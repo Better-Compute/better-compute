@@ -5,7 +5,7 @@ metaTitle: VPS instances and their lifecycle
 icon: Server
 status: beta
 packages: ['@better-compute/vps']
-sources: ['packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/vps/src/status.ts', 'packages/vps/src/runtime.ts', 'packages/vps/src/input.ts', 'packages/vps/src/sandboxes.ts', 'packages/vps/src/tenancy.ts', 'tests/vps-sandboxes.test.ts', 'packages/core/src/states.ts', 'packages/server/src/controllers/nodespec.ts', 'packages/server/src/tunnels/module.ts', 'packages/server/src/operations.ts', 'proto/bettercompute/agent/v1/session.proto', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts', 'daemon/internal/agent/requests.go']
+sources: ['packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/vps/src/status.ts', 'packages/vps/src/runtime.ts', 'packages/vps/src/input.ts', 'packages/vps/src/sandboxes.ts', 'packages/vps/src/tenancy.ts', 'tests/vps-sandboxes.test.ts', 'packages/core/src/states.ts', 'packages/server/src/controllers/nodespec.ts', 'packages/server/src/tunnels/module.ts', 'packages/server/src/operations.ts', 'proto/bettercompute/agent/v1/session.proto', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts', 'daemon/internal/agent/requests.go', 'daemon/internal/agent/tunnels.go', 'packages/cli/src/commands/tunnel.ts', 'tests/server-tunnels.test.ts']
 ---
 
 An <Term id="instance">instance</Term> is a VM in a VPS <Term id="pool">pool</Term>. You ask for one with a
@@ -529,13 +529,20 @@ Instance events have subject `instance/<id>` and carry `state`, `desiredState` a
 
 ## Access to an instance
 
-Exec, SSH and TCP port forwards into a hosted instance go through a <Term id="tunnel">tunnel</Term> (`console` is
-for nodes, and an instance refuses it with `INVALID_INPUT`): `tunnels.open({ tenantId, instanceId, op })` with `op`
-`exec`, `ssh` or `tcp` (plus a `port`) is decided as `compute:instances:exec` and returns a single-use
-<Term id="exec-ticket">exec ticket</Term> for the instance's node. The instance must be `running` and its node
-connected; provider instances are `UNSUPPORTED`, since no platform agent runs next to them. The method is registered
-only when the deployment configures tunnels. See [tunnels](/docs/guides/access/tunnels) and
-[SSH](/docs/guides/access/ssh).
+Exec, the serial console, SSH and TCP port forwards into a hosted instance go through a
+<Term id="tunnel">tunnel</Term>: `tunnels.open({ tenantId, instanceId, op })` with `op` `exec`, `console`, `ssh` or
+`tcp` (plus a `port`) is decided as `compute:instances:exec` on the instance and returns a single-use
+<Term id="exec-ticket">exec ticket</Term> for the instance's node, which carries the instance (`inst`). The instance
+must be `running` and its node connected; provider instances are `UNSUPPORTED`, since no platform agent runs next to
+them. `console`, `ssh` and `tcp` also need the node's daemon to advertise `tunnel.instance-dial`, or they are
+`UNSUPPORTED` with `details.reason: 'daemon-capability'`. The method is registered only when the deployment
+configures tunnels. See [tunnels](/docs/guides/access/tunnels) and [SSH](/docs/guides/access/ssh).
+
+`console` (798e710) attaches to the instance's serial console, which bcd opens from its runtime (`libvirt-kvm` hands
+it the pty of the domain's serial port), never a host shell. bcd refuses `exec` into an instance until guests have an
+agent, so the serial console is the terminal that works on a real host: `better-compute console --instance ID` from
+a terminal, or **Serial console** (`/instances/<id>/console`) on the instance's page in [the console](/docs/guides/clients/console).
+Sandbox and warm sandbox instances stay refused for every op (above).
 
 ## Workload identity
 

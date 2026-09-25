@@ -30,6 +30,9 @@ sources:
   - daemon/internal/agent/devices.go
   - daemon/internal/agent/access.go
   - daemon/internal/agent/gpureset.go
+  - daemon/internal/agent/host.go
+  - daemon/internal/helper/helper.go
+  - daemon/internal/selfupdate/manager.go
   - daemon/internal/agent/kinds.go
   - daemon/internal/agent/site.go
   - daemon/internal/agent/bootserver.go
@@ -127,10 +130,13 @@ a retryable failure keeps the section `PROGRESSING` and it is retried on the nex
 converger for converges trivially when empty and is `UNSUPPORTED` otherwise, which counts as terminal, with
 condition `SectionUnsupported` (reason: the field number) so the rest of the spec still converges. bcd applies the
 rule with `converge.Run`. It has convergers for `devices`, `access`, `instances` (below), `telemetry` (which accepts
-the section; bcd's own OTLP exporter is not written) and `site` (the boot lease the boot server obeys, and the
+the section; bcd's own OTLP exporter is not written), `site` (the boot lease the boot server obeys, and the
 `cache_images` the site agent pulls into its image cache: the section stays `PROGRESSING` while images warm and
-`FAILED` for an image whose bytes do not match its digest). So in bcd today a non-empty `host` or `daemon` section is
-`UNSUPPORTED`, and so is a section number it does not know. The FakeDaemon, in turn, converges `instances` and
+`FAILED` for an image whose bytes do not match its digest) and, on `bcd node` and `bcd site`, `daemon`
+([self-update](/docs/daemon/install#self-update)). So in bcd today a non-empty `host` section is `UNSUPPORTED`, and
+so is a section number it does not know. A non-empty `daemon` section is `UNSUPPORTED` in `bcd sim` and
+`bcd ramdisk`. A `bcd node` under [`bcd helper`](/docs/daemon#privilege-separation) converges it too: it downloads
+the release, and the helper verifies and swaps it (2d67b25). The FakeDaemon, in turn, converges `instances` and
 `daemon` when its options enable them but has no `access` converger.
 
 The daemon reports progress in `StatusReport`: observed and applied generation, the spec hash, one
@@ -154,6 +160,16 @@ FakeDaemon both implement this converger: bcd writes the CDI spec and env file i
 holds back from `/etc/cdi` on every pass, supports the `hold` binding and GPUs only (anything else fails with
 `unsupported-binding` or `unsupported-device`), and signs `AllocationBound` and `AllocationReleased` with the node
 key. `tests/e2e/bcd.test.ts` binds and releases a 2-GPU reservation through it.
+
+Under [privilege separation](/docs/daemon#privilege-separation) (`[helper] socket` set, 28dc2ae) the converger does
+the same work through `bcd helper`: the node asks for a `file.write` or `file.remove` of kind `cdi` or
+`allocation-env` with the allocation id, and the root helper builds the path itself. A refused or failed operation is
+an error of the action that asked for it (`helper: …`), exactly as a failed direct write would be: retryable, so the
+section stays `PROGRESSING` until a later pass succeeds. The `access`
+converger's sshd files and reload, the instances' nftables table and its 5-second check, `gpu.reset`,
+`node.reboot` and the privileged half of self-update (the `daemon` section and `daemon.upgrade`: verify, swap,
+confirm, roll back) go through the helper the same way. `tests/e2e/bcd.test.ts` binds and releases a GPU hold, and
+delivers a signed update, with an unprivileged node and a real helper.
 
 ### Break-glass SSH and tunnel keys
 

@@ -31,7 +31,8 @@ per node is live at a time, and every session has an epoch: a number that rises 
 The epoch is what keeps a gateway that lost track of the world from routing work to a node it no longer holds.
 
 This page follows a session from open to close. The frames themselves are listed in
-[protocol](/docs/daemon/protocol#frames).
+[protocol](/docs/daemon/protocol#frames), and every field of every message is in the generated
+[protocol reference](/docs/reference/protocol).
 
 ```mermaid
 sequenceDiagram
@@ -88,7 +89,8 @@ itself (see `bench/gateway-streams`).
 
 ### Hello
 
-`Hello` is kept small for reconnect storms: inventory travels as hashes, not content.
+[`Hello`](/docs/reference/protocol#hello) is kept small for reconnect storms: inventory travels as hashes, not
+content.
 
 | Field | Meaning |
 | --- | --- |
@@ -141,6 +143,7 @@ One transaction, fenced by the gateway's lease, does everything the reconnect pr
    UPDATE node_sessions SET gateway_id = $gw, session_id = $s, session_epoch = session_epoch + 1,
      boot_id = $boot, journal_id = $journal, role = $role, daemon_version = $v, proto_max = $max,
      trust_version = $trust, capabilities = $caps,
+     approver_set_epoch = $setEpoch, approver_set_sha256 = $setSha256,
      acked_event_seq = CASE WHEN journal_id IS DISTINCT FROM $journal THEN 0 ELSE acked_event_seq END,
      connected_at = compute_now(), last_seen = compute_now(), disconnected_at = NULL
    WHERE node_id = $node
@@ -161,6 +164,8 @@ session") without a disconnect write: its row already belongs to the new session
 
 ### Welcome
 
+The gateway's answer, [`Welcome`](/docs/reference/protocol#welcome):
+
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `epoch` | | `node_sessions.session_epoch` after the bump |
@@ -168,11 +173,11 @@ session") without a disconnect write: its row already belongs to the new session
 | `protocol_version` | | The negotiated version |
 | `heartbeat_interval_ms` | 10,000 | The heartbeat period |
 | `lease_ttl_ms` | 40,000 | The node's liveness lease |
-| `credits` | control 8, provision 4, bulk 2 | Commands the gateway keeps in flight per lane |
+| `credits` | control 8, provision 4, bulk 2 | Commands the gateway keeps in flight per lane ([`LaneCredits`](/docs/reference/protocol#lanecredits)) |
 | `acked_event_seq` | | Cumulative ack for `Hello.journal_id` (0 after a journal change) |
 | `request_sections` | | Inventory sections to send now |
 | `server_time` | | `compute_now()`; the daemon keeps the offset to its own clock |
-| `trust` | | A newer command-signing trust bundle, signed by the JoinService key |
+| `trust` | | A newer command-signing trust bundle ([`SignedTrustBundle`](/docs/reference/protocol#signedtrustbundle) of a [`TrustBundle`](/docs/reference/protocol#trustbundle)), signed by the JoinService key |
 | `upgrade_required` | false | The daemon is below the minimum protocol; only `daemon.upgrade` follows |
 | `capabilities` | | What the gateway offers |
 
@@ -206,15 +211,19 @@ earlier" and replay an expired command, or a tunnel ticket whose `jti` was alrea
 ticket ids 5 minutes past their expiry. A `trust` bundle is accepted only
 when it verifies under the pinned join-signing key and its version is newer than the one held.
 
-The daemon acknowledges a newly applied bundle in its next `StatusReport` (`trust_version`), not at the next
+The daemon acknowledges a newly applied bundle in its next [`StatusReport`](/docs/reference/protocol#statusreport)
+(`trust_version`), not at the next
 reconnect. The gateway stores the `Hello` value in `node_sessions.trust_version` as is, even when it is lower than
 before (a restored disk), and a status report only ever raises it; `pki rotate-command-root --stage switch` waits
 until every connected node holds the new version (see [PKI](/docs/operations/pki)). Both daemons send the version in
 `Hello`. The FakeDaemon repeats it in every status report; bcd sets it only in the first report it sends after
 applying a newer bundle and leaves it 0 (unchanged) otherwise, which spares the gateway a `node_sessions` update per
 report. Whenever a report carries `trust_version`, it also carries the held approver set (`StatusReport` fields 10
-and 11; e171f0d, 5fe7cbf), and the gateway writes both to `node_sessions.approver_set_epoch` and
-`approver_set_sha256` (NULL for an empty digest), which doctor's `pki.quorum-lag` reads.
+and 11; e171f0d, 5fe7cbf). The gateway writes the set to `node_sessions.approver_set_epoch` and
+`approver_set_sha256` (fa39201): from `Hello` as reported, and from such a report only when its `trust_version` is at
+least the recorded one, so a late, older report never pairs an old set with a newer version. An empty digest (no
+approver keys held) is stored as NULL in both. Doctor's `pki.quorum-lag` and `pki trust-version` read the columns
+(see [nodes that hold another set](/docs/operations/pki#changing-the-approver-set)).
 
 ## Epochs and fencing
 
@@ -277,8 +286,9 @@ join token. The limits are `createGateway({ duplicateHellos: { max, windowMs } }
 
 ## Liveness
 
-**Heartbeats.** The daemon sends `Heartbeat` every `heartbeat_interval_ms` (10 seconds) with its free credits per
-lane, its load (load average, available memory, running commands, pending events) and its applied generation.
+**Heartbeats.** The daemon sends [`Heartbeat`](/docs/reference/protocol#heartbeat) every `heartbeat_interval_ms`
+(10 seconds) with its free credits per lane, its load ([`NodeLoad`](/docs/reference/protocol#nodeload): load average,
+available memory, running commands, pending events) and its applied generation.
 Every 10th heartbeat also carries the inventory hashes. The gateway sends an HTTP/2 PING every 20 seconds. Any frame
 refreshes the session's last-seen time.
 
@@ -322,8 +332,8 @@ count. Go's `session.Backoff` and the FakeDaemon implement the same schedule.
 
 | The session ends with | The daemon |
 | --- | --- |
-| `Drain{reconnect_after_ms, reason}` | Closes and redials after the given delay; rolling deploys send a random delay up to 60 s |
-| `RevocationNotice{reason, serials}` | Stops using the certificate and does not redial with it |
+| [`Drain`](/docs/reference/protocol#drain)`{reconnect_after_ms, reason}` | Closes and redials after the given delay; rolling deploys send a random delay up to 60 s |
+| [`RevocationNotice`](/docs/reference/protocol#revocationnotice)`{reason, serials}` | Stops using the certificate and does not redial with it |
 | `RESOURCE_EXHAUSTED` | Retries after the `grpc-retry-pushback-ms` the gateway sent and restarts its doubling; without one, retries with jitter |
 | `ABORTED`, `UNAVAILABLE`, a reset, a timeout | Redials with back-off; the load balancer may pick another gateway |
 
@@ -374,7 +384,7 @@ One row per node, inserted by JoinService with epoch 0 and owned by the gateways
 | `daemon_version`, `proto_max` | From `Hello`; read by rollouts (migration `core/0008_session_versions`) |
 | `duplicate_hellos`, `duplicate_since` | Duplicate-`Hello` count in the current window, for the quarantine (migration `core/0016_duplicate_identity`) |
 | `trust_version` | The trust bundle version the daemon reported in `Hello` or a later `StatusReport`; read by the command-root switch (migration `core/0023_session_trust_version`) |
-| `approver_set_epoch`, `approver_set_sha256` | The approver set the daemon reported enforcing (migration `core/0026_session_approver_set`: `numeric(20, 0)` with a check of at least 0, and `bytea`; both NULL until a daemon reports them); read by doctor's `pki.quorum-lag` and `pki trust-version` |
+| `approver_set_epoch`, `approver_set_sha256` | The approver set the daemon reported enforcing (migration `core/0026_session_approver_set`: `numeric(20, 0)` with a check of at least 0, and `bytea`), written by `Hello` and by a `StatusReport` that acknowledges a trust bundle at least as new as the recorded one (fa39201); both NULL while the daemon holds no approver keys. Read by doctor's `pki.quorum-lag` and `pki trust-version`, which count a NULL digest as lagging while the published bundle has keys (08eb62e) |
 
 Routing is always this join at dispatch time, never a column copied onto commands, so a reconnect needs no rewrite
 and a command enqueued during a reconnect cannot be stranded. See [delivery](/docs/daemon/delivery).

@@ -180,7 +180,7 @@ plane for later phases has already landed; what is still open is mostly the Go d
 | v0.1 | Adopt and reserve | Server runtime, JoinService, gateway, machine PKI, inventory, capacity with the inline placer, IAM bridge, CLI `dev`, `serve` and `sim`, the TypeScript FakeDaemon and fleet simulator, bcd's node agent (join, session, journal, CDI holds, the v0.1 kinds, `bcd status`) tested end to end | A bcd release, NVML in bcd, a run on a real GPU host; the gateway and IAM-lane benchmark gates on reference hardware |
 | v0.2 | Metal | Workflow engine, `metal()`, images and profiles, site tokens, join requests, write-only secrets, FleetConfig, XID health and remediation, node-signed attested results | `bcd site` and `bcd ramdisk`; emulation CI on real QEMU machines |
 | v0.3 | VPS and access | `vps()` with hosted and provider pools, the Hetzner provider, tunnels (including bcd's node half) and break-glass SSH (including bcd's `access` converger), webhooks and the SSE stream, MCP tools, delegated confirmation; bcd's `libvirt-kvm` runtime | A run of `libvirt-kvm` on real hardware; `cloud-hypervisor` |
-| v0.4 | Scale and HA | Pool-lease placer, the WebSocket fallback (gateway and bcd), signed releases and rollouts, bcd self-update, remote IAM mode, Merkle audit checkpoints, metrics | 10,000-node runs, `bcd helper`, a bcd release |
+| v0.4 | Scale and HA | Pool-lease placer, the WebSocket fallback (gateway and bcd), signed releases and rollouts, bcd self-update, `bcd helper` (an unprivileged node agent beside a root helper), remote IAM mode, Merkle audit checkpoints, metrics | 10,000-node runs, a bcd release |
 | v0.5 | GPU depth and ecosystem | Gang, calendar and spot reservations, MIG and time-slice atoms, dedicated-root metal, TPM attestor, the bcx driver SDK (draft), the Proxmox provider, the console kit; sandboxes (templates with env and network, TTL expiry, warm pools of paused instances, snapshots and restores, exec over SSH certificates, the instance guard, the exit test on emulated hosts) | Real-hardware MIG tests; bcd enforcing a sandbox's network policy |
 | v1.0 | Freeze | The destructive-batch quorum end to end, the API surface check, the N-2 skew matrix, upgrade in place (in simulation) | API and protocol freeze, external security review, npm publication after Better IAM publishes |
 
@@ -192,7 +192,8 @@ binaries have been published), and NVML is still a stub. `bcd site` (Redfish BMC
 and the image cache) and `bcd ramdisk` (wipes, image streaming, kexec, DCGM) are written and covered by Go unit tests
 only. The `instances` converger runs VMs on `libvirt-kvm` on a host with `virsh` (tested against a fake `virsh`
 only) and on a file-backed runtime in fake-hardware builds, which alone run `bcd sim` (many real node agents in one
-process against a gateway). Self-update with A/B slots and the WebSocket fallback are written too. The
+process against a gateway). Self-update with A/B slots, the WebSocket fallback and `bcd helper` (privilege
+separation, self-update included) are written too. The
 TypeScript `FakeDaemon` in `@better-compute/testing` covers the rest, and it is what joins in
 `better-compute dev --sim N`, the simulator and most test suites. See [what bcd does today](/docs/daemon#what-bcd-does-today)
 and the [roadmap](/docs/reference/roadmap) for each phase's exit tests.

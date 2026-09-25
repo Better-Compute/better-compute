@@ -37,15 +37,17 @@ own.
 
 | Path | Target | Decided as | Credential | Lifetime |
 | --- | --- | --- | --- | --- |
-| Tunnel, op `exec`, `ssh` or `tcp` | An instance | `compute:instances:exec` on the instance | An exec ticket from `tunnels.open` | Ticket 60 s; tunnel at most 12 h |
-| Tunnel, op `console` | A node | `compute:nodes:console` on the node | An exec ticket from `tunnels.open` | Ticket 60 s; tunnel at most 12 h |
+| Tunnel, op `exec`, `ssh`, `tcp` or `console` (the serial console, 798e710) | An instance | `compute:instances:exec` on the instance | An exec ticket from `tunnels.open` | Ticket 60 s; tunnel at most 12 h |
+| Tunnel, op `console` | A node (a root shell) | `compute:nodes:console` on the node | An exec ticket from `tunnels.open` | Ticket 60 s; tunnel at most 12 h |
 | Break-glass SSH | A node | `compute:nodes:ssh-root` on the node, with an MFA session | An OpenSSH user certificate from `nodes.issueSshCert` | 15 min by default, 1 h at most |
 | Allowlisted commands | A node | `compute:nodes:exec` on the node | None: the daemon runs a registered command kind | The kind's timeout |
 
 - **[Tunnels](/docs/guides/access/tunnels)** are the everyday path. The caller gets a short
   <Term id="exec-ticket">exec ticket</Term> and opens a WebSocket with it; the API relays the stream to the gateway
   that holds the node's <Term id="session">session</Term>, and the node opens a `Tunnel` stream back. The browser
-  terminal in the console uses exactly this.
+  terminal, an instance's serial console page and a node's console in the console use exactly this. bcd refuses
+  `exec` into an instance until guests have an agent, so on a real host an instance's serial console is the terminal
+  that works.
 - **[Break-glass SSH](/docs/guides/access/ssh)** is for platform operators when the agent itself is the problem. It
   signs the caller's own public key with the compute SSH CA; nothing goes through the gateway.
 - **[Commands](/docs/guides/nodes/commands)** (`commands.run`) cover the repeatable jobs, such as a diagnostic or a
@@ -159,7 +161,7 @@ not released yet) and in the TypeScript FakeDaemon.
 | Exec tickets, the SSH CA, JWKS rotation | Implemented in `@better-compute/pki` |
 | `GET /api/compute/tunnels/<ticket>` relay, re-authorization | `handleTunnel`, mounted by `better-compute serve` and by the console's `server.mjs` |
 | Gateway relay (`OpenTunnel`, `Tunnel` stream, internal `/v1/tunnels`) | Implemented in `@better-compute/gateway` |
-| Browser terminal and node console | `apps/console` with `@better-compute/console-kit` |
+| Browser terminal, instance serial console and node console | `apps/console` with `@better-compute/console-kit` |
 | NodeSpec `access` section (JWKS, SSH CA keys) | Sent to every node |
 | Daemon side: verifying tickets, opening `Tunnel` streams, running shells, applying `access` to sshd | In bcd (built and tested, not released): it re-verifies each ticket against the NodeSpec's JWKS and its journaled `jti` set, runs a node console on a real pseudo-terminal and pipes `ssh` and `tcp` to loopback ports (`tests/e2e/bcd.test.ts` opens a console end to end), and its `access` converger writes the sshd drop-in, CA, node-bound principals and KRL. `exec` into an instance waits for bcd's instances runtime. The TypeScript FakeDaemon, with its `tunnels` option (on in `dev --sim`), answers `OpenTunnel` with an echo shell, which the CLI's `console` and `exec` tests drive end to end; it still reports a non-empty `access` section as `SectionUnsupported` |
 

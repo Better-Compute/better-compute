@@ -29,6 +29,8 @@ sources:
   - packages/pki/src/workload-request.ts
   - packages/cli/src/host/workload.ts
   - packages/cli/src/commands/pki.ts
+  - packages/gateway/src/store.ts
+  - tests/cli-quorum-lag.test.ts
   - packages/cli/src/commands/audit.ts
   - packages/cli/src/commands/daemon.ts
   - packages/cli/src/host/gateway.ts
@@ -249,7 +251,8 @@ this bundle's roots and the configured quorum publish the same bundle), `nextVer
 publish: the same version, or the next one), `approverSetEpoch` (the published approver set's epoch),
 `approverSetSha256` (this configuration's set digest, for [pinning the first set](#pinning-the-first-set), with
 `publishedApproverSetSha256` while they differ), `approverSetBehind` and `approverSetSample` (connected nodes
-enforcing another set; 6612496), `quorumChanged`
+enforcing another set, as the gateway records it, a node without keys included; see
+[nodes that hold another set](#changing-the-approver-set); 6612496, 08eb62e), `quorumChanged`
 and, when it did, `signQuorumForEpoch` (the epoch to sign the change for with
 [`batch sign-approvers`](#changing-the-approver-set), one above the published one; c6214dc), and how many connected
 daemons there are and how many are behind that version. Before any process has published a bundle it is `NOT_FOUND`. `--pki PATH`
@@ -860,11 +863,25 @@ daemon does (the published set's threshold, the epoch, the deployment's trust do
 verify are `pki.quorum-unsigned` with the reason (b118616).
 
 **Nodes that hold another set.** A daemon can take a bundle's version while refusing its quorum part, so the trust
-version alone does not show which approvers a node enforces. The gateway records what each daemon reports in
-`node_sessions.approver_set_epoch` and `approver_set_sha256` (migration `core/0026_session_approver_set`), and
-doctor warns `pki.quorum-lag` with a sample of connected nodes whose epoch or digest differs from the published set
-(6612496); `pki trust-version` prints the same as `approverSetBehind` and `approverSetSample`. The fix is to check the
-set's signatures, or to re-pin nodes that missed several changes.
+version alone does not show which approvers a node enforces. The gateway records the set each daemon reports holding
+in `node_sessions.approver_set_epoch` and `approver_set_sha256` (migration `core/0026_session_approver_set`,
+fa39201):
+
+- `Hello` writes the reported set as it comes.
+- A `StatusReport` with `trust_version` above 0 (the acknowledgement of a newer bundle) writes it only when that
+  version is at least the one recorded, so a late, older report never pairs an old set with a newer version.
+- A daemon that holds no approver keys (an empty digest) is recorded as `NULL` in both columns.
+
+`better-compute doctor` and [`pki trust-version`](#pki-trust-version) read those columns for the connected nodes
+(a session on a gateway, not ended, seen within the last 2 minutes) and compare them with the published set
+(6612496, 08eb62e). While the published bundle has approver keys, a node lags when its digest is `NULL` (it
+enforces no quorum at all, the worst lag), differs from the published set's, or its epoch differs. Without published
+keys, any node that still holds a set lags. Doctor reports `pki.quorum-lag` (a warning, only when a published
+approver set exists) as "N of M connected node(s) enforce another approver set than the published one (epoch E)",
+followed by up to five nodes with the epoch each holds (0 for a node without keys). `pki trust-version` prints the
+count as `approverSetBehind` and those nodes as `approverSetSample` (`nodeId`, `epoch`). Both leave the check out
+before `core/0026` has run. The fix is to check the set's signatures, or to re-pin nodes that missed several
+changes.
 
 The examples read the signatures from `BETTER_COMPUTE_APPROVER_SET_SIGNATURES`: the JSON files `batch sign-approvers`
 printed, comma-separated. They must all sign one epoch and exactly the quorum `BETTER_COMPUTE_APPROVER_KEYS`,

@@ -45,6 +45,11 @@ sources:
   - daemon/internal/agent/access.go
   - daemon/internal/bcx/sandbox_linux.go
   - daemon/cmd/bcd/plugins.go
+  - daemon/cmd/bcd/helper.go
+  - daemon/cmd/bcd/rootdir_unix.go
+  - daemon/internal/helper/helper.go
+  - daemon/internal/selfupdate/manager.go
+  - packages/cli/src/install-script.ts
   - packages/pki/src/quorum.ts
   - packages/server/src/api/secrets.ts
   - packages/vps/src/module.ts
@@ -77,6 +82,7 @@ are built, and ends with a hardening checklist.
 | Cloned node identity | A certificate alternating between two machines more than 3 times in 10 minutes is revoked (duplicate-identity quarantine) | Built in the gateway |
 | Compromised gateway | Holds no key in its code; commands and NodeSpecs signed; Renew and `JoinResponse` verified end to end; secrets as JWE; results and `AllocationBound` reports signed by the node. It can delay, drop or read frames, not forge intent, identity, results, bindings or secrets | Built, with the [process caveat](#gateway-processes) |
 | Compromised api or worker | Admissions still need IAM decisions; worker keys last 24 h; tickets are audited; fleet-wide destructive batches need k-of-n operator approval checked on the machine (the [destructive-batch quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)) | Built, the quorum included (v1.0): bcd and the FakeDaemon enforce it, the server stores, approves and holds batches, the gateway attaches approvals and proofs, the CLI reviews and signs, and the built-in workflows create their batches (f66e236, e594a4f). Open: metal's leaves do not bind payloads yet |
+| Exploited node agent process | With `bcd helper`, `bcd node` parses everything from the network as an unprivileged account; the root helper serves only that account (`SO_PEERCRED`) running an installed bcd binary, a few typed operations with fixed file paths, bcd's own nftables table and the host's own GPUs, and logs each one | Built in bcd (28dc2ae, Linux), self-update included (2d67b25); opt-in with `daemon install-script --unprivileged` (169c459), while the default install still runs `bcd node` as root |
 | Compromised driver plugin | Pinned by SHA-256 and executed from the file that was hashed; run under its own unprivileged uid with `no_new_privs`, a seccomp filter (no namespaces, mounts or `io_uring`) and optional cgroup limits; only plugins named `privileged` run as root | Built in bcd (Linux) |
 | Replay | Command-id journal, `not_after`, epoch fencing, a server time mark against rewound `Welcome`s, ticket `jti` sets, a Renew replay cache | Built in the control plane, the FakeDaemon and `bcd` (bcd keeps its ticket `jti` set in its journal, so a restart does not forget a spent ticket) |
 | Agent overspend | Delegation scope, confirmations, per-agent quotas, budgets, `agents.suspendAll` | Through Better IAM |
@@ -96,7 +102,8 @@ are built, and ends with a hardening checklist.
   agent's boot server answers PXE only for prepared machines while it holds the boot lease. Driver plugins run
   sandboxed (below), and each `bmc.*` kind admits only its own BMC operations, so a `bmc.query`, which needs no batch,
   cannot carry a power or RAID change, and `site.httpProxy` never reaches a BMC. With approver keys in its trust bundle it enforces the destructive-batch quorum. Its node key is a 0600
-  file, not a TPM key, and it has no privilege-separated helper yet. See
+  file, not a TPM key. `bcd node` can run unprivileged beside the root `bcd helper` ([below](#privilege-separation-on-the-node)),
+  when installed with `--unprivileged`, self-update included; by default it runs as root. See
   [the daemon](/docs/daemon#what-bcd-does-today).
 </Callout>
 
@@ -196,9 +203,49 @@ image, instead of mounting it (d9a900f). Only xfs and btrfs, or a ramdisk withou
 `nodev,nosuid` mount (read-only for kexec) with every write confined by `os.Root`. See
 [what the ramdisk does](/docs/guides/bare-metal/deploying#what-the-ramdisk-does).
 
+### Privilege separation on the node
+
+As installed, `bcd node` runs as root under a hardened systemd unit (`ProtectSystem=strict`, `NoNewPrivileges`, a
+bounded capability set; see [the unit](/docs/daemon/install#the-systemd-unit)), so a memory-safety or logic bug in
+the code that parses the session, commands and specs would run as root. PLAN.md §6 (v0.4) answers that with a split,
+and bcd has it since 28dc2ae:
+
+- **The node agent is unprivileged.** With `[helper] socket` and `[helper] user`, `bcd node` runs as that account.
+  The session, the journal, and every frame, command and spec from the gateway are handled there.
+- **The root helper trusts nothing it is sent.** `bcd helper` serves only a caller whose `SO_PEERCRED` uid and gid
+  are `[helper] user`'s (or root) and whose `/proc/<pid>/exe` is an installed bcd binary. Requests are versioned JSON,
+  at most 4 MiB, decoded strictly (an unknown field or version is refused).
+- **Typed operations, not paths.** Files are named by kind and id (`cdi`, `allocation-env`, `ssh-dropin`, `ssh-ca`,
+  `ssh-krl`, `ssh-principals`); the helper builds the path from its own table, refuses a symlink or non-directory on
+  the way down, caps a file at 1 MiB and writes it atomically without following a symlink at the target. A ruleset
+  must stay inside `table bridge bcd_instances` (no other table, no `include`, `define` or `ruleset`); `gpu.reset`
+  names only a GPU in the host's own inventory; a reboot reason is cut to 200 bytes.
+- **Everything is logged.** Each operation and each refused caller is logged with the caller's pid.
+- **Self-update without trusting the node** (2d67b25). The slots and the upgrade and release records live in root's
+  `[update] slots_dir` (default `/usr/local/lib/bcd`, never inside `data_dir`), and the executable check trusts only
+  slots there. The node only downloads, into `<data_dir>/staging`; the helper takes no path from it, verifies the
+  signed manifest under its own pins, floor and clock, opens the staged file with `O_NOFOLLOW` and hashes it as it
+  copies it into the slot, so what is checked is what runs. Its own watchdog swaps back an update no `Welcome`
+  confirmed, whatever the node does.
+- **No symlink race on the socket** (2d67b25, from a security review). Root chmod and chown follow symlinks, so with a
+  node-writable socket directory the node could have made root set `0660 root:bcd` on any file. The socket's
+  directory must now be root's and closed to group and other writes, and the socket is bound, chmodded and chowned
+  in a private 0700 directory, then renamed into place.
+
+`daemon install-script --unprivileged` (169c459) sets the mode up: a `[helper]` section with the socket in the
+helper's own root-owned `/run/bcd-helper`, the `bcd` system account, `bcd-helper.service`, a `bcd.service` drop-in
+with `User=bcd`, and `/etc/bcd` readable by the `bcd` group only.
+
+The limits are plain. The helper covers files, the firewall table, GPU resets, reboots, sshd reloads and
+self-update; the instance runtimes and PLAN.md's `mig.apply` are not helper operations, and bcx plugins need a root
+node (`--unprivileged` refuses `--plugins`). The default install still runs `bcd node` as root. See
+[privilege separation](/docs/daemon#privilege-separation) and
+[running bcd node unprivileged](/docs/daemon/install#running-bcd-node-unprivileged).
+
 ### Driver plugins on the host
 
-bcx driver plugins run next to bcd, which runs as root, so bcd confines them (`[plugins]` in `config.toml`):
+bcx driver plugins run next to bcd, which runs as root as installed, so bcd confines them (`[plugins]` in
+`config.toml`):
 
 - **What runs is what was pinned.** Each binary is hashed through an open file and, on Linux, executed from that
   file (`/proc/self/fd/3`), never by path again, so swapping the file between the check and the exec runs nothing
@@ -466,6 +513,7 @@ change; see [sinks](/docs/extending/sinks#audit-sinks).
 - `pki.commandSigning` set, so commands and NodeSpecs are signed and GPU bindings are attested.
 - `tunnels` only if you need interactive access, with the SSH CA's MFA requirement left on.
 - `auditModule` registered with the bundle's audit key.
+- Nodes that run no bcx plugins installed with `daemon install-script --unprivileged`, so `bcd node` is not root.
 
 </Step>
 <Step>

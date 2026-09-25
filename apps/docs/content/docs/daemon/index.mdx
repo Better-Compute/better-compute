@@ -33,6 +33,13 @@ sources:
   - daemon/internal/bcx/host.go
   - daemon/internal/agent/drivers.go
   - daemon/cmd/bcd/plugins.go
+  - daemon/cmd/bcd/helper.go
+  - daemon/internal/helper/helper.go
+  - daemon/internal/helper/peer_linux.go
+  - daemon/internal/selfupdate/manager.go
+  - daemon/cmd/bcd/update.go
+  - daemon/cmd/bcd/rootdir_unix.go
+  - daemon/internal/agent/host.go
   - tests/e2e/bcd-vps.test.ts
   - daemon/internal/agent/access.go
   - daemon/internal/agent/tunnels.go
@@ -68,6 +75,7 @@ sources:
   - packages/testing/README.md
   - packages/testing/src/daemon/fake-daemon.ts
   - packages/cli/src/install-script.ts
+  - tests/cli-pki.test.ts
   - PLAN.md
   - .claude/coordination.md
 ---
@@ -97,7 +105,9 @@ pipeline exists but no tag has been cut, so the install script has nothing to do
 real node agents on fake hardware in one process (fakehw builds only; see [bcd sim](#bcd-sim)). Self-update with A/B
 slots (de9f380; the end-to-end test updates a real bcd to a second signed build) and the WebSocket fallback (6cd48be;
 tested end to end against the real gateway, renewal included, 4b2d5aa) are written, and the whole bcd end-to-end
-suite runs under signed intent; `cloud-hypervisor`, NVML and the privilege-separated helper are missing (see
+suite runs under signed intent. `bcd helper`, the root half of [privilege separation](#privilege-separation), is
+written (28dc2ae) and tested end to end with an unprivileged `bcd node`, self-update included (2d67b25), and
+`daemon install-script --unprivileged` sets it up (169c459). `cloud-hypervisor` and NVML are missing (see
 [what bcd does today](#what-bcd-does-today)). The TypeScript `FakeDaemon` covers those in tests, the simulator and
 `better-compute dev --sim N`.
 </Callout>
@@ -141,7 +151,7 @@ certificate carries.
 | `site` | one or two per site, as a node with role `site` | proxy DHCP, TFTP and iPXE over HTTPS, and discovery vouching while it holds the site boot lease; the image cache and BMC access at all times | `site`, 24 h | v0.2 | works, without IPMI or vendor BMCs: BMC operations over Redfish, `site.httpProxy`, boot entries, and the boot server (proxy DHCP, TFTP, iPXE scripts with signed discovery assertions under the boot lease, the image cache) |
 | `ramdisk` | the PXE initramfs | inspection, DCGM diagnostics, wipes (`quick`, `secure-erase`, `crypto-erase`), image streaming, `boot.kexec` | `ramdisk`, at most 2 h | v0.2 | works: joins with the `discovery` attestor from its kernel command line, then runs `disk.wipe`, `deploy.image`, `boot.kexec`, `diag.dcgm` and the shared kinds. No ramdisk image is built in the repository |
 | `sim` | test hosts | N daemons on fake hardware with real TLS and gRPC | a test CA | v0.4 | works in fakehw builds: N real node agents in one process against the configured gateway, each with its own identity (a `node` certificate from a normal join); see [bcd sim](#bcd-sim) |
-| `helper` | beside `node`, as root | typed privileged operations over a local socket | none | v0.4 | not a command yet |
+| `helper` | beside `node`, as root | typed privileged operations over a local socket | none | v0.4 | works on Linux (28dc2ae): `bcd helper --config` serves an unprivileged `bcd node` on `[helper] socket`, self-update's privileged half included (2d67b25); `daemon install-script --unprivileged` installs it as `bcd-helper.service` (169c459); see [privilege separation](#privilege-separation) |
 
 A <Term id="site-agent">site agent</Term> and the <Term id="ramdisk">ramdisk</Term> speak the same session protocol
 as a node and run the same agent (`runAgent`: session, journal, dispatcher, convergers, status socket); only their
@@ -195,7 +205,8 @@ is a node that has not joined. A host without `virsh` gets a warning that it run
 metadata service and instance dials stay off) (4a0165f). Since 2845f41 it also warns when `[update] release_pins`
 is missing (self-update is refused) and otherwise reports the pin count and threshold, fails when the slots are in
 use but the entrypoint does not link to `<data_dir>/bin/current`, warns about a pending update and each failed
-version (pointing at `bcd update --clear-failed`), and warns when a site agent has no `[site] bmc_networks`. A
+version (pointing at `bcd update --clear-failed`; these slot checks read `data_dir`, not `[update] slots_dir`, so they
+miss the slots of a helper node), and warns when a site agent has no `[site] bmc_networks`. A
 gateway that does not accept a TCP connection within 5
 seconds, or an expired node certificate, is a failure. It also warns when `config.toml` is readable by anyone but its owner, and exits 1 when any
 check fails. There is no clock check yet.
@@ -241,7 +252,7 @@ wired up.
 ## What bcd does today
 
 `bcd node` is the v0.1 node agent (`daemon/internal/agent`); `bcd site` and `bcd ramdisk` run the same agent with
-their own kinds. What it implements and what is still missing, as of commit 278296e:
+their own kinds. What it implements and what is still missing, as of commit 28dc2ae:
 
 | Area | Implemented | Missing |
 | --- | --- | --- |
@@ -250,15 +261,16 @@ their own kinds. What it implements and what is still missing, as of commit 2782
 | Session | Hello from the journal (with the trust bundle version it holds), Welcome (epoch, event ack, clock offset, requested sections, signed trust bundle), heartbeats with lane credits (inventory hashes every 10th), `Ack`, `Cancel`, `Drain`, `RevocationNotice`, `OpenTunnel`, secret and workload-token answers, full-jitter redial, or exactly the gateway's `grpc-retry-pushback-ms` when a busy refusal carries one (joins too; 2237be7); a Welcome more than 5 minutes before the server time mark is refused, and one within that allowance never moves the working clock back; a newer trust bundle is acknowledged once, in the next `StatusReport` (`trust_version` is 0 in every other report) | |
 | Journal | bbolt, every write fsynced; the command rules, results with their `boot_id`, the `cancelled` outcome, the TTL sweep, spent exec-ticket ids (kept until 5 minutes after the ticket expires); a corrupt file is moved aside | |
 | Commands | `inventory.refresh`, `diag.nvml`, `logs.collect` (redacted bundle to a presigned https URL), `gpu.reset` (refuses a GPU with a live hold, reads health back), `node.reboot` (self-terminating); on a site agent `bmc.*`, `site.httpProxy`, `boot.prepareRamdisk` and `boot.cleanUp`; in the ramdisk `disk.wipe`, `deploy.image`, `boot.kexec` and `diag.dcgm` (also on nodes); on a VPS host `instance.snapshot` (disk, and optionally memory, uploaded to a presigned https URL with its SHA-256); `driver.invoke` (node, site and ramdisk) into a hosted bcx driver plugin; the acceptance order; signed commands verified once the trust bundle holds command-signing roots; with approver keys in it, the v1.0 destructive-batch quorum (`BATCH_UNAPPROVED`, each batch leaf run at most once, recorded in `data_dir/batch-leaves.json`, and `UNBATCHED_LIMIT` counted per rolling hour of the host clock in `data_dir`; a quorum change in a newer trust bundle only at a higher approver-set epoch with the held approvers' signatures, a refused set keeping the held quorum while roots and version apply, a keyless node taking only its pinned `approver_set_sha256` set and refusing destructive commands until it has it, the held set reported in `Hello` and `StatusReport` (e171f0d), and a `site.httpProxy` write only under a payload-bound leaf; e7ddb38, 8b0f50c, see [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)); attested results node-signed; `daemon.upgrade` (node and site, self-terminating; see [self-update](/docs/daemon/install#self-update)) | Every other registered kind (answered `UNSUPPORTED`) |
-| Driver plugins | The bcx host (`internal/bcx`): the plugins of `[plugins] dir` named in its `pins` file, each run only if its binary's SHA-256 is its pin, over the go-plugin style handshake and gRPC with pinned mTLS on a unix socket; their drivers are advertised in `Hello.drivers`. `bcx.Serve` is the plugin side for Go plugins. On Linux each plugin runs from the file that was hashed (`/proc/self/fd/3`), under its own uid from a block bcd keeps (`0x7FFE0000` to `0x7FFEFFFF`, assigned in name order) when bcd is root (or `[plugins] user`; root only for plugins named in `[plugins] privileged`), through bcd's `__bcx-exec` shim with `no_new_privs` and a seccomp filter on every thread (no namespaces, mounts or `io_uring`), in its own process group and, with `[plugins] cgroup`, its own cgroup with `memory_max` and `pids_max`, in a delegated cgroup bcd prepares itself (d132fef, 3872c6b, 6827df8, d902063); `daemon install-script --plugins` sets a node up for it. See [drivers](/docs/extending/drivers#the-plugin-sandbox) | Restarting a plugin that exits; a plugin that fails to start is logged and skipped |
+| Driver plugins | The bcx host (`internal/bcx`): the plugins of `[plugins] dir` named in its `pins` file, each run only if its binary's SHA-256 is its pin, over the go-plugin style handshake and gRPC with pinned mTLS on a unix socket; their drivers are advertised in `Hello.drivers`. `bcx.Serve` is the plugin side for Go plugins. On Linux each plugin runs from the file that was hashed (`/proc/self/fd/3`), under its own uid from a block bcd keeps (`0x7FFE0000` to `0x7FFEFFFF`, assigned in name order) when bcd is root (or `[plugins] user`; root only for plugins named in `[plugins] privileged`), through bcd's `__bcx-exec` shim with `no_new_privs` and a seccomp filter on every thread (no namespaces, mounts or `io_uring`), in its own process group and, with `[plugins] cgroup`, its own cgroup with `memory_max` and `pids_max`, in a delegated cgroup bcd prepares itself (d132fef, 3872c6b, 6827df8, d902063); `daemon install-script --plugins` sets a node up for it. A plugin that exits is restarted (9006eee): back-off from 1 s to 1 min, re-hashed against its pin and sandboxed again, with operations meanwhile failing with a retryable `unavailable`. See [drivers](/docs/extending/drivers#the-plugin-sandbox) | A plugin that fails its first start is only logged and skipped, never retried; plugins beside an unprivileged `bcd node` |
 | Desired state | Full specs and patches, signature checks with command-signing roots, stored and enforced offline; `devices` (CDI holds and env files, node-signed `AllocationBound` and `AllocationReleased`, `AllocationFailed`); `access` (break-glass SSH: the sshd drop-in, CA, node-bound principals and a KRL; the exec-ticket JWKS; a CA key or principal that could inject an sshd line makes the whole spec invalid, signed or not); `instances` (below); `telemetry` accepted; `site` (the boot lease state, and `cache_images` pulled into the image cache: `PROGRESSING` while they warm); `daemon` (self-update to a signed release under `[update] release_pins`: A/B slots in `data_dir/bin`, `upgrade.json` with a 120 s deadline, confirmation on the first `Welcome`, a swap back without one, a crash-loop rollback unit under systemd; de9f380) | `host` converges only when empty, else `SectionUnsupported` (and so does `daemon` in `bcd sim` and `bcd ramdisk`) |
 | Instances | The `instances` converger over a `Runtime` interface (`List`, `Ensure`, `SetState`, `Destroy`), on node agents: the section is the whole desired set; a domain bcd did not create is only reported; user data is fetched with a `SecretRequest` bound to the allocation; `RUNNING`, `PAUSED` and `STOPPED`; `restore_from` boots a new instance from a snapshot, downloaded over https only to `data_dir/snapshots/<sha256>` and verified first, in the background while the converger goes on (another runtime, or a memory snapshot from another CPU model, fails it), and deleted once no spec restores from it; transfers end when a 2-minute window moves less than 1 MiB; `instance.snapshot` stages its upload under `data_dir/snapshots` too, bounded by the command's deadline; a failing instance fails alone (`InstanceFailed`); `StatusReport.instances` lists every domain with `instances_complete`, and `Hello.drivers` lists each runtime (kind `runtime`). A host build with `virsh` on its `PATH` runs `libvirt-kvm` (362317c; see [delivery](/docs/daemon/delivery#instances)): `virsh` on `qemu:///system` and `qemu-img`, qcow2 overlays on sha256-verified https base images, a NoCloud seed ISO, taps named before the domain starts, VFIO GPU passthrough, host-passthrough CPU, and every domain it defines marked in its metadata; its tests run against a fake `virsh` and `qemu-img`, and it has not run on real hardware. fakehw builds run a file-backed runtime under the same name; `tests/e2e/bcd-vps.test.ts` runs that one against the control plane. A bcx plugin whose driver lists the kind `runtime` is also a runtime on `bcd node` (`list`, `apply`, `remove` over `Invoke`; no snapshots; see [walkthrough 4](/docs/extending/walkthroughs#walkthrough-4-a-kata-runtime-over-bcx)). The instance `network_policy` as host nftables rules on the taps, in one `bcd_instances` table replaced atomically before any domain starts: `PRIVATE` keeps a NIC to its IPAM subnets and the host, `NONE` to the host only, and a policy that cannot be expressed or rules that fail to load fail the instance (6db49c8); a host with runtimes advertises the capability `instance.network-policy` in `Hello`, since an older bcd drops the field. The same table guards every tap with a MAC and IPAM addresses, whatever its policy: only the NIC's own MAC, IP addresses, EUI-64 link-local address and ARP (278296e, 6827df8), each guarded address bound to its tap against every other port, and no foreign neighbour adverts (6639335); every instance tap, guarded or not, drops DHCP server replies, router advertisements and redirects and may not use or claim the host's own bridge addresses (6827df8); the metadata service and instance tunnel dials trust only addresses the loaded table binds, never one two instances claim, a check every 5 seconds counts the table's rules and, if the table or a chain was flushed, ends that trust at once and loads the ruleset again, and a host whose nft cannot load it keeps egress instances running with both off. The metadata service on `[imds] listen`: `PUT /latest/api/token`, then `GET /latest/identity-token?audience=`, for the running instance that holds the request's source address | `cloud-hypervisor`; a run of `libvirt-kvm` on a real KVM host. A host build without `virsh` and without a runtime plugin fails a non-empty `instances` section (`this host runs no instance runtime`) |
-| Tunnels | `OpenTunnel` with the exec ticket re-verified against the pinned JWKS and the journaled `jti` set; for node tickets `console` on a real pseudo-terminal, `ssh` and `tcp` to loopback ports; for instance tickets `ssh` (port 22) and `tcp` to the instance's own address as its runtime reports it, never a loopback, link-local or host address, and `console` on the serial console of a running, managed instance of this host, from its runtime (`libvirt-kvm` opens the pty its live domain names for the serial port; the fakehw stand-in echoes; f8273ef), never the host's shell; `tunnel.instance-dial` advertised when the host runs a runtime; at most 16 at once | `exec` into a guest (it needs a guest agent: the tunnel closes with exit status 127) |
+| Tunnels | `OpenTunnel` with the exec ticket re-verified against the pinned JWKS and the journaled `jti` set; for node tickets `console` on a real pseudo-terminal, `ssh` and `tcp` to loopback ports; for instance tickets `ssh` (port 22) and `tcp` to the instance's own address as its runtime reports it, never a loopback, link-local or host address, and `console` on the serial console of a running, managed instance of this host, from its runtime (`libvirt-kvm` opens the pty its live domain names for the serial port; the fakehw stand-in echoes; f8273ef), never the host's shell, which `tunnels.open` issues since 798e710 (`better-compute console --instance`); `tunnel.instance-dial` advertised when the host runs a runtime; at most 16 at once | `exec` into a guest (it needs a guest agent: the tunnel closes with exit status 127) |
 | Secrets and workload tokens | `SecretRequest` and `WorkloadTokenRequest`, node-signed, answered with a JWE to a fresh one-time P-256 key, matched by request id within 10 s. Callers: BMC credentials and `site.httpProxy` secret headers (bound to the workflow step), the boot server's discovery tokens (bound to the workflow), `deploy.image` user data (bound to the step), instance user data (bound to the allocation), the metadata service's workload tokens | |
 | Health | NVIDIA XIDs from `/dev/kmsg` as `Xid<n>` device conditions for the rest of the boot, kept in `data_dir/faults.json` with the boot id so a bcd restart in the same boot keeps them; PSI pressure and CPU steal every 30 s in `StatusReport.pressure` | NVML events, EDAC, SMART |
 | Inventory | `inventory.Collector` from procfs and sysfs without cgo: DMI, UEFI and Secure Boot, TPM presence, CPU and NUMA, memory, disks, NICs with SR-IOV and RDMA, NVIDIA GPUs from `/proc/driver/nvidia`, OS, cgroups, KVM, IOMMU; on a site agent an `images` section listing its image cache (digest, source URL, size, `READY` or `PULLING`), re-sent when a pull starts or ends | NVML (`internal/nvml` returns `ErrNotBuilt`), so no ECC or row-remap data on a real host; netlink |
 | Site agent | Redfish BMC operations (power, boot device, CD virtual media, inspection, firmware inventory, credential rotation, BIOS settings, RAID layouts, and firmware updates served to the BMC from the verified image cache; 944221c), each only under its own `bmc.*` kind, pinned to the enrolled SPKI, on the system a BMC address names (`/redfish/v1/Systems/<id>`) or else the first, with every resource path kept under `/redfish/v1` on that BMC; `site.httpProxy` to site-internal addresses only; boot entries persisted in `data_dir/boot-entries.json`; the boot server: proxy DHCP (UDP 67 and 4011) and read-only TFTP for the iPXE builds, `GET /boot/ipxe` scripts with a signed discovery assertion each, all answering only prepared machines while the agent holds the boot lease and hears from the gateway; the image cache (`data_dir/cache/<sha256>`, served at `GET /cache/<sha256>`, trimmed least recently used first to `[boot] cache_max_bytes` without evicting an image `cache_images` still names) | IPMI and vendor BMCs; matching `site.httpProxy` targets to the node's own addresses; the iPXE builds and the ramdisk itself, which you supply |
 | Ramdisk | Boot parameters from `/proc/cmdline`, the `discovery` join as role `ramdisk`, state in tmpfs; quick wipes read back, secure and crypto erase with `nvme format`, `hdparm` or `blkdiscard --secure`; image streaming (from the site cache by digest, else the source) through SHA-256 and gzip or zstd; cloud-init or Ignition user data; kexec into the installed kernel; `dcgmi diag` | A ramdisk image (kernel and initramfs with bcd and its tools) built in the repository; qcow2 images; a run on a real machine |
+| Privilege separation | `bcd helper` (28dc2ae, `internal/helper`): with `[helper] socket` and `user` set, `bcd node` runs as that account and sends its privileged work to the helper, which runs as root: the files bcd owns (CDI specs, allocation env files, the sshd drop-in, CA, KRL and principals), `firewall.apply` and `firewall.check` on the `bcd_instances` table, `gpu.reset`, `reboot` and `ssh.reload`, and self-update's `update.*` operations with the slots in root's `[update] slots_dir` (2d67b25). `daemon install-script --unprivileged` sets it up (169c459). Peers are checked with `SO_PEERCRED` and `/proc/<pid>/exe`; requests are versioned JSON, strictly decoded, and each is logged. `tests/e2e/bcd.test.ts` runs an unprivileged node beside a real helper that writes and removes a GPU hold's CDI spec, and a signed update reaching an unprivileged node through the helper | PLAN.md's `runtime.*` and `mig.apply` operations; bcx plugins beside an unprivileged node (`--unprivileged` refuses `--plugins`); only `bcd node` uses the helper (`bcd site` ignores `[helper]`, and the ramdisk has no configuration file) |
 | Local | `bcd status` over the unix socket; `bcd doctor`'s host checks (KVM, IOMMU, gateway reachability, identity); `bcd sim`, many fakehw node agents in one process (aa7501c) | `doctor` and `support-bundle` against the running agent; a clock check |
 
 ## Outbound only
@@ -271,7 +283,8 @@ plane wants from a node travels down the session the node opened: commands, desi
 `bcd ramdisk` opens no TCP listener, and neither does `bcd node` unless it serves the metadata service. The only
 local endpoint is a root-only unix socket (mode 0600 in a 0700 directory) that serves `bcd status`; PLAN.md also plans
 `doctor` and `support-bundle` against the running agent on it. If the socket cannot be created, the agent logs it and
-runs without. A VPS host with `[imds] listen` set serves its instances' metadata service there (for example
+runs without. Under [privilege separation](#privilege-separation) there is a second unix socket, `bcd helper`'s at
+`[helper] socket`, which only the node's account and root may use. A VPS host with `[imds] listen` set serves its instances' metadata service there (for example
 `169.254.169.254:80` on the instances' bridge), answering only requests whose source address belongs to one of its
 running instances. The other exception is a site agent with a `[boot]` section: its boot server listens on plain HTTP at `[boot] listen`, and optionally for proxy DHCP (UDP 67
 and 4011) and TFTP, for the PXE machines of its own provisioning network. It answers a booting machine only while it
@@ -280,14 +293,120 @@ holds the site's boot lease (see
 
 ## Privilege separation
 
-Until v0.4, `bcd node` runs as root under systemd hardening: `ProtectSystem=strict`, `NoNewPrivileges`, a narrow
-set of writable paths and a bounded capability set. [Installing bcd](/docs/daemon/install) shows the unit.
+By default `bcd node` runs as root under systemd hardening: `ProtectSystem=strict`, `NoNewPrivileges`, a narrow
+set of writable paths and a bounded capability set. [Installing bcd](/docs/daemon/install#the-systemd-unit) shows
+the unit.
 
-The v0.4 plan splits the daemon in two. A small `helper` process runs as root beside the node agent and performs
-typed operations on a socket whose caller it checks with `SO_PEERCRED`: `runtime.*`, `gpu.reset`, `mig.apply`,
-`cdi.write`, `reboot` and `update.swap`. Parsing of anything that comes from the network then never runs as root.
+PLAN.md §6 (v0.4) splits the daemon in two, and since 28dc2ae bcd can run that way. With `[helper] socket` and
+`[helper] user` in `config.toml`, `bcd node` runs as that unprivileged account, and `bcd helper --config
+/etc/bcd/config.toml` runs as root beside it and performs a few typed operations on the node's behalf.
+`daemon install-script --unprivileged` (169c459) sets this up: the `bcd` account, `bcd-helper.service`, and a
+`bcd.service` drop-in that runs the node as `bcd` (see
+[running bcd node unprivileged](/docs/daemon/install#running-bcd-node-unprivileged)). The session,
+the journal, and every command, spec and frame that comes from the network are then parsed by the unprivileged
+process; the helper parses only its own small requests, and trusts nothing in them.
 
-Other limits already hold in the design regardless of the split:
+```mermaid
+flowchart LR
+  G["gateway"] -->|"session, mTLS"| N["bcd node (helper.user)"]
+  N -->|"unix socket, JSON v1"| H["bcd helper (root)"]
+  H --> F["/etc/cdi, /run/bcd/allocations, /etc/ssh"]
+  H --> T["nft: bridge bcd_instances"]
+  H --> R["gpu.reset, reboot, sshd reload"]
+  H --> U["self-update: slots_dir, swap, confirm"]
+```
+
+### What the helper does
+
+| Operation | Sent by the node for | Checked by the helper |
+| --- | --- | --- |
+| `file.write`, `file.remove` | The `devices` converger's CDI specs and env files, the `access` converger's sshd files | A file kind and an id, never a path (below); at most 1 MiB |
+| `firewall.apply` | The instances' nftables ruleset | Only the shape bcd renders: at the top level, `table bridge bcd_instances`, `delete table …`, `flush table …` of that table and `table bridge bcd_instances {` blocks; inside a block no nested `table`; no `include` or `define` line and no line naming `ruleset`; balanced braces |
+| `firewall.check` | The 5-second check that the table is still loaded | A rule count from 0 to 1,000,000 |
+| `gpu.reset` | The `gpu.reset` command | A `GPU-…` UUID of a GPU in the host's own inventory |
+| `reboot` | `node.reboot` | The reason is cut to 200 bytes |
+| `ssh.reload` | The `access` converger, when the sshd drop-in changed | none |
+| `update.status`, `update.prepare`, `update.swap`, `update.confirm`, `update.rollback`, `update.settle` | [Self-update](/docs/daemon/install#self-update): the `daemon` section and `daemon.upgrade` (2d67b25) | Everything that matters, with the helper's own configuration: the manifest against its release pins and threshold, the release floor, the expiry against its own clock, and the staged binary's size and SHA-256 (below) |
+
+The helper builds each file's path from its own table:
+
+| Kind | Path | Id |
+| --- | --- | --- |
+| `cdi` | `/etc/cdi/bcd-<id>.json` | `[A-Za-z0-9_-]`, 1 to 128 characters |
+| `allocation-env` | `/run/bcd/allocations/<id>.env` | the same |
+| `ssh-dropin` | `/etc/ssh/sshd_config.d/10-better-compute.conf` | none |
+| `ssh-ca` | `/etc/ssh/bc_ca.pub` | none |
+| `ssh-krl` | `/etc/ssh/bc_krl` | none |
+| `ssh-principals` | `/etc/ssh/bc_principals/<id>` | `[A-Za-z0-9._@-]`, 1 to 64 characters |
+
+Every file is written mode 0644. The helper walks each directory down from `/` with `os.Root`, checking every
+component with `Lstat` and refusing a symlink or anything that is not a directory (a missing one is created 0755).
+It writes a temporary file created exclusively in that directory, then renames it over the target, so a symlink
+planted at the target is replaced, never followed. The node side (`helper.Client`) maps a path to its kind and id and
+refuses any path outside the table before it sends anything.
+
+### Self-update through the helper
+
+Self-update's privileged half is `selfupdate.Manager` (2d67b25): `Prepare` (verify only), `Swap`, `Confirm`,
+`RollBack`, `Settle`, `Status`, `Expire` and `ClearFailed`. A node without a helper runs it in process; under the
+helper the helper runs it, and the node only downloads and restarts:
+
+1. **The slots are root's.** The binary slots and the upgrade and release records (`upgrade.json`, `update.json`)
+   live in `[update] slots_dir`, by default `/usr/local/lib/bcd` under the helper (`<data_dir>/bin` otherwise, with
+   the records in `data_dir`). The helper creates it. A `slots_dir` inside `data_dir` is refused under the helper,
+   since the node owns that directory and could plant the binary root trusts.
+2. **The node downloads.** It asks `update.prepare` which artifact to fetch and writes it to
+   `<data_dir>/staging/bcd-<version>`.
+3. **The helper verifies and swaps.** `update.swap` takes no path from the node. The helper verifies the signed
+   manifest again under its own `[update]` pins, threshold and release floor, and the expiry against its own clock
+   (the node's server time can only make that check stricter). It opens the staged file with `O_NOFOLLOW` and hashes
+   it as it copies it into the other slot, so what is checked is what runs, then records `upgrade.json` and swaps.
+4. **The node confirms.** The node restarts into the entrypoint, and on its first `Welcome` asks the helper for
+   `update.confirm`, which moves the release floor up.
+5. **The helper's own watchdog.** An update still unconfirmed 30 seconds after its deadline is swapped back by the
+   helper, which then restarts `bcd.service`, whatever the node does. The watchdog is re-armed when the helper starts.
+
+A terminal refusal (a manifest that does not verify, a version below the floor) comes back flagged as such, so the
+node treats it as final rather than retrying. `tests/e2e/bcd.test.ts` delivers a build signed under the pinned key to
+an unprivileged node through a real helper, with the slots outside the data directory, and sees it confirmed.
+
+### Who it serves
+
+- **The peer.** For every connection the helper reads the caller's pid, uid and gid with `SO_PEERCRED`. The uid and
+  gid must both be `[helper] user`'s (its primary group), or the uid must be 0. `/proc/<pid>/exe` must be the same
+  file as an installed bcd: `[update] entrypoint`, `bcd-a` or `bcd-b` in `[update] slots_dir`, or the helper's own
+  binary. A refused caller gets only "not allowed"; the helper logs its pid, uid and the reason.
+- **The protocol.** One request per connection: JSON `{"v":1,"op":…}` of at most 4 MiB, answered `{"v":1,"ok":…}`
+  with an `error` when it failed. Both sides refuse unknown fields and another version, so a node and helper of
+  different versions refuse each other rather than guess. Each side gives a request 2 minutes.
+- **The socket.** Mode 0660, owned by root and the node account's primary group. Its directory (created 0755 if
+  missing) must be root's and closed to group and other writes, or the helper refuses to start. The helper binds,
+  chmods and chowns the socket inside a private 0700 directory and only then renames it into place, so no path the
+  node could swap for a symlink is ever changed by root (2d67b25, after a security review found the earlier
+  chmod-after-bind could be redirected). The install script uses `/run/bcd-helper/helper.sock`, not `/run/bcd`, which
+  `bcd` owns.
+- **The log.** Every operation is logged with the peer's pid, the operation, the file kind and id or the GPU, and
+  the outcome (`helper: operation … op=file.write kind=cdi name=<allocation>` in text logs).
+
+`bcd helper` refuses to start without `[helper] socket`, when `[helper] user` names no account, or when it is not
+root (a fakehw build excepted). The helper is Linux only, since it needs `SO_PEERCRED`. The configuration check
+requires an absolute socket path and a user that is not `root`. See the keys in
+[config.toml](/docs/daemon/install#configtoml).
+
+Both units start the same entrypoint, which a swap points at the new slot. A self-update restarts only the node,
+so the helper keeps running the binary it started with until it restarts; that works as long as both speak the same
+helper protocol version (1 today), since a node and a helper of different versions refuse each other. A
+[rerun of the install script](/docs/daemon/install#before-v04-rerun-the-script) restarts both units.
+
+What the helper does not cover still runs with the node account's own rights: the journal, key and status socket
+in `data_dir` and `socket_path`, the instance runtimes (`virsh -c qemu:///system` for `libvirt-kvm`; the install
+script adds the `libvirt` group when the host has one), and reading `/dev/kmsg` for XIDs. bcx plugins need root to
+start (they get their own uids only when bcd is root), so `--unprivileged` refuses `--plugins`. PLAN.md's
+`runtime.*` and `mig.apply` operations are not helper operations. The end-to-end tests cover the CDI path (an
+unprivileged fakehw `bcd node` beside a real `bcd helper` binds and releases a GPU hold, and the helper's log shows
+the `file.write` and `file.remove` of its CDI spec) and self-update. Only `bcd node` uses the helper.
+
+Other limits hold with or without the helper:
 
 - **Keys.** PLAN.md keeps the node key in the TPM when there is one; bcd today always keeps it in a 0600 file under
   `/var/lib/bcd` and never exports it. It signs only statements of the form "this node says": the mTLS handshake,
@@ -326,6 +445,7 @@ go-nvml is not added yet.
 | `internal/health` | the XID parser for `/dev/kmsg`, PSI pressure and CPU steal | done |
 | `internal/transport` | the `AgentGateway` client over connect-go, and `ws.go`, a dependency-free RFC 6455 client for the WebSocket fallback with renewal over `POST /v1/renew` | done |
 | `internal/selfupdate` | the A/B binary slots, `upgrade.json`, the release floor and the crash-loop rollback units | done (de9f380) |
+| `internal/helper` | privilege separation: `bcd helper`'s server (peer checks, the file table, the ruleset check, the `update.*` operations) and the node's clients | done (28dc2ae, 2d67b25) |
 | `internal/inventory` | NodeInventory v1, canonicalization, section encoding and hashes, the procfs/sysfs `Collector` | done |
 | `internal/support` | the secret scanner of `@better-compute/pki` for log bundles | done |
 | `internal/fakehw` | a deterministic 8x H100 SXM5 80GB HGX node | done |

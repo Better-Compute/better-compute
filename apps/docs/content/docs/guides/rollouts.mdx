@@ -17,6 +17,7 @@ sources:
   - proto/bettercompute/agent/v1/session.proto
   - daemon/.goreleaser.yaml
   - daemon/internal/journal/rules.go
+  - daemon/cmd/bcd/update.go
   - 'apps/console/src/app/(console)/admin/rollouts/page.tsx'
   - tests/rollout-controller.test.ts
   - tests/pki-release.test.ts
@@ -43,6 +44,12 @@ returns.
   [self-update](/docs/daemon/install#self-update). The FakeDaemon's opt-in `selfUpdate` plays the node side in the
   simulator.
 </Callout>
+
+Nodes that run `bcd node` unprivileged beside [`bcd helper`](/docs/daemon#privilege-separation) (installed with
+`daemon install-script --unprivileged`) take part in rollouts like any other: the node downloads the release, and the
+root helper verifies the manifest under its own release pins, swaps root's slots and confirms on the node's
+`Welcome` (2d67b25; see [self-update through the helper](/docs/daemon#self-update-through-the-helper)). Their helper
+must be a build with the `update.*` operations; an older one refuses them.
 
 ```mermaid
 flowchart LR
@@ -296,7 +303,8 @@ invalidates its desired state. Its NodeSpec then carries:
 {
   "version": "1.4.0",
   "url": "https://downloads.example.com/bcd/1.4.0/linux-amd64",
-  "sha256": "9f2c...e41a"
+  "sha256": "9f2c...e41a",
+  "signature": "eyJtYW5pZmVzdCI6..."
 }
 ```
 
@@ -306,8 +314,11 @@ invalidates its desired state. Its NodeSpec then carries:
   it. A node with neither gets no `daemon` section, and bcd is left alone.
 - **The platform** comes from the node's `cpu.arch` label (`x86_64` and `amd64` are `linux-amd64`; `aarch64` and
   `arm64` are `linux-arm64`). Without the label, or without a binary for the platform, there is no section.
-- **The digest** is the bare binary's SHA-256 from the verified manifest. The protobuf `DaemonSection` also has a
-  `signature` field; the rollout module does not set it.
+- **The digest** is the bare binary's SHA-256 from the verified manifest.
+- **The signature** is the release's signed manifest as registered (`{ manifest, signatures }`, the `manifest.json`
+  of `release sign`), its UTF-8 JSON as the section's bytes (`releaseSignature`, ecf7cd0). bcd verifies it against its
+  own `[update] release_pins`, so a compromised control plane cannot push a binary of its own. `daemon.upgrade`
+  carries the same field.
 
 ### daemon.upgrade for restricted sessions
 

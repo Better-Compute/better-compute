@@ -28,6 +28,8 @@ sources:
   - packages/iam/src/sessions.ts
   - apps/console/server.mjs
   - apps/console/console.config.mjs
+  - 'apps/console/src/app/(console)/instances/[instanceId]/console/page.tsx'
+  - apps/console/src/components/terminal-panel.tsx
   - proto/bettercompute/agent/v1/session.proto
   - tests/server-tunnels.test.ts
   - tests/gateway-tunnels.test.ts
@@ -43,7 +45,7 @@ sources:
 ---
 
 A <Term id="tunnel">tunnel</Term> is a two-way byte stream between a caller and something on a node: a shell in an
-instance, the console of a node, an instance's SSH server, or one TCP port. It rides the connection the node already
+instance, an instance's serial console, the console of a node, an instance's SSH server, or one TCP port. It rides the connection the node already
 holds to its <Term id="gateway">gateway</Term>, so the node needs no inbound port, no VPN and no bastion host. The
 API decides who may open one, and every hop checks a short-lived ticket before any byte flows.
 
@@ -78,7 +80,9 @@ sequenceDiagram
   only a host that runs an instance runtime advertises `tunnel.instance-dial`: a host build with `virsh` (the
   `libvirt-kvm` runtime, 362317c, so far tested against a fake `virsh` only, never on a real KVM host), a fakehw
   build, or a host with a bcx runtime plugin (none is written). On a host without one, `tunnels.open` refuses
-  instance `ssh` and `tcp` tunnels outright, and `exec` into an instance closes at once with exit status 127. See
+  instance `ssh`, `tcp` and `console` tunnels outright. `exec` into an instance closes at once with exit status 127
+  on every host until guests have an agent, so an instance's serial console (op `console`, 798e710) is the terminal
+  that works on a real host. See
   [the node half](#the-node-half). The TypeScript FakeDaemon answers every op with an echo shell, so tunnels also
   open end to end in the tests and in `better-compute dev --sim N`.
 </Callout>
@@ -225,7 +229,7 @@ when the input names a node. See [the reference](/docs/reference/api/tunnels#ope
     nodeId: { type: 'string', description: 'A node (node_...), for its console.' },
     op: {
       type: "'exec' | 'console' | 'ssh' | 'tcp'",
-      description: 'console is for nodes only; exec, ssh and tcp are for instances only.',
+      description: "A node takes console only (a root shell on the host). An instance takes exec, ssh, tcp or console (its serial console, 798e710).",
       required: true,
     },
     port: { type: 'number', description: 'For tcp only, and required there: 1 to 65535.' },
@@ -241,10 +245,20 @@ It refuses what cannot be tunneled:
 | A provider instance, which has no node agent to tunnel through | `UNSUPPORTED` |
 | An instance that is not `running`, or a node that is not connected to a gateway | `INVALID_STATE` |
 | A [sandbox's](/docs/guides/vps/sandboxes#run-code-inside) instance or a warm sandbox instance, for any op: use `sandboxes.exec` | `INVALID_STATE` with `details.reason: 'sandbox-managed'` |
-| An instance `ssh` or `tcp` tunnel whose node's current session does not advertise the `tunnel.instance-dial` capability (`node_sessions.capabilities`, from `Hello`) | `UNSUPPORTED` with `details: { reason: 'daemon-capability', capability }` |
+| An instance `ssh`, `tcp` or `console` tunnel whose node's current session does not advertise the `tunnel.instance-dial` capability (`node_sessions.capabilities`, from `Hello`) | `UNSUPPORTED` with `details: { reason: 'daemon-capability', capability }` |
 
 The capability check exists because a daemon that cannot dial the instance's own address would reach the host's
-loopback services instead. `exec` and node consoles do not need it.
+loopback services instead. The daemons that advertise it are also the ones that serve an instance `console` from the
+runtime; an older daemon refuses every instance ticket, and none answers one with a host shell. `exec` and node
+consoles do not need it.
+
+An instance's serial console is decided like the instance's other ops, as `compute:instances:exec` on the instance
+(never `compute:nodes:console`), and its ticket carries the instance (`inst`), so bcd attaches to that domain's serial
+port and never starts a host shell:
+
+```bash
+better-compute api tunnels.open tenantId=acme instanceId=inst_01jzq3v0m6y8x7w5t4s3r2p1ia op=console
+```
 
 The result carries the ticket and where to use it:
 
@@ -379,12 +393,15 @@ end: a full socket on one side pauses reading on the other.
 
 ### From a terminal
 
-The CLI does all of the above for you. `better-compute console --node ID` (op `console`) and `better-compute exec
---instance ID` (op `exec`) call `tunnels.open` as the token, open the WebSocket on the server named by `--url`, and
-attach your terminal in raw mode until the remote program exits:
+The CLI does all of the above for you. `better-compute console --node ID` (op `console` on a node: a root shell),
+`better-compute console --instance ID` (op `console` on an instance: its serial console; 798e710) and
+`better-compute exec --instance ID` (op `exec`) call `tunnels.open` as the token, open the WebSocket on the server
+named by `--url`, and attach your terminal in raw mode until the remote program exits. `console` takes exactly one of
+`--node` and `--instance` (a usage error otherwise):
 
 ```bash
 better-compute console --url https://compute.example.com --tenant acme --node node_01k5w…
+better-compute console --url https://compute.example.com --tenant acme --instance inst_01k5w…
 ```
 
 Every key goes to the remote, Ctrl-C included; Ctrl-] detaches. The window size is sent at start and on every
@@ -526,23 +543,27 @@ this host (a stopped instance or one on another host is refused), and bcd dials 
 that is not loopback, link-local, multicast, unspecified or an address of the host itself, so an instance ticket
 never reaches the host.
 
-`tunnels.open` issues `ssh`, `tcp` and `exec` only for instances and `console` only for nodes. The API guards instance
-`ssh` and `tcp` with a capability: the node's current session must advertise `tunnel.instance-dial` in its `Hello`
-(stored in `node_sessions.capabilities`; see [sessions](/docs/daemon/sessions#hello)), or `tunnels.open` answers
-`UNSUPPORTED` before any ticket is minted. bcd advertises it only when it runs an instance runtime: `libvirt-kvm` on
-a host build with `virsh`, the file-backed runtime of a fakehw build, or a bcx runtime plugin; on a host without one
-`console` is the only op that runs. An instance `exec` needs no capability, and bcd refuses it as above. bcd answers
-an instance ticket with op `console` (f8273ef), but `tunnels.open` does not issue one yet: it still refuses `console`
-for an instance with `INVALID_INPUT`, so no API path reaches an instance's serial console yet.
+`tunnels.open` issues `ssh`, `tcp` and `exec` only for instances, and `console` for both: a node's root shell, or an
+instance's serial console (798e710). The API guards instance `ssh`, `tcp` and `console` with a capability: the node's
+current session must advertise `tunnel.instance-dial` in its `Hello` (stored in `node_sessions.capabilities`; see
+[sessions](/docs/daemon/sessions#hello)), or `tunnels.open` answers `UNSUPPORTED` before any ticket is minted. bcd
+advertises it only when it runs an instance runtime: `libvirt-kvm` on a host build with `virsh`, the file-backed
+runtime of a fakehw build, or a bcx runtime plugin; on a host without one a node `console` is the only op that runs.
+An instance `exec` needs no capability, and bcd refuses it as above, so the serial console is the way into an
+instance on a real host. Sandbox and warm sandbox instances are refused for every op, `console` included
+(`sandbox-managed`); `sandboxes.exec` stays their only way in.
 
 ## The web terminal
 
-The console (`apps/console`) has a terminal on every instance (`/instances/<id>/terminal`, decided as
-`compute:instances:exec`) and a console on every connected node (`/nodes/<id>/console`, decided as
-`compute:nodes:console`; the node page shows the link only while the node is connected). Keys, pastes and
-resizes go straight to the target; **Reconnect** asks for a new ticket.
+The console (`apps/console`) has a terminal on every instance (`/instances/<id>/terminal`, op `exec`), the
+instance's serial console (`/instances/<id>/console`, op `console`, linked as **Serial console** beside **Open a
+terminal** on the instance page; 191898b), both decided as `compute:instances:exec`, and a console on every
+connected node (`/nodes/<id>/console`, decided as `compute:nodes:console`; the node page shows the link only while
+the node is connected). Since bcd refuses instance `exec` until guests have an agent, the serial console page is the
+instance terminal that works on real hosts. Keys, pastes and resizes go straight to the target; **Reconnect** asks
+for a new ticket.
 
-Both pages use `createTerminalSession` from `@better-compute/console-kit`, which you can use in your own UI:
+The pages use `createTerminalSession` from `@better-compute/console-kit`, which you can use in your own UI:
 
 ```ts title="terminal.ts"
 import { createTerminalSession } from '@better-compute/console-kit';
@@ -550,7 +571,7 @@ import { createTerminalSession } from '@better-compute/console-kit';
 const session = createTerminalSession(api, {
   tenantId: 'acme',
   instanceId: 'inst_01jzq3v0m6y8x7w5t4s3r2p1ia', // or nodeId for a node's console
-  op: 'exec', // or 'ssh'
+  op: 'console', // the instance's serial console; or 'exec', 'ssh'
   baseURL: 'https://compute.example.com',
 });
 session.subscribe(() => render(session.get())); // status: idle | opening | open | closed | error

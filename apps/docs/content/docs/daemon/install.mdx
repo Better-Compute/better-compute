@@ -13,6 +13,13 @@ sources:
   - daemon/cmd/bcd/plugins.go
   - daemon/cmd/bcd/main.go
   - daemon/cmd/bcd/agent.go
+  - daemon/cmd/bcd/helper.go
+  - daemon/cmd/bcd/update.go
+  - daemon/cmd/bcd/doctor.go
+  - daemon/internal/helper/helper.go
+  - daemon/internal/selfupdate/manager.go
+  - daemon/internal/agent/update.go
+  - tests/cli-pki.test.ts
   - daemon/cmd/bcd/site.go
   - daemon/cmd/bcd/ramdisk.go
   - daemon/internal/bootparams/bootparams.go
@@ -109,6 +116,7 @@ better-compute daemon install-script \
 | `--bmc-networks CIDRS` | no | | A site agent's BMC networks (comma-separated), written as `[site] bmc_networks`: `site.httpProxy` never reaches into them |
 | `--plugins` | no | | Prepare the node for bcx driver plugins: a `[plugins]` section and the systemd drop-in; see [the plugin drop-in](#the-plugin-drop-in) |
 | `--privileged-plugins NAMES` | no | | Comma-separated plugins that run as root without the seccomp filter, such as a Kata runtime; implies `--plugins` |
+| `--unprivileged` | no | | Run `bcd node` as the unprivileged `bcd` user beside a root `bcd helper` (169c459): a `[helper]` section, the `bcd` account, `bcd-helper.service` and a `bcd.service` drop-in; see [running bcd node unprivileged](#running-bcd-node-unprivileged). Refused with `--plugins` or `--privileged-plugins`. Self-update works in this mode: the helper does the privileged half (2d67b25) |
 | `--approver-set-sha256 HEX` | no | | Writes `approver_set_sha256` (64 lower-case hex digits, the `approverSetSha256` that `pki trust-version` prints) into `config.toml`, pinning the node's first approver set (9b7a199): a keyless bcd takes only that set, and runs nothing destructive until it has it; see [pinning the first set](/docs/operations/pki#pinning-the-first-set). An upgrade run without the flag keeps the node's existing pin (b6d401f) |
 | `--pki PATH` | no | | The PKI bundle to read the pins from |
 | `--out PATH` | no | | Write a new file with mode 0755 instead of printing; refuses to overwrite (`FILE_EXISTS`) |
@@ -173,9 +181,11 @@ It creates `/etc/bcd` and `/var/lib/bcd` with mode 0700 and `/etc/cdi` with mode
 `/usr/local/lib/bcd/plugins` with mode 0755). Each file is written next to its target as `*.new` and renamed over
 it, so a replacement is atomic even while bcd runs. When a `config.toml` already exists, every section of it
 (`[plugins]`, `[boot]`, `[imds]`, ...) is carried over below the freshly written top-level keys; with `--plugins`, a
-`[plugins]` section is appended unless the file already has one. After the unit, it installs or removes the
-[plugin drop-in](#the-plugin-drop-in) according to whether `config.toml` has a `[plugins]` section. Then
-`systemctl daemon-reload`.
+`[plugins]` section is appended unless the file already has one, and with `--unprivileged` a `[helper]` section
+likewise. After the unit, it installs or removes the [plugin drop-in](#the-plugin-drop-in) according to whether
+`config.toml` has a `[plugins]` section, and the [helper mode](#running-bcd-node-unprivileged) (the `bcd` account,
+`bcd-helper.service`, the `unprivileged.conf` drop-in, `/etc/bcd` readable by the `bcd` group) according to whether
+it has a `[helper]` section. Then `systemctl daemon-reload`.
 
 </Step>
 <Step>
@@ -186,7 +196,9 @@ It runs `bcd doctor --config /etc/bcd/config.toml` and prints a warning if docto
 stopping. Before the first join, doctor's `identity` check only warns that the node has not joined; a gateway it
 cannot reach over TCP is a failure. With a token, it pipes the token into `bcd join --config /etc/bcd/config.toml` with `printf`, a shell
 builtin, so the token never appears in a process listing, then runs `systemctl enable --now bcd.service`. Without
-a token, it runs `systemctl restart bcd.service`.
+a token, it runs `systemctl restart bcd.service`. In helper mode it first hands `/var/lib/bcd` to the `bcd` user
+(`chown -R bcd:bcd`, since `bcd join` wrote the identity as root) and enables and starts, or restarts,
+`bcd-helper.service`, so the helper is up before the node.
 
 </Step>
 </Steps>
@@ -211,8 +223,10 @@ sudo sh install-bcd.sh < token-file
   </Folder>
   <Folder name="/etc/systemd/system" defaultOpen>
     <File name="bcd.service (0644)" />
+    <File name="bcd-helper.service (0644, only on nodes with [helper])" />
     <Folder name="bcd.service.d (0755)" defaultOpen>
       <File name="plugins.conf (0644, only on nodes with [plugins])" />
+      <File name="unprivileged.conf (0644, only on nodes with [helper])" />
     </Folder>
   </Folder>
   <Folder name="/usr/local/lib/bcd/plugins (0755, with --plugins)" defaultOpen>
@@ -224,7 +238,10 @@ sudo sh install-bcd.sh < token-file
     <File name="journal.db (the bbolt journal)" />
   </Folder>
   <Folder name="/run/bcd (0700)" defaultOpen>
-    <File name="bcd.sock (root-only status socket)" />
+    <File name="bcd.sock (0600 status socket, owned by the user bcd runs as)" />
+  </Folder>
+  <Folder name="/run/bcd-helper (0755, root, only with [helper])" defaultOpen>
+    <File name="helper.sock (0660, root:bcd)" />
   </Folder>
   <Folder name="/etc/cdi (0755)" defaultOpen>
     <File name="bcd-ALLOCATION.json (written by the devices converger)" />
@@ -241,8 +258,9 @@ anywhere. With `--proxy-ca-file` the script also writes `/etc/bcd/websocket-prox
 [self-update](#self-update) bcd owns `<data_dir>/bin/bcd-a`, `bcd-b`, `current`, `previous` and `slots.json`,
 `upgrade.json` while an update awaits its `Welcome`, `update.json` (the release floor and failed versions), and,
 under systemd, `bcd-rollback.service` and `bcd.service.d/50-bcd-rollback.conf`; `/usr/local/bin/bcd` then links to
-`current`. A quorum node keeps `batch-leaves.json` and `unbatched-destructive.json`, and a site agent
-`bmc-hosts.json`, under `data_dir`.
+`current`. Under `bcd helper` the slots and both records are in root's `[update] slots_dir` instead (default
+`/usr/local/lib/bcd`), and the node downloads into `<data_dir>/staging`. A quorum node keeps `batch-leaves.json` and
+`unbatched-destructive.json`, and a site agent `bmc-hosts.json`, under `data_dir`.
 
 ### config.toml
 
@@ -279,7 +297,10 @@ keys and wrong types are all errors with a line number, so a typo fails loudly. 
 | `[update] release_pins` | no | none | Comma-separated `sha256/...` pins of the release keys. Without them bcd refuses every self-update; see [self-update](#self-update) |
 | `[update] release_threshold` | no | `1` | How many distinct pinned keys must have signed a release |
 | `[update] release_sequence` | no | `0` | The release the node was installed at: no release manifest with a lower sequence is taken (0: unknown) |
-| `[update] entrypoint` | no | `/usr/local/bin/bcd` | The path `bcd.service` starts; the first update makes it a symlink to `<data_dir>/bin/current` |
+| `[update] entrypoint` | no | `/usr/local/bin/bcd` | The path `bcd.service` starts; the first update makes it a symlink to `current` in the slots directory |
+| `[update] slots_dir` | no | `<data_dir>/bin`; under `bcd helper` `/usr/local/lib/bcd` | An absolute path for the binary slots, and under the helper also `upgrade.json` and `update.json` (2d67b25). Under the helper it may not be inside `data_dir` ("under bcd helper, update.slots_dir may not be inside data_dir"), since the unprivileged node owns that directory; the helper creates it |
+| `[helper] socket` | no | | An absolute path: `bcd node` then runs unprivileged and sends its privileged operations, self-update's included, to `bcd helper` on this unix socket (28dc2ae); `--unprivileged` writes `/run/bcd-helper/helper.sock`. The directory must be root's with no group or other write. See [running bcd node unprivileged](#running-bcd-node-unprivileged) |
+| `[helper] user` | with `socket` | | The unprivileged account `bcd node` runs as (`bcd` from `--unprivileged`); `root` is refused ("helper.socket needs an absolute path and helper.user, the unprivileged account bcd node runs as") |
 | `[site] bmc_networks` | no | | A site agent's BMC networks, comma-separated CIDRs: `site.httpProxy` never reaches into them, whatever the control plane asks. A site agent with it advertises the capability `site.bmc-networks`, and `better-compute doctor` warns about connected site agents without it (a019c85) |
 | `[websocket] url` | no | | A `wss://` URL (`ws://` only with `dev_insecure_h2c`), without credentials, of the gateway's WebSocket endpoint, `.../v1/session`: `bcd node` and `bcd site` then run the session and renewals over the [WebSocket fallback](/docs/daemon/protocol#websocket-fallback-v04) |
 | `[websocket] proxy_ca_file` | no | | An absolute path to a PEM file of a TLS-inspecting proxy's CA, trusted for the TLS connection only, never for the gateway's proof |
@@ -355,7 +376,9 @@ development.
 
 ## The systemd unit
 
-Until the v0.4 helper split, `bcd node` runs as root, so the unit narrows what root can do.
+By default the script installs `bcd node` running as root, so the unit narrows what root can do. With
+`--unprivileged` the same unit gets a drop-in that runs it as the `bcd` user beside a root `bcd helper`; see
+[running bcd node unprivileged](#running-bcd-node-unprivileged).
 
 ```ini title="/etc/systemd/system/bcd.service"
 [Unit]
@@ -411,7 +434,7 @@ WantedBy=multi-user.target
 | `Restart=always`, `StartLimitBurst=10` in 300 s | Restarts after 5 s, and gives up after 10 starts in five minutes |
 
 `bcd node` opens no TCP listener; everything it does starts with an outbound connection to the gateway. See
-[the overview](/docs/daemon) for the privilege-separation plan.
+[privilege separation](/docs/daemon#privilege-separation) for the helper mode.
 
 ### The plugin drop-in
 
@@ -475,6 +498,109 @@ processes itself (d902063). If the cgroup cannot be prepared, no plugin runs and
 `_` and `-`. The script adds no plugins: put the binaries and their `pins` file in the directory yourself (see
 [driver plugins in bcd](/docs/extending/drivers#driver-plugins-in-bcd)). A section you wrote by hand works the same
 way: any `[plugins]` section gets the drop-in, and removing the section removes the drop-in on the next run.
+
+### Running bcd node unprivileged
+
+`bcd helper` (28dc2ae, PLAN.md §6, v0.4) lets `bcd node` run as an unprivileged account while a root process beside
+it does the privileged work: the CDI specs, allocation env files and sshd files bcd owns, the `bcd_instances`
+nftables table, GPU resets, reboots and sshd reloads. [Privilege separation](/docs/daemon#privilege-separation)
+describes the operations and the checks. The mode is opt-in: generate the script with `--unprivileged` (169c459).
+
+```bash
+better-compute daemon install-script --pool pool_h100 --site fsn1 \
+  --gateway-url https://gw.eu.example.com --base-url https://compute.example.com \
+  --bcd-version 0.1.0 --sha256 amd64=<hex> --unprivileged > install-bcd.sh
+```
+
+The flag adds a `[helper]` section to `config.toml` unless the file already has one. Both processes read that file:
+
+```toml title="/etc/bcd/config.toml ([helper] section, as --unprivileged writes it)"
+[helper]
+socket = "/run/bcd-helper/helper.sock"
+user = "bcd"
+```
+
+| Key | Meaning |
+| --- | --- |
+| `[helper] socket` | The absolute path of the helper's unix socket. Unset (the default), `bcd node` does its privileged work itself, as root |
+| `[helper] user` | The account `bcd node` runs as, and the only caller the helper serves besides root; its primary group owns the socket. Required with `socket`, and never `root` |
+
+The socket is not in `/run/bcd`: the `bcd` user owns that directory, and a directory the node can write would let it
+redirect root's work on the socket path with a symlink. So it lives in the helper's own root-owned runtime directory.
+Since 2d67b25 the helper refuses to start unless the socket's directory is root's and closed to group and other
+writes, and it binds, chmods and chowns the socket in a private 0700 directory before renaming it into place.
+
+The script decides the mode from the configuration, not the flag: it sets up helper mode exactly when `config.toml`
+has a `[helper]` section, so an upgrade run keeps the node's mode, and deleting the section returns the node to root
+on the next run (the drop-in is removed; the account and `bcd-helper.service` are left, and the helper cannot start
+without the section, so disable that unit yourself). In helper mode it:
+
+1. creates the `bcd` system account if there is none (`useradd --system --no-create-home --home-dir /var/lib/bcd
+   --shell /usr/sbin/nologin bcd`, or busybox `adduser -S -D -H` without `useradd`);
+2. installs `bcd-helper.service` and the `bcd.service` drop-in `unprivileged.conf`, both 0644;
+3. makes `/etc/bcd` (0750) and `config.toml` (0640) group-owned by `bcd`, so the node can read its configuration and
+   nothing else of `/etc/bcd` becomes readable to it;
+4. after `bcd join` (which runs as root), gives `/var/lib/bcd` to `bcd:bcd` and starts `bcd-helper.service` before
+   `bcd.service`; an upgrade run does the same with restarts.
+
+```ini title="/etc/systemd/system/bcd-helper.service"
+[Unit]
+Description=better-compute node agent privileged helper (bcd helper)
+Documentation=https://github.com/better-compute/better-compute
+Before=bcd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/bcd helper --config /etc/bcd/config.toml
+Restart=always
+RestartSec=2s
+UMask=0077
+RuntimeDirectory=bcd-helper
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```ini title="/etc/systemd/system/bcd.service.d/unprivileged.conf"
+[Unit]
+Requires=bcd-helper.service
+After=bcd-helper.service
+
+[Service]
+User=bcd
+Group=bcd
+SupplementaryGroups=systemd-journal adm
+SupplementaryGroups=libvirt
+```
+
+| Setting | Why |
+| --- | --- |
+| `Requires=`, `After=bcd-helper.service` | The node starts after the helper and stops with it |
+| `User=bcd`, `Group=bcd` | `bcd node` runs unprivileged; systemd hands it the unit's state and runtime directories (`/var/lib/bcd`, `/run/bcd`) |
+| `SupplementaryGroups=systemd-journal adm` | Read access to the system journal and logs (`logs.collect` runs `journalctl`) |
+| `SupplementaryGroups=libvirt` | Added only when the host has a `libvirt` group: the libvirt socket, for the `libvirt-kvm` runtime on VPS hosts |
+| `RuntimeDirectory=bcd-helper`, mode 0755 | `/run/bcd-helper`, root-owned, holds the socket (0660, `root:bcd`) |
+
+The helper serves a caller only when `SO_PEERCRED` shows `bcd`'s uid and gid (or root) and `/proc/<pid>/exe` is an
+installed bcd: `[update] entrypoint`, `bcd-a` or `bcd-b` in `[update] slots_dir`, or the helper's own binary. A node
+run from anywhere else is refused.
+
+Self-update works in this mode (2d67b25): the node downloads a release into `<data_dir>/staging`, and the helper
+verifies it under its own `[update]` pins and floor, copies it into root's `[update] slots_dir` (default
+`/usr/local/lib/bcd`) and swaps; see [self-update through the helper](/docs/daemon#self-update-through-the-helper).
+Nodes installed by a script generated with `--release-pins` get the same `[update]` section as a root node.
+
+<Callout type="warn" title="Plugins need root">
+`--unprivileged` together with `--plugins` or `--privileged-plugins` is a usage error ("--unprivileged cannot host bcx
+plugins yet: bcd node would need root to start them").
+</Callout>
+
+What the helper does not do runs with the `bcd` account's own rights: the journal and key, the status socket, the
+`libvirt-kvm` runtime (`virsh -c qemu:///system`, through the `libvirt` group) and reading `/dev/kmsg`. Only
+`bcd node` uses the helper; `bcd site` ignores `[helper]`. `tests/e2e/bcd.test.ts` runs both processes by hand on a
+fakehw build, a GPU hold and a signed self-update included; `tests/cli-pki.test.ts` checks the script's section,
+account, units and drop-in.
 
 ## Joining
 
@@ -605,6 +731,10 @@ follows the kept configuration: a node with `[plugins]` keeps it, even when the 
 The node keeps its identity and journal across the restart. On reconnect its `Hello` carries the new
 `daemon_version`, which the gateway records in `node_sessions.daemon_version`.
 
+On a node that has already [self-updated](#self-update), the script's `mv -f` replaces the entrypoint symlink with a
+plain file. The next self-update adopts that file into the current slot before it relinks the entrypoint (9006eee),
+so it never falls back to the older binary the slot held; before that fix it did, rolling the script's upgrade back.
+
 ### From v0.4: rollouts and self-update
 
 The v0.4 design moves upgrades into desired state. A [rollout](/docs/guides/rollouts) sets
@@ -616,7 +746,10 @@ the server's minimum protocol version gets `Welcome.upgrade_required`, and its s
 ### Self-update
 
 bcd updates itself in place (de9f380, `daemon/internal/agent/update.go`, `daemon/internal/selfupdate`), for both the
-`daemon` section and `daemon.upgrade` (node and site roles):
+`daemon` section and `daemon.upgrade` (node and site roles). Since 2d67b25 the privileged half (`selfupdate.Manager`:
+verify, swap, confirm, roll back) runs in process on a root node and inside `bcd helper` on an
+[unprivileged one](#running-bcd-node-unprivileged); see
+[self-update through the helper](/docs/daemon#self-update-through-the-helper). The steps are the same:
 
 1. **Only a signed release.** `DaemonSection.signature` is the release's signed manifest (`manifest.json` from
    `better-compute release sign`). At least `[update] release_threshold` distinct keys pinned in `[update]
@@ -625,17 +758,22 @@ bcd updates itself in place (de9f380, `daemon/internal/agent/update.go`, `daemon
    rollback), be unexpired on both the host clock and server time, and list the bare binary
    `bcd_<version>_<os>_<arch>` with the section's SHA-256. Without release pins bcd takes no binary at all: the
    control plane alone can never hand a node one. The URL must be `https://`.
-2. **Two slots.** The binaries live in `<data_dir>/bin/bcd-a` and `bcd-b`, with `current` and `previous` symlinks
-   and `slots.json`. The first update adopts the binary the install script put at the entrypoint (`[update]
+2. **Two slots.** The binaries live in `bcd-a` and `bcd-b` of the slots directory (`[update] slots_dir`: default
+   `<data_dir>/bin`, or `/usr/local/lib/bcd` under the helper), with `current` and `previous` symlinks and
+   `slots.json`. The first update adopts the binary the install script put at the entrypoint (`[update]
    entrypoint`, default `/usr/local/bin/bcd`) into slot `a` and makes the entrypoint a symlink to `current`; an
-   entrypoint that is a symlink somewhere else is refused. The download goes into the other slot, at most 512 MiB,
-   checked against the manifest's size and digest as it streams, with an idle watchdog.
+   entrypoint that is a symlink somewhere else is refused, and a plain file found there later (a rerun of the install
+   script) is copied into the current slot first (9006eee). The node downloads the release into
+   `<data_dir>/staging/bcd-<version>`, at most 512 MiB, checked against the manifest's size and digest as it streams,
+   with an idle watchdog; the swap then copies it into the other slot, opening it with `O_NOFOLLOW` and checking the
+   size and digest again as it writes.
 3. **Swap and confirm.** bcd writes `upgrade.json` with a deadline of now plus 120 seconds (fsynced), points
    `current` at the new slot and execs the entrypoint once everything is closed. The new binary confirms itself on
    its first `Welcome`: the release floor moves up (`update.json`) and `upgrade.json` goes. Without a `Welcome` by
    the deadline it swaps back and restarts; the old binary then records the version as failed ("bcd X did not
    start"), reports the `daemon` section `FAILED` with reason `UpdateFailed`, and never tries that version again
-   until `bcd update --clear-failed`.
+   until `bcd update --clear-failed`. Under the helper, the node asks the helper to confirm, and the helper's own
+   watchdog also swaps back an update still unconfirmed 30 seconds after its deadline and restarts `bcd.service`.
 4. **Crash loops.** Under systemd the first update writes `bcd-rollback.service` and a `bcd.service` drop-in
    (`50-bcd-rollback.conf`: `StartLimitIntervalSec=600`, `StartLimitBurst=5`, `OnFailure=bcd-rollback.service`),
    which restores `previous`, only while `upgrade.json` exists. fakehw builds never write them.
@@ -646,11 +784,14 @@ bcd updates itself in place (de9f380, `daemon/internal/agent/update.go`, `daemon
 new binary once it is welcomed, or `FAILED` with `update-failed` after a swap back; a restart without a reboot is
 decided by `upgrade.json`, not the boot id. Running workloads are not touched. `bcd sim` and `bcd ramdisk` run
 without self-update: the `daemon` section stays `SectionUnsupported` and the kind `UNSUPPORTED`. `bcd update` shows
-the slots, the release floor, a pending update and failed versions, and `bcd doctor` warns without release pins,
-fails when the slots are in use but the entrypoint does not link to `current`, and warns about a pending update or a
-failed version (2845f41). `tests/e2e/bcd.test.ts` updates a real bcd to a second signed build through
-`daemon.upgrade`, a real exec and its `Welcome` (fc0ca6a); no release has been cut, so no real host has
-self-updated yet. See [delivery](/docs/daemon/delivery).
+the slots, the release floor, a pending update and failed versions from `[update] slots_dir` (run it as root on a
+helper node, whose records are root's), and `bcd doctor` warns without release pins, fails when the slots are in use
+but the entrypoint does not link to `current`, and warns about a pending update or a failed version (2845f41).
+Doctor's slot and record checks still read `<data_dir>/bin` and `data_dir`, not `[update] slots_dir`, so on a helper
+node only `bcd update` shows them. `tests/e2e/bcd.test.ts` updates a real bcd to a second signed build through
+`daemon.upgrade`, a real exec and its `Welcome` (fc0ca6a), and delivers a signed build to an unprivileged node
+through `bcd helper` (2d67b25); no release has been cut, so no real host has self-updated yet. See
+[delivery](/docs/daemon/delivery).
 
 The fleet-wide order for any upgrade is: expand migrations, then workers and api, then gateways one at a time
 with `Drain`, then daemons in waves, and contract migrations in the next release. See

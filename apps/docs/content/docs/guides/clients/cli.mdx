@@ -259,14 +259,19 @@ the token's identity:
 
 ```bash
 better-compute console --url https://compute.example.com --tenant acme --node node_01k5w…
+better-compute console --url https://compute.example.com --tenant acme --instance inst_01k5w…
 better-compute exec --url https://compute.example.com --tenant acme --instance inst_01k5w…
 better-compute forward --url https://compute.example.com --tenant acme --instance inst_01k5w… --port 5432
 better-compute ssh-cert --tenant acme --node node_01k5w… && ssh -i ~/.ssh/id_ed25519 root@10.0.0.5
 ```
 
-- **`console`** (`--node`) opens a root console on a node through `tunnels.open` with op `console`, decided as
-  `compute:nodes:console` on the node. **`exec`** (`--instance`) opens a shell in a running instance with op `exec`,
-  decided as `compute:instances:exec`; the instance's node agent runs it.
+- **`console`** opens a tunnel with op `console`: with `--node`, a root console on the node, decided as
+  `compute:nodes:console` on the node; with `--instance`, the serial console of a running instance, decided as
+  `compute:instances:exec` on the instance (798e710). Give exactly one of the two. An instance console needs a node
+  daemon that advertises `tunnel.instance-dial`, like `forward` below, and a sandbox's instance is refused
+  (`sandbox-managed`: use `sandbox exec`). **`exec`** (`--instance`) opens a shell in a running instance with op
+  `exec`, decided as `compute:instances:exec`; the instance's node agent runs it. bcd refuses instance `exec` until
+  guests have an agent, so on a real host `console --instance` is the terminal that works.
 - Both open the tunnel's WebSocket on the same server as the API call, so they need `--url` (or
   `BETTER_COMPUTE_URL`). Without it they fail with `UNSUPPORTED` before a ticket is spent: an in-process call has no
   WebSocket server.

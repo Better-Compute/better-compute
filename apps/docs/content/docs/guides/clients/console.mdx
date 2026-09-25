@@ -7,6 +7,9 @@ status: beta
 packages: ['@better-compute/console-kit', '@better-compute/client']
 sources:
   - apps/console/README.md
+  - 'apps/console/src/app/(console)/instances/[instanceId]/console/page.tsx'
+  - apps/console/src/components/terminal-panel.tsx
+  - packages/console-kit/src/terminal.ts
   - apps/console/package.json
   - apps/console/server.mjs
   - apps/console/console.config.mjs
@@ -154,7 +157,7 @@ console-kit, for the tenant the session acts in. Platform pages appear only for 
 | --- | --- | --- |
 | Overview | `/` | capacity per pool, quota alerts |
 | Reservations | `/reservations`, `/reservations/[id]` | the form with a capacity preview, the earliest start and approvals; the list and each reservation's actions |
-| Instances | `/instances`, `/instances/[id]`, `/instances/[id]/terminal` | the form with sizes per pool; list, detail and a browser terminal |
+| Instances | `/instances`, `/instances/[id]`, `/instances/[id]/terminal`, `/instances/[id]/console` | the form with sizes per pool; list, detail, a browser terminal (op `exec`) and the instance's serial console (op `console`, 191898b), linked as **Open a terminal** and **Serial console**, both decided as `compute:instances:exec`. bcd refuses instance `exec` until guests have an agent, so the serial console is the terminal that works on real hosts |
 | Sandboxes | `/sandboxes` | a create form over the tenant's templates (each with its flavor and warm pool size) and a lifetime in minutes, capped at the template's maximum; the person's own sandboxes, or everyone's, with state, a countdown to expiry (a warning in the last 5 minutes), **+30 min**, **Snapshot** and **Delete**, and the `better-compute sandbox exec` line for a shell |
 | Nodes | `/nodes`, `/nodes/[id]`, `/nodes/[id]/console` | a filterable table; conditions, cordon, uncordon and drain, recent commands, the node console, and the break-glass SSH panel (below) |
 | Batches | `/batches` | destructive batches held for the approver quorum: pending by default (or approved, expired, cancelled, all), each with its reason, command count, approvals of required, state and the window left; a batch's scope by kind, who approved, the `better-compute batch approve` line, and **Cancel** (below) |
@@ -264,7 +267,7 @@ live.connection.subscribe(() => showBadge(live.connection.get().status));
 | SSH access | `createSshAccessView`, `checkSshPublicKey`, `sshUsage` | one node's break-glass certificates: `issue` (held in `view.issued` until dismissed), `revoke`, `showExpired`; a public key check that refuses private keys; the commands to use a certificate |
 | Webhooks | `createWebhooksView`, `deliverySummary` | a tenant's webhooks over the `webhooks` group (list, create, pause, rotate, delete, ping, deliveries, redeliver, event types); the secret from create or rotate sits in `view.secret` until `dismissSecret()` and is never stored or re-read; delivery counts by state and the latest failure |
 | Break-glass SSH | `createSshAccessView`, `checkSshPublicKey`, `sshUsage` | one node's certificates over `nodes.listSshCerts` (expired ones with `showExpired(true)`), `issue({ publicKey, account?, minutes? })` (1 to 60 minutes, 15 by default) and `revoke(serial, reason?)`; a pasted private key, a multi-line paste or a key type other than Ed25519 or ECDSA P-256 is refused before anything is sent; the issued certificate sits in `issued` until `dismissIssued()`, and `sshUsage` gives the commands to use it. The console's node page uses it |
-| Terminal | `createTerminalSession`, `createScreen`, `keyInput` | `tunnels.open`, then the WebSocket; a VT100/xterm screen model with scrollback, no DOM |
+| Terminal | `createTerminalSession`, `createScreen`, `keyInput` | `tunnels.open`, then the WebSocket (an instance with op `exec`, `ssh` or `console` for its serial console, or a node's console); a VT100/xterm screen model with scrollback, no DOM |
 | React | `bindReact`, and `@better-compute/console-kit/react` | `useStore`, `useList`, `usePermission`, `useDetail`, `useAction` |
 
 ### Live updates

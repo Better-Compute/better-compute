@@ -1,10 +1,12 @@
 ---
 title: Reference
-description: Generated reference for the API, the CLI, command kinds, error codes, events, modules and packages, built from a live control plane with every module.
+description: Generated reference for the API, the CLI, command kinds, error codes, the daemon protocol, events, modules and packages, from a live control plane and the .proto files.
 icon: Code
 sources:
   - apps/docs/scripts/generate.mjs
   - apps/docs/scripts/descriptions.mjs
+  - apps/docs/scripts/protocol.mjs
+  - tests/docs-generate.test.ts
   - apps/docs/scripts/check-content.mjs
   - apps/docs/app/llms.txt/route.ts
   - apps/docs/app/llms-full.txt/route.ts
@@ -15,14 +17,15 @@ sources:
   - apps/docs/lib/glossary.ts
 ---
 
-import { BookA, Blocks, Bot, Braces, Broadcast, ChartLine, Command, History, OctagonAlert, Package, Signpost, SquareTerminal } from '@/lib/icons';
+import { BookA, Blocks, Bot, Braces, Broadcast, ChartLine, Command, FileCode, History, OctagonAlert, Package, Signpost, SquareTerminal } from '@/lib/icons';
 
 Most of this section is generated from the repository by `apps/docs/scripts/generate.mjs`, so it matches the code
 it documents. The generator does not parse source files. It imports the built packages and constructs a real control
 plane with `betterCompute()` and **every** module registered: the built-in node controllers, `inventory` and
 `capacity`, plus `provision` with `metal`, `vps`, `events`, `fleet`, `rollout` and `audit`. That control plane runs
 on a PGlite executor that is never opened and an `IamPort` that refuses every call, so nothing is migrated and no
-decision is made. What it reads is the registry a full deployment serves:
+decision is made. What it reads is the registry a full deployment serves, plus the `.proto` files for the protocol
+page:
 
 | Page | Generated from |
 | --- | --- |
@@ -30,6 +33,7 @@ decision is made. What it reads is the registry a full deployment serves:
 | [CLI](/docs/reference/cli) | `cliManifest()` of `@better-compute/cli`, the same data `better-compute help --json` prints |
 | [Command kinds](/docs/reference/command-kinds) | `registry.commandKinds`: lane, roles, retry-safe, self-terminating, attested and destructive flags, timeout and payload message |
 | [Errors](/docs/reference/errors) | Core's `errorCodes` and `defaultStatus` |
+| [Protocol](/docs/reference/protocol) | The `.proto` sources under `proto/bettercompute`, read by `apps/docs/scripts/protocol.mjs` (5cafb1e): every service, RPC, message and enum of `commands.proto`, `inventory.proto`, `session.proto`, `common.proto`, `driver.proto` and `site.proto`, with field numbers, labels, types linked to their message or enum, and each declaration's own comment. It reads the files rather than the compiled descriptors, which drop comments, and was checked against them (157 messages, 25 enums, equal field numbers) |
 | [Events](/docs/reference/events) | `eventCatalog` of `@better-compute/events`: every event family with its type, subject and module, the same list `webhooks.eventTypes` returns |
 | [Metrics](/docs/reference/metrics) | `metricCatalog()` of `@better-compute/observability`: every Prometheus family with its type, labels, help and buckets, grouped by the function that defines it |
 | [Modules](/docs/reference/modules) | The registry's modules, their API groups and migrations, and every job in `compute.jobs` |
@@ -58,6 +62,9 @@ The rest of the section is written by hand: the [glossary](/docs/reference/gloss
   </Card>
   <Card icon={<OctagonAlert />} title="Errors" href="/docs/reference/errors">
     Every stable error code with its HTTP status and meaning.
+  </Card>
+  <Card icon={<FileCode />} title="Protocol" href="/docs/reference/protocol">
+    Every service, message and enum of the daemon protocol, with field numbers and types.
   </Card>
   <Card icon={<Broadcast />} title="Events" href="/docs/reference/events">
     Every event type the outbox publishes, for webhooks and the watch stream.
@@ -113,13 +120,16 @@ node apps/docs/scripts/generate.mjs --check      # fail when anything it would w
 node apps/docs/scripts/check-content.mjs         # frontmatter, meta.json entries, links and anchors
 ```
 
-`generate.mjs` writes `apps/docs/generated/{api,errors,cli,command-kinds,modules,packages}.json` next to the pages.
+`generate.mjs` writes `apps/docs/generated/{api,errors,protocol,cli,command-kinds,events,metrics,modules,packages}.json`
+next to the pages.
 The site reads them at build time: the MCP server's `lookup_api_method`, `lookup_error_code` and
 `lookup_cli_command` tools answer from them. In `--check` mode, pages in `reference/api/` that the generator would no
 longer write count as drift too; without `--check` it deletes them.
 
 `tests/docs-generate.test.ts` checks the committed output without a build: the descriptions name only real groups,
-methods and codes, every API group has its page and `meta.json` entry, and `check-content.mjs` reports no problems.
+methods and codes, every API group has its page and `meta.json` entry, the committed `generated/protocol.json` equals
+what `protocol.mjs` reads from the `.proto` files now and the protocol page has a heading for every message
+(2adc7a3), and `check-content.mjs` reports no problems.
 With the packages built and `DOCS_GENERATE_CHECK=1` it also runs `generate.mjs --check`, so a registry change
 without regenerated docs fails the suite.
 

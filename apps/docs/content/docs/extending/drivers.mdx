@@ -6,6 +6,7 @@ icon: Plug
 status: experimental
 packages: ['@better-compute/core', '@better-compute/metal', '@better-compute/vps', '@better-compute/driver-sdk', '@better-compute/server']
 sources:
+  - daemon/internal/bcx/supervise.go
   - packages/core/src/extension.ts
   - packages/core/src/domain.ts
   - packages/metal/src/kinds.ts
@@ -426,8 +427,14 @@ A missing `pins` file runs no plugin (logged as a warning); an unreadable pin li
 fails to start is logged and skipped. Plugins are stopped with the agent. Two paths reach them: `driver.invoke`,
 below, and, on `bcd node`, the `instances` converger, which runs a hosted driver of kind `runtime` whose id is not a
 built-in runtime as one of its runtimes (`list`, `apply(spec)`, `remove(id)` over `Invoke`; snapshots unsupported).
-See [walkthrough 4](/docs/extending/walkthroughs#walkthrough-4-a-kata-runtime-over-bcx). bcd does not restart a plugin that exits
-and does not call `Health` on its own.
+See [walkthrough 4](/docs/extending/walkthroughs#walkthrough-4-a-kata-runtime-over-bcx).
+
+bcd supervises every plugin that started (`bcx.Supervise`, 9006eee, PLAN.md §5.5). When a plugin's process exits,
+bcd starts it again after a back-off that begins at 1 second and doubles to at most 1 minute (back to 1 second once a
+run lasted a minute), and each restart hashes the binary against its pin and sandboxes it again. An operation that
+arrives during a restart fails with a retryable `unavailable` error. A plugin that comes back with other drivers is
+logged, and the node keeps advertising the first set until bcd itself restarts. A plugin that fails its first start
+is still only logged and skipped, and bcd does not call `Health` on its own.
 
 #### The plugin sandbox
 

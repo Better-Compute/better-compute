@@ -24,6 +24,7 @@ sources:
   - daemon/internal/session/session.go
   - daemon/internal/journal/bolt.go
   - daemon/internal/agent/conn.go
+  - daemon/internal/helper/helper.go
   - tests/e2e/bcd.test.ts
   - bench/gateway-streams/README.md
   - bench/multi-gateway/README.md
@@ -137,7 +138,21 @@ reboot; the devices converger rewrites missing env files for assignments it stil
 `upgrade.json` instead (de9f380). The new binary reports `SUCCEEDED` once its first `Welcome` arrives. A binary that
 crashes or never gets a `Welcome` within 120 seconds is swapped back (under systemd a crash loop also triggers
 `bcd-rollback.service`), and the old binary reports `FAILED` with `update-failed` and never tries that version again.
-See [self-update](/docs/daemon/install#self-update).
+On a node under `bcd helper`, the helper's own watchdog also swaps back an update still unconfirmed 30 seconds after
+its deadline and restarts `bcd.service`, so a new binary that never gets as far as asking cannot keep the node on it
+(2d67b25). See [self-update](/docs/daemon/install#self-update).
+
+**The helper is down or refuses.** A `bcd node` running unprivileged beside [`bcd helper`](/docs/daemon#privilege-separation)
+(28dc2ae) keeps its session and journal when the helper is gone, but every operation it sends there (a CDI spec or
+env file, the sshd files, the nftables table, a GPU reset, a reboot, a self-update step) fails with an error that
+starts `helper:`, like
+the direct operation failing. Such an error is not terminal, so a `devices` or `access` section stays `PROGRESSING`
+and is retried on the next pass (the spec is not observed meanwhile), and a command such as `gpu.reset` or
+`node.reboot` fails as it would without root. A node and a helper of different protocol versions
+refuse each other's messages, so restart both after replacing the binary. On a node installed with
+`--unprivileged`, `bcd-helper.service` restarts the helper after 2 seconds (`Restart=always`), and `bcd.service`
+`Requires=` it, so stopping the helper stops the node too; see
+[running bcd node unprivileged](/docs/daemon/install#running-bcd-node-unprivileged).
 
 ## Network partition and half-open links
 
