@@ -1,4 +1,4 @@
-import type { SqlExecutor } from '@better-compute/core';
+import type { SqlExecutor, SqlTx } from '@better-compute/core';
 import {
   gatewayControlClient,
   type ControlClientOptions,
@@ -220,6 +220,9 @@ export function installIamHandlers(
       })
       .catch((error: unknown) => report(error, { event }));
   };
+  /** Every SSH certificate the identity holds, in any tenant. */
+  const revokeSshFor = (tx: SqlTx, identityId: string, reason: string) =>
+    revokeIdentitySshCertificates(tx, compute.context, { identityId, reason, by: 'iam' });
   const caches = compute.caches;
   const own = config.handlers ?? {};
   const handlers: IamEventHandlers = {
@@ -247,8 +250,12 @@ export function installIamHandlers(
         // to the successor, else the unstarted ones are cancelled (§12.8).
         const end = await identityEndOf(event, successorLookup(compute.context.sql));
         if (end) await reassignReservations(tx, compute.context, { ...end, reason: event.action });
-        // An identity that is gone keeps no streams (an update, such as a rename, keeps them).
-        if (end || identityEnds.has(event.action)) closeFor(event, 'end');
+        // An identity that is gone keeps no streams and no break-glass SSH (an update, such as a rename, keeps
+        // them): a certificate would otherwise open its node until it expires.
+        if (end || identityEnds.has(event.action)) {
+          if (identityId) await revokeSshFor(tx, identityId, event.action);
+          closeFor(event, 'end');
+        }
       }),
     // A role activation ended (the holder deactivated it, or an administrator revoked it): break-glass access
     // granted through it ends too (§12.8). better-iam names the binding as the subject and the holder as the actor
@@ -277,12 +284,17 @@ export function installIamHandlers(
       }),
     // Session revocations name an identity, a role or a tenant; dropping every cached authentication is exact
     // for all of them and costs one IAM call per caller. An identity's own revocations close or re-check its
-    // streams at once; role- and tenant-wide ones are left to the streams' periodic re-authorization.
+    // streams at once; role- and tenant-wide ones are left to the streams' periodic re-authorization. Its SSH
+    // certificates are revoked: the event does not say which session ended, and a certificate outlives any check
+    // (break-glass is re-issued in a minute from a live session).
     sessions:
       own.sessions ??
-      (async (_tx, event) => {
+      (async (tx, event) => {
         caches.clear();
-        if (identitySessionEnds.has(event.action)) closeFor(event, 'sessions');
+        if (!identitySessionEnds.has(event.action)) return;
+        const identityId = text(event.subjectId);
+        if (identityId) await revokeSshFor(tx, identityId, event.action);
+        closeFor(event, 'sessions');
       }),
     authz: own.authz ?? (async () => caches.dropDecisions()),
     onError(error, event, reaction) {

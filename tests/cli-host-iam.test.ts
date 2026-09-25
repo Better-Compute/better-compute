@@ -123,6 +123,53 @@ describe('host.iam', () => {
     expect(events.rows).toHaveLength(1);
   });
 
+  it('offboarding an identity or revoking its sessions revokes its SSH certificates in every tenant', async () => {
+    const { compute } = await deploy([{ name: 'iam', migrations: [successorsMigration] } as never]);
+    const sql = compute.context.sql;
+    await sql.query(
+      `INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ('site_b', 'ten_a', 'shared', 'eu', 1)`,
+    );
+    await sql.query(
+      `INSERT INTO nodes (id, site_id, owner_tenant_id, role, provision_state, maintenance, cordoned, connectivity,
+         trust, generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
+       VALUES ('node_b', 'site_b', 'ten_a', 'host', 'adopted', false, false, 'connected', 'platform', 1, 1, 1, 1, 0, 1)`,
+    );
+    const cert = (serial: string, tenantId: string, identityId: string) =>
+      sql.query(
+        `INSERT INTO ssh_certificates (serial, node_id, tenant_id, identity_id, principal, key_id, expires_at)
+         VALUES ($1, 'node_b', $2, $3, 'root@node_b', $4, compute_now() + interval '15 minutes')`,
+        [serial, tenantId, identityId, `key-${serial}`],
+      );
+    await cert('11', 'ten_a', 'idn_leaver');
+    await cert('12', 'ten_sub', 'idn_leaver');
+    await cert('13', 'ten_a', 'idn_signed_out');
+    await cert('14', 'ten_a', 'idn_renamed');
+    await cert('15', 'ten_a', 'idn_bystander');
+    let installed: IamEventHandlers = {};
+    installIamHandlers(compute, { bridge: { setHandlers: (handlers) => (installed = handlers) } });
+    const tx = sql as never;
+    await installed.identity!(tx, event('identity:offboard', 'idn_leaver'));
+    await installed.sessions!(tx, event('identity:revoke-sessions', 'idn_signed_out'));
+    // A rename keeps access; a tenant-wide sign-out names no identity.
+    await installed.identity!(tx, event('iam:identities:update', 'idn_renamed'));
+    await installed.sessions!(tx, event('tenant:revoke-sessions', 'ten_a'));
+    const { rows } = await sql.query<{ serial: string; revoked: boolean; reason: string | null }>(
+      'SELECT serial, revoked_at IS NOT NULL AS revoked, revoke_reason AS reason FROM ssh_certificates ORDER BY serial',
+    );
+    expect(rows).toEqual([
+      { serial: '11', revoked: true, reason: 'identity:offboard' },
+      { serial: '12', revoked: true, reason: 'identity:offboard' },
+      { serial: '13', revoked: true, reason: 'identity:revoke-sessions' },
+      { serial: '14', revoked: false, reason: null },
+      { serial: '15', revoked: false, reason: null },
+    ]);
+    // Each revocation is an event in the certificate's own tenant.
+    const events = await sql.query<{ tenant_id: string }>(
+      `SELECT payload->>'tenantId' AS tenant_id FROM outbox WHERE topic = 'node.ssh-cert.revoked' ORDER BY 1`,
+    );
+    expect(events.rows.map((row) => row.tenant_id)).toEqual(['ten_a', 'ten_a', 'ten_sub']);
+  });
+
   it('mounts the remote-IAM webhook intake into the inbox (host.iam.webhook)', async () => {
     const { compute } = await deploy();
     expect(iamWebhookRoutes(compute, { bridge: { setHandlers() {} } })).toEqual([]);
