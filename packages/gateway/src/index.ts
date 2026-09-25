@@ -91,6 +91,7 @@ export {
 } from './store.js';
 export type {
   GatewayStore,
+  CommandOwner,
   GatewayStoreOptions,
   HelloInput,
   HelloResult,

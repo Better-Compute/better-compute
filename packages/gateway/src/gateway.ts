@@ -48,6 +48,7 @@ import {
   createGatewayStore,
   FencedError,
   isTerminalUpdate,
+  type CommandOwner,
   type GatewayStore,
   type InventoryIngest,
   type LeaseToken,
@@ -134,6 +135,13 @@ export interface GatewayOptions {
    * e.g. `{ allocationBound: (tx, c, r) => markAllocationBound(tx, c.work, r.allocationId, r) }`.
    */
   reports?: ReportHandlers;
+  /**
+   * The work item that owns a command besides its node, from its idempotency key (the server's
+   * `commandOwner` bound to its registry: `<reconciler>:<key>:…` → `work_queue(<reconciler>, <key>)`).
+   * When a command settles, its owner is woken with the node, so a reconciler waiting on a result
+   * sees it now rather than at its next periodic pass.
+   */
+  commandOwner?: CommandOwner;
   log?: Logger;
   /** Streams this gateway admits (default 5 000). */
   maxStreams?: number;
@@ -420,6 +428,7 @@ export function createGateway(options: GatewayOptions): Gateway {
     specs: options.specs,
     inventory: options.inventory,
     reports: options.reports,
+    ...(options.commandOwner ? { commandOwner: options.commandOwner } : {}),
     fence: () => lease,
   });
 

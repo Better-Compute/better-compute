@@ -299,9 +299,14 @@ export interface GatewayStoreOptions {
   specs?: SpecSource;
   inventory?: InventoryIngest;
   reports?: ReportHandlers;
+  /** A settled command's owner work item besides its node (`GatewayOptions.commandOwner`). */
+  commandOwner?: CommandOwner;
   /** The lease every routing transaction re-checks first (`FOR SHARE`); undefined = not held. */
   fence: () => LeaseToken | undefined;
 }
+
+/** The work item that owns a command besides its node, from its idempotency key. */
+export type CommandOwner = (idempotencyKey: string) => { kind: string; key: string } | undefined;
 
 const inFlight = ['dispatched', 'acked', 'running'];
 const bytesOf = (value: unknown): Uint8Array =>
@@ -426,6 +431,11 @@ export function createGatewayStore(options: GatewayStoreOptions) {
   const specs = options.specs ?? nodeSpecColumn;
   const inventory = options.inventory ?? inventoryStore;
   const reports = options.reports ?? {};
+  /** A settled command's owner besides its node, when the host bound one; `node` is woken anyway. */
+  const ownerOf = (idempotencyKey: string) => {
+    const owner = options.commandOwner?.(idempotencyKey);
+    return owner && owner.kind !== 'node' ? owner : undefined;
+  };
 
   /** First statement of every routing transaction (§8.5): a zombie aborts, a takeover waits. */
   async function fence(tx: SqlTx): Promise<void> {
@@ -486,18 +496,36 @@ export function createGatewayStore(options: GatewayStoreOptions) {
   async function applyUpdatesBulk(tx: SqlTx, entries: readonly UpdateEntry[]): Promise<UpdatesResult[]> {
     const results = entries.map((): UpdatesResult => ({ settled: [], ackCommandIds: [], busy: [] }));
     const ids = [...new Set(entries.flatMap((entry) => entry.updates.map((update) => update.commandId)))].sort();
-    const rows = new Map<string, { nodeId: string; state: CommandState; kind: string; workflow: boolean }>();
+    const rows = new Map<
+      string,
+      { nodeId: string; state: CommandState; kind: string; workflow: boolean; idempotencyKey: string }
+    >();
     if (ids.length) {
-      const read = await tx.query<{ id: string; node_id: string; state: CommandState; kind: string; workflow: boolean }>(
-        `SELECT id, node_id, state, kind, starts_with(idempotency_key, 'wf:') AS workflow
+      const read = await tx.query<{
+        id: string;
+        node_id: string;
+        state: CommandState;
+        kind: string;
+        workflow: boolean;
+        idempotency_key: string;
+      }>(
+        `SELECT id, node_id, state, kind, starts_with(idempotency_key, 'wf:') AS workflow, idempotency_key
            FROM commands WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE`,
         [ids],
       );
       for (const row of read.rows)
-        rows.set(row.id, { nodeId: row.node_id, state: row.state, kind: row.kind, workflow: row.workflow });
+        rows.set(row.id, {
+          nodeId: row.node_id,
+          state: row.state,
+          kind: row.kind,
+          workflow: row.workflow,
+          idempotencyKey: row.idempotency_key,
+        });
     }
     /** Nodes whose workflow step's command settled: the Workflow reconciler (keyed by node) runs now, not at its 10 s poll. */
     const workflowWake = new Set<string>();
+    /** Owners of settled commands (`commandOwner`), by work kind. */
+    const ownerWake = new Map<string, Set<string>>();
     // Final write per command after every update of the batch, in order.
     const writes = new Map<
       string,
@@ -543,6 +571,12 @@ export function createGatewayStore(options: GatewayStoreOptions) {
               results[index]!.settled.push(settled);
               settledEvents.push({ entry: index, settled });
               if (row.workflow) workflowWake.add(entry.nodeId);
+              const owner = ownerOf(row.idempotencyKey);
+              if (owner) {
+                let keys = ownerWake.get(owner.kind);
+                if (!keys) ownerWake.set(owner.kind, (keys = new Set()));
+                keys.add(owner.key);
+              }
             }
           }
         }
@@ -591,6 +625,8 @@ export function createGatewayStore(options: GatewayStoreOptions) {
     await enqueueAll(tx, 'node', [...wake]);
     // `wf:` commands exist only where the provision module (and its `workflow` reconciler) runs.
     await enqueueAll(tx, 'workflow', [...workflowWake]);
+    // One set-wise enqueue per owner kind, only for batches in which such a command settled.
+    for (const [kind, keys] of ownerWake) await enqueueAll(tx, kind, [...keys]);
     return results;
   }
 
@@ -910,15 +946,25 @@ export function createGatewayStore(options: GatewayStoreOptions) {
         const epoch = Number(bumped.rows[0]!.session_epoch);
         const settled: SettledCommand[] = [];
         let workflowSettled = false;
+        const owners = new Map<string, Set<string>>();
         const settleRule = async (sql: string, reason: string) => {
-          const { rows } = await tx.query<{ id: string; kind: string; state: CommandState; workflow: boolean }>(sql, [
-            input.nodeId,
-            inFlight,
-          ]);
+          const { rows } = await tx.query<{
+            id: string;
+            kind: string;
+            state: CommandState;
+            workflow: boolean;
+            idempotency_key: string;
+          }>(sql, [input.nodeId, inFlight]);
           for (const row of rows) {
             const entry: SettledCommand = { id: row.id, kind: row.kind, state: row.state, reason };
             settled.push(entry);
             if (row.workflow) workflowSettled = true;
+            const owner = ownerOf(row.idempotency_key);
+            if (owner) {
+              let keys = owners.get(owner.kind);
+              if (!keys) owners.set(owner.kind, (keys = new Set()));
+              keys.add(owner.key);
+            }
             await settle(tx, input.nodeId, tenantId, entry);
           }
         };
@@ -927,7 +973,7 @@ export function createGatewayStore(options: GatewayStoreOptions) {
           await settleRule(
             `UPDATE commands SET state = 'succeeded', reason = 'rebooted', updated_at = compute_now()
              WHERE node_id = $1 AND self_terminating AND state = ANY($2::text[])
-             RETURNING id, kind, state, starts_with(idempotency_key, 'wf:') AS workflow`,
+             RETURNING id, kind, state, starts_with(idempotency_key, 'wf:') AS workflow, idempotency_key`,
             'rebooted',
           );
         // 2. A lost journal fails in-flight commands that are unsafe to run twice.
@@ -935,11 +981,12 @@ export function createGatewayStore(options: GatewayStoreOptions) {
           await settleRule(
             `UPDATE commands SET state = 'failed', reason = 'journal-lost', updated_at = compute_now()
              WHERE node_id = $1 AND NOT retry_safe AND state = ANY($2::text[])
-             RETURNING id, kind, state, starts_with(idempotency_key, 'wf:') AS workflow`,
+             RETURNING id, kind, state, starts_with(idempotency_key, 'wf:') AS workflow, idempotency_key`,
             'journal-lost',
           );
         // A workflow step waiting on these (a reboot's `rejoin`) runs now, not at its next poll.
         if (workflowSettled) await work.enqueue(tx, 'workflow', input.nodeId);
+        for (const [kind, keys] of owners) await enqueueAll(tx, kind, [...keys]);
         const updates = await applyUpdates(tx, input.nodeId, tenantId, input.unackedResults, () => 1000);
         settled.push(...updates.settled);
 
