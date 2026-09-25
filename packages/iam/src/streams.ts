@@ -110,6 +110,46 @@ export function gatewayTunnelFilter(filter: AgentStreamFilter): GatewayTunnelFil
   return { tenantId: filter.tenantId, anyAgent: true };
 }
 
+/** A process-local registry of open streams, e.g. `createWatchRegistry()` from `@better-compute/events` (SSE). */
+export interface LocalStreamRegistry {
+  closeWhere(filter: GatewayTunnelFilter, reason: string): number;
+}
+
+/** The `close` for a process-local registry (the same filters as the gateways'). */
+export function localStreamCloser(
+  registry: LocalStreamRegistry,
+): (filter: AgentStreamFilter) => Promise<number> {
+  return async (filter) => registry.closeWhere(gatewayTunnelFilter(filter), filter.reason);
+}
+
+/**
+ * Runs several closers for one filter (tunnels on every gateway, this process's SSE streams, …) and returns the
+ * total closed. All run; failures are thrown together afterwards.
+ *
+ * ```ts
+ * bridge.setHandlers({
+ *   agent: agentStreamCloser(combineStreamClosers(gatewayStreamCloser(gateways), localStreamCloser(watches))),
+ * });
+ * ```
+ */
+export function combineStreamClosers(
+  ...closers: ((filter: AgentStreamFilter) => Promise<number>)[]
+): (filter: AgentStreamFilter) => Promise<number> {
+  return async (filter) => {
+    const results = await Promise.allSettled(
+      closers.map((close) => Promise.resolve().then(() => close(filter))),
+    );
+    let closed = 0;
+    const errors: unknown[] = [];
+    for (const result of results)
+      if (result.status === 'fulfilled') closed += result.value;
+      else errors.push(result.reason);
+    if (errors.length > 0)
+      throw new AggregateError(errors, `${errors.length} stream closers failed`);
+    return closed;
+  };
+}
+
 /**
  * The `close` for `agentStreamCloser`: asks every gateway at once and returns the total closed. Every gateway is
  * tried; if any failed, it throws an AggregateError after the others finished (a gateway being away must not keep

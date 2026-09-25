@@ -11,6 +11,11 @@ Event delivery for better-compute (PLAN.md §9.3, v0.3). Compute writes CloudEve
   - Signing secrets are sealed at rest with AES-256-GCM, under a key derived from the deployment secret.
   - Webhook URLs must be `https` and public. Each delivery re-resolves the host and refuses private, loopback and link-local addresses, so a URL can't be used for SSRF.
 - **SSE `GET /watch`.** `handleWatch(request, { sql, authorize })` streams one tenant's events. Each event's `id:` is its outbox cursor, so `Last-Event-ID` resumes exactly after the last event received. Without one, the stream starts at the tail. `?types=` filters event types.
+- **Revocation.** Streams stay authorized only while the caller is:
+  - `authorize` may return `{ tenantId, subject, reauthorize }`. `reauthorize()` runs every `reauthorizeMs` (60 s, as for tunnels): false closes the stream, and a failure lasting `iamOutageMs` (2 min) closes it too.
+  - With a shared `registry: createWatchRegistry()`, a revocation closes matching streams at once: `registry.closeWhere({ agentId, delegationId } | { sessionId } | { identityId } | { tenantId, anyAgent: true }, reason)`.
+  - A closed stream ends with `event: error` (`ACCESS_DENIED` and the reason). A reconnect is authorized afresh.
+  - For `delegation:revoke`/`agent:suspend`, `@better-compute/iam`'s `localStreamCloser(registry)` plugs into `agentStreamCloser` next to the gateways' tunnel closer (`combineStreamClosers`).
 
 The outbox is read with the xmin cursor (§8.4): only transactions older than the snapshot's xmin, in `(txid, seq)` order. As a result, no event can commit behind a reader.
 

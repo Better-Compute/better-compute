@@ -1,9 +1,12 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { SqlExecutor } from '@better-compute/core';
 import { pglite } from '@better-compute/postgres/pglite';
+import { createWatchRegistry } from '@better-compute/events';
 import {
   agentStreamCloser,
   agentStreamFilter,
+  combineStreamClosers,
+  localStreamCloser,
   drainIamInbox,
   gatewayStreamCloser,
   gatewayTunnelFilter,
@@ -182,6 +185,41 @@ describe('gatewayStreamCloser', () => {
     expect(
       await gatewayStreamCloser(() => [])({ tenantId: 'ten_a', agentId: 'agt_1', reason: 'r' }),
     ).toBe(0);
+  });
+});
+
+describe('combineStreamClosers and localStreamCloser', () => {
+  it('closes tunnels on the gateways and this process’s SSE streams for one revocation', async () => {
+    const gateway = fakeGateway([{ tenantId: 'ten_a', agentId: 'agt_1', delegationId: 'dlg_1' }]);
+    const watches = createWatchRegistry();
+    const closedWatches: string[] = [];
+    watches.add({
+      tenantId: 'ten_a',
+      subject: { agentId: 'agt_1', delegationId: 'dlg_1' },
+      close: (reason) => closedWatches.push(reason),
+    });
+    watches.add({
+      tenantId: 'ten_a',
+      subject: { identityId: 'idn_alice' },
+      close: () => closedWatches.push('person'),
+    });
+    const close = combineStreamClosers(
+      gatewayStreamCloser(() => [gateway.gateway]),
+      localStreamCloser(watches),
+    );
+    expect(
+      await close({ tenantId: 'ten_a', delegationId: 'dlg_1', agentId: 'agt_1', reason: 'done' }),
+    ).toBe(2);
+    expect(closedWatches).toEqual(['done']);
+    expect(await close({ tenantId: 'ten_a', allAgents: true, reason: 'incident' })).toBe(0);
+
+    const failing = combineStreamClosers(
+      () => Promise.reject(new Error('gateway away')),
+      localStreamCloser(watches),
+    );
+    await expect(failing({ tenantId: 'ten_a', agentId: 'agt_9', reason: 'r' })).rejects.toThrow(
+      /1 stream closers failed/,
+    );
   });
 });
 
