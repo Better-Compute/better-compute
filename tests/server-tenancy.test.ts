@@ -18,6 +18,7 @@ const USER = 'token-acme-user-0123456789';
 const CHILD = 'token-child-user-0123456789';
 const ADMIN = 'token-root-admin-0123456789';
 const OTHER_USER = 'token-other-user-0123456789';
+const GONE_USER = 'token-gone-user-0123456789';
 const ACME_CHILD = 'tenant-acme-child';
 
 let db: SqlExecutor;
@@ -94,6 +95,7 @@ describe('tenancy', () => {
           now += Math.min(5_000, left);
           await setSimClock(db, now);
           await tick();
+          await compute.jobs['tenancy.resync']!.tick();
         }
       };
 
@@ -157,6 +159,11 @@ describe('tenancy', () => {
         details: { state: 'deleted' },
       });
       expect(await poke(USER, ACME, 'w6')).toMatchObject({ poked: 'w6' });
+      // Root reads a deleted tenant but never writes into it (nothing would tear that down).
+      expect(await get(ADMIN, ACME_CHILD, 'w1')).toMatchObject({ exists: false });
+      await expect(poke(ADMIN, ACME_CHILD, 'w-root-late')).rejects.toMatchObject({
+        code: 'TENANT_SUSPENDED',
+      });
 
       // The teardown runs until every module is done: the one still releasing is asked again by the sweep (30 s).
       await tick();
@@ -192,6 +199,24 @@ describe('tenancy', () => {
       await tick();
       expect(await poke(OTHER_USER, OTHER, 'w7')).toMatchObject({ poked: 'w7' });
       expect(passes).toBe(2);
+
+      // The root tenant is never suspended or deleted, and `missing` never starts a teardown by itself (an id IAM
+      // does not know as a tenant, such as an invitation's, only confirms a tenant already refused).
+      iamStates = [
+        { tenantId: ROOT, status: 'suspended' },
+        { tenantId: 'inv_not_a_tenant', status: 'missing' },
+        { tenantId: ACME_CHILD, status: 'missing' },
+      ];
+      await deliver('iam:tenants:update', ROOT);
+      await tick();
+      const { rows: recorded } = await db.query<{ tenant_id: string; state: string }>(
+        `SELECT tenant_id, state FROM compute_tenant_states ORDER BY tenant_id`,
+      );
+      expect(recorded.filter((row) => row.state !== 'active')).toEqual([
+        { tenant_id: ACME_CHILD, state: 'deleted' },
+      ]);
+      expect(await poke(ADMIN, ROOT, 'w-root-own')).toMatchObject({ poked: 'w-root-own' });
+      expect(passes).toBe(2);
     } finally {
       await compute.stop();
     }
@@ -226,6 +251,17 @@ describe('tenancy', () => {
       expect(await states()).toEqual([]);
       await deliver('iam:tenants:delete');
       expect(await states()).toEqual(['deleted']);
+      // An API-only replica (`serve --roles api`, never initialized) loads the states on its first call.
+      iam.addCaller(GONE_USER, { tenantId: 'tenant-gone', identityId: 'id-gone' });
+      iam.allow({ token: GONE_USER });
+      const replica = betterCompute({ ...options(db, iam), plugins: [acme] });
+      await expect(
+        replica.api.plugins.acme.widgets.get(
+          { token: GONE_USER },
+          { tenantId: 'tenant-gone', widgetId: 'w' },
+        ),
+      ).rejects.toMatchObject({ code: 'TENANT_SUSPENDED' });
+      await replica.stop();
       expect(
         await compute.api.plugins.acme.widgets.poke(
           { token: OTHER_USER },

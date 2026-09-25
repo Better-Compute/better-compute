@@ -19,7 +19,7 @@ import {
 import { cachesFor, publicCaches, type ComputeCaches } from './caches.js';
 import { checkPlan, createComposites, outsideComposite, type CompositeCall } from './composite.js';
 import { createListRecipe, readOnlyExecutor, runsOutsideTransaction } from './list.js';
-import { createTenantGate, type TenantGate } from './tenancy/tenancy.js';
+import { noTenantGate, type TenantGate } from './tenancy/tenancy.js';
 import type { ResolvedOptions } from './options.js';
 import {
   actionPattern,
@@ -267,9 +267,10 @@ export function createOperations(
   const { database, iam, rootTenantId, typePrefix, acceptIamCookie, clock, log } = options;
   const caches = cachesFor(options, { now: () => clock.now() });
   const lists = createListRecipe({ typePrefix, caches });
-  // §12.8: suspended tenants change nothing, deleted ones reach nothing (root exempt). The tenancy module
-  // loads and refreshes the gate; an unstarted one (unit harnesses) refuses nothing.
-  const tenantGate = gate ?? createTenantGate({ sql: database, rootTenantId: rootTenantId ?? '' });
+  // §12.8: suspended tenants change nothing, deleted ones reach nothing. betterCompute() passes the deployment's
+  // gate (loaded at start, or on the first call of a process that never started); unit harnesses without one
+  // refuse nothing.
+  const tenantGate = gate ?? noTenantGate;
 
   /**
    * §3.4 step 7 for a refused admission: a delegated session whose delegation holds the action back

@@ -63,6 +63,15 @@ function setup() {
   return { iam, database, compute: betterCompute({ ...options(database, iam), plugins: [acme] }) };
 }
 
+/** With the tenant gate loaded (a process's first call loads it otherwise), and the store log cleared. */
+async function primed<
+  T extends { compute: { tenants: { ready(): Promise<void> } }; database: { log: string[] } },
+>(server: T): Promise<T> {
+  await server.compute.tenants.ready();
+  server.database.log.length = 0;
+  return server;
+}
+
 /** A server with other modules and plugins (plugin `acme` unless `plugins` says otherwise). */
 function setupWith(extra: {
   modules?: readonly ComputeModule[];
@@ -267,8 +276,9 @@ describe('betterCompute()', () => {
     expect(migrations[0]).toBe('capacity/0001_device_links');
     expect(migrations.at(-1)).toBe('acme/0001_widgets');
     expect(migrations.at(-2)).toBe('pki/0001_sealed_secrets');
-    expect(migrations.at(-3)).toBe('tenancy/0001_tenant_states');
-    expect(migrations.slice(0, -3).every((name) => name.startsWith('capacity/'))).toBe(true);
+    expect(migrations.at(-3)).toBe('tenancy/0002_teardown_attempts');
+    expect(migrations.at(-4)).toBe('tenancy/0001_tenant_states');
+    expect(migrations.slice(0, -4).every((name) => name.startsWith('capacity/'))).toBe(true);
     expect(compute.registry.hasModule('inventory')).toBe(true);
     expect(compute.registry.hasModule('capacity')).toBe(true);
     expect(compute.registry.hasModule('metal')).toBe(false);
@@ -685,7 +695,7 @@ describe('the operation envelope', () => {
   });
 
   it('decides a read exactly once with authorize, and runs it in a read-only transaction', async () => {
-    const { compute, iam, database } = setup();
+    const { compute, iam, database } = await primed(setup());
     iam.allow({ token: USER, action: 'compute:acme:read' });
     expect(
       await compute.api.plugins.acme.widgets.get(
@@ -730,7 +740,7 @@ describe('the operation envelope', () => {
   });
 
   it('opens no transaction when a read is denied', async () => {
-    const { compute, iam, database } = setup();
+    const { compute, iam, database } = await primed(setup());
     const error = await failure(() =>
       compute.api.plugins.acme.widgets.get({ token: USER }, { tenantId: ACME, widgetId: 'w-1' }),
     );
@@ -805,7 +815,7 @@ describe('the operation envelope', () => {
   });
 
   it('writes nothing when a mutation is denied', async () => {
-    const { compute, iam, database } = setup();
+    const { compute, iam, database } = await primed(setup());
     iam.allow({ token: USER });
     iam.deny({ action: 'compute:acme:poke' });
     const error = await failure(() =>

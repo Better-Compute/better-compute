@@ -69,9 +69,14 @@ const statusOf = (value: string): TenantStatus['status'] =>
 
 const worst = (a: TenantStatus['status'], b: TenantStatus['status']) => (rank[b] > rank[a] ? b : a);
 
+/**
+ * IAM's own "Tenant not found", and nothing else: a bare 404 is also a proxy's error page or an endpoint that is not
+ * there (better-iam answers `NOT_FOUND` "Endpoint not found" for a wrong base path), which must be retried, never
+ * read as a tenant that is gone.
+ */
 const notFound = (error: unknown) => {
-  const { code, status } = error as { code?: unknown; status?: unknown };
-  return code === 'NOT_FOUND' || status === 404;
+  const { code, message } = error as { code?: unknown; message?: unknown };
+  return code === 'NOT_FOUND' && typeof message === 'string' && /^Tenant not found/.test(message);
 };
 
 /**

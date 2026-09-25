@@ -427,6 +427,7 @@ describe('eventsModule', () => {
     expect(module.migrations?.map((migration) => migration.name)).toEqual([
       'events/0001_webhooks',
       'events/0002_delivery_retention',
+      'events/0003_webhooks_by_tenant',
     ]);
     expect(module.reconcilers?.map((reconciler) => reconciler.name)).toEqual([
       'events.fanout',

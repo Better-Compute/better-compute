@@ -61,7 +61,14 @@ export const deliveryRetentionMigration: Migration = {
   sql: `CREATE INDEX webhook_deliveries_settled ON webhook_deliveries (state, created_at) WHERE state <> 'pending';`,
 };
 
+/** Every subscription of a tenant, active or not: the §12.8 purge of a deleted tenant deletes by it. */
+export const webhooksByTenantMigration: Migration = {
+  name: 'events/0003_webhooks_by_tenant',
+  sql: `CREATE INDEX webhooks_by_tenant ON webhooks (tenant_id);`,
+};
+
 export const eventsMigrations: readonly Migration[] = [
   webhooksMigration,
   deliveryRetentionMigration,
+  webhooksByTenantMigration,
 ];

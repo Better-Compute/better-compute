@@ -101,12 +101,15 @@ export { siteBootLeaseName, siteBootTtlSeconds, tickSiteBoot } from './controlle
 export {
   applyTenantStates,
   createTenantGate,
+  noTenantGate,
   syncTenantStates,
   tearDownTenant,
   tenancyModuleName,
+  tenancyResyncWorkKind,
   tenancyWorkKind,
   tenantStateHandler,
   tenantStatesMigration,
+  tenantTeardownAttemptsMigration,
   type IamTenantStatus,
   type TenantEventLike,
   type TenantGate,
@@ -189,8 +192,10 @@ export interface BetterCompute<
    * The envelope's tenant gate (§12.8): `invalidate()` makes this process reload suspended and deleted tenants
    * before its next call (`tenantStateHandler` does it after a change; other processes refresh every 5 s).
    * `setReader` gives the tenancy reconciler its IAM reader (`tenantStateHandler(compute, { readTenants })` calls it).
+   * `ready()` loads the gate now; a process that never ran `initialize()` (an API-only replica) otherwise loads it on
+   * its first call.
    */
-  tenants: { invalidate(): void; setReader(reader: TenantReader): void };
+  tenants: { invalidate(): void; setReader(reader: TenantReader): void; ready(): Promise<void> };
   /** The authorization projection: one primary-key read (the IAM bridge keeps the memory copy). */
   authz: AuthzProjection;
   /** Reports configuration and storage problems; only reads. */
@@ -415,6 +420,7 @@ export function betterCompute<
     caches: operations.caches,
     tenants: Object.freeze({
       invalidate: () => tenantGate.invalidate(),
+      ready: () => tenantGate.load(),
       setReader: (reader: TenantReader) => {
         if (typeof reader !== 'function')
           throw new ComputeError('INVALID_CONFIG', 'tenants.setReader takes a function');
