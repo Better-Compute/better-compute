@@ -36,6 +36,8 @@ import (
 //     control plane reports), never touched;
 //   - a snapshot is a tar of the flattened disk, the seed, and with memory the saved state.
 type Libvirt struct {
+	// RebindTimeout bounds the wait for a guest's rebind acknowledgement (default RebindTimeout).
+	RebindTimeout time.Duration
 	// RuntimeName is the driver id (default "libvirt-kvm").
 	RuntimeName string
 	// Dir holds images/ (base images by sha256) and instances/<id>/ (overlay, seed, saved state).
@@ -862,4 +864,43 @@ func (l *Libvirt) Console(ctx context.Context, id string) (io.ReadWriteCloser, e
 		return nil, fmt.Errorf("domain %s has no serial console (is it running?)", id)
 	}
 	return os.OpenFile(x.Devices.Serial.Source.Path, os.O_RDWR|syscallNoCTTY, 0)
+}
+
+// Rebind hot-adds the identity disk (rebind.go) to a running domain as vdz and waits for its guest's
+// acknowledgement; the disk is detached and its file scrubbed whatever happens.
+func (l *Libvirt) Rebind(ctx context.Context, id string, b Rebind) error {
+	l.mu.Lock()
+	if exists, managed, _ := l.managed(ctx, id); !exists || !managed {
+		l.mu.Unlock()
+		return fmt.Errorf("no managed domain %s", id)
+	}
+	if st, _ := l.virsh(ctx, "domstate", id); stateOf(string(st)) != StateRunning {
+		l.mu.Unlock()
+		return fmt.Errorf("domain %s is not running", id)
+	}
+	img, nonce, err := rebindImage(b)
+	if err != nil {
+		l.mu.Unlock()
+		return err
+	}
+	path := filepath.Join(l.instanceDir(id), "rebind.img")
+	scrub(path)
+	if err = os.WriteFile(path, img, 0o600); err == nil {
+		_, err = l.virsh(ctx, "attach-disk", id, path, "vdz", "--targetbus", "virtio", "--subdriver", "raw", "--serial", RebindSerial, "--live")
+	}
+	l.mu.Unlock()
+	if err != nil {
+		scrub(path)
+		return err
+	}
+	timeout := l.RebindTimeout
+	if timeout <= 0 {
+		timeout = RebindTimeout
+	}
+	waitErr := waitAck(ctx, path, nonce, timeout, 200*time.Millisecond)
+	l.mu.Lock()
+	_, _ = l.virsh(context.WithoutCancel(ctx), "detach-disk", id, "vdz", "--live")
+	l.mu.Unlock()
+	scrub(path)
+	return waitErr
 }

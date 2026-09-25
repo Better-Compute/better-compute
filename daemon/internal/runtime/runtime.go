@@ -59,6 +59,8 @@ type Domain struct {
 	RestoredFrom string `json:"restoredFrom,omitempty"`
 	// Snapshots counts snapshots taken of it.
 	Snapshots int `json:"snapshots,omitempty"`
+	// Principals are the sshd principals a rebind gave its guest (the fake's).
+	Principals string `json:"principals,omitempty"`
 }
 
 // fakeSnapshot is the fake runtime's snapshot format.
@@ -333,5 +335,26 @@ func (f *Fake) Leak(id, state string) error {
 		return err
 	}
 	st.Domains[id] = Domain{ID: id, Runtime: f.RuntimeName, State: state}
+	return f.save(st)
+}
+
+// Rebind gives a running managed domain its rebind bundle's identity (the fake guest applies and
+// acknowledges it at once).
+func (f *Fake) Rebind(_ context.Context, id string, b Rebind) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st, err := f.load()
+	if err != nil {
+		return err
+	}
+	d, ok := st.Domains[id]
+	if !ok || !d.Managed || d.State != StateRunning {
+		return fmt.Errorf("no running managed domain %s", id)
+	}
+	if _, _, err := rebindImage(b); err != nil {
+		return err
+	}
+	d.Principals = b.Principals
+	st.Domains[id] = d
 	return f.save(st)
 }

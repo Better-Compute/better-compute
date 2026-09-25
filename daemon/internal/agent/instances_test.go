@@ -32,6 +32,45 @@ func instanceStates(st *agentv1.StatusReport) map[string]agentv1.InstanceObserve
 	return out
 }
 
+// Review 13 H2: a restored instance's guest gets its own identity once it runs, and the status says
+// which rebind ref it applied, after a bcd restart too.
+func TestIdentityRebind(t *testing.T) {
+	var fake *runtime.Fake
+	dir := t.TempDir()
+	h := newHarness(t, func(o *Options) {
+		fake = &runtime.Fake{RuntimeName: "libvirt-kvm", Path: filepath.Join(dir, "runtime.json"), BootID: "boot-1"}
+		o.Runtimes = []runtime.Runtime{fake}
+	})
+	s, _ := h.open()
+	sbx := vm("inst_sbx", agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING)
+	sbx.IdentityRebindRef = "secret://t/rebind"
+	s.push(desired(1, &agentv1.NodeSpec{Instances: &agentv1.InstancesSection{Instances: []*agentv1.InstanceSpec{sbx}}}))
+	req := answerSecret(t, s, `{"v":1,"account":"sandbox","principals":"sandbox@inst_sbx\n"}`)
+	if req.GetRef() != "secret://t/rebind" || req.GetAllocationId() != "alloc_inst_sbx" {
+		t.Fatalf("bundle fetched as %v", req)
+	}
+	s.next(t, "status with the rebind applied", func(f *agentv1.AgentFrame) bool {
+		for _, i := range f.GetStatus().GetInstances() {
+			if i.GetInstanceId() == "inst_sbx" && i.GetIdentityReboundRef() == "secret://t/rebind" {
+				return true
+			}
+		}
+		return false
+	})
+	domains, _ := fake.List(context.Background())
+	if len(domains) != 1 || domains[0].Principals != "sandbox@inst_sbx\n" {
+		t.Fatalf("domains = %+v", domains)
+	}
+	if h.agent.reboundRef("inst_sbx") != "secret://t/rebind" {
+		t.Fatal("the applied ref was not kept")
+	}
+	// Kept across restarts: a new agent over the same data directory reports it without asking again.
+	h.agent.rebind = rebinds{}
+	if h.agent.reboundRef("inst_sbx") != "secret://t/rebind" {
+		t.Fatal("the applied ref was not persisted")
+	}
+}
+
 func TestInstancesConverger(t *testing.T) {
 	var fake *runtime.Fake
 	h := newHarness(t, func(o *Options) {

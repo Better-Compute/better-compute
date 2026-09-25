@@ -269,6 +269,55 @@ is logged. Every directory on the way to the socket, the slots and the entrypoin
 and closed to others (`bcd doctor` checks it), neither the slots nor the entrypoint may live in
 `data_dir`, and the helper adopts into a slot only a root-owned entrypoint no one else can write.
 
+**Identity rebind** (`agent/rebind.go`, `runtime/rebind.go`; review 13 H2). A memory-restored guest
+resumes with its source's sshd principals and host key. When its spec carries
+`identity_rebind_ref`, bcd fetches that sealed bundle once the instance runs:
+`{"v":1,"account","principals","hostKey"?,"hostCertificate"?}`. It hands the bundle to the guest on a
+raw 1 MiB disk, hot-added with virtio serial `bc-rebind`:
+- the disk is cloud-hypervisor `vm.add-disk`, or libvirt `attach-disk … vdz --live`;
+- it holds a tar at offset 0 with the members `nonce`, `account`, `principals` and, with a host
+  key, `host_key` and `host_key-cert.pub`;
+- its last 4 KiB are reserved for the guest's acknowledgement.
+
+bcd waits up to 2 minutes for `BCREBOUND <nonce>\n` at the start of that region. It then removes
+the disk, zeroes and deletes its file, and reports the ref as `InstanceStatus.identity_rebound_ref`
+(kept in `<data_dir>/instances-rebound.json`). A guest that never acknowledges is tried at most
+3 times, 5 minutes apart, and nothing is reported, so the control plane keeps refusing exec into it.
+
+The guest half, which vps installs at first boot (memory restores inherit it):
+
+```
+# /etc/udev/rules.d/90-bc-rebind.rules
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_SERIAL}=="bc-rebind", TAG+="systemd", ENV{SYSTEMD_WANTS}+="bc-rebind@%k.service"
+
+# /etc/systemd/system/bc-rebind@.service
+[Unit]
+Description=better-compute identity rebind (%I)
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/bc-rebind %I
+
+# /usr/local/sbin/bc-rebind (0755)
+#!/bin/sh
+set -eu
+dev="/dev/$1"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+tar -xf "$dev" -C "$work" --no-same-owner --no-same-permissions
+account=$(cat "$work/account")
+case "$account" in ''|*[!a-z0-9_-]*) exit 1 ;; esac
+install -d -m 0755 /etc/ssh/bc_sandbox_principals
+install -m 0644 "$work/principals" "/etc/ssh/bc_sandbox_principals/$account"
+if [ -f "$work/host_key" ]; then
+  install -m 0600 "$work/host_key" /etc/ssh/bc_sandbox_host_key
+  install -m 0644 "$work/host_key-cert.pub" /etc/ssh/bc_sandbox_host_key-cert.pub
+fi
+systemctl reload ssh 2>/dev/null || systemctl reload sshd
+size=$(blockdev --getsize64 "$dev")
+printf 'BCREBOUND %s\n' "$(cat "$work/nonce")" |
+  dd of="$dev" bs=4096 seek=$((size / 4096 - 1)) conv=notrunc,sync oflag=direct,sync status=none
+```
+
 **Server time** (`agent/conn.go`). The daemon keeps a high-water mark of server time, advanced by
 every Welcome and heartbeat and mirrored in `identity.json`. A Welcome more than 5 minutes behind it
 is refused.

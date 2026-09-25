@@ -136,6 +136,8 @@ type Agent struct {
 	// restores are the snapshot downloads running in the background (restoreFile).
 	restoresMu sync.Mutex
 	restores   map[string]*restoreFetch
+	// rebind tracks post-restore identity rebinds (rebind.go).
+	rebind rebinds
 	// uploads are the snapshot files instance.snapshot is uploading (collectSnapshots keeps them).
 	uploads sync.Map
 	cache   *imageCache

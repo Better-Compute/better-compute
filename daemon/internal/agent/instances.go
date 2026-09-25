@@ -22,7 +22,8 @@ import (
 //   - user data is fetched with SecretRequest bound to the instance's allocation before the domain
 //     is defined; the spec never carries it; a refusal fails the instance, an unavailable broker
 //     keeps the section PROGRESSING;
-//   - the status lists every domain the runtimes hold (instances_complete).
+//   - the status lists every domain the runtimes hold (instances_complete);
+//   - a memory restore's guest is given its own identity once it runs (rebind.go).
 
 var imageFormats = map[string]bool{"raw": true, "qcow2": true, "iso": true}
 
@@ -225,8 +226,14 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 		}
 		if err := r.SetState(ctx, id, wantedState(spec.GetDesiredState())); err != nil {
 			specErrors[id] = err.Error()
+			continue
+		}
+		// A memory restore's guest gets its own identity once it runs (rebind.go).
+		if spec.GetDesiredState() == agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING {
+			c.a.maybeRebind(r, spec)
 		}
 	}
+	c.a.pruneRebinds(section.GetInstances())
 	c.specErrors = specErrors
 	keep := map[string]bool{}
 	for _, spec := range section.GetInstances() {
@@ -274,6 +281,9 @@ func (c *instancesConverger) report(ctx context.Context, specErrors map[string]s
 				st.State = agentv1.InstanceObservedState_INSTANCE_OBSERVED_STATE_ERROR
 			default:
 				st.State = agentv1.InstanceObservedState_INSTANCE_OBSERVED_STATE_STOPPED
+			}
+			if d.Managed {
+				st.IdentityReboundRef = c.a.reboundRef(d.ID)
 			}
 			if msg, failed := specErrors[d.ID]; failed && d.Managed {
 				st.State, st.Message = agentv1.InstanceObservedState_INSTANCE_OBSERVED_STATE_ERROR, msg

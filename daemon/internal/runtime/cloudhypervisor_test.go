@@ -1,12 +1,14 @@
 package runtime
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"google.golang.org/protobuf/proto"
@@ -31,6 +34,33 @@ type fakeCH struct {
 	stuck bool
 	// chowns records Chown: "<path> <uid>".
 	chowns []string
+	// noAck: the guest has no bc-rebind unit.
+	noAck bool
+}
+
+// guestAck is a guest's bc-rebind unit: it reads the disk's tar and writes its acknowledgement.
+func guestAck(path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	tr := tar.NewReader(bytes.NewReader(raw))
+	for {
+		h, err := tr.Next()
+		if err != nil {
+			return err
+		}
+		if h.Name == "nonce" {
+			nonce, _ := io.ReadAll(tr)
+			f, err := os.OpenFile(path, os.O_WRONLY, 0)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			_, err = f.WriteAt([]byte("BCREBOUND "+string(nonce)), RebindImageSize-4096)
+			return err
+		}
+	}
 }
 
 func (f *fakeCH) chown(path string, uid, _ int) error {
@@ -129,6 +159,15 @@ func (f *fakeCH) api(_ context.Context, socket, method, path string, body any, f
 		if !f.stuck {
 			delete(f.vmms, socket)
 		}
+	case "vm.add-disk":
+		b := body.(map[string]any)
+		if vmm.state != "Running" || b["serial"] != RebindSerial || b["image_type"] != "Raw" {
+			return nil, 400, nil
+		}
+		if !f.noAck {
+			go func() { _ = guestAck(b["path"].(string)) }()
+		}
+	case "vm.remove-device":
 	case "vm.resize-disk":
 	case "vm.snapshot":
 		dst := strings.TrimPrefix(body.(map[string]any)["destination_url"].(string), "file://")
@@ -286,6 +325,25 @@ func TestCloudHypervisorRuntime(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(ch.calls, "\n"), "PUT vm.restore files=1") || !strings.Contains(strings.Join(ch.chowns, "\n"), fmt.Sprintf("inst_clone %d", vmmUIDBase+1)) {
 		t.Fatalf("the clone was not restored with its tap's fd as its own user:\n%s\n%s", ch.calls, ch.chowns)
+	}
+	// Review 13 H2: the running clone gets its own identity through the rebind disk, which is then
+	// removed and scrubbed; a guest without the unit never acknowledges.
+	c.RebindTimeout = 2 * time.Second
+	bundle := Rebind{V: 1, Account: "sandbox", Principals: "sandbox@inst_clone"}
+	if err := c.Rebind(ctx, "inst_clone", bundle); err != nil {
+		t.Fatal(err)
+	}
+	rebindImg := filepath.Join(dir, "instances", "inst_clone", "rebind.img")
+	if _, err := os.Stat(rebindImg); err == nil || !strings.Contains(strings.Join(ch.calls, "\n"), "PUT vm.remove-device") {
+		t.Fatal("the rebind disk stayed")
+	}
+	ch.noAck = true
+	if err := c.Rebind(ctx, "inst_clone", bundle); err == nil || !strings.Contains(err.Error(), "did not acknowledge") {
+		t.Fatalf("an unacknowledged rebind = %v", err)
+	}
+	ch.noAck = false
+	if _, err := os.Stat(rebindImg); err == nil {
+		t.Fatal("an unacknowledged rebind disk stayed")
 	}
 	if got, _ := c.state(ctx, "inst_clone"); got != StateRunning {
 		t.Fatalf("clone = %s", got)

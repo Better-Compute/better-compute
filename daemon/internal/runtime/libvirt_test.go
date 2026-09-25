@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 )
@@ -153,6 +154,15 @@ func (f *fakeVirt) virsh(args []string) ([]byte, error) {
 		dom.state = state
 		return nil, nil
 	case "blockresize":
+		return nil, nil
+	case "attach-disk":
+		// args: attach-disk <domain> <file> <target> ... --serial bc-rebind --live
+		if !strings.Contains(strings.Join(args, " "), "--serial "+RebindSerial+" --live") {
+			return nil, errors.New("virsh attach-disk: not a live rebind disk")
+		}
+		go func() { _ = guestAck(args[2]) }()
+		return nil, nil
+	case "detach-disk":
 		return nil, nil
 	}
 	return nil, fmt.Errorf("virsh %s: unknown", args[0])
@@ -365,6 +375,15 @@ func TestLibvirtRuntime(t *testing.T) {
 	}
 	if _, err := l.Console(ctx, "someone-elses"); err == nil {
 		t.Fatal("a foreign domain's console was opened")
+	}
+
+	// Review 13 H2: the running clone's guest gets its identity through a live-attached disk.
+	l.RebindTimeout = 2 * time.Second
+	if err := l.Rebind(ctx, "inst_clone", Rebind{V: 1, Account: "sandbox", Principals: "sandbox@inst_clone"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls := strings.Join(virt.calls, "\n"); !strings.Contains(calls, "virsh detach-disk inst_clone vdz --live") || fileExists(filepath.Join(dir, "instances", "inst_clone", "rebind.img")) {
+		t.Fatalf("the rebind disk stayed:\n%s", calls)
 	}
 
 	// Destroyed: definition and files gone.

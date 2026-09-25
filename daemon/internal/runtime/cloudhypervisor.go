@@ -66,6 +66,8 @@ type CloudHypervisor struct {
 	ShutdownTimeout time.Duration
 	// Poll is how often a starting VMM or a shutting-down VM is checked (default 200 ms).
 	Poll time.Duration
+	// RebindTimeout bounds the wait for a guest's rebind acknowledgement (default RebindTimeout).
+	RebindTimeout time.Duration
 
 	mu sync.Mutex
 }
@@ -1042,4 +1044,49 @@ func (c *CloudHypervisor) Console(ctx context.Context, id string) (io.ReadWriteC
 		return nil, fmt.Errorf("domain %s is not running", id)
 	}
 	return (&net.Dialer{}).DialContext(ctx, "unix", filepath.Join(c.instanceDir(id), "serial.sock"))
+}
+
+// Rebind hot-adds the identity disk (rebind.go) to a running instance and waits for its guest's
+// acknowledgement; the disk is removed and its file scrubbed whatever happens. The lock is not held
+// while the guest works.
+func (c *CloudHypervisor) Rebind(ctx context.Context, id string, b Rebind) error {
+	c.mu.Lock()
+	r, err := c.record(id)
+	if err != nil {
+		c.mu.Unlock()
+		return fmt.Errorf("no managed domain %s", id)
+	}
+	if st, _ := c.state(ctx, id); st != StateRunning {
+		c.mu.Unlock()
+		return fmt.Errorf("domain %s is not running", id)
+	}
+	img, nonce, err := rebindImage(b)
+	if err != nil {
+		c.mu.Unlock()
+		return err
+	}
+	path := filepath.Join(c.instanceDir(id), "rebind.img")
+	scrub(path)
+	err = os.WriteFile(path, img, 0o600)
+	if err == nil {
+		err = c.chown(path, int(r.UID))
+	}
+	if err == nil {
+		_, err = c.api(ctx, id, http.MethodPut, "vm.add-disk", map[string]any{"id": "bcrebind", "path": path, "serial": RebindSerial, "image_type": "Raw"})
+	}
+	c.mu.Unlock()
+	if err != nil {
+		scrub(path)
+		return err
+	}
+	timeout := c.RebindTimeout
+	if timeout <= 0 {
+		timeout = RebindTimeout
+	}
+	waitErr := waitAck(ctx, path, nonce, timeout, c.poll())
+	c.mu.Lock()
+	_, _ = c.api(context.WithoutCancel(ctx), id, http.MethodPut, "vm.remove-device", map[string]any{"id": "bcrebind"})
+	c.mu.Unlock()
+	scrub(path)
+	return waitErr
 }
