@@ -13,6 +13,7 @@ import {
   type Reconciler,
 } from '@better-compute/core';
 import type { InventoryChangeType } from './conditions.js';
+import { hygieneReconciler } from './hygiene.js';
 import { applyInventory, inventoryDiff, inventoryHistory, inventoryWorkKind, latestInventory } from './store.js';
 
 /** Addresses one node's inventory. `tenantId` scopes the call (the §3.4 tenant pre-check). */
@@ -146,11 +147,14 @@ export const inventoryReconciler: Reconciler = Object.freeze({
   },
 });
 
+/** The hygiene sweep with its defaults (DriverMismatch, CertExpiring, DaemonOutdated every 5 min). */
+export const inventoryHygieneReconciler: Reconciler = hygieneReconciler();
+
 /**
  * The always-on built-in inventory module; the server registers it before any injected module.
  * Its actions are part of compute's own catalog, so it adds no catalog fragment. `inventory.get`
  * returns the latest snapshot, `history` pages the append-only snapshots and `diff` compares two.
  */
 export const inventoryModule: ComputeModule<'inventory', InventoryApi> = Object.freeze(
-  defineModule({ name: 'inventory', api: () => api, reconcilers: [inventoryReconciler] }),
+  defineModule({ name: 'inventory', api: () => api, reconcilers: [inventoryReconciler, inventoryHygieneReconciler] }),
 );

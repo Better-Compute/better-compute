@@ -16,6 +16,7 @@ import {
   gpuAtomFamily,
   ingestInventorySection,
   ingestInventorySections,
+  inventoryHygieneReconciler,
   inventoryModule,
   inventoryReconciler,
   latestInventory,
@@ -413,8 +414,8 @@ describe('ingestInventorySections (the batched pull)', () => {
 });
 
 describe('inventoryModule wiring', () => {
-  it('registers the inventory reconciler, sharded by node', () => {
-    expect(inventoryModule.reconcilers).toEqual([inventoryReconciler]);
+  it('registers the inventory reconciler, sharded by node, and the hygiene sweep', () => {
+    expect(inventoryModule.reconcilers).toEqual([inventoryReconciler, inventoryHygieneReconciler]);
     expect(inventoryReconciler).toMatchObject({ name: 'inventory', shardBy: 'node' });
   });
 

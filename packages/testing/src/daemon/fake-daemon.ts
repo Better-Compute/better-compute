@@ -61,6 +61,7 @@ import {
   type DriverManifestSchema,
   type Event,
   type HelloSchema,
+  type HostPressureSchema,
   type NodeSpec,
   type ProtocolRange,
   type SectionStatusSchema,
@@ -176,9 +177,11 @@ export interface FakeDaemonOptions {
     version?: bigint;
     trustSigner?: SignerTrust;
     /**
-     * Desired state (signed NodeSpecs, §7.7): a spec that changes the `access` section must be signed (v0.2), and
-     * with `'always'` every spec must be (v0.4). A present signature is always checked. A refused spec is not
-     * applied (see `specRejections`).
+     * Desired state (signed NodeSpecs, §7.7). Default `'always'`: with command-signing roots every spec must be
+     * signed, since an unsigned one could raise the applied generation and freeze all later specs. `'access'`
+     * requires a signature only for specs that change the `access` section (a v0.2 control plane that signs
+     * nothing else). A present signature is always checked. A refused spec is not applied (see
+     * `specRejections`).
      */
     signedSpecs?: 'access' | 'always';
   };
@@ -1334,7 +1337,12 @@ export class FakeDaemon {
         spec.access ?? create(AccessSectionSchema),
         proc.spec?.access ?? create(AccessSectionSchema),
       );
-      const required = this.options.intent?.signedSpecs === 'always' || accessChanged;
+      // Any spec moves the applied generation forward, and a stale-generation check drops everything below
+      // it: an unsigned spec with a huge generation would freeze the node's specs for good. So with roots
+      // (the server signs every generation once it has a command-signing root) every spec must be signed;
+      // 'access' is only for a control plane that still signs access changes alone.
+      const required =
+        this.options.intent?.signedSpecs === 'access' ? accessChanged : this.intentRoots.length > 0;
       try {
         verifyDesiredState(desired, {
           roots: this.intentRoots,
@@ -1631,7 +1639,19 @@ export class FakeDaemon {
   private sendStatus(): void {
     const proc = this.proc;
     if (!proc?.lastStatus) return;
-    this.send(proc.session, { case: 'status', value: proc.lastStatus } as AgentFrame['msg']);
+    const value = this.pressure ? { ...proc.lastStatus, pressure: this.pressure } : proc.lastStatus;
+    this.send(proc.session, { case: 'status', value } as AgentFrame['msg']);
+  }
+
+  private pressure: MessageInitShape<typeof HostPressureSchema> | undefined;
+
+  /**
+   * Sim: the host's PSI and CPU steal (`StatusReport.pressure`, §10.1 Disk/Memory/CpuPressure), in
+   * every StatusReport from now on; `undefined` stops reporting it. The current report is re-sent.
+   */
+  setPressure(pressure: MessageInitShape<typeof HostPressureSchema> | undefined): void {
+    this.pressure = pressure;
+    this.sendStatus();
   }
 
   private collect(rescan: boolean): EncodedSection[] {
