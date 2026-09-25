@@ -124,6 +124,17 @@ export function driverLabels(drivers: readonly { id: string; version: string }[]
   return [...labels].map(([key, value]) => ({ key, value }));
 }
 
+/** The prefix of the node labels Hello writes for advertised capabilities (source `system`). */
+export const capabilityLabelPrefix = 'bc.dev/cap.';
+
+/**
+ * Hello's capabilities as node labels `bc.dev/cap.<capability>=1`, so placement can require one
+ * (`nodeLabels: { 'bc.dev/cap.instance.network-policy': '*' }`): only names `sessionCapabilities` keeps.
+ */
+export function capabilityLabels(capabilities: readonly string[] | undefined): { key: string; value: string }[] {
+  return sessionCapabilities(capabilities).map((name) => ({ key: `${capabilityLabelPrefix}${name}`, value: '1' }));
+}
+
 export interface HelloOptions {
   /** A prior session whose `last_seen` is younger than this is live (a second Hello is a duplicate). */
   liveWindowMs: number;
@@ -1010,21 +1021,22 @@ export function createGatewayStore(options: GatewayStoreOptions) {
            RETURNING id`,
           [input.nodeId],
         );
-        // The drivers the daemon advertises (§5.6 walkthrough 4: placement filters on them) as
-        // system labels `bc.dev/driver.<id>=<version>`, replaced on every Hello, in one statement
-        // that writes nothing when they did not change.
-        const drivers = driverLabels(input.drivers ?? []);
+        // The drivers and capabilities the daemon advertises (§5.6 walkthrough 4: placement filters
+        // on them) as system labels `bc.dev/driver.<id>=<version>` and `bc.dev/cap.<name>=1`,
+        // replaced on every Hello (a dropped one goes), in one statement that writes nothing when
+        // they did not change.
+        const labels = [...driverLabels(input.drivers ?? []), ...capabilityLabels(input.capabilities)];
         await tx.query(
           `WITH wanted AS (SELECT * FROM unnest($2::text[], $3::text[]) AS w(key, value)),
            gone AS (
              DELETE FROM node_labels l WHERE l.node_id = $1 AND l.source = 'system'
-               AND starts_with(l.key, '${driverLabelPrefix}')
+               AND (starts_with(l.key, '${driverLabelPrefix}') OR starts_with(l.key, '${capabilityLabelPrefix}'))
                AND NOT EXISTS (SELECT 1 FROM wanted w WHERE w.key = l.key))
            INSERT INTO node_labels (node_id, key, value, source)
            SELECT $1, w.key, w.value, 'system' FROM wanted w
            ON CONFLICT (node_id, key) DO UPDATE SET value = EXCLUDED.value
              WHERE node_labels.source = 'system' AND node_labels.value <> EXCLUDED.value`,
-          [input.nodeId, drivers.map((label) => label.key), drivers.map((label) => label.value)],
+          [input.nodeId, labels.map((label) => label.key), labels.map((label) => label.value)],
         );
         await events.publish(tx, {
           type: 'node.connected',

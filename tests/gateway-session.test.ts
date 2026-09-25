@@ -189,6 +189,24 @@ describe('Hello', () => {
     ]);
   });
 
+  it('writes Hello capabilities as system labels bc.dev/cap.<name>=1 and removes the ones a later Hello drops', async () => {
+    const node = await f.addNode();
+    const capLabels = async () =>
+      (
+        await f.db.query<{ key: string; value: string }>(
+          "SELECT key, value FROM node_labels WHERE node_id = $1 AND source = 'system' ORDER BY key",
+          [node],
+        )
+      ).rows;
+    await f.connect(node, { capabilities: ['instance.network-policy', 'tunnel.instance-dial', 'Bad Cap'] });
+    expect(await capLabels()).toEqual([
+      { key: 'bc.dev/cap.instance.network-policy', value: '1' },
+      { key: 'bc.dev/cap.tunnel.instance-dial', value: '1' },
+    ]);
+    await f.connect(node, { bootId: 'boot-2', capabilities: ['tunnel.instance-dial'] });
+    expect(await capLabels()).toEqual([{ key: 'bc.dev/cap.tunnel.instance-dial', value: '1' }]);
+  });
+
   it('tells observe.onHandshake how every handshake ended (§14 gateway_handshakes_total)', async () => {
     const outcomes: string[] = [];
     const g = await f.another({
