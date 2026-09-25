@@ -1,4 +1,4 @@
-import type { SqlExecutor, SqlTx } from '@better-compute/core';
+import type { ModuleContext, SqlExecutor, SqlTx } from '@better-compute/core';
 import {
   gatewayControlClient,
   type ControlClientOptions,
@@ -48,6 +48,25 @@ export interface HostStreamRegistry extends LocalStreamRegistry {
   ): number;
 }
 
+/**
+ * A module's own reactions to IAM (§12.8), beside capacity's built-in ones: what an agent or delegation created is
+ * withdrawn when it is suspended or revoked, and an owner's resources go to their successor when they leave. vps's
+ * `{ agent: withdrawAgentSandboxes, identity: reassignSandboxes }` is one. Both run in the inbox transaction; a throw
+ * retries the event.
+ */
+export interface HostIamReaction {
+  agent?(
+    tx: SqlTx,
+    context: ModuleContext,
+    filter: { tenantId: string; agentId?: string; delegationId?: string; allAgents?: boolean; reason: string },
+  ): Promise<unknown>;
+  identity?(
+    tx: SqlTx,
+    context: ModuleContext,
+    end: { tenantId: string; identityId: string; successorId?: string; reason: string },
+  ): Promise<unknown>;
+}
+
 /** `host.iam`: the IAM bridge whose inbox this deployment drains. */
 export interface HostIamConfig {
   /** The bridge from `createComputeIamBridge()` (the one whose `modules` and port the configuration uses). */
@@ -72,6 +91,8 @@ export interface HostIamConfig {
    * mount passes to `handleWatch({ registry })`: revocations close them at once, like the gateways' tunnels.
    */
   streams?: readonly HostStreamRegistry[];
+  /** Modules' own reactions (e.g. vps's sandboxes), run by the default `agent` and `identity` handlers. */
+  reactions?: readonly HostIamReaction[];
   /** Close failures of the default `agent` handler and handler errors (never thrown). */
   onError?(error: unknown, context: { filter?: AgentStreamFilter; event?: IamInboxEvent }): void;
   /**
@@ -242,6 +263,7 @@ export function installIamHandlers(
     });
   const caches = compute.caches;
   const own = config.handlers ?? {};
+  const reactions = config.reactions ?? [];
   const handlers: IamEventHandlers = {
     ...own,
     agent:
@@ -250,7 +272,10 @@ export function installIamHandlers(
         await closeStreams(tx, event);
         // The reservations the agent or delegation created that have not started are cancelled (§12.8).
         const filter = agentStreamFilter(event);
-        if (filter) await withdrawAgentReservations(tx, compute.context, { ...filter, reason: event.action });
+        if (filter) {
+          await withdrawAgentReservations(tx, compute.context, { ...filter, reason: event.action });
+          for (const reaction of reactions) await reaction.agent?.(tx, compute.context, { ...filter, reason: event.action });
+        }
         // The agent's cached authentications and decisions, where the event names it.
         const agentId =
           event.action === 'delegation:revoke' ? text(event.metadata?.agentId) : text(event.subjectId);
@@ -266,7 +291,10 @@ export function installIamHandlers(
         // An owner gone for good (offboarded, expired, deleted, or found so by IamReconcile): its reservations go
         // to the successor, else the unstarted ones are cancelled (§12.8).
         const end = await identityEndOf(event, successorLookup(compute.context.sql));
-        if (end) await reassignReservations(tx, compute.context, { ...end, reason: event.action });
+        if (end) {
+          await reassignReservations(tx, compute.context, { ...end, reason: event.action });
+          for (const reaction of reactions) await reaction.identity?.(tx, compute.context, { ...end, reason: event.action });
+        }
         // An identity that is gone keeps no streams and no break-glass SSH (an update, such as a rename, keeps
         // them): a certificate would otherwise open its node until it expires.
         if (end || identityEnds.has(event.action)) {

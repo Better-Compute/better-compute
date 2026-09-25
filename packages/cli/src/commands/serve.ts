@@ -96,12 +96,18 @@ export async function runServer(
   try {
     // IAM events reach compute through the inbox the worker roles drain: install the reactions first.
     const iamConfig = options.hostConfig?.iam;
-    // host.streams (e.g. the /watch registry) close on revocations too, beside host.iam.streams.
+    // host.streams (e.g. the /watch registry) close on revocations too, beside host.iam.streams; host.iamReactions
+    // run beside host.iam.reactions.
     const hostStreams = options.hostConfig?.streams ?? [];
+    const hostReactions = options.hostConfig?.iamReactions ?? [];
     if (iamConfig)
       iamHandlers = installIamHandlers(
         compute,
-        hostStreams.length ? { ...iamConfig, streams: [...(iamConfig.streams ?? []), ...hostStreams] } : iamConfig,
+        {
+          ...iamConfig,
+          ...(hostStreams.length ? { streams: [...(iamConfig.streams ?? []), ...hostStreams] } : {}),
+          ...(hostReactions.length ? { reactions: [...(iamConfig.reactions ?? []), ...hostReactions] } : {}),
+        },
         {
           ...(options.hostConfig?.tunnels?.control?.tls
             ? { tls: options.hostConfig.tunnels.control.tls }
@@ -450,6 +456,7 @@ export const serveCommands = [
         ...(configured?.mcp ? { mcp: configured.mcp } : {}),
         // The configuration's streams (its /watch registry) close on the embedded IAM's revocations as well.
         ...(configured?.streams ? { streams: configured.streams } : {}),
+        ...(configured?.iamReactions ? { iamReactions: configured.iamReactions } : {}),
         // IAM events (revoked delegations close their tunnels): the configuration's bridge, else --sim's.
         ...(configured?.iam
           ? { iam: configured.iam }

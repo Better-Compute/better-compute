@@ -4,7 +4,7 @@ import type { MetricsRegistry } from '@better-compute/observability';
 import type { RevocationSet } from '@better-compute/pki';
 import type { AnyCompute, AnyComputeOptions } from '../config.js';
 import type { HostRoute, HostUpgradeHandler } from './http.js';
-import type { HostIamConfig, HostStreamRegistry } from './iam.js';
+import type { HostIamConfig, HostIamReaction, HostStreamRegistry } from './iam.js';
 import type { HostTunnelsConfig } from './tunnels.js';
 
 // The named `host` export of `better-compute.config.ts`: what `serve` runs around the control plane that the
@@ -139,6 +139,12 @@ export interface HostConfig {
    */
   streams?: readonly HostStreamRegistry[];
   /**
+   * Modules' reactions to IAM events (§12.8) beside capacity's, e.g. vps's
+   * `{ agent: withdrawAgentSandboxes, identity: reassignSandboxes }`. Added to `iam.reactions`; also used with the
+   * embedded IAM of `dev --sim`.
+   */
+  iamReactions?: readonly HostIamReaction[];
+  /**
    * The MCP endpoint for AI agents (PLAN.md §9.3): `computeMcpEndpoint({ compute, gate, delegations })` from
    * @better-compute/mcp, better-iam's gate in front. Mounted at `path` (default `/mcp`, POST/GET/DELETE) and at
    * its RFC 9728 metadata path `/.well-known/oauth-protected-resource{path}`.
@@ -179,7 +185,19 @@ export async function resolveHost(exported: unknown, context: HostContext): Prom
       'INVALID_CONFIG',
       'The host export must be defineHost({ … }) or a factory',
     );
-  const { http, gateway, metrics, iam, mcp, streams } = value as HostConfig;
+  const { http, gateway, metrics, iam, mcp, streams, iamReactions } = value as HostConfig;
+  const reactionOk = (reaction: unknown) =>
+    isRecord(reaction) &&
+    (reaction.agent === undefined || typeof reaction.agent === 'function') &&
+    (reaction.identity === undefined || typeof reaction.identity === 'function');
+  if (
+    (iamReactions !== undefined && (!Array.isArray(iamReactions) || !iamReactions.every(reactionOk))) ||
+    (iam?.reactions !== undefined && (!Array.isArray(iam.reactions) || !iam.reactions.every(reactionOk)))
+  )
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'IAM reactions are objects with agent and/or identity functions, e.g. { agent: withdrawAgentSandboxes, identity: reassignSandboxes }',
+    );
   if (
     streams !== undefined &&
     (!Array.isArray(streams) || !streams.every((registry) => isRecord(registry) && typeof registry.closeWhere === 'function'))

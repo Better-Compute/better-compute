@@ -50,7 +50,7 @@ import { pglite } from '@better-compute/postgres/pglite';
 import { provisionModule } from '@better-compute/provision';
 import { rolloutModule } from '@better-compute/rollout';
 import { pkiJoinCrypto, type BetterCompute, type ComputeOptions } from '@better-compute/server';
-import { instanceStatusHandler, vps } from '@better-compute/vps';
+import { instanceStatusHandler, reassignSandboxes, vps, withdrawAgentSandboxes } from '@better-compute/vps';
 
 /**
  * The process's Prometheus registry (bounded labels, nothing identifies a tenant). With real IAM, wrap
@@ -230,6 +230,8 @@ export const exampleHost = defineHost(async ({ compute, env, cwd }) => {
   const watches = createWatchRegistry();
   const host: HostConfig = {
     streams: [watches],
+    // vps's reactions to IAM (§12.8): a revoked agent's sandboxes are withdrawn, a departed owner's go to the successor.
+    iamReactions: [{ agent: withdrawAgentSandboxes, identity: reassignSandboxes }],
     http: {
       routes: [
         {

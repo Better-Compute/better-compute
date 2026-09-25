@@ -315,6 +315,35 @@ describe('host.iam', () => {
     lenient.close();
   });
 
+  it("runs modules' reactions (vps sandboxes) beside capacity's in the default handlers", async () => {
+    const { compute } = await deploy([{ name: 'iam', migrations: [successorsMigration] } as never]);
+    let installed: IamEventHandlers = {};
+    const seen: [string, object][] = [];
+    installIamHandlers(compute, {
+      bridge: { setHandlers: (handlers) => (installed = handlers) },
+      reactions: [
+        {
+          agent: async (_tx, context, filter) => void seen.push(['agent', { ...filter, context: context === compute.context }]),
+          identity: async (_tx, context, end) => void seen.push(['identity', { ...end, context: context === compute.context }]),
+        },
+        {},
+      ],
+    });
+    const tx = compute.context.sql as never;
+    await installed.agent!(tx, event('delegation:revoke', 'dlg_1', { agentId: 'agt_1' }));
+    await installed.identity!(tx, event('identity:offboard', 'idn_8'));
+    // An update (a rename) ends nothing.
+    await installed.identity!(tx, event('iam:identities:update', 'idn_7'));
+    expect(seen).toEqual([
+      ['agent', expect.objectContaining({ tenantId: 'ten_a', delegationId: 'dlg_1', reason: 'delegation:revoke', context: true })],
+      ['identity', expect.objectContaining({ tenantId: 'ten_a', identityId: 'idn_8', reason: 'identity:offboard', context: true })],
+    ]);
+    const context = { compute: {} as never, options: {} as never, env: {}, cwd: '.' };
+    await expect(resolveHost({ iamReactions: [{ agent: 'x' }] }, context)).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
+    const reaction = { identity: async () => undefined };
+    await expect(resolveHost({ iamReactions: [reaction] }, context)).resolves.toEqual({ iamReactions: [reaction] });
+  });
+
   it('installs defaults that drop the caches, and keeps your own handlers', async () => {
     // The iam module's table (successors) is there wherever a bridge is: the reactions read it.
     const { compute } = await deploy([{ name: 'iam', migrations: [successorsMigration] } as never]);
