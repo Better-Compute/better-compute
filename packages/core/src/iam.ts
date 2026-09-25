@@ -115,6 +115,14 @@ export interface IamPort {
   /** Chunks of ≤ 50; any batch error throws, never "all false" (P11). */
   authorizeMany(credential: Credential, tenantId: string, checks: Check[]): Promise<boolean[]>;
   /**
+   * Admissions (§12.4): the envelope calls this after transaction 1 committed a draft or a pending
+   * change and before `require`, so the decision reads that row as committed, never a stale copy
+   * (`extend` decides on the pending total). Embedded ports reload the row into the in-process
+   * projection, failing closed (a failed reload drops the row, so the decision takes the bounded
+   * miss path). Optional: ports whose resolver does not cache rows need nothing.
+   */
+  refreshResource?(tenantId: string, resource: { type: string; id: string }): Promise<void>;
+  /**
    * Re-decides for a session recorded earlier (`Caller.sessionId`), when the caller presents no
    * credential again: long-lived streams such as tunnels, re-authorized every 60 s (§7.6). False
    * once the session is revoked or expired, or the identity lost the permission. Optional: hosts

@@ -63,6 +63,12 @@ export interface AuthzProjection {
   load(): Promise<void>;
   /** One tail pass; returns how many changes it applied. */
   sync(): Promise<number>;
+  /**
+   * Re-reads one row from the source into memory (an admission's committed draft or pending change,
+   * §12.4), or drops it when the source has none. A failed read drops the row too, so the next
+   * `resolve` takes the bounded miss path instead of a stale copy.
+   */
+  refresh(type: string, id: string, tenantId: string): Promise<void>;
   /** Loads, then tails every `pollMs` until `stop()`. */
   start(): Promise<void>;
   stop(): void;
@@ -190,6 +196,17 @@ export function createAuthzProjection(options: AuthzProjectionOptions = {}): Aut
       ready = true;
     },
     sync,
+    async refresh(type, id, tenantId) {
+      if (!ready || !source) return;
+      try {
+        const row = await source.get(type, id, tenantId);
+        if (row) put(row);
+        else remove(type, id, tenantId);
+      } catch (error) {
+        remove(type, id, tenantId);
+        options.onError?.(error);
+      }
+    },
     async start() {
       await this.load();
       if (timer) return;

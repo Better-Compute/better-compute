@@ -284,6 +284,7 @@ export function createComposites(options: CompositeOptions): Composites {
           envelope.preCheck(caller, tenant);
           const decision = envelope.decisionOf(tenant, entry.action!, decided);
           try {
+            await iam.refreshResource?.(decision.tenantId, decision.resource);
             await iam.require(credential, decision);
           } catch (error) {
             if (!envelope.refused(error)) throw error;

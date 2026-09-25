@@ -100,5 +100,9 @@ export function meteredIamPort(inner: IamPort, metrics: StandardMetrics): IamPor
     recordUsage: wrap('recordUsage', inner.recordUsage.bind(inner)),
     featureEnabled: wrap('featureEnabled', inner.featureEnabled.bind(inner)),
     capabilities: () => inner.capabilities(),
+    // Optional members pass through unmetered: dropping them would silently change behaviour
+    // (tunnels without a re-authorizer refuse to mount; admissions would decide on stale rows).
+    ...(inner.authorizeSession ? { authorizeSession: inner.authorizeSession.bind(inner) } : {}),
+    ...(inner.refreshResource ? { refreshResource: inner.refreshResource.bind(inner) } : {}),
   };
 }

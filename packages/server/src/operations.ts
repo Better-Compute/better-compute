@@ -338,6 +338,8 @@ export function createOperations(
     preCheck(caller, tenant);
     const decision = decisionOf(tenant, entry.action!, resource);
     try {
+      // §12.4: IAM decides on the row transaction 1 committed, never a stale cached copy.
+      await iam.refreshResource?.(decision.tenantId, decision.resource);
       await iam.require(credential, decision);
     } catch (error) {
       if (!refused(error)) throw error;

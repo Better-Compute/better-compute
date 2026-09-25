@@ -321,6 +321,11 @@ export function createComputeIamBridge(options: ComputeIamBridgeOptions = {}): C
         flags,
         successorOf: embeddedOptions.successorOf ?? successorOf,
       });
+      // §12.4: an admission's committed draft or pending change is in memory before `require`.
+      port.refreshResource = async (tenantId, resource) => {
+        if (!resource.type.startsWith(catalog.typePrefix)) return;
+        await projection.refresh(resource.type.slice(catalog.typePrefix.length), resource.id, tenantId);
+      };
       return port;
     },
     modules: [module],
