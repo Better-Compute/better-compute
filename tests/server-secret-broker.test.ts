@@ -14,6 +14,7 @@ import {
   sealedSecretsMigration,
   spkiSha256,
 } from '@better-compute/pki';
+import { agentFrame, gatewayFixture } from './support/gateway.js';
 // Until `export { createSecretBroker } from './secret-broker.js'` lands in server's join/index.ts.
 import { createSecretBroker } from '../packages/server/src/join/secret-broker.js';
 
@@ -132,6 +133,79 @@ function ask(
 ) {
   return createSecretRequest({ nodeKey: n.key, ref, ...fields });
 }
+
+describe('secret broker through a real gateway session', () => {
+  it('relays only ciphertext: the bound node opens the value, a relay by another session gets nothing', async () => {
+    const f = await gatewayFixture();
+    try {
+      await f.db.migrate([sealedSecretsMigration]);
+      const vault = localSealedSecretStore({ sql: f.db, keys: 'y'.repeat(32) });
+      f.services.services.secret = createSecretBroker({
+        database: f.db,
+        clock: f.clock,
+        events: { publish: async () => {} } as unknown as EventPublisher,
+        stores: [vault],
+      }).secret;
+      const agent = await f.addNode();
+      const key = generateP256KeyPair().privateKey;
+      const ca = createNodeCa({ clock: manualClock(f.clock.now() - 60_000) });
+      const issued = await ca.sign(createCsr(key), {
+        usage: 'client',
+        role: 'site',
+        ttlSeconds: 86_400,
+        uriSans: [nodeSpiffeId({ trustDomain: 'compute.test', siteId: 'site_s', nodeId: agent })],
+      });
+      await f.db.query(
+        `INSERT INTO node_certs (serial, node_id, role, identity_gen, spki_sha256, der, not_before, not_after)
+         VALUES ($1, $2, 'site', 1, $3, $4, $5, $6)`,
+        [
+          issued.serial,
+          agent,
+          spkiSha256(key),
+          issued.certificate,
+          new Date(issued.notBefore),
+          new Date(issued.notAfter),
+        ],
+      );
+      const ref = await vault.put(TENANT, 'ipmi-admin-pw');
+      await f.db.query(
+        `INSERT INTO commands (id, node_id, seq, kind, body, state, not_after, retry_safe, self_terminating,
+           attested, idempotency_key)
+         VALUES ('cmd_bmc', $1, 1, 'bmc.operation', $2, 'pending', compute_now() + interval '1 hour', false, false,
+           false, 'wf:wf_9:power')`,
+        [agent, new TextEncoder().encode(`{"credentialsRef":"${ref}"}`)],
+      );
+      const { request, ephemeralKey } = createSecretRequest({
+        nodeKey: key,
+        ref,
+        workflowId: 'wf_9',
+        stepId: 'power',
+      });
+
+      const { stream, handle } = await f.connect(agent);
+      await handle.receive(agentFrame({ case: 'secretRequest', value: request }));
+      await expect.poll(() => stream.of('secret').length).toBe(1);
+      const answer = stream.of('secret')[0]!;
+      expect(answer.jwe).not.toContain('ipmi-admin-pw');
+      expect(
+        openSecretResponse(answer, ephemeralKey, {
+          ref,
+          requestId: request.requestId,
+          now: f.clock.now(),
+        }),
+      ).toBe('ipmi-admin-pw');
+
+      // The same signed request replayed through another node's session.
+      const other = await f.addNode();
+      const relay = await f.connect(other);
+      await relay.handle.receive(agentFrame({ case: 'secretRequest', value: request }));
+      await expect.poll(() => relay.stream.of('secret').length).toBe(1);
+      expect(relay.stream.of('secret')[0]).toMatchObject({ error: 'access-denied', jwe: '' });
+    } finally {
+      await f.close();
+    }
+  });
+});
 
 describe('secret broker', () => {
   it('releases a value bound to the node’s live step, once, sealed to its one-time key, audited without it', async () => {
