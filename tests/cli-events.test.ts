@@ -56,27 +56,27 @@ describe('events', () => {
         requests.push(new Request(input, init));
         return sse([
           ': keep-alive\n\n',
-          'id: 10:1\ndata: {"id":"evt_1","type":"node.cordoned","tenantId":"org_acme","subject":"node/n1","data":{"reason":"a\u009b2Jb"}}\n\n',
-          'id: 10:2\ndata: {"id":"evt_2","type":"node.uncordoned","tenantId":"org_acme","subject":"node/n1"}\n\n',
+          'id: 10.1\ndata: {"id":"evt_1","type":"node.cordoned","tenantId":"org_acme","subject":"node/n1","data":{"reason":"a\u009b2Jb"}}\n\n',
+          'id: 10.2\ndata: {"id":"evt_2","type":"node.uncordoned","tenantId":"org_acme","subject":"node/n1"}\n\n',
         ]);
       },
     };
     await createCli().run(
-      ['events', 'watch', '--url', 'https://compute.test', '--types', 'node.*, reservation.placed', '--since', '9:4', '--count', '2'],
+      ['events', 'watch', '--url', 'https://compute.test', '--types', 'node.*, reservation.placed', '--since', '9.4', '--count', '2'],
       io,
     );
     const url = new URL(requests[0]!.url);
     expect(url.pathname).toBe('/watch');
     expect(url.searchParams.get('types')).toBe('node.*,reservation.placed');
     expect(url.searchParams.get('tenantId')).toBe('org_acme');
-    expect(requests[0]!.headers.get('last-event-id')).toBe('9:4');
+    expect(requests[0]!.headers.get('last-event-id')).toBe('9.4');
     expect(requests[0]!.headers.get('authorization')).toBe(`Bearer ${env.BETTER_COMPUTE_TOKEN}`);
     expect(out).toHaveLength(2);
     // The C1 CSI is escaped, never written raw; the line stays JSON that parses back to the same event.
     expect(out[0]).not.toMatch(/[\u007f-\u009f]/);
     expect(out[0]).toContain('\\u009b');
-    expect(JSON.parse(out[0]!)).toMatchObject({ id: 'evt_1', sequence: '10:1', data: { reason: 'a\u009b2Jb' } });
-    expect(JSON.parse(out[1]!)).toMatchObject({ id: 'evt_2', sequence: '10:2' });
+    expect(JSON.parse(out[0]!)).toMatchObject({ id: 'evt_1', sequence: '10.1', data: { reason: 'a\u009b2Jb' } });
+    expect(JSON.parse(out[1]!)).toMatchObject({ id: 'evt_2', sequence: '10.2' });
   });
 
   it('refuses what it cannot follow before connecting', async () => {
@@ -134,7 +134,23 @@ describe('events', () => {
       await createCli().run(['nodes', 'cordon', nodeId, '--reason', 'watched'], { out() {}, env: devEnv, cwd });
       await watching;
       expect(lines).toHaveLength(1);
-      expect(JSON.parse(lines[0]!)).toMatchObject({ type: 'node.cordoned', subject: `node/${nodeId}`, tenantId: tenant });
+      const event = JSON.parse(lines[0]!);
+      expect(event).toMatchObject({ type: 'node.cordoned', subject: `node/${nodeId}`, tenantId: tenant });
+      // A real event's sequence is what --since takes (the stream's <txid>.<seq>).
+      expect(event.sequence).toMatch(/^\d+\.\d+$/);
+      const resumed: string[] = [];
+      await createCli().run(['events', 'watch', '--since', event.sequence, '--types', 'node.*', '--count', '1'], {
+        out: (line) => resumed.push(line),
+        env: devEnv,
+        cwd,
+        fetch: async (input, init) => {
+          const response = await fetch(input, init);
+          // Something newer than the resumed cursor, once the stream is open.
+          void createCli().run(['nodes', 'uncordon', nodeId], { out() {}, env: devEnv, cwd });
+          return response;
+        },
+      });
+      expect(JSON.parse(resumed[0]!)).toMatchObject({ type: 'node.uncordoned', subject: `node/${nodeId}` });
     } finally {
       controller.abort();
       const result = await dev;

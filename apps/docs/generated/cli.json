@@ -3478,7 +3478,7 @@
       ],
       "examples": [
         "better-compute events watch --url https://compute.example.com --types \"node.*,reservation.*\"",
-        "better-compute events watch --url https://compute.example.com --since 184467:12 --count 100"
+        "better-compute events watch --url https://compute.example.com --since 184467.12 --count 100"
       ]
     },
     {

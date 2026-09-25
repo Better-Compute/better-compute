@@ -66,7 +66,7 @@ export const eventCommands = [
     },
     examples: [
       'better-compute events watch --url https://compute.example.com --types "node.*,reservation.*"',
-      'better-compute events watch --url https://compute.example.com --since 184467:12 --count 100',
+      'better-compute events watch --url https://compute.example.com --since 184467.12 --count 100',
     ],
     async run(context) {
       const { flags, io } = context;
@@ -83,8 +83,9 @@ export const eventCommands = [
         .filter(Boolean);
       if (types.length > 20 || types.some((type) => !typePattern.test(type)))
         throw usageError('--types takes up to 20 event type patterns like node.* or reservation.placed');
-      if (flags.since !== undefined && !/^\d{1,20}:\d{1,20}$/.test(flags.since))
-        throw usageError('--since takes a printed sequence, like 184467:12');
+      // The outbox cursor as the stream writes it (<txid>.<seq>; events.list pages use their own <ms>:<seq>).
+      if (flags.since !== undefined && !/^\d{1,20}\.\d{1,20}$/.test(flags.since))
+        throw usageError('--since takes a printed sequence, like 184467.12');
       const path = flags.path ?? '/watch';
       if (!/^(?:\/[A-Za-z0-9_.-]+)+$/.test(path)) throw usageError('--path must be an absolute path like /watch');
       const client = createComputeClient<{ api: unknown }>({
