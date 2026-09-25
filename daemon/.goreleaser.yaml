@@ -31,9 +31,23 @@ builds:
       # releaseSequence is the release manifest's sequence (the rollback floor a node starts from).
       - -s -w -X main.version={{ .Version }} -X main.releaseSequence={{ envOrDefault "BCD_RELEASE_SEQUENCE" "0" }}
     mod_timestamp: "{{ .CommitTimestamp }}"
+  # bcx-ipmi, the IPMI BMC driver plugin site agents run (cmd/bcx-ipmi): pure Go, no cgo.
+  - id: bcx-ipmi
+    main: ./cmd/bcx-ipmi
+    binary: bcx-ipmi
+    goos: [linux]
+    goarch: [amd64, arm64]
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
 
 archives:
   - id: bcd
+    ids: [bcd]
     formats: [tar.gz]
     name_template: "bcd_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
@@ -43,8 +57,15 @@ archives:
   # self-update verify and install exactly this file, and GET {basePath}/downloads/bcd/{version}/linux-{arch}
   # serves it (PLAN.md §6 Release artifacts).
   - id: bcd-binary
+    ids: [bcd]
     formats: [binary]
     name_template: "bcd_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  # The plugin ships as an archive only: a release lists one bare binary per platform, bcd's (the
+  # rollout's releaseBinaries and bcd's self-update take exactly bcd_<version>_<os>_<arch>).
+  - id: bcx-ipmi
+    ids: [bcx-ipmi]
+    formats: [tar.gz]
+    name_template: "bcx-ipmi_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
   # One <archive>.sha256 per archive, next to it.

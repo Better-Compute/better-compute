@@ -39,6 +39,7 @@ dependencies are connect-go, bbolt and protobuf.
 | Path | What |
 |---|---|
 | `cmd/bcd` | subcommands and flags; the hardware backend picked by build tag (`hardware_host.go`, `hardware_fakehw.go`); restart-in-place for reboots under fakehw (`reexec_*.go`) |
+| `cmd/bcx-ipmi` | the IPMI BMC driver plugin (bcx): power and boot device through `ipmitool` (lanplus), the password only in its environment; a site agent runs it for `bmc.*` operations whose driver is `ipmi` |
 | `internal/agent` | the node agent: session loop, command admission and kinds, the devices and access convergers, renewal, health watch, tunnels, secret and workload-token requests, the status socket |
 | `internal/journal` | durable memory (meta, commands, unacked events, last spec, certificates, exec-ticket `jti`s) and the command rules (`rules.go`); `Memory` for tests, `Bolt` (bbolt) in production |
 | `internal/dispatch` | the kind registry with role allowlists, `Precheck`, lanes with credits and worker pools, per-resource locks |
