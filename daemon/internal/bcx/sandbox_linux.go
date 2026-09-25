@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -69,6 +70,52 @@ func prepare(cmd *exec.Cmd, bin *os.File, _ string, name string, o StartOptions,
 	}
 	cmd.SysProcAttr = attr
 	return release, nil
+}
+
+// cgroupRoot is where the cgroup v2 hierarchy is mounted.
+const cgroupRoot = "/sys/fs/cgroup"
+
+// ownCgroup is this process's cgroup directory, from /proc/self/cgroup ("0::<path>").
+func ownCgroup(procSelfCgroup string) (string, error) {
+	for _, line := range strings.Split(procSelfCgroup, "\n") {
+		if path, ok := strings.CutPrefix(line, "0::"); ok {
+			return filepath.Join(cgroupRoot, path), nil
+		}
+	}
+	return "", errors.New("not on the cgroup v2 hierarchy")
+}
+
+// PrepareCgroup readies a delegated cgroup v2 directory for plugins (bcd.service with Delegate=yes):
+// it exists, and the memory and pids controllers are enabled in it and in its parent, so each
+// plugin's child can be limited. cgroup v2 gives no controllers to the children of a cgroup that
+// holds processes itself: when bcd runs directly in the parent (systemd < 254, no
+// DelegateSubgroup=main), it first moves itself into a "main" leaf beside the plugins.
+func PrepareCgroup(dir string) error {
+	if !strings.HasPrefix(filepath.Clean(dir)+"/", cgroupRoot+"/") {
+		return fmt.Errorf("cgroup %s is not under %s", dir, cgroupRoot)
+	}
+	parent := filepath.Dir(filepath.Clean(dir))
+	if raw, err := os.ReadFile("/proc/self/cgroup"); err == nil {
+		if self, err := ownCgroup(string(raw)); err == nil && filepath.Clean(self) == parent {
+			leaf := filepath.Join(parent, "main")
+			if err := os.MkdirAll(leaf, 0o755); err != nil {
+				return fmt.Errorf("cgroup: %w", err)
+			}
+			// "0" moves the writing process, all its threads.
+			if err := os.WriteFile(filepath.Join(leaf, "cgroup.procs"), []byte("0"), 0o644); err != nil {
+				return fmt.Errorf("cgroup: move bcd into %s: %w", leaf, err)
+			}
+		}
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("cgroup: %w", err)
+	}
+	for _, d := range []string{parent, dir} {
+		if err := os.WriteFile(filepath.Join(d, "cgroup.subtree_control"), []byte("+memory +pids"), 0o644); err != nil {
+			return fmt.Errorf("cgroup: enable memory and pids in %s (is it delegated to bcd, Delegate=yes?): %w", d, err)
+		}
+	}
+	return nil
 }
 
 // killGroup kills the plugin and whatever it started (its process group).

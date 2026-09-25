@@ -103,6 +103,12 @@ func startPlugins(ctx context.Context, dir string, sandbox config.Plugins, log *
 		return nil
 	}
 	taken := map[uint32]bool{}
+	if sandbox.Cgroup != "" {
+		if err := bcx.PrepareCgroup(sandbox.Cgroup); err != nil {
+			log.Error("the plugins' cgroup is not usable; no plugin runs", "cgroup", sandbox.Cgroup, "error", err.Error())
+			return nil
+		}
+	}
 	f, err := os.Open(filepath.Join(dir, "pins"))
 	if err != nil {
 		log.Warn("no plugin pins; no plugin runs", "dir", dir, "error", err.Error())

@@ -35,6 +35,19 @@ func probeNamespaces() string {
 	return <-done
 }
 
+func TestOwnCgroup(t *testing.T) {
+	got, err := ownCgroup("0::/system.slice/bcd.service\n")
+	if err != nil || got != "/sys/fs/cgroup/system.slice/bcd.service" {
+		t.Fatalf("own cgroup = %q, %v", got, err)
+	}
+	if _, err := ownCgroup("12:pids:/user.slice\n"); err == nil {
+		t.Fatal("a cgroup v1 line was taken for v2")
+	}
+	if err := PrepareCgroup("/tmp/not-a-cgroup/plugins"); err == nil {
+		t.Fatal("a directory outside the cgroup hierarchy was accepted")
+	}
+}
+
 func TestSandboxedPlugin(t *testing.T) {
 	exe, pin := selfPin(t)
 	ctx := context.Background()

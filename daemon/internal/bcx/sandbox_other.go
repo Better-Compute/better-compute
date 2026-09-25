@@ -22,5 +22,8 @@ func prepare(cmd *exec.Cmd, _ *os.File, path, _ string, o StartOptions, _ string
 
 func killGroup(cmd *exec.Cmd) { _ = cmd.Process.Kill() }
 
+// PrepareCgroup is Linux only.
+func PrepareCgroup(string) error { return errors.New("plugin cgroups need Linux") }
+
 // RunShim is Linux only.
 func RunShim([]string) error { return errors.New("bcx shim: needs Linux") }
