@@ -135,3 +135,27 @@ func copyFile(from, to string) error {
 	}
 	return os.WriteFile(to, b, 0o644)
 }
+
+// A CA key or principal that would add a line to sshd's files refuses the whole spec.
+func TestAccessRefusesLineInjection(t *testing.T) {
+	h := newHarness(t, nil)
+	s, _ := h.open()
+	ca := fakeCAKey()
+	for i, access := range []*agentv1.AccessSection{
+		{SshCaPublicKeys: []string{ca + "\n" + fakeCAKey()}},
+		{SshCaPublicKeys: []string{ca + "\r"}},
+		{SshCaPublicKeys: []string{"not a key"}},
+		{SshCaPublicKeys: []string{ca}, SshPrincipals: []string{"root@" + testNode + "\nroot"}},
+		{SshCaPublicKeys: []string{ca}, SshPrincipals: []string{"root @" + testNode}},
+	} {
+		s.push(desired(uint64(i+1), &agentv1.NodeSpec{Access: access}))
+	}
+	s.push(desired(10, &agentv1.NodeSpec{Access: &agentv1.AccessSection{SshCaPublicKeys: []string{ca}}}))
+	status := s.next(t, "status", func(f *agentv1.AgentFrame) bool { return f.GetStatus() != nil }).GetStatus()
+	if status.GetAppliedGeneration() != 10 {
+		t.Fatalf("applied %d: an injecting spec was applied", status.GetAppliedGeneration())
+	}
+	if b, _ := os.ReadFile(h.host.Path(sshCAFile)); string(b) != ca+"\n" {
+		t.Fatalf("CA file = %q", b)
+	}
+}

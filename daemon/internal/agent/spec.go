@@ -87,6 +87,10 @@ func (a *Agent) onDesired(d *agentv1.DesiredState) {
 	default:
 		spec = &agentv1.NodeSpec{}
 	}
+	if err := validateAccess(spec.GetAccess()); err != nil {
+		a.log.Warn("desired state refused", "generation", generation, "reason", err.Error())
+		return
+	}
 	if roots := a.state.TrustRoots; len(roots) > 0 {
 		if err := pki.VerifyIntent(pki.PurposeDesiredState, d.GetBody(), d.GetSignature(), roots, a.serverNowLocked()); err != nil {
 			a.log.Warn("desired state refused", "generation", generation, "reason", err.Error())

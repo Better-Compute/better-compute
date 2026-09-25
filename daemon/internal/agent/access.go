@@ -49,6 +49,9 @@ func (c *accessConverger) Plan(_ context.Context, desired []byte) ([]converge.Ac
 	if err := proto.Unmarshal(desired, section); err != nil {
 		return nil, converge.Terminal(fmt.Errorf("access section: %w", err))
 	}
+	if err := validateAccess(section); err != nil {
+		return nil, converge.Terminal(err)
+	}
 	c.a.mu.Lock()
 	c.a.execJWKS = section.GetExecTicketJwksJson()
 	c.a.mu.Unlock()
@@ -184,6 +187,37 @@ func buildKRL(caKeys []string, serials []uint64, generation uint64) ([]byte, err
 		str(section.Bytes())
 	}
 	return b.Bytes(), nil
+}
+
+// hasControl reports a control character (a line break would smuggle a second line into an sshd
+// file: another trusted CA, another principal).
+func hasControl(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// validateAccess refuses an access section that could inject lines into sshd's files: a CA key or
+// principal with a control character, a CA key that is not one OpenSSH public key, a principal with
+// whitespace. A spec carrying one is refused whole (onDesired), signed or not.
+func validateAccess(section *agentv1.AccessSection) error {
+	for _, k := range section.GetSshCaPublicKeys() {
+		if hasControl(k) {
+			return errors.New("an SSH CA key contains a control character")
+		}
+		if _, err := sshKeyBlob(k); err != nil {
+			return err
+		}
+	}
+	for _, p := range section.GetSshPrincipals() {
+		if hasControl(p) || strings.ContainsAny(p, " \t") {
+			return errors.New("an SSH principal contains whitespace or a control character")
+		}
+	}
+	return nil
 }
 
 // sshKeyBlob decodes the key blob of an OpenSSH public key line ("<type> <base64> [comment]").
