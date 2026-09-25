@@ -1389,6 +1389,63 @@
       ]
     },
     {
+      "name": "pki renew-ca",
+      "aliases": [],
+      "group": "PKI",
+      "summary": "Renew a CA's certificate under the root, keeping its key",
+      "description": "pki renew-ca issues a new certificate for the node, serving or internal CA from the root CA, for the same key and subject, and writes the bundle back (sealed with BETTER_COMPUTE_SECRET when set). Certificates the CA issued stay valid and the serving CA's SPKI pin does not change, so nothing is re-pinned and no node rejoins; roll the bundle out to every process before the old certificate expires (doctor warns 30 days ahead). The root key comes from the bundle or, for an offline root, from --root-key; it is never written into the bundle then.",
+      "usage": "better-compute pki renew-ca --ca CA [--root-key PATH] [--days N] [--pki PATH]",
+      "target": "none",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--ca",
+          "value": "CA",
+          "optional": false,
+          "description": "Which CA to renew",
+          "choices": ["node", "serving", "internal"]
+        },
+        {
+          "flag": "--root-key",
+          "value": "PATH",
+          "optional": true,
+          "description": "The offline root key (pki init --offline-root), when the bundle has none"
+        },
+        {
+          "flag": "--days",
+          "value": "N",
+          "optional": true,
+          "description": "Lifetime of the new certificate in days (capped by the root)",
+          "default": 365
+        },
+        {
+          "flag": "--pki",
+          "value": "PATH",
+          "optional": true,
+          "description": "The PKI bundle written by pki init",
+          "env": "BETTER_COMPUTE_PKI",
+          "default": ".better-compute/pki.json"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute pki renew-ca --ca node",
+        "better-compute pki renew-ca --ca serving --root-key /media/usb/root-ca.key"
+      ]
+    },
+    {
       "name": "pki issue-gateway",
       "aliases": [],
       "group": "PKI",
