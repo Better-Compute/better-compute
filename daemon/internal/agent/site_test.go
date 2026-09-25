@@ -143,6 +143,21 @@ func TestHTTPProxyRefusesTargetsOutsideTheSite(t *testing.T) {
 			t.Fatalf("%s = %v", target, u)
 		}
 	}
+	// A BMC is never a proxy target: a host this agent drove as a BMC, or a Redfish path.
+	h.agent.rememberBMC("https://10.0.0.9:8443/redfish/v1/Systems/1")
+	for i, target := range []string{"https://10.0.0.9/anything", "http://10.0.0.8/redfish/v1/Systems/1/Actions/ComputerSystem.Reset", "http://10.0.0.8/a/../REDFISH/v1"} {
+		id := "b" + string(rune('0'+i))
+		s.push(command(body(id, "site.httpProxy", &sitev1.HttpProxyRequest{TargetNodeId: "node_1", Url: target, Method: "POST"})))
+		if u := s.update(t, id, commonv1.CommandState_COMMAND_STATE_FAILED); u.GetError().GetCode() != "forbidden-target" {
+			t.Fatalf("%s = %v", target, u)
+		}
+	}
+	if !h.agent.knownBMC("10.0.0.9") || h.agent.knownBMC("10.0.0.10") {
+		t.Fatal("remembered BMC hosts")
+	}
+	if k, _ := h.agent.reg.Lookup("site.httpProxy", "site"); !k.Destructive {
+		t.Fatal("site.httpProxy is not destructive")
+	}
 	for _, ip := range []string{"10.20.0.7", "192.168.1.2", "fd00::1", "100.64.3.4"} {
 		if !siteAddress(net.ParseIP(ip)) {
 			t.Errorf("%s is a site address", ip)

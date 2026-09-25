@@ -103,22 +103,16 @@ func (a *Agent) onCommand(c *agentv1.Command) {
 	}
 }
 
-// badSignature is the signed-intent verdict (PLAN.md §6, §13): with command-signing roots, a
-// signature that is present is always checked, and the daemon's own kind table (never the body)
-// decides whether one is required. Without roots (v0.1) nothing is enforced.
+// badSignature is the signed-intent verdict (PLAN.md §6, §13): with command-signing roots, every
+// command must carry a signature that verifies (a kind's own table no longer decides: an unsigned
+// non-destructive kind could still act, as site.httpProxy did). Without roots (v0.1) nothing is
+// enforced.
 func (a *Agent) badSignature(c *agentv1.Command, body *agentv1.CommandBody) bool {
 	a.mu.Lock()
 	roots := a.state.TrustRoots
 	now := a.serverNowLocked()
 	a.mu.Unlock()
 	if len(roots) == 0 {
-		return false
-	}
-	required := false
-	if k := a.kinds[body.GetKind()]; k != nil {
-		required = k.Destructive
-	}
-	if c.GetSignature() == nil && !required {
 		return false
 	}
 	if err := pki.VerifyIntent(pki.PurposeCommand, c.GetBody(), c.GetSignature(), roots, now); err != nil {

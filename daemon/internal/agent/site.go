@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -44,7 +45,9 @@ func siteKinds(a *Agent) []*Kind {
 		bmc("bmc.rotate", true), // replaces the BMC's credentials
 		bmc("bmc.firmware", true),
 		bmc("bmc.storage", true),
-		{Name: "site.httpProxy", Lane: dispatch.LaneControl, Roles: site, Exec: a.runHTTPProxy},
+		// A request to a machine in the site can change it (a POST to its API): destructive, so signed
+		// and under the quorum like the BMC kinds.
+		{Name: "site.httpProxy", Lane: dispatch.LaneControl, Roles: site, Destructive: true, Exec: a.runHTTPProxy},
 		{Name: "boot.prepareRamdisk", Lane: dispatch.LaneControl, Roles: site, Exec: a.runPrepareRamdisk},
 		{Name: "boot.cleanUp", Lane: dispatch.LaneControl, Roles: site, Exec: a.runBootCleanUp},
 	}
@@ -140,6 +143,7 @@ func (a *Agent) runBMC(ctx context.Context, cmd dispatch.Command) (journal.Resul
 		}
 		args["url"] = cached
 	}
+	a.rememberBMC(req.GetAddress())
 	client, err := redfish.New(req.GetAddress(), cred.Username, cred.Password, req.GetTlsSpkiSha256())
 	if err != nil {
 		return bmcResult(false, nil, "invalid-address", err.Error())
@@ -154,6 +158,54 @@ func (a *Agent) runBMC(ctx context.Context, cmd dispatch.Command) (journal.Resul
 	}
 	a.log.Info("bmc operation", "operation", req.GetOperation(), "bmc", req.GetAddress())
 	return bmcResult(true, result, "", "")
+}
+
+// bmcHostsFile remembers the BMC hosts this site agent has driven (site.httpProxy refuses them).
+const bmcHostsFile = "bmc-hosts.json"
+
+// bmcHost is the host part of a BMC address ("10.0.0.5", "https://bmc:8443/redfish/v1/...").
+func bmcHost(address string) string {
+	if !strings.Contains(address, "://") {
+		address = "https://" + address
+	}
+	if u, err := url.Parse(address); err == nil {
+		return strings.ToLower(u.Hostname())
+	}
+	return ""
+}
+
+// rememberBMC records a BMC host, durably.
+func (a *Agent) rememberBMC(address string) {
+	host := bmcHost(address)
+	if host == "" {
+		return
+	}
+	a.bmcMu.Lock()
+	defer a.bmcMu.Unlock()
+	hosts := a.bmcHostsLocked()
+	if hosts[host] {
+		return
+	}
+	hosts[host] = true
+	raw, _ := json.Marshal(hosts)
+	if err := pki.WriteFileAtomic(filepath.Join(a.o.DataDir, bmcHostsFile), raw, 0o600); err != nil {
+		a.log.Error("remember a BMC host", "error", err.Error())
+	}
+}
+
+func (a *Agent) bmcHostsLocked() map[string]bool {
+	hosts := map[string]bool{}
+	if raw, err := os.ReadFile(filepath.Join(a.o.DataDir, bmcHostsFile)); err == nil {
+		_ = json.Unmarshal(raw, &hosts)
+	}
+	return hosts
+}
+
+// knownBMC reports whether a host (name or address) is a BMC this agent has driven.
+func (a *Agent) knownBMC(host string) bool {
+	a.bmcMu.Lock()
+	defer a.bmcMu.Unlock()
+	return a.bmcHostsLocked()[strings.ToLower(host)]
 }
 
 func str(v any) string {
@@ -208,8 +260,10 @@ func siteAddress(ip net.IP) bool {
 // was checked), https unless the address is private, no redirects, the response capped at 1 MiB,
 // the timeout, and the pinned SPKI when given. Anything else fails "forbidden-target".
 //
-// Gap: the address is not yet checked against target_node_id's own addresses (the site agent does
-// not learn them yet); only site-internal space is enforced.
+// A BMC is never a proxy target: the BMC hosts this agent has driven (bmc.* commands, remembered)
+// and any /redfish path are refused, so a BMC is reached only through the bmc.* kinds and their
+// quorum. (The address is not yet checked against target_node_id's own addresses: the site agent
+// does not learn them yet.)
 func (a *Agent) runHTTPProxy(ctx context.Context, cmd dispatch.Command) (journal.Result, error) {
 	req := &sitev1.HttpProxyRequest{}
 	if err := payloadOf(cmd, req); err != nil {
@@ -221,6 +275,12 @@ func (a *Agent) runHTTPProxy(ctx context.Context, cmd dispatch.Command) (journal
 	u, err := url.Parse(req.GetUrl())
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil {
 		return journal.Result{}, forbidden("url must be http(s) without credentials")
+	}
+	if strings.HasPrefix(strings.ToLower(path.Clean("/"+u.Path)), "/redfish") {
+		return journal.Result{}, forbidden("a BMC API (/redfish) is reached through the bmc.* kinds only")
+	}
+	if a.knownBMC(u.Hostname()) {
+		return journal.Result{}, forbidden("%s is a BMC: it is reached through the bmc.* kinds only", u.Hostname())
 	}
 	method := strings.ToUpper(req.GetMethod())
 	if method == "" {
@@ -238,6 +298,9 @@ func (a *Agent) runHTTPProxy(ctx context.Context, cmd dispatch.Command) (journal
 	for _, ip := range ips {
 		if !siteAddress(ip) {
 			return journal.Result{}, forbidden("%s resolves to %s, outside the site", u.Hostname(), ip)
+		}
+		if a.knownBMC(ip.String()) {
+			return journal.Result{}, forbidden("%s resolves to %s, a BMC", u.Hostname(), ip)
 		}
 	}
 	target := ips[0]

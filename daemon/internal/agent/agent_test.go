@@ -606,6 +606,11 @@ func TestSignedIntentWithRoots(t *testing.T) {
 	if u := s.update(t, "i1", commonv1.CommandState_COMMAND_STATE_REJECTED); u.GetRejectReason() != commonv1.CommandRejectReason_COMMAND_REJECT_REASON_BAD_SIGNATURE {
 		t.Fatalf("mis-signed refresh = %v", u)
 	}
+	// With roots every kind needs a signature, destructive or not.
+	s.push(command(body("i0", "inventory.refresh", nil)))
+	if u := s.update(t, "i0", commonv1.CommandState_COMMAND_STATE_REJECTED); u.GetRejectReason() != commonv1.CommandRejectReason_COMMAND_REJECT_REASON_BAD_SIGNATURE {
+		t.Fatalf("unsigned refresh = %v", u)
+	}
 	// A node-role certificate under the same root is no signer.
 	notWorker := newSigner(t, "node")
 	h.agent.mu.Lock()

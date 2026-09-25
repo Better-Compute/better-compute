@@ -128,6 +128,8 @@ type Agent struct {
 	// uploads are the snapshot files instance.snapshot is uploading (collectSnapshots keeps them).
 	uploads sync.Map
 	cache   *imageCache
+	// bmcMu guards the remembered BMC hosts (site.go).
+	bmcMu sync.Mutex
 	// bootURL is the boot server's own URL (BootHandler), under which it serves the cache.
 	bootURL    string
 	access     *accessConverger
