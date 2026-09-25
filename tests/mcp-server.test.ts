@@ -135,6 +135,7 @@ describe('create_instance', () => {
         imageId: 'ubuntu-24.04',
         sshKeys: ['ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGq3 alice@laptop'],
         idempotencyKey: expect.any(String),
+        wait: { timeoutMs: 20_000 },
       },
     });
   });

@@ -452,6 +452,12 @@ export function computeTools(
             description: 'Public keys to install for the default user',
           },
           idempotencyKey,
+          waitSeconds: {
+            type: 'integer',
+            minimum: 0,
+            maximum: 30,
+            description: 'How long to wait for the instance to start (default 20)',
+          },
         },
         additionalProperties: false,
       },
@@ -471,6 +477,7 @@ export function computeTools(
             imageId: args.imageId,
             ...(args.sshKeys ? { sshKeys: args.sshKeys } : {}),
             idempotencyKey: key,
+            wait: { timeoutMs: ((args.waitSeconds as number | undefined) ?? 20) * 1000 },
           }),
         );
         return { idempotencyKey: key, instance };
