@@ -123,5 +123,10 @@
     "code": "UNAVAILABLE",
     "status": 503,
     "description": ""
+  },
+  {
+    "code": "TENANT_SUSPENDED",
+    "status": 403,
+    "description": ""
   }
 ]

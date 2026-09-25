@@ -26,9 +26,19 @@
       ]
     },
     {
+      "name": "tenancy",
+      "groups": [],
+      "migrations": ["tenancy/0001_tenant_states"]
+    },
+    {
       "name": "pki",
       "groups": [],
       "migrations": ["pki/0001_sealed_secrets"]
+    },
+    {
+      "name": "tunnels",
+      "groups": ["nodes", "tunnels"],
+      "migrations": []
     },
     {
       "name": "provision",
@@ -103,6 +113,8 @@
     "outbox-dispatch",
     "rollout",
     "site-boot",
+    "tenancy",
+    "tunnels.ssh-certificates-gc",
     "vps.bootstraps",
     "vps.hosts",
     "vps.instances",
