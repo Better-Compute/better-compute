@@ -104,6 +104,7 @@ import {
   type FakeDaemonKnobs,
   type FakeKind,
   type FakeKindContext,
+  type FakeKindOutcome,
 } from './kinds.js';
 
 /** Lifecycle of a fake node's daemon process. */
@@ -1134,6 +1135,25 @@ export class FakeDaemon {
   private finishExec(exec: Exec): void {
     const proc = this.requireProcess();
     const outcome = exec.kind.run?.(this.kindContext(exec.body)) ?? { outcome: 'succeeded' as const };
+    if (outcome instanceof Promise) {
+      // An asynchronous side effect (a bcx driver call): completes when it settles, unless the
+      // process died meanwhile (the journal's running entry then recovers as interrupted).
+      void outcome
+        .catch((error: unknown): FakeKindOutcome => ({
+          outcome: 'failed',
+          code: 'internal',
+          message: error instanceof Error ? error.message : String(error),
+        }))
+        .then((settled) => {
+          if (this.proc === proc && proc.execs.get(exec.id) === exec) this.completeExec(exec, settled);
+        });
+      return;
+    }
+    this.completeExec(exec, outcome);
+  }
+
+  private completeExec(exec: Exec, outcome: FakeKindOutcome): void {
+    const proc = this.requireProcess();
     const result: JournalResult =
       outcome.outcome === 'succeeded'
         ? { outcome: 'succeeded', bootId: this.bootIdValue }

@@ -79,7 +79,11 @@ export interface FakeKind {
    * signature when the daemon enforces signed intent (§6, v0.2). Defaults to the wire kind table.
    */
   destructive?: boolean;
-  run?(context: FakeKindContext): FakeKindOutcome;
+  /**
+   * The side effect's outcome, reported once `durationMs` has passed; a Promise (e.g. a bcx driver
+   * call) is reported when it settles, if the process is still the one that started it.
+   */
+  run?(context: FakeKindContext): FakeKindOutcome | Promise<FakeKindOutcome>;
 }
 
 const invalid = (error: unknown): FakeKindOutcome => ({

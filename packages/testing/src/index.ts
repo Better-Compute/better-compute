@@ -144,6 +144,13 @@ export type { AgentFrameValue, DaemonHarness, DaemonHarnessOptions } from './dae
 export { runAgentJoin, type AgentJoinOptions, type AgentJoinResult } from './daemon/join.js';
 export { createWsDialer, type WsDialOptions } from './daemon/ws-dial.js';
 export {
+  DriverInvocationError,
+  invokeDriver,
+  parseDriverInvocation,
+  type DriverInvocation,
+  type DriverInvocationContext,
+} from './daemon/drivers.js';
+export {
   FakeHypervisor,
   overlayPath,
   seedPath,
