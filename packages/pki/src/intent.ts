@@ -1,11 +1,14 @@
-import { verify, type KeyObject } from 'node:crypto';
-import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
+import { createHash, verify, type KeyObject } from 'node:crypto';
+import { create, fromBinary, fromJson, toBinary, type JsonValue } from '@bufbuild/protobuf';
 import { ComputeError, systemClock, type Clock } from '@better-compute/core';
 import {
   CommandBodySchema,
   CommandSchema,
   DesiredStateBodySchema,
   DesiredStateSchema,
+  NodeSpecSchema,
+  protocolRegistry,
+  SignatureSchema,
   signingInput,
   type Command,
   type CommandBody,
@@ -224,6 +227,55 @@ export function verifyCommand(command: Command, options: VerifyIntentOptions): C
 export function signDesiredState(body: DesiredStateBody, key: SigningKey): DesiredState {
   const bytes = toBinary(DesiredStateBodySchema, body);
   return create(DesiredStateSchema, { body: bytes, signature: key.sign('desired-state', [bytes]) });
+}
+
+export interface DesiredStateInput {
+  nodeId: string;
+  /** The generation the spec is written at (`nodes.generation` after the write that stores it). */
+  generation: number | bigint;
+  /** The full NodeSpec as protobuf JSON (`nodes.spec`). */
+  spec: JsonValue;
+  traceparent?: string;
+}
+
+/**
+ * The `DesiredStateBody` of a full spec stored as protobuf JSON: the one encoding both the spec writer (which
+ * signs it) and the gateway (which renders unsigned specs) use, so a stored signature always covers the
+ * bytes the gateway would produce. `spec_hash` is sha256 of the encoded NodeSpec.
+ */
+export function desiredStateBodyFromJson(input: DesiredStateInput): DesiredStateBody {
+  const spec = fromJson(NodeSpecSchema, input.spec, { registry: protocolRegistry });
+  return create(DesiredStateBodySchema, {
+    nodeId: input.nodeId,
+    generation: BigInt(input.generation),
+    baseGeneration: 0n,
+    specHash: new Uint8Array(createHash('sha256').update(toBinary(NodeSpecSchema, spec)).digest()),
+    spec: { case: 'full', value: spec },
+    traceparent: input.traceparent ?? '',
+  });
+}
+
+/**
+ * What the spec writer stores beside `nodes.spec`: the encoded body and, with a worker key, the encoded
+ * `Signature` over it (purpose `desired-state`). The gateway relays both verbatim (`desiredStateFromStored`).
+ */
+export function storedDesiredState(
+  input: DesiredStateInput,
+  key?: SigningKey,
+): { body: Uint8Array; signature: Uint8Array | null } {
+  const body = toBinary(DesiredStateBodySchema, desiredStateBodyFromJson(input));
+  return {
+    body,
+    signature: key ? toBinary(SignatureSchema, key.sign('desired-state', [body])) : null,
+  };
+}
+
+/** The `DesiredState` frame for stored bytes (`nodes.spec_body`, `nodes.spec_signature`). */
+export function desiredStateFromStored(body: Uint8Array, signature?: Uint8Array | null): DesiredState {
+  return create(DesiredStateSchema, {
+    body,
+    ...(signature?.byteLength ? { signature: fromBinary(SignatureSchema, signature) } : {}),
+  });
 }
 
 /** The daemon's check of a `DesiredState`. Throws `ACCESS_DENIED`. */
