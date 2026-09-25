@@ -6,7 +6,7 @@ import {
   type Reconciler,
   type SqlTx,
 } from '@better-compute/core';
-import { schedulableSql, wakePendingForNode } from '@better-compute/capacity';
+import { schedulableSql, wakePendingForNode, wakeStartedOnNode } from '@better-compute/capacity';
 import { reconcileDrain } from './controllers/drain.js';
 import { lifecycleIn } from './controllers/lifecycle.js';
 import {
@@ -66,33 +66,50 @@ export async function reconcileNode(
   context: ModuleContext,
   nodeId: string,
   schedulable?: Set<string>,
+  /** The connectivity this worker last saw per node: a change wakes the node's started reservations. */
+  connectivity?: Map<string, string>,
 ): Promise<'DONE' | 'SYNC_AGAIN'> {
   // One fenced transaction for the whole pass: a join storm runs this ~4 times per node, and each
   // transaction costs a fence and a round trip on top of its statements.
-  const { lifecycle, nowSchedulable } = await context.sql.transaction(async (tx) => {
+  const { lifecycle, now } = await context.sql.transaction(async (tx) => {
     const lifecycle = await lifecycleIn(context, tx, nodeId);
     await livenessIn(context, tx, nodeId, { timeouts: false });
     await refreshNodeAuthz(tx, context.authz, nodeId);
-    if (!schedulable) return { lifecycle, nowSchedulable: undefined };
-    const ok = await isSchedulable(tx, nodeId);
-    // The wake commits with the pass; `schedulable` records the edge only once it has.
-    if (ok && !schedulable.has(nodeId)) await wakePendingForNode(tx, context.work, nodeId);
-    return { lifecycle, nowSchedulable: ok };
+    if (!schedulable && !connectivity) return { lifecycle, now: undefined };
+    const now = await nodeEdges(tx, nodeId);
+    if (!now) return { lifecycle, now: undefined };
+    // The wakes commit with the pass; the edges are recorded only once they have.
+    if (schedulable && now.schedulable && !schedulable.has(nodeId))
+      await wakePendingForNode(tx, context.work, nodeId);
+    // Binding and active reservations re-derive their conditions (Degraded, NodeUnreachable) at
+    // once instead of at their periodic recheck; conditions only, nothing is released (P6).
+    const schedulableChanged = schedulable && now.schedulable !== schedulable.has(nodeId);
+    if (schedulableChanged || (connectivity && connectivity.get(nodeId) !== now.connectivity))
+      await wakeStartedOnNode(tx, context.work, nodeId);
+    return { lifecycle, now };
   });
-  if (schedulable && nowSchedulable !== undefined) {
-    if (nowSchedulable) schedulable.add(nodeId);
-    else schedulable.delete(nodeId);
+  if (now) {
+    if (schedulable) {
+      if (now.schedulable) schedulable.add(nodeId);
+      else schedulable.delete(nodeId);
+    }
+    connectivity?.set(nodeId, now.connectivity);
   }
   return lifecycle;
 }
 
-/** Whether the node is schedulable now (capacity's definition), read in the pass's transaction. */
-async function isSchedulable(tx: SqlTx, nodeId: string): Promise<boolean> {
-  const { rows } = await tx.query<{ ok: boolean }>(
-    `SELECT (${schedulableSql}) AS ok FROM nodes n JOIN pools p ON p.id = n.pool_id WHERE n.id = $1`,
+/** The node's schedulability (capacity's definition) and connectivity, in the pass's transaction. */
+async function nodeEdges(
+  tx: SqlTx,
+  nodeId: string,
+): Promise<{ schedulable: boolean; connectivity: string } | undefined> {
+  const { rows } = await tx.query<{ ok: boolean | null; connectivity: string }>(
+    `SELECT (p.id IS NOT NULL AND (${schedulableSql})) AS ok, n.connectivity
+       FROM nodes n LEFT JOIN pools p ON p.id = n.pool_id WHERE n.id = $1`,
     [nodeId],
   );
-  return rows[0]?.ok === true;
+  const row = rows[0];
+  return row && { schedulable: row.ok === true, connectivity: row.connectivity };
 }
 
 /** The built-in node controllers module. */
@@ -104,11 +121,13 @@ export function createNodesModule(
   const liveness = createLivenessState();
   // Per worker: a restart forgets it, so the first pass over a schedulable node wakes once more.
   const schedulable = new Set<string>();
+  const connectivity = new Map<string, string>();
   const reconcilers: Reconciler[] = [
     {
       name: nodeWorkKind,
       shardBy: 'node',
-      run: (context: ReconcileContext, key: string) => reconcileNode(context, key, schedulable),
+      run: (context: ReconcileContext, key: string) =>
+        reconcileNode(context, key, schedulable, connectivity),
     },
     {
       name: nodeSpecWorkKind,

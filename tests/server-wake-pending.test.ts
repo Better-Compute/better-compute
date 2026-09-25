@@ -86,4 +86,50 @@ describe('pending reservations wake on a schedulable edge', () => {
     await runNode(fixture);
     expect(await wakeGen(fixture)).toBeGreaterThan(first!);
   });
+
+  it('wakes the node’s started reservations when its connectivity or schedulability changes', async () => {
+    const fixture = await setup();
+    const ACTIVE = 'rsv_wake2';
+    await fixture.database.query(
+      `INSERT INTO reservations (id, tenant_id, pool_id, state, request, request_hash, owner_identity_id,
+         idempotency_key, version)
+       VALUES ($1, $2, $3, 'active', '{}', '\\x00', 'id-owner', 'key-2', 1)`,
+      [ACTIVE, fixture.tenants.root.id, POOL],
+    );
+    await fixture.database.query(
+      `INSERT INTO allocations (id, tenant_id, pool_id, node_id, owner_kind, owner_id, during, version)
+       VALUES ('alloc_wake2', $1, $2, $3, 'reservation', $4, tstzrange(compute_now(), NULL), 1)`,
+      [fixture.tenants.root.id, POOL, NODE, ACTIVE],
+    );
+    const activeGen = async () => {
+      const { rows } = await fixture.database.query<{ gen: unknown }>(
+        `SELECT gen FROM work_queue WHERE kind = 'capacity.reservations' AND key = $1`,
+        [ACTIVE],
+      );
+      return rows[0] ? Number(rows[0].gen) : 0;
+    };
+    // The first pass of a worker sees the node for the first time: one wake.
+    await runNode(fixture);
+    const seen = await activeGen();
+    expect(seen).toBeGreaterThan(0);
+    // Nothing changed: no wake.
+    await runNode(fixture);
+    expect(await activeGen()).toBe(seen);
+    // Uncordoned (schedulable now): a wake.
+    await fixture.database.query('UPDATE nodes SET cordoned = false WHERE id = $1', [NODE]);
+    await runNode(fixture);
+    const uncordoned = await activeGen();
+    expect(uncordoned).toBeGreaterThan(seen);
+    // Its gateway is gone and the session closed: disconnected, a wake.
+    await fixture.database.query("DELETE FROM leases WHERE name = 'gateway:gw_wake'");
+    await fixture.database.query(
+      'UPDATE node_sessions SET disconnected_at = compute_now() WHERE node_id = $1',
+      [NODE],
+    );
+    await fixture.database.query("UPDATE nodes SET connectivity = 'disconnected' WHERE id = $1", [
+      NODE,
+    ]);
+    await runNode(fixture);
+    expect(await activeGen()).toBeGreaterThan(uncordoned);
+  });
 });
