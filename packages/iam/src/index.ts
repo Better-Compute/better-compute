@@ -17,4 +17,5 @@ export * from './spy.js';
 export * from './confirmation.js';
 export * from './remote.js';
 export * from './sessions.js';
+export * from './streams.js';
 export * from './bridge.js';
