@@ -80,6 +80,8 @@ type Options struct {
 	HTTPClient *http.Client
 	// ImageCache is the site image cache's base URL a ramdisk tries before an image's source.
 	ImageCache string
+	// CacheMaxBytes is the site image cache's byte budget (0 = unbounded).
+	CacheMaxBytes uint64
 	// Runtimes are the instance runtimes this host runs (VPS hosts; none elsewhere).
 	Runtimes []runtime.Runtime
 	// DialTunnel opens Tunnel streams; nil refuses every OpenTunnel.
@@ -233,6 +235,7 @@ func New(o Options) (*Agent, error) {
 	a.boot = newBootEntries(o.DataDir)
 	a.cache = newImageCache(filepath.Join(o.DataDir, "cache"))
 	a.cache.changed = a.refreshSections
+	a.cache.maxBytes = o.CacheMaxBytes
 	a.loadFaults()
 	a.access = &accessConverger{a: a}
 	a.key.Store(o.Key)

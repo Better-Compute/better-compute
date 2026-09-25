@@ -131,6 +131,9 @@ type Boot struct {
 	// TFTP is the TFTP server's UDP address (e.g. ":69") and TFTPRoot the iPXE builds it serves.
 	TFTP     string
 	TFTPRoot string
+	// CacheMaxBytes bounds the site image cache (0 = unbounded); least recently used images outside
+	// the pools' keep set are evicted.
+	CacheMaxBytes int64
 }
 
 // Journal bounds the journal. Values may lower the PLAN.md §6 caps but never raise them.
@@ -319,6 +322,7 @@ var fields = []field{
 	{section: "boot", key: "server_ip", kind: kindString, set: func(c *Config, v value) { c.Boot.ServerIP = v.str }},
 	{section: "boot", key: "proxy_dhcp", kind: kindBool, set: func(c *Config, v value) { c.Boot.ProxyDHCP = v.boolean }},
 	{section: "boot", key: "tftp", kind: kindString, set: func(c *Config, v value) { c.Boot.TFTP = v.str }},
+	{section: "boot", key: "cache_max_bytes", kind: kindInt, set: func(c *Config, v value) { c.Boot.CacheMaxBytes = v.num }},
 	{section: "boot", key: "tftp_root", kind: kindString, set: func(c *Config, v value) { c.Boot.TFTPRoot = v.str }},
 	{section: "boot", key: "url", kind: kindString, set: func(c *Config, v value) { c.Boot.URL = v.str }},
 	{section: "boot", key: "cmdline", kind: kindString, set: func(c *Config, v value) { c.Boot.Cmdline = v.str }},

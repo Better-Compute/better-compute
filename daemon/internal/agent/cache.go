@@ -38,8 +38,10 @@ type imageCache struct {
 	mu      sync.Mutex
 	pulling map[string]string // digest → ref
 	failed  map[string]string
-	// changed is called when an image becomes ready (the inventory's images section changes).
+	// changed is called when an image becomes ready or is evicted (the images section changes).
 	changed func()
+	// maxBytes is the cache's byte budget (0 = unbounded): evict trims to it.
+	maxBytes uint64
 }
 
 type cacheMeta struct {
@@ -88,6 +90,7 @@ func (c *imageCache) section() *agentv1.ImagesSection {
 		s.Images = append(s.Images, img)
 		s.UsedBytes += img.SizeBytes
 	}
+	s.CapacityBytes = c.maxBytes
 	c.mu.Lock()
 	for digest, ref := range c.pulling {
 		raw, _ := hex.DecodeString(digest)
@@ -164,6 +167,55 @@ func (c *imageCache) warm(ctx context.Context, images []*sitev1.CacheImage, clie
 		}(img.GetUrl(), digest)
 	}
 	return missing, failures
+}
+
+// evict trims the cache to its byte budget, least recently used first, never touching an image of
+// keep (SiteSpec.cache_images: the pools' pre-warm images and those a deploy at the site is
+// streaming). It returns how many images it removed.
+func (c *imageCache) evict(keep map[string]bool) int {
+	if c.maxBytes == 0 {
+		return 0
+	}
+	type entry struct {
+		digest string
+		size   uint64
+		used   time.Time
+	}
+	var entries []entry
+	var total uint64
+	files, _ := os.ReadDir(c.dir)
+	for _, f := range files {
+		if !digestPath.MatchString(f.Name()) {
+			continue
+		}
+		info, err := f.Info()
+		if err != nil {
+			continue
+		}
+		e := entry{digest: f.Name(), size: uint64(info.Size()), used: c.meta(f.Name()).LastUsed}
+		total += e.size
+		entries = append(entries, e)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].used.Before(entries[j].used) })
+	removed := 0
+	for _, e := range entries {
+		if total <= c.maxBytes {
+			break
+		}
+		if keep[e.digest] {
+			continue
+		}
+		if err := os.Remove(c.path(e.digest)); err != nil {
+			continue
+		}
+		_ = os.Remove(c.path(e.digest) + ".json")
+		total -= e.size
+		removed++
+	}
+	if removed > 0 && c.changed != nil {
+		c.changed()
+	}
+	return removed
 }
 
 // pull downloads url, verifying its digest before the copy becomes visible.

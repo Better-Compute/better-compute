@@ -109,6 +109,13 @@ func (c siteConverger) Plan(_ context.Context, desired []byte) ([]converge.Actio
 	if changed {
 		c.a.log.Info("boot lease", "active", lease.active, "epoch", lease.epoch, "ttl", lease.ttl.String())
 	}
+	keep := map[string]bool{}
+	for _, img := range spec.GetCacheImages() {
+		keep[fmt.Sprintf("%x", img.GetSha256())] = true
+	}
+	if n := c.a.cache.evict(keep); n > 0 {
+		c.a.log.Info("image cache evicted", "images", n)
+	}
 	if len(spec.GetCacheImages()) > 0 {
 		ctx := c.a.ctx
 		if ctx == nil {

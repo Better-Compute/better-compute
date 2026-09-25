@@ -124,3 +124,34 @@ func TestDeployImageFromTheSiteCache(t *testing.T) {
 		t.Fatal("the disk does not hold the cached image")
 	}
 }
+
+func TestCacheEvictsLeastRecentlyUsedOutsideTheKeepSet(t *testing.T) {
+	c := newImageCache(t.TempDir())
+	c.maxBytes = 250
+	_ = os.MkdirAll(c.dir, 0o755)
+	put := func(name string, size int, used time.Time) string {
+		digest := hex.EncodeToString(bytes.Repeat([]byte(name), 32))[:64]
+		_ = os.WriteFile(c.path(digest), make([]byte, size), 0o644)
+		c.saveMeta(digest, cacheMeta{Ref: "https://img/" + name, LastUsed: used})
+		return digest
+	}
+	now := time.Now()
+	oldest := put("a", 100, now.Add(-3*time.Hour))
+	pinned := put("b", 100, now.Add(-2*time.Hour))
+	newest := put("c", 100, now.Add(-time.Hour))
+	changed := 0
+	c.changed = func() { changed++ }
+	if n := c.evict(map[string]bool{pinned: true}); n != 1 || changed != 1 {
+		t.Fatalf("evicted %d (changed %d)", n, changed)
+	}
+	if c.has(oldest) || !c.has(pinned) || !c.has(newest) {
+		t.Fatal("the wrong image went")
+	}
+	// Under budget: nothing more goes; the pinned image stays even when it is the oldest.
+	if n := c.evict(map[string]bool{pinned: true}); n != 0 {
+		t.Fatalf("evicted %d under budget", n)
+	}
+	if sec := c.section(); sec.GetCapacityBytes() != 250 || sec.GetUsedBytes() != 200 {
+		t.Fatalf("section = %v", sec)
+	}
+}

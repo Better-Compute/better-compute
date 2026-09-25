@@ -266,11 +266,12 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 			old := client.Swap(next)
 			old.Close()
 		},
-		SignerPin:  signerPin,
-		ImageCache: cfg.ImageCache,
-		Runtimes:   runtimesFor(mode, cfg.DataDir, host),
-		Version:    version,
-		Log:        log,
+		SignerPin:     signerPin,
+		ImageCache:    cfg.ImageCache,
+		Runtimes:      runtimesFor(mode, cfg.DataDir, host),
+		CacheMaxBytes: uint64(max(cfg.Boot.CacheMaxBytes, 0)),
+		Version:       version,
+		Log:           log,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
