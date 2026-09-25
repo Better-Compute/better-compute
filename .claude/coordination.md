@@ -131,6 +131,19 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
   (§8.5): `packages/server/src/runtime/{workers,leases,reconcilers}.ts`, `tests/server-runtime-*`. No core/migration
   changes expected; column asks go to [f02367].
 
+- [402c97] round 4 (CLI/examples/dev stack, pki, security, tunnels, signed intent, console): exit gaps DONE: support
+  bundle + pki `redactSecrets` (2daaa64), packed-smoke wrapper (2c7b18e), v0.3 access e2e tests/e2e/access.test.ts
+  (replayed ticket at gateway AND daemon; delegation:revoke closes tunnel + /watch < 5 s; sign-out closes /watch).
+  Host: `host.iam` = installIamHandlers (agent → tunnels on every live gateway + local SSE; session revocations name
+  the IDENTITY in better-iam, so they close its SSE and re-authorize its tunnels; ended identities close tunnels)
+  (d97af21, 6531312, 6ff87cf); watchAuthorizer (/watch decided as events.list, a0459bb); host.mcp +
+  computeMcpEndpoint (21ff826); databaseCollector + doctor iam.refresh (328f6d5); workload OIDC discovery/JWKS
+  routes (8e02aac); gateway/internal `tlsFiles` hot reload (c6fe0e7); CLI saved credentials + `auth
+  login|status|logout` (e1b5244); console events/audit/retention/IAM handlers + watch registry (16c5760, 6531312).
+  Signed NodeSpecs: pki encoder (1a09f0a), writer (8152140), FakeDaemon `intent.signedSpecs` (e4b5e08).
+  W1 daemon TODO: bcd verifies DesiredState like commands: a signature is required when the spec changes `access`
+  (v0.2) and always from v0.4; a present signature is always checked; refused specs are not applied.
+
 ## v0.1 allocation (set by the orchestrator, Better-compute architecture plan [56cfd7], 2026-09-24)
 
 P0 is committed (3a70aa0, `pnpm check` green). v0.1 = PLAN.md §16 "Adopt & reserve". One owner per unit; message the
