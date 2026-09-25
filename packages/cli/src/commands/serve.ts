@@ -20,6 +20,7 @@ import { startGateway, type RunningGateway } from '../host/gateway.js';
 import { hostListener } from '../host/http.js';
 import { installIamHandlers } from '../host/iam.js';
 import { startHostMetrics } from '../host/metrics.js';
+import { workloadRoutes } from '../host/workload.js';
 import { mountTunnels, type TunnelMount } from '../host/tunnels.js';
 
 // `serve` and `dev` (PLAN.md §9.3): one process runs the HTTP API (`compute.nodeHandler`) and the
@@ -132,8 +133,11 @@ export async function runServer(
         ? mountTunnels(compute, options.computeOptions, options.hostConfig?.tunnels)
         : undefined;
       const http = withMetricsRoute(options.hostConfig);
+      // Workload identity's OIDC discovery and JWKS, when the deployment issues workload tokens.
+      const workload = options.computeOptions ? workloadRoutes(options.computeOptions) : [];
       const listener = hostListener(compute, {
         ...http,
+        routes: [...(http?.routes ?? []), ...workload],
         upgrade: [...(tunnels ? [tunnels.upgrade] : []), ...(http?.upgrade ?? [])],
       });
       if (tunnels) options.note(`Tunnels: ${compute.endpoint.basePath}/tunnels/{ticket}`);

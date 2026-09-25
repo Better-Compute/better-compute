@@ -109,6 +109,7 @@ export {
 } from './credentials.js';
 export { mcpRoutes, type HostMcpConfig } from './host/config.js';
 export { hostCertificates, startHostMetrics } from './host/metrics.js';
+export { workloadRoutes } from './host/workload.js';
 export {
   buildSupportBundle,
   knownSecrets,
