@@ -85,6 +85,7 @@ describe('migrate', () => {
       'core/0023_session_trust_version',
       'core/0024_session_capabilities',
       'core/0025_secret_scope',
+      'core/0026_session_approver_set',
     ]);
     expect(await db.migrate()).toEqual({ applied: names, skipped: [] });
     expect(await db.migrate()).toEqual({ applied: [], skipped: names });
