@@ -134,6 +134,9 @@ better-compute batch show --batch batch_… [--scope-out batch.json]
 better-compute batch approve --batch batch_… --key ~/.better-compute/approver.pem [--expect my-nodes.txt] --yes
 better-compute batch sign --key approver.pem --scope batch.json   # offline; then approve --signature FILE
 better-compute batch cancel --batch batch_…
+better-compute batch create --reason "reimage rack 7" --scope rack7.json   # [{ subject, kind, payload: { json } }]
+better-compute batch members --batch batch_…                               # its commands, held or run
+better-compute pki trust-version   # published version/epoch, the approver-set pin, nodes on another set
 ```
 
 - **`batch keygen`** writes the private key (mode 0600, encrypted under `BETTER_COMPUTE_APPROVER_PASSPHRASE`
@@ -153,8 +156,12 @@ better-compute batch cancel --batch batch_…
   `BETTER_COMPUTE_TRUST_DOMAIN`, or it comes from the local PKI bundle; never from the server. A batch or scope
   file of another domain is refused with `TRUST_DOMAIN_MISMATCH`.
 - `batch approve` and `batch sign` also show each operation a leaf binds, decoded from the stored payload the leaf's
-  digest covers. A payload that isn't the bound one is `SCOPE_MISMATCH`. Leaves shown only as a digest need
-  `--allow-opaque`.
+  digest covers. Payloads are decoded as the kind's own type and grouped by digest; `--operations-out FILE` writes
+  them in full. A payload that isn't the bound one, or that carries fields this CLI can't show, is `SCOPE_MISMATCH`.
+  Leaves shown only as a digest, and kinds whose type isn't known here, need `--allow-opaque`.
+- `daemon install-script --approver-set-sha256` pins a new node's first approver set; the digest comes from
+  `pki trust-version`, computed from the configured keys. `--release-pins`, `--release-sequence` and
+  `--bmc-networks` write bcd's `[update]` and `[site]` sections.
 - Key files readable by others are refused, as ssh does.
 
 ## Output and exit codes
