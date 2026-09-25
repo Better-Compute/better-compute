@@ -59,13 +59,13 @@ each kind is data: a binding on the node, inherited from its pool's hardware pro
 - **Declarations work.** `defineDriver`, the driver kinds, `drivers.list`, hardware profiles and per-node bindings are
   implemented and tested.
 - **The built-in drivers run in bcd, partly.** They live inside `bcd site` and `bcd ramdisk`, the Go daemon's v0.2
-  modes, which are written but not released. Redfish, PXE and iPXE, image streaming and kexec are there; IPMI and
-  the vendor BMCs through bmclib are not, and nor are BIOS, RAID and firmware updates through Redfish. See
+  modes, which are written but not released. Redfish (with BIOS settings, RAID layouts and firmware updates), PXE
+  and iPXE, image streaming and kexec are there; IPMI and the vendor BMCs through bmclib are not. See
   [what bcd does today](/docs/daemon#what-bcd-does-today).
 - **No control-plane code calls a driver's operations yet.** Metal's BMC steps build commands for the site agent
   instead. Direct calls from TypeScript (`ctx.drivers.for(node)`) are planned for v0.5.
 - **bcx works in TypeScript and in bcd.** `@better-compute/driver-sdk` (v0.5 draft) serves and hosts plugins end to
-  end, with real subprocesses in its tests. bcd hosts sha256-pinned plugins from its `[plugins] dir` and runs
+  end, with real subprocesses in its tests. bcd hosts sha256-pinned, sandboxed plugins from its `[plugins] dir` and runs
   `driver.invoke` in them (`daemon/internal/bcx`, Go unit tests only); see
   [driver plugins in bcd](#driver-plugins-in-bcd). The control plane still does not merge the drivers a daemon
   advertises into its registry.
@@ -407,10 +407,12 @@ per plugin (`#` comments and blank lines are skipped). Keep both root-owned, lik
 
 At start, before its session opens, the agent runs every plugin the `pins` file names:
 
-1. It hashes the binary and refuses to run it unless the SHA-256 equals its pin.
+1. It opens the binary, hashes it through that open file and refuses to run it unless the SHA-256 equals its pin.
+   On Linux the plugin is then executed from the same open file (fd 3, `/proc/self/fd/3`), never by path again, so
+   what runs is what was hashed even if the file at the path is replaced in between.
 2. It makes an ephemeral self-signed P-256 certificate and a fresh 0700 socket directory, and execs the plugin with
-   only `PATH`, `BCX_MAGIC_COOKIE`, `BCX_SOCKET_DIR` and `BCX_CLIENT_CERT` in its environment. The plugin's stderr goes
-   to bcd's.
+   only `PATH`, `BCX_MAGIC_COOKIE`, `BCX_SOCKET_DIR` and `BCX_CLIENT_CERT` in its environment, sandboxed as
+   [below](#the-plugin-sandbox). The plugin's stderr goes to bcd's.
 3. It waits up to 10 seconds for the handshake line (`bcx|1|unix|<socket>|grpc|<cert>`), dials the socket over gRPC
    with mTLS, pinning the plugin's certificate byte for byte, and calls `Describe`; a plugin that reports a bcx
    protocol other than 1 is stopped.
@@ -421,9 +423,47 @@ A missing `pins` file runs no plugin (logged as a warning); an unreadable pin li
 fails to start is logged and skipped. Plugins are stopped with the agent. Two paths reach them: `driver.invoke`,
 below, and, on `bcd node`, the `instances` converger, which runs a hosted driver of kind `runtime` whose id is not a
 built-in runtime as one of its runtimes (`list`, `apply(spec)`, `remove(id)` over `Invoke`; snapshots unsupported).
-See [walkthrough 4](/docs/extending/walkthroughs#walkthrough-4-a-kata-runtime-over-bcx). bcd does not restart a plugin that exits,
-does not call `Health` on its own, and runs plugins as its own user: PLAN.md §5.5's separate uid, seccomp and cgroup
-limits are not built.
+See [walkthrough 4](/docs/extending/walkthroughs#walkthrough-4-a-kata-runtime-over-bcx). bcd does not restart a plugin that exits
+and does not call `Health` on its own.
+
+#### The plugin sandbox
+
+On Linux bcd runs every plugin confined, as PLAN.md §5.5 asks, set by the rest of the `[plugins]` section:
+
+```toml title="/etc/bcd/config.toml"
+[plugins]
+dir = "/etc/bcd/plugins.d"
+# user = "bcx"                         # unset (the default): each plugin gets its own uid
+privileged = "kata"                    # comma-separated: plugins that run as root, unfiltered
+sandbox = true                         # the default: no_new_privs + seccomp through bcd's shim
+cgroup = "/sys/fs/cgroup/bcd.plugins"  # a delegated cgroup v2 directory (Delegate=yes)
+memory_max = 1_073_741_824             # bytes per plugin; 0 or unset: no limit
+pids_max = 256                         # tasks per plugin; 0 or unset: no limit
+```
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `user` | none | When bcd runs as root, unset gives each plugin its own uid and gid in systemd's dynamic range (61184 to 65519), derived from its name so it is stable across restarts, so no plugin can read another's memory. Set, every plugin runs as that account and its primary group. Either way no supplementary groups, and the socket directory is chowned to the plugin. `root` (or `0`) is a configuration error, and an account that resolves to uid 0 or does not exist keeps that plugin from running (logged). Ignored when bcd is not root |
+| `privileged` | none | Plugins, by name and comma-separated, that run as root without the shim or the filter: a runtime plugin that makes namespaces and mounts (Kata). Each is logged at start as a privileged plugin. Every other plugin is confined |
+| `sandbox` | `true` | Runs each unprivileged plugin through bcd itself as a shim (the hidden `bcd __bcx-exec <name>` command, `bcx.RunShim`): on one locked OS thread it sets `no_new_privs`, installs a seccomp filter synchronised to every thread (`SECCOMP_FILTER_FLAG_TSYNC`), then execs the verified binary from fd 3. `false` drops the shim; the uid still applies |
+| `cgroup` | none | An absolute path to a delegated cgroup v2 directory; each plugin, privileged ones included, runs in its own child `bcx-<name>` |
+| `memory_max` | none | Written to the child cgroup's `memory.max` |
+| `pids_max` | none | Written to the child cgroup's `pids.max` |
+
+The seccomp filter (amd64 and arm64) answers `EPERM` to what no driver plugin needs and a compromised one could abuse:
+kexec, loading and deleting kernel modules, mounts (`mount`, `umount2`, `pivot_root` and the new mount API),
+namespaces (`unshare`, `setns`, and `clone` with any `CLONE_NEW*` flag), swap, reboot, `bpf`, `io_uring_*`, `ptrace`
+and `process_vm_readv`/`writev`, the kernel keyring, `perf_event_open`, `userfaultfd`, `open_by_handle_at`,
+`iopl`/`ioperm` (amd64), setting the clock, `acct`, `quotactl`, `lookup_dcookie` and `syslog`. `clone3` answers
+`ENOSYS`, since its flags are out of a filter's reach and libc and Go fall back to `clone`. So a plugin cannot make a
+user and network namespace to reach `nf_tables`. A system call from another ABI (x32, a foreign architecture) kills
+the process. On other architectures the shim installs no filter.
+
+Every plugin also runs in its own process group, is killed if bcd dies (`Pdeathsig`), and is killed as a group on
+close, so whatever it started goes with it. The sandbox is Linux only: on another OS bcd runs a plugin by path and
+refuses to start it when a shim, a user or a cgroup is asked for, so there a plugin runs only with
+`sandbox = false`. The Go tests check that a sandboxed plugin's `perf_event_open` and `unshare(CLONE_NEWUSER)` get
+the filter's `EPERM`, that `/proc/<pid>/exe` is the verified binary, and that the keys parse and validate.
 
 `driver.invoke` then runs in them, as the FakeDaemon's `fakeDriverInvoke` does:
 

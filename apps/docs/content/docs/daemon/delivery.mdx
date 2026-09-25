@@ -179,16 +179,31 @@ agents, over the runtimes the build provides) follows the FakeDaemon's `FakeHype
   (`ERROR` with its message); the section is then `FAILED` with reason `InstanceFailed`.
 - On a host with a runtime, every status report lists everything the runtimes hold in `StatusReport.instances`,
   with `instances_complete`.
-- `restore_from` boots a new instance from a snapshot instead of an image. bcd downloads it to
-  `data_dir/snapshots/<sha256>` and verifies it first; a missing digest, a mismatch, another runtime, or a memory
-  snapshot from another CPU model fails that instance. The `instance.snapshot` command writes one: the runtime
-  captures the disk (and with `include_memory` the memory state), and bcd hashes it and uploads it to a presigned
-  https URL.
+- `restore_from` boots a new instance from a snapshot instead of an image. bcd downloads it, over https only since a
+  snapshot may hold a tenant's memory, to `data_dir/snapshots/<sha256>` and verifies it first; an `http://` URL, a
+  missing digest, a mismatch, another runtime, or a memory snapshot from another CPU model fails that instance. A
+  downloaded snapshot is deleted once no spec restores from it (it goes with its instance), on every pass of the
+  converger. The `instance.snapshot` command writes one: the runtime captures the disk (and with `include_memory`
+  the memory state) into a staging file under `data_dir/snapshots` (the data disk, never a tmpfs), and bcd hashes it
+  and uploads it to a presigned https URL. Uploads a crash left behind are deleted too. Both transfers follow
+  redirects only to https, and end after 2 minutes without progress or 6 hours in all, so a stalled PUT cannot pin a
+  bulk worker and a stalled restore cannot block the converger (509b937).
 
 - Before any domain starts, the instances' `network_policy` becomes host nftables rules on their taps (one
   `bcd_instances` table, replaced atomically): `PRIVATE` keeps a NIC to its IPAM subnets and the host, `NONE` to the
   host only, `EGRESS` adds nothing. A policy that cannot be expressed (a NIC without IPAM addresses), or rules that
-  fail to load, fail the instance and stop it if it runs.
+  fail to load, fail the instance and stop it if it runs. Taps are matched by the name every runtime gives them
+  (`runtime.TapName`), so the rules exist before the tap does. Whatever the policy, every tap whose NIC has a MAC and
+  IPAM addresses is anti-spoofed in the same table: frames must carry the NIC's MAC, IP packets its own addresses
+  (plus `0.0.0.0`, `::` and `fe80::/10` for DHCP and neighbour discovery), ARP its own IPv4 addresses; each guarded
+  address is bound to its tap, so no other port may send from it or claim it (ARP, neighbour adverts), guarded taps
+  may not answer as a DHCP server or a router, and a deleted instance keeps its guard until its domain is gone. The
+  metadata service and instance tunnels, which name an instance by its address, trust only addresses the loaded rules
+  bind, never one two instances claim. bcd checks every 30 seconds that the table still exists (`nft list table`), so
+  a reload or `flush ruleset` ends that trust at once; a host whose nft cannot load the table keeps egress instances
+  running, logs a warning and retries on the next pass. bcd advertises the `Hello` capability `instance.network-policy` on
+  hosts with a runtime, which the gateway writes as the node label `bc.dev/cap.instance.network-policy=1`; vps
+  places `private` and `none` instances only there.
 
 Only fakehw builds have a built-in runtime: a file-backed stand-in named `libvirt-kvm` whose domains outlive the
 process and honor vCPU and memory limits. On `bcd node`, a bcx plugin whose driver lists the kind `runtime` is also a
@@ -219,6 +234,7 @@ the gateway resends exactly those bytes.
 | `attested` | The result must be node-signed (verified from v0.2) |
 | `workflow_id`, `step_id` | The workflow step this command executes; secrets bind to it (v0.2) |
 | `traceparent` | W3C trace context, from the api through the worker and gateway to the daemon and driver |
+| `batch_id` | The destructive batch the command belongs to (v1.0 quorum), set by `enqueue({ batchId })`; empty for an unbatched command |
 
 The gateway also guards the stored body before sending it: a body that does not decode, lacks `not_after`, or names
 another command or node is cancelled with reason `invalid-body` instead of sent.
@@ -255,10 +271,13 @@ crash interrupted, then passes these checks in order:
    `EXPIRED`, so the control plane always sets one.
 4. **`BAD_SIGNATURE`**: a missing, unknown-key or invalid signature on a kind that requires one, or an invalid
    signature on any kind.
-5. **`BUSY`**: no free credit on the lane, or the journal is full. Not terminal: see
+5. **`BATCH_UNAPPROVED`**, **`UNBATCHED_LIMIT`** (v1.0): with approver keys in the trust bundle, a
+   destructive command whose batch approval or scope proof does not admit it, or an unbatched one beyond the hourly
+   allowance. See [the quorum](#signed-commands-and-attested-results).
+6. **`BUSY`**: no free credit on the lane, or the journal is full. Not terminal: see
    [BUSY](/docs/daemon/sessions#busy).
 
-`UNSUPPORTED`, `EXPIRED`, `STALE_GENERATION` and `BAD_SIGNATURE` are terminal: the command becomes `rejected`, and
+`UNSUPPORTED`, `EXPIRED`, `STALE_GENERATION`, `BAD_SIGNATURE` and the two quorum reasons are terminal: the command becomes `rejected`, and
 the rejection is journaled, so a duplicate delivery or a `Hello` replay gets the same answer. `BUSY` is never
 journaled. bcd (`dispatch.Precheck`, then a lane credit) and the FakeDaemon both follow this order, so a bad
 signature is refused even when the lane has no credit.
@@ -289,9 +308,10 @@ outside the agent's role is `UNSUPPORTED`.
 | `control` | `diag.nvml` | node, ramdisk | retry-safe, attested |
 | `control` | `gpu.reset` | node | attested, destructive |
 | `control` | `node.reboot` | node, site | retry-safe, self-terminating, destructive |
-| `control` | `bmc.query`, `bmc.boot` | site | retry-safe |
+| `control` | `bmc.query` | site | retry-safe |
+| `control` | `bmc.boot` | site | retry-safe, destructive |
 | `control` | `bmc.power`, `bmc.firmware`, `bmc.storage` | site | destructive |
-| `control` | `bmc.rotate` | site | attested |
+| `control` | `bmc.rotate` | site | attested, destructive |
 | `control` | `site.httpProxy` | site | |
 | `control` | `boot.prepareRamdisk`, `boot.cleanUp` | site | retry-safe |
 | `control` | `boot.kexec` | ramdisk | self-terminating |
@@ -363,8 +383,9 @@ Two signatures keep a compromised gateway, which can delay, drop or read frames,
   as v0.1 allows. The daemon's own kind table decides which kinds require a signature, never a flag the body could
   carry: destructive kinds from v0.2, all kinds from v0.4. bcd enforces nothing until its trust bundle holds
   command-signing roots; from then on a present signature is always checked and its destructive kinds
-  (`gpu.reset`, `node.reboot`, `bmc.power`, `bmc.firmware`, `bmc.storage`, `disk.wipe`, `deploy.image`) require
-  one.
+  (`gpu.reset`, `node.reboot`, `bmc.power`, `bmc.firmware`, `bmc.storage`, `disk.wipe`, `deploy.image`, and since
+  3ff8131 `bmc.boot`, which decides what a machine boots, and `bmc.rotate`, which replaces its BMC credentials)
+  require one. Metal's `metalCommandKinds` marks `bmc.boot` and `bmc.rotate` destructive too (9c14146).
 - **Signed desired state.** Specs have the same envelope under purpose `desired-state`. With
   `pki.commandSigning`, the NodeSpec controller signs each new generation's `DesiredStateBody` with the worker key
   (`CommandSigner.signDesiredState`) in the transaction that bumps the generation, and every bump rewrites both
@@ -381,6 +402,16 @@ Two signatures keep a compromised gateway, which can delay, drop or read frames,
   transition; the gateway never judges or strips them. With `attestedBindings` (on by default with
   `pki.commandSigning`), a reservation goes active only on the node's own signed `AllocationBound`; see
   [attested bindings](/docs/guides/capacity/reservations#attested-bindings).
+- **The destructive-batch quorum (v1.0).** Signed intent does not stop a compromised api or worker, which holds a
+  worker key. With `approver_keys` in the trust bundle (`pki.approvers`), a destructive command with a `batch_id`
+  runs only when `Command.batch_approval` carries enough signatures of distinct approver keys over a scope whose
+  `Command.batch_proof` proves the command's `(subject, kind)`; else it is `BATCH_UNAPPROVED`. Destructive commands
+  without a `batch_id` are refused `UNBATCHED_LIMIT` beyond `unbatched_destructive_per_hour` (default 0), counted
+  per rolling hour (bcd keeps the count in `data_dir`, so a restart does not reset it). bcd (e7ddb38) and the
+  FakeDaemon enforce it after the signature check. On the server, the `quorum` module stores batches and collects
+  approvals and the command queue holds batched commands until their batch is approved, but the gateway does not
+  attach the approval and proof to them yet, and no built-in workflow creates batches. See
+  [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10).
 
 ## Events
 

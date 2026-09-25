@@ -47,7 +47,7 @@ resource, it calls compute's <Term id="resolver">resolver</Term>, which answers 
 | `compute-provider-account` | An account with an external capacity provider | | | |
 | `compute-sandbox` | A [sandbox](/docs/guides/vps/sandboxes) (v0.5): a VPS instance with a template and a lifetime, decided while it is still a draft | `compute-pool` | | `templateId`, `vcpu`, `memoryGiB`, `gpus`, `ttlSeconds`, `warm`, and `fromSnapshot` on a restore |
 | `compute-sandbox-template` | A tenant's sandbox template (v0.5): pool, flavor, image, runtime, TTL bounds, warm pool | | | |
-| `compute-sandbox-snapshot` | A sandbox's snapshot (v0.5): disk and memory, tenant-private, owned by whoever took it; may outlive its sandbox | | | `sandboxId`, `templateId`, `includeMemory` |
+| `compute-sandbox-snapshot` | A sandbox's snapshot (v0.5): disk and memory, tenant-private, owned by its sandbox's owner whoever took it; may outlive its sandbox | | | `sandboxId`, `templateId`, `includeMemory` |
 
 Besides a row's attributes, every resolved resource carries `ownerId` when the row has an owner, and the prefixed
 `parentType` and `parentId` of its parent. Better IAM turns the parent into `resource.parentRelations`, so a
@@ -134,6 +134,7 @@ and the item form gates calls on one resource:
 | `compute:providers:manage` | `compute-fleet`, `compute-tenant`, `compute-provider-account` |
 | `compute:sandboxes:read`, `compute:sandboxes:manage` | `compute-tenant`, `compute-sandbox-template` (`read` also on `compute-sandbox` and `compute-sandbox-snapshot`) |
 | `compute:sandboxes:create`, `compute:sandboxes:update`, `compute:sandboxes:exec`, `compute:sandboxes:delete` | `compute-sandbox` (`delete` also on `compute-sandbox-snapshot`) |
+| `compute:batches:read`, `compute:batches:approve` | `compute-tenant` (v1.0 destructive-batch quorum) |
 
 ### Adding actions
 
@@ -236,6 +237,8 @@ bridge, allowing each only when granted. It decides through compute's own `IamPo
 | [`commands.get`](/docs/reference/api/commands#get) | `compute:nodes:read` | `compute-node` | v0.1 |
 | [`commands.list`](/docs/reference/api/commands#list) | `compute:nodes:read` | `compute-node` | v0.1 |
 | [`commands.cancel`](/docs/reference/api/commands#cancel) | `compute:nodes:exec` | `compute-node` | v0.2 |
+| `commandBatches.get`, `list`, `scope` | `compute:batches:read` | `compute-tenant` | v1.0 |
+| `commandBatches.approve`, `cancel` | `compute:batches:approve` (on top of the approver signatures, never instead of them) | `compute-tenant` | v1.0 |
 | [`tunnels.open`](/docs/reference/api/tunnels#open) | `compute:instances:exec` | `compute-instance` or `compute:nodes:console` on `compute-node` | v0.3 |
 
 ### Capacity
@@ -320,7 +323,7 @@ bridge, allowing each only when granted. It decides through compute's own `IamPo
 
 | Method | Action | Decided on | Phase |
 | --- | --- | --- | --- |
-| [`instances.create`](/docs/reference/api/instances#create) | `compute:instances:create` | `compute-instance` (the draft) | v0.3 |
+| [`instances.create`](/docs/reference/api/instances#create) | `compute:instances:create`, and `compute:secrets:manage` when `userData` is a `secret://` reference | `compute-instance` (the draft); the secrets decision on `compute-tenant`, plus `compute-fleet` in the root tenant | v0.3 |
 | [`instances.list`](/docs/reference/api/instances#list) | `compute:instances:read` | `compute-tenant` + items | v0.3 |
 | [`instances.get`](/docs/reference/api/instances#get) | `compute:instances:read` | `compute-instance` | v0.3 |
 | [`instances.start`](/docs/reference/api/instances#start) | `compute:instances:update` | `compute-instance` | v0.3 |
@@ -344,10 +347,10 @@ bridge, allowing each only when granted. It decides through compute's own `IamPo
 | [`sandboxes.snapshot`](/docs/reference/api/sandboxes#snapshot) | `compute:sandboxes:update` | `compute-sandbox` | v0.5 |
 | [`sandboxes.exec`](/docs/reference/api/sandboxes#exec) (hosted by the tunnels module) | `compute:sandboxes:exec` | `compute-sandbox` | v0.5 |
 | [`sandboxes.delete`](/docs/reference/api/sandboxes#delete) | `compute:sandboxes:delete` | `compute-sandbox` | v0.5 |
-| [`sandboxTemplates.create`](/docs/reference/api/sandbox-templates#create) | `compute:sandboxes:manage` | `compute-tenant` | v0.5 |
+| [`sandboxTemplates.create`](/docs/reference/api/sandbox-templates#create) | `compute:sandboxes:manage`, and `compute:secrets:manage` when it names secrets | `compute-tenant` (the secrets decision also on `compute-fleet` in the root tenant) | v0.5 |
 | [`sandboxTemplates.list`](/docs/reference/api/sandbox-templates#list) | `compute:sandboxes:read` | `compute-tenant` + items | v0.5 |
 | [`sandboxTemplates.get`](/docs/reference/api/sandbox-templates#get) | `compute:sandboxes:read` | `compute-sandbox-template` | v0.5 |
-| [`sandboxTemplates.update`](/docs/reference/api/sandbox-templates#update) | `compute:sandboxes:manage` | `compute-sandbox-template` | v0.5 |
+| [`sandboxTemplates.update`](/docs/reference/api/sandbox-templates#update) | `compute:sandboxes:manage`, and `compute:secrets:manage` when the resulting template names secrets and the update changes them or what the guest runs | `compute-sandbox-template` (the secrets decision on `compute-tenant`, plus `compute-fleet` in the root tenant) | v0.5 |
 | [`sandboxTemplates.delete`](/docs/reference/api/sandbox-templates#delete) | `compute:sandboxes:manage` | `compute-sandbox-template` | v0.5 |
 | [`sandboxSnapshots.list`](/docs/reference/api/sandbox-snapshots#list) | `compute:sandboxes:read` | `compute-tenant` + items | v0.5 |
 | [`sandboxSnapshots.get`](/docs/reference/api/sandbox-snapshots#get) | `compute:sandboxes:read` | `compute-sandbox-snapshot` | v0.5 |

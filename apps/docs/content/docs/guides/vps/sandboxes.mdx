@@ -53,7 +53,7 @@ its boot data sealed through the secret broker.
 
 `vps()` serves three API groups for it (v0.5, beta): [sandboxTemplates](/docs/reference/api/sandbox-templates),
 [sandboxes](/docs/reference/api/sandboxes), whose `exec` method the tunnels module contributes, and
-[sandboxSnapshots](/docs/reference/api/sandbox-snapshots). All 15 methods are served. Migrations `vps/0004_sandboxes` to `vps/0011_host_certificates` add their tables, columns and indexes, and the
+[sandboxSnapshots](/docs/reference/api/sandbox-snapshots). All 15 methods are served. Migrations `vps/0004_sandboxes` to `vps/0012_host_cert_validity` add their tables, columns and indexes, and the
 `vps.sandboxes` reconciler expires sandboxes, keeps warm pools filled and settles snapshots.
 
 <Callout type="warn" title="The control plane is done; the host runtime is not">
@@ -112,9 +112,15 @@ the image's format and pass through the flavor's GPUs. Unknown fields are `INVAL
 A template that names secrets, in `env` or as a `secret://` user data, hands them to every sandbox's guest, which can
 read them, while secrets are otherwise write-only. So those references must be secrets the tenant wrote itself with
 `secrets.put` (never platform-minted ones such as join tokens, BMC credentials or sealed user data, which are
-`INVALID_INPUT`), and `create` and `update` also decide `compute:secrets:manage` on the tenant, with the caller's own
-credential, before the write (`ACCESS_DENIED` with `reason: 'credential-required'` without one). Pass
-`vps({ typePrefix })` when the deployment's IAM type prefix is not `compute-`.
+`INVALID_INPUT`), nor fleet secrets (`secrets.put` with `scope: 'fleet'`, recorded in `secret_refs.scope`; also
+`INVALID_INPUT`). `create` and `update` also decide `compute:secrets:manage` on the tenant, with the caller's own
+credential, before the write (`ACCESS_DENIED` with `reason: 'credential-required'` without one). In the root tenant,
+where fleet secrets written before `core/0025_secret_scope` still read `tenant`, naming any secret also decides
+`compute:secrets:manage` on the fleet (`compute-fleet/global`). An `update` that changes what the guest runs (flavor,
+image, user data, `env` or `network`) is decided on the resulting template's secrets even when it names none itself,
+since it hands them to new code. Creating an instance from a template checks its secrets against `secret_refs` again,
+so a template written before the rule never resolves a platform-minted secret. The decisions use the deployment's IAM
+type prefix (`ModuleContext.typePrefix`), falling back to `vps({ typePrefix })`.
 
 [update](/docs/reference/api/sandbox-templates#update) changes the flavor, image, user data, `env`, `network`, TTL
 bounds or warm pool and raises `version`; the pool, name and runtime stay, and a new flavor or image is checked again,
@@ -159,13 +165,23 @@ template with either on a pool without one is `INVALID_STATE` at create and upda
 from it if the range was removed since, so vps never starts an instance bcd would have to stop. The FakeDaemon
 records the policy without enforcing it.
 
-An older bcd drops `network_policy` as an unknown field, so a bcd that enforces it advertises the capability
-`instance.network-policy`, which the gateway writes as the node label `bc.dev/cap.instance.network-policy=1`; a
-placement can require it through `nodeLabels`, though vps does not add that constraint for sandboxes yet. Whatever
+An older bcd drops `network_policy` as an unknown field and would give the instance full egress, so a bcd that
+enforces it advertises the capability `instance.network-policy` (on hosts with a runtime), which the gateway writes as
+the node label `bc.dev/cap.instance.network-policy=1`. An instance with a `private` or `none` policy
+(`instances.network_policy`) is placed only on nodes carrying that label, with any value (cfdb918): where no such host
+has room it waits `Unschedulable` rather than run unisolated. The FakeDaemon advertises the capability on VPS hosts.
+`private` means the pool's whole IPAM subnet, so on a pool offered to several tenants it includes their instances
+too. Whatever
 the policy, bcd also guards every tap whose NIC has a MAC and IPAM addresses (278296e): frames must carry the NIC's
 MAC, IP packets its own addresses (plus `0.0.0.0` and `::` for DHCP and `fe80::/10` for neighbour discovery) and ARP
-its own IPv4 addresses, so one guest cannot pose as another. The metadata service and instance tunnels, which name an
-instance by its address, work only while those rules are loaded and never for an address two instances claim.
+its own IPv4 addresses, so one guest cannot pose as another. Each guarded address is also bound to its instance's
+tap: no other bridge port (an unguarded tap, a NIC without addresses, a port bcd does not manage) may send from it,
+claim it in ARP or name it in a neighbour advert, and a deleted instance keeps its guard until its domain is gone.
+Guarded taps may not act as a DHCP server or a router (router advertisements, redirects), and their neighbour adverts
+name only their own addresses (6639335). The metadata service and instance tunnels, which name an instance by its
+address, trust only addresses the loaded rules bind to an instance, never one two instances claim; bcd checks every
+30 seconds that its table is still there, so an nftables reload or `flush ruleset` ends that trust at once, and the
+next pass loads the table again.
 
 ## Create a sandbox
 
@@ -363,16 +379,24 @@ first line; a `secret://` reference is resolved first). vps's part:
 client can only accept it on first use. With it, vps generates a host key for each sandbox instance and asks the hook
 for a host certificate naming the instance id, valid for 30 days; the host wires it to the same sandbox CA's
 `issueHostCertificate`. The private key travels only in broker-sealed user data, so the hook without a secret broker
-is `INVALID_CONFIG`. `instances.host_certified` records it (migration `vps/0011_host_certificates`), a memory restore
-inherits the source's value through its snapshot, and `sandboxes.exec` returns `hostPrincipal` and `hostCertified`
+is `INVALID_CONFIG`. `instances.host_certified` records it (migration `vps/0011_host_certificates`) and
+`instances.host_cert_valid_before` until when the certificate holds (`vps/0012_host_cert_validity`, on snapshots too).
+A memory restore inherits both through its snapshot and mints no host key of its own. Nothing renews a host
+certificate, so a sandbox never outlives its guest's: a warm claim takes only instances whose certificate covers the
+new TTL, the reconciler recycles warm instances whose certificate no longer covers the template's default TTL (at
+most 15 days), a fresh sandbox's expiry is capped at its certificate, and a memory restore or an `extend` past it is
+refused, naming how long is left (`INVALID_INPUT`, or `INVALID_STATE` once less than a minute remains).
+`sandboxes.exec` returns `hostPrincipal`, `hostCertificate` (`valid`, `expired` within a minute of its end, or `none`
+for a guest never certified) and `hostCertified` (`hostCertificate === 'valid'`),
 so a client can pin the guest with `@cert-authority <hostPrincipal> <sandbox CA key>`. `better-compute sandbox exec`
 does (see [the CLI](#from-the-cli)).
 
 The principal names the instance, so a certificate for one sandbox opens no other, and a warm instance trusts the CA
 before any sandbox exists. A memory restore is the exception: it resumes the guest without re-running cloud-init, so
 its sshd still accepts the principal of the instance the memory was captured on. Snapshots record that instance, a
-restore carries it in `restore_from.principalInstanceId`, and `sandboxes.exec` signs for it. Since only the
-snapshot's owner can restore it, only that owner's own lineage shares a principal.
+restore carries it in `restore_from.principalInstanceId`, and `sandboxes.exec` signs for it. A snapshot belongs to
+its sandbox's owner, whoever took it, and only that owner can restore it, so only the owner's own lineage shares a
+principal.
 
 The CA must be one `ssh-ed25519` or `ecdsa-sha2-nistp256` key line, with an optional comment of up to 64 printable
 characters that may contain spaces, as pki's are (`INVALID_CONFIG` otherwise). It is one CA for the deployment, not
@@ -428,8 +452,9 @@ fails at login.
 />
 
 It answers `{ sandboxId, instanceId, nodeId, tunnelId, ticket, path, expiresAt, certificate, serial, keyId, principal,
-account, validBefore, hostPrincipal, hostCertified }`; `hostPrincipal` is the name the guest's host certificate
-carries (its instance, or the original one after a memory restore), and `hostCertified` says whether it has one. Open `GET {basePath}/{path}` as a WebSocket before `expiresAt` (the ticket is single use and
+account, validBefore, hostPrincipal, hostCertified, hostCertificate }`; `hostPrincipal` is the name the guest's host
+certificate carries (its instance, or the original one after a memory restore), `hostCertificate` is `valid`,
+`expired` or `none`, and `hostCertified` says whether it is `valid`. Open `GET {basePath}/{path}` as a WebSocket before `expiresAt` (the ticket is single use and
 lives 60 s) and speak SSH over it as `account`, with the certificate saved beside your key as `<key>-cert.pub`. The
 key id is `bc:<identityId>:<sandboxId>:ssh_<id>`.
 
@@ -521,7 +546,9 @@ const snap = await client.sandboxes.snapshot({
 ```
 
 It is decided as `compute:sandboxes:update` on the sandbox. The sandbox's instance must be `running` or `paused` on a
-node (`INVALID_STATE` otherwise, and for a sandbox being deleted). vps enqueues the `instance.snapshot` command (lane
+node (`INVALID_STATE` otherwise, and for a sandbox being deleted), on a runtime whose `RuntimeTraits.snapshot` is true:
+`libvirt-kvm`, `cloud-hypervisor` and `firecracker` in `builtinRuntimeTraits` declare it, and any other runtime
+(`containerd`, a bcx runtime that does not declare it) is `UNSUPPORTED` before any command reaches the host. vps enqueues the `instance.snapshot` command (lane
 `bulk`, not retry-safe, timeout 1 h) on the instance's node with the upload URL, keyed
 `vps.sandboxes:<snapshotId>:snapshot`, and records the snapshot `pending`. With an `idempotencyKey`, the snapshot id
 derives from the key and a retry returns the same snapshot; the key used for another sandbox is `CONFLICT`. Without
@@ -541,8 +568,10 @@ sweeper or the gateway wakes `vps.sandboxes` with the snapshot id:
 ### Restore
 
 `sandboxes.create({ ..., fromSnapshot: 'snap_…' })` restores one of the caller's own `ready` snapshots: a snapshot
-holds its sandbox's memory and `/etc/sandbox/env`, so only the identity that took it may boot it. Another user's
-snapshot, even in the same tenant, another tenant's, or a deleted one, is `NOT_FOUND`; one still `pending` or
+holds its sandbox's memory and `/etc/sandbox/env`, so it belongs to the sandbox's owner, whoever took it (someone
+allowed `compute:sandboxes:update` on another user's sandbox can snapshot it, but the snapshot is still the owner's),
+and only that owner may boot it. Another user's snapshot, even in the same tenant, another tenant's, or a deleted one,
+is `NOT_FOUND`; one still `pending` or
 `failed` is `INVALID_STATE`; one taken
 on a runtime other than the template's is `INVALID_INPUT`. The decision sees `fromSnapshot`, and a restore never
 claims a warm instance: it creates one whose spec carries `restore_from` (the URL, the SHA-256 and the snapshot id). A
@@ -555,14 +584,15 @@ CPU model, and deletes the file once no spec restores from it.
 
 Snapshots are tenant data that include memory. They are never promoted to shared images, and when their sandbox is
 deleted they are deleted with it unless taken with `keep: true`; the store's `delete` then removes the object, outside
-any transaction. A snapshot deleted while its upload is still pending keeps its object until the command settles;
-the reconciler then purges it (the `purged` column), so a late upload never outlives its row. A kept snapshot
+any transaction. A deleted snapshot keeps its object and its authorization row until its upload has settled and no
+live instance restores from it (a recreate after host loss downloads it again); the reconciler then purges it (the
+`purged` column), so a late upload never outlives its row. Restores read the snapshot `FOR SHARE`. A kept snapshot
 outlives its sandbox and can still be restored by its owner until it is deleted, and a tenant teardown deletes every
 snapshot, kept ones included.
 
 ### Manage snapshots
 
-Each snapshot is its own IAM resource, `compute-sandbox-snapshot/<id>`, owned by whoever took it, with the attributes
+Each snapshot is its own IAM resource, `compute-sandbox-snapshot/<id>`, owned by its sandbox's owner, with the attributes
 `sandboxId`, `templateId` and `includeMemory`, so a kept one stays reachable after its sandbox is gone. The
 [sandboxSnapshots](/docs/reference/api/sandbox-snapshots) group manages them:
 
@@ -570,7 +600,7 @@ Each snapshot is its own IAM resource, `compute-sandbox-snapshot/<id>`, owned by
 | --- | --- | --- |
 | `sandboxSnapshots.list` | `compute:sandboxes:read` on the tenant | The tenant's snapshots, newest first, deleted ones left out and kept ones of deleted sandboxes included. `scope` is `mine` (the default) or `all` (each item checked); `sandboxId` filters; `limit` 1 to 200 (default 50); `cursor` is the last snapshot id of the previous page |
 | `sandboxSnapshots.get` | `compute:sandboxes:read` on the snapshot | One snapshot; a deleted or unknown one is `NOT_FOUND` |
-| `sandboxSnapshots.delete` | `compute:sandboxes:delete` on the snapshot | Deletes it at once for reads and restores, publishes `sandbox.snapshot.deleted` and wakes the reconciler, whose next pass deletes the stored object (after the command settles, for a pending upload), so no network call runs in the request. Idempotent |
+| `sandboxSnapshots.delete` | `compute:sandboxes:delete` on the snapshot | Deletes it at once for reads and restores, publishes `sandbox.snapshot.deleted` and wakes the reconciler, whose pass deletes the stored object once its upload settled and no live instance restores from it, so no network call runs in the request. Idempotent |
 
 ```ts
 const { items } = await client.sandboxSnapshots.list({ tenantId: 'acme', sandboxId: sandbox.id });
@@ -592,7 +622,7 @@ snapshot commands wake it. Each pass does five things:
    (the fallback for the instance reconciler's own stamp).
 4. **Deleted.** A sandbox whose instance is `deleted` (or gone) is marked deleted, leaves the authorization
    projection, drops its snapshots that are not kept, and publishes `sandbox.deleted` with `expired` telling whether
-   expiry ended it. Snapshots deleted while their upload was pending are purged once their command settles.
+   expiry ended it. Deleted snapshots are purged once their upload settled and no live instance restores from them.
 5. **Warm pools**, below.
 
 `vps().selfCheck` adds three sandbox findings to [`doctor`](/docs/operations/observability#doctor):
@@ -680,7 +710,7 @@ family. See [event types](/docs/guides/events#event-types).
 | `sandboxTemplates.create` | `compute:sandboxes:manage`, and `compute:secrets:manage` when it names secrets | `compute-tenant` |
 | `sandboxTemplates.list` | `compute:sandboxes:read` | `compute-tenant` + items |
 | `sandboxTemplates.get` | `compute:sandboxes:read` | `compute-sandbox-template` |
-| `sandboxTemplates.update` | `compute:sandboxes:manage`, and `compute:secrets:manage` on the tenant when it names secrets | `compute-sandbox-template` |
+| `sandboxTemplates.update` | `compute:sandboxes:manage`, and `compute:secrets:manage` on the tenant (and the fleet, in the root tenant) when the resulting template names secrets and the update changes `env`, user data, flavor, image or `network` | `compute-sandbox-template` |
 | `sandboxTemplates.delete` | `compute:sandboxes:manage` | `compute-sandbox-template` |
 | `sandboxes.create` | `compute:sandboxes:create` | `compute-sandbox` (the draft) |
 | `sandboxes.list` | `compute:sandboxes:read` | `compute-tenant` + items |
@@ -700,12 +730,39 @@ spent. See [actions and resources](/docs/guides/iam/actions-and-resources) and [
 
 When an IAM tenant is deleted, the built-in `tenancy` reconciler calls `vps().tenantDeleted` until it answers `DONE`.
 In one transaction per call it deletes every snapshot of the tenant (kept ones too; their objects go through the
-store's `delete` afterwards), deletes its templates (their warm pools drain), marks its open sandboxes `deleting`,
+store's `delete` afterwards, once no live instance restores from them), deletes its templates (their warm pools drain), marks its open sandboxes `deleting`,
 drops sandbox and instance drafts (removing the authorization rows of the deleted templates and dropped drafts), and
 sets up to 100 live instances, sandboxes' and warm ones included, to
 `desiredState: 'deleted'`, each publishing `instance.deleting` with `reason: 'tenant deleted'`. It answers
 `SYNC_AGAIN` until every instance of the tenant is `deleted`; the `vps.sandboxes` reconciler then publishes each
 sandbox's `sandbox.deleted`. See [tenancy](/docs/guides/iam/tenancy).
+
+## Withdrawn agents and departing owners
+
+PLAN.md §12.8's IAM reactions have their vps half (9ecd28f), level-triggered and meant to run in the IAM inbox
+transaction beside capacity's reservation reactions:
+
+- `withdrawAgentSandboxes(tx, context, { tenantId, agentId | delegationId | allAgents, reason })`, for an agent
+  suspended or a delegation revoked, deletes the open sandboxes they created after publishing `sandbox.withdrawn`
+  with the `reason`. A sandbox is the agent's own workspace, so unlike a started reservation it does not run on;
+  kept snapshots stay.
+- `reassignSandboxes(tx, context, { tenantId, identityId, successorId?, reason })`, for an owner who is gone, moves
+  the owner's open sandboxes and their instances, snapshots and the templates they wrote (with their warm instances)
+  to the successor, authorization rows included (`sandbox.reassigned`). Without a successor it deletes the owner's
+  open sandboxes; their templates and kept snapshots stay for the tenant's administrators.
+
+`better-compute serve` runs them when the host configuration lists them as a module reaction, right after capacity's
+reservation reactions in the default agent and identity handlers (a throw retries the IAM event); the examples do:
+
+```ts title="better-compute.config.ts"
+import { defineHost } from 'better-compute/cli';
+import { reassignSandboxes, withdrawAgentSandboxes } from 'better-compute/vps';
+
+export const host = defineHost(async () => ({
+  // also used with the embedded IAM of dev --sim; host.iam.reactions takes the same shape
+  iamReactions: [{ agent: withdrawAgentSandboxes, identity: reassignSandboxes }],
+}));
+```
 
 ## From the CLI
 
@@ -728,13 +785,17 @@ better-compute sandbox delete sbx_01k5w…
 `sandbox exec` reads the public key beside `--key` (default `~/.ssh/id_ed25519`, so `~/.ssh/id_ed25519.pub`; the
 private key never leaves your machine), asks `sandboxes.exec` for a certificate of `--minutes` (default 10, 1 to 15),
 listens on a random `127.0.0.1` port for exactly one connection, and runs your OpenSSH client (`--ssh`, default
-`ssh`) against it with the certificate, `IdentitiesOnly=yes` and a known-hosts file for this one connection. When
+`ssh`) against it with `-F none` (neither your nor the system's `ssh_config`), the certificate, `IdentitiesOnly=yes`
+and a known-hosts file for this one connection, used as both the user and the global known-hosts file. When
 the grant says `hostCertified`, that file holds `@cert-authority <hostPrincipal> <sandbox CA key>` (the key that
 signed your user certificate in the same authenticated answer, so there is no new trust input) and ssh runs with
 `HostKeyAlias=<hostPrincipal>` and `StrictHostKeyChecking=yes`: nothing that took the local port, and nothing on the
-node's network, can pose as the guest. A guest without a host certificate (created before `certifyHostKey`, or on a
-deployment without it) gets an empty file, `StrictHostKeyChecking=accept-new` and `HostKeyAlias` set to the sandbox
-id, and the CLI says its host key is accepted on first use. The certificate lives in a temporary directory that is
+node's network, can pose as the guest; a certified answer whose host principal is malformed fails
+(`INVALID_RESPONSE`) instead of falling back. A guest without a valid host certificate (created before
+`certifyHostKey`, on a deployment without it, or whose certificate expired) is refused with `INVALID_STATE` before ssh
+runs, unless you pass `--accept-host-key`: then that one connection gets an empty file,
+`StrictHostKeyChecking=accept-new` and `HostKeyAlias` set to the sandbox id, and the CLI says it trusts the key on
+first use. The certificate lives in a temporary directory that is
 removed afterwards, and the command exits with ssh's status. It needs `--url` and a signed-in session.
 
 Because the guest is untrusted and the command may come from an agent or a model, `sandbox exec` puts `--` before the

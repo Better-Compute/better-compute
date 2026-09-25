@@ -173,10 +173,12 @@ A stream is authorized when it opens, so the grant says how to end it early:
   and after `iamOutageMs` (2 minutes) of that the stream closes.
 - **`registry`** lets a revocation close matching streams at once: `closeWhere({ agentId | delegationId |
   sessionId | identityId | tenantId + anyAgent }, reason)`. A tenant alone is refused, since it would close too
-  much. With `host.iam: { bridge, streams: [registry] }`, `serve` installs handlers that close an agent's or
+  much. With `host.iam: { bridge }` and the registry in `host.streams` (or `host.iam.streams`), `serve` installs
+  handlers that close an agent's or
   delegation's streams on `delegation:revoke` and `agent:suspend`, every agent's in the tenant on
   `agent:suspend-all`, and an identity's on its offboarding or session revocation (the client reconnects with
-  `Last-Event-ID` and is decided again).
+  `Last-Event-ID` and is decided again). `dev --sim` passes `host.streams` to its embedded IAM's handlers too, so the
+  examples' `/watch` streams close on revocation in development as well.
 
 A closed stream ends with `event: error` carrying `{ "code": "ACCESS_DENIED", "message": <reason> }`, and events read during the
 revocation are not sent. `tests/e2e/access.test.ts` checks that a revoked delegation and a member's sign-out close

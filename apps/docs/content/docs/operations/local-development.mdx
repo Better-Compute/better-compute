@@ -190,7 +190,9 @@ With `--sim`, `dev` issues exec tickets (the configured `tunnels.issuer`, or a t
 simulated machine answers `OpenTunnel` with an echo shell, so [tunnels](/docs/guides/access/tunnels) work end to end.
 Unless the deployment's `tunnels` options bring their own, it also adds a throwaway break-glass SSH CA (`tunnels.ssh`,
 for `nodes.issueSshCert` and `better-compute ssh-cert`) and a separate throwaway sandbox SSH CA (`tunnels.sandboxSsh`),
-so both can be tried against the simulated fleet.
+so both can be tried against the simulated fleet. It adds these throwaway CAs only on a PGlite store: against a real
+database every node's spec would start trusting a CA that dies with the process, so there `dev --sim` uses only the
+CAs the deployment configures.
 With the embedded IAM, an open tunnel is not re-authorized every 60 seconds: the embedded test IAM has no session
 reviewer. `tunnels.open` still decides every ticket.
 

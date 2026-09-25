@@ -47,8 +47,8 @@ the best worked examples of the contracts on the other pages of this section.
 
 <Callout type="warn" title="No real hardware yet">
 Every metal walkthrough needs `bcd site`, and all but the agentless Talos one need `bcd ramdisk`. Both modes of the Go
-daemon are now written and answer every command these walkthroughs send, except BIOS, RAID and firmware updates
-through the BMC, but they are not released and only their Go unit tests run them. No walkthrough runs against them
+daemon are now written and answer every command these walkthroughs send, BIOS, RAID and firmware updates through
+Redfish included (944221c), but they are not released and only their Go unit tests run them. No walkthrough runs against them
 yet: the tests answer the commands with simulated site agents and machines, or with a FakeDaemon site agent over
 the real gateway. Running one for real also needs what the repository does not provide (iPXE builds, a ramdisk
 image, a KVM host). PLAN.md's pass criterion for walkthrough 1, "a sushy-tools VM reaches `deployed`", has not
@@ -196,7 +196,10 @@ it over `Invoke`, with positional JSON arguments:
 `apply` converges one instance, desired state included, so bcd records each spec and applies it when the state
 changes. A new instance's first `apply` carries its user data and, for a restore, the snapshot bcd already downloaded
 and verified, as a `file://` URL; later ones do not. Snapshots answer `unsupported`, since they are not in the bcx
-contract yet. A plugin never shadows a built-in runtime of the same name, and `Hello` lists its manifest once. Go
+contract yet. A plugin never shadows a built-in runtime of the same name, and `Hello` lists its manifest once. Like
+every plugin it runs [sandboxed](/docs/extending/drivers#the-plugin-sandbox): under its own uid by default, with a
+seccomp filter that refuses mounts, namespaces, `bpf` and module loading, so a runtime that needs them (Kata) must be
+named in `[plugins] privileged`, which runs it as root without the filter. Go
 unit tests (`pluginruntime_test.go`) cover it; no Kata plugin exists yet. The control-plane half is in place: the gateway writes each driver a daemon advertises in
 `Hello.drivers` as the node label `bc.dev/driver.<id>=<version>`, and vps places an instance whose runtime is not built
 into bcd only on nodes carrying `bc.dev/driver.<runtime>` (`runtimeNodeLabels`, through

@@ -104,6 +104,7 @@ the step frozen with `extension: 'step'`; every refusal is `INVALID_CONFIG` with
     input: { type: 'Manifest<I> | StandardSchema', description: "Validates the profile step's with when the profile is expanded, and again before run.", required: true },
     run: { type: '(input, ctx) => Promise<Json | void>', description: 'Control-plane steps only (required there). The result is stored as the step result.' },
     relays: { type: "('site' | 'node' | 'ramdisk')[]", description: 'Control-plane steps only: the places a profile may name with on:.' },
+    sends: { type: 'string[]', description: "Control-plane steps only: every dotted command kind run may enqueue. The workflow engine then refuses any other kind with INVALID_CONFIG, and provision's profileCommandKinds(profile, steps) can list a profile's whole command set before it runs, for a v1.0 destructive-batch scope. A step without it is not checked, and in a batch whatever it sends falls outside the scope. Every relaying metal step and health.resetGpus declare theirs." },
     command: { type: 'string', description: 'Agent steps only (required there): the dotted command kind sent.' },
     await: { type: "'rejoin'", description: 'Agent steps only: complete when the agent comes back with a new boot or role, for self-terminating kinds.' },
     cleanup: { type: 'ProfileStep[]', description: "Steps that run, last in first out, in the cleanup phase if this step started." },

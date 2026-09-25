@@ -147,12 +147,17 @@ stateDiagram-v2
 | --- | --- | --- |
 | to `connected` | the node's `Hello` | `node.connected`; clears the `unreachable` reason and the `NodeUnreachable` condition |
 | to `disconnected` | the session closes, or its gateway's lease expires | `node.disconnected` with reason `gateway-lost` or `no-session` |
-| to `unreachable` | 40 seconds after the node was last seen, plus grace | adds the `unreachable` NoSchedule reason, sets `NodeUnreachable` (`HeartbeatTimeout` or `GatewayLost`), publishes `node.unreachable` |
+| to `unreachable` | 40 seconds after the node was last seen, plus grace; a node that joined but never opened a session counts from its join (its newest certificate's `issued_at`) | adds the `unreachable` NoSchedule reason, sets `NodeUnreachable` (`HeartbeatTimeout` or `GatewayLost`), publishes `node.unreachable` |
 | to `lost` | the pool's `policy.lostAfter` after it became unreachable | `node.lost` |
 
 Grace keeps an infrastructure problem from looking like a fleet of dead machines: 120 seconds after a gateway
 loss, so sessions can move to another gateway, and 5 minutes after the Liveness controller or the database was
 down for more than 20 seconds, so ages that could not be flushed meanwhile do not count against nodes.
+
+"Last seen" is the later of the session's flushed `last_seen` and `disconnected_at`, else its `connected_at`. A node
+that has joined but whose first `Hello` is still queued (a whole rack powering on at once) has none of these yet, so
+both the Liveness sweep and the per-node check fall back to its newest `node_certs.issued_at`: it gets the same 40
+seconds from its join instead of being marked unreachable the moment it joins.
 
 ### Disconnected is not dead
 

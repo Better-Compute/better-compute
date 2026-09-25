@@ -47,7 +47,7 @@ Every command declares a target, and the target decides what it needs:
 | --- | --- | --- |
 | `token` | a credential (`BETTER_COMPUTE_TOKEN` or a saved one, see [authenticate](#authenticate)), and either `--url` or a configuration | `api`, `reserve`, `release`, `extend`, `reservations list/get`, `pools list`, `capacity`, `sandbox create/list/get/extend/snapshot/delete/exec/templates`, `sandbox-template create/update/delete`, `console`, `exec`, `forward`, `ssh-cert`, `fleet export/plan/status/apply`, `auth login` |
 | `config` | the configuration (`--config`, `BETTER_COMPUTE_CONFIG`, the nearest `better-compute.config.{mjs,js,ts,mts}`, or `BETTER_COMPUTE_DATABASE_URL`) and no credential | `migrate`, `doctor`, `serve`, `audit checkpoint/verify/prove` |
-| `none` | neither | `init`, `version`, `dev` (it finds a configuration itself, or runs PGlite), `sim`, `pki`, `daemon install-script`, `iam setup`, `release keygen/sign/cosign/verify`, `audit check-proof` |
+| `none` | neither | `init`, `version`, `dev` (it finds a configuration itself, or runs PGlite), `sim`, `pki`, `daemon install-script`, `iam setup`, `release keygen/sign/cosign/verify`, `batch keygen/sign`, `audit check-proof` |
 
 A `config` command talks to the database directly. It is an operator tool: whoever can run it can already read the
 database, so it is not decided by IAM. A `token` command never reads the database itself.
@@ -196,7 +196,7 @@ better-compute sandbox delete sbx_01k5w…
 | `sandbox extend SANDBOX` | exactly one of `--by DURATION` or `--until TIME` (ISO 8601, epoch ms, or `+DURATION` from now) | `sandboxes.extend` |
 | `sandbox snapshot SANDBOX` | `--no-memory` (disk only), `--keep` (outlive the sandbox), `--key KEY` | `sandboxes.snapshot`, always with an idempotency key |
 | `sandbox delete SANDBOX` | | `sandboxes.delete` |
-| `sandbox exec SANDBOX [-- COMMAND…]` | `--key PATH` (default `~/.ssh/id_ed25519`), `--minutes N` (1 to 15, default 10), `--ssh PROGRAM` (default `ssh`) | `sandboxes.exec`, then OpenSSH through the tunnel |
+| `sandbox exec SANDBOX [-- COMMAND…]` | `--key PATH` (default `~/.ssh/id_ed25519`), `--minutes N` (1 to 15, default 10), `--ssh PROGRAM` (default `ssh`), `--accept-host-key` (trust an uncertified guest's key on first use) | `sandboxes.exec`, then OpenSSH through the tunnel |
 | `sandbox templates` | | `sandboxTemplates.list` |
 
 A sandbox id that does not look like `sbx_…` is a usage error (exit 2) before anything is sent.
@@ -204,12 +204,15 @@ A sandbox id that does not look like `sbx_…` is a usage error (exit 2) before 
 **`sandbox exec`** gets a short-lived certificate for your own key and runs `ssh` through a single-use tunnel; there
 is no agent in the guest. It sends the public key beside `--key` (`<key>.pub`; a file that holds a private key is
 refused) and never the private key, writes the certificate into a temporary directory, listens on a random
-`127.0.0.1` port for one connection that it bridges to the tunnel, and runs `--ssh` with `-i <key>`,
-`CertificateFile`, `IdentitiesOnly=yes` and a known-hosts file of its own, as the account the server names. A guest
-with a host certificate from the sandbox CA (the grant's `hostCertified`) is pinned: the file holds
+`127.0.0.1` port for one connection that it bridges to the tunnel, and runs `--ssh` with `-F none` (no user or
+system `ssh_config`), `-i <key>`, `CertificateFile`, `IdentitiesOnly=yes` and a known-hosts file of its own (as both
+`UserKnownHostsFile` and `GlobalKnownHostsFile`), as the account the server names. A guest with a still-valid host
+certificate from the sandbox CA (the grant's `hostCertified`) is pinned: the file holds
 `@cert-authority <hostPrincipal> <sandbox CA key>`, with `HostKeyAlias=<hostPrincipal>` and
-`StrictHostKeyChecking=yes`. Any other guest gets an empty file, `StrictHostKeyChecking=accept-new` and
-`HostKeyAlias=<sandbox id>`, with a note that its host key is accepted on first use. The account must be a Unix
+`StrictHostKeyChecking=yes`; a malformed `hostPrincipal` is `INVALID_RESPONSE`. Any other guest (from before host
+certificates, or whose certificate expired) is refused with `INVALID_STATE` and nothing is spawned, unless you pass
+`--accept-host-key`: then it gets an empty file, `StrictHostKeyChecking=accept-new` and `HostKeyAlias=<sandbox id>`,
+with a note that its key is trusted on first use for this connection. The account must be a Unix
 account name (`INVALID_RESPONSE` otherwise). The command after `--` runs remotely; without one you get a login shell. The temporary directory is
 removed afterwards, whatever happened, and the CLI exits with ssh's own status (`REMOTE_EXIT`). Like the other tunnel
 commands it needs `--url`, and `sandboxes.exec` needs a signed-in session rather than an API key.
@@ -286,7 +289,8 @@ better-compute ssh-cert --tenant acme --node node_01k5w… && ssh -i ~/.ssh/id_e
   finds it. `--account` (default `root`) is the Unix account and `--minutes` (default 15, 1 to 60) the validity,
   never past your session. It needs `compute:nodes:ssh-root` and, by default, an MFA session. The private key never
   leaves your machine: a `--key` that is not a `.pub` file, or that holds a private key, is refused before anything
-  is sent. With **`--connect HOST`** it then runs your OpenSSH client (`--ssh`, default `ssh`) to the node's
+  is sent. The answer is checked before use: an account that is not a Unix account name, or a certificate that is not
+  an OpenSSH user certificate for your key, is `INVALID_RESPONSE` and nothing is written. With **`--connect HOST`** it then runs your OpenSSH client (`--ssh`, default `ssh`) to the node's
   address with the new certificate: `-i <key> -o CertificateFile=<cert> -o IdentitiesOnly=yes -l <account> -- HOST`,
   followed by the command after `--`, or a shell without one. `HOST` must be a host name or an IP address, never
   something ssh would read as an option (`-oProxyCommand=…`), and is checked before a certificate is issued; a
@@ -392,6 +396,7 @@ The rest of the CLI runs and maintains a deployment. Briefly:
 | `daemon install-script` | the POSIX installer that joins a server to a pool |
 | `iam setup [--meters]` | prints the example policies; creates the billing meters in Better IAM |
 | `release keygen / sign / cosign / verify` | signed bcd release manifests |
+| `batch keygen / sign` | an approver's side of the v1.0 destructive-batch quorum: a P-256 approver key, and an approval signed offline from a batch's scope file; see [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10) |
 
 See [installation](/docs/guides/installation), [local development](/docs/operations/local-development) and the
 [CLI reference](/docs/reference/cli).

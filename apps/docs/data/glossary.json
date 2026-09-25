@@ -126,6 +126,12 @@
     "href": "/docs/guides/iam/delegated-confirmation"
   },
   {
+    "id": "destructive-batch-quorum",
+    "term": "Destructive-batch quorum",
+    "definition": "The v1.0 control against a compromised api or worker: destructive commands carry a `batch_id` and run only when enough operator approver keys, pinned in the trust bundle and held off the control plane, signed a `BatchApproval` over the Merkle root of the batch's (subject, kind) scope, which the machine checks with the command's inclusion proof. bcd and the FakeDaemon enforce it and the server stores, approves and holds batches (`commandBatches`, `enqueue({ batchId })`), but the gateway does not attach approvals to batched commands yet.",
+    "href": "/docs/operations/pki#the-destructive-batch-quorum-v10"
+  },
+  {
     "id": "device",
     "term": "Device",
     "definition": "A unit of hardware with typed attributes, in the style of Kubernetes dynamic resource allocation: class `gpu`, `gpu.mig`, `gpu.slot`, `nic.vf`, `disk` or `node`, with a stable id such as a GPU UUID, disk WWN or MAC.",
@@ -400,6 +406,12 @@
     "term": "Resolver",
     "definition": "The function Better IAM calls to learn about a resource it does not store. Compute's resolver answers every `compute-*` type from the authz projection in memory and hands other types to the host's own resolver.",
     "href": "/docs/guides/iam/actions-and-resources"
+  },
+  {
+    "id": "retry-pushback",
+    "term": "Retry pushback",
+    "definition": "The delay a busy gateway attaches to a `RESOURCE_EXHAUSTED` refusal as the gRPC trailer `grpc-retry-pushback-ms` (and `retry-after` on the WebSocket path), jittered and scaled to the number of daemons it is refusing. bcd and the FakeDaemon wait exactly that long instead of their own back-off, so a power-on herd spreads over the window the gateway can admit.",
+    "href": "/docs/daemon/sessions#opening"
   },
   {
     "id": "rollout",

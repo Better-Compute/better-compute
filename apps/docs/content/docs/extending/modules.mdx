@@ -183,7 +183,8 @@ await compute.initialize();
 ```
 
 `betterCompute()` registers, in this order: the server's own groups, the built-in `node-controllers` and
-`site-boot` modules, `inventory`, `capacity`, the `tenancy` module (suspended and deleted tenants), a `pki` entry carrying the sealed-secrets migration when the default
+`site-boot` modules, `inventory`, `capacity`, the `tenancy` module (suspended and deleted tenants), the `quorum`
+module (the v1.0 destructive-batch quorum's batches and `commandBatches`, always hosted), a `pki` entry carrying the sealed-secrets migration when the default
 secret store is in use, the `tunnels` module when `tunnels` is configured, the `audit-sinks` module when any audit
 sink is listed (see [sinks](/docs/extending/sinks#audit-sinks)), then your `modules`, then your `plugins`. The order
 is the order of migrations, of `start()` calls and of NodeSpec merging.
@@ -303,6 +304,7 @@ Reconcilers from the built-in modules, for reference:
 | `capacity.mig` | capacity (the MIG layout gate) | `node` | edge-triggered, with `notBefore` wake-ups |
 | `inventory.hygiene` | inventory | `none` | `all` every `5m` |
 | `tenancy` | tenancy (built in) | `none` | `sweep` every `30s`, plus one key per deleted tenant |
+| `quorum.batches` | quorum (built in) | `none` | `expire` every `1m`: pending batches past their end expire and their held commands are cancelled |
 | `tunnels.ssh-certificates-gc`, `tunnels.ssh-certificates-reauthorize` | tunnels (with `tunnels`) | `none` | `ssh-certificates` every `1h`, `1m` |
 | `events.fanout`, `events.deliver`, `events.prune` | events | `none` | every `1s`, `2s`, `1h` (`events.prune` only unless `retention: false`) |
 | `audit-sinks` | audit-sinks (built in, with audit sinks) | `none` | `tick` every `5s` |
@@ -322,6 +324,13 @@ All but `capacity.placer` run in the `controllers` role. Tests and the simulator
 
 A module that sends work to agents registers the kinds it sends. `ctx.commands.enqueue` refuses a kind nobody
 registered.
+
+For fleet-wide destructive work (v1.0), the queue also takes batches: `ctx.commands.createBatch?(tx, { tenantId,
+scope, reason, notAfterMs?, createdBy? })` stores a batch of `{ subject, kind }` leaves and answers
+`{ batchId, held, required, size }`, and `enqueue(tx, { ..., batchId })` puts a command into it; the command's
+`(subject, kind)` must be in the scope, and it is held until operators approve the batch. `createBatch` is optional
+on `CommandQueue`, so test fakes need not implement it. See
+[the destructive-batch quorum](/docs/operations/pki#the-destructive-batch-quorum-v10).
 
 ```ts title="packages/rollout/src/module.ts"
 export const daemonUpgradeKind: CommandKindSpec = {
@@ -396,6 +405,7 @@ capacity module does this on every binding change; rollout returns a `daemon` se
 | `workflows` | `start(tx, …)` and `abort(tx, id)`, present only when a hosted module runs workflows (`provisionModule()`) |
 | `afterCommit` | Runs a hook once the outermost transaction commits, never on rollback; for pokes and in-memory updates only |
 | `caches` | `dropIdentity`, `dropSession`, `dropDecisions`: invalidate the envelope's IAM caches |
+| `typePrefix` | The deployment's IAM resource type prefix (`ComputeOptions.typePrefix`, default `compute-`), always set by `betterCompute()`, for a module that decides on compute resources itself, such as vps deciding `compute:secrets:manage` on `${typePrefix}tenant/<id>`; optional in the type, so fall back to your own default |
 | `log` | `debug`, `info`, `warn`, `error` |
 
 `usage` (a `UsageRecorder`) is declared on the contract but the v0.1 server leaves it unset. The built-in

@@ -228,7 +228,12 @@ for 10 s and every node reboots.
 
 The gate (under 3 minutes) holds at 10k with room to spare. Connection is bound by the power-on spread, and
 adoption takes the same time at 1k and 10k (p50 55 s): it is paced by the acceptance command and the node pass,
-not by throughput. Invariants I1 to I5 and I8 held. Of the 10k run's wall time, 327 s went to the reconcilers and
+not by throughput. Invariants I1 to I5 and I8 held.
+
+A harsher variant starts all 10,000 nodes at the same instant (`bench/cold-start`, c3c7423). Before the retry
+pushback and liveness counted from the join, every node was ready at 95 s but 23 were marked unreachable, all before
+they had ever connected, and the connect tail was 65 s. With both, connection p99 is 16 s and the last node connects at
+19 s, all are ready at 80 s, none is marked unreachable, a power cycle is back in 30 s, and there are no violations. Of the 10k run's wall time, 327 s went to the reconcilers and
 46 s to the gateways' jobs, both on the one PGlite. The run does not measure Postgres CPU, the separate v0.4 gate.
 
 ## How each tier scales
@@ -249,9 +254,13 @@ balancer with TLS passthrough. The knobs that bound one gateway:
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `maxStreams` | 5,000 | Sessions it admits; the next one is refused |
-| `handshakesPerSecond` | 200 | Session opens and joins admitted per second (token bucket) |
-| `maxPendingHellos` | 64 | Hello transactions in flight; beyond it `RESOURCE_EXHAUSTED`, retried with jitter |
+| `maxStreams` | 5,000 | Sessions it admits; the next one is refused, told to retry in 5 to 30 s |
+| `handshakesPerSecond` | 200 | Session opens and joins admitted per second (token bucket); a refusal is told to retry within the time the bucket needs for everyone refused that second |
+| `maxPendingHellos` | 64 | Hello transactions in flight; beyond it `RESOURCE_EXHAUSTED`, told to retry in 250 ms to 2 s |
+
+Every busy refusal carries a jittered retry pushback (`grpc-retry-pushback-ms`, and on the WebSocket path also
+`retry-after`), which bcd and the FakeDaemon follow instead of their own doubling back-off, so a power-on herd spreads
+over the window the gateway can actually admit. See [admission and scale](/docs/daemon/gateway#admission-and-scale).
 | `gatewayLeaseTtlMs`, `leaseRenewMs` | 20 s, 5 s | Its `gateway:<id>` lease; losing it fences the gateway |
 | `dispatchIntervalMs`, `dispatchBatch` | 1 s, 1,000 | The dispatch loop, besides pokes (at most every `pokeWindowMs`, 10 ms) |
 | `livenessFlushMs` | 15 s | Liveness ages are flushed in batches, not per heartbeat |
@@ -329,7 +338,8 @@ mitigation already built in:
 
 1. **Liveness writes**: memory first, batched, transition-only.
 2. **Telemetry**: goes straight to your TSDB, never through the control plane.
-3. **Reconnect storms**: the handshake bucket, `maxPendingHellos`, full-jitter back-off, `Drain`, grace periods.
+3. **Reconnect storms**: the handshake bucket, `maxPendingHellos`, retry pushback on busy refusals, full-jitter
+   back-off, `Drain`, grace periods.
 4. **Hot pools**: one writer per pool; split a pool above about 20k atoms; the pool-lease placer.
 5. **Capacity reads**: rollups, never aggregates over devices.
 6. **Inventory payloads**: section hashes; only changed sections travel.

@@ -178,7 +178,7 @@ When a daemon stops talking, Better Compute changes a condition, not ownership:
 | Transition | When | What happens |
 | --- | --- | --- |
 | `connected` to `disconnected` | The session closes or its gateway's lease expires | Nothing is released |
-| `disconnected` to `unreachable` | 40 seconds without a session, plus grace: 120 s after a gateway loss, 5 minutes after a database or controller outage | The node leaves placement (`unreachable` joins `noScheduleReasons`, `NodeUnreachable` is raised); nothing is released |
+| `disconnected` to `unreachable` | 40 seconds without a session, plus grace: 120 s after a gateway loss, 5 minutes after a database or controller outage. A node that joined but never opened a session counts from its join (its newest certificate), not from the beginning of time | The node leaves placement (`unreachable` joins `noScheduleReasons`, `NodeUnreachable` is raised); nothing is released |
 | `unreachable` to `lost` | The pool's `lostAfter`, only for `provider` and `vps-host` pools that set it | Never automatic for bare metal |
 
 Workloads on an isolated node keep running, and its reservations keep their devices and keep billing on reserved

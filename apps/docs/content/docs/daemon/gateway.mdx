@@ -280,6 +280,22 @@ Three bounds protect a gateway from a reconnect storm: the handshake token bucke
 database commits them; an unbounded queue once starved the lease renewal until the gateway fenced itself and dropped
 every stream. With the bound, a refused `Hello` retries with jitter and the database queue stays short.
 
+Each of these refusals (`RESOURCE_EXHAUSTED`) tells the daemon when to come back, so a herd spreads by the gateway's
+measure rather than by each daemon's doubling back-off. `GrpcError` carries `retryAfterMs`, sent as the standard
+`grpc-retry-pushback-ms` trailer:
+
+| Refusal | `retryAfterMs` (jittered) |
+| --- | --- |
+| Handshake bucket (`Session`, `Join`) | 250 ms up to refusals this second / `handshakesPerSecond` (at least 1 s) |
+| `maxPendingHellos` | 250 ms to 2 s |
+| `maxStreams` | 5 to 30 s |
+
+The same hint reaches every transport: the HTTP/2 trailers-only or trailing status; the WebSocket upgrade refusal,
+as `retry-after` (seconds) and `grpc-retry-pushback-ms` headers, which `connectGatewayWs` turns into a
+`RATE_LIMITED` `ComputeError` with `details.retryAfterMs` (from `grpc-retry-pushback-ms`, else `retry-after`); and
+`attachFrameConn`, whose `close(reason, { retryAfterMs })` hands it to simulated FakeDaemons. bcd and the FakeDaemon
+wait exactly that long; see [opening a session](/docs/daemon/sessions#opening).
+
 PLAN.md's v0.1 gate is one Node gateway holding at least 5,000 mTLS sessions at 10-second heartbeats for 30 minutes,
 with dispatch p99 under 500 ms and RSS under 2 GiB; if it fails, the gateway is rewritten in Go on the same proto
 (decision D20). On a development workstation (PGlite, 60 seconds), the gateway in its own process held 5,000 mTLS

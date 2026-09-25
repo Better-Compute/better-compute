@@ -252,6 +252,11 @@ keys and wrong types are all errors with a line number, so a typo fails loudly. 
 | `[imds] listen` | no | | Where a VPS host serves its instances' metadata service, for example `169.254.169.254:80` on the instances' bridge; empty turns it off |
 | `[boot] ...` | no | | A site agent's boot server; see [site agents](#a-site-agent) |
 | `[plugins] dir` | no | | A directory of bcx driver plugins and their `pins` file (sha256sum format); only pinned plugins run. Empty runs none. See [driver plugins in bcd](/docs/extending/drivers#driver-plugins-in-bcd) |
+| `[plugins] user` | no | | Who plugins run as when bcd is root (no supplementary groups); unset, each plugin gets its own uid in 61184 to 65519. `root` is refused |
+| `[plugins] privileged` | no | | Plugins (comma-separated names) that run as root without the shim or the filter, such as a Kata runtime |
+| `[plugins] sandbox` | no | `true` | Runs unprivileged plugins through bcd's `__bcx-exec` shim: `no_new_privs` and a seccomp filter. Linux only; elsewhere set `false` or no plugin starts |
+| `[plugins] cgroup` | no | | An absolute path to a delegated cgroup v2 directory; each plugin runs in its own child `bcx-<name>` |
+| `[plugins] memory_max`, `[plugins] pids_max` | no | 0 (none) | The child cgroup's `memory.max` (bytes) and `pids.max`; not negative. See [the plugin sandbox](/docs/extending/drivers#the-plugin-sandbox) |
 
 A pin is `sha256/` plus the standard base64 of the SHA-256 of a SubjectPublicKeyInfo, the form HPKP and
 `curl --pinnedpubkey` use. `bcd doctor` warns when the file is readable or writable by anyone but its owner.
@@ -372,6 +377,14 @@ WantedBy=multi-user.target
 
 `bcd node` opens no TCP listener; everything it does starts with an outbound connection to the gateway. See
 [the overview](/docs/daemon) for the privilege-separation plan.
+
+<Callout type="warn" title="Plugins under this unit">
+The unit as the install script writes it predates the plugin sandbox. Its `CapabilityBoundingSet` has no
+`CAP_SETUID` or `CAP_SETGID`, which bcd needs to start each unprivileged plugin under its own uid (or
+`[plugins] user`), and `ProtectControlGroups=yes` makes the cgroup tree read-only, so `[plugins] cgroup` cannot create
+its children. A node that runs unprivileged plugins under this unit needs those two capabilities added and, for
+cgroup limits, a writable delegated cgroup directory. Nodes without `[plugins] dir` are unaffected.
+</Callout>
 
 ## Joining
 

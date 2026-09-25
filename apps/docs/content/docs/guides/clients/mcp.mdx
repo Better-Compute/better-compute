@@ -200,6 +200,8 @@ framework.
 | `delete_sandbox` | `sandboxes.delete` | any authenticated caller | destructive, idempotent |
 | `list_sandbox_snapshots` | `sandboxSnapshots.list`: the caller's own by default, `scope: 'all'`, filter `sandboxId`, `limit` 1 to 200, `cursor` | any authenticated caller | read-only |
 | `delete_sandbox_snapshot` | `sandboxSnapshots.delete` | any authenticated caller | destructive, idempotent |
+| `list_command_batches` | `commandBatches.list` (v1.0): filter `state`, `limit` 1 to 200, `cursor` | any authenticated caller | read-only |
+| `get_command_batch` | `commandBatches.get` with a `batchId` (`batch_…`) | any authenticated caller | read-only |
 | `exec_command` (with `execCommand: true`) | `commands.run`: `inventory.refresh`, `logs.collect` or `node.reboot` | `compute:nodes:read` on the node | destructive |
 | `fleet_export` (with `fleet: true`) | `fleet.export` | `compute:fleet:admin` on the fleet | read-only |
 | `fleet_plan` (with `fleet: true`) | `fleet.plan` | `compute:fleet:admin` on the fleet | read-only |
@@ -233,8 +235,13 @@ too), and `delete_sandbox_snapshot` deletes one (`snap_…`) for good. No tool t
 `sandboxes.exec`.
 
 Every argument is checked against the tool's JSON Schema before anything is called: ids must match their prefix
-(`pool_…`, `node_…`, `rsv_…`, `inst_…`, `sbxt_…`, `sbx_…`, `snap_…`), and unknown arguments are refused. A bad argument is a tool error `INVALID_INPUT`
+(`pool_…`, `node_…`, `rsv_…`, `inst_…`, `sbxt_…`, `sbx_…`, `snap_…`, `batch_…`), and unknown arguments are refused. A bad argument is a tool error `INVALID_INPUT`
 with the path of the first problem.
+
+**Batch tools only read.** `list_command_batches` and `get_command_batch` show the tenant's
+[destructive-batch](/docs/operations/pki#the-destructive-batch-quorum-v10) quorum: a batch's reason, size, the
+approvals it has and needs, and its commands by state. There is no approve tool: approving is a person's signature
+with an approver key held off the control plane.
 
 **Fleet tools plan but never apply.** `fleet_plan` returns the changes and the `planHash`, with the list of calls
 replaced by `callCount`. There is deliberately no apply tool: a person reviews the plan and runs
@@ -253,6 +260,8 @@ deliberately light:
   filters and decides every call anyway, on the reservation or instance itself (`OwnReservations`, `BoundedExtend`,
   a delegation's confirm list).
 - The fleet tools need `compute:fleet:admin` on `compute-fleet/global`, which only resolves in the root tenant.
+- `list_command_batches` and `get_command_batch` are open to any authenticated caller; compute decides
+  `compute:batches:read` on the tenant.
 - `create_sandbox` is visible to a caller with `compute:sandboxes:read` on `compute-sandbox-template/{templateId}`:
   creating a sandbox starts with seeing its template. The other sandbox tools (`list_sandbox_templates`,
   `list_sandboxes`, `get_sandbox`, `extend_sandbox`, `delete_sandbox`, `list_sandbox_snapshots`,

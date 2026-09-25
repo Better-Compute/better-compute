@@ -58,7 +58,22 @@ sequenceDiagram
 Before any frame, the gateway admits the stream. It refuses with `UNAVAILABLE` while it is not started, holds no
 lease or is draining, and with `RESOURCE_EXHAUSTED` when it holds `maxStreams` sessions (default 5,000) or the
 handshake token bucket (200 per second, shared with `Join`) is empty. A certificate whose serial is in the
-revocation set is refused `UNAUTHENTICATED`. The daemon retries a refusal with jittered back-off.
+revocation set is refused `UNAUTHENTICATED`. The daemon retries a refusal with jittered back-off, unless the refusal
+says when to come back.
+
+A busy refusal carries a retry pushback, the standard gRPC trailer `grpc-retry-pushback-ms` (in the trailers-only
+status or the trailing one), jittered so refused daemons never return in step:
+
+| Refusal | Pushback |
+| --- | --- |
+| Handshake bucket empty (`Session` or `Join`) | Between 250 ms and the time the bucket needs to admit everyone refused this second (refusals / rate, at least 1 s), so a power-on herd spreads over exactly that window |
+| More than `maxPendingHellos` Hellos in flight | 250 ms to 2 s: a Hello transaction takes milliseconds |
+| At `maxStreams` | 5 to 30 s, or another gateway sooner |
+
+bcd waits exactly the pushback (`transport.Pushback`: capped at 15 minutes; a missing, malformed or negative value is
+ignored, since bcd always retries) instead of its own doubling, and the doubling then starts over; a refused `Join`
+uses it as its next delay. The FakeDaemon follows it the same way. Before this, a 10,000-node power-on herd's connect
+tail was each daemon's own back-off after repeated bucket refusals, 65 s in the simulator.
 
 The first frame must be `Hello`; anything else closes the stream `INVALID_ARGUMENT`. The gateway checks:
 
@@ -302,7 +317,7 @@ count. Go's `session.Backoff` and the FakeDaemon implement the same schedule.
 | --- | --- |
 | `Drain{reconnect_after_ms, reason}` | Closes and redials after the given delay; rolling deploys send a random delay up to 60 s |
 | `RevocationNotice{reason, serials}` | Stops using the certificate and does not redial with it |
-| `RESOURCE_EXHAUSTED` | Retries with jitter |
+| `RESOURCE_EXHAUSTED` | Retries after the `grpc-retry-pushback-ms` the gateway sent and restarts its doubling; without one, retries with jitter |
 | `ABORTED`, `UNAVAILABLE`, a reset, a timeout | Redials with back-off; the load balancer may pick another gateway |
 
 While disconnected the daemon keeps enforcing its last desired state, keeps journaling events, and never drops a
@@ -318,7 +333,8 @@ credits and the gateway resynchronizes its counters from them.
 When the daemon has no free credit on a command's lane, or its journal is full, it answers
 `REJECTED` with reason `BUSY`. `BUSY` is not terminal and not journaled: the gateway puts the command back to
 `pending` with `not_before` set by a back-off per command and session, 1 second doubling to 30 seconds, clears its
-epoch, and pokes dispatch. Nothing is dropped.
+epoch, and pokes dispatch. Nothing is dropped. This is the daemon refusing a command; a gateway refusing a session
+is the [retry pushback](#opening) above.
 
 ## Closing
 

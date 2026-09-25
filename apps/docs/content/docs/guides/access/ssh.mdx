@@ -158,7 +158,9 @@ ssh -i ~/.ssh/id_ed25519 root@10.20.0.14
 (default `root`) as `principal` and `--minutes` (default 15, 1 to 60) as `ttlSeconds`, and writes the certificate
 beside the key as `<key>-cert.pub`. It prints the certificate's path, serial, principals, account and
 `validBefore`. A `--key` that is not a `.pub` file, or whose content holds a private key, is refused before anything
-is sent.
+is sent. What the server answers is checked before it is used: the account must be a Unix account name (it reaches
+ssh's `%r` and `%u` expansions, such as a bastion's `ProxyCommand`), and the certificate must parse as an OpenSSH user
+certificate for your own key before it is written into `~/.ssh`; otherwise `INVALID_RESPONSE`.
 
 `--connect HOST` issues the certificate and connects in one step. After writing it, `ssh-cert` runs your OpenSSH
 client (`--ssh`, default `ssh`) to the node's address, and the command after `--` runs there (without one, a
@@ -271,7 +273,10 @@ and are left to this re-decision. Each revocation publishes `node.ssh-cert.revok
 See [IAM events](/docs/guides/iam#iam-events-compute-reacts-to).
 
 `authorizeSession` answers `false` for everything about the holder (session gone, identity gone or inactive, the
-decision says no), and that revokes. It throws only when compute's own read fails, so the reconciler treats only two
+decision says no), and that revokes. It counts a `NOT_FOUND` from Better IAM as "gone" only when it is Better IAM's
+own `Identity not found`, `Tenant not found` or `Resource not found`; a bare 404 (a proxy's error page, or `Endpoint
+not found` on a wrong base path) is IAM trouble and throws, so an IAM incident never revokes every certificate or
+closes every tunnel. It throws only when compute's own read fails, so the reconciler treats only two
 error codes as a denial: `NOT_FOUND` and `TENANT_SUSPENDED`. A thrown `ACCESS_DENIED` or `UNAUTHENTICATED` means
 compute's own credential was refused, not the holder: like any other error, it keeps the certificate, stamps
 `reauthorized_at` and logs `Re-authorizing an SSH certificate failed; it stays valid until it expires`. Otherwise an

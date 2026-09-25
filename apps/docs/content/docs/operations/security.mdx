@@ -43,6 +43,11 @@ sources:
   - daemon/internal/pki/secrets.go
   - daemon/internal/agent/tunnels.go
   - daemon/internal/agent/access.go
+  - daemon/internal/bcx/sandbox_linux.go
+  - daemon/cmd/bcd/plugins.go
+  - packages/pki/src/quorum.ts
+  - packages/server/src/api/secrets.ts
+  - packages/vps/src/module.ts
 ---
 
 Better Compute runs commands as root on your machines, so its security model starts from one question: who can make
@@ -71,7 +76,8 @@ are built, and ends with a hardening checklist.
 | Compromised node | `nodeId` only from the certificate's SAN; 24 h certificates with pushed revocation; secrets bound to current work; reports only about its own allocations; its attested results speak only for itself | Built |
 | Cloned node identity | A certificate alternating between two machines more than 3 times in 10 minutes is revoked (duplicate-identity quarantine) | Built in the gateway |
 | Compromised gateway | Holds no key in its code; commands and NodeSpecs signed; Renew and `JoinResponse` verified end to end; secrets as JWE; results and `AllocationBound` reports signed by the node. It can delay, drop or read frames, not forge intent, identity, results, bindings or secrets | Built, with the [process caveat](#gateway-processes) |
-| Compromised api or worker | Admissions still need IAM decisions; worker keys last 24 h; tickets are audited | Built; fleet-wide quorum is v1.0 |
+| Compromised api or worker | Admissions still need IAM decisions; worker keys last 24 h; tickets are audited; fleet-wide destructive batches need k-of-n operator approval checked on the machine (the [destructive-batch quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)) | Built except the quorum, which is v1.0 and partial: bcd and the FakeDaemon enforce it and the server stores, approves and holds batches, but the gateway does not attach approvals yet and nothing built in creates batches |
+| Compromised driver plugin | Pinned by SHA-256 and executed from the file that was hashed; run under its own unprivileged uid with `no_new_privs`, a seccomp filter (no namespaces, mounts or `io_uring`) and optional cgroup limits; only plugins named `privileged` run as root | Built in bcd (Linux) |
 | Replay | Command-id journal, `not_after`, epoch fencing, a server time mark against rewound `Welcome`s, ticket `jti` sets, a Renew replay cache | Built in the control plane, the FakeDaemon and `bcd` (bcd keeps its ticket `jti` set in its journal, so a restart does not forget a spent ticket) |
 | Agent overspend | Delegation scope, confirmations, per-agent quotas, budgets, `agents.suspendAll` | Through Better IAM |
 | PXE and DHCP spoofing | One lease-holding boot server per site, isolated VLANs, signed images | Partly built (v0.2) |
@@ -87,7 +93,9 @@ are built, and ends with a hardening checklist.
   refused whole, signed or not), and node-signed `SecretRequest` and `WorkloadTokenRequest` answered to a one-time
   key (the site agent sends them for BMC credentials and discovery tokens, the ramdisk and VPS hosts for user data,
   the metadata service for workload tokens). The site
-  agent's boot server answers PXE only for prepared machines while it holds the boot lease. Its node key is a 0600
+  agent's boot server answers PXE only for prepared machines while it holds the boot lease. Driver plugins run
+  sandboxed (below), and each `bmc.*` kind admits only its own BMC operations, so an unsigned `bmc.query` cannot carry
+  a power or RAID change. With approver keys in its trust bundle it enforces the destructive-batch quorum. Its node key is a 0600
   file, not a TPM key, and it has no privilege-separated helper yet. See
   [the daemon](/docs/daemon#what-bcd-does-today).
 </Callout>
@@ -151,6 +159,40 @@ more than 5 minutes before the highest server time they have seen, so a gateway 
 signed command by rewinding the daemon's clock. See
 [PKI](/docs/operations/pki#signed-intent).
 
+A worker key can still sign anything, so a compromised api or worker could wipe the fleet with valid signatures.
+PLAN.md §13's v1.0 answer is the destructive-batch quorum: `pki.approvers` pins operator approver keys, held off the
+control plane, in the join-key-signed trust bundle, and a destructive command then runs only as part of a batch that
+enough of them approved, proven by a Merkle inclusion proof the machine checks itself; unbatched destructive commands
+are refused by default. bcd and the FakeDaemon enforce it, the server's `quorum` module stores batches and collects
+approvals (`commandBatches.approve`), the command queue holds batched commands until approval, and
+`better-compute batch keygen` and `batch sign` are the approvers' tools; but the gateway does not yet attach the
+approval to a batched command and no built-in workflow creates batches, so with `pki.approvers` set every
+destructive command would be refused `UNBATCHED_LIMIT`. Do not set it on a live deployment yet. See
+[the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10).
+
+### Driver plugins on the host
+
+bcx driver plugins run next to bcd, which runs as root, so bcd confines them (`[plugins]` in `config.toml`):
+
+- **What runs is what was pinned.** Each binary is hashed through an open file and, on Linux, executed from that
+  file (`/proc/self/fd/3`), never by path again, so swapping the file between the check and the exec runs nothing
+  else.
+- **Not as root, and not as each other.** When bcd is root, each plugin runs under its own uid and gid (stable per
+  name, in systemd's dynamic range), so none can read another's memory, or all as `[plugins] user`; no
+  supplementary groups. `user = "root"` is refused: plugins that need root (a Kata runtime) are named in
+  `[plugins] privileged` and run without the filter, and bcd logs each one.
+- **A narrow kernel surface.** With `[plugins] sandbox` (default on), bcd's `__bcx-exec` shim sets `no_new_privs`
+  and installs a seccomp filter on every thread (TSYNC) that refuses kexec, kernel modules, mounts, namespaces
+  (`unshare`, `setns`, `clone` with `CLONE_NEW*`; `clone3` answers `ENOSYS`), swap, reboot, `bpf`, `io_uring`,
+  `ptrace` and `process_vm_*`, the keyring, `perf_event_open`, `userfaultfd`, `open_by_handle_at`, raw I/O ports,
+  clock changes, `acct`, `quotactl`, `lookup_dcookie` and `syslog` with `EPERM`, and kills a call from a foreign ABI.
+- **Bounded and reaped.** `[plugins] cgroup` puts each plugin in its own child cgroup with `memory_max` and
+  `pids_max`; every plugin has its own process group, dies with bcd and is killed as a group on close.
+
+The install script's systemd unit does not yet grant what the user switch and the cgroup limits need (`CAP_SETUID`,
+`CAP_SETGID`, a writable cgroup directory); see [installing bcd](/docs/daemon/install#the-systemd-unit) and
+[the plugin sandbox](/docs/extending/drivers#the-plugin-sandbox).
+
 ### Attested results
 
 A wipe or diagnostics result counts as attested only when the node signed it: the gateway stores
@@ -176,8 +218,14 @@ gateway's report handlers also ignore reports about allocations placed on anothe
   command of the step that carries the reference, or a live allocation on it), and uses a fresh request id. The
   answer is a JWE to the request's one-time key, expiring within 5 minutes.
 - A hosted VPS instance's user data is released only when its `secret://` reference belongs to the instance's own
-  tenant, so one tenant's VM cannot boot with another tenant's secret; `instances.create` refuses a foreign
-  reference up front as well.
+  tenant, so one tenant's VM cannot boot with another tenant's secret. Since the guest reads its user data,
+  `instances.create` accepts only a secret the tenant wrote with `secrets.put` (a `secret_refs` row; never a
+  platform-minted one such as a join token, a BMC credential or another instance's sealed user data) and also
+  decides `compute:secrets:manage` on the tenant with the caller's own credential (and on the fleet in the root
+  tenant), so `compute:instances:create` alone cannot read a write-only secret. Sandbox templates follow the same
+  rule.
+- `secrets.put` records the scope it was decided on (`secret_refs.scope`, `tenant` or `fleet`), and a tenant-scoped
+  put or delete never changes a fleet secret (`INVALID_STATE`).
 - Nothing is released for a tenant that is suspended or deleted: after the signature and binding checks, a reference
   whose tenant has a non-active `compute_tenant_states` row is refused (reason `tenant-suspended` or
   `tenant-deleted`, recorded as `security.secret.refused`), so a deleted tenant's instance cannot fetch its user data
@@ -195,8 +243,11 @@ The gateway refuses a tenant-controlled session without asking, since the lessee
 JWE to the request's one-time key, lives at most 15 minutes, and its audit row carries only the `jti`. Refusals
 publish `security.workload.refused`. On the host, a session token binds each metadata request to one instance and
 forwarded requests are refused. Since the metadata service and instance tunnels name an instance by its address, bcd
-guards every instance tap with host nftables rules (only the NIC's own MAC, IP addresses and ARP), answers only while
-those rules are loaded, and never serves an address two instances claim or a loopback caller. See [workload identity](/docs/guides/vps/instances#workload-identity).
+guards every instance tap with host nftables rules (only the NIC's own MAC, IP addresses and ARP; each guarded
+address bound to its own tap so no other bridge port can send from it or claim it; no rogue DHCP server, router
+advertisement or foreign neighbour advert), trusts only addresses those loaded rules bind to an instance, rechecks
+every 30 seconds that the table was not flushed, and never serves an address two instances claim or a loopback
+caller. See [workload identity](/docs/guides/vps/instances#workload-identity).
 
 ### Tunnels, tickets and break-glass SSH
 
@@ -216,6 +267,8 @@ those rules are loaded, and never serves an address two instances claim or a loo
   must not revoke every certificate mid-outage.
 - Per identity and per api replica: 10 tunnels a minute and 20 certificates an hour, then `RATE_LIMITED`.
 - `ssh-cert --connect HOST` accepts only a host name or an IP address, never something ssh would read as an option.
+  `ssh-cert` checks the server's answer before using it: the account must be a Unix account name (it reaches ssh's
+  `%r` and `%u`), and the certificate an OpenSSH user certificate for the caller's own key.
 
 See [interactive access](/docs/guides/access).
 
@@ -234,9 +287,14 @@ A sandbox is a tenant VM for code you do not trust, often written by an agent. T
 - **Secrets sealed before storage.** Template `env` values and a `secret://` user data are resolved into user data
   that is sealed through the secret broker before the instance row is written; without a broker such a template is
   `INVALID_CONFIG`.
-- **Snapshots are the owner's.** A snapshot holds memory and `/etc/sandbox/env`, so only the identity that took it
-  can restore it (`NOT_FOUND` for anyone else in the tenant). A snapshot deleted during its upload is purged once the
-  upload settles.
+- **Secrets only the tenant put.** A template's `env` and `secret://` user data must be secrets the tenant wrote with
+  `secrets.put`, never fleet-scoped ones, and naming them decides `compute:secrets:manage` (on the fleet too in the root tenant, whose store
+  also holds fleet secrets). An update that changes what the guest runs is decided on the template's secrets even
+  when it names none, and each new instance re-checks them.
+- **Snapshots are the owner's.** A snapshot holds memory and `/etc/sandbox/env`, so it belongs to the sandbox's owner,
+  whoever took it, and only that owner can restore it (`NOT_FOUND` for anyone else in the tenant); someone allowed
+  to snapshot another user's sandbox cannot boot its memory as their own. A deleted snapshot's object is purged only
+  once its upload settled and no live instance restores from it.
 - **The CLI treats the guest as hostile.** `sandbox exec` puts `--` before the host, so a generated command is never
   an ssh option, and turns off agent and X11 forwarding, port forwardings, proxies, connection sharing and local
   commands for that connection. CLI output strips control characters from server text (table cells, string results,
@@ -244,11 +302,15 @@ A sandbox is a tenant VM for code you do not trust, often written by an agent. T
 
 - **Network policy on the host.** A template's `network` (`private`, `none`) becomes host nftables rules on the
   instance's taps, whatever runs inside; bcd fails closed, stopping an instance whose rules cannot be expressed or
-  loaded, and vps refuses `private` or `none` on a pool without an IP range.
+  loaded, and vps refuses `private` or `none` on a pool without an IP range. Such instances are placed only on hosts
+  labelled `bc.dev/cap.instance.network-policy`, since an older bcd would drop the policy and give full egress.
+  `private` spans the pool's whole IPAM subnet, other tenants' instances included on a shared pool.
 
 - **The guest is pinned too.** With `vps({ sandboxExec: { certifyHostKey } })`, each guest presents a host key the
   sandbox CA certified (its private key only in sealed user data), and `sandbox exec` checks it with
-  `@cert-authority` and `StrictHostKeyChecking=yes`; a guest without one is accepted on first use, and the CLI says so.
+  `@cert-authority` and `StrictHostKeyChecking=yes`. `hostCertified` is reported only while the guest's certificate
+  (30 days, never renewed) still holds, and a sandbox's lifetime, extensions and memory restores never run past it; a guest without a valid one is refused unless `--accept-host-key` asks for trust on first
+  use for that connection. `sandbox exec` also runs ssh with `-F none`, so no user or system `ssh_config` applies.
 
 See [sandboxes](/docs/guides/vps/sandboxes#run-code-inside).
 

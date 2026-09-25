@@ -126,8 +126,9 @@ Registering the module adds:
   `vps/0006_warm_claims` (`instances.claimed_at`), `vps/0007_template_env` (`sandbox_templates.env`) and
   `vps/0008_template_network` (`sandbox_templates.network` and `instance_version`, `instances.network_policy` and
   `warm_template_version`), `vps/0009_snapshot_fixes` (`sandbox_snapshots.principal_instance_id` and `purged`),
-  `vps/0010_sandbox_metric_indexes` (partial indexes for the sandbox metrics) and `vps/0011_host_certificates`
-  (`instances.host_certified`, `sandbox_snapshots.host_certified`);
+  `vps/0010_sandbox_metric_indexes` (partial indexes for the sandbox metrics), `vps/0011_host_certificates`
+  (`instances.host_certified`, `sandbox_snapshots.host_certified`) and `vps/0012_host_cert_validity`
+  (`host_cert_valid_before` on both);
 - the `vps.instances` reconciler, woken through the <Term id="work-queue">work queue</Term> by every change, the
   `vps.sandboxes` reconciler (every 15 seconds: sandbox expiry, sandbox events, warm pools and settling snapshots),
   and the `vps.usage` job, which meters hosted instances every 5 minutes;

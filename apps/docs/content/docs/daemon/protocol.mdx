@@ -260,9 +260,12 @@ part  = uint32_be(len(bytes)) || bytes
 | `renew-pop` | current node key | `[sha256(csr), node_id, client_time]` |
 | `x509pop` | node key of a possibly expired certificate | `[sha256(csr), node_id, client_time]` |
 | `discovery-assertion` | site agent node key (`bcd site`, one per iPXE script it serves) | `[SignedDiscoveryAssertion.body]` |
+| `batch-approval` | operator approver key (v1.0 [quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)) | `[batch_id, scope_root, uint32_be(scope_size), timestamp(not_after)]` |
 
 Worker keys chain to the command-signing roots of the `TrustBundle` the daemon received in `JoinResponse`, and a
-newer bundle arrives in `Welcome.trust`, signed by the pinned JoinService key. The daemon accepts a bundle only
+newer bundle arrives in `Welcome.trust`, signed by the pinned JoinService key. The bundle also carries the v1.0
+quorum's `approver_keys`, `approver_threshold`, `quorum_tiers` and `unbatched_destructive_per_hour`, empty unless
+`pki.approvers` is set. The daemon accepts a bundle only
 when its version is greater than the one it holds. The envelopes exist from v0.1 with optional signatures, so
 turning them on is additive. See [delivery](/docs/daemon/delivery#signed-commands-and-attested-results) for which
 kinds require them.
@@ -276,7 +279,7 @@ Refusals that end a stream use gRPC status codes:
 | `UNAUTHENTICATED` | No valid node certificate; a revoked or superseded certificate; the certificate expired during the session |
 | `PERMISSION_DENIED` | `Hello.node_id` is not the certificate's node; the certificate is not valid for `Hello.role`; the node has not joined |
 | `INVALID_ARGUMENT` | The first frame is not `Hello`; `Hello` lacks `role`, `boot_id` or `journal_id`; a second `Hello`; an undecodable message |
-| `RESOURCE_EXHAUSTED` | The handshake token bucket, the stream limit or the pending-Hello limit; retry with jitter |
+| `RESOURCE_EXHAUSTED` | The handshake token bucket, the stream limit or the pending-Hello limit; retry after the `grpc-retry-pushback-ms` trailer the refusal carries (see [opening](/docs/daemon/sessions#opening)), else with jitter |
 | `ABORTED` | A newer session of the same node superseded this one |
 | `UNAVAILABLE` | The gateway is starting, draining, stopping or fenced, or a frame failed on a temporary error; reconnect |
 | `UNIMPLEMENTED` | An unknown method |

@@ -104,19 +104,22 @@ are all on the `control` lane and accepted only by agents with role `site`:
 
 | Kind | Used by | Retry-safe | Flags | Timeout |
 | --- | --- | --- | --- | --- |
-| `bmc.query` | `power.getPower`, `inspect.oob`, firmware checks | yes | none | 2m |
-| `bmc.boot` | `management.setBootDevice`, `media.insert`, `media.eject` | yes | none | 2m |
+| `bmc.query` | `power.getPower`, `inspect.oob`, firmware checks, reading BIOS settings and the RAID layout | yes | none | 2m |
+| `bmc.boot` | `management.setBootDevice`, `media.insert`, `media.eject`, applying BIOS settings (pending until the next boot) | yes | destructive | 2m |
 | `bmc.power` | `power.setPower`, `metal.power` | no | destructive | 5m |
-| `bmc.rotate` | `metal.rotateBmcCredential` | no | attested by the site agent | 5m |
+| `bmc.rotate` | `metal.rotateBmcCredential` | no | attested by the site agent, destructive | 5m |
 | `bmc.firmware` | firmware reflash | no | destructive | 1h |
-| `bmc.storage` | `raid.apply` (a v0.5 draft) | no | destructive | 1h |
+| `bmc.storage` | applying or clearing a RAID layout (a v0.5 draft) | no | destructive | 1h |
 | `boot.prepareRamdisk` | boot entries for a PXE boot | yes | none | 2m |
 | `boot.cleanUp` | removing a node's boot entries | yes | none | 2m |
 | `site.httpProxy` | one HTTP request to an agentless machine | no | none | 1m |
 
 A power cycle is not idempotent, so `bmc.power` is never retried blindly. From v0.2 agents refuse
 destructive kinds that lack a worker signature over the command body, so a compromised gateway
-cannot forge one. bcd does so once its trust bundle holds command-signing roots. See
+cannot forge one. bcd does so once its trust bundle holds command-signing roots. `bmc.boot` is destructive because
+the boot device, virtual media and BIOS settings decide what a machine boots (with any later power cycle, that is a
+reimage), and `bmc.rotate` because a changed password locks the platform out; both are therefore signed and fall
+under the v1.0 batch quorum (9c14146, 3ff8131). See
 [security](/docs/operations/security).
 
 ## Redfish in bcd site
@@ -135,6 +138,12 @@ fallback fills a JSON without a username), and runs the operation:
 | `inspect.inspect` | the system and its `EthernetInterfaces` | `macs`, `ipAddresses`, `manufacturer`, `model`, `serialNumber`, `productUuid`, `power` |
 | `firmware.components` | `UpdateService/FirmwareInventory` | `components: [{ id, name, version }]` |
 | `management.rotateCredential` | `PATCH` the `AccountService` account with the new password (fetched by `newCredentialRef`), then a login with it | `{ verified }` |
+| `bios.getSettings` | `GET` the system's `Bios` resource | `{ settings }`, every attribute as text |
+| `bios.applySettings` | `PATCH` the BIOS settings object (`@Redfish.Settings.SettingsObject`, else `.../Bios/Settings`) with `Attributes`, each value converted to the type the BIOS reports (boolean, integer or string); an attribute the BIOS lacks or a mistyped value is `invalid-args` before anything is written | `{ pendingReboot: true, changed }` |
+| `raid.getLayout` | the volumes of the system's first storage subsystem that has any (the RAID controller) | `{ volumes: [{ level, sizeGiB }] }` |
+| `raid.applyLayout` | checks the layout first (levels 0, 1, 5, 6, 10; member disks named by serial number or WWN on that controller), then `DELETE`s every existing volume and `POST`s the layout's volumes | `{ volumes }` |
+| `raid.clear` | `DELETE` every volume of the controller | `{ deleted }` |
+| `firmware.update` | `UpdateService.SimpleUpdate` on the named component of `FirmwareInventory`, with the site cache's copy of the image as `ImageURI` | `{ started: true, component }` |
 
 - **Transport.** HTTPS with basic authentication only; a plain-http address is refused (`invalid-address`). With
   `tlsSpkiSha256` the BMC's certificate must match that SPKI hash, since BMCs mostly present self-signed
@@ -154,8 +163,17 @@ fallback fills a JSON without a username), and runs the operation:
   `errorCode`, as the FakeDaemon's fake site answers. The codes are `unreachable` (including a pin mismatch),
   `auth-failed` (401 or 403), `unsupported` (404, 405, or an operation the client does not have), `bmc-error`,
   `invalid-args`, `invalid-address`, `credentials-unavailable` and `unsupported-driver`.
-- **Not built.** `bios.getSettings`, `bios.applySettings`, `firmware.update`, `raid.applyLayout` and
-  `raid.getLayout` answer `unsupported`, so the BIOS, RAID and firmware-reflash steps fail against a real BMC.
+- **Each kind carries only its own operations.** The kind decides the lane, retry safety and whether a worker
+  signature is required, so bcd runs an operation only under the kind metal assigns it: `bmc.query` (`power.getPower`,
+  `inspect.inspect`, `firmware.components`, `bios.getSettings`, `raid.getLayout`), `bmc.boot`
+  (`management.setBootDevice`, `virtual-media.insert` and `eject`, `bios.applySettings`), `bmc.power`
+  (`power.setPower`), `bmc.rotate` (`management.rotateCredential`), `bmc.firmware` (`firmware.update`) and
+  `bmc.storage` (`raid.applyLayout`, `raid.clear`). Anything else fails `invalid-payload`, so an unsigned `bmc.query`
+  cannot power a machine off or rebuild its RAID.
+- **Firmware comes from the site cache.** The BMC fetches the image itself and cannot check its digest, so the site
+  agent first pulls it into its SHA-256-verified image cache (the step's `url` and `sha256`) and hands the BMC the
+  boot server's `/cache/<sha256>` URL. An agent without a boot server has no cache to serve from and refuses the
+  update (`ok: false`, `image-unverified`), as it does a missing or malformed digest.
 - **Rotation.** `bmc.rotate` is attested: bcd signs its result with the site agent's node key, which is what the
   worker checks before promoting the new password.
 
@@ -227,7 +245,11 @@ const { ref } = await compute.api.secrets.put(credential, {
 });
 ```
 
-`secrets.put` and `secrets.delete` are decided as `compute:secrets:manage`. No method reads a value
+`secrets.put` and `secrets.delete` are decided as `compute:secrets:manage`. `secrets.put` records the scope it
+decided on in `secret_refs.scope` (migration `core/0025_secret_scope`) and answers it in the secret's info, so a
+fleet secret stays distinguishable from the root tenant's own: a put or delete of a `fleet` secret without
+`scope: 'fleet'` is `INVALID_STATE`, since it was decided on the tenant and the secret is guarded by the fleet.
+Secrets stored before the migration read `tenant`, and a fleet put may claim one. No method reads a value
 back, and the `security.secret.put` and `security.secret.deleted` events carry only the ref, name
 and version. Unless you pass other stores in the `secrets` option, the server uses the
 `local-sealed` store, which keeps ciphertext in `sealed_secrets`, sealed under the deployment

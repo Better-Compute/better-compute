@@ -82,7 +82,7 @@ better-compute api instances.create tenantId=acme poolId=pool_01jz… flavor=g1.
     flavor: { type: 'string', description: 'A flavor name of that pool, such as g1.small.', required: true },
     imageId: { type: 'string', description: 'Up to 200 characters of letters, digits and . _ @ : / -, starting with a letter or digit. Hosted pools resolve it with vps({ images }); provider pools pass it to the provider as is.', required: true },
     sshKeys: { type: 'string[]', description: 'Up to 32 OpenSSH public key lines: ssh-ed25519, ssh-rsa, ecdsa-sha2-nistp256/384/521 or sk-ssh-ed25519@openssh.com.', default: '[]' },
-    userData: { type: 'string', description: 'Your own cloud-init, at most 32 KiB, or a reference to it. When given it is used as is, and sshKeys are not added to it. A reference must be secret://<tenantId>/<id>, a secret of this tenant; any other secret://, vault:// or env:// value is INVALID_INPUT.' },
+    userData: { type: 'string', description: 'Your own cloud-init, at most 32 KiB, or a reference to it. When given it is used as is, and sshKeys are not added to it. A reference must be secret://<tenantId>/<id>, a secret this tenant wrote with secrets.put (a secret_refs row), since the guest reads it; a platform-minted secret, the sealed user data of another instance, or any other secret://, vault:// or env:// value is INVALID_INPUT. A reference also needs compute:secrets:manage (see the decision below).' },
     desiredState: { type: "'running' | 'stopped'", description: 'Where the instance should end up.', default: "'running'" },
     projectId: { type: 'string', description: 'A prj_ id, for usage tags and policies.' },
     idempotencyKey: { type: 'string', description: '1 to 128 of letters, digits and . _ : -. Retrying with the same key returns the same instance.', required: true },
@@ -120,6 +120,13 @@ owner is the caller, and it carries the attributes policies can test: `vcpu`, `m
 `imageVerified` and `projectId`. A refusal deletes the draft, so a later retry is decided afresh. An agent under
 [delegated confirmation](/docs/guides/iam/delegated-confirmation) gets `CONFIRMATION_REQUIRED` and retries with the
 same key once a person approves.
+
+When `userData` is a `secret://` reference, the admission check first decides `compute:secrets:manage` on
+`compute-tenant/<tenantId>` with the caller's own credential, and in the root tenant also on `compute-fleet/global`,
+whose secrets share the root tenant's store: user data is handed to the guest, which reads it, while secrets are
+otherwise write-only, so `compute:instances:create` alone must not be enough to read one. A call without a caller
+credential is `ACCESS_DENIED` with `details.reason: 'credential-required'`. The decision uses the deployment's IAM
+type prefix (`ModuleContext.typePrefix`).
 
 Still outside any transaction, the pool's budget check runs, the same `budgetAdmissionCheck` as for
 [reservations](/docs/guides/capacity/reservations): when the pool's policy sets `admission.budgetCheck: 'meter'`, or
@@ -163,10 +170,10 @@ A policy can bound what tenants create, for example only small VMs from signed i
 
 | Code                    | When                                                                                                                                 |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `INVALID_INPUT`         | A field fails validation, or the pool is not of class `vps-host` or `provider`.                                                      |
+| `INVALID_INPUT`         | A field fails validation, the pool is not of class `vps-host` or `provider`, or `userData` names a secret the tenant did not put with `secrets.put`. |
 | `NOT_FOUND`             | The pool is not owned by or offered to the tenant, or is archived; the flavor is missing or archived; a hosted pool's image does not resolve. |
 | `CONFLICT`              | The idempotency key was used for a different request.                                                                                |
-| `ACCESS_DENIED`         | Better IAM refused. The draft is gone.                                                                                               |
+| `ACCESS_DENIED`         | Better IAM refused. The draft is gone. Also a `secret://` user data without `compute:secrets:manage`, or without a caller credential. |
 | `CONFIRMATION_REQUIRED` | A delegated session needs a person to approve.                                                                                       |
 | `SPEND_LIMIT_REACHED`   | The pool checks budgets and a Better IAM budget covering the caller is spent. The draft stays.                                      |
 | `QUOTA_EXCEEDED`        | The tenant's quota in the pool is too small. `details` names `resource`, `requested`, `max` and `used`.                             |
@@ -341,7 +348,8 @@ form. NIC order is the guest's interface order and is kept. An instance being de
 User data never travels in the spec. At admission in a hosted pool, vps renders the cloud-config (the hostname from
 the instance id and `sshKeys`, unless you passed `userData`), seals it through the secret broker and keeps only its
 `secret://` reference (`instances.user_data_sealed`, migration `vps/0002_sealed_user_data`); a tenant's own reference
-is kept as it is, and only a sealed one is deleted with the instance. The host fetches the value with a node-signed
+(one it wrote with `secrets.put`, checked in the create transaction) is kept as it is, and only a sealed one is
+deleted with the instance. The host fetches the value with a node-signed
 `SecretRequest` naming the instance's allocation, and the broker releases it only when the secret belongs to the
 instance's own tenant. The guest gets no join token, no `bcd` and no IAM key.
 
@@ -474,8 +482,9 @@ them sets `pause: true` in its `RuntimeTraits`, and `builtinRuntimeTraits` does 
 `cloud-hypervisor` and `firecracker` (not `containerd`). vps then keeps warm instances `paused` on that runtime; see
 [paused instances](#paused-instances). `snapshot` and `InstanceSpec.restoreFrom` serve
 [sandbox snapshots](/docs/guides/vps/sandboxes#snapshots-and-restore): `sandboxes.snapshot` sends the host an
-`instance.snapshot` command, and `sandboxes.create({ fromSnapshot })` boots a new instance from one. No
-`instances.*` method snapshots a plain instance.
+`instance.snapshot` command, and `sandboxes.create({ fromSnapshot })` boots a new instance from one. A runtime that
+implements `snapshot` sets `snapshot: true` in its `RuntimeTraits` (the three built-in VM runtimes do); on any other,
+`sandboxes.snapshot` is `UNSUPPORTED` up front. No `instances.*` method snapshots a plain instance.
 
 `libvirt-kvm` and `cloud-hypervisor` are planned as runtimes built into bcd for v0.3, and neither is implemented yet:
 bcd's `instances` converger drives them through its `Runtime` interface, and today only fakehw builds provide one, a

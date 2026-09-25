@@ -221,9 +221,13 @@ See [the daemon](/docs/daemon).
   `intent.signedSpecs` is `'always'` (the default: with command-signing roots every spec must be signed, since an
   unsigned spec with a high generation would freeze all later ones) or `'access'` (only a spec that changes `access`
   must be signed, for a control plane that signs nothing else), and refused specs are listed in `specRejections`.
-  `setPressure(pressure)` puts a `HostPressure` into every status report. With `tunnels`, it answers `OpenTunnel`; with `nodeKey`, attested
+  `intent.quorum` (a `FakeQuorumTrust`: approver keys, threshold, tiers, `unbatchedPerHour`), or the quorum of a
+  newer signed trust bundle, enforces the v1.0 destructive-batch quorum: destructive commands are rejected
+  `BATCH_UNAPPROVED` or `UNBATCHED_LIMIT` (see [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)).
+  A refused session whose close carries `retryAfterMs` (the gateway's retry pushback) reconnects after exactly that
+  long. `setPressure(pressure)` puts a `HostPressure` into every status report. With `tunnels`, it answers `OpenTunnel`; with `nodeKey`, attested
   results and allocation reports carry `node_sig`. With `instances` (a `FakeHypervisor` or its options) it plays a
-  VPS host, converging domains, overlay disks, NoCloud seeds and taps and fetching user data through the secret
+  VPS host, advertising `instance.network-policy` in `Hello` and converging domains, overlay disks, NoCloud seeds and taps and fetching user data through the secret
   broker; as such a host, `handleImds(request, instanceId)` answers a running instance's metadata request (v0.5,
   a `FakeImds`), minting its workload token through a `WorkloadTokenRequest` on the session. With `selfUpdate: { badVersions?, swapMs? }` it converges `NodeSpec.daemon` by swapping and restarting,
   and a bad build falls back to its previous slot and reports the section failed. `fakeDriverInvoke({ drivers })`
@@ -391,6 +395,13 @@ I2, I3, I4, I5 and I8 (I4, I5 and I8 read the gateway port's `facts()`, which th
 simulator provide). I7 needs a database: pass it to `runNightly({ invariants })`, as the CI-sized night does.
 PLAN.md section 15 also names I6 (latency SLOs); the kit does not check it, and the real-time benchmarks measure I6-style latencies instead.
 
+I4 is also tested under gateway clock skew, which section 15 calls for: `tests/sim/clock-skew.test.ts` runs 9 nodes on
+3 real gateways whose own clocks are 90 s ahead, 90 s behind and on time (more than the 40 s liveness timeout), with
+`compute_now()` and the daemons on simulated time. Every gateway holds sessions, `diag.nvml` settles through all of
+them, and when the unskewed gateway dies its nodes re-home onto the skewed ones; connectivity sampled every simulated
+second never shows `unreachable`, no `node.unreachable` is published, and I1 to I5 and I8 hold, because gateways
+flush ages rather than timestamps.
+
 ## The control-plane simulator
 
 `createControlPlaneSim(options)` puts the real control plane and real gateways behind the fleet simulator:
@@ -409,6 +420,7 @@ ticks.
 | `modules` | Extra control-plane modules, ticked with the rest |
 | `gateway` | Extra gateway options, such as lease timings |
 | `workerPasses` | Batches each control-plane job may run per simulator tick while it keeps finding work, as a real worker loops without sleeping (default 1) |
+| `gatewayClockSkewMs` | One number per gateway slot: that gateway's own clock offset from simulated time in ms (positive is ahead); the database clock and the daemons stay on simulated time |
 
 The rig offers `run(ms)`, `api(fn)`, `killGateway(i)`, `reviveGateway(i)`, `stallGateway(i, stalled)`,
 `pauseWorkers(paused)`, `revokeNode(nodeId)`, `homeOf(nodeId)`, `serialOf(nodeId)` and `invariants()`, which reads
