@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { ComputeError, describedBy, isComputeError, strictObject } from '@better-compute/core';
 import { eventsModule } from '@better-compute/events';
+import { fleetModule } from '@better-compute/fleet';
+import { metal } from '@better-compute/metal';
+import { generateP256KeyPair, spkiPin } from '@better-compute/pki';
+import { provisionModule } from '@better-compute/provision';
+import { rolloutModule } from '@better-compute/rollout';
+import { vps } from '@better-compute/vps';
 import { closeFixtures, computeFixture } from '@better-compute/testing';
 
 // Every module's method inputs describe themselves as JSON Schema (`validate.jsonSchema`, core's
@@ -30,8 +36,19 @@ const issuesOf = (run: () => unknown): { message: string; path: string[] }[] => 
 const fullyDescribed = ['webhooks', 'inventory', 'system'];
 
 async function everyModule() {
+  const metalModule = metal();
   const { compute } = await computeFixture({
-    modules: [eventsModule({ secret: 'input-schema-agreement-secret-0123456789' })],
+    modules: [
+      provisionModule({ modules: [metalModule] }),
+      metalModule,
+      vps(),
+      eventsModule({ secret: 'input-schema-agreement-secret-0123456789' }),
+      fleetModule(),
+      rolloutModule({
+        release: { pins: [spkiPin(generateP256KeyPair().publicKey)] },
+        downloadsUrl: 'https://downloads.example.com',
+      }),
+    ],
   });
   return compute.registry.methods.filter((method) => !method.plugin);
 }
