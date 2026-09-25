@@ -84,7 +84,8 @@ export async function rebuildPoolRollup(
   }
   if (counted.size > 0) {
     // Bookings, not devices, exactly as the booking-transaction deltas count them: an atom booked
-    // now and again later adds to both `allocated` and `reserved`.
+    // now and again later adds to both `allocated` and `reserved`. Partition windows (a MIG change
+    // holding a GPU family, `partition:` ids) are maintenance, not use: neither side counts them.
     const { rows } = await tx.query<{
       device_id: string;
       now: string | number;
@@ -93,6 +94,7 @@ export async function rebuildPoolRollup(
       `SELECT device_id, count(*) FILTER (WHERE during @> compute_now()) AS now,
               count(*) FILTER (WHERE lower(during) > compute_now()) AS later
          FROM device_bookings WHERE device_id = ANY($1::text[]) AND upper(during) > compute_now()
+          AND allocation_id NOT LIKE 'partition:%'
         GROUP BY device_id`,
       [[...counted.keys()]],
     );

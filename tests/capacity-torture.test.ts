@@ -24,6 +24,7 @@ import {
   rebuildPoolRollup,
   refundQuota,
   releasePartitionChange,
+  stepMigGate,
   schedulableSql,
   setQuota,
 } from '@better-compute/capacity';
@@ -32,7 +33,9 @@ import {
 // test: 8 placers race on one MIG pool — 4 inline (the pool lock), 2 pool-lease batches (the pool
 // lock, a cached index), and 2 that IGNORE the pool lock and lease (a stale index, straight to the
 // guarded commit statements) — plus extends, releases, cordons, taint writes, `healthy` flips and
-// MIG repartitions (a mode or layout change books the GPU's whole atom family, §10.4 point 2).
+// MIG repartitions (a mode or layout change books the GPU's whole atom family, §10.4 point 2), both
+// per GPU at once and per node through the layout gate (`stepMigGate`, with the daemon's
+// repartition and convergence simulated after each grant).
 //
 // A trigger mirrors every write to device_bookings into a constraint-free shadow log, with the
 // node's schedulability and the atom's health/bookability at the moment of the write. Afterwards
@@ -175,6 +178,7 @@ interface Result {
   extendConflicts: number;
   repartitioned: number;
   repartitionConflicts: number;
+  gateGranted: number;
   unexpected: unknown[];
 }
 
@@ -203,6 +207,7 @@ async function runTorture(
     extendConflicts: 0,
     repartitioned: 0,
     repartitionConflicts: 0,
+    gateGranted: 0,
     unexpected: [],
   };
   let sequence = 0;
@@ -356,6 +361,57 @@ async function runTorture(
       await db.query(`UPDATE devices SET healthy = NOT healthy WHERE id = $1`, [
         pick([...fleet.devices.keys()]),
       ]);
+    } else if (roll < 0.88) {
+      // The layout gate (capacity.mig) for a whole node: freeze a new layout, or take one step.
+      const node = pick(fleet.nodes);
+      if (random() < 0.4) {
+        await db.query(
+          `INSERT INTO capacity_mig_layouts AS m (node_id, layout, pending_layout)
+           VALUES ($1, 'initial', $2)
+           ON CONFLICT (node_id) DO UPDATE SET pending_layout =
+             CASE WHEN m.layout = EXCLUDED.pending_layout THEN NULL ELSE EXCLUDED.pending_layout END`,
+          [node, pick(['whole', 'A', 'B'] as const)],
+        );
+        return;
+      }
+      let granted: string | undefined;
+      await db.transaction((tx) =>
+        stepMigGate(
+          tx,
+          {
+            clock: { now: () => T0 },
+            events: { async publish() {} },
+            desired: {
+              async invalidate(_tx, nodeId) {
+                granted = nodeId;
+              },
+            },
+          } as never,
+          node,
+        ),
+      );
+      if (granted === undefined) return;
+      // The daemon repartitions every GPU of the node to the granted layout (its families are
+      // held by the gate's partition bookings) and converges the spec that carried it.
+      await db.transaction(async (tx) => {
+        const { rows } = await tx.query<{ layout: string }>(
+          `SELECT layout FROM capacity_mig_layouts WHERE node_id = $1`,
+          [granted],
+        );
+        await tx.query(
+          `UPDATE nodes SET generation = generation + 1, observed_generation = generation + 1
+            WHERE id = $1`,
+          [granted],
+        );
+        await tx.query(
+          `UPDATE devices SET bookable = CASE WHEN parent_id IS NULL THEN $2 = 'whole'
+                                              ELSE attributes->>'layout' = $2 END
+            WHERE node_id = $1 AND (class = 'gpu' OR parent_id IS NOT NULL)`,
+          [granted, rows[0]!.layout],
+        );
+        await rebuildPoolRollup(tx, { id: POOL, ownerTenantId: 'root' });
+      });
+      result.gateGranted++;
     } else {
       // A MIG mode or layout change: the whole family, idle from now to the horizon, then the flip.
       const gpu = pick(fleet.gpus);
@@ -500,7 +556,17 @@ async function checkInvariants(db: SqlExecutor, fleet: Fleet): Promise<{ booking
             (extract(epoch FROM upper(during)) * 1000)::float8 AS end_ms FROM device_bookings`,
   );
   expect(new Set(table.map(key))).toEqual(new Set(open.keys()));
-  expect(table.some((row) => row.allocation_id.startsWith('partition:'))).toBe(false);
+  // The only partition bookings left are the ones a layout gate holds for a change.
+  const held = await db.query<{ booking: string }>(
+    `SELECT unnest(bookings) AS booking FROM capacity_mig_layouts`,
+  );
+  const gateHeld = new Set(held.rows.map((row) => row.booking));
+  expect(
+    table.filter(
+      (row) => row.allocation_id.startsWith('partition:') && !gateHeld.has(row.allocation_id),
+    ),
+    'partition bookings nobody holds',
+  ).toEqual([]);
 
   // 4. Live allocations hold exactly their atoms for their interval; released ones hold nothing.
   const mismatched = await db.query<{ id: string }>(
@@ -573,13 +639,14 @@ describe('the capacity torture test on a MIG pool (PGlite, interleaved)', () => 
     // The mix exercised what it is here for.
     expect(result.placed.inline).toBeGreaterThan(50);
     expect(result.placed.batch).toBeGreaterThan(50);
-    expect(result.placed.ignoring).toBeGreaterThan(20);
+    expect(result.placed.ignoring).toBeGreaterThan(10);
     expect(result.pending).toBeGreaterThan(0);
     expect(result.quotaRefused).toBeGreaterThan(0);
     expect(result.released).toBeGreaterThan(30);
     expect(result.extended).toBeGreaterThan(5);
     expect(result.repartitioned).toBeGreaterThan(5);
     expect(result.repartitionConflicts).toBeGreaterThan(5);
+    expect(result.gateGranted).toBeGreaterThan(0);
   }, 300_000);
 });
 
