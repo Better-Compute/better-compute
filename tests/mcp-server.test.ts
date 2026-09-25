@@ -263,6 +263,19 @@ describe('fleet tools (opt-in, read-only)', () => {
     });
     expect(gateTools().fleet_plan).toBeUndefined();
   });
+
+  it('has a rule for every tool, so a gate with unlisted: deny hides none of them', () => {
+    const { api } = recorder();
+    const everyTool = mcpWith(api, { execCommand: true, fleet: true }).tools.map((tool) => tool.name);
+    const rules = gateTools({ execCommand: true, fleet: true });
+    expect(everyTool.filter((name) => !(name in rules))).toEqual([]);
+    const template = 'sbxt_01k5w0000000000000000000dd';
+    expect(
+      (rules.create_sandbox as { action: string; resource(args: object): unknown }).resource({
+        templateId: template,
+      }),
+    ).toEqual({ type: 'compute-sandbox-template', id: template });
+  });
 });
 
 describe('tools', () => {

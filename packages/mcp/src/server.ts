@@ -294,6 +294,19 @@ export function gateTools(
     start_instance: { public: true },
     stop_instance: { public: true },
     delete_instance: { public: true },
+    // Sandboxes (v0.5): creating one needs to see its template; compute decides the rest.
+    list_sandbox_templates: { public: true },
+    create_sandbox: {
+      action: 'compute:sandboxes:read',
+      resource: (args: Record<string, unknown>) => ({
+        type: `${prefix}sandbox-template`,
+        id: String(args.templateId ?? ''),
+      }),
+    },
+    list_sandboxes: { public: true },
+    extend_sandbox: { public: true },
+    get_sandbox: { public: true },
+    delete_sandbox: { public: true },
   };
   if (options.execCommand) rules.exec_command = nodeRead;
   if (options.fleet) {
