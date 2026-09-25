@@ -11,14 +11,20 @@ import {
 import { createComputeClient } from 'better-compute/client';
 import {
   createConsoleResources,
+  createPermissions,
   createStore,
   watchEvents,
   type ComputeEventMessage,
   type ComputeRequester,
   type ConsoleResources,
+  type Permissions,
   type WatchStatus,
   type WritableStore,
 } from '@better-compute/console-kit';
+import { checkPermissions } from '@/app/(console)/permissions';
+
+/** Event types after which cached permission answers may be wrong. */
+const accessChanging = /^(iam\.|binding\.|delegation\.|agent\.|project\.members)/;
 
 // The console's client-side state: one compute client on this origin (the IAM cookie authenticates it), one set of
 // console-kit stores for the signed-in tenant, and the live event stream keeping them current.
@@ -29,6 +35,8 @@ export interface ConsoleContextValue {
   root: boolean;
   origin: string;
   resources: ConsoleResources;
+  /** Advisory IAM answers for action buttons (batched, cached 10 s, cleared when access may have changed). */
+  permissions: Permissions;
   /** The event stream's state, for the "live" badge. */
   connection: WritableStore<WatchStatus>;
   listeners: Set<(event: ComputeEventMessage) => void>;
@@ -88,6 +96,7 @@ export function ConsoleProvider({
       root,
       origin,
       resources: createConsoleResources(api, { tenantId }),
+      permissions: createPermissions({ authorize: checkPermissions }),
       connection: createStore<WatchStatus>('connecting'),
       listeners,
       onEvent(handler) {
@@ -105,6 +114,7 @@ export function ConsoleProvider({
       url: `${origin}/api/compute/watch`,
       headers: () => ({ 'x-better-compute': '1' }),
       onEvent(event) {
+        if (accessChanging.test(event.type)) value.permissions.clear();
         void value.resources.applyEvent(event);
         for (const handler of value.listeners) handler(event);
       },

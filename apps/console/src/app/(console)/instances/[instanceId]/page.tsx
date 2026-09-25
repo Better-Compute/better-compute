@@ -11,10 +11,10 @@ import { Loading } from '@/components/ui';
 /** One instance: its state and placement, the lifecycle actions its state allows, and its terminal. */
 export default function InstancePage({ params }: { params: Promise<{ instanceId: string }> }) {
   const { instanceId } = use(params);
-  const { api, tenantId } = useConsole();
+  const { api, tenantId, permissions } = useConsole();
   const detail = useMemo(
-    () => createDetail(api, { tenantId, kind: 'instance', id: instanceId }),
-    [api, tenantId, instanceId],
+    () => createDetail(api, { tenantId, kind: 'instance', id: instanceId, permissions }),
+    [api, tenantId, instanceId, permissions],
   );
   const state = useDetail(detail);
   useDetailEvents(detail);

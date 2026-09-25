@@ -19,10 +19,10 @@ export default function ReservationPage({
   params: Promise<{ reservationId: string }>;
 }) {
   const { reservationId } = use(params);
-  const { api, tenantId } = useConsole();
+  const { api, tenantId, permissions } = useConsole();
   const detail = useMemo(
-    () => createDetail(api, { tenantId, kind: 'reservation', id: reservationId }),
-    [api, tenantId, reservationId],
+    () => createDetail(api, { tenantId, kind: 'reservation', id: reservationId, permissions }),
+    [api, tenantId, reservationId, permissions],
   );
   const state = useDetail(detail);
   useDetailEvents(detail);

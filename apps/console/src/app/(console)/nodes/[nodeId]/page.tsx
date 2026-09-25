@@ -11,10 +11,10 @@ import { Loading } from '@/components/ui';
 /** One node: its state, conditions and labels, and the node actions its state allows. */
 export default function NodePage({ params }: { params: Promise<{ nodeId: string }> }) {
   const { nodeId } = use(params);
-  const { api, tenantId, root } = useConsole();
+  const { api, tenantId, root, permissions } = useConsole();
   const detail = useMemo(
-    () => createDetail(api, { tenantId, kind: 'node', id: nodeId }),
-    [api, tenantId, nodeId],
+    () => createDetail(api, { tenantId, kind: 'node', id: nodeId, permissions }),
+    [api, tenantId, nodeId, permissions],
   );
   const state = useDetail(detail);
   useDetailEvents(detail);
