@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useList } from '@better-compute/console-kit/react';
 import { useConsole } from '@/components/console-provider';
 import { Loading } from '@/components/ui';
@@ -26,7 +27,9 @@ export default function PoolsPage() {
             <tbody>
               {pools.items.map((pool) => (
                 <tr key={pool.id}>
-                  <td>{pool.id}</td>
+                  <td>
+                    <Link href={`/pools/${encodeURIComponent(pool.id)}`}>{pool.id}</Link>
+                  </td>
                   <td>{String(pool.class ?? '')}</td>
                   <td>{String(pool.gpuModel ?? '—')}</td>
                   <td>{String(pool.sharing ?? '')}</td>
@@ -37,7 +40,9 @@ export default function PoolsPage() {
           </table>
         </Loading>
       </section>
-      <p className="muted">Capacity per pool is on the Overview page.</p>
+      <p className="muted">
+        Capacity per pool is on the Overview page; open a pool for its 7-day booking calendar.
+      </p>
     </>
   );
 }

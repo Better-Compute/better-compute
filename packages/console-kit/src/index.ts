@@ -12,3 +12,4 @@ export * from './react.js';
 export * from './resources.js';
 export * from './store.js';
 export * from './terminal.js';
+export * from './timeline.js';

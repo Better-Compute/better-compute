@@ -175,6 +175,15 @@ button.link {
   color: var(--accent);
   cursor: pointer;
 }
+.timeline {
+  display: flex;
+  gap: 1px;
+  height: 18px;
+}
+.timeline span {
+  flex: 1;
+  border-radius: 2px;
+}
 tr[aria-selected='true'] {
   background: var(--line);
 }
