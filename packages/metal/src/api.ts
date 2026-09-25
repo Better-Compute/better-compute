@@ -18,7 +18,9 @@ import {
   type WipeMode,
 } from '@better-compute/core';
 import { builtinSteps, siteAgentFor, stepRegistry, type StepRegistry } from '@better-compute/provision';
+import { encodeMessageJson } from '@better-compute/protocol';
 import { batchSubject, verbBatchScope } from './batch.js';
+import { metalPayloads } from './commands.js';
 import type { HardwareProfile } from './module-types.js';
 import { unrescueProfile } from './profiles.js';
 import { metalWorkKind, unrescuePhase } from './reconcile.js';
@@ -474,18 +476,26 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
             const agent = await siteAgentFor(tx, node.node_id);
             if (!agent) throw new ComputeError('INVALID_STATE', `No site agent serves site ${node.site_id}`);
             const { rows } = await tx.query<{ now: Date }>('SELECT compute_now() AS now');
-            // Destructive (§13): a batch of one leaf, this machine's BMC through this agent.
+            // Destructive (§13): a batch of one leaf, this machine's BMC through this agent, bound to
+            // exactly this payload (the approvers see the power action). One encoding for both.
+            const payload = encodeMessageJson(metalPayloads.bmcOperation.typeName, bmcOperationJson(node, 'power.setPower', { action: input.action }));
             const batch = context.commands.createBatch
               ? await context.commands.createBatch(tx, {
                   tenantId: node.tenant_id,
-                  scope: [{ subject: batchSubject('bmc.power', { nodeId: node.node_id, bmcAddress: node.bmc_address }, agent), kind: 'bmc.power' }],
+                  scope: [
+                    {
+                      subject: batchSubject('bmc.power', { nodeId: node.node_id, bmcAddress: node.bmc_address }, agent),
+                      kind: 'bmc.power',
+                      payload: { typeUrl: `type.googleapis.com/${metalPayloads.bmcOperation.typeName}`, value: payload },
+                    },
+                  ],
                   reason: `power ${input.action} ${node.node_id}`,
                 })
               : undefined;
             const command = await context.commands.enqueue(tx, {
               nodeId: agent,
               kind: 'bmc.power',
-              payload: bmcOperationJson(node, 'power.setPower', { action: input.action }),
+              payload,
               idempotencyKey: `metal:power:${context.requestId}`,
               notAfter: rows[0]!.now.getTime() + 5 * 60_000,
               ...(batch ? { batchId: batch.batchId } : {}),

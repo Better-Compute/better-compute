@@ -122,6 +122,13 @@ describe('metal on FakeDaemon site agents, through the real gateway', () => {
     await until(enrolled.nodeId, 'ready');
     expect(machine.mounted).toBe('');
     expect(machine.power).toBe('off');
+    // An operator's power action runs under a one-leaf batch bound to its exact payload (§13): the
+    // server checks the command's subject and payload digest against the leaf at enqueue.
+    const power = await api.metal.power(stack.root, { tenantId: stack.rootTenantId, nodeId: enrolled.nodeId, action: 'on' });
+    expect(power.batchId).toMatch(/^batch_/);
+    const deadline = Date.now() + 15_000;
+    while (machine.power !== 'on' && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(machine.power).toBe('on');
     // Every metal command went through the gateway to the site agent and came back succeeded.
     const { rows } = await stack.database.query<{ kind: string; state: string }>(
       `SELECT kind, state FROM commands WHERE kind LIKE 'bmc.%' OR kind = 'site.httpProxy'`,
