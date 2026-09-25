@@ -289,6 +289,7 @@ describe('capacityModule API surface', () => {
     expect(module.migrations!.map((migration) => migration.name)).toEqual([
       'capacity/0001_device_links',
       'capacity/0002_lease_health',
+      'capacity/0003_device_counts',
     ]);
     expect(module.reconcilers!.map((reconciler) => reconciler.name)).toEqual([
       reservationWork,

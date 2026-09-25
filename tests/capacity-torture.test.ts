@@ -533,6 +533,19 @@ async function checkInvariants(db: SqlExecutor, fleet: Fleet): Promise<{ booking
       .map((row) => [row.resource, row.allocated, row.reserved])
       .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
   expect(counters(incremental), 'rollup').toEqual(counters(rebuilt));
+
+  // 7. The trigger-kept device counts (capacity/0003) equal an aggregate of devices, after every
+  //    health flip and repartition.
+  const drift = await db.query<{ node_id: string; class: string }>(
+    `WITH agg AS (
+       SELECT node_id, class, count(*)::int AS bookable, (count(*) FILTER (WHERE healthy))::int AS healthy
+         FROM devices WHERE bookable GROUP BY node_id, class)
+     SELECT COALESCE(a.node_id, c.node_id) AS node_id, COALESCE(a.class, c.class) AS class
+       FROM agg a FULL JOIN capacity_device_counts c ON c.node_id = a.node_id AND c.class = a.class
+      WHERE COALESCE(a.bookable, 0) <> COALESCE(c.bookable, 0)
+         OR COALESCE(a.healthy, 0) <> COALESCE(c.healthy, 0)`,
+  );
+  expect(drift.rows, 'device counts that drifted').toEqual([]);
   return { bookings: lives.length };
 }
 

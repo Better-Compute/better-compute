@@ -37,8 +37,51 @@ CREATE TABLE capacity_lease_health (
 `,
 };
 
+/**
+ * Bookable and bookable-and-healthy devices per node and class (§10.6: reads never aggregate
+ * devices), for the placement shortlist. A row trigger on `devices` keeps it exact: every change
+ * of `node_id`, `class`, `bookable` or `healthy` takes the old row out of its key and puts the new
+ * row into its own, so a repartition that flips a parent and its children in one transaction nets
+ * out. Rows are upserted and may reach 0, never deleted, so concurrent device transactions on one
+ * node never race a DELETE against an INSERT. Lock order: the counts row after its `devices` row.
+ */
+export const deviceCountsMigration: Migration = {
+  name: 'capacity/0003_device_counts',
+  sql: `
+CREATE TABLE capacity_device_counts (
+  node_id text NOT NULL,
+  class text NOT NULL,
+  bookable integer NOT NULL DEFAULT 0 CHECK (bookable >= 0),
+  healthy integer NOT NULL DEFAULT 0 CHECK (healthy >= 0 AND healthy <= bookable),
+  PRIMARY KEY (node_id, class)
+);
+CREATE FUNCTION capacity_device_counts_apply() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP IN ('UPDATE', 'DELETE') AND OLD.bookable THEN
+    UPDATE capacity_device_counts
+       SET bookable = bookable - 1, healthy = healthy - CASE WHEN OLD.healthy THEN 1 ELSE 0 END
+     WHERE node_id = OLD.node_id AND class = OLD.class;
+  END IF;
+  IF TG_OP IN ('INSERT', 'UPDATE') AND NEW.bookable THEN
+    INSERT INTO capacity_device_counts AS c (node_id, class, bookable, healthy)
+    VALUES (NEW.node_id, NEW.class, 1, CASE WHEN NEW.healthy THEN 1 ELSE 0 END)
+    ON CONFLICT (node_id, class) DO UPDATE
+      SET bookable = c.bookable + 1, healthy = c.healthy + EXCLUDED.healthy;
+  END IF;
+  RETURN NULL;
+END $$;
+CREATE TRIGGER capacity_device_counts
+  AFTER INSERT OR DELETE OR UPDATE OF node_id, class, bookable, healthy ON devices
+  FOR EACH ROW EXECUTE FUNCTION capacity_device_counts_apply();
+INSERT INTO capacity_device_counts (node_id, class, bookable, healthy)
+  SELECT node_id, class, count(*), count(*) FILTER (WHERE healthy)
+    FROM devices WHERE bookable GROUP BY node_id, class;
+`,
+};
+
 /** The capacity module's migrations, in ledger order. */
 export const capacityMigrations: readonly Migration[] = Object.freeze([
   deviceLinksMigration,
   leaseHealthMigration,
+  deviceCountsMigration,
 ]);
