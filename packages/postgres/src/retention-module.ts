@@ -10,7 +10,13 @@ import {
   pruneInventorySnapshots,
   pruneUsageWindows,
 } from './history.js';
-import { expireJoinRequests, pruneAttestationUses, pruneBehindCursors } from './retention.js';
+import {
+  expireJoinRequests,
+  pruneAttestationUses,
+  pruneBehindCursors,
+  pruneSettledCommands,
+  pruneUncursoredAuthzChanges,
+} from './retention.js';
 
 // The base schema's housekeeping as a module (PLAN.md §8.4 GC): one singleton reconciler on a period,
 // each pass in its own short transactions and bounded batches, so it never holds long locks. The
@@ -27,6 +33,13 @@ export interface RetentionModuleOptions {
   batch?: number;
   /** Most statements per job in one pass (default 20), so a backlog drains over several passes. */
   maxRounds?: number;
+  /**
+   * authz_changes rows older than this go while no reader saved an authz_changes cursor (default one
+   * day, at least one hour; `false` keeps them). The IAM projection tails reload on start.
+   */
+  authzChangesMaxAgeSeconds?: number | false;
+  /** Settled commands last updated this long ago go (default 30 days; `false` keeps them). */
+  commandsOlderThanDays?: number | false;
   /** Partitioned history upkeep (core/0018). Audit rows are never pruned by the pass. */
   history?: {
     /** Month partitions kept created ahead of the current month (default 2). */
@@ -40,7 +53,9 @@ export interface RetentionModuleOptions {
 
 export interface RetentionPass {
   outbox: number;
+  /** Behind every cursor, or past the age floor while the stream has no cursor. */
   authzChanges: number;
+  commands: number;
   attestationUses: number;
   joinRequestsExpired: number;
   /** History month partitions created ahead. */
@@ -79,9 +94,26 @@ export async function runRetention(
   );
   const pass: RetentionPass = {
     outbox: await drain(() => sql.transaction((tx) => pruneBehindCursors(tx, 'outbox', prune))),
-    authzChanges: await drain(() =>
-      sql.transaction((tx) => pruneBehindCursors(tx, 'authz_changes', prune)),
-    ),
+    authzChanges:
+      (await drain(() => sql.transaction((tx) => pruneBehindCursors(tx, 'authz_changes', prune)))) +
+      (options.authzChangesMaxAgeSeconds === false
+        ? 0
+        : await drain(() =>
+            sql.transaction((tx) =>
+              pruneUncursoredAuthzChanges(tx, {
+                olderThanSeconds: options.authzChangesMaxAgeSeconds || 86_400,
+                batch,
+              }),
+            ),
+          )),
+    commands:
+      options.commandsOlderThanDays === false
+        ? 0
+        : await drain(() =>
+            sql.transaction((tx) =>
+              pruneSettledCommands(tx, { olderThanDays: options.commandsOlderThanDays || 30, batch }),
+            ),
+          ),
     attestationUses: await drain(() =>
       sql.transaction((tx) => pruneAttestationUses(tx, { batch })),
     ),
@@ -122,8 +154,9 @@ export async function runRetention(
 }
 
 /**
- * The retention module: a singleton pass every `every` (outbox, authz_changes, attestation uses, join
- * requests, and history partitions: created ahead, inventory/usage pruned, emptied months dropped).
+ * The retention module: a singleton pass every `every` (outbox, authz_changes, settled commands,
+ * attestation uses, join requests, and history partitions: created ahead, inventory/usage pruned,
+ * emptied months dropped).
  */
 export function retentionModule(options: RetentionModuleOptions = {}): ComputeModule<'retention'> {
   return defineModule({

@@ -62,6 +62,56 @@ export async function pruneBehindCursors(tx: SqlTx, stream: CursorStream, option
 }
 
 /**
+ * Deletes up to `batch` `authz_changes` rows older than `olderThanSeconds` (default one day) while the
+ * stream has no durable cursor. Its readers are the IAM projection tails, which live in memory and
+ * reload the whole projection on start (sqlProjectionSource.load), so only a live tail more than a day
+ * behind could miss a pruned row. Once any reader saves an `authz_changes` cursor, only
+ * `pruneBehindCursors` prunes the stream.
+ */
+export async function pruneUncursoredAuthzChanges(tx: SqlTx, options: { olderThanSeconds?: number; batch?: number } = {}): Promise<number> {
+  const olderThan = options.olderThanSeconds ?? 86_400;
+  const batch = options.batch ?? 5000;
+  if (!(olderThan >= 3600) || !Number.isSafeInteger(batch) || batch < 1)
+    throw new ComputeError('INVALID_INPUT', 'olderThanSeconds must be at least 3600 and batch positive');
+  const result = await tx.query(
+    `DELETE FROM authz_changes WHERE seq IN (
+       SELECT t.seq FROM authz_changes t
+        WHERE NOT EXISTS (SELECT 1 FROM outbox_cursors WHERE stream = 'authz_changes')
+          AND t.created_at < compute_now() - make_interval(secs => $1)
+          AND t.txid < pg_snapshot_xmin(pg_current_snapshot())
+        ORDER BY t.txid, t.seq LIMIT $2)`,
+    [olderThan, batch],
+  );
+  return result.rowCount ?? 0;
+}
+
+/** Command states that never change again (PLAN.md §7.4). */
+export const settledCommandStates = Object.freeze(['succeeded', 'failed', 'rejected', 'expired', 'cancelled'] as const);
+
+/**
+ * Deletes up to `batch` settled commands last updated more than `olderThanDays` ago (default 30;
+ * at least 1), by the `commands_settled` index (core/0020). Their idempotency keys become free again,
+ * so keep the window longer than any caller retries a key: workflow, reservation and instance keys
+ * name objects that finished long before.
+ */
+export async function pruneSettledCommands(tx: SqlTx, options: { olderThanDays?: number; batch?: number } = {}): Promise<number> {
+  const olderThan = options.olderThanDays ?? 30;
+  const batch = options.batch ?? 5000;
+  if (!(olderThan >= 1) || !Number.isFinite(olderThan) || !Number.isSafeInteger(batch) || batch < 1)
+    throw new ComputeError('INVALID_INPUT', 'olderThanDays must be at least 1 and batch positive');
+  // The state list is a literal, so the planner can match the partial index.
+  const result = await tx.query(
+    `DELETE FROM commands WHERE id IN (
+       SELECT id FROM commands
+        WHERE state IN (${settledCommandStates.map((state) => `'${state}'`).join(', ')})
+          AND updated_at < compute_now() - $1::float8 * interval '1 day'
+        ORDER BY updated_at LIMIT $2)`,
+    [olderThan, batch],
+  );
+  return result.rowCount ?? 0;
+}
+
+/**
  * Marks pending and approved join requests past their expiry as expired (at most `batch`; core/0010),
  * and returns how many. Reads already show them as expired; this frees the one-pending-per-machine
  * index for a new request.

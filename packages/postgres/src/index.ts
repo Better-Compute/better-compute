@@ -13,7 +13,10 @@ export {
   loadCursor,
   pruneAttestationUses,
   pruneBehindCursors,
+  pruneSettledCommands,
+  pruneUncursoredAuthzChanges,
   saveCursor,
+  settledCommandStates,
   type CursorStream,
   type PruneOptions,
 } from './retention.js';
