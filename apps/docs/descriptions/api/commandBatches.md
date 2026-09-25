@@ -28,6 +28,12 @@ Returns a batch's leaves in leaf order, for approvers to review before signing: 
 
 An empty `payloadSha256` marks a leaf that admits any payload of its kind, which approvers should look at closely. Pages hold 1 to 5,000 leaves (1,000 by default); `next` is the leaf index to pass as `cursor`.
 
+## members
+
+Returns the commands enqueued into a batch so far, in command-id order: each one's node, (subject, kind), state and reason, and `awaitingApproval` while it is held for the batch's approval.
+
+`state` keeps one command state. Pages hold 1 to 500 commands (100 by default); `next` is the command id to pass as `cursor`. A batch of another tenant is `NOT_FOUND`.
+
 ## approve
 
 Adds one approver's signature over the batch's root; once the signatures meet the threshold for its size, the batch becomes `approved` and its held commands are released at once.

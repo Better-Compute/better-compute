@@ -957,7 +957,7 @@ better-compute fleet apply fleet.json --prune --plan-hash 3f1c…
 Write the POSIX sh script that installs bcd on a server and joins it to a pool
 
 ```sh
-better-compute daemon install-script --pool ID --site ID --gateway-url URL --base-url URL [--base-path PATH] --bcd-version VERSION [--sha256 ARCH=HEX,…] [--release-manifest PATH] [--release-pins PINS] [--release-threshold N] [--plugins] [--approver-set-sha256 HEX] [--privileged-plugins NAMES] [--pki PATH] [--out PATH]
+better-compute daemon install-script --pool ID --site ID --gateway-url URL --base-url URL [--base-path PATH] --bcd-version VERSION [--sha256 ARCH=HEX,…] [--release-manifest PATH] [--release-pins PINS] [--release-threshold N] [--plugins] [--bmc-networks CIDRS] [--approver-set-sha256 HEX] [--privileged-plugins NAMES] [--release-sequence N] [--pki PATH] [--out PATH]
 ```
 
 daemon install-script emits the bcd installer (PLAN.md §3.3, §6). The script reads the join token only from BCD_JOIN_TOKEN or standard input, downloads the pinned bcd for the machine's architecture from \{base-url\}\{base-path\}/downloads/bcd/\{version\}/linux-\{arch\}, checks it against --sha256 (or the digests of a --release-manifest verified here under --release-pins, product bcd, version --bcd-version), installs /usr/local/bin/bcd, /etc/bcd/config.toml (mode 0600: gateway URL, site and the serving CA, join signing and join encryption key pins, in bcd's sha256/\<base64> form), the JoinService encryption key, and a hardened bcd.service, then runs bcd join and starts the service. Run on a configured host without a token, it upgrades bcd in place. The pins come from the PKI bundle's public half (pki init), so no secret is needed. The script holds no secret either: create the join token separately (joinTokens.create) and hand it over out of band. --plugins prepares the node for bcx driver plugins: a [plugins] section (dir /usr/local/lib/bcd/plugins, a child of bcd's delegated cgroup) and a bcd.service.d drop-in that lets bcd run each plugin under its own uid in its own cgroup (CAP_SETUID/CAP_SETGID/CAP_KILL, Delegate=yes); --privileged-plugins names the ones that run as root and make namespaces (Kata). Any node whose config.toml has a [plugins] section gets the drop-in, and an upgrade keeps the sections the operator configured.
@@ -975,8 +975,10 @@ daemon install-script emits the bcd installer (PLAN.md §3.3, §6). The script r
 | `--release-pins PINS`        | Comma-separated sha256/… pins of the release keys                                                      |                            | `BCD_RELEASE_PINS`           |
 | `--release-threshold N`      | Release keys that must have signed (default 1)                                                         |                            |                              |
 | `--plugins`                  | Prepare the node for bcx driver plugins ([plugins], the systemd drop-in)                               |                            |                              |
+| `--bmc-networks CIDRS`       | A site agent's BMC networks (comma-separated): site.httpProxy never reaches into them                  |                            |                              |
 | `--approver-set-sha256 HEX`  | Pin the deployment's approver set (pki trust-version prints it): its first set, or nothing destructive |                            |                              |
 | `--privileged-plugins NAMES` | Plugins that run as root without the seccomp filter (comma-separated; implies --plugins)               |                            |                              |
+| `--release-sequence N`       | bcd's release floor ([update] release_sequence): it never installs an older release                    |                            |                              |
 | `--pki PATH`                 | The PKI bundle written by pki init                                                                     | `.better-compute/pki.json` | `BETTER_COMPUTE_PKI`         |
 | `--out PATH`                 | Write the script to a new file (mode 0755) instead of standard output                                  |                            |                              |
 
@@ -1197,26 +1199,28 @@ better-compute batch keygen --out ~/.better-compute/approver.pem
 Sign a batch approval offline, from its scope
 
 ```sh
-better-compute batch sign --key PATH [--batch ID] [--scope PATH] [--root HEX] [--size N] [--not-after TIME] [--trust-domain DOMAIN] [--expect PATH] [--allow-unbound] [--max-hours N] [--unchecked]
+better-compute batch sign --key PATH [--batch ID] [--scope PATH] [--root HEX] [--size N] [--not-after TIME] [--trust-domain DOMAIN] [--pki PATH] [--expect PATH] [--allow-unbound] [--allow-opaque] [--max-hours N] [--unchecked]
 ```
 
 batch sign signs one approval of a destructive batch with an approver key (--key, from batch keygen) without contacting the server: for approvers on an offline machine. Pass the batch's scope (--scope, the JSON batch show prints, or an array of \{ subject, kind \}): the root is recomputed from it and every subject is shown by kind before signing (--expect checks them against your own list). --root and --size, when given as well, must match what the scope gives; signing --root and --size alone, a root the CLI cannot check, needs --unchecked. --not-after is the batch's expiry as the server set it (all approvers sign the same one), at most --max-hours away. Prints the signature (\{ kid, sig \}) to hand to batch approve --signature.
 
-| Flag                    | Description                                                                                           | Default | Environment |
-| ----------------------- | ----------------------------------------------------------------------------------------------------- | ------- | ----------- |
-| `--key PATH`            | The approver private key (PEM)                                                                        |         |             |
-| `--batch ID`            | The batch id (default: the scope file's batchId)                                                      |         |             |
-| `--scope PATH`          | The batch scope (JSON), to recompute the root from                                                    |         |             |
-| `--root HEX`            | The scope root (64 hex digits), checked against --scope                                               |         |             |
-| `--size N`              | The scope size, checked against --scope                                                               |         |             |
-| `--not-after TIME`      | The batch's expiry: ISO-8601 or epoch milliseconds (default: the scope file's notAfter)               |         |             |
-| `--trust-domain DOMAIN` | The deployment's trust domain (default: the scope file's)                                             |         |             |
-| `--expect PATH`         | Approve only if the batch holds exactly these subjects (one per line) or \{ subject, kind \} commands |         |             |
-| `--allow-unbound`       | Approve commands whose payload the batch does not fix (shown as "any payload")                        |         |             |
-| `--max-hours N`         | Refuse a batch that stays open longer than this many hours                                            | `72`    |             |
-| `--unchecked`           | Sign --root and --size without a scope to check them against                                          |         |             |
-| `--format FORMAT`       | Output as json (indented, default), compact (one line), or table                                      |         |             |
-| `--query PATH`          | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)              |         |             |
+| Flag                    | Description                                                                                           | Default                    | Environment                   |
+| ----------------------- | ----------------------------------------------------------------------------------------------------- | -------------------------- | ----------------------------- |
+| `--key PATH`            | The approver private key (PEM)                                                                        |                            |                               |
+| `--batch ID`            | The batch id (default: the scope file's batchId)                                                      |                            |                               |
+| `--scope PATH`          | The batch scope (JSON), to recompute the root from                                                    |                            |                               |
+| `--root HEX`            | The scope root (64 hex digits), checked against --scope                                               |                            |                               |
+| `--size N`              | The scope size, checked against --scope                                                               |                            |                               |
+| `--not-after TIME`      | The batch's expiry: ISO-8601 or epoch milliseconds (default: the scope file's notAfter)               |                            |                               |
+| `--trust-domain DOMAIN` | The deployment you approve for (default: the PKI bundle's trust domain); any other is refused         |                            | `BETTER_COMPUTE_TRUST_DOMAIN` |
+| `--pki PATH`            | The PKI bundle written by pki init                                                                    | `.better-compute/pki.json` | `BETTER_COMPUTE_PKI`          |
+| `--expect PATH`         | Approve only if the batch holds exactly these subjects (one per line) or \{ subject, kind \} commands |                            |                               |
+| `--allow-unbound`       | Approve commands whose payload the batch does not fix (shown as "any payload")                        |                            |                               |
+| `--allow-opaque`        | Approve commands whose operation the batch shows only as a digest                                     |                            |                               |
+| `--max-hours N`         | Refuse a batch that stays open longer than this many hours                                            | `72`                       |                               |
+| `--unchecked`           | Sign --root and --size without a scope to check them against                                          |                            |                               |
+| `--format FORMAT`       | Output as json (indented, default), compact (one line), or table                                      |                            |                               |
+| `--query PATH`          | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)              |                            |                               |
 
 ```sh
 better-compute batch sign --key approver.pem --scope batch.json --not-after 2026-09-25T18:00:00Z
@@ -1233,18 +1237,18 @@ better-compute batch sign-approvers --key PATH --epoch N [--approvers PATHS] [--
 
 batch sign-approvers signs, as one of the CURRENT approvers (--key), the quorum a new trust bundle will carry: its approver keys (--approvers, the .pub files of the whole new set), --threshold, --tiers and --unbatched, for approver-set --epoch (one above the current set's; better-compute pki trust-version prints it) in the deployment's --trust-domain (default: the PKI bundle's; a set signed for staging never changes prod's quorum, even with shared approver keys). Daemons that hold approver keys take a changed quorum, removal included, only with such signatures from their current threshold of current approvers (PLAN.md §13): the join key alone, which the control plane holds, cannot lift or replace it. Give the signatures to the deployment's pki.approvers.setSignatures with pki.approvers.epoch; they stay valid on every later trust bundle version while the set is current. Prints the set's digest and the signature.
 
-| Flag                    | Description                                                                              | Default                    | Environment          |
-| ----------------------- | ---------------------------------------------------------------------------------------- | -------------------------- | -------------------- |
-| `--key PATH`            | Your CURRENT approver private key (PEM)                                                  |                            |                      |
-| `--epoch N`             | The new set's epoch: one above the current set's                                         |                            |                      |
-| `--approvers PATHS`     | The new set: approver public keys (.pub files, comma-separated); empty lifts the quorum  |                            |                      |
-| `--threshold K`         | Approvals a batch needs in the new set                                                   |                            |                      |
-| `--tiers SIZE:K,…`      | Per-size thresholds, ascending, e.g. 5:1,100:2                                           |                            |                      |
-| `--unbatched N`         | Unbatched destructive commands per hour                                                  | `0`                        |                      |
-| `--trust-domain DOMAIN` | The deployment's trust domain (default: the PKI bundle's)                                |                            |                      |
-| `--pki PATH`            | The PKI bundle written by pki init                                                       | `.better-compute/pki.json` | `BETTER_COMPUTE_PKI` |
-| `--format FORMAT`       | Output as json (indented, default), compact (one line), or table                         |                            |                      |
-| `--query PATH`          | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw) |                            |                      |
+| Flag                    | Description                                                                                   | Default                    | Environment                   |
+| ----------------------- | --------------------------------------------------------------------------------------------- | -------------------------- | ----------------------------- |
+| `--key PATH`            | Your CURRENT approver private key (PEM)                                                       |                            |                               |
+| `--epoch N`             | The new set's epoch: one above the current set's                                              |                            |                               |
+| `--approvers PATHS`     | The new set: approver public keys (.pub files, comma-separated); empty lifts the quorum       |                            |                               |
+| `--threshold K`         | Approvals a batch needs in the new set                                                        |                            |                               |
+| `--tiers SIZE:K,…`      | Per-size thresholds, ascending, e.g. 5:1,100:2                                                |                            |                               |
+| `--unbatched N`         | Unbatched destructive commands per hour                                                       | `0`                        |                               |
+| `--trust-domain DOMAIN` | The deployment you approve for (default: the PKI bundle's trust domain); any other is refused |                            | `BETTER_COMPUTE_TRUST_DOMAIN` |
+| `--pki PATH`            | The PKI bundle written by pki init                                                            | `.better-compute/pki.json` | `BETTER_COMPUTE_PKI`          |
+| `--format FORMAT`       | Output as json (indented, default), compact (one line), or table                              |                            |                               |
+| `--query PATH`          | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)      |                            |                               |
 
 ```sh
 better-compute batch sign-approvers --key alice.pem --epoch 2 --approvers alice.pem.pub,bob.pem.pub,carol.pem.pub --threshold 2
@@ -1305,26 +1309,29 @@ better-compute batch show --tenant org_acme --batch batch_01k5w… --scope-out b
 Approve a destructive batch with your approver key
 
 ```sh
-better-compute batch approve --tenant ID --batch ID [--key PATH] [--signature PATH] [--root HEX] [--expect PATH] [--allow-unbound] [--max-hours N] [--yes] [--config PATH] [--url URL]
+better-compute batch approve --tenant ID --batch ID [--key PATH] [--signature PATH] [--root HEX] [--expect PATH] [--allow-unbound] [--allow-opaque] [--max-hours N] [--trust-domain DOMAIN] [--pki PATH] [--yes] [--config PATH] [--url URL]
 ```
 
 batch approve reads the batch, pages its scope and recomputes the root from the listed commands (refusing with SCOPE_MISMATCH when they do not give it), shows the reason, every subject by kind (--expect checks them against your own list) and the approvals so far, and then signs the batch's root, size and expiry with --key and submits the signature (commandBatches.approve, compute:batches:approve). Without --yes it stops after showing the batch; --root approves only the root you reviewed. Once the batch holds the required approvals it is released and its commands run. With --signature, submits a signature made offline by batch sign instead, after checking it is for this batch.
 
-| Flag               | Description                                                                                                   | Default | Environment             |
-| ------------------ | ------------------------------------------------------------------------------------------------------------- | ------- | ----------------------- |
-| `--tenant ID`      | The tenant acting (the caller’s organization)                                                                 |         | `BETTER_COMPUTE_TENANT` |
-| `--batch ID`       | The batch (batch\_…)                                                                                          |         |                         |
-| `--key PATH`       | Your approver private key (from batch keygen)                                                                 |         |                         |
-| `--signature PATH` | A signature from batch sign (instead of --key)                                                                |         |                         |
-| `--root HEX`       | Approve only if the batch still has this root (64 hex digits)                                                 |         |                         |
-| `--expect PATH`    | Approve only if the batch holds exactly these subjects (one per line) or \{ subject, kind \} commands         |         |                         |
-| `--allow-unbound`  | Approve commands whose payload the batch does not fix (shown as "any payload")                                |         |                         |
-| `--max-hours N`    | Refuse a batch that stays open longer than this many hours                                                    | `72`    |                         |
-| `--yes`            | Sign and submit without stopping after the summary                                                            |         |                         |
-| `--config PATH`    | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
-| `--url URL`        | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
-| `--format FORMAT`  | Output as json (indented, default), compact (one line), or table                                              |         |                         |
-| `--query PATH`     | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)                      |         |                         |
+| Flag                    | Description                                                                                                   | Default                    | Environment                   |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------- | ----------------------------- |
+| `--tenant ID`           | The tenant acting (the caller’s organization)                                                                 |                            | `BETTER_COMPUTE_TENANT`       |
+| `--batch ID`            | The batch (batch\_…)                                                                                          |                            |                               |
+| `--key PATH`            | Your approver private key (from batch keygen)                                                                 |                            |                               |
+| `--signature PATH`      | A signature from batch sign (instead of --key)                                                                |                            |                               |
+| `--root HEX`            | Approve only if the batch still has this root (64 hex digits)                                                 |                            |                               |
+| `--expect PATH`         | Approve only if the batch holds exactly these subjects (one per line) or \{ subject, kind \} commands         |                            |                               |
+| `--allow-unbound`       | Approve commands whose payload the batch does not fix (shown as "any payload")                                |                            |                               |
+| `--allow-opaque`        | Approve commands whose operation the batch shows only as a digest                                             |                            |                               |
+| `--max-hours N`         | Refuse a batch that stays open longer than this many hours                                                    | `72`                       |                               |
+| `--trust-domain DOMAIN` | The deployment you approve for (default: the PKI bundle's trust domain); any other is refused                 |                            | `BETTER_COMPUTE_TRUST_DOMAIN` |
+| `--pki PATH`            | The PKI bundle written by pki init                                                                            | `.better-compute/pki.json` | `BETTER_COMPUTE_PKI`          |
+| `--yes`                 | Sign and submit without stopping after the summary                                                            |                            |                               |
+| `--config PATH`         | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |                            | `BETTER_COMPUTE_CONFIG`       |
+| `--url URL`             | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |                            | `BETTER_COMPUTE_URL`          |
+| `--format FORMAT`       | Output as json (indented, default), compact (one line), or table                                              |                            |                               |
+| `--query PATH`          | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)                      |                            |                               |
 
 ```sh
 better-compute batch approve --tenant org_acme --batch batch_01k5w… --key ~/.better-compute/approver.pem
