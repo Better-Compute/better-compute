@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
 	"time"
 
 	"github.com/better-compute/better-compute/daemon/internal/agent"
@@ -12,6 +13,41 @@ import (
 )
 
 type doctorCheck struct{ status, check, detail string }
+
+// toolChecks: what a VPS host needs besides KVM. libvirt-kvm drives virsh and qemu-img and builds
+// NoCloud seeds with genisoimage or xorriso; the instance firewall (anti-spoofing, network
+// policies) needs nft, and without it the metadata service and instance dials stay off.
+func toolChecks(lookPath func(string) (string, error)) []doctorCheck {
+	have := func(names ...string) (string, bool) {
+		for _, n := range names {
+			if path, err := lookPath(n); err == nil {
+				return path, true
+			}
+		}
+		return "", false
+	}
+	path, ok := have("virsh")
+	if !ok {
+		return []doctorCheck{{"warn", "libvirt", "no virsh: this host runs no libvirt-kvm instances"}}
+	}
+	out := []doctorCheck{{"ok", "libvirt", path}}
+	if path, ok := have("qemu-img"); ok {
+		out = append(out, doctorCheck{"ok", "qemu-img", path})
+	} else {
+		out = append(out, doctorCheck{"fail", "qemu-img", "virsh without qemu-img: instance disks cannot be made"})
+	}
+	if path, ok := have("genisoimage", "xorriso"); ok {
+		out = append(out, doctorCheck{"ok", "seed", path})
+	} else {
+		out = append(out, doctorCheck{"fail", "seed", "neither genisoimage nor xorriso: instances get no user data"})
+	}
+	if path, ok := have("nft"); ok {
+		out = append(out, doctorCheck{"ok", "nftables", path})
+	} else {
+		out = append(out, doctorCheck{"fail", "nftables", "no nft: instances run without anti-spoofing or network policies, and the metadata service and instance dials stay off"})
+	}
+	return out
+}
 
 // hostChecks are doctor's host checks (PLAN.md §14): virtualization support for VPS hosts, the
 // gateway reachable over TCP, and the node's identity (joined, certificate lifetime).
@@ -27,6 +63,7 @@ func hostChecks(cfg *config.Config) []doctorCheck {
 	} else {
 		out = append(out, doctorCheck{"warn", "iommu", "no IOMMU: GPU passthrough to instances is unavailable"})
 	}
+	out = append(out, toolChecks(exec.LookPath)...)
 	if cfg == nil {
 		return out
 	}
