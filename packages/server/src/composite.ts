@@ -299,6 +299,9 @@ export function createComposites(options: CompositeOptions): Composites {
               requestId,
             );
           }
+          // Budget-style checks that may call IAM; `check` runs with no transaction open.
+          if (admission.check)
+            await admission.check(run.contextFor(database, undefined, 'caller'), input, decided);
           grant(key, { entry, tenantId, decision, decidedAt: clock.now() });
           return;
         }

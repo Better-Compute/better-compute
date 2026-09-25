@@ -381,6 +381,10 @@ export function createOperations(
       }
       throw refusal;
     }
+    // Checks that may call IAM (budgets), outside any compute transaction; a refusal leaves the draft
+    // as it is (no `denied`), so the same key can succeed later.
+    if (admission.check)
+      await admission.check(contextFor(outsideTransaction(database)), input, resource);
     const admitted = admissionOf(caller, decision, requestId, clock.now());
     // Transaction 2: the handler with the recorded decision, and its audit row.
     return database.transaction(async (tx) => {

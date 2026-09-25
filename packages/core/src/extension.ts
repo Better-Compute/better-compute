@@ -1041,6 +1041,13 @@ export interface MethodAdmission<I, O> {
   denied?(context: MethodContext, input: I, tx: SqlTx, error: unknown): Promise<void>;
   /** A short human description of the request, shown to the person asked to confirm it (§3.4 step 7). */
   describe?(input: I): string;
+  /**
+   * Checks that may call IAM (e.g. `iam.billingCheck` for `budgetCheck: 'meter'` pools, §12.7-12.8):
+   * run after `prepare` answered `decide` and the IAM decision allowed it, with no transaction open.
+   * A throw refuses the request with that error WITHOUT `denied`: the draft stays, so a retry with
+   * the same key decides again (e.g. once the budget window resets).
+   */
+  check?(context: MethodContext, input: I, resource: MethodResource): Promise<void>;
 }
 
 export function defineMethod<I, O>(method: MethodDefinition<I, O>): MethodDefinition<I, O> {
