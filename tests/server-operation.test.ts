@@ -250,6 +250,7 @@ describe('betterCompute()', () => {
       'inventory/history',
       'inventory/diff',
       ...capacityPaths,
+      'commandBatches/create',
       'commandBatches/get',
       'commandBatches/list',
       'commandBatches/scope',
@@ -284,10 +285,13 @@ describe('betterCompute()', () => {
     expect(migrations[0]).toBe('capacity/0001_device_links');
     expect(migrations.at(-1)).toBe('acme/0001_widgets');
     expect(migrations.at(-2)).toBe('pki/0001_sealed_secrets');
-    expect(migrations.at(-3)).toBe('quorum/0001_batches');
-    expect(migrations.at(-4)).toBe('tenancy/0002_teardown_attempts');
-    expect(migrations.at(-5)).toBe('tenancy/0001_tenant_states');
-    expect(migrations.slice(0, -5).every((name) => name.startsWith('capacity/'))).toBe(true);
+    const quorum = migrations.filter((name) => name.startsWith('quorum/'));
+    expect(quorum[0]).toBe('quorum/0001_batches');
+    expect(migrations.slice(-2 - quorum.length, -2)).toEqual(quorum);
+    const beforeQuorum = migrations.slice(0, -2 - quorum.length);
+    expect(beforeQuorum.at(-1)).toBe('tenancy/0002_teardown_attempts');
+    expect(beforeQuorum.at(-2)).toBe('tenancy/0001_tenant_states');
+    expect(beforeQuorum.slice(0, -2).every((name) => name.startsWith('capacity/'))).toBe(true);
     expect(compute.registry.hasModule('inventory')).toBe(true);
     expect(compute.registry.hasModule('capacity')).toBe(true);
     expect(compute.registry.hasModule('metal')).toBe(false);

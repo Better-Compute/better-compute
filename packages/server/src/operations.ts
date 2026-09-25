@@ -356,62 +356,13 @@ export function createOperations(
     );
     // The same request again from its owner: the stored result, and no second decision.
     if (plan.status === 'replay') return plan.result;
-
-    const resource = checkResource(entry, plan.resource);
-    const tenant = decisionTenant(resource, tenantId)!;
-    preCheck(caller, tenant);
-    const decision = decisionOf(tenant, entry.action!, resource);
+    // Transaction 1 committed what `prepare` staged: from here on, any failure other than the IAM
+    // refusal (which runs `denied`) undoes it with `abandoned`: IAM unavailable, a check, the handler.
+    let denied = false;
     try {
-      // §12.4: IAM decides on the row transaction 1 committed, never a stale cached copy.
-      await iam.refreshResource?.(decision.tenantId, decision.resource);
-      await iam.require(credential, decision);
+      return await decideAndRun(plan);
     } catch (error) {
-      if (!refused(error)) throw error;
-      const refusal = await refusalOf(
-        entry,
-        admission,
-        input,
-        caller,
-        credential,
-        decision,
-        error,
-        requestId,
-      );
-      if (admission.denied) {
-        try {
-          await database.transaction((tx) =>
-            admission.denied!(contextFor(withinTransaction(database, tx)), input, tx, refusal),
-          );
-        } catch (cleanup) {
-          // The refusal is what the caller must see; a failed cleanup leaves a draft for GC.
-          log.warn('An admission denial hook failed', {
-            requestId,
-            route: path,
-            error: cleanup instanceof Error ? cleanup.message : String(cleanup),
-          });
-        }
-      }
-      throw refusal;
-    }
-    // Checks that may call IAM (budgets), outside any compute transaction; a refusal leaves the draft
-    // as it is (no `denied`), so the same key can succeed later.
-    if (admission.check)
-      await admission.check(contextFor(outsideTransaction(database)), input, resource);
-    const admitted = admissionOf(caller, decision, requestId, clock.now());
-    // Transaction 2: the handler with the recorded decision, and its audit row.
-    try {
-      return await database.transaction(async (tx) => {
-        const value = await definition.handler(
-          contextFor(withinTransaction(database, tx), admitted),
-          input,
-        );
-        await recordAudit(tx, admitted);
-        return value;
-      });
-    } catch (error) {
-      // Transaction 2 rolled back, and with it any cleanup of its own: what `prepare` staged in
-      // transaction 1 is undone here, best effort, in a third.
-      if (admission.abandoned) {
+      if (!denied && admission.abandoned) {
         try {
           await database.transaction((tx) =>
             admission.abandoned!(contextFor(withinTransaction(database, tx)), input, tx, error),
@@ -425,6 +376,61 @@ export function createOperations(
         }
       }
       throw error;
+    }
+
+    async function decideAndRun(plan: AdmissionPlan<unknown> & { status: 'decide' }) {
+      const resource = checkResource(entry, plan.resource);
+      const tenant = decisionTenant(resource, tenantId)!;
+      preCheck(caller, tenant);
+      const decision = decisionOf(tenant, entry.action!, resource);
+      try {
+        // §12.4: IAM decides on the row transaction 1 committed, never a stale cached copy.
+        await iam.refreshResource?.(decision.tenantId, decision.resource);
+        await iam.require(credential, decision);
+      } catch (error) {
+        if (!refused(error)) throw error;
+        denied = true;
+        const refusal = await refusalOf(
+          entry,
+          admission,
+          input,
+          caller,
+          credential,
+          decision,
+          error,
+          requestId,
+        );
+        if (admission.denied) {
+          try {
+            await database.transaction((tx) =>
+              admission.denied!(contextFor(withinTransaction(database, tx)), input, tx, refusal),
+            );
+          } catch (cleanup) {
+            // The refusal is what the caller must see; a failed cleanup leaves a draft for GC.
+            log.warn('An admission denial hook failed', {
+              requestId,
+              route: path,
+              error: cleanup instanceof Error ? cleanup.message : String(cleanup),
+            });
+          }
+        }
+        throw refusal;
+      }
+      // Checks that may call IAM (budgets), outside any compute transaction; a refusal leaves the draft
+      // as it is (no `denied`), so the same key can succeed later.
+      if (admission.check)
+        await admission.check(contextFor(outsideTransaction(database)), input, resource);
+      const admitted = admissionOf(caller, decision, requestId, clock.now());
+      // Transaction 2: the handler with the recorded decision, and its audit row. If it throws, it
+      // rolled back with any cleanup of its own; `abandoned` runs in a third (above).
+      return database.transaction(async (tx) => {
+        const value = await definition.handler(
+          contextFor(withinTransaction(database, tx), admitted),
+          input,
+        );
+        await recordAudit(tx, admitted);
+        return value;
+      });
     }
   }
 

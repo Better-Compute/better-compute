@@ -109,8 +109,10 @@ describe('MethodAdmission.check', () => {
     });
     expect(denials).toBe(0);
     expect(checks).toEqual([{ resource: { type: 'tenant', id: ACME } }]);
+    // The refusal undoes what prepare staged (`abandoned`), and the handler never ran.
+    expect(abandons).toEqual(['SPEND_LIMIT_REACHED']);
     const { rows } = await database.query('SELECT key FROM plg_shop_orders');
-    expect(rows).toEqual([]);
+    expect(rows).toEqual([{ key: 'abandoned:o1' }]);
 
     overBudget = false;
     expect(await order('o1')).toEqual({ key: 'o1' });
@@ -123,12 +125,27 @@ describe('MethodAdmission.check', () => {
     iam.allow({ token: USER });
     overBudget = false;
     await expect(order('gone-1')).rejects.toMatchObject({ code: 'INVALID_STATE' });
-    expect(abandons).toEqual(['INVALID_STATE']);
+    expect(abandons.at(-1)).toBe('INVALID_STATE');
     // The handler's write rolled back with transaction 2; the cleanup committed on its own.
     const { rows } = await database.query<{ key: string }>(
       `SELECT key FROM plg_shop_orders WHERE key LIKE '%gone-1'`,
     );
     expect(rows.map((row) => row.key)).toEqual(['abandoned:gone-1']);
+    expect(denials).toBe(0);
+  });
+
+  it('runs abandoned when IAM fails without deciding (not a refusal), never denied', async () => {
+    iam.allow({ token: USER });
+    const require = iam.require;
+    iam.require = async () => {
+      throw new ComputeError('INTERNAL_ERROR', 'IAM timed out');
+    };
+    try {
+      await expect(order('iam-down')).rejects.toMatchObject({ code: 'INTERNAL_ERROR' });
+    } finally {
+      iam.require = require;
+    }
+    expect(abandons.at(-1)).toBe('INTERNAL_ERROR');
     expect(denials).toBe(0);
   });
 
