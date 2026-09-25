@@ -307,6 +307,17 @@
       "phase": "v1.0",
       "input": null
     },
+    "commandBatches.create": {
+      "route": "POST /api/compute/commandBatches/create",
+      "kind": "mutation",
+      "action": "compute:batches:create",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": null
+    },
     "commandBatches.get": {
       "route": "POST /api/compute/commandBatches/get",
       "kind": "read",
@@ -507,6 +518,11 @@
             "minimum": 10,
             "maximum": 3600,
             "default": 600
+          },
+          "batchId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^batch_[0-9a-z]{26,52}$"
           }
         },
         "required": [

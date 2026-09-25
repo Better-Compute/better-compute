@@ -43,6 +43,7 @@ Queues a command of an allowlisted kind (`diag.nvml`, `inventory.refresh`, `logs
 | `payload`         | object  |          |                                                                          |
 | `idempotencyKey`  | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._~:/+=-]{1,128}$`           |
 | `notAfterSeconds` | integer |          | 10-3600; default `600`                                                   |
+| `batchId`         | string  |          | at most 64 characters; matches `^batch_[0-9a-z]{26,52}$`                 |
 
 ## get
 

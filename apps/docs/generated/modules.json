@@ -36,7 +36,9 @@
       "migrations": [
         "quorum/0001_batches",
         "quorum/0002_payload_digest",
-        "quorum/0003_trust_bundle_state"
+        "quorum/0003_trust_bundle_state",
+        "quorum/0004_trust_bundle_approver_set",
+        "quorum/0005_batch_request"
       ]
     },
     {
