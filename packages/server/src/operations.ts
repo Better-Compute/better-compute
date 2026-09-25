@@ -393,6 +393,41 @@ export function createOperations(
     });
   }
 
+  /**
+   * Async-with-wait (§9.1): a committed mutation whose method has `poll` and whose input asks
+   * `wait: { timeoutMs }` is refreshed in read-only transactions until done, the timeout (≤ 30 s,
+   * wall clock) or the request's abort. The last output is the answer either way.
+   */
+  async function waited(
+    definition: RegisteredMethod['definition'],
+    input: unknown,
+    output: unknown,
+    contextFor: (sql: SqlExecutor) => MethodContext,
+    signal: AbortSignal | undefined,
+  ): Promise<unknown> {
+    const poll = definition.poll;
+    const wait = isRecord(input) && isRecord(input.wait) ? input.wait.timeoutMs : undefined;
+    const timeoutMs =
+      typeof wait === 'number' && Number.isFinite(wait) ? Math.min(wait, 30_000) : 0;
+    if (!poll || timeoutMs <= 0 || poll.done(output)) return output;
+    const deadline = Date.now() + timeoutMs;
+    let delay = 50;
+    let current = output;
+    while (!signal?.aborted) {
+      const left = deadline - Date.now();
+      if (left <= 0) break;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(delay, left)));
+      if (signal?.aborted) break;
+      current = await database.transaction(
+        (tx) => poll.refresh(contextFor(withinTransaction(database, tx)), input, current),
+        { readOnly: true },
+      );
+      if (poll.done(current)) break;
+      delay = Math.min(delay * 2, 1000);
+    }
+    return current;
+  }
+
   // Composite methods reuse the envelope's own steps for their sub-calls (./composite.ts).
   const composites = createComposites({
     database,
@@ -425,7 +460,9 @@ export function createOperations(
         ...context,
         requestId,
         ...(signal ? { signal } : {}),
-        ...(traceparent ? { traceparent, commands: tracedCommands(context.commands, traceparent) } : {}),
+        ...(traceparent
+          ? { traceparent, commands: tracedCommands(context.commands, traceparent) }
+          : {}),
       };
 
       if (definition.kind === 'public') {
@@ -469,15 +506,21 @@ export function createOperations(
       });
 
       if (admission)
-        return admit(
-          entry,
-          admission as MethodAdmission<unknown, unknown>,
-          tenantId,
+        return waited(
+          definition,
           input,
-          caller,
-          credential,
-          requestId,
+          await admit(
+            entry,
+            admission as MethodAdmission<unknown, unknown>,
+            tenantId,
+            input,
+            caller,
+            credential,
+            requestId,
+            contextFor,
+          ),
           contextFor,
+          signal,
         );
 
       const decision = decisionOf(tenantId, entry.action!, resource!);
@@ -553,7 +596,7 @@ export function createOperations(
       }
 
       const admitted = mutation ? admissionOf(caller, decision, requestId, clock.now()) : undefined;
-      return database.transaction(
+      const output = await database.transaction(
         async (tx) => {
           const value = await definition.handler(
             contextFor(withinTransaction(database, tx), admitted),
@@ -564,6 +607,7 @@ export function createOperations(
         },
         mutation ? {} : { readOnly: true },
       );
+      return mutation ? waited(definition, input, output, contextFor, signal) : output;
     },
   };
 }

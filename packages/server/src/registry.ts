@@ -149,6 +149,13 @@ function checkMethod(path: string, value: unknown): MethodDefinition {
     if (admission !== undefined)
       throw invalid(`${path}: a method with transaction manual takes no admission`);
   }
+  const { poll } = value;
+  if (poll !== undefined) {
+    // Async-with-wait (§9.1) follows a committed mutation.
+    if (kind !== 'mutation') throw invalid(`${path}: only mutations take a poll`);
+    if (!isRecord(poll) || typeof poll.done !== 'function' || typeof poll.refresh !== 'function')
+      throw invalid(`${path}: poll needs done and refresh functions`);
+  }
   return value as unknown as MethodDefinition;
 }
 

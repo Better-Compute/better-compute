@@ -419,13 +419,13 @@ describe('admission contracts', () => {
     const wrong = defineModule({
       name: 'wrong',
       api: () => ({
-        projects: {
-          // A v0.2 row the server does not register yet: decided on compute-project/{id}.
-          archive: defineMethod<{ tenantId: string; projectId: string }, unknown>({
-            action: 'compute:projects:manage',
+        workflows: {
+          // A §9.2 row no built-in registers (provision's): decided on compute-node/{id}.
+          abort: defineMethod<{ tenantId: string; nodeId: string }, unknown>({
+            action: 'compute:workflows:manage',
             kind: 'mutation',
-            resource: (input) => ({ type: 'project', id: input.projectId }),
-            validate: (input) => input as { tenantId: string; projectId: string },
+            resource: (input) => ({ type: 'node', id: input.nodeId }),
+            validate: (input) => input as { tenantId: string; nodeId: string },
             handler: async () => ({}),
             admission: {
               prepare: async () => ({ status: 'decide', resource: { type: 'pool', id: 'p' } }),
@@ -439,9 +439,9 @@ describe('admission contracts', () => {
     iam.allow();
     const compute = betterCompute({ ...options(h.store, iam), modules: [wrong] });
     await expect(
-      compute.api.projects.archive({ token: USER }, {
+      (compute.api as any).workflows.abort({ token: USER }, {
         tenantId: ACME,
-        projectId: 'prj_x',
+        nodeId: 'node_x',
       } as never),
     ).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
     expect(iam.count('require')).toBe(0);

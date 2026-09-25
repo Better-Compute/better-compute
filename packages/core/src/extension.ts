@@ -1003,6 +1003,19 @@ export interface MethodDefinition<I = any, O = any> {
    * `ctx.check` then `ctx.invoke`); the envelope still writes the mutation's audit row after success.
    */
   transaction?: 'auto' | 'manual';
+  /**
+   * Async-with-wait (§9.1): when the input carries `wait: { timeoutMs }` and the committed output is
+   * not `done`, the envelope calls `refresh` in read-only transactions (back-off 50 ms → 1 s, until
+   * `done`, the timeout (at most 30 s) or the request's abort) and returns the last output. A
+   * timeout is not an error: the output still says the operation is pending.
+   */
+  poll?: MethodPoll<I, O>;
+}
+
+/** How the envelope waits for a mutation's operation to finish (`MethodDefinition.poll`). */
+export interface MethodPoll<I, O> {
+  done(output: O): boolean;
+  refresh(context: MethodContext, input: I, output: O): Promise<O>;
 }
 
 /** What `MethodAdmission.prepare` decided about the request. */
