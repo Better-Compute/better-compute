@@ -194,7 +194,7 @@ Profile 1─* Workflow 1─* Step 0..1─1 Command *─1 Node 1─1 NodeSpec(gen
    - computes `hardware_key` (§8.3) and enforces `expect` and the reclaim rules. Reclaiming a trusted key with a new node key needs `allowReclaim` and ≥2 matching independent identifiers. A key built from placeholder DMI values needs `expect` in v0.1, or operator approval via `joinRequests.approve` from v0.2;
    - inserts `nodes(provision_state='adopting', role from the pool class)` and `node_sessions(node_id, session_epoch=0)`;
    - decrements the token;
-   - signs a 24 h cert (URI SAN `spiffe://<td>/site/<site>/node/<nodeId>`, role OID `node`, no tenant).
+   - signs a 24 h cert (URI SAN `spiffe://<td>/site/<site>/node/<nodeId>`, role `node` in the Subject OU `bc-role:node`, no tenant).
 
    It returns `JoinResponse{body, sig}`, where `body` carries the chain and the command-signing trust bundle and `sig` is made with the pinned join-signing key.
 5. **Session.** bcd opens `Session` with `Hello`. The gateway checks the chain, revocation, the role, and that the SAN equals `Hello.node_id`. It bumps `session_epoch` and replies `Welcome{epoch, heartbeat 10s, leaseTTL 40s, credits, request_sections, server_time}`.
@@ -1553,7 +1553,7 @@ Remote fallback: a root subtree webhook, verified with `verifyWebhookSignature` 
 
 Node keys sign only "this node says" statements: mTLS, CSR proof of possession, attested results, secret requests.
 
-**Certs and attestors.** Certs are 24 h P-256 with a SPIFFE SAN and a role OID. `Renew` is verified by `api` with proof of possession. Revocation streams to gateways, which close sessions at once. Attestors: `join-token` (v0.1); `x509pop`, `provisioned`, `discovery` (v0.2); `cloud-iid` (v0.3); `tpm` via go-attestation **(verify fit)** (v0.5).
+**Certs and attestors.** Certs are 24 h P-256 with a SPIFFE SAN and the role in the Subject OU (`bc-role:<role>`; no private OIDs, which Go's crypto/x509 cannot parse under a 2.25 UUID arc). `Renew` is verified by `api` with proof of possession. Revocation streams to gateways, which close sessions at once. Attestors: `join-token` (v0.1); `x509pop`, `provisioned`, `discovery` (v0.2); `cloud-iid` (v0.3); `tpm` via go-attestation **(verify fit)** (v0.5).
 
 | Threat | Mitigation |
 |---|---|
