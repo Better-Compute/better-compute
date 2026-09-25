@@ -21,6 +21,7 @@ import {
   capacityModule,
   createCapacityPort,
   deviceAssignments,
+  activeRecheckMs,
   cancelPendingReservation,
   markAllocationBound,
   placeablePending,
@@ -32,6 +33,7 @@ import {
   readQuotas,
   reservationWork,
   wakePendingForNode,
+  wakeStartedOnNode,
   type AllocationBindingCheck,
   type CapacityApi,
 } from '@better-compute/capacity';
@@ -619,6 +621,66 @@ describe('the reservation lifecycle', () => {
     ]);
     expect((await readQuotas(db, 'acme', poolId))[0]!.used).toBe(0);
     expect(await deviceAssignments(db, node)).toEqual([]);
+  });
+
+  it('marks an active reservation Degraded and NodeUnreachable from its node, and never releases it (P6)', async () => {
+    const created = (await call('reservations', 'create', create())) as Rsv;
+    await reconcile(created.id); // → binding
+    const { rows } = await db.query<{ id: string; node_id: string; atoms: string[] }>(
+      `SELECT id, node_id, atoms FROM allocations WHERE owner_id = $1`,
+      [created.id],
+    );
+    const allocation = rows[0]!;
+    await db.transaction((tx) =>
+      markAllocationBound(tx, moduleContext(db).work, allocation.id, { cdiDevices: ['a'] }),
+    );
+    await reconcile(created.id); // → active
+    const conditions = async () =>
+      ((await call('reservations', 'get', { tenantId: 'acme', reservationId: created.id })) as Rsv)
+        .conditions;
+
+    await db.query(`UPDATE devices SET healthy = false WHERE id = $1`, [allocation.atoms[0]]);
+    await db.query(`UPDATE nodes SET connectivity = 'lost' WHERE id = $1`, [allocation.node_id]);
+    recorded.work = [];
+    expect(
+      await db.transaction((tx) =>
+        wakeStartedOnNode(tx, moduleContext(db).work, allocation.node_id),
+      ),
+    ).toBe(1);
+    expect(recorded.work).toEqual([{ kind: reservationWork, key: created.id }]);
+    await reconcile(created.id);
+    expect(await conditions()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'Degraded',
+          reason: 'AtomUnhealthy',
+          message: `unhealthy: ${allocation.atoms[0]}`,
+        }),
+        expect.objectContaining({ type: 'NodeUnreachable', message: allocation.node_id }),
+      ]),
+    );
+    // Conditions only: the booking stays, and the next look is the recheck.
+    const { rows: live } = await db.query(
+      `SELECT 1 FROM allocations WHERE id = $1 AND released_at IS NULL`,
+      [allocation.id],
+    );
+    expect(live).toHaveLength(1);
+    expect(recorded.work.at(-1)).toMatchObject({
+      key: created.id,
+      notBefore: T0 + activeRecheckMs,
+    });
+
+    await db.query(`UPDATE devices SET healthy = true WHERE id = $1`, [allocation.atoms[0]]);
+    await db.query(`UPDATE nodes SET connectivity = 'connected' WHERE id = $1`, [
+      allocation.node_id,
+    ]);
+    await reconcile(created.id);
+    expect((await conditions()).map((condition) => condition.type)).not.toEqual(
+      expect.arrayContaining(['Degraded']),
+    );
+    expect((await conditions()).map((condition) => condition.type)).not.toContain(
+      'NodeUnreachable',
+    );
   });
 
   it('re-places after a bind timeout, and fails after the retries run out', async () => {

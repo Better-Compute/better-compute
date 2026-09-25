@@ -2098,29 +2098,83 @@ export async function reconcileReservation(
     return now;
   }
 
-  // active: Degraded while a node reports it lost an assignment it had bound (or re-reports it
-  // bound without a valid signature).
+  // active (§10.5): conditions only, never a release (P6). `Degraded` while a node reports it lost
+  // an assignment it had bound (or re-reports it bound without a valid signature), else while a
+  // booked atom is unhealthy; `NodeUnreachable` while a node of it is not connected.
   await verifyBindings(deps, tx, row);
-  const { rows } = await tx.query<{ lost: string | number }>(
-    `SELECT count(*) FILTER (WHERE binding ? 'lost') AS lost FROM allocations
-      WHERE owner_kind = 'reservation' AND owner_id = $1 AND released_at IS NULL`,
+  const { rows } = await tx.query<{
+    lost: string | number;
+    unhealthy: string[] | null;
+    unreachable: string[] | null;
+  }>(
+    `WITH live AS (
+       SELECT id, node_id, atoms, binding FROM allocations
+        WHERE owner_kind = 'reservation' AND owner_id = $1 AND released_at IS NULL)
+     SELECT (SELECT count(*) FROM live WHERE binding ? 'lost') AS lost,
+            (SELECT array_agg(d.id ORDER BY d.id) FROM live l JOIN devices d ON d.id = ANY(l.atoms)
+              WHERE NOT d.healthy) AS unhealthy,
+            (SELECT array_agg(DISTINCT n.id ORDER BY n.id) FROM live l JOIN nodes n ON n.id = l.node_id
+              WHERE n.connectivity <> 'connected') AS unreachable`,
     [id],
   );
-  const conditions =
-    Number(rows[0]?.lost ?? 0) > 0
-      ? withCondition(
-          row.conditions,
-          {
+  const state = rows[0];
+  const degraded: Omit<Condition, 'since'> | undefined =
+    Number(state?.lost ?? 0) > 0
+      ? {
+          type: 'Degraded',
+          status: 'true',
+          reason: 'BindingLost',
+          message: 'a node dropped the devices',
+        }
+      : state?.unhealthy?.length
+        ? {
             type: 'Degraded',
             status: 'true',
-            reason: 'BindingLost',
-            message: 'a node dropped the devices',
-          },
-          now,
-        )
-      : withoutCondition(row.conditions, 'Degraded');
+            reason: 'AtomUnhealthy',
+            message: `unhealthy: ${state.unhealthy.join(', ')}`,
+          }
+        : undefined;
+  let conditions = degraded
+    ? withCondition(row.conditions, degraded, now)
+    : withoutCondition(row.conditions, 'Degraded');
+  conditions = state?.unreachable?.length
+    ? withCondition(
+        conditions,
+        {
+          type: 'NodeUnreachable',
+          status: 'true',
+          reason: 'Unreachable',
+          message: state.unreachable.join(', '),
+        },
+        now,
+      )
+    : withoutCondition(conditions, 'NodeUnreachable');
   await setConditions(tx, row, conditions);
-  return wake(row.during.end);
+  // Node edges wake it (`wakeStartedOnNode`); the recheck keeps it level-triggered without them.
+  return wake(now + activeRecheckMs);
+}
+
+/** How often an active reservation re-reads its nodes and atoms when no edge wakes it. */
+export const activeRecheckMs = 15 * 60_000;
+
+/**
+ * Wakes the started reservations (`binding`, `active`) with a live allocation on a node, so their
+ * conditions follow the node's connectivity and atom health (node-controller and health edges).
+ */
+export async function wakeStartedOnNode(
+  tx: SqlTx,
+  work: ModuleContext['work'],
+  nodeId: string,
+): Promise<number> {
+  const { rows } = await tx.query<{ owner_id: string }>(
+    `SELECT DISTINCT a.owner_id FROM allocations a JOIN reservations r ON r.id = a.owner_id
+      WHERE a.node_id = $1 AND a.owner_kind = 'reservation' AND a.released_at IS NULL
+        AND r.state IN ('binding', 'active')
+      ORDER BY a.owner_id`,
+    [nodeId],
+  );
+  for (const row of rows) await work.enqueue(tx, reservationWork, row.owner_id);
+  return rows.length;
 }
 
 /**
