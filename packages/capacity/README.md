@@ -148,8 +148,9 @@ as NoSchedule (bucket `unhealthy`).
 
 `planPlacement(request, nodeViews, pool, { plugins, weights })` is pure. It runs these steps:
 
-1. **Filters.** Eligibility, `excludeNodes`, scalar room (`floor(allocatable × ratio) − allocated`),
-   plugin filters, then device fit with selectors.
+1. **Filters.** Eligibility (for the request's tenant), `excludeNodes`, `nodeLabels` (every named
+   label with exactly that value, e.g. a runtime a host advertised as `bc.dev/driver.kata`), scalar
+   room (`floor(allocatable × ratio) − allocated`), plugin filters, then device fit with selectors.
 2. **Atom pick.** Plugin `preferAllocation` pickers win for their class. Otherwise the default pick
    prefers NVLink-complete sets, then the fewest NUMA nodes. `topology: 'nvlink-all'` refuses
    anything less than all-NV.
@@ -179,7 +180,9 @@ to every attempt.
 - It plans on plain reads. When the request allows it (no selectors, no plugin scorers, no gang),
   it plans from an exact SQL shortlist (`planFromShortlist`): the best 48 nodes by the
   count-derived part of the score, used only when no other node could reach the top N. Otherwise
-  it loads every `NodeView`.
+  it loads every `NodeView`. The shortlist reads per-node device counts from
+  `capacity_device_counts` (capacity/0003, kept exact by a trigger on `devices`), never an
+  aggregate of the pool's devices.
 - Then it locks the pool (`FOR UPDATE`) and commits the chosen node inside
   `SAVEPOINT capacity_place_<n>`. The critical section is the commit alone.
 - The node is locked with `FOR SHARE OF n` under `schedulableSql`, and the atoms with
@@ -222,6 +225,33 @@ because it is synchronous and simpler to test; production hosts on Postgres shou
   lease start and marks the allocation bound.
   - Billing is `node.metal.hours` plus the GPUs healthy at each window's start (`billableLines`).
   - Unhealthy GPUs show in an `UnhealthyAtoms` condition.
+
+## MIG layout changes (§10.4, §10.6)
+
+A `mig` pool's `policy.migLayout` reaches nodes through provision's `mig-layout { from: 'pool' }`
+config unit. A change must never repartition booked GPUs, so it goes through a gate:
+
+1. `pools.update` freezes every node of the pool at the old layout, with the new one pending
+   (`capacity_mig_layouts`, capacity/0004). Provision reads the node's gated layout, falling back
+   to the pool's for nodes never gated.
+2. The `capacity.mig` reconciler (shardBy node) books every GPU family on the node, parent and
+   every atom, from the end of its last booking onward (`bookPartitionChange`). Nothing new lands
+   past that point, though idle time before it still books.
+3. At that time it grants the new layout and invalidates the node spec. The daemon repartitions
+   idle GPUs.
+4. Once the node has converged a newer spec (or after 5 minutes, if its spec never carried the
+   layout), the holds are released.
+
+Events: `node.mig.scheduled`, `node.mig.granted`, `node.mig.applied`. Rollups don't count partition
+holds.
+
+## Metrics and invariants
+
+- `onPlacement(observation)` (module and placer option) reports every placement: placer, outcome,
+  conflicts and seconds. Observability's `placementObserver` maps it to `placements_total`,
+  `booking_conflicts_total` and `placement_seconds`.
+- `placeablePending(tx, { now })` is the offline solver for I7 (§15). It returns the pending
+  reservations that would fit right now, and should be empty after a quiet period.
 
 ## Quotas (§10.3, D9)
 
