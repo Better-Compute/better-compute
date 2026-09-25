@@ -330,6 +330,8 @@ describe('capacityModule API surface', () => {
       'capacity.mig',
     ]);
     expect(module.reconcilers![1]!.periodic).toEqual([{ key: 'all', every: '5m' }]);
+    // A deleted tenant's teardown (§12.8) goes through capacityTenantDeleted.
+    expect(module.tenantDeleted).toBeTypeOf('function');
   });
 });
 

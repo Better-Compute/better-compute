@@ -36,6 +36,7 @@ import { inlinePlacer, poolLeasePlacer, type PlacementObserver } from './placer.
 import { freezeMigLayouts, migGateWork, runMigGate } from './mig.js';
 import { dedicatedTaintPrefix } from './eligibility.js';
 import { describedBy, schemas } from './schemas.js';
+import { capacityTenantDeleted } from './tenancy.js';
 import { leaseCandidates, leaseGroups } from './node-lease.js';
 import { PoolIndexCache } from './pool-index.js';
 import { defaultSpotNoticeMs, planPreemption, readSpotAllocations } from './spot.js';
@@ -1450,6 +1451,8 @@ export function capacityModule(
       const assignments = await deviceAssignments(context.sql, node.id);
       return { devices: { assignments } };
     },
+    // §12.8: a deleted tenant's reservations end, offers to it and pools it owns are withdrawn.
+    tenantDeleted: (context, tenantId) => capacityTenantDeleted(context, tenantId),
     async selfCheck(context) {
       const count = async (sql: string) =>
         Number((await context.sql.query<{ count: string | number }>(sql)).rows[0]?.count ?? 0);
