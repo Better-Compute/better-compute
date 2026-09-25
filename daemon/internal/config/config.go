@@ -450,6 +450,10 @@ func (c *Config) Validate() error {
 		// The node owns its data directory: slots there would let it plant the binary root trusts.
 		return fmt.Errorf("under bcd helper, update.slots_dir may not be inside data_dir (%s)", c.DataDir)
 	}
+	if c.Helper.Socket != "" && nested(path.Clean(path.Dir(c.Update.Entrypoint)), path.Clean(c.DataDir)) {
+		// Root adopts the entrypoint's binary into a slot: never a file the node can plant.
+		return fmt.Errorf("under bcd helper, update.entrypoint may not be inside data_dir (%s)", c.DataDir)
+	}
 	if !path.IsAbs(c.Update.Entrypoint) {
 		return fmt.Errorf("update.entrypoint must be an absolute path, got %q", c.Update.Entrypoint)
 	}

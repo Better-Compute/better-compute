@@ -137,14 +137,12 @@ func (s Slots) Adopt(exe, version string, sequence int64) error {
 		return err
 	}
 	if cur == "" {
-		if err := os.MkdirAll(s.Dir, 0o755); err != nil {
+		// Every directory it creates 0755, explicitly: a umask of 077 (a hardened unit) would leave
+		// the slots unreachable to the node.
+		if err := mkdirAll0755(s.Dir); err != nil {
 			return err
 		}
-		// Explicitly: a umask of 077 (a hardened unit) would leave the slots unreachable to the node.
-		if err := os.Chmod(s.Dir, 0o755); err != nil {
-			return err
-		}
-		f, err := os.Open(exe)
+		f, err := openOwned(exe)
 		if err != nil {
 			return err
 		}
@@ -163,7 +161,7 @@ func (s Slots) Adopt(exe, version string, sequence int64) error {
 		// The slots exist but the entrypoint is a plain file again: an install script replaced the
 		// binary (mv -f). That file is what runs: it becomes the current slot, so relinking the
 		// entrypoint never falls back to the older binary the slot held.
-		f, err := os.Open(s.Entrypoint)
+		f, err := openOwned(s.Entrypoint)
 		if err != nil {
 			return err
 		}
@@ -177,6 +175,30 @@ func (s Slots) Adopt(exe, version string, sequence int64) error {
 		}
 	}
 	return s.linkEntrypoint()
+}
+
+// mkdirAll0755 creates dir and its missing parents, each 0755 whatever the umask. Directories that
+// already exist are left as they are (never a system directory's mode rewritten).
+func mkdirAll0755(dir string) error {
+	dir = filepath.Clean(dir)
+	if fi, err := os.Stat(dir); err == nil {
+		if !fi.IsDir() {
+			return fmt.Errorf("%s is not a directory", dir)
+		}
+		return nil
+	}
+	if parent := filepath.Dir(dir); parent != dir {
+		if err := mkdirAll0755(parent); err != nil {
+			return err
+		}
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return nil
+		}
+		return err
+	}
+	return os.Chmod(dir, 0o755)
 }
 
 // linkEntrypoint makes the entrypoint a symlink to Dir/current. A regular file there (the install
@@ -213,6 +235,11 @@ func (s Slots) Stage(r io.Reader, size int64, sum []byte, version string, sequen
 		return "", errors.New("selfupdate: no slots yet (Adopt first)")
 	}
 	next := Other(cur)
+	// The slot's record goes before its file is replaced: a crash in between leaves no record (no
+	// manifest-free swap to it, and Holds hashes the file), never a record of other bytes.
+	if err := s.setInfo(next, SlotInfo{}); err != nil {
+		return "", err
+	}
 	written, err := s.write(next, r, size, sum)
 	if err != nil {
 		return "", err

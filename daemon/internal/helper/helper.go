@@ -209,6 +209,9 @@ func (s *Server) Serve(ctx context.Context, l *net.UnixListener) error {
 		select {
 		case slots <- struct{}{}:
 		default:
+			// Over the cap: a retryable answer, not a bare EOF.
+			_ = conn.SetDeadline(time.Now().Add(time.Second))
+			_ = json.NewEncoder(conn).Encode(Response{V: Version, Error: "busy: the helper is serving its maximum of requests; retry"})
 			_ = conn.Close()
 			continue
 		}

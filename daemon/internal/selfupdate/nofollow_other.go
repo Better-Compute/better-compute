@@ -22,3 +22,6 @@ func openStaged(dir, name string, _ *uint32) (*os.File, error) {
 	}
 	return os.Open(p)
 }
+
+// openOwned opens a binary to adopt (ownership is checked on Linux only).
+func openOwned(path string) (*os.File, error) { return os.Open(path) }

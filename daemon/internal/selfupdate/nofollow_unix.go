@@ -51,3 +51,23 @@ func openStaged(dir, name string, uid *uint32) (*os.File, error) {
 	}
 	return f, nil
 }
+
+// openOwned opens a binary to adopt: as root, only a root-owned regular file (a file the node could
+// write would become a slot root runs).
+func openOwned(path string) (*os.File, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !st.Mode().IsRegular() || !ok || (os.Geteuid() == 0 && (sys.Uid != 0 || st.Mode().Perm()&0o022 != 0)) {
+		f.Close()
+		return nil, fmt.Errorf("%s is not a root-owned binary no one else can write", path)
+	}
+	return f, nil
+}

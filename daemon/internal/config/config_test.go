@@ -258,6 +258,12 @@ func TestHelperSection(t *testing.T) {
 	if err != nil || cfg.Helper.Socket != "/run/bcd/helper.sock" || cfg.Helper.User != "bcd" {
 		t.Fatalf("helper = %+v, %v", cfg.Helper, err)
 	}
+	// Under the helper, neither the slots nor the entrypoint may sit where the node writes.
+	for _, bad := range []string{"[update]\nslots_dir = \"/var/lib/bcd/bin\"\n", "[update]\nentrypoint = \"/var/lib/bcd/bcd\"\n", "[update]\nslots_dir = \"/var/lib\"\n"} {
+		if _, err := Parse([]byte(required() + bad + "[helper]\nsocket = \"/run/bcd-helper/helper.sock\"\nuser = \"bcd\"\n")); err == nil {
+			t.Errorf("accepted %q under the helper", bad)
+		}
+	}
 	for _, bad := range []string{"socket = \"/run/bcd/helper.sock\"\n", "socket = \"helper.sock\"\nuser = \"bcd\"\n", "socket = \"/run/h.sock\"\nuser = \"root\"\n"} {
 		if _, err := Parse([]byte(required() + "[helper]\n" + bad)); err == nil {
 			t.Errorf("accepted %q", bad)

@@ -78,6 +78,17 @@ func runHelper(fs *flag.FlagSet, _, stderr io.Writer) int {
 		},
 		Log: func(msg string, args ...any) { log.Info(msg, args...) },
 	}
+	if os.Geteuid() == 0 {
+		// Every directory on the way to the slots and to the socket must be root's alone: a path the
+		// node could swap for a symlink would steer root's writes (review 11 L1, L2).
+		slots, _ := cfg.UpdateDirs()
+		for _, p := range []string{slots, filepath.Dir(cfg.Helper.Socket), filepath.Dir(cfg.Update.Entrypoint)} {
+			if err := rootOnlyPath(p); err != nil {
+				fmt.Fprintf(stderr, "bcd helper: %v\n", err)
+				return exitFailure
+			}
+		}
+	}
 	// Self-update: root's slots and records; the node downloads, the helper verifies and swaps, and
 	// its own watchdog swaps back an update no gateway welcomed, whatever the node does.
 	manager, err := updateManager(cfg, func(msg string, args ...any) { log.Info(msg, args...) })
@@ -91,17 +102,6 @@ func runHelper(fs *flag.FlagSet, _, stderr io.Writer) int {
 	srv.OnSwap = func(p *selfupdate.Pending) { watchUpdate(manager, p, log) }
 	if st, err := manager.Status(); err == nil && st.Pending != nil && st.Pending.State == selfupdate.StateSwapped {
 		watchUpdate(manager, st.Pending, log)
-	}
-	if os.Geteuid() == 0 {
-		// Every directory on the way to the slots and to the socket must be root's alone: a path the
-		// node could swap for a symlink would steer root's writes (review 11 L1, L2).
-		slots, _ := cfg.UpdateDirs()
-		for _, p := range []string{slots, filepath.Dir(cfg.Helper.Socket)} {
-			if err := rootOnlyPath(p); err != nil {
-				fmt.Fprintf(stderr, "bcd helper: %v\n", err)
-				return exitFailure
-			}
-		}
 	}
 	ln, err := listenHelper(cfg.Helper.Socket, int(gid))
 	if err != nil {

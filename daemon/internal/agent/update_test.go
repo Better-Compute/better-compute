@@ -134,10 +134,16 @@ func (n *updateNode) link(t *testing.T, name string) string {
 
 func daemonStatus(t *testing.T, s *fakeStream, state agentv1.SectionState) *agentv1.SectionStatus {
 	t.Helper()
+	return daemonStatusAt(t, s, state, 0)
+}
+
+// daemonStatusAt waits for the daemon section in state for spec generation (0: any).
+func daemonStatusAt(t *testing.T, s *fakeStream, state agentv1.SectionState, generation uint64) *agentv1.SectionStatus {
+	t.Helper()
 	var found *agentv1.SectionStatus
 	s.next(t, "daemon section "+state.String(), func(f *agentv1.AgentFrame) bool {
 		for _, st := range f.GetStatus().GetSections() {
-			if st.GetSection() == "daemon" && st.GetState() == state {
+			if st.GetSection() == "daemon" && st.GetState() == state && (generation == 0 || st.GetGeneration() == generation) {
 				found = st
 				return true
 			}
@@ -280,7 +286,7 @@ func TestSelfUpdateRefusesUnpinnedReleases(t *testing.T) {
 	unsigned := r.section()
 	unsigned.Signature = nil
 	s.push(desired(2, &agentv1.NodeSpec{Daemon: unsigned}))
-	st = daemonStatus(t, s, agentv1.SectionState_SECTION_STATE_FAILED)
+	st = daemonStatusAt(t, s, agentv1.SectionState_SECTION_STATE_FAILED, 2)
 	if !strings.Contains(st.GetMessage(), "no signed release manifest") {
 		t.Fatalf("daemon section = %v", st)
 	}
@@ -288,7 +294,7 @@ func TestSelfUpdateRefusesUnpinnedReleases(t *testing.T) {
 	wrong.Sha256 = make([]byte, 32)
 	n.pins = r.pins
 	s.push(desired(3, &agentv1.NodeSpec{Daemon: wrong}))
-	daemonStatus(t, s, agentv1.SectionState_SECTION_STATE_FAILED)
+	daemonStatusAt(t, s, agentv1.SectionState_SECTION_STATE_FAILED, 3)
 	if r.requests != 0 {
 		t.Fatalf("%d downloads of an unverified binary", r.requests)
 	}

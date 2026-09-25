@@ -228,10 +228,17 @@ func (m *Manager) Swap(t Target) (*Pending, error) {
 	if err != nil {
 		return nil, err
 	}
-	target, running := Bare(t.Version), m.running(t)
-	if err := m.Slots.Adopt(m.Executable, running, m.Sequence); err != nil {
+	target := Bare(t.Version)
+	// The entrypoint's binary (installed, or put back by an install script) is this very release
+	// when the manager runs in the helper: label it with the helper's own version.
+	adopted := m.SelfVersion
+	if adopted == "" {
+		adopted = m.running(t)
+	}
+	if err := m.Slots.Adopt(m.Executable, Bare(adopted), m.Sequence); err != nil {
 		return nil, fmt.Errorf("adopt the running binary: %w", err)
 	}
+	running := m.running(t)
 	if m.InstallUnits != nil {
 		units, err := RollbackUnits(m.StateDir, m.Slots)
 		if err == nil {

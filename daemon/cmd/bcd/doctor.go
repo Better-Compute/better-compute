@@ -92,6 +92,15 @@ func configChecks(cfg *config.Config, role string) []doctorCheck {
 	for v, why := range selfupdate.LoadRecord(stateDir).Failed {
 		out = append(out, doctorCheck{"warn", "update", fmt.Sprintf("bcd %s failed (%s); bcd update --clear-failed lets a rollout retry it", v, why)})
 	}
+	if cfg.Helper.Socket != "" && os.Geteuid() == 0 {
+		// bcd helper refuses to start unless every directory to its slots, socket and entrypoint is
+		// root's alone (a group-writable /usr/local/lib, root:staff 2775 on older Debian, fails it).
+		for _, p := range []string{slotsDir, filepath.Dir(cfg.Helper.Socket), filepath.Dir(cfg.Update.Entrypoint)} {
+			if err := rootOnlyPath(p); err != nil {
+				out = append(out, doctorCheck{"fail", "helper", err.Error()})
+			}
+		}
+	}
 	if role == "site" && cfg.BMCNetworks == "" {
 		out = append(out, doctorCheck{"warn", "bmc", "no [site] bmc_networks: site.httpProxy's BMC refusal relies on the BMCs this agent has driven"})
 	}

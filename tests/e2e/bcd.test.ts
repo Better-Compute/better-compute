@@ -560,7 +560,11 @@ describe.skipIf(!enabled)('bcd, the Go daemon, against the control plane (W1)', 
     sh(`pkill -f '[n]ode --config ${toLinux(config)}' ; true`);
     await until('the node to stop', async () => sh(`pgrep -f '[n]ode --config ${toLinux(config)}' || echo gone`) === 'gone', 30_000);
     const original = readFileSync(config, 'utf8');
-    writeFileSync(config, `${original}\n[helper]\nsocket = "${socket}"\nuser = "${sh('id -un')}"\n`);
+    // Under the helper the entrypoint and the slots may not sit in the node's data directory.
+    const helperConfig = original.includes('[update]')
+      ? original.replace(/entrypoint = "[^"]*"/, `entrypoint = "${dataDir}-helper-entry/bcd"\nslots_dir = "${dataDir}-helper-slots"`)
+      : original;
+    writeFileSync(config, `${helperConfig}\n[helper]\nsocket = "${socket}"\nuser = "${sh('id -un')}"\n`);
     let helperLog = '';
     const { cmd, args } = linux(['env', 'BCD_FAKEHW_SEED=41', entry, 'helper', '--config', toLinux(config)]);
     const helperProcess = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'] });

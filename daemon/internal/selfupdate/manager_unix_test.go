@@ -87,3 +87,22 @@ func TestManagerStagedFileChecks(t *testing.T) {
 		t.Fatalf("slots dir mode = %v, %v", fi.Mode(), err)
 	}
 }
+
+// Under a hardened unit's UMask=0077, every directory the slots need is still 0755 (the node execs
+// the entrypoint through them).
+func TestSlotsDirectoriesUnderUmask077(t *testing.T) {
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+	dir := t.TempDir()
+	entry := filepath.Join(dir, "bcd")
+	_ = os.WriteFile(entry, []byte("bcd"), 0o755)
+	s := Slots{Dir: filepath.Join(dir, "usr", "local", "lib", "bcd"), Entrypoint: entry}
+	if err := s.Adopt(entry, "1.0.0", 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{filepath.Join(dir, "usr"), filepath.Join(dir, "usr", "local"), filepath.Join(dir, "usr", "local", "lib"), s.Dir} {
+		if fi, err := os.Stat(d); err != nil || fi.Mode().Perm() != 0o755 {
+			t.Fatalf("%s: %v %v", d, fi.Mode(), err)
+		}
+	}
+}
