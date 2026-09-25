@@ -1031,6 +1031,11 @@ export interface Reconciler {
    * edge-triggered enqueues: e.g. `iam.reconcile` → `[{ key: 'identities', every: '5m' }]`.
    */
   periodic?: readonly { key: string; every: Duration }[];
+  /**
+   * The worker role that runs it (§8.1): `scheduler` for placers, which scale apart from the
+   * controllers. Default `controllers`.
+   */
+  role?: 'controllers' | 'scheduler';
 }
 
 /** A CLI command a module adds (built with the CLI's `defineCommand`). */
