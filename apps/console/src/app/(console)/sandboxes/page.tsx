@@ -27,6 +27,8 @@ export default function SandboxesPage() {
   const [now, setNow] = useState(() => Date.now());
   const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
+  // Snapshots need a SnapshotStore (presigned uploads) in the deployment; without one the button goes away.
+  const [snapshotsOff, setSnapshotsOff] = useState(false);
 
   useEffect(() => {
     void view.refresh();
@@ -151,9 +153,23 @@ export default function SandboxesPage() {
                         >
                           +30 min
                         </button>
-                        <button type="button" disabled={busy} onClick={() => void act(() => view.snapshot(sandbox.id))}>
-                          Snapshot
-                        </button>
+                        {!snapshotsOff && (
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() =>
+                              void act(() =>
+                                view.snapshot(sandbox.id).catch((failure: { code?: string }) => {
+                                  if (failure?.code !== 'INVALID_CONFIG') throw failure;
+                                  setSnapshotsOff(true);
+                                  throw new Error('Snapshots are not configured on this deployment (no SnapshotStore).');
+                                }),
+                              )
+                            }
+                          >
+                            Snapshot
+                          </button>
+                        )}
                         <button
                           type="button"
                           disabled={busy}
