@@ -66,6 +66,18 @@ export interface HandleTunnelOptions {
   authorize(input: TunnelReauthorization): Promise<boolean>;
   /** The API base path (default `/api/compute`). */
   basePath?: string;
+  /**
+   * Browser origins allowed to open tunnels (e.g. the console's). An upgrade with any other `Origin`
+   * is refused before the ticket is looked at, so a leaked ticket cannot be used from another site.
+   * Requests without `Origin` (CLI clients) are not affected. Unset: any origin.
+   */
+  allowedOrigins?: readonly string[];
+  /**
+   * Resolves the identity of a credential the upgrade carries (cookie / Authorization), e.g.
+   * `(credential) => iam.authenticate(credential)`. When set and a credential is present, it must be
+   * the ticket's subject (`sub`); a mismatch or an invalid credential is refused.
+   */
+  authenticate?(credential: Credential): Promise<{ identityId: string }>;
   /** When set, the ticket's `iss` must equal it. */
   issuerName?: string;
   /** This api's own jti set (default: one per issuer in this process). */
@@ -156,6 +168,14 @@ async function open(
   };
   if (!isWebSocketUpgrade(req))
     return refuse(426, 'METHOD_NOT_ALLOWED', 'Open tunnels with a WebSocket upgrade (version 13)');
+  // Before the ticket is verified (and its jti spent): a foreign page never gets that far.
+  const origin = req.headers.origin;
+  if (
+    options.allowedOrigins &&
+    typeof origin === 'string' &&
+    !options.allowedOrigins.includes(origin.replace(/\/+$/, ''))
+  )
+    return refuse(403, 'UNTRUSTED_ORIGIN', 'Origin is not trusted');
   let ticket: string;
   try {
     ticket = decodeURIComponent(encoded);
@@ -178,6 +198,24 @@ async function open(
     });
   } catch {
     return refuse(403, 'ACCESS_DENIED', 'Exec ticket rejected');
+  }
+  const headers = Object.fromEntries(
+    (['authorization', 'cookie'] as const)
+      .filter((name) => typeof req.headers[name] === 'string')
+      .map((name) => [name, req.headers[name] as string]),
+  );
+  const credential: Credential | undefined = Object.keys(headers).length ? { headers } : undefined;
+  // A caller who presents a credential must be the person the ticket was issued to.
+  if (options.authenticate && credential) {
+    let identityId: string | undefined;
+    try {
+      identityId = (await options.authenticate(credential)).identityId;
+    } catch {
+      identityId = undefined;
+    }
+    if (socket.destroyed) return true;
+    if (identityId !== claims.sub)
+      return refuse(403, 'ACCESS_DENIED', 'The ticket belongs to another caller');
   }
   const { rows } = await options.sql.query<{ gateway_id: string | null }>(
     'SELECT gateway_id FROM node_sessions WHERE node_id = $1',
@@ -208,14 +246,9 @@ async function open(
     ...(options.maxMessageBytes ? { maxMessageBytes: options.maxMessageBytes } : {}),
     ...(options.pingIntervalMs ? { pingIntervalMs: options.pingIntervalMs } : {}),
   });
-  const headers = Object.fromEntries(
-    (['authorization', 'cookie'] as const)
-      .filter((name) => typeof req.headers[name] === 'string')
-      .map((name) => [name, req.headers[name] as string]),
-  );
   const reauthorization: TunnelReauthorization = {
     claims,
-    ...(Object.keys(headers).length ? { credential: { headers } } : {}),
+    ...(credential ? { credential } : {}),
   };
   let ended = false;
   let lifetime: ReturnType<typeof setTimeout> | undefined;

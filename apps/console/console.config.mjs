@@ -7,16 +7,22 @@ import { pathToFileURL } from 'node:url';
 // (`/api/iam` and `/api/compute`), so the host-only IAM session cookie authenticates both. The compute IAM bridge
 // installs the §12.3 catalog on better-iam and serves compute's decisions from its projection.
 //
-// Development defaults: better-iam on libSQL and compute on PGlite under `.console-data/`, a generated secret, and a
-// root administrator bootstrapped on first start (CONSOLE_ADMIN_EMAIL / CONSOLE_ADMIN_PASSWORD, printed once when
-// generated). Production sets BETTER_COMPUTE_DATABASE_URL (postgres://…), CONSOLE_SECRET and CONSOLE_ORIGIN.
+// Stores: better-iam on libSQL and compute on PGlite under `.console-data/` unless database URLs are set.
+// Secrets are never invented outside explicit development mode (CONSOLE_DEV=1, what `node server.mjs --dev` sets):
+// only there are the session secret, the exec ticket and SSH CA keys generated under the data directory and a root
+// administrator password generated (printed once). Otherwise CONSOLE_SECRET and CONSOLE_ADMIN_PASSWORD (first start)
+// are required, and tunnels need their key files and the gateway mTLS files.
 
 const env = process.env;
+// Read when used, not at import: `server.mjs --dev` sets it after importing this file.
+const dev = () => env.CONSOLE_DEV === '1';
 
 async function secretFor(dataDir) {
   if (env.CONSOLE_SECRET) return env.CONSOLE_SECRET;
-  if (env.NODE_ENV === 'production')
-    throw new Error('Set CONSOLE_SECRET (at least 32 random characters).');
+  if (!dev())
+    throw new Error(
+      'Set CONSOLE_SECRET (at least 32 random characters), or CONSOLE_DEV=1 locally.',
+    );
   const file = join(dataDir, 'secret');
   try {
     return (await readFile(file, 'utf8')).trim();
@@ -42,11 +48,11 @@ async function iamDatabase(dataDir) {
 }
 
 /**
- * A PKCS#8 PEM private key: the file `env[variable]` names, or in development one generated once under the data
- * directory. Undefined in production without the variable (the feature stays off).
+ * A PKCS#8 PEM private key: the file `env[variable]` names, or in development mode one generated once under the data
+ * directory. Undefined otherwise (the feature stays off).
  */
 async function keyFile(dataDir, variable, name, generate) {
-  const file = env[variable] ?? (env.NODE_ENV === 'production' ? undefined : join(dataDir, name));
+  const file = env[variable] ?? (dev() ? join(dataDir, name) : undefined);
   if (!file) return undefined;
   try {
     return await readFile(file, 'utf8');
@@ -93,19 +99,32 @@ async function tunnelsFor(dataDir, origin) {
   };
 }
 
-/** The api → gateway mTLS client identity for tunnel relays (CONSOLE_GATEWAY_TLS_{CERT,KEY,CA} files). */
+/**
+ * The api → gateway mTLS client identity for tunnel relays (CONSOLE_GATEWAY_TLS_{CERT,KEY,CA} files): all three or
+ * none. None is allowed only in development mode (gateways on h2c); tunnels never fall back to plaintext otherwise.
+ */
 async function gatewayTls() {
   const files = {
     cert: env.CONSOLE_GATEWAY_TLS_CERT,
     key: env.CONSOLE_GATEWAY_TLS_KEY,
     ca: env.CONSOLE_GATEWAY_TLS_CA,
   };
-  const entries = await Promise.all(
-    Object.entries(files)
-      .filter(([, file]) => file)
-      .map(async ([name, file]) => [name, await readFile(file, 'utf8')]),
+  const set = Object.values(files).filter(Boolean).length;
+  if (set === 0) {
+    if (dev()) return undefined;
+    throw new Error(
+      'Tunnels relay to gateways over mTLS: set CONSOLE_GATEWAY_TLS_CERT, CONSOLE_GATEWAY_TLS_KEY and CONSOLE_GATEWAY_TLS_CA.',
+    );
+  }
+  if (set !== 3)
+    throw new Error(
+      'Set all of CONSOLE_GATEWAY_TLS_CERT, CONSOLE_GATEWAY_TLS_KEY and CONSOLE_GATEWAY_TLS_CA.',
+    );
+  return Object.fromEntries(
+    await Promise.all(
+      Object.entries(files).map(async ([name, file]) => [name, await readFile(file, 'utf8')]),
+    ),
   );
-  return entries.length ? Object.fromEntries(entries) : undefined;
 }
 
 /** Creates the stack. Imported at runtime by `src/lib/stack.ts` (never bundled). */
@@ -189,6 +208,9 @@ export async function createStack() {
       relay: gatewayTunnelRelay({ sql: compute.context.sql, ...(tls ? { tls } : {}) }),
       authorize: tunnelAuthorizer(compute.context.iam),
       basePath: '/api/compute',
+      // Only this console's pages open tunnels, and a signed-in browser only its own person's tickets.
+      allowedOrigins: [origin],
+      authenticate: (credential) => compute.context.iam.authenticate(credential),
     };
   }
   return { iam, compute, rootTenantId, origin, tunnels: tunnelHost };
@@ -204,6 +226,9 @@ async function bootstrapRoot(iam, dataDir) {
   }
   const email = env.CONSOLE_ADMIN_EMAIL ?? 'admin@console.local';
   const generated = !env.CONSOLE_ADMIN_PASSWORD;
+  // A generated password is printed, which only a developer's own terminal may see.
+  if (generated && !dev())
+    throw new Error('Set CONSOLE_ADMIN_PASSWORD for the first start (or CONSOLE_DEV=1 locally).');
   const password = env.CONSOLE_ADMIN_PASSWORD ?? randomBytes(12).toString('base64url');
   const root = await iam.bootstrap({ email, name: 'Administrator', password });
   await writeFile(file, `${JSON.stringify({ rootTenantId: root.tenant.id, email })}\n`, {

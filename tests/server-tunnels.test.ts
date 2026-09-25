@@ -706,6 +706,75 @@ describe('GET /tunnels/{ticket}', () => {
   });
 });
 
+// From the review of c758efd: a leaked ticket must not open a shell from another site or for
+// another signed-in person.
+describe('tunnel origin and caller binding', () => {
+  const status = async (port: number, path: string, headers: string) => {
+    const client = rawClient(port, path, `sec-websocket-version: 13\r\n${headers}`);
+    await until(() => client.text().includes('\r\n\r\n'));
+    client.socket.destroy();
+    return client.text().split('\r\n')[0];
+  };
+
+  it('refuses a foreign Origin before spending the ticket', async () => {
+    const recorded: Recorded = { opened: [], received: [], closed: 0 };
+    const { server, port } = await listen({
+      relay: echoRelay(recorded),
+      allowedOrigins: ['https://console.test'],
+    });
+    try {
+      const ticket = await open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' });
+      const path = `/api/compute/${ticket.path}`;
+      expect(await status(port, path, 'origin: https://evil.test\r\n')).toBe(
+        'HTTP/1.1 403 Forbidden',
+      );
+      expect(recorded.opened).toEqual([]);
+      // Still unspent: the console's own page (or a CLI without Origin) opens it.
+      expect(await status(port, path, 'origin: https://console.test/\r\n')).toBe(
+        'HTTP/1.1 101 Switching Protocols',
+      );
+      const cli = await open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' });
+      expect(await status(port, `/api/compute/${cli.path}`, '')).toBe(
+        'HTTP/1.1 101 Switching Protocols',
+      );
+      expect(recorded.opened).toHaveLength(2);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('requires a presented credential to be the ticket’s subject', async () => {
+    const recorded: Recorded = { opened: [], received: [], closed: 0 };
+    const { server, port } = await listen({
+      relay: echoRelay(recorded),
+      authenticate: async (credential) => {
+        const cookie = new Headers(credential.headers).get('cookie') ?? '';
+        if (cookie === 'session=alice') return { identityId: 'usr_alice' };
+        if (cookie === 'session=bob') return { identityId: 'usr_bob' };
+        throw new Error('invalid session');
+      },
+    });
+    try {
+      const forBob = await open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' });
+      expect(await status(port, `/api/compute/${forBob.path}`, 'cookie: session=bob\r\n')).toBe(
+        'HTTP/1.1 403 Forbidden',
+      );
+      const stale = await open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' });
+      expect(await status(port, `/api/compute/${stale.path}`, 'cookie: session=gone\r\n')).toBe(
+        'HTTP/1.1 403 Forbidden',
+      );
+      expect(recorded.opened).toEqual([]);
+      const mine = await open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' });
+      expect(await status(port, `/api/compute/${mine.path}`, 'cookie: session=alice\r\n')).toBe(
+        'HTTP/1.1 101 Switching Protocols',
+      );
+      expect(recorded.opened).toHaveLength(1);
+    } finally {
+      server.close();
+    }
+  });
+});
+
 // Regressions from the security review of 680c66f: handleTunnel never rejects, survives peers that
 // vanish at any point, re-authorizes by identity, and enforces the IAM outage rule.
 describe('tunnel endpoint hardening', () => {

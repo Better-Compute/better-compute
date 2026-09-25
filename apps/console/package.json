@@ -6,7 +6,7 @@
   "license": "Apache-2.0",
   "description": "Next.js console for better-compute: nodes, pools and capacity, reservations, instances, terminals, rollouts and fleet drift, quotas and spend, on one origin with better-iam.",
   "scripts": {
-    "dev": "node server.mjs",
+    "dev": "node server.mjs --dev",
     "dev:next": "next dev --port 3100",
     "build": "next build",
     "start": "node server.mjs --prod",

@@ -8,14 +8,19 @@ import { createStack } from './console.config.mjs';
 // WebSocket upgrade of `GET /api/compute/tunnels/{ticket}` (browser terminals and node consoles), handled by
 // better-compute's `handleTunnel` and relayed to the node's gateway.
 //
-//   node server.mjs            development (next dev)
-//   node server.mjs --prod     after `next build`
+//   node server.mjs --dev      development: next dev, CONSOLE_DEV=1 (generated local secrets and keys)
+//   node server.mjs --prod     after `next build`; every secret comes from the environment
 //
 // PORT (default 3100) and HOSTNAME (default localhost) choose where it listens.
 
 const dir = dirname(fileURLToPath(import.meta.url));
-const dev = !process.argv.includes('--prod');
-if (!dev) process.env.NODE_ENV ??= 'production';
+const dev = process.argv.includes('--dev');
+if (dev === process.argv.includes('--prod')) {
+  console.error('Usage: node server.mjs --dev | --prod');
+  process.exit(2);
+}
+if (dev) process.env.CONSOLE_DEV ??= '1';
+else process.env.NODE_ENV ??= 'production';
 const port = Number(process.env.PORT ?? 3100);
 const hostname = process.env.HOSTNAME ?? 'localhost';
 
