@@ -12,6 +12,7 @@ import {
   type Deployment,
   type ResolvedConfigPath,
 } from './config.js';
+import { resolveToken } from './credentials.js';
 import { CliError, didYouMean, usageError } from './errors.js';
 import { formatResult, outputFormats, type OutputFormat } from './output.js';
 import { localTransport, remoteTransport, type ApiTransport } from './transport.js';
@@ -801,11 +802,12 @@ async function execute(
       return created;
     })());
   const token = async () => {
-    const value = io.env.BETTER_COMPUTE_TOKEN;
-    if (value) return value;
+    // BETTER_COMPUTE_TOKEN, else better-iam's saved session, else `better-compute auth login`'s (§9.3).
+    const found = await resolveToken(io.env);
+    if (found) return found.token;
     throw new CliError(
       'MISSING_ENV',
-      'Set BETTER_COMPUTE_TOKEN to an IAM session token, API key or session JWT',
+      'Set BETTER_COMPUTE_TOKEN to an IAM session token, API key or session JWT (or sign in: better-iam login, better-compute auth login)',
       'Public methods such as system.version need no token.',
     );
   };

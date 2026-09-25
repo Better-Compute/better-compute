@@ -121,7 +121,7 @@ describe('environment-only deployments on PGlite', () => {
     const missing = await run(['api', 'system.selfCheck'], { env: memoryEnv });
     expect(missing.status).toBe(1);
     expect(missing.stderr.split('\n')).toEqual([
-      'MISSING_ENV: Set BETTER_COMPUTE_TOKEN to an IAM session token, API key or session JWT',
+      'MISSING_ENV: Set BETTER_COMPUTE_TOKEN to an IAM session token, API key or session JWT (or sign in: better-iam login, better-compute auth login)',
       'Hint: Public methods such as system.version need no token.',
     ]);
     const refused = await run(['api', 'system.selfCheck'], {

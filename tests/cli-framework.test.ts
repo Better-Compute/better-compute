@@ -116,8 +116,8 @@ describe('help and the manifest', () => {
     expect(stdout).toContain('better-compute api GROUP.METHOD');
     expect(stdout).toContain('BETTER_COMPUTE_DATABASE_URL');
     expect(stdout).toContain('BETTER_COMPUTE_DEBUG');
-    // Profiles and login arrive in v0.1 and are not advertised before.
-    expect(stdout).not.toMatch(/login|--profile/);
+    // Saved credentials (v0.1, PLAN §9.3): auth login|status|logout.
+    expect(stdout).toMatch(/^  auth login /m);
     expect((await run([])).stdout).toBe(stdout);
     expect((await run(['--help'])).stdout).toBe(stdout);
   });
@@ -151,6 +151,9 @@ describe('help and the manifest', () => {
       'dev',
       'sim',
       'api',
+      'auth login',
+      'auth status',
+      'auth logout',
       'reserve',
       'release',
       'extend',
