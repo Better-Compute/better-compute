@@ -1,0 +1,84 @@
+{
+  "suite": "cold-start",
+  "commit": "6067791",
+  "date": "2026-09-25T05:49:58.635Z",
+  "machine": {
+    "cpus": 64,
+    "cpuModel": "AMD Ryzen Threadripper PRO 9995WX 96-Cores     ",
+    "memoryGiB": 255
+  },
+  "node": "v25.6.0",
+  "seed": "herd",
+  "config": {
+    "nodes": 10000,
+    "gateways": 3,
+    "startSpreadMs": 0,
+    "limitMs": 180000,
+    "settleMs": 60000,
+    "restart": true,
+    "restartDownMs": 10000,
+    "stepMs": 5000,
+    "workerPasses": 10
+  },
+  "wall": {
+    "setupMs": 70216,
+    "bootMs": 431911,
+    "restartMs": 82998,
+    "totalMs": 585353,
+    "loops": {
+      "api": 28,
+      "join": 66098,
+      "fleet": 512336,
+      "gateway": 41763,
+      "reconcilers": 300980
+    }
+  },
+  "boot": {
+    "connectedMs": {
+      "count": 10000,
+      "p50": 7336,
+      "p90": 14003,
+      "p99": 16130,
+      "max": 18688
+    },
+    "notConnected": 0,
+    "adoptedMs": {
+      "count": 10000,
+      "p50": 52000,
+      "p90": 70000,
+      "p99": 75000,
+      "max": 77000
+    },
+    "notAdopted": 0,
+    "allReadyMs": 80000,
+    "unreachableMarks": 0,
+    "unreachableBeforeConnect": 0,
+    "closeReasons": {
+      "gateway: RESOURCE_EXHAUSTED: handshake rate exceeded; retry with jitter": 34903,
+      "agent: RESOURCE_EXHAUSTED: handshake rate exceeded; retry with jitter": 34903
+    }
+  },
+  "restart": {
+    "connectedMs": {
+      "count": 10000,
+      "p50": 17336,
+      "p90": 24003,
+      "p99": 26171,
+      "max": 28737
+    },
+    "notConnected": 0,
+    "allReadyMs": 30000,
+    "unreachableMarks": 0,
+    "unreachableBeforeConnect": 0,
+    "closeReasons": {
+      "gateway: RESOURCE_EXHAUSTED: handshake rate exceeded; retry with jitter": 34852,
+      "agent: RESOURCE_EXHAUSTED: handshake rate exceeded; retry with jitter": 34852,
+      "gateway: gateway killed": 10000,
+      "agent: reboot": 10000
+    }
+  },
+  "schedulable": 10000,
+  "violations": 0,
+  "ok": true,
+  "violationsSample": []
+}

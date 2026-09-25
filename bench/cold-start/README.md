@@ -42,7 +42,11 @@ needs the reference setup.
 | ---------- | ------- | ------------------------ | ------------------- | ----------------------- | --------------------- | ----------- | ---------- | ----------------- |
 | 2026-09-25 | 5b03790 | 1,000 (`workerPasses` 1) | 29.8 s / 30.0 s     | 79 s / 80 s             | 40 s                  | 0           | 0          | 73 s              |
 | 2026-09-25 | 6670778 | 10,000                   | 29.7 s / 30.0 s     | 79 s / 80 s             | 40 s                  | 0           | 0          | 641 s (join 80 s) |
+| 2026-09-25 | 4b3740e | 10,000, all at once      | 32.1 s / 65.1 s     | 86 s / 95 s             | 40 s                  | 23          | 0          | 631 s             |
+| 2026-09-25 | 6067791 | 10,000, all at once      | 16.1 s / 18.7 s     | 75 s / 80 s             | 30 s                  | 0           | 0          | 603 s             |
 
 Connection is bound by the power-on spread (30 s). Adoption takes the same time at 1k and 10k (p50 55 s): it is
 paced by the acceptance command and the node pass, not by throughput. Of the 10k run's wall time, 327 s went to
 the reconcilers and 46 s to the gateways' jobs, both on the one PGlite.
+
+**The power-on herd** (`COLD_START_SPREAD_MS=0`: every node starts at the same instant). The first run was ready in 95 s but marked 23 nodes unreachable. All 23 had not connected yet (`unreachableBeforeConnect`): liveness counted a node with no session activity from -infinity, and daemons refused by the 200/s handshake bucket backed off towards 60 s. Two fixes took the tail from 65 s to 19 s and the marks to 0: the gateway's refusals carry `grpc-retry-pushback-ms` scaled to the backlog, which FakeDaemon and bcd follow (a54aae6, 825897d), and liveness counts a never-connected node from its join (f5ba478).
