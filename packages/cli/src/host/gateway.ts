@@ -145,8 +145,8 @@ export function gatewayOptions(
   config: HostGatewayConfig,
   identity?: GatewayIdentity,
   metrics?: MetricsRegistry,
-  /** The signed trust bundle this process publishes (`compute.gatewayServices.trustBundle()`, resolved once). */
-  trustBundle?: unknown,
+  /** The signed trust bundle this process publishes (`compute.gatewayServices.trustBundle()`), read per Welcome. */
+  trustBundle?: () => unknown,
 ): Record<string, unknown> {
   const extra = config.options ?? {};
   const issuer = ticketIssuer(options);
@@ -219,7 +219,7 @@ export function gatewayOptions(
     ...(identity ? { revocations: identity.revocations } : {}),
     // Welcome.trust: daemons that joined before a root rotation, an approver-set change or a new epoch learn it on
     // their next session (the bundle only changes with a restart of this process, so it is resolved once).
-    ...(trustBundle ? { trustBundle: () => trustBundle } : {}),
+    ...(trustBundle ? { trustBundle } : {}),
     ...extra,
     region: config.region,
     database: options.database,
@@ -275,12 +275,27 @@ export async function startGateway(
   const pkg = gatewayPackage as unknown as GatewayPackage;
   // The signed trust bundle (its version settled against the deployment's record first).
   const services = compute.gatewayServices as { trustBundle?: () => Promise<unknown> };
-  const trustBundle = await services.trustBundle?.().catch((error: unknown) => {
-    note(`Trust bundle: not relayed in Welcome (${error instanceof Error ? error.message : String(error)})`);
-    return undefined;
-  });
+  const read = () =>
+    services.trustBundle!().catch((error: unknown) => {
+      note(`Trust bundle: not relayed in Welcome yet (${error instanceof Error ? error.message : String(error)})`);
+      return undefined;
+    });
+  let signedTrust = services.trustBundle ? await read() : undefined;
+  // A failed read (the database away at start) is retried every minute until it succeeds (review 10 L6).
+  const trustRetry =
+    services.trustBundle && signedTrust === undefined
+      ? setInterval(() => {
+          void read().then((bundle) => {
+            if (bundle === undefined) return;
+            signedTrust = bundle;
+            clearInterval(trustRetry);
+            note('Trust bundle: now relayed in Welcome');
+          });
+        }, 60_000)
+      : undefined;
+  trustRetry?.unref?.();
   const gateway = pkg.createGateway(
-    gatewayOptions(pkg, compute, options, config, identity, metrics, trustBundle),
+    gatewayOptions(pkg, compute, options, config, identity, metrics, services.trustBundle ? () => signedTrust : undefined),
   );
   await gateway.start();
   // Revocations reach this gateway within about a second (§16: a revoked node is out within 5 s):
@@ -305,6 +320,7 @@ export async function startGateway(
   const listeners: Served[] = [];
   const watches: { close(): void }[] = [];
   const stop = async () => {
+    if (trustRetry) clearInterval(trustRetry);
     for (const watch of watches.splice(0)) watch.close();
     feed.stop();
     await gateway.drain({ reason: 'shutdown' }).catch(() => undefined);

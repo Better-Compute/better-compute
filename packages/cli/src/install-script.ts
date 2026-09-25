@@ -348,9 +348,18 @@ mv -f /usr/local/bin/bcd.new /usr/local/bin/bcd
 
 cat > /etc/bcd/config.toml.new <<'BCD_CONFIG'
 ${renderBcdConfig(options)}BCD_CONFIG
-if [ -f /etc/bcd/config.toml ] && grep -q '^\\[' /etc/bcd/config.toml; then
-  # An upgrade keeps the sections the operator configured ([plugins], [boot], [imds]...).
-  sed -n '/^\\[/,$p' /etc/bcd/config.toml >> /etc/bcd/config.toml.new
+${
+  options.approverSetSha256
+    ? ''
+    : `# An upgrade keeps the approver-set pin this node was installed with (a script without --approver-set-sha256
+# must not drop it).
+if [ -f /etc/bcd/config.toml ]; then
+  sed -n '/^[[:space:]]*\\[/q; /^[[:space:]]*approver_set_sha256[[:space:]]*=/p' /etc/bcd/config.toml >> /etc/bcd/config.toml.new
+fi
+`
+}if [ -f /etc/bcd/config.toml ] && grep -q '^[[:space:]]*\\[' /etc/bcd/config.toml; then
+  # An upgrade keeps the sections the operator configured ([plugins], [boot], [imds]..., headers indented or not).
+  sed -n '/^[[:space:]]*\\[/,$p' /etc/bcd/config.toml >> /etc/bcd/config.toml.new
 fi
 ${
   options.bmcNetworks
@@ -369,6 +378,8 @@ fi
 if ! grep -Eq '^[[:space:]]*\\[[[:space:]]*update[[:space:]]*\\]' /etc/bcd/config.toml.new; then
   cat >> /etc/bcd/config.toml.new <<'BCD_UPDATE'
 ${renderBcdUpdateSection(options.update)}BCD_UPDATE
+else
+  printf 'bcd install: note: config.toml already has an [update] section; --release-pins/--release-sequence were not applied to it\\n' >&2
 fi
 `
     : ''

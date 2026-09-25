@@ -446,6 +446,15 @@ describe('daemon install-script', () => {
     node = await apply(['--plugins']);
     expect(node.config.match(/^\s*\[\s*plugins\s*\]/gm)).toHaveLength(1);
     expect(node.dropIn).toContain('RestrictNamespaces=no');
+    // An upgrade without --approver-set-sha256 keeps the node's pin; an indented section survives too.
+    const pin = 'cd'.repeat(32);
+    node = await apply(['--approver-set-sha256', pin]);
+    expect(node.config).toContain(`approver_set_sha256 = "${pin}"`);
+    await writeFile(`${root}/etc/bcd/config.toml`, `${node.config}  [site]\n  bmc_networks = "10.9.0.0/16"\n`);
+    node = await apply([]);
+    expect(node.config.match(/approver_set_sha256 = /g)).toHaveLength(1);
+    expect(node.config).toContain(`approver_set_sha256 = "${pin}"`);
+    expect(node.config).toContain('  [site]\n  bmc_networks = "10.9.0.0/16"');
     expect(await run([...base, '--privileged-plugins', 'kata;rm'])).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
   });
 

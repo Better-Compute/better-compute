@@ -295,7 +295,7 @@ describe('serve composition audit', () => {
     // Without a trust bundle nothing is relayed; with one, every Welcome carries it (roots, quorum, epoch).
     expect(composed).not.toHaveProperty('trustBundle');
     const signed = { body: new Uint8Array([1]) };
-    const withTrust = gatewayOptions({ xidStatusHandler: xid }, fake, { database: {} } as any, { region: 'eu-1', tls: {} }, undefined, undefined, signed) as {
+    const withTrust = gatewayOptions({ xidStatusHandler: xid }, fake, { database: {} } as any, { region: 'eu-1', tls: {} }, undefined, undefined, () => signed) as {
       trustBundle: () => unknown;
     };
     expect(withTrust.trustBundle()).toBe(signed);
