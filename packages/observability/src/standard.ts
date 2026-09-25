@@ -51,6 +51,15 @@ export function standardMetrics(registry: MetricsRegistry) {
     resolverLookups: registry.counter('resolver_lookups_total', 'Authz resolver lookups', [
       'result',
     ]),
+    tenantStates: registry.gauge(
+      'tenant_states',
+      'IAM tenants compute refuses (§12.8), by state: suspended, deleted',
+      ['state'],
+    ),
+    tenantTeardownsPending: registry.gauge(
+      'tenant_teardowns_pending',
+      'Deleted tenants whose teardown has not finished (a module still releasing)',
+    ),
     certExpiry: registry.gauge('cert_expiry_seconds', 'Seconds until the soonest expiry', ['kind']),
     clockOffset: registry.gauge('clock_offset_seconds', 'Process clock minus compute_now()'),
     securityEvents: registry.counter('security_events_total', 'Security events recorded', ['type']),

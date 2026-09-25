@@ -3,6 +3,7 @@ import type { SqlExecutor } from '@better-compute/core';
 import { databaseCollector, createMetrics, standardMetrics } from '@better-compute/observability';
 import { setSimClock, useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
+import { tenantStatesMigration } from '@better-compute/server';
 
 // The §14 deployment gauges sampled from compute's tables (databaseCollector): due work by kind, backlogs, nodes by
 // connectivity and generation lag, GPUs by state, certificate expiry, clock offset and command latency.
@@ -233,6 +234,36 @@ describe('databaseCollector', () => {
     await holder.collector.refresh().catch(() => undefined);
     expect(other.count()).toBe(1);
     expect(holder.count() + other.count()).toBe(4);
+  });
+
+  it('counts suspended and deleted tenants, and unfinished teardowns, once the tenancy table exists', async () => {
+    const registry = createMetrics();
+    const collector = databaseCollector(standardMetrics(registry), {
+      sql: db,
+      latencyLease: false,
+    });
+    await collector.refresh();
+    // No tenancy module migrated: nothing reported.
+    expect(registry.value('tenant_states', { state: 'suspended' })).toBeUndefined();
+    await db.migrate([tenantStatesMigration]);
+    await db.query(
+      `INSERT INTO compute_tenant_states (tenant_id, state, teardown_done_at) VALUES
+         ('t-active', 'active', NULL), ('t-suspended', 'suspended', NULL),
+         ('t-gone', 'deleted', compute_now()), ('t-going', 'deleted', NULL), ('t-going-2', 'deleted', NULL)`,
+    );
+    await collector.refresh();
+    expect(registry.value('tenant_states', { state: 'suspended' })).toBe(1);
+    expect(registry.value('tenant_states', { state: 'deleted' })).toBe(3);
+    expect(registry.value('tenant_states', { state: 'active' })).toBeUndefined();
+    expect(registry.value('tenant_teardowns_pending')).toBe(2);
+    // Reactivated and torn down: the gauges fall back to 0.
+    await db.query(
+      `UPDATE compute_tenant_states SET state = 'active' WHERE tenant_id = 't-suspended'`,
+    );
+    await db.query(`UPDATE compute_tenant_states SET teardown_done_at = compute_now()`);
+    await collector.refresh();
+    expect(registry.value('tenant_states', { state: 'suspended' })).toBe(0);
+    expect(registry.value('tenant_teardowns_pending')).toBe(0);
   });
 
   it('polls on a timer and reports failures without throwing', async () => {

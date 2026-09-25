@@ -1,6 +1,6 @@
 // The §14 gauges that describe the whole deployment rather than one process, sampled from compute's tables on a
 // timer (PLAN.md §14): due work by kind, queue backlogs, nodes by connectivity and generation lag, GPUs by state,
-// the soonest node certificate expiry, this process's clock against compute_now(), and command latency (enqueue
+// suspended and deleted tenants with unfinished teardowns, the soonest node certificate expiry, this process's clock against compute_now(), and command latency (enqueue
 // to terminal) for commands settled since the last poll. It may run in every worker: the gauges are the same
 // everywhere, and the histogram is observed only by the holder of one `leases` row, so each command counts once.
 // Every statement except that lease's upsert is read-only and bounded; a table a deployment does not have (an
@@ -215,6 +215,23 @@ export function databaseCollector(
       }
     }
     setAll(metrics.backlog, backlog);
+
+    // §12.8: tenants the envelope refuses, and deleted ones a module is still releasing.
+    if (await exists('compute_tenant_states')) {
+      const { rows: tenants } = await sql.query<{ state: string; count: number; pending: number }>(
+        `SELECT state, count(*)::int AS count,
+                count(*) FILTER (WHERE state = 'deleted' AND teardown_done_at IS NULL)::int AS pending
+           FROM compute_tenant_states WHERE state <> 'active' GROUP BY state`,
+      );
+      setAll(
+        metrics.tenantStates,
+        tenants.map((row) => [{ state: labelValue(row.state) }, Number(row.count)]),
+      );
+      metrics.tenantTeardownsPending.set(
+        undefined,
+        tenants.reduce((sum, row) => sum + Number(row.pending), 0),
+      );
+    }
 
     // A node's newest live certificate is the one renewals replace: the soonest of those per role is how close
     // the fleet is to a node dropping off because renewals fail.
