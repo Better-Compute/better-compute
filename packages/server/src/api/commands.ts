@@ -107,6 +107,11 @@ export type CommandsApi = {
     run: MethodDefinition<RunCommandInput, CommandInfo>;
     get: MethodDefinition<GetCommandInput, CommandInfo>;
     list: MethodDefinition<ListCommandsInput, Page<CommandInfo>>;
+    /**
+     * (v0.2) Cancels a command: a pending one never runs (`cancelled`), an in-flight one is asked to
+     * stop (its gateway sends Cancel); a finished one is returned unchanged.
+     */
+    cancel: MethodDefinition<GetCommandInput, CommandInfo>;
   };
 };
 
@@ -340,6 +345,48 @@ export function commandsApi(bundles?: SupportBundlesOptions): CommandsApi {
           );
         },
       }),
+      cancel: defineMethod<GetCommandInput, CommandInfo>({
+        action: 'compute:nodes:exec',
+        kind: 'mutation',
+        resource: (input) => ({ type: 'node', id: input.nodeId }),
+        validate: getInput,
+        async handler(context, input) {
+          const read = async () =>
+            (
+              await context.sql.query<CommandRow>(
+                `SELECT ${columns} FROM commands c
+                 WHERE c.id = $3 AND c.node_id = $2 AND ${nodeVisible}`,
+                [input.tenantId, input.nodeId, input.commandId],
+              )
+            ).rows[0];
+          const before = await read();
+          if (!before) throw notFound('Command');
+          if (commandTerminalStates.has(before.state)) return toCommand(before, bundles);
+          await context.commands.cancel(context.sql, input.commandId);
+          const after = (await read())!;
+          await context.events.publish(context.sql, {
+            type: 'node.command.cancel-requested',
+            tenantId: input.tenantId,
+            subject: `node/${input.nodeId}`,
+            data: {
+              nodeId: input.nodeId,
+              commandId: after.id,
+              kind: after.kind,
+              state: after.state,
+            },
+          });
+          return toCommand(after, bundles);
+        },
+      }),
     },
   };
 }
+
+/** States a command never leaves. */
+const commandTerminalStates: ReadonlySet<CommandState> = new Set([
+  'succeeded',
+  'failed',
+  'rejected',
+  'expired',
+  'cancelled',
+]);

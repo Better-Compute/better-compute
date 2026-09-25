@@ -51,7 +51,13 @@ export type {
   ProjectsApi,
 } from './projects.js';
 export type { CreateSiteInput, GetSiteInput, ListSitesInput, SitesApi } from './sites.js';
-export type { ListUsageInput, UsageApi, UsageWindow } from './usage.js';
+export type {
+  ExportUsageInput,
+  ListUsageInput,
+  UsageApi,
+  UsageExport,
+  UsageWindow,
+} from './usage.js';
 
 export type { ServerV02Api, ServerV02Options } from './v02.js';
 

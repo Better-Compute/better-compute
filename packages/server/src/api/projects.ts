@@ -47,6 +47,8 @@ export type ProjectsApi = {
     create: MethodDefinition<CreateProjectInput, Project>;
     get: MethodDefinition<GetProjectInput, Project>;
     list: MethodDefinition<ListProjectsInput, Page<Project>>;
+    /** (v0.2) Marks the project archived; archiving an archived project returns it unchanged. */
+    archive: MethodDefinition<GetProjectInput, Project>;
   };
 };
 
@@ -181,6 +183,33 @@ export function projectsApi(lists: ListRecipe): ProjectsApi {
             { action: 'compute:projects:read', type: 'project', id: (project) => project.id },
           );
           return { ...result, items };
+        },
+      }),
+      archive: defineMethod<GetProjectInput, Project>({
+        action: 'compute:projects:manage',
+        kind: 'mutation',
+        resource: (input) => ({ type: 'project', id: input.projectId }),
+        validate: getInput,
+        async handler(context, input) {
+          const { rows } = await context.sql.query<ProjectRow>(
+            `UPDATE projects p SET state = 'archived', version = version + 1
+              WHERE p.id = $1 AND p.tenant_id = $2 AND p.state <> 'archived'
+             RETURNING ${columns}`,
+            [input.projectId, input.tenantId],
+          );
+          if (!rows[0]) {
+            const project = await findProject(context.sql, input.tenantId, input.projectId);
+            if (!project) throw notFound('Project');
+            return project; // already archived
+          }
+          const project = toProject(rows[0]);
+          await context.events.publish(context.sql, {
+            type: 'project.archived',
+            tenantId: input.tenantId,
+            subject: `project/${project.id}`,
+            data: { projectId: project.id, name: project.name },
+          });
+          return project;
         },
       }),
     },

@@ -32,7 +32,7 @@ Every call is authenticated (except public methods), refused before any database
 | `projects.create`  | mutation | `compute:projects:manage` @ `compute-tenant`       | v0.1  | registered |
 | `projects.get`     | read     | `compute:projects:read` @ `compute-project`        | v0.1  | registered |
 | `projects.list`    | read     | `compute:projects:read` @ `compute-tenant` + items | v0.1  | registered |
-| `projects.archive` | mutation | `compute:projects:manage` @ `compute-project`      | v0.2  | planned    |
+| `projects.archive` | mutation | `compute:projects:manage` @ `compute-project`      | v0.2  | registered |
 
 ### `sites` (server)
 
@@ -141,14 +141,14 @@ Every call is authenticated (except public methods), refused before any database
 | `commands.run`    | mutation | `compute:nodes:exec` @ `compute-node` | v0.1  | registered |
 | `commands.get`    | read     | `compute:nodes:read` @ `compute-node` | v0.1  | registered |
 | `commands.list`   | read     | `compute:nodes:read` @ `compute-node` | v0.1  | registered |
-| `commands.cancel` | mutation | `compute:nodes:exec` @ `compute-node` | v0.2  | planned    |
+| `commands.cancel` | mutation | `compute:nodes:exec` @ `compute-node` | v0.2  | registered |
 
 ### `usage` (server)
 
 | Method         | Kind | Authorization                                                                       | Phase | Status     |
 | -------------- | ---- | ----------------------------------------------------------------------------------- | ----- | ---------- |
 | `usage.list`   | read | `compute:usage:read` @ `compute-tenant` or `compute:usage:read` @ `compute-project` | v0.1  | registered |
-| `usage.export` | read | `compute:usage:read` @ `compute-tenant` or `compute:usage:read` @ `compute-project` | v0.2  | planned    |
+| `usage.export` | read | `compute:usage:read` @ `compute-tenant` or `compute:usage:read` @ `compute-project` | v0.2  | registered |
 
 ### `events` (server)
 
