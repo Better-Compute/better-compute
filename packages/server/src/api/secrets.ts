@@ -41,6 +41,8 @@ export interface SecretInfo {
   tenantId: string;
   name: string;
   version: number;
+  /** `fleet` for platform secrets (put with `scope: 'fleet'`): modules may refuse them in tenant places. */
+  scope: 'tenant' | 'fleet';
   createdAt: number;
   updatedAt: number;
 }
@@ -85,6 +87,7 @@ interface RefRow {
   version: unknown;
   store: string;
   last_idempotency_key: string;
+  scope: 'tenant' | 'fleet';
   created_at: Date;
   updated_at: Date;
 }
@@ -93,17 +96,32 @@ const toInfo = (row: RefRow): SecretInfo => ({
   tenantId: row.tenant_id,
   name: row.name,
   version: int(row.version),
+  scope: row.scope,
   createdAt: ms(row.created_at)!,
   updatedAt: ms(row.updated_at)!,
 });
 
+const refColumns = 'ref, tenant_id, name, version, store, last_idempotency_key, scope, created_at, updated_at';
+
 async function findRef(tx: SqlTx, tenantId: string, secretName: string, lock = '') {
   const { rows } = await tx.query<RefRow>(
-    `SELECT ref, tenant_id, name, version, store, last_idempotency_key, created_at, updated_at
-       FROM secret_refs WHERE tenant_id = $1 AND name = $2 ${lock}`,
+    `SELECT ${refColumns} FROM secret_refs WHERE tenant_id = $1 AND name = $2 ${lock}`,
     [tenantId, secretName],
   );
   return rows[0];
+}
+
+/**
+ * A tenant-scoped call never touches a fleet secret: it was decided on `compute-tenant`, and the
+ * secret is guarded by `compute-fleet`. The reverse is allowed (fleet calls are root-tenant only):
+ * secrets stored before scopes were recorded are all `tenant`, and a fleet put claims them.
+ */
+function checkExistingScope(existing: RefRow, input: { scope?: 'tenant' | 'fleet' }): void {
+  if (existing.scope === 'fleet' && (input.scope ?? 'tenant') !== 'fleet')
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Secret ${existing.name} is a fleet secret: change it with scope: 'fleet'`,
+    );
 }
 
 /** Fleet decisions are made in the root tenant, which owns every platform secret. */
@@ -129,6 +147,7 @@ export function secretsApi(source?: SecretStoreSource): SecretsApi {
           checkScope(context, input);
           const store = storeOf(context);
           const existing = await findRef(context.sql, input.tenantId, input.name, 'FOR UPDATE');
+          if (existing) checkExistingScope(existing, input);
           // A retry of the put that wrote the current version answers with it and writes nothing.
           // Unlike derived-id creates, the key is not scoped to the caller, so replays are decided too.
           if (existing?.last_idempotency_key === input.idempotencyKey) return toInfo(existing);
@@ -143,13 +162,13 @@ export function secretsApi(source?: SecretStoreSource): SecretsApi {
             existing ? { ref: existing.ref as SecretRef } : undefined,
           );
           const { rows } = await context.sql.query<RefRow>(
-            `INSERT INTO secret_refs (ref, tenant_id, name, version, store, last_idempotency_key)
-             VALUES ($1, $2, $3, 1, $4, $5)
+            `INSERT INTO secret_refs (ref, tenant_id, name, version, store, last_idempotency_key, scope)
+             VALUES ($1, $2, $3, 1, $4, $5, $6)
              ON CONFLICT (tenant_id, name) DO UPDATE
                SET version = secret_refs.version + 1, last_idempotency_key = EXCLUDED.last_idempotency_key,
-                   updated_at = compute_now()
-             RETURNING ref, tenant_id, name, version, store, last_idempotency_key, created_at, updated_at`,
-            [ref, input.tenantId, input.name, store.id, input.idempotencyKey],
+                   scope = EXCLUDED.scope, updated_at = compute_now()
+             RETURNING ${refColumns}`,
+            [ref, input.tenantId, input.name, store.id, input.idempotencyKey, input.scope ?? 'tenant'],
           );
           const info = toInfo(rows[0]!);
           await context.events.publish(context.sql, {
@@ -171,6 +190,7 @@ export function secretsApi(source?: SecretStoreSource): SecretsApi {
           const existing = await findRef(context.sql, input.tenantId, input.name, 'FOR UPDATE');
           // Deleting what is gone is not an error; the answer says whether this call deleted it.
           if (!existing) return { deleted: false };
+          checkExistingScope(existing, input);
           const store = storeOf(context);
           if (existing.store !== store.id)
             throw new ComputeError(

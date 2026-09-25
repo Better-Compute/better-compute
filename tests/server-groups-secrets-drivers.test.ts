@@ -65,6 +65,7 @@ describe('secrets.put', () => {
       tenantId: ACME,
       name: 'bmc-rack1',
       version: 1,
+      scope: 'tenant',
       createdAt: START,
       updatedAt: START,
     });
@@ -101,6 +102,29 @@ describe('secrets.put', () => {
     expect((await h.failure('secrets/put', OUTSIDER, { tenantId: ACME, name: 'x', value: 'y', idempotencyKey: 'o' })).code).toBe(
       'ACCESS_DENIED',
     );
+  });
+
+  it('records the scope, and never lets a tenant-scoped call change a fleet secret', async () => {
+    const platform = await put({ tenantId: ROOT, name: 'shared-bmc', scope: 'fleet', idempotencyKey: 'f1' }, ADMIN);
+    expect(platform.scope).toBe('fleet');
+    const scopeOf = async (secretName: string) =>
+      (await h.store.query<{ scope: string }>('SELECT scope FROM secret_refs WHERE tenant_id = $1 AND name = $2', [ROOT, secretName]))
+        .rows[0]?.scope;
+    expect(await scopeOf('shared-bmc')).toBe('fleet');
+    // The root tenant's own secrets are decided on compute-tenant: they cannot reach a fleet one.
+    const overwrite = await h.failure('secrets/put', ADMIN, { tenantId: ROOT, name: 'shared-bmc', value: 'z', idempotencyKey: 't1' });
+    expect(overwrite.code).toBe('INVALID_STATE');
+    const remove = await h.failure('secrets/delete', ADMIN, { tenantId: ROOT, name: 'shared-bmc' });
+    expect(remove.code).toBe('INVALID_STATE');
+    expect(await h.call('secrets/delete', ADMIN, { tenantId: ROOT, name: 'shared-bmc', scope: 'fleet' })).toEqual({ deleted: true });
+
+    // A secret stored before scopes were recorded reads as tenant; a fleet put claims it.
+    await put({ tenantId: ROOT, name: 'legacy-bmc', idempotencyKey: 'l1' }, ADMIN);
+    expect(await scopeOf('legacy-bmc')).toBe('tenant');
+    expect(await put({ tenantId: ROOT, name: 'legacy-bmc', scope: 'fleet', idempotencyKey: 'l2' }, ADMIN)).toMatchObject({
+      scope: 'fleet',
+      version: 2,
+    });
   });
 
   it('validates exactly, without echoing the value', async () => {
