@@ -224,7 +224,9 @@ See [the daemon](/docs/daemon).
   must be signed, for a control plane that signs nothing else), and refused specs are listed in `specRejections`.
   `intent.quorum` (a `FakeQuorumTrust`: approver keys, threshold, tiers, `unbatchedPerHour`), or the quorum of a
   newer signed trust bundle, enforces the v1.0 destructive-batch quorum: destructive commands are rejected
-  `BATCH_UNAPPROVED` or `UNBATCHED_LIMIT` (see [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)).
+  `BATCH_UNAPPROVED` or `UNBATCHED_LIMIT`, and a newer trust bundle that changes the quorum without the current
+  approvers' signatures is ignored (logged `trust.ignored`; 6a7f1b7) (see
+  [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)).
   A refused session whose close carries `retryAfterMs` (the gateway's retry pushback) reconnects after exactly that
   long. `setPressure(pressure)` puts a `HostPressure` into every status report. With `tunnels`, it answers `OpenTunnel`; with `nodeKey`, attested
   results and allocation reports carry `node_sig`. With `instances` (a `FakeHypervisor` or its options) it plays a
@@ -557,7 +559,19 @@ they are green.
 
 `pnpm check` runs `typecheck`, `test`, `test:iam-remote`, `lint:repo` and `validate:packages`. `pnpm lint:repo` runs
 the repository rules in order: `check-deps` (dependency rules), `check-sql-now` (the one-clock rule), `umbrella
---check` (umbrella drift), `proto-gen --check` and `proto-gen --breaking`, then the API surface freeze.
+--check` (umbrella drift), `proto-gen --check` and `proto-gen --breaking`, then `apps/docs/scripts/generate.mjs
+--check` (the generated docs reference must match the code; 267f8f4), then the API surface freeze. The generator
+check comes first because the freeze reads the committed reference: before it, a narrowed input that nobody
+regenerated passed the freeze. Under `pnpm check` it runs after `tsc -b`, so it sees the built code.
+
+If you change the registry (a method, its input schema, an error code, a command kind, an event or a metric),
+regenerate the reference in the same change. On a failure the check lists each file `out of date` or `stale` and
+prints the command to run, which regenerates from committed code only, so other sessions' uncommitted builds never
+reach the reference:
+
+```bash
+node scripts/head-check.mjs --run apps/docs/scripts/sync-from-head.mjs "$PWD"
+```
 
 ### The API surface freeze
 

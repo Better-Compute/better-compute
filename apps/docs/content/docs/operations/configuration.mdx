@@ -154,7 +154,7 @@ CommandSweeper runs every 5 s.
 | `pki.join` | JoinService's keys and node CA: `pkiJoinCrypto({ trustDomain, nodeCa, signingKey, encryptionKey })`. Without it, `Join` and `Renew` answer `INVALID_CONFIG`. Its public keys appear in `/.well-known/better-compute` as `join`. |
 | `pki.commandSigning` | The command-signing root (v0.2). Every command is then signed with a 24 h worker key it certifies, every NodeSpec generation is signed as it is written (v0.4), daemons get its root in their trust bundle, and capacity's `attestedBindings` defaults to the pki check. |
 | `pki.commandSigningRoots` | Roots still trusted during a rotation. Needs `commandSigning`. |
-| `pki.trustVersion` | The trust bundle's version (default 1). Bump it whenever the roots change. |
+| `pki.trustVersion` | The trust bundle's lowest version (default 1). The published version follows the content: a changed bundle (roots, approvers, tiers) takes the next one by itself (`trust_bundle_state`). Set it explicitly to the version `pki.approvers.setSignatures` were signed for; see [changing the approver set](/docs/operations/pki#changing-the-approver-set). |
 
 The PKI bundle supplies all of these:
 

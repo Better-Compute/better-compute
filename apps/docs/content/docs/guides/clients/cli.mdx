@@ -45,9 +45,9 @@ Every command declares a target, and the target decides what it needs:
 
 | Target | Needs | Commands |
 | --- | --- | --- |
-| `token` | a credential (`BETTER_COMPUTE_TOKEN` or a saved one, see [authenticate](#authenticate)), and either `--url` or a configuration | `api`, `reserve`, `release`, `extend`, `reservations list/get`, `pools list`, `capacity`, `sandbox create/list/get/extend/snapshot/delete/exec/templates`, `sandbox-template create/update/delete`, `console`, `exec`, `forward`, `ssh-cert`, `fleet export/plan/status/apply`, `auth login` |
+| `token` | a credential (`BETTER_COMPUTE_TOKEN` or a saved one, see [authenticate](#authenticate)), and either `--url` or a configuration | `api`, `reserve`, `release`, `extend`, `reservations list/get`, `pools list`, `capacity`, `sandbox create/list/get/extend/snapshot/delete/exec/templates`, `sandbox-template create/update/delete`, `console`, `exec`, `forward`, `ssh-cert`, `fleet export/plan/status/apply`, `batch list/show/approve/cancel`, `auth login` |
 | `config` | the configuration (`--config`, `BETTER_COMPUTE_CONFIG`, the nearest `better-compute.config.{mjs,js,ts,mts}`, or `BETTER_COMPUTE_DATABASE_URL`) and no credential | `migrate`, `doctor`, `serve`, `audit checkpoint/verify/prove` |
-| `none` | neither | `init`, `version`, `dev` (it finds a configuration itself, or runs PGlite), `sim`, `pki`, `daemon install-script`, `iam setup`, `release keygen/sign/cosign/verify`, `batch keygen/sign`, `audit check-proof` |
+| `none` | neither | `init`, `version`, `dev` (it finds a configuration itself, or runs PGlite), `sim`, `pki`, `daemon install-script`, `iam setup`, `release keygen/sign/cosign/verify`, `batch keygen/sign/sign-approvers`, `audit check-proof` |
 
 A `config` command talks to the database directly. It is an operator tool: whoever can run it can already read the
 database, so it is not decided by IAM. A `token` command never reads the database itself.
@@ -362,6 +362,57 @@ The fleet methods are decided on `compute:fleet:admin`, which only the root tena
 server's fleet tools stop at `fleet_plan` for the same reason: a person applies. See
 [fleet configuration](/docs/guides/fleet-config).
 
+## Destructive batches
+
+With the v1.0 destructive-batch quorum on (`pki.approvers`), fleet-wide destructive commands run only once enough
+operator approver keys have signed their batch. The `batch` commands are the approver's side (b3fd712, 6a7f1b7).
+They never take the server's word for what a batch holds: every review pages the batch's scope and recomputes its
+Merkle root before anything is signed.
+
+| Command | Needs | Does |
+| --- | --- | --- |
+| `batch keygen --out PATH` | nothing | a P-256 approver key (mode 0600, never overwritten) and `PATH.pub`; prints the `kid`. Encrypted when `BETTER_COMPUTE_APPROVER_PASSPHRASE` is set |
+| `batch list [--state STATE]` | a credential, `compute:batches:read` | `commandBatches.list`: reason, state, size, approvals had and needed |
+| `batch show --batch ID [--scope-out FILE]` | a credential, `compute:batches:read` | the batch with its verified scope; `--scope-out` writes the input of `batch sign` |
+| `batch approve --batch ID --key PATH` | a credential, `compute:batches:approve` | reviews the batch, then signs and submits your approval |
+| `batch approve --batch ID --signature FILE` | a credential, `compute:batches:approve` | submits an approval made offline, after checking it is for this batch |
+| `batch sign --key PATH --scope FILE` | nothing | the same review and signature on an offline machine |
+| `batch cancel --batch ID` | a credential, `compute:batches:approve` | ends a pending batch; its held commands are cancelled |
+| `batch sign-approvers --key PATH --version N ...` | nothing | a current approver's signature over a new approver set (see [changing the approver set](/docs/operations/pki#changing-the-approver-set)) |
+
+```bash
+better-compute batch approve --tenant acme --batch batch_01k5w… --key ~/.better-compute/approver.pem
+# Batch batch_01k5w…: reimage rack 12 after the firmware recall
+# 12 command(s) on 12 subject(s): deploy.image ×12:
+#   deploy.image: node_01…, node_02…, …
+# Approvals: 0 of 2; the window closes at 2026-09-25T18:00:00.000Z.
+# Not approved. Re-run with --yes, or with --root 3f1c….
+better-compute batch approve --tenant acme --batch batch_01k5w… --key ~/.better-compute/approver.pem \
+  --root 3f1c… --expect rack12.txt
+```
+
+`batch approve` signs only what it showed you. Without `--yes` it stops after the summary; `--root` approves only if
+the batch still has the root you reviewed. `--expect FILE` (one subject per line, or `{ subject, kind }` commands)
+approves only a batch that holds exactly those. Leaves that admit any payload of their kind are refused unless
+`--allow-unbound`, and a batch that stays open longer than `--max-hours` (default 72) is refused. The signature
+covers the batch id, root, size, expiry and the deployment's trust domain. On an offline machine, write the scope
+with `batch show --scope-out batch.json`, carry it over, run `batch sign --key … --scope batch.json` there (a bare
+`--root` and `--size` needs `--unchecked`), and bring the output back to `batch approve --signature`.
+
+Approver key files readable by other users are refused, as ssh does. Every refusal has its own exit code:
+
+| Code | Meaning |
+| --- | --- |
+| `SCOPE_MISMATCH` | the listed leaves do not give the root and size the server asks you to sign, or a `--signature` file signs something else |
+| `SCOPE_CHANGED` | the batch no longer has the `--root` you reviewed |
+| `SCOPE_UNEXPECTED` | the batch is not what `--expect` lists; the message names the differences |
+| `UNBOUND_SCOPE` | leaves admit any payload and `--allow-unbound` was not given |
+| `INVALID_RESPONSE` | the server answered a scope page that is malformed or does not advance |
+| `INVALID_STATE` | the batch is not pending, its window is closed or longer than `--max-hours`, or the key file is readable by others |
+
+See [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10) for how batches are created, held and
+checked on each machine.
+
 ## Audit
 
 The audit commands are operator commands: they read `audit_events` and the checkpoints straight from the
@@ -393,10 +444,10 @@ The rest of the CLI runs and maintains a deployment. Briefly:
 | `dev [--sim N]` | a local server with PGlite and, with `--sim`, N simulated machines and an embedded Better IAM |
 | `sim` | the deterministic fleet simulator and its invariants |
 | `pki init / show / issue-gateway / renew-ca / rotate-command-root / add-sandbox-ca / reseal` | the machine PKI bundle, its pins, gateway certificates, CA renewal and rotation, the sandbox SSH CA, re-sealing in the current format; see [PKI](/docs/operations/pki) |
-| `daemon install-script` | the POSIX installer that joins a server to a pool |
+| `daemon install-script` | the POSIX installer that joins a server to a pool; `--plugins` prepares a node for bcx driver plugins (see [installing bcd](/docs/daemon/install#the-plugin-drop-in)) |
 | `iam setup [--meters]` | prints the example policies; creates the billing meters in Better IAM |
 | `release keygen / sign / cosign / verify` | signed bcd release manifests |
-| `batch keygen / sign` | an approver's side of the v1.0 destructive-batch quorum: a P-256 approver key, and an approval signed offline from a batch's scope file; see [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10) |
+| `batch keygen / sign / sign-approvers` | an approver's offline tools: a P-256 approver key, an approval signed from a batch's scope file, and a signature over a new approver set; see [destructive batches](#destructive-batches) |
 
 See [installation](/docs/guides/installation), [local development](/docs/operations/local-development) and the
 [CLI reference](/docs/reference/cli).
@@ -414,6 +465,7 @@ exit non-zero with the error's code:
 | `FLEET_DRIFTED`, `PLAN_BLOCKED`, `CONFIG_DRIFT` | fleet plan, status and apply outcomes |
 | `AUDIT_TAMPERED`, `INVALID_PROOF`, `AUDIT_KEY_MISSING`, `PKI_NOT_FOUND` | audit verification outcomes |
 | `DOCTOR_FINDINGS` | `doctor --strict` found an error or warning |
+| `SCOPE_MISMATCH`, `SCOPE_CHANGED`, `SCOPE_UNEXPECTED`, `UNBOUND_SCOPE`, `INVALID_RESPONSE` | `batch show`, `approve` and `sign` refused a batch; see [destructive batches](#destructive-batches) |
 | `REMOTE_EXIT` | `console`, `exec`, `sandbox exec` or `ssh-cert --connect`: the binary exits with the remote program's own status (1 to 255), or 255 when the tunnel broke (or ssh was ended by a signal) |
 
 ## Project commands

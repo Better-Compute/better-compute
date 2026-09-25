@@ -511,7 +511,7 @@ tickets. When a program cannot start, the tunnel opens and closes at once with e
 
 | Op | Node ticket | Instance ticket |
 | --- | --- | --- |
-| `console` | A login shell (`/bin/bash -l`, or `/bin/sh -l`) as root in `/`, on a pseudo-terminal opened through `/dev/ptmx` without cgo. `resize` sets the window size, a hang-up sends `SIGHUP` to the shell's process group, and `closed` carries the shell's exit status | Refused: it needs a guest agent |
+| `console` | A login shell (`/bin/bash -l`, or `/bin/sh -l`) as root in `/`, on a pseudo-terminal opened through `/dev/ptmx` without cgo. `resize` sets the window size, a hang-up sends `SIGHUP` to the shell's process group, and `closed` carries the shell's exit status | The instance's serial console, from its runtime, for a running, managed instance on this host (`libvirt-kvm` opens the serial port's pty; f8273ef); never the host's shell |
 | `exec` | Refused: `exec` is into an instance; a host shell is `console`, decided as `compute:nodes:console` | Refused: it needs a guest agent |
 | `ssh` | A TCP connection to the node's own sshd on `127.0.0.1:22` | A TCP connection to port 22 of the instance's own address |
 | `tcp` | A TCP connection to the ticket's `port` on `127.0.0.1` | A TCP connection to the ticket's `port` on the instance's own address |

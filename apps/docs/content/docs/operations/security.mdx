@@ -76,7 +76,7 @@ are built, and ends with a hardening checklist.
 | Compromised node | `nodeId` only from the certificate's SAN; 24 h certificates with pushed revocation; secrets bound to current work; reports only about its own allocations; its attested results speak only for itself | Built |
 | Cloned node identity | A certificate alternating between two machines more than 3 times in 10 minutes is revoked (duplicate-identity quarantine) | Built in the gateway |
 | Compromised gateway | Holds no key in its code; commands and NodeSpecs signed; Renew and `JoinResponse` verified end to end; secrets as JWE; results and `AllocationBound` reports signed by the node. It can delay, drop or read frames, not forge intent, identity, results, bindings or secrets | Built, with the [process caveat](#gateway-processes) |
-| Compromised api or worker | Admissions still need IAM decisions; worker keys last 24 h; tickets are audited; fleet-wide destructive batches need k-of-n operator approval checked on the machine (the [destructive-batch quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)) | Built except the quorum, which is v1.0 and partial: bcd and the FakeDaemon enforce it and the server stores, approves and holds batches, but the gateway does not attach approvals yet and nothing built in creates batches |
+| Compromised api or worker | Admissions still need IAM decisions; worker keys last 24 h; tickets are audited; fleet-wide destructive batches need k-of-n operator approval checked on the machine (the [destructive-batch quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)) | Built except the quorum, which is v1.0: its chain is built (bcd and the FakeDaemon enforce it, the server stores, approves and holds batches, the gateway attaches approvals and proofs, the CLI reviews and signs), but no built-in workflow creates batches yet |
 | Compromised driver plugin | Pinned by SHA-256 and executed from the file that was hashed; run under its own unprivileged uid with `no_new_privs`, a seccomp filter (no namespaces, mounts or `io_uring`) and optional cgroup limits; only plugins named `privileged` run as root | Built in bcd (Linux) |
 | Replay | Command-id journal, `not_after`, epoch fencing, a server time mark against rewound `Welcome`s, ticket `jti` sets, a Renew replay cache | Built in the control plane, the FakeDaemon and `bcd` (bcd keeps its ticket `jti` set in its journal, so a restart does not forget a spent ticket) |
 | Agent overspend | Delegation scope, confirmations, per-agent quotas, budgets, `agents.suspendAll` | Through Better IAM |
@@ -150,8 +150,12 @@ new token. A session that already went quiet is superseded without counting. See
 With `pki.commandSigning`, every command is signed by a 24 h worker key that the command-signing root certifies,
 and so is every NodeSpec generation (v0.4): the NodeSpec controller signs the exact `DesiredStateBody` bytes of each
 new generation (purpose `desired-state`) and stores them in `nodes.spec_body` and `nodes.spec_signature`. The gateway
-relays those signatures verbatim; it cannot produce them. A daemon requires a signature for the kinds its own table
-marks destructive and checks any that is present. For desired state, the FakeDaemon with command-signing roots
+relays those signatures verbatim; it cannot produce them. A daemon checks any signature that is present; bcd with
+command-signing roots requires one on every command, whatever its kind, and the FakeDaemon on the kinds its own table
+marks destructive (0d42de8). bcd also treats `site.httpProxy` as destructive (signed, and under the batch quorum like
+`bmc.*`) and never proxies to a BMC: its site agent remembers the BMC hosts it drives (`data_dir/bmc-hosts.json`)
+and refuses them by name and resolved address, and refuses any `/redfish` path, so a BMC is reached only through the
+`bmc.*` kinds and their quorum. For desired state, the FakeDaemon with command-signing roots
 requires a signature on every spec by default (`signedSpecs: 'always'`, v0.4), and so does bcd, since an unsigned
 spec with a high generation would freeze all later ones; `signedSpecs: 'access'` requires one only on a spec that
 changes the `access` section (v0.2). Because `Welcome.server_time` is unsigned, both daemons also refuse a `Welcome`
@@ -163,11 +167,14 @@ A worker key can still sign anything, so a compromised api or worker could wipe 
 PLAN.md §13's v1.0 answer is the destructive-batch quorum: `pki.approvers` pins operator approver keys, held off the
 control plane, in the join-key-signed trust bundle, and a destructive command then runs only as part of a batch that
 enough of them approved, proven by a Merkle inclusion proof the machine checks itself; unbatched destructive commands
-are refused by default. bcd and the FakeDaemon enforce it, the server's `quorum` module stores batches and collects
-approvals (`commandBatches.approve`), the command queue holds batched commands until approval, and
-`better-compute batch keygen` and `batch sign` are the approvers' tools; but the gateway does not yet attach the
-approval to a batched command and no built-in workflow creates batches, so with `pki.approvers` set every
-destructive command would be refused `UNBATCHED_LIMIT`. Do not set it on a live deployment yet. See
+are refused by default. The chain is built end to end: bcd and the FakeDaemon enforce it, the server's `quorum`
+module stores batches and collects approvals (`commandBatches.approve`), the command queue holds batched commands
+until approval, the gateway sends each with its approval and inclusion proof, and the `better-compute batch`
+commands let approvers review a batch against its root and sign it. A change of the approver set itself needs the
+current approvers' signatures (`batch sign-approvers`), so the join key alone cannot lift or replace the quorum. What
+is missing is the producer side: the built-in workflows (metal's wipe and deploy, `bmc.*`) do not create batches
+yet, so with `pki.approvers` set and no break-glass allowance their destructive commands fail at enqueue
+(`INVALID_STATE`, reason `batch-required`). See
 [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10).
 
 ### Driver plugins on the host
@@ -177,9 +184,11 @@ bcx driver plugins run next to bcd, which runs as root, so bcd confines them (`[
 - **What runs is what was pinned.** Each binary is hashed through an open file and, on Linux, executed from that
   file (`/proc/self/fd/3`), never by path again, so swapping the file between the check and the exec runs nothing
   else.
-- **Not as root, and not as each other.** When bcd is root, each plugin runs under its own uid and gid (stable per
-  name, in systemd's dynamic range), so none can read another's memory, or all as `[plugins] user`; no
-  supplementary groups. `user = "root"` is refused: plugins that need root (a Kata runtime) are named in
+- **Not as root, and not as each other.** When bcd is root, each plugin runs under its own uid and gid, or all as
+  `[plugins] user`; no supplementary groups. The uids come from a block bcd keeps for itself (`0x7FFE0000` to
+  `0x7FFEFFFF`, clear of system users, systemd's `DynamicUser` range and container ranges), are derived from the
+  plugin's name, skip any uid an account already has, and are assigned in name order, so they are stable across
+  restarts and reordering the `pins` file changes nothing (6827df8). No plugin can read another's memory. `user = "root"` is refused: plugins that need root (a Kata runtime) are named in
   `[plugins] privileged` and run without the filter, and bcd logs each one.
 - **A narrow kernel surface.** With `[plugins] sandbox` (default on), bcd's `__bcx-exec` shim sets `no_new_privs`
   and installs a seccomp filter on every thread (TSYNC) that refuses kexec, kernel modules, mounts, namespaces
@@ -189,8 +198,12 @@ bcx driver plugins run next to bcd, which runs as root, so bcd confines them (`[
 - **Bounded and reaped.** `[plugins] cgroup` puts each plugin in its own child cgroup with `memory_max` and
   `pids_max`; every plugin has its own process group, dies with bcd and is killed as a group on close.
 
-The install script's systemd unit does not yet grant what the user switch and the cgroup limits need (`CAP_SETUID`,
-`CAP_SETGID`, a writable cgroup directory); see [installing bcd](/docs/daemon/install#the-systemd-unit) and
+The install script's `bcd.service` stays as tight as before on nodes without plugins. On a node whose `config.toml`
+has a `[plugins]` section (`daemon install-script --plugins`), the script adds a drop-in,
+`bcd.service.d/plugins.conf`, with only what the user switch and the cgroup limits need: `CAP_SETUID`, `CAP_SETGID`
+and `CAP_KILL` in the bounding set, `Delegate=yes` with `DelegateSubgroup=main`, and `ProtectControlGroups=no`;
+`RestrictNamespaces=no` is added only when `[plugins] privileged` names a plugin, such as a Kata runtime. See
+[the plugin drop-in](/docs/daemon/install#the-plugin-drop-in) and
 [the plugin sandbox](/docs/extending/drivers#the-plugin-sandbox).
 
 ### Attested results
@@ -245,11 +258,12 @@ The gateway refuses a tenant-controlled session without asking, since the lessee
 JWE to the request's one-time key, lives at most 15 minutes, and its audit row carries only the `jti`. Refusals
 publish `security.workload.refused`. On the host, a session token binds each metadata request to one instance and
 forwarded requests are refused. Since the metadata service and instance tunnels name an instance by its address, bcd
-guards every instance tap with host nftables rules (only the NIC's own MAC, IP addresses and ARP; each guarded
-address bound to its own tap so no other bridge port can send from it or claim it; no rogue DHCP server, router
-advertisement or foreign neighbour advert), trusts only addresses those loaded rules bind to an instance, rechecks
-every 30 seconds that the table was not flushed, and never serves an address two instances claim or a loopback
-caller. See [workload identity](/docs/guides/vps/instances#workload-identity).
+guards every instance tap with host nftables rules (only the NIC's own MAC, IP addresses, EUI-64 link-local address
+and ARP; each guarded address bound to its own tap so no other bridge port can send from it or claim it; on every
+tap, guarded or not, no DHCP server reply, router advertisement or redirect, and never the host's own bridge
+addresses; no foreign neighbour advert), trusts only addresses those loaded rules bind to an instance, counts the
+table's rules every 5 seconds so a flushed table or chain is caught and loaded again at once, and never serves an
+address two instances claim or a loopback caller. See [workload identity](/docs/guides/vps/instances#workload-identity).
 
 ### Tunnels, tickets and break-glass SSH
 

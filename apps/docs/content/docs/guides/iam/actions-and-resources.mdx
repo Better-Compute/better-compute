@@ -134,7 +134,7 @@ and the item form gates calls on one resource:
 | `compute:providers:manage` | `compute-fleet`, `compute-tenant`, `compute-provider-account` |
 | `compute:sandboxes:read`, `compute:sandboxes:manage` | `compute-tenant`, `compute-sandbox-template` (`read` also on `compute-sandbox` and `compute-sandbox-snapshot`) |
 | `compute:sandboxes:create`, `compute:sandboxes:update`, `compute:sandboxes:exec`, `compute:sandboxes:delete` | `compute-sandbox` (`delete` also on `compute-sandbox-snapshot`) |
-| `compute:batches:read`, `compute:batches:approve` | `compute-tenant` (v1.0 destructive-batch quorum) |
+| `compute:batches:read`, `compute:batches:create`, `compute:batches:approve` | `compute-tenant` (v1.0 destructive-batch quorum) |
 
 ### Adding actions
 
@@ -237,6 +237,7 @@ bridge, allowing each only when granted. It decides through compute's own `IamPo
 | [`commands.get`](/docs/reference/api/commands#get) | `compute:nodes:read` | `compute-node` | v0.1 |
 | [`commands.list`](/docs/reference/api/commands#list) | `compute:nodes:read` | `compute-node` | v0.1 |
 | [`commands.cancel`](/docs/reference/api/commands#cancel) | `compute:nodes:exec` | `compute-node` | v0.2 |
+| `commandBatches.create` | `compute:batches:create` | `compute-tenant` | v1.0 |
 | `commandBatches.get`, `list`, `scope` | `compute:batches:read` | `compute-tenant` | v1.0 |
 | `commandBatches.approve`, `cancel` | `compute:batches:approve` (on top of the approver signatures, never instead of them) | `compute-tenant` | v1.0 |
 | [`tunnels.open`](/docs/reference/api/tunnels#open) | `compute:instances:exec` | `compute-instance` or `compute:nodes:console` on `compute-node` | v0.3 |

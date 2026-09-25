@@ -123,7 +123,7 @@ Migrations run in registration order:
 
 1. the base schema, owner `core`, which is reserved for it;
 2. the built-in modules: node controllers, site boot, `inventory`, `capacity` (`capacity/0001_device_links` to
-   `capacity/0004_mig_layouts`), `tenancy` (`tenancy/0001_tenant_states`), `quorum` (`quorum/0001_batches`), `pki/0001_sealed_secrets` when the default secret store is in use, and the tunnels
+   `capacity/0004_mig_layouts`), `tenancy` (`tenancy/0001_tenant_states`), `quorum` (`quorum/0001_batches` to `quorum/0006_trust_bundle_history`), `pki/0001_sealed_secrets` when the default secret store is in use, and the tunnels
    module when `tunnels` is set;
 3. your `modules`, in the order you list them;
 4. your `plugins`.
@@ -165,7 +165,7 @@ Migrations run in registration order:
 | `capacity` | `0001_device_links`, `0002_lease_health`, `0003_device_counts` (`capacity_device_counts`, kept by a trigger on `devices`), `0004_mig_layouts` (`capacity_mig_layouts`, the MIG layout gate) |
 | `tenancy` | `0001_tenant_states` (`compute_tenant_states`: suspended and deleted IAM tenants, and each teardown's `teardown_done_at`) |
 | `pki` | `0001_sealed_secrets` |
-| `quorum` | `0001_batches` (`command_batches`, `command_batch_scope`, `command_batch_members`, `command_batch_approvals`: the v1.0 destructive-batch quorum; the module is always hosted) |
+| `quorum` | `0001_batches` (`command_batches`, `command_batch_scope`, `command_batch_members`, `command_batch_approvals`: the v1.0 destructive-batch quorum; the module is always hosted), `0002_payload_digest` (a scope leaf's `payload_sha256`, empty for any payload), `0003_trust_bundle_state` (the published trust bundle's version and digest, so the version follows the content), `0004_trust_bundle_approver_set` (the published quorum, to check approver-set signatures), `0005_batch_request` (`command_batches.request_sha256`, so a `commandBatches.create` retry returns the same batch), `0006_trust_bundle_history` (every published trust bundle digest with its version, so a stale replica never republishes an old bundle as newer); see [PKI](/docs/operations/pki#the-destructive-batch-quorum-v10) |
 | `iam` | `0001_successors` |
 | `provision` | `0001_workflows`, `0002_images`, `0003_workflow_owner`, `0004_gated_mig_layout`, `0005_image_pins` (`provision_image_pins`: images a deploy keeps in its site's cache until its workflow ends) |
 | `metal` | `0001_nodes`, `0002_addresses`, `0003_tenant_root`, `0004_bmc_credentials` |

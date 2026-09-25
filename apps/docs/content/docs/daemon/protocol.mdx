@@ -260,13 +260,18 @@ part  = uint32_be(len(bytes)) || bytes
 | `renew-pop` | current node key | `[sha256(csr), node_id, client_time]` |
 | `x509pop` | node key of a possibly expired certificate | `[sha256(csr), node_id, client_time]` |
 | `discovery-assertion` | site agent node key (`bcd site`, one per iPXE script it serves) | `[SignedDiscoveryAssertion.body]` |
-| `batch-approval` | operator approver key (v1.0 [quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)) | `[batch_id, scope_root, uint32_be(scope_size), timestamp(not_after)]` |
+| `batch-approval` | operator approver key (v1.0 [quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)) | `[batch_id, scope_root, uint32_be(scope_size), timestamp(not_after), trust_domain]`; each verifier supplies the trust domain from its own configuration |
+| `approver-set` | a current operator approver key | `[uint64_be(version), sha256(approverSetInput)]`: a change of the trust bundle's quorum fields |
 
 Worker keys chain to the command-signing roots of the `TrustBundle` the daemon received in `JoinResponse`, and a
 newer bundle arrives in `Welcome.trust`, signed by the pinned JoinService key. The bundle also carries the v1.0
 quorum's `approver_keys`, `approver_threshold`, `quorum_tiers` and `unbatched_destructive_per_hour`, empty unless
-`pki.approvers` is set. The daemon accepts a bundle only
-when its version is greater than the one it holds. The envelopes exist from v0.1 with optional signatures, so
+`pki.approvers` is set, and `approver_set_signatures`, by which the current approvers sign a change of those fields
+(purpose `approver-set`, parts `[uint64_be(version), sha256(approverSetInput)]`); a daemon that holds approver keys
+refuses a bundle that changes them without enough of those signatures (see
+[changing the approver set](/docs/operations/pki#changing-the-approver-set)). The daemon accepts a bundle only
+when its version is greater than the one it holds, and the control plane raises the version whenever the bundle's
+content changes, so a change always reaches the fleet. The envelopes exist from v0.1 with optional signatures, so
 turning them on is additive. See [delivery](/docs/daemon/delivery#signed-commands-and-attested-results) for which
 kinds require them.
 

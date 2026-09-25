@@ -77,6 +77,32 @@ better-compute api commands.run tenantId=$TENANT nodeId=node_… kind=node.reboo
 - `notAfterSeconds` (10 to 3,600, default 600) is how long the command may wait for the node before it expires.
 - The node must be visible to your tenant (`NOT_FOUND` otherwise), and a new command publishes
   `node.command.queued`.
+- `batchId` (optional, `batch_…`) puts the command into a destructive batch (46afe75); see below.
+
+### Destructive commands under the quorum
+
+With the v1.0 [destructive-batch quorum](/docs/operations/pki#the-destructive-batch-quorum-v10) on (approver keys in
+`pki.approvers`) and no break-glass allowance (`unbatchedDestructivePerHour` 0), every daemon refuses a destructive
+kind that is not part of an approved batch, so the queue refuses it up front: `node.reboot` without a `batchId` is
+`INVALID_STATE` with `details: { reason: 'batch-required', kind }` (508728e). Create the batch first, have enough
+approvers sign it, and run the command in it:
+
+```ts
+const batch = await client.commandBatches.create({
+  tenantId,
+  reason: 'Reboot node_0412 after the kernel update',
+  scope: [{ subject: nodeId, kind: 'node.reboot' }], // payloadSha256 (hex) would bind one exact payload
+  idempotencyKey: 'reboot-0412-batch',
+});
+await client.commands.run({ tenantId, nodeId, kind: 'node.reboot', idempotencyKey: 'reboot-0412', batchId: batch.batchId });
+// pending until the batch is approved: better-compute batch approve --tenant … --batch batch_… --key approver.pem
+```
+
+`commandBatches.create` needs `compute:batches:create` on the tenant and is idempotent per caller and key. The
+command's `(subject, kind)` must be in the batch's scope (for a node's own kinds the subject is the node id), or
+`commands.run` is `INVALID_INPUT`. The command stays `pending`, held, until the batch has its approvals; then it is
+sent with the approval and its inclusion proof, and the node checks both itself. Without approver keys a batch is
+recorded for audit only and its commands go out at once.
 
 Modules queue any registered kind through the command queue, `ctx.commands.enqueue(tx, command)`, in their own
 transaction. See [modules](/docs/extending/modules).
@@ -214,7 +240,8 @@ never forge intent or results:
   `verifyCommand`), and the daemon rejects unsigned destructive kinds with `BAD_SIGNATURE`. When the server is
   given `pki.commandSigning` (the root from `createCommandSigningAuthority`, or the PKI bundle's `commandSigning`),
   every command is signed by a 24-hour worker key that root certifies, and JoinResponse and Welcome carry the
-  trust bundle (the roots, plus `pki.commandSigningRoots` during a rotation, and `pki.trustVersion`). Without it,
+  trust bundle (the roots, plus `pki.commandSigningRoots` during a rotation, at a version that follows the bundle's
+  content, never below `pki.trustVersion`). Without it,
   commands go unsigned as in v0.1. The same key signs each NodeSpec generation (purpose `desired-state`, v0.4); the
   gateway relays the stored signed bytes, and the daemon verifies them before applying a spec. See
   [delivery](/docs/daemon/delivery#signed-commands-and-attested-results).

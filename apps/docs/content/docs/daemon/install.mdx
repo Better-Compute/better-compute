@@ -9,6 +9,8 @@ sources:
   - packages/cli/src/install-script.ts
   - packages/cli/src/commands/daemon.ts
   - daemon/internal/config/config.go
+  - daemon/internal/bcx/sandbox_linux.go
+  - daemon/cmd/bcd/plugins.go
   - daemon/cmd/bcd/main.go
   - daemon/cmd/bcd/agent.go
   - daemon/cmd/bcd/site.go
@@ -100,6 +102,8 @@ better-compute daemon install-script \
 | `--release-manifest PATH` | one of two | | A signed release manifest; its verified digests are pinned instead |
 | `--release-pins PINS` | with a manifest | `BCD_RELEASE_PINS` | Comma-separated `sha256/...` pins of the release keys |
 | `--release-threshold N` | no | | How many release keys must have signed (1 to 16, default 1) |
+| `--plugins` | no | | Prepare the node for bcx driver plugins: a `[plugins]` section and the systemd drop-in; see [the plugin drop-in](#the-plugin-drop-in) |
+| `--privileged-plugins NAMES` | no | | Comma-separated plugins that run as root without the seccomp filter, such as a Kata runtime; implies `--plugins` |
 | `--pki PATH` | no | | The PKI bundle to read the pins from |
 | `--out PATH` | no | | Write a new file with mode 0755 instead of printing; refuses to overwrite (`FILE_EXISTS`) |
 
@@ -113,7 +117,7 @@ passes can break out of the shell or TOML quoting:
 
 | Value | Must be |
 | --- | --- |
-| pool and site ids | letters, digits, `.`, `_` and `-`, starting with a letter or digit, at most 128 characters |
+| pool and site ids, privileged plugin names | letters, digits, `.`, `_` and `-`, starting with a letter or digit, at most 128 characters |
 | version | a semantic version such as `0.1.0` or `v0.2.0-rc.1` |
 | pins | `sha256/` followed by the standard base64 of 32 bytes |
 | digests | 64 lower-case hex digits, for `amd64` and/or `arm64` only |
@@ -159,8 +163,12 @@ script before anything is installed.
 
 ### Install the files
 
-It creates `/etc/bcd` and `/var/lib/bcd` with mode 0700 and `/etc/cdi` with mode 0755. Each file is written next to
-its target as `*.new` and renamed over it, so a replacement is atomic even while bcd runs. Then
+It creates `/etc/bcd` and `/var/lib/bcd` with mode 0700 and `/etc/cdi` with mode 0755 (and, with `--plugins`,
+`/usr/local/lib/bcd/plugins` with mode 0755). Each file is written next to its target as `*.new` and renamed over
+it, so a replacement is atomic even while bcd runs. When a `config.toml` already exists, every section of it
+(`[plugins]`, `[boot]`, `[imds]`, ...) is carried over below the freshly written top-level keys; with `--plugins`, a
+`[plugins]` section is appended unless the file already has one. After the unit, it installs or removes the
+[plugin drop-in](#the-plugin-drop-in) according to whether `config.toml` has a `[plugins]` section. Then
 `systemctl daemon-reload`.
 
 </Step>
@@ -197,6 +205,12 @@ sudo sh install-bcd.sh < token-file
   </Folder>
   <Folder name="/etc/systemd/system" defaultOpen>
     <File name="bcd.service (0644)" />
+    <Folder name="bcd.service.d (0755)" defaultOpen>
+      <File name="plugins.conf (0644, only on nodes with [plugins])" />
+    </Folder>
+  </Folder>
+  <Folder name="/usr/local/lib/bcd/plugins (0755, with --plugins)" defaultOpen>
+    <File name="pins (sha256sum format) and the plugin binaries, yours to add" />
   </Folder>
   <Folder name="/var/lib/bcd (0700)" defaultOpen>
     <File name="node.key (0600, the node key)" />
@@ -211,7 +225,8 @@ sudo sh install-bcd.sh < token-file
   </Folder>
 </Files>
 
-The script writes the first four. The other paths belong to the daemon: `bcd join` writes the key and
+The script writes the binary, `config.toml`, `join-encryption.jwk`, the unit and, on a plugin node, the drop-in and
+the (empty) plugin directory. The other paths belong to the daemon: `bcd join` writes the key and
 `identity.json` under `data_dir`, `bcd node` opens the journal there, serves the status socket at `socket_path`, and
 writes CDI specs for `hold` bindings (with env files under `/run/bcd/allocations`). A renewal writes the next key as
 `node.key.next` and promotes it only once the new certificate is stored. A journal that does not open is moved aside
@@ -252,10 +267,10 @@ keys and wrong types are all errors with a line number, so a typo fails loudly. 
 | `[imds] listen` | no | | Where a VPS host serves its instances' metadata service, for example `169.254.169.254:80` on the instances' bridge; empty turns it off |
 | `[boot] ...` | no | | A site agent's boot server; see [site agents](#a-site-agent) |
 | `[plugins] dir` | no | | A directory of bcx driver plugins and their `pins` file (sha256sum format); only pinned plugins run. Empty runs none. See [driver plugins in bcd](/docs/extending/drivers#driver-plugins-in-bcd) |
-| `[plugins] user` | no | | Who plugins run as when bcd is root (no supplementary groups); unset, each plugin gets its own uid in 61184 to 65519. `root` is refused |
+| `[plugins] user` | no | | Who plugins run as when bcd is root (no supplementary groups); unset, each plugin gets its own uid from a block bcd keeps, `0x7FFE0000` to `0x7FFEFFFF`. `root` is refused |
 | `[plugins] privileged` | no | | Plugins (comma-separated names) that run as root without the shim or the filter, such as a Kata runtime |
 | `[plugins] sandbox` | no | `true` | Runs unprivileged plugins through bcd's `__bcx-exec` shim: `no_new_privs` and a seccomp filter. Linux only; elsewhere set `false` or no plugin starts |
-| `[plugins] cgroup` | no | | An absolute path to a delegated cgroup v2 directory; each plugin runs in its own child `bcx-<name>` |
+| `[plugins] cgroup` | no | | An absolute path under `/sys/fs/cgroup` in bcd's delegated cgroup; bcd creates it and enables the memory and pids controllers, and each plugin runs in its own child `bcx-<name>`. `--plugins` writes `/sys/fs/cgroup/system.slice/bcd.service/plugins` |
 | `[plugins] memory_max`, `[plugins] pids_max` | no | 0 (none) | The child cgroup's `memory.max` (bytes) and `pids.max`; not negative. See [the plugin sandbox](/docs/extending/drivers#the-plugin-sandbox) |
 
 A pin is `sha256/` plus the standard base64 of the SHA-256 of a SubjectPublicKeyInfo, the form HPKP and
@@ -378,13 +393,52 @@ WantedBy=multi-user.target
 `bcd node` opens no TCP listener; everything it does starts with an outbound connection to the gateway. See
 [the overview](/docs/daemon) for the privilege-separation plan.
 
-<Callout type="warn" title="Plugins under this unit">
-The unit as the install script writes it predates the plugin sandbox. Its `CapabilityBoundingSet` has no
-`CAP_SETUID` or `CAP_SETGID`, which bcd needs to start each unprivileged plugin under its own uid (or
-`[plugins] user`), and `ProtectControlGroups=yes` makes the cgroup tree read-only, so `[plugins] cgroup` cannot create
-its children. A node that runs unprivileged plugins under this unit needs those two capabilities added and, for
-cgroup limits, a writable delegated cgroup directory. Nodes without `[plugins] dir` are unaffected.
-</Callout>
+### The plugin drop-in
+
+The unit above cannot run sandboxed [bcx plugins](/docs/extending/drivers#the-plugin-sandbox): its
+`CapabilityBoundingSet` has no `CAP_SETUID` or `CAP_SETGID`, which bcd needs to start each plugin under its own uid,
+and `ProtectControlGroups=yes` makes the cgroup tree read-only. The unit stays that tight; a node that runs plugins
+gets a drop-in instead. The script installs `/etc/systemd/system/bcd.service.d/plugins.conf` (0644) exactly when
+`/etc/bcd/config.toml` has a `[plugins]` section, and removes it otherwise, on every run, first install and upgrade
+alike:
+
+```ini title="/etc/systemd/system/bcd.service.d/plugins.conf (with a privileged plugin)"
+[Service]
+# bcx plugins ([plugins] in /etc/bcd/config.toml): their own uids, their own cgroups.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_KILL
+Delegate=yes
+DelegateSubgroup=main
+ProtectControlGroups=no
+# plugins.privileged in /etc/bcd/config.toml: runtime plugins that make namespaces (Kata).
+RestrictNamespaces=no
+```
+
+| Setting | Why |
+| --- | --- |
+| `CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_KILL` | Added to the unit's set: switch each plugin to its own uid and gid, and stop it. Nothing else is loosened |
+| `Delegate=yes`, `DelegateSubgroup=main` | systemd hands bcd its cgroup, `system.slice/bcd.service`, and runs bcd itself in the `main` child, so the plugins' cgroup can sit beside it |
+| `ProtectControlGroups=no` | bcd can create the plugins' cgroups and write their `memory.max` and `pids.max` |
+| `RestrictNamespaces=no` | Only when `[plugins] privileged` names a plugin: a runtime plugin such as Kata makes namespaces and mounts |
+
+`--plugins` makes a node a plugin node. The script then creates `/usr/local/lib/bcd/plugins` (root-owned, 0755, so
+each plugin's uid can reach its binary) and, unless the configuration already has a `[plugins]` section, appends
+one:
+
+```toml title="/etc/bcd/config.toml (with --plugins --privileged-plugins kata)"
+[plugins]
+dir = "/usr/local/lib/bcd/plugins"
+cgroup = "/sys/fs/cgroup/system.slice/bcd.service/plugins"
+privileged = "kata"
+```
+
+The cgroup is a child of bcd's delegated cgroup. At start bcd creates it and enables the memory and pids
+controllers in it and in its parent; on systemd older than 254, which ignores `DelegateSubgroup=main`, bcd first
+moves itself into a `main` leaf, since cgroup v2 gives no controllers to the children of a cgroup that holds
+processes itself (d902063). If the cgroup cannot be prepared, no plugin runs and the log says why.
+`--privileged-plugins NAMES` implies `--plugins` and writes `privileged`; each name must be letters, digits, `.`,
+`_` and `-`. The script adds no plugins: put the binaries and their `pins` file in the directory yourself (see
+[driver plugins in bcd](/docs/extending/drivers#driver-plugins-in-bcd)). A section you wrote by hand works the same
+way: any `[plugins]` section gets the drop-in, and removing the section removes the drop-in on the next run.
 
 ## Joining
 
@@ -497,12 +551,19 @@ util-linux (`blkdiscard`, `blockdev`, `lsblk`, `mount`), `udevadm`, `kexec-tools
 
 Run the same script, or one generated for a newer `--bcd-version`, without a token on a host that already has
 `/etc/bcd/config.toml`. It downloads and verifies the new binary, replaces `/usr/local/bin/bcd` with an atomic
-rename, rewrites the configuration, key and unit, and restarts the service:
+rename, rewrites the key, the unit and the top-level keys of the configuration, and restarts the service:
 
 ```bash
 sudo sh install-bcd.sh
 # bcd upgraded to 0.1.1 and restarted.
 ```
+
+The configuration's top-level keys (gateway, site and the three pins) come from the new script, and every section
+of the existing file (`[plugins]`, `[boot]`, `[imds]`, `[journal]`, `[log]`, ...) is kept as it was (4225772;
+earlier scripts rewrote the file whole and dropped them). Top-level keys you added by hand, such as `data_dir` or
+`gateway_server_name`, are not kept, so put them back after an upgrade or regenerate the script. The plugin drop-in
+follows the kept configuration: a node with `[plugins]` keeps it, even when the new script was generated without
+`--plugins`.
 
 The node keeps its identity and journal across the restart. On reconnect its `Hello` carries the new
 `daemon_version`, which the gateway records in `node_sessions.daemon_version`.

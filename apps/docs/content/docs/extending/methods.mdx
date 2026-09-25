@@ -205,6 +205,7 @@ interface MethodAdmission<I, O> {
   denied?(context: MethodContext, input: I, tx: SqlTx, error: unknown): Promise<void>;
   describe?(input: I): string;
   check?(context: MethodContext, input: I, resource: MethodResource): Promise<void>;
+  abandoned?(context: MethodContext, input: I, tx: SqlTx, error: unknown): Promise<void>;
 }
 ```
 
@@ -214,6 +215,8 @@ flowchart TD
   P -->|decide| Q["iam.require on the returned resource"]
   Q -->|allowed| C["check(), no transaction open"]
   C -->|passes| H["tx 2: handler() + audit row"]
+  H -->|throws| A["own tx: abandoned(error)"]
+  A --> Z["throw the handler's error"]
   C -->|throws| Y["throw its error; the draft stays"]
   Q -->|refused| D["own tx: denied(error)"]
   D --> X["throw ACCESS_DENIED or CONFIRMATION_REQUIRED"]
@@ -232,6 +235,13 @@ flowchart TD
   a retry with the same key is decided again later (say, once a budget's window resets). Composite `ctx.check` runs
   it too.
 - **`handler`** runs in a second transaction with `ctx.admission` set, and the audit row is written there.
+- **`abandoned`** (optional) runs in a third transaction of its own when an allowed request's handler threw, for
+  example because the resource changed between the transactions (d14564e). The handler's rollback also undid any
+  cleanup it did, so this is where to undo, best effort, what `prepare` staged in the first transaction and would
+  otherwise outlive the request, such as pending authz attributes an `extend` set, which would be merged into every
+  later decision on the resource. Keep a retry with the same key possible. If it throws, the failure is logged and the
+  caller still gets the handler's error. `reservations.extend` and `sandboxes.extend` pass their `denied` clearing
+  here too (a2288ec).
 - **`denied`** runs in a transaction of its own after a refusal, to mark the draft denied or clear pending changes.
   If it throws, the failure is logged and the refusal is still what the caller gets.
 - **Delegated sessions.** When the caller is an agent in a delegated session, the envelope asks IAM to open a

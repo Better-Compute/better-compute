@@ -40,7 +40,9 @@ sources:
   - daemon/internal/bcx/serve.go
   - daemon/internal/agent/drivers.go
   - daemon/cmd/bcd/plugins.go
+  - daemon/internal/bcx/sandbox_linux.go
   - daemon/internal/config/config.go
+  - packages/cli/src/install-script.ts
   - PLAN.md
   - .claude/coordination.md
 ---
@@ -391,17 +393,18 @@ are backed by the plugin:
 
 bcd hosts bcx plugins in `bcd node` and `bcd site`, with the Go side of the protocol in `daemon/internal/bcx`.
 (`bcd ramdisk` accepts `driver.invoke` too, but it has no config file, so no plugin directory and no plugins.) Point
-the agent at a plugin directory in `config.toml`; there is no default:
+the agent at a plugin directory in `config.toml`; there is no default in bcd, and `daemon install-script --plugins`
+writes the one below (see [installing a plugin node](#installing-a-plugin-node)):
 
 ```toml title="/etc/bcd/config.toml"
 [plugins]
-dir = "/etc/bcd/plugins.d"
+dir = "/usr/local/lib/bcd/plugins"
 ```
 
 The directory holds the plugin binaries and a `pins` file in `sha256sum` format, one `<sha256 hex>  <file name>` line
 per plugin (`#` comments and blank lines are skipped). Keep both root-owned, like `config.toml`:
 
-```text title="/etc/bcd/plugins.d/pins"
+```text title="/usr/local/lib/bcd/plugins/pins"
 9f3e0c…  acme-bmc
 ```
 
@@ -432,21 +435,21 @@ On Linux bcd runs every plugin confined, as PLAN.md §5.5 asks, set by the rest 
 
 ```toml title="/etc/bcd/config.toml"
 [plugins]
-dir = "/etc/bcd/plugins.d"
-# user = "bcx"                         # unset (the default): each plugin gets its own uid
-privileged = "kata"                    # comma-separated: plugins that run as root, unfiltered
-sandbox = true                         # the default: no_new_privs + seccomp through bcd's shim
-cgroup = "/sys/fs/cgroup/bcd.plugins"  # a delegated cgroup v2 directory (Delegate=yes)
-memory_max = 1_073_741_824             # bytes per plugin; 0 or unset: no limit
-pids_max = 256                         # tasks per plugin; 0 or unset: no limit
+dir = "/usr/local/lib/bcd/plugins"
+# user = "bcx"               # unset (the default): each plugin gets its own uid
+privileged = "kata"          # comma-separated: plugins that run as root, unfiltered
+sandbox = true               # the default: no_new_privs + seccomp through bcd's shim
+cgroup = "/sys/fs/cgroup/system.slice/bcd.service/plugins"  # in bcd's delegated cgroup
+memory_max = 1_073_741_824   # bytes per plugin; 0 or unset: no limit
+pids_max = 256               # tasks per plugin; 0 or unset: no limit
 ```
 
 | Key | Default | Effect |
 | --- | --- | --- |
-| `user` | none | When bcd runs as root, unset gives each plugin its own uid and gid in systemd's dynamic range (61184 to 65519), derived from its name so it is stable across restarts, so no plugin can read another's memory. Set, every plugin runs as that account and its primary group. Either way no supplementary groups, and the socket directory is chowned to the plugin. `root` (or `0`) is a configuration error, and an account that resolves to uid 0 or does not exist keeps that plugin from running (logged). Ignored when bcd is not root |
+| `user` | none | When bcd runs as root, unset gives each plugin its own uid and gid from a block bcd keeps for itself (`0x7FFE0000` to `0x7FFEFFFF`, at the top of the range systemd leaves unassigned, clear of system users, systemd's `DynamicUser` range and container ranges), so no plugin can read another's memory. The uid is derived from the plugin's name, moves past any uid another plugin or an existing account has, and plugins are assigned in name order, so a uid is stable across restarts and reordering the `pins` file changes nothing (6827df8). Set, every plugin runs as that account and its primary group. Either way no supplementary groups, and the socket directory is chowned to the plugin. `root` (or `0`) is a configuration error, and an account that resolves to uid 0 or does not exist keeps that plugin from running (logged). Ignored when bcd is not root |
 | `privileged` | none | Plugins, by name and comma-separated, that run as root without the shim or the filter: a runtime plugin that makes namespaces and mounts (Kata). Each is logged at start as a privileged plugin. Every other plugin is confined |
 | `sandbox` | `true` | Runs each unprivileged plugin through bcd itself as a shim (the hidden `bcd __bcx-exec <name>` command, `bcx.RunShim`): on one locked OS thread it sets `no_new_privs`, installs a seccomp filter synchronised to every thread (`SECCOMP_FILTER_FLAG_TSYNC`), then execs the verified binary from fd 3. `false` drops the shim; the uid still applies |
-| `cgroup` | none | An absolute path to a delegated cgroup v2 directory; each plugin, privileged ones included, runs in its own child `bcx-<name>` |
+| `cgroup` | none | A directory under `/sys/fs/cgroup` inside bcd's delegated cgroup; each plugin, privileged ones included, runs in its own child `bcx-<name>`. bcd prepares it at start (below) |
 | `memory_max` | none | Written to the child cgroup's `memory.max` |
 | `pids_max` | none | Written to the child cgroup's `pids.max` |
 
@@ -465,7 +468,14 @@ refuses to start it when a shim, a user or a cgroup is asked for, so there a plu
 `sandbox = false`. The Go tests check that a sandboxed plugin's `perf_event_open` and `unshare(CLONE_NEWUSER)` get
 the filter's `EPERM`, that `/proc/<pid>/exe` is the verified binary, and that the keys parse and validate.
 
-`driver.invoke` then runs in them, as the FakeDaemon's `fakeDriverInvoke` does:
+With `cgroup` set, bcd prepares the directory before it starts any plugin (d902063): it creates it and enables the
+memory and pids controllers in it and in its parent. cgroup v2 gives no controllers to the children of a cgroup that
+holds processes itself, so when bcd finds itself running directly in the parent (systemd older than 254, without
+`DelegateSubgroup=main`), it first moves itself into a `main` leaf beside the plugins. A path outside
+`/sys/fs/cgroup`, or a cgroup bcd cannot write (not delegated), means no plugin runs, and the log says why. To set a
+node up for all this, see [installing a plugin node](#installing-a-plugin-node).
+
+`driver.invoke` then runs in the plugins, as the FakeDaemon's `fakeDriverInvoke` does:
 
 | Step | bcd |
 | --- | --- |
@@ -488,6 +498,32 @@ the node: at every `Hello` the gateway writes each advertised driver as the syst
 a capability with `PlacementRequest.nodeLabels` (see [placement](/docs/guides/capacity/placement#eligibility-filters)). The FakeDaemon
 only advertises an `nvidia` driver of kind `config` on GPU hosts. PLAN.md's v0.5 acceptance includes "a third-party TS driver runs on a
 node via bcx" and a Kata `runtime` plugin in Go (walkthrough 4).
+
+#### Installing a plugin node
+
+Two things in the stock `bcd.service` stop the sandbox: its capability bounding set lacks `CAP_SETUID` and
+`CAP_SETGID`, and `ProtectControlGroups=yes` keeps the cgroup tree read-only. The install script handles both
+(4225772):
+
+```bash
+better-compute daemon install-script --pool pool_vps --site fsn1 \
+  --gateway-url https://gw.eu.example.com --base-url https://compute.example.com \
+  --bcd-version 0.1.0 --sha256 amd64=<hex> \
+  --plugins --privileged-plugins kata > install-bcd.sh
+```
+
+1. `--plugins` writes a `[plugins]` section with `dir = "/usr/local/lib/bcd/plugins"` (root-owned, 0755, so each
+   plugin's uid can reach its binary) and `cgroup = "/sys/fs/cgroup/system.slice/bcd.service/plugins"`, unless the
+   node's `config.toml` already has one. `--privileged-plugins NAMES` implies `--plugins` and adds `privileged`.
+2. On every run, the script installs the drop-in `/etc/systemd/system/bcd.service.d/plugins.conf` when
+   `config.toml` has a `[plugins]` section, and removes it when not: `CAP_SETUID CAP_SETGID CAP_KILL` added to the
+   bounding set, `Delegate=yes` with `DelegateSubgroup=main`, `ProtectControlGroups=no`, and `RestrictNamespaces=no`
+   only when `privileged` names a plugin.
+3. Copy the plugin binaries into the directory and list them in its `pins` file, both root-owned, then restart
+   `bcd.service`. The script installs no plugin.
+
+An upgrade keeps the `[plugins]` section, and with it the drop-in. See
+[the plugin drop-in](/docs/daemon/install#the-plugin-drop-in) for the unit settings.
 
 ## Testing a driver
 

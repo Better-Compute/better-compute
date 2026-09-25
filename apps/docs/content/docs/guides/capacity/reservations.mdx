@@ -471,7 +471,11 @@ const result = await compute.api.reservations.extend(credential, {
 ```
 
 An `until` that the reservation already reaches answers `extended: false` without a decision, so
-prefer `until` when you may retry: a repeated `by` extends again from the new end.
+prefer `until` when you may retry: a repeated `by` extends again from the new end. A refusal clears
+the pending change; so does a handler that throws after an allow (the reservation changed between the
+transactions), through the admission's `abandoned` hook in a transaction of its own, so a refused
+lifetime is never merged into later decisions on the reservation (a2288ec). A retry with the same key
+decides again.
 
 **Release and cancel.** [`reservations.release`](/docs/reference/api/reservations#release) ends a
 reservation at `compute_now()`: the current booking is truncated, future ones are deleted, quota is

@@ -74,7 +74,7 @@ const vm = await client.instances.create({
     label: 'Sandbox',
     unit: 'isolated VMs',
     summary:
-      'Run untrusted code in its own VM, started from a template and deleted when its time is up. A template keeps warm instances ready, so a sandbox is claimed instead of cold-booted, and it can be snapshotted and restored. Commands run over SSH with short-lived certificates, with nothing of the platform inside the guest. The API is built and tested against simulated hosts; the VM runtime on real bcd hosts is not built yet.',
+      'Run untrusted code in its own VM, started from a template and deleted when its time is up. A template keeps warm instances ready, so a sandbox is claimed instead of cold-booted, and it can be snapshotted and restored. Commands run over SSH with short-lived certificates, with nothing of the platform inside the guest. bcd runs them on libvirt-kvm hosts (tested against a fake virsh so far), and the whole API is tested end to end against simulated hosts.',
     specs: [
       ['Started from', 'a template: pool, flavor, image'],
       ['Lifetime', 'TTL from admission, extendable'],
