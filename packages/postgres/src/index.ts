@@ -34,6 +34,7 @@ export {
 } from './history.js';
 export { historyTables } from './migrations/0018_partitioned_history.js';
 export {
+  retentionFindings,
   retentionModule,
   retentionWorkKind,
   runRetention,

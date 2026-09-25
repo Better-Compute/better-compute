@@ -11,7 +11,10 @@ import {
   historyPartitions,
   pruneInventorySnapshots,
   pruneUsageWindows,
+  retentionFindings,
+  retentionModule,
   runRetention,
+  saveCursor,
   setSimClock,
   useSimClock,
 } from '@better-compute/postgres';
@@ -378,6 +381,37 @@ describe('pruning and dropping', () => {
       inventorySnapshots: 0,
       partitionsDropped: 0,
     });
+  });
+});
+
+describe('retention findings (doctor)', () => {
+  let db: SqlExecutor;
+  beforeAll(async () => {
+    db = pglite({ analyzeEveryMs: 0 });
+    await db.migrate();
+  });
+  afterAll(() => db.close());
+
+  it('is quiet on a fresh schema, then reports missing months, stranded rows and stale cursors', async () => {
+    expect(await retentionFindings(db)).toEqual([]);
+    expect(await retentionModule().selfCheck!({ sql: db } as never)).toEqual([]);
+    // Three months on, and no retention pass ran: this and next month have no partitions, and new
+    // audit rows land in the default partition.
+    const later = addMonths(Date.now(), 3) + 2 * DAY;
+    await useSimClock(db, later);
+    await audit(db, 'aud_late');
+    await saveCursor(db, { name: 'sink:dead', txid: '1', seq: 1 });
+    await setSimClock(db, later + 2 * DAY);
+    const findings = await retentionFindings(db);
+    expect(findings.map((finding) => [finding.check, finding.count])).toEqual([
+      ['history-partitions', 6],
+      ['history-default-partition', 1],
+      ['retention-cursors', 1],
+    ]);
+    expect(findings[2]!.message).toContain('sink:dead');
+    // A pass fixes the first two.
+    await runRetention(db);
+    expect((await retentionFindings(db)).map((finding) => finding.check)).toEqual(['retention-cursors']);
   });
 });
 

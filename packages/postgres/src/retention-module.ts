@@ -2,8 +2,10 @@ import {
   defineModule,
   type ComputeModule,
   type Duration,
+  type Finding,
   type ReconcileContext,
 } from '@better-compute/core';
+import { historyTables } from './migrations/0018_partitioned_history.js';
 import {
   dropEmptyHistoryPartitions,
   ensureHistoryPartitions,
@@ -154,6 +156,60 @@ export async function runRetention(
 }
 
 /**
+ * `doctor` findings for what retention keeps healthy (§14): month partitions missing for this or the
+ * next month (the pass is not running), recent rows stranded in a default partition, and durable
+ * cursors that stopped moving (their stream can no longer be pruned behind them).
+ */
+export async function retentionFindings(sql: ReconcileContext['sql'], options: { staleCursorSeconds?: number } = {}): Promise<Finding[]> {
+  const findings: Finding[] = [];
+  const { rows: missing } = await sql.query<{ name: string }>(
+    `SELECT t.parent || '_p' || to_char(m AT TIME ZONE 'UTC', 'YYYYMM') AS name
+       FROM unnest($1::text[]) AS t(parent),
+            generate_series(date_trunc('month', compute_now() AT TIME ZONE 'UTC'),
+                            date_trunc('month', compute_now() AT TIME ZONE 'UTC') + interval '1 month', interval '1 month') AS m
+      WHERE to_regclass(t.parent || '_p' || to_char(m AT TIME ZONE 'UTC', 'YYYYMM')) IS NULL
+      ORDER BY 1`,
+    [historyTables.map((entry) => entry.table)],
+  );
+  if (missing.length)
+    findings.push({
+      check: 'history-partitions',
+      severity: 'warning',
+      message: `History partitions for this or next month are missing: ${missing.map((row) => row.name).join(', ')}`,
+      fix: 'Register retentionModule() on a worker (it creates months ahead), or run ensureHistoryPartitions',
+      count: missing.length,
+    });
+  let stranded = 0;
+  for (const { table, column } of historyTables) {
+    const { rows } = await sql.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM ${table}_default WHERE ${column} >= compute_now() - interval '13 months'`,
+    );
+    stranded += Number(rows[0]!.n);
+  }
+  if (stranded)
+    findings.push({
+      check: 'history-default-partition',
+      severity: 'warning',
+      message: `${stranded} recent history rows sit in default partitions`,
+      fix: 'Let the retention pass create their months (ensureHistoryPartitions moves them out)',
+      count: stranded,
+    });
+  const { rows: stale } = await sql.query<{ name: string }>(
+    `SELECT name FROM outbox_cursors WHERE updated_at < compute_now() - make_interval(secs => $1) ORDER BY name`,
+    [options.staleCursorSeconds ?? 86_400],
+  );
+  if (stale.length)
+    findings.push({
+      check: 'retention-cursors',
+      severity: 'warning',
+      message: `Durable cursors have not moved for a day: ${stale.map((row) => row.name).join(', ')}; their streams are not pruned behind them`,
+      fix: 'Revive the sink or reader that owns each cursor, or delete its outbox_cursors row if it is gone for good',
+      count: stale.length,
+    });
+  return findings;
+}
+
+/**
  * The retention module: a singleton pass every `every` (outbox, authz_changes, settled commands,
  * attestation uses, join requests, and history partitions: created ahead, inventory/usage pruned,
  * emptied months dropped).
@@ -161,6 +217,7 @@ export async function runRetention(
 export function retentionModule(options: RetentionModuleOptions = {}): ComputeModule<'retention'> {
   return defineModule({
     name: 'retention',
+    selfCheck: (context) => retentionFindings(context.sql),
     reconcilers: [
       {
         name: retentionWorkKind,
