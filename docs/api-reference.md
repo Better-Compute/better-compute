@@ -41,15 +41,15 @@ Every call is authenticated (except public methods), refused before any database
 | `sites.list`   | read     | `compute:sites:read` @ `compute-tenant` + items                                       | v0.1  | registered |
 | `sites.get`    | read     | `compute:sites:read` @ `compute-site`                                                 | v0.1  | registered |
 | `sites.create` | mutation | `compute:sites:manage` @ `compute-fleet` or `compute:sites:manage` @ `compute-tenant` | v0.1  | registered |
-| `sites.update` | mutation | `compute:sites:manage` @ `compute-site`                                               | v0.2  | planned    |
-| `sites.delete` | mutation | `compute:sites:manage` @ `compute-site`                                               | v0.2  | planned    |
+| `sites.update` | mutation | `compute:sites:manage` @ `compute-site`                                               | v0.2  | registered |
+| `sites.delete` | mutation | `compute:sites:manage` @ `compute-site`                                               | v0.2  | registered |
 
 ### `siteTokens` (server)
 
-| Method              | Kind     | Authorization                           | Phase | Status  |
-| ------------------- | -------- | --------------------------------------- | ----- | ------- |
-| `siteTokens.create` | mutation | `compute:sites:manage` @ `compute-site` | v0.2  | planned |
-| `siteTokens.revoke` | mutation | `compute:sites:manage` @ `compute-site` | v0.2  | planned |
+| Method              | Kind     | Authorization                           | Phase | Status     |
+| ------------------- | -------- | --------------------------------------- | ----- | ---------- |
+| `siteTokens.create` | mutation | `compute:sites:manage` @ `compute-site` | v0.2  | registered |
+| `siteTokens.revoke` | mutation | `compute:sites:manage` @ `compute-site` | v0.2  | registered |
 
 ### `pools` (capacity)
 
@@ -74,11 +74,11 @@ Every call is authenticated (except public methods), refused before any database
 
 ### `joinRequests` (server)
 
-| Method                 | Kind     | Authorization                                 | Phase | Status  |
-| ---------------------- | -------- | --------------------------------------------- | ----- | ------- |
-| `joinRequests.list`    | read     | `compute:join-tokens:read` @ `compute-pool`   | v0.2  | planned |
-| `joinRequests.approve` | mutation | `compute:join-tokens:create` @ `compute-pool` | v0.2  | planned |
-| `joinRequests.reject`  | mutation | `compute:join-tokens:create` @ `compute-pool` | v0.2  | planned |
+| Method                 | Kind     | Authorization                                 | Phase | Status     |
+| ---------------------- | -------- | --------------------------------------------- | ----- | ---------- |
+| `joinRequests.list`    | read     | `compute:join-tokens:read` @ `compute-pool`   | v0.2  | registered |
+| `joinRequests.approve` | mutation | `compute:join-tokens:create` @ `compute-pool` | v0.2  | registered |
+| `joinRequests.reject`  | mutation | `compute:join-tokens:create` @ `compute-pool` | v0.2  | registered |
 
 ### `nodes` (server)
 
@@ -94,7 +94,7 @@ Every call is authenticated (except public methods), refused before any database
 | `nodes.taint`          | mutation | `compute:nodes:update` @ `compute-node`          | v0.1  | registered |
 | `nodes.adopt`          | mutation | `compute:nodes:provision` @ `compute-node`       | v0.1  | registered |
 | `nodes.revokeIdentity` | mutation | `compute:nodes:revoke-identity` @ `compute-node` | v0.1  | registered |
-| `nodes.delete`         | mutation | `compute:nodes:delete` @ `compute-node`          | v0.2  | planned    |
+| `nodes.delete`         | mutation | `compute:nodes:delete` @ `compute-node`          | v0.2  | registered |
 | `nodes.issueSshCert`   | mutation | `compute:nodes:ssh-root` @ `compute-node`        | v0.3  | planned    |
 
 ### `inventory` (inventory)
@@ -171,16 +171,16 @@ Every call is authenticated (except public methods), refused before any database
 
 ### `drivers` (server)
 
-| Method         | Kind | Authorization                             | Phase | Status  |
-| -------------- | ---- | ----------------------------------------- | ----- | ------- |
-| `drivers.list` | read | `compute:drivers:read` @ `compute-tenant` | v0.2  | planned |
+| Method         | Kind | Authorization                             | Phase | Status     |
+| -------------- | ---- | ----------------------------------------- | ----- | ---------- |
+| `drivers.list` | read | `compute:drivers:read` @ `compute-tenant` | v0.2  | registered |
 
 ### `secrets` (server)
 
-| Method           | Kind     | Authorization                                                                             | Phase | Status  |
-| ---------------- | -------- | ----------------------------------------------------------------------------------------- | ----- | ------- |
-| `secrets.put`    | mutation | `compute:secrets:manage` @ `compute-tenant` or `compute:secrets:manage` @ `compute-fleet` | v0.2  | planned |
-| `secrets.delete` | mutation | `compute:secrets:manage` @ `compute-tenant` or `compute:secrets:manage` @ `compute-fleet` | v0.2  | planned |
+| Method           | Kind     | Authorization                                                                             | Phase | Status     |
+| ---------------- | -------- | ----------------------------------------------------------------------------------------- | ----- | ---------- |
+| `secrets.put`    | mutation | `compute:secrets:manage` @ `compute-tenant` or `compute:secrets:manage` @ `compute-fleet` | v0.2  | registered |
+| `secrets.delete` | mutation | `compute:secrets:manage` @ `compute-tenant` or `compute:secrets:manage` @ `compute-fleet` | v0.2  | registered |
 
 ### `metal` (metal)
 
