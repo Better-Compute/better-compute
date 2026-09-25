@@ -1164,6 +1164,13 @@ export function createGateway(options: GatewayOptions): Gateway {
 
     openTunnel(request) {
       if (!started || stopping) return Promise.reject(new ComputeError('INVALID_STATE', 'gateway is not ready'));
+      // The WS fallback carries the Session frames only (§7.1): no Tunnel stream can open over it, so
+      // say so now instead of timing out.
+      const session = sessions.get(request.nodeId);
+      if (session && !session.closed && session.peer.signedOnly)
+        return Promise.reject(
+          new ComputeError('INVALID_STATE', `Node ${request.nodeId} is connected over the WebSocket fallback, which carries no tunnels`),
+        );
       return tunnelRegistry.open(request);
     },
 

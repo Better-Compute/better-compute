@@ -27,7 +27,7 @@ import {
   TunnelFrameSchema,
   type TunnelFrame,
 } from '@better-compute/protocol';
-import { gatewayFixture, type GatewayFixture } from './support/gateway.js';
+import { FakeStream, gatewayFixture, helloFrame, type GatewayFixture } from './support/gateway.js';
 
 // Tunnels (PLAN.md §7.6, §13, v0.3 exit): exec tickets verified by the gateway and again by the
 // daemon, relay with backpressure, re-authorization, the 12 h cap, revocation and close-by-subject.
@@ -217,6 +217,18 @@ describe('tunnel core', () => {
     expect(await f.gateway.reauthorizeTunnels({ subject: 'user_1' })).toBe(1);
     expect(seen).toEqual([{ sessionId: 'ses_1', action: 'compute:nodes:console' }]);
     expect(caller.closed?.code).toBe(GrpcCode.PERMISSION_DENIED);
+  });
+
+  it('refuses at once a tunnel to a node on the WebSocket fallback (no Tunnel stream there)', async () => {
+    const node = await f.addNode();
+    const stream = new FakeStream();
+    await f.gateway.open({ nodeId: node, signedOnly: true }, stream).receive(helloFrame(node));
+    const ticket = issuer.issue({ nodeId: node, sid: 'tun_ws', op: 'console', subject: 'user_1' });
+    await expect(f.gateway.openTunnel({ ticket: ticket.token, nodeId: node, caller: new Side() })).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message: expect.stringContaining('WebSocket fallback'),
+    });
+    expect(stream.of('openTunnel')).toEqual([]);
   });
 
   it('closes after IAM is unreachable for more than 2 minutes, and at the 12 h cap', async () => {
