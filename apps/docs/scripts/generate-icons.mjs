@@ -2,7 +2,7 @@
 // Run it after changing the mark: `node apps/docs/scripts/generate-icons.mjs`. The outputs are committed.
 //
 //   favicon.ico            16, 32, 48 px ink tiles, for browsers and tools without SVG favicon support
-//   icon.svg               the bare mark, ink on light tabs and white on dark ones (prefers-color-scheme)
+//   icon.svg               the bare mark in the signal amber, a shade darker on light tabs (prefers-color-scheme)
 //   apple-touch-icon.png   180 px, full bleed (iOS rounds the corners itself)
 //   icon-192.png, icon-512.png, icon-maskable-512.png   web app manifest icons (app/manifest.ts)
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -23,8 +23,9 @@ const sharp = createRequire(createRequire(join(app, 'package.json')).resolve('ne
 const mark =
   'M7.25 5.25H7.75V1.75H9.25V5.25H11.25V1.75H12.75V5.25H14.75V1.75H16.25V5.25H16.75A2 2 0 0 1 18.75 7.25V7.75H22.25V9.25H18.75V11.25H22.25V12.75H18.75V14.75H22.25V16.25H18.75V16.75A2 2 0 0 1 16.75 18.75H16.25V22.25H14.75V18.75H12.75V22.25H11.25V18.75H9.25V22.25H7.75V18.75H7.25A2 2 0 0 1 5.25 16.75V16.25H1.75V14.75H5.25V12.75H1.75V11.25H5.25V9.25H1.75V7.75H5.25V7.25A2 2 0 0 1 7.25 5.25ZM9.25 8.25A1 1 0 0 0 8.25 9.25V14.75A1 1 0 0 0 9.25 15.75H14.75A1 1 0 0 0 15.75 14.75V9.25A1 1 0 0 0 14.75 8.25H9.25ZM10.75 10.25A.5 .5 0 0 0 10.25 10.75V13.25A.5 .5 0 0 0 10.75 13.75H13.25A.5 .5 0 0 0 13.75 13.25V10.75A.5 .5 0 0 0 13.25 10.25H10.75Z';
 const markHeight = 20.5;
-const ink = '#121212';
-const paper = '#fafafa';
+// The instrument palette (styles/instrument.css): an amber chip on a graphite tile, amber on both tab themes.
+const ink = '#0b0c0f';
+const paper = '#ff7f1a';
 
 /** The mark centered on a square ink tile. `fill` is the mark's height as a share of the tile; `radius` rounds the corners. */
 function tile(size, { fill, radius = 0 }) {
@@ -68,12 +69,12 @@ const favicon = ico(
       [16, 0.8],
       [32, 0.74],
       [48, 0.7],
-    ].map(async ([size, fill]) => ({ size, data: await png(tile(size, { fill, radius: 0.22 })) })),
+    ].map(async ([size, fill]) => ({ size, data: await png(tile(size, { fill, radius: 0.08 })) })),
   ),
 );
 
 const adaptiveSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="1.5 1.5 21 21">
-  <style>path{fill:${ink}}@media (prefers-color-scheme:dark){path{fill:${paper}}}</style>
+  <style>path{fill:#e8680b}@media (prefers-color-scheme:dark){path{fill:${paper}}}</style>
   <path fill-rule="evenodd" d="${mark}"/>
 </svg>
 `;
@@ -82,8 +83,8 @@ const files = {
   'favicon.ico': favicon,
   'icon.svg': adaptiveSvg,
   'apple-touch-icon.png': await png(tile(180, { fill: 0.56 })),
-  'icon-192.png': await png(tile(192, { fill: 0.58, radius: 0.22 })),
-  'icon-512.png': await png(tile(512, { fill: 0.58, radius: 0.22 })),
+  'icon-192.png': await png(tile(192, { fill: 0.58, radius: 0.08 })),
+  'icon-512.png': await png(tile(512, { fill: 0.58, radius: 0.08 })),
   // Maskable icons are cropped to a circle as small as 80% of the width; the mark's corners stay inside it.
   'icon-maskable-512.png': await png(tile(512, { fill: 0.5 })),
 };

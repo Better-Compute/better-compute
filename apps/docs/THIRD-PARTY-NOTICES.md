@@ -1,8 +1,8 @@
 # Third-party notices
 
 The Better Compute documentation site is licensed under the Apache License 2.0 with the rest of Better Compute,
-except for the third-party source below, which keeps its own license. The site's design layer (BoardUI with the
-monochrome theme) is shared with the Better IAM documentation site.
+except for the third-party source below, which keeps its own license. Like the Better IAM documentation site, it is
+built on BoardUI, with its own "instrument" theme on top (`styles/instrument.css`).
 
 ## BoardUI
 

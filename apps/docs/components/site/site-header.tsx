@@ -16,6 +16,7 @@ import { IconButton } from '@/components/base/buttons/icon-button';
 import { ThemeToggle } from '@/components/application/theme/theme-toggle';
 import { Logo } from '@/components/logo';
 import { repositoryUrl } from '@/lib/repository';
+import { version } from '@/lib/shared';
 import { cx } from '@/utils/cx';
 import { Frame, gutter } from './frame';
 import { SearchButton, SearchIconButton } from './search-button';
@@ -57,8 +58,47 @@ export const navLinks: { label: string; href: string; match: (path: string) => b
   },
 ];
 
-/** The marketing header: sticky, hairline below, and inside the same rails as every band on the page. */
+/**
+ * The marketing header, drawn as the top unit of the rack: a thin status strip (release, simulator command,
+ * changelog) above a sticky bar with mono navigation labels. The active link sits on an amber bar.
+ */
 export function SiteHeader() {
+  return (
+    <>
+      <StatusStrip />
+      <HeaderBar />
+    </>
+  );
+}
+
+/** The status strip: facts only (the version and what runs today), no live data. */
+function StatusStrip() {
+  return (
+    <div className="border-b border-separator-border bg-surface-sunken">
+      <Frame
+        className={cx(
+          'flex h-8 items-center gap-4 font-mono text-[0.6875rem] tracking-[0.06em] text-text-tertiary uppercase',
+          gutter,
+        )}
+      >
+        <span className="flex items-center gap-2 text-text-secondary">
+          <span className="live-dot" />v{version} pre-release
+        </span>
+        <span className="hidden sm:inline">bcd: written, not built</span>
+        <span className="hidden md:inline">sim: better-compute dev --sim 8</span>
+        <Link
+          href="/docs/reference/changelog"
+          className="ms-auto flex items-center gap-1 text-text-secondary transition-colors hover:text-signal"
+        >
+          Changelog
+          <RiArrowRightLine className="size-3" aria-hidden />
+        </Link>
+      </Frame>
+    </div>
+  );
+}
+
+function HeaderBar() {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
   const [hovered, setHovered] = useState<string | null>(null);
@@ -99,16 +139,16 @@ export function SiteHeader() {
                 onFocus={() => setHovered(link.href)}
                 onBlur={() => setHovered(null)}
                 className={cx(
-                  'relative isolate rounded-lg px-2.5 py-1.5 text-body-medium transition-colors duration-150',
+                  'relative isolate px-2.5 py-1.5 font-mono text-caption-1-medium tracking-[0.06em] uppercase transition-colors duration-150',
                   active || hovered === link.href ? 'text-text-primary' : 'text-text-secondary',
                 )}
               >
-                {/* One pill glides to whichever link is under the pointer. */}
+                {/* One square slides to whichever link is under the pointer. */}
                 {hovered === link.href ? (
                   <motion.span
                     layoutId="site-nav-hover"
                     aria-hidden
-                    className="absolute inset-0 -z-10 rounded-lg bg-background-secondary-default"
+                    className="absolute inset-0 -z-10 bg-background-secondary-default"
                     transition={{ type: 'spring', stiffness: 500, damping: 38 }}
                   />
                 ) : null}
@@ -116,8 +156,8 @@ export function SiteHeader() {
                 {active ? (
                   <span
                     aria-hidden
-                    // Sits on the header's bottom hairline (link is 32px tall, centered in 56px).
-                    className="absolute inset-x-2.5 -bottom-[12px] h-px bg-text-primary"
+                    // Sits on the header's bottom hairline (link is 28px tall, centered in 56px).
+                    className="absolute inset-x-2.5 -bottom-[14px] h-[2px] bg-signal-fill"
                   />
                 ) : null}
               </Link>
@@ -148,7 +188,7 @@ export function SiteHeader() {
               <Link
                 key={link.href}
                 href={link.href}
-                className="flex items-center justify-between rounded-lg px-2 py-2.5 text-headline-medium text-text-primary hover:bg-background-secondary-default"
+                className="flex items-center justify-between px-2 py-2.5 font-mono text-body-medium tracking-[0.04em] text-text-primary uppercase hover:bg-background-secondary-default"
               >
                 {link.label}
                 <RiArrowRightLine className="size-4 text-foreground-icon-tertiary" aria-hidden />

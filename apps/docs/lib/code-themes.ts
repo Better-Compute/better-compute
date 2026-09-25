@@ -1,36 +1,39 @@
 import type { ThemeRegistrationRaw } from 'shiki';
 
 /**
- * Grayscale Shiki themes for the monochrome site. Syntax is carried by weight and tone instead of hue: keywords
- * are bold at full contrast, strings and numbers sit one step back, punctuation two, and comments are italic
- * at the lightest readable gray. Used by MDX code blocks (source.config.ts) and the landing page.
+ * Instrument Shiki themes: graphite text with the site's one signal hue. Keywords are amber, like the lit
+ * controls on a panel; function names are full-contrast ink; strings and numbers sit one step back, punctuation
+ * two, and comments are italic at the lightest readable graphite. Used by MDX code blocks (source.config.ts) and
+ * the landing page.
  */
-function monochrome(type: 'light' | 'dark'): ThemeRegistrationRaw {
+function instrument(type: 'light' | 'dark'): ThemeRegistrationRaw {
   const light = type === 'light';
   const tone = light
     ? {
-        fg: '#0a0a0a',
-        strong: '#000000',
-        string: '#525252',
-        literal: '#404040',
-        type: '#262626',
-        punctuation: '#737373',
-        comment: '#8f8f8f',
-        bg: '#fafafa',
+        fg: '#17191d',
+        strong: '#bd5006',
+        ink: '#0b0c0f',
+        string: '#4b515a',
+        literal: '#933f0b',
+        type: '#22262c',
+        punctuation: '#6d747e',
+        comment: '#8a919b',
+        bg: '#ffffff',
       }
     : {
-        fg: '#e5e5e5',
-        strong: '#ffffff',
-        string: '#a3a3a3',
-        literal: '#d4d4d4',
-        type: '#f5f5f5',
-        punctuation: '#8a8a8a',
-        comment: '#6f6f6f',
-        bg: '#171717',
+        fg: '#e0e3e7',
+        strong: '#ff9838',
+        ink: '#f7f8f9',
+        string: '#aab0b8',
+        literal: '#ffcf9e',
+        type: '#eff1f3',
+        punctuation: '#7a818b',
+        comment: '#5f666f',
+        bg: '#101215',
       };
 
   return {
-    name: `better-compute-mono-${type}`,
+    name: `better-compute-instrument-${type}`,
     type,
     colors: {
       'editor.background': tone.bg,
@@ -56,7 +59,7 @@ function monochrome(type: 'light' | 'dark'): ThemeRegistrationRaw {
           'constant.language.null',
           'constant.language.undefined',
         ],
-        settings: { foreground: tone.strong, fontStyle: 'bold' },
+        settings: { foreground: tone.strong },
       },
       {
         scope: [
@@ -79,7 +82,7 @@ function monochrome(type: 'light' | 'dark'): ThemeRegistrationRaw {
           'meta.function-call entity.name.function',
           'entity.name.tag',
         ],
-        settings: { foreground: tone.fg, fontStyle: 'bold' },
+        settings: { foreground: tone.ink, fontStyle: 'bold' },
       },
       {
         scope: [
@@ -116,7 +119,7 @@ function monochrome(type: 'light' | 'dark'): ThemeRegistrationRaw {
       },
       { scope: ['markup.heading', 'markup.bold'], settings: { fontStyle: 'bold' } },
       { scope: ['markup.italic'], settings: { fontStyle: 'italic' } },
-      { scope: ['markup.inserted'], settings: { foreground: tone.strong } },
+      { scope: ['markup.inserted'], settings: { foreground: tone.ink } },
       {
         scope: ['markup.deleted'],
         settings: { foreground: tone.comment, fontStyle: 'strikethrough' },
@@ -126,6 +129,6 @@ function monochrome(type: 'light' | 'dark'): ThemeRegistrationRaw {
 }
 
 export const codeThemes = {
-  light: monochrome('light'),
-  dark: monochrome('dark'),
+  light: instrument('light'),
+  dark: instrument('dark'),
 };

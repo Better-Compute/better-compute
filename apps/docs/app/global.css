@@ -3,10 +3,10 @@
 @import 'fumadocs-ui/css/preset.css';
 @import 'fumadocs-twoslash/twoslash.css';
 @import 'lenis/dist/lenis.css';
-/* BoardUI design tokens (npx boardui add theme typography), then the site's monochrome layer on top. */
+/* BoardUI design tokens (npx boardui add theme typography), then the site's instrument layer on top. */
 @import '../styles/theme.css';
 @import '../styles/typography.css';
-@import '../styles/monochrome.css';
+@import '../styles/instrument.css';
 
 @source '../components';
 @source '../app';
@@ -36,7 +36,7 @@ html > body[data-scroll-locked] {
 }
 
 ::selection {
-  background: color-mix(in srgb, var(--color-text-primary) 16%, transparent);
+  background: color-mix(in srgb, var(--color-signal-500) 30%, transparent);
 }
 
 /* Freeze hover and color transitions while the theme toggle captures the next palette (BoardUI globals.css). */
@@ -61,18 +61,57 @@ html > body[data-scroll-locked] {
   font-size: 0.875rem;
 }
 
+/* Headings are set in Plex Mono, like the labels on a panel; body text stays in Plex Sans. */
 .prose :where(h1, h2, h3, h4):not(:where([class~='not-prose'] *)) {
-  letter-spacing: -0.015em;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  letter-spacing: -0.03em;
+}
+
+.prose :where(h2):not(:where([class~='not-prose'] *)) {
+  border-top: 1px solid var(--color-separator-border);
+  padding-top: 1.25rem;
 }
 
 .prose :where(a):not(:where([class~='not-prose'] *)) {
-  text-decoration-color: color-mix(in srgb, var(--color-text-primary) 35%, transparent);
+  text-decoration-color: color-mix(in srgb, var(--color-signal) 55%, transparent);
   text-underline-offset: 3px;
-  transition: text-decoration-color 150ms ease;
+  transition:
+    text-decoration-color 150ms ease,
+    color 150ms ease;
 }
 
 .prose :where(a):not(:where([class~='not-prose'] *)):hover {
-  text-decoration-color: var(--color-text-primary);
+  color: var(--color-signal);
+  text-decoration-color: var(--color-signal);
+}
+
+/* The docs page title: mono, like the headings below it. */
+#nd-page h1 {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  letter-spacing: -0.04em;
+}
+
+/* Sidebar: the active page carries an amber bar, like a selected channel. */
+#nd-sidebar a[data-active='true'] {
+  position: relative;
+  color: var(--color-text-primary);
+  background: var(--color-signal-soft);
+}
+
+#nd-sidebar a[data-active='true']::before {
+  content: '';
+  position: absolute;
+  inset-block: 4px;
+  inset-inline-start: 0;
+  width: 2px;
+  background: var(--color-signal-fill);
+}
+
+/* Code blocks: square, with a hairline top strip like a terminal pane. */
+figure.shiki {
+  border-radius: 2px;
 }
 
 /* ---------------------------------------------------------------------------
@@ -121,6 +160,14 @@ html > body[data-scroll-locked] {
   mask-image: linear-gradient(to bottom, black, transparent 85%);
 }
 
+/* A blueprint grid behind schematics (Mermaid diagrams), not faded. */
+.grid-lines-full {
+  background-image:
+    linear-gradient(to right, var(--color-hatch) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--color-hatch) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
 .live-dot {
   position: relative;
   display: inline-block;
@@ -128,7 +175,8 @@ html > body[data-scroll-locked] {
   height: 6px;
   flex-shrink: 0;
   border-radius: 9999px;
-  background: var(--color-text-primary);
+  background: var(--color-signal-fill);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--color-signal-500) 70%, transparent);
 }
 
 .live-dot::after {
@@ -136,8 +184,98 @@ html > body[data-scroll-locked] {
   position: absolute;
   inset: -3px;
   border-radius: inherit;
-  border: 1px solid var(--color-text-primary);
+  border: 1px solid var(--color-signal-fill);
   animation: live-pulse 1.8s ease-out infinite;
+}
+
+/* A status LED: amber when lit, a dark socket when not. */
+.led {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: var(--color-neutral-600);
+}
+
+.led[data-on='true'] {
+  background: var(--color-signal-fill);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--color-signal-500) 70%, transparent);
+}
+
+/*
+ * Rack rails: the page frame hangs between two mounting rails with square holes, one hole per
+ * 22 px. They replace the Better IAM site's hairline rails and crosshairs, from sm up.
+ */
+.rack-frame::before,
+.rack-frame::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 14px;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0 9px,
+    var(--color-rail-hole) 9px 13px,
+    transparent 13px 22px
+  );
+  background-size: 4px 100%;
+  background-repeat: no-repeat;
+  background-position: center top;
+  display: none;
+}
+
+.rack-frame::before {
+  left: -15px;
+  border-inline-start: 1px solid var(--color-separator-border);
+}
+
+.rack-frame::after {
+  right: -15px;
+  border-inline-end: 1px solid var(--color-separator-border);
+}
+
+@media (min-width: 40rem) {
+  .rack-frame::before,
+  .rack-frame::after {
+    display: block;
+  }
+}
+
+/* One GPU in a fleet board: an outlined socket, filled amber when booked. */
+.gpu-cell {
+  border: 1px solid var(--color-neutral-600);
+  transition:
+    background-color 260ms ease,
+    border-color 260ms ease,
+    box-shadow 260ms ease;
+}
+
+.gpu-cell[data-state='booked'] {
+  background: var(--color-signal-fill);
+  border-color: var(--color-signal-fill);
+}
+
+.gpu-cell[data-state='fresh'] {
+  background: var(--color-signal-fill);
+  border-color: var(--color-signal-300);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--color-signal-500) 80%, transparent);
+}
+
+.gpu-cell[data-state='cordoned'] {
+  border-style: dashed;
+  border-color: var(--color-neutral-600);
+  opacity: 0.55;
+}
+
+.scanlines {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--color-text-primary) 3%, transparent) 0 1px,
+    transparent 1px 3px
+  );
 }
 
 @keyframes live-pulse {

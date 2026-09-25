@@ -15,22 +15,25 @@ function renderChart(id: string, chart: string, theme: 'dark' | 'default'): Prom
   let pending = cache.get(key);
   if (!pending) {
     pending = loadMermaid().then(async (mermaid) => {
-      // Mermaid's `base` theme takes every color from these variables: neutral grays to match the monochrome site.
+      // Mermaid's `base` theme takes every color from these variables: graphite panels in Plex Mono, with the
+      // signal amber only on the wires (edges and message arrows), like a schematic of live connections.
       const dark = theme === 'dark';
-      const ink = dark ? '#fafafa' : '#0a0a0a';
-      const node = dark ? '#262626' : '#ffffff';
-      const edge = dark ? '#404040' : '#d4d4d4';
-      const muted = dark ? '#171717' : '#f7f7f7';
+      const ink = dark ? '#eff1f3' : '#0b0c0f';
+      const node = dark ? '#17191d' : '#ffffff';
+      const edge = dark ? '#31363d' : '#c5cad1';
+      const muted = dark ? '#101215' : '#eff1f3';
+      const border = dark ? '#6d747e' : '#31363d';
+      const wire = dark ? '#ff9838' : '#bd5006';
       mermaid.initialize({
         startOnLoad: false,
         securityLevel: 'strict',
-        fontFamily: 'var(--font-inter), ui-sans-serif, system-ui',
+        fontFamily: 'var(--font-plex-mono), ui-monospace, monospace',
         theme: 'base',
         themeVariables: {
           darkMode: dark,
           background: 'transparent',
           primaryColor: node,
-          primaryBorderColor: dark ? '#737373' : '#0a0a0a',
+          primaryBorderColor: border,
           primaryTextColor: ink,
           secondaryColor: muted,
           secondaryBorderColor: edge,
@@ -38,17 +41,17 @@ function renderChart(id: string, chart: string, theme: 'dark' | 'default'): Prom
           tertiaryColor: muted,
           tertiaryBorderColor: edge,
           tertiaryTextColor: ink,
-          lineColor: dark ? '#a3a3a3' : '#737373',
+          lineColor: wire,
           textColor: ink,
           mainBkg: node,
-          nodeBorder: dark ? '#737373' : '#0a0a0a',
+          nodeBorder: border,
           clusterBkg: muted,
           clusterBorder: edge,
-          edgeLabelBackground: dark ? '#121212' : '#ffffff',
+          edgeLabelBackground: dark ? '#0b0c0f' : '#f3f4f6',
           actorBkg: node,
-          actorBorder: dark ? '#737373' : '#0a0a0a',
+          actorBorder: border,
           actorTextColor: ink,
-          signalColor: ink,
+          signalColor: wire,
           signalTextColor: ink,
           noteBkgColor: muted,
           noteBorderColor: edge,
@@ -73,7 +76,7 @@ function Chart({ id, chart, theme }: { id: string; chart: string; theme: 'dark' 
   const svg = use(renderChart(id, chart, theme));
   return (
     <div
-      className="not-prose my-6 flex justify-center overflow-x-auto rounded-2xl border border-border-button-default bg-surface-sunken p-4 [&_svg]:h-auto [&_svg]:max-w-full"
+      className="not-prose grid-lines-full my-6 flex justify-center overflow-x-auto border border-border-button-default bg-surface-sunken p-4 [&_svg]:h-auto [&_svg]:max-w-full"
       dangerouslySetInnerHTML={{ __html: svg }}
     />
   );
@@ -90,7 +93,7 @@ export function Mermaid({ chart }: { chart: string }) {
   if (!mounted) {
     return (
       <div
-        className="not-prose my-6 h-48 animate-pulse rounded-2xl border border-border-button-default bg-surface-sunken"
+        className="not-prose my-6 h-48 animate-pulse border border-border-button-default bg-surface-sunken"
         aria-hidden
       />
     );

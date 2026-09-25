@@ -31,7 +31,7 @@ fresh checkout run `node node_modules/fumadocs-mdx/bin.js` in `apps/docs` first)
 | `lib/stats.ts`                                                                              | Counts derived from `generated/` (version, methods served, error codes, commands) for the landing page and cards |
 | `lib/shared.ts`, `lib/repository.ts`, `lib/routes.ts`                                       | Name, description, version, and site URL; repository links and route prefixes (the last two are client-safe)     |
 | `lib/api-catalog.ts`, `lib/api-usage.ts`                                                    | API catalog lookups, and which guides call which methods (the "API on this page" list)                           |
-| `source.config.ts`                                                                          | MDX pipeline: Mermaid, admonitions, steps, npm tabs, grayscale Shiki themes, opt-in Twoslash, last-modified      |
+| `source.config.ts`                                                                          | MDX pipeline: Mermaid, admonitions, steps, npm tabs, instrument Shiki themes, opt-in Twoslash, last-modified     |
 | `lib/source.ts`                                                                             | Fumadocs loader, icons, status badges, `llms.txt` rendering                                                      |
 | `app/api/mcp/route.ts`                                                                      | The docs' MCP server (search, pages, API method, error code, and CLI command lookups)                            |
 | `components/`                                                                               | Site and MDX components (`home/` is the landing page, `base/` BoardUI)                                           |
@@ -39,25 +39,44 @@ fresh checkout run `node node_modules/fumadocs-mdx/bin.js` in `apps/docs` first)
 
 ## Design system
 
-The site is monochrome and built on [BoardUI](https://www.boardui.com), identical to the Better IAM docs site: its
-components are source files in this app (`npx boardui@latest add <name>` from `apps/docs` adds more), and every
-color is a BoardUI semantic token.
+The site is built on [BoardUI](https://www.boardui.com), like the Better IAM docs site, but it deliberately does not
+look like it. Better IAM's site is black and white with soft corners, Inter, and hairline rails with crosshairs. This
+one is a control-room **instrument**: graphite, dark first, one signal hue, square corners, IBM Plex, and a rack for
+a frame. BoardUI's components are source files in this app (`npx boardui@latest add <name>` from `apps/docs` adds
+more), and every color is a BoardUI semantic token or one of the signal tokens below.
 
 - `styles/theme.css`, `styles/typography.css`: BoardUI's tokens and type ramp, unmodified (`text-body-medium`,
   `bg-background-primary-default`, `border-border-button-default`, ...).
-- `styles/monochrome.css`: the site's layer on top. It turns BoardUI's accent ramp neutral (black controls in light
-  mode, white in dark), and maps Fumadocs' `--color-fd-*` palette onto the same tokens so the docs shell matches.
+- `styles/instrument.css`: the site's layer on top.
+  - Graphite neutrals (a cool shift of the neutral scale); dark mode is the default (`app/layout.tsx`).
+  - Thermal amber (`--color-signal-50..950`) as BoardUI's accent ramp, so primary buttons, switches, and focus
+    rings are amber with dark ink.
+  - Semantic `signal` (amber as text, 4.5:1 on the page), `signal-fill` (LEDs, booked cells), and `signal-soft`.
+  - Radii from 0 to 3 px.
+  - Fumadocs' `--color-fd-*` palette mapped onto the same tokens, so the docs shell matches.
+- Amber is reserved for what is live, booked, or actionable: primary actions, status LEDs, booked GPUs, the active
+  navigation item, warnings. Everything else stays graphite, and other states are told apart by fill, outline,
+  dashes, and hatching.
+- Type: IBM Plex Sans for reading, IBM Plex Mono for display headings, docs headings, labels, navigation, and
+  numbers (BoardUI's Figma spec names Plex Mono as its code face).
 - `components/base/*`, `utils/cx.ts`: BoardUI components. Two local changes, marked in the source: the primary
-  button label and the selected switch thumb read tokens, so they invert correctly in dark mode. Icons come from
-  `react-icons/ri` (the same Remix Icon set BoardUI uses) instead of `@remixicon/react`.
+  button label and the selected switch thumb read tokens. Icons come from `react-icons/ri` (the same Remix Icon set
+  BoardUI uses) instead of `@remixicon/react`.
 - `components/application/theme/theme-toggle.tsx`: BoardUI's theme toggle, backed by next-themes.
-- `components/site/*`: the marketing shell (header, footer, Lenis smooth scrolling, and the rail frame every
-  landing band aligns to). `components/docs/*`: BoardUI versions of Fumadocs' `Callout` and `Card`.
-- `components/logo.tsx`: the mark, a solid chip with its die window cut out, drawn as one even-odd path on a 24 px
-  grid in the current color, beside the "Better" and secondary-colored "Compute" wordmark.
-- `lib/code-themes.ts`: grayscale Shiki themes for every code block.
+- `components/site/*`: the marketing shell, drawn as a rack.
+  - A status strip and a header with mono navigation.
+  - Two mounting rails with square holes (`.rack-frame`) that every band hangs between.
+  - Square screws where bands meet the rails, and `U02`-style unit tags on the landing chapters.
+  - The footer and Lenis smooth scrolling.
+- `components/docs/*`: Fumadocs' `Callout` as a panel annotation (amber stripe for warnings) and `Cards` as a patch
+  panel.
+- `components/home/fleet-board.tsx`: the hero's simulated fleet board, which follows the placer's default scoring
+  in miniature and is labelled as a simulation.
+- `components/logo.tsx`: the amber chip mark beside the `better/compute` wordmark in Plex Mono.
+- `lib/code-themes.ts`: instrument Shiki themes (amber keywords on graphite).
+- `components/mermaid.tsx`: schematics in Plex Mono with amber wires on a blueprint grid.
 
-No hues and no radial gradients: states are told apart by weight (solid ink, outline, dashed, hatched).
+No radial gradients, and no second hue.
 
 ## Deploying
 
@@ -97,7 +116,7 @@ card. Docs pages add `article:*` tags, Slack's "Section" and "Reading time" labe
 | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | `lib/metadata.ts`                                                                  | Site title, description, and keywords; section names; `pageMetadata()`; JSON-LD builders     |
 | `lib/docs-seo.ts`                                                                  | A docs page's document title, section trail, keywords, and breadcrumbs                       |
-| `lib/og.tsx`, `lib/og-fonts.ts`                                                    | The social card renderer (Inter and JetBrains Mono, fetched from Google Fonts at build time) |
+| `lib/og.tsx`, `lib/og-fonts.ts`                                                    | The social card renderer (IBM Plex Sans and Mono, fetched from Google Fonts at build time)  |
 | `app/og/docs/[...slug]/route.tsx`, `app/og/[image]/route.tsx`                      | Cards for docs pages (`/og/docs/{slug}/image.png`) and the home page                         |
 | `app/manifest.ts`, `public/{favicon.ico,icon.svg,apple-touch-icon.png,icon-*.png}` | Web app manifest and icons                                                                   |
 | `app/robots.ts`, `app/sitemap.ts`                                                  | Every crawler everywhere except `/api/`; the home page and every docs page                   |

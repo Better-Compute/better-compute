@@ -520,7 +520,7 @@ function FinalCta() {
             className="hatch hatch-drift pointer-events-none absolute inset-0 opacity-60"
           />
           <Reveal className="relative flex flex-col items-start gap-6">
-            <LogoMark className="size-10 text-text-primary" />
+            <LogoMark className="size-10 text-signal-fill" />
             <h2 className="max-w-md text-display-4-semibold tracking-[-0.03em] text-balance md:text-display-3-semibold md:leading-[1.12]">
               Run your own GPU capacity, with the guarantees of a database
             </h2>

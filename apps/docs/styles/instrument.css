@@ -1,0 +1,225 @@
+/* ---------------------------------------------------------------------------
+ * Better Compute "instrument" theme, layered on BoardUI (styles/theme.css).
+ *
+ * The Better IAM site is pure black and white with soft corners. This site reads as a
+ * control-room instrument instead:
+ *
+ * - Neutrals are a cool graphite, and dark mode is the default (app/layout.tsx).
+ * - One signal hue, thermal amber, and only for things that are live, booked or actionable:
+ *   primary buttons, status LEDs, booked GPU cells, the active navigation item, focus rings.
+ *   Everything else stays graphite. States that are not "live" are told apart by fill, outline
+ *   and hatching, never by a second hue.
+ * - Corners are square (radii of 0 to 3 px), like rack hardware.
+ * - IBM Plex Sans for reading, IBM Plex Mono for display headings, labels and numbers
+ *   (BoardUI's Figma spec names Plex Mono as its code face).
+ *
+ * BoardUI tints interactive surfaces from its accent-* ramp, so the ramp is the amber signal in
+ * both themes. Every token overridden in :root is repeated in .dark, because both rules come after
+ * BoardUI's .dark block and a lone :root override would win there.
+ * --------------------------------------------------------------------------- */
+
+@theme {
+  --font-sans: var(--font-plex-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Graphite: Tailwind's neutral scale shifted slightly toward blue. */
+  --color-neutral-50: #f7f8f9;
+  --color-neutral-100: #eff1f3;
+  --color-neutral-200: #e0e3e7;
+  --color-neutral-300: #c5cad1;
+  --color-neutral-400: #99a0aa;
+  --color-neutral-500: #6d747e;
+  --color-neutral-600: #4b515a;
+  --color-neutral-700: #31363d;
+  --color-neutral-800: #22262c;
+  --color-neutral-900: #17191d;
+  --color-neutral-925: #101215;
+  --color-neutral-950: #0b0c0f;
+
+  /* Thermal amber, the one signal hue. */
+  --color-signal-50: #fff6ec;
+  --color-signal-100: #ffe8cf;
+  --color-signal-200: #ffcf9e;
+  --color-signal-300: #ffb266;
+  --color-signal-400: #ff9838;
+  --color-signal-500: #ff7f1a;
+  --color-signal-600: #e8680b;
+  --color-signal-700: #bd5006;
+  --color-signal-800: #933f0b;
+  --color-signal-900: #76340d;
+  --color-signal-950: #401804;
+
+  /* Square hardware corners. rounded-full stays round for LEDs and dots. */
+  --radius-xs: 0px;
+  --radius-sm: 1px;
+  --radius-md: 2px;
+  --radius-lg: 2px;
+  --radius-2lg: 2px;
+  --radius-xl: 3px;
+  --radius-2xl: 3px;
+  --radius-2-5xl: 3px;
+  --radius-3xl: 4px;
+  --radius-4xl: 4px;
+  --radius-notification-card: 3px;
+}
+
+:root {
+  --color-accent-50: var(--color-signal-50);
+  --color-accent-100: var(--color-signal-100);
+  --color-accent-200: var(--color-signal-200);
+  --color-accent-300: var(--color-signal-300);
+  --color-accent-400: var(--color-signal-400);
+  --color-accent-500: var(--color-signal-500);
+  --color-accent-600: var(--color-signal-600);
+  --color-accent-700: var(--color-signal-700);
+  --color-accent-800: var(--color-signal-800);
+  --color-accent-900: var(--color-signal-900);
+  --color-accent-950: var(--color-signal-950);
+
+  /* Amber fills carry dark ink in both themes (7.9:1 on signal-500). */
+  --color-button-primary-foreground: var(--color-neutral-950);
+  --color-switch-on-thumb-start: var(--color-white);
+  --color-switch-on-thumb-end: var(--color-neutral-100);
+
+  /* The signal as text (links, indices) must pass 4.5:1 on the page; as a fill it is always 500. */
+  --color-signal: var(--color-signal-700);
+  --color-signal-fill: var(--color-signal-500);
+  --color-signal-soft: color-mix(in srgb, var(--color-signal-500) 14%, transparent);
+  --color-rail-hole: var(--color-neutral-300);
+
+  --color-background-full: #f3f4f6;
+  --color-surface-raised: var(--color-white);
+  --color-surface-sunken: #eceef1;
+  --color-hatch: color-mix(in srgb, var(--color-neutral-950) 8%, transparent);
+
+  --color-fd-background: var(--color-background-full);
+  --color-fd-foreground: var(--color-text-primary);
+  --color-fd-muted: var(--color-background-secondary-default);
+  --color-fd-muted-foreground: var(--color-text-secondary);
+  --color-fd-popover: var(--color-white);
+  --color-fd-popover-foreground: var(--color-text-primary);
+  --color-fd-card: var(--color-white);
+  --color-fd-card-foreground: var(--color-text-primary);
+  --color-fd-border: var(--color-separator-border);
+  --color-fd-primary: var(--color-signal);
+  --color-fd-primary-foreground: var(--color-neutral-950);
+  --color-fd-secondary: var(--color-background-secondary-default);
+  --color-fd-secondary-foreground: var(--color-text-primary);
+  --color-fd-accent: var(--color-background-secondary-default);
+  --color-fd-accent-foreground: var(--color-text-primary);
+  --color-fd-ring: var(--color-signal-500);
+}
+
+.dark {
+  --color-accent-50: var(--color-signal-950);
+  --color-accent-100: var(--color-signal-900);
+  --color-accent-200: var(--color-signal-800);
+  --color-accent-300: var(--color-signal-700);
+  --color-accent-400: var(--color-signal-400);
+  --color-accent-500: var(--color-signal-500);
+  --color-accent-600: var(--color-signal-600);
+  --color-accent-700: var(--color-signal-300);
+  --color-accent-800: var(--color-signal-200);
+  --color-accent-900: var(--color-neutral-800);
+  --color-accent-950: var(--color-neutral-900);
+
+  --color-text-secondary: var(--color-neutral-400);
+  --color-text-tertiary: var(--color-neutral-500);
+
+  --color-button-primary-foreground: var(--color-neutral-950);
+  --color-switch-on-thumb-start: var(--color-neutral-100);
+  --color-switch-on-thumb-end: var(--color-neutral-300);
+
+  --color-button-ghost-background: var(--color-neutral-800);
+  --color-button-ghost-hover: var(--color-neutral-700);
+  --color-button-ghost-active: var(--color-neutral-600);
+  --color-button-ghost-foreground: var(--color-neutral-50);
+  --color-badge-new-background: var(--color-neutral-800);
+  --color-badge-new-text: var(--color-white);
+  --color-tab-count-selected-background: var(--color-neutral-800);
+  --color-date-range-background: var(--color-neutral-800);
+  --color-date-range-edge-background: var(--color-neutral-600);
+  --color-pill-tab-blue-selected-background: var(--color-neutral-800);
+
+  --color-signal: var(--color-signal-400);
+  --color-signal-fill: var(--color-signal-500);
+  --color-signal-soft: color-mix(in srgb, var(--color-signal-500) 16%, transparent);
+  --color-rail-hole: var(--color-neutral-700);
+
+  --color-background-full: var(--color-neutral-950);
+  --color-surface-raised: var(--color-neutral-900);
+  --color-surface-sunken: var(--color-neutral-925);
+  --color-hatch: color-mix(in srgb, var(--color-white) 7%, transparent);
+
+  --color-fd-background: var(--color-background-full);
+  --color-fd-foreground: var(--color-text-primary);
+  --color-fd-muted: var(--color-background-secondary-default);
+  --color-fd-muted-foreground: var(--color-text-secondary);
+  --color-fd-popover: var(--color-neutral-900);
+  --color-fd-popover-foreground: var(--color-text-primary);
+  --color-fd-card: var(--color-neutral-900);
+  --color-fd-card-foreground: var(--color-text-primary);
+  --color-fd-border: var(--color-separator-border);
+  --color-fd-primary: var(--color-signal);
+  --color-fd-primary-foreground: var(--color-neutral-950);
+  --color-fd-secondary: var(--color-neutral-800);
+  --color-fd-secondary-foreground: var(--color-text-primary);
+  --color-fd-accent: var(--color-neutral-800);
+  --color-fd-accent-foreground: var(--color-text-primary);
+  --color-fd-ring: var(--color-signal-500);
+}
+
+@theme inline {
+  --color-button-primary-foreground: var(--color-button-primary-foreground);
+  --color-switch-on-thumb-start: var(--color-switch-on-thumb-start);
+  --color-switch-on-thumb-end: var(--color-switch-on-thumb-end);
+  --color-surface-raised: var(--color-surface-raised);
+  --color-surface-sunken: var(--color-surface-sunken);
+  --color-hatch: var(--color-hatch);
+  --color-signal: var(--color-signal);
+  --color-signal-fill: var(--color-signal-fill);
+  --color-signal-soft: var(--color-signal-soft);
+  --color-rail-hole: var(--color-rail-hole);
+}
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  html {
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  /* BoardUI focus rings use ring-offset-2; Tailwind's default offset color is white, a halo in dark mode. */
+  *,
+  ::before,
+  ::after {
+    --tw-ring-offset-color: var(--color-background-full);
+  }
+}
+
+/* BoardUI shadow utilities follow the live dark elevation tokens (from BoardUI's globals.css). */
+.dark .shadow-2xs {
+  --tw-shadow: var(--shadow-2xs);
+}
+.dark .shadow-xs {
+  --tw-shadow: var(--shadow-xs);
+}
+.dark .shadow-sm {
+  --tw-shadow: var(--shadow-sm);
+}
+.dark .shadow-md {
+  --tw-shadow: var(--shadow-md);
+}
+.dark .shadow-lg {
+  --tw-shadow: var(--shadow-lg);
+}
+.dark .shadow-card {
+  --tw-shadow: var(--shadow-card);
+}
+.dark .shadow-dropdown {
+  --tw-shadow: var(--shadow-dropdown);
+}

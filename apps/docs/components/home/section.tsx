@@ -18,12 +18,12 @@ export function Points({ points, className }: { points: Point[]; className?: str
       {points.map((point) => (
         <StaggerItem
           key={point.lead}
-          className="group/point -mx-3 flex gap-3 rounded-xl px-3 py-1.5 text-body-regular leading-6 transition-colors duration-200 hover:bg-background-secondary-default"
+          className="group/point -mx-3 flex gap-3 border-s-2 border-transparent px-3 py-1.5 text-body-regular leading-6 transition-colors duration-200 hover:border-signal-fill hover:bg-background-secondary-default"
         >
-          {/* The rule stretches toward the claim under the pointer. */}
+          {/* An LED per claim: it lights for the claim under the pointer. */}
           <span
             aria-hidden
-            className="mt-[0.7rem] h-px w-3 shrink-0 bg-text-primary transition-[width] duration-300 ease-out group-hover/point:w-6"
+            className="led mt-[0.55rem] transition-[background-color,box-shadow] duration-200 group-hover/point:bg-signal-fill group-hover/point:shadow-[0_0_6px_var(--color-signal-500)]"
           />
           <span className="text-text-secondary transition-colors duration-200 group-hover/point:text-text-primary">
             <span className="text-body-medium text-text-primary">{point.lead}</span> {point.body}
@@ -54,7 +54,11 @@ export function SplitExplainer({
   ...props
 }: ExplainerProps & { reverse?: boolean }) {
   return (
-    <Band id={props.id} frameClassName={cx(props.sunken && 'bg-surface-sunken')}>
+    <Band
+      id={props.id}
+      unit={props.index}
+      frameClassName={cx(props.sunken && 'bg-surface-sunken')}
+    >
       <div
         className={cx('grid items-center gap-12 py-16 md:py-20 lg:grid-cols-12 lg:gap-10', gutter)}
       >
@@ -83,7 +87,11 @@ export function SplitExplainer({
 /** Heading and claims side by side, with a full-width diagram below. */
 export function StackedExplainer(props: ExplainerProps) {
   return (
-    <Band id={props.id} frameClassName={cx(props.sunken && 'bg-surface-sunken')}>
+    <Band
+      id={props.id}
+      unit={props.index}
+      frameClassName={cx(props.sunken && 'bg-surface-sunken')}
+    >
       <div className={cx('py-16 md:py-20', gutter)}>
         <div className="grid gap-8 lg:grid-cols-12">
           <SectionHeading

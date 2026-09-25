@@ -5,94 +5,82 @@ import { ogFonts } from './og-fonts';
 import { creator } from './shared';
 
 /**
- * The 1200×630 social card behind every page's `og:image` and `twitter:image`, drawn in the site's language:
- * monochrome, hairline rails with crosshair marks, hatched gutters, and the chip mark hatched on the right.
+ * The 1200×630 social card behind every page's `og:image` and `twitter:image`, drawn in the site's instrument
+ * language: graphite, two rack rails with square holes, a U-numbered unit label, the title in Plex Mono, and one
+ * row of GPU sockets on the right, half of them lit in the signal amber.
  */
 
 const { width: W, height: H } = socialImageSize;
-const rail = { left: 64, right: W - 64, top: 104, bottom: H - 104 };
+const rail = { left: 72, right: W - 72, top: 96, bottom: H - 96 };
 const color = {
-  background: '#121212',
-  ink: '#fafafa',
-  secondary: '#a3a3a3',
-  tertiary: '#737373',
-  line: '#2e2e2e',
-  hatch: '#222222',
-  shield: '#3a3a3a',
+  background: '#0b0c0f',
+  panel: '#101215',
+  ink: '#eff1f3',
+  secondary: '#99a0aa',
+  tertiary: '#6d747e',
+  line: '#22262c',
+  hole: '#31363d',
+  signal: '#ff7f1a',
+  signalText: '#ff9838',
 };
 
-/** components/logo.tsx: a chip with its die window cut out, on a 24 px grid, 20.5 units across around (12, 12). */
 const mark = logoMarkPath;
 
-function place(centerX: number, centerY: number, height: number) {
-  const scale = height / 20.5;
-  return {
-    scale,
-    transform: `translate(${centerX - 12 * scale} ${centerY - 12 * scale}) scale(${scale})`,
-  };
-}
-
-/** Rails, crosshairs, hatching, and the watermark, as one SVG under the text. */
+/** Rails with holes, unit hairlines, and the GPU socket row, as one SVG under the text. */
 function backdrop() {
-  const shield = place(rail.right - 184, (rail.top + rail.bottom) / 2, 340);
-  const crosses = [rail.left, rail.right]
+  const holes = [rail.left - 22, rail.right + 22]
     .flatMap((x) =>
-      [rail.top, rail.bottom].map((y) => `M${x - 9} ${y}H${x + 9}M${x} ${y - 9}V${y + 9}`),
+      Array.from({ length: Math.floor(H / 26) }, (_, i) => `M${x - 3} ${10 + i * 26}h6v6h-6z`),
     )
     .join('');
+  const cell = 34;
+  const gap = 8;
+  const cellsX = rail.right - 40 - (8 * cell + 7 * gap + 14);
+  const cellsY = rail.top + 48;
+  const cells = Array.from({ length: 8 }, (_, i) => {
+    const x = cellsX + i * (cell + gap) + (i >= 4 ? 14 : 0);
+    const lit = [0, 1, 2, 4].includes(i);
+    return `<rect x="${x}" y="${cellsY}" width="${cell}" height="${cell}" fill="${lit ? color.signal : 'none'}" stroke="${lit ? color.signal : color.hole}" stroke-width="2"/>`;
+  }).join('');
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
   <defs>
-    <pattern id="hatch" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-      <line x1="0" y1="0" x2="0" y2="9" stroke="${color.hatch}" stroke-width="2"/>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse" x="${rail.left}" y="${rail.top}">
+      <path d="M32 0H0V32" fill="none" stroke="#15171b" stroke-width="1"/>
     </pattern>
-    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse" x="${rail.left}" y="${rail.top}">
-      <path d="M48 0H0V48" fill="none" stroke="#1d1d1d" stroke-width="1"/>
-    </pattern>
-    <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0.3" stop-color="#fff" stop-opacity="0"/>
-      <stop offset="1" stop-color="#fff" stop-opacity="1"/>
-    </linearGradient>
-    <mask id="grid-mask">
-      <rect x="${rail.left}" y="${rail.top}" width="${rail.right - rail.left}" height="${rail.bottom - rail.top}" fill="url(#fade)"/>
-    </mask>
-    <clipPath id="shield">
-      <path transform="${shield.transform}" d="${mark}" clip-rule="evenodd"/>
-    </clipPath>
   </defs>
   <rect width="${W}" height="${H}" fill="${color.background}"/>
-  <rect width="${rail.left}" height="${H}" fill="url(#hatch)"/>
-  <rect x="${rail.right}" width="${W - rail.right}" height="${H}" fill="url(#hatch)"/>
-  <rect x="${rail.left}" y="${rail.top}" width="${rail.right - rail.left}" height="${rail.bottom - rail.top}" fill="url(#grid)" mask="url(#grid-mask)"/>
-  <rect x="${rail.left}" y="${rail.top}" width="${rail.right - rail.left}" height="${rail.bottom - rail.top}" fill="url(#hatch)" clip-path="url(#shield)"/>
-  <path transform="${shield.transform}" d="${mark}" fill="none" stroke="${color.shield}" stroke-width="${1.5 / shield.scale}"/>
-  <path d="M${rail.left} 0V${H}M${rail.right} 0V${H}M0 ${rail.top}H${W}M0 ${rail.bottom}H${W}" stroke="${color.line}" stroke-width="1"/>
-  <path d="${crosses}" stroke="${color.tertiary}" stroke-width="1.5"/>
+  <rect x="${rail.left}" y="${rail.top}" width="${rail.right - rail.left}" height="${rail.bottom - rail.top}" fill="${color.panel}"/>
+  <rect x="${rail.left}" y="${rail.top}" width="${rail.right - rail.left}" height="${rail.bottom - rail.top}" fill="url(#grid)"/>
+  <path d="${holes}" fill="${color.hole}"/>
+  <path d="M${rail.left} 0V${H}M${rail.right} 0V${H}M${rail.left - 36} 0V${H}M${rail.right + 36} 0V${H}M0 ${rail.top}H${W}M0 ${rail.bottom}H${W}" stroke="${color.line}" stroke-width="1"/>
+  <rect x="${rail.left - 4}" y="${rail.top - 4}" width="8" height="8" fill="${color.background}" stroke="${color.tertiary}" stroke-width="1.5"/>
+  <rect x="${rail.right - 4}" y="${rail.top - 4}" width="8" height="8" fill="${color.background}" stroke="${color.tertiary}" stroke-width="1.5"/>
+  <rect x="${rail.left - 4}" y="${rail.bottom - 4}" width="8" height="8" fill="${color.background}" stroke="${color.tertiary}" stroke-width="1.5"/>
+  <rect x="${rail.right - 4}" y="${rail.bottom - 4}" width="8" height="8" fill="${color.background}" stroke="${color.tertiary}" stroke-width="1.5"/>
+  ${cells}
 </svg>`;
   return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
 }
 
 export interface SocialCard {
-  /** Where the page sits, shown top right: `['Guides', 'Authentication']`. */
+  /** Where the page sits, shown top right: `['Guides', 'Capacity']`. */
   trail: string[];
   title: string;
   description?: string;
-  /** Short monospace tags in the footer, such as the npm packages a page documents. */
+  /** Short monospace tags in the footer, such as the packages a page documents. */
   tags?: string[];
 }
 
 function titleSize(title: string) {
-  if (title.length <= 22) return 76;
-  if (title.length <= 40) return 66;
-  return 56;
+  if (title.length <= 20) return 70;
+  if (title.length <= 36) return 58;
+  return 48;
 }
 
 export async function socialCard({ trail, title, description, tags = [] }: SocialCard) {
   const fonts = await ogFonts();
   const size = titleSize(title);
-  const initials = creator
-    .split(' ')
-    .map((part) => part[0])
-    .join('');
+  const mono = 'IBM Plex Mono';
   return new ImageResponse(
     (
       <div
@@ -103,7 +91,7 @@ export async function socialCard({ trail, title, description, tags = [] }: Socia
           position: 'relative',
           background: color.background,
           color: color.ink,
-          fontFamily: 'Inter',
+          fontFamily: 'IBM Plex Sans',
         }}
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -123,21 +111,31 @@ export async function socialCard({ trail, title, description, tags = [] }: Socia
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-            <svg width="38" height="38" viewBox="0 0 24 24">
-              <path fill={color.ink} fillRule="evenodd" d={mark} />
+            <svg width="36" height="36" viewBox="0 0 24 24">
+              <path fill={color.signal} fillRule="evenodd" d={mark} />
             </svg>
-            <div style={{ display: 'flex', fontSize: 32, fontWeight: 600, letterSpacing: -0.4 }}>
-              Better<span style={{ color: color.secondary }}>Compute</span>
+            <div
+              style={{
+                display: 'flex',
+                fontFamily: mono,
+                fontWeight: 500,
+                fontSize: 30,
+                letterSpacing: -1.2,
+              }}
+            >
+              <span style={{ color: color.secondary }}>better</span>
+              <span style={{ color: color.signalText }}>/</span>
+              <span>compute</span>
             </div>
           </div>
           <div
             style={{
               display: 'flex',
               gap: 14,
-              fontFamily: 'JetBrains Mono',
+              fontFamily: mono,
               fontWeight: 500,
-              fontSize: 18,
-              letterSpacing: 2,
+              fontSize: 17,
+              letterSpacing: 1.5,
               textTransform: 'uppercase',
               color: color.secondary,
             }}
@@ -156,22 +154,68 @@ export async function socialCard({ trail, title, description, tags = [] }: Socia
             position: 'absolute',
             left: rail.left,
             top: rail.top,
+            display: 'flex',
+            padding: '4px 12px',
+            borderRight: `1px solid ${color.line}`,
+            borderBottom: `1px solid ${color.line}`,
+            background: color.background,
+            fontFamily: mono,
+            fontWeight: 500,
+            fontSize: 15,
+            letterSpacing: 1.5,
+            color: color.tertiary,
+          }}
+        >
+          U01
+        </div>
+
+        <div
+          style={{
+            position: 'absolute',
+            left: rail.left,
+            top: rail.top,
             width: rail.right - rail.left,
             height: rail.bottom - rail.top,
             display: 'flex',
             flexDirection: 'column',
             justifyContent: 'flex-end',
-            padding: '0 40px 42px',
+            padding: '0 40px 40px',
           }}
         >
           <div
             style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              marginBottom: 18,
+              fontFamily: mono,
+              fontWeight: 500,
+              fontSize: 16,
+              letterSpacing: 1.5,
+              textTransform: 'uppercase',
+              color: color.signalText,
+            }}
+          >
+            <div
+              style={{
+                width: 10,
+                height: 10,
+                borderRadius: 999,
+                background: color.signal,
+                boxShadow: `0 0 10px ${color.signal}`,
+              }}
+            />
+            {trail[0] ?? 'Better Compute'}
+          </div>
+          <div
+            style={{
               display: 'block',
-              maxWidth: 660,
+              maxWidth: 760,
+              fontFamily: mono,
+              fontWeight: 500,
               fontSize: size,
-              fontWeight: 600,
-              letterSpacing: size * -0.035,
-              lineHeight: 1.05,
+              letterSpacing: size * -0.055,
+              lineHeight: 1.06,
               lineClamp: 3,
             }}
           >
@@ -181,12 +225,12 @@ export async function socialCard({ trail, title, description, tags = [] }: Socia
             <div
               style={{
                 display: 'block',
-                maxWidth: 660,
-                marginTop: 22,
-                fontSize: 26,
+                maxWidth: 720,
+                marginTop: 20,
+                fontSize: 25,
                 lineHeight: 1.42,
                 color: color.secondary,
-                lineClamp: 3,
+                lineClamp: 2,
               }}
             >
               {description}
@@ -205,28 +249,12 @@ export async function socialCard({ trail, title, description, tags = [] }: Socia
             alignItems: 'center',
             justifyContent: 'space-between',
             padding: '0 40px',
+            fontFamily: mono,
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 14, fontSize: 22 }}>
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                width: 36,
-                height: 36,
-                borderRadius: 999,
-                background: color.ink,
-                color: color.background,
-                fontFamily: 'JetBrains Mono',
-                fontWeight: 500,
-                fontSize: 14,
-              }}
-            >
-              {initials}
-            </div>
-            <span style={{ color: color.secondary }}>Created by</span>
-            <span style={{ fontWeight: 600 }}>{creator}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 19 }}>
+            <span style={{ color: color.tertiary }}>created by</span>
+            <span style={{ color: color.ink }}>{creator}</span>
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
             {tags.slice(0, 3).map((tag) => (
@@ -234,14 +262,12 @@ export async function socialCard({ trail, title, description, tags = [] }: Socia
                 key={tag}
                 style={{
                   display: 'flex',
-                  padding: '6px 16px',
-                  border: `1px solid ${color.shield}`,
-                  borderRadius: 999,
-                  background: color.background,
-                  fontFamily: 'JetBrains Mono',
+                  padding: '5px 14px',
+                  border: `1px solid ${color.hole}`,
+                  background: color.panel,
                   fontWeight: 500,
-                  fontSize: 17,
-                  color: '#d4d4d4',
+                  fontSize: 16,
+                  color: '#c5cad1',
                 }}
               >
                 {tag}

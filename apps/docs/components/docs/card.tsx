@@ -3,16 +3,25 @@ import Link from 'fumadocs-core/link';
 import { RiArrowRightLine, RiArrowRightUpLine } from 'react-icons/ri';
 import { cx } from '@/utils/cx';
 
-/** MDX card grid: two columns, one on narrow containers (same contract as Fumadocs' `Cards`). */
+/**
+ * MDX card grid, drawn as a patch panel: cells tiled edge to edge on a hairline grid, two columns, one on narrow
+ * containers (same contract as Fumadocs' `Cards`). An odd last card spans the row, so no socket is left empty.
+ */
 export function Cards({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
   return (
-    <div className={cx('@container not-prose my-5 grid grid-cols-2 gap-3', className)} {...props} />
+    <div
+      className={cx(
+        '@container not-prose my-5 grid grid-cols-2 gap-px border border-separator-border bg-separator-border [&>[data-card]:last-child:nth-child(odd)]:col-span-full',
+        className,
+      )}
+      {...props}
+    />
   );
 }
 
 /**
- * BoardUI card: hairline edge, contact shadow, and an icon tile. Linked cards lift their border on hover and show
- * an arrow (up-right for other sites).
+ * One cell of the patch panel: an icon, a mono title, and the description. Linked cells light an amber strip along
+ * their top edge on hover and show an arrow (up-right for other sites).
  */
 export function Card({
   icon,
@@ -36,13 +45,13 @@ export function Card({
         {icon ? (
           <span
             aria-hidden
-            className="flex size-8 shrink-0 items-center justify-center rounded-2lg border border-border-button-default bg-background-primary-default text-foreground-icon-primary shadow-xs [&_svg]:size-4"
+            className="flex size-8 shrink-0 items-center justify-center border border-border-button-default text-foreground-icon-primary transition-colors group-hover:border-signal-fill group-hover:text-signal [&_svg]:size-4"
           >
             {icon}
           </span>
         ) : null}
         <span className="flex min-w-0 flex-1 flex-col gap-1">
-          <span className="flex items-center gap-1.5 text-body-semibold text-text-primary">
+          <span className="flex items-center gap-1.5 font-mono text-body-medium tracking-[-0.02em] text-text-primary">
             {title}
             {href ? (
               external ? (
@@ -72,9 +81,9 @@ export function Card({
     </>
   );
   const classes = cx(
-    'group block rounded-2xl border border-border-button-default bg-background-primary-default p-4 shadow-xs @max-lg:col-span-full',
+    'group relative block bg-surface-raised p-4 @max-lg:col-span-full',
     href &&
-      'transition-[background-color,border-color] duration-150 hover:border-border-button-hover hover:bg-background-primary-hover',
+      "transition-colors duration-150 before:absolute before:inset-x-0 before:top-0 before:h-[2px] before:origin-left before:scale-x-0 before:bg-signal-fill before:transition-transform before:duration-300 before:content-[''] hover:bg-background-secondary-default hover:before:scale-x-100",
     className,
   );
   return href ? (

@@ -72,7 +72,7 @@ export function ChapterNav() {
               data-chapter={chapter.id}
               aria-current={active === chapter.id ? 'location' : undefined}
               className={cx(
-                'relative isolate inline-flex h-8 shrink-0 items-center gap-2 rounded-lg px-2.5 text-body-2-regular transition-colors',
+                'relative isolate inline-flex h-8 shrink-0 items-center gap-2 px-2.5 font-mono text-caption-1-regular tracking-[0.02em] transition-colors',
                 active === chapter.id
                   ? 'text-text-primary'
                   : 'text-text-secondary hover:text-text-primary',
@@ -81,12 +81,18 @@ export function ChapterNav() {
               {active === chapter.id ? (
                 <motion.span
                   layoutId="chapter-active"
-                  className="absolute inset-0 -z-10 rounded-lg bg-background-secondary-default"
+                  className="absolute inset-0 -z-10 border border-separator-border bg-background-secondary-default"
                   transition={{ type: 'spring', stiffness: 450, damping: 38 }}
                 />
               ) : null}
-              <span className="font-mono text-caption-2-regular text-text-tertiary tabular-nums">
-                {String(index + 1).padStart(2, '0')}
+              <span className="led" data-on={active === chapter.id} />
+              <span
+                className={cx(
+                  'tabular-nums',
+                  active === chapter.id ? 'text-signal' : 'text-text-tertiary',
+                )}
+              >
+                U{String(index + 1).padStart(2, '0')}
               </span>
               {chapter.label}
             </a>
@@ -94,7 +100,7 @@ export function ChapterNav() {
         </div>
         <motion.div
           aria-hidden
-          className="absolute inset-x-0 -bottom-px h-px origin-left bg-text-primary"
+          className="absolute inset-x-0 -bottom-px h-[2px] origin-left bg-signal-fill"
           style={{ scaleX: progress }}
         />
       </Frame>

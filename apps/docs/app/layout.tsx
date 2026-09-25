@@ -1,6 +1,6 @@
 import { RootProvider } from 'fumadocs-ui/provider/next';
 import type { Metadata, Viewport } from 'next';
-import { Inter, JetBrains_Mono } from 'next/font/google';
+import { IBM_Plex_Mono, IBM_Plex_Sans } from 'next/font/google';
 import SearchDialog from '@/components/search';
 import {
   pageMetadata,
@@ -12,9 +12,18 @@ import {
 import { appName, creator, siteUrl } from '@/lib/shared';
 import './global.css';
 
-// BoardUI's type ramp is drawn for Inter; its code face is JetBrains Mono (styles/theme.css reads both variables).
-const sans = Inter({ subsets: ['latin'], variable: '--font-inter' });
-const mono = JetBrains_Mono({ subsets: ['latin'], variable: '--font-mono-source' });
+// IBM Plex: Sans for reading, Mono for headings, labels and numbers (styles/instrument.css reads both variables).
+// BoardUI's Figma spec names Plex Mono as its code face; the Better IAM site uses Inter and JetBrains Mono.
+const sans = IBM_Plex_Sans({
+  subsets: ['latin'],
+  weight: ['400', '500', '600'],
+  variable: '--font-plex-sans',
+});
+const mono = IBM_Plex_Mono({
+  subsets: ['latin'],
+  weight: ['400', '500', '600'],
+  variable: '--font-plex-mono',
+});
 
 // Defaults for every page. Pages set their own title, description, canonical URL, and social card through
 // pageMetadata(); these cover the rest (404s included). Icons come from scripts/generate-icons.mjs, and
@@ -52,8 +61,8 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   themeColor: [
-    { media: '(prefers-color-scheme: light)', color: '#ffffff' },
-    { media: '(prefers-color-scheme: dark)', color: '#121212' },
+    { media: '(prefers-color-scheme: light)', color: '#f3f4f6' },
+    { media: '(prefers-color-scheme: dark)', color: '#0b0c0f' },
   ],
 };
 
@@ -61,7 +70,10 @@ export default function Layout({ children }: LayoutProps<'/'>) {
   return (
     <html lang="en" className={`${sans.variable} ${mono.variable}`} suppressHydrationWarning>
       <body className="flex min-h-screen flex-col font-sans antialiased">
-        <RootProvider search={{ SearchDialog }}>{children}</RootProvider>
+        {/* Dark first, like a control room; the theme toggle and a saved choice still win. */}
+        <RootProvider search={{ SearchDialog }} theme={{ defaultTheme: 'dark' }}>
+          {children}
+        </RootProvider>
       </body>
     </html>
   );

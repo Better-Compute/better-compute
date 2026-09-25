@@ -18,13 +18,23 @@ export function LogoMark(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+/**
+ * The wordmark: an amber chip beside `better/compute` in Plex Mono, set like a path on a device label.
+ */
 export function Logo({ className }: { className?: string }) {
   return (
     // Block-level flex, not inline-flex: an inline box sits on the parent's text baseline and rides a few pixels high.
-    <span className={cx('flex w-fit items-center gap-2 text-headline-semibold', className)}>
-      <LogoMark className="size-5 text-text-primary" />
-      <span className="tracking-[-0.01em]">
-        Better<span className="text-text-secondary">Compute</span>
+    <span
+      className={cx(
+        'flex w-fit items-center gap-2 font-mono text-[0.9375rem] leading-5 font-medium',
+        className,
+      )}
+    >
+      <LogoMark className="size-5 text-signal-fill" />
+      <span className="tracking-[-0.04em]">
+        <span className="text-text-secondary">better</span>
+        <span className="text-signal">/</span>
+        <span className="text-text-primary">compute</span>
       </span>
     </span>
   );

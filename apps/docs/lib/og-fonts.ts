@@ -14,9 +14,8 @@ export interface OgFont {
 }
 
 const faces: [name: string, weight: Weight][] = [
-  ['Inter', 400],
-  ['Inter', 600],
-  ['JetBrains Mono', 500],
+  ['IBM Plex Sans', 400],
+  ['IBM Plex Mono', 500],
 ];
 
 async function load(name: string, weight: Weight): Promise<ArrayBuffer> {
