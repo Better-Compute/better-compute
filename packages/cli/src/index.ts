@@ -100,6 +100,7 @@ export { hostFindings } from './host/findings.js';
 export { mountTunnels, type HostTunnelsConfig, type TunnelMount } from './host/tunnels.js';
 export { watchAuthorizer, type WatchAuthorizerOptions } from './host/watch.js';
 export { mcpRoutes, type HostMcpConfig } from './host/config.js';
+export { hostCertificates, startHostMetrics } from './host/metrics.js';
 export {
   buildSupportBundle,
   knownSecrets,

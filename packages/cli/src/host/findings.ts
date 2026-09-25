@@ -46,6 +46,15 @@ export function hostFindings(
         'The IAM bridge is registered but its events have no reactions: a revoked delegation or suspended agent keeps its tunnels until the next re-authorization (up to 60 s), and revoked sessions stay cached for up to 30 s',
       fix: 'Export host = defineHost({ iam: { bridge } }) with the bridge from createComputeIamBridge()',
     });
+  // The bridge's embedded port always refreshes admitted rows (§12.4); a remote one only with `refresh`.
+  if (bridged && typeof (options.iam as { refreshResource?: unknown }).refreshResource !== 'function')
+    findings.push({
+      check: 'iam.refresh',
+      severity: 'warning',
+      message:
+        'Remote IAM without admission refresh: a reservation or change can be decided on a projection row up to the replica lag old',
+      fix: "bridge.remote({ ..., refresh: { url: '<iam host>/compute/refresh', secret } }) and mount host.refreshHandler on the IAM hosts",
+    });
   const gateway = host.gateway;
   if (!gateway) return findings;
   try {

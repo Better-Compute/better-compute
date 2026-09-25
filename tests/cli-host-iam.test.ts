@@ -71,6 +71,14 @@ describe('host.iam', () => {
     );
   });
 
+  it('doctor warns about remote IAM without admission refresh', async () => {
+    const { compute, options } = await deploy([{ name: 'iam' }]);
+    const checks = (iam: object) =>
+      hostFindings(compute, { ...options, iam } as never, {}).map((finding) => finding.check);
+    expect(checks({})).toContain('iam.refresh');
+    expect(checks({ refreshResource: async () => undefined })).not.toContain('iam.refresh');
+  });
+
   it('asks only gateways that heartbeated recently, over the transport it can authenticate', async () => {
     const { compute } = await deploy();
     const sql = compute.context.sql;

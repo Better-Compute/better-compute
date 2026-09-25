@@ -19,6 +19,7 @@ import { mcpRoutes, resolveHost, type HostConfig } from '../host/config.js';
 import { startGateway, type RunningGateway } from '../host/gateway.js';
 import { hostListener } from '../host/http.js';
 import { installIamHandlers } from '../host/iam.js';
+import { startHostMetrics } from '../host/metrics.js';
 import { mountTunnels, type TunnelMount } from '../host/tunnels.js';
 
 // `serve` and `dev` (PLAN.md §9.3): one process runs the HTTP API (`compute.nodeHandler`) and the
@@ -89,6 +90,7 @@ export async function runServer(
   let gateway: RunningGateway | undefined;
   let tunnels: TunnelMount | undefined;
   let iamHandlers: { close(): void } | undefined;
+  let hostMetrics: { stop(): void } | undefined;
   let stopping = false;
   try {
     // IAM events reach compute through the inbox the worker roles drain: install the reactions first.
@@ -100,6 +102,9 @@ export async function runServer(
           : {}),
       });
     if (options.roles.length) await compute.start({ roles: [...options.roles] });
+    // The database-side metrics (backlogs, command ages, certificate expiries) beside the worker roles.
+    if (options.roles.length && options.hostConfig && options.computeOptions)
+      hostMetrics = startHostMetrics(compute, options.computeOptions, options.hostConfig);
     if (options.gateway) {
       const config = options.hostConfig?.gateway;
       if (!config || !options.computeOptions)
@@ -156,6 +161,7 @@ export async function runServer(
     await gateway?.stop().catch(() => undefined);
     if (server) await closeServer(server);
     tunnels?.close();
+    hostMetrics?.stop();
     await compute.stop();
     iamHandlers?.close();
   }

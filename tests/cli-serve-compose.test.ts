@@ -535,6 +535,15 @@ export const host = composed.host;
         // The gateway role's own series, sampled at scrape.
         expect(scraped).toContain('better_compute_gateway_stream_headroom');
         expect((await fetch(`${origin}/metrics`, { method: 'POST' })).status).toBe(405);
+        // The worker roles' database collector: the node CA's expiry (and backlogs) in the same registry.
+        let collected = '';
+        for (let tries = 0; tries < 100 && !collected.includes('kind="node-ca"'); tries++) {
+          collected = await (
+            await fetch(`${origin}/metrics`, { headers: { authorization: `Bearer ${METRICS_TOKEN}` } })
+          ).text();
+          if (!collected.includes('kind="node-ca"')) await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        expect(collected).toMatch(/better_compute_cert_expiry_seconds\{kind="node-ca"\} \d/);
 
         // Tunnels are mounted on the api's upgrade event: a forged ticket is refused by handleTunnel
         // (not a 404), and other upgrade paths are left alone.
