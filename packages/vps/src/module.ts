@@ -351,17 +351,6 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         'INVALID_CONFIG',
         'vps({ bootstrap }).controlPlaneUrl must be an https URL without spaces, quotes, % or $',
       );
-    const { pins } = options.bootstrap;
-    if (
-      pins !== undefined &&
-      ![pins.servingCa, pins.joinSigning, pins.joinEncryption].every((pin) =>
-        /^sha256\/[A-Za-z0-9+/]{43}=$/.test(pin),
-      )
-    )
-      throw new ComputeError(
-        'INVALID_CONFIG',
-        'vps({ bootstrap }).pins must be sha256/<base64> SPKI pins (servingCa, joinSigning, joinEncryption)',
-      );
   }
   const bootstrapDeps = (context: ModuleContext): BootstrapDeps => ({
     clock: context.clock,
