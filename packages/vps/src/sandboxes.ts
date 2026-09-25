@@ -1955,6 +1955,32 @@ export async function reassignSandboxes(
   return { deleted: [], reassigned };
 }
 
+/**
+ * The identities open sandboxes hang on (owners, and the agents that created them), for the iam
+ * bridge's IamReconcile sweep (`createComputeIamBridge({ identityHolders })`): each is re-read from
+ * IAM every 5 minutes, so a lost or raced event (a create committed just after a withdraw) is still
+ * reacted to. Delegations are not identities; their agents are listed.
+ */
+export async function sandboxHolders(
+  sql: SqlExecutor,
+  limit: number,
+): Promise<{ tenantId: string; identityId: string }[]> {
+  const present = await sql.query<{ found: string | null }>(
+    `SELECT to_regclass('sandboxes')::text AS found`,
+  );
+  if (!present.rows[0]?.found) return [];
+  const { rows } = await sql.query<{ tenant_id: string; identity_id: string }>(
+    `SELECT tenant_id, owner_identity_id AS identity_id FROM sandboxes
+      WHERE NOT draft AND deleting_at IS NULL
+     UNION
+     SELECT tenant_id, agent_id FROM sandboxes
+      WHERE NOT draft AND deleting_at IS NULL AND agent_id IS NOT NULL
+     ORDER BY 1, 2 LIMIT $1`,
+    [limit],
+  );
+  return rows.map((row) => ({ tenantId: row.tenant_id, identityId: row.identity_id }));
+}
+
 /** Both reactions, for the host's `iamReactions` (after capacity's, in the inbox transaction). */
 export const sandboxIamReactions = {
   agent: withdrawAgentSandboxes,

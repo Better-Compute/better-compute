@@ -30,6 +30,7 @@ import {
   meterInstances,
   reassignSandboxes,
   reportInstances,
+  sandboxHolders,
   sandboxWork,
   setIpPool,
   vps,
@@ -1872,6 +1873,22 @@ describe('IAM reactions (§12.8)', () => {
       [sandbox.instanceId],
     );
     expect(rows[0]!.agent_id).toBeNull();
+  });
+
+  it('list the identities open sandboxes hang on, for the IamReconcile sweep', async () => {
+    const template = await createTemplate();
+    await createSandbox(template.id, { idempotencyKey: 'agent' }, agent);
+    const bobs = await createSandbox(template.id, { idempotencyKey: 'bobs' }, bob);
+    expect(await sandboxHolders(db, 100)).toEqual([
+      { tenantId: 'acme', identityId: 'agt_1' },
+      { tenantId: 'acme', identityId: 'usr_alice' },
+      { tenantId: 'acme', identityId: 'usr_bob' },
+    ]);
+    await call('sandboxes', 'delete', { tenantId: 'acme', sandboxId: bobs.id }, bob);
+    expect(await sandboxHolders(db, 1)).toEqual([{ tenantId: 'acme', identityId: 'agt_1' }]);
+    expect((await sandboxHolders(db, 100)).map((holder) => holder.identityId)).not.toContain(
+      'usr_bob',
+    );
   });
 
   it('delete an owner’s open sandboxes when nobody succeeds them', async () => {
