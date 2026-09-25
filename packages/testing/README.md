@@ -180,10 +180,38 @@ journal loss, in-flight non-retry-safe commands fail instead of replaying), **I5
 caused by connectivity) and **I8** (usage windows tile booking duration × atoms, no duplicate
 keys). The same seed always yields the same event log (`sim.digest()`).
 
+## `createControlPlaneSim(options)`
+
+`createControlPlaneSim` runs the fleet simulator with the real control plane behind it:
+
+- `betterCompute` on the sim clock, with `compute_now()` pinned to simulated time;
+- `gateways` real gateways on manual jobs (default 1);
+- nodes that joined through JoinService with sealed tokens bound to their CSRs.
+
+The control plane's reconcilers and the gateways' jobs run on the simulator's ticks. The API sets up the deployment: a site, and an H100 pool with `diag.nvml` acceptance offered to `acme`.
+
+- `run(ms)` advances everything together.
+- `api(fn)` runs an operator or tenant call.
+- `killGateway(i)` and `stallGateway(i, stalled)` crash or pause one gateway process. `homeOf(nodeId)` answers from the newest session epoch, so a zombie's stale session doesn't count.
+- `trace(path, fn)` names each part of the loop (`join`, `fleet`, `gateway`, `reconcilers`, `api`), so an IAM spy can attribute every call. See `tests/sim/iam-negative.test.ts`.
+- `controlPlaneFacts(sql)` reads the invariant facts from compute's own tables: bookings (I1), billed allocations and usage windows (I8), command outcomes (I2) and connectivity (I5). `invariants()` refreshes them and checks.
+
+## Real-time harness
+
+The real-time harness runs on the wall clock over cleartext HTTP/2 through `createH2cClient`. The `tests/bench/*` suites run it at scale with `pnpm bench:scale`.
+
+- **`createRealtimeHarness({ nodes })`**: a real gateway and database, with FakeDaemons on pre-registered nodes.
+  - `connectAll()`
+  - `dispatch({ kind, perNode })`: a burst, timed to ack and to terminal.
+  - `load({ ratePerSecond, durationMs })`: steady state.
+  - `storm({ fraction, mode })`: a reconnect storm.
+- **`createRealtimeFleet()`**: the whole v0.1 spine. That's a started `betterCompute` with JoinService on real PKI, and a gateway wired to its services, report handlers, work queue, outbox and pokes.
+  - `join(n)` times each node from its Join call to adopted.
+  - `place(n, { ratePerSecond })` times reservations from placed to active: the §16 gate.
+- **`probeLeases(sql)`** samples the `leases` table: renewal gaps, the least headroom before expiry, lapses while owned, and takeovers.
 ## Later
 
 - **v0.1:** embedded better-iam on its in-memory SQLite adapter (through the IAM bridge) as the
   fixture's IAM, loaded by dynamic import like PGlite; the fleet sim on the real gateway core,
-  PGlite and `compute.jobs.*.tick()`; the real-time harness (`tests/realtime/`); conformance
-  runners.
+  PGlite and `compute.jobs.*.tick()` (now `createControlPlaneSim`); conformance runners.
 - **v0.4:** the scale scenarios of PLAN.md §15.
