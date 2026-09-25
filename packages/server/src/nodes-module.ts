@@ -6,6 +6,7 @@ import {
   type Reconciler,
   type SqlTx,
 } from '@better-compute/core';
+import { schedulableSql, wakePendingForNode } from '@better-compute/capacity';
 import { reconcileDrain } from './controllers/drain.js';
 import { reconcileLifecycle } from './controllers/lifecycle.js';
 import {
@@ -53,16 +54,41 @@ export interface NodesModuleOptions {
 /**
  * The `node` reconciler: NodeLifecycle, then the event side of Liveness (a dead gateway's
  * disconnect, clean-up after a reconnect), then the node's authz projection row (GPU count and
- * lifecycle converge within one level-trigger resync). Timed transitions are the sweep's.
+ * lifecycle converge within one level-trigger resync). Timed transitions are the sweep's. With
+ * `schedulable` (the nodes this worker last saw schedulable), a node that became schedulable wakes
+ * its pool's pending reservations (uncordon, adoption, first converged spec, a cleared NoSchedule
+ * reason) instead of leaving them to their back-off.
  */
 export async function reconcileNode(
   context: ModuleContext,
   nodeId: string,
+  schedulable?: Set<string>,
 ): Promise<'DONE' | 'SYNC_AGAIN'> {
   const lifecycle = await reconcileLifecycle(context, nodeId);
   await reconcileLiveness(context, nodeId, { timeouts: false });
   await context.sql.transaction((tx) => refreshNodeAuthz(tx, context.authz, nodeId));
+  if (schedulable) await wakeWhenSchedulable(context, nodeId, schedulable);
   return lifecycle;
+}
+
+/** Wakes the node's pool's pending reservations on the edge to schedulable (best effort). */
+async function wakeWhenSchedulable(
+  context: ModuleContext,
+  nodeId: string,
+  seen: Set<string>,
+): Promise<void> {
+  const { rows } = await context.sql.query<{ ok: boolean }>(
+    `SELECT (${schedulableSql}) AS ok FROM nodes n JOIN pools p ON p.id = n.pool_id WHERE n.id = $1`,
+    [nodeId],
+  );
+  const now = rows[0]?.ok === true;
+  const before = seen.has(nodeId);
+  if (!now) {
+    seen.delete(nodeId);
+    return;
+  }
+  seen.add(nodeId);
+  if (!before) await context.sql.transaction((tx) => wakePendingForNode(tx, context.work, nodeId));
 }
 
 /** The built-in node controllers module. */
@@ -72,11 +98,13 @@ export function createNodesModule(
   // The sweep's memory (heartbeat owner, outage grace) lives as long as the module; each tick runs
   // on the context of the run, whose transactions the singleton lease fences.
   const liveness = createLivenessState();
+  // Per worker: a restart forgets it, so the first pass over a schedulable node wakes once more.
+  const schedulable = new Set<string>();
   const reconcilers: Reconciler[] = [
     {
       name: nodeWorkKind,
       shardBy: 'node',
-      run: (context: ReconcileContext, key: string) => reconcileNode(context, key),
+      run: (context: ReconcileContext, key: string) => reconcileNode(context, key, schedulable),
     },
     {
       name: nodeSpecWorkKind,
