@@ -1,5 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { parseSshCertificate, parseSshPublicKey } from '@better-compute/pki';
 import { CliError, RemoteExitError, usageError } from '../errors.js';
 import { defineCommand } from '../framework.js';
 import { tenantFlag } from './capacity.js';
@@ -90,6 +91,18 @@ export const sshCommands = [
         principal: flags.account ?? 'root',
         ttlSeconds: (flags.minutes ?? 15) * 60,
       });
+      // What the server answered goes into ~/.ssh and onto ssh's command line: a parsable certificate for this key,
+      // and a Unix account name (it reaches ssh's %r/%u expansions, e.g. in a bastion ProxyCommand).
+      if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(issued.account))
+        throw new CliError('INVALID_RESPONSE', 'The server named an invalid account');
+      let parsed: ReturnType<typeof parseSshCertificate>;
+      try {
+        parsed = parseSshCertificate(issued.certificate.trim());
+      } catch {
+        throw new CliError('INVALID_RESPONSE', 'The server answered something that is not an OpenSSH certificate');
+      }
+      if (parsed.certType !== 'user' || !parsed.publicKey.equals(parseSshPublicKey(publicKey)))
+        throw new CliError('INVALID_RESPONSE', 'The certificate is not a user certificate for your key');
       const certificatePath = `${keyPath.slice(0, -'.pub'.length)}-cert.pub`;
       await writeFile(certificatePath, `${issued.certificate.trim()}\n`, { mode: 0o644 });
       note(`Wrote ${certificatePath}; it opens ${flags.node} as ${issued.account} until ${new Date(issued.validBefore).toISOString()}.`);

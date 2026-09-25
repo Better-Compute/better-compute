@@ -458,9 +458,11 @@ async function instanceNode(tx: SqlTx, tenantId: string, instanceId: string): Pr
     throw new ComputeError('NOT_FOUND', `Instance ${instanceId} not found`);
   // A sandbox's instance (or a warm one waiting for a sandbox) is reached only through sandboxes.exec (§3.7): its
   // session requirement and compute:sandboxes:exec decision must not be bypassed with instances:exec.
+  // The columns of THE instances table this search path resolves (another schema's table never counts).
   const { rows: columns } = await tx.query<{ column_name: string }>(
-    `SELECT column_name FROM information_schema.columns
-      WHERE table_name = 'instances' AND column_name IN ('sandbox_id', 'warm_template_id')`,
+    `SELECT attname AS column_name FROM pg_attribute
+      WHERE attrelid = to_regclass('instances') AND NOT attisdropped
+        AND attname IN ('sandbox_id', 'warm_template_id')`,
   );
   const managed = columns.length === 2 ? 'sandbox_id, warm_template_id' : 'NULL AS sandbox_id, NULL AS warm_template_id';
   const { rows } = await tx.query<{

@@ -155,7 +155,10 @@ export function gatewayOptions(
   const iam = (options.iam ?? {}) as Partial<Parameters<typeof tunnelAuthorizer>[0]>;
   const authorize =
     typeof iam.authorizeSession === 'function' && typeof iam.authorize === 'function'
-      ? tunnelAuthorizer(iam as Parameters<typeof tunnelAuthorizer>[0])
+      ? tunnelAuthorizer(iam as Parameters<typeof tunnelAuthorizer>[0], {
+          // Decisions name resources as the deployment does (ComputeOptions.typePrefix).
+          typePrefix: (options as { typePrefix?: string }).typePrefix ?? 'compute-',
+        })
       : undefined;
   const reauthorize = authorize
     ? (info: {

@@ -169,7 +169,11 @@ describe('sandbox exec', () => {
       },
     };
 
-    await createCli().run(['sandbox', 'exec', SANDBOX, '--minutes', '5', '--', 'uname', '-a'], io);
+    // An uncertified guest is refused unless trust on first use is asked for; nothing runs.
+    await expect(createCli().run(['sandbox', 'exec', SANDBOX], io)).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    expect(spawned).toEqual([]);
+    granted.length = 0;
+    await createCli().run(['sandbox', 'exec', SANDBOX, '--minutes', '5', '--accept-host-key', '--', 'uname', '-a'], io);
     expect(granted).toMatchObject([{ sandboxId: SANDBOX, ttlSeconds: 300 }]);
     expect((granted[0] as { publicKey: string }).publicKey).toMatch(/^ssh-ed25519 /);
     const [run] = spawned;
@@ -184,6 +188,9 @@ describe('sandbox exec', () => {
     ).rejects.toThrow();
     // The remote command can never be read as ssh options, and nothing of the user's is handed to the guest.
     expect(run!.args[run!.args.indexOf('127.0.0.1') - 1]).toBe('--');
+    // No ssh_config (the user's or the system's) and no global known hosts.
+    expect(run!.args.slice(0, 2)).toEqual(['-F', 'none']);
+    expect(run!.args.some((arg) => arg.startsWith('GlobalKnownHostsFile='))).toBe(true);
     expect(run!.args).toEqual(
       expect.arrayContaining(['-a', 'ForwardAgent=no', 'ProxyCommand=none', 'ClearAllForwardings=yes']),
     );
@@ -204,7 +211,7 @@ describe('sandbox exec', () => {
 
     // ssh's own status becomes the command's.
     status = 3;
-    await expect(createCli().run(['sandbox', 'exec', SANDBOX], io)).rejects.toMatchObject({
+    await expect(createCli().run(['sandbox', 'exec', SANDBOX, '--accept-host-key'], io)).rejects.toMatchObject({
       code: 'REMOTE_EXIT',
       status: 3,
     });

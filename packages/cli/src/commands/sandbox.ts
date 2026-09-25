@@ -269,6 +269,11 @@ export const sandboxCommands = [
         description: 'Certificate lifetime in minutes',
       },
       ssh: { type: 'string', value: 'PROGRAM', default: 'ssh', description: 'The OpenSSH client to run' },
+      'accept-host-key': {
+        type: 'boolean',
+        description:
+          "Connect although the guest's host key is not certified (older guests, or an expired host certificate): accepted on first use",
+      },
     },
     examples: ['better-compute sandbox exec sbx_01k5w… -- uname -a', 'better-compute sandbox exec sbx_01k5w…'],
     async run(context) {
@@ -314,16 +319,19 @@ export const sandboxCommands = [
         socket.on('error', () => opened.close());
       });
       // The guest's host key: pinned to the sandbox CA when the guest has a host certificate (the CA that signed our
-      // user certificate, over the authenticated API call); else accepted on first use, and said so.
-      const pinned =
-        granted.hostCertified === true &&
-        typeof granted.hostPrincipal === 'string' &&
-        /^[A-Za-z0-9._-]{1,253}$/.test(granted.hostPrincipal);
-      const alias = pinned ? granted.hostPrincipal! : id;
-      if (!pinned)
-        context.note(
-          'This sandbox has no host certificate (created before host keys were certified): its host key is accepted on first use.',
+      // user certificate, over the authenticated API call). Without one (an older guest, or a host certificate that
+      // expired) trust on first use happens only when asked for with --accept-host-key.
+      const pinned = granted.hostCertified === true;
+      if (pinned && !(typeof granted.hostPrincipal === 'string' && /^[A-Za-z0-9._-]{1,253}$/.test(granted.hostPrincipal)))
+        throw new CliError('INVALID_RESPONSE', "The server named an invalid host principal for the guest's certificate");
+      if (!pinned && !flags['accept-host-key'])
+        throw new CliError(
+          'INVALID_STATE',
+          `${id}'s host key is not certified (a guest from before host certificates, or one whose certificate expired): it cannot be verified`,
+          'Recreate the sandbox, or pass --accept-host-key to trust its key on first use for this connection.',
         );
+      const alias = pinned ? granted.hostPrincipal! : id;
+      if (!pinned) context.note(`Trusting ${id}'s host key on first use (--accept-host-key).`);
       let status: number;
       try {
         const certificate = join(dir, 'key-cert.pub');
@@ -340,6 +348,10 @@ export const sandboxCommands = [
         // ssh splits -o values on whitespace: quote the paths (a temporary directory may contain spaces).
         const quoted = (value: string) => `"${value.replace(/"/g, '')}"`;
         status = await run(flags.ssh ?? 'ssh', [
+          // No ssh_config at all, the user's or the system's (SendEnv, other IdentityFiles, global known hosts):
+          // everything this connection needs is given here.
+          '-F',
+          'none',
           '-i',
           keyPath,
           '-o',
@@ -369,6 +381,8 @@ export const sandboxCommands = [
           // A per-connection known_hosts: the sandbox CA for a certified guest (nothing else is trusted), else empty.
           '-o',
           `UserKnownHostsFile=${quoted(join(dir, 'known_hosts'))}`,
+          '-o',
+          `GlobalKnownHostsFile=${quoted(join(dir, 'known_hosts'))}`,
           '-o',
           `StrictHostKeyChecking=${pinned ? 'yes' : 'accept-new'}`,
           '-o',

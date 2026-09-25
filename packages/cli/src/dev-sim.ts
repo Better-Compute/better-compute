@@ -147,10 +147,15 @@ export async function prepareDevSim(
     tunnels?: { issuer?: ExecTicketIssuer; ssh?: SshCertificateAuthority; sandboxSsh?: SshCertificateAuthority };
   }).tunnels;
   const issuer = configured?.issuer ?? createExecTicketIssuer({ issuer: issuerName });
-  // Break-glass (ssh-cert) and sandbox exec work in dev too: throwaway CAs unless the deployment has its own.
-  const ssh = configured?.ssh ?? createSshCertificateAuthority({ comment: 'better-compute dev ssh ca' });
+  // Break-glass (ssh-cert) and sandbox exec work in dev too: throwaway CAs unless the deployment has its own. Only
+  // on a PGlite store: against a real database every node's spec would start trusting a CA that dies with this
+  // process.
+  const throwaway = (options.database as { kind?: string }).kind === 'pglite';
+  const ssh =
+    configured?.ssh ?? (throwaway ? createSshCertificateAuthority({ comment: 'better-compute dev ssh ca' }) : undefined);
   const sandboxSsh =
-    configured?.sandboxSsh ?? createSshCertificateAuthority({ comment: 'better-compute dev sandbox ssh ca' });
+    configured?.sandboxSsh ??
+    (throwaway ? createSshCertificateAuthority({ comment: 'better-compute dev sandbox ssh ca' }) : undefined);
   const simOptions: AnyComputeOptions = {
     ...options,
     iam,
@@ -158,7 +163,7 @@ export async function prepareDevSim(
     modules,
     pki: { ...options.pki, nodeCa: keys.pki.nodeCa as never, join: keys.pki.join as never },
     notifier: options.notifier ?? notifier,
-    ...({ tunnels: { ...configured, issuer, ssh, sandboxSsh } } as object),
+    ...({ tunnels: { ...configured, issuer, ...(ssh ? { ssh } : {}), ...(sandboxSsh ? { sandboxSsh } : {}) } } as object),
   };
   // The embedded test IAM has no session reviewer, so it cannot re-authorize an open tunnel: dev skips
   // the 60 s re-check (tickets are still decided by tunnels.open). A configured IAM keeps the default.
