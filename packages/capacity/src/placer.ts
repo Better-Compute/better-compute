@@ -23,7 +23,7 @@ import {
 import type { PoolIndex } from './pool-index.js';
 import { applyRollupDelta, rollupResource } from './rollup.js';
 import { planFromShortlist, shortlistable, shortlistPlan } from './shortlist.js';
-import { loadNodeViews, lockPool, readPool, type PoolRow } from './store.js';
+import { loadNodeViews, lockPool, readImageCachedNodes, readPool, type PoolRow } from './store.js';
 
 export interface InlinePlacerOptions {
   /** Placement attempts before the request goes `pending` (PLAN.md §10.3: ≤3). */
@@ -248,18 +248,23 @@ export function inlinePlacer(options: InlinePlacerOptions = {}): Placer {
       const fast = shortlistable(request, context.plugins);
       let views: NodeView[] | undefined;
       const current = pool;
+      const imageCached =
+        request.imageId !== undefined
+          ? await readImageCachedNodes(tx, current.id, request.imageId)
+          : undefined;
       return placeSingle(
         tx,
         request,
         async (without) => {
           const short = fast
-            ? (await planFromShortlist(tx, current, request, without, context))?.plan
+            ? (await planFromShortlist(tx, current, request, without, context, imageCached))?.plan
             : undefined;
           if (short) return short;
           views ??= await loadNodeViews(tx, current, request.during);
           return planPlacement({ ...request, excludeNodes: without }, views, current, {
             plugins: context.plugins,
             weights: context.weights,
+            ...(imageCached ? { imageCached } : {}),
           });
         },
         excluded,

@@ -657,6 +657,8 @@ export async function scheduleHosted(
     poolId: row.poolId,
     ...(row.projectId !== undefined ? { projectId: row.projectId } : {}),
     instanceId: row.id,
+    // Lets the image-cached scorer prefer hosts whose runtime already holds the image.
+    imageId: row.imageId,
     devices: row.shape.gpus > 0 ? [{ class: 'gpu', count: row.shape.gpus }] : [],
     resources: { vcpu: row.shape.vcpu, memoryGiB: row.shape.memoryGiB, diskGiB: row.shape.diskGiB },
     during: { start: now, end: openEnded },

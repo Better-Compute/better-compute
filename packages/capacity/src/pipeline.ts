@@ -22,6 +22,8 @@ export const defaultScorerWeights: Readonly<Record<string, number>> = Object.fre
   topology: 1,
   fragmentation: 0.25,
   spread: 0,
+  /** Requests with an `imageId` (VPS): nodes whose runtime already caches the image. */
+  'image-cached': 0.5,
 });
 
 /** One node that can take the whole request, with the atoms it would book and its score. */
@@ -56,6 +58,8 @@ export interface PlacementPlan {
 export interface PlanOptions {
   plugins?: readonly SchedulerPlugin[];
   weights?: Readonly<Record<string, number>>;
+  /** Nodes whose runtime caches `request.imageId` (the `image-cached` scorer; see `readImageCachedNodes`). */
+  imageCached?: ReadonlySet<string>;
 }
 
 /** The GPU an atom lives on: MIG instances and slots report links through their parent. */
@@ -306,6 +310,8 @@ export function planPlacement(
     }
 
     const scores = builtInScores(request, node, fit);
+    if (request.imageId !== undefined)
+      scores['image-cached'] = options.imageCached?.has(node.id) ? 1 : 0;
     for (const plugin of plugins)
       for (const scorer of plugin.scorers ?? []) {
         scores[scorer.id] = clamp(scorer.score(request, node));

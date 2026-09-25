@@ -130,11 +130,13 @@ export async function planFromShortlist(
   request: PlacementRequest,
   excluded: readonly string[],
   context: Pick<PlacementContext, 'plugins' | 'weights' | 'topN'>,
+  imageCached?: ReadonlySet<string>,
 ): Promise<{ plan: PlacementPlan; views: NodeView[] } | undefined> {
   return shortlistPlan(pool, request, excluded, context, {
     counts: () => candidates(tx, pool, request, excluded),
     views: (nodeIds) => loadNodeViews(tx, pool, request.during, { onlyNodes: nodeIds }),
     linked: () => linkedNodes(tx, pool),
+    ...(imageCached ? { imageCached } : {}),
   });
 }
 
@@ -153,6 +155,8 @@ export interface ShortlistSource {
   views(nodeIds: readonly string[]): Promise<NodeView[]> | NodeView[];
   /** Nodes with at least one GPU link row. */
   linked(): Promise<Set<string>> | Set<string>;
+  /** Nodes caching `request.imageId` (the `image-cached` score, a known per-node bonus). */
+  imageCached?: ReadonlySet<string>;
 }
 
 /** The exact shortlist over any source; see `planFromShortlist`. */
@@ -176,12 +180,15 @@ export async function shortlistPlan(
     const freeAfter = Math.max(0, row.free - needed);
     const binpack = row.total > 0 ? 1 - freeAfter / row.total : 0;
     const fragmentation = freeAfter === 0 ? 1 : (freeAfter & (freeAfter - 1)) === 0 ? 0.5 : 0;
-    // Summed in `planPlacement`'s order (binpack, topology, fragmentation, spread), so ties are exact.
+    // Summed in `planPlacement`'s order (binpack, topology, fragmentation, spread, image-cached), so
+    // ties are exact.
     let partial = 0;
     partial += w('binpack') * binpack;
     if (topologyConstant) partial += w('topology') * 1;
     partial += w('fragmentation') * fragmentation;
     partial += w('spread') * (1 - binpack);
+    if (request.imageId !== undefined)
+      partial += w('image-cached') * (source.imageCached?.has(row.nodeId) ? 1 : 0);
     return { nodeId: row.nodeId, partial };
   });
   scored.sort(
@@ -193,6 +200,7 @@ export async function shortlistPlan(
   const plan = planPlacement({ ...request, excludeNodes: [...excluded] }, views, pool, {
     plugins: context.plugins,
     weights: context.weights,
+    ...(source.imageCached ? { imageCached: source.imageCached } : {}),
   });
   if (plan.ranked.length === 0) return undefined;
   if (scored.length <= size) return { plan, views };

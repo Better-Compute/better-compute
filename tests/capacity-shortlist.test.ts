@@ -4,7 +4,9 @@ import { useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 import {
   capacityMigrations,
+  inlinePlacer,
   loadNodeViews,
+  readImageCachedNodes,
   planFromShortlist,
   planPlacement,
   readPool,
@@ -139,6 +141,17 @@ describe('the placement shortlist', () => {
     ['vCPU only', { devices: [], resources: { vcpu: 40 } }, {}],
     ['7 GPUs', { devices: [{ class: 'gpu', count: 7 }] }, { fragmentation: 2 }],
     ['1 GPU excluding the best', { excludeNodes: ['n_000', 'n_001', 'n_002'] }, {}],
+    ['1 GPU, image cached somewhere', { imageId: 'img_1' }, {}],
+    [
+      'vCPU only, image-heavy',
+      { devices: [], resources: { vcpu: 8 }, imageId: 'img_1' },
+      { 'image-cached': 3 },
+    ],
+    [
+      '2 GPUs, image cached somewhere',
+      { devices: [{ class: 'gpu', count: 2 }], imageId: 'img_1' },
+      {},
+    ],
   ];
 
   const answered = new Map<string, boolean>();
@@ -148,14 +161,26 @@ describe('the placement shortlist', () => {
       await db.transaction(async (tx) => {
         const pool = (await readPool(tx, 'pool_s'))!;
         for (const topN of [1, 5]) {
+          // A third of the nodes cache the image, when the request names one.
+          const imageCached = req.imageId
+            ? new Set(
+                Array.from({ length: nodeCount }, (_, i) => i)
+                  .filter((i) => i % 3 === 1)
+                  .map((i) => `n_${String(i).padStart(3, '0')}`),
+              )
+            : undefined;
           const full = planPlacement(req, await loadNodeViews(tx, pool, req.during), pool, {
             weights,
+            ...(imageCached ? { imageCached } : {}),
           });
-          const short = await planFromShortlist(tx, pool, req, req.excludeNodes ?? [], {
-            plugins: [],
-            weights,
-            topN,
-          });
+          const short = await planFromShortlist(
+            tx,
+            pool,
+            req,
+            req.excludeNodes ?? [],
+            { plugins: [], weights, topN },
+            imageCached,
+          );
           answered.set(`${name} top${topN}`, short !== undefined);
           // Declining is always allowed (the placer then plans the whole pool).
           if (!short) continue;
@@ -169,8 +194,53 @@ describe('the placement shortlist', () => {
 
   it('answers without the whole pool when the topology term is constant', () => {
     // One GPU (or none): the SQL counts decide the ranking entirely.
-    for (const name of ['1 GPU', '1 GPU, spread', 'vCPU only', '1 GPU excluding the best'])
+    for (const name of [
+      '1 GPU',
+      '1 GPU, spread',
+      'vCPU only',
+      '1 GPU excluding the best',
+      '1 GPU, image cached somewhere',
+      'vCPU only, image-heavy',
+    ])
       for (const topN of [1, 5]) expect(answered.get(`${name} top${topN}`), name).toBe(true);
+  });
+
+  it('prefers hosts that cache the image (node_image_cache), and ignores a missing table', async () => {
+    const request = {
+      tenantId: 'acme',
+      poolId: 'pool_s',
+      instanceId: 'inst_img',
+      imageId: 'img_ubuntu',
+      devices: [],
+      resources: { vcpu: 1 },
+      during: { start: T0, end: T0 + HOUR },
+    };
+    const context = {
+      clock: { now: () => T0 },
+      random: () => 0,
+      plugins: [],
+      weights: { 'image-cached': 10 },
+      topN: 1,
+    };
+    await db
+      .transaction(async (tx) => {
+        expect(await readImageCachedNodes(tx, 'pool_s', 'img_ubuntu')).toEqual(new Set());
+        await tx.query(
+          `CREATE TABLE IF NOT EXISTS node_image_cache (node_id text NOT NULL, image_id text NOT NULL,
+           state text NOT NULL, bytes bigint, last_used_at timestamptz, PRIMARY KEY (node_id, image_id))`,
+        );
+        await tx.query(
+          `INSERT INTO node_image_cache (node_id, image_id, state) VALUES
+           ('n_101', 'img_ubuntu', 'ready'), ('n_102', 'img_ubuntu', 'pulling'), ('n_103', 'img_other', 'ready')`,
+        );
+        expect(await readImageCachedNodes(tx, 'pool_s', 'img_ubuntu')).toEqual(new Set(['n_101']));
+        const outcome = await inlinePlacer().place(tx, request, context);
+        expect(outcome).toMatchObject({ status: 'placed', allocations: [{ nodeId: 'n_101' }] });
+        throw new Error('rollback');
+      })
+      .catch((error: Error) => {
+        if (error.message !== 'rollback') throw error;
+      });
   });
 
   it('declines requests it cannot decide exactly, and nothing that fits is lost', async () => {

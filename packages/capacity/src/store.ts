@@ -207,6 +207,27 @@ export async function readBusyDevices(
   return new Set(rows.map((row) => row.device_id));
 }
 
+/**
+ * Nodes of a pool whose host runtime caches `imageId` (`node_image_cache`, fed by inventory from the
+ * daemon's `images` section), for the `image-cached` scorer. Empty while that table does not exist.
+ */
+export async function readImageCachedNodes(
+  tx: SqlTx,
+  poolId: string,
+  imageId: string,
+): Promise<Set<string>> {
+  const exists = await tx.query<{ present: boolean }>(
+    `SELECT to_regclass('node_image_cache') IS NOT NULL AS present`,
+  );
+  if (!exists.rows[0]?.present) return new Set();
+  const { rows } = await tx.query<{ node_id: string }>(
+    `SELECT c.node_id FROM node_image_cache c JOIN nodes n ON n.id = c.node_id
+      WHERE n.pool_id = $1 AND c.image_id = $2 AND c.state = 'ready'`,
+    [poolId, imageId],
+  );
+  return new Set(rows.map((row) => row.node_id));
+}
+
 /** `node_resources` rows by node, then resource. */
 export async function readNodeResources(
   tx: SqlTx,

@@ -130,9 +130,15 @@ with. A test keeps the two in agreement.
 2. **Atom pick.** Plugin `preferAllocation` pickers win for their class. Otherwise the default pick
    prefers NVLink-complete sets, then the fewest NUMA nodes. `topology: 'nvlink-all'` refuses
    anything less than all-NV.
-3. **Scorers.** The built-ins are `binpack` (weight 1, keeps 8-GPU boards whole), `topology`
-   (1, NV > PIX > PXB > PHB > NODE > SYS), `fragmentation` (0.25) and `spread` (0). Plugin scorers
-   add to them. `weights` overrides any of them by id.
+3. **Scorers.** The built-ins are:
+   - `binpack` (weight 1): keeps 8-GPU boards whole.
+   - `topology` (1): NV > PIX > PXB > PHB > NODE > SYS.
+   - `fragmentation` (0.25).
+   - `spread` (0).
+   - `image-cached` (0.5): only for requests with an `imageId`, such as VPS instances. It scores 1
+     on nodes whose runtime caches the image, from `node_image_cache` (`readImageCachedNodes`).
+
+   Plugin scorers add to these. `weights` overrides any of them by id.
 
 `choosePlan` then picks at random among the top `topN` (default 5). `summarizeRejections` explains
 an empty result, e.g. `no node fits (3 nodes): 2 × fits: 1 of 4 gpu free; 1 × cordoned`.
@@ -166,7 +172,9 @@ capacityModule({ placer: 'pool-lease', maxBatch: 64 });
 ```
 
 Both placers use the same guarded commits, so neither can double-book. Instances, gangs,
-BookingRepair and spot preemption always place synchronously. Inline stays the library default
+BookingRepair and spot preemption always place synchronously. VPS instances stay inline on purpose:
+they are created far less often than reservations, and queuing them would need a withdraw path in
+the CapacityPort. We revisit that only if a benchmark shows instance creates contending with batches. Inline stays the library default
 because it is synchronous and simpler to test; production hosts on Postgres should use pool-lease.
 
 ## Spot reservations and node leases (v0.5)
