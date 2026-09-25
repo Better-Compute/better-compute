@@ -584,9 +584,9 @@
       "name": "console",
       "aliases": [],
       "group": "Access",
-      "summary": "Open an interactive console on a node",
-      "description": "console opens a root console on one node through tunnels.open (compute:nodes:console on the node). The session runs over the server’s tunnel WebSocket, so it needs --url (or BETTER_COMPUTE_URL). The terminal is in raw mode until the remote program exits: every key, Ctrl-C included, goes to the remote, and Ctrl-] detaches. The command exits with the remote program’s status (255 when the tunnel breaks), like ssh. Tickets are single-use and the gateway and the node verify them again; revoking your session or the delegation closes the tunnel.",
-      "usage": "better-compute console --tenant ID --node ID [--config PATH] [--url URL]",
+      "summary": "Open an interactive console on a node, or an instance’s serial console",
+      "description": "console opens a root console on one node (--node, compute:nodes:console on the node), or the serial console of one running instance (--instance, compute:instances:exec on the instance), through tunnels.open. The session runs over the server’s tunnel WebSocket, so it needs --url (or BETTER_COMPUTE_URL). The terminal is in raw mode until the remote program exits: every key, Ctrl-C included, goes to the remote, and Ctrl-] detaches. The command exits with the remote program’s status (255 when the tunnel breaks), like ssh. Tickets are single-use and the gateway and the node verify them again; revoking your session or the delegation closes the tunnel.",
+      "usage": "better-compute console --tenant ID [--node ID] [--instance ID] [--config PATH] [--url URL]",
       "target": "token",
       "args": [],
       "flags": [
@@ -600,8 +600,14 @@
         {
           "flag": "--node",
           "value": "ID",
-          "optional": false,
-          "description": "The node"
+          "optional": true,
+          "description": "The node (a root shell on it)"
+        },
+        {
+          "flag": "--instance",
+          "value": "ID",
+          "optional": true,
+          "description": "The instance (its serial console)"
         },
         {
           "flag": "--config",
@@ -619,7 +625,8 @@
         }
       ],
       "examples": [
-        "better-compute console --url https://compute.example.com --tenant org_acme --node node_01k5w…"
+        "better-compute console --url https://compute.example.com --tenant org_acme --node node_01k5w…",
+        "better-compute console --url https://compute.example.com --tenant org_acme --instance inst_01k5w…"
       ]
     },
     {
@@ -3371,7 +3378,7 @@
       "group": "Fleet",
       "summary": "Write the POSIX sh script that installs bcd on a server and joins it to a pool",
       "description": "daemon install-script emits the bcd installer (PLAN.md §3.3, §6). The script reads the join token only from BCD_JOIN_TOKEN or standard input, downloads the pinned bcd for the machine's architecture from {base-url}{base-path}/downloads/bcd/{version}/linux-{arch}, checks it against --sha256 (or the digests of a --release-manifest verified here under --release-pins, product bcd, version --bcd-version), installs /usr/local/bin/bcd, /etc/bcd/config.toml (mode 0600: gateway URL, site and the serving CA, join signing and join encryption key pins, in bcd's sha256/<base64> form), the JoinService encryption key, and a hardened bcd.service, then runs bcd join and starts the service. Run on a configured host without a token, it upgrades bcd in place. The pins come from the PKI bundle's public half (pki init), so no secret is needed. The script holds no secret either: create the join token separately (joinTokens.create) and hand it over out of band. --plugins prepares the node for bcx driver plugins: a [plugins] section (dir /usr/local/lib/bcd/plugins, a child of bcd's delegated cgroup) and a bcd.service.d drop-in that lets bcd run each plugin under its own uid in its own cgroup (CAP_SETUID/CAP_SETGID/CAP_KILL, Delegate=yes); --privileged-plugins names the ones that run as root and make namespaces (Kata). Any node whose config.toml has a [plugins] section gets the drop-in, and an upgrade keeps the sections the operator configured.",
-      "usage": "better-compute daemon install-script --pool ID --site ID --gateway-url URL --base-url URL [--base-path PATH] --bcd-version VERSION [--sha256 ARCH=HEX,…] [--release-manifest PATH] [--release-pins PINS] [--release-threshold N] [--plugins] [--websocket-url URL] [--websocket-audience HOST] [--proxy-ca-file PATH] [--bmc-networks CIDRS] [--approver-set-sha256 HEX] [--privileged-plugins NAMES] [--release-sequence N] [--pki PATH] [--out PATH]",
+      "usage": "better-compute daemon install-script --pool ID --site ID --gateway-url URL --base-url URL [--base-path PATH] --bcd-version VERSION [--sha256 ARCH=HEX,…] [--release-manifest PATH] [--release-pins PINS] [--release-threshold N] [--plugins] [--unprivileged] [--websocket-url URL] [--websocket-audience HOST] [--proxy-ca-file PATH] [--bmc-networks CIDRS] [--approver-set-sha256 HEX] [--privileged-plugins NAMES] [--release-sequence N] [--pki PATH] [--out PATH]",
       "target": "none",
       "args": [],
       "flags": [
@@ -3444,6 +3451,11 @@
           "flag": "--plugins",
           "optional": true,
           "description": "Prepare the node for bcx driver plugins ([plugins], the systemd drop-in)"
+        },
+        {
+          "flag": "--unprivileged",
+          "optional": true,
+          "description": "Run bcd node as the unprivileged bcd user beside a root bcd helper (privilege separation)"
         },
         {
           "flag": "--websocket-url",

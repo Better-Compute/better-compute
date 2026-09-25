@@ -195,7 +195,7 @@ describe('tunnels.open', () => {
     await db.query('ALTER TABLE instances ADD COLUMN IF NOT EXISTS warm_template_id text');
     try {
       await db.query(`UPDATE instances SET sandbox_id = 'sbx_1' WHERE id = $1`, [INSTANCE]);
-      for (const op of ['exec', 'tcp', 'ssh'])
+      for (const op of ['exec', 'tcp', 'ssh', 'console'])
         await expect(
           open({ tenantId: 'acme', instanceId: INSTANCE, op, ...(op === 'tcp' ? { port: 22 } : {}) }),
         ).rejects.toMatchObject({ code: 'INVALID_STATE', details: { reason: 'sandbox-managed' } });
@@ -211,10 +211,38 @@ describe('tunnels.open', () => {
     await expect(open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' })).resolves.toMatchObject({ op: 'exec' });
   });
 
+  it('opens an instance serial console, decided as compute:instances:exec on the instance', async () => {
+    const definition = api.tunnels.open as Definition & { resource(input: unknown): unknown };
+    expect(
+      definition.resource(definition.validate({ tenantId: 'acme', instanceId: INSTANCE, op: 'console' })),
+    ).toEqual({ type: 'instance', id: INSTANCE });
+    const opened = await open({ tenantId: 'acme', instanceId: INSTANCE, op: 'console' });
+    expect(opened).toMatchObject({ nodeId: NODE, instanceId: INSTANCE, op: 'console' });
+    const claims = verifyExecTicket(opened.ticket, {
+      jwks: issuer.jwksJson(),
+      nodeId: NODE,
+      now: Date.now(),
+      jtiCache: createReplayCache(),
+    });
+    // The instance is in the ticket: the daemon opens that instance's console, never a host shell.
+    expect(claims).toMatchObject({ op: 'console', act: 'compute:instances:exec', inst: INSTANCE, tnt: 'acme' });
+    // Only through a daemon that serves instance tickets.
+    await db.query(`UPDATE node_sessions SET capabilities = '{}' WHERE node_id = $1`, [NODE]);
+    try {
+      await expect(open({ tenantId: 'acme', instanceId: INSTANCE, op: 'console' })).rejects.toMatchObject({
+        code: 'UNSUPPORTED',
+        details: { reason: 'daemon-capability' },
+      });
+    } finally {
+      await db.query(`UPDATE node_sessions SET capabilities = ARRAY['tunnel.instance-dial'] WHERE node_id = $1`, [
+        NODE,
+      ]);
+    }
+  });
+
   it('refuses what cannot be tunneled', async () => {
     const refused = (raw: Record<string, unknown>) =>
       open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec', ...raw });
-    await expect(refused({ op: 'console' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     await expect(refused({ op: 'tcp' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     await expect(refused({ port: 22 })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     await expect(open({ tenantId: 'acme', nodeId: NODE, op: 'exec' })).rejects.toMatchObject({

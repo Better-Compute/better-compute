@@ -31,10 +31,13 @@ export function createTerminalSession(
   api: ComputeRequester,
   options: {
     tenantId: string;
-    /** Exactly one target: an instance (exec / ssh) or a node (its console, `compute:nodes:console`). */
+    /**
+     * Exactly one target: an instance (exec, ssh or its serial console, `compute:instances:exec`) or a node (its
+     * console, `compute:nodes:console`).
+     */
     instanceId?: string;
     nodeId?: string;
-    op?: 'exec' | 'ssh';
+    op?: 'exec' | 'ssh' | 'console';
     /** Where the API lives, for the WebSocket URL. */
     baseURL: string;
     basePath?: string;

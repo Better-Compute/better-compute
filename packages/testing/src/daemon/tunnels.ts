@@ -57,7 +57,8 @@ const decoder = new TextDecoder();
 export const echoShell: TunnelProgramFactory = (context) => {
   let line = '';
   let size = { rows: 24, cols: 80 };
-  context.write(`fake ${context.claims.op} on ${context.nodeId}\r\n$ `);
+  // An instance ticket names what it reaches (an instance console is its serial console, never the host's shell).
+  context.write(`fake ${context.claims.op} on ${context.claims.inst ?? context.nodeId}\r\n$ `);
   return {
     data(bytes) {
       for (const ch of decoder.decode(bytes)) {

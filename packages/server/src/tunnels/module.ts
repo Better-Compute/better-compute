@@ -136,7 +136,7 @@ export interface RevokedSshCert {
 
 export interface OpenTunnelInput {
   tenantId: string;
-  /** Exec into this instance (its node's agent runs it). */
+  /** Exec, ssh, tcp or the serial console of this instance (its node's agent runs it). */
   instanceId?: string;
   /** Console of this node (`compute:nodes:console`). */
   nodeId?: string;
@@ -321,10 +321,13 @@ const inputSchemas = {
         pattern: idPattern('inst').source,
         maxLength: 57,
         description:
-          'Exec, ssh or tcp into this instance; give exactly one of instanceId or nodeId',
+          'Exec, ssh, tcp or the serial console of this instance; give exactly one of instanceId or nodeId',
       },
       nodeId: { ...nodeIdSchema, description: 'The console of this node' },
-      op: { enum: [...ops], description: 'console for a node; exec, ssh or tcp for an instance' },
+      op: {
+        enum: [...ops],
+        description: "console for a node (a host shell); exec, ssh, tcp or console (its serial console) for an instance",
+      },
       port: {
         type: 'integer',
         minimum: 1,
@@ -413,11 +416,9 @@ export function parseOpenTunnel(raw: unknown): OpenTunnelInput {
       invalid('A tcp tunnel needs a port from 1 to 65535');
   } else if (input.port !== undefined) invalid('port applies to tcp tunnels only');
   // §9.2: a node takes a console (`nodes:console` @ node, the row's alternative); an instance
-  // takes exec, ssh or tcp (`instances:exec` @ instance).
+  // takes exec, ssh, tcp or its serial console (`instances:exec` @ instance).
   if (input.nodeId !== undefined && input.op !== 'console')
     invalid('A node takes a console; exec, ssh and tcp are for instances');
-  if (input.nodeId === undefined && input.op === 'console')
-    invalid('An instance takes exec, ssh or tcp; console is for nodes');
   return {
     tenantId: input.tenantId as string,
     ...(input.instanceId !== undefined ? { instanceId: input.instanceId as string } : {}),
@@ -591,9 +592,11 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
             nodeId = input.nodeId!;
             await visibleNode(tx, input.tenantId, nodeId);
           }
-          // Instance tcp/ssh reach a port on the instance: only a daemon that dials the instance's own address.
+          // Instance tcp/ssh reach a port on the instance: only a daemon that dials the instance's own address. The
+          // same daemons serve instance consoles from the runtime (an older one refuses every instance ticket; none
+          // ever answers one with a host shell).
           const needs =
-            input.instanceId && (input.op === 'tcp' || input.op === 'ssh')
+            input.instanceId && (input.op === 'tcp' || input.op === 'ssh' || input.op === 'console')
               ? instanceDialCapability
               : undefined;
           await checkReachable(tx, nodeId, needs);

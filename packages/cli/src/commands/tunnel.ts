@@ -1,6 +1,6 @@
 import { createServer, type AddressInfo, type Socket } from 'node:net';
 import { connectTunnel, tunnelUrl } from '@better-compute/client';
-import { CliError, RemoteExitError } from '../errors.js';
+import { CliError, RemoteExitError, usageError } from '../errors.js';
 import { defineCommand, type CommandContext } from '../framework.js';
 import { parseEndpoint } from '../transport.js';
 import { tenantFlag } from './capacity.js';
@@ -252,17 +252,27 @@ export const tunnelCommands = [
   defineCommand({
     name: 'console',
     group: 'Access',
-    summary: 'Open an interactive console on a node',
-    description: `console opens a root console on one node through tunnels.open (compute:nodes:console on the node). ${attachDescription}`,
+    summary: 'Open an interactive console on a node, or an instance’s serial console',
+    description: `console opens a root console on one node (--node, compute:nodes:console on the node), or the serial console of one running instance (--instance, compute:instances:exec on the instance), through tunnels.open. ${attachDescription}`,
     target: 'token',
     output: 'text',
     flags: {
       tenant: tenantFlag,
-      node: { type: 'string', value: 'ID', required: true, description: 'The node' },
+      node: { type: 'string', value: 'ID', description: 'The node (a root shell on it)' },
+      instance: { type: 'string', value: 'ID', description: 'The instance (its serial console)' },
     },
-    examples: ['better-compute console --url https://compute.example.com --tenant org_acme --node node_01k5w…'],
+    examples: [
+      'better-compute console --url https://compute.example.com --tenant org_acme --node node_01k5w…',
+      'better-compute console --url https://compute.example.com --tenant org_acme --instance inst_01k5w…',
+    ],
     async run(context) {
-      await attach(context, { tenantId: context.flags.tenant as string, op: 'console', nodeId: context.flags.node });
+      const { node, instance } = context.flags;
+      if ((node === undefined) === (instance === undefined)) throw usageError('Give exactly one of --node or --instance');
+      await attach(context, {
+        tenantId: context.flags.tenant as string,
+        op: 'console',
+        ...(node !== undefined ? { nodeId: node } : { instanceId: instance! }),
+      });
     },
   }),
   defineCommand({

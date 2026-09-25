@@ -141,4 +141,19 @@ describe('console', () => {
       }),
     ).rejects.toMatchObject({ code: 'UNSUPPORTED' });
   });
+
+  it('opens a node console or an instance’s serial console, one of the two', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'bc-console-'));
+    const env = { BETTER_COMPUTE_TOKEN: 'biam_ses_x', BETTER_COMPUTE_DATABASE_URL: 'pglite:memory' };
+    const console_ = (flags: string[]) =>
+      createCli().run(['console', '--tenant', 'org_acme', ...flags], { out() {}, env, cwd, terminal: scriptedTerminal().terminal });
+    await expect(console_([])).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(
+      console_(['--node', 'node_01k5w00000000000000000000x', '--instance', 'inst_01k5w00000000000000000000x']),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    // --instance alone gets as far as the tunnel (which needs --url).
+    await expect(console_(['--instance', 'inst_01k5w00000000000000000000x'])).rejects.toMatchObject({
+      code: 'UNSUPPORTED',
+    });
+  });
 });
