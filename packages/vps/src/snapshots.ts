@@ -17,7 +17,7 @@ import {
   MAX_COMMAND_BODY_BYTES,
 } from '@better-compute/protocol';
 import { id, int, key, object, optional, tenant } from './input.js';
-import { cpuModelLabelValue, readInstance, type InstanceDeps } from './instances.js';
+import { cpuModelLabelValue, readInstance, runtimeTable, type InstanceDeps } from './instances.js';
 
 // Sandbox snapshots (PLAN.md §3.7): `sandboxes.snapshot` sends the host the `instance.snapshot`
 // command; the runtime captures disk (and memory) state and uploads it to a presigned URL from the
@@ -313,7 +313,7 @@ export async function restoreSource(
  * retry returns the same snapshot.
  */
 export async function snapshotSandbox(
-  deps: Pick<InstanceDeps, 'clock' | 'events' | 'authz'>,
+  deps: Pick<InstanceDeps, 'clock' | 'events' | 'authz' | 'runtime' | 'runtimes'>,
   store: SnapshotStore | undefined,
   context: MethodContext,
   input: SnapshotSandboxInput,
@@ -363,6 +363,11 @@ export async function snapshotSandbox(
     throw new ComputeError(
       'INVALID_STATE',
       `Sandbox ${sandbox.id} is not running (its instance is ${instance?.state ?? 'gone'})`,
+    );
+  if (!runtimeTable(deps).get(instance.runtime)?.snapshot)
+    throw new ComputeError(
+      'UNSUPPORTED',
+      `Runtime ${instance.runtime} does not snapshot instances (RuntimeTraits.snapshot)`,
     );
   const target = await store.presign({
     tenantId: input.tenantId,

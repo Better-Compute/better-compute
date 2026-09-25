@@ -24,6 +24,7 @@ import {
 import { create } from '@bufbuild/protobuf';
 import { encodeMessage, InstanceSnapshotResultSchema } from '@better-compute/protocol';
 import {
+  builtinRuntimeTraits,
   instanceSpecs,
   instanceWork,
   meterInstances,
@@ -941,6 +942,24 @@ describe('snapshots', () => {
     await expect(
       call('sandboxes', 'snapshot', { tenantId: 'acme', sandboxId: sandbox.id }),
     ).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
+    // A runtime that cannot snapshot is refused up front, before a command reaches the host.
+    const noSnapshots = vps({
+      runtimes: ['cloud-hypervisor'],
+      runtimeTraits: {
+        'cloud-hypervisor': { ...builtinRuntimeTraits['cloud-hypervisor']!, snapshot: false },
+      },
+      images,
+      snapshots: store,
+    });
+    await expect(
+      run(
+        ((noSnapshots.api!(moduleContext(db)) as VpsApi).sandboxes as Record<string, Definition>)
+          .snapshot!,
+        { tenantId: 'acme', sandboxId: sandbox.id },
+        alice,
+      ),
+    ).rejects.toMatchObject({ code: 'UNSUPPORTED' });
+    expect(recorded.commands).toEqual([]);
     await call('sandboxes', 'delete', { tenantId: 'acme', sandboxId: sandbox.id });
     await expect(
       callStore('snapshot', { tenantId: 'acme', sandboxId: sandbox.id }),

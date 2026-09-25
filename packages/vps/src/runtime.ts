@@ -24,6 +24,11 @@ export interface RuntimeTraits {
    * resident, fastest claim) instead of `stopped`.
    */
   pause?: boolean;
+  /**
+   * (v0.5) It implements `snapshot` (`instance.snapshot`): without it `sandboxes.snapshot` is
+   * `UNSUPPORTED` up front rather than a command the host fails.
+   */
+  snapshot?: boolean;
 }
 
 /**
@@ -37,6 +42,7 @@ export const builtinRuntimeTraits: Readonly<Record<string, RuntimeTraits>> = Obj
     gpuPassthrough: true,
     imageFormats: ['qcow2', 'raw', 'iso'],
     pause: true,
+    snapshot: true,
   },
   'cloud-hypervisor': {
     isolation: 'microvm',
@@ -44,6 +50,7 @@ export const builtinRuntimeTraits: Readonly<Record<string, RuntimeTraits>> = Obj
     gpuPassthrough: true,
     imageFormats: ['raw', 'qcow2'],
     pause: true,
+    snapshot: true,
   },
   firecracker: {
     isolation: 'microvm',
@@ -51,6 +58,7 @@ export const builtinRuntimeTraits: Readonly<Record<string, RuntimeTraits>> = Obj
     gpuPassthrough: false,
     imageFormats: ['raw'],
     pause: true,
+    snapshot: true,
   },
   containerd: {
     isolation: 'container',

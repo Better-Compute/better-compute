@@ -147,6 +147,8 @@ show it.
 - **Snapshots.** `sandboxes.snapshot({ includeMemory = true, keep = false })` needs
   `vps({ snapshots: SnapshotStore })` (`presign`, optional `delete`). It sends the host
   `instance.snapshot` (registered through `commandKinds`), keyed `vps.sandboxes:<snapshotId>:snapshot`.
+  - A runtime without `RuntimeTraits.snapshot` (containerd, and bcx runtimes that don't declare it)
+    is refused up front with `UNSUPPORTED`, before any command reaches the host.
   - The snapshot is `pending` until the command settles, then `ready` or `failed`
     (`sandbox.snapshot.ready` and `.failed`).
   - Snapshots live in vps's `sandbox_snapshots` table as their own IAM resource
