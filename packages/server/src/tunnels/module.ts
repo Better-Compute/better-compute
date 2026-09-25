@@ -356,16 +356,33 @@ async function instanceNode(tx: SqlTx, tenantId: string, instanceId: string): Pr
   return row.node_id;
 }
 
-/** The node must be connected to a gateway for its tunnel to open. */
-async function checkReachable(tx: SqlTx, nodeId: string): Promise<void> {
-  const { rows } = await tx.query<{ connectivity: string; gateway_id: string | null }>(
-    `SELECT n.connectivity, s.gateway_id FROM nodes n LEFT JOIN node_sessions s ON s.node_id = n.id
+/**
+ * The daemon capability (Hello.capabilities) that instance tcp/ssh tunnels need: it dials the instance's own
+ * address. A daemon without it could reach the HOST's loopback services through an instance tunnel.
+ */
+export const instanceDialCapability = 'tunnel.instance-dial';
+
+/** The node must be connected to a gateway for its tunnel to open, and its daemon able to run it. */
+async function checkReachable(tx: SqlTx, nodeId: string, needs?: string): Promise<void> {
+  const { rows } = await tx.query<{
+    connectivity: string;
+    gateway_id: string | null;
+    capabilities: string[] | null;
+  }>(
+    `SELECT n.connectivity, s.gateway_id, s.capabilities FROM nodes n LEFT JOIN node_sessions s ON s.node_id = n.id
       WHERE n.id = $1`,
     [nodeId],
   );
   const row = rows[0];
   if (!row || row.connectivity !== 'connected' || !row.gateway_id)
     throw new ComputeError('INVALID_STATE', 'The node is not connected; try again when it is');
+  if (needs && !(row.capabilities ?? []).includes(needs))
+    throw new ComputeError(
+      'UNSUPPORTED',
+      `The daemon on node ${nodeId} cannot open this tunnel (it does not advertise ${needs}); upgrade it`,
+      undefined,
+      { reason: 'daemon-capability', capability: needs },
+    );
 }
 
 /** The tunnels group and the `access.execTicketJwks` every node pins. */
@@ -402,7 +419,10 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
             nodeId = input.nodeId!;
             await visibleNode(tx, input.tenantId, nodeId);
           }
-          await checkReachable(tx, nodeId);
+          // Instance tcp/ssh reach a port on the instance: only a daemon that dials the instance's own address.
+          const needs =
+            input.instanceId && (input.op === 'tcp' || input.op === 'ssh') ? instanceDialCapability : undefined;
+          await checkReachable(tx, nodeId, needs);
           limitTunnels(caller.identityId, context.clock.now());
           const tunnelId = newId('tun');
           const issued = options.issuer.issue({

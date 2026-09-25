@@ -236,6 +236,8 @@ interface Process {
   reconnectTimer: Timer | undefined;
   reconnectAttempt: number;
   offsetMs: number;
+  /** A Welcome set `offsetMs` in this process (before that, server time is only the journal's mark). */
+  serverTimeKnown: boolean;
   spec: NodeSpec | undefined;
   observedGeneration: number;
   lastStatus: MessageInitShape<typeof StatusReportSchema> | undefined;
@@ -495,6 +497,7 @@ export class FakeDaemon {
       reconnectTimer: undefined,
       reconnectAttempt: 0,
       offsetMs: 0,
+      serverTimeKnown: false,
       spec: undefined,
       observedGeneration: 0,
       lastStatus: undefined,
@@ -772,7 +775,14 @@ export class FakeDaemon {
       daemonVersion: this.daemonVersion,
       protoMin: range.min,
       protoMax: range.max,
-      capabilities: [...(this.options.capabilities ?? (this.hw.gpuUuids.length > 0 ? ['cdi', 'nvml'] : []))],
+      capabilities: [
+        ...(this.options.capabilities ?? [
+          ...(this.hw.gpuUuids.length > 0 ? ['cdi', 'nvml'] : []),
+          // Instance tcp/ssh tunnels reach the instance's own address (the tunnel program stands in for it), never
+          // the host's loopback: tunnels.open requires this before opening one.
+          ...(this.options.tunnels ? ['tunnel.instance-dial'] : []),
+        ]),
+      ],
       drivers: [
         ...(this.options.drivers ??
           (this.hw.gpuUuids.length > 0
@@ -970,7 +980,13 @@ export class FakeDaemon {
     session.welcomed = true;
     session.epoch = Number(welcome.epoch);
     // Go: session.ApplyWelcome.
-    if (serverTime !== undefined) proc.offsetMs = serverTime - this.localNow();
+    // The working clock never moves back either: a Welcome within the skew allowance keeps the later time, or a
+    // ticket whose jti was already pruned (at its expiry) would verify again.
+    if (serverTime !== undefined) {
+      const floor = Math.max(meta.serverTimeMs ?? -Infinity, proc.serverTimeKnown ? this.serverNow() : -Infinity);
+      proc.offsetMs = Math.max(serverTime, floor) - this.localNow();
+      proc.serverTimeKnown = true;
+    }
     this.journalValue.saveMeta({
       ...meta,
       lastEpoch: session.epoch,

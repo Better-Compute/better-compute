@@ -131,7 +131,8 @@ beforeAll(async () => {
       [id, connectivity],
     );
   await db.query(
-    `INSERT INTO node_sessions (node_id, session_epoch, gateway_id) VALUES ($1, 1, 'gw-a')`,
+    `INSERT INTO node_sessions (node_id, session_epoch, gateway_id, capabilities)
+     VALUES ($1, 1, 'gw-a', ARRAY['tunnel.instance-dial'])`,
     [NODE],
   );
 });
@@ -168,6 +169,25 @@ describe('tunnels.open', () => {
     });
     const tcp = await open({ tenantId: 'acme', instanceId: INSTANCE, op: 'tcp', port: 5432 });
     expect(tcp.op).toBe('tcp');
+  });
+
+  it('opens instance tcp/ssh tunnels only through a daemon that dials the instance, never host loopback', async () => {
+    await db.query(`UPDATE node_sessions SET capabilities = '{}' WHERE node_id = $1`, [NODE]);
+    try {
+      for (const raw of [{ op: 'tcp', port: 5432 }, { op: 'ssh' }])
+        await expect(open({ tenantId: 'acme', instanceId: INSTANCE, ...raw })).rejects.toMatchObject({
+          code: 'UNSUPPORTED',
+          details: { reason: 'daemon-capability', capability: 'tunnel.instance-dial' },
+        });
+      // exec runs through the node agent itself: unaffected.
+      await expect(open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' })).resolves.toMatchObject({
+        op: 'exec',
+      });
+    } finally {
+      await db.query(`UPDATE node_sessions SET capabilities = ARRAY['tunnel.instance-dial'] WHERE node_id = $1`, [
+        NODE,
+      ]);
+    }
   });
 
   it('refuses what cannot be tunneled', async () => {

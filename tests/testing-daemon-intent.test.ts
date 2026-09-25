@@ -272,11 +272,18 @@ describe('FakeDaemon signed intent', () => {
     await h.advance(5);
     expect(h.daemon.journal.command(recorded.id)).toBeUndefined();
 
-    // A few seconds back (skew between gateways) is fine.
+    // A few seconds back (skew between gateways) is accepted, but the daemon's clock keeps its later time: a
+    // ticket or command that expired meanwhile (its jti already pruned) stays expired.
+    const before = h.daemon.serverNow();
     rewindTo = h.scheduler.now() - 30_000;
     h.server.conn.close('gateway failover');
     await h.advance(30_000);
     expect(h.daemon.epoch).toBeGreaterThan(epoch);
+    expect(h.daemon.serverNow()).toBeGreaterThanOrEqual(before);
+    const late = h.commandBody('diag.nvml', {}, { notAfter: timestampFromMs(h.scheduler.now() - 10_000) });
+    h.server.send({ case: 'command', value: wrapCommand(late, { attempt: 1 }) });
+    await h.advance(5);
+    expect(states(h, late.id)).toEqual(['REJECTED:EXPIRED']);
   });
 
   it('without signed intent configured, behaves as v0.1 (nothing checked)', async () => {

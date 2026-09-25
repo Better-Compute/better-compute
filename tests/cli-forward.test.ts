@@ -92,6 +92,12 @@ describe('forward', () => {
        ON CONFLICT DO NOTHING`,
       [INSTANCE, stack.rootTenantId],
     );
+    // The FakeDaemon advertises tunnel.instance-dial in Hello; set on the session row too, so this test does not
+    // depend on which gateway version records Hello.capabilities.
+    await sql.query(
+      `UPDATE node_sessions SET capabilities = ARRAY['tunnel.instance-dial'] WHERE node_id = $1`,
+      [nodeId],
+    );
 
     // The api host: HTTP by the control plane, tunnel upgrades relayed to the fleet's gateway.
     const compute = stack.compute;
