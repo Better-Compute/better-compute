@@ -85,6 +85,11 @@ export interface PoolPolicy {
   sharing?: { replicas?: number };
   /** `mig` pools: the MIG layout the `mig-layout` config unit applies (e.g. `all-1g.10gb`, `mixed:3g.40gb+2x2g.20gb`). */
   migLayout?: string;
+  /**
+   * `dedicated-root` pools (v0.5): reservations may use `binding: 'node'`; nodes are leased whole
+   * and deployed by metal with the reservation's profile, then wiped on release.
+   */
+  tenantRoot?: boolean;
 }
 
 /** A scheduling and policy domain in one site, with exactly one GPU model. */
