@@ -35,11 +35,14 @@ import {
   createExecTicketIssuer,
   createNodeCa,
   createRevocationFeed,
+  createServingCa,
   createSigningKey,
   generateP256KeyPair,
   normalizeSerial,
   parseCertificate,
+  privateKeyPem,
   publicJwk,
+  toPem,
   type ExecTicketIssuer,
   type ReplayCache,
   type SignerTrust,
@@ -209,9 +212,34 @@ export interface DevFleetOptions {
    * a ticket, which only the daemon's own check can then refuse.
    */
   tunnels?: { issuer: ExecTicketIssuer; issuerName?: string; jtiCache?: ReplayCache };
+  /**
+   * Also admit nodes that joined through the gateway's `Join` RPC on their own (a real `bcd` in an
+   * integration test), not only this fleet's FakeDaemons: every 250 ms the fleet reads each node's
+   * current certificate (this identity generation, not revoked, not expired) from `node_certs` and
+   * accepts its `x-bc-test-node` header with that certificate's site, serial and role. Default off.
+   */
+  admitExternalJoins?: boolean;
+  /**
+   * A second listener for daemons outside this process (a real `bcd`), authenticated as in production:
+   * HTTP/2 over mTLS with a serving certificate from a dev serving CA (`servingCaCertificate`, what the
+   * daemon pins) and client certificates checked against the dev node CA (chain, revocation, trust
+   * domain, role, serial). Binding a non-loopback host is safe here, unlike the h2c header listener.
+   * The certificate names `dnsNames` (default `localhost`, `gw.dev.local`); a daemon dialing an IP
+   * sets its TLS server name to one of them.
+   */
+  externalTls?: { host?: string; port?: number; dnsNames?: readonly string[] };
 }
 
 export interface DevFleet {
+  /** `https://host:port` of the mTLS listener, with `externalTls`. */
+  readonly externalGatewayUrl: string | undefined;
+  /** The dev serving CA (DER) the mTLS listener's certificate chains to, with `externalTls`. */
+  readonly servingCaCertificate: Uint8Array | undefined;
+  /**
+   * Admits a node that joined on its own right now, from its current `node_certs` row (what the
+   * `admitExternalJoins` poller does every 250 ms). Resolves false when it holds no current certificate.
+   */
+  admit(nodeId: string): Promise<boolean>;
   /** The api's relay to this fleet's gateway (`handleTunnel`'s `relay`), when tunnels are on. */
   readonly tunnelRelay: ReturnType<typeof gatewayTunnelRelay> | undefined;
   gateway: Gateway;
@@ -365,6 +393,47 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
    * h2c hook accepts. The serial is what revocations match (as the mTLS listener's certificate would give).
    */
   const joined = new Map<string, { siteId: string; serial: string }>();
+  /** Nodes that joined on their own, admitted from `node_certs` (`admit`, `admitExternalJoins`). */
+  const external = new Map<
+    string,
+    { siteId: string; serial: string; role: 'node' | 'site' | 'ramdisk'; notAfter: number; tenantControlled?: true }
+  >();
+  /** Reads current certificates (one per node: the latest) of `nodeIds`, or of every node not in `joined`. */
+  const readExternal = async (nodeIds?: readonly string[]) => {
+    const { rows } = await database.query<{
+      node_id: string;
+      serial: string;
+      role: string;
+      not_after: Date | string;
+      site_id: string;
+    }>(
+      `SELECT DISTINCT ON (c.node_id) c.node_id, c.serial, c.role, c.not_after, n.site_id
+         FROM node_certs c JOIN nodes n ON n.id = c.node_id
+        WHERE c.revoked_at IS NULL AND c.not_after > compute_now() AND c.identity_gen = n.identity_gen
+          AND ($1::text[] IS NULL OR c.node_id = ANY($1::text[]))
+        ORDER BY c.node_id, c.not_after DESC`,
+      [nodeIds ? [...nodeIds] : null],
+    );
+    const seen = new Set<string>();
+    for (const row of rows) {
+      if (joined.has(row.node_id)) continue;
+      seen.add(row.node_id);
+      const tenant = row.role === 'node-tenant';
+      external.set(row.node_id, {
+        siteId: row.site_id,
+        serial: normalizeSerial(row.serial),
+        role: tenant ? 'node' : (row.role as 'node' | 'site' | 'ramdisk'),
+        notAfter: new Date(row.not_after).getTime(),
+        ...(tenant ? { tenantControlled: true as const } : {}),
+      });
+    }
+    // A node whose certificates were all revoked or superseded drops out.
+    for (const nodeId of nodeIds ?? [...external.keys()]) if (!seen.has(nodeId)) external.delete(nodeId);
+    return seen;
+  };
+  let externalTimer: ReturnType<typeof setInterval> | undefined;
+  let externalServed: ServedGateway | undefined;
+  let servingCaCertificate: Uint8Array | undefined;
   const scheduler = createRealtimeScheduler({ onError: () => {} });
   // Revocations reach the gateway as in production: the feed polls node_certs.revoked_at into the set
   // the gateway enforces (the node CA's).
@@ -377,6 +446,7 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
   let client: H2cClient | undefined;
 
   const close = async () => {
+    if (externalTimer) clearInterval(externalTimer);
     feed.stop();
     tunnelRelay?.close();
     await internal?.close().catch(() => {});
@@ -384,12 +454,19 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
       if (daemon.state !== 'stopped') daemon.crash('dev-fleet-close');
     daemons.clear();
     await client?.close().catch(() => {});
+    await externalServed?.close(100).catch(() => {});
     await served?.close(100).catch(() => {});
     await gateway?.stop().catch(() => {});
     options.notifier?.attach(undefined);
   };
 
   const { host = '127.0.0.1', port = 0, ...gatewayOptions } = options.gateway ?? {};
+  // Header authentication admits whoever names a node: never beyond this machine for outside joins.
+  if (options.admitExternalJoins && !['127.0.0.1', '::1', 'localhost'].includes(host))
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'admitExternalJoins needs the h2c gateway on loopback (anyone reaching it could claim any node id); use externalTls for other hosts',
+    );
   // The gateway advertises its control API in its directory row at start, so its port is chosen first.
   const internalPort = options.tunnels ? await freePort() : undefined;
   const tunnelIssuer = options.tunnels?.issuer;
@@ -427,10 +504,45 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
         const nodeId = peer.headers[TEST_NODE_HEADER];
         if (typeof nodeId !== 'string') return undefined;
         const identity = joined.get(nodeId);
-        if (!identity || revocations.has(identity.serial)) return undefined;
-        return { nodeId, siteId: identity.siteId, serial: identity.serial };
+        if (identity) {
+          if (revocations.has(identity.serial)) return undefined;
+          return { nodeId, siteId: identity.siteId, serial: identity.serial };
+        }
+        // A node that joined on its own: as its certificate would identify it over mTLS.
+        const outside = external.get(nodeId);
+        if (!outside || revocations.has(outside.serial) || outside.notAfter <= Date.now()) return undefined;
+        return { nodeId, ...outside };
       },
     });
+    if (options.externalTls) {
+      const servingCa = createServingCa();
+      const servingKey = generateP256KeyPair();
+      const issued = await servingCa.issue(servingKey.publicKey, {
+        usage: 'server',
+        dnsSans: [...(options.externalTls.dnsNames ?? ['localhost', 'gw.dev.local'])],
+        ttlSeconds: 30 * 86_400,
+      });
+      servingCaCertificate = servingCa.certificate;
+      externalServed = await serveGateway(gateway, {
+        host: options.externalTls.host ?? '127.0.0.1',
+        port: options.externalTls.port ?? 0,
+        tls: {
+          key: privateKeyPem(servingKey.privateKey),
+          cert: [issued.certificate, ...issued.chain].map((der) => toPem(der)).join(''),
+          ca: toPem(keys.pki.nodeCa.certificate),
+          minVersion: 'TLSv1.3',
+        },
+        // The production authenticator: chain to the node CA, revocations, trust domain, role, serial.
+        nodeRoots: [keys.pki.nodeCa.certificate],
+        revocations,
+        trustDomain: keys.trustDomain,
+      });
+    }
+    if (options.admitExternalJoins) {
+      await readExternal();
+      externalTimer = setInterval(() => void readExternal().catch(() => {}), 250);
+      externalTimer.unref?.();
+    }
     if (tunnelIssuer) {
       internal = await serveInternal(gateway, {
         insecure: true,
@@ -520,6 +632,17 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
     tunnelRelay,
     pins: keys.pins,
     daemons,
+    servingCaCertificate,
+    externalGatewayUrl: externalServed
+      ? `https://${(() => {
+          const bind = options.externalTls?.host ?? '127.0.0.1';
+          const name = ['0.0.0.0', '::'].includes(bind) ? '127.0.0.1' : bind;
+          return name.includes(':') ? `[${name}]` : name;
+        })()}:${externalServed.port}`
+      : undefined,
+    async admit(nodeId) {
+      return (await readExternal([nodeId])).has(nodeId);
+    },
     async createPool(poolOptions = {}) {
       const key = poolOptions.key ?? 'dev';
       const gpuModel = poolOptions.gpuModel === undefined ? 'H100' : poolOptions.gpuModel;
@@ -655,7 +778,7 @@ export interface DevStackIam {
 }
 
 export interface DevStackOptions
-  extends Pick<DevFleetOptions, 'region' | 'gateway' | 'daemon' | 'reports'> {
+  extends Pick<DevFleetOptions, 'region' | 'gateway' | 'daemon' | 'reports' | 'admitExternalJoins' | 'externalTls'> {
   /** The store (default: PGlite in memory). The stack migrates it and closes it on `close()`. */
   database?: SqlExecutor;
   /** Default: a fake IAM that authenticates `DEV_ROOT_TOKEN` as a root administrator and allows everything. */
@@ -773,6 +896,8 @@ export async function createDevStack(options: DevStackOptions = {}): Promise<Dev
       ...(options.gateway ? { gateway: options.gateway } : {}),
       ...(options.daemon ? { daemon: options.daemon } : {}),
       ...(options.reports ? { reports: options.reports } : {}),
+      ...(options.admitExternalJoins ? { admitExternalJoins: true } : {}),
+      ...(options.externalTls ? { externalTls: options.externalTls } : {}),
     });
   } catch (error) {
     await close().catch(() => {});
