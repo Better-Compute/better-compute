@@ -467,6 +467,44 @@ describe('FakeDaemon signed intent', () => {
     accepted(h, cmd.id);
   });
 
+  it('keeps the epoch it holds for an unchanged set, so an old signed change cannot be replayed (review 9 HIGH-2)', async () => {
+    const [a, b, c] = [createApproverKey(), createApproverKey(), createApproverKey()];
+    const current = { approverKeys: [a.key, b.key], approverThreshold: 2, quorumTiers: [], unbatchedDestructivePerHour: 0 };
+    // An old, genuinely signed change (epoch 2) that added c at k = 1 with an unbatched allowance; since removed at
+    // epoch 3, which is what this daemon holds.
+    const old = { approverKeys: [a.key, b.key, c.key], approverThreshold: 1, quorumTiers: [], unbatchedDestructivePerHour: 5 };
+    const oldSignatures = [a, b].map((key) => signApproverSet({ epoch: 2, set: old, trustDomain: 'compute.test' }, key.privateKey));
+    const welcomes = [
+      // The api (holding the join key) republishes the current set at epoch 0, unsigned...
+      signTrustBundle({ version: 2, commandSigningRoots: [authority.certificate], ...current, approverSetEpoch: 0 }, joinKey),
+      // ...then replays the old epoch-2 change, whose signers are still current.
+      signTrustBundle(
+        { version: 3, commandSigningRoots: [authority.certificate], ...old, approverSetEpoch: 2, approverSetSignatures: oldSignatures },
+        joinKey,
+      ),
+    ];
+    let session = 0;
+    const h = await daemon({
+      intent: {
+        roots: [authority.certificate],
+        version: 1n,
+        trustSigner: { publicKey: joinKey.publicKey },
+        quorum: { approverKeys: current.approverKeys, threshold: 2, unbatchedPerHour: 0, trustDomain: 'compute.test', epoch: 3n },
+      },
+      kinds: {
+        'test.destroy': { lane: Lane.CONTROL, roles: [AgentRole.NODE], destructive: true, run: () => ({ outcome: 'succeeded' }) },
+      },
+      autoWelcome: () => ({ trust: welcomes[Math.min(session++, welcomes.length - 1)]! }),
+    });
+    h.server.conn.close('failover');
+    await h.advance(30_000);
+    expect(session).toBeGreaterThanOrEqual(2);
+    const cmd = send(h, h.rawCommandBody('test.destroy'), (bytes) => signer.sign(bytes));
+    await h.advance(5);
+    // The old change was refused: still k = 2 of {a, b} and no unbatched allowance.
+    expect(states(h, cmd.id)).toEqual(['REJECTED:UNBATCHED_LIMIT']);
+  });
+
   it('a pinned daemon without keys takes only the pinned first set, and nothing destructive before it (review 7 M2)', async () => {
     const [a, b, intruder] = [createApproverKey(), createApproverKey(), createApproverKey()];
     const pinned = { approverKeys: [a.key, b.key], approverThreshold: 2, quorumTiers: [], unbatchedDestructivePerHour: 0 };

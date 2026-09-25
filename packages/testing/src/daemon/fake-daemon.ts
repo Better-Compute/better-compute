@@ -12,6 +12,7 @@ import {
   approverSetDigest,
   approverSetOf,
   batchSubject,
+  sameApproverSet,
   verifyApproverSetChange,
   verifyBatchCommand,
   verifyBatchProof,
@@ -1092,47 +1093,48 @@ export class FakeDaemon {
         // join key alone, which the api holds, cannot lift or replace it). Refused, the old quorum stays while the
         // rest of the bundle (roots, version) applies.
         const held = this.quorum;
-        try {
-          // A keyless daemon with a pin takes only the pinned set (never the api's word for the first one).
-          const pin = this.options.intent.approverSetSha256;
-          if (!held && pin && Buffer.compare(approverSetDigest(approverSetOf(bundle)), pin) !== 0)
-            throw new ComputeError('ACCESS_DENIED', 'The approver set is not the pinned one', undefined, { reason: 'pin-mismatch' });
-          verifyApproverSetChange(
-            held
-              ? {
-                  approverKeys: held.approverKeys,
-                  approverThreshold: held.threshold,
-                  quorumTiers: held.tiers ?? [],
-                  unbatchedDestructivePerHour: held.unbatchedPerHour ?? 0,
-                  epoch: held.epoch ?? 0n,
-                }
-              : undefined,
-            {
+        const heldSet = held
+          ? {
+              approverKeys: held.approverKeys,
+              approverThreshold: held.threshold,
+              quorumTiers: held.tiers ?? [],
+              unbatchedDestructivePerHour: held.unbatchedPerHour ?? 0,
+              epoch: held.epoch ?? 0n,
+            }
+          : undefined;
+        // The same set: nothing changes, the held epoch included (review 9 HIGH-2). Taking a lower one would let an
+        // old, genuinely signed change be replayed; a higher one, unsigned, would lock out the next real change.
+        if (!heldSet || !sameApproverSet(heldSet, approverSetOf(bundle)))
+          try {
+            // A keyless daemon with a pin takes only the pinned set (never the api's word for the first one).
+            const pin = this.options.intent.approverSetSha256;
+            if (!held && pin && Buffer.compare(approverSetDigest(approverSetOf(bundle)), pin) !== 0)
+              throw new ComputeError('ACCESS_DENIED', 'The approver set is not the pinned one', undefined, { reason: 'pin-mismatch' });
+            verifyApproverSetChange(heldSet, {
               ...approverSetOf(bundle),
               epoch: bundle.approverSetEpoch,
               approverSetSignatures: bundle.approverSetSignatures,
               // The deployment's own trust domain, as for batch approvals.
               trustDomain: held?.trustDomain ?? this.options.intent.trustDomain,
-            },
-          );
-          // The quorum travels in the same signed bundle: a signed one without approver keys lifts it.
-          this.quorum = bundle.approverKeys.length
-            ? {
-                approverKeys: bundle.approverKeys.map((key) => ({ kid: key.kid, spkiDer: key.spkiDer })),
-                threshold: bundle.approverThreshold,
-                tiers: bundle.quorumTiers.map((tier) => ({ maxScopeSize: tier.maxScopeSize, threshold: tier.threshold })),
-                unbatchedPerHour: bundle.unbatchedDestructivePerHour,
-                // The deployment's own trust domain (absent: every approval fails, closed).
-                trustDomain: this.quorum?.trustDomain ?? this.options.intent.trustDomain ?? '',
-                epoch: bundle.approverSetEpoch,
-              }
-            : undefined;
-        } catch (error) {
-          this.log('trust.quorum-refused', {
-            version: Number(bundle.version),
-            reason: isComputeError(error) ? String(error.details?.reason ?? error.message) : String(error),
-          });
-        }
+            });
+            // The quorum travels in the same signed bundle: a signed one without approver keys lifts it.
+            this.quorum = bundle.approverKeys.length
+              ? {
+                  approverKeys: bundle.approverKeys.map((key) => ({ kid: key.kid, spkiDer: key.spkiDer })),
+                  threshold: bundle.approverThreshold,
+                  tiers: bundle.quorumTiers.map((tier) => ({ maxScopeSize: tier.maxScopeSize, threshold: tier.threshold })),
+                  unbatchedPerHour: bundle.unbatchedDestructivePerHour,
+                  // The deployment's own trust domain (absent: every approval fails, closed).
+                  trustDomain: this.quorum?.trustDomain ?? this.options.intent.trustDomain ?? '',
+                  epoch: bundle.approverSetEpoch,
+                }
+              : undefined;
+          } catch (error) {
+            this.log('trust.quorum-refused', {
+              version: Number(bundle.version),
+              reason: isComputeError(error) ? String(error.details?.reason ?? error.message) : String(error),
+            });
+          }
         this.log('trust.updated', { version: Number(bundle.version), roots: bundle.commandSigningRoots.length });
       } catch (error) {
         this.log('trust.ignored', {

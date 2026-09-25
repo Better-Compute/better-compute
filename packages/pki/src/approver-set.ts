@@ -68,7 +68,8 @@ export function signApproverSet(
 /**
  * Whether a daemon holding `current` (at its epoch) may take `next` (from a trust bundle verified under the join key):
  * - no current approver keys: yes, the first set only adds restrictions;
- * - the same quorum fields: yes, nothing about the quorum changes;
+ * - the same quorum fields: yes, nothing about the quorum changes, and the verifier KEEPS the epoch it holds (never
+ *   the incoming one: a lower one would let an old signed change be replayed, a higher one lock out the next one);
  * - otherwise only for a higher epoch, with valid `approver_set_signatures` over (next.epoch, next's fields, the
  *   verifier's own `trustDomain`) by at least the current threshold of distinct CURRENT approver keys (kid =
  *   SHA-256 of the SPKI).
