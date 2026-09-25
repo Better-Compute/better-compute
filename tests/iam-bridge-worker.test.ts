@@ -257,6 +257,23 @@ describe('reconcileIamIdentities', () => {
     });
     expect(withHolders.checked).toBe(4);
     expect(handled.sort()).toEqual(['idn_bob:disabled', 'idn_dan:missing', 'idn_eve:missing']);
+
+    // A suspended agent (disabled, no successor) also gets the agent reaction, as agent:suspend would give it.
+    const agents: string[] = [];
+    await reconcileIamIdentities(db, {
+      readIdentity: async (_tenantId, identityId) =>
+        identityId === 'agt_sam'
+          ? { status: 'disabled', kind: 'agent' }
+          : { status: states[identityId] ?? 'missing', kind: 'user' },
+      holders: [async () => [{ tenantId: 'ten_a', identityId: 'agt_sam' }]],
+      handlers: {
+        identity: async () => {},
+        agent: async (_tx, event) => {
+          agents.push(`${event.action}:${event.subjectId}`);
+        },
+      },
+    });
+    expect(agents).toEqual(['agent:suspend:agt_sam']);
   });
 });
 

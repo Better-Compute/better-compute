@@ -249,8 +249,12 @@ export interface ReconcileIdentitiesOptions {
   readIdentity(tenantId: string, identityId: string): Promise<IdentityState>;
   /** More holders to re-read besides reservation owners (a module's, which iam cannot import). */
   holders?: readonly IdentityHolders[];
-  /** Called for every identity that is no longer active; receives a synthetic `identity` event. */
-  handlers?: Pick<IamEventHandlers, 'identity' | 'onError'>;
+  /**
+   * Called for every identity that is no longer active with a synthetic `identity` event; an agent also gets a
+   * synthetic `agent:suspend` for `agent` (what it holds as an agent, not as an owner: sandboxes it created,
+   * reservations, tunnels).
+   */
+  handlers?: Pick<IamEventHandlers, 'identity' | 'agent' | 'onError'>;
   /** Identities per pass. Default 1000. */
   limit?: number;
 }
@@ -266,8 +270,8 @@ const liveStates = reservationStateTable.states.filter(
 
 /**
  * One IamReconcile pass: every identity that owns a non-terminal reservation, or that one of `holders` names, is
- * re-read from IAM; each one that is no longer active is handed to `handlers.identity` as if its event had arrived
- * (§12.8).
+ * re-read from IAM; each one that is no longer active is handed to `handlers.identity` as if its event had arrived,
+ * and an agent to `handlers.agent` as if it had been suspended (§12.8).
  */
 export async function reconcileIamIdentities(
   sql: SqlExecutor,
@@ -303,17 +307,37 @@ export async function reconcileIamIdentities(
       metadata: { status: state.status },
       reactions: ['identity'],
     };
-    const handler = options.handlers?.identity;
-    if (!handler) continue;
-    try {
-      await sql.transaction((tx) => handler(tx, event));
-    } catch (error) {
+    const dispatch = async (
+      reaction: 'identity' | 'agent',
+      synthetic: IamInboxEvent,
+      handler: ((tx: SqlTx, event: IamInboxEvent) => Promise<void>) | undefined,
+    ) => {
+      if (!handler) return;
       try {
-        options.handlers?.onError?.(error, event, 'identity');
-      } catch {
-        // Reporting must not stop the pass.
+        await sql.transaction((tx) => handler(tx, synthetic));
+      } catch (error) {
+        try {
+          options.handlers?.onError?.(error, synthetic, reaction);
+        } catch {
+          // Reporting must not stop the pass.
+        }
       }
-    }
+    };
+    await dispatch('identity', event, options.handlers?.identity);
+    // A suspended agent reads as disabled with no successor, which ends nothing for the identity reaction; what it
+    // holds as an agent is withdrawn by the agent reaction, as `agent:suspend` would have.
+    if (state.kind === 'agent')
+      await dispatch(
+        'agent',
+        {
+          ...event,
+          eventId: `reconcile:${row.tenant_id}:${row.identity_id}:agent`,
+          action: 'agent:suspend',
+          metadata: { status: state.status, reason: 'compute:iam:reconcile' },
+          reactions: ['agent'],
+        },
+        options.handlers?.agent,
+      );
   }
   return { checked: rows.length, inactive };
 }
