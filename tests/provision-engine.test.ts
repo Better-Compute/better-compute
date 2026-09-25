@@ -246,6 +246,39 @@ describe('expandProfile', () => {
     ).toThrow(/only for control-plane steps/);
   });
 
+  it('holds a relaying step to the kinds it declares in sends (the batch scope, §13)', async () => {
+    const relay = (id: string, sent: string) =>
+      defineStep({
+        id,
+        runsOn: 'control-plane',
+        sends: ['inventory.refresh'],
+        timeout: '1m',
+        retrySafe: true,
+        input: manifest({}),
+        async run(_input, stepContext) {
+          await stepContext.sql.transaction((tx) =>
+            stepContext.commands.enqueue(tx, { nodeId: stepContext.node!.id, kind: sent, payload: {}, idempotencyKey: `${id}-1`, notAfter: Date.now() + 60_000 }),
+          );
+          return null;
+        },
+      });
+    const own: AdvanceOptions = { ...options, steps: stepRegistry([relay('test.honest', 'inventory.refresh'), relay('test.liar', 'disk.wipe')]) };
+    for (const [id, expected] of [
+      ['test.honest', 'succeeded'],
+      ['test.liar', 'failed'],
+    ] as const) {
+      profile({ id: `sends-${id}`, steps: [{ use: id }] });
+      const target = await addNode();
+      const { id: workflowId } = await db.transaction((tx) =>
+        startWorkflow(context(), own, tx, { tenantId: 'ten_a', profileId: `sends-${id}`, profileVersion: 1, nodeId: target }),
+      );
+      await advanceWorkflow(context(), own, workflowId);
+      const row = await workflow(workflowId);
+      expect(row.state, id).toBe(expected);
+      if (expected === 'failed') expect(row.error?.message).toMatch(/does not declare in sends/);
+    }
+  });
+
   it('evaluates when: against node labels', () => {
     const labels = { 'gpu.model': 'H100', nvswitch: 'true', 'mig.capable': 'false' };
     expect(evaluateWhen('nvswitch', labels)).toBe(true);

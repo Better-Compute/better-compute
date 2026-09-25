@@ -18,6 +18,7 @@ export * from './attestation.js';
 export * from './tenant-root.js';
 export * from './findings.js';
 export * from './tenancy.js';
+export * from './batch.js';
 export { generateBmcPassword, rotatedCredentialValue } from './bmc-rotation.js';
 export { applyProvisionVerb, readMetalNode, resolveDriverBindings, type MetalNodeRow } from './store.js';
 

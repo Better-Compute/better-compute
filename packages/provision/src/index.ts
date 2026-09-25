@@ -34,6 +34,7 @@ export { builtinProfileTenant, createProfile, deleteProfile, profileSource, upda
 export { provisionMigrations } from './migrations.js';
 export * from './images.js';
 export * from './site-cache.js';
+export * from './batch.js';
 export * from './findings.js';
 export * from './tenancy.js';
 export * from './command-step.js';

@@ -25,6 +25,7 @@ const stepKeys = [
   'run',
   'cleanup',
   'relays',
+  'sends',
 ] as const;
 
 /**
@@ -80,8 +81,13 @@ export function defineStep<I>(step: StepInputWithRelays<I>): RelayingStepDefinit
       for (const [i, place] of (candidate.relays as unknown[]).entries())
         if (place !== 'site' && place !== 'node' && place !== 'ramdisk') fail(`relays[${i}]`, 'must be site, node or ramdisk');
     }
+    if (candidate.sends !== undefined) {
+      if (!Array.isArray(candidate.sends)) fail('sends', 'must be a list of command kinds');
+      for (const [i, kind] of (candidate.sends as unknown[]).entries()) checkDottedId(kind, `sends[${i}]`, fail);
+    }
   } else {
     if (candidate.relays !== undefined) fail('relays', 'is only for control-plane steps');
+    if (candidate.sends !== undefined) fail('sends', `is only for control-plane steps; a step on ${candidate.runsOn} sends its command`);
     if (candidate.command === undefined)
       fail('command', `is required: a step on ${candidate.runsOn} is exactly one command`);
     checkDottedId(candidate.command, 'command', fail);

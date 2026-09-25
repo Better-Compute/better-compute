@@ -68,6 +68,7 @@ export const nodeRebootStep: StepDefinition = defineStep({
 export const resetGpusStep: StepDefinition = defineStep({
   id: 'health.resetGpus',
   runsOn: 'control-plane',
+  sends: ['gpu.reset', 'inventory.refresh'],
   relays: ['node'],
   timeout: '15m',
   retrySafe: false,

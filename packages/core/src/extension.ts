@@ -710,6 +710,13 @@ export interface StepInput<I> {
   input: Manifest<I>;
   /** Steps that run on an agent: the command kind sent (`driver.invoke` for driver operations). */
   command?: string;
+  /**
+   * Control-plane steps that relay commands: every kind `run` may send (the workflow engine refuses
+   * any other), so a profile's full command set is known before it runs, e.g. for a batch's approval
+   * scope (§13 quorum). A step without it is not checked, and in a batch whatever it sends falls
+   * outside the scope and is refused.
+   */
+  sends?: readonly string[];
   /** Control-plane steps. */
   run?(input: I, context: StepContext): Promise<Json | void>;
   cleanup?: readonly ProfileStep[];

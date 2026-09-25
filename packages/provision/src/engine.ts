@@ -792,9 +792,24 @@ async function runControlPlaneStep(
   const timer = setTimeout(() => controller.abort(new ComputeError('INTERNAL_ERROR', 'step timed out')), Math.max(0, deadline - now()));
   // Read with the workflow's lock; a node row deleted meanwhile has none.
   const node: NodeRef | undefined = workflow.node;
+  // A step that declares what it relays (`sends`) may enqueue only those kinds: a batch's scope,
+  // computed from the declarations, then covers everything the workflow can send.
+  const sends = definition.sends;
+  const commands =
+    sends && context.commands
+      ? {
+          ...context.commands,
+          enqueue: (tx: SqlTx, command: Parameters<typeof context.commands.enqueue>[1]) => {
+            if (!sends.includes(command.kind))
+              throw new ComputeError('INVALID_CONFIG', `Step ${step.action} sends ${command.kind}, which it does not declare in sends`);
+            return context.commands.enqueue(tx, command);
+          },
+        }
+      : context.commands;
   const stepContext = {
     ...(options.stepContext ?? {}),
     ...context,
+    commands,
     workflowId: workflow.id,
     stepId: step.id,
     attempt: step.attempt,

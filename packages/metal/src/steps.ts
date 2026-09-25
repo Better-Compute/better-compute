@@ -231,6 +231,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const getPower = defineStep({
     id: 'power.getPower',
     runsOn: 'control-plane',
+    sends: ['bmc.query'],
     relays: ['site'],
     timeout: '2m',
     retrySafe: true,
@@ -246,6 +247,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const setPower = defineStep({
     id: 'power.setPower',
     runsOn: 'control-plane',
+    sends: ['bmc.power'],
     relays: ['site'],
     timeout: '5m',
     retrySafe: false,
@@ -262,6 +264,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const setBootDevice = defineStep({
     id: 'management.setBootDevice',
     runsOn: 'control-plane',
+    sends: ['bmc.boot'],
     relays: ['site'],
     timeout: '2m',
     retrySafe: true,
@@ -283,6 +286,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const inspectOob = defineStep({
     id: 'inspect.oob',
     runsOn: 'control-plane',
+    sends: ['bmc.query'],
     relays: ['site'],
     timeout: '5m',
     retrySafe: true,
@@ -311,6 +315,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const prepareRamdisk = defineStep({
     id: 'boot.prepareRamdisk',
     runsOn: 'control-plane',
+    sends: ['boot.prepareRamdisk'],
     relays: ['site'],
     timeout: '2m',
     retrySafe: true,
@@ -325,6 +330,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const cleanUp = defineStep({
     id: 'boot.cleanUp',
     runsOn: 'control-plane',
+    sends: ['boot.cleanUp'],
     relays: ['site'],
     timeout: '2m',
     retrySafe: true,
@@ -350,6 +356,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const ensureRamdisk = defineStep({
     id: 'metal.ensureRamdisk',
     runsOn: 'control-plane',
+    sends: ['bmc.boot', 'boot.prepareRamdisk', 'bmc.power'],
     timeout: '20m',
     retrySafe: true,
     input: manifest({}),
@@ -374,6 +381,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const mediaInsert = defineStep({
     id: 'media.insert',
     runsOn: 'control-plane',
+    sends: ['bmc.boot'],
     relays: ['site'],
     timeout: '5m',
     retrySafe: true,
@@ -401,6 +409,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const mediaEject = defineStep({
     id: 'media.eject',
     runsOn: 'control-plane',
+    sends: ['bmc.boot'],
     relays: ['site'],
     timeout: '5m',
     retrySafe: true,
@@ -414,6 +423,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const refreshInventory = defineStep({
     id: 'inventory.refresh',
     runsOn: 'control-plane',
+    sends: ['inventory.refresh'],
     relays: ['ramdisk', 'node'],
     timeout: '10m',
     retrySafe: true,
@@ -427,6 +437,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const dcgm = defineStep({
     id: 'diag.dcgm',
     runsOn: 'control-plane',
+    sends: ['diag.dcgm'],
     relays: ['ramdisk', 'node'],
     timeout: '1h',
     retrySafe: true,
@@ -446,6 +457,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const wipe = defineStep({
     id: 'disk.wipe',
     runsOn: 'control-plane',
+    sends: ['disk.wipe'],
     relays: ['ramdisk'],
     timeout: '6h',
     retrySafe: false,
@@ -467,6 +479,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const deploy = defineStep({
     id: 'deploy.deploy',
     runsOn: 'control-plane',
+    sends: ['deploy.image'],
     relays: ['ramdisk'],
     timeout: '1h',
     retrySafe: false,
@@ -573,6 +586,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const firmwareCheck = defineStep({
     id: 'metal.firmwareCheck',
     runsOn: 'control-plane',
+    sends: ['bmc.query', 'bmc.firmware'],
     relays: ['site'],
     timeout: '5m',
     retrySafe: true,
@@ -634,6 +648,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const biosApply = defineStep({
     id: 'bios.apply',
     runsOn: 'control-plane',
+    sends: ['bmc.query', 'bmc.boot', 'bmc.power'],
     relays: ['site'],
     timeout: '5m',
     retrySafe: true,
@@ -657,6 +672,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const biosVerify = defineStep({
     id: 'bios.verify',
     runsOn: 'control-plane',
+    sends: ['bmc.query'],
     relays: ['site'],
     timeout: '5m',
     retrySafe: true,
@@ -681,6 +697,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const raidApply = defineStep({
     id: 'raid.apply',
     runsOn: 'control-plane',
+    sends: ['bmc.storage', 'bmc.query'],
     relays: ['site'],
     timeout: '1h',
     retrySafe: false,
@@ -709,6 +726,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const rotateBmcCredential = defineStep({
     id: 'metal.rotateBmcCredential',
     runsOn: 'control-plane',
+    sends: ['bmc.rotate'],
     relays: ['site'],
     timeout: '10m',
     retrySafe: true,
