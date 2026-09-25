@@ -231,6 +231,16 @@ export async function createStack() {
     modules: [...modules, ...bridge.modules],
     iam: bridge.embedded(iam, { rootTenantId, runIamJobs: true }),
     ...(tunnels ? { tunnels } : {}),
+    // Where daemons dial (CONSOLE_GATEWAY_URL, https), published in /.well-known/better-compute for
+    // `bcd join --server`; with no PKI bundle here, without a serving CA pin.
+    ...(env.CONSOLE_GATEWAY_URL
+      ? {
+          gateway: {
+            url: env.CONSOLE_GATEWAY_URL,
+            ...(env.CONSOLE_GATEWAY_SERVER_NAME ? { serverName: env.CONSOLE_GATEWAY_SERVER_NAME } : {}),
+          },
+        }
+      : {}),
   });
   await compute.initialize();
   // IAM events reach compute through the inbox this process drains: a revoked delegation or suspended agent closes
