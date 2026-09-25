@@ -162,6 +162,7 @@ strings, integers and booleans. Unknown keys, duplicate keys and wrong types are
 | `approver_set_sha256` | unset; the hex SHA-256 of the approver set a keyless daemon may take first (review 7 M2) |
 | `[update] release_pins`, `release_threshold`, `release_sequence`, `entrypoint` | no pins (self-update refused), 1, 0, `/usr/local/bin/bcd` |
 | `[site] bmc_networks` | unset; CIDRs `site.httpProxy` never reaches |
+| `[websocket] url`, `proxy_ca_file`, `audience` | unset (gRPC only); a `wss://` URL moves the session and renewals to the WebSocket fallback |
 | `[plugins] dir`, `user`, `privileged`, `sandbox`, `cgroup`, `memory_max`, `pids_max` | no plugins; per-plugin uids, none, `true` |
 | `[imds] listen` | unset (VPS hosts: the metadata service's address) |
 | `[boot] listen`, `url`, `kernel`, `initrd`, `cmdline`, `server_ip`, `proxy_dhcp`, `tftp`, `tftp_root`, `cache_max_bytes` | site agents only |
@@ -244,6 +245,14 @@ binary is staged in the other slot, `upgrade.json` gets a 120 s deadline, `curre
 execs the entrypoint. The new binary is confirmed by its first Welcome; without one it swaps back,
 and the old binary records the version as failed. Going back to the version in the other slot
 needs no manifest.
+
+**WebSocket fallback** (`transport/ws.go`, `cmd/bcd/websocket.go`). For proxies that strip client
+certificates: the Session runs over `wss://…/v1/session` (subprotocol `bc.agent.v1`, the same
+length-prefixed frames). bcd proves itself with an ES256 proof JWT (`x5c` = its chain, single-use
+`jti`, the connection nonce) and accepts only a gateway whose `x-bc-gateway-proof` chains to the
+pinned serving CA; `proxy_ca_file` is trusted for TLS only. Renewals go to `POST /v1/renew` on the
+same listener. WS mode needs command-signing roots (the gateway sends it signed intent only) and has
+no tunnels.
 
 **Server time** (`agent/conn.go`). The daemon keeps a high-water mark of server time, advanced by
 every Welcome and heartbeat and mirrored in `identity.json`. A Welcome more than 5 minutes behind it
