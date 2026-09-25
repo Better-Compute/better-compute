@@ -5,6 +5,7 @@ import {
   type ReleaseManifest,
   type SignedReleaseManifest,
 } from '@better-compute/pki';
+import type { Finding, SqlExecutor } from '@better-compute/core';
 import { CliError, usageError } from '../errors.js';
 import { defineCommand } from '../framework.js';
 import { renderInstallScript, type BcdArch } from '../install-script.js';
@@ -93,6 +94,36 @@ async function digestsFromManifest(
       `The manifest releases bcd ${manifest.version}, not ${version}`,
     );
   return binaryDigests(manifest);
+}
+
+/**
+ * doctor's daemon checks: connected site agents whose Hello lacks `site.bmc-networks` have no local deny list for
+ * site.httpProxy (config.toml [site] bmc_networks; the control plane cannot set it for them).
+ */
+export async function daemonFindings(sql: Pick<SqlExecutor, 'query'>): Promise<Finding[]> {
+  // Before migrations (doctor reports those itself): nothing to check yet.
+  const { rows: ready } = await sql.query<{ ok: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('node_sessions')
+                      AND attname = 'capabilities' AND NOT attisdropped) AS ok`,
+  );
+  if (!ready[0]?.ok) return [];
+  const { rows } = await sql.query<{ node_id: string; total: string | number }>(
+    `SELECT s.node_id, count(*) OVER () AS total
+       FROM node_sessions s JOIN nodes n ON n.id = s.node_id
+      WHERE n.role = 'site' AND s.gateway_id IS NOT NULL AND s.disconnected_at IS NULL
+        AND NOT ('site.bmc-networks' = ANY (s.capabilities))
+      ORDER BY s.node_id LIMIT 5`,
+  );
+  if (!rows.length) return [];
+  const total = Number(rows[0]!.total);
+  return [
+    {
+      check: 'daemon.site-bmc-networks',
+      severity: 'warning',
+      message: `${total} connected site agent(s) have no BMC network deny list (${rows.map((row) => row.node_id).join(', ')}${total > rows.length ? ', …' : ''}): site.httpProxy only has the control plane's word for which addresses it may reach`,
+      fix: 'Set [site] bmc_networks in their /etc/bcd/config.toml (daemon install-script --bmc-networks CIDR,…) and restart bcd',
+    },
+  ];
 }
 
 export const daemonCommands = [

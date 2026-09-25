@@ -6,6 +6,7 @@ import { resolveHost } from '../host/config.js';
 import { hostFindings } from '../host/findings.js';
 import { isUnconfiguredIam } from '../iam.js';
 import { defaultPkiPath, pkiFindings, quorumFindings, pkiFlag } from './pki.js';
+import { daemonFindings } from './daemon.js';
 
 /**
  * The starter configuration `init` writes: a side-effect-free factory with PGlite in development,
@@ -131,6 +132,7 @@ export const setupCommands = [
       if (isUnconfiguredIam(options.iam)) findings.push(noIamFinding);
       findings.push(...(await pkiFindings(path(flags.pki ?? defaultPkiPath), env, undefined, compute.context.sql)));
       findings.push(...(await quorumFindings(compute.context.sql, options)));
+      findings.push(...(await daemonFindings(compute.context.sql)));
       const host = await resolveHost((await configModule()).host, { compute, options, env, cwd });
       findings.push(...hostFindings(compute, options, host));
       print({
