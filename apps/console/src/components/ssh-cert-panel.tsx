@@ -6,6 +6,7 @@ import { ErrorLine } from './ui';
 
 interface IssuedSshCert {
   certificate: string;
+  serial: string;
   keyId: string;
   /** Node-bound (`root@node_…`): the certificate opens this node only. */
   principals: string[];
@@ -26,11 +27,13 @@ export function SshCertPanel({ nodeId }: { nodeId: string }) {
   const [issued, setIssued] = useState<IssuedSshCert>();
   const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
+  const [revokedAt, setRevokedAt] = useState<number>();
 
   const issue = async () => {
     setBusy(true);
     setError(undefined);
     setIssued(undefined);
+    setRevokedAt(undefined);
     try {
       setIssued(
         await api.$request<IssuedSshCert>('nodes/issueSshCert', {
@@ -41,6 +44,26 @@ export function SshCertPanel({ nodeId }: { nodeId: string }) {
           ttlSeconds: minutes * 60,
         }),
       );
+    } catch (failure) {
+      setError(failure);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Done with it early, or it leaked: the node's KRL lists it from its next spec (nodes.revokeSshCert).
+  const revoke = async () => {
+    if (!issued) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      const revoked = await api.$request<{ revokedAt: number }>('nodes/revokeSshCert', {
+        tenantId,
+        nodeId,
+        serial: issued.serial,
+        reason: 'revoked from the console',
+      });
+      setRevokedAt(revoked.revokedAt);
     } catch (failure) {
       setError(failure);
     } finally {
@@ -104,12 +127,24 @@ export function SshCertPanel({ nodeId }: { nodeId: string }) {
             <code>ssh {issued.account}@&lt;node&gt;</code>. It opens this node only.
           </p>
           <textarea readOnly rows={4} style={{ width: '100%' }} value={issued.certificate} />
-          <button
-            type="button"
-            onClick={() => void navigator.clipboard.writeText(issued.certificate)}
-          >
-            Copy
-          </button>
+          <div className="row">
+            <button
+              type="button"
+              onClick={() => void navigator.clipboard.writeText(issued.certificate)}
+            >
+              Copy
+            </button>
+            {revokedAt === undefined ? (
+              <button type="button" disabled={busy} onClick={() => void revoke()}>
+                Revoke now
+              </button>
+            ) : (
+              <span className="warning">
+                Revoked {new Date(revokedAt).toLocaleTimeString()}; the node refuses it from its
+                next spec.
+              </span>
+            )}
+          </div>
         </>
       )}
     </section>

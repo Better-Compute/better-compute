@@ -93,6 +93,22 @@ export interface IssuedSshCert {
   validBefore: number;
 }
 
+export interface RevokeSshCertInput {
+  tenantId: string;
+  nodeId: string;
+  /** The certificate's serial (decimal), as `nodes.issueSshCert` returned it. */
+  serial: string;
+  reason?: string;
+}
+
+export interface RevokedSshCert {
+  nodeId: string;
+  serial: string;
+  principal: string;
+  expiresAt: number;
+  revokedAt: number;
+}
+
 export interface OpenTunnelInput {
   tenantId: string;
   /** Exec into this instance (its node's agent runs it). */
@@ -118,8 +134,34 @@ export interface OpenedTunnel {
 
 export type TunnelsApi = {
   tunnels: { open: MethodDefinition<OpenTunnelInput, OpenedTunnel> };
-  nodes: { issueSshCert: MethodDefinition<IssueSshCertInput, IssuedSshCert> };
+  nodes: {
+    issueSshCert: MethodDefinition<IssueSshCertInput, IssuedSshCert>;
+    revokeSshCert: MethodDefinition<RevokeSshCertInput, RevokedSshCert>;
+  };
 };
+
+export function parseRevokeSshCert(raw: unknown): RevokeSshCertInput {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
+    invalid('input must be an object');
+  const input = raw as Record<string, unknown>;
+  for (const key of Object.keys(input))
+    if (!['tenantId', 'nodeId', 'serial', 'reason'].includes(key))
+      invalid(`${key} is not a known field`);
+  if (typeof input.tenantId !== 'string' || !tenantPattern.test(input.tenantId))
+    invalid('tenantId is invalid');
+  if (typeof input.nodeId !== 'string' || !idPattern('node').test(input.nodeId))
+    invalid('nodeId is invalid');
+  if (typeof input.serial !== 'string' || !/^[0-9]{1,20}$/.test(input.serial))
+    invalid('serial must be the certificate serial in decimal');
+  if (input.reason !== undefined && (typeof input.reason !== 'string' || input.reason.length > 500))
+    invalid('reason must be a string of at most 500 characters');
+  return {
+    tenantId: input.tenantId,
+    nodeId: input.nodeId,
+    serial: input.serial,
+    ...(input.reason !== undefined ? { reason: input.reason as string } : {}),
+  };
+}
 
 export function parseIssueSshCert(raw: unknown): IssueSshCertInput {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
@@ -397,13 +439,29 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
             // The CA bounds lifetimes (≤ 1 h) on its own (server) clock; the TTL counts from it.
             validBefore,
           });
+          const serial = issued.serial.toString();
+          // Every issuance is recorded: revocation (the node's KRL) and audit read it.
+          await tx.query(
+            `INSERT INTO ssh_certificates
+               (serial, node_id, tenant_id, identity_id, principal, key_id, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [
+              serial,
+              input.nodeId,
+              input.tenantId,
+              caller.identityId,
+              principal,
+              keyId,
+              new Date(issued.validBefore),
+            ],
+          );
           await context.events.publish(tx, {
             type: 'node.ssh-cert.issued',
             tenantId: input.tenantId,
             subject: `node/${input.nodeId}`,
             data: {
               keyId,
-              serial: issued.serial.toString(),
+              serial,
               principals: [principal],
               identityId: caller.identityId,
               validBefore: issued.validBefore,
@@ -412,7 +470,7 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
           return {
             nodeId: input.nodeId,
             certificate: issued.certificate,
-            serial: issued.serial.toString(),
+            serial,
             keyId,
             principals: [principal],
             account,
@@ -420,14 +478,97 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
           };
         },
       }),
+      // Revokes a break-glass certificate before it expires: the node's KRL lists it from the next
+      // NodeSpec on (sshd RevokedKeys). Idempotent: revoking again answers the same revocation.
+      revokeSshCert: defineMethod<RevokeSshCertInput, RevokedSshCert>({
+        action: 'compute:nodes:ssh-root',
+        kind: 'mutation',
+        resource: (input) => ({ type: 'node', id: input.nodeId }),
+        validate: parseRevokeSshCert,
+        async handler(context, input) {
+          const caller = context.caller;
+          if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
+          const tx = context.sql as SqlTx;
+          await visibleNode(tx, input.tenantId, input.nodeId);
+          const { rows } = await tx.query<{
+            principal: string;
+            expires_at: Date;
+            revoked_at: Date | null;
+          }>(
+            `UPDATE ssh_certificates
+                SET revoked_at = COALESCE(revoked_at, compute_now()),
+                    revoked_by = COALESCE(revoked_by, $4),
+                    revoke_reason = COALESCE(revoke_reason, $5)
+              WHERE serial = $1 AND node_id = $2 AND tenant_id = $3
+              RETURNING principal, expires_at, revoked_at`,
+            [input.serial, input.nodeId, input.tenantId, caller.identityId, input.reason ?? null],
+          );
+          const row = rows[0];
+          if (!row)
+            throw new ComputeError(
+              'NOT_FOUND',
+              `No certificate ${input.serial} was issued for node ${input.nodeId}`,
+            );
+          const revoked: RevokedSshCert = {
+            nodeId: input.nodeId,
+            serial: input.serial,
+            principal: row.principal,
+            expiresAt: new Date(row.expires_at).getTime(),
+            revokedAt: new Date(row.revoked_at!).getTime(),
+          };
+          // The node's spec changes (its revoked serials): push it.
+          await context.desired.invalidate(tx, input.nodeId);
+          await context.events.publish(tx, {
+            type: 'node.ssh-cert.revoked',
+            tenantId: input.tenantId,
+            subject: `node/${input.nodeId}`,
+            data: {
+              serial: input.serial,
+              identityId: caller.identityId,
+              ...(input.reason ? { reason: input.reason } : {}),
+            },
+          });
+          return revoked;
+        },
+      }),
     },
   });
   return {
     name: 'tunnels',
     api,
+    reconcilers: [
+      {
+        // Certificates past their expiry need no revocation entry and no record beyond the audit
+        // events: drop them (a day late, so a skewed node clock never sees a revoked one unlisted).
+        name: 'tunnels.ssh-certificates-gc',
+        shardBy: 'none',
+        periodic: [{ key: 'ssh-certificates', every: '1h' }],
+        async run(context) {
+          // Bounded batches: a backlog is worked off over successive runs, never in one long delete.
+          const { rows } = await context.sql.query<{ serial: string }>(
+            `DELETE FROM ssh_certificates WHERE serial IN (
+               SELECT serial FROM ssh_certificates
+                WHERE expires_at < compute_now() - interval '1 day' LIMIT 5000)
+             RETURNING serial`,
+          );
+          return rows.length === 5000 ? 'SYNC_AGAIN' : 'DONE';
+        },
+      },
+    ],
     // Every node pins the issuer's JWKS (the daemon verifies each ticket against it, P14) and
-    // trusts the compute SSH CA for break-glass certificates naming this node only.
-    async nodeSpec(_context, node) {
+    // trusts the compute SSH CA for break-glass certificates naming this node only, minus the
+    // revoked ones still within their lifetime (its KRL).
+    async nodeSpec(context, node) {
+      let revoked: string[] = [];
+      if (options.ssh) {
+        const { rows } = await context.sql.query<{ serial: string }>(
+          `SELECT serial FROM ssh_certificates
+            WHERE node_id = $1 AND revoked_at IS NOT NULL AND expires_at > compute_now()
+            ORDER BY serial`,
+          [node.id],
+        );
+        revoked = rows.map((row) => row.serial);
+      }
       return {
         access: {
           execTicketJwks: JSON.parse(options.issuer.jwksJson()),
@@ -435,6 +576,7 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
             ? {
                 sshCaPublicKeys: [options.ssh.publicKey],
                 sshPrincipals: sshAccounts.map((account) => sshPrincipal(account, node.id)),
+                ...(revoked.length ? { sshRevokedSerials: revoked } : {}),
               }
             : {}),
         },

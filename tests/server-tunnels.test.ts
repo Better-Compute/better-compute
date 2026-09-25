@@ -80,6 +80,9 @@ function within(tx: SqlTx): SqlExecutor {
   } as SqlExecutor;
 }
 
+/** What nodeSpec reads: the store (revoked certificate serials). */
+const specContext = () => ({ sql: db }) as unknown as ModuleContext;
+
 type Definition = {
   validate(raw: unknown): unknown;
   handler(context: MethodContext, input: unknown): Promise<unknown>;
@@ -330,7 +333,7 @@ describe('tunnels.open', () => {
   });
 
   it('puts the issuer’s JWKS into every node’s access section', async () => {
-    const spec = await module.nodeSpec!({} as ModuleContext, {} as NodeRecord);
+    const spec = await module.nodeSpec!(specContext(), {} as NodeRecord);
     expect(spec.access?.execTicketJwks).toEqual(JSON.parse(issuer.jwksJson()));
   });
 });
@@ -339,7 +342,30 @@ describe('nodes.issueSshCert', () => {
   const ca = createSshCertificateAuthority();
   const withSsh = tunnelsModule({ issuer, ssh: ca, limits: { sshCertsPerHour: 1000 } });
   const sshApi = withSsh.api!({} as ModuleContext) as unknown as {
-    nodes: { issueSshCert: Definition };
+    nodes: { issueSshCert: Definition; revokeSshCert: Definition };
+  };
+  const invalidated: string[] = [];
+  const revoke = async (raw: Record<string, unknown>, caller: Caller = { ...alice, mfa: true }) => {
+    const definition = sshApi.nodes.revokeSshCert;
+    const input = definition.validate({ tenantId: 'acme', nodeId: NODE, ...raw });
+    return db.transaction(
+      async (tx) =>
+        (await definition.handler(
+          {
+            sql: within(tx),
+            clock: { now: () => Date.now() },
+            caller,
+            requestId: 'r',
+            desired: { invalidate: async (_tx: SqlTx, nodeId: string) => invalidated.push(nodeId) },
+            events: {
+              async publish(_tx: SqlTx, event: { type: string }) {
+                events.push(event.type);
+              },
+            },
+          } as unknown as MethodContext,
+          input,
+        )) as { serial: string; revokedAt: number; expiresAt: number; principal: string },
+    );
   };
   const userKey = formatSshPublicKey(generateKeyPairSync('ed25519').publicKey, 'alice@laptop');
   const issue = async (raw: Record<string, unknown>, caller: Caller = { ...alice, mfa: true }) => {
@@ -403,8 +429,8 @@ describe('nodes.issueSshCert', () => {
 
   it('binds certificates to their node: node B does not accept a certificate for node A', async () => {
     const OTHER = 'node_01jz00000000000000000000nc';
-    const specA = await withSsh.nodeSpec!({} as ModuleContext, { id: NODE } as NodeRecord);
-    const specB = await withSsh.nodeSpec!({} as ModuleContext, { id: OTHER } as NodeRecord);
+    const specA = await withSsh.nodeSpec!(specContext(), { id: NODE } as NodeRecord);
+    const specB = await withSsh.nodeSpec!(specContext(), { id: OTHER } as NodeRecord);
     expect(specA.access?.sshPrincipals).toEqual([`root@${NODE}`]);
     expect(specB.access?.sshPrincipals).toEqual([`root@${OTHER}`]);
     // Same CA on both nodes; only the principal lists differ.
@@ -434,10 +460,72 @@ describe('nodes.issueSshCert', () => {
     expect(later.validBefore - Date.now()).toBeGreaterThan(19 * 60_000);
   });
 
+  it('records every certificate and revokes one into the node’s KRL', async () => {
+    const issued = (await issue({})) as unknown as { serial: string; validBefore: number };
+    const { rows } = await db.query<{
+      node_id: string;
+      principal: string;
+      revoked_at: Date | null;
+    }>('SELECT node_id, principal, revoked_at FROM ssh_certificates WHERE serial = $1', [
+      issued.serial,
+    ]);
+    expect(rows[0]).toMatchObject({ node_id: NODE, principal: `root@${NODE}`, revoked_at: null });
+    expect(
+      (await withSsh.nodeSpec!(specContext(), { id: NODE } as NodeRecord)).access,
+    ).not.toHaveProperty('sshRevokedSerials');
+
+    invalidated.length = 0;
+    events = [];
+    const revoked = await revoke({ serial: issued.serial, reason: 'laptop stolen' });
+    expect(revoked).toMatchObject({ serial: issued.serial, principal: `root@${NODE}` });
+    expect(invalidated).toEqual([NODE]);
+    expect(events).toEqual(['node.ssh-cert.revoked']);
+    const spec = await withSsh.nodeSpec!(specContext(), { id: NODE } as NodeRecord);
+    expect(spec.access?.sshRevokedSerials).toContain(issued.serial);
+    // Revoking again answers the same revocation.
+    expect((await revoke({ serial: issued.serial })).revokedAt).toBe(revoked.revokedAt);
+    // Another node's list never carries it.
+    const other = await withSsh.nodeSpec!(specContext(), {
+      id: 'node_01jz00000000000000000000nc',
+    } as NodeRecord);
+    expect(other.access).not.toHaveProperty('sshRevokedSerials');
+  });
+
+  it('refuses revoking unknown or foreign certificates', async () => {
+    await expect(revoke({ serial: '12345' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(revoke({ serial: 'x1' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    const issued = (await issue({})) as unknown as { serial: string };
+    // The same serial asked through another tenant: the node is not theirs.
+    await expect(revoke({ tenantId: 'other', serial: issued.serial })).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+  });
+
+  it('drops expired certificates (GC) and lists only unexpired revocations', async () => {
+    await db.query(
+      `INSERT INTO ssh_certificates (serial, node_id, tenant_id, identity_id, principal, key_id,
+                                     expires_at, revoked_at)
+       VALUES ('999', $1, 'acme', 'usr_alice', $2, 'k', compute_now() - interval '2 days', compute_now() - interval '3 days'),
+              ('998', $1, 'acme', 'usr_alice', $2, 'k', compute_now() - interval '1 hour', compute_now() - interval '2 hours')`,
+      [NODE, `root@${NODE}`],
+    );
+    const spec = await withSsh.nodeSpec!(specContext(), { id: NODE } as NodeRecord);
+    expect(spec.access?.sshRevokedSerials ?? []).not.toContain('999');
+    expect(spec.access?.sshRevokedSerials ?? []).not.toContain('998');
+    const gc = withSsh.reconcilers!.find((r) => r.name === 'tunnels.ssh-certificates-gc')!;
+    expect(gc.periodic).toEqual([{ key: 'ssh-certificates', every: '1h' }]);
+    await gc.run({ sql: db } as never, 'ssh-certificates');
+    const { rows } = await db.query<{ serial: string }>(
+      `SELECT serial FROM ssh_certificates WHERE serial IN ('998', '999') ORDER BY serial`,
+    );
+    // Past expiry by more than a day: gone; by an hour: kept until then.
+    expect(rows.map((row) => row.serial)).toEqual(['998']);
+  });
+
   it('allows only the configured accounts', async () => {
     await expect(issue({ principal: 'ubuntu' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     const ubuntu = tunnelsModule({ issuer, ssh: ca, sshAccounts: ['root', 'ubuntu'] });
-    const spec = await ubuntu.nodeSpec!({} as ModuleContext, { id: NODE } as NodeRecord);
+    const spec = await ubuntu.nodeSpec!(specContext(), { id: NODE } as NodeRecord);
     expect(spec.access?.sshPrincipals).toEqual([`root@${NODE}`, `ubuntu@${NODE}`]);
     expect(() => tunnelsModule({ issuer, ssh: ca, sshAccounts: [] })).toThrow(/sshAccounts/);
     expect(() => tunnelsModule({ issuer, ssh: ca, sshAccounts: ['root@x'] })).toThrow(
@@ -455,7 +543,7 @@ describe('nodes.issueSshCert', () => {
     });
     await expect(issue({ ttlSeconds: 7200 })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     await expect(issue({ principal: 'Root!' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
-    const spec = await withSsh.nodeSpec!({} as ModuleContext, {} as NodeRecord);
+    const spec = await withSsh.nodeSpec!(specContext(), {} as NodeRecord);
     expect(spec.access?.sshCaPublicKeys).toEqual([ca.publicKey]);
     // Without a CA the method is unavailable.
     const plain = module.api!({} as ModuleContext) as unknown as {
