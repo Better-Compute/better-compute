@@ -326,6 +326,12 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       throw new ComputeError('INVALID_CONFIG', 'vps({ bootstrap }).bcdUrl must be an https URL');
     if (!/^[0-9a-f]{64}$/.test(options.bootstrap.sha256))
       throw new ComputeError('INVALID_CONFIG', 'vps({ bootstrap }).sha256 must be a hex sha256');
+    const { controlPlaneUrl } = options.bootstrap;
+    if (controlPlaneUrl !== undefined && !/^https:\/\/[^\s'"%$`\\]+$/.test(controlPlaneUrl))
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'vps({ bootstrap }).controlPlaneUrl must be an https URL without spaces, quotes, % or $',
+      );
   }
   const bootstrapDeps = (context: ModuleContext): BootstrapDeps => ({
     clock: context.clock,

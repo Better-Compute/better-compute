@@ -119,8 +119,11 @@ func runRamdisk(fs *flag.FlagSet, _, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "bcd ramdisk: %v\n", err)
 		return exitFailure
 	}
+	// The installed OS keeps its state in the default data directory, not the ramdisk's tmpfs.
+	installed := *cfg
+	installed.DataDir = config.DefaultDataDir
 	cfg.InstallFiles = map[string][]byte{
-		"/etc/bcd/config.toml":         []byte(config.Render(cfg)),
+		"/etc/bcd/config.toml":         []byte(config.Render(&installed)),
 		"/etc/bcd/join-encryption.jwk": params.JWK,
 	}
 	return runAgent("ramdisk", cfg, log, stderr, nil)

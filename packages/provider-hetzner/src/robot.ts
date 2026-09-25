@@ -141,10 +141,36 @@ const resetTypes: Partial<Record<PowerAction, string>> = {
 };
 
 /**
+ * The `bcd join` the installed OS runs once at first boot (the Go contract; scripts/daemon-fixtures.mjs
+ * dumps it for bcd's tests). No config.toml is installed: bcd reads the gateway and pins from the
+ * control plane's well-known document, joins with the `provisioned` token (bound to this machine's
+ * SMBIOS UUID) and writes its configuration, then removes the token file.
+ */
+export function robotJoinArgv(controlPlaneUrl: string): string[] {
+  return [
+    '/usr/local/bin/bcd',
+    'join',
+    '--server',
+    controlPlaneUrl,
+    '--token-file',
+    robotJoinTokenPath,
+    '--attestor',
+    'provisioned',
+  ];
+}
+
+/** Where the installed OS keeps the join token until `bcd join` spends it. */
+export const robotJoinTokenPath = '/etc/bcd/join-token';
+
+/** A URL safe inside a systemd ExecStart= and a quoted heredoc: no spaces, quotes, `%`, `$` or `\\`. */
+const unitSafeUrl = /^https:\/\/[^\s'"%$`\\]+$/;
+
+/**
  * The script bootstrap runs in rescue (sent over SSH stdin). It writes an installimage autosetup
  * (software RAID 1 over the NVMe, else SATA, disks) and a post-install script. That script puts the
- * join token into the new system as a root-only file (`/etc/better-compute/join-token`), downloads
- * bcd, verifies its sha256, enables it under systemd, then shreds itself. The token comes from
+ * join token into the new system as a root-only file (`/etc/bcd/join-token`), downloads bcd,
+ * verifies its sha256, installs `bcd-join.service` (a oneshot running `robotJoinArgv` while the
+ * token file exists) and `bcd.service` (the node agent), then shreds itself. The token comes from
  * `/root/bc-join-token`, written beforehand from SSH stdin with umask 077.
  */
 export function bootstrapScript(input: {
@@ -152,7 +178,13 @@ export function bootstrapScript(input: {
   image: string;
   bcdUrl: string;
   sha256: string;
+  controlPlaneUrl: string;
 }): string {
+  if (!unitSafeUrl.test(input.controlPlaneUrl))
+    throw new ComputeError(
+      'INVALID_INPUT',
+      'controlPlaneUrl must be an https URL without spaces, quotes, % or $',
+    );
   const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
   return [
     'set -eu',
@@ -174,23 +206,39 @@ export function bootstrapScript(input: {
     // installimage runs the post-install script chrooted into the new system, where rescue's files
     // are not visible: rescue embeds the token (base64, so no quoting) into the script it writes. The
     // token never appears in what is sent over SSH as a script, nor in argv.
-    `printf '#!/bin/sh\\nset -eu\\numask 077\\nmkdir -p /etc/better-compute\\necho %s | base64 -d > /etc/better-compute/join-token\\nchmod 0600 /etc/better-compute/join-token\\n' "$(base64 -w0 /root/bc-join-token)" > /root/bc-post-install.sh`,
+    `printf '#!/bin/sh\\nset -eu\\numask 077\\nmkdir -p /etc/bcd\\necho %s | base64 -d > ${robotJoinTokenPath}\\nchmod 0600 ${robotJoinTokenPath}\\n' "$(base64 -w0 /root/bc-join-token)" > /root/bc-post-install.sh`,
     `cat >> /root/bc-post-install.sh <<'EOF'`,
     `curl -fsSL --retry 5 -o /usr/local/bin/bcd ${quote(input.bcdUrl)}`,
     `echo ${quote(`${input.sha256}  /usr/local/bin/bcd`)} | sha256sum -c -`,
     'chmod 0755 /usr/local/bin/bcd',
-    `cat > /etc/systemd/system/bcd.service <<'UNIT'`,
+    `cat > /etc/systemd/system/bcd-join.service <<'UNIT'`,
     '[Unit]',
-    'Description=better-compute node daemon',
+    'Description=Join better-compute',
     'After=network-online.target',
     'Wants=network-online.target',
+    `ConditionPathExists=${robotJoinTokenPath}`,
     '[Service]',
-    'ExecStart=/usr/local/bin/bcd node --join-token-file /etc/better-compute/join-token',
-    'Restart=always',
+    'Type=oneshot',
+    'RemainAfterExit=yes',
+    `ExecStart=${robotJoinArgv(input.controlPlaneUrl).join(' ')}`,
+    'Restart=on-failure',
+    'RestartSec=15',
     '[Install]',
     'WantedBy=multi-user.target',
     'UNIT',
-    'systemctl enable bcd.service',
+    `cat > /etc/systemd/system/bcd.service <<'UNIT'`,
+    '[Unit]',
+    'Description=better-compute node agent',
+    'After=network-online.target bcd-join.service',
+    'Wants=network-online.target',
+    '[Service]',
+    'ExecStart=/usr/local/bin/bcd node',
+    'Restart=always',
+    'RestartSec=5',
+    '[Install]',
+    'WantedBy=multi-user.target',
+    'UNIT',
+    'systemctl enable bcd-join.service bcd.service',
     'shred -u "$0" 2>/dev/null || rm -f "$0"',
     'EOF',
     'chmod 0700 /root/bc-post-install.sh',
@@ -498,10 +546,20 @@ class HetznerRobotClient implements ProviderImpl {
    */
   async bootstrap(
     machine: ExternalMachine,
-    bootstrap: { joinToken: string; bcdUrl: string; sha256: string },
+    bootstrap: { joinToken: string; bcdUrl: string; sha256: string; controlPlaneUrl?: string },
     context: CallContext,
   ): Promise<void> {
     const ssh = this.#ssh();
+    if (!bootstrap.controlPlaneUrl)
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'Robot bootstrap needs the control plane URL the installed bcd joins through (vps({ bootstrap: { controlPlaneUrl } }))',
+      );
+    if (!unitSafeUrl.test(bootstrap.controlPlaneUrl))
+      throw new ComputeError(
+        'INVALID_INPUT',
+        'controlPlaneUrl must be an https URL without spaces, quotes, % or $',
+      );
     if (!/^[0-9a-f]{64}$/.test(bootstrap.sha256))
       throw new ComputeError('INVALID_INPUT', 'bootstrap.sha256 must be a hex sha256');
     if (!/^https:\/\//.test(bootstrap.bcdUrl))
@@ -526,6 +584,7 @@ class HetznerRobotClient implements ProviderImpl {
       image: this.#config.image,
       bcdUrl: bootstrap.bcdUrl,
       sha256: bootstrap.sha256,
+      controlPlaneUrl: bootstrap.controlPlaneUrl,
     });
     const installed = await ssh(target, 'sh -s', script);
     // `reboot` may cut the session before it reports; anything else non-zero is a failure.

@@ -634,11 +634,13 @@ export interface ProviderImpl {
   delete(id: string, context: CallContext): Promise<void>;
   /**
    * `agent: 'bcd'` pools only: delivers a single-use `provisioned` join token through rescue or
-   * installimage, never through tenant-readable user-data.
+   * installimage, never through tenant-readable user-data. The installed OS runs
+   * `bcd join --server <controlPlaneUrl> --token-file … --attestor provisioned`, which reads the
+   * gateway and pins from the control plane's `/.well-known/better-compute`.
    */
   bootstrap?(
     machine: ExternalMachine,
-    bootstrap: { joinToken: string; bcdUrl: string; sha256: string },
+    bootstrap: { joinToken: string; bcdUrl: string; sha256: string; controlPlaneUrl?: string },
     context: CallContext,
   ): Promise<void>;
   /**

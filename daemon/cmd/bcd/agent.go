@@ -5,20 +5,17 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
-	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	commonv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1"
@@ -99,14 +96,73 @@ func readToken() (string, error) {
 	return "", errors.New("no join token: set BCD_JOIN_TOKEN or pass the token on standard input")
 }
 
+// runJoin joins with a token (BCD_JOIN_TOKEN, stdin or --token-file). A machine without config.toml
+// that is given --server (an OS provisioned with only a token) takes its configuration from the
+// control plane's well-known document and writes config.toml once joined. Re-running it on a node
+// that already joined succeeds without a token, so a join unit may run on every boot.
 func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
-	cfg, file, err := loadConfig(fs)
+	file := fs.Lookup("config").Value.String()
+	server := fs.Lookup("server").Value.String()
+	cfg, _, err := loadConfig(fs)
+	var bootstrapJWK []byte
+	bootstrapped := false
+	if err != nil && errors.Is(err, os.ErrNotExist) && server != "" {
+		cfg, bootstrapJWK, err = bootstrapConfig(server)
+		bootstrapped = err == nil
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "bcd join: %v\n", err)
 		return exitFailure
 	}
 	log := newLogger(cfg, stderr)
+	role := commonv1.AgentRole_AGENT_ROLE_NODE
+	switch fs.Lookup("role").Value.String() {
+	case "node":
+	case "site":
+		role = commonv1.AgentRole_AGENT_ROLE_SITE
+	default:
+		fmt.Fprintln(stderr, "bcd join: --role must be node or site")
+		return exitUsage
+	}
+	// An OS a deploy installed joins as the node it was installed for, with the single-use
+	// provisioned token its user data carried.
+	nodeID := fs.Lookup("node-id").Value.String()
+	attestor := fs.Lookup("attestor").Value.String()
+	if attestor == "" && nodeID != "" {
+		attestor = "provisioned"
+	}
 	tokenFile := fs.Lookup("token-file").Value.String()
+
+	// finish writes a bootstrapped configuration and spends the token file.
+	finish := func(state *agent.State) error {
+		if bootstrapped {
+			cfg.Site = state.SiteID
+			if err := writeConfig(file, cfg, bootstrapJWK); err != nil {
+				return fmt.Errorf("writing %s: %w", file, err)
+			}
+		}
+		if tokenFile != "" {
+			// Spent (single use), or not needed: it never stays on disk.
+			if err := os.Remove(tokenFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if state, _, err := agent.LoadState(cfg.DataDir); err == nil {
+		if nodeID != "" && state.NodeID != nodeID {
+			fmt.Fprintf(stderr, "bcd join: this machine already joined as %s, not %s\n", state.NodeID, nodeID)
+			return exitFailure
+		}
+		if err := finish(state); err != nil {
+			fmt.Fprintf(stderr, "bcd join: %v\n", err)
+			return exitFailure
+		}
+		fmt.Fprintf(stdout, "already joined as %s (site %s, role %s)\n", state.NodeID, state.SiteID, state.Role)
+		return exitOK
+	}
+
 	var token string
 	if tokenFile != "" {
 		raw, err := os.ReadFile(tokenFile)
@@ -124,7 +180,13 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	encPin, _ := config.DecodePin(cfg.JoinEncryptionKeyPin)
-	encKey, err := joinEncryptionKey(filepath.Join(filepath.Dir(file), joinKeyFile), fs.Lookup("server").Value.String(), encPin)
+	var encKey *ecdsa.PublicKey
+	if bootstrapped {
+		encKey, err = pinnedJWK(bootstrapJWK, encPin)
+		log.Info("configuration taken from the control plane's well-known document", "server", server, "gateway", cfg.GatewayURL)
+	} else {
+		encKey, err = joinEncryptionKey(filepath.Join(filepath.Dir(file), joinKeyFile), server, encPin)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "bcd join: %v\n", err)
 		return exitFailure
@@ -148,22 +210,6 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 	defer client.Close()
 	ctx, cancel := signalContext()
 	defer cancel()
-	role := commonv1.AgentRole_AGENT_ROLE_NODE
-	switch fs.Lookup("role").Value.String() {
-	case "node":
-	case "site":
-		role = commonv1.AgentRole_AGENT_ROLE_SITE
-	default:
-		fmt.Fprintln(stderr, "bcd join: --role must be node or site")
-		return exitUsage
-	}
-	// An OS a deploy installed joins as the node it was installed for, with the single-use
-	// provisioned token its user data carried.
-	nodeID := fs.Lookup("node-id").Value.String()
-	attestor := fs.Lookup("attestor").Value.String()
-	if attestor == "" && nodeID != "" {
-		attestor = "provisioned"
-	}
 	state, err := agent.Join(ctx, agent.JoinOptions{
 		Client:        client,
 		Token:         token,
@@ -185,9 +231,9 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "bcd join: joined as %s, but this OS was installed for %s\n", state.NodeID, nodeID)
 		return exitFailure
 	}
-	if tokenFile != "" {
-		// Spent (single use): it never stays on disk.
-		_ = os.Remove(tokenFile)
+	if err := finish(state); err != nil {
+		fmt.Fprintf(stderr, "bcd join: %v\n", err)
+		return exitFailure
 	}
 	fmt.Fprintf(stdout, "joined as %s (site %s, role %s); certificate valid until %s\n",
 		state.NodeID, state.SiteID, state.Role, state.NotAfter.UTC().Format("2006-01-02 15:04 MST"))
@@ -205,6 +251,11 @@ func joinEncryptionKey(file, server string, pin []byte) (*ecdsa.PublicKey, error
 	if err != nil {
 		return nil, fmt.Errorf("the JoinService encryption key: %w", err)
 	}
+	return pinnedJWK(raw, pin)
+}
+
+// pinnedJWK parses the JoinService encryption key and refuses one that does not match its pin.
+func pinnedJWK(raw, pin []byte) (*ecdsa.PublicKey, error) {
 	key, err := pki.ParseJWK(raw)
 	if err != nil {
 		return nil, fmt.Errorf("the JoinService encryption key: %w", err)
@@ -213,33 +264,6 @@ func joinEncryptionKey(file, server string, pin []byte) (*ecdsa.PublicKey, error
 		return nil, errors.New("the JoinService encryption key does not match join_encryption_key_pin")
 	}
 	return key, nil
-}
-
-// wellKnownClient fetches the well-known document (system roots: the control plane's public TLS).
-var wellKnownClient = &http.Client{Timeout: 30 * time.Second}
-
-// wellKnownJWK fetches join.encryptionJwk from <server>/.well-known/better-compute over https.
-func wellKnownJWK(server string) ([]byte, error) {
-	if !strings.HasPrefix(server, "https://") {
-		return nil, errors.New("--server must be an https:// URL")
-	}
-	resp, err := wellKnownClient.Get(strings.TrimRight(server, "/") + "/.well-known/better-compute")
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s/.well-known/better-compute returned %s", server, resp.Status)
-	}
-	var doc struct {
-		Join *struct {
-			EncryptionJwk json.RawMessage `json:"encryptionJwk"`
-		} `json:"join"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&doc); err != nil || doc.Join == nil {
-		return nil, errors.New("the control plane publishes no join keys")
-	}
-	return doc.Join.EncryptionJwk, nil
 }
 
 // runtimesFor gives node agents the build's instance runtimes (site agents and ramdisks run none).

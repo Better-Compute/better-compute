@@ -1,0 +1,115 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/better-compute/better-compute/daemon/internal/config"
+	"github.com/better-compute/better-compute/daemon/internal/pki"
+)
+
+// bootstrapDataDir is the data directory of a bootstrapped configuration (tests replace it).
+var bootstrapDataDir = config.DefaultDataDir
+
+// wellKnownClient fetches the well-known document (system roots: the control plane's public TLS).
+var wellKnownClient = &http.Client{Timeout: 30 * time.Second}
+
+// wellKnownDoc is the part of <server>/.well-known/better-compute that bcd join reads: JoinService's
+// public keys (PLAN.md §6 Install) and, when the control plane publishes it, where its gateway is.
+type wellKnownDoc struct {
+	Gateway *struct {
+		URL          string `json:"url"`
+		ServerName   string `json:"serverName"`
+		ServingCAPin string `json:"servingCaPin"`
+	} `json:"gateway"`
+	Join *struct {
+		EncryptionJwk    json.RawMessage `json:"encryptionJwk"`
+		EncryptionKeyPin string          `json:"encryptionKeyPin"`
+		SigningKeyPin    string          `json:"signingKeyPin"`
+	} `json:"join"`
+}
+
+// fetchWellKnown reads <server>/.well-known/better-compute. The control plane must be https (a
+// fakehw development build also takes http://, for a dev stack).
+func fetchWellKnown(server string) (*wellKnownDoc, error) {
+	if !strings.HasPrefix(server, "https://") && !(devBuild && strings.HasPrefix(server, "http://")) {
+		return nil, errors.New("--server must be an https:// URL")
+	}
+	url := strings.TrimRight(server, "/") + "/.well-known/better-compute"
+	resp, err := wellKnownClient.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s returned %s", url, resp.Status)
+	}
+	var doc wellKnownDoc
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&doc); err != nil {
+		return nil, fmt.Errorf("%s: %w", url, err)
+	}
+	if doc.Join == nil || len(doc.Join.EncryptionJwk) == 0 {
+		return nil, errors.New("the control plane publishes no join keys")
+	}
+	return &doc, nil
+}
+
+// wellKnownJWK fetches join.encryptionJwk from the well-known document.
+func wellKnownJWK(server string) ([]byte, error) {
+	doc, err := fetchWellKnown(server)
+	if err != nil {
+		return nil, err
+	}
+	return doc.Join.EncryptionJwk, nil
+}
+
+// bootstrapConfig builds the configuration of a machine that has none yet (an OS provisioned with
+// only a token and the control plane URL) from the well-known document: the gateway, its serving-CA
+// pin and JoinService's pins. The pins are then only as good as the control plane's TLS certificate
+// (trust on first use); an install that writes config.toml itself keeps them independent of it. The
+// site is not known until the join answers: the caller sets it before writing the file.
+func bootstrapConfig(server string) (*config.Config, []byte, error) {
+	doc, err := fetchWellKnown(server)
+	if err != nil {
+		return nil, nil, err
+	}
+	if doc.Gateway == nil || doc.Gateway.URL == "" || doc.Gateway.ServingCAPin == "" {
+		return nil, nil, errors.New("the control plane does not publish its gateway (well-known gateway.url and gateway.servingCaPin); install /etc/bcd/config.toml instead")
+	}
+	cfg := config.Defaults()
+	cfg.DataDir = bootstrapDataDir
+	cfg.GatewayURL = doc.Gateway.URL
+	cfg.GatewayServerName = doc.Gateway.ServerName
+	cfg.Site = "unknown" // replaced by the site the join answers with
+	cfg.ServingCASPKIPin = doc.Gateway.ServingCAPin
+	cfg.JoinSigningKeyPin = doc.Join.SigningKeyPin
+	cfg.JoinEncryptionKeyPin = doc.Join.EncryptionKeyPin
+	cfg.DevInsecureH2C = devBuild && strings.HasPrefix(cfg.GatewayURL, "http://")
+	if err := cfg.Validate(); err != nil {
+		return nil, nil, fmt.Errorf("the well-known document: %w", err)
+	}
+	return cfg, doc.Join.EncryptionJwk, nil
+}
+
+// writeConfig installs a bootstrapped configuration (0600) and the JoinService encryption key beside
+// it (0644, public), each through a temporary file so a crash never leaves half a file.
+func writeConfig(file string, cfg *config.Config, jwk []byte) error {
+	dir := filepath.Dir(file)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if err := pki.WriteFileAtomic(file, []byte(config.Render(cfg)), 0o600); err != nil {
+		return err
+	}
+	if len(jwk) > 0 {
+		return pki.WriteFileAtomic(filepath.Join(dir, joinKeyFile), jwk, 0o644)
+	}
+	return nil
+}

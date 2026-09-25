@@ -5,6 +5,7 @@ import { runConformance } from '@better-compute/core/conformance';
 import { providerConformanceCases } from '@better-compute/vps';
 import {
   bootstrapScript,
+  robotJoinArgv,
   hetznerRobot,
   hetznerRobotProvider,
   robotClaimName,
@@ -287,6 +288,7 @@ describe('hetznerRobot specifics', () => {
         joinToken: token,
         bcdUrl: 'https://downloads.example/bcd-linux-amd64',
         sha256: 'ab'.repeat(32),
+        controlPlaneUrl: 'https://compute.example/api/compute',
       },
       call('boot'),
     );
@@ -326,6 +328,11 @@ describe('hetznerRobot specifics', () => {
       'IMAGE /root/.oldroot/nfs/install/../images/Ubuntu-2404-noble-amd64-base.tar.gz',
     );
     expect(install.stdin).toContain('shred -u /root/bc-join-token');
+    // First boot joins through the control plane (bcd-join.service), then runs the node agent.
+    expect(install.stdin).toContain(
+      'ExecStart=/usr/local/bin/bcd join --server https://compute.example/api/compute --token-file /etc/bcd/join-token --attestor provisioned',
+    );
+    expect(install.stdin).toContain('systemctl enable bcd-join.service bcd.service');
   });
 
   it('identifies a server in rescue, and bootstrap reuses that rescue (one reset)', async () => {
@@ -354,7 +361,12 @@ describe('hetznerRobot specifics', () => {
     expect(api.rescue.has(1001)).toBe(true); // left in rescue for bootstrap
     await impl.bootstrap!(
       machine,
-      { joinToken: 'bcjt_x', bcdUrl: 'https://d.example/bcd', sha256: 'ab'.repeat(32) },
+      {
+        joinToken: 'bcjt_x',
+        bcdUrl: 'https://d.example/bcd',
+        sha256: 'ab'.repeat(32),
+        controlPlaneUrl: 'https://compute.example',
+      },
       call('boot'),
     );
     expect(api.resets).toEqual([{ server: 1001, type: 'hw' }]);
@@ -377,7 +389,12 @@ describe('hetznerRobot specifics', () => {
       { offerId: '1001', image: '', userData: '', name: '' },
       call('k'),
     );
-    const args = { joinToken: 't', bcdUrl: 'https://d.example/bcd', sha256: 'ab'.repeat(32) };
+    const args = {
+      joinToken: 't',
+      bcdUrl: 'https://d.example/bcd',
+      sha256: 'ab'.repeat(32),
+      controlPlaneUrl: 'https://compute.example',
+    };
     await expect(noSsh.bootstrap!(machine, args, call('b'))).rejects.toMatchObject({
       code: 'INVALID_CONFIG',
     });
@@ -390,6 +407,16 @@ describe('hetznerRobot specifics', () => {
     ).rejects.toMatchObject({
       code: 'INVALID_INPUT',
     });
+    // Without the control plane URL the installed OS could never join; one that could break out of
+    // the systemd unit is refused before anything reaches the machine.
+    const { controlPlaneUrl: _omitted, ...withoutUrl } = args;
+    await expect(silent.bootstrap!(machine, withoutUrl, call('b'))).rejects.toMatchObject({
+      code: 'INVALID_CONFIG',
+    });
+    for (const controlPlaneUrl of ['https://c.example/%h', 'https://c.example/$HOME', 'https://c.example/a b'])
+      await expect(
+        silent.bootstrap!(machine, { ...args, controlPlaneUrl }, call('b')),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     await expect(silent.bootstrap!(machine, args, call('b'))).rejects.toMatchObject({
       code: 'PROVIDER_ERROR',
     });
@@ -402,6 +429,7 @@ describe('bootstrapScript', () => {
     image: 'Ubuntu-2404-noble-amd64-base.tar.gz',
     bcdUrl: "https://downloads.example/bcd?x='y'",
     sha256: 'cd'.repeat(32),
+    controlPlaneUrl: 'https://compute.example',
   });
 
   it('quotes the URL, embeds the token only from rescue, and pins the binary', () => {
@@ -410,8 +438,10 @@ describe('bootstrapScript', () => {
     );
     expect(script).toContain('"$(base64 -w0 /root/bc-join-token)"');
     expect(script).toContain(
-      'ExecStart=/usr/local/bin/bcd node --join-token-file /etc/better-compute/join-token',
+      `ExecStart=${robotJoinArgv('https://compute.example').join(' ')}`,
     );
+    expect(script).toContain('ExecStart=/usr/local/bin/bcd node\n');
+    expect(script).toContain('> /etc/bcd/join-token');
     expect(script.startsWith('set -eu\numask 077')).toBe(true);
   });
 

@@ -2,16 +2,25 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/better-compute/better-compute/daemon/internal/agent"
+	"github.com/better-compute/better-compute/daemon/internal/config"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
 )
 
@@ -191,11 +200,102 @@ func TestJoinEncryptionKeyFromFileOrWellKnown(t *testing.T) {
 	if _, err := joinEncryptionKey(missing, srv.URL+"/api/compute", otherPin); err == nil {
 		t.Fatal("a well-known key that does not match the pin was used")
 	}
-	if _, err := joinEncryptionKey(missing, "http://insecure", pin); err == nil {
-		t.Fatal("a plain-http control plane was trusted")
+	if _, err := joinEncryptionKey(missing, "ftp://insecure", pin); err == nil {
+		t.Fatal("a non-https control plane was trusted")
 	}
 	_ = os.WriteFile(missing, raw, 0o644)
 	if got, err := joinEncryptionKey(missing, "", pin); err != nil || !got.Equal(&key.PublicKey) {
 		t.Fatalf("file key = %v", err)
+	}
+}
+
+// joinedState stores an identity in dir, as a completed join leaves it.
+func joinedState(t *testing.T, dir, nodeID, siteID string) {
+	t.Helper()
+	key, _ := pki.GenerateKey()
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: nodeID}, NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.SaveState(dir, &agent.State{NodeID: nodeID, SiteID: siteID, Role: "node", Chain: [][]byte{der}, NotAfter: template.NotAfter}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pki.SavePrivateKey(filepath.Join(dir, agent.KeyFile), key); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestJoinBootstrapsItsConfigurationFromTheWellKnownDocument(t *testing.T) {
+	encKey, _ := pki.GenerateKey()
+	jwk, _ := pki.PublicJWK(&encKey.PublicKey)
+	rawJWK, _ := json.Marshal(jwk)
+	encPin, _ := pki.SPKISHA256(&encKey.PublicKey)
+	pin := func(digest []byte) string { return "sha256/" + base64.StdEncoding.EncodeToString(digest) }
+	signPin := pin(bytes.Repeat([]byte{9}, 32))
+	caPin := pin(bytes.Repeat([]byte{7}, 32))
+	withGateway := false
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		doc := map[string]any{
+			"name": "better-compute",
+			"join": map[string]any{"encryptionJwk": json.RawMessage(rawJWK), "encryptionKeyPin": pin(encPin), "signingKeyPin": signPin},
+		}
+		if withGateway {
+			doc["gateway"] = map[string]any{"url": "https://gw.example.com", "serverName": "gw.internal", "servingCaPin": caPin}
+		}
+		_ = json.NewEncoder(w).Encode(doc)
+	}))
+	defer srv.Close()
+	prevClient, prevDir := wellKnownClient, bootstrapDataDir
+	wellKnownClient = srv.Client()
+	bootstrapDataDir = t.TempDir()
+	defer func() { wellKnownClient, bootstrapDataDir = prevClient, prevDir }()
+
+	etc := filepath.Join(t.TempDir(), "etc", "bcd")
+	file := filepath.Join(etc, "config.toml")
+	tokenFile := filepath.Join(t.TempDir(), "join-token")
+	_ = os.WriteFile(tokenFile, []byte("bcjt_01k5w0000000000000000000000.secret\n"), 0o600)
+	join := func(nodeID string) (int, string, string) {
+		return runBCD("join", "--config", file, "--server", srv.URL, "--token-file", tokenFile, "--node-id", nodeID)
+	}
+
+	// A control plane that does not say where its gateway is cannot bootstrap a machine.
+	if code, _, stderr := join("node_1"); code != exitFailure || !strings.Contains(stderr, "does not publish its gateway") {
+		t.Fatalf("join without a published gateway = %d, %q", code, stderr)
+	}
+	if _, err := os.Stat(file); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a configuration was written before joining")
+	}
+	withGateway = true
+
+	// A machine that already joined (a re-run after a reboot) succeeds without spending a token, writes
+	// the configuration the node agent reads and removes the token file.
+	joinedState(t, bootstrapDataDir, "node_1", "site_a")
+	if code, _, stderr := join("node_2"); code != exitFailure || !strings.Contains(stderr, "already joined as node_1") {
+		t.Fatalf("join as another node = %d, %q", code, stderr)
+	}
+	if code, stdout, stderr := join("node_1"); code != exitOK || !strings.Contains(stdout, "already joined as node_1") {
+		t.Fatalf("re-join = %d, %q %q", code, stdout, stderr)
+	}
+	cfg, err := config.Load(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GatewayURL != "https://gw.example.com" || cfg.GatewayServerName != "gw.internal" || cfg.Site != "site_a" ||
+		cfg.ServingCASPKIPin != caPin || cfg.JoinSigningKeyPin != signPin || cfg.JoinEncryptionKeyPin != pin(encPin) || cfg.DataDir != bootstrapDataDir {
+		t.Fatalf("bootstrapped configuration = %+v", cfg)
+	}
+	if info, err := os.Stat(file); err != nil || (goruntime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
+		t.Fatalf("config.toml mode = %v, %v", info, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(etc, joinKeyFile)); err != nil || !bytes.Equal(got, rawJWK) {
+		t.Fatalf("join-encryption.jwk = %q, %v", got, err)
+	}
+	if _, err := os.Stat(tokenFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the token file stayed on disk")
+	}
+	// From now on the written configuration is used; the token file is gone and nothing is needed.
+	if code, stdout, stderr := join("node_1"); code != exitOK || !strings.Contains(stdout, "already joined") {
+		t.Fatalf("second re-join = %d, %q %q", code, stdout, stderr)
 	}
 }

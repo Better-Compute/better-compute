@@ -53,7 +53,7 @@ func commands() []command {
 		{name: "site", summary: "run the site agent: proxy DHCP, iPXE, image cache, BMC", flags: withConfig, run: runSite},
 		{name: "ramdisk", summary: "run inside the PXE ramdisk: inspect, diag, wipe, image stream, kexec", flags: ramdiskFlags, run: runRamdisk},
 		{name: "sim", summary: "run simulated daemons on fakehw against a gateway", flags: simFlags, run: notYet("v0.4")},
-		{name: "join", summary: "join the fleet; the token is read from BCD_JOIN_TOKEN or stdin", flags: joinFlags, run: runJoin},
+		{name: "join", summary: "join the fleet; the token is read from BCD_JOIN_TOKEN, stdin or --token-file", flags: joinFlags, run: runJoin},
 		{name: "status", summary: "show the running node agent's state", flags: statusFlags, run: runStatus},
 		{name: "doctor", summary: "check this host: configuration, NVML, hardware, KVM, IOMMU, gateway, identity", flags: withConfig, run: runDoctor},
 		{name: "version", summary: "print the version", flags: noFlags, run: runVersion},
@@ -65,7 +65,7 @@ func joinFlags(fs *flag.FlagSet) {
 	fs.String("role", "node", "the agent role to join as: node or site (the token decides what is allowed)")
 	fs.String("token-file", "", "read the join token from this file (removed once the join succeeded)")
 	fs.String("node-id", "", "the node an installed OS joins as (a provisioned token; the identity must match)")
-	fs.String("server", "", "the control plane URL, for its well-known join keys when join-encryption.jwk is absent")
+	fs.String("server", "", "the control plane URL: its well-known join key when join-encryption.jwk is absent, and its gateway and pins when config.toml is")
 	fs.String("attestor", "", "the attestor (default join-token; provisioned with --node-id)")
 }
 
@@ -81,15 +81,25 @@ func statusFlags(fs *flag.FlagSet) {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	c, fs, code := parse(args, stdout, stderr)
+	if c == nil {
+		return code
+	}
+	return c.run(fs, stdout, stderr)
+}
+
+// parse finds the command args name and parses its flags. It returns the command, or nil and the
+// exit code when there is nothing to run (help, a usage error).
+func parse(args []string, stdout, stderr io.Writer) (*command, *flag.FlagSet, int) {
 	if len(args) == 0 {
 		usage(stderr)
-		return exitUsage
+		return nil, nil, exitUsage
 	}
 	name := args[0]
 	switch name {
 	case "help", "-h", "-help", "--help":
 		usage(stdout)
-		return exitOK
+		return nil, nil, exitOK
 	case "-version", "--version":
 		name = "version"
 	}
@@ -106,19 +116,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		if err := fs.Parse(args[1:]); err != nil {
 			if errors.Is(err, flag.ErrHelp) {
-				return exitOK
+				return nil, nil, exitOK
 			}
-			return exitUsage
+			return nil, nil, exitUsage
 		}
 		if fs.NArg() > 0 {
 			// Never echo arguments: a join token pasted into argv must not reach logs.
 			fmt.Fprintf(stderr, "bcd %s: takes no positional arguments\n", c.name)
 			if c.name == "join" {
-				fmt.Fprintln(stderr, "bcd join reads the join token from BCD_JOIN_TOKEN or stdin, never from arguments")
+				fmt.Fprintln(stderr, "bcd join reads the join token from BCD_JOIN_TOKEN, stdin or --token-file, never from arguments")
 			}
-			return exitUsage
+			return nil, nil, exitUsage
 		}
-		return c.run(fs, stdout, stderr)
+		return &c, fs, exitOK
 	}
 	if isCommandName(name) {
 		fmt.Fprintf(stderr, "bcd: unknown command %q\n\n", name)
@@ -126,7 +136,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, "bcd: unknown command\n\n")
 	}
 	usage(stderr)
-	return exitUsage
+	return nil, nil, exitUsage
 }
 
 func usage(w io.Writer) {

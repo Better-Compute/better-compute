@@ -76,6 +76,12 @@ export interface BootstrapOptions {
   bcdUrl: string;
   /** Its hex sha256 (the install verifies it). */
   sha256: string;
+  /**
+   * The control plane URL the installed bcd joins through (`bcd join --server`): it serves
+   * `/.well-known/better-compute` with the gateway and the join pins. Providers that install an OS
+   * (Hetzner Robot) need it.
+   */
+  controlPlaneUrl?: string;
   /** Join token lifetime (default 2 h, at most 6 h). */
   tokenTtlSeconds?: number;
   /** How long `joining` waits for the node (default 1 h). */
@@ -473,7 +479,12 @@ export async function reconcileBootstrap(
     });
     await client.bootstrap!(
       machine,
-      { joinToken: token, bcdUrl: options.bcdUrl, sha256: options.sha256 },
+      {
+        joinToken: token,
+        bcdUrl: options.bcdUrl,
+        sha256: options.sha256,
+        ...(options.controlPlaneUrl ? { controlPlaneUrl: options.controlPlaneUrl } : {}),
+      },
       call,
     );
     await sql.transaction(async (tx) => {

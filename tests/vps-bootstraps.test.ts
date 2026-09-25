@@ -52,7 +52,13 @@ const root: Caller = {
 /** A provider with rescue: machines by id, the tokens its bootstrap received, failures to inject. */
 const provider = {
   machines: new Map<string, ExternalMachine>(),
-  delivered: [] as { machineId: string; joinToken: string; bcdUrl: string; sha256: string }[],
+  delivered: [] as {
+    machineId: string;
+    joinToken: string;
+    bcdUrl: string;
+    sha256: string;
+    controlPlaneUrl?: string;
+  }[],
   failBootstraps: 0,
 };
 const rescueProvider = defineProvider({
@@ -188,7 +194,11 @@ const run = async (
 const options = {
   images: { resolve: async () => undefined },
   providers: [rescueProvider, plainProvider],
-  bootstrap: { bcdUrl: 'https://downloads.example/bcd-linux-amd64', sha256: 'ab'.repeat(32) },
+  bootstrap: {
+    bcdUrl: 'https://downloads.example/bcd-linux-amd64',
+    sha256: 'ab'.repeat(32),
+    controlPlaneUrl: 'https://compute.example/api/compute',
+  },
 };
 const module = vps(options);
 const api = module.api!({} as ModuleContext) as VpsApi;
@@ -285,6 +295,7 @@ describe('providerAccounts.bootstrap (§3.6 platform-owned provider machines)', 
       machineId: 'srv-1001',
       bcdUrl: 'https://downloads.example/bcd-linux-amd64',
       sha256: 'ab'.repeat(32),
+      controlPlaneUrl: 'https://compute.example/api/compute',
     });
     expect(delivered!.joinToken).toMatch(/^bcjt_jt_/);
     const [token] = await tokens();
@@ -415,5 +426,14 @@ describe('providerAccounts.bootstrap (§3.6 platform-owned provider machines)', 
     expect(() =>
       vps({ bootstrap: { bcdUrl: 'http://insecure/bcd', sha256: 'ab'.repeat(32) } }),
     ).toThrow(/https/);
+    expect(() =>
+      vps({
+        bootstrap: {
+          bcdUrl: 'https://d.example/bcd',
+          sha256: 'ab'.repeat(32),
+          controlPlaneUrl: 'https://c.example/%i',
+        },
+      }),
+    ).toThrow(/controlPlaneUrl/);
   });
 });

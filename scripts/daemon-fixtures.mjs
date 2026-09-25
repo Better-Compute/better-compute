@@ -125,3 +125,6 @@ mkdirSync(dirname(file), { recursive: true });
 writeFileSync(file, `${JSON.stringify(out, null, 2)}\n`);
 console.log(`wrote ${file}`);
 void createPrivateKey;
+
+// And the install contract (the bcd command lines provisioned OSes run).
+await import('./daemon-install-contract.mjs');

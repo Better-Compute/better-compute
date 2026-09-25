@@ -200,8 +200,10 @@ frozen, with `extension: 'provider'`.
 
 `providerAccounts.bootstrap({ tenantId, accountId, poolId, machineId | offerId, idempotencyKey })`
 turns a provider machine (a Hetzner Robot server) into a node of a vps-host or metal-host pool that
-runs bcd. It needs `vps({ bootstrap: { bcdUrl, sha256 } })`, the host PKI, and a provider with
-`identify` and `bootstrap`. The `vps.bootstraps` reconciler drives it:
+runs bcd. It needs `vps({ bootstrap: { bcdUrl, sha256, controlPlaneUrl } })`, the host PKI, and a
+provider with `identify` and `bootstrap`. `controlPlaneUrl` is what the installed OS passes to
+`bcd join --server`: it must serve `/.well-known/better-compute` with the gateway and the join pins.
+The `vps.bootstraps` reconciler drives it:
 
 1. **claiming**: `ProviderImpl.create`, keyed by the bootstrap id (with `offerId`);
 2. **identifying**: `ProviderImpl.identify` reads the SMBIOS UUID (Robot: in rescue);

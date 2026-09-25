@@ -365,11 +365,12 @@ func qualified(section, key string) string {
 }
 
 // Render writes the join-relevant part of c as a config.toml the parser accepts: the gateway, its
-// server name, the site and the three pins (what a ramdisk hands the OS it installs).
+// server name, the site and the three pins (what a ramdisk hands the OS it installs, and what bcd
+// join writes for a machine it bootstrapped from the well-known document).
 func Render(c *Config) string {
 	q := func(s string) string { return strconv.Quote(s) }
 	lines := []string{
-		"# Written by bcd ramdisk for the OS it installed (PLAN.md §3.5).",
+		"# Written by bcd (PLAN.md §3.5, §6 Install).",
 		"gateway_url = " + q(c.GatewayURL),
 	}
 	if c.GatewayServerName != "" {
@@ -381,6 +382,9 @@ func Render(c *Config) string {
 		"join_signing_key_pin = "+q(c.JoinSigningKeyPin),
 		"join_encryption_key_pin = "+q(c.JoinEncryptionKeyPin),
 	)
+	if c.DataDir != "" && c.DataDir != DefaultDataDir {
+		lines = append(lines, "data_dir = "+q(c.DataDir))
+	}
 	if c.DevInsecureH2C {
 		lines = append(lines, "dev_insecure_h2c = true")
 	}
