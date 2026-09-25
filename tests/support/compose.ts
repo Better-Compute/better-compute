@@ -1,4 +1,3 @@
-import { timingSafeEqual } from 'node:crypto';
 import type { ComputeModule } from '@better-compute/core';
 import { auditModule } from '@better-compute/audit';
 import { defineHost } from '@better-compute/cli';
@@ -6,7 +5,7 @@ import { eventsModule, handleWatch } from '@better-compute/events';
 import { fleetModule } from '@better-compute/fleet';
 import { createEmbeddedTestIam, type EmbeddedTestIam } from '@better-compute/iam/testing';
 import { metal } from '@better-compute/metal';
-import { createMetrics, metricsHandler, standardMetrics } from '@better-compute/observability';
+import { createMetrics, standardMetrics } from '@better-compute/observability';
 import {
   createPkiBundle,
   createSigningKey,
@@ -115,17 +114,10 @@ export async function composedConfig() {
               pollMs: 50,
             }),
         },
-        {
-          path: '/metrics',
-          method: 'GET',
-          handler: metricsHandler({
-            registry: metrics,
-            bearerToken: METRICS_TOKEN,
-            timingSafeEqual,
-          }),
-        },
       ],
     },
+    // serve mounts GET /metrics and adds the gateway role's series to the same registry.
+    metrics: { registry: metrics, bearerToken: METRICS_TOKEN },
     gateway: {
       region: 'eu-1',
       listen: { host: '127.0.0.1', port: 0 },

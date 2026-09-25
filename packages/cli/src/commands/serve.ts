@@ -1,4 +1,5 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { metricsHandler } from '@better-compute/observability';
 import { createServer, type Server } from 'node:http';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -95,7 +96,13 @@ export async function runServer(
           'The gateway role needs host.gateway in the configuration',
           'Export host = defineHost({ gateway: { region, tls: { key, cert, ca } } }) from better-compute.config.ts.',
         );
-      gateway = await startGateway(compute, options.computeOptions, config, options.note);
+      gateway = await startGateway(
+        compute,
+        options.computeOptions,
+        config,
+        options.note,
+        options.hostConfig?.metrics?.registry,
+      );
       running.gateway = {
         id: gateway.id,
         port: gateway.port,
@@ -103,7 +110,7 @@ export async function runServer(
       };
     }
     if (options.api !== false) {
-      const listener = hostListener(compute, options.hostConfig?.http);
+      const listener = hostListener(compute, withMetricsRoute(options.hostConfig));
       server = createServer(listener.request);
       server.on('upgrade', listener.upgrade);
       const port = await listen(server, options.host, options.port);
@@ -129,6 +136,28 @@ export async function runServer(
     if (server) await closeServer(server);
     await compute.stop();
   }
+}
+
+/** The host's HTTP options with `GET /metrics` added when `host.metrics` has a bearer token. */
+function withMetricsRoute(host: HostConfig | undefined): HostConfig['http'] {
+  const metrics = host?.metrics;
+  const bearerToken = metrics?.bearerToken;
+  if (!metrics || !bearerToken) return host?.http;
+  return {
+    ...host?.http,
+    routes: [
+      ...(host?.http?.routes ?? []),
+      {
+        path: metrics.path ?? '/metrics',
+        method: 'GET',
+        handler: metricsHandler({
+          registry: metrics.registry,
+          bearerToken,
+          timingSafeEqual,
+        }),
+      },
+    ],
+  };
 }
 
 /** The process's stop signal: `io.signal`, or the first SIGINT/SIGTERM. */
@@ -356,16 +385,20 @@ export const serveCommands = [
         : undefined;
       // The same store and options plus the dev join keys: one control plane, not a second stack.
       if (sim) chosen = createDeployment(sim.options, chosen.source);
-      // The configuration's HTTP routes (events, metrics); its gateway stays off in dev.
-      const hostHttp = located
-        ? (
-            await resolveHost((await configModule()).host, {
-              compute: chosen.compute,
-              options: chosen.options,
-              env,
-              cwd,
-            })
-          ).http
+      // The configuration's HTTP routes and metrics; its gateway stays off in dev.
+      const configured = located
+        ? await resolveHost((await configModule()).host, {
+            compute: chosen.compute,
+            options: chosen.options,
+            env,
+            cwd,
+          })
+        : undefined;
+      const devHost: HostConfig | undefined = configured
+        ? {
+            ...(configured.http ? { http: configured.http } : {}),
+            ...(configured.metrics ? { metrics: configured.metrics } : {}),
+          }
         : undefined;
       const stop = stopSignal(io.signal);
       try {
@@ -376,7 +409,7 @@ export const serveCommands = [
           migrate: true,
           signal: stop.signal,
           note,
-          ...(hostHttp ? { hostConfig: { http: hostHttp } } : {}),
+          ...(devHost ? { hostConfig: devHost } : {}),
           ...(sim
             ? {
                 afterMigrate: () => sim.afterMigrate(),

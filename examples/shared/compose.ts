@@ -18,7 +18,6 @@
 // `better-compute dev --sim N` replaces that with an embedded, in-memory better-iam and prints a root token.
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { timingSafeEqual } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
 import { auditModule } from '@better-compute/audit';
 import { defineHost, loadPkiBundle, unconfiguredIam, type HostConfig } from '@better-compute/cli';
@@ -26,7 +25,7 @@ import type { ComputeModule, IamPort, SqlExecutor } from '@better-compute/core';
 import { eventsModule, handleWatch } from '@better-compute/events';
 import { fleetModule } from '@better-compute/fleet';
 import { metal } from '@better-compute/metal';
-import { createMetrics, metricsHandler, standardMetrics } from '@better-compute/observability';
+import { createMetrics, eventCounter, standardMetrics } from '@better-compute/observability';
 import type { PkiBundle } from '@better-compute/pki';
 import { postgres } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
@@ -34,6 +33,13 @@ import { provisionModule } from '@better-compute/provision';
 import { rolloutModule } from '@better-compute/rollout';
 import { pkiJoinCrypto, type BetterCompute, type ComputeOptions } from '@better-compute/server';
 import { instanceStatusHandler, vps } from '@better-compute/vps';
+
+/**
+ * The process's Prometheus registry (bounded labels, nothing identifies a tenant). With real IAM, wrap
+ * the port too: `iam: meteredIamPort(bridge.embedded(iam, …), standardMetrics(metrics))`.
+ */
+export const metrics = createMetrics();
+standardMetrics(metrics);
 
 /** Only for PGlite examples on a laptop; Postgres deployments must set BETTER_COMPUTE_SECRET. */
 const DEVELOPMENT_SECRET = 'better-compute-examples-development-secret-not-for-production';
@@ -84,7 +90,7 @@ export function everyModule(
     provisionModule({ modules: [metalModule] }),
     metalModule,
     vps(),
-    eventsModule({ secret }),
+    eventsModule({ secret, countEvent: eventCounter(metrics) }),
     fleetModule(),
     // bcd self-update needs the offline release keys' pins.
     ...(pins.length
@@ -157,19 +163,10 @@ export const exampleHost = defineHost(async ({ compute, env, cwd }) => {
       ],
     },
   };
+  // One registry for the process: the events module counts into it, serve adds the gateway role's series
+  // and, with a token, serves GET /metrics.
   const metricsToken = env.BETTER_COMPUTE_METRICS_TOKEN;
-  if (metricsToken) {
-    const registry = createMetrics();
-    standardMetrics(registry);
-    host.http!.routes = [
-      ...host.http!.routes!,
-      {
-        path: '/metrics',
-        method: 'GET',
-        handler: metricsHandler({ registry, bearerToken: metricsToken, timingSafeEqual }),
-      },
-    ];
-  }
+  host.metrics = { registry: metrics, ...(metricsToken ? { bearerToken: metricsToken } : {}) };
   const certPath = env.BETTER_COMPUTE_GATEWAY_CERT;
   const keyPath = env.BETTER_COMPUTE_GATEWAY_KEY;
   const bundle = await bundleOf(env, cwd);

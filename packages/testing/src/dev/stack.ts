@@ -29,8 +29,10 @@ import {
 } from '@better-compute/gateway';
 import {
   createNodeCa,
+  createRevocationFeed,
   createSigningKey,
   generateP256KeyPair,
+  normalizeSerial,
   parseCertificate,
   publicJwk,
   type SignerTrust,
@@ -222,14 +224,22 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
   const region = options.region ?? 'dev-1';
   const api = compute.api as any;
   const daemons = new Map<string, FakeDaemon>();
-  /** Nodes that joined through this fleet, and their site: the only identities the h2c hook accepts. */
-  const joined = new Map<string, string>();
+  /**
+   * Nodes that joined through this fleet, with their site and certificate serial: the only identities the
+   * h2c hook accepts. The serial is what revocations match (as the mTLS listener's certificate would give).
+   */
+  const joined = new Map<string, { siteId: string; serial: string }>();
   const scheduler = createRealtimeScheduler({ onError: () => {} });
+  // Revocations reach the gateway as in production: the feed polls node_certs.revoked_at into the set
+  // the gateway enforces (the node CA's).
+  const revocations = keys.pki.nodeCa.revocations;
+  const feed = createRevocationFeed({ sql: database, revocations, intervalMs: 250 });
   let gateway: Gateway | undefined;
   let served: ServedGateway | undefined;
   let client: H2cClient | undefined;
 
   const close = async () => {
+    feed.stop();
     for (const daemon of daemons.values())
       if (daemon.state !== 'stopped') daemon.crash('dev-fleet-close');
     daemons.clear();
@@ -250,9 +260,11 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
       reports: gatewayReportHandlers,
       dispatchIntervalMs: 250,
       specSweepMs: 1_000,
+      revocations,
       ...gatewayOptions,
     });
     await gateway.start();
+    feed.start();
     options.notifier?.attach(gateway);
     served = await serveGateway(gateway, {
       host,
@@ -261,8 +273,9 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
       authenticate: (peer) => {
         const nodeId = peer.headers[TEST_NODE_HEADER];
         if (typeof nodeId !== 'string') return undefined;
-        const siteId = joined.get(nodeId);
-        return siteId ? { nodeId, siteId } : undefined;
+        const identity = joined.get(nodeId);
+        if (!identity || revocations.has(identity.serial)) return undefined;
+        return { nodeId, siteId: identity.siteId, serial: identity.serial };
       },
     });
   } catch (error) {
@@ -308,14 +321,15 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
       daemonVersion: '0.1.0-dev',
       token: { token, joinEncryptionKey: keys.agent.joinEncryptionKey },
     });
-    const spiffe = parseCertificate(body.certChain[0]!).uriSans[0] ?? '';
+    const leaf = parseCertificate(body.certChain[0]!);
+    const spiffe = leaf.uriSans[0] ?? '';
     const siteId = /\/site\/([^/]+)\/node\//.exec(spiffe)?.[1];
     if (!siteId)
       throw new ComputeError(
         'INTERNAL_ERROR',
         `Join issued a certificate without a site: ${spiffe}`,
       );
-    return { nodeId: body.nodeId, siteId };
+    return { nodeId: body.nodeId, siteId, serial: normalizeSerial(leaf.serial) };
   };
 
   return {
@@ -364,8 +378,8 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
       const ids: string[] = [];
       for (let index = 0; index < count; index++) {
         const hardware = fakeHardware({ seed: `${seed}-${index}`, variant });
-        const { nodeId, siteId } = await joinOne(minted.token, hardware);
-        joined.set(nodeId, siteId);
+        const { nodeId, siteId, serial } = await joinOne(minted.token, hardware);
+        joined.set(nodeId, { siteId, serial });
         const daemon = new FakeDaemon({
           backoff: { minMs: 100, maxMs: 5_000 },
           ...options.daemon,

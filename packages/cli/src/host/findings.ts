@@ -29,15 +29,8 @@ export function hostFindings(
   const gateway = host.gateway;
   if (!gateway) return findings;
   try {
-    const identity = gatewayIdentity(options, gateway);
-    if (!identity.revocations)
-      findings.push({
-        check: 'host.gateway.revocations',
-        severity: 'warning',
-        message:
-          'The gateway role has no revocation set: revoked node certificates are only refused once they expire',
-        fix: 'Use the PKI bundle node CA as pki.nodeCa (it carries its revocations), or set host.gateway.identity.revocations',
-      });
+    // Revocations always apply: the role's feed fills its set from node_certs.
+    gatewayIdentity(options, gateway);
   } catch (error) {
     findings.push({
       check: 'host.gateway.identity',

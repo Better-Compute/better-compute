@@ -1,5 +1,7 @@
 import type { SecureServerOptions } from 'node:http2';
 import { ComputeError } from '@better-compute/core';
+import type { MetricsRegistry } from '@better-compute/observability';
+import type { RevocationSet } from '@better-compute/pki';
 import type { AnyCompute, AnyComputeOptions } from '../config.js';
 import type { HostRoute, HostUpgradeHandler } from './http.js';
 
@@ -39,11 +41,11 @@ export interface HostGatewayConfig {
     /** DER node-CA certificates that anchor node certificates. */
     roots?: readonly Uint8Array[];
     trustDomain?: string;
-    /** Revoked serials: refused at session open, and pushed to live sessions (≤ 5 s). */
-    revocations?: {
-      has(serial: string): boolean;
-      subscribe(listener: (entry: { serial: string; reason?: string }) => void): () => void;
-    };
+    /**
+     * Revoked serials: refused at session open, and pushed to live sessions (≤ 5 s). The role's
+     * revocation feed adds every `node_certs` revocation to it. Default: the node CA's, else a new set.
+     */
+    revocations?: RevocationSet;
   };
   /**
    * The WebSocket fallback (v0.4) for networks whose TLS-inspecting proxy strips client certificates:
@@ -60,7 +62,22 @@ export interface HostGatewayConfig {
   options?: Record<string, unknown>;
 }
 
+/**
+ * Prometheus metrics of the process (@better-compute/observability): one registry for everything the
+ * configuration meters (`meteredIamPort`, `eventCounter`, …). `serve` adds the gateway role's own
+ * (`meteredGatewayServices`, `gatewayCollector`) and, with `bearerToken`, serves `GET /metrics`.
+ */
+export interface HostMetricsConfig {
+  /** `createMetrics()` from @better-compute/observability. */
+  registry: MetricsRegistry;
+  /** At least 16 characters; scrapers send `Authorization: Bearer <token>`. Without it, no route. */
+  bearerToken?: string;
+  /** Default `/metrics`. */
+  path?: string;
+}
+
 export interface HostConfig {
+  metrics?: HostMetricsConfig;
   http?: {
     routes?: readonly HostRoute[];
     upgrade?: readonly HostUpgradeHandler[];
@@ -96,9 +113,24 @@ export async function resolveHost(exported: unknown, context: HostContext): Prom
       'INVALID_CONFIG',
       'The host export must be defineHost({ … }) or a factory',
     );
-  const { http, gateway } = value as HostConfig;
+  const { http, gateway, metrics } = value as HostConfig;
   if (http !== undefined && !isRecord(http))
     throw new ComputeError('INVALID_CONFIG', 'host.http must be an object');
+  if (metrics !== undefined) {
+    if (!isRecord(metrics) || !isRecord(metrics.registry))
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'host.metrics needs a registry (createMetrics() from @better-compute/observability)',
+      );
+    if (
+      metrics.bearerToken !== undefined &&
+      (typeof metrics.bearerToken !== 'string' || metrics.bearerToken.length < 16)
+    )
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'host.metrics.bearerToken must be at least 16 characters',
+      );
+  }
   if (gateway !== undefined) {
     if (!isRecord(gateway))
       throw new ComputeError('INVALID_CONFIG', 'host.gateway must be an object');

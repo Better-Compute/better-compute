@@ -1,8 +1,20 @@
 import { createPrivateKey, type KeyObject } from 'node:crypto';
 import { ComputeError } from '@better-compute/core';
+import {
+  gatewayCollector,
+  meteredGatewayServices,
+  type MetricsRegistry,
+  type SampledGateway,
+} from '@better-compute/observability';
 import { gatewayReportHandlers } from '@better-compute/server';
+import * as gatewayPackage from '@better-compute/gateway';
+import {
+  createRevocationFeed,
+  createRevocationSet,
+  type RevocationFeed,
+  type RevocationSet,
+} from '@better-compute/pki';
 import type { AnyCompute, AnyComputeOptions } from '../config.js';
-import { importOptional } from '../config.js';
 import type { HostGatewayConfig } from './config.js';
 
 // The gateway role of `serve` (PLAN.md §7, §8.1, §13): `createGateway` on the deployment's store and runtime
@@ -26,11 +38,8 @@ interface Served {
   port: number;
   close(graceMs?: number): Promise<void>;
 }
-/** pki's RevocationSet as the gateway uses it. */
-export interface RevocationSetLike {
-  has(serial: string): boolean;
-  subscribe(listener: (entry: { serial: string; reason?: string }) => void): () => void;
-}
+/** The revocation set the gateway enforces and the revocation feed fills (pki's `RevocationSet`). */
+export type RevocationSetLike = RevocationSet;
 interface GatewayPackage {
   createGateway(options: Record<string, unknown>): GatewayLike;
   serveGateway(
@@ -64,13 +73,15 @@ export interface RunningGateway {
 export interface GatewayIdentity {
   roots: readonly Uint8Array[];
   trustDomain: string;
-  revocations?: RevocationSetLike;
+  revocations: RevocationSetLike;
 }
 
 /**
  * The gateway's session identity: `host.gateway.identity`, else the deployment's node CA
  * (`ComputeOptions.pki.nodeCa`, a local CA with its revocation set) and JoinService's trust domain.
- * Throws `INVALID_CONFIG` without both: the role never authenticates daemons by name alone.
+ * Without a revocation set a fresh one is made: the role's revocation feed fills it from `node_certs`.
+ * Throws `INVALID_CONFIG` without roots and a trust domain: the role never authenticates daemons by
+ * name alone.
  */
 export function gatewayIdentity(
   options: AnyComputeOptions,
@@ -85,13 +96,16 @@ export function gatewayIdentity(
   const trustDomain =
     explicit?.trustDomain ??
     (options.pki?.join as { trustDomain?: string } | undefined)?.trustDomain;
-  const revocations = explicit?.revocations ?? nodeCa?.revocations;
   if (!roots.length || !trustDomain)
     throw new ComputeError(
       'INVALID_CONFIG',
       'The gateway role authenticates daemons by their node certificate: configure pki.nodeCa and pki.join (from the PKI bundle), or host.gateway.identity { roots, trustDomain, revocations }',
     );
-  return { roots, trustDomain, ...(revocations ? { revocations } : {}) };
+  const revocations =
+    (explicit?.revocations as RevocationSetLike | undefined) ??
+    nodeCa?.revocations ??
+    createRevocationSet();
+  return { roots, trustDomain, revocations };
 }
 
 /** The exec-ticket issuer the deployment gives `tunnels.open`, if any (`ComputeOptions.tunnels`, v0.3). */
@@ -110,6 +124,7 @@ export function gatewayOptions(
   options: AnyComputeOptions,
   config: HostGatewayConfig,
   identity?: GatewayIdentity,
+  metrics?: MetricsRegistry,
 ): Record<string, unknown> {
   const extra = config.options ?? {};
   const issuer = ticketIssuer(options);
@@ -132,11 +147,14 @@ export function gatewayOptions(
     ...(config.internal ? { internalUrl: config.internal.url } : {}),
     ...(options.log ? { log: options.log } : {}),
     // Live sessions whose certificate is revoked get a RevocationNotice and are closed (§16: ≤ 5 s).
-    ...(identity?.revocations ? { revocations: identity.revocations } : {}),
+    ...(identity ? { revocations: identity.revocations } : {}),
     ...extra,
     region: config.region,
     database: options.database,
-    services: compute.gatewayServices,
+    // Join, Renew and Secret counted and timed when the host has a registry.
+    services: metrics
+      ? meteredGatewayServices(compute.gatewayServices, metrics)
+      : compute.gatewayServices,
     work: compute.context.work,
     events: compute.context.events,
     reports: { ...gatewayReportHandlers, ...reports, status: statusHandlers },
@@ -157,16 +175,32 @@ export async function startGateway(
   options: AnyComputeOptions,
   config: HostGatewayConfig,
   note: (message: string) => void,
+  metrics?: MetricsRegistry,
 ): Promise<RunningGateway> {
   const identity = gatewayIdentity(options, config);
-  const pkg = await importOptional<GatewayPackage>(
-    '@better-compute/gateway',
-    'better-compute serve --roles gateway',
+  const pkg = gatewayPackage as unknown as GatewayPackage;
+  const gateway = pkg.createGateway(
+    gatewayOptions(pkg, compute, options, config, identity, metrics),
   );
-  const gateway = pkg.createGateway(gatewayOptions(pkg, compute, options, config, identity));
   await gateway.start();
+  // Revocations reach this gateway within about a second (§16: a revoked node is out within 5 s):
+  // the feed polls node_certs.revoked_at into the set the gateway enforces and subscribes to.
+  const feed: RevocationFeed = createRevocationFeed({
+    sql: options.database,
+    revocations: identity.revocations,
+    onError: (error) => {
+      if (feed.consecutiveFailures === 1 || feed.consecutiveFailures % 60 === 0)
+        note(
+          `Revocation feed: polling node_certs failed ${feed.consecutiveFailures} time(s): ${error instanceof Error ? error.message : String(error)}`,
+        );
+    },
+  });
+  feed.start();
+  // Sessions by role, stream headroom, draining, lease held, in-flight commands: sampled at scrape.
+  if (metrics) gatewayCollector(metrics, () => [gateway as unknown as SampledGateway]);
   const listeners: Served[] = [];
   const stop = async () => {
+    feed.stop();
     await gateway.drain({ reason: 'shutdown' }).catch(() => undefined);
     for (const listener of listeners.splice(0).reverse())
       await listener.close(2_000).catch(() => undefined);

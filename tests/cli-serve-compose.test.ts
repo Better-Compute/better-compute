@@ -270,9 +270,13 @@ describe('serve composition audit', () => {
       ),
     ).toEqual({ roots: [certificate], trustDomain: 'td.test', revocations });
     const roots = [new Uint8Array([9])];
-    expect(
-      gatewayIdentity({} as any, { ...gateway, identity: { roots, trustDomain: 'other.test' } }),
-    ).toEqual({ roots, trustDomain: 'other.test' });
+    const explicit = gatewayIdentity({} as any, {
+      ...gateway,
+      identity: { roots, trustDomain: 'other.test' },
+    });
+    expect(explicit).toMatchObject({ roots, trustDomain: 'other.test' });
+    // No set given: a fresh one, which the role's revocation feed fills from node_certs.
+    expect(explicit.revocations.size).toBe(0);
     // Revocations reach createGateway for the live push.
     expect(
       gatewayOptions(
@@ -308,8 +312,8 @@ describe('serve composition audit', () => {
       nodeCa: { certificate: new Uint8Array([1]) },
       join: { trustDomain: 'td.test' },
     };
+    // No revocation set is fine: the role makes one and its feed fills it from node_certs.
     expect(checks({ pki, tunnels: { issuer: {} } }, { gateway: { ...gateway } })).toEqual([
-      'warning host.gateway.revocations',
       'warning host.gateway.internal',
       'error host.gateway.tunnels',
     ]);
@@ -401,7 +405,10 @@ export const host = composed.host;
           headers: { authorization: `Bearer ${METRICS_TOKEN}` },
         });
         expect(metrics.status).toBe(200);
-        expect(await metrics.text()).toContain('better_compute_');
+        const scraped = await metrics.text();
+        expect(scraped).toContain('better_compute_');
+        // The gateway role's own series, sampled at scrape.
+        expect(scraped).toContain('better_compute_gateway_stream_headroom');
         expect((await fetch(`${origin}/metrics`, { method: 'POST' })).status).toBe(405);
 
         // The events module's SSE watch, as the root administrator.
@@ -471,12 +478,27 @@ export const host = composed.host;
           now: Date.now(),
         });
 
-        // A restricted certificate (as discovery/ramdisk joins get): only diag.* may reach it.
+        // A reboot queued while the certificate is unrestricted (the restricted re-join case).
         const { compute: served, database } = composeState()!;
+        const enqueue = (kind: string, key: string) =>
+          database!.transaction((tx) =>
+            served!.context.commands.enqueue(tx, {
+              nodeId: joined.nodeId,
+              kind,
+              payload: {},
+              idempotencyKey: key,
+              notAfter: Date.now() + 600_000,
+            }),
+          );
+        const reboot = await enqueue('node.reboot', 'compose-reboot');
+
+        // Then the certificate is restricted (as discovery/ramdisk joins get): only diag.* may reach it.
         await database!.query(
           `UPDATE node_certs SET allowed_kinds = ARRAY['diag.*'] WHERE node_id = $1`,
           [joined.nodeId],
         );
+        // Defense at the source: the queue refuses new disallowed kinds for a restricted identity.
+        await expect(enqueue('node.reboot', 'compose-reboot-2')).rejects.toThrow(/restricted/);
         const certificate = {
           key: privateKeyPem(nodeKey),
           cert: joined.certChain.map((der) => toPem(der)).join(''),
@@ -488,33 +510,19 @@ export const host = composed.host;
         expect(live.error ?? live.status).toBeUndefined();
         expect(live.frames[0]!.msg.case).toBe('welcome');
 
-        // A disallowed kind is never sent: it settles server-side; the allowed one is dispatched.
-        const enqueued = await database!.transaction(async (tx) => ({
-          reboot: await served!.context.commands.enqueue(tx, {
-            nodeId: joined.nodeId,
-            kind: 'node.reboot',
-            payload: {},
-            idempotencyKey: 'compose-reboot',
-            notAfter: Date.now() + 600_000,
-          }),
-          diag: await served!.context.commands.enqueue(tx, {
-            nodeId: joined.nodeId,
-            kind: 'diag.nvml',
-            payload: {},
-            idempotencyKey: 'compose-diag',
-            notAfter: Date.now() + 600_000,
-          }),
-        }));
+        // Defense at the gateway: the queued reboot is never sent (it settles server-side); the
+        // allowed kind is dispatched.
+        const enqueued = { reboot, diag: await enqueue('diag.nvml', 'compose-diag') };
         const commandKinds = () =>
           live.frames
             .filter((frame) => frame.msg.case === 'command')
             .map((frame) => unwrapCommand(frame.msg.value as never).kind);
         await live.when(() => commandKinds().includes('diag.nvml'), 'diag.nvml dispatch');
-        const reboot = await database!.query<{ state: string }>(
+        const rebootRow = await database!.query<{ state: string }>(
           'SELECT state FROM commands WHERE id = $1',
           [enqueued.reboot.id],
         );
-        expect(reboot.rows[0]!.state).not.toMatch(/^(pending|dispatched|accepted|running)$/);
+        expect(rebootRow.rows[0]!.state).not.toMatch(/^(pending|dispatched|accepted|running)$/);
         expect(commandKinds()).not.toContain('node.reboot');
 
         // Revocation: the live session is closed (RevocationNotice), and the certificate is refused

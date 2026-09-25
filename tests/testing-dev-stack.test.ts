@@ -108,6 +108,35 @@ describe('createDevStack', () => {
     expect(rows[0]!.provision_state).not.toBe('adopted');
   });
 
+  it(
+    'drops a node within 5 s of nodes.revokeIdentity, and keeps it out',
+    { timeout: 60_000 },
+    async () => {
+      stack = await createDevStack();
+      const { poolId } = await stack.createPool();
+      const [nodeId] = await stack.join({ poolId, seed: 'dev-revoke' });
+      await stack.waitFor([nodeId!], { timeoutMs: 45_000 });
+      const connected = () =>
+        stack!.gateway.sessions().some((session) => session.nodeId === nodeId);
+      expect(connected()).toBe(true);
+      const api = stack.compute.api as any;
+      const revokedAt = Date.now();
+      await api.nodes.revokeIdentity(stack.root, {
+        tenantId: stack.rootTenantId,
+        nodeId,
+        reason: 'key-compromise',
+      });
+      // The revocation feed carries node_certs.revoked_at to the gateway, which closes the session.
+      while (connected() && Date.now() - revokedAt < 5_000)
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(connected()).toBe(false);
+      expect(Date.now() - revokedAt).toBeLessThan(5_000);
+      // The daemon redials; the revoked certificate is refused at every open.
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      expect(connected()).toBe(false);
+    },
+  );
+
   it('attaches a fleet only with insecureHeaderAuth: true', async () => {
     stack = await createDevStack();
     await expect(
