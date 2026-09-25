@@ -70,18 +70,8 @@ func pinBytes(t *testing.T, pin string) []byte {
 	return b
 }
 
-// skipOldFormat skips when the fixtures still carry the 2.25.<uuid> role extension, which Go cannot
-// parse (PLAN ae3134f moved the role to Subject OU); regenerate with scripts/daemon-fixtures.mjs.
-func skipOldFormat(t *testing.T, f interop) {
-	t.Helper()
-	if _, err := x509.ParseCertificate(unhex(t, f.NodeCert)); err != nil && strings.Contains(err.Error(), "malformed extension OID") {
-		t.Skip("testdata/interop.json predates the bc-role OU certificate format; run scripts/daemon-fixtures.mjs")
-	}
-}
-
 func TestNodeCertificateFromTypeScript(t *testing.T) {
 	f := loadInterop(t)
-	skipOldFormat(t, f)
 	cert, err := x509.ParseCertificate(unhex(t, f.NodeCert))
 	if err != nil {
 		t.Fatalf("Go cannot parse a pki-issued node certificate: %v", err)
@@ -101,7 +91,6 @@ func TestNodeCertificateFromTypeScript(t *testing.T) {
 
 func TestJoinResponseFromTypeScript(t *testing.T) {
 	f := loadInterop(t)
-	skipOldFormat(t, f)
 	resp := &agentv1.JoinResponse{}
 	if err := proto.Unmarshal(unhex(t, f.JoinResponse), resp); err != nil {
 		t.Fatal(err)

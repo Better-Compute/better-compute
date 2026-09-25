@@ -24,8 +24,9 @@ import type { GatewayCallContext } from './service.js';
 // The workload-token broker (PLAN.md §12.2, §13; v0.5): `GatewayServices.workloadToken`. A VPS host's
 // IMDS, bound to one instance, asks for that instance's workload JWT. The gateway only relays; the
 // answer is the JWT sealed to the request's one-time key (P14). A token is minted only when
-//  1. the request is signed by the requesting node's CURRENT platform key (no expiry grace; never a
-//     `node-tenant` certificate: the lessee has root there) and names the session's node — checked
+//  1. the request is signed by the requesting node's CURRENT key of role `node` without an
+//     allowed-kinds restriction (no expiry grace; never `node-tenant`, where the lessee has root,
+//     a ramdisk or a site agent) and names the session's node — checked
 //     before anything else is looked up;
 //  2. the instance is live and placed on that node, with a live allocation there;
 //  3. its pool turned workload identity on (`policy.workloadIdentity: true`);
@@ -94,10 +95,11 @@ interface CertRow {
 const ms = (value: Date | string) => (value instanceof Date ? value : new Date(value)).getTime();
 
 /** Node keys for the signature check: only a certificate of the node's CURRENT identity generation. */
-function currentCertLookup(tx: SqlTx): NodeCertLookup {
+function currentCertLookup(tx: SqlTx, restricted: Set<string>): NodeCertLookup {
   return async (spki, nodeId) => {
-    const { rows } = await tx.query<CertRow>(
-      `SELECT c.serial, c.node_id, c.role, c.der, c.not_before, c.not_after, c.revoked_at
+    const { rows } = await tx.query<CertRow & { restricted: boolean }>(
+      `SELECT c.serial, c.node_id, c.role, c.der, c.not_before, c.not_after, c.revoked_at,
+              c.allowed_kinds IS NOT NULL AS restricted
          FROM node_certs c JOIN nodes n ON n.id = c.node_id
         WHERE c.spki_sha256 = $1 AND c.node_id = $2 AND c.identity_gen = n.identity_gen
           AND n.provision_state <> 'retired'
@@ -106,6 +108,7 @@ function currentCertLookup(tx: SqlTx): NodeCertLookup {
     );
     const row = rows[0];
     if (!row) return undefined;
+    if (row.restricted) restricted.add(row.serial);
     return {
       serial: row.serial,
       nodeId: row.node_id,
@@ -197,10 +200,11 @@ export function createWorkloadBroker(options: WorkloadBrokerOptions): WorkloadBr
         if (!node) throw new Refused('access-denied', 'unknown-node');
         // 1. The node's signature first; nothing about the instance is read before it holds.
         let opened: OpenedWorkloadTokenRequest;
+        const restricted = new Set<string>();
         try {
           opened = await openWorkloadTokenRequest(request, {
             nodeId,
-            lookup: currentCertLookup(tx),
+            lookup: currentCertLookup(tx, restricted),
             now,
             expiredGraceMs: 0,
           });
@@ -208,8 +212,12 @@ export function createWorkloadBroker(options: WorkloadBrokerOptions): WorkloadBr
           if (!isComputeError(error, 'ACCESS_DENIED')) throw error;
           throw new Refused('access-denied', String(error.details?.reason ?? 'bad-signature'));
         }
-        if (opened.role === 'node-tenant')
-          throw new Refused('access-denied', 'node-tenant', node.owner_tenant_id);
+        // An allowlist: only a VPS host's own node agent serves IMDS. Never node-tenant (the lessee has
+        // root there), a ramdisk or site agent, or a certificate restricted to some kinds.
+        if (opened.role !== 'node')
+          throw new Refused('access-denied', `role-${opened.role}`, node.owner_tenant_id);
+        if (restricted.has(opened.serial))
+          throw new Refused('access-denied', 'restricted-certificate', node.owner_tenant_id);
         // 2. A live instance placed on this node, with its live allocation here (without the vps
         //    module there are no instances to mint for).
         const hasInstances = (

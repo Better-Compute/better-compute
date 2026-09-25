@@ -224,6 +224,34 @@ describe('IMDS workload identity (§16 v0.5)', () => {
     });
   }, 90_000);
 
+  it('mints only for an unrestricted node-role certificate (an allowlist)', async () => {
+    const x = await running(enabledPool);
+    const services = dev.compute.gatewayServices;
+    const ask = () =>
+      services.workloadToken!(
+        createWorkloadTokenRequest({ nodeKey: daemon(x.nodeId).nodeKey!, instanceId: x.id }).request,
+        { peerNodeId: x.nodeId },
+      );
+    expect((await ask()).jwe).not.toBe('');
+    for (const [column, value] of [
+      ['allowed_kinds', `{"diag.nvml"}`],
+      ['role', 'ramdisk'],
+    ] as const) {
+      const { rows } = await dev.database.query<{ serial: string; before: string | null }>(
+        `UPDATE node_certs c SET ${column} = $2 FROM node_certs old
+          WHERE c.serial = old.serial AND c.node_id = $1 RETURNING c.serial, old.${column}::text AS before`,
+        [x.nodeId, value],
+      );
+      expect(await ask(), column).toMatchObject({ error: 'access-denied', jwe: '' });
+      for (const row of rows)
+        await dev.database.query(`UPDATE node_certs SET ${column} = $2 WHERE serial = $1`, [
+          row.serial,
+          column === 'allowed_kinds' ? null : row.before,
+        ]);
+    }
+    expect((await ask()).jwe).not.toBe('');
+  }, 60_000);
+
   it('mints nothing in a pool that did not turn workload identity on', async () => {
     const off = await running(disabledPool);
     const token = await session(off.nodeId, off.id);
