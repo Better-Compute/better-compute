@@ -30,6 +30,12 @@ export interface ColdStartOptions {
   restartDownMs?: number;
   /** How often readiness is sampled, simulated ms (default 5 s). */
   stepMs?: number;
+  /**
+   * Batches each control-plane job may run per simulated second while it has work (default 10: one worker draining
+   * ten 32-key batches a second; a real worker loops without sleeping while there is work). See
+   * `ControlPlaneSimOptions.workerPasses`; the report's `wall.loops` shows what those passes cost here.
+   */
+  workerPasses?: number;
 }
 
 export interface ColdStartPhase {
@@ -46,7 +52,14 @@ export interface ColdStartPhase {
 export interface ColdStartReport {
   seed: string;
   config: Required<Omit<ColdStartOptions, 'seed'>>;
-  wall: { setupMs: number; bootMs: number; restartMs: number; totalMs: number };
+  wall: {
+    setupMs: number;
+    bootMs: number;
+    restartMs: number;
+    totalMs: number;
+    /** Wall ms spent in each part of the loop (`fleet`, `gateway`, `reconcilers`, `join`, `api`). */
+    loops: Record<string, number>;
+  };
   boot: ColdStartPhase & {
     /** Simulated ms from power-on to each node's adoption. */
     adoptedMs: LatencySummary;
@@ -117,6 +130,19 @@ export async function runColdStart(options: ColdStartOptions): Promise<ColdStart
     restart: options.restart ?? true,
     restartDownMs: options.restartDownMs ?? 10_000,
     stepMs: options.stepMs ?? 5_000,
+    workerPasses: options.workerPasses ?? 10,
+  };
+  // Where the wall time goes (nested parts count in both: `fleet` includes the gateway and the reconcilers).
+  const loops: Record<string, number> = {};
+  const trace = <T>(path: string, fn: () => T): T => {
+    const started = performance.now();
+    const result = fn();
+    const add = () => {
+      loops[path] = (loops[path] ?? 0) + Math.round(performance.now() - started);
+    };
+    if (result instanceof Promise) return result.finally(add) as T;
+    add();
+    return result;
   };
   const wallStart = Date.now();
   // Joining is set-up, not part of the cold start: the fleet powers on when the simulator starts.
@@ -125,7 +151,9 @@ export async function runColdStart(options: ColdStartOptions): Promise<ColdStart
     nodes: config.nodes,
     gateways: config.gateways,
     startSpreadMs: config.startSpreadMs,
+    workerPasses: config.workerPasses,
     logFrames: false,
+    trace,
   });
   try {
     const setupMs = Date.now() - wallStart;
@@ -188,7 +216,7 @@ export async function runColdStart(options: ColdStartOptions): Promise<ColdStart
     return {
       seed: options.seed,
       config,
-      wall: { setupMs, bootMs, restartMs, totalMs: Date.now() - wallStart },
+      wall: { setupMs, bootMs, restartMs, totalMs: Date.now() - wallStart, loops },
       boot,
       ...(restart ? { restart } : {}),
       schedulable: ready,

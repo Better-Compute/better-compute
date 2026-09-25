@@ -235,6 +235,12 @@ export interface ControlPlaneSimOptions
   modules?: readonly ComputeModule[];
   /** Gateway processes behind the simulator (default 1); dials are spread over the live ones. */
   gateways?: number;
+  /**
+   * Passes each control-plane job may run per simulator tick while it keeps finding work (default 1: one batch per
+   * job per tick). A real worker loops without sleeping while there is work (§8), so a queue of thousands drains
+   * within a tick or two; raise this to model that (e.g. 10 ≈ one worker draining ten 32-key batches a second).
+   */
+  workerPasses?: number;
   /** Extra gateway options (e.g. lease timings). */
   gateway?: Partial<
     Omit<
@@ -621,8 +627,10 @@ export async function createControlPlaneSim(
       restricted: _restricted,
       modules: _modules,
       gateway: _gateway,
+      workerPasses: _workerPasses,
       ...fleetOptions
     } = options;
+    const workerPasses = Math.max(1, options.workerPasses ?? 1);
     sim = createFleetSim({
       ...fleetOptions,
       start,
@@ -658,7 +666,14 @@ export async function createControlPlaneSim(
           // A dead worker runs nothing: its keys wait in the work queue until one runs again.
           if (!workersDown)
             await trace('reconcilers', async () => {
-              for (const job of Object.values(compute.jobs)) await survive(() => job.tick());
+              for (const job of Object.values(compute.jobs))
+                for (let pass = 0; pass < workerPasses; pass++) {
+                  let worked = 0;
+                  await survive(async () => {
+                    worked = await job.tick();
+                  });
+                  if (!(worked > 0)) break;
+                }
             });
         },
         kill() {
