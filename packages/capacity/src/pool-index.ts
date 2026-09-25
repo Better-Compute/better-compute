@@ -78,29 +78,22 @@ export class PoolIndexCache {
   }
 }
 
+/** What the counts need of a device: known for booked devices from the start, for others once hydrated. */
+type AtomMeta = Pick<Device, 'nodeId' | 'class' | 'bookable' | 'healthy'>;
+
 export class PoolIndex {
   private constructor(
     readonly pool: PoolRow,
     private readonly nodes: NodeRow[],
-    private readonly devices: Map<string, Device[]>,
+    /** Bookable and healthy atoms per node and class (`capacity_device_counts`). */
+    private readonly classCounts: Map<string, Map<string, { bookable: number; healthy: number }>>,
+    private readonly meta: Map<string, AtomMeta>,
     private readonly labels: Map<string, Record<string, string>>,
     private readonly resources: Map<string, Record<string, ScalarResource>>,
-    private readonly links: Map<string, NonNullable<NodeView['links']>>,
+    private readonly linkedIds: ReadonlySet<string>,
     /** Booking intervals per device, `[start, end)` in epoch ms. */
     private readonly bookings: Map<string, [number, number][]>,
   ) {
-    for (const [nodeId, list] of devices) {
-      const counts = new Map<string, { bookable: number; healthy: number }>();
-      for (const device of list) {
-        this.deviceById.set(device.id, device);
-        if (!device.bookable) continue;
-        const entry = counts.get(device.class) ?? { bookable: 0, healthy: 0 };
-        entry.bookable++;
-        if (device.healthy) entry.healthy++;
-        counts.set(device.class, entry);
-      }
-      this.classCounts.set(nodeId, counts);
-    }
     for (const deviceId of bookings.keys()) this.markBooked(deviceId);
     this.schedulable = nodes.filter((node) => mayBeSchedulable(node, pool));
     this.schedulableIds = new Set(this.schedulable.map((node) => node.id));
@@ -121,57 +114,114 @@ export class PoolIndex {
   private readonly schedulableIds: Set<string>;
   private readonly dedicatedTo = new Map<string, string>();
 
-  private readonly deviceById = new Map<string, Device>();
-  /** Bookable devices per node and class: all, and healthy. */
-  private readonly classCounts = new Map<
-    string,
-    Map<string, { bookable: number; healthy: number }>
-  >();
   /** Devices with at least one booking, per node: the only ones a window can make busy. */
   private readonly bookedByNode = new Map<string, Set<string>>();
+  /** Full devices and links of the nodes a view was asked for (see `hydrate`). */
+  private readonly devices = new Map<string, Device[]>();
+  private readonly links = new Map<string, NonNullable<NodeView['links']>>();
 
   private markBooked(deviceId: string): void {
-    const device = this.deviceById.get(deviceId);
+    const device = this.meta.get(deviceId);
     if (!device) return;
     const set = this.bookedByNode.get(device.nodeId) ?? new Set<string>();
     set.add(deviceId);
     this.bookedByNode.set(device.nodeId, set);
   }
 
-  /** Loads a pool: every node, and devices, scalars, links and bookings ending after `from` for schedulable ones. */
+  /**
+   * Loads a pool: every node, and for schedulable ones their scalars, per-class atom counts, link
+   * presence, and the bookings ending after `from` with their devices. Full device rows (with
+   * attributes) and link matrices wait for a view that needs them: at 10k nodes the pool's 80k
+   * devices cost ~600 ms to read on PGlite, while a shortlist views a handful of nodes.
+   */
   static async load(tx: SqlTx, pool: PoolRow, from: number): Promise<PoolIndex> {
     const nodes = await readPoolNodes(tx, pool.id);
     const live = nodes.filter((node) => mayBeSchedulable(node, pool)).map((node) => node.id);
-    const devices = new Map<string, Device[]>();
-    for (const device of await readDevices(tx, live))
-      devices.set(device.nodeId, [...(devices.get(device.nodeId) ?? []), device]);
+    const classCounts = new Map<string, Map<string, { bookable: number; healthy: number }>>();
+    const meta = new Map<string, AtomMeta>();
     const bookings = new Map<string, [number, number][]>();
+    const linked = new Set<string>();
     if (live.length > 0) {
-      const { rows } = await tx.query<{ device_id: string; start_ms: number; end_ms: number }>(
-        `SELECT b.device_id, (extract(epoch FROM lower(b.during)) * 1000)::float8 AS start_ms,
+      const counts = await tx.query<{
+        node_id: string;
+        class: string;
+        bookable: number | string;
+        healthy: number | string;
+      }>(
+        `SELECT node_id, class, bookable, healthy FROM capacity_device_counts
+          WHERE node_id = ANY($1::text[]) AND bookable > 0`,
+        [live],
+      );
+      for (const row of counts.rows) {
+        const byClass = classCounts.get(row.node_id) ?? new Map();
+        byClass.set(row.class, { bookable: Number(row.bookable), healthy: Number(row.healthy) });
+        classCounts.set(row.node_id, byClass);
+      }
+      const { rows } = await tx.query<{
+        device_id: string;
+        node_id: string;
+        class: string;
+        bookable: boolean;
+        healthy: boolean;
+        start_ms: number;
+        end_ms: number;
+      }>(
+        `SELECT b.device_id, d.node_id, d.class, d.bookable, d.healthy,
+                (extract(epoch FROM lower(b.during)) * 1000)::float8 AS start_ms,
                 (extract(epoch FROM upper(b.during)) * 1000)::float8 AS end_ms
            FROM device_bookings b JOIN devices d ON d.id = b.device_id
           WHERE d.node_id = ANY($1::text[]) AND upper(b.during) > $2::timestamptz`,
         [live, new Date(from).toISOString()],
       );
-      for (const row of rows)
+      for (const row of rows) {
+        meta.set(row.device_id, {
+          nodeId: row.node_id,
+          class: row.class as Device['class'],
+          bookable: row.bookable,
+          healthy: row.healthy,
+        });
         bookings.set(row.device_id, [
           ...(bookings.get(row.device_id) ?? []),
           [Number(row.start_ms), Number(row.end_ms)],
         ]);
+      }
+      const links = await tx.query<{ node_id: string }>(
+        `SELECT DISTINCT node_id FROM capacity_device_links WHERE node_id = ANY($1::text[])`,
+        [live],
+      );
+      for (const row of links.rows) linked.add(row.node_id);
     }
     return new PoolIndex(
       pool,
       nodes,
-      devices,
+      classCounts,
+      meta,
       await readNodeLabels(
         tx,
         nodes.map((node) => node.id),
       ),
       await readNodeResources(tx, live),
-      await readDeviceLinks(tx, live),
+      linked,
       bookings,
     );
+  }
+
+  /**
+   * Reads the full devices and links of these nodes (default: every schedulable one) unless already
+   * held. They are read later than the counts, so they may be fresher; the guarded commit settles
+   * any difference, as it does for bookings made elsewhere.
+   */
+  private async hydrate(tx: SqlTx, nodeIds?: readonly string[]): Promise<void> {
+    const missing = (nodeIds ?? this.schedulable.map((node) => node.id)).filter(
+      (id) => this.schedulableIds.has(id) && !this.devices.has(id),
+    );
+    if (missing.length === 0) return;
+    for (const id of missing) this.devices.set(id, []);
+    for (const device of await readDevices(tx, missing)) {
+      this.devices.get(device.nodeId)!.push(device);
+      this.meta.set(device.id, device);
+    }
+    for (const [nodeId, links] of await readDeviceLinks(tx, missing)) this.links.set(nodeId, links);
   }
 
   private busy(deviceId: string, during: TimeRange): boolean {
@@ -181,8 +231,8 @@ export class PoolIndex {
   }
 
   /** Nodes with at least one GPU link row. */
-  linked(): Set<string> {
-    return new Set(this.links.keys());
+  linked(): ReadonlySet<string> {
+    return this.linkedIds;
   }
 
   /**
@@ -233,7 +283,7 @@ export class PoolIndex {
     let busy: Map<string, number> | undefined;
     if (booked)
       for (const deviceId of booked) {
-        const device = this.deviceById.get(deviceId)!;
+        const device = this.meta.get(deviceId)!;
         if (device.bookable && device.healthy && want.has(device.class))
           if (this.busy(deviceId, request.during))
             (busy ??= new Map()).set(device.class, (busy.get(device.class) ?? 0) + 1);
@@ -321,8 +371,12 @@ export class PoolIndex {
     }
   }
 
-  /** The placement view of the pool (or of `onlyNodes`) for one window, as `loadNodeViews` builds it. */
-  views(during: TimeRange, onlyNodes?: readonly string[]): NodeView[] {
+  /**
+   * The placement view of the pool (or of `onlyNodes`) for one window, as `loadNodeViews` builds it.
+   * Reads the devices of nodes not viewed before through `tx`.
+   */
+  async views(tx: SqlTx, during: TimeRange, onlyNodes?: readonly string[]): Promise<NodeView[]> {
+    await this.hydrate(tx, onlyNodes);
     const nodes = onlyNodes
       ? onlyNodes.flatMap((id) => {
           const node = this.nodeById.get(id);
@@ -359,7 +413,7 @@ export class PoolIndex {
     }
     const nodes = new Set<string>();
     for (const atom of allocation.atoms) {
-      const device = this.deviceById.get(atom);
+      const device = this.meta.get(atom);
       if (device) nodes.add(device.nodeId);
     }
     for (const nodeId of nodes) this.refresh(nodeId);

@@ -211,7 +211,7 @@ export interface ShortlistSource {
   /** Placement views of these nodes for the request's window. */
   views(nodeIds: readonly string[]): Promise<NodeView[]> | NodeView[];
   /** Nodes with at least one GPU link row. */
-  linked(): Promise<Set<string>> | Set<string>;
+  linked(): Promise<ReadonlySet<string>> | ReadonlySet<string>;
   /** Nodes caching `request.imageId` (the `image-cached` score, a known per-node bonus). */
   imageCached?: ReadonlySet<string>;
 }
@@ -300,7 +300,7 @@ export async function shortlistPlan(
     (device) => device.class === 'gpu' || !device.class.startsWith('gpu'),
   );
   const epsilon = 1e-9;
-  let linked: Set<string> | undefined;
+  let linked: ReadonlySet<string> | undefined;
   let checked = false;
   for (const candidate of outside) {
     // Candidates exist outside: the plan must hold the full top N, and beat them all.

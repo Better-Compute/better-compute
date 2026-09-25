@@ -470,7 +470,7 @@ export async function placeFromIndexCounted(
           request,
           request.gang,
           pool,
-          index.views(request.during),
+          await index.views(tx, request.during),
           excluded,
           context,
           maxAttempts,
@@ -481,7 +481,7 @@ export async function placeFromIndexCounted(
       : await placeSingle(
           tx,
           request,
-          indexPlanner(index, request, context),
+          indexPlanner(tx, index, request, context),
           excluded,
           context,
           maxAttempts,
@@ -496,6 +496,7 @@ export async function placeFromIndexCounted(
 
 /** Plans a single-node request on a `PoolIndex`: the exact shortlist when it decides, else every node. */
 function indexPlanner(
+  tx: SqlTx,
   index: PoolIndex,
   request: PlacementRequest,
   context: Pick<PlacementContext, 'plugins' | 'weights' | 'topN'>,
@@ -507,7 +508,7 @@ function indexPlanner(
     const short = fast
       ? await shortlistPlan(pool, request, without, context, {
           ranked: () => index.ranked(request, context.weights),
-          views: (nodeIds) => index.views(request.during, nodeIds),
+          views: (nodeIds) => index.views(tx, request.during, nodeIds),
           linked: () => index.linked(),
         })
       : undefined;
@@ -515,7 +516,7 @@ function indexPlanner(
       short?.plan ??
       planPlacement(
         { ...request, excludeNodes: without },
-        (whole ??= index.views(request.during)),
+        (whole ??= await index.views(tx, request.during)),
         pool,
         { plugins: context.plugins, weights: context.weights },
       )
@@ -537,12 +538,18 @@ export function bulkCommittable(request: PlacementRequest): boolean {
  * it in the same batch). `undefined` when nothing fits; call `index.forget` if the commit fails.
  */
 export async function planOnIndex(
+  tx: SqlTx,
   index: PoolIndex,
   request: PlacementRequest,
   context: PlacementContext,
 ): Promise<NodePlan | undefined> {
   assertPlacementRequest(request);
-  const { ranked } = await indexPlanner(index, request, context)([...(request.excludeNodes ?? [])]);
+  const { ranked } = await indexPlanner(
+    tx,
+    index,
+    request,
+    context,
+  )([...(request.excludeNodes ?? [])]);
   const choice = choosePlan(ranked, () => context.random(), context.topN);
   if (choice)
     index.record({

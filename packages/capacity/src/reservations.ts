@@ -1058,7 +1058,7 @@ export async function placeQueued(
   const pool = await readPool(tx, poolId);
   if (!pool) return { placed: 0, pending: 0, more: false };
   // Reservation rows first, then the index, and only then the pool lock: loading the index (a pool
-  // of 10k nodes: ~1 s on PGlite) never holds the lock that inline placements on the pool wait for.
+  // of 10k nodes: ~250 ms on PGlite) never holds the lock that inline placements on the pool wait for.
   // A booking committed between the load and the lock is caught by the guarded commits.
   const { rows } = await tx.query<{ id: string }>(
     `SELECT id FROM reservations
@@ -1092,7 +1092,9 @@ export async function placeQueued(
     const start = Math.max(row.request.start ?? now, now);
     const during = { start, end: start + requestedDuration(row) };
     const request = placementRequest(row, during);
-    const plan = bulkCommittable(request) ? await planOnIndex(index, request, context) : undefined;
+    const plan = bulkCommittable(request)
+      ? await planOnIndex(tx, index, request, context)
+      : undefined;
     if (plan) planned.push({ row, during, request, plan });
     else oneByOne.push({ row, during, request });
   }

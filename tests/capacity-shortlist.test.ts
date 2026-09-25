@@ -225,17 +225,17 @@ describe('the placement shortlist', () => {
           { plugins: [], weights, topN: 5 },
           {
             ranked: () => index.ranked(req, weights),
-            views: (nodeIds) => index.views(req.during, nodeIds),
+            views: (nodeIds) => index.views(tx, req.during, nodeIds),
             linked: () => index.linked(),
           },
         );
         if (short) {
-          const full = planPlacement(req, index.views(req.during), pool, { weights });
+          const full = planPlacement(req, await index.views(tx, req.during), pool, { weights });
           const top = (plan: { ranked: { nodeId: string; score: number }[] }) =>
             plan.ranked.slice(0, 5).map((entry) => [entry.nodeId, entry.score]);
           expect(top(short.plan), `${name} at step ${step}`).toEqual(top(full));
         }
-        const plan = await planOnIndex(index, req, {
+        const plan = await planOnIndex(tx, index, req, {
           clock: { now: () => T0 },
           random,
           plugins: [],
