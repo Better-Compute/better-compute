@@ -1,5 +1,5 @@
 import type { KeyObject } from 'node:crypto';
-import { create, fromBinary, toBinary, type MessageInitShape } from '@bufbuild/protobuf';
+import { create, equals, fromBinary, toBinary, type MessageInitShape } from '@bufbuild/protobuf';
 import { timestampFromMs, timestampMs } from '@bufbuild/protobuf/wkt';
 import { isComputeError } from '@better-compute/core';
 import {
@@ -8,6 +8,7 @@ import {
   signAttestedReport,
   signCommandUpdate,
   verifyCommand,
+  verifyDesiredState,
   verifyTrustBundle,
   type ReplayCache,
   type SignerTrust,
@@ -171,6 +172,12 @@ export interface FakeDaemonOptions {
     roots: readonly Uint8Array[];
     version?: bigint;
     trustSigner?: SignerTrust;
+    /**
+     * Desired state (signed NodeSpecs, §7.7): a spec that changes the `access` section must be signed (v0.2), and
+     * with `'always'` every spec must be (v0.4). A present signature is always checked. A refused spec is not
+     * applied (see `specRejections`).
+     */
+    signedSpecs?: 'access' | 'always';
   };
   /**
    * A VPS host (v0.3): the `instances` section is converged on a fake hypervisor (options, or one
@@ -321,6 +328,8 @@ export class FakeDaemon {
   private intentVersion: bigint | undefined;
   /** Commands whose signature failed (precheck answers BAD_SIGNATURE in its place). */
   private readonly badSignatures = new Set<string>();
+  /** Desired states refused by signed intent, in arrival order. */
+  private readonly specRejectionsValue: { generation: number; reason: string }[] = [];
   private readonly fs = new Map<string, string>();
   private hw: FakeHardware;
   private journalValue: MemoryJournal;
@@ -376,6 +385,10 @@ export class FakeDaemon {
 
   get state(): FakeDaemonState {
     return this.stateValue;
+  }
+  /** Desired states refused by signed intent (`intent.signedSpecs`): generation and reason. */
+  get specRejections(): readonly { generation: number; reason: string }[] {
+    return this.specRejectionsValue;
   }
   /** The certificate was revoked: the daemon does not redial. */
   get revoked(): boolean {
@@ -1284,6 +1297,28 @@ export class FakeDaemon {
       }
       spec = mergeSpec(proc.spec, body.spec.value);
     } else spec = body.spec.case === 'full' ? body.spec.value : create(NodeSpecSchema);
+    // Go: intent.VerifyDesiredState. A gateway can relay a spec but not forge or alter one (P14).
+    if (this.intentRoots) {
+      const accessChanged = !equals(
+        AccessSectionSchema,
+        spec.access ?? create(AccessSectionSchema),
+        proc.spec?.access ?? create(AccessSectionSchema),
+      );
+      const required = this.options.intent?.signedSpecs === 'always' || accessChanged;
+      try {
+        verifyDesiredState(desired, {
+          roots: this.intentRoots,
+          now: this.serverNow(),
+          nodeId: this.nodeId,
+          required,
+        });
+      } catch (error) {
+        const reason = isComputeError(error) ? String(error.details?.reason ?? error.message) : String(error);
+        this.specRejectionsValue.push({ generation, reason });
+        this.log('spec.bad-signature', { generation, reason });
+        return;
+      }
+    }
     const full = create(DesiredStateBodySchema, {
       nodeId: body.nodeId,
       generation: body.generation,

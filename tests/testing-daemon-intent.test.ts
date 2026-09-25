@@ -5,7 +5,9 @@ import { manualClock } from '@better-compute/core';
 import {
   createCommandSigningAuthority,
   createSigningKey,
+  desiredStateFromStored,
   signTrustBundle,
+  storedDesiredState,
 } from '@better-compute/pki';
 import {
   CommandBodySchema,
@@ -151,6 +153,59 @@ describe('FakeDaemon signed intent', () => {
     cmd = send(h, h.commandBody('node.reboot'), (bytes) => signer.sign(bytes));
     await h.advance(5);
     expect(states(h, cmd.id)).toEqual(['REJECTED:BAD_SIGNATURE']);
+  });
+
+  it('refuses unsigned specs that change access, and forged specs (signed NodeSpecs)', async () => {
+    const h = await daemon();
+    const rogue = createCommandSigner({
+      authority: createCommandSigningAuthority({ clock }),
+      workerId: 'gw',
+      clock,
+    });
+    let generation = h.daemon.appliedGeneration;
+    const sendSpec = (spec: Record<string, unknown>, sign?: (body: Uint8Array) => Uint8Array) => {
+      generation += 1;
+      const { body } = storedDesiredState({ nodeId: 'node_a', generation, spec });
+      h.server.send({ case: 'desired', value: desiredStateFromStored(body, sign ? sign(body) : null) });
+      return generation;
+    };
+    const access = { access: { sshPrincipals: ['root@node_a'] } };
+
+    // No access change: an unsigned spec is still accepted under the default ('access') policy.
+    const plain = sendSpec({});
+    await h.advance(5);
+    expect(h.daemon.appliedGeneration).toBe(plain);
+    // Adding principals without a signature: refused, not applied.
+    const unsignedAccess = sendSpec(access);
+    await h.advance(5);
+    expect(h.daemon.appliedGeneration).toBe(plain);
+    expect(h.daemon.specRejections).toEqual([{ generation: unsignedAccess, reason: 'unsigned' }]);
+    // A worker-signed spec under the trusted root applies.
+    const signedAccess = sendSpec(access, (body) => signer.signDesiredState(body));
+    await h.advance(5);
+    expect(h.daemon.appliedGeneration).toBe(signedAccess);
+    expect(h.daemon.spec?.access?.sshPrincipals).toEqual(['root@node_a']);
+    // A signature that is present is always checked: a rogue root's is refused even without an access change.
+    const forged = sendSpec(access, (body) => rogue.signDesiredState(body));
+    await h.advance(5);
+    expect(h.daemon.appliedGeneration).toBe(signedAccess);
+    expect(h.daemon.specRejections.map((rejection) => rejection.generation)).toContain(forged);
+
+    // signedSpecs 'always' (v0.4): every spec needs a signature.
+    const strict = await daemon({
+      intent: { roots: [authority.certificate], version: 1n, signedSpecs: 'always' },
+    });
+    const before = strict.daemon.appliedGeneration;
+    const { body } = storedDesiredState({ nodeId: 'node_a', generation: before + 1, spec: {} });
+    strict.server.send({ case: 'desired', value: desiredStateFromStored(body, null) });
+    await strict.advance(5);
+    expect(strict.daemon.appliedGeneration).toBe(before);
+    strict.server.send({
+      case: 'desired',
+      value: desiredStateFromStored(body, signer.signDesiredState(body)),
+    });
+    await strict.advance(5);
+    expect(strict.daemon.appliedGeneration).toBe(before + 1);
   });
 
   it('without signed intent configured, behaves as v0.1 (nothing checked)', async () => {
