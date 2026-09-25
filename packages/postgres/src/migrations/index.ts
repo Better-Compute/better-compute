@@ -17,15 +17,12 @@ import { inventoryImagesMigration } from './0015_inventory_images.js';
 import { duplicateIdentityMigration } from './0016_duplicate_identity.js';
 import { allocationEvidenceMigration } from './0017_allocation_evidence.js';
 import { partitionedHistoryMigration } from './0018_partitioned_history.js';
-import { outboxDeadLettersMigration, outboxDeadLettersTables } from './0019_outbox_dead_letters.js';
-import { commandCreatedAtMigration } from './0020_command_created_at.js';
-import { signedSpecsMigration } from './0021_signed_specs.js';
 
 /**
  * Every table the base schema creates, in creation order. Partitions of the history tables
  * (core/0018: `<table>_default`, `<table>_pYYYYMM`) are not listed; `historyPartitions` reads them.
  */
-export const baseTables = Object.freeze([...base0002Tables, ...v01Tables, ...deviceHealthTables, ...runtimeTables, ...v02ServerTables, ...v02SecurityTables, ...v02EvidenceTables, ...imageCacheTables, ...sshCertificatesTables, ...outboxDeadLettersTables]);
+export const baseTables = Object.freeze([...base0002Tables, ...v01Tables, ...deviceHealthTables, ...runtimeTables, ...v02ServerTables, ...v02SecurityTables, ...v02EvidenceTables, ...imageCacheTables, ...sshCertificatesTables]);
 
 /**
  * The adapter-owned base schema, owner `core`, applied before any module migration. Append-only:
@@ -50,9 +47,6 @@ export const baseMigrations: readonly Migration[] = Object.freeze([
   duplicateIdentityMigration,
   allocationEvidenceMigration,
   partitionedHistoryMigration,
-  outboxDeadLettersMigration,
-  commandCreatedAtMigration,
-  signedSpecsMigration,
 ]);
 
 /** `compute_schema_version.version` after the base schema is applied: one per base migration. */

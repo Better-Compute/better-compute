@@ -15,6 +15,7 @@ import {
 } from '@better-compute/core';
 import { eventCatalog, type EventFamily } from './catalog.js';
 import { eventsMigrations } from './migrations.js';
+import { deliveryRetention, pruneWebhookDeliveries, type DeliveryRetention } from './retention.js';
 import type { UrlPolicy } from './safe-url.js';
 import {
   deliverWebhooks,
@@ -98,6 +99,11 @@ export interface EventsModuleOptions extends WebhookSecrets, UrlPolicy {
     DeliverOptions,
     'limit' | 'timeoutMs' | 'maxAttempts' | 'backoffSeconds' | 'resolve'
   >;
+  /**
+   * How long delivery history is kept (the hourly `events.prune` reconciler): delivered and cancelled 30 days,
+   * dead letters 90 by default. `false` keeps everything.
+   */
+  retention?: DeliveryRetention | false;
 }
 
 /** The events module: webhook management, outbox fan-out and signed delivery. */
@@ -194,6 +200,20 @@ export function eventsModule(options: EventsModuleOptions): ComputeModule<'event
       },
     },
   ];
+  if (options.retention !== false) {
+    // Checked here, so a bad setting fails when the module is defined rather than in the first pass.
+    const retention = deliveryRetention(options.retention);
+    const batch = 5_000;
+    reconcilers.push({
+      name: 'events.prune',
+      shardBy: 'none',
+      periodic: [{ key: 'deliveries', every: '1h' }],
+      run: async (context) =>
+        (await pruneWebhookDeliveries(context.sql, retention, batch)) >= batch
+          ? 'SYNC_AGAIN'
+          : 'DONE',
+    });
+  }
 
   const selfCheck = async (
     context: Parameters<NonNullable<ComputeModule['selfCheck']>>[0],

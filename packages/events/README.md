@@ -22,10 +22,11 @@ const compute = betterCompute({ ..., modules: [eventsModule({ secret: process.en
 const watch = (request: Request) => handleWatch(request, { sql, authorize: authorizeWatch });
 ```
 
-The module owns the tables `webhooks`, `webhook_deliveries` and `event_cursors` (migration `events/0001_webhooks`). It runs two reconcilers:
+The module owns the tables `webhooks`, `webhook_deliveries` and `event_cursors` (migrations `events/0001_webhooks` and `events/0002_delivery_retention`). It runs three reconcilers:
 
 - `events.fanout`, every 1 s, turns outbox events into deliveries. Its cursor is anchored when the control plane starts, so nothing committed before the first pass is missed and history is never replayed.
 - `events.deliver`, every 2 s, sends them. A webhook's deliveries go out one at a time in commit order, while different webhooks are served in parallel.
+- `events.prune`, hourly, deletes delivery history past its retention: delivered and cancelled deliveries after 30 days, dead letters after 90 (`eventsModule({ retention: { deliveredDays, deadDays } })`, or `retention: false` to keep everything). Pending deliveries are never deleted.
 
 ## Event catalog
 

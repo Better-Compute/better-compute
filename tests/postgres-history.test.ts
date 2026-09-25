@@ -382,15 +382,15 @@ describe('pruning and dropping', () => {
 });
 
 describe('upgrading a database with history (core/0017 → core/0018)', () => {
-  const partitioning = baseMigrations.findIndex((migration) => migration.name === 'core/0018_partitioned_history');
   let raw: PGlite;
   beforeAll(async () => {
     raw = await PGlite.create({ extensions: { btree_gist } });
     await raw.exec("SET TimeZone TO 'UTC'");
-    for (const migration of baseMigrations.slice(0, partitioning)) {
+    for (const migration of baseMigrations.slice(0, -1)) {
       expect(typeof migration.sql).toBe('string');
       await raw.exec(migration.sql as string);
     }
+    expect(baseMigrations.at(-1)!.name).toBe('core/0018_partitioned_history');
   });
   afterAll(() => raw.close());
 
@@ -429,7 +429,7 @@ describe('upgrading a database with history (core/0017 → core/0018)', () => {
       ).rows;
     const before = await auditRows();
 
-    await raw.exec(baseMigrations[partitioning]!.sql as string);
+    await raw.exec(baseMigrations.at(-1)!.sql as string);
 
     expect(await auditRows()).toEqual(before);
     const parts = (

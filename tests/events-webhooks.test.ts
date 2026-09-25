@@ -19,6 +19,7 @@ import {
   openSecret,
   outboxTail,
   parseCursor,
+  pruneWebhookDeliveries,
   readOutbox,
   sealSecret,
   signatureHeader,
@@ -348,15 +349,65 @@ describe('webhook delivery', () => {
   });
 });
 
+describe('pruneWebhookDeliveries', () => {
+  it('deletes settled deliveries past their retention in batches, never pending ones', async () => {
+    const store = webhookStore({ secret });
+    const { webhook } = await db.transaction((tx) =>
+      store.create(tx, {
+        tenantId: 'ten_a',
+        url: 'https://hooks.example.com/in',
+        events: ['*'],
+      }),
+    );
+    const day = 86_400_000;
+    const rows: [string, string, number][] = [
+      ['d-old', 'delivered', 31 * day],
+      ['d-new', 'delivered', 29 * day],
+      ['c-old', 'cancelled', 40 * day],
+      ['x-old', 'dead', 91 * day],
+      ['x-new', 'dead', 31 * day],
+      ['p-old', 'pending', 400 * day],
+    ];
+    for (const [id, state, age] of rows)
+      await db.query(
+        `INSERT INTO webhook_deliveries (id, webhook_id, tenant_id, event_id, event_type, body, state, created_at)
+         VALUES ($1, $2, 'ten_a', $1, 'node.connected', '{}', $3, compute_now() - make_interval(secs => $4::float8 / 1000))`,
+        [id, webhook.id, state, age],
+      );
+    const ids = async () =>
+      (await db.query<{ id: string }>('SELECT id FROM webhook_deliveries ORDER BY id')).rows.map(
+        (row) => row.id,
+      );
+    expect(await pruneWebhookDeliveries(db, {}, 2)).toBe(2);
+    expect(await pruneWebhookDeliveries(db, {}, 2)).toBe(1);
+    expect(await pruneWebhookDeliveries(db)).toBe(0);
+    expect(await ids()).toEqual(['d-new', 'p-old', 'x-new']);
+    // Shorter periods reach the rest, except the pending delivery.
+    expect(await pruneWebhookDeliveries(db, { deliveredDays: 1, deadDays: 1 })).toBe(2);
+    expect(await ids()).toEqual(['p-old']);
+    await expect(pruneWebhookDeliveries(db, { deliveredDays: 0.5 })).rejects.toMatchObject({
+      code: 'INVALID_CONFIG',
+    });
+  });
+});
+
 describe('eventsModule', () => {
   it('declares the §9.2 webhooks group on compute-tenant/{t} and validates input strictly', async () => {
     const module = eventsModule({ secret });
     expect(module.name).toBe('events');
-    expect(module.migrations?.map((migration) => migration.name)).toEqual(['events/0001_webhooks']);
+    expect(module.migrations?.map((migration) => migration.name)).toEqual([
+      'events/0001_webhooks',
+      'events/0002_delivery_retention',
+    ]);
     expect(module.reconcilers?.map((reconciler) => reconciler.name)).toEqual([
       'events.fanout',
       'events.deliver',
+      'events.prune',
     ]);
+    expect(
+      eventsModule({ secret, retention: false }).reconcilers?.map((reconciler) => reconciler.name),
+    ).toEqual(['events.fanout', 'events.deliver']);
+    expect(() => eventsModule({ secret, retention: { deadDays: 0 } })).toThrow(/deadDays/);
     const api = module.api!({} as never).webhooks;
     for (const name of [
       'create',

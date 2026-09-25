@@ -55,4 +55,13 @@ CREATE TABLE event_cursors (
 `,
 };
 
-export const eventsMigrations: readonly Migration[] = [webhooksMigration];
+/** The index the `events.prune` retention pass deletes by: settled deliveries by state and age. */
+export const deliveryRetentionMigration: Migration = {
+  name: 'events/0002_delivery_retention',
+  sql: `CREATE INDEX webhook_deliveries_settled ON webhook_deliveries (state, created_at) WHERE state <> 'pending';`,
+};
+
+export const eventsMigrations: readonly Migration[] = [
+  webhooksMigration,
+  deliveryRetentionMigration,
+];

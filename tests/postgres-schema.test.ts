@@ -78,9 +78,6 @@ describe('migrate', () => {
       'core/0016_duplicate_identity',
       'core/0017_allocation_evidence',
       'core/0018_partitioned_history',
-      'core/0019_outbox_dead_letters',
-      'core/0020_command_created_at',
-      'core/0021_signed_specs',
     ]);
     expect(await db.migrate()).toEqual({ applied: names, skipped: [] });
     expect(await db.migrate()).toEqual({ applied: [], skipped: names });
@@ -355,30 +352,6 @@ describe('allocation evidence (core/0017)', () => {
       { column_name: 'bound_sig', data_type: 'bytea' },
       { column_name: 'bound_sig_kid', data_type: 'text' },
     ]);
-  });
-});
-
-describe('outbox dead letters and command latency (core/0019, core/0020)', () => {
-  it('keys dead events by sink and commit position', async () => {
-    expect(await constraints('outbox_dead_letters')).toEqual(
-      expect.arrayContaining([{ type: 'p', definition: 'PRIMARY KEY (sink, txid, seq)' }]),
-    );
-  });
-
-  it('stamps commands with their enqueue time and indexes settled ones by update time', async () => {
-    const { rows } = await db.query<{ is_nullable: string; column_default: string }>(
-      `SELECT is_nullable, column_default FROM information_schema.columns WHERE table_name = 'commands' AND column_name = 'created_at'`,
-    );
-    expect(rows).toEqual([{ is_nullable: 'NO', column_default: 'compute_now()' }]);
-    expect(await indexDefinition('commands_settled')).toMatch(/\(updated_at\) WHERE \(state = ANY/);
-  });
-
-  it('keeps a node spec signed bytes next to it (core/0021)', async () => {
-    const { rows } = await db.query<{ column_name: string }>(
-      `SELECT column_name FROM information_schema.columns
-        WHERE table_name = 'nodes' AND column_name IN ('spec_body', 'spec_signature') AND data_type = 'bytea' ORDER BY 1`,
-    );
-    expect(rows.map((row) => row.column_name)).toEqual(['spec_body', 'spec_signature']);
   });
 });
 

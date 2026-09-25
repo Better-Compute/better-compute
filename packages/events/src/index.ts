@@ -11,4 +11,5 @@ export * from './migrations.js';
 export * from './catalog.js';
 export * from './webhooks.js';
 export * from './watch.js';
+export * from './retention.js';
 export * from './module.js';
