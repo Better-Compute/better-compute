@@ -134,6 +134,7 @@ with cgo through `zig cc`. `daemon/bin/` and `daemon/dist/` are gitignored.
 | `bcd site` | `-config` | the site agent: `bmc.*` over Redfish, `site.httpProxy`, and with `[boot]` the iPXE boot server, image cache, proxyDHCP and TFTP |
 | `bcd ramdisk` | `-cmdline`, `-data-dir` | inside the PXE ramdisk: joins from the `bc.*` boot parameters; inspect, diag, wipe, image stream, kexec |
 | `bcd sim` | `-nodes`, `-seed`, `-config` | fakehw builds only: N simulated daemons in one process |
+| `bcd helper` | `-config` | as root beside an unprivileged `bcd node`: typed privileged operations on `[helper] socket` |
 | `bcd update` | `-config`, `-clear-failed` | shows the self-update slots, release floor, a pending update and failed versions; `-clear-failed` lets a failed version be tried again |
 | `bcd status` | `-socket`, `-json` | asks the running agent over its unix socket |
 | `bcd doctor` | `-config` | checks the config (and its file mode), NVML and hardware collection |
@@ -160,7 +161,8 @@ strings, integers and booleans. Unknown keys, duplicate keys and wrong types are
 | `[journal] max_bytes`, `max_events` | 64 MiB, 10 000 (the file may lower these caps, never raise them) |
 | `[log] level`, `json` | `info`, `true` |
 | `approver_set_sha256` | unset; the hex SHA-256 of the approver set a keyless daemon may take first (review 7 M2) |
-| `[update] release_pins`, `release_threshold`, `release_sequence`, `entrypoint` | no pins (self-update refused), 1, 0, `/usr/local/bin/bcd` |
+| `[update] release_pins`, `release_threshold`, `release_sequence`, `entrypoint`, `slots_dir` | no pins (self-update refused), 1, 0, `/usr/local/bin/bcd`, `<data_dir>/bin` (under bcd helper `/usr/local/lib/bcd`) |
+| `[helper] socket`, `user` | unset; with both, `bcd node` runs as `user` and `bcd helper` (root) does its privileged work |
 | `[site] bmc_networks` | unset; CIDRs `site.httpProxy` never reaches |
 | `[websocket] url`, `proxy_ca_file`, `audience` | unset (gRPC only); a `wss://` URL moves the session and renewals to the WebSocket fallback |
 | `[plugins] dir`, `user`, `privileged`, `sandbox`, `cgroup`, `memory_max`, `pids_max` | no plugins; per-plugin uids, none, `true` |
@@ -253,6 +255,15 @@ length-prefixed frames). bcd proves itself with an ES256 proof JWT (`x5c` = its 
 pinned serving CA; `proxy_ca_file` is trusted for TLS only. Renewals go to `POST /v1/renew` on the
 same listener. WS mode needs command-signing roots (the gateway sends it signed intent only) and has
 no tunnels.
+
+**Privilege separation** (`internal/helper`, `cmd/bcd/helper.go`). With `[helper]`, `bcd node` runs
+unprivileged and asks `bcd helper` (root) over a unix socket for: files named by kind and id
+(CDI specs, allocation env files, the SSH drop-in, CA, principals and KRL), reboots, resets of the
+host's own GPUs, bcd's nftables table, sshd reloads, and self-update (`update.*`: the node
+downloads; the helper verifies the manifest with its own pins and floor, re-hashes the staged
+binary into root's slots, swaps, and swaps back on its own deadline). Peers are checked by
+SO_PEERCRED and `/proc/<pid>/exe`; requests are versioned, strictly decoded JSON; every operation
+is logged. The socket's directory must be root's and closed to others.
 
 **Server time** (`agent/conn.go`). The daemon keeps a high-water mark of server time, advanced by
 every Welcome and heartbeat and mirrored in `identity.json`. A Welcome more than 5 minutes behind it
