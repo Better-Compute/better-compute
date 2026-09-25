@@ -248,6 +248,11 @@ export interface ControlPlaneSimOptions
    * within a tick or two; raise this to model that (e.g. 10 ≈ one worker draining ten 32-key batches a second).
    */
   workerPasses?: number;
+  /**
+   * Per gateway slot, how far that gateway's own clock is off (ms; positive = ahead): §15 I4 "no liveness false
+   * positives, including under gateway clock skew". The database's compute_now() and the daemons stay on sim time.
+   */
+  gatewayClockSkewMs?: readonly number[];
   /** Extra gateway options (e.g. lease timings). */
   gateway?: Partial<
     Omit<
@@ -589,7 +594,11 @@ export async function createControlPlaneSim(
     const nodes: { nodeId: string; hardware: FakeHardware }[] = [];
     const serials = new Map<string, string>();
     const nodeKeys = new Map<string, KeyObject>();
-    const joinOne = async (token: string, hardware: FakeHardware, attestor?: string): Promise<string> => {
+    const joinOne = async (
+      token: string,
+      hardware: FakeHardware,
+      attestor?: string,
+    ): Promise<string> => {
       const { privateKey } = generateP256KeyPair();
       const csr = createCsr(privateKey);
       const sealed = sealJoinToken(token, encryption.publicKey, {
@@ -622,14 +631,19 @@ export async function createControlPlaneSim(
           seed: `${options.seed}-${index}`,
           ...(options.variant ? { variant: options.variant } : {}),
         });
-        const nodeId = await joinOne(minted.token!, hardware, index >= restrictedFrom ? 'sim-restricted' : undefined);
+        const nodeId = await joinOne(
+          minted.token!,
+          hardware,
+          index >= restrictedFrom ? 'sim-restricted' : undefined,
+        );
         nodes.push({ nodeId, hardware });
       }
     });
 
     // More pools on the site, each with its own join token and nodes (after the main pool's).
     const pools: { poolId: string; class: string; nodeIds: string[] }[] = [];
-    const extraNodes: { nodeId: string; hardware: FakeHardware; daemon?: FleetDaemonOptions }[] = [];
+    const extraNodes: { nodeId: string; hardware: FakeHardware; daemon?: FleetDaemonOptions }[] =
+      [];
     for (const [poolIndex, extra] of (options.extraPools ?? []).entries()) {
       const created = await api(() =>
         compute.api.pools.create(root, {
@@ -681,6 +695,10 @@ export async function createControlPlaneSim(
       dbCut: false,
       generation: 0,
     }));
+    const skewedClock = (index: number) => {
+      const skew = options.gatewayClockSkewMs?.[index] ?? 0;
+      return skew === 0 ? clock : { now: () => now() + skew };
+    };
     const slotGateway = async (slot: GatewaySlot): Promise<Gateway> => {
       if (slot.gateway) return slot.gateway;
       slot.starting ??= (async () => {
@@ -688,7 +706,7 @@ export async function createControlPlaneSim(
           id: `gw_sim_${slot.index + 1}_${++slot.generation}`,
           region: 'sim',
           database: faulty(database, () => databaseDown || slot.dbCut),
-          clock,
+          clock: skewedClock(slot.index),
           manual: true,
           services: compute.gatewayServices,
           work: compute.context.work,
@@ -696,7 +714,9 @@ export async function createControlPlaneSim(
           // As `serve` composes them: node XIDs feed §10.1 health (conditions, NoSchedule, the health reconciler).
           reports: {
             ...gatewayReportHandlers,
-            status: options.statusHandlers?.length ? [xidStatusHandler, ...options.statusHandlers] : xidStatusHandler,
+            status: options.statusHandlers?.length
+              ? [xidStatusHandler, ...options.statusHandlers]
+              : xidStatusHandler,
           },
           revocations,
           ...options.gateway,
@@ -724,6 +744,7 @@ export async function createControlPlaneSim(
       modules: _modules,
       gateway: _gateway,
       workerPasses: _workerPasses,
+      gatewayClockSkewMs: _gatewayClockSkewMs,
       extraPools: _extraPools,
       statusHandlers: _statusHandlers,
       ...fleetOptions
