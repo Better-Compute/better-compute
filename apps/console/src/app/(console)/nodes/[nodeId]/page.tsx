@@ -6,6 +6,7 @@ import { createDetail } from '@better-compute/console-kit';
 import { useDetail } from '@better-compute/console-kit/react';
 import { useConsole, useDetailEvents } from '@/components/console-provider';
 import { DetailActions } from '@/components/detail-actions';
+import { NodeCommands } from '@/components/node-commands';
 import { SshCertPanel } from '@/components/ssh-cert-panel';
 import { Loading } from '@/components/ui';
 
@@ -86,6 +87,7 @@ export default function NodePage({ params }: { params: Promise<{ nodeId: string 
             </section>
             {/* Break-glass shells are a platform operation (compute:nodes:ssh-root; IAM still decides). */}
             {root && <SshCertPanel nodeId={nodeId} />}
+            <NodeCommands nodeId={nodeId} />
           </>
         )}
       </Loading>
