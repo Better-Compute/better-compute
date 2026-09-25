@@ -2,6 +2,8 @@ import { access, writeFile } from 'node:fs/promises';
 import type { Finding } from '@better-compute/core';
 import { CliError, usageError } from '../errors.js';
 import { defineCommand } from '../framework.js';
+import { resolveHost } from '../host/config.js';
+import { hostFindings } from '../host/findings.js';
 import { isUnconfiguredIam } from '../iam.js';
 import { defaultPkiPath, pkiFindings, pkiFlag } from './pki.js';
 
@@ -112,7 +114,7 @@ export const setupCommands = [
     group: 'Setup',
     summary: 'Check the database, schema, clock, method registry and IAM wiring',
     description:
-      "doctor runs compute.selfCheck() (applied migrations, btree_gist, compute_now() against the database clock, the method → action registry, and each module's own checks) and adds the CLI's findings, such as a deployment with no IAM configured. It only reads. --strict exits non-zero (DOCTOR_FINDINGS) when any error or warning is found.",
+      "doctor runs compute.selfCheck() (applied migrations, btree_gist, compute_now() against the database clock, the method → action registry, and each module's own checks) and adds the CLI's findings, such as a deployment with no IAM configured, the PKI bundle, and the configuration's host export (whether the gateway role can authenticate daemons by node certificate, reach the api's pokes, tunnels and revocations, and whether host routes fit beside the API). It only reads. --strict exits non-zero (DOCTOR_FINDINGS) when any error or warning is found.",
     target: 'config',
     flags: {
       strict: { type: 'boolean', description: 'Exit non-zero when any error or warning is found' },
@@ -122,12 +124,14 @@ export const setupCommands = [
       'better-compute doctor',
       'better-compute doctor --strict --query "findings[].check"',
     ],
-    async run({ deployment, flags, print, path, env }) {
+    async run({ deployment, configModule, flags, print, path, env, cwd }) {
       const { compute, options, source } = await deployment();
       const check = await compute.selfCheck();
       const findings = [...check.findings];
       if (isUnconfiguredIam(options.iam)) findings.push(noIamFinding);
       findings.push(...(await pkiFindings(path(flags.pki ?? defaultPkiPath), env)));
+      const host = await resolveHost((await configModule()).host, { compute, options, env, cwd });
+      findings.push(...hostFindings(compute, options, host));
       print({
         node: process.versions.node,
         config: source,

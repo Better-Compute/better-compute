@@ -96,6 +96,7 @@ export {
   type RunningGateway,
 } from './host/gateway.js';
 export { joinKeysWellKnown } from './host/well-known.js';
+export { hostFindings } from './host/findings.js';
 export {
   parseRoles,
   runServer,

@@ -1,0 +1,75 @@
+import type { Finding } from '@better-compute/core';
+import type { AnyCompute, AnyComputeOptions } from '../config.js';
+import type { HostConfig } from './config.js';
+import { gatewayIdentity } from './gateway.js';
+import { checkHostRoutes } from './http.js';
+
+/**
+ * What `better-compute doctor` reports about the configuration's `host` export (only reads): whether the
+ * gateway role can authenticate daemons, whether the api can reach gateways (pokes, tunnels, revocations),
+ * and whether the host routes fit beside the API.
+ */
+export function hostFindings(
+  compute: AnyCompute,
+  options: AnyComputeOptions,
+  host: HostConfig,
+): Finding[] {
+  const findings: Finding[] = [];
+  const routes = host.http?.routes ?? [];
+  try {
+    checkHostRoutes(routes, compute.endpoint.basePath);
+  } catch (error) {
+    findings.push({
+      check: 'host.routes',
+      severity: 'error',
+      message: (error as Error).message,
+      fix: 'Give host.http.routes absolute paths outside the API base path and the built-ins',
+    });
+  }
+  const gateway = host.gateway;
+  if (!gateway) return findings;
+  try {
+    const identity = gatewayIdentity(options, gateway);
+    if (!identity.revocations)
+      findings.push({
+        check: 'host.gateway.revocations',
+        severity: 'warning',
+        message:
+          'The gateway role has no revocation set: revoked node certificates are only refused once they expire',
+        fix: 'Use the PKI bundle node CA as pki.nodeCa (it carries its revocations), or set host.gateway.identity.revocations',
+      });
+  } catch (error) {
+    findings.push({
+      check: 'host.gateway.identity',
+      severity: 'error',
+      message: (error as Error).message,
+      fix: 'better-compute pki init, then pki: { nodeCa: bundle.nodeCa, join: pkiJoinCrypto({ … }) } in the configuration',
+    });
+  }
+  if (!gateway.internal)
+    findings.push({
+      check: 'host.gateway.internal',
+      severity: 'warning',
+      message:
+        'The gateway serves no internal control API: api processes elsewhere cannot poke it, open tunnels or push revocations to it',
+      fix: 'Set host.gateway.internal { url, tls } from the internal CA (fine for a single all-in-one process)',
+    });
+  else if (!options.notifier)
+    findings.push({
+      check: 'host.gateway.notifier',
+      severity: 'warning',
+      message:
+        'No notifier: after an enqueue the api does not wake the owning gateway, so dispatch waits for its 1 s loop',
+      fix: 'notifier: gatewayNotifier({ sql: database, tls }) from @better-compute/gateway',
+    });
+  const tunnels = (options as { tunnels?: unknown }).tunnels;
+  if (tunnels && !gateway.internal)
+    findings.push({
+      check: 'host.gateway.tunnels',
+      severity: 'error',
+      message:
+        'Tunnels are configured, but the gateway has no internal control API to open them on',
+      fix: 'Set host.gateway.internal { url, tls }',
+    });
+  return findings;
+}

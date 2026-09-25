@@ -5,7 +5,13 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
-import { createCli, gatewayIdentity, gatewayOptions, type CliIO } from '@better-compute/cli';
+import {
+  createCli,
+  gatewayIdentity,
+  gatewayOptions,
+  hostFindings,
+  type CliIO,
+} from '@better-compute/cli';
 import { AGENT_GATEWAY_SERVICE, frameMessage, MessageDecoder } from '@better-compute/gateway';
 import { createEmbeddedTestIam, type EmbeddedTestIam } from '@better-compute/iam/testing';
 import {
@@ -281,6 +287,39 @@ describe('serve composition audit', () => {
         },
       ),
     ).toMatchObject({ revocations });
+  });
+
+  it('doctor reports host wiring problems', () => {
+    const compute = { endpoint: { basePath: '/api/compute' } } as any;
+    const checks = (options: any, host: any) =>
+      hostFindings(compute, options, host).map((finding) => `${finding.severity} ${finding.check}`);
+    expect(checks({}, {})).toEqual([]);
+    const handler = () => new Response();
+    expect(checks({}, { http: { routes: [{ path: '/api/compute/x', handler }] } })).toEqual([
+      'error host.routes',
+    ]);
+    const gateway = { region: 'eu-1', tls: {} };
+    // No node CA: the role would refuse to start; no internal API: other processes cannot reach it.
+    expect(checks({}, { gateway })).toEqual([
+      'error host.gateway.identity',
+      'warning host.gateway.internal',
+    ]);
+    const pki = {
+      nodeCa: { certificate: new Uint8Array([1]) },
+      join: { trustDomain: 'td.test' },
+    };
+    expect(checks({ pki, tunnels: { issuer: {} } }, { gateway: { ...gateway } })).toEqual([
+      'warning host.gateway.revocations',
+      'warning host.gateway.internal',
+      'error host.gateway.tunnels',
+    ]);
+    const revocations = { has: () => false, subscribe: () => () => undefined };
+    expect(
+      checks(
+        { pki: { ...pki, nodeCa: { ...pki.nodeCa, revocations } } },
+        { gateway: { ...gateway, internal: { url: 'https://gw', tls: {} } } },
+      ),
+    ).toEqual(['warning host.gateway.notifier']);
   });
 
   // ([37c0ab]) createModuleContext sets no ctx.workflows yet, so metal verbs fail under betterCompute().
