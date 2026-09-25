@@ -163,6 +163,20 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     description: 'VPS instance lifecycle',
   },
   {
+    type: 'sandbox.*',
+    subject: 'sandbox/{id}',
+    module: 'vps',
+    description:
+      'Sandbox lifecycle (§3.7): created, ready (its instance first runs), extended, expired (before the delete), deleted; data { templateId, instanceId, poolId }',
+  },
+  {
+    type: 'sandbox.snapshot.*',
+    subject: 'sandbox/{id}',
+    module: 'vps',
+    description:
+      'A sandbox snapshot settled: ready { snapshotId, includeMemory, sha256, sizeBytes } or failed { snapshotId, reason }',
+  },
+  {
     type: 'fleet.*',
     subject: 'fleet/{id}',
     module: 'fleet',
