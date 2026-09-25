@@ -312,6 +312,7 @@ interface RawInstance {
   restore_from: InstanceRestore | string | null;
   host_certified: boolean | null;
   host_cert_valid_ms: number | null;
+  network_policy: 'private' | 'none' | null;
 }
 
 /** The sandbox snapshot an instance boots from (§3.7), verified by the host against `sha256`. */
@@ -332,6 +333,12 @@ export interface InstanceRestore {
   hostCertified?: boolean;
   hostCertValidBefore?: number;
 }
+
+/**
+ * The label the gateway writes for a bcd that enforces `InstanceSpec.network_policy` (Hello capability
+ * `instance.network-policy`): an older bcd would drop the field and give the instance full egress.
+ */
+export const networkPolicyCapabilityLabel = 'bc.dev/cap.instance.network-policy';
 
 /**
  * The node label a memory snapshot's host must carry: the CPU model the state was captured on, as
@@ -398,6 +405,8 @@ export interface InstanceRow {
   hostCertified: boolean;
   /** Until when that certificate is valid (epoch ms). */
   hostCertValidBefore?: number;
+  /** A sandbox template's network (§3.7); absent: egress. */
+  networkPolicy?: 'private' | 'none';
 }
 
 const json = <T>(value: T | string): T =>
@@ -443,6 +452,8 @@ function toRow(raw: RawInstance): InstanceRow {
   if (raw.sandbox_id !== null) row.sandboxId = raw.sandbox_id;
   if (raw.warm_template_id !== null) row.warmTemplateId = raw.warm_template_id;
   if (raw.restore_from !== null) row.restoreFrom = json(raw.restore_from);
+  if (raw.network_policy !== null && raw.network_policy !== undefined)
+    row.networkPolicy = raw.network_policy;
   return row;
 }
 
@@ -452,7 +463,7 @@ const columns = `i.id, i.tenant_id, i.pool_id, i.project_id, i.flavor_id, i.flav
   i.owner_identity_id, i.agent_id, i.delegation_id, i.idempotency_key,
   encode(i.request_hash, 'hex') AS request_hash, i.conditions, i.version, p.class AS pool_class,
   i.sandbox_id, i.warm_template_id, i.restore_from, i.host_certified,
-  (extract(epoch FROM i.host_cert_valid_before) * 1000)::float8 AS host_cert_valid_ms`;
+  (extract(epoch FROM i.host_cert_valid_before) * 1000)::float8 AS host_cert_valid_ms, i.network_policy`;
 
 export async function readInstance(
   tx: SqlTx,
@@ -948,6 +959,8 @@ export async function scheduleHosted(
     ...(row.restoreFrom?.includeMemory && row.restoreFrom.cpuModel
       ? { [cpuModelLabel]: row.restoreFrom.cpuModel }
       : {}),
+    // A private or none network lands only where the host enforces it.
+    ...(row.networkPolicy ? { [networkPolicyCapabilityLabel]: '*' } : {}),
   };
   const outcome = await deps.capacity.reserve(
     tx,

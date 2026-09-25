@@ -417,10 +417,12 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         undefined,
         { reason: 'credential-required' },
       );
+    // The deployment's own prefix (betterCompute() sets it), else vps({ typePrefix }).
+    const prefix = context.typePrefix ?? typePrefix;
     await context.iam.require(context.credential, {
       tenantId,
       action: 'compute:secrets:manage',
-      resource: { type: `${typePrefix}tenant`, id: tenantId },
+      resource: { type: `${prefix}tenant`, id: tenantId },
     });
     // Fleet secrets (BMC credentials of shared sites) live in the root tenant too, with nothing in
     // `secret_refs` telling them apart: there, naming any secret takes the fleet's own decision.
@@ -428,7 +430,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       await context.iam.require(context.credential, {
         tenantId,
         action: 'compute:secrets:manage',
-        resource: { type: `${typePrefix}fleet`, id: fleetResourceId },
+        resource: { type: `${prefix}fleet`, id: fleetResourceId },
       });
   };
   /**

@@ -1281,7 +1281,15 @@ describe('template network and versions', () => {
     const open = await createTemplate({ name: 'open' });
     expect(closed).toMatchObject({ network: 'none' });
     expect(open).toMatchObject({ network: 'egress' });
+    // A host whose bcd cannot enforce the policy never gets the sandbox (an old bcd would drop it).
+    const stuck = await createSandbox(closed.id, { idempotencyKey: 'no-capable-host' });
+    expect(stuck).toMatchObject({ state: 'starting', instanceState: 'scheduling' });
+    await db.query(
+      `INSERT INTO node_labels (node_id, key, value, source)
+       SELECT id, 'bc.dev/cap.instance.network-policy', '1', 'system' FROM nodes`,
+    );
     const a = await createSandbox(closed.id, { idempotencyKey: 'a' });
+    expect(a.instanceState).toBe('provisioning');
     const b = await createSandbox(open.id, { idempotencyKey: 'b' });
     const specs = await db.transaction(async (tx) => [
       ...(await instanceSpecs(tx, 'node_01jz00000000000000000000va')),
