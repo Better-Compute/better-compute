@@ -58,7 +58,15 @@ export interface ExecTicketClaims {
    */
   agt?: string;
   dlg?: string;
+  /**
+   * The sandbox whose instance (`inst`) the ticket opens (`sandboxes.exec`, §3.7): re-authorization
+   * decides `act` on the sandbox. Never without `inst`.
+   */
+  sbx?: string;
 }
+
+/** `sbx`: a sandbox id. */
+const sandboxIdPattern = /^sbx_[0-9a-hjkmnp-tv-z]{26,52}$/;
 
 export interface IssueExecTicketInput {
   nodeId: string;
@@ -75,6 +83,8 @@ export interface IssueExecTicketInput {
   /** The agent acting for the subject (`agt`) and its delegation (`dlg`). */
   agentId?: string;
   delegationId?: string;
+  /** The sandbox the instance belongs to (`sbx`); requires `instanceId`. */
+  sandboxId?: string;
   /** Default and maximum 60. */
   ttlSeconds?: number;
 }
@@ -144,6 +154,14 @@ export function createExecTicketIssuer(options: {
           'INVALID_INPUT',
           'An exec ticket names a node, a stream and a subject',
         );
+      if (
+        input.sandboxId !== undefined &&
+        (input.instanceId === undefined || !sandboxIdPattern.test(input.sandboxId))
+      )
+        throw new ComputeError(
+          'INVALID_INPUT',
+          'A sandbox exec ticket names a sandbox id and its instance',
+        );
       const now = Math.floor(clock.now() / 1000);
       const claims: ExecTicketClaims = {
         iss: options.issuer,
@@ -161,6 +179,7 @@ export function createExecTicketIssuer(options: {
         ...(input.action !== undefined ? { act: input.action } : {}),
         ...(input.agentId !== undefined ? { agt: input.agentId } : {}),
         ...(input.delegationId !== undefined ? { dlg: input.delegationId } : {}),
+        ...(input.sandboxId !== undefined ? { sbx: input.sandboxId } : {}),
       };
       const current = keys[0]!;
       const signingInput = `${encode({ alg: 'ES256', typ: execTicketType, kid: current.kid })}.${encode(claims)}`;
@@ -268,6 +287,15 @@ export function verifyExecTicket(
     !claims.jti ||
     typeof claims.sid !== 'string' ||
     !claims.sid
+  )
+    throw deny('malformed');
+  // A sandbox ticket always names its instance too.
+  if (
+    claims.sbx !== undefined &&
+    (typeof claims.sbx !== 'string' ||
+      !sandboxIdPattern.test(claims.sbx) ||
+      typeof claims.inst !== 'string' ||
+      !claims.inst)
   )
     throw deny('malformed');
   if (!options.jtiCache.add(claims.jti, claims.exp * 1000 + leeway, options.now))

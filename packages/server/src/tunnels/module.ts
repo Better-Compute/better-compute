@@ -15,6 +15,7 @@ import {
   type SshCertificateAuthority,
   type TunnelOp,
 } from '@better-compute/pki';
+import { sandboxExecMethod, type SandboxExec, type SandboxExecInput } from './sandbox-exec.js';
 
 // Tunnels, the API half (PLAN.md §7.6, §13 "Interactive access", v0.3). `tunnels.open` decides the
 // caller (`compute:instances:exec` on the instance; `compute:nodes:console` on a node once the
@@ -35,6 +36,14 @@ export interface TunnelsOptions {
   ssh?: SshCertificateAuthority;
   /** Require an MFA session for `nodes.issueSshCert` (default true, §13). */
   sshRequiresMfa?: boolean;
+  /**
+   * The sandbox SSH CA (§3.7), separate from the break-glass one: `sandboxes.exec` signs short
+   * certificates for `<sandboxAccount>@<instanceId>`; vps renders its public key into sandbox
+   * instances (`vps({ sandboxExec })`). Without it `sandboxes.exec` is `UNSUPPORTED`.
+   */
+  sandboxSsh?: SshCertificateAuthority;
+  /** The guest account sandbox certificates log in as (default `sandbox`, as vps's). */
+  sandboxAccount?: string;
   /**
    * The Unix accounts break-glass certificates may log in as (default `['root']`). A certificate's
    * principal is `<account>@<nodeId>` and each node accepts only its own (`access.sshPrincipals`),
@@ -182,13 +191,19 @@ export type TunnelsApi = {
   nodes: {
     issueSshCert: MethodDefinition<IssueSshCertInput, IssuedSshCert>;
     revokeSshCert: MethodDefinition<RevokeSshCertInput, RevokedSshCert>;
-    listSshCerts: MethodDefinition<ListSshCertsInput, { items: SshCertRecord[]; nextCursor?: string }>;
+    listSshCerts: MethodDefinition<
+      ListSshCertsInput,
+      { items: SshCertRecord[]; nextCursor?: string }
+    >;
   };
+  /** Contributed to vps's `sandboxes` group (§3.7). */
+  sandboxes: { exec: MethodDefinition<SandboxExecInput, SandboxExec> };
 };
 
 /** The page cursor: newest first by issuance, the serial breaking ties. */
 const certCursor = {
-  encode: (issuedAt: number, serial: string) => Buffer.from(`${issuedAt}:${serial}`).toString('base64url'),
+  encode: (issuedAt: number, serial: string) =>
+    Buffer.from(`${issuedAt}:${serial}`).toString('base64url'),
   decode(cursor: string): { issuedAt: number; serial: string } {
     const match = /^(\d{1,16}):(\d{1,20})$/.exec(Buffer.from(cursor, 'base64url').toString('utf8'));
     if (!match) invalid('cursor is invalid');
@@ -221,7 +236,9 @@ export function parseListSshCerts(raw: unknown): ListSshCertsInput {
   return {
     tenantId: input.tenantId,
     nodeId: input.nodeId,
-    ...(input.includeExpired !== undefined ? { includeExpired: input.includeExpired as boolean } : {}),
+    ...(input.includeExpired !== undefined
+      ? { includeExpired: input.includeExpired as boolean }
+      : {}),
     ...(input.limit !== undefined ? { limit: input.limit as number } : {}),
     ...(input.cursor !== undefined ? { cursor: input.cursor as string } : {}),
   };
@@ -304,11 +321,17 @@ const inputSchemas = {
         type: 'string',
         pattern: idPattern('inst').source,
         maxLength: 57,
-        description: 'Exec, ssh or tcp into this instance; give exactly one of instanceId or nodeId',
+        description:
+          'Exec, ssh or tcp into this instance; give exactly one of instanceId or nodeId',
       },
       nodeId: { ...nodeIdSchema, description: 'The console of this node' },
       op: { enum: [...ops], description: 'console for a node; exec, ssh or tcp for an instance' },
-      port: { type: 'integer', minimum: 1, maximum: 65535, description: 'tcp only: the port to reach' },
+      port: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 65535,
+        description: 'tcp only: the port to reach',
+      },
     },
     ['tenantId', 'op'],
   ),
@@ -488,7 +511,19 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
     );
   // Every node writes this line into sshd's TrustedUserCAKeys: a line break would smuggle in a second CA.
   if (options.ssh && !/^[\x20-\x7e]+$/.test(options.ssh.publicKey))
-    throw new ComputeError('INVALID_CONFIG', 'The SSH CA public key must be a single printable line');
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'The SSH CA public key must be a single printable line',
+    );
+  // Every sandbox writes this one into its sshd config the same way.
+  if (options.sandboxSsh && !/^[\x20-\x7e]+$/.test(options.sandboxSsh.publicKey))
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'The sandbox SSH CA public key must be a single printable line',
+    );
+  const sandboxAccount = options.sandboxAccount ?? 'sandbox';
+  if (!accountPattern.test(sandboxAccount))
+    throw new ComputeError('INVALID_CONFIG', 'tunnels.sandboxAccount must be a Unix account name');
   const sshAccounts = [...(options.sshAccounts ?? ['root'])];
   const typePrefix = options.typePrefix ?? 'compute-';
   if (!sshAccounts.length || sshAccounts.some((account) => !accountPattern.test(account)))
@@ -500,6 +535,16 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
     'break-glass certificates',
   );
   const api = (): TunnelsApi => ({
+    sandboxes: {
+      exec: sandboxExecMethod({
+        issuer: options.issuer,
+        ...(options.sandboxSsh ? { ca: options.sandboxSsh } : {}),
+        account: sandboxAccount,
+        checkReachable,
+        limitTunnels,
+        instanceDialCapability,
+      }),
+    },
     tunnels: {
       open: defineMethod<OpenTunnelInput, OpenedTunnel>({
         action: 'compute:instances:exec',
@@ -518,7 +563,9 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
           }
           // Instance tcp/ssh reach a port on the instance: only a daemon that dials the instance's own address.
           const needs =
-            input.instanceId && (input.op === 'tcp' || input.op === 'ssh') ? instanceDialCapability : undefined;
+            input.instanceId && (input.op === 'tcp' || input.op === 'ssh')
+              ? instanceDialCapability
+              : undefined;
           await checkReachable(tx, nodeId, needs);
           limitTunnels(caller.identityId, context.clock.now());
           const tunnelId = newId('tun');
@@ -722,7 +769,10 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
       }),
       // Who holds (or held) break-glass access to a node, for the tenant that issued it: audit information, the same
       // the node's events already show, so it is decided as compute:nodes:read. Never the certificate itself.
-      listSshCerts: defineMethod<ListSshCertsInput, { items: SshCertRecord[]; nextCursor?: string }>({
+      listSshCerts: defineMethod<
+        ListSshCertsInput,
+        { items: SshCertRecord[]; nextCursor?: string }
+      >({
         action: 'compute:nodes:read',
         kind: 'read',
         resource: (input) => ({ type: 'node', id: input.nodeId }),
@@ -783,7 +833,9 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
           const last = items.at(-1);
           return {
             items,
-            ...(rows.length > limit && last ? { nextCursor: certCursor.encode(last.issuedAt, last.serial) } : {}),
+            ...(rows.length > limit && last
+              ? { nextCursor: certCursor.encode(last.issuedAt, last.serial) }
+              : {}),
           };
         },
       }),
@@ -863,9 +915,10 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
               });
             });
           const stamp = (serial: string) =>
-            context.sql.query('UPDATE ssh_certificates SET reauthorized_at = compute_now() WHERE serial = $1', [
-              serial,
-            ]);
+            context.sql.query(
+              'UPDATE ssh_certificates SET reauthorized_at = compute_now() WHERE serial = $1',
+              [serial],
+            );
           for (const row of rows) {
             if (context.signal.aborted) break;
             if (row.tenant_state === 'suspended' || row.tenant_state === 'deleted') {
@@ -887,10 +940,13 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
               const code = (error as { code?: unknown }).code;
               if (typeof code === 'string' && deniedCodes.has(code)) allowed = false;
               else {
-                context.log.warn('Re-authorizing an SSH certificate failed; it stays valid until it expires', {
-                  serial: row.serial,
-                  error: error instanceof Error ? error.message : String(error),
-                });
+                context.log.warn(
+                  'Re-authorizing an SSH certificate failed; it stays valid until it expires',
+                  {
+                    serial: row.serial,
+                    error: error instanceof Error ? error.message : String(error),
+                  },
+                );
                 await stamp(row.serial);
                 continue;
               }

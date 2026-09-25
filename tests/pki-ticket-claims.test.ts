@@ -35,6 +35,44 @@ describe('exec ticket agent claims', () => {
   });
 });
 
+describe('exec ticket sandbox claim', () => {
+  const SANDBOX = 'sbx_01jz0000000000000000000000';
+  it('carries sbx with its instance, and never alone', () => {
+    const clock = manualClock(Date.UTC(2026, 8, 24));
+    const issuer = createExecTicketIssuer({ issuer: 'https://compute.test', clock });
+    const verify = (token: string) =>
+      verifyExecTicket(token, {
+        jwks: issuer.jwksJson(),
+        nodeId: NODE,
+        now: clock.now(),
+        jtiCache: createReplayCache(),
+      });
+    const base = { nodeId: NODE, op: 'ssh' as const, subject: 'usr_a' };
+    const ticket = issuer.issue({
+      ...base,
+      sid: 'tun_1',
+      instanceId: 'inst_01jz0000000000000000000000',
+      sandboxId: SANDBOX,
+      action: 'compute:sandboxes:exec',
+    });
+    expect(verify(ticket.token)).toMatchObject({
+      sbx: SANDBOX,
+      inst: 'inst_01jz0000000000000000000000',
+      act: 'compute:sandboxes:exec',
+    });
+    expect(verify(issuer.issue({ ...base, sid: 'tun_2' }).token)).not.toHaveProperty('sbx');
+    expect(() => issuer.issue({ ...base, sid: 'tun_3', sandboxId: SANDBOX })).toThrow(/instance/);
+    expect(() =>
+      issuer.issue({
+        ...base,
+        sid: 'tun_4',
+        instanceId: 'inst_01jz0000000000000000000000',
+        sandboxId: 'inst_01jz0000000000000000000000',
+      }),
+    ).toThrow(/sandbox id/);
+  });
+});
+
 describe('replay cache when full', () => {
   it('evicts the oldest live entry by default (that key becomes replayable)', () => {
     const cache = createReplayCache({ maxEntries: 2 });
