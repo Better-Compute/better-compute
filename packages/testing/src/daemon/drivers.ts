@@ -1,4 +1,13 @@
+import { create, toBinary } from '@bufbuild/protobuf';
+import { anyUnpack, timestampMs } from '@bufbuild/protobuf/wkt';
 import type { DriverContext, DriverDefinition, Json, SecretResolver } from '@better-compute/core';
+import {
+  AgentRole,
+  DriverInvokeRequestSchema,
+  DriverInvokeResultSchema,
+  Lane,
+} from '@better-compute/protocol';
+import type { FakeKind } from './kinds.js';
 
 // The daemon's driver host for `driver.invoke` (PLAN.md §5.5, §11.2): one driver operation
 // `<concern>.<operation>` of a driver the agent hosts — built in, or a bcx plugin whose host
@@ -64,6 +73,55 @@ export function parseDriverInvocation(value: unknown): DriverInvocation {
 }
 
 /**
+ * The `driver.invoke` kind of a FakeDaemon (or any TS agent) hosting `drivers`: in-process
+ * `defineDriver`s, or bcx plugins' drivers from `externalDriver(...).start()`. It is destructive (a
+ * driver operation may power-cycle or deploy), so a daemon enforcing signed intent runs it only with a
+ * worker signature. The result is `DriverInvokeResult { result_json }`.
+ *
+ * ```ts
+ * new FakeDaemon({ ..., kinds: { 'driver.invoke': fakeDriverInvoke({ drivers: await plugin.start() }) } });
+ * ```
+ */
+export function fakeDriverInvoke(options: {
+  drivers: readonly DriverDefinition[];
+  secrets?: SecretResolver;
+  /** Side-effect floor before the call starts (default 10 ms). */
+  durationMs?: number;
+}): FakeKind {
+  return {
+    lane: Lane.PROVISION,
+    roles: [AgentRole.NODE, AgentRole.SITE, AgentRole.RAMDISK],
+    destructive: true,
+    durationMs: options.durationMs ?? 10,
+    async run(ctx) {
+      const request = ctx.body.payload && anyUnpack(ctx.body.payload, DriverInvokeRequestSchema);
+      if (!request)
+        return { outcome: 'failed', code: 'invalid-payload', message: 'driver.invoke takes a DriverInvokeRequest' };
+      try {
+        const invocation = parseDriverInvocation(request.args);
+        const result = await invokeDriver(options.drivers, invocation, {
+          nodeId: request.targetNodeId || ctx.nodeId,
+          idempotencyKey: `wf:${request.workflowId}:${request.stepId}#${request.attempt}`,
+          ...(ctx.body.notAfter ? { deadline: timestampMs(ctx.body.notAfter) } : {}),
+          now: () => ctx.now(),
+          ...(options.secrets ? { secrets: options.secrets } : {}),
+        });
+        return {
+          outcome: 'succeeded',
+          result: toBinary(DriverInvokeResultSchema, create(DriverInvokeResultSchema, { resultJson: JSON.stringify(result) })),
+        };
+      } catch (error) {
+        return {
+          outcome: 'failed',
+          code: error instanceof DriverInvocationError ? error.code : 'driver-error',
+          message: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  };
+}
+
+/**
  * Runs one driver operation on the hosted drivers and returns its JSON result. Unknown drivers,
  * concerns and operations fail with `driver-not-found` / `unsupported`; the operation's own errors
  * keep their code (`details.driverCode` of a bcx DRIVER_ERROR, else the ComputeError code).
@@ -120,8 +178,10 @@ export async function invokeDriver(
       implementation,
       invocation.args === undefined ? [] : [invocation.args],
     );
-    // An operation that yields progress (AsyncIterable) ends with its last value.
-    if (result && typeof result === 'object' && Symbol.asyncIterator in result) {
+    // A call that is also a promise (a bcx proxy: awaitable, or iterable for its progress) is awaited;
+    // an operation that only yields progress (an async generator) ends with its last value.
+    if (result && typeof (result as PromiseLike<unknown>).then === 'function') result = await result;
+    else if (result && typeof result === 'object' && Symbol.asyncIterator in result) {
       let last: unknown = null;
       for await (const item of result as AsyncIterable<unknown>) last = item;
       result = last;

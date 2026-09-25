@@ -145,6 +145,7 @@ export { runAgentJoin, type AgentJoinOptions, type AgentJoinResult } from './dae
 export { createWsDialer, type WsDialOptions } from './daemon/ws-dial.js';
 export {
   DriverInvocationError,
+  fakeDriverInvoke,
   invokeDriver,
   parseDriverInvocation,
   type DriverInvocation,
