@@ -19,6 +19,18 @@ message SiteSpec {
   // Images the site cache pre-warms (§11.5), from its pools' policy. The agent pulls each one and
   // re-verifies its digest before serving it.
   repeated CacheImage cache_images = 2;
+  // The machines site.httpProxy may reach through this agent, each with its addresses: the source of
+  // "an address of target_node_id known to the site" (HttpProxyRequest). The agent refuses a request
+  // whose URL host is not one of target_node_id's addresses (IP literals compared as IPs, names
+  // compared by name and then by every resolved IP), so a request "about" one node can never reach
+  // another machine or a BMC. Contributed for nodes whose profile is agent-less (e.g. Talos).
+  repeated ProxyTarget proxy_targets = 3;
+}
+
+message ProxyTarget {
+  string node_id = 1;
+  // IP literals or DNS names of the node's API endpoint(s), never a BMC address.
+  repeated string addresses = 2;
 }
 
 // A verified catalog image the site cache holds.

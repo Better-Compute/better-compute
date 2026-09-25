@@ -91,7 +91,13 @@ type SiteSpec struct {
 	Boot  *BootLeaseState        `protobuf:"bytes,1,opt,name=boot,proto3" json:"boot,omitempty"`
 	// Images the site cache pre-warms (§11.5), from its pools' policy. The agent pulls each one and
 	// re-verifies its digest before serving it.
-	CacheImages   []*CacheImage `protobuf:"bytes,2,rep,name=cache_images,json=cacheImages,proto3" json:"cache_images,omitempty"`
+	CacheImages []*CacheImage `protobuf:"bytes,2,rep,name=cache_images,json=cacheImages,proto3" json:"cache_images,omitempty"`
+	// The machines site.httpProxy may reach through this agent, each with its addresses: the source of
+	// "an address of target_node_id known to the site" (HttpProxyRequest). The agent refuses a request
+	// whose URL host is not one of target_node_id's addresses (IP literals compared as IPs, names
+	// compared by name and then by every resolved IP), so a request "about" one node can never reach
+	// another machine or a BMC. Contributed for nodes whose profile is agent-less (e.g. Talos).
+	ProxyTargets  []*ProxyTarget `protobuf:"bytes,3,rep,name=proxy_targets,json=proxyTargets,proto3" json:"proxy_targets,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -140,6 +146,66 @@ func (x *SiteSpec) GetCacheImages() []*CacheImage {
 	return nil
 }
 
+func (x *SiteSpec) GetProxyTargets() []*ProxyTarget {
+	if x != nil {
+		return x.ProxyTargets
+	}
+	return nil
+}
+
+type ProxyTarget struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	NodeId string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	// IP literals or DNS names of the node's API endpoint(s), never a BMC address.
+	Addresses     []string `protobuf:"bytes,2,rep,name=addresses,proto3" json:"addresses,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProxyTarget) Reset() {
+	*x = ProxyTarget{}
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProxyTarget) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProxyTarget) ProtoMessage() {}
+
+func (x *ProxyTarget) ProtoReflect() protoreflect.Message {
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProxyTarget.ProtoReflect.Descriptor instead.
+func (*ProxyTarget) Descriptor() ([]byte, []int) {
+	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *ProxyTarget) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *ProxyTarget) GetAddresses() []string {
+	if x != nil {
+		return x.Addresses
+	}
+	return nil
+}
+
 // A verified catalog image the site cache holds.
 type CacheImage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -154,7 +220,7 @@ type CacheImage struct {
 
 func (x *CacheImage) Reset() {
 	*x = CacheImage{}
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[1]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -166,7 +232,7 @@ func (x *CacheImage) String() string {
 func (*CacheImage) ProtoMessage() {}
 
 func (x *CacheImage) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[1]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -179,7 +245,7 @@ func (x *CacheImage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CacheImage.ProtoReflect.Descriptor instead.
 func (*CacheImage) Descriptor() ([]byte, []int) {
-	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{1}
+	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *CacheImage) GetUrl() string {
@@ -219,7 +285,7 @@ type BootLeaseState struct {
 
 func (x *BootLeaseState) Reset() {
 	*x = BootLeaseState{}
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[2]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -231,7 +297,7 @@ func (x *BootLeaseState) String() string {
 func (*BootLeaseState) ProtoMessage() {}
 
 func (x *BootLeaseState) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[2]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -244,7 +310,7 @@ func (x *BootLeaseState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootLeaseState.ProtoReflect.Descriptor instead.
 func (*BootLeaseState) Descriptor() ([]byte, []int) {
-	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{2}
+	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *BootLeaseState) GetActive() bool {
@@ -292,7 +358,7 @@ type ProxyDhcpEntry struct {
 
 func (x *ProxyDhcpEntry) Reset() {
 	*x = ProxyDhcpEntry{}
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[3]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -304,7 +370,7 @@ func (x *ProxyDhcpEntry) String() string {
 func (*ProxyDhcpEntry) ProtoMessage() {}
 
 func (x *ProxyDhcpEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[3]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -317,7 +383,7 @@ func (x *ProxyDhcpEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProxyDhcpEntry.ProtoReflect.Descriptor instead.
 func (*ProxyDhcpEntry) Descriptor() ([]byte, []int) {
-	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{3}
+	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ProxyDhcpEntry) GetMac() string {
@@ -402,7 +468,7 @@ type HttpProxyRequest struct {
 
 func (x *HttpProxyRequest) Reset() {
 	*x = HttpProxyRequest{}
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[4]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -414,7 +480,7 @@ func (x *HttpProxyRequest) String() string {
 func (*HttpProxyRequest) ProtoMessage() {}
 
 func (x *HttpProxyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[4]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -427,7 +493,7 @@ func (x *HttpProxyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HttpProxyRequest.ProtoReflect.Descriptor instead.
 func (*HttpProxyRequest) Descriptor() ([]byte, []int) {
-	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{4}
+	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *HttpProxyRequest) GetTargetNodeId() string {
@@ -496,7 +562,7 @@ type HttpProxyHeader struct {
 
 func (x *HttpProxyHeader) Reset() {
 	*x = HttpProxyHeader{}
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[5]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -508,7 +574,7 @@ func (x *HttpProxyHeader) String() string {
 func (*HttpProxyHeader) ProtoMessage() {}
 
 func (x *HttpProxyHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[5]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -521,7 +587,7 @@ func (x *HttpProxyHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HttpProxyHeader.ProtoReflect.Descriptor instead.
 func (*HttpProxyHeader) Descriptor() ([]byte, []int) {
-	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{5}
+	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *HttpProxyHeader) GetName() string {
@@ -551,7 +617,7 @@ type HttpProxyResponse struct {
 
 func (x *HttpProxyResponse) Reset() {
 	*x = HttpProxyResponse{}
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[6]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -563,7 +629,7 @@ func (x *HttpProxyResponse) String() string {
 func (*HttpProxyResponse) ProtoMessage() {}
 
 func (x *HttpProxyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[6]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -576,7 +642,7 @@ func (x *HttpProxyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HttpProxyResponse.ProtoReflect.Descriptor instead.
 func (*HttpProxyResponse) Descriptor() ([]byte, []int) {
-	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{6}
+	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *HttpProxyResponse) GetStatus() uint32 {
@@ -620,7 +686,7 @@ type BootCleanUpRequest struct {
 
 func (x *BootCleanUpRequest) Reset() {
 	*x = BootCleanUpRequest{}
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[7]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -632,7 +698,7 @@ func (x *BootCleanUpRequest) String() string {
 func (*BootCleanUpRequest) ProtoMessage() {}
 
 func (x *BootCleanUpRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[7]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -645,7 +711,7 @@ func (x *BootCleanUpRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootCleanUpRequest.ProtoReflect.Descriptor instead.
 func (*BootCleanUpRequest) Descriptor() ([]byte, []int) {
-	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{7}
+	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *BootCleanUpRequest) GetNodeId() string {
@@ -688,7 +754,7 @@ type IpxeScriptRequest struct {
 
 func (x *IpxeScriptRequest) Reset() {
 	*x = IpxeScriptRequest{}
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[8]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -700,7 +766,7 @@ func (x *IpxeScriptRequest) String() string {
 func (*IpxeScriptRequest) ProtoMessage() {}
 
 func (x *IpxeScriptRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[8]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -713,7 +779,7 @@ func (x *IpxeScriptRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IpxeScriptRequest.ProtoReflect.Descriptor instead.
 func (*IpxeScriptRequest) Descriptor() ([]byte, []int) {
-	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{8}
+	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *IpxeScriptRequest) GetMac() string {
@@ -776,7 +842,7 @@ type IpxeScript struct {
 
 func (x *IpxeScript) Reset() {
 	*x = IpxeScript{}
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[9]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -788,7 +854,7 @@ func (x *IpxeScript) String() string {
 func (*IpxeScript) ProtoMessage() {}
 
 func (x *IpxeScript) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[9]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -801,7 +867,7 @@ func (x *IpxeScript) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IpxeScript.ProtoReflect.Descriptor instead.
 func (*IpxeScript) Descriptor() ([]byte, []int) {
-	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{9}
+	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *IpxeScript) GetScript() string {
@@ -840,7 +906,7 @@ type BmcOperationRequest struct {
 
 func (x *BmcOperationRequest) Reset() {
 	*x = BmcOperationRequest{}
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[10]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -852,7 +918,7 @@ func (x *BmcOperationRequest) String() string {
 func (*BmcOperationRequest) ProtoMessage() {}
 
 func (x *BmcOperationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[10]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -865,7 +931,7 @@ func (x *BmcOperationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BmcOperationRequest.ProtoReflect.Descriptor instead.
 func (*BmcOperationRequest) Descriptor() ([]byte, []int) {
-	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{10}
+	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *BmcOperationRequest) GetDriver() string {
@@ -923,7 +989,7 @@ type BmcOperationResult struct {
 
 func (x *BmcOperationResult) Reset() {
 	*x = BmcOperationResult{}
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[11]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -935,7 +1001,7 @@ func (x *BmcOperationResult) String() string {
 func (*BmcOperationResult) ProtoMessage() {}
 
 func (x *BmcOperationResult) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[11]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -948,7 +1014,7 @@ func (x *BmcOperationResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BmcOperationResult.ProtoReflect.Descriptor instead.
 func (*BmcOperationResult) Descriptor() ([]byte, []int) {
-	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{11}
+	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *BmcOperationResult) GetOk() bool {
@@ -993,7 +1059,7 @@ type SignedDiscoveryAssertion struct {
 
 func (x *SignedDiscoveryAssertion) Reset() {
 	*x = SignedDiscoveryAssertion{}
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[12]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1005,7 +1071,7 @@ func (x *SignedDiscoveryAssertion) String() string {
 func (*SignedDiscoveryAssertion) ProtoMessage() {}
 
 func (x *SignedDiscoveryAssertion) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[12]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1018,7 +1084,7 @@ func (x *SignedDiscoveryAssertion) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignedDiscoveryAssertion.ProtoReflect.Descriptor instead.
 func (*SignedDiscoveryAssertion) Descriptor() ([]byte, []int) {
-	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{12}
+	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SignedDiscoveryAssertion) GetBody() []byte {
@@ -1054,7 +1120,7 @@ type DiscoveryAssertion struct {
 
 func (x *DiscoveryAssertion) Reset() {
 	*x = DiscoveryAssertion{}
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[13]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1066,7 +1132,7 @@ func (x *DiscoveryAssertion) String() string {
 func (*DiscoveryAssertion) ProtoMessage() {}
 
 func (x *DiscoveryAssertion) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_site_v1_site_proto_msgTypes[13]
+	mi := &file_bettercompute_site_v1_site_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1079,7 +1145,7 @@ func (x *DiscoveryAssertion) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DiscoveryAssertion.ProtoReflect.Descriptor instead.
 func (*DiscoveryAssertion) Descriptor() ([]byte, []int) {
-	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{13}
+	return file_bettercompute_site_v1_site_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *DiscoveryAssertion) GetSiteId() string {
@@ -1149,10 +1215,14 @@ var File_bettercompute_site_v1_site_proto protoreflect.FileDescriptor
 
 const file_bettercompute_site_v1_site_proto_rawDesc = "" +
 	"\n" +
-	" bettercompute/site/v1/site.proto\x12\x15bettercompute.site.v1\x1a$bettercompute/common/v1/common.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x8b\x01\n" +
+	" bettercompute/site/v1/site.proto\x12\x15bettercompute.site.v1\x1a$bettercompute/common/v1/common.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd4\x01\n" +
 	"\bSiteSpec\x129\n" +
 	"\x04boot\x18\x01 \x01(\v2%.bettercompute.site.v1.BootLeaseStateR\x04boot\x12D\n" +
-	"\fcache_images\x18\x02 \x03(\v2!.bettercompute.site.v1.CacheImageR\vcacheImages\"N\n" +
+	"\fcache_images\x18\x02 \x03(\v2!.bettercompute.site.v1.CacheImageR\vcacheImages\x12G\n" +
+	"\rproxy_targets\x18\x03 \x03(\v2\".bettercompute.site.v1.ProxyTargetR\fproxyTargets\"D\n" +
+	"\vProxyTarget\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1c\n" +
+	"\taddresses\x18\x02 \x03(\tR\taddresses\"N\n" +
 	"\n" +
 	"CacheImage\x12\x10\n" +
 	"\x03url\x18\x01 \x01(\tR\x03url\x12\x16\n" +
@@ -1255,43 +1325,45 @@ func file_bettercompute_site_v1_site_proto_rawDescGZIP() []byte {
 }
 
 var file_bettercompute_site_v1_site_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_bettercompute_site_v1_site_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_bettercompute_site_v1_site_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_bettercompute_site_v1_site_proto_goTypes = []any{
 	(BootArch)(0),                    // 0: bettercompute.site.v1.BootArch
 	(*SiteSpec)(nil),                 // 1: bettercompute.site.v1.SiteSpec
-	(*CacheImage)(nil),               // 2: bettercompute.site.v1.CacheImage
-	(*BootLeaseState)(nil),           // 3: bettercompute.site.v1.BootLeaseState
-	(*ProxyDhcpEntry)(nil),           // 4: bettercompute.site.v1.ProxyDhcpEntry
-	(*HttpProxyRequest)(nil),         // 5: bettercompute.site.v1.HttpProxyRequest
-	(*HttpProxyHeader)(nil),          // 6: bettercompute.site.v1.HttpProxyHeader
-	(*HttpProxyResponse)(nil),        // 7: bettercompute.site.v1.HttpProxyResponse
-	(*BootCleanUpRequest)(nil),       // 8: bettercompute.site.v1.BootCleanUpRequest
-	(*IpxeScriptRequest)(nil),        // 9: bettercompute.site.v1.IpxeScriptRequest
-	(*IpxeScript)(nil),               // 10: bettercompute.site.v1.IpxeScript
-	(*BmcOperationRequest)(nil),      // 11: bettercompute.site.v1.BmcOperationRequest
-	(*BmcOperationResult)(nil),       // 12: bettercompute.site.v1.BmcOperationResult
-	(*SignedDiscoveryAssertion)(nil), // 13: bettercompute.site.v1.SignedDiscoveryAssertion
-	(*DiscoveryAssertion)(nil),       // 14: bettercompute.site.v1.DiscoveryAssertion
-	(*timestamppb.Timestamp)(nil),    // 15: google.protobuf.Timestamp
-	(*v1.Signature)(nil),             // 16: bettercompute.common.v1.Signature
+	(*ProxyTarget)(nil),              // 2: bettercompute.site.v1.ProxyTarget
+	(*CacheImage)(nil),               // 3: bettercompute.site.v1.CacheImage
+	(*BootLeaseState)(nil),           // 4: bettercompute.site.v1.BootLeaseState
+	(*ProxyDhcpEntry)(nil),           // 5: bettercompute.site.v1.ProxyDhcpEntry
+	(*HttpProxyRequest)(nil),         // 6: bettercompute.site.v1.HttpProxyRequest
+	(*HttpProxyHeader)(nil),          // 7: bettercompute.site.v1.HttpProxyHeader
+	(*HttpProxyResponse)(nil),        // 8: bettercompute.site.v1.HttpProxyResponse
+	(*BootCleanUpRequest)(nil),       // 9: bettercompute.site.v1.BootCleanUpRequest
+	(*IpxeScriptRequest)(nil),        // 10: bettercompute.site.v1.IpxeScriptRequest
+	(*IpxeScript)(nil),               // 11: bettercompute.site.v1.IpxeScript
+	(*BmcOperationRequest)(nil),      // 12: bettercompute.site.v1.BmcOperationRequest
+	(*BmcOperationResult)(nil),       // 13: bettercompute.site.v1.BmcOperationResult
+	(*SignedDiscoveryAssertion)(nil), // 14: bettercompute.site.v1.SignedDiscoveryAssertion
+	(*DiscoveryAssertion)(nil),       // 15: bettercompute.site.v1.DiscoveryAssertion
+	(*timestamppb.Timestamp)(nil),    // 16: google.protobuf.Timestamp
+	(*v1.Signature)(nil),             // 17: bettercompute.common.v1.Signature
 }
 var file_bettercompute_site_v1_site_proto_depIdxs = []int32{
-	3,  // 0: bettercompute.site.v1.SiteSpec.boot:type_name -> bettercompute.site.v1.BootLeaseState
-	2,  // 1: bettercompute.site.v1.SiteSpec.cache_images:type_name -> bettercompute.site.v1.CacheImage
-	0,  // 2: bettercompute.site.v1.ProxyDhcpEntry.arch:type_name -> bettercompute.site.v1.BootArch
-	15, // 3: bettercompute.site.v1.ProxyDhcpEntry.not_after:type_name -> google.protobuf.Timestamp
-	6,  // 4: bettercompute.site.v1.HttpProxyRequest.headers:type_name -> bettercompute.site.v1.HttpProxyHeader
-	6,  // 5: bettercompute.site.v1.HttpProxyRequest.secret_headers:type_name -> bettercompute.site.v1.HttpProxyHeader
-	6,  // 6: bettercompute.site.v1.HttpProxyResponse.headers:type_name -> bettercompute.site.v1.HttpProxyHeader
-	15, // 7: bettercompute.site.v1.IpxeScript.not_after:type_name -> google.protobuf.Timestamp
-	16, // 8: bettercompute.site.v1.SignedDiscoveryAssertion.sig:type_name -> bettercompute.common.v1.Signature
-	15, // 9: bettercompute.site.v1.DiscoveryAssertion.issued_at:type_name -> google.protobuf.Timestamp
-	15, // 10: bettercompute.site.v1.DiscoveryAssertion.not_after:type_name -> google.protobuf.Timestamp
-	11, // [11:11] is the sub-list for method output_type
-	11, // [11:11] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	4,  // 0: bettercompute.site.v1.SiteSpec.boot:type_name -> bettercompute.site.v1.BootLeaseState
+	3,  // 1: bettercompute.site.v1.SiteSpec.cache_images:type_name -> bettercompute.site.v1.CacheImage
+	2,  // 2: bettercompute.site.v1.SiteSpec.proxy_targets:type_name -> bettercompute.site.v1.ProxyTarget
+	0,  // 3: bettercompute.site.v1.ProxyDhcpEntry.arch:type_name -> bettercompute.site.v1.BootArch
+	16, // 4: bettercompute.site.v1.ProxyDhcpEntry.not_after:type_name -> google.protobuf.Timestamp
+	7,  // 5: bettercompute.site.v1.HttpProxyRequest.headers:type_name -> bettercompute.site.v1.HttpProxyHeader
+	7,  // 6: bettercompute.site.v1.HttpProxyRequest.secret_headers:type_name -> bettercompute.site.v1.HttpProxyHeader
+	7,  // 7: bettercompute.site.v1.HttpProxyResponse.headers:type_name -> bettercompute.site.v1.HttpProxyHeader
+	16, // 8: bettercompute.site.v1.IpxeScript.not_after:type_name -> google.protobuf.Timestamp
+	17, // 9: bettercompute.site.v1.SignedDiscoveryAssertion.sig:type_name -> bettercompute.common.v1.Signature
+	16, // 10: bettercompute.site.v1.DiscoveryAssertion.issued_at:type_name -> google.protobuf.Timestamp
+	16, // 11: bettercompute.site.v1.DiscoveryAssertion.not_after:type_name -> google.protobuf.Timestamp
+	12, // [12:12] is the sub-list for method output_type
+	12, // [12:12] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_bettercompute_site_v1_site_proto_init() }
@@ -1305,7 +1377,7 @@ func file_bettercompute_site_v1_site_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bettercompute_site_v1_site_proto_rawDesc), len(file_bettercompute_site_v1_site_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   14,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -52,3 +52,25 @@ describe('NodeSpec instances section (v0.5)', () => {
     );
   });
 });
+
+describe('NodeSpec site section: proxy targets (review 7 HIGH-1)', () => {
+  it('lists the machines site.httpProxy may reach, sorted, and none when nothing contributes', async () => {
+    const wire = await wireNodeSpec(tx, {
+      site: {
+        boot: { active: true, epoch: 2 },
+        proxyTargets: [
+          { nodeId: 'node_b', addresses: ['10.1.0.9', 'talos-b.site.internal', '10.1.0.9'] },
+          { nodeId: 'node_a', addresses: ['10.1.0.7'] },
+        ],
+      },
+    });
+    const site = fromJson(NodeSpecSchema, wire as never).site!;
+    expect(site.proxyTargets.map((target) => [target.nodeId, target.addresses])).toEqual([
+      ['node_a', ['10.1.0.7']],
+      ['node_b', ['10.1.0.9', 'talos-b.site.internal']],
+    ]);
+    const bare = await wireNodeSpec(tx, { site: { boot: { active: true, epoch: 2 } } });
+    expect(fromJson(NodeSpecSchema, bare as never).site!.proxyTargets).toEqual([]);
+    expect((bare.site as Record<string, unknown>).proxyTargets).toBeUndefined();
+  });
+});

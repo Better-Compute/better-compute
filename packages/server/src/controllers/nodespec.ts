@@ -294,6 +294,14 @@ export async function wireNodeSpec(tx: SqlTx, spec: NodeSpec): Promise<JsonObjec
         sha256: bytesField(image.sha256),
         format: image.format,
       }));
+    const targets = [...(spec.site.proxyTargets ?? [])].sort((a, b) =>
+      a.nodeId.localeCompare(b.nodeId),
+    );
+    if (targets.length)
+      site.proxyTargets = targets.map((target) => ({
+        nodeId: target.nodeId,
+        addresses: [...new Set(target.addresses)].sort(),
+      }));
     wire.site = site;
   }
   return wire;

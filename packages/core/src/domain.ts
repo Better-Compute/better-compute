@@ -625,6 +625,11 @@ export interface SiteSpec {
   boot: { active: boolean; epoch: number };
   /** (v0.2 §11.5) Verified catalog images the site cache pre-warms; `sha256` is hex. */
   cacheImages?: { url: string; sha256: string; format: ImageFormat }[];
+  /**
+   * (review 7 HIGH-1) The machines `site.httpProxy` may reach through this agent, with their
+   * addresses (IP literals or DNS names, never a BMC). The agent refuses any other target.
+   */
+  proxyTargets?: { nodeId: string; addresses: string[] }[];
 }
 
 /**
