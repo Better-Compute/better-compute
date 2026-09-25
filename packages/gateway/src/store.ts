@@ -594,11 +594,12 @@ export function createGatewayStore(options: GatewayStoreOptions) {
       stored++;
     }
     if (stored) {
+      // No `node` wake: the node reconciler reads no agent events (its triggers are connect,
+      // disconnect, settled commands and status), and a join storm paid one run per event batch.
       await tx.query('UPDATE node_sessions SET acked_event_seq = $2 WHERE node_id = $1', [
         nodeId,
         acked,
       ]);
-      await work.enqueue(tx, 'node', nodeId);
     }
     return { ackedEventSeq: acked, stored };
   }
