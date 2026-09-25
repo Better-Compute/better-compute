@@ -236,6 +236,12 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
 		return exitFailure
 	}
+	plugins := startPlugins(context.Background(), cfg.PluginsDir, log)
+	defer func() {
+		for _, p := range plugins {
+			p.Close()
+		}
+	}()
 	var client atomic.Pointer[transport.Client]
 	first, err := newClient(cfg, state, key)
 	if err != nil {
@@ -269,6 +275,7 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		SignerPin:     signerPin,
 		ImageCache:    cfg.ImageCache,
 		Runtimes:      runtimesFor(mode, cfg.DataDir, host),
+		Drivers:       agent.DriversOf(plugins),
 		CacheMaxBytes: uint64(max(cfg.Boot.CacheMaxBytes, 0)),
 		Version:       version,
 		Log:           log,

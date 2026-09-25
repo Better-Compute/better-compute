@@ -156,6 +156,9 @@ func (a *Agent) hello() (*agentv1.Hello, error) {
 	if len(a.o.Runtimes) > 0 {
 		h.Capabilities = append(h.Capabilities, InstanceDialCapability)
 	}
+	for _, d := range a.o.Drivers {
+		h.Drivers = append(h.Drivers, d.Manifest)
+	}
 	for _, r := range a.o.Runtimes {
 		h.Drivers = append(h.Drivers, &commonv1.DriverManifest{
 			Id: r.Name(), Version: a.o.Version, Kinds: []string{"runtime"}, RunsOn: commonv1.RunsOn_RUNS_ON_NODE,

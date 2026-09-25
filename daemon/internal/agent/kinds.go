@@ -78,6 +78,13 @@ func builtinKinds(a *Agent) []*Kind {
 			Exec:  a.runInstanceSnapshot,
 		},
 		{
+			Name:        "driver.invoke",
+			Lane:        dispatch.LaneProvision,
+			Roles:       []dispatch.Role{dispatch.RoleNode, dispatch.RoleSite, dispatch.RoleRamdisk},
+			Destructive: true,
+			Exec:        a.runDriverInvoke,
+		},
+		{
 			Name:            "node.reboot",
 			Lane:            dispatch.LaneControl,
 			Roles:           []dispatch.Role{dispatch.RoleNode, dispatch.RoleSite},

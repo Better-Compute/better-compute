@@ -94,6 +94,9 @@ type Config struct {
 	// Boot configures a site agent's boot server ([boot]; bcd site only).
 	Boot Boot
 
+	// PluginsDir holds the bcx driver plugins and their sha256 pins ([plugins] dir); empty: none.
+	PluginsDir string
+
 	// IMDSListen is where a VPS host serves its instances' metadata service ([imds] listen, e.g.
 	// "169.254.169.254:80" on the instances' bridge); empty disables it.
 	IMDSListen string
@@ -315,6 +318,7 @@ var fields = []field{
 	{section: "journal", key: "max_events", kind: kindInt, set: func(c *Config, v value) { c.Journal.MaxEvents = v.num }},
 	{section: "log", key: "level", kind: kindString, set: func(c *Config, v value) { c.Log.Level = v.str }},
 	{section: "log", key: "json", kind: kindBool, set: func(c *Config, v value) { c.Log.JSON = v.boolean }},
+	{section: "plugins", key: "dir", kind: kindString, set: func(c *Config, v value) { c.PluginsDir = v.str }},
 	{section: "imds", key: "listen", kind: kindString, set: func(c *Config, v value) { c.IMDSListen = v.str }},
 	{section: "boot", key: "listen", kind: kindString, set: func(c *Config, v value) { c.Boot.Listen = v.str }},
 	{section: "boot", key: "kernel", kind: kindString, set: func(c *Config, v value) { c.Boot.Kernel = v.str }},

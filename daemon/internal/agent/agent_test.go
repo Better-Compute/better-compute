@@ -23,6 +23,8 @@ import (
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	commonv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1"
+	driverv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/driver/v1"
+	"github.com/better-compute/better-compute/daemon/internal/bcx"
 	"github.com/better-compute/better-compute/daemon/internal/dispatch"
 	"github.com/better-compute/better-compute/daemon/internal/fakehw"
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
@@ -31,6 +33,7 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -875,5 +878,64 @@ func TestInstanceTicketsNeverReachTheHost(t *testing.T) {
 	}
 	if _, err := DefaultTunnelProgram(pki.ExecTicketClaims{Op: "exec"}, TunnelIO{}); err == nil {
 		t.Error("an exec ticket without an instance opened a host shell")
+	}
+}
+
+type recordingDriver struct {
+	got *driverv1.InvokeRequest
+	err error
+}
+
+func (r *recordingDriver) Invoke(_ context.Context, req *driverv1.InvokeRequest, _ func(*driverv1.Progress)) (string, error) {
+	r.got = req
+	if r.err != nil {
+		return "", r.err
+	}
+	return `{"power":"on"}`, nil
+}
+
+func TestDriverInvokeThroughAHostedPlugin(t *testing.T) {
+	rec := &recordingDriver{}
+	h := newHarness(t, func(o *Options) {
+		o.State.Role = "site"
+		o.Drivers = []HostedDriver{{Manifest: &commonv1.DriverManifest{Id: "acme-bmc", Kinds: []string{"power", "management"}}, Host: rec}}
+	})
+	s, hello := h.open()
+	if ids := hello.GetDrivers(); len(ids) == 0 || ids[0].GetId() != "acme-bmc" {
+		t.Fatalf("hello drivers = %v", ids)
+	}
+	args, _ := structpb.NewStruct(map[string]any{
+		"concern": "power", "operation": "setPower", "args": map[string]any{"action": "on"},
+		"config": map[string]any{"endpoint": "https://10.0.0.5", "password": "secret://t/bmc"},
+	})
+	inv := body("d1", "driver.invoke", &agentv1.DriverInvokeRequest{WorkflowId: "wf_1", StepId: "power", Attempt: 2, Args: args})
+	inv.Lane = commonv1.Lane_LANE_PROVISION
+	s.push(command(inv))
+	if req := answerSecret(t, s, "hunter2"); req.GetRef() != "secret://t/bmc" || req.GetStepId() != "power" {
+		t.Fatalf("secret request = %v", req)
+	}
+	done := s.update(t, "d1", commonv1.CommandState_COMMAND_STATE_SUCCEEDED)
+	res := &agentv1.DriverInvokeResult{}
+	_ = proto.Unmarshal(done.GetResult(), res)
+	if res.GetResultJson() != `{"power":"on"}` {
+		t.Fatalf("result = %v", res)
+	}
+	g := rec.got
+	if g.GetDriverId() != "acme-bmc" || g.GetKind() != "power" || g.GetOperation() != "setPower" || g.GetArgsJson() != `{"action":"on"}` ||
+		g.GetIdempotencyKey() != "wf:wf_1:power#2" || len(g.GetSecrets()) != 1 || g.GetSecrets()[0].GetField() != "password" ||
+		string(g.GetSecrets()[0].GetValue()) != "hunter2" || !strings.Contains(g.GetConfigJson(), `"password":"secret://t/bmc"`) || g.GetDeadline() == nil {
+		t.Fatalf("invoke request = %v", g)
+	}
+	// Unknown concern, and a driver's own error code.
+	other, _ := structpb.NewStruct(map[string]any{"concern": "deploy", "operation": "deploy"})
+	s.push(command(body("d2", "driver.invoke", &agentv1.DriverInvokeRequest{Args: other})))
+	if u := s.update(t, "d2", commonv1.CommandState_COMMAND_STATE_FAILED); u.GetError().GetCode() != "driver-not-found" {
+		t.Fatalf("unknown concern = %v", u)
+	}
+	rec.err = &bcx.Error{Code: "unreachable", Message: "no BMC"}
+	plain, _ := structpb.NewStruct(map[string]any{"concern": "power", "operation": "getPower"})
+	s.push(command(body("d3", "driver.invoke", &agentv1.DriverInvokeRequest{Args: plain})))
+	if u := s.update(t, "d3", commonv1.CommandState_COMMAND_STATE_FAILED); u.GetError().GetCode() != "unreachable" {
+		t.Fatalf("driver error = %v", u)
 	}
 }

@@ -82,6 +82,8 @@ type Options struct {
 	ImageCache string
 	// CacheMaxBytes is the site image cache's byte budget (0 = unbounded).
 	CacheMaxBytes uint64
+	// Drivers are the drivers the agent's bcx plugins serve (driver.invoke; advertised in Hello).
+	Drivers []HostedDriver
 	// Runtimes are the instance runtimes this host runs (VPS hosts; none elsewhere).
 	Runtimes []runtime.Runtime
 	// DialTunnel opens Tunnel streams; nil refuses every OpenTunnel.
