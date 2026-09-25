@@ -277,6 +277,9 @@ export const schemas = {
       tenantId,
       templateId,
       ttlSeconds: ttlSeconds("The sandbox's lifetime (default: the template's defaultTtlSeconds)"),
+      fromSnapshot: {
+        ...idOf('snap', 'Restore this snapshot of the tenant (taken on the same runtime)'),
+      },
       idempotencyKey,
       wait: strictObject(
         {
@@ -297,6 +300,27 @@ export const schemas = {
       cursor: { ...sandboxId, description: 'The last sandbox id of the previous page' },
     },
     ['tenantId'],
+  ),
+  snapshotSandbox: strictObject(
+    {
+      tenantId,
+      sandboxId,
+      includeMemory: {
+        type: 'boolean',
+        default: true,
+        description: 'Capture memory state too (a running restore); false: disk only',
+      },
+      keep: {
+        type: 'boolean',
+        default: false,
+        description: 'Keep the snapshot after the sandbox is deleted',
+      },
+      idempotencyKey: {
+        ...idempotencyKey,
+        description: 'Makes the snapshot id deterministic; a retry returns the same snapshot',
+      },
+    },
+    ['tenantId', 'sandboxId'],
   ),
   extendSandbox: strictObject(
     {

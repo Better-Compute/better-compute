@@ -394,6 +394,7 @@ describe('vps() API surface', () => {
       'vps/0002_sealed_user_data',
       'vps/0003_provider_bootstraps',
       'vps/0004_sandboxes',
+      'vps/0005_sandbox_snapshots',
     ]);
     expect(module.requires).toEqual(['capacity']);
     expect(() => vps({ runtimes: [] })).toThrow(ComputeError);

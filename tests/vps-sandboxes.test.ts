@@ -3,6 +3,7 @@ import {
   apiMethod,
   ComputeError,
   manualClock,
+  newId,
   type AuthzRow,
   type Caller,
   type ManualClock,
@@ -19,7 +20,10 @@ import {
   createCapacityPort,
   readQuotas,
 } from '@better-compute/capacity';
+import { create } from '@bufbuild/protobuf';
+import { encodeMessage, InstanceSnapshotResultSchema } from '@better-compute/protocol';
 import {
+  instanceSpecs,
   instanceWork,
   reportInstances,
   sandboxWork,
@@ -42,8 +46,16 @@ interface Recorded {
   removed: { type: string; id: string }[];
   pending: { id: string; attributes: unknown }[];
   events: { type: string; subject: string; data: Record<string, unknown> }[];
+  commands: {
+    id: string;
+    nodeId: string;
+    kind: string;
+    payload: unknown;
+    idempotencyKey: string;
+  }[];
 }
 let recorded: Recorded;
+const fresh = (): Recorded => ({ authz: [], removed: [], pending: [], events: [], commands: [] });
 
 const alice: Caller = {
   identityId: 'usr_alice',
@@ -97,6 +109,35 @@ function moduleContext(sql: SqlExecutor): ModuleContext {
     },
     work: { async enqueue() {} },
     desired: { async invalidate() {} },
+    // A real `commands` row, so settling reads its state and result like the gateway leaves them.
+    commands: {
+      async enqueue(tx, command) {
+        const id = newId('cmd');
+        const seq = recorded.commands.length + 1;
+        await tx.query(
+          `INSERT INTO commands (id, node_id, seq, kind, body, state, not_after, retry_safe,
+                                 self_terminating, attested, idempotency_key)
+           VALUES ($1, $2, $3, $4, '\\x'::bytea, 'pending', $5::timestamptz, false, false, false, $6)`,
+          [
+            id,
+            command.nodeId,
+            seq,
+            command.kind,
+            new Date(command.notAfter).toISOString(),
+            command.idempotencyKey,
+          ],
+        );
+        recorded.commands.push({
+          id,
+          nodeId: command.nodeId,
+          kind: command.kind,
+          payload: command.payload,
+          idempotencyKey: command.idempotencyKey,
+        });
+        return { id, seq };
+      },
+      async cancel() {},
+    },
   } as unknown as ModuleContext;
 }
 
@@ -225,6 +266,9 @@ afterAll(async () => {
 });
 
 const tables = [
+  'sandbox_snapshots',
+  'commands',
+  'node_labels',
   'sandboxes',
   'sandbox_templates',
   'usage_windows',
@@ -247,7 +291,7 @@ const tables = [
 let pool: string;
 beforeEach(async () => {
   for (const table of tables) await db.query(`DELETE FROM ${table}`);
-  recorded = { authz: [], removed: [], pending: [], events: [] };
+  recorded = fresh();
   clock = manualClock(T0);
   await useSimClock(db, T0);
   await db.query(
@@ -291,7 +335,7 @@ beforeEach(async () => {
     { tenantId: 'root', poolId: pool, name: 's1.small', vcpu: 2, memoryGiB: 4, diskGiB: 20 },
     root,
   );
-  recorded = { authz: [], removed: [], pending: [], events: [] };
+  recorded = fresh();
 });
 
 const templateInput = (extra: Record<string, unknown> = {}) => ({
@@ -706,6 +750,244 @@ describe('warm pools', () => {
     expect(await live()).toBe(0);
     // The sandbox of a deleted template lives on.
     expect((await getSandbox(cold.id)).state).toBe('starting');
+  });
+});
+
+describe('snapshots', () => {
+  const deletedObjects: string[] = [];
+  const store = {
+    async presign(input: { snapshotId: string }) {
+      return {
+        uploadUrl: `https://store.example/put/${input.snapshotId}?sig=x`,
+        uploadHeaders: { 'x-amz-acl': 'private' },
+        url: `https://store.example/${input.snapshotId}`,
+      };
+    },
+    async delete(input: { snapshotId: string }) {
+      deletedObjects.push(input.snapshotId);
+    },
+  };
+  const withStore = vps({ runtimes: ['cloud-hypervisor'], images, snapshots: store });
+  const storeApi = withStore.api!(moduleContext(db)) as VpsApi;
+  const callStore = (method: string, raw: unknown, who: Caller = alice) =>
+    run((storeApi.sandboxes as Record<string, Definition>)[method]!, raw, who);
+  const reconcileWith = (key: string) =>
+    withStore
+      .reconcilers!.find((entry) => entry.name === sandboxWork)!
+      .run({ ...moduleContext(db), signal: new AbortController().signal }, key);
+  type SnapshotView = {
+    id: string;
+    state: string;
+    cpuModel?: string;
+    sha256?: string;
+    reason?: string;
+  };
+  const settle = async (commandId: string, state: 'succeeded' | 'failed', cpuModel = '') => {
+    const result = encodeMessage(
+      InstanceSnapshotResultSchema,
+      create(InstanceSnapshotResultSchema, {
+        uploadedBytes: 1234n,
+        sha256: new Uint8Array(32).fill(0xab),
+        runtime: 'cloud-hypervisor',
+        cpuModel,
+      }),
+    );
+    await db.query(`UPDATE commands SET state = $2, result = $3, reason = $4 WHERE id = $1`, [
+      commandId,
+      state,
+      state === 'succeeded' ? result : null,
+      state === 'failed' ? 'unsupported' : null,
+    ]);
+  };
+  const running = async () => {
+    const template = await createTemplate();
+    const sandbox = await createSandbox(template.id);
+    await hostsReport('running');
+    return { template, sandbox };
+  };
+
+  it('need a store, and a running sandbox', async () => {
+    const { sandbox } = await running();
+    await expect(
+      call('sandboxes', 'snapshot', { tenantId: 'acme', sandboxId: sandbox.id }),
+    ).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
+    await call('sandboxes', 'delete', { tenantId: 'acme', sandboxId: sandbox.id });
+    await expect(
+      callStore('snapshot', { tenantId: 'acme', sandboxId: sandbox.id }),
+    ).rejects.toMatchObject({ code: 'INVALID_STATE' });
+  });
+
+  it('send instance.snapshot to the host, settle from its result, and restore on the same CPU model', async () => {
+    const { template, sandbox } = await running();
+    const snapshot = (await callStore('snapshot', {
+      tenantId: 'acme',
+      sandboxId: sandbox.id,
+      idempotencyKey: 'snap-1',
+    })) as SnapshotView;
+    expect(snapshot).toMatchObject({ state: 'pending', includeMemory: true, keep: false });
+    expect(snapshot.id).toMatch(/^snap_/);
+    const [command] = recorded.commands;
+    expect(command).toMatchObject({
+      kind: 'instance.snapshot',
+      nodeId: 'node_01jz00000000000000000000va',
+      idempotencyKey: `vps.sandboxes:${snapshot.id}:snapshot`,
+      payload: {
+        instanceId: sandbox.instanceId,
+        uploadUrl: `https://store.example/put/${snapshot.id}?sig=x`,
+        uploadHeaders: [{ name: 'x-amz-acl', value: 'private' }],
+        imageId: snapshot.id,
+        includeMemory: true,
+      },
+    });
+    expect(withStore.commandKinds).toMatchObject([
+      { kind: 'instance.snapshot', lane: 'bulk', retrySafe: false, roles: ['node'] },
+    ]);
+    // A retry under the key returns it; nothing else is sent.
+    expect(
+      (
+        (await callStore('snapshot', {
+          tenantId: 'acme',
+          sandboxId: sandbox.id,
+          idempotencyKey: 'snap-1',
+        })) as SnapshotView
+      ).id,
+    ).toBe(snapshot.id);
+    expect(recorded.commands).toHaveLength(1);
+
+    await settle(command!.id, 'succeeded', 'AMD EPYC 9654 96-Core Processor');
+    recorded.events = [];
+    await reconcileWith(snapshot.id);
+    expect(recorded.events).toMatchObject([
+      {
+        type: 'sandbox.snapshot.ready',
+        subject: `sandbox/${sandbox.id}`,
+        data: { snapshotId: snapshot.id, sha256: 'ab'.repeat(32), sizeBytes: 1234 },
+      },
+    ]);
+    const viewed = (await call('sandboxes', 'get', {
+      tenantId: 'acme',
+      sandboxId: sandbox.id,
+    })) as { snapshots: SnapshotView[] };
+    expect(viewed.snapshots).toMatchObject([
+      { id: snapshot.id, state: 'ready', cpuModel: 'AMD-EPYC-9654-96-Core-Processor' },
+    ]);
+
+    // The restore lands only where inventory labelled the same CPU model.
+    await db.query(
+      `INSERT INTO node_labels (node_id, key, value, source)
+       VALUES ('node_01jz00000000000000000000vb', 'cpu.model', 'AMD-EPYC-9654-96-Core-Processor', 'inventory')`,
+    );
+    const restored = (await callStore('create', {
+      tenantId: 'acme',
+      templateId: template.id,
+      fromSnapshot: snapshot.id,
+      idempotencyKey: 'restore-1',
+    })) as SandboxView & { fromSnapshot?: string; nodeId?: string };
+    expect(restored).toMatchObject({
+      fromSnapshot: snapshot.id,
+      warm: false,
+      nodeId: 'node_01jz00000000000000000000vb',
+    });
+    expect(recorded.authz.findLast((row) => row.type === 'sandbox')?.attributes).toMatchObject({
+      fromSnapshot: snapshot.id,
+      warm: false,
+    });
+    const specs = await db.transaction((tx) =>
+      instanceSpecs(tx, 'node_01jz00000000000000000000vb'),
+    );
+    expect(specs.find((spec) => spec.id === restored.instanceId)?.restoreFrom).toEqual({
+      url: `https://store.example/${snapshot.id}`,
+      sha256: 'ab'.repeat(32),
+      imageId: snapshot.id,
+    });
+  });
+
+  it("refuse another tenant's snapshot and a pending one; a failed command fails the snapshot", async () => {
+    const { template, sandbox } = await running();
+    const snapshot = (await callStore('snapshot', {
+      tenantId: 'acme',
+      sandboxId: sandbox.id,
+      includeMemory: false,
+    })) as SnapshotView;
+    await expect(
+      callStore('create', {
+        tenantId: 'acme',
+        templateId: template.id,
+        fromSnapshot: snapshot.id,
+        idempotencyKey: 'too-soon',
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    await settle(recorded.commands[0]!.id, 'failed');
+    recorded.events = [];
+    await reconcileWith('all');
+    expect(
+      recorded.events.find((event) => event.type === 'sandbox.snapshot.failed')?.data,
+    ).toMatchObject({
+      snapshotId: snapshot.id,
+      reason: 'unsupported',
+    });
+
+    // Another tenant's ready snapshot looks exactly like a missing one.
+    await db.query(
+      `INSERT INTO sandbox_templates (id, tenant_id, name, pool_id, flavor, image_id, runtime,
+                                      default_ttl_seconds, max_ttl_seconds, created_by, version)
+       VALUES ('sbxt_01jz00000000000000000000gx', 'globex', 't', $1, 's1.small', 'ubuntu-24.04',
+               'cloud-hypervisor', 60, 60, 'usr_g', 1)`,
+      [pool],
+    );
+    await db.query(
+      `INSERT INTO sandboxes (id, tenant_id, template_id, pool_id, instance_id, draft, ttl_seconds,
+                              owner_identity_id, idempotency_key, request_hash, version)
+       VALUES ('sbx_01jz00000000000000000000gx', 'globex', 'sbxt_01jz00000000000000000000gx', $1,
+               'inst_01jz00000000000000000000gx', false, 60, 'usr_g', 'k', '\\x00', 1)`,
+      [pool],
+    );
+    await db.query(
+      `INSERT INTO sandbox_snapshots (id, tenant_id, sandbox_id, template_id, instance_id, node_id, runtime,
+                                      include_memory, state, command_id, url, sha256, owner_identity_id, version)
+       VALUES ('snap_01jz00000000000000000000gx', 'globex', 'sbx_01jz00000000000000000000gx',
+               'sbxt_01jz00000000000000000000gx', 'inst_01jz00000000000000000000gx',
+               'node_01jz00000000000000000000va', 'cloud-hypervisor', false, 'ready', 'cmd_x',
+               'https://store.example/globex', $1, 'usr_g', 1)`,
+      ['cd'.repeat(32)],
+    );
+    await expect(
+      callStore('create', {
+        tenantId: 'acme',
+        templateId: template.id,
+        fromSnapshot: 'snap_01jz00000000000000000000gx',
+        idempotencyKey: 'steal',
+      }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('go with their sandbox unless kept', async () => {
+    const { sandbox } = await running();
+    const dropped = (await callStore('snapshot', {
+      tenantId: 'acme',
+      sandboxId: sandbox.id,
+    })) as SnapshotView;
+    const kept = (await callStore('snapshot', {
+      tenantId: 'acme',
+      sandboxId: sandbox.id,
+      keep: true,
+    })) as SnapshotView;
+    deletedObjects.length = 0;
+    await call('sandboxes', 'delete', { tenantId: 'acme', sandboxId: sandbox.id });
+    await reconcileInstance(sandbox.instanceId);
+    await hostsReport('absent');
+    await reconcileWith('all');
+    expect(deletedObjects).toEqual([dropped.id]);
+    const states = await db.query<{ id: string; state: string }>(
+      `SELECT id, state FROM sandbox_snapshots ORDER BY created_at, id`,
+    );
+    expect(Object.fromEntries(states.rows.map((row) => [row.id, row.state]))).toEqual({
+      [dropped.id]: 'deleted',
+      [kept.id]: 'pending',
+    });
+    // The tenant's teardown takes kept ones too.
+    await withStore.tenantDeleted!(moduleContext(db), 'acme');
+    expect(deletedObjects).toEqual([dropped.id, kept.id]);
   });
 });
 

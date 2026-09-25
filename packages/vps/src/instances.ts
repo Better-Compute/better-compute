@@ -289,6 +289,39 @@ interface RawInstance {
   pool_class: string;
   sandbox_id: string | null;
   warm_template_id: string | null;
+  restore_from: InstanceRestore | string | null;
+}
+
+/** The sandbox snapshot an instance boots from (§3.7), verified by the host against `sha256`. */
+export interface InstanceRestore {
+  snapshotId: string;
+  url: string;
+  /** Hex sha256 of the snapshot object. */
+  sha256: string;
+  includeMemory: boolean;
+  /** Memory state needs a host with this `cpu.model` label (a `cpuModelLabelValue`). */
+  cpuModel?: string;
+}
+
+/**
+ * The node label a memory snapshot's host must carry: the CPU model the state was captured on, as
+ * inventory writes it (`cpu.model`, source `inventory`).
+ */
+export const cpuModelLabel = 'cpu.model';
+
+/**
+ * A CPU model as a label value, exactly as inventory's `cpuModelLabelValue` makes it: (R)/(TM)
+ * dropped, other runs of characters outside [A-Za-z0-9._] turned into '-', trimmed of '-' and '.',
+ * at most 63 characters. `undefined` when nothing is left.
+ */
+export function cpuModelLabelValue(model: string): string | undefined {
+  const value = model
+    .replace(/\((r|tm)\)/gi, '')
+    .replace(/[^A-Za-z0-9._]+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+    .slice(0, 63)
+    .replace(/[-.]+$/g, '');
+  return value || undefined;
 }
 
 /** A stored instance with everything the lifecycle needs. */
@@ -329,6 +362,8 @@ export interface InstanceRow {
   sandboxId?: string;
   /** A warm-pool instance of this sandbox template, not claimed yet (§3.7). */
   warmTemplateId?: string;
+  /** The snapshot it boots from (a restored sandbox, §3.7). */
+  restoreFrom?: InstanceRestore;
 }
 
 const json = <T>(value: T | string): T =>
@@ -369,6 +404,7 @@ function toRow(raw: RawInstance): InstanceRow {
   if (raw.delegation_id !== null) row.delegationId = raw.delegation_id;
   if (raw.sandbox_id !== null) row.sandboxId = raw.sandbox_id;
   if (raw.warm_template_id !== null) row.warmTemplateId = raw.warm_template_id;
+  if (raw.restore_from !== null) row.restoreFrom = json(raw.restore_from);
   return row;
 }
 
@@ -377,7 +413,7 @@ const columns = `i.id, i.tenant_id, i.pool_id, i.project_id, i.flavor_id, i.flav
   i.provider_account_id, i.external_id, i.addresses, i.reported_state, i.quota_charged,
   i.owner_identity_id, i.agent_id, i.delegation_id, i.idempotency_key,
   encode(i.request_hash, 'hex') AS request_hash, i.conditions, i.version, p.class AS pool_class,
-  i.sandbox_id, i.warm_template_id`;
+  i.sandbox_id, i.warm_template_id, i.restore_from`;
 
 export async function readInstance(
   tx: SqlTx,
@@ -866,6 +902,14 @@ export async function scheduleHosted(
   admission?: AdmissionContext,
 ): Promise<InstanceRow> {
   const now = deps.clock.now();
+  // A plugin runtime lands only on hosts whose bcd advertised it (walkthrough 4); a memory snapshot
+  // only on hosts with the CPU model it was captured on (§3.7).
+  const nodeLabels: Record<string, string> = {
+    ...runtimeNodeLabels(row.runtime),
+    ...(row.restoreFrom?.includeMemory && row.restoreFrom.cpuModel
+      ? { [cpuModelLabel]: row.restoreFrom.cpuModel }
+      : {}),
+  };
   const outcome = await deps.capacity.reserve(
     tx,
     {
@@ -882,8 +926,7 @@ export async function scheduleHosted(
         diskGiB: row.shape.diskGiB,
       },
       during: { start: now, end: openEnded },
-      // A plugin runtime lands only on hosts whose bcd advertised it (walkthrough 4).
-      ...(runtimeNodeLabels(row.runtime) ? { nodeLabels: runtimeNodeLabels(row.runtime)! } : {}),
+      ...(Object.keys(nodeLabels).length > 0 ? { nodeLabels } : {}),
     },
     admission ? { admission } : undefined,
   );

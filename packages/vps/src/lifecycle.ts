@@ -541,9 +541,10 @@ export async function instanceSpecs(
     atoms: string[] | null;
     address: string | null;
     mac: string;
+    restore_from: { snapshotId: string; url: string; sha256: string } | string | null;
   }>(
     `SELECT i.id, i.state, i.desired_state, i.runtime, i.flavor, i.image, i.user_data, i.ssh_keys,
-            i.allocation_id, a.atoms, host(l.address) || '/' || masklen(p.cidr) AS address,
+            i.allocation_id, a.atoms, i.restore_from, host(l.address) || '/' || masklen(p.cidr) AS address,
             regexp_replace('02' || substr(encode(sha256(convert_to(i.id, 'UTF8')), 'hex'), 1, 10),
                            '(..)(?=.)', '\\1:', 'g') AS mac
        FROM instances i
@@ -578,6 +579,11 @@ export async function instanceSpecs(
     };
     if (row.atoms && row.atoms.length > 0) spec.deviceIds = [...row.atoms];
     if (row.allocation_id) spec.allocationId = row.allocation_id;
+    // A restored sandbox (§3.7): the host fetches and verifies the snapshot instead of a fresh boot.
+    const restore =
+      typeof row.restore_from === 'string' ? JSON.parse(row.restore_from) : row.restore_from;
+    if (restore)
+      spec.restoreFrom = { url: restore.url, sha256: restore.sha256, imageId: restore.snapshotId };
     spec.nics = [{ network, mac: row.mac, addresses: row.address ? [row.address] : [] }];
     return [spec];
   });

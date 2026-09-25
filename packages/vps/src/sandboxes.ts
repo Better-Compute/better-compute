@@ -41,9 +41,20 @@ import {
   visibleVpsPool,
   wake,
   type InstanceDeps,
+  type InstanceRestore,
   type InstanceRow,
   type VpsImage,
 } from './instances.js';
+import {
+  dropSnapshots,
+  purgeSnapshots,
+  restoreSource,
+  sandboxSnapshots,
+  settleSnapshots,
+  type DroppedSnapshot,
+  type SandboxSnapshot,
+  type SnapshotStore,
+} from './snapshots.js';
 
 // Sandboxes (PLAN.md §3.7, D24): a sandbox is a hosted VPS instance with a template, a lifetime and a
 // fast start. It has no placement or tenancy path of its own: the instance it drives is admitted,
@@ -583,6 +594,10 @@ export interface Sandbox {
   readyAt?: number;
   /** Set when the sandbox ended by reaching `expiresAt`. */
   expiredAt?: number;
+  /** The snapshot it was restored from. */
+  fromSnapshot?: string;
+  /** Its snapshots, newest first (`sandboxes.get` only). */
+  snapshots?: SandboxSnapshot[];
 }
 
 export interface CreateSandboxInput {
@@ -590,6 +605,8 @@ export interface CreateSandboxInput {
   templateId: string;
   /** Default: the template's `defaultTtlSeconds`; at most its `maxTtlSeconds`. */
   ttlSeconds?: number;
+  /** Restore this snapshot (the tenant's own, same runtime) instead of booting the image. */
+  fromSnapshot?: string;
   idempotencyKey: string;
   /** §9.1 async-with-wait: hold the answer up to `timeoutMs` (≤ 30 s) until the sandbox leaves `starting`. */
   wait?: { timeoutMs: number };
@@ -615,7 +632,14 @@ export interface ListSandboxesInput {
 }
 
 export function parseCreateSandbox(raw: unknown): CreateSandboxInput {
-  const input = object(raw, ['tenantId', 'templateId', 'ttlSeconds', 'idempotencyKey', 'wait']);
+  const input = object(raw, [
+    'tenantId',
+    'templateId',
+    'ttlSeconds',
+    'fromSnapshot',
+    'idempotencyKey',
+    'wait',
+  ]);
   const result: CreateSandboxInput = {
     tenantId: tenant(input.tenantId),
     templateId: id(input.templateId, 'sbxt', 'templateId'),
@@ -623,6 +647,8 @@ export function parseCreateSandbox(raw: unknown): CreateSandboxInput {
   };
   const ttlSeconds = optional(input.ttlSeconds, (value) => ttl(value, 'ttlSeconds'));
   if (ttlSeconds !== undefined) result.ttlSeconds = ttlSeconds;
+  const fromSnapshot = optional(input.fromSnapshot, (value) => id(value, 'snap', 'fromSnapshot'));
+  if (fromSnapshot !== undefined) result.fromSnapshot = fromSnapshot;
   if (input.wait !== undefined) {
     const wait = object(input.wait, ['timeoutMs']);
     result.wait = { timeoutMs: int(wait.timeoutMs, 'wait.timeoutMs', 0, 30_000) };
@@ -699,6 +725,7 @@ interface RawSandbox {
   instance_state: InstanceState | null;
   addresses: string[] | null;
   node_id: string | null;
+  from_snapshot: string | null;
 }
 
 const ms = (column: string) => `(extract(epoch FROM ${column}) * 1000)::float8`;
@@ -707,7 +734,7 @@ const sandboxColumns = `s.id, s.tenant_id, s.template_id, s.pool_id, s.instance_
   ${ms('s.expired_at')} AS expired_ms, ${ms('s.deleting_at')} AS deleting_ms,
   ${ms('s.deleted_at')} AS deleted_ms, s.owner_identity_id, s.idempotency_key,
   encode(s.request_hash, 'hex') AS request_hash, s.version, ${ms('s.created_at')} AS created_ms,
-  i.state AS instance_state, i.addresses, i.node_id`;
+  i.state AS instance_state, i.addresses, i.node_id, s.from_snapshot`;
 const sandboxFrom = `sandboxes s LEFT JOIN instances i ON i.id = s.instance_id`;
 
 async function readSandbox(
@@ -753,6 +780,7 @@ export function sandboxView(raw: RawSandbox): Sandbox {
   if (raw.node_id !== null) view.nodeId = raw.node_id;
   if (raw.ready_ms !== null) view.readyAt = Number(raw.ready_ms);
   if (raw.expired_ms !== null) view.expiredAt = Number(raw.expired_ms);
+  if (raw.from_snapshot !== null) view.fromSnapshot = raw.from_snapshot;
   return view;
 }
 
@@ -784,15 +812,19 @@ export function sandboxAttributes(
   template: Pick<SandboxTemplate, 'id' | 'warm'>,
   flavor: Pick<FlavorRecord, 'vcpu' | 'memoryGiB' | 'gpus'>,
   ttlSeconds: number,
+  fromSnapshot?: string,
 ): AuthzAttributes {
-  return {
+  const attributes: AuthzAttributes = {
     templateId: template.id,
     vcpu: flavor.vcpu,
     memoryGiB: flavor.memoryGiB,
     gpus: flavor.gpus,
     ttlSeconds,
-    warm: template.warm.min > 0,
+    // A restore never claims a warm instance.
+    warm: template.warm.min > 0 && fromSnapshot === undefined,
   };
+  if (fromSnapshot !== undefined) attributes.fromSnapshot = fromSnapshot;
+  return attributes;
 }
 
 const sandboxIdOf = (context: MethodContext, input: CreateSandboxInput) =>
@@ -841,11 +873,20 @@ export async function prepareCreateSandbox(
       'INVALID_STATE',
       `Sandbox template ${template.name} names flavor ${template.flavor}, which is gone`,
     );
+  if (input.fromSnapshot !== undefined) {
+    // The tenant's own ready snapshot (another tenant's is NOT_FOUND), written by this runtime.
+    const source = await restoreSource(tx, input.tenantId, input.fromSnapshot);
+    if (source.runtime !== template.runtime)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `Snapshot ${source.snapshotId} was taken on ${source.runtime}; template ${template.name} runs ${template.runtime}`,
+      );
+  }
   if (!existing)
     await tx.query(
-      `INSERT INTO sandboxes (id, tenant_id, template_id, pool_id, instance_id, ttl_seconds,
+      `INSERT INTO sandboxes (id, tenant_id, template_id, pool_id, instance_id, ttl_seconds, from_snapshot,
                               owner_identity_id, agent_id, delegation_id, idempotency_key, request_hash, version)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, decode($11, 'hex'), 1)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $12, $7, $8, $9, $10, decode($11, 'hex'), 1)`,
       [
         sandboxId,
         input.tenantId,
@@ -858,13 +899,14 @@ export async function prepareCreateSandbox(
         caller.delegationId ?? null,
         input.idempotencyKey,
         hash,
+        input.fromSnapshot ?? null,
       ],
     );
   await deps.authz.upsert(tx, {
     type: 'sandbox',
     id: sandboxId,
     tenantId: input.tenantId,
-    attributes: sandboxAttributes(template, flavor, ttlSeconds),
+    attributes: sandboxAttributes(template, flavor, ttlSeconds, input.fromSnapshot),
     parentType: 'pool',
     parentId: template.poolId,
     ownerId: caller.identityId,
@@ -910,6 +952,8 @@ interface ManagedInstance {
   sandboxId?: string;
   warmTemplateId?: string;
   admission?: AdmissionContext;
+  /** Boot from this snapshot (a restore) instead of the template's image. */
+  restoreFrom?: InstanceRestore;
 }
 
 async function createManagedInstance(
@@ -933,9 +977,9 @@ async function createManagedInstance(
   await tx.query(
     `INSERT INTO instances (id, tenant_id, pool_id, flavor_id, flavor, image_id, image, ssh_keys, user_data,
                             runtime, draft, state, desired_state, owner_identity_id, agent_id, delegation_id,
-                            idempotency_key, request_hash, sandbox_id, warm_template_id, version)
+                            idempotency_key, request_hash, sandbox_id, warm_template_id, restore_from, version)
      VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, '{}', $8, $9, false, 'pending', $10, $11, $12, $13,
-             $14, decode($15, 'hex'), $16, $17, 1)`,
+             $14, decode($15, 'hex'), $16, $17, $18::jsonb, 1)`,
     [
       spec.instanceId,
       template.tenantId,
@@ -954,6 +998,7 @@ async function createManagedInstance(
       hash,
       spec.sandboxId ?? null,
       spec.warmTemplateId ?? null,
+      spec.restoreFrom ? JSON.stringify(spec.restoreFrom) : null,
     ],
   );
   let row = (await readInstance(tx, spec.instanceId, { lock: true }))!;
@@ -1038,7 +1083,12 @@ export async function completeCreateSandbox(
   const template = await readTemplate(tx, raw.tenant_id, raw.template_id);
   if (!template)
     throw new ComputeError('NOT_FOUND', `Sandbox template ${raw.template_id} not found`);
-  const claimed = await claimWarm(deps, tx, template, raw);
+  // A restore boots its snapshot, so it never claims a warm instance.
+  const source =
+    raw.from_snapshot === null
+      ? undefined
+      : await restoreSource(tx, raw.tenant_id, raw.from_snapshot);
+  const claimed = source ? undefined : await claimWarm(deps, tx, template, raw);
   const instance =
     claimed ??
     (await createManagedInstance(deps, tx, {
@@ -1050,6 +1100,17 @@ export async function completeCreateSandbox(
       desiredState: 'running',
       sandboxId: raw.id,
       ...(context.admission ? { admission: context.admission } : {}),
+      ...(source
+        ? {
+            restoreFrom: {
+              snapshotId: source.snapshotId,
+              url: source.url,
+              sha256: source.sha256,
+              includeMemory: source.includeMemory,
+              ...(source.cpuModel ? { cpuModel: source.cpuModel } : {}),
+            },
+          }
+        : {}),
     }));
   const now = deps.clock.now();
   await tx.query(
@@ -1077,10 +1138,11 @@ async function lockOpenSandbox(tx: SqlTx, ref: SandboxRef): Promise<RawSandbox> 
   return raw;
 }
 
+/** One sandbox with its snapshots. */
 export async function getSandbox(tx: SqlTx, ref: SandboxRef): Promise<Sandbox> {
   const raw = await readSandbox(tx, ref.sandboxId, { tenantId: ref.tenantId });
   if (!raw || raw.draft) throw new ComputeError('NOT_FOUND', `Sandbox ${ref.sandboxId} not found`);
-  return sandboxView(raw);
+  return { ...sandboxView(raw), snapshots: await sandboxSnapshots(tx, raw.id) };
 }
 
 /** A tenant's sandboxes, newest first; `scope: 'mine'` (the default) filters to the caller's own. */
@@ -1222,7 +1284,7 @@ export async function extendSandbox(
         type: 'sandbox',
         id: raw.id,
         tenantId: raw.tenant_id,
-        attributes: sandboxAttributes(template, flavor, lifetime),
+        attributes: sandboxAttributes(template, flavor, lifetime, raw.from_snapshot ?? undefined),
         parentType: 'pool',
         parentId: raw.pool_id,
         ownerId: raw.owner_identity_id,
@@ -1243,6 +1305,7 @@ export interface SandboxPass {
   deleted: number;
   warmCreated: number;
   warmDrained: number;
+  snapshotsSettled: number;
 }
 
 /**
@@ -1256,12 +1319,20 @@ export interface SandboxPass {
 export async function reconcileSandboxes(
   deps: InstanceDeps,
   sql: SqlExecutor,
-  options: { batch?: number } = {},
+  options: { batch?: number; store?: SnapshotStore } = {},
 ): Promise<SandboxPass> {
   const batch = options.batch ?? 100;
   const now = deps.clock.now();
   const at = new Date(now).toISOString();
-  const pass: SandboxPass = { expired: 0, ready: 0, deleted: 0, warmCreated: 0, warmDrained: 0 };
+  const pass: SandboxPass = {
+    expired: 0,
+    ready: 0,
+    deleted: 0,
+    warmCreated: 0,
+    warmDrained: 0,
+    snapshotsSettled: await settleSnapshots(deps, sql, { batch }),
+  };
+  const dropped: DroppedSnapshot[] = [];
 
   await sql.transaction(async (tx) => {
     const expired = await tx.query<RawSandbox>(
@@ -1311,12 +1382,15 @@ export async function reconcileSandboxes(
         [raw.id, at],
       );
       await deps.authz.remove(tx, { type: 'sandbox', id: raw.id, tenantId: raw.tenant_id });
+      // Snapshots hold memory: they go with the sandbox unless kept.
+      dropped.push(...(await dropSnapshots(tx, { sandboxId: raw.id })));
       await publishSandbox(deps, tx, raw, 'sandbox.deleted', {
         expired: raw.expired_ms !== null,
       });
       pass.deleted++;
     }
   });
+  await purgeSnapshots(options.store, deps.log, dropped);
 
   // Warm pools: what each template holds, then one transaction per change.
   const { rows: pools } = await sql.query<RawTemplate & { live: string | number }>(

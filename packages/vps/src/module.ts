@@ -120,6 +120,15 @@ import {
   type TemplateUpdate,
 } from './sandboxes.js';
 import { vpsTenantDeleted } from './tenancy.js';
+import {
+  instanceSnapshotKind,
+  parseSnapshotSandbox,
+  settleSnapshots,
+  snapshotSandbox,
+  type SandboxSnapshot,
+  type SnapshotSandboxInput,
+  type SnapshotStore,
+} from './snapshots.js';
 
 /** Options of `vps()`. */
 export interface VpsOptions {
@@ -148,6 +157,11 @@ export interface VpsOptions {
    * from. Without it `providerAccounts.bootstrap` is INVALID_CONFIG.
    */
   bootstrap?: BootstrapOptions;
+  /**
+   * Where sandbox snapshots are stored (§3.7): presigned uploads for `instance.snapshot` and the URL
+   * restores fetch. Without it `sandboxes.snapshot` is INVALID_CONFIG.
+   */
+  snapshots?: SnapshotStore;
 }
 
 type PoolInput = { tenantId: string; poolId: string };
@@ -187,6 +201,7 @@ export type VpsApi = {
     list: MethodDefinition<ListSandboxesInput, { items: Sandbox[]; cursor?: string }>;
     get: MethodDefinition<SandboxRef, Sandbox>;
     extend: MethodDefinition<ExtendSandboxInput, Sandbox>;
+    snapshot: MethodDefinition<SnapshotSandboxInput, SandboxSnapshot>;
     delete: MethodDefinition<SandboxRef, Sandbox>;
   };
   sandboxTemplates: {
@@ -638,6 +653,14 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         },
         handler: (context, input) => extendSandbox(depsOf(context), context, input),
       }),
+      snapshot: defineMethod({
+        action: 'compute:sandboxes:update',
+        kind: 'mutation',
+        resource: sandboxResource,
+        validate: describedBy(schemas.snapshotSandbox, parseSnapshotSandbox),
+        handler: (context, input) =>
+          snapshotSandbox(depsOf(context), options.snapshots, context, input),
+      }),
       delete: defineMethod({
         action: 'compute:sandboxes:delete',
         kind: 'mutation',
@@ -741,8 +764,14 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         name: sandboxWork,
         shardBy: 'none',
         periodic: [{ key: 'all', every: '15s' }],
-        async run(context) {
-          await reconcileSandboxes(depsOf(context), context.sql);
+        async run(context, key) {
+          // A settled `instance.snapshot` wakes this reconciler with its snapshot id.
+          if (key.startsWith('snap_'))
+            await settleSnapshots(depsOf(context), context.sql, { onlyId: key });
+          else
+            await reconcileSandboxes(depsOf(context), context.sql, {
+              ...(options.snapshots ? { store: options.snapshots } : {}),
+            });
           return 'DONE';
         },
       },
@@ -759,7 +788,9 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     ],
     selfCheck: (context) => vpsSelfCheck(context.sql, runtimeTable, runtimes[0]!),
     // §12.8: hosted instances hold inline allocations, which capacity's teardown never reaches.
-    tenantDeleted: (context, tenantId) => vpsTenantDeleted(depsOf(context), context, tenantId),
+    tenantDeleted: (context, tenantId) =>
+      vpsTenantDeleted(depsOf(context), context, tenantId, options.snapshots),
+    commandKinds: [instanceSnapshotKind],
     async nodeSpec(context, node) {
       const instances = await instanceSpecs(
         context.sql,

@@ -6,11 +6,18 @@ import {
   wake,
   type InstanceDeps,
 } from './instances.js';
+import {
+  dropSnapshots,
+  purgeSnapshots,
+  type DroppedSnapshot,
+  type SnapshotStore,
+} from './snapshots.js';
 
 // VPS's part of a tenant teardown (PLAN.md §12.8: the IAM tenant was deleted; the built-in `tenancy`
 // reconciler calls `ComputeModule.tenantDeleted` until every module answers DONE). Hosted instances
 // hold inline allocations, not reservations, so capacity's teardown never reaches them:
-// 1. sandbox templates are deleted (their warm pools drain) and open sandboxes marked deleting;
+// 1. sandbox templates are deleted (their warm pools drain), open sandboxes marked deleting, and
+//    every snapshot deleted (kept ones too; stored objects after the transaction);
 // 2. admission drafts are dropped;
 // 3. every live instance (sandboxes' and warm ones included) gets `desiredState: 'deleted'` and goes
 //    through the ordinary lifecycle: runtime teardown, allocation released, IP freed, quota refunded.
@@ -23,9 +30,13 @@ export async function vpsTenantDeleted(
   deps: InstanceDeps,
   context: Pick<ModuleContext, 'sql'>,
   tenantId: string,
+  store?: SnapshotStore,
 ): Promise<'DONE' | 'SYNC_AGAIN'> {
   const at = new Date(deps.clock.now()).toISOString();
-  return context.sql.transaction(async (tx) => {
+  let dropped: DroppedSnapshot[] = [];
+  const outcome = await context.sql.transaction(async (tx) => {
+    // Its snapshots, kept ones included (tenant data with memory state).
+    dropped = await dropSnapshots(tx, { tenantId });
     await tx.query(
       `UPDATE sandbox_templates SET deleted = true, version = version + 1
         WHERE tenant_id = $1 AND NOT deleted`,
@@ -60,6 +71,8 @@ export async function vpsTenantDeleted(
       `SELECT 1 FROM instances WHERE tenant_id = $1 AND NOT draft AND state <> 'deleted' LIMIT 1`,
       [tenantId],
     );
-    return left.rows.length > 0 ? 'SYNC_AGAIN' : 'DONE';
+    return left.rows.length > 0 ? ('SYNC_AGAIN' as const) : ('DONE' as const);
   });
+  await purgeSnapshots(store, deps.log, dropped);
+  return outcome;
 }
