@@ -40,6 +40,30 @@ describe('examples', () => {
       expect(report.findings.map((finding) => finding.check)).toContain('iam.not-configured');
     });
 
+  it('dev: approver keys from batch keygen turn the destructive-batch quorum on', { timeout: 120_000 }, async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'bc-example-quorum-'));
+    const env = { BETTER_COMPUTE_DATABASE_URL: `pglite:${join(cwd, 'db')}`, BETTER_COMPUTE_SECRET: SECRET };
+    await run(['pki', 'init', '--trust-domain', 'compute.test'], env, cwd);
+    await run(['batch', 'keygen', '--out', 'alice.pem'], env, cwd);
+    await run(['batch', 'keygen', '--out', 'bob.pem'], env, cwd);
+    const quorum = { ...env, BETTER_COMPUTE_APPROVER_KEYS: 'alice.pem.pub, bob.pem.pub', BETTER_COMPUTE_APPROVER_THRESHOLD: '2' };
+    expect(await run(['migrate', '--config', config('dev')], quorum, cwd)).toContain('applied');
+    const report = JSON.parse(await run(['doctor', '--config', config('dev')], quorum, cwd)) as { ok: boolean };
+    expect(report.ok).toBe(true);
+    const { exampleOptions } = await import('../examples/shared/compose.ts');
+    const options = await exampleOptions({ env: quorum, cwd });
+    expect(options.pki?.approvers).toMatchObject({ threshold: 2, unbatchedDestructivePerHour: 0 });
+    expect(options.pki?.approvers?.keys).toHaveLength(2);
+    await options.database.close?.();
+    // k must be within the keys given; a private key file is not a public key.
+    await expect(
+      run(['doctor', '--config', config('dev')], { ...quorum, BETTER_COMPUTE_APPROVER_THRESHOLD: '3' }, cwd),
+    ).rejects.toThrow(/APPROVER_THRESHOLD/);
+    await expect(
+      run(['doctor', '--config', config('dev')], { ...quorum, BETTER_COMPUTE_APPROVER_KEYS: 'alice.pem' }, cwd),
+    ).rejects.toThrow();
+  });
+
   it('postgres refuses to run on PGlite', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'bc-example-pg-'));
     await expect(

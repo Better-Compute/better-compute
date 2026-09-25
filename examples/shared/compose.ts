@@ -16,6 +16,9 @@
 // - BETTER_COMPUTE_GATEWAY_URL (https://gw.example.com:8443) and optionally _SERVER_NAME: published in
 //   /.well-known/better-compute with the serving CA's pin, for `bcd join --server <control plane>`.
 // - BETTER_COMPUTE_METRICS_TOKEN: ≥ 16 characters; mounts GET /metrics for Prometheus.
+// - BETTER_COMPUTE_APPROVER_KEYS: approver public keys (`better-compute batch keygen` .pub files, comma-separated)
+//   with BETTER_COMPUTE_APPROVER_THRESHOLD (k of them): the v1.0 destructive-batch quorum, in every daemon's trust
+//   bundle. BETTER_COMPUTE_UNBATCHED_PER_HOUR (default 0): destructive commands a node runs per hour outside a batch.
 //
 // IAM: until you wire better-iam (see the README of examples/postgres), no credential authenticates.
 // `better-compute dev --sim N` replaces that with an embedded, in-memory better-iam and prints a root token.
@@ -41,7 +44,7 @@ import {
   runtimeObserver,
   standardMetrics,
 } from '@better-compute/observability';
-import { bootstrapPins, commandSigningOptions, type PkiBundle } from '@better-compute/pki';
+import { approverKeyOf, bootstrapPins, commandSigningOptions, type PkiBundle } from '@better-compute/pki';
 import { postgres, retentionModule } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 import { provisionModule } from '@better-compute/provision';
@@ -79,6 +82,25 @@ export interface ExampleContext {
 async function bundleOf(env: NodeJS.ProcessEnv, cwd: string): Promise<PkiBundle | undefined> {
   const path = resolve(cwd, env.BETTER_COMPUTE_PKI ?? '.better-compute/pki.json');
   return existsSync(path) ? loadPkiBundle(path, env) : undefined;
+}
+
+/** `pki.approvers` from BETTER_COMPUTE_APPROVER_KEYS / _THRESHOLD / BETTER_COMPUTE_UNBATCHED_PER_HOUR, if set. */
+async function approversOf(env: NodeJS.ProcessEnv, cwd: string) {
+  const paths = (env.BETTER_COMPUTE_APPROVER_KEYS ?? '')
+    .split(',')
+    .map((path) => path.trim())
+    .filter(Boolean);
+  if (paths.length === 0) return undefined;
+  const threshold = Number(env.BETTER_COMPUTE_APPROVER_THRESHOLD);
+  if (!Number.isInteger(threshold) || threshold < 1 || threshold > paths.length)
+    throw new Error(`Set BETTER_COMPUTE_APPROVER_THRESHOLD to how many of the ${paths.length} approver keys a batch needs`);
+  const keys = await Promise.all(
+    paths.map(async (path) => approverKeyOf(await readFile(resolve(cwd, path), 'utf8')).spkiDer),
+  );
+  const perHour = Number(env.BETTER_COMPUTE_UNBATCHED_PER_HOUR ?? 0);
+  if (!Number.isInteger(perHour) || perHour < 0)
+    throw new Error('BETTER_COMPUTE_UNBATCHED_PER_HOUR must be a whole number ≥ 0');
+  return { keys, threshold, unbatchedDestructivePerHour: perHour };
 }
 
 function database(env: NodeJS.ProcessEnv, cwd: string, requirePostgres: boolean): SqlExecutor {
@@ -150,6 +172,9 @@ export async function exampleOptions(
   const secret = env.BETTER_COMPUTE_SECRET ?? (postgresStore ? undefined : DEVELOPMENT_SECRET);
   if (!secret) throw new Error('Set BETTER_COMPUTE_SECRET (at least 32 characters)');
   const bundle = await bundleOf(env, cwd);
+  const approvers = await approversOf(env, cwd);
+  if (approvers && !bundle?.commandSigning)
+    throw new Error('BETTER_COMPUTE_APPROVER_KEYS needs a PKI bundle with a command-signing root (pki init)');
   const iam: IamPort = unconfiguredIam();
   return {
     database: store,
@@ -189,6 +214,8 @@ export async function exampleOptions(
             // Signed intent (v0.2): commands and specs signed under the bundle's command-signing root, with the
             // roots and trust version of a rotation in progress (pki rotate-command-root).
             ...commandSigningOptions(bundle),
+            // The destructive-batch quorum (v1.0): k-of-n approver keys, checked by every daemon.
+            ...(approvers ? { approvers } : {}),
           },
         }
       : {}),
