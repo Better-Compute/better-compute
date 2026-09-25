@@ -76,13 +76,15 @@ export async function recordHostPressure(
   const next = evaluatePressure(report, raised, options.thresholds ?? defaultPressureThresholds);
   const changed = [...next].filter(([type, value]) => value.status !== raised.has(type) && (value.status || current.some((row) => row.type === type)));
   if (changed.length === 0) return [];
-  const { rows: nodes } = await tx.query<{ no_schedule_reasons: string[]; owner_tenant_id: string; class: string | null }>(
-    `SELECT n.no_schedule_reasons, n.owner_tenant_id, p.class FROM nodes n LEFT JOIN pools p ON p.id = n.pool_id
+  const { rows: nodes } = await tx.query<{ no_schedule_reasons: string[]; owner_tenant_id: string; class: string | null; trust: string }>(
+    `SELECT n.no_schedule_reasons, n.owner_tenant_id, p.class, n.trust FROM nodes n LEFT JOIN pools p ON p.id = n.pool_id
       WHERE n.id = $1 FOR UPDATE OF n`,
     [nodeId],
   );
   const node = nodes[0];
-  if (!node) return [];
+  // A tenant-controlled node (dedicated-root lease) reports what its lessee wants: advisory, like its
+  // inventory (§10.1 Trust), so it never makes a pool NoSchedule.
+  if (!node || node.trust === 'tenant-controlled') return [];
   await upsertNodeConditions(
     tx,
     nodeId,

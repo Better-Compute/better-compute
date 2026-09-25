@@ -66,7 +66,8 @@ the always-on built-in module that the server registers before any injected modu
    A `tenant-controlled` node (a dedicated-root lease: the lessee has root) is advisory (PLAN.md
    §10.1 Trust). Its set is appended as a snapshot and announced as `node.inventory.changed` with
    `advisory: true`, and nothing else changes: devices, health, labels, conditions, the image cache
-   and the hardware key keep the platform's last view, and `recordXid` ignores its XIDs. Otherwise a
+   and the hardware key keep the platform's last view, and `recordXid` and `recordHostPressure`
+   ignore its reports. Otherwise a
    GPU the lessee reports missing or unhealthy would leave the lease's bill. The applied digest is
    stored as `advisory:<digest>`. When metal ends the lease it calls `endAdvisoryInventory`, so the
    next report applies the same set under platform trust.

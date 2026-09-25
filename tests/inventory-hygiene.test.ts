@@ -224,4 +224,12 @@ describe('host pressure', () => {
     ]);
     expect((await node(vps)).no_schedule_reasons).toEqual(['DiskPressure']);
   });
+
+  it("ignores a tenant-controlled node's pressure (the lessee writes it)", async () => {
+    const leased = 'node_hyg000000000000000000000006';
+    await addNode(leased, 'pool_vps');
+    await db.query(`UPDATE nodes SET trust = 'tenant-controlled' WHERE id = $1`, [leased]);
+    expect(await db.transaction((tx) => recordHostPressure(tx, leased, { ...quiet, memorySomeAvg10: 35, ioSomeAvg10: 60 }))).toEqual([]);
+    expect(await node(leased)).toMatchObject({ no_schedule_reasons: [] });
+  });
 });
