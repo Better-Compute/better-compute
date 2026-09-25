@@ -12,6 +12,10 @@ Several Claude sessions and workflow agents may edit this tree at once. Rules:
 - better-iam (`../better-iam`) is read-only unless the user approves an upstream item in chat (PLAN.md §12.12).
 - The contracts frozen at the end of P0 (`proto/bettercompute/agent/v1`, `@better-compute/core`, the v0.1 schema,
   the v0.1 rows of PLAN.md §9.2) change only by additive, reviewed edits.
+- A commit that changes what an API method DOES (new modes, error codes, events, limits) also edits its section in
+  `apps/docs/descriptions/api/<group>.md`, or pings [c321a3] with the sha. The generator and lint catch input and
+  surface changes and missing descriptions, not stale prose. Then regenerate:
+  `node scripts/head-check.mjs --run apps/docs/scripts/sync-from-head.mjs <root>` and commit the generated files.
 
 ## Toolchain on this machine
 
