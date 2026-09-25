@@ -10,6 +10,7 @@ const areas = [
   { href: '/instances', label: 'Instances' },
   { href: '/sandboxes', label: 'Sandboxes' },
   { href: '/nodes', label: 'Nodes' },
+  { href: '/batches', label: 'Batches' },
   { href: '/pools', label: 'Pools & capacity' },
   { href: '/quotas', label: 'Quotas' },
   { href: '/usage', label: 'Usage & spend' },
