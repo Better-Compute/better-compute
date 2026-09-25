@@ -1,0 +1,31 @@
+{
+  "name": "@better-compute/console",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "description": "Next.js console for better-compute: nodes, pools and capacity, reservations, instances, terminals, rollouts and fleet drift, quotas and spend, on one origin with better-iam.",
+  "scripts": {
+    "dev": "next dev --port 3100",
+    "build": "next build",
+    "start": "next start --port 3100",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@better-compute/console-kit": "workspace:*",
+    "@better-iam/next": "^0.1.0",
+    "@better-iam/react": "^0.1.0",
+    "better-compute": "workspace:*",
+    "better-iam": "^0.1.0",
+    "next": "^15.5.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "server-only": "^0.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "typescript": "^5.9.3"
+  }
+}
