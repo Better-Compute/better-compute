@@ -16,12 +16,29 @@ export class FleetFacts implements FactSink {
   readonly heard = new Map<string, number[]>();
   private readonly open = new Map<string, NodeBinding>();
 
+  /** I3 ground truth: DesiredState frames that reached a daemon, in time order. */
+  readonly specsDelivered: { nodeId: string; generation: number; at: number }[] = [];
+  /** I3 ground truth: per node, the observed generation each StatusReport a gateway received carried. */
+  readonly observed = new Map<string, { generation: number; at: number }[]>();
+
   /** A gateway received a frame from `nodeId` at `at` (called by the simulator's links). */
   heardFrom(nodeId: string, at: number): void {
     const times = this.heard.get(nodeId);
     if (!times) this.heard.set(nodeId, [at]);
     // One entry per instant is enough; frames arrive in time order.
     else if (times.at(-1) !== at) times.push(at);
+  }
+
+  /** A daemon received DesiredState `generation` at `at`. */
+  specDelivered(nodeId: string, generation: number, at: number): void {
+    this.specsDelivered.push({ nodeId, generation, at });
+  }
+
+  /** A gateway received a StatusReport observing `generation` at `at`. */
+  observedGeneration(nodeId: string, generation: number, at: number): void {
+    const reports = this.observed.get(nodeId);
+    if (!reports) this.observed.set(nodeId, [{ generation, at }]);
+    else reports.push({ generation, at });
   }
 
   record(fact: DaemonFact): void {

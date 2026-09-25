@@ -3,7 +3,7 @@
 // Postgres snapshot (bookings) plus daemon reports (bindings).
 
 /** Invariant ids of PLAN.md §15 that this module checks. */
-export type InvariantId = 'I1' | 'I2' | 'I4' | 'I5' | 'I8';
+export type InvariantId = 'I1' | 'I2' | 'I3' | 'I4' | 'I5' | 'I8';
 
 export interface InvariantViolation {
   invariant: InvariantId;
@@ -307,6 +307,63 @@ export function checkI5(input: {
           ? `${release.allocationId} was released (${release.reason}) while node ${release.nodeId} was ${state}`
           : `${release.allocationId} was released for a cause that is not allowed: ${release.reason}`,
     });
+  }
+  return violations;
+}
+
+// ---------------------------------------------------------------------------------------------
+// I3: convergence within T.
+
+/** Default I3 bound: a node that stays reachable reports a delivered spec as observed within this. */
+export const CONVERGENCE_MS = 60_000;
+
+/**
+ * I3: every DesiredState a daemon received is reported observed (a StatusReport with an observed generation at
+ * least as high) within `withinMs`, provided the node stayed reachable the whole time: a gateway heard from it at
+ * least every `heardGapMs` over the window. Deliveries whose window runs past `until` are not judged yet.
+ */
+export function checkI3(input: {
+  specsDelivered: readonly { nodeId: string; generation: number; at: number }[];
+  observed: ReadonlyMap<string, readonly { generation: number; at: number }[]>;
+  heard: ReadonlyMap<string, readonly number[]>;
+  until: number;
+  withinMs?: number;
+  heardGapMs?: number;
+}): InvariantViolation[] {
+  const withinMs = input.withinMs ?? CONVERGENCE_MS;
+  const gapMs = input.heardGapMs ?? 15_000;
+  const violations: InvariantViolation[] = [];
+  const reachable = (nodeId: string, from: number, to: number) => {
+    const times = input.heard.get(nodeId) ?? [];
+    let last = from;
+    for (const time of times) {
+      if (time < from) continue;
+      if (time > to) break;
+      if (time - last > gapMs) return false;
+      last = time;
+    }
+    return to - last <= gapMs;
+  };
+  // One verdict per node and generation: the earliest delivery.
+  const judged = new Set<string>();
+  for (const spec of input.specsDelivered) {
+    const key = `${spec.nodeId}#${spec.generation}`;
+    if (judged.has(key)) continue;
+    const deadline = spec.at + withinMs;
+    if (deadline > input.until) continue;
+    judged.add(key);
+    if (!reachable(spec.nodeId, spec.at, deadline)) continue;
+    const reports = input.observed.get(spec.nodeId) ?? [];
+    const converged = reports.some(
+      (report) =>
+        report.at >= spec.at && report.at <= deadline && report.generation >= spec.generation,
+    );
+    if (!converged)
+      violations.push({
+        invariant: 'I3',
+        subject: spec.nodeId,
+        message: `node ${spec.nodeId} received generation ${spec.generation} at ${spec.at} and did not report it observed within ${withinMs} ms while reachable`,
+      });
   }
   return violations;
 }

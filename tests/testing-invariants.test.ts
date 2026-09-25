@@ -5,6 +5,7 @@ import {
   atomMilliseconds,
   checkI1,
   checkI2,
+  checkI3,
   checkI4,
   checkI5,
   checkI8,
@@ -177,6 +178,46 @@ describe('I5: no allocation released only because a node disconnected', () => {
       'b was released (reaped) while node n was unreachable',
       'c was released for a cause that is not allowed: mystery',
     ]);
+  });
+});
+
+describe('I3: convergence within T', () => {
+  const heardEvery = (from: number, to: number, step = 10_000) =>
+    Array.from({ length: Math.floor((to - from) / step) + 1 }, (_, i) => from + i * step);
+
+  it('flags a reachable node that never reports a delivered spec, and skips the rest', () => {
+    const heard = new Map([
+      ['n1', heardEvery(0, 200_000)],
+      ['n2', heardEvery(0, 200_000)],
+      // n3 fell silent at 30 s: it cannot be judged.
+      ['n3', heardEvery(0, 30_000)],
+    ]);
+    const violations = checkI3({
+      heard,
+      until: 200_000,
+      specsDelivered: [
+        { nodeId: 'n1', generation: 2, at: 10_000 },
+        { nodeId: 'n1', generation: 3, at: 50_000 },
+        { nodeId: 'n2', generation: 5, at: 20_000 },
+        { nodeId: 'n3', generation: 2, at: 20_000 },
+        // Too recent to judge.
+        { nodeId: 'n2', generation: 6, at: 180_000 },
+      ],
+      observed: new Map([
+        // n1 reported 2 in time, and 3 only after the 60 s bound.
+        [
+          'n1',
+          [
+            { generation: 2, at: 12_000 },
+            { generation: 3, at: 115_000 },
+          ],
+        ],
+        // n2 skipped straight to 5.
+        ['n2', [{ generation: 5, at: 70_000 }]],
+      ]),
+    });
+    expect(violations.map((v) => [v.invariant, v.subject])).toEqual([['I3', 'n1']]);
+    expect(violations[0]!.message).toMatch(/generation 3/);
   });
 });
 

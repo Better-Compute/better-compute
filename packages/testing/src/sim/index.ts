@@ -33,9 +33,11 @@ export {
   atomMilliseconds,
   checkI1,
   checkI2,
+  checkI3,
   checkI4,
   checkI5,
   checkI8,
+  CONVERGENCE_MS,
   LIVENESS_WINDOW_MS,
 } from './invariants.js';
 export type {

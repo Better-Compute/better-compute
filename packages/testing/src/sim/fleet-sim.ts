@@ -18,6 +18,7 @@ import { GatewayStub, type GatewayStubOptions } from './gateway-stub.js';
 import {
   checkI1,
   checkI2,
+  checkI3,
   checkI4,
   checkI5,
   checkI8,
@@ -242,9 +243,21 @@ export function createFleetSim(options: FleetSimOptions): FleetSim {
       case 'drop':
       case 'duplicate':
       case 'reorder': {
-        // I4's ground truth: the gateway side received a frame from this node now.
-        if (event.type === 'deliver' && event.dir === 'a->b')
-          facts.heardFrom(nodeId, scheduler.now());
+        if (event.type === 'deliver') {
+          const now = scheduler.now();
+          if (event.dir === 'a->b') {
+            // I4's ground truth: the gateway side received a frame from this node now.
+            facts.heardFrom(nodeId, now);
+            const msg = (event.frame as AgentFrame).msg;
+            // I3: what the node reported converged.
+            if (msg.case === 'status')
+              facts.observedGeneration(nodeId, Number(msg.value.observedGeneration), now);
+          } else {
+            const msg = (event.frame as ServerFrame).msg;
+            if (msg.case === 'desired')
+              facts.specDelivered(nodeId, Number(unwrapDesiredState(msg.value).generation), now);
+          }
+        }
         if (!logFrames) return;
         const up = event.dir === 'a->b';
         const detail = up
@@ -433,6 +446,14 @@ export function createFleetSim(options: FleetSimOptions): FleetSim {
           ...(g ? { outcomes: g.outcomes } : {}),
         }),
       ];
+      violations.push(
+        ...checkI3({
+          specsDelivered: facts.specsDelivered,
+          observed: facts.observed,
+          heard: facts.heard,
+          until: scheduler.now(),
+        }),
+      );
       if (g) {
         violations.push(...checkI4({ connectivity: g.connectivity, heard: facts.heard }));
         violations.push(...checkI5({ releases: g.releases, connectivity: g.connectivity }));
