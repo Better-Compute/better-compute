@@ -92,7 +92,7 @@ export interface EventsModuleOptions extends WebhookSecrets, UrlPolicy {
   fetch?: typeof globalThis.fetch;
   maxPerTenant?: number;
   /** Counts every event the fan-out reads by catalog family (`eventCounter(registry)` from observability). */
-  countEvent?: (family: string, module: string) => void;
+  countEvent?: (family: string, module: string, type: string) => void;
   /** Plugin event families subscriptions may name, or `false` to accept any pattern (see `eventCatalog`). */
   extraEvents?: readonly EventFamily[] | false;
   delivery?: Pick<

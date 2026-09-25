@@ -399,8 +399,8 @@ async function enqueueDeliveries(
 export interface FanOutOptions {
   /** The cursor row name. Default `webhooks`. */
   name?: string;
-  /** Called once per event read, with its catalog family (`(unknown)` outside it): metrics. */
-  countEvent?: (family: string, module: string) => void;
+  /** Called once per event read, with its catalog family (`(unknown)` outside it) and its type: metrics. */
+  countEvent?: (family: string, module: string, type: string) => void;
   /** The catalog `countEvent` classifies by (default `eventCatalog`). */
   catalog?: readonly EventFamily[];
   limit?: number;
@@ -455,7 +455,11 @@ export async function fanOutWebhooks(
       for (const event of page.events) {
         const family = eventFamilyOf(event.type, options.catalog);
         try {
-          options.countEvent(family?.type ?? '(unknown)', family?.module ?? '(unknown)');
+          options.countEvent(
+            family?.type ?? '(unknown)',
+            family?.module ?? '(unknown)',
+            event.type,
+          );
         } catch {
           // Metrics never break the fan-out.
         }

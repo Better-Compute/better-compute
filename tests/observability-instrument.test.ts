@@ -10,6 +10,7 @@ import {
   meteredProvider,
   createObserver,
   placementObserver,
+  resolverLookupCounter,
   revocationFeedCollector,
   runtimeObserver,
   standardMetrics,
@@ -197,6 +198,55 @@ describe('placementObserver', () => {
       seconds: 1,
     });
     expect(bare.value('placements_total', { outcome: 'error' })).toBe(1);
+  });
+});
+
+describe('the standard series with a writer of their own', () => {
+  it('gateway_sessions{role}, security_events_total{type} and resolver_lookups_total{result}', () => {
+    const registry = createMetrics();
+    const metrics = standardMetrics(registry);
+    let sessions: { role: unknown; inFlight: number; upgradeRequired: boolean }[] = [
+      { role: 'node', inFlight: 0, upgradeRequired: false },
+      { role: 'node', inFlight: 0, upgradeRequired: false },
+      { role: 'site', inFlight: 0, upgradeRequired: false },
+    ];
+    const gateway = {
+      status: () => ({
+        id: 'gw_1',
+        sessions: sessions.length,
+        maxStreams: 10,
+        draining: false,
+        leaseEpoch: 1,
+      }),
+      sessions: () => sessions,
+    };
+    gatewayCollector(
+      registry,
+      () => [gateway, { ...gateway, status: () => ({ ...gateway.status(), id: 'gw_2' }) }],
+      {
+        metrics,
+      },
+    );
+    registry.expose();
+    expect(registry.value('gateway_sessions', { role: 'node' })).toBe(4);
+    expect(registry.value('gateway_sessions', { role: 'site' })).toBe(2);
+    sessions = [{ role: 'node', inFlight: 0, upgradeRequired: false }];
+    registry.expose();
+    expect(registry.value('gateway_sessions', { role: 'node' })).toBe(2);
+    expect(registry.value('gateway_sessions', { role: 'site' })).toBe(0);
+
+    const count = eventCounter(registry, metrics);
+    count('security.*', 'server', 'security.join.refused');
+    count('security.*', 'server', 'security.join.refused');
+    count('node.*', 'server', 'node.connected');
+    count('security.*', 'server');
+    expect(registry.value('security_events_total', { type: 'security.join.refused' })).toBe(2);
+    expect(registry.value('events_total', { family: 'security.*', module: 'server' })).toBe(3);
+
+    const lookup = resolverLookupCounter(metrics);
+    for (const result of ['hit', 'hit', 'miss', 'timeout']) lookup(result);
+    expect(registry.value('resolver_lookups_total', { result: 'hit' })).toBe(2);
+    expect(registry.value('resolver_lookups_total', { result: 'timeout' })).toBe(1);
   });
 });
 

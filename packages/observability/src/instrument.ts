@@ -182,7 +182,11 @@ export interface SampledGateway {
 export function gatewayCollector(
   registry: MetricsRegistry,
   gateways: () => readonly SampledGateway[],
-  options: { now?: () => number } = {},
+  options: {
+    now?: () => number;
+    /** Also fills the standard `gateway_sessions{role}` (this process's sessions over all its gateways). */
+    metrics?: Pick<StandardMetrics, 'gatewaySessions'>;
+  } = {},
 ): void {
   const now = options.now ?? Date.now;
   const sessions = registry.gauge('gateway_open_sessions', 'Open agent sessions by role', [
@@ -227,7 +231,24 @@ export function gatewayCollector(
     'Seconds since a gateway loop last ran cleanly (-1 before its first clean run)',
     ['gateway', 'loop'],
   );
+  const seenRoles = new Set<string>();
   registry.collect(() => {
+    const totals = new Map<string, number>();
+    for (const gateway of gateways()) {
+      for (const session of gateway.sessions()) {
+        const role = labelValue(String(session.role));
+        totals.set(role, (totals.get(role) ?? 0) + 1);
+      }
+    }
+    if (options.metrics) {
+      // Roles seen before and gone now read 0 rather than their last count.
+      for (const role of seenRoles)
+        if (!totals.has(role)) options.metrics.gatewaySessions.set({ role }, 0);
+      for (const [role, count] of totals) {
+        options.metrics.gatewaySessions.set({ role }, count);
+        seenRoles.add(role);
+      }
+    }
     for (const gateway of gateways()) {
       const status = gateway.status();
       const id = labelValue(status.id);
@@ -358,10 +379,28 @@ export function runtimeObserver(
  * A counter of outbox events by family (the event catalog's families bound the label): pass the returned function
  * as `eventsModule({ countEvent })`, which calls it once per event its fan-out reads.
  */
-export function eventCounter(registry: MetricsRegistry): (family: string, module: string) => void {
+export function eventCounter(
+  registry: MetricsRegistry,
+  metrics?: Pick<StandardMetrics, 'securityEvents'>,
+): (family: string, module: string, type?: string) => void {
   const events = registry.counter('events_total', 'Outbox events by catalog family', [
     'family',
     'module',
   ]);
-  return (family, module) => events.inc({ family: labelValue(family), module: labelValue(module) });
+  return (family, module, type) => {
+    events.inc({ family: labelValue(family), module: labelValue(module) });
+    // Security events by exact type (a bounded set the control plane defines): `security_events_total{type}`.
+    if (metrics && type?.startsWith('security.'))
+      metrics.securityEvents.inc({ type: labelValue(type) });
+  };
+}
+
+/**
+ * The resolver's `onLookup` feeding `resolver_lookups_total{result}` (hit, miss, timeout, unavailable, scope,
+ * fallback): `bridge.resolveResource(fallback, { onLookup: resolverLookupCounter(metrics) })`.
+ */
+export function resolverLookupCounter(
+  metrics: Pick<StandardMetrics, 'resolverLookups'>,
+): (result: string) => void {
+  return (result) => metrics.resolverLookups.inc({ result: labelValue(result) });
 }
