@@ -65,6 +65,8 @@ interface LivenessRow {
   last_seen: Date | null;
   disconnected_at: Date | null;
   connected_at: Date | null;
+  /** When the node's newest certificate was issued: when it (re)joined. */
+  joined_at: Date | null;
   gateway_expires_at: Date | null;
   unreachable_status: string | null;
   unreachable_since: Date | null;
@@ -114,6 +116,7 @@ export async function livenessIn(
       `SELECT n.connectivity, n.no_schedule_reasons, n.owner_tenant_id,
               p.class AS pool_class, p.policy AS pool_policy,
               s.gateway_id, s.last_seen, s.disconnected_at, s.connected_at,
+              (SELECT max(nc.issued_at) FROM node_certs nc WHERE nc.node_id = n.id) AS joined_at,
               l.expires_at AS gateway_expires_at,
               c.status AS unreachable_status, c.since AS unreachable_since
          FROM nodes n
@@ -166,7 +169,11 @@ export async function livenessIn(
       const seen = [toMs(row.last_seen), toMs(row.disconnected_at)].filter(
         (value): value is number => value !== undefined,
       );
-      const lastAlive = seen.length ? Math.max(...seen) : toMs(row.connected_at);
+      // A node that joined but never opened a session yet (a power-on herd queued at the gateways)
+      // counts from its join, its newest certificate, instead of timing out at once.
+      const lastAlive = seen.length
+        ? Math.max(...seen)
+        : (toMs(row.connected_at) ?? toMs(row.joined_at));
       let deadline =
         lastAlive === undefined
           ? Number.NEGATIVE_INFINITY
@@ -296,7 +303,9 @@ export async function sweepLiveness(
       WHERE (n.connectivity = 'connected'
              AND (s.gateway_id IS NULL OR l.expires_at IS NULL OR l.expires_at <= compute_now()))
          OR (NOT $4::bool AND n.connectivity = 'disconnected'
-             AND COALESCE(GREATEST(s.last_seen, s.disconnected_at), s.connected_at, '-infinity')
+             AND COALESCE(GREATEST(s.last_seen, s.disconnected_at), s.connected_at,
+                          (SELECT max(nc.issued_at) FROM node_certs nc WHERE nc.node_id = n.id),
+                          '-infinity')
                  + make_interval(secs => $1::float8
                      + CASE WHEN s.gateway_id IS NOT NULL
                              AND (l.expires_at IS NULL OR l.expires_at <= compute_now())

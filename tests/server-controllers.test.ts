@@ -593,6 +593,29 @@ describe('Liveness', () => {
     });
   });
 
+  it('gives a node that joined but never opened a session the lease TTL from its join (a power-on herd)', async () => {
+    const fixture = await setup();
+    const id = await seedNode(fixture, { state: 'adopted', connectivity: 'disconnected' });
+    // As JoinService leaves it: a session row with no activity yet, and the certificate just issued.
+    await fixture.database.query(
+      `UPDATE node_sessions SET gateway_id = NULL, last_seen = NULL, connected_at = NULL,
+         disconnected_at = NULL WHERE node_id = $1`,
+      [id],
+    );
+    await fixture.database.query(
+      `INSERT INTO node_certs (serial, node_id, role, identity_gen, spki_sha256, der, not_before, not_after)
+       VALUES ('serial-herd', $1, 'node', 1, '\\x00', '\\x00', compute_now() - interval '1 hour',
+               compute_now() + interval '1 day')`,
+      [id],
+    );
+    await fixture.compute.jobs.liveness!.tick();
+    expect(await at(fixture, id)).toBe('disconnected'); // not at once: it joined just now
+    await run(fixture, 35_000);
+    expect(await at(fixture, id)).toBe('disconnected');
+    await run(fixture, 10_000); // 45 s after the join, still no session
+    expect(await at(fixture, id)).toBe('unreachable');
+  });
+
   it('holds timeouts back for 5 min after the controller was down for more than 20 s', async () => {
     const fixture = await setup();
     const id = await seedNode(fixture, { state: 'adopted', connectivity: 'disconnected' });
