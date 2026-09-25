@@ -214,7 +214,8 @@ func (a *Agent) convergeOnce(ctx context.Context) bool {
 		sections[converge.Section(strconv.Itoa(no))] = []byte{0}
 	}
 	a.devices.generation = generation
-	report, err := converge.Run(ctx, converge.Spec{Generation: generation, Sections: sections}, []converge.Converger{a.devices, telemetryConverger{}})
+	a.access.generation = generation
+	report, err := converge.Run(ctx, converge.Spec{Generation: generation, Sections: sections}, []converge.Converger{a.devices, a.access, telemetryConverger{}})
 	if err != nil {
 		return false
 	}

@@ -130,12 +130,13 @@ func welcome(sections ...string) *agentv1.ServerFrame {
 // ---- a host in memory --------------------------------------------------------------------------
 
 type fakeHost struct {
-	mu      sync.Mutex
-	boot    string
-	root    string
-	inv     *inventory.NodeInventory
-	reboots []string
-	onBoot  func()
+	mu         sync.Mutex
+	boot       string
+	root       string
+	inv        *inventory.NodeInventory
+	reboots    []string
+	onBoot     func()
+	sshReloads int
 }
 
 func (h *fakeHost) BootID() (string, error) { return h.boot, nil }
@@ -153,6 +154,12 @@ func (h *fakeHost) Reboot(reason string) error {
 	return nil
 }
 func (h *fakeHost) Path(abs string) string { return filepath.Join(h.root, filepath.FromSlash(abs)) }
+func (h *fakeHost) ReloadSSH() error {
+	h.mu.Lock()
+	h.sshReloads++
+	h.mu.Unlock()
+	return nil
+}
 func (h *fakeHost) Logs(_ context.Context, unit string, _ time.Duration) ([]byte, error) {
 	return []byte(unit + ": started\nenv: BCD_JOIN_TOKEN=bcjt_join_01k5w0000000000000000000000.secretsecret\n"), nil
 }

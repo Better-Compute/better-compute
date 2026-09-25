@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -29,6 +31,8 @@ type Host interface {
 	Path(abs string) string
 	// Logs returns a systemd unit's log lines of the last since (logs.collect).
 	Logs(ctx context.Context, unit string, since time.Duration) ([]byte, error)
+	// ReloadSSH makes sshd re-read its configuration (the access converger's drop-in).
+	ReloadSSH() error
 }
 
 // RealHost is the machine bcd runs on.
@@ -65,6 +69,21 @@ func (h *RealHost) Hostname() string {
 func (h *RealHost) Inventory() (*inventory.NodeInventory, error) { return h.Collect() }
 
 func (h *RealHost) Reboot(reason string) error { return h.RebootFunc(reason) }
+
+// ReloadSSH reloads sshd through systemd (Debian names the unit ssh, others sshd). A host under a
+// fake root has no sshd to reload.
+func (h *RealHost) ReloadSSH() error {
+	if h.Root != "" && h.Root != "/" {
+		return nil
+	}
+	var last error
+	for _, unit := range []string{"ssh", "sshd"} {
+		if last = exec.Command("systemctl", "reload-or-restart", unit).Run(); last == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("reload sshd: %w", last)
+}
 
 func (h *RealHost) Path(abs string) string {
 	if h.Root == "" || h.Root == "/" {

@@ -92,24 +92,27 @@ type Agent struct {
 	lanes       *dispatch.Lanes
 	laneConfig  map[dispatch.Lane]dispatch.LaneConfig
 	devices     *devicesConverger
+	access      *accessConverger
 	convergeCh  chan struct{}
 	rng         *rand.Rand
 	ctx         context.Context
 	// key is the node key (read without mu: attested results are signed under it).
 	key atomic.Pointer[ecdsa.PrivateKey]
 
-	mu            sync.Mutex
-	state         *State
-	sess          *sess
-	offset        time.Duration
-	execs         map[string]*exec
-	deferred      map[string]*deferred
-	overflow      []journal.Event
-	spec          *agentv1.NodeSpec
-	applied       uint64
-	observed      uint64
-	lastStatus    *agentv1.StatusReport
-	revoked       bool
+	mu         sync.Mutex
+	state      *State
+	sess       *sess
+	offset     time.Duration
+	execs      map[string]*execution
+	deferred   map[string]*deferred
+	overflow   []journal.Event
+	spec       *agentv1.NodeSpec
+	applied    uint64
+	observed   uint64
+	lastStatus *agentv1.StatusReport
+	revoked    bool
+	// execJWKS is the applied access section's exec-ticket JWKS (tunnels).
+	execJWKS      string
 	upgradeNeeded bool
 
 	invMu       sync.Mutex
@@ -174,7 +177,7 @@ func New(o Options) (*Agent, error) {
 		convergeCh:  make(chan struct{}, 1),
 		rng:         rand.New(rand.NewSource(time.Now().UnixNano())),
 		state:       o.State,
-		execs:       map[string]*exec{},
+		execs:       map[string]*execution{},
 		deferred:    map[string]*deferred{},
 		applied:     meta.AppliedGeneration,
 	}
@@ -192,6 +195,7 @@ func New(o Options) (*Agent, error) {
 		return nil, err
 	}
 	a.devices = &devicesConverger{a: a}
+	a.access = &accessConverger{a: a}
 	a.key.Store(o.Key)
 	return a, nil
 }

@@ -56,8 +56,8 @@ const (
 	phaseDone
 )
 
-// exec is an accepted command in this process.
-type exec struct {
+// execution is an accepted command in this process.
+type execution struct {
 	cmd     dispatch.Command
 	kind    *Kind
 	phase   phase
@@ -201,7 +201,7 @@ func (a *Agent) admitLocked(cmd dispatch.Command, recheck bool, badSig bool) {
 		return
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
-	x := &exec{cmd: cmd, kind: kind, phase: phaseQueued, release: release, cancel: cancel, ctx: ctx}
+	x := &execution{cmd: cmd, kind: kind, phase: phaseQueued, release: release, cancel: cancel, ctx: ctx}
 	a.execs[cmd.ID] = x
 	a.log.Info("command accepted", "id", cmd.ID, "kind", cmd.Kind, "lane", kind.Lane.String())
 	a.sendLocked(updateFrame(&agentv1.CommandUpdate{
@@ -211,7 +211,7 @@ func (a *Agent) admitLocked(cmd dispatch.Command, recheck bool, badSig bool) {
 }
 
 // execute waits for a lane worker, then runs the kind and records its result.
-func (a *Agent) execute(x *exec) {
+func (a *Agent) execute(x *execution) {
 	workerDone, err := a.lanes.Work(x.ctx, x.kind.Lane)
 	if err != nil {
 		return // cancelled while queued: onCancel completed it
@@ -258,7 +258,7 @@ func (a *Agent) markRunning(id string) error {
 	return nil
 }
 
-func (a *Agent) finish(x *exec, r journal.Result, err error) {
+func (a *Agent) finish(x *execution, r journal.Result, err error) {
 	if err != nil {
 		var ke *KindError
 		if errors.As(err, &ke) {
