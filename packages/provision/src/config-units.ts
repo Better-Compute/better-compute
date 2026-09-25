@@ -128,7 +128,9 @@ export async function hostSpecFor(
   units: readonly ConfigUnitDefinition[] = builtinConfigUnits,
 ): Promise<Partial<NodeSpec>> {
   // A pool layout change reaches a node only once capacity granted it (every atom free, §10.4):
-  // until then the node keeps the layout capacity froze it at (provision/0004).
+  // until then the node keeps the layout capacity froze it at (provision/0004). Capacity's
+  // `carriesPoolLayout` reads the same source (the last succeeded workflow's
+  // profile_document->'hostConfig'): change both together.
   const { rows } = await sql.query<{
     host_config: Record<string, Record<string, Json>> | null;
     pool_policy: Record<string, unknown> | null;
