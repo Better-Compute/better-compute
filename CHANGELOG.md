@@ -27,6 +27,20 @@
     - The §16 gateway gate is met on a workstation: 5k mTLS sessions, 0 drops, dispatch p99 26 ms.
   - Tests: the §16 v0.3 MCP confirmation acceptance and §12.6 example policies end to end, §5.6 walkthrough 2 (acme-cloud), the authz matrix known-key replay step; `pnpm check` runs the remote-IAM suites, `proto-gen --check` and `buf breaking`. Tools: `scripts/private-commit.mjs` (compare-and-swap commits), `scripts/head-check.mjs` (tests the committed tree in a worktree).
 
+- Round 4, capacity and sandboxes ([097b34]):
+  - Capacity:
+    - The pool-lease placer reads a lazy `PoolIndex`: per-class counts from `capacity_device_counts` (trigger-kept), booked devices only, and full devices and links per node on first view. It loads the index before taking the pool lock. At 10k nodes on PGlite, `placeQueued` goes from ~500 to ~1,000 placements/s and lock hold p90 from 875 to 60 ms.
+    - Also: single-tenant offers, `dedicated=<tenant>` taints, node label constraints (`nodeLabels`, `'*'` any value), the MIG layout gate, attested `AllocationBound`, admit hooks for node leases, the budget admission check, reservation `operation`/`poll`, active conditions, `onPlacement` metrics, the I7 solver, fast-check planning properties, `capacityTenantDeleted`, and JSON Schemas for every method.
+  - Sandboxes (§3.7, D24), a `sandboxes` + `sandboxTemplates` group on `vps()`:
+    - Each sandbox drives one hosted instance: admission, placement, quota, IPAM, sealed user data, metering and deletion are the instance's. Instance item methods refuse a sandbox's instance.
+    - Templates are checked against a hosted pool once. They carry TTL bounds, `warm: { min, max }`, `env` (tenant `secret://` refs written to `/etc/sandbox/env` inside broker-sealed user data) and `network` (`egress`/`private`/`none` → `InstanceSpec.networkPolicy`).
+    - TTL expiry is an ordinary instance delete (`sandbox.expired`, then `deleted`). `extend` is decided with the new lifetime.
+    - Warm pools: `paused` when the runtime can pause, otherwise `stopped`. A warm instance is claimed with `FOR UPDATE SKIP LOCKED` only after the create's own allow, and never from an older template shape. Warm capacity is metered as `vps.sandbox.warm` until claimed.
+    - Snapshots: `sandboxes.snapshot` sends `instance.snapshot` through `vps({ snapshots: SnapshotStore })` into a tenant-private `sandbox_snapshots` table. `create({ fromSnapshot })` restores on the same runtime and `cpu.model`, and FakeHypervisor carries guest memory across.
+    - Exec without an in-guest agent: tunnels' `sandboxes.exec` returns an `ssh` ticket (`act`, `inst`, `sbx`) plus a ≤15 min certificate from the `sandboxSsh` CA for `<account>@<instanceId>`, which vps renders into the guest's trust.
+    - Also: `readyAt` stamped at first run, selfCheck findings, and `vps().tenantDeleted`, which deletes every instance of a deleted tenant (hosted instances' inline allocations were never released before).
+  - `daemon/README.md` rewritten for the v0.1 daemon.
+
 - Metal attestation and dedicated-root leases:
   - Security fix: a wipe or diagnostics result counts as attested only when the node signed it. The gateway stores `CommandUpdate.node_sig` (`commands.result_sig*`, `core/0012_v02_evidence`), and metal's default `nodeSignedResults()` verifies it with pki against `node_certs`. Before this, the kind's `attested` flag was trusted, so a gateway could forge a wipe. A lessee's `node-tenant` certificate never attests.
   - v0.5 `binding: 'node'` (metal side): a dedicated-root lease deploys the lessee's profile under `tenant-controlled` trust with a revoked platform identity, and marks the allocation bound. Its release runs the §13 teardown (fence, attested secure erase, DCGM, firmware baseline check with quarantine on drift, new identity generation).
