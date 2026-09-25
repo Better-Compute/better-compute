@@ -18,6 +18,7 @@ const database = pglite();
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), 'bc-downloads-'));
   await writeFile(join(dir, 'bcd_0.1.0_linux_amd64'), 'ELF-amd64');
+  await writeFile(join(dir, 'bcx-ipmi_0.1.0_linux_amd64.tar.gz'), 'TGZ-ipmi');
 });
 afterAll(async () => {
   await rm(dir, { recursive: true, force: true });
@@ -52,6 +53,11 @@ describe('downloads', () => {
     expect((await get(compute, 'downloads/bcd/v0.1.0/linux-amd64')).status).toBe(200);
     const arm64 = await get(compute, 'downloads/bcd/0.2.0/linux-arm64');
     expect(await arm64.text()).toBe('ELF-arm64');
+    // The bcx plugins bcd's release ships, by name: goreleaser's archive.
+    const ipmi = await get(compute, 'downloads/bcx-ipmi/0.1.0/linux-amd64');
+    expect(ipmi.status).toBe(200);
+    expect(await ipmi.text()).toBe('TGZ-ipmi');
+    expect(ipmi.headers.get('content-disposition')).toContain('bcx-ipmi_0.1.0_linux_amd64.tar.gz');
   });
 
   it('answers 404 for anything that is not a known artifact, and when not configured', async () => {
@@ -63,6 +69,10 @@ describe('downloads', () => {
       'downloads/bcd/..%2F..%2Fetc/linux-amd64',
       'downloads/bcd/0.1.0/../../x',
       'downloads/other/0.1.0/linux-amd64',
+      // Only named products: no free-form plugin names, no other files of a release.
+      'downloads/bcx-evil/0.1.0/linux-amd64',
+      'downloads/constructor/0.1.0/linux-amd64',
+      'downloads/bcx-ipmi/0.9.9/linux-amd64',
     ])
       expect((await get(compute, path)).status, path).toBe(404);
     expect((await get(server(), 'downloads/bcd/0.1.0/linux-amd64')).status).toBe(404);
