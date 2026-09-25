@@ -47,12 +47,12 @@
     {
       "name": "vps",
       "groups": ["flavors", "instances", "providerAccounts"],
-      "migrations": ["vps/0001_instances"]
+      "migrations": ["vps/0001_instances", "vps/0002_sealed_user_data"]
     },
     {
       "name": "events",
       "groups": ["webhooks"],
-      "migrations": ["events/0001_webhooks"]
+      "migrations": ["events/0001_webhooks", "events/0002_delivery_retention"]
     },
     {
       "name": "fleet",
@@ -80,6 +80,7 @@
     "event-subscribers",
     "events.deliver",
     "events.fanout",
+    "events.prune",
     "fleet.drift",
     "health",
     "inventory",
@@ -90,6 +91,7 @@
     "outbox-dispatch",
     "rollout",
     "site-boot",
+    "vps.hosts",
     "vps.instances",
     "vps.usage",
     "workflow"
