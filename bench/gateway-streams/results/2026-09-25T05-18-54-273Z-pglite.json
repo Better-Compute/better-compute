@@ -1,0 +1,79 @@
+{
+  "suite": "gateway-streams",
+  "date": "2026-09-25T05:18:54.273Z",
+  "commit": "9fd4623",
+  "referenceHardware": false,
+  "machine": {
+    "cpus": 64,
+    "cpuModel": "AMD Ryzen Threadripper PRO 9995WX 96-Cores",
+    "memoryBytes": 274182045696
+  },
+  "node": "v25.6.0",
+  "adapter": "pglite",
+  "config": {
+    "sessions": 5000,
+    "durationMs": 1800000,
+    "commandsPerSecond": 50,
+    "streamsPerConnection": 1,
+    "heartbeatMs": 10000,
+    "transport": "mtls",
+    "storm": true
+  },
+  "certificatesIssuedMs": 1001,
+  "loadGeneratorInProcess": false,
+  "ramp": {
+    "established": 5000,
+    "ms": 30417,
+    "handshakeRetries": 0,
+    "dialRetries": 162
+  },
+  "steady": {
+    "heldSessions": 5000,
+    "unexpectedCloses": 0,
+    "enqueued": 90480,
+    "enqueueErrors": 0,
+    "dispatched": 90000,
+    "dispatchMs": {
+      "p50": 14,
+      "p90": 20,
+      "p99": 24,
+      "max": 422
+    },
+    "rssMiB": {
+      "max": 2016,
+      "last": 1948
+    },
+    "heapMiB": {
+      "max": 235
+    },
+    "eventLoopDelayMs": {
+      "p99": 25,
+      "max": 418
+    }
+  },
+  "storm": {
+    "reconnected": 5000,
+    "backMs": {
+      "p50": 26590,
+      "p99": 40115,
+      "all": 40402
+    },
+    "replayedDeliveries": 0,
+    "commandStates": {
+      "succeeded": 90480
+    },
+    "notSucceeded": 0
+  },
+  "closeReasons": {
+    "close 8": 5000,
+    "close 0": 5000,
+    "error ERR_HTTP2_STREAM_CANCEL": 162
+  },
+  "gate": {
+    "sessions": true,
+    "dispatchP99": true,
+    "rss": true,
+    "durationAtLeast30Min": true,
+    "met": true
+  }
+}
