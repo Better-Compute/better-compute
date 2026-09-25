@@ -4951,7 +4951,7 @@
     "group": "sandboxSnapshots",
     "slug": "sandbox-snapshots",
     "module": "vps",
-    "overview": "",
+    "overview": "Sandbox snapshots are their own resource, so a snapshot kept with `keep: true` outlives the sandbox it came from. `sandboxes.snapshot` takes them and `sandboxes.create` restores from them with `fromSnapshot`. These methods list, read and delete them. Snapshots stay private to their tenant and are never promoted to shared images. See [Sandboxes](/docs/guides/vps/sandboxes).",
     "methods": [
       {
         "method": "list",
@@ -4998,8 +4998,8 @@
           "required": ["tenantId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns a page of the tenant's snapshots, newest first, including kept snapshots of deleted sandboxes.",
+        "description": "Returns a page of the tenant's snapshots, newest first, including kept snapshots of deleted sandboxes.\n\n`scope` defaults to `mine`, the caller's own snapshots; `all` lists the tenant's. `sandboxId` keeps one sandbox's snapshots. `limit` is 1 to 200 (default 50), and `cursor`, the last snapshot id of the previous page, is set while more remain. Deleted snapshots are never listed. Decided as `compute:sandboxes:read` on the tenant."
       },
       {
         "method": "get",
@@ -5031,8 +5031,8 @@
           "required": ["tenantId", "snapshotId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns one snapshot of the tenant with its state (`pending`, `ready` or `failed`), and once ready its sha256, size, runtime and CPU model.",
+        "description": "Returns one snapshot of the tenant with its state (`pending`, `ready` or `failed`), and once ready its sha256, size, runtime and CPU model.\n\nA deleted snapshot, or one of another tenant, is `NOT_FOUND`. Decided as `compute:sandboxes:read` on the snapshot."
       },
       {
         "method": "delete",
@@ -5064,8 +5064,8 @@
           "required": ["tenantId", "snapshotId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Deletes a snapshot at once for reads and restores; the stored object is removed by the next `vps.sandboxes` pass (after its upload settled, for a pending one), so no network call runs in the request.",
+        "description": "Deletes a snapshot at once for reads and restores; the stored object is removed by the next `vps.sandboxes` pass (after its upload settled, for a pending one), so no network call runs in the request.\n\nIdempotent: deleting a deleted snapshot answers `{ deleted: true }` again; an unknown one is `NOT_FOUND`. Publishes `sandbox.snapshot.deleted`. Decided as `compute:sandboxes:delete` on the snapshot."
       }
     ]
   },
