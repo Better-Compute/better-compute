@@ -2524,6 +2524,47 @@
       ]
     },
     {
+      "name": "pki trust-version",
+      "aliases": [],
+      "group": "PKI",
+      "summary": "Show the trust bundle version the deployment publishes, and the one to sign a quorum change for",
+      "description": "pki trust-version reads the trust bundle the deployment last published (its version follows its content: a changed bundle publishes the next version, pki.trustVersion is a floor) and compares it with this configuration and PKI bundle: whether they publish the same bundle, whether the configured approver quorum differs (then its current approvers sign it for nextVersion: better-compute batch sign-approvers --version <nextVersion>, with pki.trustVersion set to it), and how many connected daemons hold that version.",
+      "usage": "better-compute pki trust-version [--pki PATH] [--config PATH]",
+      "target": "config",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--pki",
+          "value": "PATH",
+          "optional": true,
+          "description": "The PKI bundle written by pki init",
+          "env": "BETTER_COMPUTE_PKI",
+          "default": ".better-compute/pki.json"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute pki trust-version"]
+    },
+    {
       "name": "pki renew-ca",
       "aliases": [],
       "group": "PKI",
@@ -2775,8 +2816,8 @@
       "aliases": [],
       "group": "Quorum",
       "summary": "Sign a change of the approver set with a current approver key",
-      "description": "batch sign-approvers signs, as one of the CURRENT approvers (--key), the quorum a new trust bundle will carry: its approver keys (--approvers, the .pub files of the whole new set), --threshold, --tiers and --unbatched, for trust bundle --version. Daemons that hold approver keys take a changed quorum, removal included, only with such signatures from their current threshold of current approvers (PLAN.md §13): the join key alone, which the control plane holds, cannot lift or replace it. Give the signatures to the deployment's pki.approvers with that version. Prints the set's digest and the signature.",
-      "usage": "better-compute batch sign-approvers --key PATH --version N [--approvers PATHS] [--threshold K] [--tiers SIZE:K,…] [--unbatched N]",
+      "description": "batch sign-approvers signs, as one of the CURRENT approvers (--key), the quorum a new trust bundle will carry: its approver keys (--approvers, the .pub files of the whole new set), --threshold, --tiers and --unbatched, for trust bundle --version of the deployment's --trust-domain (default: the PKI bundle's; a set signed for staging never changes prod's quorum, even with shared approver keys). Daemons that hold approver keys take a changed quorum, removal included, only with such signatures from their current threshold of current approvers (PLAN.md §13): the join key alone, which the control plane holds, cannot lift or replace it. Give the signatures to the deployment's pki.approvers with that version. Prints the set's digest and the signature.",
+      "usage": "better-compute batch sign-approvers --key PATH --version N [--approvers PATHS] [--threshold K] [--tiers SIZE:K,…] [--unbatched N] [--trust-domain DOMAIN] [--pki PATH]",
       "target": "none",
       "args": [],
       "flags": [
@@ -2816,6 +2857,20 @@
           "optional": true,
           "description": "Unbatched destructive commands per hour",
           "default": 0
+        },
+        {
+          "flag": "--trust-domain",
+          "value": "DOMAIN",
+          "optional": true,
+          "description": "The deployment's trust domain (default: the PKI bundle's)"
+        },
+        {
+          "flag": "--pki",
+          "value": "PATH",
+          "optional": true,
+          "description": "The PKI bundle written by pki init",
+          "env": "BETTER_COMPUTE_PKI",
+          "default": ".better-compute/pki.json"
         },
         {
           "flag": "--format",

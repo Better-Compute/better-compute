@@ -22,7 +22,8 @@
         "capacity/0001_device_links",
         "capacity/0002_lease_health",
         "capacity/0003_device_counts",
-        "capacity/0004_mig_layouts"
+        "capacity/0004_mig_layouts",
+        "capacity/0005_extend_holds"
       ]
     },
     {
@@ -38,7 +39,8 @@
         "quorum/0002_payload_digest",
         "quorum/0003_trust_bundle_state",
         "quorum/0004_trust_bundle_approver_set",
-        "quorum/0005_batch_request"
+        "quorum/0005_batch_request",
+        "quorum/0006_trust_bundle_history"
       ]
     },
     {
@@ -95,7 +97,8 @@
         "vps/0010_sandbox_metric_indexes",
         "vps/0011_host_certificates",
         "vps/0012_host_cert_validity",
-        "vps/0013_sandbox_expiring"
+        "vps/0013_sandbox_expiring",
+        "vps/0014_sandbox_extending"
       ]
     },
     {
