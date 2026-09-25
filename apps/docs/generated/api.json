@@ -1042,6 +1042,21 @@
         "description": ""
       },
       {
+        "method": "unrescue",
+        "route": "POST /api/compute/metal/unrescue",
+        "kind": "mutation",
+        "action": "compute:nodes:provision",
+        "resource": "compute-node",
+        "alternatives": [],
+        "list": false,
+        "phase": "v0.2",
+        "module": "metal",
+        "status": "planned",
+        "input": null,
+        "summary": "",
+        "description": ""
+      },
+      {
         "method": "abort",
         "route": "POST /api/compute/metal/abort",
         "kind": "mutation",
