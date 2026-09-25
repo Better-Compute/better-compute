@@ -8,9 +8,12 @@ import {
   meteredAttestor,
   meteredGatewayServices,
   meteredProvider,
+  createObserver,
   placementObserver,
   revocationFeedCollector,
+  runtimeObserver,
   standardMetrics,
+  type ComputeSpan,
 } from '@better-compute/observability';
 import { closeFixtures, computeFixture } from '@better-compute/testing';
 import { defineProvider } from '@better-compute/vps';
@@ -194,6 +197,58 @@ describe('placementObserver', () => {
       seconds: 1,
     });
     expect(bare.value('placements_total', { outcome: 'error' })).toBe(1);
+  });
+});
+
+describe('runtimeObserver', () => {
+  it('feeds reconcile durations and swept commands, and reports reconcile spans without the key', () => {
+    const registry = createMetrics();
+    const spans: ComputeSpan[] = [];
+    const observe = runtimeObserver(
+      standardMetrics(registry),
+      createObserver({ metrics: registry, onSpan: (span) => spans.push(span) }),
+    );
+    observe.onRun({
+      reconciler: 'capacity.reservations',
+      key: 'rsv_1',
+      outcome: 'done',
+      durationMs: 12,
+    });
+    observe.onRun({
+      reconciler: 'capacity.reservations',
+      key: 'rsv_2',
+      outcome: 'sync-again',
+      durationMs: 8,
+    });
+    observe.onRun({
+      reconciler: 'health',
+      key: 'node_1',
+      outcome: 'error',
+      durationMs: 3,
+      code: 'CONFLICT',
+    });
+    observe.onSweep({ expired: 2, failed: 0 });
+    observe.onSweep({ expired: 1, failed: 3 });
+    const exposed = registry.expose();
+    expect(exposed).toContain(
+      'better_compute_reconcile_duration_seconds_count{reconciler="capacity.reservations"} 2',
+    );
+    expect(exposed).not.toContain('rsv_1');
+    expect(registry.value('commands_swept_total', { to: 'expired' })).toBe(3);
+    expect(registry.value('commands_swept_total', { to: 'failed' })).toBe(3);
+    expect(spans.map((span) => [span.name, span.outcome, span.code ?? null])).toEqual([
+      ['capacity.reservations', 'ok', null],
+      ['capacity.reservations', 'ok', null],
+      ['health', 'error', 'CONFLICT'],
+    ]);
+    expect(
+      registry.value('spans_total', {
+        kind: 'reconcile',
+        name: 'health',
+        outcome: 'error',
+        code: 'CONFLICT',
+      }),
+    ).toBe(1);
   });
 });
 

@@ -11,6 +11,7 @@ import {
   type ProviderImpl,
 } from '@better-compute/core';
 import { labelValue, type MetricsRegistry } from './registry.js';
+import type { Observer } from './spans.js';
 import type { StandardMetrics } from './standard.js';
 
 const outcomeOf = (error: unknown): string =>
@@ -303,6 +304,53 @@ export function placementObserver(
     metrics.placements.inc({ outcome: labelValue(observation.outcome) });
     if (observation.conflicts > 0) metrics.bookingConflicts.inc(undefined, observation.conflicts);
     duration?.observe({ placer: labelValue(observation.placer) }, observation.seconds);
+  };
+}
+
+/** One reconciler run, as the server runtime reports it (`worker.observe.onRun`), typed structurally. */
+export interface ReconcileRunLike {
+  reconciler: string;
+  /** The work key: never a metric label (unbounded). */
+  key?: string;
+  outcome: 'done' | 'sync-again' | 'error';
+  durationMs: number;
+  code?: string;
+}
+
+/** One CommandSweeper pass (`worker.observe.onSweep`). */
+export interface CommandSweepLike {
+  expired: number;
+  failed: number;
+}
+
+/**
+ * The runtime's worker hooks feeding `reconcile_duration_seconds{reconciler}` and `commands_swept_total{to}`,
+ * and, with an observer, a `reconcile` span per run:
+ *
+ * ```ts
+ * betterCompute({ worker: { observe: runtimeObserver(standardMetrics(registry), observer) } })
+ * ```
+ */
+export function runtimeObserver(
+  metrics: Pick<StandardMetrics, 'reconcileDuration' | 'commandsSwept'>,
+  observer?: Pick<Observer, 'report'>,
+): { onRun(run: ReconcileRunLike): void; onSweep(swept: CommandSweepLike): void } {
+  return {
+    onRun(run) {
+      const reconciler = labelValue(run.reconciler);
+      metrics.reconcileDuration.observe({ reconciler }, Math.max(0, run.durationMs) / 1000);
+      observer?.report({
+        kind: 'reconcile',
+        name: reconciler,
+        outcome: run.outcome === 'error' ? 'error' : 'ok',
+        ...(run.code === undefined ? {} : { code: run.code }),
+        durationMs: run.durationMs,
+      });
+    },
+    onSweep(swept) {
+      if (swept.expired > 0) metrics.commandsSwept.inc({ to: 'expired' }, swept.expired);
+      if (swept.failed > 0) metrics.commandsSwept.inc({ to: 'failed' }, swept.failed);
+    },
   };
 }
 
