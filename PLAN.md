@@ -287,7 +287,7 @@ A sandbox is a VPS instance with a template, a lifetime and a fast start, and it
   - the command kind `instance.snapshot`.
 
   A runtime without `pause` warms to `stopped`. A runtime without `snapshot` makes `sandboxes.snapshot` fail with `UNSUPPORTED`.
-- **Events:** `sandbox.created`, `ready`, `expired`, `deleted`, and `sandbox.snapshot.ready`.
+- **Events:** `sandbox.created`, `ready`, `extended`, `expiring` (once, ahead of `expiresAt`; an extend re-arms it), `expired`, `deleted`, `withdrawn` and `reassigned` (§12.8), and `sandbox.snapshot.ready`/`.failed`.
 
 ---
 
@@ -1500,9 +1500,9 @@ Remote fallback: a root subtree webhook, verified with `verifyWebhookSignature` 
 
 | Event | Compute reaction (after re-reading state) |
 |---|---|
-| `identity:offboard` (`successorId`), `identity:expire`, `identity:delete`, `iam:identities:delete\|update` | close streams; revoke break-glass certs; reassign reservations to `successorId` or apply tenant policy; remember `successorId` for the usage sink |
+| `identity:offboard` (`successorId`), `identity:expire`, `identity:delete`, `iam:identities:delete\|update` | close streams; revoke break-glass certs; reassign reservations to `successorId` or apply tenant policy; move open sandboxes, snapshots and templates to `successorId`, or delete the open sandboxes; remember `successorId` for the usage sink |
 | `auth:session:revoke*`, `identity:revoke-sessions`, `tenant:revoke-sessions` | recheck that identity's streams (no `sessionId` until U4); drop cached authentications |
-| `agent:suspend`, `agent:suspend-all`, `delegation:revoke` | close the agent's streams; cancel its unplaced reservations; handle active ones per tenant policy |
+| `agent:suspend`, `agent:suspend-all`, `delegation:revoke` | close the agent's streams; cancel its unplaced reservations; handle active ones per tenant policy; delete the open sandboxes it created (a sandbox is the agent's workspace) |
 | `binding:activate\|deactivate` | cap or close break-glass sessions |
 | `iam:tenants:update\|delete` | suspend admissions; schedule teardown and purge |
 | policy, role, binding, `iam:relationships:*`, `feature:*` | invalidate the read-decision and flag caches |
