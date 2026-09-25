@@ -64,6 +64,8 @@ interface Recorded {
 let recorded: Recorded;
 /** Actions the fake IAM refuses (the extra decisions vps makes). */
 const denied = new Set<string>();
+/** The fake IAM's `billingCheck`: a spent budget refuses. */
+let budgetSpent = false;
 /** The secret broker, for the tests that need one (sealed user data, template env). */
 let broker:
   | {
@@ -144,6 +146,11 @@ function moduleContext(sql: SqlExecutor): ModuleContext {
         recorded.decisions.push(decision.action);
         if (decision.resource.type === 'compute-fleet') recorded.fleetDecisions++;
         if (denied.has(decision.action)) throw new ComputeError('ACCESS_DENIED', 'Access denied');
+      },
+      async billingCheck() {
+        return budgetSpent
+          ? { allowed: false, blockedBy: { budgetId: 'bud_1', name: 'monthly' } }
+          : { allowed: true };
       },
     },
     // A real `commands` row, so settling reads its state and result like the gateway leaves them.
@@ -663,6 +670,32 @@ describe('sandboxes', () => {
     expect(recorded.events.find((event) => event.type === 'sandbox.deleted')?.data).toMatchObject({
       expired: false,
     });
+  });
+
+  it('extend only within budget where the pool checks it, and clear the refused lifetime', async () => {
+    const template = await createTemplate({ defaultTtlSeconds: 600, maxTtlSeconds: 3600 });
+    const sandbox = await createSandbox(template.id);
+    await db.query(
+      `UPDATE pools SET policy = policy || '{"admission": {"budgetCheck": "meter"}}'::jsonb WHERE id = $1`,
+      [pool],
+    );
+    budgetSpent = true;
+    try {
+      recorded.pending = [];
+      await expect(
+        call('sandboxes', 'extend', { tenantId: 'acme', sandboxId: sandbox.id, by: '10m' }),
+      ).rejects.toMatchObject({ code: 'SPEND_LIMIT_REACHED', details: { budgetId: 'bud_1' } });
+      expect(recorded.pending).toEqual([
+        { id: sandbox.id, attributes: { ttlSeconds: 1200 } },
+        { id: sandbox.id, attributes: null },
+      ]);
+      expect(await getSandbox(sandbox.id)).toMatchObject({ expiresAt: T0 + 600_000 });
+    } finally {
+      budgetSpent = false;
+    }
+    expect(
+      await call('sandboxes', 'extend', { tenantId: 'acme', sandboxId: sandbox.id, by: '10m' }),
+    ).toMatchObject({ expiresAt: T0 + 1200_000 });
   });
 
   it('list the caller’s own by default', async () => {

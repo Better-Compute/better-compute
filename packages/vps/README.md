@@ -131,8 +131,10 @@ show it.
   The TTL starts at admission. `wait` holds the answer until the sandbox leaves `starting`.
 
 - **Lifetime.** `extend({ until | by })` is decided with the new lifetime as the pending
-  `ttlSeconds`, and is bounded by `maxTtlSeconds`. `delete` and expiry are both an ordinary instance
-  delete. Events: `sandbox.created`, `ready` (stamped when the instance first runs), `extended`,
+  `ttlSeconds`, and is bounded by `maxTtlSeconds`. Like `create`, it runs capacity's budget check
+  where the pool asks for one (`budgetCheck: 'meter'`, or an offer's `stop-new`/`drain`): a spent
+  budget is `SPEND_LIMIT_REACHED` and clears the pending lifetime. `delete` and expiry are both an
+  ordinary instance delete. Events: `sandbox.created`, `ready` (stamped when the instance first runs), `extended`,
   `expired`, `deleted`.
 - **Warm pools.** The `vps.sandboxes` reconciler runs every 15 s. It keeps `warm.min` instances per
   template:

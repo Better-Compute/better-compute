@@ -15,6 +15,7 @@ import {
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
+import { budgetAdmissionCheck } from '@better-compute/capacity';
 import { readFlavorByName, type FlavorRecord } from './flavors.js';
 import {
   canonical,
@@ -2029,6 +2030,28 @@ export async function denyExtendSandbox(
     { type: 'sandbox', id: input.sandboxId, tenantId: input.tenantId },
     null,
   );
+}
+
+/**
+ * `sandboxes.extend`'s budget check (as `reservations.extend`'s): a longer sandbox is more spend, so
+ * a pool that checks budgets (or an offer that stops new work on a spent one) refuses it with
+ * `SPEND_LIMIT_REACHED`. A refusal also clears the pending lifetime.
+ */
+export async function budgetExtendSandboxCheck(
+  context: MethodContext,
+  input: SandboxRef,
+): Promise<void> {
+  const { rows } = await context.sql.query<{ pool_id: string }>(
+    `SELECT pool_id FROM sandboxes WHERE id = $1 AND tenant_id = $2`,
+    [input.sandboxId, input.tenantId],
+  );
+  if (!rows[0]) return;
+  try {
+    await budgetAdmissionCheck(context, input.tenantId, rows[0].pool_id);
+  } catch (error) {
+    await context.sql.transaction((tx) => denyExtendSandbox(context, input, tx));
+    throw error;
+  }
 }
 
 /** `sandboxes.extend` transaction 2 (allowed): moves `expiresAt` within the template's `maxTtlSeconds`. */

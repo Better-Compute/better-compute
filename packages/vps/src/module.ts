@@ -108,6 +108,7 @@ import {
   parseTemplateUpdate,
   prepareCreateSandbox,
   prepareExtendSandbox,
+  budgetExtendSandboxCheck,
   reconcileSandboxes,
   sandboxSelfCheck,
   sandboxSettled,
@@ -827,6 +828,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         admission: {
           prepare: (context, input, tx) => prepareExtendSandbox(context, input, tx),
           denied: (context, input, tx) => denyExtendSandbox(context, input, tx),
+          check: (context, input) => budgetExtendSandboxCheck(context, input),
         },
         handler: (context, input) => extendSandbox(depsOf(context), context, input),
       }),
