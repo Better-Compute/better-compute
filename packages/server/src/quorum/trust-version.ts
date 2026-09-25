@@ -95,6 +95,12 @@ export function trustBundleDigest(bundle: JoinTrustBundle): Uint8Array {
     .sort();
   hash.update(`roots:${roots.length}:${roots.join(',')}\n`);
   hash.update(approverSetInput(approverSetOf(bundle)));
+  // The epoch and its signatures too (review 10 L): a new epoch, or signatures added for it (the
+  // set's own, so daemons advance), is a new bundle that daemons must receive.
+  const signatures = (bundle.approverSetSignatures ?? [])
+    .map((signature) => `${signature.kid}:${Buffer.from(signature.sig).toString('hex')}`)
+    .sort();
+  hash.update(`\nepoch:${bundle.approverSetEpoch ?? 0n}\nsignatures:${signatures.join(',')}`);
   return new Uint8Array(hash.digest());
 }
 

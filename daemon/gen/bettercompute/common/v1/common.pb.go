@@ -468,12 +468,16 @@ type TrustBundle struct {
 	// the control plane holds: k-of-the-CURRENT-set signatures, purpose "approver-set", parts
 	// [uint64_be(approver_set_epoch), sha256(approver set input), trust_domain] (see protocol's
 	// approverSetInput; the verifier's own trust domain). Published on every version while the set is
-	// current. A daemon that holds approver keys at epoch e takes a different set, removal included,
-	// only with approver_set_epoch > e and these signatures by its current set at its current
-	// threshold; an older epoch is refused. When the quorum part is refused, the rest of the bundle
-	// (roots, version) still applies and the old quorum stays. A daemon without keys takes the first set
-	// as-is: that only adds restrictions. A daemon that missed two set changes with disjoint keys needs
-	// re-provisioning.
+	// current. One rule (review 10 M3): a daemon holding set H at epoch e adopts (set N, epoch e') only
+	// when e' > e AND k-of-H (H's threshold) signatures over (e', N, domain) verify; otherwise it keeps
+	// (H, e). That holds for N == H too: adopting a higher epoch for an unchanged set needs the set's
+	// own signatures. The list therefore carries both the previous set's signatures (which admit the
+	// change) and the new set's own signatures (which move daemons already holding it, or holding it
+	// again after a revert, to the new epoch, so a replay of an intermediate epoch fails). When the
+	// quorum part is refused, the rest of the bundle (roots, version) still applies. A daemon without
+	// keys takes the first set as-is unless pinned (approver_set_sha256 in its config). Residual risk:
+	// a daemon offline across two changes can be served an intermediate epoch by a compromised api;
+	// pin long-offline nodes again when they return.
 	ApproverSetSignatures []*Signature `protobuf:"bytes,7,rep,name=approver_set_signatures,json=approverSetSignatures,proto3" json:"approver_set_signatures,omitempty"`
 	// (v1.0) The epoch of the quorum fields (3-6): monotonic, separate from `version` (roots rotate
 	// without touching it), raised with every change of the set.

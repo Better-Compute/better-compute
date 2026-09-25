@@ -230,7 +230,7 @@ interface ConfiguredApprovers {
   threshold?: number;
   tiers?: readonly { maxScopeSize: number; threshold: number }[];
   unbatchedDestructivePerHour?: number;
-  setSignatures?: readonly unknown[];
+  setSignatures?: readonly { kid: string; sig: string | Uint8Array }[];
   epoch?: number | bigint;
 }
 const approversOf = (options: AnyComputeOptions) =>
@@ -261,7 +261,27 @@ export function configuredTrustDigest(bundle: PkiBundle, options: AnyComputeOpti
     ...(bundle.commandSigningNext ? [bundle.commandSigningNext.certificate] : []),
     ...(bundle.commandSigningPrevious ? [bundle.commandSigningPrevious] : []),
   ];
-  return trustBundleDigest({ version: 0n, commandSigningRoots: roots, ...configuredApproverSet(options) } as never);
+  // The epoch and set signatures are part of the digest too (review 10 L), resolved as the server does: epoch 1 by
+  // default once approvers are configured, signatures as base64url or bytes.
+  const approvers = approversOf(options)?.approvers;
+  const quorumEpoch = approvers
+    ? {
+        approverSetEpoch: BigInt(approvers.epoch ?? 1),
+        approverSetSignatures: (approvers.setSignatures ?? []).map((signature) => ({
+          kid: signature.kid,
+          sig:
+            typeof signature.sig === 'string'
+              ? new Uint8Array(Buffer.from(signature.sig, 'base64url'))
+              : new Uint8Array(signature.sig),
+        })),
+      }
+    : {};
+  return trustBundleDigest({
+    version: 0n,
+    commandSigningRoots: roots,
+    ...configuredApproverSet(options),
+    ...quorumEpoch,
+  } as never);
 }
 
 /**

@@ -230,6 +230,12 @@ message Hello {
   // TrustBundle.version the daemon holds and verifies with (0: none). The gateway records it
   // (node_sessions.trust_version) so a command-root switch waits for every connected node (§13).
   uint64 trust_version = 17;
+  // (v1.0 §13) The approver set the daemon HOLDS: a bundle's version can be taken while its quorum
+  // part is refused (unsigned change, stale epoch), so trust_version alone would read "up to date"
+  // for a node still enforcing the old approvers. approver_set_sha256 is SHA-256 of the held set's
+  // approverSetInput (empty: no approver keys held).
+  uint64 approver_set_epoch = 18;
+  bytes approver_set_sha256 = 19;
 }
 
 message Welcome {
@@ -665,6 +671,9 @@ message StatusReport {
   // TrustBundle.version the daemon holds, as in Hello.trust_version, reported again once it applies
   // a newer bundle mid-session (Welcome.trust), so the ack does not wait for a reconnect. 0: unchanged.
   uint64 trust_version = 9;
+  // The approver set held after that bundle, as in Hello (set whenever trust_version is).
+  uint64 approver_set_epoch = 10;
+  bytes approver_set_sha256 = 11;
 }
 
 // Linux pressure stall information (/proc/pressure/*, "some" avg10, percent of wall time) and CPU
