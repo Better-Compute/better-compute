@@ -136,7 +136,7 @@ export async function mcpFindings(host: HostConfig): Promise<Finding[]> {
       check: 'host.mcp.ungated',
       severity: 'error',
       message: `host.mcp answers MCP at ${path} without a credential (tools/list returned ${status}): agents reach compute through it without the gate`,
-      fix: 'Mount computeMcpEndpoint({ compute, gate: createMcpGate({ … }) }).handler, never a bare createComputeMcp() handler',
+      fix: 'Mount computeMcpEndpoint({ compute, gate: createMcpGate({ …, confirmations: false }) }).handler, never a bare createComputeMcp() handler',
     },
   ];
 }

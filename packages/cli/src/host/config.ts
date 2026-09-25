@@ -104,7 +104,10 @@ export interface HostMetricsConfig {
 export interface HostMcpConfig {
   /** Default `/mcp`. */
   path?: string;
-  /** `computeMcpEndpoint(...).handler`: answers MCP and the gate's metadata and challenges. */
+  /**
+   * `computeMcpEndpoint({ compute, gate: createMcpGate({ …, confirmations: false }) }).handler`: answers MCP and the
+   * gate's metadata and challenges. Never an ungated handler (`doctor` probes it: host.mcp.ungated).
+   */
   handler(request: Request): Promise<Response> | Response;
 }
 
