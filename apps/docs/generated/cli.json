@@ -2436,7 +2436,7 @@
       "aliases": [],
       "group": "PKI",
       "summary": "Seal the bundle in the current format, authenticating its public parts",
-      "description": "pki reseal rewrites the bundle sealed with BETTER_COMPUTE_SECRET in the current format, where the seal also covers every certificate and pin, so a file changed without the secret no longer loads. Bundles sealed before that format, or left unsealed while a secret is set, are refused everywhere else. First compare the pins it prints (the same as pki show) with the ones your install scripts and join tokens use: it seals whatever the file holds now. Needs BETTER_COMPUTE_SECRET; the current key and certificates are kept, nothing is rotated.",
+      "description": "pki reseal rewrites the bundle sealed with BETTER_COMPUTE_SECRET in the current format, where the seal also covers every certificate and pin, so a file changed without the secret no longer loads. Bundles sealed before that format, or left unsealed while a secret is set, are refused everywhere else. First compare the pins it prints (the same as pki show) with the ones your install scripts and join tokens use, and check `certificates` (the SHA-256 of every certificate in every chain) holds nothing you did not put there: it seals whatever the file holds now. Needs BETTER_COMPUTE_SECRET; the current key and certificates are kept, nothing is rotated.",
       "usage": "better-compute pki reseal [--pki PATH] [--accept-unauthenticated]",
       "target": "none",
       "args": [],
@@ -2642,6 +2642,103 @@
       "examples": [
         "better-compute pki issue-gateway --san gw.eu-central.example.com",
         "better-compute pki issue-gateway --san gw1.example.com,gw.example.com --out /etc/better-compute/tls --days 14"
+      ]
+    },
+    {
+      "name": "batch keygen",
+      "aliases": [],
+      "group": "Quorum",
+      "summary": "Create an approver key pair for destructive batches",
+      "description": "batch keygen creates an ECDSA P-256 approver key (PLAN.md §13): the private key (PKCS#8 PEM, mode 0600) at --out, the public key beside it at <out>.pub. Keep the private key with its operator, off the control plane (a hardware token or an offline machine is better). Add the public key to the deployment's pki.approvers.keys, e.g. approverKeyOf(readFileSync('alice.pem.pub', 'utf8')).spkiDer from @better-compute/pki, with pki.approvers.threshold; daemons receive it in their trust bundle. The kid printed is how approvals name the key.",
+      "usage": "better-compute batch keygen --out PATH",
+      "target": "none",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--out",
+          "value": "PATH",
+          "optional": false,
+          "description": "Where to write the private key (never overwritten)"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute batch keygen --out ~/.better-compute/approver.pem"]
+    },
+    {
+      "name": "batch sign",
+      "aliases": [],
+      "group": "Quorum",
+      "summary": "Sign a batch approval offline, from its scope",
+      "description": "batch sign signs one approval of a destructive batch with an approver key (--key, from batch keygen) without contacting the server: for approvers on an offline machine. Pass the batch's scope (--scope, the JSON batch show prints, or an array of { subject, kind }): the root is recomputed from it and the kinds and subject count are shown before signing. --root and --size, when given as well, must match what the scope gives; with --root and --size alone the CLI signs a root it cannot check, and says so. --not-after is the batch's expiry as the server set it (all approvers sign the same one). Prints the signature ({ kid, sig }) to hand to batch approve --signature.",
+      "usage": "better-compute batch sign --key PATH [--batch ID] [--scope PATH] [--root HEX] [--size N] --not-after TIME",
+      "target": "none",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--key",
+          "value": "PATH",
+          "optional": false,
+          "description": "The approver private key (PEM)"
+        },
+        {
+          "flag": "--batch",
+          "value": "ID",
+          "optional": true,
+          "description": "The batch id (default: the scope file's batchId)"
+        },
+        {
+          "flag": "--scope",
+          "value": "PATH",
+          "optional": true,
+          "description": "The batch scope (JSON), to recompute the root from"
+        },
+        {
+          "flag": "--root",
+          "value": "HEX",
+          "optional": true,
+          "description": "The scope root (64 hex digits), checked against --scope"
+        },
+        {
+          "flag": "--size",
+          "value": "N",
+          "optional": true,
+          "description": "The scope size, checked against --scope"
+        },
+        {
+          "flag": "--not-after",
+          "value": "TIME",
+          "optional": false,
+          "description": "The batch's expiry: ISO-8601 or epoch milliseconds"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute batch sign --key approver.pem --scope batch.json --not-after 2026-09-25T18:00:00Z",
+        "better-compute batch sign --key approver.pem --batch batch_01k5w… --root 3f1c… --size 412 --not-after 1790359200000"
       ]
     },
     {
