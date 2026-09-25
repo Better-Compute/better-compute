@@ -533,7 +533,8 @@ async function childHost(ids: string[], pki: BenchPki | undefined): Promise<Host
 }
 
 describe('gateway-streams gate', () => {
-  it(`holds ${sessions} sessions at ${heartbeatMs / 1000} s heartbeats, dispatches within budget and survives a reconnect storm`, async () => {
+  // The 30 min gate plus ramp, storm and settle outlasts the suite's 30 min default.
+  it(`holds ${sessions} sessions at ${heartbeatMs / 1000} s heartbeats, dispatches within budget and survives a reconnect storm`, { timeout: durationMs + 20 * 60_000 }, async () => {
     const adapter = postgresUrl ? 'postgres' : 'pglite';
     const run = newId('req').slice(-8);
     const ids = Array.from({ length: sessions }, (_, i) => `node_bench_${run}_${i}`);
