@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { SqlExecutor } from '@better-compute/core';
-import { loadCursor, pruneAttestationUses, pruneBehindCursors, saveCursor, setSimClock, useSimClock } from '@better-compute/postgres';
+import { loadCursor, pruneAttestationUses, pruneBehindCursors, retentionModule, runRetention, saveCursor, setSimClock, useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 
 // core/0009_runtime: durable cursors and retention behind every cursor of a stream (PLAN.md §8.4).
@@ -74,6 +74,20 @@ describe('pruneBehindCursors', () => {
       `SELECT indexname FROM pg_indexes WHERE indexname IN ('outbox_tenant_cursor', 'usage_windows_tenant', 'join_tokens_tenant_pool') ORDER BY 1`,
     );
     expect(indexes.map((i) => i.indexname)).toEqual(['join_tokens_tenant_pool', 'outbox_tenant_cursor', 'usage_windows_tenant']);
+  });
+});
+
+describe('retentionModule', () => {
+  it('is a periodic singleton, and one pass drains every job', async () => {
+    const module = retentionModule({ every: '10m' });
+    expect(module.reconcilers).toEqual([expect.objectContaining({ name: 'core.retention', shardBy: 'none', periodic: [{ key: 'pass', every: '10m' }] })]);
+    await db.query(`INSERT INTO attestation_uses (attestor, subject, expires_at) VALUES ('discovery', $1, compute_now() - interval '1 minute')`, [
+      new Uint8Array(32).fill(9),
+    ]);
+    const pass = await runRetention(db, { minAgeSeconds: 0 });
+    expect(pass.attestationUses).toBe(1);
+    expect(pass).toMatchObject({ joinRequestsExpired: 0 });
+    expect(await runRetention(db)).toEqual({ outbox: 0, authzChanges: 0, attestationUses: 0, joinRequestsExpired: 0 });
   });
 });
 

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { JoinRequestInfo } from '../packages/server/src/api/join-requests.js';
-import { expireJoinRequests } from '../packages/server/src/api/join-requests.js';
+import { expireJoinRequests } from '@better-compute/postgres';
 import { ACME } from './support/server.js';
 import { OUTSIDER, USER, type Harness } from './support/server-api.js';
 import { consumeApproved, seedJoinRequest, sha256, v02Harness } from './support/server-v02.js';

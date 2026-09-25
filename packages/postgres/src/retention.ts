@@ -62,6 +62,24 @@ export async function pruneBehindCursors(tx: SqlTx, stream: CursorStream, option
 }
 
 /**
+ * Marks pending and approved join requests past their expiry as expired (at most `batch`; core/0010),
+ * and returns how many. Reads already show them as expired; this frees the one-pending-per-machine
+ * index for a new request.
+ */
+export async function expireJoinRequests(tx: SqlTx, options: { batch?: number } = {}): Promise<number> {
+  const batch = options.batch ?? 1000;
+  if (!Number.isSafeInteger(batch) || batch < 1) throw new ComputeError('INVALID_INPUT', 'batch must be positive');
+  const { rowCount } = await tx.query(
+    `UPDATE join_requests SET state = 'expired', version = version + 1
+      WHERE id IN (SELECT id FROM join_requests
+                    WHERE state IN ('pending', 'approved') AND expires_at <= compute_now()
+                    ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED)`,
+    [batch],
+  );
+  return rowCount ?? 0;
+}
+
+/**
  * Deletes up to `batch` `attestation_uses` rows whose `expires_at` passed (core/0011): evidence that
  * can no longer be presented needs no replay guard. Rows without an expiry stay. Returns how many went.
  */

@@ -235,20 +235,7 @@ async function publish(
   });
 }
 
-/**
- * Marks pending and approved requests past their expiry as expired (at most `limit`), and returns
- * how many. Reads already show them as expired; this keeps the pending index free for a new request.
- */
-export async function expireJoinRequests(tx: SqlTx, limit = 1000): Promise<number> {
-  const { rowCount } = await tx.query(
-    `UPDATE join_requests SET state = 'expired', version = version + 1
-      WHERE id IN (SELECT id FROM join_requests
-                    WHERE state IN ('pending', 'approved') AND expires_at <= compute_now()
-                    ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED)`,
-    [limit],
-  );
-  return rowCount;
-}
+// Expired requests read as expired at once; @better-compute/postgres's retentionModule marks them.
 
 export function joinRequestsApi(): JoinRequestsApi {
   return {
