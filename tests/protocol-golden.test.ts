@@ -511,6 +511,32 @@ function batchScope() {
     })),
   };
 }
+// The approver set's canonical bytes (TrustBundle 3-6; common.proto approver_set_signatures), built
+// here from the documented layout, independently of approverSetInput: bcd must reproduce
+// approver-set.json byte for byte.
+function approverSetGolden() {
+  const u32 = (value: number) => new Uint8Array(be(4, BigInt(value)));
+  const lp = (bytes: Uint8Array) => new Uint8Array([...u32(bytes.length), ...bytes]);
+  const keys = [...approverSet.approverKeys].sort((a, b) => (a.kid < b.kid ? -1 : a.kid > b.kid ? 1 : 0));
+  const input = new Uint8Array([
+    ...u32(keys.length),
+    ...keys.flatMap((key) => [...lp(utf8(key.kid)), ...lp(key.spkiDer)]),
+    ...u32(approverSet.approverThreshold),
+    ...u32(approverSet.quorumTiers.length),
+    ...approverSet.quorumTiers.flatMap((tier) => [...u32(tier.maxScopeSize), ...u32(tier.threshold)]),
+    ...u32(approverSet.unbatchedDestructivePerHour),
+  ]);
+  return {
+    approverKeys: approverSet.approverKeys.map((key) => ({ kid: key.kid, spkiDer: hex(key.spkiDer) })),
+    approverThreshold: approverSet.approverThreshold,
+    quorumTiers: approverSet.quorumTiers,
+    unbatchedDestructivePerHour: approverSet.unbatchedDestructivePerHour,
+    approverSetInput: hex(input),
+    setSha256: hex(digest(input)),
+    version: '7',
+    signingInput: hex(signingInput('approver-set', [new Uint8Array(be(8, 7n)), digest(input)])),
+  };
+}
 const signingJson = () =>
   signingVectors.map(({ name, purpose, parts, built }) => ({
     name,
@@ -537,6 +563,7 @@ if (updating) {
   }
   await writeJson(`${goldenDir}signing.json`, signingJson());
   await writeJson(`${goldenDir}batch-scope.json`, batchScope());
+  await writeJson(`${goldenDir}approver-set.json`, approverSetGolden());
 }
 
 describe('protocol golden vectors', () => {
@@ -603,6 +630,13 @@ describe('protocol golden vectors', () => {
       ),
     );
     expect(approverSetInput(approverSet).slice(0, 4)).toEqual(new Uint8Array([0, 0, 0, 2]));
+    // The documented layout, the implementation and the golden agree.
+    const golden = approverSetGolden();
+    expect(readJson(`${goldenDir}approver-set.json`)).toEqual(golden);
+    expect(hex(approverSetInput(approverSet))).toBe(golden.approverSetInput);
+    expect(
+      hex(approverSetSigningInput({ version: 7n, setSha256: fromHex(golden.setSha256) })),
+    ).toBe(golden.signingInput);
     expect(batchNodeInput(filled(32, 1), filled(32, 2))[0]).toBe(1);
     expect(() => batchNodeInput(filled(31, 1), filled(32, 2))).toThrow(/32-byte/);
   });
