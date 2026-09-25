@@ -5,6 +5,7 @@ import {
   choosePlan,
   dedicatedTaint,
   isSchedulable,
+  missingNodeLabel,
   planPlacement,
   shortlistable,
   shortlistPlan,
@@ -45,6 +46,7 @@ const nodeArb = (index: number) =>
       busy: fc.array(fc.boolean(), { minLength: 9, maxLength: 9 }),
       linked: fc.constantFrom('none', 'islands', 'flat'),
       vcpuAllocated: fc.integer({ min: 0, max: 64 }),
+      driver: fc.constantFrom(undefined, undefined, '1.0', '2.0'),
     })
     .map((seed): NodeView => {
       const id = `n_${String(index).padStart(3, '0')}`;
@@ -98,7 +100,7 @@ const nodeArb = (index: number) =>
         cordoned: seed.state === 'cordoned',
         connectivity: seed.state === 'lost' ? 'lost' : 'connected',
         trust: 'platform',
-        labels: {},
+        labels: seed.driver ? { 'bc.dev/driver.kata': seed.driver } : {},
         noScheduleReasons: reasons[seed.state] ?? [],
         devices,
         free,
@@ -119,6 +121,7 @@ const requestArb = (nodeCount: number, maxGpus = 5) =>
       gpus: fc.integer({ min: 0, max: maxGpus }),
       nic: fc.boolean(),
       vcpu: fc.constantFrom(0, 0, 4, 16, 48),
+      labels: fc.constantFrom(undefined, undefined, undefined, undefined, '*', '1.0'),
       exclude: fc.uniqueArray(fc.integer({ min: 0, max: Math.max(0, nodeCount - 1) }), {
         maxLength: 4,
       }),
@@ -144,6 +147,7 @@ const requestArb = (nodeCount: number, maxGpus = 5) =>
         ],
         ...(seed.vcpu > 0 ? { resources: { vcpu: seed.vcpu } } : {}),
         excludeNodes: seed.exclude.map((i) => `n_${String(i).padStart(3, '0')}`),
+        ...(seed.labels ? { nodeLabels: { 'bc.dev/driver.kata': seed.labels } } : {}),
         during: { start: 0, end: 3_600_000 },
       } satisfies PlacementRequest,
     }));
@@ -165,6 +169,7 @@ function countsFromViews(nodes: readonly NodeView[], request: PlacementRequest):
   const out: CandidateCounts[] = [];
   nodes: for (const node of nodes) {
     if (excluded.has(node.id) || !isSchedulable(node, pool, request.tenantId)) continue;
+    if (missingNodeLabel(request.nodeLabels, node.labels) !== undefined) continue;
     for (const [resource, need] of Object.entries(request.resources ?? {})) {
       const scalar = node.resources[resource];
       if (
@@ -206,6 +211,7 @@ describe('capacity planning properties', () => {
           const node = byId.get(entry.nodeId)!;
           expect(excluded.has(node.id)).toBe(false);
           expect(isSchedulable(node, pool, request.tenantId)).toBe(true);
+          expect(missingNodeLabel(request.nodeLabels, node.labels)).toBeUndefined();
           expect(new Set(entry.atoms).size).toBe(entry.atoms.length);
           const free = new Map(node.free.map((atom) => [atom.id, atom]));
           const perClass = new Map<string, number>();
@@ -243,7 +249,7 @@ describe('capacity planning properties', () => {
       { numRuns: 300 },
     );
     // The generator reaches the interesting cases.
-    expect(nonEmpty).toBeGreaterThan(100);
+    expect(nonEmpty).toBeGreaterThan(60);
     expect(onDedicated).toBeGreaterThan(20);
   });
 
