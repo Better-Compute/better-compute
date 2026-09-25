@@ -1329,7 +1329,7 @@ export const computeResourceTypes = (p = 'compute-') => ({
                       ...a('reservations', 'read'), ...a('instances', 'read'), ...a('projects', 'read', 'manage'), ...a('quotas', 'read'),
                       ...a('usage', 'read'), ...a('events', 'read'), ...a('webhooks', 'manage'), ...a('drivers', 'read'),
                       ...a('secrets', 'manage'), ...a('profiles', 'read', 'manage'), ...a('images', 'read', 'publish'),
-                      ...a('providers', 'read', 'manage')] },
+                      ...a('providers', 'read', 'manage'), ...a('sandboxes', 'read', 'manage')] },
   [`${p}project`]: { actions: [...a('projects', 'read', 'manage'), ...a('usage', 'read')], relations: ['member', 'admin'] },
   [`${p}site`]:    { actions: a('sites', 'read', 'manage'), attributes: { region: 'string', iamRegion: 'string', kind: 'string' } },
   [`${p}pool`]:    { actions: [...a('pools', 'read', 'manage', 'share'), ...a('capacity', 'read'), ...a('join-tokens', 'create', 'read', 'revoke'),
@@ -1344,6 +1344,10 @@ export const computeResourceTypes = (p = 'compute-') => ({
                      attributes: { vcpu: 'number', memoryGiB: 'number', gpus: 'number', imageId: 'string', imageVerified: 'boolean', projectId: 'string' } },
   [`${p}image`]: { actions: a('images', 'read', 'publish'), attributes: { visibility: 'string', verified: 'boolean' } },
   [`${p}profile`]: { actions: a('profiles', 'read', 'manage') }, [`${p}provider-account`]: { actions: a('providers', 'read', 'manage') },
+  // v0.5 sandboxes (§3.7): `warm` = the template keeps a warm pool (the claim happens after the decision).
+  [`${p}sandbox`]: { parent: `${p}pool`, actions: a('sandboxes', 'create', 'read', 'update', 'exec', 'delete'),
+                     attributes: { templateId: 'string', vcpu: 'number', memoryGiB: 'number', gpus: 'number', ttlSeconds: 'number', fromSnapshot: 'string', warm: 'boolean' } },
+  [`${p}sandbox-template`]: { actions: a('sandboxes', 'read', 'manage') },
 }) satisfies Record<string, ResourceTypeDefinition>;
 
 export function computeIamPlugin(o: { typePrefix?: string; inbox: InboxWriter; extra?: CatalogFragment[]; timeoutMs?: number; spill?: number }): IamPlugin {
