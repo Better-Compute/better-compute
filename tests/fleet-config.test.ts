@@ -290,6 +290,7 @@ beforeEach(async () => {
     'fleet_names',
     'fleet_applied',
     'sandbox_templates',
+    'sandbox_volumes',
     'ip_pools',
     'flavors',
     'quota_usage',
@@ -373,6 +374,41 @@ describe('sandbox templates (v0.5, PLAN §3.7)', () => {
         warm: { min: 0, max: 2 },
       },
     ],
+  });
+
+  it('mounts existing volumes in a template by name, round-trips them, and updates them (agent memory)', async () => {
+    await apply(base);
+    const { rows } = await db.query<{ pool_id: string }>(
+      `SELECT DISTINCT pool_id FROM flavors WHERE name = 'g1.small'`,
+    );
+    // Fleet never creates volumes (they hold data): this one exists already.
+    await db.query(
+      `INSERT INTO sandbox_volumes (id, tenant_id, pool_id, name, size_gib, serial, state, created_by,
+                                    idempotency_key, request_hash)
+       VALUES ('vol_01k5w0000000000000000000vv', 'root', $1, 'agent-notes', 10, 'bcv-0000000000000vv',
+               'ready', 'usr_root', 'v-1', 'h')`,
+      [rows[0]!.pool_id],
+    );
+    const withVolume = (readOnly: boolean): FleetConfig => {
+      const config = withTemplate();
+      config.sandboxTemplates![0]!.warm = { min: 0, max: 0 };
+      config.sandboxTemplates![0]!.volumes = [
+        { volume: 'agent-notes', mountPath: '/mnt/memory', ...(readOnly ? { readOnly } : {}) },
+      ];
+      return config;
+    };
+    await apply(withVolume(false));
+    const exported = await fleet<{ config: FleetConfig }>('export', { tenantId: 'root' });
+    expect(exported.config.sandboxTemplates?.[0]?.volumes).toEqual([
+      { volume: 'agent-notes', mountPath: '/mnt/memory' },
+    ]);
+    expect((await plan(withVolume(false))).calls).toEqual([]);
+    expect(
+      (await plan(withVolume(true))).changes.find((change) => change.kind === 'sandboxTemplate'),
+    ).toMatchObject({ action: 'update', fields: ['volumes'] });
+    const bad = withVolume(false);
+    bad.sandboxTemplates![0]!.volumes![0]!.mountPath = 'relative/path';
+    expect(() => validateFleetConfig(bad)).toThrow(/mountPath/);
   });
 
   it('creates a template after the flavor it names, round-trips export, and updates in place', async () => {

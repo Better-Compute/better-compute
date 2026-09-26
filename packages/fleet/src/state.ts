@@ -35,8 +35,8 @@ export interface FleetState {
     FleetPool & { id: string; siteId: string; providerAccountId?: string })[];
   flavors: (FleetFlavor & { poolId: string })[];
   /** Every field filled in (runtime, TTL bounds, warm, network); `userData` and `env` only when set. */
-  sandboxTemplates: (Required<Omit<FleetSandboxTemplate, 'userData' | 'env'>> &
-    Pick<FleetSandboxTemplate, 'userData' | 'env'> & {
+  sandboxTemplates: (Required<Omit<FleetSandboxTemplate, 'userData' | 'env' | 'volumes'>> &
+    Pick<FleetSandboxTemplate, 'userData' | 'env' | 'volumes'> & {
       id: string;
       poolId: string;
       warm: { min: number; max: number };
@@ -236,10 +236,12 @@ export async function readFleetState(tx: SqlTx, tenantId: string): Promise<Fleet
         warm_max: number;
         env: unknown;
         network: 'egress' | 'private' | 'none';
+        volumes: unknown;
       }>(
+        // `volumes` through to_jsonb: absent before the agent-memory migration.
         `SELECT id, name, pool_id, flavor, image_id, runtime, user_data, default_ttl_seconds,
-                max_ttl_seconds, warm_min, warm_max, env, network
-           FROM sandbox_templates WHERE tenant_id = $1 AND NOT deleted ORDER BY name`,
+                max_ttl_seconds, warm_min, warm_max, env, network, to_jsonb(t)->'volumes' AS volumes
+           FROM sandbox_templates t WHERE tenant_id = $1 AND NOT deleted ORDER BY name`,
         [tenantId],
       )
     ).rows.map((row) => ({
@@ -259,10 +261,34 @@ export async function readFleetState(tx: SqlTx, tenantId: string): Promise<Fleet
       ...(Object.keys((parse(row.env) ?? {}) as object).length
         ? { env: parse(row.env) as Record<string, string> }
         : {}),
+      ...templateVolumes(parse(row.volumes)),
     }));
   else missing.push('sandbox_templates');
+  // A template names its volumes by id; the document names them by volume name.
+  if (sandboxTemplates.some((template) => template.volumes?.length)) {
+    const ids = sandboxTemplates.flatMap((template) => template.volumes ?? []).map((v) => v.volume);
+    const { rows } = await tx.query<{ id: string; name: string }>(
+      `SELECT id, name FROM sandbox_volumes WHERE id = ANY($1::text[])`,
+      [ids],
+    );
+    const names = new Map(rows.map((row) => [row.id, row.name]));
+    for (const template of sandboxTemplates)
+      for (const volume of template.volumes ?? []) volume.volume = names.get(volume.volume) ?? volume.volume;
+  }
 
   return { tenantId, sites, providerAccounts, pools, flavors, sandboxTemplates, missing };
+}
+
+/** A stored template's volumes ({ volumeId, mountPath, readOnly }) in document form, ids for now. */
+function templateVolumes(value: unknown): Pick<FleetSandboxTemplate, 'volumes'> {
+  if (!Array.isArray(value) || value.length === 0) return {};
+  return {
+    volumes: value.map((entry: { volumeId: string; mountPath: string; readOnly?: boolean }) => ({
+      volume: entry.volumeId,
+      mountPath: entry.mountPath,
+      ...(entry.readOnly ? { readOnly: true } : {}),
+    })),
+  };
 }
 
 /** The current state as a FleetConfig document (`fleet.export`). */

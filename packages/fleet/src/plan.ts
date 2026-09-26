@@ -1,4 +1,13 @@
-import type { FleetConfig, FleetFlavor } from './config.js';
+import type { FleetConfig, FleetFlavor, FleetSandboxTemplate } from './config.js';
+
+/** A document's template volumes in the API's form (by volume name). */
+function apiVolumes(volumes: NonNullable<FleetSandboxTemplate['volumes']>) {
+  return volumes.map((volume) => ({
+    name: volume.volume,
+    mountPath: volume.mountPath,
+    readOnly: volume.readOnly === true,
+  }));
+}
 import type { FleetState, NamedKind } from './state.js';
 
 /** One planned change, for people. */
@@ -415,6 +424,7 @@ export async function planFleet(
           ...(template.warm !== undefined ? { warm: template.warm } : {}),
           ...(template.env !== undefined ? { env: template.env } : {}),
           ...(template.network !== undefined ? { network: template.network } : {}),
+          ...(template.volumes !== undefined ? { volumes: apiVolumes(template.volumes) } : {}),
         },
       });
       continue;
@@ -449,6 +459,14 @@ export async function planFleet(
         mutable.push('warm');
         update.warm = template.warm;
       }
+    }
+    // Volumes by value, in order (the attach order is the guest's disk order).
+    if (
+      template.volumes !== undefined &&
+      !same(apiVolumes(current.volumes ?? []), apiVolumes(template.volumes))
+    ) {
+      mutable.push('volumes');
+      update.volumes = apiVolumes(template.volumes);
     }
     if (immutable.length)
       add({

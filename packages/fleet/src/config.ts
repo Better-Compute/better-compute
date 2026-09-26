@@ -39,6 +39,11 @@ export interface FleetSandboxTemplate {
   env?: Record<string, string>;
   /** What the sandbox's NICs may reach (default egress). */
   network?: 'egress' | 'private' | 'none';
+  /**
+   * (v1.1, agent memory) Persistent volumes every sandbox mounts, by volume name, in order. Fleet
+   * never creates or deletes volumes (they hold data): they must exist (`sandboxVolumes.create`).
+   */
+  volumes?: { volume: string; mountPath: string; readOnly?: boolean }[];
 }
 
 export interface FleetSite {
@@ -325,6 +330,7 @@ export function validateFleetConfig(value: unknown): FleetConfig {
           'warm',
           'env',
           'network',
+          'volumes',
         ],
         path,
       );
@@ -372,6 +378,24 @@ export function validateFleetConfig(value: unknown): FleetConfig {
         if (!['egress', 'private', 'none'].includes(template.network as string))
           fail(`${path}.network`, 'must be egress, private or none');
         result.network = template.network as FleetSandboxTemplate['network'];
+      }
+      if (template.volumes !== undefined) {
+        if (!Array.isArray(template.volumes) || template.volumes.length > 24)
+          fail(`${path}.volumes`, 'must list at most 24 volumes');
+        result.volumes = template.volumes.map((raw, index) => {
+          const at = `${path}.volumes[${index}]`;
+          const volume = record(raw, at);
+          only(volume, ['volume', 'mountPath', 'readOnly'], at);
+          const entry: NonNullable<FleetSandboxTemplate['volumes']>[number] = {
+            volume: string(volume.volume, `${at}.volume`, namePattern),
+            mountPath: string(volume.mountPath, `${at}.mountPath`, /^\/[A-Za-z0-9._/-]{0,254}$/),
+          };
+          if (volume.readOnly !== undefined) {
+            if (typeof volume.readOnly !== 'boolean') fail(`${at}.readOnly`, 'must be a boolean');
+            if (volume.readOnly) entry.readOnly = true;
+          }
+          return entry;
+        });
       }
       return result;
     },
