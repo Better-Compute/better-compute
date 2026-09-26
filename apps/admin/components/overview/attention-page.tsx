@@ -133,6 +133,7 @@ export function AttentionPage() {
             onRowClick={(r) => router.push(r.href)}
             initialSort={{ id: 'severity', dir: 'asc' }}
             exportName="attention"
+            viewKey="attention"
             bulkActions={(selected, clear) => (
               <>
                 <Button size="xs" variant="primary" leadingIcon={RiCheckLine} onClick={() => { ackRows(selected); clear(); }}>

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNod
 import {
   RiArrowDownLine,
   RiArrowUpLine,
+  RiBookmarkLine,
   RiDownload2Line,
   RiEyeLine,
   RiFilter3Line,
@@ -65,6 +66,44 @@ export interface DataTableProps<Row> {
   onQueryChange?: (query: string) => void;
   /** Marks a row with a left rail: red for 'crit', amber for 'warn'. */
   rowTone?: (row: Row) => 'crit' | 'warn' | undefined;
+  /**
+   * Persist this table's filters, sort and columns per browser under this key, and offer named saved views
+   * ("My H100 nodes", "Stuck reservations") in the toolbar.
+   */
+  viewKey?: string;
+}
+
+interface ViewState {
+  query?: string;
+  filters: Record<string, string | undefined>;
+  sort?: { id: string; dir: 'asc' | 'desc' };
+  hidden: string[];
+}
+
+interface StoredViews {
+  current?: ViewState;
+  active?: string;
+  saved: { name: string; state: ViewState }[];
+}
+
+const viewStorageKey = (key: string) => `bc-admin:table:${key}`;
+
+function loadViews(key: string): StoredViews {
+  try {
+    const raw = window.localStorage.getItem(viewStorageKey(key));
+    const parsed = raw ? (JSON.parse(raw) as Partial<StoredViews>) : {};
+    return { ...parsed, saved: parsed.saved ?? [] };
+  } catch {
+    return { saved: [] };
+  }
+}
+
+function storeViews(key: string, views: StoredViews) {
+  try {
+    window.localStorage.setItem(viewStorageKey(key), JSON.stringify(views));
+  } catch {
+    // Views just don't persist in a private window.
+  }
 }
 
 function toCsv<Row>(rows: Row[], columns: Column<Row>[]) {
@@ -97,6 +136,7 @@ export function DataTable<Row>({
   query: controlledQuery,
   onQueryChange,
   rowTone,
+  viewKey,
 }: DataTableProps<Row>) {
   const { density } = useWorkspace();
   const [localQuery, setLocalQuery] = useState('');
@@ -112,6 +152,50 @@ export function DataTable<Row>({
   const [limit, setLimit] = useState(pageSize);
   const [cursor, setCursor] = useState(-1);
   const bodyRef = useRef<HTMLTableSectionElement>(null);
+
+  // Saved views: restore the last state once, then keep it current; named views are snapshots of it.
+  const [views, setViews] = useState<StoredViews>({ saved: [] });
+  const [viewsLoaded, setViewsLoaded] = useState(false);
+  const defaultHidden = useMemo(() => columns.filter((c) => c.defaultHidden).map((c) => c.id), [columns]);
+  const snapshot = (): ViewState => ({
+    ...(controlledQuery === undefined && query ? { query } : {}),
+    filters,
+    ...(sort ? { sort } : {}),
+    hidden: [...hidden],
+  });
+  const applyState = (state: ViewState) => {
+    setFilters(state.filters ?? {});
+    setSort(state.sort ?? initialSort);
+    setHidden(new Set(state.hidden ?? defaultHidden));
+    if (controlledQuery === undefined) setLocalQuery(state.query ?? '');
+  };
+  useEffect(() => {
+    if (!viewKey) return;
+    const stored = loadViews(viewKey);
+    setViews(stored);
+    if (stored.current) applyState(stored.current);
+    setViewsLoaded(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewKey]);
+  useEffect(() => {
+    if (!viewKey || !viewsLoaded) return;
+    const next = { ...views, current: snapshot() };
+    storeViews(viewKey, next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewKey, viewsLoaded, filters, sort, hidden, localQuery, views]);
+  const updateViews = (next: StoredViews) => {
+    setViews(next);
+    if (viewKey) storeViews(viewKey, { ...next, current: snapshot() });
+  };
+  const saveViewAs = () => {
+    const name = window.prompt('Name this view', views.active ?? '')?.trim();
+    if (!name) return;
+    updateViews({ ...views, active: name, saved: [...views.saved.filter((v) => v.name !== name), { name, state: snapshot() }] });
+  };
+  const resetView = () => {
+    applyState({ filters: {}, ...(initialSort ? { sort: initialSort } : {}), hidden: defaultHidden });
+    updateViews({ ...views, active: undefined });
+  };
 
   const visible = columns.filter((column) => !hidden.has(column.id));
 
@@ -260,6 +344,34 @@ export function DataTable<Row>({
         )}
         <div className="ml-auto flex items-center gap-1">
           {toolbar}
+          {viewKey && (
+            <Menu
+              label="Saved views"
+              trigger={
+                <ToolButton icon={RiBookmarkLine} label="Saved views" active={Boolean(views.active)}>
+                  {views.active
+                    ? `${views.active}${JSON.stringify(views.saved.find((v) => v.name === views.active)?.state) !== JSON.stringify(snapshot()) ? ' *' : ''}`
+                    : 'Views'}
+                </ToolButton>
+              }
+              items={[
+                ...views.saved.map((view) => ({
+                  id: `view:${view.name}`,
+                  label: view.name === views.active ? `● ${view.name}` : view.name,
+                  onAction: () => {
+                    applyState(view.state);
+                    updateViews({ ...views, active: view.name });
+                  },
+                })),
+                { id: 'save', label: views.active ? `Update “${views.active}”` : 'Save current view…', icon: RiBookmarkLine, separator: views.saved.length > 0, onAction: () => (views.active ? updateViews({ ...views, saved: views.saved.map((v) => (v.name === views.active ? { name: v.name, state: snapshot() } : v)) }) : saveViewAs()) },
+                ...(views.active ? [{ id: 'save-as', label: 'Save as new view…', icon: RiBookmarkLine, onAction: saveViewAs }] : []),
+                { id: 'reset', label: 'Reset to default', onAction: resetView },
+                ...(views.active
+                  ? [{ id: 'delete', label: `Delete “${views.active}”`, danger: true, onAction: () => updateViews({ ...views, active: undefined, saved: views.saved.filter((v) => v.name !== views.active) }) }]
+                  : []),
+              ]}
+            />
+          )}
           <span className="px-1 font-mono text-[11px] text-text-tertiary tabular-nums">
             {filtered.length === rows.length ? rows.length : `${filtered.length} / ${rows.length}`}
           </span>
