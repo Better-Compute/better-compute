@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/better-compute/better-compute/daemon/internal/runtime"
 )
 
 // DomainPolicy is what a libvirt domain bcd node asks the helper to define may use. Defining a
@@ -25,10 +27,16 @@ type DomainPolicy struct {
 	CheckFile func(path string) error
 	// PCI are the devices a domain may take through (this host's GPUs, "0000:3b:00.0").
 	PCI map[string]bool
-	// Bridges are the bridges an interface may join (the instances' networks).
+	// Bridges are the bridges an interface may join ([helper] instance_bridges); none refuses every
+	// definition with an interface.
 	Bridges map[string]bool
-	// TapPrefix begins every tap bcd names (runtime.TapName).
-	TapPrefix string
+	// Images is the base images' directory: an instance disk is an overlay of
+	// <Images>/<image>.<format> (runtime.Libvirt's metadata), a restored one flat.
+	Images string
+	// Overlay and Base check, as root, what the node wrote: an instance disk's qcow2 header and
+	// backing file (runtime.CheckOverlay), a cdrom (runtime.CheckBase).
+	Overlay func(path, base, baseFormat string) error
+	Base    func(path, format string) error
 }
 
 // bcdMetadataNS is bcd's metadata namespace (runtime.Libvirt's instance element).
@@ -92,6 +100,11 @@ func ValidateDomainXML(raw []byte, p DomainPolicy) (string, error) {
 	var name strings.Builder
 	instanceID, instances := "", 0
 	inMetadata, elements := 0, 0
+	meta := map[string]*strings.Builder{} // bcd's metadata values (image, format, restored)
+	metaAt := ""
+	type disk struct{ device, format, file string }
+	var disks []disk
+	var taps []string
 	for {
 		tok, err := d.Token()
 		if errors.Is(err, io.EOF) {
@@ -116,6 +129,12 @@ func ValidateDomainXML(raw []byte, p DomainPolicy) (string, error) {
 						if a.Name.Local == "id" {
 							instanceID = a.Value
 						}
+					}
+				}
+				if inMetadata == 2 {
+					metaAt = t.Name.Local
+					if meta[metaAt] == nil {
+						meta[metaAt] = &strings.Builder{}
 					}
 				}
 				inMetadata++
@@ -143,11 +162,25 @@ func ValidateDomainXML(raw []byte, p DomainPolicy) (string, error) {
 			if err := checkDomainElement(at, attrs, p); err != nil {
 				return "", err
 			}
-			if at == "domain/metadata" {
+			switch at {
+			case "domain/metadata":
 				inMetadata = 1
+			case "domain/devices/disk":
+				disks = append(disks, disk{device: attrs["device"]})
+			case "domain/devices/disk/driver":
+				disks[len(disks)-1].format = attrs["type"]
+			case "domain/devices/disk/source":
+				disks[len(disks)-1].file = attrs["file"]
+			case "domain/devices/interface":
+				taps = append(taps, "")
+			case "domain/devices/interface/target":
+				taps[len(taps)-1] = attrs["dev"]
 			}
 		case xml.EndElement:
 			if inMetadata > 0 {
+				if inMetadata == 3 {
+					metaAt = ""
+				}
 				if inMetadata--; inMetadata > 0 {
 					continue
 				}
@@ -156,6 +189,10 @@ func ValidateDomainXML(raw []byte, p DomainPolicy) (string, error) {
 				stack = stack[:len(stack)-1]
 			}
 		case xml.CharData:
+			if inMetadata == 3 && metaAt != "" {
+				meta[metaAt].Write(t)
+				continue
+			}
 			switch strings.Join(stack, "/") {
 			case "domain/name":
 				name.Write(t)
@@ -179,8 +216,48 @@ func ValidateDomainXML(raw []byte, p DomainPolicy) (string, error) {
 	if instances != 1 || instanceID != domainName {
 		return "", errors.New("domain: bcd's metadata must name the domain's instance once")
 	}
+	// Each interface is on the instance's own tap, as bcd's network rules expect.
+	for i, tap := range taps {
+		if tap != runtime.TapName(domainName, i) {
+			return "", fmt.Errorf("domain: interface %d's tap is %q, not %s", i, tap, runtime.TapName(domainName, i))
+		}
+	}
+	// What the node wrote, checked again as root: the instance disk's qcow2 header and backing file
+	// (an overlay of its image, or flat when restored), a cdrom's format.
+	value := func(k string) string {
+		if b := meta[k]; b != nil {
+			return strings.TrimSpace(b.String())
+		}
+		return ""
+	}
+	if p.Overlay == nil || p.Base == nil {
+		return "", errors.New("domain: no disk image checks configured")
+	}
+	for _, d := range disks {
+		switch {
+		case d.device == "cdrom":
+			if err := p.Base(d.file, "iso"); err != nil {
+				return "", fmt.Errorf("domain: cdrom %s: %w", d.file, err)
+			}
+		case d.format == "qcow2":
+			base, format := "", ""
+			if value("restored") == "" {
+				image, imageFormat := value("image"), value("format")
+				if !imageName.MatchString(image) || (imageFormat != "qcow2" && imageFormat != "raw") {
+					return "", errors.New("domain: bcd's metadata names no base image")
+				}
+				base, format = path.Join(p.Images, image+"."+imageFormat), imageFormat
+			}
+			if err := p.Overlay(d.file, base, format); err != nil {
+				return "", fmt.Errorf("domain: disk %s: %w", d.file, err)
+			}
+		}
+	}
 	return domainName, nil
 }
+
+// imageName is a base image's name in the images directory (bcd names them by digest).
+var imageName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
 func contains(list []string, s string) bool {
 	for _, v := range list {
@@ -217,8 +294,8 @@ func checkDomainElement(at string, a map[string]string, p DomainPolicy) error {
 			return fmt.Errorf("domain: bridge %q is not an instance network", a["bridge"])
 		}
 	case "domain/devices/interface/target":
-		if p.TapPrefix == "" || !strings.HasPrefix(a["dev"], p.TapPrefix) {
-			return fmt.Errorf("domain: tap %q is not bcd's", a["dev"])
+		if a["dev"] == "" {
+			return errors.New("domain: an interface names its tap")
 		}
 	case "domain/devices/hostdev":
 		if a["mode"] != "subsystem" || a["type"] != "pci" || a["managed"] != "yes" {

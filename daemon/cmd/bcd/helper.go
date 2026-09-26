@@ -98,6 +98,8 @@ func runHelper(fs *flag.FlagSet, _, stderr io.Writer) int {
 	}
 	// Without those pins, the roots of the trust bundle the pinned JoinService key signed.
 	srv.JoinSigningPin, _ = config.DecodePin(cfg.JoinSigningKeyPin) // validated when the file was loaded
+	// libvirt for a node outside the libvirt group: checked definitions and bcd's domains only.
+	srv.Virsh, srv.LibvirtPolicy = libvirtHelper(cfg, host, int(uid), int(gid))
 	if os.Geteuid() == 0 {
 		// Every directory on the way to the slots and to the socket must be root's alone: a path the
 		// node could swap for a symlink would steer root's writes (review 11 L1, L2).

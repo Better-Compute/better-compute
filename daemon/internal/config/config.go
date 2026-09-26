@@ -49,6 +49,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -217,6 +218,20 @@ type Helper struct {
 	Socket string
 	// User is the account bcd node runs as: the only peer the helper serves besides root.
 	User string
+	// InstanceBridges are the bridges an instance's NIC may join (comma-separated), which the helper
+	// checks every libvirt domain it defines against; unset, it defines none with a NIC.
+	InstanceBridges string
+}
+
+// Bridges lists [helper] instance_bridges.
+func (h Helper) Bridges() []string {
+	var out []string
+	for _, b := range strings.Split(h.InstanceBridges, ",") {
+		if b = strings.TrimSpace(b); b != "" {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 // WebSocket is the session's WebSocket fallback (PLAN.md §7.1) for networks whose TLS-inspecting
@@ -433,6 +448,11 @@ func (c *Config) Validate() error {
 	if c.Helper.Socket != "" && (!path.IsAbs(c.Helper.Socket) || c.Helper.User == "" || c.Helper.User == "root") {
 		return errors.New("helper.socket needs an absolute path and helper.user, the unprivileged account bcd node runs as")
 	}
+	for _, b := range c.Helper.Bridges() {
+		if !bridgeName.MatchString(b) {
+			return fmt.Errorf("helper.instance_bridges: %q is not an interface name", b)
+		}
+	}
 	if c.WebSocket.ProxyCAFile != "" && !path.IsAbs(c.WebSocket.ProxyCAFile) {
 		return fmt.Errorf("websocket.proxy_ca_file must be an absolute path, got %q", c.WebSocket.ProxyCAFile)
 	}
@@ -488,6 +508,9 @@ func (c *Config) Validate() error {
 	}
 	return nil
 }
+
+// bridgeName is a Linux interface name (IFNAMSIZ).
+var bridgeName = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
 
 // BMCNets parses [site] bmc_networks.
 func (c *Config) BMCNets() ([]*net.IPNet, error) {
@@ -588,6 +611,7 @@ var fields = []field{
 	{section: "update", key: "entrypoint", kind: kindString, set: func(c *Config, v value) { c.Update.Entrypoint = v.str }},
 	{section: "helper", key: "socket", kind: kindString, set: func(c *Config, v value) { c.Helper.Socket = v.str }},
 	{section: "helper", key: "user", kind: kindString, set: func(c *Config, v value) { c.Helper.User = v.str }},
+	{section: "helper", key: "instance_bridges", kind: kindString, set: func(c *Config, v value) { c.Helper.InstanceBridges = v.str }},
 	{section: "websocket", key: "url", kind: kindString, set: func(c *Config, v value) { c.WebSocket.URL = v.str }},
 	{section: "websocket", key: "proxy_ca_file", kind: kindString, set: func(c *Config, v value) { c.WebSocket.ProxyCAFile = v.str }},
 	{section: "websocket", key: "audience", kind: kindString, set: func(c *Config, v value) { c.WebSocket.Audience = v.str }},

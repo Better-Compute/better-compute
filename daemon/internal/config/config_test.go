@@ -257,6 +257,16 @@ func TestCommandRootSHA256(t *testing.T) {
 	}
 }
 
+func TestHelperInstanceBridges(t *testing.T) {
+	cfg, err := Parse([]byte(required() + "[helper]\nsocket = \"/run/bcd/helper.sock\"\nuser = \"bcd\"\ninstance_bridges = \"br0, br-priv\"\n"))
+	if err != nil || strings.Join(cfg.Helper.Bridges(), ",") != "br0,br-priv" {
+		t.Fatalf("bridges = %v %v", cfg.Helper.Bridges(), err)
+	}
+	if _, err := Parse([]byte(required() + "[helper]\ninstance_bridges = \"br0;rm -rf /\"\n")); err == nil {
+		t.Fatal("a bridge that is no interface name was accepted")
+	}
+}
+
 func TestHostSection(t *testing.T) {
 	cfg, err := Parse([]byte(required()))
 	if err != nil || cfg.ExternalHost {
