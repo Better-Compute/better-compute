@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/better-compute/better-compute/daemon/internal/runtime"
 	"github.com/better-compute/better-compute/daemon/internal/telemetry"
 )
 
@@ -88,6 +89,15 @@ func (a *Agent) hostMemoryMetrics() []telemetry.Metric {
 	return out
 }
 
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // instanceMetrics are the VMs and sandboxes the runtimes hold (managed or not):
 //
 //	bcd.instances             count, by runtime and state
@@ -100,10 +110,35 @@ func (a *Agent) instanceMetrics(ctx context.Context) []telemetry.Metric {
 	counts := map[[2]string]int64{}
 	vcpu := telemetry.Metric{Name: "bcd.instance.vcpu", Unit: "{cpu}"}
 	memory := telemetry.Metric{Name: "bcd.instance.memory", Unit: "By"}
+	// Live usage, from runtimes that read it (runtime.UsageReader): cumulative sums and a gauge.
+	cpuTime := telemetry.Metric{Name: "bcd.instance.cpu.time", Unit: "s", Sum: true}
+	memUsed := telemetry.Metric{Name: "bcd.instance.memory.used", Unit: "By"}
+	ioRead := telemetry.Metric{Name: "bcd.instance.io.read", Unit: "By", Sum: true}
+	ioWrite := telemetry.Metric{Name: "bcd.instance.io.write", Unit: "By", Sum: true}
+	netRx := telemetry.Metric{Name: "bcd.instance.network.receive", Unit: "By", Sum: true}
+	netTx := telemetry.Metric{Name: "bcd.instance.network.transmit", Unit: "By", Sum: true}
 	for _, r := range a.o.Runtimes {
 		domains, err := r.List(ctx)
 		if err != nil {
 			continue
+		}
+		if reader, ok := r.(runtime.UsageReader); ok {
+			if usage, err := reader.Usage(ctx); err == nil {
+				for _, id := range sortedKeys(usage) {
+					u := usage[id]
+					attrs := map[string]string{"instance.id": id, "runtime": r.Name()}
+					n := func(m *telemetry.Metric, v uint64) {
+						x := int64(v)
+						m.Points = append(m.Points, telemetry.Point{Attrs: attrs, Int: &x})
+					}
+					cpuTime.Points = append(cpuTime.Points, telemetry.Point{Attrs: attrs, Double: u.CPUSeconds})
+					n(&memUsed, u.MemoryBytes)
+					n(&ioRead, u.IOReadBytes)
+					n(&ioWrite, u.IOWriteBytes)
+					n(&netRx, u.NetRxBytes)
+					n(&netTx, u.NetTxBytes)
+				}
+			}
 		}
 		for _, d := range domains {
 			counts[[2]string{r.Name(), d.State}]++
@@ -125,7 +160,7 @@ func (a *Agent) instanceMetrics(ctx context.Context) []telemetry.Metric {
 		instances.Points = append(instances.Points, telemetry.Point{Attrs: map[string]string{"runtime": k[0], "state": k[1]}, Int: &n})
 	}
 	var out []telemetry.Metric
-	for _, m := range []telemetry.Metric{instances, vcpu, memory} {
+	for _, m := range []telemetry.Metric{instances, vcpu, memory, cpuTime, memUsed, ioRead, ioWrite, netRx, netTx} {
 		if len(m.Points) > 0 {
 			out = append(out, m)
 		}

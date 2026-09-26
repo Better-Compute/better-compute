@@ -72,4 +72,11 @@ func TestHostAndInstanceMetrics(t *testing.T) {
 	if value("bcd.instance.vcpu", map[string]string{"instance.id": "foreign-vm", "managed": "false"}) < 0 {
 		t.Fatal("vcpu")
 	}
+	// The fake reports usage for running domains (runtime.UsageReader).
+	if _, ok := byName["bcd.instance.memory.used"]; !ok {
+		t.Fatalf("no bcd.instance.memory.used in %v", byName)
+	}
+	if m := byName["bcd.instance.cpu.time"]; !m.Sum || len(m.Points) != 1 || m.Points[0].Attrs["instance.id"] != "foreign-vm" {
+		t.Fatalf("cpu time = %+v", m)
+	}
 }
