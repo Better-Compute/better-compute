@@ -10,6 +10,7 @@ import {
   RiMore2Fill,
   RiRefreshLine,
   RiSearchLine,
+  RiShareLine,
 } from 'react-icons/ri';
 import { Button } from '@/components/base/buttons/button';
 import { PALETTE_EVENTS } from '@/components/shell/command-palette';
@@ -24,6 +25,8 @@ import {
   PRESETS,
   saveState,
   uniqueKey,
+  decodeDashboard,
+  encodeDashboard,
   type Dashboard,
   type DashboardState,
   type WidgetInstance,
@@ -46,9 +49,19 @@ export function Dashboards() {
   const [configuring, setConfiguring] = useState<WidgetInstance | null>(null);
   const { confirm, toast } = useFeedback();
 
+  const [incoming, setIncoming] = useState<Pick<Dashboard, 'name' | 'items'> | null>(null);
+
   useEffect(() => {
     setState(loadState());
     setHydrated(true);
+    // A share link (?dashboard=…) offers the dashboard; the param leaves the URL either way.
+    const url = new URL(window.location.href);
+    const shared = url.searchParams.get('dashboard');
+    if (shared) {
+      setIncoming(decodeDashboard(shared));
+      url.searchParams.delete('dashboard');
+      window.history.replaceState(window.history.state, '', url.href);
+    }
   }, []);
   useEffect(() => {
     if (hydrated) saveState(state);
@@ -109,6 +122,25 @@ export function Dashboards() {
     });
   };
 
+  const shareLink = async (d: Dashboard) => {
+    const url = new URL('/', window.location.origin);
+    url.searchParams.set('dashboard', encodeDashboard(d));
+    try {
+      await navigator.clipboard.writeText(url.href);
+      toast({ title: 'Share link copied', detail: `“${d.name}”, ${d.items.length} widgets and their settings. Anyone with the admin can import it.`, status: 'ok' });
+    } catch {
+      window.prompt('Copy this link', url.href);
+    }
+  };
+
+  const importShared = () => {
+    if (!incoming) return;
+    const id = `d-${Date.now().toString(36)}`;
+    setState((current) => ({ ...current, active: id, dashboards: [...current.dashboards, { id, name: incoming.name, items: incoming.items }] }));
+    toast({ title: `Imported “${incoming.name}”`, status: 'ok' });
+    setIncoming(null);
+  };
+
   const resetToPreset = () => {
     const preset = PRESETS.find((p) => p.id === dashboard.id);
     update(() => (preset ? preset.items.map((i) => ({ ...i })) : []));
@@ -116,6 +148,21 @@ export function Dashboards() {
 
   return (
     <div className="flex flex-col gap-3">
+      {incoming && (
+        <div role="status" className="flex flex-wrap items-center gap-3 border border-signal-fill/50 bg-signal-soft px-3 py-2">
+          <RiShareLine className="size-4 text-signal" aria-hidden />
+          <span className="text-body-regular text-text-primary">
+            Someone shared the dashboard <b className="font-medium">“{incoming.name}”</b> ({incoming.items.length} widgets).
+          </span>
+          <span className="flex-1" />
+          <Button size="xs" onClick={importShared}>
+            Import
+          </Button>
+          <Button size="xs" variant="secondary" onClick={() => setIncoming(null)}>
+            Dismiss
+          </Button>
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-2 border-b border-separator-border">
         <div role="tablist" aria-label="Dashboards" data-tour="dashboards" className="-mb-px flex min-w-0 flex-1 items-end gap-0 overflow-x-auto">
           {state.dashboards.map((d) => {
@@ -175,6 +222,7 @@ export function Dashboards() {
             trigger={<ToolButton icon={RiMore2Fill} label="Dashboard options" />}
             items={[
               { id: 'rename', label: 'Rename…', icon: RiEdit2Line, onAction: () => rename(dashboard) },
+              { id: 'share', label: 'Copy share link', icon: RiShareLine, onAction: () => void shareLink(dashboard) },
               { id: 'reset', label: PRESETS.some((p) => p.id === dashboard.id) ? 'Reset to preset' : 'Clear widgets', icon: RiRefreshLine, onAction: resetToPreset },
               { id: 'delete', label: 'Delete dashboard', icon: RiDeleteBinLine, danger: true, disabled: state.dashboards.length === 1, separator: true, onAction: () => remove(dashboard) },
               { id: 'factory', label: 'Restore all defaults', icon: RiRefreshLine, danger: true, onAction: () => setState(defaultState()) },
@@ -361,7 +409,14 @@ function WidgetGrid({
                 },
               }}
             >
-              <def.component size={{ w: instance.w, h: instance.h }} editing={editing} settings={widgetSettings(def, instance.settings)} />
+              <def.component
+                size={{ w: instance.w, h: instance.h }}
+                editing={editing}
+                settings={widgetSettings(def, instance.settings)}
+                updateSettings={(patch) =>
+                  onChange(items.map((i) => (i.key === instance.key ? { ...i, settings: { ...i.settings, ...patch } } : i)))
+                }
+              />
             </WidgetFrame>
           ) : (
             <div className="flex h-full items-center justify-between gap-2 border border-dashed border-separator-border px-3 font-mono text-[11px] text-text-tertiary">

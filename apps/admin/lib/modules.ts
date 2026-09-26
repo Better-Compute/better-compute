@@ -26,6 +26,11 @@ export interface WidgetProps {
   editing: boolean;
   /** This instance's settings (defaults filled in from WidgetDef.settings). */
   settings: Record<string, string | number | boolean>;
+  /**
+   * Persist values into this instance's settings from inside the widget (a filter it offers, a note's text).
+   * Absent where there is no instance to save to (the configure preview, an expanded copy).
+   */
+  updateSettings?: (patch: Record<string, string | number | boolean>) => void;
 }
 
 /** One per-instance option a widget offers in its "Configure" form. */
@@ -56,9 +61,12 @@ export interface WidgetDef {
   component: ComponentType<WidgetProps>;
 }
 
-/** An instance's settings with the definition's defaults filled in. */
+/**
+ * An instance's settings with the definition's defaults filled in. Keys a widget saved itself through
+ * updateSettings (a note's text) are kept even when they aren't declared settings.
+ */
 export function widgetSettings(def: WidgetDef, saved?: Record<string, string | number | boolean>) {
-  const out: Record<string, string | number | boolean> = {};
+  const out: Record<string, string | number | boolean> = { ...saved };
   for (const setting of def.settings ?? []) out[setting.id] = saved?.[setting.id] ?? setting.default;
   return out;
 }

@@ -7,11 +7,13 @@ import {
   RiPulseLine,
   RiServerLine,
   RiStackLine,
+  RiStickyNoteLine,
   RiTimerFlashLine,
 } from 'react-icons/ri';
 import type { AdminModule } from '@/lib/modules';
 import { controlPlane, siteById, sites } from '@/lib/data';
 import { ComponentPeek, SitePeek } from './peeks';
+import { NotesWidget } from './notes-widget';
 import {
   ActivityWidget,
   AttentionQueue,
@@ -122,6 +124,7 @@ export const overviewModule: AdminModule = {
     { id: 'overview.sites', title: 'Sites', description: 'Sites on a map with nodes, GPUs, utilization and power. Click to scope.', icon: RiMapPin2Line, module: 'overview', defaultSize: { w: 6, h: 4 }, minSize: { w: 3, h: 3 }, component: SitesWidget },
     { id: 'overview.activity', title: 'Activity', description: 'The live event stream, newest first, filterable by kind.', icon: RiTimerFlashLine, module: 'overview', defaultSize: { w: 6, h: 4 }, minSize: { w: 3, h: 3 }, href: '/activity', component: ActivityWidget,
       settings: [{ id: 'severity', label: 'Show', type: 'select', default: 'info', options: [{ value: 'info', label: 'Everything' }, { value: 'warning', label: 'Warnings and critical' }, { value: 'critical', label: 'Critical only' }] }] },
+    { id: 'overview.notes', title: 'Notes', description: 'Handover notes, runbook links and who is on call, saved with the dashboard.', icon: RiStickyNoteLine, module: 'overview', defaultSize: { w: 4, h: 3 }, minSize: { w: 2, h: 2 }, live: true, component: NotesWidget },
     { id: 'overview.power', title: 'Power', description: 'IT power draw against budget, and the energy run-rate.', icon: RiFlashlightLine, module: 'overview', defaultSize: { w: 4, h: 2 }, minSize: { w: 3, h: 2 }, component: PowerWidget },
   ],
 };

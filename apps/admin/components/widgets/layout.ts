@@ -137,6 +137,48 @@ export function saveState(state: DashboardState) {
   }
 }
 
+/** A dashboard as a URL-safe string (base64url of its JSON), for share links. */
+export function encodeDashboard(dashboard: Pick<Dashboard, 'name' | 'items'>): string {
+  const bytes = new TextEncoder().encode(JSON.stringify({ v: 1, name: dashboard.name, items: dashboard.items }));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/** The dashboard in a share link, or null when it isn't one (validated field by field; nothing is executed). */
+export function decodeDashboard(encoded: string): Pick<Dashboard, 'name' | 'items'> | null {
+  try {
+    const binary = atob(encoded.replace(/-/g, '+').replace(/_/g, '/'));
+    const parsed = JSON.parse(new TextDecoder().decode(Uint8Array.from(binary, (c) => c.charCodeAt(0)))) as {
+      v?: number;
+      name?: unknown;
+      items?: unknown;
+    };
+    if (parsed.v !== 1 || typeof parsed.name !== 'string' || !Array.isArray(parsed.items)) return null;
+    const items = parsed.items.flatMap((raw): WidgetInstance[] => {
+      const i = raw as Partial<WidgetInstance>;
+      if (typeof i.widget !== 'string' || typeof i.w !== 'number' || typeof i.h !== 'number') return [];
+      const settings =
+        i.settings && typeof i.settings === 'object'
+          ? Object.fromEntries(Object.entries(i.settings).filter(([, v]) => ['string', 'number', 'boolean'].includes(typeof v)))
+          : undefined;
+      return [
+        {
+          key: typeof i.key === 'string' ? i.key : i.widget,
+          widget: i.widget,
+          w: Math.min(12, Math.max(1, Math.round(i.w))),
+          h: Math.min(10, Math.max(1, Math.round(i.h))),
+          ...(typeof i.title === 'string' ? { title: i.title.slice(0, 80) } : {}),
+          ...(settings ? { settings: settings as WidgetInstance['settings'] } : {}),
+        },
+      ];
+    });
+    return { name: parsed.name.slice(0, 60) || 'Shared dashboard', items: items.slice(0, 40) };
+  } catch {
+    return null;
+  }
+}
+
 export const uniqueKey = (widget: string, items: WidgetInstance[]) => {
   let n = 1;
   let key = widget;
