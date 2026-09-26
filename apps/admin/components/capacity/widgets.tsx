@@ -15,6 +15,7 @@ import { cx } from '@/utils/cx';
 import { DAY, HOUR, useHourWindow, usePoolRows, useTenantName, useTimelines } from './data';
 import { CapacityHeatmap } from './heatmap';
 import { InsightList } from './insights';
+import { SpotList } from './spot';
 import { byModel, costOf, dailySpend, fleetSeries, fleetTotals, heatMatrix, pressure, quotaCells, rollup } from './model';
 import { planHref, Segmented } from './ui';
 
@@ -294,7 +295,16 @@ export function InsightsWidget({ size }: WidgetProps) {
   );
 }
 
-const FINDER_GPUS =['1', '8', '16', '32', '64'] as const;
+/** Spot work per pool: GPUs on spot now, preemption notices, 30-day savings. */
+export function SpotWidget({ size }: WidgetProps) {
+  return (
+    <div className="-m-3">
+      <SpotList limit={Math.max(2, Math.floor(bodyHeight(size.h) / 30) - 1)} />
+    </div>
+  );
+}
+
+const FINDER_GPUS = ['1', '8', '16', '32', '64'] as const;
 const FINDER_DURATIONS = { '4h': 4 * HOUR, '1d': DAY, '3d': 3 * DAY, '7d': 7 * DAY } as const;
 
 /** "Where can I get N GPUs for D?" across every pool, answered from the timelines. */

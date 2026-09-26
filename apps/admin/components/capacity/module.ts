@@ -6,6 +6,7 @@ import {
   RiCalendarScheduleLine,
   RiDownloadLine,
   RiFileTextLine,
+  RiFlashlightLine,
   RiFlaskLine,
   RiLightbulbFlashLine,
   RiLayoutGridLine,
@@ -29,6 +30,7 @@ import {
   CapacityKpisWidget,
   FinderWidget,
   InsightsWidget,
+  SpotWidget,
   ModelsWidget,
   padded,
   PoolsWidget,
@@ -189,6 +191,7 @@ export const capacityModule: AdminModule = {
     { id: 'usage.spend', title: 'Spend', description: '30-day estimated spend and the top tenants.', icon: RiMoneyDollarCircleLine, module: 'capacity', defaultSize: { w: 4, h: 3 }, minSize: { w: 3, h: 2 }, href: '/usage', component: SpendWidget },
     { id: 'capacity.finder', title: 'Find GPUs', description: 'Where N GPUs are free for a duration, soonest first.', icon: RiSearchEyeLine, module: 'capacity', defaultSize: { w: 4, h: 4 }, minSize: { w: 3, h: 3 }, href: '/reservations/new', component: FinderWidget },
     { id: 'capacity.pressure', title: 'Where it is tight', description: 'Per pool: when 8 GPUs are next free for 24 h.', icon: RiTimerLine, module: 'capacity', defaultSize: { w: 4, h: 3 }, minSize: { w: 3, h: 2 }, href: '/capacity', component: PressureWidget },
+    { id: 'capacity.spot', title: 'Spot', description: 'GPUs on spot per pool, preemption notices, 30-day savings.', icon: RiFlashlightLine, module: 'capacity', defaultSize: { w: 4, h: 3 }, minSize: { w: 3, h: 2 }, href: '/usage', component: SpotWidget },
     { id: 'capacity.insights', title: 'Capacity insights', description: 'Pools about to fill, unplaceable work, fragmentation, quota ceilings, billing dead letters.', icon: RiLightbulbFlashLine, module: 'capacity', defaultSize: { w: 4, h: 4 }, minSize: { w: 3, h: 2 }, href: '/capacity', component: InsightsWidget },
   ]),
   commands: [

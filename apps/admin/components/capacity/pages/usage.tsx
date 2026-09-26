@@ -14,6 +14,7 @@ import type { UsageWindow } from '@/lib/data/capacity';
 import { cx } from '@/utils/cx';
 import { DAY, useCapacity, usePoolRows, useTenantName } from '../data';
 import { SourceNotice } from '../source-notice';
+import { SPOT_RATE, SpotList } from '../spot';
 import { dailySpend, rollup } from '../model';
 import { HoverCard, HoverRow, Segmented, utcDay } from '../ui';
 
@@ -279,6 +280,10 @@ export function UsagePage() {
               ))}
             </tbody>
           </table>
+        </Panel>
+
+        <Panel className="col-span-12" title="Spot" meta={`spot GPU-hours are billed at ${Math.round(SPOT_RATE * 100)}% of list`} flush>
+          <SpotList />
         </Panel>
       </Grid>
     </>
