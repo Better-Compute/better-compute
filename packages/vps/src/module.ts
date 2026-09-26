@@ -155,7 +155,7 @@ import {
   type SandboxVolume,
   type VolumeRef,
 } from './volumes.js';
-import { volumeStorageStatusHandler } from './volume-storage.js';
+import { volumeStorageSelfCheck, volumeStorageStatusHandler } from './volume-storage.js';
 import {
   deleteSnapshot,
   getSnapshot,
@@ -1181,6 +1181,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     selfCheck: async (context) => [
       ...(await vpsSelfCheck(context.sql, runtimeTable, runtimes[0]!)),
       ...(await sandboxSelfCheck(context.sql)),
+      ...(await volumeStorageSelfCheck(context.sql)),
     ],
     // §12.8: hosted instances hold inline allocations, which capacity's teardown never reaches.
     tenantDeleted: (context, tenantId) =>

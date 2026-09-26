@@ -1,4 +1,4 @@
-import { ComputeError, type Migration, type SqlTx } from '@better-compute/core';
+import { ComputeError, type Finding, type Migration, type SqlExecutor, type SqlTx } from '@better-compute/core';
 import type { StatusReport } from '@better-compute/protocol';
 
 // What a runtime host's volume store can really hold (review 2, MED 2). Volumes are sparse files in bcd's
@@ -113,4 +113,57 @@ export async function assertVolumeStorage(tx: SqlTx, nodeId: string, growGiB: nu
       freeGiB: Math.max(free, 0),
       neededGiB: growGiB,
     });
+}
+
+/**
+ * Doctor findings (vps selfCheck) about volume stores:
+ * - `vps.volumes.storage-unreported` (warning): hosts whose bcd keeps volumes (`bc.dev/cap.instance.volumes`)
+ *   but never reported its store. No volume can be booked there (an older bcd).
+ * - `vps.volumes.storage-stale` (warning): connected hosts whose last report is over an hour old.
+ * - `vps.volumes.storage-full` (error): hosts whose booked volumes exceed what their store can hold, e.g.
+ *   after the filesystem filled up. Growth and new volumes there are refused until space comes back.
+ */
+export async function volumeStorageSelfCheck(sql: Pick<SqlExecutor, 'query'>): Promise<Finding[]> {
+  const present = await sql.query<{ found: string | null }>(`SELECT to_regclass('host_volume_storage')::text AS found`);
+  if (!present.rows[0]?.found) return [];
+  const { rows } = await sql.query<{ unreported: string[] | null; stale: string[] | null }>(
+    `SELECT
+       (SELECT array_agg(n.id ORDER BY n.id) FROM nodes n
+         WHERE n.deleted_at IS NULL AND n.role = 'host'
+           AND EXISTS (SELECT 1 FROM node_labels l WHERE l.node_id = n.id AND l.key = 'bc.dev/cap.instance.volumes' AND l.source = 'system')
+           AND NOT EXISTS (SELECT 1 FROM host_volume_storage h WHERE h.node_id = n.id)) AS unreported,
+       (SELECT array_agg(h.node_id ORDER BY h.node_id) FROM host_volume_storage h JOIN nodes n ON n.id = h.node_id
+         WHERE n.deleted_at IS NULL AND n.connectivity = 'connected' AND h.reported_at < compute_now() - interval '1 hour') AS stale`,
+  );
+  const all = await sql.query<{ node_id: string }>('SELECT node_id FROM host_volume_storage ORDER BY node_id');
+  const headroom = await volumeHeadroomGiB(sql as SqlTx, all.rows.map((row) => row.node_id));
+  const full = [...headroom].filter(([, free]) => free < 0).map(([node, free]) => `${node} (${-free} GiB over)`);
+  const findings: Finding[] = [];
+  const unreported = rows[0]?.unreported ?? [];
+  if (unreported.length)
+    findings.push({
+      check: 'vps.volumes.storage-unreported',
+      severity: 'warning',
+      message: `${unreported.length} host(s) keep volumes but never reported their volume store, so no volume can be booked there: ${unreported.slice(0, 10).join(', ')}`,
+      fix: 'Update bcd on those hosts to one that reports StatusReport.volume_storage',
+      count: unreported.length,
+    });
+  const stale = rows[0]?.stale ?? [];
+  if (stale.length)
+    findings.push({
+      check: 'vps.volumes.storage-stale',
+      severity: 'warning',
+      message: `${stale.length} connected host(s) have not refreshed their volume store report in over an hour: ${stale.slice(0, 10).join(', ')}`,
+      fix: 'Check that the gateway composes vps() status handlers (serve does) and that the hosts send status reports',
+      count: stale.length,
+    });
+  if (full.length)
+    findings.push({
+      check: 'vps.volumes.storage-full',
+      severity: 'error',
+      message: `${full.length} host(s) have more volume space booked than their store can hold: ${full.slice(0, 10).join(', ')}`,
+      fix: 'Free or add space in the data directory of those hosts, or move volumes off them; new volumes and growth there are refused until then',
+      count: full.length,
+    });
+  return findings;
 }

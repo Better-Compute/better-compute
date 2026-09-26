@@ -26,6 +26,7 @@ import {
   volumeMeter,
   volumeSerial,
   volumeHeadroomGiB,
+  volumeStorageSelfCheck,
   volumeStorageStatusHandler,
   volumeWork,
   vps,
@@ -431,6 +432,20 @@ describe('sandbox volumes', () => {
     expect((await call('sandboxVolumes', 'resize', { tenantId: 'acme', volumeId: small.id, sizeGiB: 40 })).sizeGiB).toBe(40);
     // An unchanged report (within 1 GiB) writes nothing.
     expect(await storage(a, { availableGiB: 300, reservedGiB: 20, outstandingGiB: 75, committedGiB: 25 })).toBe(false);
+
+    // Doctor: host b keeps volumes (its label) but never reported; host a's store filled up past its bookings.
+    expect((await volumeStorageSelfCheck(db)).map((finding) => finding.check)).toEqual(['vps.volumes.storage-unreported']);
+    await storage(a, { availableGiB: 30, reservedGiB: 20, outstandingGiB: 60, committedGiB: 40 });
+    const findings = await volumeStorageSelfCheck(db);
+    expect(findings.map((finding) => [finding.check, finding.severity])).toEqual([
+      ['vps.volumes.storage-unreported', 'warning'],
+      ['vps.volumes.storage-full', 'error'],
+    ]);
+    expect(findings[1]!.message).toContain(`${a} (50 GiB over)`);
+    // An hour without a fresh report from a connected host.
+    clock.advance(2 * 3_600_000);
+    await setSimClock(db, T0 + 2 * 3_600_000);
+    expect((await volumeStorageSelfCheck(db)).map((finding) => finding.check)).toContain('vps.volumes.storage-stale');
   });
 
   it('are listed per caller by default, the whole tenant with scope all', async () => {
