@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createMcpGate } from '@better-iam/mcp';
 import { ComputeClientError } from '@better-compute/client';
-import { createComputeMcp, gateTools, type ComputeApi } from '@better-compute/mcp';
+import {
+  createComputeMcp,
+  gateTools,
+  memoryCallLimiter,
+  type ComputeApi,
+  type McpCallLimiter,
+} from '@better-compute/mcp';
 import { closeIamFixtures, iamFixture } from './support/iam.js';
 
 // The better-compute MCP server (PLAN.md §9.3): JSON-RPC over Streamable HTTP, the tools against
@@ -301,6 +307,41 @@ describe('create_instance', () => {
     // Freed once the first call finished.
     const third = await rpc(mcp, 'tools/call', { name: 'list_pools', arguments: {} }, 4, ALICE);
     expect(third.body.result.isError).toBeUndefined();
+  });
+
+  it('counts through a shared limiter across instances, keyed without credentials, failing closed', async () => {
+    const keys: string[] = [];
+    const shared = memoryCallLimiter();
+    const limiter: McpCallLimiter = {
+      acquire: (key, max) => {
+        keys.push(key);
+        return shared.acquire(key, max);
+      },
+    };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const api: ComputeApi = {
+      async $request<Output>() {
+        await gate;
+        return { items: [] } as Output;
+      },
+    };
+    // Two MCP instances, one cap.
+    const one = mcpWith(api, { maxConcurrentCallsPerCaller: 1, callLimiter: limiter });
+    const two = mcpWith(api, { maxConcurrentCallsPerCaller: 1, callLimiter: limiter });
+    const ALICE = { authorization: 'Bearer alice-secret' };
+    const first = rpc(one, 'tools/call', { name: 'list_pools', arguments: {} }, 1, ALICE);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const second = await rpc(two, 'tools/call', { name: 'list_pools', arguments: {} }, 2, ALICE);
+    expect(second.body.result.content[0].text).toContain('RATE_LIMITED');
+    release();
+    await first;
+    expect(keys.every((key) => /^auth:[0-9a-f]{64}$/.test(key) && !key.includes('alice'))).toBe(true);
+    const down = mcpWith(api, {
+      callLimiter: { acquire: () => Promise.reject(new Error('redis down')) },
+    });
+    const refused = await rpc(down, 'tools/call', { name: 'list_pools', arguments: {} }, 3, ALICE);
+    expect(refused.body.result.content[0].text).toContain('UNAVAILABLE');
   });
 
   it('keeps gate resources to well-formed ids (review 14 M2)', () => {

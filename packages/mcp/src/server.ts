@@ -51,7 +51,43 @@ export interface ComputeMcpOptions {
    * held requests (review 14 L5). More answers RATE_LIMITED.
    */
   maxConcurrentCallsPerCaller?: number;
+  /**
+   * Where the per-caller count lives (default: this process's memory). A deployment running several
+   * MCP instances passes a shared limiter (Redis, its database, …) so the cap holds across them;
+   * with the default each instance counts alone, so the effective cap is the cap × instances.
+   */
+  callLimiter?: McpCallLimiter;
   newKey?: () => string;
+}
+
+/**
+ * Counts a caller's tool calls in flight. `acquire` takes a slot when fewer than `max` are held for
+ * `key` and returns its release, or `undefined` to refuse. Keys never contain credentials (a
+ * credential-keyed caller is its SHA-256). A shared implementation must expire slots it never saw
+ * released (a crashed instance), e.g. after 2 minutes: calls run for at most ~85 s.
+ */
+export interface McpCallLimiter {
+  acquire(key: string, max: number): Promise<(() => Promise<void>) | undefined>;
+}
+
+/** The default limiter: counts in this process's memory. */
+export function memoryCallLimiter(): McpCallLimiter {
+  const inFlight = new Map<string, number>();
+  return {
+    async acquire(key, max) {
+      const running = inFlight.get(key) ?? 0;
+      if (running >= max) return undefined;
+      inFlight.set(key, running + 1);
+      let released = false;
+      return async () => {
+        if (released) return;
+        released = true;
+        const left = (inFlight.get(key) ?? 1) - 1;
+        if (left <= 0) inFlight.delete(key);
+        else inFlight.set(key, left);
+      };
+    },
+  };
 }
 
 export interface CallToolResult {
@@ -148,12 +184,16 @@ export function createComputeMcp(options: ComputeMcpOptions): ComputeMcp {
       : (options.tenantId ?? caller?.tenantId);
 
   const maxInFlight = options.maxConcurrentCallsPerCaller ?? 4;
-  const inFlight = new Map<string, number>();
-  /** Who a call counts against: the caller's identity, else its credential. */
-  const callerKey = (request: Request, caller?: McpCallerLike) =>
-    caller?.identityId
-      ? `${caller.tenantId ?? ''}/${caller.identityId}`
-      : `auth:${request.headers.get('authorization') ?? ''}`;
+  const limiter = options.callLimiter ?? memoryCallLimiter();
+  /** Who a call counts against: the caller's identity, else its credential's SHA-256 (never the credential). */
+  const callerKey = async (request: Request, caller?: McpCallerLike) => {
+    if (caller?.identityId) return `${caller.tenantId ?? ''}/${caller.identityId}`;
+    const digest = await globalThis.crypto.subtle.digest(
+      'SHA-256',
+      new TextEncoder().encode(request.headers.get('authorization') ?? ''),
+    );
+    return `auth:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+  };
 
   const callTool: ComputeMcp['callTool'] = async (name, args, request, caller) => {
     const tool = byName.get(name);
@@ -163,21 +203,25 @@ export function createComputeMcp(options: ComputeMcpOptions): ComputeMcp {
     if (problem) return errorResult('INVALID_INPUT', problem);
     const tenantId = tenantFor(caller);
     if (!tenantId) return errorResult('ACCESS_DENIED', 'No tenant to act in');
-    const key = callerKey(request, caller);
-    const running = inFlight.get(key) ?? 0;
-    if (running >= maxInFlight)
+    let release: (() => Promise<void>) | undefined;
+    try {
+      release = await limiter.acquire(await callerKey(request, caller), maxInFlight);
+    } catch {
+      // A shared limiter that is down refuses rather than lets calls through uncounted.
+      return errorResult('UNAVAILABLE', 'The tool-call limiter is unavailable; retry shortly', {
+        retryAfterMs: 2000,
+      });
+    }
+    if (!release)
       return errorResult(
         'RATE_LIMITED',
         `At most ${maxInFlight} tool calls at once; wait for one to finish`,
         { retryAfterMs: 2000 },
       );
-    inFlight.set(key, running + 1);
     try {
       return await runTool(tool, input, request, caller, tenantId);
     } finally {
-      const left = (inFlight.get(key) ?? 1) - 1;
-      if (left <= 0) inFlight.delete(key);
-      else inFlight.set(key, left);
+      await release().catch(() => undefined);
     }
   };
 
