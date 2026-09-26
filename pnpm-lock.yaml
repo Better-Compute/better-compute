@@ -437,6 +437,9 @@ importers:
       '@better-compute/postgres':
         specifier: workspace:*
         version: link:../postgres
+      '@better-compute/provider-kubernetes':
+        specifier: workspace:*
+        version: link:../provider-kubernetes
       '@better-compute/server':
         specifier: workspace:*
         version: link:../server
