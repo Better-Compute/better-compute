@@ -12,7 +12,7 @@ import {
   RiCloseLine,
 } from 'react-icons/ri';
 import { cx } from '@/utils/cx';
-import { useWorkspace } from '@/components/shell/workspace';
+import { useWorkspaceSettings } from '@/components/shell/workspace';
 import { Menu, ToolButton } from './overlay';
 import { EmptyState } from './panel';
 
@@ -138,7 +138,7 @@ export function DataTable<Row>({
   rowTone,
   viewKey,
 }: DataTableProps<Row>) {
-  const { density } = useWorkspace();
+  const { density } = useWorkspaceSettings();
   const [localQuery, setLocalQuery] = useState('');
   const query = controlledQuery ?? localQuery;
   const setQuery = (next: string) => {

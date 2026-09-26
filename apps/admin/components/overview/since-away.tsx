@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { RiCloseLine, RiHistoryLine } from 'react-icons/ri';
 import { activity, capacityTotals, fleetPulse, fmtDuration, fmtNum, fmtPct, fmtStamp, HOUR, MINUTE } from '@/lib/data';
 import { collectAttention } from '@/lib/modules';
-import { useScope, useWorkspace } from '@/components/shell/workspace';
+import { useScope, useWallNow, useWorkspaceSettings } from '@/components/shell/workspace';
 import { SeverityIcon } from '@/components/ui/signal';
 import { cx } from '@/utils/cx';
 
@@ -20,7 +20,8 @@ const MAX_AWAY = 7 * 24 * HOUR;
  * GPU use, critical items that opened, notable events — with a replay of that moment through time travel.
  */
 export function SinceAway() {
-  const { wallNow, travelTo } = useWorkspace();
+  const { travelTo } = useWorkspaceSettings();
+  const wallNow = useWallNow(60_000);
   const scope = useScope();
   const [since, setSince] = useState<number | null>(null);
   const [dismissed, setDismissed] = useState(false);

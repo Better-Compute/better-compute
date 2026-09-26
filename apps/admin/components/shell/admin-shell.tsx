@@ -13,7 +13,7 @@ import { Tour } from './tour';
 import { AttentionWatcher } from './attention-watcher';
 import { Sidebar } from './sidebar';
 import { Topbar } from './topbar';
-import { useWorkspace } from './workspace';
+import { useClockGetter, useWorkspaceSettings } from './workspace';
 
 const SIDEBAR_KEY = 'bc-admin:sidebar-collapsed';
 
@@ -27,7 +27,8 @@ const isTyping = (target: EventTarget | null) =>
  */
 export function AdminShell({ children }: { children: ReactNode }) {
   const router = useRouter();
-  const { live, setLive, now, wallNow, travelTo } = useWorkspace();
+  const { live, setLive, travelTo } = useWorkspaceSettings();
+  const clock = useClockGetter();
   const [collapsed, setCollapsed] = useState(false);
   const [palette, setPalette] = useState(false);
   const [keys, setKeys] = useState(false);
@@ -99,10 +100,10 @@ export function AdminShell({ children }: { children: ReactNode }) {
       } else if (event.key === 'p') {
         setLive(!live);
       } else if (event.key === ',' || event.key === '<') {
-        travelTo(now - (event.shiftKey ? 3_600_000 : 300_000));
+        travelTo(clock().now - (event.shiftKey ? 3_600_000 : 300_000));
       } else if ((event.key === '.' || event.key === '>') && !live) {
-        const target = now + (event.shiftKey ? 3_600_000 : 300_000);
-        if (target >= wallNow - 30_000) setLive(true);
+        const target = clock().now + (event.shiftKey ? 3_600_000 : 300_000);
+        if (target >= clock().wallNow - 30_000) setLive(true);
         else travelTo(target);
       } else if (event.key === 'e') {
         window.dispatchEvent(new Event(PALETTE_EVENTS.editDashboard));
@@ -112,7 +113,7 @@ export function AdminShell({ children }: { children: ReactNode }) {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [router, live, setLive, palette, now, wallNow, travelTo]);
+  }, [router, live, setLive, palette, clock, travelTo]);
 
   return (
     // App shell: the window never scrolls; <main> does, so the sidebar and top bar stay put and scroll position

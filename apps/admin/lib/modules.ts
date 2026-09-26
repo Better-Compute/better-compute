@@ -113,7 +113,12 @@ export interface AdminModule {
    * Items that need an operator, computed from the module's own data at `now` (pure: time travel calls it for
    * past moments). Merged into the bell, the Needs attention page and the Overview queue.
    */
-  attention?: (now: number, scope: { siteId?: string }) => AttentionItem[];
+  attention?: (now: number, scope: { siteId?: string }, context: AttentionContext) => AttentionItem[];
+}
+
+/** What collectAttention tells each module: which source the workspace reads (a module reads its live store). */
+export interface AttentionContext {
+  source: 'simulated' | 'live';
 }
 
 /** Sidebar sections, top to bottom. Unknown groups sort after these, alphabetically. */
@@ -170,12 +175,16 @@ const severityRank = { critical: 0, warning: 1, info: 2 } as const;
  * Everything that needs an operator at `now`: the platform's own items plus every module's `attention`,
  * most severe first, newest first within a severity. A failing module is skipped.
  */
-export function collectAttention(now: number, scope: { siteId?: string } = {}): AttentionItem[] {
+export function collectAttention(
+  now: number,
+  scope: { siteId?: string } = {},
+  context: AttentionContext = { source: 'simulated' },
+): AttentionItem[] {
   const items = [
     ...platformAttention(now, scope),
     ...modules.flatMap((module) => {
       try {
-        return module.attention?.(now, scope) ?? [];
+        return module.attention?.(now, scope, context) ?? [];
       } catch {
         return [];
       }

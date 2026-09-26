@@ -7,7 +7,7 @@ import { ThemeToggle } from '@/components/application/theme/theme-toggle';
 import { allNav, navForPath, navGroups, type NavItem } from '@/lib/modules';
 import { cx } from '@/utils/cx';
 import { usePins } from './pins';
-import { useWorkspace } from './workspace';
+import { useWorkspaceSettings } from './workspace';
 
 /**
  * The rack rail: module navigation grouped by section, collapsible to an icon rail (`[` toggles it). The active
@@ -27,7 +27,7 @@ export function Sidebar({
 }) {
   const pathname = usePathname();
   const active = navForPath(pathname);
-  const { source, live } = useWorkspace();
+  const { source, live } = useWorkspaceSettings();
   const groups = navGroups();
   const { pins, toggle } = usePins();
   const pinned = pins.map((href) => allNav().find((item) => item.href === href)).filter((item): item is NavItem => Boolean(item));

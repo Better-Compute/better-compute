@@ -15,6 +15,7 @@ import { useFeedback } from '@/components/ui/feedback';
 import { Grid, PageHeader, Panel } from '@/components/ui/panel';
 import { Mono, SeverityIcon, Tag } from '@/components/ui/signal';
 import { Stat } from '@/components/ui/stat';
+import { useAttentionItems } from '@/components/shell/use-attention';
 
 type Row = AttentionItem & { state: 'open' | 'acknowledged' | 'resolved' };
 
@@ -27,7 +28,7 @@ export function AttentionPage() {
   const { now } = useWorkspace();
   const acks = useAcks();
   const { toast } = useFeedback();
-  const current = useLive((t, scope) => collectAttention(t, scope), { bucketMs: 10_000 });
+  const current = useAttentionItems();
   const past = useLive(
     (t, scope) => {
       const seen = new Map<string, AttentionItem>();

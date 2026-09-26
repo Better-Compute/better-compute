@@ -5,7 +5,8 @@ import { useEffect, useRef } from 'react';
 import { collectAttention } from '@/lib/modules';
 import { useFeedback } from '@/components/ui/feedback';
 import { useAcks } from './pins';
-import { useLive, useWorkspace } from './workspace';
+import { useLive, useWorkspaceSettings } from './workspace';
+import { useAttentionItems } from './use-attention';
 
 /**
  * Raises a toast when a critical item opens while the operator is watching (live clock only): the queue is
@@ -13,10 +14,10 @@ import { useLive, useWorkspace } from './workspace';
  */
 export function AttentionWatcher() {
   const router = useRouter();
-  const { live, siteId } = useWorkspace();
+  const { live, siteId } = useWorkspaceSettings();
   const { toast } = useFeedback();
   const acks = useAcks();
-  const items = useLive((now, scope) => collectAttention(now, scope), { bucketMs: 10_000 });
+  const items = useAttentionItems();
   const seen = useRef<Set<string> | null>(null);
   const context = useRef('');
 

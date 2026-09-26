@@ -22,7 +22,7 @@ import { usePeek } from './peek';
 import { cx } from '@/utils/cx';
 import { useRegisteredPageCommands } from './page-commands';
 import { TOUR_EVENT } from './tour';
-import { RANGES, useWorkspace, type RangeKey } from './workspace';
+import { RANGES, useClockGetter, useWorkspaceSettings, type RangeKey } from './workspace';
 
 type Icon = ComponentType<{ className?: string; 'aria-hidden'?: boolean }>;
 
@@ -95,7 +95,8 @@ export const PALETTE_EVENTS = {
 export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenChange(open: boolean): void }) {
   const router = useRouter();
   const { resolvedTheme, setTheme } = useTheme();
-  const workspace = useWorkspace();
+  const workspace = useWorkspaceSettings();
+  const clock = useClockGetter();
   const peek = usePeek();
   const [query, setQuery] = useState('');
   const [cursor, setCursor] = useState(0);
@@ -186,7 +187,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
       const defaults = entries.filter((entry) => entry.group === 'Go to' || entry.group === 'Workspace').slice(0, 24);
       return [...here, ...recents, ...defaults].map((entry) => ({ entry, hits: [] as number[] }));
     }
-    const found: Entry[] = searchAll(q, { now: workspace.now, ...(workspace.siteId ? { siteId: workspace.siteId } : {}) }).map((result) => ({
+    const found: Entry[] = searchAll(q, { now: clock().now, ...(workspace.siteId ? { siteId: workspace.siteId } : {}) }).map((result) => ({
       id: `search:${result.group}:${result.id}`,
       label: result.label,
       group: result.group,

@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { DAY, HOUR, MINUTE } from '@/lib/data/core';
 import { useLiveAvailable } from './connection';
 
@@ -48,7 +48,7 @@ export interface Workspace {
   travelTo(t: number): void;
 }
 
-const WorkspaceContext = createContext<Workspace | null>(null);
+const WorkspaceContext = createContext<Omit<Workspace, 'now' | 'wallNow' | 'window'> | null>(null);
 const STORAGE_KEY = 'bc-admin:workspace';
 const TICK_MS = 2_000;
 
@@ -142,58 +142,113 @@ export function WorkspaceProvider({ initialNow, children }: { initialNow: number
     document.documentElement.dataset.density = density;
   }, [density]);
 
-  const window_ = useMemo(() => {
-    const spec = RANGES[range];
-    return { from: now - spec.ms, to: now, step: spec.step, points: spec.points };
-  }, [now, range]);
+  // The clock lives in a store, not in the settings context: a tick re-renders only components that read the
+  // clock, and useLive/useNow with a bucket re-render only when their bucket changes.
+  const [clock] = useState(() => createClockStore(initialNow));
+  useEffect(() => clock.set(now, wallNow), [clock, now, wallNow]);
 
-  const value = useMemo<Workspace>(
-    () => ({
-      now,
-      live,
-      setLive,
-      range,
-      setRange,
-      window: window_,
-      siteId,
-      setSiteId,
-      density,
-      setDensity,
-      source,
-      dataSource,
-      setDataSource,
-      wallNow,
-      travelTo,
-    }),
-    [now, live, setLive, range, window_, siteId, density, wallNow, travelTo, source, dataSource],
+  const settings = useMemo<WorkspaceSettings>(
+    () => ({ live, setLive, range, setRange, siteId, setSiteId, density, setDensity, source, dataSource, setDataSource, travelTo }),
+    [live, setLive, range, siteId, density, travelTo, source, dataSource],
   );
 
-  return <WorkspaceContext.Provider value={value}>{children}</WorkspaceContext.Provider>;
+  return (
+    <ClockContext.Provider value={clock}>
+      <WorkspaceContext.Provider value={settings}>{children}</WorkspaceContext.Provider>
+    </ClockContext.Provider>
+  );
 }
 
+type WorkspaceSettings = Omit<Workspace, 'now' | 'wallNow' | 'window'>;
+
+interface ClockStore {
+  get(): { now: number; wallNow: number };
+  set(now: number, wallNow: number): void;
+  subscribe(listener: () => void): () => void;
+}
+
+function createClockStore(initial: number): ClockStore {
+  let snapshot = { now: initial, wallNow: initial };
+  const listeners = new Set<() => void>();
+  return {
+    get: () => snapshot,
+    set(now, wallNow) {
+      if (now === snapshot.now && wallNow === snapshot.wallNow) return;
+      snapshot = { now, wallNow };
+      for (const listener of listeners) listener();
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+}
+
+const ClockContext = createContext<ClockStore | null>(null);
+
+function useClockStore(): ClockStore {
+  const clock = useContext(ClockContext);
+  if (!clock) throw new Error('workspace hooks outside <WorkspaceProvider>');
+  return clock;
+}
+
+/** Everything but the clock: scope, range, density, source, and the setters. Never re-renders on a tick. */
+export function useWorkspaceSettings(): WorkspaceSettings {
+  const settings = useContext(WorkspaceContext);
+  if (!settings) throw new Error('useWorkspaceSettings() outside <WorkspaceProvider>');
+  return settings as WorkspaceSettings;
+}
+
+/** The workspace clock, floored to `bucketMs` (0 = every tick); re-renders only when that value changes. */
+export function useNow(bucketMs = 0): number {
+  const clock = useClockStore();
+  const read = () => (bucketMs ? Math.floor(clock.get().now / bucketMs) * bucketMs : clock.get().now);
+  return useSyncExternalStore(clock.subscribe, read, read);
+}
+
+/** Reads the clock on demand without subscribing: for event handlers (keyboard steps, callbacks). */
+export function useClockGetter(): () => { now: number; wallNow: number } {
+  return useClockStore().get;
+}
+
+/** The wall clock (always ticking), floored to `bucketMs`. */
+export function useWallNow(bucketMs = 0): number {
+  const clock = useClockStore();
+  const read = () => (bucketMs ? Math.floor(clock.get().wallNow / bucketMs) * bucketMs : clock.get().wallNow);
+  return useSyncExternalStore(clock.subscribe, read, read);
+}
+
+/**
+ * Settings plus the clock (now, wallNow, the range window). Re-renders on every tick; prefer
+ * useWorkspaceSettings + useNow(bucket) / useLive in anything heavy.
+ */
 export function useWorkspace(): Workspace {
-  const workspace = useContext(WorkspaceContext);
-  if (!workspace) throw new Error('useWorkspace() outside <WorkspaceProvider>');
-  return workspace;
+  const settings = useWorkspaceSettings();
+  const clock = useClockStore();
+  const { now, wallNow } = useSyncExternalStore(clock.subscribe, clock.get, clock.get);
+  const window_ = useMemo(() => {
+    const spec = RANGES[settings.range];
+    return { from: now - spec.ms, to: now, step: spec.step, points: spec.points };
+  }, [now, settings.range]);
+  return useMemo(() => ({ ...settings, now, wallNow, window: window_ }), [settings, now, wallNow, window_]);
 }
 
 /** The scope object the data generators take. */
 export function useScope(): { siteId?: string } {
-  const { siteId } = useWorkspace();
+  const { siteId } = useWorkspaceSettings();
   return useMemo(() => (siteId ? { siteId } : {}), [siteId]);
 }
 
 /**
- * Derive data from the workspace clock: `useLive((now, scope) => fleetPulse(now, scope))`. Recomputed on each
- * tick and when the scope changes; pass `bucketMs` to recompute less often (heavy series).
+ * Derive data from the workspace clock: `useLive((now, scope) => fleetPulse(now, scope), { bucketMs: 10_000 })`.
+ * The component re-renders only when the bucketed time or the scope changes (every tick without a bucket).
  */
 export function useLive<T>(
   derive: (now: number, scope: { siteId?: string }) => T,
   options: { bucketMs?: number; deps?: unknown[] } = {},
 ): T {
-  const { now } = useWorkspace();
+  const at = useNow(options.bucketMs ?? 0);
   const scope = useScope();
-  const at = options.bucketMs ? Math.floor(now / options.bucketMs) * options.bucketMs : now;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const compute = useCallback(derive, options.deps ?? []);
   return useMemo(() => compute(at, scope), [compute, at, scope]);

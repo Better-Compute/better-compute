@@ -18,12 +18,13 @@ import { SeverityIcon } from '@/components/ui/signal';
 import { cx } from '@/utils/cx';
 import { useAcks } from './pins';
 import { TimeMachine } from './time-machine';
-import { RANGES, useLive, useWorkspace, type RangeKey } from './workspace';
+import { RANGES, useLive, useNow, useWorkspaceSettings, type RangeKey } from './workspace';
+import { useAttentionItems } from './use-attention';
 
 /** Breadcrumbs on the left; the workspace controls (search, scope, range, clock, attention) on the right. */
 export function Topbar({ onOpenPalette, onOpenNav }: { onOpenPalette(): void; onOpenNav(): void }) {
   const pathname = usePathname();
-  const { range, setRange, siteId, setSiteId } = useWorkspace();
+  const { range, setRange, siteId, setSiteId } = useWorkspaceSettings();
   const nav = navForPath(pathname);
   const rest = nav && pathname !== nav.href ? pathname.slice(nav.href.length).split('/').filter(Boolean) : [];
 
@@ -99,10 +100,10 @@ export function Topbar({ onOpenPalette, onOpenNav }: { onOpenPalette(): void; on
 }
 
 function AttentionBell() {
-  const all = useLive((now, scope) => collectAttention(now, scope), { bucketMs: 10_000 });
+  const all = useAttentionItems();
   const acks = useAcks();
   const items = all.filter((item) => !acks.has(item.id));
-  const { now } = useWorkspace();
+  const now = useNow(10_000);
   const critical = items.filter((item) => item.severity === 'critical').length;
   // The badge counts what needs action (critical + warning); info items are in the list, not the count.
   const urgent = items.filter((item) => item.severity !== 'info').length;

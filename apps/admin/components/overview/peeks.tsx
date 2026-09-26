@@ -4,7 +4,7 @@ import { RiFocus3Line } from 'react-icons/ri';
 import { controlPlane, fleetPulse, fmtDuration, fmtNum, fmtPct, siteById } from '@/lib/data';
 import { Button } from '@/components/base/buttons/button';
 import { EntityLink } from '@/components/shell/peek';
-import { useLive, useWorkspace } from '@/components/shell/workspace';
+import { useLive, useNow, useWorkspaceSettings } from '@/components/shell/workspace';
 import { Sparkline, StackedBar, TimeSeriesChart } from '@/components/ui/charts';
 import { KeyValue, Panel } from '@/components/ui/panel';
 import { Led, Tag } from '@/components/ui/signal';
@@ -15,7 +15,7 @@ const health = { ok: 'ok', degraded: 'warn', down: 'crit' } as const;
 /** A site at a glance: its pools, nodes, GPUs, power and gateway, with a button to scope the panel to it. */
 export function SitePeek({ id }: { id: string }) {
   const site = siteById(id);
-  const { siteId, setSiteId } = useWorkspace();
+  const { siteId, setSiteId } = useWorkspaceSettings();
   const pulse = useLive((now) => fleetPulse(now, { siteId: id }), { bucketMs: 10_000, deps: [id] });
   const gateway = useLive((now) => controlPlane(now).find((c) => c.id === `gw-${id}`), { bucketMs: 10_000, deps: [id] });
   if (!site) return <p className="text-text-secondary">No site {id}.</p>;
@@ -79,7 +79,7 @@ export function SitePeek({ id }: { id: string }) {
 
 /** One control-plane component: status, 30-minute latency and what it is doing. */
 export function ComponentPeek({ id }: { id: string }) {
-  const { now } = useWorkspace();
+  const now = useNow(5_000);
   const component = useLive((t) => controlPlane(t).find((c) => c.id === id), { bucketMs: 5_000, deps: [id] });
   if (!component) return <p className="text-text-secondary">No component {id}.</p>;
   const times = component.series.map((_, i) => Math.floor(now / 60_000) * 60_000 - (component.series.length - 1 - i) * 60_000);

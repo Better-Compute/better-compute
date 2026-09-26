@@ -15,7 +15,7 @@ import {
   RiRulerLine,
 } from 'react-icons/ri';
 import { widgetSettings, type WidgetDef } from '@/lib/modules';
-import { useWorkspace } from '@/components/shell/workspace';
+import { useWorkspaceSettings } from '@/components/shell/workspace';
 import { Menu, ToolButton } from '@/components/ui/overlay';
 import { EmptyState } from '@/components/ui/panel';
 import { cx } from '@/utils/cx';
@@ -77,7 +77,7 @@ export function WidgetFrame({
   children: ReactNode;
 }) {
   const title = customTitle || def.title;
-  const { source } = useWorkspace();
+  const { source } = useWorkspaceSettings();
   return (
     <div
       className={cx(

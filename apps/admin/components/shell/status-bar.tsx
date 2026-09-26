@@ -11,6 +11,7 @@ import { useConnection } from './connection';
 import { useAcks } from './pins';
 import { usePeek } from './peek';
 import { useLive, useWorkspace } from './workspace';
+import { useAttentionItems } from './use-attention';
 
 /** One status bar readout: a label and a mono value, optionally a button. */
 export function StatusItem({
@@ -63,7 +64,7 @@ export function StatusBar() {
   const peek = usePeek();
   const { status: connection } = useConnection();
   const components = useLive((t) => controlPlane(t), { bucketMs: 5_000 });
-  const items = useLive((t, scope) => collectAttention(t, scope), { bucketMs: 10_000 });
+  const items = useAttentionItems();
   const acks = useAcks();
   const open = items.filter((item) => !acks.has(item.id));
   const critical = open.filter((item) => item.severity === 'critical').length;

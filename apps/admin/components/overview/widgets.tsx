@@ -5,7 +5,9 @@ import { useMemo, useState } from 'react';
 import { RiArrowRightSLine } from 'react-icons/ri';
 import { activity, attentionGroup, capacityTotals, controlPlane, fleetPulse, fmtClock, fmtDuration, fmtMoney, fmtNum, fmtPct, fmtRelative, nodeStates, pulseSeries, sites, type AttentionItem, type NodeState } from '@/lib/data';
 import { collectAttention, type WidgetProps } from '@/lib/modules';
-import { useLive, useWorkspace } from '@/components/shell/workspace';
+import { useCapacityTotals } from '@/components/capacity/data';
+import { useFleetSummary } from '@/components/fleet/summary';
+import { RANGES, useLive, useNow, useWorkspaceSettings } from '@/components/shell/workspace';
 import { useFeedback } from '@/components/ui/feedback';
 import { useAcks } from '@/components/shell/pins';
 import { EntityLink, usePeek } from '@/components/shell/peek';
@@ -13,38 +15,47 @@ import { Gauge, Legend, Sparkline, StackedBar, TimeSeriesChart, useWidth } from 
 import { Stat } from '@/components/ui/stat';
 import { Led, SeverityIcon, Tag, type Status } from '@/components/ui/signal';
 import { cx } from '@/utils/cx';
+import { useAttentionItems } from '@/components/shell/use-attention';
 
 /** Fleet KPIs with trends over the workspace range. */
 export function KpiStrip({ size }: WidgetProps) {
-  const { window: range } = useWorkspace();
-  const pulse = useLive((now, scope) => fleetPulse(now, scope));
-  // GPU numbers come from the capacity rollup, so they match /capacity to the GPU.
-  const capacity = useLive((now, scope) => capacityTotals(now, scope), { bucketMs: 15_000 });
+  const { range: rangeKey, source } = useWorkspaceSettings();
+  const range = RANGES[rangeKey];
+  const live = source === 'live';
+  const pulse = useLive((now, scope) => fleetPulse(now, scope), { bucketMs: 10_000 });
+  // Node counts and GPU numbers come from the fleet and capacity modules (live API or simulation, whichever the
+  // workspace reads), so they match /nodes and /capacity exactly.
+  const fleet = useFleetSummary();
+  const capacity = useCapacityTotals();
   const series = useLive((now, scope) => pulseSeries(now, 36, range.step * 2, scope), { bucketMs: 30_000, deps: [range.step] });
-  // Trends are shapes over the range; the delta compares the range's ends of the same series.
-  const trendDelta = (values: number[]) => (values.length > 1 && values[0] ? (values.at(-1)! - values[0]) / values[0] : undefined);
+  // Trends are shapes over the range; the delta compares the range's ends of the same series. The trend history
+  // only exists in the simulation, so live mode shows the numbers without it.
+  const trendDelta = (values: number[]) => (!live && values.length > 1 && values[0] ? (values.at(-1)! - values[0]) / values[0] : undefined);
+  const trend = (values: number[]) => (live ? undefined : values);
+  const simHint = live ? 'simulated (no live source)' : undefined;
   const gpuUtil = series.map((p) => p.gpuUtilization);
   const gpuAlloc = series.map((p) => p.gpusAllocated);
+  const nodes = fleet.nodes;
   const cards = [
     {
       label: 'Nodes ready',
-      value: fmtNum(pulse.nodes.ready),
-      unit: `/ ${fmtNum(pulse.nodes.total)}`,
-      hint: `${pulse.nodes.degraded} degraded · ${pulse.nodes.offline} offline · ${pulse.nodes.provisioning} provisioning`,
+      value: fleet.unavailable ? '—' : fmtNum(nodes.ready),
+      unit: fleet.unavailable ? undefined : `/ ${fmtNum(nodes.total)}`,
+      hint: fleet.unavailable ? 'the nodes API did not answer' : `${nodes.degraded} degraded · ${nodes.offline} offline · ${nodes.provisioning} provisioning`,
       trend: undefined as number[] | undefined,
     },
     {
       label: 'GPU utilization',
       value: fmtPct(capacity.gpus.utilization),
       delta: trendDelta(gpuUtil),
-      trend: gpuUtil,
+      trend: trend(gpuUtil),
     },
     {
       label: 'GPUs allocated',
       value: fmtNum(capacity.gpus.allocated),
       unit: `/ ${fmtNum(capacity.gpus.allocatable)}`,
       delta: trendDelta(gpuAlloc),
-      trend: gpuAlloc,
+      trend: trend(gpuAlloc),
     },
     {
       label: 'GPUs free now',
@@ -57,6 +68,7 @@ export function KpiStrip({ size }: WidgetProps) {
       value: fmtPct(pulse.cpuUtilization),
       trend: series.map((p) => p.cpuUtilization),
       tone: 'neutral' as const,
+      hint: simHint,
     },
     {
       label: 'Sandboxes live',
@@ -64,6 +76,7 @@ export function KpiStrip({ size }: WidgetProps) {
       delta: trendDelta(series.map((p) => p.sandboxesLive)),
       trend: series.map((p) => p.sandboxesLive),
       tone: 'neutral' as const,
+      hint: simHint,
     },
     {
       label: 'IT power',
@@ -71,6 +84,7 @@ export function KpiStrip({ size }: WidgetProps) {
       unit: 'MW',
       trend: series.map((p) => p.powerKw),
       tone: 'neutral' as const,
+      hint: simHint,
     },
   ];
   // As many cards as fit at ~150 px each (the grid unit says nothing on a phone, where every widget is 1 column).
@@ -94,7 +108,8 @@ const PULSE_METRICS = {
 
 /** A fleet metric over the workspace range: utilization (GPU vs CPU), GPUs allocated, sandboxes or power. */
 export function PulseChart({ size, settings }: WidgetProps) {
-  const { window: range, range: key } = useWorkspace();
+  const { range: key } = useWorkspaceSettings();
+  const range = RANGES[key];
   const metric = (String(settings.metric) in PULSE_METRICS ? settings.metric : 'utilization') as keyof typeof PULSE_METRICS;
   const series = useLive((now, scope) => pulseSeries(now, range.points, range.step, scope), {
     bucketMs: Math.min(range.step, 60_000),
@@ -142,10 +157,10 @@ export function PulseChart({ size, settings }: WidgetProps) {
 
 /** The operator's queue: what needs a person, most severe first. */
 export function AttentionQueue({ settings }: WidgetProps) {
-  const items = useLive((now, scope) => collectAttention(now, scope), { bucketMs: 10_000 });
-  const { now } = useWorkspace();
+  const items = useAttentionItems();
   const acks = useAcks();
   const { toast } = useFeedback();
+  const now = useNow(10_000);
   const open = items.filter((item) => !acks.has(item.id));
   const ack = (id: string, title: string) => {
     acks.add([id]);
@@ -281,7 +296,7 @@ export function SubjectLink({ subject }: { subject: string }) {
 /** Every node in scope as one cell, grouped by pool: amber by load, red offline, hatched provisioning. */
 export function FleetWall({ settings }: WidgetProps) {
   const pulse = useLive((now, scope) => fleetPulse(now, scope), { bucketMs: 10_000 });
-  const { now } = useWorkspace();
+  const now = useNow(10_000);
   const peek = usePeek();
   const [hover, setHover] = useState<{ id: string; state: NodeState; load: number; pool: string } | null>(null);
   const kind = String(settings.kind ?? 'all');
@@ -378,7 +393,7 @@ export function ControlPlaneWidget() {
 /** Sites on a map (equirectangular, EU + US), sized by nodes and lit by GPU utilization, with a table. */
 export function SitesWidget({ size }: WidgetProps) {
   const pulse = useLive((now) => fleetPulse(now), { bucketMs: 10_000 });
-  const { siteId, setSiteId } = useWorkspace();
+  const { siteId, setSiteId } = useWorkspaceSettings();
   const bySite = sites.map((site) => {
     const pools = pulse.pools.filter((p) => p.pool.siteId === site.id);
     const gpu = pools.filter((p) => p.unit === 'gpu');
@@ -481,7 +496,7 @@ export function ActivityWidget({ settings }: WidgetProps) {
   const all = useLive((now, scope) => activity(now, 60, scope), { bucketMs: 5_000 });
   const floor = String(settings.severity ?? 'info');
   const events = all.filter((e) => floor === 'info' || (floor === 'warning' ? e.severity !== 'info' : e.severity === 'critical'));
-  const { now } = useWorkspace();
+  const now = useNow(5_000);
   const [kind, setKind] = useState<string | null>(null);
   const kinds = [...new Set(events.map((e) => e.type.split('.')[0]!))];
   const shown = kind ? events.filter((e) => e.type.startsWith(`${kind}.`)) : events;

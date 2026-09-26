@@ -74,7 +74,8 @@ export function PageHeader({
   return (
     <div className="flex flex-col gap-3 pb-4">
       <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
-        <div className="flex min-w-0 flex-1 items-start gap-3">
+        {/* At least 18rem (or the full width) before the actions wrap below, so phones keep a readable line. */}
+        <div className="flex min-w-[min(100%,18rem)] flex-1 items-start gap-3">
           {IconComponent && (
             <span className="mt-0.5 grid size-9 shrink-0 place-items-center border border-separator-border bg-surface-raised">
               <IconComponent className="size-[18px] text-text-secondary" aria-hidden />
