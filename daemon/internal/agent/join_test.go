@@ -1,12 +1,15 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"math/big"
 	"net/url"
@@ -19,8 +22,11 @@ import (
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	commonv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
+	"github.com/better-compute/better-compute/daemon/internal/tpm"
+	"github.com/better-compute/better-compute/daemon/internal/tpm/tpmsim"
 	"github.com/better-compute/better-compute/daemon/internal/transport"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // joinService is a JoinService in Go for the join loop tests: the first request is deferred
@@ -107,7 +113,7 @@ func TestJoinWaitsExactlyThePushback(t *testing.T) {
 func (j *joinService) Join(_ context.Context, req *agentv1.JoinRequest) (*agentv1.JoinResponse, error) {
 	j.calls++
 	j.csrs = append(j.csrs, req.GetCsr())
-	if _, err := pki.OpenJWE(string(req.GetSealedToken()), j.encKey, pki.SealedJoinTokenType); err != nil {
+	if _, err := pki.OpenJWE(string(req.GetSealedToken()), j.encKey, pki.SealedJoinTokenType); err != nil && len(req.GetSealedToken()) > 0 {
 		j.t.Fatalf("the sealed token does not open: %v", err)
 	}
 	sum := sha256.Sum256(req.GetCsr())
@@ -145,4 +151,89 @@ func (j *joinService) Join(_ context.Context, req *agentv1.JoinRequest) (*agentv
 		j.t.Fatal(err)
 	}
 	return &agentv1.JoinResponse{Body: b, Sig: &commonv1.Signature{Kid: "join", Sig: sig, Chain: [][]byte{j.signDER}}}, nil
+}
+
+// tpmGateway is JoinService with the tpm attestor: round 1 gets a credential challenge for the AK
+// the evidence names; round 2 must carry the activated secret, and is then issued a certificate.
+type tpmGateway struct {
+	*joinService
+	secret []byte
+	rounds int
+	// tokens counts the rounds that carried a sealed join token.
+	tokens int
+}
+
+func (g *tpmGateway) Join(ctx context.Context, req *agentv1.JoinRequest) (*agentv1.JoinResponse, error) {
+	g.rounds++
+	g.csrs = append(g.csrs, req.GetCsr())
+	if req.GetAttestor() != "tpm" {
+		g.t.Fatalf("round %d: attestor %q", g.rounds, req.GetAttestor())
+	}
+	if len(req.GetSealedToken()) != 0 {
+		g.tokens++
+	}
+	var e struct {
+		EK, AK string
+		Answer *struct{ Secret string }
+	}
+	if err := json.Unmarshal(req.GetAttestation(), &e); err != nil {
+		g.t.Fatal(err)
+	}
+	b64 := base64.RawURLEncoding
+	if e.Answer == nil {
+		ek, _ := b64.DecodeString(e.EK)
+		ak, _ := b64.DecodeString(e.AK)
+		name, _ := tpm.Name(ak)
+		blob, enc, err := tpmsim.MakeCredential(ek, name, g.secret)
+		if err != nil {
+			g.t.Fatal(err)
+		}
+		payload, _ := json.Marshal(map[string]any{"credentialBlob": b64.EncodeToString(blob), "encryptedSecret": b64.EncodeToString(enc),
+			"state": "s", "pcrSelection": []tpm.Selection{{Hash: tpm.AlgSHA256, PCRs: []int{0, 1, 2, 3, 4, 5, 6, 7}}}})
+		sum := sha256.Sum256(req.GetCsr())
+		body := &agentv1.JoinResponseBody{CsrSha256: sum[:], Deferral: &agentv1.JoinDeferral{Kind: &agentv1.JoinDeferral_Challenge{Challenge: &agentv1.JoinChallenge{
+			Attestor: "tpm", Payload: payload, NotAfter: timestamppb.New(time.Now().Add(5 * time.Minute))}}}}
+		raw, _ := proto.Marshal(body)
+		sig, _ := pki.SignP1363(g.signKey, pki.SigningInput(pki.PurposeJoinResponse, raw))
+		return &agentv1.JoinResponse{Body: raw, Sig: &commonv1.Signature{Kid: "join", Sig: sig, Chain: [][]byte{g.signDER}}}, nil
+	}
+	if got, _ := b64.DecodeString(e.Answer.Secret); !bytes.Equal(got, g.secret) {
+		g.t.Fatal("round 2 does not carry the activated credential")
+	}
+	g.joinService.calls = 1 // issue now
+	return g.joinService.Join(ctx, req)
+}
+
+// A tpm join (v0.5): no token; the TPM's evidence, the challenge answered with the same CSR.
+func TestJoinWithTPM(t *testing.T) {
+	sim, err := tpmsim.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := tpm.NewAttestor(sim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	f := joinFixture(t)
+	g := &tpmGateway{joinService: f, secret: bytes.Repeat([]byte{9}, 32)}
+	state, err := Join(context.Background(), JoinOptions{
+		Client: g, Attestor: "tpm", Attest: a, EncryptionKey: &f.encKey.PublicKey, SignerPin: f.pin, DataDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.NodeID != f.nodeID || g.rounds != 2 || g.tokens != 0 || !bytes.Equal(g.csrs[0], g.csrs[1]) {
+		t.Fatalf("state %v after %d rounds (%d with a token)", state, g.rounds, g.tokens)
+	}
+	// Without an attestor that answers challenges, a challenge ends the join.
+	g2 := &tpmGateway{joinService: joinFixture(t), secret: g.secret}
+	ev, _ := a.Evidence()
+	_, err = Join(context.Background(), JoinOptions{
+		Client: g2, Attestor: "tpm", Attestation: ev, Token: "bcjt_join_01k5w0000000000000000000000." + strings.Repeat("A", 43),
+		EncryptionKey: &g2.encKey.PublicKey, SignerPin: g2.pin, DataDir: t.TempDir(),
+	})
+	if !errors.Is(err, ErrChallenge) {
+		t.Fatalf("an unanswerable challenge = %v", err)
+	}
 }
