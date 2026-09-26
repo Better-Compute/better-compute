@@ -192,7 +192,12 @@ async function boundToAllocation(
   );
 }
 
-/** A host unit's request names `host:<unit>` as its workflow and the settings field as its step. */
+/**
+ * A host unit's request names `host:<unit>` as its workflow and the settings field as its step. This
+ * is deliberate, not a gap to fix in pki: `openSecretRequest` refuses a request naming neither a
+ * workflow nor an allocation, both fields are signed parts of the request, and no workflow id has
+ * this form (they are `wf_…`), so the claim is explicit and cannot pass as a step.
+ */
 export const hostUnitWorkflowPrefix = 'host:';
 
 /**
