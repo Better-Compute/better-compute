@@ -115,8 +115,10 @@ export async function chooseHostPlacement(
       load.set(Number(node), (load.get(Number(node)) ?? 0) + Number(row.vcpu));
   }
   const memoryBytes = instance.shape.memoryGiB * GiB;
-  const free = (nodes: readonly number[]) =>
-    nodes.flatMap((node) => topology.numa.get(node)?.cpus ?? []).filter((cpu) => !taken.has(cpu));
+  // The host's own CPUs (policy.hostReserve) are never a guest's.
+  const usable = (nodes: readonly number[]) =>
+    nodes.flatMap((node) => topology.numa.get(node)?.cpus ?? []).filter((cpu) => !topology.reserved?.has(cpu));
+  const free = (nodes: readonly number[]) => usable(nodes).filter((cpu) => !taken.has(cpu));
   const all = [...topology.numa.keys()].sort((a, b) => a - b);
 
   let nodes: number[] = all;
@@ -140,11 +142,15 @@ export async function chooseHostPlacement(
       const localBytes = nodes.reduce((sum, node) => sum + (topology.numa.get(node)?.memoryBytes ?? 0), 0);
       if (localBytes >= memoryBytes) placement.mems = nodes.join(',');
       else degraded = 'NumaMemoryTooSmall';
-      if (!wanted.pinned) placement.cpus = formatCpuList(nodes.flatMap((node) => topology.numa.get(node)!.cpus));
+      if (!wanted.pinned) placement.cpus = formatCpuList(usable(nodes));
     }
   }
   if (wanted.pinned) {
-    const candidates = free(nodes);
+    // Kernel-isolated CPUs first (no host tasks, no timer ticks there), then the rest by id.
+    const isolated = topology.isolated;
+    const candidates = free(nodes).sort(
+      (a, b) => Number(isolated?.has(b) ?? false) - Number(isolated?.has(a) ?? false) || a - b,
+    );
     if (candidates.length >= instance.shape.vcpu) {
       placement.cpus = formatCpuList(candidates.slice(0, instance.shape.vcpu));
       placement.pinned = true;

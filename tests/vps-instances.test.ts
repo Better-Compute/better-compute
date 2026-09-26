@@ -1030,6 +1030,45 @@ describe('flavor placement: NUMA, pinned CPUs, hugepages (§3.8)', () => {
     expect(await placement(created.id, VB)).toEqual({ hugepageSizeBytes: GiB });
   });
 
+  it('pins to kernel-isolated CPUs first and never to the host’s reserved ones', async () => {
+    await call(
+      'flavors',
+      'create',
+      {
+        tenantId: 'root',
+        poolId: hostedPool,
+        name: 'pin.only',
+        vcpu: 4,
+        memoryGiB: 4,
+        diskGiB: 40,
+        placement: { pinned: true },
+      },
+      root,
+    );
+    // The host keeps 2 CPUs for itself; 13-15 are isolated from the scheduler.
+    await db.query(
+      `UPDATE inventory_snapshots SET sections = jsonb_set(sections, '{cpu,isolatedCpus}', '"13-15"')`,
+    );
+    await db.query(
+      `UPDATE pools SET policy = policy || '{"hostReserve":{"vcpu":2}}'::jsonb WHERE id = $1`,
+      [hostedPool],
+    );
+    const first = (await call(
+      'instances',
+      'create',
+      createHosted({ flavor: 'pin.only', idempotencyKey: 'iso-1' }),
+    )) as View;
+    // Isolated 13-15 first, then the lowest free: 2 (0 and 1 are the host's).
+    expect((await placement(first.id, first.nodeId!))!.cpus).toBe('2,13-15');
+    const second = (await call(
+      'instances',
+      'create',
+      createHosted({ flavor: 'pin.only', idempotencyKey: 'iso-2' }),
+    )) as View;
+    if (second.nodeId === first.nodeId)
+      expect((await placement(second.id, second.nodeId!))!.cpus).toBe('3-6');
+  });
+
   it('gives guests a balloon when the pool overcommits memory, never hugepage or GPU guests', async () => {
     await db.query(
       `UPDATE pools SET policy = policy || '{"overcommit":{"memoryGiB":1.5}}'::jsonb WHERE id = $1`,

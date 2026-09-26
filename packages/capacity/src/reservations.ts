@@ -46,6 +46,7 @@ import {
 } from './bookings.js';
 import { chargeQuota, quotaDemand, refundQuota } from './quota.js';
 import { formatCpuList, parseCpuList } from './cpulist.js';
+import { defaultNodeReserve } from './host-resources.js';
 import { dedicatedTaint, schedulableSqlTolerating } from './eligibility.js';
 import { assertGang, planGangs } from './gang.js';
 import { assertSelector } from './selector.js';
@@ -2474,10 +2475,17 @@ export async function deviceAssignments(tx: SqlTx, nodeId: string): Promise<Devi
 const hostBooked = (resources: Readonly<Record<string, number>>): boolean =>
   (resources.vcpu ?? 0) > 0 || (resources.memoryGiB ?? 0) > 0 || (resources.hugepages1Gi ?? 0) > 0;
 
-/** A host's NUMA nodes (applied inventory) and the NUMA node of each of some devices. */
+/**
+ * A host's NUMA nodes (applied inventory), the NUMA node of each of some devices, the CPUs the
+ * kernel isolates (`cpu.isolatedCpus`) and the CPUs kept for the host itself (§3.8): the lowest-
+ * numbered non-isolated CPUs, as many as the pool's `policy.hostReserve.vcpu` (default 2), which
+ * no cpuset or pinned guest is given.
+ */
 export interface NodeTopology {
   numa: ReadonlyMap<number, { cpus: readonly number[]; memoryBytes: number }>;
   deviceNuma: ReadonlyMap<string, number>;
+  isolated?: ReadonlySet<number>;
+  reserved?: ReadonlySet<number>;
 }
 
 export async function readNodeTopology(
@@ -2486,8 +2494,17 @@ export async function readNodeTopology(
   deviceIds: readonly string[],
 ): Promise<NodeTopology> {
   // proto3 JSON leaves a zero id out: NUMA node 0 has no `id`.
-  const numaRows = await tx.query<{ id: string | null; cpus: string | null; memory: string | null }>(
-    `SELECT e->>'id' AS id, e->>'cpus' AS cpus, e->>'memoryBytes' AS memory
+  const numaRows = await tx.query<{
+    id: string | null;
+    cpus: string | null;
+    memory: string | null;
+    isolated: string | null;
+    reserve: string | null;
+  }>(
+    `SELECT e->>'id' AS id, e->>'cpus' AS cpus, e->>'memoryBytes' AS memory,
+            s.sections->'cpu'->>'isolatedCpus' AS isolated,
+            (SELECT p.policy->'hostReserve'->>'vcpu' FROM nodes n JOIN pools p ON p.id = n.pool_id
+              WHERE n.id = ni.node_id) AS reserve
        FROM node_inventory ni JOIN inventory_snapshots s ON s.id = ni.applied_snapshot_id,
             jsonb_array_elements(CASE WHEN jsonb_typeof(s.sections->'cpu'->'numaNodes') = 'array'
                                       THEN s.sections->'cpu'->'numaNodes' ELSE '[]'::jsonb END) e
@@ -2507,7 +2524,21 @@ export async function readNodeTopology(
   const deviceNuma = new Map<string, number>();
   for (const row of deviceRows.rows)
     if (row.numa !== null && /^\d+$/.test(row.numa)) deviceNuma.set(row.id, Number(row.numa));
-  return { numa, deviceNuma };
+  const first = numaRows.rows[0];
+  const isolated = new Set(parseCpuList(first?.isolated ?? ''));
+  const count = Number(first?.reserve);
+  const reserve =
+    first?.reserve !== null && first?.reserve !== undefined && Number.isFinite(count) && count >= 0
+      ? Math.floor(count)
+      : defaultNodeReserve.vcpu;
+  const reserved = new Set(
+    [...numa.values()]
+      .flatMap((entry) => entry.cpus)
+      .filter((cpu) => !isolated.has(cpu))
+      .sort((a, b) => a - b)
+      .slice(0, reserve),
+  );
+  return { numa, deviceNuma, isolated, reserved };
 }
 
 /**
@@ -2533,7 +2564,8 @@ export function assignmentLimits(
     ? (nodes as number[]).sort((a, b) => a - b).map((node) => [node, topology.numa.get(node)!] as const)
     : [];
   if (local.length > 0) {
-    const cpus = local.flatMap(([, entry]) => entry.cpus);
+    // The host's own CPUs never go to an allocation.
+    const cpus = local.flatMap(([, entry]) => entry.cpus).filter((cpu) => !topology.reserved?.has(cpu));
     if (vcpu > 0 && cpus.length >= vcpu) limits.cpus = formatCpuList(cpus);
     const localBytes = local.reduce((sum, [, entry]) => sum + entry.memoryBytes, 0);
     if (memoryBytes > 0 && localBytes >= memoryBytes)

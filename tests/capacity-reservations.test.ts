@@ -2817,7 +2817,8 @@ describe('host CPU and memory booked with the GPUs (§3.8)', () => {
       cpuMillis: 16_000,
       memoryBytes: 128 * 2 ** 30,
       hugepages1Gi: 4,
-      cpus: nodes.size === 2 ? '0-63' : nodes.has(0) ? '0-15,32-47' : '16-31,48-63',
+      // CPUs 0 and 1 are the host's own (policy.hostReserve.vcpu, default 2).
+      cpus: nodes.size === 2 ? '2-63' : nodes.has(0) ? '2-15,32-47' : '16-31,48-63',
       mems: [...nodes].sort().join(','),
     });
     // The spec carries them to the node.
@@ -2852,6 +2853,10 @@ describe('host CPU and memory booked with the GPUs (§3.8)', () => {
     });
     // A device without a known NUMA node: no cpuset at all.
     expect(assignmentLimits({ vcpu: 2 }, ['g1', 'gx'], topology)).toEqual({ cpuMillis: 2000 });
+    // The host's reserved CPUs are left out, and count against the fit.
+    const reserved = { ...topology, reserved: new Set([4, 5]) };
+    expect(assignmentLimits({ vcpu: 2 }, ['g1'], reserved)).toMatchObject({ cpus: '6-7' });
+    expect(assignmentLimits({ vcpu: 3 }, ['g1'], reserved)).not.toHaveProperty('cpus');
     expect(parseCpuList('0-3, 8,10-9,x')).toEqual([0, 1, 2, 3, 8]);
     expect(formatCpuList([8, 3, 2, 1, 0, 10, 11])).toBe('0-3,8,10-11');
   });
