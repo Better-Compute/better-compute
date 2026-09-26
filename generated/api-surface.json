@@ -5980,6 +5980,45 @@
         "additionalProperties": false
       }
     },
+    "sandboxVolumes.resize": {
+      "route": "POST /api/compute/sandboxVolumes/resize",
+      "kind": "mutation",
+      "action": "compute:sandboxes:manage",
+      "resource": "compute-sandbox-volume",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "volumeId": {
+            "type": "string",
+            "pattern": "^vol_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The sandbox volume"
+          },
+          "sizeGiB": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16384,
+            "description": "The new size in GiB: at least the current one (a volume never shrinks); the growth is charged to the diskGiB quota"
+          }
+        },
+        "required": [
+          "tenantId",
+          "volumeId",
+          "sizeGiB"
+        ],
+        "additionalProperties": false
+      }
+    },
     "sandboxes.create": {
       "route": "POST /api/compute/sandboxes/create",
       "kind": "mutation",

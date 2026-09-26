@@ -6031,6 +6031,45 @@
         "description": "Returns one volume of the tenant: its size, serial, host and state (`ready`, `deleting` or `deleted`).\n\nA volume of another tenant is `NOT_FOUND`. Decided as `compute:sandboxes:read` on the volume."
       },
       {
+        "method": "resize",
+        "route": "POST /api/compute/sandboxVolumes/resize",
+        "kind": "mutation",
+        "action": "compute:sandboxes:manage",
+        "resource": "compute-sandbox-volume",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "volumeId": {
+              "type": "string",
+              "pattern": "^vol_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 56,
+              "description": "The sandbox volume"
+            },
+            "sizeGiB": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384,
+              "description": "The new size in GiB: at least the current one (a volume never shrinks); the growth is charged to the diskGiB quota"
+            }
+          },
+          "required": ["tenantId", "volumeId", "sizeGiB"],
+          "additionalProperties": false
+        },
+        "summary": "",
+        "description": ""
+      },
+      {
         "method": "delete",
         "route": "POST /api/compute/sandboxVolumes/delete",
         "kind": "mutation",
