@@ -17,6 +17,7 @@ import {
   RiWifiOffLine,
 } from 'react-icons/ri';
 import type { AdminModule } from '@/lib/modules';
+import { fleetAttention } from './attention';
 import { NodePeek, SandboxPeek, searchFleet } from './peeks';
 import { BatchesStatus, NodesStatus, RolloutStatus } from './status';
 import { BatchesWidget, GpuWallWidget, HealthWidget, RolloutWidget, SandboxesWidget, UnhealthyWidget, poolKindOptions } from './widgets';
@@ -172,6 +173,7 @@ export const fleetModule: AdminModule = {
     { id: 'fleet.batches.pending', label: 'Batches awaiting my signature', group: 'Operations', icon: RiShieldCheckLine, href: '/batches', keywords: ['approve', 'quorum'] },
   ],
   search: searchFleet,
+  attention: fleetAttention,
   peeks: {
     node: { title: (id) => id.replace(/^n-/, ''), href: (id) => `/nodes/${id}`, icon: RiServerLine, component: NodePeek },
     sandbox: { title: (id) => id, href: (id) => `/sandboxes?sandbox=${id}`, icon: RiBox3Line, component: SandboxPeek },
