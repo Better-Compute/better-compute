@@ -15,7 +15,7 @@ import { Mono, Tag } from '@/components/ui/signal';
 import { Stat } from '@/components/ui/stat';
 import { fmtDuration, fmtMoney, fmtNum, fmtPct, fmtRelative, fmtStamp } from '@/lib/data/format';
 import { reservationGpus } from '@/lib/data/capacity';
-import { DAY, HOUR, useHourWindow, usePoolRows, useTenantName, useTimelines } from '../data';
+import { DAY, HOUR, useHourWindow, usePoolRows, useTenantName, useTimelineErrors, useTimelines } from '../data';
 import { SourceNotice } from '../source-notice';
 import { CapacityHeatmap, HeatmapTable } from '../heatmap';
 import { byModel, costOf, fleetSeries, fleetTotals, heatMatrix, pressure, quotaCells, runway, type PoolRow } from '../model';
@@ -40,15 +40,20 @@ function RunwayPanel({ rows }: { rows: PoolRow[] }) {
     from,
     hour,
   );
+  const failed = useTimelineErrors(
+    rows.map((row) => row.id),
+    from,
+    hour,
+  );
   const list = useMemo(
     () =>
       rows
         .map((row) => {
           const timeline = timelines.get(row.id);
-          return { row, loading: !timeline, ...(timeline ? runway(timeline) : { daily: [] as number[], slopePerWeek: 0, current: 0, daysToCeiling: undefined }) };
+          return { row, loading: !timeline, failed: failed.has(row.id), ...(timeline ? runway(timeline) : { daily: [] as number[], slopePerWeek: 0, current: 0, daysToCeiling: undefined }) };
         })
         .sort((a, b) => (a.daysToCeiling ?? Infinity) - (b.daysToCeiling ?? Infinity) || b.slopePerWeek - a.slopePerWeek),
-    [rows, timelines],
+    [rows, timelines, failed],
   );
   return (
     <Panel className="col-span-12 lg:col-span-6" title="Runway" icon={RiLineChartLine} meta="14-day trend → 95% booked" flush>
@@ -62,7 +67,7 @@ function RunwayPanel({ rows }: { rows: PoolRow[] }) {
           </tr>
         </thead>
         <tbody>
-          {list.map(({ row, daily, slopePerWeek, daysToCeiling, loading }) => (
+          {list.map(({ row, daily, slopePerWeek, daysToCeiling, loading, failed: loadFailed }) => (
             <tr key={row.id} className="border-b border-separator-border last:border-0">
               <td className="px-3 py-1.5">
                 <Link href={`/pools/${row.id}`} className="text-caption-1-medium hover:underline">
@@ -80,7 +85,7 @@ function RunwayPanel({ rows }: { rows: PoolRow[] }) {
               </td>
               <td className="px-3 py-1.5 text-right">
                 {loading ? (
-                  <span className="font-mono text-[11px] text-text-tertiary">loading…</span>
+                  <span className="font-mono text-[11px] text-text-tertiary">{loadFailed ? "couldn't load" : 'loading…'}</span>
                 ) : daysToCeiling === undefined ? (
                   <span className="font-mono text-[11px] text-text-tertiary">not at this trend</span>
                 ) : daysToCeiling === 0 ? (

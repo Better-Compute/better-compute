@@ -34,6 +34,8 @@ export interface WaitDiagnosis {
   cause?: WaitCheck;
   /** Pool-wide earliest window for the same size and length from its wanted start (the placer decides per node). */
   fitsAt?: number;
+  /** Where the timeline that `fitsAt` searched ends (no fit means "none before this"). */
+  searchedTo?: number;
   /** The placer's own last word, when it reported the reservation unschedulable. */
   placer?: Condition;
   /** What is booked on the pool during the window, biggest first. */
@@ -42,18 +44,37 @@ export interface WaitDiagnosis {
 
 const ORDER: CheckId[] = ['confirmation', 'quota', 'shape', 'service', 'capacity', 'fragmentation'];
 
+/**
+ * The window a waiting reservation wants: a pending one has no `during` yet, its request says when it wants to
+ * start (or as soon as possible). Callers load the pool's timeline to at least `end`.
+ */
+export function waitWindow(reservation: Reservation, now: number): { start: number; end: number } {
+  const length = durationMs(reservation.request.duration) || (reservation.during ? reservation.during.end - reservation.during.start : 0) || DAY;
+  const start = Math.max(now, reservation.during?.start ?? reservation.request.start ?? now);
+  return { start, end: start + length };
+}
+
+/**
+ * How far to load a pool timeline so it covers these waiting windows: at least 7 days, through the last window's
+ * end plus a day to search for a later fit, capped at 30 days. Whole hours, so the range (and its cache key) is
+ * stable between renders.
+ */
+export function timelineReach(hour: number, windowEnds: readonly number[]): number {
+  const needed = Math.max(0, ...windowEnds.map((end) => Math.ceil(end / HOUR) * HOUR + DAY));
+  return Math.min(hour + 30 * DAY, Math.max(hour + 7 * DAY, needed));
+}
+
 export function diagnoseWait(reservation: Reservation, snapshot: CapacitySnapshot, timeline?: CapacityTimeline): WaitDiagnosis {
   const device = reservation.request.devices[0];
   const nodesWanted = reservation.request.gang?.size ?? 1;
-  const gpus = reservationGpus(reservation);
-  const length = durationMs(reservation.request.duration) || (reservation.during ? reservation.during.end - reservation.during.start : 0) || DAY;
-  // A pending reservation has no window yet: its request says when it wants to start (or as soon as possible).
-  const start = Math.max(snapshot.now, reservation.during?.start ?? reservation.request.start ?? snapshot.now);
-  const end = start + length;
+  const { start, end } = waitWindow(reservation, snapshot.now);
+  const length = end - start;
   const poolNodes = snapshot.nodes.filter((node) => node.poolId === reservation.poolId);
   const wholeNode = device?.class === 'node';
   const largest = Math.max(0, ...poolNodes.map((node) => node.gpus));
   const perNode = wholeNode ? largest || 8 : device?.count ?? 1;
+  // A whole-node request needs every GPU of the node: count this pool's node size, not a nominal 8.
+  const gpus = wholeNode ? perNode * nodesWanted : reservationGpus(reservation);
   const checks: WaitCheck[] = [];
 
   // An agent's delegation said "ask a person": nothing is placed until someone confirms, whatever the capacity.
@@ -66,25 +87,17 @@ export function diagnoseWait(reservation: Reservation, snapshot: CapacitySnapsho
       short: 'needs a person to confirm (delegated deny)',
     });
 
-  // Quota: the tenant's GPU headroom in this pool.
+  // Quota is charged when a reservation is created, before placement, and held while it waits: a pending or
+  // awaiting reservation never waits on quota (an over-quota create is denied outright). Shown for context only.
   const quota = snapshot.quotas.find(
     (row) => row.poolId === reservation.poolId && row.resource === 'gpu' && (row.tenantId ?? snapshot.tenantId) === reservation.tenantId,
   );
-  if (!quota) checks.push({ id: 'quota', verdict: 'unknown', label: 'Quota', detail: 'No GPU quota row for this tenant in this pool.' });
-  else {
-    const headroom = quota.available ?? Math.max(0, quota.max - quota.used);
-    checks.push(
-      headroom >= gpus
-        ? { id: 'quota', verdict: 'ok', label: 'Quota', detail: `${headroom} of ${quota.max} GPUs left; it needs ${gpus}.` }
-        : {
-            id: 'quota',
-            verdict: 'blocks',
-            label: 'Quota',
-            detail: `Only ${headroom} of ${quota.max} GPUs left (${quota.used} in use); it needs ${gpus}.`,
-            short: `quota: ${headroom} of ${gpus} GPUs left`,
-          },
-    );
-  }
+  checks.push({
+    id: 'quota',
+    verdict: 'ok',
+    label: 'Quota',
+    detail: `Charged when it was created, so it isn't waiting on quota${quota ? ` (${quota.used} of ${quota.max} GPUs in use in this pool)` : ''}.`,
+  });
 
   // The rest are node-level when the node list is known.
   const blockers = new Map<string, Blocker>();
@@ -156,7 +169,11 @@ export function diagnoseWait(reservation: Reservation, snapshot: CapacitySnapsho
   } else {
     // Live without the node list: the pool-wide timeline is all there is.
     const inWindow = timeline?.buckets.filter((bucket) => bucket.end > start && bucket.start < end) ?? [];
+    const covered = inWindow.length ? Math.max(...inWindow.map((bucket) => bucket.end)) : 0;
     if (!inWindow.length) checks.push({ id: 'capacity', verdict: 'unknown', label: 'Capacity', detail: 'No timeline for the window yet.' });
+    else if (covered < end && Math.min(...inWindow.map((bucket) => bucket.free)) >= gpus)
+      // Free as far as we can see, but the rest of the window isn't loaded: don't call it a pass.
+      checks.push({ id: 'capacity', verdict: 'unknown', label: 'Capacity', detail: 'Free as far as the loaded timeline goes, but it ends before the window does.' });
     else {
       const least = Math.min(...inWindow.map((bucket) => bucket.free));
       checks.push(
@@ -170,8 +187,10 @@ export function diagnoseWait(reservation: Reservation, snapshot: CapacitySnapsho
   checks.sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
   const fitsAt = timeline ? earliestFit(timeline, gpus, length, { notBefore: start }) : undefined;
   const placer = reservation.conditions.filter((condition) => condition.type === 'Unschedulable').at(-1);
+  const searchedTo = timeline?.buckets.length ? Math.max(...timeline.buckets.map((bucket) => bucket.end)) : undefined;
   return {
     window: { start, end },
+    ...(searchedTo !== undefined ? { searchedTo } : {}),
     ...(placer ? { placer } : {}),
     needed: { gpus, perNode, nodes: nodesWanted },
     checks,

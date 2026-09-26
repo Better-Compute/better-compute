@@ -32,8 +32,9 @@ export function PinButton({ widgetId, settings }: { widgetId: string; settings?:
 }
 
 /** Next to mutation controls: why they won't act right now (useCapacityActions().readOnly). */
-export function ReadOnlyHint({ reason }: { reason: 'past' | 'signed-out' | undefined }) {
+export function ReadOnlyHint({ reason }: { reason: 'past' | 'not-ready' | 'signed-out' | undefined }) {
   if (reason === 'past') return <Tag status="warn">viewing the past: read-only</Tag>;
+  if (reason === 'not-ready') return <Tag status="warn">live connection not ready</Tag>;
   if (reason === 'signed-out')
     return (
       <Link href="/signin" className="font-mono text-[11px] text-text-secondary hover:text-text-primary hover:underline">

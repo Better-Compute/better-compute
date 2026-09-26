@@ -14,7 +14,7 @@ import { fmtDuration, fmtMoney, fmtNum, fmtRelative, fmtStamp } from '@/lib/data
 import { durationMs, HOUR, reservationGpus, type Reservation, type ReservationState } from '@/lib/data/capacity';
 import { cx } from '@/utils/cx';
 import { DAY, useCapacity, useCapacityActions, useHourWindow, usePoolRows, useTenantName, useTimelines } from './data';
-import { diagnoseWait } from './diagnose';
+import { diagnoseWait, timelineReach, waitWindow } from './diagnose';
 import { ReservationGantt } from './gantt';
 import { reservationSpend, stateStyle } from './model';
 import { planHref, ReadOnlyHint, StateTag } from './ui';
@@ -143,19 +143,24 @@ const VERDICT_ICON = { ok: RiCheckLine, blocks: RiCloseLine, unknown: RiQuestion
 function WhyWaiting({ reservation }: { reservation: Reservation }) {
   const snapshot = useCapacity();
   const tenantName = useTenantName();
-  const { hour, to } = useHourWindow(0, 7 * 24);
-  const timelines = useTimelines([reservation.poolId], hour, to);
+  const { hour } = useHourWindow(0, 0);
+  // Load the pool's timeline through the window it wants (a pending start can be days out).
+  const reach = timelineReach(hour, [waitWindow(reservation, snapshot.now).end]);
+  const timelines = useTimelines([reservation.poolId], hour, reach);
   const timeline = timelines.get(reservation.poolId);
   const diagnosis = useMemo(() => diagnoseWait(reservation, snapshot, timeline), [reservation, snapshot, timeline]);
   const { cause, fitsAt, needed } = diagnosis;
   const { start } = diagnosis.window;
   const length = diagnosis.window.end - start;
+  // The pool-wide earliest fit only answers a capacity cause: scattered GPUs look free pool-wide, and a person's
+  // confirmation or a shape that never fits don't move with time.
+  const poolWideFit = !cause || cause.id === 'capacity';
   const next =
-    cause?.id === 'quota'
-      ? { href: `/quotas?tenant=${encodeURIComponent(reservation.tenantId)}`, label: 'open quotas' }
-      : cause?.id === 'service'
-        ? { href: `/pools/${reservation.poolId}?tab=now`, label: 'see the rack' }
-        : fitsAt !== undefined && (cause?.id === 'capacity' || cause?.id === 'fragmentation')
+    cause?.id === 'service'
+      ? { href: `/pools/${reservation.poolId}?tab=now`, label: 'see the rack' }
+      : cause?.id === 'fragmentation'
+        ? { href: `/pools/${reservation.poolId}?tab=now`, label: 'see where the free GPUs are' }
+        : cause?.id === 'capacity' && fitsAt !== undefined
           ? { href: planHref(reservation.poolId, fitsAt, fitsAt + length, { gpus: needed.perNode, nodes: needed.nodes }), label: 'plan the earliest window' }
           : undefined;
   return (
@@ -178,11 +183,15 @@ function WhyWaiting({ reservation }: { reservation: Reservation }) {
         </p>
         <p className="mt-1 font-mono text-[11px] text-text-secondary">
           {start > snapshot.now + HOUR && `wants to start ${fmtStamp(start)} (${fmtRelative(start, snapshot.now)}) · `}
-          {fitsAt === undefined
-            ? `no window for ${needed.gpus} GPUs × ${fmtDuration(length)} in this pool within 7 d`
-            : fitsAt <= start + HOUR
-              ? `this pool has ${needed.gpus} GPUs × ${fmtDuration(length)} free from ${start > snapshot.now + HOUR ? 'then' : 'now'} (pool-wide)`
-              : `this pool fits ${needed.gpus} GPUs × ${fmtDuration(length)} from ${fmtStamp(fitsAt)} (${fmtRelative(fitsAt, snapshot.now)})`}
+          {!poolWideFit
+            ? `needs ${needed.gpus} GPUs × ${fmtDuration(length)}`
+            : !timeline
+              ? 'loading the pool timeline…'
+              : fitsAt === undefined
+                ? `no window for ${needed.gpus} GPUs × ${fmtDuration(length)} in this pool before ${fmtStamp(diagnosis.searchedTo ?? reach)}`
+                : fitsAt <= start + HOUR
+                  ? `this pool has ${needed.gpus} GPUs × ${fmtDuration(length)} free from ${start > snapshot.now + HOUR ? 'then' : 'now'} (pool-wide)`
+                  : `this pool fits ${needed.gpus} GPUs × ${fmtDuration(length)} from ${fmtStamp(fitsAt)} (${fmtRelative(fitsAt, snapshot.now)})`}
           {next && (
             <>
               {' · '}

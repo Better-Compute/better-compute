@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { HOUR, type CapacityNode, type CapacitySnapshot, type Reservation } from '@/lib/data/capacity';
-import { diagnoseWait } from '@/components/capacity/diagnose';
+import { diagnoseWait, timelineReach } from '@/components/capacity/diagnose';
 
 // "Why is it waiting" over a hand-built pool: two 8-GPU nodes, one tenant with a GPU quota.
 const NOW = Date.UTC(2026, 8, 23, 14, 0);
@@ -51,12 +51,42 @@ describe('diagnoseWait', () => {
   it('puts a missing confirmation before everything else', () => {
     const d = diagnoseWait(reservation('r', { state: 'awaiting-confirmation' }), snapshot([], { quota: 0 }));
     expect(d.cause?.id).toBe('confirmation');
-    expect(d.checks.find((check) => check.id === 'quota')?.verdict).toBe('blocks');
   });
 
-  it('blames quota first', () => {
-    const d = diagnoseWait(reservation('r', {}), snapshot([], { quota: 8, used: 4 }));
-    expect(d.cause?.id).toBe('quota');
+  it('never blames quota: a waiting reservation was charged at create', () => {
+    // Live: used already includes its own 8 GPUs, so available is 0; that is not why it waits.
+    const d = diagnoseWait(reservation('r', {}), snapshot([], { quota: 16, used: 16 }));
+    expect(d.cause).toBeUndefined();
+    expect(d.checks.find((check) => check.id === 'quota')?.verdict).toBe('ok');
+  });
+
+  it('sizes a whole-node request by the pool’s nodes', () => {
+    const whole = reservation('r', { request: { poolId: 'p1', devices: [{ class: 'node', count: 1 }], duration: '4h' } });
+    const nodes: CapacityNode[] = [
+      { id: 'n1', poolId: 'p1', gpus: 4, health: 'ok' },
+      { id: 'n2', poolId: 'p1', gpus: 4, health: 'ok' },
+    ];
+    const d = diagnoseWait(whole, snapshot([busy('a', 'n2', 4)], { nodes }));
+    expect(d.needed).toEqual({ gpus: 4, perNode: 4, nodes: 1 });
+    expect(d.cause).toBeUndefined();
+  });
+
+  it('loads timelines through the wanted window', () => {
+    const hour = NOW;
+    expect(timelineReach(hour, [])).toBe(hour + 7 * 24 * HOUR);
+    // Rounded up to the hour, plus a day to search for a later fit.
+    expect(timelineReach(hour, [NOW + 10 * 24 * HOUR + 1])).toBe(NOW + 11 * 24 * HOUR + HOUR);
+    expect(timelineReach(hour, [NOW + 90 * 24 * HOUR])).toBe(hour + 30 * 24 * HOUR);
+  });
+
+  it("doesn't pass a window the timeline only half covers", () => {
+    const timeline = {
+      poolId: 'p1',
+      allocatable: 16,
+      buckets: Array.from({ length: 3 }, (_, i) => ({ start: NOW + i * HOUR, end: NOW + (i + 1) * HOUR, booked: 0, free: 16 })),
+    };
+    const d = diagnoseWait(reservation('r', {}), snapshot([], { nodes: [] }), timeline);
+    expect(d.checks.find((check) => check.id === 'capacity')?.verdict).toBe('unknown');
   });
 
   it('says a shape can never fit', () => {

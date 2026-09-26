@@ -913,7 +913,8 @@ function buildReservation(booking: PlannedBooking, now: number, overlay: Overlay
       ...(state === 'failed' ? { error: { code: 'UNAVAILABLE', message: 'The node did not report AllocationBound in time' } } : {}),
     },
     version: 1 + (overlay.ends.has(booking.id) ? 1 : 0),
-    // Only a reservation the placer placed has nodes: pending, awaiting, cancelled and denied ones never got any.
+    // Only a reservation holding (or that held) a placement shows nodes: pending, awaiting and denied ones never
+    // had one, and a cancelled one gave its placement back.
     ...(holds || state === 'placed' || state === 'failed'
       ? { nodeIds: booking.atoms.map((atom) => atom.nodeId), atoms: booking.atoms.flatMap((atom) => atom.gpus.map((gpu) => `${atom.nodeId}/gpu${gpu}`)) }
       : {}),

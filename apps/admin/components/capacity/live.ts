@@ -102,6 +102,12 @@ export function liveTimeline(tenantId: string, poolId: string, from: number, to:
   return entry?.value;
 }
 
+/** The last fetch error of a timeline with no value yet (so a view can say "couldn't load" instead of "loading"). */
+export function liveTimelineError(tenantId: string, poolId: string, from: number, to: number, stepMinutes: number): string | undefined {
+  const entry = timelines.get(`${tenantId}:${poolId}:${from}:${to}:${stepMinutes}`);
+  return entry && !entry.value ? entry.error : undefined;
+}
+
 /** An empty snapshot for the moment before the first live load answers. */
 export function emptySnapshot(now: number, tenantId = ''): CapacitySnapshot {
   return {

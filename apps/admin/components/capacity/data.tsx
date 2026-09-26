@@ -20,7 +20,7 @@ import {
 } from '@/lib/data/capacity';
 import { useConnection } from '@/components/shell/connection';
 import { actionsVersion, subscribeFleetActions } from '@/lib/data/fleet-actions';
-import { emptySnapshot, liveSource, liveState, liveSubscribe, liveTimeline, liveVersion, loadLive, refreshLive } from './live';
+import { emptySnapshot, liveSource, liveState, liveSubscribe, liveTimeline, liveTimelineError, liveVersion, loadLive, refreshLive } from './live';
 import { poolRows, type PoolRow } from './model';
 
 // The capacity module's data hooks, in two modes behind one API:
@@ -131,6 +131,18 @@ export function useTimelines(poolIds: readonly string[], from: number, to: numbe
   );
 }
 
+/** Live: the pools whose timeline over this range failed to load (and has nothing cached). Always empty simulated. */
+export function useTimelineErrors(poolIds: readonly string[], from: number, to: number, stepMinutes = 60): Set<string> {
+  const { live, tenantId } = useMode();
+  const liveVer = useLiveStore();
+  const key = poolIds.join(',');
+  return useMemo(
+    () => (live ? new Set(poolIds.filter((poolId) => liveTimelineError(tenantId, poolId, from, to, stepMinutes))) : new Set<string>()),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [key, from, to, stepMinutes, live, tenantId, live ? liveVer : 0],
+  );
+}
+
 /**
  * A synchronous timeline lookup for pure derivations (insights): the simulation answers at once; live answers
  * what is cached and starts loading the rest (the component re-renders when it arrives).
@@ -177,20 +189,27 @@ export type ActionState = { busy: boolean; error?: string; done?: string };
  * Nothing mutates while the workspace clock is in the past (time travel): the past is read-only.
  */
 export function useCapacityActions() {
-  const { live: clockLive, setLive } = useWorkspaceSettings();
+  const { live: clockLive, setLive, source } = useWorkspaceSettings();
   const clock = useClockGetter();
   const mode = useMode();
+  const connection = useConnection();
   // Live data ignores time travel, so it can always be changed; the simulation's past is read-only.
   const live = clockLive || mode.live;
-  const writable = !mode.live || mode.writable;
+  // Live without a tenant yet (no status, or none configured) is not ready: never fall back to the simulation.
+  const liveNotReady = source === 'live' && !mode.live;
+  const writable = source !== 'live' || (mode.live && mode.writable);
   const router = useRouter();
   const { toast, confirmWithReason } = useFeedback();
   const [state, setState] = useState<ActionState>({ busy: false });
   const signInToast = useCallback(() => {
-    const error = 'Signed out, the live connection only reads.';
+    const error = liveNotReady ? 'The live connection has no tenant yet.' : 'Signed out, the live connection only reads.';
     setState({ busy: false, error });
-    toast({ title: 'Sign in to make changes', detail: error, status: 'warn', action: { label: 'Sign in', onAction: () => router.push('/signin') } });
-  }, [router, toast]);
+    toast(
+      liveNotReady
+        ? { title: 'Live connection not ready', detail: `${error} Check Settings → Connection.`, status: 'warn' }
+        : { title: 'Sign in to make changes', detail: error, status: 'warn', action: { label: 'Sign in', onAction: () => router.push('/signin') } },
+    );
+  }, [router, toast, liveNotReady]);
   const run = useCallback(
     async <T,>(label: string, action: (source: CapacitySource) => Promise<T>, quiet = false): Promise<T | undefined> => {
       if (!live) {
@@ -217,6 +236,8 @@ export function useCapacityActions() {
         bump();
         // The proxy refuses mutations without an operator session (the session may have expired meanwhile).
         if ((error as { code?: string } | null)?.code === 'READ_ONLY') {
+          // Our writable flag was stale (e.g. the session expired): re-probe so the next click refuses up front.
+          connection.refresh();
           signInToast();
           return undefined;
         }
@@ -226,7 +247,7 @@ export function useCapacityActions() {
         return undefined;
       }
     },
-    [clock, live, writable, setLive, signInToast, toast, mode.live, mode.tenantId],
+    [clock, live, writable, setLive, signInToast, toast, mode.live, mode.tenantId, connection],
   );
   // Refused actions skip the dialog and go straight to run(), which says why: never ask for a reason, then refuse.
   const confirmed = useCallback(
@@ -240,7 +261,7 @@ export function useCapacityActions() {
     /** False in live mode while signed out: actions refuse with a "Sign in" toast. */
     writable,
     /** Why nothing can change right now, for a hint next to the controls. */
-    readOnly: !live ? ('past' as const) : !writable ? ('signed-out' as const) : undefined,
+    readOnly: !live ? ('past' as const) : liveNotReady ? ('not-ready' as const) : !writable ? ('signed-out' as const) : undefined,
     reset: () => setState({ busy: false }),
     release: async (id: string, gpus?: number) =>
       (await confirmed({

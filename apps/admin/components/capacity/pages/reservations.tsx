@@ -13,7 +13,7 @@ import { fmtDuration, fmtNum, fmtRelative } from '@/lib/data/format';
 import { reservationGpus, reservationStates, type Reservation, type ReservationState } from '@/lib/data/capacity';
 import { cx } from '@/utils/cx';
 import { HOUR, useHourWindow, usePoolRows, useTenantName, useTimelines } from '../data';
-import { diagnoseWait } from '../diagnose';
+import { diagnoseWait, timelineReach, waitWindow } from '../diagnose';
 import { SourceNotice } from '../source-notice';
 import { GanttLegend, ReservationGantt } from '../gantt';
 import { stateStyle } from '../model';
@@ -67,7 +67,12 @@ export function ReservationsPage() {
 
   const pending = useMemo(() => all.filter((r) => r.state === 'pending' || r.state === 'awaiting-confirmation'), [all]);
   const pendingPools = useMemo(() => [...new Set(pending.map((r) => r.poolId))], [pending]);
-  const pendingTimelines = useTimelines(pendingPools, window_.hour, window_.hour + 7 * 24 * HOUR);
+  // Through the latest wanted window of the listed ones, so a start days out still gets an answer.
+  const pendingReach = useMemo(
+    () => timelineReach(window_.hour, pending.slice(0, 30).map((r) => waitWindow(r, snapshot.now).end)),
+    [pending, window_.hour, snapshot.now],
+  );
+  const pendingTimelines = useTimelines(pendingPools, window_.hour, pendingReach);
   const diagnoses = useMemo(
     () => new Map(pending.slice(0, 30).map((r) => [r.id, diagnoseWait(r, snapshot, pendingTimelines.get(r.poolId))])),
     [pending, snapshot, pendingTimelines],
@@ -173,9 +178,11 @@ export function ReservationsPage() {
                   </span>
                   <span className={cx('ml-auto font-mono text-[11px]', cause ? 'text-text-primary' : 'text-text-secondary')}>
                     {cause?.short
-                      ? `${cause.short}${cause.id !== 'confirmation' && cause.id !== 'shape' && fit !== undefined ? ` · fits ${fmtRelative(fit, snapshot.now)}` : ''}`
-                      : fit === undefined
-                        ? 'no window in the next 7 days'
+                      ? `${cause.short}${cause.id === 'capacity' && fit !== undefined ? ` · fits ${fmtRelative(fit, snapshot.now)}` : ''}`
+                      : !pendingTimelines.has(r.poolId)
+                        ? 'loading…'
+                        : fit === undefined
+                        ? `no window ${fmtRelative(diagnosis.searchedTo ?? pendingReach, snapshot.now).replace(/^in /, 'within ')}`
                         : fit <= diagnosis.window.start + HOUR
                           ? later
                             ? `room at its start (${fmtRelative(diagnosis.window.start, snapshot.now)})`
