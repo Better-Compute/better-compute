@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"testing"
@@ -20,6 +22,8 @@ type kataPlugin struct {
 	instances map[string]coreInstanceStatus
 	applied   []coreInstanceSpec
 	removed   []string
+	// netDir: where a compliant plugin's taps appear (the host's /sys/class/net); "" creates none.
+	netDir string
 }
 
 func (k *kataPlugin) Invoke(_ context.Context, req *driverv1.InvokeRequest, _ func(*driverv1.Progress)) (string, error) {
@@ -47,6 +51,11 @@ func (k *kataPlugin) Invoke(_ context.Context, req *driverv1.InvokeRequest, _ fu
 			return "", &bcx.Error{Code: "invalid-args", Message: err.Error()}
 		}
 		k.applied = append(k.applied, spec)
+		if k.netDir != "" && spec.DesiredState == "running" {
+			for _, n := range spec.Nics {
+				_ = os.MkdirAll(filepath.Join(k.netDir, n.Tap), 0o755)
+			}
+		}
 		st := coreInstanceStatus{ID: spec.ID, State: spec.DesiredState, Addresses: []string{"10.0.0.9"}}
 		if spec.Image == nil || spec.Image.Format != "raw" {
 			st = coreInstanceStatus{ID: spec.ID, State: "error", Message: "kata boots raw images only"}
@@ -70,6 +79,7 @@ func TestPluginRuntimeRunsInstances(t *testing.T) {
 		o.Drivers = []HostedDriver{{Manifest: &commonv1.DriverManifest{Id: "kata", Version: "1.2.0", Kinds: []string{"runtime"}}, Host: kata}}
 		o.Runtimes = PluginRuntimes(o.Drivers, nil)
 	})
+	kata.netDir = h.host.Path("/sys/class/net")
 	s, hello := h.open()
 	kinds := 0
 	for _, d := range hello.GetDrivers() {

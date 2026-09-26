@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 
@@ -68,6 +69,18 @@ type coreInstanceSpec struct {
 	Nics          []coreNic    `json:"nics,omitempty"`
 	RestoreFrom   *coreRestore `json:"restoreFrom,omitempty"`
 	NetworkPolicy string       `json:"networkPolicy,omitempty"`
+	// The guest's own identity after a memory restore, SSH from the host only, and placement
+	// (review 13 H2 and L5, PLAN.md §3.8), as core's InstanceSpec names them.
+	IdentityRebindRef string         `json:"identityRebindRef,omitempty"`
+	SSHFromHostOnly   bool           `json:"sshFromHostOnly,omitempty"`
+	Placement         *corePlacement `json:"placement,omitempty"`
+}
+
+type corePlacement struct {
+	CPUs              string `json:"cpus,omitempty"`
+	Mems              string `json:"mems,omitempty"`
+	HugepageSizeBytes uint64 `json:"hugepageSizeBytes,omitempty"`
+	Balloon           bool   `json:"balloon,omitempty"`
 }
 
 type coreFlavor struct {
@@ -87,6 +100,9 @@ type coreNic struct {
 	Network   string   `json:"network"`
 	Mac       string   `json:"mac"`
 	Addresses []string `json:"addresses"`
+	// Tap is the host interface the runtime must give this NIC: bcd's network-policy and
+	// host-only-SSH rules match it by name (runtime.TapName), and bcd checks it is there.
+	Tap string `json:"tap"`
 }
 
 type coreRestore struct {
@@ -173,13 +189,41 @@ func coreSpecOf(spec *agentv1.InstanceSpec) *coreInstanceSpec {
 	if img := spec.GetImage(); img.GetUrl() != "" {
 		c.Image = &coreImage{URL: img.GetUrl(), Sha256: hex.EncodeToString(img.GetSha256()), Format: img.GetFormat()}
 	}
-	for _, n := range spec.GetNics() {
-		c.Nics = append(c.Nics, coreNic{Network: n.GetNetwork(), Mac: n.GetMac(), Addresses: append([]string{}, n.GetAddresses()...)})
+	for i, n := range spec.GetNics() {
+		c.Nics = append(c.Nics, coreNic{Network: n.GetNetwork(), Mac: n.GetMac(), Addresses: append([]string{}, n.GetAddresses()...),
+			Tap: runtime.TapName(spec.GetInstanceId(), i)})
 	}
 	if pol := spec.GetNetworkPolicy(); pol != agentv1.InstanceNetworkPolicy_INSTANCE_NETWORK_POLICY_UNSPECIFIED {
 		c.NetworkPolicy = policyName(pol)
 	}
+	c.IdentityRebindRef, c.SSHFromHostOnly = spec.GetIdentityRebindRef(), spec.GetSshFromHostOnly()
+	if p := spec.GetPlacement(); p != nil {
+		c.Placement = &corePlacement{CPUs: p.GetCpus(), Mems: p.GetMems(), HugepageSizeBytes: p.GetHugepageSizeBytes(), Balloon: p.GetBalloon()}
+	}
 	return c
+}
+
+// tapRulesApply reports whether bcd's tap rules guard spec: a network policy other than egress, or
+// SSH from the host only.
+func tapRulesApply(spec *agentv1.InstanceSpec) bool {
+	switch spec.GetNetworkPolicy() {
+	case agentv1.InstanceNetworkPolicy_INSTANCE_NETWORK_POLICY_PRIVATE, agentv1.InstanceNetworkPolicy_INSTANCE_NETWORK_POLICY_NONE:
+		return true
+	}
+	return spec.GetSshFromHostOnly()
+}
+
+// missingTaps are the taps a plugin runtime's running instance should have under bcd's names but
+// does not: its traffic would bypass the rules, which match by name.
+func (a *Agent) missingTaps(spec *agentv1.InstanceSpec) []string {
+	var missing []string
+	for i := range spec.GetNics() {
+		tap := runtime.TapName(spec.GetInstanceId(), i)
+		if _, err := os.Stat(a.host.Path("/sys/class/net/" + tap)); err != nil {
+			missing = append(missing, tap)
+		}
+	}
+	return missing
 }
 
 // Ensure records the spec (with a new instance's user data and snapshot) for SetState, which

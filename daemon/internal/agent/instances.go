@@ -256,6 +256,19 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 			specErrors[id] = err.Error()
 			continue
 		}
+		// A bcx runtime is told its taps' names; one that did not use them would run outside the
+		// rules, which match by name: it stops (fail closed).
+		if _, plugin := r.(*PluginRuntime); plugin && tapRulesApply(spec) &&
+			spec.GetDesiredState() == agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING {
+			if missing := c.a.missingTaps(spec); len(missing) > 0 {
+				msg := fmt.Sprintf("runtime %s did not create taps %s: its network rules cannot apply", r.Name(), strings.Join(missing, ", "))
+				if err := r.SetState(ctx, id, runtime.StateStopped); err != nil {
+					msg += "; stopping it failed: " + err.Error()
+				}
+				specErrors[id] = msg
+				continue
+			}
+		}
 		// A memory restore's guest gets its own identity once it runs (rebind.go).
 		if spec.GetDesiredState() == agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING {
 			c.a.maybeRebind(r, spec)
