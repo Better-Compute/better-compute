@@ -112,7 +112,7 @@ for in each mode.
     hardwareProfile: { type: 'string', description: 'The metal hardware profile whose driver bindings nodes inherit.' },
     sharing: {
       type: '{ replicas?: number }',
-      description: 'timeslice and mps pools: slot atoms per GPU (1 to 64). Defaults are 4 for timeslice and 10 for mps. The same number reaches each host in the gpu-sharing config unit, which allows at most 48 (/docs/daemon/host-config#gpu-sharing).',
+      description: 'timeslice and mps pools: slot atoms per GPU (1 to 48, the most MPS serves; pools.create and pools.update refuse more, and inventory makes at most 48, a708aa6). Defaults are 4 for timeslice and 10 for mps. The same number reaches each host in the gpu-sharing config unit (/docs/daemon/host-config#gpu-sharing).',
     },
     hostReserve: {
       type: '{ vcpu?: number; memoryGiB?: number }',
@@ -130,9 +130,21 @@ for in each mode.
       type: '{ load?: string[]; options?: Record<string, string> }',
       description: '(v1.1) Kernel modules every host loads, through the kernel-modules config unit. See /docs/daemon/host-config#kernel-modules.',
     },
+    cpu: {
+      type: "{ governor?: 'performance' | 'schedutil' | 'ondemand' | 'powersave'; isolate?: string }",
+      description: '(v1.1) The cpu config unit on every host: the cpufreq governor, and a cpulist of CPUs isolated from the kernel scheduler (never CPU 0; effective after a reboot), which pinned guests take first. See /docs/daemon/host-config#cpu.',
+    },
+    iommu: {
+      type: '{ passthrough?: boolean }',
+      description: '(v1.1) The iommu config unit: the IOMMU on for GPU passthrough to VMs (effective after a reboot); set it on vps-host pools with GPU flavors. See /docs/daemon/host-config#iommu.',
+    },
+    gpu: {
+      type: '{ powerLimitWatts?: number; ecc?: boolean }',
+      description: "(v1.1) The gpu-settings config unit: each GPU's power cap (1 to 10,000 W) and ECC mode. See /docs/daemon/host-config#gpu-settings.",
+    },
     kubernetes: {
-      type: '{ apiServer?, caCertSha256?, joinTokenRef?, labels?, taints?, kubernetesVersion?, gpu?, platformOperated? }',
-      description: "(v1.1) The pool's hosts work for a Kubernetes cluster, and reservations may use binding 'kubernetes'. apiServer, caCertSha256 and joinTokenRef together make every host join through the k8s-join unit; none of them marks a pool whose bcd runs as a DaemonSet in the cluster. See /docs/guides/capacity/kubernetes.",
+      type: "{ apiServer?, caCertSha256?, joinTokenRef?, labels?, taints?, kubernetesVersion?, gpu?, gpuApi?: 'device-plugin' | 'dra', platformOperated? }",
+      description: "(v1.1) The pool's hosts work for a Kubernetes cluster, and reservations may use binding 'kubernetes'. apiServer, caCertSha256 and joinTokenRef together make every host join through the k8s-join unit; none of them marks a pool whose bcd runs as a DaemonSet in the cluster. gpuApi picks bcd's device plugins or its DRA driver. platformOperated counts only on a pool the platform owns. See /docs/guides/capacity/kubernetes.",
     },
     telemetry: {
       type: '{ otlpEndpoint?, intervalSeconds?, headersRef?, resourceAttributes? }',
@@ -167,10 +179,12 @@ pool `hugepages2Mi` and `hugepages1Gi` (the configured pages, never overcommitte
 rows, a row never shrinks below what is allocated, and unchanged rows are not rewritten. GPU reservations book these
 rows with their devices (see [host resources](/docs/guides/capacity/reservations#host-resources)).
 
-The host policy fields (`hugepages`, `kernelModules`, `kubernetes`, and a `sharing` mode of `mps` or `timeslice`)
-become config units in every host's NodeSpec, through provision (see
-[host configuration](/docs/daemon/host-config#where-the-units-come-from)). The pools API stores the policy as given
-and does not check them; a bad value is `INVALID_INPUT` when a node's spec is built. `admission.budgetCheck: 'meter'` adds a Better IAM
+The host policy fields (`hugepages`, `kernelModules`, `cpu`, `iommu`, `gpu`, `kubernetes`, and a `sharing` mode of
+`mps` or `timeslice`) become config units in every host's NodeSpec, through provision (see
+[host configuration](/docs/daemon/host-config#where-the-units-come-from)). Since 37dcd02 `pools.create` and
+`pools.update` (when it changes the policy) run the modules' `pool-policy` validators before writing, and provision
+registers one that checks these fields as nodes would get them, so a bad value is `INVALID_INPUT` at the API; a
+validator's failure that is not a compute error reads `policy: ...`. `admission.budgetCheck: 'meter'` adds a Better IAM
 `billing.check` to every reservation and instance admission in the pool, on top of the IAM policy described in
 [quotas and usage](/docs/guides/capacity/quotas-and-usage).
 

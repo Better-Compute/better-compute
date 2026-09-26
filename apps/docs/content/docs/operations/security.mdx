@@ -242,13 +242,35 @@ and bcd has it since 28dc2ae:
   node-writable socket directory the node could have made root set `0660 root:bcd` on any file. The socket's
   directory must now be root's and closed to group and other writes, and the socket is bound, chmodded and chowned
   in a private 0700 directory, then renamed into place.
+- **Host units only from signed specs** (03c023d, 2d18327). The helper's `host.unit` applies a config unit as root,
+  and every request carries the signed `DesiredState` that last set the host section and its worker signature (`bcd
+  node` keeps the body in `data_dir/host-intent.json`). The command-signing roots come from `command_root_sha256` in
+  root's `config.toml` (the SHA-256 of each root certificate, given at install, never taken from the control plane or
+  the node), which decides alone when set, or else from the `SignedTrustBundle` the JoinService key signed, checked
+  against root's `join_signing_key_pin`, so a root rotation needs no new pin. The helper refuses unless the roots
+  check out (pinned, or from a bundle no older than one it accepted), the signature verifies (worker role), the body
+  names this node (fixed by the first signed spec in `/var/lib/bcd-hostconfig/helper-intent.json`), its generation is
+  not older than one already applied, and the unit's settings are exactly the body's. Once a bundle with roots was
+  accepted, a request without a signed spec is refused. A verified body stays good after its short-lived worker
+  certificate expires, and a node and a helper of different versions fail closed. **The caveat:** nothing is checked
+  while the helper has no roots, that is without `command_root_sha256` before its first trust bundle with roots, or on
+  a deployment that signs nothing; the helper is then bounded by strict unit validation, the sysctl denylist, root
+  writes only under root-only directories, and `k8s-join` only to root-pinned `allowed_clusters`. `daemon
+  install-script` pins `command_root_sha256` from `--command-root-sha256` or the local PKI bundle (59985ae), which
+  closes that window. See [signed specs](/docs/daemon/host-config#signed-specs).
+- **Root writes only under root's directories** (02485b3, f8e13ef). Whenever bcd writes as root for a config unit,
+  every existing directory from `/` down to the file must be a real directory owned by root and writable by no one
+  else, so `/tmp` and anything the node owns are refused, and the units' records live in `/var/lib/bcd-hostconfig`,
+  never in the node's `data_dir`. The helper's file kinds follow the same rule.
 
 `daemon install-script --unprivileged` (169c459) sets the mode up: a `[helper]` section with the socket in the
 helper's own root-owned `/run/bcd-helper`, the `bcd` system account, `bcd-helper.service`, a `bcd.service` drop-in
 with `User=bcd`, and `/etc/bcd` readable by the `bcd` group only.
 
-The limits are plain. The helper covers files, the firewall table, GPU resets, reboots, sshd reloads and
-self-update; the instance runtimes and PLAN.md's `mig.apply` are not helper operations, and bcx plugins need a root
+The limits are plain. On a VPS or sandbox host that runs `libvirt-kvm`, the node's account is in the `libvirt`
+group, which is equivalent to root, so there `[helper]` gives no privilege separation until domain operations go
+through the helper; `bcd doctor` warns about it (5573737). The helper covers files, the firewall table, GPU resets,
+reboots, sshd reloads, host units and self-update; the instance runtimes and PLAN.md's `mig.apply` are not helper operations, and bcx plugins need a root
 node (`--unprivileged` refuses `--plugins`). The default install still runs `bcd node` as root. See
 [privilege separation](/docs/daemon#privilege-separation) and
 [running bcd node unprivileged](/docs/daemon/install#running-bcd-node-unprivileged).
@@ -426,7 +448,8 @@ A sandbox is a tenant VM for code you do not trust, often written by an agent. T
 - **SSH only from the host.** Every sandbox instance's spec sets `ssh_from_host_only`, and bcd drops tcp/22 into its
   taps from anything but the host's own bridge addresses (474d51f, review 13 L5). An exec certificate therefore works
   only through a tunnel, which is re-authorized every 60 seconds and closed on revocation, and one guest cannot reach
-  another's sshd. A bcd from before 474d51f ignores the field; nothing gates placement on it.
+  another's sshd. A bcd from before 474d51f would ignore the field, so since 82f4f51 sandbox and warm instances are
+  placed only on hosts labelled `bc.dev/cap.instance.ssh-host-only`, which a bcd that enforces it advertises.
 - **Replays and races.** A sandbox create's idempotency hash covers the caller's agent and delegation, so an agent
   cannot replay its person's key (or the reverse) to take over a sandbox, and a template update decided on one set
   of secrets is refused (`CONFLICT`, `secrets-changed`) if the template names others by the time it writes
@@ -514,7 +537,14 @@ See [tenancy](/docs/guides/iam/tenancy).
   passes `compute.handler(request, { peer: { address } })`, and remote IAM gets that as `x-forwarded-for`. The
   client's own `x-forwarded-for`, `x-real-ip` and `forwarded` are never forwarded, so a caller cannot choose the
   `request.sourceIp` its policies see (e7092bf, d269738, review 14 L3; the MCP server's remote IAM likewise, 7890821).
-  See [the caller address](/docs/operations/deployment#the-caller-address).
+  Behind a load balancer, `trustedProxies` (0873d20) lists the proxies' addresses or CIDRs: only when the socket peer
+  is one of them is the caller read from `X-Forwarded-For`, right to left, skipping trusted hops; a trusted proxy that
+  sends no usable header, or a malformed hop, leaves `sourceIp` unset, never the proxy's own address. Since 0eba0ad
+  the HTTP handler also strips `X-Forwarded-For`, `Forwarded`, `X-Real-IP` and the other client-address headers from
+  what an embedded IAM sees and sets `X-Forwarded-For` to the verified address, and the IAM caches key on it: the
+  authentication cache (30 s) and allowed read decisions (10 s) are per caller address, so a stolen token used from
+  a disallowed address no longer rides its owner's cached entries. See
+  [the caller address](/docs/operations/deployment#the-caller-address).
 
 ### Delegated approvals
 
@@ -606,7 +636,9 @@ change; see [sinks](/docs/extending/sinks#audit-sinks).
 - `pki.commandSigning` set, so commands and NodeSpecs are signed and GPU bindings are attested.
 - `tunnels` only if you need interactive access, with the SSH CA's MFA requirement left on.
 - `auditModule` registered with the bundle's audit key.
-- Nodes that run no bcx plugins installed with `daemon install-script --unprivileged`, so `bcd node` is not root.
+- Nodes that run no bcx plugins installed with `daemon install-script --unprivileged`, so `bcd node` is not root,
+  with `command_root_sha256` pinned so `bcd helper` checks host units against signed specs from the first request.
+- `trustedProxies` set to your load balancers when IAM policies condition on `request.sourceIp`.
 
 </Step>
 <Step>

@@ -292,18 +292,23 @@ pass (6c2343f). The built-in units, in the order bcd applies them:
 | `kernel-modules` | `load` (module names), `options` (module: `"key=value ..."`) |
 | `sysctl` | sysctl names with scalar values; keys that run programs as root or lower the host's defenses are `INVALID_INPUT` |
 | `hugepages` | `pages2m`, `pages1g`, `transparent` (`always`, `madvise`, `never`), `perNuma` |
+| `cpu` | `governor` (`performance`, `schedutil`, `ondemand`, `powersave`), `isolate` (a cpulist, never CPU 0; effective after a reboot) |
+| `iommu` | `passthrough`, default true (effective after a reboot) |
 | `nvidia-driver` | `branch` (three digits), `open` |
 | `fabric-manager` | none |
+| `gpu-settings` | `powerLimitWatts` (1 to 10,000), `ecc` (effective after a reboot) |
 | `mig-layout` | `from: 'pool'` takes the pool's `policy.migLayout`, or a `layout` |
 | `gpu-sharing` | `mode` (`mps` or `timeslice`), `replicas` (1 to 48) |
 | `container-toolkit` | `cdi`, default true |
-| `k8s-join` | `server`, `caCertSha256`, `tokenRef`, `kubernetesVersion`, `nodeLabels`, `taints`, `gpu` |
+| `k8s-join` | `server`, `caCertSha256`, `tokenRef` (a `secret://` reference), `kubernetesVersion`, `nodeLabels`, `taints`, `gpu`, `gpuApi` (`device-plugin` or `dra`) |
 
 Any unit takes `when`, a label expression. The pool can set units too, and a pool's unit replaces the profile's:
-`policy.hugepages`, `policy.kernelModules` and `policy.kubernetes`, and `gpu-sharing` for a pool shared by `mps` or
-`timeslice`. [Host configuration](/docs/daemon/host-config) describes what each unit does on the machine, the files it
-writes, what it refuses and when it asks for a reboot. Add units with `provisionModule({ configUnits })`; bcd
-applies only the units it knows, and fails the `host` section on any other.
+`policy.hugepages`, `policy.kernelModules`, `policy.cpu`, `policy.iommu`, `policy.gpu` and `policy.kubernetes`, and
+`gpu-sharing` for a pool shared by `mps` or `timeslice`. [Host configuration](/docs/daemon/host-config) describes
+what each unit does on the machine, the files it writes, what it refuses and when it reports `RebootRequired`, and
+the [host config units reference](/docs/reference/host-units) lists each unit's settings field by field. Add
+units with `provisionModule({ configUnits })`; bcd applies only the units it knows, and reports any other as a
+terminal failure once the units it knows had their turn.
 
 ## The image catalog
 

@@ -58,8 +58,11 @@ its boot data sealed through the secret broker.
 
 `vps()` serves three API groups for it (v0.5, beta): [sandboxTemplates](/docs/reference/api/sandbox-templates),
 [sandboxes](/docs/reference/api/sandboxes), whose `exec` method the tunnels module contributes, and
-[sandboxSnapshots](/docs/reference/api/sandbox-snapshots). All 15 methods are served. Migrations `vps/0004_sandboxes` to `vps/0017_identity_rebind` add their tables, columns and indexes, and the
-`vps.sandboxes` reconciler expires sandboxes, keeps warm pools filled and settles snapshots.
+[sandboxSnapshots](/docs/reference/api/sandbox-snapshots). All 15 methods are served. Since 2a09202 a fourth group,
+[sandboxVolumes](/docs/reference/api/sandbox-volumes) (v1.1, agent memory), keeps persistent disks that sandboxes
+attach across runs; see [volumes](#volumes). Migrations `vps/0004_sandboxes` to `vps/0020_volumes` add their tables,
+columns and indexes, the `vps.sandboxes` reconciler expires sandboxes, keeps warm pools filled and settles snapshots,
+and `vps.volumes` finishes volume deletions.
 
 <Callout type="warn" title="The control plane is done; the host runtime is untested on real hardware">
 Sandboxes run only on hosted (`vps-host`) pools, and a hosted instance is booted by a runtime inside `bcd` on its
@@ -115,6 +118,7 @@ const template = await client.sandboxTemplates.create({
     defaultTtlSeconds: { type: 'number', description: 'A sandbox lifetime when create gives none. 60 s to 30 days.', default: '3600' },
     maxTtlSeconds: { type: 'number', description: 'The longest lifetime, extensions included. 60 s to 30 days, at least defaultTtlSeconds.', default: 'max(86400, defaultTtlSeconds)' },
     warm: { type: '{ min: number; max?: number }', description: 'Warm instances to keep, 0 to 64 each; max defaults to min and must be at least min.', default: '{ min: 0, max: 0 }' },
+    volumes: { type: '{ volumeId | name, mountPath, readOnly? }[]', description: "Up to 8 sandbox volumes each sandbox attaches, in order. Resolved to ids when written: the tenant's own, in the same pool, ready. A template with volumes keeps no warm pool. See Volumes below.", default: '[]' },
   }}
 />
 
@@ -217,8 +221,11 @@ the host sends into the tap is dropped unless its source is one of the host's ow
 bridges, where the exec tunnel's dial comes from; with no host address of a family, that family's tcp/22 is dropped
 outright. Both rules sit ahead of every accept. So an exec certificate is usable only through a tunnel, which the
 control plane re-authorizes and closes on revocation, and guests on one pool cannot reach each other's sshd. An
-ordinary instance is unaffected. A bcd from before 474d51f ignores the field, and no capability or placement label
-guards it.
+ordinary instance is unaffected. A bcd from before 474d51f would ignore the field, so since 82f4f51 a bcd that
+enforces it advertises the capability `instance.ssh-host-only` (on hosts with a runtime), which the gateway writes as
+the node label `bc.dev/cap.instance.ssh-host-only=1`, and vps places sandbox and warm instances only on nodes that
+carry it; where no such host has room the instance waits in `scheduling`. `tests/vps-sandboxes.test.ts` checks that a
+sandbox lands only on such a host (3b9e81d).
 
 ## Create a sandbox
 
@@ -564,6 +571,86 @@ sandboxes.exec"), so `compute:instances:exec` on the instance, from an API key o
 session requirement and the `compute:sandboxes:exec` decision. `better-compute exec --instance` and `forward
 --instance` hit the same refusal. See [tunnels](/docs/guides/access/tunnels).
 
+## Volumes
+
+A sandbox volume (v1.1, 2a09202) is agent memory: a persistent disk on one host of a pool that the tenant's sandboxes
+attach across runs, so an agent keeps its memory, caches and checkouts after each sandbox is gone. PLAN.md §3.8 counts
+it as the third kind of memory, beside booked host memory and memory snapshots.
+
+```ts title="volume.ts"
+const volume = await client.sandboxVolumes.create({
+  tenantId: 'acme',
+  poolId: sandboxPool, // a vps-host pool
+  name: 'agent-memory',
+  sizeGiB: 50,
+  idempotencyKey: 'agent-memory',
+});
+// { id: 'vol_…', name: 'agent-memory', sizeGiB: 50, serial: 'bcv-…', nodeId: 'node_…', state: 'ready', … }
+
+await client.sandboxTemplates.update({
+  tenantId: 'acme',
+  templateId: template.id,
+  warm: { min: 0, max: 0 }, // a template with volumes keeps no warm pool
+  volumes: [{ name: 'agent-memory', mountPath: '/workspace' }],
+});
+```
+
+| Method | Decided as | |
+| --- | --- | --- |
+| [`sandboxVolumes.create`](/docs/reference/api/sandbox-volumes#create) | `compute:sandboxes:manage` on the tenant | `poolId`, `name`, `sizeGiB` (1 to 16,384), `idempotencyKey` |
+| [`sandboxVolumes.list`](/docs/reference/api/sandbox-volumes#list) | `compute:sandboxes:read` on the tenant | Optional `poolId` and `includeDeleted`; at most 500, oldest first |
+| [`sandboxVolumes.get`](/docs/reference/api/sandbox-volumes#get) | `compute:sandboxes:read` on the volume | |
+| `sandboxVolumes.resize` | `compute:sandboxes:manage` on the volume | `sizeGiB`, grow only (8cbece0) |
+| [`sandboxVolumes.delete`](/docs/reference/api/sandbox-volumes#delete) | `compute:sandboxes:manage` on the volume | |
+
+A volume is the IAM resource `sandbox-volume`, whose parent is its pool.
+
+**Create.** vps books the volume's `diskGiB` on one host of the pool through the capacity module, in an allocation
+owned by the volume (`owner_kind` `volume`, migration `core/0028_volume_allocations`), open-ended, and charged to the
+tenant's `diskGiB` quota (`QUOTA_EXCEEDED` past it). No host with room is `CAPACITY_UNAVAILABLE`, and a provider pool
+is `INVALID_INPUT`: volumes live on hosted pools. The name is unique among the tenant's volumes that are not deleted
+(`CONFLICT`). A retry with the same idempotency key returns the same volume; the key with another request is
+`CONFLICT`. The volume's serial is `bcv-` and the last 16 characters of its id, and its host's NodeSpec lists it, so
+bcd creates it there as a sparse raw file (see [volumes on the host](/docs/daemon/delivery#persistent-volumes)). The
+create publishes `sandbox.volume.created`.
+
+**Attach.** A template names up to 8 volumes, each by `volumeId` or by `name` (not both), with a `mountPath` and
+`readOnly` (default false). They are resolved to ids when the template is written: each must be the tenant's own, in
+the template's pool, and `ready`. A mount path is absolute, without `.` or `..` segments, never a system path (`/`,
+`/bin`, `/boot`, `/dev`, `/etc`, `/lib`, `/lib32`, `/lib64`, `/proc`, `/root`, `/run`, `/sbin`, `/sys`, `/tmp`, `/usr`,
+`/var`) or inside `/proc`, `/sys`, `/dev` or `/boot`; two volumes never share a path or nest. A template with volumes
+keeps no warm pool (`warm.max` must be 0), since a warm instance would hold them. Every sandbox of the template then:
+
+- attaches the volumes before it is placed, and one volume takes one read-write attachment on its own, or any number
+  of read-only ones, never both: otherwise `CONFLICT` with `details.reason: 'volume-in-use'`;
+- is placed only on the volumes' host (`PlacementRequest.onlyNodes`, 8cbece0), and only while that host carries
+  `bc.dev/cap.instance.volumes` (82f4f51); otherwise it waits in `scheduling`. Volumes on different hosts are
+  `INVALID_STATE`;
+- gets cloud-config that formats each writable volume once as ext4 (`fs_setup` with `overwrite: false`, so existing
+  data stays; a read-only volume is never formatted), mounts every volume by `/dev/disk/by-id/virtio-<serial>` with
+  `defaults,nofail` (`ro` for a read-only one, and a missing volume does not stop the boot), and runs `resize2fs` on
+  each writable volume at first boot.
+
+A sandbox with a read-write volume cannot be snapshotted with its memory (see [take one](#take-one)).
+
+**Resize.** `sandboxVolumes.resize` grows a volume and never shrinks it (a smaller size is `INVALID_INPUT`). The growth
+is charged to quota and booked on the volume's host; a host without room is `CAPACITY_UNAVAILABLE`, with the quota
+refunded and nothing changed. The host's spec carries the new size and bcd grows the file, telling a running guest at
+once (b5415a2); the filesystem grows at the next sandbox's first boot. It publishes `sandbox.volume.resized`.
+
+**Delete.** `sandboxVolumes.delete` is refused (`CONFLICT`) while a live instance attaches the volume or a live
+template names it. Otherwise the volume becomes `deleting` and leaves its host's spec, so bcd destroys it, but its disk
+stays booked until the host has applied a later spec generation (or the host is gone or retired). The `vps.volumes`
+reconciler then releases the booking, which gives the quota back, and marks the volume `deleted`. The events are
+`sandbox.volume.deleting` and `sandbox.volume.deleted`. Tenant teardown deletes a tenant's volumes after its instances.
+
+**Metering.** `vps.volume.gib.hours`, the size per hour, from the booking until it is released, by the `vps.usage`
+job.
+
+<Callout type="info" title="API only for now">
+The CLI, the MCP server and the console do not expose volumes yet; use the API or the TypeScript client.
+</Callout>
+
 ## Snapshots and restore
 
 `sandboxes.snapshot` saves a sandbox's state, disk and (by default) memory, as a tenant-private snapshot, and
@@ -626,10 +713,16 @@ sweeper or the gateway wakes `vps.sandboxes` with the snapshot id:
 `sandboxes.get` lists a sandbox's snapshots (`id`, `state`, `includeMemory`, `keep`, `runtime`, `sha256`,
 `sizeBytes`, `cpuModel`, `reason`, `createdAt`, `readyAt`).
 
-A sandbox with passthrough GPUs cannot be snapshotted with its memory: since be4de2a both runtimes refuse it on the
-host before capturing anything, because the GPU's state lives in the device and no VMM saves it, so the snapshot ends
-`failed`. The control plane does not check this up front. Take a disk-only snapshot (`includeMemory: false`) of such
-a sandbox instead.
+Two kinds of sandbox cannot be snapshotted with their memory, and since 2a09202 vps refuses them up front with
+`INVALID_STATE`, before any command reaches the host:
+
+| Sandbox | `details.reason` | Why |
+| --- | --- | --- |
+| With passthrough GPUs | `memory-snapshot-with-gpus` | The GPU's state lives in the device, and no VMM saves it |
+| Attaching a [volume](#volumes) read-write | `memory-snapshot-with-volumes` | The saved memory would not match the disk the volume goes on changing |
+
+Both runtimes refuse the same on the host too (be4de2a, 550da91). Take a disk-only snapshot (`includeMemory: false`)
+of such a sandbox instead.
 
 ### Restore
 

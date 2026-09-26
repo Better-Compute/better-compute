@@ -255,10 +255,33 @@ address. With `compute.handler`, pass it yourself as the second argument, `Handl
 const response = await compute.handler(request, { peer: { address: socket.remoteAddress } });
 ```
 
-Behind a load balancer, pass the hop your own proxy configuration trusts, never a value read from the client's
-`x-forwarded-for`. The address becomes `Credential.sourceIp`, which remote IAM receives as `x-forwarded-for`; the
-client's own forwarding headers never reach IAM (e7092bf). Without an address, IAM sees none. `serve` has no
-trusted-proxy setting, so behind a load balancer it reports the balancer's address.
+The address becomes `Credential.sourceIp`, which remote IAM receives as `x-forwarded-for`; the client's own
+forwarding headers never reach IAM (e7092bf). Since 0eba0ad that holds for an embedded IAM too: the handler strips
+`X-Forwarded-For`, `Forwarded`, `X-Real-IP` and the other client-address headers and sets `X-Forwarded-For` to the
+verified address. The IAM caches key on the address as well, so the authentication cache (30 s) and allowed read
+decisions (10 s) of a token used from one address never serve it from another. Without an address, IAM sees none.
+
+Behind a load balancer the socket's peer is the balancer, for every caller. Name your load balancers and reverse
+proxies in `trustedProxies` (0873d20), addresses or CIDR ranges, IPv4 or IPv6:
+
+```ts title="better-compute.config.ts"
+betterCompute({
+  // …
+  trustedProxies: ['10.0.0.0/8', 'fd00::/8'],
+});
+```
+
+| Socket peer | `request.sourceIp` |
+| --- | --- |
+| Not a trusted proxy | The peer; forwarding headers are ignored, as without the option |
+| A trusted proxy | `X-Forwarded-For` read right to left, skipping trusted hops: the first address that is not a trusted proxy |
+| A trusted proxy, and every hop is one too | The leftmost hop (an internal caller) |
+| A trusted proxy with no `X-Forwarded-For`, or a malformed hop | None: it fails closed, never the proxy's own address, which an internal allowlist might match |
+
+IPv4-mapped IPv6 peers (`::ffff:10.0.0.1`) are compared as IPv4. An entry that is not an address or CIDR is
+`INVALID_CONFIG` at startup, and the default trusts no proxy. `serve` takes the option from the configuration file like
+every other, and applies it to `compute.nodeHandler`; with `compute.handler`, pass the socket's peer as above and the
+option applies the same way.
 
 ## Containers
 

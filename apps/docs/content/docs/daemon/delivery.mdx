@@ -185,7 +185,9 @@ What bcd holds (46a61db, d02ba4f):
 
 - **Conflicts** are parent-aware: a whole GPU is refused (`overlap`) while part of it is held, a MIG instance or slot
   while its GPU is held whole, and two holds never share an atom. No hold is bound on a GPU the `instances` converger
-  passes through to a VM.
+  passes through to a VM, counting the domains still running after the last pass, and since 6b1480b a VM start is
+  refused a GPU that a live hold has, whole, as a MIG instance or as a slot, since passthrough would take it off its
+  host driver.
 - **CDI names** cannot contain `/`, so each device's CDI name is its atom id with `/` as `_`, and the real id rides in
   the device annotation `bcd.dev/device-id` (CDI 0.6), which is how bcd reads its holds back. `AllocationBound`
   reports the names as `bcd.dev/gpu=<name>`.
@@ -202,7 +204,8 @@ What bcd holds (46a61db, d02ba4f):
 [host resources](/docs/guides/capacity/reservations#host-resources)) reaches the node as `DeviceAssignment.limits`
 (c5a419c): `cpu_millis` from `vcpu` (1000 per CPU), `memory_bytes` from `memoryGiB`, `hugepages_1gi`, and a cpuset on
 the NUMA nodes of the hold's devices, `cpus` only when those nodes have at least `vcpu` CPUs and `mems` only when they
-hold the booked memory. bcd then creates the hold's cgroup-v2 slice before the CDI spec names it (260e33c):
+hold the booked memory. bcd then creates the hold's cgroup-v2 slice,
+`bcd.slice/bcd-alloc.slice/bcd-alloc-<allocation>.slice`, before the CDI spec names it (260e33c):
 
 | Slice `bcd-alloc-<allocation>.slice` | From |
 | --- | --- |
@@ -215,8 +218,20 @@ The limits are runtime properties (`systemctl set-property --runtime`), which a 
 so a pass that finds a held hold's slice missing creates it again. The CDI spec names the slice in the annotation
 `bcd.dev/cgroup-parent`, and every workload gets `BCD_CGROUP_PARENT=bcd-alloc-<allocation>.slice`: containerd, Slurm
 or a wrapper places the workload there; bcd does not move processes. On release, bcd stops the slice only once
-`cgroup.events` says it is empty, so a release never kills a workload; a slice still in use is kept, and bcd does not
-come back to stop it later. A hold without limits gets no slice, and nothing changes for it.
+`cgroup.events` says it is empty, so a release never kills a workload. A slice still in use is kept, and since
+e01d7ff every pass, the 10-minute drift pass included, lists the hold slices on the host and tries again to stop any
+whose hold is neither wanted nor released in that pass, so it goes once its workload exits. A hold without limits
+gets no slice, and nothing changes for it. Neither does a `BINDING_KUBERNETES` hold: its pods live in the kubelet's
+own cgroups (`kubepods.slice`), where the kubelet enforces their requests and limits, so bcd creates no slice for it
+and names no cgroup parent in its CDI spec or env (e01d7ff).
+
+**Host admission of holds** (31555bf). A new hold whose limits carry a memory limit or huge pages is admitted
+against the host the way an instance start is (see [host-side admission](#instances)): from `MemTotal` less the huge
+page pool and 1 GiB of headroom come the running and paused domains' commitments and those of the holds already
+bound (their `MemoryMax`, and the huge pages of their limits not yet faulted in, per NUMA node). A hold that does not
+fit fails with `AllocationFailed{reason: resources-exhausted}`, and the control plane re-places it. VM starts count
+the bound holds in turn, so VMs and holds never take what the other was promised. A Kubernetes hold's booked limits
+count here too, although it has no slice. A host whose memory cannot be read binds without the check, with a warning.
 
 Under [privilege separation](/docs/daemon#privilege-separation) (`[helper] socket` set, 28dc2ae) the converger does
 the same work through `bcd helper`: the node asks for a `file.write` or `file.remove` of kind `cdi` or
@@ -269,9 +284,12 @@ agents, over the runtimes the build provides) follows the FakeDaemon's `FakeHype
   a VM that has not touched its memory yet will:
   - normal memory: `MemTotal` less the huge page pool (`Hugetlb`) and 1 GiB of headroom for the host, against the
     memory plus VMM overhead (1/32 of the memory plus 256 MiB) of every running or paused domain bcd manages on
-    normal pages, and of the starts admitted earlier in the same pass;
+    normal pages, of the bound holds' memory limits (since 31555bf), and of the starts admitted earlier in the same
+    pass;
   - huge pages, for an instance whose `placement` asks for them: free pages of that size on the placement's NUMA
-    nodes, or free less reserved pages host-wide without one; its VMM overhead still counts against normal memory.
+    nodes, and since aeaa982 also no more than the host-wide count (free less reserved, less what takers without a
+    NUMA node need), or free less reserved pages host-wide without one; its VMM overhead still counts against
+    normal memory.
 
   A start that does not fit stays stopped, and the instance's status message reads `ResourcesExhausted: … MiB of
   memory needed, … MiB left on this host` (or the huge pages needed and free). It is not `ERROR`, so vps does not fail
@@ -324,6 +342,11 @@ agents, over the runtimes the build provides) follows the FakeDaemon's `FakeHype
   source is one of the host's own addresses on the instances' bridges, where the tunnel dial comes from; a family
   with no host address has its tcp/22 dropped outright. Both rules sit ahead of every accept, so an exec certificate
   is usable only through a tunnel, which the control plane closes on revocation, and no guest-side KRL is needed.
+- **Capabilities.** On hosts with a runtime, bcd's `Hello` advertises what it enforces, and the gateway writes each as
+  a `bc.dev/cap.<name>=1` label that vps places on (see [capabilities](/docs/daemon/sessions#hello)):
+  `instance.network-policy` (`private` and `none` instances), `instance.ssh-host-only` (sandbox and warm instances),
+  `instance.placement` (flavors with a `placement`) and `instance.volumes` (instances that attach volumes), the last
+  three since 82f4f51. An older bcd would drop the field and run the guest without it.
 - The rules match taps by name, so a bcx runtime plugin is told each NIC's tap name (`runtime.TapName`) in its spec
   (b8a1801). When the rules guard an instance (a `PRIVATE` or `NONE` policy, or SSH from the host only) and a running
   instance of a plugin runtime has no interface under one of those names, bcd stops it and fails it with `runtime <id>
@@ -356,7 +379,52 @@ fails with `runtime <id> is not installed on this host`.
 A snapshot is tied to the runtime that took it: `meta.json` names it, and the other runtime refuses the tar. Both
 runtimes refuse a memory snapshot of an instance with passthrough GPUs up front, since the GPU's state lives in the
 device and no VMM saves it (`an instance with passthrough GPUs cannot be snapshotted with its memory; snapshot its
-disk only`, be4de2a); a disk-only snapshot of such an instance still works.
+disk only`, be4de2a), and of an instance with a read-write volume (`ErrMemorySnapshotWithVolumes`, 550da91); a
+disk-only snapshot of such an instance still works. vps refuses both before a command is sent (see
+[snapshots](/docs/guides/vps/sandboxes#take-one)).
+
+**QEMU reaches its files** (f7b8805). libvirt runs QEMU as its own user (`libvirt-qemu` or `qemu`), and its dynamic
+ownership relabels a domain's files but never the directories on their way, while bcd's are 0700 root. Before it
+defines a domain, bcd therefore adds `o+x` (search, never read) to each directory from `data_dir` down to the disks,
+seed and volumes the domain names and to the overlay's base image directory. Listing stays closed, and bcd's own
+files there are 0600 (identity, keys, journal) or relabelled by libvirt.
+
+**Under bcd helper** (7dde6a3). An unprivileged `bcd node` runs `libvirt-kvm` when its account is in the `libvirt`
+group, since libvirtd does the privileged work; `bcd doctor` fails the `libvirt` check when it is not. That group is
+equivalent to root, so on such a host the helper separates nothing until domain operations go through it, and `bcd
+doctor` warns (5573737). It does not
+offer `cloud-hypervisor`, whose VMMs need root (the `systemd-run` units, the taps, files handed to the VMM's user): bcd
+logs a warning, does not advertise the runtime, and `bcd doctor` warns.
+
+#### Persistent volumes
+
+A host keeps the volumes its `instances` section lists (`InstancesSection.volumes`, 014bf0d; bcd 550da91), the
+disks behind [sandbox volumes](/docs/guides/vps/sandboxes#volumes), across the instances that attach them:
+
+- **The store.** Each volume is a sparse raw file, `<data_dir>/volumes/<id>.raw` (0600), with its serial beside it
+  in `<id>.json`. Raw rather than qcow2: its format is fixed and never probed, it has no header a VMM could rewrite,
+  and it grows by truncation. An id is 1 to 80 of `[A-Za-z0-9_-]`, a serial 1 to 20 of `[a-z0-9-]`, and a size a
+  positive multiple of 512 bytes.
+- **Created and grown, never shrunk.** bcd creates missing volumes and grows those whose size grew before any
+  instance is defined; a smaller size fails. A volume that grew is resized live in every running or paused guest that
+  attaches it (`virsh blockresize` on `libvirt-kvm`, `vm.resize-disk` on `cloud-hypervisor`; b5415a2).
+- **Attached by serial.** `InstanceSpec.volumes` attaches them in order as `vdb` onward after the root disk: raw
+  virtio disks on `libvirt-kvm` (read-only when asked), `Raw` disks with their serial on `cloud-hypervisor` (bound
+  into the VMM's unit; a read-write one handed to the VMM's user while it runs), and path and serial for a bcx
+  runtime. The guest finds each at `/dev/disk/by-id/virtio-<serial>`.
+- **One writer.** An instance that attaches a volume beside a running or paused writer, or as a writer beside
+  readers, is refused; the first in spec order keeps it. Since 448dc5f a pass applies stops and deletes before starts,
+  so a volume handed from one instance to another in the same pass is let go before it is taken. Since 6b1480b bcd
+  tracks which instances have which volumes open, from the running domains and as the pass stops, deletes and starts
+  them, and checks every start (and a bcx runtime's live re-apply) against that, so a stop that failed never lets a
+  second writer in. Spec-level refusals (a shrink, a volume the section does not list, a pending attach) no longer
+  stop a running VM; only a second holder of an open volume makes one let go.
+- **Destroyed when unlisted.** A volume the section no longer lists and no instance attaches is destroyed after the
+  pass: its blocks are punched out, then the file is unlinked. A volume a running VM still has open is never destroyed
+  (39458f9), and one whose VM is stopped or deleted in the same pass goes in that pass (408e002).
+- **No memory snapshots beside a writer**, as above.
+
+A bcd that keeps volumes advertises `instance.volumes`, and only such hosts receive instances with volumes.
 
 #### Tenant images
 

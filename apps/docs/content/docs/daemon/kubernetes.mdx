@@ -6,75 +6,83 @@ icon: Kubernetes
 status: experimental
 packages: ['@better-compute/cli', '@better-compute/provider-kubernetes']
 sources:
+  - deploy/kubernetes/README.md
   - packages/provider-kubernetes/README.md
   - packages/provider-kubernetes/src/daemonset.ts
+  - packages/provider-kubernetes/src/cli.ts
+  - daemon/Containerfile
   - daemon/cmd/bcd/k8s_contract_test.go
   - packages/server/src/join/service.ts
   - packages/server/src/api/join-tokens.ts
   - packages/provision/src/config-units.ts
-  - deploy/kubernetes/daemonset.yaml
-  - deploy/kubernetes/namespace.yaml
-  - deploy/kubernetes/kustomization.yaml
-  - deploy/kubernetes/config.toml.example
-  - daemon/Containerfile
-  - tests/deploy-kubernetes.test.ts
+  - tests/provider-kubernetes.test.ts
+  - tests/provider-kubernetes-cli.test.ts
   - daemon/cmd/bcd/agent.go
   - daemon/cmd/bcd/tokenfile.go
   - daemon/cmd/bcd/wellknown.go
-  - daemon/cmd/bcd/hardware_host.go
-  - daemon/internal/agent/spec.go
+  - daemon/internal/agent/kube.go
   - daemon/internal/config/config.go
   - daemon/internal/kube/manager.go
+  - daemon/internal/kube/dra.go
+  - daemon/internal/kube/plugin_test.go
 ---
 
 Most machines run bcd the way [the install script](/docs/daemon/install) puts it there: a binary and a systemd unit
 on a host the control plane provisions and configures. A cluster you already operate is different. Its GPU nodes
 have a driver, a container toolkit and a MIG layout that something else manages, usually the NVIDIA GPU operator,
 and you want the control plane to adopt them without taking that over. For that, bcd runs inside the cluster as a
-DaemonSet (8df8c70): one privileged pod per GPU node, which joins the node once and then runs `bcd node`.
+DaemonSet: one privileged pod per GPU node, which joins the node once and then runs `bcd node`.
 
 This is the opposite direction from a [Kubernetes pool](/docs/guides/capacity/kubernetes). There, bcd is installed on
 machines the control plane owns, and the `k8s-join` config unit joins them to a cluster as workers. Here the cluster
-and its nodes exist first, and bcd runs inside the cluster to report and hold their GPUs.
+and its nodes exist first, and bcd runs inside the cluster to report their GPUs and hand the bound ones to pods.
 
 <Callout type="warn" title="Checked on paper, not run in a cluster">
-`tests/deploy-kubernetes.test.ts` checks the static manifests' text: the token Secret's `defaultMode: 0400` and
-`optional: true`, `--hosted kubernetes`, no service-account token, the identity on the host's `/var/lib/bcd`,
-`[host] units = false` and no release pins, the privileged namespace and the host paths.
-`tests/provider-kubernetes.test.ts` and bcd's `TestKubernetesDaemonSetContract` check the generated ones (see
-[below](#generate-the-manifests-from-typescript)). No test or CI job builds `daemon/Containerfile` or applies either
-to a cluster, and bcd has not run as a DaemonSet anywhere yet.
+`tests/provider-kubernetes.test.ts`, `tests/provider-kubernetes-cli.test.ts` and bcd's
+`TestKubernetesDaemonSetContract` check the generated manifests and the `kubernetes manifest` command, and
+`TestHostedManager` runs the hosted device plugins against a fake kubelet. No test or CI job builds
+`daemon/Containerfile` or applies the manifests to a cluster, and bcd has not run as a DaemonSet anywhere yet.
 </Callout>
 
 ## What you get
 
-- **One pod per GPU node.** The DaemonSet selects nodes labelled `nvidia.com/gpu.present=true` (the label NVIDIA's
-  GPU Feature Discovery sets), tolerates the `nvidia.com/gpu` and `node.kubernetes.io/unschedulable` taints, and runs
-  at `system-node-critical` priority, rolling one node at a time.
-- **The host's view.** The pod is privileged, with the host's network and PID namespaces, and mounts `/dev`, `/sys`,
-  `/etc/cdi`, `/run/bcd`, the kubelet's device-plugin directory, the journal and `/etc/machine-id` from the host. The
-  NVIDIA container runtime gives it `nvidia-smi` (`NVIDIA_VISIBLE_DEVICES=all`, `NVIDIA_DRIVER_CAPABILITIES=utility`),
-  which is how bcd reads the GPUs.
-- **No Kubernetes identity.** `automountServiceAccountToken: false`: bcd talks to its gateway only, never to the
-  Kubernetes API as a pod.
+- **One pod per selected node.** The DaemonSet runs on every node, or on those `--node-selector` names (for example
+  `nvidia.com/gpu.present=true`, the label NVIDIA's GPU Feature Discovery sets), tolerates every taint by default,
+  runs at `system-node-critical` priority and rolls one node at a time.
+- **The host's view.** The `bcd` container is privileged, with host networking, and mounts `/dev`, `/sys`,
+  `/var/lib/kubelet`, `/etc/kubernetes` (read-only), `/etc/cdi`, `/var/run/cdi` and the host's `/var/lib/bcd`. The
+  pod does not share the host's PID namespace (`hostPID: false`). It runs under the RuntimeClass `nvidia` (the GPU
+  operator's; `nvidiaRuntimeClass`), and the `bcd` container asks for `NVIDIA_VISIBLE_DEVICES=all` with
+  `NVIDIA_DRIVER_CAPABILITIES=utility` only, so bcd gets `nvidia-smi` and the driver's libraries to read and reset
+  GPUs (b6d5548); workload pods still get CDI devices only.
+- **No Kubernetes identity.** No service account token: bcd talks to its gateway, and what it does in the cluster
+  (its Node's labels, deleting pods, DRA slices) it does with the kubelet's own credentials.
 - **One join per node.** The identity lives in the host's `/var/lib/bcd`, so it survives pod restarts and image
   rollouts; every later start finds it and needs no token.
-- **No host configuration.** `config.toml` sets `[host] units = false`. bcd applies no `NodeSpec.host` unit and
-  reports the `host` section `UNSUPPORTED` with reason `HostManagedExternally` (see
-  [host configuration](/docs/daemon/host-config)). The inventory still reports what the node has, so capacity books
-  only the GPUs, MIG instances and huge pages that the cluster's own tooling set up.
-- **No self-update.** There are no `[update] release_pins`, so bcd refuses every self-update and the `daemon` section
-  is unsupported; you upgrade by rolling out a new image. With no host units, nothing in bcd asks for a reboot here.
+- **No host configuration.** `config.toml` sets `[host] units = false` by default. bcd applies no `NodeSpec.host`
+  unit and reports the `host` section `UNSUPPORTED` with reason `HostManagedExternally` (see
+  [host configuration](/docs/daemon/host-config)), which the gateway records as an informational node condition. The
+  inventory still reports what the node has, so capacity books only the GPUs, MIG instances and huge pages that the
+  cluster's own tooling set up.
+- **GPUs for pods.** bcd hands the GPUs of `binding: 'kubernetes'` reservations to the kubelet, with no `k8s-join`
+  record: see [GPUs for pods](#gpus-for-pods). It gives pods only those GPUs only when bcd is the only source of GPUs
+  on the node: see [GPU isolation](#gpu-isolation).
+- **No self-update and no reboots.** The configuration has no `[update] release_pins`, so bcd refuses every
+  self-update and you upgrade by rolling out a new image; bcd never reboots a node.
 
 ## Deploy it
+
+Since 3341e50 there is one path: the manifests are rendered for your deployment by the CLI, with
+`@better-compute/provider-kubernetes`'s `bcdDaemonSetManifests`, so they cannot drift from what bcd and the control
+plane expect. The hand-kept manifests that `deploy/kubernetes` used to carry are gone; its README walks the same steps.
 
 <Steps>
 <Step>
 ### Build the image
 
 `daemon/Containerfile` builds the cgo-free host build (`-tags nonvml`; GPUs through `nvidia-smi`) on
-`debian:bookworm-slim` with `ca-certificates`, `nftables`, `kmod`, `pciutils` and `util-linux`, from the `daemon/`
-directory:
+`debian:bookworm-slim` with `ca-certificates`, `nftables`, `kmod`, `pciutils` and `util-linux`. Build and push it,
+and note its digest:
 
 ```bash
 docker build -f daemon/Containerfile -t registry.example.com/better-compute/bcd:0.1.0 \
@@ -82,87 +90,99 @@ docker build -f daemon/Containerfile -t registry.example.com/better-compute/bcd:
 docker push registry.example.com/better-compute/bcd:0.1.0
 ```
 
-`RELEASE_SEQUENCE` is a second build argument (default 0). No published image exists; build your own.
+`RELEASE_SEQUENCE` is a second build argument (default 0). No published image exists; build your own. The
+`provider-kubernetes` README requires `kubectl` in the image, which bcd uses for its Node's labels, for deleting pods
+of released devices and for DRA; `daemon/Containerfile` does not install it, so add it to your build.
 </Step>
 <Step>
-### Create the configuration
+### Add the command
 
-Start from `deploy/kubernetes/config.toml.example`. The gateway, the site and the three pins are the ones
-[`better-compute daemon install-script`](/docs/daemon/install#generate-the-script) writes into `/etc/bcd/config.toml`
-for the same site; the join fails closed when a pin does not match what the control plane serves.
+The CLI never imports providers, so the application adds `kubernetes manifest` (a2eb28f) to its configuration:
 
-```toml title="config.toml"
-gateway_url = "https://gw.compute.example.com"
-site = "site_01..."
-serving_ca_spki_pin = "sha256/..."
-join_signing_key_pin = "sha256/..."
-join_encryption_key_pin = "sha256/..."
-data_dir = "/var/lib/bcd"
+```ts title="better-compute.config.ts"
+import { kubernetesManifestCommand } from '@better-compute/provider-kubernetes';
 
-[host]
-units = false
-
-[log]
-json = true
+export const commands = [kubernetesManifestCommand()];
 ```
 
-Put it in the ConfigMap `bcd-config` in namespace `bcd-system`, with a second key, `server`, the control plane's URL
-including its base path: `bcd join --server` fetches the join key from `<server>/.well-known/better-compute`, since the
-ConfigMap carries no `join-encryption.jwk`.
-
-```bash
-kubectl create namespace bcd-system   # or apply namespace.yaml first
-kubectl -n bcd-system create configmap bcd-config \
-  --from-file=config.toml=config.toml \
-  --from-literal=server=https://compute.example.com/api/compute
-```
+An application may pass `kubernetesManifestCommand({ pins })` with the trust anchors from its own PKI bundle
+(`readPkiPins` of `@better-compute/pki`); otherwise the pins are flags.
 </Step>
 <Step>
-### Create the join token Secret
-
-Mint one hosted token for the pool the nodes join, with one use per node, and put it in the Secret `bcd-join` under
-the key `token`:
+### Render the manifests and the join token
 
 ```bash
-better-compute join-tokens create --tenant root --pool pool_01k… --ttl 2h --max-uses 8 \
-  --hosted kubernetes --out join-token
-kubectl -n bcd-system create secret generic bcd-join --from-file=token=join-token
+better-compute kubernetes manifest --tenant root --pool pool_01k… \
+  --image registry.example.com/better-compute/bcd@sha256:<64 hex digits> \
+  --serving-ca-pin sha256/… --join-signing-pin sha256/… --join-encryption-pin sha256/… \
+  --max-uses 8 --ttl 1h \
+  --secret-out bcd-join-secret.json --out bcd.json
 ```
 
-`--hosted kubernetes` (`joinTokens.create({ hosted: 'kubernetes' })`, a27156a) decides the nodes' trust; see
-[trust](#trust) below and [joinTokens.create](/docs/reference/api/join-tokens#create). `--ttl` is 60 seconds to 24
-hours, so create the Secret shortly before you apply. The DaemonSet mounts it with
-`defaultMode: 0400`: `bcd join --token-file` refuses a token file that group or others can read (it must be 0600 or
-0400), one that is not a regular file (a Secret volume's symlink into `..data` is followed) and one over 4 KiB
-(c29bb16). After a join, bcd removes the spent token file; on a read-only Secret mount it cannot, and logs a warning
-instead of failing.
+The three pins are trust anchors, and they come only from you (d2cd813): the three flags together (all or none),
+from `better-compute pki show` on the control-plane host, or the application's `pins`. A run without them is refused
+before any call. The command never pins what the network says: from the control plane's `/.well-known/better-compute`
+(at `--control-plane`, which must be https, else the configured deployment in process) it takes only data that
+carries no trust, the gateway's URL and name and the join key, and it refuses a join key that does not match
+`--join-encryption-pin` before a token is minted.
+
+It renders the manifests first, so a bad image or pin fails before any token exists: a Namespace (`bcd-system`,
+labelled `pod-security.kubernetes.io/enforce: privileged`), a ConfigMap with `config.toml`, and the DaemonSet.
+Then it mints a multi-use join token with `hosted: 'kubernetes'` and writes it only as the join Secret's manifest,
+to `--secret-out`, a new file created 0600, never the output. The call is decided as `compute:join-tokens:create`.
+
+| Flag | Default | |
+| --- | --- | --- |
+| `--tenant` | `BETTER_COMPUTE_TENANT` | The tenant that owns the pool (required) |
+| `--pool` | required | The pool the cluster's nodes join |
+| `--image` | required | The bcd image, pinned by digest (`registry/repo[:tag]@sha256:<64 hex>`) |
+| `--serving-ca-pin`, `--join-signing-pin`, `--join-encryption-pin` | `BCD_SERVING_CA_PIN`, `BCD_JOIN_SIGNING_PIN`, `BCD_JOIN_ENCRYPTION_PIN` | The gateway serving CA's and the JoinService keys' `sha256/…` pins, from the PKI bundle; all three, unless the application passes `pins` |
+| `--secret-out` | required | A new file (0600) for the join token Secret manifest |
+| `--out` | the output | A new file for the manifests |
+| `--control-plane` | the configuration | The API's public https URL, where the well-known document is served: the origin for `better-compute serve`, or the origin and the API's base path when compute is mounted inside an application |
+| `--namespace`, `--name` | `bcd-system`, `bcd` | |
+| `--node-selector` | every node | `key=value` pairs, such as `nvidia.com/gpu.present=true` |
+| `--host-units` | off | Let bcd apply `NodeSpec.host` units |
+| `--gpu-api` | `device-plugin` | `dra` for the DRA driver (see [GPUs for pods](#gpus-for-pods)) |
+| `--ttl` | `24h` | How long the token admits nodes, 1 minute to 24 hours |
+| `--max-uses` | `100` | How many nodes it admits |
+| `--key` | a new UUID | The token's idempotency key, to retry the same request |
+
+**Token hygiene** (d6f8549). A DaemonSet cannot use one single-use token per node, so the token is multi-use, and
+anyone who reads the Secret while it is live can join a machine to the pool. Give it `--max-uses` equal to the node
+count and a short `--ttl` (an hour covers a rollout).
 </Step>
 <Step>
 ### Apply
 
-Point the image at your build and apply the kustomization, which creates the `bcd-system` namespace (Pod Security
-level `privileged`) and the DaemonSet:
+Configure the GPU stack as [GPU isolation](#gpu-isolation) requires, then apply the Secret first and the manifests
+after:
 
 ```bash
-cd deploy/kubernetes
-kustomize edit set image bcd=registry.example.com/better-compute/bcd:0.1.0
-kubectl apply -k .
+kubectl apply -f bcd-join-secret.json
+kubectl apply -f bcd.json
 ```
 
-On each node the init container runs `bcd join --config=/etc/bcd/config.toml --server=$(BCD_SERVER)
---token-file=/var/run/bcd-join/token`; on a node that joined before it prints `already joined as <node>` and exits
-0. The main container then runs `bcd node`. The nodes appear in [`nodes.list`](/docs/reference/api/nodes#list) as
-`adopting`, as any joined machine does (see [joining nodes](/docs/guides/nodes/joining)).
+On each node the `join` init container runs `bcd join` with the token Secret mounted read-only (mode 0400), as root
+with no capabilities, no privilege escalation and a read-only root filesystem; on a node that joined before it
+succeeds without spending a use. `bcd join --token-file` refuses a token file that group or others can read, one
+that is not a regular file (a Secret volume's symlink into `..data` is followed) and one over 4 KiB (c29bb16). The
+`bcd` container then runs `bcd node`, and never sees the token. The nodes appear in
+[`nodes.list`](/docs/reference/api/nodes#list) as `adopting`, as any joined machine does (see
+[joining nodes](/docs/guides/nodes/joining)).
 </Step>
 <Step>
-### Delete the Secret
+### Revoke the token and delete the Secret
 
-Once every node has joined, delete `bcd-join`. The volume is `optional`, so the pods keep running and restarting
-without it; a node added later needs a new token and a new Secret.
+Once every node has joined, revoke the token ([`joinTokens.revoke`](/docs/reference/api/join-tokens#revoke)) and delete
+the Secret:
 
 ```bash
-kubectl -n bcd-system delete secret bcd-join
+kubectl -n bcd-system delete secret <name>
 ```
+
+The pods keep running and restarting without it, since a joined node keeps its identity in `/var/lib/bcd`. For nodes
+added later, mint a new token and Secret, and remove both again.
 </Step>
 </Steps>
 
@@ -171,10 +191,12 @@ kubectl -n bcd-system delete secret bcd-join
 The cluster's admins have root on its machines: anyone who may run a privileged pod there can read what bcd holds.
 So a node that joins with a hosted token lands `tenant-controlled`, with a `node-tenant` certificate that never
 receives platform secrets, unless the pool's `policy.kubernetes.platformOperated` is `true`, which says the platform
-itself operates the cluster (a27156a). The token decides this, never what the node claims, and it only ever lowers
-trust: a node on a tenant's own `custom` site stays `tenant-owned`, and a reclaim through a hosted token lowers an
-existing `platform` node the same way. Replaying `joinTokens.create` with the same key and another `hosted` value is
-`CONFLICT`.
+itself operates the cluster (a27156a). Since 259d82c that flag counts only on a pool the platform owns: the pool's
+owner must be the owner of its site, the site must not be `custom`, and, when the deployment names a root tenant, the
+owner must be it. A tenant's pool on a platform site cannot vouch for its own cluster by editing its policy. The token
+decides this, never what the node claims, and it only ever lowers trust: a node on a tenant's own `custom` site stays
+`tenant-owned`, and a reclaim through a hosted token lowers an existing `platform` node the same way. Replaying
+`joinTokens.create` with the same key and another `hosted` value is `CONFLICT`.
 
 A `tenant-controlled` node adds no capacity: placement excludes it, as for a
 [dedicated-root lease](/docs/guides/bare-metal/dedicated-root). For the platform's own clusters, give the pool
@@ -182,21 +204,76 @@ A `tenant-controlled` node adds no capacity: placement excludes it, as for a
 three together mean the machines should join a cluster through the `k8s-join` unit, and a partial set is
 `INVALID_INPUT` (7db110a).
 
+### Host paths and Pod Security
+
+bcd keeps its node key and journal in the hostPath `/var/lib/bcd` (files 0600, owned by root). Any pod allowed to
+mount host paths as root can read them, and with the key it can act as the node. So restrict host paths for
+everything else (d6f8549): label workload namespaces with Pod Security Admission `baseline` or `restricted`, which
+both forbid hostPath and privileged pods. Only `bcd-system`, which the manifests label
+`pod-security.kubernetes.io/enforce: privileged`, and your platform's own system namespaces should run privileged.
+bcd's pod runs without `hostPID` and with no service account token.
+
+## GPU isolation
+
+bcd hands a pod exactly the GPUs its reservation holds, and it can enforce that only when nothing else hands out GPUs
+on the node (d6f8549). With the NVIDIA GPU operator its defaults are unsafe here: its own device plugin advertises
+every GPU, and its container runtime gives an unprivileged pod any GPU it names in `NVIDIA_VISIBLE_DEVICES`, so any
+pod could take every GPU. Required:
+
+| Setting | Why |
+| --- | --- |
+| `devicePlugin.enabled=false` in the GPU operator | bcd's device plugins (or its DRA driver) are the only source of GPUs for the kubelet |
+| `accept-nvidia-visible-devices-envvar-when-unprivileged = false` in the NVIDIA container toolkit's `config.toml` (the operator's `toolkit` env `ACCEPT_NVIDIA_VISIBLE_DEVICES_ENVVAR_WHEN_UNPRIVILEGED=false`) | Devices arrive by CDI only |
+| CDI specs generated with `--device-name-strategy=uuid` | bcd's device plugin then answers `nvidia.com/gpu=<uuid>`; without that spec it answers `bcd.dev/gpu=<uuid>` plus `NVIDIA_VISIBLE_DEVICES`, which is safe only with the setting above |
+
+The generated DaemonSet carries these requirements, and the Pod Security and token rules above, in its
+`bcd.dev/requires` annotation (`gpuIsolationRequirements`), since JSON manifests have no comments.
+
+bcd enforces the first two itself (9f860ad): when the kubelet can also allocate an `nvidia.com/*` resource, or a
+toolkit configuration in `/etc/nvidia-container-runtime` or `/usr/local/nvidia/toolkit` accepts
+`NVIDIA_VISIBLE_DEVICES` from unprivileged pods (the key `true`, or absent, the toolkit's default), bcd offers no GPUs:
+its device plugins stop, its DRA slice is deleted, and it reports the condition `ForeignGpuExposure` naming what to
+close. So a cluster with the GPU operator's defaults gets no GPUs through bcd until you apply the settings above.
+
+## GPUs for pods
+
+With `[host] units = false` the node is a worker because the cluster runs bcd there, not because `k8s-join` joined
+it, so bcd's Kubernetes side runs in hosted mode (1e5f96b). It needs no `k8s-join` record: the joined-mode files in
+`/var/lib/bcd-hostconfig` are not read here.
+
+- **Device plugins.** bcd runs its kubelet device plugins whenever
+  `/var/lib/kubelet/device-plugins/kubelet.sock` exists, advertising the devices of the node's
+  `binding: 'kubernetes'` holds as `bcd.dev/gpu`, `bcd.dev/gpu.mig` and `bcd.dev/gpu.slot`, as on a joined worker
+  (see [the device plugin](/docs/guides/capacity/kubernetes#the-device-plugin)).
+- **Labels.** bcd keeps its Node's `bcd.dev/*` labels itself (`bcd.dev/node-id`, `bcd.dev/site`, `bcd.dev/gpu.count`,
+  `bcd.dev/gpu.product`, `bcd.dev/gpu.driver`), naming the Node from `NODE_NAME` (the DaemonSet's `spec.nodeName`
+  field reference) and using the kubelet's kubeconfig, `/etc/kubernetes/kubelet.conf`. It updates them at most once
+  a minute, touches only `bcd.dev/*`, sets no taints, and removes `bcd.dev/*` labels it no longer sets.
+- **The reaper.** Pods that keep a released device are deleted after 30 seconds with a 10-second grace period, and
+  forced a minute later if they still hold it, as on a joined worker, through the kubelet's pod-resources socket under
+  `/var/lib/kubelet`; without that socket bcd reports `PodResourcesUnavailable`.
+- **Device plugin or DRA.** `[kubernetes] gpu_api` in `config.toml` chooses how the GPUs reach pods:
+  `"device-plugin"` (the default) or `"dra"`, bcd's DRA driver `gpu.bcd.dev` (7d24836), never both. Any other value
+  stops bcd from starting. `--gpu-api` and `bcdDaemonSetManifests({ gpuApi })` write it (e4b0c01). See
+  [device plugin or DRA](/docs/guides/capacity/kubernetes#device-plugin-or-dra) for what the driver publishes.
+
+All of these need `kubectl` in the image.
+
 ## Generate the manifests from TypeScript
 
-`@better-compute/provider-kubernetes` (2c9f953) renders the same deployment from code, with stricter defaults. It is
-not a VPS provider and creates no machines: it produces manifests you apply.
+`kubernetes manifest` calls `bcdDaemonSetManifests` (2c9f953). An application can call it itself; it is not a VPS
+provider and creates no machines, it produces manifests you apply, and it mints no token.
 
 ```ts title="bcd-k8s.ts"
 import { writeFileSync } from 'node:fs';
 import { bcdDaemonSetManifests, renderKubernetesManifests } from '@better-compute/provider-kubernetes';
 
 const manifests = bcdDaemonSetManifests({
-  image: 'registry.example.com/better-compute/bcd:0.1.0@sha256:<64 hex digits>',
+  image: 'registry.example.com/better-compute/bcd@sha256:<64 hex digits>',
   gatewayUrl: 'https://gw.eu-central.example.com',
   siteId: 'site_01k…',
-  pins: { servingCaPin, joinSigningPin, joinEncryptionPin },
-  controlPlaneUrl: 'https://compute.example.com/api/compute', // or joinEncryptionJwk
+  pins: { servingCaPin, joinSigningPin, joinEncryptionPin }, // from your PKI bundle
+  controlPlaneUrl: 'https://compute.example.com', // where /.well-known/better-compute is served, or joinEncryptionJwk
   joinTokenSecret: { name: 'bcd-join' },
   nodeSelector: { 'nvidia.com/gpu.present': 'true' },
 });
@@ -206,7 +283,8 @@ writeFileSync('bcd.json', renderKubernetesManifests(manifests)); // kubectl appl
 `bcdDaemonSetManifests` returns a Namespace, a ConfigMap (`config.toml`, and the pinned JoinService key when you pass
 `joinEncryptionJwk`) and a DaemonSet; `renderKubernetesManifests` turns them into one `v1` `List` for
 `kubectl apply -f`. It refuses (`INVALID_CONFIG`) an image not pinned by digest, a gateway or control-plane URL that
-is not https, malformed pins, names or resource quantities, and a JWK with a private part.
+is not https, malformed pins, names or resource quantities, a `gpuApi` other than `device-plugin` or `dra`, and a JWK
+with a private part.
 
 | Option | Default | |
 | --- | --- | --- |
@@ -219,34 +297,35 @@ is not https, malformed pins, names or resource quantities, and a JWK with a pri
 | `priorityClassName` | `system-node-critical` | `null` for none |
 | `imagePullSecrets`, `resources` | none; requests 100m and 128Mi, limit 512Mi | |
 | `hostUnits` | `false` | `true` writes no `[host] units = false`, so the pool's host units apply |
+| `gpuApi` | none (bcd's default, `device-plugin`) | `'dra'` writes `[kubernetes] gpu_api = "dra"` (e4b0c01) |
+| `nvidiaRuntimeClass` | `nvidia` | The RuntimeClass that gives bcd's container the driver's user space; `null` when the image carries it (b6d5548) |
 | `gatewayServerName`, `logLevel` | none, `info` | |
 
-The pods it describes differ from the static files in a few ways: the `join` init container runs as root with no
-capabilities, no privilege escalation and a read-only root, and is the only container that mounts the token; the
-`bcd` container also mounts `/var/lib/kubelet`, `/etc/kubernetes` read-only and `/var/run/cdi`, gets `NODE_NAME`, and
-has `bcd status` as its liveness probe; the pod tolerates every taint by default and rolls when `config.toml` changes
-(annotation `bcd.dev/config-sha256`). Both sides check the contract: `scripts/daemon-k8s-contract.mjs` writes the
-generated pod to `daemon/cmd/bcd/testdata/k8s-daemonset.json`, and bcd's `TestKubernetesDaemonSetContract` parses its
-`config.toml` and command lines with bcd's own configuration parser and flag sets. `tests/provider-kubernetes.test.ts`
-covers the options and refusals.
+The pod's `bcd` container gets `NODE_NAME` and has `bcd status` as its liveness probe, and the pod rolls when
+`config.toml` changes (annotation `bcd.dev/config-sha256`). Both sides check the contract:
+`scripts/daemon-k8s-contract.mjs` writes the generated pod to `daemon/cmd/bcd/testdata/k8s-daemonset.json`, and bcd's
+`TestKubernetesDaemonSetContract` parses its `config.toml` (the `gpu_api` key included) and command lines with bcd's
+own configuration parser and flag sets.
 
 ## Upgrades
 
-Roll out a new image (`kustomize edit set image`, then `kubectl apply -k`). The update strategy replaces one pod at a
-time. The identity and the journal are on the host, so a new pod resumes where the old one stopped. Rollouts and
+Render the manifests again with the new image digest and apply them. The update strategy replaces one pod at a time.
+The identity and the journal are on the host, so a new pod resumes where the old one stopped. Rollouts and
 `daemon.upgrade` do not apply to these nodes, since bcd takes no self-update without release pins.
 
 ## Limits
 
-- **The device plugin does not run here.** bcd's kubelet device plugin, which hands the GPUs of `binding:
-  'kubernetes'` reservations to the kubelet, starts only on a node bcd itself joined to a cluster with the `k8s-join`
-  unit (it needs that unit's record, `/etc/bcd/k8s-join.json`, with `gpu` on). A DaemonSet node never ran that unit,
-  so the plugin stays off, although both deployments mount the device-plugin directory and the
-  `@better-compute/provider-kubernetes` README says the plugin advertises the reserved GPUs. The Node's `bcd.dev/*`
-  labels are also kept only by that unit. See
-  [Kubernetes workers](/docs/guides/capacity/kubernetes#two-ways-into-a-cluster).
 - **No VPS instances.** The image carries neither `virsh` nor `cloud-hypervisor`, so these nodes run no instance
   runtime.
 - **No reboots.** `node.reboot` runs `systemctl reboot`, which the image does not have.
 - **The pod sees its own filesystem.** Only the mounted host paths are the host's; that is why the host converger is
-  off.
+  off by default.
+- **Host resources are the kubelet's.** A `binding: 'kubernetes'` hold gets no cgroup slice: the kubelet enforces its
+  pods' requests and limits (e01d7ff). See [Kubernetes workers](/docs/guides/capacity/kubernetes#host-resources-and-pods).
+- **No `kubectl` in `daemon/Containerfile`.** Add it, or labels, reaping and DRA do not work.
+
+<Cards>
+  <Card title="Kubernetes workers" href="/docs/guides/capacity/kubernetes">Reservations with binding kubernetes, the device plugin and DRA.</Card>
+  <Card title="Joining nodes" href="/docs/guides/nodes/joining">Join tokens, hosted tokens and trust.</Card>
+  <Card title="Installing bcd" href="/docs/daemon/install">config.toml and the files on a host.</Card>
+</Cards>

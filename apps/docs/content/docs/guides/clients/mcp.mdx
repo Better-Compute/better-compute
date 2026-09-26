@@ -144,7 +144,8 @@ caller's `tenantId`, which the tools act in.
     serverInfo: { type: '{ name: string; version: string }', description: 'Reported at initialize.', default: "{ name: 'better-compute', version: '0.1.0' }" },
     instructions: { type: 'string', description: 'Shown to the model at initialize. The default explains the list, preview, reserve and retry flow.' },
     maxBodyBytes: { type: 'number', description: 'Largest JSON-RPC request body.', default: '1048576 (1 MiB)' },
-    maxConcurrentCallsPerCaller: { type: 'number', description: "Tool calls one caller may have in flight at once, counted per caller identity (tenant and identity), else per Authorization header. Above it a call answers the tool error RATE_LIMITED with retryAfterMs 2000. Counted per server instance (48d41a4).", default: '4' },
+    maxConcurrentCallsPerCaller: { type: 'number', description: "Tool calls one caller may have in flight at once, counted per caller identity (tenant and identity), else per Authorization header. Above it a call answers the tool error RATE_LIMITED with retryAfterMs 2000 (48d41a4). Counted by callLimiter.", default: '4' },
+    callLimiter: { type: 'McpCallLimiter', description: "Where the per-caller count lives (76e4e37): { acquire(key, max) } returns a release, or undefined to refuse. The default, memoryCallLimiter(), counts in this process, so with several MCP instances the cap multiplies; pass a shared one (Redis, your database) to hold it across them. A shared limiter must expire slots it never saw released, for example after 2 minutes. A limiter that throws refuses the call with UNAVAILABLE and retryAfterMs 2000, never lets it through uncounted. Keys never carry credentials: a caller known only by its Authorization header counts under the header's SHA-256.", default: 'memoryCallLimiter()' },
     newKey: { type: '() => string', description: 'Idempotency keys for tools that create things.', default: 'mcp- and 24 random hex characters' },
   }}
 />
@@ -194,7 +195,7 @@ framework.
 | `list_pools` | `pools.list` | any authenticated caller | read-only |
 | `capacity_summary` | `capacity.summary`, or `capacity.byPool` with `poolId` | any authenticated caller | read-only |
 | `preview_reservation` | `capacity.preview` | `compute:pools:read` on the pool | read-only |
-| `reserve_gpus` | `reservations.create` (`binding: 'hold'`) | `compute:pools:read` on the pool | idempotent |
+| `reserve_gpus` | `reservations.create` (`binding: 'hold'`, or `'kubernetes'`) | `compute:pools:read` on the pool | idempotent |
 | `release_reservation` | `reservations.release` | any authenticated caller | destructive, idempotent |
 | `list_reservations` | `reservations.list`: the caller's own by default, `scope: 'all'`, filters `state` and `poolId`, `limit` 1 to 200, `cursor` | any authenticated caller | read-only |
 | `get_reservation` | `reservations.get` | any authenticated caller | read-only |
@@ -225,7 +226,11 @@ framework.
 The GPU tools share one argument shape: `poolId`, `gpus` (1 to 64 whole GPUs), `duration` (such as `30m`, `8h`,
 `3d`), and optionally `gpuModel` (`H100`), `gpuProduct` (`H100-SXM5-80GB`), `nvlink` (all GPUs in one NVLink
 domain) and `selector` (up to 32 `{ key, op, values }` expressions with `In`, `NotIn`, `Exists`, `DoesNotExist`, `Gt`,
-`Gte`, `Lt` or `Lte`). The tool turns them into one device request of class `gpu`. `reserve_gpus` also takes an
+`Gte`, `Lt` or `Lte`). The tool turns them into one device request of class `gpu`. Since 17f600b both also take
+`vcpu` (0 to 4096) and `memoryGiB` (0 to 65,536), the host CPUs and memory to book with the GPUs (sent as
+`resources`; without them the pool's per-GPU share), and `kubernetes: true`, which asks for `binding: 'kubernetes'`
+on a pool whose machines are [Kubernetes workers](/docs/guides/capacity/kubernetes) instead of a hold; the preview books
+the same host resources as the create would. `reserve_gpus` also takes an
 `idempotencyKey` and `waitSeconds` (0 to 30, default 20), which it sends as `wait: { timeoutMs }`, so on a pool-lease
 pool the call returns once the reservation is placed or the wait runs out; see
 [waiting for placement](/docs/guides/capacity/reservations#waiting-for-placement).
@@ -371,14 +376,16 @@ to `expired`. Without a bearer token or a tenant it returns nothing and the tool
   `propose_command_batch` that people approved.
 - One caller has at most `maxConcurrentCallsPerCaller` (default 4) tool calls in flight. A call can wait about
   85 seconds for an approval or an instance to start, so an agent looping on retries would otherwise pile up held
-  requests; above the cap a call answers `RATE_LIMITED` with `retryAfterMs: 2000` (48d41a4, review 14 L5).
+  requests; above the cap a call answers `RATE_LIMITED` with `retryAfterMs: 2000` (48d41a4, review 14 L5). With
+  several MCP server instances, pass a shared `callLimiter` so the cap holds across them (76e4e37); the default
+  counts per process.
 - The person approving a `create_instance`, `reserve_gpus`, `extend_reservation` or `create_sandbox` reads compute's
   description of the request, and the approval admits only that request; see
   [delegated confirmation](/docs/guides/iam/delegated-confirmation#what-the-person-sees).
 - `run_diagnostic` runs `diag.nvml` only. It returns the queued command; the result arrives when the node finishes,
   and `node_status` or the command's own methods show it.
-- `reserve_gpus` always books with `binding: 'hold'`; whole-node leases, spot, gangs and calendar starts are not
-  exposed as tool arguments.
+- `reserve_gpus` books with `binding: 'hold'`, or `kubernetes` with `kubernetes: true`; whole-node leases, spot, gangs
+  and calendar starts are not exposed as tool arguments.
 - `release_reservation`, `stop_instance`, `delete_instance`, `delete_sandbox` and `delete_sandbox_snapshot` are
   marked destructive: many MCP hosts ask the user before calling such a tool.
 - The sandbox tools cannot take a snapshot or run code in a sandbox; code runs through the CLI's `sandbox exec`.

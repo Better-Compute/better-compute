@@ -169,6 +169,7 @@ See [pools](/docs/guides/capacity/pools).
     diskGiB: { type: 'number', description: '1 to 1048576.', required: true },
     gpus: { type: 'number', description: '0 to 64.', default: '0' },
     offerId: { type: 'string', description: 'Sell the flavor under one offer only.' },
+    placement: { type: "{ numaAffine?: boolean; pinned?: boolean; hugepages?: '2Mi' | '1Gi' }", description: 'Where its guests live on their host; sandbox templates inherit it (2e61612). Unknown keys are refused, false flags are dropped, and the plan compares it by value.' },
   }}
 />
 
@@ -235,7 +236,7 @@ What each kind can do:
 | Pool | `pools.create`, with its owner quota | `pools.update` (`policy`, `gpuModel`) | `pools.archive`: running reservations keep their bookings | `site`, `class`, `sharing`, `agent`, `providerAccount` |
 | Owner quota | `quotas.set` | `quotas.set` | No | |
 | Offer | `pools.offer` | `pools.offer` (`quota`, `includeDescendants`, `priority`) | `pools.unoffer` | |
-| Flavor | `flavors.create` | `flavors.update` (`vcpu`, `memoryGiB`, `diskGiB`, `gpus`, `offerId`) | `flavors.delete` | |
+| Flavor | `flavors.create` | `flavors.update` (`vcpu`, `memoryGiB`, `diskGiB`, `gpus`, `offerId`, `placement`) | `flavors.delete` | |
 | Sandbox template | `sandboxTemplates.create` | `sandboxTemplates.update` (`flavor`, `imageId`, `userData`, `defaultTtlSeconds`, `maxTtlSeconds`, `network`, `env`, `warm`) | `sandboxTemplates.delete`: its warm instances are deleted, running sandboxes keep their TTL | `pool`, `runtime` |
 
 A change is **blocked** when it touches a field that cannot change, names an unknown site, pool or provider account,

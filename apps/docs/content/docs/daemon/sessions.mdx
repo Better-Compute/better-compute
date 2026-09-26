@@ -129,6 +129,19 @@ is listed once, through its plugin's manifest. A node agent that runs an instanc
 [tunnels](/docs/guides/access/tunnels#the-node-half)); a host without a runtime does not. The FakeDaemon
 advertises it when its tunnels are configured.
 
+A node agent with a runtime also advertises what it enforces for instances. The gateway writes every capability as
+the system label `bc.dev/cap.<name>=1` at each `Hello`, and drops the ones no longer advertised; vps then places an
+instance that needs one only on nodes carrying its label, so an older bcd that would drop the field never gets it:
+
+| Capability | Label vps requires it for |
+| --- | --- |
+| `instance.network-policy` | An instance with a `private` or `none` network (cfdb918) |
+| `instance.ssh-host-only` | Sandbox and warm instances, which set `ssh_from_host_only` (82f4f51) |
+| `instance.placement` | An instance whose flavor has a `placement` (82f4f51) |
+| `instance.volumes` | An instance that attaches [sandbox volumes](/docs/guides/vps/sandboxes#volumes) (82f4f51) |
+
+The FakeDaemon advertises all four when it plays a VPS host.
+
 ### The Hello transaction
 
 One transaction, fenced by the gateway's lease, does everything the reconnect proves:

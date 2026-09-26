@@ -422,13 +422,24 @@ A reservation can book a host's CPUs, memory and 1 GiB huge pages with its GPUs 
   when the draft is written, and stored in the request. Requests for MIG instances or slots only book none, so pools
   behave as before until their hosts have rows.
 - **Quota.** Host resources are not charged to quota; the devices are.
+- **Preview.** `capacity.preview` books the same host resources as `reservations.create` would, the request's or the
+  pool's per-GPU share, so a preview that fits is a create that fits (17f600b); a `node` binding books none.
 - **On the node** (c5a419c, 260e33c), the booked resources become the assignment's limits: `cpu_millis` from
   `vcpu`, `memory_bytes` from `memoryGiB`, `hugepages_1gi`, and a cpuset on the NUMA nodes of the hold's devices when
-  those nodes have enough CPUs (`cpus`) or memory (`mems`). bcd creates the cgroup slice `bcd-alloc-<allocation>.slice`
-  with those limits, names it in the CDI spec (`bcd.dev/cgroup-parent`) and the env (`BCD_CGROUP_PARENT`), and keeps
-  it until it is empty after the release. The workload manager on the node (containerd, Slurm, a wrapper) places the
-  workload in it; see [device assignments](/docs/daemon/delivery#device-assignments). The kubelet does not, so a
-  `kubernetes` binding's pods are not limited by it.
+  those nodes have enough CPUs (`cpus`) or memory (`mems`). Since b6b804e a cpuset never includes the host's reserved
+  CPUs, the lowest non-isolated, `policy.hostReserve.vcpu` (default 2), and the reserve counts against the fit. bcd
+  admits the hold against the host's memory beside its VMs and other holds, and one that does not fit fails with
+  `resources-exhausted`, which re-places it (31555bf). It then creates the cgroup slice
+  `bcd-alloc-<allocation>.slice` with those limits, names it in the CDI spec (`bcd.dev/cgroup-parent`) and the env
+  (`BCD_CGROUP_PARENT`), and stops it once it is empty after the release, retrying every pass (e01d7ff).
+- **Where the workload runs.** The workload manager on the node (containerd, Slurm, a wrapper) places the workload in
+  that slice; see [device assignments](/docs/daemon/delivery#device-assignments). Once the reservation is active,
+  [`reservations.get`](/docs/reference/api/reservations#get) shows the slice as `binding.cgroupParent`
+  (`HoldBinding.cgroupParent`, 6aa412b), which bcd reports in `AllocationBound.cgroup_parent` (c81f230, 19dbf60); the
+  control plane keeps it only in bcd's `bcd-alloc-<id>.slice` form. It is empty for a hold without limits and for a
+  `kubernetes` binding: that binding gets no slice, since its pods live in the kubelet's cgroups, where the kubelet
+  enforces their requests and limits; its booked limits still count in bcd's host admission (see
+  [Kubernetes workers](/docs/guides/capacity/kubernetes#host-resources-and-pods)).
 
 ### Attested bindings
 

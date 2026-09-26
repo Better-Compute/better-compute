@@ -126,8 +126,9 @@ better-compute daemon install-script \
 | `--plugins` | no | | Prepare the node for bcx driver plugins: a `[plugins]` section and the systemd drop-in; see [the plugin drop-in](#the-plugin-drop-in) |
 | `--privileged-plugins NAMES` | no | | Comma-separated plugins that run as root without the seccomp filter, such as a Kata runtime; implies `--plugins` |
 | `--install-plugins NAMES` | no | | Comma-separated bcx plugins to install from the release, each checked against its archive digest in the verified `--release-manifest` (adf2ae9). Only plugins a release ships are accepted: `bcx-ipmi`. Implies `--plugins` and needs `--release-manifest`; see [installing plugins from the release](#installing-plugins-from-the-release) |
-| `--unprivileged` | no | | Run `bcd node` as the unprivileged `bcd` user beside a root `bcd helper` (169c459): a `[helper]` section, the `bcd` account, `bcd-helper.service` and a `bcd.service` drop-in; see [running bcd node unprivileged](#running-bcd-node-unprivileged). Refused with `--plugins`, `--privileged-plugins` or `--install-plugins`. Self-update works in this mode: the helper does the privileged half (2d67b25) |
+| `--unprivileged` | no | | Run `bcd node` as the unprivileged `bcd` user beside a root `bcd helper` (169c459): a `[helper]` section, the `bcd` account, `bcd-helper.service` and a `bcd.service` drop-in; see [running bcd node unprivileged](#running-bcd-node-unprivileged). Refused with `--plugins`, `--privileged-plugins` or `--install-plugins`. Self-update works in this mode: the helper does the privileged half (2d67b25). On a `libvirt-kvm` host it separates nothing yet: the `bcd` account is in the `libvirt` group, which is equivalent to root (`bcd doctor` warns, 5573737) |
 | `--approver-set-sha256 HEX` | no | | Writes `approver_set_sha256` (64 lower-case hex digits, the `approverSetSha256` that `pki trust-version` prints) into `config.toml`, pinning the node's first approver set (9b7a199): a keyless bcd takes only that set, and runs nothing destructive until it has it; see [pinning the first set](/docs/operations/pki#pinning-the-first-set). An upgrade run without the flag keeps the node's existing pin (b6d401f) |
+| `--command-root-sha256 HEX,...` | no | | Writes `command_root_sha256`, 1 to 16 lower-case hex SHA-256 digests of the command-signing root certificates (`pki trust-version` prints them as `commandRootSha256`), so `bcd helper` checks host config units against specs signed under them from its first request (59985ae; see [signed specs](/docs/daemon/host-config#signed-specs)). Without the flag the script pins the PKI bundle's command-signing root and, during a rotation, the added one, and nothing when the bundle has no command signing; an upgrade by a script without pins keeps the node's |
 | `--pki PATH` | no | | The PKI bundle to read the pins from |
 | `--out PATH` | no | | Write a new file with mode 0755 instead of printing; refuses to overwrite (`FILE_EXISTS`) |
 
@@ -246,6 +247,13 @@ sudo sh install-bcd.sh < token-file
     <File name="node.key (0600, the node key)" />
     <File name="identity.json (certificate chain, trust bundle, server time mark)" />
     <File name="journal.db (the bbolt journal)" />
+    <File name="host-intent.json (0600, the signed spec that last set the host section)" />
+    <File name="volumes/ID.raw, ID.json (0600, persistent host volumes)" />
+  </Folder>
+  <Folder name="/var/lib/bcd-hostconfig (root's, never data_dir)" defaultOpen>
+    <File name="bootargs/UNIT, hugepages-1g-boot, cdi-nvidia.stamp (the host units' records)" />
+    <File name="k8s-join.json, k8s/bootstrap-token (k8s-join)" />
+    <File name="helper-intent.json (bcd helper's accepted signed spec)" />
   </Folder>
   <Folder name="/run/bcd (0700)" defaultOpen>
     <File name="bcd.sock (0600 status socket, owned by the user bcd runs as)" />
@@ -304,6 +312,7 @@ keys and wrong types are all errors with a line number, so a typo fails loudly. 
 | `gateway_server_name` | no | | The name the gateway certificate must carry when `gateway_url` names an IP address (an L4 balancer, a dev stack reached from WSL) |
 | `dev_insecure_h2c` | no | `false` | Allows an `http://` `gateway_url` (cleartext HTTP/2 to a dev gateway). Only fakehw builds accept it; the host build refuses to start |
 | `approver_set_sha256` | no | | 64 lower-case hex digits: the only approver set a daemon without approver keys takes first (see [pinning the first set](/docs/operations/pki#pinning-the-first-set)); `--approver-set-sha256` writes it |
+| `command_root_sha256` | no | | Comma-separated lower-case hex SHA-256 digests of the command-signing root certificates, at most 16 (03c023d). `bcd helper` then applies a `host.unit` only with a spec signed under these roots, which decide alone. Without it the helper takes the roots from the trust bundle the JoinService key signed, checked against `join_signing_key_pin` (2d18327), and checks nothing until it has first accepted such a bundle with roots. A malformed value stops bcd from starting. `daemon install-script` writes it; see [signed specs](/docs/daemon/host-config#signed-specs) |
 | `[update] release_pins` | no | none | Comma-separated `sha256/...` pins of the release keys. Without them bcd refuses every self-update; see [self-update](#self-update) |
 | `[update] release_threshold` | no | `1` | How many distinct pinned keys must have signed a release |
 | `[update] release_sequence` | no | `0` | The release the node was installed at: no release manifest with a lower sequence is taken (0: unknown) |
@@ -317,7 +326,8 @@ keys and wrong types are all errors with a line number, so a typo fails loudly. 
 | `[websocket] audience` | no | `gateway_server_name`, else the URL's host | The gateway's public host the node's proof names |
 | `[imds] listen` | no | | Where a VPS host serves its instances' metadata service, for example `169.254.169.254:80` on the instances' bridge; empty turns it off |
 | `[host] units` | no | `true` | `false` when something else manages the host's configuration (the NVIDIA GPU operator beside [bcd as a DaemonSet](/docs/daemon/kubernetes)): bcd applies no `NodeSpec.host` unit and reports the section `UNSUPPORTED` with reason `HostManagedExternally` (a193249). See [host configuration](/docs/daemon/host-config) |
-| `[kubernetes] allowed_clusters` | under `bcd helper`, for a `k8s-join` | | Comma-separated `https://host[:port]#sha256:<CA pin>` entries: the only clusters the `k8s-join` unit may join this machine to (7579184). `bcd node` running as root enforces it when set; `bcd helper` requires it and refuses every join without it. A malformed entry stops `bcd node` and `bcd helper` from starting. See [k8s-join](/docs/daemon/host-config#k8s-join) |
+| `[kubernetes] allowed_clusters` | for a `k8s-join` | | Comma-separated `https://host[:port]#sha256:<CA pin>` entries: the only clusters the `k8s-join` unit may join this machine to (7579184). Since 9f860ad it is required as root too: without it every join is refused, and `bcd doctor` fails a joined node without one. A malformed entry stops `bcd node` and `bcd helper` from starting. See [k8s-join](/docs/daemon/host-config#k8s-join) |
+| `[kubernetes] gpu_api` | no | `device-plugin` | How a node bcd did not join itself (the cluster's DaemonSet) offers bound GPUs to the kubelet: `device-plugin` or `dra`, never both (7d24836); any other value stops bcd from starting. A node `k8s-join` joined takes the unit's `gpuApi` instead. See [GPUs for pods](/docs/daemon/kubernetes#gpus-for-pods) |
 | `[boot] ...` | no | | A site agent's boot server; see [site agents](#a-site-agent) |
 | `[plugins] dir` | no | | A directory of bcx driver plugins and their `pins` file (sha256sum format); only pinned plugins run. Empty runs none. See [driver plugins in bcd](/docs/extending/drivers#driver-plugins-in-bcd) |
 | `[plugins] user` | no | | Who plugins run as when bcd is root (no supplementary groups); unset, each plugin gets its own uid from a block bcd keeps, `0x7FFE0000` to `0x7FFEFFFF`. `root` is refused |

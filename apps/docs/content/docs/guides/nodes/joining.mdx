@@ -98,7 +98,7 @@ revoked, expired and used-up tokens), and `join-tokens revoke` takes the token i
     maxUses: { type: 'number', description: 'How many machines may join with it, 1 to 10,000.', default: '1' },
     expect: { type: '{ productUuid?, serial?, mac?, gpuUuid? }', description: 'Binds the token to one machine; name at least one identifier. mac is aa:bb:cc:dd:ee:ff, gpuUuid starts with GPU-.' },
     allowReclaim: { type: 'boolean', description: 'Lets a known machine with a new key reclaim its node.', default: 'false' },
-    hosted: { type: "'kubernetes'", description: 'For bcd running as a DaemonSet on a Kubernetes cluster (a27156a): its nodes join tenant-controlled unless the pool has policy.kubernetes.platformOperated true. See /docs/daemon/kubernetes#trust.' },
+    hosted: { type: "'kubernetes'", description: 'For bcd running as a DaemonSet on a Kubernetes cluster (a27156a): its nodes join tenant-controlled unless the pool has policy.kubernetes.platformOperated true and the platform owns the pool (259d82c). See /docs/daemon/kubernetes#trust.' },
     idempotencyKey: { type: 'string', description: 'Scoped to the tenant and the calling identity.', required: true },
   }}
 />
@@ -112,7 +112,9 @@ when it is set.
 A **hosted** token (`--hosted kubernetes` in the CLI) is for [bcd as a DaemonSet](/docs/daemon/kubernetes) on a
 cluster whose admins have root on its machines through privileged pods. A node that joins with it is
 `tenant-controlled`, with a `node-tenant` certificate that never receives platform secrets, unless the token's pool
-has `policy.kubernetes.platformOperated: true`. The token decides, never the machine's claims, and it only lowers
+has `policy.kubernetes.platformOperated: true` and the platform owns that pool (259d82c): its owner is the owner of
+its site, the site is not `custom`, and, when the deployment names a root tenant, the owner is that tenant, so a
+tenant cannot vouch for its own cluster by editing its pool's policy. The token decides, never the machine's claims, and it only lowers
 `platform` trust (a tenant's own site stays `tenant-owned`); a reclaim through a hosted token lowers an existing
 `platform` node too.
 

@@ -323,12 +323,18 @@ session (`newHarness`), answering its `SecretRequest`s with sealed JWEs:
 
 **Host configuration, holds and Kubernetes (v1.1).** These run against fakes: `hostconfig.FakeSystem` (an in-memory
 host whose files and command answers a test scripts), a fake root for a real `Agent`, and a fake kubelet on real unix
-sockets. None has run on a real machine.
+sockets. Only `TestRealKernel` touches a real kernel.
 
 | Test | Checks |
 | --- | --- |
-| `internal/hostconfig` (18 tests) | Every config unit's plan and apply, drift, cleanup, refusals and reboot cases: sysctl, kernel modules before the sysctl they provide, huge pages with the GRUB and grubby fallbacks and per-NUMA pools, the NVIDIA driver installed or asking for a reboot, the toolkit's CDI regeneration, Fabric Manager and `FabricManagerDown`, the MIG layout grammar and busy GPUs, MPS and `MPSDown`, unknown units not blocking the others (6c2343f). See [host configuration](/docs/daemon/host-config#what-the-tests-cover) |
-| `internal/agent` `TestHostSectionConverges`, `TestGPUBusy` | The host section through a real `Agent` under a fake root, with `FabricManagerDown` in the status report; a GPU is busy when a hold's atom id names it (0f68c9a) |
+| `internal/hostconfig` (22 tests) | Every config unit's plan and apply, drift, cleanup, refusals and reboot cases: sysctl, kernel modules before the sysctl they provide, huge pages with the mount unit, the GRUB and grubby fallbacks and per-NUMA pools, `cpu`, `iommu` and `gpu-settings`, the NVIDIA driver installed or asking for a reboot, the toolkit's CDI regeneration, Fabric Manager and `FabricManagerDown`, the MIG layout grammar and busy GPUs, MPS and `MPSDown`, unknown units and a unit waiting for a reboot not holding back the others (6c2343f, c21ef84). See [host configuration](/docs/daemon/host-config#what-the-tests-cover) |
+| `internal/hostconfig` `TestRealKernel` | As root with `BCD_HOSTCONFIG_REAL=1` on Linux: sysctl, the transparent huge page selector and 2 MiB huge pages against the real kernel, each put back, and root refusing to write under `/tmp`, a world-writable or a symlinked parent (60143bf, 02485b3). Passes on WSL Ubuntu |
+| `internal/agent` `TestHostSectionConverges`, `TestHostSectionReportsRebootRequired`, `TestHostDriftRepairedWithoutANewSpec`, `TestSignedHostSectionKeptForTheHelper`, `TestExternalHostAppliesNoUnit`, `TestGPUBusy` | The host section through a real `Agent` under a fake root, with `FabricManagerDown` and `RebootRequired` in the status report, drift repaired by the 10-minute pass (3c0fe02), the signed host section kept for the helper, `[host] units = false`; a GPU is busy when a hold's atom id names it (0f68c9a) |
+| `internal/helper` `TestHelperHostUnit`, `TestHostUnitNeedsTheSignedSpec`, `intent_bundle_test.go` | `host.unit` through a real helper socket: re-planned as root with the unit's own validation, refused keys, names and unknown units, cleans, busy GPUs, an unconfigured helper (e0fe5ec); the signed spec under pinned roots (03c023d) and under the trust bundle the join key signed, with a root rotation, a replayed bundle, another key's bundle and a rootless one (2d18327) |
+| `internal/agent` `TestHoldsAndVMsShareTheHostsMemory`, `TestAHoldTheHostCannotFitFailsAsResourcesExhausted` | Host admission of holds beside VMs, and `resources-exhausted` (31555bf) |
+| `internal/agent`, `internal/runtime` volume tests | Persistent volumes: sparse, grown and never shrunk, discarded; attached in order by serial; one writer, handoffs within a pass, what running VMs have open; grown volumes told to running guests (550da91, b5415a2, 448dc5f, 39458f9, 408e002) |
+| `internal/kube` `TestHostedManager`, `TestDRADriver`, `TestResourceSliceV1beta1`, `TestUnhealthyDevicesAreNeverOffered` | Hosted mode's device plugins and `bcd.dev/*` labels without a join (1e5f96b); the DRA driver's registration, slice, prepare and reaper (7d24836, fa8611e); an unhealthy GPU never offered by either API (6f5a99f) |
+| `cmd/bcd` `TestResourceChecks`, `TestHelperRuntimeChecks` | `bcd doctor`'s cgroup, huge page, `vfio-pci` and systemd checks (ab26e87), and the `libvirt` group and `cloud-hypervisor` checks under the helper (7dde6a3) |
 | `internal/agent` `TestResolveAtomNamesParentsAndWhatTheDriverSees`, `TestHoldConflictsAcrossWholeGPUsPartsAndVMs`, `TestCDISpecOfPartsAndLimits` | MIG and slot atoms resolved against the inventory, parent-aware conflicts and the VM passthrough guard, CDI names without `/`, the slice annotation and env, one `NVIDIA_VISIBLE_DEVICES` per hold (46a61db, d02ba4f) |
 | `internal/slice`, `internal/agent` slice tests | The hold slice's systemd properties and hugetlb limits, the name and cpulist checks, removal only once empty (1d03c28, 260e33c) |
 | `internal/kube` `TestJoinFromBareHost`, `TestJoinRefusesAnotherCluster`, `TestJoinSettingsAreCheckedAgain`, `TestJoinUnderHelper`, `TestContainerdImport`, `TestJoinConfigurationV1beta3` | The `k8s-join` unit against `FakeSystem` (88ecb07) |
@@ -371,6 +377,21 @@ under `/tmp`. It checks that:
   certificate from the CA the node pins and audience `gw.dev.local`; the node restarts with `[websocket] url`, runs
   a signed `inventory.refresh` over the WebSocket session, and renews over `POST /v1/renew`, which the fakehw knob
   `BCD_RENEW_AFTER=3s` brings forward.
+- node metrics (efdff1d): a test module sets `NodeSpec.telemetry` (http to the WSL host, a 5-second interval and an
+  extra resource attribute), the node's spec is rendered again, and the fakehw bcd posts OTLP/JSON to a local
+  receiver in the test: `bcd.gpu.utilization` for all 8 GPUs, memory, temperature, power and active XIDs, with
+  `service.name=bcd`, `bcd.node.id` and the attribute as resource attributes. The receiver is the test's own, not a
+  collector product.
+
+`tests/e2e/bcd-host.test.ts` (91f5e81, same gating) runs `NodeSpec.host` end to end: a `metal-host` pool with
+`policy.hugepages` (2 MiB, 64) and `policy.kernelModules` (`tun`, `vhost_net`), provision renders the units, the
+gateway sends them, and the fakehw bcd applies them under its fake root. `tests/e2e/kubernetes-bindings.test.ts`
+(8a084ca) runs `binding: 'kubernetes'` on the dev stack's FakeDaemons: the hold marked `bcd.dev/binding=kubernetes`
+without `NVIDIA_VISIBLE_DEVICES`, a plain hold on the same pool not, the booked limits in the assignment, release,
+and the refusal on a pool without `policy.kubernetes`. `tests/vps-sandboxes.test.ts` checks that a sandbox lands only
+on a host labelled `bc.dev/cap.instance.ssh-host-only` (3b9e81d), and `tests/vps-volumes.test.ts` covers sandbox
+volumes: booking, quota, replay, pinning, serial mounts, one writer, read-only sharing, resize, deletion and metering
+(2a09202, 8cbece0).
 
 The whole file runs on `createDevStack({ signedIntent: true })` (5071dbc), which puts the stack under a
 command-signing root: joined daemons receive the roots in `JoinResponse.trust` and every command and spec bcd takes

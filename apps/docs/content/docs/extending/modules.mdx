@@ -191,7 +191,10 @@ is the order of migrations, of `start()` calls and of NodeSpec merging.
 
 The `extensions` a module or plugin lists are read like the top-level options: drivers and attestors are found in
 either place, scheduler plugins join `scheduler.plugins` in the placer, and event and audit sinks join `sinks.events`
-and `sinks.audit`. A usage sink, in `sinks.usage` or in `extensions`, is `INVALID_CONFIG`: usage goes to IAM billing
+and `sinks.audit`. A `pool-policy` extension (`PoolPolicyValidator`, 37dcd02) checks the parts of a pool policy its
+module reads: `validate(policy, { class, sharing })` runs in `pools.create` and in `pools.update` when the policy
+changes, before the write, and refuses by throwing a `ComputeError`; any other error becomes `INVALID_INPUT`
+`policy: ...`. Provision registers one for its host units. A usage sink, in `sinks.usage` or in `extensions`, is `INVALID_CONFIG`: usage goes to IAM billing
 through the IAM bridge.
 
 Registration checks everything it can without the database and throws `INVALID_CONFIG`:

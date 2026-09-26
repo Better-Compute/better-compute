@@ -43,7 +43,7 @@ Inventory derives the atoms from what the node reports (see
   <Term id="mig">MIG</Term> instance. This happens whatever the pool's mode, but only `mig` pools accept
   `gpu.mig` requests, so a MIG-mode GPU in another pool cannot be reserved.
 - In a `timeslice` or `mps` pool, a GPU not in MIG mode becomes an unbookable parent plus `replicas`
-  slot atoms (1 to 64). In `mps` pools each slot also carries `mpsUnits`, its share of the GPU's 100
+  slot atoms (1 to 48, the most clients MPS serves per GPU; a708aa6). In `mps` pools each slot also carries `mpsUnits`, its share of the GPU's 100
   MPS units (`floor(100 / replicas)`).
 - A GPU whose MIG mode is changing (the pending mode differs from the current one) has every atom
   unbookable and marked `partitionPending`, so nothing new lands on it until the change completes.

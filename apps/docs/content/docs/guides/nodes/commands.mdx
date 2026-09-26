@@ -52,7 +52,10 @@ Since 662fb55, `nvml.init` passes only when the driver's management interface (`
 kernel driver alone names the GPUs; then it checks that the GPUs are visible (and the expected count), and per GPU
 `ecc.uncorrectable`, `row-remap.pending`, `row-remap.failure`, `pcie.link` (a link narrower than its maximum width;
 speed is left out, since idle GPUs lower it on purpose) and `xid.recent` (XID conditions this boot). Every failing
-check says why. Its `node.reboot` goes through `systemctl reboot`.
+check says why. Its `node.reboot` goes through `systemctl reboot`. It is how a node with the condition
+`RebootRequired` gets a host setting that waits for a boot (1 GiB huge pages, isolated CPUs, the IOMMU, an ECC mode,
+a new driver): bcd never reboots on its own, so reboot such nodes within the pool's disruption budget (see
+[RebootRequired](/docs/guides/nodes/inventory-and-health#conditions)).
 
 bcd also runs `gpu.reset`, which `commands.run` does not accept: the provision module's remediation sends it for
 `RowRemapPending` once no allocation is live. bcd refuses the whole command `gpu-busy` while any listed GPU is in use

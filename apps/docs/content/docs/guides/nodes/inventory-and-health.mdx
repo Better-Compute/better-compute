@@ -212,7 +212,7 @@ The `gpus` section becomes devices with stable ids, so a reboot or a re-inventor
 | A time-slice or MPS slot | `<gpuUuid>/s<k>` | `gpu.slot` | yes; its parent GPU is not |
 
 Only atoms are booked. Slots exist in `timeslice` and `mps` pools: 4 per GPU for time-slicing and 10 for MPS by
-default (`policy.sharing.replicas`, 1 to 64). A GPU whose MIG mode is about to change has every atom
+default (`policy.sharing.replicas`, 1 to 48, MPS's limit; a708aa6). A GPU whose MIG mode is about to change has every atom
 unbookable, with `partitionPending: true`, until the change completes. See
 [fractional GPUs](/docs/guides/capacity/fractional-gpus).
 
@@ -298,6 +298,29 @@ puts its type into `noScheduleReasons`, in the same transaction.
 | `EccUncorrectable`, `NvlinkDegraded` (v0.2) | inventory: volatile uncorrectable ECC errors, or NVLinks down on a GPU that has NVLink peers | the GPU is quarantined |
 | `DriverMismatch`, `CertExpiring`, `DaemonOutdated` | the hygiene sweep, see below | NoSchedule, plus `node.condition.changed` |
 | `CpuPressure`, `MemoryPressure`, `DiskPressure` (v0.3) | host pressure in status reports, see below | NoSchedule on `vps-host` pools; an alert elsewhere |
+| `FabricManagerDown` (v1.1) | bcd's `fabric-manager` unit: an NVSwitch system without Fabric Manager running, so CUDA cannot initialize multi-GPU jobs (c7613e1) | NoSchedule while `true` |
+| `MPSDown` (v1.1) | bcd's `gpu-sharing` unit: an `mps` pool's MPS control daemon is not running, so every client fails (c7613e1) | NoSchedule while `true` |
+| `RebootRequired` (v1.1) | bcd's host units: a setting takes effect only after a reboot; the reason names the units (0aea5c0), see below | Informational |
+| `HostManagedExternally` (v1.1) | the `host` section's state on a node with `[host] units = false` (c7613e1) | Informational |
+| `ForeignGpuExposure` (v1.1) | bcd on a Kubernetes worker: something besides bcd hands out GPUs (another `nvidia.com/*` device plugin, or a container toolkit that accepts `NVIDIA_VISIBLE_DEVICES` from unprivileged pods), so bcd offers none (9f860ad) | In the status report only |
+| `PodResourcesUnavailable` (v1.1) | bcd on a Kubernetes worker: it holds devices for Kubernetes and the kubelet's pod-resources socket is missing or failing, so released devices cannot be reclaimed from pods (9f860ad) | In the status report only |
+| `KubernetesReleased` (v1.1) | bcd: the spec dropped `k8s-join`, and bcd cordoned and drained the Node (9f860ad) | In the status report only |
+
+The three Kubernetes conditions ride bcd's `StatusReport.conditions` and the `node.status` event; the gateway's
+`daemonNodeConditions` does not list them yet, so they are not written as node conditions. See
+[Kubernetes workers](/docs/guides/capacity/kubernetes#gpu-isolation).
+
+`FabricManagerDown`, `MPSDown`, `RebootRequired` and `HostManagedExternally` come from bcd's
+[host configuration](/docs/daemon/host-config#status-and-failures). The gateway's
+`xidStatusHandler` makes each the node's condition exactly as the last status report says, `true` while reported and
+`false` once it is not, and writes and publishes `node.condition.changed` only on a change. On a `tenant-controlled`
+node they are advisory: recorded, never a NoSchedule reason.
+
+**RebootRequired.** Some host settings wait for a reboot: 1 GiB huge pages reserved on the kernel command line, CPUs
+isolated with the `cpu` unit, the `iommu` unit, an ECC mode set with `gpu-settings`, a driver swap while the GPUs are
+in use, and a MIG mode reset that failed. bcd never reboots on its own, and nothing in the control plane reboots on
+this condition: reboot the node yourself with [`node.reboot`](/docs/guides/nodes/commands), within the pool's
+disruption budget. The node keeps running and taking work meanwhile.
 
 The condition table in `@better-compute/inventory` (`nodeConditionTypes`) also defines `PcieReplayHigh` and
 `ClockSkew`. No controller raises those on nodes yet.
@@ -362,7 +385,12 @@ eight-GPU machine, while a GPU that fell off the bus usually needs a reboot of t
 - **XID events.** The daemon reports XIDs as `Xid<n>` conditions on a GPU in its status reports. With the
   gateway's `xidStatusHandler` installed (`createGateway({ reports: { ...gatewayReportHandlers, status:
   xidStatusHandler } })`), each one goes through `recordXid`. XIDs without a policy (13, 31, 43, 45 and other
-  application faults) are only recorded as events, and XIDs from a `tenant-controlled` node change nothing.
+  application faults) are only recorded as events, and XIDs from a `tenant-controlled` node change nothing. When an
+  XID quarantines a GPU, the handler also wakes the node's started reservations at once (04f6bda), so a reservation
+  holding that GPU turns `Degraded` with reason `AtomUnhealthy`, naming the GPU, within a pass, rather than at
+  capacity's periodic recheck or provision's health reconciler. Nothing is released, and the node keeps its hold; on
+  a Kubernetes worker bcd's device plugins or DRA driver stop offering the GPU as healthy (6f5a99f).
+  `tests/e2e/kubernetes-bindings.test.ts` runs this with an XID 48 on a Kubernetes-bound GPU.
 - **XIDs in bcd.** bcd follows `/dev/kmsg` from its end and parses driver lines of the form
   `NVRM: Xid (PCI:0000:18:00): 79, ...`. It normalizes the bus id to NVML's form (`00000000:18:00.0`), finds the GPU
   with that bus id in its inventory, and raises condition `Xid79` (status `TRUE`, `device_id` the GPU's UUID, the

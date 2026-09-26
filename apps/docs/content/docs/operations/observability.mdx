@@ -326,8 +326,10 @@ rule 3; see [sealed secrets](/docs/operations/security#sealed-secrets)).
 **Failures.** An endpoint that is not an http(s) URL, or a malformed resource attribute, fails the `telemetry`
 section terminally; an empty endpoint stops the export. A collector's 4xx answer other than 429 drops that batch;
 anything else is tried again on the next interval. bcd logs a failure once, not every interval, and logs when the
-export resumes. The exporter restarts whenever the section changes. It is tested against a fake collector; no real
-one has received it yet.
+export resumes. The exporter restarts whenever the section changes. `bcd status` prints the endpoint, the last
+export and the last error (ad8791f). It is tested against a fake collector, and since efdff1d end to end: the real
+fakehw bcd in `tests/e2e/bcd.test.ts` posts its GPU metrics to a local OTLP receiver the test runs, named in
+`NodeSpec.telemetry` (see [testing](/docs/operations/testing)). No collector product has received it yet.
 
 ## Health and readiness
 

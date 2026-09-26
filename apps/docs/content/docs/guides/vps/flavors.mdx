@@ -128,6 +128,17 @@ guest, floating, and the instance carries a `PlacementDegraded` condition naming
 `NoNumaNodeFits`, `GpuNumaUnknown`, `NumaMemoryTooSmall` or `NotEnoughFreeCpus`. Huge pages are never degraded:
 they were booked, and bcd's own admission refuses a start the free pages cannot back.
 
+- **The host's own CPUs.** Since b6b804e a guest's CPUs never include the host's reserved CPUs, the lowest
+  non-isolated, `policy.hostReserve.vcpu` (default 2), whether pinned or floating on a NUMA node.
+- **Isolated CPUs first.** A pinned guest takes the CPUs the kernel isolates first (no host tasks or timer ticks
+  there), then the rest by id. Isolate them with the pool's [`cpu` unit](/docs/daemon/host-config#cpu).
+- **Only where bcd applies it.** An instance whose flavor has a `placement` is placed only on hosts labelled
+  `bc.dev/cap.instance.placement` (82f4f51), which a bcd that applies `InstanceSpec.placement` advertises: an older
+  bcd would back a huge-page guest with memory placement never booked.
+- **A balloon on overcommitted pools** (073324a). A pool whose `policy.overcommit.memoryGiB` is above 1 gives every
+  guest a virtio balloon, so the host can reclaim the guests' free memory, except huge-page-backed and GPU (VFIO)
+  guests, whose memory is pinned. An older bcd drops the field harmlessly, so no capability label is needed for it.
+
 ## Flavors on provider pools
 
 In a `provider` pool the flavor's `offerId` is what the reconciler passes to `ProviderImpl.create`. Its `vcpu`,
