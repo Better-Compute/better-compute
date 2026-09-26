@@ -30,10 +30,9 @@ func networkConfig(nics []*agentv1.InstanceNic) ([]byte, error) {
 	for i, n := range nics {
 		mac, err := net.ParseMAC(n.GetMac())
 		if err != nil {
-			if len(n.GetAddresses()) == 0 && n.GetGateway() == "" && len(n.GetNameservers()) == 0 {
-				continue // a DHCP NIC the runtime gives a MAC
-			}
-			return nil, fmt.Errorf("nic %d: static configuration needs a MAC: %q", i, n.GetMac())
+			// With a network-config cloud-init drops its fallback DHCP: a NIC it cannot match by MAC
+			// would get no configuration at all.
+			return nil, fmt.Errorf("nic %d has no MAC (%q): its configuration cannot be matched beside the static NICs", i, n.GetMac())
 		}
 		fmt.Fprintf(&b, "  nic%d:\n    match:\n      macaddress: %s\n", i, strconv.Quote(mac.String()))
 		if len(n.GetAddresses()) == 0 {

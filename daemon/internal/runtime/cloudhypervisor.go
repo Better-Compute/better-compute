@@ -109,6 +109,9 @@ type chRecord struct {
 	GivenVolumes []string         `json:"givenVolumes,omitempty"`
 	// StartedVolumes are the volumes the running VM was started with, in disk order (vol<i>).
 	StartedVolumes []AttachedVolume `json:"startedVolumes,omitempty"`
+	// FromSnapshot: the running VM was restored from its memory snapshot, on normal pages (a saved
+	// config keeps no hugepages); its later cold starts use the placement's.
+	FromSnapshot bool `json:"fromSnapshot,omitempty"`
 }
 
 // union adds b's strings to a's, once.
@@ -246,8 +249,8 @@ func (c *CloudHypervisor) List(ctx context.Context) ([]Domain, error) {
 			RestoredFrom: r.RestoredFrom, Addresses: r.Addresses, MACs: r.MACs, GPUs: r.GPUs,
 			VCPU: r.VCPU, MemoryBytes: r.MemoryBytes, DiskBytes: r.DiskBytes,
 		}
-		// A restored instance runs on normal pages (its saved config keeps none).
-		if r.Placement != nil && r.RestoredFrom == "" {
+		// A VM restored from its memory snapshot runs on normal pages (its saved config keeps none).
+		if r.Placement != nil && !r.FromSnapshot {
 			d.HugepageSize = r.Placement.HugepageSize
 		}
 		d.State, d.Message = c.state(ctx, r.ID)
@@ -550,9 +553,12 @@ func (c *CloudHypervisor) unitProperties(r *chRecord) []string {
 // chMemoryMax bounds a VMM's memory cgroup: the guest's memory plus overhead. Hugepage-backed guest
 // memory is charged to the hugetlb pool, not the memory cgroup, so there only the overhead counts
 // (a restored instance runs on normal pages: its saved config keeps none).
+// RestoresOnNormalPages: a memory restore's saved config keeps no hugepages (restoredConfig).
+func (c *CloudHypervisor) RestoresOnNormalPages() bool { return true }
+
 func chMemoryMax(r *chRecord) uint64 {
 	overhead := r.MemoryBytes/32 + 256<<20
-	if r.Placement != nil && r.Placement.HugepageSize != 0 && r.RestoredFrom == "" {
+	if r.Placement != nil && r.Placement.HugepageSize != 0 && !r.FromSnapshot {
 		return overhead
 	}
 	return r.MemoryBytes + overhead
@@ -670,11 +676,13 @@ func (c *CloudHypervisor) deleteTaps(ctx context.Context, r *chRecord) {
 	}
 }
 
-func (c *CloudHypervisor) chown(path string, uid int) error {
+func (c *CloudHypervisor) chown(path string, uid int) error { return c.chownTo(path, uid, uid) }
+
+func (c *CloudHypervisor) chownTo(path string, uid, gid int) error {
 	if c.Chown != nil {
-		return c.Chown(path, uid, uid)
+		return c.Chown(path, uid, gid)
 	}
-	return os.Lchown(path, uid, uid)
+	return os.Lchown(path, uid, gid)
 }
 
 // vfioGroups are the /dev/vfio group devices of the instance's GPUs.
@@ -770,22 +778,35 @@ func (c *CloudHypervisor) start(ctx context.Context, r *chRecord, paused bool) e
 		r.GivenGroups = union(r.GivenGroups, groups)
 	}
 	// A read-write volume is the VMM user's while it runs (exclusive: the agent never attaches one
-	// read-write beside anything else); a read-only one stays root's, readable (its 0700 directory
-	// is closed to everyone the unit's bind mount does not reach).
+	// read-write beside anything else). A read-only one stays root's, readable by group kvm, which
+	// every VMM unit has (SupplementaryGroups) and no ordinary user does: libvirt's QEMU may have
+	// made the way to the volumes searchable.
 	r.StartedVolumes = append([]AttachedVolume(nil), r.Volumes...)
 	for _, v := range r.Volumes {
-		uid, mode := 0, os.FileMode(0o644)
-		if !v.ReadOnly {
-			uid, mode = int(r.UID), 0o600
+		uid, gid, mode := int(r.UID), int(r.UID), os.FileMode(0o600)
+		if v.ReadOnly {
+			kvm, err := user.LookupGroup("kvm")
+			if err != nil {
+				return fmt.Errorf("volume %s is shared read-only through the kvm group: %w", v.ID, err)
+			}
+			uid, mode = 0, 0o640
+			if gid, err = strconv.Atoi(kvm.Gid); err != nil {
+				return err
+			}
+		} else {
 			r.GivenVolumes = union(r.GivenVolumes, []string{v.Path})
 		}
-		if err := c.chown(v.Path, uid); err != nil {
+		if err := c.chownTo(v.Path, uid, gid); err != nil {
 			return err
 		}
 		if err := os.Chmod(v.Path, mode); err != nil {
 			return err
 		}
 	}
+	// A pending memory snapshot restores on normal pages; a cold start uses the placement's (the
+	// unit's MemoryMax and the admission's accounting follow).
+	_, pendingErr := os.Stat(filepath.Join(c.instanceDir(r.ID), "snapshot", "state.json"))
+	r.FromSnapshot = pendingErr == nil
 	if err := c.save(r); err != nil {
 		return err
 	}
@@ -1005,7 +1026,8 @@ func (c *CloudHypervisor) Snapshot(ctx context.Context, id string, includeMemory
 		return "", ErrMemorySnapshotWithGPUs
 	}
 	if includeMemory {
-		for _, v := range r.Volumes {
+		// What it runs with (a detach applies at the next start) and what its spec attaches.
+		for _, v := range append(append([]AttachedVolume(nil), r.StartedVolumes...), r.Volumes...) {
 			if !v.ReadOnly {
 				return "", ErrMemorySnapshotWithVolumes
 			}

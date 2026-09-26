@@ -62,10 +62,10 @@ func TestHostAdmissionCountsCommittedMemoryNotUse(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 40 GiB + overheads committed of 55 GiB: 8 GiB fits once, not twice.
-	if err := m.admit(instance("inst_d", 8<<30, nil)); err != nil {
+	if err := m.admit(instance("inst_d", 8<<30, nil), false); err != nil {
 		t.Fatalf("8 GiB refused: %v", err)
 	}
-	err = m.admit(instance("inst_e", 8<<30, nil))
+	err = m.admit(instance("inst_e", 8<<30, nil), false)
 	if err == nil || !strings.HasPrefix(err.Error(), ResourcesExhausted) {
 		t.Fatalf("the second 8 GiB start: %v", err)
 	}
@@ -80,17 +80,27 @@ func TestHostAdmissionTakesHugepagesFromThePlacementNodes(t *testing.T) {
 	onNode1 := &agentv1.InstancePlacement{Mems: "1", HugepageSizeBytes: runtime.Hugepage2Mi}
 	// Node 1 holds 1024 free 2 MiB pages (2 GiB): a 2 GiB guest fits, a second does not, though node 0
 	// has plenty (a strict binding never spills over).
-	if err := m.admit(instance("inst_a", 2<<30, onNode1)); err != nil {
+	if err := m.admit(instance("inst_a", 2<<30, onNode1), false); err != nil {
 		t.Fatalf("2 GiB on node 1 refused: %v", err)
 	}
-	err = m.admit(instance("inst_b", 2<<30, onNode1))
+	err = m.admit(instance("inst_b", 2<<30, onNode1), false)
 	if err == nil || !strings.Contains(err.Error(), "NUMA node(s) 1") {
 		t.Fatalf("a second 2 GiB on node 1: %v", err)
 	}
 	// Anywhere on the host: node 0's pages serve it.
-	if err := m.admit(instance("inst_c", 4<<30, &agentv1.InstancePlacement{HugepageSizeBytes: runtime.Hugepage2Mi})); err != nil {
+	if err := m.admit(instance("inst_c", 4<<30, &agentv1.InstancePlacement{HugepageSizeBytes: runtime.Hugepage2Mi}), false); err != nil {
 		t.Fatalf("4 GiB host-wide refused: %v", err)
 	}
+	// A memory restore on normal pages (cloud-hypervisor) takes no hugepages, whatever its placement:
+	// node 1 has none left, and it is admitted from normal memory.
+	before := m.committed
+	if err := m.admit(instance("inst_r", 2<<30, onNode1), true); err != nil {
+		t.Fatalf("a normal-pages restore refused: %v", err)
+	}
+	if m.committed-before != 2<<30+vmmOverhead(2<<30) {
+		t.Fatalf("restore charged %d", m.committed-before)
+	}
+	m.committed = before
 	// Guest memory in hugepages is not normal memory: only the admitted VMMs' overhead is charged
 	// (the refused start is not).
 	if m.committed != vmmOverhead(2<<30)+vmmOverhead(4<<30) {

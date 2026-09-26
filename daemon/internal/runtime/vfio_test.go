@@ -3,7 +3,9 @@ package runtime
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 type fakeVFIO struct{ bound, released []string }
@@ -86,6 +88,18 @@ func TestVFIOBindsTheWholeGroupButBridges(t *testing.T) {
 	}
 	if err := v.Bind("not-an-address"); err == nil {
 		t.Fatal("a bad address was accepted")
+	}
+}
+
+// A driver that never lets go (the GPU held open) fails the bind in bounded time.
+func TestVFIOUnbindThatBlocksTimesOut(t *testing.T) {
+	v := fakeSysfs(t)
+	v.blocked, v.UnbindTimeout = make(chan struct{}), 50*time.Millisecond
+	defer close(v.blocked)
+	start := time.Now()
+	err := v.Bind("0000:3b:00.0")
+	if err == nil || !strings.Contains(err.Error(), "has not let go") || time.Since(start) > 5*time.Second {
+		t.Fatalf("bind = %v after %s", err, time.Since(start))
 	}
 }
 

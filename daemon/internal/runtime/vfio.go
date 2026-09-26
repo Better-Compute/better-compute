@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // VFIO binding for passthrough GPUs (PLAN.md §3.6): libvirt's managed hostdevs rebind a device
@@ -17,8 +18,36 @@ import (
 // SysfsVFIO binds and releases PCI devices through sysfs under Root ("" or "/": the real one).
 type SysfsVFIO struct {
 	Root string
+	// UnbindTimeout bounds an unbind (default 30 s): a driver waits in it until its device is closed.
+	UnbindTimeout time.Duration
 	// probed runs after a write to drivers_probe (tests: plays the kernel's rebind).
 	probed func(dev string)
+	// blocked, in tests, stands for an unbind the driver never completes.
+	blocked chan struct{}
+}
+
+// unbind writes dev to its driver's unbind file, but waits at most UnbindTimeout. A driver's remove
+// waits for its device to be closed (nvidia-persistenced keeps GPUs open), and the write cannot be
+// cancelled: past the timeout it is left to finish on its own (the device then has no driver and
+// the next Bind probes it for vfio-pci), and the start fails instead of blocking every section.
+func (v SysfsVFIO) unbind(dev string) error {
+	timeout := v.UnbindTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	done := make(chan error, 1)
+	go func() {
+		if v.blocked != nil {
+			<-v.blocked
+		}
+		done <- v.write("/sys/bus/pci/devices/"+dev+"/driver/unbind", dev)
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("its driver has not let go after %s: something still has the device open (nvidia-persistenced, a process on the GPU)", timeout)
+	}
 }
 
 func (v SysfsVFIO) path(p string) string {
@@ -85,8 +114,8 @@ func (v SysfsVFIO) Bind(addr string) error {
 		}
 		if current := v.driver(dev); current != "" {
 			// A GPU the host driver still uses refuses to unbind (or blocks): holds and VMs never
-			// share a GPU (the devices converger checks), so nothing of ours runs on it.
-			if err := v.write(base+"/driver/unbind", dev); err != nil {
+			// share a GPU (both converger check it), so nothing of ours runs on it.
+			if err := v.unbind(dev); err != nil {
 				return fmt.Errorf("unbind %s from %s: %w", dev, current, err)
 			}
 		}

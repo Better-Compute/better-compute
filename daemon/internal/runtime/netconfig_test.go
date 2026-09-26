@@ -15,7 +15,7 @@ func TestNetworkConfigForLeasedNICs(t *testing.T) {
 		{Mac: "52:54:00:00:00:01", Addresses: []string{"203.0.113.7/24", "2001:db8::7/64"}, Gateway: "203.0.113.1", Nameservers: []string{"1.1.1.1", "2606:4700:4700::1111"}},
 		{Mac: "52:54:00:00:00:02", Addresses: []string{"10.1.0.7/16"}}, // private: no default route
 		{Mac: "52:54:00:00:00:03"},
-		{Addresses: nil}, // a DHCP NIC without a MAC yet
+		{Mac: "52:54:00:00:00:04"},
 		{Mac: "52:54:00:00:00:05", Addresses: []string{"2001:db8:1::5/64"}, Gateway: "2001:db8:1::1"},
 	})
 	if err != nil {
@@ -49,6 +49,10 @@ ethernets:
     match:
       macaddress: "52:54:00:00:00:03"
     dhcp4: true
+  nic3:
+    match:
+      macaddress: "52:54:00:00:00:04"
+    dhcp4: true
   nic4:
     match:
       macaddress: "52:54:00:00:00:05"
@@ -72,5 +76,10 @@ ethernets:
 		if _, err := networkConfig([]*agentv1.InstanceNic{nic}); err == nil || !strings.Contains(err.Error(), "nic 0") {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+	// A DHCP NIC without a MAC beside a static one would lose DHCP (cloud-init's fallback is off).
+	if _, err := networkConfig([]*agentv1.InstanceNic{{Mac: "52:54:00:00:00:01", Addresses: []string{"10.0.0.7/24"}}, {}}); err == nil ||
+		!strings.Contains(err.Error(), "nic 1 has no MAC") {
+		t.Errorf("a MAC-less DHCP NIC beside a static one: %v", err)
 	}
 }

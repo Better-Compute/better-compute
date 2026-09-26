@@ -585,7 +585,8 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 					hostMem = probed
 				}
 				if hostMem != nil {
-					if err := hostMem.admit(spec); err != nil {
+					nr, ok := r.(runtime.NormalPagesRestore)
+					if err := hostMem.admit(spec, restore != nil && ok && nr.RestoresOnNormalPages()); err != nil {
 						if strings.HasPrefix(err.Error(), ResourcesExhausted) {
 							exhausted[id] = err.Error()
 						} else {

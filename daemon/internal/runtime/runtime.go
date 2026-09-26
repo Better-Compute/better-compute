@@ -116,6 +116,12 @@ type Restore struct {
 // state lives in the devices, which no VMM saves (a disk-only snapshot still works).
 var ErrMemorySnapshotWithGPUs = errors.New("an instance with passthrough GPUs cannot be snapshotted with its memory; snapshot its disk only")
 
+// NormalPagesRestore is a runtime whose memory restores run on normal pages whatever the placement
+// says (cloud-hypervisor: a saved config keeps no hugepages); host admission charges them so.
+type NormalPagesRestore interface {
+	RestoresOnNormalPages() bool
+}
+
 // VolumeGrower is a runtime that tells a running guest one of its volumes grew (the file already
 // has; without it the guest sees the new size at its next start).
 type VolumeGrower interface {

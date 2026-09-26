@@ -119,11 +119,17 @@ func probeHostMemory(domains map[string]runtime.Domain) (*hostMemory, error) {
 	return m, nil
 }
 
-// admit takes a start's memory out of the host's, or says why the host cannot give it.
-func (m *hostMemory) admit(spec *agentv1.InstanceSpec) error {
+// admit takes a start's memory out of the host's, or says why the host cannot give it. normalPages:
+// the start runs on normal pages whatever its placement (a memory restore on cloud-hypervisor).
+func (m *hostMemory) admit(spec *agentv1.InstanceSpec, normalPages bool) error {
 	placement, err := runtime.PlacementOf(spec)
 	if err != nil {
 		return err
+	}
+	if normalPages && placement != nil {
+		p := *placement
+		p.HugepageSize = 0
+		placement = &p
 	}
 	memory := spec.GetMemoryBytes()
 	normal := vmmOverhead(memory)

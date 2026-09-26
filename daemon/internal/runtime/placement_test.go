@@ -125,10 +125,16 @@ func TestCloudHypervisorAppliesPlacement(t *testing.T) {
 	if got, want := chMemoryMax(r), uint64(4<<30)/32+256<<20; got != want {
 		t.Errorf("MemoryMax %d, want %d", got, want)
 	}
-	r.RestoredFrom = "ab"
+	// Restored from its memory snapshot: normal pages. Its later cold starts use hugepages again.
+	r.RestoredFrom, r.FromSnapshot = "ab", true
 	if got := chMemoryMax(r); got != 4<<30+uint64(4<<30)/32+256<<20 {
-		t.Errorf("a restored instance runs on normal pages: MemoryMax %d", got)
+		t.Errorf("a VM restored from its memory runs on normal pages: MemoryMax %d", got)
 	}
+	r.FromSnapshot = false
+	if got := chMemoryMax(r); got != uint64(4<<30)/32+256<<20 {
+		t.Errorf("a restored instance's cold start: MemoryMax %d", got)
+	}
+	r.RestoredFrom = ""
 	// A restore keeps bcd's pinning, never the snapshot's.
 	saved := map[string]any{
 		"cpus":   map[string]any{"boot_vcpus": json.Number("2"), "max_vcpus": json.Number("2"), "affinity": []any{"tenant's"}},
