@@ -16,15 +16,25 @@ function of time, so the clock can be paused and scrubbed back 7 days (time trav
 plane, configure it **on the admin server** (never in the browser):
 
 ```bash
-ADMIN_COMPUTE_URL=http://127.0.0.1:3300/api/compute   # the API base, including its basePath
-ADMIN_COMPUTE_TOKEN=biam_ses_…                         # optional: without it only public methods answer
-ADMIN_COMPUTE_TENANT=ten_…                             # optional: the tenant views default to
+ADMIN_COMPUTE_URL=http://127.0.0.1:3300/api/compute   # the API base, including its basePath (no credentials)
+ADMIN_IAM_URL=http://127.0.0.1:3300/api/iam           # better-iam's API; default: the compute origin + /api/iam
+ADMIN_COMPUTE_TENANT=ten_…                             # the platform (root) tenant operators sign in to by default
+ADMIN_SESSION_SECRET=…                                 # 32+ characters; seals operator sessions (dev generates one)
+ADMIN_COMPUTE_TOKEN=biam_ses_…                         # optional read-only shared connection for signed-out viewers
+ADMIN_ALLOWED_HOSTS=admin.example.com                  # extra Host names when served behind a proxy
 ```
 
-or the same keys in `apps/admin/.upstream.json` (`{ "url", "token", "tenantId" }`, gitignored). Then pick
-**Live API** in Settings → Connection. The browser reaches the API only through `POST /api/upstream/<method>`
-(CSRF header required, token added server-side); `lib/api.ts` exposes it as a console-kit `ComputeRequester`.
-Modules with a live source switch on `useWorkspaceSettings().source === 'live'`; widgets without one say "sim".
+or `apps/admin/.upstream.json` (`{ "url", "iamUrl", "tenantId", "token" }`, gitignored) in development. Then
+pick **Live API** in Settings → Connection.
+
+**Security model.** The dev and start scripts bind to 127.0.0.1. The browser reaches the API only through
+`POST /api/upstream/<method>`, which accepts only this admin's own page (Host/Origin allowlist plus the
+`x-better-compute` header). Operators **sign in** (`/signin`) with their better-iam account; the admin keeps
+their own session token sealed in an HttpOnly cookie and forwards it as the bearer, so every change is
+authorized and audited as that person. Signed out, the proxy only forwards read methods. `lib/api.ts`
+exposes the proxy as a console-kit `ComputeRequester`; `useConnection().status.writable` says whether
+changes are possible. Modules with a live source switch on `useWorkspaceSettings().source === 'live'`;
+widgets without one say "sim".
 
 ## Modules
 
