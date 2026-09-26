@@ -37,13 +37,20 @@ func (h *fakeHelper) Libvirt(_ context.Context, verb string, op LibvirtOp) error
 	case "define":
 		_, err = h.virt.virsh([]string{"define", staged(op.XML)})
 	case "start", "shutdown", "destroy", "suspend", "resume", "undefine":
-		_, err = h.virt.virsh([]string{verb, op.Domain})
+		args := []string{verb, op.Domain}
+		if op.Paused {
+			args = append(args, "--paused")
+		}
+		_, err = h.virt.virsh(args)
 	case "save":
 		_, err = h.virt.virsh([]string{"save", op.Domain, op.File})
 	case "restore":
 		args := []string{"restore", op.File}
 		if len(op.XML) > 0 {
 			args = append(args, "--xml", staged(op.XML))
+		}
+		if op.Paused {
+			args = append(args, "--paused")
 		}
 		_, err = h.virt.virsh(args)
 	case "attach-disk":
@@ -113,7 +120,7 @@ func TestLibvirtUnderTheHelper(t *testing.T) {
 	if err := l.Destroy(ctx, "inst_h"); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"define", "start inst_h", "suspend inst_h", "resume inst_h", "save inst_h", "restore inst_h", "console inst_h", "undefine inst_h"} {
+	for _, want := range []string{"define", "start inst_h", "resume inst_h", "save inst_h", "restore inst_h", "console inst_h", "undefine inst_h"} {
 		if !slices.Contains(helper.ops, want) {
 			t.Errorf("the helper was not asked to %s: %v", want, helper.ops)
 		}

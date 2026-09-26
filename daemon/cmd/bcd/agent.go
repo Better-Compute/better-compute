@@ -323,7 +323,7 @@ func forHelper(runtimes []runtime.Runtime, hv runtime.Hypervisor, log *slog.Logg
 type helperHypervisor struct{ c helper.Client }
 
 func (h helperHypervisor) Libvirt(ctx context.Context, verb string, op runtime.LibvirtOp) error {
-	return h.c.Libvirt(ctx, verb, helper.LibvirtRequest{Domain: op.Domain, XML: op.XML, Target: op.Target, Bytes: op.Bytes, File: op.File})
+	return h.c.Libvirt(ctx, verb, helper.LibvirtRequest{Domain: op.Domain, XML: op.XML, Target: op.Target, Bytes: op.Bytes, File: op.File, Paused: op.Paused})
 }
 
 func (h helperHypervisor) Console(ctx context.Context, domain string) (*os.File, error) {

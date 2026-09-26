@@ -29,6 +29,8 @@ type LibvirtOp struct {
 	Target string
 	Bytes  uint64
 	File   string
+	// Paused starts or restores the domain paused (start, restore).
+	Paused bool
 }
 
 // readOnlyVerbs run on libvirt's read-only socket under a Hypervisor.
@@ -61,13 +63,8 @@ func (l *Libvirt) privileged(ctx context.Context, args []string) ([]byte, error)
 		}
 		return nil, l.Hypervisor.Libvirt(ctx, "define", LibvirtOp{XML: raw})
 	case "start":
-		if err := l.Hypervisor.Libvirt(ctx, "start", op); err != nil {
-			return nil, err
-		}
-		if flag("--paused") { // the helper starts running; a paused start pauses at once
-			return nil, l.Hypervisor.Libvirt(ctx, "suspend", op)
-		}
-		return nil, nil
+		op.Paused = flag("--paused")
+		return nil, l.Hypervisor.Libvirt(ctx, "start", op)
 	case "shutdown", "destroy", "suspend", "resume", "undefine":
 		return nil, l.Hypervisor.Libvirt(ctx, verb, op)
 	case "blockresize": // blockresize <id> <target> <bytes>B
@@ -115,13 +112,8 @@ func (l *Libvirt) privileged(ctx context.Context, args []string) ([]byte, error)
 				}
 			}
 		}
-		if err := l.Hypervisor.Libvirt(ctx, verb, op); err != nil {
-			return nil, err
-		}
-		if flag("--paused") {
-			return nil, l.Hypervisor.Libvirt(ctx, "suspend", LibvirtOp{Domain: id})
-		}
-		return nil, nil
+		op.Paused = flag("--paused")
+		return nil, l.Hypervisor.Libvirt(ctx, verb, op)
 	}
 	return nil, fmt.Errorf("virsh %s is not an operation bcd helper does", verb)
 }
