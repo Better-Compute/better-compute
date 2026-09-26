@@ -651,6 +651,39 @@ func TestCPUGovernorAndIsolation(t *testing.T) {
 	}
 }
 
+func TestIOMMU(t *testing.T) {
+	sys := NewFakeSystem()
+	sys.Set("/proc/cpuinfo", "processor\t: 0\nvendor_id\t: AuthenticAMD\n")
+	sys.Programs["grubby"] = true
+	r := Builtin(Options{})
+	_, err := runAll(t, r, sys, unit("iommu", `{}`))
+	if err == nil || errors.Is(err, converge.ErrTerminal) || !strings.Contains(err.Error(), "reboot the node") {
+		t.Fatalf("err = %v", err)
+	}
+	if got := sys.Commands(); !slices.Equal(got, []string{"grubby --update-kernel=ALL --args=amd_iommu=on iommu=pt"}) {
+		t.Fatalf("commands %q", got)
+	}
+	// Booted with it: converged. Passthrough off replaces the arguments.
+	sys.Ran = nil
+	sys.Set(IOMMUClass+"/ivhd0/type", "x")
+	if n, err := runAll(t, r, sys, unit("iommu", `{}`)); err != nil || n != 0 {
+		t.Fatalf("converged: %d %v", n, err)
+	}
+	if _, err := runAll(t, r, sys, unit("iommu", `{"passthrough":false}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := sys.Commands(); !slices.Equal(got, []string{
+		"grubby --update-kernel=ALL --remove-args=amd_iommu=on iommu=pt",
+		"grubby --update-kernel=ALL --args=amd_iommu=on",
+	}) {
+		t.Fatalf("commands %q", got)
+	}
+	sys.Set("/proc/cpuinfo", "vendor_id\t: SomethingElse\n")
+	if _, err := runAll(t, r, sys, unit("iommu", `{}`)); !errors.Is(err, converge.ErrTerminal) {
+		t.Fatalf("unknown vendor: %v", err)
+	}
+}
+
 func TestOSRelease(t *testing.T) {
 	sys := NewFakeSystem()
 	sys.Set("/etc/os-release", "ID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"9.4\"\n")

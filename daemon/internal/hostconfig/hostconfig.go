@@ -121,7 +121,7 @@ type Options struct {
 // added after them (Registry.Add).
 func Builtin(o Options) *Registry {
 	return NewRegistry(
-		KernelModules{}, Sysctl{}, Hugepages{}, CPU{},
+		KernelModules{}, Sysctl{}, Hugepages{}, CPU{}, IOMMU{},
 		NvidiaDriver{}, FabricManager{}, MigLayout{Busy: o.GPUBusy}, GPUSharing{}, ContainerToolkit{},
 	)
 }
