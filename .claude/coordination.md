@@ -104,7 +104,22 @@ Later: 31555bf hold admission (resources-exhausted); 550da91 host volumes (raw, 
 Open:
 - cloud-hypervisor under `[helper]`: its systemd-run, taps and VFIO sysfs writes need root, so it is not offered there. libvirt-kvm works under the helper with the libvirt group.
 - The balloon is never set by the control plane yet.
-- The "instance.volumes" Hello capability was asked of [595a2f].
+- The "instance.volumes" Hello capability was asked of [595a2f] (done in 82f4f51).
+
+[595a2f] (C + F) landed:
+- a21c1c1 reservations book vcpu/memoryGiB/hugepages1Gi (policy.perGpu, else the smallest host share; not charged to quota), binding kubernetes;
+- c5a419c DeviceAssignment.limits;
+- 9d55b36 flavor placement → InstancePlacement (PlacementDegraded), hugepage flavors book hugepages and quota as memoryGiB;
+- 387c22f InstanceNic.gateway/nameservers (ip_pools.dns) and telemetry headersRef/resourceAttributes on the wire;
+- 014bf0d host volumes seam; 37dcd02 `pool-policy` extensions (provision validates host policy at pools.create/update);
+- 17f600b preview books host resources, MCP reserve_gpus vcpu/memoryGiB/kubernetes;
+- 0873d20 trustedProxies;
+- 82f4f51 Hello capabilities instance.ssh-host-only / placement / volumes and the vps constraints;
+- a708aa6 48 slots per GPU at most.
+
+Assigned since: agent-memory volumes, with the control plane (vps sandboxVolumes) to [927015] and bcd to [06192c] (done, 550da91 + b5415a2).
+- [d320b8]: signed intent for helper host.unit (root-owned command_signing_root_sha256 pin, out-of-band), a periodic drift pass, and the hugepages fstab.
+- [6baab5]: DRA driver (gpu.bcd.dev).
 
 ## Round 4 allocation (proposed by [f85da7], 2026-09-24 late; all round-3 sessions are gone)
 
