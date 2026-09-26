@@ -2,7 +2,7 @@
 
 import { useMemo } from 'react';
 import { useConnection } from '@/components/shell/connection';
-import { useNow, useWorkspaceSettings } from '@/components/shell/workspace';
+import { useNow, useScope, useWorkspaceSettings } from '@/components/shell/workspace';
 import { scopeFleet, simulateFleet, type FleetSnapshot } from '@/lib/data/fleet';
 import { liveSnapshot } from '@/lib/data/fleet-live';
 import { useLiveFleet, type LiveState } from './live';
@@ -15,7 +15,9 @@ import { applyActions, useFleetActions } from './store';
  */
 export function useFleet(options: { scoped?: boolean; bucketMs?: number } = {}): FleetSnapshot {
   const now = useNow(options.bucketMs ?? 5_000);
-  const { siteId, source } = useWorkspaceSettings();
+  const { source } = useWorkspaceSettings();
+  // useScope, not the workspace's siteId: a widget pinned to a site sees that site.
+  const { siteId } = useScope();
   const connection = useConnection();
   const actions = useFleetActions();
   const live = source === 'live';

@@ -162,9 +162,9 @@ export const fleetModule: AdminModule = {
       live: true,
       component: UnhealthyWidget,
     },
-    { id: 'fleet.rollout', title: 'bcd rollout', description: 'The running rollout by wave, with failures.', icon: RiRocket2Line, module: 'fleet', defaultSize: { w: 4, h: 2 }, minSize: { w: 3, h: 2 }, href: '/rollouts', live: true, component: RolloutWidget },
+    { id: 'fleet.rollout', title: 'bcd rollout', description: 'The running rollout by wave, with failures.', icon: RiRocket2Line, module: 'fleet', defaultSize: { w: 4, h: 2 }, minSize: { w: 3, h: 2 }, href: '/rollouts', live: true, pins: { site: false }, component: RolloutWidget },
     { id: 'fleet.sandboxes', title: 'Sandboxes', description: 'Live, starting and warm-idle sandboxes, warm-pool hits, expiring soon.', icon: RiBox3Line, module: 'fleet', defaultSize: { w: 4, h: 2 }, minSize: { w: 3, h: 2 }, href: '/sandboxes', live: true, component: SandboxesWidget },
-    { id: 'fleet.batches', title: 'Batches to sign', description: 'Quorum batches waiting for approver signatures.', icon: RiShieldCheckLine, module: 'fleet', defaultSize: { w: 4, h: 3 }, minSize: { w: 3, h: 2 }, href: '/batches', live: true, component: BatchesWidget },
+    { id: 'fleet.batches', title: 'Batches to sign', description: 'Quorum batches waiting for approver signatures.', icon: RiShieldCheckLine, module: 'fleet', defaultSize: { w: 4, h: 3 }, minSize: { w: 3, h: 2 }, href: '/batches', live: true, pins: { site: false }, component: BatchesWidget },
   ],
   status: [NodesStatus, RolloutStatus, BatchesStatus],
   commands: [
