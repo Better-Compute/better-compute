@@ -9,6 +9,7 @@ const areas = [
   { href: '/reservations', label: 'Reservations' },
   { href: '/instances', label: 'Instances' },
   { href: '/sandboxes', label: 'Sandboxes' },
+  { href: '/volumes', label: 'Volumes' },
   { href: '/nodes', label: 'Nodes' },
   { href: '/batches', label: 'Batches' },
   { href: '/pools', label: 'Pools & capacity' },
