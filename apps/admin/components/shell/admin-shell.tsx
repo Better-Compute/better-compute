@@ -9,6 +9,7 @@ import { PageCommandsProvider } from './page-commands';
 import { PeekProvider } from './peek';
 import { StatusBar } from './status-bar';
 import { TimeTravelBanner } from './time-machine';
+import { Tour } from './tour';
 import { Sidebar } from './sidebar';
 import { Topbar } from './topbar';
 import { useWorkspace } from './workspace';
@@ -139,6 +140,7 @@ export function AdminShell({ children }: { children: ReactNode }) {
       </div>
       <CommandPalette open={palette} onOpenChange={setPalette} />
       <ShortcutSheet open={keys} onOpenChange={setKeys} />
+      <Tour />
     </div>
     </PeekProvider>
     </PageCommandsProvider>

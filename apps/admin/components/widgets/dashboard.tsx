@@ -117,7 +117,7 @@ export function Dashboards() {
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2 border-b border-separator-border">
-        <div role="tablist" aria-label="Dashboards" className="-mb-px flex min-w-0 flex-1 items-end gap-0 overflow-x-auto">
+        <div role="tablist" aria-label="Dashboards" data-tour="dashboards" className="-mb-px flex min-w-0 flex-1 items-end gap-0 overflow-x-auto">
           {state.dashboards.map((d) => {
             const active = d.id === dashboard.id;
             return (
@@ -166,6 +166,7 @@ export function Dashboards() {
             leadingIcon={editing ? RiCheckLine : RiEdit2Line}
             onClick={() => setEditing((e) => !e)}
             title="Arrange widgets (e)"
+            data-tour="arrange"
           >
             {editing ? 'Done' : 'Arrange'}
           </Button>

@@ -35,6 +35,7 @@ export function Sidebar({
   return (
     <nav
       aria-label="Admin"
+      data-tour="sidebar"
       className={cx(
         'flex h-full shrink-0 flex-col border-r border-separator-border bg-surface-sunken transition-[width] duration-200 ease-out',
         collapsed ? 'w-14' : 'w-60',

@@ -2,7 +2,8 @@
 
 import { useRef, useState } from 'react';
 import { useTheme } from 'next-themes';
-import { RiDownload2Line, RiPuzzle2Line, RiSettings3Line, RiUpload2Line } from 'react-icons/ri';
+import { RiCompass3Line, RiDownload2Line, RiPuzzle2Line, RiSettings3Line, RiUpload2Line } from 'react-icons/ri';
+import { TOUR_EVENT } from './tour';
 import { Button } from '@/components/base/buttons/button';
 import { SegmentedControl, SegmentedControlItem } from '@/components/base/segmented-control/segmented-control';
 import { Grid, KeyValue, PageHeader, Panel } from '@/components/ui/panel';
@@ -76,6 +77,11 @@ export function SettingsPage() {
                 </SegmentedControlItem>
               ))}
             </SegmentedControl>
+          </Row>
+          <Row label="Tour" hint="A one-minute walk through search, scope, time travel, dashboards and the status bar.">
+            <Button variant="secondary" size="small" leadingIcon={RiCompass3Line} onClick={() => window.dispatchEvent(new Event(TOUR_EVENT))}>
+              Take the tour
+            </Button>
           </Row>
           <Row label="Live updates" hint="Pause to freeze every view on one instant (p).">
             <SegmentedControl selectedKeys={[workspace.live ? 'live' : 'paused']} onSelectionChange={(keys) => workspace.setLive([...keys][0] === 'live')} aria-label="Live updates">

@@ -48,6 +48,7 @@ export function TimeMachine() {
   return (
     <DialogTrigger>
       <AriaButton
+        data-tour="clock"
         aria-label={live ? 'Clock: live. Open time travel' : `Clock: ${fmtDuration(behind)} in the past. Open time travel`}
         className={cx(
           'flex h-8 items-center gap-2 border px-2 font-mono text-[12px] tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-border-focus-ring',

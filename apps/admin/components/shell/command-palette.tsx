@@ -6,6 +6,7 @@ import { Dialog, Modal, ModalOverlay } from 'react-aria-components';
 import { useTheme } from 'next-themes';
 import {
   RiArrowRightLine,
+  RiCompass3Line,
   RiContrast2Line,
   RiDashboardLine,
   RiGlobalLine,
@@ -20,6 +21,7 @@ import { allCommands, allNav, searchAll } from '@/lib/modules';
 import { usePeek } from './peek';
 import { cx } from '@/utils/cx';
 import { useRegisteredPageCommands } from './page-commands';
+import { TOUR_EVENT } from './tour';
 import { RANGES, useWorkspace, type RangeKey } from './workspace';
 
 type Icon = ComponentType<{ className?: string; 'aria-hidden'?: boolean }>;
@@ -151,6 +153,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
       { id: 'ws:theme', label: `Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} theme`, group: 'Workspace', icon: RiContrast2Line, keywords: ['dark', 'light', 'appearance'], perform: () => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark') },
       { id: 'ws:density', label: `Use ${workspace.density === 'compact' ? 'comfortable' : 'compact'} density`, group: 'Workspace', icon: RiLayoutColumnLine, keywords: ['rows', 'dense', 'spacing'], perform: () => workspace.setDensity(workspace.density === 'compact' ? 'comfortable' : 'compact') },
       { id: 'ws:sidebar', label: 'Toggle the sidebar', group: 'Workspace', icon: RiLayoutColumnLine, shortcut: '[', perform: emit(PALETTE_EVENTS.toggleSidebar) },
+      { id: 'ws:tour', label: 'Take the tour', group: 'Workspace', icon: RiCompass3Line, keywords: ['help', 'guide', 'onboarding', 'how'], perform: () => setTimeout(emit(TOUR_EVENT), 80) },
       { id: 'ws:keys', label: 'Keyboard shortcuts', group: 'Workspace', icon: RiKeyboardLine, shortcut: '?', perform: emit(PALETTE_EVENTS.showShortcuts) },
       ...(Object.keys(RANGES) as RangeKey[]).map((key) => ({
         id: `range:${key}`,

@@ -73,7 +73,7 @@ export function StatusBar() {
   const extras = modules.flatMap((module) => (module.status ?? []).map((Item, index) => ({ key: `${module.id}:${index}`, Item })));
 
   return (
-    <footer className="hidden h-7 shrink-0 items-stretch divide-x divide-separator-border overflow-x-auto border-t border-separator-border bg-surface-sunken font-mono text-[11px] text-text-secondary sm:flex">
+    <footer data-tour="statusbar" className="hidden h-7 shrink-0 items-stretch divide-x divide-separator-border overflow-x-auto border-t border-separator-border bg-surface-sunken font-mono text-[11px] text-text-secondary sm:flex">
       <StatusItem
         value={
           <span className="inline-flex items-center gap-1.5">

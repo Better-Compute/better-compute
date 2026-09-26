@@ -60,6 +60,7 @@ export function Topbar({ onOpenPalette, onOpenNav }: { onOpenPalette(): void; on
 
       <button
         type="button"
+        data-tour="palette"
         onClick={onOpenPalette}
         className="hidden h-8 w-64 items-center gap-2 border border-border-button-default bg-background-primary-default px-2 text-left text-body-regular text-text-placeholder outline-none hover:border-border-button-hover focus-visible:ring-2 focus-visible:ring-border-focus-ring md:flex"
       >
@@ -71,10 +72,11 @@ export function Topbar({ onOpenPalette, onOpenNav }: { onOpenPalette(): void; on
         <RiSearchLine className="size-4" aria-hidden />
       </button>
 
+      <div data-tour="scope" className="hidden items-center gap-3 lg:flex">
       <Select
         label="Site scope"
         icon={RiGlobalLine}
-        className="hidden w-40 lg:block"
+        className="w-40"
         value={siteId ?? 'all'}
         onChange={(value) => setSiteId(value === 'all' ? undefined : value)}
         options={[{ id: 'all', label: 'All sites' }, ...sites.map((site) => ({ id: site.id, label: `${site.id} · ${site.city}`, description: site.provider }))]}
@@ -82,11 +84,12 @@ export function Topbar({ onOpenPalette, onOpenNav }: { onOpenPalette(): void; on
       <Select
         label="Time range"
         icon={RiTimeLine}
-        className="hidden w-40 lg:block"
+        className="w-40"
         value={range}
         onChange={(value) => setRange(value as RangeKey)}
         options={(Object.keys(RANGES) as RangeKey[]).map((key) => ({ id: key, label: RANGES[key].label }))}
       />
+      </div>
 
       <TimeMachine />
 
@@ -104,6 +107,7 @@ function AttentionBell() {
   return (
     <DialogTrigger>
       <AriaButton
+        data-tour="bell"
         aria-label={`${items.length} items need attention`}
         className="relative grid size-8 place-items-center text-text-secondary outline-none hover:bg-background-secondary-default hover:text-text-primary focus-visible:ring-2 focus-visible:ring-border-focus-ring"
       >
