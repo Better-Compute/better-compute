@@ -103,12 +103,12 @@ export interface PoolPolicy {
    * (v1.1 §3.8) What each host keeps for itself, out of its bookable CPU and memory (default 2 CPUs
    * and 8 GiB); hugepage pools come out of memory on top of it.
    */
-  hostReserve?: { cpu?: number; memoryGiB?: number };
+  hostReserve?: { vcpu?: number; memoryGiB?: number };
   /**
    * (v1.1 §3.8) The CPU and memory a GPU reservation gets per GPU when it asks for none (default: the
    * node's allocatable CPU and memory divided by its bookable GPUs).
    */
-  perGpu?: { cpu?: number; memoryGiB?: number };
+  perGpu?: { vcpu?: number; memoryGiB?: number };
   /** (v1.1 §3.8) Hugepage pools the `hugepages` config unit reserves on each host (per NUMA node when `perNuma`). */
   hugepages?: { size: '2Mi' | '1Gi'; count: number; perNuma?: boolean };
   /**
@@ -295,8 +295,9 @@ export interface DeviceRequest {
 export type ReservationBinding = 'hold' | 'instance' | 'node' | 'kubernetes';
 
 /**
- * (v1.1 §3.8) Host scalars booked with a reservation's devices, by resource name: `cpu` (logical
- * CPUs), `memoryGiB`, `hugepages1Gi` (pages). A record, as capacity books any `node_resources` name.
+ * (v1.1 §3.8) Host scalars booked with a reservation's devices, by resource name: `vcpu` (logical
+ * CPUs, the same resource vps hosts book), `memoryGiB`, `hugepages1Gi` (pages). A record, as
+ * capacity books any `node_resources` name.
  */
 export type ReservationResources = Record<string, number>;
 
