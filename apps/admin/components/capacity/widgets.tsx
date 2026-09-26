@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ComponentType } from 'react';
 import { earliestFit } from '@better-compute/console-kit';
 import { Sparkline, StackedBar } from '@/components/ui/charts';
 import { EmptyState } from '@/components/ui/panel';
@@ -20,7 +20,21 @@ import { Segmented } from './ui';
 // Dashboard widgets of the capacity module. Each renders only its body (the shell's WidgetFrame draws the title
 // bar, menu and resize handle) and adapts to its grid size: 12 columns, 80 px rows.
 
-const bodyHeight = (h: number) => h * 80 - 48;
+/** Usable body height inside the frame's title bar and our padding. */
+const bodyHeight = (h: number) => h * 80 - 48 - 24;
+
+/** The frame body is flush; widgets bring their own padding (as the Overview's do). */
+export function padded(Component: ComponentType<WidgetProps>): ComponentType<WidgetProps> {
+  function Padded(props: WidgetProps) {
+    return (
+      <div className="h-full overflow-y-auto p-3">
+        <Component {...props} />
+      </div>
+    );
+  }
+  Padded.displayName = `Padded(${Component.name})`;
+  return Padded;
+}
 
 export function CapacityKpisWidget({ size }: WidgetProps) {
   const { snapshot, rows } = usePoolRows();
@@ -34,25 +48,37 @@ export function CapacityKpisWidget({ size }: WidgetProps) {
   const series = useMemo(() => fleetSeries([...timelines.values()]), [timelines]);
   const trend = series.booked.map((booked, index) => (series.allocatable[index] ? booked / series.allocatable[index]! : 0));
   const spend = useMemo(() => snapshot.usage.filter((w) => w.windowStart >= hour - DAY).reduce((total, w) => total + costOf(w, snapshot.prices), 0), [snapshot, hour]);
-  const cols = size.w >= 10 ? 'grid-cols-5' : size.w >= 6 ? 'grid-cols-3' : 'grid-cols-2';
+  const count = size.w >= 10 ? 5 : size.w >= 6 ? 4 : 2;
+  const cards = [
+    { label: 'GPUs allocated', value: fmtPct(totals.utilization, 0), unit: `${fmtNum(totals.allocated)}/${fmtNum(totals.allocatable)}`, trend: size.h >= 2 ? trend : undefined },
+    { label: 'Free now', value: fmtNum(totals.freeNow), unit: 'GPUs', tone: 'neutral' as const, hint: `${fmtNum(totals.unavailable)} out of service` },
+    { label: 'Waiting', value: fmtNum(totals.pending), unit: 'pending', tone: 'neutral' as const },
+    { label: 'Booked later', value: fmtNum(totals.reserved), unit: 'atoms', tone: 'neutral' as const },
+    { label: 'Spend, 24 h', value: fmtMoney(spend, { short: true }), tone: 'neutral' as const, hint: 'at list price' },
+  ];
   return (
-    <div className={cx('grid gap-x-5 gap-y-3', cols)}>
-      <Stat size="sm" label="GPUs allocated" value={fmtPct(totals.utilization, 0)} unit={`${fmtNum(totals.allocated)}/${fmtNum(totals.allocatable)}`} trend={size.h >= 2 ? trend : undefined} />
-      <Stat size="sm" label="Free now" value={fmtNum(totals.freeNow)} unit="GPUs" tone="neutral" />
-      <Stat size="sm" label="Booked later" value={fmtNum(totals.reserved)} unit="atoms" tone="neutral" />
-      {size.w >= 6 && <Stat size="sm" label="Pending" value={fmtNum(totals.pending)} tone="neutral" />}
-      {size.w >= 10 && <Stat size="sm" label="Spend, 24 h" value={fmtMoney(spend, { short: true })} tone="neutral" />}
+    <div className="grid h-full divide-x divide-separator-border" style={{ gridTemplateColumns: `repeat(${count}, minmax(0, 1fr))` }}>
+      {cards.slice(0, count).map((card) => (
+        <Stat key={card.label} className="justify-center px-3 py-2" size="sm" {...card} />
+      ))}
     </div>
   );
 }
 
-export function CapacityHeatmapWidget({ size }: WidgetProps) {
+const HEAT_WINDOWS: Record<string, [number, number]> = { '12/48': [12, 48], '24/96': [24, 96], '48/168': [48, 168], '168/168': [168, 168] };
+
+export function CapacityHeatmapWidget({ size, settings }: WidgetProps) {
   const router = useRouter();
   const { snapshot, rows } = usePoolRows();
-  const back = size.w >= 8 ? 24 : 12;
-  const ahead = size.w >= 8 ? 96 : 48;
+  const chosen = HEAT_WINDOWS[String(settings.window)];
+  const [back, ahead] = chosen ?? (size.w >= 8 ? [24, 96] : [12, 48]);
   const { from, to } = useHourWindow(back, ahead);
-  const gpuRows = useMemo(() => rows.filter((row) => row.unit === 'gpu'), [rows]);
+  const model = String(settings.model ?? 'all');
+  const sort = String(settings.sort ?? 'pool');
+  const gpuRows = useMemo(() => {
+    const list = rows.filter((row) => row.unit === 'gpu' && (model === 'all' || row.short === model));
+    return sort === 'utilization' ? [...list].sort((a, b) => b.utilization - a.utilization) : list;
+  }, [rows, model, sort]);
   const timelines = useTimelines(
     gpuRows.map((row) => row.id),
     from,
@@ -64,9 +90,17 @@ export function CapacityHeatmapWidget({ size }: WidgetProps) {
   return <CapacityHeatmap matrix={matrix} now={snapshot.now} rowHeight={rowHeight} compact={size.w < 8} onSelect={(poolId) => router.push(`/pools/${poolId}`)} />;
 }
 
-export function PoolsWidget({ size }: WidgetProps) {
+export function PoolsWidget({ size, settings }: WidgetProps) {
   const { rows } = usePoolRows();
-  const sorted = useMemo(() => [...rows].sort((a, b) => b.utilization - a.utilization), [rows]);
+  const kind = String(settings.kind ?? 'all');
+  const sort = String(settings.sort ?? 'utilization');
+  const sorted = useMemo(
+    () =>
+      rows
+        .filter((row) => kind === 'all' || row.unit === kind)
+        .sort((a, b) => (sort === 'free' ? b.freeNow / (b.allocatable || 1) - a.freeNow / (a.allocatable || 1) : sort === 'name' ? a.name.localeCompare(b.name) : b.utilization - a.utilization)),
+    [rows, kind, sort],
+  );
   const fit = Math.max(2, Math.floor(bodyHeight(size.h) / 34));
   return (
     <ul className="flex flex-col gap-2">
@@ -127,22 +161,25 @@ export function ModelsWidget() {
   );
 }
 
-export function UpcomingWidget({ size }: WidgetProps) {
+export function UpcomingWidget({ size, settings }: WidgetProps) {
   const { snapshot, rows } = usePoolRows();
   const tenantName = useTenantName();
   const inScope = useMemo(() => new Set(rows.map((row) => row.id)), [rows]);
+  const horizon = Number(settings.horizon ?? 12);
+  const show = String(settings.show ?? 'both');
+  const minGpus = Number(settings.minGpus ?? 1);
   const events = useMemo(() => {
-    const until = snapshot.now + 12 * HOUR;
+    const until = snapshot.now + horizon * HOUR;
     const list: { t: number; kind: 'starts' | 'ends'; id: string; tenantId: string; gpus: number; poolId: string }[] = [];
     for (const r of snapshot.reservations) {
-      if (!r.during || !inScope.has(r.poolId)) continue;
-      if (r.state === 'placed' && r.during.start > snapshot.now && r.during.start < until) list.push({ t: r.during.start, kind: 'starts', id: r.id, tenantId: r.tenantId, gpus: reservationGpus(r), poolId: r.poolId });
-      if (r.state === 'active' && r.during.end > snapshot.now && r.during.end < until) list.push({ t: r.during.end, kind: 'ends', id: r.id, tenantId: r.tenantId, gpus: reservationGpus(r), poolId: r.poolId });
+      if (!r.during || !inScope.has(r.poolId) || reservationGpus(r) < minGpus) continue;
+      if (show !== 'ends' && r.state === 'placed' && r.during.start > snapshot.now && r.during.start < until) list.push({ t: r.during.start, kind: 'starts', id: r.id, tenantId: r.tenantId, gpus: reservationGpus(r), poolId: r.poolId });
+      if (show !== 'starts' && r.state === 'active' && r.during.end > snapshot.now && r.during.end < until) list.push({ t: r.during.end, kind: 'ends', id: r.id, tenantId: r.tenantId, gpus: reservationGpus(r), poolId: r.poolId });
     }
     return list.sort((a, b) => a.t - b.t);
-  }, [snapshot, inScope]);
+  }, [snapshot, inScope, horizon, show, minGpus]);
   const fit = Math.max(3, Math.floor(bodyHeight(size.h) / 28));
-  if (!events.length) return <EmptyState title="Nothing starts or ends in 12 h" />;
+  if (!events.length) return <EmptyState title={`Nothing ${show === 'both' ? 'starts or ends' : show} in ${horizon} h`} />;
   return (
     <ul>
       {events.slice(0, fit).map((event) => (
@@ -161,15 +198,20 @@ export function UpcomingWidget({ size }: WidgetProps) {
   );
 }
 
-export function QuotaAlertsWidget({ size }: WidgetProps) {
+export function QuotaAlertsWidget({ size, settings }: WidgetProps) {
   const { snapshot, rows } = usePoolRows();
   const tenantName = useTenantName();
   const inScope = useMemo(() => new Set(rows.map((row) => row.id)), [rows]);
+  const threshold = Number(settings.threshold ?? 80) / 100;
+  const resource = String(settings.resource ?? 'all');
   const alerts = useMemo(
-    () => quotaCells(snapshot.quotas).filter((cell) => cell.level !== 'ok' && cell.tenantId !== snapshot.tenantId && inScope.has(cell.poolId)).sort((a, b) => b.ratio - a.ratio),
-    [snapshot, inScope],
+    () =>
+      quotaCells(snapshot.quotas, threshold)
+        .filter((cell) => cell.level !== 'ok' && cell.tenantId !== snapshot.tenantId && inScope.has(cell.poolId) && (resource === 'all' || cell.resource === resource))
+        .sort((a, b) => b.ratio - a.ratio),
+    [snapshot, inScope, threshold, resource],
   );
-  if (!alerts.length) return <EmptyState title="Every tenant has headroom" />;
+  if (!alerts.length) return <EmptyState title={`Every tenant is under ${Math.round(threshold * 100)}%`} />;
   const fit = Math.max(2, Math.floor(bodyHeight(size.h) / 36));
   return (
     <ul className="flex flex-col gap-2">
@@ -193,19 +235,25 @@ export function QuotaAlertsWidget({ size }: WidgetProps) {
   );
 }
 
-export function SpendWidget({ size }: WidgetProps) {
+export function SpendWidget({ size, settings }: WidgetProps) {
   const { snapshot, rows } = usePoolRows();
   const tenantName = useTenantName();
   const inScope = useMemo(() => new Set(rows.map((row) => row.id)), [rows]);
-  const from = snapshot.now - 30 * DAY;
+  const daysBack = Number(settings.days ?? 30);
+  const group = String(settings.group ?? 'tenant');
+  const from = snapshot.now - daysBack * DAY;
   const windows = useMemo(() => snapshot.usage.filter((w) => w.windowStart >= from && inScope.has(w.tags.poolId ?? '')), [snapshot.usage, from, inScope]);
   const days = useMemo(() => dailySpend(windows, snapshot.prices, from, snapshot.now), [windows, snapshot.prices, from, snapshot.now]);
-  const tenants = useMemo(() => rollup(windows, (w) => w.tags.tenantId ?? '', snapshot.prices), [windows, snapshot.prices]);
+  const tenants = useMemo(
+    () => rollup(windows, (w) => (group === 'project' ? w.tags.project || '(none)' : group === 'pool' ? w.tags.poolId ?? '' : group === 'meter' ? w.meter : w.tags.tenantId ?? ''), snapshot.prices),
+    [windows, snapshot.prices, group],
+  );
+  const label = (key: string) => (group === 'tenant' ? tenantName(key) : key);
   const total = tenants.reduce((sum, entry) => sum + entry.cost, 0);
   return (
     <div className="flex h-full flex-col gap-3">
       <div className="flex items-end justify-between gap-3">
-        <Stat label="30-day spend" value={fmtMoney(total, { short: true })} hint="estimated at list" />
+        <Stat label={`${daysBack}-day spend`} value={fmtMoney(total, { short: true })} hint="estimated at list" />
         <div className="w-1/2">
           <Sparkline values={days.cost} height={40} />
         </div>
@@ -214,7 +262,7 @@ export function SpendWidget({ size }: WidgetProps) {
         <ul className="flex flex-col gap-1.5">
           {tenants.slice(0, Math.max(2, size.h * 2 - 3)).map((entry) => (
             <li key={entry.key} className="grid grid-cols-[8rem_1fr_4.5rem] items-center gap-2">
-              <span className="truncate text-caption-1-regular">{tenantName(entry.key)}</span>
+              <span className="truncate text-caption-1-regular">{label(entry.key)}</span>
               <div className="h-1.5 bg-background-secondary-default">
                 <div className="h-full bg-signal-fill" style={{ width: `${(entry.cost / (tenants[0]?.cost || 1)) * 100}%` }} />
               </div>
@@ -231,12 +279,16 @@ const FINDER_GPUS = ['1', '8', '16', '32', '64'] as const;
 const FINDER_DURATIONS = { '4h': 4 * HOUR, '1d': DAY, '3d': 3 * DAY, '7d': 7 * DAY } as const;
 
 /** "Where can I get N GPUs for D?" across every pool, answered from the timelines. */
-export function FinderWidget({ size }: WidgetProps) {
+export function FinderWidget({ size, settings }: WidgetProps) {
   const { snapshot, rows } = usePoolRows();
-  const [gpus, setGpus] = useState<(typeof FINDER_GPUS)[number]>('8');
-  const [duration, setDuration] = useState<keyof typeof FINDER_DURATIONS>('1d');
+  const [gpus, setGpus] = useState<(typeof FINDER_GPUS)[number]>((String(settings.gpus ?? '8') as (typeof FINDER_GPUS)[number]) ?? '8');
+  const [duration, setDuration] = useState<keyof typeof FINDER_DURATIONS>((String(settings.duration ?? '1d') as keyof typeof FINDER_DURATIONS) ?? '1d');
+  // The instance's settings are the defaults; the chips change them for this view only.
+  useEffect(() => setGpus(String(settings.gpus ?? '8') as (typeof FINDER_GPUS)[number]), [settings.gpus]);
+  useEffect(() => setDuration(String(settings.duration ?? '1d') as keyof typeof FINDER_DURATIONS), [settings.duration]);
   const { hour, to } = useHourWindow(0, 7 * 24);
-  const gpuRows = useMemo(() => rows.filter((row) => row.unit === 'gpu'), [rows]);
+  const model = String(settings.model ?? 'all');
+  const gpuRows = useMemo(() => rows.filter((row) => row.unit === 'gpu' && (model === 'all' || row.short === model)), [rows, model]);
   const timelines = useTimelines(
     gpuRows.map((row) => row.id),
     hour,
@@ -275,9 +327,11 @@ export function FinderWidget({ size }: WidgetProps) {
   );
 }
 
-export function PressureWidget({ size }: WidgetProps) {
+export function PressureWidget({ size, settings }: WidgetProps) {
   const { snapshot, rows } = usePoolRows();
   const { hour, to } = useHourWindow(0, 7 * 24);
+  const gpus = Number(settings.gpus ?? 8);
+  const hours = Number(settings.hours ?? 24);
   const gpuRows = useMemo(() => rows.filter((row) => row.unit === 'gpu'), [rows]);
   const timelines = useTimelines(
     gpuRows.map((row) => row.id),
@@ -285,8 +339,8 @@ export function PressureWidget({ size }: WidgetProps) {
     to,
   );
   const list = useMemo(
-    () => gpuRows.map((row) => ({ row, ...pressure(row, timelines.get(row.id)!, snapshot.now, 8, DAY) })).sort((a, b) => (b.waitMs ?? Infinity) - (a.waitMs ?? Infinity)),
-    [gpuRows, timelines, snapshot.now],
+    () => gpuRows.map((row) => ({ row, ...pressure(row, timelines.get(row.id)!, snapshot.now, gpus, hours * HOUR) })).sort((a, b) => (b.waitMs ?? Infinity) - (a.waitMs ?? Infinity)),
+    [gpuRows, timelines, snapshot.now, gpus, hours],
   );
   const fit = Math.max(2, Math.floor(bodyHeight(size.h) / 28));
   return (
@@ -299,7 +353,7 @@ export function PressureWidget({ size }: WidgetProps) {
           <Mono dim className="text-[11px]">
             {fmtNum(row.freeNow)} free
           </Mono>
-          {start === undefined ? <Tag status="crit">none 7 d</Tag> : waitMs! < HOUR ? <Tag status="ok">8×24h now</Tag> : <Tag status={waitMs! > DAY ? 'warn' : 'ok'}>in {fmtDuration(waitMs!)}</Tag>}
+          {start === undefined ? <Tag status="crit">none 7 d</Tag> : waitMs! < HOUR ? <Tag status="ok">{gpus}×{hours}h now</Tag> : <Tag status={waitMs! > DAY ? 'warn' : 'ok'}>in {fmtDuration(waitMs!)}</Tag>}
         </li>
       ))}
     </ul>
