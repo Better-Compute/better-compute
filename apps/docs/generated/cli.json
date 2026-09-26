@@ -2207,7 +2207,7 @@
       "group": "Sandboxes",
       "summary": "List the tenant’s persistent volumes (sandboxVolumes.list)",
       "description": "List the tenant’s persistent volumes (sandboxVolumes.list)",
-      "usage": "better-compute sandbox-volume list --tenant ID [--pool ID] [--deleted] [--config PATH] [--url URL]",
+      "usage": "better-compute sandbox-volume list --tenant ID [--pool ID] [--deleted] [--all] [--config PATH] [--url URL]",
       "target": "token",
       "args": [],
       "flags": [
@@ -2228,6 +2228,11 @@
           "flag": "--deleted",
           "optional": true,
           "description": "Include deleted volumes"
+        },
+        {
+          "flag": "--all",
+          "optional": true,
+          "description": "Every volume of the tenant you may see, not only yours"
         },
         {
           "flag": "--config",

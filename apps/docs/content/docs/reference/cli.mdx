@@ -909,7 +909,7 @@ better-compute sandbox-volume create --pool pool_01k5w… --name agent-notes --s
 List the tenant’s persistent volumes (sandboxVolumes.list)
 
 ```sh
-better-compute sandbox-volume list --tenant ID [--pool ID] [--deleted] [--config PATH] [--url URL]
+better-compute sandbox-volume list --tenant ID [--pool ID] [--deleted] [--all] [--config PATH] [--url URL]
 ```
 
 List the tenant’s persistent volumes (sandboxVolumes.list)
@@ -919,6 +919,7 @@ List the tenant’s persistent volumes (sandboxVolumes.list)
 | `--tenant ID`     | The tenant acting (the caller’s organization)                                                                 |         | `BETTER_COMPUTE_TENANT` |
 | `--pool ID`       | Only this pool’s (pool\_…)                                                                                    |         |                         |
 | `--deleted`       | Include deleted volumes                                                                                       |         |                         |
+| `--all`           | Every volume of the tenant you may see, not only yours                                                        |         |                         |
 | `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`       | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                                              |         |                         |
