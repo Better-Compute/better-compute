@@ -185,6 +185,7 @@ function ShortcutSheet({ open, onOpenChange }: { open: boolean; onOpenChange(ope
     ['p', 'Pause or resume the clock'],
     [',  .', 'Step the clock ±5 min (shift: ±1 h)'],
     ['e', 'Arrange the dashboard'],
+    ['←  →', 'Arranging: move the focused widget (shift: resize)'],
     ['[', 'Collapse the sidebar'],
     ['j  k', 'Move through table rows'],
     ['↵', 'Open the selected row'],
