@@ -17,6 +17,7 @@ import {
   widgetSettings,
 } from '@/lib/modules';
 import { decodeDashboard, encodeDashboard, PRESETS } from '@/components/widgets/layout';
+import { clearJournal, journalCall, journalFields, readJournal } from '@/lib/journal';
 import { overrideFrom, settingsSummary } from '@/components/widgets/configure';
 
 // The foundation's pure logic: the simulated platform signals, the module registry helpers and dashboard
@@ -171,6 +172,39 @@ describe('module registry', () => {
       vi.unstubAllGlobals();
     }
     expect(allWidgets().some((w) => w.module === 'fleet')).toBe(true);
+  });
+});
+
+describe('change journal', () => {
+  it('keeps ids, names and reasons, never secrets or long blobs', () => {
+    expect(
+      journalFields({ nodeId: 'n-1', reason: 'XID 79', token: 'biam_ses_x', apiKey: 'k', nodeIds: ['a', 'b', 'c', 'd', 'e', 'f', 'g'], spec: { big: true }, count: 3 }),
+    ).toEqual({ nodeId: 'n-1', reason: 'XID 79', nodeIds: 'a, b, c, d, e +2' });
+    expect(journalFields(null)).toEqual({});
+    expect(journalFields({ name: 'x'.repeat(300) }).name).toHaveLength(120);
+  });
+
+  it('records changes with their outcome, skips reads and signed-out refusals', () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('window', {
+      localStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) },
+      dispatchEvent: () => true,
+    });
+    try {
+      clearJournal();
+      journalCall('nodes/list', {}, { ok: true });
+      journalCall('nodes/cordon', { nodeId: 'n-1' }, { ok: false, code: 'READ_ONLY', message: 'sign in' });
+      journalCall('nodes/cordon', { nodeId: 'n-1' }, { ok: true }, T0);
+      journalCall('nodes/drain', { nodeId: 'n-2' }, { ok: false, code: 'CONFLICT', message: 'busy' }, T0 + 1);
+      const entries = readJournal();
+      expect(entries.map((e) => [e.method, e.ok, e.code])).toEqual([
+        ['nodes/drain', false, 'CONFLICT'],
+        ['nodes/cordon', true, undefined],
+      ]);
+      expect(JSON.parse(store.get('bc-admin:journal')!)).toHaveLength(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

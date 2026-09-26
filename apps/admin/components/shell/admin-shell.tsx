@@ -6,6 +6,7 @@ import { Dialog, Heading, Modal, ModalOverlay } from 'react-aria-components';
 import { allCommands, allNav } from '@/lib/modules';
 import { CommandPalette, PALETTE_EVENTS } from './command-palette';
 import { HiddenModuleBanner } from './hidden-module-banner';
+import { JournalDrawer } from './journal';
 import { PageCommandsProvider } from './page-commands';
 import { PeekProvider } from './peek';
 import { recordVisit } from './pins';
@@ -182,6 +183,7 @@ function ShellFrame({ children }: { children: ReactNode }) {
       {!kiosk.on && <Tour />}
       <AttentionWatcher />
       <WatchWatcher />
+      <JournalDrawer />
     </div>
     </PeekProvider>
     </PageCommandsProvider>

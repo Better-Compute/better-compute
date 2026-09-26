@@ -28,6 +28,7 @@ import { cx } from '@/utils/cx';
 import { useRegisteredPageCommands } from './page-commands';
 import { TOUR_EVENT } from './tour';
 import { KIOSK_EVENT } from './kiosk';
+import { JOURNAL_EVENT } from './journal';
 import { RANGES, useClockGetter, useWorkspaceSettings, type RangeKey } from './workspace';
 
 type Icon = ComponentType<{ className?: string; 'aria-hidden'?: boolean }>;
@@ -225,6 +226,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
       { id: 'ws:sidebar', label: 'Toggle the sidebar', group: 'Workspace', icon: RiLayoutColumnLine, shortcut: '[', perform: emit(PALETTE_EVENTS.toggleSidebar) },
       { id: 'ws:kiosk', label: 'Wall display (full screen, dashboards rotate)', group: 'Workspace', icon: RiTvLine, keywords: ['kiosk', 'noc', 'tv', 'fullscreen', 'screen'], perform: () => { router.push('/'); setTimeout(emit(KIOSK_EVENT), 60); } },
       { id: 'ws:tour', label: 'Take the tour', group: 'Workspace', icon: RiCompass3Line, keywords: ['help', 'guide', 'onboarding', 'how'], perform: () => setTimeout(emit(TOUR_EVENT), 80) },
+      { id: 'ws:journal', label: 'Your recent changes', group: 'Workspace', icon: RiHistoryLine, keywords: ['journal', 'audit', 'history', 'undo', 'what did i do'], perform: () => setTimeout(emit(JOURNAL_EVENT), 80) },
       { id: 'ws:keys', label: 'Keyboard shortcuts', group: 'Workspace', icon: RiKeyboardLine, shortcut: '?', perform: emit(PALETTE_EVENTS.showShortcuts) },
       ...(Object.keys(RANGES) as RangeKey[]).map((key) => ({
         id: `range:${key}`,

@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { journalCall } from './journal';
 import { adminHeaders } from './session-key';
 
 // The browser side of live mode: `api.$request('capacity/summary', { tenantId })` goes through this app's
@@ -20,6 +21,18 @@ export class ApiError extends Error {
 }
 
 async function request<Output = unknown>(path: string, input: unknown = {}, options: { signal?: AbortSignal } = {}): Promise<Output> {
+  try {
+    const data = await send<Output>(path, input, options);
+    journalCall(path, input, { ok: true });
+    return data;
+  } catch (error) {
+    if (!options.signal?.aborted)
+      journalCall(path, input, error instanceof ApiError ? { ok: false, code: error.code, message: error.message } : { ok: false, code: 'NETWORK', message: String(error) });
+    throw error;
+  }
+}
+
+async function send<Output>(path: string, input: unknown, options: { signal?: AbortSignal }): Promise<Output> {
   const response = await fetch(`/api/upstream/${path}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...adminHeaders() },

@@ -2,7 +2,8 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { RiLoginBoxLine, RiLogoutBoxRLine, RiUserLine } from 'react-icons/ri';
+import { RiHistoryLine, RiLoginBoxLine, RiLogoutBoxRLine, RiUserLine } from 'react-icons/ri';
+import { JOURNAL_EVENT, useJournal } from './journal';
 import { Menu, ToolButton } from '@/components/ui/overlay';
 import { useFeedback } from '@/components/ui/feedback';
 import { adminHeaders, rotateSessionKey } from '@/lib/session-key';
@@ -16,6 +17,7 @@ export function OperatorMenu() {
   const { status, refresh } = useConnection();
   const pathname = usePathname();
   const { toast } = useFeedback();
+  const journal = useJournal();
   if (!status?.configured) return null;
   const operator = status.operator;
   if (!operator)
@@ -51,6 +53,12 @@ export function OperatorMenu() {
       }
       items={[
         { id: 'who', label: `${operator.email ?? operator.identityId} · ${status.tenantId ?? ''}`, disabled: true },
+        {
+          id: 'journal',
+          label: journal.length ? `Your changes (${journal.length})` : 'Your changes',
+          icon: RiHistoryLine,
+          onAction: () => window.dispatchEvent(new Event(JOURNAL_EVENT)),
+        },
         { id: 'out', label: 'Sign out', icon: RiLogoutBoxRLine, separator: true, onAction: () => void signOut() },
       ]}
     />
