@@ -471,6 +471,37 @@ describe('JoinService.join', () => {
       site_id: 'site_custom',
     });
   });
+
+  it('lands a Kubernetes-hosted token’s node tenant-controlled unless the platform operates the cluster', async () => {
+    const s = await setup();
+    const hosted = async (poolId: string) => {
+      const token = await mintToken(s, { poolId });
+      await s.fixture.database.query(`UPDATE join_tokens SET hosted = 'kubernetes' WHERE id = $1`, [
+        token.id,
+      ]);
+      return token;
+    };
+    // pool_other: platform site, no policy.kubernetes. The cluster's admins have root there: the
+    // node is tenant-controlled, and its certificate is node-tenant (never platform secrets).
+    const first = await join(s, (await hosted('pool_other')).token, machine(1));
+    expect(await nodeRow(s, first.body.nodeId)).toMatchObject({ trust: 'tenant-controlled' });
+    expect(parseCertificate(first.body.certChain[0]!).role).toBe('node-tenant');
+
+    // A platform-operated cluster keeps platform trust.
+    await s.fixture.database.query(
+      `UPDATE pools SET policy = $2 WHERE id = $1`,
+      ['pool_other', JSON.stringify({ kubernetes: { platformOperated: true } })],
+    );
+    const second = await join(s, (await hosted('pool_other')).token, machine(2));
+    expect(await nodeRow(s, second.body.nodeId)).toMatchObject({ trust: 'platform' });
+    expect(parseCertificate(second.body.certChain[0]!).role).toBe('node');
+
+    // Never raises: a tenant's own site stays tenant-owned.
+    const byo = await mintToken(s, { tenantId: s.fixture.tenants.acme.id, poolId: 'pool_byo' });
+    await s.fixture.database.query(`UPDATE join_tokens SET hosted = 'kubernetes' WHERE id = $1`, [byo.id]);
+    const third = await join(s, byo.token, machine(3));
+    expect(await nodeRow(s, third.body.nodeId)).toMatchObject({ trust: 'tenant-owned' });
+  });
 });
 
 describe('JoinService two-round joins (AttestationDeferral)', () => {

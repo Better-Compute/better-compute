@@ -44,6 +44,12 @@ export interface CreateJoinTokenInput {
   expect?: JoinTokenExpect;
   /** Lets a known machine with a new key reclaim its node (needs ≥ 2 matching identifiers). */
   allowReclaim?: boolean;
+  /**
+   * `kubernetes`: for bcd running as a DaemonSet on a cluster (deploy/kubernetes). Its nodes join
+   * tenant-controlled unless the pool's `policy.kubernetes.platformOperated` is true: that cluster's
+   * admins have root on the machines.
+   */
+  hosted?: 'kubernetes';
   idempotencyKey: string;
 }
 export interface ListJoinTokensInput {
@@ -71,6 +77,7 @@ export interface JoinTokenInfo {
   usesLeft: number;
   expect?: JoinTokenExpect;
   allowReclaim: boolean;
+  hosted?: 'kubernetes';
   expiresAt: number;
   revokedAt?: number;
 }
@@ -121,6 +128,7 @@ const parseCreate = parser({
   ttlSeconds: v.int({ min: 60, max: 86_400 }),
   expect: v.optional(expectInput),
   allowReclaim: v.withDefault(v.boolean(), false),
+  hosted: v.optional(v.option(['kubernetes'])),
   idempotencyKey: fields.idempotencyKey,
 });
 function createInput(input: unknown): CreateJoinTokenInput {
@@ -159,11 +167,12 @@ interface TokenRow {
   uses_left: number;
   expect: JoinTokenExpect | null;
   allow_reclaim: boolean;
+  hosted: 'kubernetes' | null;
   expires_at: Date;
   revoked_at: Date | null;
 }
 const columns = `t.id, t.tenant_id, t.role, t.pool_id, t.site_id, t.uses_left, t.expect,
-  t.allow_reclaim, t.expires_at, t.revoked_at`;
+  t.allow_reclaim, t.hosted, t.expires_at, t.revoked_at`;
 
 function toToken(row: TokenRow): JoinTokenInfo {
   const token: JoinTokenInfo = {
@@ -177,6 +186,7 @@ function toToken(row: TokenRow): JoinTokenInfo {
   };
   if (row.site_id !== null) token.siteId = row.site_id;
   if (row.expect !== null) token.expect = row.expect;
+  if (row.hosted !== null) token.hosted = row.hosted;
   const revokedAt = ms(row.revoked_at);
   if (revokedAt !== undefined) token.revokedAt = revokedAt;
   return token;
@@ -205,10 +215,11 @@ const canonical = (expect: JoinTokenExpect | undefined) =>
     ),
   );
 
-/** A retry is the same request when it names the same pool, pins and reclaim rule. */
+/** A retry is the same request when it names the same pool, pins, reclaim rule and hosting. */
 const sameRequest = (token: JoinTokenInfo, input: CreateJoinTokenInput) =>
   token.poolId === input.poolId &&
   token.allowReclaim === (input.allowReclaim ?? false) &&
+  token.hosted === input.hosted &&
   canonical(token.expect) === canonical(input.expect);
 
 export function joinTokensApi(minter: JoinTokenMinter = defaultJoinTokenMinter): JoinTokensApi {
@@ -245,9 +256,9 @@ export function joinTokensApi(minter: JoinTokenMinter = defaultJoinTokenMinter):
           const { token, secretHash } = minter.mint(id);
           const { rows } = await context.sql.query<TokenRow>(
             `INSERT INTO join_tokens AS t (id, tenant_id, role, pool_id, site_id, secret_hash, uses_left,
-               expect, allow_reclaim, expires_at)
+               expect, allow_reclaim, expires_at, hosted)
              VALUES ($1, $2, 'node', $3, $4, $5, $6, $7::jsonb, $8,
-               compute_now() + make_interval(secs => $9::int))
+               compute_now() + make_interval(secs => $9::int), $10)
              ON CONFLICT DO NOTHING
              RETURNING ${columns}`,
             [
@@ -260,6 +271,7 @@ export function joinTokensApi(minter: JoinTokenMinter = defaultJoinTokenMinter):
               input.expect ? JSON.stringify(input.expect) : null,
               input.allowReclaim ?? false,
               input.ttlSeconds,
+              input.hosted ?? null,
             ],
           );
           if (!rows[0]) {
@@ -278,6 +290,7 @@ export function joinTokensApi(minter: JoinTokenMinter = defaultJoinTokenMinter):
               usesLeft: created.usesLeft,
               expiresAt: new Date(created.expiresAt).toISOString(),
               pinned: input.expect !== undefined,
+              ...(input.hosted ? { hosted: input.hosted } : {}),
             } satisfies Json,
           });
           return { ...created, token };

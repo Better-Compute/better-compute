@@ -251,7 +251,7 @@ export const nodeCommands = [
     group: 'Nodes',
     summary: 'Create a join token for a pool: what bcd join presents (joinTokens.create)',
     description:
-      "join-tokens create mints a token that lets up to --max-uses machines (default 1) join --pool for --ttl (60s to 24h). --expect-* bind it to one machine's identity (product UUID, serial, MAC or GPU UUID). The token is printed once and never again: with --out it goes to a new file (0600, never overwritten) instead of the output, to hand to the server out of band (the install script reads BCD_JOIN_TOKEN or stdin). Decided as compute:join-tokens:create.",
+      "join-tokens create mints a token that lets up to --max-uses machines (default 1) join --pool for --ttl (60s to 24h). --expect-* bind it to one machine's identity (product UUID, serial, MAC or GPU UUID). --hosted kubernetes marks it for bcd as a DaemonSet (deploy/kubernetes): the cluster's admins have root on its machines, so they join tenant-controlled unless the pool's policy.kubernetes.platformOperated is true. The token is printed once and never again: with --out it goes to a new file (0600, never overwritten) instead of the output, to hand to the server out of band (the install script reads BCD_JOIN_TOKEN or stdin). Decided as compute:join-tokens:create.",
     target: 'token',
     flags: {
       tenant: tenantFlag,
@@ -272,6 +272,13 @@ export const nodeCommands = [
       'allow-reclaim': {
         type: 'boolean',
         description: 'May re-admit a machine the pool already knew',
+      },
+      hosted: {
+        type: 'string',
+        value: 'WHERE',
+        choices: ['kubernetes'],
+        description:
+          'For bcd as a DaemonSet on a Kubernetes cluster: its nodes join tenant-controlled unless the pool says the platform operates the cluster',
       },
       'expect-product-uuid': {
         type: 'string',
@@ -307,6 +314,7 @@ export const nodeCommands = [
     examples: [
       'better-compute join-tokens create --pool h100-eu --ttl 2h --max-uses 8 --out ./join-token',
       'better-compute join-tokens create --pool h100-eu --ttl 30m --expect-serial SN12345',
+      'better-compute join-tokens create --pool k8s-gpu --ttl 2h --max-uses 16 --hosted kubernetes --out ./join-token',
     ],
     async run({ flags, path, api, note }) {
       let ttlMs: number;
@@ -332,6 +340,7 @@ export const nodeCommands = [
         ttlSeconds,
         ...(flags['max-uses'] !== undefined ? { maxUses: flags['max-uses'] } : {}),
         ...(flags['allow-reclaim'] ? { allowReclaim: true } : {}),
+        ...(flags.hosted ? { hosted: flags.hosted } : {}),
         ...(Object.keys(expect).length ? { expect } : {}),
         idempotencyKey: flags.key ?? newIdempotencyKey(),
       });

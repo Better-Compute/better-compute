@@ -50,6 +50,27 @@ const create = (input: object, token = USER) =>
     ...input,
   });
 
+describe('joinTokens.create hosted', () => {
+  it('records a Kubernetes-hosted token, shows it, and counts it in a replay', async () => {
+    const created = await create({ idempotencyKey: 'k8s-1', hosted: 'kubernetes', maxUses: 4 });
+    expect(created).toMatchObject({ hosted: 'kubernetes', usesLeft: 4 });
+    const { rows } = await h.store.query<{ hosted: string | null }>(
+      'SELECT hosted FROM join_tokens WHERE id = $1',
+      [created.id],
+    );
+    expect(rows[0]?.hosted).toBe('kubernetes');
+    // The same key without hosted is another request.
+    await expect(create({ idempotencyKey: 'k8s-1', maxUses: 4 })).rejects.toMatchObject({
+      code: 'CONFLICT',
+    });
+    await expect(create({ idempotencyKey: 'k8s-2', hosted: 'docker' })).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+    const plain = await create({ idempotencyKey: 'plain-1' });
+    expect(plain.hosted).toBeUndefined();
+  });
+});
+
 describe('joinTokens.create', () => {
   it('mints a token once, stores only the secret hash, and decides on the pool', async () => {
     const created = await create({

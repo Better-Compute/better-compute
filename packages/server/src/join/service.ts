@@ -508,8 +508,8 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
 
       const token = result.tokenId
         ? (
-            await tx.query<{ expect: unknown; allow_reclaim: boolean }>(
-              'SELECT expect, allow_reclaim FROM join_tokens WHERE id = $1',
+            await tx.query<{ expect: unknown; allow_reclaim: boolean; hosted: string | null }>(
+              'SELECT expect, allow_reclaim, hosted FROM join_tokens WHERE id = $1',
               [result.tokenId],
             )
           ).rows[0]
@@ -544,8 +544,17 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
       const ownerTenantId = pool?.owner_tenant_id ?? result.tenantId;
       const nodeRole: NodeRole =
         role === 'site' ? 'site' : pool ? (roleOfClass[pool.class] ?? 'unassigned') : 'unassigned';
-      const trust: NodeTrust =
+      let trust: NodeTrust =
         result.trust ?? (site.kind === 'custom' ? 'tenant-owned' : 'platform');
+      // A token minted for bcd hosted on a Kubernetes cluster (the DaemonSet): that cluster's admins
+      // run privileged pods on the machine, so it is tenant-controlled unless the pool says the
+      // platform operates the cluster. The token decides, never the node's claims, and this only
+      // ever lowers platform trust.
+      const policyOf = typeof pool?.policy === 'string' ? JSON.parse(pool.policy) : pool?.policy;
+      const hostedElsewhere =
+        token?.hosted === 'kubernetes' &&
+        (policyOf as PoolPolicy | null | undefined)?.kubernetes?.platformOperated !== true;
+      if (hostedElsewhere && trust === 'platform') trust = 'tenant-controlled';
 
       // Reclaim (§3.3 step 4): a trusted key already enrolled, proven again with a new node key.
       let existing: ExistingNode | undefined;
@@ -590,6 +599,11 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
           nodeId,
           identityGen,
         ]);
+        if (hostedElsewhere && existing.trust === 'platform') {
+          // Reclaimed from inside someone else's cluster: the same lowering as a new node.
+          await tx.query(`UPDATE nodes SET trust = 'tenant-controlled' WHERE id = $1`, [nodeId]);
+          existing.trust = 'tenant-controlled';
+        }
         const { rows } = await tx.query<{ serial: string }>(
           `UPDATE node_certs SET revoked_at = compute_now(), revocation_reason = 'reclaimed'
             WHERE node_id = $1 AND revoked_at IS NULL RETURNING serial`,
@@ -637,11 +651,10 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
         );
         // A pool without acceptance checks (and a site agent) adopts at once; with checks the node
         // is still disconnected, so a pass now would do nothing: its first Hello wakes it.
-        const policy = typeof pool?.policy === 'string' ? JSON.parse(pool.policy) : pool?.policy;
         const checks = acceptanceChecks({
           role: nodeRole,
           pool_id: pool?.id ?? null,
-          policy: (policy ?? null) as PoolPolicy | null,
+          policy: (policyOf ?? null) as PoolPolicy | null,
         });
         if (checks.length === 0) await work.enqueue(tx, nodeWorkKind, nodeId);
       }
