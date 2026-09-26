@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useMemo, useState } from 'react';
 import { RiAddLine, RiArrowRightUpLine, RiBarChartBoxLine, RiCalendarScheduleLine, RiFileTextLine, RiLightbulbFlashLine, RiLineChartLine, RiTimerLine } from 'react-icons/ri';
 import { HourDrawer } from '../hour-drawer';
+import { Holders, UpcomingList } from '../upcoming';
 import { InsightList } from '../insights';
 import { ButtonLink } from '@/components/base/buttons/button';
 import { Legend, Sparkline, StackedBar, TimeSeriesChart } from '@/components/ui/charts';
@@ -139,19 +140,6 @@ export function CapacityOverviewPage() {
   );
 
   const poolIds = useMemo(() => new Set(rows.map((row) => row.id)), [rows]);
-  const upcoming = useMemo(() => {
-    const until = snapshot.now + 6 * HOUR;
-    const events: { t: number; kind: 'start' | 'end'; id: string; tenantId: string; poolId: string; gpus: number; state: (typeof snapshot.reservations)[number]['state'] }[] = [];
-    for (const reservation of snapshot.reservations) {
-      if (!reservation.during || !poolIds.has(reservation.poolId)) continue;
-      if (reservation.state === 'placed' && reservation.during.start > snapshot.now && reservation.during.start <= until)
-        events.push({ t: reservation.during.start, kind: 'start', id: reservation.id, tenantId: reservation.tenantId, poolId: reservation.poolId, gpus: reservationGpus(reservation), state: reservation.state });
-      if ((reservation.state === 'active' || reservation.state === 'binding') && reservation.during.end > snapshot.now && reservation.during.end <= until)
-        events.push({ t: reservation.during.end, kind: 'end', id: reservation.id, tenantId: reservation.tenantId, poolId: reservation.poolId, gpus: reservationGpus(reservation), state: reservation.state });
-    }
-    return events.sort((a, b) => a.t - b.t);
-  }, [snapshot, poolIds]);
-
   const alerts = useMemo(
     () =>
       quotaCells(snapshot.quotas)
@@ -160,16 +148,6 @@ export function CapacityOverviewPage() {
         .slice(0, 8),
     [snapshot, poolIds],
   );
-
-  const consumers = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const reservation of snapshot.reservations) {
-      if (!poolIds.has(reservation.poolId)) continue;
-      if (reservation.state !== 'active' && reservation.state !== 'binding') continue;
-      map.set(reservation.tenantId, (map.get(reservation.tenantId) ?? 0) + reservationGpus(reservation));
-    }
-    return [...map].sort((a, b) => b[1] - a[1]);
-  }, [snapshot, poolIds]);
 
   const spend30 = useMemo(
     () => snapshot.usage.filter((window) => poolIds.has(window.tags.poolId ?? '')).reduce((total, window) => total + costOf(window, snapshot.prices), 0),
@@ -357,28 +335,8 @@ export function CapacityOverviewPage() {
 
         <RunwayPanel rows={gpuRows} />
 
-        <Panel className="col-span-12 lg:col-span-6" title="Next 6 hours" meta={`${upcoming.length} changes`} flush>
-          {upcoming.length ? (
-            <ul className="max-h-[340px] overflow-y-auto">
-              {upcoming.slice(0, 40).map((event) => (
-                <li key={`${event.id}:${event.kind}`} className="flex items-center gap-3 border-b border-separator-border px-3 py-1.5 last:border-0">
-                  <span className="w-14 shrink-0 font-mono text-[11px] tabular-nums text-text-tertiary">{fmtRelative(event.t, snapshot.now)}</span>
-                  <Tag status={event.kind === 'start' ? 'pending' : 'ok'} className="w-14 justify-center">
-                    {event.kind === 'start' ? 'starts' : 'ends'}
-                  </Tag>
-                  <Link href={`/reservations?id=${event.id}`} className="min-w-0 truncate">
-                    <Mono>{event.id}</Mono>
-                  </Link>
-                  <span className="min-w-0 flex-1 truncate text-caption-1-regular text-text-secondary">
-                    {tenantName(event.tenantId)} · {event.poolId}
-                  </span>
-                  <span className="shrink-0 font-mono text-[12px] tabular-nums">{event.gpus} GPU</span>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <EmptyState title="Nothing starts or ends in the next 6 hours" />
-          )}
+        <Panel className="col-span-12 lg:col-span-6" title="Next 6 hours" meta="starts and ends" flush bodyClassName="max-h-[340px] overflow-y-auto">
+          <UpcomingList hours={6} />
         </Panel>
 
         <Panel
@@ -412,18 +370,8 @@ export function CapacityOverviewPage() {
           )}
         </Panel>
 
-        <Panel className="col-span-12 lg:col-span-6" title="Who holds GPUs now" meta={`${consumers.length} tenants`}>
-          <ul className="flex flex-col gap-2.5">
-            {consumers.map(([tenantId, gpus]) => (
-              <li key={tenantId} className="grid grid-cols-[9rem_1fr_4rem] items-center gap-3">
-                <span className="truncate text-caption-1-medium text-text-primary">{tenantName(tenantId)}</span>
-                <div className="h-2 bg-background-secondary-default">
-                  <div className="h-full bg-signal-fill" style={{ width: `${(gpus / (consumers[0]?.[1] || 1)) * 100}%` }} />
-                </div>
-                <span className="text-right font-mono text-[12px] tabular-nums">{fmtNum(gpus)}</span>
-              </li>
-            ))}
-          </ul>
+        <Panel className="col-span-12 lg:col-span-6" title="Who holds GPUs now">
+          <Holders limit={12} />
           <p className="mt-3 text-caption-1-regular text-text-tertiary">
             GPUs of active reservations. <StateTag state="active" className="ml-1" />
           </p>

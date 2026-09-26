@@ -27,6 +27,7 @@ import { ReservationDrawer } from '../reservation-drawer';
 import { ReservationsTable } from '../reservations-table';
 import { heatFill, HeatLegend, Segmented, utcDay } from '../ui';
 import { Term } from '../term';
+import { Holders, UpcomingList } from '../upcoming';
 import { FlavorList } from './flavors';
 import { classLabel } from './pools';
 
@@ -257,6 +258,16 @@ export function PoolDetailPage({ poolId }: { poolId: string }) {
                 atom booked now and later counts twice.
               </p>
             </Panel>
+            {row.unit === 'gpu' && (
+              <>
+                <Panel className="col-span-12 lg:col-span-5" title="Holding GPUs now">
+                  <Holders poolId={poolId} />
+                </Panel>
+                <Panel className="col-span-12 lg:col-span-7" title="Next 12 hours" meta="starts and ends in this pool" flush bodyClassName="max-h-[300px] overflow-y-auto">
+                  <UpcomingList poolId={poolId} hours={12} />
+                </Panel>
+              </>
+            )}
             {row.unit === 'gpu' && calendarTimeline && (
               <Panel className="col-span-12" title="This week, hour by hour" meta="UTC">
                 <BookingCalendar timeline={calendarTimeline} now={snapshot.now} />

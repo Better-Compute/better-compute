@@ -16,6 +16,7 @@ import { DAY, HOUR, useHourWindow, usePoolRows, useTenantName, useTimelines } fr
 import { CapacityHeatmap } from './heatmap';
 import { InsightList } from './insights';
 import { SpotList } from './spot';
+import { UpcomingList } from './upcoming';
 import { byModel, costOf, dailySpend, fleetSeries, fleetTotals, heatMatrix, pressure, quotaCells, rollup } from './model';
 import { planHref, Segmented } from './ui';
 
@@ -173,42 +174,13 @@ export function ModelsWidget() {
 }
 
 export function UpcomingWidget({ size, settings }: WidgetProps) {
-  const { snapshot, rows } = usePoolRows();
-  const tenantName = useTenantName();
-  const inScope = useMemo(() => new Set(rows.map((row) => row.id)), [rows]);
-  const horizon = Number(settings.horizon ?? 12);
-  const show = String(settings.show ?? 'both');
-  const minGpus = Number(settings.minGpus ?? 1);
-  const events = useMemo(() => {
-    const until = snapshot.now + horizon * HOUR;
-    const list: { t: number; kind: 'starts' | 'ends'; id: string; tenantId: string; gpus: number; poolId: string }[] = [];
-    for (const r of snapshot.reservations) {
-      if (!r.during || !inScope.has(r.poolId) || reservationGpus(r) < minGpus) continue;
-      if (show !== 'ends' && r.state === 'placed' && r.during.start > snapshot.now && r.during.start < until) list.push({ t: r.during.start, kind: 'starts', id: r.id, tenantId: r.tenantId, gpus: reservationGpus(r), poolId: r.poolId });
-      if (show !== 'starts' && r.state === 'active' && r.during.end > snapshot.now && r.during.end < until) list.push({ t: r.during.end, kind: 'ends', id: r.id, tenantId: r.tenantId, gpus: reservationGpus(r), poolId: r.poolId });
-    }
-    return list.sort((a, b) => a.t - b.t);
-  }, [snapshot, inScope, horizon, show, minGpus]);
-  const fit = Math.max(3, Math.floor(bodyHeight(size.h) / 28));
-  if (!events.length) return <EmptyState title={`Nothing ${show === 'both' ? 'starts or ends' : show} in ${horizon} h`} />;
+  const show = String(settings.show ?? 'both') as 'both' | 'starts' | 'ends';
   return (
-    <ul>
-      {events.slice(0, fit).map((event) => (
-        <li key={`${event.id}:${event.kind}`} className="flex items-center gap-2 border-b border-separator-border py-1 last:border-0">
-          <span className="w-12 shrink-0 font-mono text-[11px] tabular-nums text-text-tertiary">{fmtRelative(event.t, snapshot.now)}</span>
-          <Tag status={event.kind === 'starts' ? 'pending' : 'ok'} led={event.kind === 'starts'}>
-            {event.kind}
-          </Tag>
-          <Link href={`/reservations?id=${event.id}`} className="min-w-0 flex-1 truncate text-caption-1-regular hover:underline">
-            {tenantName(event.tenantId)} <span className="font-mono text-[10px] text-text-tertiary">{event.poolId}</span>
-          </Link>
-          <span className="font-mono text-[11px] tabular-nums">{event.gpus}</span>
-        </li>
-      ))}
-    </ul>
+    <div className="-m-3">
+      <UpcomingList hours={Number(settings.horizon ?? 12)} show={show} minGpus={Number(settings.minGpus ?? 1)} limit={Math.max(3, Math.floor(bodyHeight(size.h) / 30))} />
+    </div>
   );
 }
-
 export function QuotaAlertsWidget({ size, settings }: WidgetProps) {
   const { snapshot, rows } = usePoolRows();
   const tenantName = useTenantName();
