@@ -121,6 +121,14 @@ Assigned since: agent-memory volumes, with the control plane (vps sandboxVolumes
 - [d320b8]: signed intent for helper host.unit (root-owned command_signing_root_sha256 pin, out-of-band), a periodic drift pass, and the hugepages fstab.
 - [6baab5]: DRA driver (gpu.bcd.dev).
 
+Round-5 security review (subagent over a760805..HEAD; 2 HIGH, 7 MED, 3 LOW):
+- H1 [helper] + libvirt group = root: [06192c] runtime + [d320b8] helper domain.* ops (open; docs caveat meanwhile).
+- H2 hosted-mode GPU exposure: 9f860ad ForeignGpuExposure, d6f8549 README/annotation, 3341e50 manifests.
+- M3 kube release: 9f860ad + 14111c1; deferred AllocationReleased by [06192c] (open).
+- M4: 9f860ad (bcd), e4d14cd (platformOperated). M5/M6: 0eba0ad. M7/M8: 41826a2. M9: 3341e50, 9f860ad.
+- L10: 03c023d, a894cd2. L11: c1fd430 (+ gateway takeover and metal/vps readers asked). L12: 3f73449.
+- Pin rule for `kubernetes manifest`: d2cd813.
+
 E landed ([6baab5]):
 - GPUs and health: cb987e5 nvidia-smi backend (+5026330 NVLink peers); 662fb55 diag.nvml, XID rescans, reset clears XIDs; 6f5a99f unhealthy GPUs never offered.
 - Kubernetes: 88ecb07/7579184 k8s-join + device plugin + reaper; 1e5f96b hosted mode; 7d24836/fa8611e DRA; 9f860ad/3f73449 review-5 fixes (ids <atom>@<alloc>, ForeignGpuExposure, RequireAllowed, DRA adminAccess/claim map); 028b81c release cordon/drain; 6ef198b taints only at registration (KubernetesTaintsDrift); 14111c1 InUse/Freed (with [06192c]'s cd5fc82).
