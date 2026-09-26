@@ -28,7 +28,7 @@ type LibvirtRequest struct {
 	XML []byte `json:"xml,omitempty"`
 	// Target is a disk's target device (vda, vdz: blockresize, attach-disk, detach-disk).
 	Target string `json:"target,omitempty"`
-	// Bytes is blockresize's new size.
+	// Bytes is blockresize's new size, and setmem's (what the guest's balloon leaves it).
 	Bytes uint64 `json:"bytes,omitempty"`
 	// File is a node-owned file: attach-disk's disk, restore's memory state, save's destination.
 	File string `json:"file,omitempty"`
@@ -104,6 +104,14 @@ func (s *Server) libvirt(ctx context.Context, verb string, req *LibvirtRequest) 
 			return errors.New("blockresize: a vdX target and a size")
 		}
 		_, err := s.Virsh(ctx, "blockresize", req.Domain, req.Target, strconv.FormatUint(req.Bytes, 10)+"B")
+		return err
+	case verb == "setmem":
+		// The balloon: libvirt caps it at the domain's memory; below that it only squeezes the node's
+		// own guest, which the node may stop anyway.
+		if req.Bytes < 1<<20 {
+			return errors.New("setmem: a size of at least 1 MiB")
+		}
+		_, err := s.Virsh(ctx, "setmem", req.Domain, strconv.FormatUint(req.Bytes/1024, 10), "--live")
 		return err
 	case verb == "attach-disk":
 		if req.Target != "vdz" {

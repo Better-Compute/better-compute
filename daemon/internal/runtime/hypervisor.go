@@ -15,7 +15,7 @@ import (
 // write access to qemu:///system, only its read-only socket (virsh -r) for reads.
 type Hypervisor interface {
 	// Libvirt runs one operation: define {XML}; start, shutdown, destroy, suspend, resume, undefine
-	// {Domain}; blockresize {Domain, Target, Bytes}; attach-disk, detach-disk {Domain, Target vdz,
+	// {Domain}; blockresize {Domain, Target, Bytes}; setmem {Domain, Bytes} (the balloon); attach-disk, detach-disk {Domain, Target vdz,
 	// File}; save {Domain, File}; restore {Domain, File, XML?}.
 	Libvirt(ctx context.Context, verb string, op LibvirtOp) error
 	// Console opens a domain's serial console pty.
@@ -34,7 +34,7 @@ type LibvirtOp struct {
 }
 
 // readOnlyVerbs run on libvirt's read-only socket under a Hypervisor.
-var readOnlyVerbs = map[string]bool{"list": true, "domstate": true, "dumpxml": true}
+var readOnlyVerbs = map[string]bool{"list": true, "domstate": true, "dumpxml": true, "domstats": true}
 
 // privileged turns a virsh invocation into the Hypervisor's operation. Under a Hypervisor nothing
 // writes through qemu:///system directly: an operation it does not know is refused.
@@ -76,6 +76,16 @@ func (l *Libvirt) privileged(ctx context.Context, args []string) ([]byte, error)
 			return nil, err
 		}
 		op.Target, op.Bytes = rest[1], n
+		return nil, l.Hypervisor.Libvirt(ctx, verb, op)
+	case "setmem": // setmem <id> <KiB> --live
+		if len(rest) < 2 {
+			return nil, fmt.Errorf("virsh setmem %v", rest)
+		}
+		kib, err := strconv.ParseUint(rest[1], 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		op.Bytes = kib * 1024
 		return nil, l.Hypervisor.Libvirt(ctx, verb, op)
 	case "attach-disk": // attach-disk <id> <file> vdz ...
 		if len(rest) < 3 {

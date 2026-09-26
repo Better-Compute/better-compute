@@ -93,6 +93,16 @@ func TestHelperLibvirt(t *testing.T) {
 	if err := op("blockresize", LibvirtRequest{Domain: "inst_01k5w0000000000000000000ab", Target: "sda", Bytes: 1}); err == nil {
 		t.Fatal("a non-virtio target was resized")
 	}
+	// The balloon: live, in KiB, on bcd's own domains only.
+	if err := op("setmem", LibvirtRequest{Domain: "inst_01k5w0000000000000000000ab", Bytes: 3 << 30}); err != nil || fake.calls[len(fake.calls)-1] != "setmem inst_01k5w0000000000000000000ab 3145728 --live" {
+		t.Fatalf("setmem: %v %q", err, fake.calls[len(fake.calls)-1])
+	}
+	if err := op("setmem", LibvirtRequest{Domain: "legacy-vm", Bytes: 1 << 30}); err == nil {
+		t.Fatal("a foreign domain's balloon was resized")
+	}
+	if err := op("setmem", LibvirtRequest{Domain: "inst_01k5w0000000000000000000ab"}); err == nil {
+		t.Fatal("setmem without a size")
+	}
 	if err := op("attach-disk", LibvirtRequest{Domain: "inst_01k5w0000000000000000000ab", Target: "vdz", File: "/etc/shadow"}); err == nil {
 		t.Fatal("a disk outside bcd's directories was attached")
 	}

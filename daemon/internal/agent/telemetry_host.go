@@ -19,24 +19,7 @@ import (
 func (a *Agent) hostMemoryMetrics() []telemetry.Metric {
 	var out []telemetry.Metric
 	i64 := func(v uint64) *int64 { n := int64(v); return &n }
-	if b, err := os.ReadFile(a.host.Path("/proc/meminfo")); err == nil {
-		fields := map[string]uint64{}
-		for _, line := range strings.Split(string(b), "\n") {
-			key, rest, ok := strings.Cut(line, ":")
-			if !ok {
-				continue
-			}
-			f := strings.Fields(rest)
-			if len(f) == 0 {
-				continue
-			}
-			if n, err := strconv.ParseUint(f[0], 10, 64); err == nil {
-				if len(f) > 1 && f[1] == "kB" {
-					n *= 1024
-				}
-				fields[key] = n
-			}
-		}
+	if fields, err := a.meminfo(); err == nil {
 		for _, m := range []struct{ name, key string }{
 			{"bcd.host.memory.total", "MemTotal"},
 			{"bcd.host.memory.available", "MemAvailable"},
@@ -89,6 +72,32 @@ func (a *Agent) hostMemoryMetrics() []telemetry.Metric {
 	return out
 }
 
+// meminfo reads the host's /proc/meminfo, in bytes.
+func (a *Agent) meminfo() (map[string]uint64, error) {
+	b, err := os.ReadFile(a.host.Path("/proc/meminfo"))
+	if err != nil {
+		return nil, err
+	}
+	fields := map[string]uint64{}
+	for _, line := range strings.Split(string(b), "\n") {
+		key, rest, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		f := strings.Fields(rest)
+		if len(f) == 0 {
+			continue
+		}
+		if n, err := strconv.ParseUint(f[0], 10, 64); err == nil {
+			if len(f) > 1 && f[1] == "kB" {
+				n *= 1024
+			}
+			fields[key] = n
+		}
+	}
+	return fields, nil
+}
+
 func sortedKeys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -103,6 +112,7 @@ func sortedKeys[V any](m map[string]V) []string {
 //	bcd.instances             count, by runtime and state
 //	bcd.instance.vcpu         configured vCPUs, by instance.id and runtime
 //	bcd.instance.memory       configured memory bytes, by instance.id, runtime and hugepages
+//	bcd.instance.memory.balloon  what a ballooned guest's balloon leaves it, by instance.id, runtime
 func (a *Agent) instanceMetrics(ctx context.Context) []telemetry.Metric {
 	if len(a.o.Runtimes) == 0 {
 		return nil
@@ -117,6 +127,7 @@ func (a *Agent) instanceMetrics(ctx context.Context) []telemetry.Metric {
 	ioWrite := telemetry.Metric{Name: "bcd.instance.io.write", Unit: "By", Sum: true}
 	netRx := telemetry.Metric{Name: "bcd.instance.network.receive", Unit: "By", Sum: true}
 	netTx := telemetry.Metric{Name: "bcd.instance.network.transmit", Unit: "By", Sum: true}
+	balloon := telemetry.Metric{Name: "bcd.instance.memory.balloon", Unit: "By"}
 	for _, r := range a.o.Runtimes {
 		domains, err := r.List(ctx)
 		if err != nil {
@@ -140,6 +151,14 @@ func (a *Agent) instanceMetrics(ctx context.Context) []telemetry.Metric {
 				}
 			}
 		}
+		if b, ok := r.(runtime.Ballooner); ok {
+			if sizes, err := b.Balloons(ctx); err == nil {
+				for _, id := range sortedKeys(sizes) {
+					v := int64(sizes[id])
+					balloon.Points = append(balloon.Points, telemetry.Point{Attrs: map[string]string{"instance.id": id, "runtime": r.Name()}, Int: &v})
+				}
+			}
+		}
 		for _, d := range domains {
 			counts[[2]string{r.Name(), d.State}]++
 			attrs := map[string]string{"instance.id": d.ID, "runtime": r.Name(), "managed": strconv.FormatBool(d.Managed)}
@@ -160,7 +179,7 @@ func (a *Agent) instanceMetrics(ctx context.Context) []telemetry.Metric {
 		instances.Points = append(instances.Points, telemetry.Point{Attrs: map[string]string{"runtime": k[0], "state": k[1]}, Int: &n})
 	}
 	var out []telemetry.Metric
-	for _, m := range []telemetry.Metric{instances, vcpu, memory, cpuTime, memUsed, ioRead, ioWrite, netRx, netTx} {
+	for _, m := range []telemetry.Metric{instances, vcpu, memory, balloon, cpuTime, memUsed, ioRead, ioWrite, netRx, netTx} {
 		if len(m.Points) > 0 {
 			out = append(out, m)
 		}

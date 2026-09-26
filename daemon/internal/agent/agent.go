@@ -124,6 +124,9 @@ type Options struct {
 	// KubernetesGPUAPI is how a hosted node offers its GPUs ([kubernetes] gpu_api: kube.APIDevicePlugin
 	// or kube.APIDRA); a node k8s-join joined follows its unit's gpuApi.
 	KubernetesGPUAPI string
+	// BalloonFloor is the share of its memory a ballooned guest always keeps ([instances]
+	// balloon_floor_percent; 0: half).
+	BalloonFloor float64
 }
 
 // Agent is the node agent.
@@ -403,6 +406,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.inventoryLoop(ctx)
 	if len(a.o.Runtimes) > 0 {
 		go a.firewallLoop(ctx)
+		go a.balloonLoop(ctx)
 	}
 	if a.o.Renewer != nil {
 		go a.renewLoop(ctx)

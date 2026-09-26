@@ -168,6 +168,9 @@ strings, integers and booleans. Unknown keys, duplicate keys and wrong types are
 | `[websocket] url`, `proxy_ca_file`, `audience` | unset (gRPC only); a `wss://` URL moves the session and renewals to the WebSocket fallback |
 | `[plugins] dir`, `user`, `privileged`, `sandbox`, `cgroup`, `memory_max`, `pids_max` | no plugins; per-plugin uids, none, `true` |
 | `[imds] listen` | unset (VPS hosts: the metadata service's address) |
+| `[instances] balloon_floor_percent` | 50 (10–100): the share of its memory a ballooned guest always keeps; bcd inflates balloons only while the host is short of memory or stalls on it (PSI), idle guests first, and never below the floor or the guest's use plus 10% |
+| `[kubernetes] allowed_clusters`, `gpu_api` | none (k8s-join refused under bcd helper), `device-plugin` |
+| `[host] units` | `true`; `false` when the GPU operator (or another tool) owns the host's configuration |
 | `[boot] listen`, `url`, `kernel`, `initrd`, `cmdline`, `server_ip`, `proxy_dhcp`, `tftp`, `tftp_root`, `cache_max_bytes` | site agents only |
 
 Files the daemon owns:
@@ -273,7 +276,7 @@ is logged. Every directory on the way to the socket, the slots and the entrypoin
 and closed to others (`bcd doctor` checks it), neither the slots nor the entrypoint may live in
 `data_dir`, and the helper adopts into a slot only a root-owned entrypoint no one else can write.
 Instance runtimes under the helper: libvirt-kvm's privileged operations (`define`, `start`,
-`shutdown`, `destroy`, `suspend`, `resume`, `undefine`, `blockresize`, the rebind disk's
+`shutdown`, `destroy`, `suspend`, `resume`, `undefine`, `blockresize`, the balloon's `setmem`, the rebind disk's
 `attach-disk`/`detach-disk`, memory `save`/`restore`, and the console pty) go through the helper's
 `libvirt.*` ops (`runtime.Hypervisor`). Root validates every domain definition against an allowlist:
 - disks only under bcd's instance, image and volume directories, with the overlays re-checked;

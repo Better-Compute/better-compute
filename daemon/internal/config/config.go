@@ -143,6 +143,10 @@ type Config struct {
 	// to the kubelet ([kubernetes] gpu_api): "device-plugin" (default) or "dra".
 	KubernetesGPUAPI string
 
+	// BalloonFloorPercent is the share of its memory a ballooned guest always keeps ([instances]
+	// balloon_floor_percent, 10–100; default 50): bcd never inflates a balloon past it.
+	BalloonFloorPercent int64
+
 	// ExternalHost is [host] units = false: the host's configuration (driver, container toolkit, MIG,
 	// hugepages, kernel parameters) is managed outside bcd, e.g. by the NVIDIA GPU operator when bcd
 	// runs as a Kubernetes DaemonSet. bcd then applies no NodeSpec.host unit and reports the section
@@ -324,12 +328,13 @@ type Log struct {
 // Defaults returns the configuration before the file is applied.
 func Defaults() *Config {
 	return &Config{
-		DataDir:    DefaultDataDir,
-		SocketPath: DefaultSocketPath,
-		Journal:    Journal{MaxBytes: journal.DefaultMaxBytes, MaxEvents: journal.DefaultMaxEvents},
-		Log:        Log{Level: "info", JSON: true},
-		Plugins:    Plugins{Sandbox: true},
-		Update:     Update{ReleaseThreshold: 1, Entrypoint: "/usr/local/bin/bcd"},
+		DataDir:             DefaultDataDir,
+		SocketPath:          DefaultSocketPath,
+		Journal:             Journal{MaxBytes: journal.DefaultMaxBytes, MaxEvents: journal.DefaultMaxEvents},
+		Log:                 Log{Level: "info", JSON: true},
+		Plugins:             Plugins{Sandbox: true},
+		Update:              Update{ReleaseThreshold: 1, Entrypoint: "/usr/local/bin/bcd"},
+		BalloonFloorPercent: 50,
 	}
 }
 
@@ -501,6 +506,9 @@ func (c *Config) Validate() error {
 	if !path.IsAbs(c.Update.Entrypoint) {
 		return fmt.Errorf("update.entrypoint must be an absolute path, got %q", c.Update.Entrypoint)
 	}
+	if c.BalloonFloorPercent < 10 || c.BalloonFloorPercent > 100 {
+		return fmt.Errorf("instances.balloon_floor_percent must be between 10 and 100, got %d", c.BalloonFloorPercent)
+	}
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":
 	default:
@@ -619,6 +627,7 @@ var fields = []field{
 	{section: "imds", key: "listen", kind: kindString, set: func(c *Config, v value) { c.IMDSListen = v.str }},
 	{section: "kubernetes", key: "allowed_clusters", kind: kindString, set: func(c *Config, v value) { c.KubernetesAllowedClusters = v.str }},
 	{section: "kubernetes", key: "gpu_api", kind: kindString, set: func(c *Config, v value) { c.KubernetesGPUAPI = v.str }},
+	{section: "instances", key: "balloon_floor_percent", kind: kindInt, set: func(c *Config, v value) { c.BalloonFloorPercent = v.num }},
 	{section: "host", key: "units", kind: kindBool, set: func(c *Config, v value) { c.ExternalHost = !v.boolean }},
 	{section: "boot", key: "listen", kind: kindString, set: func(c *Config, v value) { c.Boot.Listen = v.str }},
 	{section: "boot", key: "kernel", kind: kindString, set: func(c *Config, v value) { c.Boot.Kernel = v.str }},
