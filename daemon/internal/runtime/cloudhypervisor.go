@@ -66,6 +66,15 @@ type CloudHypervisor struct {
 	VFIO VFIOBinder
 	// Volumes is the host's volume store (volumes.go); nil: instances with volumes are refused.
 	Volumes *Volumes
+	// Privileged, for an unprivileged bcd node (under [helper]): the taps, VFIO and the VMM unit go
+	// through it (bcd helper's ch.* ops, root building the unit from the record it checks itself),
+	// and the node keeps owning every file, letting each VMM's user at its instance's with ACLs.
+	// nil: bcd is root and does it all itself.
+	Privileged CHPrivileged
+	// NodeUID is the node's user under Privileged (default os.Getuid()).
+	NodeUID int
+	// rootShared: root's side of the helper's file model (CHLaunch builds the shared unit).
+	rootShared bool
 	// HTTP downloads base images (https only).
 	HTTP *http.Client
 	// ShutdownTimeout bounds a graceful (ACPI) shutdown before the VM is stopped (default 60 s).
@@ -109,6 +118,9 @@ type chRecord struct {
 	GivenVolumes []string         `json:"givenVolumes,omitempty"`
 	// GivenReadOnly are the read-only volumes the running VMM's user was let read (an ACL entry).
 	GivenReadOnly []string `json:"givenReadOnly,omitempty"`
+	// StartedNICs is how many taps the running VM was started with (its NICs may have been
+	// dropped since): the taps a stop deletes by name.
+	StartedNICs int `json:"startedNics,omitempty"`
 	// StartedVolumes are the volumes the running VM was started with, in disk order (vol<i>).
 	StartedVolumes []AttachedVolume `json:"startedVolumes,omitempty"`
 	// FromSnapshot: the running VM was restored from its memory snapshot, on normal pages (a saved
@@ -508,7 +520,7 @@ func (c *CloudHypervisor) unitProperties(r *chRecord) []string {
 		"ProtectSystem=strict", "ProtectHome=yes", "PrivateTmp=yes", "ProtectProc=invisible",
 		"ProtectKernelTunables=yes", "ProtectKernelModules=yes", "ProtectKernelLogs=yes", "ProtectControlGroups=yes",
 		"ProtectClock=yes", "ProtectHostname=yes", "RestrictSUIDSGID=yes", "RestrictRealtime=yes", "RestrictNamespaces=yes",
-		"LockPersonality=yes", "UMask=0077",
+		"LockPersonality=yes", "UMask=" + c.umask(),
 		"SystemCallFilter=~@debug @mount @reboot @swap @module @raw-io @clock @cpu-emulation @obsolete",
 		"TemporaryFileSystem=/run:ro", "TemporaryFileSystem=/var:ro",
 		"InaccessiblePaths=-/etc/bcd -/etc/ssh -/etc/libvirt -/etc/shadow -/etc/gshadow",
@@ -566,6 +578,33 @@ func chMemoryMax(r *chRecord) uint64 {
 	return r.MemoryBytes + overhead
 }
 
+// launchArgs are systemd-run's arguments for the instance's VMM unit.
+func (c *CloudHypervisor) launchArgs(r *chRecord) []string {
+	binary := c.Binary
+	if binary == "" {
+		binary = "cloud-hypervisor"
+	}
+	args := []string{"--unit=" + unitName(r.ID), "--collect", "--quiet", "--slice=bcd-instances.slice"}
+	for _, p := range c.unitProperties(r) {
+		args = append(args, "-p", p)
+	}
+	return append(args, "--", binary, "--api-socket", "path="+c.socket(r.ID))
+}
+
+// umask is the VMM unit's: nothing for anyone else, and, when the node shares its files with the
+// VMM through ACLs (under the helper), group bits too, so what the VMM creates (its API socket,
+// snapshot files) keeps the node's inherited ACL entry effective. The group is the VMM's own.
+func (c *CloudHypervisor) umask() string {
+	if c.shared() {
+		return "0007"
+	}
+	return "0077"
+}
+
+// shared reports the helper's file model: the node owns every file and lets the VMM's user at its
+// instance's through ACLs, instead of root handing the files over.
+func (c *CloudHypervisor) shared() bool { return c.Privileged != nil || c.rootShared }
+
 // launch starts the instance's VMM as a confined transient unit and waits for its API.
 func (c *CloudHypervisor) launch(ctx context.Context, r *chRecord) error {
 	if _, err := c.api(ctx, r.ID, http.MethodGet, "vmm.ping", nil); err == nil {
@@ -576,16 +615,12 @@ func (c *CloudHypervisor) launch(ctx context.Context, r *chRecord) error {
 	if err := os.MkdirAll(filepath.Join(c.Dir, "images"), 0o700); err != nil {
 		return err
 	}
-	binary := c.Binary
-	if binary == "" {
-		binary = "cloud-hypervisor"
-	}
-	args := []string{"--unit=" + unitName(r.ID), "--collect", "--quiet", "--slice=bcd-instances.slice"}
-	for _, p := range c.unitProperties(r) {
-		args = append(args, "-p", p)
-	}
-	args = append(args, "--", binary, "--api-socket", "path="+c.socket(r.ID))
-	if _, err := c.run(ctx, "systemd-run", args...); err != nil {
+	if c.Privileged != nil {
+		// Root builds the unit from the record it checks itself (bcd helper's ch.launch).
+		if err := c.Privileged.Launch(ctx, r.ID); err != nil {
+			return err
+		}
+	} else if _, err := c.run(ctx, "systemd-run", c.launchArgs(r)...); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(10 * time.Second)
@@ -763,21 +798,41 @@ func (c *CloudHypervisor) start(ctx context.Context, r *chRecord, paused bool) e
 	if err := c.checkDisk(r); err != nil {
 		return err
 	}
-	if err := c.taps(ctx, r); err != nil {
-		return err
-	}
-	// Every endpoint of each GPU's IOMMU group on vfio-pci, before its group is handed over.
-	for _, addr := range c.gpuAddresses(r) {
-		if err := c.vfio().Bind(addr); err != nil {
+	r.StartedNICs = len(r.Networks)
+	if c.Privileged != nil {
+		// Root reads the record for what it does: it must be current.
+		if err := c.save(r); err != nil {
 			return err
 		}
-		r.BoundAddrs = union(r.BoundAddrs, []string{addr})
-	}
-	if err := c.giveFiles(r, int(r.UID)); err != nil {
-		return err
-	}
-	if groups, err := c.vfioGroups(r); err == nil {
-		r.GivenGroups = union(r.GivenGroups, groups)
+		if err := c.Privileged.Taps(ctx, r.ID, r.Networks); err != nil {
+			return err
+		}
+		if len(r.GPUs) > 0 {
+			if err := c.Privileged.BindVFIO(ctx, r.ID); err != nil {
+				return err
+			}
+			r.BoundAddrs = union(r.BoundAddrs, c.gpuAddresses(r))
+		}
+		if err := c.grantFiles(r); err != nil {
+			return err
+		}
+	} else {
+		if err := c.taps(ctx, r); err != nil {
+			return err
+		}
+		// Every endpoint of each GPU's IOMMU group on vfio-pci, before its group is handed over.
+		for _, addr := range c.gpuAddresses(r) {
+			if err := c.vfio().Bind(addr); err != nil {
+				return err
+			}
+			r.BoundAddrs = union(r.BoundAddrs, []string{addr})
+		}
+		if err := c.giveFiles(r, int(r.UID)); err != nil {
+			return err
+		}
+		if groups, err := c.vfioGroups(r); err == nil {
+			r.GivenGroups = union(r.GivenGroups, groups)
+		}
 	}
 	// A read-write volume is the VMM user's while it runs (exclusive: the agent never attaches one
 	// read-write beside anything else). A read-only one stays root's, readable by group kvm, which
@@ -785,6 +840,22 @@ func (c *CloudHypervisor) start(ctx context.Context, r *chRecord, paused bool) e
 	// made the way to the volumes searchable.
 	r.StartedVolumes = append([]AttachedVolume(nil), r.Volumes...)
 	for _, v := range r.Volumes {
+		if c.shared() {
+			// The node's file: an ACL entry of the VMM's user, read-write or read-only.
+			perm := uint16(aclRW)
+			if v.ReadOnly {
+				perm = aclRead
+			}
+			if err := aclGrant(v.Path, int(r.UID), perm, false); err != nil {
+				return fmt.Errorf("volume %s: %w", v.ID, err)
+			}
+			if v.ReadOnly {
+				r.GivenReadOnly = union(r.GivenReadOnly, []string{v.Path})
+			} else {
+				r.GivenVolumes = union(r.GivenVolumes, []string{v.Path})
+			}
+			continue
+		}
 		if v.ReadOnly {
 			// Readable by exactly the VMMs that have it open (an ACL entry per VMM user).
 			if err := c.shareReadOnly(v.Path, int(r.UID)); err != nil {
@@ -927,6 +998,28 @@ func (c *CloudHypervisor) stop(ctx context.Context, r *chRecord) error {
 	// Each step may find nothing to do (no VM, no VMM, no unit); only the unit's state decides.
 	_, _ = c.api(ctx, id, http.MethodPut, "vm.shutdown", nil)
 	_, _ = c.api(ctx, id, http.MethodPut, "vmm.shutdown", nil)
+	if c.Privileged != nil {
+		// Root stops the unit (and takes the VFIO devices back), then deletes the taps by name.
+		state, err := c.Privileged.Stop(ctx, id)
+		if err != nil {
+			return fmt.Errorf("the VMM's unit: %w", err)
+		}
+		if state != "inactive" && state != "failed" {
+			return fmt.Errorf("the VMM's unit %s is %q after the stop", unitName(id), state)
+		}
+		if err := c.Privileged.Untaps(ctx, id, startedNICs(r)); err != nil {
+			return err
+		}
+		// The volumes lose the VMM's entry (the instance's own files keep theirs: its user is its).
+		for _, p := range append(append([]string(nil), r.GivenVolumes...), r.GivenReadOnly...) {
+			_ = aclGrant(p, int(r.UID), 0, false)
+		}
+		if len(r.GivenVolumes) > 0 || len(r.GivenReadOnly) > 0 {
+			r.GivenVolumes, r.GivenReadOnly = nil, nil
+			_ = c.save(r)
+		}
+		return nil
+	}
 	_, _ = c.run(ctx, "systemctl", "stop", unitName(id))
 	out, err := c.run(ctx, "systemctl", "show", "--property=ActiveState", "--value", unitName(id))
 	if err != nil {
@@ -1032,8 +1125,12 @@ func (c *CloudHypervisor) Destroy(ctx context.Context, id string) error {
 	}
 	// The GPUs go back to their host driver (best effort: a GPU left on vfio-pci is only unusable
 	// to the host until the next pass or boot).
-	for _, addr := range union(r.BoundAddrs, c.gpuAddresses(r)) {
-		_ = c.vfio().Release(addr)
+	if addrs := union(r.BoundAddrs, c.gpuAddresses(r)); c.Privileged != nil && len(addrs) > 0 {
+		_ = c.Privileged.ReleaseVFIO(ctx, id, addrs)
+	} else {
+		for _, addr := range addrs {
+			_ = c.vfio().Release(addr)
+		}
 	}
 	return os.RemoveAll(c.instanceDir(id))
 }
@@ -1114,10 +1211,10 @@ func (c *CloudHypervisor) Snapshot(ctx context.Context, id string, includeMemory
 			return "", err
 		}
 		// The VMM (its own user) writes its snapshot there.
-		if err := c.chown(work, int(r.UID)); err != nil {
+		if err := c.giveTo(work, int(r.UID)); err != nil {
 			return "", err
 		}
-		if err := c.chown(chDir, int(r.UID)); err != nil {
+		if err := c.giveTo(chDir, int(r.UID)); err != nil {
 			return "", err
 		}
 		if _, err := c.api(ctx, id, http.MethodPut, "vm.snapshot", map[string]any{"destination_url": "file://" + chDir}); err != nil {
@@ -1371,7 +1468,7 @@ func (c *CloudHypervisor) Rebind(ctx context.Context, id string, b Rebind) error
 	scrub(path)
 	err = os.WriteFile(path, img, 0o600)
 	if err == nil {
-		err = c.chown(path, int(r.UID))
+		err = c.giveTo(path, int(r.UID))
 	}
 	if err == nil {
 		_, err = c.api(ctx, id, http.MethodPut, "vm.add-disk", map[string]any{"id": "bcrebind", "path": path, "serial": RebindSerial, "image_type": "Raw"})
