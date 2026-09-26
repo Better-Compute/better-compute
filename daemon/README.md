@@ -286,9 +286,17 @@ Instance runtimes under the helper: libvirt-kvm's privileged operations (`define
 The node reads libvirt's read-only socket (`virsh -r`) and must not be in the root-equivalent
 `libvirt` group. libvirt runs with `dynamic_ownership = 0`, and QEMU reaches the node's files
 through the node's group: disks are 0660 and read-only ones 0640, and directories get group
-search. cloud-hypervisor is not offered, because its VMMs need root: systemd-run units, taps, and
-files handed to their users. `bcd doctor` checks all of this. cloud-hypervisor is not offered, because its VMMs need root:
-systemd-run units, taps, and files handed to their users. `bcd doctor` reports both.
+search.
+
+cloud-hypervisor under the helper (`runtime.CHPrivileged`, the helper's `ch.*`) keeps each VMM as its
+own uid, but the node owns every file and grants that uid access with POSIX ACLs (inherited by what
+the VMM creates, under `UMask=0007` and its own private group). Root does only what needs root:
+- the taps, named `runtime.TapName`, owned by the node, on `[helper] instance_bridges`;
+- VFIO, only for this host's GPUs whose whole IOMMU group is theirs and that root sees idle;
+- the VMM's unit, which root builds from the record it checks itself (`runtime.CHLaunch`), with
+  root's binary and never another running unit's uid.
+
+`bcd doctor` checks all of this.
 
 **Identity rebind** (`agent/rebind.go`, `runtime/rebind.go`; review 13 H2). A memory-restored guest
 resumes with its source's sshd principals and host key. When its spec carries
