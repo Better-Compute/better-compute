@@ -226,10 +226,16 @@ describe('xidStatusHandler', () => {
       { status: 'true' },
     ]);
     expect((await state()).reasons).toEqual([]);
+    // A unit waiting for a reboot: recorded for whoever reboots within the budget, not NoSchedule.
+    await report(6, ['RebootRequired']);
+    expect((await f.db.query<{ status: string }>(`SELECT status FROM node_conditions WHERE node_id = $1 AND type = 'RebootRequired'`, [node])).rows).toEqual([
+      { status: 'true' },
+    ]);
+    expect((await state()).reasons).toEqual([]);
 
     // A tenant-controlled node's reports are advisory: the condition, never a NoSchedule reason.
     await f.db.query(`UPDATE nodes SET trust = 'tenant-controlled' WHERE id = $1`, [node]);
-    await report(6, ['FabricManagerDown']);
+    await report(7, ['FabricManagerDown']);
     expect(await state()).toMatchObject({ reasons: [] });
     expect((await state()).conditions).toContainEqual({ type: 'FabricManagerDown', status: 'true' });
   });

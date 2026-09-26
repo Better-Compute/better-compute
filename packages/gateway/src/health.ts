@@ -16,6 +16,9 @@ export const daemonNodeConditions: Readonly<Record<string, { noSchedule: boolean
   FabricManagerDown: { noSchedule: true },
   // An mps pool's MPS control daemon is down: every client fails.
   MPSDown: { noSchedule: true },
+  // A host config unit takes effect only after a reboot (bcd never reboots on its own): reboot the
+  // node within the disruption budget (node.reboot). Not a fault; the node keeps running.
+  RebootRequired: { noSchedule: false },
   // Not a fault: the host section is observed only ([host] units = false; the GPU operator owns
   // the host). Operators see it on the node; capacity books from the inventory alone.
   HostManagedExternally: { noSchedule: false },
