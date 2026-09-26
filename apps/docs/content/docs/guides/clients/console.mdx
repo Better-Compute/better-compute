@@ -45,6 +45,9 @@ sources:
   - packages/console-kit/src/webhooks.ts
   - apps/console/src/app/(console)/webhooks/page.tsx
   - apps/console/src/app/(console)/batches/page.tsx
+  - apps/console/src/app/(console)/discovery/page.tsx
+  - packages/console-kit/src/pxe-discovery.ts
+  - tests/console-kit-pxe-discovery.test.ts
   - PLAN.md
 ---
 
@@ -161,9 +164,10 @@ console-kit, for the tenant the session acts in. Platform pages appear only for 
 | Overview | `/` | capacity per pool, quota alerts |
 | Reservations | `/reservations`, `/reservations/[id]` | the form with a capacity preview, the earliest start and approvals, optional host CPUs and memory (GiB), and a Kubernetes checkbox only for a pool the tenant owns with `policy.kubernetes` (4533265); the list and each reservation's actions |
 | Instances | `/instances`, `/instances/[id]`, `/instances/[id]/terminal`, `/instances/[id]/console` | the form with sizes per pool; list, detail, a browser terminal (op `exec`) and the instance's serial console (op `console`, 191898b), linked as **Open a terminal** and **Serial console**, both decided as `compute:instances:exec`. bcd refuses instance `exec` until guests have an agent, so the serial console is the terminal that works on real hosts |
-| Sandboxes | `/sandboxes` | a create form over the tenant's templates (each with its flavor and warm pool size) and a lifetime in minutes, capped at the template's maximum; the person's own sandboxes, or everyone's, with state, a countdown to expiry (a warning in the last 5 minutes), **+30 min**, **Snapshot** and **Delete**, and the `better-compute sandbox exec` line for a shell |
+| Sandboxes | `/sandboxes` | a create form over the tenant's templates (each with its flavor and warm pool size) and a lifetime in minutes, capped at the template's maximum; the person's own sandboxes, or everyone's, with state, a countdown to expiry (a warning in the last 5 minutes), **+30 min**, **Snapshot** and **Delete**, and the `better-compute sandbox exec` line for a shell; templates, with their volumes (attach and detach, dd5555b) |
 | Volumes | `/volumes` | [sandbox volumes](/docs/guides/vps/sandboxes#volumes) (50add82): a create form (pool, name, size in GiB); the person's own volumes, or everyone's (e68aba7), with id, device path, pool, host, size and state; **Grow** and **Delete** (below) |
-| Nodes | `/nodes`, `/nodes/[id]`, `/nodes/[id]/console` | a filterable table; conditions, cordon, uncordon and drain, the node's labels (key, value, source) and taints with forms to set or remove an operator label and add or remove a taint (`nodes.label`, `nodes.taint`, gated like the other node actions on `compute:nodes:update`; keys, values and taints are checked against the API's patterns before the button enables; 3ff9fb3), recent commands, the node console, and the break-glass SSH panel (below). A node in a bare-metal provision state (not `adopting` or `adopted`) also gets a **Lifecycle** panel (0cd1d79): `manage`, `inspect`, `provide`, `rescue`, `unrescue`, `abort`, `recover`, `undeploy` and `retire`, each offered as the provision state machine and IAM (`compute:nodes:provision`) allow; deploy, power and PXE MAC confirmation stay in the CLI (`metal deploy`, `metal power`, `metal discovered` and `metal confirm-mac`) |
+| Nodes | `/nodes`, `/nodes/[id]`, `/nodes/[id]/console` | a filterable table; conditions, cordon, uncordon and drain, the node's labels (key, value, source) and taints with forms to set or remove an operator label and add or remove a taint (`nodes.label`, `nodes.taint`, gated like the other node actions on `compute:nodes:update`; keys, values and taints are checked against the API's patterns before the button enables; 3ff9fb3), recent commands, the node console, and the break-glass SSH panel (below). A node in a bare-metal provision state (not `adopting` or `adopted`) also gets a **Lifecycle** panel (0cd1d79): `manage`, `inspect`, `provide`, `rescue`, `unrescue`, `abort`, `recover`, `undeploy` and `retire`, each offered as the provision state machine and IAM (`compute:nodes:provision`) allow; deploy and power stay in the CLI (`metal deploy`, `metal power`), and PXE MAC confirmation has its own page (below) |
+| PXE discovery | `/discovery` | a site picker and what the site's agents saw PXE-booting from MACs with no boot entry (`metal.discovered`): MAC and request count, product UUID, arch and relay, last seen, and what each row is (a candidate for a machine, not enrolled, or an enrolled node); **Confirm** on a candidate and a form to bind a MAC by hand (`metal.confirmMac`), each behind a browser confirmation (15c11ee; below) |
 | Batches | `/batches` | destructive batches held for the approver quorum: pending by default (or approved, expired, cancelled, all), each with its reason, command count, approvals of required, state and the window left; a batch's scope by kind, who approved, the `better-compute batch approve` line, and **Cancel** (below) |
 | Pools & capacity | `/pools`, `/pools/[id]` | pools owned or offered, a 7-day booking calendar, join tokens and join requests |
 | Quotas | `/quotas` | used of max per pool and resource |
@@ -182,8 +186,8 @@ server action batches up to 50 checks through Better IAM's `can`, and the comput
 A delegated call held back for approval shows "awaiting approval" with the confirmation id.
 
 Actions that destroy or release something ask first, naming what happens: draining a node, stopping or deleting an
-instance, releasing or cancelling a reservation (d40af29, 0919f86), and a bare-metal node's `undeploy`, `retire`,
-`abort` and `provide` (0cd1d79).
+instance, releasing or cancelling a reservation (d40af29, 0919f86), a bare-metal node's `undeploy`, `retire`,
+`abort` and `provide` (0cd1d79), and binding a machine's PXE MAC, after which it boots from that MAC (15c11ee).
 
 ### Sandboxes
 
@@ -210,6 +214,14 @@ image, warm minimum and longest lifetime in hours. console-kit's `SandboxesView`
 `createTemplate`, `updateTemplate` and `deleteTemplate`. Templates can also come from
 `better-compute sandbox-template create` or a FleetConfig document.
 
+Since dd5555b the templates table also shows each template's [volumes](/docs/guides/vps/sandboxes#volumes) (volume
+name, mount path, `(read-only)`), each with **Detach**, and an **Attach a volume** form picks a template, a `ready`
+volume of that template's pool, a mount path (default `/data`; it must start with `/`) and **Read-only**. Every
+sandbox from the template then mounts the volume and runs on the volume's host. Both send the template's whole volume
+list through `sandboxTemplates.update`. **Warm +1** is disabled for a template with volumes, since the server keeps
+no warm pool beside volumes. The volume picker lists everyone's volumes (`sandboxVolumes.list` with `scope: 'all'`);
+without the right to list them it is empty.
+
 ### Volumes
 
 The **Volumes** page (50add82) works on the session tenant's [sandbox volumes](/docs/guides/vps/sandboxes#volumes),
@@ -221,8 +233,43 @@ checked before the button enables) and a size from 1 to 16,384 GiB, and sends `s
 `/dev/disk/by-id/virtio-<serial>` path, pool and host ("not placed yet" without one), size and state. For a `ready`
 volume, **Grow** asks for the new size and calls `sandboxVolumes.resize` only with a larger one, and **Delete** asks
 for confirmation, warning that the data is wiped, before `sandboxVolumes.delete`. As on the Sandboxes page, the
-buttons are not gated by IAM checks in advance; the call is decided and an error is shown in place. Attaching a volume
-to a template is not in the console: use `better-compute sandbox-template update --volumes`, the API or FleetConfig.
+buttons are not gated by IAM checks in advance; the call is decided and an error is shown in place. A volume is
+attached to a template on the Sandboxes page's **Templates** section (dd5555b, above), or with
+`better-compute sandbox-template update --volumes`, the API or FleetConfig.
+
+### PXE discovery
+
+The **PXE discovery** page (`/discovery`, 15c11ee) is the console's side of
+[discovering new machines](/docs/guides/bare-metal/sites#discovering-new-machines): a machine whose BMC cannot name
+its NICs (IPMI), enrolled with only its product UUID, waits in `metal.ensureRamdisk` until an operator confirms its
+PXE MAC. The page is built on console-kit's `createPxeDiscoveryView`.
+
+A site picker lists the session tenant's sites (`sites/list`, the first one selected), and the table shows what that
+site's agents saw PXE-booting from MACs with no boot entry in the last 24 hours ([`metal.discovered`](/docs/reference/api/metal#discovered);
+only the tenant that owns the site sees it). **Refresh** reloads it. `pxeCandidates` orders the rows by what needs a
+decision first: candidates, then unknown machines, then enrolled ones, newest first within each.
+
+| Column | Shows |
+| --- | --- |
+| MAC | the MAC, and how many requests it sent |
+| Product UUID | the SMBIOS UUID from DHCP, or a dash |
+| Arch / relay | the client architecture, and `via <relays>` for a relayed request or `agent segment` for one on the agent's own segment |
+| Last seen | `just now`, `N min ago` or `N h ago` (`seenAgo`) |
+| Machine | what the row is to the operator: `candidate for <node>`, `not enrolled`, or the enrolled node's id |
+
+Nothing on the page binds a MAC by itself, since discovery data is unauthenticated DHCP. A candidate row (the MAC
+metal saw under the machine's UUID right after power-cycling it) has a **Confirm** button. It first asks, in a browser
+confirmation, "Bind `<mac>` as the PXE MAC of `<node>`? The machine will then boot from it.", and only then calls
+[`metal.confirmMac`](/docs/reference/api/metal#confirmmac) and reloads the list. Unknown and enrolled rows have no
+button: an unknown machine is never answered or enrolled from here.
+
+**Bind a MAC by hand** serves a machine enrolled without MACs whose PXE MAC you know from its label or its BMC. It
+takes a node id (it must start with `node_`) and a MAC; `normalizeMac` accepts upper or lower case and `-` or `:` as
+the separator, and the button stays disabled until both are well formed. It goes through the same browser
+confirmation and `metal.confirmMac` call. As with the CLI's `metal confirm-mac`, the call is decided as
+`compute:nodes:provision` on the node and audited as `node.pxe-mac.confirmed`; the buttons are not gated by IAM
+checks in advance, so a refusal (for example `CONFLICT` for a MAC another machine of the site has, or
+`INVALID_STATE` for a node that already has MACs) is shown in place.
 
 ### Destructive batches
 
@@ -288,8 +335,9 @@ live.connection.subscribe(() => showBadge(live.connection.get().status));
 | Forms | `createReservationForm`, `validateReservation`, `createInstanceForm`, `validateInstance` | validation that mirrors the server, a debounced `capacity.preview`, one idempotency key per attempt kept across retries and confirmations. Since e833433 the reservation form also takes `vcpu` (0 to 4096) and `memoryGiB` (0 to 65,536), sent as `resources` (left out: the pool's per-GPU share), and `kubernetes` for `binding: 'kubernetes'`, and the preview books them too. The console app's reservation page shows them since 4533265, with the Kubernetes checkbox only for a pool the tenant owns that has `policy.kubernetes` |
 | Views | `capacityChart`, `quotaView`, `createQuotaView`, `timelineView`, `earliestFit`, `usageView`, `usageCsv` | stacked capacity bars, quota meters (warning from 80 %), the booking calendar and earliest free window, usage and estimated spend |
 | Admin | `createRolloutView`, `rolloutProgress`, `createFleetDriftView`, `nodeTable` | rollout waves, fleet drift by kind, a filterable, stably sorted node table |
-| Sandboxes | `createSandboxesView`, `timeLeft`, `sandboxExecCommand` | a tenant's sandboxes (`scope` mine or all) and templates, `detail`, `create`, `extend`, `snapshot` and `remove`, each refreshing the list; the remaining lifetime as `12m 03s` or `1h 05m`, urgent in the last 5 minutes; the CLI line that opens a shell |
+| Sandboxes | `createSandboxesView`, `timeLeft`, `sandboxExecCommand`, `withTemplateVolume`, `maxTemplateVolumes` | a tenant's sandboxes (`scope` mine or all) and templates, `detail`, `create`, `extend`, `snapshot` and `remove`, each refreshing the list; the remaining lifetime as `12m 03s` or `1h 05m`, urgent in the last 5 minutes; the CLI line that opens a shell. Since dd5555b a `SandboxTemplateRow` carries its `volumes` (`volumeId`, `mountPath`, `readOnly`), `TemplateFields.volumes` replaces a template's whole list, `volumes()` lists the tenant's volumes a template can attach, and `withTemplateVolume(current, { add } or { remove })` returns the new list, refusing a second volume at the same mount path or more than `maxTemplateVolumes` (8) before anything is sent |
 | Batches | `createBatchesView`, `scopeByKind`, `describeSubject`, `batchApproveCommand` | a tenant's destructive batches over `commandBatches` (`filter(state or 'all')`, default `pending`), `detail`, `scope(batchId, max?)` (every leaf, paged, at most 20,000 by default, stopping on a page that does not advance; `truncated` when capped) and `cancel`; the scope grouped by kind with sorted subjects; a subject as text; the approver's CLI line |
+| PXE discovery | `createPxeDiscoveryView`, `pxeCandidates`, `seenAgo`, `normalizeMac` | one site's `metal.discovered` list (`{ siteId, machines }`, each a `DiscoveredMachineRow`), `site(siteId)` to switch sites, and `confirmMac(nodeId, mac)`, which normalizes the MAC (throwing before any call for one that is not a MAC), calls `metal.confirmMac` and reloads the list; the rows as `{ kind, row }` with `kind` `candidate`, `unknown` or `enrolled`, in that order, newest first; a last-seen time as text; a MAC as the API takes it (lower case, colons) or `undefined` (15c11ee) |
 | SSH access | `createSshAccessView`, `checkSshPublicKey`, `sshUsage` | one node's break-glass certificates: `issue` (held in `view.issued` until dismissed), `revoke`, `showExpired`; a public key check that refuses private keys; the commands to use a certificate |
 | Webhooks | `createWebhooksView`, `deliverySummary` | a tenant's webhooks over the `webhooks` group (list, create, pause, rotate, delete, ping, deliveries, redeliver, event types); the secret from create or rotate sits in `view.secret` until `dismissSecret()` and is never stored or re-read; delivery counts by state and the latest failure |
 | Break-glass SSH | `createSshAccessView`, `checkSshPublicKey`, `sshUsage` | one node's certificates over `nodes.listSshCerts` (expired ones with `showExpired(true)`), `issue({ publicKey, account?, minutes? })` (1 to 60 minutes, 15 by default) and `revoke(serial, reason?)`; a pasted private key, a multi-line paste or a key type other than Ed25519 or ECDSA P-256 is refused before anything is sent; the issued certificate sits in `issued` until `dismissIssued()`, and `sshUsage` gives the commands to use it. The console's node page uses it |

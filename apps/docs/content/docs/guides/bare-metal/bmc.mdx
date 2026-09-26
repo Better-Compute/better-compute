@@ -238,7 +238,9 @@ An `ipmi` machine enrolls and commissions to `ready` (a3ec8d0, 3f19859, f62f9e9)
     `discoveredMac` (see [discovering new machines](/docs/guides/bare-metal/sites#discovering-new-machines)). The
     step then waits, polling every 5 seconds, until an operator binds a MAC with
     [`metal.confirmMac`](/docs/reference/api/metal#confirmmac) (from the CLI, `metal discovered --site …` to see the
-    candidate, then `metal confirm-mac <node> --mac …`; 002dd95), and boots the machine into the ramdisk as usual. A
+    candidate, then `metal confirm-mac <node> --mac …`, 002dd95; or **Confirm** on the console's
+    [PXE discovery](/docs/guides/clients/console#pxe-discovery) page, 15c11ee), and boots the machine into the ramdisk
+    as usual. A
     pool with `policy.trustProvisioningNetwork: true` binds the candidate without confirmation, and then checks the
     ramdisk's own UUID and NICs against the machine.
 

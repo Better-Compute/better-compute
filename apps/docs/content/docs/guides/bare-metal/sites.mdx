@@ -449,8 +449,11 @@ better-compute metal confirm-mac node_01k5w… --mac 3c:ec:ef:12:34:56
 | `metal discovered` | `--site ID` (required), `--tenant` | `metal.discovered`: what the site's agents saw PXE or HTTP boot from MACs with no boot entry, with the machine each is a candidate for; nothing in it is trusted or bound |
 | `metal confirm-mac NODE` | `--mac MAC` (required, `aa:bb:cc:dd:ee:ff`; `-` also separates), `--tenant` | `metal.confirmMac`: the operator's decision that `--mac` is the machine's PXE MAC, usually the candidate `metal discovered` shows; a malformed MAC is a usage error before anything is sent |
 
-The console has no page for either yet. See [IPMI](/docs/guides/bare-metal/bmc#ipmi-through-bcx-ipmi) for the
-enrollment that uses this.
+In the console, the **PXE discovery** page (`/discovery`, 15c11ee) shows the same list for a site you pick, with a
+**Confirm** button on each candidate and a form to bind a MAC by hand; both ask in a browser confirmation before
+calling `metal.confirmMac`, so nothing is bound without the operator's click. See
+[the console](/docs/guides/clients/console#pxe-discovery). See [IPMI](/docs/guides/bare-metal/bmc#ipmi-through-bcx-ipmi)
+for the enrollment that uses this.
 
 The discovery attestor also supports operator approval:
 

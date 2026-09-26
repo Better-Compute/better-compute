@@ -283,20 +283,27 @@ bcd join --config /etc/bcd/config.toml --attestor tpm
   `bcd join --config /etc/bcd/config.toml --attestor tpm < /dev/null` before (re)starting the units, so the same
   script installs and upgrades.
 
-The node key is still a file under the data directory, not a TPM key.
+The node key is still a file under the data directory, not a TPM key. Since 965c14d `internal/tpm` has the pieces
+for one, not yet used by `bcd join` or the session: `NodeKey`, an unrestricted, non-exportable P-256 signing key
+derived as a primary of the owner hierarchy from a 32-byte per-key unique (nothing is stored in the TPM; anyone
+with owner auth, root on the node, can derive and use it too), usable as a Go `crypto.Signer` for CSRs, TLS and node
+statements, and `CertifyNodeKey`, which has the AK certify that key (`TPM2_Certify`) over qualifying data.
 
 What is tested, and with what TPM:
 
 | Test | TPM | What it proves |
 | --- | --- | --- |
-| `TestTSContract` (`daemon/internal/tpm`) | `tpmsim` fixture | bcd's round-1 evidence is still byte for byte the fixture's, and the challenge `tpmAttestor` made for it activates and quotes through bcd's client (TypeScript to Go) |
-| `tests/pki-attestors-tpm-bcd.test.ts` | the same fixture | `tpmAttestor` challenges bcd's evidence and admits bcd's answer, and refuses that answer for another CSR (`challenge-for-another-csr`) or after the challenge expired (`challenge-expired`) (Go to TypeScript) |
+| `TestTSContract` (`daemon/internal/tpm`) | `tpmsim` fixture, with a manufacturer EK certificate in NV (b973e05) | bcd's round-1 evidence is still byte for byte the fixture's, including the EK certificate bcd reads from NV index `0x01C00002` (`tpm.EKCertIndex`) and sends as `ekCert`, and the challenge `tpmAttestor` made for it activates and quotes through bcd's client (TypeScript to Go) |
+| `tests/pki-attestors-tpm-bcd.test.ts` | the same fixture | `tpmAttestor` with `ekRoots: [ek-root.der]` and no `allowUncertifiedEk` verifies the EK certificate's chain, challenges bcd's evidence and admits bcd's answer; it refuses the EK under another root (`ek-certificate-chain`), and the answer for another CSR (`challenge-for-another-csr`) or after the challenge expired (`challenge-expired`) (Go to TypeScript) |
 | `tests/e2e/bcd-tpm.test.ts` (`BCD_E2E=1`, WSL or Linux; db9bd46) | `tpmsim` in a fakehw bcd | a real `bcd join --attestor tpm` with no token against the dev stack's JoinService: two rounds, the SHA-256 PCR bank 0 to 7 reaching `resolve`, the node in the resolved pool and bound to `sha256(EK)` in `node_bindings`; with its identity removed (a reinstall) the same TPM joins as the same node; `bcd node` on that identity is adopted |
 
 `scripts/daemon-tpm-fixture.mjs` regenerates the fixtures in `daemon/internal/tpm/testdata` after a deliberate change
-of either side, so a format change fails a test rather than a machine's join. Every test uses the software TPM with
-`allowUncertifiedEk`: no test has run against a hardware TPM, an EK certificate chain (`ekRoots`) or a real
-`/dev/tpmrm0`.
+of either side, so a format change fails a test rather than a machine's join. Since b973e05 the contract runs the
+attestor as against a real TPM: `ek-root.der` is a test manufacturer root and `ek-cert.der` the EK certificate it
+issued for the sim's EK (made once by the Go test, and kept with `sim.json` when the fixtures are regenerated), and
+the attestor verifies that chain through `ekRoots`. The dev-stack e2e (`tests/e2e/bcd-tpm.test.ts`) still uses
+`allowUncertifiedEk`, since the software TPM there carries no manufacturer certificate. Every test uses a software TPM: no test
+has run against a hardware TPM, a real manufacturer's EK certificate or a real `/dev/tpmrm0`.
 
 ## Single-use evidence
 

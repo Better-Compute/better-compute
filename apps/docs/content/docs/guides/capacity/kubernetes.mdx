@@ -352,13 +352,26 @@ the DRA slice withdraw the devices in the same moment. Since cd5fc82 it reports 
 holds a device of the allocation any more:
 
 - The pending release is written to `<data_dir>/releasing.json` before the CDI spec goes, so a crash never loses it.
+  An unreadable file fails closed (a18f423, b01130f); see [an unreadable releases file](#an-unreadable-releases-file).
 - Until the report, the devices stay claimed on the node: no hold, VM, `gpu.reset`, `diag.dcgm` or host config unit
   gets them. The control plane waits for the report too (e7d922c): a released, bound Kubernetes reservation keeps its
-  GPUs and host share booked, and billed, until the node reports `AllocationReleased`, the node is lost, or the
-  booking's end passes. The reservation shows as released at once, and the spec withdraws the devices, but no other
-  allocation can take them while pods still hold them. The secret broker gives such a releasing allocation nothing.
+  GPUs and host share booked, and billed, until the node reports `AllocationReleased` or the node is lost, though
+  never billed past the allocation's own end (metering stops at the earlier of its release and its end). The reservation shows
+  as released at once, and the spec withdraws the devices, but no other allocation can take them while pods still
+  hold them. Since 0127ed7 `reservations.get` and `list` show such a released reservation with the computed condition
+  `DevicesHeld` (reason `PodsHoldDevices`, `since` the release, the message naming the nodes whose pods still hold
+  the devices), so the tenant can see why it is still booked and billed; it disappears once the release ends. The
+  secret broker gives such a releasing allocation nothing.
   `tests/sim/kubernetes-host-resources-1k.test.ts` checks this (see
   [the control-plane simulator](/docs/operations/testing#the-control-plane-simulator)).
+- **A release stuck past the booking's end** (462e28f). Pods can hold the GPUs longer than the reservation was
+  booked for (bcd then reports `KubernetesReleaseStuck`, below). While the node is reachable and no other allocation
+  booked those devices next, the hosts pass carries the release's device bookings `stuckReleaseStepMs` (5 minutes)
+  further each time they come within half a step of their end, locking the devices as the placer does, so a GPU pods
+  still hold is never offered again. `finishStaleReleases` closes a release without the node's report only when the
+  node is lost, or once its bookings ended because another allocation had booked those devices next (that one may
+  then fail on the node until the pods let go). Only the device bookings are carried, never the allocation's own
+  end, so billing stays capped there: the carried bookings keep the devices, not the meter, running.
 - "No pod holds it" comes from the kubelet's pod-resources API (a device plugin id `<atom>@<allocation>`, or a
   `gpu.bcd.dev` claim of this node's pool named for the allocation; 14111c1). Since 8bcbe92 (security review 2) two
   more sources can keep the devices in use, and every check fails closed:
@@ -403,6 +416,41 @@ reaper, which keeps running, forces what still holds a device. A cluster that fo
 to cordon itself still gets drained. bcd does not reset the kubelet: the machine stays a cordoned member until an
 operator removes it, and the unit's return uncordons it.
 
+### An unreadable releases file
+
+If `<data_dir>/releasing.json` (by default `/var/lib/bcd/releasing.json`) exists but cannot be read or parsed, bcd
+no longer knows which releases were pending, and a pod of one of them may still hold its GPUs. Until a18f423 the file
+was read as empty, so those GPUs lost their claim. Since then (security review) bcd fails closed:
+
+- It renames the file to `releasing.json.unreadable-<unix seconds>` (kept, never deleted) and writes the marker
+  `<data_dir>/releasing.unreadable` with the time and the error.
+- While the marker exists, every GPU of the node counts as claimed by "(pending Kubernetes releases that could not be
+  read)": no hold, VM, `gpu.reset` or `diag.dcgm` gets one. The node's own live holds keep theirs as usual.
+- The node reports the condition `KubernetesReleasesUnreadable` (reason `ReleasesFileUnreadable`), whose message names
+  the marker's path.
+
+The marker clears itself on a converge pass once the kube manager's `HeldOutside` (38f90fb, b01130f) answers that no
+pod may hold a bcd GPU of an allocation outside the node's live set: the allocations the spec wants, the node's holds
+and its pending releases. It checks the same sources as a release, each failing closed:
+
+- device plugin ids `<atom>@<allocation>` in pod-resources, and `gpu.bcd.dev` devices, prepared in the DRA driver's
+  record or claimed in pod-resources, whose name carries another allocation's tag;
+- pod processes with a GPU open, asked only about the whole GPUs no live allocation holds (in whole or in part, as a
+  MIG instance or slot), since a process cannot be told apart by allocation;
+- a node that is or was a worker whose kubelet cannot be asked, or whose DRA record is unreadable, counts as held.
+  A node that never was a worker answers "not held" at once.
+
+When the node's holds cannot be read, nothing is decided that pass. An operator can also clear the claim by removing
+the marker (by default `/var/lib/bcd/releasing.unreadable`) once they know no pod holds a GPU of a lost release.
+
+<Callout type="warn" title="Not a node condition in the control plane">
+The gateway's `daemonNodeConditions` does not list `KubernetesReleasesUnreadable`, so it is not written to
+`node_conditions`, publishes no `node.condition.changed` and sets no NoSchedule reason. It reaches the control plane
+only in the node's status report (`StatusReport.conditions`, and the `node.status` event). Placement can still book
+the node's GPUs, and a new hold on them then fails on the node with `AllocationFailed` (reason `overlap`), which the
+reservation treats as a bind failure, until the claim clears. Watch `node.status` for it, or look at the node.
+</Callout>
+
 ## Host resources and pods
 
 A `kubernetes` binding's pods live in the kubelet's own cgroups (`kubepods.slice`), where the kubelet enforces their
@@ -417,6 +465,9 @@ requests to the reservation yourself; compute does not write them.
 - **No real cluster has run this.** Neither the device plugins nor the DRA driver has served a real kubelet.
 - **Pod requests are not derived from the reservation.** The kubelet enforces what the pods ask for, not what the
   reservation booked.
+- **`KubernetesReleasesUnreadable` is not recorded.** The gateway keeps it out of the node's conditions, so a node
+  whose releases file was unreadable is still offered for placement (see
+  [an unreadable releases file](#an-unreadable-releases-file)).
 
 <Cards>
   <Card title="Host configuration" href="/docs/daemon/host-config#k8s-join">The k8s-join unit in detail.</Card>

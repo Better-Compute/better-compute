@@ -59,6 +59,9 @@ sources:
   - tests/e2e/bcd-tpm.test.ts
   - tests/sim/kubernetes-host-resources-1k.test.ts
   - packages/testing/src/sim/invariants.ts
+  - tests/metal-discovery-e2e.test.ts
+  - tests/pki-attestors-tpm-bcd.test.ts
+  - daemon/internal/tpm/contract_test.go
 ---
 
 import { Activity, Scale, Terminal } from '@/lib/icons';
@@ -234,7 +237,10 @@ See [the daemon](/docs/daemon).
   approvers' signatures for the FakeDaemon's own trust domain is ignored (logged `trust.ignored`; 6a7f1b7, 4835f4f) (see
   [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)).
   A refused session whose close carries `retryAfterMs` (the gateway's retry pushback) reconnects after exactly that
-  long. `setPressure(pressure)` puts a `HostPressure` into every status report. With `tunnels`, it answers `OpenTunnel`; with `nodeKey`, attested
+  long. `setPressure(pressure)` puts a `HostPressure` into every status report. `setDiscovered(machines)` (537e672)
+  plays a site agent's PXE discovery list: each `{ mac, productUuid?, arch?, firstSeen?, lastSeen?, count?, relay? }`
+  (times in epoch milliseconds, default now; MAC and UUID lower-cased) goes into `StatusReport.discovered` of every
+  report from then on, the current report is re-sent, and `undefined` stops it. With `tunnels`, it answers `OpenTunnel`; with `nodeKey`, attested
   results and allocation reports carry `node_sig`. With `instances` (a `FakeHypervisor` or its options) it plays a
   VPS host, advertising `instance.network-policy` in `Hello` and converging domains, overlay disks, NoCloud seeds and taps and fetching user data through the secret
   broker; as such a host, `handleImds(request, instanceId)` answers a running instance's metadata request (v0.5,
@@ -406,7 +412,16 @@ without `NVIDIA_VISIBLE_DEVICES`, a plain hold on the same pool not, the booked 
 and the refusal on a pool without `policy.kubernetes`. `tests/vps-sandboxes.test.ts` checks that a sandbox lands only
 on a host labelled `bc.dev/cap.instance.ssh-host-only` (3b9e81d), and `tests/vps-volumes.test.ts` covers sandbox
 volumes: booking, quota, replay, pinning, serial mounts, one writer, read-only sharing, resize, deletion and metering
-(2a09202, 8cbece0).
+(2a09202, 8cbece0). `tests/metal-discovery-e2e.test.ts` (452d6bf, not gated: FakeDaemons only) runs
+[PXE discovery](/docs/guides/bare-metal/sites#discovering-new-machines) through the real control plane and gateway,
+with a FakeDaemon site agent carrying metal's site kinds: an IPMI machine enrolled with only its product UUID,
+`metal.ensureRamdisk` setting PXE and power-cycling it through the agent, the agent reporting it with
+`setDiscovered` in DHCP's mixed-endian UUID spelling, metal's module status handler (composed into the dev stack's
+gateway) storing the report, and `metal.discovered` showing the MAC as the machine's candidate with
+`discovered_mac` set, `macs` still empty and no boot entry sent for 2 seconds. Only after `metal.confirmMac` does the
+agent get `boot.prepareRamdisk` for exactly that MAC, with a `secret://` discovery token reference and no sanboot
+digest. The dev stack has no ramdisk to join, so it ends at the boot entry; `tests/metal-discovery.test.ts` covers
+the rest on the sim.
 
 The whole file runs on `createDevStack({ signedIntent: true })` (5071dbc), which puts the stack under a
 command-signing root: joined daemons receive the roots in `JoinResponse.trust` and every command and spec bcd takes
@@ -427,6 +442,9 @@ as the same node after the identity is removed (a reinstall), `already joined` o
 adopted on that identity. Its wire format is pinned in both directions without a stack too: bcd's `TestTSContract`
 and `tests/pki-attestors-tpm-bcd.test.ts` share the fixtures in `daemon/internal/tpm/testdata`, which
 `scripts/daemon-tpm-fixture.mjs` regenerates (see [bcd with its TPM](/docs/guides/nodes/attestation#bcd-with-its-tpm)).
+Since b973e05 those fixtures include a test manufacturer root (`ek-root.der`) and the EK certificate it issued
+(`ek-cert.der`) in the sim's NV, so that pair runs `tpmAttestor` with `ekRoots` and no `allowUncertifiedEk`, and
+checks that another root is refused (`ek-certificate-chain`).
 None of these touches a hardware TPM.
 
 On Linux the suites run in `pnpm test` whenever Go is installed; they build the binary first. On Windows they are

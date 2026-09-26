@@ -1204,8 +1204,11 @@ The **Volumes** page (`/volumes`, 50add82) manages [volumes](#volumes): a form t
 and a size in GiB (1 to 16,384), with a fresh `console-…` idempotency key; the person's own volumes, or with
 **Everyone's volumes** the tenant's (e68aba7), each with its id, its `/dev/disk/by-id/virtio-<serial>` path, pool,
 host, size and state; and, for a `ready` volume, **Grow** (asks for the new size, which must be larger) and **Delete**
-(asks for confirmation, warning that the data is wiped). Attaching a volume to a template is not on the page: use
-`sandbox-template update --volumes`, the API or FleetConfig.
+(asks for confirmation, warning that the data is wiped). Volumes are attached to templates on the **Sandboxes** page
+(dd5555b): its templates table lists each template's volumes with **Detach**, and **Attach a volume** picks a
+template, a `ready` volume of its pool, a mount path and read-only, sending the whole list through
+`sandboxTemplates.update`; **Warm +1** is off for a template with volumes. `sandbox-template update --volumes`, the
+API and FleetConfig do the same.
 
 ## Where sandboxes run today
 

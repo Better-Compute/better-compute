@@ -372,7 +372,10 @@ it, so bcd's Kubernetes side runs in hosted mode (1e5f96b). It needs no `k8s-joi
   kubelet bcd cannot ask means the devices stay in use. The process backstop a joined worker has (a pod process with a
   released GPU's device node open) is off here: without `hostPID` bcd's `/proc` is its own pod's, where its own
   `nvidia-smi` would look like a holder (f88bcdb). A hosted node relies on pod-resources and, with DRA, the driver's
-  `prepared.json` record in the `/var/lib/kubelet/plugins/gpu.bcd.dev` mount.
+  `prepared.json` record in the `/var/lib/kubelet/plugins/gpu.bcd.dev` mount. The same holds for clearing an
+  unreadable `releasing.json`, which keeps every GPU claimed and raises `KubernetesReleasesUnreadable` until no pod
+  may hold a GPU of an allocation the node does not know (a18f423, b01130f; see
+  [an unreadable releases file](/docs/guides/capacity/kubernetes#an-unreadable-releases-file)).
 - **Device plugin or DRA.** `[kubernetes] gpu_api` in `config.toml` chooses how the GPUs reach pods:
   `"device-plugin"` (the default) or `"dra"`, bcd's DRA driver `gpu.bcd.dev` (7d24836), never both. Any other value
   stops bcd from starting. `--gpu-api` and `bcdDaemonSetManifests({ gpuApi })` write it (e4b0c01). See

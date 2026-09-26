@@ -227,7 +227,8 @@ A machine whose BMC cannot report its MACs (IPMI) and that was enrolled with onl
 before 4 (3d26428, 8de6e2f): `metal.ensureRamdisk` power-cycles it into PXE with no boot entry, a MAC first seen under
 its UUID within 10 minutes becomes its candidate, and nothing more is sent until an operator confirms a MAC with
 `metal.confirmMac` (`better-compute metal confirm-mac <node> --mac …`, after `metal discovered --site …` shows the
-candidate; 002dd95), or at once on a pool with `policy.trustProvisioningNetwork` (whose `inventory.refresh` then checks
+candidate, 002dd95; or **Confirm** on the console's [PXE discovery](/docs/guides/clients/console#pxe-discovery) page,
+15c11ee), or at once on a pool with `policy.trustProvisioningNetwork` (whose `inventory.refresh` then checks
 the ramdisk's UUID and NICs against the machine). See
 [discovering new machines](/docs/guides/bare-metal/sites#discovering-new-machines).
 
@@ -476,7 +477,8 @@ better-compute metal bulk --pool pool_01k5w… --verb retire --nodes-file retire
   `--verb undeploy` only.
 - **PXE discovery**: `metal discovered --site ID` lists what the site's agents saw PXE-booting from unknown MACs,
   and `metal confirm-mac NODE --mac MAC` binds the MAC of a machine enrolled without one (002dd95), which unblocks an
-  IPMI machine waiting in `metal.ensureRamdisk`. See
+  IPMI machine waiting in `metal.ensureRamdisk`. The console's
+  [PXE discovery](/docs/guides/clients/console#pxe-discovery) page does the same from a browser (15c11ee). See
   [discovering new machines](/docs/guides/bare-metal/sites#discovering-new-machines).
 
 `workflows list --node`, `workflows get`, `workflows retry --from-step` and `commands list --node` follow what a
