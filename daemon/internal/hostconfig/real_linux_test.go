@@ -81,6 +81,35 @@ func TestRealKernel(t *testing.T) {
 		}
 	}
 
+	// Root never writes under a directory someone else can write (/tmp included), or a symlink.
+	if err := sys.WriteFile(t.TempDir()+"/state", []byte("1"), 0o644); err == nil {
+		t.Fatal("root wrote under /tmp")
+	}
+	base := "/run/bcd-hostconfig-test-" + strconv.Itoa(os.Getpid())
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	open, owned := base+"/open", base+"/owned"
+	for _, d := range []string{open, owned} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(open, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.WriteFile(open+"/x/state", []byte("1"), 0o644); err == nil || !strings.Contains(err.Error(), "only root can write") {
+		t.Fatalf("world-writable parent: %v", err)
+	}
+	if err := os.Symlink("/etc", owned+"/link"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.WriteFile(owned+"/link/bcd-test", []byte("1"), 0o644); err == nil {
+		_ = os.Remove("/etc/bcd-test")
+		t.Fatal("wrote through a symlink")
+	}
+	if err := sys.WriteFile(owned+"/ok/state", []byte("1"), 0o644); err != nil {
+		t.Fatalf("root's own directory: %v", err)
+	}
+
 	// 2 MiB huge pages: two more, then back.
 	if n, err := readCount(sys, Hugepages2MDir+"/nr_hugepages"); err == nil {
 		t.Cleanup(func() { _ = sys.WriteKernel(Hugepages2MDir+"/nr_hugepages", strconv.FormatInt(n, 10)) })

@@ -63,6 +63,11 @@ func (s *OSSystem) WriteFile(abs string, data []byte, mode fs.FileMode) error {
 		return s.WriteFileFunc(abs, data, mode)
 	}
 	p := s.Path(abs)
+	if !s.fake() {
+		if err := checkRootPath(filepath.Dir(p)); err != nil {
+			return err
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
@@ -72,6 +77,11 @@ func (s *OSSystem) WriteFile(abs string, data []byte, mode fs.FileMode) error {
 func (s *OSSystem) RemoveFile(abs string) error {
 	if s.RemoveFileFunc != nil {
 		return s.RemoveFileFunc(abs)
+	}
+	if !s.fake() {
+		if err := checkRootPath(filepath.Dir(s.Path(abs))); err != nil {
+			return err
+		}
 	}
 	if err := os.Remove(s.Path(abs)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err

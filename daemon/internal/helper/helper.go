@@ -492,6 +492,12 @@ func (s *Server) openDir(fk fileKind) (*os.Root, error) {
 			root.Close()
 			return nil, fmt.Errorf("%s is not a plain directory", "/"+walked)
 		}
+		// On the real filesystem as root: a directory the node (or anyone) could write, or that is
+		// not root's, is not one root writes under (a staged file could be swapped in it).
+		if (s.Root == "" || s.Root == "/") && os.Geteuid() == 0 && !rootOnly(fi) {
+			root.Close()
+			return nil, fmt.Errorf("%s is not a directory only root can write", "/"+walked)
+		}
 	}
 	dir, err := root.OpenRoot(rel)
 	root.Close()
