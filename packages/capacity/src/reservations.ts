@@ -28,6 +28,7 @@ import {
   type PlacementRequest,
   type Placer,
   type Reservation,
+  type ReservationResources,
   type ReservationSpec,
   type ReservationState,
   type ReservationVerb,
@@ -103,8 +104,14 @@ export interface CreateReservationInput {
   start?: number;
   /** Milliseconds. */
   duration: number;
-  /** `hold` (default) or `node` (v0.5: a whole node in a `tenantRoot` pool, deployed by metal). */
-  binding: 'hold' | 'node';
+  /**
+   * `hold` (default), `node` (v0.5: a whole node in a `tenantRoot` pool, deployed by metal) or
+   * `kubernetes` (v1.1 §3.8: the devices are advertised to the node's kubelet; pools with
+   * `policy.kubernetes`).
+   */
+  binding: 'hold' | 'node' | 'kubernetes';
+  /** (v1.1 §3.8) Host CPU, memory and hugepages per node; absent: the pool's per-GPU share. */
+  resources?: ReservationResources;
   /** `binding: 'node'`: the metal profile to deploy (required there, refused otherwise). */
   node?: NodeBindingSpec;
   leaseSeconds?: number;
@@ -142,6 +149,13 @@ function integer(value: unknown, min: number, max: number, what: string): number
   return value;
 }
 
+/** The host resources a reservation may book with its devices (§3.8), and each one's maximum. */
+export const hostResourceLimits: Readonly<Record<string, number>> = Object.freeze({
+  vcpu: 4096,
+  memoryGiB: 65_536,
+  hugepages1Gi: 4096,
+});
+
 /** Validates `reservations.create` input; rejects unknown fields and phases not yet delivered. */
 export function parseCreateReservation(raw: unknown): CreateReservationInput {
   const input = record(raw, 'The request');
@@ -157,6 +171,7 @@ export function parseCreateReservation(raw: unknown): CreateReservationInput {
       'duration',
       'binding',
       'node',
+      'resources',
       'leaseSeconds',
       'spot',
       'idempotencyKey',
@@ -211,12 +226,17 @@ export function parseCreateReservation(raw: unknown): CreateReservationInput {
   if (!(duration >= 60_000 && duration <= maxDuration))
     fail('duration must be between 1m and 365d');
 
-  if (input.binding !== undefined && input.binding !== 'hold' && input.binding !== 'node')
+  if (
+    input.binding !== undefined &&
+    input.binding !== 'hold' &&
+    input.binding !== 'node' &&
+    input.binding !== 'kubernetes'
+  )
     throw new ComputeError(
       'UNSUPPORTED',
       `binding ${String(input.binding)} is not a reservation binding (instances: vps.instances.create)`,
     );
-  const binding = input.binding === 'node' ? 'node' : 'hold';
+  const binding = input.binding === 'node' || input.binding === 'kubernetes' ? input.binding : 'hold';
   if (input.spot !== undefined && typeof input.spot !== 'boolean') fail('spot must be a boolean');
   if (binding === 'node' && input.spot === true) fail('A node binding cannot be spot');
   if ((binding === 'node') !== (input.node !== undefined))
@@ -236,6 +256,16 @@ export function parseCreateReservation(raw: unknown): CreateReservationInput {
     result.node = { profileId: string(node.profileId, profilePattern, 'node.profileId') };
     if (node.profileVersion !== undefined)
       result.node.profileVersion = integer(node.profileVersion, 1, 2 ** 31, 'node.profileVersion');
+  }
+  if (input.resources !== undefined) {
+    if (binding === 'node') fail('A node binding books the whole node; resources is refused');
+    const resources = record(input.resources, 'resources');
+    onlyKeys(resources, Object.keys(hostResourceLimits), 'resources');
+    const parsed: ReservationResources = {};
+    for (const [name, max] of Object.entries(hostResourceLimits))
+      if (resources[name] !== undefined)
+        parsed[name] = integer(resources[name], 0, max, `resources.${name}`);
+    result.resources = parsed;
   }
   if (input.projectId !== undefined) {
     if (!isId(input.projectId, 'prj')) fail('projectId must be a project id');
@@ -278,6 +308,7 @@ export function reservationSpec(input: CreateReservationInput): ReservationSpec 
   if (input.gang !== undefined) spec.gang = { ...input.gang };
   if (input.spot === true) spec.spot = true;
   if (input.node !== undefined) spec.node = { ...input.node };
+  if (input.resources !== undefined) spec.resources = { ...input.resources };
   return spec;
 }
 
@@ -621,6 +652,59 @@ export function wholeGpus(devices: readonly DeviceRequest[]): number {
   return devices.filter((device) => device.class === 'gpu').reduce((sum, d) => sum + d.count, 0);
 }
 
+/** Whether a pool's hosts join a Kubernetes cluster (`policy.kubernetes`, §3.8). */
+export function isKubernetesPool(pool: { policy?: unknown }): boolean {
+  const kubernetes = policyObject(pool.policy)?.kubernetes;
+  return typeof kubernetes === 'object' && kubernetes !== null && !Array.isArray(kubernetes);
+}
+
+function policyObject(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * The host CPU and memory a reservation without `resources` books per node with its whole GPUs
+ * (§3.8): `policy.perGpu`'s values, else the smallest per-GPU share among the pool's GPU hosts
+ * (`floor(allocatable × ratio ÷ bookable GPUs)`), so the share fits on every host. Requests for MIG
+ * instances or slots only (no whole GPUs) book none, and neither do hosts without the rows.
+ */
+export async function perGpuShare(
+  tx: Pick<SqlTx, 'query'>,
+  pool: { id: string; policy?: unknown },
+  gpus: number,
+): Promise<ReservationResources> {
+  if (gpus <= 0) return {};
+  const perGpu = policyObject(policyObject(pool.policy)?.perGpu);
+  const share: ReservationResources = {};
+  const derived: string[] = [];
+  for (const name of ['vcpu', 'memoryGiB']) {
+    const value = perGpu?.[name];
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0)
+      share[name] = Math.floor(value * gpus);
+    else derived.push(name);
+  }
+  if (derived.length > 0) {
+    const { rows } = await tx.query<{ resource: string; share: string }>(
+      `SELECT nr.resource, min(floor(nr.allocatable * nr.ratio / g.gpus))::text AS share
+         FROM nodes n
+         JOIN (SELECT node_id, count(*) AS gpus FROM devices
+                WHERE class = 'gpu' AND bookable GROUP BY node_id) g
+           ON g.node_id = n.id
+         JOIN node_resources nr ON nr.node_id = n.id AND nr.resource = ANY($2::text[])
+        WHERE n.pool_id = $1 AND n.deleted_at IS NULL
+        GROUP BY nr.resource`,
+      [pool.id, derived],
+    );
+    for (const row of rows) share[row.resource] = Number(row.share) * gpus;
+  }
+  for (const [name, amount] of Object.entries(share))
+    if (amount > 0) share[name] = Math.min(amount, hostResourceLimits[name] ?? 0);
+    else delete share[name];
+  return share;
+}
+
 /** MIG instances and time-slice/MPS slots a request books (`gpuSlices` in policies). */
 export function gpuSlices(devices: readonly DeviceRequest[]): number {
   return devices
@@ -764,9 +848,15 @@ export async function prepareCreate(
   assertSharingFits(input.devices, pool.sharing);
   if (input.binding === 'node' && !isTenantRootPool(pool))
     fail(`Pool ${pool.id} does not lease whole nodes (policy.tenantRoot)`);
+  if (input.binding === 'kubernetes' && !isKubernetesPool(pool))
+    fail(`Pool ${pool.id} does not join a Kubernetes cluster (policy.kubernetes)`);
   const id =
     existing?.id ?? (await draftId('rsv', input.tenantId, caller.identityId, input.idempotencyKey));
   const spec = reservationSpec(input);
+  if (!existing && input.binding !== 'node' && input.resources === undefined) {
+    const share = await perGpuShare(tx, pool, wholeGpus(input.devices));
+    if (Object.keys(share).length > 0) spec.resources = share;
+  }
   if (!existing)
     await tx.query(
       `INSERT INTO reservations (id, tenant_id, pool_id, project_id, state, request, request_hash,
@@ -927,10 +1017,25 @@ function placementRequest(row: ReservationRow, during: TimeRange) {
     ...(row.projectId !== undefined ? { projectId: row.projectId } : {}),
     reservationId: row.id,
     devices: row.request.devices,
+    ...(row.request.resources !== undefined && !isNodeBinding(row)
+      ? { resources: row.request.resources }
+      : {}),
     ...(row.request.topology !== undefined ? { topology: row.request.topology } : {}),
     ...(row.request.gang !== undefined ? { gang: row.request.gang } : {}),
     during,
   };
+}
+
+/**
+ * What a reservation charges to quota: its devices. The host CPU and memory it books with them
+ * (§3.8) ride on the GPUs and are bounded by the hosts, not by quota rows (an offer names device
+ * classes; a missing row would grant 0).
+ */
+function reservationDemand(request: ReservationSpec): Record<string, number> {
+  return quotaDemand({
+    devices: request.devices,
+    ...(request.gang !== undefined ? { gang: request.gang } : {}),
+  });
 }
 
 function requestedDuration(row: ReservationRow): number {
@@ -1483,7 +1588,7 @@ export async function completeCreate(
   const row = await readReservation(tx, input.tenantId, id, { lock: true });
   if (!row) throw new ComputeError('NOT_FOUND', `Reservation ${id} not found`);
   if (row.state !== 'draft') return reservationView(tx, row);
-  await chargeQuota(tx, row.tenantId, row.poolId, quotaDemand(row.request));
+  await chargeQuota(tx, row.tenantId, row.poolId, reservationDemand(row.request));
   const next = await attemptPlacement(deps, tx, row, context.admission);
   return reservationView(tx, next);
 }
@@ -1517,7 +1622,7 @@ export async function endReservation(
   if (reservationStateTable.terminal.includes(row.state)) return row;
   if (row.state === 'draft' || row.state === 'awaiting-confirmation')
     throw new ComputeError('INVALID_STATE', `Reservation ${row.id} is ${row.state}`);
-  await refundQuota(tx, row.tenantId, row.poolId, quotaDemand(row.request));
+  await refundQuota(tx, row.tenantId, row.poolId, reservationDemand(row.request));
   await releaseBookings(tx, row, deps);
   let next: ReservationRow;
   if (row.state === 'pending') next = await move(tx, row, 'cancel');
@@ -1537,7 +1642,7 @@ async function failReservation(
   row: ReservationRow,
   condition: Omit<Condition, 'since'>,
 ): Promise<ReservationRow> {
-  await refundQuota(tx, row.tenantId, row.poolId, quotaDemand(row.request));
+  await refundQuota(tx, row.tenantId, row.poolId, reservationDemand(row.request));
   await releaseBookings(tx, row, deps);
   const failed = await move(tx, row, 'fail', {
     conditions: withCondition(row.conditions, condition, deps.clock.now()),
@@ -1566,7 +1671,7 @@ export async function cancelReservation(
       'INVALID_STATE',
       `Only pending or not-yet-started reservations can be cancelled (${row.state}); release it instead`,
     );
-  await refundQuota(tx, row.tenantId, row.poolId, quotaDemand(row.request));
+  await refundQuota(tx, row.tenantId, row.poolId, reservationDemand(row.request));
   await releaseBookings(tx, row, deps);
   const cancelled = await move(tx, row, 'cancel');
   await publish(deps, tx, cancelled, 'reservation.cancelled');
@@ -1592,7 +1697,7 @@ export async function cancelPendingReservation(
     return row;
   const charged = row.state !== 'awaiting-confirmation';
   if (charged) {
-    await refundQuota(tx, row.tenantId, row.poolId, quotaDemand(row.request));
+    await refundQuota(tx, row.tenantId, row.poolId, reservationDemand(row.request));
     await releaseBookings(tx, row, deps);
   }
   const cancelled = await move(tx, row, 'cancel');

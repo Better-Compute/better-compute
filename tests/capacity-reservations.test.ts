@@ -2630,3 +2630,129 @@ describe('attested bindings (v0.2, P14: a gateway-forged AllocationBound is reje
     expect((await get(created.id)).state).toBe('active');
   });
 });
+
+describe('host CPU and memory booked with the GPUs (§3.8)', () => {
+  const NA = 'node_01jz00000000000000000000na';
+  const NB = 'node_01jz00000000000000000000nb';
+
+  async function hostRows(rows: Record<string, Record<string, number>>): Promise<void> {
+    for (const [nodeId, resources] of Object.entries(rows))
+      for (const [resource, allocatable] of Object.entries(resources))
+        await db.query(
+          `INSERT INTO node_resources (node_id, resource, allocatable, ratio, allocated)
+           VALUES ($1, $2, $3, 1, 0)`,
+          [nodeId, resource, allocatable],
+        );
+  }
+
+  async function booked(reservationId: string) {
+    const { rows } = await db.query<{ node_id: string; resources: unknown }>(
+      `SELECT node_id, resources FROM allocations WHERE owner_id = $1`,
+      [reservationId],
+    );
+    return rows.map((row) => ({
+      nodeId: row.node_id,
+      resources: typeof row.resources === 'string' ? JSON.parse(row.resources) : row.resources,
+    }));
+  }
+
+  async function allocated(nodeId: string) {
+    const { rows } = await db.query<{ resource: string; allocated: string }>(
+      `SELECT resource, allocated::text FROM node_resources WHERE node_id = $1 ORDER BY resource`,
+      [nodeId],
+    );
+    return Object.fromEntries(rows.map((row) => [row.resource, Number(row.allocated)]));
+  }
+
+  async function storedRequest(reservationId: string) {
+    const { rows } = await db.query<{ request: unknown }>(
+      `SELECT request FROM reservations WHERE id = $1`,
+      [reservationId],
+    );
+    const request = rows[0]!.request;
+    return (typeof request === 'string' ? JSON.parse(request) : request) as {
+      resources?: Record<string, number>;
+      binding?: string;
+    };
+  }
+
+  it('books explicit resources on the chosen host, keeps quota to devices, and frees them on release', async () => {
+    await hostRows({ [NA]: { vcpu: 64, memoryGiB: 512 }, [NB]: { vcpu: 64, memoryGiB: 512 } });
+    const created = (await call(
+      'reservations',
+      'create',
+      create({ resources: { vcpu: 24, memoryGiB: 200 } }),
+    )) as Rsv;
+    expect(created.state).toBe('placed');
+    const [allocation] = await booked(created.id);
+    expect(allocation!.resources).toEqual({ vcpu: 24, memoryGiB: 200 });
+    expect(await allocated(allocation!.nodeId)).toEqual({ memoryGiB: 200, vcpu: 24 });
+    // Quota counts the GPUs only: the offer names `gpu`, and a missing row would grant 0.
+    expect(await readQuotas(db, 'acme', poolId)).toEqual([
+      expect.objectContaining({ resource: 'gpu', used: 2 }),
+    ]);
+    await call('reservations', 'release', { tenantId: 'acme', reservationId: created.id });
+    expect(await allocated(allocation!.nodeId)).toEqual({ memoryGiB: 0, vcpu: 0 });
+  });
+
+  it('defaults to the smallest per-GPU share among the pool’s hosts', async () => {
+    // na: 16 CPUs and 128 GiB per GPU; nb: 8 CPUs and 160 GiB per GPU (4 GPUs each).
+    await hostRows({ [NA]: { vcpu: 64, memoryGiB: 512 }, [NB]: { vcpu: 32, memoryGiB: 640 } });
+    const created = (await call('reservations', 'create', create())) as Rsv;
+    expect((await storedRequest(created.id)).resources).toEqual({ vcpu: 16, memoryGiB: 256 });
+    expect((await booked(created.id))[0]!.resources).toEqual({ vcpu: 16, memoryGiB: 256 });
+  });
+
+  it('takes policy.perGpu over the derived share, per resource', async () => {
+    await hostRows({ [NA]: { vcpu: 64, memoryGiB: 512 }, [NB]: { vcpu: 64, memoryGiB: 512 } });
+    await db.query(`UPDATE pools SET policy = '{"perGpu":{"vcpu":6}}'::jsonb WHERE id = $1`, [poolId]);
+    const created = (await call('reservations', 'create', create())) as Rsv;
+    expect((await storedRequest(created.id)).resources).toEqual({ vcpu: 12, memoryGiB: 256 });
+  });
+
+  it('books nothing extra where hosts have no rows, and for slices only', async () => {
+    const created = (await call('reservations', 'create', create())) as Rsv;
+    expect(created.state).toBe('placed');
+    expect((await storedRequest(created.id)).resources).toBeUndefined();
+    expect((await booked(created.id))[0]!.resources).toEqual({});
+  });
+
+  it('leaves a request that fits no host pending', async () => {
+    await hostRows({ [NA]: { vcpu: 64, memoryGiB: 512 }, [NB]: { vcpu: 64, memoryGiB: 512 } });
+    const created = (await call(
+      'reservations',
+      'create',
+      create({ resources: { vcpu: 65 } }),
+    )) as Rsv;
+    expect(created.state).toBe('pending');
+    expect(created.conditions.map((condition) => condition.type)).toContain('Unschedulable');
+  });
+
+  it('validates resources and the kubernetes binding', async () => {
+    for (const bad of [
+      create({ resources: { cpu: 4 } }),
+      create({ resources: { vcpu: -1 } }),
+      create({ resources: { vcpu: 1.5 } }),
+      create({ resources: { vcpu: 4097 } }),
+    ])
+      await expect(call('reservations', 'create', bad)).rejects.toMatchObject({
+        code: 'INVALID_INPUT',
+      });
+    await expect(
+      call('reservations', 'create', create({ binding: 'kubernetes' })),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT', message: expect.stringContaining('policy.kubernetes') });
+    await db.query(
+      `UPDATE pools SET policy = '{"kubernetes":{"apiServer":"https://k8s.example:6443","caCertSha256":"00","joinTokenRef":"secret://k8s/join"}}'::jsonb
+        WHERE id = $1`,
+      [poolId],
+    );
+    const created = (await call(
+      'reservations',
+      'create',
+      create({ binding: 'kubernetes', idempotencyKey: 'key-k8s' }),
+    )) as Rsv;
+    expect(created.state).toBe('placed');
+    expect((await storedRequest(created.id)).binding).toBe('kubernetes');
+    expect(recorded.authz.at(-1)?.attributes).toMatchObject({ binding: 'kubernetes' });
+  });
+});

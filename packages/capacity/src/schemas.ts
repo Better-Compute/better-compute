@@ -177,8 +177,27 @@ export const schemas = {
       binding: {
         type: 'string',
         default: 'hold',
-        description: 'hold (CDI devices) or node (a whole-node lease in a tenantRoot pool)',
+        description:
+          'hold (CDI devices), node (a whole-node lease in a tenantRoot pool) or kubernetes (the devices advertised to the node’s kubelet, in a pool with policy.kubernetes)',
       },
+      resources: strict(
+        {
+          vcpu: { type: 'integer', minimum: 0, maximum: 4096, description: 'Host CPUs per node' },
+          memoryGiB: {
+            type: 'integer',
+            minimum: 0,
+            maximum: 65_536,
+            description: 'Host memory per node, GiB',
+          },
+          hugepages1Gi: {
+            type: 'integer',
+            minimum: 0,
+            maximum: 4096,
+            description: '1 GiB hugepages per node',
+          },
+        },
+        [],
+      ),
       node: strict(
         {
           profileId: { type: 'string', pattern: '^[A-Za-z0-9._:/-]{1,128}$', maxLength: 128 },
