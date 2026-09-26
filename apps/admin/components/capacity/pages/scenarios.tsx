@@ -7,7 +7,6 @@ import { RiAddLine, RiArrowDownSLine, RiDeleteBinLine, RiFlaskLine, RiLinkM, RiL
 import { Button } from '@/components/base/buttons/button';
 import { useFleetCommands } from '@/components/fleet/commands';
 import { useFleet } from '@/components/fleet/use-fleet';
-import { actionsVersion as fleetActionsVersion } from '@/lib/data/fleet-actions';
 import { usePageCommands } from '@/components/shell/page-commands';
 import { Legend, TimeSeriesChart } from '@/components/ui/charts';
 import { useFeedback } from '@/components/ui/feedback';
@@ -420,11 +419,8 @@ function CordonButton({ nodeIds, done, onDone }: { nodeIds: string[]; done?: str
       leadingIcon={RiLockLine}
       className="mt-2"
       onClick={async () => {
-        const before = fleetActionsVersion();
-        await commands.cordon(nodes);
-        // Only record it when the command went through (not cancelled, not refused while time-travelling). In live
-        // mode the API applies it and the fleet refresh shows the result; this page doesn't track it there.
-        if (fleetActionsVersion() !== before) onDone(nodes.map((node) => node.id));
+        // true = applied (simulation) or every API call succeeded (live); false = cancelled, refused or failed.
+        if (await commands.cordon(nodes)) onDone(nodes.map((node) => node.id));
       }}
     >
       Cordon these {nodes.length} now

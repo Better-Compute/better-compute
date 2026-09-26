@@ -8,6 +8,7 @@ import { HourDrawer } from '../hour-drawer';
 import { Holders, UpcomingList } from '../upcoming';
 import { InsightList } from '../insights';
 import { ButtonLink } from '@/components/base/buttons/button';
+import { Select } from '@/components/ui/overlay';
 import { Legend, Sparkline, StackedBar, TimeSeriesChart } from '@/components/ui/charts';
 import { EmptyState, Grid, PageHeader, Panel } from '@/components/ui/panel';
 import { Mono, Tag } from '@/components/ui/signal';
@@ -112,7 +113,17 @@ export function CapacityOverviewPage() {
     from,
     to,
   );
-  const matrix = useMemo(() => heatMatrix(gpuRows, timelines, from, HOUR, (to - from) / HOUR), [gpuRows, timelines, from, to]);
+  // Heatmap rows: optionally one GPU model, sorted by pool, busiest now or most free now.
+  const [heatModel, setHeatModel] = useState('all');
+  const [heatSort, setHeatSort] = useState<'pool' | 'busy' | 'free'>('pool');
+  const heatModels = useMemo(() => [...new Set(gpuRows.map((row) => row.short))], [gpuRows]);
+  const heatRows = useMemo(() => {
+    const list = gpuRows.filter((row) => heatModel === 'all' || row.short === heatModel);
+    if (heatSort === 'busy') return [...list].sort((a, b) => b.utilization - a.utilization);
+    if (heatSort === 'free') return [...list].sort((a, b) => b.freeNow - a.freeNow);
+    return list;
+  }, [gpuRows, heatModel, heatSort]);
+  const matrix = useMemo(() => heatMatrix(heatRows, timelines, from, HOUR, (to - from) / HOUR), [heatRows, timelines, from, to]);
   const totals = useMemo(() => fleetTotals(rows), [rows]);
   const series = useMemo(() => fleetSeries([...timelines.values()]), [timelines]);
   const models = useMemo(() => byModel(rows), [rows]);
@@ -207,7 +218,25 @@ export function CapacityOverviewPage() {
           meta={`${fmtStamp(from)} → ${fmtStamp(to)} UTC`}
         >
           {/* Controls live in the body, where they can wrap on a phone; a panel header can't. */}
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <Select
+              label="GPU model"
+              value={heatModel}
+              onChange={setHeatModel}
+              options={[{ id: 'all', label: 'All models' }, ...heatModels.map((model) => ({ id: model, label: model }))]}
+              className="w-36"
+            />
+            <Segmented
+              label="Sort rows"
+              value={heatSort}
+              onChange={setHeatSort}
+              options={[
+                { id: 'pool', label: 'pool' },
+                { id: 'busy', label: 'busiest' },
+                { id: 'free', label: 'most free' },
+              ]}
+            />
+            <span className="flex-1" />
             <Segmented
               label="Heatmap span"
               value={span}
