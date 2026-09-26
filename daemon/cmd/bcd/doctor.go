@@ -122,6 +122,7 @@ func hostChecks(cfg *config.Config) []doctorCheck {
 		out = append(out, doctorCheck{"warn", "iommu", "no IOMMU: GPU passthrough to instances is unavailable"})
 	}
 	out = append(out, toolChecks(exec.LookPath)...)
+	out = append(out, hostResourceChecks()...)
 	out = append(out, gpuChecks(gpuSampler())...)
 	if cfg == nil {
 		return out
