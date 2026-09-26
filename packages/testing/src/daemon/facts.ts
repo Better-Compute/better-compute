@@ -35,6 +35,17 @@ export type DaemonFact =
       deviceIds: string[];
       generation: number;
     }
+  /**
+   * A Kubernetes-bound hold's devices were offered to the node's kubelet (bcd's device plugin or DRA
+   * slice), or withdrawn: withdrawn at the release, while pods may keep them (knobs.kubePodReleaseMs).
+   */
+  | {
+      type: 'kube.advertised' | 'kube.withdrawn';
+      at: number;
+      nodeId: string;
+      allocationId: string;
+      deviceIds: string[];
+    }
   /** The journal was lost and a new one (new journal_id) started. */
   | { type: 'journal.lost'; at: number; nodeId: string; oldJournalId: string; newJournalId: string }
   /** A daemon process started or died. */

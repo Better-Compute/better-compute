@@ -121,6 +121,82 @@ export function checkI1(input: {
   return violations;
 }
 
+/** A device set a node offered its kubelet for a Kubernetes-bound allocation over [from, to). */
+export interface KubeAdvertisement {
+  nodeId: string;
+  allocationId: string;
+  deviceIds: readonly string[];
+  from: number;
+  /** Exclusive; undefined while still offered. */
+  to?: number;
+}
+
+/**
+ * I1 for Kubernetes bindings (PLAN.md §3.8): no GPU is offered to a node's kubelet for one allocation
+ * while the control plane books it to another. A kubelet hands an offered device to a new pod at any
+ * moment, so an offer that outlives its allocation's booking into another's is a double booking on
+ * the node, however short.
+ */
+export function checkKubeAdvertisements(input: {
+  bookings: readonly BookingRow[];
+  advertisements: readonly KubeAdvertisement[];
+}): InvariantViolation[] {
+  const byDevice = new Map<string, BookingRow[]>();
+  for (const row of input.bookings) push(byDevice, row.deviceId, row);
+  const violations: InvariantViolation[] = [];
+  for (const offer of input.advertisements) {
+    const end = offer.to ?? Infinity;
+    for (const deviceId of offer.deviceIds)
+      for (const row of byDevice.get(deviceId) ?? []) {
+        if (row.allocationId === offer.allocationId || row.end <= offer.from || row.start >= end)
+          continue;
+        violations.push({
+          invariant: 'I1',
+          subject: offer.allocationId,
+          message: `node ${offer.nodeId} offered ${deviceId} to its kubelet for ${offer.allocationId} [${offer.from}, ${end}) while ${row.allocationId} books it [${row.start}, ${row.end})`,
+        });
+      }
+  }
+  return violations;
+}
+
+/** One `node_resources` row, sampled with the live claims on it. */
+export interface HostResourceSample {
+  at: number;
+  nodeId: string;
+  resource: string;
+  allocatable: number;
+  ratio: number;
+  allocated: number;
+  /** Σ the resource over the node's allocations not yet released. */
+  claimed: number;
+}
+
+/**
+ * I1 for host resources (vCPU, memory, hugepages): a host never has more allocated than
+ * floor(allocatable × ratio), and what is allocated is exactly what its live allocations claim
+ * (a release that subtracts twice, or a re-book that adds without a claim, drifts it).
+ */
+export function checkHostResources(samples: readonly HostResourceSample[]): InvariantViolation[] {
+  const violations: InvariantViolation[] = [];
+  for (const s of samples) {
+    const cap = Math.floor(s.allocatable * s.ratio);
+    if (s.allocated > cap)
+      violations.push({
+        invariant: 'I1',
+        subject: s.nodeId,
+        message: `at ${s.at} ${s.nodeId} has ${s.allocated} ${s.resource} allocated, over ${s.allocatable} × ${s.ratio}`,
+      });
+    if (s.allocated !== s.claimed)
+      violations.push({
+        invariant: 'I1',
+        subject: s.nodeId,
+        message: `at ${s.at} ${s.nodeId} has ${s.allocated} ${s.resource} allocated but its live allocations claim ${s.claimed}`,
+      });
+  }
+  return violations;
+}
+
 // ---------------------------------------------------------------------------------------------
 // I2: at most one execution per command; after a journal loss, non-retry-safe in-flight commands
 // fail rather than replay.

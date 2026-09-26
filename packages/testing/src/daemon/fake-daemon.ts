@@ -409,6 +409,11 @@ export class FakeDaemon {
   /** Desired states refused by signed intent, in arrival order. */
   private readonly specRejectionsValue: { generation: number; reason: string }[] = [];
   private readonly fs = new Map<string, string>();
+  /**
+   * Released Kubernetes holds whose pods still have the devices (knobs.kubePodReleaseMs): claimed until
+   * `until`, then AllocationReleased. On the daemon, not the process: bcd keeps them in releasing.json.
+   */
+  private readonly kubeReleasing = new Map<string, { deviceIds: string[]; generation: number; until: number }>();
   private hw: FakeHardware;
   private journalValue: MemoryJournal;
   private bootIdValue: string;
@@ -1690,8 +1695,8 @@ export class FakeDaemon {
     for (const { body: waiting } of [...proc.deferred.values()]) this.admit(waiting, true);
   }
 
-  private observedAllocations(): Map<string, { deviceIds: string[]; generation: number; reservationId: string }> {
-    const out = new Map<string, { deviceIds: string[]; generation: number; reservationId: string }>();
+  private observedAllocations(): Map<string, { deviceIds: string[]; generation: number; reservationId: string; kubernetes: boolean }> {
+    const out = new Map<string, { deviceIds: string[]; generation: number; reservationId: string; kubernetes: boolean }>();
     for (const [path, text] of this.fs) {
       if (!path.startsWith(CDI_DIR)) continue;
       const spec = JSON.parse(text) as {
@@ -1704,6 +1709,7 @@ export class FakeDaemon {
         deviceIds: spec.devices.map((d) => d.name),
         generation: Number(spec.annotations['bcd.dev/generation'] ?? 0),
         reservationId: spec.annotations['bcd.dev/reservation-id'] ?? '',
+        kubernetes: spec.annotations['bcd.dev/binding'] === 'kubernetes',
       });
     }
     return out;
@@ -1722,19 +1728,42 @@ export class FakeDaemon {
     const desired = section?.assignments ?? [];
     const observed = this.observedAllocations();
     const wantedIds = new Set(desired.map((a) => a.allocationId));
+    const now = this.scheduler.now();
+    const released = (allocationId: string, deviceIds: string[], gen: number) => {
+      this.log('alloc.released', { allocation: allocationId, generation: gen });
+      this.fact({ type: 'allocation.unbound', at: this.scheduler.now(), nodeId: this.nodeId, allocationId, deviceIds, generation: gen });
+      this.emitEvent('transition', 'allocation.released', {
+        case: 'attested',
+        value: this.attested({ case: 'allocationReleased', value: { allocationId, generation: BigInt(gen), deviceIds } }),
+      });
+    };
+    // Kubernetes releases whose pods let go: reported now (bcd's fail-closed InUse).
+    for (const [allocationId, pending] of [...this.kubeReleasing]) {
+      if (pending.until > now) continue;
+      this.kubeReleasing.delete(allocationId);
+      released(allocationId, pending.deviceIds, pending.generation);
+    }
     for (const [allocationId, hold] of [...observed].sort(([a], [b]) => (a < b ? -1 : 1))) {
       if (wantedIds.has(allocationId)) continue;
       this.fs.delete(cdiSpecPath(allocationId));
       this.fs.delete(envFilePath(allocationId));
       observed.delete(allocationId);
-      this.log('alloc.released', { allocation: allocationId, generation });
-      this.fact({ type: 'allocation.unbound', at: this.scheduler.now(), nodeId: this.nodeId, allocationId, deviceIds: hold.deviceIds, generation });
-      this.emitEvent('transition', 'allocation.released', {
-        case: 'attested',
-        value: this.attested({ case: 'allocationReleased', value: { allocationId, generation: BigInt(generation), deviceIds: hold.deviceIds } }),
-      });
+      if (hold.kubernetes) {
+        // Withdrawn from the kubelet at once; pods may keep the devices a while (claimed meanwhile).
+        this.fact({ type: 'kube.withdrawn', at: now, nodeId: this.nodeId, allocationId, deviceIds: hold.deviceIds });
+        const podMs = this.knobs.kubePodReleaseMs ?? 0;
+        if (podMs > 0) {
+          this.kubeReleasing.set(allocationId, { deviceIds: hold.deviceIds, generation, until: now + podMs });
+          this.log('alloc.releasing', { allocation: allocationId, generation, podMs });
+          this.later(podMs, () => this.converge('kube-release'));
+          continue;
+        }
+      }
+      released(allocationId, hold.deviceIds, generation);
     }
     const claimed = new Map<string, string>();
+    for (const [allocationId, pending] of this.kubeReleasing)
+      for (const id of pending.deviceIds) claimed.set(id, allocationId);
     for (const a of desired) {
       const hold = observed.get(a.allocationId);
       if (hold) for (const id of hold.deviceIds) claimed.set(id, a.allocationId);
@@ -1796,6 +1825,8 @@ export class FakeDaemon {
       proc.failedAllocations.delete(allocationId);
       this.log('alloc.bound', { allocation: allocationId, generation, devices: ids.length });
       this.fact({ type: 'allocation.bound', at: this.scheduler.now(), nodeId: this.nodeId, allocationId, deviceIds: ids, generation });
+      if (assignment.binding === Binding.KUBERNETES)
+        this.fact({ type: 'kube.advertised', at: this.scheduler.now(), nodeId: this.nodeId, allocationId, deviceIds: ids });
       this.emitEvent('transition', 'allocation.bound', {
         case: 'attested',
         value: this.attested({

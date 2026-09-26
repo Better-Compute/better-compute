@@ -1,5 +1,10 @@
 import type { DaemonFact, FactSink } from '../daemon/facts.js';
-import type { ExecutionFact, JournalLossFact, NodeBinding } from './invariants.js';
+import type {
+  ExecutionFact,
+  JournalLossFact,
+  KubeAdvertisement,
+  NodeBinding,
+} from './invariants.js';
 
 /**
  * Collects FakeDaemon facts (the ground truth of what nodes did) into the rows the invariant
@@ -10,6 +15,9 @@ export class FleetFacts implements FactSink {
   readonly journalLosses: JournalLossFact[] = [];
   /** Every CDI hold interval; `to` is unset while still bound. */
   readonly bindings: NodeBinding[] = [];
+  /** Every offer of a Kubernetes-bound hold's devices to a kubelet; `to` is unset while offered. */
+  readonly advertisements: KubeAdvertisement[] = [];
+  private readonly offered = new Map<string, KubeAdvertisement>();
   /** Process starts and stops. */
   readonly processes: Extract<DaemonFact, { type: 'process.started' | 'process.stopped' }>[] = [];
   /** I4 ground truth: per node, when a gateway received one of its frames (sim time, ascending). */
@@ -88,6 +96,27 @@ export class FleetFacts implements FactSink {
         const binding = this.open.get(key);
         if (binding) binding.to = fact.at;
         this.open.delete(key);
+        return;
+      }
+      case 'kube.advertised': {
+        const key = `${fact.nodeId}/${fact.allocationId}`;
+        const previous = this.offered.get(key);
+        if (previous) previous.to ??= fact.at;
+        const offer: KubeAdvertisement = {
+          nodeId: fact.nodeId,
+          allocationId: fact.allocationId,
+          deviceIds: [...fact.deviceIds],
+          from: fact.at,
+        };
+        this.advertisements.push(offer);
+        this.offered.set(key, offer);
+        return;
+      }
+      case 'kube.withdrawn': {
+        const key = `${fact.nodeId}/${fact.allocationId}`;
+        const offer = this.offered.get(key);
+        if (offer) offer.to = fact.at;
+        this.offered.delete(key);
         return;
       }
       case 'journal.lost':

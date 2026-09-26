@@ -41,6 +41,12 @@ export interface FakeDaemonKnobs {
   };
   /** The next `n` CDI writes fail; the devices section reports PROGRESSING and retries. */
   cdiWriteFailures: number;
+  /**
+   * Pods keep a released Kubernetes hold's devices this long (ms; 0: none): bcd stops offering them
+   * at once but keeps them claimed, and reports AllocationReleased only once the pods let go (its
+   * fail-closed InUse). A new hold on them meanwhile fails with overlap.
+   */
+  kubePodReleaseMs?: number;
 }
 
 /** What a kind handler can see and do on its node. */
