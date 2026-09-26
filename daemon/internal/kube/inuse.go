@@ -116,16 +116,21 @@ func (m *Manager) offersGPUs() bool {
 // open (/dev/nvidia<minor>, the minor from /proc/driver/nvidia/gpus/*/information). An unreadable
 // driver directory or process table is no evidence either way.
 func (m *Manager) podProcessHolds(deviceIDs []string) bool {
-	// As the DaemonSet (no hostPID) /proc is bcd's own pod: no evidence there, and bcd's own
-	// nvidia-smi would look like a holder. Hosted relies on pod-resources and the DRA record.
-	if m.Hosted && m.ProcRoot == "" {
-		return false
-	}
 	gpus := map[string]bool{}
 	for _, id := range deviceIDs {
 		if ResourceOf(id) == ResourceGPU {
 			gpus[GPUOf(id)] = true
 		}
+	}
+	return m.podProcessHoldsGPUs(gpus)
+}
+
+// podProcessHoldsGPUs reports whether a process in a pod's cgroup has one of gpus (UUIDs) open.
+func (m *Manager) podProcessHoldsGPUs(gpus map[string]bool) bool {
+	// As the DaemonSet (no hostPID) /proc is bcd's own pod: no evidence there, and bcd's own
+	// nvidia-smi would look like a holder. Hosted relies on pod-resources and the DRA record.
+	if m.Hosted && m.ProcRoot == "" {
+		return false
 	}
 	if len(gpus) == 0 {
 		return false
@@ -207,4 +212,69 @@ func (m *Manager) gpuMinors() map[string]int {
 		}
 	}
 	return out
+}
+
+// HeldOutside reports whether a pod may hold a bcd GPU of an allocation not in live: a device plugin
+// id <atom>@<allocation>, or a gpu.bcd.dev device (prepared for a claim in the DRA driver's record,
+// or claimed by a pod in pod-resources) whose name carries another allocation's tag, or a pod
+// process with one of gpuUUIDs open. gpuUUIDs are the whole GPUs no live allocation holds (a
+// process cannot be told apart by allocation, so a live one's GPUs would always match). It fails
+// closed like InUse: true when a node that is or was a worker cannot ask its kubelet, or the DRA
+// record is unreadable; false on a node that never was a worker. The devices converger clears an
+// unreadable releasing.json's blanket claim once it answers false.
+func (m *Manager) HeldOutside(ctx context.Context, live map[string]bool, gpuUUIDs []string) bool {
+	m.init()
+	if !m.worker() {
+		return false
+	}
+	tags := map[string]bool{}
+	for alloc := range live {
+		tags[draDeviceName("", alloc)] = true
+	}
+	outside := func(device string) bool {
+		i := strings.LastIndex(device, "-")
+		return i < 0 || !tags[device[i:]]
+	}
+	if m.dra.preparedOutside(outside) {
+		return true
+	}
+	gpus := map[string]bool{}
+	for _, uuid := range gpuUUIDs {
+		gpus[uuid] = true
+	}
+	if m.podProcessHoldsGPUs(gpus) {
+		return true
+	}
+	if _, err := os.Stat(m.PodResources); err != nil {
+		return true
+	}
+	client := connect.NewClient[ListPodResourcesRequest, ListPodResourcesResponse](unixClient(m.PodResources),
+		"http://localhost"+procListPodResources, connect.WithGRPC(), connect.WithCodec(codec{}))
+	lctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	resp, err := client.CallUnary(lctx, connect.NewRequest(&ListPodResourcesRequest{}))
+	if err != nil {
+		return true
+	}
+	node := m.nodeName()
+	for _, pod := range resp.Msg.Pods {
+		for _, c := range pod.Containers {
+			for _, d := range c.Devices {
+				if !strings.HasPrefix(d.ResourceName, "bcd.dev/") {
+					continue
+				}
+				for _, id := range d.DeviceIDs {
+					if _, alloc, ok := strings.Cut(id, "@"); !ok || !live[alloc] {
+						return true
+					}
+				}
+			}
+			for _, d := range c.Claimed {
+				if d.Driver == DRADriverName && d.Pool == node && outside(d.Device) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

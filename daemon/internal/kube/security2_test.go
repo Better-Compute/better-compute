@@ -107,3 +107,51 @@ func TestInUseProcessBackstop(t *testing.T) {
 		t.Fatal("a host daemon holding the GPU counted as a pod")
 	}
 }
+
+// HeldOutside: whether a pod may hold a bcd GPU of an allocation outside the live set (clearing an
+// unreadable releasing.json's blanket claim), failing closed like InUse.
+func TestHeldOutside(t *testing.T) {
+	m, kubelet, sys, _, _ := securityRig(t)
+	ctx := context.Background()
+	kubelet.mu.Lock()
+	kubelet.podList = []PodResources{
+		{Name: "a", Namespace: "ml", Containers: []ContainerResources{{Name: "main", Devices: []ContainerDevices{{ResourceName: ResourceGPU, DeviceIDs: []string{"GPU-1@a1"}}}}}},
+		{Name: "b", Namespace: "ml", Containers: []ContainerResources{{Name: "main", Claimed: []ClaimedDevice{{Driver: DRADriverName, Pool: "n1", Device: draDeviceName("GPU-2", "a2")}}}}},
+		{Name: "c", Namespace: "ml", Containers: []ContainerResources{{Name: "main", Claimed: []ClaimedDevice{{Driver: DRADriverName, Pool: "other-node", Device: draDeviceName("GPU-3", "a3")}}}}},
+	}
+	kubelet.mu.Unlock()
+	if m.HeldOutside(ctx, map[string]bool{"a1": true, "a2": true}, nil) {
+		t.Fatal("every held device is live, yet something is held outside")
+	}
+	for name, live := range map[string]map[string]bool{"device plugin": {"a2": true}, "DRA": {"a1": true}} {
+		if !m.HeldOutside(ctx, live, nil) {
+			t.Errorf("%s: a pod holding a device of a non-live allocation went unnoticed", name)
+		}
+	}
+	// A claim prepared for a non-live allocation's device counts, pods or not.
+	kubelet.mu.Lock()
+	kubelet.podList = nil
+	kubelet.mu.Unlock()
+	m.init()
+	m.dra.mu.Lock()
+	if err := m.dra.savePreparedLocked(map[string]string{draDeviceName("GPU-4", "a4"): "u4"}); err != nil {
+		t.Fatal(err)
+	}
+	m.dra.mu.Unlock()
+	if !m.HeldOutside(ctx, map[string]bool{"a1": true}, nil) || m.HeldOutside(ctx, map[string]bool{"a4": true}, nil) {
+		t.Fatal("the prepared record was not checked against the live allocations")
+	}
+	// Fails closed without pod-resources on a worker; false on a node that never was one.
+	m.PodResources = filepath.Join(m.Dir, "absent.sock")
+	if !m.HeldOutside(ctx, map[string]bool{"a4": true}, nil) {
+		t.Fatal("a worker without pod-resources answered nothing held outside")
+	}
+	sys.Delete(StateFile)
+	m.init()
+	m.dra.mu.Lock()
+	_ = m.dra.savePreparedLocked(map[string]string{})
+	m.dra.mu.Unlock()
+	if m.HeldOutside(ctx, nil, nil) {
+		t.Fatal("a node that never was a worker holds nothing")
+	}
+}

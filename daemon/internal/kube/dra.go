@@ -372,6 +372,22 @@ func (d *draDriver) unprepared(uid string) error {
 	return d.savePreparedLocked(next)
 }
 
+// preparedOutside reports whether a prepared device matches outside (an unreadable record: true).
+func (d *draDriver) preparedOutside(outside func(device string) bool) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	prepared := d.preparedLocked()
+	if d.unreadable {
+		return true
+	}
+	for device := range prepared {
+		if outside(device) {
+			return true
+		}
+	}
+	return false
+}
+
 // preparedWithSuffix reports whether a device whose DRA name ends in suffix (an allocation's tag) is
 // prepared for a claim: a pod may hold it until the kubelet unprepares the claim. An unreadable
 // record answers true.
