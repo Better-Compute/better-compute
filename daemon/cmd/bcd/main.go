@@ -86,7 +86,7 @@ func joinFlags(fs *flag.FlagSet) {
 	fs.String("token-file", "", "read the join token from this file (removed once the join succeeded)")
 	fs.String("node-id", "", "the node an installed OS joins as (a provisioned token; the identity must match)")
 	fs.String("server", "", "the control plane URL: its well-known join key when join-encryption.jwk is absent, and its gateway and pins when config.toml is")
-	fs.String("attestor", "", "the attestor (default join-token; provisioned with --node-id)")
+	fs.String("attestor", "", "the attestor (default join-token; provisioned with --node-id; tpm: the host's TPM (/dev/tpmrm0) and no token)")
 	fs.String("serving-ca-pin", "", "sha256/<base64> pin of the gateway serving CA (required to join without config.toml)")
 	fs.String("join-signing-pin", "", "sha256/<base64> pin of the key that signs JoinResponse (required to join without config.toml)")
 	fs.String("join-encryption-pin", "", "sha256/<base64> pin of the key the join token is sealed to (required to join without config.toml)")

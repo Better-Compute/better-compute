@@ -13,6 +13,7 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
 	"github.com/better-compute/better-compute/daemon/internal/nvml"
 	"github.com/better-compute/better-compute/daemon/internal/runtime"
+	"github.com/better-compute/better-compute/daemon/internal/tpm"
 )
 
 // hardwareBackend names the inventory source this binary was built with.
@@ -69,6 +70,19 @@ func newRuntimes(dataDir, _ string) []runtime.Runtime {
 // newSimHost: simulated machines exist only in fakehw builds.
 func newSimHost(string, uint64, func()) (agent.Host, error) {
 	return nil, errors.New("bcd sim needs a fakehw build (go build -tags fakehw)")
+}
+
+// tpmDevice is the kernel's TPM resource manager: it loads and flushes contexts per open file, so
+// bcd's transient keys never collide with another TPM user's.
+const tpmDevice = "/dev/tpmrm0"
+
+// openTPM is the host's TPM for the tpm join attestor.
+func openTPM(string) (tpm.Transport, func(), error) {
+	d, err := tpm.OpenDevice(tpmDevice)
+	if err != nil {
+		return nil, nil, err
+	}
+	return d, func() { _ = d.Close() }, nil
 }
 
 // newHost is the machine bcd runs on; a reboot goes through systemd so units stop cleanly.

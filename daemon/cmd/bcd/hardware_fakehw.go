@@ -14,6 +14,8 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/fakehw"
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
 	"github.com/better-compute/better-compute/daemon/internal/runtime"
+	"github.com/better-compute/better-compute/daemon/internal/tpm"
+	"github.com/better-compute/better-compute/daemon/internal/tpm/tpmsim"
 )
 
 // hardwareBackend names the inventory source this binary was built with.
@@ -31,6 +33,19 @@ func fakeSeed() uint64 {
 // collectInventory returns the fake HGX H100 node for BCD_FAKEHW_SEED.
 func collectInventory() (*inventory.NodeInventory, error) {
 	return fakehw.Inventory(fakeSeed()), nil
+}
+
+// openTPM is the fake machine's TPM: a software TPM (tpmsim) kept in <data_dir>/fakehw-tpm.json, the
+// same EK on every join of this machine.
+func openTPM(dataDir string) (tpm.Transport, func(), error) {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return nil, nil, err
+	}
+	sim, err := tpmsim.Load(filepath.Join(dataDir, "fakehw-tpm.json"))
+	if err != nil {
+		return nil, nil, err
+	}
+	return sim, func() {}, nil
 }
 
 // newHost is a fake machine in the data directory: its files live under fakehw-root/, its boot id in

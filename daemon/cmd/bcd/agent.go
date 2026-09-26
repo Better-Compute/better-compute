@@ -27,6 +27,7 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/kube"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
 	"github.com/better-compute/better-compute/daemon/internal/runtime"
+	"github.com/better-compute/better-compute/daemon/internal/tpm"
 	"github.com/better-compute/better-compute/daemon/internal/transport"
 )
 
@@ -188,18 +189,43 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 	}
 
 	var token string
-	if tokenFile != "" {
+	var attest agent.ChallengeAttestor
+	switch {
+	case attestor == "tpm":
+		// The TPM is the credential (its EK; the attestor decides where the machine joins): no token
+		// is read, and none is sent.
+		if tokenFile != "" {
+			fmt.Fprintln(stderr, "bcd join: --attestor tpm joins without a token; drop --token-file")
+			return exitUsage
+		}
+		_ = os.Unsetenv("BCD_JOIN_TOKEN")
+		dev, closeTPM, err := openTPM(cfg.DataDir)
+		if err != nil {
+			fmt.Fprintf(stderr, "bcd join: the TPM: %v\n", err)
+			return exitFailure
+		}
+		defer closeTPM()
+		a, err := tpm.NewAttestor(dev)
+		if err != nil {
+			fmt.Fprintf(stderr, "bcd join: %v\n", err)
+			return exitFailure
+		}
+		defer a.Close()
+		attest = a
+	case tokenFile != "":
 		raw, err := readTokenFile(tokenFile)
 		if err != nil {
 			fmt.Fprintf(stderr, "bcd join: %v\n", err)
 			return exitFailure
 		}
 		token = strings.TrimSpace(strings.TrimPrefix(string(raw), "\uFEFF"))
-	} else if token, err = readToken(); err != nil {
-		fmt.Fprintf(stderr, "bcd join: %v\n", err)
-		return exitUsage
+	default:
+		if token, err = readToken(); err != nil {
+			fmt.Fprintf(stderr, "bcd join: %v\n", err)
+			return exitUsage
+		}
 	}
-	if _, ok := pki.ParseJoinToken(token); !ok {
+	if _, ok := pki.ParseJoinToken(token); !ok && attest == nil {
 		fmt.Fprintln(stderr, "bcd join: that is not a join token (bcjt_...)")
 		return exitUsage
 	}
@@ -239,6 +265,7 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 		Token:         token,
 		Role:          role,
 		Attestor:      attestor,
+		Attest:        attest,
 		EncryptionKey: encKey,
 		SignerPin:     signerPin,
 		Claims:        agent.Claims(inv, host.Hostname(), bootID),
