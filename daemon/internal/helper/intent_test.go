@@ -1,6 +1,7 @@
 package helper
 
 import (
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -76,6 +77,62 @@ func full(units ...*agentv1.ConfigUnit) *agentv1.DesiredStateBody {
 
 func sysctl(json string) *agentv1.ConfigUnit {
 	return &agentv1.ConfigUnit{Unit: "sysctl", ConfigJson: json}
+}
+
+// Root's join record names the node: another node's signed spec is refused from the first request on
+// (no trust on first use), a root re-join moves the binding and starts the generations over, and a
+// record the pinned JoinService key did not sign refuses every host.unit.
+func TestHostUnitBindsTheJoinedNode(t *testing.T) {
+	signer := newIntentSigner(t, "worker", time.Now().Add(time.Hour))
+	pin := sha256.Sum256(signer.root)
+	joinCert := func() (*ecdsa.PrivateKey, []byte) {
+		key, _ := pki.GenerateKey()
+		tmpl := &x509.Certificate{SerialNumber: big.NewInt(9), Subject: pkix.Name{CommonName: "join"},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return key, der
+	}
+	joinKey, joinDER := joinCert()
+	joinPin, _ := pki.SPKISHA256(&joinKey.PublicKey)
+	sys := hostconfig.NewFakeSystem()
+	s := &Server{HostSystem: sys, CommandRootPins: [][]byte{pin[:]}, JoinSigningPin: joinPin}
+	joined := func(node string, key *ecdsa.PrivateKey, der []byte) {
+		t.Helper()
+		body, _ := proto.Marshal(&agentv1.JoinResponseBody{NodeId: node, CertChain: [][]byte{{1}}})
+		sig, err := pki.SignP1363(key, pki.SigningInput(pki.PurposeJoinResponse, body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := WriteJoinRecord(sys, &agentv1.JoinResponse{Body: body, Sig: &commonv1.Signature{Kid: "join", Sig: sig, Chain: [][]byte{der}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ask := func(node string, generation uint64) error {
+		return s.checkIntent(Request{Op: "host.unit", Unit: "sysctl", Settings: json.RawMessage(`{"vm.swappiness":10}`),
+			Intent: signedSpec(t, signer, node, generation, full(sysctl(`{"vm.swappiness":10}`)))})
+	}
+	expect := func(err error, want string) {
+		t.Helper()
+		if want == "" && err != nil || want != "" && (err == nil || !strings.Contains(err.Error(), want)) {
+			t.Fatalf("err = %v, want %q", err, want)
+		}
+	}
+
+	joined("node_a", joinKey, joinDER)
+	// Without the record, this first spec would have bound the helper to node_b.
+	expect(ask("node_b", 5), "not this node")
+	expect(ask("node_a", 5), "")
+	// Root joins the machine again, as node_c.
+	joined("node_c", joinKey, joinDER)
+	expect(ask("node_a", 6), "not this node")
+	expect(ask("node_c", 1), "")
+	// A record another key signed decides nothing, and refuses.
+	otherKey, otherDER := joinCert()
+	joined("node_c", otherKey, otherDER)
+	expect(ask("node_c", 2), "not a JoinResponse signed by the pinned JoinService key")
 }
 
 func TestHostUnitNeedsTheSignedSpec(t *testing.T) {

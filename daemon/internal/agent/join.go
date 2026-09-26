@@ -50,6 +50,9 @@ type JoinOptions struct {
 	Version string
 	// DataDir receives the key and the identity.
 	DataDir string
+	// Record, when set, keeps the verified JoinResponse that issued the identity, as signed (bcd join
+	// as root under bcd helper: root's record the helper takes the node's id from).
+	Record func(resp *agentv1.JoinResponse) error
 	// Attempts bounds the retries of retryable failures (default 20).
 	Attempts int
 	Backoff  session.Backoff
@@ -203,6 +206,12 @@ func Join(ctx context.Context, o JoinOptions) (*State, error) {
 				attestation, challenges = evidence, 0
 			}
 			continue
+		}
+		if o.Record != nil {
+			// Before the identity: a join whose record failed is re-run whole, never left half kept.
+			if err := o.Record(resp); err != nil {
+				return nil, fmt.Errorf("agent: keep the signed join response: %w", err)
+			}
 		}
 		return persistJoin(o, key, out.Body)
 	}

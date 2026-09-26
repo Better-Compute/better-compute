@@ -204,6 +204,36 @@ func (g *tpmGateway) Join(ctx context.Context, req *agentv1.JoinRequest) (*agent
 	return g.joinService.Join(ctx, req)
 }
 
+// Record keeps the signed response that issued the identity (root's join record under bcd helper),
+// before the identity: a failed record fails the join and leaves no identity behind.
+func TestJoinRecordsTheSignedResponse(t *testing.T) {
+	join := func(f *joinService, dir string, record func(*agentv1.JoinResponse) error) error {
+		_, err := Join(context.Background(), JoinOptions{
+			Client: f, Token: "bcjt_join_01k5w0000000000000000000000." + strings.Repeat("A", 43),
+			EncryptionKey: &f.encKey.PublicKey, SignerPin: f.pin, DataDir: dir, Record: record,
+			Sleep: func(context.Context, time.Duration) error { return nil },
+		})
+		return err
+	}
+	f := joinFixture(t)
+	var kept []*agentv1.JoinResponse
+	if err := join(f, t.TempDir(), func(r *agentv1.JoinResponse) error { kept = append(kept, r); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	body := &agentv1.JoinResponseBody{}
+	if len(kept) != 1 || proto.Unmarshal(kept[0].GetBody(), body) != nil || body.GetNodeId() != f.nodeID ||
+		!pki.VerifySignature(pki.PurposeJoinResponse, [][]byte{kept[0].GetBody()}, kept[0].GetSig(), pki.Trust{Pin: f.pin}) {
+		t.Fatalf("kept %v", kept)
+	}
+	dir := t.TempDir()
+	if err := join(joinFixture(t), dir, func(*agentv1.JoinResponse) error { return errors.New("disk full") }); err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("a failed record: %v", err)
+	}
+	if _, _, err := LoadState(dir); !errors.Is(err, ErrNotJoined) {
+		t.Fatalf("an identity was kept without its record: %v", err)
+	}
+}
+
 // A tpm join (v0.5): no token; the TPM's evidence, the challenge answered with the same CSR.
 func TestJoinWithTPM(t *testing.T) {
 	sim, err := tpmsim.New()

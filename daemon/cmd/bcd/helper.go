@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"time"
 
+	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/agent"
 	"github.com/better-compute/better-compute/daemon/internal/config"
 	"github.com/better-compute/better-compute/daemon/internal/helper"
@@ -146,6 +147,16 @@ func runHelper(fs *flag.FlagSet, _, stderr io.Writer) int {
 		return exitFailure
 	}
 	return exitOK
+}
+
+// joinRecorder keeps the signed JoinResponse as root's join record on a node under bcd helper (the
+// install runs bcd join as root): the helper takes the node's id from it for host units. Nil for a
+// node without [helper], or a join not run as root (it could not write root's record).
+func joinRecorder(cfg *config.Config) func(*agentv1.JoinResponse) error {
+	if cfg.Helper.Socket == "" || os.Geteuid() != 0 {
+		return nil
+	}
+	return func(resp *agentv1.JoinResponse) error { return helper.WriteJoinRecord(&hostconfig.OSSystem{}, resp) }
 }
 
 // listenHelper opens the socket: 0660, group the node's. Root never changes a path the node could

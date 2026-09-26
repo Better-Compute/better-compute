@@ -244,6 +244,7 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 		Claims:        agent.Claims(inv, host.Hostname(), bootID),
 		Version:       version,
 		DataDir:       cfg.DataDir,
+		Record:        joinRecorder(cfg),
 		Log:           log,
 	})
 	token = ""

@@ -32,8 +32,8 @@ type HostIntent struct {
 	TrustBundle []byte   `json:"trustBundle,omitempty"`
 }
 
-// IntentRecord is where the helper keeps, as root, what it last accepted: the node it serves (the
-// first signed spec names it), the newest host-section body (which also stands verified after its
+// IntentRecord is where the helper keeps, as root, what it last accepted: the node it serves (root's
+// JoinRecord names it; without one, the first signed spec), the newest host-section body (which also stands verified after its
 // worker certificate expires: a spec unchanged for days keeps its first signature), and the newest
 // trust bundle (an older one is a rollback) and whether its roots made signed intent mandatory.
 const IntentRecord = hostconfig.StateDir + "/helper-intent.json"
@@ -46,6 +46,44 @@ type intentRecord struct {
 	// Signed is set once a trust bundle with command-signing roots was accepted: from then on a
 	// host.unit without a signed spec is refused, whatever the node says.
 	Signed bool `json:"signed,omitempty"`
+}
+
+// JoinRecord is where bcd join, run as root on a node under the helper, keeps the signed
+// JoinResponse that issued the node's identity (WriteJoinRecord). The helper takes the node's id from
+// it, checked against root's join_signing_key_pin, instead of trusting the first signed spec it sees.
+const JoinRecord = hostconfig.StateDir + "/join-response.pb"
+
+// WriteJoinRecord keeps a verified JoinResponse as root's join record.
+func WriteJoinRecord(sys hostconfig.System, resp *agentv1.JoinResponse) error {
+	raw, err := proto.Marshal(resp)
+	if err != nil {
+		return err
+	}
+	return sys.WriteFile(JoinRecord, raw, 0o600)
+}
+
+// joinedNode returns the node id root's join record names, or "" without a record (a node joined
+// before the record existed: the first signed spec names it). A record that does not verify
+// refuses: it is root's, so something is wrong.
+func (s *Server) joinedNode() (string, error) {
+	raw, err := s.HostSystem.ReadFile(JoinRecord)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("host.unit: %s: %w", JoinRecord, err)
+	}
+	resp := &agentv1.JoinResponse{}
+	body := &agentv1.JoinResponseBody{}
+	if len(s.JoinSigningPin) == 0 || proto.Unmarshal(raw, resp) != nil ||
+		!pki.VerifySignature(pki.PurposeJoinResponse, [][]byte{resp.GetBody()}, resp.GetSig(), pki.Trust{Pin: s.JoinSigningPin}) ||
+		proto.Unmarshal(resp.GetBody(), body) != nil {
+		return "", fmt.Errorf("host.unit: %s is not a JoinResponse signed by the pinned JoinService key", JoinRecord)
+	}
+	if body.GetNodeId() == "" || len(body.GetCertChain()) == 0 {
+		return "", fmt.Errorf("host.unit: %s issued no identity", JoinRecord)
+	}
+	return body.GetNodeId(), nil
 }
 
 // maxIntent bounds the signed spec a request carries (roots, bundle and body).
@@ -120,6 +158,15 @@ func (s *Server) checkIntent(req Request) error {
 	}
 	if roots == nil {
 		return nil // an install without signed intent
+	}
+	joined, err := s.joinedNode()
+	if err != nil {
+		return err
+	}
+	if joined != "" && rec.NodeID != joined {
+		// Root joined this machine (again): the node is the record's, and generations another
+		// identity applied do not carry over.
+		rec.NodeID, rec.Generation, rec.BodySHA256 = joined, 0, ""
 	}
 	body := &agentv1.DesiredStateBody{}
 	sig := &commonv1.Signature{}
