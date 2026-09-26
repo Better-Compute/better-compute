@@ -44,6 +44,9 @@ sources:
   - packages/rollout/README.md
   - packages/server/src/options.ts
   - packages/server/src/downloads.ts
+  - daemon/cmd/bcd/reset.go
+  - daemon/cmd/bcd/doctor.go
+  - daemon/internal/agent/state.go
   - PLAN.md
   - .claude/coordination.md
 ---
@@ -661,7 +664,10 @@ without the section, so disable that unit yourself). In helper mode it:
    [node keys through the helper](/docs/daemon#node-keys-through-the-helper)). Scripts from 0ba2a79 until then added
    `bcd` to `tss` and wrote a udev rule; an upgrade run takes `bcd` out of `tss` when it is a member (`gpasswd -d bcd
    tss`, or busybox `delgroup bcd tss`) and deletes `/etc/udev/rules.d/60-bcd-tpm.rules`. It does not change the
-   device's current group or mode back;
+   device's current group or mode back. Until that run, a host installed between 0ba2a79 and 8870b8d keeps `bcd` in
+   `tss`, and since e6c3f53 `bcd doctor` fails its `tpm` check there: "bcd is in the tss group: it can send the TPM
+   any command (lock or clear its hierarchies); bcd helper holds the node keys, so remove it (gpasswd -d bcd tss)
+   and restart bcd.service". Rerun the script, or do that by hand;
 7. after `bcd join` (which runs as root), gives `/var/lib/bcd` to `bcd:bcd` and starts `bcd-helper.service` before
    `bcd.service`; an upgrade run does the same with restarts.
 
@@ -759,6 +765,52 @@ cannot, and logs a warning instead of failing. [bcd on Kubernetes](/docs/daemon/
 
 The node then opens its session (see [sessions](/docs/daemon/sessions)) and appears as `adopting`. Tokens,
 attestors, refusals and certificates are covered in [joining nodes](/docs/guides/nodes/joining).
+
+### Joining again with --reset
+
+`bcd join` on a machine whose identity loads answers `already joined as <node>` and exits 0, whatever state the
+certificate is in: expired, revoked, refused at renewal, or naming an AK this TPM no longer has. That keeps a join
+unit safe to run on every boot, but it cannot bring such a node back. Since a1c1a46 `--reset` can:
+
+```bash
+# as root: see what it would move (moves nothing, exits 2)
+bcd join --config /etc/bcd/config.toml --reset
+# move the identity aside and join again, here with the TPM
+bcd join --config /etc/bcd/config.toml --reset --yes --attestor tpm
+# or with a new join token on standard input
+bcd join --config /etc/bcd/config.toml --reset --yes < join-token.txt
+```
+
+| Flag | Does |
+| --- | --- |
+| `--reset` | Before the join, moves the node's identity aside: `identity.json`, `node.key` and a pending `node.key.next`, whichever exist in `data_dir`, each renamed `<name>.reset-<UTC time>` (for example `node.key.reset-20260926T114200Z`) |
+| `--yes` | Confirms `--reset`. Without it bcd prints which files it would move, that the join that follows makes a new key (a new node, unless the attestor proves this machine and reclaims it), and exits 2 |
+
+What it does and does not do:
+
+- **Root only.** Outside development (fakehw) builds a non-root `--reset` fails with "run it as root", exit 1.
+- **Nothing is deleted.** The old files stay in `data_dir` under their new names, so an operator can still read
+  them (a TPM key's record still names its key). Remove them yourself once the node is back.
+- **Then the usual join.** The move happens after the configuration loads and before the join reads any
+  credential, so the same run needs the join's credential as any join: a token (`BCD_JOIN_TOKEN`, standard input or
+  `--token-file`), `--attestor tpm`, or `--node-id` for an installed OS. If the join then fails, the identity stays
+  moved aside and a later plain `bcd join` joins. bcd's own hints spell it as two runs, `bcd join --reset --yes`,
+  then `bcd join`. With nothing to move, `--reset` does nothing and the join goes on.
+- **Same node or a new one.** An attestor that proves the machine (`tpm` with the same EK, `provisioned`) reclaims
+  the node it is bound to. A token join of a machine whose trusted hardware key the old node still holds needs a
+  token with `allowReclaim` (see
+  [placeholder hardware and reclaims](/docs/guides/nodes/joining#placeholder-hardware-and-reclaims)); to join as a new
+  node instead, cordon and delete the old one first (`better-compute nodes delete <node> --yes`; see
+  [removing an adopted host](/docs/guides/nodes/operating-nodes#removing-an-adopted-host)).
+- **The journal is not moved.** `journal.db` stays. When the machine comes back as a new node id, move it aside by
+  hand before `bcd node` starts, or the node refuses it ("the journal belongs to node `<old>`, not `<new>`").
+- **Under `[helper]`** the join writes the new `node.key` and `identity.json` as root. Hand `data_dir` back to the
+  node and restart both units, as the install script does: `chown -R bcd:bcd /var/lib/bcd`, then restart
+  `bcd-helper.service` and `bcd.service`. Re-running the install script also does the `chown` and the restarts.
+
+`bcd doctor` points at it: the `identity` check fails for an identity that does not load and for an expired
+certificate, and both details end with "bcd join --reset --yes, then bcd join". `TestJoinReset` covers the dry run,
+the move and that no identity loads afterwards.
 
 ## Site agents and the ramdisk
 

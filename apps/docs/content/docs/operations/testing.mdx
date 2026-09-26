@@ -70,6 +70,10 @@ sources:
   - tests/e2e/helper-vps.test.ts
   - tests/testing-helper-vps-host.test.ts
   - tests/testing-fake-daemon.test.ts
+  - scripts/helper-e2e.mjs
+  - daemon/internal/helper/roote2e/roote2e_linux_test.go
+  - daemon/cmd/bcd/reset_test.go
+  - daemon/cmd/bcd/doctor_tss_test.go
 ---
 
 import { Activity, Scale, Terminal } from '@/lib/icons';
@@ -419,6 +423,23 @@ node scripts/daemon-test.mjs --build-bcd              # also writes daemon/bin/b
 | `--build-bcd` | Also build the fakehw `bcd` for linux/amd64 |
 | `packages...` | Go package patterns (default `./...`) |
 
+**bcd helper as root.** `node scripts/helper-e2e.mjs [--distro NAME] [-v]` (da8751e) is the one test that runs
+`bcd helper` as real root. It builds bcd and `internal/helper/roote2e` with `-tags nonvml,helpere2e` (which gives bcd
+an e2e-only `helper-call`, so the node's requests come from the installed binary as the `bcd` user), renders the
+install script with `--unprivileged --instance-bridges bcbr0`, and runs `TestHelperAsRoot` as root under
+`unshare --mount --net`, over overlays of `/etc`, `/usr/local` and `/var` and a fresh `/run`, so the host is never
+changed (the test fails outside private namespaces). On Windows it runs in WSL as root; on Linux it needs root;
+elsewhere, or without `unshare` and `useradd`, it prints why and exits 0. Its steps: the script's unprivileged mode;
+the helper started as `bcd-helper.service` runs it; signed host units and their refusals; libvirt against a fake
+`virsh`; `cloud-hypervisor` with real taps (b9667d5); and since 035fc41 self-update under the helper, with the
+script's `[update]` pinning the two release keys of `daemon/internal/pki/testdata/release.json` (threshold 2,
+sequence 5). That step checks that `update.prepare` refuses a tampered manifest, another digest and a missing one;
+that `update.swap` refuses nothing staged, a symlink, a root-owned file and other bytes without moving `current`;
+that a good swap puts the release in slot b behind the entrypoint (sequence 7 recorded in `upgrade.json`), after
+which a second swap and confirming another version are refused; that `update.rollback` brings the installed binary
+back and `update.settle` records the release as failed, so preparing it again is refused; and that the slots and
+records are root's and not group- or world-writable, with the swap in the helper's log.
+
 **Site agent, ramdisk and instances.** The site agent and ramdisk have Go tests only; no end-to-end or interop suite
 runs `bcd site` or `bcd ramdisk` against the control plane yet (a VPS host has one, below). The agent tests drive a real `Agent` over a scripted
 session (`newHarness`), answering its `SecretRequest`s with sealed JWEs:
@@ -462,6 +483,7 @@ sockets. Only `TestRealKernel` touches a real kernel.
 | `internal/agent`, `internal/runtime` volume tests | Persistent volumes: sparse, grown and never shrunk, discarded; attached in order by serial; one writer, handoffs within a pass, what running VMs have open; grown volumes told to running guests (550da91, b5415a2, 448dc5f, 39458f9, 408e002) |
 | `internal/kube` `TestHostedManager`, `TestDRADriver`, `TestResourceSliceV1beta1`, `TestUnhealthyDevicesAreNeverOffered` | Hosted mode's device plugins and `bcd.dev/*` labels without a join (1e5f96b); the DRA driver's registration, slice, prepare and reaper (7d24836, fa8611e); an unhealthy GPU never offered by either API (6f5a99f) |
 | `cmd/bcd` `TestResourceChecks`, `TestHelperRuntimeChecks` | `bcd doctor`'s cgroup, huge page, `vfio-pci` and systemd checks (ab26e87), and the `libvirt` and `cloud-hypervisor` checks under the helper: the node out of the `libvirt` group, `dynamic_ownership = 0` and QEMU's user in the node's group (ed3c7d2), and `cloud-hypervisor` warning without `[helper] instance_bridges` (7fe74a1) |
+| `cmd/bcd` `TestDoctorTSS`, `TestJoinReset` | `bcd doctor`'s `tpm` check: silent without `[helper]`, a failure naming `gpasswd -d bcd tss` for a node user in `tss`, silent outside it or without a `tss` group (e6c3f53); `bcd join --reset`: nothing to move lets the join go on, an unconfirmed reset moves nothing and exits 2, a confirmed one renames `identity.json` and `node.key` to `.reset-` names, after which no identity loads (a1c1a46) |
 | `cmd/bcd` `TestAnUnprivilegedNodesRuntimes`, `internal/helper` `ch_test.go`, `internal/runtime` `TestCloudHypervisorUnderTheHelper`, `TestCHRecordRefusals` | `cloud-hypervisor` under the helper against fakes (d86fcbe, 7fe74a1, 94843ec): both runtimes kept for an unprivileged node, taps only of bcd's names on allowed bridges, a launch never taking another running unit's uid, VFIO only for whole groups of this host's GPUs and never a group another running VMM's user owns, root's checks of the instance record; since 1c9684a the running domain's live usage (CPU time, memory, tap counters) read from its cgroup and taps as the node, with no `ch.*` operation |
 | `internal/agent` `TestNodeKeyInTheTPM`, `internal/tpm` `TestNodeKey` | The node key in `tpmsim` (965c14d, 50e18f9, 0ba2a79): a join stores only the record, the key loads again, node statements verify under the certificate's key and `kid`, renewal makes the next key in the TPM (and moves a file-key node there), no TPM means no load; SHA-256 and -384 signatures, a CSR, `TPM2_Certify` by the AK. `cmd/bcd` `TestUserCanOpen` went with the check it tested (8870b8d) |
 | `internal/helper` `TestHelperTPMKeys` | An unprivileged node's TPM node keys through the helper's `tpm.*` operations against `tpmsim` (8870b8d): the same key and AK as the TPM's own, signing, certifying, at most 8 keys loaded with the least recently used unloaded, a released key derived again, and refusals of bad shapes, unknown verbs and a helper without a TPM. `tests/cli-pki.test.ts` asserts the install script no longer adds `bcd` to `tss` and removes it on upgrade |

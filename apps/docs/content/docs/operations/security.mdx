@@ -65,6 +65,8 @@ sources:
   - daemon/internal/agent/rebind.go
   - packages/pki/src/attestors/tpm.ts
   - packages/server/src/join/service.ts
+  - daemon/cmd/bcd/doctor.go
+  - tests/server-join-tpm-renew.test.ts
 ---
 
 Better Compute runs commands as root on your machines, so its security model starts from one question: who can make
@@ -276,7 +278,7 @@ and bcd has it since 28dc2ae:
   install-script` pins `command_root_sha256` from `--command-root-sha256` or the local PKI bundle (59985ae), which
   closes that window. The trust-on-first-use binding of the node id is closed by root's join record (a966cd4), except
   on nodes joined before it, which have no record. `bcd doctor` (as root, with `[helper]`) warns on such a node
-  (f77c6f9); re-join it as root with a new token after moving its identity aside, since re-running the install script
+  (f77c6f9); re-join it as root with `bcd join --reset --yes` (a1c1a46), since re-running the install script
   on a joined node writes no record. See [signed specs](/docs/daemon/host-config#signed-specs).
 - **Root writes only under root's directories** (02485b3, f8e13ef). Whenever bcd writes as root for a config unit,
   every existing directory from `/` down to the file must be a real directory owned by root and writable by no one
@@ -314,7 +316,7 @@ The limits are plain. A host installed with `--unprivileged` before d418820 keep
 until the install script runs again (see
 [upgrading an unprivileged libvirt host](/docs/daemon/install#upgrading-an-unprivileged-libvirt-host)); `bcd doctor`
 fails it until then. Likewise a host installed between 0ba2a79 and 8870b8d keeps `bcd` in `tss` until the script runs
-again, and no `bcd doctor` check reports it. The helper covers files, the firewall table, GPU resets, reboots, sshd
+again; since e6c3f53 `bcd doctor` fails its `tpm` check there (`gpasswd -d bcd tss`, then restart `bcd.service`). The helper covers files, the firewall table, GPU resets, reboots, sshd
 reloads, host units, self-update, libvirt, cloud-hypervisor (tested against fakes only) and the TPM's node keys; PLAN.md's `mig.apply` is not a
 helper operation, and bcx plugins need a root node (`--unprivileged` refuses `--plugins`). The default install still runs `bcd node` as root. See
 [privilege separation](/docs/daemon#privilege-separation) and
@@ -572,13 +574,43 @@ See [tenancy](/docs/guides/iam/tenancy).
 
 - Unexpected errors answer `500` with `INTERNAL_ERROR` and a generic message; the detail goes only to `log.error`.
 - Join, renew and secret refusals are one generic `ACCESS_DENIED` to the agent; the reason goes to audit
-  (`security.join.refused`, `security.secret.refused`), rate-limited per reason.
+  (`security.join.refused`, `security.renew.refused` since 0e42018, `security.secret.refused`), rate-limited per
+  reason.
 - A report a node sends about another node becomes `security.node-mismatch` and never reaches a handler, and a
   report about another node's allocation is ignored.
 - `/.well-known/better-compute` publishes only public key members; a private JWK member never passes.
 - The PKI bundle is sealed at rest, and `pki show` reads only its public half.
 - `bcd` reads its join token from `BCD_JOIN_TOKEN` or standard input, never from arguments, and never echoes a
   positional argument.
+
+### Refused renewals
+
+Until 0e42018 a refused `Renew` was only a `renew refused` line in the server log. JoinService now also publishes
+`security.renew.refused` for every `ACCESS_DENIED` renewal, in its own short transaction after the renewal's has
+rolled back, so the event survives the refusal. Who sees it depends on how far the caller got:
+
+| The caller | Tenant | `subject` | Reasons |
+| --- | --- | --- | --- |
+| Proved possession of the current key (the leaf is compute's own, current certificate and `pop_sig` verified) | The node's owner (`nodes.owner_tenant_id`) | `node/<nodeId>` | `renew:replay`, and a refused key attestation: `renew:key-attestation-missing`, `renew:key-attestation-ak`, `renew:node-key-*`, `renew:tpm-ak-uri`, `renew:key-statement-unknown`, `renew:key-statement-unsupported` |
+| Anyone else | The IAM root tenant (`rootTenantId`); nothing is published without one | `renew` | `renew:chain`, `renew:client-time`, `renew:proof`, `renew:csr`, `renew:certificate`, `renew:revoked`, `renew:retired`, `renew:peer` |
+
+The split is deliberate: a node certificate is public, so anyone can present one with a bad proof, and such a
+refusal must not land in the owner's event stream or name its node. The payload carries reasons only:
+
+<TypeTable
+  type={{
+    reason: { type: 'string', description: "'renew:<reason>' from JoinService ('renew:denied' when the error carried none).", required: true },
+    nodeId: { type: 'string', description: 'Only for a caller that proved the current key.' },
+    gatewayId: { type: 'string', description: 'The gateway that relayed the call, when known.' },
+    suppressed: { type: 'number', description: 'Refusals of the same reason dropped by the rate bound since the last event.', required: true },
+  }}
+/>
+
+The rate bound is the one join refusals use (`refusalEventsPerMinute`, default 60 a minute), keyed per renew reason.
+A renewal that bcd never sends (its TPM unavailable, or another AK than the certificate names) produces no event;
+bcd logs `renewal failed`. `tests/server-join-tpm-renew.test.ts` checks both cases: a missing key attestation is the
+owner's event naming the node, and a proof by someone else's key over the node's certificate is the root tenant's,
+subject `renew`, with no node.
 
 ### The HTTP API
 

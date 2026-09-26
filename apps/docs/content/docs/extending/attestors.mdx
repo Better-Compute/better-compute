@@ -30,6 +30,11 @@ sources:
   - packages/observability/src/instrument.ts
   - tests/pki-attestors-join.test.ts
   - tests/pki-attestors-tpm.test.ts
+  - tests/server-join-tpm-renew.test.ts
+  - packages/server/src/join/crypto.ts
+  - packages/server/src/join/pki.ts
+  - daemon/cmd/bcd/main.go
+  - daemon/internal/agent/join.go
   - PLAN.md
   - .claude/coordination.md
 ---
@@ -52,8 +57,9 @@ The verifier is what you register. The producer for real machines is Go in `bcd`
 `@better-compute/pki` exist for the FakeDaemon and tests.
 
 <Callout type="warn" title="The agent half">
-`bcd` is built but not released, it joins only with `join-token` (it answers no attestor challenge), and it has no
-plug-in point for third-party producers. A custom attestor can be
+`bcd` joins with the built-in attestors only: `join-token` (the default), `provisioned` (`--node-id`), `tpm`
+(`--attestor tpm`, the only challenge it answers) and, from `bcd ramdisk`, `discovery`. It has no plug-in point for
+third-party producers. A custom attestor can be
 registered and exercised end to end today with TypeScript agents (`runAgentJoin` in `@better-compute/testing`), but a
 real machine needs a `bcd` that sends its `JoinRequest.attestor` and `attestation`.
 </Callout>
@@ -167,9 +173,18 @@ roles it may admit (`node`, `site`, `ramdisk`), and `verify` receives:
     allowedKinds: { type: 'readonly string[]', description: "Restricts the command kinds the certificate allows: exact kinds or prefix.* globs. A malformed entry fails the join with INVALID_CONFIG." },
     bind: { type: 'Uint8Array', description: 'A 32-byte stable hardware identity (a hash). Bound to the node in node_bindings after issuing; the same subject can never admit another node.' },
     nodeKey: { type: "'tpm'", description: "Where you proved the node key lives: 'tpm' when the machine's TPM certified the CSR's key as one it made and never lets out. Absent means not proven. JoinService records it as nodeKey in node.joined and the join audit row ('unattested' when absent)." },
-    nodeKeyUri: { type: 'string', description: "A urn:bc: statement about the node key that JoinService writes into the certificate after its SPIFFE ID (tpm: urn:bc:tpm-ak:<nameAlg>:<digest>, the AK that certified it; d94f1f3). Renewals carry it forward and must prove it again for the new key: pkiJoinCrypto's verifyKeyStatements knows only urn:bc:tpm-ak:, and refuses the renewal of any other statement (key-statement-unknown)." },
+    nodeKeyUri: { type: 'string', description: "A urn:bc: statement about the node key that JoinService writes into the certificate after its SPIFFE ID (tpm: urn:bc:tpm-ak:<nameAlg>:<digest>, the AK that certified it; d94f1f3). Renewals carry it forward and must prove it again for the new key, so JoinService writes it only when JoinCrypto.knowsKeyStatement accepts it (0e42018): pkiJoinCrypto knows only urn:bc:tpm-ak:, and a join returning any other nodeKeyUri is refused (node-key-statement), never issued a certificate that could not renew." },
   }}
 />
+
+A custom attestor has no statement of its own to return. Since 0e42018 JoinService refuses a result whose
+`nodeKeyUri` the configured `JoinCrypto` cannot prove at renewal (`knowsKeyStatement`, which `pkiJoinCrypto` answers
+true only for a well-formed `urn:bc:tpm-ak:`; a `JoinCrypto` without the method knows none): the join fails with
+`ACCESS_DENIED`, recorded as
+`security.join.refused` reason `join:node-key-statement`. Before, such a join got a certificate carrying the
+statement, and every renewal of it was refused (`key-statement-unknown`), so the node went offline when its first
+certificate ran out. Leave `nodeKeyUri` unset unless you return `urn:bc:tpm-ak:` for a key a TPM's AK certified;
+`tests/server-join-tpm-renew.test.ts` joins through an attestor returning `urn:bc:other-key:1` and sees it refused.
 
 JoinService then checks the rest itself: the token's `expect` binding when you returned a `tokenId`, a trusted hardware
 key already enrolled (a reclaim through a token needs `allowReclaim`), and that a reclaimed node keeps its tenant,

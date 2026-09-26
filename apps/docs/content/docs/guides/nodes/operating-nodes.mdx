@@ -257,7 +257,22 @@ identity, for example after its TPM or disk was replaced (see
 2. Wait until it holds no open allocation: release its reservations, or let them end.
 3. Delete it. Its certificates are revoked, and its attestor bindings (a `tpm` join's EK binding included) and its
    trusted hardware key are freed.
-4. Join the machine again (a new token, or `bcd join --attestor tpm`). It joins as a new node.
+4. On the machine, as root, join again with `--reset --yes` and the join's credential (a new token, or
+   `--attestor tpm`). The delete revoked the old certificate but left the files on the machine, and an identity that
+   still loads would only answer `already joined`; `--reset` moves it aside first (see
+   [joining again with --reset](/docs/daemon/install#joining-again-with---reset)). The machine joins as a new node.
+
+```bash
+better-compute nodes cordon node_01k5w… --tenant $TENANT --reason 'TPM replaced'
+# ... once the node holds no open allocation:
+better-compute nodes delete node_01k5w… --tenant $TENANT --reason 'TPM replaced' --yes
+# then on the machine, as root:
+bcd join --config /etc/bcd/config.toml --reset --yes --attestor tpm
+```
+
+`nodes delete` (4049621) takes `--reason` and `--if-version` like the other node changes, and without `--yes` it
+refuses with a usage error before making any call (`nodes delete removes <node> for good; re-run with --yes`). From a
+client:
 
 ```ts
 await client.nodes.cordon({ tenantId, nodeId, reason: 'TPM replaced' });
@@ -265,7 +280,13 @@ await client.nodes.cordon({ tenantId, nodeId, reason: 'TPM replaced' });
 await client.nodes.delete({ tenantId, nodeId, reason: 'TPM replaced' });
 ```
 
-The CLI has no `nodes delete` command; call the method through a client.
+<Callout type="warn" title="A new node id and the old journal">
+`bcd join` moves an old journal aside only when the old identity still loads and names another node. After
+`--reset` it no longer loads, so a machine that joins as a new node keeps the old node's `journal.db` in `data_dir`,
+and `bcd node` then refuses to start ("the journal belongs to node `<old>`, not `<new>`"). Move
+`/var/lib/bcd/journal.db` aside as well before restarting `bcd.service`. A re-join that reclaims the same node (a
+cleared TPM, the same EK) is not affected.
+</Callout>
 
 ## The nodes API
 

@@ -149,7 +149,7 @@ writes a type outside the catalog.
 | `fleet.*` | `fleet/{id}` | fleet | `fleet.drifted`, `fleet.converged` |
 | `rollout.*` | `rollout/{id}` | rollout | `rollout.started`, `paused`, `resumed`, `aborted`, `completed` |
 | `tunnel.*` | `tunnel/{id}` | server | `tunnel.issued` |
-| `security.*` | varies | server | `security.join-token.created`, `security.join-token.revoked`, `security.site-token.created`, `security.site-token.revoked`, `security.join.refused`, `security.certificate-revoked`, `security.node.identity-revoked`, `security.node.duplicate-session` and `security.node.quarantined` (from the gateway), `security.secret.put`, `security.secret.deleted`, `security.secret.refused`, `security.workload.refused` (v0.5) |
+| `security.*` | varies | server | `security.join-token.created`, `security.join-token.revoked`, `security.site-token.created`, `security.site-token.revoked`, `security.join.refused`, `security.renew.refused` (0e42018; see [refused renewals](/docs/operations/security#refused-renewals)), `security.certificate-revoked`, `security.node.identity-revoked`, `security.node.duplicate-session` and `security.node.quarantined` (from the gateway), `security.secret.put`, `security.secret.deleted`, `security.secret.refused`, `security.workload.refused` (v0.5) |
 | `webhook.ping` | `webhook/{id}` | events | A test delivery from `webhooks.ping` |
 
 The catalog names the subject each family is declared with, but code is the final word: `tunnel.issued`, for

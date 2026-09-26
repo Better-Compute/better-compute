@@ -43,6 +43,8 @@ sources:
   - packages/pki/src/spiffe.ts
   - packages/server/src/join/pki.ts
   - daemon/internal/agent/renew.go
+  - daemon/cmd/bcd/reset.go
+  - packages/cli/src/commands/nodes.ts
   - daemon/internal/agent/renew_tpm_test.go
   - daemon/internal/agent/state.go
   - daemon/internal/pki/join.go
@@ -304,7 +306,11 @@ that TPM.
    issues the certificate with two URI SANs: the SPIFFE ID first, then
    `urn:bc:tpm-ak:<nameAlg>:<digest>`, the AK's TPM name in hex (`tpmAkUri`; the name covers the AK's whole public
    area, so only that key matches it). A join without a certified key (any other attestor, or `nodeKey: 'any'`
-   without a certification) gets no statement and renews as before.
+   without a certification) gets no statement and renews as before. Since 0e42018 JoinService writes a statement
+   only when renewals can prove it again (`JoinCrypto.knowsKeyStatement`; `pkiJoinCrypto` knows `urn:bc:tpm-ak:`
+   alone): a join whose attestor returns any other `nodeKeyUri` is refused with `node-key-statement`
+   (`security.join.refused` reason `join:node-key-statement`) rather than issued a certificate that could never
+   renew.
 2. **Where Renew reads it.** From the presented leaf, which must already be byte for byte compute's own
    `node_certs` row, never from the CSR. A CSR that asks for no SAN at all still gets the statement back, and a CSR
    cannot remove it.
@@ -316,7 +322,9 @@ that TPM.
    qualifying data, the certified name, `fixedTPM`, `fixedParent`, `sensitiveDataOrigin` and a signing key, and
    that the key's SPKI is the CSR's.
 4. **No downgrade.** A missing or failing attestation refuses the renewal with `ACCESS_DENIED` ("Renew refused"),
-   and JoinService logs `renew refused` with the node id and the reason. The new certificate carries the statement
+   and JoinService logs `renew refused` with the node id and the reason. Since 0e42018 it also publishes
+   `security.renew.refused` to the node owner, naming the node (see
+   [refused renewals](/docs/operations/security#refused-renewals)). The new certificate carries the statement
    forward, so the next renewal needs the AK again.
 
 | Reason | Meaning |
@@ -344,7 +352,7 @@ key with a warning, this one fails the renewal instead and sends nothing.
 | At renewal | What bcd does |
 | --- | --- |
 | The TPM cannot be opened | `renewal: the certificate's node key is in the TPM, which is unavailable: ...` |
-| The TPM derives another AK | `renewal: this TPM's attestation key is not the one the certificate names (was the TPM cleared? run bcd join again)` |
+| The TPM derives another AK | `renewal: this TPM's attestation key is not the one the certificate names (another TPM, or its endorsement seed changed): the certificate cannot be renewed here; join again: bcd join --reset --yes, then bcd join` (a1c1a46) |
 | The TPM cannot make or certify the next key | `renewal: the next node key in the TPM: ...` or `renewal: the TPM's attestation key certifying the next key: ...` |
 
 Each failure is logged as `renewal failed` with the attempt and `expiresIn`, and retried with backoff from
@@ -353,28 +361,49 @@ Each failure is logged as `renewal failed` with the attempt and `expiresIn`, and
 
 #### Recovering a node whose TPM changed
 
-A `tpm`-joined node recovers by joining again with its TPM, `bcd join --attestor tpm`. The attestor keys the
+A `tpm`-joined node recovers by joining again with its TPM. `bcd join` alone joins only when the old identity no
+longer loads; one that still loads answers `already joined as <node>` whatever state its certificate is in. Since
+a1c1a46 `bcd join --reset --yes` moves the old identity aside first, so the recovery command is the same whichever
+case you are in:
+
+```bash
+# as root on the machine
+bcd join --config /etc/bcd/config.toml --reset --yes --attestor tpm
+```
+
+`--reset` renames `identity.json`, `node.key` and a pending `node.key.next` to `<name>.reset-<UTC time>` in the data
+directory (nothing is deleted) and the join then runs as on a new machine; see
+[joining again with --reset](/docs/daemon/install#joining-again-with---reset) for its guards. The attestor keys the
 machine on the SHA-256 of its EK, so what happens depends on whether the EK survived:
 
 - **The EK is the same** (for example after `TPM2_Clear`, which resets the owner hierarchy's seed but not the
   endorsement seed the EK and AK come from). The node key is a primary of the owner hierarchy, so the same
-  `node.key` record now derives another key, and bcd no longer loads its identity ("the node key does not match the
-  node certificate"). `bcd join` then finds no usable identity and joins, and the attestor reclaims the node that EK
-  is bound to: the same node id, a new identity generation (every older certificate revoked), a new certified key
-  and a fresh AK statement. If `bcd join` still answers `already joined as <node>` (the identity loads, but renewal
-  fails), remove `identity.json` and `node.key` from the data directory first; that is what the e2e test does to
-  model a reinstall. bcd has no command that does this for you.
-- **The EK is new** (another TPM, a replaced board, a reset endorsement hierarchy). The attestor does not know the
-  EK, but the old node still exists: it holds the binding to the old EK and, usually, the machine's trusted hardware
-  key, and a join whose hardware key another node holds is refused (`reclaim`), since a `tpm` join carries no
-  `allowReclaim`. Remove the old node first, then join again:
-  1. cordon the old node (`nodes.cordon`) and wait until it holds no open allocation;
-  2. delete it (`nodes.delete`, which since 54cad9e accepts a cordoned `adopted` node): its certificates are
-     revoked and its EK binding and trusted hardware key are freed (see
-     [removing an adopted host](/docs/guides/nodes/operating-nodes#removing-an-adopted-host));
-  3. on the machine, remove `identity.json` and `node.key` if `bcd join` answers `already joined`, and run
-     `bcd join --attestor tpm`. The machine joins wherever your `resolve` or `enrollment` sends it, as a new node
-     (with neither, it is refused).
+  `node.key` record now derives another key, and bcd no longer loads its identity: "the node key does not match the
+  node certificate: the TPM derives another key from node.key (was the TPM cleared?); join again: bcd join --reset
+  --yes, then bcd join" (since a1c1a46 this hint is on the key mismatch, where a clear shows; the AK survives a
+  clear). The join finds no usable identity, and the attestor reclaims the node that EK is bound to: the same node
+  id, a new identity generation (every older certificate revoked), a new certified key and a fresh AK statement.
+  Here a plain `bcd join --attestor tpm` would work too, since the identity no longer loads; `--reset` keeps the old
+  files instead of overwriting them.
+- **The EK is new** (another TPM, a replaced board, a reset endorsement hierarchy). The renewal's AK check fails
+  ("another TPM, or its endorsement seed changed"). The attestor does not know the EK, but the old node still
+  exists: it holds the binding to the old EK and, usually, the machine's trusted hardware key, and a join whose
+  hardware key another node holds is refused (`reclaim`), since a `tpm` join carries no `allowReclaim`. Remove the
+  old node first, then join again:
+  1. cordon the old node (`better-compute nodes cordon`, `nodes.cordon`) and wait until it holds no open
+     allocation;
+  2. delete it (`better-compute nodes delete <node> --yes`, 4049621; `nodes.delete`, which since 54cad9e accepts a
+     cordoned `adopted` node): its certificates are revoked and its EK binding and trusted hardware key are freed
+     (see [removing an adopted host](/docs/guides/nodes/operating-nodes#removing-an-adopted-host));
+  3. on the machine, as root, run `bcd join --reset --yes --attestor tpm`. The machine joins wherever your
+     `resolve` or `enrollment` sends it, as a new node (with neither, it is refused). It has a new node id, so move
+     the old `journal.db` in the data directory aside too before `bcd node` starts, or it refuses the old node's
+     journal (see [the callout there](/docs/guides/nodes/operating-nodes#removing-an-adopted-host)).
+
+`bcd join --reset` without `--yes` moves nothing: it prints what it would move and exits 2. The hints bcd prints
+spell the recovery as two runs, `bcd join --reset --yes`, then `bcd join`; one run with both does the same, because
+the reset happens before the join reads any credential. If the join after a reset fails, the identity stays moved
+aside and a later `bcd join` joins.
 
 A node that joined with a token has no statement, so its renewal does not depend on the TPM's AK. Its node key, if
 in the TPM, still needs that TPM to load: after a clear it joins again with a token, and a token join of a known
@@ -399,7 +428,8 @@ bcd join --config /etc/bcd/config.toml --attestor tpm
   `<data_dir>/fakehw-tpm.json`, the same EK on every join of that machine.
 - **The rounds.** `agent.Join` sends the evidence, answers up to 3 challenge rounds for the same CSR, and waits out
   a pending approval (`enrollment`) before a fresh challenge round. A machine that already joined answers
-  `already joined as <node>` without touching the TPM.
+  `already joined as <node>` without touching the TPM, unless `--reset --yes` moved its identity aside first
+  ([recovering a node whose TPM changed](#recovering-a-node-whose-tpm-changed)).
 - **The node key, certified** (cf24876). When node keys can use a TPM on this host (below), `agent.Join` makes the
   join's node key in the attestor's own TPM (`tpm.Attestor.HoldNodeKey`, through the `NodeKeyHolder` interface),
   and the round-2 answer carries the AK's `TPM2_Certify` of it over `sha256(csr)`. If the TPM cannot make that key,
@@ -446,7 +476,9 @@ results, discovery assertions, secret and workload-token requests) and the WebSo
 - **What it protects.** Such a key cannot be copied off the machine, but anyone with the owner hierarchy's
   authorization on that TPM (root on the node) can derive and use it: non-exportable, not root-proof.
 - **Seeing it.** `bcd doctor` has a `node key` check: `ok` "in the TPM", `ok` for a file key on a host with no TPM,
-  and `warn` for a file key on a host with a TPM (the next renewal moves it into the TPM). `bcd status` prints
+  and `warn` for a file key on a host with a TPM ("the next renewal moves it into the TPM (through bcd helper when
+  bcd node runs unprivileged)"). Under `[helper]` its `tpm` check (e6c3f53) fails while the node's user is still in
+  the `tss` group. `bcd status` prints
   `node key in the TPM` or `node key a file` on its identity line, and its JSON carries `nodeKey` (`tpm` or `file`).
 
 What the control plane knows about it depends on how the key was made:

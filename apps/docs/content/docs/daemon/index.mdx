@@ -12,6 +12,7 @@ sources:
   - daemon/cmd/bcd/agent.go
   - daemon/cmd/bcd/status.go
   - daemon/cmd/bcd/doctor.go
+  - daemon/cmd/bcd/reset.go
   - daemon/cmd/bcd/site.go
   - daemon/cmd/bcd/ramdisk.go
   - daemon/cmd/bcd/sim.go
@@ -202,7 +203,7 @@ Beside the modes, bcd has five local commands, all of which work:
 
 | Command | Does |
 | --- | --- |
-| `bcd join` | Joins the fleet with a join token read from `BCD_JOIN_TOKEN`, standard input or `--token-file` (deleted once the join succeeds), never from arguments. `--role` is `node` (the default) or `site`; the token decides what is allowed. It seals the token to the key in `join-encryption.jwk` next to the config, or, when that file is absent and `--server https://…` is given, to `join.encryptionJwk` from the control plane's `/.well-known/better-compute`; either key is refused unless it matches `join_encryption_key_pin`. `--node-id` joins an installed OS with the `provisioned` attestor and fails unless the joined node is that one; `--attestor` names another. It verifies the signed `JoinResponse`, writes `node.key` (a PKCS#8 key, or the record of a key it made in the host's TPM; see [the node key in the TPM](/docs/guides/nodes/attestation#the-node-key-in-the-tpm)) and `identity.json` under `data_dir`, and prints `joined as <node> (site <site>, role <role>)`. With `--server` and no `config.toml` at all, it reads the gateway (`gateway.url`, `serverName`, which the server publishes when its options set `gateway.url`) from that well-known document, checks the document's pins against `--serving-ca-pin`, `--join-signing-pin` and `--join-encryption-pin` (all three required on a host build; a fakehw build may take them from the document, which is trust on first use), joins, then writes `config.toml` (0600, naming the data directory from `--data-dir`, default `/var/lib/bcd`) and `join-encryption.jwk` (0644); see [joining from the well-known document](/docs/daemon/install#joining-from-the-well-known-document). With a `config.toml`, pin flags given must match it. A node that already joined exits 0 without a token, so a join unit may run on every boot; a different `--node-id` is refused |
+| `bcd join` | Joins the fleet with a join token read from `BCD_JOIN_TOKEN`, standard input or `--token-file` (deleted once the join succeeds), never from arguments. `--role` is `node` (the default) or `site`; the token decides what is allowed. It seals the token to the key in `join-encryption.jwk` next to the config, or, when that file is absent and `--server https://…` is given, to `join.encryptionJwk` from the control plane's `/.well-known/better-compute`; either key is refused unless it matches `join_encryption_key_pin`. `--node-id` joins an installed OS with the `provisioned` attestor and fails unless the joined node is that one; `--attestor` names another. It verifies the signed `JoinResponse`, writes `node.key` (a PKCS#8 key, or the record of a key it made in the host's TPM; see [the node key in the TPM](/docs/guides/nodes/attestation#the-node-key-in-the-tpm)) and `identity.json` under `data_dir`, and prints `joined as <node> (site <site>, role <role>)`. With `--server` and no `config.toml` at all, it reads the gateway (`gateway.url`, `serverName`, which the server publishes when its options set `gateway.url`) from that well-known document, checks the document's pins against `--serving-ca-pin`, `--join-signing-pin` and `--join-encryption-pin` (all three required on a host build; a fakehw build may take them from the document, which is trust on first use), joins, then writes `config.toml` (0600, naming the data directory from `--data-dir`, default `/var/lib/bcd`) and `join-encryption.jwk` (0644); see [joining from the well-known document](/docs/daemon/install#joining-from-the-well-known-document). With a `config.toml`, pin flags given must match it. A node that already joined exits 0 without a token, so a join unit may run on every boot; a different `--node-id` is refused. `--reset --yes` (a1c1a46, as root) first moves an identity that still loads but no longer works aside, so the machine joins again; see [joining again with --reset](/docs/daemon/install#joining-again-with---reset) |
 | `bcd status` | Asks the running agent (node, site or ramdisk) over its root-only unix socket (`--socket`, default `/run/bcd/bcd.sock`; `--json` for JSON) for its node, site and role, boot, session epoch and clock offset, applied and observed generations with each section's state, running and deferred commands, the event backlog, certificate expiry, what holds the node key (`in the TPM` or `a file`; `nodeKey` in JSON, 50e18f9), trust bundle version and whether signed intent is enforced. Since ad8791f also the machine: one line per GPU read now, a `kubernetes` line and a `telemetry` line (see [below](#bcd-status)) |
 | `bcd doctor` | Checks the configuration file, NVML, the hardware backend, `/dev/kvm`, IOMMU units, a TCP connection to the gateway and the node's identity |
 | `bcd update` | Shows the self-update slots, the release floor, a pending update and the versions that failed to start (`--config`); `--clear-failed` lets a failed version be tried again. See [self-update](/docs/daemon/install#self-update) |
@@ -255,7 +256,9 @@ ok    kubernetes 1 allowed clusters
 ```
 
 A missing `/dev/kvm` or IOMMU is a warning (the host cannot run VPS instances, or pass GPUs through to them), and so
-is a node that has not joined. A host with neither `virsh` nor `cloud-hypervisor` gets a warning that it runs no VPS
+is a node that has not joined. An identity that is there but does not load (a node key that no longer matches its
+certificate, an unreadable `identity.json`) is a failure since a1c1a46 (it was a warning); its detail, like that of
+an expired certificate, ends with the way back: `join again as root: bcd join --reset --yes, then bcd join`. A host with neither `virsh` nor `cloud-hypervisor` gets a warning that it runs no VPS
 instances. With either, doctor reports the runtime it found and checks a VPS host's tools: it fails one missing
 `qemu-img` (no instance disks), both `genisoimage` and `xorriso` (no NoCloud user data seed) or `nft` (no
 anti-spoofing or network policies, so the metadata service and instance dials stay off) (4a0165f). For
@@ -282,7 +285,8 @@ Since ab26e87 doctor also checks what enforcing booked host resources needs from
 | `systemd` | With `cloud-hypervisor` installed, fails below systemd 247 (its confined units need it) and warns when the version cannot be read |
 | `libvirt` | Under `[helper]` with `virsh` installed (ed3c7d2), fails when the helper's user is in the `libvirt` group, which is root-equivalent (`gpasswd -d bcd libvirt`), when `/etc/libvirt/qemu.conf` lacks `dynamic_ownership = 0`, and when QEMU's user (`libvirt-qemu`, else `qemu`) is not in the node account's primary group (`usermod -aG`); warns when neither QEMU user exists. See [libvirt through the helper](#libvirt-through-the-helper) |
 | `cloud-hypervisor` | Under `[helper]` with `cloud-hypervisor` installed (7fe74a1), warns when `[helper] instance_bridges` is empty, since the helper then refuses every instance tap; otherwise `ok`: its taps, VFIO and VMM units go through `bcd helper` |
-| `node key` | Once the node has joined (50e18f9): `ok` when the key is in the TPM, `ok` for a file key on a host without a TPM, and warns for a file key on a host with one (the next renewal moves it into the TPM; under `[helper]` through `bcd helper`, 8870b8d) |
+| `tpm` | Under `[helper]` (both `socket` and `user` set; e6c3f53), fails when the helper's user is in the `tss` group, which lets it send the TPM any command although `bcd helper` holds the node keys: "`<user>` is in the tss group: it can send the TPM any command (lock or clear its hierarchies); bcd helper holds the node keys, so remove it (gpasswd -d `<user>` tss) and restart bcd.service". Warns when the membership cannot be read; prints nothing on a host without a `tss` group or a user outside it. See [node keys through the helper](#node-keys-through-the-helper) |
+| `node key` | Once the node has joined (50e18f9): `ok` when the key is in the TPM, `ok` for a file key on a host without a TPM, and warns for a file key on a host with one: "a file key although this host has a TPM: the next renewal moves it into the TPM (through bcd helper when bcd node runs unprivileged)" (a1c1a46) |
 
 ## bcd status
 
@@ -550,7 +554,9 @@ TLS handshake and node statement signs, so a successful `tpm.sign` is not logged
 `tpm.*` call are.
 
 `daemon install-script --unprivileged` no longer adds `bcd` to `tss`, and an upgrade run takes it out (see
-[running bcd node unprivileged](/docs/daemon/install#running-bcd-node-unprivileged)). `internal/helper`'s
+[running bcd node unprivileged](/docs/daemon/install#running-bcd-node-unprivileged)). Until that run, a host
+installed between 0ba2a79 and 8870b8d keeps `bcd` in `tss`, and since e6c3f53 `bcd doctor` fails its `tpm` check
+there (`gpasswd -d bcd tss`, then restart `bcd.service`). `internal/helper`'s
 `TestHelperTPMKeys` checks the operations against `tpmsim`; no hardware TPM has run them.
 
 ### Self-update through the helper

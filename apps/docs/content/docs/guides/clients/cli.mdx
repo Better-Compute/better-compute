@@ -183,7 +183,7 @@ the way to any method a group's commands leave out (a raw `commands.run`, for on
 
 | Commands | What they do | API group |
 | --- | --- | --- |
-| [`nodes`](/docs/reference/cli#nodes-list) `list`, `get`, `events`, `cordon`, `uncordon`, `drain`, `label`, `taint` | Read nodes and their events; cordon, drain, label and taint them (`--if-version` for optimistic concurrency) | [nodes](/docs/reference/api/nodes) |
+| [`nodes`](/docs/reference/cli#nodes-list) `list`, `get`, `events`, `cordon`, `uncordon`, `drain`, `label`, `taint`, `delete` | Read nodes and their events; cordon, drain, label and taint them (`--if-version` for optimistic concurrency). `delete` (4049621) removes a retired or cordoned adopted node for good and refuses without `--yes` before any call; see [removing an adopted host](/docs/guides/nodes/operating-nodes#removing-an-adopted-host) | [nodes](/docs/reference/api/nodes) |
 | [`join-tokens`](/docs/reference/cli#join-tokens-create) `create`, `list`, `revoke` | Mint the tokens `bcd join` presents | [joinTokens](/docs/reference/api/join-tokens) |
 | [`join-requests`](/docs/reference/cli#join-requests-list) `list`, `approve`, `reject` | Admit or turn down machines that asked to join | [joinRequests](/docs/reference/api/join-requests) |
 | [`inventory`](/docs/reference/cli#inventory-get) `get`, `history`, `diff` | A node's hardware inventory and what changed | [inventory](/docs/reference/api/inventory) |

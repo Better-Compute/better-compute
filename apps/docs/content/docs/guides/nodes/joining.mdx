@@ -23,6 +23,8 @@ sources:
   - tests/server-join.test.ts
   - tests/server-join-tpm-renew.test.ts
   - daemon/internal/agent/renew.go
+  - daemon/cmd/bcd/reset.go
+  - daemon/cmd/bcd/doctor.go
 ---
 
 Joining turns a machine into a [node](/docs/guides/nodes): JoinService checks the machine's evidence, creates or
@@ -277,9 +279,22 @@ such a node recovers by joining again. A certificate without a statement (every 
 join) renews with a proof of possession only: bcd still makes the next key in the TPM when it can, but nothing
 proves it to the control plane.
 
+Every refusal answers the agent with the same `ACCESS_DENIED` ("Renew refused"). Since 0e42018 JoinService also
+publishes `security.renew.refused` with the reason, to the node owner once the caller proved the current key and to
+the root tenant otherwise; see [refused renewals](/docs/operations/security#refused-renewals).
+
 A certificate that expired while the machine was offline cannot be renewed; when the server has the `x509pop`
 attestor configured, the machine re-joins with it within 7 days instead (see
-[attestation](/docs/guides/nodes/attestation)).
+[attestation](/docs/guides/nodes/attestation)). bcd keeps such an identity: it still loads, so `bcd join` answers
+`already joined`, and `bcd doctor` fails its `identity` check with "the certificate expired at ...; join again as
+root: bcd join --reset --yes, then bcd join". Since a1c1a46 that is the way back: `--reset --yes` moves the old
+identity aside and the join that follows presents a new token (see
+[joining again with --reset](/docs/daemon/install#joining-again-with---reset)):
+
+```bash
+# as root; the token from standard input, as for any join
+bcd join --config /etc/bcd/config.toml --reset --yes < join-token.txt
+```
 
 ## Adopting a brownfield server
 
@@ -532,9 +547,18 @@ decision fields `decidedAt`, `decidedBy`, `reason` and `consumedAt`. Decisions p
   <Accordion title="bcd logs renewal failed: the TPM is unavailable or names another AK">
     The certificate came from a certified `tpm` join and names its AK, so bcd renews only with that TPM. Restore
     access to the TPM (`/dev/tpmrm0` for a root `bcd node`; under `[helper]`, a running `bcd helper`, which holds the
-    TPM for the node) and the next retry renews. If the TPM was cleared or replaced, run `bcd join --attestor tpm`
-    again: an unchanged EK reclaims the same node. For a new EK, cordon and delete the old node first (`nodes.delete`
-    frees its EK binding and hardware key), then join: the machine joins as a new node. See
+    TPM for the node) and the next retry renews. If the TPM was cleared or replaced, run
+    `bcd join --reset --yes --attestor tpm` as root: an unchanged EK reclaims the same node. For a new EK, cordon
+    the old node and delete it first (`better-compute nodes delete <node> --yes`, which frees its EK binding and
+    hardware key), then join: the machine joins as a new node. See
     [recovering a node whose TPM changed](/docs/guides/nodes/attestation#recovering-a-node-whose-tpm-changed).
+  </Accordion>
+  <Accordion title="bcd join answers already joined, but the node cannot connect">
+    `bcd join` does nothing on a machine whose identity loads, whatever its certificate's state: expired, revoked
+    (`nodes.revokeIdentity`, `nodes.delete`) or refused at renewal. `bcd doctor` shows which (`identity` fails for
+    an expired certificate or an identity that does not load). Run the join again as root with `--reset --yes` and
+    the join's credential; the old `identity.json`, `node.key` and `node.key.next` are renamed
+    `<name>.reset-<UTC time>`, not deleted. See
+    [joining again with --reset](/docs/daemon/install#joining-again-with---reset).
   </Accordion>
 </Accordions>

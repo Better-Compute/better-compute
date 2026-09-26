@@ -28,6 +28,9 @@ sources:
   - daemon/internal/agent/renew.go
   - daemon/internal/agent/state.go
   - daemon/internal/tpm/nodekey.go
+  - daemon/cmd/bcd/reset.go
+  - daemon/internal/agent/agent.go
+  - packages/server/src/join/service.ts
   - tests/e2e/bcd.test.ts
   - bench/gateway-streams/README.md
   - bench/multi-gateway/README.md
@@ -70,7 +73,7 @@ I6 (latency) is part of the design but has no checker in this module; the real-t
 | [api or worker crash](#api-or-worker-crash) | Stateless api restarts; worker leases expire and move | Nothing durable | none needed |
 | [Clock skew](#clock-skew) | Ages instead of timestamps; server time on the daemon; `ClockSkew` on control-plane processes | Nothing | I4 |
 | [Certificate expiry](#certificate-expiry) | Renewal at 60% of the lifetime; the session closes at expiry | The session | |
-| [TPM cleared or unavailable](#tpm-cleared-or-unavailable) | A certificate naming the TPM's AK does not renew without that AK; bcd retries and fails loudly, an operator re-joins it with `bcd join --attestor tpm` | The session, until the re-join | |
+| [TPM cleared or unavailable](#tpm-cleared-or-unavailable) | A certificate naming the TPM's AK does not renew without that AK; bcd retries and fails loudly, an operator re-joins it with `bcd join --reset --yes --attestor tpm` | The session, until the re-join | |
 | [Certificate revocation](#certificate-revocation) | `RevocationNotice`, then the stream closes; the daemon stops redialing | The session | |
 | [Reconnect storm](#reconnect-storm) | Token bucket, pending-Hello bound, jitter, hash-only `Hello` | Nothing | Bounded load |
 | [Compromised gateway](#compromised-gateway) | Can delay, drop or read frames; cannot mint certificates, read tokens or secrets, or forge results, bindings or signed intent | | P14 |
@@ -273,21 +276,34 @@ a file key for such a certificate:
   and `expiresIn`, and retries with backoff from 30 seconds to 10 minutes. Once the TPM answers again, the next
   retry renews. A TPM-held current key needs the TPM to load too, so a restarted `bcd node` does not start without
   it.
-- **The TPM derives another AK.** The renewal fails the same way, with "this TPM's attestation key is not the one
-  the certificate names (was the TPM cleared? run bcd join again)", and retrying cannot help.
-- **The TPM was cleared** (`TPM2_Clear`). The node key is a primary of the owner hierarchy, whose seed a clear
-  replaces, so the stored record derives another key, and bcd refuses its identity ("the node key does not match
-  the node certificate").
+- **The TPM derives another AK** (another TPM, or one whose endorsement seed changed). The renewal fails the same
+  way, with "this TPM's attestation key is not the one the certificate names (another TPM, or its endorsement seed
+  changed): the certificate cannot be renewed here; join again: bcd join --reset --yes, then bcd join" (a1c1a46),
+  and retrying cannot help.
+- **The TPM was cleared** (`TPM2_Clear`). A clear replaces the owner hierarchy's seed but not the endorsement one,
+  so the AK survives and the node key does not: the key is a primary of the owner hierarchy, the stored record
+  derives another key, and bcd refuses its identity with "the node key does not match the node certificate: the TPM
+  derives another key from node.key (was the TPM cleared?); join again: bcd join --reset --yes, then bcd join".
+  Since a1c1a46 the cleared-TPM hint is here, where a clear shows, rather than on the AK check. `bcd doctor` fails
+  its `identity` check with the same text.
 
 Either way the certificate runs out within its 24 hours and the session closes as in
-[certificate expiry](#certificate-expiry). The recovery is to join again with the TPM, `bcd join --attestor tpm`:
-with no loadable identity, bcd joins, and the attestor reclaims the node bound to the machine's EK, with a new
-identity generation, a new certified key and a fresh AK statement. A machine whose EK changed (another TPM) joins as
-a new node instead, once the old node is cordoned and deleted with `nodes.delete` (54cad9e), which frees its EK
-binding and the machine's hardware key. See
+[certificate expiry](#certificate-expiry). The recovery is to join again with the TPM, as root:
+`bcd join --reset --yes --attestor tpm` moves the old identity aside (renamed `<name>.reset-<UTC time>`, not
+deleted) and joins, and the attestor reclaims the node bound to the machine's EK, with a new identity generation, a
+new certified key and a fresh AK statement. A machine whose EK changed (another TPM) joins as a new node instead,
+once the old node is cordoned and deleted (`better-compute nodes delete <node> --yes`, 4049621; `nodes.delete`,
+54cad9e), which frees its EK binding and the machine's hardware key; its old `journal.db` must then be moved aside
+by hand, or `bcd node` refuses it as another node's. See
 [recovering a node whose TPM changed](/docs/guides/nodes/attestation#recovering-a-node-whose-tpm-changed). Nodes
 whose certificate names no AK (every other join) renew as before; a key of theirs in a cleared TPM is lost the same
-way and needs a new join.
+way and needs a new join (`bcd join --reset --yes` with a token).
+
+Refused renewals are visible to the node owner since 0e42018: once the node proved its current key, JoinService
+publishes `security.renew.refused` naming the node, with the reason (for example
+`renew:key-attestation-missing`); see [refused renewals](/docs/operations/security#refused-renewals). A renewal that
+fails on the node before any request (the TPM unavailable, another AK) reaches no server and publishes nothing; it
+shows only as `renewal failed` in bcd's log.
 
 ## Certificate revocation
 

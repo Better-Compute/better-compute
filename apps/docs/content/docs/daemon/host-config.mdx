@@ -343,8 +343,9 @@ says which binding a node has (f77c6f9):
 | `fail` | The record names another node than this machine's identity, or the pinned key did not sign it; the helper refuses host units either way |
 | `fail` | Neither `command_root_sha256` nor root's join record names command-signing roots (71ccf71), as in the caveat above; a second finding beside the binding's |
 
-To pin a node that joined before the record, re-join it as root: `bcd join` with a new token after moving the data
-directory's identity aside (a `tpm` or `provisioned` re-join keeps the node id). Re-running the install script is not
+To pin a node that joined before the record, re-join it as root: since a1c1a46 `bcd join --reset --yes` moves the
+data directory's identity aside and joins, here with a new token (a `tpm` or `provisioned` re-join keeps the node id;
+see [joining again with --reset](/docs/daemon/install#joining-again-with---reset)). Re-running the install script is not
 enough: its join returns at once on a joined node and writes no record.
 
 `TestHelperHostUnit` (e0fe5ec) covers the operation against a real helper socket and a fake host: a sysctl
