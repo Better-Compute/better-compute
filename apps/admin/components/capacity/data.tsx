@@ -18,7 +18,7 @@ import {
   type SimCapacitySource,
 } from '@/lib/data/capacity';
 import { useConnection } from '@/components/shell/connection';
-import { emptySnapshot, liveSource, liveState, liveSubscribe, liveTimeline, liveVersion, loadLive } from './live';
+import { emptySnapshot, liveSource, liveState, liveSubscribe, liveTimeline, liveVersion, loadLive, refreshLive } from './live';
 import { poolRows, type PoolRow } from './model';
 
 // The capacity module's data hooks, in two modes behind one API:
@@ -190,12 +190,15 @@ export function useCapacityActions() {
       setState({ busy: true });
       try {
         const result = await action(mode.live ? liveSource(mode.tenantId) : capacitySource(clock().now));
-        if (mode.live) await loadLive(mode.tenantId);
+        if (mode.live) await refreshLive(mode.tenantId);
         bump();
         setState({ busy: false, done: label });
         if (!quiet) toast({ title: label, status: 'ok' });
         return result;
       } catch (error) {
+        // Part of a batch may have gone through before the failure: show what changed either way.
+        if (mode.live) void refreshLive(mode.tenantId);
+        bump();
         const message = error instanceof Error ? error.message : String(error);
         setState({ busy: false, error: message });
         toast({ title: 'That did not work', detail: message, status: 'crit' });

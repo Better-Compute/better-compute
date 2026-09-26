@@ -124,6 +124,42 @@ describe('simulated capacity source', () => {
   });
 });
 
+describe('review regressions', () => {
+  it('gives bookings made at the same clock instant distinct ids', async () => {
+    const { source, snapshot } = simAt(NOW);
+    const pool = snapshot().summary.pools.find((entry) => entry.capacity.some((row) => row.resource === 'gpu' && (row.freeNow ?? 0) >= 4))!;
+    const a = await source.create({ poolId: pool.poolId, gpus: 1, durationMs: HOUR, start: NOW + HOUR });
+    const b = await source.create({ poolId: pool.poolId, gpus: 1, durationMs: HOUR, start: NOW + HOUR });
+    expect(a.id).not.toBe(b.id);
+  });
+
+  it('queues a booking that does not fit as pending, holding nothing', async () => {
+    const { source } = simAt(NOW);
+    // More GPUs per node than any node has free: can't fit.
+    const created = await source.create({ poolId: 'pool_h100_fra1', gpus: 8, gang: 8, durationMs: 400 * HOUR });
+    const again = source.snapshot().reservations.find((r) => r.id === created.id)!;
+    expect(again.state).toBe('pending');
+  });
+
+  it('refuses an extension over GPUs a later booking holds', async () => {
+    const { source, snapshot } = simAt(NOW);
+    // An active reservation whose atoms have a later booking right after it.
+    const all = snapshot().reservations;
+    const blocked = all.find((r) => {
+      if (r.state !== 'active' || !r.during || !r.atoms?.length) return false;
+      return all.some((o) => o.id !== r.id && (o.state === 'placed' || o.state === 'active') && o.during && o.during.start >= r.during!.end && o.during.start < r.during!.end + 48 * HOUR && o.atoms?.some((atom) => r.atoms!.includes(atom)));
+    });
+    expect(blocked).toBeDefined();
+    await expect(source.extend(blocked!.id, 48 * HOUR)).rejects.toThrow(/Can't extend/);
+  });
+
+  it('never emits a week unit the API rejects', async () => {
+    const { formatDuration } = await import('@/lib/data/capacity');
+    expect(formatDuration(7 * 24 * HOUR)).toBe('7d');
+    expect(formatDuration(14 * 24 * HOUR)).toBe('14d');
+  });
+});
+
 describe('simulated capacity over time', () => {
   it('turns a placed reservation active once its start passes', () => {
     const { snapshot, setNow } = simAt(NOW);

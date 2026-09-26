@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useMemo } from 'react';
+import { useMemo, useRef } from 'react';
 import { earliestFit } from '@better-compute/console-kit';
 import { usePageCommands } from '@/components/shell/page-commands';
 import { EntityLink } from '@/components/shell/peek';
@@ -168,7 +168,10 @@ export function ReservationDrawer({ reservation, onClose }: { reservation?: Rese
     [snapshot, reservation],
   );
   const spend = useMemo(() => (current ? reservationSpend(current, snapshot.usage, snapshot.prices) : 0), [current, snapshot]);
-  // While open, the reservation's verbs are in ⌘K under "This page".
+  // While open, the reservation's verbs are in ⌘K under "This page". They call the *current* actions through a
+  // ref: a memoized closure would keep an old `live` flag and could mutate while the panel shows the past.
+  const actionsRef = useRef(actions);
+  actionsRef.current = actions;
   const id = current?.id;
   const state = current?.state;
   usePageCommands(
@@ -179,11 +182,11 @@ export function ReservationDrawer({ reservation, onClose }: { reservation?: Rese
       return [
         ...(live
           ? [
-              { id: 'rsv.release', label: `Release ${id}`, group: 'This page', icon: RiStopCircleLine, run: () => void actions.release(id) },
-              ...[1, 6, 24].map((hours) => ({ id: `rsv.extend.${hours}`, label: `Extend ${id} by ${hours} h`, group: 'This page', icon: RiAddLine, run: () => void actions.extend(id, hours * HOUR) })),
+              { id: 'rsv.release', label: `Release ${id}`, group: 'This page', icon: RiStopCircleLine, run: () => void actionsRef.current.release(id) },
+              ...[1, 6, 24].map((hours) => ({ id: `rsv.extend.${hours}`, label: `Extend ${id} by ${hours} h`, group: 'This page', icon: RiAddLine, run: () => void actionsRef.current.extend(id, hours * HOUR) })),
             ]
           : []),
-        ...(cancellable ? [{ id: 'rsv.cancel', label: `Cancel ${id}`, group: 'This page', icon: RiCloseCircleLine, run: () => void actions.cancel(id) }] : []),
+        ...(cancellable ? [{ id: 'rsv.cancel', label: `Cancel ${id}`, group: 'This page', icon: RiCloseCircleLine, run: () => void actionsRef.current.cancel(id) }] : []),
         { id: 'rsv.copy-cli', label: `Copy CLI for ${id}`, group: 'This page', icon: RiFileCopyLine, run: () => void navigator.clipboard?.writeText(`better-compute reservations get ${id}`) },
       ];
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -291,7 +294,8 @@ export function ReservationDrawer({ reservation, onClose }: { reservation?: Rese
             { label: 'Topology', value: r.request.topology ?? 'any', mono: true },
             { label: 'Market', value: r.request.spot ? 'spot (preemptible)' : 'on-demand' },
             { label: 'Owner', value: owner ? `${owner.name}${owner.agent ? ' (agent)' : ''}` : r.ownerIdentityId },
-            { label: 'Spend so far', value: fmtMoney(spend, { cents: true }), mono: true },
+            // Live usage windows don't name their reservation, so per-reservation spend is simulation-only.
+            { label: 'Spend so far', value: snapshot.source === 'live' ? '— (see Usage)' : fmtMoney(spend, { cents: true }), mono: true },
             ...(r.request.hostShare
               ? [{ label: 'Host share', value: `${fmtNum(r.request.hostShare.vcpu ?? 0)} vCPU · ${fmtNum(r.request.hostShare.memoryGiB ?? 0)} GiB`, mono: true }]
               : []),

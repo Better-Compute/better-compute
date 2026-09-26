@@ -43,8 +43,15 @@ export function SourceNotice() {
       </div>
     );
   return (
-    <div className="mb-3 flex items-center gap-2 font-mono text-[11px] text-text-tertiary">
-      <Led status="live" /> live · updated {fmtRelative(status.loadedAt, wallNow)} · refreshes every 15 s
+    <div className="mb-3 flex flex-col gap-1">
+      <div className="flex items-center gap-2 font-mono text-[11px] text-text-tertiary">
+        <Led status="live" /> live · updated {fmtRelative(status.loadedAt, wallNow)} · refreshes every 15 s
+      </div>
+      {snapshot.partial?.map((note) => (
+        <div key={note} className="flex items-center gap-2 text-caption-1-regular text-text-secondary">
+          <SeverityIcon severity="warning" /> Partial data: {note}.
+        </div>
+      ))}
     </div>
   );
 }

@@ -50,21 +50,34 @@ export function liveSource(tenantId: string): CapacitySource {
   return source;
 }
 
-/** Load (or reload) the snapshot; concurrent callers share one request. */
-export function loadLive(tenantId: string): Promise<void> {
+/**
+ * Load (or reload) the snapshot; concurrent callers share one request. `fresh` (after a mutation) waits for any
+ * load already in flight, which may have started before the change, and then loads again. An answer for a tenant
+ * that is no longer current is dropped.
+ */
+export async function loadLive(tenantId: string, options: { fresh?: boolean } = {}): Promise<void> {
+  if (options.fresh && inflight) await inflight;
   const current = liveSource(tenantId);
   inflight ??= (async () => {
     set({ loading: true });
     try {
       const snapshot = await current.load();
+      if (sourceTenant !== tenantId) return;
       set({ snapshot, loading: false, error: undefined, loadedAt: Date.now(), tenantId });
     } catch (error) {
+      if (sourceTenant !== tenantId) return;
       set({ loading: false, error: error instanceof Error ? error.message : String(error) });
     } finally {
       inflight = undefined;
     }
   })();
   return inflight;
+}
+
+/** After a mutation: reload the snapshot and forget cached timelines (bookings changed). */
+export async function refreshLive(tenantId: string): Promise<void> {
+  timelines.clear();
+  await loadLive(tenantId, { fresh: true });
 }
 
 const TIMELINE_TTL = 60_000;
@@ -74,15 +87,16 @@ const TIMELINE_TTL = 60_000;
  * fetch; its answer notifies the subscribers. Failed fetches are retried after the TTL.
  */
 export function liveTimeline(tenantId: string, poolId: string, from: number, to: number, stepMinutes: number): CapacityTimeline | undefined {
-  const key = `${poolId}:${from}:${to}:${stepMinutes}`;
+  const key = `${tenantId}:${poolId}:${from}:${to}:${stepMinutes}`;
   const entry = timelines.get(key);
   const fresh = entry && Date.now() - entry.at < TIMELINE_TTL;
   if (!fresh && !entry?.pending) {
     timelines.set(key, { value: entry?.value, at: entry?.at ?? 0, pending: true });
     void liveSource(tenantId)
       .timeline(poolId, { from, to, stepMinutes })
-      .then((value) => timelines.set(key, { value, at: Date.now() }))
-      .catch((error: unknown) => timelines.set(key, { value: entry?.value, at: Date.now(), error: String(error) }))
+      // A tenant switch cleared the cache meanwhile: drop the old tenant's answer.
+      .then((value) => sourceTenant === tenantId && timelines.set(key, { value, at: Date.now() }))
+      .catch((error: unknown) => sourceTenant === tenantId && timelines.set(key, { value: entry?.value, at: Date.now(), error: String(error) }))
       .finally(emit);
   }
   return entry?.value;

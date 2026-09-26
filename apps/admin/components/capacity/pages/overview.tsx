@@ -18,6 +18,7 @@ import { SourceNotice } from '../source-notice';
 import { CapacityHeatmap, HeatmapTable } from '../heatmap';
 import { byModel, costOf, fleetSeries, fleetTotals, heatMatrix, pressure, quotaCells, runway, type PoolRow } from '../model';
 import { HeatLegend, planHref, Segmented, StateTag, utcDay } from '../ui';
+import { Term } from '../term';
 
 const SPANS = {
   '3d': { back: 24, ahead: 72, label: '−1d / +3d' },
@@ -128,7 +129,11 @@ export function CapacityOverviewPage() {
   const pressures = useMemo(
     () =>
       gpuRows
-        .map((row) => ({ row, ...pressure(row, timelines.get(row.id)!, snapshot.now, 8, DAY) }))
+        // Live timelines arrive one by one: pools without one yet are left out until it does.
+        .flatMap((row) => {
+          const timeline = timelines.get(row.id);
+          return timeline ? [{ row, ...pressure(row, timeline, snapshot.now, 8, DAY) }] : [];
+        })
         .sort((a, b) => (b.waitMs ?? Infinity) - (a.waitMs ?? Infinity)),
     [gpuRows, timelines, snapshot.now],
   );
@@ -205,12 +210,12 @@ export function CapacityOverviewPage() {
 
       <Grid>
         <Panel className="col-span-12" bodyClassName="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3 xl:grid-cols-6">
-          <Stat label="Schedulable GPUs" value={fmtNum(totals.allocatable)} unit={`/ ${fmtNum(totals.gpus)}`} hint={`${fmtNum(totals.unavailable)} out of service`} />
-          <Stat label="Allocated now" value={fmtPct(totals.utilization, 0)} unit={`${fmtNum(totals.allocated)} GPUs`} trend={series.booked.slice(0, Math.max(2, series.times.findIndex((t) => t >= hour) + 1))} />
-          <Stat label="Free now" value={fmtNum(totals.freeNow)} unit="GPUs" hint={`${fmtNum(totals.reserved)} of them booked later`} tone="neutral" />
+          <Stat label={<Term id="schedulable">Schedulable GPUs</Term>} value={fmtNum(totals.allocatable)} unit={`/ ${fmtNum(totals.gpus)}`} hint={`${fmtNum(totals.unavailable)} out of service`} />
+          <Stat label={<Term id="allocated">Allocated now</Term>} value={fmtPct(totals.utilization, 0)} unit={`${fmtNum(totals.allocated)} GPUs`} trend={series.booked.slice(0, Math.max(2, series.times.findIndex((t) => t >= hour) + 1))} />
+          <Stat label={<Term id="freeNow">Free now</Term>} value={fmtNum(totals.freeNow)} unit="GPUs" hint={`${fmtNum(totals.reserved)} of them booked later`} tone="neutral" />
           <Stat label="Starting in 24 h" value={fmtNum(upcoming24)} unit="reservations" hint={`peak ${fmtPct(ahead.ratio, 0)} ${ahead.t <= snapshot.now ? 'this hour' : fmtRelative(ahead.t, snapshot.now)}`} />
-          <Stat label="Waiting" value={fmtNum(totals.pending)} unit="pending" hint="need capacity or a confirmation" tone="neutral" />
-          <Stat label="Spend, 30 days" value={fmtMoney(spend30, { short: true })} hint="estimated at list price" tone="neutral" />
+          <Stat label={<Term id="pending">Waiting</Term>} value={fmtNum(totals.pending)} unit="pending" hint="need capacity or a confirmation" tone="neutral" />
+          <Stat label={<Term id="spend">Spend, 30 days</Term>} value={fmtMoney(spend30, { short: true })} hint="estimated at list price" tone="neutral" />
         </Panel>
 
         <Panel className="col-span-12" title="Insights" icon={RiLightbulbFlashLine} flush>

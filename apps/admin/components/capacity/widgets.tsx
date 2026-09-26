@@ -368,7 +368,13 @@ export function PressureWidget({ size, settings }: WidgetProps) {
     to,
   );
   const list = useMemo(
-    () => gpuRows.map((row) => ({ row, ...pressure(row, timelines.get(row.id)!, snapshot.now, gpus, hours * HOUR) })).sort((a, b) => (b.waitMs ?? Infinity) - (a.waitMs ?? Infinity)),
+    () =>
+      gpuRows
+        .flatMap((row) => {
+          const timeline = timelines.get(row.id);
+          return timeline ? [{ row, ...pressure(row, timeline, snapshot.now, gpus, hours * HOUR) }] : [];
+        })
+        .sort((a, b) => (b.waitMs ?? Infinity) - (a.waitMs ?? Infinity)),
     [gpuRows, timelines, snapshot.now, gpus, hours],
   );
   const fit = Math.max(2, Math.floor(bodyHeight(size.h) / 28));

@@ -26,6 +26,7 @@ import { GpuRack } from '../rack';
 import { ReservationDrawer } from '../reservation-drawer';
 import { ReservationsTable } from '../reservations-table';
 import { heatFill, HeatLegend, Segmented, utcDay } from '../ui';
+import { Term } from '../term';
 import { FlavorList } from './flavors';
 import { classLabel } from './pools';
 
@@ -191,11 +192,11 @@ export function PoolDetailPage({ poolId }: { poolId: string }) {
 
       <Grid>
         <Panel className="col-span-12" bodyClassName="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3 xl:grid-cols-6">
-          <Stat label="Allocated now" value={fmtPct(row.utilization, 0)} unit={`${fmtNum(row.allocated)} / ${fmtNum(row.allocatable)}`} />
-          <Stat label="Free now" value={fmtNum(row.freeNow)} unit={row.unit === 'gpu' ? 'GPUs' : 'vCPUs'} tone="neutral" />
-          <Stat label="Booked later" value={fmtNum(row.reserved)} unit="atoms" hint="counted even if also in use now" tone="neutral" />
-          <Stat label="Out of service" value={fmtNum(row.unavailable)} hint={`${fmtNum(row.row.provisioning ?? 0)} provisioning · ${fmtNum(row.row.maintenance ?? 0)} maintenance`} tone="neutral" />
-          <Stat label="Active · pending" value={`${row.active} · ${row.pending}`} hint={`${row.startingSoon} start, ${row.endingSoon} end in 6 h`} tone="neutral" />
+          <Stat label={<Term id="allocated">Allocated now</Term>} value={fmtPct(row.utilization, 0)} unit={`${fmtNum(row.allocated)} / ${fmtNum(row.allocatable)}`} />
+          <Stat label={<Term id="freeNow">Free now</Term>} value={fmtNum(row.freeNow)} unit={row.unit === 'gpu' ? 'GPUs' : 'vCPUs'} tone="neutral" />
+          <Stat label={<Term id="bookedLater">Booked later</Term>} value={fmtNum(row.reserved)} unit="atoms" hint="counted even if also in use now" tone="neutral" />
+          <Stat label={<Term id="outOfService">Out of service</Term>} value={fmtNum(row.unavailable)} hint={`${fmtNum(row.row.provisioning ?? 0)} provisioning · ${fmtNum(row.row.maintenance ?? 0)} maintenance`} tone="neutral" />
+          <Stat label={<Term id="pending">Active · pending</Term>} value={`${row.active} · ${row.pending}`} hint={`${row.startingSoon} start, ${row.endingSoon} end in 6 h`} tone="neutral" />
           <Stat
             label="Next 8 GPUs × 24 h"
             value={row.unit !== 'gpu' ? '—' : fit?.start === undefined ? '> 7 d' : fit.waitMs! < HOUR ? 'now' : `in ${fmtDuration(fit.waitMs!)}`}

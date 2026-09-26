@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { RiAddLine, RiCalendarEventLine, RiHourglassLine } from 'react-icons/ri';
 import { earliestFit } from '@better-compute/console-kit';
 import { ButtonLink } from '@/components/base/buttons/button';
@@ -36,6 +36,11 @@ export function ReservationsPage() {
   const [states, setStates] = useState<Set<ReservationState>>(new Set());
   const gpuPools = rows.filter((row) => row.unit === 'gpu');
   const [poolId, setPoolId] = useState<string>(search.get('pool') ?? gpuPools[0]?.id ?? '');
+  // Live pools arrive after the first render: pick the first one once they do.
+  const firstPool = gpuPools[0]?.id;
+  useEffect(() => {
+    if (!poolId && firstPool) setPoolId(firstPool);
+  }, [poolId, firstPool]);
   const [span, setSpan] = useState<WindowKey>('3d');
   const window_ = useHourWindow(WINDOWS[span][0], WINDOWS[span][1]);
 

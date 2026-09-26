@@ -292,6 +292,8 @@ export interface CapacitySnapshot {
   nodesByPool: Record<string, string[]>;
   /** Every node with GPUs and its health (sim; live leaves it empty until the fleet source joins it). */
   nodes: CapacityNode[];
+  /** Live: what didn't fully load (caps, failed calls), for the views to say so. */
+  partial?: string[];
   source: 'sim' | 'live';
 }
 
@@ -353,8 +355,8 @@ export function durationMs(duration: string): number {
   return Number(match[1]) * unit;
 }
 
+/** A duration literal the API accepts (ms, s, m, h, d; the server has no week unit). */
 export function formatDuration(ms: number): string {
-  if (ms % WEEK === 0 && ms >= WEEK) return `${ms / WEEK}w`;
   if (ms % DAY === 0 && ms >= DAY) return `${ms / DAY}d`;
   if (ms % HOUR === 0) return `${ms / HOUR}h`;
   return `${Math.round(ms / 60_000)}m`;
@@ -1214,6 +1216,7 @@ export function createSimCapacitySource(options: SimOptions = {}): SimCapacitySo
   const plans = new Map<number, Plan>();
   const cache = new Map<string, Derived>();
   let revision = 0;
+  let createdCount = 0;
 
   const planFor = (now: number) => {
     const epoch = Math.floor(now / WEEK) * WEEK;
@@ -1393,7 +1396,8 @@ export function createSimCapacitySource(options: SimOptions = {}): SimCapacitySo
       const person = fleet.identities.find((identity) => identity.tenantId === tenantId && !identity.agent) ?? fleet.identities[0]!;
       const start = placed.start ?? Math.max(clock(), request.start ?? clock());
       const booking: PlannedBooking = {
-        id: `rsv_${(clock() % 36 ** 8).toString(36).padStart(8, '0')}`,
+        // Unique even for bookings made in the same (bucketed or paused) clock instant.
+        id: `rsv_${((clock() + (createdCount += 1) * 7919) % 36 ** 8).toString(36).padStart(8, '0')}`,
         poolId: pool.id,
         tenantId,
         projectId: request.projectId ?? TENANTS.find((entry) => entry.id === tenantId)?.projects[0] ?? 'default',
@@ -1408,6 +1412,9 @@ export function createSimCapacitySource(options: SimOptions = {}): SimCapacitySo
         preState: placed.fits ? 'placed' : 'pending',
       };
       overlay.created.push(booking);
+      // Didn't fit: it waits in pending with nothing booked (stateAt would otherwise start it at its start time
+      // on GPUs other bookings hold).
+      if (!placed.fits) overlay.states.set(booking.id, 'pending');
       return after(booking.id);
     },
     async release(id) {
@@ -1426,7 +1433,23 @@ export function createSimCapacitySource(options: SimOptions = {}): SimCapacitySo
     async extend(id, byMs) {
       await wait();
       const booking = find(id);
-      overlay.ends.set(id, (overlay.ends.get(id) ?? booking.end) + byMs);
+      const end = overlay.ends.get(id) ?? booking.end;
+      // All or nothing, as the API: refuse when a later booking holds one of these GPUs in the added time.
+      const { fleet, derived } = current();
+      const mine = new Set(booking.atoms.flatMap((atom) => atom.gpus.map((gpu) => `${atom.nodeId}/${gpu}`)));
+      const holding = new Set(derived.reservations.filter((entry) => entry.id !== id && liveStates.has(entry.state)).map((entry) => entry.id));
+      const blocker = [...fleet.bookings, ...overlay.created].find(
+        (other) =>
+          holding.has(other.id) &&
+          other.start < end + byMs &&
+          (overlay.ends.get(other.id) ?? other.end) > end &&
+          other.atoms.some((atom) => atom.gpus.some((gpu) => mine.has(`${atom.nodeId}/${gpu}`))),
+      );
+      if (blocker)
+        throw Object.assign(new Error(`Can't extend: ${blocker.id} holds some of these GPUs from ${new Date(Math.max(end, blocker.start)).toISOString().slice(11, 16)} UTC`), {
+          code: 'RESOURCE_EXHAUSTED',
+        });
+      overlay.ends.set(id, end + byMs);
       return after(id);
     },
     async setQuota(row) {
@@ -1829,7 +1852,7 @@ export function createLiveCapacitySource(request: ComputeRequest, options: { ten
     ...(input.spot ? { spot: true } : {}),
     ...(input.binding ? { binding: input.binding } : {}),
   });
-  /** Follows `cursor` up to `pages` pages. */
+  /** Follows `cursor` up to `pages` pages; `truncated` when more remained. */
   const paged = async <T>(path: string, body: Record<string, unknown>, pages: number, opts?: { signal?: AbortSignal }) => {
     const items: T[] = [];
     let cursor: string | undefined;
@@ -1839,7 +1862,43 @@ export function createLiveCapacitySource(request: ComputeRequest, options: { ten
       cursor = result.cursor;
       if (!cursor) break;
     }
-    return { items };
+    return { items, truncated: Boolean(cursor) };
+  };
+  /**
+   * The API's windows carry `tenantId` at the top level and the pool as `tags.pool`; the views read
+   * `tags.tenantId` / `tags.poolId` (as the simulation writes them).
+   */
+  const normalize = (window: UsageWindow & { tenantId?: string }): UsageWindow => ({
+    ...window,
+    tags: {
+      ...window.tags,
+      ...(window.tags.pool && !window.tags.poolId ? { poolId: window.tags.pool } : {}),
+      ...(window.tenantId && !window.tags.tenantId ? { tenantId: window.tenantId } : {}),
+    },
+  });
+  const USAGE_CAP = 10_000;
+  /**
+   * The last 30 days of usage, newest day first (usage.list pages in ascending order, so a single ranged call
+   * would keep the oldest windows and drop the recent ones at the cap). Errors are reported, not swallowed.
+   */
+  const recentUsage = async (now: number, opts?: { signal?: AbortSignal }) => {
+    const items: UsageWindow[] = [];
+    let truncated = false;
+    let error: string | undefined;
+    const today = Math.floor(now / DAY) * DAY;
+    for (let day = today; day > now - 30 * DAY && items.length < USAGE_CAP; day -= DAY) {
+      try {
+        const page = await paged<UsageWindow & { tenantId?: string }>('usage/list', { tenantId, from: day, to: Math.min(now, day + DAY), limit: 500 }, 8, opts);
+        items.push(...page.items.map(normalize));
+        truncated ||= page.truncated;
+      } catch (reason) {
+        error = reason instanceof Error ? reason.message : String(reason);
+        break;
+      }
+    }
+    if (items.length >= USAGE_CAP) truncated = true;
+    items.sort((a, b) => a.windowStart - b.windowStart);
+    return { items, truncated, ...(error ? { error } : {}) };
   };
   return {
     kind: 'live',
@@ -1851,7 +1910,7 @@ export function createLiveCapacitySource(request: ComputeRequest, options: { ten
         request<CapacitySummary>('capacity/summary', { tenantId }, opts),
         paged<Reservation>('reservations/list', { tenantId, scope: 'all', limit: 200 }, 10, opts),
         request<{ items: QuotaRow[] }>('quotas/get', { tenantId }, opts),
-        paged<UsageWindow>('usage/list', { tenantId, from: now - 30 * DAY, to: now, limit: 500 }, 20, opts).catch(() => ({ items: [] as UsageWindow[] })),
+        recentUsage(now, opts),
       ]);
       const flavorPools = pools.items.filter((pool) => pool.class === 'vps-host' || pool.class === 'provider');
       const flavors = (
@@ -1881,6 +1940,15 @@ export function createLiveCapacitySource(request: ComputeRequest, options: { ten
         nodesByPool: {},
         nodes: [],
         source: 'live',
+        ...(reservations.truncated || usage.truncated || usage.error
+          ? {
+              partial: [
+                ...(reservations.truncated ? ['only the newest 2,000 reservations are loaded'] : []),
+                ...(usage.truncated ? ['usage is cut to the most recent 10,000 windows'] : []),
+                ...(usage.error ? [`usage could not be loaded: ${usage.error}`] : []),
+              ],
+            }
+          : {}),
       };
     },
     async timeline(poolId, range, signal) {
@@ -1910,8 +1978,15 @@ export function createLiveCapacitySource(request: ComputeRequest, options: { ten
     cancel(reservationId) {
       return request<Reservation>('reservations/cancel', { tenantId, reservationId });
     },
-    extend(reservationId, byMs) {
-      return request<Reservation>('reservations/extend', { tenantId, reservationId, by: byMs, idempotencyKey: idem() });
+    async extend(reservationId, byMs) {
+      // The API answers { reservation, extended, availableUntil? }: a blocked extension is not an error there.
+      const out = await request<{ reservation: Reservation; extended: boolean; availableUntil?: number }>('reservations/extend', { tenantId, reservationId, by: byMs, idempotencyKey: idem() });
+      if (!out.extended)
+        throw Object.assign(
+          new Error(`Can't extend by that much${out.availableUntil ? `: the GPUs are free until ${new Date(out.availableUntil).toISOString().replace('T', ' ').slice(0, 16)} UTC` : ''}`),
+          { code: 'RESOURCE_EXHAUSTED' },
+        );
+      return out.reservation;
     },
     setQuota(row) {
       return request<QuotaRow>('quotas/set', { tenantId: row.tenantId ?? tenantId, poolId: row.poolId, resource: row.resource, max: row.max });

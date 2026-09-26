@@ -138,7 +138,9 @@ export function PlannerPage() {
   const [spot, setSpot] = useState(false);
   const tenantsForPool = useMemo(() => snapshot.offers.filter((offer) => offer.poolId === row?.id).map((offer) => offer.tenantId), [snapshot, row]);
   const [tenantId, setTenantId] = useState<string>(snapshot.tenantId);
-  const tenant = snapshot.tenants.find((entry) => entry.id === (tenantsForPool.includes(tenantId) ? tenantId : snapshot.tenantId))!;
+  // Live data may carry no tenant list (or none yet): fall back to the caller's own tenant.
+  const tenant = snapshot.tenants.find((entry) => entry.id === (tenantsForPool.includes(tenantId) ? tenantId : snapshot.tenantId)) ??
+    snapshot.tenants.find((entry) => entry.id === snapshot.tenantId) ?? { id: snapshot.tenantId, name: snapshot.tenantId || 'this tenant', projects: [] };
   const [projectId, setProjectId] = useState<string>('');
 
   const windowAhead = useHourWindow(0, 7 * 24);
@@ -313,11 +315,14 @@ export function PlannerPage() {
                     setTenantId(value);
                     setProjectId('');
                   }}
-                  options={snapshot.tenants.filter((entry) => tenantsForPool.includes(entry.id)).map((entry) => ({ id: entry.id, label: entry.name }))}
+                  options={(() => {
+                    const offered = snapshot.tenants.filter((entry) => tenantsForPool.includes(entry.id)).map((entry) => ({ id: entry.id, label: entry.name }));
+                    return offered.length ? offered : [{ id: tenant.id, label: tenant.name }];
+                  })()}
                 />
               </Field>
               <Field label="Project">
-                <Select label="Project" value={projectId || tenant.projects[0] || ''} onChange={setProjectId} options={tenant.projects.map((project) => ({ id: project, label: project }))} />
+                <Select label="Project" value={projectId || tenant.projects[0] || ''} onChange={setProjectId} options={tenant.projects.length ? tenant.projects.map((project) => ({ id: project, label: project })) : [{ id: '', label: '(no project)' }]} />
               </Field>
             </div>
             <Switch isSelected={spot} onChange={setSpot} size="sm">
