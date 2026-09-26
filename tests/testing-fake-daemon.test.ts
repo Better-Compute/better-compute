@@ -364,7 +364,7 @@ describe('session', () => {
       daemonVersion: '0.1.0',
       protoMin: 1,
       protoMax: 1,
-      capabilities: ['cdi', 'nvml'],
+      capabilities: ['cdi', 'nvml', 'devices.limits', 'binding.kubernetes'],
       lastEpoch: 0n,
       appliedGeneration: 0n,
       lastEventSeq: 0n,
