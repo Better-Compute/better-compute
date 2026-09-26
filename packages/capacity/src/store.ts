@@ -266,7 +266,10 @@ export async function readNodeLabels(
   const byNode = new Map<string, Record<string, string>>();
   if (nodeIds.length === 0) return byNode;
   const { rows } = await tx.query<{ node_id: string; key: string; value: string }>(
-    `SELECT node_id, key, value FROM node_labels WHERE node_id = ANY($1::text[])`,
+    // `bc.dev/` labels count only when the system wrote them (bcd's Hello, via the gateway): an
+    // operator-set one could claim a capability the node's bcd does not enforce.
+    `SELECT node_id, key, value FROM node_labels
+      WHERE node_id = ANY($1::text[]) AND (NOT starts_with(key, 'bc.dev/') OR source = 'system')`,
     [nodeIds],
   );
   for (const row of rows) {

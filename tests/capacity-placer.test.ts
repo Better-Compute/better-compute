@@ -671,9 +671,12 @@ describe('rollups and eligibility SQL', () => {
   it('places only on nodes carrying every requested label, on every placement path', async () => {
     await addNode('node_a', { gpus: 2 });
     await addNode('node_b', { gpus: 8 });
+    await addNode('node_c', { gpus: 8 });
     await db.query(
       `INSERT INTO node_labels (node_id, key, value, source)
-       VALUES ('node_a', 'bc.dev/driver.kata', '3.2', 'inventory'), ('node_b', 'bc.dev/driver.kata', '3.1', 'inventory')`,
+       VALUES ('node_a', 'bc.dev/driver.kata', '3.2', 'system'), ('node_b', 'bc.dev/driver.kata', '3.1', 'system'),
+              -- An operator-set bc.dev/ label never counts (round-5 review L11).
+              ('node_c', 'bc.dev/driver.kata', '3.2', 'operator')`,
     );
     const kata = { 'bc.dev/driver.kata': '3.2' };
     // The shortlist, and the whole pool (a selector declines the shortlist): node_b would win binpack.
@@ -710,7 +713,8 @@ describe('rollups and eligibility SQL', () => {
           .map((c) => c.nodeId),
       ).toEqual(['node_b']);
       expect(index.ranked(request(1, { nodeLabels: { 'bc.dev/driver.gvisor': '*' } }))).toEqual([]);
-      expect(index.ranked(request(1)).map((c) => c.nodeId)).toEqual(['node_b']);
+      // No label asked: any node with room (node_c's operator-set label changes nothing).
+      expect(index.ranked(request(1)).map((c) => c.nodeId)).toEqual(['node_b', 'node_c']);
     });
   });
 

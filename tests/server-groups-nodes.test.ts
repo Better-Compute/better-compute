@@ -178,6 +178,14 @@ describe('labels and taints', () => {
       set: { 'gpu.product': 'fake' },
     });
     expect(refused).toMatchObject({ code: 'INVALID_INPUT' });
+    // bc.dev/ is the system's (bcd's advertised capabilities gate where enforcing work lands).
+    for (const input of [
+      { set: { 'bc.dev/cap.instance.network-policy': '1' } },
+      { remove: ['bc.dev/driver.kata'] },
+    ])
+      expect(
+        await h.failure('nodes/label', USER, { tenantId: ACME, nodeId: id, ...input }),
+      ).toMatchObject({ code: 'INVALID_INPUT', message: expect.stringContaining('system only') });
     for (const input of [{}, { set: { 'bad key!': 'x' } }, { set: { a: 'x' }, remove: ['a'] }])
       expect(
         (await h.failure('nodes/label', USER, { tenantId: ACME, nodeId: id, ...input })).code,

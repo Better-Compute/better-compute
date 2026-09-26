@@ -132,6 +132,8 @@ export type NodesApi = {
 /** Work-queue kinds (§8.4): the node reconciler's (NodeLifecycle), and the Drain controller's. */
 const nodeWork = nodeWorkKind;
 const taintPrefix = 'taint:';
+/** Labels only the system writes (Hello capabilities and drivers, from the gateway). */
+const systemLabelPrefix = 'bc.dev/';
 
 // --- Inputs --------------------------------------------------------------------------------------
 
@@ -502,6 +504,16 @@ export function nodesApi(lists: ListRecipe): NodesApi {
       label: nodeMutation('compute:nodes:update', Object.assign(labelInput, { jsonSchema: parseLabel.jsonSchema }), async (context, input) => {
         const row = await lockNode(context, input);
         const set = Object.entries(input.set ?? {});
+        // `bc.dev/` labels are the system's: what bcd advertised (capabilities, drivers) gates where
+        // enforcing work lands (sandboxes, placement, volumes), so an operator never forges one.
+        const reserved = [...set.map(([key]) => key), ...(input.remove ?? [])].find((key) =>
+          key.startsWith(systemLabelPrefix),
+        );
+        if (reserved)
+          throw new ComputeError(
+            'INVALID_INPUT',
+            `${reserved}: labels under ${systemLabelPrefix} are written by the system only`,
+          );
         if (set.length) {
           const { rows: taken } = await context.sql.query<{ key: string }>(
             `SELECT key FROM node_labels WHERE node_id = $1 AND key = ANY($2::text[])
