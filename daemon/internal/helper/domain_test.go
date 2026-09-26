@@ -15,7 +15,7 @@ var (
 
 const goodDomainTemplate = `<domain type="kvm">
   <name>inst_01k5w0000000000000000000ab</name>
-  <metadata><bc:instance xmlns:bc="https://better-compute.dev/libvirt/1" id="inst_01k5w0000000000000000000ab"><bc:image>ubuntu</bc:image><bc:format>qcow2</bc:format></bc:instance></metadata>
+  <metadata><bc:instance xmlns:bc="https://better-compute.dev/libvirt/1" id="inst_01k5w0000000000000000000ab"><bc:image>abababababababababababababababababababababababababababababababab</bc:image><bc:format>qcow2</bc:format></bc:instance></metadata>
   <memory unit="KiB">4194304</memory>
   <vcpu placement="static" cpuset="4-7">2</vcpu>
   <cputune><vcpupin vcpu="0" cpuset="4"></vcpupin></cputune>
@@ -50,16 +50,49 @@ func domainPolicy(checked *[]string) DomainPolicy {
 	}
 }
 
+// qemu opens an overlay's base too: root checks it as it checks the disk (the node's own file, not a
+// link), and as a plain image naming no further backing file; its name is the image's sha256.
+func TestValidateDomainXMLChecksTheBase(t *testing.T) {
+	image := strings.Repeat("ab", 32)
+	base := "/var/lib/bcd/libvirt/images/" + image + ".qcow2"
+	var checked []string
+	chained := domainPolicy(&checked)
+	chained.Base = func(path, format string) error {
+		if path == base {
+			return errors.New("the image names a backing file")
+		}
+		return nil
+	}
+	if _, err := ValidateDomainXML([]byte(goodDomain), chained); err == nil || !strings.Contains(err.Error(), "base "+base+": the image names a backing file") {
+		t.Fatalf("a base with its own backing file: %v", err)
+	}
+	linked := domainPolicy(&checked)
+	linked.CheckFile = func(path string) error {
+		if path == base {
+			return errors.New(path + " is a symlink")
+		}
+		return nil
+	}
+	if _, err := ValidateDomainXML([]byte(goodDomain), linked); err == nil || !strings.Contains(err.Error(), "is a symlink") {
+		t.Fatalf("a base that is a link: %v", err)
+	}
+	for _, name := range []string{"ubuntu", strings.Repeat("AB", 32), strings.Repeat("ab", 31)} {
+		if _, err := ValidateDomainXML([]byte(strings.Replace(goodDomain, image, name, 1)), domainPolicy(&checked)); err == nil || !strings.Contains(err.Error(), "names no base image") {
+			t.Fatalf("image %q: %v", name, err)
+		}
+	}
+}
+
 func TestValidateDomainXML(t *testing.T) {
 	var checked []string
 	name, err := ValidateDomainXML([]byte(goodDomain), domainPolicy(&checked))
-	if err != nil || name != "inst_01k5w0000000000000000000ab" || len(checked) != 5 {
+	if err != nil || name != "inst_01k5w0000000000000000000ab" || len(checked) != 7 {
 		t.Fatalf("good domain: %q %v (checked %v)", name, err, checked)
 	}
 	// Root checks the overlay against the metadata's image, and the cdrom's format.
 	joined := strings.Join(checked, "\n")
 	for _, want := range []string{
-		"overlay /var/lib/bcd/libvirt/instances/inst_01k5w0000000000000000000ab/disk.qcow2 /var/lib/bcd/libvirt/images/ubuntu.qcow2 qcow2",
+		"overlay /var/lib/bcd/libvirt/instances/inst_01k5w0000000000000000000ab/disk.qcow2 /var/lib/bcd/libvirt/images/abababababababababababababababababababababababababababababababab.qcow2 qcow2",
 		"base /var/lib/bcd/libvirt/images/abc.iso iso",
 	} {
 		if !strings.Contains(joined, want) {
@@ -91,7 +124,7 @@ func TestValidateDomainXML(t *testing.T) {
 		"an emulator":       {`<memballoon`, `<emulator>/tmp/evil</emulator><memballoon`},
 		"os kernel":         {`<boot dev="hd"></boot>`, `<boot dev="hd"></boot><kernel>/tmp/vmlinuz</kernel>`},
 		"not kvm":           {`<domain type="kvm">`, `<domain type="qemu">`},
-		"foreign metadata":  {`<bc:image>ubuntu</bc:image>`, `<x:y xmlns:x="urn:x"></x:y>`},
+		"foreign metadata":  {`<bc:image>abababababababababababababababababababababababababababababababab</bc:image>`, `<x:y xmlns:x="urn:x"></x:y>`},
 		"metadata mismatch": {`id="inst_01k5w0000000000000000000ab"`, `id="inst_01k5w0000000000000000000zz"`},
 		"a name not an id":  {`<name>inst_01k5w0000000000000000000ab</name>`, `<name>../etc</name>`},
 		"a doctype":         {`<domain type="kvm">`, `<!DOCTYPE domain [<!ENTITY x SYSTEM "file:///etc/shadow">]><domain type="kvm">`},

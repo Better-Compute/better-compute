@@ -251,13 +251,23 @@ func ValidateDomainXML(raw []byte, p DomainPolicy) (string, error) {
 			if err := p.Overlay(d.file, base, format); err != nil {
 				return "", fmt.Errorf("domain: disk %s: %w", d.file, err)
 			}
+			if base != "" {
+				// qemu opens the base too: it must be the node's own image file (not a link to another),
+				// and a plain one, naming no further backing or data file (review 2 LOW).
+				if err := p.checkDiskFile(base); err != nil {
+					return "", err
+				}
+				if err := p.Base(base, format); err != nil {
+					return "", fmt.Errorf("domain: base %s: %w", base, err)
+				}
+			}
 		}
 	}
 	return domainName, nil
 }
 
-// imageName is a base image's name in the images directory (bcd names them by digest).
-var imageName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+// imageName is a base image's name in the images directory: bcd names them by their sha256.
+var imageName = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func contains(list []string, s string) bool {
 	for _, v := range list {
