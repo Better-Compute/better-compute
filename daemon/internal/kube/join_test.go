@@ -352,6 +352,75 @@ func TestJoinUnderHelper(t *testing.T) {
 	}
 }
 
+// The spec drops k8s-join: bcd cordons the Node, deletes its workload pods (not DaemonSet or static
+// ones, not finished ones), records the release; the unit's return uncordons it.
+func TestReleaseCordonsAndDrains(t *testing.T) {
+	c := newFakeCluster(t)
+	var tokens []string
+	u := unit(&tokens)
+	if _, err := settle(t, c.sys, u, settings); err != nil {
+		t.Fatal(err)
+	}
+	prev := c.sys.Handler
+	c.sys.Handler = func(ctx context.Context, cmd hostconfig.Cmd) ([]byte, error) {
+		if cmd.Name == "kubectl" && len(cmd.Args) > 3 && cmd.Args[2] == "get" && cmd.Args[3] == "pods" {
+			return []byte(`{"items":[
+				{"metadata":{"name":"train","namespace":"ml"},"status":{"phase":"Running"}},
+				{"metadata":{"name":"bcd-x","namespace":"bcd-system","ownerReferences":[{"kind":"DaemonSet"}]},"status":{"phase":"Running"}},
+				{"metadata":{"name":"etcd","namespace":"kube-system","annotations":{"kubernetes.io/config.mirror":"x"}},"status":{"phase":"Running"}},
+				{"metadata":{"name":"done","namespace":"ml"},"status":{"phase":"Succeeded"}},
+				{"metadata":{"name":"infer","namespace":"ai"},"status":{"phase":"Pending"}}]}`), nil
+		}
+		return prev(ctx, cmd)
+	}
+	before := len(c.sys.Commands())
+	steps, err := u.Clean(context.Background(), c.sys)
+	if err != nil || len(steps) != 3 {
+		t.Fatalf("clean = %d steps, %v", len(steps), err)
+	}
+	for _, s := range steps {
+		if err := s.Apply(context.Background()); err != nil {
+			t.Fatalf("%s: %v", s.Description, err)
+		}
+	}
+	var ran []string
+	for _, cmd := range c.sys.Commands()[before:] {
+		ran = append(ran, strings.TrimPrefix(cmd, "kubectl --kubeconfig /etc/kubernetes/kubelet.conf "))
+	}
+	want := []string{
+		"cordon gpu-node-7",
+		"get pods --all-namespaces --field-selector spec.nodeName=gpu-node-7 -o json",
+		"delete pod --namespace ai infer --wait=false --ignore-not-found",
+		"delete pod --namespace ml train --wait=false --ignore-not-found",
+	}
+	if strings.Join(ran, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("ran:\n%s", strings.Join(ran, "\n"))
+	}
+	state, _, _ := ReadState(c.sys)
+	if !state.Released || state.GPU {
+		t.Fatalf("state = %+v", state)
+	}
+	if steps, err := u.Clean(context.Background(), c.sys); err != nil || len(steps) != 0 {
+		t.Fatalf("a second clean = %d steps, %v", len(steps), err)
+	}
+	// The unit comes back: uncordoned, no longer released.
+	before = len(c.sys.Commands())
+	if _, err := settle(t, c.sys, u, settings); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(c.sys.Commands()[before:], "\n"), "uncordon gpu-node-7") {
+		t.Fatalf("no uncordon: %v", c.sys.Commands()[before:])
+	}
+	if state, _, _ := ReadState(c.sys); state.Released || !state.GPU {
+		t.Fatalf("state after the return = %+v", state)
+	}
+	// A node bcd never joined has nothing to release.
+	fresh := newFakeCluster(t)
+	if steps, err := u.Clean(context.Background(), fresh.sys); err != nil || len(steps) != 0 {
+		t.Fatalf("clean of a stranger = %d steps, %v", len(steps), err)
+	}
+}
+
 func TestContainerdImport(t *testing.T) {
 	existing := "# local\nversion = 2\nroot = \"/var/lib/containerd\"\n\n[plugins.\"io.containerd.grpc.v1.cri\"]\n  sandbox_image = \"x\"\n"
 	got, err := withImport(existing, false)
