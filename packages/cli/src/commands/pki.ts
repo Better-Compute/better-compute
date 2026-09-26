@@ -806,6 +806,15 @@ export const pkiCommands = [
         ...(published.approverSet?.approverKeys.length && !sameApproverSet(published.approverSet, configuredApproverSet(options))
           ? { publishedApproverSetSha256: Buffer.from(approverSetDigest(published.approverSet)).toString('hex') }
           : {}),
+        // What install scripts pin for bcd helper's host units (daemon install-script --command-root-sha256): the
+        // bundle's signing root and, during a rotation, the added one.
+        ...(bundle?.commandSigning
+          ? {
+              commandRootSha256: [pkiPins(bundle).commandSigningRootSha256, pkiPins(bundle).commandSigningNextRootSha256]
+                .filter(Boolean)
+                .join(','),
+            }
+          : {}),
         quorumChanged,
         ...(quorumChanged ? { signQuorumForEpoch: published.approverSetEpoch + 1 } : {}),
         connected: lag.connected,

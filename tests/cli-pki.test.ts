@@ -287,7 +287,7 @@ describe('daemon install-script', () => {
     const entries = config
       .split('\n')
       .filter((line) => line && !line.startsWith('#'))
-      .map((line) => /^([a-z_]+) = "([^"\\]*)"$/.exec(line));
+      .map((line) => /^([a-z0-9_]+) = "([^"\\]*)"$/.exec(line));
     expect(entries.every(Boolean)).toBe(true);
     expect(Object.fromEntries(entries.map((match) => [match![1], match![2]]))).toEqual({
       gateway_url: 'https://gw.eu.compute.test',
@@ -295,6 +295,8 @@ describe('daemon install-script', () => {
       serving_ca_spki_pin: pins.servingCaSpkiPin,
       join_signing_key_pin: pins.joinSigningKeyPin,
       join_encryption_key_pin: pins.joinEncryptionKeyPin,
+      // The bundle's command-signing root, pinned for bcd helper's host units.
+      ...(pins.commandSigningRootSha256 ? { command_root_sha256: pins.commandSigningRootSha256 } : {}),
     });
     expect(script).toContain(JSON.stringify(pins.joinEncryptionJwk));
     expect(script).toContain(bcdServiceUnit);
@@ -529,6 +531,24 @@ describe('daemon install-script', () => {
     expect(config).toContain(`approver_set_sha256 = "${digest}"`);
     expect(await run([...base, '--approver-set-sha256', 'AB'.repeat(32)])).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
     expect(await run([...base, '--approver-set-sha256', '"; rm -rf /'])).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
+  });
+
+  it('pins the command-signing roots for bcd helper’s host units with --command-root-sha256', async () => {
+    const config = (script: string) => script.split("<<'BCD_CONFIG'\n")[1]!.split('BCD_CONFIG\n')[0]!;
+    const [a, b] = ['ab'.repeat(32), 'cd'.repeat(32)];
+    expect(config((await run([...base, '--command-root-sha256', `${a}, ${b},${a}`])).stdout)).toContain(
+      `command_root_sha256 = "${a},${b}"`,
+    );
+    for (const bad of ['AB'.repeat(32), '"; rm -rf /', ',', a.slice(2)])
+      expect(await run([...base, '--command-root-sha256', bad]), bad).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
+    // Without the flag: the bundle's own signing root when it has command signing, and the upgrade keeps a pin.
+    const plain = (await run(base)).stdout;
+    const own = readPkiPins(await readFile(join(scratch, '.better-compute', 'pki.json'), 'utf8')).commandSigningRootSha256;
+    if (own) expect(config(plain)).toContain(`command_root_sha256 = "${own}`);
+    else {
+      expect(config(plain)).not.toContain('command_root_sha256');
+      expect(plain).toContain("/^[[:space:]]*command_root_sha256[[:space:]]*=/p");
+    }
   });
 
   it('gives a node with [plugins] the plugin drop-in, keeps the operator’s sections on upgrade', async () => {

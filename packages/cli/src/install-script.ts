@@ -53,6 +53,12 @@ export interface InstallScriptOptions {
    */
   approverSetSha256?: string;
   /**
+   * Hex SHA-256 of the command-signing root certificates (`better-compute pki trust-version` prints them): bcd
+   * helper then applies a host config unit only with a spec signed under one of them. Given here, out of band,
+   * never taken from the control plane.
+   */
+  commandRootSha256?: readonly string[];
+  /**
    * bcd self-update (PLAN.md §6): the release keys' pins and how many must have signed, as an [update] section
    * (without pins bcd refuses every self-update).
    */
@@ -193,6 +199,13 @@ export function checkInstallScriptOptions(options: InstallScriptOptions): Instal
   }
   if (options.approverSetSha256 !== undefined && !hexPattern.test(options.approverSetSha256))
     throw invalid('--approver-set-sha256', 'must be 64 lower-case hex digits (pki trust-version prints it)');
+  if (
+    options.commandRootSha256 !== undefined &&
+    (options.commandRootSha256.length === 0 ||
+      options.commandRootSha256.length > 16 ||
+      !options.commandRootSha256.every((pin) => hexPattern.test(pin)))
+  )
+    throw invalid('--command-root-sha256', 'must be 1 to 16 lower-case hex SHA-256 digests, comma-separated (pki trust-version prints them)');
   if (options.update) {
     const pins = new Set(options.update.releasePins);
     if (pins.size === 0 || ![...pins].every((pin) => pinPattern.test(pin)))
@@ -246,7 +259,13 @@ export function checkInstallScriptOptions(options: InstallScriptOptions): Instal
 export function renderBcdConfig(
   options: Pick<
     InstallScriptOptions,
-    'gatewayUrl' | 'siteId' | 'servingCaSpkiPin' | 'joinSigningKeyPin' | 'joinEncryptionKeyPin' | 'approverSetSha256'
+    | 'gatewayUrl'
+    | 'siteId'
+    | 'servingCaSpkiPin'
+    | 'joinSigningKeyPin'
+    | 'joinEncryptionKeyPin'
+    | 'approverSetSha256'
+    | 'commandRootSha256'
   >,
 ): string {
   return [
@@ -257,6 +276,9 @@ export function renderBcdConfig(
     `join_signing_key_pin = "${options.joinSigningKeyPin}"`,
     `join_encryption_key_pin = "${options.joinEncryptionKeyPin}"`,
     ...(options.approverSetSha256 ? [`approver_set_sha256 = "${options.approverSetSha256}"`] : []),
+    ...(options.commandRootSha256?.length
+      ? [`command_root_sha256 = "${[...new Set(options.commandRootSha256)].join(',')}"`]
+      : []),
     '',
   ].join('\n');
 }
@@ -510,6 +532,15 @@ ${
 # must not drop it).
 if [ -f /etc/bcd/config.toml ]; then
   sed -n '/^[[:space:]]*\\[/q; /^[[:space:]]*approver_set_sha256[[:space:]]*=/p' /etc/bcd/config.toml >> /etc/bcd/config.toml.new
+fi
+`
+}${
+  options.commandRootSha256?.length
+    ? ''
+    : `# An upgrade keeps the command-root pins this node was installed with (a script without --command-root-sha256
+# must not drop them: bcd helper would stop checking host units' signatures).
+if [ -f /etc/bcd/config.toml ]; then
+  sed -n '/^[[:space:]]*\\[/q; /^[[:space:]]*command_root_sha256[[:space:]]*=/p' /etc/bcd/config.toml >> /etc/bcd/config.toml.new
 fi
 `
 }if [ -f /etc/bcd/config.toml ] && grep -q '^[[:space:]]*\\[' /etc/bcd/config.toml; then

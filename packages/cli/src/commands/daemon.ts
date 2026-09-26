@@ -145,6 +145,22 @@ export async function daemonFindings(sql: Pick<SqlExecutor, 'query'>): Promise<F
   ];
 }
 
+/**
+ * The command-signing roots an install pins (config.toml command_root_sha256): the operator's list, else the local
+ * PKI bundle's signing root and, during a rotation, the added one (the bundle is the operator's own copy, never the
+ * control plane's word). None when the bundle has no command signing.
+ */
+function commandRootPins(
+  flag: string | undefined,
+  pins: { commandSigningRootSha256?: string; commandSigningNextRootSha256?: string },
+): { commandRootSha256?: string[] } {
+  const roots =
+    flag !== undefined
+      ? flag.split(',').map((pin) => pin.trim()).filter(Boolean)
+      : [pins.commandSigningRootSha256, pins.commandSigningNextRootSha256].filter((pin): pin is string => !!pin);
+  return roots.length || flag !== undefined ? { commandRootSha256: roots } : {};
+}
+
 export const daemonCommands = [
   defineCommand({
     name: 'daemon install-script',
@@ -252,6 +268,12 @@ export const daemonCommands = [
         value: 'HEX',
         description: "Pin the deployment's approver set (pki trust-version prints it): its first set, or nothing destructive",
       },
+      'command-root-sha256': {
+        type: 'string',
+        value: 'HEX,…',
+        description:
+          'Pin the command-signing roots (pki trust-version prints them): bcd helper applies host config units only from specs signed under them. Default: the PKI bundle’s current and next roots',
+      },
       'privileged-plugins': {
         type: 'string',
         value: 'NAMES',
@@ -344,6 +366,7 @@ export const daemonCommands = [
           y: string;
         },
         ...(flags['approver-set-sha256'] ? { approverSetSha256: flags['approver-set-sha256'] } : {}),
+        ...commandRootPins(flags['command-root-sha256'], pins),
         ...(flags.unprivileged ? { unprivileged: true } : {}),
         ...(flags['websocket-url']
           ? {
