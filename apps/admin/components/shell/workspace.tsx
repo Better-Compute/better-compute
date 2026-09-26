@@ -2,6 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { DAY, HOUR, MINUTE } from '@/lib/data/core';
+import { useLiveAvailable } from './connection';
 
 // The workspace: the controls in the top bar that every page and widget reads. One clock (live or paused),
 // one time range, one site scope and the density preference. Modules never call Date.now(): they take `now`
@@ -32,8 +33,15 @@ export interface Workspace {
   setSiteId(siteId: string | undefined): void;
   density: Density;
   setDensity(density: Density): void;
-  /** Where the data comes from. Only the simulation exists today; live mode arrives with the API adapter. */
+  /**
+   * Where the data comes from: 'live' when the operator chose the API (`dataSource`) and it answers
+   * (Settings → Connection); modules with a live source read the API through `api` in lib/api.ts, the rest
+   * stay simulated. Time travel only replays the simulation.
+   */
   source: 'simulated' | 'live';
+  /** The operator's choice; `source` falls back to 'simulated' while the API is unavailable. */
+  dataSource: 'simulated' | 'live';
+  setDataSource(source: 'simulated' | 'live'): void;
   /** The wall clock (always ticking), for "how far behind live am I". */
   wallNow: number;
   /** Time travel: pause the whole panel at `t` (clamped to the past). `setLive(true)` returns to live. */
@@ -44,7 +52,7 @@ const WorkspaceContext = createContext<Workspace | null>(null);
 const STORAGE_KEY = 'bc-admin:workspace';
 const TICK_MS = 2_000;
 
-function load(): Partial<{ range: RangeKey; siteId: string; density: Density; live: boolean }> {
+function load(): Partial<{ range: RangeKey; siteId: string; density: Density; dataSource: 'simulated' | 'live' }> {
   try {
     return JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? '{}');
   } catch {
@@ -59,6 +67,9 @@ export function WorkspaceProvider({ initialNow, children }: { initialNow: number
   const [range, setRange] = useState<RangeKey>('24h');
   const [siteId, setSiteId] = useState<string | undefined>(undefined);
   const [density, setDensity] = useState<Density>('comfortable');
+  const [dataSource, setDataSource] = useState<'simulated' | 'live'>('simulated');
+  const liveAvailable = useLiveAvailable();
+  const source = dataSource === 'live' && liveAvailable ? 'live' : 'simulated';
   const [hydrated, setHydrated] = useState(false);
 
   // Saved preferences, then the URL (?site=fra1&range=7d&at=<ms>) wins: links reproduce a view, including a
@@ -73,6 +84,7 @@ export function WorkspaceProvider({ initialNow, children }: { initialNow: number
     if (nextRange && nextRange in RANGES) setRange(nextRange);
     if (urlSite || saved.siteId) setSiteId(urlSite === 'all' ? undefined : (urlSite ?? saved.siteId));
     if (saved.density) setDensity(saved.density);
+    if (saved.dataSource === 'live') setDataSource('live');
     // Only a link pauses on load; a reload without ?at= is always live.
     if (Number.isFinite(urlAt) && urlAt > 0 && urlAt < Date.now()) {
       setLiveState(false);
@@ -84,11 +96,11 @@ export function WorkspaceProvider({ initialNow, children }: { initialNow: number
   useEffect(() => {
     if (!hydrated) return;
     try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ range, siteId, density }));
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ range, siteId, density, dataSource }));
     } catch {
       // Private windows: preferences just don't persist.
     }
-  }, [hydrated, range, siteId, density]);
+  }, [hydrated, range, siteId, density, dataSource]);
 
   // Keep the URL shareable: scope, range and (when paused) the moment, without a navigation.
   useEffect(() => {
@@ -147,11 +159,13 @@ export function WorkspaceProvider({ initialNow, children }: { initialNow: number
       setSiteId,
       density,
       setDensity,
-      source: 'simulated',
+      source,
+      dataSource,
+      setDataSource,
       wallNow,
       travelTo,
     }),
-    [now, live, setLive, range, window_, siteId, density, wallNow, travelTo],
+    [now, live, setLive, range, window_, siteId, density, wallNow, travelTo, source, dataSource],
   );
 
   return <WorkspaceContext.Provider value={value}>{children}</WorkspaceContext.Provider>;

@@ -7,6 +7,7 @@ import { collectAttention, modules } from '@/lib/modules';
 import { Led } from '@/components/ui/signal';
 import { WidgetBoundary } from '@/components/widgets/widget-frame';
 import { cx } from '@/utils/cx';
+import { useConnection } from './connection';
 import { useAcks } from './pins';
 import { usePeek } from './peek';
 import { useLive, useWorkspace } from './workspace';
@@ -60,6 +61,7 @@ export function StatusItem({
 export function StatusBar() {
   const { source, live, now, wallNow, density, setDensity } = useWorkspace();
   const peek = usePeek();
+  const { status: connection } = useConnection();
   const components = useLive((t) => controlPlane(t), { bucketMs: 5_000 });
   const items = useLive((t, scope) => collectAttention(t, scope), { bucketMs: 10_000 });
   const acks = useAcks();
@@ -82,6 +84,13 @@ export function StatusBar() {
           </span>
         }
         title={source === 'simulated' ? 'Deterministic simulated fleet; no API calls are made' : 'Connected to the compute API'}
+      />
+      <StatusItem
+        label="api"
+        value={!connection ? '…' : !connection.configured ? 'not set' : connection.ok ? `${connection.latencyMs} ms` : 'down'}
+        tone={connection?.configured && !connection.ok ? 'crit' : undefined}
+        href="/settings#connection"
+        title={connection?.url ? `${connection.url}${connection.error ? ` — ${connection.error.message}` : ''}` : 'No compute API configured; the panel is simulated'}
       />
       <StatusItem
         label="control plane"

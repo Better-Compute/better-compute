@@ -3,6 +3,7 @@
 import { useRef, useState } from 'react';
 import { useTheme } from 'next-themes';
 import { RiCompass3Line, RiDownload2Line, RiPuzzle2Line, RiSettings3Line, RiUpload2Line } from 'react-icons/ri';
+import { ConnectionPanel } from './connection-panel';
 import { TOUR_EVENT } from './tour';
 import { Button } from '@/components/base/buttons/button';
 import { SegmentedControl, SegmentedControlItem } from '@/components/base/segmented-control/segmented-control';
@@ -113,6 +114,7 @@ export function SettingsPage() {
             />
           </div>
         </Panel>
+        <ConnectionPanel />
         <Panel className="col-span-12" title="Installed modules" icon={RiPuzzle2Line} meta={`${modules.length} modules`} flush>
           <table className="w-full text-left">
             <thead>

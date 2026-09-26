@@ -104,24 +104,27 @@ function AttentionBell() {
   const items = all.filter((item) => !acks.has(item.id));
   const { now } = useWorkspace();
   const critical = items.filter((item) => item.severity === 'critical').length;
+  // The badge counts what needs action (critical + warning); info items are in the list, not the count.
+  const urgent = items.filter((item) => item.severity !== 'info').length;
   return (
     <DialogTrigger>
       <AriaButton
         data-tour="bell"
-        aria-label={`${items.length} items need attention`}
+        aria-label={`${urgent} items need attention, ${items.length - urgent} for information`}
         className="relative grid size-8 place-items-center text-text-secondary outline-none hover:bg-background-secondary-default hover:text-text-primary focus-visible:ring-2 focus-visible:ring-border-focus-ring"
       >
         <RiNotification3Line className="size-[18px]" aria-hidden />
-        {items.length > 0 && (
+        {urgent > 0 && (
           <span
             className={cx(
               'absolute -top-0.5 -right-0.5 grid h-4 min-w-4 place-items-center px-1 font-mono text-[10px] leading-none font-medium',
               critical ? 'bg-red-500 text-white' : 'bg-signal-fill text-neutral-950',
             )}
           >
-            {items.length}
+            {urgent > 99 ? '99+' : urgent}
           </span>
         )}
+        {urgent === 0 && items.length > 0 && <span aria-hidden className="absolute top-1 right-1 size-1.5 rounded-full bg-text-tertiary" />}
       </AriaButton>
       <Popover placement="bottom end" offset={6} className="w-96 max-w-[calc(100vw-2rem)] border border-separator-border bg-surface-raised shadow-dropdown outline-none">
         <Dialog aria-label="Needs attention" className="outline-none">
