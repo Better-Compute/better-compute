@@ -23,7 +23,15 @@ export interface WidgetProps {
   size: { w: number; h: number };
   /** True while the dashboard is being arranged: pause animations, skip heavy work. */
   editing: boolean;
+  /** This instance's settings (defaults filled in from WidgetDef.settings). */
+  settings: Record<string, string | number | boolean>;
 }
+
+/** One per-instance option a widget offers in its "Configure" form. */
+export type WidgetSetting =
+  | { id: string; label: string; type: 'select'; options: { value: string; label: string }[]; default: string; hint?: string }
+  | { id: string; label: string; type: 'toggle'; default: boolean; hint?: string }
+  | { id: string; label: string; type: 'number'; default: number; min?: number; max?: number; step?: number; hint?: string };
 
 export interface WidgetDef {
   /** `<module>.<name>`, e.g. 'capacity.heatmap'. Stored in saved layouts, so never rename one. */
@@ -37,7 +45,16 @@ export interface WidgetDef {
   maxSize?: { w: number; h: number };
   /** Where "Open" in the widget menu goes. */
   href?: string;
+  /** Per-instance options; the component reads them from `props.settings`. */
+  settings?: WidgetSetting[];
   component: ComponentType<WidgetProps>;
+}
+
+/** An instance's settings with the definition's defaults filled in. */
+export function widgetSettings(def: WidgetDef, saved?: Record<string, string | number | boolean>) {
+  const out: Record<string, string | number | boolean> = {};
+  for (const setting of def.settings ?? []) out[setting.id] = saved?.[setting.id] ?? setting.default;
+  return out;
 }
 
 export interface CommandDef {

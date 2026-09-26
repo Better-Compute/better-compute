@@ -7,13 +7,14 @@ import {
   RiCloseLine,
   RiDeleteBinLine,
   RiDraggable,
+  RiEqualizerLine,
   RiExternalLinkLine,
   RiFileCopyLine,
   RiFullscreenLine,
   RiMore2Fill,
   RiRulerLine,
 } from 'react-icons/ri';
-import type { WidgetDef } from '@/lib/modules';
+import { widgetSettings, type WidgetDef } from '@/lib/modules';
 import { Menu, ToolButton } from '@/components/ui/overlay';
 import { EmptyState } from '@/components/ui/panel';
 import { cx } from '@/utils/cx';
@@ -52,6 +53,9 @@ export function WidgetFrame({
   onResize,
   onMaximize,
   onResizeStart,
+  onConfigure,
+  title: customTitle,
+  summary,
   dragHandleProps,
   children,
 }: {
@@ -63,9 +67,15 @@ export function WidgetFrame({
   onResize(w: number, h: number): void;
   onMaximize(): void;
   onResizeStart(event: React.PointerEvent): void;
+  onConfigure(): void;
+  /** The instance's own title, if renamed. */
+  title?: string;
+  /** Mono summary of non-default settings, e.g. "gpu · fra1". */
+  summary?: string;
   dragHandleProps?: React.HTMLAttributes<HTMLElement>;
   children: ReactNode;
 }) {
+  const title = customTitle || def.title;
   return (
     <div
       className={cx(
@@ -75,19 +85,20 @@ export function WidgetFrame({
     >
       <header className="flex h-9 shrink-0 items-center gap-2 border-b border-separator-border pr-1 pl-3">
         {editing && (
-          <span {...dragHandleProps} className="-ml-1.5 cursor-grab text-text-tertiary active:cursor-grabbing" aria-label={`Drag ${def.title}`}>
+          <span {...dragHandleProps} className="-ml-1.5 cursor-grab text-text-tertiary active:cursor-grabbing" aria-label={`Drag ${title}`}>
             <RiDraggable className="size-4" aria-hidden />
           </span>
         )}
         <def.icon className="size-3.5 shrink-0 text-text-tertiary" aria-hidden />
-        <h3 className="min-w-0 flex-1 truncate font-mono text-[11px] font-medium tracking-wide text-text-secondary uppercase">
+        <h3 className="flex min-w-0 flex-1 items-baseline gap-2 truncate font-mono text-[11px] font-medium tracking-wide text-text-secondary uppercase">
           {def.href && !editing ? (
-            <Link href={def.href} className="hover:text-text-primary">
-              {def.title}
+            <Link href={def.href} className="truncate hover:text-text-primary">
+              {title}
             </Link>
           ) : (
-            def.title
+            <span className="truncate">{title}</span>
           )}
+          {summary && <span className="truncate text-[10px] font-normal tracking-normal text-text-tertiary normal-case">{summary}</span>}
         </h3>
         {editing && (
           <span className="font-mono text-[10px] text-text-tertiary tabular-nums">
@@ -95,12 +106,14 @@ export function WidgetFrame({
           </span>
         )}
         <div className={cx('flex items-center', !editing && 'opacity-0 transition-opacity group-hover/widget:opacity-100 focus-within:opacity-100')}>
-          {!editing && <ToolButton icon={RiFullscreenLine} label={`Expand ${def.title}`} onPress={onMaximize} />}
+          {!editing && def.settings?.length ? <ToolButton icon={RiEqualizerLine} label={`Configure ${title}`} onPress={onConfigure} /> : null}
+          {!editing && <ToolButton icon={RiFullscreenLine} label={`Expand ${title}`} onPress={onMaximize} />}
           <Menu
-            label={`${def.title} options`}
-            trigger={<ToolButton icon={RiMore2Fill} label={`${def.title} options`} />}
+            label={`${title} options`}
+            trigger={<ToolButton icon={RiMore2Fill} label={`${title} options`} />}
             items={[
               ...(def.href ? [{ id: 'open', label: 'Open page', icon: RiExternalLinkLine, onAction: () => { window.location.href = def.href!; } }] : []),
+              { id: 'configure', label: def.settings?.length ? 'Configure…' : 'Rename…', icon: RiEqualizerLine, onAction: onConfigure },
               { id: 'max', label: 'Expand', icon: RiFullscreenLine, onAction: onMaximize },
               ...SIZE_PRESETS.map((preset, index) => ({
                 id: `size-${preset.id}`,
@@ -113,11 +126,11 @@ export function WidgetFrame({
               { id: 'remove', label: 'Remove from dashboard', icon: RiDeleteBinLine, danger: true, onAction: onRemove },
             ]}
           />
-          {editing && <ToolButton icon={RiCloseLine} label={`Remove ${def.title}`} onPress={onRemove} />}
+          {editing && <ToolButton icon={RiCloseLine} label={`Remove ${title}`} onPress={onRemove} />}
         </div>
       </header>
       <div className={cx('relative min-h-0 flex-1 overflow-hidden', editing && 'pointer-events-none opacity-80')}>
-        <WidgetBoundary name={def.title}>{children}</WidgetBoundary>
+        <WidgetBoundary name={title}>{children}</WidgetBoundary>
       </div>
       {editing && (
         <span
@@ -136,7 +149,17 @@ export function WidgetFrame({
 }
 
 /** A widget blown up to fill the screen. */
-export function WidgetMaximized({ def, onClose }: { def: WidgetDef | null; onClose(): void }) {
+export function WidgetMaximized({
+  def,
+  settings,
+  title,
+  onClose,
+}: {
+  def: WidgetDef | null;
+  settings?: Record<string, string | number | boolean>;
+  title?: string;
+  onClose(): void;
+}) {
   return (
     <ModalOverlay isOpen={Boolean(def)} onOpenChange={(open) => !open && onClose()} isDismissable className="fixed inset-0 z-50 bg-neutral-950/50 p-4 sm:p-8">
       <Modal className="flex h-full w-full flex-col border border-separator-border bg-surface-raised shadow-lg outline-none">
@@ -146,7 +169,7 @@ export function WidgetMaximized({ def, onClose }: { def: WidgetDef | null; onClo
               <header className="flex h-11 shrink-0 items-center gap-2 border-b border-separator-border pr-2 pl-4">
                 <def.icon className="size-4 text-text-tertiary" aria-hidden />
                 <Heading slot="title" className="flex-1 truncate font-mono text-[12px] font-medium tracking-wide text-text-secondary uppercase">
-                  {def.title}
+                  {title || def.title}
                 </Heading>
                 {def.href && (
                   <Link href={def.href} onClick={onClose} className="font-mono text-[11px] text-signal hover:underline">
@@ -157,7 +180,7 @@ export function WidgetMaximized({ def, onClose }: { def: WidgetDef | null; onClo
               </header>
               <div className="min-h-0 flex-1 overflow-auto">
                 <WidgetBoundary name={def.title}>
-                  <def.component size={{ w: 12, h: 8 }} editing={false} />
+                  <def.component size={{ w: 12, h: 8 }} editing={false} settings={widgetSettings(def, settings)} />
                 </WidgetBoundary>
               </div>
             </>

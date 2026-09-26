@@ -7,6 +7,10 @@ export interface WidgetInstance {
   widget: string;
   w: number;
   h: number;
+  /** A custom title for this instance ("H100 only"). */
+  title?: string;
+  /** Values for the widget's declared settings. */
+  settings?: Record<string, string | number | boolean>;
 }
 
 export interface Dashboard {

@@ -93,39 +93,56 @@ export function KpiStrip({ size }: WidgetProps) {
   );
 }
 
-/** GPU and CPU utilization over the workspace range, with GPUs allocated. */
-export function PulseChart({ size }: WidgetProps) {
+const PULSE_METRICS = {
+  utilization: { label: 'Utilization', format: (v: number) => `${Math.round(v * 100)}%` },
+  gpus: { label: 'GPUs allocated', format: (v: number) => fmtNum(v, { short: true }) },
+  sandboxes: { label: 'Sandboxes live', format: (v: number) => fmtNum(v, { short: true }) },
+  power: { label: 'IT power (kW)', format: (v: number) => fmtNum(v, { short: true }) },
+} as const;
+
+/** A fleet metric over the workspace range: utilization (GPU vs CPU), GPUs allocated, sandboxes or power. */
+export function PulseChart({ size, settings }: WidgetProps) {
   const { window: range, range: key } = useWorkspace();
+  const metric = (String(settings.metric) in PULSE_METRICS ? settings.metric : 'utilization') as keyof typeof PULSE_METRICS;
   const series = useLive((now, scope) => pulseSeries(now, range.points, range.step, scope), {
     bucketMs: Math.min(range.step, 60_000),
     deps: [range.points, range.step],
   });
   const times = series.map((p) => p.t);
   const long = key === '7d' || key === '30d';
+  const lines =
+    metric === 'utilization'
+      ? [
+          { id: 'gpu', label: 'GPU', values: series.map((p) => p.gpuUtilization), tone: 'signal' as const, area: true },
+          ...(settings.compare !== false ? [{ id: 'cpu', label: 'CPU', values: series.map((p) => p.cpuUtilization), tone: 'neutral' as const, dashed: true }] : []),
+        ]
+      : [
+          {
+            id: metric,
+            label: PULSE_METRICS[metric].label,
+            values: series.map((p) => (metric === 'gpus' ? p.gpusAllocated : metric === 'sandboxes' ? p.sandboxesLive : p.powerKw)),
+            tone: 'signal' as const,
+            area: true,
+          },
+        ];
+  const main = lines[0]!.values;
+  const format = PULSE_METRICS[metric].format;
   return (
     <div className="flex h-full flex-col gap-2 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <Legend
-          items={[
-            { label: 'GPU utilization', tone: 'signal' },
-            { label: 'CPU utilization', tone: 'neutral' },
-          ]}
-        />
+        <Legend items={lines.map((l) => ({ label: metric === 'utilization' ? `${l.label} utilization` : l.label, tone: l.tone }))} />
         <span className="font-mono text-[11px] text-text-tertiary">
-          peak {fmtPct(Math.max(...series.map((p) => p.gpuUtilization)))} · low {fmtPct(Math.min(...series.map((p) => p.gpuUtilization)))}
+          peak {format(Math.max(...main))} · low {format(Math.min(...main))}
         </span>
       </div>
       <TimeSeriesChart
         className="min-h-0 flex-1"
         height={Math.max(120, size.h * 80 - 110)}
         times={times}
-        yMax={1}
-        yFormat={(v) => `${Math.round(v * 100)}%`}
+        yMax={metric === 'utilization' ? 1 : undefined}
+        yFormat={format}
         xFormat={(t) => (long ? new Date(t).toISOString().slice(5, 10) : fmtClock(t, false))}
-        series={[
-          { id: 'gpu', label: 'GPU', values: series.map((p) => p.gpuUtilization), tone: 'signal', area: true },
-          { id: 'cpu', label: 'CPU', values: series.map((p) => p.cpuUtilization), tone: 'neutral', dashed: true },
-        ]}
+        series={lines}
       />
     </div>
   );
@@ -202,12 +219,16 @@ export function SubjectLink({ subject }: { subject: string }) {
 }
 
 /** Every node in scope as one cell, grouped by pool: amber by load, red offline, hatched provisioning. */
-export function FleetWall() {
+export function FleetWall({ settings }: WidgetProps) {
   const pulse = useLive((now, scope) => fleetPulse(now, scope), { bucketMs: 10_000 });
   const { now } = useWorkspace();
   const peek = usePeek();
   const [hover, setHover] = useState<{ id: string; state: NodeState; load: number; pool: string } | null>(null);
-  const walls = useMemo(() => pulse.pools.map((p) => ({ pulse: p, nodes: nodeStates(p, now) })), [pulse, now]);
+  const kind = String(settings.kind ?? 'all');
+  const walls = useMemo(
+    () => pulse.pools.filter((p) => kind === 'all' || p.pool.kind === kind).map((p) => ({ pulse: p, nodes: nodeStates(p, now) })),
+    [pulse, now, kind],
+  );
   return (
     <div className="flex h-full flex-col">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-separator-border px-3 py-1.5">
@@ -396,8 +417,10 @@ export function SitesWidget({ size }: WidgetProps) {
 const typeStatus = (severity: string): Status => (severity === 'critical' ? 'crit' : severity === 'warning' ? 'warn' : 'ok');
 
 /** The live event stream (newest first), filterable by kind. */
-export function ActivityWidget() {
-  const events = useLive((now, scope) => activity(now, 40, scope), { bucketMs: 5_000 });
+export function ActivityWidget({ settings }: WidgetProps) {
+  const all = useLive((now, scope) => activity(now, 60, scope), { bucketMs: 5_000 });
+  const floor = String(settings.severity ?? 'info');
+  const events = all.filter((e) => floor === 'info' || (floor === 'warning' ? e.severity !== 'info' : e.severity === 'critical'));
   const { now } = useWorkspace();
   const [kind, setKind] = useState<string | null>(null);
   const kinds = [...new Set(events.map((e) => e.type.split('.')[0]!))];

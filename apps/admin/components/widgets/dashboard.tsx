@@ -15,7 +15,8 @@ import { Button } from '@/components/base/buttons/button';
 import { PALETTE_EVENTS } from '@/components/shell/command-palette';
 import { useFeedback } from '@/components/ui/feedback';
 import { Drawer, Menu, ToolButton } from '@/components/ui/overlay';
-import { allWidgets, modules, widgetById, type WidgetDef } from '@/lib/modules';
+import { allWidgets, modules, widgetById, widgetSettings, type WidgetDef } from '@/lib/modules';
+import { ConfigureWidget, settingsSummary } from './configure';
 import { cx } from '@/utils/cx';
 import {
   defaultState,
@@ -41,7 +42,8 @@ export function Dashboards() {
   const [hydrated, setHydrated] = useState(false);
   const [editing, setEditing] = useState(false);
   const [catalog, setCatalog] = useState(false);
-  const [maximized, setMaximized] = useState<WidgetDef | null>(null);
+  const [maximized, setMaximized] = useState<WidgetInstance | null>(null);
+  const [configuring, setConfiguring] = useState<WidgetInstance | null>(null);
   const { confirm, toast } = useFeedback();
 
   useEffect(() => {
@@ -191,11 +193,23 @@ export function Dashboards() {
         editing={editing}
         onChange={(items) => update(() => items)}
         onMaximize={setMaximized}
+        onConfigure={setConfiguring}
         onEmpty={() => setCatalog(true)}
       />
 
       <WidgetCatalog open={catalog} onOpenChange={setCatalog} onAdd={addWidget} present={new Set(dashboard.items.map((i) => i.widget))} />
-      <WidgetMaximized def={maximized} onClose={() => setMaximized(null)} />
+      <WidgetMaximized
+        def={maximized ? (widgetById(maximized.widget) ?? null) : null}
+        settings={maximized?.settings}
+        title={maximized?.title}
+        onClose={() => setMaximized(null)}
+      />
+      <ConfigureWidget
+        def={configuring ? (widgetById(configuring.widget) ?? null) : null}
+        instance={configuring}
+        onClose={() => setConfiguring(null)}
+        onSave={(patch) => update((items) => items.map((i) => (i.key === configuring?.key ? { ...i, title: patch.title, settings: patch.settings } : i)))}
+      />
     </div>
   );
 }
@@ -205,12 +219,14 @@ function WidgetGrid({
   editing,
   onChange,
   onMaximize,
+  onConfigure,
   onEmpty,
 }: {
   items: WidgetInstance[];
   editing: boolean;
   onChange(items: WidgetInstance[]): void;
-  onMaximize(def: WidgetDef): void;
+  onMaximize(instance: WidgetInstance): void;
+  onConfigure(instance: WidgetInstance): void;
   onEmpty(): void;
 }) {
   const gridRef = useRef<HTMLDivElement>(null);
@@ -326,7 +342,10 @@ function WidgetGrid({
                 onChange([...items.slice(0, index + 1), copy, ...items.slice(index + 1)]);
               }}
               onResize={(w, h) => onChange(items.map((i) => (i.key === instance.key ? { ...i, w, h } : i)))}
-              onMaximize={() => onMaximize(def)}
+              onMaximize={() => onMaximize(instance)}
+              onConfigure={() => onConfigure(instance)}
+              title={instance.title}
+              summary={settingsSummary(def, instance.settings)}
               onResizeStart={startResize(instance, def)}
               dragHandleProps={{
                 draggable: true,
@@ -341,7 +360,7 @@ function WidgetGrid({
                 },
               }}
             >
-              <def.component size={{ w: instance.w, h: instance.h }} editing={editing} />
+              <def.component size={{ w: instance.w, h: instance.h }} editing={editing} settings={widgetSettings(def, instance.settings)} />
             </WidgetFrame>
           ) : (
             <div className="flex h-full items-center justify-between gap-2 border border-dashed border-separator-border px-3 font-mono text-[11px] text-text-tertiary">
