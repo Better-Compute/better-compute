@@ -32,6 +32,17 @@ func TestHoldsAndVMsShareTheHostsMemory(t *testing.T) {
 	if err := m.admitHold(&agentv1.ResourceLimits{Mems: "0", Hugepages_2Mi: 600}); err != nil {
 		t.Fatalf("600 pages on node 0 refused: %v", err)
 	}
+	// Pages taken with no node (host-wide) leave the per-node counts alone, but still bound them:
+	// 2048 - 600 left on node 0, yet only 4096 - 1500 - 600 - 1500 = 496 on the host.
+	if err := m.admitHold(&agentv1.ResourceLimits{Hugepages_2Mi: 1500}); err != nil {
+		t.Fatalf("1500 host-wide pages refused: %v", err)
+	}
+	if err := m.admitHold(&agentv1.ResourceLimits{Mems: "0", Hugepages_2Mi: 600}); err == nil {
+		t.Fatal("600 pages on node 0 admitted beyond the host's 496")
+	}
+	if err := m.admit(instance("inst_h", 2<<30, &agentv1.InstancePlacement{Mems: "0", HugepageSizeBytes: runtime.Hugepage2Mi})); err == nil {
+		t.Fatal("a 1024-page VM on node 0 admitted beyond the host's 496")
+	}
 	// 16 GiB + overhead + 24 GiB committed of 55 GiB: a 16 GiB VM no longer fits.
 	if err := m.admit(instance("inst_b", 16<<30, nil)); err == nil || !strings.HasPrefix(err.Error(), ResourcesExhausted) {
 		t.Fatalf("a 16 GiB VM beside the hold: %v", err)

@@ -145,6 +145,11 @@ func (m *hostMemory) admit(spec *agentv1.InstanceSpec) error {
 		for _, node := range nodes {
 			free += m.freeHugepages[size][node]
 		}
+		// The host-wide count (free less reserved, less what node-less instances and holds took) bounds
+		// every node's too: per-node counts know nothing of those.
+		if host := m.freeHugepages[size][-1]; host < free {
+			free = host
+		}
 		if free < pages {
 			return fmt.Errorf("%s: %d hugepages of %d KiB needed on NUMA node(s) %s, %d free", ResourcesExhausted,
 				pages, size/1024, placement.Mems, free)
@@ -215,6 +220,9 @@ func (m *hostMemory) fits(c holdCommitment) string {
 		free := uint64(0)
 		for _, node := range m.nodesOf(c) {
 			free += m.freeHugepages[size][node]
+		}
+		if host := m.freeHugepages[size][-1]; host < free { // node-less takers count too
+			free = host
 		}
 		if free < pages {
 			return fmt.Sprintf("%d hugepages of %d KiB needed, %d free", pages, size/1024, free)
