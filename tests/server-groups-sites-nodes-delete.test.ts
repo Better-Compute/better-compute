@@ -149,11 +149,25 @@ describe('nodes.delete', () => {
     expect(await h.call('nodes/delete', USER, { tenantId: ACME, nodeId: node })).toEqual({ nodeId: node, deleted: false });
   });
 
+  it('deletes a cordoned adopted node (no retire workflow), freeing its EK binding for a rejoin', async () => {
+    // e.g. the machine's TPM was replaced: the old identity must go so the machine can join anew.
+    const { node } = await nodeWithCapacity('adopted');
+    await h.store.query('UPDATE nodes SET cordoned = true WHERE id = $1', [node]);
+    expect(await h.call('nodes/delete', USER, { tenantId: ACME, nodeId: node, reason: 'tpm replaced' })).toEqual({
+      nodeId: node,
+      deleted: true,
+    });
+    expect((await h.store.query('SELECT 1 FROM node_bindings WHERE node_id = $1', [node])).rowCount).toBe(0);
+    const { rows: certs } = await h.store.query<{ reason: string }>('SELECT revocation_reason AS reason FROM node_certs WHERE node_id = $1', [node]);
+    expect(certs).toEqual([{ reason: 'node-deleted' }]);
+  });
+
   it('refuses nodes that are in service or hold allocations', async () => {
     const { node: live } = await nodeWithCapacity('adopted');
     const error = await h.failure('nodes/delete', USER, { tenantId: ACME, nodeId: live });
     expect(error.code).toBe('INVALID_STATE');
-    expect(error.details).toEqual({ provisionState: 'adopted' });
+    expect(error.details).toEqual({ provisionState: 'adopted', cordoned: false });
+    expect(error.message).toMatch(/Cordon the adopted node first/);
 
     const { node: busy } = await nodeWithCapacity('retired');
     await h.store.query(

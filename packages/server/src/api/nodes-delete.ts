@@ -4,8 +4,8 @@ import { fields, int, notFound, visibleIn } from './common.js';
 import { parser, v } from './input.js';
 
 // `nodes.delete` (PLAN.md §9.2, module server, v0.2), decided on `compute-node/{nodeId}` with
-// `compute:nodes:delete`. Only a retired node, or one that never got past adoption or enrollment,
-// can be deleted, and only with no open allocation. Its capacity rows are released first, in the
+// `compute:nodes:delete`. Only a retired node, a cordoned adopted node (no retire workflow there), or
+// one that never got past adoption or enrollment, can be deleted, and only with no open allocation. Its capacity rows are released first, in the
 // capacity lock order (quota_usage → pools → nodes → devices → node_resources →
 // pool_capacity_rollup). Then the node is tombstoned: audit rows, certs, inventory snapshots and
 // past allocations keep referencing it. It leaves its pool and the projection (nobody sees it), its
@@ -45,6 +45,7 @@ interface NodeRow {
   owner_tenant_id: string;
   provision_state: string;
   failed_from: string | null;
+  cordoned: boolean;
   version: unknown;
 }
 
@@ -68,7 +69,7 @@ export function nodesDeleteApi(): NodesDeleteApi {
           const read = async (lock: string) =>
             (
               await sql.query<NodeRow>(
-                `SELECT n.id, n.pool_id, n.owner_tenant_id, n.provision_state, n.failed_from, n.version
+                `SELECT n.id, n.pool_id, n.owner_tenant_id, n.provision_state, n.failed_from, n.cordoned, n.version
                    FROM nodes n
                   WHERE n.id = $2 AND n.deleted_at IS NULL AND ${visibleIn('node', 'n.id', '$1')} ${lock}`,
                 [input.tenantId, input.nodeId],
@@ -96,12 +97,22 @@ export function nodesDeleteApi(): NodesDeleteApi {
           const failedEarly =
             row.provision_state === 'failed' &&
             (deletableFailures as readonly string[]).includes(row.failed_from ?? '');
-          if (!(deletableStates as readonly string[]).includes(row.provision_state) && !failedEarly)
+          // An adopted host (bcd installed on a machine metal does not manage) has no retire workflow:
+          // it is removed by cordoning it and deleting it once it holds nothing, e.g. after its TPM or
+          // disk was replaced, so the machine can join again under a new identity.
+          const adoptedCordoned = row.provision_state === 'adopted' && row.cordoned;
+          if (
+            !(deletableStates as readonly string[]).includes(row.provision_state) &&
+            !failedEarly &&
+            !adoptedCordoned
+          )
             throw new ComputeError(
               'INVALID_STATE',
-              `Only retired nodes, or nodes never adopted or enrolled, can be deleted (this one is ${row.provision_state})`,
+              row.provision_state === 'adopted'
+                ? 'Cordon the adopted node first (nodes.cordon), then delete it once it holds nothing'
+                : `Only retired nodes, cordoned adopted nodes, or nodes never adopted or enrolled, can be deleted (this one is ${row.provision_state})`,
               undefined,
-              { provisionState: row.provision_state },
+              { provisionState: row.provision_state, cordoned: row.cordoned },
             );
           const { rows: open } = await sql.query<{ n: number }>(
             `SELECT count(*)::int AS n FROM allocations WHERE node_id = $1 AND released_at IS NULL`,
