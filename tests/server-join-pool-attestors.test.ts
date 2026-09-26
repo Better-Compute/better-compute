@@ -46,6 +46,8 @@ const tpm = (poolId: () => string, tenantId: () => string) =>
   tpmAttestor({
     challengeKey: new Uint8Array(randomBytes(32)),
     allowUncertifiedEk: true,
+    // The software TPM here does not hold the node key (the join-key certification has its own tests).
+    nodeKey: 'any',
     resolve: async () => ({ tenantId: tenantId(), role: 'node', poolId: poolId() }),
   });
 

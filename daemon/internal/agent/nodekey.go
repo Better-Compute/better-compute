@@ -92,6 +92,29 @@ func newNodeKey(log *slog.Logger) (crypto.Signer, []byte, error) {
 	return newFileKey()
 }
 
+// NodeKeyHolder is an attestor that makes the join's node key in its own TPM and certifies it in its
+// answer (tpm.Attestor): the control plane then knows the key cannot leave the machine.
+type NodeKeyHolder interface {
+	HoldNodeKey(unique []byte) (crypto.Signer, error)
+}
+
+// joinKey makes the join's node key: in the attestor's TPM, certified, when it holds keys and node keys
+// can use the TPM here (bcd node loads it through TPM); else as newNodeKey does.
+func joinKey(attest ChallengeAttestor, log *slog.Logger) (crypto.Signer, []byte, error) {
+	if holder, ok := attest.(NodeKeyHolder); ok && TPM != nil {
+		unique := make([]byte, tpm.NodeKeyUniqueSize)
+		if _, err := rand.Read(unique); err != nil {
+			return nil, nil, err
+		}
+		key, err := holder.HoldNodeKey(unique)
+		if err != nil {
+			return nil, nil, fmt.Errorf("agent: the node key in the attestor's TPM: %w", err)
+		}
+		return key, tpmKeyRecord(unique), nil
+	}
+	return newNodeKey(log)
+}
+
 func newTPMKey() (*tpm.NodeKey, []byte, error) {
 	t, err := openTPM()
 	if err != nil {

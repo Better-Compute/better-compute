@@ -102,6 +102,8 @@ function attestor(overrides: Partial<TpmAttestorOptions> = {}, reasons: string[]
   return tpmAttestor({
     challengeKey,
     ekRoots: [acme.root],
+    // These tests' agents keep their keys in software; the node-key certification has its own tests.
+    nodeKey: 'any',
     resolve: async (_tx, identity) =>
       known.has(hex(identity.ekSha256))
         ? { tenantId: 'org_acme', role: 'node', poolId: 'pool_tpm' }
@@ -172,6 +174,36 @@ describe('tpm attestor', () => {
       bind: sha256(tpm.ekPublic),
     });
     expect(seen).toEqual([hex(sha256(tpm.ekPublic))]);
+  });
+
+  it("admits (nodeKey: certified, the default) only a node key the AK certifies as the TPM's, and the CSR's", async () => {
+    const tpm = softwareTpm({ certifiedBy: acme });
+    enroll(tpm);
+    const key = generateP256KeyPair();
+    const csr = createCsr(key.privateKey);
+    const spkiOf = (k: KeyObject) => sha256(new Uint8Array(k.export({ type: 'spki', format: 'der' })));
+    const ctx = (): AttestationContext => ({
+      tx: { query: async () => ({ rows: [], rowCount: 0 }) } as unknown as SqlTx,
+      clock: manualClock(now),
+      claims: {},
+      role: 'node',
+      csrSha256: sha256(csr),
+      csrSpkiSha256: spkiOf(key.publicKey),
+    });
+    const run = async (a: ReturnType<typeof tpmAttestor>, holder: SoftwareTpm) => {
+      const producer = tpmProducer(holder);
+      const first = (await a.verify(await producer.produce({ claims: {}, nonce: sha256(csr) }), ctx())) as AttestationDeferral;
+      return a.verify(await producer.produce({ claims: {}, nonce: sha256(csr), challenge: first.challenge! }), ctx());
+    };
+    const reasons: string[] = [];
+    const strict = attestor({ nodeKey: 'certified' }, reasons);
+    await expect(run(strict, { ...tpm, nodeKey: key.publicKey })).resolves.toMatchObject({ nodeKey: 'tpm', bind: sha256(tpm.ekPublic) });
+    // Not certified; certified, but another key than the CSR's.
+    await expect(run(strict, tpm)).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    await expect(run(strict, { ...tpm, nodeKey: generateP256KeyPair().publicKey })).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    expect(reasons).toEqual(['node-key-not-certified', 'node-key-not-csr']);
+    // `any` admits a key held elsewhere, and does not say it is the TPM's.
+    await expect(run(attestor(), tpm)).resolves.not.toHaveProperty('nodeKey');
   });
 
   it('refuses answers for another CSR, late answers, forged secrets and PCR lies', async () => {

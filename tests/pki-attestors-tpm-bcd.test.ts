@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { isAttestationDeferral, manualClock, type AttestationContext, type SqlTx } from '@better-compute/core';
-import { sha256, tpmAttestor } from '@better-compute/pki';
+import { parseTpmPublic, sha256, tpmAttestor } from '@better-compute/pki';
 
 // The tpm attestor's wire contract with bcd (daemon/internal/tpm/testdata, scripts/daemon-tpm-fixture.mjs):
 // bcd's Go TPM client answered the challenge tpmAttestor made for its evidence; tpmAttestor must admit
@@ -19,6 +19,11 @@ const bytes = (b64url: string) => new Uint8Array(Buffer.from(b64url, 'base64url'
 const evidence = read('evidence.json');
 const answer = read('answer.json');
 const ek = bytes((JSON.parse(new TextDecoder().decode(evidence)) as { ek: string }).ek);
+// The node key bcd holds in the TPM (answer.nodeKey): the CSR's key, as JoinService tells the attestor.
+const nodeKeyPublic = parseTpmPublic(
+  bytes((JSON.parse(new TextDecoder().decode(answer)) as { answer: { nodeKey: { public: string } } }).answer.nodeKey.public),
+);
+const csrSpkiSha256 = sha256(new Uint8Array(nodeKeyPublic.publicKey.export({ type: 'spki', format: 'der' })));
 
 // The sim's EK certificate chains to this manufacturer root (made with the fixture, ek-root.der).
 const ekRoot = read('ek-root.der');
@@ -32,12 +37,13 @@ function attestor(reasons: string[], ekRoots: Uint8Array[] = [ekRoot]) {
   });
 }
 
-const context = (csrSha256: Uint8Array, at = challenge.now): AttestationContext => ({
+const context = (csrSha256: Uint8Array, at = challenge.now, spki = csrSpkiSha256): AttestationContext => ({
   tx: { query: async () => ({ rows: [], rowCount: 0 }) } as unknown as SqlTx,
   clock: manualClock(at),
   claims: {},
   role: 'node',
   csrSha256,
+  csrSpkiSha256: spki,
 });
 
 describe('tpm attestor × bcd (Go)', () => {
@@ -50,7 +56,13 @@ describe('tpm attestor × bcd (Go)', () => {
     const reasons: string[] = [];
     const verdict = await attestor(reasons).verify({ attestor: 'tpm', payload: answer }, context(bytes(challenge.csrSha256)));
     expect(reasons).toEqual([]);
-    expect(verdict).toMatchObject({ tenantId: 'org_bcd', poolId: 'pool_tpm', bind: sha256(ek) });
+    // Its node key certified by the AK (nodeKey: certified is the default): the TPM's, the CSR's.
+    expect(verdict).toMatchObject({ tenantId: 'org_bcd', poolId: 'pool_tpm', bind: sha256(ek), nodeKey: 'tpm' });
+    const other: string[] = [];
+    await expect(
+      attestor(other).verify({ attestor: 'tpm', payload: answer }, context(bytes(challenge.csrSha256), challenge.now, new Uint8Array(32))),
+    ).rejects.toThrow();
+    expect(other).toEqual(['node-key-not-csr']);
   });
 
   it("verifies the EK certificate bcd read from the TPM's NV: another manufacturer's root is refused", async () => {

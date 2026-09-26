@@ -47,6 +47,10 @@ func TestTSContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.Close()
+	// The join's node key is in this TPM: the answer carries the AK's certification of it.
+	if _, err := a.HoldNodeKey(bytes.Repeat([]byte{0x42}, tpm.NodeKeyUniqueSize)); err != nil {
+		t.Fatal(err)
+	}
 	evidence, err := a.Evidence()
 	if err != nil {
 		t.Fatal(err)
@@ -96,6 +100,10 @@ func TestTSContract(t *testing.T) {
 		}
 		for _, k := range []string{"state", "secret", "pcrs"} {
 			out["answer."+k] = ans[k]
+		}
+		// The node key's public area is derived again from its unique; its certification is signed anew.
+		if nk, ok := ans["nodeKey"].(map[string]any); ok {
+			out["answer.nodeKey.public"] = nk["public"]
 		}
 		return out
 	}

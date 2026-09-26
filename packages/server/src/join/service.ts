@@ -500,7 +500,7 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
     const response = await database.transaction(async (tx) => {
       const result = await attestor.verify(
         { attestor: attestorId, payload, ...(openedToken ? { token: openedToken } : {}) },
-        { tx, clock, claims: coreClaims(request.claims), role, csrSha256: csr.sha256 },
+        { tx, clock, claims: coreClaims(request.claims), role, csrSha256: csr.sha256, csrSpkiSha256: csr.spkiSha256 },
       );
       // A two-round join: the attestor's rows commit, nothing is issued, the agent comes back.
       if (isAttestationDeferral(result)) return deferred(crypto, attestorId, csr.sha256, result);
@@ -719,6 +719,8 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
           attestor: attestorId,
           reclaimed: existing !== undefined,
           hardwareKeyTrusted: key?.trusted ?? false,
+          // Where the attestor proved the node key lives (tpm: the machine's TPM certified it).
+          nodeKey: result.nodeKey ?? 'unattested',
           serial: certificate.serial,
           ...(context.gatewayId ? { gatewayId: context.gatewayId } : {}),
         },
@@ -745,6 +747,7 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
             revoked,
             hardwareKey: key?.key ?? null,
             hardwareKeyTrusted: key?.trusted ?? false,
+            nodeKey: result.nodeKey ?? 'unattested',
           }),
         ],
       );

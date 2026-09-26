@@ -21,12 +21,17 @@ import { consumeApprovedRequest, recordPendingRequest, requestRejected } from '.
 import {
   activateCredential,
   isAttestationKey,
+  isTpmResidentSigningKey,
   makeCredential,
+  marshalCertify,
+  nodeKeyAttributes,
+  parseCertify,
   parseQuote,
   parseTpmPublic,
   parseTpmSignature,
   pcrDigest,
   marshalQuote,
+  marshalTpmPublic,
   signTpmAttest,
   TPM_ALG,
   tpmName,
@@ -98,6 +103,13 @@ export interface TpmAttestorOptions extends AttestorBaseOptions {
   };
   challengeTtlMs?: number;
   roles?: readonly AgentRole[];
+  /**
+   * The node key (the CSR's): `certified` (the default) admits a join only when the AK certifies it as a
+   * key this TPM made and never lets out (TPM2_Certify over sha256(csr): `answer.nodeKey`), so the node's
+   * identity cannot be copied off the machine; `any` also admits a node key held elsewhere (a file).
+   * The result's `nodeKey` says which applied.
+   */
+  nodeKey?: 'certified' | 'any';
 }
 
 export const tpmChallengeMaxTtlMs = 5 * 60_000;
@@ -133,6 +145,8 @@ interface TpmEvidence {
     secret: string;
     quote: string;
     signature: string;
+    /** The AK's certification of the node key (bcd's tpm.Attestor.HoldNodeKey). */
+    nodeKey?: { public: string; certifyInfo: string; signature: string };
     pcrs: Record<string, Record<string, string>>;
   };
 }
@@ -369,6 +383,34 @@ export function tpmAttestor(options: TpmAttestorOptions): AttestorVerifier {
         const policy = options.pcrPolicy?.(pcrs);
         if (policy) fail(`pcr-policy:${policy}`);
 
+        // The node key: the AK (proven beside the EK above) certifies that this TPM made the CSR's key
+        // and never lets it out, over sha256(csr).
+        const keyProof = answer.nodeKey;
+        let nodeKey: 'tpm' | undefined;
+        if (keyProof) {
+          let certified: TpmPublic;
+          let info: Uint8Array;
+          let certifySignature;
+          let certify;
+          try {
+            certified = parseTpmPublic(fromBase64url(keyProof.public));
+            info = fromBase64url(keyProof.certifyInfo);
+            certifySignature = parseTpmSignature(fromBase64url(keyProof.signature));
+            certify = parseCertify(info);
+          } catch {
+            return fail('node-key-malformed');
+          }
+          if (!verifyTpmSignature(ak, info, certifySignature)) fail('node-key-signature');
+          if (!timingSafeEqualBytes(certify.extraData, csrSha256)) fail('node-key-nonce');
+          if (!timingSafeEqualBytes(certify.name, tpmName(certified))) fail('node-key-name');
+          if (!isTpmResidentSigningKey(certified)) fail('node-key-attributes');
+          const spkiSha256 = sha256(spki(certified.publicKey));
+          if (!context.csrSpkiSha256 || !timingSafeEqualBytes(spkiSha256, context.csrSpkiSha256)) fail('node-key-not-csr');
+          nodeKey = 'tpm';
+        }
+        if (!nodeKey && (options.nodeKey ?? 'certified') === 'certified') fail('node-key-not-certified');
+        const keyed = nodeKey ? { nodeKey } : {};
+
         // Where the machine joins: 1) the node this EK is bound to (a re-join after reinstall or a
         // lost key is a reclaim of that node); 2) the host's allow-list; 3) operator enrollment.
         const bound = await boundNode(context.tx, ekSha256);
@@ -381,13 +423,14 @@ export function tpmAttestor(options: TpmAttestorOptions): AttestorVerifier {
             siteId: bound.site_id,
             ...(bound.pool_id ? { poolId: bound.pool_id } : {}),
             bind: ekSha256,
+            ...keyed,
           };
         }
         const identity = { ekSha256, ...(ekCertificate ? { ekCertificate } : {}), akName, pcrs };
         const resolved = await options.resolve?.(context.tx, identity, { role: context.role });
         if (resolved) {
           if (resolved.role !== context.role) fail('role');
-          return { ...resolved, bind: ekSha256 };
+          return { ...resolved, bind: ekSha256, ...keyed };
         }
         const enrollment = options.enrollment;
         if (!enrollment) return fail('unknown-ek');
@@ -406,6 +449,7 @@ export function tpmAttestor(options: TpmAttestorOptions): AttestorVerifier {
             ...(approved.pool_id ? { poolId: approved.pool_id } : {}),
             ...(approved.node_id ? { nodeId: approved.node_id } : {}),
             bind: ekSha256,
+            ...keyed,
           };
         if (await requestRejected(context.tx, request)) fail('rejected');
         const requestId = await recordPendingRequest(context.tx, {
@@ -447,6 +491,11 @@ export interface SoftwareTpm {
   ekChain?: readonly Uint8Array[];
   /** Current PCR values by bank and index. */
   pcrs: Map<number, Map<number, Uint8Array>>;
+  /**
+   * The join's node key (its public half), as if this TPM held it: the answer carries the AK's
+   * certification of it, as bcd's does.
+   */
+  nodeKey?: KeyObject;
 }
 
 /**
@@ -499,6 +548,25 @@ export function tpmProducer(tpm: SoftwareTpm): NodeAttestor {
         for (const pcr of selection.pcrs)
           bank[pcr] = Buffer.from(tpm.pcrs.get(selection.hash)!.get(pcr)!).toString('hex');
       }
+      let nodeKey: { public: string; certifyInfo: string; signature: string } | undefined;
+      if (tpm.nodeKey) {
+        const keyPublic = marshalTpmPublic({ key: tpm.nodeKey, attributes: nodeKeyAttributes });
+        const info = marshalCertify({
+          qualifiedSigner: tpmName(ak),
+          extraData: input.nonce,
+          clock: 1n,
+          resetCount: 0,
+          restartCount: 0,
+          firmwareVersion: 1n,
+          name: tpmName({ nameAlg: TPM_ALG.SHA256, bytes: keyPublic }),
+          qualifiedName: new Uint8Array(34),
+        });
+        nodeKey = {
+          public: base64url(keyPublic),
+          certifyInfo: base64url(info),
+          signature: base64url(signTpmAttest(tpm.akPrivateKey, info)),
+        };
+      }
       return encode({
         ...base,
         answer: {
@@ -507,6 +575,7 @@ export function tpmProducer(tpm: SoftwareTpm): NodeAttestor {
           quote: base64url(attest),
           signature: base64url(signTpmAttest(tpm.akPrivateKey, attest)),
           pcrs,
+          ...(nodeKey ? { nodeKey } : {}),
         },
       });
     },

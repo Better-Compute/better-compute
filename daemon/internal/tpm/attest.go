@@ -115,6 +115,21 @@ type Attestor struct {
 	ekPub       []byte
 	akPub       []byte
 	ekCert      []byte
+	// joinKey is the node key the join is for, when it is in this TPM (HoldNodeKey): the answer
+	// carries the AK's certification of it.
+	joinKey *NodeKey
+}
+
+// HoldNodeKey makes the join's node key in this TPM (the key of unique): the answer then carries the
+// AK's certification that this TPM holds it, over the CSR's digest, so the control plane knows the
+// node's key cannot leave the machine.
+func (a *Attestor) HoldNodeKey(unique []byte) (crypto.Signer, error) {
+	k, err := a.NodeKey(unique)
+	if err != nil {
+		return nil, err
+	}
+	a.joinKey = k
+	return k, nil
 }
 
 // NewAttestor loads the EK (the persisted one when it is the default template's, else a fresh
@@ -202,6 +217,15 @@ type answer struct {
 	Quote     string                       `json:"quote"`
 	Signature string                       `json:"signature"`
 	PCRs      map[string]map[string]string `json:"pcrs"`
+	NodeKey   *nodeKeyProof                `json:"nodeKey,omitempty"`
+}
+
+// nodeKeyProof is the AK's certification of the node key: its public area, and TPM2_Certify's
+// attestation (extraData = sha256 of the CSR) and signature.
+type nodeKeyProof struct {
+	Public      string `json:"public"`
+	CertifyInfo string `json:"certifyInfo"`
+	Signature   string `json:"signature"`
 }
 
 func (a *Attestor) base() evidence {
@@ -294,6 +318,14 @@ func (a *Attestor) Answer(payload, csrSha256 []byte) ([]byte, error) {
 		e.Answer = &answer{
 			State: c.State, Secret: b64.EncodeToString(secret), Quote: b64.EncodeToString(attest),
 			Signature: b64.EncodeToString(sig), PCRs: pcrs,
+		}
+		if a.joinKey != nil {
+			info, csig, err := a.CertifyNodeKey(a.joinKey, csrSha256)
+			if err != nil {
+				return nil, fmt.Errorf("tpm: certify the node key: %w", err)
+			}
+			e.Answer.NodeKey = &nodeKeyProof{Public: b64.EncodeToString(a.joinKey.PublicArea()),
+				CertifyInfo: b64.EncodeToString(info), Signature: b64.EncodeToString(csig)}
 		}
 		return json.Marshal(e)
 	}

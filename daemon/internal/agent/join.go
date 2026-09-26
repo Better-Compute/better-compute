@@ -109,8 +109,9 @@ func Join(ctx context.Context, o JoinOptions) (*State, error) {
 	if o.Role == commonv1.AgentRole_AGENT_ROLE_UNSPECIFIED {
 		o.Role = commonv1.AgentRole_AGENT_ROLE_NODE
 	}
-	// The node key: in the TPM when the host has one, else a file.
-	key, record, err := newNodeKey(o.Log)
+	// The node key: in the TPM when the host has one (the attestor's, certified, for a tpm join), else
+	// a file.
+	key, record, err := joinKey(o.Attest, o.Log)
 	if err != nil {
 		return nil, err
 	}

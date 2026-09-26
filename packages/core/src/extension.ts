@@ -319,6 +319,11 @@ export interface AttestationContext {
   claims: HardwareClaims;
   /** SHA-256 of `JoinRequest.csr`; attestors that sign over the request (x509pop, cloud-iid) bind to it. */
   csrSha256?: Uint8Array;
+  /**
+   * SHA-256 of the CSR's SubjectPublicKeyInfo: the node key the certificate will certify (tpm checks
+   * that the key its AK certified is this one).
+   */
+  csrSpkiSha256?: Uint8Array;
   /** The role the agent asks for. */
   role: AgentRole;
 }
@@ -344,6 +349,12 @@ export interface AttestationResult {
    * later join the attestor finds the node by it and returns `nodeId`.
    */
   bind?: Uint8Array;
+  /**
+   * Where the attestor proved the node key lives: `tpm` when the machine's TPM certified the CSR's key
+   * as one it made and never lets out (tpm, with its AK). Absent: not proven. JoinService records it
+   * with the join (`node.joined`).
+   */
+  nodeKey?: 'tpm';
 }
 
 /**

@@ -180,6 +180,14 @@ describe.skipIf(!enabled)('bcd join --attestor tpm', () => {
     const again = await tpmJoin();
     expect(again.status, again.stderr).toBe(0);
     expect(/joined as (\S+)/.exec(again.stdout)?.[1]).toBe(nodeId);
+    // Both joins' node keys were certified by the TPM's AK (tpmAttestor's default, nodeKey: certified), and
+    // the control plane recorded it.
+    const joinedEvents = (
+      await dev.database.query<{ payload: { data: { nodeId: string; nodeKey: string } } }>(
+        `SELECT payload FROM outbox WHERE topic = 'node.joined' ORDER BY seq`,
+      )
+    ).rows.map((row) => row.payload.data);
+    expect(joinedEvents.filter((e) => e.nodeId === nodeId).map((e) => e.nodeKey)).toEqual(['tpm', 'tpm']);
     // And once joined, re-running it is a no-op that needs no TPM round.
     const noop = await tpmJoin();
     expect(noop.stdout).toContain(`already joined as ${nodeId}`);

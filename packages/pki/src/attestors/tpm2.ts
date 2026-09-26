@@ -625,6 +625,82 @@ export function marshalQuote(quote: Omit<TpmQuote, 'safe'> & { safe?: boolean })
   );
 }
 
+// --- TPMS_ATTEST (certifications) ------------------------------------------------------------------
+
+export const TPM_ST_ATTEST_CERTIFY = 0x8017;
+
+export interface TpmCertify {
+  qualifiedSigner: Uint8Array;
+  /** The caller's qualifying data (bcd: sha256 of the CSR). */
+  extraData: Uint8Array;
+  clock: bigint;
+  resetCount: number;
+  restartCount: number;
+  safe: boolean;
+  firmwareVersion: bigint;
+  /** The certified object's TPM2B_NAME. */
+  name: Uint8Array;
+  qualifiedName: Uint8Array;
+}
+
+/** Parses a TPMS_ATTEST of type certify (`TPM2_Certify`'s `certifyInfo`). */
+export function parseCertify(bytes: Uint8Array): TpmCertify {
+  const r = new TpmReader(bytes);
+  if (r.u32() !== TPM_GENERATED_VALUE) bad('not TPM-generated');
+  if (r.u16() !== TPM_ST_ATTEST_CERTIFY) bad('not a certification');
+  const qualifiedSigner = r.tpm2b();
+  const extraData = r.tpm2b();
+  const clock = r.u64();
+  const resetCount = r.u32();
+  const restartCount = r.u32();
+  const safe = r.u8() === 1;
+  const firmwareVersion = r.u64();
+  const name = r.tpm2b();
+  const qualifiedName = r.tpm2b();
+  r.end('TPMS_ATTEST');
+  return { qualifiedSigner, extraData, clock, resetCount, restartCount, safe, firmwareVersion, name, qualifiedName };
+}
+
+/** Marshals a certify TPMS_ATTEST (what `TPM2_Certify` signs; software TPMs). */
+export function marshalCertify(certify: Omit<TpmCertify, 'safe'> & { safe?: boolean }): Uint8Array {
+  const clock = new Uint8Array(8);
+  new DataView(clock.buffer).setBigUint64(0, certify.clock);
+  const firmware = new Uint8Array(8);
+  new DataView(firmware.buffer).setBigUint64(0, certify.firmwareVersion);
+  return concat(
+    u32be(TPM_GENERATED_VALUE),
+    u16be(TPM_ST_ATTEST_CERTIFY),
+    tpm2b(certify.qualifiedSigner),
+    tpm2b(certify.extraData),
+    clock,
+    u32be(certify.resetCount),
+    u32be(certify.restartCount),
+    new Uint8Array([certify.safe === false ? 0 : 1]),
+    firmware,
+    tpm2b(certify.name),
+    tpm2b(certify.qualifiedName),
+  );
+}
+
+/**
+ * A node's own signing key as bcd makes it in the TPM (tpm.NodeKeyAttributes): generated inside the
+ * TPM and never leaving it (fixedTPM, fixedParent, sensitiveDataOrigin), unrestricted signing (TLS,
+ * CSRs, statements), no decrypt.
+ */
+export const nodeKeyAttributes =
+  TPMA_OBJECT.fixedTPM |
+  TPMA_OBJECT.fixedParent |
+  TPMA_OBJECT.sensitiveDataOrigin |
+  TPMA_OBJECT.userWithAuth |
+  TPMA_OBJECT.noDA |
+  TPMA_OBJECT.sign;
+
+/** Whether a public area is a signing key the TPM made and never lets out. */
+export function isTpmResidentSigningKey(pub: TpmPublic): boolean {
+  const must = TPMA_OBJECT.fixedTPM | TPMA_OBJECT.fixedParent | TPMA_OBJECT.sensitiveDataOrigin | TPMA_OBJECT.sign;
+  return (pub.attributes & must) === must && (pub.attributes & TPMA_OBJECT.decrypt) === 0;
+}
+
 /** Signs a marshaled TPMS_ATTEST with an AK private key into a TPMT_SIGNATURE (ECDSA or RSASSA). */
 export function signTpmAttest(
   akPrivateKey: KeyObject,
