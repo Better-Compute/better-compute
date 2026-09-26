@@ -22,7 +22,7 @@ const LABEL = /^([A-Za-z0-9](?:[A-Za-z0-9._/-]{0,126}[A-Za-z0-9])?)(?:=(.{0,63})
 export function useFleetCommands() {
   const { live, source } = useWorkspaceSettings();
   const clock = useClockGetter();
-  const connection = useConnection().status;
+  const { status: connection, refresh: refreshConnection } = useConnection();
   const tenantId = connection?.tenantId;
   // The live proxy forwards mutations only with a signed-in operator's own credential (status.writable).
   const writable = connection?.writable === true;
@@ -55,7 +55,15 @@ export function useFleetCommands() {
       const failed = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
       const first = failed[0]?.reason as { code?: string; message?: string } | undefined;
       if (first?.code === 'READ_ONLY') {
-        toast({ title: 'Sign in to make changes', detail: 'Signed out, the live connection only reads.', status: 'warn', action: { label: 'Sign in', onAction: () => router.push('/signin') } });
+        // We thought we could write (e.g. the operator session just expired): re-read the connection now, so the
+        // next action refuses up front instead of after its confirmation.
+        refreshConnection();
+        toast({
+          title: writable ? 'Your sign-in has ended' : 'Sign in to make changes',
+          detail: writable ? 'Nothing was changed. Sign in again to act.' : 'Signed out, the live connection only reads.',
+          status: 'warn',
+          action: { label: 'Sign in', onAction: () => router.push('/signin') },
+        });
         return false;
       }
       toast(
@@ -322,5 +330,5 @@ export function useFleetCommands() {
       },
     };
     return api;
-  }, [clock, live, source, tenantId, writable, router, toast, confirm, confirmWithReason]);
+  }, [clock, live, source, tenantId, writable, router, refreshConnection, toast, confirm, confirmWithReason]);
 }
