@@ -117,7 +117,8 @@
         "vps/0017_identity_rebind",
         "vps/0018_placement",
         "vps/0019_ip_pool_dns",
-        "vps/0020_volumes"
+        "vps/0020_volumes",
+        "vps/0021_volume_resize_hold"
       ]
     },
     {

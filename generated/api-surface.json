@@ -5901,7 +5901,7 @@
       "route": "POST /api/compute/sandboxVolumes/create",
       "kind": "mutation",
       "action": "compute:sandboxes:manage",
-      "resource": "compute-tenant",
+      "resource": "compute-sandbox-volume",
       "alternatives": [],
       "list": false,
       "status": "registered",
