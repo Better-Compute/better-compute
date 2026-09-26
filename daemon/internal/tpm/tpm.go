@@ -6,6 +6,7 @@
 //   - NV_ReadPublic and NV_Read, for the EK certificate;
 //   - StartAuthSession, PolicySecret and ActivateCredential, to prove the AK sits beside the EK;
 //   - Quote and PCR_Read, for the PCR values;
+//   - Sign and Certify, for the node's own signing key (NodeKey) and the AK's word that the TPM holds it;
 //   - FlushContext.
 package tpm
 
@@ -46,6 +47,8 @@ const (
 
 	CCNVRead             = 0x0000014E
 	CCCreatePrimary      = 0x00000131
+	CCCertify            = 0x00000148
+	CCSign               = 0x0000015D
 	CCActivateCredential = 0x00000147
 	CCPolicySecret       = 0x00000151
 	CCQuote              = 0x00000158
@@ -387,6 +390,62 @@ func (t *TPM) Quote(ak uint32, nonce []byte, sels []Selection) (attest, signatur
 	attest = r.B2B()
 	signature = append([]byte(nil), r.B...)
 	return attest, signature, r.Err
+}
+
+// Sign signs digest with an unrestricted ECDSA key: the hash is the digest's (SHA-256, -384 or -512
+// by its length), no ticket. It returns r and s, each the curve's size.
+func (t *TPM) Sign(key uint32, digest []byte) (r, s []byte, err error) {
+	alg := uint16(0)
+	switch len(digest) {
+	case 32:
+		alg = AlgSHA256
+	case 48:
+		alg = AlgSHA384
+	case 64:
+		alg = AlgSHA512
+	default:
+		return nil, nil, fmt.Errorf("tpm: a %d-byte digest", len(digest))
+	}
+	w := &Writer{}
+	w.B2B(digest)
+	w.U16(AlgECDSA)
+	w.U16(alg)
+	w.U16(0x8024) // validation: TPMT_TK_HASHCHECK, TPM_ST_HASHCHECK
+	w.U32(RHNull)
+	w.B2B(nil)
+	_, params, err := t.Run(CCSign, []uint32{key}, [][]byte{PasswordAuth()}, w.B, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	return readECDSASignature(params)
+}
+
+// Certify has signer (the AK) attest that object is loaded in this TPM: it returns the TPMS_ATTEST
+// (TPM_ST_ATTEST_CERTIFY, with qualifying as its extraData) and the TPMT_SIGNATURE, in the AK's
+// scheme.
+func (t *TPM) Certify(object, signer uint32, qualifying []byte) (attest, signature []byte, err error) {
+	w := &Writer{}
+	w.B2B(qualifying)
+	w.U16(AlgNull) // inScheme: the signer's
+	_, params, err := t.Run(CCCertify, []uint32{object, signer}, [][]byte{PasswordAuth(), PasswordAuth()}, w.B, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	r := &Reader{B: params}
+	attest = r.B2B()
+	signature = append([]byte(nil), r.B...)
+	return attest, signature, r.Err
+}
+
+// readECDSASignature reads a TPMT_SIGNATURE of the ECDSA scheme: r and s.
+func readECDSASignature(b []byte) (r, s []byte, err error) {
+	rd := &Reader{B: b}
+	if rd.U16() != AlgECDSA {
+		return nil, nil, errors.New("tpm: not an ECDSA signature")
+	}
+	rd.U16() // hash
+	r, s = rd.B2B(), rd.B2B()
+	return r, s, rd.Err
 }
 
 // PCRRead reads the PCRs of sels: values by bank, then index. A TPM returns at most eight a call;

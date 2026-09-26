@@ -11,6 +11,7 @@ package tpmsim
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/hmac"
@@ -53,7 +54,8 @@ type Sim struct {
 	pcrs     [24][]byte
 	counter  uint32
 	objects  map[uint32][]byte // transient handle → public area
-	sessions map[uint32]bool   // policy session → PolicySecret(endorsement) passed
+	keys     map[uint32]*ecdsa.PrivateKey
+	sessions map[uint32]bool // policy session → PolicySecret(endorsement) passed
 	next     uint32
 }
 
@@ -149,8 +151,11 @@ func (s *Sim) PCR(i int) []byte {
 var commandHandles = map[uint32]int{
 	tpm.CCCreatePrimary: 1, tpm.CCReadPublic: 1, tpm.CCFlushContext: 0, tpm.CCStartAuthSession: 2,
 	tpm.CCPolicySecret: 2, tpm.CCActivateCredential: 2, tpm.CCQuote: 1, tpm.CCPCRRead: 0,
-	tpm.CCNVReadPublic: 1, tpm.CCNVRead: 2,
+	tpm.CCNVReadPublic: 1, tpm.CCNVRead: 2, tpm.CCSign: 1, tpm.CCCertify: 2,
 }
+
+// rcTicket is TPM_RC_TICKET: a restricted key asked to sign a digest the TPM did not hash.
+const rcTicket = 0x08C
 
 type reply struct {
 	rc      uint32
@@ -224,13 +229,17 @@ func respond(tag uint16, out reply, auths int) []byte {
 	return w.B
 }
 
-func (s *Sim) handle(public []byte) uint32 {
+func (s *Sim) handle(public []byte, key *ecdsa.PrivateKey) uint32 {
 	if s.objects == nil {
 		s.objects = map[uint32][]byte{}
+		s.keys = map[uint32]*ecdsa.PrivateKey{}
 	}
 	s.next++
 	h := 0x80000000 | s.next
 	s.objects[h] = public
+	if key != nil {
+		s.keys[h] = key
+	}
 	return h
 }
 
@@ -239,7 +248,7 @@ func (s *Sim) run(cc uint32, handles, auths []uint32, p *tpm.Reader) reply {
 	case tpm.CCCreatePrimary:
 		p.B2B() // inSensitive
 		template := p.B2B()
-		public, err := s.public(template)
+		public, key, err := s.public(handles[0], template)
 		if err != nil || p.Err != nil {
 			return reply{rc: rcValue}
 		}
@@ -252,7 +261,7 @@ func (s *Sim) run(cc uint32, handles, auths []uint32, p *tpm.Reader) reply {
 		w.B2B(nil)
 		name, _ := tpm.Name(public)
 		w.B2B(name)
-		return reply{handles: []uint32{s.handle(public)}, params: w.B}
+		return reply{handles: []uint32{s.handle(public, key)}, params: w.B}
 	case tpm.CCReadPublic:
 		public, ok := s.objects[handles[0]]
 		if !ok {
@@ -268,6 +277,7 @@ func (s *Sim) run(cc uint32, handles, auths []uint32, p *tpm.Reader) reply {
 		h := p.U32()
 		if _, ok := s.objects[h]; ok {
 			delete(s.objects, h)
+			delete(s.keys, h)
 		} else if _, ok := s.sessions[h]; ok {
 			delete(s.sessions, h)
 		} else {
@@ -308,6 +318,10 @@ func (s *Sim) run(cc uint32, handles, auths []uint32, p *tpm.Reader) reply {
 		return s.activate(handles, auths, p)
 	case tpm.CCQuote:
 		return s.quote(handles, p)
+	case tpm.CCSign:
+		return s.sign(handles, p)
+	case tpm.CCCertify:
+		return s.certify(handles, p)
 	case tpm.CCPCRRead:
 		return s.pcrRead(p)
 	case tpm.CCNVReadPublic:
@@ -336,13 +350,18 @@ func (s *Sim) run(cc uint32, handles, auths []uint32, p *tpm.Reader) reply {
 	return reply{rc: rcCommand}
 }
 
-// public is the public area CreatePrimary makes from template: the EK for an RSA template, the AK
-// for an ECC one (the template's fields, the key's unique).
-func (s *Sim) public(template []byte) ([]byte, error) {
+// restricted is TPMA_OBJECT restricted: an AK signs only what the TPM itself produced.
+const restricted = 1 << 16
+
+// public is the public area CreatePrimary makes from template in hierarchy (the template's fields,
+// the key's unique): the EK for an RSA template, the AK for a restricted ECC one, and for an
+// unrestricted ECC one (a node key) a key derived from the TPM's secret, the hierarchy and the
+// template's unique, as a real TPM derives primaries: the same unique, the same key.
+func (s *Sim) public(hierarchy uint32, template []byte) ([]byte, *ecdsa.PrivateKey, error) {
 	r := &tpm.Reader{B: template}
 	typ := r.U16()
 	r.U16() // nameAlg
-	r.U32() // attributes
+	attrs := r.U32()
 	r.B2B() // authPolicy
 	if r.U16() != tpm.AlgNull {
 		r.U16()
@@ -352,6 +371,7 @@ func (s *Sim) public(template []byte) ([]byte, error) {
 		r.U16()
 	}
 	w := &tpm.Writer{}
+	var key *ecdsa.PrivateKey
 	switch typ {
 	case tpm.AlgRSA:
 		r.U16()
@@ -364,15 +384,44 @@ func (s *Sim) public(template []byte) ([]byte, error) {
 			r.U16()
 		}
 		w.Raw(template[:len(template)-len(r.B)])
-		w.B2B(s.ak.X.FillBytes(make([]byte, 32)))
-		w.B2B(s.ak.Y.FillBytes(make([]byte, 32)))
+		key = s.ak
+		if attrs&restricted == 0 {
+			unique := r.B2B()
+			var err error
+			if key, err = s.derive(hierarchy, unique); err != nil {
+				return nil, nil, err
+			}
+		}
+		w.B2B(key.X.FillBytes(make([]byte, 32)))
+		w.B2B(key.Y.FillBytes(make([]byte, 32)))
 	default:
-		return nil, errors.New("key type")
+		return nil, nil, errors.New("key type")
 	}
 	if r.Err != nil {
-		return nil, r.Err
+		return nil, nil, r.Err
 	}
-	return w.B, nil
+	return w.B, key, nil
+}
+
+// derive is the P-256 primary key of hierarchy and unique: KDFa over the simulator's own secret (its
+// EK's), until a valid scalar comes out.
+func (s *Sim) derive(hierarchy uint32, unique []byte) (*ecdsa.PrivateKey, error) {
+	seed := sha256.Sum256(s.ek.D.Bytes())
+	var h [4]byte
+	binary.BigEndian.PutUint32(h[:], hierarchy)
+	for counter := byte(0); counter < 16; counter++ {
+		d := KDFa(seed[:], "bcd tpmsim primary", append(h[:], counter), unique, 256)
+		priv, err := ecdh.P256().NewPrivateKey(d)
+		if err != nil {
+			continue
+		}
+		point := priv.PublicKey().Bytes() // 0x04 ‖ X ‖ Y
+		return &ecdsa.PrivateKey{
+			PublicKey: ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(point[1:33]), Y: new(big.Int).SetBytes(point[33:])},
+			D:         new(big.Int).SetBytes(d),
+		}, nil
+	}
+	return nil, errors.New("tpmsim: no key derived")
 }
 
 func (s *Sim) isEK(h uint32) bool {
@@ -382,7 +431,89 @@ func (s *Sim) isEK(h uint32) bool {
 
 func (s *Sim) isAK(h uint32) bool {
 	pub, ok := s.objects[h]
-	return ok && len(pub) >= 2 && binary.BigEndian.Uint16(pub) == tpm.AlgECC
+	return ok && len(pub) >= 8 && binary.BigEndian.Uint16(pub) == tpm.AlgECC && binary.BigEndian.Uint32(pub[4:8])&restricted != 0
+}
+
+// sign is TPM2_Sign with an ECC key: an unrestricted key signs any digest; a restricted one (the
+// AK) only with a ticket for a digest the TPM hashed itself, which this simulator never issues.
+func (s *Sim) sign(handles []uint32, p *tpm.Reader) reply {
+	key, ok := s.keys[handles[0]]
+	if !ok {
+		return reply{rc: rcHandle}
+	}
+	if s.isAK(handles[0]) {
+		return reply{rc: rcTicket}
+	}
+	digest := p.B2B()
+	scheme, hash := p.U16(), uint16(0)
+	if scheme != tpm.AlgNull {
+		hash = p.U16()
+	}
+	p.U16() // validation tag
+	p.U32() // hierarchy
+	p.B2B() // digest
+	if p.Err != nil {
+		return reply{rc: rcSize}
+	}
+	if scheme != tpm.AlgECDSA || len(digest) == 0 || len(digest) > 64 {
+		return reply{rc: rcValue}
+	}
+	r, sv, err := ecdsa.Sign(rand.Reader, key, digest)
+	if err != nil {
+		return reply{rc: rcValue}
+	}
+	w := &tpm.Writer{}
+	w.U16(tpm.AlgECDSA)
+	w.U16(hash)
+	w.B2B(r.FillBytes(make([]byte, 32)))
+	w.B2B(sv.FillBytes(make([]byte, 32)))
+	return reply{params: w.B}
+}
+
+// certify is TPM2_Certify by the AK: a TPMS_ATTEST of type TPM_ST_ATTEST_CERTIFY naming the object
+// (its name, and its qualified name as a primary of the owner hierarchy), signed like a quote.
+func (s *Sim) certify(handles []uint32, p *tpm.Reader) reply {
+	object, signer := handles[0], handles[1]
+	public, ok := s.objects[object]
+	if !ok || !s.isAK(signer) {
+		return reply{rc: rcHandle}
+	}
+	qualifying := p.B2B()
+	if scheme := p.U16(); scheme != tpm.AlgNull {
+		p.U16()
+	}
+	if p.Err != nil {
+		return reply{rc: rcSize}
+	}
+	name, _ := tpm.Name(public)
+	signerName, _ := tpm.Name(s.objects[signer])
+	var owner [4]byte
+	binary.BigEndian.PutUint32(owner[:], tpm.RHOwner)
+	qn := sha256.Sum256(append(owner[:], name...))
+	a := &tpm.Writer{}
+	a.U32(0xff544347) // TPM_GENERATED_VALUE
+	a.U16(0x8017)     // TPM_ST_ATTEST_CERTIFY
+	a.B2B(signerName)
+	a.B2B(qualifying)
+	a.U64(uint64(time.Now().UnixMilli()))
+	a.U32(0) // resetCount
+	a.U32(0) // restartCount
+	a.U8(1)  // safe
+	a.U64(1) // firmwareVersion
+	a.B2B(name)
+	a.B2B(append([]byte{0, tpm.AlgSHA256}, qn[:]...))
+	digest := sha256.Sum256(a.B)
+	r, sv, err := ecdsa.Sign(rand.Reader, s.ak, digest[:])
+	if err != nil {
+		return reply{rc: rcValue}
+	}
+	w := &tpm.Writer{}
+	w.B2B(a.B)
+	w.U16(tpm.AlgECDSA)
+	w.U16(tpm.AlgSHA256)
+	w.B2B(r.FillBytes(make([]byte, 32)))
+	w.B2B(sv.FillBytes(make([]byte, 32)))
+	return reply{params: w.B}
 }
 
 func (s *Sim) activate(handles, auths []uint32, p *tpm.Reader) reply {

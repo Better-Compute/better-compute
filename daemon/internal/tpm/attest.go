@@ -159,6 +159,9 @@ func (a *Attestor) Close() {
 // EKPublic is the EK's TPMT_PUBLIC (sha256 of it is the machine's identity to the control plane).
 func (a *Attestor) EKPublic() []byte { return a.ekPub }
 
+// AKPublic is the AK's TPMT_PUBLIC (its key verifies quotes and certifications).
+func (a *Attestor) AKPublic() []byte { return a.akPub }
+
 // trimDER cuts an NV area to the DER certificate at its start (NV areas are often padded).
 func trimDER(b []byte) []byte {
 	if len(b) < 2 || b[0] != 0x30 {
