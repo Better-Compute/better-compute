@@ -4,10 +4,10 @@
 // Build tags select the implementation:
 //
 //   - -tags nonvml builds nvml_stub.go: no cgo, for Windows and logic tests;
-//   - the default build uses nvml.go, which will dlopen libnvidia-ml through NVIDIA/go-nvml (cgo),
-//     so release builds need a C cross-compiler (see .goreleaser.yaml).
+//   - the default build uses nvml.go, which reads the GPUs through nvidia-smi (smi.go, no cgo);
+//     a go-nvml backend may replace it once that dependency is approved.
 //
-// Both builds return ErrNotBuilt until v0.1.
+// SMI itself builds everywhere, so its parsers are tested under -tags nonvml too.
 package nvml
 
 import "errors"

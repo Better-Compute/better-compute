@@ -1,3 +1,5 @@
+//go:build nonvml
+
 package nvml
 
 import (
@@ -5,8 +7,7 @@ import (
 	"testing"
 )
 
-// TODO(v0.1): once nvml.go talks to go-nvml, keep this assertion for -tags nonvml only and test the
-// default build against the go-nvml mock.
+// The nonvml build never talks to the driver; the default build's Probe is SMI.Probe (smi_test.go).
 func TestProbeReportsNotBuilt(t *testing.T) {
 	if _, err := Probe(); !errors.Is(err, ErrNotBuilt) {
 		t.Fatalf("Probe() = %v; want ErrNotBuilt", err)

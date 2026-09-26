@@ -2,13 +2,17 @@
 
 package nvml
 
-import "fmt"
+import (
+	"context"
+	"time"
+)
 
-// Probe initializes NVML and reports the driver version and the GPU count.
+// Probe reports the driver version and the GPU count through nvidia-smi (SMI); ErrNoDriver on a
+// host without it.
 //
-// TODO(v0.1): implement it with github.com/NVIDIA/go-nvml (nvml.Init, SystemGetDriverVersion,
-// DeviceGetCount) once a Go toolchain can add the module and its go.sum entries; the dependency
-// cannot be added without one.
+// TODO: a go-nvml (cgo) backend once the dependency is approved; SMI covers every inventory field.
 func Probe() (Info, error) {
-	return Info{}, fmt.Errorf("%w: NVIDIA/go-nvml is wired in v0.1", ErrNotBuilt)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return SMI{}.Probe(ctx)
 }

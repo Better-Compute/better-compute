@@ -225,7 +225,7 @@ func runDoctor(fs *flag.FlagSet, stdout, _ io.Writer) int {
 
 	if info, err := nvml.Probe(); err == nil {
 		report("ok", "nvml", fmt.Sprintf("driver %s, %d GPUs", info.DriverVersion, info.DeviceCount))
-	} else if errors.Is(err, nvml.ErrNotBuilt) {
+	} else if errors.Is(err, nvml.ErrNotBuilt) || errors.Is(err, nvml.ErrNoDriver) {
 		report("warn", "nvml", err.Error())
 	} else {
 		report("fail", "nvml", err.Error())

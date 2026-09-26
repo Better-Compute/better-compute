@@ -1,0 +1,189 @@
+<?xml version="1.0" ?>
+<!DOCTYPE nvidia_smi_log SYSTEM "nvsmi_device_v12.dtd">
+<nvidia_smi_log>
+	<timestamp>Thu Sep 25 10:00:00 2026</timestamp>
+	<driver_version>580.65.06</driver_version>
+	<cuda_version>13.0</cuda_version>
+	<attached_gpus>2</attached_gpus>
+	<gpu id="00000000:18:00.0">
+		<product_name>NVIDIA H100 80GB HBM3</product_name>
+		<product_brand>NVIDIA</product_brand>
+		<product_architecture>Hopper</product_architecture>
+		<persistence_mode>Enabled</persistence_mode>
+		<mig_mode>
+			<current_mig>Disabled</current_mig>
+			<pending_mig>Enabled</pending_mig>
+		</mig_mode>
+		<mig_devices>
+			None
+		</mig_devices>
+		<serial>1654922000001</serial>
+		<uuid>GPU-11111111-1111-1111-1111-111111111111</uuid>
+		<minor_number>0</minor_number>
+		<vbios_version>96.00.74.00.01</vbios_version>
+		<board_part_number>692-2G520-0200-000</board_part_number>
+		<fabric>
+			<state>Completed</state>
+			<status>Success</status>
+			<cliqueId>32766</cliqueId>
+			<clusterUuid>AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE</clusterUuid>
+		</fabric>
+		<pci>
+			<pci_bus>18</pci_bus>
+			<pci_bus_id>00000000:18:00.0</pci_bus_id>
+		</pci>
+		<performance_state>P0</performance_state>
+		<fb_memory_usage>
+			<total>81559 MiB</total>
+			<reserved>346 MiB</reserved>
+			<used>1024 MiB</used>
+			<free>80189 MiB</free>
+		</fb_memory_usage>
+		<compute_mode>Default</compute_mode>
+		<utilization>
+			<gpu_util>87 %</gpu_util>
+			<memory_util>40 %</memory_util>
+		</utilization>
+		<ecc_mode>
+			<current_ecc>Enabled</current_ecc>
+			<pending_ecc>Enabled</pending_ecc>
+		</ecc_mode>
+		<ecc_errors>
+			<volatile>
+				<sram_correctable>2</sram_correctable>
+				<sram_uncorrectable_parity>0</sram_uncorrectable_parity>
+				<sram_uncorrectable_secded>0</sram_uncorrectable_secded>
+				<dram_correctable>3</dram_correctable>
+				<dram_uncorrectable>1</dram_uncorrectable>
+			</volatile>
+			<aggregate>
+				<sram_correctable>10</sram_correctable>
+				<sram_uncorrectable_parity>0</sram_uncorrectable_parity>
+				<sram_uncorrectable_secded>0</sram_uncorrectable_secded>
+				<dram_correctable>20</dram_correctable>
+				<dram_uncorrectable>1</dram_uncorrectable>
+			</aggregate>
+		</ecc_errors>
+		<remapped_rows>
+			<remapped_row_corr>0</remapped_row_corr>
+			<remapped_row_unc>1</remapped_row_unc>
+			<remapped_row_pending>Yes</remapped_row_pending>
+			<remapped_row_failure>No</remapped_row_failure>
+		</remapped_rows>
+		<temperature>
+			<gpu_temp>54 C</gpu_temp>
+		</temperature>
+		<gpu_power_readings>
+			<power_state>P0</power_state>
+			<average_power_draw>510.12 W</average_power_draw>
+			<instant_power_draw>512.40 W</instant_power_draw>
+			<current_power_limit>700.00 W</current_power_limit>
+		</gpu_power_readings>
+		<clocks>
+			<graphics_clock>1980 MHz</graphics_clock>
+			<sm_clock>1980 MHz</sm_clock>
+			<mem_clock>2619 MHz</mem_clock>
+		</clocks>
+		<processes>
+			<process_info>
+				<pid>4242</pid>
+				<type>C</type>
+				<process_name>python</process_name>
+				<used_memory>1000 MiB</used_memory>
+			</process_info>
+		</processes>
+	</gpu>
+	<gpu id="00000000:2A:00.0">
+		<product_name>NVIDIA A100-SXM4-40GB</product_name>
+		<product_architecture>Ampere</product_architecture>
+		<persistence_mode>Disabled</persistence_mode>
+		<mig_mode>
+			<current_mig>Enabled</current_mig>
+			<pending_mig>Enabled</pending_mig>
+		</mig_mode>
+		<mig_devices>
+			<mig_device>
+				<index>0</index>
+				<gpu_instance_id>1</gpu_instance_id>
+				<compute_instance_id>0</compute_instance_id>
+				<fb_memory_usage>
+					<total>19968 MiB</total>
+					<used>13 MiB</used>
+				</fb_memory_usage>
+			</mig_device>
+			<mig_device>
+				<index>1</index>
+				<gpu_instance_id>2</gpu_instance_id>
+				<compute_instance_id>0</compute_instance_id>
+				<fb_memory_usage>
+					<total>9856 MiB</total>
+					<used>7 MiB</used>
+				</fb_memory_usage>
+			</mig_device>
+		</mig_devices>
+		<serial>N/A</serial>
+		<uuid>GPU-22222222-2222-2222-2222-222222222222</uuid>
+		<vbios_version>92.00.19.00.01</vbios_version>
+		<board_part_number>N/A</board_part_number>
+		<fabric>
+			<cliqueId>N/A</cliqueId>
+			<clusterUuid>N/A</clusterUuid>
+		</fabric>
+		<pci>
+			<pci_bus_id>00000000:2A:00.0</pci_bus_id>
+		</pci>
+		<performance_state>P0</performance_state>
+		<fb_memory_usage>
+			<total>40960 MiB</total>
+			<reserved>0 MiB</reserved>
+			<used>20 MiB</used>
+			<free>40940 MiB</free>
+		</fb_memory_usage>
+		<compute_mode>Exclusive_Process</compute_mode>
+		<utilization>
+			<gpu_util>N/A</gpu_util>
+			<memory_util>N/A</memory_util>
+		</utilization>
+		<ecc_mode>
+			<current_ecc>Enabled</current_ecc>
+			<pending_ecc>Disabled</pending_ecc>
+		</ecc_mode>
+		<ecc_errors>
+			<volatile>
+				<single_bit>
+					<total>4</total>
+				</single_bit>
+				<double_bit>
+					<total>0</total>
+				</double_bit>
+			</volatile>
+			<aggregate>
+				<single_bit>
+					<total>9</total>
+				</single_bit>
+				<double_bit>
+					<total>0</total>
+				</double_bit>
+			</aggregate>
+		</ecc_errors>
+		<remapped_rows>
+			<remapped_row_corr>N/A</remapped_row_corr>
+			<remapped_row_unc>N/A</remapped_row_unc>
+			<remapped_row_pending>N/A</remapped_row_pending>
+			<remapped_row_failure>N/A</remapped_row_failure>
+		</remapped_rows>
+		<temperature>
+			<gpu_temp>33 C</gpu_temp>
+		</temperature>
+		<power_readings>
+			<power_draw>61.50 W</power_draw>
+			<power_limit>400.00 W</power_limit>
+		</power_readings>
+		<clocks>
+			<sm_clock>210 MHz</sm_clock>
+			<mem_clock>1215 MHz</mem_clock>
+		</clocks>
+		<processes>
+		</processes>
+	</gpu>
+</nvidia_smi_log>

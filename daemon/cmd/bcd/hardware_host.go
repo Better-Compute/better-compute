@@ -3,12 +3,15 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/better-compute/better-compute/daemon/internal/agent"
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
+	"github.com/better-compute/better-compute/daemon/internal/nvml"
 	"github.com/better-compute/better-compute/daemon/internal/runtime"
 )
 
@@ -18,16 +21,28 @@ const hardwareBackend = "host"
 // devBuild refuses dev-only configuration in production builds.
 const devBuild = false
 
-// collectInventory reads the host's inventory from procfs and sysfs (inventory.Collector).
+// collectInventory reads the host's inventory from procfs and sysfs (inventory.Collector), the GPUs
+// completed by nvidia-smi (MIG, NVLink, topology, ECC, row remapping) when the driver is installed.
 func collectInventory() (*inventory.NodeInventory, error) {
-	return inventory.Collector{}.Collect()
+	inv, err := inventory.Collector{}.Collect()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if snap, err := (nvml.SMI{}).Snapshot(ctx); err == nil {
+		inv.Gpus = nvml.Enrich(inv.Gpus, snap)
+		inventory.Canonicalize(inv)
+	}
+	return inv, nil
 }
 
 // newRuntimes: libvirt-kvm when virsh is installed (a VPS host), its GPUs' PCI addresses from the
 // inventory for VFIO; a host without libvirt runs no instances.
 func newRuntimes(dataDir, _ string) []runtime.Runtime {
 	gpuAddress := func(id string) (string, bool) {
-		inv, err := collectInventory()
+		// The bus ids come from sysfs; no need to wait on nvidia-smi.
+		inv, err := inventory.Collector{}.Collect()
 		if err != nil || inv == nil || inv.Gpus == nil {
 			return "", false
 		}
