@@ -13,6 +13,10 @@ sources:
   - packages/observability/src/database.ts
   - packages/observability/src/node-telemetry.ts
   - daemon/internal/agent/telemetry.go
+  - daemon/internal/agent/telemetry_host.go
+  - daemon/internal/runtime/usage.go
+  - daemon/internal/runtime/balloon.go
+  - daemon/internal/runtime/hypervisor.go
   - daemon/internal/telemetry/otlp.go
   - packages/cli/src/host/metrics.ts
   - packages/server/src/operations.ts
@@ -316,6 +320,34 @@ pools as `pool-telemetry-invalid`, from `nodeTelemetryFindings(sql)`.
 | `bcd.gpu.xid.active` | conditions | bcd's active XID conditions per GPU |
 | `bcd.host.pressure.cpu`, `bcd.host.pressure.memory`, `bcd.host.pressure.io` | percent | PSI `some avg10` |
 | `bcd.host.cpu.steal` | percent | CPU steal |
+| `bcd.host.memory.total`, `bcd.host.memory.available` | bytes (`By`) | `/proc/meminfo`'s `MemTotal` and `MemAvailable` (3111284) |
+| `bcd.host.hugepages.total`, `bcd.host.hugepages.free` | pages (`{page}`) | `/sys/kernel/mm/hugepages`, each pool's `nr_hugepages` and `free_hugepages`, by `page.size` (the page size in bytes) |
+| `bcd.instances` | instances (`{instance}`) | every instance runtime's list of domains, managed or not, counted by `runtime` and `state` (`running`, `stopped`, `paused`, `error`) |
+| `bcd.instance.vcpu` | vCPUs (`{cpu}`) | each domain's configured vCPUs, by `instance.id`, `runtime` and `managed` |
+| `bcd.instance.memory` | bytes (`By`) | each domain's configured memory, by the same attributes and `hugepages` (the backing page size in bytes, `0` for normal pages) |
+| `bcd.instance.memory.balloon` | bytes (`By`) | the memory a guest's balloon leaves it now, by `instance.id` and `runtime` (12e9ced): libvirt's `balloon.current` for every running domain, cloud-hypervisor's configured memory less its balloon for guests that have one; see [memory ballooning](/docs/daemon/delivery#memory-ballooning) |
+| `bcd.instance.cpu.time` | seconds (`s`), cumulative sum | live usage (0b21b4b): CPU time since the domain started, by `instance.id` and `runtime` |
+| `bcd.instance.memory.used` | bytes (`By`) | live usage: the memory the domain uses now |
+| `bcd.instance.io.read`, `bcd.instance.io.write` | bytes (`By`), cumulative sum | live usage: disk bytes read and written |
+| `bcd.instance.network.receive`, `bcd.instance.network.transmit` | bytes (`By`), cumulative sum | live usage: bytes the guest received and sent |
+
+**Instances.** The host and instance series come every interval from a node that has them: the memory and huge page
+series from any Linux host, the `bcd.instance*` series only from a host that runs an instance runtime (VPS and
+sandbox hosts). The configured series (`bcd.instances`, `bcd.instance.vcpu`, `bcd.instance.memory`) cover every
+runtime, plugin runtimes included. The live usage series come only from runtimes that can read it
+(`runtime.UsageReader`), for their running domains, and count from the guest's side:
+
+| Runtime | Where the usage comes from |
+| --- | --- |
+| `cloud-hypervisor` | The VMM unit's cgroup v2, `/sys/fs/cgroup/bcd-instances.slice/bcd-ch-<id>.service`: `cpu.stat` `usage_usec`, `memory.current`, and `io.stat`'s `rbytes` and `wbytes` over every device; plus the counters of the instance's taps, where a tap's transmitted bytes are what the guest received. Managed domains that are running or paused only |
+| `libvirt-kvm` | `virsh domstats --raw --state-running --cpu-total --balloon --interface --block`: `cpu.time`, `balloon.rss` (the QEMU process's resident memory) and the summed `net.*` and `block.*` byte counters |
+
+A domain whose usage cannot be read is left out of the live series. Plugin runtimes report none, and a fakehw
+build's file-backed runtime reports synthetic usage (half the configured memory, a second of CPU per boot). Under
+[`bcd helper`](/docs/daemon#privilege-separation) `libvirt-kvm` reads `domstats` on libvirt's read-only socket
+(since 12e9ced; before it the read was refused there), and `cloud-hypervisor` is not offered. The series are
+tested against a fake `/proc`, sysfs, cgroup tree and captured `domstats` output
+(`internal/agent` `telemetry_host_test.go`, `internal/runtime` `usage_test.go`).
 
 GPU points carry `gpu.uuid`, `gpu.index` and `gpu.model`. The resource carries `service.name=bcd`,
 `service.version`, `host.name`, `bcd.node.id` and `bcd.site.id`, then the section's own attributes (which cannot

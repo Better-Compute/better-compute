@@ -23,7 +23,12 @@ sources:
   - daemon/internal/kube/dra_test.go
   - daemon/internal/kube/cdi.go
   - daemon/internal/kube/plugin_test.go
+  - daemon/internal/kube/exposure.go
+  - daemon/internal/kube/inuse.go
+  - daemon/cmd/bcd/doctor_kube.go
   - daemon/internal/agent/kube.go
+  - daemon/internal/agent/kuberelease.go
+  - packages/gateway/src/health.ts
   - daemon/internal/agent/devices.go
   - daemon/internal/agent/admission.go
   - daemon/internal/agent/holds.go
@@ -73,6 +78,7 @@ await compute.api.pools.create(rootCredential, {
       taints: ['example.com/gpu=reserved:NoSchedule'],
       kubernetesVersion: '1.34.1',
       gpuApi: 'device-plugin',
+      platformOperated: true, // required for a join on a platform site (e4d14cd)
     },
   },
   idempotencyKey: 'pool-k8s-h100',
@@ -89,7 +95,7 @@ await compute.api.pools.create(rootCredential, {
     kubernetesVersion: { type: 'string', description: 'A release such as 1.34.1: the pkgs.k8s.io repository bcd installs kubeadm, the kubelet and kubectl from when they are missing.' },
     gpu: { type: 'boolean', description: 'Hand reserved GPUs to the kubelet.', default: 'true' },
     gpuApi: { type: "'device-plugin' | 'dra'", description: "How: bcd's device plugins, or its DRA driver gpu.bcd.dev. Passed to the k8s-join unit; see Device plugin or DRA below.", default: "'device-plugin'" },
-    platformOperated: { type: 'boolean', description: 'For a pool whose bcd runs as a DaemonSet inside the cluster: nodes joining with a hosted token keep platform trust, and only when the platform owns the pool. See /docs/daemon/kubernetes#trust.' },
+    platformOperated: { type: 'boolean', description: 'The platform operates this cluster. Required with apiServer on a pool whose site is not custom (e4d14cd). For a pool whose bcd runs as a DaemonSet inside the cluster: nodes joining with a hosted token keep platform trust, and only when the platform owns the pool. See /docs/daemon/kubernetes#trust.' },
   }}
 />
 
@@ -97,6 +103,14 @@ await compute.api.pools.create(rootCredential, {
 through the `k8s-join` unit; none says bcd already runs inside the cluster as a [DaemonSet](/docs/daemon/kubernetes);
 a partial set is `INVALID_INPUT`. With the three, provision turns the policy into the `k8s-join` config unit on every
 machine of the pool, adopted ones included (see [host configuration](/docs/daemon/host-config#k8s-join)).
+
+**A platform site's pool joins only a cluster the platform operates** (e4d14cd). A cluster's admins get root on its
+workers through privileged pods, while machines on a platform site keep their platform identity and receive brokered
+secrets. So `pools.create` and `pools.update` refuse the three join settings on a pool whose site is not `custom`
+unless `platformOperated` is `true` (`INVALID_INPUT`, "a platform site's pool joins only a cluster the platform
+operates; confirm it with policy.kubernetes.platformOperated: true"). A tenant's `custom` site needs no confirmation,
+since its nodes are tenant-owned anyway, and a pool without the join settings (bcd as a DaemonSet) is not affected.
+bcd's half of the rule is the `[kubernetes] allowed_clusters` list below.
 
 Since 37dcd02 the pools API checks the policy when `pools.create` or `pools.update` writes it: provision registers its
 host-unit checks as a `pool-policy` extension, so a bad `policy.kubernetes` is `INVALID_INPUT` at the API (`policy:
@@ -113,9 +127,14 @@ reference here, since the broker reads the tenant from a `secret://` reference a
 
 Each machine runs `bcd node` the usual way. The first pass of its host converger installs kubeadm, the kubelet and
 containerd where missing, prepares the kernel and containerd (CDI on, the systemd cgroup driver), fetches the token,
-and runs `kubeadm join`. From then on it keeps the kubelet running and the Node's labels and taints in step, adding
-`bcd.dev/node-id`, `bcd.dev/site`, `bcd.dev/gpu.count`, `bcd.dev/gpu.product` and `bcd.dev/gpu.driver`. It never
-moves a node that is joined to another cluster.
+and runs `kubeadm join`, registering the Node with the pool's labels and taints. From then on it keeps the kubelet
+running and the Node's labels in step, adding `bcd.dev/node-id`, `bcd.dev/site`, `bcd.dev/gpu.count`,
+`bcd.dev/gpu.product` and `bcd.dev/gpu.driver`. It never moves a node that is joined to another cluster.
+
+Taints are set only at registration (6ef198b): Kubernetes' NodeRestriction forbids a kubelet to change its own
+taints. When you change the pool's `taints` later, joined nodes report the condition `KubernetesTaintsDrift`, whose
+message is the `kubectl taint node … --overwrite …` command a cluster admin runs to apply them (see
+[host configuration](/docs/daemon/host-config#k8s-join)).
 
 Joining a cluster gives it root on the machine, so root decides which clusters a machine may join, in `config.toml`:
 
@@ -144,6 +163,15 @@ await compute.api.reservations.create(credential, {
   idempotencyKey: 'train-k8s-2026-09-26',
 });
 ```
+
+From the CLI (ea36a94), preview first, then reserve:
+
+```bash
+better-compute capacity --tenant acme --preview --pool pool_01k… --gpus 2 --for 8h --cpus 32 --memory 256 --kubernetes
+better-compute reserve --tenant acme --pool pool_01k… --gpus 2 --for 8h --cpus 32 --memory 256 --kubernetes
+```
+
+`@better-compute/console-kit`'s reservation form takes the same host CPU, memory and Kubernetes fields (e833433).
 
 - The pool must have `policy.kubernetes`, or the request is `INVALID_INPUT`
   (`Pool … does not join a Kubernetes cluster (policy.kubernetes)`).
@@ -231,10 +259,17 @@ in its `bcd.dev/requires` annotation.
 
 Since 9f860ad bcd enforces this. When the kubelet can also allocate an `nvidia.com/*` resource (the GPU operator's
 device plugin, read from pod-resources' allocatable resources), or a container toolkit configuration
-(`/etc/nvidia-container-runtime` or the operator's `/usr/local/nvidia/toolkit`) accepts `NVIDIA_VISIBLE_DEVICES`
-from unprivileged pods (the key `true`, or absent, which is the toolkit's default), bcd offers no GPUs at all: the
-device plugins stop, the DRA slice is deleted, and bcd reports the condition `ForeignGpuExposure` (reason
-`OtherGpuPath`) with a message naming what to close. A missing or unreadable file is not taken as evidence.
+(`/etc/nvidia-container-runtime/config.toml`, or the GPU operator's
+`/usr/local/nvidia/toolkit/.config/nvidia-container-runtime/config.toml`) accepts `NVIDIA_VISIBLE_DEVICES` from
+unprivileged pods (the key `true`, or absent, which is the toolkit's default), bcd offers no GPUs at all: the device
+plugins stop, the DRA slice is deleted, and bcd reports the condition `ForeignGpuExposure` (reason `OtherGpuPath`)
+with a message naming what to close. A missing or unreadable file is not taken as evidence. The gateway records the
+condition as an informational node condition (b91dcff), so it shows in `nodes.get` without taking the node out of
+placement.
+
+`bcd doctor` runs the toolkit half of the same check (35534e5): on a node bcd joined with `gpu` on, its
+`gpu-isolation` check fails, with the same message, while a toolkit configuration lets unprivileged pods pick GPUs,
+so you see why no GPU is offered before you go looking.
 
 ## Device plugin or DRA
 
@@ -265,8 +300,13 @@ with `BINDING_KUBERNETES` is offered, and [GPU isolation](#gpu-isolation) applie
   the kubelet asked for and that it is allocated, then reads the holds again and answers each `gpu.bcd.dev` device's
   CDI ids (`bcd.dev/gpu=<device>` and, where NVIDIA's spec names it, `nvidia.com/gpu=<uuid>`). A device that is not
   bound to Kubernetes on this node at that moment is refused, whatever the slice said, and so is an unhealthy one,
-  even for a claim allocated before it went bad (6f5a99f); the slice drops a GPU the moment it goes bad.
-  `NodeUnprepareResources` has nothing to undo.
+  even for a claim allocated before it went bad (6f5a99f); the slice drops a GPU the moment it goes bad. Since
+  3f73449 two more results are refused: one with `adminAccess`, which would reach a device already allocated to
+  another claim ("admin access to gpu.bcd.dev devices is refused"), and a device already prepared for another claim,
+  until that claim is unprepared ("is prepared for claim …"). The device-to-claim record is kept in memory; after a
+  bcd restart the kubelet's own checkpoint still keeps a device to one claim.
+  `NodeUnprepareResources` changes nothing on the host (the CDI specs are the holds'); it only forgets the claim's
+  devices.
 - **The reaper.** A pod whose claim still holds one of this node's `gpu.bcd.dev` devices that compute released is
   deleted after the same 30 seconds as with the device plugins (fa8611e). Other drivers' claims are left alone.
 
@@ -276,8 +316,22 @@ mount (see [on Kubernetes](/docs/daemon/kubernetes#gpus-for-pods)).
 
 ## Release
 
-When the reservation ends, the node's spec loses the assignment. bcd removes the CDI spec, reports
-`AllocationReleased`, and the device plugins or the DRA slice withdraw the devices in the same moment. Pods still
+When the reservation ends, the node's spec loses the assignment. bcd removes the CDI spec, and the device plugins or
+the DRA slice withdraw the devices in the same moment. Since cd5fc82 it reports `AllocationReleased` only once no pod
+holds a device of the allocation any more:
+
+- The pending release is written to `<data_dir>/releasing.json` before the CDI spec goes, so a crash never loses it.
+- Until the report, the devices stay claimed on the node: no hold, VM, `gpu.reset`, `diag.dcgm` or host config unit
+  gets them, and the control plane keeps them booked.
+- "No pod holds it" comes from the kubelet's pod-resources API (a device plugin id `<atom>@<allocation>`, or a
+  `gpu.bcd.dev` claim of this node's pool named for the allocation; 14111c1). It fails closed: while the
+  pod-resources socket is missing or failing, the devices count as held.
+- bcd checks again when the reaper sees such a pod gone, on every converge pass, and at the latest 30 seconds later.
+  A release pending for more than 5 minutes raises the condition `KubernetesReleaseStuck` (reason `PodsHoldDevices`),
+  naming the allocation and its devices.
+- An allocation bound again before its release was reported is dropped from the pending list without a report.
+
+Pods still
 holding a released `bcd.dev/*` device (the kubelet's PodResources API names them), or a released `gpu.bcd.dev` device
 through a claim, are deleted once they have held it for 30 seconds, with `kubectl delete pod --wait=false
 --grace-period=10` and the kubelet's credentials; a pod that still holds the device a minute later is deleted with

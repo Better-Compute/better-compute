@@ -144,7 +144,7 @@ for in each mode.
     },
     kubernetes: {
       type: "{ apiServer?, caCertSha256?, joinTokenRef?, labels?, taints?, kubernetesVersion?, gpu?, gpuApi?: 'device-plugin' | 'dra', platformOperated? }",
-      description: "(v1.1) The pool's hosts work for a Kubernetes cluster, and reservations may use binding 'kubernetes'. apiServer, caCertSha256 and joinTokenRef together make every host join through the k8s-join unit; none of them marks a pool whose bcd runs as a DaemonSet in the cluster. gpuApi picks bcd's device plugins or its DRA driver. platformOperated counts only on a pool the platform owns. See /docs/guides/capacity/kubernetes.",
+      description: "(v1.1) The pool's hosts work for a Kubernetes cluster, and reservations may use binding 'kubernetes'. apiServer, caCertSha256 and joinTokenRef together make every host join through the k8s-join unit; none of them marks a pool whose bcd runs as a DaemonSet in the cluster. gpuApi picks bcd's device plugins or its DRA driver. On a site that is not custom, the join set needs platformOperated: true (e4d14cd). platformOperated counts only on a pool the platform owns. See /docs/guides/capacity/kubernetes.",
     },
     telemetry: {
       type: '{ otlpEndpoint?, intervalSeconds?, headersRef?, resourceAttributes? }',

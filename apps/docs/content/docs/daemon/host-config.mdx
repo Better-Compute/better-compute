@@ -148,15 +148,17 @@ waiting for busy GPUs, no longer keeps `nvidia-driver`, `gpu-sharing` or `contai
 named twice fails the whole section, since bcd cannot tell which settings apply. The `host` section never holds back
 the other sections either: `devices`, `instances` and the rest converge on their own.
 
-Two units report **conditions** besides the section state, `FabricManagerDown` and `MPSDown`, both with reason
-`NotRunning`, as `StatusReport.conditions` with status true while the fault lasts, and the converger adds
-`RebootRequired` (below). The gateway's `xidStatusHandler` turns them into node conditions (c7613e1, 0aea5c0), written
-and published as `node.condition.changed` only when they change:
+Three units report **conditions** besides the section state: `FabricManagerDown` and `MPSDown`, both with reason
+`NotRunning`, and `k8s-join`'s `KubernetesTaintsDrift` (reason `NodeRestriction`, 6ef198b), as
+`StatusReport.conditions` with status true while the fault lasts, and the converger adds `RebootRequired` (below). The
+gateway's `xidStatusHandler` turns them into node conditions (c7613e1, 0aea5c0, 88219ea), written and published as
+`node.condition.changed` only when they change:
 
 | Condition | Effect on the node |
 | --- | --- |
 | `FabricManagerDown` | NoSchedule while true: an NVSwitch system without Fabric Manager cannot initialize CUDA for multi-GPU jobs |
 | `MPSDown` | NoSchedule while true: every MPS client fails |
+| `KubernetesTaintsDrift` | Informational: the message is the `kubectl taint` command a cluster admin runs (see [k8s-join](#k8s-join)) |
 | `RebootRequired` | Informational; the node keeps running and taking work |
 | `HostManagedExternally` | Informational, from the `host` section's state (`[host] units = false`) |
 
@@ -239,11 +241,15 @@ with the unit's own validation, and applies it.
 | Checks | The units decode and validate the settings themselves, exactly as in `bcd node`; an unknown unit is `not supported`, and a helper built without host units answers `not configured` |
 | Signed spec | The signed spec that asks for the unit, whenever the helper knows the command-signing roots (below) |
 
-<Callout type="warn" title="No privilege separation on libvirt hosts yet">
-On a VPS or sandbox host that runs `libvirt-kvm`, the node's account is in the `libvirt` group, and access to
-libvirtd is equivalent to root. There `[helper]` gives no privilege separation until a fix lands; the signed-spec
-checks below bound what the helper applies, not what the node can do through libvirt. `bcd doctor` warns about it
-under `[helper]` (5573737).
+`[host] units = false` is read by `bcd node` only: it then has no host converger and sends no `host.unit`. `bcd helper`
+does not read the key, and would still apply a `host.unit` that passes the checks below.
+
+<Callout type="info" title="libvirt hosts">
+Since ed3c7d2 and d418820 a VPS or sandbox host that runs `libvirt-kvm` is separated too: `bcd node` is no longer in
+the root-equivalent `libvirt` group, and the helper defines and runs its libvirt domains after checking every
+definition (see [libvirt through the helper](/docs/daemon#libvirt-through-the-helper)). A host installed with
+`--unprivileged` before d418820 keeps the node in that group until the install script runs again; `bcd doctor` fails
+it until then.
 </Callout>
 
 **Busy GPUs are root's view** (a894cd2). For `mig-layout` the helper ignores the busy GPUs the node sends and works
@@ -624,7 +630,7 @@ converger; the [Kubernetes device plugin](/docs/guides/capacity/kubernetes#the-d
 
 ## k8s-join
 
-Joins the machine to a Kubernetes cluster as a worker, and keeps its kubelet, labels and taints (88ecb07, wired into
+Joins the machine to a Kubernetes cluster as a worker, and keeps its kubelet and labels (88ecb07, wired into
 the agent, the helper and the configuration in 7579184). Compute never runs a control plane and never schedules
 pods; it hands a cluster machines and GPUs. The whole flow is on [Kubernetes workers](/docs/guides/capacity/kubernetes).
 
@@ -672,10 +678,18 @@ order:
    is terminal. It records what it manages in `/var/lib/bcd-hostconfig/k8s-join.json`.
 5. **Kept.** Once joined: a kubelet whose kubeconfig names another API server is terminal (`reset it by hand
    (kubeadm reset) to move it`): bcd never resets a node joined elsewhere. It starts the kubelet when it is not
-   active, and keeps the Node's labels and taints with the kubelet's own credentials (`kubectl --kubeconfig
-   /etc/kubernetes/kubelet.conf label` and `taint`), removing only labels and taints it set before or labels under
-   `bcd.dev/`. Besides the spec's labels, bcd sets `bcd.dev/node-id`, `bcd.dev/site`, `bcd.dev/gpu.count`,
-   `bcd.dev/gpu.product` and `bcd.dev/gpu.driver` from its identity and inventory.
+   active, and keeps the Node's labels with the kubelet's own credentials (`kubectl --kubeconfig
+   /etc/kubernetes/kubelet.conf label`), removing only labels it set before or labels under `bcd.dev/`. Besides the
+   spec's labels, bcd sets `bcd.dev/node-id`, `bcd.dev/site`, `bcd.dev/gpu.count`, `bcd.dev/gpu.product` and
+   `bcd.dev/gpu.driver` from its identity and inventory.
+
+**Taints are set once** (6ef198b). The NodeRestriction admission plugin forbids a kubelet to change its own Node's
+taints, so bcd sets them only at registration, in the `JoinConfiguration`, and records them in `k8s-join.json` as
+registered. When the unit's taints later differ from the Node's (the pool's `taints` changed), bcd does not retry: the
+unit reports the condition `KubernetesTaintsDrift` (reason `NodeRestriction`) while they differ, and its message
+carries the command a cluster admin runs, `kubectl taint node <node> --overwrite <taints>`, which sets the unit's
+taints and removes those bcd registered that the unit no longer names. The gateway records it as an informational
+node condition. Labels are not affected: the kubelet may label its own Node outside `kubernetes.io` and `k8s.io`.
 
 **The token.** `bcd node` fetches it with a `SecretRequest` that names workflow `host:k8s-join` and step `tokenRef`.
 The secret broker releases it only while the node's current spec names that reference in that field (binding rule 3,

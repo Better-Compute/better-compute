@@ -647,8 +647,11 @@ reconciler then releases the booking, which gives the quota back, and marks the 
 **Metering.** `vps.volume.gib.hours`, the size per hour, from the booking until it is released, by the `vps.usage`
 job.
 
-<Callout type="info" title="API only for now">
-The CLI, the MCP server and the console do not expose volumes yet; use the API or the TypeScript client.
+<Callout type="info" title="Where volumes are exposed">
+Besides the API and the TypeScript client, the MCP server has four volume tools (`list_sandbox_volumes`,
+`create_sandbox_volume`, `resize_sandbox_volume`, `delete_sandbox_volume`; e6759df; see
+[agents over MCP](#agents-over-mcp)), and a [FleetConfig](/docs/guides/fleet-config) sandbox template mounts existing
+volumes by name (94b8b70). The CLI and the console do not expose volumes yet.
 </Callout>
 
 ## Snapshots and restore
@@ -1091,6 +1094,12 @@ The [MCP server](/docs/guides/clients/mcp#the-tools) has eight sandbox tools: `l
 `get_sandbox`, `extend_sandbox` (`sandboxId`, `by`), `delete_sandbox`, `list_sandbox_snapshots` (`scope`,
 `sandboxId`, `limit`, `cursor`) and `delete_sandbox_snapshot` (`snapshotId`). No tool takes a snapshot or runs code
 in a sandbox.
+
+Four more tools manage [volumes](#volumes), an agent's memory (e6759df): `list_sandbox_volumes` (`poolId`),
+`create_sandbox_volume` (`poolId`, `name`, `sizeGiB`, `idempotencyKey`; confirmation-aware like `create_sandbox`),
+`resize_sandbox_volume` (`volumeId`, `sizeGiB`; grow only) and `delete_sandbox_volume` (`volumeId`; destructive, it
+wipes the data). `create_sandbox_volume` is visible with `compute:pools:read` on its pool, and the other three are
+open to any authenticated caller. No tool attaches a volume to a template.
 
 `gateTools()` has a rule for each of them, so a gate built with `unlisted: 'deny'` shows them: `create_sandbox` is
 visible with `compute:sandboxes:read` on its template (`compute-sandbox-template/{templateId}`), and the other seven

@@ -138,6 +138,10 @@ they were booked, and bcd's own admission refuses a start the free pages cannot 
 - **A balloon on overcommitted pools** (073324a). A pool whose `policy.overcommit.memoryGiB` is above 1 gives every
   guest a virtio balloon, so the host can reclaim the guests' free memory, except huge-page-backed and GPU (VFIO)
   guests, whose memory is pinned. An older bcd drops the field harmlessly, so no capability label is needed for it.
+  Since 12e9ced bcd inflates those balloons only while the host is short of memory (under 10% available, or a
+  memory stall of 10% or more), idle guests first, never below a guest's floor (`[instances] balloon_floor_percent`,
+  default 50, or its use plus 10%), and deflates them once more than 20% is free again; host admission still charges
+  each guest its full memory. See [memory ballooning](/docs/daemon/delivery#memory-ballooning).
 
 ## Flavors on provider pools
 

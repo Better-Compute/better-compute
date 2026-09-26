@@ -270,7 +270,8 @@ sequenceDiagram
 Proxy DHCP answers, and `/boot/ipxe` renders a script, only when both hold:
 
 - the MAC has a live boot entry; an unknown machine gets no proxy DHCP answer and a 404 script that exits, so it
-  falls through to its next boot device;
+  falls through to its next boot device, and is listed as discovered (see
+  [discovering new machines](#discovering-new-machines));
 - the agent is the active boot server: its `site` section says it holds the lease at a non-zero epoch, and it has
   heard from the gateway within the lease TTL (15 seconds when the section gives none). A partitioned agent fences
   itself this way; its `/boot/ipxe` answers 503 with a script that waits 10 seconds and reboots.
@@ -281,6 +282,15 @@ carries a fresh `DiscoveryAssertion` (the site, this agent's node id, the lease 
 or the connection, the product UUID from the query or the entry, the workflow, `issued_at` in server time, and a
 `not_after` at most 15 minutes out and never past the entry's), signed by the agent's node key under purpose
 `discovery-assertion`.
+
+**Sanboot of a cached ISO** (0056e1e, e763001). For a BMC without virtual media, such as `ipmi`, a boot entry may
+carry `ProxyDhcpEntry.sanboot_sha256` instead of a ramdisk boot: `/boot/ipxe` then answers
+`sanboot --no-describe <url>/cache/<sha256>`, and iPXE reads the ISO from the image cache with HTTP range requests.
+The ISO boots as it is, with no discovery token and no `bc.*` parameters. The agent serves it only when the site
+spec names that digest as an `iso` cache image and the verified copy is cached. Otherwise the machine waits (a 503
+script that sleeps 30 seconds and chains again, never the ramdisk), and the `site` section fails naming the entry.
+The control plane does not set `sanboot_sha256` yet: metal still refuses a deploy profile that needs virtual media
+for an `ipmi` machine (see [IPMI](/docs/guides/bare-metal/bmc#ipmi-through-bcx-ipmi)).
 
 The image cache is served by the same HTTP server at `GET /cache/<sha256 hex>`, digest paths only, whether or not
 the agent holds the lease. The agent pulls every `cacheImages` entry of its `site` section in the background into
@@ -332,9 +342,23 @@ Today a machine enters metal by its BMC: `metal.enroll` with the BMC address, th
 step asks the BMC for the machine's PXE MACs, SMBIOS UUID and IP addresses and records them. That is
 what makes the boot entries above possible.
 
-Machines that PXE-boot without being enrolled first are designed but not shipped end to end. The
-site protocol lets the boot server report an unknown MAC as a discovery event, and the discovery
-attestor already supports operator approval:
+Machines that PXE-boot without being enrolled first are designed but not shipped end to end. Since 0056e1e the
+site agent's side exists: a PXE or HTTP-boot DHCP request, or an iPXE script fetch, from a MAC without a live boot
+entry, while the agent holds the boot lease, is never answered but listed in `StatusReport.discovered` (e763001):
+
+| Field | Value |
+| --- | --- |
+| `mac` | The machine's MAC |
+| `product_uuid` | The SMBIOS UUID from DHCP option 97, the one a BMC also reports |
+| `arch` | The client architecture |
+| `first_seen`, `last_seen`, `count` | When it was first and last seen, and how often |
+| `relay` | The DHCP relay (`giaddr`) it came through |
+
+The list holds at most 256 machines (the oldest `last_seen` goes first), forgets each a day after it was last seen,
+and drops a machine once it gets a boot entry. A new machine asks for a status report at most once every 30 seconds.
+Nothing is enrolled from it. The control plane does not read the list yet: the gateway neither stores nor publishes
+it, and metal does not match it to enrollments, so an `ipmi` machine is still enrolled with its `macs` (see
+[IPMI](/docs/guides/bare-metal/bmc#ipmi-through-bcx-ipmi)). The discovery attestor already supports operator approval:
 
 - `approval: 'never'` (the default) admits as described above;
 - `approval: 'unknown-machines'` defers a join that no running workflow names;

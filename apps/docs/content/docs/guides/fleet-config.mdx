@@ -191,11 +191,16 @@ See [flavors](/docs/guides/vps/flavors).
     warm: { type: '{ min: number; max?: number }', description: '0 to 64 each.' },
     env: { type: 'Record<string, string>', description: 'Variable names (A-Z, 0-9, _) to secret://<tenant>/<id> references only, written to /etc/sandbox/env in each sandbox.' },
     network: { type: "'egress' | 'private' | 'none'", description: "What the sandbox's NICs may reach.", default: "'egress'" },
+    volumes: { type: '{ volume: string; mountPath: string; readOnly?: boolean }[]', description: '(v1.1, 94b8b70) Existing sandbox volumes every sandbox mounts, by volume name, in attach order. mountPath is an absolute path of letters, digits and . _ / -. The document takes at most 24; the API allows 8 per template.' },
   }}
 />
 
 Only the fields you list are compared, so TTL bounds and warm sizes the server filled in are not drift. `env` is
-compared and replaced as a whole map. See [sandboxes](/docs/guides/vps/sandboxes#templates).
+compared and replaced as a whole map. `volumes` is compared by value and in order, since the attach order is the
+guest's disk order, and replaced as a whole list. Fleet never creates or deletes volumes, because they hold data:
+each name must already exist ([`sandboxVolumes.create`](/docs/reference/api/sandbox-volumes#create)), and an export
+names the template's volumes by name again. See [sandboxes](/docs/guides/vps/sandboxes#templates) and
+[volumes](/docs/guides/vps/sandboxes#volumes).
 
 </Tab>
 </Tabs>
@@ -237,7 +242,7 @@ What each kind can do:
 | Owner quota | `quotas.set` | `quotas.set` | No | |
 | Offer | `pools.offer` | `pools.offer` (`quota`, `includeDescendants`, `priority`) | `pools.unoffer` | |
 | Flavor | `flavors.create` | `flavors.update` (`vcpu`, `memoryGiB`, `diskGiB`, `gpus`, `offerId`, `placement`) | `flavors.delete` | |
-| Sandbox template | `sandboxTemplates.create` | `sandboxTemplates.update` (`flavor`, `imageId`, `userData`, `defaultTtlSeconds`, `maxTtlSeconds`, `network`, `env`, `warm`) | `sandboxTemplates.delete`: its warm instances are deleted, running sandboxes keep their TTL | `pool`, `runtime` |
+| Sandbox template | `sandboxTemplates.create` | `sandboxTemplates.update` (`flavor`, `imageId`, `userData`, `defaultTtlSeconds`, `maxTtlSeconds`, `network`, `env`, `warm`, `volumes`) | `sandboxTemplates.delete`: its warm instances are deleted, running sandboxes keep their TTL | `pool`, `runtime` |
 
 A change is **blocked** when it touches a field that cannot change, names an unknown site, pool or provider account,
 offers a pool to its own owner, or lists flavors or sandbox templates on a deployment without them (a template then

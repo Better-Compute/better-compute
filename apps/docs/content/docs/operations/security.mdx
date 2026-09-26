@@ -263,15 +263,26 @@ and bcd has it since 28dc2ae:
   else, so `/tmp` and anything the node owns are refused, and the units' records live in `/var/lib/bcd-hostconfig`,
   never in the node's `data_dir`. The helper's file kinds follow the same rule.
 
+- **libvirt through the helper** (c305a05, af09411, 8c0cf9e, fea4d2e, ed3c7d2, d418820). The `libvirt` group is
+  root-equivalent, so an unprivileged node is not in it. The helper defines, starts, stops, resizes, saves and
+  restores the node's libvirt domains and opens their consoles, only for domains bcd defined, after a default-deny
+  check of each definition: disks only under bcd's directories, checked and re-checked as root, taps named for the
+  instance on `[helper] instance_bridges`, hostdevs only of the host's GPUs, no QEMU command line, filesystems,
+  graphics or foreign namespaces. libvirt runs with `dynamic_ownership = 0`, so it never chowns a path the node names.
+  The node reads through libvirt's read-only socket. See
+  [libvirt through the helper](/docs/daemon#libvirt-through-the-helper).
+
 `daemon install-script --unprivileged` (169c459) sets the mode up: a `[helper]` section with the socket in the
 helper's own root-owned `/run/bcd-helper`, the `bcd` system account, `bcd-helper.service`, a `bcd.service` drop-in
-with `User=bcd`, and `/etc/bcd` readable by the `bcd` group only.
+with `User=bcd`, and `/etc/bcd` readable by the `bcd` group only; on a libvirt host, `dynamic_ownership = 0` and QEMU's
+user in the `bcd` group (d418820).
 
-The limits are plain. On a VPS or sandbox host that runs `libvirt-kvm`, the node's account is in the `libvirt`
-group, which is equivalent to root, so there `[helper]` gives no privilege separation until domain operations go
-through the helper; `bcd doctor` warns about it (5573737). The helper covers files, the firewall table, GPU resets,
-reboots, sshd reloads, host units and self-update; the instance runtimes and PLAN.md's `mig.apply` are not helper operations, and bcx plugins need a root
-node (`--unprivileged` refuses `--plugins`). The default install still runs `bcd node` as root. See
+The limits are plain. A host installed with `--unprivileged` before d418820 keeps `bcd node` in the `libvirt` group
+until the install script runs again (see
+[upgrading an unprivileged libvirt host](/docs/daemon/install#upgrading-an-unprivileged-libvirt-host)); `bcd doctor`
+fails it until then. The helper covers files, the firewall table, GPU resets, reboots, sshd reloads, host units,
+self-update and libvirt; `cloud-hypervisor` is not offered under the helper, PLAN.md's `mig.apply` is not a helper
+operation, and bcx plugins need a root node (`--unprivileged` refuses `--plugins`). The default install still runs `bcd node` as root. See
 [privilege separation](/docs/daemon#privilege-separation) and
 [running bcd node unprivileged](/docs/daemon/install#running-bcd-node-unprivileged).
 
@@ -464,6 +475,15 @@ A sandbox is a tenant VM for code you do not trust, often written by an agent. T
   loaded, and vps refuses `private` or `none` on a pool without an IP range. Such instances are placed only on hosts
   labelled `bc.dev/cap.instance.network-policy`, since an older bcd would drop the policy and give full egress.
   `private` spans the pool's whole IPAM subnet, other tenants' instances included on a shared pool.
+
+- **Capability labels are bcd's alone** (c1fd430, 0ff3ded, 736d3e5; review L11). The `bc.dev/` labels above, and the
+  `bc.dev/driver.*` and `bc.dev/driver-kind.*` labels, are what bcd advertises, written by the gateway with source
+  `system`. An operator could otherwise forge one and land sandboxes, placed flavors or volumes on a bcd that does
+  not enforce them. So [`nodes.label`](/docs/reference/api/nodes#label) refuses to set or remove any `bc.dev/` key,
+  and every reader counts a `bc.dev/` label only with source `system`: placement (the node labels it reads and the
+  exact shortlist), metal's driver kinds for a site's BMC drivers, provision's `when:` expressions and the host spec
+  it builds, and the vps self-check that trusts `bc.dev/cap.instance.network-policy`. A `Hello` whose `bc.dev/`
+  labels match an operator row left from before c1fd430 takes that row over as `system`.
 
 - **The tenant's image is hostile to the host.** Both bcd runtimes read every `qcow2` base image's header in Go,
   without `qemu-img` or any other tool probing it, and refuse one that names a backing file or an external data

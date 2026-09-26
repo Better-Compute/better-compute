@@ -46,6 +46,9 @@ sources:
   - daemon/internal/agent/instances.go
   - daemon/internal/runtime/runtime.go
   - daemon/internal/runtime/libvirt.go
+  - daemon/internal/runtime/hypervisor.go
+  - daemon/internal/runtime/balloon.go
+  - daemon/internal/agent/balloon.go
   - daemon/internal/runtime/cloudhypervisor.go
   - daemon/internal/runtime/qcow2.go
   - daemon/internal/agent/netpolicy.go
@@ -275,7 +278,8 @@ agents, over the runtimes the build provides) follows the FakeDaemon's `FakeHype
   balloon (never with huge pages). bcd checks it before anything is created, and a placement the host cannot apply
   fails the instance. `libvirt-kvm` maps it to a vCPU `cpuset` (floating) or `vcpupin` (exactly one CPU per vCPU),
   `numatune` in strict mode, locked `memoryBacking` huge pages and an explicit `memballoon` (none unless asked);
-  `cloud-hypervisor` to `cpus.affinity`, `memory.hugepages` and a balloon with free page reporting, with
+  `cloud-hypervisor` to `cpus.affinity`, `memory.hugepages` and a balloon with free page reporting (see
+  [memory ballooning](#memory-ballooning)), with
   `AllowedCPUs` and `AllowedMemoryNodes` on the VMM's unit, whose `MemoryMax` drops to the VMM's overhead when the
   guest's memory is in huge pages. A restore keeps bcd's pinning, never the snapshot's.
 - **Host-side admission** (0dd122a). Before a runtime starts a domain that is not running (a new one, a stopped one;
@@ -389,12 +393,44 @@ defines a domain, bcd therefore adds `o+x` (search, never read) to each director
 seed and volumes the domain names and to the overlay's base image directory. Listing stays closed, and bcd's own
 files there are 0600 (identity, keys, journal) or relabelled by libvirt.
 
-**Under bcd helper** (7dde6a3). An unprivileged `bcd node` runs `libvirt-kvm` when its account is in the `libvirt`
-group, since libvirtd does the privileged work; `bcd doctor` fails the `libvirt` check when it is not. That group is
-equivalent to root, so on such a host the helper separates nothing until domain operations go through it, and `bcd
-doctor` warns (5573737). It does not
-offer `cloud-hypervisor`, whose VMMs need root (the `systemd-run` units, the taps, files handed to the VMM's user): bcd
-logs a warning, does not advertise the runtime, and `bcd doctor` warns.
+**Under bcd helper** (ed3c7d2, d418820). An unprivileged `bcd node` is not in the root-equivalent `libvirt` group.
+Its `libvirt-kvm` runtime sends `define`, `start`, `shutdown`, `destroy`, `suspend`, `resume`, `undefine`,
+`blockresize`, the rebind disk's `attach-disk` and `detach-disk`, `save`, `restore` and the console to the helper's
+`libvirt.*` operations, where root checks every domain definition default-deny (disks only under bcd's directories
+and re-checked as root, taps named for the instance on `[helper] instance_bridges`, hostdevs only of the host's GPUs)
+and hands the console back as a file descriptor; the balloon's `setmem` goes there too. Reads (`list`, `domstate`,
+`dumpxml`, `domstats`) use libvirt's read-only socket (`virsh -r`). libvirt runs with
+`dynamic_ownership = 0`, so instead of the relabelling and `o+x` above, QEMU's user is in the node's group: disks are
+0660 (read-only ones 0640) and the directories on the way get group search. See
+[libvirt through the helper](/docs/daemon#libvirt-through-the-helper). The helper does not offer `cloud-hypervisor`,
+whose VMMs need root (the `systemd-run` units, the taps, files handed to the VMM's user): bcd logs a warning, does
+not advertise the runtime, and `bcd doctor` warns.
+
+#### Memory ballooning
+
+A guest whose `InstanceSpec.placement` asks for a balloon lends the host the memory it does not use (12e9ced, PLAN.md
+§3.8). vps asks for one on every guest of a pool that overcommits memory, except huge-page-backed and GPU guests (see
+[flavors](/docs/guides/vps/flavors#placement)), and bcd never balloons a guest with huge pages. Every 30 seconds (the
+health interval) bcd reads the host's `MemTotal` and `MemAvailable` and the memory pressure stall (PSI `some avg10`),
+and resizes the balloons of its running, managed guests that have one:
+
+| Host state | What bcd does |
+| --- | --- |
+| Less than 10% of memory available, or a memory stall of 10% or more | Inflates balloons to cover the shortfall below 10% (at least 2% of host memory while stalled), taking first from the guests with the most memory above their floor, at most a quarter of a guest's memory per pass |
+| More than 20% available and no stall | Deflates every inflated balloon a step (a quarter of the guest's memory) at a time, within what is free above 20% |
+| In between | Leaves the balloons as they are |
+
+A guest never goes below its floor: `[instances] balloon_floor_percent` of its memory (10 to 100, default 50), or
+what it uses plus 10% of its memory when that is higher. Its use comes from the runtime's usage reading (see
+[node metrics](/docs/operations/observability#node-metrics-from-bcd)); a guest without one counts as using all its
+memory, so nothing is taken from it. `libvirt-kvm` sets the size with `virsh setmem --live` (through the helper's
+`libvirt.setmem` under `bcd helper`) and reads it from `domstats --balloon`; `cloud-hypervisor` with `vm.resize`'s
+`desired_balloon` and `vm.info`'s balloon size. A guest defined without a balloon device is never touched (the runtime
+answers `ErrNoBalloon`, e48f40e), and a memory-restored `cloud-hypervisor` VM keeps bcd's balloon, never the one saved
+in the tenant's snapshot (9dddde4). Host admission still charges each VM its full configured memory, so ballooning
+never lets bcd start more guests than fit. The OTLP export reports each balloon as `bcd.instance.memory.balloon`. The
+policy and the controller are tested against fake runtimes (`internal/agent` `balloon_test.go`,
+`balloon_agent_test.go`); no balloon has run on a real host.
 
 #### Persistent volumes
 

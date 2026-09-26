@@ -227,8 +227,10 @@ An `ipmi` machine enrolls and commissions to `ready` (a3ec8d0, 3f19859, f62f9e9)
   `skipped` result, and the ramdisk inspects in band later.
 - **PXE MACs at enrollment.** IPMI inspection reports no host MACs, so a machine in a pool with an agent (one the
   ramdisk boots) must be enrolled with its `macs`. Without them `metal.enroll` is `UNSUPPORTED` with reason
-  `bmc-driver-unsupported` ("enroll the machine with macs"). Metal does not yet learn PXE MACs from the site agent's
-  DHCP or discovery traffic. An inspection that reports no MACs keeps the enrolled ones. The missing product UUID
+  `bmc-driver-unsupported` ("enroll the machine with macs"). Since 0056e1e the site agent lists the PXE machines it
+  does not know in `StatusReport.discovered`, with the SMBIOS UUID a BMC also reports (see
+  [discovering new machines](/docs/guides/bare-metal/sites#discovering-new-machines)), but the control plane does
+  not read that list yet, so metal does not learn PXE MACs from it. An inspection that reports no MACs keeps the enrolled ones. The missing product UUID
   changes nothing else: a boot entry then carries no `productUuid`, and the ramdisk's discovery token is bound to
   its MAC.
 - **Agentless machines take their addresses at enrollment.** In a pool with `agent: 'none'`, pass the machine's own
@@ -242,8 +244,10 @@ An `ipmi` machine enrolls and commissions to `ready` (a3ec8d0, 3f19859, f62f9e9)
   [bcx-ipmi](/docs/extending/drivers#bcx-ipmi-the-ipmi-driver).
 - **What stays Redfish only.** A deploy profile that mounts virtual media, a hardware profile with BIOS settings or
   a RAID layout, and the dedicated-root teardown (`metal-tenant-root-release`, which rotates the BMC password and
-  checks firmware) are refused for an `ipmi` machine with `UNSUPPORTED`. There is no PXE path yet that boots an ISO
-  for a driver without virtual media.
+  checks firmware) are refused for an `ipmi` machine with `UNSUPPORTED`. The site agent can now boot a cached ISO
+  over PXE for a driver without virtual media (`sanboot`, 0056e1e; see
+  [sanboot of a cached ISO](/docs/guides/bare-metal/sites#the-boot-server-in-bcd-site)), but metal sets no
+  `sanboot_sha256` on a boot entry yet, so that refusal stands.
 
 ```ts title="An IPMI machine"
 await compute.api.metal.enroll(credential, {

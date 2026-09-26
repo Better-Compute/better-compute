@@ -89,11 +89,14 @@ curl -X POST https://compute.example.com/api/compute/reservations/create \
 
 ```bash
 better-compute reserve --tenant acme --pool pool_01k… --gpus 4 --for 8h --nvlink --key train-2026-09-24
+better-compute reserve --tenant acme --pool pool_01k… --gpus 2 --for 8h --cpus 32 --memory 256
+better-compute capacity --tenant acme --preview --pool pool_01k… --gpus 2 --for 8h --cpus 32 --memory 256
 better-compute reservations get rsv_… --tenant acme --query binding
 ```
 
 `reserve` sends a new idempotency key on every run unless you pass `--key`, and prints the key so you
-can retry. See the [CLI reference](/docs/reference/cli).
+can retry. `--cpus` and `--memory` (GiB) book [host resources](#host-resources) with the GPUs, and `--kubernetes` asks
+for `binding: 'kubernetes'` (ea36a94); `capacity --preview` takes the same three. See the [CLI reference](/docs/reference/cli).
 
 </Tab>
 </Tabs>
@@ -421,9 +424,21 @@ A reservation can book a host's CPUs, memory and 1 GiB huge pages with its GPUs 
   pool can give (`floor(allocatable × ratio ÷ bookable GPUs)`), so the share fits on every host. It is resolved once,
   when the draft is written, and stored in the request. Requests for MIG instances or slots only book none, so pools
   behave as before until their hosts have rows.
-- **Quota.** Host resources are not charged to quota; the devices are.
+- **The share is also the floor** (41826a2). `resources` below the pool's per-GPU share, or `resources: {}`, are
+  raised to it, so booked GPUs never run a workload without CPU and memory limits while the same CPU and memory are
+  sold again.
+- **Quota.** The share rides on the GPUs and needs no quota beyond theirs; the reservation records it as `hostShare`
+  when it is created. Anything booked above it is charged to the tenant's `vcpu` and `memoryGiB` quota (1 GiB huge
+  pages count as memory), and a missing quota row grants 0, so the excess is `QUOTA_EXCEEDED` unless the offer names
+  these resources (41826a2). One GPU's quota can then not take a whole host's CPUs and memory. Reservations made before
+  `hostShare` existed charge their devices only. IAM sees `vcpu` and `memoryGiB` (summed over a gang) as attributes of
+  the reservation.
 - **Preview.** `capacity.preview` books the same host resources as `reservations.create` would, the request's or the
   pool's per-GPU share, so a preview that fits is a create that fits (17f600b); a `node` binding books none.
+- **From the CLI and the console.** `better-compute reserve` and `better-compute capacity --preview` take `--cpus`
+  (0 to 4096) and `--memory` (GiB, 0 to 65,536), sent as `resources`, and `--kubernetes` for `binding: 'kubernetes'`
+  (ea36a94). `@better-compute/console-kit`'s reservation form takes the same three as `vcpu`, `memoryGiB` and
+  `kubernetes`, and previews with them (e833433); the console app's reservation page does not show those fields yet.
 - **On the node** (c5a419c, 260e33c), the booked resources become the assignment's limits: `cpu_millis` from
   `vcpu`, `memory_bytes` from `memoryGiB`, `hugepages_1gi`, and a cpuset on the NUMA nodes of the hold's devices when
   those nodes have enough CPUs (`cpus`) or memory (`mems`). Since b6b804e a cpuset never includes the host's reserved

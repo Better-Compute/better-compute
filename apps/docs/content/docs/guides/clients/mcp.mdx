@@ -216,6 +216,10 @@ framework.
 | `delete_sandbox` | `sandboxes.delete` | any authenticated caller | destructive, idempotent |
 | `list_sandbox_snapshots` | `sandboxSnapshots.list`: the caller's own by default, `scope: 'all'`, filter `sandboxId`, `limit` 1 to 200, `cursor` | any authenticated caller | read-only |
 | `delete_sandbox_snapshot` | `sandboxSnapshots.delete` | any authenticated caller | destructive, idempotent |
+| `list_sandbox_volumes` | `sandboxVolumes.list` (v1.1), filter `poolId` | any authenticated caller | read-only |
+| `create_sandbox_volume` | `sandboxVolumes.create`, confirmation-aware | `compute:pools:read` on the pool | idempotent |
+| `resize_sandbox_volume` | `sandboxVolumes.resize` | any authenticated caller | idempotent |
+| `delete_sandbox_volume` | `sandboxVolumes.delete` | any authenticated caller | destructive, idempotent |
 | `list_command_batches` | `commandBatches.list` (v1.0): filter `state`, `limit` 1 to 200, `cursor` | any authenticated caller | read-only |
 | `get_command_batch` | `commandBatches.get` with a `batchId` (`batch_…`) | any authenticated caller | read-only |
 | `exec_command` (with `execCommand: true`) | `commands.run`: `inventory.refresh`, `logs.collect` or `node.reboot`, optionally with a `batchId` | `compute:nodes:read` on the node | destructive |
@@ -257,8 +261,19 @@ the sandbox and its disk before its TTL ends. `list_sandbox_snapshots` lists sna
 too), and `delete_sandbox_snapshot` deletes one (`snap_…`) for good. No tool takes a snapshot or calls
 `sandboxes.exec`.
 
+**Volume tools are agent memory** (e6759df). [Sandbox volumes](/docs/guides/vps/sandboxes#volumes) are persistent
+disks that outlive sandboxes, which a template mounts in every sandbox it creates. `list_sandbox_volumes` lists the
+tenant's volumes, optionally of one `poolId`. `create_sandbox_volume` takes a `poolId`, a `name` unique in the tenant
+(`^[a-z0-9][a-z0-9._-]{0,62}$`, such as `agent-notes`), `sizeGiB` (1 to 65,536 in the tool's schema; compute allows
+at most 16,384) and optionally an `idempotencyKey`; like `create_sandbox` it answers
+`{ idempotencyKey, volume }` and turns `CONFIRMATION_REQUIRED` into a result to retry with the same key. The volume
+lives on one host and is billed until deleted. `resize_sandbox_volume` grows a volume (`vol_…`) to `sizeGiB`, never
+shrinks it, and sandboxes see the new size at their next boot. `delete_sandbox_volume` deletes a volume and wipes its
+data; a volume a sandbox still mounts is refused. No tool attaches a volume to a template: a person does that with
+`sandboxTemplates.update`.
+
 Every argument is checked against the tool's JSON Schema before anything is called: ids must match their prefix
-(`pool_…`, `node_…`, `rsv_…`, `inst_…`, `sbxt_…`, `sbx_…`, `snap_…`, `batch_…`), and unknown arguments are refused. A bad argument is a tool error `INVALID_INPUT`
+(`pool_…`, `node_…`, `rsv_…`, `inst_…`, `sbxt_…`, `sbx_…`, `snap_…`, `vol_…`, `batch_…`), and unknown arguments are refused. A bad argument is a tool error `INVALID_INPUT`
 with the path of the first problem. The check reads own properties only (`constructor`, `__proto__` and the like are
 never arguments) and enforces `minItems` and `uniqueItems`, and the list tools put the caller's `tenantId` after
 the arguments, so an argument can never replace it (7890821, review 14 L1).
@@ -300,6 +315,9 @@ deliberately light:
   `list_sandboxes`, `get_sandbox`, `extend_sandbox`, `delete_sandbox`, `list_sandbox_snapshots`,
   `delete_sandbox_snapshot`) are open to any authenticated caller, since compute decides each call on the tenant,
   the sandbox, the snapshot or the draft.
+- `create_sandbox_volume` is visible with `compute:pools:read` on its pool; `list_sandbox_volumes`,
+  `resize_sandbox_volume` and `delete_sandbox_volume` are open to any authenticated caller, and compute decides each
+  call on the tenant or the volume (e6759df).
 
 The rules accept only well-formed ids: a `poolId` of letters, digits and `._:-` (at most 128 characters), a
 `node_…` or a `sbxt_…` id. Anything else throws, so the gate denies the call (7890821, review 14 M2): the gate runs
@@ -386,8 +404,8 @@ to `expired`. Without a bearer token or a tenant it returns nothing and the tool
   and `node_status` or the command's own methods show it.
 - `reserve_gpus` books with `binding: 'hold'`, or `kubernetes` with `kubernetes: true`; whole-node leases, spot, gangs
   and calendar starts are not exposed as tool arguments.
-- `release_reservation`, `stop_instance`, `delete_instance`, `delete_sandbox` and `delete_sandbox_snapshot` are
-  marked destructive: many MCP hosts ask the user before calling such a tool.
+- `release_reservation`, `stop_instance`, `delete_instance`, `delete_sandbox`, `delete_sandbox_snapshot` and
+  `delete_sandbox_volume` are marked destructive: many MCP hosts ask the user before calling such a tool.
 - The sandbox tools cannot take a snapshot or run code in a sandbox; code runs through the CLI's `sandbox exec`.
 - The server is stateless, with JSON responses only: it does not open SSE streams or send server notifications, and
   `tools.listChanged` is `false`. It negotiates protocol versions `2025-06-18`, `2025-03-26` and `2024-11-05`,

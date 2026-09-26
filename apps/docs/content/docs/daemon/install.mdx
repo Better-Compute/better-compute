@@ -16,7 +16,10 @@ sources:
   - daemon/cmd/bcd/helper.go
   - daemon/cmd/bcd/update.go
   - daemon/cmd/bcd/doctor.go
+  - daemon/cmd/bcd/doctor_resources.go
+  - daemon/cmd/bcd/helper_libvirt.go
   - daemon/internal/helper/helper.go
+  - daemon/internal/helper/intent.go
   - daemon/internal/selfupdate/manager.go
   - daemon/internal/selfupdate/selfupdate.go
   - daemon/internal/selfupdate/nofollow_unix.go
@@ -126,7 +129,8 @@ better-compute daemon install-script \
 | `--plugins` | no | | Prepare the node for bcx driver plugins: a `[plugins]` section and the systemd drop-in; see [the plugin drop-in](#the-plugin-drop-in) |
 | `--privileged-plugins NAMES` | no | | Comma-separated plugins that run as root without the seccomp filter, such as a Kata runtime; implies `--plugins` |
 | `--install-plugins NAMES` | no | | Comma-separated bcx plugins to install from the release, each checked against its archive digest in the verified `--release-manifest` (adf2ae9). Only plugins a release ships are accepted: `bcx-ipmi`. Implies `--plugins` and needs `--release-manifest`; see [installing plugins from the release](#installing-plugins-from-the-release) |
-| `--unprivileged` | no | | Run `bcd node` as the unprivileged `bcd` user beside a root `bcd helper` (169c459): a `[helper]` section, the `bcd` account, `bcd-helper.service` and a `bcd.service` drop-in; see [running bcd node unprivileged](#running-bcd-node-unprivileged). Refused with `--plugins`, `--privileged-plugins` or `--install-plugins`. Self-update works in this mode: the helper does the privileged half (2d67b25). On a `libvirt-kvm` host it separates nothing yet: the `bcd` account is in the `libvirt` group, which is equivalent to root (`bcd doctor` warns, 5573737) |
+| `--unprivileged` | no | | Run `bcd node` as the unprivileged `bcd` user beside a root `bcd helper` (169c459): a `[helper]` section, the `bcd` account, `bcd-helper.service` and a `bcd.service` drop-in; see [running bcd node unprivileged](#running-bcd-node-unprivileged). Refused with `--plugins`, `--privileged-plugins` or `--install-plugins`. Self-update works in this mode: the helper does the privileged half (2d67b25). On a `libvirt-kvm` host the helper defines and runs the domains, and the `bcd` account stays out of the `libvirt` group (d418820) |
+| `--instance-bridges BRIDGES` | no | | With `--unprivileged`, on VPS and sandbox hosts: the bridges an instance's NIC may join, comma-separated interface names (1 to 15 of letters, digits, `.`, `_` and `-`), written as `[helper] instance_bridges` unless the configuration already sets it (d418820). Without `--unprivileged` it is `INVALID_INPUT` |
 | `--approver-set-sha256 HEX` | no | | Writes `approver_set_sha256` (64 lower-case hex digits, the `approverSetSha256` that `pki trust-version` prints) into `config.toml`, pinning the node's first approver set (9b7a199): a keyless bcd takes only that set, and runs nothing destructive until it has it; see [pinning the first set](/docs/operations/pki#pinning-the-first-set). An upgrade run without the flag keeps the node's existing pin (b6d401f) |
 | `--command-root-sha256 HEX,...` | no | | Writes `command_root_sha256`, 1 to 16 lower-case hex SHA-256 digests of the command-signing root certificates (`pki trust-version` prints them as `commandRootSha256`), so `bcd helper` checks host config units against specs signed under them from its first request (59985ae; see [signed specs](/docs/daemon/host-config#signed-specs)). Without the flag the script pins the PKI bundle's command-signing root and, during a rotation, the added one, and nothing when the bundle has no command signing; an upgrade by a script without pins keeps the node's |
 | `--pki PATH` | no | | The PKI bundle to read the pins from |
@@ -254,6 +258,7 @@ sudo sh install-bcd.sh < token-file
     <File name="bootargs/UNIT, hugepages-1g-boot, cdi-nvidia.stamp (the host units' records)" />
     <File name="k8s-join.json, k8s/bootstrap-token (k8s-join)" />
     <File name="helper-intent.json (bcd helper's accepted signed spec)" />
+    <File name="libvirt/ (bcd helper's staging for domain definitions and memory saves)" />
   </Folder>
   <Folder name="/run/bcd (0700)" defaultOpen>
     <File name="bcd.sock (0600 status socket, owned by the user bcd runs as)" />
@@ -312,7 +317,7 @@ keys and wrong types are all errors with a line number, so a typo fails loudly. 
 | `gateway_server_name` | no | | The name the gateway certificate must carry when `gateway_url` names an IP address (an L4 balancer, a dev stack reached from WSL) |
 | `dev_insecure_h2c` | no | `false` | Allows an `http://` `gateway_url` (cleartext HTTP/2 to a dev gateway). Only fakehw builds accept it; the host build refuses to start |
 | `approver_set_sha256` | no | | 64 lower-case hex digits: the only approver set a daemon without approver keys takes first (see [pinning the first set](/docs/operations/pki#pinning-the-first-set)); `--approver-set-sha256` writes it |
-| `command_root_sha256` | no | | Comma-separated lower-case hex SHA-256 digests of the command-signing root certificates, at most 16 (03c023d). `bcd helper` then applies a `host.unit` only with a spec signed under these roots, which decide alone. Without it the helper takes the roots from the trust bundle the JoinService key signed, checked against `join_signing_key_pin` (2d18327), and checks nothing until it has first accepted such a bundle with roots. A malformed value stops bcd from starting. `daemon install-script` writes it; see [signed specs](/docs/daemon/host-config#signed-specs) |
+| `command_root_sha256` | no | | Comma-separated lower-case hex SHA-256 digests of the command-signing root certificates, at most 16 (03c023d); `pki trust-version` prints them as `commandRootSha256`. `bcd helper` then applies a `host.unit` only with a spec signed under these roots, which decide alone. `daemon install-script` writes it by default from the PKI bundle's current command-signing root and, during a rotation, the next one; `--command-root-sha256` overrides that. Without it the helper takes the roots from the `SignedTrustBundle` the JoinService key signed, checked against `join_signing_key_pin` (2d18327): it refuses a bundle older than one it already accepted (a rollback) and, once it has accepted a bundle with roots, any request without a signed spec; before that it checks nothing. A malformed value stops bcd from starting. See [signed specs](/docs/daemon/host-config#signed-specs) |
 | `[update] release_pins` | no | none | Comma-separated `sha256/...` pins of the release keys. Without them bcd refuses every self-update; see [self-update](#self-update) |
 | `[update] release_threshold` | no | `1` | How many distinct pinned keys must have signed a release |
 | `[update] release_sequence` | no | `0` | The release the node was installed at: no release manifest with a lower sequence is taken (0: unknown) |
@@ -320,10 +325,12 @@ keys and wrong types are all errors with a line number, so a typo fails loudly. 
 | `[update] slots_dir` | no | `<data_dir>/bin`; under `bcd helper` `/usr/local/lib/bcd` | An absolute path for the binary slots and, beside them, `upgrade.json` and `update.json` (without it and without the helper, the records stay in `data_dir`; 2d67b25). Under the helper it may neither be inside `data_dir` nor contain it ("under bcd helper, update.slots_dir may not be inside data_dir"; both paths cleaned first, c139b9c), since the unprivileged node owns that directory; the helper creates it |
 | `[helper] socket` | no | | An absolute path: `bcd node` then runs unprivileged and sends its privileged operations, self-update's included, to `bcd helper` on this unix socket (28dc2ae); `--unprivileged` writes `/run/bcd-helper/helper.sock`. The directory must be root's with no group or other write. See [running bcd node unprivileged](#running-bcd-node-unprivileged) |
 | `[helper] user` | with `socket` | | The unprivileged account `bcd node` runs as (`bcd` from `--unprivileged`); `root` is refused ("helper.socket needs an absolute path and helper.user, the unprivileged account bcd node runs as") |
+| `[helper] instance_bridges` | no | | Comma-separated bridges an instance's NIC may join (fea4d2e). `bcd helper` refuses to define a libvirt domain with a NIC on any other bridge, and with none set it defines no domain with a NIC at all. A name that is not an interface name stops bcd from starting ("helper.instance_bridges: … is not an interface name"). `--instance-bridges` writes it; see [libvirt through the helper](/docs/daemon#libvirt-through-the-helper) |
 | `[site] bmc_networks` | no | | A site agent's BMC networks, comma-separated CIDRs: `site.httpProxy` never reaches into them, whatever the control plane asks. A site agent with it advertises the capability `site.bmc-networks`, and `better-compute doctor` warns about connected site agents without it (a019c85) |
 | `[websocket] url` | no | | A `wss://` URL (`ws://` only with `dev_insecure_h2c`), without credentials, of the gateway's WebSocket endpoint, `.../v1/session`: `bcd node` and `bcd site` then run the session and renewals over the [WebSocket fallback](/docs/daemon/protocol#websocket-fallback-v04) |
 | `[websocket] proxy_ca_file` | no | | An absolute path to a PEM file of a TLS-inspecting proxy's CA, trusted for the TLS connection only, never for the gateway's proof |
 | `[websocket] audience` | no | `gateway_server_name`, else the URL's host | The gateway's public host the node's proof names |
+| `[instances] balloon_floor_percent` | no | `50` | 10 to 100: the share of its memory a ballooned guest always keeps (12e9ced); bcd also never takes a guest below its use plus 10%. Outside the range bcd does not start. See [memory ballooning](/docs/daemon/delivery#memory-ballooning) |
 | `[imds] listen` | no | | Where a VPS host serves its instances' metadata service, for example `169.254.169.254:80` on the instances' bridge; empty turns it off |
 | `[host] units` | no | `true` | `false` when something else manages the host's configuration (the NVIDIA GPU operator beside [bcd as a DaemonSet](/docs/daemon/kubernetes)): bcd applies no `NodeSpec.host` unit and reports the section `UNSUPPORTED` with reason `HostManagedExternally` (a193249). See [host configuration](/docs/daemon/host-config) |
 | `[kubernetes] allowed_clusters` | for a `k8s-join` | | Comma-separated `https://host[:port]#sha256:<CA pin>` entries: the only clusters the `k8s-join` unit may join this machine to (7579184). Since 9f860ad it is required as root too: without it every join is refused, and `bcd doctor` fails a joined node without one. A malformed entry stops `bcd node` and `bcd helper` from starting. See [k8s-join](/docs/daemon/host-config#k8s-join) |
@@ -577,6 +584,7 @@ user = "bcd"
 | --- | --- |
 | `[helper] socket` | The absolute path of the helper's unix socket. Unset (the default), `bcd node` does its privileged work itself, as root |
 | `[helper] user` | The account `bcd node` runs as, and the only caller the helper serves besides root; its primary group owns the socket. Required with `socket`, and never `root` |
+| `[helper] instance_bridges` | On a VPS or sandbox host: the bridges instance NICs may join, which the helper checks every domain against; unset, it defines no domain with a NIC. `--instance-bridges br0,br-priv` adds it |
 
 The socket is not in `/run/bcd`: the `bcd` user owns that directory, and a directory the node can write would let it
 redirect root's work on the socket path with a symlink. So it lives in the helper's own root-owned runtime directory.
@@ -603,7 +611,12 @@ without the section, so disable that unit yourself). In helper mode it:
    that exists (c139b9c, 9e71b1f);
 4. makes `/etc/bcd` (0750) and `config.toml` (0640) group-owned by `bcd`, so the node can read its configuration and
    nothing else of `/etc/bcd` becomes readable to it;
-5. after `bcd join` (which runs as root), gives `/var/lib/bcd` to `bcd:bcd` and starts `bcd-helper.service` before
+5. on a host with `/etc/libvirt/qemu.conf` (d418820): sets `dynamic_ownership = 0` there (replacing the line,
+   commented or not, or appending it), adds `libvirt-qemu` or `qemu`, whichever exists, to the `bcd` group, and
+   restarts `virtqemud.service` or `libvirtd.service` if it runs. libvirt then chowns no path the node names, and
+   QEMU reaches the node's disk files through the `bcd` group (see
+   [libvirt through the helper](/docs/daemon#libvirt-through-the-helper));
+6. after `bcd join` (which runs as root), gives `/var/lib/bcd` to `bcd:bcd` and starts `bcd-helper.service` before
    `bcd.service`; an upgrade run does the same with restarts.
 
 ```ini title="/etc/systemd/system/bcd-helper.service"
@@ -634,7 +647,6 @@ After=bcd-helper.service
 User=bcd
 Group=bcd
 SupplementaryGroups=systemd-journal adm
-SupplementaryGroups=libvirt
 ```
 
 | Setting | Why |
@@ -642,7 +654,6 @@ SupplementaryGroups=libvirt
 | `Requires=`, `After=bcd-helper.service` | The node starts after the helper and stops with it |
 | `User=bcd`, `Group=bcd` | `bcd node` runs unprivileged; systemd hands it the unit's state and runtime directories (`/var/lib/bcd`, `/run/bcd`) |
 | `SupplementaryGroups=systemd-journal adm` | Read access to the system journal and logs (`logs.collect` runs `journalctl`) |
-| `SupplementaryGroups=libvirt` | Added only when the host has a `libvirt` group: the libvirt socket, for the `libvirt-kvm` runtime on VPS hosts |
 | `RuntimeDirectory=bcd-helper`, mode 0755 | `/run/bcd-helper`, root-owned, holds the socket (0660, `root:bcd`) |
 
 The helper serves a caller only when `SO_PEERCRED` shows `bcd`'s uid and gid (or root) and `/proc/<pid>/exe` is an
@@ -660,7 +671,9 @@ plugins yet: bcd node would need root to start them").
 </Callout>
 
 What the helper does not do runs with the `bcd` account's own rights: the journal and key, the status socket, the
-`libvirt-kvm` runtime (`virsh -c qemu:///system`, through the `libvirt` group) and reading `/dev/kmsg`. Only
+`libvirt-kvm` runtime's reads (`virsh -r`, libvirt's read-only socket) and its files under `data_dir/libvirt`, and
+reading `/dev/kmsg`. Defining and running libvirt domains goes through the helper's checked `libvirt.*` operations
+(ed3c7d2; see [libvirt through the helper](/docs/daemon#libvirt-through-the-helper)). Only
 `bcd node` uses the helper; `bcd site` ignores `[helper]`. `tests/e2e/bcd.test.ts` runs both processes by hand on a
 fakehw build, a GPU hold and a signed self-update included; `tests/cli-pki.test.ts` checks the script's section,
 account, units and drop-in.
@@ -803,6 +816,27 @@ The node keeps its identity and journal across the restart. On reconnect its `He
 On a node that has already [self-updated](#self-update), the script's `mv -f` replaces the entrypoint symlink with a
 plain file. The next self-update adopts that file into the current slot before it relinks the entrypoint (9006eee),
 so it never falls back to the older binary the slot held; before that fix it did, rolling the script's upgrade back.
+
+### Upgrading an unprivileged libvirt host
+
+A VPS or sandbox host installed with `--unprivileged` by a script from before d418820 runs `bcd node` in the
+`libvirt` group, which is root-equivalent, and its libvirt still relabels files. A new bcd there sends domain
+operations through the helper anyway (ed3c7d2), which refuses to define a domain with a NIC until
+`[helper] instance_bridges` is set, but the group membership and the relabelling stay until you run a
+newer script, generated with `--unprivileged` (and `--instance-bridges` for the instances' bridges), on the host
+without a token. It rewrites the `unprivileged.conf` drop-in without `SupplementaryGroups=libvirt`, sets
+`dynamic_ownership = 0`, adds QEMU's user to the `bcd` group, restarts libvirt and then both bcd units:
+
+```bash
+better-compute daemon install-script --pool pool_vps --site fsn1 \
+  --gateway-url https://gw.eu.example.com --base-url https://compute.example.com \
+  --bcd-version 0.9.2 --sha256 amd64=<hex> --unprivileged --instance-bridges br0 > install-bcd.sh
+sudo sh install-bcd.sh
+```
+
+Without `[helper] instance_bridges` the helper defines no domain with a NIC, so set the bridges before instances
+with networks start there; the script adds them only when the configuration has no `instance_bridges` line yet.
+`bcd doctor`'s `libvirt` check fails until the host is set up this way.
 
 ### From v0.4: rollouts and self-update
 

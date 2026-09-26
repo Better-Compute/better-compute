@@ -24,7 +24,10 @@ sources:
   - daemon/internal/config/config.go
   - daemon/internal/kube/manager.go
   - daemon/internal/kube/dra.go
+  - daemon/internal/kube/exposure.go
   - daemon/internal/kube/plugin_test.go
+  - daemon/cmd/bcd/doctor_kube.go
+  - packages/gateway/src/health.ts
 ---
 
 Most machines run bcd the way [the install script](/docs/daemon/install) puts it there: a binary and a systemd unit
@@ -50,8 +53,11 @@ and its nodes exist first, and bcd runs inside the cluster to report their GPUs 
   `nvidia.com/gpu.present=true`, the label NVIDIA's GPU Feature Discovery sets), tolerates every taint by default,
   runs at `system-node-critical` priority and rolls one node at a time.
 - **The host's view.** The `bcd` container is privileged, with host networking, and mounts `/dev`, `/sys`,
-  `/var/lib/kubelet`, `/etc/kubernetes` (read-only), `/etc/cdi`, `/var/run/cdi` and the host's `/var/lib/bcd`. The
-  pod does not share the host's PID namespace (`hostPID: false`). It runs under the RuntimeClass `nvidia` (the GPU
+  `/var/lib/kubelet`, `/etc/kubernetes` (read-only), `/etc/cdi`, `/var/run/cdi` and the host's `/var/lib/bcd`. Since
+  dcd2ab0 it also mounts the NVIDIA container toolkit's configuration directories read-only,
+  `/etc/nvidia-container-runtime` and the GPU operator's `/usr/local/nvidia/toolkit/.config/nvidia-container-runtime`
+  (`nvidiaToolkitConfigDirs`, hostPath `DirectoryOrCreate`), so bcd can see a toolkit that hands out GPUs by
+  environment variable (see [GPU isolation](#gpu-isolation)). The pod does not share the host's PID namespace (`hostPID: false`). It runs under the RuntimeClass `nvidia` (the GPU
   operator's; `nvidiaRuntimeClass`), and the `bcd` container asks for `NVIDIA_VISIBLE_DEVICES=all` with
   `NVIDIA_DRIVER_CAPABILITIES=utility` only, so bcd gets `nvidia-smi` and the driver's libraries to read and reset
   GPUs (b6d5548); workload pods still get CDI devices only.
@@ -130,6 +136,9 @@ It renders the manifests first, so a bad image or pin fails before any token exi
 labelled `pod-security.kubernetes.io/enforce: privileged`), a ConfigMap with `config.toml`, and the DaemonSet.
 Then it mints a multi-use join token with `hosted: 'kubernetes'` and writes it only as the join Secret's manifest,
 to `--secret-out`, a new file created 0600, never the output. The call is decided as `compute:join-tokens:create`.
+After writing the Secret, the command reminds you (ab9339b) to revoke the token (`join-tokens revoke <id>`) and
+delete the Secret once every node has joined, with a fresh token for a later batch of nodes, and prints the
+[GPU isolation](#gpu-isolation) requirements.
 
 | Flag | Default | |
 | --- | --- | --- |
@@ -144,6 +153,7 @@ to `--secret-out`, a new file created 0600, never the output. The call is decide
 | `--node-selector` | every node | `key=value` pairs, such as `nvidia.com/gpu.present=true` |
 | `--host-units` | off | Let bcd apply `NodeSpec.host` units |
 | `--gpu-api` | `device-plugin` | `dra` for the DRA driver (see [GPUs for pods](#gpus-for-pods)) |
+| `--nvidia-runtime-class` | `nvidia` | The RuntimeClass bcd's own container runs under, which gives it `nvidia-smi` and the driver's libraries (`nvidiaRuntimeClass`; ab9339b); `none` for no RuntimeClass, when the image carries them |
 | `--ttl` | `24h` | How long the token admits nodes, 1 minute to 24 hours |
 | `--max-uses` | `100` | How many nodes it admits |
 | `--key` | a new UUID | The token's idempotency key, to retry the same request |
@@ -230,10 +240,13 @@ The generated DaemonSet carries these requirements, and the Pod Security and tok
 `bcd.dev/requires` annotation (`gpuIsolationRequirements`), since JSON manifests have no comments.
 
 bcd enforces the first two itself (9f860ad): when the kubelet can also allocate an `nvidia.com/*` resource, or a
-toolkit configuration in `/etc/nvidia-container-runtime` or `/usr/local/nvidia/toolkit` accepts
-`NVIDIA_VISIBLE_DEVICES` from unprivileged pods (the key `true`, or absent, the toolkit's default), bcd offers no GPUs:
-its device plugins stop, its DRA slice is deleted, and it reports the condition `ForeignGpuExposure` naming what to
-close. So a cluster with the GPU operator's defaults gets no GPUs through bcd until you apply the settings above.
+toolkit `config.toml` in `/etc/nvidia-container-runtime` or `/usr/local/nvidia/toolkit/.config/nvidia-container-runtime`
+accepts `NVIDIA_VISIBLE_DEVICES` from unprivileged pods (the key `true`, or absent, the toolkit's default), bcd offers
+no GPUs: its device plugins stop, its DRA slice is deleted, and it reports the condition `ForeignGpuExposure` naming
+what to close. The generated DaemonSet mounts both directories read-only for this (dcd2ab0), and the gateway records
+the condition as an informational node condition (b91dcff). So a cluster with the GPU operator's defaults gets no GPUs
+through bcd until you apply the settings above. `bcd doctor`'s `gpu-isolation` check (35534e5) runs the toolkit half
+of the check only on a node bcd itself joined with `k8s-join`, not on a DaemonSet node: there, look at the condition.
 
 ## GPUs for pods
 
@@ -251,7 +264,9 @@ it, so bcd's Kubernetes side runs in hosted mode (1e5f96b). It needs no `k8s-joi
   a minute, touches only `bcd.dev/*`, sets no taints, and removes `bcd.dev/*` labels it no longer sets.
 - **The reaper.** Pods that keep a released device are deleted after 30 seconds with a 10-second grace period, and
   forced a minute later if they still hold it, as on a joined worker, through the kubelet's pod-resources socket under
-  `/var/lib/kubelet`; without that socket bcd reports `PodResourcesUnavailable`.
+  `/var/lib/kubelet`; without that socket bcd reports `PodResourcesUnavailable`. A released allocation is reported
+  to the control plane only once no pod holds its devices (cd5fc82; see
+  [release](/docs/guides/capacity/kubernetes#release)).
 - **Device plugin or DRA.** `[kubernetes] gpu_api` in `config.toml` chooses how the GPUs reach pods:
   `"device-plugin"` (the default) or `"dra"`, bcd's DRA driver `gpu.bcd.dev` (7d24836), never both. Any other value
   stops bcd from starting. `--gpu-api` and `bcdDaemonSetManifests({ gpuApi })` write it (e4b0c01). See

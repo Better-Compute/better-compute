@@ -128,7 +128,10 @@ const node = await client.nodes.label({
 `set` takes up to 64 labels and `remove` up to 64 keys. A key is up to 128 characters of letters, digits and
 `. _ / -`, starting and ending with a letter or digit; a value is up to 256 characters of letters, digits and
 `. _ : / @ + = -`. Setting a key that inventory or the system owns is `INVALID_INPUT`, and
-`remove` only removes operator labels. The call returns the node with its labels and publishes `node.labeled`.
+`remove` only removes operator labels. Since c1fd430 any `bc.dev/` key is refused in `set` and `remove` alike: those
+labels are bcd's advertised drivers and capabilities, and placement, metal, provision and vps count one only with
+source `system` (see [capability labels](/docs/operations/security#sandboxes-v05)). The call returns the node
+with its labels and publishes `node.labeled`.
 
 ```bash
 better-compute nodes label node_01k5w… --tenant $TENANT --set rack=b7,fabric/rail=3 --remove burn-in
