@@ -66,6 +66,7 @@ import {
   type Condition,
   type DesiredState,
   type DevicesSection,
+  type DiscoveredMachineSchema,
   type DriverManifestSchema,
   type Event,
   type HelloSchema,
@@ -1986,6 +1987,7 @@ export class FakeDaemon {
     const value = {
       ...proc.lastStatus,
       ...(this.pressure ? { pressure: this.pressure } : {}),
+      ...(this.discovered ? { discovered: this.discovered } : {}),
       // A bundle applied from Welcome.trust after Hello is acknowledged here, without a reconnect.
       ...(this.intentVersion !== undefined && !this.options.profile?.withoutHello?.includes('trustVersion')
         ? { trustVersion: this.intentVersion, ...this.heldApproverSet() }
@@ -2002,6 +2004,39 @@ export class FakeDaemon {
    */
   setPressure(pressure: MessageInitShape<typeof HostPressureSchema> | undefined): void {
     this.pressure = pressure;
+    this.sendStatus();
+  }
+
+  private discovered: MessageInitShape<typeof DiscoveredMachineSchema>[] | undefined;
+
+  /**
+   * Sim, site agents: the unknown machines that PXE-booted (`StatusReport.discovered`, bcd's
+   * discovery list), in every StatusReport from now on; `undefined` stops reporting them. Times are
+   * milliseconds since the epoch (default: now); the current report is re-sent.
+   */
+  setDiscovered(
+    machines:
+      | readonly {
+          mac: string;
+          productUuid?: string;
+          arch?: string;
+          firstSeen?: number;
+          lastSeen?: number;
+          count?: number;
+          relay?: string;
+        }[]
+      | undefined,
+  ): void {
+    const now = Math.floor(this.serverNow());
+    this.discovered = machines?.map((m) => ({
+      mac: m.mac.toLowerCase(),
+      productUuid: (m.productUuid ?? '').toLowerCase(),
+      arch: m.arch ?? '',
+      firstSeen: timestampFromMs(m.firstSeen ?? now),
+      lastSeen: timestampFromMs(m.lastSeen ?? now),
+      count: m.count ?? 1,
+      relay: m.relay ?? '',
+    }));
     this.sendStatus();
   }
 
