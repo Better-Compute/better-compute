@@ -4399,6 +4399,68 @@
             "type": "bytes",
             "label": "",
             "description": ""
+          },
+          {
+            "name": "discovered",
+            "number": 12,
+            "type": "DiscoveredMachine",
+            "label": "repeated",
+            "description": "(v1.1, site agents only) Machines seen PXE/HTTP-booting (DHCP PXEClient/HTTPClient) from a MAC\nwith no live boot entry: never answered, never enrolled; a list for metal to match (by\nproduct_uuid, the SMBIOS UUID a BMC also reports) or an operator to act on. The whole list,\ncapped at 256 (oldest last_seen evicted, forgotten 24 h after last seen)."
+          }
+        ]
+      },
+      {
+        "name": "DiscoveredMachine",
+        "description": "",
+        "fields": [
+          {
+            "name": "mac",
+            "number": 1,
+            "type": "string",
+            "label": "",
+            "description": "Lowercase colon form."
+          },
+          {
+            "name": "product_uuid",
+            "number": 2,
+            "type": "string",
+            "label": "",
+            "description": "DHCP option 97 (the SMBIOS system UUID); empty when the client sent none."
+          },
+          {
+            "name": "arch",
+            "number": 3,
+            "type": "string",
+            "label": "",
+            "description": "DHCP option 93, as the site agent names it: x86_64-efi, bios, arm64-efi, x86_64-efi-http, …"
+          },
+          {
+            "name": "first_seen",
+            "number": 4,
+            "type": "google.protobuf.Timestamp",
+            "label": "",
+            "description": ""
+          },
+          {
+            "name": "last_seen",
+            "number": 5,
+            "type": "google.protobuf.Timestamp",
+            "label": "",
+            "description": ""
+          },
+          {
+            "name": "count",
+            "number": 6,
+            "type": "uint32",
+            "label": "",
+            "description": ""
+          },
+          {
+            "name": "relay",
+            "number": 7,
+            "type": "string",
+            "label": "",
+            "description": "giaddr when the request was relayed (which L2 segment it came from); empty when direct."
           }
         ]
       },
@@ -6416,6 +6478,13 @@
             "type": "string",
             "label": "",
             "description": "Secret ref of this machine's MAC-bound discovery join token. The site agent fetches it with\nSecretRequest{workflow_id} and puts it only into the ramdisk's boot parameters it serves, so the\ntoken never travels in plaintext in commands.body."
+          },
+          {
+            "name": "sanboot_sha256",
+            "number": 9,
+            "type": "bytes",
+            "label": "",
+            "description": "(v1.1) Boot this ISO instead of the ramdisk, for BMC drivers without virtual media (ipmi): the\nsha256 of a SiteSpec.cache_images entry with format \"iso\". The machine's iPXE script is then\n`sanboot --no-describe <site agent>/cache/<hex>`, the vendor or OS ISO as is (no discovery token,\nno bc.* parameters). A digest the cache does not hold verified is never answered (the site\nsection fails) rather than falling back to the ramdisk. `boot_file` still chains iPXE;\n`ipxe_script_url` is ignored while this is set."
           }
         ]
       },

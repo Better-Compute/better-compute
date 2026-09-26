@@ -68,6 +68,8 @@ Creates a pool on a site the tenant owns, with the owner's quota rows and an emp
 - It is decided as `compute:pools:create` on the tenant (`compute-tenant`), the alternative its catalog row lists next to `compute-fleet`.
 - `sharing` defaults to `exclusive` and `agent` to `bcd` (`none` for `provider` pools). A `provider` pool needs `providerAccountId` and `agent: 'none'`, and other classes refuse `providerAccountId`; both are `INVALID_INPUT`.
 - `ownerQuota` defaults to `gpu` at 2,147,483,647. Owners of `mig`, `timeslice` or `mps` pools add `gpu.mig` or `gpu.slot` rows themselves, because a missing row grants 0.
+- The policy is checked as the nodes will get it (v1.1). Each module's `pool-policy` validator runs, e.g. provision's host units: hugepages, kernel modules, a `kubernetes` join set given all together or not at all, and sharing replicas up to 48. A policy nodes can't take is `INVALID_INPUT`.
+- On a platform (non-`custom`) site, a `kubernetes` join set also needs `platformOperated: true`: the cluster's admins get root on the machines, which keep their platform trust.
 - With `idempotencyKey`, the pool id is derived from the tenant, the caller and the key. A retry returns the stored pool without a second IAM decision; the same key with a different site, class, sharing mode, agent or provider account is `CONFLICT`.
 - A site the tenant does not own is `NOT_FOUND`.
 
@@ -169,7 +171,7 @@ That tenant's quota rows on the pool drop to what is in use, so live reservation
 
 Replaces the policy, the GPU model, or both, of a pool the tenant owns, and returns the pool with its version incremented.
 
-- The new `policy` replaces the old one as a whole. A request with neither field is `INVALID_INPUT`. Class, site, sharing mode and agent cannot change.
+- The new `policy` replaces the old one as a whole, and is checked as on `create`: the `pool-policy` validators, and `platformOperated` for a platform site's Kubernetes join. A request with neither field is `INVALID_INPUT`. Class, site, sharing mode and agent cannot change.
 - Turning `policy.singleTenant` on is `INVALID_STATE` while more than one tenant, or any tenant with `includeDescendants`, holds an offer.
 - A new `migLayout` in a `mig` pool never repartitions booked GPUs; each node takes the new layout once its GPUs are idle. A change to `prewarmImages` refreshes the desired state of the site's agents.
 - The pool's authz rows are refreshed for the owner and every offered tenant.
