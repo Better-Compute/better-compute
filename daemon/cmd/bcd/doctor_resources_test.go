@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/better-compute/better-compute/daemon/internal/config"
 )
 
 func TestResourceChecks(t *testing.T) {
@@ -64,5 +66,24 @@ func TestResourceChecks(t *testing.T) {
 		if c.status != "ok" {
 			t.Errorf("%+v", c)
 		}
+	}
+}
+
+func TestHelperRuntimeChecks(t *testing.T) {
+	cfg := &config.Config{}
+	both := func(string) (string, error) { return "/usr/bin/x", nil }
+	member := func(ok bool) func(string, string) (bool, error) {
+		return func(string, string) (bool, error) { return ok, nil }
+	}
+	if got := helperRuntimeChecks(cfg, both, member(false)); got != nil {
+		t.Fatalf("without [helper]: %v", got)
+	}
+	cfg.Helper.Socket, cfg.Helper.User = "/run/bcd/helper.sock", "bcd"
+	got := helperRuntimeChecks(cfg, both, member(false))
+	if len(got) != 2 || got[0].status != "fail" || !strings.Contains(got[0].detail, "not in the libvirt group") || got[1].status != "warn" {
+		t.Fatalf("checks = %v", got)
+	}
+	if got := helperRuntimeChecks(cfg, both, member(true)); got[0].status != "ok" {
+		t.Fatalf("a member: %v", got)
 	}
 }

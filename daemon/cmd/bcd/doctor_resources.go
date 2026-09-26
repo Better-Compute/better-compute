@@ -4,10 +4,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/better-compute/better-compute/daemon/internal/config"
 )
 
 // resourceChecks: what enforcing PLAN.md §3.8 needs from the host (root prefixes /sys; tests point it
@@ -102,6 +106,47 @@ func systemdVersion() int {
 		return n
 	}
 	return 0
+}
+
+// helperRuntimeChecks: under [helper] bcd node is unprivileged. libvirt-kvm then needs its user in
+// the libvirt group (virsh reaches qemu:///system through it), and cloud-hypervisor is not offered.
+// inGroup reports whether the user belongs to the group (errors: unknown user or group).
+func helperRuntimeChecks(cfg *config.Config, lookPath func(string) (string, error), inGroup func(user, group string) (bool, error)) []doctorCheck {
+	if cfg.Helper.Socket == "" || cfg.Helper.User == "" {
+		return nil
+	}
+	var out []doctorCheck
+	if _, err := lookPath("virsh"); err == nil {
+		switch ok, err := inGroup(cfg.Helper.User, "libvirt"); {
+		case err != nil:
+			out = append(out, doctorCheck{"fail", "libvirt", err.Error()})
+		case !ok:
+			out = append(out, doctorCheck{"fail", "libvirt", cfg.Helper.User + " is not in the libvirt group: bcd node cannot drive libvirt-kvm under [helper]"})
+		default:
+			out = append(out, doctorCheck{"ok", "libvirt", cfg.Helper.User + " drives libvirt through the libvirt group"})
+		}
+	}
+	if _, err := lookPath("cloud-hypervisor"); err == nil {
+		out = append(out, doctorCheck{"warn", "cloud-hypervisor", "not offered under [helper]: its VMMs need bcd node to run as root"})
+	}
+	return out
+}
+
+// userInGroup reports whether the named user is a member of the named group.
+func userInGroup(name, group string) (bool, error) {
+	u, err := user.Lookup(name)
+	if err != nil {
+		return false, err
+	}
+	g, err := user.LookupGroup(group)
+	if err != nil {
+		return false, err
+	}
+	gids, err := u.GroupIds()
+	if err != nil {
+		return false, err
+	}
+	return slices.Contains(gids, g.Gid) || u.Gid == g.Gid, nil
 }
 
 // hostResourceChecks runs resourceChecks against this host.

@@ -128,6 +128,7 @@ func hostChecks(cfg *config.Config) []doctorCheck {
 		return out
 	}
 	out = append(out, hostKubeChecks(cfg)...)
+	out = append(out, helperRuntimeChecks(cfg, exec.LookPath, userInGroup)...)
 	if u, err := url.Parse(cfg.GatewayURL); err == nil {
 		host := u.Host
 		if u.Port() == "" {

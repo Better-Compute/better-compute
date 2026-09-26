@@ -299,6 +299,22 @@ func runtimesFor(mode, dataDir string, host agent.Host) []runtime.Runtime {
 	return newRuntimes(dataDir, bootID)
 }
 
+// withoutRootRuntimes drops the runtimes an unprivileged bcd node cannot drive: cloud-hypervisor
+// launches its VMMs with systemd-run, creates their taps and hands them files, all as root. They
+// are not advertised, so the control plane places no instance on them here. libvirt stays: libvirtd
+// does its privileged work (the node's user needs the libvirt group; bcd doctor checks it).
+func withoutRootRuntimes(runtimes []runtime.Runtime, log *slog.Logger) []runtime.Runtime {
+	out := runtimes[:0:0]
+	for _, r := range runtimes {
+		if _, ch := r.(*runtime.CloudHypervisor); ch {
+			log.Warn("cloud-hypervisor needs bcd node to run as root; it is not offered under [helper]")
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
 // clientRenewer calls Renew on whichever client is current.
 type clientRenewer struct {
 	client *atomic.Pointer[transport.Client]
@@ -365,6 +381,9 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 	}()
 	drivers := agent.DriversOf(plugins)
 	runtimes := runtimesFor(mode, cfg.DataDir, host)
+	if underHelper {
+		runtimes = withoutRootRuntimes(runtimes, log)
+	}
 	if mode == "node" {
 		// Runtimes the plugins serve (a Kata or Firecracker plugin), beside the built-in ones.
 		runtimes = append(runtimes, agent.PluginRuntimes(drivers, runtimes)...)

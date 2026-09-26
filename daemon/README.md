@@ -272,6 +272,9 @@ SO_PEERCRED and `/proc/<pid>/exe`; requests are versioned, strictly decoded JSON
 is logged. Every directory on the way to the socket, the slots and the entrypoint must be root's
 and closed to others (`bcd doctor` checks it), neither the slots nor the entrypoint may live in
 `data_dir`, and the helper adopts into a slot only a root-owned entrypoint no one else can write.
+Instance runtimes under the helper: libvirt-kvm works when the node's user is in the `libvirt` group,
+since libvirtd does the privileged work. cloud-hypervisor is not offered, because its VMMs need root:
+systemd-run units, taps, and files handed to their users. `bcd doctor` reports both.
 
 **Identity rebind** (`agent/rebind.go`, `runtime/rebind.go`; review 13 H2). A memory-restored guest
 resumes with its source's sshd principals and host key. When its spec carries
