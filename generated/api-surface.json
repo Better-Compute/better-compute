@@ -6032,6 +6032,14 @@
             "maxLength": 128,
             "description": "The tenant the call acts in"
           },
+          "scope": {
+            "enum": [
+              "mine",
+              "all"
+            ],
+            "default": "mine",
+            "description": "The caller’s own volumes (default), or every volume of the tenant"
+          },
           "poolId": {
             "type": "string",
             "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",

@@ -49,7 +49,7 @@ The volume id derives from the tenant, the caller and `idempotencyKey`. A retry 
 
 `POST /api/compute/sandboxVolumes/list`
 
-Returns the tenant's volumes, oldest first, optionally in one pool; `includeDeleted: true` adds deleted ones.
+Returns the caller's own volumes, oldest first (`scope: 'mine'`, the default, as for snapshots), or with `scope: 'all'` every volume of the tenant. `poolId` narrows it to one pool, and `includeDeleted: true` adds deleted ones.
 
 At most 500 volumes are returned. Decided as `compute:sandboxes:read` on the tenant.
 
@@ -60,11 +60,12 @@ At most 500 volumes are returned. Decided as `compute:sandboxes:read` on the ten
 
 **Input**
 
-| Field            | Type    | Required | Constraints                                                       |
-| ---------------- | ------- | -------- | ----------------------------------------------------------------- |
-| `tenantId`       | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
-| `poolId`         | string  |          | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
-| `includeDeleted` | boolean |          | default `false`                                                   |
+| Field            | Type                 | Required | Constraints                                                       |
+| ---------------- | -------------------- | -------- | ----------------------------------------------------------------- |
+| `tenantId`       | string               | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `scope`          | one of `mine`, `all` |          | default `"mine"`                                                  |
+| `poolId`         | string               |          | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `includeDeleted` | boolean              |          | default `false`                                                   |
 
 ## get
 
