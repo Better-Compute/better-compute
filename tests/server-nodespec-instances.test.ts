@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { fromJson } from '@bufbuild/protobuf';
 import type { InstanceSpec, SqlTx } from '@better-compute/core';
-import { InstanceNetworkPolicy, NodeSpecSchema } from '@better-compute/protocol';
+import { Binding, InstanceNetworkPolicy, NodeSpecSchema } from '@better-compute/protocol';
 import { specHash, wireNodeSpec } from '../packages/server/src/controllers/nodespec.js';
 
 // The instances section on the wire (v0.5 sandboxes §3.7): restore_from and network_policy decode
@@ -64,6 +64,53 @@ describe('NodeSpec instances section (v0.5)', () => {
     expect(specHash(await wireNodeSpec(tx, { instances: [instance({ sshFromHostOnly: false })] }))).toBe(
       specHash(plain),
     );
+  });
+});
+
+describe('NodeSpec resources on the wire (v1.1 §3.8)', () => {
+  it('carries an instance placement and decodes it as bcd reads it', async () => {
+    const wire = await wireNodeSpec(tx, {
+      instances: [
+        instance({
+          placement: { cpus: '8-9', mems: '1', hugepageSizeBytes: 1_073_741_824, balloon: false },
+        }),
+      ],
+    });
+    const decoded = fromJson(NodeSpecSchema, wire as never).instances!.instances[0]!;
+    expect(decoded.placement).toMatchObject({ cpus: '8-9', mems: '1', hugepageSizeBytes: 1_073_741_824n, balloon: false });
+    // No placement: nothing on the wire, so the spec hashes as before.
+    const plain = await wireNodeSpec(tx, { instances: [instance()] });
+    expect(specHash(await wireNodeSpec(tx, { instances: [instance({ placement: {} })] }))).toBe(specHash(plain));
+  });
+
+  it("carries a hold's limits and the kubernetes binding", async () => {
+    const rows = {
+      devices: [{ id: 'GPU-1', class: 'gpu' }],
+      allocations: [{ id: 'alc_1', owner_kind: 'reservation', owner_id: 'rsv_1', binding: 'kubernetes' }],
+    };
+    const store = {
+      query: async (sql: string) => ({ rows: sql.includes('FROM devices') ? rows.devices : rows.allocations, rowCount: 1 }),
+    } as unknown as SqlTx;
+    const wire = await wireNodeSpec(store, {
+      devices: {
+        assignments: [
+          {
+            allocationId: 'alc_1',
+            deviceIds: ['GPU-1'],
+            limits: { cpus: '0-7', mems: '0', cpuMillis: 8000, memoryBytes: 64 * 2 ** 30, hugepages1Gi: 4 },
+          },
+        ],
+      },
+    });
+    const assignment = fromJson(NodeSpecSchema, wire as never).devices!.assignments[0]!;
+    expect(assignment.binding).toBe(Binding.KUBERNETES);
+    expect(assignment.limits).toMatchObject({
+      cpus: '0-7',
+      mems: '0',
+      cpuMillis: 8000,
+      memoryBytes: 68_719_476_736n,
+      hugepages1gi: 4n,
+    });
   });
 });
 

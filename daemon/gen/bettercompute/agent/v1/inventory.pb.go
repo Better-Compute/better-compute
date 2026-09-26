@@ -964,7 +964,11 @@ type CpuSection struct {
 	// Sorted, e.g. "amx_tile", "avx512f".
 	Flags []string `protobuf:"bytes,7,rep,name=flags,proto3" json:"flags,omitempty"`
 	// Sorted by id.
-	NumaNodes     []*NumaNode `protobuf:"bytes,8,rep,name=numa_nodes,json=numaNodes,proto3" json:"numa_nodes,omitempty"`
+	NumaNodes []*NumaNode `protobuf:"bytes,8,rep,name=numa_nodes,json=numaNodes,proto3" json:"numa_nodes,omitempty"`
+	// (v1.1 §3.8) CPUs the kernel isolates from the scheduler (/sys/devices/system/cpu/isolated,
+	// cpulist form; empty when none): bcd pins VMs and holds there first, and never counts them for
+	// the host's own reserve.
+	IsolatedCpus  string `protobuf:"bytes,9,opt,name=isolated_cpus,json=isolatedCpus,proto3" json:"isolated_cpus,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1055,12 +1059,22 @@ func (x *CpuSection) GetNumaNodes() []*NumaNode {
 	return nil
 }
 
+func (x *CpuSection) GetIsolatedCpus() string {
+	if x != nil {
+		return x.IsolatedCpus
+	}
+	return ""
+}
+
 type NumaNode struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Id    uint32                 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
 	// Kernel cpulist form, e.g. "0-31,64-95".
-	Cpus          string `protobuf:"bytes,2,opt,name=cpus,proto3" json:"cpus,omitempty"`
-	MemoryBytes   uint64 `protobuf:"varint,3,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
+	Cpus        string `protobuf:"bytes,2,opt,name=cpus,proto3" json:"cpus,omitempty"`
+	MemoryBytes uint64 `protobuf:"varint,3,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
+	// (v1.1 §3.8) The node's hugepage pools (/sys/devices/system/node/nodeN/hugepages), sorted by page
+	// size: NUMA-local hugepage backing books from these.
+	Hugepages     []*HugepagePool `protobuf:"bytes,4,rep,name=hugepages,proto3" json:"hugepages,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1114,6 +1128,13 @@ func (x *NumaNode) GetMemoryBytes() uint64 {
 		return x.MemoryBytes
 	}
 	return 0
+}
+
+func (x *NumaNode) GetHugepages() []*HugepagePool {
+	if x != nil {
+		return x.Hugepages
+	}
+	return nil
 }
 
 type MemorySection struct {
@@ -2906,7 +2927,7 @@ const file_bettercompute_agent_v1_inventory_proto_rawDesc = "" +
 	"\x03Tpm\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\tR\aversion\x12\"\n" +
 	"\fmanufacturer\x18\x02 \x01(\tR\fmanufacturer\x12$\n" +
-	"\x0eek_cert_issuer\x18\x03 \x01(\tR\fekCertIssuer\"\xff\x01\n" +
+	"\x0eek_cert_issuer\x18\x03 \x01(\tR\fekCertIssuer\"\xa4\x02\n" +
 	"\n" +
 	"CpuSection\x12\x16\n" +
 	"\x06vendor\x18\x01 \x01(\tR\x06vendor\x12\x14\n" +
@@ -2917,11 +2938,13 @@ const file_bettercompute_agent_v1_inventory_proto_rawDesc = "" +
 	"\athreads\x18\x06 \x01(\rR\athreads\x12\x14\n" +
 	"\x05flags\x18\a \x03(\tR\x05flags\x12?\n" +
 	"\n" +
-	"numa_nodes\x18\b \x03(\v2 .bettercompute.agent.v1.NumaNodeR\tnumaNodes\"Q\n" +
+	"numa_nodes\x18\b \x03(\v2 .bettercompute.agent.v1.NumaNodeR\tnumaNodes\x12#\n" +
+	"\risolated_cpus\x18\t \x01(\tR\fisolatedCpus\"\x95\x01\n" +
 	"\bNumaNode\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\rR\x02id\x12\x12\n" +
 	"\x04cpus\x18\x02 \x01(\tR\x04cpus\x12!\n" +
-	"\fmemory_bytes\x18\x03 \x01(\x04R\vmemoryBytes\"\xe2\x01\n" +
+	"\fmemory_bytes\x18\x03 \x01(\x04R\vmemoryBytes\x12B\n" +
+	"\thugepages\x18\x04 \x03(\v2$.bettercompute.agent.v1.HugepagePoolR\thugepages\"\xe2\x01\n" +
 	"\rMemorySection\x12\x1f\n" +
 	"\vtotal_bytes\x18\x01 \x01(\x04R\n" +
 	"totalBytes\x12B\n" +
@@ -3193,36 +3216,37 @@ var file_bettercompute_agent_v1_inventory_proto_depIdxs = []int32{
 	1,  // 14: bettercompute.agent.v1.SystemSection.boot_mode:type_name -> bettercompute.agent.v1.BootMode
 	12, // 15: bettercompute.agent.v1.SystemSection.tpm:type_name -> bettercompute.agent.v1.Tpm
 	14, // 16: bettercompute.agent.v1.CpuSection.numa_nodes:type_name -> bettercompute.agent.v1.NumaNode
-	16, // 17: bettercompute.agent.v1.MemorySection.hugepages:type_name -> bettercompute.agent.v1.HugepagePool
-	17, // 18: bettercompute.agent.v1.MemorySection.dimms:type_name -> bettercompute.agent.v1.Dimm
-	18, // 19: bettercompute.agent.v1.MemorySection.edac:type_name -> bettercompute.agent.v1.EdacCounters
-	20, // 20: bettercompute.agent.v1.DisksSection.disks:type_name -> bettercompute.agent.v1.Disk
-	2,  // 21: bettercompute.agent.v1.Disk.transport:type_name -> bettercompute.agent.v1.DiskTransport
-	21, // 22: bettercompute.agent.v1.Disk.smart:type_name -> bettercompute.agent.v1.SmartStatus
-	23, // 23: bettercompute.agent.v1.NicsSection.nics:type_name -> bettercompute.agent.v1.Nic
-	3,  // 24: bettercompute.agent.v1.Nic.rdma:type_name -> bettercompute.agent.v1.RdmaType
-	4,  // 25: bettercompute.agent.v1.Nic.link:type_name -> bettercompute.agent.v1.LinkState
-	25, // 26: bettercompute.agent.v1.GpusSection.gpus:type_name -> bettercompute.agent.v1.Gpu
-	26, // 27: bettercompute.agent.v1.Gpu.mig:type_name -> bettercompute.agent.v1.GpuMig
-	29, // 28: bettercompute.agent.v1.Gpu.nvlinks:type_name -> bettercompute.agent.v1.NvlinkLink
-	30, // 29: bettercompute.agent.v1.Gpu.topology:type_name -> bettercompute.agent.v1.GpuPeerLink
-	31, // 30: bettercompute.agent.v1.Gpu.fabric:type_name -> bettercompute.agent.v1.GpuFabric
-	32, // 31: bettercompute.agent.v1.Gpu.ecc:type_name -> bettercompute.agent.v1.GpuEcc
-	34, // 32: bettercompute.agent.v1.Gpu.row_remap:type_name -> bettercompute.agent.v1.GpuRowRemap
-	5,  // 33: bettercompute.agent.v1.GpuMig.current:type_name -> bettercompute.agent.v1.MigMode
-	5,  // 34: bettercompute.agent.v1.GpuMig.pending:type_name -> bettercompute.agent.v1.MigMode
-	27, // 35: bettercompute.agent.v1.GpuMig.profiles:type_name -> bettercompute.agent.v1.MigProfile
-	28, // 36: bettercompute.agent.v1.GpuMig.instances:type_name -> bettercompute.agent.v1.MigInstance
-	4,  // 37: bettercompute.agent.v1.NvlinkLink.state:type_name -> bettercompute.agent.v1.LinkState
-	6,  // 38: bettercompute.agent.v1.GpuPeerLink.link:type_name -> bettercompute.agent.v1.GpuLinkType
-	33, // 39: bettercompute.agent.v1.GpuEcc.volatile_counts:type_name -> bettercompute.agent.v1.EccCounts
-	33, // 40: bettercompute.agent.v1.GpuEcc.aggregate_counts:type_name -> bettercompute.agent.v1.EccCounts
-	7,  // 41: bettercompute.agent.v1.OsSection.cgroup:type_name -> bettercompute.agent.v1.CgroupVersion
-	42, // [42:42] is the sub-list for method output_type
-	42, // [42:42] is the sub-list for method input_type
-	42, // [42:42] is the sub-list for extension type_name
-	42, // [42:42] is the sub-list for extension extendee
-	0,  // [0:42] is the sub-list for field type_name
+	16, // 17: bettercompute.agent.v1.NumaNode.hugepages:type_name -> bettercompute.agent.v1.HugepagePool
+	16, // 18: bettercompute.agent.v1.MemorySection.hugepages:type_name -> bettercompute.agent.v1.HugepagePool
+	17, // 19: bettercompute.agent.v1.MemorySection.dimms:type_name -> bettercompute.agent.v1.Dimm
+	18, // 20: bettercompute.agent.v1.MemorySection.edac:type_name -> bettercompute.agent.v1.EdacCounters
+	20, // 21: bettercompute.agent.v1.DisksSection.disks:type_name -> bettercompute.agent.v1.Disk
+	2,  // 22: bettercompute.agent.v1.Disk.transport:type_name -> bettercompute.agent.v1.DiskTransport
+	21, // 23: bettercompute.agent.v1.Disk.smart:type_name -> bettercompute.agent.v1.SmartStatus
+	23, // 24: bettercompute.agent.v1.NicsSection.nics:type_name -> bettercompute.agent.v1.Nic
+	3,  // 25: bettercompute.agent.v1.Nic.rdma:type_name -> bettercompute.agent.v1.RdmaType
+	4,  // 26: bettercompute.agent.v1.Nic.link:type_name -> bettercompute.agent.v1.LinkState
+	25, // 27: bettercompute.agent.v1.GpusSection.gpus:type_name -> bettercompute.agent.v1.Gpu
+	26, // 28: bettercompute.agent.v1.Gpu.mig:type_name -> bettercompute.agent.v1.GpuMig
+	29, // 29: bettercompute.agent.v1.Gpu.nvlinks:type_name -> bettercompute.agent.v1.NvlinkLink
+	30, // 30: bettercompute.agent.v1.Gpu.topology:type_name -> bettercompute.agent.v1.GpuPeerLink
+	31, // 31: bettercompute.agent.v1.Gpu.fabric:type_name -> bettercompute.agent.v1.GpuFabric
+	32, // 32: bettercompute.agent.v1.Gpu.ecc:type_name -> bettercompute.agent.v1.GpuEcc
+	34, // 33: bettercompute.agent.v1.Gpu.row_remap:type_name -> bettercompute.agent.v1.GpuRowRemap
+	5,  // 34: bettercompute.agent.v1.GpuMig.current:type_name -> bettercompute.agent.v1.MigMode
+	5,  // 35: bettercompute.agent.v1.GpuMig.pending:type_name -> bettercompute.agent.v1.MigMode
+	27, // 36: bettercompute.agent.v1.GpuMig.profiles:type_name -> bettercompute.agent.v1.MigProfile
+	28, // 37: bettercompute.agent.v1.GpuMig.instances:type_name -> bettercompute.agent.v1.MigInstance
+	4,  // 38: bettercompute.agent.v1.NvlinkLink.state:type_name -> bettercompute.agent.v1.LinkState
+	6,  // 39: bettercompute.agent.v1.GpuPeerLink.link:type_name -> bettercompute.agent.v1.GpuLinkType
+	33, // 40: bettercompute.agent.v1.GpuEcc.volatile_counts:type_name -> bettercompute.agent.v1.EccCounts
+	33, // 41: bettercompute.agent.v1.GpuEcc.aggregate_counts:type_name -> bettercompute.agent.v1.EccCounts
+	7,  // 42: bettercompute.agent.v1.OsSection.cgroup:type_name -> bettercompute.agent.v1.CgroupVersion
+	43, // [43:43] is the sub-list for method output_type
+	43, // [43:43] is the sub-list for method input_type
+	43, // [43:43] is the sub-list for extension type_name
+	43, // [43:43] is the sub-list for extension extendee
+	0,  // [0:43] is the sub-list for field type_name
 }
 
 func init() { file_bettercompute_agent_v1_inventory_proto_init() }

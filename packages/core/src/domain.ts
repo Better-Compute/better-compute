@@ -99,6 +99,33 @@ export interface PoolPolicy {
    * off by default.
    */
   workloadIdentity?: boolean;
+  /**
+   * (v1.1 §3.8) What each host keeps for itself, out of its bookable CPU and memory (default 2 CPUs
+   * and 8 GiB); hugepage pools come out of memory on top of it.
+   */
+  hostReserve?: { cpu?: number; memoryGiB?: number };
+  /**
+   * (v1.1 §3.8) The CPU and memory a GPU reservation gets per GPU when it asks for none (default: the
+   * node's allocatable CPU and memory divided by its bookable GPUs).
+   */
+  perGpu?: { cpu?: number; memoryGiB?: number };
+  /** (v1.1 §3.8) Hugepage pools the `hugepages` config unit reserves on each host (per NUMA node when `perNuma`). */
+  hugepages?: { size: '2Mi' | '1Gi'; count: number; perNuma?: boolean };
+  /**
+   * (v1.1 §3.8) The pool's machines join this Kubernetes cluster (the `k8s-join` config unit), and
+   * reservations may use `binding: 'kubernetes'`: their devices go to the kubelet through bcd's device
+   * plugin, and only those. `joinTokenRef` is a `secret://` ref of a kubeadm bootstrap token.
+   */
+  kubernetes?: {
+    apiServer: string;
+    /** `sha256:<hex>` of the cluster CA's public key (kubeadm's `--discovery-token-ca-cert-hash`). */
+    caCertSha256: string;
+    joinTokenRef: string;
+    /** Extra labels for the machines' Node objects (keys under `bcd.dev/` are bcd's own). */
+    labels?: Record<string, string>;
+    /** Taints as `key=value:Effect`. */
+    taints?: string[];
+  };
 }
 
 /** A scheduling and policy domain in one site, with exactly one GPU model. */
@@ -261,8 +288,17 @@ export interface DeviceRequest {
   sharing?: SharingMode;
 }
 
-/** `hold`: CDI devices for an operator-run workload manager (v0.1); `instance`: VPS; `node`: tenant deploy (v0.5). */
-export type ReservationBinding = 'hold' | 'instance' | 'node';
+/**
+ * `hold`: CDI devices for an operator-run workload manager (v0.1); `instance`: VPS; `node`: tenant deploy
+ * (v0.5); `kubernetes`: given to the node's kubelet on a pool with `policy.kubernetes` (v1.1 §3.8).
+ */
+export type ReservationBinding = 'hold' | 'instance' | 'node' | 'kubernetes';
+
+/**
+ * (v1.1 §3.8) Host scalars booked with a reservation's devices, by resource name: `cpu` (logical
+ * CPUs), `memoryGiB`, `hugepages1Gi` (pages). A record, as capacity books any `node_resources` name.
+ */
+export type ReservationResources = Record<string, number>;
 
 /** Wait for the operation to become terminal, up to `timeoutMs` (≤ 30000). */
 export interface WaitOptions {
@@ -286,6 +322,11 @@ export interface ReservationRequest {
   poolId: string;
   projectId?: string;
   devices: DeviceRequest[];
+  /**
+   * (v1.1 §3.8) Host CPU and memory to book with the devices (per node for gangs); absent: the pool's
+   * `policy.perGpu` share. Enforced on the node (cgroup limits for holds, the kubelet for Kubernetes).
+   */
+  resources?: ReservationResources;
   topology?: Topology;
   gang?: GangSpec;
   /** Epoch milliseconds; absent means now. */
@@ -377,6 +418,12 @@ export interface Flavor {
   memoryGiB: number;
   diskGiB: number;
   gpus?: number;
+  /**
+   * (v1.1 §3.8) Where the guest lives on the host: `numaAffine` keeps vCPUs and memory on one NUMA node
+   * (its GPUs' when it has any), `pinned` gives each vCPU its own host CPU, `hugepages` backs guest
+   * memory with hugepages of that size. Sandbox templates inherit their flavor's.
+   */
+  placement?: { numaAffine?: boolean; pinned?: boolean; hugepages?: '2Mi' | '1Gi' };
 }
 
 export interface Instance {
@@ -561,6 +608,34 @@ export interface DeviceAssignment {
   deviceIds: string[];
   /** Assignments end here even if the node never hears the release. */
   until?: number;
+  /** (v1.1 §3.8) The CPU, memory and hugepages booked with the devices, enforced by the host. */
+  limits?: ResourceLimits;
+}
+
+/** (v1.1 §3.8) Host resources an allocation may use, as bcd applies them (cgroup v2). */
+export interface ResourceLimits {
+  /** cpuset.cpus, cpulist form. */
+  cpus?: string;
+  /** cpuset.mems: the NUMA nodes memory comes from. */
+  mems?: string;
+  /** cpu.max, in thousandths of a CPU. */
+  cpuMillis?: number;
+  /** memory.max (memory.high is set at 90%). */
+  memoryBytes?: number;
+  hugepages2Mi?: number;
+  hugepages1Gi?: number;
+}
+
+/** (v1.1 §3.8) Where a VM's vCPUs and memory live on its host. */
+export interface InstancePlacement {
+  /** Host CPUs for the vCPUs (cpulist); exactly `vcpu` of them pins vCPU i to the i-th. */
+  cpus?: string;
+  /** NUMA nodes the guest memory is bound to. */
+  mems?: string;
+  /** Hugepage backing: 2097152 or 1073741824. */
+  hugepageSizeBytes?: number;
+  /** A virtio balloon, never with hugepages. */
+  balloon?: boolean;
 }
 
 export interface HostSpec {
@@ -601,6 +676,8 @@ export interface InstanceSpec {
   identityRebindRef?: string;
   /** (review 13 L5) The guest's port 22 is reachable from the host only (bcd's tunnel dial). */
   sshFromHostOnly?: boolean;
+  /** (v1.1 §3.8) Pinned CPUs, NUMA-bound memory, hugepages, balloon. */
+  placement?: InstancePlacement;
 }
 /** One instance NIC: the host bridge or network, its MAC and its IPAM addresses. */
 export interface InstanceNicSpec {

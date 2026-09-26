@@ -4,6 +4,7 @@ import {
   type ComputeModule,
   type Condition,
   type DeviceAssignment,
+  type ResourceLimits,
   type InstanceSpec,
   type Json,
   type Label,
@@ -149,7 +150,21 @@ const bindings: Readonly<Record<string, string>> = {
   hold: 'BINDING_HOLD',
   instance: 'BINDING_INSTANCE',
   node: 'BINDING_NODE',
+  kubernetes: 'BINDING_KUBERNETES',
 };
+
+/** Resource limits on the wire (v1.1 §3.8): only the fields set, so specs without them hash as before. */
+function wireLimits(limits: ResourceLimits | undefined): JsonObject | undefined {
+  if (!limits) return undefined;
+  const wire: JsonObject = {};
+  if (limits.cpus) wire.cpus = limits.cpus;
+  if (limits.mems) wire.mems = limits.mems;
+  if (limits.cpuMillis) wire.cpuMillis = limits.cpuMillis;
+  if (limits.memoryBytes) wire.memoryBytes = String(BigInt(Math.round(limits.memoryBytes)));
+  if (limits.hugepages2Mi) wire.hugepages2mi = String(limits.hugepages2Mi);
+  if (limits.hugepages1Gi) wire.hugepages1gi = String(limits.hugepages1Gi);
+  return Object.keys(wire).length ? wire : undefined;
+}
 
 async function wireAssignments(
   tx: SqlTx,
@@ -193,6 +208,8 @@ async function wireAssignments(
       };
       if (owner?.owner_kind === 'reservation') wire.reservationId = owner.owner_id;
       if (owner?.owner_kind === 'instance') wire.instanceId = owner.owner_id;
+      const limits = wireLimits(assignment.limits);
+      if (limits) wire.limits = limits;
       return wire;
     });
 }
@@ -234,6 +251,13 @@ function wireInstance(instance: InstanceSpec): Json {
   // Set only when used, so other specs hash as before.
   if (instance.identityRebindRef) wire.identityRebindRef = instance.identityRebindRef;
   if (instance.sshFromHostOnly) wire.sshFromHostOnly = true;
+  const placement: JsonObject = {};
+  if (instance.placement?.cpus) placement.cpus = instance.placement.cpus;
+  if (instance.placement?.mems) placement.mems = instance.placement.mems;
+  if (instance.placement?.hugepageSizeBytes)
+    placement.hugepageSizeBytes = String(instance.placement.hugepageSizeBytes);
+  if (instance.placement?.balloon) placement.balloon = true;
+  if (Object.keys(placement).length) wire.placement = placement;
   return wire;
 }
 

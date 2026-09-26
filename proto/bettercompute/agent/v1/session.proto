@@ -509,6 +509,25 @@ message DeviceAssignment {
   string instance_id = 5;
   // Extra "KEY=VALUE" lines for the allocation's env file.
   repeated string env = 6;
+  // (v1.1 §3.8) The CPU, memory and hugepages booked with the devices. For HOLD, bcd creates the
+  // cgroup-v2 slice bcd-alloc-<allocation_id>.slice with these limits and names it in the CDI spec;
+  // for KUBERNETES they are what the kubelet may give pods using these devices. Absent: devices only.
+  ResourceLimits limits = 7;
+}
+
+// Host resources an allocation may use (cgroup v2 semantics). Zero or empty = not limited.
+message ResourceLimits {
+  // CPUs the allocation may run on (cpuset.cpus, cpulist form, e.g. "8-15,72-79").
+  string cpus = 1;
+  // NUMA nodes its memory comes from (cpuset.mems, e.g. "1").
+  string mems = 2;
+  // CPU time, in thousandths of a CPU (cpu.max; 4000 = 4 CPUs).
+  uint32 cpu_millis = 3;
+  // memory.max; bcd sets memory.high at 90% of it.
+  uint64 memory_bytes = 4;
+  // hugetlb.2MB.max / hugetlb.1GB.max, in pages.
+  uint64 hugepages_2mi = 5;
+  uint64 hugepages_1gi = 6;
 }
 
 message AssignedDevice {
@@ -527,6 +546,9 @@ enum Binding {
   BINDING_INSTANCE = 2;
   // The whole node, for a tenant deploy (v0.5).
   BINDING_NODE = 3;
+  // (v1.1 §3.8) Given to the node's kubelet (the node joined a Kubernetes cluster through its pool):
+  // bcd's device plugin advertises exactly the devices bound this way, and withdraws them on release.
+  BINDING_KUBERNETES = 4;
 }
 
 // (v0.3) VPS instances on this host; the daemon converges each toward desired_state.
@@ -565,6 +587,23 @@ message InstanceSpec {
   // (review 13 L5) Port 22 of the guest is reachable only from the host (bcd's tunnel dial), never
   // from other guests or the network, whatever network_policy allows.
   bool ssh_from_host_only = 15;
+  // (v1.1 §3.8) Where the guest's vCPUs and memory live on the host. Absent: the runtime's default
+  // (floating vCPUs, host memory).
+  InstancePlacement placement = 16;
+}
+
+message InstancePlacement {
+  // Host CPUs for the vCPUs (cpulist). With exactly `vcpu` CPUs, vCPU i is pinned to the i-th one;
+  // otherwise the vCPUs float within the set.
+  string cpus = 1;
+  // NUMA nodes the guest memory is bound to (e.g. "1").
+  string mems = 2;
+  // Back guest memory with hugepages of this size (2097152 or 1073741824); 0 = normal pages. The
+  // pages come from the host's pools on `mems`.
+  uint64 hugepage_size_bytes = 3;
+  // Give the guest a virtio balloon (libvirt memballoon, cloud-hypervisor balloon) so the host can
+  // reclaim free guest memory; never with hugepages.
+  bool balloon = 4;
 }
 
 enum InstanceNetworkPolicy {
