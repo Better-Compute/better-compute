@@ -840,6 +840,8 @@ export interface DevStackOptions
    * joining daemons receive the roots in JoinResponse.trust (a WS-mode bcd refuses to run without them).
    */
   signedIntent?: boolean;
+  /** Join attestors besides join-token, as for `betterCompute()` (e.g. `tpmAttestor` for `bcd join --attestor tpm`). */
+  attestors?: ComputeOptions<readonly ComputeModule[], []>['attestors'];
 }
 
 export interface DevStack extends DevFleet {
@@ -936,6 +938,7 @@ export async function createDevStack(options: DevStackOptions = {}): Promise<Dev
     ...(options.log ? { log: options.log } : {}),
     ...(options.capacity ? { capacity: options.capacity } : {}),
     ...(options.workloadIdentity ? { workloadIdentity: options.workloadIdentity } : {}),
+    ...(options.attestors ? { attestors: options.attestors } : {}),
   });
   let started = false;
   let fleet: DevFleet | undefined;
