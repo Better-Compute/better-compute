@@ -1,22 +1,27 @@
 {
   "title": "Guides",
-  "description": "Concepts, nodes, GPU and CPU capacity, bare metal, VPS and sandboxes, and the platform around them",
+  "description": "Nodes, GPU and CPU capacity, bare metal, VPS and sandboxes",
   "root": true,
   "icon": "BookOpen",
   "pages": [
+    "---Getting started---",
     "index",
     "quickstart",
     "installation",
+    "---Foundations---",
     "concepts",
+    "iam",
+    "---Fleet---",
     "nodes",
-    "capacity",
-    "bare-metal",
-    "vps",
-    "access",
     "fleet-config",
     "rollouts",
-    "iam",
-    "events",
-    "clients"
+    "access",
+    "---Compute---",
+    "capacity",
+    "vps",
+    "bare-metal",
+    "---Integrate---",
+    "clients",
+    "events"
   ]
 }

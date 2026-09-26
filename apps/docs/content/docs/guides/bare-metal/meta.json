@@ -1,5 +1,5 @@
 {
   "title": "Bare metal",
   "icon": "HardDrive",
-  "pages": ["index", "sites", "workflows", "profiles-and-images", "bmc", "deploying", "dedicated-root"]
+  "pages": ["index", "sites", "bmc", "profiles-and-images", "workflows", "deploying", "dedicated-root"]
 }

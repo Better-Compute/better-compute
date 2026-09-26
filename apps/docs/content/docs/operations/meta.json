@@ -5,15 +5,19 @@
   "icon": "Server",
   "pages": [
     "index",
+    "---Deploy---",
     "deployment",
     "configuration",
     "database",
-    "pki",
+    "scaling",
+    "---Secure---",
     "security",
-    "local-development",
-    "testing",
+    "pki",
+    "---Observe---",
     "observability",
     "retention",
-    "scaling"
+    "---Develop---",
+    "local-development",
+    "testing"
   ]
 }

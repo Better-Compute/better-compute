@@ -3,5 +3,15 @@
   "description": "bcd, the gateway, and the session protocol between them",
   "root": true,
   "icon": "SignalTower",
-  "pages": ["index", "install", "protocol", "sessions", "delivery", "gateway", "failure-modes"]
+  "pages": [
+    "index",
+    "---Run bcd---",
+    "install",
+    "delivery",
+    "failure-modes",
+    "---Protocol---",
+    "gateway",
+    "protocol",
+    "sessions"
+  ]
 }
