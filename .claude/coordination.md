@@ -103,7 +103,7 @@ Later: 31555bf hold admission (resources-exhausted); 550da91 host volumes (raw, 
 
 Open:
 - cloud-hypervisor under `[helper]`: its systemd-run, taps and VFIO sysfs writes need root, so it is not offered there. libvirt-kvm works under the helper with the libvirt group.
-- The balloon is never set by the control plane yet.
+- The balloon: the control plane sets it since 073324a (pools with memory overcommit); the bcd balloon controller is [6baab5]'s.
 - The "instance.volumes" Hello capability was asked of [595a2f] (done in 82f4f51).
 
 [595a2f] (C + F) landed:
