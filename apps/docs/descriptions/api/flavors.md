@@ -17,6 +17,7 @@ Adds a flavor to a `vps-host` or `provider` pool the tenant owns and returns it 
   - `pinned` gives each vCPU a host CPU that no other pinned guest on the host has.
   - A host that cannot honour `numaAffine` or `pinned` still runs the guest, floating, and the instance carries a `PlacementDegraded` condition with the reason (`NoNumaTopology`, `NoNumaNodeFits`, `GpuNumaUnknown`, `NumaMemoryTooSmall` or `NotEnoughFreeCpus`).
   - Resizing to a flavor with a different `placement` is `UNSUPPORTED`.
+- In a pool that overcommits memory (`policy.overcommit.memoryGiB` > 1), every guest gets a virtio balloon so the host can reclaim its free memory. The exceptions are hugepage-backed guests and guests with GPUs, whose memory is pinned. This needs no flavor field.
 - `NOT_FOUND` when the tenant does not own the pool; `INVALID_STATE` when the pool is of another class.
 - `CONFLICT` when the pool already has a flavor with that name, archived ones included.
 

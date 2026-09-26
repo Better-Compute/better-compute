@@ -8,6 +8,8 @@ import { formatCpuList, parseCpuList, readNodeTopology } from '@better-compute/c
 //   numaAffine vCPUs and memory on one NUMA node: its GPUs' node, else the least-loaded node that
 //              holds the memory
 //   pinned     each vCPU gets its own host CPU that no other pinned guest on the host has
+//   balloon    (no flavor field) every guest of a pool that overcommits memory, except hugepage-
+//              backed and GPU (VFIO) guests, whose memory is pinned
 // A host that cannot honour numaAffine or pinned still runs the guest, floating, with a
 // `PlacementDegraded` condition naming why: placement already booked the scalars. Two placements
 // on one host serialize on its `vcpu` node_resources row (every hosted instance books vCPUs), so the
@@ -80,12 +82,20 @@ export async function chooseHostPlacement(
     nodeId: string;
     shape: { vcpu: number; memoryGiB: number; placement?: FlavorPlacement };
     deviceIds: readonly string[];
+    /**
+     * The pool overcommits memory (`policy.overcommit.memoryGiB` > 1): the guest gets a virtio
+     * balloon so the host can reclaim its free memory. Never with hugepages or VFIO GPUs (pinned
+     * guest memory cannot be ballooned).
+     */
+    balloon?: boolean;
   },
 ): Promise<PlacementChoice> {
   const wanted = instance.shape.placement;
-  if (!wanted) return {};
+  const balloon = instance.balloon === true && !wanted?.hugepages && instance.deviceIds.length === 0;
+  if (!wanted) return balloon ? { placement: { balloon: true } } : {};
   const placement: HostPlacement = {};
   if (wanted.hugepages) placement.hugepageSizeBytes = pageBytes[wanted.hugepages];
+  if (balloon) placement.balloon = true;
   if (!wanted.numaAffine && !wanted.pinned) return { placement };
 
   const topology = await readNodeTopology(tx, instance.nodeId, instance.deviceIds);

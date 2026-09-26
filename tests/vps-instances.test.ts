@@ -1030,6 +1030,31 @@ describe('flavor placement: NUMA, pinned CPUs, hugepages (§3.8)', () => {
     expect(await placement(created.id, VB)).toEqual({ hugepageSizeBytes: GiB });
   });
 
+  it('gives guests a balloon when the pool overcommits memory, never hugepage or GPU guests', async () => {
+    await db.query(
+      `UPDATE pools SET policy = policy || '{"overcommit":{"memoryGiB":1.5}}'::jsonb WHERE id = $1`,
+      [hostedPool],
+    );
+    const plain = (await call('instances', 'create', createHosted({ idempotencyKey: 'b-1' }))) as View;
+    expect(await placement(plain.id, plain.nodeId!)).toEqual({ balloon: true });
+    const gpu = (await call(
+      'instances',
+      'create',
+      createHosted({ flavor: 'gpu1.l40s', idempotencyKey: 'b-2' }),
+    )) as View;
+    expect(await placement(gpu.id, gpu.nodeId!)).toBeUndefined();
+    await db.query(
+      `INSERT INTO node_resources (node_id, resource, allocatable, ratio, allocated) VALUES ($1, 'hugepages1Gi', 16, 1, 0)`,
+      [VA],
+    );
+    const huge = (await call(
+      'instances',
+      'create',
+      createHosted({ flavor: 'huge.1g', idempotencyKey: 'b-3' }),
+    )) as View;
+    expect(await placement(huge.id, huge.nodeId!)).toEqual({ hugepageSizeBytes: GiB });
+  });
+
   it('places a placed flavor only where bcd applies placement', async () => {
     await db.query(`DELETE FROM node_labels WHERE node_id = $1`, [VA]);
     const created = (await call(

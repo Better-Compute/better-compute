@@ -1023,11 +1023,16 @@ async function placeOnHost(
   deviceIds: readonly string[],
   now: number,
 ): Promise<Condition[]> {
+  const { rows: pools } = await tx.query<{ overcommit: string | null }>(
+    `SELECT policy->'overcommit'->>'memoryGiB' AS overcommit FROM pools WHERE id = $1`,
+    [row.poolId],
+  );
   const choice = await chooseHostPlacement(tx, {
     id: row.id,
     nodeId,
     shape: row.shape,
     deviceIds,
+    balloon: Number(pools[0]?.overcommit ?? 1) > 1,
   });
   await tx.query(`UPDATE instances SET host_placement = $2::jsonb WHERE id = $1`, [
     row.id,
