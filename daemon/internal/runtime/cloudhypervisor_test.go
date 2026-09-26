@@ -427,4 +427,13 @@ func TestRestoredConfig(t *testing.T) {
 	if _, err := restoredConfig(saved, fresh, &agentv1.InstanceSpec{Vcpu: 4, MemoryBytes: 1 << 30}); err == nil {
 		t.Fatal("a 2-vCPU VM restored as 4")
 	}
+	// The balloon is bcd's: the fresh one is kept, a tenant's saved one never.
+	saved["balloon"] = map[string]any{"size": json.Number("999")}
+	if cfg, _ := restoredConfig(saved, fresh, &agentv1.InstanceSpec{Vcpu: 2, MemoryBytes: 1 << 30}); cfg["balloon"] != nil {
+		t.Fatalf("a tenant's balloon was kept: %v", cfg["balloon"])
+	}
+	fresh["balloon"] = map[string]any{"size": 0, "deflate_on_oom": true}
+	if cfg, _ := restoredConfig(saved, fresh, &agentv1.InstanceSpec{Vcpu: 2, MemoryBytes: 1 << 30}); cfg["balloon"] == nil {
+		t.Fatal("a restored VM lost its balloon")
+	}
 }

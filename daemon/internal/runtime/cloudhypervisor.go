@@ -1249,7 +1249,9 @@ func restoredConfig(saved, fresh map[string]any, spec *agentv1.InstanceSpec) (ma
 	if p := section(saved, "platform"); p != nil {
 		cfg["platform"] = keep(p, "num_pci_segments", "iommu_segments", "serial_number", "uuid", "oem_strings")
 	}
-	for _, k := range []string{"payload", "disks", "net", "serial", "console", "rng", "devices"} {
+	// The balloon is bcd's too (placement.balloon): a restored VM keeps it (restores run on normal
+	// pages, which a balloon may reclaim).
+	for _, k := range []string{"payload", "disks", "net", "serial", "console", "rng", "devices", "balloon"} {
 		if v, ok := fresh[k]; ok {
 			cfg[k] = v
 		}
