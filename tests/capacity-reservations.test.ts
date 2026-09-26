@@ -39,6 +39,7 @@ import {
   meterReservations,
   readQuotas,
   reservationWork,
+  maxStuckCarryMs,
   stuckReleaseStepMs,
   wakePendingForNode,
   wakeStartedOnNode,
@@ -3136,10 +3137,23 @@ describe('host CPU and memory booked with the GPUs (§3.8)', () => {
     expect(await db.transaction((tx) => finishStaleReleases(tx, work))).toBe(0);
     expect(await bookedUntil()).toBe(clock.now() + stuckReleaseStepMs);
     expect(await state(fourth.allocationId)).toEqual({ released: false, releasing: true, open: 2 });
+    // A bound report meanwhile (a restarted bcd, or a node trying it) keeps the release pending
+    // (review 3, MED): the report that ends it still returns the host share.
+    await db.transaction((tx) =>
+      markAllocationBound(tx, work, fourth.allocationId, { cdiDevices: ['bcd.dev/gpu=0'] }),
+    );
+    expect(await state(fourth.allocationId)).toMatchObject({ released: false, releasing: true });
     expect(
       await db.transaction((tx) => markAllocationReleased(tx, work, fourth.allocationId)),
     ).toBe(true);
     expect(await state(fourth.allocationId)).toMatchObject({ released: true, open: 0 });
     expect(await allocated(fourth.nodeId)).toEqual({ memoryGiB: 0, vcpu: 0 });
+
+    // Carried at most maxStuckCarryMs past the booking's own end (unbilled), then closed.
+    const fifth = await start('k8s-cap');
+    await call('reservations', 'release', { tenantId: 'root', reservationId: fifth.id }, root);
+    await advance(2 * HOUR + maxStuckCarryMs + 60_000);
+    expect(await db.transaction((tx) => finishStaleReleases(tx, work))).toBe(1);
+    expect(await state(fifth.allocationId)).toMatchObject({ released: true, open: 0 });
   });
 });

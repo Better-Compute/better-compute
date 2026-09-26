@@ -2139,6 +2139,10 @@ export interface BindingEvidence {
  * another node's allocation is refused. Returns `false` when the allocation is unknown, released or
  * not on `nodeId`.
  */
+/** SQL: the allocation's `releasing` mark (deferRelease), to merge into a binding that replaces it. */
+const keepReleasing = `CASE WHEN COALESCE(binding, '{}'::jsonb) ? 'releasing'
+       THEN jsonb_build_object('releasing', binding->'releasing') ELSE '{}'::jsonb END`;
+
 export async function markAllocationBound(
   tx: SqlTx,
   work: ModuleContext['work'],
@@ -2148,8 +2152,11 @@ export async function markAllocationBound(
 ): Promise<boolean> {
   // The slice bcd bound a hold into (§3.8): exactly this allocation's, never another name.
   const slice = binding.cgroupParent === `bcd-alloc-${allocationId}.slice` ? binding.cgroupParent : undefined;
+  // A report never ends a deferred release (review 3, MED): `releasing` survives a rebind, so the
+  // node's AllocationReleased (or the hosts pass) still returns the devices and host share.
   const { rows } = await tx.query<{ owner_id: string; owner_kind: string }>(
-    `UPDATE allocations SET binding = $2::jsonb, bound_at = COALESCE(bound_at, compute_now()),
+    `UPDATE allocations SET binding = $2::jsonb || ${keepReleasing},
+                            bound_at = COALESCE(bound_at, compute_now()),
                             bound_report = $4, bound_sig_kid = $5, bound_sig = $6,
                             version = version + 1
       WHERE id = $1 AND released_at IS NULL AND ($3::text IS NULL OR node_id = $3)
@@ -2231,7 +2238,7 @@ async function verifyBindings(
       }
     if (outcome.ok) {
       await tx.query(
-        `UPDATE allocations SET binding = $2::jsonb, version = version + 1 WHERE id = $1`,
+        `UPDATE allocations SET binding = $2::jsonb || ${keepReleasing}, version = version + 1 WHERE id = $1`,
         [
           allocation.id,
           JSON.stringify({
@@ -2323,6 +2330,11 @@ export async function markAllocationReleased(
 
 /** How far a stuck Kubernetes release's booking is carried past its end at a time. */
 export const stuckReleaseStepMs = 5 * 60_000;
+/**
+ * How long past its own end a stuck release is carried at most (review 3, LOW): the carried time is
+ * not billed, and bcd's KubernetesReleaseStuck (NoSchedule) has had an operator's attention by then.
+ */
+export const maxStuckCarryMs = 24 * 60 * 60_000;
 
 /**
  * Ends the deferred releases (`deferRelease`) no report will end: the node is lost, or the booking
@@ -2338,14 +2350,16 @@ export async function finishStaleReleases(
   limit = 500,
 ): Promise<number> {
   // Pods still holding the devices at the booking's end (bcd: KubernetesReleaseStuck) keep them
-  // booked, a step at a time, while the node is reachable and no one else booked them next.
+  // booked, a step at a time, while the node is reachable and no one else booked them next, for at
+  // most `maxStuckCarryMs` past the booking's own end (unbilled; the node is NoSchedule meanwhile).
   const { rows: due } = await tx.query<{ id: string }>(
     `SELECT a.id FROM allocations a JOIN nodes n ON n.id = a.node_id
       WHERE a.released_at IS NULL AND a.binding ? 'releasing' AND n.connectivity <> 'lost'
         AND (SELECT max(upper(b.during)) FROM device_bookings b WHERE b.allocation_id = a.id)
             <= compute_now() + make_interval(secs => $2 / 1000.0)
+        AND compute_now() < upper(a.during) + make_interval(secs => $3 / 1000.0)
       ORDER BY a.id LIMIT $1 FOR UPDATE OF a`,
-    [limit, stuckReleaseStepMs / 2],
+    [limit, stuckReleaseStepMs / 2, maxStuckCarryMs],
   );
   for (const allocation of due) {
     // The booked devices (atoms, and any parent a fraction books) are locked as the placer does.
@@ -2370,12 +2384,18 @@ export async function finishStaleReleases(
       [allocation.id, stuckReleaseStepMs],
     );
   }
+  // Also, defensively, any allocation still unreleased whose reservation ended without deferring it
+  // (a leak would keep node_resources claimed forever).
   const { rows } = await tx.query<{ id: string; pool_id: string }>(
     `SELECT a.id, a.pool_id FROM allocations a JOIN nodes n ON n.id = a.node_id
-      WHERE a.released_at IS NULL AND a.binding ? 'releasing'
-        AND (n.connectivity = 'lost'
-             OR NOT EXISTS (SELECT 1 FROM device_bookings b
-                             WHERE b.allocation_id = a.id AND upper(b.during) > compute_now()))
+      WHERE a.released_at IS NULL
+        AND ((a.binding ? 'releasing'
+              AND (n.connectivity = 'lost'
+                   OR NOT EXISTS (SELECT 1 FROM device_bookings b
+                                   WHERE b.allocation_id = a.id AND upper(b.during) > compute_now())))
+             OR (NOT COALESCE(a.binding ? 'releasing', false) AND a.owner_kind = 'reservation'
+                 AND EXISTS (SELECT 1 FROM reservations r WHERE r.id = a.owner_id
+                              AND r.state IN ('denied', 'released', 'failed', 'cancelled', 'expired'))))
       ORDER BY a.id LIMIT $1`,
     [limit],
   );

@@ -303,6 +303,8 @@ describe('protocol contract shape (PLAN.md §7.7)', () => {
       'chain = 2',
       'client_time = 3',
       'pop_sig = 4',
+      // The TPM2_Certify of the new key by the leaf's AK (d94f1f3).
+      'key_attestation = 5',
     ]);
     expect(fieldsOf(SecretRequestSchema).slice(0, 6)).toEqual([
       'ref = 1',
