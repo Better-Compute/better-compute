@@ -86,11 +86,16 @@ export function AttentionPage() {
     {
       id: 'actions',
       header: '',
-      width: 110,
+      width: 250,
       align: 'right',
       cell: (r) =>
         r.state === 'resolved' ? null : (
           <span className="inline-flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+            {r.action && r.state !== 'acknowledged' && (
+              <Link href={r.action.href} className="font-mono text-[11px] text-signal hover:underline">
+                {r.action.label}
+              </Link>
+            )}
             {r.state === 'open' ? (
               <button type="button" onClick={() => ackRows([r])} className="font-mono text-[11px] text-signal hover:underline">ack</button>
             ) : (

@@ -170,6 +170,14 @@ export function AttentionQueue() {
                 <span>{item.source}</span>·<span suppressHydrationWarning>{fmtRelative(item.at, now)}</span>·
                 <SubjectLink subject={item.subject} />
               </span>
+              {item.action && (
+                <Link
+                  href={item.action.href}
+                  className="mt-1.5 inline-flex h-6 items-center border border-signal-fill/50 px-2 font-mono text-[11px] text-signal hover:bg-signal-soft"
+                >
+                  {item.action.label} →
+                </Link>
+              )}
             </div>
             <button
               type="button"

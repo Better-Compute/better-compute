@@ -266,50 +266,13 @@ export interface AttentionItem {
   href: string;
   at: number;
   subject: string;
+  /** The one next step, rendered as a button ("Adjust quota", "Open the nodes"). */
+  action?: { label: string; href: string };
 }
 
-// Platform-level placeholders. Capacity items (quota pressure, forecasts, dead-lettered usage) come from the
-// capacity module's own `attention`, computed from its data; fleet items move there as the fleet module adds its.
+// The platform's own items. Capacity and fleet items come from those modules' `attention` (collectAttention
+// in lib/modules.ts merges them); here only the control plane itself and platform-wide chores.
 const attentionTemplates: ((key: string, t: number) => Omit<AttentionItem, 'id' | 'at'>)[] = [
-  (key) => {
-    const pool = pick(pools.filter((p) => p.kind === 'gpu'), key);
-    const node = poolNodeId(pool, Math.floor(noise(key, 1) * pool.nodes));
-    return {
-      severity: 'critical',
-      title: `XID 79 on ${node}`,
-      detail: `GPU fell off the bus; ${pool.short} node drained automatically, 1 reservation re-placed.`,
-      source: 'fleet',
-      href: `/nodes/${node}`,
-      subject: `node/${node}`,
-    };
-  },
-  (key) => ({
-    severity: 'warning',
-    title: 'Quorum batch awaiting approval',
-    detail: `metal.wipe × ${2 + Math.floor(noise(key, 3) * 6)} nodes, 1 of 2 signatures.`,
-    source: 'fleet',
-    href: '/batches',
-    subject: 'batch/pending',
-  }),
-  (key) => {
-    const site = pick(sites, key);
-    return {
-      severity: 'info',
-      title: `${1 + Math.floor(noise(key, 4) * 4)} machines discovered in ${site.id}`,
-      detail: 'PXE discovery found unknown hardware; confirm before it can join.',
-      source: 'fleet',
-      href: '/metal',
-      subject: `site/${site.id}`,
-    };
-  },
-  (key) => ({
-    severity: 'warning',
-    title: 'Rollout paused at wave 3',
-    detail: `bcd ${'1.4.' + (2 + Math.floor(noise(key, 5) * 5))}: error budget hit (2 nodes failed health checks).`,
-    source: 'fleet',
-    href: '/rollouts',
-    subject: 'rollout/bcd',
-  }),
   (key) => ({
     severity: 'info',
     title: 'Signing root rotation due',
@@ -320,9 +283,29 @@ const attentionTemplates: ((key: string, t: number) => Omit<AttentionItem, 'id' 
   }),
 ];
 
+/** A degraded control-plane component (the Control plane page's own numbers) is an item until it recovers. */
+function controlPlaneAttention(t: number, scope?: Scope): AttentionItem[] {
+  return controlPlane(t)
+    .filter((c) => c.status !== 'ok' && (!scope?.siteId || !c.siteId || c.siteId === scope.siteId))
+    .map((c) => {
+      const since = floorTo(t, 15 * MINUTE);
+      return {
+        id: `cp:${c.id}:${since}`,
+        severity: c.status === 'down' ? ('critical' as const) : ('warning' as const),
+        title: `${c.name} degraded`,
+        detail: `${c.detail}; about ${Math.round(c.latencyMs / baseLatency[c.kind])}× its usual latency.`,
+        source: 'control-plane',
+        href: '/control-plane',
+        at: since,
+        subject: `component/${c.id}`,
+        action: { label: 'Open the control plane', href: '/control-plane' },
+      };
+    });
+}
+
 /** The open items at `t`: each slot turns over every few hours, so the queue changes slowly and plausibly. */
 export function attention(t: number, scope?: Scope): AttentionItem[] {
-  const items: AttentionItem[] = [];
+  const items: AttentionItem[] = [...controlPlaneAttention(t, scope)];
   for (let slot = 0; slot < attentionTemplates.length; slot++) {
     const period = (2 + slot) * HOUR;
     // Slots turn over at staggered times; an item opened somewhere between its slot's start and now.
