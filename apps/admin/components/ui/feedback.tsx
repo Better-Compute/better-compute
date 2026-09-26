@@ -27,18 +27,24 @@ export interface ConfirmOptions {
   danger?: boolean;
   /** The operator must type this exactly (a node id, a pool name) before confirming. */
   typeToConfirm?: string;
+  /** The exact API call that will run, shown as a mono chip: `nodes.drain { nodeId }`. */
+  method?: string;
+  /** Ask for a reason for the audit log (optional unless `required`). Read it with `confirmWithReason`. */
+  reason?: boolean | { placeholder?: string; required?: boolean };
 }
 
 interface Feedback {
   toast(toast: Omit<Toast, 'id'>): void;
   confirm(options: ConfirmOptions): Promise<boolean>;
+  /** Like confirm, with the reason field on: the reason ('' when left empty), or null when cancelled. */
+  confirmWithReason(options: ConfirmOptions): Promise<string | null>;
 }
 
 const FeedbackContext = createContext<Feedback | null>(null);
 
 export function FeedbackProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [pending, setPending] = useState<(ConfirmOptions & { resolve(ok: boolean): void }) | null>(null);
+  const [pending, setPending] = useState<(ConfirmOptions & { resolve(result: string | null): void }) | null>(null);
   const next = useRef(1);
 
   const dismiss = useCallback((id: number) => setToasts((all) => all.filter((t) => t.id !== id)), []);
@@ -47,10 +53,16 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
     setToasts((all) => [...all.slice(-3), { ...input, id }]);
   }, []);
   const confirm = useCallback(
-    (options: ConfirmOptions) => new Promise<boolean>((resolve) => setPending({ ...options, resolve })),
+    (options: ConfirmOptions) =>
+      new Promise<boolean>((resolve) => setPending({ ...options, resolve: (result) => resolve(result !== null) })),
     [],
   );
-  const value = useMemo(() => ({ toast, confirm }), [toast, confirm]);
+  const confirmWithReason = useCallback(
+    (options: ConfirmOptions) =>
+      new Promise<string | null>((resolve) => setPending({ ...options, reason: options.reason ?? true, resolve })),
+    [],
+  );
+  const value = useMemo(() => ({ toast, confirm, confirmWithReason }), [toast, confirm, confirmWithReason]);
 
   return (
     <FeedbackContext.Provider value={value}>
@@ -62,8 +74,8 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
       </div>
       <ConfirmDialog
         options={pending}
-        onClose={(ok) => {
-          pending?.resolve(ok);
+        onClose={(result) => {
+          pending?.resolve(result);
           setPending(null);
         }}
       />
@@ -107,14 +119,20 @@ function ToastCard({ toast, onDismiss }: { toast: Toast; onDismiss(): void }) {
   );
 }
 
-function ConfirmDialog({ options, onClose }: { options: ConfirmOptions | null; onClose(ok: boolean): void }) {
+function ConfirmDialog({ options, onClose }: { options: ConfirmOptions | null; onClose(result: string | null): void }) {
   const [typed, setTyped] = useState('');
-  useEffect(() => setTyped(''), [options]);
-  const blocked = Boolean(options?.typeToConfirm) && typed !== options?.typeToConfirm;
+  const [reason, setReason] = useState('');
+  useEffect(() => {
+    setTyped('');
+    setReason('');
+  }, [options]);
+  const reasonSpec = typeof options?.reason === 'object' ? options.reason : options?.reason ? {} : null;
+  const blocked =
+    (Boolean(options?.typeToConfirm) && typed !== options?.typeToConfirm) || Boolean(reasonSpec?.required && !reason.trim());
   return (
     <ModalOverlay
       isOpen={Boolean(options)}
-      onOpenChange={(open) => !open && onClose(false)}
+      onOpenChange={(open) => !open && onClose(null)}
       isDismissable
       className="fixed inset-0 z-[70] grid place-items-center bg-neutral-950/50 p-4 entering:animate-[fade-in_120ms_ease-out]"
     >
@@ -124,7 +142,7 @@ function ConfirmDialog({ options, onClose }: { options: ConfirmOptions | null; o
             <form
               onSubmit={(event) => {
                 event.preventDefault();
-                if (!blocked) onClose(true);
+                if (!blocked) onClose(reason.trim());
               }}
             >
               <div className={cx('border-b px-4 py-3', options.danger ? 'border-red-500/40' : 'border-separator-border')}>
@@ -134,6 +152,11 @@ function ConfirmDialog({ options, onClose }: { options: ConfirmOptions | null; o
               </div>
               <div className="flex flex-col gap-3 px-4 py-4 text-body-regular text-text-secondary">
                 {options.body}
+                {options.method && (
+                  <code className="self-start border border-separator-border bg-surface-sunken px-1.5 py-0.5 font-mono text-[12px] text-text-primary">
+                    {options.method}
+                  </code>
+                )}
                 {options.typeToConfirm && (
                   <label className="flex flex-col gap-1.5">
                     <span className="text-caption-1-regular">
@@ -148,9 +171,22 @@ function ConfirmDialog({ options, onClose }: { options: ConfirmOptions | null; o
                     />
                   </label>
                 )}
+                {reasonSpec && (
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-caption-1-regular">Reason{reasonSpec.required ? '' : ' (optional)'} · recorded in the audit log</span>
+                    <textarea
+                      value={reason}
+                      onChange={(event) => setReason(event.target.value)}
+                      rows={2}
+                      autoFocus={!options.typeToConfirm}
+                      placeholder={reasonSpec.placeholder ?? 'e.g. INC-2291, replacing a failed PSU'}
+                      className="resize-none border border-border-button-default bg-background-primary-default px-2 py-1.5 text-body-regular text-text-primary outline-none placeholder:text-text-placeholder focus:ring-2 focus:ring-border-focus-ring"
+                    />
+                  </label>
+                )}
               </div>
               <div className="flex justify-end gap-2 border-t border-separator-border px-4 py-3">
-                <Button variant="secondary" size="small" onClick={() => onClose(false)}>
+                <Button variant="secondary" size="small" onClick={() => onClose(null)}>
                   Cancel
                 </Button>
                 <Button type="submit" variant={options.danger ? 'danger' : 'primary'} size="small" disabled={blocked} autoFocus={!options.typeToConfirm}>

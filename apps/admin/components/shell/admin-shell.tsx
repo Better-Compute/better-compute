@@ -6,6 +6,7 @@ import { Dialog, Heading, Modal, ModalOverlay } from 'react-aria-components';
 import { allCommands, allNav } from '@/lib/modules';
 import { CommandPalette, PALETTE_EVENTS } from './command-palette';
 import { PageCommandsProvider } from './page-commands';
+import { TimeTravelBanner } from './time-machine';
 import { Sidebar } from './sidebar';
 import { Topbar } from './topbar';
 import { useWorkspace } from './workspace';
@@ -22,7 +23,7 @@ const isTyping = (target: EventTarget | null) =>
  */
 export function AdminShell({ children }: { children: ReactNode }) {
   const router = useRouter();
-  const { live, setLive } = useWorkspace();
+  const { live, setLive, now, wallNow, travelTo } = useWorkspace();
   const [collapsed, setCollapsed] = useState(false);
   const [palette, setPalette] = useState(false);
   const [keys, setKeys] = useState(false);
@@ -93,6 +94,12 @@ export function AdminShell({ children }: { children: ReactNode }) {
         toggleSidebar();
       } else if (event.key === 'p') {
         setLive(!live);
+      } else if (event.key === ',' || event.key === '<') {
+        travelTo(now - (event.shiftKey ? 3_600_000 : 300_000));
+      } else if ((event.key === '.' || event.key === '>') && !live) {
+        const target = now + (event.shiftKey ? 3_600_000 : 300_000);
+        if (target >= wallNow - 30_000) setLive(true);
+        else travelTo(target);
       } else if (event.key === 'e') {
         window.dispatchEvent(new Event(PALETTE_EVENTS.editDashboard));
       } else if (event.key === '?') {
@@ -101,7 +108,7 @@ export function AdminShell({ children }: { children: ReactNode }) {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [router, live, setLive, palette]);
+  }, [router, live, setLive, palette, now, wallNow, travelTo]);
 
   return (
     // App shell: the window never scrolls; <main> does, so the sidebar and top bar stay put and scroll position
@@ -121,6 +128,7 @@ export function AdminShell({ children }: { children: ReactNode }) {
       </ModalOverlay>
       <div className="flex min-w-0 flex-1 flex-col">
         <Topbar onOpenPalette={() => setPalette(true)} onOpenNav={() => setMobileNav(true)} />
+        <TimeTravelBanner />
         <main id="main" ref={mainRef} tabIndex={-1} className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-5 outline-none lg:px-6">
           {children}
         </main>
@@ -137,6 +145,7 @@ function ShortcutSheet({ open, onOpenChange }: { open: boolean; onOpenChange(ope
   const global = [
     ['⌘K  /', 'Command palette'],
     ['p', 'Pause or resume the clock'],
+    [',  .', 'Step the clock ±5 min (shift: ±1 h)'],
     ['e', 'Arrange the dashboard'],
     ['[', 'Collapse the sidebar'],
     ['j  k', 'Move through table rows'],

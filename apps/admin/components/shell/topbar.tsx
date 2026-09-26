@@ -8,23 +8,22 @@ import {
   RiGlobalLine,
   RiMenuLine,
   RiNotification3Line,
-  RiPauseFill,
-  RiPlayFill,
   RiSearchLine,
   RiTimeLine,
 } from 'react-icons/ri';
-import { attention, fmtClock, fmtRelative, sites } from '@/lib/data';
+import { attention, fmtRelative, sites } from '@/lib/data';
 import { navForPath } from '@/lib/modules';
 import { Select } from '@/components/ui/overlay';
-import { Led, SeverityIcon } from '@/components/ui/signal';
+import { SeverityIcon } from '@/components/ui/signal';
 import { cx } from '@/utils/cx';
 import { useAcks } from './pins';
+import { TimeMachine } from './time-machine';
 import { RANGES, useLive, useWorkspace, type RangeKey } from './workspace';
 
 /** Breadcrumbs on the left; the workspace controls (search, scope, range, clock, attention) on the right. */
 export function Topbar({ onOpenPalette, onOpenNav }: { onOpenPalette(): void; onOpenNav(): void }) {
   const pathname = usePathname();
-  const { now, live, setLive, range, setRange, siteId, setSiteId } = useWorkspace();
+  const { range, setRange, siteId, setSiteId } = useWorkspace();
   const nav = navForPath(pathname);
   const rest = nav && pathname !== nav.href ? pathname.slice(nav.href.length).split('/').filter(Boolean) : [];
 
@@ -89,21 +88,7 @@ export function Topbar({ onOpenPalette, onOpenNav }: { onOpenPalette(): void; on
         options={(Object.keys(RANGES) as RangeKey[]).map((key) => ({ id: key, label: RANGES[key].label }))}
       />
 
-      <button
-        type="button"
-        onClick={() => setLive(!live)}
-        aria-pressed={live}
-        title={live ? 'Pause the clock (p)' : 'Resume live updates (p)'}
-        className={cx(
-          'flex h-8 items-center gap-2 border px-2 font-mono text-[12px] tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-border-focus-ring',
-          live ? 'border-separator-border text-text-primary' : 'border-signal-fill/60 bg-signal-soft text-signal',
-        )}
-      >
-        <Led status={live ? 'live' : 'pending'} />
-        <span suppressHydrationWarning>{fmtClock(now)}</span>
-        <span className="text-text-tertiary">UTC</span>
-        {live ? <RiPauseFill className="size-3.5 text-text-tertiary" aria-hidden /> : <RiPlayFill className="size-3.5" aria-hidden />}
-      </button>
+      <TimeMachine />
 
       <AttentionBell />
     </header>

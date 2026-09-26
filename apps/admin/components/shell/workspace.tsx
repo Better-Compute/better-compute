@@ -34,6 +34,10 @@ export interface Workspace {
   setDensity(density: Density): void;
   /** Where the data comes from. Only the simulation exists today; live mode arrives with the API adapter. */
   source: 'simulated' | 'live';
+  /** The wall clock (always ticking), for "how far behind live am I". */
+  wallNow: number;
+  /** Time travel: pause the whole panel at `t` (clamped to the past). `setLive(true)` returns to live. */
+  travelTo(t: number): void;
 }
 
 const WorkspaceContext = createContext<Workspace | null>(null);
@@ -50,18 +54,29 @@ function load(): Partial<{ range: RangeKey; siteId: string; density: Density; li
 
 export function WorkspaceProvider({ initialNow, children }: { initialNow: number; children: ReactNode }) {
   const [now, setNow] = useState(initialNow);
-  const [live, setLive] = useState(true);
+  const [wallNow, setWallNow] = useState(initialNow);
+  const [live, setLiveState] = useState(true);
   const [range, setRange] = useState<RangeKey>('24h');
   const [siteId, setSiteId] = useState<string | undefined>(undefined);
   const [density, setDensity] = useState<Density>('comfortable');
   const [hydrated, setHydrated] = useState(false);
 
+  // Saved preferences, then the URL (?site=fra1&range=7d&at=<ms>) wins: links reproduce a view, including a
+  // moment in the past.
   useEffect(() => {
     const saved = load();
-    if (saved.range && saved.range in RANGES) setRange(saved.range);
-    if (saved.siteId) setSiteId(saved.siteId);
+    const params = new URLSearchParams(window.location.search);
+    const urlRange = params.get('range');
+    const urlSite = params.get('site');
+    const urlAt = Number(params.get('at'));
+    const nextRange = urlRange && urlRange in RANGES ? (urlRange as RangeKey) : saved.range;
+    if (nextRange && nextRange in RANGES) setRange(nextRange);
+    if (urlSite || saved.siteId) setSiteId(urlSite === 'all' ? undefined : (urlSite ?? saved.siteId));
     if (saved.density) setDensity(saved.density);
-    if (saved.live === false) setLive(false);
+    if (Number.isFinite(urlAt) && urlAt > 0 && urlAt < Date.now()) {
+      setLiveState(false);
+      setNow(urlAt);
+    } else if (saved.live === false) setLiveState(false);
     setHydrated(true);
   }, []);
 
@@ -74,12 +89,41 @@ export function WorkspaceProvider({ initialNow, children }: { initialNow: number
     }
   }, [hydrated, range, siteId, density, live]);
 
+  // Keep the URL shareable: scope, range and (when paused) the moment, without a navigation.
   useEffect(() => {
-    if (!live) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), TICK_MS);
+    if (!hydrated) return;
+    const url = new URL(window.location.href);
+    const set = (key: string, value: string | undefined) => (value ? url.searchParams.set(key, value) : url.searchParams.delete(key));
+    set('site', siteId);
+    set('range', range === '24h' ? undefined : range);
+    set('at', live ? undefined : String(now));
+    if (url.href !== window.location.href) window.history.replaceState(window.history.state, '', url.href);
+  }, [hydrated, siteId, range, live, now]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setWallNow(Date.now());
+    }, TICK_MS);
     return () => window.clearInterval(timer);
-  }, [live]);
+  }, []);
+
+  useEffect(() => {
+    if (live) setNow(wallNow);
+  }, [live, wallNow]);
+
+  const setLive = useCallback((next: boolean) => {
+    setLiveState(next);
+    if (next) {
+      const t = Date.now();
+      setWallNow(t);
+      setNow(t);
+    }
+  }, []);
+
+  const travelTo = useCallback((t: number) => {
+    setLiveState(false);
+    setNow(Math.min(Math.floor(t), Date.now()));
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.density = density;
@@ -103,8 +147,10 @@ export function WorkspaceProvider({ initialNow, children }: { initialNow: number
       density,
       setDensity,
       source: 'simulated',
+      wallNow,
+      travelTo,
     }),
-    [now, live, range, window_, siteId, density],
+    [now, live, setLive, range, window_, siteId, density, wallNow, travelTo],
   );
 
   return <WorkspaceContext.Provider value={value}>{children}</WorkspaceContext.Provider>;
