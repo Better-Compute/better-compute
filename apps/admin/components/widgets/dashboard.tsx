@@ -6,6 +6,7 @@ import {
   RiCheckLine,
   RiDeleteBinLine,
   RiEdit2Line,
+  RiEyeOffLine,
   RiLayoutMasonryLine,
   RiMore2Fill,
   RiRefreshLine,
@@ -17,7 +18,7 @@ import { PALETTE_EVENTS, takeDashboardAction } from '@/components/shell/command-
 import { useFeedback } from '@/components/ui/feedback';
 import { useKiosk } from '@/components/shell/kiosk';
 import { Drawer, Menu, ToolButton } from '@/components/ui/overlay';
-import { allWidgets, enabledModules, isModuleHidden, widgetById, widgetSettings, type WidgetDef } from '@/lib/modules';
+import { allWidgets, enabledModules, isModuleHidden, modules, setModuleHidden, widgetById, widgetSettings, type WidgetDef } from '@/lib/modules';
 import { useModuleVersion } from '@/components/shell/use-modules';
 import { ConfigureWidget, overrideFrom, settingsSummary } from './configure';
 import { ScopeOverrideProvider } from '@/components/shell/workspace';
@@ -336,15 +337,17 @@ function WidgetGrid({
   const [columns, setColumns] = useState(12);
   const shown = preview ?? items;
 
-  useEffect(() => {
-    const element = gridRef.current;
+  // A callback ref: the grid can appear after mount (from an empty state), and must be measured then too.
+  const observer = useRef<ResizeObserver | null>(null);
+  const attachGrid = useCallback((element: HTMLDivElement | null) => {
+    observer.current?.disconnect();
+    gridRef.current = element;
     if (!element) return;
-    const observer = new ResizeObserver(([entry]) => {
+    observer.current = new ResizeObserver(([entry]) => {
       const width = entry?.contentRect.width ?? 1200;
       setColumns(width < 600 ? 1 : width < 860 ? 6 : 12);
     });
-    observer.observe(element);
-    return () => observer.disconnect();
+    observer.current.observe(element);
   }, []);
 
   // A hidden module's widgets stay in the layout (they come back with the module) but aren't drawn, even
@@ -410,9 +413,50 @@ function WidgetGrid({
       </div>
     );
 
+  // Widgets of modules hidden in this browser: a note above the grid, or an empty state when that's all there is.
+  const hiddenItems = items.filter((i) => isModuleHidden(i.widget.split('.')[0] ?? ''));
+  const hiddenModules = [...new Set(hiddenItems.map((i) => i.widget.split('.')[0]!))];
+  const titleOf = (id: string) => modules.find((module) => module.id === id)?.title ?? id;
+  if (resolved.length === 0 && hiddenModules.length)
+    return (
+      <div className="grid place-items-center border border-dashed border-separator-border-strong py-20">
+        <div className="flex max-w-md flex-col items-center gap-3 text-center">
+          <RiEyeOffLine className="size-6 text-text-tertiary" aria-hidden />
+          <p className="font-mono text-[13px] text-text-primary">
+            This dashboard&apos;s {items.length === 1 ? 'widget belongs' : `${items.length} widgets belong`} to{' '}
+            {hiddenModules.length === 1 ? 'a module' : 'modules'} hidden in this browser
+          </p>
+          <div className="flex flex-wrap justify-center gap-2">
+            {hiddenModules.map((id) => (
+              <Button key={id} size="small" variant="secondary" onClick={() => setModuleHidden(id, false)}>
+                Show {titleOf(id)}
+              </Button>
+            ))}
+            <Button size="small" variant="ghost" leadingIcon={RiAddLine} onClick={onEmpty}>
+              Add a widget
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+
   return (
+    <>
+    {hiddenItems.length > 0 && (
+      <p className="mb-2 flex flex-wrap items-center gap-x-2 font-mono text-[11px] text-text-tertiary">
+        <RiEyeOffLine className="size-3.5" aria-hidden />
+        {hiddenItems.length} {hiddenItems.length === 1 ? 'widget' : 'widgets'} hidden with{' '}
+        {hiddenModules.map(titleOf).join(', ')}
+        <span aria-hidden>·</span>
+        {hiddenModules.map((id) => (
+          <button key={id} type="button" onClick={() => setModuleHidden(id, false)} className="text-text-secondary hover:text-text-primary hover:underline">
+            show {titleOf(id)}
+          </button>
+        ))}
+      </p>
+    )}
     <div
-      ref={gridRef}
+      ref={attachGrid}
       className="grid"
       style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, gridAutoRows: ROW, gap: GAP, gridAutoFlow: 'row dense' }}
     >
@@ -528,6 +572,7 @@ function WidgetGrid({
         </div>
       ))}
     </div>
+    </>
   );
 }
 
