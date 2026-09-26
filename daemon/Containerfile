@@ -7,9 +7,11 @@
 # mounts into the pod (NVIDIA_VISIBLE_DEVICES=all, NVIDIA_DRIVER_CAPABILITIES=utility).
 #
 # kubectl: as the DaemonSet, bcd keeps its Node's bcd.dev/* labels, reaps pods still on released
-# devices and publishes its DRA ResourceSlice through kubectl, with the pod's service account
-# (in-cluster config). The version is fixed and each architecture's binary is checked against the
-# sha256 below (dl.k8s.io's published sums for v1.34.1); a mismatch fails the build.
+# devices and publishes its DRA ResourceSlice through kubectl, as the kubelet: the DaemonSet mounts
+# /etc/kubernetes/kubelet.conf and /var/lib/kubelet/pki read-only, so NodeRestriction confines bcd
+# to its own Node and that Node's pods (no service-account token: RBAC cannot be node-scoped). The
+# version is fixed and each architecture's binary is checked against the sha256 below (dl.k8s.io's
+# published sums for v1.34.1); a mismatch fails the build.
 
 FROM golang:1.26-bookworm AS build
 WORKDIR /src

@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -282,11 +281,12 @@ func TestHostedManager(t *testing.T) {
 	nodeLabels := map[string]string{"kubernetes.io/hostname": "w1", "bcd.dev/stale": "x", "team": "ml"}
 	var gets int
 	sys.Handler = func(_ context.Context, cmd hostconfig.Cmd) ([]byte, error) {
-		// In the cluster: the DaemonSet's service account, never the kubelet's kubeconfig.
-		if slices.Contains(cmd.Args, "--kubeconfig") {
-			t.Errorf("hosted kubectl with a kubeconfig: %v", cmd.Args)
+		// Hosted too, the kubelet's own identity (NodeRestriction fences it to this Node), never a
+		// cluster-wide service account.
+		if len(cmd.Args) < 2 || cmd.Args[0] != "--kubeconfig" || cmd.Args[1] != KubeletConf {
+			t.Errorf("hosted kubectl without the kubelet's kubeconfig: %v", cmd.Args)
 		}
-		args := cmd.Args
+		args := cmd.Args[2:]
 		switch args[0] {
 		case "get":
 			gets++
