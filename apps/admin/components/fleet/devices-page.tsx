@@ -93,8 +93,12 @@ export function DevicesPage() {
         <Panel title="By model" className="col-span-12 md:col-span-6 xl:col-span-3">
           <ul className="flex flex-col gap-3">
             {models.map(([model, entry]) => (
-              <li key={model}>
-                <Meter value={entry.booked} max={entry.total} warnAt={0.95} label={<Mono>{model}</Mono>} detail={`${entry.booked}/${entry.total} booked · ${fmtPct(entry.live ? entry.util / entry.live : 0, 0)} util${entry.total - entry.healthy ? ` · ${entry.total - entry.healthy} bad` : ''}`} />
+              <li key={model} className="flex flex-col gap-0.5">
+                <Meter value={entry.booked} max={entry.total} warnAt={0.95} label={<Mono>{model}</Mono>} detail={`${entry.booked}/${entry.total}`} />
+                <span className="font-mono text-[10px] text-text-tertiary">
+                  {fmtPct(entry.booked / (entry.total || 1), 0)} booked · {fmtPct(entry.live ? entry.util / entry.live : 0, 0)} util
+                  {entry.total - entry.healthy ? <span className="text-red-500"> · {entry.total - entry.healthy} unhealthy</span> : null}
+                </span>
               </li>
             ))}
           </ul>
