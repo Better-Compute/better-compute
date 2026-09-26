@@ -48,8 +48,14 @@ func loadConfig(fs *flag.FlagSet) (*config.Config, string, error) {
 	if cfg.DevInsecureH2C && !devBuild {
 		return nil, file, errors.New("dev_insecure_h2c is only accepted by fakehw development builds")
 	}
-	// Node keys in the TPM where there is one.
+	// Node keys in the TPM where there is one. bcd running unprivileged under [helper] never opens the
+	// TPM (its resource manager filters no command: the hierarchies could be locked or cleared): root's
+	// helper derives, signs and certifies its node keys (security review 3).
 	agent.TPM = nodeKeyTPM(cfg.DataDir)
+	if agent.TPM != nil && cfg.Helper.Socket != "" && os.Geteuid() != 0 {
+		keys := helper.TPMKeys{Client: helper.Client{Socket: cfg.Helper.Socket}}
+		agent.TPM = func() (tpm.Keys, error) { return keys, nil }
+	}
 	return cfg, file, nil
 }
 
@@ -138,14 +144,6 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 		return exitFailure
 	}
 	log := newLogger(cfg, stderr)
-	// bcd join runs as root; under [helper] the node key is bcd node's, another user's: in the TPM only
-	// when that user can open it (else a file, which a renewal moves into the TPM once it can).
-	if device := nodeKeyDevice(); agent.TPM != nil && device != "" && cfg.Helper.Socket != "" && os.Geteuid() == 0 {
-		if err := userCanOpen(cfg.Helper.User, device); err != nil {
-			log.Warn("the node key stays a file: bcd node cannot use the TPM", "error", err.Error())
-			agent.TPM = nil
-		}
-	}
 	role := commonv1.AgentRole_AGENT_ROLE_NODE
 	switch fs.Lookup("role").Value.String() {
 	case "node":

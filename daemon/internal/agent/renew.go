@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"errors"
@@ -74,16 +73,16 @@ func (a *Agent) renewLoop(ctx context.Context) {
 
 // renewalCertifier opens the AK a certificate names (urn:bc:tpm-ak:), or nil when it names none. It
 // fails when the TPM is unavailable or its AK is another (a cleared TPM: the node must join again).
-func renewalCertifier(leaf *x509.Certificate) (*tpm.Certifier, error) {
+func renewalCertifier(leaf *x509.Certificate) (tpm.KeyCertifier, error) {
 	name, err := pki.TPMAKName(leaf)
 	if err != nil || name == nil {
 		return nil, err
 	}
-	t, err := openTPM()
+	keys, err := openTPM()
 	if err != nil {
 		return nil, fmt.Errorf("renewal: the certificate's node key is in the TPM, which is unavailable: %w", err)
 	}
-	c, err := tpm.NewCertifier(t)
+	c, err := keys.Certifier()
 	if err != nil {
 		return nil, fmt.Errorf("renewal: %w", err)
 	}
@@ -95,17 +94,17 @@ func renewalCertifier(leaf *x509.Certificate) (*tpm.Certifier, error) {
 	return c, nil
 }
 
-// certifiedKey makes the next node key where the certifier's AK can certify it.
-func certifiedKey(c *tpm.Certifier) (crypto.Signer, []byte, error) {
-	unique := make([]byte, tpm.NodeKeyUniqueSize)
-	if _, err := rand.Read(unique); err != nil {
+// certifiedKey makes the next node key in the TPM, where the AK can certify it.
+func certifiedKey() (crypto.Signer, []byte, error) {
+	keys, err := openTPM()
+	if err != nil {
 		return nil, nil, err
 	}
-	key, err := c.NodeKey(unique)
+	key, record, err := newKeyIn(keys)
 	if err != nil {
 		return nil, nil, fmt.Errorf("renewal: the next node key in the TPM: %w", err)
 	}
-	return key, tpmKeyRecord(unique), nil
+	return key, record, nil
 }
 
 // renewOnce renews the certificate with a fresh key, proven by the current one. The next key is
@@ -131,7 +130,7 @@ func (a *Agent) renewOnce(ctx context.Context) error {
 	var record []byte
 	if certifier != nil {
 		defer certifier.Close()
-		next, record, err = certifiedKey(certifier)
+		next, record, err = certifiedKey()
 	} else {
 		// The next key: in the TPM when the host has one (a node with a file key moves into the TPM here).
 		next, record, err = newNodeKey(a.log)
@@ -155,13 +154,14 @@ func (a *Agent) renewOnce(ctx context.Context) error {
 	}
 	if certifier != nil {
 		digest := sha256.Sum256(req.GetCsr())
-		info, signature, err := certifier.CertifyNodeKey(next.(*tpm.NodeKey), digest[:])
+		key := next.(tpm.Key)
+		info, signature, err := certifier.CertifyNodeKey(key, digest[:])
 		if err != nil {
 			return fmt.Errorf("renewal: the TPM's attestation key certifying the next key: %w", err)
 		}
 		req.KeyAttestation = &agentv1.TpmKeyAttestation{
 			AkPublic:    certifier.AKPublic(),
-			KeyPublic:   next.(*tpm.NodeKey).PublicArea(),
+			KeyPublic:   key.PublicArea(),
 			CertifyInfo: info,
 			Signature:   signature,
 		}

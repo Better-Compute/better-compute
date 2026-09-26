@@ -23,7 +23,7 @@ import (
 // useTPM gives node keys a software TPM for the test.
 func useTPM(t *testing.T, sim *tpmsim.Sim) {
 	t.Helper()
-	TPM = func() (tpm.Transport, error) { return sim, nil }
+	TPM = func() (tpm.Keys, error) { return tpm.DeviceKeys(sim), nil }
 	resetTPM()
 	t.Cleanup(func() { TPM = nil; resetTPM() })
 }

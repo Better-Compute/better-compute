@@ -105,6 +105,8 @@ func runHelper(fs *flag.FlagSet, _, stderr io.Writer) int {
 	srv.Virsh, srv.LibvirtPolicy = libvirtHelper(cfg, host, int(uid), int(gid))
 	// cloud-hypervisor for that node: taps, VFIO and the VMM's unit, built by root from what it checks.
 	srv.CHPolicy = chHelper(cfg, host, int(uid))
+	// The node's keys in the TPM, which only root opens (loadConfig: root's TPM, never the helper's own).
+	srv.TPM = agent.TPM
 	if os.Geteuid() == 0 {
 		// The config decides what root does for the node ([host] units, the pins): root's alone.
 		if err := rootOnlyFile(configFile); err != nil {

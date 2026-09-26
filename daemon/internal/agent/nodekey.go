@@ -22,56 +22,38 @@ import (
 // the node key is a crypto.Signer and every signature (TLS, CSRs, Renew proofs, node statements, the
 // WebSocket proof) is the same on the wire.
 
-// TPM opens the host's TPM for node keys (cmd/bcd sets it where /dev/tpmrm0 answers; fakehw builds
-// on request): new node keys are made in it. Nil: new node keys are files. A key already in the TPM
-// needs it to load either way.
-var TPM func() (tpm.Transport, error)
+// TPM opens where node keys are made in the host's TPM (cmd/bcd sets it where /dev/tpmrm0 answers;
+// fakehw builds on request): the TPM itself when bcd runs as root (tpm.DeviceKeys), else bcd helper,
+// so an unprivileged bcd node never holds the TPM (whose hierarchies it could otherwise lock or
+// clear). Nil: new node keys are files. A key already in the TPM needs it to load either way.
+var TPM func() (tpm.Keys, error)
 
 // tpmKeyBlock is the PEM type of a TPM node key's record: its unique.
 const tpmKeyBlock = "BCD TPM NODE KEY"
 
-// The TPM connection node keys use, opened once: one connection keeps their handles valid together,
-// and its Send is serialized for the TLS handshakes and statements that sign concurrently.
+// The node keys' TPM, opened once: one connection keeps their handles valid together.
 var (
 	tpmOnce sync.Once
-	tpmConn tpm.Transport
+	tpmKeys tpm.Keys
 	tpmErr  error
 )
 
-type lockedTransport struct {
-	mu sync.Mutex
-	t  tpm.Transport
-}
-
-func (l *lockedTransport) Send(command []byte) ([]byte, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.t.Send(command)
-}
-
 // resetTPM forgets the opened connection (tests that change TPM).
 func resetTPM() {
-	tpmOnce, tpmConn, tpmErr = sync.Once{}, nil, nil
+	tpmOnce, tpmKeys, tpmErr = sync.Once{}, nil, nil
 }
 
-func openTPM() (tpm.Transport, error) {
+func openTPM() (tpm.Keys, error) {
 	if TPM == nil {
 		return nil, errors.New("agent: this host has no TPM for node keys")
 	}
-	tpmOnce.Do(func() {
-		t, err := TPM()
-		if err != nil {
-			tpmErr = err
-			return
-		}
-		tpmConn = &lockedTransport{t: t}
-	})
-	return tpmConn, tpmErr
+	tpmOnce.Do(func() { tpmKeys, tpmErr = TPM() })
+	return tpmKeys, tpmErr
 }
 
 // NodeKeyKind names what holds a node key: "tpm" or "file".
 func NodeKeyKind(key crypto.Signer) string {
-	if _, ok := key.(*tpm.NodeKey); ok {
+	if _, ok := key.(tpm.Key); ok {
 		return "tpm"
 	}
 	return "file"
@@ -115,16 +97,21 @@ func joinKey(attest ChallengeAttestor, log *slog.Logger) (crypto.Signer, []byte,
 	return newNodeKey(log)
 }
 
-func newTPMKey() (*tpm.NodeKey, []byte, error) {
-	t, err := openTPM()
+func newTPMKey() (tpm.Key, []byte, error) {
+	keys, err := openTPM()
 	if err != nil {
 		return nil, nil, err
 	}
+	return newKeyIn(keys)
+}
+
+// newKeyIn makes a node key of a fresh unique in keys, and its record.
+func newKeyIn(keys tpm.Keys) (tpm.Key, []byte, error) {
 	unique := make([]byte, tpm.NodeKeyUniqueSize)
 	if _, err := rand.Read(unique); err != nil {
 		return nil, nil, err
 	}
-	key, err := tpm.LoadNodeKey(t, unique)
+	key, err := keys.NodeKey(unique)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -163,11 +150,15 @@ func loadNodeKey(path string) (crypto.Signer, error) {
 	if block == nil || block.Type != tpmKeyBlock {
 		return pki.LoadPrivateKey(path)
 	}
-	t, err := openTPM()
+	keys, err := openTPM()
 	if err != nil {
 		return nil, fmt.Errorf("%s is a key in the TPM: %w", path, err)
 	}
-	return tpm.LoadNodeKey(t, block.Bytes)
+	key, err := keys.NodeKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	return key, nil
 }
 
 // closeKey unloads a TPM key that is no longer used (a file key has nothing to unload).

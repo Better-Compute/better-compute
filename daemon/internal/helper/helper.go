@@ -33,6 +33,7 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/pki"
 	"github.com/better-compute/better-compute/daemon/internal/selfupdate"
 	"github.com/better-compute/better-compute/daemon/internal/slice"
+	"github.com/better-compute/better-compute/daemon/internal/tpm"
 )
 
 // Version is the node ↔ helper protocol version.
@@ -83,6 +84,8 @@ type Request struct {
 	Libvirt *LibvirtRequest `json:"libvirt,omitempty"`
 	// ch.<verb>: the operation's arguments (ch.go).
 	CH *CHRequest `json:"ch,omitempty"`
+	// tpm.<verb>: a node key in root's TPM (tpmkeys.go).
+	TPM *TPMRequest `json:"tpm,omitempty"`
 }
 
 // Response is the helper's answer.
@@ -240,6 +243,9 @@ type Server struct {
 	// CHPolicy serves ch.* (ch.go); nil refuses them. chMu serializes launches (one VMM user each).
 	CHPolicy func() (CHPolicy, error)
 	chMu     sync.Mutex
+	// TPM opens the host's TPM (as root) for tpm.* (tpmkeys.go); nil refuses them.
+	TPM func() (tpm.Keys, error)
+	tpm tpmKeys
 }
 
 // SliceTimeout bounds slice.apply and slice.remove (a few systemctl calls).
@@ -412,6 +418,11 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 	if req.CH != nil {
 		instance = req.CH.Instance
 	}
+	if req.Op == "tpm.sign" && err == nil {
+		// Every TLS handshake and node statement signs: only refusals are logged.
+		answer(result, err)
+		return
+	}
 	s.logf("helper: operation", "pid", peer.PID, "op", req.Op, "kind", req.Kind, "name", req.Name, "gpu", req.GPU, "version", req.Version, "unit", req.Unit, "instance", instance, "outcome", outcome)
 	answer(result, err)
 }
@@ -425,6 +436,9 @@ func (s *Server) do(ctx context.Context, req Request) (any, error) {
 	}
 	if verb, ok := strings.CutPrefix(req.Op, "ch."); ok {
 		return s.ch(ctx, verb, req.CH)
+	}
+	if verb, ok := strings.CutPrefix(req.Op, "tpm."); ok {
+		return s.tpmOp(verb, req.TPM)
 	}
 	return nil, s.op(ctx, req)
 }

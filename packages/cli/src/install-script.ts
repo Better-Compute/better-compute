@@ -691,18 +691,14 @@ if grep -Eq '^[[:space:]]*\\[[[:space:]]*helper[[:space:]]*\\]' /etc/bcd/config.
       adduser -S -D -H -h /var/lib/bcd -s /sbin/nologin bcd
     fi
   fi
-  # bcd node keeps its key in the TPM when the host has one: it opens the TPM resource manager through
-  # the tss group (the tpm2-tss udev rule's group; set up here when the device has none).
-  if [ -c /dev/tpmrm0 ]; then
-    if ! getent group tss >/dev/null 2>&1; then
-      if command -v groupadd >/dev/null 2>&1; then groupadd --system tss; else addgroup -S tss; fi
-    fi
-    if [ "$(stat -c %G /dev/tpmrm0 2>/dev/null)" != tss ]; then
-      printf 'KERNEL=="tpmrm[0-9]*", GROUP="tss", MODE="0660"\\n' > /etc/udev/rules.d/60-bcd-tpm.rules
-      chgrp tss /dev/tpmrm0 && chmod 0660 /dev/tpmrm0
-    fi
-    if command -v usermod >/dev/null 2>&1; then usermod -a -G tss bcd; else addgroup bcd tss; fi
+  # bcd node keeps its key in the TPM when the host has one, through bcd helper: it never opens the TPM
+  # itself (the resource manager filters no command, so a tss member could lock or clear the TPM's
+  # hierarchies and break root's TPM-sealed secrets). An upgrade from a script that put bcd in the tss
+  # group takes it out again, with the udev rule that script wrote.
+  if id -nG bcd 2>/dev/null | tr ' ' '\\n' | grep -qx tss; then
+    if command -v gpasswd >/dev/null 2>&1; then gpasswd -d bcd tss >/dev/null; else delgroup bcd tss; fi
   fi
+  rm -f /etc/udev/rules.d/60-bcd-tpm.rules
   cat > /etc/systemd/system/bcd-helper.service.new <<'BCD_HELPER_UNIT'
 ${bcdHelperUnit}BCD_HELPER_UNIT
   chmod 0644 /etc/systemd/system/bcd-helper.service.new

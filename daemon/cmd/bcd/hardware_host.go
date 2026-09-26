@@ -77,18 +77,21 @@ func newSimHost(string, uint64, func()) (agent.Host, error) {
 // bcd's transient keys never collide with another TPM user's.
 const tpmDevice = "/dev/tpmrm0"
 
-// nodeKeyTPM keeps node keys in the host's TPM when the kernel's resource manager is there. bcd node
-// must be able to open it (root, or the bcd user in the device's group, as the install script sets
-// up): a new key falls back to a file when it cannot, and a key already in the TPM needs it.
-func nodeKeyTPM(string) func() (tpm.Transport, error) {
+// nodeKeyTPM keeps node keys in the host's TPM when the kernel's resource manager is there, opened by
+// this process (root: bcd node without a helper, bcd join, bcd helper). An unprivileged bcd node
+// reaches it only through bcd helper (loadConfig).
+func nodeKeyTPM(string) func() (tpm.Keys, error) {
 	if _, err := os.Stat(tpmDevice); err != nil {
 		return nil
 	}
-	return func() (tpm.Transport, error) { return tpm.OpenDevice(tpmDevice) }
+	return func() (tpm.Keys, error) {
+		d, err := tpm.OpenDevice(tpmDevice)
+		if err != nil {
+			return nil, err
+		}
+		return tpm.DeviceKeys(d), nil
+	}
 }
-
-// nodeKeyDevice is the device node keys are made in ("" in fakehw builds).
-func nodeKeyDevice() string { return tpmDevice }
 
 // openTPM is the host's TPM for the tpm join attestor.
 func openTPM(string) (tpm.Transport, func(), error) {

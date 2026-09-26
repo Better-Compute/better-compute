@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"sync"
 )
 
 // NodeKeyAttributes are a node key's attributes: it never leaves the TPM (fixedTPM, fixedParent,
@@ -110,8 +111,65 @@ func (a *Attestor) CertifyNodeKey(k *NodeKey, qualifying []byte) (attest, signat
 	return a.tpm.Certify(k.handle, a.ak, qualifying)
 }
 
-// Certifier is the AK alone, without the EK: at each renewal of a certificate that names this AK
-// (urn:bc:tpm-ak:), it certifies the next node key, which it derives on its own connection.
+// Key is a node key in a TPM, whoever holds the TPM connection: this process (*NodeKey) or bcd helper
+// for an unprivileged bcd node, which never opens the TPM itself.
+type Key interface {
+	crypto.Signer
+	// PublicArea is the key's TPMT_PUBLIC (its name is what an AK certifies).
+	PublicArea() []byte
+	Close() error
+}
+
+// KeyCertifier is the AK certifying node keys: at each renewal of a certificate that names it
+// (urn:bc:tpm-ak:), the next key.
+type KeyCertifier interface {
+	AKPublic() []byte
+	// CertifyNodeKey has the AK certify k over qualifying (sha256 of the renewal's CSR): the
+	// TPMS_ATTEST and its TPMT_SIGNATURE.
+	CertifyNodeKey(k Key, qualifying []byte) (attest, signature []byte, err error)
+	Close()
+}
+
+// Keys derives node keys and certifies them, on one TPM connection.
+type Keys interface {
+	NodeKey(unique []byte) (Key, error)
+	Certifier() (KeyCertifier, error)
+}
+
+// DeviceKeys is Keys over a TPM this process opened: one connection keeps the keys' handles valid
+// together, and its commands are serialized for the TLS handshakes and statements that sign at once.
+func DeviceKeys(t Transport) Keys { return &deviceKeys{tpm: New(&lockedTransport{t: t})} }
+
+type deviceKeys struct{ tpm *TPM }
+
+func (d *deviceKeys) NodeKey(unique []byte) (Key, error) {
+	k, err := loadNodeKey(d.tpm, unique)
+	if err != nil {
+		return nil, err
+	}
+	return k, nil
+}
+
+func (d *deviceKeys) Certifier() (KeyCertifier, error) {
+	c, err := newCertifier(d.tpm)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+type lockedTransport struct {
+	mu sync.Mutex
+	t  Transport
+}
+
+func (l *lockedTransport) Send(command []byte) ([]byte, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.t.Send(command)
+}
+
+// Certifier is the AK alone, without the EK (KeyCertifier over a TPM connection).
 type Certifier struct {
 	tpm   *TPM
 	ak    uint32
@@ -119,8 +177,10 @@ type Certifier struct {
 }
 
 // NewCertifier loads the AK (the same primary the join's Attestor certified the node key with).
-func NewCertifier(t Transport) (*Certifier, error) {
-	c := &Certifier{tpm: New(t)}
+func NewCertifier(t Transport) (*Certifier, error) { return newCertifier(New(t)) }
+
+func newCertifier(t *TPM) (*Certifier, error) {
+	c := &Certifier{tpm: t}
 	h, pub, err := c.tpm.CreatePrimary(RHEndorsement, AKTemplate())
 	if err != nil {
 		return nil, fmt.Errorf("tpm: the attestation key: %w", err)
@@ -136,11 +196,15 @@ func (c *Certifier) AKPublic() []byte { return c.akPub }
 func (c *Certifier) NodeKey(unique []byte) (*NodeKey, error) { return loadNodeKey(c.tpm, unique) }
 
 // CertifyNodeKey has the AK certify k over qualifying (sha256 of the renewal's CSR).
-func (c *Certifier) CertifyNodeKey(k *NodeKey, qualifying []byte) (attest, signature []byte, err error) {
-	if k.tpm != c.tpm {
+func (c *Certifier) CertifyNodeKey(k Key, qualifying []byte) (attest, signature []byte, err error) {
+	nk, ok := k.(*NodeKey)
+	if !ok || nk.tpm != c.tpm {
 		return nil, nil, errors.New("tpm: the node key is loaded in another TPM connection")
 	}
-	return c.tpm.Certify(k.handle, c.ak, qualifying)
+	if nk.handle == 0 || c.ak == 0 {
+		return nil, nil, errors.New("tpm: the node key or the AK is closed")
+	}
+	return c.tpm.Certify(nk.handle, c.ak, qualifying)
 }
 
 // Close unloads the AK.
