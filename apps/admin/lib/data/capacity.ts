@@ -831,9 +831,33 @@ const stateAt = (booking: PlannedBooking, now: number, overlay: Overlay): Reserv
 export const holdsDevices = (state: ReservationState) =>
   liveStates.has(state) || state === 'released' || state === 'expired';
 
+const TERMINAL: ReadonlySet<ReservationState> = new Set(['released', 'expired', 'cancelled', 'failed', 'denied']);
+
+/**
+ * Terminal reservations never change (their conditions and fields don't depend on the clock), so each booking's
+ * object is built once and reused while its state and end stay the same: most of the ~8k per derive, which keeps
+ * derivation cheap and object identity stable for memoized views.
+ */
+const terminalCache = new WeakMap<PlannedBooking, { key: string; value: Reservation }>();
+const usageCache = new WeakMap<PlannedBooking, { key: string; windows: UsageWindow[] }>();
+/** CPU/sandbox pools: average allocated vCPUs of a whole past UTC day, by `pool|day`. */
+const pastDayVcpus = new Map<string, number>();
+
 function toReservation(booking: PlannedBooking, now: number, overlay: Overlay): Reservation {
   const state = stateAt(booking, now, overlay);
   const end = overlay.ends.get(booking.id) ?? booking.end;
+  if (TERMINAL.has(state)) {
+    const key = `${state}|${end}`;
+    const cached = terminalCache.get(booking);
+    if (cached?.key === key) return cached.value;
+    const value = buildReservation(booking, now, overlay, state, end);
+    terminalCache.set(booking, { key, value });
+    return value;
+  }
+  return buildReservation(booking, now, overlay, state, end);
+}
+
+function buildReservation(booking: PlannedBooking, now: number, overlay: Overlay, state: ReservationState, end: number): Reservation {
   const perNode = booking.atoms[0]!.gpus.length;
   const pool = POOLS.find((entry) => entry.id === booking.poolId)!;
   const deviceClass: DeviceRequest['class'] = booking.binding === 'node' ? 'node' : 'gpu';
@@ -1059,6 +1083,15 @@ function derive(plan: Plan, now: number, overlay: Overlay): Derived {
   for (const reservation of holding) {
     if (!reservation.during) continue;
     const booking = byId.get(reservation.id)!;
+    // A finished reservation's windows only change when the 30-day cut-off moves (daily): reuse them.
+    const finished = TERMINAL.has(reservation.state) && reservation.during.end <= now;
+    const cacheKey = `${usageFrom}|${reservation.during.end}|${reservation.state}`;
+    const cached = finished ? usageCache.get(booking) : undefined;
+    if (cached?.key === cacheKey) {
+      for (const window of cached.windows) usage.push(window);
+      continue;
+    }
+    const own: UsageWindow[] = [];
     const pool = POOLS.find((entry) => entry.id === reservation.poolId)!;
     const start = Math.max(reservation.during.start, usageFrom);
     const end = Math.min(reservation.during.end, now);
@@ -1069,7 +1102,7 @@ function derive(plan: Plan, now: number, overlay: Overlay): Derived {
       if (hours <= 0) continue;
       const tags = { project: reservation.projectId ?? '', poolId: pool.id, tenantId: reservation.tenantId, ...(booking.spot ? { spot: 'true' } : {}) };
       const push = (meter: string, quantity: number, suffix: string) =>
-        usage.push({
+        own.push({
           idempotencyKey: `${reservation.id}:${day}:${suffix}`,
           allocationId: `alc_${reservation.id.slice(4)}`,
           identityId: reservation.ownerIdentityId,
@@ -1087,6 +1120,8 @@ function derive(plan: Plan, now: number, overlay: Overlay): Derived {
         push('vps.memory.gib.hours', hours * gpus * 96, 'mem');
       }
     }
+    if (finished) usageCache.set(booking, { key: cacheKey, windows: own });
+    for (const window of own) usage.push(window);
   }
   // CPU and sandbox pools: instance vCPU and memory hours per tenant per day, from the pulse (4 samples a day).
   for (const pool of POOLS.filter((entry) => entry.gpusPerNode === 0)) {
@@ -1096,8 +1131,17 @@ function derive(plan: Plan, now: number, overlay: Overlay): Derived {
     for (let day = usageFrom; day < now; day += DAY) {
       const end = Math.min(now, day + DAY);
       const hours = (end - day) / HOUR;
-      const samples = [0.125, 0.375, 0.625, 0.875].map((f) => poolPulse(pool.topo, day + f * (end - day)).allocated);
-      const vcpus = samples.reduce((total, value) => total + value, 0) / samples.length;
+      // A whole past day's average never changes: cache it (the partial current day is sampled fresh).
+      const cacheKey = `${pool.id}|${day}`;
+      let vcpus = end === day + DAY ? pastDayVcpus.get(cacheKey) : undefined;
+      if (vcpus === undefined) {
+        const samples = [0.125, 0.375, 0.625, 0.875].map((f) => poolPulse(pool.topo, day + f * (end - day)).allocated);
+        vcpus = samples.reduce((total, value) => total + value, 0) / samples.length;
+        if (end === day + DAY) {
+          pastDayVcpus.set(cacheKey, vcpus);
+          if (pastDayVcpus.size > 400) pastDayVcpus.delete(pastDayVcpus.keys().next().value!);
+        }
+      }
       pool.tenants.forEach((tenantId, index) => {
         const share = (vcpus * weights[index]!) / sum;
         const tenant = TENANTS.find((entry) => entry.id === tenantId)!;
