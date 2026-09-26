@@ -919,6 +919,26 @@ describe('desired state and the devices converger', () => {
     expect(lastHello(h)).toMatchObject({ appliedGeneration: 4n, appliedSpecHash: specHash });
   });
 
+  it('holds a Kubernetes binding like a hold, marked for the device plugin, with the env per pod', async () => {
+    const h = await daemon();
+    const [g0, g1, g2] = h.daemon.hardware.gpuUuids;
+    h.sendSpec(1, {
+      devices: {
+        assignments: [hold('alloc_1', [g0!, g1!]), { ...hold('alloc_k', [g2!]), binding: Binding.KUBERNETES }],
+      },
+    });
+    await h.advance(5);
+    expect(h.daemon.boundAllocations()).toEqual(['alloc_1', 'alloc_k']);
+    const plain = JSON.parse(h.daemon.files.get(cdiSpecPath('alloc_1'))!);
+    const kube = JSON.parse(h.daemon.files.get(cdiSpecPath('alloc_k'))!);
+    // One NVIDIA_VISIBLE_DEVICES per hold (several devices in one container would each override it).
+    expect(plain.containerEdits.env).toEqual(['BCD_ALLOCATION_ID=alloc_1', `NVIDIA_VISIBLE_DEVICES=${g0},${g1}`]);
+    expect(plain.devices).toEqual([{ name: g0, containerEdits: {} }, { name: g1, containerEdits: {} }]);
+    expect(plain.annotations['bcd.dev/binding']).toBeUndefined();
+    expect(kube.annotations['bcd.dev/binding']).toBe('kubernetes');
+    expect(kube.containerEdits.env).toEqual(['BCD_ALLOCATION_ID=alloc_k']);
+  });
+
   it('rejects overlapping assignments (AllocationFailed{overlap}, section FAILED) and missing devices', async () => {
     const h = await daemon();
     const [g0, g1] = h.daemon.hardware.gpuUuids;

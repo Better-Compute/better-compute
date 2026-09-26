@@ -1758,7 +1758,8 @@ export class FakeDaemon {
         if (!this.fs.has(envFilePath(allocationId))) this.fs.set(envFilePath(allocationId), envFile(assignment));
         continue;
       }
-      if (assignment.binding !== Binding.HOLD) {
+      // A Kubernetes binding holds exactly like a hold; bcd's device plugin hands it to the kubelet.
+      if (assignment.binding !== Binding.HOLD && assignment.binding !== Binding.KUBERNETES) {
         fail(allocationId, 'unsupported-binding', `binding ${Binding[assignment.binding]} is not supported in v0.1`);
         continue;
       }
@@ -2115,10 +2116,18 @@ export function mergeSpec(current: NodeSpec, patch: NodeSpec): NodeSpec {
   return merged;
 }
 
+/**
+ * A hold's CDI spec, as bcd writes it (agent/devices.go): devices carry no env (several in one
+ * container would each set NVIDIA_VISIBLE_DEVICES); a hold's spec sets the joined list once, and a
+ * Kubernetes hold's spec none (the device plugin sets it per pod) but is marked bcd.dev/binding.
+ */
 function cdiSpec(
-  assignment: { allocationId: string; reservationId: string; devices: { id: string }[] },
+  assignment: { allocationId: string; reservationId: string; binding: Binding; devices: { id: string }[] },
   generation: number,
 ): string {
+  const kubernetes = assignment.binding === Binding.KUBERNETES;
+  const env = [`BCD_ALLOCATION_ID=${assignment.allocationId}`];
+  if (!kubernetes) env.push(`NVIDIA_VISIBLE_DEVICES=${[...new Set(assignment.devices.map((d) => d.id))].join(',')}`);
   return JSON.stringify({
     cdiVersion: '0.6.0',
     kind: 'bcd.dev/gpu',
@@ -2126,12 +2135,10 @@ function cdiSpec(
       'bcd.dev/allocation-id': assignment.allocationId,
       'bcd.dev/reservation-id': assignment.reservationId,
       'bcd.dev/generation': String(generation),
+      ...(kubernetes ? { 'bcd.dev/binding': 'kubernetes' } : {}),
     },
-    devices: assignment.devices.map((d) => ({
-      name: d.id,
-      containerEdits: { env: [`NVIDIA_VISIBLE_DEVICES=${d.id}`] },
-    })),
-    containerEdits: { env: [`BCD_ALLOCATION_ID=${assignment.allocationId}`] },
+    devices: assignment.devices.map((d) => ({ name: d.id, containerEdits: {} })),
+    containerEdits: { env },
   });
 }
 
