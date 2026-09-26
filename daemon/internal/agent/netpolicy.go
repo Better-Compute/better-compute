@@ -48,6 +48,16 @@ const PlacementCapability = "instance.placement"
 // an older bcd would start a volume-bearing instance without its persistent disk.
 const VolumesCapability = "instance.volumes"
 
+// DeviceLimitsCapability says this bcd enforces DeviceAssignment.limits (a hold's cgroup slice with
+// its CPUs, memory and hugepages, §3.8): capacity books host resources with GPUs only here, since an
+// older bcd would drop the limits and run the workload unbounded.
+const DeviceLimitsCapability = "devices.limits"
+
+// KubernetesBindingCapability says this bcd hands Binding.KUBERNETES devices to the kubelet (device
+// plugin or DRA) and reports their release only once no pod holds them: capacity places Kubernetes
+// reservations only here.
+const KubernetesBindingCapability = "binding.kubernetes"
+
 // firewallTable is the nftables table bcd owns.
 const firewallTable = "bcd_instances"
 

@@ -882,7 +882,9 @@ export class FakeDaemon {
       capabilities: [
         ...(this.options.capabilities ??
           this.options.profile?.capabilities ?? [
-          ...(this.hw.gpuUuids.length > 0 ? ['cdi', 'nvml'] : []),
+          // devices.limits and binding.kubernetes: this build enforces DeviceAssignment.limits and hands
+          // KUBERNETES bindings to the kubelet (§3.8); capacity books host resources and Kubernetes only here.
+          ...(this.hw.gpuUuids.length > 0 ? ['cdi', 'nvml', 'devices.limits', 'binding.kubernetes'] : []),
           // Instance tcp/ssh tunnels reach the instance's own address (the tunnel program stands in for it), never
           // the host's loopback: tunnels.open requires this before opening one.
           ...(this.options.tunnels ? ['tunnel.instance-dial'] : []),

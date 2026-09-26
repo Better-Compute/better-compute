@@ -1082,7 +1082,28 @@ export async function denyCreate(
   });
 }
 
+/**
+ * bcd capabilities (Hello, as `bc.dev/cap.<name>` system labels) a reservation's node must have:
+ * an older bcd drops DeviceAssignment.limits and Binding.KUBERNETES as unknown, so a workload would
+ * run without its host limits, or its GPUs never reach the kubelet (§3.8, N−2 skew).
+ */
+export const deviceLimitsCapabilityLabel = 'bc.dev/cap.devices.limits';
+export const kubernetesBindingCapabilityLabel = 'bc.dev/cap.binding.kubernetes';
+
+export function requiredCapabilities(request: {
+  binding?: string;
+  resources?: Readonly<Record<string, number>>;
+}): Record<string, string> | undefined {
+  if (request.binding === 'node') return undefined;
+  const labels: Record<string, string> = {};
+  if (request.resources && Object.values(request.resources).some((amount) => amount > 0))
+    labels[deviceLimitsCapabilityLabel] = '*';
+  if (request.binding === 'kubernetes') labels[kubernetesBindingCapabilityLabel] = '*';
+  return Object.keys(labels).length > 0 ? labels : undefined;
+}
+
 function placementRequest(row: ReservationRow, during: TimeRange) {
+  const nodeLabels = requiredCapabilities(row.request);
   return {
     tenantId: row.tenantId,
     poolId: row.poolId,
@@ -1092,6 +1113,7 @@ function placementRequest(row: ReservationRow, during: TimeRange) {
     ...(row.request.resources !== undefined && !isNodeBinding(row)
       ? { resources: row.request.resources }
       : {}),
+    ...(nodeLabels ? { nodeLabels } : {}),
     ...(row.request.topology !== undefined ? { topology: row.request.topology } : {}),
     ...(row.request.gang !== undefined ? { gang: row.request.gang } : {}),
     during,

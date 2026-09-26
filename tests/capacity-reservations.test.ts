@@ -21,6 +21,8 @@ import {
   capacityModule,
   createCapacityPort,
   deviceAssignments,
+  deviceLimitsCapabilityLabel,
+  kubernetesBindingCapabilityLabel,
   assignmentLimits,
   formatCpuList,
   parseCpuList,
@@ -232,6 +234,9 @@ const tables = [
   'node_resources',
   'devices',
   'quota_usage',
+  'node_labels',
+  'node_inventory',
+  'inventory_snapshots',
   'nodes',
   'pool_offers',
   'pools',
@@ -2710,6 +2715,44 @@ describe('attested bindings (v0.2, P14: a gateway-forged AllocationBound is reje
 describe('host CPU and memory booked with the GPUs (§3.8)', () => {
   const NA = 'node_01jz00000000000000000000na';
   const NB = 'node_01jz00000000000000000000nb';
+
+  // Both hosts run a bcd that enforces DeviceAssignment.limits and serves Kubernetes bindings (Hello
+  // capabilities, stored as system labels); an older one gets neither (see the skew test below).
+  beforeEach(async () => {
+    for (const nodeId of [NA, NB])
+      for (const key of [deviceLimitsCapabilityLabel, kubernetesBindingCapabilityLabel])
+        await db.query(
+          `INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, $2, '1', 'system')`,
+          [nodeId, key],
+        );
+  });
+
+  it('books host resources and Kubernetes only on a bcd that enforces them (N−2 skew)', async () => {
+    await hostRows({ [NA]: { vcpu: 64, memoryGiB: 512 }, [NB]: { vcpu: 64, memoryGiB: 512 } });
+    // NA runs an older bcd: no capabilities. An operator label of the same name does not count.
+    await db.query(`DELETE FROM node_labels WHERE node_id = $1`, [NA]);
+    await db.query(
+      `INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, $2, '1', 'operator')`,
+      [NA, deviceLimitsCapabilityLabel],
+    );
+    for (const key of ['skew-1', 'skew-2']) {
+      const created = (await call(
+        'reservations',
+        'create',
+        create({ idempotencyKey: key }),
+      )) as Rsv;
+      expect(created.state).toBe('placed');
+      expect((await booked(created.id))[0]!.nodeId).toBe(NB);
+    }
+    // NB is full (4 GPUs); NA could take 2 GPUs but not their limits.
+    const third = (await call('reservations', 'create', create({ idempotencyKey: 'skew-3' }))) as Rsv;
+    expect(third.state).toBe('pending');
+    // Without host resources (no rows, no share), an older bcd still takes plain GPU holds.
+    await db.query(`DELETE FROM node_resources`);
+    const plain = (await call('reservations', 'create', create({ idempotencyKey: 'skew-4' }))) as Rsv;
+    expect(plain.state).toBe('placed');
+    expect((await booked(plain.id))[0]!.nodeId).toBe(NA);
+  });
 
   async function hostRows(rows: Record<string, Record<string, number>>): Promise<void> {
     for (const [nodeId, resources] of Object.entries(rows))

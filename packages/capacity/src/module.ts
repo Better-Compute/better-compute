@@ -73,6 +73,7 @@ import {
   readReservation,
   reconcileReservation,
   releaseReservation,
+  requiredCapabilities,
   renewReservation,
   reservationView,
   reservationWork,
@@ -1122,12 +1123,17 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
           input.binding === 'node'
             ? undefined
             : hostResources(input.resources, await perGpuShare(tx, pool, gpuEquivalent(input.devices, pool)));
+        const nodeLabels = requiredCapabilities({
+          ...(input.binding !== undefined ? { binding: input.binding } : {}),
+          ...(resources ? { resources } : {}),
+        });
         const request = {
           tenantId: input.tenantId,
           poolId: input.poolId,
           reservationId: 'rsv_preview',
           devices: input.devices,
           ...(resources && Object.keys(resources).length > 0 ? { resources } : {}),
+          ...(nodeLabels ? { nodeLabels } : {}),
           ...(input.topology !== undefined ? { topology: input.topology } : {}),
           ...(input.gang !== undefined ? { gang: input.gang } : {}),
           during,

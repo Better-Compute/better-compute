@@ -189,7 +189,7 @@ func (a *Agent) hello() (*agentv1.Hello, error) {
 		})
 	}
 	if gpus > 0 {
-		h.Capabilities = append(h.Capabilities, "cdi")
+		h.Capabilities = append(h.Capabilities, "cdi", DeviceLimitsCapability, KubernetesBindingCapability)
 		if nvml {
 			h.Capabilities = append(h.Capabilities, "nvml")
 		}
