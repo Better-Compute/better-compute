@@ -376,12 +376,19 @@ func (d *devicesConverger) Plan(ctx context.Context, desired []byte) ([]converge
 	return actions, nil
 }
 
-// passedGPUs are the GPUs the instances converger's last pass gave VMs (VFIO): GPU UUID → instance.
+// passedGPUs are the GPUs VMs have or are to have (VFIO): GPU UUID → instance. The current specs',
+// plus what running domains had at the last pass (a GPU dropped from a running VM's spec stays its
+// until the next start).
 func (a *Agent) passedGPUs() map[string]string {
 	out := map[string]string{}
 	if a.instances == nil {
 		return out
 	}
+	a.instances.specsMu.Lock()
+	for gpu, id := range a.instances.passed {
+		out[gpu] = id
+	}
+	a.instances.specsMu.Unlock()
 	for _, spec := range a.instances.currentSpecs() {
 		if spec.GetDesiredState() == agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED {
 			continue

@@ -36,28 +36,12 @@ func TestVolumeRefusalsKeepOneWriter(t *testing.T) {
 			attach("inst_9", deleted, rw("vol_a")),
 		},
 	}
-	// What running domains have open counts first: inst_old keeps running with vol_c although its
-	// spec dropped it (applies at its next start); inst_gone is being stopped, so its vol_d is free.
-	section.Volumes = append(section.Volumes, &agentv1.HostVolume{VolumeId: "vol_c"}, &agentv1.HostVolume{VolumeId: "vol_d"})
-	section.Instances = append(section.Instances,
-		attach("inst_new", running, rw("vol_c")),
-		attach("inst_old", running),
-		attach("inst_gone", stopped),
-		attach("inst_d", running, rw("vol_d")),
-	)
-	domains := map[string]runtime.Domain{
-		"inst_old":  {ID: "inst_old", Managed: true, State: runtime.StateRunning, Volumes: []runtime.AttachedVolume{{Volume: runtime.Volume{ID: "vol_c"}}}},
-		"inst_gone": {ID: "inst_gone", Managed: true, State: runtime.StateRunning, Volumes: []runtime.AttachedVolume{{Volume: runtime.Volume{ID: "vol_d"}}}},
-		// Running with the volume its spec names: not a conflict with itself.
-		"inst_1": {ID: "inst_1", Managed: true, State: runtime.StateRunning, Volumes: []runtime.AttachedVolume{{Volume: runtime.Volume{ID: "vol_a"}}}},
-	}
-	got := volumeRefusals(section, map[string]string{"vol_bad": "disk full"}, domains)
+	got := volumeRefusals(section, map[string]string{"vol_bad": "disk full"})
 	want := map[string]string{
-		"inst_2":   "volume vol_a is attached read-write to inst_1",
-		"inst_6":   "volume vol_b is attached to inst_4: a read-write attachment is exclusive",
-		"inst_7":   "volume vol_gone is not on this host",
-		"inst_8":   "volume vol_bad: disk full",
-		"inst_new": "volume vol_c is attached read-write to inst_old",
+		"inst_2": "volume vol_a is attached read-write to inst_1",
+		"inst_6": "volume vol_b is attached to inst_4: a read-write attachment is exclusive",
+		"inst_7": "volume vol_gone is not on this host",
+		"inst_8": "volume vol_bad: disk full",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("refusals = %v", got)
@@ -66,6 +50,48 @@ func TestVolumeRefusalsKeepOneWriter(t *testing.T) {
 		if got[id] != msg {
 			t.Errorf("%s: %q, want %q", id, got[id], msg)
 		}
+	}
+}
+
+// What running domains have open is what a start is checked against: a detached-but-running VM
+// still holds its volume, a stop that failed keeps it held, and one that succeeded frees it.
+func TestOpenVolumesFollowWhatRuns(t *testing.T) {
+	running := agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING
+	vol := func(id string, ro bool) []runtime.AttachedVolume {
+		return []runtime.AttachedVolume{{Volume: runtime.Volume{ID: id}, ReadOnly: ro}}
+	}
+	open := openVolumesOf(map[string]runtime.Domain{
+		"inst_old":    {ID: "inst_old", Managed: true, State: runtime.StateRunning, Volumes: vol("vol_c", false)},
+		"inst_reader": {ID: "inst_reader", Managed: true, State: runtime.StatePaused, Volumes: vol("vol_r", true)},
+		"inst_off":    {ID: "inst_off", Managed: true, State: runtime.StateStopped, Volumes: vol("vol_x", false)},
+		"foreign":     {ID: "foreign", State: runtime.StateRunning, Volumes: vol("vol_y", false)},
+	})
+	wants := func(id string, ro bool, vid string) *agentv1.InstanceSpec {
+		return &agentv1.InstanceSpec{InstanceId: id, DesiredState: running, Volumes: []*agentv1.InstanceVolume{{VolumeId: vid, ReadOnly: ro}}}
+	}
+	for _, c := range []struct {
+		spec *agentv1.InstanceSpec
+		want string
+	}{
+		{wants("inst_new", false, "vol_c"), "volume vol_c is open read-write in inst_old"},
+		{wants("inst_new", true, "vol_c"), "volume vol_c is open read-write in inst_old"},
+		{wants("inst_new", true, "vol_r"), ""},
+		{wants("inst_new", false, "vol_r"), "volume vol_r is open in inst_reader: a read-write attachment is exclusive"},
+		{wants("inst_old", false, "vol_c"), ""}, // itself
+		{wants("inst_new", false, "vol_x"), ""}, // stopped domains hold nothing
+		{wants("inst_new", false, "vol_y"), ""}, // not bcd's
+	} {
+		if got := open.conflict(c.spec); got != c.want {
+			t.Errorf("%s %v: %q, want %q", c.spec.GetInstanceId(), c.spec.GetVolumes(), got, c.want)
+		}
+	}
+	open.release("inst_old")
+	if got := open.conflict(wants("inst_new", false, "vol_c")); got != "" {
+		t.Fatalf("after the stop: %q", got)
+	}
+	open.set(wants("inst_new", false, "vol_c"))
+	if !open.holds("inst_new", "vol_c") || open.conflict(wants("inst_other", true, "vol_c")) == "" {
+		t.Fatal("a started writer is not tracked")
 	}
 }
 
@@ -78,22 +104,18 @@ func TestCollectVolumesKeepsWhatRunningDomainsHaveOpen(t *testing.T) {
 		}
 	}
 	c := &instancesConverger{a: &Agent{log: slog.New(slog.NewTextHandler(io.Discard, nil))}, volumes: store}
-	open := []runtime.AttachedVolume{{Volume: runtime.Volume{ID: "vol_open"}}}
-	domains := map[string]runtime.Domain{"inst_a": {ID: "inst_a", Managed: true, State: runtime.StateRunning, Volumes: open}}
+	open := openVolumesOf(map[string]runtime.Domain{"inst_a": {ID: "inst_a", Managed: true, State: runtime.StateRunning,
+		Volumes: []runtime.AttachedVolume{{Volume: runtime.Volume{ID: "vol_open"}}}}})
+	// Its spec dropped the volume, still running: open, kept.
 	section := &agentv1.InstancesSection{Instances: []*agentv1.InstanceSpec{{InstanceId: "inst_a",
 		DesiredState: agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING}}}
-	c.collectVolumes(section, nil, domains)
+	c.collectVolumes(section, nil, open)
 	if ids, _ := store.List(); len(ids) != 1 || ids[0] != "vol_open" {
 		t.Fatalf("volumes = %v", ids)
 	}
-	// Its delete failed this pass: still open, kept.
-	section.Instances[0].DesiredState = agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED
-	c.collectVolumes(section, map[string]string{"inst_a": "virsh: busy"}, domains)
-	if ids, _ := store.List(); len(ids) != 1 {
-		t.Fatalf("volumes = %v", ids)
-	}
-	// Deleted this pass: it let go, and the volume goes in the same pass.
-	c.collectVolumes(section, nil, domains)
+	// Stopped or deleted this pass: it let go, and the volume goes in the same pass.
+	open.release("inst_a")
+	c.collectVolumes(section, nil, open)
 	if ids, _ := store.List(); len(ids) != 0 {
 		t.Fatalf("volumes = %v", ids)
 	}

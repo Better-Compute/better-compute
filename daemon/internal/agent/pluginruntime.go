@@ -39,6 +39,8 @@ type PluginRuntime struct {
 	// instance's user data and restore until an apply succeeded.
 	specs     map[string]*coreInstanceSpec
 	firstBoot map[string]*coreInstanceSpec
+	// open: the volumes each running instance was last applied with.
+	open map[string][]runtime.AttachedVolume
 }
 
 // PluginRuntimes wraps the hosted drivers that implement "runtime" and are not built into bcd.
@@ -181,9 +183,17 @@ func (p *PluginRuntime) List(ctx context.Context) ([]runtime.Domain, error) {
 		return nil, fmt.Errorf("%s list: %w", p.ID, err)
 	}
 	out := make([]runtime.Domain, 0, len(statuses))
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	for _, s := range statuses {
 		if s.ID != "" {
-			out = append(out, domainOf(p.ID, s))
+			d := domainOf(p.ID, s)
+			if d.State == runtime.StateRunning || d.State == runtime.StatePaused {
+				// What bcd last applied to it while running (since this bcd started: the plugin's list
+				// does not carry volumes).
+				d.Volumes = p.open[s.ID]
+			}
+			out = append(out, d)
 		}
 	}
 	return out, nil
@@ -292,11 +302,24 @@ func (p *PluginRuntime) SetState(ctx context.Context, id, state string) error {
 	if err := json.Unmarshal([]byte(raw), &st); err != nil {
 		return fmt.Errorf("%s apply: %w", p.ID, err)
 	}
+	p.mu.Lock()
 	if first {
-		p.mu.Lock()
 		delete(p.firstBoot, id)
-		p.mu.Unlock()
 	}
+	// A plugin applies the whole spec live: what it runs with now is what it has open.
+	if p.open == nil {
+		p.open = map[string][]runtime.AttachedVolume{}
+	}
+	if state == runtime.StateRunning || state == runtime.StatePaused {
+		var vols []runtime.AttachedVolume
+		for _, v := range applied.Volumes {
+			vols = append(vols, runtime.AttachedVolume{Volume: runtime.Volume{ID: v.ID, Path: v.Path, Serial: v.Serial}, ReadOnly: v.ReadOnly})
+		}
+		p.open[id] = vols
+	} else {
+		delete(p.open, id)
+	}
+	p.mu.Unlock()
 	if st.State == "error" {
 		return fmt.Errorf("%s: %s", p.ID, strings.TrimSpace(firstNonEmpty(st.Message, "the instance failed")))
 	}
@@ -311,6 +334,7 @@ func (p *PluginRuntime) Destroy(ctx context.Context, id string) error {
 	p.mu.Lock()
 	delete(p.specs, id)
 	delete(p.firstBoot, id)
+	delete(p.open, id)
 	p.mu.Unlock()
 	return nil
 }

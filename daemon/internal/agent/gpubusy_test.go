@@ -1,14 +1,42 @@
 package agent
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	commonv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1"
 	"github.com/better-compute/better-compute/daemon/internal/fakehw"
+	"github.com/better-compute/better-compute/daemon/internal/runtime"
 	"google.golang.org/protobuf/proto"
 )
+
+// A VM never starts on a GPU a hold has (passthrough takes it off its host driver), a MIG instance
+// or slot of it included.
+func TestAVMIsRefusedAGPUAHoldHas(t *testing.T) {
+	var fake *runtime.Fake
+	h := newHarness(t, func(o *Options) {
+		fake = &runtime.Fake{RuntimeName: "libvirt-kvm", Path: filepath.Join(t.TempDir(), "runtime.json"), BootID: "boot-1"}
+		o.Runtimes = []runtime.Runtime{fake}
+	})
+	s, _ := h.open()
+	gpus := fakehw.Inventory(1).Gpus.Gpus
+	vmOn := vm("inst_gpu", agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING)
+	vmOn.GpuDeviceIds = []string{gpus[1].Uuid}
+	s.push(desired(1, &agentv1.NodeSpec{
+		Devices: &agentv1.DevicesSection{Assignments: []*agentv1.DeviceAssignment{{AllocationId: "alloc_slot", Binding: agentv1.Binding_BINDING_HOLD,
+			Devices: []*agentv1.AssignedDevice{dev(gpus[1].Uuid+"/s0", "gpu.slot")}}}},
+		Instances: &agentv1.InstancesSection{Instances: []*agentv1.InstanceSpec{vmOn}},
+	}))
+	st := s.next(t, "status", func(f *agentv1.AgentFrame) bool { return f.GetStatus().GetObservedGeneration() == 1 }).GetStatus()
+	if len(st.GetInstances()) != 1 || !strings.Contains(st.GetInstances()[0].GetMessage(), "has a live hold") {
+		t.Fatalf("instances = %v", st.GetInstances())
+	}
+	if domains, _ := fake.List(t.Context()); len(domains) != 0 {
+		t.Fatalf("the VM was defined: %v", domains)
+	}
+}
 
 // gpu.reset and diag.dcgm (from level 2) refuse a GPU whose MIG instance or slot is held, or that a
 // VM has passed through, not only a GPU held whole.

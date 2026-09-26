@@ -34,6 +34,7 @@ type instancesConverger struct {
 	// off the converger (devices, gpu.reset, diag.dcgm): through currentSpecs, under specsMu.
 	specsMu    sync.Mutex
 	specs      []*agentv1.InstanceSpec
+	passed     map[string]string // GPU → instance, after the last pass (setPassedGPUs); nil before one
 	specErrors map[string]string
 	// exhausted: the last pass's starts host-side admission refused (admission.go); they stay
 	// stopped, with the reason as their message, and are tried again.
@@ -83,13 +84,129 @@ func (c *instancesConverger) tellGrownVolumes(ctx context.Context, r runtime.Run
 	}
 }
 
-// volumeRefusals are the instances whose volumes cannot be attached: one the section does not list,
-// one that failed, or one another running (or paused) instance has when either attachment is
-// read-write (a raw volume has one writer and no readers beside it). What a domain that keeps
-// running has open counts first, whatever its spec says now (a detach applies at its next start);
-// then the first in spec order keeps the volume. Domains being stopped are stopped before anything
-// starts (apply).
-func volumeRefusals(section *agentv1.InstancesSection, failed map[string]string, domains map[string]runtime.Domain) map[string]string {
+// openVolumes tracks which instances have which volumes open (volume → instance → read-write), from
+// the running and paused domains at the start of a pass, kept current as the pass stops, deletes
+// and starts them: a start is checked against what is open at that moment, never against what
+// the specs say should be (a stop may fail; a detach applies at the next start).
+type openVolumes map[string]map[string]bool
+
+func openVolumesOf(domains map[string]runtime.Domain) openVolumes {
+	o := openVolumes{}
+	for id, d := range domains {
+		if d.Managed && (d.State == runtime.StateRunning || d.State == runtime.StatePaused) {
+			for _, v := range d.Volumes {
+				o.add(v.ID, id, !v.ReadOnly)
+			}
+		}
+	}
+	return o
+}
+
+func (o openVolumes) add(volume, id string, rw bool) {
+	if o[volume] == nil {
+		o[volume] = map[string]bool{}
+	}
+	o[volume][id] = rw
+}
+
+// release: the instance stopped or is gone.
+func (o openVolumes) release(id string) {
+	for _, users := range o {
+		delete(users, id)
+	}
+}
+
+// set: the instance now has exactly spec's volumes open (it started, or a bcx runtime re-applied
+// its spec live).
+func (o openVolumes) set(spec *agentv1.InstanceSpec) {
+	o.release(spec.GetInstanceId())
+	for _, iv := range spec.GetVolumes() {
+		o.add(iv.GetVolumeId(), spec.GetInstanceId(), !iv.GetReadOnly())
+	}
+}
+
+// conflict says why spec cannot open its volumes beside what others have open, or "".
+func (o openVolumes) conflict(spec *agentv1.InstanceSpec) string {
+	id := spec.GetInstanceId()
+	for _, iv := range spec.GetVolumes() {
+		holders := make([]string, 0, len(o[iv.GetVolumeId()]))
+		for other := range o[iv.GetVolumeId()] {
+			holders = append(holders, other)
+		}
+		sort.Strings(holders)
+		for _, other := range holders {
+			switch rw := o[iv.GetVolumeId()][other]; {
+			case other == id:
+			case rw:
+				return fmt.Sprintf("volume %s is open read-write in %s", iv.GetVolumeId(), other)
+			case !iv.GetReadOnly():
+				return fmt.Sprintf("volume %s is open in %s: a read-write attachment is exclusive", iv.GetVolumeId(), other)
+			}
+		}
+	}
+	return ""
+}
+
+// holds reports whether the instance has volume open.
+func (o openVolumes) holds(id, volume string) bool {
+	_, ok := o[volume][id]
+	return ok
+}
+
+// heldGPUs are the device ids of the live holds (whole GPUs, "<gpu>/gi…" MIG instances, "<gpu>/s…"
+// slots).
+func (a *Agent) heldGPUs() []string {
+	if a.devices == nil {
+		return nil
+	}
+	var out []string
+	for id := range a.devices.assignedDevices() {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// gpuHeldBy says which of spec's passthrough GPUs a hold has, or "".
+func gpuHeldBy(spec *agentv1.InstanceSpec, held []string) string {
+	for _, gpu := range spec.GetGpuDeviceIds() {
+		if gpuBusy(held, gpu) {
+			return "GPU " + gpu + " has a live hold on this host: it cannot be passed through"
+		}
+	}
+	return ""
+}
+
+// setPassedGPUs records, after a pass, the GPUs VMs have or are to have (passedGPUs): the active
+// specs' and those of domains still running (a GPU dropped from a running VM's spec stays its
+// until the next start).
+func (c *instancesConverger) setPassedGPUs(section *agentv1.InstancesSection, domains map[string]runtime.Domain) {
+	passed := map[string]string{}
+	for _, spec := range section.GetInstances() {
+		if spec.GetDesiredState() == agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED {
+			continue
+		}
+		for _, gpu := range spec.GetGpuDeviceIds() {
+			passed[gpu] = spec.GetInstanceId()
+		}
+	}
+	for id, d := range domains {
+		if d.Managed && (d.State == runtime.StateRunning || d.State == runtime.StatePaused) {
+			for _, gpu := range d.GPUs {
+				passed[gpu] = id
+			}
+		}
+	}
+	c.specsMu.Lock()
+	c.passed = passed
+	c.specsMu.Unlock()
+}
+
+// volumeRefusals are the instances whose volumes cannot be attached by their specs alone: one the
+// section does not list, one that failed, or one an earlier running (or paused) spec attaches when
+// either attachment is read-write (a raw volume has one writer and no readers beside it). What
+// running domains actually have open is checked start by start (openVolumes).
+func volumeRefusals(section *agentv1.InstancesSection, failed map[string]string) map[string]string {
 	listed := map[string]bool{}
 	for _, v := range section.GetVolumes() {
 		listed[v.GetVolumeId()] = true
@@ -99,26 +216,6 @@ func volumeRefusals(section *agentv1.InstancesSection, failed map[string]string,
 		rw bool
 	}
 	users := map[string][]user{}
-	keepsRunning := map[string]bool{}
-	for _, spec := range section.GetInstances() {
-		switch spec.GetDesiredState() {
-		case agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING, agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_PAUSED:
-			keepsRunning[spec.GetInstanceId()] = true
-		}
-	}
-	ids := make([]string, 0, len(domains))
-	for id := range domains {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		d := domains[id]
-		if d.Managed && keepsRunning[id] && (d.State == runtime.StateRunning || d.State == runtime.StatePaused) {
-			for _, v := range d.Volumes {
-				users[v.ID] = append(users[v.ID], user{id, !v.ReadOnly})
-			}
-		}
-	}
 	out := map[string]string{}
 	for _, spec := range section.GetInstances() {
 		state := spec.GetDesiredState()
@@ -138,9 +235,6 @@ func volumeRefusals(section *agentv1.InstancesSection, failed map[string]string,
 				out[id] = "volume " + vid + ": " + failed[vid]
 			case active:
 				for _, u := range users[vid] {
-					if u.id == id {
-						continue // itself, already running with it
-					}
 					if u.rw {
 						out[id] = fmt.Sprintf("volume %s is attached read-write to %s", vid, u.id)
 						break
@@ -165,28 +259,15 @@ func volumeRefusals(section *agentv1.InstancesSection, failed map[string]string,
 
 // collectVolumes destroys the stored volumes the section no longer lists that no instance still
 // attaches: neither in its spec (an instance whose delete failed keeps its volumes) nor open in a
-// domain still running after the pass. One this pass stopped or deleted without error has let
-// go (unnamed domains were destroyed first, or the pass ended early).
-func (c *instancesConverger) collectVolumes(section *agentv1.InstancesSection, specErrors map[string]string, domains map[string]runtime.Domain) {
+// domain after the pass (open: the pass's tracker, which let go of what it stopped or deleted).
+func (c *instancesConverger) collectVolumes(section *agentv1.InstancesSection, specErrors map[string]string, open openVolumes) {
 	keep := map[string]bool{}
 	for _, v := range section.GetVolumes() {
 		keep[v.GetVolumeId()] = true
 	}
-	stillRunning := map[string]bool{}
-	for _, spec := range section.GetInstances() {
-		_, failed := specErrors[spec.GetInstanceId()]
-		switch spec.GetDesiredState() {
-		case agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING, agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_PAUSED:
-			stillRunning[spec.GetInstanceId()] = true
-		default:
-			stillRunning[spec.GetInstanceId()] = failed
-		}
-	}
-	for id, d := range domains {
-		if stillRunning[id] {
-			for _, v := range d.Volumes {
-				keep[v.ID] = true
-			}
+	for volume, users := range open {
+		if len(users) > 0 {
+			keep[volume] = true
 		}
 	}
 	for _, spec := range section.GetInstances() {
@@ -335,7 +416,22 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 	specErrors := map[string]string{}
 	// Volumes exist (and have grown) before the instances that attach them are defined.
 	failedVolumes, grownVolumes := c.ensureVolumes(section)
-	refusedVolumes := volumeRefusals(section, failedVolumes, domains)
+	refusedVolumes := volumeRefusals(section, failedVolumes)
+	open := openVolumesOf(domains)
+	// stopped and gone keep what the pass knows current: admission (probed at the first start, after
+	// every stop) and the volume tracker count only what still runs.
+	stopped := func(id string) {
+		open.release(id)
+		if d, ok := domains[id]; ok {
+			d.State, d.Volumes = runtime.StateStopped, nil
+			domains[id] = d
+		}
+	}
+	gone := func(id string) {
+		open.release(id)
+		delete(domains, id)
+	}
+	heldGPUs := c.a.heldGPUs()
 	// The rules go in before any domain starts: taps are matched by name, so they apply from the
 	// first frame.
 	unenforceable := c.enforceNetworkPolicies(ctx, section.GetInstances())
@@ -367,10 +463,15 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 			if exists && existing.Managed {
 				if err := destroy(existing); err != nil {
 					specErrors[id] = err.Error()
+				} else {
+					gone(id)
 				}
 			}
 			continue
 		}
+		active := spec.GetDesiredState() == agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING ||
+			spec.GetDesiredState() == agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_PAUSED
+		running := exists && (existing.State == runtime.StateRunning || existing.State == runtime.StatePaused)
 		if exists && !existing.Managed {
 			specErrors[id] = "a domain named " + id + " exists that bcd did not create"
 			continue
@@ -386,19 +487,45 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 			if exists && existing.State != runtime.StateStopped {
 				if err := r.SetState(ctx, id, runtime.StateStopped); err != nil {
 					specErrors[id] = msg + "; stopping it failed: " + err.Error()
+				} else {
+					stopped(id)
 				}
 			}
 			continue
 		}
 		if msg, bad := refusedVolumes[id]; bad {
-			// A second writer (or a reader beside one) would corrupt the volume: it stops.
+			// Its spec cannot have these volumes; a running domain keeps what it has open (its
+			// definition is not updated, so nothing new is opened).
 			specErrors[id] = msg
-			if exists && existing.State != runtime.StateStopped {
-				if err := r.SetState(ctx, id, runtime.StateStopped); err != nil {
-					specErrors[id] = msg + "; stopping it failed: " + err.Error()
-				}
-			}
 			continue
+		}
+		_, plugin := r.(*PluginRuntime)
+		if active && (!running || plugin) {
+			// Opening its volumes now (a start, or a bcx runtime's live re-apply): against what is open
+			// at this moment.
+			if msg := open.conflict(spec); msg != "" {
+				specErrors[id] = msg
+				// Two holders of one volume already (a stop that failed earlier): this one lets go.
+				for _, iv := range spec.GetVolumes() {
+					if running && open.holds(id, iv.GetVolumeId()) {
+						if err := r.SetState(ctx, id, runtime.StateStopped); err != nil {
+							specErrors[id] = msg + "; stopping it failed: " + err.Error()
+						} else {
+							stopped(id)
+						}
+						break
+					}
+				}
+				continue
+			}
+		}
+		if active && !running {
+			// A GPU passed through is taken off its host driver: never one a hold has (whole, or a MIG
+			// instance or slot of it).
+			if msg := gpuHeldBy(spec, heldGPUs); msg != "" {
+				specErrors[id] = msg
+				continue
+			}
 		}
 		restoreFrom := spec.GetRestoreFrom()
 		if restoreFrom.GetUrl() == "" {
@@ -473,6 +600,12 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 			specErrors[id] = err.Error()
 			continue
 		}
+		switch {
+		case !active:
+			stopped(id)
+		case !running || plugin:
+			open.set(spec)
+		}
 		c.tellGrownVolumes(ctx, r, spec, grownVolumes)
 		// A bcx runtime is told its taps' names; one that did not use them would run outside the
 		// rules, which match by name: it stops (fail closed).
@@ -482,6 +615,8 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 				msg := fmt.Sprintf("runtime %s did not create taps %s: its network rules cannot apply", r.Name(), strings.Join(missing, ", "))
 				if err := r.SetState(ctx, id, runtime.StateStopped); err != nil {
 					msg += "; stopping it failed: " + err.Error()
+				} else {
+					stopped(id)
 				}
 				specErrors[id] = msg
 				continue
@@ -493,7 +628,8 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 		}
 	}
 	c.a.pruneRebinds(section.GetInstances())
-	c.collectVolumes(section, specErrors, domains)
+	c.collectVolumes(section, specErrors, open)
+	c.setPassedGPUs(section, domains)
 	c.specErrors = specErrors
 	c.exhausted = exhausted
 	keep := map[string]bool{}
