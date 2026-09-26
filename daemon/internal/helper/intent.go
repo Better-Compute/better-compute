@@ -19,61 +19,112 @@ import (
 
 // HostIntent is the signed spec a host.unit request rests on: the DesiredStateBody that last set
 // the node's host section, exactly as the control plane signed it (a full spec, or a patch that
-// sets host), its worker signature, and the command-signing roots the signature chains to. The
-// helper trusts none of it until each root matches a pin in root's config.toml
-// (command_root_sha256), the signature verifies, the body names this node, and the unit's settings
-// are exactly the body's: bcd node can ask for what the control plane signed, nothing else.
+// sets host), its worker signature, and where the command-signing roots it chains to come from:
+// Roots, each of which must match a pin in root's config.toml (command_root_sha256), or, without
+// those pins, TrustBundle, the SignedTrustBundle the JoinService key signed (checked against root's
+// join_signing_key_pin, so a root rotation needs no new pin). The helper trusts none of it until the
+// roots check out, the signature verifies, the body names this node, and the unit's settings are
+// exactly the body's: bcd node can ask for what the control plane signed, nothing else.
 type HostIntent struct {
-	Body      []byte   `json:"body"`
-	Signature []byte   `json:"signature"`
-	Roots     [][]byte `json:"roots"`
+	Body        []byte   `json:"body"`
+	Signature   []byte   `json:"signature"`
+	Roots       [][]byte `json:"roots,omitempty"`
+	TrustBundle []byte   `json:"trustBundle,omitempty"`
 }
 
 // IntentRecord is where the helper keeps, as root, what it last accepted: the node it serves (the
-// first signed spec names it) and the newest host-section body, which also stands verified after
-// its worker certificate expires (a spec unchanged for days keeps its first signature).
+// first signed spec names it), the newest host-section body (which also stands verified after its
+// worker certificate expires: a spec unchanged for days keeps its first signature), and the newest
+// trust bundle (an older one is a rollback) and whether its roots made signed intent mandatory.
 const IntentRecord = hostconfig.StateDir + "/helper-intent.json"
 
 type intentRecord struct {
-	NodeID     string `json:"nodeId"`
-	Generation uint64 `json:"generation"`
-	BodySHA256 string `json:"bodySha256"`
+	NodeID       string `json:"nodeId"`
+	Generation   uint64 `json:"generation"`
+	BodySHA256   string `json:"bodySha256"`
+	TrustVersion uint64 `json:"trustVersion,omitempty"`
+	// Signed is set once a trust bundle with command-signing roots was accepted: from then on a
+	// host.unit without a signed spec is refused, whatever the node says.
+	Signed bool `json:"signed,omitempty"`
 }
 
-// maxIntent bounds the signed spec a request carries (roots and body).
+// maxIntent bounds the signed spec a request carries (roots, bundle and body).
 const maxIntent = 1 << 20
 
-// checkIntent decides whether the signed spec allows this host.unit request. Without pins there is
-// nothing to check against (an install without signed intent).
-func (s *Server) checkIntent(req Request) error {
-	if len(s.CommandRootPins) == 0 {
-		return nil
-	}
-	in := req.Intent
-	if in == nil {
-		return errors.New("host.unit needs the signed spec that asks for it (command_root_sha256 is set)")
-	}
-	size := len(in.Body) + len(in.Signature)
-	for _, r := range in.Roots {
-		size += len(r)
-	}
-	if size > maxIntent || len(in.Roots) == 0 || len(in.Roots) > 16 {
-		return errors.New("host.unit: malformed signed spec")
-	}
-	for _, root := range in.Roots {
-		sum := sha256.Sum256(root)
-		if !pinned(s.CommandRootPins, sum[:]) {
-			return errors.New("host.unit: a command-signing root is not pinned in command_root_sha256")
+// intentRoots decides which command-signing roots the request's spec must chain to. It returns none
+// (and no error) for an install without signed intent: no command_root_sha256, and no trust bundle
+// with roots ever seen.
+func (s *Server) intentRoots(in *HostIntent, rec *intentRecord) ([][]byte, error) {
+	if in != nil {
+		size := len(in.Body) + len(in.Signature) + len(in.TrustBundle)
+		for _, r := range in.Roots {
+			size += len(r)
 		}
+		if size > maxIntent || len(in.Roots) > 16 {
+			return nil, errors.New("host.unit: malformed signed spec")
+		}
+	}
+	if len(s.CommandRootPins) > 0 {
+		// The install's pins decide alone.
+		if in == nil || len(in.Roots) == 0 {
+			return nil, errors.New("host.unit needs the signed spec that asks for it (command_root_sha256 is set)")
+		}
+		for _, root := range in.Roots {
+			sum := sha256.Sum256(root)
+			if !pinned(s.CommandRootPins, sum[:]) {
+				return nil, errors.New("host.unit: a command-signing root is not pinned in command_root_sha256")
+			}
+		}
+		return in.Roots, nil
+	}
+	if in == nil || len(in.TrustBundle) == 0 || len(s.JoinSigningPin) == 0 {
+		if rec.Signed {
+			return nil, errors.New("host.unit needs the signed spec that asks for it (this node's specs are signed)")
+		}
+		return nil, nil
+	}
+	signed := &commonv1.SignedTrustBundle{}
+	if proto.Unmarshal(in.TrustBundle, signed) != nil ||
+		!pki.VerifySignature(pki.PurposeTrustBundle, [][]byte{signed.GetBody()}, signed.GetSignature(), pki.Trust{Pin: s.JoinSigningPin}) {
+		return nil, errors.New("host.unit: the trust bundle is not signed by the pinned JoinService key")
+	}
+	bundle := &commonv1.TrustBundle{}
+	if proto.Unmarshal(signed.GetBody(), bundle) != nil {
+		return nil, errors.New("host.unit: unreadable trust bundle")
+	}
+	if bundle.GetVersion() < rec.TrustVersion {
+		return nil, fmt.Errorf("host.unit: trust bundle version %d is older than %d, already accepted", bundle.GetVersion(), rec.TrustVersion)
+	}
+	roots := bundle.GetCommandSigningRoots()
+	if len(roots) == 0 {
+		if rec.Signed {
+			return nil, errors.New("host.unit: a trust bundle without command-signing roots, after one with them")
+		}
+		return nil, nil
+	}
+	rec.TrustVersion, rec.Signed = bundle.GetVersion(), true
+	return roots, nil
+}
+
+// checkIntent decides whether the signed spec allows this host.unit request.
+func (s *Server) checkIntent(req Request) error {
+	in := req.Intent
+	rec, err := s.readIntentRecord()
+	if err != nil {
+		return err
+	}
+	before := rec
+	roots, err := s.intentRoots(in, &rec)
+	if err != nil {
+		return err
+	}
+	if roots == nil {
+		return nil // an install without signed intent
 	}
 	body := &agentv1.DesiredStateBody{}
 	sig := &commonv1.Signature{}
 	if proto.Unmarshal(in.Body, body) != nil || proto.Unmarshal(in.Signature, sig) != nil {
 		return errors.New("host.unit: unreadable signed spec")
-	}
-	rec, err := s.readIntentRecord()
-	if err != nil {
-		return err
 	}
 	if body.GetNodeId() == "" || (rec.NodeID != "" && body.GetNodeId() != rec.NodeID) {
 		return fmt.Errorf("host.unit: the signed spec is for node %q, not this node", body.GetNodeId())
@@ -88,7 +139,7 @@ func (s *Server) checkIntent(req Request) error {
 		if s.Now != nil {
 			now = s.Now
 		}
-		if err := pki.VerifyIntent(pki.PurposeDesiredState, in.Body, sig, in.Roots, now()); err != nil {
+		if err := pki.VerifyIntent(pki.PurposeDesiredState, in.Body, sig, roots, now()); err != nil {
 			return fmt.Errorf("host.unit: %w", err)
 		}
 	}
@@ -119,9 +170,9 @@ func (s *Server) checkIntent(req Request) error {
 	case req.Settings != nil && !bytes.Equal(bytes.TrimSpace(req.Settings), bytes.TrimSpace(signed)):
 		return fmt.Errorf("host.unit: the settings of %s are not the signed spec's", req.Unit)
 	}
-	if !known || rec.NodeID == "" {
-		next := intentRecord{NodeID: body.GetNodeId(), Generation: body.GetGeneration(), BodySHA256: hex.EncodeToString(digest[:])}
-		if err := s.writeIntentRecord(next); err != nil {
+	rec.NodeID, rec.Generation, rec.BodySHA256 = body.GetNodeId(), body.GetGeneration(), hex.EncodeToString(digest[:])
+	if rec != before {
+		if err := s.writeIntentRecord(rec); err != nil {
 			return fmt.Errorf("host.unit: record the signed spec: %w", err)
 		}
 	}

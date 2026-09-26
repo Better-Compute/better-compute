@@ -346,6 +346,7 @@ func (a *Agent) onWelcome(ctx context.Context, s *sess, w *agentv1.Welcome) bool
 				}
 			}
 		}
+		a.keepSignedTrustLocked(w.GetTrust())
 	}
 	s.welcomed = true
 	a.mu.Unlock()

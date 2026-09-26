@@ -45,6 +45,9 @@ type State struct {
 	// TrustBundle is the whole bundle (serialized): its approver keys, thresholds and caps (v1.0
 	// quorum) besides the roots.
 	TrustBundle []byte `json:"trustBundle,omitempty"`
+	// SignedTrustBundle is the SignedTrustBundle of TrustVersion as the JoinService key signed it
+	// (serialized; from a Welcome): bcd helper takes host units' command-signing roots from it.
+	SignedTrustBundle []byte `json:"signedTrustBundle,omitempty"`
 	// ServerTime mirrors the journal's server time high-water mark at each Welcome, so a lost journal
 	// does not reset it (journal.Meta.ServerTime).
 	ServerTime time.Time `json:"serverTime,omitempty"`

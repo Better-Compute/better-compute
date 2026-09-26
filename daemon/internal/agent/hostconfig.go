@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,10 +12,12 @@ import (
 	"sync"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
+	commonv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1"
 	"github.com/better-compute/better-compute/daemon/internal/converge"
 	"github.com/better-compute/better-compute/daemon/internal/helper"
 	"github.com/better-compute/better-compute/daemon/internal/hostconfig"
 	"github.com/better-compute/better-compute/daemon/internal/kube"
+	"github.com/better-compute/better-compute/daemon/internal/pki"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -94,18 +97,49 @@ func (c *hostConverger) noteSignedSpec(d *agentv1.DesiredState, body *agentv1.De
 	}
 }
 
-// helperIntent is what host.unit carries: the signed spec and the roots it chains to.
+// helperIntent is what host.unit carries: the signed spec, the roots it chains to, and the signed
+// trust bundle that vouches for them (the helper checks the roots against its pins, or the bundle
+// against the JoinService key's).
 func (c *hostConverger) helperIntent() *helper.HostIntent {
 	c.mu.Lock()
 	in := c.intent
 	c.mu.Unlock()
-	if in == nil {
-		return nil
-	}
 	c.a.mu.Lock()
-	roots := c.a.state.TrustRoots
+	roots, bundle := c.a.state.TrustRoots, c.a.state.SignedTrustBundle
 	c.a.mu.Unlock()
-	return &helper.HostIntent{Body: in.Body, Signature: in.Signature, Roots: roots}
+	if in == nil {
+		if len(bundle) == 0 {
+			return nil
+		}
+		// No signed host section yet: the bundle alone lets the helper refuse a spec-less request.
+		return &helper.HostIntent{TrustBundle: bundle}
+	}
+	return &helper.HostIntent{Body: in.Body, Signature: in.Signature, Roots: roots, TrustBundle: bundle}
+}
+
+// keepSignedTrustLocked stores a Welcome's SignedTrustBundle when it is the bundle this node holds
+// (its version, signed by the pinned JoinService key) and not stored yet: a node that joined with
+// its bundle in JoinResponse gets the signed form at its first Welcome.
+func (a *Agent) keepSignedTrustLocked(signed *commonv1.SignedTrustBundle) {
+	if signed == nil || len(a.o.SignerPin) == 0 ||
+		!pki.VerifySignature(pki.PurposeTrustBundle, [][]byte{signed.GetBody()}, signed.GetSignature(), pki.Trust{Pin: a.o.SignerPin}) {
+		return
+	}
+	bundle := &commonv1.TrustBundle{}
+	if proto.Unmarshal(signed.GetBody(), bundle) != nil || bundle.GetVersion() != a.state.TrustVersion {
+		return
+	}
+	raw, err := marshal(signed)
+	if err != nil || bytes.Equal(raw, a.state.SignedTrustBundle) {
+		return
+	}
+	next := *a.state
+	next.SignedTrustBundle = raw
+	if err := SaveState(a.o.DataDir, &next); err != nil {
+		a.log.Error("store the signed trust bundle", "error", err.Error())
+		return
+	}
+	a.state = &next
 }
 
 func (c *hostConverger) Section() converge.Section { return converge.SectionHost }

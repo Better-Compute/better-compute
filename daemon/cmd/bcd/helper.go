@@ -96,6 +96,8 @@ func runHelper(fs *flag.FlagSet, _, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "bcd helper: %v\n", err)
 		return exitFailure
 	}
+	// Without those pins, the roots of the trust bundle the pinned JoinService key signed.
+	srv.JoinSigningPin, _ = config.DecodePin(cfg.JoinSigningKeyPin) // validated when the file was loaded
 	if os.Geteuid() == 0 {
 		// Every directory on the way to the slots and to the socket must be root's alone: a path the
 		// node could swap for a symlink would steer root's writes (review 11 L1, L2).

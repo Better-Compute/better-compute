@@ -215,6 +215,9 @@ type Server struct {
 	// config.toml command_root_sha256, given at install, never taken from the control plane). Set,
 	// every host.unit must carry the signed spec that asks for it (checkIntent).
 	CommandRootPins [][]byte
+	// JoinSigningPin is config.toml's join_signing_key_pin (the SHA-256 the pin carries). Without
+	// CommandRootPins, host.unit takes its roots from a SignedTrustBundle this key signed.
+	JoinSigningPin []byte
 	// Now is the clock worker certificates are checked at (default time.Now).
 	Now func() time.Time
 	// SliceRunner runs systemctl for slice.apply and slice.remove (default: the real one).
