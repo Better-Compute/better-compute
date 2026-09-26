@@ -214,6 +214,10 @@ type Server struct {
 	// host.unit. The units validate their settings themselves (hostconfig), exactly as in bcd node.
 	HostUnits  func(hostconfig.Options) *hostconfig.Registry
 	HostSystem hostconfig.System
+	// ExternalHost is root's own config.toml [host] units = false: the host's configuration is
+	// managed outside bcd, and host.unit is refused whatever the node asks (its own copy of the
+	// setting is the node's to ignore; this one is root's).
+	ExternalHost bool
 	// CommandRootPins are the SHA-256 digests of the command-signing root certificates (root's
 	// config.toml command_root_sha256, given at install, never taken from the control plane). Set,
 	// every host.unit must carry the signed spec that asks for it (checkIntent).
@@ -268,6 +272,9 @@ var unitName = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
 
 // hostUnit plans one unit again, as root, and applies it.
 func (s *Server) hostUnit(ctx context.Context, req Request) error {
+	if s.ExternalHost {
+		return errors.New("host.unit: this host's configuration is managed outside bcd ([host] units = false in root's config.toml)")
+	}
 	if s.HostUnits == nil || s.HostSystem == nil {
 		return errors.New("host config units are not configured on this helper")
 	}

@@ -85,6 +85,18 @@ func TestHelperHostUnit(t *testing.T) {
 	if _, ok := sys.Get(hostconfig.SysctlFile); ok {
 		t.Fatal("drop-in left after the clean")
 	}
+	// Root's config says the host is managed outside bcd ([host] units = false): refused, whatever
+	// the node's own config says, cleaning included; nothing is written.
+	srv.ExternalHost = true
+	for _, settings := range []json.RawMessage{json.RawMessage(`{"vm.swappiness":30}`), nil} {
+		if err := c.HostUnit(ctx, "sysctl", settings, nil, nil); err == nil || !strings.Contains(err.Error(), "managed outside bcd") {
+			t.Fatalf("external host: %v", err)
+		}
+	}
+	if v, _ := sys.Get("/proc/sys/vm/swappiness"); v != "10\n" {
+		t.Fatalf("swappiness written on an external host: %q", v)
+	}
+	srv.ExternalHost = false
 	// A helper without host units refuses the operation.
 	srv.HostUnits = nil
 	if err := c.HostUnit(ctx, "sysctl", json.RawMessage(`{}`), nil, nil); err == nil || !strings.Contains(err.Error(), "not configured") {

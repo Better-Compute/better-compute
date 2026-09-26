@@ -9,3 +9,6 @@ func rootOnlyDir(string) error { return errors.New("bcd helper runs on Linux") }
 
 // rootOnlyPath: bcd helper runs on Linux only.
 func rootOnlyPath(string) error { return errors.New("bcd helper runs on Linux") }
+
+// rootOnlyFile: bcd helper runs on Linux only.
+func rootOnlyFile(string) error { return errors.New("bcd helper runs on Linux") }

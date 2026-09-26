@@ -26,7 +26,7 @@ import (
 // the node's privileged operations on [helper] socket. Only the node's account (or root) running an
 // installed bcd binary is served; every operation is checked and logged (internal/helper).
 func runHelper(fs *flag.FlagSet, _, stderr io.Writer) int {
-	cfg, _, err := loadConfig(fs)
+	cfg, configFile, err := loadConfig(fs)
 	if err != nil {
 		fmt.Fprintf(stderr, "bcd helper: %v\n", err)
 		return exitFailure
@@ -90,6 +90,8 @@ func runHelper(fs *flag.FlagSet, _, stderr io.Writer) int {
 			return agent.HostUnitsWith(o, kube.JoinUnit{Allowed: kubernetesAllowed, RequireAllowed: true})
 		},
 		HostSystem: &hostconfig.OSSystem{Root: host.Root},
+		// [host] units = false as root's config.toml says it (checked root-only below), not the node.
+		ExternalHost: cfg.ExternalHost,
 	}
 	// Signed intent for host units: pinned at install, never from the control plane or the node.
 	if srv.CommandRootPins, err = cfg.CommandRootPins(); err != nil {
@@ -101,6 +103,11 @@ func runHelper(fs *flag.FlagSet, _, stderr io.Writer) int {
 	// libvirt for a node outside the libvirt group: checked definitions and bcd's domains only.
 	srv.Virsh, srv.LibvirtPolicy = libvirtHelper(cfg, host, int(uid), int(gid))
 	if os.Geteuid() == 0 {
+		// The config decides what root does for the node ([host] units, the pins): root's alone.
+		if err := rootOnlyFile(configFile); err != nil {
+			fmt.Fprintf(stderr, "bcd helper: %v\n", err)
+			return exitFailure
+		}
 		// Every directory on the way to the slots and to the socket must be root's alone: a path the
 		// node could swap for a symlink would steer root's writes (review 11 L1, L2).
 		slots, _ := cfg.UpdateDirs()
