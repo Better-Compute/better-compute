@@ -35,7 +35,10 @@ authorized and audited as that person. Cookies ignore ports, so the cookie alone
 to a random key in this origin's localStorage (`lib/session-key.ts`, header `x-bc-session-key`), and a copy
 replayed by another local server opens nothing. Sign-in is throttled per account (10 failures / 15 min), a
 second-factor challenge takes 5 codes and signs in once, sign-out revokes the session here even when
-better-iam can't be reached, and beyond loopback sign-in needs https (the cookie is then `__Host-`).
+better-iam can't be reached, and beyond loopback sign-in needs https (the cookie is then `__Host-`). The
+throttle, the used-challenge record and the sign-out denylist live in the process's memory: a restart forgets
+them and several instances behind one name don't share them. Run one instance, and treat better-iam's own
+revocation as the real sign-out (the admin says when it couldn't reach better-iam).
 Signed out, the proxy only forwards read methods (by name: give `ADMIN_COMPUTE_TOKEN` a read-only role, the
 API's authorization is the real boundary). `lib/api.ts`
 exposes the proxy as a console-kit `ComputeRequester`; `useConnection().status.writable` says whether
