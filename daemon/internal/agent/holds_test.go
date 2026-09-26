@@ -103,7 +103,7 @@ func TestCDISpecOfPartsAndLimits(t *testing.T) {
 	raw, _ := json.Marshal(spec)
 	out := string(raw)
 	for _, want := range []string{
-		`"name":"GPU-a_gi1_ci0"`, `"bcd.dev/device-id":"GPU-a/gi1/ci0"`, `"NVIDIA_VISIBLE_DEVICES=MIG-a10"`,
+		`"name":"GPU-a_gi1_ci0"`, `"bcd.dev/device-id":"GPU-a/gi1/ci0"`, `"NVIDIA_VISIBLE_DEVICES=MIG-a10,GPU-b"`,
 		`"bcd.dev/cgroup-parent":"bcd-alloc-alloc_9.slice"`, `"BCD_CGROUP_PARENT=bcd-alloc-alloc_9.slice"`,
 		`"CUDA_MPS_PIPE_DIRECTORY=/run/nvidia-mps"`,
 	} {
@@ -111,12 +111,22 @@ func TestCDISpecOfPartsAndLimits(t *testing.T) {
 			t.Errorf("CDI spec lacks %s: %s", want, out)
 		}
 	}
-	// Every CDI name is valid (no "/").
+	// Every CDI name is valid (no "/"), and NVIDIA_VISIBLE_DEVICES appears once, for the whole hold.
 	for _, d := range spec.Devices {
-		if strings.Contains(d.Name, "/") {
-			t.Errorf("CDI name %q", d.Name)
+		if strings.Contains(d.Name, "/") || len(d.ContainerEdits.Env) > 0 {
+			t.Errorf("CDI device %+v", d)
 		}
 	}
+	if strings.Count(out, "NVIDIA_VISIBLE_DEVICES") != 1 || strings.Contains(out, "bcd.dev/binding") {
+		t.Errorf("a hold's spec: %s", out)
+	}
+	// A Kubernetes binding is marked for the device plugin, which sets the visible devices per pod.
+	as.Binding = agentv1.Binding_BINDING_KUBERNETES
+	raw, _ = json.Marshal(newCDISpec(as, 7, atoms, true))
+	if kubeOut := string(raw); !strings.Contains(kubeOut, `"bcd.dev/binding":"kubernetes"`) || strings.Contains(kubeOut, "NVIDIA_VISIBLE_DEVICES") {
+		t.Errorf("a Kubernetes hold's spec: %s", kubeOut)
+	}
+	as.Binding = agentv1.Binding_BINDING_HOLD
 	// Two slots of one GPU are one visible device.
 	env := string(envFile(as, atoms, false))
 	if !strings.Contains(env, "NVIDIA_VISIBLE_DEVICES=MIG-a10,GPU-b\n") || strings.Contains(env, "CUDA_MPS") {

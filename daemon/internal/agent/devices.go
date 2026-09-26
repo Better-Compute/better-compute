@@ -15,6 +15,7 @@ import (
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/converge"
 	"github.com/better-compute/better-compute/daemon/internal/journal"
+	"github.com/better-compute/better-compute/daemon/internal/kube"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
 	"google.golang.org/protobuf/proto"
 )
@@ -178,7 +179,8 @@ func (d *devicesConverger) Plan(_ context.Context, desired []byte) ([]converge.A
 			}
 			continue
 		}
-		if as.GetBinding() != agentv1.Binding_BINDING_HOLD {
+		// A Kubernetes binding is a hold the node's device plugin hands to the kubelet (kube package).
+		if b := as.GetBinding(); b != agentv1.Binding_BINDING_HOLD && b != agentv1.Binding_BINDING_KUBERNETES {
 			failures = append(failures, failure{id, "unsupported-binding", fmt.Sprintf("binding %s is not supported", as.GetBinding())})
 			continue
 		}
@@ -368,28 +370,41 @@ func newCDISpec(as *agentv1.DeviceAssignment, generation uint64, atoms []atom, m
 	if as.GetLimits() != nil {
 		spec.Annotations[annotationCgroupParent] = holdSlice(as.GetAllocationId())
 	}
+	if as.GetBinding() == agentv1.Binding_BINDING_KUBERNETES {
+		// Only these holds' devices are advertised to the kubelet (kube.ReadHolds).
+		spec.Annotations[kube.AnnotationBinding] = kube.BindingKubernetes
+	} else {
+		// One key for the whole hold: per-device env would repeat NVIDIA_VISIBLE_DEVICES and the last
+		// device would win. (A Kubernetes pod may get part of a hold: the plugin sets its own in
+		// Allocate.)
+		spec.ContainerEdits.Env = append(spec.ContainerEdits.Env, "NVIDIA_VISIBLE_DEVICES="+strings.Join(visibleDevices(atoms), ","))
+	}
 	for _, a := range atoms {
 		spec.Devices = append(spec.Devices, cdiDevice{
-			Name:           cdiDeviceName(a.id),
-			Annotations:    map[string]string{annotationDeviceID: a.id},
-			ContainerEdits: cdiEdits{Env: []string{"NVIDIA_VISIBLE_DEVICES=" + a.visible}},
+			Name:        cdiDeviceName(a.id),
+			Annotations: map[string]string{annotationDeviceID: a.id},
 		})
 	}
 	return spec
 }
 
-func envFile(as *agentv1.DeviceAssignment, atoms []atom, mps bool) []byte {
-	visible := make([]string, 0, len(atoms))
+// visibleDevices is what NVIDIA_VISIBLE_DEVICES lists for atoms: two slots of one GPU are one device
+// to the driver.
+func visibleDevices(atoms []atom) []string {
+	out := make([]string, 0, len(atoms))
 	seen := map[string]bool{}
 	for _, a := range atoms {
-		// Two slots of one GPU are one device to the driver.
 		if !seen[a.visible] {
 			seen[a.visible] = true
-			visible = append(visible, a.visible)
+			out = append(out, a.visible)
 		}
 	}
+	return out
+}
+
+func envFile(as *agentv1.DeviceAssignment, atoms []atom, mps bool) []byte {
 	lines := holdEnv(as, atoms, mps)
-	lines = append(lines, "BCD_RESERVATION_ID="+as.GetReservationId(), "NVIDIA_VISIBLE_DEVICES="+strings.Join(visible, ","))
+	lines = append(lines, "BCD_RESERVATION_ID="+as.GetReservationId(), "NVIDIA_VISIBLE_DEVICES="+strings.Join(visibleDevices(atoms), ","))
 	lines = append(lines, as.GetEnv()...)
 	return []byte(strings.Join(lines, "\n") + "\n")
 }
