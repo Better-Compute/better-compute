@@ -2755,6 +2755,47 @@
             "type": "bytes",
             "label": "",
             "description": "Proof of possession by the CURRENT node key. Purpose \"renew-pop\", parts\n[sha256(csr), node_id, client_time]. Accepted within ±60 s of server time; 120 s replay cache."
+          },
+          {
+            "name": "key_attestation",
+            "number": 5,
+            "type": "TpmKeyAttestation",
+            "label": "",
+            "description": "Required when the current certificate names a TPM attestation key (URI SAN\nurn:bc:tpm-ak:<nameAlg>:<digest>): that AK certifies the CSR's key as one the TPM holds. The new\ncertificate carries the statement forward from the old one; without this the renewal is refused."
+          }
+        ]
+      },
+      {
+        "name": "TpmKeyAttestation",
+        "description": "TPM2_Certify of a node key by the AK a certificate names, qualifying data sha256(csr).",
+        "fields": [
+          {
+            "name": "ak_public",
+            "number": 1,
+            "type": "bytes",
+            "label": "",
+            "description": "TPMT_PUBLIC of the AK: its TPM name must be the one in the certificate."
+          },
+          {
+            "name": "key_public",
+            "number": 2,
+            "type": "bytes",
+            "label": "",
+            "description": "TPMT_PUBLIC of the node key: the CSR's key, fixedTPM | fixedParent | sensitiveDataOrigin."
+          },
+          {
+            "name": "certify_info",
+            "number": 3,
+            "type": "bytes",
+            "label": "",
+            "description": "The TPMS_ATTEST (TPM_ST_ATTEST_CERTIFY) and the AK's TPMT_SIGNATURE over it."
+          },
+          {
+            "name": "signature",
+            "number": 4,
+            "type": "bytes",
+            "label": "",
+            "description": ""
           }
         ]
       },

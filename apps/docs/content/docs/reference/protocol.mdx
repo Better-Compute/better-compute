@@ -771,12 +771,24 @@ A two-round join (§3.3): an operator approval (discovery → joinRequests) or a
 
 ### RenewRequest
 
-| Field         | Number | Type                        | Description                                                                                                                                                            |
-| ------------- | ------ | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `csr`         | 1      | `bytes`                     | DER PKCS#10 CSR (a new key, or the current one).                                                                                                                       |
-| `chain`       | 2      | repeated `bytes`            | The current certificate chain, leaf first.                                                                                                                             |
-| `client_time` | 3      | `google.protobuf.Timestamp` |                                                                                                                                                                        |
-| `pop_sig`     | 4      | `bytes`                     | Proof of possession by the CURRENT node key. Purpose "renew-pop", parts [sha256(csr), node_id, client_time]. Accepted within ±60 s of server time; 120 s replay cache. |
+| Field             | Number | Type                                      | Description                                                                                                                                                                                                                                                                    |
+| ----------------- | ------ | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `csr`             | 1      | `bytes`                                   | DER PKCS#10 CSR (a new key, or the current one).                                                                                                                                                                                                                               |
+| `chain`           | 2      | repeated `bytes`                          | The current certificate chain, leaf first.                                                                                                                                                                                                                                     |
+| `client_time`     | 3      | `google.protobuf.Timestamp`               |                                                                                                                                                                                                                                                                                |
+| `pop_sig`         | 4      | `bytes`                                   | Proof of possession by the CURRENT node key. Purpose "renew-pop", parts [sha256(csr), node_id, client_time]. Accepted within ±60 s of server time; 120 s replay cache.                                                                                                         |
+| `key_attestation` | 5      | [`TpmKeyAttestation`](#tpmkeyattestation) | Required when the current certificate names a TPM attestation key (URI SAN urn:bc:tpm-ak:\<nameAlg>:\<digest>): that AK certifies the CSR's key as one the TPM holds. The new certificate carries the statement forward from the old one; without this the renewal is refused. |
+
+### TpmKeyAttestation
+
+TPM2_Certify of a node key by the AK a certificate names, qualifying data sha256(csr).
+
+| Field          | Number | Type    | Description                                                                                 |
+| -------------- | ------ | ------- | ------------------------------------------------------------------------------------------- |
+| `ak_public`    | 1      | `bytes` | TPMT_PUBLIC of the AK: its TPM name must be the one in the certificate.                     |
+| `key_public`   | 2      | `bytes` | TPMT_PUBLIC of the node key: the CSR's key, fixedTPM \| fixedParent \| sensitiveDataOrigin. |
+| `certify_info` | 3      | `bytes` | The TPMS_ATTEST (TPM_ST_ATTEST_CERTIFY) and the AK's TPMT_SIGNATURE over it.                |
+| `signature`    | 4      | `bytes` |                                                                                             |
 
 ### RenewResponse
 
