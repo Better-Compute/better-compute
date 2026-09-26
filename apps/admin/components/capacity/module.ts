@@ -23,6 +23,7 @@ import { liveState, liveTimeline } from './live';
 import { pools, tenants } from '@/lib/data/topology';
 import { PoolPeek, ReservationPeek, TenantPeek } from './peeks';
 import { FreeGpusStatus, InsightsStatus, WaitingStatus } from './status';
+import { watchPool, watchReservation, watchTenant } from './watch';
 import {
   CapacityHeatmapWidget,
   CapacityKpisWidget,
@@ -160,6 +161,7 @@ export const capacityModule: AdminModule = {
     return insightsFrom(state.snapshot, (poolId, range) => liveTimeline(tenantId, poolId, range.from, range.to, range.stepMinutes ?? 60), scope);
   },
   status: [FreeGpusStatus, WaitingStatus, InsightsStatus],
+  watch: { pool: watchPool, reservation: watchReservation, tenant: watchTenant },
   peeks: {
     pool: { title: (id) => pools.find((pool) => pool.id === id)?.name ?? id, href: (id) => `/pools/${id}`, icon: RiServerLine, component: PoolPeek },
     reservation: { title: (id) => `Reservation ${id}`, href: (id) => `/reservations?id=${id}`, icon: RiCalendarEventLine, component: ReservationPeek },
