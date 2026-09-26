@@ -61,8 +61,9 @@ and its nodes exist first, and bcd runs inside the cluster to report their GPUs 
   operator's; `nvidiaRuntimeClass`), and the `bcd` container asks for `NVIDIA_VISIBLE_DEVICES=all` with
   `NVIDIA_DRIVER_CAPABILITIES=utility` only, so bcd gets `nvidia-smi` and the driver's libraries to read and reset
   GPUs (b6d5548); workload pods still get CDI devices only.
-- **No Kubernetes identity.** No service account token: bcd talks to its gateway, and what it does in the cluster
-  (its Node's labels, deleting pods, DRA slices) it does with the kubelet's own credentials.
+- **No Kubernetes identity of its own.** No service account token: bcd talks to its gateway, and what it does in the
+  cluster (its Node's labels, deleting pods, DRA claims and slices) it does by running the image's `kubectl` with the
+  kubelet's own credentials, which NodeRestriction confines to its Node (see [API access](#api-access)).
 - **One join per node.** The identity lives in the host's `/var/lib/bcd`, so it survives pod restarts and image
   rollouts; every later start finds it and needs no token.
 - **No host configuration.** `config.toml` sets `[host] units = false` by default. bcd applies no `NodeSpec.host`
@@ -96,9 +97,11 @@ docker build -f daemon/Containerfile -t registry.example.com/better-compute/bcd:
 docker push registry.example.com/better-compute/bcd:0.1.0
 ```
 
-`RELEASE_SEQUENCE` is a second build argument (default 0). No published image exists; build your own. The
-`provider-kubernetes` README requires `kubectl` in the image, which bcd uses for its Node's labels, for deleting pods
-of released devices and for DRA; `daemon/Containerfile` does not install it, so add it to your build.
+`RELEASE_SEQUENCE` is a second build argument (default 0). No published image exists; build your own. Since 9bdd43a
+the image also carries `kubectl` v1.34.1 at `/usr/local/bin/kubectl`, which bcd runs for its Node's labels, for
+deleting pods of released devices and for DRA. The build downloads it from `dl.k8s.io` for `TARGETARCH` (default
+`amd64`; `arm64` too) and checks it against the pinned SHA-256 of that release; a mismatch, or another architecture,
+fails the build. bcd runs it as the kubelet (see [API access](#api-access)).
 </Step>
 <Step>
 ### Add the command
@@ -223,6 +226,22 @@ both forbid hostPath and privileged pods. Only `bcd-system`, which the manifests
 `pod-security.kubernetes.io/enforce: privileged`, and your platform's own system namespaces should run privileged.
 bcd's pod runs without `hostPID` and with no service account token.
 
+### API access
+
+bcd reaches the Kubernetes API only by running the image's pinned `kubectl` as the kubelet: every call passes
+`--kubeconfig /etc/kubernetes/kubelet.conf`, which the DaemonSet mounts read-only from `/etc/kubernetes`, with the
+kubelet's client certificate under the mounted `/var/lib/kubelet`. The pod has `automountServiceAccountToken: false`
+and the manifests create no RBAC. That is deliberate (e7d0765, which reverted 9bdd43a's service-account credentials):
+RBAC cannot be scoped to one node, so a service account would have given every privileged bcd pod cluster-wide
+`patch` on Nodes and `delete` on pods, while the NodeRestriction admission plugin confines the kubelet's identity, and
+so bcd, to its own Node and that Node's pods. What bcd does with it:
+
+| Work | `kubectl` |
+| --- | --- |
+| Its Node's `bcd.dev/*` labels | `get node`, `label node --overwrite` |
+| The reaper | `delete pod --wait=false --grace-period=10`, forced a minute later |
+| DRA (`gpu_api = "dra"`) | `api-versions`, `get resourceclaim`, `apply --server-side --field-manager=bcd` and `delete` of its `ResourceSlice` |
+
 ## GPU isolation
 
 bcd hands a pod exactly the GPUs its reservation holds, and it can enforce that only when nothing else hands out GPUs
@@ -244,8 +263,10 @@ toolkit `config.toml` in `/etc/nvidia-container-runtime` or `/usr/local/nvidia/t
 accepts `NVIDIA_VISIBLE_DEVICES` from unprivileged pods (the key `true`, or absent, the toolkit's default), bcd offers
 no GPUs: its device plugins stop, its DRA slice is deleted, and it reports the condition `ForeignGpuExposure` naming
 what to close. The generated DaemonSet mounts both directories read-only for this (dcd2ab0), and the gateway records
-the condition as an informational node condition (b91dcff). So a cluster with the GPU operator's defaults gets no GPUs
-through bcd until you apply the settings above. `bcd doctor`'s `gpu-isolation` check (35534e5) runs the toolkit half
+the condition as a node condition (b91dcff). Since ebd9806 it is NoSchedule while true (advisory only on a
+tenant-controlled node), and the node's active reservations turn `Degraded` with reason `ForeignGpuExposure`
+(4570dfe), since their GPUs are no longer isolated. So a cluster with the GPU operator's defaults gets no GPUs
+through bcd, and its nodes take no new work, until you apply the settings above. `bcd doctor`'s `gpu-isolation` check (35534e5) runs the toolkit half
 of the check only on a node bcd itself joined with `k8s-join`, not on a DaemonSet node: there, look at the condition.
 
 ## GPUs for pods
@@ -260,19 +281,21 @@ it, so bcd's Kubernetes side runs in hosted mode (1e5f96b). It needs no `k8s-joi
   (see [the device plugin](/docs/guides/capacity/kubernetes#the-device-plugin)).
 - **Labels.** bcd keeps its Node's `bcd.dev/*` labels itself (`bcd.dev/node-id`, `bcd.dev/site`, `bcd.dev/gpu.count`,
   `bcd.dev/gpu.product`, `bcd.dev/gpu.driver`), naming the Node from `NODE_NAME` (the DaemonSet's `spec.nodeName`
-  field reference) and using the kubelet's kubeconfig, `/etc/kubernetes/kubelet.conf`. It updates them at most once
+  field reference) and using the kubelet's kubeconfig, `/etc/kubernetes/kubelet.conf` (see
+  [API access](#api-access)). It updates them at most once
   a minute, touches only `bcd.dev/*`, sets no taints, and removes `bcd.dev/*` labels it no longer sets.
 - **The reaper.** Pods that keep a released device are deleted after 30 seconds with a 10-second grace period, and
   forced a minute later if they still hold it, as on a joined worker, through the kubelet's pod-resources socket under
-  `/var/lib/kubelet`; without that socket bcd reports `PodResourcesUnavailable`. A released allocation is reported
-  to the control plane only once no pod holds its devices (cd5fc82; see
-  [release](/docs/guides/capacity/kubernetes#release)).
+  `/var/lib/kubelet`; without that socket bcd reports `PodResourcesUnavailable`, which is NoSchedule for the whole
+  node while true (ebd9806; advisory on a tenant-controlled node). A released allocation is reported to the control
+  plane only once no pod holds its devices (cd5fc82), and one still held after 5 minutes raises
+  `KubernetesReleaseStuck`, also NoSchedule while true (see [release](/docs/guides/capacity/kubernetes#release)).
 - **Device plugin or DRA.** `[kubernetes] gpu_api` in `config.toml` chooses how the GPUs reach pods:
   `"device-plugin"` (the default) or `"dra"`, bcd's DRA driver `gpu.bcd.dev` (7d24836), never both. Any other value
   stops bcd from starting. `--gpu-api` and `bcdDaemonSetManifests({ gpuApi })` write it (e4b0c01). See
   [device plugin or DRA](/docs/guides/capacity/kubernetes#device-plugin-or-dra) for what the driver publishes.
 
-All of these need `kubectl` in the image.
+All of these run the `kubectl` the image carries, as the kubelet (see [API access](#api-access)).
 
 ## Generate the manifests from TypeScript
 
@@ -337,7 +360,6 @@ The identity and the journal are on the host, so a new pod resumes where the old
   off by default.
 - **Host resources are the kubelet's.** A `binding: 'kubernetes'` hold gets no cgroup slice: the kubelet enforces its
   pods' requests and limits (e01d7ff). See [Kubernetes workers](/docs/guides/capacity/kubernetes#host-resources-and-pods).
-- **No `kubectl` in `daemon/Containerfile`.** Add it, or labels, reaping and DRA do not work.
 
 <Cards>
   <Card title="Kubernetes workers" href="/docs/guides/capacity/kubernetes">Reservations with binding kubernetes, the device plugin and DRA.</Card>

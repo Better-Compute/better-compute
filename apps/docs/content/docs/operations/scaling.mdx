@@ -9,6 +9,8 @@ sources:
   - bench/gateway-streams/README.md
   - bench/gateway-streams/results
   - tests/bench/gateway-streams.bench.ts
+  - bench/gateway-status/README.md
+  - tests/bench/gateway-status.bench.ts
   - bench/iam-lane/README.md
   - bench/placements/README.md
   - bench/placements/results
@@ -109,6 +111,15 @@ store, the gateway's own lease renewal waited past its 20 s TTL, and every fence
 jitter. In the h2c storm run all 5,000 sessions came back, p99 32.5 s and all within 33.2 s, and 3,056 of 3,056
 commands succeeded. In the h2c runs RSS includes the in-process load generator, and h2c leaves out TLS handshake
 cost.
+
+**Status reports** (318b396). `bench/gateway-status` applies status reports as the gateway's status job does, with the
+production `xidStatusHandler`, over 10,000 nodes on PGlite, sequentially. bcd sends a full report at least every
+10-minute drift pass, so the steady need is 16.7 reports/s; the steady report ran at 662/s (p99 3.27 ms), about 40
+times that, and a fleet-wide burst drains in about 15 s. Raising two conditions on every node ran at 253/s. The
+gateway now publishes `node.status` only when a report says something new: `statusKey(report)` hashes the report
+without its gauges (host pressure and volume storage), and a session publishes only when the key changes (a new
+session publishes its first report again). Every report still runs the status handlers, so conditions, pressure and
+`observed_generation` stay current. Before, every drift report was an event, about 1.44 million a day at 10,000 nodes.
 
 ### Placements
 

@@ -239,7 +239,8 @@ answer whether or not anything exists.
 
 The idempotency row is looked up and locked. The pool must be owned by or offered to the tenant and
 not archived, or the answer is `NOT_FOUND`. Device classes must fit the pool's sharing mode, and
-`binding: 'node'` needs a `tenantRoot` pool, `binding: 'kubernetes'` a pool with `policy.kubernetes`. A request
+`binding: 'node'` needs a `tenantRoot` pool, `binding: 'kubernetes'` a pool with `policy.kubernetes` that the
+tenant owns (3825ec7; a tenant the pool is only offered to is `INVALID_INPUT`). A request
 without `resources` gets the pool's per-GPU share of host CPU and memory here, stored in the request (see
 [host resources](#host-resources)). Then the draft is inserted with its row in the IAM
 <Term id="authz-projection">authz projection</Term>, parented to the pool and owned by the caller:
@@ -363,6 +364,7 @@ never releases it (PLAN.md section 10.5): node connectivity and health changes w
 | `Queued` | `PoolPlacer` | Waiting for the pool-lease placer's next batch |
 | `BindTimeout` | `NodeDidNotBind`, `NodeRejectedBinding` | The node did not bind in time or refused; the message counts attempts |
 | `Degraded` | `BindingLost` | A node reported it lost devices it had bound |
+| `Degraded` | `ForeignGpuExposure` | A node of an active reservation reports the node condition `ForeignGpuExposure`: something besides bcd can hand its GPUs to pods, so they are not the tenant's alone (4570dfe). The message lists the nodes. `BindingLost` wins over it, and it wins over `AtomUnhealthy`; nothing is released. See [GPU isolation](/docs/guides/capacity/kubernetes#gpu-isolation) |
 | `Degraded` | `AtomUnhealthy` | A booked atom of an active reservation is unhealthy; the message lists them. `BindingLost` wins when both apply |
 | `NodeUnreachable` | `Unreachable` | A node of an active reservation is not connected; the message lists the nodes |
 | `Preempted` | `SpotPreempted` | A running spot reservation was cut back to its notice deadline |
@@ -408,27 +410,34 @@ another node's allocation is ignored like an unknown one. A report that arrives 
 **`kubernetes`** (v1.1, a21c1c1) is a hold whose devices the node hands to its kubelet: the assignment carries
 `BINDING_KUBERNETES`, bcd binds it like a hold and marks its CDI spec for its device plugin, which advertises exactly
 those devices as `bcd.dev/gpu`, `bcd.dev/gpu.mig` or `bcd.dev/gpu.slot` until the reservation ends. It needs a pool
-with `policy.kubernetes` (`INVALID_INPUT` otherwise). See [Kubernetes workers](/docs/guides/capacity/kubernetes).
+with `policy.kubernetes` (`INVALID_INPUT` otherwise), and only the pool's owner may book it (3825ec7): the kubelet
+gives bound GPUs to any pod of the cluster, so a tenant the pool is merely offered to gets `INVALID_INPUT` and books
+holds instead. See [Kubernetes workers](/docs/guides/capacity/kubernetes).
 
 ### Host resources
 
 A reservation can book a host's CPUs, memory and 1 GiB huge pages with its GPUs (PLAN.md §3.8, a21c1c1):
 
 - **What is bookable.** The `capacity.hosts` reconciler (every 30 seconds, `hostSyncEvery`) keeps each host's
-  `vcpu`, `memoryGiB`, `hugepages2Mi` and `hugepages1Gi` rows in step with its applied inventory (8a7f8eb); see
+  `vcpu`, `memoryGiB`, `hugepages2Mi` and `hugepages1Gi` rows in step with its applied inventory (8a7f8eb), and since
+  b7e8bf5 inventory wakes it (and vps's `vps.hosts`) for a host as soon as it applies that host's snapshot, so a new
+  or re-inventoried host is bookable at once rather than at the next pass; see
   [pools](/docs/guides/capacity/pools#pool-policy). A host without rows books none.
 - **`resources`.** `{ vcpu, memoryGiB, hugepages1Gi }` per node (per gang member for a gang), booked on the devices'
   node in the same guarded statement as the devices, so a node that cannot give them is not a fit.
-- **Without `resources`**, a request for whole GPUs books the pool's per-GPU share of CPU and memory, times its whole
-  GPUs: `policy.perGpu.vcpu` and `policy.perGpu.memoryGiB` where set, otherwise the smallest share any GPU host of the
-  pool can give (`floor(allocatable × ratio ÷ bookable GPUs)`), so the share fits on every host. It is resolved once,
-  when the draft is written, and stored in the request. Requests for MIG instances or slots only book none, so pools
-  behave as before until their hosts have rows.
+- **Without `resources`**, a request books the pool's per-GPU share of CPU and memory, times the GPUs' worth it asks
+  for: `policy.perGpu.vcpu` and `policy.perGpu.memoryGiB` where set, otherwise the smallest share any GPU host of the
+  pool can give (`allocatable × ratio ÷ physical GPUs`, counting every physical GPU whether bookable or not), so the
+  share fits on every host; the product is rounded down. Since 004579e fractional GPUs count too (`gpuEquivalent`): a
+  MIG instance is 1/7 of a GPU, and a time-slice or MPS slot 1/`policy.sharing.replicas` (default 4, or 10 for `mps`),
+  so MIG and slot work also carries, and is limited to, its share of the host. It is resolved once, when the draft is
+  written, and stored in the request. Pools whose hosts have no rows book none, so they behave as before.
 - **The share is also the floor** (41826a2). `resources` below the pool's per-GPU share, or `resources: {}`, are
   raised to it, so booked GPUs never run a workload without CPU and memory limits while the same CPU and memory are
   sold again.
 - **Quota.** The share rides on the GPUs and needs no quota beyond theirs; the reservation records it as `hostShare`
-  when it is created. Anything booked above it is charged to the tenant's `vcpu` and `memoryGiB` quota (1 GiB huge
+  when it is created, and since 004579e always, as `{}` when the share is empty (a pool without one), so anything
+  booked above an empty share is charged too. Anything booked above it is charged to the tenant's `vcpu` and `memoryGiB` quota (1 GiB huge
   pages count as memory), and a missing quota row grants 0, so the excess is `QUOTA_EXCEEDED` unless the offer names
   these resources (41826a2). One GPU's quota can then not take a whole host's CPUs and memory. Reservations made before
   `hostShare` existed charge their devices only. IAM sees `vcpu` and `memoryGiB` (summed over a gang) as attributes of
@@ -438,11 +447,16 @@ A reservation can book a host's CPUs, memory and 1 GiB huge pages with its GPUs 
 - **From the CLI and the console.** `better-compute reserve` and `better-compute capacity --preview` take `--cpus`
   (0 to 4096) and `--memory` (GiB, 0 to 65,536), sent as `resources`, and `--kubernetes` for `binding: 'kubernetes'`
   (ea36a94). `@better-compute/console-kit`'s reservation form takes the same three as `vcpu`, `memoryGiB` and
-  `kubernetes`, and previews with them (e833433); the console app's reservation page does not show those fields yet.
+  `kubernetes`, and previews with them (e833433). The console app's reservation page shows them since 4533265:
+  optional **Host CPUs** (0 to 4096) and **Host memory, GiB** (0 to 65,536), left empty for the pool's per-GPU share,
+  and the Kubernetes checkbox only for a pool the tenant owns that has `policy.kubernetes`.
 - **On the node** (c5a419c, 260e33c), the booked resources become the assignment's limits: `cpu_millis` from
   `vcpu`, `memory_bytes` from `memoryGiB`, `hugepages_1gi`, and a cpuset on the NUMA nodes of the hold's devices when
   those nodes have enough CPUs (`cpus`) or memory (`mems`). Since b6b804e a cpuset never includes the host's reserved
-  CPUs, the lowest non-isolated, `policy.hostReserve.vcpu` (default 2), and the reserve counts against the fit. bcd
+  CPUs, the lowest non-isolated, `policy.hostReserve.vcpu` (default 2), and the reserve counts against the fit. The node's cpulists (its NUMA nodes'
+  CPUs and isolated CPUs) come from its inventory, so capacity reads them within bounds (004579e): CPU ids up to 8191,
+  at most 32 KiB and 4096 comma-separated parts, a longer list read as empty, so an oversized list cannot stall the
+  control plane. bcd
   admits the hold against the host's memory beside its VMs and other holds, and one that does not fit fails with
   `resources-exhausted`, which re-places it (31555bf). It then creates the cgroup slice
   `bcd-alloc-<allocation>.slice` with those limits, names it in the CDI spec (`bcd.dev/cgroup-parent`) and the env
@@ -451,7 +465,8 @@ A reservation can book a host's CPUs, memory and 1 GiB huge pages with its GPUs 
   that slice; see [device assignments](/docs/daemon/delivery#device-assignments). Once the reservation is active,
   [`reservations.get`](/docs/reference/api/reservations#get) shows the slice as `binding.cgroupParent`
   (`HoldBinding.cgroupParent`, 6aa412b), which bcd reports in `AllocationBound.cgroup_parent` (c81f230, 19dbf60); the
-  control plane keeps it only in bcd's `bcd-alloc-<id>.slice` form. It is empty for a hold without limits and for a
+  control plane keeps it only when it is exactly `bcd-alloc-<allocation>.slice` for that same allocation (004579e), so
+a node cannot point a reservation at another allocation's slice. It is empty for a hold without limits and for a
   `kubernetes` binding: that binding gets no slice, since its pods live in the kubelet's cgroups, where the kubelet
   enforces their requests and limits; its booked limits still count in bcd's host admission (see
   [Kubernetes workers](/docs/guides/capacity/kubernetes#host-resources-and-pods)).

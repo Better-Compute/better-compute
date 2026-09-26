@@ -223,6 +223,13 @@ The deploy then sends `deploy.image` (the catalog source, digest, format and com
 reference to the rendered user data) and `boot.kexec`. The user data travels only as a reference, and
 the deploy's ramdisk boot gets its own discovery token.
 
+A machine whose BMC cannot report its MACs (IPMI) and that was enrolled with only its `productUuid` adds a step
+before 4 (3d26428, 8de6e2f): `metal.ensureRamdisk` power-cycles it into PXE with no boot entry, a MAC first seen under
+its UUID within 10 minutes becomes its candidate, and nothing more is sent until an operator confirms a MAC with
+`metal.confirmMac` (or at once on a pool with `policy.trustProvisioningNetwork`, whose `inventory.refresh` then checks
+the ramdisk's UUID and NICs against the machine). See
+[discovering new machines](/docs/guides/bare-metal/sites#discovering-new-machines).
+
 ### What the ramdisk does
 
 `bcd ramdisk` runs these kinds (`daemon/internal/agent/ramdisk.go`) under metal's names. Disks are named by WWN,
@@ -301,6 +308,13 @@ export const acmeAutoinstall = definePlugin({
 Pass the plugin to the workflow engine next to metal, so it resolves the plugin's step and profile:
 `provisionModule({ modules: [bareMetal, acmeAutoinstall] })`. `media.insert` with `fromStep` reads the
 `url` the render step returned and mounts it through the BMC's virtual media.
+
+**On a BMC without virtual media** (IPMI), this profile is refused before the workflow starts, because a
+`fromStep` ISO has no digest the site cache can verify. An ISO registered in the catalog works there (3d26428): name
+it with `{ use: 'media.insert', with: { image: 'img_…' } }`, and metal pins it at the site, boots it with iPXE
+`sanboot` from the site cache, turns the later `setBootDevice` to `cd` into `pxe`, and has `media.eject` remove the
+boot entry. A catalog ISO is the same for every machine, so a per-node join token cannot live inside it. See
+[sanboot instead of virtual media](/docs/guides/bare-metal/bmc#sanboot-instead-of-virtual-media).
 
 What the tests assert:
 

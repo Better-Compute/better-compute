@@ -258,7 +258,8 @@ const response = await compute.handler(request, { peer: { address: socket.remote
 The address becomes `Credential.sourceIp`, which remote IAM receives as `x-forwarded-for`; the client's own
 forwarding headers never reach IAM (e7092bf). Since 0eba0ad that holds for an embedded IAM too: the handler strips
 `X-Forwarded-For`, `Forwarded`, `X-Real-IP` and the other client-address headers and sets `X-Forwarded-For` to the
-verified address. The IAM caches key on the address as well, so the authentication cache (30 s) and allowed read
+verified address, and since 004579e the in-process API does the same with a credential's `headers` and `sourceIp`,
+so no path in lets a caller name its own address. The IAM caches key on the address as well, so the authentication cache (30 s) and allowed read
 decisions (10 s) of a token used from one address never serve it from another. Without an address, IAM sees none.
 
 Behind a load balancer the socket's peer is the balancer, for every caller. Name your load balancers and reverse

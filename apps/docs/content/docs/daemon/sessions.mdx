@@ -303,7 +303,10 @@ join token. The limits are `createGateway({ duplicateHellos: { max, windowMs } }
 **Heartbeats.** The daemon sends [`Heartbeat`](/docs/reference/protocol#heartbeat) every `heartbeat_interval_ms`
 (10 seconds) with its free credits per lane, its load ([`NodeLoad`](/docs/reference/protocol#nodeload): load average,
 available memory, running commands, pending events) and its applied generation.
-Every 10th heartbeat also carries the inventory hashes. The gateway sends an HTTP/2 PING every 20 seconds. Any frame
+Every 10th heartbeat also carries the inventory hashes, and since 427787a so does the first heartbeat after a
+re-collection sent changed sections (a host unit that reserved huge pages, say): the gateway applies an inventory
+only once the stored sections and the reported hashes agree, so the change no longer waits up to ten heartbeat
+intervals before capacity sees it. The gateway sends an HTTP/2 PING every 20 seconds. Any frame
 refreshes the session's last-seen time.
 
 **Three missed heartbeats close the session.** The gateway's liveness loop runs every 5 seconds (half the

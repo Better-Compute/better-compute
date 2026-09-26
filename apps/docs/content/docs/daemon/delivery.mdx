@@ -163,7 +163,10 @@ a message), and its full condition set. Conditions carry `age_ms`, an age on the
 control plane derives `since` from `compute_now()`: agents report ages, not timestamps. From v0.3 the report also
 lists every VM or container the host runtimes know. Status is coalesced latest-wins: the gateway keeps the last
 report per session and writes it about once a second, running the host's status handlers (XID health, VPS instance
-status), each under its own savepoint.
+status), each under its own savepoint. Every report runs the handlers, but since 318b396 the `node.status` event is
+published only when the report says something new: `statusKey` hashes it without its gauges (host pressure and
+volume storage), and a session skips a report whose key it already published (a new session publishes its first
+report again). See [scaling](/docs/operations/scaling#gateway-sessions).
 
 ### Device assignments
 
@@ -301,7 +304,8 @@ agents, over the runtimes the build provides) follows the FakeDaemon's `FakeHype
   runtime that checks capacity itself (the fakehw runtime) is left alone, and a host whose `/proc/meminfo` cannot be
   read starts without the check, with a warning.
 - On a host with a runtime, every status report lists everything the runtimes hold in `StatusReport.instances`,
-  with `instances_complete`.
+  with `instances_complete`, and since b8e7271 the volume store's space in `StatusReport.volume_storage` (see
+  [persistent volumes](#persistent-volumes)).
 - `restore_from` boots a new instance from a snapshot instead of an image. bcd downloads it, over https only since a
   snapshot may hold a tenant's memory, to `data_dir/snapshots/<sha256>` and verifies it first; an `http://` URL, a
   missing digest, a mismatch, another runtime, or a memory snapshot from another CPU model fails that instance. The
@@ -428,9 +432,12 @@ memory, so nothing is taken from it. `libvirt-kvm` sets the size with `virsh set
 `desired_balloon` and `vm.info`'s balloon size. A guest defined without a balloon device is never touched (the runtime
 answers `ErrNoBalloon`, e48f40e), and a memory-restored `cloud-hypervisor` VM keeps bcd's balloon, never the one saved
 in the tenant's snapshot (9dddde4). Host admission still charges each VM its full configured memory, so ballooning
-never lets bcd start more guests than fit. The OTLP export reports each balloon as `bcd.instance.memory.balloon`. The
+never lets bcd start more guests than fit. The OTLP export reports what each running ballooned guest lends the host
+(its memory less what the balloon leaves it) as `bcd.instance.memory.balloon.reclaimed`, only for guests whose spec
+asks for a balloon (9bdd43a; it was `bcd.instance.memory.balloon`, reported for every libvirt domain). The
 policy and the controller are tested against fake runtimes (`internal/agent` `balloon_test.go`,
-`balloon_agent_test.go`); no balloon has run on a real host.
+`balloon_agent_test.go`), and `tests/e2e/bcd-placement.test.ts` inflates and deflates one through a fakehw bcd under
+simulated memory pressure (427787a); no balloon has run on a real host.
 
 #### Persistent volumes
 
@@ -459,6 +466,31 @@ disks behind [sandbox volumes](/docs/guides/vps/sandboxes#volumes), across the i
   pass: its blocks are punched out, then the file is unlinked. A volume a running VM still has open is never destroyed
   (39458f9), and one whose VM is stopped or deleted in the same pass goes in that pass (408e002).
 - **No memory snapshots beside a writer**, as above.
+- **Sparse, but never overcommitted** (851016e). A volume's unwritten space is promised, not taken, so a tenant
+  filling its volume could otherwise leave the other volumes, the instances' overlays and bcd's own journal without
+  space. A new volume, or a growth, must fit in the data directory filesystem's available space (`statfs` `Bavail`)
+  less a reserve (5% of the filesystem, at least 2 GiB) less every volume's unwritten space. One that does not is
+  refused, keeps its size, and the instances that attach it report why (`volume <id>: … MiB needed, … MiB can still be
+  promised to volumes on this host (… MiB free, … MiB reserved, … MiB promised to volumes' unwritten space)`).
+- **Space reported** (37d6d6d, b8e7271). Every status report of a host with a runtime carries
+  `StatusReport.volume_storage`:
+
+  | Field | Value |
+  | --- | --- |
+  | `total_bytes` | The data directory's filesystem |
+  | `available_bytes` | Its `statfs` `Bavail` |
+  | `reserved_bytes` | Kept from volumes: 5% of the total, at least 2 GiB |
+  | `committed_bytes` | The sum of every volume's size |
+  | `outstanding_bytes` | The sum of every volume's unwritten (sparse) space |
+
+  The control plane does not read it yet: vps books a volume's `diskGiB` through capacity without these numbers, so
+  a volume can be booked on a host whose filesystem cannot keep the promise, and bcd then refuses it there.
+- **Closed again once detached** (bdeb452). On `cloud-hypervisor` a read-write volume is handed to the running VMM's
+  user (0600) and given back to root when it stops. A read-only volume gets a POSIX ACL entry (`user:<uid>:r`) for
+  each VMM user that has it open, removed when that VMM stops, so it is readable by exactly those VMMs rather than by
+  a group; the last reader gone, it is root's 0600 without an ACL. On a filesystem without ACLs it falls back to
+  group `kvm` and 0640, reverted once no other instance of the runtime was given it. Under `bcd helper`, a stopped or
+  destroyed `libvirt-kvm` domain's volumes go back to 0600 unless another running domain still has them open.
 
 A bcd that keeps volumes advertises `instance.volumes`, and only such hosts receive instances with volumes.
 

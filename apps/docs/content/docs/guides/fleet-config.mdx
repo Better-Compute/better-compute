@@ -191,7 +191,7 @@ See [flavors](/docs/guides/vps/flavors).
     warm: { type: '{ min: number; max?: number }', description: '0 to 64 each.' },
     env: { type: 'Record<string, string>', description: 'Variable names (A-Z, 0-9, _) to secret://<tenant>/<id> references only, written to /etc/sandbox/env in each sandbox.' },
     network: { type: "'egress' | 'private' | 'none'", description: "What the sandbox's NICs may reach.", default: "'egress'" },
-    volumes: { type: '{ volume: string; mountPath: string; readOnly?: boolean }[]', description: '(v1.1, 94b8b70) Existing sandbox volumes every sandbox mounts, by volume name, in attach order. mountPath is an absolute path of letters, digits and . _ / -. The document takes at most 24; the API allows 8 per template.' },
+    volumes: { type: '{ volume: string; mountPath: string; readOnly?: boolean }[]', description: '(v1.1, 94b8b70) Existing sandbox volumes every sandbox mounts, by volume name, in attach order. mountPath is an absolute path of letters, digits and . _ / -. At most 8, the API\'s limit per template (f181f43), so a longer list fails validation with INVALID_INPUT before anything is applied.' },
   }}
 />
 

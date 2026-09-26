@@ -96,7 +96,8 @@ the hash of its bytes.
 ### Hash on the node
 
 The daemon canonicalizes each section (repeated fields sorted by a stable key), encodes it, and takes the SHA-256
-of those exact bytes. `Hello`, and every tenth heartbeat, carry the section hashes.
+of those exact bytes. `Hello`, every tenth heartbeat, and the first heartbeat after changed sections were sent
+(427787a) carry the section hashes.
 </Step>
 <Step>
 ### Pull what changed
@@ -306,16 +307,29 @@ puts its type into `noScheduleReasons`, in the same transaction.
 | `MPSDown` (v1.1) | bcd's `gpu-sharing` unit: an `mps` pool's MPS control daemon is not running, so every client fails (c7613e1) | NoSchedule while `true` |
 | `RebootRequired` (v1.1) | bcd's host units: a setting takes effect only after a reboot; the reason names the units (0aea5c0), see below | Informational |
 | `HostManagedExternally` (v1.1) | the `host` section's state on a node with `[host] units = false` (c7613e1) | Informational |
-| `ForeignGpuExposure` (v1.1) | bcd on a Kubernetes worker: something besides bcd hands out GPUs (another `nvidia.com/*` device plugin, or a container toolkit that accepts `NVIDIA_VISIBLE_DEVICES` from unprivileged pods), so bcd offers none (9f860ad) | Informational |
-| `PodResourcesUnavailable` (v1.1) | bcd on a Kubernetes worker: it holds devices for Kubernetes and the kubelet's pod-resources socket is missing or failing, so released devices cannot be reclaimed from pods (9f860ad) | Informational |
+| `ForeignGpuExposure` (v1.1) | bcd on a Kubernetes worker: something besides bcd hands out GPUs (another `nvidia.com/*` device plugin, or a container toolkit that accepts `NVIDIA_VISIBLE_DEVICES` from unprivileged pods), so bcd offers none (9f860ad) | NoSchedule while `true` (ebd9806), and the node's active reservations are `Degraded` with reason `ForeignGpuExposure` (4570dfe) |
+| `PodResourcesUnavailable` (v1.1) | bcd on a Kubernetes worker: it holds devices for Kubernetes and the kubelet's pod-resources socket is missing or failing, so released devices cannot be reclaimed from pods (9f860ad) | NoSchedule while `true` (ebd9806), for the whole node |
 | `KubernetesReleased` (v1.1) | bcd: the spec dropped `k8s-join`, and bcd cordoned and drained the Node (9f860ad) | Informational |
 | `KubernetesTaintsDrift` (v1.1) | bcd's `k8s-join` unit: the Node's taints differ from the pool's, which the kubelet may not change; the message is the `kubectl taint` command a cluster admin runs (6ef198b) | Informational |
-| `KubernetesReleaseStuck` (v1.1) | bcd: a released Kubernetes allocation still held by a pod (or with pod-resources unreachable) after 5 minutes, so its release is not reported yet (cd5fc82) | In the status report only |
+| `KubernetesReleaseStuck` (v1.1) | bcd: a released Kubernetes allocation still held by a pod (or with pod-resources unreachable) after 5 minutes, so its release is not reported yet (cd5fc82) | NoSchedule while `true` (ebd9806) |
 
-Since b91dcff and 88219ea the gateway's `daemonNodeConditions` lists `ForeignGpuExposure`,
-`PodResourcesUnavailable`, `KubernetesReleased` and `KubernetesTaintsDrift`, so they are written as node conditions
-without a NoSchedule reason. `KubernetesReleaseStuck` is not in that list: it rides bcd's `StatusReport.conditions`
-and the `node.status` event only. See [Kubernetes workers](/docs/guides/capacity/kubernetes#gpu-isolation).
+The gateway's `daemonNodeConditions` (b91dcff, 88219ea) lists the Kubernetes conditions, so they are written as node
+conditions. Since ebd9806 (security review 2) three of them are NoSchedule while true on a node that is not
+`tenant-controlled` (on a tenant-controlled node they stay advisory, as below), because each means the node cannot
+hand out GPUs safely:
+
+- **`ForeignGpuExposure`**: another path (the GPU operator's device plugin, or `NVIDIA_VISIBLE_DEVICES` from
+  unprivileged pods) reaches the node's GPUs, so a hold booked there would not be isolated. A change of it also wakes
+  the node's started reservations, which then show `Degraded` / `ForeignGpuExposure` at once (4570dfe; see
+  [reservation conditions](/docs/guides/capacity/reservations#states-and-conditions)).
+- **`PodResourcesUnavailable`**: bcd cannot tell which pods hold which devices. Placement has no NoSchedule for one
+  binding only, so the whole node takes no work until the socket answers.
+- **`KubernetesReleaseStuck`**: until ebd9806 it rode bcd's `StatusReport.conditions` and the `node.status` event
+  only. Now it is recorded, and while a released allocation's devices are still held by a pod the node takes no more
+  work, since the GPUs may still be in use; an operator looks first.
+
+`KubernetesReleased` and `KubernetesTaintsDrift` stay informational. See
+[Kubernetes workers](/docs/guides/capacity/kubernetes#gpu-isolation).
 
 `FabricManagerDown`, `MPSDown`, `RebootRequired`, `HostManagedExternally` and the four Kubernetes conditions above
 come from bcd's [host configuration](/docs/daemon/host-config#status-and-failures) and its Kubernetes side. The gateway's

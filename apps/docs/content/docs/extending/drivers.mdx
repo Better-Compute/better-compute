@@ -295,7 +295,7 @@ on [BMC drivers and credentials](/docs/guides/bare-metal/bmc).
 | `power.getPower` | `chassis power status` | `{"power":"on"}` or `{"power":"off"}` |
 | `power.setPower` (`action`) | `chassis power on`, `off`, `cycle`, `reset` or `soft` (`shutdown` is `soft`) | `{}` |
 | `management.setBootDevice` (`device`, `persistent`) | `chassis bootdev pxe`, `disk`, `cdrom` or `bios` (`hdd` is `disk`, `cd` is `cdrom`), plus `options=persistent` | `{}` |
-| `inspect.inspect` | `fru print 0` and `chassis power status` (required), then `mc info`, `lan print` and `sdr list` (best effort) | The Redfish driver's shape, less the host's NICs and UUID (below) |
+| `inspect.inspect` | `fru print 0` and `chassis power status` (required), then `mc info`, `mc guid`, `lan print` and `sdr list` (best effort) | The Redfish driver's shape, less the host's NICs (below) |
 
 `inspect.inspect` answers:
 
@@ -303,7 +303,8 @@ on [BMC drivers and credentials](/docs/guides/bare-metal/bmc).
 | --- | --- |
 | `manufacturer`, `model`, `serialNumber` | The builtin FRU (`fru print 0`): `Product Manufacturer`, `Product Name`, `Product Serial`, falling back to the board's (and for the serial the chassis') fields |
 | `power` | `chassis power status` |
-| `macs`, `ipAddresses` | Always empty: IPMI does not name the host's NICs reliably. `productUuid` is left out for the same reason |
+| `macs`, `ipAddresses` | Always empty: IPMI does not name the host's NICs reliably |
+| `productUuid` | The `System GUID` of `mc guid` (Get System GUID), lower-cased, when it is a canonical UUID other than all zeros (7cd1dd2). It is the host's SMBIOS UUID on most boards, in whichever byte order the BMC prints it; metal matches every order, so a machine enrolled without MACs is found when it PXE-boots. Left out when the BMC has none |
 | `board` | `{ manufacturer, product, serial }` from the FRU's board fields |
 | `bmc` | `{ firmware, manufacturer }` from `mc info` and `{ mac, ipAddress }` from `lan print`: the BMC's own identity, not the host's |
 | `sensors` | `{ count, ok, problems }` from `sdr list`; `problems` names at most 32 sensors whose status is neither `ok` nor `ns` |
@@ -335,13 +336,15 @@ file's first word; b12c217) is `credentials-unavailable`.
   installed.
 
 It covers power, boot device and inspection: virtual media, firmware, BIOS, RAID and credential rotation stay
-Redfish's. goreleaser builds it without cgo and ships it as `bcx-ipmi_<version>_linux_{amd64,arm64}.tar.gz` (348ff56),
+Redfish's, though a catalog ISO still boots on an `ipmi` machine over PXE (`sanboot`; see
+[sanboot instead of virtual media](/docs/guides/bare-metal/bmc#sanboot-instead-of-virtual-media)). goreleaser builds it without cgo and ships it as `bcx-ipmi_<version>_linux_{amd64,arm64}.tar.gz` (348ff56),
 and the api's downloads route serves that archive (97b2ac2; see
 [serving the binaries](/docs/daemon/install#serving-the-binaries)); `daemon install-script --install-plugins bcx-ipmi`
 installs it with its pin after checking the archive against the signed release manifest (adf2ae9; see
 [installing plugins from the release](/docs/daemon/install#installing-plugins-from-the-release)). To use it, have it
-in a site agent's `[plugins] dir` (below) and enroll the machine's BMC with driver `ipmi`, without a key pin, and with
-its PXE `macs` in a pool with an agent, since IPMI inspection finds none. Metal knows what `ipmi` serves and refuses
+in a site agent's `[plugins] dir` (below) and enroll the machine's BMC with driver `ipmi`, without a key pin, and in a pool
+with an agent with its PXE `macs` or its `productUuid` (PXE discovery then proposes the MAC for `metal.confirmMac`;
+3d26428, 8de6e2f), since IPMI inspection finds no MACs. Metal knows what `ipmi` serves and refuses
 up front, with `UNSUPPORTED` (reason `bmc-driver-unsupported`), any verb whose workflows need more (a3ec8d0); see
 [IPMI through bcx-ipmi](/docs/guides/bare-metal/bmc#ipmi-through-bcx-ipmi) and
 [what metal checks before a workflow](/docs/guides/bare-metal/bmc#what-metal-checks-before-a-workflow). Its tests

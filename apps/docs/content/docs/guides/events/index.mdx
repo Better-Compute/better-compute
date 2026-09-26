@@ -139,9 +139,9 @@ writes a type outside the catalog.
 | `quota.updated` | `pool/{id}` | capacity | `quota.updated` |
 | `reservation.*` | `reservation/{id}` | capacity | `reservation.placed`, `pending`, `queued`, `binding`, `active`, `extended`, `preempting`, `preempted`, `repaired`, `failed`, `cancelled`, `expired`, `awaiting-confirmation`, `binding-rejected`, and one per state change |
 | `reservation.reassigned` | `reservation/{id}` | capacity | An offboarded identity's reservation moved to its successor: `{ reservationId, from, to, reason }` |
-| `node.*` | `node/{id}` | server | `node.joined`, `node.acceptance.started`, `node.acceptance.failed`, `node.adopted`, `node.connected`, `node.disconnected`, `node.unreachable`, `node.lost`, `node.status`, `node.cordoned`, `node.uncordoned`, `node.draining`, `node.drained`, `node.labeled`, `node.tainted`, `node.adopting`, `node.deleted`, `node.command.queued`, `node.command.cancel-requested`, `node.report-failed`, `node.ssh-cert.issued`, `node.ssh-cert.revoked` |
+| `node.*` | `node/{id}` | server | `node.joined`, `node.acceptance.started`, `node.acceptance.failed`, `node.adopted`, `node.connected`, `node.disconnected`, `node.unreachable`, `node.lost`, `node.status` (only when a report says something new; see below), `node.cordoned`, `node.uncordoned`, `node.draining`, `node.drained`, `node.labeled`, `node.tainted`, `node.adopting`, `node.deleted`, `node.command.queued`, `node.command.cancel-requested`, `node.report-failed`, `node.ssh-cert.issued`, `node.ssh-cert.revoked` |
 | `node.inventory.changed`, `node.gpu.*`, `node.mig.*`, `node.disk.*`, `node.driver.*` | `node/{id}` | inventory | `node.gpu.added`, `node.gpu.missing`, `node.mig.layout.changed`, `node.disk.replaced`, `node.driver.changed`; `node.mig.scheduled`, `node.mig.granted` and `node.mig.applied` from capacity's MIG layout gate; also `node.condition.changed` from the hygiene sweep and host pressure (within `node.*`) |
-| `node.enrolled`, `node.provision.*` | `node/{id}` | metal | `node.provision.<state>` for each provisioning transition |
+| `node.enrolled`, `node.pxe-mac.discovered`, `node.pxe-mac.confirmed`, `node.provision.*` | `node/{id}` | metal | `node.provision.<state>` for each provisioning transition; `node.pxe-mac.discovered` when PXE discovery found a candidate MAC for a machine enrolled without MACs (`bound` says whether a trusted pool bound it at once); `node.pxe-mac.confirmed` when an operator bound a MAC with `metal.confirmMac` |
 | `command.settled` | `command/{id}` | gateway | A command reached a terminal state |
 | `workflow.*` | `workflow/{id}` | provision | `workflow.created`, `started`, `paused`, `resumed`, `retried`, `cancelled`, and one per state |
 | `instance.*` | `instance/{id}` | vps | `instance.created`, `scheduled`, `provisioning`, `starting`, `stopping`, `resized`, `deleting`, `deleted`, `failed`, `lost`, `recovered`, `recreating`, `orphaned` |
@@ -156,6 +156,11 @@ The catalog names the subject each family is declared with, but code is the fina
 example, is published with the instance or node it opens as its subject. Modules you write publish their own
 families; register them with `eventsModule({ extraEvents })` so webhooks can subscribe to them (see
 [webhooks](/docs/guides/events/webhooks)).
+
+`node.status` is published when a node's status report says something new on its session, not for every report.
+The gateway compares reports without their gauges (host pressure, volume storage), which move on every converge
+pass, so `node.status` does not carry every gauge update: read gauges from [metrics](/docs/operations/observability),
+and conditions from `node.condition.changed`. A reconnected session publishes its first report again.
 
 ## Read history with events.list
 

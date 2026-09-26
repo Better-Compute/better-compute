@@ -109,7 +109,13 @@ are built, and ends with a hardening checklist.
   refused whole, signed or not), and node-signed `SecretRequest` and `WorkloadTokenRequest` answered to a one-time
   key (the site agent sends them for BMC credentials and discovery tokens, the ramdisk and VPS hosts for user data,
   the metadata service for workload tokens). The site
-  agent's boot server answers PXE only for prepared machines while it holds the boot lease. Driver plugins run
+  agent's boot server answers PXE only for prepared machines while it holds the boot lease, serves its image cache
+  only under per-boot or per-firmware grants (b7ed8a2), bounds TFTP to 64 transfers and 4 per source (4d8b493) and
+  request headers to 8 KiB, and keeps only well-formed fields of unknown PXE clients (0442561). PXE discovery never
+  binds a MAC from that unauthenticated DHCP data alone (8de6e2f): a discovered MAC is a candidate until an operator
+  confirms it with `metal.confirmMac`, unless the pool sets `policy.trustProvisioningNetwork`, in which case the
+  ramdisk's UUID and NICs must match the machine (see
+  [discovering new machines](/docs/guides/bare-metal/sites#discovering-new-machines)). Driver plugins run
   sandboxed (below), and each `bmc.*` kind admits only its own BMC operations, so a `bmc.query`, which needs no batch,
   cannot carry a power or RAID change, and `site.httpProxy` never reaches a BMC. With approver keys in its trust bundle it enforces the destructive-batch quorum. Its node key is a 0600
   file, not a TPM key. `bcd node` can run unprivileged beside the root `bcd helper` ([below](#privilege-separation-on-the-node)),
@@ -249,7 +255,9 @@ and bcd has it since 28dc2ae:
   the node), which decides alone when set, or else from the `SignedTrustBundle` the JoinService key signed, checked
   against root's `join_signing_key_pin`, so a root rotation needs no new pin. The helper refuses unless the roots
   check out (pinned, or from a bundle no older than one it accepted), the signature verifies (worker role), the body
-  names this node (fixed by the first signed spec in `/var/lib/bcd-hostconfig/helper-intent.json`), its generation is
+  names this node (since a966cd4 the node root's own signed join record names, `/var/lib/bcd-hostconfig/join-response.pb`,
+  re-verified against `join_signing_key_pin`; a node joined before it keeps the first signed spec's binding in
+  `/var/lib/bcd-hostconfig/helper-intent.json`), its generation is
   not older than one already applied, and the unit's settings are exactly the body's. Once a bundle with roots was
   accepted, a request without a signed spec is refused. A verified body stays good after its short-lived worker
   certificate expires, and a node and a helper of different versions fail closed. **The caveat:** nothing is checked
@@ -257,7 +265,9 @@ and bcd has it since 28dc2ae:
   a deployment that signs nothing; the helper is then bounded by strict unit validation, the sysctl denylist, root
   writes only under root-only directories, and `k8s-join` only to root-pinned `allowed_clusters`. `daemon
   install-script` pins `command_root_sha256` from `--command-root-sha256` or the local PKI bundle (59985ae), which
-  closes that window. See [signed specs](/docs/daemon/host-config#signed-specs).
+  closes that window. The trust-on-first-use binding of the node id is closed by root's join record (a966cd4), except
+  on nodes joined before it, which have no record: re-join them, or re-run the install script. See
+  [signed specs](/docs/daemon/host-config#signed-specs).
 - **Root writes only under root's directories** (02485b3, f8e13ef). Whenever bcd writes as root for a config unit,
   every existing directory from `/` down to the file must be a real directory owned by root and writable by no one
   else, so `/tmp` and anything the node owns are refused, and the units' records live in `/var/lib/bcd-hostconfig`,
@@ -561,7 +571,9 @@ See [tenancy](/docs/guides/iam/tenancy).
   is one of them is the caller read from `X-Forwarded-For`, right to left, skipping trusted hops; a trusted proxy that
   sends no usable header, or a malformed hop, leaves `sourceIp` unset, never the proxy's own address. Since 0eba0ad
   the HTTP handler also strips `X-Forwarded-For`, `Forwarded`, `X-Real-IP` and the other client-address headers from
-  what an embedded IAM sees and sets `X-Forwarded-For` to the verified address, and the IAM caches key on it: the
+  what an embedded IAM sees and sets `X-Forwarded-For` to the verified address; since 004579e that happens for
+  every credential on every path in (`presentedCredential`, the in-process API included), not only over HTTP, so a
+  caller that passes `headers` to `compute.api` cannot choose its address either. The IAM caches key on it: the
   authentication cache (30 s) and allowed read decisions (10 s) are per caller address, so a stolen token used from
   a disallowed address no longer rides its owner's cached entries. See
   [the caller address](/docs/operations/deployment#the-caller-address).
@@ -645,6 +657,8 @@ change; see [sinks](/docs/extending/sinks#audit-sinks).
 - Internal control APIs (`host.gateway.internal`) reachable only from the control plane, over internal-CA mTLS.
 - `GET /metrics` only with a `bearerToken`, and not exposed publicly.
 - BMC networks reachable only from site agents.
+- `policy.trustProvisioningNetwork` only on pools whose provisioning network no untrusted host can reach; elsewhere
+  confirm each discovered PXE MAC with `metal.confirmMac`.
 
 </Step>
 <Step>

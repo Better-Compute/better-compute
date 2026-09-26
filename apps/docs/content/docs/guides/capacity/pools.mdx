@@ -110,6 +110,11 @@ for in each mode.
       default: "'24h'",
     },
     hardwareProfile: { type: 'string', description: 'The metal hardware profile whose driver bindings nodes inherit.' },
+    trustProvisioningNetwork: {
+      type: 'boolean',
+      description: '(v1.0, 8de6e2f) Bare metal: bind a PXE MAC that discovery proposes at once, without metal.confirmMac. Only for a provisioning network no untrusted host can reach: any host on it can claim a machine\'s UUID. The ramdisk\'s UUID and NICs are then checked against the machine. See /docs/guides/bare-metal/sites#discovering-new-machines.',
+      default: 'false',
+    },
     sharing: {
       type: '{ replicas?: number }',
       description: 'timeslice and mps pools: slot atoms per GPU (1 to 48, the most MPS serves; pools.create and pools.update refuse more, and inventory makes at most 48, a708aa6). Defaults are 4 for timeslice and 10 for mps. The same number reaches each host in the gpu-sharing config unit (/docs/daemon/host-config#gpu-sharing).',

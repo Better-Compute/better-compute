@@ -325,7 +325,7 @@ pools as `pool-telemetry-invalid`, from `nodeTelemetryFindings(sql)`.
 | `bcd.instances` | instances (`{instance}`) | every instance runtime's list of domains, managed or not, counted by `runtime` and `state` (`running`, `stopped`, `paused`, `error`) |
 | `bcd.instance.vcpu` | vCPUs (`{cpu}`) | each domain's configured vCPUs, by `instance.id`, `runtime` and `managed` |
 | `bcd.instance.memory` | bytes (`By`) | each domain's configured memory, by the same attributes and `hugepages` (the backing page size in bytes, `0` for normal pages) |
-| `bcd.instance.memory.balloon` | bytes (`By`) | the memory a guest's balloon leaves it now, by `instance.id` and `runtime` (12e9ced): libvirt's `balloon.current` for every running domain, cloud-hypervisor's configured memory less its balloon for guests that have one; see [memory ballooning](/docs/daemon/delivery#memory-ballooning) |
+| `bcd.instance.memory.balloon.reclaimed` | bytes (`By`) | the memory a ballooned guest lends the host now: its configured memory less what its balloon leaves it, by `instance.id` and `runtime` (9bdd43a; `bcd.instance.memory.balloon` before). Only for running, managed guests whose spec gives them a balloon (`placement.balloon`); a guest without a balloon reading counts as fully deflated (0). See [memory ballooning](/docs/daemon/delivery#memory-ballooning) |
 | `bcd.instance.cpu.time` | seconds (`s`), cumulative sum | live usage (0b21b4b): CPU time since the domain started, by `instance.id` and `runtime` |
 | `bcd.instance.memory.used` | bytes (`By`) | live usage: the memory the domain uses now |
 | `bcd.instance.io.read`, `bcd.instance.io.write` | bytes (`By`), cumulative sum | live usage: disk bytes read and written |

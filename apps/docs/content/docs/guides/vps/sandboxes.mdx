@@ -614,6 +614,12 @@ is `INVALID_INPUT`: volumes live on hosted pools. The name is unique among the t
 bcd creates it there as a sparse raw file (see [volumes on the host](/docs/daemon/delivery#persistent-volumes)). The
 create publishes `sandbox.volume.created`.
 
+Sparse does not mean overcommitted (851016e): bcd creates or grows a volume only when its data directory's filesystem
+can hold every volume's full size, keeping a reserve of 5% (at least 2 GiB) for the instances' overlays and its own
+files. Otherwise the volume keeps its size and the sandboxes that attach it report why. Hosts report the numbers in
+`StatusReport.volume_storage` (37d6d6d, b8e7271), but capacity does not read them yet, so a host's disk booking and
+its filesystem can disagree.
+
 **Attach.** A template names up to 8 volumes, each by `volumeId` or by `name` (not both), with a `mountPath` and
 `readOnly` (default false). They are resolved to ids when the template is written: each must be the tenant's own, in
 the template's pool, and `ready`. A mount path is absolute, without `.` or `..` segments, never a system path (`/`,
@@ -648,10 +654,12 @@ reconciler then releases the booking, which gives the quota back, and marks the 
 job.
 
 <Callout type="info" title="Where volumes are exposed">
-Besides the API and the TypeScript client, the MCP server has four volume tools (`list_sandbox_volumes`,
-`create_sandbox_volume`, `resize_sandbox_volume`, `delete_sandbox_volume`; e6759df; see
-[agents over MCP](#agents-over-mcp)), and a [FleetConfig](/docs/guides/fleet-config) sandbox template mounts existing
-volumes by name (94b8b70). The CLI and the console do not expose volumes yet.
+Besides the API and the TypeScript client, the CLI has `sandbox-volume create|list|get|resize|delete` and
+`sandbox-template create|update --volumes` (f181f43; see [from the CLI](#from-the-cli)), the MCP server has four
+volume tools (`list_sandbox_volumes`, `create_sandbox_volume`, `resize_sandbox_volume`, `delete_sandbox_volume`;
+e6759df; see [agents over MCP](#agents-over-mcp)), and a [FleetConfig](/docs/guides/fleet-config) sandbox template
+mounts up to 8 existing volumes by name (94b8b70). Every client caps a size at the API's 16,384 GiB. The console does
+not expose volumes yet.
 </Callout>
 
 ## Snapshots and restore
@@ -1083,7 +1091,27 @@ forwardings, `ProxyCommand` and `ProxyJump`, connection sharing (`ControlMaster`
 `PermitLocalCommand`. When `sandboxes.exec` refuses with `restore-shares-identity`, `sandbox exec` adds a hint:
 delete the sandbox it was restored from or its sibling restores, or wait until the host gives it its own identity,
 which `sandbox get` shows as `identityRebound: true` (9958865). `sandbox-template create|update|delete` manage
-templates from a terminal. See
+templates from a terminal.
+
+[Volumes](#volumes) have their own commands (f181f43), in the same `Sandboxes` group:
+
+```bash
+better-compute sandbox-volume create --pool pool_01k5w… --name agent-notes --size 20   # GiB, 1 to 16,384
+better-compute sandbox-volume list --format table        # --pool ID for one pool, --deleted to include deleted ones
+better-compute sandbox-volume get vol_01k5w…
+better-compute sandbox-volume resize vol_01k5w… --size 40                            # grow only
+better-compute sandbox-volume delete vol_01k5w…          # wipes the data
+better-compute sandbox-template update sbxt_01k5w… --warm-min 0 --warm-max 0 \
+  --volumes agent-notes:/workspace,datasets:/data:ro
+```
+
+`sandbox-volume create` sends a fresh idempotency key unless you pass `--key KEY`, so repeat it with the same `--key`
+to retry safely. `get`, `resize` and `delete` take a volume id and refuse anything that is not `vol_…` before calling
+the API. `--volumes` on `sandbox-template create` and `update` lists `NAME:/mount/path` or `NAME:/mount/path:ro`
+entries, comma-separated and in order; an entry that looks like a volume id (`vol_…`) is sent as `volumeId`, anything
+else as `name`, and a malformed entry (no absolute path, a mode other than `ro`) is a usage error. `--volumes ""`
+removes every volume from the template. The server's checks in [attach](#volumes) still apply, so a template with
+volumes also needs `--warm-min 0 --warm-max 0` (`--warm-max` needs `--warm-min`). See
 [the CLI guide](/docs/guides/clients/cli#sandboxes) and the [reference](/docs/reference/cli#sandbox-create).
 
 ## Agents over MCP

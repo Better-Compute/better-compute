@@ -262,6 +262,18 @@ For many real daemons at once, a fakehw build runs `bcd sim --config <that confi
 allowing N uses on standard input: N node agents in one process, each a distinct fakehw machine with its own
 identity under `data_dir/sim/<i>` (see [bcd sim](/docs/daemon#bcd-sim)).
 
+Two fakehw behaviours help when you test placement against a real bcd:
+
+- **Reserved huge pages show in the inventory** (cd7a311). The host units write under the fake root
+  (`<data_dir>/fakehw-root`), and the fakehw inventory reads `nr_hugepages` back from there: the machine-wide pools,
+  and each NUMA node's own file or an even share of the machine-wide pool (node 0 takes the remainder). A pool with
+  `policy.hugepages` therefore books `hugepages2Mi` and `hugepages1Gi` on a fakehw node as it would on a real host.
+- **The libvirt plan is written out** (9a6aaf4). The fakehw runtime still runs every domain itself, but also writes
+  the libvirt domain XML bcd would define on a real host to `<data_dir>/fakehw-plans/<id>.xml` (`vcpupin`,
+  `numatune`, huge-page backing, the memory balloon, volumes by serial, GPU hostdevs), or `<id>.error` when libvirt
+  would refuse the spec, and removes it on destroy. Its balloons live on disk (`<runtime>.balloons`), so they survive
+  a restart. `tests/e2e/bcd-placement.test.ts` reads both (see [testing](/docs/operations/testing#the-go-daemon)).
+
 ## The example
 
 `examples/dev` is the whole deployment every example shares (`examples/shared/compose.ts`: provision and metal,

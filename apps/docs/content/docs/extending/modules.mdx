@@ -54,6 +54,7 @@ interface ComputeModule<Name extends string = string, A extends ApiGroups = {}> 
   reconcilers?: Reconciler[];
   commandKinds?: CommandKindSpec[];
   nodeSpec?(context: ModuleContext, node: NodeRecord): Promise<NodeSpecPart>;
+  statusHandlers?: readonly ModuleStatusHandler[];
   catalog?: { actions?: string[]; resourceTypes?: Record<string, ComputeResourceType> };
   commands?: CliCommandSpec[];
   profiles?: ProfileDocument[];
@@ -74,6 +75,7 @@ interface ComputeModule<Name extends string = string, A extends ApiGroups = {}> 
     reconcilers: { type: 'Reconciler[]', description: 'Level-triggered workers on the work queue. See Reconcilers.' },
     commandKinds: { type: 'CommandKindSpec[]', description: 'Agent command kinds this module sends. Each kind is registered once across all modules.' },
     nodeSpec: { type: '(ctx, node) => NodeSpecPart', description: "The module's sections of a node's desired state." },
+    statusHandlers: { type: 'ModuleStatusHandler[]', description: "(8de6e2f) Consumers of a node's coalesced StatusReport: (tx, { nodeId, tenantId, work, events? }, report) => Promise<unknown>, run by the gateway in the status transaction under its own savepoint. better-compute serve and the dev stack run every registered module's after the gateway's XID health handler and before the configuration's reports.status; a host that calls createGateway itself adds them. metal declares its PXE discovery handler here." },
     catalog: { type: '{ actions?, resourceTypes? }', description: 'Merged into the IAM catalog. Every action matches compute:<area>:<verb>.' },
     commands: { type: 'CliCommandSpec[]', description: 'CLI commands the module adds: { name, summary, group? }.' },
     profiles: { type: 'ProfileDocument[]', description: 'Provisioning profiles the module ships; see steps and profiles.' },

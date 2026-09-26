@@ -610,7 +610,10 @@ without the section, so disable that unit yourself). In helper mode it:
    missing directory on the way to the slots with mode 0755 whatever its umask, and never changes the mode of one
    that exists (c139b9c, 9e71b1f);
 4. makes `/etc/bcd` (0750) and `config.toml` (0640) group-owned by `bcd`, so the node can read its configuration and
-   nothing else of `/etc/bcd` becomes readable to it;
+   nothing else of `/etc/bcd` becomes readable to it. Both stay root's: since 3fa9021 `bcd helper` refuses to start
+   as root unless its `config.toml` is a regular file root owns that no one else can write, in directories only root
+   can write, because that file (`[host] units`, `command_root_sha256`, the join pin) decides what root does for the
+   node. Do not hand the file to `bcd` or make it group-writable;
 5. on a host with `/etc/libvirt/qemu.conf` (d418820): sets `dynamic_ownership = 0` there (replacing the line,
    commented or not, or appending it), adds `libvirt-qemu` or `qemu`, whichever exists, to the `bcd` group, and
    restarts `virtqemud.service` or `libvirtd.service` if it runs. libvirt then chowns no path the node names, and

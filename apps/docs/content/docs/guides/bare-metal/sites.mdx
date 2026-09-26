@@ -12,6 +12,14 @@ sources:
   - packages/provision/src/engine.ts
   - packages/provision/src/join-resolvers.ts
   - packages/metal/src/steps.ts
+  - packages/metal/src/discovery.ts
+  - packages/metal/src/module.ts
+  - packages/core/src/extension.ts
+  - packages/cli/src/host/gateway.ts
+  - tests/metal-discovery.test.ts
+  - packages/metal/src/api.ts
+  - packages/metal/README.md
+  - packages/cli/src/host/config.ts
   - packages/pki/src/attestors/discovery.ts
   - proto/bettercompute/site/v1/site.proto
   - tests/server-groups-site-tokens.test.ts
@@ -21,6 +29,9 @@ sources:
   - daemon/internal/agent/site.go
   - daemon/internal/agent/bootserver.go
   - daemon/internal/agent/cache.go
+  - daemon/internal/agent/cachegrant.go
+  - daemon/internal/agent/discovery.go
+  - daemon/internal/agent/sanboot.go
   - daemon/internal/pxe/dhcp.go
   - daemon/internal/pxe/tftp.go
   - daemon/internal/bootparams/bootparams.go
@@ -84,7 +95,7 @@ the control plane it is a node like any other: a `nodes` row with `role = 'site'
 | Proxy DHCP, so booting machines find the iPXE binary without replacing your DHCP server | only while holding the boot lease | yes, with `[boot] proxy_dhcp` |
 | TFTP and iPXE scripts, one per machine being booted | only while holding the boot lease | yes: read-only TFTP for the iPXE builds, scripts over plain HTTP |
 | Vouching for ramdisks that PXE-booted from it (signed discovery assertions) | only while holding the boot lease | yes |
-| An image cache that ramdisks stream from | always | yes, by digest (`GET /cache/<sha256>`) |
+| An image cache that ramdisks stream from | always (a boot's grant only while holding the boot lease) | yes, by digest under a grant (`GET /cache/t/<grant>/<sha256>`, b7ed8a2) |
 | BMC access (Redfish, IPMI, vendor drivers) on the management network | always | Redfish built in; IPMI power, boot device and inspection through the hosted `bcx-ipmi` plugin (51806ab, 7818f19), which `daemon install-script --install-plugins bcx-ipmi` installs from the release (adf2ae9); no vendor driver |
 
 The command kinds it accepts are role-restricted to `site`: `bmc.query`, `bmc.boot`, `bmc.power`,
@@ -230,7 +241,10 @@ sequenceDiagram
   that MAC's iPXE script. No command body ever holds the token.
 - A token is minted only when its entry's command is first sent, not on every poll, and the cleanup
   step `boot.cleanUp` removes the entries and deletes the stored tokens.
-- A machine with no known MAC fails with `INVALID_STATE`: inspect it out of band first.
+- A machine with no known MAC fails with `INVALID_STATE`: inspect it out of band first. The one exception
+  (3d26428) is a machine enrolled with a usable `productUuid` and no MACs: `metal.ensureRamdisk` PXE-boots it once
+  with no entry so a site agent lists it, and goes on once the MAC [discovery](#discovering-new-machines) proposes
+  is confirmed with `metal.confirmMac` (8de6e2f), or bound at once on a pool that trusts its provisioning network.
 
 ### The boot server in bcd site
 
@@ -262,7 +276,9 @@ sequenceDiagram
    the same build as a URL, `<url>/boot/files/<file>`. iPXE itself gets `<url>/boot/chain.ipxe`, which chains to
    `/boot/ipxe` with its MAC, SMBIOS UUID and IP.
 2. **TFTP** (`tftp`, `tftp_root`) is read-only, octet mode, with block size and transfer size negotiation, and serves
-   nothing outside its root. You supply the iPXE builds.
+   nothing outside its root. You supply the iPXE builds. Since 4d8b493 it runs at most 64 transfers at once and 4
+   per source address; a request beyond either bound is dropped unanswered (answering would take a socket too), and
+   the firmware retries.
 3. **`GET /boot/ipxe`** renders the machine's script: the site's ramdisk `kernel` and `initrd`, and on the kernel
    command line the `bc.*` boot parameters `bcd ramdisk` joins with (the gateway, pins and join key, the machine's
    discovery token and a signed assertion, and `bc.cache` when `url` is set), then `cmdline`.
@@ -285,21 +301,32 @@ or the connection, the product UUID from the query or the entry, the workflow, `
 
 **Sanboot of a cached ISO** (0056e1e, e763001). For a BMC without virtual media, such as `ipmi`, a boot entry may
 carry `ProxyDhcpEntry.sanboot_sha256` instead of a ramdisk boot: `/boot/ipxe` then answers
-`sanboot --no-describe <url>/cache/<sha256>`, and iPXE reads the ISO from the image cache with HTTP range requests.
-The ISO boots as it is, with no discovery token and no `bc.*` parameters. The agent serves it only when the site
-spec names that digest as an `iso` cache image and the verified copy is cached. Otherwise the machine waits (a 503
-script that sleeps 30 seconds and chains again, never the ramdisk), and the `site` section fails naming the entry.
-The control plane does not set `sanboot_sha256` yet: metal still refuses a deploy profile that needs virtual media
-for an `ipmi` machine (see [IPMI](/docs/guides/bare-metal/bmc#ipmi-through-bcx-ipmi)).
+`sanboot --no-describe <url>/cache/t/<grant>/<sha256>`, and iPXE reads the ISO from the image cache with HTTP range
+requests. The ISO boots as it is, with no discovery token and no `bc.*` parameters. The agent serves it only when
+the site spec names that digest as an `iso` cache image and the verified copy is cached. Otherwise the machine waits
+(a 503 script that sleeps 30 seconds and chains again, never the ramdisk), and the `site` section fails naming the
+entry. Since 3d26428 metal sets `sanboot_sha256`: a `media.insert` step that names a catalog ISO (`image`) on a
+driver without virtual media pins the ISO at the site and, once the site's cache holds it verified, sends a boot
+entry for it (see [sanboot instead of virtual media](/docs/guides/bare-metal/bmc#sanboot-instead-of-virtual-media)).
 
-The image cache is served by the same HTTP server at `GET /cache/<sha256 hex>`, digest paths only, whether or not
-the agent holds the lease. The agent pulls every `cacheImages` entry of its `site` section in the background into
+The image cache is served by the same HTTP server, and since b7ed8a2 only under grants: every cache URL the agent
+hands out has the form `GET /cache/t/<grant>/<sha256 hex>`, with an unguessable 128-bit grant, and any other path,
+a plain `/cache/<sha256>` included, is 404. The cache holds tenants' deploy images, so nothing is served to whoever
+asks:
+
+| Grant | Handed out as | Serves | Valid |
+| --- | --- | --- | --- |
+| A boot | The ramdisk's `bc.cache` in its iPXE script, and a sanboot URL | Any cached image (`bc.cache`; the ramdisk checks the digest its command names) or that one ISO (sanboot) | Until the boot entry's `not_after` (6 hours for an entry without one), and only while the agent holds the boot lease: otherwise 503 |
+| A BMC firmware update | The URL the BMC fetches the firmware image from | That one digest | 2 hours |
+
+The agent pulls every `cacheImages` entry of its `site` section in the background into
 `data_dir/cache/<sha256>`, and a copy becomes visible only after its bytes match the digest. The `site` section
-stays `PROGRESSING` while images warm and fails for an image whose bytes do not match. With `[boot] cache_max_bytes` set, each pass trims the cache to that budget, least
-recently used first, and never evicts an image the section still names (the pools' pre-warm images plus every image
-a deploy at the site is streaming). A ramdisk booted with
+stays `PROGRESSING` while images warm and fails for an image whose bytes do not match. With `[boot] cache_max_bytes`
+set, each pass trims the cache to that budget, least recently used first, and never evicts an image the section
+still names (the pools' pre-warm images plus every image a deploy at the site is streaming). A ramdisk booted with
 `bc.cache` tries the cache first for `deploy.image` and falls back to the image's source URL; the digest is checked
-on the stream either way, so a cache can never substitute an image.
+on the stream either way, so a cache can never substitute an image. The boot server caps request headers at 8 KiB
+(0442561), since any machine on the segment can reach it.
 
 ### The discovery attestor
 
@@ -342,9 +369,12 @@ Today a machine enters metal by its BMC: `metal.enroll` with the BMC address, th
 step asks the BMC for the machine's PXE MACs, SMBIOS UUID and IP addresses and records them. That is
 what makes the boot entries above possible.
 
-Machines that PXE-boot without being enrolled first are designed but not shipped end to end. Since 0056e1e the
-site agent's side exists: a PXE or HTTP-boot DHCP request, or an iPXE script fetch, from a MAC without a live boot
-entry, while the agent holds the boot lease, is never answered but listed in `StatusReport.discovered` (e763001):
+PXE discovery closes the gap for a BMC that cannot name the machine's NICs, such as IPMI. It never enrolls anything:
+it lets metal learn the PXE MAC of a machine that is already enrolled.
+
+**The site agent's side** (0056e1e, e763001). A PXE or HTTP-boot DHCP request, or an iPXE script fetch, from a MAC
+without a live boot entry, while the agent holds the boot lease, is never answered but listed in
+`StatusReport.discovered`:
 
 | Field | Value |
 | --- | --- |
@@ -356,9 +386,62 @@ entry, while the agent holds the boot lease, is never answered but listed in `St
 
 The list holds at most 256 machines (the oldest `last_seen` goes first), forgets each a day after it was last seen,
 and drops a machine once it gets a boot entry. A new machine asks for a status report at most once every 30 seconds.
-Nothing is enrolled from it. The control plane does not read the list yet: the gateway neither stores nor publishes
-it, and metal does not match it to enrollments, so an `ipmi` machine is still enrolled with its `macs` (see
-[IPMI](/docs/guides/bare-metal/bmc#ipmi-through-bcx-ipmi)). The discovery attestor already supports operator approval:
+Since 0442561 the agent takes only well-formed fields from an unknown client, so none can grow the status report past
+the frame limit: a MAC must parse, a UUID is kept only in canonical 36-character form, an arch only as
+`[a-z0-9_-]{1,32}`, and a relay only as an IP address. While the agent runs proxy DHCP, an iPXE script fetch counts
+only for a MAC that DHCP already showed, since anyone can fetch a URL.
+
+**The control plane's side** (3d26428, 8de6e2f). Discovery data is unauthenticated DHCP: any host on the provisioning
+network can claim any MAC and any UUID. So storing the list binds nothing, and a discovered MAC boots a machine only
+after an operator confirms it.
+
+- **Storing.** `metal()` declares `metalDiscoveryStatusHandler()` as one of its module status handlers
+  (`ComputeModule.statusHandlers`, 8de6e2f), and `better-compute serve` and the dev stack run every registered
+  module's handlers after the gateway's XID health handler and before the configuration's own `reports.status`. A host
+  that builds its gateway with `createGateway` itself adds it to `reports.status`. It stores lists from live site
+  agents only (other nodes' roles are cached per process for 10 minutes, so a host's reports cost no query), in
+  `metal_discovered` (migration `metal/0007_discovered`), each agent's list replaced whole and written only when its
+  digest changes (`metal_discovery_reports`).
+- **Reading.** [`metal.discovered`](/docs/reference/api/metal#discovered) (`{ tenantId, siteId }`, decided as
+  `compute:sites:read` on the site) lists the machines seen in the last 24 hours, merged over the site's agents,
+  newest first, at most 256: `mac`, `productUuid`, `arch`, `firstSeen`, `lastSeen`, `count` (summed over agents),
+  `relays`, `agentNodeIds`, `nodeId` when an enrolled machine has that MAC, and `candidateFor` when it is a machine's
+  candidate awaiting confirmation. Only the tenant that owns the site sees it; any other tenant gets `NOT_FOUND`,
+  since the list describes the site's network.
+- **Matching, only right after metal's own power cycle.** Only `metal.ensureRamdisk` matches, for a machine enrolled
+  with a usable product UUID and no MACs, right after it power-cycled the machine into PXE with its BMC. A MAC becomes
+  the machine's candidate when all of these hold: it was first seen within 10 minutes after that power command was
+  sent (with 30 seconds of clock slack before it); it is the only MAC the UUID was seen from in the last 24 hours, in
+  any of three spellings (as given, with the first three fields byte-swapped as SMBIOS stores them, or fully reversed
+  as IPMI's Get System GUID prints it); no other machine of the site shares the UUID; and no enrolled machine has the
+  MAC. Firmware placeholder UUIDs (all zeros, all ones, `03000200-0400-0500-0006-000700080009` and
+  `00020003-0004-0005-0006-000700080009`) never match. A new candidate publishes `node.pxe-mac.discovered` (`nodeId`,
+  `mac`, `productUuid`, `siteId`, `agentNodeId`, `bound`), and the machine's metal view shows it as `discoveredMac`.
+- **Confirming.** The candidate gets no boot entry and no discovery token until an operator binds it with
+  [`metal.confirmMac`](/docs/reference/api/metal#confirmmac) (`{ tenantId, nodeId, mac }`, decided as
+  `compute:nodes:provision` on the node), which takes the candidate or any MAC the operator knows to be the machine's.
+  It publishes `node.pxe-mac.confirmed` (`nodeId`, `mac`, `discovered`, `requestId`) for the audit trail, answers
+  `INVALID_STATE` for a node that already has MACs or is retired and `CONFLICT` for a MAC another machine of the site
+  has, and wakes the reconciler, so the waiting `metal.ensureRamdisk` goes on from that MAC. While it waits, the step
+  reports why (`waiting for metal.confirmMac`, or the reason there is no candidate: `not-seen`, `ambiguous`,
+  `shared-uuid`, `mac-enrolled`).
+
+<Callout type="warn" title="policy.trustProvisioningNetwork">
+A pool whose policy sets `trustProvisioningNetwork: true` binds the candidate at once, without `metal.confirmMac`
+(`macSource: 'discovered'`). Use it only on a provisioning network no untrusted host can reach: any host on it can
+claim a machine's UUID from its own MAC and boot that machine's ramdisk with its discovery token. As a backstop,
+`inventory.refresh` then waits for the ramdisk's own `system` and `nics` sections, received after it connected, and
+fails the workflow with `DRIVER_ERROR` (reason `machine-identity-mismatch`) before anything is written to the machine
+unless the reported product UUID is a spelling of the enrolled one and the NICs include the MAC. For MACs from any
+other source, a UUID present on both sides is still compared.
+</Callout>
+
+The metal view records where a machine's MACs came from as `macSource` (`operator` for enroll and `metal.confirmMac`,
+`inspection`, or `discovered`; migration `metal/0008_mac_source`). Neither the CLI nor the console has a command for
+`metal.discovered` or `metal.confirmMac` yet: call the API. See [IPMI](/docs/guides/bare-metal/bmc#ipmi-through-bcx-ipmi)
+for the enrollment that uses this.
+
+The discovery attestor also supports operator approval:
 
 - `approval: 'never'` (the default) admits as described above;
 - `approval: 'unknown-machines'` defers a join that no running workflow names;

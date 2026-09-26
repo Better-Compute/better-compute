@@ -209,7 +209,7 @@ the way to any method a group's commands leave out (a raw `commands.run`, for on
 | [`provider-accounts`](/docs/reference/cli#provider-accounts-list) `list`, `get`, `create`, `update`, `delete`, `offers`, `bootstrap` | Provider accounts (`--config-file`, credentials in it as references) | [providerAccounts](/docs/reference/api/provider-accounts) |
 | [`reserve`](/docs/reference/cli#reserve), `release`, `extend`, `reservations list`, `reservations get` | Reservations ([below](#capacity)) | [reservations](/docs/reference/api/reservations) |
 | [`capacity`](/docs/reference/cli#capacity) | Free capacity per pool and GPU model, and a preview | [capacity](/docs/reference/api/capacity) |
-| [`sandbox`](/docs/reference/cli#sandbox-create), [`sandbox-template`](/docs/reference/cli#sandbox-template-create), [`sandbox-snapshot`](/docs/reference/cli#sandbox-snapshot-list) | Sandboxes, their templates and their snapshots ([below](#sandboxes)) | [sandboxes](/docs/reference/api/sandboxes), [sandboxTemplates](/docs/reference/api/sandbox-templates), [sandboxSnapshots](/docs/reference/api/sandbox-snapshots) |
+| [`sandbox`](/docs/reference/cli#sandbox-create), [`sandbox-template`](/docs/reference/cli#sandbox-template-create), [`sandbox-snapshot`](/docs/reference/cli#sandbox-snapshot-list), [`sandbox-volume`](/docs/reference/cli#sandbox-volume-create) | Sandboxes, their templates, their snapshots and their persistent volumes ([below](#sandboxes)) | [sandboxes](/docs/reference/api/sandboxes), [sandboxTemplates](/docs/reference/api/sandbox-templates), [sandboxSnapshots](/docs/reference/api/sandbox-snapshots), [sandboxVolumes](/docs/reference/api/sandbox-volumes) |
 | [`console`](/docs/reference/cli#console), `exec`, `forward`; [`ssh-cert`](/docs/reference/cli#ssh-cert) | Tunnels and break-glass SSH ([below](#interactive-access)) | [tunnels](/docs/reference/api/tunnels), `nodes.issueSshCert` |
 | [`fleet`](/docs/reference/cli#fleet-export) `export`, `plan`, `status`, `apply` | [Fleet configuration](#fleet-configuration) | [fleet](/docs/reference/api/fleet) |
 | [`batch`](/docs/reference/cli#batch-list) `list`, `show`, `approve`, `create`, `members`, `cancel` | [Destructive batches](#destructive-batches) | [commandBatches](/docs/reference/api/command-batches) |
@@ -218,7 +218,7 @@ the way to any method a group's commands leave out (a raw `commands.run`, for on
 What they share:
 
 - **Ids are checked before anything is sent.** An id that does not look like its kind (`node_…`, `inst_…`,
-  `rollout_…`, `wf_…`, `cmd_…`, `pool_…`, `jreq_…`, `pacct_…`, `snap_…`) is a usage error, exit 2.
+  `rollout_…`, `wf_…`, `cmd_…`, `pool_…`, `jreq_…`, `pacct_…`, `snap_…`, `vol_…`) is a usage error, exit 2.
 - **Lists print tables.** List commands default to `--format table`, and a page with more rows ends with
   `(more rows: --cursor …)` (5df9455); pass that cursor to get the next page.
 - **Creates are retry-safe.** A command that creates something sends a new idempotency key on every run unless you
@@ -378,9 +378,38 @@ better-compute sandbox-template delete sbxt_01k5w…
 The template flags are `--flavor`, `--image`, `--user-data FILE` (cloud-init read from a file), `--default-ttl` and
 `--max-ttl` (durations such as `30m` or `4h`, whole seconds), `--warm-min N` and `--warm-max N` (the API accepts 0 to
 64; `--warm-max` needs `--warm-min`), `--env NAME=secret://<tenant>/<id>,…` (secret references, never values) and
-`--network egress|private|none`. An `update` without any field flag, or with both `--user-data` and
-`--no-user-data`, is a usage error, and so is a template id that does not look like `sbxt_…`. See
+`--network egress|private|none`, and `--volumes NAME:/PATH[:ro],…` (f181f43): the persistent volumes every sandbox
+mounts, in order, each by name or by id (an entry that looks like `vol_…` is sent as `volumeId`), with `:ro` for a
+read-only mount; `--volumes ""` removes them all, and an entry without an absolute path or with a mode other than `ro`
+is a usage error. An `update` without any field flag, or with both `--user-data` and `--no-user-data`, is a usage
+error, and so is a template id that does not look like `sbxt_…`. See
 [templates](/docs/guides/vps/sandboxes#templates).
+
+### Sandbox volumes
+
+`sandbox-volume` (f181f43) manages [persistent volumes](/docs/guides/vps/sandboxes#volumes), an agent's memory, with
+the `sandboxVolumes` methods:
+
+```bash
+better-compute sandbox-volume create --pool pool_01k5w… --name agent-notes --size 20
+better-compute sandbox-volume list --pool pool_01k5w… --format table
+better-compute sandbox-volume get vol_01k5w…
+better-compute sandbox-volume resize vol_01k5w… --size 40
+better-compute sandbox-volume delete vol_01k5w…
+better-compute sandbox-template update sbxt_01k5w… --warm-min 0 --warm-max 0 --volumes agent-notes:/workspace
+```
+
+| Command | Flags | Calls |
+| --- | --- | --- |
+| `sandbox-volume create` | `--pool ID`, `--name NAME` and `--size GIB` (1 to 16,384) required, `--key KEY` | `sandboxVolumes.create`, with a new idempotency key unless `--key` is given |
+| `sandbox-volume list` | `--pool ID` (only that pool's), `--deleted` (include deleted volumes) | `sandboxVolumes.list` |
+| `sandbox-volume get VOLUME` | | `sandboxVolumes.get` |
+| `sandbox-volume resize VOLUME` | `--size GIB` (1 to 16,384, required); volumes only grow | `sandboxVolumes.resize` |
+| `sandbox-volume delete VOLUME` | | `sandboxVolumes.delete`, which wipes the data |
+
+A volume id that does not look like `vol_…` is a usage error before anything is sent. A template that mounts volumes
+keeps no warm pool, so give it `--warm-min 0 --warm-max 0` (the API refuses one whose `warm.max` is not 0). The
+console does not manage volumes.
 
 ## Interactive access
 

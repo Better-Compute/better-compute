@@ -29,6 +29,7 @@ sources:
   - daemon/internal/agent/kube.go
   - daemon/internal/agent/kuberelease.go
   - packages/gateway/src/health.ts
+  - packages/gateway/README.md
   - daemon/internal/agent/devices.go
   - daemon/internal/agent/admission.go
   - daemon/internal/agent/holds.go
@@ -171,10 +172,18 @@ better-compute capacity --tenant acme --preview --pool pool_01k… --gpus 2 --fo
 better-compute reserve --tenant acme --pool pool_01k… --gpus 2 --for 8h --cpus 32 --memory 256 --kubernetes
 ```
 
-`@better-compute/console-kit`'s reservation form takes the same host CPU, memory and Kubernetes fields (e833433).
+`@better-compute/console-kit`'s reservation form takes the same host CPU, memory and Kubernetes fields (e833433), and
+the console app's reservation page shows them (4533265): its **Give the GPUs to the pool's Kubernetes cluster**
+checkbox appears only for a pool the tenant owns that has `policy.kubernetes`.
 
 - The pool must have `policy.kubernetes`, or the request is `INVALID_INPUT`
   (`Pool … does not join a Kubernetes cluster (policy.kubernetes)`).
+- **Only the pool's owner books it** (3825ec7). The device plugins and the DRA driver hand bound GPUs to any pod of
+  the cluster that asks and cannot tell tenants apart, so a tenant the pool is merely offered to could pay for GPUs
+  that another tenant's pods then take. A pool's cluster is therefore its owner's: `binding: 'kubernetes'` from any
+  other tenant is `INVALID_INPUT` (`Pool …'s Kubernetes cluster is its owner's: only the owner books binding
+  kubernetes`), checked when the draft is written, before the IAM decision. Tenants the pool is offered to book
+  holds on it instead (or instances, where the pool runs them).
 - Everything else is a normal reservation: the same decision, quota, placement and lifecycle. `resources` books host
   CPU, memory and 1 GiB pages with the GPUs, or the pool's per-GPU share when left out (see
   [host resources](/docs/guides/capacity/reservations#host-resources)). `capacity.preview` books the same host
@@ -244,8 +253,9 @@ spec:
 ```
 
 Compute decides which GPUs a node offers, not which pod takes them: any pod the cluster's scheduler places there may
-claim advertised devices. Use the Node labels, taints and your cluster's own policies to keep a reservation's GPUs
-for its owner's workloads; `BCD_ALLOCATION_IDS` tells a container which allocation it got.
+claim advertised devices. That is why only the pool's owner books `binding: 'kubernetes'` (3825ec7): the cluster and
+every GPU reserved into it belong to one tenant. Use the Node labels, taints and your cluster's own policies to keep a
+reservation's GPUs for the workloads it was made for; `BCD_ALLOCATION_IDS` tells a container which allocation it got.
 
 ## GPU isolation
 
@@ -264,8 +274,14 @@ device plugin, read from pod-resources' allocatable resources), or a container t
 unprivileged pods (the key `true`, or absent, which is the toolkit's default), bcd offers no GPUs at all: the device
 plugins stop, the DRA slice is deleted, and bcd reports the condition `ForeignGpuExposure` (reason `OtherGpuPath`)
 with a message naming what to close. A missing or unreadable file is not taken as evidence. The gateway records the
-condition as an informational node condition (b91dcff), so it shows in `nodes.get` without taking the node out of
-placement.
+condition as a node condition (b91dcff), and since ebd9806 it is NoSchedule while true: a GPU booked on that node would
+not be isolated from pods that take it by the other path, so the node takes no new work until the path is closed. On a
+tenant-controlled node the condition stays advisory and changes no NoSchedule reason, as all of bcd's conditions do.
+A change of the condition also wakes the node's started reservations, and while it is true every active reservation
+with an allocation on the node is `Degraded` with reason `ForeignGpuExposure` ("GPUs exposed outside bcd on
+node_…", 4570dfe), whatever its binding, since its GPUs are no longer the tenant's alone. A lost binding still takes
+precedence, and the exposure takes precedence over `AtomUnhealthy`. Nothing is released: the reservation keeps its
+GPUs and the condition clears when bcd stops reporting the exposure.
 
 `bcd doctor` runs the toolkit half of the same check (35534e5): on a node bcd joined with `gpu` on, its
 `gpu-isolation` check fails, with the same message, while a toolkit configuration lets unprivileged pods pick GPUs,
@@ -328,7 +344,9 @@ holds a device of the allocation any more:
   pod-resources socket is missing or failing, the devices count as held.
 - bcd checks again when the reaper sees such a pod gone, on every converge pass, and at the latest 30 seconds later.
   A release pending for more than 5 minutes raises the condition `KubernetesReleaseStuck` (reason `PodsHoldDevices`),
-  naming the allocation and its devices.
+  naming the allocation and its devices. Since ebd9806 the gateway records it as a node condition that is NoSchedule
+  while true (advisory on a tenant-controlled node): the GPUs may still be in use, so an operator looks at the node
+  before it takes more work.
 - An allocation bound again before its release was reported is dropped from the pending list without a report.
 
 Pods still
@@ -337,7 +355,9 @@ through a claim, are deleted once they have held it for 30 seconds, with `kubect
 --grace-period=10` and the kubelet's credentials; a pod that still holds the device a minute later is deleted with
 `--grace-period=0 --force` (9f860ad). bcd never deletes a pod after a failed read of the holds. While bcd holds
 devices for Kubernetes and the kubelet's pod-resources socket is missing or failing, so released devices cannot be
-reclaimed, it reports the condition `PodResourcesUnavailable`.
+reclaimed, it reports the condition `PodResourcesUnavailable`. Since ebd9806 that condition is NoSchedule for the whole
+node while true (advisory on a tenant-controlled node): bcd cannot tell which pods hold which devices, and placement has no NoSchedule for one binding only,
+so the node takes no work of any kind until the socket answers again.
 
 **Taking the machine back.** When a node's spec no longer names `k8s-join` (the pool dropped Kubernetes, or the
 machine left the pool), bcd cordons its Node, deletes its running and pending workload pods with each pod's own grace

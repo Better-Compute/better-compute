@@ -264,13 +264,13 @@ too), and `delete_sandbox_snapshot` deletes one (`snap_…`) for good. No tool t
 **Volume tools are agent memory** (e6759df). [Sandbox volumes](/docs/guides/vps/sandboxes#volumes) are persistent
 disks that outlive sandboxes, which a template mounts in every sandbox it creates. `list_sandbox_volumes` lists the
 tenant's volumes, optionally of one `poolId`. `create_sandbox_volume` takes a `poolId`, a `name` unique in the tenant
-(`^[a-z0-9][a-z0-9._-]{0,62}$`, such as `agent-notes`), `sizeGiB` (1 to 65,536 in the tool's schema; compute allows
-at most 16,384) and optionally an `idempotencyKey`; like `create_sandbox` it answers
+(`^[a-z0-9][a-z0-9._-]{0,62}$`, such as `agent-notes`), `sizeGiB` (1 to 16,384, the API's own limit, so a larger size is
+refused by the schema before compute is called; f181f43) and optionally an `idempotencyKey`; like `create_sandbox` it answers
 `{ idempotencyKey, volume }` and turns `CONFIRMATION_REQUIRED` into a result to retry with the same key. The volume
 lives on one host and is billed until deleted. `resize_sandbox_volume` grows a volume (`vol_…`) to `sizeGiB`, never
-shrinks it, and sandboxes see the new size at their next boot. `delete_sandbox_volume` deletes a volume and wipes its
+shrinks it (the same 1 to 16,384), and sandboxes see the new size at their next boot. `delete_sandbox_volume` deletes a volume and wipes its
 data; a volume a sandbox still mounts is refused. No tool attaches a volume to a template: a person does that with
-`sandboxTemplates.update`.
+`sandboxTemplates.update`, the CLI's `sandbox-template update --volumes` or a FleetConfig template.
 
 Every argument is checked against the tool's JSON Schema before anything is called: ids must match their prefix
 (`pool_…`, `node_…`, `rsv_…`, `inst_…`, `sbxt_…`, `sbx_…`, `snap_…`, `vol_…`, `batch_…`), and unknown arguments are refused. A bad argument is a tool error `INVALID_INPUT`

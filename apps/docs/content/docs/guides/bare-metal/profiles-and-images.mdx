@@ -148,7 +148,7 @@ ships `remediate-reboot@1` and `remediate-gpu-reset@1` for health remediation.
 | `power.setPower` | relays to the site agent | `action`: `on`, `off`, `graceful-off`, `reset`, `graceful-restart`, `cycle`, `nmi` | 5m |
 | `management.setBootDevice` | relays to the site agent | `device`: `pxe`, `http`, `disk`, `cd`; `persistent` | 2m |
 | `inspect.oob` | relays to the site agent | none | 5m |
-| `media.insert` | relays to the site agent | `url` (https) or `fromStep` | 5m |
+| `media.insert` | relays to the site agent | `url` (https), `fromStep` or `image` (a catalog `iso`) | 30m |
 | `media.eject` | relays to the site agent | none | 5m |
 | `boot.prepareRamdisk`, `boot.cleanUp` | relays to the site agent | none | 2m |
 | `metal.ensureRamdisk` | control plane | none | 20m |
@@ -163,7 +163,14 @@ ships `remediate-reboot@1` and `remediate-gpu-reset@1` for health remediation.
 
 - `metal.ensureRamdisk` does nothing when the machine's ramdisk is already connected. Otherwise it
   sets one-time PXE, sends the boot entries and power-cycles the machine, then waits for the ramdisk
-  to join.
+  to join. A machine known only by its product UUID is first power-cycled into PXE with no entry, so
+  its site agent lists it; the step then waits until the MAC [PXE discovery](/docs/guides/bare-metal/sites#discovering-new-machines)
+  proposes is confirmed with `metal.confirmMac`, or bound at once on a pool with `policy.trustProvisioningNetwork`
+  (3d26428, 8de6e2f).
+- `inventory.refresh` checks that the machine that booted is the one enrolled (8de6e2f): a product UUID in the
+  ramdisk's `system` section must be a spelling of the enrolled one, and for a MAC PXE discovery bound it waits for
+  the ramdisk's `system` and `nics` sections and requires the NICs to include that MAC. A mismatch fails the workflow
+  with `DRIVER_ERROR` (reason `machine-identity-mismatch`) before anything is written.
 - `diag.dcgm` fails with `DRIVER_ERROR` unless the result is node-signed and every test passed.
 - `disk.wipe` succeeds with `attested: false` when the signature or a disk's read-back check fails;
   metal then refuses to release the node to `ready` (`UNVERIFIED_WIPE`).
@@ -173,6 +180,10 @@ ships `remediate-reboot@1` and `remediate-gpu-reset@1` for health remediation.
   ramdisk wrote differs from the catalog's.
 - `media.insert` with `fromStep` mounts the `url` an earlier step of the same workflow returned: how
   a plugin hands a per-node ISO to the BMC (see [deploying](/docs/guides/bare-metal/deploying)).
+- `media.insert` with `image` (3d26428) names an `iso` of the catalog: virtual media mounts its `https://` source,
+  and a BMC without virtual media boots it with iPXE `sanboot` from the site cache instead; a later
+  `management.setBootDevice` to `cd` then sets `pxe`, and `media.eject` removes the boot entry. See
+  [sanboot instead of virtual media](/docs/guides/bare-metal/bmc#sanboot-instead-of-virtual-media).
 
 ## Driver bindings from the hardware profile
 
@@ -343,7 +354,7 @@ await compute.api.images.register(credential, {
   type={{
     ref: { type: 'string', description: 'name@version, unique per tenant (a duplicate is CONFLICT).', required: true },
     kind: { type: "'os' | 'ramdisk'", description: 'Ramdisks must be signed by a platform signer.', default: "'os'" },
-    format: { type: "'raw' | 'qcow2' | 'iso'", description: 'deploy.deploy writes raw and qcow2 to disk; an iso goes through virtual media.', required: true },
+    format: { type: "'raw' | 'qcow2' | 'iso'", description: 'deploy.deploy writes raw and qcow2 to disk; an iso goes through media.insert (virtual media, or sanboot from the site cache).', required: true },
     compression: { type: "'none' | 'zstd' | 'gzip'", description: 'How the artifact is compressed.', default: "'none'" },
     sha256: { type: 'string', description: '64 hex digits of the artifact as stored.', required: true },
     sizeBytes: { type: 'number', description: 'The artifact size, for cache planning.' },

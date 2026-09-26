@@ -249,8 +249,13 @@ It then decides where the machine joins, keyed by the SHA-256 of the EK: the nod
 | `enrollment` | `{ tenantId, siteId, poolId?, pendingTtlSeconds?, retryAfterSeconds? }`: defer unknown EKs for approval. |
 | `challengeTtlMs` | Challenge lifetime, at most 5 minutes. |
 
-`tpmProducer(SoftwareTpm)` is the agent side for tests. bcd has no TPM code yet (its node key is a file); how it will
-drive a real TPM (go-attestation) is still to be confirmed for v0.5.
+`tpmProducer(SoftwareTpm)` is the agent side for tests. Since f61b32d bcd has a TPM client too, `internal/tpm`: a
+pure-Go TPM 2.0 client over the kernel resource manager (`/dev/tpmrm0`, Linux only) that derives the default RSA-2048
+EK and a restricted P-256 AK and builds this attestor's `{ ek, ak }` evidence and its round-2 answer (the
+`ActivateCredential` secret and a quote with `extraData = sha256(secret || sha256(csr))`), with a software TPM,
+`tpmsim`, for tests; `agent.Join` answers up to 3 challenge rounds for the same CSR. It is not wired: `bcd join
+--attestor tpm` does not use it, nothing in bcd constructs it, and no test checks its evidence against the TypeScript
+verifier. The node key is still a file.
 
 ## Single-use evidence
 

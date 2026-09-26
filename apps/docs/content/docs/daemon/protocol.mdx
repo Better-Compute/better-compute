@@ -187,10 +187,10 @@ The first [`AgentFrame`](/docs/reference/protocol#agentframe) of a session must 
 | AgentFrame (daemon to gateway) | Purpose |
 | --- | --- |
 | `hello` | Identity, versions, journal cursors, inventory hashes, and `trust_version`: the trust bundle version the daemon holds (0 for none) |
-| `heartbeat` | A [`Heartbeat`](/docs/reference/protocol#heartbeat): free lane credits, coarse load, applied generation; inventory hashes on every 10th |
+| `heartbeat` | A [`Heartbeat`](/docs/reference/protocol#heartbeat): free lane credits, coarse load, applied generation; inventory hashes on every 10th, and on the first after changed inventory sections (427787a) |
 | `update` | A [`CommandUpdate`](/docs/reference/protocol#commandupdate): acked, running, or a terminal outcome |
 | `events` | An [`EventBatch`](/docs/reference/protocol#eventbatch) of journaled events for one `journal_id` |
-| `status` | A [`StatusReport`](/docs/reference/protocol#statusreport): observed and applied generation, section states, conditions; from v0.3 the hosted instances and `pressure` (`HostPressure`: CPU, memory and I/O PSI "some" avg10 and CPU steal); `trust_version` once the daemon applied a newer trust bundle mid-session (0 means unchanged; bcd sets it only in the first report after the change, the FakeDaemon in every report) |
+| `status` | A [`StatusReport`](/docs/reference/protocol#statusreport): observed and applied generation, section states, conditions; from v0.3 the hosted instances and `pressure` (`HostPressure`: CPU, memory and I/O PSI "some" avg10 and CPU steal); `discovered` from a site agent (unknown PXE machines) and `volume_storage` from a runtime host (the volume store's space, b8e7271); `trust_version` once the daemon applied a newer trust bundle mid-session (0 means unchanged; bcd sets it only in the first report after the change, the FakeDaemon in every report) |
 | `inventory` | One [`InventorySection`](/docs/reference/protocol#inventorysection): the canonical encoding of a section and its SHA-256 |
 | `spec_request` | A [`SpecRequest`](/docs/reference/protocol#specrequest) for a full `DesiredState` |
 | `secret_request` | Asks for one secret, sealed to a one-time key (v0.2) |

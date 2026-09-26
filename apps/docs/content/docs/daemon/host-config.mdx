@@ -59,7 +59,8 @@ it applies no unit, and a `host` section that lists units is reported `UNSUPPORT
 `HostManagedExternally`. That state does not hold back `observed_generation` and raises no `SectionUnsupported`
 condition; the gateway records it as the informational node condition `HostManagedExternally` (c7613e1). The
 inventory still reports what the host has, so capacity never books huge pages or MIG instances the other tool did
-not set up.
+not set up. Under [`bcd helper`](#under-bcd-helper) root reads the same key from its own root-owned `config.toml` and
+refuses every `host.unit` (3fa9021).
 </Callout>
 
 <Callout type="warn" title="Mostly tested against fakes">
@@ -127,7 +128,9 @@ download) and, since 3c0fe02, every 10 minutes whatever happened (`driftInterval
 spec or mount changed behind bcd's back is repaired within 10 minutes, with no new spec.
 
 After a unit applies, bcd refreshes its inventory, so the driver version, the MIG devices and the huge page pools
-it reports follow what the unit changed.
+it reports follow what the unit changed. Since 427787a the heartbeat right after such a change carries the inventory
+hashes too, so the gateway applies the new sections at once and capacity sees, say, reserved huge pages within a
+heartbeat instead of up to ten heartbeats later.
 
 ## Status and failures
 
@@ -241,8 +244,18 @@ with the unit's own validation, and applies it.
 | Checks | The units decode and validate the settings themselves, exactly as in `bcd node`; an unknown unit is `not supported`, and a helper built without host units answers `not configured` |
 | Signed spec | The signed spec that asks for the unit, whenever the helper knows the command-signing roots (below) |
 
-`[host] units = false` is read by `bcd node` only: it then has no host converger and sends no `host.unit`. `bcd helper`
-does not read the key, and would still apply a `host.unit` that passes the checks below.
+`[host] units = false` is honoured on both sides (3fa9021). `bcd node` then has no host converger and sends no
+`host.unit`, and `bcd helper` reads the key from its own `config.toml` and refuses every `host.unit`, applies and
+cleans alike, with `host.unit: this host's configuration is managed outside bcd ([host] units = false in root's
+config.toml)`, writing nothing. Root's copy is the one that counts, so a compromised node that dropped the setting
+from its own view still gets no host change applied as root.
+
+For the same reason, `bcd helper` running as root refuses to start unless its configuration file is a regular file
+(not a symlink) that root owns and no one else can write, in directories only root can write: `<file> must be a
+regular file root owns that no one else can write`. That file decides what root does for the node (`[host] units`,
+`command_root_sha256`, the join pin). The install script already writes it that way, `root:bcd` 0640 in `/etc/bcd`
+0750 (see [install](/docs/daemon/install)); a hand-made `config.toml` owned by the `bcd` account, or writable by its
+group, stops the helper.
 
 <Callout type="info" title="libvirt hosts">
 Since ed3c7d2 and d418820 a VPS or sandbox host that runs `libvirt-kvm` is separated too: `bcd node` is no longer in
@@ -281,8 +294,14 @@ starting. The helper refuses the request unless all of these hold:
 - its roots check out: each is pinned in `command_root_sha256`, or they come from a trust bundle signed by the pinned
   JoinService key whose version is not older than one the helper already accepted (an older one is a rollback);
 - the signature verifies, from a certificate of the worker role, for a desired state;
-- the body names this node; the first signed spec the helper accepts fixes the node in
-  `/var/lib/bcd-hostconfig/helper-intent.json`;
+- the body names this node. Since a966cd4 the node is the one root's own join record names: `bcd join`, run as root
+  on a node with `[helper]` (the install script's join), writes the verified `JoinResponse`, as signed, to
+  `/var/lib/bcd-hostconfig/join-response.pb` (0600, a root-only path) before the identity is written, and a failed
+  record fails the join and leaves no identity. The helper takes the node id from that record, re-verified against
+  root's `join_signing_key_pin`, so another node's signed spec is refused from the first request on. A record the
+  pinned key did not sign refuses every `host.unit`; when root joins the machine again as another node, the binding
+  moves and the generations start over. A node joined before a966cd4 has no record and keeps the older rule: the first
+  signed spec the helper accepts fixes the node in `/var/lib/bcd-hostconfig/helper-intent.json`;
 - its generation is not older than one the helper already accepted;
 - the unit's settings are exactly the body's, and a clean is allowed only for a unit the body no longer names.
 
@@ -304,6 +323,11 @@ without them keeps the node's pins, and `better-compute pki trust-version` print
 either way: that is why the `sysctl`
 unit refuses keys that would run a program as root, and why a Kubernetes join under the helper needs root's own
 allowlist of clusters (see [k8s-join](#k8s-join)). Programs a unit runs are bounded to 20 minutes each.
+
+A second window, which node the specs must name, is closed since a966cd4 by root's join record. A node joined before
+a966cd4 has no `join-response.pb` and still binds to the first signed spec it presents, so a node compromised before
+that first `host.unit` could bind root to another node's specs. Re-join such nodes, or re-run the install script, so
+root writes the record.
 
 `TestHelperHostUnit` (e0fe5ec) covers the operation against a real helper socket and a fake host: a sysctl
 re-planned and applied as root with the busy GPUs passed through, `kernel.core_pattern` refused with nothing written,
