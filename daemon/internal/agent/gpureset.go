@@ -94,5 +94,11 @@ func (a *Agent) runGpuReset(ctx context.Context, cmd dispatch.Command) (journal.
 		}
 		a.invMu.Unlock()
 	}
+	// A GPU the reset brought back healthy no longer carries this boot's XIDs.
+	for _, o := range result.Gpus {
+		if o.Reset_ && o.Healthy {
+			a.clearGpuFaults(o.Uuid)
+		}
+	}
 	return succeeded(result)
 }

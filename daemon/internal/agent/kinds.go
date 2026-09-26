@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
@@ -180,12 +181,17 @@ func (a *Agent) runDiagNvml(_ context.Context, cmd dispatch.Command) (journal.Re
 		section = a.inv.Gpus
 	}
 	a.invMu.Unlock()
-	nvml := section != nil
+	// The kernel driver alone (procfs) names the GPUs; the checks need its management interface.
+	nvml := section != nil && section.CudaDriverVersion != ""
 	checks := []*agentv1.DiagnosticCheck{{Name: "nvml.init", Passed: nvml}}
 	if !nvml {
 		checks[0].Message = "NVML is not available on this node"
+		if section != nil {
+			checks[0].Message = "the NVIDIA driver's management interface (nvidia-smi) did not answer"
+		}
 		return succeeded(&agentv1.DiagNvmlResult{Passed: false, Checks: checks})
 	}
+	xids := a.gpuXids()
 	visible := section.Gpus
 	if want := req.GetExpectedGpuCount(); want > 0 {
 		checks = append(checks, &agentv1.DiagnosticCheck{
@@ -227,19 +233,30 @@ func (a *Agent) runDiagNvml(_ context.Context, cmd dispatch.Command) (journal.Re
 			passed = false
 			continue
 		}
-		failing := map[string]bool{}
+		failing := map[string]string{}
 		if g.Ecc != nil && g.Ecc.VolatileCounts != nil && g.Ecc.VolatileCounts.Uncorrectable > 0 {
-			failing["ecc.uncorrectable"] = true
+			failing["ecc.uncorrectable"] = fmt.Sprintf("%d uncorrectable ECC errors since the driver loaded", g.Ecc.VolatileCounts.Uncorrectable)
 		}
 		if g.RowRemap != nil {
-			failing["row-remap.pending"] = g.RowRemap.Pending
-			failing["row-remap.failure"] = g.RowRemap.Failure
+			if g.RowRemap.Pending {
+				failing["row-remap.pending"] = "a row remap waits for a GPU reset"
+			}
+			if g.RowRemap.Failure {
+				failing["row-remap.failure"] = "row remapping failed: the GPU needs replacing"
+			}
+		}
+		// Link width only: an idle GPU lowers its link speed on purpose, never its width.
+		if cur, max, ok := a.pcieLinkWidth(g.PciBusId); ok && cur < max {
+			failing["pcie.link"] = fmt.Sprintf("PCIe link x%d of x%d", cur, max)
+		}
+		if kinds := xids[u]; len(kinds) > 0 {
+			failing["xid.recent"] = strings.Join(kinds, ", ") + " this boot"
 		}
 		gd := &agentv1.GpuDiagnostic{Uuid: u, Passed: true}
 		for _, name := range []string{"ecc.uncorrectable", "row-remap.pending", "row-remap.failure", "pcie.link", "xid.recent"} {
-			c := &agentv1.DiagnosticCheck{Name: name, Passed: !failing[name]}
-			if failing[name] {
-				c.Message = name + " failed"
+			msg, bad := failing[name]
+			c := &agentv1.DiagnosticCheck{Name: name, Passed: !bad, Message: msg}
+			if bad {
 				gd.Passed = false
 			}
 			gd.Checks = append(gd.Checks, c)

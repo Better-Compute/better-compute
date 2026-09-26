@@ -112,6 +112,9 @@ type Options struct {
 	// Kubernetes DaemonSet beside the GPU operator). No NodeSpec.host unit is applied, and the host
 	// section reports HostManagedExternally.
 	ExternalHost bool
+	// InventoryInterval re-collects the inventory without a reason (default 10 min); an XID
+	// re-collects it soon regardless.
+	InventoryInterval time.Duration
 	// KubernetesAllowed are the clusters the k8s-join unit may join ([kubernetes] allowed_clusters);
 	// empty allows any when bcd node applies units itself (as root), none under bcd helper.
 	KubernetesAllowed []kube.Cluster
@@ -156,7 +159,9 @@ type Agent struct {
 	access  *accessConverger
 	hostcfg *hostConverger
 	// kube runs the kubelet device plugins on a Kubernetes worker (kube.go).
-	kube       *kube.Manager
+	kube *kube.Manager
+	// rescan asks inventoryLoop for a collection soon (gpuhealth.go).
+	rescan     chan struct{}
 	convergeCh chan struct{}
 	rng        *rand.Rand
 	ctx        context.Context
@@ -262,6 +267,7 @@ func New(o Options) (*Agent, error) {
 		lanes:       lanes,
 		laneConfig:  o.Lanes,
 		convergeCh:  make(chan struct{}, 1),
+		rescan:      make(chan struct{}, 1),
 		rng:         rand.New(rand.NewSource(time.Now().UnixNano())),
 		state:       o.State,
 		execs:       map[string]*execution{},
@@ -376,6 +382,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.healthLoop(ctx)
 	go a.watchXids(ctx)
 	go a.kube.Run(ctx)
+	go a.inventoryLoop(ctx)
 	if len(a.o.Runtimes) > 0 {
 		go a.firewallLoop(ctx)
 	}

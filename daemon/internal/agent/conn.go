@@ -164,6 +164,9 @@ func (a *Agent) hello() (*agentv1.Hello, error) {
 	}
 	a.invMu.Lock()
 	gpus := len(gpuUUIDs(a.inv))
+	// procfs names the GPUs; only the driver's management interface (nvidia-smi / NVML) fills the
+	// CUDA version and each GPU's memory, ECC and MIG state.
+	nvml := gpus > 0 && a.inv.Gpus.CudaDriverVersion != ""
 	a.invMu.Unlock()
 	if len(a.o.Runtimes) > 0 {
 		h.Capabilities = append(h.Capabilities, InstanceDialCapability, NetworkPolicyCapability)
@@ -185,7 +188,10 @@ func (a *Agent) hello() (*agentv1.Hello, error) {
 		})
 	}
 	if gpus > 0 {
-		h.Capabilities = append(h.Capabilities, "cdi", "nvml")
+		h.Capabilities = append(h.Capabilities, "cdi")
+		if nvml {
+			h.Capabilities = append(h.Capabilities, "nvml")
+		}
 		h.Drivers = append(h.Drivers, &commonv1.DriverManifest{
 			Id:               "nvidia",
 			Version:          a.o.Version,

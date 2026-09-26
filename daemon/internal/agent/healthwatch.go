@@ -88,6 +88,8 @@ func (a *Agent) onXid(x health.Xid) {
 	}
 	kind := "Xid" + strconv.Itoa(x.Code)
 	a.log.Warn("GPU XID", "gpu", device, "xid", x.Code, "message", x.Message)
+	// The GPU's ECC and row-remap counters move with an XID: read them again.
+	a.requestRescan()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	found := false
