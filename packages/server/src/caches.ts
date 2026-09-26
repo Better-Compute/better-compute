@@ -113,17 +113,37 @@ export function credentialKey(credential: Credential): string | undefined {
     headers?.get('cookie') ?? null,
   ];
   if (material.every((part) => part === null || part === '')) return undefined;
-  return createHash('sha256').update(JSON.stringify(material)).digest('hex');
+  // The caller's address is part of the key: IAM may decide on it (`request.sourceIp` conditions,
+  // session IP binding), so a token used from another address never rides a cached answer.
+  return createHash('sha256')
+    .update(JSON.stringify([...material, credential.sourceIp ?? null]))
+    .digest('hex');
 }
 
-const decisionKey = (caller: Caller, decision: Decision) =>
-  JSON.stringify([
+/**
+ * The source address a caller was authenticated from, set (non-enumerable, so equality and JSON
+ * ignore it) by `authenticate`; the server passes that very object on to `authorize` and the list
+ * recipe. A caller built elsewhere counts as address-less (`null`).
+ */
+const sourceOf = Symbol('sourceIp');
+type Sourced = Caller & { [sourceOf]?: string | null };
+
+function tagSource(caller: Caller, source: string | null): Caller {
+  const copy = { ...caller };
+  Object.defineProperty(copy, sourceOf, { value: source, enumerable: false });
+  return copy;
+}
+
+const decisionKey = (caller: Caller, decision: Decision): string | undefined => {
+  return JSON.stringify([
     caller.sessionId,
+    (caller as Sourced)[sourceOf] ?? null,
     decision.tenantId,
     decision.action,
     decision.resource.type,
     decision.resource.id,
   ]);
+};
 
 interface CachedDecision {
   identityId: string;
@@ -152,10 +172,12 @@ export function createCaches(options: CacheOptions = {}): Caches {
 
   return {
     async authenticate(credential, load) {
+      const source = credential.sourceIp ?? null;
+      const tagged = (caller: Caller): Caller => tagSource(caller, source);
       const key = authentications.enabled ? credentialKey(credential) : undefined;
-      if (key === undefined) return load();
+      if (key === undefined) return tagged(await load());
       const cached = authentications.get(key);
-      if (cached) return { ...cached };
+      if (cached) return tagged(cached);
       let pending = inflight.get(key);
       if (!pending) {
         const started = epoch;
@@ -169,11 +191,11 @@ export function createCaches(options: CacheOptions = {}): Caches {
         pending.then(settled, settled);
         inflight.set(key, pending);
       }
-      return { ...(await pending) };
+      return tagged(await pending);
     },
     async authorize(caller, decision, load) {
-      if (!decisions.enabled) return load();
-      const key = decisionKey(caller, decision);
+      const key = decisions.enabled ? decisionKey(caller, decision) : undefined;
+      if (key === undefined) return load();
       if (decisions.get(key)) return true;
       const started = epoch;
       const allowed = await load();
@@ -182,16 +204,17 @@ export function createCaches(options: CacheOptions = {}): Caches {
       return allowed;
     },
     cachedDecision(caller, decision) {
-      return decisions.enabled && decisions.get(decisionKey(caller, decision)) ? true : undefined;
+      const key = decisions.enabled ? decisionKey(caller, decision) : undefined;
+      return key !== undefined && decisions.get(key) ? true : undefined;
     },
     generation: () => epoch,
     rememberAllowed(caller, allowed, generation) {
       if (generation !== epoch) return;
-      for (const decision of allowed)
-        decisions.set(decisionKey(caller, decision), {
-          identityId: caller.identityId,
-          sessionId: caller.sessionId,
-        });
+      for (const decision of allowed) {
+        const key = decisionKey(caller, decision);
+        if (key !== undefined)
+          decisions.set(key, { identityId: caller.identityId, sessionId: caller.sessionId });
+      }
     },
     dropIdentity,
     dropSession,

@@ -46,9 +46,11 @@ describe('the caller address IAM sees', () => {
     db = pglite();
     const iam = fakeIam({ callers: { tok: { tenantId: ACME } }, allow: [{}] });
     const seen: (string | undefined)[] = [];
+    const forwarded: (string | null)[] = [];
     const authenticate = iam.authenticate.bind(iam);
     iam.authenticate = async (credential: Credential) => {
       seen.push(credential.sourceIp);
+      forwarded.push(new Headers(credential.headers).get('x-forwarded-for'));
       return authenticate(credential);
     };
     const compute = betterCompute({ ...options(db, iam), trustedProxies: ['10.0.0.0/8'] } as never) as any;
@@ -67,6 +69,8 @@ describe('the caller address IAM sees', () => {
     await compute.handler(request('6.6.6.6, 198.51.100.7'), { peer: { address: '10.1.2.3' } });
     await compute.handler(request('198.51.100.7'), { peer: { address: '203.0.113.1' } });
     expect(seen).toEqual(['198.51.100.7', '203.0.113.1']);
+    // IAM's headers carry only the verified address, never the client's claims.
+    expect(forwarded).toEqual(['198.51.100.7', '203.0.113.1']);
     expect(() => betterCompute({ ...options(db, iam), trustedProxies: ['nope'] } as never)).toThrow(
       /trustedProxies/,
     );

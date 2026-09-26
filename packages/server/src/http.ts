@@ -126,6 +126,18 @@ export interface HandlerInfo {
   peer?: { address?: string };
 }
 
+/** Headers that claim a client address; stripped from what IAM sees (review of round 5, M6). */
+const forwardingHeaders = [
+  'x-forwarded-for',
+  'forwarded',
+  'x-real-ip',
+  'x-client-ip',
+  'true-client-ip',
+  'cf-connecting-ip',
+  'fastly-client-ip',
+  'x-cluster-client-ip',
+] as const;
+
 export interface HttpHost {
   options: ResolvedOptions;
   registry: Registry;
@@ -276,6 +288,10 @@ export function createHttp({ options, registry, operations }: HttpHost) {
       // The caller's address as the host verified it: the peer, or behind a trusted proxy the hop it
       // reported (`trustedProxies`); never a forwarding header an untrusted peer sent.
       const peer = options.sourceAddress(info?.peer?.address, request.headers);
+      // Client-sent forwarding headers never reach IAM (an embedded IAM that reads X-Forwarded-For
+      // would take the client's word): only the verified address, as X-Forwarded-For.
+      for (const name of forwardingHeaders) headers.delete(name);
+      if (peer) headers.set('x-forwarded-for', peer);
       const data = await operations.call(method, { headers, ...(peer ? { sourceIp: peer } : {}) }, body, {
         requestId,
         signal: request.signal,

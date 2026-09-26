@@ -60,6 +60,26 @@ describe('createCaches(): authentication', () => {
     expect(load.calls).toBe(3);
   });
 
+  it('keys authentications and read decisions by the caller’s address too (request.sourceIp)', async () => {
+    const caches = createCaches({ now: clock().now });
+    const load = counted(() => caller('id-ip'));
+    const here = await caches.authenticate({ token: 'tok-ip', sourceIp: '198.51.100.7' }, load);
+    await caches.authenticate({ token: 'tok-ip', sourceIp: '198.51.100.7' }, load);
+    expect(load.calls).toBe(1);
+    // The same token from another address is authenticated afresh (IAM may bind the session to an IP).
+    const there = await caches.authenticate({ token: 'tok-ip', sourceIp: '203.0.113.9' }, load);
+    expect(load.calls).toBe(2);
+    expect(here).toEqual(caller('id-ip'));
+    const allow = counted(() => true);
+    await caches.authorize(here, decision('n-ip'), allow);
+    expect(caches.cachedDecision(here, decision('n-ip'))).toBe(true);
+    // An allow decided for one address never answers for another.
+    expect(caches.cachedDecision(there, decision('n-ip'))).toBeUndefined();
+    await caches.authorize(there, decision('n-ip'), allow);
+    expect(allow.calls).toBe(2);
+    expect(credentialKey({ token: 't', sourceIp: '1.1.1.1' })).not.toBe(credentialKey({ token: 't' }));
+  });
+
   it('hands out copies, shares one call among concurrent misses and never caches a failure', async () => {
     const caches = createCaches({ now: clock().now });
     let release!: () => void;
