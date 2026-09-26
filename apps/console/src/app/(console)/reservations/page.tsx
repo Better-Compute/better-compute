@@ -16,6 +16,13 @@ export default function ReservationsPage() {
   const form = useMemo(() => createReservationForm(api, { tenantId }), [api, tenantId]);
   const state = useStore(form);
   const values = state.values;
+  // Kubernetes-bound GPUs are the pool owner's only (the kubelet can't tell tenants apart).
+  const chosen = pools.items.find((pool) => pool.id === values.poolId) as
+    | { ownerTenantId?: unknown; policy?: { kubernetes?: unknown } }
+    | undefined;
+  const kubernetesPool =
+    chosen?.ownerTenantId === tenantId && typeof chosen?.policy?.kubernetes === 'object';
+  const optionalInt = (value: string) => (value.trim() === '' ? undefined : Number(value));
 
   return (
     <>
@@ -88,6 +95,46 @@ export default function ReservationsPage() {
             />
             All GPUs on one NVLink domain
           </label>
+          <label>
+            Host CPUs (optional)
+            <input
+              type="number"
+              min={0}
+              max={4096}
+              placeholder="the pool's share per GPU"
+              value={values.vcpu ?? ''}
+              onChange={(event) => form.change({ vcpu: optionalInt(event.target.value) as never })}
+            />
+            {state.errors.vcpu && <span className="error">{state.errors.vcpu}</span>}
+          </label>
+          <label>
+            Host memory, GiB (optional)
+            <input
+              type="number"
+              min={0}
+              max={65536}
+              placeholder="the pool's share per GPU"
+              value={values.memoryGiB ?? ''}
+              onChange={(event) =>
+                form.change({ memoryGiB: optionalInt(event.target.value) as never })
+              }
+            />
+            {state.errors.memoryGiB && <span className="error">{state.errors.memoryGiB}</span>}
+          </label>
+          {kubernetesPool && (
+            <label className="row">
+              <input
+                type="checkbox"
+                checked={values.kubernetes ?? false}
+                onChange={(event) => form.change({ kubernetes: event.target.checked })}
+              />
+              Give the GPUs to the pool&apos;s Kubernetes cluster
+            </label>
+          )}
+          <p className="muted">
+            Host CPUs and memory below the pool&apos;s per-GPU share are raised to it; above it, they
+            count against your CPU and memory quota.
+          </p>
           <EarliestStart poolId={values.poolId} gpus={values.gpus} duration={values.duration} />
           {state.previewing && <p className="muted">Checking capacity…</p>}
           {state.preview && (
