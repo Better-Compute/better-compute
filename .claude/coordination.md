@@ -72,6 +72,22 @@ multi-gateway 10k + nightly sim ([3afca2]), spot/node leases/pool-lease placer (
 - Orchestrator [37c0ab]: installs/lockfile, core/protocol additive changes, server index/options/api/context.
 Open, unassigned: W1 Go daemon (needs Go installed), real-Postgres runs (no Postgres here), D15 hardware gates.
 
+## Round 5: the complete node daemon (PLAN §3.8, v1.1), orchestrator [595a2f] (2026-09-25)
+
+User request: build out the full compute daemon for sandboxes and GPU nodes, with memory, and with Kubernetes support.
+Session ids changed on restart: [595a2f] = ex-f85da7 (orchestrator), [d320b8] = ex-c321a3, [06192c] = ex-097b34,
+[927015] = ex-f02367, [6baab5] = ex-31c64a, [c159f5] = docs. There is no session for ex-402c97 (cli/pki/console) or
+ex-6a20b8 (bcd), so bcd's areas are split below. Seams are in a760805 (proto, core, nodespec wire).
+
+| Workstream | Owner | Files |
+|---|---|---|
+| A. bcd host converger (NodeSpec.host units: sysctl, hugepages, nvidia-driver, container-toolkit+CDI, mig-layout, fabric-manager) and helper `host.unit` | [d320b8] | `daemon/internal/hostconfig/**`, `daemon/internal/agent/hostconfig.go` |
+| B. bcd devices converger (HOLD cgroup slices from DeviceAssignment.limits, device ownership, MIG/slot), runtimes (InstanceSpec.placement: NUMA, pinning, hugepages, balloon), host admission (ResourcesExhausted), command-kind gaps | [06192c] | `daemon/internal/agent/{devices,instances}.go`, `daemon/internal/runtime/**` |
+| C. capacity: node_resources for every host (cpu, memoryGiB, hugepages), ReservationRequest.resources + policy.perGpu, NUMA-aware booking, flavor placement → templates | [06192c] | `packages/capacity/**`, `packages/vps/**` |
+| D. provision `hugepages` + `k8s-join` units, inventory memory/NUMA/hugepages/isolated CPUs + labels, migrations, Kubernetes capacity-source provider (bcd DaemonSet adopt) | [927015] | `packages/{provision,inventory,metal}/**`, `daemon/internal/inventory/**` (collect), a new provider package |
+| E. GPU backend (nvidia-smi based), Kubernetes node side: k8s-join unit inside A's framework, device plugin for BINDING_KUBERNETES (only bound devices), bcd.dev/* Node labels/taints, cordon/drain on release; live GPU samples as OTLP metrics | [6baab5] | `daemon/internal/nvml/**`, `daemon/internal/kube/**` |
+| F. proto/core seams, server nodespec wiring, PLAN, coordination, reviews | [595a2f] | proto, `packages/core`, `packages/server` |
+
 ## Round 4 allocation (proposed by [f85da7], 2026-09-24 late; all round-3 sessions are gone)
 
 Six "Feature building continuation" sessions started at once. If two proposals collide, this one stands (it was written
