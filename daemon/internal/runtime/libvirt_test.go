@@ -281,6 +281,13 @@ func TestLibvirtRuntime(t *testing.T) {
 		!bytes.Contains(seed, []byte(`macaddress: "52:54:00:00:00:07"`)) || !bytes.Contains(seed, []byte(`via: "10.0.0.1"`)) {
 		t.Fatalf("seed = %q", seed)
 	}
+	// QEMU runs as its own user: it can search (never list) the way to its disks and base image.
+	for _, d := range []string{filepath.Join(dir, "instances", "inst_web"), filepath.Join(dir, "images"), dir} {
+		info, err := os.Stat(d)
+		if err != nil || info.Mode().Perm()&0o001 == 0 || (d != dir && info.Mode().Perm()&0o004 != 0) {
+			t.Errorf("%s: %v %v", d, info.Mode(), err)
+		}
+	}
 	if _, err := os.Stat(filepath.Join(dir, "images", fmt.Sprintf("%x.qcow2", sum))); err != nil {
 		t.Fatalf("base image: %v", err)
 	}

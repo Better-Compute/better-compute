@@ -541,6 +541,19 @@ func (l *Libvirt) Ensure(ctx context.Context, spec *agentv1.InstanceSpec, userDa
 	if err != nil {
 		return err
 	}
+	// QEMU (its own user) must reach every file the domain names.
+	reach := []string{}
+	for _, disk := range d.Devices.Disks {
+		reach = append(reach, filepath.Dir(disk.Source.File))
+	}
+	if meta.Image != "" && meta.Restored == "" { // the overlay's backing base (0644)
+		reach = append(reach, filepath.Join(l.Dir, "images"))
+	}
+	for _, p := range reach {
+		if err := l.searchable(p); err != nil {
+			return err
+		}
+	}
 	return l.define(ctx, d, dir)
 }
 
@@ -614,6 +627,31 @@ func (l *Libvirt) checkRestored(_ context.Context, dir string) error {
 		return fmt.Errorf("the snapshot's disk: %w", err)
 	}
 	return nil
+}
+
+// searchable gives "others" search permission (x, never read) on dir and its ancestors up to the
+// data directory: libvirt runs QEMU as its own user (libvirt-qemu, qemu), which must reach the
+// disks, base image and volumes libvirt hands it (dynamic ownership relabels files, never the
+// directories on their way). Listing stays closed, and bcd's own files there are 0600.
+func (l *Libvirt) searchable(dir string) error {
+	stop := filepath.Dir(filepath.Clean(l.Dir))
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if !strings.HasPrefix(d+"/", stop+"/") {
+			return nil // outside bcd's data directory: not bcd's to change
+		}
+		info, err := os.Stat(d)
+		if err != nil {
+			return err
+		}
+		if perm := info.Mode().Perm(); perm&0o001 == 0 {
+			if err := os.Chmod(d, perm|0o001); err != nil {
+				return err
+			}
+		}
+		if d == stop {
+			return nil
+		}
+	}
 }
 
 // seed writes the NoCloud seed ISO (volume "cidata") with the user data, the instance id and, when

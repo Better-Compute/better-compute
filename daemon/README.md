@@ -189,6 +189,7 @@ Files the daemon owns:
 | `/etc/systemd/system/bcd-rollback.service`, `bcd.service.d/50-bcd-rollback.conf` | written by the first update under systemd |
 | `/etc/cdi/bcd-<allocationId>.json` | CDI spec per GPU hold |
 | `/run/bcd/allocations/<allocationId>.env` | the hold's environment (`BCD_ALLOCATION_ID`, `BCD_RESERVATION_ID`, `NVIDIA_VISIBLE_DEVICES`, …) |
+| `<data_dir>/libvirt/…` | libvirt-kvm instances and base images. QEMU runs as its own user, so bcd gives "others" search (x, never read) on the way from `<data_dir>` to each file a domain names; the files stay root's until libvirt relabels them |
 | `<data_dir>/volumes/<id>.raw`, `<id>.json` | persistent host volumes and their serials (0600; a CH VMM's user holds a read-write one while it runs) |
 | `bcd-alloc-<allocationId>.slice` | a hold's runtime slice when it has limits (`/sys/fs/cgroup/bcd.slice/bcd-alloc.slice/…`); under a fake root, `/run/bcd/slices/<name>.json` |
 | `/etc/ssh/sshd_config.d/10-better-compute.conf`, `/etc/ssh/bc_ca.pub`, `/etc/ssh/bc_principals/<account>`, `/etc/ssh/bc_krl` | break-glass SSH, written by the access converger |
