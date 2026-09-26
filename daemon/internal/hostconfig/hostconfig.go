@@ -26,6 +26,11 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/converge"
 )
 
+// StateDir holds what the units record about the host (the boot loader's arguments, the CDI spec's
+// stamp). It is root's, never bcd's data_dir: under bcd helper the unprivileged node owns data_dir,
+// and a record there would let it steer root's writes through a planted symlink.
+const StateDir = "/var/lib/bcd-hostconfig"
+
 // Cmd is a program run on the host.
 type Cmd struct {
 	Name string

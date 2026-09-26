@@ -23,7 +23,7 @@ const (
 	// allocation specs are /etc/cdi/bcd-<alloc>.json, from the devices converger).
 	CDISpecFile = "/etc/cdi/nvidia.yaml"
 	// CDIStampFile records what the vendor CDI spec was generated for (driver and GPU list).
-	CDIStampFile = "/var/lib/bcd/cdi-nvidia.stamp"
+	CDIStampFile = StateDir + "/cdi-nvidia.stamp"
 )
 
 var driverBranch = regexp.MustCompile(`^[0-9]{3}$`)

@@ -8,7 +8,7 @@ import (
 )
 
 // BootArgsDir holds, per unit, the kernel arguments the boot loader was last set up with.
-const BootArgsDir = "/var/lib/bcd/bootargs"
+const BootArgsDir = StateDir + "/bootargs"
 
 // planBootArgs keeps a unit's kernel arguments on the boot loader's command line: a GRUB drop-in
 // (/etc/default/grub.d/90-bcd-<unit>.cfg) and update-grub on the Debian family, grubby elsewhere.

@@ -30,7 +30,7 @@ const (
 	// GrubHugepagesFile is the GRUB drop-in (Debian family) holding the 1 GiB boot arguments.
 	GrubHugepagesFile = "/etc/default/grub.d/90-bcd-hugepages.cfg"
 	// HugepagesBootState records the 1 GiB count the boot loader was last set up for.
-	HugepagesBootState = "/var/lib/bcd/hugepages-1g-boot"
+	HugepagesBootState = StateDir + "/hugepages-1g-boot"
 )
 
 type hugepagesSettings struct {
