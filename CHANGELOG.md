@@ -18,6 +18,8 @@
     - Hosted-Kubernetes join tokens land nodes `tenant-controlled`.
     - Slots per shared GPU are capped at 48.
   - MCP `reserve_gpus` takes `vcpu`, `memoryGiB` and `kubernetes`.
+  - **Breaking (IAM):** `sandboxVolumes.create` is decided on `compute-sandbox-volume/<draft id>`, whose projection carries the requested `sizeGiB`, instead of the tenant (6cb30e9). Policies that granted it on `compute-tenant` still reach it through the pool parent; policies that bound volume size now see it. `sandboxVolumes.resize` stages the new size the same way.
+  - **Breaking (API):** `sandboxVolumes.list` defaults to the caller's own volumes; pass `scope: 'all'` for everyone's (77bf9f5).
   - **Breaking (metrics):** bcd's `bcd.instance.memory.balloon` is now `bcd.instance.memory.balloon.reclaimed` (9bdd43a). It reports flavor memory minus current guest memory, only for guests with a balloon. Dashboards and alerts on the old name need updating.
   - Hosted-Kubernetes bcd uses the kubelet's credentials (e7d0765; NodeRestriction confines it to its own Node), never a service account.
   - CI builds the DaemonSet image (daemon/Containerfile) and server-side dry-runs the rendered manifests on a kind cluster.
