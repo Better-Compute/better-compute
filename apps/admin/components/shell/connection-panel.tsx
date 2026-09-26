@@ -43,7 +43,23 @@ export function ConnectionPanel() {
               { label: 'Latency', value: status?.latencyMs !== undefined ? `${status.latencyMs} ms` : '—', mono: true },
               { label: 'API', value: status?.url ?? '—', mono: true },
               { label: 'Server', value: status?.server ? `${status.server.name} ${status.server.version} · protocol ${status.server.protocol.min}–${status.server.protocol.max}` : '—', mono: true },
-              { label: 'Credential', value: status?.configured ? (status.authenticated ? 'bearer token (server-side)' : 'none: public methods only') : '—' },
+              {
+                label: 'Acting as',
+                value: !status?.configured ? (
+                  '—'
+                ) : status.operator ? (
+                  <span>
+                    {status.operator.name ?? status.operator.email ?? status.operator.identityId} <Tag status="live">read &amp; write</Tag>
+                  </span>
+                ) : (
+                  <span>
+                    {status.authenticated ? 'shared connection' : 'anonymous (public methods)'} <Tag status="pending">read-only</Tag>{' '}
+                    <a href="/signin?next=/settings%23connection" className="text-signal hover:underline">
+                      sign in
+                    </a>
+                  </span>
+                ),
+              },
               { label: 'Checked', value: status?.checkedAt ? fmtRelative(status.checkedAt, wallNow) : '—', mono: true },
             ]}
           />
@@ -57,10 +73,11 @@ export function ConnectionPanel() {
             <span className="font-mono text-[11px] text-text-tertiary">now: {source}</span>
           </div>
           <p className="text-caption-1-regular text-text-secondary">
-            The URL and token are set on the admin server, never in the browser, so this page can't be pointed at
-            another host: <Mono>ADMIN_COMPUTE_URL</Mono>, <Mono>ADMIN_COMPUTE_TOKEN</Mono> and <Mono>ADMIN_COMPUTE_TENANT</Mono>, or
-            the same keys in <Mono>apps/admin/.upstream.json</Mono> for local development. Modules that have a live source switch to
-            it; the rest stay simulated, and time travel always replays the simulation.
+            The API is set on the admin server, never in the browser: <Mono>ADMIN_COMPUTE_URL</Mono> (and optionally
+            <Mono>ADMIN_IAM_URL</Mono>, <Mono>ADMIN_COMPUTE_TENANT</Mono>), or <Mono>apps/admin/.upstream.json</Mono> in development.
+            Signed in, the admin forwards your own better-iam session, so changes are made, authorized and audited as you;
+            signed out, it only reads (with <Mono>ADMIN_COMPUTE_TOKEN</Mono> if set). Modules with a live source switch to it; time
+            travel always replays the simulation.
           </p>
         </div>
         <div className="flex min-w-0 flex-col gap-2">

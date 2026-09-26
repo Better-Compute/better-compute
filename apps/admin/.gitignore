@@ -5,3 +5,5 @@ next-env.d.ts
 *.tsbuildinfo
 # Local live-mode connection (URL + bearer token); see lib/upstream.ts
 .upstream.json
+# Development-only session key (lib/session.ts); production sets ADMIN_SESSION_SECRET
+.admin-secret

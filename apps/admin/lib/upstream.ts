@@ -13,34 +13,74 @@ export interface UpstreamConfig {
   url: string;
   token?: string;
   tenantId?: string;
+  /** better-iam's API base (…/api/iam) for operator sign-in; defaults to the compute URL's origin + /api/iam. */
+  iamUrl?: string;
 }
 
 export function upstreamConfig(): UpstreamConfig | null {
   let url = process.env.ADMIN_COMPUTE_URL;
   let token = process.env.ADMIN_COMPUTE_TOKEN;
   let tenantId = process.env.ADMIN_COMPUTE_TENANT;
+  let iamUrl = process.env.ADMIN_IAM_URL;
   if (!url) {
     try {
       const file = JSON.parse(readFileSync(join(process.cwd(), '.upstream.json'), 'utf8')) as Partial<UpstreamConfig>;
-      url = file.url;
-      token ??= file.token;
-      tenantId ??= file.tenantId;
+      url = typeof file.url === 'string' ? file.url : undefined;
+      token ??= typeof file.token === 'string' ? file.token : undefined;
+      tenantId ??= typeof file.tenantId === 'string' ? file.tenantId : undefined;
+      iamUrl ??= typeof file.iamUrl === 'string' ? file.iamUrl : undefined;
     } catch {
       return null;
     }
   }
   if (!url) return null;
-  let base: string;
+  const base = cleanBase(url);
+  if (!base) return null;
+  const iam = iamUrl ? cleanBase(iamUrl) : `${new URL(base).origin}/api/iam`;
+  return { url: base, ...(token ? { token } : {}), ...(tenantId ? { tenantId } : {}), ...(iam ? { iamUrl: iam } : {}) };
+}
+
+/** http(s) origin + path, with no credentials, query or fragment (those never belong in a base URL). */
+function cleanBase(url: string): string | null {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
     // Credentials belong in ADMIN_COMPUTE_TOKEN, never in the URL (it is shown in Settings and in errors).
     if (parsed.username || parsed.password || parsed.search || parsed.hash) return null;
-    base = `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, '');
+    return `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, '');
   } catch {
     return null;
   }
-  return { url: base, ...(token ? { token } : {}), ...(tenantId ? { tenantId } : {}) };
+}
+
+/**
+ * POST a better-iam method (…/api/iam/<group>/<method>) from this server: JSON, the x-better-iam CSRF header,
+ * no Origin (server to server), an optional bearer, a timeout. Returns { data } or { error }.
+ */
+export async function callIam(
+  config: UpstreamConfig,
+  path: string,
+  input: unknown,
+  bearer?: string,
+): Promise<{ data?: unknown; error?: { code: string; message: string } }> {
+  if (!config.iamUrl) return { error: { code: 'NOT_CONFIGURED', message: 'No identity service is configured (ADMIN_IAM_URL)' } };
+  const headers: Record<string, string> = { 'content-type': 'application/json', 'x-better-iam': '1' };
+  if (bearer) headers.authorization = `Bearer ${bearer}`;
+  try {
+    const response = await fetch(`${config.iamUrl}/${path}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(input ?? {}),
+      redirect: 'error',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(10_000),
+    });
+    const body = (await response.json().catch(() => null)) as { data?: unknown; error?: { code: string; message: string } } | null;
+    if (!body || (!('data' in body) && !body.error)) return { error: { code: 'INVALID_RESPONSE', message: `The identity service answered ${response.status}` } };
+    return body;
+  } catch (error) {
+    return { error: { code: 'UPSTREAM_UNREACHABLE', message: safeMessage(error) } };
+  }
 }
 
 /**

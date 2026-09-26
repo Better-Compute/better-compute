@@ -1,3 +1,4 @@
+import { sessionFromRequest } from '@/lib/session';
 import { callerAllowed, callUpstream, safeMessage, upstreamConfig } from '@/lib/upstream';
 
 // Connection status for the status bar and Settings: is an API configured, does it answer, who are we to it.
@@ -10,10 +11,21 @@ export async function GET(request: Request) {
   const config = upstreamConfig();
   if (!config) return Response.json({ configured: false }, { headers: { 'cache-control': 'no-store' } });
   const started = performance.now();
-  const base = { configured: true, url: config.url, authenticated: Boolean(config.token), tenantId: config.tenantId ?? null };
+  // Who the admin acts as: the signed-in operator (all methods, their own authority) or the shared read-only
+  // connection. Never the token itself.
+  const session = sessionFromRequest(request);
+  const base = {
+    configured: true,
+    url: config.url,
+    authenticated: Boolean(session || config.token),
+    tenantId: session?.tenantId ?? config.tenantId ?? null,
+    operator: session ? { identityId: session.identityId, name: session.name ?? null, email: session.email ?? null, expiresAt: session.expiresAt } : null,
+    readOnly: !session,
+    writable: Boolean(session),
+  };
   try {
     const signal = AbortSignal.timeout(4000);
-    const version = await callUpstream(config, 'system/version', {}, signal);
+    const version = await callUpstream(session ? { ...config, token: session.token } : config, 'system/version', {}, signal);
     const latencyMs = Math.round(performance.now() - started);
     const data = (version.body as { data?: unknown; error?: { code: string; message: string } }) ?? {};
     if (!data.data) return Response.json({ ...base, ok: false, latencyMs, error: data.error ?? { code: 'HTTP_ERROR', message: `HTTP ${version.status}` } });

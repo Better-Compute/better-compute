@@ -47,6 +47,10 @@ export interface ConnectionStatus {
   latencyMs?: number;
   authenticated?: boolean;
   tenantId?: string | null;
+  /** True once a signed-in operator's own credential is forwarded; mutations are refused otherwise. */
+  writable?: boolean;
+  /** The signed-in operator, or null (the shared read-only connection). */
+  operator?: { identityId: string; name: string | null; email: string | null; expiresAt: number } | null;
   server?: { name: string; version: string; basePath: string; protocol: { min: number; max: number } };
   error?: { code: string; message: string };
   checkedAt?: number;

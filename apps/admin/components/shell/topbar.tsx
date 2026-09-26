@@ -18,6 +18,7 @@ import { SeverityIcon } from '@/components/ui/signal';
 import { cx } from '@/utils/cx';
 import { useAcks } from './pins';
 import { TimeMachine } from './time-machine';
+import { OperatorMenu } from './operator-menu';
 import { RANGES, useLive, useNow, useWorkspaceSettings, type RangeKey } from './workspace';
 import { useAttentionItems } from './use-attention';
 
@@ -105,6 +106,7 @@ export function Topbar({ onOpenPalette, onOpenNav }: { onOpenPalette(): void; on
       <TimeMachine />
 
       <AttentionBell />
+      <OperatorMenu />
     </header>
   );
 }
