@@ -6,11 +6,13 @@ import {
   bcdHostIgnition,
   defineProfile,
   hostSpecFor,
+  poolHostConfig,
   provisionMigrations,
   provisionModule,
   renderTemplate,
   resolveHostConfig,
   startWorkflow,
+  validatePoolHostPolicy,
 } from '@better-compute/provision';
 
 // Config units (PLAN.md §11.2): hostConfig → the NodeSpec host section, and the Ignition renderer.
@@ -48,6 +50,101 @@ describe('resolveHostConfig', () => {
     await expect(resolveHostConfig({ 'nvidia-driver': { branch: 'latest' } }, { labels })).rejects.toThrow(/nvidia-driver/);
     await expect(resolveHostConfig({ 'kernel-module': {} }, { labels })).rejects.toThrow(/not a known config unit/);
     await expect(resolveHostConfig({ sysctl: { 'Bad Key': 1 } }, { labels })).rejects.toThrow(/sysctl/);
+  });
+});
+
+describe('hugepages, kernel-modules and k8s-join (PLAN.md §3.8)', () => {
+  const token = 'secret://tenant-root/k8s-bootstrap';
+  const join = { server: 'https://k8s.example:6443', caCertSha256: `sha256:${'AB'.repeat(32)}`, tokenRef: token };
+
+  it('validates hugepages and normalizes kernel modules', async () => {
+    expect(await resolveHostConfig({ hugepages: { pages2m: 4096, pages1g: 16, transparent: 'madvise' } }, { labels: {} })).toEqual({
+      config: { hugepages: { pages2m: 4096, pages1g: 16, transparent: 'madvise' } },
+    });
+    await expect(resolveHostConfig({ hugepages: { pages1g: -1 } }, { labels: {} })).rejects.toThrow(/hugepages/);
+    await expect(resolveHostConfig({ hugepages: { transparent: 'sometimes' } }, { labels: {} })).rejects.toThrow(/hugepages/);
+    expect(
+      await resolveHostConfig(
+        { 'kernel-modules': { load: ['vhost_net', 'kvm_intel', 'tun', 'tun'], options: { kvm_intel: 'nested=1' } } },
+        { labels: {} },
+      ),
+    ).toEqual({ config: { 'kernel-modules': { load: ['kvm_intel', 'tun', 'vhost_net'], options: { kvm_intel: 'nested=1' } } } });
+    await expect(resolveHostConfig({ 'kernel-modules': { load: ['../evil'] } }, { labels: {} })).rejects.toThrow(/module name/);
+    await expect(resolveHostConfig({ 'kernel-modules': { options: { kvm: 'a=1; reboot' } } }, { labels: {} })).rejects.toThrow(/options/);
+  });
+
+  it('validates k8s-join: an https server, the CA pin, the token by reference, labels and taints', async () => {
+    expect(
+      await resolveHostConfig(
+        { 'k8s-join': { ...join, nodeLabels: { 'bc.dev/pool': 'h100', tier: 'gpu' }, taints: ['nvidia.com/gpu=present:NoSchedule'], kubernetesVersion: '1.34.1' } },
+        { labels: {} },
+      ),
+    ).toEqual({
+      config: {
+        'k8s-join': {
+          server: 'https://k8s.example:6443',
+          caCertSha256: 'ab'.repeat(32),
+          tokenRef: token,
+          gpu: true,
+          kubernetesVersion: '1.34.1',
+          nodeLabels: { 'bc.dev/pool': 'h100', tier: 'gpu' },
+          taints: ['nvidia.com/gpu=present:NoSchedule'],
+        },
+      },
+    });
+    const refused = async (patch: Record<string, unknown>, pattern: RegExp) =>
+      expect(resolveHostConfig({ 'k8s-join': { ...join, ...patch } as never }, { labels: {} })).rejects.toThrow(pattern);
+    await refused({ server: 'http://k8s.example:6443' }, /server/);
+    await refused({ server: 'https://user:pw@k8s.example' }, /server/);
+    await refused({ caCertSha256: 'abc' }, /caCertSha256/);
+    // A bootstrap token itself, never a reference: refused, it would sit in every signed spec.
+    await refused({ tokenRef: 'abcdef.0123456789abcdef' }, /tokenRef/);
+    await refused({ nodeLabels: { 'node-role.kubernetes.io/worker': '' } }, /reserved/);
+    await refused({ nodeLabels: { tier: 'has space' } }, /label value/);
+    await refused({ taints: ['gpu:Sometimes'] }, /NoSchedule/);
+    await refused({ kubeconfig: '...' }, /not a setting/);
+  });
+
+  it("renders a pool's policy into units that win over the profile's", async () => {
+    const db = pglite();
+    try {
+      await db.migrate(provisionMigrations);
+      await db.query(`INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ('s', 't', 'shared', 'eu', 1)`);
+      const policy = {
+        kubernetes: { apiServer: 'https://k8s.example:6443', caCertSha256: 'cd'.repeat(32), joinTokenRef: token, labels: { tier: 'gpu' } },
+        hugepages: { size: '1Gi', count: 8, perNuma: true },
+        kernelModules: { load: ['vhost_net'] },
+      };
+      await db.query(
+        `INSERT INTO pools (id, owner_tenant_id, site_id, class, sharing, agent, policy, version)
+         VALUES ('pool_k8s', 't', 's', 'metal-host', 'exclusive', 'bcd', $1::jsonb, 1)`,
+        [JSON.stringify(policy)],
+      );
+      // An adopted node no workflow ran on still gets the pool's units.
+      await db.query(
+        `INSERT INTO nodes (id, site_id, pool_id, owner_tenant_id, role, provision_state, maintenance, cordoned, connectivity, trust,
+           generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
+         VALUES ('node_k8s', 's', 'pool_k8s', 't', 'host', 'adopted', false, false, 'connected', 'platform', 1, 1, 1, 0, 0, 1)`,
+      );
+      expect(await hostSpecFor(db, 'node_k8s')).toEqual({
+        host: {
+          config: {
+            'k8s-join': { server: 'https://k8s.example:6443', caCertSha256: 'cd'.repeat(32), tokenRef: token, gpu: true, nodeLabels: { tier: 'gpu' } },
+            hugepages: { pages1g: 8, perNuma: true },
+            'kernel-modules': { load: ['vhost_net'] },
+          },
+        },
+      });
+      await expect(validatePoolHostPolicy({ hugepages: { size: '4Ki', count: 1 } })).rejects.toThrow(/size/);
+      await expect(validatePoolHostPolicy({ hugepages: { size: '2Mi', count: -3 } })).rejects.toThrow(/hugepages/);
+      await expect(validatePoolHostPolicy({ kubernetes: { ...policy.kubernetes, joinTokenRef: 'plain-token' } })).rejects.toThrow(/tokenRef/);
+      await expect(validatePoolHostPolicy({ kubernetes: { ...policy.kubernetes, kubeconfig: 'x' } })).rejects.toThrow(/not a setting/);
+      await expect(validatePoolHostPolicy(policy)).resolves.toBeUndefined();
+      // The pool's hugepages win over a profile's (the operator's memory layout).
+      expect(poolHostConfig(policy).hugepages).toEqual({ pages1g: 8, perNuma: true });
+    } finally {
+      await db.close();
+    }
   });
 });
 

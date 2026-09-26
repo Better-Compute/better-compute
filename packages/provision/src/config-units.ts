@@ -1,6 +1,7 @@
 import {
   ComputeError,
   field,
+  isSecretRef,
   manifest,
   type HostSpec,
   type Json,
@@ -56,9 +57,136 @@ export const builtinConfigUnits: readonly ConfigUnitDefinition[] = Object.freeze
     description: 'Kernel parameters',
     settings: manifest({}) as Manifest<Record<string, Json>>,
   },
+  {
+    name: 'hugepages',
+    description:
+      'Huge pages: 2 MiB pages allocated at runtime, 1 GiB pages through the kernel command line (effective after a reboot), and the transparent huge page policy',
+    settings: manifest({
+      pages2m: field.int({ min: 0, max: 4_194_304 }).optional(),
+      pages1g: field.int({ min: 0, max: 16_384 }).optional(),
+      transparent: field.option(['always', 'madvise', 'never']).optional(),
+      /** The counts are per NUMA node (each node gets them), not for the whole host. */
+      perNuma: field.boolean().optional(),
+    }) as Manifest<Record<string, Json>>,
+  },
+  {
+    name: 'kernel-modules',
+    description:
+      'Kernel modules loaded at boot and now (modules-load.d), with their options (modprobe.d): kvm_intel/kvm_amd, vhost_net and tun for VM hosts',
+    // Validated by validateKernelModules: a module list and an options map.
+    settings: manifest({}) as Manifest<Record<string, Json>>,
+  },
+  {
+    name: 'k8s-join',
+    description:
+      "Joins the node to a Kubernetes cluster as a worker (kubeadm join with a bootstrap token fetched by reference) and keeps its kubelet, labels and taints; GPUs through containerd's NVIDIA runtime and CDI",
+    // Validated by validateK8sJoin: the manifest cannot express its label map and taint list.
+    settings: manifest({}) as Manifest<Record<string, Json>>,
+  },
 ]);
 
 const sysctlKey = /^[a-z0-9_]+(?:\.[a-z0-9_-]+)+$/;
+
+// Kubernetes label syntax (k8s.io/docs/concepts/overview/working-with-objects/labels): an optional DNS
+// subdomain prefix and a name of at most 63 characters; values the same, or empty.
+const labelName = /^[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$/;
+const dnsSubdomain = /^(?=.{1,253}$)[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*$/;
+const reservedPrefix = /(^|\.)(kubernetes\.io|k8s\.io)$/;
+const taintEffects = ['NoSchedule', 'PreferNoSchedule', 'NoExecute'];
+
+function labelKeyProblem(key: string): string | undefined {
+  const slash = key.indexOf('/');
+  const prefix = slash >= 0 ? key.slice(0, slash) : undefined;
+  const name = slash >= 0 ? key.slice(slash + 1) : key;
+  if (!labelName.test(name)) return 'is not a Kubernetes label name';
+  if (prefix !== undefined && !dnsSubdomain.test(prefix)) return 'has a prefix that is not a DNS subdomain';
+  // The kubelet refuses to set most of these itself, and the rest belong to the cluster.
+  if (prefix !== undefined && reservedPrefix.test(prefix)) return 'uses a prefix reserved for Kubernetes (kubernetes.io, k8s.io)';
+  return undefined;
+}
+
+const moduleName = /^[a-z0-9_-]{1,64}$/;
+const moduleOptions = /^[A-Za-z0-9_.,:=/ -]{0,256}$/;
+
+/** `kernel-modules` settings: `load` (module names) and `options` (module → "k=v k2=v2"). */
+function validateKernelModules(settings: Record<string, Json>): Record<string, Json> {
+  const bad = (message: string): never => {
+    throw new ComputeError('INVALID_INPUT', `hostConfig.kernel-modules.${message}`);
+  };
+  for (const key of Object.keys(settings)) if (key !== 'load' && key !== 'options') bad(`${key} is not a setting (load, options)`);
+  const out: Record<string, Json> = {};
+  if (settings.load !== undefined) {
+    const load = settings.load;
+    if (!Array.isArray(load) || load.length > 64) bad('load must be a list of at most 64 module names');
+    for (const name of load as Json[]) if (typeof name !== 'string' || !moduleName.test(name)) bad(`load: ${JSON.stringify(name)} is not a module name`);
+    out.load = [...new Set(load as string[])].sort();
+  }
+  if (settings.options !== undefined) {
+    const options = settings.options;
+    if (!options || typeof options !== 'object' || Array.isArray(options) || Object.keys(options).length > 64)
+      bad('options must be an object of at most 64 module: "key=value …" entries');
+    for (const [name, value] of Object.entries(options as Record<string, Json>)) {
+      if (!moduleName.test(name)) bad(`options: ${name} is not a module name`);
+      if (typeof value !== 'string' || !moduleOptions.test(value)) bad(`options.${name} must be "key=value …" (letters, digits and _.,:=/ -)`);
+    }
+    out.options = Object.fromEntries(Object.entries(options as Record<string, string>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  }
+  return out;
+}
+
+/** `k8s-join` settings: the API server, its CA pin, the bootstrap token by reference, labels and taints. */
+function validateK8sJoin(settings: Record<string, Json>): Record<string, Json> {
+  const bad = (message: string): never => {
+    throw new ComputeError('INVALID_INPUT', `hostConfig.k8s-join.${message}`);
+  };
+  const allowed = new Set(['server', 'caCertSha256', 'tokenRef', 'kubernetesVersion', 'nodeLabels', 'taints', 'gpu']);
+  for (const key of Object.keys(settings)) if (!allowed.has(key)) bad(`${key} is not a setting (${[...allowed].join(', ')})`);
+  const { server, caCertSha256, tokenRef, kubernetesVersion, nodeLabels, taints, gpu } = settings;
+  let url: URL | undefined;
+  try {
+    url = typeof server === 'string' ? new URL(server) : undefined;
+  } catch {
+    url = undefined;
+  }
+  if (!url || url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search)
+    bad('server must be the API server as https://host[:port]');
+  // kubeadm's --discovery-token-ca-cert-hash: "sha256:<hex>" or the bare hex.
+  const pin = typeof caCertSha256 === 'string' ? caCertSha256.toLowerCase().replace(/^sha256:/, '') : '';
+  if (!/^[0-9a-f]{64}$/.test(pin)) bad('caCertSha256 must be the SHA-256 of the cluster CA public key, 64 hex digits (optionally "sha256:")');
+  // The bootstrap token never travels in the spec: the daemon fetches it by reference.
+  if (typeof tokenRef !== 'string' || !isSecretRef(tokenRef)) bad('tokenRef must be a secret:// (or vault://, env://) reference to the bootstrap token');
+  const out: Record<string, Json> = { server: url!.origin, caCertSha256: pin, tokenRef: tokenRef as string, gpu: gpu ?? true };
+  if (typeof out.gpu !== 'boolean') bad('gpu must be true or false');
+  if (kubernetesVersion !== undefined) {
+    if (typeof kubernetesVersion !== 'string' || !/^1\.[0-9]{2}\.[0-9]{1,3}$/.test(kubernetesVersion)) bad('kubernetesVersion must be a release such as 1.34.1');
+    out.kubernetesVersion = kubernetesVersion as string;
+  }
+  if (nodeLabels !== undefined) {
+    if (!nodeLabels || typeof nodeLabels !== 'object' || Array.isArray(nodeLabels)) bad('nodeLabels must be an object of label: value');
+    const labels = nodeLabels as Record<string, Json>;
+    if (Object.keys(labels).length > 64) bad('nodeLabels has more than 64 labels');
+    for (const [key, value] of Object.entries(labels)) {
+      const problem = labelKeyProblem(key);
+      if (problem) bad(`nodeLabels.${key} ${problem}`);
+      if (typeof value !== 'string' || (value !== '' && !labelName.test(value))) bad(`nodeLabels.${key} must be a Kubernetes label value (at most 63 characters)`);
+    }
+    out.nodeLabels = Object.fromEntries(Object.entries(labels).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  }
+  if (taints !== undefined) {
+    if (!Array.isArray(taints) || taints.length > 32) bad('taints must be a list of at most 32 "key[=value]:Effect" strings');
+    for (const taint of taints as Json[]) {
+      const match = typeof taint === 'string' ? /^([^=:]+)(?:=([^:]*))?:([A-Za-z]+)$/.exec(taint) : null;
+      if (!match) bad(`taints: ${JSON.stringify(taint)} is not "key[=value]:Effect"`);
+      const [, key, value, effect] = match!;
+      const problem = labelKeyProblem(key!);
+      if (problem) bad(`taints: the key ${key} ${problem}`);
+      if (value && !labelName.test(value)) bad(`taints: the value of ${key} is not a Kubernetes label value`);
+      if (!taintEffects.includes(effect!)) bad(`taints: ${effect} is not one of ${taintEffects.join(', ')}`);
+    }
+    out.taints = [...(taints as string[])];
+  }
+  return out;
+}
 
 /** A unit's settings minus the unit-level `when:` key. */
 function settingsOf(raw: Record<string, Json>): { when?: string; settings: Record<string, Json> } {
@@ -74,6 +202,8 @@ async function validateUnit(unit: ConfigUnitDefinition, name: string, settings: 
         throw new ComputeError('INVALID_INPUT', `hostConfig.sysctl.${key} must be a sysctl name with a scalar value`);
     return settings;
   }
+  if (name === 'k8s-join') return validateK8sJoin(settings);
+  if (name === 'kernel-modules') return validateKernelModules(settings);
   const result = await unit.settings['~standard'].validate(settings);
   if ('issues' in result && result.issues)
     throw new ComputeError(
@@ -118,9 +248,67 @@ export async function resolveHostConfig(
   return Object.keys(config).length ? { config } : {};
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+
+/**
+ * The config units a pool's policy asks for on every machine of the pool (PLAN.md §3.8):
+ * - `policy.kubernetes` { apiServer, caCertSha256, joinTokenRef, labels?, taints?, kubernetesVersion?, gpu? }
+ *   → `k8s-join`;
+ * - `policy.hugepages` { size: '2Mi' | '1Gi', count, perNuma? } (core PoolPolicy) → `hugepages`
+ *   { pages2m | pages1g: count, perNuma };
+ * - `policy.kernelModules` { load?, options? } → `kernel-modules`.
+ * They win over a profile's `hostConfig` for the same unit: the pool's operator decides cluster
+ * membership and memory layout, not the profile a machine was deployed with.
+ */
+export function poolHostConfig(policy: Readonly<Record<string, unknown>> | null | undefined): Record<string, Record<string, Json>> {
+  const config: Record<string, Record<string, Json>> = {};
+  const kubernetes = policy?.kubernetes;
+  if (kubernetes !== undefined) {
+    if (!isRecord(kubernetes)) throw new ComputeError('INVALID_INPUT', 'policy.kubernetes must be an object');
+    const { apiServer, caCertSha256, joinTokenRef, labels, taints, kubernetesVersion, gpu, ...rest } = kubernetes;
+    const unknown = Object.keys(rest);
+    if (unknown.length) throw new ComputeError('INVALID_INPUT', `policy.kubernetes.${unknown[0]} is not a setting`);
+    config['k8s-join'] = {
+      server: apiServer as Json,
+      caCertSha256: caCertSha256 as Json,
+      tokenRef: joinTokenRef as Json,
+      ...(labels !== undefined ? { nodeLabels: labels as Json } : {}),
+      ...(taints !== undefined ? { taints: taints as Json } : {}),
+      ...(kubernetesVersion !== undefined ? { kubernetesVersion: kubernetesVersion as Json } : {}),
+      ...(gpu !== undefined ? { gpu: gpu as Json } : {}),
+    };
+  }
+  if (policy?.hugepages !== undefined) {
+    const hugepages = policy.hugepages;
+    if (!isRecord(hugepages)) throw new ComputeError('INVALID_INPUT', 'policy.hugepages must be an object');
+    const { size, count, perNuma, ...rest } = hugepages;
+    const unknown = Object.keys(rest);
+    if (unknown.length) throw new ComputeError('INVALID_INPUT', `policy.hugepages.${unknown[0]} is not a setting (size, count, perNuma)`);
+    if (size !== '2Mi' && size !== '1Gi') throw new ComputeError('INVALID_INPUT', "policy.hugepages.size must be '2Mi' or '1Gi'");
+    config.hugepages = {
+      [size === '2Mi' ? 'pages2m' : 'pages1g']: count as Json,
+      ...(perNuma !== undefined ? { perNuma: perNuma as Json } : {}),
+    };
+  }
+  if (policy?.kernelModules !== undefined) {
+    if (!isRecord(policy.kernelModules)) throw new ComputeError('INVALID_INPUT', 'policy.kernelModules must be an object');
+    config['kernel-modules'] = { ...(policy.kernelModules as Record<string, Json>) };
+  }
+  return config;
+}
+
+/**
+ * Checks a pool policy's host settings (`poolHostConfig`) as nodes will get them: for the pools API to
+ * call on create and update, so a bad policy is refused there rather than breaking every node's spec.
+ */
+export async function validatePoolHostPolicy(policy: Readonly<Record<string, unknown>> | null | undefined): Promise<void> {
+  await resolveHostConfig(poolHostConfig(policy), { labels: {}, poolPolicy: policy ?? null });
+}
+
 /**
  * The NodeSpec contribution of provision (`ComputeModule.nodeSpec`): the `host` section from the
- * `hostConfig` of the last workflow that succeeded on the node, resolved for it.
+ * `hostConfig` of the last workflow that succeeded on the node, plus the units its pool's policy asks for
+ * (`poolHostConfig`, which win), resolved for it. A node no workflow ran on (adopted) gets the pool's.
  */
 export async function hostSpecFor(
   sql: SqlTx,
@@ -136,18 +324,21 @@ export async function hostSpecFor(
     pool_policy: Record<string, unknown> | null;
     gated_layout: string | null;
   }>(
-    `SELECT w.profile_document->'hostConfig' AS host_config, p.policy AS pool_policy,
-            provision_gated_mig_layout(n.id) AS gated_layout
-       FROM workflows w JOIN nodes n ON n.id = w.node_id LEFT JOIN pools p ON p.id = n.pool_id
-      WHERE w.node_id = $1 AND w.state = 'succeeded' AND w.profile_document ? 'hostConfig'
-      ORDER BY w.finished_at DESC NULLS LAST, w.id DESC LIMIT 1`,
+    `SELECT (SELECT w.profile_document->'hostConfig' FROM workflows w
+              WHERE w.node_id = n.id AND w.state = 'succeeded' AND w.profile_document ? 'hostConfig'
+              ORDER BY w.finished_at DESC NULLS LAST, w.id DESC LIMIT 1) AS host_config,
+            p.policy AS pool_policy, provision_gated_mig_layout(n.id) AS gated_layout
+       FROM nodes n LEFT JOIN pools p ON p.id = n.pool_id
+      WHERE n.id = $1`,
     [nodeId],
   );
   const row = rows[0];
-  if (!row?.host_config) return {};
+  if (!row) return {};
+  const fromPool = poolHostConfig(row.pool_policy);
+  if (!row.host_config && Object.keys(fromPool).length === 0) return {};
   const labels = await sql.query<{ key: string; value: string }>('SELECT key, value FROM node_labels WHERE node_id = $1', [nodeId]);
   const poolPolicy = row.gated_layout !== null ? { ...(row.pool_policy ?? {}), migLayout: row.gated_layout } : row.pool_policy;
-  const host = await resolveHostConfig(row.host_config, {
+  const host = await resolveHostConfig({ ...(row.host_config ?? {}), ...fromPool }, {
     labels: Object.fromEntries(labels.rows.map((label) => [label.key, label.value])),
     poolPolicy,
   }, units);
