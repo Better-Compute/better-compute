@@ -278,6 +278,8 @@ func TestHostedManager(t *testing.T) {
 	kubelet := startKubelet(t, dir)
 	sys := hostconfig.NewFakeSystem()
 	sys.Set(CDIDir+"/bcd-a1.json", holdFile("a1", BindingKubernetes, "GPU-1"))
+	// Hosted, the container runtime's config must be readable (a CDI-only toolkit: no exposure).
+	sys.Set(ContainerRuntimeConfigs[0], "version = 2\n")
 	nodeLabels := map[string]string{"kubernetes.io/hostname": "w1", "bcd.dev/stale": "x", "team": "ml"}
 	var gets int
 	sys.Handler = func(_ context.Context, cmd hostconfig.Cmd) ([]byte, error) {
@@ -289,6 +291,9 @@ func TestHostedManager(t *testing.T) {
 		args := cmd.Args[2:]
 		switch args[0] {
 		case "get":
+			if args[1] == "resourceslices" {
+				return []byte(`{"items":[]}`), nil
+			}
 			gets++
 			b := `{"metadata":{"labels":{`
 			first := true

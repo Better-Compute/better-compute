@@ -116,6 +116,11 @@ func (m *Manager) offersGPUs() bool {
 // open (/dev/nvidia<minor>, the minor from /proc/driver/nvidia/gpus/*/information). An unreadable
 // driver directory or process table is no evidence either way.
 func (m *Manager) podProcessHolds(deviceIDs []string) bool {
+	// As the DaemonSet (no hostPID) /proc is bcd's own pod: no evidence there, and bcd's own
+	// nvidia-smi would look like a holder. Hosted relies on pod-resources and the DRA record.
+	if m.Hosted && m.ProcRoot == "" {
+		return false
+	}
 	gpus := map[string]bool{}
 	for _, id := range deviceIDs {
 		if ResourceOf(id) == ResourceGPU {

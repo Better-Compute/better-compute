@@ -2,12 +2,14 @@ package kube
 
 import (
 	"context"
-	"errors"
-	"io/fs"
+	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -51,21 +53,175 @@ var ToolkitConfigs = []string{
 
 var envvarUnprivileged = regexp.MustCompile(`(?m)^\s*accept-nvidia-visible-devices-envvar-when-unprivileged\s*=\s*(true|false)\s*$`)
 
-// ToolkitExposure reports a toolkit config that lets an unprivileged pod pick GPUs with
-// NVIDIA_VISIBLE_DEVICES: the key true, or absent (the toolkit's default is true). An unreadable or
-// missing file is not evidence.
-func ToolkitExposure(sys hostconfig.System) string {
-	for _, path := range ToolkitConfigs {
-		b, err := sys.ReadFile(path)
-		if errors.Is(err, fs.ErrNotExist) || err != nil {
+// ContainerRuntimeConfigs are where the kubelet's container runtime keeps its config: containerd
+// (plain, k3s, RKE2) and CRI-O; ContainerRuntimeDropIns their drop-in directories.
+var (
+	ContainerRuntimeConfigs = []string{
+		"/etc/containerd/config.toml",
+		"/var/lib/rancher/k3s/agent/etc/containerd/config.toml",
+		"/var/lib/rancher/rke2/agent/etc/containerd/config.toml",
+		"/etc/crio/crio.conf",
+	}
+	ContainerRuntimeDropIns = []string{"/etc/containerd/conf.d", "/etc/containerd/config.d", "/etc/crio/crio.conf.d"}
+)
+
+// nvidiaRuntimeBinary finds a runtime entry that runs the NVIDIA container runtime: containerd's
+// BinaryName, CRI-O's runtime_path.
+var nvidiaRuntimeBinary = regexp.MustCompile(`(?m)^\s*(?:BinaryName|runtime_path)\s*=\s*["']([^"']*nvidia-container-runtime[^"']*)["']`)
+
+// NvidiaRuntimes returns the nvidia-container-runtime binaries the container runtime's config names
+// (the .cdi variant, which takes CDI names only, excluded), and whether any container runtime
+// config could be read at all.
+func NvidiaRuntimes(sys hostconfig.System) (binaries []string, readable bool) {
+	files := append([]string(nil), ContainerRuntimeConfigs...)
+	for _, dir := range ContainerRuntimeDropIns {
+		names, err := sys.ReadDir(dir)
+		if err != nil {
 			continue
+		}
+		for _, n := range names {
+			if strings.HasSuffix(n, ".toml") || strings.HasSuffix(n, ".conf") {
+				files = append(files, dir+"/"+n)
+			}
+		}
+	}
+	seen := map[string]bool{}
+	for _, file := range files {
+		b, err := sys.ReadFile(file)
+		if err != nil {
+			continue
+		}
+		readable = true
+		for _, m := range nvidiaRuntimeBinary.FindAllStringSubmatch(string(b), -1) {
+			if bin := m[1]; !strings.HasSuffix(bin, ".cdi") && !seen[bin] {
+				seen[bin] = true
+				binaries = append(binaries, bin)
+			}
+		}
+	}
+	sort.Strings(binaries)
+	return binaries, readable
+}
+
+// ToolkitConfigFor is the config a runtime binary reads: the GPU operator's toolkit keeps it beside
+// its install directory (<dir>/toolkit/.config/nvidia-container-runtime/config.toml, its wrapper's
+// XDG_CONFIG_HOME), the host package in /etc/nvidia-container-runtime.
+func ToolkitConfigFor(binary string) string {
+	if dir := filepath.Dir(binary); filepath.Base(dir) == "toolkit" {
+		return dir + "/.config/nvidia-container-runtime/config.toml"
+	}
+	return ToolkitConfigs[0]
+}
+
+// ToolkitExposure reports toolkit configs that let an unprivileged pod pick GPUs with
+// NVIDIA_VISIBLE_DEVICES: the key true, or absent (the toolkit's default is true). For each
+// nvidia-container-runtime the container runtime is configured with, its config must exist and say
+// false: missing or unreadable, the toolkit takes its defaults (security review 2 #3b). The other
+// known configs count only when present.
+func ToolkitExposure(sys hostconfig.System) string {
+	var why []string
+	checked := map[string]bool{}
+	check := func(path, runtime string) {
+		if checked[path] {
+			return
+		}
+		checked[path] = true
+		b, err := sys.ReadFile(path)
+		if err != nil {
+			if runtime != "" {
+				why = append(why, fmt.Sprintf("the container runtime runs %s, but its config %s is missing or unreadable (the toolkit then accepts NVIDIA_VISIBLE_DEVICES from any pod)", runtime, path))
+			}
+			return
 		}
 		m := envvarUnprivileged.FindStringSubmatch(string(b))
 		if m == nil || m[1] == "true" {
-			return path + " lets unprivileged pods choose GPUs with NVIDIA_VISIBLE_DEVICES (set accept-nvidia-visible-devices-envvar-when-unprivileged = false; CDI only)"
+			why = append(why, path+" lets unprivileged pods choose GPUs with NVIDIA_VISIBLE_DEVICES (set accept-nvidia-visible-devices-envvar-when-unprivileged = false; CDI only)")
 		}
 	}
-	return ""
+	binaries, _ := NvidiaRuntimes(sys)
+	for _, bin := range binaries {
+		check(ToolkitConfigFor(bin), bin)
+	}
+	for _, path := range ToolkitConfigs {
+		check(path, "")
+	}
+	return strings.Join(why, "; ")
+}
+
+// RuntimeConfigUnverifiable is the reason a hosted node cannot rule the toolkit out: no container
+// runtime config is readable (a hostPath mount of type DirectoryOrCreate makes a missing directory
+// look empty; security review 2 #3c). "" when one is.
+func RuntimeConfigUnverifiable(sys hostconfig.System) string {
+	if _, readable := NvidiaRuntimes(sys); readable {
+		return ""
+	}
+	return "no container runtime config is readable (" + strings.Join(ContainerRuntimeConfigs, ", ") +
+		"): bcd cannot tell whether the NVIDIA toolkit hands GPUs to pods (mount the runtime's config read-only, as a File or Directory, never DirectoryOrCreate)"
+}
+
+// sliceList is the part of a ResourceSlice list the foreign-driver check reads.
+type sliceList struct {
+	Items []struct {
+		Spec struct {
+			Driver   string `json:"driver"`
+			NodeName string `json:"nodeName"`
+			Devices  []any  `json:"devices"`
+		} `json:"spec"`
+	} `json:"items"`
+}
+
+// gpuDriverName matches a DRA driver that hands out GPUs (gpu.nvidia.com, gpu.amd.com, …).
+var gpuDriverName = regexp.MustCompile(`(?i)(^|[.-])(gpu|nvidia)([.-]|$)`)
+
+// ForeignDRADrivers lists the DRA drivers besides gpu.bcd.dev that publish GPU devices for node
+// (security review 2 #3a), read with the kubelet's credentials. An API server without
+// resource.k8s.io, or one that refuses the list, is an error: no evidence either way.
+func ForeignDRADrivers(ctx context.Context, sys hostconfig.System, node string) ([]string, error) {
+	out, err := sys.Run(ctx, kubectl("get", "resourceslices", "--field-selector", "spec.nodeName="+node, "-o", "json"))
+	if err != nil {
+		return nil, err
+	}
+	var list sliceList
+	if err := json.Unmarshal(out, &list); err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, it := range list.Items {
+		d := it.Spec.Driver
+		if d != DRADriverName && len(it.Spec.Devices) > 0 && gpuDriverName.MatchString(d) {
+			seen[d] = true
+		}
+	}
+	drivers := keys(seen)
+	sort.Strings(drivers)
+	return drivers, nil
+}
+
+// draForeignEvery spaces the ResourceSlice reads (one kubectl per minute, not per pass).
+const draForeignEvery = time.Minute
+
+// foreignDRA caches ForeignDRADrivers for draForeignEvery.
+type foreignDRA struct {
+	mu      sync.Mutex
+	at      time.Time
+	drivers []string
+}
+
+func (m *Manager) foreignDRADrivers(ctx context.Context) []string {
+	m.draForeign.mu.Lock()
+	defer m.draForeign.mu.Unlock()
+	now := m.Now()
+	if !m.draForeign.at.IsZero() && now.Sub(m.draForeign.at) < draForeignEvery {
+		return m.draForeign.drivers
+	}
+	m.draForeign.at = now
+	drivers, err := ForeignDRADrivers(ctx, m.Sys, m.nodeName())
+	if err != nil {
+		m.Log.Debug("ResourceSlices unreadable: other DRA drivers are not checked", "error", err.Error())
+		drivers = nil
+	}
+	m.draForeign.drivers = drivers
+	return drivers
 }
 
 // AllocatableResponse is podresources v1.AllocatableResourcesResponse (the devices only).
@@ -126,8 +282,16 @@ func (m *Manager) exposure(ctx context.Context) *Condition {
 	if foreign, err := m.foreignGpuResources(ctx); err == nil && len(foreign) > 0 {
 		why = append(why, "the kubelet also offers "+strings.Join(foreign, ", ")+" (disable that device plugin: devicePlugin.enabled=false in the GPU operator)")
 	}
+	if drivers := m.foreignDRADrivers(ctx); len(drivers) > 0 {
+		why = append(why, "the ResourceSlices of this node also offer GPUs through "+strings.Join(drivers, ", ")+" (disable that DRA driver on nodes compute manages)")
+	}
 	if msg := ToolkitExposure(m.Sys); msg != "" {
 		why = append(why, msg)
+	}
+	if m.Hosted {
+		if msg := RuntimeConfigUnverifiable(m.Sys); msg != "" {
+			why = append(why, msg)
+		}
 	}
 	if len(why) == 0 {
 		return nil

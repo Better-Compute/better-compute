@@ -64,8 +64,9 @@ type Manager struct {
 	// RegistryDir is the kubelet's plugins_registry and DRAPluginDir the DRA driver's own directory
 	// (defaults under /var/lib/kubelet).
 	RegistryDir, DRAPluginDir string
-	// ProcRoot is the host's /proc (default): InUse's process backstop reads the GPUs' device minors
-	// and the pods' open files there. As a DaemonSet that needs hostPID.
+	// ProcRoot is the host's /proc (default /proc): InUse's process backstop reads the GPUs' device
+	// minors and the pods' open files there. Hosted (a DaemonSet without hostPID) the backstop is off
+	// unless ProcRoot names the host's /proc.
 	ProcRoot string
 
 	trigger chan struct{}
@@ -77,6 +78,8 @@ type Manager struct {
 	// deleted remembers when a pod's deletion was last asked for (forced a minute later).
 	deleted   map[string]time.Time
 	labelSync time.Time
+	// draForeign caches the other DRA drivers of this node's ResourceSlices (exposure.go).
+	draForeign foreignDRA
 	// advertised is each resource's device count as of the last pass (Advertised), conditions its
 	// conditions (Conditions).
 	advertised atomic.Pointer[map[string]int]

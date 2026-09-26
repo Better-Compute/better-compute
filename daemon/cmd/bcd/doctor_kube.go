@@ -14,8 +14,10 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/nvml"
 )
 
-// kubeChecks: the [kubernetes] allowlist, and on a node bcd joined to a cluster its kubelet and the
-// device plugins' socket directory.
+// kubeChecks: the [kubernetes] allowlist; as the cluster's DaemonSet ([host] units = false) whether
+// the container runtime's GPU exposure can be checked at all; and on a node bcd joined to a cluster
+// its kubelet, the device plugins' socket directory and the same GPU isolation checks the Manager
+// runs (ForeignGpuExposure: the toolkit the runtime runs, other GPU DRA drivers).
 func kubeChecks(cfg *config.Config, sys hostconfig.System, active func(unit string) bool) []doctorCheck {
 	var out []doctorCheck
 	allowed, err := kube.ParseAllowedClusters(cfg.KubernetesAllowedClusters)
@@ -24,6 +26,13 @@ func kubeChecks(cfg *config.Config, sys hostconfig.System, active func(unit stri
 		out = append(out, doctorCheck{"fail", "kubernetes", err.Error()})
 	case len(allowed) > 0:
 		out = append(out, doctorCheck{"ok", "kubernetes", fmt.Sprintf("%d allowed clusters", len(allowed))})
+	}
+	if cfg.ExternalHost {
+		for _, msg := range []string{kube.RuntimeConfigUnverifiable(sys), kube.ToolkitExposure(sys)} {
+			if msg != "" {
+				out = append(out, doctorCheck{"fail", "gpu-isolation", msg})
+			}
+		}
 	}
 	state, joined, err := kube.ReadState(sys)
 	if err != nil {
@@ -46,6 +55,14 @@ func kubeChecks(cfg *config.Config, sys hostconfig.System, active func(unit stri
 		// bcd withdraws every GPU while another path hands them out (ForeignGpuExposure).
 		if msg := kube.ToolkitExposure(sys); msg != "" {
 			out = append(out, doctorCheck{"fail", "gpu-isolation", msg})
+		}
+		if active("kubelet") {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			drivers, err := kube.ForeignDRADrivers(ctx, sys, state.NodeName)
+			cancel()
+			if err == nil && len(drivers) > 0 {
+				out = append(out, doctorCheck{"fail", "gpu-isolation", "the ResourceSlices of " + state.NodeName + " also offer GPUs through " + strings.Join(drivers, ", ")})
+			}
 		}
 		if _, err := sys.ReadDir("/var/lib/kubelet/device-plugins"); err != nil {
 			out = append(out, doctorCheck{"warn", "device-plugin", "no /var/lib/kubelet/device-plugins: bcd cannot hand GPUs to the kubelet"})

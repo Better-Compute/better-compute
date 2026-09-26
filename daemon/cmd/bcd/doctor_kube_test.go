@@ -47,6 +47,27 @@ func TestKubeChecks(t *testing.T) {
 	if len(got) != 4 || got[2].check != "gpu-isolation" || got[2].status != "fail" {
 		t.Fatalf("toolkit = %+v", got)
 	}
+	sys.Delete(kube.ToolkitConfigs[0])
+	// Another GPU DRA driver on the Node fails it too.
+	sys.Handler = func(_ context.Context, cmd hostconfig.Cmd) ([]byte, error) {
+		if strings.Contains(strings.Join(cmd.Args, " "), "get resourceslices") {
+			return []byte(`{"items":[{"spec":{"driver":"gpu.nvidia.com","devices":[{"name":"gpu-0"}]}}]}`), nil
+		}
+		return nil, nil
+	}
+	got = kubeChecks(allowed, sys, active)
+	if len(got) != 4 || got[2].check != "gpu-isolation" || !strings.Contains(got[2].detail, "gpu.nvidia.com") {
+		t.Fatalf("foreign DRA driver = %+v", got)
+	}
+	// As the DaemonSet: no readable container runtime config is a failure of its own.
+	hosted := hostconfig.NewFakeSystem()
+	if got := kubeChecks(&config.Config{ExternalHost: true}, hosted, active); len(got) != 1 || got[0].check != "gpu-isolation" || !strings.Contains(got[0].detail, "no container runtime config") {
+		t.Fatalf("hosted, runtime config unreadable = %+v", got)
+	}
+	hosted.Set(kube.ContainerRuntimeConfigs[0], "version = 2\n")
+	if got := kubeChecks(&config.Config{ExternalHost: true}, hosted, active); len(got) != 0 {
+		t.Fatalf("hosted, CDI only = %+v", got)
+	}
 }
 
 func TestGpuChecks(t *testing.T) {
