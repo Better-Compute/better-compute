@@ -17,7 +17,7 @@ import { fmtDuration, fmtMoney, fmtNum, fmtRelative, fmtStamp } from '@/lib/data
 import { poolById } from '@/lib/data/topology';
 import type { CapacityTimeline, PlacementRequest } from '@/lib/data/capacity';
 import { cx } from '@/utils/cx';
-import { DAY, HOUR, useCapacityActions, useHourWindow, usePoolRows, usePreview, useTimelines } from '../data';
+import { DAY, HOUR, useCapacityActions, useHourWindow, usePoolRows, usePreview, usePreviews, useTimelines } from '../data';
 import { SourceNotice } from '../source-notice';
 import { HoverCard, HoverRow, Segmented, timeTicks } from '../ui';
 
@@ -174,6 +174,14 @@ export function PlannerPage() {
       }
     : undefined;
   const preview = usePreview(request);
+  // The same GPU count in other shapes (GPUs per node × nodes), dry-run together: often one fits sooner.
+  const shapes = useMemo(() => {
+    if (!request) return [] as { perNode: number; nodes: number }[];
+    return [1, 2, 4, 8]
+      .filter((p) => p <= perNodeMax && gpus % p === 0 && gpus / p <= 8 && !(p === Math.min(perNode, perNodeMax) && gpus / p === nodes))
+      .map((p) => ({ perNode: p, nodes: gpus / p }));
+  }, [request, perNodeMax, gpus, perNode, nodes]);
+  const shapePreviews = usePreviews(useMemo(() => (request ? shapes.map((shape) => ({ ...request, gpus: shape.perNode, ...(shape.nodes > 1 ? { gang: shape.nodes } : { gang: undefined }) })) : []), [request, shapes]));
   const quota = row ? quotaHint(snapshot.quotas.filter((q) => q.tenantId === tenant.id), row.id, { gpu: gpus }) : { fits: true, short: [] };
   const price = poolById(row?.id ?? '')?.price ?? 0;
   const cost = gpus * (durationMs / HOUR) * price * (spot ? 0.4 : 1);
@@ -367,6 +375,36 @@ export function PlannerPage() {
                 ))}
                 <li className="font-mono text-[10px] text-text-tertiary">score: how full the node ends up (bin-packing keeps whole nodes free)</li>
               </ul>
+            )}
+            {shapes.length > 0 && (
+              <div className="mt-4">
+                <div className="mb-1.5 font-mono text-[11px] tracking-wide text-text-tertiary uppercase">Same {gpus} GPUs, other shapes</div>
+                <div className="flex flex-wrap gap-2">
+                  {shapes.map((shape, index) => {
+                    const answer = shapePreviews[index];
+                    const fits = answer?.fits;
+                    return (
+                      <button
+                        key={`${shape.perNode}x${shape.nodes}`}
+                        type="button"
+                        onClick={() => {
+                          setPerNode(shape.perNode);
+                          setNodes(shape.nodes);
+                        }}
+                        title={answer?.reason ?? (fits ? 'fits now' : undefined)}
+                        className={cx(
+                          'inline-flex h-8 items-center gap-2 border px-2 font-mono text-[12px] outline-none focus-visible:ring-2 focus-visible:ring-border-focus-ring',
+                          fits ? 'border-signal-fill text-text-primary hover:bg-signal-soft' : 'border-separator-border text-text-secondary hover:border-separator-border-strong',
+                        )}
+                      >
+                        <Led status={answer === undefined ? 'pending' : fits ? 'live' : 'off'} />
+                        {shape.nodes > 1 ? `${shape.nodes} nodes × ${shape.perNode}` : `1 node × ${shape.perNode}`}
+                        <span className="text-text-tertiary">{answer === undefined ? '…' : fits ? 'fits' : 'no'}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             )}
             <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-separator-border pt-3">
               <Button leadingIcon={RiRocketLine} disabled={!request || actions.state.busy || !quota.fits || verdict === 'checking'} onClick={() => void book()}>

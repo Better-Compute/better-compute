@@ -288,6 +288,24 @@ export function usePreview(request: PlacementRequest | undefined) {
   return preview;
 }
 
+/** Dry-runs several requests at once (e.g. the shapes of one GPU count); results line up with the requests. */
+export function usePreviews(requests: readonly PlacementRequest[]) {
+  const snapshot = useCapacity();
+  const mode = useMode();
+  const [results, setResults] = useState<(Awaited<ReturnType<CapacitySource['preview']>> | undefined)[]>([]);
+  const key = JSON.stringify(requests);
+  useEffect(() => {
+    let current = true;
+    const source = mode.live ? liveSource(mode.tenantId) : capacitySource(snapshot.now);
+    void Promise.all(requests.map((request) => source.preview(request).catch(() => undefined))).then((answers) => current && setResults(answers));
+    return () => {
+      current = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, snapshot]);
+  return results;
+}
+
 export { DAY, HOUR };
 
 /** Tenant display name from the snapshot. */
