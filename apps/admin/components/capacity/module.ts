@@ -19,7 +19,9 @@ import {
   RiTimerLine,
 } from 'react-icons/ri';
 import type { AdminModule, CommandDef, SearchResult, WidgetDef, WidgetSetting } from '@/lib/modules';
-import { capacityAt, capacityInsights, insightsFrom, reservationGpus } from '@/lib/data/capacity';
+import { capacityAt, capacityInsights, DAY, formatDuration, HOUR, insightsFrom, reservationGpus, sharedCapacitySource } from '@/lib/data/capacity';
+import { parseAsk, rankAsk } from './ask';
+import { planHref } from './ui';
 import { liveState, liveTimeline } from './live';
 import { pools, tenants } from '@/lib/data/topology';
 import { PoolPeek, ReservationPeek, TenantPeek } from './peeks';
@@ -124,6 +126,27 @@ const matches = (query: string, ...fields: (string | undefined)[]) => {
 /** Palette entities: pools, tenants and reservations (by id, or a tenant's live ones). */
 function search(query: string, context: { now: number; siteId?: string }): SearchResult[] {
   const results: SearchResult[] = [];
+  // "16 h200 3d": answer the capacity question itself, soonest pools first, each opening the planner prefilled.
+  const ask = parseAsk(query);
+  if (ask) {
+    const snapshot = capacityAt(context.now);
+    const source = sharedCapacitySource();
+    const hour = Math.floor(snapshot.now / HOUR) * HOUR;
+    const answers = rankAsk(ask, snapshot, (poolId) => source.timelineSync(poolId, { from: hour, to: hour + 7 * DAY }))
+      .filter((answer) => !context.siteId || answer.siteId === context.siteId)
+      .slice(0, 4);
+    for (const answer of answers) {
+      const when = answer.start === undefined ? 'no window in 7 d' : answer.start <= snapshot.now + HOUR ? 'fits now' : `from ${new Date(answer.start).toISOString().slice(5, 16).replace('T', ' ')} UTC`;
+      results.push({
+        id: `ask:${answer.poolId}`,
+        label: `Plan ${answer.nodes > 1 ? `${answer.nodes} × ${answer.perNode}` : answer.perNode} ${answer.short} for ${formatDuration(ask.durationMs)}${ask.spot ? ' (spot)' : ''} in ${answer.name}`,
+        group: 'Capacity',
+        hint: `${when} · ≈ $${Math.round(answer.cost).toLocaleString('en')}`,
+        icon: RiSearchEyeLine,
+        href: planHref(answer.poolId, answer.start, answer.start !== undefined ? answer.start + ask.durationMs : undefined, { gpus: answer.perNode, nodes: answer.nodes }),
+      });
+    }
+  }
   for (const pool of pools) {
     if (context.siteId && pool.siteId !== context.siteId) continue;
     if (matches(query, pool.id, pool.name, pool.short, pool.model, pool.siteId))

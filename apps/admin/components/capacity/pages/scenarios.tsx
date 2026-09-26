@@ -3,8 +3,11 @@
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
-import { RiAddLine, RiArrowDownSLine, RiDeleteBinLine, RiFlaskLine, RiLinkM, RiRefreshLine } from 'react-icons/ri';
+import { RiAddLine, RiArrowDownSLine, RiDeleteBinLine, RiFlaskLine, RiLinkM, RiLockLine, RiRefreshLine } from 'react-icons/ri';
 import { Button } from '@/components/base/buttons/button';
+import { useFleetCommands } from '@/components/fleet/commands';
+import { useFleet } from '@/components/fleet/use-fleet';
+import { actionsVersion as fleetActionsVersion } from '@/lib/data/fleet-actions';
 import { usePageCommands } from '@/components/shell/page-commands';
 import { Legend, TimeSeriesChart } from '@/components/ui/charts';
 import { useFeedback } from '@/components/ui/feedback';
@@ -69,6 +72,8 @@ export function ScenariosPage() {
   const gpuRows = useMemo(() => rows.filter((row) => row.unit === 'gpu'), [rows]);
   const [changes, setChanges] = useState<Change[]>(() => decodeScenario(search.get('s')));
   const [focus, setFocus] = useState<string | undefined>();
+  /** Per maintenance change: the nodes this page cordoned for it (they stay in its plan). */
+  const [cordoned, setCordoned] = useState<Record<string, string[]>>({});
   const { hour, to } = useHourWindow(0, HORIZON);
   const timelines = useTimelines(
     gpuRows.map((row) => row.id),
@@ -225,7 +230,7 @@ export function ScenariosPage() {
                 const pool = gpuRows.find((row) => row.id === change.poolId);
                 const plan =
                   change.kind === 'maintenance'
-                    ? leastDisruptiveNodes(snapshot, change.poolId, change.nodes, hour + change.startHours * HOUR, hour + (change.startHours + change.hours) * HOUR)
+                    ? leastDisruptiveNodes(snapshot, change.poolId, change.nodes, hour + change.startHours * HOUR, hour + (change.startHours + change.hours) * HOUR, cordoned[change.id] ?? [])
                     : undefined;
                 return (
                   <li key={change.id} className={cx('flex flex-col gap-3 border-b border-separator-border px-3 py-3 last:border-0', focusId === change.poolId && 'bg-signal-soft/40')}>
@@ -289,6 +294,11 @@ export function ScenariosPage() {
                             {plan.reservations.length > 4 && <li className="font-mono text-[10px] text-text-tertiary">and {plan.reservations.length - 4} more</li>}
                           </ul>
                         )}
+                        <CordonButton
+                          nodeIds={plan.nodes.map((node) => node.id)}
+                          done={cordoned[change.id]}
+                          onDone={(ids) => setCordoned((current) => ({ ...current, [change.id]: ids }))}
+                        />
                       </div>
                     )}
                   </li>
@@ -388,6 +398,37 @@ export function ScenariosPage() {
         </div>
       </Grid>
     </>
+  );
+}
+
+/**
+ * Turn the plan into action: cordon the chosen nodes now (the fleet's command: confirm with an audit reason, live
+ * API or simulation, refused while time-travelling, Undo in the toast). Cordoning stops new work landing there;
+ * running work is untouched, so bookings drain away naturally before the window.
+ */
+function CordonButton({ nodeIds, done, onDone }: { nodeIds: string[]; done?: string[]; onDone(ids: string[]): void }) {
+  const fleet = useFleet({ scoped: false });
+  const commands = useFleetCommands();
+  const nodes = useMemo(() => fleet.nodes.filter((node) => nodeIds.includes(node.id)), [fleet.nodes, nodeIds]);
+  if (done?.length)
+    return <p className="mt-2 font-mono text-[11px] text-text-secondary">✓ cordoned {done.length} node{done.length === 1 ? '' : 's'} for this window</p>;
+  if (!nodes.length) return null;
+  return (
+    <Button
+      size="xs"
+      variant="secondary"
+      leadingIcon={RiLockLine}
+      className="mt-2"
+      onClick={async () => {
+        const before = fleetActionsVersion();
+        await commands.cordon(nodes);
+        // Only record it when the command went through (not cancelled, not refused while time-travelling). In live
+        // mode the API applies it and the fleet refresh shows the result; this page doesn't track it there.
+        if (fleetActionsVersion() !== before) onDone(nodes.map((node) => node.id));
+      }}
+    >
+      Cordon these {nodes.length} now
+    </Button>
   );
 }
 

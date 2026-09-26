@@ -18,6 +18,7 @@ import {
   type SimCapacitySource,
 } from '@/lib/data/capacity';
 import { useConnection } from '@/components/shell/connection';
+import { actionsVersion, subscribeFleetActions } from '@/lib/data/fleet-actions';
 import { emptySnapshot, liveSource, liveState, liveSubscribe, liveTimeline, liveVersion, loadLive, refreshLive } from './live';
 import { poolRows, type PoolRow } from './model';
 
@@ -75,8 +76,10 @@ export function useCapacity(): CapacitySnapshot {
   const wallNow = useWallNow(BUCKET);
   const { live, tenantId } = useMode();
   const rev = useRevision();
+  // Fleet operator actions (cordon, drain, maintenance) change node health immediately.
+  const fleetVersion = useSyncExternalStore(subscribeFleetActions, actionsVersion, actionsVersion);
   useLiveStore();
-  const simulated = useMemo(() => (live ? undefined : capacityAt(at)), [at, rev, live]);
+  const simulated = useMemo(() => (live ? undefined : capacityAt(at)), [at, rev, live, fleetVersion]);
   const empty = useMemo(() => emptySnapshot(wallNow, tenantId), [wallNow, tenantId]);
   useEffect(() => {
     if (!live) return;

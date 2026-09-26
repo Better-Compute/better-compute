@@ -12,6 +12,7 @@
 // Everything here is SSR-safe: no randomness or clock reads at module load.
 
 import { DAY, HOUR } from './core';
+import { actionsVersion } from './fleet-actions';
 import { nodeHealth } from './fleet-health';
 import { poolPulse } from './platform';
 import { poolNodeId, pools as topoPools, sites as topoSites, tenants as topoTenants, type Pool as TopoPool } from './topology';
@@ -1232,7 +1233,8 @@ export function createSimCapacitySource(options: SimOptions = {}): SimCapacitySo
     const now = clock();
     const fleet = planFor(now);
     // States move by the minute; recompute at most once per 15 s of simulated time.
-    const key = `${fleet.epoch}:${Math.floor(now / 15_000)}:${revision}`;
+    // Operator actions (cordon, drain, maintenance) change node health at once: they are part of the key.
+    const key = `${fleet.epoch}:${Math.floor(now / 15_000)}:${revision}:${actionsVersion()}`;
     let derived = cache.get(key);
     if (derived) cache.delete(key);
     else derived = derive(fleet, now, overlay);

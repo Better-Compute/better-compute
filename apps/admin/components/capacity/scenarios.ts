@@ -106,8 +106,9 @@ export function evaluate(
  * For "take N nodes out" over a window: the N schedulable nodes whose GPUs are least booked in the window, and
  * the reservations that touch them (which would have to move). Picking these is what an operator would do by hand.
  */
-export function leastDisruptiveNodes(snapshot: CapacitySnapshot, poolId: string, count: number, start: number, end: number) {
-  const nodes = snapshot.nodes.filter((node) => node.poolId === poolId && node.health === 'ok');
+export function leastDisruptiveNodes(snapshot: CapacitySnapshot, poolId: string, count: number, start: number, end: number, pinned: readonly string[] = []) {
+  // Pinned nodes (e.g. already cordoned for this plan) stay in the plan whatever their health now.
+  const nodes = snapshot.nodes.filter((node) => node.poolId === poolId && (node.health === 'ok' || pinned.includes(node.id)));
   const load = new Map<string, { gpuHours: number; reservations: Set<string> }>(nodes.map((node) => [node.id, { gpuHours: 0, reservations: new Set() }]));
   const touching = new Map<string, Reservation>();
   for (const reservation of snapshot.reservations) {
@@ -124,7 +125,7 @@ export function leastDisruptiveNodes(snapshot: CapacitySnapshot, poolId: string,
     }
   }
   const chosen = [...nodes]
-    .sort((a, b) => load.get(a.id)!.gpuHours - load.get(b.id)!.gpuHours || a.id.localeCompare(b.id))
+    .sort((a, b) => Number(pinned.includes(b.id)) - Number(pinned.includes(a.id)) || load.get(a.id)!.gpuHours - load.get(b.id)!.gpuHours || a.id.localeCompare(b.id))
     .slice(0, count);
   const affected = new Set(chosen.flatMap((node) => [...load.get(node.id)!.reservations]));
   return {
