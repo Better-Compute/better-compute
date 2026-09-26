@@ -15,7 +15,7 @@ ECDSA P-256 with SHA-256.
 | Key                        | Factory                                  | Signs                                                                                        | Pinned by                           |
 | -------------------------- | ---------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------- |
 | offline root               | `createRootCa()`                         | subordinate CAs only                                                                         | —                                   |
-| per-region node CA         | `createNodeCa({ issuer?, trustDomain })` | agent client certs: one SPIFFE URI SAN, role extension, `clientAuth`, ≤ 24 h (ramdisk ≤ 2 h) | gateways (trust anchor)             |
+| per-region node CA         | `createNodeCa({ issuer?, trustDomain })` | agent client certs: one SPIFFE URI SAN (+ `urn:bc:` key statements), role extension, `clientAuth`, ≤ 24 h (ramdisk ≤ 2 h) | gateways (trust anchor)             |
 | gateway serving CA         | `createServingCa()`                      | gateway server certs: DNS SANs, `serverAuth`, ≤ 30 days                                      | daemons (`serving_ca_spki_pin`)     |
 | internal CA                | `createInternalCa()`                     | api ↔ gateway ↔ worker mTLS, ≤ 7 days                                                      | control plane                       |
 | JoinService signing key    | `createSigningKey()`                     | `JoinResponse`, `SignedTrustBundle`                                                          | daemons (`join_signing_key_pin`)    |
@@ -314,7 +314,10 @@ part)*`, SHA-256.
   1. the signature under the pinned key;
   2. `csr_sha256` equals SHA-256 of the CSR you sent;
   3. the leaf's public key equals your key;
-  4. the leaf's one URI SAN is `spiffe://<trust_domain>/site/<site_id>/node/<node_id>`;
+  4. the leaf's one SPIFFE URI SAN is `spiffe://<trust_domain>/site/<site_id>/node/<node_id>`; any
+     other URI SAN is a `urn:bc:` statement about the node key (`urn:bc:tpm-ak:<nameAlg>:<digest>`,
+     the TPM AK that certified it, which every renewal must prove again with `key_attestation`),
+     never an identity (`nodeSpiffeIdOf`);
   5. the role extension matches `role`.
 - **Certificates.** Agent certificates carry the role in non-critical extension
   `2.25.121396728463777788658791269357486937304.1.1` as a UTF8String. Worker command-signing
