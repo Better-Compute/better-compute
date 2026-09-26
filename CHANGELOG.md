@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Round 5, the complete node daemon (PLAN §3.8, v1.1; orchestrator [595a2f]):
+  - Host resources on every host: `vcpu`, `memoryGiB`, `hugepages2Mi`, `hugepages1Gi` rows from inventory (`capacity.hosts`, `policy.hostReserve`). VPS hosts' memory now excludes hugepage pools.
+  - Reservations take `resources` (`vcpu`, `memoryGiB`, `hugepages1Gi`) and default to the pool's per-GPU share (`policy.perGpu`, else the smallest host share). Host resources are not charged to quota. `capacity.preview` books the same.
+  - `DeviceAssignment.limits` carry cgroup limits and a NUMA-local cpuset (without the host's reserved CPUs) to bcd.
+  - `binding: 'kubernetes'` works on pools with `policy.kubernetes`. bcd hands those devices to the kubelet: device plugins or the DRA driver `gpu.bcd.dev` (`gpuApi`).
+  - Flavors take `placement` (`numaAffine`, `pinned`, `hugepages`). Hugepage guests book hugepages and are charged as `memoryGiB`. Pinned guests take isolated CPUs first. Guests that don't get their placement carry `PlacementDegraded`. Guests of pools that overcommit memory get a balloon.
+  - Guests get their IPAM gateway and DNS (`setIpPool({ dns })`, `InstanceNic.gateway/nameservers`).
+  - Agent memory: `sandboxVolumes`, persistent host volumes (`InstancesSection.volumes`, `InstanceSpec.volumes`). Placement takes `onlyNodes`.
+  - Extension kind `pool-policy`: provision refuses host policies nodes can't take, at `pools.create`/`update`.
+  - Telemetry specs carry `headersRef` and `resourceAttributes` (`nodeTelemetryModule`, `PoolPolicy.telemetry`).
+  - Security:
+    - `trustedProxies`: behind a load balancer, IAM sees the caller, and fails closed.
+    - Hello capabilities `instance.ssh-host-only`, `instance.placement` and `instance.volumes` gate where sandboxes, placed flavors and volumes land.
+    - Hosted-Kubernetes join tokens land nodes `tenant-controlled`.
+    - Slots per shared GPU are capped at 48.
+  - MCP `reserve_gpus` takes `vcpu`, `memoryGiB` and `kubernetes`.
+
 - Round 4, server/core/mcp/client ([f85da7]):
   - Security: admissions decide on the committed row (`IamPort.refreshResource`; §12.4 "draft in memory before require" was unimplemented, so `extend` decided on stale projection rows: BoundedExtend allowed 72 h + 1 h). A node reports only its own allocations. With `pki.commandSigning`, a reservation goes active only on the node's own signed `AllocationBound` (`pkiAllocationBindingCheck`). The secret broker releases an instance's user data only when it names a secret of the instance's own tenant. Certificate roles live in the Subject OU `bc-role:<role>` (no private OIDs; Go cannot parse the 2.25 arc).
   - Envelope: async-with-wait (`MethodDefinition.poll`, `wait: { timeoutMs }`), `MethodAdmission.check` (budget checks outside transactions, no `denied`), W3C `traceparent` onto enqueued commands.
