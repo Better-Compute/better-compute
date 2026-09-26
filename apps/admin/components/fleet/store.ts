@@ -74,6 +74,8 @@ export function useFleetActions(): State {
   );
 }
 export const actionsVersion = () => version;
+/** The overlay outside React (tests, pure callers). */
+export const storeState = () => state;
 
 let sequence = 0;
 function audit(entry: Omit<AuditEntry, 'id'>): AuditEntry {
