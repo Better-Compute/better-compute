@@ -7,6 +7,7 @@ import { allCommands, allNav } from '@/lib/modules';
 import { CommandPalette, PALETTE_EVENTS } from './command-palette';
 import { PageCommandsProvider } from './page-commands';
 import { PeekProvider } from './peek';
+import { recordVisit } from './pins';
 import { StatusBar } from './status-bar';
 import { TimeTravelBanner } from './time-machine';
 import { Tour } from './tour';
@@ -39,6 +40,10 @@ export function AdminShell({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     mainRef.current?.scrollTo({ top: 0 });
+    // Pages with their query (a pool's tab, a filtered table), minus the workspace's own params.
+    const url = new URL(window.location.href);
+    for (const key of ['site', 'range', 'at', 'dashboard']) url.searchParams.delete(key);
+    recordVisit(url.pathname + url.search);
   }, [pathname]);
 
   useEffect(() => {

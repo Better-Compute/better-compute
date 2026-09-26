@@ -17,7 +17,8 @@ import {
   RiTimeLine,
 } from 'react-icons/ri';
 import { sites } from '@/lib/data';
-import { allCommands, allNav, searchAll } from '@/lib/modules';
+import { allCommands, allNav, navForPath, searchAll } from '@/lib/modules';
+import { readVisits } from './pins';
 import { usePeek } from './peek';
 import { cx } from '@/utils/cx';
 import { useRegisteredPageCommands } from './page-commands';
@@ -101,12 +102,14 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
   const [query, setQuery] = useState('');
   const [cursor, setCursor] = useState(0);
   const [recent, setRecent] = useState<string[]>([]);
+  const [visits, setVisits] = useState<string[]>([]);
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
     setQuery('');
     setCursor(0);
+    setVisits(readVisits().filter((href) => href !== window.location.pathname + window.location.search));
     try {
       setRecent(JSON.parse(window.localStorage.getItem(RECENT_KEY) ?? '[]'));
     } catch {
@@ -119,7 +122,18 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
   const entries = useMemo<Entry[]>(() => {
     const go = (href: string) => () => router.push(href);
     const emit = (name: string) => () => window.dispatchEvent(new Event(name));
+    // Deeper pages visited lately (a node, a pool's schedule tab); top-level pages are already under "Go to".
+    const visited = visits.flatMap((href): Entry[] => {
+      const url = new URL(href, 'http://admin.local');
+      const nav = navForPath(url.pathname);
+      if (!nav || (url.pathname === nav.href && !url.search)) return [];
+      const rest = decodeURIComponent(url.pathname.slice(nav.href.length).replace(/^\//, ''));
+      const tab = url.searchParams.get('tab') ?? url.searchParams.get('view');
+      const label = [rest || nav.label, tab].filter(Boolean).join(' · ');
+      return [{ id: `visit:${href}`, label, group: 'Recently visited', hint: nav.label, icon: nav.icon, perform: go(href) }];
+    });
     return [
+      ...visited,
       ...pageCommands.map((command) => ({
         id: `page:${command.id}`,
         label: command.label,
@@ -176,7 +190,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
       })),
       // Pools, tenants, nodes, reservations… come from the modules' own `search` (see results below).
     ];
-  }, [router, workspace, resolvedTheme, setTheme, pageCommands]);
+  }, [router, workspace, resolvedTheme, setTheme, pageCommands, visits]);
 
   const results = useMemo(() => {
     const q = query.trim();
@@ -184,8 +198,9 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
       const byId = new Map(entries.map((entry) => [entry.id, entry]));
       const recents = recent.map((id) => byId.get(id)).filter((entry): entry is Entry => Boolean(entry)).map((entry) => ({ ...entry, group: 'Recent' }));
       const here = entries.filter((entry) => entry.group === 'This page');
+      const visited = entries.filter((entry) => entry.group === 'Recently visited').slice(0, 5);
       const defaults = entries.filter((entry) => entry.group === 'Go to' || entry.group === 'Workspace').slice(0, 24);
-      return [...here, ...recents, ...defaults].map((entry) => ({ entry, hits: [] as number[] }));
+      return [...here, ...visited, ...recents, ...defaults].map((entry) => ({ entry, hits: [] as number[] }));
     }
     const found: Entry[] = searchAll(q, { now: clock().now, ...(workspace.siteId ? { siteId: workspace.siteId } : {}) }).map((result) => ({
       id: `search:${result.group}:${result.id}`,

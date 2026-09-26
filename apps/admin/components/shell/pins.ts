@@ -57,3 +57,23 @@ export const useAcks = createLocalSet('acks');
 
 /** Sidebar sections the operator folded away. */
 export const useFoldedGroups = createLocalSet('nav-folded');
+
+const VISITS_KEY = 'bc-admin:visits';
+
+/** Remember a visited page (path + query), newest first, at most 12. */
+export function recordVisit(href: string) {
+  try {
+    const visits = JSON.parse(window.localStorage.getItem(VISITS_KEY) ?? '[]') as string[];
+    window.localStorage.setItem(VISITS_KEY, JSON.stringify([href, ...visits.filter((v) => v !== href)].slice(0, 12)));
+  } catch {
+    // Recent pages are a convenience.
+  }
+}
+
+export function readVisits(): string[] {
+  try {
+    return JSON.parse(window.localStorage.getItem(VISITS_KEY) ?? '[]') as string[];
+  } catch {
+    return [];
+  }
+}
