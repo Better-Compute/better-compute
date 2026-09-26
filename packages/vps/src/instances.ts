@@ -349,6 +349,18 @@ export interface InstanceRestore {
 export const networkPolicyCapabilityLabel = 'bc.dev/cap.instance.network-policy';
 
 /**
+ * The label of a bcd that enforces `InstanceSpec.ssh_from_host_only` (capability
+ * `instance.ssh-host-only`): sandbox guests, which set it, are placed only there.
+ */
+export const sshHostOnlyCapabilityLabel = 'bc.dev/cap.instance.ssh-host-only';
+
+/**
+ * The label of a bcd that applies `InstanceSpec.placement` (capability `instance.placement`): an
+ * older bcd would back a hugepage flavor's guest with memory placement never booked.
+ */
+export const placementCapabilityLabel = 'bc.dev/cap.instance.placement';
+
+/**
  * The node label a memory snapshot's host must carry: the CPU model the state was captured on, as
  * inventory writes it (`cpu.model`, source `inventory`).
  */
@@ -1056,6 +1068,12 @@ export async function scheduleHosted(
       : {}),
     // A private or none network lands only where the host enforces it.
     ...(row.networkPolicy ? { [networkPolicyCapabilityLabel]: '*' } : {}),
+    // A sandbox guest takes ssh only from its host (instanceSpecs sets sshFromHostOnly for them).
+    ...(row.sandboxId !== undefined || row.warmTemplateId !== undefined
+      ? { [sshHostOnlyCapabilityLabel]: '*' }
+      : {}),
+    // A flavor placement (§3.8), hugepages above all, only where bcd applies it.
+    ...(row.shape.placement ? { [placementCapabilityLabel]: '*' } : {}),
   };
   const outcome = await deps.capacity.reserve(
     tx,

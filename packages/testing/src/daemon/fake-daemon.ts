@@ -883,6 +883,8 @@ export class FakeDaemon {
           // A VPS host enforces InstanceSpec.network_policy (the fake hypervisor records it), as bcd does
           // since 13f784f: vps places private/none sandboxes only on hosts that say so.
           ...(this.hypervisor ? ['instance.network-policy'] : []),
+          // And ssh_from_host_only and placement: vps places sandboxes and placed flavors only there.
+          ...(this.hypervisor ? ['instance.ssh-host-only', 'instance.placement', 'instance.volumes'] : []),
         ]),
       ],
       drivers: [

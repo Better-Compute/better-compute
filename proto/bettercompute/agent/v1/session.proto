@@ -555,14 +555,18 @@ enum Binding {
 message InstancesSection {
   repeated InstanceSpec instances = 1;
   // (v1.1, agent memory) Persistent volumes kept on this host across instances. bcd creates each
-  // missing one (a sparse qcow2 under its state directory, never shrunk) and destroys (discards,
-  // then unlinks) one the section no longer lists once no instance attaches it: an absent volume
-  // is a deleted volume, so a spec is only ever missing one the control plane deleted.
+  // missing one (a sparse raw file under its data directory; growing is a truncate, seen by the
+  // guest at its next start; never shrunk) and destroys (hole-punches, then unlinks) one the section
+  // no longer lists once no instance attaches it: an absent volume is a deleted volume, so a spec is
+  // only ever missing one the control plane deleted. Only a bcd with the `instance.volumes`
+  // capability keeps them.
   repeated HostVolume volumes = 2;
 }
 
 message HostVolume {
+  // [A-Za-z0-9_-]{1,80}.
   string volume_id = 1;
+  // A positive multiple of 512.
   uint64 size_bytes = 2;
   // The virtio-blk serial (at most 20 bytes, [a-z0-9-]); the guest finds the disk at
   // /dev/disk/by-id/virtio-<serial> and mounts it from its user data.

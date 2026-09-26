@@ -1690,9 +1690,11 @@ export type InstancesSection = Message<"bettercompute.agent.v1.InstancesSection"
 
   /**
    * (v1.1, agent memory) Persistent volumes kept on this host across instances. bcd creates each
-   * missing one (a sparse qcow2 under its state directory, never shrunk) and destroys (discards,
-   * then unlinks) one the section no longer lists once no instance attaches it: an absent volume
-   * is a deleted volume, so a spec is only ever missing one the control plane deleted.
+   * missing one (a sparse raw file under its data directory; growing is a truncate, seen by the
+   * guest at its next start; never shrunk) and destroys (hole-punches, then unlinks) one the section
+   * no longer lists once no instance attaches it: an absent volume is a deleted volume, so a spec is
+   * only ever missing one the control plane deleted. Only a bcd with the `instance.volumes`
+   * capability keeps them.
    *
    * @generated from field: repeated bettercompute.agent.v1.HostVolume volumes = 2;
    */
@@ -1711,11 +1713,15 @@ export const InstancesSectionSchema: GenMessage<InstancesSection> = /*@__PURE__*
  */
 export type HostVolume = Message<"bettercompute.agent.v1.HostVolume"> & {
   /**
+   * [A-Za-z0-9_-]{1,80}.
+   *
    * @generated from field: string volume_id = 1;
    */
   volumeId: string;
 
   /**
+   * A positive multiple of 512.
+   *
    * @generated from field: uint64 size_bytes = 2;
    */
   sizeBytes: bigint;

@@ -300,6 +300,7 @@ const tables = [
   'quota_usage',
   'node_inventory',
   'inventory_snapshots',
+  'node_labels',
   'nodes',
   'pool_offers',
   'pools',
@@ -936,6 +937,11 @@ describe('flavor placement: NUMA, pinned CPUs, hugepages (§3.8)', () => {
         node,
         `inv_${node.slice(-2)}`,
       ]);
+      // Its bcd applies InstanceSpec.placement (Hello capability instance.placement).
+      await db.query(
+        `INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, 'bc.dev/cap.instance.placement', '1', 'system')`,
+        [node],
+      );
     }
     for (const [name, vcpu, memoryGiB, placement] of [
       ['numa.pinned', 4, 8, { numaAffine: true, pinned: true }],
@@ -1021,6 +1027,25 @@ describe('flavor placement: NUMA, pinned CPUs, hugepages (§3.8)', () => {
       vcpu: 2,
     });
     expect(await placement(created.id, VB)).toEqual({ hugepageSizeBytes: GiB });
+  });
+
+  it('places a placed flavor only where bcd applies placement', async () => {
+    await db.query(`DELETE FROM node_labels WHERE node_id = $1`, [VA]);
+    const created = (await call(
+      'instances',
+      'create',
+      createHosted({ flavor: 'numa.pinned', idempotencyKey: 'cap-1' }),
+    )) as View;
+    expect(created.nodeId).toBe(VB);
+    await db.query(`DELETE FROM node_labels`);
+    const pending = (await call(
+      'instances',
+      'create',
+      createHosted({ flavor: 'numa.pinned', idempotencyKey: 'cap-2' }),
+    )) as View & { conditions: { type: string; message?: string }[] };
+    expect(pending.conditions).toContainEqual(
+      expect.objectContaining({ type: 'Unschedulable', message: expect.stringContaining('instance.placement') }),
+    );
   });
 
   it('validates placement, and refuses a resize that changes it', async () => {

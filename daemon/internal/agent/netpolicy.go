@@ -35,6 +35,19 @@ import (
 // an older one drops the field as unknown, so a private or none instance must never be placed there.
 const NetworkPolicyCapability = "instance.network-policy"
 
+// SSHHostOnlyCapability says this bcd enforces InstanceSpec.ssh_from_host_only (port 22 of the guest
+// only from the host): sandboxes, which set it, are never placed on a bcd that would drop it.
+const SSHHostOnlyCapability = "instance.ssh-host-only"
+
+// PlacementCapability says this bcd applies InstanceSpec.placement (pinned CPUs, NUMA-bound memory,
+// hugepage backing): an older bcd would back a hugepage flavor's guest with ordinary memory the
+// control plane never booked.
+const PlacementCapability = "instance.placement"
+
+// VolumesCapability says this bcd attaches InstanceSpec.volumes and keeps InstancesSection.volumes:
+// an older bcd would start a volume-bearing instance without its persistent disk.
+const VolumesCapability = "instance.volumes"
+
 // firewallTable is the nftables table bcd owns.
 const firewallTable = "bcd_instances"
 

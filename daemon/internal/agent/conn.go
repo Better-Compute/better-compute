@@ -169,7 +169,8 @@ func (a *Agent) hello() (*agentv1.Hello, error) {
 	nvml := gpus > 0 && a.inv.Gpus.CudaDriverVersion != ""
 	a.invMu.Unlock()
 	if len(a.o.Runtimes) > 0 {
-		h.Capabilities = append(h.Capabilities, InstanceDialCapability, NetworkPolicyCapability)
+		h.Capabilities = append(h.Capabilities, InstanceDialCapability, NetworkPolicyCapability,
+			SSHHostOnlyCapability, PlacementCapability, VolumesCapability)
 	}
 	if a.role() == dispatch.RoleSite && len(a.o.BMCNetworks) > 0 {
 		// The local [site] bmc_networks deny list is set (doctor warns for site agents without it).

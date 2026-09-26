@@ -3464,9 +3464,11 @@ type InstancesSection struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	Instances []*InstanceSpec        `protobuf:"bytes,1,rep,name=instances,proto3" json:"instances,omitempty"`
 	// (v1.1, agent memory) Persistent volumes kept on this host across instances. bcd creates each
-	// missing one (a sparse qcow2 under its state directory, never shrunk) and destroys (discards,
-	// then unlinks) one the section no longer lists once no instance attaches it: an absent volume
-	// is a deleted volume, so a spec is only ever missing one the control plane deleted.
+	// missing one (a sparse raw file under its data directory; growing is a truncate, seen by the
+	// guest at its next start; never shrunk) and destroys (hole-punches, then unlinks) one the section
+	// no longer lists once no instance attaches it: an absent volume is a deleted volume, so a spec is
+	// only ever missing one the control plane deleted. Only a bcd with the `instance.volumes`
+	// capability keeps them.
 	Volumes       []*HostVolume `protobuf:"bytes,2,rep,name=volumes,proto3" json:"volumes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3517,9 +3519,11 @@ func (x *InstancesSection) GetVolumes() []*HostVolume {
 }
 
 type HostVolume struct {
-	state     protoimpl.MessageState `protogen:"open.v1"`
-	VolumeId  string                 `protobuf:"bytes,1,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
-	SizeBytes uint64                 `protobuf:"varint,2,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// [A-Za-z0-9_-]{1,80}.
+	VolumeId string `protobuf:"bytes,1,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
+	// A positive multiple of 512.
+	SizeBytes uint64 `protobuf:"varint,2,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
 	// The virtio-blk serial (at most 20 bytes, [a-z0-9-]); the guest finds the disk at
 	// /dev/disk/by-id/virtio-<serial> and mounts it from its user data.
 	Serial        string `protobuf:"bytes,3,opt,name=serial,proto3" json:"serial,omitempty"`

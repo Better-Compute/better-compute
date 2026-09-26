@@ -381,6 +381,11 @@ beforeEach(async () => {
         `INSERT INTO node_resources (node_id, resource, allocatable, ratio, allocated) VALUES ($1, $2, $3, 1, 0)`,
         [node, resource, allocatable],
       );
+    // Its bcd enforces ssh_from_host_only (the gateway writes this from Hello): sandboxes land only there.
+    await db.query(
+      `INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, 'bc.dev/cap.instance.ssh-host-only', '1', 'system')`,
+      [node],
+    );
   }
   await setIpPool(db, { poolId: pool, cidr: '10.0.0.0/28', gateway: '10.0.0.1' });
   await call(
