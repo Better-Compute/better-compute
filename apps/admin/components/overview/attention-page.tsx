@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMemo } from 'react';
 import { RiAlarmWarningLine, RiCheckDoubleLine, RiCheckLine, RiArrowGoBackLine } from 'react-icons/ri';
-import { fmtRelative, fmtStamp, HOUR, type AttentionItem } from '@/lib/data';
+import { attentionGroup, fmtRelative, fmtStamp, HOUR, type AttentionItem } from '@/lib/data';
 import { collectAttention } from '@/lib/modules';
 import { Button } from '@/components/base/buttons/button';
 import { usePageCommands } from '@/components/shell/page-commands';
@@ -135,6 +135,7 @@ export function AttentionPage() {
               { id: 'state', label: 'State', value: (r) => r.state },
               { id: 'severity', label: 'Severity', value: (r) => r.severity },
               { id: 'source', label: 'Owner', value: (r) => r.source },
+              { id: 'kind', label: 'Kind', value: (r) => attentionGroup(r) },
             ]}
             rowTone={(r) => (r.state !== 'open' ? undefined : r.severity === 'critical' ? 'crit' : r.severity === 'warning' ? 'warn' : undefined)}
             onRowClick={(r) => router.push(r.href)}

@@ -2,7 +2,8 @@
 
 import Link from 'next/link';
 import { useMemo, useState } from 'react';
-import { activity, capacityTotals, controlPlane, fleetPulse, fmtClock, fmtDuration, fmtMoney, fmtNum, fmtPct, fmtRelative, nodeStates, pulseSeries, sites, type NodeState } from '@/lib/data';
+import { RiArrowRightSLine } from 'react-icons/ri';
+import { activity, attentionGroup, capacityTotals, controlPlane, fleetPulse, fmtClock, fmtDuration, fmtMoney, fmtNum, fmtPct, fmtRelative, nodeStates, pulseSeries, sites, type AttentionItem, type NodeState } from '@/lib/data';
 import { collectAttention, type WidgetProps } from '@/lib/modules';
 import { useLive, useWorkspace } from '@/components/shell/workspace';
 import { useFeedback } from '@/components/ui/feedback';
@@ -140,7 +141,7 @@ export function PulseChart({ size, settings }: WidgetProps) {
 }
 
 /** The operator's queue: what needs a person, most severe first. */
-export function AttentionQueue() {
+export function AttentionQueue({ settings }: WidgetProps) {
   const items = useLive((now, scope) => collectAttention(now, scope), { bucketMs: 10_000 });
   const { now } = useWorkspace();
   const acks = useAcks();
@@ -150,6 +151,27 @@ export function AttentionQueue() {
     acks.add([id]);
     toast({ title: 'Acknowledged', detail: title, status: 'ok', action: { label: 'undo', onAction: () => acks.remove([id]) } });
   };
+  const ackMany = (members: AttentionItem[]) => {
+    const ids = members.map((m) => m.id);
+    acks.add(ids);
+    toast({ title: `Acknowledged ${ids.length} items`, detail: attentionGroup(members[0]!), status: 'ok', action: { label: 'undo', onAction: () => acks.remove(ids) } });
+  };
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggle = (key: string) =>
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  // Same-kind items collapse into one row (in the order of their most severe member); `grouped: false` lists all.
+  const groups: [string, AttentionItem[]][] = [];
+  for (const item of open) {
+    const key = settings.grouped === false ? item.id : attentionGroup(item);
+    const found = groups.find(([k]) => k === key);
+    if (found) found[1].push(item);
+    else groups.push([key, [item]]);
+  }
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-3 border-b border-separator-border px-3 py-1.5 font-mono text-[11px] text-text-tertiary">
@@ -158,39 +180,78 @@ export function AttentionQueue() {
         <span>{open.filter((i) => i.severity === 'info').length} info</span>
       </div>
       <ul className="min-h-0 flex-1 overflow-y-auto">
-        {open.map((item) => (
-          <li key={item.id} className="group flex gap-2.5 border-b border-separator-border/70 px-3 py-2.5 last:border-0">
-            <SeverityIcon severity={item.severity} className="mt-0.5" />
-            <div className="min-w-0 flex-1">
-              <Link href={item.href} className="block">
-                <span className="block truncate text-body-medium text-text-primary group-hover:underline">{item.title}</span>
-                <span className="line-clamp-2 text-caption-1-regular text-text-secondary">{item.detail}</span>
-              </Link>
-              <span className="mt-1 flex items-center gap-2 font-mono text-[10px] text-text-tertiary">
-                <span>{item.source}</span>·<span suppressHydrationWarning>{fmtRelative(item.at, now)}</span>·
-                <SubjectLink subject={item.subject} />
-              </span>
-              {item.action && (
-                <Link
-                  href={item.action.href}
-                  className="mt-1.5 inline-flex h-6 items-center border border-signal-fill/50 px-2 font-mono text-[11px] text-signal hover:bg-signal-soft"
+        {groups.map(([key, members]) =>
+          members.length === 1 ? (
+            <AttentionRow key={members[0]!.id} item={members[0]!} now={now} onAck={ack} />
+          ) : (
+            <li key={key} className="border-b border-separator-border/70 last:border-0">
+              <div className="group flex gap-2.5 px-3 py-2.5">
+                <SeverityIcon severity={members[0]!.severity} className="mt-0.5" />
+                <button type="button" onClick={() => toggle(key)} aria-expanded={expanded.has(key)} className="min-w-0 flex-1 text-left">
+                  <span className="flex items-center gap-2">
+                    <RiArrowRightSLine className={cx('size-4 shrink-0 text-text-tertiary transition-transform', expanded.has(key) && 'rotate-90')} aria-hidden />
+                    <span className="truncate text-body-medium text-text-primary">{key}</span>
+                    <span className="shrink-0 border border-separator-border px-1 font-mono text-[10px] text-text-secondary">×{members.length}</span>
+                  </span>
+                  <span className="mt-0.5 block truncate pl-6 font-mono text-[10px] text-text-tertiary">
+                    {members.slice(0, 4).map((m) => m.subject.split('/').pop()).join(' · ')}
+                    {members.length > 4 ? ` · +${members.length - 4}` : ''} · newest <span suppressHydrationWarning>{fmtRelative(Math.max(...members.map((m) => m.at)), now)}</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => ackMany(members)}
+                  className="h-6 shrink-0 self-start px-1.5 font-mono text-[10px] text-text-tertiary opacity-0 group-hover:opacity-100 hover:text-text-primary focus:opacity-100"
                 >
-                  {item.action.label} →
-                </Link>
+                  ack all
+                </button>
+              </div>
+              {expanded.has(key) && (
+                <ul className="border-t border-separator-border/60 bg-surface-sunken/40 pl-4">
+                  {members.map((item) => (
+                    <AttentionRow key={item.id} item={item} now={now} onAck={ack} />
+                  ))}
+                </ul>
               )}
-            </div>
-            <button
-              type="button"
-              onClick={() => ack(item.id, item.title)}
-              className="h-6 shrink-0 self-start px-1.5 font-mono text-[10px] text-text-tertiary opacity-0 group-hover:opacity-100 hover:text-text-primary focus:opacity-100"
-            >
-              ack
-            </button>
-          </li>
-        ))}
+            </li>
+          ),
+        )}
         {open.length === 0 && <li className="px-3 py-10 text-center text-caption-1-regular text-text-tertiary">Quiet. Nothing needs you.</li>}
       </ul>
     </div>
+  );
+}
+
+function AttentionRow({ item, now, onAck }: { item: AttentionItem; now: number; onAck(id: string, title: string): void }) {
+  return (
+    <li className="group flex gap-2.5 border-b border-separator-border/70 px-3 py-2.5 last:border-0">
+      <SeverityIcon severity={item.severity} className="mt-0.5" />
+      <div className="min-w-0 flex-1">
+        <Link href={item.href} className="block">
+          <span className="block truncate text-body-medium text-text-primary group-hover:underline">{item.title}</span>
+          <span className="line-clamp-2 text-caption-1-regular text-text-secondary">{item.detail}</span>
+        </Link>
+        <span className="mt-1 flex items-center gap-2 font-mono text-[10px] text-text-tertiary">
+          <span>{item.source}</span>·<span suppressHydrationWarning>{fmtRelative(item.at, now)}</span>·
+          <SubjectLink subject={item.subject} />
+        </span>
+        {item.action && (
+          <Link
+            href={item.action.href}
+            className="mt-1.5 inline-flex h-6 items-center border border-signal-fill/50 px-2 font-mono text-[11px] text-signal hover:bg-signal-soft"
+          >
+            {item.action.label} →
+          </Link>
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={() => onAck(item.id, item.title)}
+        className="h-6 shrink-0 self-start px-1.5 font-mono text-[10px] text-text-tertiary opacity-0 group-hover:opacity-100 hover:text-text-primary focus:opacity-100"
+      >
+        ack
+      </button>
+    </li>
   );
 }
 

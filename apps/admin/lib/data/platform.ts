@@ -268,6 +268,13 @@ export interface AttentionItem {
   subject: string;
   /** The one next step, rendered as a button ("Adjust quota", "Open the nodes"). */
   action?: { label: string; href: string };
+  /** Items with the same group collapse together in the queue ("Node unreachable" ×3). See attentionGroup. */
+  group?: string;
+}
+
+/** The item's group: its own `group`, else its title without a trailing " on <subject>". */
+export function attentionGroup(item: AttentionItem): string {
+  return item.group ?? item.title.replace(/\s+on\s+\S+$/, '');
 }
 
 // The platform's own items. Capacity and fleet items come from those modules' `attention` (collectAttention
