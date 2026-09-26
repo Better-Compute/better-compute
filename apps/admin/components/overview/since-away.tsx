@@ -7,6 +7,7 @@ import { activity, capacityTotals, fleetPulse, fmtDuration, fmtNum, fmtPct, fmtS
 import { collectAttention } from '@/lib/modules';
 import { useScope, useWallNow, useWorkspaceSettings } from '@/components/shell/workspace';
 import { SeverityIcon } from '@/components/ui/signal';
+import { useKiosk } from '@/components/shell/kiosk';
 import { cx } from '@/utils/cx';
 
 const KEY = 'bc-admin:last-seen';
@@ -21,6 +22,7 @@ const MAX_AWAY = 7 * 24 * HOUR;
  */
 export function SinceAway() {
   const { travelTo } = useWorkspaceSettings();
+  const kiosk = useKiosk();
   const wallNow = useWallNow(60_000);
   const scope = useScope();
   const [since, setSince] = useState<number | null>(null);
@@ -77,7 +79,7 @@ export function SinceAway() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [since, scope]);
 
-  if (!digest || dismissed) return null;
+  if (!digest || dismissed || kiosk.on) return null;
 
   const change = (before: number, after: number, format: (v: number) => string, worseWhenUp = false) => {
     const diff = after - before;

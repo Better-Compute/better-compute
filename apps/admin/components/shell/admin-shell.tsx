@@ -12,6 +12,7 @@ import { StatusBar } from './status-bar';
 import { TimeTravelBanner } from './time-machine';
 import { Tour } from './tour';
 import { AttentionWatcher } from './attention-watcher';
+import { KioskProvider, KioskStrip, useKiosk } from './kiosk';
 import { WatchWatcher } from './watching';
 import { Sidebar } from './sidebar';
 import { Topbar } from './topbar';
@@ -28,6 +29,15 @@ const isTyping = (target: EventTarget | null) =>
  * (⌘K palette, g-chords to pages, [ sidebar, p pause, e arrange dashboard, ? shortcut sheet).
  */
 export function AdminShell({ children }: { children: ReactNode }) {
+  return (
+    <KioskProvider>
+      <ShellFrame>{children}</ShellFrame>
+    </KioskProvider>
+  );
+}
+
+function ShellFrame({ children }: { children: ReactNode }) {
+  const kiosk = useKiosk();
   const router = useRouter();
   const { live, setLive, travelTo } = useWorkspaceSettings();
   const clock = useClockGetter();
@@ -130,6 +140,15 @@ export function AdminShell({ children }: { children: ReactNode }) {
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[70] focus:bg-surface-raised focus:px-3 focus:py-2">
         Skip to content
       </a>
+      {kiosk.on ? (
+        <div className="flex min-w-0 flex-1 flex-col">
+          <KioskStrip />
+          <main id="main" ref={mainRef} tabIndex={-1} className="min-h-0 min-w-0 flex-1 overflow-y-auto px-6 py-5 outline-none">
+            {children}
+          </main>
+        </div>
+      ) : (
+      <>
       <Sidebar collapsed={collapsed} onToggle={toggleSidebar} className="hidden md:flex" />
       <ModalOverlay isOpen={mobileNav} onOpenChange={setMobileNav} isDismissable className="fixed inset-0 z-50 bg-neutral-950/50 md:hidden entering:animate-[fade-in_120ms_ease-out]">
         <Modal className="h-full w-fit outline-none">
@@ -146,9 +165,11 @@ export function AdminShell({ children }: { children: ReactNode }) {
         </main>
         <StatusBar />
       </div>
+      </>
+      )}
       <CommandPalette open={palette} onOpenChange={setPalette} />
       <ShortcutSheet open={keys} onOpenChange={setKeys} />
-      <Tour />
+      {!kiosk.on && <Tour />}
       <AttentionWatcher />
       <WatchWatcher />
     </div>

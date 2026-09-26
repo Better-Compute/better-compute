@@ -15,6 +15,7 @@ import {
 import { Button } from '@/components/base/buttons/button';
 import { PALETTE_EVENTS } from '@/components/shell/command-palette';
 import { useFeedback } from '@/components/ui/feedback';
+import { useKiosk } from '@/components/shell/kiosk';
 import { Drawer, Menu, ToolButton } from '@/components/ui/overlay';
 import { allWidgets, modules, widgetById, widgetSettings, type WidgetDef } from '@/lib/modules';
 import { ConfigureWidget, settingsSummary } from './configure';
@@ -72,7 +73,18 @@ export function Dashboards() {
     return () => window.removeEventListener(PALETTE_EVENTS.editDashboard, onEdit);
   }, []);
 
-  const dashboard = state.dashboards.find((d) => d.id === state.active) ?? state.dashboards[0]!;
+  // Wall display: rotate through the dashboards without touching the saved active one.
+  const kiosk = useKiosk();
+  const [rotation, setRotation] = useState(0);
+  useEffect(() => {
+    if (!kiosk.on || !kiosk.rotateSeconds || state.dashboards.length < 2) return;
+    const timer = window.setInterval(() => setRotation((r) => r + 1), kiosk.rotateSeconds * 1000);
+    return () => window.clearInterval(timer);
+  }, [kiosk.on, kiosk.rotateSeconds, state.dashboards.length]);
+  const activeIndex = Math.max(0, state.dashboards.findIndex((d) => d.id === state.active));
+  const dashboard = kiosk.on
+    ? state.dashboards[(activeIndex + rotation) % state.dashboards.length]!
+    : (state.dashboards.find((d) => d.id === state.active) ?? state.dashboards[0]!);
 
   const update = useCallback(
     (change: (items: WidgetInstance[]) => WidgetInstance[]) =>
@@ -185,7 +197,7 @@ export function Dashboards() {
               </button>
             );
           })}
-          <Menu
+          {!kiosk.on && <Menu
             label="New dashboard"
             placement="bottom start"
             trigger={<ToolButton icon={RiAddLine} label="New dashboard" className="mb-1 ml-1" />}
@@ -199,9 +211,9 @@ export function Dashboards() {
                 onAction: () => newDashboard(preset),
               })),
             ]}
-          />
+          />}
         </div>
-        <div className="mb-1.5 flex items-center gap-1.5">
+        <div className={cx('mb-1.5 flex items-center gap-1.5', kiosk.on && 'hidden')}>
           {editing && (
             <Button variant="secondary" size="small" leadingIcon={RiAddLine} onClick={() => setCatalog(true)}>
               Add widget
