@@ -13,8 +13,10 @@ import {
   RiStackLine,
   RiTimerLine,
 } from 'react-icons/ri';
-import type { AdminModule, CommandDef } from '@/lib/modules';
-import { pools } from '@/lib/data/topology';
+import type { AdminModule, CommandDef, SearchResult } from '@/lib/modules';
+import { capacityAt, reservationGpus } from '@/lib/data/capacity';
+import { pools, tenants } from '@/lib/data/topology';
+import { PoolPeek, ReservationPeek, TenantPeek } from './peeks';
 import {
   CapacityHeatmapWidget,
   CapacityKpisWidget,
@@ -29,30 +31,61 @@ import {
 
 // Capacity: pools, bookings over time, reservations and their planning, quotas, usage and spend, flavors.
 
-const poolCommands: CommandDef[] = pools.flatMap((pool) => [
-  {
-    id: `capacity.pool.${pool.id}`,
-    label: `Pool: ${pool.name}`,
-    group: 'Pools',
-    icon: RiServerLine,
-    keywords: [pool.id, pool.short, pool.model, pool.siteId],
-    href: `/pools/${pool.id}`,
-  },
-  ...(pool.kind === 'gpu'
-    ? [
-        {
-          id: `capacity.book.${pool.id}`,
-          label: `Book ${pool.short} GPUs in ${pool.siteId}`,
-          group: 'Capacity',
-          icon: RiAddLine,
-          keywords: ['reserve', 'reservation', 'gpu', pool.short, pool.id],
-          href: `/reservations/new?pool=${pool.id}`,
-        },
-      ]
-    : []),
-]);
+// Pools themselves come from `search` (with peeks); commands are the verbs.
+const poolCommands: CommandDef[] = pools
+  .filter((pool) => pool.kind === 'gpu')
+  .map((pool) => ({
+    id: `capacity.book.${pool.id}`,
+    label: `Book ${pool.short} GPUs in ${pool.siteId}`,
+    group: 'Capacity',
+    icon: RiAddLine,
+    keywords: ['reserve', 'reservation', 'gpu', pool.short, pool.id],
+    href: `/reservations/new?pool=${pool.id}`,
+  }));
+
+const matches = (query: string, ...fields: (string | undefined)[]) => {
+  const q = query.toLowerCase();
+  return fields.some((field) => field?.toLowerCase().includes(q));
+};
+
+/** Palette entities: pools, tenants and reservations (by id, or a tenant's live ones). */
+function search(query: string, context: { now: number; siteId?: string }): SearchResult[] {
+  const results: SearchResult[] = [];
+  for (const pool of pools) {
+    if (context.siteId && pool.siteId !== context.siteId) continue;
+    if (matches(query, pool.id, pool.name, pool.short, pool.model, pool.siteId))
+      results.push({ id: `pool:${pool.id}`, label: pool.name, group: 'Pools', hint: `${pool.short} · ${pool.siteId} · ${pool.nodes * (pool.gpusPerNode || 1)} ${pool.gpusPerNode ? 'GPUs' : 'nodes'}`, icon: RiServerLine, href: `/pools/${pool.id}`, peek: { kind: 'pool', id: pool.id } });
+  }
+  for (const tenant of tenants)
+    if (matches(query, tenant.id, tenant.name, tenant.slug))
+      results.push({ id: `tenant:${tenant.id}`, label: tenant.name, group: 'Tenants', hint: tenant.id, icon: RiScales3Line, href: `/quotas?tenant=${tenant.id}`, peek: { kind: 'tenant', id: tenant.id } });
+  const q = query.toLowerCase();
+  if (q.length >= 3 && (q.startsWith('rsv') || /[0-9]/.test(q))) {
+    const snapshot = capacityAt(context.now);
+    for (const reservation of snapshot.reservations) {
+      if (!reservation.id.includes(q)) continue;
+      results.push({
+        id: `reservation:${reservation.id}`,
+        label: reservation.id,
+        group: 'Reservations',
+        hint: `${reservation.state} · ${reservationGpus(reservation)} GPU · ${reservation.poolId}`,
+        icon: RiCalendarEventLine,
+        href: `/reservations?id=${reservation.id}`,
+        peek: { kind: 'reservation', id: reservation.id },
+      });
+      if (results.length >= 8) break;
+    }
+  }
+  return results.slice(0, 8);
+}
 
 export const capacityModule: AdminModule = {
+  search,
+  peeks: {
+    pool: { title: (id) => pools.find((pool) => pool.id === id)?.name ?? id, href: (id) => `/pools/${id}`, icon: RiServerLine, component: PoolPeek },
+    reservation: { title: (id) => `Reservation ${id}`, href: (id) => `/reservations?id=${id}`, icon: RiCalendarEventLine, component: ReservationPeek },
+    tenant: { title: (id) => tenants.find((tenant) => tenant.id === id)?.name ?? id, href: (id) => `/quotas?tenant=${id}`, icon: RiScales3Line, component: TenantPeek },
+  },
   id: 'capacity',
   title: 'Capacity',
   nav: [

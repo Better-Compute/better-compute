@@ -7,6 +7,7 @@ import { RiArrowLeftLine, RiCheckboxCircleLine, RiCloseCircleLine, RiFlashlightL
 import { earliestFit, quotaHint } from '@better-compute/console-kit';
 import { Button, ButtonLink } from '@/components/base/buttons/button';
 import { Switch } from '@/components/base/switch/switch';
+import { EntityLink } from '@/components/shell/peek';
 import { useWidth } from '@/components/ui/charts';
 import { useFeedback } from '@/components/ui/feedback';
 import { Select } from '@/components/ui/overlay';
@@ -348,9 +349,7 @@ export function PlannerPage() {
                 {preview.candidates.slice(0, 6).map((candidate, index) => (
                   <li key={candidate.nodeId} className="grid grid-cols-[1.5rem_11rem_1fr_3rem] items-center gap-2">
                     <span className="font-mono text-[11px] text-text-tertiary">#{index + 1}</span>
-                    <Link href={`/nodes/${candidate.nodeId}`} className="truncate hover:underline">
-                      <Mono>{candidate.nodeId}</Mono>
-                    </Link>
+                    <EntityLink kind="node" id={candidate.nodeId} href={`/nodes/${candidate.nodeId}`} className="truncate" />
                     <div className="h-1.5 bg-background-secondary-default">
                       <div className={cx('h-full', index < nodes ? 'bg-signal-fill' : 'bg-text-tertiary/60')} style={{ width: `${candidate.score}%` }} />
                     </div>

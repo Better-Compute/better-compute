@@ -1360,6 +1360,127 @@ export function createSimCapacitySource(options: SimOptions = {}): SimCapacitySo
   };
 }
 
+// --- The shared simulated fleet ------------------------------------------------------------------------------
+//
+// One simulated source per JS runtime, so every module (capacity pages, the Overview, the fleet's node views)
+// reads the same bookings, and a release on one page shows on every other. Call these with the workspace clock;
+// derivation is cached per 15 s of that clock, so call them at `now`, not once per point of a history series
+// (use `timelineSync` for series: it is cheap once the snapshot at `now` exists).
+
+let shared: SimCapacitySource | undefined;
+const sharedClock = { now: 0 };
+
+/** The shared simulated source. Set its clock with `capacityAt(now)` before calling it directly. */
+export function sharedCapacitySource(): SimCapacitySource {
+  shared ??= createSimCapacitySource({ now: () => sharedClock.now || Date.now() });
+  return shared;
+}
+
+/** The capacity snapshot at `now` (the workspace clock), bucketed to 15 s. */
+export function capacityAt(now: number): CapacitySnapshot {
+  sharedClock.now = Math.floor(now / 15_000) * 15_000;
+  return sharedCapacitySource().snapshot();
+}
+
+export interface CapacityTotals {
+  gpus: {
+    total: number;
+    allocatable: number;
+    allocated: number;
+    /** Atoms booked for later (the API's `reserved`; an atom can be allocated now and reserved later). */
+    reserved: number;
+    /** The API's conservative `available`. */
+    available: number;
+    /** allocatable − allocated. */
+    freeNow: number;
+    /** Provisioning, unhealthy, maintenance or unreachable. */
+    unschedulable: number;
+    utilization: number;
+  };
+  pools: Record<string, { total: number; allocatable: number; allocated: number; reserved: number; freeNow: number; unschedulable: number; utilization: number }>;
+}
+
+/** GPU totals from the capacity rollup at `now`, optionally for one site: the numbers /capacity shows. */
+export function capacityTotals(now: number, scope: { siteId?: string } = {}): CapacityTotals {
+  const snapshot = capacityAt(now);
+  const pools: CapacityTotals['pools'] = {};
+  const gpus = { total: 0, allocatable: 0, allocated: 0, reserved: 0, available: 0, freeNow: 0, unschedulable: 0, utilization: 0 };
+  const siteOf = new Map(snapshot.pools.map((pool) => [pool.id, pool.siteId]));
+  for (const entry of snapshot.summary.pools) {
+    if (scope.siteId && siteOf.get(entry.poolId) !== scope.siteId) continue;
+    const row = entry.capacity.find((capacity) => capacity.resource === 'gpu');
+    if (!row) continue;
+    const unschedulable = row.total - row.allocatable;
+    const freeNow = Math.max(0, row.allocatable - row.allocated);
+    pools[entry.poolId] = {
+      total: row.total,
+      allocatable: row.allocatable,
+      allocated: row.allocated,
+      reserved: row.reserved,
+      freeNow,
+      unschedulable,
+      utilization: row.allocatable ? row.allocated / row.allocatable : 0,
+    };
+    gpus.total += row.total;
+    gpus.allocatable += row.allocatable;
+    gpus.allocated += row.allocated;
+    gpus.reserved += row.reserved;
+    gpus.available += row.available;
+    gpus.freeNow += freeNow;
+    gpus.unschedulable += unschedulable;
+  }
+  gpus.utilization = gpus.allocatable ? gpus.allocated / gpus.allocatable : 0;
+  return { gpus, pools };
+}
+
+export interface GpuHolder {
+  reservationId: string;
+  tenantId: string;
+  projectId?: string;
+  poolId: string;
+  state: ReservationState;
+  since: number;
+  until: number;
+  spot: boolean;
+}
+
+const holderCache = new WeakMap<CapacitySnapshot, Map<string, GpuHolder>>();
+
+/** Who holds each GPU at `now`: atom id (`<nodeId>/gpu<i>`) → the reservation. Free GPUs are absent. */
+export function gpuHolders(now: number): Map<string, GpuHolder> {
+  const snapshot = capacityAt(now);
+  const cached = holderCache.get(snapshot);
+  if (cached) return cached;
+  const holders = new Map<string, GpuHolder>();
+  for (const reservation of snapshot.reservations) {
+    if (!reservation.during || !liveStates.has(reservation.state)) continue;
+    if (reservation.during.start > snapshot.now || reservation.during.end <= snapshot.now) continue;
+    for (const atom of reservation.atoms ?? [])
+      holders.set(atom, {
+        reservationId: reservation.id,
+        tenantId: reservation.tenantId,
+        ...(reservation.projectId ? { projectId: reservation.projectId } : {}),
+        poolId: reservation.poolId,
+        state: reservation.state,
+        since: reservation.during.start,
+        until: reservation.during.end,
+        spot: Boolean(reservation.request.spot),
+      });
+  }
+  holderCache.set(snapshot, holders);
+  return holders;
+}
+
+/** Reservations that booked a node, overlapping [now − back, now + ahead], by start. */
+export function nodeBookings(nodeId: string, now: number, window: { back?: number; ahead?: number } = {}): Reservation[] {
+  const snapshot = capacityAt(now);
+  const from = snapshot.now - (window.back ?? DAY);
+  const to = snapshot.now + (window.ahead ?? 3 * DAY);
+  return snapshot.reservations
+    .filter((reservation) => reservation.nodeIds?.includes(nodeId) && reservation.during && reservation.during.end > from && reservation.during.start < to)
+    .sort((a, b) => a.during!.start - b.during!.start);
+}
+
 // --- Live source ----------------------------------------------------------------------------------------
 
 /** `$request(path, body)` against /api/compute, as console-kit's ComputeRequester does. */

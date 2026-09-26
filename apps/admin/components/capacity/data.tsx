@@ -4,7 +4,8 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 import { useScope, useWorkspace } from '@/components/shell/workspace';
 import { useFeedback } from '@/components/ui/feedback';
 import {
-  createSimCapacitySource,
+  capacityAt,
+  sharedCapacitySource,
   DAY,
   HOUR,
   type CapacitySnapshot,
@@ -18,12 +19,10 @@ import { poolRows, type PoolRow } from './model';
 // top bar's pause freezes every capacity view), recomputed at most every 15 s of workspace time or after a
 // mutation. A live source plugs in behind the same hooks once the shell's API adapter lands.
 
-const clock = { now: 0 };
-let sim: SimCapacitySource | undefined;
-
-export function capacitySource(): SimCapacitySource {
-  sim ??= createSimCapacitySource({ now: () => clock.now || Date.now() });
-  return sim;
+/** The shared simulated source (lib/data/capacity.ts), with its clock set to `now`. */
+export function capacitySource(now?: number): SimCapacitySource {
+  if (now !== undefined) capacityAt(now);
+  return sharedCapacitySource();
 }
 
 // A revision counter all capacity views subscribe to: mutations bump it and every view re-derives.
@@ -47,8 +46,7 @@ export function useCapacity(): CapacitySnapshot {
   const rev = useRevision();
   const at = Math.floor(now / BUCKET) * BUCKET;
   return useMemo(() => {
-    clock.now = at;
-    return capacitySource().snapshot();
+    return capacityAt(at);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [at, rev]);
 }
@@ -65,7 +63,7 @@ export function usePoolRows(): { snapshot: CapacitySnapshot; rows: PoolRow[] } {
 export function useTimeline(poolId: string | undefined, from: number, to: number, stepMinutes = 60): CapacityTimeline | undefined {
   const snapshot = useCapacity();
   return useMemo(
-    () => (poolId ? capacitySource().timelineSync(poolId, { from, to, stepMinutes }) : undefined),
+    () => (poolId ? capacitySource(snapshot.now).timelineSync(poolId, { from, to, stepMinutes }) : undefined),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [poolId, from, to, stepMinutes, snapshot],
   );
@@ -76,7 +74,10 @@ export function useTimelines(poolIds: readonly string[], from: number, to: numbe
   const snapshot = useCapacity();
   const key = poolIds.join(',');
   return useMemo(
-    () => new Map(poolIds.map((poolId) => [poolId, capacitySource().timelineSync(poolId, { from, to, stepMinutes })])),
+    () => {
+      const source = capacitySource(snapshot.now);
+      return new Map(poolIds.map((poolId) => [poolId, source.timelineSync(poolId, { from, to, stepMinutes })]));
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [key, from, to, stepMinutes, snapshot],
   );
@@ -108,10 +109,9 @@ export function useCapacityActions() {
         toast({ title: 'Read-only while time-travelling', detail: error, status: 'warn', action: { label: 'Go live', onAction: () => setLive(true) } });
         return undefined;
       }
-      clock.now = now;
       setState({ busy: true });
       try {
-        const result = await action(capacitySource());
+        const result = await action(capacitySource(now));
         bump();
         setState({ busy: false, done: label });
         if (!quiet) toast({ title: label, status: 'ok' });
@@ -195,8 +195,7 @@ export function usePreview(request: PlacementRequest | undefined) {
       return;
     }
     let current = true;
-    clock.now = snapshot.now;
-    void capacitySource()
+    void capacitySource(snapshot.now)
       .preview(request)
       .then((result) => current && setPreview(result));
     return () => {

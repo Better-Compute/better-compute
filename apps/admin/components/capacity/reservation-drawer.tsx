@@ -1,6 +1,6 @@
 'use client';
 
-import Link from 'next/link';
+import { EntityLink } from '@/components/shell/peek';
 import { useMemo } from 'react';
 import { RiAddLine, RiArrowDownSLine, RiCloseCircleLine, RiFileCopyLine, RiStopCircleLine } from 'react-icons/ri';
 import { Button } from '@/components/base/buttons/button';
@@ -23,8 +23,8 @@ function Lifecycle({ reservation, now }: { reservation: Reservation; now: number
   const terminal = ['failed', 'cancelled', 'expired', 'denied'].includes(reservation.state);
   const reached = terminal ? -1 : PATH.indexOf(reservation.state === 'awaiting-confirmation' ? 'pending' : reservation.state);
   const during = reservation.during;
+  // Only times the API tells us: the window's start and end (placement time is not returned).
   const when: Partial<Record<ReservationState, number | undefined>> = {
-    placed: during ? during.start - Math.min(6 * HOUR, Math.max(HOUR, (during.end - during.start) / 4)) : undefined,
     binding: during?.start,
     active: during ? during.start + 2 * 60_000 : undefined,
     releasing: during?.end,
@@ -214,9 +214,7 @@ export function ReservationDrawer({ reservation, onClose }: { reservation?: Rese
             <ul className="flex flex-col gap-1.5">
               {r.nodeIds!.map((nodeId) => (
                 <li key={nodeId} className="flex flex-wrap items-center gap-2">
-                  <Link href={`/nodes/${nodeId}`} className="hover:underline">
-                    <Mono>{nodeId}</Mono>
-                  </Link>
+                  <EntityLink kind="node" id={nodeId} href={`/nodes/${nodeId}`} />
                   <span className="flex flex-wrap gap-1">
                     {(r.atoms ?? [])
                       .filter((atom) => atom.startsWith(`${nodeId}/`))
