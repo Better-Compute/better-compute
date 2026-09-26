@@ -243,6 +243,12 @@ export const daemonCommands = [
         type: 'boolean',
         description: 'Run bcd node as the unprivileged bcd user beside a root bcd helper (privilege separation)',
       },
+      attestor: {
+        type: 'string',
+        value: 'tpm',
+        description:
+          "Join with the host's TPM (the tpm attestor: its endorsement key is the credential; the attestor's policy decides the pool) instead of a join token",
+      },
       'websocket-url': {
         type: 'string',
         value: 'URL',
@@ -377,6 +383,7 @@ export const daemonCommands = [
           ? { instanceBridges: flags['instance-bridges'].split(',').map((bridge) => bridge.trim()).filter(Boolean) }
           : {}),
         ...(flags.unprivileged ? { unprivileged: true } : {}),
+        ...(flags.attestor !== undefined ? { attestor: flags.attestor as 'tpm' } : {}),
         ...(flags['websocket-url']
           ? {
               websocket: {

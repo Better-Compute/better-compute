@@ -90,6 +90,12 @@ export interface InstallScriptOptions {
    * libvirt domain with a NIC on any other bridge (VPS and sandbox hosts).
    */
   instanceBridges?: readonly string[];
+  /**
+   * `tpm`: the node joins with the host's TPM (the tpm attestor; its endorsement key is the credential, and the
+   * attestor's policy decides where the machine joins). The script reads no join token and runs `bcd join
+   * --attestor tpm`, which returns at once on a machine that already joined. Default: a join token.
+   */
+  attestor?: 'tpm';
   /** Generation stamp for the header comment. */
   generatedAt?: string;
   generator?: string;
@@ -207,6 +213,8 @@ export function checkInstallScriptOptions(options: InstallScriptOptions): Instal
     if (!options.instanceBridges.length || !options.instanceBridges.every((bridge) => /^[A-Za-z0-9_.-]{1,15}$/.test(bridge)))
       throw invalid('--instance-bridges', 'must be interface names (1-15 of letters, digits, . _ -), comma-separated');
   }
+  if (options.attestor !== undefined && options.attestor !== 'tpm')
+    throw invalid('--attestor', 'must be tpm (the default joins with a token)');
   if (options.approverSetSha256 !== undefined && !hexPattern.test(options.approverSetSha256))
     throw invalid('--approver-set-sha256', 'must be 64 lower-case hex digits (pki trust-version prints it)');
   if (
@@ -472,11 +480,16 @@ export function renderInstallScript(input: InstallScriptOptions): string {
 # better-compute: install bcd and join pool ${options.poolId} at site ${options.siteId}.
 # Generated${options.generatedAt ? ` ${options.generatedAt}` : ''}${options.generator ? ` by ${options.generator}` : ''}.
 #
-# Run as root. The join token is read from BCD_JOIN_TOKEN or standard input, never from arguments:
+${
+  options.attestor === 'tpm'
+    ? `# Run as root: sh install-bcd.sh. The node joins with its TPM (the tpm attestor): no join token; the
+# attestor's policy decides where the machine joins. Re-running it upgrades bcd in place.`
+    : `# Run as root. The join token is read from BCD_JOIN_TOKEN or standard input, never from arguments:
 #   BCD_JOIN_TOKEN=bcjt_... sh install-bcd.sh
 #   sh install-bcd.sh < token-file
 # Download the script first; piping it into sh would leave no standard input for the token.
-# Without a token on an already configured host, the script upgrades bcd in place.
+# Without a token on an already configured host, the script upgrades bcd in place.`
+}
 set -eu
 umask 077
 
@@ -501,7 +514,14 @@ case "$(uname -m)" in
 esac
 [ -n "$SHA256" ] || fail "this script carries no bcd build for $ARCH"
 
+${
+  options.attestor === 'tpm'
+    ? `# The tpm attestor: the host's TPM (its endorsement key) is the credential; no join token is read.
+unset BCD_JOIN_TOKEN
 TOKEN=
+[ -e /dev/tpmrm0 ] || fail 'this node joins with its TPM, and /dev/tpmrm0 (the TPM resource manager) is missing'
+`
+    : `TOKEN=
 if [ -n "\${BCD_JOIN_TOKEN:-}" ]; then
   TOKEN=$BCD_JOIN_TOKEN
 elif [ ! -t 0 ]; then
@@ -513,7 +533,8 @@ case "$TOKEN" in
   bcjt_*.*) ;;
   *) fail 'that is not a join token (bcjt_...)' 2 ;;
 esac
-
+`
+}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT INT TERM
 URL="$DOWNLOADS/bcd/$BCD_VERSION/linux-$ARCH"
@@ -710,7 +731,21 @@ systemctl daemon-reload
 /usr/local/bin/bcd doctor --config /etc/bcd/config.toml >/dev/null 2>&1 ||
   printf 'bcd install: warning: bcd doctor reported a problem; run it for details\\n' >&2
 
-if [ -n "$TOKEN" ]; then
+${
+  options.attestor === 'tpm'
+    ? `# The TPM joins the machine, or bcd join says it already joined (an upgrade), then the units (re)start. As root
+# on a node with [helper], bcd join also keeps the signed JoinResponse the helper binds host units to.
+/usr/local/bin/bcd join --config /etc/bcd/config.toml --attestor tpm < /dev/null || fail 'bcd join with the TPM failed'
+if [ -n "$BCD_HELPER" ]; then
+  chown -R bcd:bcd /var/lib/bcd
+  systemctl enable bcd-helper.service
+  systemctl restart bcd-helper.service
+fi
+systemctl enable bcd.service
+systemctl restart bcd.service
+printf 'bcd %s joined with the host TPM and is running.\\n' "$BCD_VERSION"
+`
+    : `if [ -n "$TOKEN" ]; then
   # printf is a shell builtin: the token never appears in a process listing.
   printf '%s\\n' "$TOKEN" | /usr/local/bin/bcd join --config /etc/bcd/config.toml || fail 'bcd join failed'
   TOKEN=
@@ -730,5 +765,6 @@ else
   systemctl restart bcd.service
   printf 'bcd upgraded to %s and restarted.\\n' "$BCD_VERSION"
 fi
-`;
+`
+}`;
 }

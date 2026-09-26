@@ -562,6 +562,27 @@ describe('daemon install-script', () => {
       expect(await run([...base, '--unprivileged', '--instance-bridges', bad]), bad).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
   });
 
+  it('joins with the host TPM with --attestor tpm: no token read, bcd join --attestor tpm, the units restarted', async () => {
+    const result = await run([...base, '--attestor', 'tpm', '--unprivileged']);
+    expect(result, JSON.stringify(result).slice(0, 400)).toMatchObject({ ok: true });
+    const script = result.stdout;
+    expect(script).toContain('/usr/local/bin/bcd join --config /etc/bcd/config.toml --attestor tpm < /dev/null');
+    expect(script).toContain("[ -e /dev/tpmrm0 ] || fail 'this node joins with its TPM");
+    expect(script).not.toContain('read -r TOKEN');
+    expect(script).not.toContain('printf \'%s\\n\' "$TOKEN"');
+    // bcd join is run before the units start again, and the helper before the node.
+    const joined = script.indexOf('--attestor tpm < /dev/null');
+    expect(script.indexOf('systemctl restart bcd-helper.service', joined)).toBeLessThan(script.indexOf('systemctl restart bcd.service', joined));
+    expect(await run([...base, '--attestor', 'join-token'])).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
+    // Without the flag, the token flow is unchanged.
+    expect((await run(base)).stdout).toContain('IFS= read -r TOKEN');
+    const shell = posixShell();
+    if (!shell) return;
+    const checked = join(await mkdtemp(join(tmpdir(), 'bc-install-tpm-')), 'install-tpm-check.sh');
+    await writeFile(checked, script);
+    expect(spawnSync(shell, ['-n', checked], { encoding: 'utf8' }).status).toBe(0);
+  });
+
   it('gives a node with [plugins] the plugin drop-in, keeps the operator’s sections on upgrade', async () => {
     const shell = posixShell();
     if (!shell) return;
