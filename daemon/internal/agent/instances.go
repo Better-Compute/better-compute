@@ -249,6 +249,11 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 					if err != nil {
 						c.a.log.Warn("host memory unreadable; starting without host-side admission", "err", err)
 						probed = nil
+					} else {
+						// What the GPU holds were promised is not the VMs' to take.
+						for _, h := range c.a.holdCommitments() {
+							probed.reserve(h)
+						}
 					}
 					hostMem = probed
 				}

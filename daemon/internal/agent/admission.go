@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/runtime"
+	"github.com/better-compute/better-compute/daemon/internal/slice"
 )
 
 // Host-side admission (PLAN.md §3.8): bcd refuses to start an instance whose memory the host cannot
@@ -159,4 +161,157 @@ func (m *hostMemory) admit(spec *agentv1.InstanceSpec) error {
 	}
 	m.committed += normal
 	return nil
+}
+
+// A hold with limits is admitted the same way (PLAN.md §3.8): its MemoryMax is committed normal
+// memory, and its hugetlb limits are hugepages it may take. VM starts count the holds, and holds count
+// the VMs, so neither side can take what the other was promised.
+
+// holdCommitment is what a hold may still take: its memory limit, and the hugepages of its limits it
+// has not faulted in yet (by page size), from its memory nodes.
+type holdCommitment struct {
+	memory    uint64
+	hugepages map[uint64]uint64
+	nodes     []int
+}
+
+// commitmentOf is limits' claim on the host; used (by page size) is what the hold already has.
+func commitmentOf(limits *agentv1.ResourceLimits, used map[uint64]uint64) holdCommitment {
+	c := holdCommitment{memory: limits.GetMemoryBytes(), hugepages: map[uint64]uint64{}}
+	for size, pages := range map[uint64]uint64{runtime.Hugepage2Mi: limits.GetHugepages_2Mi(), runtime.Hugepage1Gi: limits.GetHugepages_1Gi()} {
+		if have := used[size]; pages > have {
+			c.hugepages[size] = pages - have
+		}
+	}
+	if limits.GetMems() != "" {
+		c.nodes, _ = runtime.ParseCPUList(limits.GetMems())
+	}
+	return c
+}
+
+// holdHugepagesUsed reads the hugepages a hold's slice has faulted in (hugetlb.<size>.current, bytes).
+func holdHugepagesUsed(allocationID string) map[uint64]uint64 {
+	used := map[uint64]uint64{}
+	dir := slice.Dir(hostMemoryRoot, holdSlice(allocationID))
+	for size, name := range map[uint64]string{runtime.Hugepage2Mi: "2MB", runtime.Hugepage1Gi: "1GB"} {
+		raw, err := os.ReadFile(filepath.Join(dir, "hugetlb."+name+".current"))
+		if err != nil {
+			continue
+		}
+		if n, err := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64); err == nil {
+			used[size] = n / size
+		}
+	}
+	return used
+}
+
+// fits reports why c does not fit what is left, or "".
+func (m *hostMemory) fits(c holdCommitment) string {
+	if m.committed+c.memory > m.normalCapacity {
+		return fmt.Sprintf("%d MiB of memory needed, %d MiB left on this host", c.memory>>20,
+			(m.normalCapacity-min(m.committed, m.normalCapacity))>>20)
+	}
+	for size, pages := range c.hugepages {
+		free := uint64(0)
+		for _, node := range m.nodesOf(c) {
+			free += m.freeHugepages[size][node]
+		}
+		if free < pages {
+			return fmt.Sprintf("%d hugepages of %d KiB needed, %d free", pages, size/1024, free)
+		}
+	}
+	return ""
+}
+
+func (m *hostMemory) nodesOf(c holdCommitment) []int {
+	if len(c.nodes) == 0 {
+		return []int{-1}
+	}
+	return c.nodes
+}
+
+// reserve takes c out of what is left (as far as it goes: a hold already bound is counted even when
+// the host no longer has room for it).
+func (m *hostMemory) reserve(c holdCommitment) {
+	m.committed += c.memory
+	for size, pages := range c.hugepages {
+		byNode := m.freeHugepages[size]
+		if byNode == nil {
+			continue
+		}
+		for _, node := range m.nodesOf(c) {
+			take := min(pages, byNode[node])
+			byNode[node] -= take
+			pages -= take
+			if node != -1 {
+				byNode[-1] -= min(take, byNode[-1])
+			}
+		}
+	}
+}
+
+// admitHold takes a new hold's limits out of what is left, or says why the host cannot give them.
+func (m *hostMemory) admitHold(limits *agentv1.ResourceLimits) error {
+	c := commitmentOf(limits, nil)
+	if why := m.fits(c); why != "" {
+		return fmt.Errorf("%s: %s", ResourcesExhausted, why)
+	}
+	m.reserve(c)
+	return nil
+}
+
+// holdAdmission reports whether holds are admitted against the host's memory: on the real host, or
+// where a test points hostMemoryRoot at a fake tree; never on a simulated host.
+func (a *Agent) holdAdmission() bool {
+	if hostMemoryRoot != "/" {
+		return true
+	}
+	rh, ok := a.host.(*RealHost)
+	return ok && !rh.fakeRoot()
+}
+
+// holdCommitments are the bound holds' claims (for VM starts' admission).
+func (a *Agent) holdCommitments() []holdCommitment {
+	if a.devices == nil {
+		return nil
+	}
+	a.devices.mu.Lock()
+	defer a.devices.mu.Unlock()
+	out := make([]holdCommitment, 0, len(a.devices.limits))
+	for id, l := range a.devices.limits {
+		out = append(out, commitmentOf(l, holdHugepagesUsed(id)))
+	}
+	return out
+}
+
+// probeForHolds reads the host for the devices converger: the domains' commitments and the kept
+// holds' (allocation id → limits).
+func (a *Agent) probeForHolds(ctx context.Context, kept map[string]*agentv1.ResourceLimits) (*hostMemory, error) {
+	domains, err := a.instanceDomains(ctx)
+	if err != nil {
+		return nil, err
+	}
+	m, err := probeHostMemory(domains)
+	if err != nil {
+		return nil, err
+	}
+	for id, l := range kept {
+		m.reserve(commitmentOf(l, holdHugepagesUsed(id)))
+	}
+	return m, nil
+}
+
+// instanceDomains lists every runtime's domains now, for the devices converger's admission.
+func (a *Agent) instanceDomains(ctx context.Context) (map[string]runtime.Domain, error) {
+	domains := map[string]runtime.Domain{}
+	for _, r := range a.o.Runtimes {
+		list, err := r.List(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", r.Name(), err)
+		}
+		for _, d := range list {
+			domains[d.ID] = d
+		}
+	}
+	return domains, nil
 }

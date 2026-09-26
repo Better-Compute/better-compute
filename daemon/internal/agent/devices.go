@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/converge"
@@ -76,11 +77,33 @@ type devicesConverger struct {
 	generation uint64
 	// failed remembers the generation an allocation's failure was reported at (reported once).
 	failed map[string]uint64
+	// limits: the bound, still desired holds that have limits (host admission counts them; read by
+	// the instances converger under mu).
+	mu     sync.Mutex
+	limits map[string]*agentv1.ResourceLimits
+}
+
+func (d *devicesConverger) setLimits(id string, l *agentv1.ResourceLimits) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.limits == nil {
+		d.limits = map[string]*agentv1.ResourceLimits{}
+	}
+	if l == nil {
+		delete(d.limits, id)
+	} else {
+		d.limits[id] = l
+	}
+}
+
+// admits says whether limits need host admission: a memory limit or hugepages.
+func admits(l *agentv1.ResourceLimits) bool {
+	return l.GetMemoryBytes() > 0 || l.GetHugepages_2Mi() > 0 || l.GetHugepages_1Gi() > 0
 }
 
 func (d *devicesConverger) Section() converge.Section { return converge.SectionDevices }
 
-func (d *devicesConverger) Plan(_ context.Context, desired []byte) ([]converge.Action, error) {
+func (d *devicesConverger) Plan(ctx context.Context, desired []byte) ([]converge.Action, error) {
 	section := &agentv1.DevicesSection{}
 	if err := proto.Unmarshal(desired, section); err != nil {
 		return nil, converge.Terminal(fmt.Errorf("devices section: %w", err))
@@ -132,12 +155,37 @@ func (d *devicesConverger) Plan(_ context.Context, desired []byte) ([]converge.A
 		})
 	}
 	claimed := map[string]string{}
+	kept := map[string]*agentv1.ResourceLimits{}
 	for _, as := range section.GetAssignments() {
 		if h, ok := observed[as.GetAllocationId()]; ok {
 			for _, dev := range h.deviceIDs {
 				claimed[dev] = as.GetAllocationId()
 			}
+			if admits(as.GetLimits()) {
+				kept[as.GetAllocationId()] = as.GetLimits()
+			}
 		}
+	}
+	d.mu.Lock()
+	d.limits = kept
+	d.mu.Unlock()
+	// Host admission of new holds with limits (admission.go): probed once, when one needs it, against
+	// the runtimes' domains now and the holds kept.
+	var hostMem *hostMemory
+	probed := !d.a.holdAdmission()
+	admitHold := func(l *agentv1.ResourceLimits) error {
+		if !probed {
+			probed = true
+			m, err := d.a.probeForHolds(ctx, kept)
+			if err != nil {
+				d.a.log.Warn("host memory unreadable; binding without host-side admission", "err", err)
+			}
+			hostMem = m
+		}
+		if hostMem == nil {
+			return nil
+		}
+		return hostMem.admitHold(l)
 	}
 	d.a.invMu.Lock()
 	inv := d.a.inv
@@ -209,6 +257,13 @@ func (d *devicesConverger) Plan(_ context.Context, desired []byte) ([]converge.A
 			failures = append(failures, failure{id, "overlap", msg})
 			continue
 		}
+		if admits(as.GetLimits()) {
+			if err := admitHold(as.GetLimits()); err != nil {
+				// The control plane re-places the bind (markAllocationFailed).
+				failures = append(failures, failure{id, "resources-exhausted", err.Error()})
+				continue
+			}
+		}
 		for _, dev := range ids {
 			claimed[dev] = id
 		}
@@ -231,6 +286,9 @@ func (d *devicesConverger) Plan(_ context.Context, desired []byte) ([]converge.A
 					return err
 				}
 				delete(d.failed, id)
+				if admits(as.GetLimits()) {
+					d.setLimits(id, as.GetLimits())
+				}
 				cdi := make([]string, 0, len(ids))
 				for _, dev := range ids {
 					cdi = append(cdi, "bcd.dev/gpu="+cdiDeviceName(dev))
