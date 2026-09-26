@@ -19,13 +19,36 @@ profile into persisted steps for one node or instance (PLAN.md §11.2). It depen
     Ignition (`bcd-host.ign`), embedding a single-use `provisioned` join token minted through
     `ctx.pki`. The document is stored through `ctx.secrets`, and the deploy carries only its
     `userDataRef`. Template values must be single lines, so a value can never inject lines.
-  - **Config units.** `nvidia-driver`, `container-toolkit`, `mig-layout`, `fabric-manager` and
-    `sysctl`, each validated by a manifest. `when:` is checked against the node's labels, and
-    `mig-layout` can take `from: 'pool'`. They are served as the NodeSpec `host` section from the
-    last succeeded workflow's `hostConfig`, and the engine invalidates desired state when such a
-    workflow succeeds. A pool's layout reaches a node only once capacity granted the change
-    (`provision_gated_mig_layout`, reading `capacity_mig_layouts` when capacity is installed), so
-    booked MIG instances are never repartitioned under a reservation.
+  - **Config units.** `nvidia-driver`, `container-toolkit`, `mig-layout`, `fabric-manager`,
+    `sysctl`, `hugepages`, `kernel-modules`, `gpu-sharing` and `k8s-join`, each validated before any
+    node gets it:
+    - `sysctl` refuses the keys bcd refuses (`forbiddenSysctls`: `kernel.core_pattern`,
+      `kernel.modprobe`, `user.*` and others that run programs as root or lower the host's defenses);
+    - `hugepages` takes `{ pages2m?, pages1g?, transparent?, perNuma? }`. bcd allocates 2 MiB pages at
+      runtime and 1 GiB pages through the kernel command line, reporting when a reboot is pending;
+    - `kernel-modules` takes `{ load?, options? }`, e.g. `kvm_intel` with `nested=1` for VM hosts;
+    - `gpu-sharing` takes `{ mode: mps | timeslice, replicas? }`;
+    - `k8s-join` takes `{ server, caCertSha256, tokenRef, kubernetesVersion?, nodeLabels?, taints?, gpu? }`.
+      The kubeadm bootstrap token is only ever a `secret://` reference that bcd fetches through the
+      broker, never in the spec. Labels and taints use Kubernetes syntax, without the
+      `kubernetes.io`/`k8s.io` prefixes.
+
+    `when:` is checked against the node's labels, and `mig-layout` can take `from: 'pool'`. The units
+    are served as the NodeSpec `host` section from the last succeeded workflow's `hostConfig`. The
+    engine invalidates desired state when such a workflow succeeds.
+
+    A pool's policy adds units to every one of its machines, adopted ones included, and they win over
+    the profile's (`poolHostConfig`):
+    - `policy.kubernetes` with `apiServer`, `caCertSha256` and `joinTokenRef` gives `k8s-join`. A hosted
+      pool gives none of the three, because bcd runs inside the cluster as a DaemonSet
+      (provider-kubernetes);
+    - `policy.hugepages` `{ size, count, perNuma }` gives `hugepages`;
+    - `policy.kernelModules` gives `kernel-modules`;
+    - a pool shared by `mps` or `timeslice` gives `gpu-sharing`.
+
+    The pools API checks a policy with `validatePoolHostPolicy`. A pool's layout reaches a node only
+    once capacity granted the change (`provision_gated_mig_layout`, reading `capacity_mig_layouts` when
+    capacity is installed), so booked MIG instances are never repartitioned under a reservation.
   - **`driver.invoke`**, the command kind of profile steps that name a driver operation
     (destructive, so always signed; `driverInvokeCommandKind`).
   - **Workflows** can be aborted, retried from a step, paused and resumed (`workflows.*`).
