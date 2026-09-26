@@ -20,7 +20,10 @@ const LABEL = /^([A-Za-z0-9](?:[A-Za-z0-9._/-]{0,126}[A-Za-z0-9])?)(?:=(.{0,63})
 export function useFleetCommands() {
   const { live, source } = useWorkspaceSettings();
   const clock = useClockGetter();
-  const tenantId = useConnection().status?.tenantId;
+  const connection = useConnection().status;
+  const tenantId = connection?.tenantId;
+  // The live proxy forwards only reads until operators sign in; it will say `writable: true` once they can act.
+  const writable = (connection as { writable?: boolean } | null | undefined)?.writable === true;
   const { toast, confirm, confirmWithReason } = useFeedback();
 
   return useMemo(() => {
@@ -31,6 +34,12 @@ export function useFleetCommands() {
       toast({ title: "You're viewing the past", detail: 'Return the clock to live before changing the fleet.', status: 'warn' });
       return false;
     };
+    /** Live and read-only: refuse before asking anything (the proxy would answer 403 READ_ONLY). */
+    const canWrite = () => {
+      if (!remote || writable) return true;
+      toast({ title: 'Read-only until operator sign-in', detail: 'The live connection only reads; change the fleet with the CLI or the console for now.', status: 'warn' });
+      return false;
+    };
     const at = () => clock().now;
     const remote = source === 'live';
     /** Live mode: run each call against the API, report how many succeeded, then refresh the fleet. */
@@ -39,6 +48,10 @@ export function useFleetCommands() {
       const results = await Promise.allSettled(calls.map(([path, input]) => client.$request(path, { tenantId, ...input })));
       const failed = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
       const first = failed[0]?.reason as { code?: string; message?: string } | undefined;
+      if (first?.code === 'READ_ONLY') {
+        toast({ title: 'Read-only until operator sign-in', detail: 'The live connection only reads; change the fleet with the CLI or the console for now.', status: 'warn' });
+        return false;
+      }
       toast(
         failed.length
           ? { title: `${label}: ${failed.length} of ${calls.length} failed`, detail: first ? `${first.code ?? 'ERROR'}: ${first.message ?? ''}` : undefined, status: 'crit', timeout: 0 }
@@ -54,8 +67,10 @@ export function useFleetCommands() {
 
     const api = {
       live,
+      /** False in live mode until operators sign in; actions refuse with a toast. */
+      canWrite: !remote || writable,
       async cordon(nodes: readonly FleetNode[], options: { confirm?: boolean } = {}) {
-        if (!canAct()) return false;
+        if (!canAct() || !canWrite()) return false;
         let reason: string | null = '';
         if (options.confirm !== false) {
           reason = await confirmWithReason({
@@ -78,7 +93,7 @@ export function useFleetCommands() {
         return true;
       },
       uncordon(nodes: readonly FleetNode[]) {
-        if (!canAct()) return false;
+        if (!canAct() || !canWrite()) return false;
         if (remote) return send(`Uncordon ${names(nodes)}`, nodes.map((node) => ['nodes/uncordon', { nodeId: node.id }]));
         fleetActions.uncordon(ids(nodes), at());
         toast({
@@ -90,7 +105,7 @@ export function useFleetCommands() {
         return true;
       },
       async drain(nodes: readonly FleetNode[]) {
-        if (!canAct()) return false;
+        if (!canAct() || !canWrite()) return false;
         const booked = nodes.reduce((sum, node) => sum + node.gpus.filter((gpu) => gpu.allocation).length, 0);
         const workloads = nodes.reduce((sum, node) => sum + node.instanceCount + node.sandboxCount, 0);
         const big = nodes.length > 8;
@@ -115,7 +130,7 @@ export function useFleetCommands() {
         return true;
       },
       maintenance(nodes: readonly FleetNode[], on: boolean) {
-        if (!canAct()) return false;
+        if (!canAct() || !canWrite()) return false;
         if (remote) return toastFalse({ title: 'Not in live mode', detail: on ? 'Put metal nodes into maintenance with metal.manage (CLI: better-compute metal manage).' : 'Return nodes with metal.provide.', status: 'warn' });
         fleetActions.maintenance(ids(nodes), on, at());
         toast({
@@ -126,7 +141,7 @@ export function useFleetCommands() {
         return true;
       },
       async revokeIdentity(node: FleetNode) {
-        if (!canAct()) return false;
+        if (!canAct() || !canWrite()) return false;
         const reason = await confirmWithReason({
           title: `Revoke ${node.hostname}'s identity?`,
           body: 'Every certificate of the current identity generation is revoked and the gateway drops the session. The machine must rejoin with a new join token. This cannot be undone.',
@@ -143,7 +158,7 @@ export function useFleetCommands() {
         return true;
       },
       label(nodes: readonly FleetNode[], set: Record<string, string>, remove: readonly string[] = []) {
-        if (!canAct()) return false;
+        if (!canAct() || !canWrite()) return false;
         if (remote) return send(`Label ${names(nodes)}`, nodes.map((node) => ['nodes/label', { nodeId: node.id, set, remove: [...remove] }]));
         fleetActions.label(ids(nodes), set, remove, at());
         const text = [...Object.entries(set).map(([k, v]) => `${k}=${v}`), ...remove.map((k) => `−${k}`)].join(', ');
@@ -152,7 +167,7 @@ export function useFleetCommands() {
       },
       /** Asks for `key=value` (or `key-` to remove) and labels every node. */
       async labelPrompt(nodes: readonly FleetNode[]) {
-        if (!canAct()) return false;
+        if (!canAct() || !canWrite()) return false;
         const value = await confirmWithReason({
           title: `Label ${names(nodes)}`,
           body: 'Operator labels; placement matches them through nodeLabels. Write key=value, or key- to remove one. bc.dev/ labels are system-only.',
@@ -168,7 +183,7 @@ export function useFleetCommands() {
         return match[2] === undefined ? api.label(nodes, {}, [match[1]!]) : api.label(nodes, { [match[1]!]: match[2] });
       },
       taint(nodes: readonly FleetNode[], add: readonly string[], remove: readonly string[] = []) {
-        if (!canAct()) return false;
+        if (!canAct() || !canWrite()) return false;
         if (remote) return send(`Taint ${names(nodes)}`, nodes.map((node) => ['nodes/taint', { nodeId: node.id, add: [...add], remove: [...remove] }]));
         fleetActions.taint(ids(nodes), add, remove, at());
         toast({
@@ -186,7 +201,7 @@ export function useFleetCommands() {
         return true;
       },
       async rollout(rollout: Rollout, next: 'paused' | 'running' | 'aborted') {
-        if (!canAct()) return false;
+        if (!canAct() || !canWrite()) return false;
         if (next === 'aborted') {
           const reason = await confirmWithReason({
             title: `Abort the bcd ${rollout.version} rollout?`,
@@ -213,7 +228,7 @@ export function useFleetCommands() {
         return true;
       },
       async approveBatch(batch: CommandBatchView) {
-        if (!canAct()) return false;
+        if (!canAct() || !canWrite()) return false;
         if (remote)
           return toastFalse({
             title: 'Sign with your approver key',
@@ -243,7 +258,7 @@ export function useFleetCommands() {
         return true;
       },
       async cancelBatch(batch: CommandBatchView) {
-        if (!canAct()) return false;
+        if (!canAct() || !canWrite()) return false;
         const ok = await confirm({
           title: 'Cancel this batch?',
           body: `${batch.scopeSize} queued commands are cancelled and the approvals discarded.`,
@@ -258,7 +273,7 @@ export function useFleetCommands() {
         return true;
       },
       async confirmMac(mac: string, node: FleetNode | undefined, nodeId: string) {
-        if (!canAct()) return false;
+        if (!canAct() || !canWrite()) return false;
         const ok = await confirm({
           title: `Confirm ${mac} for ${node?.hostname ?? nodeId}?`,
           body: 'The machine is enrolled with this MAC and PXE boots from it. Confirm only when the BMC inventory or a site visit matches.',
@@ -278,7 +293,7 @@ export function useFleetCommands() {
         return true;
       },
       async deleteSandboxes(sandboxes: readonly Sandbox[]) {
-        if (!canAct()) return false;
+        if (!canAct() || !canWrite()) return false;
         const ok = await confirm({
           title: sandboxes.length === 1 ? `Delete sandbox ${sandboxes[0]!.id}?` : `Delete ${sandboxes.length} sandboxes?`,
           body: 'Their instances are destroyed now; snapshots marked keep survive.',
@@ -293,7 +308,7 @@ export function useFleetCommands() {
         return true;
       },
       extendSandboxes(sandboxes: readonly Sandbox[], seconds: number) {
-        if (!canAct()) return false;
+        if (!canAct() || !canWrite()) return false;
         if (remote) return send(`Extend ${sandboxes.length === 1 ? 'sandbox' : `${sandboxes.length} sandboxes`}`, sandboxes.map((sandbox) => ['sandboxes/extend', { sandboxId: sandbox.id, by: seconds * 1000 }]));
         fleetActions.extendSandboxes(sandboxes.map((sandbox) => sandbox.id), seconds, at());
         toast({ title: `Extended ${sandboxes.length === 1 ? 'sandbox' : `${sandboxes.length} sandboxes`} by ${Math.round(seconds / 60)} min`, status: 'live' });
@@ -301,5 +316,5 @@ export function useFleetCommands() {
       },
     };
     return api;
-  }, [clock, live, source, tenantId, toast, confirm, confirmWithReason]);
+  }, [clock, live, source, tenantId, writable, toast, confirm, confirmWithReason]);
 }
