@@ -119,7 +119,7 @@ func TestGrownVolumesAreToldToRunningGuests(t *testing.T) {
 	if err := c.GrowVolume(ctx, "inst_c", vol); err != nil {
 		t.Fatal(err)
 	}
-	if raw, _ := json.Marshal(resized); string(raw) != `[{"desired_size":4294967296,"disk":"vol1"}]` {
+	if raw, _ := json.Marshal(resized); string(raw) != `[{"desired_size":4294967296,"id":"vol1"}]` {
 		t.Fatalf("resized = %s", raw)
 	}
 	// Listed with what it has open.

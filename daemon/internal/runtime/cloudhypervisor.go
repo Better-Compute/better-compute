@@ -424,7 +424,7 @@ func (c *CloudHypervisor) Ensure(ctx context.Context, spec *agentv1.InstanceSpec
 			if _, err := c.run(ctx, "qemu-img", "resize", "-f", "qcow2", filepath.Join(dir, "disk.qcow2"), strconv.FormatUint(spec.GetDiskBytes(), 10)); err != nil {
 				return err
 			}
-		} else if _, err := c.api(ctx, id, http.MethodPut, "vm.resize-disk", map[string]any{"disk": "disk0", "desired_size": spec.GetDiskBytes()}); err != nil {
+		} else if _, err := c.api(ctx, id, http.MethodPut, "vm.resize-disk", map[string]any{"id": "disk0", "desired_size": spec.GetDiskBytes()}); err != nil {
 			return err
 		}
 	} else if spec.GetDiskBytes() < r.DiskBytes {
@@ -1251,7 +1251,7 @@ func (c *CloudHypervisor) GrowVolume(ctx context.Context, id string, v AttachedV
 	if i < 0 {
 		return nil
 	}
-	_, err = c.api(ctx, id, http.MethodPut, "vm.resize-disk", map[string]any{"disk": fmt.Sprintf("vol%d", i), "desired_size": v.SizeBytes})
+	_, err = c.api(ctx, id, http.MethodPut, "vm.resize-disk", map[string]any{"id": fmt.Sprintf("vol%d", i), "desired_size": v.SizeBytes})
 	return err
 }
 

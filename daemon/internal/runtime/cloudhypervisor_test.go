@@ -169,6 +169,11 @@ func (f *fakeCH) api(_ context.Context, socket, method, path string, body any, f
 		}
 	case "vm.remove-device":
 	case "vm.resize-disk":
+		// VmResizeDisk (the cloud-hypervisor OpenAPI): {id, desired_size}.
+		b := body.(map[string]any)
+		if _, ok := b["id"].(string); !ok || b["desired_size"] == nil || len(b) != 2 {
+			return []byte("VmResizeDisk is {id, desired_size}"), 400, nil
+		}
 	case "vm.snapshot":
 		dst := strings.TrimPrefix(body.(map[string]any)["destination_url"].(string), "file://")
 		_ = os.WriteFile(filepath.Join(dst, "config.json"), vmm.config, 0o600)
