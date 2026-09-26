@@ -1,0 +1,26 @@
+# bcd as a container image, for running it as a Kubernetes DaemonSet (deploy/kubernetes). On a
+# machine bcd owns, install the binary and bcd.service instead (the install script).
+#
+#   docker build -f daemon/Containerfile -t bcd:dev --build-arg VERSION=0.0.0-dev daemon
+#
+# The host build without cgo: GPUs are read through nvidia-smi, which the NVIDIA container runtime
+# mounts into the pod (NVIDIA_VISIBLE_DEVICES=all, NVIDIA_DRIVER_CAPABILITIES=utility).
+
+FROM golang:1.26-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=0.0.0-dev
+ARG RELEASE_SEQUENCE=0
+RUN CGO_ENABLED=0 go build -trimpath -tags nonvml \
+      -ldflags "-s -w -X main.version=${VERSION} -X main.releaseSequence=${RELEASE_SEQUENCE}" \
+      -o /out/bcd ./cmd/bcd
+
+FROM debian:bookworm-slim
+# nftables (instance network policy), kmod (modprobe), pciutils and util-linux (inventory, wipes).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates nftables kmod pciutils util-linux \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/bcd /usr/local/bin/bcd
+ENTRYPOINT ["/usr/local/bin/bcd"]

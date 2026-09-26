@@ -1,0 +1,13 @@
+# kubectl apply -k deploy/kubernetes, after creating the bcd-config ConfigMap and the bcd-join
+# Secret (daemonset.yaml says how). Point the image at your registry's build of daemon/Containerfile:
+#   kustomize edit set image bcd=registry.example.com/better-compute/bcd:<version>
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: bcd-system
+resources:
+  - namespace.yaml
+  - daemonset.yaml
+images:
+  - name: bcd
+    newName: bcd
+    newTag: dev

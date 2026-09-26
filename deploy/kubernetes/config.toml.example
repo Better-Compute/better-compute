@@ -1,0 +1,20 @@
+# bcd's configuration for the Kubernetes DaemonSet: the ConfigMap bcd-config, key config.toml.
+# The gateway and the three pins are the ones `better-compute daemon install-script` writes into
+# /etc/bcd/config.toml (the PKI bundle's public half); the join fails closed when a pin does not
+# match what the control plane serves.
+gateway_url = "https://gw.compute.example.com"
+site = "site_01..."
+serving_ca_spki_pin = "sha256/..."
+join_signing_key_pin = "sha256/..."
+join_encryption_key_pin = "sha256/..."
+# On the host's /var/lib/bcd (hostPath): the identity survives pod restarts and image rollouts.
+data_dir = "/var/lib/bcd"
+
+[host]
+# The NVIDIA GPU operator (or the cluster's own tooling) owns the driver, the container toolkit, the
+# MIG layout and the kernel parameters. bcd applies no NodeSpec.host unit and reports the host
+# section as HostManagedExternally; capacity books only what the inventory shows.
+units = false
+
+[log]
+json = true
