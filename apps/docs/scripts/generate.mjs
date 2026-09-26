@@ -53,7 +53,7 @@ const core = await load('core');
 const server = await load('server');
 const { pglite } = await load('postgres', 'pglite.js');
 const pki = await load('pki');
-const { provisionModule } = await load('provision');
+const { provisionModule, builtinConfigUnits } = await load('provision');
 const { metal } = await load('metal');
 const { vps } = await load('vps');
 const { eventsModule, eventCatalog } = await load('events');
@@ -628,6 +628,41 @@ files.set(
   ].join('\n'),
 );
 
+// Host config units: provision's manifests (what a spec may say) and descriptions/host-units.md (what bcd
+// does with it). A heading naming no unit is a problem, like an undescribed method.
+const hostUnitText = await sections(join(descriptions, 'host-units.md'));
+const hostUnits = builtinConfigUnits.map((unit) => ({
+  name: unit.name,
+  summary: unit.description,
+  description: hostUnitText.get(unit.name) ?? '',
+  settings: unit.settings.jsonSchema(),
+}));
+const unknownHostUnits = [...hostUnitText.keys()].filter((name) => name && !hostUnits.some((unit) => unit.name === name));
+files.set(
+  `${reference}/host-units.mdx`,
+  [
+    frontmatter({
+      title: 'Host config units',
+      description: `The ${hostUnits.length} config units a node's spec may set, their settings and what bcd does with them.`,
+    }),
+    generatedNote("provision's builtinConfigUnits and apps/docs/descriptions/host-units.md"),
+    '',
+    prose(hostUnitText.get('') ?? ''),
+    '',
+    ...hostUnits.flatMap((unit) => [
+      `## ${unit.name}`,
+      '',
+      prose(unit.summary.endsWith('.') ? unit.summary : `${unit.summary}.`),
+      ...(unit.description ? ['', prose(unit.description)] : []),
+      '',
+      ...(unit.name === 'sysctl'
+        ? ['Takes free-form keys: sysctl names (`^[a-z0-9_]+(?:\\.[a-z0-9_-]+)+$`) with scalar values.']
+        : inputTable(unit.settings)),
+      '',
+    ]),
+  ].join('\n'),
+);
+
 // The reference section's own meta.json and index are hand-written; the generated pages are listed there.
 
 const data = {
@@ -638,6 +673,7 @@ const data = {
   'generated/command-kinds.json': commandKinds,
   'generated/events.json': events,
   'generated/metrics.json': metrics,
+  'generated/host-units.json': hostUnits,
   'generated/modules.json': { modules, jobs },
   'generated/packages.json': packages,
 };
@@ -669,7 +705,10 @@ async function stale() {
 }
 
 // A heading that names no method (a typo, a renamed method) would silently drop its text.
-const descriptionProblems = await checkDescriptions(docs, { api, errorCodes: core.errorCodes });
+const descriptionProblems = [
+  ...(await checkDescriptions(docs, { api, errorCodes: core.errorCodes })),
+  ...unknownHostUnits.map((name) => `descriptions/host-units.md: ## ${name} names no config unit`),
+];
 if (descriptionProblems.length) {
   for (const line of descriptionProblems) console.error(`apps/docs/${line}`);
   console.error(`${descriptionProblems.length} problem(s) in apps/docs/descriptions.`);
@@ -709,7 +748,10 @@ if (check) {
 const undescribed = api.flatMap((entry) =>
   entry.methods.filter((method) => !method.description).map((method) => `${entry.group}.${method.method}`),
 );
-const unexplained = errors.filter((error) => !error.description).map((error) => error.code);
+const unexplained = [
+  ...errors.filter((error) => !error.description).map((error) => error.code),
+  ...hostUnits.filter((unit) => !unit.description).map((unit) => `host unit ${unit.name}`),
+];
 if (undescribed.length || unexplained.length)
   console.log(
     `apps/docs: no description yet for ${[...undescribed, ...unexplained].slice(0, 8).join(', ')}${undescribed.length + unexplained.length > 8 ? ` and ${undescribed.length + unexplained.length - 8} more` : ''} (apps/docs/descriptions/).`,
