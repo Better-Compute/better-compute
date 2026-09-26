@@ -58,6 +58,12 @@ export interface WidgetDef {
    * without it keep showing the simulation and their frame says so.
    */
   live?: boolean;
+  /**
+   * Scope pins the Configure drawer offers for this widget. Every widget can be pinned to a site (useScope
+   * and useLive read the pin); set `range: true` when the widget reads its window through useRange().
+   * `site: false` hides the site pin for widgets that are not per-site.
+   */
+  pins?: { site?: boolean; range?: boolean };
   component: ComponentType<WidgetProps>;
 }
 

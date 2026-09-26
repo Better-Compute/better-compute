@@ -7,7 +7,7 @@ import { activity, attentionGroup, capacityTotals, controlPlane, fleetPulse, fmt
 import { collectAttention, type WidgetProps } from '@/lib/modules';
 import { useCapacityTotals } from '@/components/capacity/data';
 import { useFleetSummary } from '@/components/fleet/summary';
-import { RANGES, useLive, useNow, useWorkspaceSettings } from '@/components/shell/workspace';
+import { useLive, useNow, useRange, useWorkspaceSettings } from '@/components/shell/workspace';
 import { useFeedback } from '@/components/ui/feedback';
 import { useAcks } from '@/components/shell/pins';
 import { EntityLink, usePeek } from '@/components/shell/peek';
@@ -19,8 +19,8 @@ import { useAttentionItems } from '@/components/shell/use-attention';
 
 /** Fleet KPIs with trends over the workspace range. */
 export function KpiStrip({ size }: WidgetProps) {
-  const { range: rangeKey, source } = useWorkspaceSettings();
-  const range = RANGES[rangeKey];
+  const { source } = useWorkspaceSettings();
+  const range = useRange().spec;
   const live = source === 'live';
   const pulse = useLive((now, scope) => fleetPulse(now, scope), { bucketMs: 10_000 });
   // Node counts and GPU numbers come from the fleet and capacity modules (live API or simulation, whichever the
@@ -108,8 +108,7 @@ const PULSE_METRICS = {
 
 /** A fleet metric over the workspace range: utilization (GPU vs CPU), GPUs allocated, sandboxes or power. */
 export function PulseChart({ size, settings }: WidgetProps) {
-  const { range: key } = useWorkspaceSettings();
-  const range = RANGES[key];
+  const { key, spec: range } = useRange();
   const metric = (String(settings.metric) in PULSE_METRICS ? settings.metric : 'utilization') as keyof typeof PULSE_METRICS;
   const series = useLive((now, scope) => pulseSeries(now, range.points, range.step, scope), {
     bucketMs: Math.min(range.step, 60_000),

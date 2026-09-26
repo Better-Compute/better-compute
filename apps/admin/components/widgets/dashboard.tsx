@@ -18,7 +18,8 @@ import { useFeedback } from '@/components/ui/feedback';
 import { useKiosk } from '@/components/shell/kiosk';
 import { Drawer, Menu, ToolButton } from '@/components/ui/overlay';
 import { allWidgets, modules, widgetById, widgetSettings, type WidgetDef } from '@/lib/modules';
-import { ConfigureWidget, settingsSummary } from './configure';
+import { ConfigureWidget, overrideFrom, settingsSummary } from './configure';
+import { ScopeOverrideProvider } from '@/components/shell/workspace';
 import { cx } from '@/utils/cx';
 import {
   defaultState,
@@ -492,14 +493,16 @@ function WidgetGrid({
                 },
               }}
             >
-              <def.component
-                size={{ w: instance.w, h: instance.h }}
-                editing={editing}
-                settings={widgetSettings(def, instance.settings)}
-                updateSettings={(patch) =>
-                  onChange(items.map((i) => (i.key === instance.key ? { ...i, settings: { ...i.settings, ...patch } } : i)))
-                }
-              />
+              <ScopeOverrideProvider value={overrideFrom(instance.settings)}>
+                <def.component
+                  size={{ w: instance.w, h: instance.h }}
+                  editing={editing}
+                  settings={widgetSettings(def, instance.settings)}
+                  updateSettings={(patch) =>
+                    onChange(items.map((i) => (i.key === instance.key ? { ...i, settings: { ...i.settings, ...patch } } : i)))
+                  }
+                />
+              </ScopeOverrideProvider>
             </WidgetFrame>
           ) : (
             <div className="flex h-full items-center justify-between gap-2 border border-dashed border-separator-border px-3 font-mono text-[11px] text-text-tertiary">

@@ -4,6 +4,7 @@ import { attention, attentionGroup, controlPlane, fleetPulse, nodeStates, poolPu
 import { pools, poolNodePlacement, sites } from '@/lib/data/topology';
 import { collectAttention, modules, navForPath, searchAll, widgetById, widgetSettings } from '@/lib/modules';
 import { decodeDashboard, encodeDashboard, PRESETS } from '@/components/widgets/layout';
+import { overrideFrom, settingsSummary } from '@/components/widgets/configure';
 
 // The foundation's pure logic: the simulated platform signals, the module registry helpers and dashboard
 // share links. A fixed T0 in the past, never the wall clock.
@@ -132,6 +133,18 @@ describe('module registry', () => {
     const def = widgetById('overview.pulse')!;
     expect(widgetSettings(def)).toMatchObject({ metric: 'utilization', compare: true });
     expect(widgetSettings(def, { metric: 'power', text: 'kept' })).toMatchObject({ metric: 'power', compare: true, text: 'kept' });
+  });
+});
+
+describe('widget scope pins', () => {
+  it('reads $site / $range into a scope override and the title summary', () => {
+    expect(overrideFrom({})).toEqual({});
+    expect(overrideFrom({ $site: 'fra1', $range: '7d' })).toEqual({ siteId: 'fra1', range: '7d' });
+    expect(overrideFrom({ $site: 'all' })).toEqual({ siteId: null });
+    expect(overrideFrom({ $site: '', $range: 'nonsense' })).toEqual({});
+    const def = widgetById('overview.pulse')!;
+    expect(settingsSummary(def, { $site: 'fra1', $range: '7d', metric: 'power' })).toBe('fra1 · 7d · IT power');
+    expect(settingsSummary(widgetById('overview.notes')!, { text: 'x' })).toBeUndefined();
   });
 });
 

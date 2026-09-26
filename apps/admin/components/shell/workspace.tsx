@@ -240,10 +240,36 @@ export function useWorkspace(): Workspace {
   return useMemo(() => ({ ...settings, now, wallNow, window: window_ }), [settings, now, wallNow, window_]);
 }
 
-/** The scope object the data generators take. */
+/**
+ * A widget instance's own scope, when the operator pinned it (Configure → Site / Range): `siteId` null means
+ * "all sites" regardless of the workspace; undefined follows the workspace.
+ */
+export interface ScopeOverride {
+  siteId?: string | null;
+  range?: RangeKey;
+}
+
+const ScopeOverrideContext = createContext<ScopeOverride>({});
+
+export function ScopeOverrideProvider({ value, children }: { value: ScopeOverride; children: ReactNode }) {
+  const memo = useMemo(() => value, [value.siteId, value.range]); // eslint-disable-line react-hooks/exhaustive-deps
+  return <ScopeOverrideContext.Provider value={memo}>{children}</ScopeOverrideContext.Provider>;
+}
+
+/** The scope object the data generators take: the widget's pinned site if any, else the workspace's. */
 export function useScope(): { siteId?: string } {
   const { siteId } = useWorkspaceSettings();
-  return useMemo(() => (siteId ? { siteId } : {}), [siteId]);
+  const override = useContext(ScopeOverrideContext);
+  const effective = override.siteId === undefined ? siteId : (override.siteId ?? undefined);
+  return useMemo(() => (effective ? { siteId: effective } : {}), [effective]);
+}
+
+/** The time range a view should use: the widget's pinned range if any, else the workspace's. */
+export function useRange(): { key: RangeKey; spec: (typeof RANGES)[RangeKey] } {
+  const { range } = useWorkspaceSettings();
+  const override = useContext(ScopeOverrideContext);
+  const key = override.range ?? range;
+  return { key, spec: RANGES[key] };
 }
 
 /**

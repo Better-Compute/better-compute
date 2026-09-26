@@ -7,6 +7,8 @@ import { Switch } from '@/components/base/switch/switch';
 import { Drawer, Select } from '@/components/ui/overlay';
 import { widgetSettings, type WidgetDef } from '@/lib/modules';
 import type { WidgetInstance } from './layout';
+import { sites } from '@/lib/data';
+import { RANGES, ScopeOverrideProvider, type RangeKey, type ScopeOverride } from '@/components/shell/workspace';
 
 type Values = Record<string, string | number | boolean>;
 
@@ -53,6 +55,39 @@ export function ConfigureWidget({
             />
           </label>
 
+          {(def.pins?.site !== false || def.pins?.range) && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              {def.pins?.site !== false && (
+                <div className="flex flex-col gap-1.5">
+                  <span className="font-mono text-[11px] tracking-wide text-text-tertiary uppercase">Site</span>
+                  <Select
+                    label="Site"
+                    size="medium"
+                    value={String(values.$site || '')}
+                    onChange={(value) => set('$site', value)}
+                    options={[
+                      { id: '', label: 'Follow the workspace' },
+                      { id: 'all', label: 'All sites, always' },
+                      ...sites.map((site) => ({ id: site.id, label: `${site.id} · ${site.city}` })),
+                    ]}
+                  />
+                </div>
+              )}
+              {def.pins?.range && (
+                <div className="flex flex-col gap-1.5">
+                  <span className="font-mono text-[11px] tracking-wide text-text-tertiary uppercase">Time range</span>
+                  <Select
+                    label="Time range"
+                    size="medium"
+                    value={String(values.$range || '')}
+                    onChange={(value) => set('$range', value)}
+                    options={[{ id: '', label: 'Follow the workspace' }, ...(Object.keys(RANGES) as RangeKey[]).map((key) => ({ id: key, label: RANGES[key].label }))]}
+                  />
+                </div>
+              )}
+            </div>
+          )}
+
           {def.settings?.map((setting) => (
             <div key={setting.id} className="flex flex-col gap-1.5">
               <span className="font-mono text-[11px] tracking-wide text-text-tertiary uppercase">{setting.label}</span>
@@ -88,7 +123,9 @@ export function ConfigureWidget({
           <div>
             <span className="mb-1.5 block font-mono text-[11px] tracking-wide text-text-tertiary uppercase">Preview</span>
             <div className="h-72 overflow-hidden border border-separator-border bg-surface-raised">
-              <def.component size={{ w: 6, h: 4 }} editing={false} settings={values} />
+              <ScopeOverrideProvider value={overrideFrom(values)}>
+                <def.component size={{ w: 6, h: 4 }} editing={false} settings={values} />
+              </ScopeOverrideProvider>
             </div>
           </div>
 
@@ -111,9 +148,24 @@ export function ConfigureWidget({
   );
 }
 
-/** "gpu · fra1": the non-default setting values, for the widget's title bar. */
+/** The scope pins stored in an instance's settings ($site, $range) as a ScopeOverride. */
+export function overrideFrom(saved?: Values): ScopeOverride {
+  const site = saved?.$site;
+  const range = saved?.$range;
+  return {
+    ...(typeof site === 'string' && site ? { siteId: site === 'all' ? null : site } : {}),
+    ...(typeof range === 'string' && range in RANGES ? { range: range as RangeKey } : {}),
+  };
+}
+
+/** "gpu · fra1": the non-default setting values and pins, for the widget's title bar. */
 export function settingsSummary(def: WidgetDef, saved?: Values): string | undefined {
-  if (!def.settings?.length || !saved) return undefined;
+  if (!saved) return undefined;
+  const pins = [
+    typeof saved.$site === 'string' && saved.$site ? (saved.$site === 'all' ? 'all sites' : saved.$site) : null,
+    typeof saved.$range === 'string' && saved.$range ? saved.$range : null,
+  ].filter((p): p is string => Boolean(p));
+  if (!def.settings?.length) return pins.length ? pins.join(' · ') : undefined;
   const parts = def.settings.flatMap((setting) => {
     const value = saved[setting.id];
     if (value === undefined || value === setting.default) return [];
@@ -121,5 +173,6 @@ export function settingsSummary(def: WidgetDef, saved?: Values): string | undefi
     if (setting.type === 'toggle') return [value ? setting.label.toLowerCase() : `no ${setting.label.toLowerCase()}`];
     return [`${setting.label.toLowerCase()} ${value}`];
   });
-  return parts.length ? parts.join(' · ') : undefined;
+  const all = [...pins, ...parts];
+  return all.length ? all.join(' · ') : undefined;
 }

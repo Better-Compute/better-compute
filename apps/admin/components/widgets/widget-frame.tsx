@@ -15,7 +15,8 @@ import {
   RiRulerLine,
 } from 'react-icons/ri';
 import { widgetSettings, type WidgetDef } from '@/lib/modules';
-import { useWorkspaceSettings } from '@/components/shell/workspace';
+import { ScopeOverrideProvider, useWorkspaceSettings } from '@/components/shell/workspace';
+import { overrideFrom } from './configure';
 import { Menu, ToolButton } from '@/components/ui/overlay';
 import { EmptyState } from '@/components/ui/panel';
 import { cx } from '@/utils/cx';
@@ -120,14 +121,14 @@ export function WidgetFrame({
           </span>
         )}
         <div className={cx('flex items-center', !editing && 'opacity-0 transition-opacity group-hover/widget:opacity-100 focus-within:opacity-100')}>
-          {!editing && def.settings?.length ? <ToolButton icon={RiEqualizerLine} label={`Configure ${title}`} onPress={onConfigure} /> : null}
+          {!editing && (def.settings?.length || def.pins?.site !== false || def.pins?.range) ? <ToolButton icon={RiEqualizerLine} label={`Configure ${title}`} onPress={onConfigure} /> : null}
           {!editing && <ToolButton icon={RiFullscreenLine} label={`Expand ${title}`} onPress={onMaximize} />}
           <Menu
             label={`${title} options`}
             trigger={<ToolButton icon={RiMore2Fill} label={`${title} options`} />}
             items={[
               ...(def.href ? [{ id: 'open', label: 'Open page', icon: RiExternalLinkLine, onAction: () => { window.location.href = def.href!; } }] : []),
-              { id: 'configure', label: def.settings?.length ? 'Configure…' : 'Rename…', icon: RiEqualizerLine, onAction: onConfigure },
+              { id: 'configure', label: 'Configure…', icon: RiEqualizerLine, onAction: onConfigure },
               { id: 'max', label: 'Expand', icon: RiFullscreenLine, onAction: onMaximize },
               ...SIZE_PRESETS.map((preset, index) => ({
                 id: `size-${preset.id}`,
@@ -194,7 +195,9 @@ export function WidgetMaximized({
               </header>
               <div className="min-h-0 flex-1 overflow-auto">
                 <WidgetBoundary name={def.title}>
-                  <def.component size={{ w: 12, h: 8 }} editing={false} settings={widgetSettings(def, settings)} />
+                  <ScopeOverrideProvider value={overrideFrom(settings)}>
+                    <def.component size={{ w: 12, h: 8 }} editing={false} settings={widgetSettings(def, settings)} />
+                  </ScopeOverrideProvider>
                 </WidgetBoundary>
               </div>
             </>

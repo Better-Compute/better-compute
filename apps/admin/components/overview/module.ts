@@ -112,7 +112,7 @@ export const overviewModule: AdminModule = {
     component: { title: (id) => controlPlane(0).find((c) => c.id === id)?.name ?? id, href: () => '/control-plane', icon: RiServerLine, component: ComponentPeek },
   },
   widgets: [
-    { id: 'overview.kpis', title: 'Fleet KPIs', description: 'Nodes ready, GPU and CPU utilization, free GPUs, sandboxes, power — with trends.', icon: RiStackLine, module: 'overview', defaultSize: { w: 12, h: 2 }, minSize: { w: 4, h: 2 }, maxSize: { w: 12, h: 3 }, live: true, component: KpiStrip },
+    { id: 'overview.kpis', title: 'Fleet KPIs', description: 'Nodes ready, GPU and CPU utilization, free GPUs, sandboxes, power — with trends.', icon: RiStackLine, module: 'overview', defaultSize: { w: 12, h: 2 }, minSize: { w: 4, h: 2 }, maxSize: { w: 12, h: 3 }, live: true, pins: { range: true }, component: KpiStrip },
     {
       id: 'overview.pulse',
       title: 'Utilization',
@@ -121,6 +121,7 @@ export const overviewModule: AdminModule = {
       module: 'overview',
       defaultSize: { w: 8, h: 4 },
       minSize: { w: 4, h: 3 },
+      pins: { range: true },
       settings: [
         {
           id: 'metric',
@@ -142,12 +143,12 @@ export const overviewModule: AdminModule = {
       settings: [{ id: 'grouped', label: 'Group', type: 'toggle', default: true, hint: 'Collapse items of the same kind ("Node unreachable" ×3)' }] },
     { id: 'overview.fleet-wall', title: 'Fleet wall', description: 'Every node as one cell, grouped by pool: load, faults, provisioning.', icon: RiGridLine, module: 'overview', defaultSize: { w: 8, h: 4 }, minSize: { w: 4, h: 3 }, href: '/nodes', component: FleetWall,
       settings: [{ id: 'kind', label: 'Pools', type: 'select', default: 'all', options: [{ value: 'all', label: 'All pools' }, { value: 'gpu', label: 'GPU pools' }, { value: 'cpu', label: 'CPU pools' }, { value: 'sandbox', label: 'Sandbox pools' }] }] },
-    { id: 'overview.control-plane', title: 'Control plane', description: 'API, IAM bridge, database, workers, outbox and each site gateway.', icon: RiServerLine, module: 'overview', defaultSize: { w: 4, h: 4 }, minSize: { w: 3, h: 3 }, href: '/control-plane', component: ControlPlaneWidget },
-    { id: 'overview.sites', title: 'Sites', description: 'Sites on a map with nodes, GPUs, utilization and power. Click to scope.', icon: RiMapPin2Line, module: 'overview', defaultSize: { w: 6, h: 4 }, minSize: { w: 3, h: 3 }, component: SitesWidget },
+    { id: 'overview.control-plane', title: 'Control plane', description: 'API, IAM bridge, database, workers, outbox and each site gateway.', icon: RiServerLine, module: 'overview', defaultSize: { w: 4, h: 4 }, minSize: { w: 3, h: 3 }, href: '/control-plane', pins: { site: false }, component: ControlPlaneWidget },
+    { id: 'overview.sites', title: 'Sites', description: 'Sites on a map with nodes, GPUs, utilization and power. Click to scope.', icon: RiMapPin2Line, module: 'overview', defaultSize: { w: 6, h: 4 }, minSize: { w: 3, h: 3 }, pins: { site: false }, component: SitesWidget },
     { id: 'overview.activity', title: 'Activity', description: 'The live event stream, newest first, filterable by kind.', icon: RiTimerFlashLine, module: 'overview', defaultSize: { w: 6, h: 4 }, minSize: { w: 3, h: 3 }, href: '/activity', component: ActivityWidget,
       settings: [{ id: 'severity', label: 'Show', type: 'select', default: 'info', options: [{ value: 'info', label: 'Everything' }, { value: 'warning', label: 'Warnings and critical' }, { value: 'critical', label: 'Critical only' }] }] },
-    { id: 'overview.watching', title: 'Watching', description: 'Nodes, pools, reservations and sites you watch, with their state now; a toast when one changes.', icon: RiEyeLine, module: 'overview', defaultSize: { w: 4, h: 4 }, minSize: { w: 3, h: 2 }, live: true, component: WatchingWidget },
-    { id: 'overview.notes', title: 'Notes', description: 'Handover notes, runbook links and who is on call, saved with the dashboard.', icon: RiStickyNoteLine, module: 'overview', defaultSize: { w: 4, h: 3 }, minSize: { w: 2, h: 2 }, live: true, component: NotesWidget },
+    { id: 'overview.watching', title: 'Watching', description: 'Nodes, pools, reservations and sites you watch, with their state now; a toast when one changes.', icon: RiEyeLine, module: 'overview', defaultSize: { w: 4, h: 4 }, minSize: { w: 3, h: 2 }, live: true, pins: { site: false }, component: WatchingWidget },
+    { id: 'overview.notes', title: 'Notes', description: 'Handover notes, runbook links and who is on call, saved with the dashboard.', icon: RiStickyNoteLine, module: 'overview', defaultSize: { w: 4, h: 3 }, minSize: { w: 2, h: 2 }, live: true, pins: { site: false }, component: NotesWidget },
     { id: 'overview.power', title: 'Power', description: 'IT power draw against budget, and the energy run-rate.', icon: RiFlashlightLine, module: 'overview', defaultSize: { w: 4, h: 2 }, minSize: { w: 3, h: 2 }, component: PowerWidget },
   ],
 };
