@@ -191,21 +191,32 @@ export async function readFleetState(tx: SqlTx, tenantId: string): Promise<Fleet
         disk_gib: number;
         gpus: number | null;
         offer_id: string | null;
+        placement: FleetFlavor['placement'] | string | null;
       }>(
-        `SELECT pool_id, name, vcpu, memory_gib, disk_gib, gpus, offer_id FROM flavors
+        // `placement` through to_jsonb: absent before vps/0018, so older schemas still read.
+        `SELECT pool_id, name, vcpu, memory_gib, disk_gib, gpus, offer_id,
+                to_jsonb(f)->'placement' AS placement
+           FROM flavors f
           WHERE pool_id = ANY($1::text[]) AND NOT archived ORDER BY pool_id, name`,
         [poolIds],
       )
-    ).rows.map((row) => ({
-      poolId: row.pool_id,
-      pool: poolName.get(row.pool_id) ?? row.pool_id,
-      name: row.name,
-      vcpu: Number(row.vcpu),
-      memoryGiB: Number(row.memory_gib),
-      diskGiB: Number(row.disk_gib),
-      ...(row.gpus ? { gpus: Number(row.gpus) } : {}),
-      ...(row.offer_id ? { offerId: row.offer_id } : {}),
-    }));
+    ).rows.map((row) => {
+      const placement =
+        typeof row.placement === 'string' ? JSON.parse(row.placement) : row.placement;
+      return {
+        poolId: row.pool_id,
+        pool: poolName.get(row.pool_id) ?? row.pool_id,
+        name: row.name,
+        vcpu: Number(row.vcpu),
+        memoryGiB: Number(row.memory_gib),
+        diskGiB: Number(row.disk_gib),
+        ...(row.gpus ? { gpus: Number(row.gpus) } : {}),
+        ...(row.offer_id ? { offerId: row.offer_id } : {}),
+        ...(placement && typeof placement === 'object' && Object.keys(placement).length
+          ? { placement }
+          : {}),
+      };
+    });
   else missing.push('flavors');
 
   let sandboxTemplates: FleetState['sandboxTemplates'] = [];

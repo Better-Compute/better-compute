@@ -1,4 +1,4 @@
-import type { FleetConfig } from './config.js';
+import type { FleetConfig, FleetFlavor } from './config.js';
 import type { FleetState, NamedKind } from './state.js';
 
 /** One planned change, for people. */
@@ -340,6 +340,7 @@ export async function planFleet(
       diskGiB: flavor.diskGiB,
       ...(flavor.gpus !== undefined ? { gpus: flavor.gpus } : {}),
       ...(flavor.offerId !== undefined ? { offerId: flavor.offerId } : {}),
+      ...(flavor.placement !== undefined ? { placement: flavor.placement } : {}),
     };
     const current = state.flavors.find(
       (item) => item.poolId === poolId && item.name === flavor.name,
@@ -349,11 +350,15 @@ export async function planFleet(
       flavorCalls.push({ path: 'flavors/create', input });
       continue;
     }
-    const fields = (['vcpu', 'memoryGiB', 'diskGiB', 'gpus', 'offerId'] as const).filter(
+    const fields: string[] = (['vcpu', 'memoryGiB', 'diskGiB', 'gpus', 'offerId'] as const).filter(
       (field) =>
         (current[field] ?? (field === 'gpus' ? 0 : null)) !==
         (flavor[field] ?? (field === 'gpus' ? 0 : null)),
     );
+    // Placement by value, flags in a fixed order (the store drops false flags).
+    const placementOf = (value: FleetFlavor['placement']) =>
+      JSON.stringify([value?.numaAffine === true, value?.pinned === true, value?.hugepages ?? null]);
+    if (placementOf(current.placement) !== placementOf(flavor.placement)) fields.push('placement');
     if (fields.length) {
       add({ kind: 'flavor', name, action: 'update', fields });
       flavorCalls.push({ path: 'flavors/update', input });

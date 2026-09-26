@@ -89,6 +89,8 @@ export interface FleetFlavor {
   diskGiB: number;
   gpus?: number;
   offerId?: string;
+  /** (v1.1 §3.8) Where its guests live on the host; sandbox templates inherit it. */
+  placement?: { numaAffine?: boolean; pinned?: boolean; hugepages?: '2Mi' | '1Gi' };
 }
 
 const namePattern = /^[a-z0-9][a-z0-9._-]{0,62}$/;
@@ -269,7 +271,11 @@ export function validateFleetConfig(value: unknown): FleetConfig {
     'flavors',
     (raw, path) => {
       const flavor = record(raw, path);
-      only(flavor, ['pool', 'name', 'vcpu', 'memoryGiB', 'diskGiB', 'gpus', 'offerId'], path);
+      only(
+        flavor,
+        ['pool', 'name', 'vcpu', 'memoryGiB', 'diskGiB', 'gpus', 'offerId', 'placement'],
+        path,
+      );
       const result: FleetFlavor = {
         pool: string(flavor.pool, `${path}.pool`, namePattern),
         name: string(flavor.name, `${path}.name`, namePattern),
@@ -279,6 +285,23 @@ export function validateFleetConfig(value: unknown): FleetConfig {
       };
       if (flavor.gpus !== undefined) result.gpus = int(flavor.gpus, `${path}.gpus`, 0, 64);
       if (flavor.offerId !== undefined) result.offerId = string(flavor.offerId, `${path}.offerId`);
+      if (flavor.placement !== undefined) {
+        const at = `${path}.placement`;
+        const placement = record(flavor.placement, at);
+        only(placement, ['numaAffine', 'pinned', 'hugepages'], at);
+        const wanted: NonNullable<FleetFlavor['placement']> = {};
+        for (const key of ['numaAffine', 'pinned'] as const) {
+          if (placement[key] === undefined) continue;
+          if (typeof placement[key] !== 'boolean') fail(`${at}.${key}`, 'must be a boolean');
+          if (placement[key]) wanted[key] = true;
+        }
+        if (placement.hugepages !== undefined) {
+          if (placement.hugepages !== '2Mi' && placement.hugepages !== '1Gi')
+            fail(`${at}.hugepages`, 'must be 2Mi or 1Gi');
+          wanted.hugepages = placement.hugepages;
+        }
+        if (Object.keys(wanted).length) result.placement = wanted;
+      }
       return result;
     },
     (flavor) => `${flavor.pool}/${flavor.name}`,

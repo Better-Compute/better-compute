@@ -559,6 +559,25 @@ describe('fleet.apply', () => {
     expect((await plan(next)).calls).toEqual([]);
   });
 
+  it('carries a flavor’s placement: create, export, update when it changes (§3.8)', async () => {
+    const placed = clone();
+    placed.flavors![0]!.placement = { numaAffine: true, hugepages: '1Gi' };
+    await apply(placed);
+    const exported = await fleet<{ config: FleetConfig }>('export', { tenantId: 'root' });
+    expect(exported.config.flavors?.[0]?.placement).toEqual({ numaAffine: true, hugepages: '1Gi' });
+    expect((await plan(placed)).calls).toEqual([]);
+    const moved = clone();
+    moved.flavors![0]!.placement = { pinned: true };
+    const planned = await plan(moved);
+    expect(planned.changes.find((change) => change.kind === 'flavor')).toMatchObject({
+      action: 'update',
+      fields: ['placement'],
+    });
+    const bad = clone();
+    bad.flavors![0]!.placement = { hugepages: '4Mi' as '1Gi' };
+    expect(() => validateFleetConfig(bad)).toThrow(/placement\.hugepages/);
+  });
+
   it('deletes only with prune: unoffer, flavors, archive pools, then provider accounts', async () => {
     await apply(base);
     const next = clone();
