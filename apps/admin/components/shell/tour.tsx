@@ -23,7 +23,8 @@ const STEPS: Step[] = [
   { target: 'clock', title: 'Time travel', body: 'Everything is a function of this clock. Pause it (p) or scrub back up to 7 days to see the fleet as it was; , and . step 5 minutes.' },
   { target: 'bell', title: 'What needs you', body: 'Failures, approvals, quota pressure and forecasts from every module. Acknowledge here or on the Needs attention page.' },
   { target: 'dashboards', title: 'Your dashboards', body: 'Operations, Capacity, Fleet and On-call to start. Add your own with +, and switch between them here.', page: '/' },
-  { target: 'arrange', title: 'Arrange and configure', body: 'Drag, resize, add and configure widgets (e). Each widget can be set up differently, and expanded full screen.', page: '/' },
+  { target: 'widget', title: 'Every widget is yours to tune', body: 'Hover a widget: the equalizer sets its options and pins it to one site or time range; expand shows it full screen. Click any id inside to peek at it, and watch it from there.', page: '/' },
+  { target: 'arrange', title: 'Arrange', body: 'Drag, resize and add widgets (e), or use the arrow keys on a widget’s handle. ⌘K → "Add widget" works from any page.', page: '/' },
   { target: 'sidebar', title: 'Pin what you use', body: 'Hover a page and pin it to the top of the sidebar. [ collapses the sidebar to a rail.' },
   { target: 'statusbar', title: 'Vitals, always on', body: 'Control-plane latency, sessions, alerts and module readouts at the bottom of every page. Click one to peek.' },
 ];

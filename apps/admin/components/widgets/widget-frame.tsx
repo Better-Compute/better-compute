@@ -81,6 +81,7 @@ export function WidgetFrame({
   const { source } = useWorkspaceSettings();
   return (
     <div
+      data-tour="widget"
       className={cx(
         'group/widget relative flex h-full min-w-0 flex-col border bg-surface-raised',
         editing ? 'border-dashed border-signal-fill/50' : 'border-separator-border',
