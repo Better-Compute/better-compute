@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Regenerates the docs reference from COMMITTED code only and copies the result into a checkout:
 //
-//   node scripts/head-check.mjs --run apps/docs/scripts/sync-from-head.mjs <checkout root>
+//   node scripts/head-check.mjs --run apps/docs/scripts/sync-from-head.mjs <checkout root> [--accept-breaking]
 //
 // head-check builds a worktree at HEAD and runs this inside it while holding the tree, so other
 // sessions' uncommitted work (their dist output) never reaches the generated reference. Here it runs
@@ -27,7 +27,9 @@ if (target === tree) {
 const node = (script, args = []) =>
   spawnSync(process.execPath, [join(tree, script), ...args], { cwd: tree, stdio: 'inherit' }).status ?? 1;
 if (node('apps/docs/scripts/generate.mjs') !== 0) process.exit(1);
-const surface = node('scripts/api-surface.mjs', ['--update']);
+// `--accept-breaking` after the checkout root records a deliberate break (e.g. a security fix that moves
+// a method's decision to another resource); nothing else is passed on.
+const surface = node('scripts/api-surface.mjs', ['--update', ...process.argv.slice(3).filter((arg) => arg === '--accept-breaking')]);
 
 const defaultGit = join(process.env.LOCALAPPDATA ?? '', 'GitHubDesktop', 'app-3.6.5', 'resources', 'app', 'git', 'cmd', 'git.exe');
 const git = process.env.GIT ?? (existsSync(defaultGit) ? defaultGit : 'git');
