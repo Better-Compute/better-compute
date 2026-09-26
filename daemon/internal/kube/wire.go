@@ -456,10 +456,16 @@ type PodResources struct {
 	Containers      []ContainerResources
 }
 
-// ContainerResources is one container's devices.
+// ContainerResources is one container's devices: device plugins' (Devices) and DRA claims' (Claimed).
 type ContainerResources struct {
 	Name    string
 	Devices []ContainerDevices
+	Claimed []ClaimedDevice
+}
+
+// ClaimedDevice is one v1.ClaimResource of a container's DynamicResource (field 5): a DRA device.
+type ClaimedDevice struct {
+	Driver, Pool, Device string
 }
 
 // ContainerDevices is v1.ContainerDevices.
@@ -481,6 +487,10 @@ func (m *ListPodResourcesResponse) marshal() []byte {
 			cb := appendString(nil, 1, c.Name)
 			for _, d := range c.Devices {
 				cb = appendMessage(cb, 2, appendStrings(appendString(nil, 1, d.ResourceName), 2, d.DeviceIDs))
+			}
+			for _, d := range c.Claimed {
+				claim := appendString(appendString(appendString(nil, 2, d.Driver), 3, d.Pool), 4, d.Device)
+				cb = appendMessage(cb, 5, appendMessage(nil, 4, claim))
 			}
 			pb = appendMessage(pb, 3, cb)
 		}
@@ -520,6 +530,27 @@ func (m *ListPodResourcesResponse) unmarshal(b []byte) error {
 						})
 						c.Devices = append(c.Devices, d)
 						return err
+					case 5:
+						// DynamicResource{claim_name 2, claim_namespace 3, claim_resources 4}.
+						return fields(raw, func(num protowire.Number, _ protowire.Type, _ uint64, res []byte) error {
+							if num != 4 {
+								return nil
+							}
+							var d ClaimedDevice
+							err := fields(res, func(num protowire.Number, _ protowire.Type, _ uint64, s []byte) error {
+								switch num {
+								case 2:
+									d.Driver = string(s)
+								case 3:
+									d.Pool = string(s)
+								case 4:
+									d.Device = string(s)
+								}
+								return nil
+							})
+							c.Claimed = append(c.Claimed, d)
+							return err
+						})
 					}
 					return nil
 				})

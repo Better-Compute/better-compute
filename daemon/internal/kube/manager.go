@@ -250,6 +250,7 @@ func (m *Manager) Sync(ctx context.Context) {
 		if err := m.dra.publish(ctx, want); err != nil {
 			m.Log.Warn("DRA ResourceSlice", "error", err.Error())
 		}
+		m.reap(ctx, want)
 		m.syncLabels(ctx)
 		return
 	}
@@ -327,10 +328,21 @@ func (m *Manager) reap(ctx context.Context, want map[string]map[string]atom) {
 	}
 	now := m.Now()
 	seen := map[string]bool{}
+	node := m.nodeName()
+	bound := m.dra.byDeviceName(want)
 	for _, pod := range resp.Msg.Pods {
 		key := pod.Namespace + "/" + pod.Name
 		var released []string
 		for _, c := range pod.Containers {
+			// DRA: this node's gpu.bcd.dev devices of the pod's claims.
+			for _, d := range c.Claimed {
+				if d.Driver != DRADriverName || d.Pool != node {
+					continue
+				}
+				if _, ok := bound[d.Device]; !ok {
+					released = append(released, d.Device)
+				}
+			}
 			for _, d := range c.Devices {
 				if !strings.HasPrefix(d.ResourceName, "bcd.dev/") {
 					continue

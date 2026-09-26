@@ -150,6 +150,23 @@ func TestDRADriver(t *testing.T) {
 		t.Fatalf("unprepare = %+v, %v", unprep, err)
 	}
 
+	// A pod holds gpu-1 through its claim when compute releases it.
+	var reaped []string
+	m.DeletePod = func(_ context.Context, ns, name string) error {
+		reaped = append(reaped, ns+"/"+name)
+		return nil
+	}
+	kubelet.mu.Lock()
+	kubelet.podList = []PodResources{
+		{Name: "train", Namespace: "ml", Containers: []ContainerResources{{Name: "main", Claimed: []ClaimedDevice{{Driver: DRADriverName, Pool: "n1", Device: "gpu-1"}}}}},
+		{Name: "other", Namespace: "ml", Containers: []ContainerResources{{Name: "main", Claimed: []ClaimedDevice{{Driver: "other.example.com", Pool: "n1", Device: "gpu-1"}}}}},
+	}
+	kubelet.mu.Unlock()
+	m.Sync(ctx)
+	if len(reaped) != 0 {
+		t.Fatalf("reaped a pod whose device is still bound: %v", reaped)
+	}
+
 	// Released: prepare refuses at once (it reads the holds itself), and the next pass empties the slice.
 	sys.Delete(CDIDir + "/bcd-a1.json")
 	if got := prepare(procPrepareV1, Claim{Namespace: "ml", Name: "c1", UID: "u1"}); !strings.Contains(got["u1"].Error, "not bound") {
@@ -159,6 +176,14 @@ func TestDRADriver(t *testing.T) {
 	if len(deleted) != 1 || !strings.Contains(deleted[0], "resourceslice n1-gpu.bcd.dev") {
 		t.Fatalf("deleted = %v", deleted)
 	}
+	now = now.Add(31 * time.Second)
+	m.Sync(ctx)
+	if !reflect.DeepEqual(reaped, []string{"ml/train"}) {
+		t.Fatalf("reaped = %v", reaped)
+	}
+	kubelet.mu.Lock()
+	kubelet.podList = nil
+	kubelet.mu.Unlock()
 
 	// Back to the device plugins: the DRA sockets go.
 	sys.Set(StateFile, `{"server":"https://10.0.0.1:6443","nodeName":"n1","gpu":true}`)

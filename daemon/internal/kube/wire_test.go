@@ -79,6 +79,20 @@ message_type {
   field { name: "name" number: 1 label: LABEL_OPTIONAL type: TYPE_STRING json_name: "name" }
   field { name: "devices" number: 2 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".v1beta1.ContainerDevices" json_name: "devices" }
   field { name: "cpu_ids" number: 3 label: LABEL_REPEATED type: TYPE_INT64 json_name: "cpuIds" }
+  field { name: "dynamic_resources" number: 5 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".v1beta1.DynamicResource" json_name: "dynamicResources" }
+}
+message_type {
+  name: "ClaimResource"
+  field { name: "cdi_devices" number: 1 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".v1beta1.CDIDevice" json_name: "cdiDevices" }
+  field { name: "driver_name" number: 2 label: LABEL_OPTIONAL type: TYPE_STRING json_name: "driverName" }
+  field { name: "pool_name" number: 3 label: LABEL_OPTIONAL type: TYPE_STRING json_name: "poolName" }
+  field { name: "device_name" number: 4 label: LABEL_OPTIONAL type: TYPE_STRING json_name: "deviceName" }
+}
+message_type {
+  name: "DynamicResource"
+  field { name: "claim_name" number: 2 label: LABEL_OPTIONAL type: TYPE_STRING json_name: "claimName" }
+  field { name: "claim_namespace" number: 3 label: LABEL_OPTIONAL type: TYPE_STRING json_name: "claimNamespace" }
+  field { name: "claim_resources" number: 4 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".v1beta1.ClaimResource" json_name: "claimResources" }
 }
 message_type {
   name: "PodResources"
@@ -180,8 +194,11 @@ func TestWireMatchesUpstream(t *testing.T) {
 	}
 	var pods ListPodResourcesResponse
 	if err := pods.unmarshal(fromJSON(t, fd, "ListPodResourcesResponse",
-		`{"podResources":[{"name":"train","namespace":"ml","containers":[{"name":"main","cpuIds":["3","4"],"devices":[{"resourceName":"bcd.dev/gpu","deviceIds":["GPU-1"],"topology":{"nodes":[{"ID":"1"}]}}]}]}]}`)); err != nil ||
-		!reflect.DeepEqual(pods.Pods, []PodResources{{Name: "train", Namespace: "ml", Containers: []ContainerResources{{Name: "main", Devices: []ContainerDevices{{ResourceName: ResourceGPU, DeviceIDs: []string{"GPU-1"}}}}}}}) {
+		`{"podResources":[{"name":"train","namespace":"ml","containers":[{"name":"main","cpuIds":["3","4"],"devices":[{"resourceName":"bcd.dev/gpu","deviceIds":["GPU-1"],"topology":{"nodes":[{"ID":"1"}]}}],
+		  "dynamicResources":[{"claimName":"c1","claimNamespace":"ml","claimResources":[{"cdiDevices":[{"name":"bcd.dev/gpu=GPU-2"}],"driverName":"gpu.bcd.dev","poolName":"n1","deviceName":"gpu-2"}]}]}]}]}`)); err != nil ||
+		!reflect.DeepEqual(pods.Pods, []PodResources{{Name: "train", Namespace: "ml", Containers: []ContainerResources{{Name: "main",
+			Devices: []ContainerDevices{{ResourceName: ResourceGPU, DeviceIDs: []string{"GPU-1"}}},
+			Claimed: []ClaimedDevice{{Driver: DRADriverName, Pool: "n1", Device: "gpu-2"}}}}}}) {
 		t.Fatalf("ListPodResourcesResponse = %+v, %v", pods.Pods, err)
 	}
 	var devices ListAndWatchResponse
