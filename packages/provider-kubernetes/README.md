@@ -37,6 +37,11 @@ When all nodes have joined, delete the Secret. A node that has joined keeps its 
 | `bcd` | `bcd node`, privileged. It needs devices, cgroups, CDI specs under `/etc/cdi` and `/var/run/cdi`, the kubelet's device-plugin socket under `/var/lib/kubelet`, and `/etc/kubernetes/kubelet.conf` read-only to keep its own Node's `bcd.dev/*` labels (NodeRestriction allows those). It never sees the token. Its liveness probe is `bcd status`. |
 | Pod | Host network, no service account token (bcd needs no API access of its own), `system-node-critical`, tolerates every taint by default, and rolls when `config.toml` changes (`bcd.dev/config-sha256`). |
 
+**What the cluster needs:**
+- The image carries `kubectl`. bcd labels its own Node and reaps pods of released devices with the kubelet's kubeconfig, and it touches only `bcd.dev/*` labels.
+- With the NVIDIA GPU operator, let it generate CDI specs with `--device-name-strategy=uuid`. bcd's device plugin then answers `nvidia.com/gpu=<uuid>`; without that spec it answers `bcd.dev/gpu=<uuid>` plus `NVIDIA_VISIBLE_DEVICES`.
+- The device plugins start once the kubelet's `/var/lib/kubelet/device-plugins/kubelet.sock` exists. The pod-resources socket under `/var/lib/kubelet` tells bcd which pods hold which devices.
+
 `config.toml` comes from a ConfigMap. It holds the gateway, site, pins and `[host] units = false`, so bcd applies no host units: the cluster's own tooling, such as the NVIDIA GPU operator, owns drivers, MIG and kernel settings. Set `hostUnits: true` to let the pool's host units apply. The join token is never in it.
 
 `bcdDaemonSetManifests` refuses an image not pinned by digest, a non-https gateway or control plane URL, malformed pins and names, resource quantities it can't parse, and a JWK with a private part.
