@@ -9,41 +9,57 @@ IBM Plex Sans and Mono.
 cd apps/admin && node node_modules/next/dist/bin/next dev --port 4200   # or .claude/launch.json "admin"
 ```
 
-The data is a deterministic **simulated fleet** today (labelled in the UI); every view reads it through
-`lib/data`, so a live adapter over the compute API replaces the generators without touching pages.
+## Data: simulated or live
+
+By default the panel runs on a deterministic **simulated fleet** (5 sites, 9 pools, 440 nodes), a pure
+function of time, so the clock can be paused and scrubbed back 7 days (time travel). To read a real control
+plane, configure it **on the admin server** (never in the browser):
+
+```bash
+ADMIN_COMPUTE_URL=http://127.0.0.1:3300/api/compute   # the API base, including its basePath
+ADMIN_COMPUTE_TOKEN=biam_ses_…                         # optional: without it only public methods answer
+ADMIN_COMPUTE_TENANT=ten_…                             # optional: the tenant views default to
+```
+
+or the same keys in `apps/admin/.upstream.json` (`{ "url", "token", "tenantId" }`, gitignored). Then pick
+**Live API** in Settings → Connection. The browser reaches the API only through `POST /api/upstream/<method>`
+(CSRF header required, token added server-side); `lib/api.ts` exposes it as a console-kit `ComputeRequester`.
+Modules with a live source switch on `useWorkspaceSettings().source === 'live'`; widgets without one say "sim".
 
 ## Modules
 
-Everything the shell shows comes from `lib/modules.ts`. A module is one descriptor:
+Everything the shell shows comes from `lib/modules.ts`. A module is one descriptor; add it to `modules` (one
+line) and it appears in the sidebar, ⌘K, the shortcut sheet, the widget catalog, search, peeks, the status bar
+and the attention queue. Its pages live under `app/(admin)/<route>/`.
 
-```ts
-export const capacityModule: AdminModule = {
-  id: 'capacity',
-  title: 'Capacity',
-  nav: [{ href: '/pools', label: 'Pools', icon: RiServerLine, group: 'Capacity', shortcut: 'g l' }],
-  widgets: [{ id: 'capacity.heatmap', title: 'Heatmap', description: '…', icon, module: 'capacity',
-              defaultSize: { w: 12, h: 4 }, component: Heatmap }],
-  commands: [{ id: 'capacity.new', label: 'New reservation', group: 'Capacity', href: '/reservations/new' }],
-};
-```
+| Field       | What it contributes                                                                                   |
+| ----------- | ----------------------------------------------------------------------------------------------------- |
+| `nav`       | Sidebar entries (grouped by `group`), breadcrumbs, `g`-chord shortcuts, palette "Go to"               |
+| `widgets`   | Dashboard widgets: body only; `settings` (per-instance options), `live`, sizes, `href`                |
+| `commands`  | Palette commands (pages add "This page" commands with `usePageCommands`)                               |
+| `search`    | Entities for ⌘K: `(query, { now, siteId }) => SearchResult[]`                                           |
+| `peeks`     | A compact view per entity kind, opened in a side sheet by `<EntityLink kind id>` from any page        |
+| `status`    | Compact readouts in the status bar (`StatusItem`)                                                     |
+| `attention` | Items that need an operator: `(now, scope, { source }) => AttentionItem[]` (pure: time travel)        |
 
-Add it to the `modules` array (one line) and it appears in the sidebar, the ⌘K palette, the shortcut sheet and
-the widget catalog. Its pages live under `app/(admin)/<route>/`. Widgets render only their body; the dashboard
-draws the frame (title, menu, drag, resize, expand) and contains a crash to the one widget.
-
-| Path                   | What                                                                                   |
-| ---------------------- | -------------------------------------------------------------------------------------- |
-| `components/shell`     | Sidebar, top bar, command palette, keyboard map, workspace (clock, range, site scope)  |
-| `components/widgets`   | Dashboards: presets, drag/resize, catalog, persistence                                 |
-| `components/ui`        | Panel, PageHeader, Stat, Led/Tag, charts, DataTable, Drawer, Menu, Select              |
-| `components/base`      | BoardUI components (unmodified copies from apps/docs)                                  |
-| `components/overview`  | The Overview module: KPIs, utilization, attention, fleet wall, control plane, sites    |
-| `lib/data`             | Seeded generators over a shared topology; `useLive` derives views from the clock       |
+| Path                  | What                                                                                          |
+| --------------------- | --------------------------------------------------------------------------------------------- |
+| `components/shell`    | Shell, palette, keyboard map, workspace (clock, scope, range, source), time travel, peek, tour |
+| `components/widgets`  | Dashboards: presets, drag/resize, catalog, configure, persistence                             |
+| `components/ui`       | Panel, PageHeader, Stat, Led/Tag, charts, DataTable (saved views), Drawer, Menu, feedback     |
+| `components/base`     | BoardUI components (copies from apps/docs)                                                    |
+| `components/overview` | Overview module: KPIs, utilization, attention, fleet wall, control plane, sites, digest       |
+| `lib/data`            | Seeded generators over a shared topology; platform signals; formatting                        |
+| `lib/api.ts`, `lib/upstream.ts`, `app/api/upstream` | The live connection                                             |
 
 ## Rules of the room
 
 - Amber (`signal`) marks what is live, booked or needs an operator; red only what failed; the rest is graphite.
-- Never call `Date.now()` in a view: take `now` from `useWorkspace()` or derive with `useLive`, so pausing (`p`)
-  freezes the panel and server and client renders agree.
-- Numbers are mono and tabular; ids are `<Mono>`; times are UTC.
-- Keyboard: ⌘K or `/` palette, `g` + key to jump, `e` arrange the dashboard, `[` sidebar, `?` all keys.
+- Never call `Date.now()` in a simulated view: derive from the workspace clock. `useLive(fn, { bucketMs })` and
+  `useNow(bucketMs)` re-render only when their bucket changes; `useWorkspaceSettings()` never re-renders on a
+  tick; `useWorkspace()` does (every 2 s), so keep it out of heavy components.
+- Destructive actions go through `useFeedback().confirm` (or `confirmWithReason`, with the API method shown),
+  and are refused while the clock is in the past.
+- Numbers are mono and tabular; ids are `<Mono>` or `<EntityLink>`; times are UTC.
+- Keyboard: ⌘K or `/` palette, `g` + key to jump, `e` arrange, `p` pause, `,` `.` step time, `[` sidebar,
+  `?` all keys.
