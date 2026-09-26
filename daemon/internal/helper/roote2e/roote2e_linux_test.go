@@ -44,7 +44,12 @@ import (
 //     not pinned, settings not the signed ones, a guarded key even when signed;
 //  4. libvirt domains defined and started through the helper against a fake virsh, and refused: a
 //     disk outside bcd's directories, a root-owned disk, <qemu:commandline>, a GPU the host does not
-//     give, a bridge not in instance_bridges, a domain bcd did not define.
+//     give, a bridge not in instance_bridges, a domain bcd did not define;
+//  5. cloud-hypervisor through the helper (ch.*): real taps in the test's network namespace, made by
+//     root for the node on the instance bridge and deleted by name, never an interface that is not a
+//     tap; root's VMM unit (systemd-run, stubbed) built from the record it checks, refused for a
+//     symlink in the instance's directory or a record the node does not own, and VFIO refused for a
+//     GPU the host does not have.
 
 const (
 	nodeID    = "node_01k5w0000000000000000000e2"
@@ -103,6 +108,10 @@ case "$1" in
 esac
 `, quote(logs), quote(domains)))
 	must(t, os.WriteFile(filepath.Join(domains, foreign+".xml"), []byte("<domain><name>"+foreign+"</name></domain>\n"), 0o644))
+	// cloud-hypervisor installed (bcd helper resolves it at start; the unit is never really run) and
+	// systemd-run recording the units root asks for.
+	stub(t, stubs, "cloud-hypervisor", "exit 1\n")
+	stub(t, stubs, "systemd-run", fmt.Sprintf("printf '%%s\\n' \"$*\" >> %s/systemd-run\n", quote(logs)))
 	path := stubs + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 	signer := newSigner(t)
@@ -297,6 +306,103 @@ esac
 	if log := helperLog.String(); !strings.Contains(log, `"op":"libvirt.define"`) || !strings.Contains(log, `"op":"host.unit"`) ||
 		!strings.Contains(log, "the peer does not run an installed bcd binary") {
 		t.Fatalf("helper log lacks the operations:\n%s", log)
+	}
+
+	cloudHypervisor(t, path, logs, uid, gid, call, expect, helperLog.String)
+}
+
+// cloudHypervisor is step 5: ch.* through bcd helper, with real taps in the test's network namespace.
+func cloudHypervisor(t *testing.T, path, logs string, uid, gid uint32, call func(helper.Request) string,
+	expect func(what, got, want string), helperLog func() string) {
+	t.Helper()
+	if _, err := os.Stat("/dev/net/tun"); err != nil {
+		t.Logf("no /dev/net/tun: cloud-hypervisor through the helper not tested (%v)", err)
+		return
+	}
+	// sysfs as this network namespace sees it (root reads /sys/class/net to tell taps from anything else).
+	mount(t, "sysfs", "/sys", "sysfs", "")
+	run(t, path, "ip", "link", "add", bridge, "type", "bridge")
+	ch := func(verb string, req helper.CHRequest) string {
+		return call(helper.Request{Op: "ch." + verb, CH: &req})
+	}
+	const (
+		dir     = "/var/lib/bcd/cloud-hypervisor"
+		vmmUser = 0x7FFD0000 + 5 // in bcd's VMM range
+		gpuVM   = "inst_01k5w0000000000000000000gp"
+	)
+	record := func(id, recordID string, owner uint32, gpus string) {
+		t.Helper()
+		inst := filepath.Join(dir, "instances", id)
+		must(t, os.MkdirAll(inst, 0o700))
+		for _, d := range []string{dir, filepath.Join(dir, "instances"), inst} {
+			must(t, os.Chown(d, int(uid), int(gid)))
+		}
+		file := filepath.Join(inst, "vm.json")
+		must(t, os.WriteFile(file, []byte(fmt.Sprintf(
+			`{"id":%q,"managed":"better-compute/cloud-hypervisor/1","uid":%d,"vcpu":1,"memoryBytes":1073741824,"networks":[%q],"gpus":[%s],"config":null}`,
+			recordID, vmmUser, bridge, gpus)), 0o600))
+		must(t, os.Chown(file, int(owner), int(owner)))
+	}
+	record(instance, instance, uid, "")
+
+	// Taps: made by root, owned by the node, on the instance bridge; nothing else.
+	tap := runtime.TapName(instance, 0)
+	expect("a tap off the instance bridges", ch("taps", helper.CHRequest{Instance: instance, Networks: []string{"br0"}}), "not an instance bridge")
+	expect("taps", ch("taps", helper.CHRequest{Instance: instance, Networks: []string{bridge}}), "ok")
+	if _, err := os.Stat("/sys/class/net/" + tap + "/tun_flags"); err != nil {
+		t.Fatalf("no tap %s: %v", tap, err)
+	}
+	if owner := kernel(t, "/sys/class/net/"+tap+"/owner"); owner != strconv.FormatUint(uint64(uid), 10) {
+		t.Fatalf("tap %s is uid %s's, not the node's (%d)", tap, owner, uid)
+	}
+	if master, err := os.Readlink("/sys/class/net/" + tap + "/master"); err != nil || filepath.Base(master) != bridge {
+		t.Fatalf("tap %s is on %q (%v), not %s", tap, master, err, bridge)
+	}
+	// An interface of an instance's tap name that is not a tap is never deleted.
+	impostor := runtime.TapName(foreign, 0)
+	run(t, path, "ip", "link", "add", impostor, "type", "dummy")
+	expect("untaps of a non-tap", ch("untaps", helper.CHRequest{Instance: foreign, NICs: 1}), "not a tap")
+	if _, err := os.Stat("/sys/class/net/" + impostor); err != nil {
+		t.Fatalf("the non-tap %s was deleted", impostor)
+	}
+	expect("a path as an instance", ch("taps", helper.CHRequest{Instance: "../../etc", Networks: []string{bridge}}), "an instance id")
+
+	// The VMM unit: root's, from the record root checked, never one the node wrote.
+	expect("launch", ch("launch", helper.CHRequest{Instance: instance}), "ok")
+	units, _ := os.ReadFile(filepath.Join(logs, "systemd-run"))
+	for _, want := range []string{"--unit=bcd-ch-" + instance + ".service", "User=" + strconv.Itoa(vmmUser), "UMask=0007",
+		"-- " + filepath.Join(strings.SplitN(path, ":", 2)[0], "cloud-hypervisor") + " --api-socket path=" + filepath.Join(dir, "instances", instance, "api.sock")} {
+		if !strings.Contains(string(units), want) {
+			t.Fatalf("root's unit lacks %q:\n%s", want, units)
+		}
+	}
+	must(t, os.Symlink("/etc/shadow", filepath.Join(dir, "instances", instance, "seed.iso")))
+	expect("launch with a symlink", ch("launch", helper.CHRequest{Instance: instance}), "symlink")
+	must(t, os.Remove(filepath.Join(dir, "instances", instance, "seed.iso")))
+	record(foreign, foreign, 0, "")
+	expect("launch of a record root owns", ch("launch", helper.CHRequest{Instance: foreign}), "not the node's")
+	record(foreign, instance, uid, "")
+	expect("launch of another instance's record", ch("launch", helper.CHRequest{Instance: foreign}), "not bcd's")
+	if units, _ := os.ReadFile(filepath.Join(logs, "systemd-run")); strings.Count(string(units), "\n") != 1 {
+		t.Fatalf("refused launches reached systemd-run:\n%s", units)
+	}
+
+	// VFIO: only this host's GPUs (none here).
+	record(gpuVM, gpuVM, uid, `"GPU-e2e"`)
+	expect("vfio of a GPU the host lacks", ch("vfio", helper.CHRequest{Instance: gpuVM}), "not one of this host's")
+	expect("unvfio of an address not the host's", ch("unvfio", helper.CHRequest{Instance: gpuVM, Addrs: []string{"0000:3b:00.0"}}), "not one of this host's GPUs")
+
+	// Stop, then the taps go by name.
+	expect("stop", ch("stop", helper.CHRequest{Instance: instance}), "ok")
+	if calls, _ := os.ReadFile(filepath.Join(logs, "systemctl")); !strings.Contains(string(calls), "stop bcd-ch-"+instance+".service") {
+		t.Fatalf("systemctl calls lack the stop:\n%s", calls)
+	}
+	expect("untaps", ch("untaps", helper.CHRequest{Instance: instance, NICs: 1}), "ok")
+	if _, err := os.Stat("/sys/class/net/" + tap); err == nil {
+		t.Fatalf("tap %s is still there", tap)
+	}
+	if log := helperLog(); !strings.Contains(log, `"op":"ch.launch"`) || !strings.Contains(log, `"instance":"`+instance+`"`) {
+		t.Fatalf("helper log lacks the ch.* operations:\n%s", log)
 	}
 }
 
