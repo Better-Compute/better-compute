@@ -99,9 +99,12 @@ C was taken by [595a2f] (a21c1c1, c5a419c, 9d55b36). B is done; the details are 
 - 0791fc9 NoCloud network-config v2 on the 387c22f seam;
 - 3e25c78 vps sandbox cloud-config installs the rebind guest half.
 
+Later: 31555bf hold admission (resources-exhausted); 550da91 host volumes (raw, one writer; 014bf0d seam); ab26e87 doctor resource checks; f7b8805 libvirt QEMU can reach its disks (o+x on the way); 7dde6a3 CH not offered under [helper].
+
 Open:
-- Instance runtimes under `[helper]`: CH's systemd-run, taps and VFIO sysfs writes need root, so VPS/sandbox hosts run bcd as root for now.
+- cloud-hypervisor under `[helper]`: its systemd-run, taps and VFIO sysfs writes need root, so it is not offered there. libvirt-kvm works under the helper with the libvirt group.
 - The balloon is never set by the control plane yet.
+- The "instance.volumes" Hello capability was asked of [595a2f].
 
 ## Round 4 allocation (proposed by [f85da7], 2026-09-24 late; all round-3 sessions are gone)
 
