@@ -417,6 +417,8 @@ describe('atom health edges wake started reservations', () => {
     await report(node, { gpus: encoded.gpus(8), system: encoded.system('S-wake-2') });
     await applyInventory(db, node, { events, work });
     expect(enqueued).toContain(`capacity.reservations:rsv_${node}`);
+    // Every applied snapshot resyncs the host's bookable resources at once (capacity and vps).
+    expect(enqueued).toEqual(expect.arrayContaining([`capacity.hosts:${node}`, `vps.hosts:${node}`]));
     // No health change: no wake.
     enqueued.length = 0;
     await report(node, { gpus: encoded.gpus(8), system: encoded.system('S-wake-3') });

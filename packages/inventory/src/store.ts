@@ -18,6 +18,7 @@ import {
   healthWorkKind,
   inventoryHealthFindings,
   upsertNodeConditions as upsertConditions,
+  wakeHostResources,
   wakeStartedReservations,
   type HealthFinding,
 } from './health.js';
@@ -418,6 +419,8 @@ export async function applyInventory(
     if (options.work && health.some((finding) => finding.noSchedule)) await options.work.enqueue(tx, healthWorkKind, nodeId);
     const { healthChanged, ...devices } = await applyDevices(tx, nodeId, sections, poolSharing(node.sharing, node.policy));
     if (options.work && healthChanged) await wakeStartedReservations(tx, options.work, nodeId);
+    // A new or re-inventoried host is bookable at once, not at the next periodic pass (up to 30 s later).
+    if (options.work && node.role !== 'site') await wakeHostResources(tx, options.work, nodeId);
     await applyLabels(tx, nodeId, sections);
     const cache = await applyImageCache(tx, nodeId, sections.images);
     // A site agent's cache is its site's image cache: provision derives `image_locations` from it.

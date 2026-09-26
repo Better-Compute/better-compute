@@ -107,6 +107,21 @@ export function inventoryHealthFindings(section: GpusSection | undefined): Healt
 
 /** capacity's reservation reconciler (inventory cannot import capacity, which builds on it). */
 export const reservationsWorkKind = 'capacity.reservations';
+/**
+ * The host-resource reconcilers that take a node id as their key besides the periodic `all`: capacity's
+ * `capacity.hosts` (nodeResourcesWork) and vps's `vps.hosts` (hostResourcesWork). Mirrored here, as inventory
+ * imports neither.
+ */
+export const hostResourceWorkKinds = ['capacity.hosts', 'vps.hosts'] as const;
+
+/** Queues a node's host-resource sync in capacity and vps, after inventory applied a snapshot of it. */
+export async function wakeHostResources(
+  tx: SqlTx,
+  work: { enqueue(tx: SqlTx, kind: string, key: string): Promise<void> },
+  nodeId: string,
+): Promise<void> {
+  for (const kind of hostResourceWorkKinds) await work.enqueue(tx, kind, nodeId);
+}
 
 /**
  * Wakes the started reservations (`binding`, `active`) with a live allocation on a node, so their
