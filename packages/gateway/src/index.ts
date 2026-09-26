@@ -40,7 +40,7 @@ export { AGENT_GATEWAY_SERVICE, serveGateway, unsafeSanOnlyAuthenticate } from '
 export { attachFrameConn, closeReason } from './frames.js';
 export type { FrameEndpoint } from './frames.js';
 export { certificateAuthenticate, peerChain } from './identity.js';
-export { xidStatusHandler } from './health.js';
+export { daemonNodeConditions, xidStatusHandler } from './health.js';
 export { attachGatewayWs, serveGatewayWs, servingFromPem, WS_PATH, WS_SUBPROTOCOL } from './ws.js';
 export { swapSecureContext, watchTlsFiles } from './tls-reload.js';
 export type { TlsFiles, TlsFileWatch, TlsMaterial } from './tls-reload.js';

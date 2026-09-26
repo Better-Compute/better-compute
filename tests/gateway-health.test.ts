@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { xidStatusHandler } from '@better-compute/gateway';
-import { ConditionStatus, InstanceObservedState, type StatusReport } from '@better-compute/protocol';
+import { ConditionStatus, InstanceObservedState, SectionState, type StatusReport } from '@better-compute/protocol';
 import { agentFrame, gatewayFixture, type GatewayFixture } from './support/gateway.js';
 
 // Status-driven health (§10.1) and session versions for Rollout (§6, v0.4) at the gateway.
@@ -171,6 +171,67 @@ describe('xidStatusHandler', () => {
     await f.gateway.jobs.status.tick();
     expect(await conditions()).toEqual([{ type: 'MemoryPressure', status: 'false' }]);
     expect(await f.outbox('node.condition.changed')).toHaveLength(2);
+  });
+
+  it('follows the host units’ conditions (FabricManagerDown, MPSDown): written on a change, NoSchedule while true', async () => {
+    f = await gatewayFixture({ reports: { status: xidStatusHandler } });
+    const node = await f.addNode();
+    const { handle } = await f.connect(node);
+    const state = async () => ({
+      conditions: (
+        await f.db.query<{ type: string; status: string }>(
+          `SELECT type, status FROM node_conditions WHERE node_id = $1 AND type IN ('FabricManagerDown', 'MPSDown') ORDER BY type`,
+          [node],
+        )
+      ).rows,
+      reasons: (await f.db.query<{ no_schedule_reasons: string[] }>('SELECT no_schedule_reasons FROM nodes WHERE id = $1', [node]))
+        .rows[0]!.no_schedule_reasons,
+    });
+    const report = async (generation: number, types: string[]) => {
+      await handle.receive(status(generation, types.map((type) => ({ type, message: `${type} here` }))));
+      await f.gateway.jobs.status.tick();
+    };
+    await report(1, ['FabricManagerDown', 'SomethingElse']);
+    expect(await state()).toEqual({ conditions: [{ type: 'FabricManagerDown', status: 'true' }], reasons: ['FabricManagerDown'] });
+    expect(await f.outbox('node.condition.changed')).toHaveLength(1);
+    // Repeated: nothing written, nothing published.
+    await report(2, ['FabricManagerDown']);
+    expect(await f.outbox('node.condition.changed')).toHaveLength(1);
+    // Fabric Manager back, MPS down.
+    await report(3, ['MPSDown']);
+    expect(await state()).toEqual({
+      conditions: [
+        { type: 'FabricManagerDown', status: 'false' },
+        { type: 'MPSDown', status: 'true' },
+      ],
+      reasons: ['MPSDown'],
+    });
+    expect(await f.outbox('node.condition.changed')).toHaveLength(3);
+    await report(4, []);
+    expect((await state()).reasons).toEqual([]);
+
+    // An externally managed host (bcd as a DaemonSet): a condition, never NoSchedule.
+    await handle.receive(
+      agentFrame({
+        case: 'status',
+        value: {
+          observedGeneration: 5n,
+          appliedGeneration: 5n,
+          sections: [{ section: 'host', generation: 5n, state: SectionState.UNSUPPORTED, reason: 'HostManagedExternally', message: 'managed outside bcd' }],
+        },
+      }),
+    );
+    await f.gateway.jobs.status.tick();
+    expect((await f.db.query<{ status: string }>(`SELECT status FROM node_conditions WHERE node_id = $1 AND type = 'HostManagedExternally'`, [node])).rows).toEqual([
+      { status: 'true' },
+    ]);
+    expect((await state()).reasons).toEqual([]);
+
+    // A tenant-controlled node's reports are advisory: the condition, never a NoSchedule reason.
+    await f.db.query(`UPDATE nodes SET trust = 'tenant-controlled' WHERE id = $1`, [node]);
+    await report(6, ['FabricManagerDown']);
+    expect(await state()).toMatchObject({ reasons: [] });
+    expect((await state()).conditions).toContainEqual({ type: 'FabricManagerDown', status: 'true' });
   });
 
   it('ignores XIDs without a policy and conditions without a device', async () => {
