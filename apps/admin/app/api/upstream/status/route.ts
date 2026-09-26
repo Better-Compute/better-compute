@@ -1,11 +1,12 @@
-import { callUpstream, upstreamConfig } from '@/lib/upstream';
+import { callerAllowed, callUpstream, safeMessage, upstreamConfig } from '@/lib/upstream';
 
 // Connection status for the status bar and Settings: is an API configured, does it answer, who are we to it.
-// Never returns the token.
+// Never returns the token; the URL is origin + path only (upstreamConfig refuses credentials in it).
 
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(request: Request) {
+  if (!callerAllowed(request)) return Response.json({ configured: false }, { status: 403 });
   const config = upstreamConfig();
   if (!config) return Response.json({ configured: false }, { headers: { 'cache-control': 'no-store' } });
   const started = performance.now();
@@ -18,6 +19,6 @@ export async function GET() {
     if (!data.data) return Response.json({ ...base, ok: false, latencyMs, error: data.error ?? { code: 'HTTP_ERROR', message: `HTTP ${version.status}` } });
     return Response.json({ ...base, ok: true, latencyMs, server: data.data }, { headers: { 'cache-control': 'no-store' } });
   } catch (error) {
-    return Response.json({ ...base, ok: false, error: { code: 'UPSTREAM_UNREACHABLE', message: (error as Error).message } });
+    return Response.json({ ...base, ok: false, error: { code: 'UPSTREAM_UNREACHABLE', message: safeMessage(error) } });
   }
 }

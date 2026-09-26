@@ -122,9 +122,18 @@ export function loadState(): DashboardState {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return defaultState();
-    const parsed = JSON.parse(raw) as DashboardState;
-    if (parsed.version !== 1 || !Array.isArray(parsed.dashboards) || parsed.dashboards.length === 0) return defaultState();
-    return withNewPresets(parsed);
+    const parsed = JSON.parse(raw) as Partial<DashboardState> | null;
+    if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.dashboards)) return defaultState();
+    // Every stored dashboard is re-validated: a malformed entry is dropped, never rendered.
+    const dashboards: Dashboard[] = parsed.dashboards.flatMap((d: unknown) => {
+      const x = d as Partial<Dashboard> | null;
+      if (!x || typeof x.id !== 'string' || typeof x.name !== 'string' || !Array.isArray(x.items)) return [];
+      return [{ id: x.id.slice(0, 40), name: x.name.slice(0, 60), items: sanitizeItems(x.items, true) }];
+    });
+    if (!dashboards.length) return defaultState();
+    const active = typeof parsed.active === 'string' && dashboards.some((d) => d.id === parsed.active) ? parsed.active : dashboards[0]!.id;
+    const presetsSeen = Array.isArray(parsed.presetsSeen) ? parsed.presetsSeen.filter((p): p is string => typeof p === 'string') : undefined;
+    return withNewPresets({ version: 1, active, dashboards, ...(presetsSeen ? { presetsSeen } : {}) });
   } catch {
     return defaultState();
   }
@@ -156,28 +165,41 @@ export function decodeDashboard(encoded: string): Pick<Dashboard, 'name' | 'item
       items?: unknown;
     };
     if (parsed.v !== 1 || typeof parsed.name !== 'string' || !Array.isArray(parsed.items)) return null;
-    const items = parsed.items.flatMap((raw): WidgetInstance[] => {
-      const i = raw as Partial<WidgetInstance>;
-      if (typeof i.widget !== 'string' || typeof i.w !== 'number' || typeof i.h !== 'number') return [];
-      const settings =
-        i.settings && typeof i.settings === 'object'
-          ? Object.fromEntries(Object.entries(i.settings).filter(([, v]) => ['string', 'number', 'boolean'].includes(typeof v)))
-          : undefined;
-      return [
-        {
-          key: typeof i.key === 'string' ? i.key : i.widget,
-          widget: i.widget,
-          w: Math.min(12, Math.max(1, Math.round(i.w))),
-          h: Math.min(10, Math.max(1, Math.round(i.h))),
-          ...(typeof i.title === 'string' ? { title: i.title.slice(0, 80) } : {}),
-          ...(settings ? { settings: settings as WidgetInstance['settings'] } : {}),
-        },
-      ];
-    });
-    return { name: parsed.name.slice(0, 60) || 'Shared dashboard', items: items.slice(0, 40) };
+    return { name: parsed.name.slice(0, 60) || 'Shared dashboard', items: sanitizeItems(parsed.items, false) };
   } catch {
     return null;
   }
+}
+
+/**
+ * Widget instances from an untrusted source (a share link, or storage), field by field: sizes clamped, only
+ * string/number/boolean settings, at most 40. Share links get fresh keys so crafted duplicates can't collide;
+ * stored dashboards keep theirs unless duplicated.
+ */
+export function sanitizeItems(list: unknown[], keepKeys: boolean): WidgetInstance[] {
+  const items: WidgetInstance[] = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== 'object') continue;
+    const i = raw as Partial<WidgetInstance>;
+    if (typeof i.widget !== 'string' || typeof i.w !== 'number' || typeof i.h !== 'number') continue;
+    if (!Number.isFinite(i.w) || !Number.isFinite(i.h)) continue;
+    const settings =
+      i.settings && typeof i.settings === 'object'
+        ? Object.fromEntries(Object.entries(i.settings).filter(([, v]) => ['string', 'number', 'boolean'].includes(typeof v)))
+        : undefined;
+    const widget = i.widget.slice(0, 80);
+    const key = keepKeys && typeof i.key === 'string' && !items.some((x) => x.key === i.key) ? i.key : uniqueKey(widget, items);
+    items.push({
+      key,
+      widget,
+      w: Math.min(12, Math.max(1, Math.round(i.w))),
+      h: Math.min(10, Math.max(1, Math.round(i.h))),
+      ...(typeof i.title === 'string' ? { title: i.title.slice(0, 80) } : {}),
+      ...(settings ? { settings: settings as WidgetInstance['settings'] } : {}),
+    });
+    if (items.length >= 40) break;
+  }
+  return items;
 }
 
 export const uniqueKey = (widget: string, items: WidgetInstance[]) => {

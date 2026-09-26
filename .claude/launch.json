@@ -13,7 +13,7 @@
       "name": "admin",
       "cwd": "apps/admin",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["node_modules/next/dist/bin/next", "dev", "--port", "4200"],
+      "runtimeArgs": ["node_modules/next/dist/bin/next", "dev", "--hostname", "127.0.0.1", "--port", "4200"],
       "env": { "NEXT_DIST_DIR": ".next-admin" },
       "port": 4200
     },
@@ -21,7 +21,7 @@
       "name": "admin-561b07",
       "cwd": "apps/admin",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["node_modules/next/dist/bin/next", "dev", "--port", "4210"],
+      "runtimeArgs": ["node_modules/next/dist/bin/next", "dev", "--hostname", "127.0.0.1", "--port", "4210"],
       "env": { "NEXT_DIST_DIR": ".next-561b07" },
       "port": 4210
     },
@@ -29,7 +29,7 @@
       "name": "admin-f906ff",
       "cwd": "apps/admin",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["node_modules/next/dist/bin/next", "dev", "--port", "4220"],
+      "runtimeArgs": ["node_modules/next/dist/bin/next", "dev", "--hostname", "127.0.0.1", "--port", "4220"],
       "env": { "NEXT_DIST_DIR": ".next-f906ff" },
       "port": 4220
     },

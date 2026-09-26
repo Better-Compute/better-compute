@@ -57,11 +57,23 @@ const TICK_MS = 2_000;
 
 function load(): Partial<{ range: RangeKey; siteId: string; density: Density; dataSource: 'simulated' | 'live' }> {
   try {
-    return JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? '{}');
+    // Shape-checked: anything unexpected in storage is ignored, never trusted.
+    const raw = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? '{}') as Record<string, unknown> | null;
+    if (!raw || typeof raw !== 'object') return {};
+    return {
+      ...(isRangeKey(raw.range) ? { range: raw.range } : {}),
+      ...(isSiteId(raw.siteId) ? { siteId: raw.siteId } : {}),
+      ...(raw.density === 'compact' || raw.density === 'comfortable' ? { density: raw.density } : {}),
+      ...(raw.dataSource === 'live' || raw.dataSource === 'simulated' ? { dataSource: raw.dataSource } : {}),
+    };
   } catch {
     return {};
   }
 }
+
+/** A real RANGES key (own property: `?range=toString` is not one). */
+export const isRangeKey = (value: unknown): value is RangeKey => typeof value === 'string' && Object.hasOwn(RANGES, value);
+const isSiteId = (value: unknown): value is string => typeof value === 'string' && /^[a-z0-9][a-z0-9-]{0,39}$/.test(value);
 
 export function WorkspaceProvider({ initialNow, children }: { initialNow: number; children: ReactNode }) {
   const [now, setNow] = useState(initialNow);
@@ -86,9 +98,11 @@ export function WorkspaceProvider({ initialNow, children }: { initialNow: number
     const urlAt = Number(params.get('at'));
     const urlCompare = Number(params.get('compare'));
     if (Number.isFinite(urlCompare) && urlCompare > 0 && urlCompare < Date.now()) setCompareAt(urlCompare);
-    const nextRange = urlRange && urlRange in RANGES ? (urlRange as RangeKey) : saved.range;
-    if (nextRange && nextRange in RANGES) setRange(nextRange);
-    if (urlSite || saved.siteId) setSiteId(urlSite === 'all' ? undefined : (urlSite ?? saved.siteId));
+    const nextRange = isRangeKey(urlRange) ? urlRange : saved.range;
+    if (isRangeKey(nextRange)) setRange(nextRange);
+    if (urlSite === 'all') setSiteId(undefined);
+    else if (isSiteId(urlSite)) setSiteId(urlSite);
+    else if (saved.siteId) setSiteId(saved.siteId);
     if (saved.density) setDensity(saved.density);
     if (saved.dataSource === 'live') setDataSource('live');
     // Only a link pauses on load; a reload without ?at= is always live.

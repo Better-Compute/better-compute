@@ -10,6 +10,16 @@ import { ToolButton } from '@/components/ui/overlay';
 // lines starting with "- " are bullets, "# " a heading, [label](url) a link (internal paths stay in the app),
 // and `code` is mono. Saved into the widget instance, so it travels with an exported dashboard.
 
+/**
+ * What a note's link may be: an in-app path ("/nodes", not the protocol-relative "//host" or "/\host"), an
+ * http(s) URL, or nothing (javascript:, data:, anything else renders as plain text).
+ */
+export function linkKind(href: string): 'internal' | 'external' | null {
+  if (/^\/(?![/\\])/.test(href)) return 'internal';
+  if (/^https?:\/\//i.test(href)) return 'external';
+  return null;
+}
+
 function inline(text: string, key: string): ReactNode[] {
   const parts: ReactNode[] = [];
   const pattern = /\[([^\]]+)\]\(([^)\s]+)\)|`([^`]+)`/g;
@@ -20,11 +30,11 @@ function inline(text: string, key: string): ReactNode[] {
     if (match.index > last) parts.push(text.slice(last, match.index));
     if (match[1] && match[2]) {
       const href = match[2];
-      const safe = href.startsWith('/') || /^https?:\/\//.test(href);
+      const kind = linkKind(href);
       parts.push(
-        !safe ? (
+        !kind ? (
           match[1]
-        ) : href.startsWith('/') ? (
+        ) : kind === 'internal' ? (
           <Link key={`${key}-${n++}`} href={href} className="text-signal underline-offset-2 hover:underline">
             {match[1]}
           </Link>

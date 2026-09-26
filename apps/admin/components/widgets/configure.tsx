@@ -8,7 +8,7 @@ import { Drawer, Select } from '@/components/ui/overlay';
 import { widgetSettings, type WidgetDef } from '@/lib/modules';
 import type { WidgetInstance } from './layout';
 import { sites } from '@/lib/data';
-import { RANGES, ScopeOverrideProvider, type RangeKey, type ScopeOverride } from '@/components/shell/workspace';
+import { isRangeKey, RANGES, ScopeOverrideProvider, type RangeKey, type ScopeOverride } from '@/components/shell/workspace';
 
 type Values = Record<string, string | number | boolean>;
 
@@ -154,7 +154,7 @@ export function overrideFrom(saved?: Values): ScopeOverride {
   const range = saved?.$range;
   return {
     ...(typeof site === 'string' && site ? { siteId: site === 'all' ? null : site } : {}),
-    ...(typeof range === 'string' && range in RANGES ? { range: range as RangeKey } : {}),
+    ...(isRangeKey(range) ? { range } : {}),
   };
 }
 

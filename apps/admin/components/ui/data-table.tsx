@@ -89,11 +89,43 @@ interface StoredViews {
 
 const viewStorageKey = (key: string) => `bc-admin:table:${key}`;
 
+/** A stored view state, shape-checked field by field (a bad value is dropped, never trusted). */
+function viewState(value: unknown): ViewState | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const v = value as Record<string, unknown>;
+  const strings = (x: unknown) => (Array.isArray(x) ? x.filter((s): s is string => typeof s === 'string') : []);
+  const filters =
+    v.filters && typeof v.filters === 'object'
+      ? Object.fromEntries(Object.entries(v.filters as Record<string, unknown>).filter(([, f]) => typeof f === 'string')) as Record<string, string>
+      : {};
+  const sort = v.sort as { id?: unknown; dir?: unknown } | undefined;
+  const widths =
+    v.widths && typeof v.widths === 'object'
+      ? Object.fromEntries(Object.entries(v.widths as Record<string, unknown>).filter(([, w]) => typeof w === 'number' && w >= 40 && w <= 2000)) as Record<string, number>
+      : undefined;
+  return {
+    filters,
+    hidden: strings(v.hidden),
+    ...(typeof v.query === 'string' ? { query: v.query.slice(0, 200) } : {}),
+    ...(sort && typeof sort.id === 'string' && (sort.dir === 'asc' || sort.dir === 'desc') ? { sort: { id: sort.id, dir: sort.dir } } : {}),
+    ...(widths && Object.keys(widths).length ? { widths } : {}),
+  };
+}
+
 function loadViews(key: string): StoredViews {
   try {
     const raw = window.localStorage.getItem(viewStorageKey(key));
-    const parsed = raw ? (JSON.parse(raw) as Partial<StoredViews>) : {};
-    return { ...parsed, saved: parsed.saved ?? [] };
+    const parsed = (raw ? JSON.parse(raw) : {}) as Record<string, unknown> | null;
+    if (!parsed || typeof parsed !== 'object') return { saved: [] };
+    const saved = Array.isArray(parsed.saved)
+      ? parsed.saved.flatMap((s: unknown) => {
+          const entry = s as { name?: unknown; state?: unknown } | null;
+          const state = viewState(entry?.state);
+          return entry && typeof entry.name === 'string' && state ? [{ name: entry.name.slice(0, 60), state }] : [];
+        })
+      : [];
+    const current = viewState(parsed.current);
+    return { saved, ...(current ? { current } : {}), ...(typeof parsed.active === 'string' ? { active: parsed.active } : {}) };
   } catch {
     return { saved: [] };
   }

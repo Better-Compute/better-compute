@@ -4,6 +4,17 @@ import { useCallback, useSyncExternalStore } from 'react';
 
 // Small persisted string sets shared across components (and tabs): pinned pages, acknowledged attention items.
 
+/** A stored value as a string list; anything else (a hand-edited or foreign value) reads as empty. */
+function stringList(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string').slice(0, 500) : [];
+  } catch {
+    return [];
+  }
+}
+
 function createLocalSet(key: string) {
   const event = `bc-admin:${key}-changed`;
   const empty: string[] = [];
@@ -11,7 +22,7 @@ function createLocalSet(key: string) {
   const read = (): string[] => {
     try {
       const raw = window.localStorage.getItem(`bc-admin:${key}`);
-      if (raw !== cache.raw) cache = { raw, value: raw ? (JSON.parse(raw) as string[]) : empty };
+      if (raw !== cache.raw) cache = { raw, value: raw ? stringList(raw) : empty };
       return cache.value;
     } catch {
       return empty;
@@ -66,7 +77,7 @@ const VISITS_KEY = 'bc-admin:visits';
 /** Remember a visited page (path + query), newest first, at most 12. */
 export function recordVisit(href: string) {
   try {
-    const visits = JSON.parse(window.localStorage.getItem(VISITS_KEY) ?? '[]') as string[];
+    const visits = stringList(window.localStorage.getItem(VISITS_KEY));
     window.localStorage.setItem(VISITS_KEY, JSON.stringify([href, ...visits.filter((v) => v !== href)].slice(0, 12)));
   } catch {
     // Recent pages are a convenience.
@@ -75,7 +86,8 @@ export function recordVisit(href: string) {
 
 export function readVisits(): string[] {
   try {
-    return JSON.parse(window.localStorage.getItem(VISITS_KEY) ?? '[]') as string[];
+    // Only in-app paths are offered back in the palette.
+    return stringList(window.localStorage.getItem(VISITS_KEY)).filter((href) => /^\/(?![/\\])/.test(href));
   } catch {
     return [];
   }

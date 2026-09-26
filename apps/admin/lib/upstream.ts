@@ -30,36 +30,98 @@ export function upstreamConfig(): UpstreamConfig | null {
     }
   }
   if (!url) return null;
+  let base: string;
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    // Credentials belong in ADMIN_COMPUTE_TOKEN, never in the URL (it is shown in Settings and in errors).
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) return null;
+    base = `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, '');
   } catch {
     return null;
   }
-  return { url: url.replace(/\/+$/, ''), ...(token ? { token } : {}), ...(tenantId ? { tenantId } : {}) };
+  return { url: base, ...(token ? { token } : {}), ...(tenantId ? { tenantId } : {}) };
 }
+
+/**
+ * The proxy acts with the server's credential, so only this admin's own page may call it. The custom
+ * x-better-compute header stops cross-site forms; this check stops other hosts on the network and DNS
+ * rebinding (a hostile page resolving its name to this machine): the Host header must be an allowed name,
+ * and a present Origin must be that same host. ADMIN_ALLOWED_HOSTS (comma-separated host[:port]) adds names
+ * for a deployment behind a proxy; loopback names are always allowed.
+ */
+export function callerAllowed(request: Request): boolean {
+  const host = (request.headers.get('host') ?? '').toLowerCase();
+  const name = host.replace(/:\d+$/, '');
+  const extra = (process.env.ADMIN_ALLOWED_HOSTS ?? '')
+    .split(',')
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+  const loopback = name === 'localhost' || name === '127.0.0.1' || name === '[::1]' || name.endsWith('.localhost');
+  if (!loopback && !extra.includes(host) && !extra.includes(name)) return false;
+  const origin = request.headers.get('origin');
+  if (origin) {
+    try {
+      if (new URL(origin).host.toLowerCase() !== host) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Messages from fetch can quote the URL; keep only the first line and drop anything URL-shaped. */
+export function safeMessage(error: unknown): string {
+  const text = (error instanceof Error ? error.message : String(error)).split('\n')[0] ?? '';
+  return text.replace(/https?:\/\/\S+/g, '<url>').slice(0, 200) || 'The compute API did not answer';
+}
+
+const MAX_BODY = 8 * 1024 * 1024;
 
 /** A method path as the compute API names them: `capacity/summary`, `nodes/list`, `system/version`. */
 export const METHOD_PATH = /^[a-z][A-Za-z0-9]*(\/[a-z][A-Za-z0-9]*){1,3}$/;
+
+/**
+ * Read methods: the last segment is a getter or a listing (get, list, summary, version, status, timeline,
+ * preview, history, diff, show, describe, catalog, search, find, estimate, optionally followed by more words:
+ * `listSshCerts`, `getPolicy`). The admin has no operator login yet and the proxy holds one server credential,
+ * so it forwards only these; mutations (cordon, drain, create, cancel, delete, set…) are refused until
+ * per-operator authentication lands.
+ */
+const READ_METHOD = /^(get|list|summary|version|status|timeline|preview|history|diff|show|describe|catalog|search|find|estimate)([A-Z][A-Za-z0-9]*)?$/;
+
+export function isReadMethod(path: string): boolean {
+  if (!METHOD_PATH.test(path)) return false;
+  return READ_METHOD.test(path.split('/').at(-1)!);
+}
 
 /** POST a method to the upstream API; returns the raw status and JSON envelope. */
 export async function callUpstream(config: UpstreamConfig, path: string, input: unknown, signal?: AbortSignal) {
   const headers: Record<string, string> = { 'content-type': 'application/json', 'x-better-compute': '1' };
   if (config.token) headers.authorization = `Bearer ${config.token}`;
+  // A hung upstream never holds a request forever.
+  const timeout = AbortSignal.timeout(15_000);
   const response = await fetch(`${config.url}/${path}`, {
     method: 'POST',
     headers,
     body: JSON.stringify(input ?? {}),
     redirect: 'error',
     cache: 'no-store',
-    signal,
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_BODY)
+    return { status: 502, body: { error: { code: 'INVALID_RESPONSE', message: 'The compute API answer is too large' } }, retryAfter: null };
   const text = await response.text();
+  if (text.length > MAX_BODY)
+    return { status: 502, body: { error: { code: 'INVALID_RESPONSE', message: 'The compute API answer is too large' } }, retryAfter: null };
   let body: unknown;
   try {
     body = JSON.parse(text);
   } catch {
     body = { error: { code: 'INVALID_RESPONSE', message: `The compute server answered ${response.status} without JSON` } };
   }
-  return { status: response.status, body, retryAfter: response.headers.get('retry-after') };
+  // Statuses that can't carry a body (204/205/304) or aren't valid Response statuses become a 502.
+  const status = response.status >= 200 && response.status <= 599 && ![204, 205, 304].includes(response.status) ? response.status : 502;
+  return { status, body, retryAfter: response.headers.get('retry-after') };
 }
