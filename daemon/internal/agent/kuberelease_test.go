@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -67,6 +68,46 @@ func TestAKubernetesReleaseWaitsForItsPods(t *testing.T) {
 	}
 	if got := h.agent.devices.releasingDevices(); len(got) != 0 {
 		t.Fatalf("still releasing: %v", got)
+	}
+}
+
+// An unreadable releases file fails closed: every GPU stays claimed, the node says why, and the
+// file is kept aside; the claim goes once no pod holds a GPU of an allocation the node does not know.
+func TestUnreadableKubernetesReleasesKeepEveryGPUClaimed(t *testing.T) {
+	h := newHarness(t, nil)
+	s, _ := h.open("gpus")
+	s.push(desired(1, &agentv1.NodeSpec{Devices: &agentv1.DevicesSection{}}))
+	s.next(t, "status", func(f *agentv1.AgentFrame) bool { return f.GetStatus().GetObservedGeneration() == 1 })
+	d := h.agent.devices
+	if err := os.WriteFile(d.releasingPath(), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gpus := fakehw.Inventory(1).Gpus.Gpus
+	claimed := d.releasingDevices()
+	if len(claimed) != len(gpus) || claimed[gpus[0].Uuid] != unknownRelease {
+		t.Fatalf("claimed = %v", claimed)
+	}
+	if held := h.agent.heldGPUs(); len(held) != len(gpus) {
+		t.Fatalf("VMs and gpu.reset would get GPUs: held = %v", held)
+	}
+	if aside, _ := filepath.Glob(d.releasingPath() + ".unreadable-*"); len(aside) != 1 {
+		t.Fatalf("the unreadable file was not kept aside: %v", aside)
+	}
+	conds := d.currentConditions()
+	if len(conds) != 1 || conds[0].GetType() != "KubernetesReleasesUnreadable" {
+		t.Fatalf("conditions = %v", conds)
+	}
+	// A pod may still hold one: kept. None does: the GPUs are free again.
+	unaccounted := true
+	d.releasesUnaccounted = func(context.Context, map[string]bool) bool { return unaccounted }
+	d.clearUnreadable(context.Background(), nil)
+	if !d.releasesUnreadable() {
+		t.Fatal("cleared while a pod may hold a GPU")
+	}
+	unaccounted = false
+	d.clearUnreadable(context.Background(), nil)
+	if d.releasesUnreadable() || len(d.releasingDevices()) != 0 || len(d.currentConditions()) != 0 {
+		t.Fatal("the claim outlived the pods")
 	}
 }
 
