@@ -52,6 +52,19 @@ async function wait<T>(probe: () => T | undefined, what: string): Promise<T> {
 }
 
 describe('nodes, join-tokens and instances (request bodies)', () => {
+  it('deletes a node only with --yes', async () => {
+    const refused = await stubbed(['nodes', 'delete', NODE, '--reason', 'TPM replaced']);
+    expect(refused).toMatchObject({ ok: false, message: expect.stringContaining('--yes') });
+    expect(refused.calls).toEqual([]);
+    const deleted = await stubbed(['nodes', 'delete', NODE, '--reason', 'TPM replaced', '--if-version', '3', '--yes']);
+    expect(deleted.calls).toEqual([
+      {
+        path: '/api/compute/nodes/delete',
+        body: { tenantId: 'org_acme', nodeId: NODE, reason: 'TPM replaced', version: 3 },
+      },
+    ]);
+  });
+
   it('builds node changes, labels and taints', async () => {
     let result = await stubbed([
       'nodes',

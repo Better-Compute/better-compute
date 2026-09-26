@@ -247,6 +247,30 @@ export const nodeCommands = [
     },
   }),
   defineCommand({
+    name: 'nodes delete',
+    group: 'Nodes',
+    summary: 'Remove a retired or cordoned adopted node for good (nodes.delete)',
+    description:
+      'nodes delete tombstones a node that is retired, a cordoned adopted node (cordon it first), or one that never got past adoption or enrollment, once it holds no allocation. Its certificates are revoked and its hardware key and attestor bindings (e.g. a TPM) are freed, so the machine can join again as a new node: after a TPM swap, cordon, delete, then run `bcd join --reset --yes` and `bcd join` on the machine. It cannot be undone, so it needs --yes. Decided as compute:nodes:delete.',
+    target: 'token',
+    args: nodeArg,
+    flags: {
+      ...changeFlags,
+      yes: { type: 'boolean', description: 'Confirm: the node is removed for good' },
+    },
+    examples: ['better-compute nodes delete node_01k5w… --reason "TPM replaced" --yes'],
+    async run({ flags, args, api }) {
+      const id = nodeId(args);
+      if (!flags.yes) throw usageError(`nodes delete removes ${id} for good; re-run with --yes`);
+      return (await api()).call('nodes/delete', {
+        tenantId: flags.tenant,
+        nodeId: id,
+        ...(flags.reason ? { reason: flags.reason } : {}),
+        ...(flags['if-version'] !== undefined ? { version: flags['if-version'] } : {}),
+      });
+    },
+  }),
+  defineCommand({
     name: 'join-tokens create',
     group: 'Nodes',
     summary: 'Create a join token for a pool: what bcd join presents (joinTokens.create)',

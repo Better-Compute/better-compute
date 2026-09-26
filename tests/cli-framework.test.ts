@@ -226,6 +226,7 @@ describe('help and the manifest', () => {
       'nodes drain',
       'nodes label',
       'nodes taint',
+      'nodes delete',
       'join-tokens create',
       'join-tokens list',
       'join-tokens revoke',
