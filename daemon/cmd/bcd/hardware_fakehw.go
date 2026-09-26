@@ -4,11 +4,16 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/better-compute/better-compute/daemon/internal/agent"
 	"github.com/better-compute/better-compute/daemon/internal/fakehw"
@@ -60,7 +65,43 @@ func openTPM(dataDir string) (tpm.Transport, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	// A manufacturer's EK certificate, as a real TPM carries in NV: issued at each load by the CA in
+	// BCD_FAKEHW_TPM_EK_CA (PEM: its certificate and PKCS#8 key), which the test's attestor trusts.
+	if ca := os.Getenv("BCD_FAKEHW_TPM_EK_CA"); ca != "" {
+		if sim.EKCert, err = fakeEKCertificate(ca, sim); err != nil {
+			return nil, nil, fmt.Errorf("BCD_FAKEHW_TPM_EK_CA: %w", err)
+		}
+	}
 	return sim, func() {}, nil
+}
+
+// fakeEKCertificate is an EK certificate for the sim's EK, issued by the CA in the PEM file path.
+func fakeEKCertificate(path string, sim *tpmsim.Sim) ([]byte, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var ca *x509.Certificate
+	var key any
+	for block, rest := pem.Decode(raw); block != nil; block, rest = pem.Decode(rest) {
+		switch block.Type {
+		case "CERTIFICATE":
+			ca, err = x509.ParseCertificate(block.Bytes)
+		case "PRIVATE KEY":
+			key, err = x509.ParsePKCS8PrivateKey(block.Bytes)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	if ca == nil || key == nil {
+		return nil, errors.New("needs a CERTIFICATE and a PRIVATE KEY")
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: "bcd fakehw EK"},
+		NotBefore: ca.NotBefore, NotAfter: ca.NotAfter, KeyUsage: x509.KeyUsageKeyEncipherment,
+	}
+	return x509.CreateCertificate(rand.Reader, tmpl, ca, sim.EKPublicKey(), key)
 }
 
 // newHost is a fake machine in the data directory: its files live under fakehw-root/, its boot id in

@@ -5,7 +5,17 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { parseCertificate, spkiPin, tpmAttestor, type TpmIdentity } from '@better-compute/pki';
+import {
+  buildCertificate,
+  distinguishedName,
+  generateP256KeyPair,
+  parseCertificate,
+  privateKeyPem,
+  spkiPin,
+  toPem,
+  tpmAttestor,
+  type TpmIdentity,
+} from '@better-compute/pki';
 import { createDevStack, type DevStack } from '@better-compute/testing';
 
 // The tpm join attestor end to end (v0.5, PLAN §13): a fakehw bcd with its software TPM
@@ -46,6 +56,7 @@ function runLinux(argv: string[]): Promise<{ status: number | null; stdout: stri
 
 let dev: DevStack;
 let configDir: string;
+let ekCa: string;
 let config: string;
 let dataDir: string;
 let poolId = '';
@@ -64,13 +75,31 @@ describe.skipIf(!enabled)('bcd join --attestor tpm', () => {
       if (built.status !== 0) throw new Error(`go build failed: ${built.stderr}`);
     }
     const host = windows ? sh("ip route show default | awk '{print $3}'") : '127.0.0.1';
+    // A TPM manufacturer: the fake machine's TPM gets its EK certificate from this root
+    // (BCD_FAKEHW_TPM_EK_CA), and the attestor trusts only it, as it trusts real manufacturers.
+    configDir = mkdtempSync(join(tmpdir(), 'bcd-tpm-'));
+    const manufacturer = generateP256KeyPair();
+    const subject = distinguishedName({ commonName: 'bcd e2e TPM EK root' });
+    const ekRoot = buildCertificate(
+      {
+        serial: new Uint8Array([1]),
+        issuer: subject,
+        subject,
+        notBefore: Date.now() - 86_400_000,
+        notAfter: Date.now() + 10 * 365 * 86_400_000,
+        publicKey: manufacturer.publicKey,
+        ca: {},
+      },
+      manufacturer.privateKey,
+    );
+    ekCa = join(configDir, 'ek-ca.pem');
+    writeFileSync(ekCa, toPem(ekRoot) + privateKeyPem(manufacturer.privateKey), { mode: 0o600 });
     dev = await createDevStack({
       externalTls: { host: '0.0.0.0' },
       attestors: [
         tpmAttestor({
           challengeKey: new Uint8Array(randomBytes(32)),
-          // tpmsim has no manufacturer EK certificate.
-          allowUncertifiedEk: true,
+          ekRoots: [ekRoot],
           // The operator's allow-list: this EK joins the TPM pool.
           resolve: async (_tx, identity) => {
             seen.push(identity);
@@ -93,7 +122,6 @@ describe.skipIf(!enabled)('bcd join --attestor tpm', () => {
 
     const url = new URL(dev.externalGatewayUrl!);
     url.hostname = host;
-    configDir = mkdtempSync(join(tmpdir(), 'bcd-tpm-'));
     config = join(configDir, 'config.toml');
     dataDir = `/tmp/bcd-tpm-${randomBytes(6).toString('hex')}`;
     const pin = (der: Uint8Array) => spkiPin(parseCertificate(der).publicKey);
@@ -123,7 +151,9 @@ describe.skipIf(!enabled)('bcd join --attestor tpm', () => {
     await dev?.close();
   }, 60_000);
 
-  const tpmJoin = () => runLinux(['env', 'BCD_FAKEHW_SEED=93', toLinux(binary), 'join', '--config', toLinux(config), '--attestor', 'tpm']);
+  // The fake machine's TPM: its EK certified by the manufacturer above, and the node key kept in it.
+  const tpmEnv = () => ['env', 'BCD_FAKEHW_SEED=93', `BCD_FAKEHW_TPM_EK_CA=${toLinux(ekCa)}`, 'BCD_FAKEHW_TPM_KEYS=1'];
+  const tpmJoin = () => runLinux([...tpmEnv(), toLinux(binary), 'join', '--config', toLinux(config), '--attestor', 'tpm']);
 
   it('joins with its TPM and no token, into the pool the attestor resolves, bound to its EK; a reinstall rejoins as the same node', async () => {
     const first = await tpmJoin();
@@ -133,6 +163,10 @@ describe.skipIf(!enabled)('bcd join --attestor tpm', () => {
     // Two rounds: the evidence, then the activated credential and the quote. resolve ran on the verified identity.
     expect(seen).toHaveLength(1);
     expect(seen[0]!.pcrs.get(0x000b)?.size).toBe(8); // SHA-256 bank, PCRs 0-7
+    // The EK certificate bcd read from the TPM's NV, chained to the manufacturer.
+    expect(seen[0]!.ekCertificate?.issuer).toContain('bcd e2e TPM EK root');
+    // The node key is in the TPM too: the data directory holds only its record.
+    expect(sh(`head -n 1 '${dataDir}/node.key'`)).toBe('-----BEGIN BCD TPM NODE KEY-----');
     const row = (await dev.database.query<{ pool_id: string }>('SELECT pool_id FROM nodes WHERE id = $1', [nodeId])).rows[0];
     expect(row?.pool_id).toBe(poolId);
     const bindings = (
@@ -150,7 +184,7 @@ describe.skipIf(!enabled)('bcd join --attestor tpm', () => {
     const noop = await tpmJoin();
     expect(noop.stdout).toContain(`already joined as ${nodeId}`);
 
-    const { cmd, args } = linux(['env', 'BCD_FAKEHW_SEED=93', toLinux(binary), 'node', '--config', toLinux(config)]);
+    const { cmd, args } = linux([...tpmEnv(), toLinux(binary), 'node', '--config', toLinux(config)]);
     node = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'] });
     node.stderr!.on('data', (chunk: Buffer) => {
       nodeLog += chunk.toString();
