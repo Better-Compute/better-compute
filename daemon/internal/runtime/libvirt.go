@@ -438,6 +438,15 @@ func (l *Libvirt) List(ctx context.Context) ([]Domain, error) {
 				for _, n := range x.Devices.Interfaces {
 					d.MACs = append(d.MACs, n.MAC.Address)
 				}
+				// A running domain's live definition: the volumes it has open.
+				if l.Volumes != nil && (d.State == StateRunning || d.State == StatePaused) {
+					for _, disk := range x.Devices.Disks {
+						id, ok := strings.CutSuffix(filepath.Base(disk.Source.File), ".raw")
+						if ok && filepath.Dir(disk.Source.File) == filepath.Clean(l.Volumes.Dir) {
+							d.Volumes = append(d.Volumes, AttachedVolume{Volume: Volume{ID: id, Path: disk.Source.File}, ReadOnly: disk.ReadOnly != nil})
+						}
+					}
+				}
 			}
 		}
 		domains = append(domains, d)

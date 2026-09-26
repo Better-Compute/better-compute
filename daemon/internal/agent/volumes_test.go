@@ -34,12 +34,28 @@ func TestVolumeRefusalsKeepOneWriter(t *testing.T) {
 			attach("inst_9", deleted, rw("vol_a")),
 		},
 	}
-	got := volumeRefusals(section, map[string]string{"vol_bad": "disk full"})
+	// What running domains have open counts first: inst_old keeps running with vol_c although its
+	// spec dropped it (applies at its next start); inst_gone is being stopped, so its vol_d is free.
+	section.Volumes = append(section.Volumes, &agentv1.HostVolume{VolumeId: "vol_c"}, &agentv1.HostVolume{VolumeId: "vol_d"})
+	section.Instances = append(section.Instances,
+		attach("inst_new", running, rw("vol_c")),
+		attach("inst_old", running),
+		attach("inst_gone", stopped),
+		attach("inst_d", running, rw("vol_d")),
+	)
+	domains := map[string]runtime.Domain{
+		"inst_old":  {ID: "inst_old", Managed: true, State: runtime.StateRunning, Volumes: []runtime.AttachedVolume{{Volume: runtime.Volume{ID: "vol_c"}}}},
+		"inst_gone": {ID: "inst_gone", Managed: true, State: runtime.StateRunning, Volumes: []runtime.AttachedVolume{{Volume: runtime.Volume{ID: "vol_d"}}}},
+		// Running with the volume its spec names: not a conflict with itself.
+		"inst_1": {ID: "inst_1", Managed: true, State: runtime.StateRunning, Volumes: []runtime.AttachedVolume{{Volume: runtime.Volume{ID: "vol_a"}}}},
+	}
+	got := volumeRefusals(section, map[string]string{"vol_bad": "disk full"}, domains)
 	want := map[string]string{
-		"inst_2": "volume vol_a is attached read-write to inst_1",
-		"inst_6": "volume vol_b is attached to inst_4: a read-write attachment is exclusive",
-		"inst_7": "volume vol_gone is not on this host",
-		"inst_8": "volume vol_bad: disk full",
+		"inst_2":   "volume vol_a is attached read-write to inst_1",
+		"inst_6":   "volume vol_b is attached to inst_4: a read-write attachment is exclusive",
+		"inst_7":   "volume vol_gone is not on this host",
+		"inst_8":   "volume vol_bad: disk full",
+		"inst_new": "volume vol_c is attached read-write to inst_old",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("refusals = %v", got)

@@ -64,6 +64,9 @@ type Domain struct {
 	// HugepageSize: its memory is backed by hugepages of this size (placement, PLAN.md §3.8); 0:
 	// normal pages. Host admission counts it against the hugepage pool, not the host's memory.
 	HugepageSize uint64 `json:"hugepageSize,omitempty"`
+	// Volumes are the host volumes a running or paused domain has open (what it started with, not
+	// its spec's): the agent never lets a second writer at one.
+	Volumes []AttachedVolume `json:"volumes,omitempty"`
 }
 
 // SelfAdmitting is a runtime that checks host capacity itself (the fake, against its own limits),

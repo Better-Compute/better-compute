@@ -107,8 +107,8 @@ type chRecord struct {
 	// to the running VMM's user (read-write ones), which stop gives back.
 	Volumes      []AttachedVolume `json:"volumes,omitempty"`
 	GivenVolumes []string         `json:"givenVolumes,omitempty"`
-	// StartedVolumes are the volume paths the running VM was started with, in disk order (vol<i>).
-	StartedVolumes []string `json:"startedVolumes,omitempty"`
+	// StartedVolumes are the volumes the running VM was started with, in disk order (vol<i>).
+	StartedVolumes []AttachedVolume `json:"startedVolumes,omitempty"`
 }
 
 // union adds b's strings to a's, once.
@@ -251,6 +251,9 @@ func (c *CloudHypervisor) List(ctx context.Context) ([]Domain, error) {
 			d.HugepageSize = r.Placement.HugepageSize
 		}
 		d.State, d.Message = c.state(ctx, r.ID)
+		if d.State == StateRunning || d.State == StatePaused {
+			d.Volumes = r.StartedVolumes
+		}
 		out = append(out, d)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -769,9 +772,8 @@ func (c *CloudHypervisor) start(ctx context.Context, r *chRecord, paused bool) e
 	// A read-write volume is the VMM user's while it runs (exclusive: the agent never attaches one
 	// read-write beside anything else); a read-only one stays root's, readable (its 0700 directory
 	// is closed to everyone the unit's bind mount does not reach).
-	r.StartedVolumes = nil
+	r.StartedVolumes = append([]AttachedVolume(nil), r.Volumes...)
 	for _, v := range r.Volumes {
-		r.StartedVolumes = append(r.StartedVolumes, v.Path)
 		uid, mode := 0, os.FileMode(0o644)
 		if !v.ReadOnly {
 			uid, mode = int(r.UID), 0o600
@@ -1245,7 +1247,7 @@ func (c *CloudHypervisor) GrowVolume(ctx context.Context, id string, v AttachedV
 	if st, _ := c.state(ctx, id); st == StateStopped {
 		return nil
 	}
-	i := slices.Index(r.StartedVolumes, v.Path)
+	i := slices.IndexFunc(r.StartedVolumes, func(s AttachedVolume) bool { return s.Path == v.Path })
 	if i < 0 {
 		return nil
 	}

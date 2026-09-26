@@ -85,9 +85,11 @@ func (c *instancesConverger) tellGrownVolumes(ctx context.Context, r runtime.Run
 
 // volumeRefusals are the instances whose volumes cannot be attached: one the section does not list,
 // one that failed, or one another running (or paused) instance has when either attachment is
-// read-write (a raw volume has one writer and no readers beside it). The first in spec order keeps
-// the volume.
-func volumeRefusals(section *agentv1.InstancesSection, failed map[string]string) map[string]string {
+// read-write (a raw volume has one writer and no readers beside it). What a domain that keeps
+// running has open counts first, whatever its spec says now (a detach applies at its next start);
+// then the first in spec order keeps the volume. Domains being stopped are stopped before anything
+// starts (apply).
+func volumeRefusals(section *agentv1.InstancesSection, failed map[string]string, domains map[string]runtime.Domain) map[string]string {
 	listed := map[string]bool{}
 	for _, v := range section.GetVolumes() {
 		listed[v.GetVolumeId()] = true
@@ -97,6 +99,26 @@ func volumeRefusals(section *agentv1.InstancesSection, failed map[string]string)
 		rw bool
 	}
 	users := map[string][]user{}
+	keepsRunning := map[string]bool{}
+	for _, spec := range section.GetInstances() {
+		switch spec.GetDesiredState() {
+		case agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING, agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_PAUSED:
+			keepsRunning[spec.GetInstanceId()] = true
+		}
+	}
+	ids := make([]string, 0, len(domains))
+	for id := range domains {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		d := domains[id]
+		if d.Managed && keepsRunning[id] && (d.State == runtime.StateRunning || d.State == runtime.StatePaused) {
+			for _, v := range d.Volumes {
+				users[v.ID] = append(users[v.ID], user{id, !v.ReadOnly})
+			}
+		}
+	}
 	out := map[string]string{}
 	for _, spec := range section.GetInstances() {
 		state := spec.GetDesiredState()
@@ -116,6 +138,9 @@ func volumeRefusals(section *agentv1.InstancesSection, failed map[string]string)
 				out[id] = "volume " + vid + ": " + failed[vid]
 			case active:
 				for _, u := range users[vid] {
+					if u.id == id {
+						continue // itself, already running with it
+					}
 					if u.rw {
 						out[id] = fmt.Sprintf("volume %s is attached read-write to %s", vid, u.id)
 						break
@@ -291,7 +316,7 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 	specErrors := map[string]string{}
 	// Volumes exist (and have grown) before the instances that attach them are defined.
 	failedVolumes, grownVolumes := c.ensureVolumes(section)
-	refusedVolumes := volumeRefusals(section, failedVolumes)
+	refusedVolumes := volumeRefusals(section, failedVolumes, domains)
 	// The rules go in before any domain starts: taps are matched by name, so they apply from the
 	// first frame.
 	unenforceable := c.enforceNetworkPolicies(ctx, section.GetInstances())
@@ -299,7 +324,24 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 	// Host-side admission (admission.go): read once per pass, then charged start by start.
 	var hostMem *hostMemory
 	exhausted := map[string]string{}
-	for _, spec := range section.GetInstances() {
+	// Stops and deletes before starts: a volume (or the memory) handed from one instance to another
+	// in the same pass is let go before it is taken.
+	ordered := make([]*agentv1.InstanceSpec, 0, len(section.GetInstances()))
+	for _, active := range []bool{false, true} {
+		for _, spec := range section.GetInstances() {
+			switch spec.GetDesiredState() {
+			case agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING, agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_PAUSED:
+				if active {
+					ordered = append(ordered, spec)
+				}
+			default:
+				if !active {
+					ordered = append(ordered, spec)
+				}
+			}
+		}
+	}
+	for _, spec := range ordered {
 		id := spec.GetInstanceId()
 		existing, exists := domains[id]
 		if spec.GetDesiredState() == agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED {

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"os"
 	"slices"
 	"strings"
@@ -108,7 +109,7 @@ func TestGrownVolumesAreToldToRunningGuests(t *testing.T) {
 		}
 		return nil, 200, nil
 	}}
-	r := &chRecord{ID: "inst_c", Managed: chManaged, StartedVolumes: []string{"/v/other.raw", vol.Path}}
+	r := &chRecord{ID: "inst_c", Managed: chManaged, StartedVolumes: []AttachedVolume{{Volume: Volume{Path: "/v/other.raw"}}, vol}}
 	if err := os.MkdirAll(c.instanceDir(r.ID), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -120,6 +121,10 @@ func TestGrownVolumesAreToldToRunningGuests(t *testing.T) {
 	}
 	if raw, _ := json.Marshal(resized); string(raw) != `[{"desired_size":4294967296,"disk":"vol1"}]` {
 		t.Fatalf("resized = %s", raw)
+	}
+	// Listed with what it has open.
+	if domains, _ := c.List(ctx); len(domains) != 1 || len(domains[0].Volumes) != 2 || domains[0].Volumes[1].Path != vol.Path {
+		t.Fatalf("listed = %+v", domains)
 	}
 	// Attached since the VM started: nothing to tell it until its next start.
 	other := vol
@@ -156,6 +161,16 @@ func TestInstancesAttachVolumesInOrderBySerial(t *testing.T) {
 	if len(vols) != 2 || vols[0].Target.Dev != "vdb" || vols[0].Serial != "bcv-b" || vols[0].ReadOnly != nil || vols[0].Driver.Type != "raw" ||
 		vols[1].Target.Dev != "vdc" || vols[1].Serial != "bcv-a" || vols[1].ReadOnly == nil {
 		t.Fatalf("libvirt volume disks = %+v", vols)
+	}
+	// A running domain is listed with the volumes its live definition has open.
+	d.Metadata.Instance.ID = "inst_v"
+	live, _ := xml.Marshal(d)
+	virt := &fakeVirt{domains: map[string]*fakeDomain{"inst_v": {xml: live, state: "running"}}}
+	l.Exec = virt.exec
+	listed, err := l.List(t.Context())
+	if err != nil || len(listed) != 1 || len(listed[0].Volumes) != 2 || listed[0].Volumes[0].ID != "vol_b" || listed[0].Volumes[0].ReadOnly ||
+		listed[0].Volumes[1].ID != "vol_a" || !listed[0].Volumes[1].ReadOnly {
+		t.Fatalf("listed = %+v, %v", listed, err)
 	}
 
 	c := &CloudHypervisor{Dir: t.TempDir(), Volumes: v}
