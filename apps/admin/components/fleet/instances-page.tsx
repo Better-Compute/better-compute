@@ -4,7 +4,7 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useMemo } from 'react';
 import { RiInstanceLine } from 'react-icons/ri';
 import { EntityLink } from '@/components/shell/peek';
-import { useWorkspace } from '@/components/shell/workspace';
+import { useNow } from '@/components/shell/workspace';
 import { StackedBar } from '@/components/ui/charts';
 import { DataTable, type Column, type Facet } from '@/components/ui/data-table';
 import { Drawer } from '@/components/ui/overlay';
@@ -102,7 +102,7 @@ export function InstancesPage() {
 }
 
 export function InstanceDetail({ instance, snapshot }: { instance: Instance; snapshot: FleetSnapshot }) {
-  const { now } = useWorkspace();
+  const now = useNow(5_000);
   const node = snapshot.nodes.find((each) => each.id === instance.nodeId);
   return (
     <div className="flex flex-col gap-5">

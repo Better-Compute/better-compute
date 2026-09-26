@@ -2,7 +2,7 @@
 
 import { useMemo } from 'react';
 import { useConnection } from '@/components/shell/connection';
-import { useWorkspace } from '@/components/shell/workspace';
+import { useWorkspaceSettings, useClockGetter } from '@/components/shell/workspace';
 import { api as client } from '@/lib/api';
 import { useFeedback } from '@/components/ui/feedback';
 import type { CommandBatchView, FleetNode, Rollout, Sandbox } from '@/lib/data/fleet';
@@ -18,7 +18,8 @@ const names = (nodes: readonly FleetNode[]) => (nodes.length === 1 ? nodes[0]!.h
 const LABEL = /^([A-Za-z0-9](?:[A-Za-z0-9._/-]{0,126}[A-Za-z0-9])?)(?:=(.{0,63})|-)$/;
 
 export function useFleetCommands() {
-  const { now, live, source } = useWorkspace();
+  const { live, source } = useWorkspaceSettings();
+  const clock = useClockGetter();
   const tenantId = useConnection().status?.tenantId;
   const { toast, confirm, confirmWithReason } = useFeedback();
 
@@ -30,7 +31,7 @@ export function useFleetCommands() {
       toast({ title: "You're viewing the past", detail: 'Return the clock to live before changing the fleet.', status: 'warn' });
       return false;
     };
-    const at = () => now;
+    const at = () => clock().now;
     const remote = source === 'live';
     /** Live mode: run each call against the API, report how many succeeded, then refresh the fleet. */
     const send = async (label: string, calls: [path: string, input: Record<string, unknown>][]) => {
@@ -282,5 +283,5 @@ export function useFleetCommands() {
       },
     };
     return api;
-  }, [now, live, source, tenantId, toast, confirm, confirmWithReason]);
+  }, [clock, live, source, tenantId, toast, confirm, confirmWithReason]);
 }

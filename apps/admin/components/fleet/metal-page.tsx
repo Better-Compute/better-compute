@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react';
 import { RiArrowRightLine, RiCheckLine, RiCloseLine, RiHammerLine, RiRadarLine } from 'react-icons/ri';
 import { EntityLink } from '@/components/shell/peek';
-import { useWorkspace } from '@/components/shell/workspace';
+import { useNow } from '@/components/shell/workspace';
 import { StackedBar } from '@/components/ui/charts';
 import { EmptyState, PageHeader, Panel } from '@/components/ui/panel';
 import { Led, Mono, Tag } from '@/components/ui/signal';
@@ -38,7 +38,7 @@ const blurb: Partial<Record<ProvisionState, string>> = {
 
 export function MetalPage() {
   const snapshot = useFleet();
-  const { now } = useWorkspace();
+  const now = useNow(5_000);
   const commands = useFleetCommands();
   const [selected, setSelected] = useState<ProvisionState | undefined>(undefined);
   const metal = useMemo(() => snapshot.nodes.filter((node) => node.bmc), [snapshot.nodes]);

@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useMemo } from 'react';
 import { EntityLink, usePeek } from '@/components/shell/peek';
-import { useWorkspace } from '@/components/shell/workspace';
+import { useNow } from '@/components/shell/workspace';
 import { StackedBar } from '@/components/ui/charts';
 import { Led, Mono, Tag } from '@/components/ui/signal';
 import { MINUTE } from '@/lib/data/core';
@@ -115,7 +115,7 @@ const rank = (node: FleetNode) => {
 /** fleet.unhealthy: the worst nodes first, with their top condition. */
 export function UnhealthyWidget({ settings, size }: WidgetProps) {
   const snapshot = useFleet();
-  const { now } = useWorkspace();
+  const now = useNow(5_000);
   const includeWarnings = settings.warnings !== false;
   const nodes = useMemo(
     () =>
@@ -159,7 +159,7 @@ export function UnhealthyWidget({ settings, size }: WidgetProps) {
 /** fleet.rollout: the running bcd rollout by wave. */
 export function RolloutWidget() {
   const snapshot = useFleet();
-  const { now } = useWorkspace();
+  const now = useNow(5_000);
   const rollout = snapshot.rollouts.find((each) => each.state === 'running' || each.state === 'paused');
   if (!rollout) return <p className="grid h-full place-items-center text-body-2-regular text-text-tertiary">No rollout running.</p>;
   const total = rollout.nodeList.length;
@@ -199,7 +199,7 @@ export function RolloutWidget() {
 /** fleet.sandboxes: live, starting and warm-idle sandboxes, and how many expire soon. */
 export function SandboxesWidget() {
   const snapshot = useFleet();
-  const { now } = useWorkspace();
+  const now = useNow(5_000);
   const ready = snapshot.sandboxes.filter((s) => s.state === 'ready').length;
   const starting = snapshot.sandboxes.filter((s) => s.state === 'starting').length;
   const idle = snapshot.templates.reduce((sum, template) => sum + warmIdle(template, now), 0);
@@ -227,7 +227,7 @@ export function SandboxesWidget() {
 /** fleet.batches: quorum batches waiting for signatures. */
 export function BatchesWidget() {
   const snapshot = useFleet();
-  const { now } = useWorkspace();
+  const now = useNow(5_000);
   const pending = snapshot.batches.filter((batch) => batch.state === 'pending');
   if (!pending.length) return <p className="grid h-full place-items-center text-body-2-regular text-text-tertiary">Nothing awaits a signature.</p>;
   return (

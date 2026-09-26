@@ -16,7 +16,7 @@ import {
   RiTableLine,
 } from 'react-icons/ri';
 import { usePageCommands } from '@/components/shell/page-commands';
-import { useWorkspace } from '@/components/shell/workspace';
+import { useNow } from '@/components/shell/workspace';
 import type { CommandDef } from '@/lib/modules';
 import { StackedBar } from '@/components/ui/charts';
 import { DataTable, type Column } from '@/components/ui/data-table';
@@ -44,7 +44,7 @@ function avgGpu(node: FleetNode): number | undefined {
 
 export function NodesPage() {
   const snapshot = useFleet();
-  const { now } = useWorkspace();
+  const now = useNow(5_000);
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();

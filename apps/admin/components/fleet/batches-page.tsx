@@ -12,7 +12,7 @@ import {
   RiShieldCheckLine,
   RiUser3Line,
 } from 'react-icons/ri';
-import { useWorkspace } from '@/components/shell/workspace';
+import { useNow } from '@/components/shell/workspace';
 import { StackedBar } from '@/components/ui/charts';
 import { useFeedback } from '@/components/ui/feedback';
 import { EmptyState, PageHeader, Panel } from '@/components/ui/panel';
@@ -36,7 +36,7 @@ const ME = 'you@legionedge.ai';
 
 export function BatchesPage() {
   const snapshot = useFleet();
-  const { now } = useWorkspace();
+  const now = useNow(5_000);
   const [filter, setFilter] = useState<BatchState | 'all'>('all');
   const counts = useMemo(() => {
     const out: Record<BatchState, number> = { pending: 0, approved: 0, expired: 0, cancelled: 0 };

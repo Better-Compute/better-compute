@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useMemo, useState } from 'react';
 import { RiPauseLine, RiPlayLine, RiRocket2Line, RiStopLine } from 'react-icons/ri';
-import { useWorkspace } from '@/components/shell/workspace';
+import { useNow } from '@/components/shell/workspace';
 import { Meter, StackedBar } from '@/components/ui/charts';
 import { KeyValue, PageHeader, Panel } from '@/components/ui/panel';
 import { Mono, Tag, type Status } from '@/components/ui/signal';
@@ -35,7 +35,7 @@ const stateTone: Record<RolloutNodeState, 'signal' | 'neutral' | 'muted' | 'crit
 
 export function RolloutsPage() {
   const snapshot = useFleet();
-  const { now } = useWorkspace();
+  const now = useNow(5_000);
   const current = snapshot.rollouts.find((rollout) => rollout.state === 'running' || rollout.state === 'paused');
   const versions = useMemo(() => countBy(snapshot.nodes, (node) => node.daemonVersion), [snapshot.nodes]);
   const history = snapshot.rollouts.filter((rollout) => rollout !== current);

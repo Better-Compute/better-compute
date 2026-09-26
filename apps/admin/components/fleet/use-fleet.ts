@@ -2,7 +2,7 @@
 
 import { useMemo } from 'react';
 import { useConnection } from '@/components/shell/connection';
-import { useWorkspace } from '@/components/shell/workspace';
+import { useNow, useWorkspaceSettings } from '@/components/shell/workspace';
 import { scopeFleet, simulateFleet, type FleetSnapshot } from '@/lib/data/fleet';
 import { liveSnapshot } from '@/lib/data/fleet-live';
 import { useLiveFleet, type LiveState } from './live';
@@ -13,8 +13,9 @@ import { applyActions, useFleetActions } from './store';
  * actions laid over it. Live (Settings → Connection): the API's answers, refreshed every 15 s; actions go to the
  * API instead (commands.tsx). Either way scoped to the workspace's site.
  */
-export function useFleet(options: { scoped?: boolean } = {}): FleetSnapshot {
-  const { now, siteId, source } = useWorkspace();
+export function useFleet(options: { scoped?: boolean; bucketMs?: number } = {}): FleetSnapshot {
+  const now = useNow(options.bucketMs ?? 5_000);
+  const { siteId, source } = useWorkspaceSettings();
   const connection = useConnection();
   const actions = useFleetActions();
   const live = source === 'live';
@@ -28,7 +29,7 @@ export function useFleet(options: { scoped?: boolean } = {}): FleetSnapshot {
 
 /** Live-mode fetch state for banners: which API groups failed, when it last answered. */
 export function useFleetSource(): { live: boolean; state: LiveState } {
-  const { source } = useWorkspace();
+  const { source } = useWorkspaceSettings();
   const connection = useConnection();
   const live = source === 'live';
   return { live, state: useLiveFleet(live, connection.status?.tenantId) };

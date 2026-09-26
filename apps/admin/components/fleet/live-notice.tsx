@@ -1,6 +1,6 @@
 'use client';
 
-import { useWorkspace } from '@/components/shell/workspace';
+import { useNow } from '@/components/shell/workspace';
 import { Led } from '@/components/ui/signal';
 import { fmtRelative } from '@/lib/data/format';
 import { useFleetSource } from './use-fleet';
@@ -8,7 +8,7 @@ import { useFleetSource } from './use-fleet';
 /** In live mode: when the fleet last answered, and which API groups failed (so empty never reads as "no fleet"). */
 export function LiveNotice() {
   const { live, state } = useFleetSource();
-  const { now } = useWorkspace();
+  const now = useNow(5_000);
   if (!live) return null;
   const failed = Object.entries(state.errors);
   return (

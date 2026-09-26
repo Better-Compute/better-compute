@@ -16,7 +16,7 @@ import {
   RiToolsLine,
 } from 'react-icons/ri';
 import { Tab, TabList, TabPanel, Tabs } from '@/components/base/tabs/tabs';
-import { useWorkspace } from '@/components/shell/workspace';
+import { useNow } from '@/components/shell/workspace';
 import { Gauge, Sparkline } from '@/components/ui/charts';
 import { KeyValue } from '@/components/ui/panel';
 import { Led, Mono, SeverityIcon, Tag } from '@/components/ui/signal';
@@ -54,7 +54,7 @@ const actionLabel: Record<string, string> = {
 
 /** Everything about one node: header actions, then tabs for GPUs, conditions, labels, workloads, events. */
 export function NodeDetail({ node, snapshot, compact }: { node: FleetNode; snapshot: FleetSnapshot; compact?: boolean }) {
-  const { now } = useWorkspace();
+  const now = useNow(5_000);
   const commands = useFleetCommands();
   const pool = node.poolId ? poolById(node.poolId) : undefined;
   const site = siteById(node.siteId);
@@ -500,7 +500,7 @@ function LabelsEditor({ node }: { node: FleetNode }) {
 }
 
 function NodeEvents({ node, snapshot }: { node: FleetNode; snapshot: FleetSnapshot }) {
-  const { now } = useWorkspace();
+  const now = useNow(5_000);
   const actions = useFleetActions();
   const bucket = Math.floor(now / 10_000) * 10_000;
   const events = useMemo(() => {

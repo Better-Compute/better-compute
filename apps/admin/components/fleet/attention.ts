@@ -1,7 +1,9 @@
 import { describeCondition, scopeFleet, simulateFleet } from '@/lib/data/fleet';
+import { liveSnapshot } from '@/lib/data/fleet-live';
 import { fmtDuration } from '@/lib/data/format';
 import type { AttentionItem } from '@/lib/data/platform';
 import { poolById, siteById } from '@/lib/data/topology';
+import { currentLiveParts } from './live';
 
 // The fleet's entries in the operator's attention queue, from the same snapshot the fleet pages show: node
 // incidents (XID and device faults, unreachable nodes, failed acceptance), a paused or failing rollout, batches
@@ -10,9 +12,12 @@ import { poolById, siteById } from '@/lib/data/topology';
 
 const MAX_NODE_ITEMS = 10;
 
-export function fleetAttention(now: number, scope: { siteId?: string } = {}): AttentionItem[] {
+export function fleetAttention(now: number, scope: { siteId?: string } = {}, context: { source?: 'simulated' | 'live' } = {}): AttentionItem[] {
   const at = Math.floor(now / 10_000) * 10_000;
-  const snapshot = scopeFleet(simulateFleet(at), scope.siteId);
+  // Live: the poller's last answer (nothing until it has one, rather than simulated items in a live view).
+  const parts = context.source === 'live' ? currentLiveParts() : undefined;
+  if (context.source === 'live' && !parts) return [];
+  const snapshot = scopeFleet(parts ? liveSnapshot(parts, at) : simulateFleet(at), scope.siteId);
   const items: AttentionItem[] = [];
 
   // One item per node: its worst condition, with how many more it has. Critical first, then warnings.

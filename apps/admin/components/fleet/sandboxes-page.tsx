@@ -4,7 +4,7 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useMemo } from 'react';
 import { RiAddLine, RiBox3Line, RiCameraLensLine, RiDeleteBin6Line, RiFileCopyLine, RiFireLine, RiTimeLine } from 'react-icons/ri';
 import { EntityLink } from '@/components/shell/peek';
-import { useWorkspace } from '@/components/shell/workspace';
+import { useNow } from '@/components/shell/workspace';
 import { Legend } from '@/components/ui/charts';
 import { DataTable, type Column, type Facet } from '@/components/ui/data-table';
 import { useFeedback } from '@/components/ui/feedback';
@@ -57,7 +57,7 @@ function TtlBar({ sandbox, now }: { sandbox: Sandbox; now: number }) {
 
 export function SandboxesPage() {
   const snapshot = useFleet();
-  const { now } = useWorkspace();
+  const now = useNow(5_000);
   const commands = useFleetCommands();
   const router = useRouter();
   const pathname = usePathname();
@@ -296,7 +296,7 @@ function BootHistogram({ sandboxes }: { sandboxes: readonly Sandbox[] }) {
 
 /** One sandbox: lifecycle, TTL, placement, exec, snapshots and actions (the drawer and the peek). */
 export function SandboxDetail({ sandbox, snapshot }: { sandbox: Sandbox; snapshot: FleetSnapshot }) {
-  const { now } = useWorkspace();
+  const now = useNow(5_000);
   const commands = useFleetCommands();
   const { toast } = useFeedback();
   const template = snapshot.templates.find((each) => each.id === sandbox.templateId);

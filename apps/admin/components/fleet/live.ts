@@ -89,6 +89,11 @@ export async function refreshLive(): Promise<void> {
   });
 }
 
+/** The poller's last answer, outside React (the attention queue reads it). Undefined until live data arrived. */
+export function currentLiveParts(): LiveParts | undefined {
+  return state.parts;
+}
+
 function subscribe(listener: () => void) {
   listeners.add(listener);
   return () => listeners.delete(listener);

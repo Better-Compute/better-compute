@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useMemo, useState } from 'react';
 import { RiFileCopyLine, RiPauseLine, RiPlayLine, RiSearchLine, RiTimerFlashLine } from 'react-icons/ri';
-import { useWorkspace } from '@/components/shell/workspace';
+import { useNow, useWorkspaceSettings } from '@/components/shell/workspace';
 import { Sparkline } from '@/components/ui/charts';
 import { useFeedback } from '@/components/ui/feedback';
 import { Drawer } from '@/components/ui/overlay';
@@ -67,7 +67,8 @@ function summary(event: ComputeEvent): string {
 
 export function ActivityPage() {
   const snapshot = useFleet({ scoped: false });
-  const { now, siteId } = useWorkspace();
+  const now = useNow(2_000);
+  const { siteId } = useWorkspaceSettings();
   const actions = useFleetActions();
   const { toast } = useFeedback();
   const router = useRouter();

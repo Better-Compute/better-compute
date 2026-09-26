@@ -1,7 +1,7 @@
 'use client';
 
 import { RiCheckboxCircleLine, RiGitPullRequestLine } from 'react-icons/ri';
-import { useWorkspace } from '@/components/shell/workspace';
+import { useNow } from '@/components/shell/workspace';
 import { EmptyState, KeyValue, PageHeader, Panel } from '@/components/ui/panel';
 import { Mono, Tag, type Status } from '@/components/ui/signal';
 import type { FleetChange } from '@/lib/data/fleet';
@@ -17,7 +17,7 @@ const sign: Record<FleetChange['action'], string> = { create: '+', update: '~', 
 
 export function DriftPage() {
   const snapshot = useFleet({ scoped: false });
-  const { now } = useWorkspace();
+  const now = useNow(5_000);
   const status = snapshot.drift;
   const drift = status.drift;
   return (

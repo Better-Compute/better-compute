@@ -2,7 +2,7 @@
 
 import { RiHardDrive2Line } from 'react-icons/ri';
 import { EntityLink } from '@/components/shell/peek';
-import { useWorkspace } from '@/components/shell/workspace';
+import { useNow } from '@/components/shell/workspace';
 import { DataTable, type Column, type Facet } from '@/components/ui/data-table';
 import { PageHeader, Panel } from '@/components/ui/panel';
 import { Mono, Tag } from '@/components/ui/signal';
@@ -18,7 +18,7 @@ import { useFleet } from './use-fleet';
 
 export function VolumesPage() {
   const snapshot = useFleet();
-  const { now } = useWorkspace();
+  const now = useNow(5_000);
   const volumes = snapshot.volumes;
   const mounted = new Map<string, string[]>();
   for (const template of snapshot.templates) for (const mount of template.volumes) mounted.set(mount.volumeId, [...(mounted.get(mount.volumeId) ?? []), `${template.name}:${mount.mountPath}`]);

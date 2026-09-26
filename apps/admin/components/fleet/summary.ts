@@ -2,7 +2,7 @@
 
 import { useMemo } from 'react';
 import { useConnection } from '@/components/shell/connection';
-import { useScope, useWorkspace } from '@/components/shell/workspace';
+import { useNow, useWorkspaceSettings, useScope } from '@/components/shell/workspace';
 import { liveHealth } from '@/lib/data/fleet-live';
 import { fleetPulse } from '@/lib/data/platform';
 import { useLiveFleet } from './live';
@@ -28,7 +28,8 @@ export interface FleetSummary {
 const empty = (): NodeCounts => ({ total: 0, ready: 0, degraded: 0, offline: 0, provisioning: 0 });
 
 export function useFleetSummary(): FleetSummary {
-  const { now, source } = useWorkspace();
+  const now = useNow(10_000);
+  const { source } = useWorkspaceSettings();
   const scope = useScope();
   const connection = useConnection();
   const live = source === 'live';
