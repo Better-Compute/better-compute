@@ -37,9 +37,10 @@ func TestDRADriver(t *testing.T) {
 	var mu sync.Mutex
 	var applied []map[string]any
 	var deleted []string
+	gpu1 := draDeviceName("GPU-1", "a1")
 	claims := map[string]string{
 		"c1": `{"metadata":{"uid":"u1"},"status":{"allocation":{"devices":{"results":[
-			{"request":"gpu","driver":"gpu.bcd.dev","pool":"n1","device":"gpu-1"},
+			{"request":"gpu","driver":"gpu.bcd.dev","pool":"n1","device":"` + gpu1 + `"},
 			{"request":"nic","driver":"other.example.com","pool":"n1","device":"nic-0"}]}}}}`,
 		"c2": `{"metadata":{"uid":"u2"},"status":{"allocation":{"devices":{"results":[
 			{"request":"gpu","driver":"gpu.bcd.dev","pool":"n1","device":"gpu-3"}]}}}}`,
@@ -96,7 +97,7 @@ func TestDRADriver(t *testing.T) {
 	}
 	first := devices[0].(map[string]any)
 	attrs := first["attributes"].(map[string]any)
-	if first["name"] != "gpu-1" || attrs["uuid"].(map[string]any)["string"] != "GPU-1" || attrs["allocation"].(map[string]any)["string"] != "a1" ||
+	if first["name"] != gpu1 || attrs["uuid"].(map[string]any)["string"] != "GPU-1" || attrs["allocation"].(map[string]any)["string"] != "a1" ||
 		attrs["class"].(map[string]any)["string"] != "gpu" || attrs["numaNode"].(map[string]any)["int"] != 1.0 {
 		t.Fatalf("device = %v", first)
 	}
@@ -133,7 +134,7 @@ func TestDRADriver(t *testing.T) {
 		Claim{Namespace: "ml", Name: "c2", UID: "u2"},
 		Claim{Namespace: "ml", Name: "c3", UID: "u3"},
 		Claim{Namespace: "ml", Name: "gone", UID: "u4"})
-	if !reflect.DeepEqual(got["u1"], ClaimResult{Devices: []PreparedDevice{{RequestNames: []string{"gpu"}, PoolName: "n1", DeviceName: "gpu-1", CDIDeviceIDs: []string{"bcd.dev/gpu=GPU-1"}}}}) {
+	if !reflect.DeepEqual(got["u1"], ClaimResult{Devices: []PreparedDevice{{RequestNames: []string{"gpu"}, PoolName: "n1", DeviceName: gpu1, CDIDeviceIDs: []string{"bcd.dev/gpu=GPU-1"}}}}) {
 		t.Fatalf("u1 = %+v", got["u1"])
 	}
 	for uid, want := range map[string]string{"u2": "not bound to Kubernetes", "u3": "is not the claim", "u4": "read ResourceClaim"} {
@@ -152,14 +153,14 @@ func TestDRADriver(t *testing.T) {
 
 	// A pod holds gpu-1 through its claim when compute releases it.
 	var reaped []string
-	m.DeletePod = func(_ context.Context, ns, name string) error {
+	m.DeletePod = func(_ context.Context, ns, name string, _ bool) error {
 		reaped = append(reaped, ns+"/"+name)
 		return nil
 	}
 	kubelet.mu.Lock()
 	kubelet.podList = []PodResources{
-		{Name: "train", Namespace: "ml", Containers: []ContainerResources{{Name: "main", Claimed: []ClaimedDevice{{Driver: DRADriverName, Pool: "n1", Device: "gpu-1"}}}}},
-		{Name: "other", Namespace: "ml", Containers: []ContainerResources{{Name: "main", Claimed: []ClaimedDevice{{Driver: "other.example.com", Pool: "n1", Device: "gpu-1"}}}}},
+		{Name: "train", Namespace: "ml", Containers: []ContainerResources{{Name: "main", Claimed: []ClaimedDevice{{Driver: DRADriverName, Pool: "n1", Device: gpu1}}}}},
+		{Name: "other", Namespace: "ml", Containers: []ContainerResources{{Name: "main", Claimed: []ClaimedDevice{{Driver: "other.example.com", Pool: "n1", Device: gpu1}}}}},
 	}
 	kubelet.mu.Unlock()
 	m.Sync(ctx)
@@ -199,8 +200,8 @@ func TestDRADriver(t *testing.T) {
 
 func TestResourceSliceV1beta1(t *testing.T) {
 	body, _ := resourceSlice("resource.k8s.io/v1beta1", "n1", 7, map[string]map[string]atom{
-		ResourceGPUMig: {"GPU-1_gi1_ci0": {allocation: "a1", visible: "MIG-x", healthy: true}},
-		ResourceGPU:    {"GPU-2": {allocation: "a1", healthy: false}},
+		ResourceGPUMig: {"GPU-1_gi1_ci0@a1": {id: "GPU-1_gi1_ci0", allocation: "a1", visible: "MIG-x", healthy: true}},
+		ResourceGPU:    {"GPU-2@a1": {id: "GPU-2", allocation: "a1", healthy: false}},
 	})
 	var slice struct {
 		Spec struct {
@@ -211,7 +212,7 @@ func TestResourceSliceV1beta1(t *testing.T) {
 	if err := json.Unmarshal(body, &slice); err != nil {
 		t.Fatal(err)
 	}
-	if len(slice.Spec.Devices) != 1 || slice.Spec.Devices[0]["name"] != "gpu-1-gi1-ci0" || slice.Spec.Pool["generation"] != 7.0 {
+	if len(slice.Spec.Devices) != 1 || slice.Spec.Devices[0]["name"] != draDeviceName("GPU-1_gi1_ci0", "a1") || slice.Spec.Pool["generation"] != 7.0 {
 		t.Fatalf("slice = %s", body)
 	}
 	attrs := slice.Spec.Devices[0]["basic"].(map[string]any)["attributes"].(map[string]any)

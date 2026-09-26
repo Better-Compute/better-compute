@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/hostconfig"
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
 	"github.com/better-compute/better-compute/daemon/internal/kube"
@@ -34,6 +35,9 @@ func (a *Agent) kubeJoinUnit() kube.JoinUnit {
 		},
 		Labels:  a.kubeLabels,
 		Allowed: a.o.KubernetesAllowed,
+		// Root decides which clusters get this machine, as root or not (review round 5 #4): an empty
+		// [kubernetes] allowed_clusters refuses every k8s-join.
+		RequireAllowed: true,
 	}
 }
 
@@ -113,10 +117,22 @@ func newKubeManager(a *Agent) *kube.Manager {
 		NodeName: os.Getenv("NODE_NAME"),
 		Labels:   a.kubeLabels,
 		GPUAPI:   a.o.KubernetesGPUAPI,
+		// ForeignGpuExposure, PodResourcesUnavailable, KubernetesReleased reach the control plane with
+		// the next status.
+		Changed: a.triggerConverge,
 		// The DRA driver's sockets live beside the device plugins' (fakehw maps them under its root).
 		RegistryDir:  a.host.Path("/var/lib/kubelet/plugins_registry"),
 		DRAPluginDir: a.host.Path("/var/lib/kubelet/plugins/" + kube.DRADriverName),
 	}
+}
+
+// kubeConditions are the device plugin manager's conditions as StatusReport conditions.
+func (a *Agent) kubeConditions() []*agentv1.Condition {
+	var out []*agentv1.Condition
+	for _, c := range a.kube.Conditions() {
+		out = append(out, &agentv1.Condition{Type: c.Type, Status: agentv1.ConditionStatus_CONDITION_STATUS_TRUE, Reason: c.Reason, Message: c.Message})
+	}
+	return out
 }
 
 // gpu returns the inventory's GPU by UUID (a copy's pointer; nil when unknown).

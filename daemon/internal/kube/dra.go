@@ -46,9 +46,12 @@ const (
 	sliceRefresh = 10 * time.Minute
 )
 
-// draDeviceName makes a DRA device name (a DNS label) of an atom: GPU-5ab…/gi1/ci0 → gpu-5ab…-gi1-ci0.
-func draDeviceName(atomID string) string {
-	return strings.NewReplacer("/", "-", "_", "-").Replace(strings.ToLower(atomID))
+// draDeviceName makes a DRA device name (a DNS label, at most 63 characters) of an atom and the
+// allocation it is bound to: GPU-5ab…/gi1/ci0 of alloc_x → gpu-5ab…-gi1-ci0-<8 hex of alloc_x>. The
+// allocation is part of the name for the reason it is part of a device plugin id (deviceID).
+func draDeviceName(atomID, allocation string) string {
+	sum := sha256.Sum256([]byte(allocation))
+	return strings.NewReplacer("/", "-", "_", "-").Replace(strings.ToLower(atomID)) + "-" + hex.EncodeToString(sum[:4])
 }
 
 // draDriver serves the kubelet's plugin registration and DRA services.
@@ -64,6 +67,15 @@ type draDriver struct {
 	lastSlice   string
 	publishedAt time.Time
 	apiVersion  string
+	// live: a slice with devices is out there (deleted once none are left).
+	live bool
+}
+
+// lastPublished reports whether the node's slice offers devices now.
+func (d *draDriver) lastPublished() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.live
 }
 
 func (d *draDriver) regPath() string {
@@ -270,8 +282,8 @@ func (d *draDriver) prepareClaim(ctx context.Context, c Claim, node string, devi
 func (d *draDriver) byDeviceName(want map[string]map[string]atom) map[string]atom {
 	out := map[string]atom{}
 	for _, atoms := range want {
-		for id, a := range atoms {
-			out[draDeviceName(id)] = a
+		for _, a := range atoms {
+			out[draDeviceName(a.id, a.allocation)] = a
 		}
 	}
 	return out
@@ -313,12 +325,12 @@ func resourceSlice(api, node string, generation int64, want map[string]map[strin
 	}
 	var devs []dev
 	for resource, atoms := range want {
-		for id, a := range atoms {
+		for _, a := range atoms {
 			if !a.healthy {
 				continue
 			}
 			attrs := map[string]map[string]any{
-				"uuid":       {"string": GPUOf(id)},
+				"uuid":       {"string": GPUOf(a.id)},
 				"class":      {"string": strings.TrimPrefix(resource, "bcd.dev/")},
 				"allocation": {"string": a.allocation},
 			}
@@ -328,7 +340,7 @@ func resourceSlice(api, node string, generation int64, want map[string]map[strin
 			if len(a.numa) > 0 {
 				attrs["numaNode"] = map[string]any{"int": a.numa[0]}
 			}
-			devs = append(devs, dev{draDeviceName(id), attrs})
+			devs = append(devs, dev{draDeviceName(a.id, a.allocation), attrs})
 		}
 	}
 	sort.Slice(devs, func(i, j int) bool { return devs[i].name < devs[j].name })
@@ -397,7 +409,7 @@ func (d *draDriver) publish(ctx context.Context, want map[string]map[string]atom
 		return fmt.Errorf("publish ResourceSlice %s: %w", sliceName(node), err)
 	}
 	d.mu.Lock()
-	d.lastSlice, d.publishedAt = hash, now
+	d.lastSlice, d.publishedAt, d.live = hash, now, !empty
 	d.mu.Unlock()
 	return nil
 }

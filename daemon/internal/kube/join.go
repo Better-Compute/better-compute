@@ -54,6 +54,9 @@ type State struct {
 	// GPU lets the device plugins (or the DRA driver, GPUAPI "dra") offer GPUs.
 	GPU    bool   `json:"gpu"`
 	GPUAPI string `json:"gpuApi,omitempty"`
+	// Released: the spec dropped k8s-join, so bcd cordoned and drained the Node (Clean). The kubelet
+	// stays joined; the unit's return uncordons it.
+	Released bool `json:"released,omitempty"`
 }
 
 // ReadState reads StateFile; ok is false when the node was never joined by bcd.
@@ -154,6 +157,10 @@ func (u JoinUnit) Plan(ctx context.Context, sys hostconfig.System, settings json
 	}
 	if !active(ctx, sys, "kubelet") {
 		actions = append(actions, runCmd(sys, hostconfig.Cmd{Name: "systemctl", Args: []string{"enable", "--now", "kubelet"}}))
+	}
+	if state.Released {
+		// The unit is back after a release: the Node takes pods again.
+		actions = append(actions, runCmd(sys, kubectl("uncordon", name)))
 	}
 	steps, err = planNode(ctx, sys, name, state, labels, p.taints)
 	if err != nil {

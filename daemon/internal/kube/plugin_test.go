@@ -25,9 +25,10 @@ type fakeKubelet struct {
 	srv  *http.Server
 	pods *http.Server
 
-	mu         sync.Mutex
-	registered []RegisterRequest
-	podList    []PodResources
+	mu          sync.Mutex
+	registered  []RegisterRequest
+	podList     []PodResources
+	allocatable []ContainerDevices
 }
 
 func startKubelet(t *testing.T, dir string) *fakeKubelet {
@@ -52,6 +53,11 @@ func (k *fakeKubelet) start() {
 		k.mu.Lock()
 		defer k.mu.Unlock()
 		return connect.NewResponse(&ListPodResourcesResponse{Pods: k.podList}), nil
+	}, opts))
+	pods.Handle(procAllocatable, connect.NewUnaryHandler(procAllocatable, func(context.Context, *connect.Request[ListPodResourcesRequest]) (*connect.Response[allocatableAnswer], error) {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		return connect.NewResponse(&allocatableAnswer{devices: k.allocatable}), nil
 	}, opts))
 	k.pods = serveUnix(k.t, filepath.Join(k.dir, "pod-resources.sock"), pods)
 }
@@ -154,7 +160,7 @@ func TestDevicePlugin(t *testing.T) {
 		},
 		NUMA:    func(gpu string) (int64, bool) { return map[string]int64{"GPU-1": 0, "GPU-2": 1}[gpu], gpu != "GPU-4" },
 		Healthy: func(gpu string) bool { return gpu != "GPU-2" },
-		DeletePod: func(_ context.Context, ns, name string) error {
+		DeletePod: func(_ context.Context, ns, name string, _ bool) error {
 			deleted = append(deleted, ns+"/"+name)
 			return nil
 		},
@@ -185,12 +191,12 @@ func TestDevicePlugin(t *testing.T) {
 		return stream.Msg().Devices
 	}
 	first := next()
-	if len(first) != 2 || !reflect.DeepEqual(*first[0], Device{ID: "GPU-1", Health: Healthy, NUMA: []int64{0}}) || first[1].ID != "GPU-2" || first[1].Health != Unhealthy || !reflect.DeepEqual(first[1].NUMA, []int64{1}) {
+	if len(first) != 2 || !reflect.DeepEqual(*first[0], Device{ID: "GPU-1@a1", Health: Healthy, NUMA: []int64{0}}) || first[1].ID != "GPU-2@a1" || first[1].Health != Unhealthy || !reflect.DeepEqual(first[1].NUMA, []int64{1}) {
 		t.Fatalf("devices = %+v %+v", first[0], first[1])
 	}
 
 	allocate := pluginClient[AllocateRequest, AllocateResponse](dir, ResourceGPU, procAllocate)
-	resp, err := allocate.CallUnary(ctx, connect.NewRequest(&AllocateRequest{ContainerRequests: [][]string{{"GPU-2", "GPU-1"}}}))
+	resp, err := allocate.CallUnary(ctx, connect.NewRequest(&AllocateRequest{ContainerRequests: [][]string{{"GPU-2@a1", "GPU-1@a1"}}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,11 +205,11 @@ func TestDevicePlugin(t *testing.T) {
 		c.Envs["NVIDIA_VISIBLE_DEVICES"] != "GPU-1,GPU-2" || c.Envs["BCD_ALLOCATION_IDS"] != "a1" || c.Annotations["bcd.dev/allocation-ids"] != "a1" {
 		t.Fatalf("allocate = %+v", c)
 	}
-	_, err = allocate.CallUnary(ctx, connect.NewRequest(&AllocateRequest{ContainerRequests: [][]string{{"GPU-3"}}}))
+	_, err = allocate.CallUnary(ctx, connect.NewRequest(&AllocateRequest{ContainerRequests: [][]string{{"GPU-3@a2"}}}))
 	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
 		t.Fatalf("allocating a plain hold's GPU = %v", err)
 	}
-	mig, err := pluginClient[AllocateRequest, AllocateResponse](dir, ResourceGPUMig, procAllocate).CallUnary(ctx, connect.NewRequest(&AllocateRequest{ContainerRequests: [][]string{{"GPU-4/gi1/ci0"}}}))
+	mig, err := pluginClient[AllocateRequest, AllocateResponse](dir, ResourceGPUMig, procAllocate).CallUnary(ctx, connect.NewRequest(&AllocateRequest{ContainerRequests: [][]string{{"GPU-4/gi1/ci0@a3"}}}))
 	if err != nil || !reflect.DeepEqual(mig.Msg.ContainerResponses[0].CDIDevices, []string{"bcd.dev/gpu=GPU-4/gi1/ci0", "nvidia.com/gpu=MIG-aaaa"}) ||
 		mig.Msg.ContainerResponses[0].Envs["NVIDIA_VISIBLE_DEVICES"] != "MIG-aaaa" {
 		t.Fatalf("MIG allocate = %+v, %v", mig, err)
@@ -211,9 +217,9 @@ func TestDevicePlugin(t *testing.T) {
 
 	pref, err := pluginClient[PreferredAllocationRequest, PreferredAllocationResponse](dir, ResourceGPU, procGetPreferredAlloc).CallUnary(ctx,
 		connect.NewRequest(&PreferredAllocationRequest{ContainerRequests: []*ContainerPreferredAllocationRequest{
-			{AvailableDeviceIDs: []string{"GPU-2", "GPU-1"}, MustIncludeDeviceIDs: []string{"GPU-2"}, AllocationSize: 2},
+			{AvailableDeviceIDs: []string{"GPU-2@a1", "GPU-1@a1"}, MustIncludeDeviceIDs: []string{"GPU-2@a1"}, AllocationSize: 2},
 		}}))
-	if err != nil || !reflect.DeepEqual(pref.Msg.ContainerResponses, [][]string{{"GPU-2", "GPU-1"}}) {
+	if err != nil || !reflect.DeepEqual(pref.Msg.ContainerResponses, [][]string{{"GPU-2@a1", "GPU-1@a1"}}) {
 		t.Fatalf("preferred = %+v, %v", pref, err)
 	}
 
@@ -221,7 +227,7 @@ func TestDevicePlugin(t *testing.T) {
 	// pod is deleted after the grace period, not before.
 	kubelet.mu.Lock()
 	kubelet.podList = []PodResources{
-		{Name: "train", Namespace: "ml", Containers: []ContainerResources{{Name: "main", Devices: []ContainerDevices{{ResourceName: ResourceGPU, DeviceIDs: []string{"GPU-1"}}}}}},
+		{Name: "train", Namespace: "ml", Containers: []ContainerResources{{Name: "main", Devices: []ContainerDevices{{ResourceName: ResourceGPU, DeviceIDs: []string{"GPU-1@a1"}}}}}},
 		{Name: "other", Namespace: "ml", Containers: []ContainerResources{{Name: "main", Devices: []ContainerDevices{{ResourceName: "nvidia.com/gpu", DeviceIDs: []string{"GPU-9"}}}}}},
 	}
 	kubelet.mu.Unlock()

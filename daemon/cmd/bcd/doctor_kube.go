@@ -24,8 +24,6 @@ func kubeChecks(cfg *config.Config, sys hostconfig.System, active func(unit stri
 		out = append(out, doctorCheck{"fail", "kubernetes", err.Error()})
 	case len(allowed) > 0:
 		out = append(out, doctorCheck{"ok", "kubernetes", fmt.Sprintf("%d allowed clusters", len(allowed))})
-	case cfg.Helper.Socket != "":
-		out = append(out, doctorCheck{"warn", "kubernetes", "no [kubernetes] allowed_clusters: bcd helper refuses every k8s-join"})
 	}
 	state, joined, err := kube.ReadState(sys)
 	if err != nil {
@@ -33,6 +31,11 @@ func kubeChecks(cfg *config.Config, sys hostconfig.System, active func(unit stri
 	}
 	if !joined {
 		return out
+	}
+	// bcd refuses every k8s-join without an allowlist (as root or under bcd helper): a node it joined
+	// before one was required fails its host section until root names the cluster.
+	if err == nil && len(allowed) == 0 && cfg.KubernetesAllowedClusters == "" {
+		out = append(out, doctorCheck{"fail", "kubernetes", fmt.Sprintf("joined to %s but [kubernetes] allowed_clusters is empty: k8s-join is refused until root lists the cluster", state.Server)})
 	}
 	if !active("kubelet") {
 		out = append(out, doctorCheck{"fail", "kubelet", fmt.Sprintf("joined to %s as %s but the kubelet is not running", state.Server, state.NodeName)})

@@ -33,8 +33,12 @@ const (
 	allocationIDsEnvironment = "BCD_ALLOCATION_IDS"
 )
 
-// atom is one advertised device.
+// atom is one advertised device. It is keyed by its kubelet id, deviceID(id, allocation): the same GPU
+// bound to another allocation is another device, so a pod the kubelet gave it under the old
+// allocation holds an id nobody advertises any more, and is reaped (review round 5 #3).
 type atom struct {
+	// id is the atom id (GPU-…, <gpu>_gi1_ci0, <gpu>_s2): the CDI device name.
+	id         string
 	allocation string
 	// cdi are the CDI names Allocate answers for it.
 	cdi []string
@@ -60,6 +64,9 @@ type plugin struct {
 	sock    os.FileInfo // our socket as created
 	kubelet os.FileInfo // kubelet.sock as registered with
 }
+
+// deviceID is a device's kubelet id: the atom and the allocation it is bound to.
+func deviceID(atomID, allocation string) string { return atomID + "@" + allocation }
 
 func socketName(resource string) string {
 	// bcd.dev/gpu.mig → bcd-gpu.mig.sock

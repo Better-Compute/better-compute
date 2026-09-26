@@ -18,11 +18,6 @@ func TestKubeChecks(t *testing.T) {
 	sys := hostconfig.NewFakeSystem()
 	up := map[string]bool{}
 	active := func(unit string) bool { return up[unit] }
-	helper := &config.Config{}
-	helper.Helper.Socket = "/run/bcd/helper.sock"
-	if got := kubeChecks(helper, sys, active); len(got) != 1 || got[0].status != "warn" || !strings.Contains(got[0].detail, "refuses every k8s-join") {
-		t.Fatalf("helper without allowlist = %+v", got)
-	}
 	bad := &config.Config{KubernetesAllowedClusters: "http://x#abc"}
 	if got := kubeChecks(bad, sys, active); len(got) != 1 || got[0].status != "fail" {
 		t.Fatalf("bad allowlist = %+v", got)
@@ -31,14 +26,19 @@ func TestKubeChecks(t *testing.T) {
 		t.Fatalf("not a Kubernetes node = %+v", got)
 	}
 	sys.Set(kube.StateFile, `{"server":"https://10.0.0.1:6443","nodeName":"gpu-7","gpu":true}`)
-	got := kubeChecks(&config.Config{}, sys, active)
-	if len(got) != 2 || got[0].check != "kubelet" || got[0].status != "fail" || got[1].status != "warn" {
+	// Joined, but no allowlist: every k8s-join is refused now (review round 5 #4).
+	if got := kubeChecks(&config.Config{}, sys, active); got[0].status != "fail" || !strings.Contains(got[0].detail, "allowed_clusters is empty") {
+		t.Fatalf("joined without an allowlist = %+v", got)
+	}
+	allowed := &config.Config{KubernetesAllowedClusters: "https://10.0.0.1:6443#sha256:" + strings.Repeat("ab", 32)}
+	got := kubeChecks(allowed, sys, active)
+	if len(got) != 3 || got[0].status != "ok" || got[1].check != "kubelet" || got[1].status != "fail" || got[2].status != "warn" {
 		t.Fatalf("joined, kubelet down = %+v", got)
 	}
 	up["kubelet"] = true
 	sys.Set("/var/lib/kubelet/device-plugins/kubelet.sock", "")
-	got = kubeChecks(&config.Config{}, sys, active)
-	if got[0].status != "ok" || got[0].detail != "node gpu-7 of https://10.0.0.1:6443" || got[1].status != "ok" {
+	got = kubeChecks(allowed, sys, active)
+	if got[1].status != "ok" || got[1].detail != "node gpu-7 of https://10.0.0.1:6443" || got[2].status != "ok" {
 		t.Fatalf("joined = %+v", got)
 	}
 }

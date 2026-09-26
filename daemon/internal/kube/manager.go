@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,8 +34,9 @@ type Manager struct {
 	// Healthy reports whether a GPU may take work (nil: all are).
 	Healthy func(gpu string) bool
 	// DeletePod deletes a pod still using a released device (default: kubectl with the kubelet's
-	// credentials).
-	DeletePod func(ctx context.Context, namespace, name string) error
+	// credentials): first with a 10 s grace period, then, if it still holds the device a minute later,
+	// forced.
+	DeletePod func(ctx context.Context, namespace, name string, force bool) error
 	// Interval between passes (default 5 s) and Grace a released device may stay in use before its
 	// pods are deleted (default 30 s).
 	Interval, Grace time.Duration
@@ -50,6 +52,9 @@ type Manager struct {
 	Labels   func() map[string]string
 	// LabelInterval spaces the hosted label syncs (default 1 min).
 	LabelInterval time.Duration
+	// Changed is called after a pass whose conditions differ from the previous one's (the agent then
+	// sends a status with them).
+	Changed func()
 	// GPUAPI is how a hosted node offers its GPUs (APIDevicePlugin, the default, or APIDRA); a node
 	// k8s-join joined takes its record's gpuApi.
 	GPUAPI string
@@ -62,11 +67,18 @@ type Manager struct {
 	once    sync.Once
 	plugins map[string]*plugin
 	// stale remembers when a pod was first seen holding a released device (namespace/name → time).
-	stale     map[string]time.Time
+	stale map[string]time.Time
+	// deleted remembers when a pod's deletion was last asked for (forced a minute later).
+	deleted   map[string]time.Time
 	labelSync time.Time
-	// advertised is each resource's device count as of the last pass (Advertised).
+	// advertised is each resource's device count as of the last pass (Advertised), conditions its
+	// conditions (Conditions).
 	advertised atomic.Pointer[map[string]int]
+	conditions atomic.Pointer[[]Condition]
 }
+
+// forceAfter is how long a deleted pod may keep a released device before its deletion is forced.
+const forceAfter = time.Minute
 
 // Advertised returns how many devices each bcd.dev resource advertises to the kubelet now (none
 // while the node is not a worker), for bcd status.
@@ -108,11 +120,16 @@ func (m *Manager) init() {
 			m.Log = slog.New(slog.DiscardHandler)
 		}
 		if m.DeletePod == nil {
-			m.DeletePod = func(ctx context.Context, namespace, name string) error {
-				_, err := m.Sys.Run(ctx, kubectl("delete", "pod", "--namespace", namespace, name, "--wait=false"))
+			m.DeletePod = func(ctx context.Context, namespace, name string, force bool) error {
+				args := []string{"delete", "pod", "--namespace", namespace, name, "--wait=false", "--ignore-not-found", "--grace-period=10"}
+				if force {
+					args = append(args[:len(args)-1], "--grace-period=0", "--force")
+				}
+				_, err := m.Sys.Run(ctx, kubectl(args...))
 				return err
 			}
 		}
+		m.deleted = map[string]time.Time{}
 	})
 }
 
@@ -219,12 +236,23 @@ func (m *Manager) syncLabels(ctx context.Context) {
 // Sync runs one pass.
 func (m *Manager) Sync(ctx context.Context) {
 	m.init()
+	var conditions []Condition
+	defer func() {
+		previous := m.conditions.Swap(&conditions)
+		if m.Changed != nil && (previous == nil && len(conditions) > 0 || previous != nil && !reflect.DeepEqual(*previous, conditions)) {
+			m.Changed()
+		}
+	}()
 	if !m.enabled() {
 		if len(m.plugins) > 0 {
 			m.Log.Info("device plugins stopped: the node is not a bcd-joined Kubernetes worker with gpu on")
 		}
 		m.stopAll()
 		m.advertised.Store(&map[string]int{})
+		if state, ok, err := ReadState(m.Sys); err == nil && ok && state.Released {
+			conditions = append(conditions, Condition{Type: ConditionKubernetesReleased, Reason: "Released",
+				Message: "compute released this machine from " + state.Server + ": Node " + state.NodeName + " is cordoned and drained"})
+		}
 		return
 	}
 	holds, err := ReadHolds(m.Sys)
@@ -234,6 +262,25 @@ func (m *Manager) Sync(ctx context.Context) {
 		return
 	}
 	want := m.atoms(holds)
+	// Another path to the GPUs (a second device plugin, a toolkit honouring NVIDIA_VISIBLE_DEVICES from any
+	// pod) makes compute's bindings meaningless: offer nothing until it is closed (review round 5 #2).
+	if exposed := m.exposure(ctx); exposed != nil {
+		if len(m.plugins) > 0 || m.dra.serving() {
+			m.Log.Warn("GPUs withdrawn from the kubelet", "reason", exposed.Message)
+		}
+		m.stopPlugins()
+		if m.dra.lastPublished() {
+			if err := m.dra.publish(ctx, nil); err != nil {
+				m.Log.Warn("DRA ResourceSlice", "error", err.Error())
+			}
+		}
+		m.dra.stop()
+		m.advertised.Store(&map[string]int{})
+		conditions = append(conditions, *exposed)
+		conditions = append(conditions, m.reap(ctx, want, len(holds) > 0)...)
+		m.syncLabels(ctx)
+		return
+	}
 	counts := map[string]int{}
 	for resource, atoms := range want {
 		counts[resource] = len(atoms)
@@ -250,7 +297,7 @@ func (m *Manager) Sync(ctx context.Context) {
 		if err := m.dra.publish(ctx, want); err != nil {
 			m.Log.Warn("DRA ResourceSlice", "error", err.Error())
 		}
-		m.reap(ctx, want)
+		conditions = append(conditions, m.reap(ctx, want, len(holds) > 0)...)
 		m.syncLabels(ctx)
 		return
 	}
@@ -272,7 +319,7 @@ func (m *Manager) Sync(ctx context.Context) {
 			}
 		}
 	}
-	m.reap(ctx, want)
+	conditions = append(conditions, m.reap(ctx, want, len(holds) > 0)...)
 	m.syncLabels(ctx)
 }
 
@@ -284,7 +331,7 @@ func (m *Manager) atoms(holds []Hold) map[string]map[string]atom {
 		for _, id := range h.Devices {
 			resource := ResourceOf(id)
 			gpu := GPUOf(id)
-			a := atom{allocation: h.AllocationID, cdi: []string{cdiKind + "=" + id}, visible: gpu, healthy: true}
+			a := atom{id: id, allocation: h.AllocationID, cdi: []string{cdiKind + "=" + id}, visible: gpu, healthy: true}
 			if resource == ResourceGPUMig {
 				a.visible = ""
 				if m.MigUUID != nil {
@@ -305,17 +352,23 @@ func (m *Manager) atoms(holds []Hold) map[string]map[string]atom {
 			if out[resource] == nil {
 				out[resource] = map[string]atom{}
 			}
-			out[resource][id] = a
+			out[resource][deviceID(id, h.AllocationID)] = a
 		}
 	}
 	return out
 }
 
 // reap deletes the pods whose containers still hold a bcd.dev device that is no longer advertised,
-// once they have held it for Grace (the kubelet's view lags a release by a pass or two).
-func (m *Manager) reap(ctx context.Context, want map[string]map[string]atom) {
+// once they have held it for Grace (the kubelet's view lags a release by a pass or two). Without the
+// pod-resources socket it cannot, which is a condition while bcd holds devices for Kubernetes.
+func (m *Manager) reap(ctx context.Context, want map[string]map[string]atom, holding bool) []Condition {
 	if _, err := os.Stat(m.PodResources); err != nil {
-		return
+		if !holding {
+			return nil
+		}
+		m.Log.Warn("pod-resources socket missing: released devices cannot be reclaimed from pods", "socket", m.PodResources)
+		return []Condition{{Type: ConditionPodResourcesUnavailable, Reason: "SocketMissing",
+			Message: m.PodResources + " is missing: pods keep devices compute released until the kubelet serves it"}}
 	}
 	client := connect.NewClient[ListPodResourcesRequest, ListPodResourcesResponse](unixClient(m.PodResources),
 		"http://localhost"+procListPodResources, connect.WithGRPC(), connect.WithCodec(codec{}))
@@ -324,7 +377,10 @@ func (m *Manager) reap(ctx context.Context, want map[string]map[string]atom) {
 	resp, err := client.CallUnary(lctx, connect.NewRequest(&ListPodResourcesRequest{}))
 	if err != nil {
 		m.Log.Warn("list pod resources", "error", err.Error())
-		return
+		if !holding {
+			return nil
+		}
+		return []Condition{{Type: ConditionPodResourcesUnavailable, Reason: "ListFailed", Message: err.Error()}}
 	}
 	now := m.Now()
 	seen := map[string]bool{}
@@ -366,14 +422,21 @@ func (m *Manager) reap(ctx context.Context, want map[string]map[string]atom) {
 		if now.Sub(first) < m.Grace {
 			continue
 		}
-		m.Log.Warn("deleting a pod that holds released devices", "pod", key, "devices", strings.Join(released, ","))
-		if err := m.DeletePod(ctx, pod.Namespace, pod.Name); err != nil {
+		asked, deleting := m.deleted[key]
+		if deleting && now.Sub(asked) < forceAfter {
+			continue
+		}
+		m.Log.Warn("deleting a pod that holds released devices", "pod", key, "devices", strings.Join(released, ","), "force", deleting)
+		if err := m.DeletePod(ctx, pod.Namespace, pod.Name, deleting); err != nil {
 			m.Log.Warn("delete pod", "pod", key, "error", err.Error())
 		}
+		m.deleted[key] = now
 	}
 	for key := range m.stale {
 		if !seen[key] {
 			delete(m.stale, key)
+			delete(m.deleted, key)
 		}
 	}
+	return nil
 }

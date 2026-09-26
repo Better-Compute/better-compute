@@ -39,7 +39,7 @@ func TestUnhealthyDevicesAreNeverOffered(t *testing.T) {
 		case "apply":
 			slices = append(slices, string(cmd.Stdin))
 		case "get":
-			return []byte(`{"metadata":{"uid":"u1"},"status":{"allocation":{"devices":{"results":[{"request":"gpu","driver":"gpu.bcd.dev","pool":"n1","device":"gpu-2"}]}}}}`), nil
+			return []byte(`{"metadata":{"uid":"u1"},"status":{"allocation":{"devices":{"results":[{"request":"gpu","driver":"gpu.bcd.dev","pool":"n1","device":"` + draDeviceName("GPU-2", "a1") + `"}]}}}}`), nil
 		}
 		return nil, nil
 	}
@@ -49,13 +49,16 @@ func TestUnhealthyDevicesAreNeverOffered(t *testing.T) {
 	m := &Manager{
 		Sys: sys, Dir: dir, PodResources: filepath.Join(dir, "pod-resources.sock"),
 		RegistryDir: filepath.Join(dir, "reg"), DRAPluginDir: filepath.Join(dir, "dra"),
-		Healthy:   func(gpu string) bool { return gpu != bad.Load().(string) },
-		DeletePod: func(_ context.Context, ns, name string) error { reaped = append(reaped, ns+"/"+name); return nil },
-		Grace:     time.Millisecond,
+		Healthy: func(gpu string) bool { return gpu != bad.Load().(string) },
+		DeletePod: func(_ context.Context, ns, name string, _ bool) error {
+			reaped = append(reaped, ns+"/"+name)
+			return nil
+		},
+		Grace: time.Millisecond,
 	}
 	ctx := context.Background()
 	kubelet.mu.Lock()
-	kubelet.podList = []PodResources{{Name: "train", Namespace: "ml", Containers: []ContainerResources{{Name: "main", Devices: []ContainerDevices{{ResourceName: ResourceGPU, DeviceIDs: []string{"GPU-2"}}}}}}}
+	kubelet.podList = []PodResources{{Name: "train", Namespace: "ml", Containers: []ContainerResources{{Name: "main", Devices: []ContainerDevices{{ResourceName: ResourceGPU, DeviceIDs: []string{"GPU-2@a1"}}}}}}}
 	kubelet.mu.Unlock()
 	m.Sync(ctx)
 	t.Cleanup(m.stopAll)
@@ -77,12 +80,12 @@ func TestUnhealthyDevicesAreNeverOffered(t *testing.T) {
 		}
 		return out
 	}
-	if got := health(); got["GPU-1"] != Healthy || got["GPU-2"] != Healthy {
+	if got := health(); got["GPU-1@a1"] != Healthy || got["GPU-2@a1"] != Healthy {
 		t.Fatalf("health = %v", got)
 	}
 	bad.Store("GPU-2")
 	m.Sync(ctx)
-	if got := health(); got["GPU-1"] != Healthy || got["GPU-2"] != Unhealthy {
+	if got := health(); got["GPU-1@a1"] != Healthy || got["GPU-2@a1"] != Unhealthy {
 		t.Fatalf("after the XID: %v", got)
 	}
 	time.Sleep(5 * time.Millisecond)
@@ -104,7 +107,7 @@ func TestUnhealthyDevicesAreNeverOffered(t *testing.T) {
 			} `json:"devices"`
 		} `json:"spec"`
 	}
-	if err := json.Unmarshal([]byte(last), &slice); err != nil || len(slice.Spec.Devices) != 1 || slice.Spec.Devices[0].Name != "gpu-1" {
+	if err := json.Unmarshal([]byte(last), &slice); err != nil || len(slice.Spec.Devices) != 1 || slice.Spec.Devices[0].Name != draDeviceName("GPU-1", "a1") {
 		t.Fatalf("slice = %s", last)
 	}
 	resp, err := draClient[ClaimsRequest, PrepareResponse](filepath.Join(dir, "dra", "dra.sock"), procPrepareV1).
@@ -118,7 +121,7 @@ func TestUnhealthyDevicesAreNeverOffered(t *testing.T) {
 	mu.Lock()
 	last = slices[len(slices)-1]
 	mu.Unlock()
-	if !strings.Contains(last, `"gpu-2"`) {
+	if !strings.Contains(last, `"`+draDeviceName("GPU-2", "a1")+`"`) {
 		t.Fatalf("slice after recovery = %s", last)
 	}
 }
