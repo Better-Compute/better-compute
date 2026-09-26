@@ -94,6 +94,17 @@ func TestSysctlRefusesAndWaits(t *testing.T) {
 			t.Fatalf("%s written", key)
 		}
 	}
+	// Hardened keys take only their hardened values.
+	for setting, ok := range map[string]bool{
+		`{"kernel.io_uring_disabled":0}`: false, `{"kernel.io_uring_disabled":2}`: true,
+		`{"dev.tty.legacy_tiocsti":1}`: false, `{"dev.tty.ldisc_autoload":0}`: true,
+		`{"net.ipv4.ip_unprivileged_port_start":80}`: false, `{"net.ipv4.ip_unprivileged_port_start":1024}`: true,
+	} {
+		_, err := parseSysctls("sysctl", json.RawMessage(setting))
+		if ok != (err == nil) {
+			t.Fatalf("%s: %v", setting, err)
+		}
+	}
 	// A key the kernel does not have yet (its module is not loaded) is retried, not terminal.
 	_, err = runAll(t, r, sys, unit("sysctl", `{"net.bridge.bridge-nf-call-iptables":1}`))
 	if err == nil || errors.Is(err, converge.ErrTerminal) || !strings.Contains(err.Error(), "net.bridge.bridge-nf-call-iptables") {
@@ -146,6 +157,11 @@ func TestKernelModulesThenSysctl(t *testing.T) {
 	_, err = runAll(t, r, sys, unit("kernel-modules", `{"load":["kvm; rm -rf /"]}`))
 	if !errors.Is(err, converge.ErrTerminal) {
 		t.Fatalf("bad name: %v", err)
+	}
+	for _, bad := range []string{`{"options":{"vfio":"enable_unsafe_noiommu_mode=1"}}`, `{"options":{"vfio-iommu-type1":"allow_unsafe_interrupts=Y"}}`} {
+		if _, err := runAll(t, r, sys, unit("kernel-modules", bad)); !errors.Is(err, converge.ErrTerminal) || !strings.Contains(err.Error(), "DMA isolation") {
+			t.Fatalf("%s: %v", bad, err)
+		}
 	}
 }
 

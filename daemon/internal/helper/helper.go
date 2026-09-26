@@ -68,7 +68,8 @@ type Request struct {
 	// update.settle
 	Running string `json:"running,omitempty"`
 	// host.unit: a config unit of NodeSpec.host and its settings (absent: the unit left the spec, and
-	// what it wrote is cleaned); GPUsBusy are the GPUs holding allocations (mig-layout skips them).
+	// what it wrote is cleaned). GPUsBusy is kept for the protocol and ignored: the helper finds the
+	// GPUs holding work itself (rootBusyGPUs).
 	// slice.apply / slice.remove: a GPU hold's slice (PLAN.md §3.8) and its limits.
 	Slice    string          `json:"slice,omitempty"`
 	Limits   *slice.Limits   `json:"limits,omitempty"`
@@ -272,11 +273,10 @@ func (s *Server) hostUnit(ctx context.Context, req Request) error {
 	if err := s.checkIntent(req); err != nil {
 		return err
 	}
-	busy := make(map[string]bool, len(req.GPUsBusy))
-	for _, g := range req.GPUsBusy {
-		busy[g] = true
-	}
-	r := s.HostUnits(hostconfig.Options{GPUBusy: func(uuid string) bool { return busy[uuid] }})
+	// Which GPUs hold work comes from root's own view; the node's list (req.GPUsBusy) is ignored:
+	// a node that lied could have busy GPUs repartitioned under their tenants.
+	busy := rootBusyGPUs(ctx, s.HostSystem)
+	r := s.HostUnits(hostconfig.Options{GPUBusy: func(uuid string) bool { return busy[uuid] || busy[anyGPU] }})
 	ctx, cancel := context.WithTimeout(ctx, HostUnitTimeout)
 	defer cancel()
 	steps, err := r.PlanUnit(ctx, s.HostSystem, req.Unit, req.Settings)

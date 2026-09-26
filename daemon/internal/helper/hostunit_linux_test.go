@@ -22,12 +22,20 @@ func TestHelperHostUnit(t *testing.T) {
 	sys := hostconfig.NewFakeSystem()
 	sys.Set("/proc/sys/vm/swappiness", "60\n")
 	sys.Set("/proc/sys/kernel/core_pattern", "core\n")
+	// Root's view of the GPUs holding work: processes on GPU-a, a live hold of a MIG instance of GPU-c.
+	sys.Handler = func(_ context.Context, c hostconfig.Cmd) ([]byte, error) {
+		if c.Name == "nvidia-smi" && strings.HasPrefix(c.Args[0], "--query-compute-apps") {
+			return []byte("GPU-a\nGPU-a\n"), nil
+		}
+		return nil, nil
+	}
+	sys.Set("/etc/cdi/bcd-alloc_1.json", `{"cdiVersion":"0.6.0","devices":[{"name":"GPU-c/gi1/ci0"}]}`)
 	var busy []string
 	srv := &Server{
 		Ops: &fakeOps{}, Root: t.TempDir(), Allowed: me,
 		HostUnits: func(o hostconfig.Options) *hostconfig.Registry {
 			busy = busy[:0]
-			for _, g := range []string{"GPU-a", "GPU-b"} {
+			for _, g := range []string{"GPU-a", "GPU-b", "GPU-c"} {
 				if o.GPUBusy(g) {
 					busy = append(busy, g)
 				}
@@ -47,7 +55,8 @@ func TestHelperHostUnit(t *testing.T) {
 	if v, _ := sys.Get("/proc/sys/vm/swappiness"); v != "10\n" {
 		t.Fatalf("swappiness = %q", v)
 	}
-	if strings.Join(busy, ",") != "GPU-b" {
+	// The node said GPU-b; the helper goes by what it sees itself.
+	if strings.Join(busy, ",") != "GPU-a,GPU-c" {
 		t.Fatalf("busy GPUs = %v", busy)
 	}
 	// What the unit refuses, the helper refuses: a key that would run a program as root.

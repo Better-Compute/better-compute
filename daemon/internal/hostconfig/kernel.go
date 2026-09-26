@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/better-compute/better-compute/daemon/internal/converge"
@@ -59,8 +60,43 @@ func parseSysctls(unit string, settings json.RawMessage) (map[string]string, err
 		default:
 			return nil, converge.Terminal(fmt.Errorf("%s.%s: the value must be a scalar", unit, key))
 		}
+		if reason := guardedSysctlValue(key, out[key]); reason != "" {
+			return nil, converge.Terminal(fmt.Errorf("%s: %s = %s is refused: %s", unit, key, out[key], reason))
+		}
 	}
 	return out, nil
+}
+
+// hardenedSysctls may only be set to their hardened values (raising a defense is fine, lowering it
+// is not): name → the values allowed, or a minimum for a numeric one.
+var hardenedSysctls = map[string]struct {
+	values []string
+	min    int
+}{
+	"dev.tty.legacy_tiocsti":              {values: []string{"0"}},      // no TIOCSTI keystroke injection
+	"dev.tty.ldisc_autoload":              {values: []string{"0"}},      // no autoloading line disciplines
+	"kernel.io_uring_disabled":            {values: []string{"1", "2"}}, // io_uring restricted or off
+	"net.ipv4.ip_unprivileged_port_start": {min: 1024},                  // ports below it stay root's
+}
+
+// guardedSysctlValue returns why a value of a hardened key is refused, or "".
+func guardedSysctlValue(key, value string) string {
+	h, ok := hardenedSysctls[key]
+	if !ok {
+		return ""
+	}
+	if len(h.values) > 0 {
+		for _, v := range h.values {
+			if value == v {
+				return ""
+			}
+		}
+		return "it would lower the host's defenses (allowed: " + strings.Join(h.values, ", ") + ")"
+	}
+	if n, err := strconv.Atoi(value); err != nil || n < h.min {
+		return fmt.Sprintf("it would lower the host's defenses (at least %d)", h.min)
+	}
+	return ""
 }
 
 // guardedSysctls are kernel parameters a spec may not set, whoever sends it: the ones that run a
@@ -203,6 +239,13 @@ var (
 	optionName   = regexp.MustCompile(`^[A-Za-z0-9_]{1,64}$`)
 )
 
+// guardedModuleOptions are module options a spec may not set: they let a device passed through to a
+// guest reach host memory (no IOMMU, or unsafe interrupt remapping).
+var guardedModuleOptions = map[string]bool{
+	"vfio.enable_unsafe_noiommu_mode":          true,
+	"vfio_iommu_type1.allow_unsafe_interrupts": true,
+}
+
 type kernelModulesSettings struct {
 	Load    []string          `json:"load"`
 	Options map[string]string `json:"options"`
@@ -231,6 +274,9 @@ func parseKernelModules(unit string, settings json.RawMessage) (kernelModulesSet
 			k, _, _ := strings.Cut(kv, "=")
 			if !optionName.MatchString(k) {
 				return s, converge.Terminal(fmt.Errorf("%s: %q is not a module option", unit, kv))
+			}
+			if guardedModuleOptions[strings.ReplaceAll(m, "-", "_")+"."+k] {
+				return s, converge.Terminal(fmt.Errorf("%s: %s %s is refused: it turns off DMA isolation for passed-through devices", unit, m, k))
 			}
 		}
 	}
