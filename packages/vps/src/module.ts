@@ -141,8 +141,11 @@ import {
   parseResizeVolume,
   parseVolumeRef,
   resizeVolume,
+  templateVolumeDecisions,
+  templateVolumesOf,
   volumeWork,
   type CreateVolumeInput,
+  type DecidedVolume,
   type ListVolumesInput,
   type ResizeVolumeInput,
   type SandboxVolume,
@@ -494,9 +497,40 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       });
   };
   /**
+   * A template hands its volumes to every sandbox it starts, whose guest reads (and unless read-only
+   * writes) them: each volume is decided on its own IAM resource with the caller's credential, as
+   * `compute:sandboxes:manage` (read-write) or `compute:sandboxes:read` (read-only), not only the
+   * template (review 2, MED 1). Outside any transaction; returns what was decided, which the handler
+   * holds the resolved list to.
+   */
+  const volumesCheck = async (
+    context: MethodContext,
+    tenantId: string,
+    volumes: readonly { volumeId?: string; name?: string; readOnly?: boolean }[],
+  ): Promise<DecidedVolume[]> => {
+    if (volumes.length === 0) return [];
+    if (!context.credential)
+      throw new ComputeError(
+        'ACCESS_DENIED',
+        'A sandbox template that mounts volumes is decided on the caller’s own credential',
+        undefined,
+        { reason: 'credential-required' },
+      );
+    const prefix = context.typePrefix ?? typePrefix;
+    const decided = await templateVolumeDecisions(context.sql, tenantId, volumes);
+    for (const volume of decided)
+      await context.iam.require(context.credential, {
+        tenantId,
+        action: volume.write ? 'compute:sandboxes:manage' : 'compute:sandboxes:read',
+        resource: { type: `${prefix}sandbox-volume`, id: volume.volumeId },
+      });
+    return decided;
+  };
+  /**
    * An update that changes what the guest runs (image, flavor, user data, env, network) hands the
    * template's secrets to new code, even when it names none itself: decided on the resulting
-   * template's secrets. Read outside any transaction (this is the admission `check`).
+   * template's secrets. Read outside any transaction (this is the admission `check`). Its volumes
+   * likewise: a new list, or the current one when new code inherits it, is decided volume by volume.
    */
   const templateUpdateSecretsCheck = async (
     context: MethodContext,
@@ -508,16 +542,19 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       input.userData !== undefined ||
       input.env !== undefined ||
       input.network !== undefined;
-    if (!reshapes) return;
+    if (!reshapes && input.volumes === undefined) return;
     const { rows } = await context.sql.query<{
       env: Record<string, string> | string;
       user_data: string | null;
-    }>(`SELECT env, user_data FROM sandbox_templates WHERE id = $1 AND tenant_id = $2`, [
+      volumes: unknown;
+    }>(`SELECT env, user_data, volumes FROM sandbox_templates WHERE id = $1 AND tenant_id = $2`, [
       input.templateId,
       input.tenantId,
     ]);
     const current = rows[0];
     if (!current) return;
+    input.decidedVolumes = await volumesCheck(context, input.tenantId, input.volumes ?? templateVolumesOf(current.volumes));
+    if (!reshapes) return;
     const env = typeof current.env === 'string' ? JSON.parse(current.env) : current.env;
     const resulting = {
       env: input.env ?? env,
@@ -912,7 +949,10 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
             status: 'decide',
             resource: tenantResource(input),
           }),
-          check: (context, input) => secretsCheck(context, input.tenantId, input),
+          check: async (context, input) => {
+            await secretsCheck(context, input.tenantId, input);
+            input.decidedVolumes = await volumesCheck(context, input.tenantId, input.volumes ?? []);
+          },
         },
         handler: (context, input) => createTemplate(depsOf(context), context, input),
       }),
@@ -991,7 +1031,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         kind: 'read',
         resource: tenantResource,
         validate: describedBy(schemas.listVolumes, parseListVolumes),
-        handler: (context, input) => listVolumes(context.sql, input),
+        handler: (context, input) => listVolumes(context.sql, input, context.caller?.identityId),
       }),
       get: defineMethod({
         action: 'compute:sandboxes:read',

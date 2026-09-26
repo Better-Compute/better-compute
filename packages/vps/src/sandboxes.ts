@@ -50,9 +50,11 @@ import {
   type VpsImage,
 } from './instances.js';
 import {
+  assertVolumesDecided,
   attachTemplateVolumes,
   parseTemplateVolumes,
   resolveTemplateVolumes,
+  type DecidedVolume,
   templateVolumeMounts,
   templateVolumesOf,
   volumeCloudConfig,
@@ -277,6 +279,8 @@ export interface TemplateInput {
   network?: SandboxNetwork;
   /** Volumes by id or name, where the guest mounts them, read-only or not. */
   volumes?: TemplateVolumeInput[];
+  /** Set by the admission check, never by the caller: the volumes its per-volume decisions covered. */
+  decidedVolumes?: DecidedVolume[];
 }
 
 export interface TemplateUpdate {
@@ -299,6 +303,8 @@ export interface TemplateUpdate {
    * secret refs its `compute:secrets:manage` decision covered, read outside the transaction.
    */
   decidedSecrets?: string[];
+  /** Set by the admission check: the volumes its per-volume decisions covered (the resulting list's). */
+  decidedVolumes?: DecidedVolume[];
 }
 
 export type TemplateRef = { tenantId: string; templateId: string };
@@ -634,6 +640,8 @@ export async function createTemplate(
     { tenantId: input.tenantId, poolId: input.poolId, warmMax: input.warm?.max ?? input.warm?.min ?? 0 },
     input.volumes ?? [],
   );
+  // Each volume was decided on the caller's credential outside this transaction (admission check).
+  assertVolumesDecided(input.name, volumes, input.decidedVolumes);
   const taken = await tx.query(
     `SELECT 1 FROM sandbox_templates WHERE tenant_id = $1 AND name = $2 AND NOT deleted`,
     [input.tenantId, input.name],
@@ -804,6 +812,8 @@ export async function updateTemplate(
     input,
     ...(input.volumes !== undefined ? { volumes } : {}),
   });
+  // A new volume list, or new code inheriting the current one, was decided volume by volume (admission).
+  if (input.volumes !== undefined || reshapes) assertVolumesDecided(current.id, volumes, input.decidedVolumes);
   // The check decided on the template it read outside any transaction: secrets added since (by
   // someone allowed to) were not part of that decision, and new code must not inherit them.
   if (reshapes) {

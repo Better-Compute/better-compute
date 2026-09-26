@@ -104,6 +104,8 @@ export interface CreateVolumeInput {
 export type VolumeRef = { tenantId: string; volumeId: string };
 export interface ListVolumesInput {
   tenantId: string;
+  /** The caller's own volumes (`mine`, the default, as for snapshots), or the tenant's. */
+  scope?: 'mine' | 'all';
   poolId?: string;
   /** Also deleted ones (default false). */
   includeDeleted?: boolean;
@@ -149,8 +151,9 @@ export function parseVolumeRef(raw: unknown): VolumeRef {
 }
 
 export function parseListVolumes(raw: unknown): ListVolumesInput {
-  const input = object(raw, ['tenantId', 'poolId', 'includeDeleted']);
-  const out: ListVolumesInput = { tenantId: tenant(input.tenantId) };
+  const input = object(raw, ['tenantId', 'scope', 'poolId', 'includeDeleted']);
+  if (input.scope !== undefined && input.scope !== 'mine' && input.scope !== 'all') fail('scope must be mine or all');
+  const out: ListVolumesInput = { tenantId: tenant(input.tenantId), scope: (input.scope as 'mine' | 'all' | undefined) ?? 'mine' };
   const poolId = optional(input.poolId, (value) => id(value, 'pool', 'poolId'));
   if (poolId !== undefined) out.poolId = poolId;
   if (input.includeDeleted !== undefined) {
@@ -226,6 +229,56 @@ export async function resolveTemplateVolumes(
   const ids = resolved.map((volume) => volume.volumeId);
   if (new Set(ids).size !== ids.length) fail('volumes: a volume is named twice');
   return resolved;
+}
+
+/** A mount the admission decision covered: the volume, and whether writing to it was decided too. */
+export interface DecidedVolume {
+  volumeId: string;
+  write: boolean;
+}
+
+/**
+ * The volumes a template write mounts, resolved to ids outside any transaction, for the per-volume
+ * decision (review 2, MED 1): a template hands its volumes to every sandbox it starts, so mounting one
+ * takes `compute:sandboxes:manage` on `sandbox-volume/<id>` (read-write) or `compute:sandboxes:read`
+ * (read-only), not only the right to manage templates. A name that resolves to nothing is left out;
+ * the write itself then fails NOT_FOUND.
+ */
+export async function templateVolumeDecisions(
+  sql: Pick<SqlTx, 'query'>,
+  tenantId: string,
+  volumes: readonly { volumeId?: string; name?: string; readOnly?: boolean }[],
+): Promise<DecidedVolume[]> {
+  const decided = new Map<string, boolean>();
+  for (const entry of volumes) {
+    let volumeId = entry.volumeId;
+    if (!volumeId && entry.name) {
+      const { rows } = await sql.query<{ id: string }>(
+        `SELECT id FROM sandbox_volumes WHERE tenant_id = $1 AND name = $2 AND state <> 'deleted'`,
+        [tenantId, entry.name],
+      );
+      volumeId = rows[0]?.id;
+    }
+    if (volumeId) decided.set(volumeId, (decided.get(volumeId) ?? false) || entry.readOnly !== true);
+  }
+  return [...decided].map(([volumeId, write]) => ({ volumeId, write }));
+}
+
+/**
+ * Refuses a template's resolved volumes the admission decision did not cover: a name re-pointed at another
+ * volume, or a mount made writable, since the check read them outside the transaction. `CONFLICT`
+ * (`volumes-changed`): the caller retries, and is decided again.
+ */
+export function assertVolumesDecided(templateId: string, resolved: readonly TemplateVolume[], decided: readonly DecidedVolume[] | undefined): void {
+  if (resolved.length === 0) return;
+  const covered = new Map((decided ?? []).map((entry) => [entry.volumeId, entry.write]));
+  const unchecked = resolved.filter((volume) => !covered.has(volume.volumeId) || (!volume.readOnly && covered.get(volume.volumeId) !== true));
+  if (unchecked.length > 0)
+    throw new ComputeError('CONFLICT', `Sandbox template ${templateId}'s volumes changed while this write was decided; retry`, undefined, {
+      templateId,
+      reason: 'volumes-changed',
+      volumeIds: unchecked.map((volume) => volume.volumeId),
+    });
 }
 
 /** A stored template's `volumes` column. */
@@ -362,12 +415,15 @@ export async function getVolume(tx: SqlTx, ref: VolumeRef): Promise<SandboxVolum
   return volumeView(row);
 }
 
-export async function listVolumes(tx: SqlTx, input: ListVolumesInput): Promise<{ items: SandboxVolume[] }> {
+export async function listVolumes(tx: SqlTx, input: ListVolumesInput, callerIdentityId?: string): Promise<{ items: SandboxVolume[] }> {
+  // `mine` without a caller matches nothing rather than everything.
+  const owner = (input.scope ?? 'mine') === 'mine' ? (callerIdentityId ?? '') : null;
   const { rows } = await tx.query<VolumeRow>(
     `SELECT ${columns} FROM sandbox_volumes
       WHERE tenant_id = $1 AND ($2::text IS NULL OR pool_id = $2) AND ($3 OR state <> 'deleted')
+        AND ($4::text IS NULL OR created_by = $4)
       ORDER BY created_at, id LIMIT 500`,
-    [input.tenantId, input.poolId ?? null, input.includeDeleted === true],
+    [input.tenantId, input.poolId ?? null, input.includeDeleted === true, owner],
   );
   return { items: rows.map(volumeView) };
 }

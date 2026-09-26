@@ -12,7 +12,8 @@ Checks the pool, flavor, image and runtime once and stores a template under a na
   - each entry names a volume by `volumeId` or by `name` (one of them), with a `mountPath` and an optional `readOnly`;
   - each volume must be the tenant's, `ready` and in the template's pool (`NOT_FOUND`, `INVALID_STATE`, `INVALID_INPUT`), and named once;
   - a mount path is absolute, without `.` or `..`, never over a system directory (`/`, `/etc`, `/usr`, `/proc`, …), and never inside another entry's (`INVALID_INPUT`);
-  - a template with volumes keeps no warm pool (`warm.max` must be 0), since a warm instance would hold the volumes.
+  - a template with volumes keeps no warm pool (`warm.max` must be 0), since a warm instance would hold the volumes;
+  - every sandbox of the template reads the volume, and unless it is `readOnly` writes it, so each volume is also decided on the caller's own credential: `compute:sandboxes:manage` on `compute-sandbox-volume` for a read-write mount, `compute:sandboxes:read` for a read-only one (`ACCESS_DENIED` otherwise).
 
   Its sandboxes run on the volumes' host only. A read-write attachment needs the volume to itself, so a second sandbox of a template that attaches a volume read-write is `CONFLICT` (`details.reason: 'volume-in-use'`) while the first lives.
 
@@ -34,7 +35,7 @@ A deleted template, or one of another tenant, is `NOT_FOUND`.
 
 Changes a template's flavor, image, user data, TTL bounds, warm pool or volumes; returns the template with its version raised.
 
-The pool, name and runtime stay. A new `flavor` or `imageId` is checked against the pool as on `create`, and the pool must still run the template's runtime (`INVALID_INPUT`). Omitted fields keep their values, `userData: null` removes the user data, and `warm` replaces the warm pool, `max` again defaulting to `min`. A `defaultTtlSeconds` above `maxTtlSeconds` after the change is `INVALID_INPUT`. A deleted or missing template is `NOT_FOUND`. The secrets the template references are decided with the update; if another change added secret references while this one was decided, it is `CONFLICT` with `details.reason: 'secrets-changed'`: retry, and the new references are decided too.
+The pool, name and runtime stay. A new `flavor` or `imageId` is checked against the pool as on `create`, and the pool must still run the template's runtime (`INVALID_INPUT`). Omitted fields keep their values, `userData: null` removes the user data, and `warm` replaces the warm pool, `max` again defaulting to `min`. A `defaultTtlSeconds` above `maxTtlSeconds` after the change is `INVALID_INPUT`. A deleted or missing template is `NOT_FOUND`. The secrets the template references are decided with the update; if another change added secret references while this one was decided, it is `CONFLICT` with `details.reason: 'secrets-changed'`: retry, and the new references are decided too. The volumes are decided the same way, each on its own resource as on `create`: a new `volumes` list, and the current one when the update changes what the guest runs (flavor, image, user data, env or network). If a volume name now points at another volume, or a mount became writable, since the decision, it is `CONFLICT` with `details.reason: 'volumes-changed'`: retry.
 
 Sandboxes that exist keep their instances, and warm instances already created stay claimable with the shape they were created with; new sandboxes and warm refills use the new values. A lower `warm.max` makes the reconciler delete the excess. Publishes no event.
 

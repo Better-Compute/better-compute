@@ -40,6 +40,8 @@ let db: SqlExecutor;
 let clock: ManualClock;
 const events: string[] = [];
 const invalidated: string[] = [];
+const decisions: { action: string; resource: string }[] = [];
+const denied = new Set<string>();
 
 const alice: Caller = { identityId: 'usr_alice', identityKind: 'user', tenantId: 'acme', sessionId: 's', sessionKind: 'user', mfa: false };
 const root: Caller = { ...alice, identityId: 'usr_root', tenantId: 'root' };
@@ -70,7 +72,17 @@ function moduleContext(sql: SqlExecutor): ModuleContext {
         invalidated.push(nodeId);
       },
     },
-    iam: { rootTenantId: 'root', async require() {}, async billingCheck() { return { allowed: true }; } },
+    iam: {
+      rootTenantId: 'root',
+      // Records every decision; refuses the resources a test denies.
+      async require(_credential: unknown, request: { action: string; resource: { type: string; id: string } }) {
+        decisions.push({ action: request.action, resource: `${request.resource.type}/${request.resource.id}` });
+        if (denied.has(request.resource.id)) throw new ComputeError('ACCESS_DENIED', `denied ${request.action} on ${request.resource.id}`);
+      },
+      async billingCheck() {
+        return { allowed: true };
+      },
+    },
     commands: {
       async enqueue() {
         return { id: newId('cmd'), seq: 1 };
@@ -168,6 +180,8 @@ beforeEach(async () => {
     await db.query(`DELETE FROM ${table}`);
   events.length = 0;
   invalidated.length = 0;
+  decisions.length = 0;
+  denied.clear();
   clock = manualClock(T0);
   await useSimClock(db, T0);
   await db.query(`INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ('site_01jz00000000000000000000aa', 'root', 'shared', 'eu', 1)`);
@@ -262,6 +276,59 @@ describe('sandbox volumes', () => {
     const readers = [await createSandbox(reader.id, 'sbx-4'), await createSandbox(reader.id, 'sbx-5')];
     const readerSpecs = await instanceSpecs(db, volume.nodeId);
     for (const readerSandbox of readers) expect(readerSpecs.find((s) => s.id === readerSandbox.instanceId)!.volumes).toEqual([{ volumeId: volume.id, readOnly: true }]);
+  });
+
+  it('are mounted by a template only with a decision on each volume (review 2, MED 1)', async () => {
+    const bob: Caller = { ...alice, identityId: 'usr_bob' };
+    const volume = await createVolume();
+    // Bob may manage templates, but not alice's volume: he cannot mount it, read-write or read-only.
+    denied.add(volume.id);
+    const asBob = (extra: Record<string, unknown>) =>
+      call('sandboxTemplates', 'create', { tenantId: 'acme', name: 'bobs', poolId: pool, flavor: 's1.small', imageId: 'ubuntu-24.04', ...extra }, bob);
+    await expect(asBob({ volumes: [{ name: 'agent-memory', mountPath: '/workspace' }] })).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    await expect(asBob({ volumes: [{ volumeId: volume.id, mountPath: '/data', readOnly: true }] })).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    expect(decisions.filter((d) => d.resource === `compute-sandbox-volume/${volume.id}`).map((d) => d.action)).toEqual([
+      'compute:sandboxes:manage',
+      'compute:sandboxes:read',
+    ]);
+    denied.clear();
+    const template = await createTemplate({ volumes: [{ volumeId: volume.id, mountPath: '/data', readOnly: true }] });
+    // An update that hands the volumes to new code (another image, user data) is decided on them again.
+    decisions.length = 0;
+    await call('sandboxTemplates', 'update', { tenantId: 'acme', templateId: template.id, userData: '#cloud-config\n' });
+    expect(decisions).toContainEqual({ action: 'compute:sandboxes:read', resource: `compute-sandbox-volume/${volume.id}` });
+    denied.add(volume.id);
+    await expect(call('sandboxTemplates', 'update', { tenantId: 'acme', templateId: template.id, userData: '#cloud-config\n# v2\n' })).rejects.toMatchObject({
+      code: 'ACCESS_DENIED',
+    });
+    // A TTL change hands nothing new: no volume decision.
+    decisions.length = 0;
+    await call('sandboxTemplates', 'update', { tenantId: 'acme', templateId: template.id, maxTtlSeconds: 7200 });
+    expect(decisions.some((d) => d.resource.startsWith('compute-sandbox-volume/'))).toBe(false);
+    denied.clear();
+    // What the handler resolves under its lock must be what was decided: a name re-pointed, or a mount made
+    // writable, since the check is refused (CONFLICT, retried and decided again).
+    const definition = (api.sandboxTemplates as unknown as Record<string, Definition>).update!;
+    const widened = definition.validate({ tenantId: 'acme', templateId: template.id, volumes: [{ volumeId: volume.id, mountPath: '/data' }] }) as Record<string, unknown>;
+    widened.decidedVolumes = [{ volumeId: volume.id, write: false }];
+    await expect(
+      db.transaction((tx) => definition.handler({ ...moduleContext(within(tx)), caller: alice, requestId: 'req' } as MethodContext, widened)),
+    ).rejects.toMatchObject({ code: 'CONFLICT', details: { reason: 'volumes-changed' } });
+  });
+
+  it('are listed per caller by default, the whole tenant with scope all', async () => {
+    const bob: Caller = { ...alice, identityId: 'usr_bob' };
+    const mine = await createVolume();
+    const bobs = (await call(
+      'sandboxVolumes',
+      'create',
+      { tenantId: 'acme', poolId: pool, name: 'bob-memory', sizeGiB: 10, idempotencyKey: 'vol-bob' },
+      bob,
+    )) as { id: string };
+    const ids = (result: { items: { id: string }[] }) => result.items.map((volume) => volume.id).sort();
+    expect(ids(await call('sandboxVolumes', 'list', { tenantId: 'acme' }))).toEqual([mine.id]);
+    expect(ids(await call('sandboxVolumes', 'list', { tenantId: 'acme' }, bob))).toEqual([bobs.id]);
+    expect(ids(await call('sandboxVolumes', 'list', { tenantId: 'acme', scope: 'all' }))).toEqual([mine.id, bobs.id].sort());
   });
 
   it('are deleted once their host applied a spec without them, and release their disk', async () => {

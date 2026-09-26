@@ -13,7 +13,7 @@ The volume id derives from the tenant, the caller and `idempotencyKey`. A retry 
 
 ## list
 
-Returns the tenant's volumes, oldest first, optionally in one pool; `includeDeleted: true` adds deleted ones.
+Returns the caller's own volumes, oldest first (`scope: 'mine'`, the default, as for snapshots), or with `scope: 'all'` every volume of the tenant. `poolId` narrows it to one pool, and `includeDeleted: true` adds deleted ones.
 
 At most 500 volumes are returned. Decided as `compute:sandboxes:read` on the tenant.
 

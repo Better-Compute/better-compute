@@ -360,6 +360,7 @@ export const schemas = {
   listVolumes: strictObject(
     {
       tenantId,
+      scope: { enum: ['mine', 'all'], default: 'mine', description: 'The caller’s own volumes (default), or every volume of the tenant' },
       poolId: { ...poolId, description: 'Only this pool’s volumes' },
       includeDeleted: { type: 'boolean', default: false, description: 'Include deleted volumes' },
     },
