@@ -928,3 +928,16 @@ Rules for v0.1:
   files: shell + 123 pages, check-content clean, tsc clean, all routes 200 in next dev). Run the dev server with
   cwd apps/docs (`.claude/launch.json` "docs"): fumadocs-mdx resolves source.config.ts from the cwd, and from the
   repo root every page 500s with "getText('processed') requires includeProcessedMarkdown".
+
+## apps/admin — BoardUI operator admin panel (2026-09-26, user request to three sessions at once)
+
+New private Next 16 app `apps/admin` (Tailwind 4 + BoardUI copied from apps/docs, the docs "instrument" theme). Split
+agreed between the three sessions:
+- [71c0e4] FOUNDATION: `apps/admin/{package.json,tsconfig.json,next.config.mjs,postcss.config.mjs,README.md,.gitignore}`,
+  `app/layout.tsx`, `app/globals.css`, `app/(admin)/layout.tsx`, `app/(admin)/page.tsx` (Overview widget grid),
+  `styles/**`, `utils/**`, `components/{base,shell,widgets,overview}/**`, `lib/modules.ts`, `lib/data/{index,core,topology,format}.ts`.
+- [f906ff] CAPACITY: `app/(admin)/{capacity,pools,reservations,quotas,usage,flavors}/**`, `components/capacity/**`,
+  `lib/data/capacity.ts`.
+- [561b07] FLEET/OPS: `app/(admin)/{nodes,devices,sandboxes,instances,volumes,metal,rollouts,drift,batches,activity}/**`,
+  `components/fleet/**`, `lib/data/fleet.ts`.
+Shared files (`lib/modules.ts`, `lib/data/index.ts`) take one-line inserts. apps/console is not part of this.

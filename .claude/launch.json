@@ -10,6 +10,14 @@
       "port": 4100
     },
     {
+      "name": "admin",
+      "cwd": "apps/admin",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["node_modules/next/dist/bin/next", "dev", "--port", "4200"],
+      "env": { "NEXT_DIST_DIR": ".next-admin" },
+      "port": 4200
+    },
+    {
       "name": "console",
       "cwd": "apps/console",
       "runtimeExecutable": "node",

@@ -1,0 +1,111 @@
+@import 'tailwindcss';
+/* BoardUI design tokens and type ramp (copied from apps/docs), then the docs' instrument layer on top. */
+@import '../styles/theme.css';
+@import '../styles/typography.css';
+@import '../styles/instrument.css';
+
+@source '../app';
+@source '../components';
+@source '../lib';
+
+/* react-aria-components state attributes as Tailwind variants. */
+@custom-variant entering (&[data-entering]);
+@custom-variant exiting (&[data-exiting]);
+@custom-variant pressed (&[data-pressed]);
+@custom-variant selected (&[data-selected]);
+@custom-variant focus-visible-ra (&[data-focus-visible]);
+
+html {
+  scrollbar-gutter: stable;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-kerning: normal;
+}
+
+body {
+  background-color: var(--color-background-full);
+  color: var(--color-text-primary);
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-signal-500) 30%, transparent);
+}
+
+/* Thin instrument scrollbars. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-separator-border-strong) transparent;
+}
+
+/* "Not schedulable" fill: diagonal hairlines, never a second hue. */
+@utility hatch {
+  background-image: repeating-linear-gradient(
+    135deg,
+    var(--color-hatch) 0 1px,
+    transparent 1px 4px
+  );
+  background-color: transparent;
+}
+
+@keyframes led-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 var(--color-signal-soft);
+  }
+  50% {
+    box-shadow: 0 0 0 4px var(--color-signal-soft);
+  }
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes fade-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.985);
+  }
+}
+@keyframes pop-out {
+  to {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+}
+@keyframes slide-in-right {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+}
+@keyframes slide-out-right {
+  to {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+}
+@keyframes row-in {
+  from {
+    background: var(--color-signal-soft);
+  }
+}
+
+/* The command palette's modal is centered with a transform; keep pop-in from fighting it. */
+[data-entering].-translate-x-1\/2 {
+  animation-name: fade-in !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+  }
+}
