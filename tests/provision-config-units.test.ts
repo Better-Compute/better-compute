@@ -124,6 +124,8 @@ describe('hugepages, kernel-modules and k8s-join (PLAN.md §3.8)', () => {
   it('never joins a hosted pool (bcd as a DaemonSet inside the cluster already)', async () => {
     expect(poolHostConfig({ kubernetes: { platformOperated: true } })).toEqual({});
     await expect(validatePoolHostPolicy({ kubernetes: { platformOperated: 'yes' } })).rejects.toThrow(/platformOperated/);
+    // All three join settings, or none.
+    await expect(validatePoolHostPolicy({ kubernetes: { apiServer: 'https://k8s.example:6443' } })).rejects.toThrow(/together/);
   });
 
   it("renders a pool's policy into units that win over the profile's", async () => {

@@ -329,10 +329,16 @@ export function poolHostConfig(
     if (unknown.length) throw new ComputeError('INVALID_INPUT', `policy.kubernetes.${unknown[0]} is not a setting`);
     if (platformOperated !== undefined && typeof platformOperated !== 'boolean')
       throw new ComputeError('INVALID_INPUT', 'policy.kubernetes.platformOperated must be true or false');
+    const given = [apiServer, caCertSha256, joinTokenRef].filter((value) => value !== undefined).length;
+    if (given !== 0 && given !== 3)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        'policy.kubernetes needs apiServer, caCertSha256 and joinTokenRef together (machines join that cluster), or none of them (bcd runs inside the cluster as a DaemonSet)',
+      );
   }
-  // Machines join the cluster only when the pool gives a join token: a pool whose bcd runs as a DaemonSet
-  // inside the cluster (hosted, provider-kubernetes) is in it already, and kubeadm join would fail there.
-  if (isRecord(kubernetes) && (kubernetes.joinTokenRef !== undefined || kubernetes.apiServer !== undefined)) {
+  // Machines join the cluster only when the pool names it: a pool whose bcd runs as a DaemonSet inside the
+  // cluster (hosted, provider-kubernetes) is in it already, and kubeadm join would fail there.
+  if (isRecord(kubernetes) && kubernetes.joinTokenRef !== undefined) {
     const { apiServer, caCertSha256, joinTokenRef, labels, taints, kubernetesVersion, gpu } = kubernetes;
     config['k8s-join'] = {
       server: apiServer as Json,

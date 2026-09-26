@@ -117,10 +117,15 @@ export interface PoolPolicy {
    * plugin, and only those. `joinTokenRef` is a `secret://` ref of a kubeadm bootstrap token.
    */
   kubernetes?: {
-    apiServer: string;
+    /**
+     * The cluster the machines join (the `k8s-join` unit): `apiServer`, `caCertSha256` and `joinTokenRef`
+     * together, or none of them for a pool whose bcd runs as a DaemonSet inside the cluster already
+     * (provider-kubernetes).
+     */
+    apiServer?: string;
     /** `sha256:<hex>` of the cluster CA's public key (kubeadm's `--discovery-token-ca-cert-hash`). */
-    caCertSha256: string;
-    joinTokenRef: string;
+    caCertSha256?: string;
+    joinTokenRef?: string;
     /** Extra labels for the machines' Node objects (keys under `bcd.dev/` are bcd's own). */
     labels?: Record<string, string>;
     /** Taints as `key=value:Effect`. */
@@ -136,6 +141,8 @@ export interface PoolPolicy {
      */
     platformOperated?: boolean;
   };
+  /** (v1.1) Where the pool's hosts export GPU and host metrics (OTLP); wins over the deployment's. */
+  telemetry?: TelemetrySpec;
 }
 
 /** A scheduling and policy domain in one site, with exactly one GPU model. */
@@ -695,6 +702,10 @@ export interface InstanceNicSpec {
   network: string;
   mac: string;
   addresses: string[];
+  /** (v1.1) The IPAM range's gateway: the guest's default route. */
+  gateway?: string;
+  /** (v1.1) DNS servers; absent: the guest keeps its image's. */
+  nameservers?: string[];
 }
 /** Empty in v0.1; from v0.3 the SSH CA principals and exec-ticket JWKS. */
 export interface AccessSpec {
@@ -708,6 +719,10 @@ export interface AccessSpec {
 export interface TelemetrySpec {
   otlpEndpoint?: string;
   intervalSeconds?: number;
+  /** A `secret://` ref of the exporter's auth headers; bcd fetches it through the broker. */
+  headersRef?: string;
+  /** Extra OTLP resource attributes. */
+  resourceAttributes?: Record<string, string>;
 }
 export interface DaemonSpec {
   version: string;
