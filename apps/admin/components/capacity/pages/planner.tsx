@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { RiArrowLeftLine, RiCheckboxCircleLine, RiCloseCircleLine, RiFlashlightLine, RiRocketLine, RiSearchEyeLine } from 'react-icons/ri';
 import { earliestFit, quotaHint } from '@better-compute/console-kit';
 import { Button, ButtonLink } from '@/components/base/buttons/button';
@@ -229,6 +229,18 @@ export function PlannerPage() {
       <Grid>
         <Panel className="col-span-12 lg:col-span-5" title="Request" meta="reservations.create">
           <div className="flex flex-col gap-4">
+            <Presets
+              current={{ poolId: row?.id ?? '', perNode: Math.min(perNode, perNodeMax), nodes, duration, spot, tenantId: tenant.id, projectId: projectId || tenant.projects[0] || '' }}
+              onApply={(preset) => {
+                setPoolId(preset.poolId);
+                setPerNode(preset.perNode);
+                setNodes(preset.nodes);
+                setDuration(preset.duration);
+                setSpot(preset.spot);
+                setTenantId(preset.tenantId);
+                setProjectId(preset.projectId);
+              }}
+            />
             <Field label="Pool">
               <Select
                 label="Pool"
@@ -447,6 +459,90 @@ export function PlannerPage() {
         </div>
       </Grid>
     </>
+  );
+}
+
+interface Preset {
+  name: string;
+  poolId: string;
+  perNode: number;
+  nodes: number;
+  duration: string;
+  spot: boolean;
+  tenantId: string;
+  projectId: string;
+}
+
+const PRESETS_KEY = 'bc-admin:planner-presets';
+
+function readPresets(): Preset[] {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(PRESETS_KEY) ?? '[]');
+    return Array.isArray(parsed) ? parsed.filter((entry) => entry && typeof entry.name === 'string' && typeof entry.poolId === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Named requests saved in this browser: chips that refill the form, plus "save this". */
+function Presets({ current, onApply }: { current: Omit<Preset, 'name'>; onApply(preset: Preset): void }) {
+  const [presets, setPresets] = useState<Preset[]>([]);
+  const [naming, setNaming] = useState<string | null>(null);
+  useEffect(() => setPresets(readPresets()), []);
+  const store = (next: Preset[]) => {
+    setPresets(next);
+    try {
+      window.localStorage.setItem(PRESETS_KEY, JSON.stringify(next.slice(0, 12)));
+    } catch {
+      // Private windows: presets last for this page only.
+    }
+  };
+  const describe = (preset: Omit<Preset, 'name'>) => `${preset.nodes > 1 ? `${preset.nodes}×` : ''}${preset.perNode} GPU · ${preset.duration}${preset.spot ? ' · spot' : ''}`;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {presets.map((preset) => (
+        <span key={preset.name} className="group inline-flex h-7 items-center border border-separator-border">
+          <button type="button" onClick={() => onApply(preset)} title={`${preset.poolId} · ${describe(preset)}`} className="px-2 font-mono text-[11px] text-text-secondary hover:text-text-primary">
+            {preset.name}
+          </button>
+          <button
+            type="button"
+            aria-label={`Forget preset ${preset.name}`}
+            onClick={() => store(presets.filter((entry) => entry.name !== preset.name))}
+            className="hidden h-full px-1 text-text-tertiary group-hover:block hover:text-text-primary"
+          >
+            ×
+          </button>
+        </span>
+      ))}
+      {naming === null ? (
+        <button type="button" onClick={() => setNaming(describe(current))} className="h-7 px-1 font-mono text-[11px] text-signal hover:underline">
+          + save as preset
+        </button>
+      ) : (
+        <form
+          className="inline-flex items-center gap-1"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const name = naming.trim().slice(0, 40);
+            if (name) store([{ ...current, name }, ...presets.filter((entry) => entry.name !== name)]);
+            setNaming(null);
+          }}
+        >
+          <input
+            autoFocus
+            value={naming}
+            onChange={(event) => setNaming(event.target.value)}
+            onKeyDown={(event) => event.key === 'Escape' && setNaming(null)}
+            aria-label="Preset name"
+            className="h-7 w-44 border border-border-button-default bg-background-primary-default px-2 font-mono text-[11px] outline-none focus-visible:ring-2 focus-visible:ring-border-focus-ring"
+          />
+          <button type="submit" className="h-7 px-1.5 font-mono text-[11px] text-signal hover:underline">
+            save
+          </button>
+        </form>
+      )}
+    </div>
   );
 }
 

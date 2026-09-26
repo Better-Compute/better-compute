@@ -86,7 +86,14 @@ export const GpuRack = memo(function GpuRack({
     return true;
   };
 
-  if (!nodes.length) return <p className="text-caption-1-regular text-text-tertiary">This pool has no GPU nodes.</p>;
+  if (!nodes.length)
+    return (
+      <p className="text-caption-1-regular text-text-tertiary">
+        {snapshot.source === 'live'
+          ? 'The compute API does not report per-GPU placement to this view yet: the schedule tab shows bookings packed into lanes instead.'
+          : 'This pool has no GPU nodes.'}
+      </p>
+    );
 
   return (
     <div
