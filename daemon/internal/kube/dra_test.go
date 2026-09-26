@@ -45,6 +45,10 @@ func TestDRADriver(t *testing.T) {
 		"c2": `{"metadata":{"uid":"u2"},"status":{"allocation":{"devices":{"results":[
 			{"request":"gpu","driver":"gpu.bcd.dev","pool":"n1","device":"gpu-3"}]}}}}`,
 		"c3": `{"metadata":{"uid":"u3-new"},"status":{"allocation":{"devices":{"results":[]}}}}`,
+		"c5": `{"metadata":{"uid":"u5"},"status":{"allocation":{"devices":{"results":[
+			{"request":"gpu","driver":"gpu.bcd.dev","pool":"n1","device":"` + gpu1 + `","adminAccess":true}]}}}}`,
+		"c6": `{"metadata":{"uid":"u6"},"status":{"allocation":{"devices":{"results":[
+			{"request":"gpu","driver":"gpu.bcd.dev","pool":"n1","device":"` + gpu1 + `"}]}}}}`,
 	}
 	sys.Handler = func(_ context.Context, cmd hostconfig.Cmd) ([]byte, error) {
 		mu.Lock()
@@ -146,9 +150,17 @@ func TestDRADriver(t *testing.T) {
 	if got := prepare(procPrepareV1beta1, Claim{Namespace: "ml", Name: "c1", UID: "u1"}); got["u1"].Error != "" {
 		t.Fatalf("v1beta1 = %+v", got["u1"])
 	}
+	// Admin access, and a second claim for a device prepared for u1, are refused (review round 5 #12).
+	got = prepare(procPrepareV1, Claim{Namespace: "ml", Name: "c5", UID: "u5"}, Claim{Namespace: "ml", Name: "c6", UID: "u6"})
+	if !strings.Contains(got["u5"].Error, "admin access") || !strings.Contains(got["u6"].Error, "prepared for claim u1") {
+		t.Fatalf("u5 %+v u6 %+v", got["u5"], got["u6"])
+	}
 	unprep, err := draClient[ClaimsRequest, UnprepareResponse](info.Msg.Endpoint, procUnprepareV1).CallUnary(ctx, connect.NewRequest(&ClaimsRequest{Claims: []Claim{{UID: "u1"}}}))
 	if err != nil || !reflect.DeepEqual(unprep.Msg.Claims, map[string]string{"u1": ""}) {
 		t.Fatalf("unprepare = %+v, %v", unprep, err)
+	}
+	if got := prepare(procPrepareV1, Claim{Namespace: "ml", Name: "c6", UID: "u6"}); got["u6"].Error != "" {
+		t.Fatalf("u6 after u1 let go = %+v", got["u6"])
 	}
 
 	// A pod holds gpu-1 through its claim when compute releases it.

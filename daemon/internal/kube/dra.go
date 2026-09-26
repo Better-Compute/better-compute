@@ -69,6 +69,8 @@ type draDriver struct {
 	apiVersion  string
 	// live: a slice with devices is out there (deleted once none are left).
 	live bool
+	// prepared maps a prepared device (its DRA name) to the claim UID it was prepared for.
+	prepared map[string]string
 }
 
 // lastPublished reports whether the node's slice offers devices now.
@@ -177,9 +179,10 @@ func (d *draDriver) serviceHandler() http.Handler {
 		return connect.NewResponse(d.prepare(ctx, req.Msg.Claims)), nil
 	}
 	unprepare := func(_ context.Context, req *connect.Request[ClaimsRequest]) (*connect.Response[UnprepareResponse], error) {
-		// Nothing to undo: preparing wrote nothing on the host (the CDI specs are the holds').
+		// Nothing to undo on the host (the CDI specs are the holds'): only the device→claim record.
 		out := &UnprepareResponse{Claims: map[string]string{}}
 		for _, c := range req.Msg.Claims {
+			d.unprepared(c.UID)
 			out.Claims[c.UID] = ""
 		}
 		return connect.NewResponse(out), nil
@@ -203,10 +206,11 @@ type claimObject struct {
 		Allocation *struct {
 			Devices struct {
 				Results []struct {
-					Request string `json:"request"`
-					Driver  string `json:"driver"`
-					Pool    string `json:"pool"`
-					Device  string `json:"device"`
+					Request     string `json:"request"`
+					Driver      string `json:"driver"`
+					Pool        string `json:"pool"`
+					Device      string `json:"device"`
+					AdminAccess *bool  `json:"adminAccess"`
 				} `json:"results"`
 			} `json:"devices"`
 		} `json:"allocation"`
@@ -263,6 +267,14 @@ func (d *draDriver) prepareClaim(ctx context.Context, c Claim, node string, devi
 		if !a.healthy {
 			return ClaimResult{Error: fmt.Sprintf("device %s/%s is unhealthy", r.Pool, r.Device)}
 		}
+		// Admin access reaches a device already allocated to someone else: compute bound it to one
+		// allocation, so no claim may share it that way.
+		if r.AdminAccess != nil && *r.AdminAccess {
+			return ClaimResult{Error: fmt.Sprintf("device %s/%s: admin access to gpu.bcd.dev devices is refused", r.Pool, r.Device)}
+		}
+		if other := d.preparedFor(r.Device); other != "" && other != c.UID {
+			return ClaimResult{Error: fmt.Sprintf("device %s/%s is prepared for claim %s", r.Pool, r.Device, other)}
+		}
 		p := byDevice[r.Device]
 		if p == nil {
 			p = &PreparedDevice{PoolName: r.Pool, DeviceName: r.Device, CDIDeviceIDs: append([]string(nil), a.cdi...)}
@@ -272,10 +284,35 @@ func (d *draDriver) prepareClaim(ctx context.Context, c Claim, node string, devi
 		p.RequestNames = append(p.RequestNames, r.Request)
 	}
 	res := ClaimResult{}
+	d.mu.Lock()
+	if d.prepared == nil {
+		d.prepared = map[string]string{}
+	}
 	for _, name := range order {
 		res.Devices = append(res.Devices, *byDevice[name])
+		d.prepared[name] = c.UID
 	}
+	d.mu.Unlock()
 	return res
+}
+
+// preparedFor returns the claim a device is prepared for ("" when none). The record lives in memory:
+// after a bcd restart the kubelet's own checkpoint still keeps a device to one claim.
+func (d *draDriver) preparedFor(device string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.prepared[device]
+}
+
+// unprepared forgets a claim's devices.
+func (d *draDriver) unprepared(uid string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for device, claim := range d.prepared {
+		if claim == uid {
+			delete(d.prepared, device)
+		}
+	}
 }
 
 // byDeviceName indexes the advertised devices (every resource) by their DRA device name.
