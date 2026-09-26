@@ -203,5 +203,10 @@ describe('bcd as a Kubernetes DaemonSet', () => {
     for (const dir of ['/etc/kubernetes', '/etc/kubernetes/pki', '/var/lib/kubelet', '/var/lib/kubelet/pods', '/'])
       expect(() => bcdDaemonSetManifests({ ...options, kubeletCredentials: { kubeconfig: k3s.kubeconfig, certificateDirs: [dir] } })).toThrow(/certificateDirs/);
     expect(() => bcdDaemonSetManifests({ ...options, kubeletCredentials: { kubeconfig: 'relative/kubelet.conf', certificateDirs: ['/x'] } })).toThrow(/kubeconfig/);
+    // By name: the same mounts as the paths.
+    expect(podOf(bcdDaemonSetManifests({ ...options, kubeletCredentials: 'k3s' })).volumes).toEqual(pod.volumes);
+    const rke2 = podOf(bcdDaemonSetManifests({ ...options, kubeletCredentials: 'rke2' }));
+    expect(rke2.volumes.find((v: { name: string }) => v.name === 'kubelet-kubeconfig').hostPath.path).toBe('/var/lib/rancher/rke2/agent/kubelet.kubeconfig');
+    expect(() => bcdDaemonSetManifests({ ...options, kubeletCredentials: 'minikube' as never })).toThrow(/kubeletCredentials/);
   });
 });

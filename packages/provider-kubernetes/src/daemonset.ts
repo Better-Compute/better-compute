@@ -100,7 +100,7 @@ export interface BcdDaemonSetOptions {
    * of the host's /etc/kubernetes is mounted: on a control-plane node that holds admin.conf and the
    * cluster CA's keys.
    */
-  kubeletCredentials?: { kubeconfig: string; certificateDirs: readonly string[] };
+  kubeletCredentials?: keyof typeof kubeletCredentialPresets | { kubeconfig: string; certificateDirs: readonly string[] };
   /**
    * The nodes' container runtime, whose configuration bcd reads read-only (`containerRuntimeConfigs`): default
    * `containerd` (`/etc/containerd/config.toml`), or `k3s`, `rke2`, `cri-o`, or the paths themselves. Every
@@ -205,6 +205,17 @@ export const kubeadmKubeletCredentials = Object.freeze({
   kubeconfig: '/etc/kubernetes/kubelet.conf',
   certificateDirs: Object.freeze(['/var/lib/kubelet/pki']),
 });
+
+/**
+ * The kubelet's kubeconfig and client-certificate directory per distribution, for `kubeletCredentials`
+ * (a CLI maps `--kubelet-credentials <name>` onto these). k3s and RKE2 keep both in their agent directory.
+ */
+export const kubeletCredentialPresets: Readonly<Record<'kubeadm' | 'k3s' | 'rke2', { kubeconfig: string; certificateDirs: readonly string[] }>> =
+  Object.freeze({
+    kubeadm: kubeadmKubeletCredentials,
+    k3s: Object.freeze({ kubeconfig: '/var/lib/rancher/k3s/agent/kubelet.kubeconfig', certificateDirs: Object.freeze(['/var/lib/rancher/k3s/agent']) }),
+    rke2: Object.freeze({ kubeconfig: '/var/lib/rancher/rke2/agent/kubelet.kubeconfig', certificateDirs: Object.freeze(['/var/lib/rancher/rke2/agent']) }),
+  });
 /** One directory of the kubelet's state bcd's container mounts. */
 export interface KubeletStateMount {
   volume: string;
@@ -330,7 +341,12 @@ export function bcdDaemonSetManifests(options: BcdDaemonSetOptions): KubernetesO
   for (const [kind, values] of Object.entries(resources))
     for (const [resource, value] of Object.entries(values))
       if (typeof value !== 'string' || !quantity.test(value)) invalid(`resources.${kind}.${resource} must be a quantity such as 100m or 128Mi`);
-  const kubelet = options.kubeletCredentials ?? kubeadmKubeletCredentials;
+  const kubelet =
+    typeof options.kubeletCredentials === 'string'
+      ? (Object.hasOwn(kubeletCredentialPresets, options.kubeletCredentials)
+          ? kubeletCredentialPresets[options.kubeletCredentials]
+          : invalid(`kubeletCredentials must be one of ${Object.keys(kubeletCredentialPresets).join(', ')}, or { kubeconfig, certificateDirs }`))
+      : (options.kubeletCredentials ?? kubeadmKubeletCredentials);
   if (typeof kubelet.kubeconfig !== 'string' || !absolutePath.test(kubelet.kubeconfig)) invalid('kubeletCredentials.kubeconfig must be an absolute path');
   if (!Array.isArray(kubelet.certificateDirs) || kubelet.certificateDirs.length === 0 || kubelet.certificateDirs.length > 4)
     invalid('kubeletCredentials.certificateDirs must list 1 to 4 directories');
