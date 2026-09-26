@@ -289,12 +289,12 @@ a file key for such a certificate:
 
 Either way the certificate runs out within its 24 hours and the session closes as in
 [certificate expiry](#certificate-expiry). The recovery is to join again with the TPM, as root:
-`bcd join --reset --yes --attestor tpm` moves the old identity aside (renamed `<name>.reset-<UTC time>`, not
-deleted) and joins, and the attestor reclaims the node bound to the machine's EK, with a new identity generation, a
+`bcd join --reset --yes --attestor tpm` moves the old identity and journal aside (renamed
+`<name>.reset-<UTC time>`, not deleted) and joins, and the attestor reclaims the node bound to the machine's EK, with a new identity generation, a
 new certified key and a fresh AK statement. A machine whose EK changed (another TPM) joins as a new node instead,
 once the old node is cordoned and deleted (`better-compute nodes delete <node> --yes`, 4049621; `nodes.delete`,
-54cad9e), which frees its EK binding and the machine's hardware key; its old `journal.db` must then be moved aside
-by hand, or `bcd node` refuses it as another node's. See
+54cad9e), which frees its EK binding and the machine's hardware key; the old node's `journal.db` is already aside
+(b4fcc2e), so `bcd node` does not refuse it as another node's. See
 [recovering a node whose TPM changed](/docs/guides/nodes/attestation#recovering-a-node-whose-tpm-changed). Nodes
 whose certificate names no AK (every other join) renew as before; a key of theirs in a cleared TPM is lost the same
 way and needs a new join (`bcd join --reset --yes` with a token).

@@ -270,7 +270,7 @@ better-compute nodes delete node_01k5w… --tenant $TENANT --reason 'TPM replace
 bcd join --config /etc/bcd/config.toml --reset --yes --attestor tpm
 ```
 
-`nodes delete` (4049621) takes `--reason` and `--if-version` like the other node changes, and without `--yes` it
+[`nodes delete`](/docs/reference/cli#nodes-delete) (4049621) takes `--reason` and `--if-version` like the other node changes, and without `--yes` it
 refuses with a usage error before making any call (`nodes delete removes <node> for good; re-run with --yes`). From a
 client:
 
@@ -280,12 +280,12 @@ await client.nodes.cordon({ tenantId, nodeId, reason: 'TPM replaced' });
 await client.nodes.delete({ tenantId, nodeId, reason: 'TPM replaced' });
 ```
 
-<Callout type="warn" title="A new node id and the old journal">
-`bcd join` moves an old journal aside only when the old identity still loads and names another node. After
-`--reset` it no longer loads, so a machine that joins as a new node keeps the old node's `journal.db` in `data_dir`,
-and `bcd node` then refuses to start ("the journal belongs to node `<old>`, not `<new>`"). Move
-`/var/lib/bcd/journal.db` aside as well before restarting `bcd.service`. A re-join that reclaims the same node (a
-cleared TPM, the same EK) is not affected.
+<Callout title="A new node id and the old journal">
+`bcd node` refuses a journal of another node ("the journal belongs to node `<old>`, not `<new>`"), and a plain
+`bcd join` moves an old journal aside only when the old identity still loads. After `--reset` it does not, so
+`--reset` moves `journal.db` aside with the identity (`journal.db.reset-<UTC time>`, b4fcc2e) and the new node starts
+a journal of its own. Under `[helper]` the root join also hands `identity.json` and `node.key` to the `[helper]` user
+when it finishes, so no `chown` is needed before restarting `bcd-helper.service` and `bcd.service`.
 </Callout>
 
 ## The nodes API

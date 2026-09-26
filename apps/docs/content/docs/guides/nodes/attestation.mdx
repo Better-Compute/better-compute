@@ -396,9 +396,9 @@ machine on the SHA-256 of its EK, so what happens depends on whether the EK surv
      cordoned `adopted` node): its certificates are revoked and its EK binding and trusted hardware key are freed
      (see [removing an adopted host](/docs/guides/nodes/operating-nodes#removing-an-adopted-host));
   3. on the machine, as root, run `bcd join --reset --yes --attestor tpm`. The machine joins wherever your
-     `resolve` or `enrollment` sends it, as a new node (with neither, it is refused). It has a new node id, so move
-     the old `journal.db` in the data directory aside too before `bcd node` starts, or it refuses the old node's
-     journal (see [the callout there](/docs/guides/nodes/operating-nodes#removing-an-adopted-host)).
+     `resolve` or `enrollment` sends it, as a new node (with neither, it is refused). It has a new node id; the
+     `--reset` moved the old node's `journal.db` aside with the identity (b4fcc2e), so `bcd node` starts with a
+     journal of its own.
 
 `bcd join --reset` without `--yes` moves nothing: it prints what it would move and exits 2. The hints bcd prints
 spell the recovery as two runs, `bcd join --reset --yes`, then `bcd join`; one run with both does the same, because

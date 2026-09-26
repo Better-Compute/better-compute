@@ -557,8 +557,9 @@ decision fields `decidedAt`, `decidedBy`, `reason` and `consumedAt`. Decisions p
     `bcd join` does nothing on a machine whose identity loads, whatever its certificate's state: expired, revoked
     (`nodes.revokeIdentity`, `nodes.delete`) or refused at renewal. `bcd doctor` shows which (`identity` fails for
     an expired certificate or an identity that does not load). Run the join again as root with `--reset --yes` and
-    the join's credential; the old `identity.json`, `node.key` and `node.key.next` are renamed
-    `<name>.reset-<UTC time>`, not deleted. See
+    the join's credential; the old `identity.json`, `node.key`, `node.key.next` and `journal.db` are renamed
+    `<name>.reset-<UTC time>`, not deleted. Under `[helper]` the root join hands `identity.json` and `node.key` to
+    the `[helper]` user when it finishes, so `bcd node` can read them. See
     [joining again with --reset](/docs/daemon/install#joining-again-with---reset).
   </Accordion>
 </Accordions>

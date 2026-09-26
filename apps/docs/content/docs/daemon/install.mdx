@@ -783,7 +783,7 @@ bcd join --config /etc/bcd/config.toml --reset --yes < join-token.txt
 
 | Flag | Does |
 | --- | --- |
-| `--reset` | Before the join, moves the node's identity aside: `identity.json`, `node.key` and a pending `node.key.next`, whichever exist in `data_dir`, each renamed `<name>.reset-<UTC time>` (for example `node.key.reset-20260926T114200Z`) |
+| `--reset` | Before the join, moves the node's identity and journal aside: `identity.json`, `node.key`, a pending `node.key.next` and `journal.db`, whichever exist in `data_dir`, each renamed `<name>.reset-<UTC time>` (for example `node.key.reset-20260926T114200Z`) |
 | `--yes` | Confirms `--reset`. Without it bcd prints which files it would move, that the join that follows makes a new key (a new node, unless the attestor proves this machine and reclaims it), and exits 2 |
 
 What it does and does not do:
@@ -802,15 +802,19 @@ What it does and does not do:
   [placeholder hardware and reclaims](/docs/guides/nodes/joining#placeholder-hardware-and-reclaims)); to join as a new
   node instead, cordon and delete the old one first (`better-compute nodes delete <node> --yes`; see
   [removing an adopted host](/docs/guides/nodes/operating-nodes#removing-an-adopted-host)).
-- **The journal is not moved.** `journal.db` stays. When the machine comes back as a new node id, move it aside by
-  hand before `bcd node` starts, or the node refuses it ("the journal belongs to node `<old>`, not `<new>`").
-- **Under `[helper]`** the join writes the new `node.key` and `identity.json` as root. Hand `data_dir` back to the
-  node and restart both units, as the install script does: `chown -R bcd:bcd /var/lib/bcd`, then restart
-  `bcd-helper.service` and `bcd.service`. Re-running the install script also does the `chown` and the restarts.
+- **The journal moves too** (b4fcc2e). `journal.db` is the old node's, and `bcd node` refuses a journal of another
+  node ("the journal belongs to node `<old>`, not `<new>`"). A plain join moves an old journal aside only when the
+  old identity still loads, which after `--reset` it does not, so `--reset` moves it with the identity and the node
+  starts a new one.
+- **Under `[helper]`** the join runs as root and writes the new `node.key` and `identity.json` as root. When it
+  finishes, it hands both to the `[helper]` user with `Lchown` (b4fcc2e; root only, and a name swapped for a symlink
+  changes only the link), for a new join and for `already joined` alike, so `bcd node` can read its key. Then
+  restart `bcd-helper.service` and `bcd.service`; re-running the install script also does the restarts.
 
 `bcd doctor` points at it: the `identity` check fails for an identity that does not load and for an expired
 certificate, and both details end with "bcd join --reset --yes, then bcd join". `TestJoinReset` covers the dry run,
-the move and that no identity loads afterwards.
+the move (the journal included) and that no identity loads afterwards; `TestJoinHandsTheIdentityToTheNode` covers
+the hand-over (as root; skipped otherwise).
 
 ## Site agents and the ramdisk
 
