@@ -122,7 +122,7 @@ type Options struct {
 func Builtin(o Options) *Registry {
 	return NewRegistry(
 		KernelModules{}, Sysctl{}, Hugepages{}, CPU{}, IOMMU{},
-		NvidiaDriver{}, FabricManager{}, MigLayout{Busy: o.GPUBusy}, GPUSharing{}, ContainerToolkit{},
+		NvidiaDriver{}, FabricManager{}, GPUSettings{}, MigLayout{Busy: o.GPUBusy}, GPUSharing{}, ContainerToolkit{},
 	)
 }
 

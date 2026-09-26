@@ -684,6 +684,68 @@ func TestIOMMU(t *testing.T) {
 	}
 }
 
+func TestGPUSettings(t *testing.T) {
+	sys := gpuHost("570.86.15")
+	limits := map[string]string{"0": "700.00", "1": "650.00"}
+	ecc := map[string][2]string{"0": {"Enabled", "Enabled"}, "1": {"Enabled", "Enabled"}}
+	sys.Handler = func(_ context.Context, c Cmd) ([]byte, error) {
+		if c.Name != "nvidia-smi" {
+			return nil, nil
+		}
+		switch {
+		case strings.HasPrefix(c.Args[0], "--query-gpu"):
+			var b strings.Builder
+			for _, i := range []string{"0", "1"} {
+				fmt.Fprintf(&b, "%s, %s, 200.00, 700.00, %s, %s\n", i, limits[i], ecc[i][0], ecc[i][1])
+			}
+			return []byte(b.String()), nil
+		case c.Args[2] == "-pl":
+			limits[c.Args[1]] = c.Args[3] + ".00"
+		case c.Args[2] == "-e":
+			e := ecc[c.Args[1]]
+			e[1] = map[string]string{"1": "Enabled", "0": "Disabled"}[c.Args[3]]
+			ecc[c.Args[1]] = e
+		}
+		return nil, nil
+	}
+	r := Builtin(Options{})
+	if _, err := runAll(t, r, sys, unit("gpu-settings", `{"powerLimitWatts":650}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := sys.Commands(); !slices.Contains(got, "nvidia-smi -i 0 -pl 650") || slices.Contains(got, "nvidia-smi -i 1 -pl 650") {
+		t.Fatalf("commands %q", got)
+	}
+	if n, err := runAll(t, r, sys, unit("gpu-settings", `{"powerLimitWatts":650}`)); err != nil || n != 0 {
+		t.Fatalf("converged: %d %v", n, err)
+	}
+	if _, err := runAll(t, r, sys, unit("gpu-settings", `{"powerLimitWatts":900}`)); !errors.Is(err, converge.ErrTerminal) {
+		t.Fatalf("out of range: %v", err)
+	}
+	// ECC off: set pending on both, then a reboot is due; once pending, it is not set again.
+	eccSets := func() int {
+		n := 0
+		for _, c := range sys.Commands() {
+			if strings.Contains(c, " -e ") {
+				n++
+			}
+		}
+		return n
+	}
+	sys.Ran = nil
+	_, err := runAll(t, r, sys, unit("gpu-settings", `{"ecc":false}`))
+	if err == nil || !strings.Contains(err.Error(), "reboot the node") || eccSets() != 2 {
+		t.Fatalf("ecc: %v %q", err, sys.Commands())
+	}
+	sys.Ran = nil
+	if _, err := runAll(t, r, sys, unit("gpu-settings", `{"ecc":false}`)); err == nil || eccSets() != 0 {
+		t.Fatalf("pending ecc re-set: %v %q", err, sys.Commands())
+	}
+	ecc["0"], ecc["1"] = [2]string{"Disabled", "Disabled"}, [2]string{"Disabled", "Disabled"}
+	if n, err := runAll(t, r, sys, unit("gpu-settings", `{"ecc":false}`)); err != nil || n != 0 {
+		t.Fatalf("after reboot: %d %v", n, err)
+	}
+}
+
 func TestOSRelease(t *testing.T) {
 	sys := NewFakeSystem()
 	sys.Set("/etc/os-release", "ID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"9.4\"\n")
