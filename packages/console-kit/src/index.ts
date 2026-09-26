@@ -19,3 +19,4 @@ export * from './webhooks.js';
 export * from './ssh-access.js';
 export * from './sandboxes.js';
 export * from './batches.js';
+export * from './pxe-discovery.js';

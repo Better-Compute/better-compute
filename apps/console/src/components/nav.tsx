@@ -11,6 +11,7 @@ const areas = [
   { href: '/sandboxes', label: 'Sandboxes' },
   { href: '/volumes', label: 'Volumes' },
   { href: '/nodes', label: 'Nodes' },
+  { href: '/discovery', label: 'PXE discovery' },
   { href: '/batches', label: 'Batches' },
   { href: '/pools', label: 'Pools & capacity' },
   { href: '/quotas', label: 'Quotas' },
