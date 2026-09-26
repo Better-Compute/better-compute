@@ -17,6 +17,9 @@ import { Segmented } from '../ui';
 // Markdown to paste into a doc or a channel. Everything is derived from the same data the other pages show.
 
 const PERIODS = { '7d': 7, '14d': 14, '30d': 30 } as const;
+
+/** Names come from tenants and operators: keep them from breaking a Markdown table or line. */
+const md = (text: string) => text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ').replace(/([*_`[\]<>])/g, '\\$1');
 type PeriodKey = keyof typeof PERIODS;
 
 export function ReportPage() {
@@ -90,18 +93,18 @@ export function ReportPage() {
       '|---|---|---:|---:|---:|---:|---:|',
       ...pools.map(
         (p) =>
-          `| ${p.row.name} | ${p.row.short} | ${fmtPct(p.avg, 0)} | ${fmtPct(p.peak, 0)} | ${p.fullHours} | ${p.trend ? (p.trend.slopePerWeek * 100).toFixed(1) : '—'} | ${p.trend?.daysToCeiling === undefined ? '—' : p.trend.daysToCeiling === 0 ? 'already' : `${Math.round(p.trend.daysToCeiling)} d`} |`,
+          `| ${md(p.row.name)} | ${md(p.row.short)} | ${fmtPct(p.avg, 0)} | ${fmtPct(p.peak, 0)} | ${p.fullHours} | ${p.trend ? (p.trend.slopePerWeek * 100).toFixed(1) : '—'} | ${p.trend?.daysToCeiling === undefined ? '—' : p.trend.daysToCeiling === 0 ? 'already' : `${Math.round(p.trend.daysToCeiling)} d`} |`,
       ),
       '',
       '## Top tenants',
       '',
       '| Tenant | GPU-hours | Spend (list) |',
       '|---|---:|---:|',
-      ...tenants.map((t) => `| ${tenantName(t.key)} | ${fmtNum(Math.round(gpuHoursByTenant.get(t.key) ?? 0))} | ${fmtMoney(t.cost)} |`),
+      ...tenants.map((t) => `| ${md(tenantName(t.key))} | ${fmtNum(Math.round(gpuHoursByTenant.get(t.key) ?? 0))} | ${fmtMoney(t.cost)} |`),
       '',
       '## Open items',
       '',
-      ...(insights.length ? insights.map((i) => `- **${i.severity}** · ${i.title}: ${i.detail}`) : ['- Nothing open.']),
+      ...(insights.length ? insights.map((i) => `- **${i.severity}** · ${md(i.title)}: ${md(i.detail)}`) : ['- Nothing open.']),
       '',
       `_Source: ${snapshot.source === 'sim' ? 'simulated fleet' : 'live compute API'}; generated ${fmtStamp(snapshot.now)} UTC._`,
     ];
