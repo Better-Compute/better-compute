@@ -160,6 +160,7 @@ describe.skipIf(!url)('postgres() on PostgreSQL', () => {
       'core/0024_session_capabilities',
       'core/0025_secret_scope',
       'core/0026_session_approver_set',
+      'core/0027_join_token_hosted',
     ]);
     expect((await db.migrate()).applied).toEqual([]);
   });

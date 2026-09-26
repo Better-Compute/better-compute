@@ -125,6 +125,16 @@ export interface PoolPolicy {
     labels?: Record<string, string>;
     /** Taints as `key=value:Effect`. */
     taints?: string[];
+    /** The kubelet/kubeadm release the `k8s-join` unit installs, e.g. `1.34.1` (default: the node's packages). */
+    kubernetesVersion?: string;
+    /** GPUs through containerd's NVIDIA runtime and CDI (default true). */
+    gpu?: boolean;
+    /**
+     * The platform runs this cluster: a bcd DaemonSet joining with a `hosted: 'kubernetes'` token lands its
+     * node at the pool's trust instead of `tenant-controlled` (core/0027). Only the pool decides it, never
+     * the node or the token alone.
+     */
+    platformOperated?: boolean;
   };
 }
 

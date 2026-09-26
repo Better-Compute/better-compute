@@ -70,6 +70,15 @@ export const builtinConfigUnits: readonly ConfigUnitDefinition[] = Object.freeze
     }) as Manifest<Record<string, Json>>,
   },
   {
+    name: 'gpu-sharing',
+    description:
+      "How a shared pool's GPUs are split between clients: MPS (bcd-mps.service, 100/replicas % of the SMs each) or time-slicing (MPS stopped)",
+    settings: manifest({
+      mode: field.option(['mps', 'timeslice']),
+      replicas: field.int({ min: 1, max: 48 }).optional(),
+    }) as Manifest<Record<string, Json>>,
+  },
+  {
     name: 'kernel-modules',
     description:
       'Kernel modules loaded at boot and now (modules-load.d), with their options (modprobe.d): kvm_intel/kvm_amd, vhost_net and tun for VM hosts',
@@ -86,6 +95,45 @@ export const builtinConfigUnits: readonly ConfigUnitDefinition[] = Object.freeze
 ]);
 
 const sysctlKey = /^[a-z0-9_]+(?:\.[a-z0-9_-]+)+$/;
+
+/**
+ * Keys bcd's host converger refuses (terminal): they run programs as root or lower the host's defenses.
+ * Mirrored here so a profile or pool naming one is INVALID_INPUT up front, not a failed host section.
+ * `prefix.*` covers the subtree.
+ */
+export const forbiddenSysctls: readonly string[] = Object.freeze([
+  'kernel.core_pattern',
+  'kernel.modprobe',
+  'kernel.usermodehelper.*',
+  'kernel.poweroff_cmd',
+  'kernel.hotplug',
+  'fs.binfmt_misc.*',
+  'fs.suid_dumpable',
+  'fs.protected_*',
+  'kernel.randomize_va_space',
+  'kernel.kptr_restrict',
+  'kernel.dmesg_restrict',
+  'kernel.yama.*',
+  'kernel.kexec_load_disabled',
+  'kernel.unprivileged_bpf_disabled',
+  'kernel.perf_event_paranoid',
+  'kernel.sysrq',
+  'kernel.modules_disabled',
+  'vm.mmap_min_addr',
+  'vm.unprivileged_userfaultfd',
+  'net.core.bpf_jit_harden',
+  'user.*',
+  'kernel.unprivileged_userns_clone',
+  'kernel.apparmor_restrict_unprivileged_userns',
+]);
+
+function sysctlForbidden(key: string): boolean {
+  return forbiddenSysctls.some((rule) => {
+    if (rule.endsWith('.*')) return key.startsWith(rule.slice(0, -1)) || key === rule.slice(0, -2);
+    if (rule.endsWith('*')) return key.startsWith(rule.slice(0, -1));
+    return key === rule;
+  });
+}
 
 // Kubernetes label syntax (k8s.io/docs/concepts/overview/working-with-objects/labels): an optional DNS
 // subdomain prefix and a name of at most 63 characters; values the same, or empty.
@@ -200,6 +248,8 @@ async function validateUnit(unit: ConfigUnitDefinition, name: string, settings: 
     for (const [key, value] of Object.entries(settings))
       if (!sysctlKey.test(key) || !['string', 'number', 'boolean'].includes(typeof value))
         throw new ComputeError('INVALID_INPUT', `hostConfig.sysctl.${key} must be a sysctl name with a scalar value`);
+      else if (sysctlForbidden(key))
+        throw new ComputeError('INVALID_INPUT', `hostConfig.sysctl.${key} is not settable: it runs programs as root or lowers the host's defenses`);
     return settings;
   }
   if (name === 'k8s-join') return validateK8sJoin(settings);
@@ -256,18 +306,34 @@ const isRecord = (value: unknown): value is Record<string, unknown> => !!value &
  *   → `k8s-join`;
  * - `policy.hugepages` { size: '2Mi' | '1Gi', count, perNuma? } (core PoolPolicy) → `hugepages`
  *   { pages2m | pages1g: count, perNuma };
- * - `policy.kernelModules` { load?, options? } → `kernel-modules`.
+ * - `policy.kernelModules` { load?, options? } → `kernel-modules`;
+ * - a pool shared by `mps` or `timeslice` → `gpu-sharing` { mode, replicas: `policy.sharing.replicas`,
+ *   default 10 for MPS and 4 for time-slicing }.
  * They win over a profile's `hostConfig` for the same unit: the pool's operator decides cluster
- * membership and memory layout, not the profile a machine was deployed with.
+ * membership, memory layout and GPU sharing, not the profile a machine was deployed with.
  */
-export function poolHostConfig(policy: Readonly<Record<string, unknown>> | null | undefined): Record<string, Record<string, Json>> {
+export function poolHostConfig(
+  policy: Readonly<Record<string, unknown>> | null | undefined,
+  sharing?: string | null,
+): Record<string, Record<string, Json>> {
   const config: Record<string, Record<string, Json>> = {};
+  if (sharing === 'mps' || sharing === 'timeslice') {
+    const replicas = isRecord(policy?.sharing) ? policy.sharing.replicas : undefined;
+    config['gpu-sharing'] = { mode: sharing, replicas: (replicas ?? (sharing === 'mps' ? 10 : 4)) as Json };
+  }
   const kubernetes = policy?.kubernetes;
   if (kubernetes !== undefined) {
     if (!isRecord(kubernetes)) throw new ComputeError('INVALID_INPUT', 'policy.kubernetes must be an object');
-    const { apiServer, caCertSha256, joinTokenRef, labels, taints, kubernetesVersion, gpu, ...rest } = kubernetes;
+    const { apiServer, caCertSha256, joinTokenRef, labels, taints, kubernetesVersion, gpu, platformOperated, ...rest } = kubernetes;
     const unknown = Object.keys(rest);
     if (unknown.length) throw new ComputeError('INVALID_INPUT', `policy.kubernetes.${unknown[0]} is not a setting`);
+    if (platformOperated !== undefined && typeof platformOperated !== 'boolean')
+      throw new ComputeError('INVALID_INPUT', 'policy.kubernetes.platformOperated must be true or false');
+  }
+  // Machines join the cluster only when the pool gives a join token: a pool whose bcd runs as a DaemonSet
+  // inside the cluster (hosted, provider-kubernetes) is in it already, and kubeadm join would fail there.
+  if (isRecord(kubernetes) && (kubernetes.joinTokenRef !== undefined || kubernetes.apiServer !== undefined)) {
+    const { apiServer, caCertSha256, joinTokenRef, labels, taints, kubernetesVersion, gpu } = kubernetes;
     config['k8s-join'] = {
       server: apiServer as Json,
       caCertSha256: caCertSha256 as Json,
@@ -301,8 +367,8 @@ export function poolHostConfig(policy: Readonly<Record<string, unknown>> | null 
  * Checks a pool policy's host settings (`poolHostConfig`) as nodes will get them: for the pools API to
  * call on create and update, so a bad policy is refused there rather than breaking every node's spec.
  */
-export async function validatePoolHostPolicy(policy: Readonly<Record<string, unknown>> | null | undefined): Promise<void> {
-  await resolveHostConfig(poolHostConfig(policy), { labels: {}, poolPolicy: policy ?? null });
+export async function validatePoolHostPolicy(policy: Readonly<Record<string, unknown>> | null | undefined, sharing?: string | null): Promise<void> {
+  await resolveHostConfig(poolHostConfig(policy, sharing), { labels: {}, poolPolicy: policy ?? null });
 }
 
 /**
@@ -322,19 +388,20 @@ export async function hostSpecFor(
   const { rows } = await sql.query<{
     host_config: Record<string, Record<string, Json>> | null;
     pool_policy: Record<string, unknown> | null;
+    pool_sharing: string | null;
     gated_layout: string | null;
   }>(
     `SELECT (SELECT w.profile_document->'hostConfig' FROM workflows w
               WHERE w.node_id = n.id AND w.state = 'succeeded' AND w.profile_document ? 'hostConfig'
               ORDER BY w.finished_at DESC NULLS LAST, w.id DESC LIMIT 1) AS host_config,
-            p.policy AS pool_policy, provision_gated_mig_layout(n.id) AS gated_layout
+            p.policy AS pool_policy, p.sharing AS pool_sharing, provision_gated_mig_layout(n.id) AS gated_layout
        FROM nodes n LEFT JOIN pools p ON p.id = n.pool_id
       WHERE n.id = $1`,
     [nodeId],
   );
   const row = rows[0];
   if (!row) return {};
-  const fromPool = poolHostConfig(row.pool_policy);
+  const fromPool = poolHostConfig(row.pool_policy, row.pool_sharing);
   if (!row.host_config && Object.keys(fromPool).length === 0) return {};
   const labels = await sql.query<{ key: string; value: string }>('SELECT key, value FROM node_labels WHERE node_id = $1', [nodeId]);
   const poolPolicy = row.gated_layout !== null ? { ...(row.pool_policy ?? {}), migLayout: row.gated_layout } : row.pool_policy;

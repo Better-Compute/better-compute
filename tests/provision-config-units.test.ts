@@ -105,6 +105,27 @@ describe('hugepages, kernel-modules and k8s-join (PLAN.md §3.8)', () => {
     await refused({ kubeconfig: '...' }, /not a setting/);
   });
 
+  it('refuses sysctls that run programs as root or lower host defenses, as bcd does', async () => {
+    for (const key of ['kernel.core_pattern', 'kernel.usermodehelper.bset', 'fs.protected_symlinks', 'user.max_user_namespaces', 'kernel.yama.ptrace_scope'])
+      await expect(resolveHostConfig({ sysctl: { [key]: '0' } }, { labels: {} })).rejects.toThrow(/not settable/);
+    expect(await resolveHostConfig({ sysctl: { 'vm.swappiness': 10, 'net.core.somaxconn': 4096 } }, { labels: {} })).toEqual({
+      config: { sysctl: { 'vm.swappiness': 10, 'net.core.somaxconn': 4096 } },
+    });
+  });
+
+  it("renders gpu-sharing from a shared pool's mode, with default replicas", () => {
+    expect(poolHostConfig({}, 'mps')['gpu-sharing']).toEqual({ mode: 'mps', replicas: 10 });
+    expect(poolHostConfig({ sharing: { replicas: 8 } }, 'timeslice')['gpu-sharing']).toEqual({ mode: 'timeslice', replicas: 8 });
+    expect(poolHostConfig({}, 'timeslice')['gpu-sharing']).toEqual({ mode: 'timeslice', replicas: 4 });
+    expect(poolHostConfig({}, 'exclusive')['gpu-sharing']).toBeUndefined();
+    expect(poolHostConfig({}, 'mig')['gpu-sharing']).toBeUndefined();
+  });
+
+  it('never joins a hosted pool (bcd as a DaemonSet inside the cluster already)', async () => {
+    expect(poolHostConfig({ kubernetes: { platformOperated: true } })).toEqual({});
+    await expect(validatePoolHostPolicy({ kubernetes: { platformOperated: 'yes' } })).rejects.toThrow(/platformOperated/);
+  });
+
   it("renders a pool's policy into units that win over the profile's", async () => {
     const db = pglite();
     try {
@@ -140,6 +161,7 @@ describe('hugepages, kernel-modules and k8s-join (PLAN.md §3.8)', () => {
       await expect(validatePoolHostPolicy({ kubernetes: { ...policy.kubernetes, joinTokenRef: 'plain-token' } })).rejects.toThrow(/tokenRef/);
       await expect(validatePoolHostPolicy({ kubernetes: { ...policy.kubernetes, kubeconfig: 'x' } })).rejects.toThrow(/not a setting/);
       await expect(validatePoolHostPolicy(policy)).resolves.toBeUndefined();
+      await expect(validatePoolHostPolicy({ sharing: { replicas: 99 } }, 'mps')).rejects.toThrow(/gpu-sharing/);
       // The pool's hugepages win over a profile's (the operator's memory layout).
       expect(poolHostConfig(policy).hugepages).toEqual({ pages1g: 8, perNuma: true });
     } finally {
