@@ -10,3 +10,4 @@ export * from './instrument.js';
 export * from './database.js';
 export * from './catalog.js';
 export * from './traceparent.js';
+export * from './node-telemetry.js';
