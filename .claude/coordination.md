@@ -129,6 +129,11 @@ Round-5 security review (subagent over a760805..HEAD; 2 HIGH, 7 MED, 3 LOW):
 - L10: 03c023d, a894cd2. L11: c1fd430 (+ gateway takeover and metal/vps readers asked). L12: 3f73449.
 - Pin rule for `kubernetes manifest`: d2cd813.
 
+Security review 2 (1f0210a..HEAD; sub-reviews for kube, volumes, PXE/control plane; the helper/libvirt part is pending):
+- Kube: M1–M3 and L6 → [6baab5]; M4 → [d320b8] ebd9806 plus capacity 4570dfe; M5 owner-only kubernetes binding 3825ec7; L7 → [927015].
+- Volumes: M1/L3 → [927015]; M2 → [06192c] 851016e plus the volume_storage seam 37d6d6d ([927015] consumes); L4 → [06192c] bdeb452.
+- PXE/control plane: M8/M6/cpulist 004579e (mine); PXE M1/L5/L7 → [06192c]; discovery spoofing L6 → [927015] (confirmation before binding a MAC).
+
 E landed ([6baab5]):
 - GPUs and health: cb987e5 nvidia-smi backend (+5026330 NVLink peers); 662fb55 diag.nvml, XID rescans, reset clears XIDs; 6f5a99f unhealthy GPUs never offered.
 - Kubernetes: 88ecb07/7579184 k8s-join + device plugin + reaper; 1e5f96b hosted mode; 7d24836/fa8611e DRA; 9f860ad/3f73449 review-5 fixes (ids <atom>@<alloc>, ForeignGpuExposure, RequireAllowed, DRA adminAccess/claim map); 028b81c release cordon/drain; 6ef198b taints only at registration (KubernetesTaintsDrift); 14111c1 InUse/Freed (with [06192c]'s cd5fc82).
