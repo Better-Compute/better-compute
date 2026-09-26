@@ -298,6 +298,8 @@ func (a *Agent) metrics(ctx context.Context) []telemetry.Metric {
 			out = append(out, telemetry.Metric{Name: p.name, Unit: "%", Points: []telemetry.Point{{Double: float64(p.value)}}})
 		}
 	}
+	out = append(out, a.hostMemoryMetrics()...)
+	out = append(out, a.instanceMetrics(ctx)...)
 	return out
 }
 
