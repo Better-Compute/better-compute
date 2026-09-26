@@ -51,12 +51,39 @@ export interface CommandDef {
   shortcut?: string;
 }
 
+/** One entity a module finds for the ⌘K search (a node, a reservation, a tenant…). */
+export interface SearchResult {
+  id: string;
+  label: string;
+  /** Palette section, e.g. 'Nodes'. */
+  group: string;
+  hint?: string;
+  icon?: IconType;
+  href: string;
+  /** When set, Shift+Enter in the palette peeks instead of navigating. */
+  peek?: { kind: string; id: string };
+}
+
+/**
+ * A peek: a compact view of one entity, opened in a side sheet from any <EntityLink kind id> without leaving
+ * the page. Keyed by entity kind ('node', 'pool', 'reservation', 'tenant', 'site'…).
+ */
+export interface PeekDef {
+  title: (id: string) => string;
+  href: (id: string) => string;
+  icon?: IconType;
+  component: ComponentType<{ id: string }>;
+}
+
 export interface AdminModule {
   id: string;
   title: string;
   nav: NavItem[];
   widgets: WidgetDef[];
   commands?: CommandDef[];
+  /** Entities for the palette. Called with the query (≥ 2 chars) and the workspace clock; return ≤ 8. */
+  search?: (query: string, context: { now: number; siteId?: string }) => SearchResult[];
+  peeks?: Record<string, PeekDef>;
 }
 
 /** Sidebar sections, top to bottom. Unknown groups sort after these, alphabetically. */
@@ -93,6 +120,19 @@ export const allNav = () => modules.flatMap((module) => module.nav);
 export const allWidgets = () => modules.flatMap((module) => module.widgets);
 export const allCommands = () => modules.flatMap((module) => module.commands ?? []);
 export const widgetById = (id: string) => allWidgets().find((widget) => widget.id === id);
+export const peekFor = (kind: string): PeekDef | undefined => modules.find((module) => module.peeks?.[kind])?.peeks?.[kind];
+
+/** Every module's search results for a query, grouped in module order. A failing module is skipped. */
+export function searchAll(query: string, context: { now: number; siteId?: string }): SearchResult[] {
+  if (query.trim().length < 2) return [];
+  return modules.flatMap((module) => {
+    try {
+      return (module.search?.(query.trim(), context) ?? []).slice(0, 8);
+    } catch {
+      return [];
+    }
+  });
+}
 
 /** The nav item a path belongs to: the longest href that prefixes it. */
 export function navForPath(pathname: string): NavItem | undefined {

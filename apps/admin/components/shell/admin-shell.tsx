@@ -6,6 +6,7 @@ import { Dialog, Heading, Modal, ModalOverlay } from 'react-aria-components';
 import { allCommands, allNav } from '@/lib/modules';
 import { CommandPalette, PALETTE_EVENTS } from './command-palette';
 import { PageCommandsProvider } from './page-commands';
+import { PeekProvider } from './peek';
 import { TimeTravelBanner } from './time-machine';
 import { Sidebar } from './sidebar';
 import { Topbar } from './topbar';
@@ -114,6 +115,7 @@ export function AdminShell({ children }: { children: ReactNode }) {
     // App shell: the window never scrolls; <main> does, so the sidebar and top bar stay put and scroll position
     // is per page (reset on navigation below).
     <PageCommandsProvider>
+    <PeekProvider>
     <div className="flex h-dvh overflow-hidden">
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[70] focus:bg-surface-raised focus:px-3 focus:py-2">
         Skip to content
@@ -136,6 +138,7 @@ export function AdminShell({ children }: { children: ReactNode }) {
       <CommandPalette open={palette} onOpenChange={setPalette} />
       <ShortcutSheet open={keys} onOpenChange={setKeys} />
     </div>
+    </PeekProvider>
     </PageCommandsProvider>
   );
 }

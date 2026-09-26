@@ -10,6 +10,8 @@ import {
   RiTimerFlashLine,
 } from 'react-icons/ri';
 import type { AdminModule } from '@/lib/modules';
+import { controlPlane, siteById, sites } from '@/lib/data';
+import { ComponentPeek, SitePeek } from './peeks';
 import {
   ActivityWidget,
   AttentionQueue,
@@ -54,6 +56,37 @@ export const overviewModule: AdminModule = {
       description: 'The API, gateways, workers, database and outbox',
     },
   ],
+  search: (query) => {
+    const q = query.toLowerCase();
+    return [
+      ...sites
+        .filter((site) => `${site.id} ${site.name} ${site.city} ${site.provider}`.toLowerCase().includes(q))
+        .map((site) => ({
+          id: site.id,
+          label: `${site.name} (${site.id})`,
+          group: 'Sites',
+          hint: `${site.city} · ${site.provider}`,
+          icon: RiMapPin2Line,
+          href: `/?site=${site.id}`,
+          peek: { kind: 'site', id: site.id },
+        })),
+      ...controlPlane(0)
+        .filter((c) => `${c.id} ${c.name} ${c.kind}`.toLowerCase().includes(q))
+        .map((c) => ({
+          id: c.id,
+          label: c.name,
+          group: 'Control plane',
+          hint: c.kind,
+          icon: RiServerLine,
+          href: '/control-plane',
+          peek: { kind: 'component', id: c.id },
+        })),
+    ];
+  },
+  peeks: {
+    site: { title: (id) => siteById(id)?.name ?? id, href: (id) => `/?site=${id}`, icon: RiMapPin2Line, component: SitePeek },
+    component: { title: (id) => controlPlane(0).find((c) => c.id === id)?.name ?? id, href: () => '/control-plane', icon: RiServerLine, component: ComponentPeek },
+  },
   widgets: [
     { id: 'overview.kpis', title: 'Fleet KPIs', description: 'Nodes ready, GPU and CPU utilization, free GPUs, sandboxes, power — with trends.', icon: RiStackLine, module: 'overview', defaultSize: { w: 12, h: 2 }, minSize: { w: 4, h: 2 }, maxSize: { w: 12, h: 3 }, component: KpiStrip },
     { id: 'overview.pulse', title: 'Utilization', description: 'GPU and CPU utilization over the workspace time range.', icon: RiPulseLine, module: 'overview', defaultSize: { w: 8, h: 4 }, minSize: { w: 4, h: 3 }, component: PulseChart },

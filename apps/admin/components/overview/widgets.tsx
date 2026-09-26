@@ -22,6 +22,7 @@ import type { WidgetProps } from '@/lib/modules';
 import { useLive, useWorkspace } from '@/components/shell/workspace';
 import { useFeedback } from '@/components/ui/feedback';
 import { useAcks } from '@/components/shell/pins';
+import { EntityLink, usePeek } from '@/components/shell/peek';
 import { Gauge, Legend, Sparkline, StackedBar, TimeSeriesChart } from '@/components/ui/charts';
 import { Stat } from '@/components/ui/stat';
 import { Led, SeverityIcon, Tag, type Status } from '@/components/ui/signal';
@@ -152,13 +153,16 @@ export function AttentionQueue() {
         {open.map((item) => (
           <li key={item.id} className="group flex gap-2.5 border-b border-separator-border/70 px-3 py-2.5 last:border-0">
             <SeverityIcon severity={item.severity} className="mt-0.5" />
-            <Link href={item.href} className="min-w-0 flex-1">
-              <span className="block truncate text-body-medium text-text-primary group-hover:underline">{item.title}</span>
-              <span className="line-clamp-2 text-caption-1-regular text-text-secondary">{item.detail}</span>
+            <div className="min-w-0 flex-1">
+              <Link href={item.href} className="block">
+                <span className="block truncate text-body-medium text-text-primary group-hover:underline">{item.title}</span>
+                <span className="line-clamp-2 text-caption-1-regular text-text-secondary">{item.detail}</span>
+              </Link>
               <span className="mt-1 flex items-center gap-2 font-mono text-[10px] text-text-tertiary">
-                <span>{item.source}</span>·<span suppressHydrationWarning>{fmtRelative(item.at, now)}</span>·<span className="truncate">{item.subject}</span>
+                <span>{item.source}</span>·<span suppressHydrationWarning>{fmtRelative(item.at, now)}</span>·
+                <SubjectLink subject={item.subject} />
               </span>
-            </Link>
+            </div>
             <button
               type="button"
               onClick={() => ack(item.id, item.title)}
@@ -182,10 +186,26 @@ const cellStyle: Record<NodeState, string> = {
   provisioning: 'hatch border border-separator-border-strong',
 };
 
+/** `node/n-fra1-h100-017` as a peekable link (plain text when no module renders that kind). */
+export function SubjectLink({ subject }: { subject: string }) {
+  const [kind, ...rest] = subject.split('/');
+  const id = rest.join('/');
+  const peek = usePeek();
+  if (!kind || !id || !peek.canPeek(kind)) return <span className="truncate">{subject}</span>;
+  return (
+    <span className="truncate" onClick={(event) => event.stopPropagation()}>
+      <EntityLink kind={kind} id={id} className="text-[10px] text-text-tertiary">
+        {subject}
+      </EntityLink>
+    </span>
+  );
+}
+
 /** Every node in scope as one cell, grouped by pool: amber by load, red offline, hatched provisioning. */
 export function FleetWall() {
   const pulse = useLive((now, scope) => fleetPulse(now, scope), { bucketMs: 10_000 });
   const { now } = useWorkspace();
+  const peek = usePeek();
   const [hover, setHover] = useState<{ id: string; state: NodeState; load: number; pool: string } | null>(null);
   const walls = useMemo(() => pulse.pools.map((p) => ({ pulse: p, nodes: nodeStates(p, now) })), [pulse, now]);
   return (
@@ -218,6 +238,11 @@ export function FleetWall() {
                   href={`/nodes/${node.id}`}
                   aria-label={`${node.id}: ${node.state}`}
                   onPointerEnter={() => setHover({ ...node, pool: p.pool.id })}
+                  onClick={(event) => {
+                    if (!peek.canPeek('node') || event.metaKey || event.ctrlKey || event.shiftKey) return;
+                    event.preventDefault();
+                    peek.open('node', node.id);
+                  }}
                   className={cx('size-[9px] shrink-0', cellStyle[node.state])}
                   style={node.state === 'busy' ? { background: `color-mix(in srgb, var(--color-signal-fill) ${Math.round(35 + node.load * 65)}%, var(--color-background-secondary-default))` } : undefined}
                 />
@@ -235,6 +260,7 @@ const healthStatus: Record<string, Status> = { ok: 'ok', degraded: 'warn', down:
 /** The control plane's own components: status, latency trend, throughput. */
 export function ControlPlaneWidget() {
   const components = useLive((now) => controlPlane(now), { bucketMs: 10_000 });
+  const peek = usePeek();
   const degraded = components.filter((c) => c.status !== 'ok').length;
   return (
     <div className="flex h-full flex-col">
@@ -249,7 +275,9 @@ export function ControlPlaneWidget() {
           <li key={component.id} className="grid grid-cols-[auto_minmax(0,1fr)_72px_auto] items-center gap-3 border-b border-separator-border/70 px-3 py-2 last:border-0">
             <Led status={healthStatus[component.status]!} label={component.status} />
             <div className="min-w-0">
-              <div className="truncate text-body-medium text-text-primary">{component.name}</div>
+              <button type="button" onClick={() => peek.open('component', component.id)} className="block max-w-full truncate text-left text-body-medium text-text-primary hover:underline">
+                {component.name}
+              </button>
               <div className="truncate font-mono text-[10px] text-text-tertiary">{component.detail}</div>
             </div>
             <Sparkline values={component.series} height={22} tone={component.status === 'ok' ? 'neutral' : 'signal'} area={false} />
@@ -337,8 +365,8 @@ export function SitesWidget({ size }: WidgetProps) {
                 onClick={() => setSiteId(siteId === row.site.id ? undefined : row.site.id)}
                 className={cx('cursor-pointer border-t border-separator-border/70 text-caption-1-regular hover:bg-background-secondary-default/60', siteId === row.site.id && 'bg-signal-soft')}
               >
-                <td className="px-3 py-1.5">
-                  <span className="font-mono text-text-primary">{row.site.id}</span> <span className="text-text-tertiary">{row.site.city}</span>
+                <td className="px-3 py-1.5" onClick={(event) => event.stopPropagation()}>
+                  <EntityLink kind="site" id={row.site.id} /> <span className="text-text-tertiary">{row.site.city}</span>
                 </td>
                 <td className="px-2 py-1.5 text-right font-mono tabular-nums">
                   {row.ready}

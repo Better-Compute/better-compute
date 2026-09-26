@@ -19,7 +19,8 @@ import {
   RiTimeLine,
 } from 'react-icons/ri';
 import { pools, sites, tenants } from '@/lib/data';
-import { allCommands, allNav } from '@/lib/modules';
+import { allCommands, allNav, searchAll } from '@/lib/modules';
+import { usePeek } from './peek';
 import { cx } from '@/utils/cx';
 import { useRegisteredPageCommands } from './page-commands';
 import { RANGES, useWorkspace, type RangeKey } from './workspace';
@@ -35,6 +36,8 @@ interface Entry {
   keywords?: string[];
   shortcut?: string;
   perform: () => void;
+  /** Shift+Enter: peek instead of navigating. */
+  alt?: () => void;
 }
 
 /** Fuzzy score: every query char in order; bonuses for word starts and runs. -1 when it doesn't match. */
@@ -94,6 +97,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
   const router = useRouter();
   const { resolvedTheme, setTheme } = useTheme();
   const workspace = useWorkspace();
+  const peek = usePeek();
   const [query, setQuery] = useState('');
   const [cursor, setCursor] = useState(0);
   const [recent, setRecent] = useState<string[]>([]);
@@ -199,16 +203,29 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
       const defaults = entries.filter((entry) => entry.group === 'Go to' || entry.group === 'Workspace').slice(0, 24);
       return [...here, ...recents, ...defaults].map((entry) => ({ entry, hits: [] as number[] }));
     }
-    return entries
+    const found: Entry[] = searchAll(q, { now: workspace.now, ...(workspace.siteId ? { siteId: workspace.siteId } : {}) }).map((result) => ({
+      id: `search:${result.group}:${result.id}`,
+      label: result.label,
+      group: result.group,
+      hint: result.hint,
+      icon: result.icon,
+      perform: () => router.push(result.href),
+      ...(result.peek ? { alt: () => peek.open(result.peek!.kind, result.peek!.id) } : {}),
+    }));
+    return [...entries, ...found]
       .map((entry) => {
         const main = score(entry.label, q);
         const extra = Math.max(-1, ...[entry.hint ?? '', ...(entry.keywords ?? []), entry.group].map((text) => score(text, q).score * 0.6));
-        return { entry, hits: main.hits, s: Math.max(main.score, extra) };
+        // A module's own search already matched (maybe on fields the label doesn't show): keep it ranked.
+        const floor = entry.id.startsWith('search:') ? 60 : -1;
+        return { entry, hits: main.hits, s: Math.max(main.score, extra, floor) };
       })
       .filter((result) => result.s >= 0)
       .sort((a, b) => b.s - a.s)
-      .slice(0, 40)
+      .slice(0, 50)
       .map(({ entry, hits }) => ({ entry, hits }));
+    // The clock only matters for search results; re-running on every tick would reshuffle the list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entries, query, recent]);
 
   useEffect(() => setCursor(0), [query]);
@@ -216,7 +233,12 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     listRef.current?.querySelector(`[data-index="${cursor}"]`)?.scrollIntoView({ block: 'nearest' });
   }, [cursor]);
 
-  const run = (entry: Entry) => {
+  const run = (entry: Entry, alternate = false) => {
+    if (alternate && entry.alt) {
+      onOpenChange(false);
+      entry.alt();
+      return;
+    }
     const baseId = entry.id;
     try {
       const next = [baseId, ...recent.filter((id) => id !== baseId)].slice(0, 5);
@@ -262,7 +284,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
                 } else if (event.key === 'Enter') {
                   event.preventDefault();
                   const target = flat.find((item) => item.index === cursor);
-                  if (target) run(target.entry);
+                  if (target) run(target.entry, event.shiftKey);
                 }
               }}
               placeholder="Jump to a page, pool, tenant, or run a command…"
@@ -297,6 +319,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
                     </span>
                     {entry.hint && <span className="min-w-0 flex-1 truncate text-caption-1-regular text-text-tertiary">{entry.hint}</span>}
                     {!entry.hint && <span className="flex-1" />}
+                    {entry.alt && index === cursor && <kbd className="shrink-0 font-mono text-[10px] text-text-tertiary">⇧↵ peek</kbd>}
                     {entry.shortcut && <kbd className="shrink-0 border border-separator-border px-1 font-mono text-[10px] text-text-tertiary">{entry.shortcut}</kbd>}
                   </div>
                 ))}
@@ -307,6 +330,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
           <div className="flex items-center gap-4 border-t border-separator-border px-3 py-1.5 font-mono text-[10px] text-text-tertiary">
             <span>↑↓ move</span>
             <span>↵ run</span>
+            <span>⇧↵ peek</span>
             <span>esc close</span>
             <span className="ml-auto">{flat.length} results</span>
           </div>

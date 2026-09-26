@@ -73,21 +73,22 @@ export function WorkspaceProvider({ initialNow, children }: { initialNow: number
     if (nextRange && nextRange in RANGES) setRange(nextRange);
     if (urlSite || saved.siteId) setSiteId(urlSite === 'all' ? undefined : (urlSite ?? saved.siteId));
     if (saved.density) setDensity(saved.density);
+    // Only a link pauses on load; a reload without ?at= is always live.
     if (Number.isFinite(urlAt) && urlAt > 0 && urlAt < Date.now()) {
       setLiveState(false);
       setNow(urlAt);
-    } else if (saved.live === false) setLiveState(false);
+    }
     setHydrated(true);
   }, []);
 
   useEffect(() => {
     if (!hydrated) return;
     try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ range, siteId, density, live }));
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ range, siteId, density }));
     } catch {
       // Private windows: preferences just don't persist.
     }
-  }, [hydrated, range, siteId, density, live]);
+  }, [hydrated, range, siteId, density]);
 
   // Keep the URL shareable: scope, range and (when paused) the moment, without a navigation.
   useEffect(() => {
