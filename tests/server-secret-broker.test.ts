@@ -448,6 +448,36 @@ describe('secret broker', () => {
     expect(await get(next)).toBe('access-denied');
   });
 
+  it('releases the node’s own telemetry headers (telemetry.headersRef) while its spec names them', async () => {
+    const agent = await node();
+    const headers = await store.put(TENANT, '{"authorization":"Bearer otlp-key"}');
+    const setTelemetry = (telemetry: Record<string, unknown> | null) =>
+      db.query('UPDATE nodes SET spec = $2::jsonb WHERE id = $1', [
+        agent.id,
+        JSON.stringify(telemetry === null ? {} : { telemetry }),
+      ]);
+    const b = broker();
+    const named = { workflowId: 'host:telemetry', stepId: 'headersRef' };
+    const get = async (fields: Parameters<typeof ask>[2] = named, ref = headers) =>
+      (await b.secret(ask(agent, ref, fields).request, { peerNodeId: agent.id })).error;
+
+    expect(await get()).toBe('not-bound');
+    await setTelemetry({ otlpEndpoint: 'https://otlp.example', headersRef: headers });
+    expect(await get()).toBe('');
+    expect(await get({ workflowId: 'host:telemetry', stepId: 'otlpEndpoint' })).toBe('not-bound');
+    expect(await get({ workflowId: 'host:devices', stepId: 'headersRef' })).toBe('not-bound');
+    // Another tenant's ref in the spec stays sealed; a spec that moved on releases nothing old.
+    const foreign = await store.put('org_other', 'x');
+    await setTelemetry({ headersRef: foreign });
+    expect(await get(named, foreign)).toBe('not-bound');
+    await setTelemetry(null);
+    expect(await get()).toBe('not-bound');
+    await setTelemetry({ headersRef: headers });
+    expect(
+      (await broker({ specRefs: [] }).secret(ask(agent, headers, named).request, { peerNodeId: agent.id })).error,
+    ).toBe('not-bound');
+  });
+
   it('answers not-found / unavailable without detail, and bounds refusal events', async () => {
     const agent = await node();
     const missing = 'secret://org_acme/nope';

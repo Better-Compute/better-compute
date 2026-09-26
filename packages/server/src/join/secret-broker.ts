@@ -31,7 +31,8 @@ import type { GatewayCallContext } from './service.js';
 //     workflow step addressed to it that carries the ref, or an allocation placed on it whose
 //     instance/telemetry references it, or a config unit of its current NodeSpec `host` section
 //     that names it as its credential (`k8s-join.tokenRef`, the bootstrap token; the request names
-//     workflow `host:k8s-join`, step `tokenRef`);
+//     workflow `host:k8s-join`, step `tokenRef`), or a NodeSpec section's credential field
+//     (`telemetry.headersRef`: workflow `host:telemetry`, step `headersRef`);
 //  4. the request id was not used before.
 // The answer is a JWE to the request's one-time key with a short `exp`. The audit row and events
 // carry the ref (and its version), never the value.
@@ -62,7 +63,23 @@ export interface SecretBrokerOptions {
    * rule 3). Default: only `k8s-join.tokenRef`; `[]` turns the rule off.
    */
   hostUnitRefs?: readonly HostUnitRef[];
+  /**
+   * NodeSpec section fields that name a credential the node fetches for itself, requested as
+   * `host:<section>` / `<field>` (binding rule 3). Default: only `telemetry.headersRef` (the OTLP
+   * export's headers); `[]` turns them off.
+   */
+  specRefs?: readonly SpecRef[];
 }
+
+/** A NodeSpec section's field (protobuf JSON name) holding a secret ref its node may fetch. */
+export interface SpecRef {
+  section: string;
+  field: string;
+}
+
+export const defaultSpecRefs: readonly SpecRef[] = Object.freeze([
+  { section: 'telemetry', field: 'headersRef' },
+]);
 
 /** A config unit's settings field holding a secret ref its node may fetch. */
 export interface HostUnitRef {
@@ -212,12 +229,29 @@ async function boundToHostUnit(
   nodeId: string,
   opened: OpenedSecretRequest,
   allowed: readonly HostUnitRef[],
+  sections: readonly SpecRef[],
 ): Promise<string | undefined> {
   if (opened.allocationId || !opened.workflowId.startsWith(hostUnitWorkflowPrefix)) return undefined;
   const unit = opened.workflowId.slice(hostUnitWorkflowPrefix.length);
-  const refs = allowed.filter((r) => r.unit === unit && r.field === opened.stepId);
   const refTenant = parseSecretRef(opened.ref)?.tenantId;
-  if (!refs.length || refTenant === undefined) return undefined;
+  if (refTenant === undefined) return undefined;
+  // A section's own field (telemetry.headersRef), not a config unit's.
+  if (sections.some((s) => s.section === unit && s.field === opened.stepId)) {
+    const { rows } = await tx.query(
+      `SELECT 1
+         FROM nodes n
+         JOIN node_certs c ON c.node_id = n.id AND c.identity_gen = n.identity_gen AND c.serial = $2
+                          AND c.revoked_at IS NULL
+         LEFT JOIN pools p ON p.id = n.pool_id
+        WHERE n.id = $1 AND n.provision_state <> 'retired'
+          AND $5 IN (n.owner_tenant_id, p.owner_tenant_id)
+          AND jsonb_typeof(n.spec->($3::text)) = 'object' AND n.spec->($3::text)->>($6::text) = $4`,
+      [nodeId, opened.serial, unit, opened.ref, refTenant, opened.stepId],
+    );
+    return rows.length ? unit : undefined;
+  }
+  const refs = allowed.filter((r) => r.unit === unit && r.field === opened.stepId);
+  if (!refs.length) return undefined;
   const { rows } = await tx.query<{ unit: string }>(
     `SELECT u.value->>'unit' AS unit
        FROM nodes n
@@ -248,6 +282,7 @@ export function createSecretBroker(options: SecretBrokerOptions): SecretBrokerPo
   const seen = new Map<string, number>();
   const refusals = refusalBucket(options.refusalEventsPerMinute ?? 60);
   const hostUnitRefs = options.hostUnitRefs ?? defaultHostUnitRefs;
+  const specRefs = options.specRefs ?? defaultSpecRefs;
 
   function remember(key: string, now: number): boolean {
     for (const [stored, expiry] of seen) {
@@ -330,7 +365,7 @@ export function createSecretBroker(options: SecretBrokerOptions): SecretBrokerPo
                 (await boundToAllocation(tx, nodeId, candidate, options.allocationRefs))
               )
                 return true;
-              hostUnit = await boundToHostUnit(tx, nodeId, candidate, hostUnitRefs);
+              hostUnit = await boundToHostUnit(tx, nodeId, candidate, hostUnitRefs, specRefs);
               return hostUnit !== undefined;
             },
           });

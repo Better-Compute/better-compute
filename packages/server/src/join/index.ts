@@ -16,10 +16,16 @@ export { createGatewayServices } from './gateway-services.js';
 export {
   createSecretBroker,
   defaultHostUnitRefs,
+  defaultSpecRefs,
   hostUnitWorkflowPrefix,
   maxSecretTtlSeconds,
 } from './secret-broker.js';
-export type { HostUnitRef, SecretBrokerOptions, SecretBrokerPort } from './secret-broker.js';
+export type {
+  HostUnitRef,
+  SecretBrokerOptions,
+  SecretBrokerPort,
+  SpecRef,
+} from './secret-broker.js';
 export { createWorkloadBroker } from './workload-broker.js';
 export type {
   WorkloadBrokerOptions,
