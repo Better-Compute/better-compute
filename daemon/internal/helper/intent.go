@@ -62,47 +62,66 @@ func WriteJoinRecord(sys hostconfig.System, resp *agentv1.JoinResponse) error {
 	return sys.WriteFile(JoinRecord, raw, 0o600)
 }
 
-// joinedNode returns the node id root's join record names, or "" without a record (a node joined
-// before the record existed: the first signed spec names it). A record that does not verify
-// refuses: it is root's, so something is wrong.
-func (s *Server) joinedNode() (string, error) {
-	id, err := ReadJoinRecord(s.HostSystem, s.JoinSigningPin)
-	if err != nil {
-		return "", fmt.Errorf("host.unit: %w", err)
-	}
-	return id, nil
+// Joined is what root's join record says, verified: the node it issued, and the trust bundle the
+// JoinService key signed into the response (its command-signing roots make signed intent mandatory).
+type Joined struct {
+	NodeID string
+	Trust  *commonv1.TrustBundle
 }
 
-// ReadJoinRecord returns the node id root's join record names, checked against the join signing
-// pin; "" and no error without a record.
-func ReadJoinRecord(sys hostconfig.System, pin []byte) (string, error) {
+// CommandRoots are the command-signing roots the join record carries (none: the record does not
+// decide signed intent).
+func (j *Joined) CommandRoots() [][]byte {
+	if j == nil {
+		return nil
+	}
+	return j.Trust.GetCommandSigningRoots()
+}
+
+// joined reads root's join record for host.unit: nil without one (a node joined before the record
+// existed: the first signed spec names it). A record that does not verify refuses: it is root's, so
+// something is wrong.
+func (s *Server) joined() (*Joined, error) {
+	j, err := ReadJoinRecord(s.HostSystem, s.JoinSigningPin)
+	if err != nil {
+		return nil, fmt.Errorf("host.unit: %w", err)
+	}
+	return j, nil
+}
+
+// ReadJoinRecord returns root's join record, checked against the join signing pin; nil and no
+// error without a record.
+func ReadJoinRecord(sys hostconfig.System, pin []byte) (*Joined, error) {
 	raw, err := sys.ReadFile(JoinRecord)
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", nil
+		return nil, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", JoinRecord, err)
+		return nil, fmt.Errorf("%s: %w", JoinRecord, err)
 	}
 	resp := &agentv1.JoinResponse{}
 	body := &agentv1.JoinResponseBody{}
 	if len(pin) == 0 || proto.Unmarshal(raw, resp) != nil ||
 		!pki.VerifySignature(pki.PurposeJoinResponse, [][]byte{resp.GetBody()}, resp.GetSig(), pki.Trust{Pin: pin}) ||
 		proto.Unmarshal(resp.GetBody(), body) != nil {
-		return "", fmt.Errorf("%s is not a JoinResponse signed by the pinned JoinService key", JoinRecord)
+		return nil, fmt.Errorf("%s is not a JoinResponse signed by the pinned JoinService key", JoinRecord)
 	}
 	if body.GetNodeId() == "" || len(body.GetCertChain()) == 0 {
-		return "", fmt.Errorf("%s issued no identity", JoinRecord)
+		return nil, fmt.Errorf("%s issued no identity", JoinRecord)
 	}
-	return body.GetNodeId(), nil
+	return &Joined{NodeID: body.GetNodeId(), Trust: body.GetTrust()}, nil
 }
 
 // maxIntent bounds the signed spec a request carries (roots, bundle and body).
 const maxIntent = 1 << 20
 
-// intentRoots decides which command-signing roots the request's spec must chain to. It returns none
-// (and no error) for an install without signed intent: no command_root_sha256, and no trust bundle
-// with roots ever seen.
-func (s *Server) intentRoots(in *HostIntent, rec *intentRecord) ([][]byte, error) {
+// intentRoots decides which command-signing roots the request's spec must chain to: the install's
+// pins alone when set; else root's join record's roots, which make signed intent mandatory whatever
+// the node sends (review 2 MED: without them the node decided, by sending a trust bundle or not), and
+// which a newer SignedTrustBundle the node presents may rotate, only forward. It returns none (and
+// no error) only for an install without signed intent: no pins, no join record with roots, and no
+// trust bundle with roots ever seen.
+func (s *Server) intentRoots(in *HostIntent, rec *intentRecord, joined *Joined) ([][]byte, error) {
 	if in != nil {
 		size := len(in.Body) + len(in.Signature) + len(in.TrustBundle)
 		for _, r := range in.Roots {
@@ -125,11 +144,26 @@ func (s *Server) intentRoots(in *HostIntent, rec *intentRecord) ([][]byte, error
 		}
 		return in.Roots, nil
 	}
+	// Root's join record: the trust the JoinService key signed at the join, root's own copy. Its roots
+	// stand until a newer bundle rotated them (then the node must present that bundle, or older roots
+	// would come back).
+	var recorded [][]byte
+	var recordedVersion uint64
+	if roots := joined.CommandRoots(); len(roots) > 0 {
+		recorded, recordedVersion, rec.Signed = roots, joined.Trust.GetVersion(), true
+	}
 	if in == nil || len(in.TrustBundle) == 0 || len(s.JoinSigningPin) == 0 {
+		if recorded != nil && recordedVersion >= rec.TrustVersion {
+			rec.TrustVersion = recordedVersion
+			return recorded, nil
+		}
 		if rec.Signed {
-			return nil, errors.New("host.unit needs the signed spec that asks for it (this node's specs are signed)")
+			return nil, fmt.Errorf("host.unit needs the signed spec that asks for it and the current trust bundle (version %d; this node's specs are signed)", rec.TrustVersion)
 		}
 		return nil, nil
+	}
+	if recordedVersion > rec.TrustVersion {
+		rec.TrustVersion = recordedVersion
 	}
 	signed := &commonv1.SignedTrustBundle{}
 	if proto.Unmarshal(in.TrustBundle, signed) != nil ||
@@ -162,21 +196,24 @@ func (s *Server) checkIntent(req Request) error {
 		return err
 	}
 	before := rec
-	roots, err := s.intentRoots(in, &rec)
+	joined, err := s.joined()
+	if err != nil {
+		return err
+	}
+	roots, err := s.intentRoots(in, &rec, joined)
 	if err != nil {
 		return err
 	}
 	if roots == nil {
 		return nil // an install without signed intent
 	}
-	joined, err := s.joinedNode()
-	if err != nil {
-		return err
+	if in == nil || len(in.Body) == 0 {
+		return errors.New("host.unit needs the signed spec that asks for it (this node's specs are signed)")
 	}
-	if joined != "" && rec.NodeID != joined {
+	if joined != nil && rec.NodeID != joined.NodeID {
 		// Root joined this machine (again): the node is the record's, and generations another
 		// identity applied do not carry over.
-		rec.NodeID, rec.Generation, rec.BodySHA256 = joined, 0, ""
+		rec.NodeID, rec.Generation, rec.BodySHA256 = joined.NodeID, 0, ""
 	}
 	body := &agentv1.DesiredStateBody{}
 	sig := &commonv1.Signature{}

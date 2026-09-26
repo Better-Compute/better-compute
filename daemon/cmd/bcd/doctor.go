@@ -121,18 +121,27 @@ func helperBindingChecks(cfg *config.Config, sys hostconfig.System) []doctorChec
 	pin, _ := config.DecodePin(cfg.JoinSigningKeyPin)
 	joined, err := helper.ReadJoinRecord(sys, pin)
 	state, _, stateErr := agent.LoadState(cfg.DataDir)
-	switch {
-	case err != nil:
+	if err != nil {
 		return []doctorCheck{{"fail", "helper", err.Error() + ": bcd helper refuses every host unit"}}
-	case joined == "" && stateErr == nil:
-		return []doctorCheck{{"warn", "helper", fmt.Sprintf("host units bind to the node the first signed spec names (trust on first use): %s joined before bcd join kept a signed join record (%s). To pin it, re-join as root: bcd join with a new token after moving %s's identity aside (a tpm or provisioned re-join keeps the node id)",
-			state.NodeID, helper.JoinRecord, cfg.DataDir)}}
-	case joined == "":
-		return nil // not joined yet
-	case stateErr == nil && joined != state.NodeID:
-		return []doctorCheck{{"fail", "helper", fmt.Sprintf("root's join record names %s, but this machine's identity is %s: bcd helper refuses its specs; re-run the join as root", joined, state.NodeID)}}
 	}
-	return []doctorCheck{{"ok", "helper", "host units bind to " + joined + " (root's signed join record)"}}
+	if joined == nil && stateErr != nil {
+		return nil // not joined yet
+	}
+	var out []doctorCheck
+	switch {
+	case joined == nil:
+		out = append(out, doctorCheck{"warn", "helper", fmt.Sprintf("host units bind to the node the first signed spec names (trust on first use): %s joined before bcd join kept a signed join record (%s). To pin it, re-join as root: bcd join with a new token after moving %s's identity aside (a tpm or provisioned re-join keeps the node id)",
+			state.NodeID, helper.JoinRecord, cfg.DataDir)})
+	case stateErr == nil && joined.NodeID != state.NodeID:
+		out = append(out, doctorCheck{"fail", "helper", fmt.Sprintf("root's join record names %s, but this machine's identity is %s: bcd helper refuses its specs; re-run the join as root", joined.NodeID, state.NodeID)})
+	default:
+		out = append(out, doctorCheck{"ok", "helper", "host units bind to " + joined.NodeID + " (root's signed join record)"})
+	}
+	// Signed intent must be root's decision: the install's pins, or the roots root's join record carries.
+	if pins, _ := cfg.CommandRootPins(); len(pins) == 0 && len(joined.CommandRoots()) == 0 {
+		out = append(out, doctorCheck{"fail", "helper", "bcd helper applies host units unsigned unless the node itself presents a trust bundle: neither command_root_sha256 nor root's join record names command-signing roots. Pin them (the install script's --command-root-sha256), or re-join as root against a control plane that signs intent"})
+	}
+	return out
 }
 
 // hostChecks are doctor's host checks (PLAN.md §14): virtualization support for VPS hosts, the
