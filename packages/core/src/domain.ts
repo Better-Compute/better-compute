@@ -140,6 +140,12 @@ export interface PoolPolicy {
     /** GPUs through containerd's NVIDIA runtime and CDI (default true). */
     gpu?: boolean;
     /**
+     * How bound GPUs reach pods: bcd's kubelet device plugins (`bcd.dev/gpu[.mig|.slot]`, the default)
+     * or its DRA driver `gpu.bcd.dev` (ResourceSlices of only the bound devices; Kubernetes ≥ 1.32).
+     * A node runs one of them, never both.
+     */
+    gpuApi?: 'device-plugin' | 'dra';
+    /**
      * The platform runs this cluster: a bcd DaemonSet joining with a `hosted: 'kubernetes'` token lands its
      * node at the pool's trust instead of `tenant-controlled` (core/0027). Only the pool decides it, never
      * the node or the token alone.
