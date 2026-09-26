@@ -266,11 +266,13 @@ A node that joined with the `tpm` attestor and a certified node key has a certif
 key (`urn:bc:tpm-ak:`), and since d94f1f3 it renews only with a next key that AK certifies. bcd never falls back to
 a file key for such a certificate:
 
-- **The TPM cannot be opened** (a missing `/dev/tpmrm0`, or the user `bcd node` runs as lost access to it). The
-  renewal fails before any request: "the certificate's node key is in the TPM, which is unavailable". bcd logs
-  `renewal failed` with the attempt and `expiresIn`, and retries with backoff from 30 seconds to 10 minutes. Once
-  the TPM answers again, the next retry renews. A TPM-held current key needs the TPM to load too, so a restarted
-  `bcd node` does not start without it.
+- **The TPM cannot be reached** (a missing `/dev/tpmrm0`, or, for an unprivileged `bcd node` under `[helper]`, a
+  `bcd helper` that is down or cannot open the TPM: since 8870b8d that node reaches the TPM only through the
+  helper). The renewal fails before any request: "the certificate's node key is in the TPM, which is unavailable"
+  when bcd opens the TPM itself, or `renewal:` with the helper's error. bcd logs `renewal failed` with the attempt
+  and `expiresIn`, and retries with backoff from 30 seconds to 10 minutes. Once the TPM answers again, the next
+  retry renews. A TPM-held current key needs the TPM to load too, so a restarted `bcd node` does not start without
+  it.
 - **The TPM derives another AK.** The renewal fails the same way, with "this TPM's attestation key is not the one
   the certificate names (was the TPM cleared? run bcd join again)", and retrying cannot help.
 - **The TPM was cleared** (`TPM2_Clear`). The node key is a primary of the owner hierarchy, whose seed a clear
@@ -281,7 +283,8 @@ Either way the certificate runs out within its 24 hours and the session closes a
 [certificate expiry](#certificate-expiry). The recovery is to join again with the TPM, `bcd join --attestor tpm`:
 with no loadable identity, bcd joins, and the attestor reclaims the node bound to the machine's EK, with a new
 identity generation, a new certified key and a fresh AK statement. A machine whose EK changed (another TPM) joins as
-a new node instead. See
+a new node instead, once the old node is cordoned and deleted with `nodes.delete` (54cad9e), which frees its EK
+binding and the machine's hardware key. See
 [recovering a node whose TPM changed](/docs/guides/nodes/attestation#recovering-a-node-whose-tpm-changed). Nodes
 whose certificate names no AK (every other join) renew as before; a key of theirs in a cleared TPM is lost the same
 way and needs a new join.

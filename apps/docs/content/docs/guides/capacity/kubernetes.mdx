@@ -373,7 +373,17 @@ holds a device of the allocation any more:
   still hold is never offered again. `finishStaleReleases` closes a release without the node's report only when the
   node is lost, or once its bookings ended because another allocation had booked those devices next (that one may
   then fail on the node until the pods let go). Only the device bookings are carried, never the allocation's own
-  end, so billing stays capped there: the carried bookings keep the devices, not the meter, running.
+  end, so billing stays capped there: the carried bookings keep the devices, not the meter, running. Since e7a56d7
+  (security review 3) the carry stops `maxStuckCarryMs` (24 hours) past the allocation's own end: the node has been
+  `KubernetesReleaseStuck`, and NoSchedule, for that long, and `finishStaleReleases` then closes the release
+  without the node's report.
+- **A bound report does not end a release** (e7a56d7). An `AllocationBound` that arrives while the release is
+  pending (a node re-sending it, or a restarted bcd converging again before it received the withdrawing spec) keeps
+  the release's pending mark, as does an [attested binding](/docs/guides/capacity/reservations#attested-bindings)
+  that replaces the binding. Before, such a report erased the mark: the later `AllocationReleased` was then ignored,
+  and the node's host share stayed claimed while the GPUs stayed booked to their original end. As a further guard,
+  `finishStaleReleases` also releases any unreleased allocation whose reservation is terminal (`denied`,
+  `released`, `failed`, `cancelled` or `expired`) and that is not waiting for a deferred release.
 - "No pod holds it" comes from the kubelet's pod-resources API (a device plugin id `<atom>@<allocation>`, or a
   `gpu.bcd.dev` claim of this node's pool named for the allocation; 14111c1). Since 8bcbe92 (security review 2) two
   more sources can keep the devices in use, and every check fails closed:

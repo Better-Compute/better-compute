@@ -296,18 +296,26 @@ and bcd has it since 28dc2ae:
   instance_bridges`, binds only whole IOMMU groups of this host's idle GPUs to `vfio-pci`, and builds each VMM's
   unit itself from the instance record it checks, with its own binary, never a command line of the node's. See
   [cloud-hypervisor through the helper](/docs/daemon#cloud-hypervisor-through-the-helper).
+- **The TPM** (8870b8d, security review 3). The kernel's TPM resource manager filters no command: whoever opens
+  `/dev/tpmrm0` can change the hierarchies' authorization, clear the TPM through the default empty lockout
+  authorization or trip its dictionary-attack lockout, breaking root's TPM-sealed secrets and attestation. So the
+  node never opens it. Root's helper derives, signs with and certifies its node keys (`tpm.*`, keys named by their
+  32-byte unique), builds every TPM command itself, and answers only public areas, signatures and certifications,
+  which the node checks against the key's public half. See
+  [node keys through the helper](/docs/daemon#node-keys-through-the-helper).
 
 `daemon install-script --unprivileged` (169c459) sets the mode up: a `[helper]` section with the socket in the
 helper's own root-owned `/run/bcd-helper`, the `bcd` system account, `bcd-helper.service`, a `bcd.service` drop-in
 with `User=bcd`, and `/etc/bcd` readable by the `bcd` group only; on a libvirt host, `dynamic_ownership = 0` and QEMU's
-user in the `bcd` group (d418820); on a host with `/dev/tpmrm0`, the `bcd` user in the `tss` group so the node can use
-its TPM-resident key (0ba2a79).
+user in the `bcd` group (d418820). It keeps the `bcd` user out of the `tss` group: scripts from 0ba2a79 until
+8870b8d put it there, and an upgrade run takes it out and deletes their `/etc/udev/rules.d/60-bcd-tpm.rules`.
 
 The limits are plain. A host installed with `--unprivileged` before d418820 keeps `bcd node` in the `libvirt` group
 until the install script runs again (see
 [upgrading an unprivileged libvirt host](/docs/daemon/install#upgrading-an-unprivileged-libvirt-host)); `bcd doctor`
-fails it until then. The helper covers files, the firewall table, GPU resets, reboots, sshd reloads, host units,
-self-update, libvirt and cloud-hypervisor (the latter tested against fakes only); PLAN.md's `mig.apply` is not a
+fails it until then. Likewise a host installed between 0ba2a79 and 8870b8d keeps `bcd` in `tss` until the script runs
+again, and no `bcd doctor` check reports it. The helper covers files, the firewall table, GPU resets, reboots, sshd
+reloads, host units, self-update, libvirt, cloud-hypervisor (tested against fakes only) and the TPM's node keys; PLAN.md's `mig.apply` is not a
 helper operation, and bcx plugins need a root node (`--unprivileged` refuses `--plugins`). The default install still runs `bcd node` as root. See
 [privilege separation](/docs/daemon#privilege-separation) and
 [running bcd node unprivileged](/docs/daemon/install#running-bcd-node-unprivileged).

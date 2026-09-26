@@ -370,7 +370,7 @@ never releases it (PLAN.md section 10.5): node connectivity and health changes w
 | `Preempted` | `SpotPreempted` | A running spot reservation was cut back to its notice deadline |
 | `ConfirmationRequired` | the confirmation id | Waiting for a person; the message is the deadline in epoch milliseconds |
 | `UnhealthyAtoms` | `NotBilled` | A node lease holds unhealthy GPUs that it is not billed for |
-| `DevicesHeld` | `PodsHoldDevices` | A released `binding: 'kubernetes'` reservation whose allocation is still releasing: pods on the named nodes still hold its GPUs, which stay booked and billed until the node reports them free (0127ed7). `since` is when the release began. Computed by `reservations.get` and `list`, not stored; it disappears once `AllocationReleased` or the hosts pass ends the release. See [release](/docs/guides/capacity/kubernetes#release) |
+| `DevicesHeld` | `PodsHoldDevices` | A released `binding: 'kubernetes'` reservation whose allocation is still releasing: pods on the named nodes still hold its GPUs, which stay booked until the node reports them free (0127ed7), billed never past the allocation's own end; a release stuck past that end is carried in 5-minute steps, unbilled, for at most 24 hours (e7a56d7). `since` is when the release began. Computed by `reservations.get` and `list`, not stored; it disappears once `AllocationReleased` or the hosts pass ends the release. See [release](/docs/guides/capacity/kubernetes#release) |
 
 Lifecycle changes emit events with subject `reservation/<id>` and `state` and `poolId` in their data:
 `reservation.placed` (with `nodeIds`, `start`, `end`), `reservation.pending`, `reservation.queued`,

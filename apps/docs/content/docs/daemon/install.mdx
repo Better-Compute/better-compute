@@ -242,10 +242,10 @@ policy decides where the machine joins. It differs in two places:
   [signed specs](/docs/daemon/host-config#signed-specs)).
 
 The join makes the node key in the same TPM and sends the TPM's certification of it, which `tpmAttestor` requires by
-default (`nodeKey: 'certified'`, cf24876). With `[helper]`, the key goes in the TPM only when the helper's user can
-open `/dev/tpmrm0`, which the script arranges through the `tss` group ([below](#running-bcd-node-unprivileged));
-if it cannot, the key is a file and such an attestor refuses the join. See
-[bcd with its TPM](/docs/guides/nodes/attestation#bcd-with-its-tpm).
+default (`nodeKey: 'certified'`, cf24876). The join runs as root and opens the TPM itself, with or without
+`[helper]`; under `[helper]` the unprivileged `bcd node` then reaches that key only through `bcd helper` (8870b8d), and
+never opens `/dev/tpmrm0` ([below](#running-bcd-node-unprivileged)). If the TPM cannot make the key, the join stops
+with an error. See [bcd with its TPM](/docs/guides/nodes/attestation#bcd-with-its-tpm).
 
 ```bash
 better-compute daemon install-script --pool pool_tpm --site fsn1 \
@@ -654,12 +654,14 @@ without the section, so disable that unit yourself). In helper mode it:
    restarts `virtqemud.service` or `libvirtd.service` if it runs. libvirt then chowns no path the node names, and
    QEMU reaches the node's disk files through the `bcd` group (see
    [libvirt through the helper](/docs/daemon#libvirt-through-the-helper));
-6. on a host with `/dev/tpmrm0` (0ba2a79): adds the `bcd` user to the `tss` group, so `bcd node` can open the TPM
-   that holds its node key. Where the group is missing it creates it (`groupadd --system tss`, or busybox
-   `addgroup -S tss`), and where the device is not already group `tss` it writes the udev rule
-   `/etc/udev/rules.d/60-bcd-tpm.rules` (`KERNEL=="tpmrm[0-9]*", GROUP="tss", MODE="0660"`) and applies the same
-   group and mode to the device at once. `bcd join` (as root) makes the key in the TPM only when the helper's user can
-   open the device; otherwise the key stays a file with a warning, and a later renewal moves it into the TPM;
+6. keeps the `bcd` user away from the TPM (8870b8d, security review 3). The kernel's resource manager filters no
+   command, so any member of the `tss` group could change the hierarchies' authorization, clear the TPM or trip its
+   dictionary-attack lockout, breaking root's TPM-sealed secrets (LUKS keys) and attestation. `bcd node` therefore
+   never opens `/dev/tpmrm0`: `bcd helper` derives, signs with and certifies its node keys (see
+   [node keys through the helper](/docs/daemon#node-keys-through-the-helper)). Scripts from 0ba2a79 until then added
+   `bcd` to `tss` and wrote a udev rule; an upgrade run takes `bcd` out of `tss` when it is a member (`gpasswd -d bcd
+   tss`, or busybox `delgroup bcd tss`) and deletes `/etc/udev/rules.d/60-bcd-tpm.rules`. It does not change the
+   device's current group or mode back;
 7. after `bcd join` (which runs as root), gives `/var/lib/bcd` to `bcd:bcd` and starts `bcd-helper.service` before
    `bcd.service`; an upgrade run does the same with restarts.
 
@@ -714,7 +716,8 @@ Nodes installed by a script generated with `--release-pins` get the same `[updat
 plugins yet: bcd node would need root to start them").
 </Callout>
 
-What the helper does not do runs with the `bcd` account's own rights: the journal and key, the status socket, the
+What the helper does not do runs with the `bcd` account's own rights: the journal and the node key file (on a host
+with a TPM only the key's record; the key itself is used through the helper's `tpm.*` operations), the status socket, the
 `libvirt-kvm` runtime's reads (`virsh -r`, libvirt's read-only socket) and its files under `data_dir/libvirt`, the
 `cloud-hypervisor` runtime's files, which it shares with each VMM's user through ACL entries, and reading
 `/dev/kmsg`. Defining and running libvirt domains goes through the helper's checked `libvirt.*` operations

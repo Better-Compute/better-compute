@@ -531,9 +531,10 @@ decision fields `decidedAt`, `decidedBy`, `reason` and `consumedAt`. Decisions p
   </Accordion>
   <Accordion title="bcd logs renewal failed: the TPM is unavailable or names another AK">
     The certificate came from a certified `tpm` join and names its AK, so bcd renews only with that TPM. Restore
-    access to the TPM (`/dev/tpmrm0` for the user `bcd node` runs as) and the next retry renews. If the TPM was
-    cleared or replaced, run `bcd join --attestor tpm` again: an unchanged EK reclaims the same node, a new one joins
-    as a new node. See
+    access to the TPM (`/dev/tpmrm0` for a root `bcd node`; under `[helper]`, a running `bcd helper`, which holds the
+    TPM for the node) and the next retry renews. If the TPM was cleared or replaced, run `bcd join --attestor tpm`
+    again: an unchanged EK reclaims the same node. For a new EK, cordon and delete the old node first (`nodes.delete`
+    frees its EK binding and hardware key), then join: the machine joins as a new node. See
     [recovering a node whose TPM changed](/docs/guides/nodes/attestation#recovering-a-node-whose-tpm-changed).
   </Accordion>
 </Accordions>

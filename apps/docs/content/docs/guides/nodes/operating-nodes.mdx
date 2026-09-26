@@ -228,8 +228,12 @@ placement until the checks pass. See [acceptance checks](/docs/guides/nodes/inve
 for good or never got going. It accepts only:
 
 - a `retired` node;
+- an `adopted` node that is cordoned (54cad9e);
 - a node still in `adopting` or `enrolling`, or one that failed during enrollment;
 - and only when the node has no open allocation (`INVALID_STATE` with the count otherwise).
+
+Any other state is `INVALID_STATE` with `{ provisionState, cordoned }` in its details. An adopted node that is not
+cordoned gets "Cordon the adopted node first (nodes.cordon), then delete it once it holds nothing".
 
 In one transaction it makes the node's devices unbookable, removes its scalar resources and rebuilds the pool's
 capacity rollup, revokes its certificates (`node-deleted`), frees its attestor bindings and trusted hardware key,
@@ -240,6 +244,28 @@ and `node.deleted` is published once.
 
 For bare-metal nodes, retire through the metal workflow first; see
 [bare-metal workflows](/docs/guides/bare-metal/workflows).
+
+### Removing an adopted host
+
+An adopted host (bcd installed on a machine metal does not manage) has no retire workflow, so the retire path for it
+is a cordon and then the delete. Use it when the machine is decommissioned, or when it must join again under a new
+identity, for example after its TPM or disk was replaced (see
+[recovering a node whose TPM changed](/docs/guides/nodes/attestation#recovering-a-node-whose-tpm-changed)):
+
+1. Cordon the node, so nothing new lands on it. [Drain](#drain) it instead when you want to wait for its
+   allocations to end.
+2. Wait until it holds no open allocation: release its reservations, or let them end.
+3. Delete it. Its certificates are revoked, and its attestor bindings (a `tpm` join's EK binding included) and its
+   trusted hardware key are freed.
+4. Join the machine again (a new token, or `bcd join --attestor tpm`). It joins as a new node.
+
+```ts
+await client.nodes.cordon({ tenantId, nodeId, reason: 'TPM replaced' });
+// ... once the node holds no open allocation:
+await client.nodes.delete({ tenantId, nodeId, reason: 'TPM replaced' });
+```
+
+The CLI has no `nodes delete` command; call the method through a client.
 
 ## The nodes API
 
@@ -253,7 +279,7 @@ For bare-metal nodes, retire through the metal workflow first; see
 | [`label`](/docs/reference/api/nodes#label), [`taint`](/docs/reference/api/nodes#taint) | `compute:nodes:update` | v0.1 | Operator labels and NoSchedule taints |
 | [`adopt`](/docs/reference/api/nodes#adopt) | `compute:nodes:provision` | v0.1 | Re-run acceptance |
 | [`revokeIdentity`](/docs/reference/api/nodes#revokeidentity) | `compute:nodes:revoke-identity` | v0.1 | Revoke every certificate, new identity generation |
-| [`delete`](/docs/reference/api/nodes#delete) | `compute:nodes:delete` | v0.2 | Tombstone a retired or never-adopted node |
+| [`delete`](/docs/reference/api/nodes#delete) | `compute:nodes:delete` | v0.2 | Tombstone a retired, cordoned adopted, or never-adopted node |
 | [`issueSshCert`](/docs/reference/api/nodes#issuesshcert) | `compute:nodes:ssh-root` | v0.3 | Break-glass SSH certificate; see [SSH](/docs/guides/access/ssh) |
 
 To run diagnostics, collect logs or reboot a node, use [commands](/docs/guides/nodes/commands).

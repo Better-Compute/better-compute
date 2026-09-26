@@ -27,7 +27,8 @@ sources:
   - daemon/cmd/bcd/agent.go
   - daemon/cmd/bcd/hardware_host.go
   - daemon/cmd/bcd/hardware_fakehw.go
-  - daemon/cmd/bcd/tpmaccess_unix.go
+  - daemon/internal/helper/tpmkeys.go
+  - packages/server/src/api/nodes-delete.ts
   - daemon/cmd/bcd/doctor.go
   - daemon/internal/agent/nodekey.go
   - daemon/internal/tpm/nodekey.go
@@ -332,10 +333,12 @@ URIs in all). The identity readers (`nodeSpiffeIdOf` in `@better-compute/pki`, u
 possession, join responses and the gateway's renew relay) and bcd's `pki.NodeIdentity` take the node id from the
 one SPIFFE ID and never from a statement; see [PKI](/docs/operations/pki#trust-domain-and-spiffe-ids).
 
-**bcd's side.** At each renewal `renewOnce` reads the current leaf. When it names an AK, bcd opens the TPM and loads
-that AK alone (`tpm.Certifier`, a primary of the endorsement hierarchy, no EK), checks that its TPM name is the one
-the certificate names, derives the next node key in the same connection, and has the AK certify it over
-`sha256(csr)` into `key_attestation`. There is no fallback: where a certificate without a statement would get a file
+**bcd's side.** At each renewal `renewOnce` reads the current leaf. When it names an AK, bcd loads that AK alone
+(`tpm.Certifier`, a primary of the endorsement hierarchy, no EK), checks that its TPM name is the one the certificate
+names, derives the next node key in the same TPM connection, and has the AK certify it over `sha256(csr)` into
+`key_attestation`. A root `bcd node` does this on the TPM it opened; an unprivileged one under `[helper]` asks
+`bcd helper` (`tpm.ak`, `tpm.nodekey`, `tpm.certify`; 8870b8d), which holds the TPM connection, and checks that the
+helper certified with the AK it announced (see [the node key in the TPM](#the-node-key-in-the-tpm)). There is no fallback: where a certificate without a statement would get a file
 key with a warning, this one fails the renewal instead and sends nothing.
 
 | At renewal | What bcd does |
@@ -360,12 +363,18 @@ machine on the SHA-256 of its EK, so what happens depends on whether the EK surv
   is bound to: the same node id, a new identity generation (every older certificate revoked), a new certified key
   and a fresh AK statement. If `bcd join` still answers `already joined as <node>` (the identity loads, but renewal
   fails), remove `identity.json` and `node.key` from the data directory first; that is what the e2e test does to
-  model a reinstall.
-- **The EK is new** (another TPM, a replaced board, a reset endorsement hierarchy). The machine is unknown to the
-  attestor, so it joins wherever your `resolve` or `enrollment` sends it, as a new node (with neither, it is
-  refused). The old node keeps its
-  binding to the old EK and stays offline until you remove it (see
-  [deleting a node](/docs/guides/nodes/operating-nodes#deleting-a-node), which frees its attestor bindings).
+  model a reinstall. bcd has no command that does this for you.
+- **The EK is new** (another TPM, a replaced board, a reset endorsement hierarchy). The attestor does not know the
+  EK, but the old node still exists: it holds the binding to the old EK and, usually, the machine's trusted hardware
+  key, and a join whose hardware key another node holds is refused (`reclaim`), since a `tpm` join carries no
+  `allowReclaim`. Remove the old node first, then join again:
+  1. cordon the old node (`nodes.cordon`) and wait until it holds no open allocation;
+  2. delete it (`nodes.delete`, which since 54cad9e accepts a cordoned `adopted` node): its certificates are
+     revoked and its EK binding and trusted hardware key are freed (see
+     [removing an adopted host](/docs/guides/nodes/operating-nodes#removing-an-adopted-host));
+  3. on the machine, remove `identity.json` and `node.key` if `bcd join` answers `already joined`, and run
+     `bcd join --attestor tpm`. The machine joins wherever your `resolve` or `enrollment` sends it, as a new node
+     (with neither, it is refused).
 
 A node that joined with a token has no statement, so its renewal does not depend on the TPM's AK. Its node key, if
 in the TPM, still needs that TPM to load: after a clear it joins again with a token, and a token join of a known
@@ -394,10 +403,11 @@ bcd join --config /etc/bcd/config.toml --attestor tpm
 - **The node key, certified** (cf24876). When node keys can use a TPM on this host (below), `agent.Join` makes the
   join's node key in the attestor's own TPM (`tpm.Attestor.HoldNodeKey`, through the `NodeKeyHolder` interface),
   and the round-2 answer carries the AK's `TPM2_Certify` of it over `sha256(csr)`. If the TPM cannot make that key,
-  the join stops with an error rather than falling back to a file. When node keys cannot use the TPM (under
-  `[helper]` when the helper's user cannot open `/dev/tpmrm0`, or a fakehw build without `BCD_FAKEHW_TPM_KEYS=1`),
-  the key is a file, the answer carries no certification, and an attestor left at `nodeKey: 'certified'` refuses
-  the join.
+  the join stops with an error rather than falling back to a file. When node keys cannot use the TPM (a fakehw
+  build without `BCD_FAKEHW_TPM_KEYS=1`), the key is a file, the answer carries no certification, and an attestor
+  left at `nodeKey: 'certified'` refuses the join. `bcd join` runs as root and opens the TPM itself, `[helper]` or
+  not; since 8870b8d it no longer checks whether the helper's user can open `/dev/tpmrm0`, because that user never
+  does (below).
 - **The install script.** [`daemon install-script --attestor tpm`](/docs/daemon/install#generate-the-script)
   (a006d9f) writes a script that reads no token, fails early without `/dev/tpmrm0`, and runs
   `bcd join --config /etc/bcd/config.toml --attestor tpm < /dev/null` before (re)starting the units, so the same
@@ -417,23 +427,27 @@ results, discovery assertions, secret and workload-token requests) and the WebSo
   every load. Each signature uses ECDSA with the digest's hash (SHA-256, -384 or -512, for TLS).
 - **On disk.** `node.key` (and `node.key.next` during a renewal) then holds only the record: a PEM block of type
   `BCD TPM NODE KEY` whose bytes are the unique, mode 0600. A key in the TPM does not load without that TPM.
-- **When.** Every new node key is made in the TPM when bcd can open one: at `bcd join` and at every renewal's next
-  key. A host build uses `/dev/tpmrm0` when it exists; a fakehw build uses its software TPM only with
+- **When.** Every new node key is made in the TPM when there is one: at `bcd join` and at every renewal's next
+  key (under `[helper]`, in the helper's TPM connection). A host build uses `/dev/tpmrm0` when it exists; a fakehw build uses its software TPM only with
   `BCD_FAKEHW_TPM_KEYS=1`. When the TPM cannot hold the key, bcd logs a warning and makes a PKCS#8 file key instead,
   except at the renewal of a certificate that names an AK, which fails rather than leave the TPM (see
   [renewing a TPM-held key](#renewing-a-tpm-held-key)). A node that joined with a file key moves into the TPM at its
   next renewal.
-- **Under `[helper]`.** `bcd join` runs as root, but the key belongs to `bcd node`, which runs as the helper's
-  user. The join makes the key in the TPM only when that user can read and write `/dev/tpmrm0` (world `rw`, owner
-  `rw` as that user, or group `rw` with the user a member); otherwise it is a file key with the warning "the node key
-  stays a file: bcd node cannot use the TPM". The install script, on a node with `[helper]` and `/dev/tpmrm0`, adds the
-  `bcd` user to the `tss` group (see [running bcd node unprivileged](/docs/daemon/install#running-bcd-node-unprivileged)).
+- **Under `[helper]`** (8870b8d, security review 3). The unprivileged `bcd node` never opens the TPM. The kernel's
+  resource manager filters no command, so whoever can open `/dev/tpmrm0` can change the hierarchies' authorization,
+  clear the TPM through its (empty) lockout authorization or trip its dictionary-attack lockout, breaking root's
+  TPM-sealed secrets (LUKS keys) and attestation. `bcd join` and `bcd helper` run as root and open the TPM
+  themselves; an unprivileged `bcd node` reaches its node keys only through the helper's `tpm.*` operations,
+  which name a key by its 32-byte unique, and checks every signature the helper returns against the key's public
+  half. The helper builds every TPM command itself, so the node picks no template, handle, hierarchy or
+  authorization (see [node keys through the helper](/docs/daemon#node-keys-through-the-helper)). Install scripts
+  from 0ba2a79 until 8870b8d put the `bcd` user in the `tss` group instead; an upgrade run takes it out again (see
+  [running bcd node unprivileged](/docs/daemon/install#running-bcd-node-unprivileged)).
 - **What it protects.** Such a key cannot be copied off the machine, but anyone with the owner hierarchy's
   authorization on that TPM (root on the node) can derive and use it: non-exportable, not root-proof.
 - **Seeing it.** `bcd doctor` has a `node key` check: `ok` "in the TPM", `ok` for a file key on a host with no TPM,
-  and `warn` for a file key on a host with a TPM (the next renewal moves it, if `bcd node` can open
-  `/dev/tpmrm0`). `bcd status` prints `node key in the TPM` or `node key a file` on its identity line, and its
-  JSON carries `nodeKey` (`tpm` or `file`).
+  and `warn` for a file key on a host with a TPM (the next renewal moves it into the TPM). `bcd status` prints
+  `node key in the TPM` or `node key a file` on its identity line, and its JSON carries `nodeKey` (`tpm` or `file`).
 
 What the control plane knows about it depends on how the key was made:
 
@@ -458,6 +472,7 @@ What is tested, and with what TPM:
 | `tests/e2e/bcd-tpm.test.ts` (`BCD_E2E=1`, WSL or Linux; db9bd46, 8a9af54) | `tpmsim` in a fakehw bcd, with an EK certificate from a manufacturer root the test makes (`BCD_FAKEHW_TPM_EK_CA`) and the node key in that TPM (`BCD_FAKEHW_TPM_KEYS=1`) | a real `bcd join --attestor tpm` with no token against the dev stack's JoinService, whose `tpmAttestor` trusts only that root (`ekRoots`, no `allowUncertifiedEk`): two rounds, `resolve` seeing the EK certificate chained to the manufacturer and the SHA-256 PCR bank 0 to 7, the node in the resolved pool and bound to `sha256(EK)` in `node_bindings`; `node.key` a `BCD TPM NODE KEY` record; the node key certified by the AK, so `node.joined` says `nodeKey: 'tpm'` for this join and for the rejoin below (cf24876); with its identity removed (a reinstall) the same TPM joins as the same node; `bcd node` on that identity, signing its session and statements in the TPM, is adopted; since d94f1f3 the certificate carries the AK's `urn:bc:tpm-ak:` statement, and `bcd node` renews (`BCD_RENEW_AFTER=3s`) with the AK certifying the next key, which stays a `BCD TPM NODE KEY` record while the new certificate keeps the statement |
 | `tests/server-join-tpm-renew.test.ts` (d94f1f3) | `tpmProducer` and `softwareTpmCertify` over `SoftwareTpm` | a certified join names the AK; a renewal without `key_attestation` is `key-attestation-missing`, another TPM's AK `key-attestation-ak`, a certification of another key `node-key-not-csr`, one for another CSR `node-key-nonce`; a good renewal keeps the statement although its CSR asks for no SAN, and the next renewal needs the AK again; an uncertified join (`nodeKey: 'any'`) gets no statement and renews without one |
 | `internal/agent` `TestRenewCertifiedByTheAK` (d94f1f3) | `tpmsim` | a certificate naming the sim's AK renews with the next key made in that TPM and certified by it; with no TPM the renewal fails (`unavailable`), and with another TPM (another AK) it fails before any request, never falling back to a file key |
+| `internal/helper` `TestHelperTPMKeys` (8870b8d, Linux) | `tpmsim` behind a helper server on a test socket | the key and AK the node gets through `tpm.*` are the same as the TPM's own; signing and certifying; at most 8 keys loaded (least recently used unloaded) and a released key derived again on use; refusals of bad shapes, unknown verbs and a helper without a TPM |
 
 `scripts/daemon-tpm-fixture.mjs` regenerates the fixtures in `daemon/internal/tpm/testdata` after a deliberate change
 of either side, so a format change fails a test rather than a machine's join. Since b973e05 the contract runs the
