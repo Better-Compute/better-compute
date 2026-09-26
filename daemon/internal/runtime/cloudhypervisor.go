@@ -384,7 +384,7 @@ func (c *CloudHypervisor) Ensure(ctx context.Context, spec *agentv1.InstanceSpec
 				os.RemoveAll(dir)
 				return err
 			}
-			if err := st.seed(ctx, id, userData, dir); err != nil {
+			if err := st.seed(ctx, id, spec.GetNics(), userData, dir); err != nil {
 				os.RemoveAll(dir)
 				return err
 			}

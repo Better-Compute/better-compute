@@ -259,7 +259,8 @@ func TestLibvirtRuntime(t *testing.T) {
 		InstanceId: "inst_web", Runtime: "libvirt-kvm", AllocationId: "alloc_1", Vcpu: 4, MemoryBytes: 8 << 30, DiskBytes: 40 << 30,
 		Image:        &agentv1.ImageRef{Ref: "ubuntu", Url: srv.URL + "/ubuntu.qcow2", Sha256: sum[:], Format: "qcow2"},
 		GpuDeviceIds: []string{"GPU-1"},
-		Nics:         []*agentv1.InstanceNic{{Network: "br0", Mac: "52:54:00:00:00:07", Addresses: []string{"10.0.0.7/24"}}},
+		Nics: []*agentv1.InstanceNic{{Network: "br0", Mac: "52:54:00:00:00:07", Addresses: []string{"10.0.0.7/24"},
+			Gateway: "10.0.0.1", Nameservers: []string{"10.0.0.53"}}},
 	}
 
 	// A new domain: overlay on the verified base, seed with the user data, NIC on its named tap.
@@ -276,7 +277,8 @@ func TestLibvirtRuntime(t *testing.T) {
 			t.Errorf("domain XML lacks %s:\n%s", want, raw)
 		}
 	}
-	if seed, _ := os.ReadFile(filepath.Join(dir, "instances", "inst_web", "seed.iso")); !bytes.Contains(seed, []byte("hostname: web")) || !bytes.Contains(seed, []byte("instance-id: inst_web")) {
+	if seed, _ := os.ReadFile(filepath.Join(dir, "instances", "inst_web", "seed.iso")); !bytes.Contains(seed, []byte("hostname: web")) || !bytes.Contains(seed, []byte("instance-id: inst_web")) ||
+		!bytes.Contains(seed, []byte(`macaddress: "52:54:00:00:00:07"`)) || !bytes.Contains(seed, []byte(`via: "10.0.0.1"`)) {
 		t.Fatalf("seed = %q", seed)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "images", fmt.Sprintf("%x.qcow2", sum))); err != nil {

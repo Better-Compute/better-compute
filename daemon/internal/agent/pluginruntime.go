@@ -103,6 +103,9 @@ type coreNic struct {
 	// Tap is the host interface the runtime must give this NIC: bcd's network-policy and
 	// host-only-SSH rules match it by name (runtime.TapName), and bcd checks it is there.
 	Tap string `json:"tap"`
+	// The guest's default route and resolvers on this NIC; empty: none / the image's own.
+	Gateway     string   `json:"gateway,omitempty"`
+	Nameservers []string `json:"nameservers,omitempty"`
 }
 
 type coreRestore struct {
@@ -191,7 +194,7 @@ func coreSpecOf(spec *agentv1.InstanceSpec) *coreInstanceSpec {
 	}
 	for i, n := range spec.GetNics() {
 		c.Nics = append(c.Nics, coreNic{Network: n.GetNetwork(), Mac: n.GetMac(), Addresses: append([]string{}, n.GetAddresses()...),
-			Tap: runtime.TapName(spec.GetInstanceId(), i)})
+			Tap: runtime.TapName(spec.GetInstanceId(), i), Gateway: n.GetGateway(), Nameservers: n.GetNameservers()})
 	}
 	if pol := spec.GetNetworkPolicy(); pol != agentv1.InstanceNetworkPolicy_INSTANCE_NETWORK_POLICY_UNSPECIFIED {
 		c.NetworkPolicy = policyName(pol)

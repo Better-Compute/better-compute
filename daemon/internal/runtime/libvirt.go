@@ -493,7 +493,7 @@ func (l *Libvirt) Ensure(ctx context.Context, spec *agentv1.InstanceSpec, userDa
 			if err != nil {
 				return err
 			}
-			if err := l.seed(ctx, id, userData, dir); err != nil {
+			if err := l.seed(ctx, id, spec.GetNics(), userData, dir); err != nil {
 				return err
 			}
 			meta.UserData = len(userData) > 0
@@ -590,8 +590,13 @@ func (l *Libvirt) checkRestored(_ context.Context, dir string) error {
 	return nil
 }
 
-// seed writes the NoCloud seed ISO (volume "cidata") with the user data and the instance id.
-func (l *Libvirt) seed(ctx context.Context, id string, userData []byte, dir string) error {
+// seed writes the NoCloud seed ISO (volume "cidata") with the user data, the instance id and, when
+// the NICs have leased addresses, their network-config (netconfig.go).
+func (l *Libvirt) seed(ctx context.Context, id string, nics []*agentv1.InstanceNic, userData []byte, dir string) error {
+	netcfg, err := networkConfig(nics)
+	if err != nil {
+		return fmt.Errorf("network-config: %w", err)
+	}
 	src := filepath.Join(dir, "seed")
 	if err := os.MkdirAll(src, 0o700); err != nil {
 		return err
@@ -609,7 +614,13 @@ func (l *Libvirt) seed(ctx context.Context, id string, userData []byte, dir stri
 	}
 	iso := filepath.Join(dir, "seed.iso")
 	files := []string{filepath.Join(src, "user-data"), filepath.Join(src, "meta-data")}
-	_, err := l.run(ctx, "genisoimage", append([]string{"-quiet", "-output", iso, "-volid", "cidata", "-joliet", "-rock"}, files...)...)
+	if netcfg != nil {
+		if err := os.WriteFile(filepath.Join(src, "network-config"), netcfg, 0o600); err != nil {
+			return err
+		}
+		files = append(files, filepath.Join(src, "network-config"))
+	}
+	_, err = l.run(ctx, "genisoimage", append([]string{"-quiet", "-output", iso, "-volid", "cidata", "-joliet", "-rock"}, files...)...)
 	if err != nil {
 		if _, err2 := l.run(ctx, "xorriso", append([]string{"-as", "mkisofs", "-quiet", "-output", iso, "-volid", "cidata", "-joliet", "-rock"}, files...)...); err2 != nil {
 			return fmt.Errorf("NoCloud seed: %w", err)

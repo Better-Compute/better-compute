@@ -15,7 +15,7 @@ import (
 func TestPluginRuntimesAreToldWhatBcdEnforces(t *testing.T) {
 	spec := &agentv1.InstanceSpec{
 		InstanceId: "inst_p", Runtime: "firecracker", Vcpu: 2, MemoryBytes: 2 << 30,
-		Nics:              []*agentv1.InstanceNic{{Network: "br0", Mac: "52:54:00:00:00:09"}},
+		Nics:              []*agentv1.InstanceNic{{Network: "br0", Mac: "52:54:00:00:00:09", Gateway: "10.0.0.1", Nameservers: []string{"10.0.0.53"}}},
 		NetworkPolicy:     agentv1.InstanceNetworkPolicy_INSTANCE_NETWORK_POLICY_NONE,
 		SshFromHostOnly:   true,
 		IdentityRebindRef: "secret://acme/rebind-1",
@@ -25,7 +25,7 @@ func TestPluginRuntimesAreToldWhatBcdEnforces(t *testing.T) {
 	out := string(raw)
 	for _, want := range []string{
 		`"tap":"` + runtime.TapName("inst_p", 0) + `"`, `"networkPolicy":"none"`, `"sshFromHostOnly":true`,
-		`"identityRebindRef":"secret://acme/rebind-1"`, `"placement":{"cpus":"4-5","mems":"0"}`,
+		`"identityRebindRef":"secret://acme/rebind-1"`, `"gateway":"10.0.0.1","nameservers":["10.0.0.53"]`, `"placement":{"cpus":"4-5","mems":"0"}`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("core spec lacks %s: %s", want, out)
