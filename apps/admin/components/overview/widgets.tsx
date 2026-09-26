@@ -21,6 +21,7 @@ import {
 import type { WidgetProps } from '@/lib/modules';
 import { useLive, useWorkspace } from '@/components/shell/workspace';
 import { useFeedback } from '@/components/ui/feedback';
+import { useAcks } from '@/components/shell/pins';
 import { Gauge, Legend, Sparkline, StackedBar, TimeSeriesChart } from '@/components/ui/charts';
 import { Stat } from '@/components/ui/stat';
 import { Led, SeverityIcon, Tag, type Status } from '@/components/ui/signal';
@@ -133,17 +134,12 @@ export function PulseChart({ size }: WidgetProps) {
 export function AttentionQueue() {
   const items = useLive((now, scope) => attention(now, scope), { bucketMs: 10_000 });
   const { now } = useWorkspace();
-  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const acks = useAcks();
   const { toast } = useFeedback();
-  const open = items.filter((item) => !dismissed.has(item.id));
+  const open = items.filter((item) => !acks.has(item.id));
   const ack = (id: string, title: string) => {
-    setDismissed((d) => new Set(d).add(id));
-    toast({
-      title: 'Acknowledged',
-      detail: title,
-      status: 'ok',
-      action: { label: 'undo', onAction: () => setDismissed((d) => { const next = new Set(d); next.delete(id); return next; }) },
-    });
+    acks.add([id]);
+    toast({ title: 'Acknowledged', detail: title, status: 'ok', action: { label: 'undo', onAction: () => acks.remove([id]) } });
   };
   return (
     <div className="flex h-full flex-col">

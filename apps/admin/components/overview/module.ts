@@ -36,6 +36,15 @@ export const overviewModule: AdminModule = {
       description: 'Dashboards of widgets from every module',
     },
     {
+      href: '/attention',
+      label: 'Needs attention',
+      icon: RiAlarmWarningLine,
+      group: 'Overview',
+      shortcut: 'g a',
+      keywords: ['alerts', 'incidents', 'queue', 'ack', 'on-call'],
+      description: 'Failures, approvals, quota pressure and forecasts from every module',
+    },
+    {
       href: '/control-plane',
       label: 'Control plane',
       icon: RiServerLine,
@@ -48,7 +57,7 @@ export const overviewModule: AdminModule = {
   widgets: [
     { id: 'overview.kpis', title: 'Fleet KPIs', description: 'Nodes ready, GPU and CPU utilization, free GPUs, sandboxes, power — with trends.', icon: RiStackLine, module: 'overview', defaultSize: { w: 12, h: 2 }, minSize: { w: 4, h: 2 }, maxSize: { w: 12, h: 3 }, component: KpiStrip },
     { id: 'overview.pulse', title: 'Utilization', description: 'GPU and CPU utilization over the workspace time range.', icon: RiPulseLine, module: 'overview', defaultSize: { w: 8, h: 4 }, minSize: { w: 4, h: 3 }, component: PulseChart },
-    { id: 'overview.attention', title: 'Needs attention', description: 'The operator queue: failures, approvals, forecasts, quota pressure.', icon: RiAlarmWarningLine, module: 'overview', defaultSize: { w: 4, h: 4 }, minSize: { w: 3, h: 3 }, href: '/#attention', component: AttentionQueue },
+    { id: 'overview.attention', title: 'Needs attention', description: 'The operator queue: failures, approvals, forecasts, quota pressure.', icon: RiAlarmWarningLine, module: 'overview', defaultSize: { w: 4, h: 4 }, minSize: { w: 3, h: 3 }, href: '/attention', component: AttentionQueue },
     { id: 'overview.fleet-wall', title: 'Fleet wall', description: 'Every node as one cell, grouped by pool: load, faults, provisioning.', icon: RiGridLine, module: 'overview', defaultSize: { w: 8, h: 4 }, minSize: { w: 4, h: 3 }, href: '/nodes', component: FleetWall },
     { id: 'overview.control-plane', title: 'Control plane', description: 'API, IAM bridge, database, workers, outbox and each site gateway.', icon: RiServerLine, module: 'overview', defaultSize: { w: 4, h: 4 }, minSize: { w: 3, h: 3 }, href: '/control-plane', component: ControlPlaneWidget },
     { id: 'overview.sites', title: 'Sites', description: 'Sites on a map with nodes, GPUs, utilization and power. Click to scope.', icon: RiMapPin2Line, module: 'overview', defaultSize: { w: 6, h: 4 }, minSize: { w: 3, h: 3 }, component: SitesWidget },

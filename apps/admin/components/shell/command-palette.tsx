@@ -21,6 +21,7 @@ import {
 import { pools, sites, tenants } from '@/lib/data';
 import { allCommands, allNav } from '@/lib/modules';
 import { cx } from '@/utils/cx';
+import { useRegisteredPageCommands } from './page-commands';
 import { RANGES, useWorkspace, type RangeKey } from './workspace';
 
 type Icon = ComponentType<{ className?: string; 'aria-hidden'?: boolean }>;
@@ -109,10 +110,22 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     }
   }, [open]);
 
+  const pageCommands = useRegisteredPageCommands();
+
   const entries = useMemo<Entry[]>(() => {
     const go = (href: string) => () => router.push(href);
     const emit = (name: string) => () => window.dispatchEvent(new Event(name));
     return [
+      ...pageCommands.map((command) => ({
+        id: `page:${command.id}`,
+        label: command.label,
+        group: 'This page',
+        hint: command.group !== 'This page' ? command.group : undefined,
+        icon: command.icon,
+        keywords: command.keywords,
+        shortcut: command.shortcut,
+        perform: command.run ?? go(command.href ?? '/'),
+      })),
       ...allNav().map((item) => ({
         id: `nav:${item.href}`,
         label: item.label,
@@ -175,15 +188,16 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
         perform: go(`/quotas?tenant=${tenant.id}`),
       })),
     ];
-  }, [router, workspace, resolvedTheme, setTheme]);
+  }, [router, workspace, resolvedTheme, setTheme, pageCommands]);
 
   const results = useMemo(() => {
     const q = query.trim();
     if (!q) {
       const byId = new Map(entries.map((entry) => [entry.id, entry]));
-      const recents = recent.map((id) => byId.get(id)).filter(Boolean).map((entry) => ({ entry: { ...entry!, group: 'Recent' }, hits: [] as number[] }));
+      const recents = recent.map((id) => byId.get(id)).filter((entry): entry is Entry => Boolean(entry)).map((entry) => ({ ...entry, group: 'Recent' }));
+      const here = entries.filter((entry) => entry.group === 'This page');
       const defaults = entries.filter((entry) => entry.group === 'Go to' || entry.group === 'Workspace').slice(0, 24);
-      return [...recents, ...defaults.map((entry) => ({ entry, hits: [] as number[] }))];
+      return [...here, ...recents, ...defaults].map((entry) => ({ entry, hits: [] as number[] }));
     }
     return entries
       .map((entry) => {

@@ -5,6 +5,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Dialog, Heading, Modal, ModalOverlay } from 'react-aria-components';
 import { allCommands, allNav } from '@/lib/modules';
 import { CommandPalette, PALETTE_EVENTS } from './command-palette';
+import { PageCommandsProvider } from './page-commands';
 import { Sidebar } from './sidebar';
 import { Topbar } from './topbar';
 import { useWorkspace } from './workspace';
@@ -25,6 +26,7 @@ export function AdminShell({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
   const [palette, setPalette] = useState(false);
   const [keys, setKeys] = useState(false);
+  const [mobileNav, setMobileNav] = useState(false);
   const chord = useRef<{ key: string; at: number } | null>(null);
   const mainRef = useRef<HTMLElement>(null);
   const pathname = usePathname();
@@ -104,13 +106,21 @@ export function AdminShell({ children }: { children: ReactNode }) {
   return (
     // App shell: the window never scrolls; <main> does, so the sidebar and top bar stay put and scroll position
     // is per page (reset on navigation below).
+    <PageCommandsProvider>
     <div className="flex h-dvh overflow-hidden">
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[70] focus:bg-surface-raised focus:px-3 focus:py-2">
         Skip to content
       </a>
-      <Sidebar collapsed={collapsed} onToggle={toggleSidebar} />
+      <Sidebar collapsed={collapsed} onToggle={toggleSidebar} className="hidden md:flex" />
+      <ModalOverlay isOpen={mobileNav} onOpenChange={setMobileNav} isDismissable className="fixed inset-0 z-50 bg-neutral-950/50 md:hidden entering:animate-[fade-in_120ms_ease-out]">
+        <Modal className="h-full w-fit outline-none">
+          <Dialog aria-label="Navigation" className="h-full outline-none">
+            <Sidebar collapsed={false} onToggle={() => setMobileNav(false)} onNavigate={() => setMobileNav(false)} />
+          </Dialog>
+        </Modal>
+      </ModalOverlay>
       <div className="flex min-w-0 flex-1 flex-col">
-        <Topbar onOpenPalette={() => setPalette(true)} />
+        <Topbar onOpenPalette={() => setPalette(true)} onOpenNav={() => setMobileNav(true)} />
         <main id="main" ref={mainRef} tabIndex={-1} className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-5 outline-none lg:px-6">
           {children}
         </main>
@@ -118,6 +128,7 @@ export function AdminShell({ children }: { children: ReactNode }) {
       <CommandPalette open={palette} onOpenChange={setPalette} />
       <ShortcutSheet open={keys} onOpenChange={setKeys} />
     </div>
+    </PageCommandsProvider>
   );
 }
 

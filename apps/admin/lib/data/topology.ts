@@ -99,14 +99,28 @@ export const siteById = (id: string) => sites.find((site) => site.id === id);
 export const poolById = (id: string) => pools.find((pool) => pool.id === id);
 export const poolsInSite = (siteId: string) => pools.filter((pool) => pool.siteId === siteId);
 
-/** Stable node ids: `n-fra1-h100-017`. Rack = index / 8, unit = 42 − (index % 8) × 4 (4U servers). */
+/** Stable node ids: `n-fra1-h100-017`. */
 export function poolNodeId(pool: Pool, index: number): string {
   const tag = pool.id.split('_')[1];
   return `n-${pool.siteId}-${tag}-${String(index + 1).padStart(3, '0')}`;
 }
 
+/** Racks used by the pools listed before `pool` in the same site, so pools sharing a site never share a rack. */
+function rackOffset(pool: Pool): number {
+  let offset = 0;
+  for (const other of pools) {
+    if (other.id === pool.id) break;
+    if (other.siteId === pool.siteId) offset += Math.ceil(other.nodes / 8);
+  }
+  return offset;
+}
+
+/**
+ * Where a node sits: eight 4U servers per 42U rack; `unit` is the server's TOP U (42, 37, … 7). Racks are
+ * numbered per site, continuing across the site's pools.
+ */
 export function poolNodePlacement(pool: Pool, index: number): { rack: string; unit: number } {
-  const rack = Math.floor(index / 8);
+  const rack = rackOffset(pool) + Math.floor(index / 8);
   return {
     rack: `${pool.siteId.toUpperCase()}-R${String(rack + 1).padStart(2, '0')}`,
     unit: 42 - (index % 8) * 5,

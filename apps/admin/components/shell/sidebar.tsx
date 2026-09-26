@@ -2,21 +2,35 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { RiLayoutLeft2Line, RiLayoutRight2Line, RiSettings3Line } from 'react-icons/ri';
+import { RiLayoutLeft2Line, RiLayoutRight2Line, RiPushpinFill, RiPushpinLine, RiSettings3Line } from 'react-icons/ri';
 import { ThemeToggle } from '@/components/application/theme/theme-toggle';
-import { navForPath, navGroups } from '@/lib/modules';
+import { allNav, navForPath, navGroups, type NavItem } from '@/lib/modules';
 import { cx } from '@/utils/cx';
+import { usePins } from './pins';
 import { useWorkspace } from './workspace';
 
 /**
  * The rack rail: module navigation grouped by section, collapsible to an icon rail (`[` toggles it). The active
  * item is marked with the amber signal; everything else stays graphite.
  */
-export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle(): void }) {
+export function Sidebar({
+  collapsed,
+  onToggle,
+  onNavigate,
+  className,
+}: {
+  collapsed: boolean;
+  onToggle(): void;
+  /** Called on every link click (the mobile drawer closes itself). */
+  onNavigate?: () => void;
+  className?: string;
+}) {
   const pathname = usePathname();
   const active = navForPath(pathname);
   const { source, live } = useWorkspace();
   const groups = navGroups();
+  const { pins, toggle } = usePins();
+  const pinned = pins.map((href) => allNav().find((item) => item.href === href)).filter((item): item is NavItem => Boolean(item));
 
   return (
     <nav
@@ -24,6 +38,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle(
       className={cx(
         'flex h-full shrink-0 flex-col border-r border-separator-border bg-surface-sunken transition-[width] duration-200 ease-out',
         collapsed ? 'w-14' : 'w-60',
+        className,
       )}
     >
       <div className={cx('flex h-12 shrink-0 items-center gap-2 border-b border-separator-border', collapsed ? 'justify-center px-0' : 'px-3')}>
@@ -39,11 +54,11 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle(
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto py-2">
-        {groups.map(({ group, items }) => (
+        {[...(pinned.length ? [{ group: 'Pinned', items: pinned }] : []), ...groups].map(({ group, items }) => (
           <div key={group} className="mb-3">
             {!collapsed ? (
               <div className="flex items-center gap-2 px-3 pt-1 pb-1.5">
-                <span className="font-mono text-[10px] tracking-[0.16em] text-text-tertiary uppercase">{group}</span>
+                <span className={cx('font-mono text-[10px] tracking-[0.16em] uppercase', group === 'Pinned' ? 'text-signal' : 'text-text-tertiary')}>{group}</span>
                 <span className="h-px flex-1 bg-separator-border" />
               </div>
             ) : (
@@ -52,10 +67,12 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle(
             <ul className="flex flex-col gap-px px-2">
               {items.map((item) => {
                 const isActive = active?.href === item.href;
+                const isPinned = pins.includes(item.href);
                 return (
-                  <li key={item.href}>
+                  <li key={item.href} className="group/item relative">
                     <Link
                       href={item.href}
+                      onClick={onNavigate}
                       title={collapsed ? item.label : undefined}
                       aria-current={isActive ? 'page' : undefined}
                       className={cx(
@@ -70,9 +87,24 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle(
                       <item.icon className={cx('size-4 shrink-0', isActive ? 'text-signal' : 'text-text-tertiary group-hover:text-text-secondary')} aria-hidden />
                       {!collapsed && <span className="min-w-0 flex-1 truncate">{item.label}</span>}
                       {!collapsed && item.shortcut && (
-                        <kbd className="hidden font-mono text-[10px] text-text-tertiary opacity-0 group-hover:opacity-100 lg:inline">{item.shortcut}</kbd>
+                        <kbd className="hidden pr-5 font-mono text-[10px] text-text-tertiary opacity-0 group-hover:opacity-100 lg:inline">{item.shortcut}</kbd>
                       )}
                     </Link>
+                    {!collapsed && (
+                      <button
+                        type="button"
+                        onClick={() => toggle(item.href)}
+                        aria-label={isPinned ? `Unpin ${item.label}` : `Pin ${item.label}`}
+                        aria-pressed={isPinned}
+                        className={cx(
+                          'absolute top-1/2 right-1 grid size-6 -translate-y-1/2 place-items-center outline-none focus-visible:opacity-100',
+                          isPinned ? 'text-signal opacity-0 group-hover/item:opacity-100' : 'text-text-tertiary opacity-0 group-hover/item:opacity-100 hover:text-text-primary',
+                          group === 'Pinned' && 'text-signal',
+                        )}
+                      >
+                        {isPinned ? <RiPushpinFill className="size-3.5" aria-hidden /> : <RiPushpinLine className="size-3.5" aria-hidden />}
+                      </button>
+                    )}
                   </li>
                 );
               })}
@@ -85,6 +117,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle(
         <Link
           href="/settings"
           title="Settings"
+          onClick={onNavigate}
           className={cx(
             'flex h-8 items-center gap-2.5 px-2 text-body-regular text-text-secondary hover:bg-background-secondary-default/60 hover:text-text-primary',
             pathname === '/settings' && 'bg-background-secondary-default text-text-primary',

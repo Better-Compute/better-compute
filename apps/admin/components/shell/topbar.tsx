@@ -6,6 +6,7 @@ import { Button as AriaButton, Dialog, DialogTrigger, Popover } from 'react-aria
 import {
   RiArrowRightSLine,
   RiGlobalLine,
+  RiMenuLine,
   RiNotification3Line,
   RiPauseFill,
   RiPlayFill,
@@ -17,10 +18,11 @@ import { navForPath } from '@/lib/modules';
 import { Select } from '@/components/ui/overlay';
 import { Led, SeverityIcon } from '@/components/ui/signal';
 import { cx } from '@/utils/cx';
+import { useAcks } from './pins';
 import { RANGES, useLive, useWorkspace, type RangeKey } from './workspace';
 
 /** Breadcrumbs on the left; the workspace controls (search, scope, range, clock, attention) on the right. */
-export function Topbar({ onOpenPalette }: { onOpenPalette(): void }) {
+export function Topbar({ onOpenPalette, onOpenNav }: { onOpenPalette(): void; onOpenNav(): void }) {
   const pathname = usePathname();
   const { now, live, setLive, range, setRange, siteId, setSiteId } = useWorkspace();
   const nav = navForPath(pathname);
@@ -28,6 +30,9 @@ export function Topbar({ onOpenPalette }: { onOpenPalette(): void }) {
 
   return (
     <header className="relative z-30 flex h-12 shrink-0 items-center gap-3 border-b border-separator-border bg-background-full px-4">
+      <button type="button" onClick={onOpenNav} aria-label="Open navigation" className="-ml-1 grid size-8 place-items-center text-text-secondary md:hidden">
+        <RiMenuLine className="size-5" aria-hidden />
+      </button>
       <ol className="flex min-w-0 flex-1 items-center gap-1 font-mono text-[12px]" aria-label="Breadcrumb">
         {nav ? (
           <>
@@ -106,7 +111,9 @@ export function Topbar({ onOpenPalette }: { onOpenPalette(): void }) {
 }
 
 function AttentionBell() {
-  const items = useLive((now, scope) => attention(now, scope), { bucketMs: 10_000 });
+  const all = useLive((now, scope) => attention(now, scope), { bucketMs: 10_000 });
+  const acks = useAcks();
+  const items = all.filter((item) => !acks.has(item.id));
   const { now } = useWorkspace();
   const critical = items.filter((item) => item.severity === 'critical').length;
   return (
@@ -131,7 +138,7 @@ function AttentionBell() {
         <Dialog aria-label="Needs attention" className="outline-none">
           <div className="flex items-center justify-between border-b border-separator-border px-3 py-2">
             <span className="font-mono text-[11px] tracking-wide text-text-secondary uppercase">Needs attention</span>
-            <Link href="/#attention" className="font-mono text-[11px] text-signal hover:underline">
+            <Link href="/attention" className="font-mono text-[11px] text-signal hover:underline">
               open queue
             </Link>
           </div>
