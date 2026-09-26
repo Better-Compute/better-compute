@@ -26,11 +26,15 @@ export default function VolumesPage() {
   const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState({ poolId: '', name: '', sizeGiB: 10 });
+  const [all, setAll] = useState(false);
 
   const refresh = useCallback(async () => {
-    const page = await api.$request<{ items: VolumeRow[] }>('sandboxVolumes/list', { tenantId });
+    const page = await api.$request<{ items: VolumeRow[] }>('sandboxVolumes/list', {
+      tenantId,
+      scope: all ? 'all' : 'mine',
+    });
     setVolumes(page.items);
-  }, [api, tenantId]);
+  }, [api, tenantId, all]);
   useEffect(() => {
     void refresh().catch(setError);
   }, [refresh]);
@@ -122,9 +126,15 @@ export default function VolumesPage() {
       <section className="panel">
         <div className="row" style={{ justifyContent: 'space-between' }}>
           <h3>Volumes</h3>
-          <button onClick={() => void act(async () => undefined)} disabled={busy}>
-            Refresh
-          </button>
+          <div className="row">
+            <label className="row">
+              <input type="checkbox" checked={all} onChange={(event) => setAll(event.target.checked)} />
+              Everyone&apos;s volumes
+            </label>
+            <button onClick={() => void act(async () => undefined)} disabled={busy}>
+              Refresh
+            </button>
+          </div>
         </div>
         <Loading status={volumes ? 'ready' : 'loading'} error={undefined}>
           {volumes && volumes.length === 0 && <p className="muted">No volumes.</p>}

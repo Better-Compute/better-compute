@@ -695,7 +695,10 @@ export function computeTools(
         'Lists the persistent volumes of this tenant (agent memory): name, size, pool and host. A template that names a volume mounts it in every sandbox it creates, and the data survives the sandboxes.',
       inputSchema: {
         type: 'object',
-        properties: { poolId: id('pool', 'Only this pool') },
+        properties: {
+          poolId: id('pool', 'Only this pool'),
+          scope: { type: 'string', enum: ['mine', 'all'], description: 'Default mine' },
+        },
         additionalProperties: false,
       },
       annotations: { readOnlyHint: true, openWorldHint: false },

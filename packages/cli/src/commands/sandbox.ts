@@ -563,11 +563,13 @@ export const sandboxCommands = [
       tenant: tenantFlag,
       pool: { type: 'string', value: 'ID', description: 'Only this pool’s (pool_…)' },
       deleted: { type: 'boolean', description: 'Include deleted volumes' },
+      all: { type: 'boolean', description: 'Every volume of the tenant you may see, not only yours' },
     },
     examples: ['better-compute sandbox-volume list --format table'],
     async run({ flags, api }) {
       return (await api()).call('sandboxVolumes/list', {
         tenantId: flags.tenant,
+        ...(flags.all ? { scope: 'all' } : {}),
         ...(flags.pool ? { poolId: flags.pool } : {}),
         ...(flags.deleted ? { includeDeleted: true } : {}),
       });
