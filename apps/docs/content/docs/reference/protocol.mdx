@@ -1234,6 +1234,17 @@ Convergence state, coalesced latest-wins.
 | `approver_set_epoch`  | 10     | `uint64`                                           | The approver set held after that bundle, as in Hello (set whenever trust_version is).                                                                                                                                                                                                                                                                       |
 | `approver_set_sha256` | 11     | `bytes`                                            |                                                                                                                                                                                                                                                                                                                                                             |
 | `discovered`          | 12     | repeated [`DiscoveredMachine`](#discoveredmachine) | (v1.1, site agents only) Machines seen PXE/HTTP-booting (DHCP PXEClient/HTTPClient) from a MAC with no live boot entry: never answered, never enrolled; a list for metal to match (by product_uuid, the SMBIOS UUID a BMC also reports) or an operator to act on. The whole list, capped at 256 (oldest last_seen evicted, forgotten 24 h after last seen). |
+| `volume_storage`      | 13     | [`VolumeStorage`](#volumestorage)                  | (v1.1, hosts with a runtime) The volume store's filesystem, so capacity books persistent volumes against what can really be written (volumes are sparse). bcd refuses a volume create or growth beyond available − reserved − outstanding; capacity applies the same rule.                                                                                  |
+
+### VolumeStorage
+
+| Field               | Number | Type     | Description                                                                     |
+| ------------------- | ------ | -------- | ------------------------------------------------------------------------------- |
+| `total_bytes`       | 1      | `uint64` | The data directory's filesystem (statfs).                                       |
+| `available_bytes`   | 2      | `uint64` | statfs Bavail.                                                                  |
+| `reserved_bytes`    | 3      | `uint64` | Kept from volumes: overlays, journal, images (5% of total, at least 2 GiB).     |
+| `committed_bytes`   | 4      | `uint64` | The sum of every volume's size.                                                 |
+| `outstanding_bytes` | 5      | `uint64` | The sum of every volume's unwritten (sparse) space: promised but not yet taken. |
 
 ### DiscoveredMachine
 

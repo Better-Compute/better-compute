@@ -2304,6 +2304,44 @@
         "additionalProperties": false
       }
     },
+    "metal.confirmMac": {
+      "route": "POST /api/compute/metal/confirmMac",
+      "kind": "mutation",
+      "action": "compute:nodes:provision",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The node"
+          },
+          "mac": {
+            "type": "string",
+            "pattern": "^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$",
+            "description": "The machine's PXE MAC (':' or '-' separated)"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId",
+          "mac"
+        ],
+        "additionalProperties": false
+      }
+    },
     "metal.deploy": {
       "route": "POST /api/compute/metal/deploy",
       "kind": "mutation",

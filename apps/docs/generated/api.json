@@ -2358,7 +2358,7 @@
           "additionalProperties": false
         },
         "summary": "Creates a metal node from a BMC address, driver and credentials in the given pool, in provision state `enrolling`, and queues the reconciler to verify BMC access and inspect the machine out of band.",
-        "description": "Creates a metal node from a BMC address, driver and credentials in the given pool, in provision state `enrolling`, and queues the reconciler to verify BMC access and inspect the machine out of band.\n\n- Decided as `compute:nodes:provision` on the pool, since the node does not exist yet.\n- `bmc.credentials` is a `secret://` reference or an inline username and password. Inline credentials go to the secret broker before anything is written, and only the reference is stored; without a secret broker they are `INVALID_CONFIG`.\n- The node's driver bindings come from the BMC (power, management, virtual media), then the hardware profile (`hardwareProfile`, else the pool's `policy.hardwareProfile`). An unknown hardware profile is `INVALID_INPUT`.\n- `bmc.driverOptions` is a JSON object of at most 1 KiB for the BMC driver (e.g. `{ \"cipherSuite\": 3 }` for older IPMI BMCs), sent on every BMC request and validated by the driver. Keys that look like credentials are `INVALID_INPUT`: credentials travel only as `bmc.credentials`.\n- `addresses` are the machine's own IP literals (at most 16). In an agentless pool the site's agents can reach the machine through them at once; out-of-band inspection replaces them only when it reports some (IPMI reports none).\n- A driver that cannot report MACs (IPMI) needs `macs`, or `productUuid` (the SMBIOS UUID its BMC reports). With the UUID alone, PXE discovery fills the MAC: the first boot PXE-boots the machine once with no boot entry, and its site agent lists it (see `discovered`). A firmware placeholder UUID (all zeros, all ones, `03000200-0400-0500-0006-000700080009`) cannot stand in for the MACs.\n- `NOT_FOUND` when the pool does not exist or the tenant does not own it; `INVALID_INPUT` when the pool is not in `siteId`.\n\nEach call creates a new node; there is no idempotency key. Publishes `node.enrolled`, and `node.pxe-mac.discovered` when a site agent had already seen the machine."
+        "description": "Creates a metal node from a BMC address, driver and credentials in the given pool, in provision state `enrolling`, and queues the reconciler to verify BMC access and inspect the machine out of band.\n\n- Decided as `compute:nodes:provision` on the pool, since the node does not exist yet.\n- `bmc.credentials` is a `secret://` reference or an inline username and password. Inline credentials go to the secret broker before anything is written, and only the reference is stored; without a secret broker they are `INVALID_CONFIG`.\n- The node's driver bindings come from the BMC (power, management, virtual media), then the hardware profile (`hardwareProfile`, else the pool's `policy.hardwareProfile`). An unknown hardware profile is `INVALID_INPUT`.\n- `bmc.driverOptions` is a JSON object of at most 1 KiB for the BMC driver (e.g. `{ \"cipherSuite\": 3 }` for older IPMI BMCs), sent on every BMC request and validated by the driver. Keys that look like credentials are `INVALID_INPUT`: credentials travel only as `bmc.credentials`.\n- `addresses` are the machine's own IP literals (at most 16). In an agentless pool the site's agents can reach the machine through them at once; out-of-band inspection replaces them only when it reports some (IPMI reports none).\n- A driver that cannot report MACs (IPMI) needs `macs`, or `productUuid` (the SMBIOS UUID its BMC reports). With the UUID alone, the first boot PXE-boots the machine once with no boot entry, and PXE discovery proposes the MAC its site agent then sees (see `discovered` and `confirmMac`). A firmware placeholder UUID (all zeros, all ones, `03000200-0400-0500-0006-000700080009`) cannot stand in for the MACs.\n- `NOT_FOUND` when the pool does not exist or the tenant does not own it; `INVALID_INPUT` when the pool is not in `siteId`.\n\nEach call creates a new node; there is no idempotency key. Publishes `node.enrolled`."
       },
       {
         "method": "manage",
@@ -2811,6 +2811,44 @@
         "description": "Runs one lifecycle verb on many nodes of a pool at once (`manage`, `inspect`, `provide`, `undeploy`, `rescue` or `retire`), as one batch; returns every node and, when the verb sends destructive commands, the batch.\n\n- Each node is decided on its own, exactly as if the verb were called for it (`metal.<verb>`); one refusal refuses the whole call before anything changes. Every node must be in `poolId` (`INVALID_INPUT` otherwise), listed once, 1 to 10,000 of them.\n- When the verb's steps send destructive commands, a quorum batch (`commandBatches`) is created over them with `reason`, and each node's commands carry it: with approver keys they wait for its approval; without, it is recorded for audit.\n- `wipe` applies to `undeploy` only.\n\nDecided as `compute:nodes:provision` on the pool, then per node."
       },
       {
+        "method": "confirmMac",
+        "route": "POST /api/compute/metal/confirmMac",
+        "kind": "mutation",
+        "action": "compute:nodes:provision",
+        "resource": "compute-node",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "metal",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node"
+            },
+            "mac": {
+              "type": "string",
+              "pattern": "^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$",
+              "description": "The machine's PXE MAC (':' or '-' separated)"
+            }
+          },
+          "required": ["tenantId", "nodeId", "mac"],
+          "additionalProperties": false
+        },
+        "summary": "Binds the PXE MAC of a machine enrolled without MACs, usually the candidate PXE discovery proposed (its `discoveredMac`), or any MAC the operator knows to be the machine's. The waiting boot then goes on from that MAC.",
+        "description": "Binds the PXE MAC of a machine enrolled without MACs, usually the candidate PXE discovery proposed (its `discoveredMac`), or any MAC the operator knows to be the machine's. The waiting boot then goes on from that MAC.\n\n- Decided as `compute:nodes:provision` on the node. Publishes `node.pxe-mac.confirmed` with the MAC and whether it was the discovered candidate.\n- `INVALID_STATE` when the node already has MACs or is retired. `CONFLICT` when another machine of the site has the MAC.\n- Until a MAC is confirmed, a machine known only by its UUID never gets a boot entry or a discovery token. A pool whose `policy.trustProvisioningNetwork` is `true` binds the candidate at once instead. Use it only on a provisioning network no untrusted host can reach. Its ramdisk's reported UUID and NICs are then checked against the machine before anything is written, and a mismatch fails the workflow."
+      },
+      {
         "method": "discovered",
         "route": "POST /api/compute/metal/discovered",
         "kind": "read",
@@ -2841,7 +2879,7 @@
           "additionalProperties": false
         },
         "summary": "Lists the machines the site's agents saw PXE-booting from a MAC with no boot entry in the last 24 hours, newest first. The agents never answer or enroll them.",
-        "description": "Lists the machines the site's agents saw PXE-booting from a MAC with no boot entry in the last 24 hours, newest first. The agents never answer or enroll them.\n\n- Decided as `compute:sites:read` on the site, and only the tenant that owns the site sees it (`NOT_FOUND` otherwise): the list describes the site's network.\n- Each machine has its `mac`, the `productUuid` its DHCP request carried (as sent: SMBIOS stores the first three fields byte-swapped), its `arch`, when it was first and last seen, a request `count` summed over agents, the DHCP `relays` it came through, and the `agentNodeIds` that saw it.\n- `nodeId` names the enrolled machine with that MAC, or the one whose MAC it filled. An enrolled machine without MACs gets one only when its product UUID, in any byte order, was seen from exactly one MAC, no other machine of the site shares the UUID, and the MAC is not already enrolled. It then publishes `node.pxe-mac.discovered`.\n- At most 256 machines per agent, as each agent's last status report lists them."
+        "description": "Lists the machines the site's agents saw PXE-booting from a MAC with no boot entry in the last 24 hours, newest first. The agents never answer or enroll them.\n\n- Decided as `compute:sites:read` on the site, and only the tenant that owns the site sees it (`NOT_FOUND` otherwise): the list describes the site's network.\n- Each machine has its `mac`, the `productUuid` its DHCP request carried (as sent: SMBIOS stores the first three fields byte-swapped), its `arch`, when it was first and last seen, a request `count` summed over agents, the DHCP `relays` it came through, and the `agentNodeIds` that saw it.\n- `nodeId` names the enrolled machine with that MAC. `candidateFor` names the machine enrolled without MACs whose candidate it is, awaiting `confirmMac`.\n- The list alone binds nothing: any host on the network can claim any MAC and UUID. A MAC becomes a machine's candidate only when metal has just power-cycled that machine into PXE with its BMC. The MAC must be first seen within 10 minutes after that cycle, and be the only MAC its product UUID (in any byte order) was seen from in 24 hours. No other machine of the site may share the UUID, and the MAC must not be enrolled already. This publishes `node.pxe-mac.discovered`.\n- At most 256 machines per agent, as each agent's last status report lists them."
       }
     ]
   },

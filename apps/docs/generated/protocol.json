@@ -4406,6 +4406,54 @@
             "type": "DiscoveredMachine",
             "label": "repeated",
             "description": "(v1.1, site agents only) Machines seen PXE/HTTP-booting (DHCP PXEClient/HTTPClient) from a MAC\nwith no live boot entry: never answered, never enrolled; a list for metal to match (by\nproduct_uuid, the SMBIOS UUID a BMC also reports) or an operator to act on. The whole list,\ncapped at 256 (oldest last_seen evicted, forgotten 24 h after last seen)."
+          },
+          {
+            "name": "volume_storage",
+            "number": 13,
+            "type": "VolumeStorage",
+            "label": "",
+            "description": "(v1.1, hosts with a runtime) The volume store's filesystem, so capacity books persistent\nvolumes against what can really be written (volumes are sparse). bcd refuses a volume create or\ngrowth beyond available − reserved − outstanding; capacity applies the same rule."
+          }
+        ]
+      },
+      {
+        "name": "VolumeStorage",
+        "description": "",
+        "fields": [
+          {
+            "name": "total_bytes",
+            "number": 1,
+            "type": "uint64",
+            "label": "",
+            "description": "The data directory's filesystem (statfs)."
+          },
+          {
+            "name": "available_bytes",
+            "number": 2,
+            "type": "uint64",
+            "label": "",
+            "description": "statfs Bavail."
+          },
+          {
+            "name": "reserved_bytes",
+            "number": 3,
+            "type": "uint64",
+            "label": "",
+            "description": "Kept from volumes: overlays, journal, images (5% of total, at least 2 GiB)."
+          },
+          {
+            "name": "committed_bytes",
+            "number": 4,
+            "type": "uint64",
+            "label": "",
+            "description": "The sum of every volume's size."
+          },
+          {
+            "name": "outstanding_bytes",
+            "number": 5,
+            "type": "uint64",
+            "label": "",
+            "description": "The sum of every volume's unwritten (sparse) space: promised but not yet taken."
           }
         ]
       },
