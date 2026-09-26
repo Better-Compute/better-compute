@@ -2,7 +2,7 @@
 
 import { RiRefreshLine } from 'react-icons/ri';
 import { Button } from '@/components/base/buttons/button';
-import { useWorkspace } from '@/components/shell/workspace';
+import { useWallNow, useWorkspaceSettings } from '@/components/shell/workspace';
 import { Led, SeverityIcon } from '@/components/ui/signal';
 import { fmtRelative } from '@/lib/data/format';
 import { useCapacity, useCapacityStatus } from './data';
@@ -14,7 +14,8 @@ import { useCapacity, useCapacityStatus } from './data';
 export function SourceNotice() {
   const status = useCapacityStatus();
   const snapshot = useCapacity();
-  const { setDataSource, wallNow } = useWorkspace();
+  const { setDataSource } = useWorkspaceSettings();
+  const wallNow = useWallNow(5_000);
   if (status.mode !== 'live') return null;
   if (status.error)
     return (

@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import { useScope, useWorkspace } from '@/components/shell/workspace';
+import { useClockGetter, useNow, useScope, useWallNow, useWorkspaceSettings } from '@/components/shell/workspace';
 import { useFeedback } from '@/components/ui/feedback';
 import {
   capacityAt,
@@ -35,7 +35,7 @@ export function capacitySource(now?: number): SimCapacitySource {
 
 /** Which source the capacity views read, and for which tenant (live). */
 function useMode() {
-  const { source } = useWorkspace();
+  const { source } = useWorkspaceSettings();
   const { status } = useConnection();
   const tenantId = status?.tenantId ?? undefined;
   return { live: source === 'live' && Boolean(tenantId), tenantId: tenantId ?? '' };
@@ -70,12 +70,14 @@ const LIVE_REFRESH = 15_000;
 
 /** The capacity snapshot: simulated at the workspace clock, or the latest live answer. */
 export function useCapacity(): CapacitySnapshot {
-  const { now, wallNow } = useWorkspace();
+  // Bucketed clocks: a capacity view re-renders when its 15 s bucket turns, not on every 2 s tick.
+  const at = useNow(BUCKET);
+  const wallNow = useWallNow(BUCKET);
   const { live, tenantId } = useMode();
   const rev = useRevision();
   useLiveStore();
-  const at = Math.floor(now / BUCKET) * BUCKET;
   const simulated = useMemo(() => (live ? undefined : capacityAt(at)), [at, rev, live]);
+  const empty = useMemo(() => emptySnapshot(wallNow, tenantId), [wallNow, tenantId]);
   useEffect(() => {
     if (!live) return;
     void loadLive(tenantId);
@@ -83,7 +85,7 @@ export function useCapacity(): CapacitySnapshot {
     return () => window.clearInterval(timer);
   }, [live, tenantId]);
   if (!live) return simulated!;
-  return liveState().snapshot ?? emptySnapshot(wallNow, tenantId);
+  return liveState().snapshot ?? empty;
 }
 
 /** Pool rows in the workspace's site scope. */
@@ -154,10 +156,11 @@ export function useCapacityTotals(): CapacityTotals {
 
 /** A window around now, aligned to the hour so ticking doesn't reshuffle columns. */
 export function useHourWindow(backHours: number, aheadHours: number) {
-  const { now, wallNow } = useWorkspace();
+  const now = useNow(HOUR);
+  const wallNow = useWallNow(HOUR);
   const { live } = useMode();
   // Live data is always "now": time travel replays only the simulation.
-  const hour = Math.floor((live ? wallNow : now) / HOUR) * HOUR;
+  const hour = live ? wallNow : now;
   return useMemo(() => ({ from: hour - backHours * HOUR, to: hour + aheadHours * HOUR, hour }), [hour, backHours, aheadHours]);
 }
 
@@ -169,7 +172,8 @@ export type ActionState = { busy: boolean; error?: string; done?: string };
  * Nothing mutates while the workspace clock is in the past (time travel): the past is read-only.
  */
 export function useCapacityActions() {
-  const { now, live: clockLive, setLive } = useWorkspace();
+  const { live: clockLive, setLive } = useWorkspaceSettings();
+  const clock = useClockGetter();
   const mode = useMode();
   // Live data ignores time travel, so it can always be changed; the simulation's past is read-only.
   const live = clockLive || mode.live;
@@ -185,7 +189,7 @@ export function useCapacityActions() {
       }
       setState({ busy: true });
       try {
-        const result = await action(mode.live ? liveSource(mode.tenantId) : capacitySource(now));
+        const result = await action(mode.live ? liveSource(mode.tenantId) : capacitySource(clock().now));
         if (mode.live) await loadLive(mode.tenantId);
         bump();
         setState({ busy: false, done: label });
@@ -198,7 +202,7 @@ export function useCapacityActions() {
         return undefined;
       }
     },
-    [now, live, setLive, toast, mode.live, mode.tenantId],
+    [clock, live, setLive, toast, mode.live, mode.tenantId],
   );
   const confirmed = useCallback(
     async (options: Parameters<typeof confirmWithReason>[0]) => (live ? (await confirmWithReason({ ...options, reason: { placeholder: 'Why (kept in the audit log)' } })) !== null : true),

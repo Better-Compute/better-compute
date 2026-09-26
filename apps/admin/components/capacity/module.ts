@@ -17,7 +17,8 @@ import {
   RiTimerLine,
 } from 'react-icons/ri';
 import type { AdminModule, CommandDef, SearchResult, WidgetDef, WidgetSetting } from '@/lib/modules';
-import { capacityAt, capacityInsights, reservationGpus } from '@/lib/data/capacity';
+import { capacityAt, capacityInsights, insightsFrom, reservationGpus } from '@/lib/data/capacity';
+import { liveState, liveTimeline } from './live';
 import { pools, tenants } from '@/lib/data/topology';
 import { PoolPeek, ReservationPeek, TenantPeek } from './peeks';
 import { FreeGpusStatus, InsightsStatus, WaitingStatus } from './status';
@@ -149,7 +150,14 @@ function search(query: string, context: { now: number; siteId?: string }): Searc
 
 export const capacityModule: AdminModule = {
   search,
-  attention: (now, scope) => capacityInsights(now, scope),
+  // Live: the latest live snapshot (none yet → nothing); timelines come from the live cache as they load.
+  attention: (now, scope, context) => {
+    if (context?.source !== 'live') return capacityInsights(now, scope);
+    const state = liveState();
+    if (!state.snapshot) return [];
+    const tenantId = state.tenantId ?? state.snapshot.tenantId;
+    return insightsFrom(state.snapshot, (poolId, range) => liveTimeline(tenantId, poolId, range.from, range.to, range.stepMinutes ?? 60), scope);
+  },
   status: [FreeGpusStatus, WaitingStatus, InsightsStatus],
   peeks: {
     pool: { title: (id) => pools.find((pool) => pool.id === id)?.name ?? id, href: (id) => `/pools/${id}`, icon: RiServerLine, component: PoolPeek },

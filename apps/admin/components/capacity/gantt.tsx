@@ -1,6 +1,6 @@
 'use client';
 
-import { memo, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useWidth } from '@/components/ui/charts';
 import { Led } from '@/components/ui/signal';
 import { fmtDuration, fmtNum, fmtStamp } from '@/lib/data/format';
@@ -65,8 +65,8 @@ interface Bar {
 export const ReservationGantt = memo(function ReservationGantt({
   reservations,
   nodes,
-  from,
-  to,
+  from: fromProp,
+  to: toProp,
   now,
   selectedId,
   onSelect,
@@ -88,7 +88,52 @@ export const ReservationGantt = memo(function ReservationGantt({
   const [ref, width] = useWidth<HTMLDivElement>(800);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<{ bar: Bar; x: number; y: number } | null>(null);
+  // Local zoom/pan over the window the page chose; a new window from the page resets it.
+  const [view, setView] = useState<{ from: number; to: number } | null>(null);
+  useEffect(() => setView(null), [fromProp, toProp]);
+  const from = view?.from ?? fromProp;
+  const to = view?.to ?? toProp;
   const plotW = Math.max(40, width - LABEL_W);
+  const viewRef = useRef({ from, to, plotW });
+  viewRef.current = { from, to, plotW };
+
+  /** Zoom by `factor` around time `anchor` (1 h to 60 d spans). */
+  const zoom = useCallback((factor: number, anchor?: number) => {
+    const { from: f, to: t } = viewRef.current;
+    const span = t - f;
+    const next = Math.min(60 * 86_400_000, Math.max(3_600_000, span * factor));
+    const at = anchor ?? f + span / 2;
+    const nextFrom = at - ((at - f) / span) * next;
+    setView({ from: nextFrom, to: nextFrom + next });
+  }, []);
+  const pan = useCallback((ms: number) => {
+    const { from: f, to: t } = viewRef.current;
+    setView({ from: f + ms, to: t + ms });
+  }, []);
+
+  // Ctrl/⌘ + wheel zooms around the cursor; Shift + wheel (or a horizontal wheel) pans. Native listener: React's
+  // wheel handlers are passive and can't stop the page from zooming or scrolling.
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const onWheel = (event: WheelEvent) => {
+      const { from: f, to: t, plotW: w } = viewRef.current;
+      const box = element.getBoundingClientRect();
+      const x = event.clientX - box.left - LABEL_W;
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        zoom(Math.exp(event.deltaY * 0.0025), f + (Math.max(0, Math.min(w, x)) / w) * (t - f));
+      } else if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+        event.preventDefault();
+        pan(((event.shiftKey ? event.deltaY : event.deltaX) / w) * (t - f));
+      }
+    };
+    element.addEventListener('wheel', onWheel, { passive: false });
+    return () => element.removeEventListener('wheel', onWheel);
+  }, [zoom, pan]);
+
+  // Drag on empty space pans.
+  const drag = useRef<{ x: number; from: number; to: number } | null>(null);
   const xOf = (t: number) => LABEL_W + ((Math.min(Math.max(t, from), to) - from) / (to - from)) * plotW;
   const byNode = Boolean(nodes && nodes.length && reservations.some((reservation) => reservation.atoms?.length));
   const gpuPx = gpusPerNode > 4 ? 3 : 5;
@@ -130,8 +175,64 @@ export const ReservationGantt = memo(function ReservationGantt({
   const focus = hover?.bar.reservation.id ?? selectedId;
   const nowX = xOf(now);
 
+  // Keyboard: bars are focusable; ←/→ move along the row by time, ↑/↓ to the nearest bar in the next row,
+  // Enter/Space open. Each bar's DOM node is kept by its index.
+  const barNodes = useRef(new Map<number, SVGRectElement>());
+  const byRow = useMemo(() => {
+    const map = new Map<number, number[]>();
+    bars.forEach((bar, index) => map.set(bar.row, [...(map.get(bar.row) ?? []), index]));
+    for (const list of map.values()) list.sort((a, b) => bars[a]!.x0 - bars[b]!.x0);
+    return map;
+  }, [bars]);
+  const rowOrder = useMemo(() => [...byRow.keys()].sort((a, b) => a - b), [byRow]);
+  const moveFocus = (index: number, key: string) => {
+    const bar = bars[index]!;
+    let target: number | undefined;
+    if (key === 'ArrowRight' || key === 'ArrowLeft') {
+      const list = byRow.get(bar.row)!;
+      const at = list.indexOf(index);
+      target = list[at + (key === 'ArrowRight' ? 1 : -1)];
+    } else {
+      const at = rowOrder.indexOf(bar.row);
+      const row = rowOrder[at + (key === 'ArrowDown' ? 1 : -1)];
+      if (row !== undefined) {
+        const center = (bar.x0 + bar.x1) / 2;
+        target = byRow.get(row)!.reduce((best, candidate) => (Math.abs((bars[candidate]!.x0 + bars[candidate]!.x1) / 2 - center) < Math.abs((bars[best]!.x0 + bars[best]!.x1) / 2 - center) ? candidate : best));
+      }
+    }
+    if (target !== undefined) barNodes.current.get(target)?.focus();
+  };
+  const showFor = (bar: Bar, element: Element) => {
+    const box = ref.current!.getBoundingClientRect();
+    const rect = element.getBoundingClientRect();
+    setHover({ bar, x: rect.left + rect.width / 2 - box.left, y: rect.bottom - box.top });
+  };
+  const zoomed = view !== null;
+  // Roving tabindex: one bar is in the tab order (the last focused, else the selected, else the first).
+  const [active, setActive] = useState<string | undefined>();
+  const tabbable = useMemo(() => {
+    const byKey = (id?: string) => (id ? bars.findIndex((bar) => bar.reservation.id === id) : -1);
+    const found = byKey(active);
+    if (found >= 0) return found;
+    const selected = byKey(selectedId);
+    return selected >= 0 ? selected : 0;
+  }, [bars, active, selectedId]);
+
   return (
     <div ref={ref} className="relative w-full select-none" onPointerLeave={() => setHover(null)}>
+      <div className="absolute top-0 right-0 z-10 flex items-center gap-1 bg-surface-raised/90 pl-1">
+        <button type="button" aria-label="Zoom out" onClick={() => zoom(1.5)} className="grid size-6 place-items-center font-mono text-[13px] text-text-secondary hover:bg-background-secondary-default hover:text-text-primary">
+          −
+        </button>
+        <button type="button" aria-label="Zoom in" onClick={() => zoom(1 / 1.5)} className="grid size-6 place-items-center font-mono text-[13px] text-text-secondary hover:bg-background-secondary-default hover:text-text-primary">
+          +
+        </button>
+        {zoomed && (
+          <button type="button" onClick={() => setView(null)} className="h-6 px-1.5 font-mono text-[10px] text-signal hover:underline">
+            reset
+          </button>
+        )}
+      </div>
       <svg width={width} height={AXIS_H} className="block" aria-hidden>
         {ticks.map((tick) => (
           <g key={tick.t}>
@@ -151,9 +252,23 @@ export const ReservationGantt = memo(function ReservationGantt({
         <svg
           width={width}
           height={Math.max(bodyH, 24)}
-          className="block"
-          role="img"
-          aria-label={`${bars.length} bookings between ${fmtStamp(from)} and ${fmtStamp(to)} UTC`}
+          className={cx('block', drag.current ? 'cursor-grabbing' : 'cursor-grab')}
+          role="group"
+          aria-label={`${bars.length} bookings between ${fmtStamp(from)} and ${fmtStamp(to)} UTC. Arrow keys move between bookings; Enter opens one.`}
+          onPointerDown={(event) => {
+            if (event.button !== 0 || (event.target as Element).tagName === 'rect' && (event.target as Element).getAttribute('data-bar')) return;
+            drag.current = { x: event.clientX, from, to };
+            event.currentTarget.setPointerCapture(event.pointerId);
+          }}
+          onPointerMove={(event) => {
+            if (!drag.current) return;
+            const span = drag.current.to - drag.current.from;
+            const shift = -((event.clientX - drag.current.x) / plotW) * span;
+            setView({ from: drag.current.from + shift, to: drag.current.to + shift });
+          }}
+          onPointerUp={() => {
+            drag.current = null;
+          }}
         >
           {rows.map((row, index) => (
             <g key={row.id}>
@@ -174,6 +289,14 @@ export const ReservationGantt = memo(function ReservationGantt({
             return (
               <rect
                 key={`${bar.reservation.id}:${bar.row}:${index}`}
+                ref={(node) => {
+                  if (node) barNodes.current.set(index, node);
+                  else barNodes.current.delete(index);
+                }}
+                data-bar="1"
+                tabIndex={index === tabbable ? 0 : -1}
+                role="button"
+                aria-label={`${bar.reservation.id}, ${stateStyle[bar.reservation.state].label}, ${tenantName(bar.reservation.tenantId)}, ${reservationGpus(bar.reservation)} GPUs from ${fmtStamp(bar.reservation.during!.start)} UTC`}
                 x={bar.x0}
                 y={bar.y0}
                 width={w}
@@ -183,10 +306,24 @@ export const ReservationGantt = memo(function ReservationGantt({
                 stroke={focused ? 'var(--color-text-primary)' : style.stroke ?? 'none'}
                 strokeWidth={focused ? 1.5 : 1}
                 strokeDasharray={focused ? undefined : style.dash}
-                className={onSelect ? 'cursor-pointer' : undefined}
+                className={cx('outline-none focus-visible:stroke-[var(--color-border-focus-ring)]', onSelect ? 'cursor-pointer' : undefined)}
                 onPointerEnter={(event) => {
                   const box = ref.current!.getBoundingClientRect();
                   setHover({ bar, x: event.clientX - box.left, y: event.clientY - box.top });
+                }}
+                onFocus={(event) => {
+                  setActive(bar.reservation.id);
+                  showFor(bar, event.currentTarget);
+                }}
+                onBlur={() => setHover(null)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    onSelect?.(bar.reservation);
+                  } else if (event.key.startsWith('Arrow')) {
+                    event.preventDefault();
+                    moveFocus(index, event.key);
+                  }
                 }}
                 onClick={() => onSelect?.(bar.reservation)}
               />
