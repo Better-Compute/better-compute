@@ -1988,6 +1988,8 @@ export class FakeDaemon {
       ...proc.lastStatus,
       ...(this.pressure ? { pressure: this.pressure } : {}),
       ...(this.discovered ? { discovered: this.discovered } : {}),
+      // A VPS host with a volume store reports it (bcd: its data directory's filesystem).
+      ...(this.hypervisor?.volumeStorage() ? { volumeStorage: this.hypervisor.volumeStorage() } : {}),
       // A bundle applied from Welcome.trust after Hello is acknowledged here, without a reconnect.
       ...(this.intentVersion !== undefined && !this.options.profile?.withoutHello?.includes('trustVersion')
         ? { trustVersion: this.intentVersion, ...this.heldApproverSet() }

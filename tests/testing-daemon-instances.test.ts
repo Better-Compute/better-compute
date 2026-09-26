@@ -262,15 +262,84 @@ describe('FakeHypervisor: paused instances, restores and snapshots (v0.5 sandbox
     expect(() => hypervisor.snapshot('inst_none')).toThrow(/no instance/);
 
     const digest = Uint8Array.from(Buffer.from(first.sha256, 'hex'));
-    const restoreFrom = { ref: 'img_snap', url: 'https://objects.example/snap', sha256: digest, format: 'raw' };
+    const restoreFrom = {
+      ref: 'img_snap',
+      url: 'https://objects.example/snap',
+      sha256: digest,
+      format: 'raw',
+    };
     hypervisor.converge(section(spec('inst_s'), spec('inst_r', { restoreFrom, nics: [] })));
     expect(hypervisor.domains.get('inst_r')).toMatchObject({
       state: 'running',
       restoredFrom: first.sha256,
     });
     const unverified = { ...restoreFrom, sha256: new Uint8Array(0) };
-    expect(hypervisor.converge(section(spec('inst_u', { restoreFrom: unverified }))).message).toMatch(
-      /no sha256/,
+    expect(
+      hypervisor.converge(section(spec('inst_u', { restoreFrom: unverified }))).message,
+    ).toMatch(/no sha256/);
+  });
+});
+
+describe('FakeHypervisor host volumes (v1.1)', () => {
+  const GiB = 1n << 30n;
+  const volume = (volumeId: string, sizeGiB: bigint) => ({
+    volumeId,
+    sizeBytes: sizeGiB * GiB,
+    serial: `bcv-${volumeId}`,
+  });
+  const section = (
+    instances: MessageInitShape<typeof InstanceSpecSchema>[],
+    volumes: ReturnType<typeof volume>[],
+  ) => create(InstancesSectionSchema, { instances, volumes });
+
+  it('keeps volumes across instances and power loss, one writer at a time, stops before starts', () => {
+    const hypervisor = new FakeHypervisor({
+      runtimes: ['libvirt-kvm'],
+      volumeStore: { totalBytes: 100n * GiB, reservedBytes: 10n * GiB },
+    });
+    const rw = (id: string, desiredState = InstanceDesiredState.RUNNING) =>
+      spec(id, { desiredState, volumes: [{ volumeId: 'v1', readOnly: false }] });
+    const ro = (id: string) => spec(id, { volumes: [{ volumeId: 'v1', readOnly: true }] });
+    hypervisor.converge(section([rw('a')], [volume('v1', 20n)]));
+    expect(hypervisor.openBy('v1')).toEqual([{ domainId: 'a', readOnly: false }]);
+    hypervisor.writeVolume('a', 'v1', 'notes-1');
+    // A second writer, or a reader beside the writer, fails to start.
+    const second = hypervisor.converge(section([rw('a'), rw('b'), ro('c')], [volume('v1', 20n)]));
+    expect(second.state).toBe(SectionState.FAILED);
+    expect(hypervisor.domains.get('b')!.state).toBe('error');
+    expect(hypervisor.domains.get('c')!.state).toBe('error');
+    // The handoff in one pass: a stops first, then b opens it (whatever the spec order).
+    hypervisor.converge(
+      section([rw('b'), rw('a', InstanceDesiredState.STOPPED)], [volume('v1', 20n)]),
     );
+    expect(hypervisor.openBy('v1')).toEqual([{ domainId: 'b', readOnly: false }]);
+    expect(hypervisor.volumeContent('v1')).toBe('notes-1');
+    // Power loss closes it; the data stays. Growth takes effect, and the store reports what it promised.
+    hypervisor.powerLoss();
+    expect(hypervisor.openBy('v1')).toEqual([]);
+    hypervisor.converge(section([rw('b')], [volume('v1', 30n)]));
+    expect(hypervisor.volumes.get('v1')).toMatchObject({
+      sizeBytes: 30n * GiB,
+      content: 'notes-1',
+    });
+    expect(hypervisor.volumeStorage()).toMatchObject({
+      committedBytes: 30n * GiB,
+      outstandingBytes: 30n * GiB - (1n << 20n),
+    });
+    // No room: bcd refuses the create, and the instance naming it fails.
+    const full = hypervisor.converge(
+      section(
+        [rw('b'), spec('d', { volumes: [{ volumeId: 'v2', readOnly: false }] })],
+        [volume('v1', 30n), volume('v2', 80n)],
+      ),
+    );
+    expect(full.state).toBe(SectionState.FAILED);
+    expect(hypervisor.volumes.has('v2')).toBe(false);
+    expect(hypervisor.domains.get('d')!.message).toMatch(/no room/);
+    // Unlisted: it goes only once nothing has it open.
+    hypervisor.converge(section([rw('b')], []));
+    expect(hypervisor.volumes.has('v1')).toBe(true);
+    hypervisor.converge(section([], []));
+    expect(hypervisor.volumes.size).toBe(0);
   });
 });

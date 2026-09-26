@@ -66,7 +66,26 @@ export interface FakeDomain {
    * (the pool subnet and the host) or `none` (the host only). bcd enforces it on the taps.
    */
   networkPolicy: 'egress' | 'private' | 'none';
+  /** (v1.1) The host volumes it attaches (`InstanceSpec.volumes`), open while it runs or is paused. */
+  volumes: { volumeId: string; readOnly: boolean }[];
 }
+
+/**
+ * (v1.1, agent memory) A persistent volume the host keeps (`InstancesSection.volumes`): a sparse raw file
+ * under the data directory that outlives the instances attaching it.
+ */
+export interface FakeVolume {
+  readonly id: string;
+  sizeBytes: bigint;
+  serial: string;
+  /** What guests wrote so far (a sparse file takes only this much of the filesystem). */
+  writtenBytes: bigint;
+  /** A stand-in for the data on it: what `writeVolume` last wrote, kept across instances and power loss. */
+  content?: string;
+}
+
+/** Where a host volume's file lives. */
+export const volumePath = (volumeId: string): string => `/var/lib/bcd/volumes/${volumeId}.raw`;
 
 const NETWORK_POLICY: Partial<Record<InstanceNetworkPolicy, FakeDomain['networkPolicy']>> = {
   [InstanceNetworkPolicy.PRIVATE]: 'private',
@@ -92,6 +111,20 @@ export interface FakeHypervisorOptions {
    * between hosts so a snapshot taken on one restores on another (default: this host's own).
    */
   snapshotStore?: Map<string, Uint8Array>;
+  /**
+   * (v1.1) The filesystem volumes live on, for `StatusReport.volume_storage` (`volumeStorage()`); without it
+   * the host reports none. `reservedBytes` defaults to bcd's: 5% of the total, at least 2 GiB.
+   */
+  volumeStore?: { totalBytes: bigint; reservedBytes?: bigint };
+}
+
+/** `StatusReport.volume_storage`, as bcd computes it for its data directory. */
+export interface FakeVolumeStorage {
+  totalBytes: bigint;
+  availableBytes: bigint;
+  reservedBytes: bigint;
+  committedBytes: bigint;
+  outstandingBytes: bigint;
 }
 
 /** What the converger asks its daemon to fetch (a SecretRequest for the instance's allocation). */
@@ -145,6 +178,9 @@ export class FakeHypervisor {
   readonly runtimes: readonly string[];
   /** (v0.5) Snapshot objects by hex sha256 (`FakeHypervisorOptions.snapshotStore`). */
   readonly snapshotStore: Map<string, Uint8Array>;
+  /** (v1.1) Host volumes by id (`InstancesSection.volumes`); their files are `volumePath(id)`. */
+  readonly volumes = new Map<string, FakeVolume>();
+  private readonly volumeStore: FakeHypervisorOptions['volumeStore'];
   private readonly capacity: NonNullable<FakeHypervisorOptions['capacity']>;
   /** Fetched user data by ref: the value, or the broker's refusal. */
   private readonly userData = new Map<string, { value: string } | { error: string }>();
@@ -161,6 +197,7 @@ export class FakeHypervisor {
     this.runtimes = [...(options.runtimes ?? ['libvirt-kvm'])];
     this.capacity = { ...options.capacity };
     this.snapshotStore = options.snapshotStore ?? new Map();
+    this.volumeStore = options.volumeStore;
   }
 
   /**
@@ -171,13 +208,36 @@ export class FakeHypervisor {
     section: InstancesSection | undefined,
     fetch?: (request: UserDataFetch) => boolean,
   ): InstancesConvergeResult {
-    const specs = section?.instances ?? [];
+    // Stops (and deletes) before starts, as bcd orders a pass: a volume handed from one instance to
+    // another is closed before it is opened again.
+    const wantsUp = (spec: InstanceSpec) =>
+      spec.desiredState === InstanceDesiredState.RUNNING || spec.desiredState === InstanceDesiredState.PAUSED;
+    const specs = [...(section?.instances ?? [])].sort((a, b) => Number(wantsUp(a)) - Number(wantsUp(b)));
     const named = new Set(specs.map((spec) => spec.instanceId));
     for (const domain of [...this.domains.values()])
       if (domain.managed && !named.has(domain.id)) this.destroy(domain.id);
     this.specErrors.clear();
     let progressing = false;
     const failures: string[] = [];
+    // (v1.1) Host volumes: created or grown when the store has room (bcd refuses otherwise, and the
+    // volume keeps its size); never shrunk.
+    const listed = new Map((section?.volumes ?? []).map((volume) => [volume.volumeId, volume]));
+    const volumeErrors = new Map<string, string>();
+    for (const wanted of listed.values()) {
+      const existing = this.volumes.get(wanted.volumeId);
+      if (!existing) {
+        if (!this.volumeRoom(wanted.sizeBytes)) {
+          volumeErrors.set(wanted.volumeId, `no room in the volume store for volume ${wanted.volumeId}`);
+          continue;
+        }
+        // Its file is volumePath(id); kept apart from `files`, which are the domains' own.
+        this.volumes.set(wanted.volumeId, { id: wanted.volumeId, sizeBytes: wanted.sizeBytes, serial: wanted.serial, writtenBytes: 0n });
+      } else if (wanted.sizeBytes > existing.sizeBytes) {
+        if (!this.volumeRoom(wanted.sizeBytes - existing.sizeBytes))
+          volumeErrors.set(wanted.volumeId, `no room in the volume store to grow volume ${wanted.volumeId}`);
+        else existing.sizeBytes = wanted.sizeBytes;
+      } else if (wanted.sizeBytes < existing.sizeBytes) volumeErrors.set(wanted.volumeId, `volume ${wanted.volumeId} cannot shrink`);
+    }
     const fail = (spec: InstanceSpec, message: string) => {
       failures.push(`${spec.instanceId}: ${message}`);
       const domain = this.domains.get(spec.instanceId);
@@ -253,6 +313,7 @@ export class FakeHypervisor {
           userData,
           boots: 0,
           networkPolicy: NETWORK_POLICY[spec.networkPolicy] ?? 'egress',
+          volumes: [],
           ...(restore ? { restoredFrom: hex(restore.sha256) } : {}),
         };
         // A memory snapshot brings its guest memory back (when the store holds the object).
@@ -291,12 +352,26 @@ export class FakeHypervisor {
             fail(spec, 'not enough free vCPU or memory on this host');
             continue;
           }
+          // Its volumes open at boot: each on this host, and one writer at a time (checked against what
+          // running and paused domains really have open, not what their specs say now).
+          const attach = spec.volumes.map((volume) => ({ volumeId: volume.volumeId, readOnly: volume.readOnly }));
+          const refusal = this.volumeRefusal(domain.id, attach, volumeErrors);
+          if (refusal) {
+            fail(spec, refusal);
+            continue;
+          }
+          domain.volumes = attach;
           domain.boots++;
         }
         domain.state = wanted === InstanceDesiredState.PAUSED ? 'paused' : 'running';
       } else domain.state = 'stopped';
       delete domain.message;
     }
+
+    // An unlisted volume is a deleted one: its file goes once no running or paused domain has it open.
+    for (const id of [...this.volumes.keys()])
+      if (!listed.has(id) && !this.openBy(id).length) this.volumes.delete(id);
+    for (const [id, message] of volumeErrors) if (!failures.some((failure) => failure.includes(id))) failures.push(message);
 
     const statuses = this.statuses();
     this.waiting = progressing;
@@ -359,7 +434,80 @@ export class FakeHypervisor {
       userData: '',
       boots: 1,
       networkPolicy: 'egress',
+      volumes: [],
     });
+  }
+
+  // ---- volumes (v1.1) ----------------------------------------------------------------------------
+
+  /** The running or paused domains that have `volumeId` open, and how. */
+  openBy(volumeId: string): { domainId: string; readOnly: boolean }[] {
+    const out: { domainId: string; readOnly: boolean }[] = [];
+    for (const domain of this.domains.values())
+      if (domain.state === 'running' || domain.state === 'paused')
+        for (const volume of domain.volumes) if (volume.volumeId === volumeId) out.push({ domainId: domain.id, readOnly: volume.readOnly });
+    return out;
+  }
+
+  /** Why `domainId` cannot open `attach` now, or undefined. */
+  private volumeRefusal(
+    domainId: string,
+    attach: readonly { volumeId: string; readOnly: boolean }[],
+    volumeErrors: ReadonlyMap<string, string>,
+  ): string | undefined {
+    for (const volume of attach) {
+      const error = volumeErrors.get(volume.volumeId);
+      if (error && !this.volumes.has(volume.volumeId)) return error;
+      if (!this.volumes.has(volume.volumeId)) return `volume ${volume.volumeId} is not on this host`;
+      const others = this.openBy(volume.volumeId).filter((open) => open.domainId !== domainId);
+      const writer = others.find((open) => !open.readOnly);
+      if (writer) return `volume ${volume.volumeId} is open read-write by ${writer.domainId}`;
+      if (!volume.readOnly && others.length) return `volume ${volume.volumeId} is open read-only by ${others[0]!.domainId}`;
+    }
+    return undefined;
+  }
+
+  /** Whether the store can promise `need` more bytes: available − reserved − outstanding, as bcd checks. */
+  private volumeRoom(need: bigint): boolean {
+    const storage = this.volumeStorage();
+    if (!storage) return true;
+    return need <= storage.availableBytes - storage.reservedBytes - storage.outstandingBytes;
+  }
+
+  /** `StatusReport.volume_storage` for the data directory, or undefined without `volumeStore`. */
+  volumeStorage(): FakeVolumeStorage | undefined {
+    if (!this.volumeStore) return undefined;
+    const totalBytes = this.volumeStore.totalBytes;
+    const floor = 2n << 30n;
+    const reservedBytes = this.volumeStore.reservedBytes ?? (totalBytes / 20n > floor ? totalBytes / 20n : floor);
+    let written = 0n;
+    let committed = 0n;
+    for (const volume of this.volumes.values()) {
+      written += volume.writtenBytes;
+      committed += volume.sizeBytes;
+    }
+    const availableBytes = totalBytes > written ? totalBytes - written : 0n;
+    return { totalBytes, availableBytes, reservedBytes, committedBytes: committed, outstandingBytes: committed - written };
+  }
+
+  /**
+   * The guest of `instanceId` writes `bytes` (default 1 MiB, at most the volume's size) to a volume it has
+   * open read-write; `content` stands in for the data and outlives the instance. Throws otherwise.
+   */
+  writeVolume(instanceId: string, volumeId: string, content: string, bytes: bigint = 1n << 20n): void {
+    const domain = this.domains.get(instanceId);
+    const volume = this.volumes.get(volumeId);
+    if (!domain || (domain.state !== 'running' && domain.state !== 'paused')) throw new Error(`instance ${instanceId} is not running here`);
+    if (!volume || !domain.volumes.some((open) => open.volumeId === volumeId && !open.readOnly))
+      throw new Error(`instance ${instanceId} has no read-write volume ${volumeId} open`);
+    volume.content = content;
+    const written = volume.writtenBytes + bytes;
+    volume.writtenBytes = written > volume.sizeBytes ? volume.sizeBytes : written;
+  }
+
+  /** What a guest reading `volumeId` would find (`writeVolume`'s last content), if the host has it. */
+  volumeContent(volumeId: string): string | undefined {
+    return this.volumes.get(volumeId)?.content;
   }
 
   /** The instance's guest fails (reported ERROR) until `clearFault`. */
@@ -420,6 +568,7 @@ export class FakeHypervisor {
     this.files.clear();
     this.taps.clear();
     this.imageCache.clear();
+    this.volumes.clear();
     this.userData.clear();
     this.fetching.clear();
   }
