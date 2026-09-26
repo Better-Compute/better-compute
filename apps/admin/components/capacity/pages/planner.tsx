@@ -124,8 +124,9 @@ export function PlannerPage() {
   const [poolId, setPoolId] = useState(search.get('pool') ?? gpuRows[0]?.id ?? '');
   const row = gpuRows.find((entry) => entry.id === poolId) ?? gpuRows[0];
   const perNodeMax = row ? (snapshot.nodes.find((node) => node.poolId === row.id)?.gpus ?? 8) : 8;
-  const [perNode, setPerNode] = useState(Math.min(8, perNodeMax));
-  const [nodes, setNodes] = useState(1);
+  // ?gpus=<per node>&nodes=<gang size> prefill the shape (from "Plan there" links).
+  const [perNode, setPerNode] = useState(Math.min(Number(search.get('gpus')) || 8, perNodeMax));
+  const [nodes, setNodes] = useState(Math.max(1, Math.min(8, Number(search.get('nodes')) || 1)));
   // ?start=<ms>&hours=<n> (from a heatmap drag or a link) prefill the window.
   const linkedHours = Number(search.get('hours')) || undefined;
   const linkedStart = Number(search.get('start')) || undefined;

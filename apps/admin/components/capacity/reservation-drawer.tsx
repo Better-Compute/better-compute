@@ -1,19 +1,21 @@
 'use client';
 
+import Link from 'next/link';
+import { useMemo } from 'react';
+import { earliestFit } from '@better-compute/console-kit';
 import { usePageCommands } from '@/components/shell/page-commands';
 import { EntityLink } from '@/components/shell/peek';
-import { useMemo } from 'react';
 import { RiAddLine, RiArrowDownSLine, RiCloseCircleLine, RiFileCopyLine, RiStopCircleLine } from 'react-icons/ri';
 import { Button } from '@/components/base/buttons/button';
 import { Drawer, Menu } from '@/components/ui/overlay';
 import { KeyValue } from '@/components/ui/panel';
 import { Mono, SeverityIcon, Tag } from '@/components/ui/signal';
 import { fmtDuration, fmtMoney, fmtNum, fmtRelative, fmtStamp } from '@/lib/data/format';
-import { HOUR, reservationGpus, type Reservation, type ReservationState } from '@/lib/data/capacity';
+import { durationMs, HOUR, reservationGpus, type Reservation, type ReservationState } from '@/lib/data/capacity';
 import { cx } from '@/utils/cx';
-import { useCapacity, useCapacityActions, useTenantName } from './data';
+import { DAY, useCapacity, useCapacityActions, useHourWindow, usePoolRows, useTenantName, useTimelines } from './data';
 import { reservationSpend, stateStyle } from './model';
-import { StateTag } from './ui';
+import { planHref, StateTag } from './ui';
 
 // One reservation, everything about it, and what an operator can do to it. Destructive actions confirm inline
 // (a second press), never in a modal on top of a modal.
@@ -62,6 +64,71 @@ function Lifecycle({ reservation, now }: { reservation: Reservation; now: number
         </li>
       )}
     </ol>
+  );
+}
+
+/**
+ * For a reservation that hasn't started: every GPU pool that could take the same shape, with its earliest window
+ * (pool-wide timeline; the placer still decides per node) and a link that opens the planner prefilled there.
+ */
+function Alternatives({ reservation }: { reservation: Reservation }) {
+  const { snapshot, rows } = usePoolRows();
+  const { hour, to } = useHourWindow(0, 7 * 24);
+  const perNode = reservation.request.devices[0]?.class === 'node' ? 8 : reservation.request.devices[0]?.count ?? 1;
+  const nodes = reservation.request.gang?.size ?? 1;
+  const gpus = reservationGpus(reservation);
+  const length = durationMs(reservation.request.duration) || DAY;
+  const candidates = useMemo(
+    () => rows.filter((row) => row.unit === 'gpu' && (snapshot.nodes.find((node) => node.poolId === row.id)?.gpus ?? 8) >= perNode),
+    [rows, snapshot.nodes, perNode],
+  );
+  const timelines = useTimelines(
+    candidates.map((row) => row.id),
+    hour,
+    to,
+  );
+  const ranked = useMemo(
+    () =>
+      candidates
+        .map((row) => {
+          const timeline = timelines.get(row.id);
+          const start = timeline ? earliestFit(timeline, gpus, length, { notBefore: hour }) : undefined;
+          return { row, start };
+        })
+        .sort((a, b) => (a.start ?? Infinity) - (b.start ?? Infinity))
+        .slice(0, 5),
+    [candidates, timelines, gpus, length, hour],
+  );
+  const current = reservation.during?.start;
+  return (
+    <section>
+      <h3 className="mb-2 font-mono text-[11px] tracking-wide text-text-tertiary uppercase">Other places it could run</h3>
+      <ul className="border border-separator-border">
+        {ranked.map(({ row, start }) => (
+          <li key={row.id} className="flex items-center gap-2 border-b border-separator-border px-3 py-1.5 last:border-0">
+            <span className="min-w-0 flex-1 truncate text-caption-1-regular">
+              {row.name} <span className="font-mono text-[10px] text-text-tertiary">{row.short} · {row.siteId}</span>
+              {row.id === reservation.poolId && <span className="ml-1 font-mono text-[10px] text-text-tertiary">(this pool)</span>}
+            </span>
+            {start === undefined ? (
+              <Tag status="off">none in 7 d</Tag>
+            ) : start <= snapshot.now + HOUR ? (
+              <Tag status="live">now</Tag>
+            ) : (
+              <Tag status={current !== undefined && start < current ? 'live' : 'ok'} led={current !== undefined && start < current}>
+                {fmtRelative(start, snapshot.now)}
+              </Tag>
+            )}
+            {start !== undefined && row.id !== reservation.poolId && (
+              <Link href={planHref(row.id, start, start + length, { gpus: perNode, nodes })} className="font-mono text-[11px] text-signal hover:underline">
+                plan there
+              </Link>
+            )}
+          </li>
+        ))}
+      </ul>
+      <p className="mt-1 font-mono text-[10px] text-text-tertiary">earliest window for {fmtNum(gpus)} GPUs × {fmtDuration(length)}; amber = sooner than it starts now</p>
+    </section>
   );
 }
 
@@ -210,6 +277,8 @@ export function ReservationDrawer({ reservation, onClose }: { reservation?: Rese
           <h3 className="mb-2 font-mono text-[11px] tracking-wide text-text-tertiary uppercase">Lifecycle</h3>
           <Lifecycle reservation={r} now={snapshot.now} />
         </section>
+
+        {(r.state === 'pending' || r.state === 'awaiting-confirmation' || r.state === 'placed') && <Alternatives reservation={r} />}
 
         {r.conditions.length > 0 && (
           <section>

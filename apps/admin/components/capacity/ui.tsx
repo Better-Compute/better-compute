@@ -91,9 +91,9 @@ export function HoverRow({ label, value }: { label: ReactNode; value: ReactNode 
   );
 }
 
-/** The planner, prefilled with a pool and a window (start in ms, whole hours). */
-export const planHref = (poolId: string, start?: number, end?: number) =>
-  `/reservations/new?pool=${encodeURIComponent(poolId)}${start !== undefined ? `&start=${start}` : ''}${start !== undefined && end !== undefined ? `&hours=${Math.max(1, Math.round((end - start) / 3_600_000))}` : ''}`;
+/** The planner, prefilled with a pool, a window (start in ms, whole hours) and optionally the shape. */
+export const planHref = (poolId: string, start?: number, end?: number, shape?: { gpus?: number; nodes?: number }) =>
+  `/reservations/new?pool=${encodeURIComponent(poolId)}${start !== undefined ? `&start=${start}` : ''}${start !== undefined && end !== undefined ? `&hours=${Math.max(1, Math.round((end - start) / 3_600_000))}` : ''}${shape?.gpus ? `&gpus=${shape.gpus}` : ''}${shape?.nodes && shape.nodes > 1 ? `&nodes=${shape.nodes}` : ''}`;
 
 export const utcDay = (t: number) => {
   const date = new Date(t);
