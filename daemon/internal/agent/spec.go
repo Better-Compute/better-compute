@@ -219,7 +219,10 @@ func (a *Agent) convergeOnce(ctx context.Context) bool {
 	}
 	a.devices.generation = generation
 	a.access.generation = generation
-	convergers := []converge.Converger{a.hostcfg, a.devices, a.access, a.instances, telemetryConverger{}, siteConverger{a}}
+	convergers := []converge.Converger{a.devices, a.access, a.instances, telemetryConverger{}, siteConverger{a}}
+	if !a.o.ExternalHost {
+		convergers = append(convergers, a.hostcfg)
+	}
 	if a.o.Update != nil {
 		convergers = append(convergers, daemonConverger{a})
 	}
@@ -251,6 +254,12 @@ func (a *Agent) convergeOnce(ctx context.Context) bool {
 			st.Message = errText(r.Err)
 		case converge.StatusUnsupported:
 			st.State = agentv1.SectionState_SECTION_STATE_UNSUPPORTED
+			if r.Section == converge.SectionHost && a.o.ExternalHost {
+				// Observed only: whatever the units ask, the host is what its inventory reports.
+				st.Reason = "HostManagedExternally"
+				st.Message = "the host's configuration is managed outside bcd ([host] units = false); no unit is applied"
+				break
+			}
 			st.Reason = "SectionUnsupported"
 			no, known := sectionField[r.Section]
 			if !known {

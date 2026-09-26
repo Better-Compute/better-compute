@@ -108,6 +108,10 @@ type Options struct {
 	HealthInterval time.Duration
 	// Update enables self-update (NodeSpec.daemon, daemon.upgrade); nil reports both unsupported.
 	Update *UpdateOptions
+	// ExternalHost: the host's configuration is managed outside bcd ([host] units = false; a
+	// Kubernetes DaemonSet beside the GPU operator). No NodeSpec.host unit is applied, and the host
+	// section reports HostManagedExternally.
+	ExternalHost bool
 	// KubernetesAllowed are the clusters the k8s-join unit may join ([kubernetes] allowed_clusters);
 	// empty allows any when bcd node applies units itself (as root), none under bcd helper.
 	KubernetesAllowed []kube.Cluster

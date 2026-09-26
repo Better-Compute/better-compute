@@ -241,6 +241,20 @@ func TestSiteBMCNetworks(t *testing.T) {
 	}
 }
 
+func TestHostSection(t *testing.T) {
+	cfg, err := Parse([]byte(required()))
+	if err != nil || cfg.ExternalHost {
+		t.Fatalf("default: host units are bcd's (%v)", err)
+	}
+	cfg, err = Parse([]byte(required() + "[host]\nunits = false\n"))
+	if err != nil || !cfg.ExternalHost {
+		t.Fatalf("units = false: %+v %v", cfg.ExternalHost, err)
+	}
+	if _, err := Parse([]byte(required() + "[host]\nunits = \"no\"\n")); err == nil {
+		t.Fatal("a string for a boolean was accepted")
+	}
+}
+
 func TestWebSocketSection(t *testing.T) {
 	cfg, err := Parse([]byte(required() + "[websocket]\nurl = \"wss://gw.example.com:8443/v1/session\"\nproxy_ca_file = \"/etc/bcd/proxy-ca.pem\"\naudience = \"gw.example.com\"\n"))
 	if err != nil || cfg.WebSocket.URL == "" || cfg.WebSocket.ProxyCAFile != "/etc/bcd/proxy-ca.pem" || cfg.WebSocket.Audience != "gw.example.com" {

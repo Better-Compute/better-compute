@@ -63,6 +63,36 @@ func TestHostSectionConverges(t *testing.T) {
 	}
 }
 
+func TestExternalHostAppliesNoUnit(t *testing.T) {
+	h := newHarness(t, func(o *Options) { o.ExternalHost = true })
+	hostFile(t, h.host.root, "/proc/sys/vm/swappiness", "60\n")
+	s, _ := h.open()
+	s.push(desired(1, &agentv1.NodeSpec{Host: &agentv1.HostSection{Units: []*agentv1.ConfigUnit{
+		{Unit: "sysctl", ConfigJson: `{"vm.swappiness":10}`},
+	}}}))
+	status := s.next(t, "status", func(f *agentv1.AgentFrame) bool { return f.GetStatus() != nil }).GetStatus()
+	var host *agentv1.SectionStatus
+	for _, st := range status.GetSections() {
+		if st.GetSection() == "host" {
+			host = st
+		}
+	}
+	if host == nil || host.GetState() != agentv1.SectionState_SECTION_STATE_UNSUPPORTED || host.GetReason() != "HostManagedExternally" {
+		t.Fatalf("host section = %v", host)
+	}
+	for _, c := range status.GetConditions() {
+		if c.GetType() == "SectionUnsupported" {
+			t.Fatalf("reported as a version gap: %v", c)
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(h.host.root, "proc/sys/vm/swappiness")); string(b) != "60\n" {
+		t.Fatalf("a unit was applied: %q", b)
+	}
+	if status.GetObservedGeneration() != 1 {
+		t.Fatal("an externally managed host holds back the generation")
+	}
+}
+
 func TestGPUBusy(t *testing.T) {
 	if !gpuBusy([]string{"GPU-aaaa"}, "GPU-aaaa") || gpuBusy([]string{"GPU-aaaa"}, "GPU-bbbb") {
 		t.Fatal("whole GPU holds")

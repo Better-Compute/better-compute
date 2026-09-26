@@ -132,6 +132,12 @@ type Config struct {
 	// Under bcd helper a k8s-join needs one: joining a cluster hands it root on the machine.
 	KubernetesAllowedClusters string
 
+	// ExternalHost is [host] units = false: the host's configuration (driver, container toolkit, MIG,
+	// hugepages, kernel parameters) is managed outside bcd, e.g. by the NVIDIA GPU operator when bcd
+	// runs as a Kubernetes DaemonSet. bcd then applies no NodeSpec.host unit and reports the section
+	// as managed elsewhere; the inventory still reports what the host has.
+	ExternalHost bool
+
 	// IMDSListen is where a VPS host serves its instances' metadata service ([imds] listen, e.g.
 	// "169.254.169.254:80" on the instances' bridge); empty disables it.
 	IMDSListen string
@@ -553,6 +559,7 @@ var fields = []field{
 	{section: "site", key: "bmc_networks", kind: kindString, set: func(c *Config, v value) { c.BMCNetworks = v.str }},
 	{section: "imds", key: "listen", kind: kindString, set: func(c *Config, v value) { c.IMDSListen = v.str }},
 	{section: "kubernetes", key: "allowed_clusters", kind: kindString, set: func(c *Config, v value) { c.KubernetesAllowedClusters = v.str }},
+	{section: "host", key: "units", kind: kindBool, set: func(c *Config, v value) { c.ExternalHost = !v.boolean }},
 	{section: "boot", key: "listen", kind: kindString, set: func(c *Config, v value) { c.Boot.Listen = v.str }},
 	{section: "boot", key: "kernel", kind: kindString, set: func(c *Config, v value) { c.Boot.Kernel = v.str }},
 	{section: "boot", key: "initrd", kind: kindString, set: func(c *Config, v value) { c.Boot.Initrd = v.str }},
