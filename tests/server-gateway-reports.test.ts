@@ -102,4 +102,28 @@ describe('gateway report handlers', () => {
     });
     expect(woken.length).toBeGreaterThan(0);
   });
+
+  it('keeps the hold’s cgroup slice (AllocationBound.cgroup_parent) in the binding, only in its own form', async () => {
+    const as = { nodeId: NODE_B, work };
+    const bind = (allocationId: string, cgroupParent: string) =>
+      db.transaction((tx) =>
+        gatewayReportHandlers.allocationBound(
+          tx,
+          as,
+          create(AllocationBoundSchema, { allocationId, cdiDevices: ['bcd.dev/gpu=GPU-a'], envFile: '/run/bcd/allocations/a.env', cgroupParent }),
+        ),
+      );
+    await db.query(
+      `UPDATE allocations SET bound_at = NULL, binding = NULL, released_at = NULL WHERE id IN ('alloc_b2', 'alloc_b3')`,
+    );
+    expect(await bind('alloc_b2', 'bcd-alloc-alloc_b2.slice')).toBe(true);
+    expect((await allocation('alloc_b2')).binding).toMatchObject({
+      cdiDevices: ['bcd.dev/gpu=GPU-a'],
+      envFile: '/run/bcd/allocations/a.env',
+      cgroupParent: 'bcd-alloc-alloc_b2.slice',
+    });
+    // Anything but the slice form (a path the node could point elsewhere) is dropped.
+    expect(await bind('alloc_b3', '../../system.slice')).toBe(true);
+    expect((await allocation('alloc_b3')).binding).not.toHaveProperty('cgroupParent');
+  });
 });

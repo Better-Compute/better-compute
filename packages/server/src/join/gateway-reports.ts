@@ -64,6 +64,8 @@ export const gatewayReportHandlers: GatewayReportHandlers = Object.freeze({
       {
         cdiDevices: report.cdiDevices,
         ...(report.envFile ? { envFile: report.envFile } : {}),
+        // The hold's cgroup slice (§3.8): capacity keeps only the bcd-alloc-<id>.slice form.
+        ...(report.cgroupParent ? { cgroupParent: report.cgroupParent } : {}),
       },
       { nodeId: context.nodeId, ...(context.attested ? { evidence: context.attested } : {}) },
     ),
