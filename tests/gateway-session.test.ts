@@ -225,6 +225,28 @@ describe('Hello', () => {
     expect(await capLabels()).toEqual([{ key: 'bc.dev/cap.tunnel.instance-dial', value: '1' }]);
   });
 
+  it('takes over a bc.dev/ label an operator set before those keys became the daemon’s (review L11)', async () => {
+    const node = await f.addNode();
+    // A row from before c1fd430: an operator's, on a key only bcd may set now (placement ignores it).
+    await f.db.query(
+      `INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, 'bc.dev/cap.instance.volumes', '0', 'operator'),
+                                                                      ($1, 'team', 'infra', 'operator')`,
+      [node],
+    );
+    await f.connect(node, { capabilities: ['instance.volumes'] });
+    const { rows } = await f.db.query<{ key: string; value: string; source: string }>(
+      `SELECT key, value, source FROM node_labels WHERE node_id = $1 ORDER BY key`,
+      [node],
+    );
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        { key: 'bc.dev/cap.instance.volumes', value: '1', source: 'system' },
+        // An operator's own key stays theirs.
+        { key: 'team', value: 'infra', source: 'operator' },
+      ]),
+    );
+  });
+
   it('tells observe.onHandshake how every handshake ended (§14 gateway_handshakes_total)', async () => {
     const outcomes: string[] = [];
     const g = await f.another({

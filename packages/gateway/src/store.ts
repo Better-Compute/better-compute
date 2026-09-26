@@ -1115,7 +1115,8 @@ export function createGatewayStore(options: GatewayStoreOptions) {
         // The drivers and capabilities the daemon advertises (§5.6 walkthrough 4: placement filters
         // on them) as system labels `bc.dev/driver.<id>=<version>` and `bc.dev/cap.<name>=1`,
         // replaced on every Hello (a dropped one goes), in one statement that writes nothing when
-        // they did not change.
+        // they did not change. The daemon's word on a `bc.dev/` key wins over an operator row left
+        // from before operators lost those keys (review L11): placement counts only system ones.
         const labels = [...driverLabels(input.drivers ?? []), ...capabilityLabels(input.capabilities)];
         await tx.query(
           `WITH wanted AS (SELECT * FROM unnest($2::text[], $3::text[]) AS w(key, value)),
@@ -1126,8 +1127,9 @@ export function createGatewayStore(options: GatewayStoreOptions) {
                AND NOT EXISTS (SELECT 1 FROM wanted w WHERE w.key = l.key))
            INSERT INTO node_labels (node_id, key, value, source)
            SELECT $1, w.key, w.value, 'system' FROM wanted w
-           ON CONFLICT (node_id, key) DO UPDATE SET value = EXCLUDED.value
-             WHERE node_labels.source = 'system' AND node_labels.value <> EXCLUDED.value`,
+           ON CONFLICT (node_id, key) DO UPDATE SET value = EXCLUDED.value, source = 'system'
+             WHERE (node_labels.source = 'system' AND node_labels.value <> EXCLUDED.value)
+                OR (node_labels.source <> 'system' AND starts_with(node_labels.key, 'bc.dev/'))`,
           [input.nodeId, labels.map((label) => label.key), labels.map((label) => label.value)],
         );
         await events.publish(tx, {
