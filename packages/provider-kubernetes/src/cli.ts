@@ -213,6 +213,20 @@ export function kubernetesManifestCommand(
         description:
           'How bcd offers the GPUs compute binds to the kubelet (default device-plugin; dra needs resource.k8s.io)',
       },
+      'container-runtime': {
+        type: 'string' as const,
+        value: 'RUNTIME',
+        choices: ['containerd', 'k3s', 'rke2', 'cri-o'],
+        description:
+          "The nodes' container runtime, whose config bcd reads (read-only) to rule out other paths to the GPUs (default containerd)",
+      },
+      'nvidia-toolkit': {
+        type: 'string' as const,
+        value: 'INSTALL',
+        choices: ['gpu-operator', 'packages'],
+        description:
+          "Where the NVIDIA container toolkit's config lives: the GPU operator's /usr/local/nvidia/toolkit/.config or the packages' /etc/nvidia-container-runtime (default gpu-operator)",
+      },
       'nvidia-runtime-class': {
         type: 'string' as const,
         value: 'NAME',
@@ -319,6 +333,18 @@ export function kubernetesManifestCommand(
           ? { gpuApi: flags['gpu-api'] }
           : {}),
         ...(gateway.serverName ? { gatewayServerName: gateway.serverName } : {}),
+        ...(text(flags['container-runtime'])
+          ? {
+              containerRuntime: flags['container-runtime'] as
+                | 'containerd'
+                | 'k3s'
+                | 'rke2'
+                | 'cri-o',
+            }
+          : {}),
+        ...(text(flags['nvidia-toolkit'])
+          ? { nvidiaToolkit: flags['nvidia-toolkit'] as 'gpu-operator' | 'packages' }
+          : {}),
         ...(text(flags['nvidia-runtime-class'])
           ? {
               nvidiaRuntimeClass:

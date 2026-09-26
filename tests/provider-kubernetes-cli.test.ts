@@ -141,6 +141,26 @@ describe('kubernetes manifest', () => {
     const bare = harness({ 'nvidia-runtime-class': 'none' });
     await bare.command.run(bare.context);
     expect(bare.out.join('\n')).not.toContain('runtimeClassName');
+    // The exposure inputs bcd reads: the GPU operator's toolkit and containerd by default, or the
+    // distribution and packages given.
+    expect(manifests).toContain('/etc/containerd/config.toml');
+    expect(manifests).toContain('/usr/local/nvidia/toolkit/.config');
+    const k3s = harness({ 'container-runtime': 'k3s', 'nvidia-toolkit': 'packages' });
+    await k3s.command.run(k3s.context);
+    const rendered = k3s.out.join('\n');
+    expect(rendered).toContain('/var/lib/rancher/k3s/agent/etc/containerd/config.toml');
+    expect(rendered).toContain('/etc/nvidia-container-runtime');
+    expect(rendered).not.toContain('/usr/local/nvidia/toolkit/.config');
+    // Never created when missing: an empty directory would pass for "no toolkit, no runtime".
+    for (const path of [
+      '/var/lib/rancher/k3s/agent/etc/containerd/config.toml',
+      '/etc/nvidia-container-runtime',
+    ])
+      expect(rendered).not.toMatch(
+        new RegExp(
+          `"path":\\s*"${path.replaceAll('.', '\\.')}",\\s*"type":\\s*"DirectoryOrCreate"`,
+        ),
+      );
   });
 
   it('reads --control-plane over https and writes --out to a new file', async () => {
