@@ -871,6 +871,63 @@ func (l *Libvirt) SetState(ctx context.Context, id, state string) error {
 }
 
 func (l *Libvirt) stop(ctx context.Context, id string) error {
+	if err := l.stopDomain(ctx, id); err != nil {
+		return err
+	}
+	l.closeVolumes(ctx, id)
+	return nil
+}
+
+// closeVolumes: under a Hypervisor a stopped domain's volumes, shared with QEMU through the node's
+// group while it ran, are closed again (0600) unless another running domain still has them open.
+// (Without one, libvirt's own relabelling gives them back.)
+func (l *Libvirt) closeVolumes(ctx context.Context, id string) {
+	if l.Hypervisor == nil || l.Volumes == nil {
+		return
+	}
+	paths := func(name string) []string {
+		raw, err := l.virsh(ctx, "dumpxml", name)
+		if err != nil {
+			return nil
+		}
+		var x domainXML
+		if xml.Unmarshal(raw, &x) != nil {
+			return nil
+		}
+		var out []string
+		for _, d := range x.Devices.Disks {
+			if filepath.Dir(d.Source.File) == filepath.Clean(l.Volumes.Dir) {
+				out = append(out, d.Source.File)
+			}
+		}
+		return out
+	}
+	mine := paths(id)
+	if len(mine) == 0 {
+		return
+	}
+	open := map[string]bool{}
+	if list, err := l.virsh(ctx, "list", "--all", "--name"); err == nil {
+		for _, name := range strings.Fields(string(list)) {
+			if name == id {
+				continue
+			}
+			if st, _ := l.virsh(ctx, "domstate", name); stateOf(string(st)) == StateStopped {
+				continue
+			}
+			for _, p := range paths(name) {
+				open[p] = true
+			}
+		}
+	}
+	for _, p := range mine {
+		if !open[p] {
+			_ = os.Chmod(p, 0o600)
+		}
+	}
+}
+
+func (l *Libvirt) stopDomain(ctx context.Context, id string) error {
 	timeout := l.ShutdownTimeout
 	if timeout <= 0 {
 		timeout = time.Minute
@@ -907,6 +964,7 @@ func (l *Libvirt) Destroy(ctx context.Context, id string) error {
 				return err
 			}
 		}
+		l.closeVolumes(ctx, id) // while its definition still names them
 		if _, err := l.virsh(ctx, "undefine", id, "--nvram", "--managed-save"); err != nil {
 			return err
 		}

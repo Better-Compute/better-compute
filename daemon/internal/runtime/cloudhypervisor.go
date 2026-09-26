@@ -107,6 +107,8 @@ type chRecord struct {
 	// to the running VMM's user (read-write ones), which stop gives back.
 	Volumes      []AttachedVolume `json:"volumes,omitempty"`
 	GivenVolumes []string         `json:"givenVolumes,omitempty"`
+	// GivenReadOnly are the read-only volumes the running VMM's user was let read (an ACL entry).
+	GivenReadOnly []string `json:"givenReadOnly,omitempty"`
 	// StartedVolumes are the volumes the running VM was started with, in disk order (vol<i>).
 	StartedVolumes []AttachedVolume `json:"startedVolumes,omitempty"`
 	// FromSnapshot: the running VM was restored from its memory snapshot, on normal pages (a saved
@@ -783,23 +785,19 @@ func (c *CloudHypervisor) start(ctx context.Context, r *chRecord, paused bool) e
 	// made the way to the volumes searchable.
 	r.StartedVolumes = append([]AttachedVolume(nil), r.Volumes...)
 	for _, v := range r.Volumes {
-		uid, gid, mode := int(r.UID), int(r.UID), os.FileMode(0o600)
 		if v.ReadOnly {
-			kvm, err := user.LookupGroup("kvm")
-			if err != nil {
-				return fmt.Errorf("volume %s is shared read-only through the kvm group: %w", v.ID, err)
+			// Readable by exactly the VMMs that have it open (an ACL entry per VMM user).
+			if err := c.shareReadOnly(v.Path, int(r.UID)); err != nil {
+				return fmt.Errorf("volume %s: %w", v.ID, err)
 			}
-			uid, mode = 0, 0o640
-			if gid, err = strconv.Atoi(kvm.Gid); err != nil {
-				return err
-			}
-		} else {
-			r.GivenVolumes = union(r.GivenVolumes, []string{v.Path})
+			r.GivenReadOnly = union(r.GivenReadOnly, []string{v.Path})
+			continue
 		}
-		if err := c.chownTo(v.Path, uid, gid); err != nil {
+		r.GivenVolumes = union(r.GivenVolumes, []string{v.Path})
+		if err := c.chownTo(v.Path, int(r.UID), int(r.UID)); err != nil {
 			return err
 		}
-		if err := os.Chmod(v.Path, mode); err != nil {
+		if err := os.Chmod(v.Path, 0o600); err != nil {
 			return err
 		}
 	}
@@ -943,16 +941,76 @@ func (c *CloudHypervisor) stop(ctx context.Context, r *chRecord) error {
 	for _, g := range union(r.GivenGroups, groups) {
 		_ = c.chown(g, 0)
 	}
-	// Its read-write volumes go back to root, closed again.
+	// Its read-write volumes go back to root, closed again; its read-only ones lose its reader.
 	for _, p := range r.GivenVolumes {
 		_ = c.chown(p, 0)
 		_ = os.Chmod(p, 0o600)
 	}
-	if len(r.GivenGroups) > 0 || len(r.GivenVolumes) > 0 {
-		r.GivenGroups, r.GivenVolumes = nil, nil
+	for _, p := range r.GivenReadOnly {
+		_ = c.unshareReadOnly(p, int(r.UID), r.ID)
+	}
+	if len(r.GivenGroups) > 0 || len(r.GivenVolumes) > 0 || len(r.GivenReadOnly) > 0 {
+		r.GivenGroups, r.GivenVolumes, r.GivenReadOnly = nil, nil, nil
 		_ = c.save(r)
 	}
 	return nil
+}
+
+// shareReadOnly lets the VMM user uid read a read-only volume: an ACL entry of its own, or, on a
+// filesystem without ACLs, group kvm (every VMM's) with the file at 0640.
+func (c *CloudHypervisor) shareReadOnly(path string, uid int) error {
+	readers, err := aclReaders(path)
+	if err == nil {
+		return setACLReaders(path, append(readers, uid))
+	}
+	if !errors.Is(err, errors.ErrUnsupported) {
+		return err
+	}
+	kvm, err := user.LookupGroup("kvm")
+	if err != nil {
+		return fmt.Errorf("no ACLs here, and no kvm group to share it through: %w", err)
+	}
+	gid, err := strconv.Atoi(kvm.Gid)
+	if err != nil {
+		return err
+	}
+	if err := c.chownTo(path, 0, gid); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o640)
+}
+
+// unshareReadOnly takes uid's read away when its VMM stops; the last reader gone, the volume is
+// root's 0600 again (under group kvm: once no other VMM of this runtime was given it).
+func (c *CloudHypervisor) unshareReadOnly(path string, uid int, id string) error {
+	readers, err := aclReaders(path)
+	if err == nil {
+		return setACLReaders(path, slices.DeleteFunc(readers, func(u int) bool { return u == uid }))
+	}
+	if !errors.Is(err, errors.ErrUnsupported) {
+		return err
+	}
+	if c.givenElsewhere(path, id) {
+		return nil
+	}
+	if err := c.chownTo(path, 0, 0); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}
+
+// givenElsewhere reports whether another instance's running VMM was given path.
+func (c *CloudHypervisor) givenElsewhere(path, id string) bool {
+	entries, _ := os.ReadDir(filepath.Join(c.Dir, "instances"))
+	for _, e := range entries {
+		if e.Name() == id {
+			continue
+		}
+		if r, err := c.record(e.Name()); err == nil && (slices.Contains(r.GivenReadOnly, path) || slices.Contains(r.GivenVolumes, path)) {
+			return true
+		}
+	}
+	return false
 }
 
 // Destroy stops a managed instance and removes its taps and directory.

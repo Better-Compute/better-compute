@@ -75,18 +75,24 @@ func TestLibvirtUnderTheHelper(t *testing.T) {
 	virt := &fakeVirt{domains: map[string]*fakeDomain{}}
 	helper := &fakeHelper{virt: virt, dir: t.TempDir()}
 	dir := t.TempDir()
-	l := &Libvirt{Dir: dir, Exec: virt.exec, HTTP: srv.Client(), Hypervisor: helper}
+	vols := &Volumes{Dir: filepath.Join(dir, "volumes"), statfs: func(string) (uint64, uint64, error) { return 100 << 30, 50 << 30, nil }}
+	if _, err := vols.Ensure(&agentv1.HostVolume{VolumeId: "vol_m", SizeBytes: 1 << 20, Serial: "bcv-m"}); err != nil {
+		t.Fatal(err)
+	}
+	l := &Libvirt{Dir: dir, Exec: virt.exec, HTTP: srv.Client(), Hypervisor: helper, Volumes: vols}
 	ctx := context.Background()
 	spec := &agentv1.InstanceSpec{
 		InstanceId: "inst_h", Runtime: "libvirt-kvm", Vcpu: 2, MemoryBytes: 2 << 30, DiskBytes: 10 << 30,
-		Image: &agentv1.ImageRef{Ref: "ubuntu", Url: srv.URL + "/u.qcow2", Sha256: sum[:], Format: "qcow2"},
-		Nics:  []*agentv1.InstanceNic{{Network: "br0", Mac: "52:54:00:00:00:21"}},
+		Image:   &agentv1.ImageRef{Ref: "ubuntu", Url: srv.URL + "/u.qcow2", Sha256: sum[:], Format: "qcow2"},
+		Nics:    []*agentv1.InstanceNic{{Network: "br0", Mac: "52:54:00:00:00:21"}},
+		Volumes: []*agentv1.InstanceVolume{{VolumeId: "vol_m", ReadOnly: true}}, // a writer bars memory snapshots
 	}
 	if err := l.Ensure(ctx, spec, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	inst := filepath.Join(dir, "instances", "inst_h")
-	for path, want := range map[string]os.FileMode{filepath.Join(inst, "disk.qcow2"): 0o660, filepath.Join(inst, "seed.iso"): 0o640} {
+	volume := filepath.Join(dir, "volumes", "vol_m.raw")
+	for path, want := range map[string]os.FileMode{filepath.Join(inst, "disk.qcow2"): 0o660, filepath.Join(inst, "seed.iso"): 0o640, volume: 0o640} {
 		if info, err := os.Stat(path); err != nil || info.Mode().Perm() != want {
 			t.Errorf("%s: %v %v, want %v", path, info.Mode(), err, want)
 		}
@@ -116,6 +122,10 @@ func TestLibvirtUnderTheHelper(t *testing.T) {
 	console.Close()
 	if err := l.SetState(ctx, "inst_h", StateStopped); err != nil {
 		t.Fatal(err)
+	}
+	// Stopped: its volume is closed to QEMU's group again.
+	if info, _ := os.Stat(volume); info.Mode().Perm() != 0o600 {
+		t.Fatalf("the volume stayed %v after the stop", info.Mode())
 	}
 	if err := l.Destroy(ctx, "inst_h"); err != nil {
 		t.Fatal(err)
