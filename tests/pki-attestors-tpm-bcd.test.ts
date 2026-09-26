@@ -20,11 +20,13 @@ const evidence = read('evidence.json');
 const answer = read('answer.json');
 const ek = bytes((JSON.parse(new TextDecoder().decode(evidence)) as { ek: string }).ek);
 
-function attestor(reasons: string[]) {
+// The sim's EK certificate chains to this manufacturer root (made with the fixture, ek-root.der).
+const ekRoot = read('ek-root.der');
+
+function attestor(reasons: string[], ekRoots: Uint8Array[] = [ekRoot]) {
   return tpmAttestor({
     challengeKey: bytes(challenge.challengeKey),
-    // tpmsim has no manufacturer certificate.
-    allowUncertifiedEk: true,
+    ekRoots,
     resolve: async () => ({ tenantId: 'org_bcd', role: 'node', poolId: 'pool_tpm' }),
     onRefusal: (r) => void reasons.push(r.reason),
   });
@@ -49,6 +51,15 @@ describe('tpm attestor × bcd (Go)', () => {
     const verdict = await attestor(reasons).verify({ attestor: 'tpm', payload: answer }, context(bytes(challenge.csrSha256)));
     expect(reasons).toEqual([]);
     expect(verdict).toMatchObject({ tenantId: 'org_bcd', poolId: 'pool_tpm', bind: sha256(ek) });
+  });
+
+  it("verifies the EK certificate bcd read from the TPM's NV: another manufacturer's root is refused", async () => {
+    expect((JSON.parse(new TextDecoder().decode(evidence)) as { ekCert?: string }).ekCert).toBeTruthy();
+    const reasons: string[] = [];
+    await expect(
+      attestor(reasons, [read('ek-cert.der')]).verify({ attestor: 'tpm', payload: evidence }, context(bytes(challenge.csrSha256))),
+    ).rejects.toThrow();
+    expect(reasons).toEqual(['ek-certificate-chain']);
   });
 
   it('refuses the same answer for another CSR, or after the challenge expired', async () => {

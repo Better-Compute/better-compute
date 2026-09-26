@@ -5,7 +5,7 @@
 // that breaks the other fails a test instead of a machine's join.
 //
 // To regenerate (after a deliberate change of either side), delete testdata/{evidence,challenge,answer}.json
-// (keep sim.json: the same TPM), then:
+// (keep sim.json, ek-cert.der and ek-root.der: the same TPM and its manufacturer certificate), then:
 //   node scripts/daemon-test.mjs ./internal/tpm/ --run TestTSContract       writes evidence.json, skips
 //   node --import ./tests/fixtures/bcx-loader.mjs scripts/daemon-tpm-fixture.mjs    writes challenge.json
 //   node scripts/daemon-test.mjs ./internal/tpm/ --run TestTSContract       writes answer.json
@@ -24,7 +24,9 @@ const challengeKey = new Uint8Array(32).fill(7);
 const now = Date.UTC(2026, 8, 26, 12);
 const csrSha256 = new Uint8Array(createHash('sha256').update('bcd tpm contract csr').digest());
 
-const verdict = await tpmAttestor({ challengeKey, allowUncertifiedEk: true }).verify(
+// The EK's certificate chains to the fixture's manufacturer root (ek-root.der), as a real TPM's does.
+const ekRoot = new Uint8Array(readFileSync(join(dir, 'ek-root.der')));
+const verdict = await tpmAttestor({ challengeKey, ekRoots: [ekRoot] }).verify(
   { attestor: 'tpm', payload: evidence },
   {
     tx: { query: async () => ({ rows: [], rowCount: 0 }) },

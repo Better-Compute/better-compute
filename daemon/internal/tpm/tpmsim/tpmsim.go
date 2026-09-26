@@ -125,6 +125,9 @@ func Load(path string) (*Sim, error) {
 	return s, nil
 }
 
+// EKPublicKey is the endorsement key's public key: what a manufacturer's EK certificate certifies.
+func (s *Sim) EKPublicKey() *rsa.PublicKey { return &s.ek.PublicKey }
+
 // Extend extends a SHA-256 PCR with data's digest.
 func (s *Sim) Extend(pcr int, data []byte) {
 	s.mu.Lock()

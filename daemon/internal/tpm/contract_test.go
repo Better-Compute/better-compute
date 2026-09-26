@@ -2,14 +2,21 @@ package tpm_test
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"math/big"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/better-compute/better-compute/daemon/internal/tpm"
 	"github.com/better-compute/better-compute/daemon/internal/tpm/tpmsim"
@@ -32,6 +39,9 @@ func TestTSContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A manufacturer's EK certificate in NV, under a root the TS side trusts (ek-root.der): the
+	// attestor verifies the chain, as for a real TPM.
+	sim.EKCert = ekCertificate(t, dir, sim)
 	a, err := tpm.NewAttestor(sim)
 	if err != nil {
 		t.Fatal(err)
@@ -93,6 +103,41 @@ func TestTSContract(t *testing.T) {
 		t.Fatalf("bcd's answer changed: regenerate the tpm fixtures (scripts/daemon-tpm-fixture.mjs)\nwas %v\nnow %v",
 			stable(mustRead(t, filepath.Join(dir, "answer.json"))), stable(answer))
 	}
+}
+
+// ekCertificate is the fixture's EK certificate for the sim's EK (ek-cert.der), issued by a
+// manufacturer root (ek-root.der); both are made once, when missing.
+func ekCertificate(t *testing.T, dir string, sim *tpmsim.Sim) []byte {
+	t.Helper()
+	certFile, rootFile := filepath.Join(dir, "ek-cert.der"), filepath.Join(dir, "ek-root.der")
+	if cert, err := os.ReadFile(certFile); err == nil {
+		return cert
+	}
+	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	from, to := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2044, 1, 1, 0, 0, 0, 0, time.UTC)
+	rootTmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "bcd tpmsim EK root"},
+		NotBefore: from, NotAfter: to, IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	root, err := x509.CreateCertificate(rand.Reader, rootTmpl, rootTmpl, &rootKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootCert, _ := x509.ParseCertificate(root)
+	ekTmpl := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "bcd tpmsim EK"},
+		NotBefore: from, NotAfter: to, KeyUsage: x509.KeyUsageKeyEncipherment}
+	cert, err := x509.CreateCertificate(rand.Reader, ekTmpl, rootCert, sim.EKPublicKey(), rootKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for file, der := range map[string][]byte{rootFile: root, certFile: cert} {
+		if err := os.WriteFile(file, der, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Logf("wrote %s and %s", rootFile, certFile)
+	return cert
 }
 
 // fixture writes got to file when it is missing; otherwise it reports whether same accepts the file.
