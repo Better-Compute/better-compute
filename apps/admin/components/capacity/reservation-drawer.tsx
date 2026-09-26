@@ -17,7 +17,7 @@ import { DAY, useCapacity, useCapacityActions, useHourWindow, usePoolRows, useTe
 import { diagnoseWait } from './diagnose';
 import { ReservationGantt } from './gantt';
 import { reservationSpend, stateStyle } from './model';
-import { planHref, StateTag } from './ui';
+import { planHref, ReadOnlyHint, StateTag } from './ui';
 
 // One reservation, everything about it, and what an operator can do to it. Destructive actions confirm inline
 // (a second press), never in a modal on top of a modal.
@@ -355,7 +355,7 @@ export function ReservationDrawer({ reservation, onClose }: { reservation?: Rese
           >
             Copy CLI
           </Button>
-          {!actions.live && (live || cancellable) && <Tag status="warn">viewing the past: read-only</Tag>}
+          {(live || cancellable) && <ReadOnlyHint reason={actions.readOnly} />}
         </div>
         {actions.state.error && (
           <p className="flex items-center gap-2 border border-red-500/40 bg-red-500/10 px-3 py-2 text-caption-1-regular text-text-error-primary">

@@ -19,7 +19,7 @@ import type { CapacityTimeline, PlacementRequest } from '@/lib/data/capacity';
 import { cx } from '@/utils/cx';
 import { DAY, HOUR, useCapacityActions, useHourWindow, usePoolRows, usePreview, usePreviews, useTimelines } from '../data';
 import { SourceNotice } from '../source-notice';
-import { HoverCard, HoverRow, Segmented, timeTicks } from '../ui';
+import { HoverCard, HoverRow, ReadOnlyHint, Segmented, timeTicks } from '../ui';
 
 const DURATIONS = [
   { id: '1h', ms: HOUR },
@@ -427,6 +427,7 @@ export function PlannerPage() {
               <Button leadingIcon={RiRocketLine} disabled={!request || actions.state.busy || !quota.fits || verdict === 'checking'} onClick={() => void book()}>
                 {verdict === 'fits' ? 'Book' : 'Book anyway (queues as pending)'}
               </Button>
+              {!actions.state.error && <ReadOnlyHint reason={actions.readOnly} />}
               {actions.state.error && (
                 <span className="flex items-center gap-1.5 text-caption-1-regular text-text-error-primary">
                   <SeverityIcon severity="critical" /> {actions.state.error}

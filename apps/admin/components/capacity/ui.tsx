@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { SegmentedControl, SegmentedControlItem } from '@/components/base/segmented-control/segmented-control';
 import { Tag } from '@/components/ui/signal';
@@ -9,6 +10,18 @@ import { cx } from '@/utils/cx';
 import { stateStyle } from './model';
 
 // Small pieces the capacity pages share. Anything generally useful moves to components/ui via the shell's owner.
+
+/** Next to mutation controls: why they won't act right now (useCapacityActions().readOnly). */
+export function ReadOnlyHint({ reason }: { reason: 'past' | 'signed-out' | undefined }) {
+  if (reason === 'past') return <Tag status="warn">viewing the past: read-only</Tag>;
+  if (reason === 'signed-out')
+    return (
+      <Link href="/signin" className="font-mono text-[11px] text-text-secondary hover:text-text-primary hover:underline">
+        read-only · <span className="text-signal">sign in</span> to change
+      </Link>
+    );
+  return null;
+}
 
 /** A single-choice segmented toggle over string ids. */
 export function Segmented<T extends string>({

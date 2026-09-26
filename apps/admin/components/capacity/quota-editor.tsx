@@ -8,6 +8,7 @@ import { Drawer } from '@/components/ui/overlay';
 import { SeverityIcon } from '@/components/ui/signal';
 import { fmtNum, fmtPct } from '@/lib/data/format';
 import { useCapacity, useCapacityActions, useTenantName } from './data';
+import { ReadOnlyHint } from './ui';
 
 export interface QuotaTarget {
   tenantId: string;
@@ -150,7 +151,7 @@ export function QuotaEditor({ target, onClose }: { target?: QuotaTarget; onClose
           >
             Save maximum
           </Button>
-          <span className="font-mono text-[11px] text-text-tertiary">quotas.set · takes effect on the next admission</span>
+          {actions.readOnly ? <ReadOnlyHint reason={actions.readOnly} /> : <span className="font-mono text-[11px] text-text-tertiary">quotas.set · takes effect on the next admission</span>}
         </div>
       </div>
     </Drawer>

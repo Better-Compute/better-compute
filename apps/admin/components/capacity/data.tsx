@@ -1,5 +1,6 @@
 'use client';
 
+import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { useClockGetter, useNow, useScope, useWallNow, useWorkspaceSettings } from '@/components/shell/workspace';
 import { useFeedback } from '@/components/ui/feedback';
@@ -39,7 +40,8 @@ function useMode() {
   const { source } = useWorkspaceSettings();
   const { status } = useConnection();
   const tenantId = status?.tenantId ?? undefined;
-  return { live: source === 'live' && Boolean(tenantId), tenantId: tenantId ?? '' };
+  // The live proxy forwards mutations only with a signed-in operator's credential; signed out it only reads.
+  return { live: source === 'live' && Boolean(tenantId), tenantId: tenantId ?? '', writable: status?.writable === true };
 }
 
 const useLiveStore = () => useSyncExternalStore(liveSubscribe, liveVersion, liveVersion);
@@ -180,14 +182,25 @@ export function useCapacityActions() {
   const mode = useMode();
   // Live data ignores time travel, so it can always be changed; the simulation's past is read-only.
   const live = clockLive || mode.live;
+  const writable = !mode.live || mode.writable;
+  const router = useRouter();
   const { toast, confirmWithReason } = useFeedback();
   const [state, setState] = useState<ActionState>({ busy: false });
+  const signInToast = useCallback(() => {
+    const error = 'Signed out, the live connection only reads.';
+    setState({ busy: false, error });
+    toast({ title: 'Sign in to make changes', detail: error, status: 'warn', action: { label: 'Sign in', onAction: () => router.push('/signin') } });
+  }, [router, toast]);
   const run = useCallback(
     async <T,>(label: string, action: (source: CapacitySource) => Promise<T>, quiet = false): Promise<T | undefined> => {
       if (!live) {
         const error = 'Viewing the past: return to live to change anything.';
         setState({ busy: false, error });
         toast({ title: 'Read-only while time-travelling', detail: error, status: 'warn', action: { label: 'Go live', onAction: () => setLive(true) } });
+        return undefined;
+      }
+      if (!writable) {
+        signInToast();
         return undefined;
       }
       setState({ busy: true });
@@ -202,21 +215,32 @@ export function useCapacityActions() {
         // Part of a batch may have gone through before the failure: show what changed either way.
         if (mode.live) void refreshLive(mode.tenantId);
         bump();
+        // The proxy refuses mutations without an operator session (the session may have expired meanwhile).
+        if ((error as { code?: string } | null)?.code === 'READ_ONLY') {
+          signInToast();
+          return undefined;
+        }
         const message = error instanceof Error ? error.message : String(error);
         setState({ busy: false, error: message });
         toast({ title: 'That did not work', detail: message, status: 'crit' });
         return undefined;
       }
     },
-    [clock, live, setLive, toast, mode.live, mode.tenantId],
+    [clock, live, writable, setLive, signInToast, toast, mode.live, mode.tenantId],
   );
+  // Refused actions skip the dialog and go straight to run(), which says why: never ask for a reason, then refuse.
   const confirmed = useCallback(
-    async (options: Parameters<typeof confirmWithReason>[0]) => (live ? (await confirmWithReason({ ...options, reason: { placeholder: 'Why (kept in the audit log)' } })) !== null : true),
-    [confirmWithReason, live],
+    async (options: Parameters<typeof confirmWithReason>[0]) =>
+      live && writable ? (await confirmWithReason({ ...options, reason: { placeholder: 'Why (kept in the audit log)' } })) !== null : true,
+    [confirmWithReason, live, writable],
   );
   return {
     state,
     live,
+    /** False in live mode while signed out: actions refuse with a "Sign in" toast. */
+    writable,
+    /** Why nothing can change right now, for a hint next to the controls. */
+    readOnly: !live ? ('past' as const) : !writable ? ('signed-out' as const) : undefined,
     reset: () => setState({ busy: false }),
     release: async (id: string, gpus?: number) =>
       (await confirmed({

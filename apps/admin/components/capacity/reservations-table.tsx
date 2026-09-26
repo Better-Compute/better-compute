@@ -8,7 +8,7 @@ import { fmtDuration, fmtNum, fmtRelative, fmtStamp } from '@/lib/data/format';
 import { reservationGpus, type Reservation } from '@/lib/data/capacity';
 import { useCapacity, useCapacityActions, useTenantName } from './data';
 import { stateStyle } from './model';
-import { StateTag } from './ui';
+import { ReadOnlyHint, StateTag } from './ui';
 
 /** Reservations as a filterable, sortable, exportable table with bulk release/cancel. */
 export function ReservationsTable({
@@ -159,6 +159,7 @@ export function ReservationsTable({
             >
               Cancel {cancellable.length}
             </Button>
+            <ReadOnlyHint reason={actions.readOnly} />
           </div>
         );
       }}
