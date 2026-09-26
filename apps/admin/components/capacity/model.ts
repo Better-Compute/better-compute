@@ -359,6 +359,67 @@ export function dailySpend(usage: readonly UsageWindow[], prices: Readonly<Recor
   return { times: Array.from({ length: days }, (_, index) => start + index * DAY), cost, gpuHours };
 }
 
+// --- Quota right-sizing -------------------------------------------------------------------------------------
+
+export interface QuotaSuggestion {
+  tenantId: string;
+  poolId: string;
+  max: number;
+  used: number;
+  /** The most GPUs the tenant held at once in the pool over the window (hourly). */
+  peak: number;
+  suggested: number;
+  direction: 'lower' | 'raise';
+  reason: string;
+}
+
+/**
+ * GPU quota suggestions from the last `days` of bookings: lower a ceiling whose peak stayed at or under half of it
+ * (to 125% of the peak, whole nodes of 8), raise one the tenant reached (by a quarter). Pure: hourly peaks from the
+ * reservations that held devices.
+ */
+export function quotaSuggestions(snapshot: CapacitySnapshot, days = 30): QuotaSuggestion[] {
+  const hours = days * 24;
+  const from = Math.floor(snapshot.now / HOUR) * HOUR - hours * HOUR;
+  const peaks = new Map<string, Float64Array>();
+  for (const reservation of snapshot.reservations) {
+    if (!reservation.during || !holdsDevices(reservation.state)) continue;
+    const first = Math.max(0, Math.floor((reservation.during.start - from) / HOUR));
+    const last = Math.min(hours - 1, Math.ceil((Math.min(reservation.during.end, snapshot.now) - from) / HOUR) - 1);
+    if (last < first) continue;
+    const key = `${reservation.tenantId}|${reservation.poolId}`;
+    let series = peaks.get(key);
+    if (!series) peaks.set(key, (series = new Float64Array(hours)));
+    const gpus = reservationGpus(reservation);
+    for (let index = first; index <= last; index += 1) series[index]! += gpus;
+  }
+  const roundUp = (value: number) => Math.max(8, Math.ceil(value / 8) * 8);
+  const out: QuotaSuggestion[] = [];
+  for (const row of snapshot.quotas) {
+    if (row.resource !== 'gpu' || !row.tenantId || row.tenantId === snapshot.tenantId) continue;
+    const series = peaks.get(`${row.tenantId}|${row.poolId}`);
+    let peak = 0;
+    if (series) for (const value of series) if (value > peak) peak = value;
+    if (row.max >= 16 && peak <= row.max * 0.5) {
+      const suggested = roundUp(peak * 1.25);
+      if (suggested < row.max)
+        out.push({ tenantId: row.tenantId, poolId: row.poolId, max: row.max, used: row.used, peak, suggested, direction: 'lower', reason: peak === 0 ? `unused for ${days} days` : `peak ${Math.round((peak / row.max) * 100)}% of the ceiling in ${days} days` });
+    } else if (row.max > 0 && (peak >= row.max * 0.95 || row.used >= row.max)) {
+      out.push({
+        tenantId: row.tenantId,
+        poolId: row.poolId,
+        max: row.max,
+        used: row.used,
+        peak,
+        suggested: roundUp(Math.max(row.max * 1.25, peak)),
+        direction: 'raise',
+        reason: row.used >= row.max ? 'at the ceiling now' : peak >= row.max ? `hit the ceiling in the last ${days} days` : `reached ${Math.round((peak / row.max) * 100)}% in ${days} days`,
+      });
+    }
+  }
+  return out.sort((a, b) => (a.direction === b.direction ? Math.abs(b.max - b.suggested) - Math.abs(a.max - a.suggested) : a.direction === 'raise' ? -1 : 1));
+}
+
 // --- Quotas ---------------------------------------------------------------------------------------------------
 
 export interface QuotaCell {

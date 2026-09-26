@@ -3,15 +3,16 @@
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useMemo, useState } from 'react';
-import { RiScales3Line } from 'react-icons/ri';
+import { RiEqualizerLine, RiScales3Line } from 'react-icons/ri';
+import { Button } from '@/components/base/buttons/button';
 import { usePageCommands } from '@/components/shell/page-commands';
 import { EmptyState, Grid, PageHeader, Panel } from '@/components/ui/panel';
 import { Tag } from '@/components/ui/signal';
 import { fmtGiB, fmtNum, fmtPct } from '@/lib/data/format';
 import { cx } from '@/utils/cx';
-import { usePoolRows, useTenantName } from '../data';
+import { useCapacity, useCapacityActions, usePoolRows, useTenantName } from '../data';
 import { SourceNotice } from '../source-notice';
-import { quotaCells, type QuotaCell } from '../model';
+import { quotaCells, quotaSuggestions, type QuotaCell } from '../model';
 import { QuotaEditor, type QuotaTarget } from '../quota-editor';
 import { Segmented } from '../ui';
 
@@ -46,6 +47,78 @@ function CellMeter({ cell, resource, onEdit }: { cell: QuotaCell; resource: Reso
         />
       </span>
     </button>
+  );
+}
+
+/** GPU quota right-sizing from the last 30 days of bookings, each with a one-click (confirmed) apply. */
+function Suggestions({ inScope, onEdit }: { inScope: ReadonlySet<string>; onEdit(target: QuotaTarget): void }) {
+  const snapshot = useCapacity();
+  const tenantName = useTenantName();
+  const actions = useCapacityActions();
+  const list = useMemo(() => quotaSuggestions(snapshot).filter((entry) => inScope.has(entry.poolId)), [snapshot, inScope]);
+  return (
+    <Panel className="col-span-12" title="Right-sizing" icon={RiEqualizerLine} meta="GPU quotas vs the 30-day peak" flush>
+      {list.length ? (
+        <div className="overflow-x-auto">
+          <table className="w-full text-body-regular">
+            <thead>
+              <tr className="border-b border-separator-border font-mono text-[11px] tracking-wide text-text-tertiary uppercase">
+                <th className="px-3 py-2 text-left font-normal">Tenant · pool</th>
+                <th className="px-3 py-2 text-left font-normal">Peak vs ceiling</th>
+                <th className="px-3 py-2 text-right font-normal">Now</th>
+                <th className="px-3 py-2 text-right font-normal">Suggest</th>
+                <th className="px-3 py-2 text-left font-normal">Why</th>
+                <th className="px-3 py-2" />
+              </tr>
+            </thead>
+            <tbody>
+              {list.map((entry) => (
+                <tr key={`${entry.tenantId}:${entry.poolId}`} className="border-b border-separator-border last:border-0">
+                  <td className="px-3 py-1.5">
+                    <span className="text-body-medium">{tenantName(entry.tenantId)}</span>
+                    <span className="ml-2 font-mono text-[11px] text-text-tertiary">{entry.poolId}</span>
+                  </td>
+                  <td className="w-56 px-3 py-1.5">
+                    <div className="relative h-2 bg-background-secondary-default" title={`peak ${entry.peak} of ${entry.max}`}>
+                      <div className="h-full bg-text-tertiary/70" style={{ width: `${Math.min(1, entry.peak / Math.max(entry.max, entry.suggested)) * 100}%` }} />
+                      <span className="absolute top-[-2px] h-3 w-0.5 bg-text-primary" style={{ left: `${(entry.max / Math.max(entry.max, entry.suggested)) * 100}%` }} />
+                      <span className="absolute top-[-2px] h-3 w-0.5 bg-signal-fill" style={{ left: `calc(${(entry.suggested / Math.max(entry.max, entry.suggested)) * 100}% - 2px)` }} />
+                    </div>
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono text-[12px] tabular-nums">
+                    {fmtNum(entry.peak)} / {fmtNum(entry.max)}
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono text-[12px] tabular-nums">
+                    <span className={entry.direction === 'raise' ? 'text-signal' : 'text-text-primary'}>
+                      {entry.direction === 'raise' ? '↑' : '↓'} {fmtNum(entry.suggested)}
+                    </span>
+                  </td>
+                  <td className="px-3 py-1.5 text-caption-1-regular text-text-secondary">{entry.reason}</td>
+                  <td className="px-3 py-1.5 text-right whitespace-nowrap">
+                    <button type="button" className="mr-3 font-mono text-[11px] text-text-tertiary hover:text-text-primary" onClick={() => onEdit({ tenantId: entry.tenantId, poolId: entry.poolId, resource: 'gpu' })}>
+                      edit
+                    </button>
+                    <Button
+                      size="xs"
+                      variant="secondary"
+                      disabled={actions.state.busy || !actions.live}
+                      onClick={() => void actions.setQuota({ tenantId: entry.tenantId, poolId: entry.poolId, resource: 'gpu', max: entry.suggested, current: entry.max })}
+                    >
+                      Apply
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <EmptyState title="Every GPU quota fits its use" className="py-6">
+          No ceiling sat mostly idle, and none was reached, in the last 30 days.
+        </EmptyState>
+      )}
+      <p className="px-3 py-2 font-mono text-[10px] text-text-tertiary">bar: 30-day peak · white tick: today's ceiling · amber tick: the suggestion (whole 8-GPU nodes)</p>
+    </Panel>
   );
 }
 
@@ -213,6 +286,7 @@ export function QuotasPage() {
             <EmptyState title="Everyone has headroom" />
           )}
         </Panel>
+        {resource === 'gpu' && <Suggestions inScope={new Set(pools.map((pool) => pool.id))} onEdit={setTarget} />}
       </Grid>
       <QuotaEditor target={target} onClose={() => setTarget(undefined)} />
     </>

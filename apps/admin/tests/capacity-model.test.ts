@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DAY, HOUR, type CapacityTimeline, type Reservation } from '@/lib/data/capacity';
-import { packLanes, quotaCells, runway } from '@/components/capacity/model';
+import { packLanes, quotaCells, quotaSuggestions, runway } from '@/components/capacity/model';
 import { decodeScenario, encodeScenario, evaluate, type Change } from '@/components/capacity/scenarios';
 
 const T0 = Date.UTC(2026, 8, 20, 0);
@@ -111,6 +111,55 @@ describe('model.quotaCells', () => {
       { tenantId: 't', poolId: 's', resource: 'gpu', max: 0, used: 0 },
     ]);
     expect(cells.map((cell) => cell.level)).toEqual(['ok', 'warning', 'full', 'ok']);
+  });
+});
+
+describe('model.quotaSuggestions', () => {
+  const now = T0 + 40 * DAY;
+  const reservation = (id: string, tenantId: string, gpus: number, start: number, end: number): Reservation =>
+    ({
+      id,
+      tenantId,
+      poolId: 'p',
+      state: 'released',
+      request: { poolId: 'p', devices: [{ class: 'gpu', count: gpus }], duration: '1h' },
+      during: { start, end },
+      ownerIdentityId: 'i',
+      idempotencyKey: id,
+      conditions: [],
+      version: 1,
+    }) as Reservation;
+  const snapshot = (reservations: Reservation[], quotas: { tenantId: string; max: number; used: number }[]) =>
+    ({
+      now,
+      tenantId: 'root',
+      reservations,
+      quotas: quotas.map((q) => ({ ...q, poolId: 'p', resource: 'gpu' })),
+    }) as unknown as Parameters<typeof quotaSuggestions>[0];
+
+  it('lowers a mostly idle ceiling to 125% of the peak in whole nodes', () => {
+    // Two overlapping 8-GPU bookings → peak 16 of 64: suggest 24 (16 × 1.25 = 20 → 24).
+    const list = quotaSuggestions(snapshot([reservation('a', 't', 8, now - 5 * DAY, now - 4 * DAY), reservation('b', 't', 8, now - 5 * DAY, now - 4 * DAY)], [{ tenantId: 't', max: 64, used: 0 }]));
+    expect(list).toEqual([expect.objectContaining({ tenantId: 't', peak: 16, suggested: 24, direction: 'lower' })]);
+  });
+
+  it('raises a ceiling that was reached, and leaves a well-sized one alone', () => {
+    const list = quotaSuggestions(
+      snapshot(
+        [reservation('a', 'hot', 32, now - 2 * DAY, now - DAY), reservation('b', 'ok', 24, now - 2 * DAY, now - DAY)],
+        [
+          { tenantId: 'hot', max: 32, used: 0 },
+          { tenantId: 'ok', max: 32, used: 0 },
+        ],
+      ),
+    );
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ tenantId: 'hot', direction: 'raise', suggested: 40 });
+  });
+
+  it('ignores the operator and bookings older than the window', () => {
+    const list = quotaSuggestions(snapshot([reservation('old', 't', 64, now - 35 * DAY, now - 34 * DAY)], [{ tenantId: 'root', max: 64, used: 0 }, { tenantId: 't', max: 64, used: 0 }]));
+    expect(list).toEqual([expect.objectContaining({ tenantId: 't', peak: 0, suggested: 8, direction: 'lower' })]);
   });
 });
 
