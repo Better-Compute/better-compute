@@ -160,6 +160,16 @@ export function bcdConfigToml(
   return lines.join('\n');
 }
 
+/**
+ * What the cluster must be for bcd to give pods only the GPUs compute bound (README "GPU isolation"): the
+ * DaemonSet carries it as `bcd.dev/requires`, since JSON manifests have no comments.
+ */
+export const gpuIsolationRequirements =
+  'bcd must be the only source of GPUs on these nodes. NVIDIA GPU operator: devicePlugin.enabled=false; container toolkit ' +
+  'accept-nvidia-visible-devices-envvar-when-unprivileged=false (CDI only); CDI --device-name-strategy=uuid. Workload namespaces: ' +
+  'Pod Security baseline or restricted (no hostPath: /var/lib/bcd holds the node key). Revoke the join token and delete its Secret ' +
+  'once every node has joined.';
+
 const dataDir = '/var/lib/bcd';
 const configPath = '/etc/bcd/config.toml';
 const tokenDir = '/etc/bcd/token';
@@ -237,7 +247,15 @@ export function bcdDaemonSetManifests(options: BcdDaemonSetOptions): KubernetesO
   const configMount = mount('config', configPath, true, 'config.toml');
   const objects: KubernetesObject[] = [];
   if (options.createNamespace !== false)
-    objects.push({ apiVersion: 'v1', kind: 'Namespace', metadata: { name: namespace, labels: { 'app.kubernetes.io/part-of': 'better-compute' } } });
+    objects.push({
+      apiVersion: 'v1',
+      kind: 'Namespace',
+      metadata: {
+        name: namespace,
+        // bcd's pod is privileged with host paths: its own namespace allows that; workload namespaces must not.
+        labels: { 'app.kubernetes.io/part-of': 'better-compute', 'pod-security.kubernetes.io/enforce': 'privileged' },
+      },
+    });
   objects.push({
     apiVersion: 'v1',
     kind: 'ConfigMap',
@@ -247,7 +265,7 @@ export function bcdDaemonSetManifests(options: BcdDaemonSetOptions): KubernetesO
   objects.push({
     apiVersion: 'apps/v1',
     kind: 'DaemonSet',
-    metadata: { name, namespace, labels },
+    metadata: { name, namespace, labels, annotations: { 'bcd.dev/requires': gpuIsolationRequirements } },
     spec: {
       selector: { matchLabels: selector },
       updateStrategy: { type: 'RollingUpdate', rollingUpdate: { maxUnavailable: 1 } },

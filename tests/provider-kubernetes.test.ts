@@ -28,6 +28,11 @@ describe('bcd as a Kubernetes DaemonSet', () => {
     const list = JSON.parse(renderKubernetesManifests(objects));
     expect(list).toMatchObject({ apiVersion: 'v1', kind: 'List' });
     expect(bcdDaemonSetManifests({ ...options, createNamespace: false }).map((object) => object.kind)).toEqual(['ConfigMap', 'DaemonSet']);
+    // Its namespace runs privileged; the GPU isolation requirements travel with the DaemonSet.
+    expect(objects[0]!.metadata.labels).toMatchObject({ 'pod-security.kubernetes.io/enforce': 'privileged' });
+    const daemonSet = objects.find((object) => object.kind === 'DaemonSet')!;
+    expect(daemonSet.metadata.annotations!['bcd.dev/requires']).toMatch(/devicePlugin\.enabled=false.*accept-nvidia-visible-devices-envvar-when-unprivileged=false/);
+    expect((daemonSet as any).spec.template.spec.hostPID).toBe(false);
   });
 
   it('keeps the token in the join init container only, and gives bcd no API token', () => {
