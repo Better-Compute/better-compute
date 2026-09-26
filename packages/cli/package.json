@@ -59,7 +59,6 @@
     "@better-compute/observability": "workspace:*",
     "@better-compute/pki": "workspace:*",
     "@better-compute/postgres": "workspace:*",
-    "@better-compute/provider-kubernetes": "workspace:*",
     "@better-compute/server": "workspace:*"
   },
   "peerDependencies": {

@@ -38,9 +38,6 @@
     },
     {
       "path": "../observability"
-    },
-    {
-      "path": "../provider-kubernetes"
     }
   ]
 }
