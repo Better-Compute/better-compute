@@ -597,6 +597,19 @@ func (b *BootEntries) Get(mac string, now time.Time) *sitev1.ProxyDhcpEntry {
 	return e
 }
 
+// Sanboots are the live entries that sanboot an ISO: MAC → image digest.
+func (b *BootEntries) Sanboots(now time.Time) map[string][]byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := map[string][]byte{}
+	for mac, e := range b.entries {
+		if len(e.GetSanbootSha256()) > 0 && (e.GetNotAfter() == nil || now.Before(e.GetNotAfter().AsTime())) {
+			out[mac] = e.GetSanbootSha256()
+		}
+	}
+	return out
+}
+
 // Remove drops the entries of a workflow, or the listed MACs; it returns how many it dropped.
 func (b *BootEntries) Remove(macs []string, workflowID string) (int, error) {
 	b.mu.Lock()
@@ -639,10 +652,15 @@ func (a *Agent) runPrepareRamdisk(_ context.Context, cmd dispatch.Command) (jour
 	if _, err := net.ParseMAC(req.GetMac()); err != nil {
 		return journal.Result{}, invalidPayload(fmt.Errorf("mac %q", req.GetMac()))
 	}
+	if n := len(req.GetSanbootSha256()); n != 0 && n != 32 {
+		return journal.Result{}, invalidPayload(fmt.Errorf("sanboot_sha256 has %d bytes", n))
+	}
 	if err := a.boot.Put(req); err != nil {
 		return journal.Result{}, err
 	}
-	a.log.Info("boot entry", "mac", req.GetMac(), "workflow", req.GetWorkflowId())
+	// Prepared now: no longer an unknown machine.
+	a.discovery.forget(req.GetMac())
+	a.log.Info("boot entry", "mac", req.GetMac(), "workflow", req.GetWorkflowId(), "sanboot", len(req.GetSanbootSha256()) > 0)
 	return journal.Result{Outcome: journal.OutcomeSucceeded}, nil
 }
 

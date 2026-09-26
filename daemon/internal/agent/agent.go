@@ -162,8 +162,12 @@ type Agent struct {
 	bmcMu sync.Mutex
 	// bootURL is the boot server's own URL (BootHandler), under which it serves the cache.
 	bootURL string
-	access  *accessConverger
-	hostcfg *hostConverger
+	// discovery lists the unknown machines that PXE-booted (discovery.go); sanbootISOs are the
+	// cache images the site spec names as iso, which boot entries may sanboot (under mu).
+	discovery   discovery
+	sanbootISOs map[string]bool
+	access      *accessConverger
+	hostcfg     *hostConverger
 	// kube runs the kubelet device plugins on a Kubernetes worker (kube.go).
 	kube *kube.Manager
 	// telemetry runs the OTLP export NodeSpec.telemetry names (telemetry.go).

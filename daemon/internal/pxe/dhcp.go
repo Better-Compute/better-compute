@@ -63,6 +63,8 @@ type Request struct {
 	IPXE bool
 	// UUID is the client machine UUID (option 97), when sent.
 	UUID string
+	// Relay is the DHCP relay the request came through (giaddr); nil on the agent's own segment.
+	Relay net.IP
 }
 
 // Answer is where a client boots from; empty means "do not answer".
@@ -128,6 +130,9 @@ func (p *packet) request() (Request, bool) {
 		return Request{}, false
 	}
 	r := Request{MAC: p.chaddr}
+	if p.giaddr != nil && !p.giaddr.IsUnspecified() {
+		r.Relay = p.giaddr
+	}
 	if a := p.options[optClientArch]; len(a) >= 2 {
 		r.Arch = Arch(binary.BigEndian.Uint16(a))
 	}

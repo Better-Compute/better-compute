@@ -64,6 +64,12 @@ func (a *Agent) pxeAnswer(cfg BootConfig, r pxe.Request) (pxe.Answer, bool) {
 		return pxe.Answer{}, false
 	}
 	if a.boot.Get(r.MAC.String(), a.serverNow()) == nil {
+		// Never answered: listed for metal (StatusReport.discovered).
+		relay := ""
+		if r.Relay != nil {
+			relay = r.Relay.String()
+		}
+		a.discovered(r.MAC.String(), r.UUID, archName(r.Arch), relay)
 		return pxe.Answer{}, false
 	}
 	base := strings.TrimRight(cfg.URL, "/")
@@ -109,9 +115,19 @@ func (c siteConverger) Plan(_ context.Context, desired []byte) ([]converge.Actio
 	if changed {
 		c.a.log.Info("boot lease", "active", lease.active, "epoch", lease.epoch, "ttl", lease.ttl.String())
 	}
-	keep := map[string]bool{}
+	keep, isos := map[string]bool{}, map[string]bool{}
 	for _, img := range spec.GetCacheImages() {
 		keep[fmt.Sprintf("%x", img.GetSha256())] = true
+		if img.GetFormat() == "iso" {
+			isos[fmt.Sprintf("%x", img.GetSha256())] = true
+		}
+	}
+	c.a.mu.Lock()
+	c.a.sanbootISOs = isos
+	c.a.mu.Unlock()
+	// A boot entry that sanboots an image the site does not cache as an iso would never boot.
+	if problems := c.a.sanbootProblems(c.a.serverNow()); len(problems) > 0 {
+		return nil, converge.Terminal(errors.New(strings.Join(problems, "; ")))
 	}
 	if n := c.a.cache.evict(keep); n > 0 {
 		c.a.log.Info("image cache evicted", "images", n)
@@ -237,9 +253,19 @@ func (a *Agent) serveIPXE(w http.ResponseWriter, r *http.Request, cfg BootConfig
 	now := a.serverNow()
 	entry := a.boot.Get(mac, now)
 	if entry == nil {
-		a.log.Info("PXE request from an unknown machine", "mac", mac, "uuid", q.Get("uuid"))
+		if _, err := net.ParseMAC(mac); err == nil {
+			arch := ""
+			if b, p := q.Get("buildarch"), q.Get("platform"); b != "" {
+				arch = b + "-" + p // iPXE's ${buildarch}-${platform}: x86_64-efi, i386-pcbios, arm64-efi
+			}
+			a.discovered(mac, q.Get("uuid"), arch, "")
+		}
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = fmt.Fprint(w, "#!ipxe\necho No boot is prepared for this machine.\nexit\n")
+		return
+	}
+	if digest := entry.GetSanbootSha256(); len(digest) > 0 {
+		a.serveSanboot(w, mac, digest, cfg)
 		return
 	}
 	token, err := a.discoveryToken(r.Context(), entry)
