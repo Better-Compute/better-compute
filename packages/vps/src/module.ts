@@ -138,10 +138,13 @@ import {
   meterVolumes,
   parseCreateVolume,
   parseListVolumes,
+  parseResizeVolume,
   parseVolumeRef,
+  resizeVolume,
   volumeWork,
   type CreateVolumeInput,
   type ListVolumesInput,
+  type ResizeVolumeInput,
   type SandboxVolume,
   type VolumeRef,
 } from './volumes.js';
@@ -269,6 +272,7 @@ export type VpsApi = {
     create: MethodDefinition<CreateVolumeInput, SandboxVolume>;
     list: MethodDefinition<ListVolumesInput, { items: SandboxVolume[] }>;
     get: MethodDefinition<VolumeRef, SandboxVolume>;
+    resize: MethodDefinition<ResizeVolumeInput, SandboxVolume>;
     delete: MethodDefinition<VolumeRef, SandboxVolume>;
   };
 };
@@ -995,6 +999,13 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         resource: volumeResource,
         validate: describedBy(schemas.volume, parseVolumeRef),
         handler: (context, input) => getVolume(context.sql, input),
+      }),
+      resize: defineMethod({
+        action: 'compute:sandboxes:manage',
+        kind: 'mutation',
+        resource: volumeResource,
+        validate: describedBy(schemas.resizeVolume, parseResizeVolume),
+        handler: (context, input) => resizeVolume(depsOf(context), context.sql, input),
       }),
       delete: defineMethod({
         action: 'compute:sandboxes:manage',

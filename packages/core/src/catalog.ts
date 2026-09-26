@@ -566,6 +566,7 @@ group('sandboxVolumes', 'vps', [
   ['create', 'mutation', 'sandboxes:manage', 'tenant', 'v1.0'],
   ['list', 'read', 'sandboxes:read', 'tenant', 'v1.0'],
   ['get', 'read', 'sandboxes:read', 'sandbox-volume', 'v1.0'],
+  ['resize', 'mutation', 'sandboxes:manage', 'sandbox-volume', 'v1.0'],
   ['delete', 'mutation', 'sandboxes:manage', 'sandbox-volume', 'v1.0'],
 ]);
 group('commandBatches', 'quorum', [

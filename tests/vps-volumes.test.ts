@@ -286,6 +286,54 @@ describe('sandbox volumes', () => {
     await createVolume({ idempotencyKey: 'vol-again' });
   });
 
+  it('keep their sandboxes on their host when another host scores better', async () => {
+    const volume = await createVolume();
+    // A third, empty host, and the volume's host made the busiest: a spreading scorer prefers the others.
+    const third = 'node_01jz00000000000000000000vc';
+    await db.query(
+      `INSERT INTO nodes (id, site_id, pool_id, owner_tenant_id, role, provision_state, maintenance, cordoned,
+                          connectivity, trust, generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
+       VALUES ($1, 'site_01jz00000000000000000000aa', $2, 'root', 'host', 'adopted', false, false, 'connected', 'platform', 1, 1, 1, 1, 0, 1)`,
+      [third, pool],
+    );
+    for (const label of ['bc.dev/cap.instance.ssh-host-only', 'bc.dev/cap.instance.volumes'])
+      await db.query(`INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, $2, '1', 'system')`, [third, label]);
+    for (const [resource, allocatable] of [['vcpu', 64], ['memoryGiB', 256], ['diskGiB', 4000]] as const)
+      await db.query(`INSERT INTO node_resources (node_id, resource, allocatable, ratio, allocated) VALUES ($1, $2, $3, 1, 0)`, [third, resource, allocatable]);
+    await db.query(`UPDATE node_resources SET allocated = 12 WHERE node_id = $1 AND resource = 'vcpu'`, [volume.nodeId]);
+    const template = await createTemplate({ volumes: [{ volumeId: volume.id, mountPath: '/workspace' }] });
+    const sandbox = await createSandbox(template.id, 'sbx-pinned');
+    const { rows } = await db.query<{ node_id: string }>(`SELECT node_id FROM instances WHERE id = $1`, [sandbox.instanceId]);
+    expect(rows[0]!.node_id).toBe(volume.nodeId);
+    // A host without the volumes capability never takes it (an older bcd drops volumes).
+    await db.query(`DELETE FROM node_labels WHERE node_id = $1 AND key = 'bc.dev/cap.instance.volumes'`, [volume.nodeId]);
+    await call('sandboxes', 'delete', { tenantId: 'acme', sandboxId: sandbox.id });
+    await reconcile(instanceWork, sandbox.instanceId);
+    await hostsReport('absent');
+    const again = await createSandbox(template.id, 'sbx-again');
+    const placed = await db.query<{ node_id: string | null; state: string }>(`SELECT node_id, state FROM instances WHERE id = $1`, [again.instanceId]);
+    expect(placed.rows[0]).toMatchObject({ node_id: null, state: 'scheduling' });
+  });
+
+  it('grow in place, charged to quota and booked on their host, and never shrink', async () => {
+    const volume = await createVolume();
+    expect(await call('sandboxVolumes', 'resize', { tenantId: 'acme', volumeId: volume.id, sizeGiB: 80 })).toMatchObject({ sizeGiB: 80 });
+    expect(await disk(volume.nodeId)).toBe(80);
+    expect((await quotaUsed()).diskGiB).toBe(80);
+    expect(await hostVolumeSpecs(db, volume.nodeId)).toEqual([{ id: volume.id, sizeBytes: 80 * 2 ** 30, serial: volume.serial }]);
+    await expect(call('sandboxVolumes', 'resize', { tenantId: 'acme', volumeId: volume.id, sizeGiB: 40 })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    // No room on its host: nothing changes, the quota charge comes back.
+    await db.query(`UPDATE node_resources SET allocatable = 100 WHERE node_id = $1 AND resource = 'diskGiB'`, [volume.nodeId]);
+    await expect(call('sandboxVolumes', 'resize', { tenantId: 'acme', volumeId: volume.id, sizeGiB: 200 })).rejects.toMatchObject({ code: 'CAPACITY_UNAVAILABLE' });
+    expect((await quotaUsed()).diskGiB).toBe(80);
+    expect(await call('sandboxVolumes', 'get', { tenantId: 'acme', volumeId: volume.id })).toMatchObject({ sizeGiB: 80 });
+    // The next sandbox's guest grows the filesystem to the disk.
+    const template = await createTemplate({ volumes: [{ volumeId: volume.id, mountPath: '/workspace' }] });
+    const sandbox = await createSandbox(template.id, 'sbx-grown');
+    const { rows } = await db.query<{ user_data: string }>(`SELECT user_data FROM instances WHERE id = $1`, [sandbox.instanceId]);
+    expect(rows[0]!.user_data).toContain(`resize2fs /dev/disk/by-id/virtio-${volume.serial}`);
+  });
+
   it('meter GiB-hours from creation until they are gone', async () => {
     const volume = await createVolume({ sizeGiB: 10 });
     clock.advance(2 * 3600_000);

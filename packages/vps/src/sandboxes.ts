@@ -56,6 +56,7 @@ import {
   templateVolumeMounts,
   templateVolumesOf,
   volumeCloudConfig,
+  volumeRuncmd,
   type TemplateVolume,
   type TemplateVolumeInput,
 } from './volumes.js';
@@ -1592,13 +1593,17 @@ export function sandboxUserData(
     );
   // write_files may end with no entry (no exec, no env): an empty list is valid cloud-config.
   lines.push(...volumeCloudConfig(parts.volumes ?? []));
-  if (exec)
-    lines.push(
-      'runcmd:',
-      '  - ["systemctl", "daemon-reload"]',
-      '  - ["udevadm", "control", "--reload"]',
-      '  - ["sh", "-c", "systemctl reload-or-restart ssh || systemctl reload-or-restart sshd"]',
-    );
+  const runcmd = [
+    ...(exec
+      ? [
+          '  - ["systemctl", "daemon-reload"]',
+          '  - ["udevadm", "control", "--reload"]',
+          '  - ["sh", "-c", "systemctl reload-or-restart ssh || systemctl reload-or-restart sshd"]',
+        ]
+      : []),
+    ...volumeRuncmd(parts.volumes ?? []),
+  ];
+  if (runcmd.length > 0) lines.push('runcmd:', ...runcmd);
   lines.push('');
   const boundary = `bc-sandbox-${instanceId}`;
   const part = (type: string, body: string) =>

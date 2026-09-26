@@ -7,7 +7,7 @@ import {
   type MethodContext,
   type SqlTx,
 } from '@better-compute/core';
-import { hourMs, meterAllocation } from '@better-compute/capacity';
+import { chargeQuota, hourMs, meterAllocation, refundQuota, resizeAllocation } from '@better-compute/capacity';
 import { fail, id, int, key, name, object, optional, tenant } from './input.js';
 import { openEnded, visibleVpsPool, type InstanceDeps } from './instances.js';
 
@@ -454,6 +454,54 @@ export async function finishVolumeDeletions(
   return rows.length;
 }
 
+export interface ResizeVolumeInput extends VolumeRef {
+  sizeGiB: number;
+}
+
+export function parseResizeVolume(raw: unknown): ResizeVolumeInput {
+  const input = object(raw, ['tenantId', 'volumeId', 'sizeGiB']);
+  return { ...parseVolumeRef({ tenantId: input.tenantId, volumeId: input.volumeId }), sizeGiB: int(input.sizeGiB, 'sizeGiB', 1, maxVolumeGiB) };
+}
+
+/**
+ * `sandboxVolumes.resize`: grows a volume (never shrinks it; `INVALID_INPUT`), charging the growth to the
+ * diskGiB quota and booking it on the volume's host (`CAPACITY_UNAVAILABLE` when the host has no room;
+ * nothing changes). bcd grows the file, live in a running guest; the guest's filesystem follows at the next
+ * sandbox's first boot (`resize2fs` in its user data).
+ */
+export async function resizeVolume(
+  deps: Pick<InstanceDeps, 'desired' | 'events'>,
+  tx: SqlTx,
+  input: ResizeVolumeInput,
+): Promise<SandboxVolume> {
+  const row = await readVolume(tx, input, { lock: true });
+  if (!row) throw new ComputeError('NOT_FOUND', `Volume ${input.volumeId} not found`);
+  if (row.state !== 'ready') throw new ComputeError('INVALID_STATE', `Volume ${row.id} is ${row.state}`);
+  const current = Number(row.size_gib);
+  if (input.sizeGiB === current) return volumeView(row);
+  if (input.sizeGiB < current) fail(`A volume never shrinks: ${row.id} is ${current} GiB`);
+  if (!row.allocation_id) throw new ComputeError('INVALID_STATE', `Volume ${row.id} has no disk booking`);
+  const grow = { diskGiB: input.sizeGiB - current };
+  await chargeQuota(tx, row.tenant_id, row.pool_id, grow);
+  const outcome = await resizeAllocation(tx, row.allocation_id, { diskGiB: input.sizeGiB });
+  if (outcome.status !== 'resized') {
+    await refundQuota(tx, row.tenant_id, row.pool_id, grow);
+    throw new ComputeError('CAPACITY_UNAVAILABLE', `Host ${row.node_id} has no room to grow volume ${row.id} to ${input.sizeGiB} GiB`);
+  }
+  const { rows } = await tx.query<VolumeRow>(
+    `UPDATE sandbox_volumes SET size_gib = $2, version = version + 1 WHERE id = $1 RETURNING ${columns}`,
+    [row.id, input.sizeGiB],
+  );
+  if (row.node_id) await deps.desired.invalidate(tx, row.node_id);
+  await deps.events.publish(tx, {
+    type: 'sandbox.volume.resized',
+    tenantId: row.tenant_id,
+    subject: `sandbox-volume/${row.id}`,
+    data: { volumeId: row.id, fromGiB: current, sizeGiB: input.sizeGiB },
+  });
+  return volumeView(rows[0]!);
+}
+
 /**
  * A deleted tenant's volumes (§12.8), once none of its instances is left: every ready one leaves its host's
  * spec, as `deleteVolume` would (templates are deleted by then). Answers whether any is not yet `deleted`.
@@ -508,16 +556,14 @@ export async function attachTemplateVolumes(tx: SqlTx, instanceId: string, volum
 export const volumesCapabilityLabel = 'bc.dev/cap.instance.volumes';
 
 /**
- * Where an instance that attaches volumes may run: the one host they live on, as `excludeNodes` (every
- * other node of the pool), and only while that host's bcd keeps volumes (`volumesCapabilityLabel`).
- * `undefined` for an instance without volumes; `INVALID_STATE` when its volumes live on different hosts,
- * or on none.
+ * Where an instance that attaches volumes may run: the one host they live on (`onlyNodes`), and only while
+ * that host's bcd keeps volumes (`volumesCapabilityLabel`). `undefined` for an instance without volumes;
+ * `INVALID_STATE` when its volumes live on different hosts, or on none.
  */
 export async function volumePlacement(
   tx: SqlTx,
   instanceId: string,
-  poolId: string,
-): Promise<{ excludeNodes: string[]; nodeLabels: Record<string, string> } | undefined> {
+): Promise<{ onlyNodes: string[]; nodeLabels: Record<string, string> } | undefined> {
   const { rows } = await tx.query<{ node_id: string | null }>(
     `SELECT DISTINCT v.node_id FROM volume_attachments va JOIN sandbox_volumes v ON v.id = va.volume_id WHERE va.instance_id = $1`,
     [instanceId],
@@ -525,8 +571,7 @@ export async function volumePlacement(
   if (rows.length === 0) return undefined;
   if (rows.length > 1 || rows[0]!.node_id === null)
     throw new ComputeError('INVALID_STATE', `Instance ${instanceId} attaches volumes that live on different hosts`);
-  const { rows: others } = await tx.query<{ id: string }>(`SELECT id FROM nodes WHERE pool_id = $1 AND id <> $2 ORDER BY id`, [poolId, rows[0]!.node_id]);
-  return { excludeNodes: others.map((row) => row.id), nodeLabels: { [volumesCapabilityLabel]: '*' } };
+  return { onlyNodes: [rows[0]!.node_id], nodeLabels: { [volumesCapabilityLabel]: '*' } };
 }
 
 /** The mounts a sandbox's user data carries for its attachments (by serial, in attach order). */
@@ -570,6 +615,17 @@ export function volumeCloudConfig(mounts: readonly { serial: string; mountPath: 
   for (const mount of mounts)
     lines.push(`  - [${text(device(mount.serial))}, ${text(mount.mountPath)}, "ext4", ${text(`defaults,nofail${mount.readOnly ? ',ro' : ''}`)}, "0", "2"]`);
   return lines;
+}
+
+/**
+ * The `runcmd` entries (YAML flow lists) that grow each writable volume's filesystem to its disk at the
+ * guest's first boot, after it is mounted: a volume grown since the last sandbox (`sandboxVolumes.resize`)
+ * then shows its full size. ext4 grows online; a failure never stops the boot.
+ */
+export function volumeRuncmd(mounts: readonly { serial: string; readOnly: boolean }[]): string[] {
+  return mounts
+    .filter((mount) => !mount.readOnly)
+    .map((mount) => `  - ["sh", "-c", ${JSON.stringify(`resize2fs /dev/disk/by-id/virtio-${mount.serial} || true`)}]`);
 }
 
 // --- Specs -------------------------------------------------------------------------------------------

@@ -339,6 +339,14 @@ export const schemas = {
     ['tenantId', 'templateId'],
   ),
   volume: strictObject({ tenantId, volumeId }, ['tenantId', 'volumeId']),
+  resizeVolume: strictObject(
+    {
+      tenantId,
+      volumeId,
+      sizeGiB: integer(1, 16_384, 'The new size in GiB: at least the current one (a volume never shrinks); the growth is charged to the diskGiB quota'),
+    },
+    ['tenantId', 'volumeId', 'sizeGiB'],
+  ),
   createVolume: strictObject(
     {
       tenantId,

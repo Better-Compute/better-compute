@@ -1082,7 +1082,7 @@ export async function scheduleHosted(
     ...(row.shape.placement ? { [placementCapabilityLabel]: '*' } : {}),
   };
   // Agent memory: an instance that attaches volumes runs on the host they live on, if its bcd keeps them.
-  const volumes = await volumePlacement(tx, row.id, row.poolId);
+  const volumes = await volumePlacement(tx, row.id);
   if (volumes) Object.assign(nodeLabels, volumes.nodeLabels);
   const outcome = await deps.capacity.reserve(
     tx,
@@ -1097,7 +1097,7 @@ export async function scheduleHosted(
       resources: placementResources(row.shape),
       during: { start: now, end: openEnded },
       ...(Object.keys(nodeLabels).length > 0 ? { nodeLabels } : {}),
-      ...(volumes ? { excludeNodes: volumes.excludeNodes } : {}),
+      ...(volumes ? { onlyNodes: volumes.onlyNodes } : {}),
     },
     admission ? { admission } : undefined,
   );
