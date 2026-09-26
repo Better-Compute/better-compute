@@ -64,9 +64,11 @@ export const GROUP_ORDER = ['Overview', 'Capacity', 'Fleet', 'Workloads', 'Opera
 
 // ── Registry: one line per module ────────────────────────────────────────────────────────────────────────────
 import { overviewModule } from '@/components/overview/module';
+import { fleetModule } from '@/components/fleet/module';
 
 export const modules: AdminModule[] = [
   overviewModule,
+  fleetModule,
 ];
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 

@@ -4,3 +4,4 @@ export * from './format';
 export * from './topology';
 export * from './platform';
 // ── domain sources (one line each) ──
+export * from './fleet';
