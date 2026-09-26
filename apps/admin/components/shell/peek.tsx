@@ -7,6 +7,7 @@ import { RiArrowLeftLine, RiExternalLinkLine } from 'react-icons/ri';
 import { peekFor } from '@/lib/modules';
 import { Drawer } from '@/components/ui/overlay';
 import { WidgetBoundary } from '@/components/widgets/widget-frame';
+import { WatchButton } from './watching';
 import { cx } from '@/utils/cx';
 
 // Peek: any module's entity (a node, a pool, a reservation, a tenant) opened in a side sheet over the current
@@ -64,6 +65,8 @@ export function PeekProvider({ children }: { children: ReactNode }) {
         subtitle={current ? <span className="font-mono">{current.kind} · {current.id}</span> : undefined}
         actions={
           current && def ? (
+            <>
+            <WatchButton kind={current.kind} id={current.id} />
             <button
               type="button"
               onClick={() => {
@@ -76,6 +79,7 @@ export function PeekProvider({ children }: { children: ReactNode }) {
               open page
               <RiExternalLinkLine className="size-3.5" aria-hidden />
             </button>
+            </>
           ) : undefined
         }
       >

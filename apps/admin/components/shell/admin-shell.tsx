@@ -12,6 +12,7 @@ import { StatusBar } from './status-bar';
 import { TimeTravelBanner } from './time-machine';
 import { Tour } from './tour';
 import { AttentionWatcher } from './attention-watcher';
+import { WatchWatcher } from './watching';
 import { Sidebar } from './sidebar';
 import { Topbar } from './topbar';
 import { useClockGetter, useWorkspaceSettings } from './workspace';
@@ -149,6 +150,7 @@ export function AdminShell({ children }: { children: ReactNode }) {
       <ShortcutSheet open={keys} onOpenChange={setKeys} />
       <Tour />
       <AttentionWatcher />
+      <WatchWatcher />
     </div>
     </PeekProvider>
     </PageCommandsProvider>

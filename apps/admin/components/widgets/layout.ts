@@ -87,6 +87,7 @@ export const PRESETS: { id: string; name: string; description: string; items: Wi
     items: [
       item('overview.attention', 6, 5),
       item('fleet.unhealthy', 6, 5),
+      item('overview.watching', 4, 4),
       { ...item('fleet.gpu-wall', 8, 4), settings: { unhealthyOnly: true } },
       item('fleet.batches', 4, 4),
       item('overview.control-plane', 4, 4),

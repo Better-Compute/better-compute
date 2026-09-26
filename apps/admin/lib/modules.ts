@@ -122,7 +122,23 @@ export interface AdminModule {
    * past moments). Merged into the bell, the Needs attention page and the Overview queue.
    */
   attention?: (now: number, scope: { siteId?: string }, context: AttentionContext) => AttentionItem[];
+  /**
+   * Watchable entity kinds: how to describe one entity's state right now, for the Watching widget and the
+   * change toasts. Return null when the entity no longer exists. Pure (time travel asks about the past).
+   */
+  watch?: Record<string, (id: string, now: number, context: AttentionContext) => WatchState | null>;
 }
+
+/** One watched entity's state. A change of `status` (or `summary` for 'live') raises a toast while live. */
+export interface WatchState {
+  label: string;
+  status: 'live' | 'ok' | 'warn' | 'crit' | 'off' | 'pending';
+  /** One line: "ready · 6 of 8 GPUs booked", "active until 14:00", "degraded: XID 79". */
+  summary: string;
+  href: string;
+}
+
+export const watchFor = (kind: string) => modules.find((module) => module.watch?.[kind])?.watch?.[kind];
 
 /** What collectAttention tells each module: which source the workspace reads (a module reads its live store). */
 export interface AttentionContext {

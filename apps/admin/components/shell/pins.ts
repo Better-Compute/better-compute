@@ -55,6 +55,9 @@ export function usePins() {
 /** Acknowledged attention items (by id), shared by the bell, the widget and the Attention page. */
 export const useAcks = createLocalSet('acks');
 
+/** Watched entities as "kind:id" (the Watching widget and change toasts). */
+export const useWatched = createLocalSet('watched');
+
 /** Sidebar sections the operator folded away. */
 export const useFoldedGroups = createLocalSet('nav-folded');
 

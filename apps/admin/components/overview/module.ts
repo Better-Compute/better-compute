@@ -1,6 +1,7 @@
 import {
   RiAlarmWarningLine,
   RiDashboard3Line,
+  RiEyeLine,
   RiFlashlightLine,
   RiGridLine,
   RiMapPin2Line,
@@ -11,7 +12,8 @@ import {
   RiTimerFlashLine,
 } from 'react-icons/ri';
 import type { AdminModule } from '@/lib/modules';
-import { controlPlane, siteById, sites } from '@/lib/data';
+import { controlPlane, fleetPulse, siteById, sites } from '@/lib/data';
+import { WatchingWidget } from '@/components/shell/watching';
 import { ComponentPeek, SitePeek } from './peeks';
 import { NotesWidget } from './notes-widget';
 import {
@@ -85,6 +87,26 @@ export const overviewModule: AdminModule = {
         })),
     ];
   },
+  watch: {
+    site: (id, now) => {
+      const site = siteById(id);
+      if (!site) return null;
+      const pulse = fleetPulse(now, { siteId: id });
+      const gateway = controlPlane(now).find((c) => c.id === `gw-${id}`);
+      const status = pulse.nodes.offline > 2 || gateway?.status === 'down' ? 'crit' : pulse.nodes.offline || pulse.nodes.degraded > 3 || gateway?.status === 'degraded' ? 'warn' : 'ok';
+      return {
+        label: site.name,
+        status,
+        summary: `${pulse.nodes.ready}/${pulse.nodes.total} ready · ${pulse.nodes.offline} offline · gateway ${gateway?.status ?? 'unknown'}`,
+        href: `/?site=${id}`,
+      };
+    },
+    component: (id, now) => {
+      const c = controlPlane(now).find((x) => x.id === id);
+      if (!c) return null;
+      return { label: c.name, status: c.status === 'ok' ? 'ok' : c.status === 'down' ? 'crit' : 'warn', summary: c.detail, href: '/control-plane' };
+    },
+  },
   peeks: {
     site: { title: (id) => siteById(id)?.name ?? id, href: (id) => `/?site=${id}`, icon: RiMapPin2Line, component: SitePeek },
     component: { title: (id) => controlPlane(0).find((c) => c.id === id)?.name ?? id, href: () => '/control-plane', icon: RiServerLine, component: ComponentPeek },
@@ -124,6 +146,7 @@ export const overviewModule: AdminModule = {
     { id: 'overview.sites', title: 'Sites', description: 'Sites on a map with nodes, GPUs, utilization and power. Click to scope.', icon: RiMapPin2Line, module: 'overview', defaultSize: { w: 6, h: 4 }, minSize: { w: 3, h: 3 }, component: SitesWidget },
     { id: 'overview.activity', title: 'Activity', description: 'The live event stream, newest first, filterable by kind.', icon: RiTimerFlashLine, module: 'overview', defaultSize: { w: 6, h: 4 }, minSize: { w: 3, h: 3 }, href: '/activity', component: ActivityWidget,
       settings: [{ id: 'severity', label: 'Show', type: 'select', default: 'info', options: [{ value: 'info', label: 'Everything' }, { value: 'warning', label: 'Warnings and critical' }, { value: 'critical', label: 'Critical only' }] }] },
+    { id: 'overview.watching', title: 'Watching', description: 'Nodes, pools, reservations and sites you watch, with their state now; a toast when one changes.', icon: RiEyeLine, module: 'overview', defaultSize: { w: 4, h: 4 }, minSize: { w: 3, h: 2 }, live: true, component: WatchingWidget },
     { id: 'overview.notes', title: 'Notes', description: 'Handover notes, runbook links and who is on call, saved with the dashboard.', icon: RiStickyNoteLine, module: 'overview', defaultSize: { w: 4, h: 3 }, minSize: { w: 2, h: 2 }, live: true, component: NotesWidget },
     { id: 'overview.power', title: 'Power', description: 'IT power draw against budget, and the energy run-rate.', icon: RiFlashlightLine, module: 'overview', defaultSize: { w: 4, h: 2 }, minSize: { w: 3, h: 2 }, component: PowerWidget },
   ],
