@@ -38,6 +38,37 @@ export interface SandboxTemplateRow {
   defaultTtlSeconds: number;
   maxTtlSeconds: number;
   warm: { min: number; max: number };
+  /** Agent memory: volumes every sandbox from the template attaches, in order (absent from older servers). */
+  volumes?: TemplateVolumeRow[];
+}
+
+/** A template's volume as stored: the volume, where the guest mounts it, and whether read-only. */
+export interface TemplateVolumeRow {
+  volumeId: string;
+  mountPath: string;
+  readOnly: boolean;
+}
+
+/** At most this many volumes per template (the vps module's `maxTemplateVolumes`). */
+export const maxTemplateVolumes = 8;
+
+/**
+ * A template's volume list with one volume added (or its mount replaced) or removed, as
+ * `sandboxTemplates.update` takes it: the whole list, each by `volumeId`. Mount paths are the
+ * server's to validate; adding a path already used (or a ninth volume) fails here first.
+ */
+export function withTemplateVolume(
+  current: readonly TemplateVolumeRow[],
+  change: { add: TemplateVolumeRow } | { remove: string },
+): TemplateVolumeRow[] {
+  if ('remove' in change) return current.filter((volume) => volume.volumeId !== change.remove);
+  const { add } = change;
+  const rest = current.filter((volume) => volume.volumeId !== add.volumeId);
+  if (rest.some((volume) => volume.mountPath === add.mountPath))
+    throw new Error(`Another volume already mounts at ${add.mountPath}`);
+  if (rest.length >= maxTemplateVolumes)
+    throw new Error(`A template takes at most ${maxTemplateVolumes} volumes`);
+  return [...rest, { volumeId: add.volumeId, mountPath: add.mountPath, readOnly: add.readOnly }];
 }
 
 /** A sandbox's remaining lifetime for display: `12m 03s`, `1h 05m`, or `expired`. */
@@ -73,6 +104,17 @@ export interface SandboxesView extends ValueResource<{ items: SandboxRow[]; curs
   createTemplate(input: TemplateFields & { name: string; poolId: string; flavor: string; imageId: string }): Promise<SandboxTemplateRow>;
   updateTemplate(templateId: string, fields: TemplateFields): Promise<SandboxTemplateRow>;
   deleteTemplate(templateId: string): Promise<void>;
+  /** The tenant's volumes a template can attach (sandboxVolumes.list, everyone's). */
+  volumes(): Promise<VolumeChoice[]>;
+}
+
+/** A volume as the template editor offers it. */
+export interface VolumeChoice {
+  id: string;
+  name: string;
+  poolId: string;
+  state: string;
+  sizeGiB: number;
 }
 
 /** Template fields an administrator sets (sandboxTemplates.create / update). */
@@ -84,6 +126,8 @@ export interface TemplateFields {
   maxTtlSeconds?: number;
   warm?: { min: number; max?: number };
   network?: 'egress' | 'private' | 'none';
+  /** The whole volume list (replaces the template's); a template with volumes keeps no warm pool. */
+  volumes?: { volumeId?: string; name?: string; mountPath: string; readOnly?: boolean }[];
 }
 
 const newKey = () =>
@@ -150,5 +194,9 @@ export function createSandboxesView(
     deleteTemplate: async (templateId) => {
       await api.$request('sandboxTemplates/delete', { tenantId, templateId });
     },
+    volumes: async () =>
+      (
+        await api.$request<{ items: VolumeChoice[] }>('sandboxVolumes/list', { tenantId, scope: 'all' })
+      ).items.map(({ id, name, poolId, state, sizeGiB }) => ({ id, name, poolId, state, sizeGiB })),
   };
 }

@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   createSandboxesView,
+  maxTemplateVolumes,
   sandboxExecCommand,
   timeLeft,
+  withTemplateVolume,
   type ComputeRequester,
 } from '@better-compute/console-kit';
 
@@ -94,6 +96,44 @@ describe('sandboxes view', () => {
       },
       { path: 'sandboxTemplates/update', input: { tenantId: 'org_acme', templateId: 'sbxt_1', warm: { min: 3, max: 4 } } },
       { path: 'sandboxTemplates/delete', input: { tenantId: 'org_acme', templateId: 'sbxt_1' } },
+    ]);
+  });
+
+  it('edits a template’s volume list and offers the tenant’s volumes', async () => {
+    const data = { volumeId: 'vol_data', mountPath: '/data', readOnly: false };
+    const models = { volumeId: 'vol_models', mountPath: '/models', readOnly: true };
+    expect(withTemplateVolume([], { add: data })).toEqual([data]);
+    // Re-adding a volume replaces its mount; removing drops it.
+    expect(withTemplateVolume([data, models], { add: { ...data, mountPath: '/work' } })).toEqual([
+      models,
+      { ...data, mountPath: '/work' },
+    ]);
+    expect(withTemplateVolume([data, models], { remove: 'vol_data' })).toEqual([models]);
+    expect(() => withTemplateVolume([data], { add: { ...models, mountPath: '/data' } })).toThrow(/already mounts/);
+    const eight = Array.from({ length: maxTemplateVolumes }, (_, index) => ({
+      volumeId: `vol_${index}`,
+      mountPath: `/v${index}`,
+      readOnly: true,
+    }));
+    expect(() => withTemplateVolume(eight, { add: data })).toThrow(/at most 8/);
+
+    const calls: { path: string; input: Record<string, unknown> }[] = [];
+    const api = {
+      async $request(path: string, input: Record<string, unknown>) {
+        calls.push({ path, input });
+        return {
+          items: [{ id: 'vol_data', name: 'data', poolId: 'pool_1', state: 'ready', sizeGiB: 20, serial: 'bcv-x' }],
+        };
+      },
+    } as unknown as ComputeRequester;
+    const view = createSandboxesView(api, { tenantId: 'org_acme' });
+    expect(await view.volumes()).toEqual([
+      { id: 'vol_data', name: 'data', poolId: 'pool_1', state: 'ready', sizeGiB: 20 },
+    ]);
+    await view.updateTemplate('sbxt_1', { volumes: [data] });
+    expect(calls).toEqual([
+      { path: 'sandboxVolumes/list', input: { tenantId: 'org_acme', scope: 'all' } },
+      { path: 'sandboxTemplates/update', input: { tenantId: 'org_acme', templateId: 'sbxt_1', volumes: [data] } },
     ]);
   });
 

@@ -5,7 +5,9 @@ import {
   createSandboxesView,
   sandboxExecCommand,
   timeLeft,
+  withTemplateVolume,
   type SandboxTemplateRow,
+  type VolumeChoice,
 } from '@better-compute/console-kit';
 import { useStore } from '@better-compute/console-kit/react';
 import { useConsole } from '@/components/console-provider';
@@ -60,6 +62,26 @@ export default function SandboxesPage() {
   const template = templates.find((item) => item.id === templateId);
   const reloadTemplates = async () => setTemplates(await view.templates());
   const [draft, setDraft] = useState({ name: '', poolId: '', flavor: '', imageId: '', warmMin: 0, maxHours: 4 });
+  // Agent memory: attach a volume of the template's pool; a template with volumes keeps no warm pool.
+  const [volumes, setVolumes] = useState<VolumeChoice[]>();
+  const [attach, setAttach] = useState({ templateId: '', volumeId: '', mountPath: '/data', readOnly: false });
+  // Listing everyone's volumes needs the right to; without it the picker is just empty.
+  useEffect(() => {
+    void view
+      .volumes()
+      .then(setVolumes)
+      .catch(() => setVolumes([]));
+  }, [view]);
+  const attachTo = templates.find((item) => item.id === attach.templateId);
+  const attachable = (volumes ?? []).filter(
+    (volume) => volume.state === 'ready' && (!attachTo || volume.poolId === attachTo.poolId),
+  );
+  const volumeName = (volumeId: string) => volumes?.find((volume) => volume.id === volumeId)?.name ?? volumeId;
+  const setTemplateVolumes = (item: SandboxTemplateRow, next: NonNullable<SandboxTemplateRow['volumes']>) =>
+    act(async () => {
+      await view.updateTemplate(item.id, { volumes: next });
+      await reloadTemplates();
+    });
 
   return (
     <>
@@ -118,6 +140,7 @@ export default function SandboxesPage() {
                 <th>Pool / flavor / image</th>
                 <th>Lifetime</th>
                 <th>Warm</th>
+                <th>Volumes</th>
                 <th />
               </tr>
             </thead>
@@ -140,10 +163,34 @@ export default function SandboxesPage() {
                     {item.warm.min}–{item.warm.max}
                   </td>
                   <td>
+                    {(item.volumes ?? []).length === 0 && <span className="muted">none</span>}
+                    {(item.volumes ?? []).map((volume) => (
+                      <div key={volume.volumeId} className="row">
+                        <span>
+                          {volumeName(volume.volumeId)} → <code>{volume.mountPath}</code>
+                          {volume.readOnly ? ' (read-only)' : ''}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() =>
+                            void setTemplateVolumes(
+                              item,
+                              withTemplateVolume(item.volumes ?? [], { remove: volume.volumeId }),
+                            )
+                          }
+                        >
+                          Detach
+                        </button>
+                      </div>
+                    ))}
+                  </td>
+                  <td>
                     <div className="row">
                       <button
                         type="button"
-                        disabled={busy}
+                        disabled={busy || (item.volumes ?? []).length > 0}
+                        title={(item.volumes ?? []).length > 0 ? 'A template with volumes keeps no warm pool' : undefined}
                         onClick={() =>
                           void act(async () => {
                             await view.updateTemplate(item.id, {
@@ -243,6 +290,78 @@ export default function SandboxesPage() {
             Create template
           </button>
         </form>
+        {templates.length > 0 && (
+          <form
+            className="form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!attachTo) return;
+              void setTemplateVolumes(
+                attachTo,
+                withTemplateVolume(attachTo.volumes ?? [], {
+                  add: { volumeId: attach.volumeId, mountPath: attach.mountPath.trim(), readOnly: attach.readOnly },
+                }),
+              );
+            }}
+          >
+            <h4>Attach a volume</h4>
+            <p className="muted">
+              Every sandbox from the template mounts it (formatted on first use; data survives runs), and runs on the
+              volume&apos;s host. A read-write volume is one sandbox&apos;s at a time; the template keeps no warm pool.
+            </p>
+            <div className="row">
+              <label>
+                Template
+                <select
+                  value={attach.templateId}
+                  onChange={(event) => setAttach({ ...attach, templateId: event.target.value, volumeId: '' })}
+                >
+                  <option value="">Choose…</option>
+                  {templates.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Volume
+                <select
+                  value={attach.volumeId}
+                  onChange={(event) => setAttach({ ...attach, volumeId: event.target.value })}
+                >
+                  <option value="">{volumes === undefined ? 'Loading…' : 'Choose…'}</option>
+                  {attachable.map((volume) => (
+                    <option key={volume.id} value={volume.id}>
+                      {volume.name} ({volume.sizeGiB} GiB)
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Mount path
+                <input
+                  value={attach.mountPath}
+                  onChange={(event) => setAttach({ ...attach, mountPath: event.target.value })}
+                />
+              </label>
+              <label className="row">
+                <input
+                  type="checkbox"
+                  checked={attach.readOnly}
+                  onChange={(event) => setAttach({ ...attach, readOnly: event.target.checked })}
+                />
+                Read-only
+              </label>
+            </div>
+            <button
+              type="submit"
+              disabled={busy || !attachTo || !attach.volumeId || !attach.mountPath.trim().startsWith('/')}
+            >
+              Attach
+            </button>
+          </form>
+        )}
       </section>
 
       <label className="row">
