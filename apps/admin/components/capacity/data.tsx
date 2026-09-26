@@ -211,7 +211,7 @@ export function useCapacityActions() {
     );
   }, [router, toast, liveNotReady]);
   const run = useCallback(
-    async <T,>(label: string, action: (source: CapacitySource) => Promise<T>, quiet = false): Promise<T | undefined> => {
+    async <T,>(label: string, action: (source: CapacitySource) => Promise<T>, quiet = false, batch = false): Promise<T | undefined> => {
       if (!live) {
         const error = 'Viewing the past: return to live to change anything.';
         setState({ busy: false, error });
@@ -236,9 +236,12 @@ export function useCapacityActions() {
         bump();
         // The proxy refuses mutations without an operator session (the session may have expired meanwhile).
         if ((error as { code?: string } | null)?.code === 'READ_ONLY') {
-          // Our writable flag was stale (e.g. the session expired): re-probe so the next click refuses up front.
+          // Our writable flag was stale (the session expired): re-probe so the next click refuses up front. Same
+          // words as fleet's commands. A batch may have changed some items before the refusal: say so.
           connection.refresh();
-          signInToast();
+          const detail = batch ?'Anything done before it ended is kept; the rest was not changed.' : 'Nothing was changed.';
+          setState({ busy: false, error: `Your sign-in has ended. ${detail}` });
+          toast({ title: 'Your sign-in has ended', detail, status: 'warn', action: { label: 'Sign in', onAction: () => router.push('/signin') } });
           return undefined;
         }
         const message = error instanceof Error ? error.message : String(error);
@@ -247,7 +250,7 @@ export function useCapacityActions() {
         return undefined;
       }
     },
-    [clock, live, writable, setLive, signInToast, toast, mode.live, mode.tenantId, connection],
+    [clock, live, writable, setLive, signInToast, toast, router, mode.live, mode.tenantId, connection],
   );
   // Refused actions skip the dialog and go straight to run(), which says why: never ask for a reason, then refuse.
   const confirmed = useCallback(
@@ -296,7 +299,7 @@ export function useCapacityActions() {
       if (!ok) return;
       await run(`${kind === 'release' ? 'Released' : 'Cancelled'} ${ids.length} reservations`, async (source) => {
         for (const id of ids) await (kind === 'release' ? source.release(id) : source.cancel(id));
-      });
+      }, false, true);
     },
     extend: (id: string, byMs: number) => run(`Extended ${id} by ${Math.round(byMs / HOUR)} h`, (source) => source.extend(id, byMs)),
     /** Quiet: the caller toasts with the new reservation's id and state. */
