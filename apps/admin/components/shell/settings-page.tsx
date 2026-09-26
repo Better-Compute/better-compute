@@ -1,7 +1,7 @@
 'use client';
 
 import { useRef, useState } from 'react';
-import { useTheme } from 'next-themes';
+import { useTheme } from './theme';
 import { RiCompass3Line, RiDownload2Line, RiPuzzle2Line, RiSettings3Line, RiUpload2Line } from 'react-icons/ri';
 import { ConnectionPanel } from './connection-panel';
 import { TOUR_EVENT } from './tour';

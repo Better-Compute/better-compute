@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { RiMoonLine, RiSunLine } from 'react-icons/ri';
-import { useTheme } from 'next-themes';
+import { useTheme } from '@/components/shell/theme';
 import { cx } from '@/utils/cx';
 
 /**

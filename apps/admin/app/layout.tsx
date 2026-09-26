@@ -1,7 +1,9 @@
 import type { Metadata, Viewport } from 'next';
 import { IBM_Plex_Mono, IBM_Plex_Sans } from 'next/font/google';
 import { connection } from 'next/server';
+import Script from 'next/script';
 import type { ReactNode } from 'react';
+import { THEME_BOOTSTRAP } from '@/lib/theme-script';
 import { Providers } from './providers';
 import './globals.css';
 
@@ -29,6 +31,10 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
   return (
     <html lang="en" className={`${sans.variable} ${mono.variable} dark`} suppressHydrationWarning>
       <body className="min-h-dvh font-sans antialiased">
+        {/* Applies the saved theme before the page is interactive (Next injects it into <head>). */}
+        <Script id="bc-admin-theme" strategy="beforeInteractive">
+          {THEME_BOOTSTRAP}
+        </Script>
         <Providers initialNow={initialNow}>{children}</Providers>
       </body>
     </html>

@@ -3,7 +3,7 @@
 import { useRouter } from 'next/navigation';
 import { useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
 import { Dialog, Modal, ModalOverlay } from 'react-aria-components';
-import { useTheme } from 'next-themes';
+import { useTheme } from './theme';
 import {
   RiArrowRightLine,
   RiCompass3Line,

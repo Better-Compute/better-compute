@@ -1,6 +1,6 @@
 'use client';
 
-import { ThemeProvider } from 'next-themes';
+import { ThemeProvider } from '@/components/shell/theme';
 import { RouterProvider } from 'react-aria-components';
 import { useRouter } from 'next/navigation';
 import type { ReactNode } from 'react';
@@ -12,8 +12,8 @@ import { FeedbackProvider } from '@/components/ui/feedback';
 export function Providers({ initialNow, children }: { initialNow: number; children: ReactNode }) {
   const router = useRouter();
   return (
-    // Dark first, like a control room; the toggle and a saved choice still win.
-    <ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false} disableTransitionOnChange>
+    // Dark first, like a control room; the toggle and a saved choice still win (see THEME_BOOTSTRAP).
+    <ThemeProvider>
       <RouterProvider navigate={router.push}>
         <ConnectionProvider>
           <WorkspaceProvider initialNow={initialNow}>
