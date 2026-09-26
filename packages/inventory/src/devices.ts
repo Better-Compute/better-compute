@@ -67,6 +67,8 @@ export interface GpuSharing {
   replicas?: number;
 }
 export const defaultSlotsPerGpu: Readonly<Record<'timeslice' | 'mps', number>> = Object.freeze({ timeslice: 4, mps: 10 });
+/** Slots per shared GPU at most (`policy.sharing.replicas`): the gpu-sharing unit's limit. */
+export const maxSlotsPerGpu = 48;
 /** MPS divides a GPU into 100 units; each slot holds an equal share. */
 export const mpsUnitsPerGpu = 100;
 
@@ -109,7 +111,9 @@ export function devicesFromGpus(nodeId: string, section: GpusSection | undefined
     devices.push({ id: gpu.uuid, nodeId, class: 'gpu', bookable: !mig && !slotted && !pending, healthy, attributes });
     if (slotted) {
       const mode = sharing!.mode as 'timeslice' | 'mps';
-      const slots = Math.max(1, Math.min(64, Math.floor(sharing!.replicas ?? defaultSlotsPerGpu[mode])));
+      // At most 48, as the gpu-sharing unit configures the host: CUDA MPS serves 48 clients per GPU
+      // (Volta and later), so a 49th slot would be booked but never run.
+      const slots = Math.max(1, Math.min(maxSlotsPerGpu, Math.floor(sharing!.replicas ?? defaultSlotsPerGpu[mode])));
       for (let k = 0; k < slots; k++) {
         const child: DeviceAttributes = {
           gpuProduct: attributes.gpuProduct!,
