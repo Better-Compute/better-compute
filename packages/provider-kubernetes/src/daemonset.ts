@@ -83,6 +83,14 @@ export interface BcdDaemonSetOptions {
    * (`gpu.bcd.dev`, needs resource.k8s.io on the API server). A node runs one, never both.
    */
   gpuApi?: 'device-plugin' | 'dra';
+  /**
+   * The RuntimeClass that injects the NVIDIA driver's libraries and `nvidia-smi` into bcd's own container
+   * (default `nvidia`, which the GPU operator creates): bcd reads and resets GPUs through them. `null`
+   * when the image carries the driver's user space itself. bcd's container asks for every GPU with the
+   * `utility` capability only, which the runtime grants a privileged container even with
+   * accept-nvidia-visible-devices-envvar-when-unprivileged=false; workload pods still get CDI devices only.
+   */
+  nvidiaRuntimeClass?: string | null;
 }
 
 const dns1123Label = /^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$/;
@@ -206,6 +214,8 @@ export function bcdDaemonSetManifests(options: BcdDaemonSetOptions): KubernetesO
   for (const secret of options.imagePullSecrets ?? []) if (!dns1123Subdomain.test(secret)) invalid(`imagePullSecrets: ${secret} is not a Secret name`);
   const priorityClassName = options.priorityClassName === undefined ? 'system-node-critical' : options.priorityClassName;
   if (priorityClassName !== null && !dns1123Subdomain.test(priorityClassName)) invalid('priorityClassName must be a PriorityClass name');
+  const runtimeClassName = options.nvidiaRuntimeClass === undefined ? 'nvidia' : options.nvidiaRuntimeClass;
+  if (runtimeClassName !== null && !dns1123Subdomain.test(runtimeClassName)) invalid('nvidiaRuntimeClass must be a RuntimeClass name');
   const resources = {
     requests: { cpu: '100m', memory: '128Mi', ...options.resources?.requests },
     limits: { memory: '512Mi', ...options.resources?.limits },
@@ -283,6 +293,7 @@ export function bcdDaemonSetManifests(options: BcdDaemonSetOptions): KubernetesO
           enableServiceLinks: false,
           terminationGracePeriodSeconds: 30,
           ...(priorityClassName !== null ? { priorityClassName } : {}),
+          ...(runtimeClassName !== null ? { runtimeClassName } : {}),
           ...(options.nodeSelector && Object.keys(options.nodeSelector).length ? { nodeSelector: { ...options.nodeSelector } } : {}),
           tolerations: options.tolerations ? options.tolerations.map((toleration) => ({ ...toleration })) : [{ operator: 'Exists' }],
           ...(options.imagePullSecrets?.length ? { imagePullSecrets: options.imagePullSecrets.map((secret) => ({ name: secret })) } : {}),
@@ -316,7 +327,16 @@ export function bcdDaemonSetManifests(options: BcdDaemonSetOptions): KubernetesO
               image: options.image,
               imagePullPolicy: 'IfNotPresent',
               command: [bcdBinary, 'node', '--config', configPath],
-              env: [{ name: 'NODE_NAME', valueFrom: { fieldRef: { fieldPath: 'spec.nodeName' } } }],
+              env: [
+                { name: 'NODE_NAME', valueFrom: { fieldRef: { fieldPath: 'spec.nodeName' } } },
+                // bcd itself reads and resets every GPU (nvidia-smi, NVML): the driver's utilities only.
+                ...(runtimeClassName !== null
+                  ? [
+                      { name: 'NVIDIA_VISIBLE_DEVICES', value: 'all' },
+                      { name: 'NVIDIA_DRIVER_CAPABILITIES', value: 'utility' },
+                    ]
+                  : []),
+              ],
               securityContext: { runAsUser: 0, privileged: true, readOnlyRootFilesystem: true },
               resources,
               livenessProbe: { exec: { command: [bcdBinary, 'status'] }, initialDelaySeconds: 30, periodSeconds: 60, failureThreshold: 5 },

@@ -108,6 +108,15 @@ describe('hugepages, kernel-modules and k8s-join (PLAN.md §3.8)', () => {
   it('refuses sysctls that run programs as root or lower host defenses, as bcd does', async () => {
     for (const key of ['kernel.core_pattern', 'kernel.usermodehelper.bset', 'fs.protected_symlinks', 'user.max_user_namespaces', 'kernel.yama.ptrace_scope'])
       await expect(resolveHostConfig({ sysctl: { [key]: '0' } }, { labels: {} })).rejects.toThrow(/not settable/);
+    // Hardening-only keys: their safe values pass, the others are refused.
+    expect(await resolveHostConfig({ sysctl: { 'dev.tty.legacy_tiocsti': 0, 'kernel.io_uring_disabled': 2, 'net.ipv4.ip_unprivileged_port_start': 1024 } }, { labels: {} }))
+      .toMatchObject({ config: { sysctl: { 'kernel.io_uring_disabled': 2 } } });
+    for (const [key, value] of [['dev.tty.legacy_tiocsti', 1], ['dev.tty.ldisc_autoload', 1], ['kernel.io_uring_disabled', 0], ['net.ipv4.ip_unprivileged_port_start', 0]] as const)
+      await expect(resolveHostConfig({ sysctl: { [key]: value } }, { labels: {} })).rejects.toThrow(/may only be/);
+    // Module options that turn off VFIO's protections.
+    await expect(resolveHostConfig({ 'kernel-modules': { options: { vfio: 'enable_unsafe_noiommu_mode=1' } } }, { labels: {} })).rejects.toThrow(/protection/);
+    await expect(resolveHostConfig({ 'kernel-modules': { options: { 'vfio-iommu-type1': 'allow-unsafe-interrupts=1' } } }, { labels: {} })).rejects.toThrow(/protection/);
+    expect(await resolveHostConfig({ 'kernel-modules': { options: { kvm_intel: 'nested=1' } } }, { labels: {} })).toBeTruthy();
     expect(await resolveHostConfig({ sysctl: { 'vm.swappiness': 10, 'net.core.somaxconn': 4096 } }, { labels: {} })).toEqual({
       config: { sysctl: { 'vm.swappiness': 10, 'net.core.somaxconn': 4096 } },
     });

@@ -72,6 +72,8 @@ bcd keeps its node key and journal in the hostPath `/var/lib/bcd` (files 0600, o
 | `priorityClassName` | `system-node-critical` | `null` for none. |
 | `imagePullSecrets`, `resources` | none; 100m / 128Mi requests, 512Mi limit | |
 | `hostUnits` | `false` | |
+| `nvidiaRuntimeClass` | `nvidia` | The RuntimeClass that gives bcd's own container the driver's utilities (`nvidia-smi`, NVML; `NVIDIA_VISIBLE_DEVICES=all` with the `utility` capability only). `null` when the image carries them. Workload pods are unaffected. |
+| `gpuApi` | device plugin | `dra` for bcd's DRA driver (`[kubernetes] gpu_api`). |
 | `gatewayServerName`, `logLevel` | none, `info` | |
 
 The contract with bcd is checked on both sides. `scripts/daemon-k8s-contract.mjs` writes `daemon/cmd/bcd/testdata/k8s-daemonset.json`, and bcd's `TestKubernetesDaemonSetContract` parses its `config.toml` and command lines with bcd's own parser and flag sets. Tests: [`tests/provider-kubernetes.test.ts`](../../tests/provider-kubernetes.test.ts).

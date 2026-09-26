@@ -45,6 +45,13 @@ describe('bcd as a Kubernetes DaemonSet', () => {
     expect(bcd.command).toEqual(['/usr/local/bin/bcd', 'node', '--config', '/etc/bcd/config.toml']);
     expect(bcd.volumeMounts.map((m: { name: string }) => m.name)).not.toContain('join-token');
     expect(JSON.stringify(bcd.env)).not.toMatch(/TOKEN/);
+    // bcd sees the driver's utilities (nvidia-smi) through the NVIDIA runtime; the join container does not.
+    expect(pod.runtimeClassName).toBe('nvidia');
+    expect(bcd.env).toEqual(expect.arrayContaining([{ name: 'NVIDIA_VISIBLE_DEVICES', value: 'all' }, { name: 'NVIDIA_DRIVER_CAPABILITIES', value: 'utility' }]));
+    expect(join.env).toBeUndefined();
+    const plain = podOf(bcdDaemonSetManifests({ ...options, nvidiaRuntimeClass: null }));
+    expect(plain.runtimeClassName).toBeUndefined();
+    expect(JSON.stringify(plain.containers[0].env)).not.toMatch(/NVIDIA/);
     expect(pod.automountServiceAccountToken).toBe(false);
     expect(pod.hostNetwork).toBe(true);
     // The token Secret is referenced by name only, read-only, as `token`.

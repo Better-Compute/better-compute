@@ -148,6 +148,28 @@ export const forbiddenSysctls: readonly string[] = Object.freeze([
   'kernel.apparmor_restrict_unprivileged_userns',
 ]);
 
+/**
+ * Keys bcd lets through only at safe values (a894cd2): set them to harden, never to loosen.
+ */
+export const restrictedSysctls: Readonly<Record<string, { what: string; allows(value: string): boolean }>> = Object.freeze({
+  'dev.tty.legacy_tiocsti': { what: '0', allows: (value) => value === '0' },
+  'dev.tty.ldisc_autoload': { what: '0', allows: (value) => value === '0' },
+  'kernel.io_uring_disabled': { what: '1 or 2', allows: (value) => value === '1' || value === '2' },
+  'net.ipv4.ip_unprivileged_port_start': {
+    what: '1024 or more',
+    allows: (value) => /^\d{1,5}$/.test(value) && Number(value) >= 1024 && Number(value) <= 65536,
+  },
+});
+
+/**
+ * Module options bcd refuses (a894cd2): each turns off a protection VFIO passthrough depends on
+ * (`module` → option names; `-` and `_` are the same in module names).
+ */
+export const forbiddenModuleOptions: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  vfio: ['enable_unsafe_noiommu_mode'],
+  vfio_iommu_type1: ['allow_unsafe_interrupts'],
+});
+
 function sysctlForbidden(key: string): boolean {
   return forbiddenSysctls.some((rule) => {
     if (rule.endsWith('.*')) return key.startsWith(rule.slice(0, -1)) || key === rule.slice(0, -2);
@@ -224,6 +246,11 @@ function validateKernelModules(settings: Record<string, Json>): Record<string, J
     for (const [name, value] of Object.entries(options as Record<string, Json>)) {
       if (!moduleName.test(name)) bad(`options: ${name} is not a module name`);
       if (typeof value !== 'string' || !moduleOptions.test(value)) bad(`options.${name} must be "key=value …" (letters, digits and _.,:=/ -)`);
+      const refused = forbiddenModuleOptions[name.replace(/-/g, '_')] ?? [];
+      for (const option of (value as string).split(/\s+/).filter(Boolean)) {
+        const key = option.split('=')[0]!.replace(/-/g, '_');
+        if (refused.includes(key)) bad(`options.${name}: ${key} turns off a protection GPU passthrough depends on`);
+      }
     }
     out.options = Object.fromEntries(Object.entries(options as Record<string, string>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
   }
@@ -305,6 +332,8 @@ async function validateUnit(unit: ConfigUnitDefinition, name: string, settings: 
         throw new ComputeError('INVALID_INPUT', `hostConfig.sysctl.${key} must be a sysctl name with a scalar value`);
       else if (sysctlForbidden(key))
         throw new ComputeError('INVALID_INPUT', `hostConfig.sysctl.${key} is not settable: it runs programs as root or lowers the host's defenses`);
+      else if (Object.hasOwn(restrictedSysctls, key) && !restrictedSysctls[key]!.allows(String(value)))
+        throw new ComputeError('INVALID_INPUT', `hostConfig.sysctl.${key} may only be ${restrictedSysctls[key]!.what}: other values lower the host's defenses`);
     return settings;
   }
   if (name === 'k8s-join') return validateK8sJoin(settings);
