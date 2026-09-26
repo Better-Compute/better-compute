@@ -109,6 +109,7 @@ const PULSE_METRICS = {
 /** A fleet metric over the workspace range: utilization (GPU vs CPU), GPUs allocated, sandboxes or power. */
 export function PulseChart({ size, settings }: WidgetProps) {
   const { key, spec: range } = useRange();
+  const { compareAt } = useWorkspaceSettings();
   const metric = (String(settings.metric) in PULSE_METRICS ? settings.metric : 'utilization') as keyof typeof PULSE_METRICS;
   const series = useLive((now, scope) => pulseSeries(now, range.points, range.step, scope), {
     bucketMs: Math.min(range.step, 60_000),
@@ -149,6 +150,7 @@ export function PulseChart({ size, settings }: WidgetProps) {
         yFormat={format}
         xFormat={(t) => (long ? new Date(t).toISOString().slice(5, 10) : fmtClock(t, false))}
         series={lines}
+        markers={compareAt ? [{ t: compareAt, label: 'compared', tone: 'signal' }] : undefined}
       />
     </div>
   );
