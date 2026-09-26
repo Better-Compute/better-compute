@@ -86,6 +86,36 @@ type Condition struct {
 	Message string
 }
 
+// RebootRequired is the error of a unit whose desired state takes effect only after a reboot (the
+// boot loader's arguments, a GPU mode that waits for a reset, a driver in use). bcd never reboots
+// on its own: the section keeps retrying, and the node reports condition RebootRequired so the
+// control plane or an operator reboots it within the disruption budget.
+type RebootRequired struct{ Err error }
+
+func (r *RebootRequired) Error() string { return r.Err.Error() }
+func (r *RebootRequired) Unwrap() error { return r.Err }
+
+// RebootPhrase is in every RebootRequired message: a unit applied by bcd helper comes back as text,
+// and the phrase is how the node still recognises it.
+const RebootPhrase = "reboot the node"
+
+// needsReboot is a RebootRequired error (fmt.Errorf's format, %w included); the message must say
+// RebootPhrase.
+func needsReboot(format string, args ...any) error {
+	err := fmt.Errorf(format, args...)
+	if !strings.Contains(err.Error(), RebootPhrase) {
+		err = fmt.Errorf("%w: %s", err, RebootPhrase)
+	}
+	return &RebootRequired{Err: err}
+}
+
+// IsRebootRequired reports whether err says the host needs a reboot to converge, typed or as the
+// helper's text.
+func IsRebootRequired(err error) bool {
+	var r *RebootRequired
+	return err != nil && (errors.As(err, &r) || strings.Contains(err.Error(), RebootPhrase))
+}
+
 // Reporter is a unit that reports conditions while the spec names it.
 type Reporter interface {
 	Unit
@@ -107,6 +137,8 @@ type Registry struct {
 	// unprivileged bcd node asks bcd helper, which plans the unit again as root). settings is nil
 	// for a unit the spec no longer names (clean it).
 	Delegate func(ctx context.Context, unit string, settings json.RawMessage) error
+	// Observe, when set, hears each applied unit's outcome (nil: converged in this pass).
+	Observe func(unit string, err error)
 }
 
 // Options configure the built-in units.
@@ -164,8 +196,8 @@ func (r *Registry) Names() []string {
 // Plan plans every unit of the spec, and cleans the Cleaners the spec no longer names. Each unit
 // that is not converged becomes one action which plans again when it runs, against the host as the
 // units before it left it, and applies those steps. A unit that fails to plan up front still gets its
-// action (the unit before it may be what it waits for), so one unit's failure does not hold back the
-// others: the section fails with the first error, after every other unit had its turn.
+// action (the unit before it may be what it waits for), and a unit that fails to apply does not stop
+// the ones after it: a last action reports every failure once all units had their turn.
 func (r *Registry) Plan(ctx context.Context, sys System, configs []Config) ([]converge.Action, error) {
 	byName := make(map[string]json.RawMessage, len(configs))
 	for _, c := range configs {
@@ -183,7 +215,7 @@ func (r *Registry) Plan(ctx context.Context, sys System, configs []Config) ([]co
 	sort.Strings(unknown)
 
 	var actions []converge.Action
-	var deferred []error
+	var deferred, failed []error
 	for _, u := range r.units {
 		settings, named := byName[u.Name()]
 		if named && len(bytes.TrimSpace(settings)) == 0 {
@@ -207,24 +239,36 @@ func (r *Registry) Plan(ctx context.Context, sys System, configs []Config) ([]co
 			continue
 		}
 		name := u.Name()
+		apply := func(ctx context.Context) error {
+			if r.Delegate != nil {
+				var s json.RawMessage
+				if named {
+					s = settings
+				}
+				return r.Delegate(ctx, name, s)
+			}
+			steps, err := plan(ctx)
+			if err != nil {
+				return err
+			}
+			for _, s := range steps {
+				if err := s.Apply(ctx); err != nil {
+					return fmt.Errorf("%s: %w", s.Description, err)
+				}
+			}
+			return nil
+		}
+		// A unit's failure is recorded, not returned: converge stops a section at the first failing
+		// action, and one unit waiting (for a reboot, a package) must not hold back the rest.
 		actions = append(actions, converge.Action{
 			Description: "unit " + name,
 			Apply: func(ctx context.Context) error {
-				if r.Delegate != nil {
-					var s json.RawMessage
-					if named {
-						s = settings
-					}
-					return r.Delegate(ctx, name, s)
+				err := apply(ctx)
+				if r.Observe != nil {
+					r.Observe(name, err)
 				}
-				steps, err := plan(ctx)
 				if err != nil {
-					return err
-				}
-				for _, s := range steps {
-					if err := s.Apply(ctx); err != nil {
-						return fmt.Errorf("%s: %w", s.Description, err)
-					}
+					failed = append(failed, fmt.Errorf("%s: %w", name, err))
 				}
 				return nil
 			},
@@ -233,16 +277,37 @@ func (r *Registry) Plan(ctx context.Context, sys System, configs []Config) ([]co
 	for _, name := range unknown {
 		deferred = append(deferred, converge.Terminal(fmt.Errorf("unit %s is not supported by this daemon", name)))
 	}
-	if len(deferred) > 0 {
-		// Last, so the units that can converge do.
-		failure := errors.Join(deferred...)
+	if len(deferred) > 0 || len(actions) > 0 {
+		// Last, so every unit that can converge does: the section reports what failed, retryable
+		// while any failure is (a terminal one alone fails it).
 		actions = append(actions, converge.Action{
 			Description: "host units",
-			Apply:       func(context.Context) error { return failure },
+			Apply: func(context.Context) error {
+				all := append(append([]error(nil), failed...), deferred...)
+				if len(all) == 0 {
+					return nil
+				}
+				joined := errors.Join(all...)
+				for _, err := range all {
+					if !errors.Is(err, converge.ErrTerminal) {
+						return retryable{joined}
+					}
+				}
+				return joined
+			},
 		})
 	}
 	return actions, nil
 }
+
+// retryable carries a joined error whose parts include a terminal one without being terminal
+// itself: errors.Is(retryable, converge.ErrTerminal) is false, the text is all of them.
+type retryable struct{ err error }
+
+func (r retryable) Error() string { return r.err.Error() }
+
+// As lets errors.As find a RebootRequired among the parts (Is stays false for ErrTerminal).
+func (r retryable) As(target any) bool { return errors.As(r.err, target) }
 
 // Conditions collects the conditions of the spec's units that report some, in unit order.
 func (r *Registry) Conditions(ctx context.Context, sys System, configs []Config) []Condition {

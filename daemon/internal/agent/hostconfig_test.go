@@ -63,6 +63,35 @@ func TestHostSectionConverges(t *testing.T) {
 	}
 }
 
+func TestHostSectionReportsRebootRequired(t *testing.T) {
+	h := newHarness(t, nil)
+	root := h.host.root
+	hostFile(t, root, "/usr/sbin/update-grub", "#!/bin/sh\n") // found by LookPath; recorded, not run
+	hostFile(t, root, "/proc/sys/vm/swappiness", "60\n")
+	s, _ := h.open()
+	s.push(desired(1, &agentv1.NodeSpec{Host: &agentv1.HostSection{Units: []*agentv1.ConfigUnit{
+		{Unit: "cpu", ConfigJson: `{"isolate":"2-3"}`},
+		{Unit: "sysctl", ConfigJson: `{"vm.swappiness":10}`},
+	}}}))
+	status := s.next(t, "status", func(f *agentv1.AgentFrame) bool { return f.GetStatus() != nil }).GetStatus()
+	var reboot *agentv1.Condition
+	for _, c := range status.GetConditions() {
+		if c.GetType() == "RebootRequired" {
+			reboot = c
+		}
+	}
+	if reboot == nil || reboot.GetReason() != "cpu" || !strings.Contains(reboot.GetMessage(), "reboot the node") {
+		t.Fatalf("conditions = %v", status.GetConditions())
+	}
+	// The unit waiting for the reboot held nothing back.
+	if b, _ := os.ReadFile(filepath.Join(root, "proc/sys/vm/swappiness")); string(b) != "10\n" {
+		t.Fatalf("swappiness = %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(root, "etc/default/grub.d/90-bcd-cpu.cfg")); !strings.Contains(string(b), "isolcpus=managed_irq,domain,2-3") {
+		t.Fatalf("drop-in = %q", b)
+	}
+}
+
 func TestExternalHostAppliesNoUnit(t *testing.T) {
 	h := newHarness(t, func(o *Options) { o.ExternalHost = true })
 	hostFile(t, h.host.root, "/proc/sys/vm/swappiness", "60\n")

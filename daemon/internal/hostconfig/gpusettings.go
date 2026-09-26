@@ -99,7 +99,7 @@ func (g GPUSettings) Plan(ctx context.Context, sys System, settings json.RawMess
 		}
 	}
 	if len(pendingECC) > 0 {
-		actions = append(actions, fail(fmt.Errorf("gpu-settings: the ECC mode of GPU(s) %s changes at their next reset: reboot the node", strings.Join(pendingECC, ", "))))
+		actions = append(actions, fail(needsReboot("gpu-settings: the ECC mode of GPU(s) %s changes at their next reset: reboot the node", strings.Join(pendingECC, ", "))))
 	}
 	return actions, nil
 }

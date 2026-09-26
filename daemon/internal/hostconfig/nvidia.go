@@ -147,7 +147,7 @@ func (d NvidiaDriver) Plan(ctx context.Context, sys System, settings json.RawMes
 					_, _ = sys.Run(ctx, Cmd{Name: "systemctl", Args: []string{"stop", svc}})
 				}
 				if _, err := sys.Run(ctx, Cmd{Name: "modprobe", Args: []string{"-r", "nvidia_uvm", "nvidia_drm", "nvidia_modeset", "nvidia"}}); err != nil {
-					return fmt.Errorf("driver %s is in use; reboot the node to load branch %s: %w", old, s.Branch, err)
+					return needsReboot("driver %s is in use; reboot the node to load branch %s: %w", old, s.Branch, err)
 				}
 				return nil
 			},
@@ -164,7 +164,7 @@ func (d NvidiaDriver) Plan(ctx context.Context, sys System, settings json.RawMes
 					return err
 				}
 				if branchOf(v) != s.Branch || !flavorOK(open) {
-					return fmt.Errorf("driver %q is loaded, not branch %s; reboot the node", v, s.Branch)
+					return needsReboot("driver %q is loaded, not branch %s; reboot the node", v, s.Branch)
 				}
 				return nil
 			},

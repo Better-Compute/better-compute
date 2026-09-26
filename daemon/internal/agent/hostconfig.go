@@ -35,6 +35,8 @@ type hostConverger struct {
 
 	mu         sync.Mutex
 	conditions []*agentv1.Condition
+	// reboots are this pass's units that converge only after a reboot (RebootRequired).
+	reboots map[string]string
 }
 
 func newHostConverger(a *Agent) *hostConverger {
@@ -69,19 +71,23 @@ func (c *hostConverger) Plan(ctx context.Context, desired []byte) ([]converge.Ac
 			return h.HostUnit(ctx, unit, settings, busy)
 		}
 	}
+	c.mu.Lock()
+	c.reboots = map[string]string{}
+	c.mu.Unlock()
+	// What the units change shows in the inventory (driver version, MIG devices, hugepages); a unit
+	// that waits for a reboot is reported as RebootRequired.
+	reg.Observe = func(unit string, err error) {
+		go c.a.refreshSections()
+		if hostconfig.IsRebootRequired(err) {
+			c.mu.Lock()
+			c.reboots[unit] = err.Error()
+			c.mu.Unlock()
+		}
+	}
 	actions, err := reg.Plan(ctx, c.sys, configs)
 	c.setConditions(reg.Conditions(ctx, c.sys, configs))
 	if err != nil {
 		return nil, err
-	}
-	// What the units change shows in the inventory (driver version, MIG devices, hugepages).
-	for i := range actions {
-		apply := actions[i].Apply
-		actions[i].Apply = func(ctx context.Context) error {
-			err := apply(ctx)
-			go c.a.refreshSections()
-			return err
-		}
 	}
 	return actions, nil
 }
@@ -126,12 +132,38 @@ func (c *hostConverger) setConditions(conds []hostconfig.Condition) {
 	c.mu.Unlock()
 }
 
-// currentConditions are the units' conditions of the last pass (StatusReport.conditions).
+// currentConditions are the units' conditions of the last pass (StatusReport.conditions), and
+// RebootRequired while a unit converges only after a reboot (its reason names the units).
 func (c *hostConverger) currentConditions() []*agentv1.Condition {
 	if c == nil {
 		return nil
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return cloneConditions(c.conditions)
+	out := cloneConditions(c.conditions)
+	if len(c.reboots) > 0 {
+		units := make([]string, 0, len(c.reboots))
+		for u := range c.reboots {
+			units = append(units, u)
+		}
+		sort.Strings(units)
+		msgs := make([]string, 0, len(units))
+		for _, u := range units {
+			msgs = append(msgs, c.reboots[u])
+		}
+		out = append(out, &agentv1.Condition{
+			Type:    "RebootRequired",
+			Status:  agentv1.ConditionStatus_CONDITION_STATUS_TRUE,
+			Reason:  strings.Join(units, ","),
+			Message: truncate(strings.Join(msgs, "; "), 1024),
+		})
+	}
+	return out
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }

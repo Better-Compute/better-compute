@@ -284,7 +284,7 @@ func (m MigLayout) resetIfPending(sys System, g migGPU, want string) converge.Ac
 					continue
 				}
 				if _, err := sys.Run(ctx, Cmd{Name: "nvidia-smi", Args: []string{"--gpu-reset", "-i", g.Index}}); err != nil {
-					return fmt.Errorf("MIG mode %s waits for a GPU reset, which failed (reboot the node): %w", strings.ToLower(want), err)
+					return needsReboot("MIG mode %s waits for a GPU reset, which failed (reboot the node): %w", strings.ToLower(want), err)
 				}
 			}
 			return nil

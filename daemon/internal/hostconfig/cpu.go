@@ -137,7 +137,7 @@ func (c CPU) Plan(ctx context.Context, sys System, settings json.RawMessage) ([]
 		return nil, err
 	}
 	if live, _ := ParseCPUList(have); FormatCPUList(live) != want {
-		actions = append(actions, fail(fmt.Errorf("cpu: CPUs %s are isolated from the next boot (now: %q): reboot the node", want, have)))
+		actions = append(actions, fail(needsReboot("cpu: CPUs %s are isolated from the next boot (now: %q): reboot the node", want, have)))
 	}
 	return actions, nil
 }

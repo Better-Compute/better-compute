@@ -75,7 +75,7 @@ func (u IOMMU) Plan(_ context.Context, sys System, settings json.RawMessage) ([]
 		return nil, err
 	}
 	if len(active) == 0 {
-		actions = append(actions, fail(fmt.Errorf("iommu: the IOMMU is on from the next boot (%s): reboot the node; check the firmware enables VT-d or AMD-Vi", strings.Join(args, " "))))
+		actions = append(actions, fail(needsReboot("iommu: the IOMMU is on from the next boot (%s): reboot the node; check the firmware enables VT-d or AMD-Vi", strings.Join(args, " "))))
 	}
 	return actions, nil
 }

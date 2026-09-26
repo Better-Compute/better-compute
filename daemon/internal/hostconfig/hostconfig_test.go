@@ -20,12 +20,16 @@ func runAll(t *testing.T, r *Registry, sys System, configs ...Config) (int, erro
 	if err != nil {
 		return 0, err
 	}
-	for i, a := range actions {
+	units := 0 // the units applied; the last action only reports their failures
+	for _, a := range actions {
 		if err := a.Apply(context.Background()); err != nil {
-			return i, fmt.Errorf("%s: %w", a.Description, err)
+			return units, fmt.Errorf("%s: %w", a.Description, err)
+		}
+		if a.Description != "host units" {
+			units++
 		}
 	}
-	return len(actions), nil
+	return units, nil
 }
 
 func unit(name, settings string) Config {
@@ -171,6 +175,32 @@ func hugepageHost() *FakeSystem {
 	sys.Set(THPEnabled, "[always] madvise never\n")
 	sys.Set("/proc/mounts", "hugetlbfs /dev/hugepages hugetlbfs rw,relatime,pagesize=2M 0 0\n")
 	return sys
+}
+
+func TestAUnitWaitingForARebootDoesNotHoldBackTheRest(t *testing.T) {
+	sys := hugepageHost()
+	sys.Set("/proc/mounts", "hugetlbfs /dev/hugepages1G hugetlbfs rw,pagesize=1024M 0 0\n")
+	sys.Programs["update-grub"] = true
+	sys.Set("/proc/sys/vm/swappiness", "60\n")
+	short := &shortKernel{FakeSystem: sys, keep: Hugepages1GDir + "/nr_hugepages"}
+	var observed []string
+	r := NewRegistry(Hugepages{}, Sysctl{})
+	r.Observe = func(unit string, err error) { observed = append(observed, fmt.Sprintf("%s:%v", unit, err != nil)) }
+	_, err := runAll(t, r, short, unit("hugepages", `{"pages1g":2}`), unit("sysctl", `{"vm.swappiness":5}`))
+	if !IsRebootRequired(err) || errors.Is(err, converge.ErrTerminal) {
+		t.Fatalf("err = %v", err)
+	}
+	if v, _ := sys.Get("/proc/sys/vm/swappiness"); v != "5\n" {
+		t.Fatal("the sysctl after a unit waiting for a reboot was held back")
+	}
+	if !slices.Equal(observed, []string{"hugepages:true", "sysctl:false"}) {
+		t.Fatalf("observed %q", observed)
+	}
+	// A terminal failure next to a retryable one: the section retries.
+	_, err = runAll(t, r, short, unit("hugepages", `{"pages1g":2}`), unit("sysctl", `{"vm.swappiness":{"x":1}}`))
+	if err == nil || errors.Is(err, converge.ErrTerminal) {
+		t.Fatalf("mixed: %v", err)
+	}
 }
 
 func TestHugepages(t *testing.T) {

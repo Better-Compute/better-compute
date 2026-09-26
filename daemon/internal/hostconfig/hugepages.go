@@ -219,7 +219,7 @@ func planPool(sys System, nr, size string, want int64, boot func() ([]converge.A
 					return fmt.Errorf("%w; %s: %w", short, s.Description, err)
 				}
 			}
-			return fmt.Errorf("%w; the boot loader reserves them from the next boot: reboot the node", short)
+			return needsReboot("%w; the boot loader reserves them from the next boot: reboot the node", short)
 		},
 	})
 	return actions, nil
