@@ -262,7 +262,17 @@ function usage(fleet: Fleet, kind: Kind) {
   return `${used * unit}/${total * unit}`;
 }
 
-export function FleetBoard({ className }: { className?: string }) {
+/** The number of recent events a compact board shows under its rows. */
+const COMPACT_LOG_LINES = 3;
+
+export function FleetBoard({
+  className,
+  compact = false,
+}: {
+  className?: string;
+  /** For a half-width column: the events run under the rows instead of beside them, and rows are shorter. */
+  compact?: boolean;
+}) {
   const [fleet, dispatch] = useReducer(
     (state: Fleet, now: number) => step(state, now),
     undefined,
@@ -307,9 +317,14 @@ export function FleetBoard({ className }: { className?: string }) {
         </span>
       </div>
 
-      <div className="grid lg:grid-cols-[minmax(0,1fr)_16rem] xl:grid-cols-[minmax(0,1fr)_19rem]">
+      <div
+        className={cx(
+          'grid',
+          !compact && 'lg:grid-cols-[minmax(0,1fr)_16rem] xl:grid-cols-[minmax(0,1fr)_19rem]',
+        )}
+      >
         <ol
-          className="scanlines flex flex-col gap-1.5 px-3 py-3"
+          className={cx('scanlines flex flex-col px-3 py-3', compact ? 'gap-1' : 'gap-1.5')}
           aria-label="Simulated GPU nodes and CPU hosts"
         >
           {fleet.cells.map((row, index) => {
@@ -337,7 +352,10 @@ export function FleetBoard({ className }: { className?: string }) {
                           <span
                             key={start + i}
                             title={cell ?? (machine.cordoned ? 'cordoned' : 'idle')}
-                            className="gpu-cell block h-3.5 min-w-[4px] flex-1 sm:h-4"
+                            className={cx(
+                              'gpu-cell block min-w-[4px] flex-1',
+                              compact ? 'h-3 sm:h-3.5' : 'h-3.5 sm:h-4',
+                            )}
                             data-state={
                               machine.cordoned
                                 ? 'cordoned'
@@ -371,12 +389,30 @@ export function FleetBoard({ className }: { className?: string }) {
           })}
         </ol>
 
-        <div className="flex flex-col border-t border-separator-border lg:border-t-0 lg:border-s">
-          <p className="border-b border-separator-border px-3 py-2 tracking-[0.06em] text-text-tertiary uppercase">
+        <div
+          className={cx(
+            'flex border-t border-separator-border',
+            compact ? 'flex-row' : 'flex-col lg:border-t-0 lg:border-s',
+          )}
+        >
+          <p
+            className={cx(
+              'shrink-0 tracking-[0.06em] text-text-tertiary uppercase',
+              compact
+                ? 'border-e border-separator-border px-3 py-2'
+                : 'border-b border-separator-border px-3 py-2',
+            )}
+          >
             Events
           </p>
-          <ol className="flex flex-1 flex-col gap-1.5 overflow-hidden px-3 py-3" aria-live="off">
-            {fleet.log.map((line) => (
+          <ol
+            className={cx(
+              'flex min-w-0 flex-1 flex-col overflow-hidden px-3',
+              compact ? 'gap-1 py-2' : 'gap-1.5 py-3',
+            )}
+            aria-live="off"
+          >
+            {(compact ? fleet.log.slice(0, COMPACT_LOG_LINES) : fleet.log).map((line) => (
               <li key={line.seq} className="flex gap-2 truncate">
                 <span
                   className={cx(

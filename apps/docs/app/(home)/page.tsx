@@ -12,7 +12,7 @@ import {
   RiTerminalBoxLine,
 } from 'react-icons/ri';
 import { CommandLanes } from '@/components/home/command-lanes';
-import { CountUp } from '@/components/home/count-up';
+import { Console } from '@/components/home/console';
 import { DeepDives, type DeepDive } from '@/components/home/deep-dives';
 import { FleetPlan } from '@/components/home/fleet-plan';
 import { RunsOnStrip } from '@/components/home/framework-strip';
@@ -25,6 +25,7 @@ import { ModuleRack } from '@/components/home/module-rack';
 import { MotionProvider } from '@/components/home/motion';
 import { PlacementDemo } from '@/components/home/placement-demo';
 import { QuickstartTerminal } from '@/components/home/quickstart-terminal';
+import type { RackUnit } from '@/components/home/rack-index';
 import { Resources } from '@/components/home/resources';
 import { SandboxPanel } from '@/components/home/sandbox-panel';
 import { SignalPath } from '@/components/home/signal-path';
@@ -48,11 +49,24 @@ export const metadata: Metadata = pageMetadata({
   image: siteImages.home,
 });
 
+/** The console's units, in rack order; the pinned index lists them and lights the one in view. */
+const units: RackUnit[] = [
+  { id: 'capacity', unit: '01', label: 'Capacity' },
+  { id: 'signal-path', unit: '02', label: 'Signal path' },
+  { id: 'deep-dives', unit: '03', label: 'Deep dives' },
+  { id: 'guarantees', unit: '04', label: 'Guarantees' },
+  { id: 'modules', unit: '05', label: 'Modules' },
+  { id: 'quickstart', unit: '06', label: 'Quickstart' },
+  { id: 'reference', unit: '07', label: 'Reference' },
+];
+
 /**
- * The landing page, laid out as an operator's console rather than a scroll of chapters: the fleet board, one ledger
- * for three kinds of capacity, the signal path, the interactive diagrams as channels of one monitor, the datasheet,
- * the module rack, and a terminal session. Every claim is checked against the code (packages/*\/src), the generated
- * reference (generated/*.json, through lib/stats.ts), or PLAN.md where it says what is designed rather than shipped.
+ * The landing page, laid out as an operator's console: a one-screen hero (the claim beside a live fleet board,
+ * then a readout of the reference), the platforms it runs on, and the units in one rack frame with a pinned index:
+ * one ledger for three kinds of capacity, the signal path, the interactive diagrams as channels of one monitor, the
+ * datasheet, the module rack, a terminal session and where to go next. Every claim is checked against the code
+ * (packages/*\/src), the generated reference (generated/*.json, through lib/stats.ts), or PLAN.md where it says what
+ * is designed rather than shipped.
  */
 export default function HomePage() {
   const dives: DeepDive[] = [
@@ -143,57 +157,30 @@ export default function HomePage() {
         <JsonLd data={siteJsonLd()} />
         <Hero />
         <RunsOnStrip />
-        <Resources />
-        <SignalPath />
-        <Band id="deep-dives" unit="03">
-          <div className={cx('flex flex-col gap-10 py-16 md:py-20', gutter)}>
-            <SectionHeading index="03" eyebrow="Deep dives" title="Eight channels into the machine room">
-              Each channel is a working model of one part of the system: race two placements, edit an
-              audit row and watch its proof fail, cut a node&rsquo;s session mid-command. Pick a channel; only that one runs.
-            </SectionHeading>
-            <DeepDives dives={dives} />
-          </div>
-        </Band>
-        <SpecSheet />
-        <ModuleRack />
-        <QuickstartTerminal />
-        <Closing />
+        <Console units={units}>
+          <Resources />
+          <SignalPath />
+          <Band id="deep-dives" unit="03">
+            <div className={cx('flex flex-col gap-10 py-16 md:py-20', gutter)}>
+              <SectionHeading index="03" eyebrow="Deep dives" title="Eight channels into the machine room">
+                Each channel is a working model of one part of the system: race two placements, edit an
+                audit row and watch its proof fail, cut a node&rsquo;s session mid-command. Pick a channel; only that one runs.
+              </SectionHeading>
+              <DeepDives dives={dives} />
+            </div>
+          </Band>
+          <SpecSheet />
+          <ModuleRack />
+          <QuickstartTerminal />
+          <Closing />
+        </Console>
       </main>
     </MotionProvider>
   );
 }
 
-/** The last unit: the reference in numbers, and where to go next. */
+/** The last unit: where to go next. The reference in numbers opens the page, in the hero's readout. */
 function Closing() {
-  const numbers = [
-    {
-      value: stats.methods,
-      label: 'API methods',
-      detail:
-        stats.servedMethods === stats.methods
-          ? `all served today, in ${stats.groups} groups`
-          : `${stats.servedMethods} served today in ${stats.groups} groups`,
-      href: '/docs/reference/api',
-    },
-    {
-      value: stats.errorCodes,
-      label: 'error codes',
-      detail: 'each with its HTTP status',
-      href: '/docs/reference/errors',
-    },
-    {
-      value: stats.cliCommands,
-      label: 'CLI commands',
-      detail: 'dev --sim to audit verify',
-      href: '/docs/reference/cli',
-    },
-    {
-      value: stats.commandKinds,
-      label: 'command kinds',
-      detail: 'lanes, timeouts, roles',
-      href: '/docs/reference/command-kinds',
-    },
-  ];
   const paths: { icon: Icon; title: string; body: string; href: string }[] = [
     {
       icon: RiBookOpenLine,
@@ -263,31 +250,12 @@ function Closing() {
         </div>
 
         <div className="flex flex-col lg:col-span-7">
-          <ul className="grid grid-cols-2 gap-px border-b border-separator-border bg-separator-border sm:grid-cols-4">
-            {numbers.map((item) => (
-              <li key={item.label} className="bg-background-full">
-                <Link
-                  href={item.href}
-                  className="group flex h-full flex-col gap-1 px-5 py-6 transition-colors hover:bg-background-secondary-default"
-                >
-                  <CountUp
-                    value={item.value}
-                    className="font-mono text-[2rem] leading-none font-medium tracking-[-0.05em] text-text-primary tabular-nums group-hover:text-signal"
-                  />
-                  <span className="font-mono text-caption-1-medium text-text-primary">
-                    {item.label}
-                  </span>
-                  <span className="text-caption-1-regular text-text-tertiary">{item.detail}</span>
-                </Link>
-              </li>
-            ))}
-          </ul>
           <ul className="grid flex-1 grid-cols-2 gap-px bg-separator-border sm:grid-cols-3">
             {paths.map(({ icon: PathIcon, title, body, href }) => (
               <li key={href} className="bg-background-full">
                 <Link
                   href={href}
-                  className="group flex h-full flex-col justify-between gap-6 px-5 py-5 transition-colors hover:bg-background-secondary-default"
+                  className="group flex h-full min-h-32 flex-col justify-between gap-6 px-5 py-5 transition-colors hover:bg-background-secondary-default"
                 >
                   <span className="flex items-center justify-between">
                     <PathIcon

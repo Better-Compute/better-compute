@@ -15,7 +15,7 @@
 
 @theme {
   /* The marketing pages' content frame: every section, grid, and the header align to these rails. */
-  --container-site: 76rem;
+  --container-site: 82rem;
 }
 
 html {
@@ -298,6 +298,28 @@ figure.shiki {
   .rack-frame::after {
     display: block;
   }
+}
+
+/*
+ * The console (components/home/console.tsx): the units below the hero share one rack frame. A unit's own frame
+ * inside it gives up its rails, width and border, and its screws and unit tag (the index shows the unit numbers).
+ * Unlayered, so it wins over the frame's Tailwind utilities.
+ */
+.console-stack .rack-frame {
+  width: 100%;
+  max-width: none;
+  margin-inline: 0;
+  border-inline-width: 0;
+}
+
+.console-stack .rack-frame::before,
+.console-stack .rack-frame::after,
+.console-stack [data-rack-mark] {
+  display: none;
+}
+
+.console-stack > section:last-child {
+  border-bottom-width: 0;
 }
 
 /* One GPU in a fleet board: an outlined socket, filled amber when booked. */

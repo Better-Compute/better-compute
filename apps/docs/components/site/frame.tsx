@@ -66,6 +66,7 @@ export function Screw({ className }: { className?: string }) {
   return (
     <span
       aria-hidden
+      data-rack-mark=""
       className={cx(
         'pointer-events-none absolute z-10 hidden size-[7px] border border-text-tertiary bg-background-full sm:block',
         className,
@@ -79,6 +80,7 @@ function UnitTag({ unit }: { unit: string }) {
   return (
     <span
       aria-hidden
+      data-rack-mark=""
       className="pointer-events-none absolute top-0 left-0 z-10 hidden border-e border-b border-separator-border bg-background-full px-2 py-0.5 font-mono text-[0.6875rem] leading-4 tracking-[0.08em] text-text-tertiary sm:block"
     >
       U{unit}

@@ -72,8 +72,15 @@ more), and every color is a BoardUI semantic token or one of the signal tokens b
   panel.
 - `app/(home)/page.tsx` and `components/home/*`: the landing page, laid out as an operator's console rather than a
   scroll of chapters. In order:
-  - `hero.tsx`: the claim, and `fleet-board.tsx`, a simulated site whose GPU nodes and CPU hosts book and release
-    capacity under the placer's default scoring in miniature, labelled as a simulation.
+  - `hero.tsx`: one screen tall on a laptop. The claim, pitch and actions on the left; on the right
+    `fleet-board.tsx` (its `compact` variant), a simulated site whose GPU nodes and CPU hosts book and release
+    capacity under the placer's default scoring in miniature, labelled as a simulation; across the bottom a readout
+    of the reference counts from `lib/stats.ts` and the runtime spec plate. The headline's word reveal is pure CSS
+    so it paints before hydration.
+  - `framework-strip.tsx`: the hardware and platforms it runs on.
+  - `console.tsx` / `rack-index.tsx`: the units U01 to U07 hang in one rack frame, with a pinned index on the left
+    (from lg) that lights the unit in view. Inside `.console-stack` each unit's own frame gives up its rails, width,
+    screws and unit tag (`app/global.css`).
   - `resources.tsx` / `resource-switch.tsx`: GPU, CPU and sandbox as tabs, each with spec rows and the real API calls,
     highlighted on the server.
   - `signal-path.tsx`: a request's path from caller to node as a schematic, with amber pulses on the wires.
@@ -82,7 +89,7 @@ more), and every color is a BoardUI semantic token or one of the signal tokens b
   - `spec-sheet.tsx`: the guarantees as a datasheet, each with its mechanism and the test that checks it.
   - `module-rack.tsx`: the modules as rack units, read from `generated/modules.json`.
   - `quickstart-terminal.tsx`: the quickstart as a terminal session.
-  - A closing unit with the reference counts from `lib/stats.ts`.
+  - A closing unit: the pitch and where to go next.
 - `components/logo.tsx`: the amber chip mark beside the `better/compute` wordmark in Plex Mono.
 - `lib/code-themes.ts`: instrument Shiki themes (amber keywords on graphite).
 - `components/mermaid.tsx`: schematics in Plex Mono with amber wires on a blueprint grid.
