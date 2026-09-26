@@ -1522,6 +1522,16 @@ export function sandboxUserData(
       '    permissions: "0644"',
       `    content: ${text(`${parts.hostKey.certificate}\n`)}`,
     );
+  // The guest half of the identity rebind (daemon/README "Identity rebind"): installed at first
+  // boot, so a memory restore of this guest (which resumes without cloud-init) takes its own identity.
+  if (exec)
+    for (const [path, permissions, content] of identityRebindFiles)
+      lines.push(
+        `  - path: ${text(path)}`,
+        `    permissions: ${text(permissions)}`,
+        '    owner: "root:root"',
+        `    content: ${text(content)}`,
+      );
   if (env.length > 0)
     lines.push(
       `  - path: ${text(sandboxEnvPath)}`,
@@ -1532,6 +1542,8 @@ export function sandboxUserData(
   if (exec)
     lines.push(
       'runcmd:',
+      '  - ["systemctl", "daemon-reload"]',
+      '  - ["udevadm", "control", "--reload"]',
       '  - ["sh", "-c", "systemctl reload-or-restart ssh || systemctl reload-or-restart sshd"]',
     );
   lines.push('');
@@ -1675,6 +1687,57 @@ async function certifiedHostKey(
 
 /** Where a sandbox's template env lands in the guest (root-only). */
 export const sandboxEnvPath = '/etc/sandbox/env';
+
+/**
+ * The guest half of the identity rebind, verbatim from bcd's contract (daemon/README "Identity
+ * rebind"): a udev rule starts a oneshot for the `bc-rebind` disk bcd hot-adds after a memory
+ * restore; the script installs the bundle's principals (and host key and certificate) at the paths
+ * `sandboxUserData` renders, reloads sshd and acknowledges with the disk's nonce.
+ */
+export const identityRebindFiles: readonly (readonly [string, string, string])[] = [
+  [
+    '/etc/udev/rules.d/90-bc-rebind.rules',
+    '0644',
+    'ACTION=="add", SUBSYSTEM=="block", ENV{ID_SERIAL}=="bc-rebind", TAG+="systemd", ENV{SYSTEMD_WANTS}+="bc-rebind@%k.service"\n',
+  ],
+  [
+    '/etc/systemd/system/bc-rebind@.service',
+    '0644',
+    [
+      '[Unit]',
+      'Description=better-compute identity rebind (%I)',
+      '[Service]',
+      'Type=oneshot',
+      'ExecStart=/usr/local/sbin/bc-rebind %I',
+      '',
+    ].join('\n'),
+  ],
+  [
+    '/usr/local/sbin/bc-rebind',
+    '0755',
+    [
+      '#!/bin/sh',
+      'set -eu',
+      'dev="/dev/$1"',
+      'work=$(mktemp -d)',
+      'trap \'rm -rf "$work"\' EXIT',
+      'tar -xf "$dev" -C "$work" --no-same-owner --no-same-permissions',
+      'account=$(cat "$work/account")',
+      'case "$account" in \'\'|*[!a-z0-9_-]*) exit 1 ;; esac',
+      'install -d -m 0755 /etc/ssh/bc_sandbox_principals',
+      'install -m 0644 "$work/principals" "/etc/ssh/bc_sandbox_principals/$account"',
+      'if [ -f "$work/host_key" ]; then',
+      '  install -m 0600 "$work/host_key" /etc/ssh/bc_sandbox_host_key',
+      '  install -m 0644 "$work/host_key-cert.pub" /etc/ssh/bc_sandbox_host_key-cert.pub',
+      'fi',
+      'systemctl reload ssh 2>/dev/null || systemctl reload sshd',
+      'size=$(blockdev --getsize64 "$dev")',
+      'printf \'BCREBOUND %s\\n\' "$(cat "$work/nonce")" |',
+      '  dd of="$dev" bs=4096 seek=$((size / 4096 - 1)) conv=notrunc,sync oflag=direct,sync status=none',
+      '',
+    ].join('\n'),
+  ],
+];
 
 /** A POSIX shell single-quoted word. */
 const shellQuote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;

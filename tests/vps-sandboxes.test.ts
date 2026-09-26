@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   apiMethod,
@@ -25,12 +26,14 @@ import { create } from '@bufbuild/protobuf';
 import { encodeMessage, InstanceSnapshotResultSchema } from '@better-compute/protocol';
 import {
   builtinRuntimeTraits,
+  identityRebindFiles,
   instanceSpecs,
   instanceWork,
   meterInstances,
   reassignSandboxes,
   reportInstances,
   sandboxHolders,
+  sandboxUserData,
   sandboxWork,
   setIpPool,
   vps,
@@ -2478,6 +2481,35 @@ describe('exec trust', () => {
     } finally {
       broker = undefined;
     }
+  });
+
+  it('installs the guest half of the identity rebind exactly as bcd’s contract states it', () => {
+    const readme = readFileSync(new URL('../daemon/README.md', import.meta.url), 'utf8').replace(
+      /\r\n/g,
+      '\n',
+    );
+    const start = readme.indexOf('The guest half, which vps installs at first boot');
+    const open = readme.indexOf('```\n', start) + 4;
+    const block = readme.slice(open, readme.indexOf('\n```', open));
+    // "# <path>[ (mode)]" headers, each followed by the file's content up to the next header.
+    const contract = new Map<string, string>();
+    for (const part of block.split(/^# (?=\/)/m).filter(Boolean)) {
+      const newline = part.indexOf('\n');
+      const path = part.slice(0, newline).replace(/ \(\d+\)$/, '');
+      contract.set(path, part.slice(newline + 1).replace(/\n*$/, '\n'));
+    }
+    expect([...contract.keys()]).toEqual(identityRebindFiles.map(([path]) => path));
+    for (const [path, , content] of identityRebindFiles)
+      expect(content.replace(/\n*$/, '\n')).toBe(contract.get(path));
+    // Rendered into every sandbox guest that exec can reach, next to sshd's trust.
+    const userData = sandboxUserData(undefined, 'inst_x', {
+      exec: { caPublicKey, account: 'sandbox' },
+    });
+    for (const [path, mode] of identityRebindFiles) {
+      expect(userData).toContain(`path: ${JSON.stringify(path)}`);
+      expect(userData).toContain(`permissions: ${JSON.stringify(mode)}`);
+    }
+    expect(userData).toContain('["systemctl", "daemon-reload"]');
   });
 
   it('refuses a secret:// user data it would have to render without a broker', async () => {
