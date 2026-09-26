@@ -54,3 +54,6 @@ export function usePins() {
 
 /** Acknowledged attention items (by id), shared by the bell, the widget and the Attention page. */
 export const useAcks = createLocalSet('acks');
+
+/** Sidebar sections the operator folded away. */
+export const useFoldedGroups = createLocalSet('nav-folded');

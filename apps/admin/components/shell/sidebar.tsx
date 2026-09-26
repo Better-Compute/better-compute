@@ -2,11 +2,11 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { RiLayoutLeft2Line, RiLayoutRight2Line, RiPushpinFill, RiPushpinLine, RiSettings3Line } from 'react-icons/ri';
+import { RiArrowDownSLine, RiLayoutLeft2Line, RiLayoutRight2Line, RiPushpinFill, RiPushpinLine, RiSettings3Line } from 'react-icons/ri';
 import { ThemeToggle } from '@/components/application/theme/theme-toggle';
 import { allNav, navForPath, navGroups, type NavItem } from '@/lib/modules';
 import { cx } from '@/utils/cx';
-import { usePins } from './pins';
+import { useFoldedGroups, usePins } from './pins';
 import { useWorkspaceSettings } from './workspace';
 
 /**
@@ -30,6 +30,7 @@ export function Sidebar({
   const { source, live } = useWorkspaceSettings();
   const groups = navGroups();
   const { pins, toggle } = usePins();
+  const folded = useFoldedGroups();
   const pinned = pins.map((href) => allNav().find((item) => item.href === href)).filter((item): item is NavItem => Boolean(item));
 
   return (
@@ -55,13 +56,24 @@ export function Sidebar({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto py-2">
-        {[...(pinned.length ? [{ group: 'Pinned', items: pinned }] : []), ...groups].map(({ group, items }) => (
+        {[...(pinned.length ? [{ group: 'Pinned', items: pinned }] : []), ...groups].map(({ group, items: all }) => {
+          const isFolded = !collapsed && folded.has(group);
+          // A folded section still shows the page you're on, so the sidebar always says where you are.
+          const items = isFolded ? all.filter((item) => item.href === active?.href) : all;
+          return (
           <div key={group} className="mb-3">
             {!collapsed ? (
-              <div className="flex items-center gap-2 px-3 pt-1 pb-1.5">
-                <span className={cx('font-mono text-[10px] tracking-[0.16em] uppercase', group === 'Pinned' ? 'text-signal' : 'text-text-tertiary')}>{group}</span>
+              <button
+                type="button"
+                onClick={() => folded.toggle(group)}
+                aria-expanded={!isFolded}
+                className="group/fold flex w-full items-center gap-2 px-3 pt-1 pb-1.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-border-focus-ring"
+              >
+                <span className={cx('font-mono text-[10px] tracking-[0.16em] uppercase', group === 'Pinned' ? 'text-signal' : 'text-text-tertiary group-hover/fold:text-text-secondary')}>{group}</span>
                 <span className="h-px flex-1 bg-separator-border" />
-              </div>
+                {isFolded && <span className="font-mono text-[10px] text-text-tertiary tabular-nums">{all.length}</span>}
+                <RiArrowDownSLine className={cx('size-3.5 text-text-tertiary opacity-0 transition-[transform,opacity] group-hover/fold:opacity-100', isFolded && '-rotate-90 opacity-100')} aria-hidden />
+              </button>
             ) : (
               <div className="mx-3 my-1.5 h-px bg-separator-border" />
             )}
@@ -111,7 +123,8 @@ export function Sidebar({
               })}
             </ul>
           </div>
-        ))}
+          );
+        })}
       </div>
 
       <div className={cx('flex shrink-0 flex-col gap-2 border-t border-separator-border p-2', collapsed && 'items-center')}>
