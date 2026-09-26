@@ -17,6 +17,7 @@ import { poolById, siteById } from '@/lib/data/topology';
 import { DAY, HOUR, type CapacityTimeline, type Reservation } from '@/lib/data/capacity';
 import { cx } from '@/utils/cx';
 import { useHourWindow, usePoolRows, useTenantName, useTimeline } from '../data';
+import { SourceNotice } from '../source-notice';
 import { GanttLegend, ReservationGantt } from '../gantt';
 import { pressure, quotaCells } from '../model';
 import { QuotaEditor, type QuotaTarget } from '../quota-editor';
@@ -155,6 +156,7 @@ export function PoolDetailPage({ poolId }: { poolId: string }) {
 
   return (
     <>
+      <SourceNotice />
       <PageHeader
         icon={RiServerLine}
         title={row.name}

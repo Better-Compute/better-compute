@@ -11,6 +11,7 @@ import { Led, Mono, Tag } from '@/components/ui/signal';
 import { fmtMoney, fmtNum, fmtPct } from '@/lib/data/format';
 import { siteById } from '@/lib/data/topology';
 import { useHourWindow, usePoolRows, useTimelines } from '../data';
+import { SourceNotice } from '../source-notice';
 import { fleetTotals, type PoolRow } from '../model';
 import { Segmented } from '../ui';
 
@@ -157,6 +158,7 @@ export function PoolsPage() {
 
   return (
     <>
+      <SourceNotice />
       <PageHeader
         icon={RiServerLine}
         title="Pools"

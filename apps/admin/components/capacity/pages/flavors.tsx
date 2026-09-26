@@ -10,6 +10,7 @@ import { fmtMoney, fmtNum } from '@/lib/data/format';
 import { poolById } from '@/lib/data/topology';
 import type { FlavorRecord } from '@/lib/data/capacity';
 import { usePoolRows } from '../data';
+import { SourceNotice } from '../source-notice';
 
 /** A horizontal bar for one dimension of a flavor, scaled to the largest in the list. */
 function ShapeBar({ value, max, unit }: { value: number; max: number; unit: string }) {
@@ -130,6 +131,7 @@ export function FlavorList({ poolId }: { poolId?: string }) {
 export function FlavorsPage() {
   return (
     <>
+      <SourceNotice />
       <PageHeader
         icon={RiLayoutGridLine}
         title="Flavors"

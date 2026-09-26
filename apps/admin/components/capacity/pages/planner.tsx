@@ -18,6 +18,7 @@ import { poolById } from '@/lib/data/topology';
 import type { CapacityTimeline, PlacementRequest } from '@/lib/data/capacity';
 import { cx } from '@/utils/cx';
 import { DAY, HOUR, useCapacityActions, useHourWindow, usePoolRows, usePreview, useTimelines } from '../data';
+import { SourceNotice } from '../source-notice';
 import { HoverCard, HoverRow, Segmented, timeTicks } from '../ui';
 
 const DURATIONS = [
@@ -205,6 +206,7 @@ export function PlannerPage() {
 
   return (
     <>
+      <SourceNotice />
       <PageHeader
         icon={RiSearchEyeLine}
         title="Plan a reservation"

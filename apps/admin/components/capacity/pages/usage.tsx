@@ -13,6 +13,7 @@ import { fmtMoney, fmtNum, fmtPct } from '@/lib/data/format';
 import type { UsageWindow } from '@/lib/data/capacity';
 import { cx } from '@/utils/cx';
 import { DAY, useCapacity, usePoolRows, useTenantName } from '../data';
+import { SourceNotice } from '../source-notice';
 import { dailySpend, rollup } from '../model';
 import { HoverCard, HoverRow, Segmented, utcDay } from '../ui';
 
@@ -159,6 +160,7 @@ export function UsagePage() {
   return (
     <>
       <UsageCommands onRange={setRange} onGroup={setGroup} onExport={exportCsv} onResetPrices={() => setOverrides({})} />
+      <SourceNotice />
       <PageHeader
         icon={RiMoneyDollarCircleLine}
         title="Usage & spend"

@@ -13,6 +13,7 @@ import { Stat } from '@/components/ui/stat';
 import { fmtDuration, fmtMoney, fmtNum, fmtPct, fmtRelative, fmtStamp } from '@/lib/data/format';
 import { reservationGpus } from '@/lib/data/capacity';
 import { DAY, HOUR, useHourWindow, usePoolRows, useTenantName, useTimelines } from '../data';
+import { SourceNotice } from '../source-notice';
 import { CapacityHeatmap, HeatmapTable } from '../heatmap';
 import { byModel, costOf, fleetSeries, fleetTotals, heatMatrix, pressure, quotaCells } from '../model';
 import { HeatLegend, planHref, Segmented, StateTag, utcDay } from '../ui';
@@ -105,6 +106,7 @@ export function CapacityOverviewPage() {
 
   return (
     <>
+      <SourceNotice />
       <PageHeader
         icon={RiBarChartBoxLine}
         title="Capacity"

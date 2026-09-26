@@ -9,20 +9,43 @@ import {
   DAY,
   HOUR,
   type CapacitySnapshot,
+  type CapacitySource,
   type CapacityTimeline,
   type PlacementRequest,
   type SimCapacitySource,
 } from '@/lib/data/capacity';
+import { useConnection } from '@/components/shell/connection';
+import { emptySnapshot, liveSource, liveState, liveSubscribe, liveTimeline, liveVersion, loadLive } from './live';
 import { poolRows, type PoolRow } from './model';
 
-// The capacity module's data hooks. One simulated source per browser tab, driven by the workspace clock (so the
-// top bar's pause freezes every capacity view), recomputed at most every 15 s of workspace time or after a
-// mutation. A live source plugs in behind the same hooks once the shell's API adapter lands.
+// The capacity module's data hooks, in two modes behind one API:
+// - simulated (default): the shared simulated source, driven by the workspace clock (pause and time travel
+//   freeze or replay every capacity view), recomputed at most every 15 s of workspace time or after a mutation;
+// - live (workspace.source === 'live'): the compute API through the admin's proxy (live.ts), refreshed every
+//   15 s at the wall clock; time travel does not apply to live data.
 
 /** The shared simulated source (lib/data/capacity.ts), with its clock set to `now`. */
 export function capacitySource(now?: number): SimCapacitySource {
   if (now !== undefined) capacityAt(now);
   return sharedCapacitySource();
+}
+
+/** Which source the capacity views read, and for which tenant (live). */
+function useMode() {
+  const { source } = useWorkspace();
+  const { status } = useConnection();
+  const tenantId = status?.tenantId ?? undefined;
+  return { live: source === 'live' && Boolean(tenantId), tenantId: tenantId ?? '' };
+}
+
+const useLiveStore = () => useSyncExternalStore(liveSubscribe, liveVersion, liveVersion);
+
+/** Live mode's status for banners: loading, the last error, when data last arrived. */
+export function useCapacityStatus(): { mode: 'simulated' | 'live'; loading: boolean; error?: string; loadedAt?: number } {
+  const { live } = useMode();
+  useLiveStore();
+  const state = liveState();
+  return live ? { mode: 'live', loading: state.loading, ...(state.error ? { error: state.error } : {}), ...(state.loadedAt ? { loadedAt: state.loadedAt } : {}) } : { mode: 'simulated', loading: false };
 }
 
 // A revision counter all capacity views subscribe to: mutations bump it and every view re-derives.
@@ -40,15 +63,24 @@ const useRevision = () => useSyncExternalStore(subscribe, () => revision, () => 
 
 const BUCKET = 15_000;
 
-/** The capacity snapshot at the workspace clock. */
+const LIVE_REFRESH = 15_000;
+
+/** The capacity snapshot: simulated at the workspace clock, or the latest live answer. */
 export function useCapacity(): CapacitySnapshot {
-  const { now } = useWorkspace();
+  const { now, wallNow } = useWorkspace();
+  const { live, tenantId } = useMode();
   const rev = useRevision();
+  useLiveStore();
   const at = Math.floor(now / BUCKET) * BUCKET;
-  return useMemo(() => {
-    return capacityAt(at);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [at, rev]);
+  const simulated = useMemo(() => (live ? undefined : capacityAt(at)), [at, rev, live]);
+  useEffect(() => {
+    if (!live) return;
+    void loadLive(tenantId);
+    const timer = window.setInterval(() => void loadLive(tenantId), LIVE_REFRESH);
+    return () => window.clearInterval(timer);
+  }, [live, tenantId]);
+  if (!live) return simulated!;
+  return liveState().snapshot ?? emptySnapshot(wallNow, tenantId);
 }
 
 /** Pool rows in the workspace's site scope. */
@@ -61,32 +93,40 @@ export function usePoolRows(): { snapshot: CapacitySnapshot; rows: PoolRow[] } {
 
 /** One pool's timeline for [from, to) (hourly unless `stepMinutes`), recomputed with the snapshot. */
 export function useTimeline(poolId: string | undefined, from: number, to: number, stepMinutes = 60): CapacityTimeline | undefined {
-  const snapshot = useCapacity();
-  return useMemo(
-    () => (poolId ? capacitySource(snapshot.now).timelineSync(poolId, { from, to, stepMinutes }) : undefined),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [poolId, from, to, stepMinutes, snapshot],
-  );
+  const map = useTimelines(poolId ? [poolId] : [], from, to, stepMinutes);
+  return poolId ? map.get(poolId) : undefined;
 }
 
-/** Timelines of several pools over the same range. */
+/** Timelines of several pools over the same range (live: those loaded so far; the rest arrive and re-render). */
 export function useTimelines(poolIds: readonly string[], from: number, to: number, stepMinutes = 60): Map<string, CapacityTimeline> {
   const snapshot = useCapacity();
+  const { live, tenantId } = useMode();
+  const liveVer = useLiveStore();
   const key = poolIds.join(',');
   return useMemo(
     () => {
+      if (live) {
+        const out = new Map<string, CapacityTimeline>();
+        for (const poolId of poolIds) {
+          const timeline = liveTimeline(tenantId, poolId, from, to, stepMinutes);
+          if (timeline) out.set(poolId, timeline);
+        }
+        return out;
+      }
       const source = capacitySource(snapshot.now);
       return new Map(poolIds.map((poolId) => [poolId, source.timelineSync(poolId, { from, to, stepMinutes })]));
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [key, from, to, stepMinutes, snapshot],
+    [key, from, to, stepMinutes, snapshot, live, tenantId, live ? liveVer : 0],
   );
 }
 
 /** A window around now, aligned to the hour so ticking doesn't reshuffle columns. */
 export function useHourWindow(backHours: number, aheadHours: number) {
-  const { now } = useWorkspace();
-  const hour = Math.floor(now / HOUR) * HOUR;
+  const { now, wallNow } = useWorkspace();
+  const { live } = useMode();
+  // Live data is always "now": time travel replays only the simulation.
+  const hour = Math.floor((live ? wallNow : now) / HOUR) * HOUR;
   return useMemo(() => ({ from: hour - backHours * HOUR, to: hour + aheadHours * HOUR, hour }), [hour, backHours, aheadHours]);
 }
 
@@ -98,11 +138,14 @@ export type ActionState = { busy: boolean; error?: string; done?: string };
  * Nothing mutates while the workspace clock is in the past (time travel): the past is read-only.
  */
 export function useCapacityActions() {
-  const { now, live, setLive } = useWorkspace();
+  const { now, live: clockLive, setLive } = useWorkspace();
+  const mode = useMode();
+  // Live data ignores time travel, so it can always be changed; the simulation's past is read-only.
+  const live = clockLive || mode.live;
   const { toast, confirmWithReason } = useFeedback();
   const [state, setState] = useState<ActionState>({ busy: false });
   const run = useCallback(
-    async <T,>(label: string, action: (source: SimCapacitySource) => Promise<T>, quiet = false): Promise<T | undefined> => {
+    async <T,>(label: string, action: (source: CapacitySource) => Promise<T>, quiet = false): Promise<T | undefined> => {
       if (!live) {
         const error = 'Viewing the past: return to live to change anything.';
         setState({ busy: false, error });
@@ -111,7 +154,8 @@ export function useCapacityActions() {
       }
       setState({ busy: true });
       try {
-        const result = await action(capacitySource(now));
+        const result = await action(mode.live ? liveSource(mode.tenantId) : capacitySource(now));
+        if (mode.live) await loadLive(mode.tenantId);
         bump();
         setState({ busy: false, done: label });
         if (!quiet) toast({ title: label, status: 'ok' });
@@ -123,7 +167,7 @@ export function useCapacityActions() {
         return undefined;
       }
     },
-    [now, live, setLive, toast],
+    [now, live, setLive, toast, mode.live, mode.tenantId],
   );
   const confirmed = useCallback(
     async (options: Parameters<typeof confirmWithReason>[0]) => (live ? (await confirmWithReason({ ...options, reason: { placeholder: 'Why (kept in the audit log)' } })) !== null : true),
@@ -187,7 +231,8 @@ export function useCapacityActions() {
 /** A read-only preview of a placement request (no booking). */
 export function usePreview(request: PlacementRequest | undefined) {
   const snapshot = useCapacity();
-  const [preview, setPreview] = useState<Awaited<ReturnType<SimCapacitySource['preview']>>>();
+  const mode = useMode();
+  const [preview, setPreview] = useState<Awaited<ReturnType<CapacitySource['preview']>>>();
   const key = request ? JSON.stringify(request) : '';
   useEffect(() => {
     if (!request) {
@@ -195,9 +240,11 @@ export function usePreview(request: PlacementRequest | undefined) {
       return;
     }
     let current = true;
-    void capacitySource(snapshot.now)
+    const source = mode.live ? liveSource(mode.tenantId) : capacitySource(snapshot.now);
+    void source
       .preview(request)
-      .then((result) => current && setPreview(result));
+      .then((result) => current && setPreview(result))
+      .catch((error: unknown) => current && setPreview({ fits: false, candidates: [], reason: error instanceof Error ? error.message : String(error) }));
     return () => {
       current = false;
     };

@@ -15,6 +15,7 @@ import { fmtDuration, fmtNum, fmtPct, fmtStamp } from '@/lib/data/format';
 import { reservationGpus } from '@/lib/data/capacity';
 import { cx } from '@/utils/cx';
 import { HOUR, useHourWindow, usePoolRows, useTenantName, useTimelines } from '../data';
+import { SourceNotice } from '../source-notice';
 import { decodeScenario, encodeScenario, evaluate, KIND_LABEL, leastDisruptiveNodes, newId, type Change, type ChangeKind, type PoolOutcome } from '../scenarios';
 import { utcDay } from '../ui';
 
@@ -145,6 +146,7 @@ export function ScenariosPage() {
 
   return (
     <>
+      <SourceNotice />
       <PageHeader
         icon={RiFlaskLine}
         title="What-if"

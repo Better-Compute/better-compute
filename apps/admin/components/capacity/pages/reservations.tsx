@@ -14,6 +14,7 @@ import { fmtDuration, fmtNum, fmtRelative } from '@/lib/data/format';
 import { durationMs, reservationGpus, reservationStates, type Reservation, type ReservationState } from '@/lib/data/capacity';
 import { cx } from '@/utils/cx';
 import { HOUR, useHourWindow, usePoolRows, useTenantName, useTimelines } from '../data';
+import { SourceNotice } from '../source-notice';
 import { GanttLegend, ReservationGantt } from '../gantt';
 import { stateStyle } from '../model';
 import { ReservationDrawer } from '../reservation-drawer';
@@ -90,6 +91,7 @@ export function ReservationsPage() {
 
   return (
     <>
+      <SourceNotice />
       <PageHeader
         icon={RiCalendarEventLine}
         title="Reservations"

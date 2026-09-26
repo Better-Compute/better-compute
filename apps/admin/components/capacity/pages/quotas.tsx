@@ -10,6 +10,7 @@ import { Tag } from '@/components/ui/signal';
 import { fmtGiB, fmtNum, fmtPct } from '@/lib/data/format';
 import { cx } from '@/utils/cx';
 import { usePoolRows, useTenantName } from '../data';
+import { SourceNotice } from '../source-notice';
 import { quotaCells, type QuotaCell } from '../model';
 import { QuotaEditor, type QuotaTarget } from '../quota-editor';
 import { Segmented } from '../ui';
@@ -91,6 +92,7 @@ export function QuotasPage() {
 
   return (
     <>
+      <SourceNotice />
       <PageHeader
         icon={RiScales3Line}
         title="Quotas"
