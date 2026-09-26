@@ -759,6 +759,23 @@ message StatusReport {
   // product_uuid, the SMBIOS UUID a BMC also reports) or an operator to act on. The whole list,
   // capped at 256 (oldest last_seen evicted, forgotten 24 h after last seen).
   repeated DiscoveredMachine discovered = 12;
+  // (v1.1, hosts with a runtime) The volume store's filesystem, so capacity books persistent
+  // volumes against what can really be written (volumes are sparse). bcd refuses a volume create or
+  // growth beyond available − reserved − outstanding; capacity applies the same rule.
+  VolumeStorage volume_storage = 13;
+}
+
+message VolumeStorage {
+  // The data directory's filesystem (statfs).
+  uint64 total_bytes = 1;
+  // statfs Bavail.
+  uint64 available_bytes = 2;
+  // Kept from volumes: overlays, journal, images (5% of total, at least 2 GiB).
+  uint64 reserved_bytes = 3;
+  // The sum of every volume's size.
+  uint64 committed_bytes = 4;
+  // The sum of every volume's unwritten (sparse) space: promised but not yet taken.
+  uint64 outstanding_bytes = 5;
 }
 
 message DiscoveredMachine {
