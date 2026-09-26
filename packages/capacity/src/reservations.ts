@@ -39,6 +39,7 @@ import {
   type TimeRange,
 } from '@better-compute/core';
 import {
+  deferRelease,
   extendAllocation,
   readOwnerAllocations,
   releaseAllocation,
@@ -1673,8 +1674,12 @@ async function releaseBookings(
   deps: Pick<ReservationDeps, 'desired' | 'work'>,
 ): Promise<AllocationRecord[]> {
   const allocations = await readOwnerAllocations(tx, { kind: 'reservation', id: row.id });
+  // Pods may keep a Kubernetes binding's devices after the kubelet loses them: those stay booked
+  // until the node reports AllocationReleased (§3.8, deferRelease).
+  const kubernetes = row.request.binding === 'kubernetes';
   for (const allocation of allocations) {
-    await releaseAllocation(tx, allocation.id);
+    if (!(kubernetes && (await deferRelease(tx, allocation.id))))
+      await releaseAllocation(tx, allocation.id);
     await deps.desired.invalidate(tx, allocation.nodeId);
   }
   // Metal tears a released lease down (tenant-root release) and returns the node to ready.
@@ -1683,7 +1688,8 @@ async function releaseBookings(
 }
 
 /**
- * Ends a reservation: bookings released at compute_now(), quota refunded, node specs invalidated,
+ * Ends a reservation: bookings released at compute_now() (a bound Kubernetes binding's at the node's
+ * AllocationReleased, `deferRelease`), quota refunded, node specs invalidated,
  * and the terminal state recorded. `placed`/`binding`/`active` go through `releasing` to `released`;
  * `pending` is `cancelled`; terminal states are returned unchanged (idempotent).
  */
@@ -2244,13 +2250,24 @@ export async function markAllocationFailed(
 /**
  * Records a node's `AllocationReleased` report. For a released allocation that is the expected
  * acknowledgement (`false`). For a live, bound one the node lost the assignment: the reservation
- * gets `Degraded` (`BindingLost`) until the node reports it bound again.
+ * gets `Degraded` (`BindingLost`) until the node reports it bound again. For one whose release was
+ * deferred (`deferRelease`, a Kubernetes binding) it is the end: no pod holds the devices any more,
+ * so the bookings end now, the scalars are returned and the pool's pending reservations retry.
  */
 export async function markAllocationReleased(
   tx: SqlTx,
   work: ModuleContext['work'],
   allocationId: string,
 ): Promise<boolean> {
+  const releasing = await tx.query<{ pool_id: string }>(
+    `SELECT pool_id FROM allocations WHERE id = $1 AND released_at IS NULL AND binding ? 'releasing'`,
+    [allocationId],
+  );
+  if (releasing.rows[0]) {
+    if (!(await releaseAllocation(tx, allocationId))) return false;
+    await wakePendingReservations(tx, work, releasing.rows[0].pool_id);
+    return true;
+  }
   const { rows } = await tx.query<{ owner_id: string; owner_kind: string }>(
     `UPDATE allocations SET binding = COALESCE(binding, '{}'::jsonb) || '{"lost": true}'::jsonb,
                             version = version + 1
@@ -2259,6 +2276,34 @@ export async function markAllocationReleased(
     [allocationId],
   );
   return wakeOwner(tx, work, rows[0]);
+}
+
+/**
+ * Ends the deferred releases (`deferRelease`) no report will end: the node is lost, or the booking
+ * reached its end (its devices are bookable from then on anyway). Run by the hosts pass (§3.8);
+ * answers how many it ended. A later AllocationReleased for one is the usual acknowledgement.
+ */
+export async function finishStaleReleases(
+  tx: SqlTx,
+  work: ModuleContext['work'],
+  limit = 500,
+): Promise<number> {
+  const { rows } = await tx.query<{ id: string; pool_id: string }>(
+    `SELECT a.id, a.pool_id FROM allocations a JOIN nodes n ON n.id = a.node_id
+      WHERE a.released_at IS NULL AND a.binding ? 'releasing'
+        AND (n.connectivity = 'lost' OR upper(a.during) <= compute_now())
+      ORDER BY a.id LIMIT $1`,
+    [limit],
+  );
+  const pools = new Set<string>();
+  let ended = 0;
+  for (const row of rows)
+    if (await releaseAllocation(tx, row.id)) {
+      ended++;
+      pools.add(row.pool_id);
+    }
+  for (const poolId of [...pools].sort()) await wakePendingReservations(tx, work, poolId);
+  return ended;
 }
 
 async function setConditions(

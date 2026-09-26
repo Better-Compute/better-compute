@@ -15,13 +15,11 @@ import {
 //   - node_resources never has more allocated than floor(allocatable × ratio), and what is allocated
 //     is exactly what the node's live allocations claim, across releases, re-books and host
 //     re-inventories (I1, sampled after every step);
-//   - the fleet invariants (I1 bookings and bindings, I2–I5, I8).
-// Not yet (the second test, expected to fail until capacity changes): no GPU is ever offered to a
-// node's kubelet for one allocation while the control plane books it to another (I1, kubelet offers
-// against device_bookings). The control plane frees a Kubernetes-bound GPU at release: it re-books
-// it before the node withdrew it from its kubelet (one spec delivery) and while pods still hold it,
-// so the new allocation fails with overlap on the node. The fix is capacity's: a Kubernetes booking
-// ends when the node reports AllocationReleased (bcd reports it once no pod holds the devices).
+//   - the fleet invariants (I1 bookings and bindings, I2–I5, I8);
+//   - (the second test) no GPU is ever offered to a node's kubelet for one allocation while the
+//     control plane books it to another (I1, kubelet offers against device_bookings): a released
+//     Kubernetes booking ends only when the node reports AllocationReleased, once no pod holds the
+//     devices (capacity's deferRelease), so the placer cannot re-book it under the pods.
 
 const SEC = 1_000;
 const MIN = 60 * SEC;
@@ -200,15 +198,13 @@ async function churn(nodes: number, strict: boolean): Promise<ChurnResult> {
 describe('Kubernetes and host-resource reservations under churn at fleet scale', () => {
   it('never overbooks a host across releases, re-books and re-inventories', async () => {
     const result = await churn(NODES, false);
-    // Recorded, not asserted: see the test below.
+    // Recorded, not asserted here (the second test asserts it on a small pool).
     console.log(
       `kubelet offers of GPUs booked elsewhere: ${result.kubeViolations}; failed reservations: ${result.failed}`,
     );
   }, 3_600_000);
 
-  // Fails today (see the header): flip to `it` once capacity ends a Kubernetes booking at the node's
-  // AllocationReleased.
-  it.fails(
+  it(
     'never offers a kubelet a GPU the control plane booked to another allocation',
     async () => {
       await churn(12, true);

@@ -60,6 +60,7 @@ import {
   denyCreate,
   denyPending,
   deviceAssignments,
+  finishStaleReleases,
   listReservations,
   parseCreateReservation,
   parseExtendReservation,
@@ -1514,6 +1515,11 @@ export function capacityModule(
     // a new or changed host is bookable at once rather than at the next pass.
     async run(context, key) {
       await syncNodeResources(context.sql, key && key !== 'all' ? { nodeId: key } : {});
+      // Deferred Kubernetes releases a lost node or the booking's end closes (no report will).
+      if (!key || key === 'all') {
+        const ended = await inTx(context, (tx) => finishStaleReleases(tx, context.work));
+        if (ended === 500) return 'SYNC_AGAIN';
+      }
       return 'DONE';
     },
   };

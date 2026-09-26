@@ -184,7 +184,8 @@ async function boundToAllocation(
   const { rows } = await tx.query<{ owner_kind: string; owner_id: string; has_instances: boolean }>(
     `SELECT a.owner_kind, a.owner_id, to_regclass('instances') IS NOT NULL AS has_instances
        FROM allocations a
-      WHERE a.id = $1 AND a.node_id = $2 AND a.released_at IS NULL`,
+      WHERE a.id = $1 AND a.node_id = $2 AND a.released_at IS NULL
+        AND NOT (COALESCE(a.binding, '{}'::jsonb) ? 'releasing')`,
     [opened.allocationId, nodeId],
   );
   const allocation = rows[0];

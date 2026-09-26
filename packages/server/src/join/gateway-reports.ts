@@ -46,7 +46,8 @@ export interface GatewayReportHandlers {
 
 /**
  * AllocationBound → the binding (`cdiDevices`, `envFile`) and the reservation's wake-up;
- * AllocationReleased → a lost binding (billing keeps the reserved time); AllocationFailed → the
+ * AllocationReleased → the end of a deferred Kubernetes release (§3.8), else a lost binding
+ * (billing keeps the reserved time); AllocationFailed → the
  * reservation re-places or fails.
  *
  * ```ts

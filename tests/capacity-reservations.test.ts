@@ -27,6 +27,7 @@ import {
   activeRecheckMs,
   cancelPendingReservation,
   capacityTenantDeleted,
+  finishStaleReleases,
   markAllocationBound,
   placeablePending,
   readReservationsBy,
@@ -2981,5 +2982,89 @@ describe('host CPU and memory booked with the GPUs (§3.8)', () => {
     expect(created.state).toBe('placed');
     expect((await storedRequest(created.id)).binding).toBe('kubernetes');
     expect(recorded.authz.at(-1)?.attributes).toMatchObject({ binding: 'kubernetes' });
+  });
+
+  it('keeps a released Kubernetes binding booked until its node reports AllocationReleased', async () => {
+    // The 1k sim's race: pods keep the GPUs after the kubelet loses them, so the placer must not
+    // re-book them (nor the host share) before bcd says no pod holds them any more.
+    await hostRows({ [NA]: { vcpu: 64, memoryGiB: 512 }, [NB]: { vcpu: 64, memoryGiB: 512 } });
+    await db.query(
+      `UPDATE pools SET policy = '{"kubernetes":{"apiServer":"https://k8s.example:6443","caCertSha256":"00","joinTokenRef":"secret://k8s/join"}}'::jsonb
+        WHERE id = $1`,
+      [poolId],
+    );
+    const root = { who: { ...caller, tenantId: 'root', identityId: 'usr_root' } };
+    const work = moduleContext(db).work;
+    const start = async (key: string) => {
+      const created = (await call(
+        'reservations',
+        'create',
+        create({ tenantId: 'root', binding: 'kubernetes', idempotencyKey: key }),
+        root,
+      )) as Rsv;
+      await reconcile(created.id); // → binding
+      const [allocation] = await booked(created.id);
+      const { rows } = await db.query<{ id: string }>(
+        `SELECT id FROM allocations WHERE owner_id = $1`,
+        [created.id],
+      );
+      await db.transaction((tx) =>
+        markAllocationBound(tx, work, rows[0]!.id, { cdiDevices: ['bcd.dev/gpu=0'] }),
+      );
+      await reconcile(created.id); // → active
+      return { id: created.id, allocationId: rows[0]!.id, nodeId: allocation!.nodeId };
+    };
+    const state = async (allocationId: string) => {
+      const { rows } = await db.query<{ released: boolean; releasing: boolean; open: number }>(
+        `SELECT a.released_at IS NOT NULL AS released, COALESCE(a.binding ? 'releasing', false) AS releasing,
+                (SELECT count(*)::int FROM device_bookings b
+                  WHERE b.allocation_id = a.id AND b.during @> compute_now()) AS open
+           FROM allocations a WHERE a.id = $1`,
+        [allocationId],
+      );
+      return rows[0]!;
+    };
+
+    const first = await start('k8s-deferred');
+    expect(await allocated(first.nodeId)).toEqual({ memoryGiB: 256, vcpu: 32 });
+    await call('reservations', 'release', { tenantId: 'root', reservationId: first.id }, root);
+    // Released for the tenant and withdrawn from the node's spec, but still booked.
+    expect(
+      ((await call('reservations', 'get', { tenantId: 'root', reservationId: first.id }, root)) as Rsv)
+        .state,
+    ).toBe('released');
+    expect(await deviceAssignments(db, first.nodeId)).toEqual([]);
+    expect(await state(first.allocationId)).toEqual({ released: false, releasing: true, open: 2 });
+    expect(await allocated(first.nodeId)).toEqual({ memoryGiB: 256, vcpu: 32 });
+    // bcd reports once the pods let go: the bookings end, the share comes back.
+    expect(
+      await db.transaction((tx) => markAllocationReleased(tx, work, first.allocationId)),
+    ).toBe(true);
+    expect(await state(first.allocationId)).toEqual({ released: true, releasing: true, open: 0 });
+    expect(await allocated(first.nodeId)).toEqual({ memoryGiB: 0, vcpu: 0 });
+    expect(
+      await db.transaction((tx) => markAllocationReleased(tx, work, first.allocationId)),
+    ).toBe(false);
+
+    // A node that will never report (lost) is closed by the hosts pass instead.
+    const second = await start('k8s-lost');
+    await call('reservations', 'release', { tenantId: 'root', reservationId: second.id }, root);
+    expect(await db.transaction((tx) => finishStaleReleases(tx, work))).toBe(0);
+    await db.query(`UPDATE nodes SET connectivity = 'lost' WHERE id = $1`, [second.nodeId]);
+    expect(await db.transaction((tx) => finishStaleReleases(tx, work))).toBe(1);
+    expect(await state(second.allocationId)).toMatchObject({ released: true, open: 0 });
+    expect(await allocated(second.nodeId)).toEqual({ memoryGiB: 0, vcpu: 0 });
+    await db.query(`UPDATE nodes SET connectivity = 'connected' WHERE id = $1`, [second.nodeId]);
+
+    // Not bound yet: nothing holds the devices, so the release is immediate.
+    const third = (await call(
+      'reservations',
+      'create',
+      create({ tenantId: 'root', binding: 'kubernetes', idempotencyKey: 'k8s-unbound' }),
+      root,
+    )) as Rsv;
+    await call('reservations', 'release', { tenantId: 'root', reservationId: third.id }, root);
+    const [unbound] = await booked(third.id);
+    expect(await allocated(unbound!.nodeId)).toEqual({ memoryGiB: 0, vcpu: 0 });
   });
 });

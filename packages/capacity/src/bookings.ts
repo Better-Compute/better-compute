@@ -137,6 +137,37 @@ export async function releaseAllocation(tx: SqlTx, allocationId: string): Promis
   return true;
 }
 
+/**
+ * Defers the release of a bound Kubernetes allocation (§3.8): its node withdraws the devices from
+ * the kubelet at the next spec, but pods may keep them a while, and bcd reports AllocationReleased
+ * only once none does. Until then the allocation keeps its bookings, scalar claims and billing and
+ * is marked `binding.releasing` (the ms it started); `releaseAllocation` ends it at the report
+ * (`markAllocationReleased`) or, for a node that never reports, at the sweep
+ * (`finishStaleReleases`). Nothing is deferred for an allocation not bound yet, already lost or
+ * rejected, past its booked end, or on a lost node: that one is released at once. Answers whether
+ * the release is deferred (also when it already was).
+ */
+export async function deferRelease(tx: SqlTx, allocationId: string): Promise<boolean> {
+  const { rows } = await tx.query<{ deferred: boolean }>(
+    `WITH target AS (
+       SELECT a.id, a.binding ? 'releasing' AS already FROM allocations a JOIN nodes n ON n.id = a.node_id
+        WHERE a.id = $1 AND a.released_at IS NULL AND a.bound_at IS NOT NULL
+          AND NOT (COALESCE(a.binding, '{}'::jsonb) ?| array['lost', 'failed'])
+          AND upper(a.during) > compute_now() AND n.connectivity <> 'lost'
+        FOR UPDATE OF a
+     ), marked AS (
+       UPDATE allocations a
+          SET binding = COALESCE(a.binding, '{}'::jsonb)
+                        || jsonb_build_object('releasing', (extract(epoch FROM compute_now()) * 1000)::float8),
+              version = version + 1
+         FROM target t WHERE a.id = t.id AND NOT t.already
+     )
+     SELECT true AS deferred FROM target`,
+    [allocationId],
+  );
+  return rows.length > 0;
+}
+
 export type ResizeOutcome =
   | { status: 'resized'; resources: Record<string, number> }
   /** `resource` does not fit on the allocation's node; nothing changed. */
