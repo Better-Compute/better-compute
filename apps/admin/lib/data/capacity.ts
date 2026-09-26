@@ -866,7 +866,7 @@ function buildReservation(booking: PlannedBooking, now: number, overlay: Overlay
   const deviceClass: DeviceRequest['class'] = booking.binding === 'node' ? 'node' : 'gpu';
   const conditions: Condition[] = [];
   if (state === 'pending')
-    conditions.push({ type: 'Unschedulable', status: 'true', reason: 'InsufficientCapacity', message: `No ${perNode} free ${pool.gpuModel} in one node for the window`, since: booking.start - 6 * HOUR });
+    conditions.push({ type: 'Unschedulable', status: 'true', reason: 'InsufficientCapacity', message: `No ${perNode} free ${pool.gpuModel} in one node for the window`, since: Math.min(now, booking.start - 6 * HOUR) });
   if (state === 'failed')
     conditions.push({ type: 'Failed', status: 'true', reason: pick(mulberry32(booking.start), ['BindTimeout', 'QuotaExceeded', 'MaxPendingReached']), since: booking.start + 20 * 60_000 });
   if (booking.spot && state === 'active' && end - now < 2 * HOUR)
@@ -913,8 +913,10 @@ function buildReservation(booking: PlannedBooking, now: number, overlay: Overlay
       ...(state === 'failed' ? { error: { code: 'UNAVAILABLE', message: 'The node did not report AllocationBound in time' } } : {}),
     },
     version: 1 + (overlay.ends.has(booking.id) ? 1 : 0),
-    nodeIds: booking.atoms.map((atom) => atom.nodeId),
-    atoms: booking.atoms.flatMap((atom) => atom.gpus.map((gpu) => `${atom.nodeId}/gpu${gpu}`)),
+    // Only a reservation the placer placed has nodes: pending, awaiting, cancelled and denied ones never got any.
+    ...(holds || state === 'placed' || state === 'failed'
+      ? { nodeIds: booking.atoms.map((atom) => atom.nodeId), atoms: booking.atoms.flatMap((atom) => atom.gpus.map((gpu) => `${atom.nodeId}/gpu${gpu}`)) }
+      : {}),
   };
 }
 

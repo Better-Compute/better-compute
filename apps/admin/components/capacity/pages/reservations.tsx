@@ -4,16 +4,16 @@ import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { RiAddLine, RiCalendarEventLine, RiHourglassLine } from 'react-icons/ri';
-import { earliestFit } from '@better-compute/console-kit';
 import { ButtonLink } from '@/components/base/buttons/button';
 import { usePageCommands } from '@/components/shell/page-commands';
 import { Select } from '@/components/ui/overlay';
 import { EmptyState, PageHeader, Panel } from '@/components/ui/panel';
 import { Mono, Tag } from '@/components/ui/signal';
 import { fmtDuration, fmtNum, fmtRelative } from '@/lib/data/format';
-import { durationMs, reservationGpus, reservationStates, type Reservation, type ReservationState } from '@/lib/data/capacity';
+import { reservationGpus, reservationStates, type Reservation, type ReservationState } from '@/lib/data/capacity';
 import { cx } from '@/utils/cx';
 import { HOUR, useHourWindow, usePoolRows, useTenantName, useTimelines } from '../data';
+import { diagnoseWait } from '../diagnose';
 import { SourceNotice } from '../source-notice';
 import { GanttLegend, ReservationGantt } from '../gantt';
 import { stateStyle } from '../model';
@@ -68,6 +68,10 @@ export function ReservationsPage() {
   const pending = useMemo(() => all.filter((r) => r.state === 'pending' || r.state === 'awaiting-confirmation'), [all]);
   const pendingPools = useMemo(() => [...new Set(pending.map((r) => r.poolId))], [pending]);
   const pendingTimelines = useTimelines(pendingPools, window_.hour, window_.hour + 7 * 24 * HOUR);
+  const diagnoses = useMemo(
+    () => new Map(pending.slice(0, 30).map((r) => [r.id, diagnoseWait(r, snapshot, pendingTimelines.get(r.poolId))])),
+    [pending, snapshot, pendingTimelines],
+  );
 
   usePageCommands(
     useMemo(
@@ -151,9 +155,10 @@ export function ReservationsPage() {
         <Panel title="Waiting for capacity" icon={RiHourglassLine} meta={`${pending.length} pending`} className="mb-3" flush>
           <ul className="max-h-60 overflow-y-auto">
             {pending.slice(0, 30).map((r) => {
-              const timeline = pendingTimelines.get(r.poolId);
               const perNode = r.request.devices[0]?.count ?? 1;
-              const fit = timeline ? earliestFit(timeline, reservationGpus(r), durationMs(r.request.duration), { notBefore: snapshot.now }) : undefined;
+              const diagnosis = diagnoses.get(r.id)!;
+              const { cause, fitsAt: fit } = diagnosis;
+              const later = diagnosis.window.start > snapshot.now + HOUR;
               return (
                 <li key={r.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-separator-border px-3 py-1.5 last:border-0">
                   <button type="button" onClick={() => setOpenId(r.id)} className="hover:underline">
@@ -166,13 +171,15 @@ export function ReservationsPage() {
                       {r.poolId}
                     </Link>
                   </span>
-                  <span className="ml-auto font-mono text-[11px] text-text-secondary">
-                    {r.state === 'awaiting-confirmation'
-                      ? 'needs a person to confirm (delegated deny)'
+                  <span className={cx('ml-auto font-mono text-[11px]', cause ? 'text-text-primary' : 'text-text-secondary')}>
+                    {cause?.short
+                      ? `${cause.short}${cause.id !== 'confirmation' && cause.id !== 'shape' && fit !== undefined ? ` · fits ${fmtRelative(fit, snapshot.now)}` : ''}`
                       : fit === undefined
                         ? 'no window in the next 7 days'
-                        : fit <= snapshot.now + HOUR
-                          ? 'fits now: the placer retries on the next wake'
+                        : fit <= diagnosis.window.start + HOUR
+                          ? later
+                            ? `room at its start (${fmtRelative(diagnosis.window.start, snapshot.now)})`
+                            : 'fits now: the placer retries on the next wake'
                           : `pool-wide window ${fmtRelative(fit, snapshot.now)}`}
                   </span>
                 </li>

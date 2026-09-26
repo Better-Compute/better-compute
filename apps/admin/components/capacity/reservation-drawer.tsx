@@ -5,7 +5,7 @@ import { useMemo, useRef } from 'react';
 import { earliestFit } from '@better-compute/console-kit';
 import { usePageCommands } from '@/components/shell/page-commands';
 import { EntityLink } from '@/components/shell/peek';
-import { RiAddLine, RiArrowDownSLine, RiCloseCircleLine, RiFileCopyLine, RiStopCircleLine } from 'react-icons/ri';
+import { RiAddLine, RiArrowDownSLine, RiCheckLine, RiCloseCircleLine, RiCloseLine, RiFileCopyLine, RiQuestionLine, RiStopCircleLine } from 'react-icons/ri';
 import { Button } from '@/components/base/buttons/button';
 import { Drawer, Menu } from '@/components/ui/overlay';
 import { KeyValue } from '@/components/ui/panel';
@@ -14,6 +14,7 @@ import { fmtDuration, fmtMoney, fmtNum, fmtRelative, fmtStamp } from '@/lib/data
 import { durationMs, HOUR, reservationGpus, type Reservation, type ReservationState } from '@/lib/data/capacity';
 import { cx } from '@/utils/cx';
 import { DAY, useCapacity, useCapacityActions, useHourWindow, usePoolRows, useTenantName, useTimelines } from './data';
+import { diagnoseWait } from './diagnose';
 import { ReservationGantt } from './gantt';
 import { reservationSpend, stateStyle } from './model';
 import { planHref, StateTag } from './ui';
@@ -129,6 +130,104 @@ function Alternatives({ reservation }: { reservation: Reservation }) {
         ))}
       </ul>
       <p className="mt-1 font-mono text-[10px] text-text-tertiary">earliest window for {fmtNum(gpus)} GPUs × {fmtDuration(length)}; amber = sooner than it starts now</p>
+    </section>
+  );
+}
+
+const VERDICT_ICON = { ok: RiCheckLine, blocks: RiCloseLine, unknown: RiQuestionLine } as const;
+
+/**
+ * For a reservation that hasn't placed: which check holds it (quota, shape, nodes in service, capacity, free GPUs
+ * scattered across nodes), what is booked on the pool over its window, and the one next step for that cause.
+ */
+function WhyWaiting({ reservation }: { reservation: Reservation }) {
+  const snapshot = useCapacity();
+  const tenantName = useTenantName();
+  const { hour, to } = useHourWindow(0, 7 * 24);
+  const timelines = useTimelines([reservation.poolId], hour, to);
+  const timeline = timelines.get(reservation.poolId);
+  const diagnosis = useMemo(() => diagnoseWait(reservation, snapshot, timeline), [reservation, snapshot, timeline]);
+  const { cause, fitsAt, needed } = diagnosis;
+  const { start } = diagnosis.window;
+  const length = diagnosis.window.end - start;
+  const next =
+    cause?.id === 'quota'
+      ? { href: `/quotas?tenant=${encodeURIComponent(reservation.tenantId)}`, label: 'open quotas' }
+      : cause?.id === 'service'
+        ? { href: `/pools/${reservation.poolId}?tab=now`, label: 'see the rack' }
+        : fitsAt !== undefined && (cause?.id === 'capacity' || cause?.id === 'fragmentation')
+          ? { href: planHref(reservation.poolId, fitsAt, fitsAt + length, { gpus: needed.perNode, nodes: needed.nodes }), label: 'plan the earliest window' }
+          : undefined;
+  return (
+    <section>
+      <h3 className="mb-2 font-mono text-[11px] tracking-wide text-text-tertiary uppercase">Why it&apos;s waiting</h3>
+      <div className={cx('border px-3 py-2', cause ? 'border-signal-fill/50 bg-signal-soft' : 'border-separator-border')}>
+        <p className="text-caption-1-regular text-text-primary">
+          {cause ? (
+            <>
+              <span className="font-semibold">{cause.label}.</span> {cause.detail}
+            </>
+          ) : diagnosis.placer ? (
+            <>
+              The book has room for it now; the placer last said “{diagnosis.placer.message ?? diagnosis.placer.reason ?? diagnosis.placer.type}”
+              {diagnosis.placer.since < snapshot.now - 60_000 ? ` (${fmtRelative(diagnosis.placer.since, snapshot.now)})` : ''}. It retries on the next pass.
+            </>
+          ) : (
+            'Nothing in the book blocks it: it should place on the next pass.'
+          )}
+        </p>
+        <p className="mt-1 font-mono text-[11px] text-text-secondary">
+          {start > snapshot.now + HOUR && `wants to start ${fmtStamp(start)} (${fmtRelative(start, snapshot.now)}) · `}
+          {fitsAt === undefined
+            ? `no window for ${needed.gpus} GPUs × ${fmtDuration(length)} in this pool within 7 d`
+            : fitsAt <= start + HOUR
+              ? `this pool has ${needed.gpus} GPUs × ${fmtDuration(length)} free from ${start > snapshot.now + HOUR ? 'then' : 'now'} (pool-wide)`
+              : `this pool fits ${needed.gpus} GPUs × ${fmtDuration(length)} from ${fmtStamp(fitsAt)} (${fmtRelative(fitsAt, snapshot.now)})`}
+          {next && (
+            <>
+              {' · '}
+              <Link href={next.href} className="text-signal hover:underline">
+                {next.label}
+              </Link>
+            </>
+          )}
+        </p>
+      </div>
+      <ul className="mt-2 flex flex-col">
+        {diagnosis.checks.map((check) => {
+          const Icon = VERDICT_ICON[check.verdict];
+          return (
+            <li key={check.id} className="grid grid-cols-[16px_88px_1fr] items-start gap-x-2 py-1">
+              <Icon
+                aria-label={check.verdict === 'ok' ? 'passes' : check.verdict === 'blocks' ? 'blocks' : 'unknown'}
+                className={cx('mt-0.5 size-3.5', check.verdict === 'blocks' ? 'text-signal' : check.verdict === 'ok' ? 'text-text-secondary' : 'text-text-tertiary')}
+              />
+              <span className={cx('font-mono text-[11px]', check.verdict === 'blocks' ? 'text-text-primary' : 'text-text-secondary')}>{check.label}</span>
+              <span className="text-caption-1-regular text-text-secondary">{check.detail}</span>
+            </li>
+          );
+        })}
+      </ul>
+      {diagnosis.blockers.length > 0 && (cause?.id === 'capacity' || cause?.id === 'fragmentation') && (
+        <div className="mt-2">
+          <p className="mb-1 font-mono text-[10px] text-text-tertiary">
+            booked on {reservation.poolId} over its window ({fmtStamp(diagnosis.window.start)} → {fmtStamp(diagnosis.window.end)}), most GPU-hours first
+          </p>
+          <ul className="border border-separator-border">
+            {diagnosis.blockers.slice(0, 5).map(({ reservation: other, gpus, gpuHours }) => (
+              <li key={other.id} className="flex flex-wrap items-center gap-2 border-b border-separator-border px-3 py-1.5 last:border-0">
+                <EntityLink kind="reservation" id={other.id} href={`/reservations?id=${other.id}`} className="shrink-0" />
+                <span className="min-w-0 flex-1 truncate text-caption-1-regular text-text-secondary">{tenantName(other.tenantId)}</span>
+                {other.request.spot && <Tag status="warn">spot</Tag>}
+                <span className="font-mono text-[11px] tabular-nums text-text-secondary">
+                  {fmtNum(gpus)} GPU · {fmtNum(Math.round(gpuHours))} GPU·h · until {fmtStamp(other.during!.end)}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {diagnosis.blockers.length > 5 && <p className="mt-1 font-mono text-[10px] text-text-tertiary">+{diagnosis.blockers.length - 5} more</p>}
+        </div>
+      )}
     </section>
   );
 }
@@ -307,6 +406,8 @@ export function ReservationDrawer({ reservation, onClose }: { reservation?: Rese
           <h3 className="mb-2 font-mono text-[11px] tracking-wide text-text-tertiary uppercase">Lifecycle</h3>
           <Lifecycle reservation={r} now={snapshot.now} />
         </section>
+
+        {(r.state === 'pending' || r.state === 'awaiting-confirmation') && <WhyWaiting reservation={r} />}
 
         {(r.state === 'pending' || r.state === 'awaiting-confirmation' || r.state === 'placed') && <Alternatives reservation={r} />}
 
