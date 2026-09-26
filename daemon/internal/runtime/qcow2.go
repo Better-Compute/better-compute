@@ -116,6 +116,13 @@ func checkBase(path, format string) error {
 	return nil
 }
 
+// CheckOverlay is checkOverlay, for bcd helper: root checks the disk of a domain it defines again,
+// since the node wrote it.
+func CheckOverlay(path, base, baseFormat string) error { return checkOverlay(path, base, baseFormat) }
+
+// CheckBase is checkBase, for bcd helper (a domain's cdrom and backing base).
+func CheckBase(path, format string) error { return checkBase(path, format) }
+
 // checkOverlay checks an instance's disk before anything opens it (every start, snapshot and
 // resize): a VMM that once ran it can rewrite its header. The disk is bcd's overlay on base (format
 // baseFormat), or a flat disk when base is empty (a restored snapshot, an iso install).
