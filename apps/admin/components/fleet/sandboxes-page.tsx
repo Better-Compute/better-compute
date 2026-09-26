@@ -216,6 +216,7 @@ export function SandboxesPage() {
           searchPlaceholder="Filter by id, template, tenant…"
           initialSort={{ id: 'created', dir: 'asc' }}
           exportName="sandboxes"
+            viewKey="sandboxes"
           rowTone={(s) => (s.state === 'failed' ? 'crit' : s.expiresAt - now < 5 * MINUTE && s.state === 'ready' ? 'warn' : undefined)}
           bulkActions={(selected, clear) => (
             <>

@@ -1,6 +1,7 @@
 import {
   RiAlarmWarningLine,
   RiBox3Line,
+  RiGridLine,
   RiHammerLine,
   RiLayoutColumnLine,
   RiRadarLine,
@@ -13,6 +14,8 @@ import {
 } from 'react-icons/ri';
 import type { AdminModule } from '@/lib/modules';
 import { NodePeek, SandboxPeek, searchFleet } from './peeks';
+import { BatchesStatus, NodesStatus, RolloutStatus } from './status';
+import { BatchesWidget, GpuWallWidget, HealthWidget, RolloutWidget, SandboxesWidget, UnhealthyWidget, poolKindOptions } from './widgets';
 
 /**
  * Fleet and operations: nodes (table, racks, detail), GPU devices and health, workloads (instances, sandboxes,
@@ -77,7 +80,51 @@ export const fleetModule: AdminModule = {
       description: 'The live event stream, filterable and pausable',
     },
   ],
-  widgets: [],
+  widgets: [
+    {
+      id: 'fleet.health',
+      title: 'Node health',
+      description: 'Ready, degraded, provisioning and offline nodes per pool; click a pool to list its nodes.',
+      icon: RiServerLine,
+      module: 'fleet',
+      defaultSize: { w: 4, h: 4 },
+      minSize: { w: 3, h: 2 },
+      href: '/nodes',
+      settings: [{ id: 'kind', label: 'Pools', type: 'select', options: poolKindOptions, default: 'all' }],
+      component: HealthWidget,
+    },
+    {
+      id: 'fleet.gpu-wall',
+      title: 'GPU wall',
+      description: 'Every GPU as a cell, grouped by node: utilization or temperature; unhealthy ones outlined red.',
+      icon: RiGridLine,
+      module: 'fleet',
+      defaultSize: { w: 8, h: 4 },
+      minSize: { w: 4, h: 3 },
+      href: '/nodes',
+      settings: [
+        { id: 'color', label: 'Fill', type: 'select', options: [{ value: 'util', label: 'Utilization' }, { value: 'temp', label: 'Temperature' }], default: 'util' },
+        { id: 'unhealthyOnly', label: 'Only nodes with an unhealthy GPU', type: 'toggle', default: false },
+      ],
+      component: GpuWallWidget,
+    },
+    {
+      id: 'fleet.unhealthy',
+      title: 'Unhealthy nodes',
+      description: 'The worst nodes first with their top condition; click one to peek.',
+      icon: RiAlarmWarningLine,
+      module: 'fleet',
+      defaultSize: { w: 4, h: 4 },
+      minSize: { w: 3, h: 2 },
+      href: '/nodes?preset=attention',
+      settings: [{ id: 'warnings', label: 'Include warnings', type: 'toggle', default: true, hint: 'Off: only critical nodes' }],
+      component: UnhealthyWidget,
+    },
+    { id: 'fleet.rollout', title: 'bcd rollout', description: 'The running rollout by wave, with failures.', icon: RiRocket2Line, module: 'fleet', defaultSize: { w: 4, h: 2 }, minSize: { w: 3, h: 2 }, href: '/rollouts', component: RolloutWidget },
+    { id: 'fleet.sandboxes', title: 'Sandboxes', description: 'Live, starting and warm-idle sandboxes, warm-pool hits, expiring soon.', icon: RiBox3Line, module: 'fleet', defaultSize: { w: 4, h: 2 }, minSize: { w: 3, h: 2 }, href: '/sandboxes', component: SandboxesWidget },
+    { id: 'fleet.batches', title: 'Batches to sign', description: 'Quorum batches waiting for approver signatures.', icon: RiShieldCheckLine, module: 'fleet', defaultSize: { w: 4, h: 3 }, minSize: { w: 3, h: 2 }, href: '/batches', component: BatchesWidget },
+  ],
+  status: [NodesStatus, RolloutStatus, BatchesStatus],
   commands: [
     { id: 'fleet.nodes.attention', label: 'Nodes that need attention', group: 'Fleet', icon: RiAlarmWarningLine, href: '/nodes?preset=attention', keywords: ['incidents', 'broken', 'critical'] },
     { id: 'fleet.nodes.offline', label: 'Offline nodes', group: 'Fleet', icon: RiWifiOffLine, href: '/nodes?health=offline', keywords: ['unreachable', 'lost', 'down'] },

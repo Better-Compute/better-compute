@@ -273,6 +273,7 @@ export function NodesPage() {
             }}
             initialSort={{ id: 'conditions', dir: 'desc' }}
             exportName="nodes"
+            viewKey="nodes"
             pageSize={100}
             maxHeight="calc(100dvh - 330px)"
           />
