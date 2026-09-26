@@ -514,12 +514,18 @@ export async function reservationView(tx: SqlTx, row: ReservationRow): Promise<R
     );
     const bound = rows[0];
     if (bound) {
-      const binding = json(bound.binding) as { cdiDevices?: string[]; envFile?: string } | null;
+      const binding = json(bound.binding) as {
+        cdiDevices?: string[];
+        envFile?: string;
+        cgroupParent?: string;
+      } | null;
       const hold: HoldBinding = {
         nodeId: bound.node_id,
         cdiDevices: binding?.cdiDevices ?? [],
         envFile: binding?.envFile ?? '',
       };
+      if (typeof binding?.cgroupParent === 'string' && binding.cgroupParent !== '')
+        hold.cgroupParent = binding.cgroupParent;
       view.binding = hold;
     }
   }
@@ -2024,9 +2030,14 @@ export async function markAllocationBound(
   tx: SqlTx,
   work: ModuleContext['work'],
   allocationId: string,
-  binding: { cdiDevices: readonly string[]; envFile?: string },
+  binding: { cdiDevices: readonly string[]; envFile?: string; cgroupParent?: string },
   options: { nodeId?: string; evidence?: BindingEvidence } = {},
 ): Promise<boolean> {
+  // The slice bcd bound a hold into (§3.8), kept only when it looks like one of bcd's.
+  const slice =
+    typeof binding.cgroupParent === 'string' && /^bcd-alloc-[A-Za-z0-9_-]{1,120}\.slice$/.test(binding.cgroupParent)
+      ? binding.cgroupParent
+      : undefined;
   const { rows } = await tx.query<{ owner_id: string; owner_kind: string }>(
     `UPDATE allocations SET binding = $2::jsonb, bound_at = COALESCE(bound_at, compute_now()),
                             bound_report = $4, bound_sig_kid = $5, bound_sig = $6,
@@ -2035,7 +2046,11 @@ export async function markAllocationBound(
       RETURNING owner_id, owner_kind`,
     [
       allocationId,
-      JSON.stringify({ cdiDevices: [...binding.cdiDevices], envFile: binding.envFile ?? '' }),
+      JSON.stringify({
+        cdiDevices: [...binding.cdiDevices],
+        envFile: binding.envFile ?? '',
+        ...(slice ? { cgroupParent: slice } : {}),
+      }),
       options.nodeId ?? null,
       options.evidence?.body ?? null,
       options.evidence?.kid ?? null,

@@ -400,6 +400,11 @@ export interface HoldBinding {
   nodeId: string;
   cdiDevices: string[];
   envFile: string;
+  /**
+   * (v1.1 §3.8) The cgroup-v2 slice the workload must run in to get the booked CPU, memory and
+   * hugepages (e.g. `bcd-alloc-<allocation>.slice`); absent when the reservation booked none.
+   */
+  cgroupParent?: string;
 }
 
 export interface Reservation {

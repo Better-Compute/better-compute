@@ -2824,6 +2824,19 @@ describe('host CPU and memory booked with the GPUs (§3.8)', () => {
     // The spec carries them to the node.
     const spec = await module.nodeSpec!(moduleContext(db), { id: NA } as never);
     expect(spec.devices!.assignments).toEqual([assignment]);
+    // bcd's AllocationBound names the slice; the reservation shows where the workload must run.
+    await db.transaction((tx) =>
+      markAllocationBound(tx, moduleContext(db).work, assignment!.allocationId, {
+        cdiDevices: ['bcd.dev/gpu=GPU-na-0'],
+        cgroupParent: `bcd-alloc-${assignment!.allocationId}.slice`,
+      }),
+    );
+    await reconcile(created.id);
+    const active = (await call('reservations', 'get', {
+      tenantId: 'acme',
+      reservationId: created.id,
+    })) as Rsv;
+    expect(active.binding).toMatchObject({ cgroupParent: `bcd-alloc-${assignment!.allocationId}.slice` });
     await db.query(`DELETE FROM node_inventory`);
     await db.query(`DELETE FROM inventory_snapshots`);
   });

@@ -5206,8 +5206,12 @@ type AllocationBound struct {
 	// Fully qualified CDI device names, e.g. "bcd.dev/gpu=GPU-…".
 	CdiDevices []string `protobuf:"bytes,4,rep,name=cdi_devices,json=cdiDevices,proto3" json:"cdi_devices,omitempty"`
 	// e.g. "/etc/cdi/bcd-<allocation_id>.json".
-	CdiSpecPath   string `protobuf:"bytes,5,opt,name=cdi_spec_path,json=cdiSpecPath,proto3" json:"cdi_spec_path,omitempty"`
-	EnvFile       string `protobuf:"bytes,6,opt,name=env_file,json=envFile,proto3" json:"env_file,omitempty"`
+	CdiSpecPath string `protobuf:"bytes,5,opt,name=cdi_spec_path,json=cdiSpecPath,proto3" json:"cdi_spec_path,omitempty"`
+	EnvFile     string `protobuf:"bytes,6,opt,name=env_file,json=envFile,proto3" json:"env_file,omitempty"`
+	// (v1.1 §3.8) The cgroup-v2 slice a HOLD's workload must run in, e.g.
+	// "bcd-alloc-<allocation_id>.slice" (also in the CDI spec and env file); empty when the assignment
+	// carried no limits or its binding is KUBERNETES (the kubelet enforces those).
+	CgroupParent  string `protobuf:"bytes,7,opt,name=cgroup_parent,json=cgroupParent,proto3" json:"cgroup_parent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5280,6 +5284,13 @@ func (x *AllocationBound) GetCdiSpecPath() string {
 func (x *AllocationBound) GetEnvFile() string {
 	if x != nil {
 		return x.EnvFile
+	}
+	return ""
+}
+
+func (x *AllocationBound) GetCgroupParent() string {
+	if x != nil {
+		return x.CgroupParent
 	}
 	return ""
 }
@@ -6638,7 +6649,7 @@ const file_bettercompute_agent_v1_session_proto_rawDesc = "" +
 	"\x10allocation_bound\x18\n" +
 	" \x01(\v2'.bettercompute.agent.v1.AllocationBoundH\x00R\x0fallocationBound\x12]\n" +
 	"\x13allocation_released\x18\v \x01(\v2*.bettercompute.agent.v1.AllocationReleasedH\x00R\x12allocationReleasedB\b\n" +
-	"\x06report\"\xd5\x01\n" +
+	"\x06report\"\xfa\x01\n" +
 	"\x0fAllocationBound\x12#\n" +
 	"\rallocation_id\x18\x01 \x01(\tR\fallocationId\x12\x1e\n" +
 	"\n" +
@@ -6649,7 +6660,8 @@ const file_bettercompute_agent_v1_session_proto_rawDesc = "" +
 	"\vcdi_devices\x18\x04 \x03(\tR\n" +
 	"cdiDevices\x12\"\n" +
 	"\rcdi_spec_path\x18\x05 \x01(\tR\vcdiSpecPath\x12\x19\n" +
-	"\benv_file\x18\x06 \x01(\tR\aenvFile\"x\n" +
+	"\benv_file\x18\x06 \x01(\tR\aenvFile\x12#\n" +
+	"\rcgroup_parent\x18\a \x01(\tR\fcgroupParent\"x\n" +
 	"\x12AllocationReleased\x12#\n" +
 	"\rallocation_id\x18\x01 \x01(\tR\fallocationId\x12\x1e\n" +
 	"\n" +
