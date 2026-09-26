@@ -691,6 +691,18 @@ if grep -Eq '^[[:space:]]*\\[[[:space:]]*helper[[:space:]]*\\]' /etc/bcd/config.
       adduser -S -D -H -h /var/lib/bcd -s /sbin/nologin bcd
     fi
   fi
+  # bcd node keeps its key in the TPM when the host has one: it opens the TPM resource manager through
+  # the tss group (the tpm2-tss udev rule's group; set up here when the device has none).
+  if [ -c /dev/tpmrm0 ]; then
+    if ! getent group tss >/dev/null 2>&1; then
+      if command -v groupadd >/dev/null 2>&1; then groupadd --system tss; else addgroup -S tss; fi
+    fi
+    if [ "$(stat -c %G /dev/tpmrm0 2>/dev/null)" != tss ]; then
+      printf 'KERNEL=="tpmrm[0-9]*", GROUP="tss", MODE="0660"\\n' > /etc/udev/rules.d/60-bcd-tpm.rules
+      chgrp tss /dev/tpmrm0 && chmod 0660 /dev/tpmrm0
+    fi
+    if command -v usermod >/dev/null 2>&1; then usermod -a -G tss bcd; else addgroup bcd tss; fi
+  fi
   cat > /etc/systemd/system/bcd-helper.service.new <<'BCD_HELPER_UNIT'
 ${bcdHelperUnit}BCD_HELPER_UNIT
   chmod 0644 /etc/systemd/system/bcd-helper.service.new

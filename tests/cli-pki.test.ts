@@ -570,6 +570,9 @@ describe('daemon install-script', () => {
     expect(script).toContain("[ -e /dev/tpmrm0 ] || fail 'this node joins with its TPM");
     expect(script).not.toContain('read -r TOKEN');
     expect(script).not.toContain('printf \'%s\\n\' "$TOKEN"');
+    // bcd node (the bcd user) opens the TPM its node key lives in through the tss group.
+    expect(script).toContain('usermod -a -G tss bcd');
+    expect(script).toContain(`KERNEL=="tpmrm[0-9]*", GROUP="tss", MODE="0660"`);
     // bcd join is run before the units start again, and the helper before the node.
     const joined = script.indexOf('--attestor tpm < /dev/null');
     expect(script.indexOf('systemctl restart bcd-helper.service', joined)).toBeLessThan(script.indexOf('systemctl restart bcd.service', joined));

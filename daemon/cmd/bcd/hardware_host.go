@@ -87,6 +87,9 @@ func nodeKeyTPM(string) func() (tpm.Transport, error) {
 	return func() (tpm.Transport, error) { return tpm.OpenDevice(tpmDevice) }
 }
 
+// nodeKeyDevice is the device node keys are made in ("" in fakehw builds).
+func nodeKeyDevice() string { return tpmDevice }
+
 // openTPM is the host's TPM for the tpm join attestor.
 func openTPM(string) (tpm.Transport, func(), error) {
 	d, err := tpm.OpenDevice(tpmDevice)

@@ -47,6 +47,9 @@ func nodeKeyTPM(dataDir string) func() (tpm.Transport, error) {
 	}
 }
 
+// nodeKeyDevice: a fake machine's TPM is a file, open to whoever runs bcd.
+func nodeKeyDevice() string { return "" }
+
 // openTPM is the fake machine's TPM: a software TPM (tpmsim) kept in <data_dir>/fakehw-tpm.json, the
 // same EK on every join of this machine.
 func openTPM(dataDir string) (tpm.Transport, func(), error) {
