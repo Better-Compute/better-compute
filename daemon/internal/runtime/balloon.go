@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -18,9 +20,24 @@ type Ballooner interface {
 	Balloons(ctx context.Context) (map[string]uint64, error)
 }
 
+// ErrNoBalloon: the guest was defined without a balloon device (its spec has no placement.balloon,
+// or it has hugepages).
+var ErrNoBalloon = errors.New("the guest has no balloon device")
+
 // SetBalloon asks libvirt to set the guest's current memory (virsh setmem --live, KiB).
 func (l *Libvirt) SetBalloon(ctx context.Context, id string, guestBytes uint64) error {
-	_, err := l.virsh(ctx, "setmem", id, strconv.FormatUint(guestBytes/1024, 10), "--live")
+	raw, err := l.virsh(ctx, "dumpxml", id)
+	if err != nil {
+		return err
+	}
+	var x domainXML
+	if err := xml.Unmarshal(raw, &x); err != nil || x.Metadata == nil || x.Metadata.Instance.ID != id {
+		return fmt.Errorf("no managed domain %s", id)
+	}
+	if b := x.Devices.Memballoon; b == nil || b.Model == "none" {
+		return fmt.Errorf("%s: %w", id, ErrNoBalloon)
+	}
+	_, err = l.virsh(ctx, "setmem", id, strconv.FormatUint(guestBytes/1024, 10), "--live")
 	return err
 }
 
@@ -65,7 +82,19 @@ func (c *CloudHypervisor) SetBalloon(ctx context.Context, id string, guestBytes 
 		if guestBytes > d.MemoryBytes {
 			guestBytes = d.MemoryBytes
 		}
-		_, err := c.api(ctx, id, http.MethodPut, "vm.resize", map[string]uint64{"desired_balloon": d.MemoryBytes - guestBytes})
+		raw, err := c.api(ctx, id, http.MethodGet, "vm.info", nil)
+		if err != nil {
+			return err
+		}
+		var info struct {
+			Config struct {
+				Balloon json.RawMessage `json:"balloon"`
+			} `json:"config"`
+		}
+		if json.Unmarshal(raw, &info) != nil || len(info.Config.Balloon) == 0 || string(info.Config.Balloon) == "null" {
+			return fmt.Errorf("%s: %w", id, ErrNoBalloon)
+		}
+		_, err = c.api(ctx, id, http.MethodPut, "vm.resize", map[string]uint64{"desired_balloon": d.MemoryBytes - guestBytes})
 		return err
 	}
 	return fmt.Errorf("no domain %s", id)

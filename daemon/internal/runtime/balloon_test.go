@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -34,8 +35,13 @@ func TestLibvirtBalloon(t *testing.T) {
 	ctx := context.Background()
 	var calls []string
 	exec := func(_ context.Context, name string, args ...string) ([]byte, error) {
-		calls = append(calls, name+" "+strings.Join(args, " "))
-		if len(args) > 0 && strings.Contains(strings.Join(args, " "), "domstats") {
+		line := strings.Join(args, " ")
+		if _, id, ok := strings.Cut(line, "dumpxml "); ok {
+			model := map[string]string{"inst_a": "virtio", "inst_b": "none"}[id]
+			return []byte(`<domain><metadata><bc:instance xmlns:bc="https://better-compute.dev/libvirt/1" id="` + id + `"/></metadata><devices><memballoon model="` + model + `"/></devices></domain>`), nil
+		}
+		calls = append(calls, name+" "+line)
+		if strings.Contains(line, "domstats") {
 			return []byte("Domain: 'inst_a'\n  balloon.current=2097152\n"), nil
 		}
 		return nil, nil
@@ -43,6 +49,10 @@ func TestLibvirtBalloon(t *testing.T) {
 	l := &Libvirt{Dir: t.TempDir(), Exec: exec}
 	if err := l.SetBalloon(ctx, "inst_a", 3<<30); err != nil {
 		t.Fatal(err)
+	}
+	// A guest defined without a balloon (memballoon model none) says so rather than failing in QEMU.
+	if err := l.SetBalloon(ctx, "inst_b", 3<<30); !errors.Is(err, ErrNoBalloon) {
+		t.Fatalf("no balloon: %v", err)
 	}
 	sizes, err := l.Balloons(ctx)
 	if err != nil || sizes["inst_a"] != 2<<30 {
