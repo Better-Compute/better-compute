@@ -73,32 +73,36 @@ Runs the placer on a reservation request without booking anything and returns wh
 
 **Input**
 
-| Field                 | Type                                                          | Required | Constraints                                                       |
-| --------------------- | ------------------------------------------------------------- | -------- | ----------------------------------------------------------------- |
-| `tenantId`            | string                                                        | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
-| `poolId`              | string                                                        | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
-| `projectId`           | string                                                        |          | at most 56 characters; matches `^prj_[0-9a-hjkmnp-tv-z]{26,52}$`  |
-| `devices`             | list of object                                                | yes      | 1-8 items                                                         |
-| `devices[].class`     | one of `gpu`, `gpu.mig`, `gpu.slot`, `nic.vf`, `disk`, `node` | yes      |                                                                   |
-| `devices[].count`     | integer                                                       | yes      | 1-64                                                              |
-| `devices[].selector`  | object                                                        |          |                                                                   |
-| `devices[].topology`  | one of `any`, `nvlink-all`                                    |          |                                                                   |
-| `devices[].sharing`   | one of `exclusive`, `mig`, `timeslice`, `mps`                 |          |                                                                   |
-| `topology`            | one of `any`, `nvlink-all`                                    |          |                                                                   |
-| `start`               | integer                                                       |          | 0-140737488355328                                                 |
-| `duration`            | string,integer                                                | yes      |                                                                   |
-| `binding`             | string                                                        |          | default `"hold"`                                                  |
-| `node`                | object                                                        |          |                                                                   |
-| `node.profileId`      | string                                                        | yes      | at most 128 characters; matches `^[A-Za-z0-9._:/-]{1,128}$`       |
-| `node.profileVersion` | integer                                                       |          | at least 1                                                        |
-| `leaseSeconds`        | integer                                                       |          | 30-86400                                                          |
-| `spot`                | boolean                                                       |          |                                                                   |
-| `idempotencyKey`      | string                                                        | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
-| `wait`                | object                                                        |          |                                                                   |
-| `wait.timeoutMs`      | integer                                                       | yes      | 0-30000                                                           |
-| `gang`                | object                                                        |          |                                                                   |
-| `gang.size`           | integer                                                       | yes      | 2-64                                                              |
-| `gang.topologyKey`    | string                                                        |          | at most 128 characters                                            |
+| Field                    | Type                                                          | Required | Constraints                                                       |
+| ------------------------ | ------------------------------------------------------------- | -------- | ----------------------------------------------------------------- |
+| `tenantId`               | string                                                        | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`                 | string                                                        | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `projectId`              | string                                                        |          | at most 56 characters; matches `^prj_[0-9a-hjkmnp-tv-z]{26,52}$`  |
+| `devices`                | list of object                                                | yes      | 1-8 items                                                         |
+| `devices[].class`        | one of `gpu`, `gpu.mig`, `gpu.slot`, `nic.vf`, `disk`, `node` | yes      |                                                                   |
+| `devices[].count`        | integer                                                       | yes      | 1-64                                                              |
+| `devices[].selector`     | object                                                        |          |                                                                   |
+| `devices[].topology`     | one of `any`, `nvlink-all`                                    |          |                                                                   |
+| `devices[].sharing`      | one of `exclusive`, `mig`, `timeslice`, `mps`                 |          |                                                                   |
+| `topology`               | one of `any`, `nvlink-all`                                    |          |                                                                   |
+| `start`                  | integer                                                       |          | 0-140737488355328                                                 |
+| `duration`               | string,integer                                                | yes      |                                                                   |
+| `binding`                | string                                                        |          | default `"hold"`                                                  |
+| `resources`              | object                                                        |          |                                                                   |
+| `resources.vcpu`         | integer                                                       |          | 0-4096                                                            |
+| `resources.memoryGiB`    | integer                                                       |          | 0-65536                                                           |
+| `resources.hugepages1Gi` | integer                                                       |          | 0-4096                                                            |
+| `node`                   | object                                                        |          |                                                                   |
+| `node.profileId`         | string                                                        | yes      | at most 128 characters; matches `^[A-Za-z0-9._:/-]{1,128}$`       |
+| `node.profileVersion`    | integer                                                       |          | at least 1                                                        |
+| `leaseSeconds`           | integer                                                       |          | 30-86400                                                          |
+| `spot`                   | boolean                                                       |          |                                                                   |
+| `idempotencyKey`         | string                                                        | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `wait`                   | object                                                        |          |                                                                   |
+| `wait.timeoutMs`         | integer                                                       | yes      | 0-30000                                                           |
+| `gang`                   | object                                                        |          |                                                                   |
+| `gang.size`              | integer                                                       | yes      | 2-64                                                              |
+| `gang.topologyKey`       | string                                                        |          | at most 128 characters                                            |
 
 ## timeline
 

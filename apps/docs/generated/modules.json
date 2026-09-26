@@ -141,6 +141,7 @@
   ],
   "jobs": [
     "audit.checkpoint",
+    "capacity.hosts",
     "capacity.mig",
     "capacity.reservations",
     "capacity.rollup",
