@@ -549,11 +549,10 @@ mid-command and a zombie gateway fenced by its session epoch.
 memory shares over a GPU pool of `SIM_K8S_NODES` hosts (default 1,000) under link faults, crashes, partitions and
 resets, re-inventories hosts with less CPU and memory and then restores them, and has pods keep released Kubernetes
 GPUs for 45 seconds. After every step it asserts `checkHostResources` and the fleet invariants; the recorded run at
-1,000 nodes is green in about 4.5 minutes. A second, strict 12-node run of `checkKubeAdvertisements` is marked
-`it.fails`, because it fails today: capacity frees a Kubernetes-bound GPU at release and re-books it about a second
-before the node withdraws it from the kubelet, and while pods still hold it, so the node rejects the new binding
-(`NodeRejectedBinding`; 55 of 240 reservations failed at 12 nodes, 13 of 240 at 1,000). It becomes a plain test once
-a Kubernetes booking ends at the node's `AllocationReleased`.
+1,000 nodes is green in about 4.5 minutes. A second, strict 12-node run of `checkKubeAdvertisements` checks that no
+kubelet is offered a GPU booked elsewhere. It used to fail (capacity freed a Kubernetes-bound GPU at release and
+re-booked it before pods let go, so the node rejected the new binding: 55 of 240 reservations at 12 nodes); since
+e7d922c a Kubernetes booking ends at the node's `AllocationReleased`, and the run passes with no failed reservations.
 
 ### The nightly simulation
 

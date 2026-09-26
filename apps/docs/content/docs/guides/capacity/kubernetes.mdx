@@ -353,10 +353,12 @@ holds a device of the allocation any more:
 
 - The pending release is written to `<data_dir>/releasing.json` before the CDI spec goes, so a crash never loses it.
 - Until the report, the devices stay claimed on the node: no hold, VM, `gpu.reset`, `diag.dcgm` or host config unit
-  gets them. The control plane does not wait for the report yet: capacity frees the GPU when the reservation is
-  released and may book it to another allocation at once, which the node then refuses with overlap
-  (`NodeRejectedBinding`) while pods still hold it. `tests/sim/kubernetes-host-resources-1k.test.ts` records this as
-  an expected failure (246c95b; see [the control-plane simulator](/docs/operations/testing#the-control-plane-simulator)).
+  gets them. The control plane waits for the report too (e7d922c): a released, bound Kubernetes reservation keeps its
+  GPUs and host share booked, and billed, until the node reports `AllocationReleased`, the node is lost, or the
+  booking's end passes. The reservation shows as released at once, and the spec withdraws the devices, but no other
+  allocation can take them while pods still hold them. The secret broker gives such a releasing allocation nothing.
+  `tests/sim/kubernetes-host-resources-1k.test.ts` checks this (see
+  [the control-plane simulator](/docs/operations/testing#the-control-plane-simulator)).
 - "No pod holds it" comes from the kubelet's pod-resources API (a device plugin id `<atom>@<allocation>`, or a
   `gpu.bcd.dev` claim of this node's pool named for the allocation; 14111c1). Since 8bcbe92 (security review 2) two
   more sources can keep the devices in use, and every check fails closed:
@@ -415,9 +417,6 @@ requests to the reservation yourself; compute does not write them.
 - **No real cluster has run this.** Neither the device plugins nor the DRA driver has served a real kubelet.
 - **Pod requests are not derived from the reservation.** The kubelet enforces what the pods ask for, not what the
   reservation booked.
-- **A Kubernetes booking ends at release, not at the node's report.** Capacity can re-book a released GPU while pods
-  still hold it and before the node withdraws it from the kubelet, and the new binding then fails on the node (see
-  [release](#release)).
 
 <Cards>
   <Card title="Host configuration" href="/docs/daemon/host-config#k8s-join">The k8s-join unit in detail.</Card>
