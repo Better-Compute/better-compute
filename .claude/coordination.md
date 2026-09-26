@@ -121,6 +121,14 @@ Assigned since: agent-memory volumes, with the control plane (vps sandboxVolumes
 - [d320b8]: signed intent for helper host.unit (root-owned command_signing_root_sha256 pin, out-of-band), a periodic drift pass, and the hugepages fstab.
 - [6baab5]: DRA driver (gpu.bcd.dev).
 
+E landed ([6baab5]):
+- GPUs and health: cb987e5 nvidia-smi backend (+5026330 NVLink peers); 662fb55 diag.nvml, XID rescans, reset clears XIDs; 6f5a99f unhealthy GPUs never offered.
+- Kubernetes: 88ecb07/7579184 k8s-join + device plugin + reaper; 1e5f96b hosted mode; 7d24836/fa8611e DRA; 9f860ad/3f73449 review-5 fixes (ids <atom>@<alloc>, ForeignGpuExposure, RequireAllowed, DRA adminAccess/claim map); 028b81c release cordon/drain; 6ef198b taints only at registration (KubernetesTaintsDrift); 14111c1 InUse/Freed (with [06192c]'s cd5fc82).
+- provider-kubernetes: a2eb28f/d2cd813/ab9339b `kubernetesManifestCommand` (pins only from the operator).
+- Telemetry: 27c7ee2 OTLP export (bcd.gpu.*, bcd.host.pressure.*); 53aa356 nodeTelemetryModule; 3111284 host memory/hugepages/instances; 0b21b4b runtime/usage.go + bcd.instance.* usage.
+- bcd status/doctor: ad8791f, f9d7af9, 35534e5.
+- e2e: efdff1d real-bcd OTLP; 8a084ca + 04f6bda Kubernetes-bound reservations (the gateway XID wake fix).
+
 ## Round 4 allocation (proposed by [f85da7], 2026-09-24 late; all round-3 sessions are gone)
 
 Six "Feature building continuation" sessions started at once. If two proposals collide, this one stands (it was written
