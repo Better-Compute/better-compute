@@ -189,6 +189,7 @@ Files the daemon owns:
 | `/etc/systemd/system/bcd-rollback.service`, `bcd.service.d/50-bcd-rollback.conf` | written by the first update under systemd |
 | `/etc/cdi/bcd-<allocationId>.json` | CDI spec per GPU hold |
 | `/run/bcd/allocations/<allocationId>.env` | the hold's environment (`BCD_ALLOCATION_ID`, `BCD_RESERVATION_ID`, `NVIDIA_VISIBLE_DEVICES`, …) |
+| `<data_dir>/volumes/<id>.raw`, `<id>.json` | persistent host volumes and their serials (0600; a CH VMM's user holds a read-write one while it runs) |
 | `bcd-alloc-<allocationId>.slice` | a hold's runtime slice when it has limits (`/sys/fs/cgroup/bcd.slice/bcd-alloc.slice/…`); under a fake root, `/run/bcd/slices/<name>.json` |
 | `/etc/ssh/sshd_config.d/10-better-compute.conf`, `/etc/ssh/bc_ca.pub`, `/etc/ssh/bc_principals/<account>`, `/etc/ssh/bc_krl` | break-glass SSH, written by the access converger |
 
@@ -372,6 +373,17 @@ events. It never drops a hold on its own.
   - free hugepages of the right size, per NUMA node for a placed instance.
   
   A refused start reports `ResourcesExhausted`, stays stopped and is tried again on the next pass.
+  A new hold with a memory limit or hugepages is admitted the same way. What doesn't fit becomes
+  `AllocationFailed{reason: resources-exhausted}`, which the control plane re-places. Each side
+  counts the other, so VMs and holds never take what the other was promised.
+- *Volumes* (`runtime/volumes.go`; `InstancesSection.volumes`):
+  - persistent disks under `<data_dir>/volumes`, one sparse raw file each;
+  - created and grown (never shrunk) before any instance is defined;
+  - attached in spec order as `vdb`… and found by serial;
+  - one writer: an instance beside a running or paused writer, or a writer beside readers, is
+    refused and stopped;
+  - once unlisted and unattached, a volume's blocks are punched out and the file is unlinked;
+  - a memory snapshot of an instance with a read-write volume is refused.
 - *Placement* (`runtime/placement.go`). `InstanceSpec.placement` pins the vCPUs one to one when
   `cpus` has exactly `vcpu` entries; with more entries the vCPUs float within them. Placement also
   sets memory binding (`mems`, strict), hugepage backing (2 MiB or 1 GiB, locked) and the balloon,
