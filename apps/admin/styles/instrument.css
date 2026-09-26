@@ -78,6 +78,8 @@
 
   /* Amber fills carry dark ink in both themes (7.9:1 on signal-500). */
   --color-button-primary-foreground: var(--color-neutral-950);
+  /* Admin: tertiary ink at least 4.5:1 on every light surface (BoardUI's neutral-400 was 2.1-2.6:1). */
+  --color-text-tertiary: #5f6670;
   --color-switch-on-thumb-start: var(--color-white);
   --color-switch-on-thumb-end: var(--color-neutral-100);
 
@@ -124,7 +126,9 @@
   --color-accent-950: var(--color-neutral-900);
 
   --color-text-secondary: var(--color-neutral-400);
-  --color-text-tertiary: var(--color-neutral-500);
+  /* Admin: the panel sets many 10-11 px mono labels in tertiary ink; #8a919b keeps them at least 4.5:1 on
+     every dark surface (neutral-500 was 3.2-3.7:1 on panels). */
+  --color-text-tertiary: #8a919b;
 
   --color-button-primary-foreground: var(--color-neutral-950);
   --color-switch-on-thumb-start: var(--color-neutral-100);
