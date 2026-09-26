@@ -226,8 +226,16 @@ describe('xidStatusHandler', () => {
       { status: 'true' },
     ]);
     expect((await state()).reasons).toEqual([]);
-    // A unit waiting for a reboot: recorded for whoever reboots within the budget, not NoSchedule.
-    await report(6, ['RebootRequired']);
+    // A unit waiting for a reboot, and the kube manager's conditions: recorded, not NoSchedule.
+    await report(6, ['RebootRequired', 'ForeignGpuExposure', 'PodResourcesUnavailable']);
+    expect(
+      (
+        await f.db.query<{ type: string }>(
+          `SELECT type FROM node_conditions WHERE node_id = $1 AND status = 'true' AND type IN ('ForeignGpuExposure', 'PodResourcesUnavailable') ORDER BY type`,
+          [node],
+        )
+      ).rows.map((row) => row.type),
+    ).toEqual(['ForeignGpuExposure', 'PodResourcesUnavailable']);
     expect((await f.db.query<{ status: string }>(`SELECT status FROM node_conditions WHERE node_id = $1 AND type = 'RebootRequired'`, [node])).rows).toEqual([
       { status: 'true' },
     ]);

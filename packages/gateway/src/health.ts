@@ -19,6 +19,12 @@ export const daemonNodeConditions: Readonly<Record<string, { noSchedule: boolean
   // A host config unit takes effect only after a reboot (bcd never reboots on its own): reboot the
   // node within the disruption budget (node.reboot). Not a fault; the node keeps running.
   RebootRequired: { noSchedule: false },
+  // bcd's Kubernetes node side (kube manager): another path gives pods GPUs, so bcd offers none (capacity decides
+  // what that means for binding:'kubernetes' reservations); released devices cannot be reclaimed from pods; the
+  // spec dropped k8s-join and bcd cordoned and drained the Node.
+  ForeignGpuExposure: { noSchedule: false },
+  PodResourcesUnavailable: { noSchedule: false },
+  KubernetesReleased: { noSchedule: false },
   // Not a fault: the host section is observed only ([host] units = false; the GPU operator owns
   // the host). Operators see it on the node; capacity books from the inventory alone.
   HostManagedExternally: { noSchedule: false },
