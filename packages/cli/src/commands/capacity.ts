@@ -48,6 +48,38 @@ export function parseTime(value: string, now: number, flag: string): number {
   return parsed;
 }
 
+/** Host resources and the binding a reservation books with its GPUs (§3.8). */
+const hostFlags = {
+  cpus: {
+    type: 'integer',
+    value: 'N',
+    min: 0,
+    max: 4096,
+    description: "Host CPUs to book with the GPUs (default: the pool's per-GPU share)",
+  },
+  memory: {
+    type: 'integer',
+    value: 'GIB',
+    min: 0,
+    max: 65_536,
+    description: "Host memory in GiB to book with the GPUs (default: the pool's per-GPU share)",
+  },
+  kubernetes: {
+    type: 'boolean',
+    description: "Give the GPUs to the node's kubelet (pools that join a Kubernetes cluster)",
+  },
+} as const satisfies Record<string, FlagSpec>;
+
+function hostFields(flags: { cpus?: number | undefined; memory?: number | undefined; kubernetes?: boolean | undefined }) {
+  const resources: Record<string, number> = {};
+  if (typeof flags.cpus === 'number') resources.vcpu = flags.cpus;
+  if (typeof flags.memory === 'number') resources.memoryGiB = flags.memory;
+  return {
+    binding: flags.kubernetes === true ? 'kubernetes' : 'hold',
+    ...(Object.keys(resources).length ? { resources } : {}),
+  };
+}
+
 function checkDuration(value: string, flag: string): string {
   try {
     parseDuration(value);
@@ -177,9 +209,11 @@ export const capacityCommands = [
         default: 20,
         description: 'How long to wait for the placement',
       },
+      ...hostFlags,
     },
     examples: [
       'better-compute reserve --pool pool_01k… --gpus 4 --for 8h',
+      'better-compute reserve --pool pool_01k… --gpus 2 --for 8h --cpus 32 --memory 256 --kubernetes',
       'better-compute reserve --pool pool_01k… --gpus 8 --for 3d --model H100 --nvlink --selector "vramGiB >= 80"',
       'better-compute reserve --pool pool_01k… --gpus 2 --for 1h --start +2h --key nightly-2026-09-24',
     ],
@@ -200,7 +234,7 @@ export const capacityCommands = [
           }),
         ],
         duration: checkDuration(flags.for!, 'for'),
-        binding: 'hold',
+        ...hostFields(flags),
         idempotencyKey,
         wait: { timeoutMs: (flags.wait ?? 20) * 1000 },
       };
@@ -370,6 +404,7 @@ export const capacityCommands = [
       gpus: { type: 'integer', value: 'N', min: 1, max: 64, description: 'GPUs for --preview' },
       for: { type: 'string', value: 'DURATION', description: 'Duration for --preview' },
       selector: { type: 'string', value: 'EXPR', description: 'Selector shorthand for --preview' },
+      ...hostFlags,
     },
     validate(flags) {
       if (flags.preview && (!flags.pool || flags.gpus === undefined || !flags.for))
@@ -393,7 +428,7 @@ export const capacityCommands = [
             }),
           ],
           duration: checkDuration(flags.for!, 'for'),
-          binding: 'hold',
+          ...hostFields(flags),
           idempotencyKey: newIdempotencyKey(),
         });
       if (flags.pool)

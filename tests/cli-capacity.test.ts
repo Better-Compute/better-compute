@@ -121,6 +121,32 @@ describe('reserve', () => {
     });
     expect(call!.body.idempotencyKey).toMatch(/^cli-[0-9a-f]{24}$/);
     expect(result.ok && result.notes.join('\n')).toContain(String(call!.body.idempotencyKey));
+    // No host flags: the pool's per-GPU share (no resources in the request).
+    expect(call!.body.resources).toBeUndefined();
+  });
+
+  it('books host CPUs and memory and the kubernetes binding (§3.8)', async () => {
+    const result = await run([
+      'reserve',
+      '--pool',
+      POOL,
+      '--gpus',
+      '2',
+      '--for',
+      '8h',
+      '--cpus',
+      '32',
+      '--memory',
+      '256',
+      '--kubernetes',
+    ]);
+    expect(result.ok).toBe(true);
+    expect(result.calls[0]!.body).toMatchObject({
+      binding: 'kubernetes',
+      resources: { vcpu: 32, memoryGiB: 256 },
+    });
+    const bad = await run(['reserve', '--pool', POOL, '--gpus', '2', '--for', '8h', '--cpus', '-1']);
+    expect(bad).toMatchObject({ ok: false, code: 'INVALID_ARGUMENT' });
   });
 
   it('retries with --key, schedules with --start and leases with --lease', async () => {
