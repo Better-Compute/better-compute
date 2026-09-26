@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -29,6 +30,7 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/helper"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
 	"github.com/better-compute/better-compute/daemon/internal/runtime"
+	"github.com/better-compute/better-compute/daemon/internal/selfupdate"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -49,7 +51,11 @@ import (
 //     root for the node on the instance bridge and deleted by name, never an interface that is not a
 //     tap; root's VMM unit (systemd-run, stubbed) built from the record it checks, refused for a
 //     symlink in the instance's directory or a record the node does not own, and VFIO refused for a
-//     GPU the host does not have.
+//     GPU the host does not have;
+//  6. self-update under the helper: root takes a release only from a manifest the pinned keys signed
+//     (the install script's [update]), copies the node's staged binary into its own slot re-hashing it
+//     (refused: a tampered manifest, another digest, a symlink, a file root owns, other bytes), swaps the
+//     entrypoint, rolls back, and records the release as failed at the next start.
 
 const (
 	nodeID    = "node_01k5w0000000000000000000e2"
@@ -309,6 +315,111 @@ esac
 	}
 
 	cloudHypervisor(t, path, logs, uid, gid, call, expect, helperLog.String)
+	selfUpdate(t, bcdBuild, uid, gid, expect, helperLog.String)
+}
+
+// selfUpdate is step 6: self-update under bcd helper. The node stages a release and asks; root takes it
+// only from a manifest the pinned release keys signed (threshold 2), copies the staged binary into its
+// own slot re-hashing it, and swaps the entrypoint. A rollback swaps back, and the start that follows
+// records the release as failed, so it is never taken again.
+func selfUpdate(t *testing.T, bcdBuild string, uid, gid uint32, expect func(what, got, want string), helperLog func() string) {
+	t.Helper()
+	raw, err := os.ReadFile(os.Getenv("BCD_ROOTE2E_RELEASE"))
+	must(t, err)
+	var fixture struct {
+		Signed   string            `json:"signed"`
+		Binaries map[string]string `json:"binaries"`
+	}
+	must(t, json.Unmarshal(raw, &fixture))
+	binary, err := base64.StdEncoding.DecodeString(fixture.Binaries["linux-amd64"])
+	must(t, err)
+	sum := sha256.Sum256(binary)
+	const (
+		version = "0.4.0"
+		slots   = "/usr/local/lib/bcd" // root's slots and records under bcd helper
+		staging = "/var/lib/bcd/staging"
+		staged  = staging + "/bcd-" + version
+	)
+	slotA := filepath.Join(slots, "bcd-a")
+	target := selfupdate.Target{Version: version, Sha256: sum[:], Manifest: []byte(fixture.Signed)}
+	update := func(binary, op string, tgt *selfupdate.Target, v, reason string) string {
+		return callAs(t, uid, gid, binary, helper.Request{Op: op, Target: tgt, Version: v, Reason: reason})
+	}
+	must(t, os.MkdirAll(staging, 0o700))
+	must(t, os.Chown(staging, int(uid), int(gid)))
+
+	// Only a manifest the pinned keys signed, naming this very binary.
+	expect("prepare", update(bcd, "update.prepare", &target, "", ""), "ok")
+	tampered := target
+	// One character of the signed manifest's base64 body changed.
+	tampered.Manifest = []byte(fixture.Signed)
+	if i := len(`{"manifest":"`) + 40; tampered.Manifest[i] == 'A' {
+		tampered.Manifest[i] = 'B'
+	} else {
+		tampered.Manifest[i] = 'A'
+	}
+	expect("a tampered manifest", update(bcd, "update.prepare", &tampered, "", ""), "")
+	other := target
+	other.Sha256 = make([]byte, 32)
+	expect("another binary", update(bcd, "update.prepare", &other, "", ""), "lists no bcd_0.4.0_linux_amd64")
+	unsigned := target
+	unsigned.Manifest = nil
+	expect("no manifest", update(bcd, "update.prepare", &unsigned, "", ""), "no signed release manifest")
+
+	// The staged file: the node's own regular file, and exactly the release's bytes.
+	expect("nothing staged", update(bcd, "update.swap", &target, "", ""), "the staged binary")
+	must(t, os.Symlink(bcdBuild, staged))
+	expect("a symlink staged", update(bcd, "update.swap", &target, "", ""), "the staged binary")
+	must(t, os.Remove(staged))
+	must(t, os.WriteFile(staged, binary, 0o644)) // root's
+	expect("a file root owns", update(bcd, "update.swap", &target, "", ""), "the staged binary")
+	must(t, os.Chown(staged, int(uid), int(gid)))
+	must(t, os.WriteFile(staged, append([]byte("evil"), binary[4:]...), 0o644))
+	expect("other bytes", update(bcd, "update.swap", &target, "", ""), "")
+	if cur, _ := os.Readlink(filepath.Join(slots, "current")); cur != "" && cur != "bcd-a" && !strings.HasSuffix(cur, "/bcd-a") {
+		t.Fatalf("a refused swap moved current to %q", cur)
+	}
+	must(t, os.WriteFile(staged, binary, 0o644))
+
+	expect("swap", update(bcd, "update.swap", &target, "", ""), "ok")
+	if digest(t, bcd) != hex.EncodeToString(sum[:]) {
+		t.Fatal("the entrypoint does not run the release after the swap")
+	}
+	if digest(t, slotA) != digest(t, bcdBuild) {
+		t.Fatal("slot a is not the installed binary")
+	}
+	p, err := selfupdate.LoadPending(slots)
+	if err != nil || p == nil || p.Version != version || p.State != selfupdate.StateSwapped || p.Sequence != 7 || p.To != "b" {
+		t.Fatalf("upgrade.json after the swap: %+v, %v", p, err)
+	}
+	// The entrypoint is the new (fake) release now: the node's calls come from slot a, still an installed bcd.
+	expect("a second swap", update(slotA, "update.swap", &target, "", ""), "already pending")
+	expect("confirm another version", update(slotA, "update.confirm", nil, "0.9.9", ""), "no swap to that version")
+
+	// No Welcome: swapped back; the start that follows records the release as failed.
+	expect("rollback", update(slotA, "update.rollback", nil, version, "e2e: not welcomed"), "ok")
+	if digest(t, bcd) != digest(t, bcdBuild) {
+		t.Fatal("the entrypoint does not run the installed binary after the rollback")
+	}
+	expect("settle", callAs(t, uid, gid, bcd, helper.Request{Op: "update.settle", Running: "0.0.0-e2e"}), "ok")
+	if rec := selfupdate.LoadRecord(slots); rec.Failed[version] != "e2e: not welcomed" {
+		t.Fatalf("update.json after the rollback: %+v", rec)
+	}
+	if p, _ := selfupdate.LoadPending(slots); p != nil {
+		t.Fatalf("upgrade.json stayed: %+v", p)
+	}
+	expect("the failed release again", update(bcd, "update.prepare", &target, "", ""), "did not start")
+	// Root's slots and records: never the node's.
+	for _, f := range []string{slots, slotA, filepath.Join(slots, "update.json")} {
+		fi, err := os.Stat(f)
+		must(t, err)
+		if st := fi.Sys().(*syscall.Stat_t); st.Uid != 0 || fi.Mode().Perm()&0o022 != 0 {
+			t.Fatalf("%s is uid %d mode %v", f, st.Uid, fi.Mode().Perm())
+		}
+	}
+	if log := helperLog(); !strings.Contains(log, `"op":"update.swap"`) || !strings.Contains(log, "self-update: swapped back") {
+		t.Fatalf("helper log lacks the update:\n%s", log)
+	}
 }
 
 // cloudHypervisor is step 5: ch.* through bcd helper, with real taps in the test's network namespace.

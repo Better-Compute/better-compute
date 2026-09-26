@@ -69,7 +69,11 @@ await import('../tests/fixtures/bcx-loader.mjs');
 const { renderInstallScript } = await import('@better-compute/cli/install-script');
 const pin = (fill) => `sha256/${Buffer.alloc(32, fill).toString('base64')}`;
 const placeholder = 'ee'.repeat(32);
+// Self-update (step 6): bcd 0.4.0, release sequence 7, signed by two keys (daemon/internal/pki/testdata).
+const releaseFixture = join(daemonDir, 'internal', 'pki', 'testdata', 'release.json');
+const release = JSON.parse(readFileSync(releaseFixture, 'utf8'));
 const script = renderInstallScript({
+  update: { releasePins: release.pins, threshold: 2, sequence: 5 },
   poolId: 'pool-e2e',
   siteId: 'site-e2e',
   gatewayUrl: 'https://gateway.e2e.invalid',
@@ -100,6 +104,7 @@ const [cmd, cmdArgs] = asRoot([
   `BCD_ROOTE2E_SCRIPT=${linuxPath(scriptFile)}`,
   `BCD_ROOTE2E_BCD=${linuxPath(bcd)}`,
   `BCD_ROOTE2E_PLACEHOLDER=${placeholder}`,
+  `BCD_ROOTE2E_RELEASE=${linuxPath(releaseFixture)}`,
   linuxPath(test),
   ...(verbose ? ['-test.v'] : []),
   '-test.run',
