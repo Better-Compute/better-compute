@@ -27,7 +27,10 @@ sources:
   - daemon/internal/kube/exposure.go
   - daemon/internal/kube/plugin_test.go
   - daemon/cmd/bcd/doctor_kube.go
+  - daemon/internal/kube/inuse.go
   - packages/gateway/src/health.ts
+  - .github/workflows/daemon.yml
+  - scripts/k8s-render-manifests.mjs
 ---
 
 Most machines run bcd the way [the install script](/docs/daemon/install) puts it there: a binary and a systemd unit
@@ -40,11 +43,15 @@ This is the opposite direction from a [Kubernetes pool](/docs/guides/capacity/ku
 machines the control plane owns, and the `k8s-join` config unit joins them to a cluster as workers. Here the cluster
 and its nodes exist first, and bcd runs inside the cluster to report their GPUs and hand the bound ones to pods.
 
-<Callout type="warn" title="Checked on paper, not run in a cluster">
+<Callout type="warn" title="Built and dry-run in CI, never run in a cluster">
 `tests/provider-kubernetes.test.ts`, `tests/provider-kubernetes-cli.test.ts` and bcd's
 `TestKubernetesDaemonSetContract` check the generated manifests and the `kubernetes manifest` command, and
-`TestHostedManager` runs the hosted device plugins against a fake kubelet. No test or CI job builds
-`daemon/Containerfile` or applies the manifests to a cluster, and bcd has not run as a DaemonSet anywhere yet.
+`TestHostedManager` runs the hosted device plugins against a fake kubelet. Since ac1ca4b the `container` job of
+`.github/workflows/daemon.yml` builds `daemon/Containerfile`, runs `bcd --version` and `kubectl version --client`
+from the image, renders the manifests (`scripts/k8s-render-manifests.mjs`, with placeholder pins and image digest)
+and has a [kind](https://kind.sigs.k8s.io) cluster's API server accept them: it creates the Namespace, then
+`kubectl apply --dry-run=server` the rest, which checks the schema and Pod Security admission. That is a dry run: no
+pod is scheduled, no image is pulled, and bcd has not run as a DaemonSet against a control plane anywhere yet.
 </Callout>
 
 ## What you get
@@ -52,12 +59,11 @@ and its nodes exist first, and bcd runs inside the cluster to report their GPUs 
 - **One pod per selected node.** The DaemonSet runs on every node, or on those `--node-selector` names (for example
   `nvidia.com/gpu.present=true`, the label NVIDIA's GPU Feature Discovery sets), tolerates every taint by default,
   runs at `system-node-critical` priority and rolls one node at a time.
-- **The host's view.** The `bcd` container is privileged, with host networking, and mounts `/dev`, `/sys`,
-  `/var/lib/kubelet`, `/etc/kubernetes` (read-only), `/etc/cdi`, `/var/run/cdi` and the host's `/var/lib/bcd`. Since
-  dcd2ab0 it also mounts the NVIDIA container toolkit's configuration directories read-only,
-  `/etc/nvidia-container-runtime` and the GPU operator's `/usr/local/nvidia/toolkit/.config/nvidia-container-runtime`
-  (`nvidiaToolkitConfigDirs`, hostPath `DirectoryOrCreate`), so bcd can see a toolkit that hands out GPUs by
-  environment variable (see [GPU isolation](#gpu-isolation)). The pod does not share the host's PID namespace (`hostPID: false`). It runs under the RuntimeClass `nvidia` (the GPU
+- **The host's view, and only what bcd uses of it.** The `bcd` container is privileged, with host networking, and
+  mounts exactly the host paths listed in [host mounts](#host-mounts): `/dev`, `/sys`, `/var/lib/bcd`, the CDI
+  directories, the kubelet sockets bcd talks to, the kubelet's own credentials, and the container runtime's and
+  NVIDIA toolkit's configuration, read-only. Never `/var/lib/kubelet` itself and never the host's `/etc/kubernetes`.
+  The pod does not share the host's PID namespace (`hostPID: false`). It runs under the RuntimeClass `nvidia` (the GPU
   operator's; `nvidiaRuntimeClass`), and the `bcd` container asks for `NVIDIA_VISIBLE_DEVICES=all` with
   `NVIDIA_DRIVER_CAPABILITIES=utility` only, so bcd gets `nvidia-smi` and the driver's libraries to read and reset
   GPUs (b6d5548); workload pods still get CDI devices only.
@@ -76,6 +82,36 @@ and its nodes exist first, and bcd runs inside the cluster to report their GPUs 
   on the node: see [GPU isolation](#gpu-isolation).
 - **No self-update and no reboots.** The configuration has no `[update] release_pins`, so bcd refuses every
   self-update and you upgrade by rolling out a new image; bcd never reboots a node.
+
+## Host mounts
+
+The `bcd` container's host paths follow what `daemon/internal/kube` uses and nothing more (27f2c1b, a5eee84,
+d11810c). Mounting all of `/var/lib/kubelet` would give a compromised bcd pod every pod's volumes, secrets and service
+account tokens and the kubelet's checkpoints; the host's `/etc/kubernetes` holds `admin.conf` and the cluster CA's
+keys on a kubeadm control-plane node. `tests/provider-kubernetes.test.ts` asserts the exact set, with and without DRA.
+
+| Host path | Mode | hostPath type | Why |
+| --- | --- | --- | --- |
+| `/dev`, `/sys` | read-write | `Directory` | GPUs, cgroups, device nodes |
+| `/var/lib/bcd` | read-write | `DirectoryOrCreate` | The node key, identity and journal, kept across pod restarts |
+| `/etc/cdi` | read-write | `DirectoryOrCreate` | bcd writes each hold's CDI spec |
+| `/var/run/cdi` | read-only | `DirectoryOrCreate` | bcd only reads NVIDIA's generated spec there |
+| `/var/lib/kubelet/device-plugins` | read-write | `Directory` | bcd's plugin sockets, and the kubelet's registration socket it dials |
+| `/var/lib/kubelet/pod-resources` | read-only | `Directory` | bcd only connects to the socket; a read-only bind mount still allows `connect()` |
+| `/var/lib/kubelet/plugins_registry`, `/var/lib/kubelet/plugins/gpu.bcd.dev` | read-write | `DirectoryOrCreate` | Only with `gpuApi: 'dra'`: the DRA registration and driver sockets, and the driver's `prepared.json` |
+| The kubelet's kubeconfig: `/etc/kubernetes/kubelet.conf` (kubeadm, the default), `/var/lib/rancher/k3s/agent/kubelet.kubeconfig` (k3s) or `/var/lib/rancher/rke2/agent/kubelet.kubeconfig` (rke2) | read-only | `File` | Mounted where bcd reads it, `/etc/kubernetes/kubelet.conf` (see [API access](#api-access)) |
+| The kubelet's certificate directories: `/var/lib/kubelet/pki` (kubeadm), `/var/lib/rancher/k3s/agent` (k3s) or `/var/lib/rancher/rke2/agent` (rke2) | read-only | `Directory` | Each at its own path, so the paths inside the kubeconfig resolve |
+| The container runtime's configuration, default `/etc/containerd/config.toml` | read-only | `File` or `Directory` | bcd reads which NVIDIA runtime the container runtime runs (see [GPU isolation](#gpu-isolation)) |
+| The NVIDIA toolkit's configuration, default `/usr/local/nvidia/toolkit/.config` | read-only | `Directory` | bcd reads whether the toolkit accepts `NVIDIA_VISIBLE_DEVICES` from unprivileged pods |
+
+Besides these, the pod has the ConfigMap's `config.toml`, a memory-backed `emptyDir` at `/run/bcd` and an `emptyDir`
+at `/tmp`. The container runtime's and toolkit's configuration are never created: a missing path stays missing, so the
+pod does not start on a node that lacks it rather than seeing an empty directory, and hosted bcd treats a runtime
+configuration it cannot read as `ForeignGpuExposure`. The kubelet credentials refuse a certificate directory that holds
+more than the kubelet's own: `/etc`, `/etc/kubernetes`, `/etc/kubernetes/pki`, `/var/lib/kubelet` or anything under it
+but `pki`, `/var/lib`, `/var` and `/`. Which paths these are is set with the options in
+[generate the manifests from TypeScript](#generate-the-manifests-from-typescript), or with `--kubelet-credentials`,
+`--container-runtime` and `--nvidia-toolkit`.
 
 ## Deploy it
 
@@ -101,7 +137,9 @@ docker push registry.example.com/better-compute/bcd:0.1.0
 the image also carries `kubectl` v1.34.1 at `/usr/local/bin/kubectl`, which bcd runs for its Node's labels, for
 deleting pods of released devices and for DRA. The build downloads it from `dl.k8s.io` for `TARGETARCH` (default
 `amd64`; `arm64` too) and checks it against the pinned SHA-256 of that release; a mismatch, or another architecture,
-fails the build. bcd runs it as the kubelet (see [API access](#api-access)).
+fails the build. bcd runs it as the kubelet (see [API access](#api-access)). CI builds this image for `linux/amd64` on
+every change to `daemon/**`, `proto/**` or `packages/provider-kubernetes/**` (the `container` job, ac1ca4b), but
+publishes nothing.
 </Step>
 <Step>
 ### Add the command
@@ -156,10 +194,21 @@ delete the Secret once every node has joined, with a fresh token for a later bat
 | `--node-selector` | every node | `key=value` pairs, such as `nvidia.com/gpu.present=true` |
 | `--host-units` | off | Let bcd apply `NodeSpec.host` units |
 | `--gpu-api` | `device-plugin` | `dra` for the DRA driver (see [GPUs for pods](#gpus-for-pods)) |
+| `--container-runtime` | `containerd` | `containerd` (`/etc/containerd/config.toml`), `k3s` (`/var/lib/rancher/k3s/agent/etc/containerd/config.toml`), `rke2` (`/var/lib/rancher/rke2/agent/etc/containerd/config.toml`) or `cri-o` (`/etc/crio/crio.conf` and `/etc/crio/crio.conf.d`): the nodes' container runtime, whose configuration is mounted read-only for the [GPU isolation](#gpu-isolation) check (`containerRuntime`; 3775f46) |
+| `--kubelet-credentials` | `kubeadm` | `kubeadm` (`/etc/kubernetes/kubelet.conf` and `/var/lib/kubelet/pki`), `k3s` (`/var/lib/rancher/k3s/agent/kubelet.kubeconfig` and `/var/lib/rancher/k3s/agent`) or `rke2` (the same under `/var/lib/rancher/rke2/agent`): the kubelet's kubeconfig and client certificates, mounted read-only, which bcd acts with (`kubeletCredentials`; 3d6f79a, a96b238) |
+| `--nvidia-toolkit` | `gpu-operator` | `gpu-operator` (`/usr/local/nvidia/toolkit/.config`) or `packages` (`/etc/nvidia-container-runtime`): where the NVIDIA container toolkit's configuration lives, mounted read-only for the same check (`nvidiaToolkit`; 3775f46) |
 | `--nvidia-runtime-class` | `nvidia` | The RuntimeClass bcd's own container runs under, which gives it `nvidia-smi` and the driver's libraries (`nvidiaRuntimeClass`; ab9339b); `none` for no RuntimeClass, when the image carries them |
 | `--ttl` | `24h` | How long the token admits nodes, 1 minute to 24 hours |
 | `--max-uses` | `100` | How many nodes it admits |
 | `--key` | a new UUID | The token's idempotency key, to retry the same request |
+
+**Distribution, runtime and toolkit.** Pick `--container-runtime` and `--kubelet-credentials` for the distribution the
+nodes run (`k3s` or `rke2` for those; `cri-o` for CRI-O, else `containerd`, with `kubeadm` credentials), and
+`--nvidia-toolkit packages` when the toolkit comes from NVIDIA's distribution packages rather than the GPU operator. Every path must exist on every selected node: the mounts are never
+created, so a wrong choice leaves the pod unable to start, and hosted bcd withdraws every GPU when it cannot read the
+runtime's configuration. Other paths (containerd's `conf.d`, another `toolkit.installDir`) need
+`bcdDaemonSetManifests` with `{ files, dirs }`, and so do kubelet credentials outside the three presets
+(`kubeletCredentials: { kubeconfig, certificateDirs }`).
 
 **Token hygiene** (d6f8549). A DaemonSet cannot use one single-use token per node, so the token is multi-use, and
 anyone who reads the Secret while it is live can join a machine to the pool. Give it `--max-uses` equal to the node
@@ -194,8 +243,10 @@ the Secret:
 kubectl -n bcd-system delete secret <name>
 ```
 
-The pods keep running and restarting without it, since a joined node keeps its identity in `/var/lib/bcd`. For nodes
-added later, mint a new token and Secret, and remove both again.
+The pods keep running and restarting without it, since a joined node keeps its identity in `/var/lib/bcd`. Since
+27f2c1b the join-token Secret volume is `optional: true`, so a pod of a joined node that restarts or is rescheduled
+after the Secret is gone starts instead of waiting in `ContainerCreating`: its `bcd join` finds the identity, exits 0
+without a token file and spends nothing. For nodes added later, mint a new token and Secret, and remove both again.
 </Step>
 </Steps>
 
@@ -229,8 +280,10 @@ bcd's pod runs without `hostPID` and with no service account token.
 ### API access
 
 bcd reaches the Kubernetes API only by running the image's pinned `kubectl` as the kubelet: every call passes
-`--kubeconfig /etc/kubernetes/kubelet.conf`, which the DaemonSet mounts read-only from `/etc/kubernetes`, with the
-kubelet's client certificate under the mounted `/var/lib/kubelet`. The pod has `automountServiceAccountToken: false`
+`--kubeconfig /etc/kubernetes/kubelet.conf`. Since 27f2c1b the DaemonSet mounts only that file there (read-only,
+hostPath type `File`, from the kubelet's own kubeconfig, which `--kubelet-credentials` or `kubeletCredentials` names),
+and the kubelet's client-certificate directories read-only at their own paths (default `/var/lib/kubelet/pki`), never the host's
+whole `/etc/kubernetes` (see [host mounts](#host-mounts)). The pod has `automountServiceAccountToken: false`
 and the manifests create no RBAC. That is deliberate (e7d0765, which reverted 9bdd43a's service-account credentials):
 RBAC cannot be scoped to one node, so a service account would have given every privileged bcd pod cluster-wide
 `patch` on Nodes and `delete` on pods, while the NodeRestriction admission plugin confines the kubelet's identity, and
@@ -241,6 +294,7 @@ so bcd, to its own Node and that Node's pods. What bcd does with it:
 | Its Node's `bcd.dev/*` labels | `get node`, `label node --overwrite` |
 | The reaper | `delete pod --wait=false --grace-period=10`, forced a minute later |
 | DRA (`gpu_api = "dra"`) | `api-versions`, `get resourceclaim`, `apply --server-side --field-manager=bcd` and `delete` of its `ResourceSlice` |
+| Other GPU DRA drivers ([GPU isolation](#gpu-isolation)) | `get resourceslices --field-selector spec.nodeName=<node>`, at most once a minute (f88bcdb) |
 
 ## GPU isolation
 
@@ -258,16 +312,40 @@ pod could take every GPU. Required:
 The generated DaemonSet carries these requirements, and the Pod Security and token rules above, in its
 `bcd.dev/requires` annotation (`gpuIsolationRequirements`), since JSON manifests have no comments.
 
-bcd enforces the first two itself (9f860ad): when the kubelet can also allocate an `nvidia.com/*` resource, or a
-toolkit `config.toml` in `/etc/nvidia-container-runtime` or `/usr/local/nvidia/toolkit/.config/nvidia-container-runtime`
-accepts `NVIDIA_VISIBLE_DEVICES` from unprivileged pods (the key `true`, or absent, the toolkit's default), bcd offers
-no GPUs: its device plugins stop, its DRA slice is deleted, and it reports the condition `ForeignGpuExposure` naming
-what to close. The generated DaemonSet mounts both directories read-only for this (dcd2ab0), and the gateway records
-the condition as a node condition (b91dcff). Since ebd9806 it is NoSchedule while true (advisory only on a
-tenant-controlled node), and the node's active reservations turn `Degraded` with reason `ForeignGpuExposure`
+bcd enforces the first two itself (9f860ad, widened in f88bcdb). It offers no GPUs while any of these holds: its
+device plugins stop, its DRA slice is deleted, and it reports the condition `ForeignGpuExposure` naming what to close.
+
+- **Another device plugin.** The kubelet can also allocate an `nvidia.com/*` resource (pod-resources' allocatable
+  resources).
+- **Another GPU DRA driver.** The node's ResourceSlices, read with the kubelet's credentials at most once a minute,
+  show a driver other than `gpu.bcd.dev` whose name marks it as a GPU driver (for example `gpu.nvidia.com`) offering
+  devices. An API server without `resource.k8s.io`, or one that refuses the list, is no evidence either way.
+- **The toolkit the container runtime runs.** bcd reads the container runtime's configuration (containerd's
+  `/etc/containerd/config.toml`, k3s's and RKE2's under `/var/lib/rancher/<k3s|rke2>/agent/etc/containerd/`, CRI-O's
+  `/etc/crio/crio.conf`, and the `.toml` and `.conf` files of `/etc/containerd/conf.d`, `/etc/containerd/config.d` and
+  `/etc/crio/crio.conf.d`) for a `BinaryName` or `runtime_path` that runs `nvidia-container-runtime` (the `.cdi`
+  variant, which takes CDI names only, excepted). For each, it derives the configuration that binary reads: the GPU
+  operator's `<installDir>/toolkit/.config/nvidia-container-runtime/config.toml` when the binary sits in a `toolkit`
+  directory, else `/etc/nvidia-container-runtime/config.toml`. That file must exist and set
+  `accept-nvidia-visible-devices-envvar-when-unprivileged = false`: missing or unreadable, the toolkit takes its
+  default and accepts `NVIDIA_VISIBLE_DEVICES` from any pod, so that is exposure too.
+- **Any known toolkit configuration.** `/etc/nvidia-container-runtime/config.toml` or the operator's
+  `/usr/local/nvidia/toolkit/.config/nvidia-container-runtime/config.toml`, when present, accepts the variable (the key
+  `true`, or absent, the toolkit's default).
+- **Hosted, no readable runtime configuration.** On a DaemonSet node bcd cannot rule the toolkit out when it can read
+  none of the container runtime's configuration files, so it counts that as exposure. That is why the manifests mount
+  them read-only as `File` or `Directory` and never `DirectoryOrCreate`, which would make a missing directory look
+  empty (d11810c; see [host mounts](#host-mounts)).
+
+The gateway records the condition as a node condition (b91dcff). Since ebd9806 it is NoSchedule while true (advisory
+only on a tenant-controlled node), and the node's active reservations turn `Degraded` with reason `ForeignGpuExposure`
 (4570dfe), since their GPUs are no longer isolated. So a cluster with the GPU operator's defaults gets no GPUs
-through bcd, and its nodes take no new work, until you apply the settings above. `bcd doctor`'s `gpu-isolation` check (35534e5) runs the toolkit half
-of the check only on a node bcd itself joined with `k8s-join`, not on a DaemonSet node: there, look at the condition.
+through bcd, and its nodes take no new work, until you apply the settings above.
+
+`bcd doctor`'s `gpu-isolation` check (35534e5) runs the same checks. Since f88bcdb it also runs on a DaemonSet node
+(`[host] units = false`): it fails when no container runtime configuration is readable and when a toolkit
+configuration lets unprivileged pods pick GPUs. On a node bcd joined with `k8s-join` it also fails on another GPU DRA
+driver in the node's ResourceSlices while the kubelet is up.
 
 ## GPUs for pods
 
@@ -285,11 +363,16 @@ it, so bcd's Kubernetes side runs in hosted mode (1e5f96b). It needs no `k8s-joi
   [API access](#api-access)). It updates them at most once
   a minute, touches only `bcd.dev/*`, sets no taints, and removes `bcd.dev/*` labels it no longer sets.
 - **The reaper.** Pods that keep a released device are deleted after 30 seconds with a 10-second grace period, and
-  forced a minute later if they still hold it, as on a joined worker, through the kubelet's pod-resources socket under
-  `/var/lib/kubelet`; without that socket bcd reports `PodResourcesUnavailable`, which is NoSchedule for the whole
-  node while true (ebd9806; advisory on a tenant-controlled node). A released allocation is reported to the control
-  plane only once no pod holds its devices (cd5fc82), and one still held after 5 minutes raises
-  `KubernetesReleaseStuck`, also NoSchedule while true (see [release](/docs/guides/capacity/kubernetes#release)).
+  forced a minute later if they still hold it, as on a joined worker, DaemonSet pods included (8bcbe92), through the
+  kubelet's pod-resources socket in the read-only `/var/lib/kubelet/pod-resources` mount; without that socket bcd
+  reports `PodResourcesUnavailable`, which is NoSchedule for the whole node while true (ebd9806; advisory on a
+  tenant-controlled node). A released allocation is reported to the control plane only once nothing holds its devices
+  (cd5fc82, 8bcbe92), and one still held after 5 minutes raises `KubernetesReleaseStuck`, also NoSchedule while true
+  (see [release](/docs/guides/capacity/kubernetes#release)). A hosted node always counts as a worker there, so a
+  kubelet bcd cannot ask means the devices stay in use. The process backstop a joined worker has (a pod process with a
+  released GPU's device node open) is off here: without `hostPID` bcd's `/proc` is its own pod's, where its own
+  `nvidia-smi` would look like a holder (f88bcdb). A hosted node relies on pod-resources and, with DRA, the driver's
+  `prepared.json` record in the `/var/lib/kubelet/plugins/gpu.bcd.dev` mount.
 - **Device plugin or DRA.** `[kubernetes] gpu_api` in `config.toml` chooses how the GPUs reach pods:
   `"device-plugin"` (the default) or `"dra"`, bcd's DRA driver `gpu.bcd.dev` (7d24836), never both. Any other value
   stops bcd from starting. `--gpu-api` and `bcdDaemonSetManifests({ gpuApi })` write it (e4b0c01). See
@@ -321,8 +404,8 @@ writeFileSync('bcd.json', renderKubernetesManifests(manifests)); // kubectl appl
 `bcdDaemonSetManifests` returns a Namespace, a ConfigMap (`config.toml`, and the pinned JoinService key when you pass
 `joinEncryptionJwk`) and a DaemonSet; `renderKubernetesManifests` turns them into one `v1` `List` for
 `kubectl apply -f`. It refuses (`INVALID_CONFIG`) an image not pinned by digest, a gateway or control-plane URL that
-is not https, malformed pins, names or resource quantities, a `gpuApi` other than `device-plugin` or `dra`, and a JWK
-with a private part.
+is not https, malformed pins, names or resource quantities, a `gpuApi` other than `device-plugin` or `dra`, a JWK
+with a private part, and host paths that are not absolute or that [host mounts](#host-mounts) rules out.
 
 | Option | Default | |
 | --- | --- | --- |
@@ -337,6 +420,9 @@ with a private part.
 | `hostUnits` | `false` | `true` writes no `[host] units = false`, so the pool's host units apply |
 | `gpuApi` | none (bcd's default, `device-plugin`) | `'dra'` writes `[kubernetes] gpu_api = "dra"` (e4b0c01) |
 | `nvidiaRuntimeClass` | `nvidia` | The RuntimeClass that gives bcd's container the driver's user space; `null` when the image carries it (b6d5548) |
+| `kubeletCredentials` | `'kubeadm'`: `/etc/kubernetes/kubelet.conf` and `/var/lib/kubelet/pki` | A preset (3d6f79a; `kubeletCredentialPresets`): `'k3s'` (`/var/lib/rancher/k3s/agent/kubelet.kubeconfig`, `/var/lib/rancher/k3s/agent`) or `'rke2'` (the same under `/var/lib/rancher/rke2/agent`), or `{ kubeconfig, certificateDirs }` with 1 to 4 directories. The kubeconfig is mounted read-only at `/etc/kubernetes/kubelet.conf`, each directory at its own path; a directory holding more than the kubelet's certificates, or an unknown preset, is refused (27f2c1b) |
+| `containerRuntime` | `'containerd'` | `'k3s'`, `'rke2'`, `'cri-o'`, or `{ files, dirs }` (1 to 8 absolute paths in all): the runtime configuration mounted read-only (`containerRuntimeConfigs`; d11810c) |
+| `nvidiaToolkit` | `'gpu-operator'` | `'packages'`, or `{ files, dirs }` for another `toolkit.installDir`: the toolkit configuration mounted read-only (`nvidiaToolkitConfigs`; d11810c). A path both options name is refused |
 | `gatewayServerName`, `logLevel` | none, `info` | |
 
 The pod's `bcd` container gets `NODE_NAME` and has `bcd status` as its liveness probe, and the pod rolls when

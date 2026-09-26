@@ -380,7 +380,7 @@ fails with `runtime <id> is not installed on this host`.
 | CPU | `host-passthrough`, so a memory snapshot restores only on the same CPU model | `boot_vcpus` and `max_vcpus` both the instance's vCPUs; a memory snapshot restores only on the same CPU model |
 | Ownership | bcd marks each domain it defines in its metadata (namespace `https://better-compute.dev/libvirt/1`: allocation, image digest, addresses, the snapshot it was restored from). Any other domain of the connection is listed as unmanaged, the leak the control plane reports, and is never defined over, stopped or destroyed | cloud-hypervisor keeps no registry, so bcd's record is `instances/<id>/vm.json` (allocation, image digest, addresses, MACs, bridges, GPUs and the VM configuration). `List` reports only directories with that record, with the state from `vm.info`; a directory without one is not bcd's and is never defined over or removed |
 | States | `start` (or `start --paused`), `suspend` and `resume`; a stop is `virsh shutdown`, then `virsh destroy` after 60 seconds; a start that fails with "Cannot allocate memory" is a capacity failure. Delete destroys and undefines the domain and removes its directory | `vm.create` and `vm.boot` (then `vm.pause` for a paused start), `vm.pause` and `vm.resume`; a stop is the ACPI power button for up to 60 seconds, then `vm.shutdown`, `vmm.shutdown` and `systemctl stop`, and it fails unless `systemctl show` then reports the unit `inactive` or `failed`, so a VMM that survived is never forgotten; a boot that fails for lack of memory is a capacity failure. Delete stops the VM (and so never removes the directory of a VMM still running) and removes its taps and directory |
-| Snapshots | A tar of `meta.json` (runtime, CPU model, `includeMemory`), the overlay flattened onto its base (`qemu-img convert`), the seed and, with memory, `virsh save`'s state, after which the domain carries on from that state; a disk-only snapshot of a running domain pauses it for the copy | A tar of `meta.json`, the flattened overlay, the seed and, with memory, cloud-hypervisor's own snapshot of the paused VM under `ch/` (`config.json`, `state.json`, `memory-ranges`); a running VM is paused for it and resumed after |
+| Snapshots | A tar of `meta.json` (runtime, CPU model, `includeMemory`), the overlay flattened onto its base (`qemu-img convert`), the seed and, with memory, `virsh save`'s state, after which the domain carries on from that state with `virsh restore --xml` of bcd's own `domain.xml`, never the definition embedded in the state file, which the helper cannot validate (81f9c21); a disk-only snapshot of a running domain pauses it for the copy | A tar of `meta.json`, the flattened overlay, the seed and, with memory, cloud-hypervisor's own snapshot of the paused VM under `ch/` (`config.json`, `state.json`, `memory-ranges`); a running VM is paused for it and resumed after |
 | Restores | Unpacks the tar into the new instance's directory, refusing one taken by another runtime or, with memory, on another CPU model, then [checks](#tenant-images) its disk and seed; a memory restore's first start is `virsh restore` with the new domain's XML | The same refusals and checks. A memory snapshot's `config.json` must have exactly the instance's vCPUs (`boot_vcpus` and `max_vcpus`) and memory size, and is rebuilt before its first start, which is `vm.restore` then `vm.resume`: from the snapshot it keeps only CPU, memory and platform keys (`cpus`, `memory`, `platform` allowlists), bcd supplies the payload, disks, NICs, serial, console, rng and devices, and anything else (`fs`, `pmem`, `vsock`, memory zones, CPU affinity, a debug console, landlock rules) is dropped |
 | Console | The pty libvirt gave the domain's serial port, for [instance console tunnels](/docs/guides/access/tunnels#the-node-half) | The serial port's unix socket, `instances/<id>/serial.sock` |
 
@@ -402,7 +402,12 @@ Its `libvirt-kvm` runtime sends `define`, `start`, `shutdown`, `destroy`, `suspe
 `blockresize`, the rebind disk's `attach-disk` and `detach-disk`, `save`, `restore` and the console to the helper's
 `libvirt.*` operations, where root checks every domain definition default-deny (disks only under bcd's directories
 and re-checked as root, taps named for the instance on `[helper] instance_bridges`, hostdevs only of the host's GPUs)
-and hands the console back as a file descriptor; the balloon's `setmem` goes there too. Reads (`list`, `domstate`,
+and hands the console back as a file descriptor; the balloon's `setmem` goes there too. Since b6df6f1 (security
+review 2) `libvirt.restore` refuses a request without a definition before anything runs, since `virsh restore` alone
+starts the domain the node-written state file embeds: the definition is checked like a `define` (and must be the
+requested domain's), staged in root's directory and always passed as `--xml`. Since 3fcd1a1 the helper also checks an
+overlay's base image as root: the node's own plain image, naming no backing or data file, named by its SHA-256.
+Reads (`list`, `domstate`,
 `dumpxml`, `domstats`) use libvirt's read-only socket (`virsh -r`). libvirt runs with
 `dynamic_ownership = 0`, so instead of the relabelling and `o+x` above, QEMU's user is in the node's group: disks are
 0660 (read-only ones 0640) and the directories on the way get group search. See
@@ -483,8 +488,9 @@ disks behind [sandbox volumes](/docs/guides/vps/sandboxes#volumes), across the i
   | `committed_bytes` | The sum of every volume's size |
   | `outstanding_bytes` | The sum of every volume's unwritten (sparse) space |
 
-  The control plane does not read it yet: vps books a volume's `diskGiB` through capacity without these numbers, so
-  a volume can be booked on a host whose filesystem cannot keep the promise, and bcd then refuses it there.
+  Since 131f5ee vps keeps each host's last report (`host_volume_storage`) and books a volume, or a growth, only on a
+  host whose store can hold it by the same rule, less what it booked there that bcd has not reported yet; a host
+  that has not reported takes no volume (see [volumes](/docs/guides/vps/sandboxes#volumes)).
 - **Closed again once detached** (bdeb452). On `cloud-hypervisor` a read-write volume is handed to the running VMM's
   user (0600) and given back to root when it stops. A read-only volume gets a POSIX ACL entry (`user:<uid>:r`) for
   each VMM user that has it open, removed when that VMM stops, so it is readable by exactly those VMMs rather than by

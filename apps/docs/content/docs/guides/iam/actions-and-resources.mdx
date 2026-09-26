@@ -50,6 +50,7 @@ resource, it calls compute's <Term id="resolver">resolver</Term>, which answers 
 | `compute-sandbox` | A [sandbox](/docs/guides/vps/sandboxes) (v0.5): a VPS instance with a template and a lifetime, decided while it is still a draft | `compute-pool` | | `templateId`, `vcpu`, `memoryGiB`, `gpus`, `ttlSeconds`, `warm`, and `fromSnapshot` on a restore |
 | `compute-sandbox-template` | A tenant's sandbox template (v0.5): pool, flavor, image, runtime, TTL bounds, warm pool | | | |
 | `compute-sandbox-snapshot` | A sandbox's snapshot (v0.5): disk and memory, tenant-private, owned by its sandbox's owner whoever took it; may outlive its sandbox | | | `sandboxId`, `templateId`, `includeMemory` |
+| `compute-sandbox-volume` | A tenant's persistent [sandbox volume](/docs/guides/vps/sandboxes#volumes) (v1.1, agent memory): a disk on one host of a pool that its sandboxes attach across runs, owned by whoever created it; decided before it exists on `create` | `compute-pool` | | `sizeGiB` (pending on `resize`) |
 
 Besides a row's attributes, every resolved resource carries `ownerId` when the row has an owner, and the prefixed
 `parentType` and `parentId` of its parent. Better IAM turns the parent into `resource.parentRelations`, so a
@@ -143,7 +144,7 @@ and the item form gates calls on one resource:
 | `compute:images:publish` | `compute-fleet`, `compute-tenant`, `compute-image` |
 | `compute:providers:read` | `compute-tenant`, `compute-provider-account` |
 | `compute:providers:manage` | `compute-fleet`, `compute-tenant`, `compute-provider-account` |
-| `compute:sandboxes:read`, `compute:sandboxes:manage` | `compute-tenant`, `compute-sandbox-template` (`read` also on `compute-sandbox` and `compute-sandbox-snapshot`) |
+| `compute:sandboxes:read`, `compute:sandboxes:manage` | `compute-tenant`, `compute-sandbox-template`, `compute-sandbox-volume` (`read` also on `compute-sandbox` and `compute-sandbox-snapshot`) |
 | `compute:sandboxes:create`, `compute:sandboxes:update`, `compute:sandboxes:exec`, `compute:sandboxes:delete` | `compute-sandbox` (`delete` also on `compute-sandbox-snapshot`) |
 | `compute:batches:read`, `compute:batches:create`, `compute:batches:approve` | `compute-tenant` (v1.0 destructive-batch quorum) |
 
@@ -362,14 +363,19 @@ bridge, allowing each only when granted. It decides through compute's own `IamPo
 | [`sandboxes.snapshot`](/docs/reference/api/sandboxes#snapshot) | `compute:sandboxes:update` | `compute-sandbox` | v0.5 |
 | [`sandboxes.exec`](/docs/reference/api/sandboxes#exec) (hosted by the tunnels module) | `compute:sandboxes:exec` | `compute-sandbox` | v0.5 |
 | [`sandboxes.delete`](/docs/reference/api/sandboxes#delete) | `compute:sandboxes:delete` | `compute-sandbox` | v0.5 |
-| [`sandboxTemplates.create`](/docs/reference/api/sandbox-templates#create) | `compute:sandboxes:manage`, and `compute:secrets:manage` when it names secrets | `compute-tenant` (the secrets decision also on `compute-fleet` in the root tenant) | v0.5 |
+| [`sandboxTemplates.create`](/docs/reference/api/sandbox-templates#create) | `compute:sandboxes:manage`, and `compute:secrets:manage` when it names secrets; for each volume it names, `compute:sandboxes:manage` (read-write mount) or `compute:sandboxes:read` (read-only) | `compute-tenant` (the secrets decision also on `compute-fleet` in the root tenant; the volume decisions on each `compute-sandbox-volume`, 77bf9f5) | v0.5 |
 | [`sandboxTemplates.list`](/docs/reference/api/sandbox-templates#list) | `compute:sandboxes:read` | `compute-tenant` + items | v0.5 |
 | [`sandboxTemplates.get`](/docs/reference/api/sandbox-templates#get) | `compute:sandboxes:read` | `compute-sandbox-template` | v0.5 |
-| [`sandboxTemplates.update`](/docs/reference/api/sandbox-templates#update) | `compute:sandboxes:manage`, and `compute:secrets:manage` when the resulting template names secrets and the update changes them or what the guest runs | `compute-sandbox-template` (the secrets decision on `compute-tenant`, plus `compute-fleet` in the root tenant) | v0.5 |
+| [`sandboxTemplates.update`](/docs/reference/api/sandbox-templates#update) | `compute:sandboxes:manage`, and `compute:secrets:manage` when the resulting template names secrets and the update changes them or what the guest runs; the per-volume decisions for a new `volumes` list, or for the current one when the update changes what the guest runs | `compute-sandbox-template` (the secrets decision on `compute-tenant`, plus `compute-fleet` in the root tenant; the volume decisions on each `compute-sandbox-volume`) | v0.5 |
 | [`sandboxTemplates.delete`](/docs/reference/api/sandbox-templates#delete) | `compute:sandboxes:manage` | `compute-sandbox-template` | v0.5 |
 | [`sandboxSnapshots.list`](/docs/reference/api/sandbox-snapshots#list) | `compute:sandboxes:read` | `compute-tenant` + items | v0.5 |
 | [`sandboxSnapshots.get`](/docs/reference/api/sandbox-snapshots#get) | `compute:sandboxes:read` | `compute-sandbox-snapshot` | v0.5 |
 | [`sandboxSnapshots.delete`](/docs/reference/api/sandbox-snapshots#delete) | `compute:sandboxes:delete` | `compute-sandbox-snapshot` | v0.5 |
+| [`sandboxVolumes.create`](/docs/reference/api/sandbox-volumes#create) | `compute:sandboxes:manage`, with the requested `sizeGiB` | `compute-sandbox-volume` (the volume it would create, under its pool; 6cb30e9, was `compute-tenant`) | v1.0 |
+| [`sandboxVolumes.list`](/docs/reference/api/sandbox-volumes#list) | `compute:sandboxes:read` | `compute-tenant` (`scope` `mine` by default, or `all`) | v1.0 |
+| [`sandboxVolumes.get`](/docs/reference/api/sandbox-volumes#get) | `compute:sandboxes:read` | `compute-sandbox-volume` | v1.0 |
+| [`sandboxVolumes.resize`](/docs/reference/api/sandbox-volumes#resize) | `compute:sandboxes:manage`, with the new `sizeGiB` pending | `compute-sandbox-volume` | v1.0 |
+| [`sandboxVolumes.delete`](/docs/reference/api/sandbox-volumes#delete) | `compute:sandboxes:manage` | `compute-sandbox-volume` | v1.0 |
 
 ### Fleet and rollouts
 

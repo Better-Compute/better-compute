@@ -437,9 +437,20 @@ other source, a UUID present on both sides is still compared.
 </Callout>
 
 The metal view records where a machine's MACs came from as `macSource` (`operator` for enroll and `metal.confirmMac`,
-`inspection`, or `discovered`; migration `metal/0008_mac_source`). Neither the CLI nor the console has a command for
-`metal.discovered` or `metal.confirmMac` yet: call the API. See [IPMI](/docs/guides/bare-metal/bmc#ipmi-through-bcx-ipmi)
-for the enrollment that uses this.
+`inspection`, or `discovered`; migration `metal/0008_mac_source`). From the CLI (002dd95):
+
+```bash
+better-compute metal discovered --site site_01k5w… --format table
+better-compute metal confirm-mac node_01k5w… --mac 3c:ec:ef:12:34:56
+```
+
+| Command | Flags | Calls |
+| --- | --- | --- |
+| `metal discovered` | `--site ID` (required), `--tenant` | `metal.discovered`: what the site's agents saw PXE or HTTP boot from MACs with no boot entry, with the machine each is a candidate for; nothing in it is trusted or bound |
+| `metal confirm-mac NODE` | `--mac MAC` (required, `aa:bb:cc:dd:ee:ff`; `-` also separates), `--tenant` | `metal.confirmMac`: the operator's decision that `--mac` is the machine's PXE MAC, usually the candidate `metal discovered` shows; a malformed MAC is a usage error before anything is sent |
+
+The console has no page for either yet. See [IPMI](/docs/guides/bare-metal/bmc#ipmi-through-bcx-ipmi) for the
+enrollment that uses this.
 
 The discovery attestor also supports operator approval:
 

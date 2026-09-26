@@ -130,6 +130,7 @@ better-compute daemon install-script \
 | `--privileged-plugins NAMES` | no | | Comma-separated plugins that run as root without the seccomp filter, such as a Kata runtime; implies `--plugins` |
 | `--install-plugins NAMES` | no | | Comma-separated bcx plugins to install from the release, each checked against its archive digest in the verified `--release-manifest` (adf2ae9). Only plugins a release ships are accepted: `bcx-ipmi`. Implies `--plugins` and needs `--release-manifest`; see [installing plugins from the release](#installing-plugins-from-the-release) |
 | `--unprivileged` | no | | Run `bcd node` as the unprivileged `bcd` user beside a root `bcd helper` (169c459): a `[helper]` section, the `bcd` account, `bcd-helper.service` and a `bcd.service` drop-in; see [running bcd node unprivileged](#running-bcd-node-unprivileged). Refused with `--plugins`, `--privileged-plugins` or `--install-plugins`. Self-update works in this mode: the helper does the privileged half (2d67b25). On a `libvirt-kvm` host the helper defines and runs the domains, and the `bcd` account stays out of the `libvirt` group (d418820) |
+| `--attestor tpm` | no | | Join with the host's TPM instead of a join token (a006d9f): the script reads no token, fails early without `/dev/tpmrm0`, and runs `bcd join --attestor tpm`; see [joining with the TPM](#joining-with-the-tpm). `tpm` is the only value; any other is `INVALID_INPUT` |
 | `--instance-bridges BRIDGES` | no | | With `--unprivileged`, on VPS and sandbox hosts: the bridges an instance's NIC may join, comma-separated interface names (1 to 15 of letters, digits, `.`, `_` and `-`), written as `[helper] instance_bridges` unless the configuration already sets it (d418820). Without `--unprivileged` it is `INVALID_INPUT` |
 | `--approver-set-sha256 HEX` | no | | Writes `approver_set_sha256` (64 lower-case hex digits, the `approverSetSha256` that `pki trust-version` prints) into `config.toml`, pinning the node's first approver set (9b7a199): a keyless bcd takes only that set, and runs nothing destructive until it has it; see [pinning the first set](/docs/operations/pki#pinning-the-first-set). An upgrade run without the flag keeps the node's existing pin (b6d401f) |
 | `--command-root-sha256 HEX,...` | no | | Writes `command_root_sha256`, 1 to 16 lower-case hex SHA-256 digests of the command-signing root certificates (`pki trust-version` prints them as `commandRootSha256`), so `bcd helper` checks host config units against specs signed under them from its first request (59985ae; see [signed specs](/docs/daemon/host-config#signed-specs)). Without the flag the script pins the PKI bundle's command-signing root and, during a rotation, the added one, and nothing when the bundle has no command signing; an upgrade by a script without pins keeps the node's |
@@ -225,6 +226,32 @@ BCD_JOIN_TOKEN=bcjt_... sudo -E sh install-bcd.sh
 # or, keeping the token out of the environment:
 sudo sh install-bcd.sh < token-file
 ```
+
+### Joining with the TPM
+
+A script generated with `--attestor tpm` (a006d9f) joins the machine with its TPM, through the control plane's
+[`tpm` attestor](/docs/guides/nodes/attestation#tpm), and carries no token step. Its header says the attestor's
+policy decides where the machine joins. It differs in two places:
+
+- **Instead of reading a token**, it unsets `BCD_JOIN_TOKEN` and stops unless `/dev/tpmrm0`, the kernel's TPM
+  resource manager, exists.
+- **Instead of the token join**, it runs `bcd join --config /etc/bcd/config.toml --attestor tpm < /dev/null`, which
+  returns at once on a machine that already joined, so the same script installs and upgrades. Then it enables and
+  restarts `bcd-helper.service` (in helper mode, after `chown -R bcd:bcd /var/lib/bcd`) and `bcd.service`. As root on
+  a node with `[helper]`, the join also keeps the signed join record the helper binds host units to (see
+  [signed specs](/docs/daemon/host-config#signed-specs)).
+
+```bash
+better-compute daemon install-script --pool pool_tpm --site fsn1 \
+  --gateway-url https://gw.eu.example.com --base-url https://compute.example.com \
+  --bcd-version 0.1.0 --sha256 amd64=<hex> --attestor tpm > install-bcd.sh
+sudo sh install-bcd.sh
+```
+
+The control plane must run `tpmAttestor` with a `resolve` allow-list or `enrollment` for the machine's endorsement
+key, else the join is refused or waits for approval; `--pool` only names the pool in the header. A pool can then
+refuse token joins with `policy.joinAttestors: ['tpm']` (see
+[requiring an attestor](/docs/guides/nodes/attestation#requiring-an-attestor)).
 
 ## Files on the host
 

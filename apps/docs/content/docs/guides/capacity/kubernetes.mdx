@@ -267,13 +267,22 @@ CDI specs with `--device-name-strategy=uuid`. This applies to joined workers and
 [bcd on Kubernetes](/docs/daemon/kubernetes#gpu-isolation) alike; the generated DaemonSet carries the requirements
 in its `bcd.dev/requires` annotation.
 
-Since 9f860ad bcd enforces this. When the kubelet can also allocate an `nvidia.com/*` resource (the GPU operator's
-device plugin, read from pod-resources' allocatable resources), or a container toolkit configuration
-(`/etc/nvidia-container-runtime/config.toml`, or the GPU operator's
-`/usr/local/nvidia/toolkit/.config/nvidia-container-runtime/config.toml`) accepts `NVIDIA_VISIBLE_DEVICES` from
-unprivileged pods (the key `true`, or absent, which is the toolkit's default), bcd offers no GPUs at all: the device
-plugins stop, the DRA slice is deleted, and bcd reports the condition `ForeignGpuExposure` (reason `OtherGpuPath`)
-with a message naming what to close. A missing or unreadable file is not taken as evidence. The gateway records the
+Since 9f860ad bcd enforces this, and since f88bcdb (security review 2) it follows every path it knows of. bcd offers
+no GPUs at all when the kubelet can also allocate an `nvidia.com/*` resource (the GPU operator's device plugin, read
+from pod-resources' allocatable resources); when the node's ResourceSlices (read with the kubelet's credentials at
+most once a minute) show another GPU DRA driver offering devices, such as `gpu.nvidia.com`; or when a container
+toolkit configuration accepts `NVIDIA_VISIBLE_DEVICES` from unprivileged pods (the key `true`, or absent, which is the
+toolkit's default). The toolkit configuration that counts is the one the container runtime runs: bcd reads
+containerd's `BinaryName` (plain, k3s, RKE2 and `conf.d` drop-ins) and CRI-O's `runtime_path` for
+`nvidia-container-runtime` (not the `.cdi` variant) and checks that binary's configuration, the GPU operator's
+`<installDir>/toolkit/.config/nvidia-container-runtime/config.toml` or `/etc/nvidia-container-runtime/config.toml`.
+A runtime that runs the toolkit with that file missing or unreadable is exposure, since the toolkit then takes its
+default; the two known files also count whenever they are present. As the cluster's DaemonSet, a node where no
+container runtime configuration is readable is exposure as well (see
+[bcd on Kubernetes](/docs/daemon/kubernetes#gpu-isolation)). In every case the device plugins stop, the DRA slice is
+deleted, and bcd reports the condition `ForeignGpuExposure` (reason `OtherGpuPath`) with a message naming what to
+close. On nodes bcd joins itself, the [`container-toolkit` unit](/docs/daemon/host-config#container-toolkit) sets the
+toolkit's keys so this check passes. The gateway records the
 condition as a node condition (b91dcff), and since ebd9806 it is NoSchedule while true: a GPU booked on that node would
 not be isolated from pods that take it by the other path, so the node takes no new work until the path is closed. On a
 tenant-controlled node the condition stays advisory and changes no NoSchedule reason, as all of bcd's conditions do.
@@ -283,9 +292,10 @@ node_…", 4570dfe), whatever its binding, since its GPUs are no longer the tena
 precedence, and the exposure takes precedence over `AtomUnhealthy`. Nothing is released: the reservation keeps its
 GPUs and the condition clears when bcd stops reporting the exposure.
 
-`bcd doctor` runs the toolkit half of the same check (35534e5): on a node bcd joined with `gpu` on, its
-`gpu-isolation` check fails, with the same message, while a toolkit configuration lets unprivileged pods pick GPUs,
-so you see why no GPU is offered before you go looking.
+`bcd doctor` runs the same checks (35534e5, f88bcdb): on a node bcd joined with `gpu` on, its `gpu-isolation` check
+fails, with the same message, while a toolkit configuration lets unprivileged pods pick GPUs, and, while the kubelet
+runs, when another GPU DRA driver offers devices on the node; on a DaemonSet node it fails on the toolkit and on an
+unreadable runtime configuration. So you see why no GPU is offered before you go looking.
 
 ## Device plugin or DRA
 
@@ -319,16 +329,21 @@ with `BINDING_KUBERNETES` is offered, and [GPU isolation](#gpu-isolation) applie
   even for a claim allocated before it went bad (6f5a99f); the slice drops a GPU the moment it goes bad. Since
   3f73449 two more results are refused: one with `adminAccess`, which would reach a device already allocated to
   another claim ("admin access to gpu.bcd.dev devices is refused"), and a device already prepared for another claim,
-  until that claim is unprepared ("is prepared for claim …"). The device-to-claim record is kept in memory; after a
-  bcd restart the kubelet's own checkpoint still keeps a device to one claim.
-  `NodeUnprepareResources` changes nothing on the host (the CDI specs are the holds'); it only forgets the claim's
-  devices.
+  until that claim is unprepared ("is prepared for claim …"). Since 8bcbe92 the device-to-claim record is kept on
+  disk, in `/var/lib/kubelet/plugins/gpu.bcd.dev/prepared.json` (0600, written through a temporary file and a
+  rename), and read back when bcd starts, so it survives a restart. The check and the record happen under one lock,
+  so two concurrent prepares cannot both take a device, and the record is on disk before the kubelet hears of the
+  prepare; a record that cannot be written fails the claim.
+  `NodeUnprepareResources` changes nothing on the host (the CDI specs are the holds'); it only removes the claim's
+  devices from the record. A failed write of that is returned to the kubelet, which retries, and until then the
+  devices stay prepared.
 - **The reaper.** A pod whose claim still holds one of this node's `gpu.bcd.dev` devices that compute released is
   deleted after the same 30 seconds as with the device plugins (fa8611e). Other drivers' claims are left alone.
 
 A pod then asks through a ResourceClaim for driver `gpu.bcd.dev`, selecting on the attributes. The DRA driver needs
-`kubectl` on the node and the kubelet's kubeconfig, and on a DaemonSet the generated manifests' `/var/lib/kubelet`
-mount (see [on Kubernetes](/docs/daemon/kubernetes#gpus-for-pods)).
+`kubectl` on the node and the kubelet's kubeconfig, and on a DaemonSet the generated manifests' `plugins_registry` and
+`plugins/gpu.bcd.dev` mounts, which they add only with `gpuApi: 'dra'` (see
+[host mounts](/docs/daemon/kubernetes#host-mounts)).
 
 ## Release
 
@@ -338,10 +353,25 @@ holds a device of the allocation any more:
 
 - The pending release is written to `<data_dir>/releasing.json` before the CDI spec goes, so a crash never loses it.
 - Until the report, the devices stay claimed on the node: no hold, VM, `gpu.reset`, `diag.dcgm` or host config unit
-  gets them, and the control plane keeps them booked.
+  gets them. The control plane does not wait for the report yet: capacity frees the GPU when the reservation is
+  released and may book it to another allocation at once, which the node then refuses with overlap
+  (`NodeRejectedBinding`) while pods still hold it. `tests/sim/kubernetes-host-resources-1k.test.ts` records this as
+  an expected failure (246c95b; see [the control-plane simulator](/docs/operations/testing#the-control-plane-simulator)).
 - "No pod holds it" comes from the kubelet's pod-resources API (a device plugin id `<atom>@<allocation>`, or a
-  `gpu.bcd.dev` claim of this node's pool named for the allocation; 14111c1). It fails closed: while the
-  pod-resources socket is missing or failing, the devices count as held.
+  `gpu.bcd.dev` claim of this node's pool named for the allocation; 14111c1). Since 8bcbe92 (security review 2) two
+  more sources can keep the devices in use, and every check fails closed:
+  - **A prepared DRA claim.** A `gpu.bcd.dev` device named for the allocation that the DRA driver's `prepared.json`
+    still lists is in use until the kubelet unprepares its claim, whatever pod-resources says (pod-resources reports
+    DRA devices only with the `KubeletPodResourcesDynamicResources` feature gate). An unreadable record counts every
+    device as prepared.
+  - **A pod process.** A process in a `kubepods` cgroup with a released whole GPU's `/dev/nvidia<minor>` open (the
+    minor from `/proc/driver/nvidia/gpus/*/information`) holds it, which covers what pod-resources does not account
+    for: static pods, a lost kubelet checkpoint. It covers whole GPUs only, since MIG instances and slots share their
+    GPU's device node, and it needs the host's `/proc`: on a DaemonSet node without `hostPID` it is off.
+  - **The kubelet.** Any node that is or was a worker counts: a hosted node, one with a `k8s-join` record (even a
+    released or unreadable one), or one with the kubelet's kubeconfig, `/var/lib/kubelet/config.yaml` or pod-resources
+    socket on disk. There, a pod-resources socket that is missing or failing means the devices count as held. Only a
+    node that never was a worker answers "not in use" without asking.
 - bcd checks again when the reaper sees such a pod gone, on every converge pass, and at the latest 30 seconds later.
   A release pending for more than 5 minutes raises the condition `KubernetesReleaseStuck` (reason `PodsHoldDevices`),
   naming the allocation and its devices. Since ebd9806 the gateway records it as a node condition that is NoSchedule
@@ -353,7 +383,10 @@ Pods still
 holding a released `bcd.dev/*` device (the kubelet's PodResources API names them), or a released `gpu.bcd.dev` device
 through a claim, are deleted once they have held it for 30 seconds, with `kubectl delete pod --wait=false
 --grace-period=10` and the kubelet's credentials; a pod that still holds the device a minute later is deleted with
-`--grace-period=0 --force` (9f860ad). bcd never deletes a pod after a failed read of the holds. While bcd holds
+`--grace-period=0 --force` (9f860ad). DaemonSet pods are not spared. Since 8bcbe92 the reaper keeps running after
+the node stops offering GPUs, when compute released the machine, `gpu` is off, or the kubelet is restarting: on a
+node that is or was a worker it deletes any pod holding a `bcd.dev` device compute does not bind there, and with
+nothing offered, that is every such device. bcd never deletes a pod after a failed read of the holds. While bcd holds
 devices for Kubernetes and the kubelet's pod-resources socket is missing or failing, so released devices cannot be
 reclaimed, it reports the condition `PodResourcesUnavailable`. Since ebd9806 that condition is NoSchedule for the whole
 node while true (advisory on a tenant-controlled node): bcd cannot tell which pods hold which devices, and placement has no NoSchedule for one binding only,
@@ -361,8 +394,10 @@ so the node takes no work of any kind until the socket answers again.
 
 **Taking the machine back.** When a node's spec no longer names `k8s-join` (the pool dropped Kubernetes, or the
 machine left the pool), bcd cordons its Node, deletes its running and pending workload pods with each pod's own grace
-period (never DaemonSet, static mirror or finished pods, and only pods of this Node), records the release, which stops
-the device plugins or DRA driver, and reports `KubernetesReleased` (9f860ad, 028b81c). A cluster that forbids a node
+period capped at 30 seconds (`--grace-period=30`, 8bcbe92), records the release, which stops the device plugins or
+DRA driver, and reports `KubernetesReleased` (9f860ad, 028b81c). It leaves static mirror pods, finished pods and pods
+of other Nodes alone, and DaemonSet pods too unless they ask for a `bcd.dev/` resource or a resource claim; the
+reaper, which keeps running, forces what still holds a device. A cluster that forbids a node
 to cordon itself still gets drained. bcd does not reset the kubelet: the machine stays a cordoned member until an
 operator removes it, and the unit's return uncordons it.
 
@@ -380,6 +415,9 @@ requests to the reservation yourself; compute does not write them.
 - **No real cluster has run this.** Neither the device plugins nor the DRA driver has served a real kubelet.
 - **Pod requests are not derived from the reservation.** The kubelet enforces what the pods ask for, not what the
   reservation booked.
+- **A Kubernetes booking ends at release, not at the node's report.** Capacity can re-book a released GPU while pods
+  still hold it and before the node withdraws it from the kubelet, and the new binding then fails on the node (see
+  [release](#release)).
 
 <Cards>
   <Card title="Host configuration" href="/docs/daemon/host-config#k8s-join">The k8s-join unit in detail.</Card>

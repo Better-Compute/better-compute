@@ -252,8 +252,9 @@ and bcd has it since 28dc2ae:
   and every request carries the signed `DesiredState` that last set the host section and its worker signature (`bcd
   node` keeps the body in `data_dir/host-intent.json`). The command-signing roots come from `command_root_sha256` in
   root's `config.toml` (the SHA-256 of each root certificate, given at install, never taken from the control plane or
-  the node), which decides alone when set, or else from the `SignedTrustBundle` the JoinService key signed, checked
-  against root's `join_signing_key_pin`, so a root rotation needs no new pin. The helper refuses unless the roots
+  the node), which decides alone when set, or else, since 71ccf71, from the trust bundle in root's own signed join
+  record, which makes signed intent mandatory whatever the node sends; a newer `SignedTrustBundle` the node presents,
+  checked against root's `join_signing_key_pin`, rotates the roots forward only, so a root rotation needs no new pin. The helper refuses unless the roots
   check out (pinned, or from a bundle no older than one it accepted), the signature verifies (worker role), the body
   names this node (since a966cd4 the node root's own signed join record names, `/var/lib/bcd-hostconfig/join-response.pb`,
   re-verified against `join_signing_key_pin`; a node joined before it keeps the first signed spec's binding in
@@ -261,13 +262,15 @@ and bcd has it since 28dc2ae:
   not older than one already applied, and the unit's settings are exactly the body's. Once a bundle with roots was
   accepted, a request without a signed spec is refused. A verified body stays good after its short-lived worker
   certificate expires, and a node and a helper of different versions fail closed. **The caveat:** nothing is checked
-  while the helper has no roots, that is without `command_root_sha256` before its first trust bundle with roots, or on
-  a deployment that signs nothing; the helper is then bounded by strict unit validation, the sysctl denylist, root
-  writes only under root-only directories, and `k8s-join` only to root-pinned `allowed_clusters`. `daemon
+  on an install where neither `command_root_sha256` nor root's join record names command-signing roots (a deployment
+  that signs nothing, or a node joined before the record) until the node itself presents a bundle with roots; the
+  helper is then bounded by strict unit validation, the sysctl denylist, root writes only under root-only directories,
+  and `k8s-join` only to root-pinned `allowed_clusters`, and `bcd doctor` fails on it (71ccf71). `daemon
   install-script` pins `command_root_sha256` from `--command-root-sha256` or the local PKI bundle (59985ae), which
   closes that window. The trust-on-first-use binding of the node id is closed by root's join record (a966cd4), except
-  on nodes joined before it, which have no record: re-join them, or re-run the install script. See
-  [signed specs](/docs/daemon/host-config#signed-specs).
+  on nodes joined before it, which have no record. `bcd doctor` (as root, with `[helper]`) warns on such a node
+  (f77c6f9); re-join it as root with a new token after moving its identity aside, since re-running the install script
+  on a joined node writes no record. See [signed specs](/docs/daemon/host-config#signed-specs).
 - **Root writes only under root's directories** (02485b3, f8e13ef). Whenever bcd writes as root for a config unit,
   every existing directory from `/` down to the file must be a real directory owned by root and writable by no one
   else, so `/tmp` and anything the node owns are refused, and the units' records live in `/var/lib/bcd-hostconfig`,

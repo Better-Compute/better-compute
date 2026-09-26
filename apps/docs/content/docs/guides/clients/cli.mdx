@@ -204,7 +204,7 @@ the way to any method a group's commands leave out (a raw `commands.run`, for on
 | [`pools`](/docs/reference/cli#pools-get) `get`, `create`, `update`, `archive`, `offer`, `unoffer`, and [`pools list`](/docs/reference/cli#pools-list) | Pools and their offers | [pools](/docs/reference/api/pools) |
 | [`drivers list`](/docs/reference/cli#drivers-list) | The registered drivers | [drivers](/docs/reference/api/drivers) |
 | [`secrets`](/docs/reference/cli#secrets-put) `put`, `delete` | Write-only secrets, the value from a file or standard input only | [secrets](/docs/reference/api/secrets) |
-| [`metal`](/docs/reference/cli#metal-enroll) `enroll`, `manage`, `inspect`, `provide`, `rescue`, `unrescue`, `recover`, `retire`, `deploy`, `undeploy`, `abort`, `power`, `bulk` | The bare-metal lifecycle; see [deploying](/docs/guides/bare-metal/deploying#from-the-command-line) | [metal](/docs/reference/api/metal) |
+| [`metal`](/docs/reference/cli#metal-enroll) `enroll`, `manage`, `inspect`, `provide`, `rescue`, `unrescue`, `recover`, `retire`, `deploy`, `undeploy`, `abort`, `discovered`, `confirm-mac`, `power`, `bulk` | The bare-metal lifecycle; see [deploying](/docs/guides/bare-metal/deploying#from-the-command-line). `discovered` and `confirm-mac` (002dd95) list a site's PXE discovery and bind a machine's PXE MAC; see [discovering new machines](/docs/guides/bare-metal/sites#discovering-new-machines) | [metal](/docs/reference/api/metal) |
 | [`profiles`](/docs/reference/cli#profiles-list) `list`, `get`, `validate`, `render`, `create`, `update`, `delete` | Provision profiles, from JSON documents | [profiles](/docs/reference/api/profiles) |
 | [`provider-accounts`](/docs/reference/cli#provider-accounts-list) `list`, `get`, `create`, `update`, `delete`, `offers`, `bootstrap` | Provider accounts (`--config-file`, credentials in it as references) | [providerAccounts](/docs/reference/api/provider-accounts) |
 | [`reserve`](/docs/reference/cli#reserve), `release`, `extend`, `reservations list`, `reservations get` | Reservations ([below](#capacity)) | [reservations](/docs/reference/api/reservations) |
@@ -402,14 +402,16 @@ better-compute sandbox-template update sbxt_01k5w… --warm-min 0 --warm-max 0 -
 | Command | Flags | Calls |
 | --- | --- | --- |
 | `sandbox-volume create` | `--pool ID`, `--name NAME` and `--size GIB` (1 to 16,384) required, `--key KEY` | `sandboxVolumes.create`, with a new idempotency key unless `--key` is given |
-| `sandbox-volume list` | `--pool ID` (only that pool's), `--deleted` (include deleted volumes) | `sandboxVolumes.list` |
+| `sandbox-volume list` | `--all` (every volume of the tenant you may see, not only yours; e68aba7), `--pool ID` (only that pool's), `--deleted` (include deleted volumes) | `sandboxVolumes.list`, with `scope: 'all'` for `--all` and the API's default, your own volumes, otherwise |
 | `sandbox-volume get VOLUME` | | `sandboxVolumes.get` |
 | `sandbox-volume resize VOLUME` | `--size GIB` (1 to 16,384, required); volumes only grow | `sandboxVolumes.resize` |
 | `sandbox-volume delete VOLUME` | | `sandboxVolumes.delete`, which wipes the data |
 
 A volume id that does not look like `vol_…` is a usage error before anything is sent. A template that mounts volumes
-keeps no warm pool, so give it `--warm-min 0 --warm-max 0` (the API refuses one whose `warm.max` is not 0). The
-console does not manage volumes.
+keeps no warm pool, so give it `--warm-min 0 --warm-max 0` (the API refuses one whose `warm.max` is not 0), and
+naming a volume in a template takes a decision on that volume (see [attach](/docs/guides/vps/sandboxes#volumes)). The
+console's **Volumes** page does the same list, create, grow and delete (see
+[the console](/docs/guides/clients/console#volumes)).
 
 ## Interactive access
 

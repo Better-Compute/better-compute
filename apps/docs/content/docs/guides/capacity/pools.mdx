@@ -110,6 +110,10 @@ for in each mode.
       default: "'24h'",
     },
     hardwareProfile: { type: 'string', description: 'The metal hardware profile whose driver bindings nodes inherit.' },
+    joinAttestors: {
+      type: 'string[]',
+      description: "(v0.5, 1516728) The attestors that may admit a machine into the pool, by id: for example ['tpm'] to require the TPM, or ['tpm', 'x509pop']. A token join is 'join-token' and must be listed to be allowed. JoinService refuses a join or reclaim admitted by any other attestor with ACCESS_DENIED (reason pool-attestor). pools.create and pools.update refuse a list that is not 1 to 16 ids of attestors the control plane runs. Unset: any. See /docs/guides/nodes/attestation#requiring-an-attestor.",
+    },
     trustProvisioningNetwork: {
       type: 'boolean',
       description: '(v1.0, 8de6e2f) Bare metal: bind a PXE MAC that discovery proposes at once, without metal.confirmMac. Only for a provisioning network no untrusted host can reach: any host on it can claim a machine\'s UUID. The ramdisk\'s UUID and NICs are then checked against the machine. See /docs/guides/bare-metal/sites#discovering-new-machines.',
@@ -189,7 +193,9 @@ The host policy fields (`hugepages`, `kernelModules`, `cpu`, `iommu`, `gpu`, `ku
 [host configuration](/docs/daemon/host-config#where-the-units-come-from)). Since 37dcd02 `pools.create` and
 `pools.update` (when it changes the policy) run the modules' `pool-policy` validators before writing, and provision
 registers one that checks these fields as nodes would get them, so a bad value is `INVALID_INPUT` at the API; a
-validator's failure that is not a compute error reads `policy: ...`. `admission.budgetCheck: 'meter'` adds a Better IAM
+validator's failure that is not a compute error reads `policy: ...`. The server adds its own validator for
+`joinAttestors` (1516728), which knows the attestors JoinService runs: `join-token` and every registered one.
+`admission.budgetCheck: 'meter'` adds a Better IAM
 `billing.check` to every reservation and instance admission in the pool, on top of the IAM policy described in
 [quotas and usage](/docs/guides/capacity/quotas-and-usage).
 

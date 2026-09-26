@@ -134,7 +134,8 @@ plugin (51806ab), tested against a fake `ipmitool` only. GPU details come from `
 library (cb987e5), and NVML events are missing (see [what bcd does today](#what-bcd-does-today)). The
 [host converger](/docs/daemon/host-config) (6c2343f), MIG and slot holds with their cgroup slices (46a61db,
 260e33c) and Kubernetes workers (88ecb07, 7579184) are written and tested against fakes only, and bcd can run as a
-[DaemonSet](/docs/daemon/kubernetes) on an existing cluster (8df8c70), which no test has deployed. The TypeScript `FakeDaemon` covers those in tests, the simulator and
+[DaemonSet](/docs/daemon/kubernetes) on an existing cluster (8df8c70): CI builds its image and has a kind cluster's
+API server dry-run its manifests (ac1ca4b), but no test has deployed it. The TypeScript `FakeDaemon` covers those in tests, the simulator and
 `better-compute dev --sim N`.
 </Callout>
 
@@ -233,7 +234,14 @@ host without the NVIDIA driver prints no `gpu` line. With a configuration file i
 `kubernetes` fails when `[kubernetes] allowed_clusters` does not parse, reports the number of allowed clusters, and
 fails a node bcd joined to a cluster without any, since every `k8s-join` then refuses (9f860ad); on a node bcd joined to a cluster,
 `kubelet` fails when the kubelet is not running, and `device-plugin` warns when `/var/lib/kubelet/device-plugins` is
-missing.
+missing. `gpu-isolation` fails whenever bcd would report `ForeignGpuExposure`: on a joined worker for a toolkit
+configuration that lets unprivileged pods pick GPUs and for another GPU DRA driver in the node's ResourceSlices, and,
+since f88bcdb, on a node with `[host] units = false` (a DaemonSet) for the toolkit and for a container runtime
+configuration it cannot read (see [GPU isolation](/docs/daemon/kubernetes#gpu-isolation)). As root with `[helper]`,
+`helper` says what the helper binds host units to: root's signed join record (`ok`), trust on first use for a node
+joined before that record (`warn`), or a record that names another node or fails its signature (`fail`; f77c6f9), and
+fails when neither `command_root_sha256` nor the record names command-signing roots, so host units would go unsigned
+(71ccf71; see [signed specs](/docs/daemon/host-config#signed-specs)).
 
 ```text
 ok    gpu       GPU-5f1c… NVIDIA H100 80GB HBM3: 87% busy, 61 C, 540/700 W, 71.2/79.6 GiB
@@ -336,7 +344,7 @@ their own kinds. What it implements and what is still missing, as of commit 2598
 
 | Area | Implemented | Missing |
 | --- | --- | --- |
-| Identity | Join with a sealed `join-token` as role `node` or `site`; a `provisioned` join for an OS a deploy installed (`--token-file`, `--node-id`, `--server` for the well-known join key); with no `config.toml`, the configuration bootstrapped from the well-known document and checked against the install's three pins (69aaba9); the ramdisk's `discovery` join (the token and the site agent's signed assertion from the kernel command line); a retried deferral with the same CSR, `JoinResponse` verification (pinned signer, CSR binding, leaf key, SPIFFE id, role); renewal at 60% of the lifetime with proof of possession and a new key | TPM keys (the key is a 0600 `node.key` file), a wired TPM join (since f61b32d `internal/tpm` builds the `tpm` attestor's evidence and challenge answers, tested against its software TPM `tpmsim`, and `agent.Join` answers up to 3 challenge rounds, but `bcd join --attestor tpm` does not use them and nothing cross-checks them against the TypeScript verifier), the `.well-known` fallback for a stale key file (bcd reads the well-known key only when `join-encryption.jwk` is absent and `--server` is given) |
+| Identity | Join with a sealed `join-token` as role `node` or `site`; a `provisioned` join for an OS a deploy installed (`--token-file`, `--node-id`, `--server` for the well-known join key); with no `config.toml`, the configuration bootstrapped from the well-known document and checked against the install's three pins (69aaba9); the ramdisk's `discovery` join (the token and the site agent's signed assertion from the kernel command line); a retried deferral with the same CSR, `JoinResponse` verification (pinned signer, CSR binding, leaf key, SPIFFE id, role); a `tpm` join with no token, `bcd join --attestor tpm` over `/dev/tpmrm0` (8545688; `internal/tpm`, up to 3 challenge rounds, checked against the TypeScript verifier by a fixture contract in both directions and end to end with the software TPM `tpmsim`, db9bd46; see [bcd with its TPM](/docs/guides/nodes/attestation#bcd-with-its-tpm)); renewal at 60% of the lifetime with proof of possession and a new key | TPM keys (the key is a 0600 `node.key` file), a join against a hardware TPM (every test uses `tpmsim`), the `.well-known` fallback for a stale key file (bcd reads the well-known key only when `join-encryption.jwk` is absent and `--server` is given) |
 | Transport | gRPC over HTTP/2 with connect-go (`Join`, `Renew`, `Session`, `Tunnel`), TLS 1.3 pinned to the serving CA's SPKI (never system roots), mTLS with the node certificate, HTTP/2 pings every 20 s; `gateway_server_name` for a gateway reached by IP; with `[websocket] url`, the WebSocket fallback for proxies that strip client certificates: the session over `wss://.../v1/session` with a node proof and a checked gateway proof, renewals over `POST /v1/renew`, no tunnels, command-signing roots required (6cd48be, tested end to end in 4b2d5aa; see [the fallback](/docs/daemon/protocol#websocket-fallback-v04)) | |
 | Session | Hello from the journal (with the trust bundle version it holds), Welcome (epoch, event ack, clock offset, requested sections, signed trust bundle), heartbeats with lane credits (inventory hashes every 10th and right after changed sections, 427787a), `Ack`, `Cancel`, `Drain`, `RevocationNotice`, `OpenTunnel`, secret and workload-token answers, full-jitter redial, or exactly the gateway's `grpc-retry-pushback-ms` when a busy refusal carries one (joins too; 2237be7); a Welcome more than 5 minutes before the server time mark is refused, and one within that allowance never moves the working clock back; a newer trust bundle is acknowledged once, in the next `StatusReport` (`trust_version` is 0 in every other report) | |
 | Journal | bbolt, every write fsynced; the command rules, results with their `boot_id`, the `cancelled` outcome, the TTL sweep, spent exec-ticket ids (kept until 5 minutes after the ticket expires); a corrupt file is moved aside | |
@@ -445,7 +453,9 @@ domain with a host disk. So since ed3c7d2 an unprivileged `bcd node` is not in t
 (`runtime.Libvirt` with a `Hypervisor`) sends every privileged `virsh` verb to the helper's `libvirt.*` operations
 above, reads through libvirt's read-only socket (`virsh -r`) for `list`, `domstate`, `dumpxml` and `domstats` only,
 and refuses any other verb ("is not an operation bcd helper does"). A paused start or restore passes the helper's
-`Paused` flag (`--paused`; f3c6a65). The helper runs `virsh -c qemu:///system` as root, stages each definition in its own directory,
+`Paused` flag (`--paused`; f3c6a65). `libvirt.restore` needs a definition, checked like a `define` and passed as
+`--xml`: a restore without one is refused before anything runs, since `virsh restore` alone would start the domain
+the node-written state file embeds (b6df6f1). The helper runs `virsh -c qemu:///system` as root, stages each definition in its own directory,
 `/var/lib/bcd-hostconfig/libvirt`, and acts only on domains whose bcd metadata names them, never on one bcd did not
 define.
 
@@ -456,7 +466,7 @@ emulator or kernel, a `seclabel`, a DOCTYPE or entities, and foreign namespaces 
 | Part of the domain | Admitted |
 | --- | --- |
 | Domain | `type="kvm"`, `os` type `hvm`, at most 1 MiB and 4096 elements; the name is an instance id, and bcd's metadata (its own namespace only) names that instance exactly once |
-| Disks | File disks and cdroms, driver `qemu`, `qcow2` or `raw`, under `data_dir`'s `libvirt/instances`, `libvirt/images` or `volumes` only, as a clean absolute path. As root the helper checks that no component from that directory down is a symlink and that the file is a regular file of the node's uid with one link, then re-runs the image checks (414bfef): an instance's qcow2 disk must be an overlay of `<images>/<image>.<format>` as bcd's metadata names it (flat when restored), and a cdrom must pass the base image check |
+| Disks | File disks and cdroms, driver `qemu`, `qcow2` or `raw`, under `data_dir`'s `libvirt/instances`, `libvirt/images` or `volumes` only, as a clean absolute path. As root the helper checks that no component from that directory down is a symlink and that the file is a regular file of the node's uid with one link, then re-runs the image checks (414bfef): an instance's qcow2 disk must be an overlay of `<images>/<image>.<format>` as bcd's metadata names it (flat when restored), and a cdrom must pass the base image check. Since 3fcd1a1 the overlay's base is checked as root too, since QEMU opens it: under bcd's directories, the node's own regular file with one link and no symlink on the way, a plain image naming no backing or data file, and named by its SHA-256 (64 lowercase hex digits) |
 | Interfaces | `type="bridge"` on a bridge listed in `[helper] instance_bridges`, with the tap exactly `runtime.TapName(domain, i)`; with no bridges configured, no domain with a NIC is defined |
 | Host devices | Managed PCI hostdevs of this host's GPUs, from its inventory at each request |
 | Others | `memballoon` `none` or `virtio`; `pty` serial and console; vCPU, `cputune` pinning, `numatune` and huge page backing |

@@ -27,7 +27,10 @@ Joining turns a machine into a [node](/docs/guides/nodes): JoinService checks th
 reclaims the node row, and signs a short-lived client certificate that the daemon uses for every later
 connection. This page covers joining with a <Term id="join-token">join token</Term>, the v0.1 path for servers
 you already run (a brownfield adopt). Bare-metal machines join through other
-<Term id="attestor">attestors</Term>; see [attestation](/docs/guides/nodes/attestation).
+<Term id="attestor">attestors</Term>; see [attestation](/docs/guides/nodes/attestation). A machine with a TPM 2.0 can
+join with no token at all, `bcd join --attestor tpm` (8545688; see [bcd with its TPM](/docs/guides/nodes/attestation#bcd-with-its-tpm)),
+and a pool can refuse token joins altogether with `policy.joinAttestors` (see
+[requiring an attestor](/docs/guides/nodes/attestation#requiring-an-attestor)).
 
 <Callout type="info" title="Not published yet">
 Better Compute is not on npm yet, and the Go daemon `bcd` is built and tested but not released, so there is no
@@ -411,7 +414,8 @@ remain (product UUID, a serial, permanent MACs, GPU UUIDs).
   site and pool, for the same role; otherwise it is refused (`reclaim`). The node keeps its id, its identity
   generation goes up by one, every older certificate is revoked (`reclaimed`, with a
   `security.certificate-revoked` event), acceptance runs again, and the audit row says `node.reclaimed`. A
-  machine with fewer than two identifiers never reclaims: it joins as a new node.
+  machine with fewer than two identifiers never reclaims: it joins as a new node. In a pool whose
+  `policy.joinAttestors` does not list `join-token`, a token join or reclaim is refused (`pool-attestor`, 1516728).
 
 ## Join requests and approvals
 

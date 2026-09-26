@@ -55,6 +55,10 @@ sources:
   - .github/workflows/nightly.yml
   - .github/workflows/release.yml
   - .github/workflows/daemon.yml
+  - scripts/k8s-render-manifests.mjs
+  - tests/e2e/bcd-tpm.test.ts
+  - tests/sim/kubernetes-host-resources-1k.test.ts
+  - packages/testing/src/sim/invariants.ts
 ---
 
 import { Activity, Scale, Terminal } from '@/lib/icons';
@@ -414,6 +418,17 @@ on the fakehw build's file-backed `libvirt-kvm` runtime (not the libvirt runtime
 `StatusReport.instances` carries it and the vps module moves it to
 `running`, and `instances.delete` removes the domain from the host. It has the same gating.
 
+`tests/e2e/bcd-tpm.test.ts` (db9bd46, same gating) runs the `tpm` join end to end: a fakehw bcd whose software TPM
+lives in `<data_dir>/fakehw-tpm.json` runs `bcd join --attestor tpm` with no token against the dev stack's
+JoinService with `tpmAttestor` (`allowUncertifiedEk`, and a `resolve` allow-list for the TPM pool;
+`createDevStack({ attestors })` passes join attestors to `betterCompute()`). It checks the two rounds, the SHA-256 PCR
+bank 0 to 7 reaching `resolve`, the node in the resolved pool and bound to `sha256(EK)` in `node_bindings`, a rejoin
+as the same node after the identity is removed (a reinstall), `already joined` on a further run, and `bcd node`
+adopted on that identity. Its wire format is pinned in both directions without a stack too: bcd's `TestTSContract`
+and `tests/pki-attestors-tpm-bcd.test.ts` share the fixtures in `daemon/internal/tpm/testdata`, which
+`scripts/daemon-tpm-fixture.mjs` regenerates (see [bcd with its TPM](/docs/guides/nodes/attestation#bcd-with-its-tpm)).
+None of these touches a hardware TPM.
+
 On Linux the suites run in `pnpm test` whenever Go is installed; they build the binary first. On Windows they are
 opt-in: they need `BCD_E2E=1`, a WSL distribution, and Go at `C:\Program Files\Go\bin` (or an existing
 `daemon/bin/bcd-linux-amd64`). bcd runs in WSL through `wsl -e`, never a shell, and reaches the gateway at WSL's
@@ -481,6 +496,17 @@ control plane or a database snapshot.
 | I7 | After a quiet period, no pending reservation would fit if planned alone now; the input is capacity's offline solver, `placeablePending(tx, { now })` | `checkI7` |
 | I8 | Per allocation, usage windows do not overlap, stay inside the booking and add up to its duration times atoms, with no duplicate keys | `checkI8` |
 
+Two more I1 checkers (40b1ce8) cover PLAN.md §3.8's host resources and Kubernetes bindings:
+
+| Checker | Checks |
+| --- | --- |
+| `checkHostResources(samples)` | Over sampled `node_resources` rows (`HostResourceSample`: vCPU, memory, huge pages), `allocated` never exceeds `floor(allocatable x ratio)` and always equals what the node's unreleased allocations claim, so a release that subtracts twice or a re-book without a claim shows as drift |
+| `checkKubeAdvertisements({ bookings, advertisements })` | No device is offered to a node's kubelet for one allocation while the control plane books it to another, since a kubelet can hand an offered device to a new pod at any moment. The offers (`KubeAdvertisement`) come from `FleetFacts.advertisements`: a FakeDaemon records `kube.advertised` when it offers a Kubernetes-bound hold and `kube.withdrawn` at its release |
+
+With the knob `kubePodReleaseMs`, a FakeDaemon's pods keep a released Kubernetes hold's devices that long: it stops
+offering them at once, keeps them claimed (a new hold on them fails with overlap) and reports `AllocationReleased`
+only then, as bcd's fail-closed release does.
+
 `assertInvariants(violations, limit?)` throws one error listing them. The fleet simulator's `invariants()` checks I1,
 I2, I3, I4, I5 and I8 (I4, I5 and I8 read the gateway port's `facts()`, which the stub gateway and the control-plane
 simulator provide). I7 needs a database: pass it to `runNightly({ invariants })`, as the CI-sized night does.
@@ -518,6 +544,16 @@ The rig offers `run(ms)`, `api(fn)`, `killGateway(i)`, `reviveGateway(i)`, `stal
 the facts from compute's own tables (bookings, billed allocations and usage windows, command outcomes,
 connectivity) and checks I1, I2, I3, I4, I5 and I8. `tests/sim/multi-gateway.test.ts` uses it for a gateway killed
 mid-command and a zombie gateway fenced by its session epoch.
+
+`tests/sim/kubernetes-host-resources-1k.test.ts` (246c95b) churns Kubernetes-bound and hold reservations with vCPU and
+memory shares over a GPU pool of `SIM_K8S_NODES` hosts (default 1,000) under link faults, crashes, partitions and
+resets, re-inventories hosts with less CPU and memory and then restores them, and has pods keep released Kubernetes
+GPUs for 45 seconds. After every step it asserts `checkHostResources` and the fleet invariants; the recorded run at
+1,000 nodes is green in about 4.5 minutes. A second, strict 12-node run of `checkKubeAdvertisements` is marked
+`it.fails`, because it fails today: capacity frees a Kubernetes-bound GPU at release and re-books it about a second
+before the node withdraws it from the kubelet, and while pods still hold it, so the node rejects the new binding
+(`NodeRejectedBinding`; 55 of 240 reservations failed at 12 nodes, 13 of 240 at 1,000). It becomes a plain test once
+a Kubernetes booking ends at the node's `AllocationReleased`.
 
 ### The nightly simulation
 
@@ -635,7 +671,7 @@ they are green.
 | `ci.yml` | every push to `main` and pull request | On Ubuntu and Windows with Node 22 and 24: `pnpm check`, `pnpm proto:check`, `buf breaking` (Ubuntu, Node 24), `pack:all`, `check:packed-types`, `test:packed`. A job with a `postgres:17` service runs `pnpm test:postgres`. After both, on `main`, the publish job goes to npm only once Better IAM resolves from npm rather than `vendor/`, then tags the release and dispatches `release.yml` |
 | `nightly.yml` | 02:17 UTC every day, or by hand | `sim`: `pnpm sim:nightly` with the 10k cold start (`COLD_START_NODES=10000`), results uploaded. `guarded`: `pnpm test` and `pnpm test:iam-remote` with `BETTER_COMPUTE_IAM_GUARD=throw`, so any `IamPort` call inside a compute transaction fails. `postgres`: the whole `pnpm test` against `postgres:17`, so the Postgres-only cases run. `streak`: counts consecutive green scheduled nights and reports when the v0.4 exit's three are reached |
 | `release.yml` | a `v*` tag, or a dispatch with a tag | bcd's release: goreleaser archives and binaries for linux amd64 and arm64 with SHA-256 files, an SPDX SBOM per archive (syft), keyless cosign signatures, and SLSA level 3 provenance (`bcd.intoto.jsonl`) from the SLSA generic generator; see [installing bcd](/docs/daemon/install) |
-| `daemon.yml` | pushes to `main` and pull requests that touch `daemon/` or `proto/` | On Ubuntu and Windows: `go vet` and `go test` with `nonvml,fakehw`; on Linux also `go vet` of the NVML build and `goreleaser check` |
+| `daemon.yml` | pushes to `main` and pull requests that touch `daemon/`, `proto/`, `packages/provider-kubernetes/` or `scripts/k8s-render-manifests.mjs` | On Ubuntu and Windows: `go vet` and `go test` with `nonvml,fakehw`; on Linux also `go vet` of the NVML build and `goreleaser check`. The `container` job (ac1ca4b) builds `daemon/Containerfile` for `linux/amd64` with buildx, runs `bcd --version` and `kubectl version --client` from the image, renders the DaemonSet manifests (`scripts/k8s-render-manifests.mjs`, placeholder pins and digest) and, on a kind cluster, applies the Namespace and server-side dry-runs the rest (`kubectl apply --dry-run=server`), so the API server checks the schema and Pod Security admission. Nothing is scheduled or pulled: it is not a run of bcd as a DaemonSet (see [bcd on Kubernetes](/docs/daemon/kubernetes)) |
 
 `pnpm check` runs `typecheck`, `test`, `test:iam-remote`, `lint:repo` and `validate:packages`. `pnpm lint:repo` runs
 the repository rules in order: `check-deps` (dependency rules), `check-sql-now` (the one-clock rule), `umbrella

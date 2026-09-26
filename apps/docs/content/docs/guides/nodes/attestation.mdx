@@ -23,6 +23,15 @@ sources:
   - daemon/internal/agent/bootserver_test.go
   - daemon/cmd/bcd/ramdisk.go
   - daemon/internal/agent/join.go
+  - daemon/cmd/bcd/agent.go
+  - daemon/cmd/bcd/hardware_host.go
+  - daemon/cmd/bcd/hardware_fakehw.go
+  - daemon/internal/tpm/contract_test.go
+  - scripts/daemon-tpm-fixture.mjs
+  - tests/pki-attestors-tpm-bcd.test.ts
+  - tests/e2e/bcd-tpm.test.ts
+  - packages/server/src/join/pool-policy.ts
+  - tests/server-join-pool-attestors.test.ts
 ---
 
 A join token proves that someone with access to your API wanted a machine to join. That is enough for a server
@@ -249,13 +258,45 @@ It then decides where the machine joins, keyed by the SHA-256 of the EK: the nod
 | `enrollment` | `{ tenantId, siteId, poolId?, pendingTtlSeconds?, retryAfterSeconds? }`: defer unknown EKs for approval. |
 | `challengeTtlMs` | Challenge lifetime, at most 5 minutes. |
 
-`tpmProducer(SoftwareTpm)` is the agent side for tests. Since f61b32d bcd has a TPM client too, `internal/tpm`: a
-pure-Go TPM 2.0 client over the kernel resource manager (`/dev/tpmrm0`, Linux only) that derives the default RSA-2048
-EK and a restricted P-256 AK and builds this attestor's `{ ek, ak }` evidence and its round-2 answer (the
+### bcd with its TPM
+
+`tpmProducer(SoftwareTpm)` is the agent side in TypeScript tests. bcd has its own, `internal/tpm` (f61b32d): a pure-Go
+TPM 2.0 client over the kernel resource manager (`/dev/tpmrm0`, Linux only) that derives the default RSA-2048 EK and a
+restricted P-256 AK and builds this attestor's `{ ek, ak }` evidence and its round-2 answer (the
 `ActivateCredential` secret and a quote with `extraData = sha256(secret || sha256(csr))`), with a software TPM,
-`tpmsim`, for tests; `agent.Join` answers up to 3 challenge rounds for the same CSR. It is not wired: `bcd join
---attestor tpm` does not use it, nothing in bcd constructs it, and no test checks its evidence against the TypeScript
-verifier. The node key is still a file.
+`tpmsim`, for tests. Since 8545688 `bcd join --attestor tpm` uses it:
+
+```bash
+bcd join --config /etc/bcd/config.toml --attestor tpm
+```
+
+- **The TPM is the credential.** No token is read or sent: `BCD_JOIN_TOKEN` is dropped from the environment, and
+  `--token-file` with `--attestor tpm` is a usage error. Where the machine joins is the attestor's decision (the
+  bound node, `resolve` or `enrollment` above).
+- **Which TPM.** A host build opens `/dev/tpmrm0`; a fakehw build keeps a software TPM in
+  `<data_dir>/fakehw-tpm.json`, the same EK on every join of that machine.
+- **The rounds.** `agent.Join` sends the evidence, answers up to 3 challenge rounds for the same CSR, and waits out
+  a pending approval (`enrollment`) before a fresh challenge round. A machine that already joined answers
+  `already joined as <node>` without touching the TPM.
+- **The install script.** [`daemon install-script --attestor tpm`](/docs/daemon/install#generate-the-script)
+  (a006d9f) writes a script that reads no token, fails early without `/dev/tpmrm0`, and runs
+  `bcd join --config /etc/bcd/config.toml --attestor tpm < /dev/null` before (re)starting the units, so the same
+  script installs and upgrades.
+
+The node key is still a file under the data directory, not a TPM key.
+
+What is tested, and with what TPM:
+
+| Test | TPM | What it proves |
+| --- | --- | --- |
+| `TestTSContract` (`daemon/internal/tpm`) | `tpmsim` fixture | bcd's round-1 evidence is still byte for byte the fixture's, and the challenge `tpmAttestor` made for it activates and quotes through bcd's client (TypeScript to Go) |
+| `tests/pki-attestors-tpm-bcd.test.ts` | the same fixture | `tpmAttestor` challenges bcd's evidence and admits bcd's answer, and refuses that answer for another CSR (`challenge-for-another-csr`) or after the challenge expired (`challenge-expired`) (Go to TypeScript) |
+| `tests/e2e/bcd-tpm.test.ts` (`BCD_E2E=1`, WSL or Linux; db9bd46) | `tpmsim` in a fakehw bcd | a real `bcd join --attestor tpm` with no token against the dev stack's JoinService: two rounds, the SHA-256 PCR bank 0 to 7 reaching `resolve`, the node in the resolved pool and bound to `sha256(EK)` in `node_bindings`; with its identity removed (a reinstall) the same TPM joins as the same node; `bcd node` on that identity is adopted |
+
+`scripts/daemon-tpm-fixture.mjs` regenerates the fixtures in `daemon/internal/tpm/testdata` after a deliberate change
+of either side, so a format change fails a test rather than a machine's join. Every test uses the software TPM with
+`allowUncertifiedEk`: no test has run against a hardware TPM, an EK certificate chain (`ekRoots`) or a real
+`/dev/tpmrm0`.
 
 ## Single-use evidence
 
@@ -297,6 +338,37 @@ tokens and record uses only on the final round.
 On the agent side, `openJoinResponse` reads a response as joined, pending or challenge, and `verifyJoinResponse`
 refuses a deferral. `runAgentJoin` in `@better-compute/testing` is the reference retry loop.
 
+## Requiring an attestor
+
+By default a pool takes a machine whichever attestor admitted it. Since 1516728 a pool can require hardware
+attestation with `policy.joinAttestors`, the ids of the attestors that may admit a machine into it:
+
+```ts title="tpm-pool.ts"
+const pool = await client.pools.get({ tenantId: 'root', poolId: 'pool_01k…' });
+await client.pools.update({
+  tenantId: 'root',
+  poolId: pool.id,
+  // The policy is replaced as a whole, so keep the rest of it.
+  policy: { ...pool.policy, joinAttestors: ['tpm'] }, // or ['tpm', 'x509pop'], or ['join-token', 'tpm'] to keep tokens
+});
+```
+
+- **Where it is checked.** JoinService checks it in the transaction that resolves the pool, before any reclaim or
+  insert. A join or a reclaim admitted by an attestor that is not listed is refused with `ACCESS_DENIED`, reason
+  `pool-attestor`. A token join is `join-token`, so a pool that lists only `tpm` refuses tokens, and a token reclaim
+  of a TPM-bound machine (`allowReclaim` with the same trusted hardware key) is refused while its TPM still reclaims
+  it.
+- **Who sees the refusal.** The attestor has already verified the machine, so the refusal is attributed to the pool's
+  owner: `security.join.refused` with the attestor and reason `join:pool-attestor`, and the token or node id when
+  known.
+- **Validation.** `pools.create` and `pools.update` refuse (`INVALID_INPUT`) a value that is not an array of 1 to 16
+  ids of attestors this control plane runs: `join-token` and every attestor registered in `attestors` or by a module
+  or plugin.
+- **Moving nodes.** No API moves a node between pools. A node gets its pool at join, where the check runs, or at
+  `metal.enroll`, whose machine gets its identity only through JoinService.
+
+Tested by `tests/server-join-pool-attestors.test.ts`.
+
 ## Choosing an attestor
 
 | Situation | Use |
@@ -306,6 +378,6 @@ refuses a deferral. `runAgentJoin` in `@better-compute/testing` is the reference
 | The OS a Better Compute deploy or a provider bootstrap installed | `provisioned` |
 | A ramdisk during bare-metal commissioning | `discovery`, with `approval` if unexpected machines should wait for a person |
 | A VM your provider account created | `cloud-iid` |
-| Hardware identity that must survive reinstalls, on TPM 2.0 machines | `tpm` (v0.5) |
+| Hardware identity that must survive reinstalls, on TPM 2.0 machines | `tpm` (v0.5), with `bcd join --attestor tpm`; add `policy.joinAttestors: ['tpm']` to refuse every other way in |
 
 To write your own attestor, see [attestors](/docs/extending/attestors).

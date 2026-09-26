@@ -281,7 +281,8 @@ to from one of two places:
 | Source | When |
 | --- | --- |
 | `command_root_sha256` in root's `config.toml`: the SHA-256 of each command-signing root certificate's DER, lowercase hex, comma-separated, at most 16 | When set, these pins decide alone: the request names its roots, and each must be pinned (03c023d) |
-| The `SignedTrustBundle` the JoinService key signed, checked against root's `join_signing_key_pin` | Without `command_root_sha256` (2d18327). The node sends the bundle of the version it holds; a command-signing root rotation needs no new pin |
+| The trust bundle in root's join record, `/var/lib/bcd-hostconfig/join-response.pb`, which the JoinService key signed | Without `command_root_sha256`, since 71ccf71, when the record carries command-signing roots: signed intent is then mandatory from the first request, whatever the node sends |
+| A newer `SignedTrustBundle` the node presents, checked against root's `join_signing_key_pin` | Without `command_root_sha256` (2d18327): it rotates the roots forward only, from the newest version accepted (the record's included), so a command-signing root rotation needs no new pin |
 
 ```toml title="/etc/bcd/config.toml"
 join_signing_key_pin = "sha256/..."       # always there: the install's out-of-band pin
@@ -291,8 +292,10 @@ command_root_sha256 = "<64 hex digits>"   # optional: pin the roots themselves
 Both pins are given at install, never taken from the control plane or the node, and a malformed value stops bcd from
 starting. The helper refuses the request unless all of these hold:
 
-- its roots check out: each is pinned in `command_root_sha256`, or they come from a trust bundle signed by the pinned
-  JoinService key whose version is not older than one the helper already accepted (an older one is a rollback);
+- its roots check out: each is pinned in `command_root_sha256`, or they come from root's join record or a trust bundle
+  signed by the pinned JoinService key whose version is not older than one the helper already accepted (an older one
+  is a rollback). Once a presented bundle rotated the roots, leaving it out does not bring the record's older roots
+  back: the node must present the current bundle (71ccf71);
 - the signature verifies, from a certificate of the worker role, for a desired state;
 - the body names this node. Since a966cd4 the node is the one root's own join record names: `bcd join`, run as root
   on a node with `[helper]` (the install script's join), writes the verified `JoinResponse`, as signed, to
@@ -311,23 +314,38 @@ roots, is refused, whatever the node sends. A body the helper already verified s
 worker certificate expires, so a spec unchanged for days keeps working on its first signature; a new body needs a
 valid one. A node and a helper of different versions fail closed, since the helper refuses the unknown request field.
 
-**The remaining caveat.** Nothing is checked while the helper has no roots to check against: without
-`command_root_sha256`, until it has accepted a first trust bundle with command-signing roots, and on a deployment
-whose trust bundles carry none (one that signs nothing). Until then it applies what the unprivileged node asks for, as
-on an install without signed intent, bounded only by strict unit validation, the sysctl denylist, root writes only
-under root-only directories, and `k8s-join` only to root-pinned `allowed_clusters`. Pinning `command_root_sha256`
-closes that window from the first request. [`daemon install-script`](/docs/daemon/install#generate-the-script)
-writes it (59985ae): the digests given with `--command-root-sha256`, else the local PKI bundle's command-signing root
-and, during a rotation, the added one, and none when the bundle has no command signing; an upgrade by a script
-without them keeps the node's pins, and `better-compute pki trust-version` prints them. The unit checks stay in force
-either way: that is why the `sysctl`
+**The remaining caveat.** Signed intent is root's decision since 71ccf71 (security review 2): before it, without
+`command_root_sha256`, it turned on only once the node itself sent a trust bundle with roots, so a node that never sent
+one got unchecked units. Now the pins or root's join record decide. What remains is an install where neither names
+command-signing roots: no `command_root_sha256`, and a join record without roots (a deployment that signs nothing, or
+a node joined before a966cd4 with no record). There the helper checks nothing until the node presents a bundle with
+roots, and applies what the unprivileged node asks for, as on an install without signed intent, bounded only by
+strict unit validation, the sysctl denylist, root writes only under root-only directories, and `k8s-join` only to
+root-pinned `allowed_clusters`. `bcd doctor` (as root, with `[helper]`) fails on such an install ("bcd helper applies
+host units unsigned unless the node itself presents a trust bundle"). Pinning `command_root_sha256` closes it from the
+first request, and so does re-joining as root against a control plane that signs intent.
+[`daemon install-script`](/docs/daemon/install#generate-the-script) writes the pins (59985ae): the digests given with
+`--command-root-sha256`, else the local PKI bundle's command-signing root and, during a rotation, the added one, and
+none when the bundle has no command signing; an upgrade by a script without them keeps the node's pins, and
+`better-compute pki trust-version` prints them. The unit checks stay in force either way: that is why the `sysctl`
 unit refuses keys that would run a program as root, and why a Kubernetes join under the helper needs root's own
 allowlist of clusters (see [k8s-join](#k8s-join)). Programs a unit runs are bounded to 20 minutes each.
 
 A second window, which node the specs must name, is closed since a966cd4 by root's join record. A node joined before
 a966cd4 has no `join-response.pb` and still binds to the first signed spec it presents, so a node compromised before
-that first `host.unit` could bind root to another node's specs. Re-join such nodes, or re-run the install script, so
-root writes the record.
+that first `host.unit` could bind root to another node's specs. `bcd doctor`, run as root on a node with `[helper]`,
+says which binding a node has (f77c6f9):
+
+| Result | When |
+| --- | --- |
+| `ok` | "host units bind to `<node>` (root's signed join record)" |
+| `warn` | The node joined before the record, so the helper binds on trust on first use; the finding says how to pin it |
+| `fail` | The record names another node than this machine's identity, or the pinned key did not sign it; the helper refuses host units either way |
+| `fail` | Neither `command_root_sha256` nor root's join record names command-signing roots (71ccf71), as in the caveat above; a second finding beside the binding's |
+
+To pin a node that joined before the record, re-join it as root: `bcd join` with a new token after moving the data
+directory's identity aside (a `tpm` or `provisioned` re-join keeps the node id). Re-running the install script is not
+enough: its join returns at once on a joined node and writes no record.
 
 `TestHelperHostUnit` (e0fe5ec) covers the operation against a real helper socket and a fake host: a sysctl
 re-planned and applied as root with the busy GPUs passed through, `kernel.core_pattern` refused with nothing written,
@@ -643,6 +661,16 @@ The NVIDIA container toolkit, the container runtimes configured with it, and the
   `nvidia-container-runtime` yet: `nvidia-ctk runtime configure --runtime=<name>` (with `--cdi.enabled` when `cdi`
   is on), then `systemctl restart containerd` or `docker`. A runtime already configured is not configured again, so
   turning `cdi` on later does not rewrite it.
+- **CDI only.** With `cdi`, since b61b9c5 (security review 2) the unit sets
+  `accept-nvidia-visible-devices-envvar-when-unprivileged` and `accept-nvidia-visible-devices-as-volume-mounts` to
+  `false` in `/etc/nvidia-container-runtime/config.toml` (`nvidia-ctk config --in-place --set <key>=false`) unless
+  the file already says so. `nvidia-ctk runtime configure --cdi.enabled` points containerd at the legacy
+  `nvidia-container-runtime`, and the packaged configuration leaves the first key commented out, at its permissive
+  default: any unprivileged container, any pod, could then choose GPUs, other tenants' included, with
+  `NVIDIA_VISIBLE_DEVICES`, and on a `k8s-join` node bcd's own
+  [`ForeignGpuExposure` check](/docs/guides/capacity/kubernetes#gpu-isolation) withdrew every GPU. The runtime reads
+  its configuration per container, so nothing restarts. `cdi: false`, the legacy mode that hands GPUs out through the
+  variable, changes neither key.
 - **CDI.** With `cdi`, bcd generates `/etc/cdi/nvidia.yaml` with `nvidia-ctk cdi generate --format=yaml` and records
   what it describes in `/var/lib/bcd-hostconfig/cdi-nvidia.stamp`: a SHA-256 of the loaded driver version and
   `nvidia-smi -L`, which lists every GPU and MIG device. The spec is generated again whenever that changes, so a

@@ -26,6 +26,9 @@ sources:
   - packages/mcp/src/tools.ts
   - packages/mcp/src/server.ts
   - packages/console-kit/src/sandboxes.ts
+  - packages/vps/src/volumes.ts
+  - apps/console/src/app/(console)/volumes/page.tsx
+  - tests/vps-volumes.test.ts
   - packages/fleet/src/config.ts
   - packages/events/src/catalog.ts
   - packages/core/src/catalog.ts
@@ -597,13 +600,29 @@ await client.sandboxTemplates.update({
 
 | Method | Decided as | |
 | --- | --- | --- |
-| [`sandboxVolumes.create`](/docs/reference/api/sandbox-volumes#create) | `compute:sandboxes:manage` on the tenant | `poolId`, `name`, `sizeGiB` (1 to 16,384), `idempotencyKey` |
-| [`sandboxVolumes.list`](/docs/reference/api/sandbox-volumes#list) | `compute:sandboxes:read` on the tenant | Optional `poolId` and `includeDeleted`; at most 500, oldest first |
+| [`sandboxVolumes.create`](/docs/reference/api/sandbox-volumes#create) | `compute:sandboxes:manage` on the volume it would create, with `sizeGiB` (6cb30e9) | `poolId`, `name`, `sizeGiB` (1 to 16,384), `idempotencyKey` |
+| [`sandboxVolumes.list`](/docs/reference/api/sandbox-volumes#list) | `compute:sandboxes:read` on the tenant | `scope` (`mine`, the default, or `all`; 77bf9f5), optional `poolId` and `includeDeleted`; at most 500, oldest first |
 | [`sandboxVolumes.get`](/docs/reference/api/sandbox-volumes#get) | `compute:sandboxes:read` on the volume | |
-| `sandboxVolumes.resize` | `compute:sandboxes:manage` on the volume | `sizeGiB`, grow only (8cbece0) |
+| `sandboxVolumes.resize` | `compute:sandboxes:manage` on the volume, with the new `sizeGiB` pending (6cb30e9) | `sizeGiB`, grow only (8cbece0) |
 | [`sandboxVolumes.delete`](/docs/reference/api/sandbox-volumes#delete) | `compute:sandboxes:manage` on the volume | |
 
-A volume is the IAM resource `sandbox-volume`, whose parent is its pool.
+A volume is the IAM resource `sandbox-volume`, whose parent is its pool, with the attribute `sizeGiB`. Since 6cb30e9
+(security review 2) a policy can bound how big a volume gets:
+
+- **Create** is decided on the volume itself, `compute-sandbox-volume/<id>`, not on the tenant. The id derives from
+  the tenant, the caller and the idempotency key, and before the decision the projection gets that volume's row,
+  under its pool and owned by the caller, with the requested `sizeGiB`. A key already used returns its volume without
+  a new decision, and a refusal removes the staged row, so nothing is left behind. A policy that granted
+  `compute:sandboxes:manage` on the tenant still reaches the volume through its pool.
+- **Resize** is decided with the new size as the volume's pending `sizeGiB`, as `sandboxes.extend` decides a
+  lifetime. Refusals come first (not found, not `ready`, a shrink), and the current size returns the volume
+  unchanged. One resize of a volume is decided at a time: another one meanwhile is `CONFLICT`
+  (`details.reason: 'resize-in-flight'`, `retryAfterSeconds: 60`), and a hold older than 60 seconds is taken over
+  (migration `vps/0021_volume_resize_hold`). On success the volume's `sizeGiB` becomes the new size; a refusal, or a
+  resize that fails with `QUOTA_EXCEEDED` or `CAPACITY_UNAVAILABLE`, clears the pending value.
+
+**List** returns the caller's own volumes by default (`scope: 'mine'`, the volumes it created, as for snapshots), and
+the whole tenant's with `scope: 'all'` (77bf9f5). Without a caller, `mine` matches nothing.
 
 **Create.** vps books the volume's `diskGiB` on one host of the pool through the capacity module, in an allocation
 owned by the volume (`owner_kind` `volume`, migration `core/0028_volume_allocations`), open-ended, and charged to the
@@ -617,15 +636,43 @@ create publishes `sandbox.volume.created`.
 Sparse does not mean overcommitted (851016e): bcd creates or grows a volume only when its data directory's filesystem
 can hold every volume's full size, keeping a reserve of 5% (at least 2 GiB) for the instances' overlays and its own
 files. Otherwise the volume keeps its size and the sandboxes that attach it report why. Hosts report the numbers in
-`StatusReport.volume_storage` (37d6d6d, b8e7271), but capacity does not read them yet, so a host's disk booking and
-its filesystem can disagree.
+`StatusReport.volume_storage` (37d6d6d, b8e7271), and since 131f5ee (security review 2) the control plane books
+against them, since `diskGiB` is the sum of the node's disks, overcommitted, and says nothing about the filesystem the
+volumes live on:
+
+- **What is kept.** vps's status handler (`volumeStorageStatusHandler`, which `serve` and the dev stack compose)
+  keeps each host's last report in `host_volume_storage` (migration `vps/0022_volume_storage`), written when a value
+  moved by at least 1 GiB, the committed or outstanding bytes changed, or the stored report is 5 minutes old.
+- **Headroom.** bcd's own rule: available less reserved less outstanding (the volumes' unwritten, sparse space),
+  less what is booked on the host that bcd has not reported yet (the live volumes' sizes beyond its reported
+  committed bytes). A host that has not reported its store has no headroom and takes no volume.
+- **Create** books only on the pool's hosts with headroom for the whole size, their rows locked so concurrent
+  bookings on a host are decided one after the other, else `CAPACITY_UNAVAILABLE` with
+  `details.reason: 'volume-storage'`. **Resize** checks the volume's own host first: `volume-storage` with `freeGiB`
+  and `neededGiB`, or `volume-storage-unknown` for a host that has not reported. `diskGiB` and quota are charged on
+  top, as before.
+- **Doctor** (1617d84). vps's self-check warns `vps.volumes.storage-unreported` for a host that keeps volumes
+  (`bc.dev/cap.instance.volumes`) but never reported its store (an older bcd), and `vps.volumes.storage-stale` for a
+  connected host whose report is over an hour old (the gateway does not compose vps's status handlers, or the host
+  sends no status), and fails `vps.volumes.storage-full` for a host whose booked volumes exceed what its store can
+  hold, for example after the filesystem filled up.
 
 **Attach.** A template names up to 8 volumes, each by `volumeId` or by `name` (not both), with a `mountPath` and
 `readOnly` (default false). They are resolved to ids when the template is written: each must be the tenant's own, in
 the template's pool, and `ready`. A mount path is absolute, without `.` or `..` segments, never a system path (`/`,
 `/bin`, `/boot`, `/dev`, `/etc`, `/lib`, `/lib32`, `/lib64`, `/proc`, `/root`, `/run`, `/sbin`, `/sys`, `/tmp`, `/usr`,
 `/var`) or inside `/proc`, `/sys`, `/dev` or `/boot`; two volumes never share a path or nest. A template with volumes
-keeps no warm pool (`warm.max` must be 0), since a warm instance would hold them. Every sandbox of the template then:
+keeps no warm pool (`warm.max` must be 0), since a warm instance would hold them.
+
+A template hands its volumes to every sandbox it starts, so since 77bf9f5 (security review 2) naming a volume takes a
+decision on that volume, not only the right to manage templates: `compute:sandboxes:manage` on
+`compute-sandbox-volume/<id>` for a read-write mount, `compute:sandboxes:read` for a read-only one, each on the
+caller's own credential (`ACCESS_DENIED` with `reason: 'credential-required'` without one), before the write and
+outside its transaction. `sandboxTemplates.create` decides every volume it names; `update` decides a new `volumes`
+list, and the current one whenever the update changes what the guest runs (flavor, image, user data, `env` or
+`network`); a TTL or warm pool change decides nothing more. A name re-pointed at another volume, or a mount made
+writable, between the decision and the write is `CONFLICT` (`reason: 'volumes-changed'`): retry, and it is decided
+again. Every sandbox of the template then:
 
 - attaches the volumes before it is placed, and one volume takes one read-write attachment on its own, or any number
   of read-only ones, never both: otherwise `CONFLICT` with `details.reason: 'volume-in-use'`;
@@ -658,8 +705,10 @@ Besides the API and the TypeScript client, the CLI has `sandbox-volume create|li
 `sandbox-template create|update --volumes` (f181f43; see [from the CLI](#from-the-cli)), the MCP server has four
 volume tools (`list_sandbox_volumes`, `create_sandbox_volume`, `resize_sandbox_volume`, `delete_sandbox_volume`;
 e6759df; see [agents over MCP](#agents-over-mcp)), and a [FleetConfig](/docs/guides/fleet-config) sandbox template
-mounts up to 8 existing volumes by name (94b8b70). Every client caps a size at the API's 16,384 GiB. The console does
-not expose volumes yet.
+mounts up to 8 existing volumes by name (94b8b70). The console's **Volumes** page (50add82) lists, creates, grows and
+deletes them (see [in the console](#in-the-console)). Every client caps a size at the API's 16,384 GiB, and every
+list takes the per-caller scope: the CLI's `--all`, the MCP tool's `scope`, the console's **Everyone's volumes**
+(e68aba7).
 </Callout>
 
 ## Snapshots and restore
@@ -983,10 +1032,10 @@ family. See [event types](/docs/guides/events#event-types).
 
 | Method | Action | Decided on |
 | --- | --- | --- |
-| `sandboxTemplates.create` | `compute:sandboxes:manage`, and `compute:secrets:manage` when it names secrets | `compute-tenant` |
+| `sandboxTemplates.create` | `compute:sandboxes:manage`, and `compute:secrets:manage` when it names secrets; for each volume it names, `compute:sandboxes:manage` (read-write) or `compute:sandboxes:read` (read-only) on that `compute-sandbox-volume` | `compute-tenant` |
 | `sandboxTemplates.list` | `compute:sandboxes:read` | `compute-tenant` + items |
 | `sandboxTemplates.get` | `compute:sandboxes:read` | `compute-sandbox-template` |
-| `sandboxTemplates.update` | `compute:sandboxes:manage`, and `compute:secrets:manage` on the tenant (and the fleet, in the root tenant) when the resulting template names secrets and the update changes `env`, user data, flavor, image or `network` | `compute-sandbox-template` |
+| `sandboxTemplates.update` | `compute:sandboxes:manage`, and `compute:secrets:manage` on the tenant (and the fleet, in the root tenant) when the resulting template names secrets and the update changes `env`, user data, flavor, image or `network`; the per-volume decisions for a new `volumes` list, or for the current one when the update changes those fields | `compute-sandbox-template` |
 | `sandboxTemplates.delete` | `compute:sandboxes:manage` | `compute-sandbox-template` |
 | `sandboxes.create` | `compute:sandboxes:create` | `compute-sandbox` (the draft) |
 | `sandboxes.list` | `compute:sandboxes:read` | `compute-tenant` + items |
@@ -997,6 +1046,10 @@ family. See [event types](/docs/guides/events#event-types).
 | `sandboxSnapshots.list` | `compute:sandboxes:read` | `compute-tenant` + items |
 | `sandboxSnapshots.get` | `compute:sandboxes:read` | `compute-sandbox-snapshot` |
 | `sandboxSnapshots.delete` | `compute:sandboxes:delete` | `compute-sandbox-snapshot` |
+| `sandboxVolumes.create` | `compute:sandboxes:manage`, with the requested `sizeGiB` | `compute-sandbox-volume` (the volume it would create) |
+| `sandboxVolumes.list` | `compute:sandboxes:read` | `compute-tenant` |
+| `sandboxVolumes.get` | `compute:sandboxes:read` | `compute-sandbox-volume` |
+| `sandboxVolumes.resize`, `delete` | `compute:sandboxes:manage` (resize with the new `sizeGiB` pending) | `compute-sandbox-volume` |
 
 A `compute-sandbox` has the pool as its parent, so pool relations apply. The example `StopWhenOverBudget` statement
 denies `compute:sandboxes:create` and `compute:sandboxes:update` (extensions and snapshots) once the caller's budget is
@@ -1097,7 +1150,7 @@ templates from a terminal.
 
 ```bash
 better-compute sandbox-volume create --pool pool_01k5w… --name agent-notes --size 20   # GiB, 1 to 16,384
-better-compute sandbox-volume list --format table        # --pool ID for one pool, --deleted to include deleted ones
+better-compute sandbox-volume list --format table        # yours; --all for the tenant's, --pool ID, --deleted
 better-compute sandbox-volume get vol_01k5w…
 better-compute sandbox-volume resize vol_01k5w… --size 40                            # grow only
 better-compute sandbox-volume delete vol_01k5w…          # wipes the data
@@ -1123,7 +1176,8 @@ The [MCP server](/docs/guides/clients/mcp#the-tools) has eight sandbox tools: `l
 `sandboxId`, `limit`, `cursor`) and `delete_sandbox_snapshot` (`snapshotId`). No tool takes a snapshot or runs code
 in a sandbox.
 
-Four more tools manage [volumes](#volumes), an agent's memory (e6759df): `list_sandbox_volumes` (`poolId`),
+Four more tools manage [volumes](#volumes), an agent's memory (e6759df): `list_sandbox_volumes` (`poolId`, and
+`scope`, `mine` by default or `all`; e68aba7),
 `create_sandbox_volume` (`poolId`, `name`, `sizeGiB`, `idempotencyKey`; confirmation-aware like `create_sandbox`),
 `resize_sandbox_volume` (`volumeId`, `sizeGiB`; grow only) and `delete_sandbox_volume` (`volumeId`; destructive, it
 wipes the data). `create_sandbox_volume` is visible with `compute:pools:read` on its pool, and the other three are
@@ -1145,6 +1199,13 @@ memory restore whose `identityRebound` is `false` carries a warning that it stil
 identity, so exec waits until the source and sibling restores are gone or the host gives it its own (9958865). On a
 deployment without a `SnapshotStore`, the first **Snapshot** answers `INVALID_CONFIG`; the page then says snapshots
 are not configured and hides the button for the session. See [the console](/docs/guides/clients/console#screens).
+
+The **Volumes** page (`/volumes`, 50add82) manages [volumes](#volumes): a form that creates one from a pool, a name
+and a size in GiB (1 to 16,384), with a fresh `console-…` idempotency key; the person's own volumes, or with
+**Everyone's volumes** the tenant's (e68aba7), each with its id, its `/dev/disk/by-id/virtio-<serial>` path, pool,
+host, size and state; and, for a `ready` volume, **Grow** (asks for the new size, which must be larger) and **Delete**
+(asks for confirmation, warning that the data is wiped). Attaching a volume to a template is not on the page: use
+`sandbox-template update --volumes`, the API or FleetConfig.
 
 ## Where sandboxes run today
 

@@ -216,7 +216,7 @@ framework.
 | `delete_sandbox` | `sandboxes.delete` | any authenticated caller | destructive, idempotent |
 | `list_sandbox_snapshots` | `sandboxSnapshots.list`: the caller's own by default, `scope: 'all'`, filter `sandboxId`, `limit` 1 to 200, `cursor` | any authenticated caller | read-only |
 | `delete_sandbox_snapshot` | `sandboxSnapshots.delete` | any authenticated caller | destructive, idempotent |
-| `list_sandbox_volumes` | `sandboxVolumes.list` (v1.1), filter `poolId` | any authenticated caller | read-only |
+| `list_sandbox_volumes` | `sandboxVolumes.list` (v1.1), filter `poolId`, `scope` (`mine` by default, or `all`) | any authenticated caller | read-only |
 | `create_sandbox_volume` | `sandboxVolumes.create`, confirmation-aware | `compute:pools:read` on the pool | idempotent |
 | `resize_sandbox_volume` | `sandboxVolumes.resize` | any authenticated caller | idempotent |
 | `delete_sandbox_volume` | `sandboxVolumes.delete` | any authenticated caller | destructive, idempotent |
@@ -263,7 +263,8 @@ too), and `delete_sandbox_snapshot` deletes one (`snap_…`) for good. No tool t
 
 **Volume tools are agent memory** (e6759df). [Sandbox volumes](/docs/guides/vps/sandboxes#volumes) are persistent
 disks that outlive sandboxes, which a template mounts in every sandbox it creates. `list_sandbox_volumes` lists the
-tenant's volumes, optionally of one `poolId`. `create_sandbox_volume` takes a `poolId`, a `name` unique in the tenant
+caller's own volumes, or with `scope: 'all'` the tenant's (e68aba7; the API's default is `mine` since 77bf9f5),
+optionally of one `poolId`. `create_sandbox_volume` takes a `poolId`, a `name` unique in the tenant
 (`^[a-z0-9][a-z0-9._-]{0,62}$`, such as `agent-notes`), `sizeGiB` (1 to 16,384, the API's own limit, so a larger size is
 refused by the schema before compute is called; f181f43) and optionally an `idempotencyKey`; like `create_sandbox` it answers
 `{ idempotencyKey, volume }` and turns `CONFIRMATION_REQUIRED` into a result to retry with the same key. The volume
