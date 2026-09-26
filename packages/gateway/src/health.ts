@@ -1,4 +1,4 @@
-import { recordHostPressure, recordXid, upsertNodeConditions } from '@better-compute/inventory';
+import { recordHostPressure, recordXid, upsertNodeConditions, wakeStartedReservations } from '@better-compute/inventory';
 import { ConditionStatus, type StatusReport } from '@better-compute/protocol';
 import type { EventPublisher, SqlTx } from '@better-compute/core';
 import type { StatusHandler } from './store.js';
@@ -112,6 +112,7 @@ async function recordDaemonConditions(
  */
 export const xidStatusHandler: StatusHandler = async function xidStatusHandler(tx, context, report) {
   let recorded = 0;
+  let quarantined = false;
   for (const condition of report.conditions) {
     const match = xidType.exec(condition.type);
     if (!match || condition.status !== ConditionStatus.TRUE || !condition.deviceId) continue;
@@ -121,8 +122,12 @@ export const xidStatusHandler: StatusHandler = async function xidStatusHandler(t
       ...(condition.message ? { message: condition.message.slice(0, 512) } : {}),
     });
     if (outcome.policy) recorded++;
+    quarantined ||= outcome.quarantined;
   }
   if (recorded) await context.work.enqueue(tx, 'health', context.nodeId);
+  // A quarantined GPU degrades the reservations holding it now (Degraded / AtomUnhealthy), whether or not
+  // a `health` reconciler (provision) runs, not at capacity's periodic recheck.
+  if (quarantined) await wakeStartedReservations(tx, context.work, context.nodeId);
   if (report.pressure)
     recorded += (
       await recordHostPressure(tx, context.nodeId, report.pressure, context.events ? { events: context.events } : {})

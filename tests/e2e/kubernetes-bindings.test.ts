@@ -176,6 +176,32 @@ describe('Kubernetes-bound reservations (§3.8)', () => {
     expect(p.daemon.files.has(cdiSpecPath(p.allocationId))).toBe(true);
   }, 120_000);
 
+  it('an XID on a Kubernetes-bound GPU degrades its reservation, and releases nothing', async () => {
+    const created = await reserve('kubernetes', 1);
+    await active(created.id);
+    const k = await holdOf(created.id);
+    const gpu = k.spec.devices[0].name as string;
+    (k.daemon as any).injectXid(gpu, 48);
+    const degraded = await until(
+      'the reservation to be Degraded',
+      async () => {
+        const current = await api.reservations.get(dev.root, { tenantId: dev.rootTenantId, reservationId: created.id });
+        return current.conditions?.find((c: { type: string }) => c.type === 'Degraded') ? current : undefined;
+      },
+      60_000,
+    );
+    expect(degraded.state).toBe('active');
+    expect(degraded.conditions.find((c: { type: string }) => c.type === 'Degraded')).toMatchObject({
+      reason: 'AtomUnhealthy',
+      message: expect.stringContaining(gpu),
+    });
+    const { rows } = await dev.database.query<{ healthy: boolean }>(`SELECT healthy FROM devices WHERE id = $1`, [gpu]);
+    expect(rows[0]!.healthy).toBe(false);
+    // P6: the node keeps the hold (bcd's plugins mark the GPU Unhealthy; nothing is released).
+    expect(k.daemon.files.has(cdiSpecPath(k.allocationId))).toBe(true);
+    await api.reservations.release(dev.root, { tenantId: dev.rootTenantId, reservationId: created.id });
+  }, 120_000);
+
   it("refuses binding 'kubernetes' on a pool that is not a cluster's", async () => {
     const { poolId: plainPool } = await dev.createPool({ key: 'no-k8s' });
     await expect(
