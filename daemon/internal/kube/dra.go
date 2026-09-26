@@ -247,6 +247,10 @@ func (d *draDriver) prepareClaim(ctx context.Context, c Claim, node string, devi
 		if r.Pool != node || !ok {
 			return ClaimResult{Error: fmt.Sprintf("device %s/%s is not bound to Kubernetes on this node", r.Pool, r.Device)}
 		}
+		// Never hand a pod a GPU that went bad after the claim was allocated (it left the slice then).
+		if !a.healthy {
+			return ClaimResult{Error: fmt.Sprintf("device %s/%s is unhealthy", r.Pool, r.Device)}
+		}
 		p := byDevice[r.Device]
 		if p == nil {
 			p = &PreparedDevice{PoolName: r.Pool, DeviceName: r.Device, CDIDeviceIDs: append([]string(nil), a.cdi...)}

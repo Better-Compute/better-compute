@@ -88,8 +88,10 @@ func (a *Agent) onXid(x health.Xid) {
 	}
 	kind := "Xid" + strconv.Itoa(x.Code)
 	a.log.Warn("GPU XID", "gpu", device, "xid", x.Code, "message", x.Message)
-	// The GPU's ECC and row-remap counters move with an XID: read them again.
+	// The GPU's ECC and row-remap counters move with an XID: read them again. The kubelet hears of it
+	// at once: the device plugins mark the GPU Unhealthy, the DRA slice drops it.
 	a.requestRescan()
+	defer a.kube.Trigger()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	found := false

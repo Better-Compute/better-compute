@@ -66,6 +66,20 @@ func TestGpuHealthChecksAndResetClearsXids(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
+	// The device plugins and DRA read health from gpuHealthy: the XID makes the GPU unhealthy.
+	healthOf := func(uuid string) bool {
+		for _, g := range h.agent.Status().GPUs {
+			if g.UUID == uuid {
+				return g.Healthy
+			}
+		}
+		t.Fatalf("no GPU %s in the status", uuid)
+		return false
+	}
+	if healthOf(gpu.Uuid) || !healthOf(other.Uuid) {
+		t.Fatal("the XID did not make its GPU (and only it) unhealthy")
+	}
+
 	diag := func(id string) *agentv1.DiagNvmlResult {
 		t.Helper()
 		s.push(command(body(id, "diag.nvml", &agentv1.DiagNvmlRequest{GpuUuids: []string{gpu.Uuid, other.Uuid}})))
@@ -122,6 +136,9 @@ func TestGpuHealthChecksAndResetClearsXids(t *testing.T) {
 	h.agent.mu.Unlock()
 	if faults != 0 {
 		t.Fatalf("faults after the reset = %d", faults)
+	}
+	if !healthOf(gpu.Uuid) {
+		t.Fatal("the reset GPU is still unhealthy")
 	}
 }
 

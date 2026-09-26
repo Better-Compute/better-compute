@@ -90,6 +90,7 @@ func (a *Agent) clearGpuFaults(uuid string) {
 		return
 	}
 	a.log.Info("GPU XID conditions cleared after a reset", "gpu", uuid)
+	defer a.kube.Trigger()
 	a.faults = kept
 	a.saveFaultsLocked()
 	if a.lastStatus != nil {
