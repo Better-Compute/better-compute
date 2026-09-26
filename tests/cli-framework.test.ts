@@ -314,6 +314,8 @@ describe('help and the manifest', () => {
       'metal deploy',
       'metal undeploy',
       'metal abort',
+      'metal discovered',
+      'metal confirm-mac',
       'metal power',
       'metal bulk',
       'profiles list',

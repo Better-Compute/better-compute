@@ -247,6 +247,45 @@ export const metalCommands = [
     },
   }),
   defineCommand({
+    name: 'metal discovered',
+    group: 'Metal',
+    summary: 'Machines a site saw PXE-booting from unknown MACs (metal.discovered)',
+    description:
+      'metal discovered lists what the site agent saw PXE/HTTP-boot from MACs with no boot entry: MAC, SMBIOS UUID, architecture, relay, first and last seen, and the enrolled machine it is a candidate for. Nothing in it is trusted or bound: confirm a candidate with metal confirm-mac.',
+    target: 'token',
+    flags: {
+      tenant: tenantFlag,
+      site: { type: 'string', value: 'ID', required: true, description: 'The site (site_…)' },
+    },
+    examples: ['better-compute metal discovered --site site_01k5w… --format table'],
+    async run({ flags, api }) {
+      return (await api()).call('metal/discovered', { tenantId: flags.tenant, siteId: flags.site });
+    },
+  }),
+  defineCommand({
+    name: 'metal confirm-mac',
+    group: 'Metal',
+    summary: 'Bind the PXE MAC of a machine enrolled without one (metal.confirmMac)',
+    description:
+      "metal confirm-mac is the operator's decision that --mac is this machine's PXE MAC, usually the candidate metal discovered shows for it. Only then is the machine booted from that MAC; a MAC another machine holds is CONFLICT. The decision is audited (node.pxe-mac.confirmed).",
+    target: 'token',
+    args: nodeArg,
+    flags: {
+      tenant: tenantFlag,
+      mac: { type: 'string', value: 'MAC', required: true, description: "The machine's PXE MAC (aa:bb:cc:dd:ee:ff)" },
+    },
+    examples: ['better-compute metal confirm-mac node_01k5w… --mac 3c:ec:ef:12:34:56'],
+    async run({ flags, args, api }) {
+      if (!/^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$/.test(flags.mac!))
+        throw usageError(`--mac ${flags.mac}: use aa:bb:cc:dd:ee:ff`);
+      return (await api()).call('metal/confirmMac', {
+        tenantId: flags.tenant,
+        nodeId: id(args[0]!, 'node', 'node'),
+        mac: flags.mac,
+      });
+    },
+  }),
+  defineCommand({
     name: 'metal power',
     group: 'Metal',
     summary: 'Send a BMC power action through the site agent (metal.power)',

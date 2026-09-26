@@ -50,6 +50,19 @@ const enroll = [
 ];
 
 describe('metal', () => {
+  it('lists PXE discovery and confirms a MAC (review 2, LOW 6)', async () => {
+    expect((await run(['metal', 'discovered', '--site', 'site_01k5w0000000000000000000ss'])).calls).toEqual([
+      { path: 'metal/discovered', body: { tenantId: 'org_acme', siteId: 'site_01k5w0000000000000000000ss' } },
+    ]);
+    expect((await run(['metal', 'confirm-mac', NODE, '--mac', '3c:ec:ef:12:34:56'])).calls).toEqual([
+      { path: 'metal/confirmMac', body: { tenantId: 'org_acme', nodeId: NODE, mac: '3c:ec:ef:12:34:56' } },
+    ]);
+    expect(await run(['metal', 'confirm-mac', NODE, '--mac', 'not-a-mac'])).toMatchObject({
+      ok: false,
+      calls: [],
+    });
+  });
+
   it('enrolls with a credentials reference or a password file, never a password flag', async () => {
     expect(
       (
