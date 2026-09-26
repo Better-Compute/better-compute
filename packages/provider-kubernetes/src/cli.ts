@@ -1,9 +1,11 @@
+import { createHash, createPublicKey } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { ComputeError, parseDuration } from '@better-compute/core';
 import {
   bcdDaemonSetManifests,
   renderKubernetesManifests,
   type BcdDaemonSetOptions,
+  type BcdPins,
   type KubernetesObject,
 } from './daemonset.js';
 
@@ -97,20 +99,43 @@ function pairs(value: string, flag: string): Record<string, string> {
   return out;
 }
 
+/** The `sha256/<base64>` SPKI pin of a public JWK; "" when it is not one. */
+function joinKeyPin(jwk: Record<string, string>): string {
+  try {
+    const der = createPublicKey({
+      key: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y },
+      format: 'jwk',
+    }).export({ type: 'spki', format: 'der' });
+    return `sha256/${createHash('sha256').update(der).digest('base64')}`;
+  } catch {
+    return '';
+  }
+}
+
 const text = (value: unknown) => (typeof value === 'string' && value ? value : undefined);
 
 /**
  * The `kubernetes manifest` command, as a better-compute CLI CommandSpec (structural: this package does not
  * depend on the CLI). `fetch` is for tests.
  */
-export function kubernetesManifestCommand(options: { fetch?: typeof fetch } = {}) {
+export function kubernetesManifestCommand(
+  options: {
+    fetch?: typeof fetch;
+    /**
+     * The trust anchors, from the application's own PKI bundle (`readPkiPins` of @better-compute/pki), for
+     * a command that needs no pin flags. Never taken from the control plane: whoever answers its well-known
+     * document would pin themselves.
+     */
+    pins?: BcdPins;
+  } = {},
+) {
   const fetcher = options.fetch ?? fetch;
   return {
     name: 'kubernetes manifest',
     group: 'Nodes',
     summary: 'Render the manifests that run bcd as a DaemonSet on a cluster a pool adopts',
     description:
-      "kubernetes manifest renders what `kubectl apply -f` needs for bcd on every node of an existing Kubernetes cluster: a Namespace, bcd's ConfigMap and the DaemonSet, pointed at the gateway, pins and join key of the control plane's well-known document (from --control-plane, else the configured deployment). It mints a join token for --pool with hosted kubernetes (--max-uses nodes, valid for --ttl) and writes it, as the Secret the DaemonSet's join container reads, to --secret-out: a new file (0600), never the output. Apply the Secret first, then the manifests. Decided as compute:join-tokens:create.",
+      "kubernetes manifest renders what `kubectl apply -f` needs for bcd on every node of an existing Kubernetes cluster: a Namespace, bcd's ConfigMap and the DaemonSet, pointed at the gateway and join key of the control plane's well-known document (from --control-plane, else the configured deployment) and pinned to the anchors the operator gives out of band: --serving-ca-pin, --join-signing-pin and --join-encryption-pin (the PKI bundle's pins, pki show on the control-plane host), never the document's own (whoever answered it would pin themselves). The join key is checked against --join-encryption-pin. It mints a join token for --pool with hosted kubernetes (--max-uses nodes, valid for --ttl) and writes it, as the Secret the DaemonSet's join container reads, to --secret-out: a new file (0600), never the output. Apply the Secret first, then the manifests. Decided as compute:join-tokens:create.",
     target: 'token' as const,
     flags: {
       tenant: {
@@ -148,6 +173,25 @@ export function kubernetesManifestCommand(options: { fetch?: typeof fetch } = {}
         value: 'URL',
         description:
           "The API's public https URL; bcd fetches the pinned join key there too (default: the configuration)",
+      },
+      'serving-ca-pin': {
+        type: 'string' as const,
+        value: 'PIN',
+        env: 'BCD_SERVING_CA_PIN',
+        description:
+          "The gateway serving CA's sha256/… pin, from the PKI bundle (pki show), never the network",
+      },
+      'join-signing-pin': {
+        type: 'string' as const,
+        value: 'PIN',
+        env: 'BCD_JOIN_SIGNING_PIN',
+        description: "The JoinService signing key's sha256/… pin, from the PKI bundle",
+      },
+      'join-encryption-pin': {
+        type: 'string' as const,
+        value: 'PIN',
+        env: 'BCD_JOIN_ENCRYPTION_PIN',
+        description: "The JoinService encryption key's sha256/… pin, from the PKI bundle",
       },
       namespace: { type: 'string' as const, value: 'NAME', description: 'Default bcd-system' },
       name: { type: 'string' as const, value: 'NAME', description: 'The DaemonSet (default bcd)' },
@@ -210,18 +254,39 @@ export function kubernetesManifestCommand(options: { fetch?: typeof fetch } = {}
           throw usage('--ttl must be whole seconds from 1m to 24h');
         ttlSeconds = ms / 1000;
       }
+      // The trust anchors come from the operator (or the application's bundle), all three or none.
+      const given = [
+        flags['serving-ca-pin'],
+        flags['join-signing-pin'],
+        flags['join-encryption-pin'],
+      ].map(text);
+      if (given.some(Boolean) && !given.every(Boolean))
+        throw usage('--serving-ca-pin, --join-signing-pin and --join-encryption-pin go together');
+      const pins: BcdPins | undefined = given.every(Boolean)
+        ? { servingCaPin: given[0]!, joinSigningPin: given[1]!, joinEncryptionPin: given[2]! }
+        : options.pins;
+      if (!pins)
+        throw usage(
+          'The pins must come from you, not the control plane: pass --serving-ca-pin, --join-signing-pin and --join-encryption-pin (better-compute pki show on the control-plane host prints them)',
+        );
       const controlPlane = text(flags['control-plane']);
       const known = await readWellKnown(context, controlPlane, fetcher);
       const gateway = known.gateway;
-      if (!gateway?.url || !gateway.servingCaPin)
+      if (!gateway?.url)
         throw new ComputeError(
           'INVALID_STATE',
-          "The control plane's well-known document has no gateway (or no serving CA pin): set gateway.url and its serving CA, as `bcd join --server` needs too",
+          "The control plane's well-known document has no gateway: set gateway.url, as `bcd join --server` needs too",
         );
       if (!known.join)
         throw new ComputeError(
           'INVALID_STATE',
           "The control plane's well-known document has no join keys: configure pki.join with public keys",
+        );
+      // bcd pins the join key too, but a mismatch would only surface as failed joins on every node.
+      if (joinKeyPin(known.join.encryptionJwk) !== pins.joinEncryptionPin)
+        throw new ComputeError(
+          'INVALID_STATE',
+          "The control plane's join encryption key does not match --join-encryption-pin: check the pin (pki show) and that --control-plane is the right deployment",
         );
       const api = await context.api();
       const pool = await api.call<{ siteId: string }>('pools/get', { tenantId, poolId });
@@ -232,11 +297,8 @@ export function kubernetesManifestCommand(options: { fetch?: typeof fetch } = {}
         image,
         gatewayUrl: gateway.url,
         siteId: pool.siteId,
-        pins: {
-          servingCaPin: gateway.servingCaPin,
-          joinSigningPin: known.join.signingKeyPin,
-          joinEncryptionPin: known.join.encryptionKeyPin,
-        },
+        pins,
+        // Data, not trust: bcdDaemonSetManifests checks it against pins.joinEncryptionPin.
         joinEncryptionJwk: JSON.stringify(known.join.encryptionJwk),
         ...(controlPlane ? { controlPlaneUrl: controlPlane } : {}),
         joinTokenSecret: { name: secretName },

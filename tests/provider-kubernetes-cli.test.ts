@@ -35,10 +35,18 @@ const wellKnown = {
   },
 };
 const image = `ghcr.io/acme/bcd:0.5.0@sha256:${'ab'.repeat(32)}`;
+// The operator's out-of-band anchors (the PKI bundle's pins): the only pins the manifests carry.
+const pinFlags = {
+  'serving-ca-pin': spkiPin(serving.publicKey),
+  'join-signing-pin': spkiPin(signing.publicKey),
+  'join-encryption-pin': spkiPin(encryption.publicKey),
+};
 
 function harness(
   flags: Record<string, string | number | boolean | undefined>,
   token: string | null = 'bcjt_join_secret123',
+  document: unknown = wellKnown,
+  commandOptions: Parameters<typeof kubernetesManifestCommand>[0] = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), 'k8s-manifest-'));
   dirs.push(dir);
@@ -47,7 +55,14 @@ function harness(
   const notes: string[] = [];
   const fetched: string[] = [];
   const context: ManifestCommandContext = {
-    flags: { tenant: 'tenant-root', pool: 'pool_1', image, 'secret-out': 'join.json', ...flags },
+    flags: {
+      tenant: 'tenant-root',
+      pool: 'pool_1',
+      image,
+      'secret-out': 'join.json',
+      ...pinFlags,
+      ...flags,
+    },
     path: (value) => join(dir, value),
     note: (message) => notes.push(message),
     io: { out: (message) => out.push(message) },
@@ -62,15 +77,16 @@ function harness(
       endpoint: { basePath: '/api/compute' },
       handler: async (request: Request) => {
         fetched.push(new URL(request.url).pathname);
-        return Response.json(wellKnown);
+        return Response.json(document);
       },
     }),
   };
   const command = kubernetesManifestCommand({
     fetch: (async (url: string) => {
       fetched.push(String(url));
-      return Response.json(wellKnown);
+      return Response.json(document);
     }) as typeof fetch,
+    ...commandOptions,
   });
   return { dir, context, command, calls, out, notes, fetched };
 }
@@ -142,6 +158,56 @@ describe('kubernetes manifest', () => {
     const again = harness({ out: 'bcd.json' });
     again.context.path = h.context.path;
     await expect(again.command.run(again.context)).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('never takes its pins from the control plane', async () => {
+    // Well-known only (no operator pins): refused before any call.
+    const bare = harness({
+      'serving-ca-pin': undefined,
+      'join-signing-pin': undefined,
+      'join-encryption-pin': undefined,
+    });
+    await expect(bare.command.run(bare.context)).rejects.toThrow(/pki show/);
+    expect(bare.calls).toEqual([]);
+    const partial = harness({ 'join-signing-pin': undefined });
+    await expect(partial.command.run(partial.context)).rejects.toThrow(/go together/);
+
+    // A document that answers with someone else's keys and pins: the manifests keep the operator's pins, and
+    // the join key that does not match them is refused before a token exists.
+    const intruder = key();
+    const forged = {
+      gateway: { url: 'https://gw.eu.example.com', servingCaPin: spkiPin(intruder.publicKey) },
+      join: {
+        encryptionJwk: intruder.publicKey.export({ format: 'jwk' }),
+        encryptionKeyPin: spkiPin(intruder.publicKey),
+        signingKeyPin: spkiPin(intruder.publicKey),
+      },
+    };
+    const mitm = harness({}, 'bcjt_join_secret123', forged);
+    await expect(mitm.command.run(mitm.context)).rejects.toThrow(/joinEncryption|pin/i);
+    expect(mitm.calls.map(([path]) => path)).not.toContain('joinTokens/create');
+
+    // An application may supply its own bundle's pins instead of flags.
+    const app = harness(
+      {
+        'serving-ca-pin': undefined,
+        'join-signing-pin': undefined,
+        'join-encryption-pin': undefined,
+      },
+      'bcjt_join_secret123',
+      wellKnown,
+      {
+        pins: {
+          servingCaPin: pinFlags['serving-ca-pin'],
+          joinSigningPin: pinFlags['join-signing-pin'],
+          joinEncryptionPin: pinFlags['join-encryption-pin'],
+        },
+      },
+    );
+    await app.command.run(app.context);
+    const manifests = app.out.join('\n');
+    expect(manifests).toContain(pinFlags['serving-ca-pin']);
+    expect(manifests).not.toContain(spkiPin(intruder.publicKey));
   });
 
   it('refuses before minting when the inputs are wrong, and a replayed key', async () => {
