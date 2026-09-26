@@ -127,6 +127,11 @@ type Config struct {
 	// site agent never proxies a request into them, whatever the control plane asks.
 	BMCNetworks string
 
+	// KubernetesAllowedClusters are the clusters this machine may join as a worker ([kubernetes]
+	// allowed_clusters, comma-separated "https://host[:port]#sha256:<CA pin>"; kube.ParseAllowedClusters).
+	// Under bcd helper a k8s-join needs one: joining a cluster hands it root on the machine.
+	KubernetesAllowedClusters string
+
 	// IMDSListen is where a VPS host serves its instances' metadata service ([imds] listen, e.g.
 	// "169.254.169.254:80" on the instances' bridge); empty disables it.
 	IMDSListen string
@@ -547,6 +552,7 @@ var fields = []field{
 	{section: "websocket", key: "audience", kind: kindString, set: func(c *Config, v value) { c.WebSocket.Audience = v.str }},
 	{section: "site", key: "bmc_networks", kind: kindString, set: func(c *Config, v value) { c.BMCNetworks = v.str }},
 	{section: "imds", key: "listen", kind: kindString, set: func(c *Config, v value) { c.IMDSListen = v.str }},
+	{section: "kubernetes", key: "allowed_clusters", kind: kindString, set: func(c *Config, v value) { c.KubernetesAllowedClusters = v.str }},
 	{section: "boot", key: "listen", kind: kindString, set: func(c *Config, v value) { c.Boot.Listen = v.str }},
 	{section: "boot", key: "kernel", kind: kindString, set: func(c *Config, v value) { c.Boot.Kernel = v.str }},
 	{section: "boot", key: "initrd", kind: kindString, set: func(c *Config, v value) { c.Boot.Initrd = v.str }},

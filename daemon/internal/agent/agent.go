@@ -28,6 +28,7 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/dispatch"
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
 	"github.com/better-compute/better-compute/daemon/internal/journal"
+	"github.com/better-compute/better-compute/daemon/internal/kube"
 	"github.com/better-compute/better-compute/daemon/internal/runtime"
 	"github.com/better-compute/better-compute/daemon/internal/session"
 	"github.com/better-compute/better-compute/daemon/internal/transport"
@@ -107,6 +108,9 @@ type Options struct {
 	HealthInterval time.Duration
 	// Update enables self-update (NodeSpec.daemon, daemon.upgrade); nil reports both unsupported.
 	Update *UpdateOptions
+	// KubernetesAllowed are the clusters the k8s-join unit may join ([kubernetes] allowed_clusters);
+	// empty allows any when bcd node applies units itself (as root), none under bcd helper.
+	KubernetesAllowed []kube.Cluster
 }
 
 // Agent is the node agent.
@@ -144,9 +148,11 @@ type Agent struct {
 	// bmcMu guards the remembered BMC hosts (site.go).
 	bmcMu sync.Mutex
 	// bootURL is the boot server's own URL (BootHandler), under which it serves the cache.
-	bootURL    string
-	access     *accessConverger
-	hostcfg    *hostConverger
+	bootURL string
+	access  *accessConverger
+	hostcfg *hostConverger
+	// kube runs the kubelet device plugins on a Kubernetes worker (kube.go).
+	kube       *kube.Manager
 	convergeCh chan struct{}
 	rng        *rand.Rand
 	ctx        context.Context
@@ -280,6 +286,7 @@ func New(o Options) (*Agent, error) {
 	a.loadFaults()
 	a.access = &accessConverger{a: a}
 	a.hostcfg = newHostConverger(a)
+	a.kube = newKubeManager(a)
 	a.key.Store(o.Key)
 	return a, nil
 }
@@ -364,6 +371,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.sweepLoop(ctx)
 	go a.healthLoop(ctx)
 	go a.watchXids(ctx)
+	go a.kube.Run(ctx)
 	if len(a.o.Runtimes) > 0 {
 		go a.firewallLoop(ctx)
 	}

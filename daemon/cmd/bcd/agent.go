@@ -24,6 +24,7 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/config"
 	"github.com/better-compute/better-compute/daemon/internal/helper"
 	"github.com/better-compute/better-compute/daemon/internal/journal"
+	"github.com/better-compute/better-compute/daemon/internal/kube"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
 	"github.com/better-compute/better-compute/daemon/internal/runtime"
 	"github.com/better-compute/better-compute/daemon/internal/transport"
@@ -373,6 +374,11 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 	signerPin, _ := config.DecodePin(cfg.JoinSigningKeyPin)
 	approverSetPin, _ := cfg.ApproverSetPin() // validated when the file was loaded
 	bmcNetworks, _ := cfg.BMCNets()
+	kubernetesAllowed, err := kube.ParseAllowedClusters(cfg.KubernetesAllowedClusters)
+	if err != nil {
+		fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
+		return exitFailure
+	}
 	var update *agent.UpdateOptions
 	if mode == "node" || mode == "site" {
 		if update, err = updateOptions(cfg, log); err != nil {
@@ -415,6 +421,8 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		Version:        version,
 		Log:            log,
 		Update:         update,
+		// k8s-join: under bcd helper the helper enforces the allowlist itself (and requires one).
+		KubernetesAllowed: kubernetesAllowed,
 	}
 	if d, err := time.ParseDuration(os.Getenv("BCD_RENEW_AFTER")); devBuild && err == nil {
 		opts.RenewAfter = d // fakehw builds only: renew soon after start (e2e)

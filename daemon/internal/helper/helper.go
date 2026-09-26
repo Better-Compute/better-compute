@@ -100,6 +100,8 @@ var FileKinds = map[string]fileKind{
 	"ssh-ca":         {dir: "/etc/ssh", file: func(string) string { return "bc_ca.pub" }, mode: 0o644},
 	"ssh-krl":        {dir: "/etc/ssh", file: func(string) string { return "bc_krl" }, mode: 0o644},
 	"ssh-principals": {dir: "/etc/ssh/bc_principals", name: regexp.MustCompile(`^[A-Za-z0-9._@-]{1,64}$`), file: func(id string) string { return id }, mode: 0o644},
+	// The node stages a kubeadm bootstrap token for host.unit k8s-join (kube.TokenFile); root-only.
+	"k8s-token": {dir: "/run/bcd/k8s", file: func(string) string { return "bootstrap-token" }, mode: 0o600},
 }
 
 // Classify maps a path bcd node writes to its file kind and id (the node's side of the table).

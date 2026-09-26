@@ -12,13 +12,15 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/converge"
 	"github.com/better-compute/better-compute/daemon/internal/helper"
 	"github.com/better-compute/better-compute/daemon/internal/hostconfig"
+	"github.com/better-compute/better-compute/daemon/internal/kube"
 	"google.golang.org/protobuf/proto"
 )
 
-// HostUnits returns the config units bcd applies from NodeSpec.host, in convergence order. bcd node
-// plans with it and bcd helper applies with it (as root), so both hold the same units.
+// HostUnits returns the config units bcd applies from NodeSpec.host, in convergence order, with a
+// k8s-join that joins no cluster root has not allowed (HostUnitsWith sets the allowlist). bcd node
+// plans with HostUnitsWith and bcd helper applies with it (as root), so both hold the same units.
 func HostUnits(o hostconfig.Options) *hostconfig.Registry {
-	return hostconfig.Builtin(o)
+	return HostUnitsWith(o, kube.JoinUnit{RequireAllowed: true})
 }
 
 // hostConverger applies NodeSpec.host (hostconfig): kernel modules and parameters, hugepages, the
@@ -55,10 +57,15 @@ func (c *hostConverger) Plan(ctx context.Context, desired []byte) ([]converge.Ac
 		configs = append(configs, hostconfig.Config{Unit: u.GetUnit(), Settings: json.RawMessage(u.GetConfigJson())})
 	}
 	busy := c.busyGPUs()
-	reg := HostUnits(hostconfig.Options{GPUBusy: func(uuid string) bool { return gpuBusy(busy, uuid) }})
+	reg := HostUnitsWith(hostconfig.Options{GPUBusy: func(uuid string) bool { return gpuBusy(busy, uuid) }}, c.a.kubeJoinUnit())
 	if c.helper != nil {
 		h := c.helper
 		reg.Delegate = func(ctx context.Context, unit string, settings json.RawMessage) error {
+			if unit == kube.UnitName && settings != nil {
+				if err := c.a.stageKubeToken(ctx, c.sys, settings); err != nil {
+					return fmt.Errorf("stage the bootstrap token: %w", err)
+				}
+			}
 			return h.HostUnit(ctx, unit, settings, busy)
 		}
 	}
