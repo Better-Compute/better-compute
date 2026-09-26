@@ -13,7 +13,7 @@ import { Stat } from '@/components/ui/stat';
 import { fmtDuration, fmtMoney, fmtNum, fmtPct, fmtRelative, fmtStamp } from '@/lib/data/format';
 import { reservationGpus } from '@/lib/data/capacity';
 import { DAY, HOUR, useHourWindow, usePoolRows, useTenantName, useTimelines } from '../data';
-import { CapacityHeatmap } from '../heatmap';
+import { CapacityHeatmap, HeatmapTable } from '../heatmap';
 import { byModel, costOf, fleetSeries, fleetTotals, heatMatrix, pressure, quotaCells } from '../model';
 import { HeatLegend, planHref, Segmented, StateTag, utcDay } from '../ui';
 
@@ -30,6 +30,7 @@ export function CapacityOverviewPage() {
   const { snapshot, rows } = usePoolRows();
   const tenantName = useTenantName();
   const [span, setSpan] = useState<SpanKey>('7d');
+  const [heatView, setHeatView] = useState<'chart' | 'table'>('chart');
   const { from, to, hour } = useHourWindow(SPANS[span].back, SPANS[span].ahead);
   const gpuRows = useMemo(() => rows.filter((row) => row.unit === 'gpu'), [rows]);
   const timelines = useTimelines(
@@ -144,15 +145,28 @@ export function CapacityOverviewPage() {
           icon={RiCalendarScheduleLine}
           meta={`${fmtStamp(from)} → ${fmtStamp(to)} UTC`}
           actions={
-            <Segmented
-              label="Heatmap span"
-              value={span}
-              onChange={setSpan}
-              options={(Object.keys(SPANS) as SpanKey[]).map((id) => ({ id, label: SPANS[id].label }))}
-            />
+            <div className="flex flex-wrap items-center gap-2">
+              <Segmented
+                label="Heatmap span"
+                value={span}
+                onChange={setSpan}
+                options={(Object.keys(SPANS) as SpanKey[]).map((id) => ({ id, label: SPANS[id].label }))}
+              />
+              <Segmented
+                label="Show as"
+                value={heatView}
+                onChange={setHeatView}
+                options={[
+                  { id: 'chart', label: 'Chart' },
+                  { id: 'table', label: 'Table' },
+                ]}
+              />
+            </div>
           }
         >
-          {matrix.rows.length ? (
+          {matrix.rows.length && heatView === 'table' ? (
+            <HeatmapTable matrix={matrix} now={snapshot.now} />
+          ) : matrix.rows.length ? (
             <>
               <CapacityHeatmap
                 matrix={matrix}

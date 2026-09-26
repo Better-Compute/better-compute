@@ -15,6 +15,60 @@ const LABEL_W = 148;
 const SUMMARY_W = 64;
 const HEADER_H = 26;
 
+/**
+ * The heatmap's table twin: per pool and UTC day, the peak share booked and the fewest GPUs free. Every value the
+ * chart encodes in color is readable here as text.
+ */
+export function HeatmapTable({ matrix, now }: { matrix: HeatMatrix; now: number }) {
+  const days = useMemo(() => {
+    const list: number[] = [];
+    for (let index = 0; index < matrix.columns; index += 1) {
+      const day = Math.floor((matrix.from + index * matrix.step) / 86_400_000) * 86_400_000;
+      if (list.at(-1) !== day) list.push(day);
+    }
+    return list;
+  }, [matrix]);
+  const today = Math.floor(now / 86_400_000) * 86_400_000;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full border-collapse text-body-regular">
+        <caption className="sr-only">Peak share of GPUs booked and fewest free GPUs, per pool and UTC day</caption>
+        <thead>
+          <tr className="border-b border-separator-border font-mono text-[11px] text-text-tertiary">
+            <th className="px-2 py-1.5 text-left font-normal">Pool</th>
+            {days.map((day) => (
+              <th key={day} className={cx('px-2 py-1.5 text-right font-normal', day === today && 'text-text-primary')}>
+                {new Date(day).toLocaleString('en', { month: 'short', day: 'numeric', timeZone: 'UTC' })}
+                {day === today ? ' · today' : ''}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {matrix.rows.map((entry) => (
+            <tr key={entry.row.id} className="border-b border-separator-border last:border-0">
+              <th scope="row" className="px-2 py-1.5 text-left font-mono text-[12px] font-normal whitespace-nowrap">
+                {entry.row.short} · {entry.row.siteId}
+              </th>
+              {days.map((day) => {
+                const buckets = entry.timeline.buckets.filter((bucket) => bucket.start >= day && bucket.start < day + 86_400_000);
+                const peak = Math.max(0, ...buckets.map((bucket) => (entry.timeline.allocatable ? bucket.booked / entry.timeline.allocatable : 0)));
+                const minFree = Math.min(...buckets.map((bucket) => bucket.free));
+                return (
+                  <td key={day} className="px-2 py-1.5 text-right font-mono text-[12px] tabular-nums whitespace-nowrap">
+                    <span className={cx(peak >= 0.95 ? 'text-signal' : 'text-text-primary')}>{fmtPct(peak, 0)}</span>
+                    <span className="text-text-tertiary"> · {Number.isFinite(minFree) ? fmtNum(minFree) : '—'} free</span>
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export const CapacityHeatmap = memo(function CapacityHeatmap({
   matrix,
   now,
