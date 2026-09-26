@@ -496,6 +496,17 @@ describe('JoinService.join', () => {
     expect(await nodeRow(s, second.body.nodeId)).toMatchObject({ trust: 'platform' });
     expect(parseCertificate(second.body.certChain[0]!).role).toBe('node');
 
+    // A tenant's pool on the platform's site cannot vouch for its own cluster.
+    await s.fixture.database.query(
+      `INSERT INTO pools (id, owner_tenant_id, site_id, class, gpu_model, sharing, agent, policy, version)
+       VALUES ('pool_acme_k8s', $1, $2, 'metal-host', 'H100', 'exclusive', 'bcd', $3, 1)`,
+      [s.fixture.tenants.acme.id, SITE, JSON.stringify({ kubernetes: { platformOperated: true } })],
+    );
+    const vouched = await mintToken(s, { tenantId: s.fixture.tenants.acme.id, poolId: 'pool_acme_k8s' });
+    await s.fixture.database.query(`UPDATE join_tokens SET hosted = 'kubernetes' WHERE id = $1`, [vouched.id]);
+    const fourth = await join(s, vouched.token, machine(4));
+    expect(await nodeRow(s, fourth.body.nodeId)).toMatchObject({ trust: 'tenant-controlled' });
+
     // Never raises: a tenant's own site stays tenant-owned.
     const byo = await mintToken(s, { tenantId: s.fixture.tenants.acme.id, poolId: 'pool_byo' });
     await s.fixture.database.query(`UPDATE join_tokens SET hosted = 'kubernetes' WHERE id = $1`, [byo.id]);

@@ -536,9 +536,10 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
       const siteId = pool?.site_id ?? result.siteId;
       if (!siteId) throw deny('site');
       const site = (
-        await tx.query<{ id: string; kind: string }>('SELECT id, kind FROM sites WHERE id = $1', [
-          siteId,
-        ])
+        await tx.query<{ id: string; kind: string; owner_tenant_id: string }>(
+          'SELECT id, kind, owner_tenant_id FROM sites WHERE id = $1',
+          [siteId],
+        )
       ).rows[0];
       if (!site) throw deny('site');
       const ownerTenantId = pool?.owner_tenant_id ?? result.tenantId;
@@ -549,11 +550,18 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
       // A token minted for bcd hosted on a Kubernetes cluster (the DaemonSet): that cluster's admins
       // run privileged pods on the machine, so it is tenant-controlled unless the pool says the
       // platform operates the cluster. The token decides, never the node's claims, and this only
-      // ever lowers platform trust.
+      // ever lowers platform trust. The pool's word counts only when the platform owns the pool
+      // (the owner of its non-custom site, and the root tenant when one is configured): whoever can
+      // edit a policy could otherwise vouch for their own cluster.
       const policyOf = typeof pool?.policy === 'string' ? JSON.parse(pool.policy) : pool?.policy;
+      const platformOwned =
+        pool !== undefined &&
+        site.kind !== 'custom' &&
+        pool.owner_tenant_id === site.owner_tenant_id &&
+        (options.rootTenantId === undefined || pool.owner_tenant_id === options.rootTenantId);
       const hostedElsewhere =
         token?.hosted === 'kubernetes' &&
-        (policyOf as PoolPolicy | null | undefined)?.kubernetes?.platformOperated !== true;
+        !(platformOwned && (policyOf as PoolPolicy | null | undefined)?.kubernetes?.platformOperated === true);
       if (hostedElsewhere && trust === 'platform') trust = 'tenant-controlled';
 
       // Reclaim (§3.3 step 4): a trusted key already enrolled, proven again with a new node key.
