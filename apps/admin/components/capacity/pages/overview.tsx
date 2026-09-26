@@ -45,7 +45,7 @@ function RunwayPanel({ rows }: { rows: PoolRow[] }) {
       rows
         .map((row) => {
           const timeline = timelines.get(row.id);
-          return { row, ...(timeline ? runway(timeline) : { daily: [] as number[], slopePerWeek: 0, current: 0, daysToCeiling: undefined }) };
+          return { row, loading: !timeline, ...(timeline ? runway(timeline) : { daily: [] as number[], slopePerWeek: 0, current: 0, daysToCeiling: undefined }) };
         })
         .sort((a, b) => (a.daysToCeiling ?? Infinity) - (b.daysToCeiling ?? Infinity) || b.slopePerWeek - a.slopePerWeek),
     [rows, timelines],
@@ -62,7 +62,7 @@ function RunwayPanel({ rows }: { rows: PoolRow[] }) {
           </tr>
         </thead>
         <tbody>
-          {list.map(({ row, daily, slopePerWeek, daysToCeiling }) => (
+          {list.map(({ row, daily, slopePerWeek, daysToCeiling, loading }) => (
             <tr key={row.id} className="border-b border-separator-border last:border-0">
               <td className="px-3 py-1.5">
                 <Link href={`/pools/${row.id}`} className="text-caption-1-medium hover:underline">
@@ -79,7 +79,9 @@ function RunwayPanel({ rows }: { rows: PoolRow[] }) {
                 </span>
               </td>
               <td className="px-3 py-1.5 text-right">
-                {daysToCeiling === undefined ? (
+                {loading ? (
+                  <span className="font-mono text-[11px] text-text-tertiary">loading…</span>
+                ) : daysToCeiling === undefined ? (
                   <span className="font-mono text-[11px] text-text-tertiary">not at this trend</span>
                 ) : daysToCeiling === 0 ? (
                   <Tag status="crit">already</Tag>
