@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"path"
 	"sort"
 	"strings"
 
@@ -19,10 +20,13 @@ const (
 	// KubeletConf is the kubelet's kubeconfig, written by kubeadm join: its presence means joined.
 	KubeletConf = "/etc/kubernetes/kubelet.conf"
 	// StateFile records what the unit manages: the cluster, the Node name, the labels and taints it
-	// set, and whether the device plugin may run (Plugin reads it).
-	StateFile = "/etc/bcd/k8s-join.json"
+	// set, and whether the device plugin may run (Manager reads it, unprivileged: 0644). Everything
+	// the unit writes lives in root's hostconfig.StateDir: under bcd helper it runs as root on the
+	// unprivileged node's request, and a file in a directory the node can write (its data_dir,
+	// /run/bcd) could be swapped under it, e.g. a JoinConfiguration naming another cluster.
+	StateFile = hostconfig.StateDir + "/k8s-join.json"
 	// JoinConfigFile holds the JoinConfiguration (with the token) only while kubeadm join runs.
-	JoinConfigFile = "/run/bcd/k8s-join.yaml"
+	JoinConfigFile = hostconfig.StateDir + "/k8s-join.yaml"
 
 	modulesFile          = "/etc/modules-load.d/90-bcd-k8s.conf"
 	sysctlFile           = "/etc/sysctl.d/90-bcd-k8s.conf"
@@ -32,7 +36,7 @@ const (
 	containerdImportGlob = containerdDropInDir + "/*.toml"
 	aptSource            = "/etc/apt/sources.list.d/bcd-kubernetes.list"
 	aptKeyring           = "/etc/apt/keyrings/bcd-kubernetes.gpg"
-	aptKeyDownload       = "/run/bcd/k8s-release.key"
+	aptKeyDownload       = hostconfig.StateDir + "/k8s-release.key"
 	dnfRepo              = "/etc/yum.repos.d/bcd-kubernetes.repo"
 	criSocket            = "unix:///run/containerd/containerd.sock"
 )
@@ -68,9 +72,9 @@ func ReadState(sys hostconfig.System) (State, bool, error) {
 }
 
 // TokenFile is where an unprivileged bcd node stages the bootstrap token for bcd helper (helper
-// file kind "k8s-token", 0600): the helper cannot ask the control plane for secrets. The join
-// removes it.
-const TokenFile = "/run/bcd/k8s/bootstrap-token"
+// file kind "k8s-token", root's 0600 file in root's directory, so the node cannot point it at
+// another file): the helper cannot ask the control plane for secrets. The join removes it.
+const TokenFile = hostconfig.StateDir + "/k8s/bootstrap-token"
 
 // JoinUnit is the k8s-join config unit.
 type JoinUnit struct {
@@ -169,12 +173,12 @@ func PendingToken(sys hostconfig.System, settings json.RawMessage) (ref string, 
 	if err != nil {
 		return "", err
 	}
-	// Listing, not reading: an unprivileged node may list /etc/kubernetes and /run/bcd/k8s but
-	// cannot read the root-only files in them.
+	// Listing, not reading: an unprivileged node may list /etc/kubernetes and the token's directory
+	// but cannot read the root-only files in them.
 	if names, _ := sys.ReadDir("/etc/kubernetes"); contains(names, "kubelet.conf") {
 		return "", nil
 	}
-	if names, _ := sys.ReadDir("/run/bcd/k8s"); contains(names, "bootstrap-token") {
+	if names, _ := sys.ReadDir(path.Dir(TokenFile)); contains(names, path.Base(TokenFile)) {
 		return "", nil
 	}
 	return p.TokenRef, nil
