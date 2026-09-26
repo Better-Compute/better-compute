@@ -161,9 +161,14 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 			}
 		}
 		if tokenFile != "" {
-			// Spent (single use), or not needed: it never stays on disk.
+			// Spent (single use), or not needed: it never stays on disk. A read-only mount (a
+			// Kubernetes Secret volume) cannot be emptied here; the spent token is useless, and its
+			// Secret is the cluster admin's to delete.
 			if err := os.Remove(tokenFile); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
+				if !errors.Is(err, syscall.EROFS) {
+					return err
+				}
+				log.Warn("the token file is on a read-only mount and stays; delete its source (the spent token no longer joins)", "file", tokenFile)
 			}
 		}
 		return nil
@@ -184,7 +189,7 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 
 	var token string
 	if tokenFile != "" {
-		raw, err := os.ReadFile(tokenFile)
+		raw, err := readTokenFile(tokenFile)
 		if err != nil {
 			fmt.Fprintf(stderr, "bcd join: %v\n", err)
 			return exitFailure
