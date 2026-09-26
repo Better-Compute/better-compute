@@ -1,8 +1,0 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: bcd-system
-  labels:
-    app.kubernetes.io/part-of: better-compute
-    # bcd needs the host: privileged, host PID and network namespaces (see daemonset.yaml).
-    pod-security.kubernetes.io/enforce: privileged
