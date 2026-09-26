@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { fromBinary, toBinary, toJson, type JsonValue } from '@bufbuild/protobuf';
 import {
   canTransition,
@@ -1382,25 +1383,27 @@ export function createGatewayStore(options: GatewayStoreOptions) {
       }
     },
     /**
-     * A status report (§7.2): `observed_generation` only moves forward; the report is published for
-     * the Inventory/Health reconciler, which owns conditions.
+     * A status report (§7.2): `observed_generation` only moves forward; the report is published as
+     * `node.status` (unless `publish: false`: the gateway skips a report whose `statusKey` its session
+     * already published), and every report goes through the status handlers.
      */
-    async status(nodeId: string, tenantId: string, report: StatusReport): Promise<void> {
+    async status(nodeId: string, tenantId: string, report: StatusReport, options: { publish?: boolean } = {}): Promise<void> {
       await db.transaction(async (tx) => {
         const advanced = await tx.query(
           `UPDATE nodes SET observed_generation = $2
            WHERE id = $1 AND observed_generation < $2`,
           [nodeId, Number(report.observedGeneration)],
         );
-        await events.publish(tx, {
-          type: 'node.status',
-          tenantId,
-          subject: `node/${nodeId}`,
-          data: {
-            nodeId,
-            report: toJson(StatusReportSchema, report, { registry: protocolRegistry }) as Json,
-          },
-        });
+        if (options.publish !== false)
+          await events.publish(tx, {
+            type: 'node.status',
+            tenantId,
+            subject: `node/${nodeId}`,
+            data: {
+              nodeId,
+              report: toJson(StatusReportSchema, report, { registry: protocolRegistry }) as Json,
+            },
+          });
         // The node reconciler waits on convergence: wake it when observed_generation moved, not on
         // every (coalesced, ~1/s) report. Conditions and instances go to the status handlers.
         if (advanced.rowCount) await work.enqueue(tx, 'node', nodeId);
@@ -1616,3 +1619,14 @@ export function createGatewayStore(options: GatewayStoreOptions) {
 }
 
 export type GatewayStore = ReturnType<typeof createGatewayStore>;
+
+/**
+ * What a status report says that `node.status` carries news of: the report without its gauges (host
+ * pressure, volume storage), which move on every pass. bcd sends a full report after each converge
+ * pass, at least every 10-minute drift pass; at 10k nodes an unchanged one published every time is
+ * ~1.4M events a day (bench/gateway-status), so a session publishes a report only when this changes.
+ */
+export function statusKey(report: StatusReport): string {
+  const bytes = toBinary(StatusReportSchema, { ...report, pressure: undefined, volumeStorage: undefined });
+  return createHash('sha256').update(bytes).digest('base64');
+}

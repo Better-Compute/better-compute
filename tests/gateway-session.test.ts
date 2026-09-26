@@ -574,6 +574,45 @@ describe('status, inventory and specs', () => {
     expect(await f.outbox('node.status')).toHaveLength(2);
   });
 
+  it('publishes node.status only when a report says something new on its session; the handlers see every report', async () => {
+    await f.close();
+    const seen: number[] = [];
+    f = await gatewayFixture({
+      reports: { status: async (_tx, _context, report) => void seen.push(Number(report.pressure?.cpuSomeAvg10 ?? -1)) },
+    });
+    const node = await f.addNode();
+    const { handle } = await f.connect(node);
+    const status = (cpu: number, section = 'devices') =>
+      agentFrame({
+        case: 'status',
+        value: {
+          observedGeneration: 4n,
+          appliedGeneration: 4n,
+          sections: [{ section, generation: 4n }],
+          pressure: { cpuSomeAvg10: cpu },
+          volumeStorage: { availableBytes: BigInt(cpu * 1000) },
+        },
+      });
+    const apply = async (frame: ReturnType<typeof status>) => {
+      await handle.receive(frame);
+      await f.gateway.jobs.status.tick();
+    };
+    await apply(status(1));
+    // The drift pass's report: the same, gauges aside (pressure and volume storage move every pass).
+    await apply(status(1));
+    await apply(status(2));
+    expect(await f.outbox('node.status')).toHaveLength(1);
+    // A section changed: news.
+    await apply(status(2, 'access'));
+    expect(await f.outbox('node.status')).toHaveLength(2);
+    // A new session publishes its first report again.
+    const again = await f.connect(node, { bootId: 'boot-2' });
+    await again.handle.receive(status(2, 'access'));
+    await f.gateway.jobs.status.tick();
+    expect(await f.outbox('node.status')).toHaveLength(3);
+    expect(seen).toEqual([1, 1, 2, 2, 2]);
+  });
+
   it('records heartbeat hash reports of many nodes in one group commit, a bad report failing only itself', async () => {
     const nodes = [await f.addNode(), await f.addNode(), await f.addNode()];
     const sessions = [];

@@ -1,0 +1,283 @@
+{
+  "suite": "gateway-status",
+  "date": "2026-09-26T07:29:52.825Z",
+  "commit": "f5715b1",
+  "referenceHardware": false,
+  "machine": {
+    "cpus": 64,
+    "cpuModel": "AMD Ryzen Threadripper PRO 9995WX 96-Cores",
+    "memoryBytes": 274182045696
+  },
+  "node": "v25.6.0",
+  "adapter": "pglite",
+  "config": {
+    "nodes": 10000,
+    "driftPassSeconds": 600,
+    "handlers": [
+      "xidStatusHandler"
+    ]
+  },
+  "seedMs": 189,
+  "passes": [
+    {
+      "pass": "warm-up",
+      "reportsPerSecond": 396,
+      "passSeconds": 25.3,
+      "latencyMs": {
+        "p50": 2.55,
+        "p99": 4.75,
+        "max": 43.92
+      },
+      "statementsPerReport": 7,
+      "perStatement": [
+        {
+          "sql": "UPDATE nodes SET observed_generation = $2 WHERE id = $1 AND observed_generation ",
+          "perReport": 1,
+          "msPerReport": 0.394
+        },
+        {
+          "sql": "INSERT INTO outbox (topic, payload) VALUES ($1, $2::jsonb || jsonb_build_object(",
+          "perReport": 1,
+          "msPerReport": 0.387
+        },
+        {
+          "sql": "INSERT INTO work_queue (kind, key, shard, gen, not_before) VALUES ($1, $2, $3, 1",
+          "perReport": 1,
+          "msPerReport": 0.352
+        },
+        {
+          "sql": "SELECT type, status FROM node_conditions WHERE node_id = $1 AND type = ANY($2::t",
+          "perReport": 1,
+          "msPerReport": 0.291
+        },
+        {
+          "sql": "SELECT type, status FROM node_conditions WHERE node_id = $1 AND type = ANY($2)",
+          "perReport": 1,
+          "msPerReport": 0.268
+        },
+        {
+          "sql": "RELEASE SAVEPOINT gateway_status",
+          "perReport": 1,
+          "msPerReport": 0.181
+        },
+        {
+          "sql": "SAVEPOINT gateway_status",
+          "perReport": 1,
+          "msPerReport": 0.174
+        }
+      ]
+    },
+    {
+      "pass": "drift, every report published",
+      "reportsPerSecond": 480,
+      "passSeconds": 20.8,
+      "latencyMs": {
+        "p50": 2.04,
+        "p99": 4.47,
+        "max": 39.69
+      },
+      "statementsPerReport": 6,
+      "perStatement": [
+        {
+          "sql": "INSERT INTO outbox (topic, payload) VALUES ($1, $2::jsonb || jsonb_build_object(",
+          "perReport": 1,
+          "msPerReport": 0.387
+        },
+        {
+          "sql": "UPDATE nodes SET observed_generation = $2 WHERE id = $1 AND observed_generation ",
+          "perReport": 1,
+          "msPerReport": 0.321
+        },
+        {
+          "sql": "SELECT type, status FROM node_conditions WHERE node_id = $1 AND type = ANY($2::t",
+          "perReport": 1,
+          "msPerReport": 0.293
+        },
+        {
+          "sql": "SELECT type, status FROM node_conditions WHERE node_id = $1 AND type = ANY($2)",
+          "perReport": 1,
+          "msPerReport": 0.268
+        },
+        {
+          "sql": "SAVEPOINT gateway_status",
+          "perReport": 1,
+          "msPerReport": 0.179
+        },
+        {
+          "sql": "RELEASE SAVEPOINT gateway_status",
+          "perReport": 1,
+          "msPerReport": 0.178
+        }
+      ]
+    },
+    {
+      "pass": "drift",
+      "reportsPerSecond": 662,
+      "passSeconds": 15.1,
+      "latencyMs": {
+        "p50": 1.52,
+        "p99": 3.27,
+        "max": 12.51
+      },
+      "statementsPerReport": 5,
+      "perStatement": [
+        {
+          "sql": "UPDATE nodes SET observed_generation = $2 WHERE id = $1 AND observed_generation ",
+          "perReport": 1,
+          "msPerReport": 0.294
+        },
+        {
+          "sql": "SELECT type, status FROM node_conditions WHERE node_id = $1 AND type = ANY($2::t",
+          "perReport": 1,
+          "msPerReport": 0.271
+        },
+        {
+          "sql": "SELECT type, status FROM node_conditions WHERE node_id = $1 AND type = ANY($2)",
+          "perReport": 1,
+          "msPerReport": 0.258
+        },
+        {
+          "sql": "SAVEPOINT gateway_status",
+          "perReport": 1,
+          "msPerReport": 0.171
+        },
+        {
+          "sql": "RELEASE SAVEPOINT gateway_status",
+          "perReport": 1,
+          "msPerReport": 0.17
+        }
+      ]
+    },
+    {
+      "pass": "raise",
+      "reportsPerSecond": 253,
+      "passSeconds": 39.6,
+      "latencyMs": {
+        "p50": 3.84,
+        "p99": 8.1,
+        "max": 49.2
+      },
+      "statementsPerReport": 10,
+      "perStatement": [
+        {
+          "sql": "INSERT INTO node_conditions (node_id, type, status, reason, since) SELECT $1, c.",
+          "perReport": 1,
+          "msPerReport": 0.481
+        },
+        {
+          "sql": "INSERT INTO outbox (topic, payload) SELECT v.topic, v.payload::jsonb || jsonb_bu",
+          "perReport": 1,
+          "msPerReport": 0.466
+        },
+        {
+          "sql": "UPDATE nodes SET observed_generation = $2 WHERE id = $1 AND observed_generation ",
+          "perReport": 1,
+          "msPerReport": 0.403
+        },
+        {
+          "sql": "INSERT INTO outbox (topic, payload) VALUES ($1, $2::jsonb || jsonb_build_object(",
+          "perReport": 1,
+          "msPerReport": 0.382
+        },
+        {
+          "sql": "INSERT INTO work_queue (kind, key, shard, gen, not_before) VALUES ($1, $2, $3, 1",
+          "perReport": 1,
+          "msPerReport": 0.358
+        },
+        {
+          "sql": "SELECT no_schedule_reasons, trust, owner_tenant_id FROM nodes WHERE id = $1 FOR ",
+          "perReport": 1,
+          "msPerReport": 0.32
+        },
+        {
+          "sql": "SELECT type, status FROM node_conditions WHERE node_id = $1 AND type = ANY($2::t",
+          "perReport": 1,
+          "msPerReport": 0.307
+        },
+        {
+          "sql": "SELECT type, status FROM node_conditions WHERE node_id = $1 AND type = ANY($2)",
+          "perReport": 1,
+          "msPerReport": 0.284
+        },
+        {
+          "sql": "RELEASE SAVEPOINT gateway_status",
+          "perReport": 1,
+          "msPerReport": 0.186
+        },
+        {
+          "sql": "SAVEPOINT gateway_status",
+          "perReport": 1,
+          "msPerReport": 0.177
+        }
+      ]
+    },
+    {
+      "pass": "clear",
+      "reportsPerSecond": 343,
+      "passSeconds": 29.2,
+      "latencyMs": {
+        "p50": 2.73,
+        "p99": 6.02,
+        "max": 52.49
+      },
+      "statementsPerReport": 9,
+      "perStatement": [
+        {
+          "sql": "INSERT INTO outbox (topic, payload) SELECT v.topic, v.payload::jsonb || jsonb_bu",
+          "perReport": 1,
+          "msPerReport": 0.385
+        },
+        {
+          "sql": "INSERT INTO node_conditions (node_id, type, status, reason, since) SELECT $1, c.",
+          "perReport": 1,
+          "msPerReport": 0.37
+        },
+        {
+          "sql": "INSERT INTO outbox (topic, payload) VALUES ($1, $2::jsonb || jsonb_build_object(",
+          "perReport": 1,
+          "msPerReport": 0.322
+        },
+        {
+          "sql": "SELECT type, status FROM node_conditions WHERE node_id = $1 AND type = ANY($2)",
+          "perReport": 1,
+          "msPerReport": 0.272
+        },
+        {
+          "sql": "UPDATE nodes SET observed_generation = $2 WHERE id = $1 AND observed_generation ",
+          "perReport": 1,
+          "msPerReport": 0.271
+        },
+        {
+          "sql": "SELECT no_schedule_reasons, trust, owner_tenant_id FROM nodes WHERE id = $1 FOR ",
+          "perReport": 1,
+          "msPerReport": 0.269
+        },
+        {
+          "sql": "SELECT type, status FROM node_conditions WHERE node_id = $1 AND type = ANY($2::t",
+          "perReport": 1,
+          "msPerReport": 0.263
+        },
+        {
+          "sql": "RELEASE SAVEPOINT gateway_status",
+          "perReport": 1,
+          "msPerReport": 0.162
+        },
+        {
+          "sql": "SAVEPOINT gateway_status",
+          "perReport": 1,
+          "msPerReport": 0.152
+        }
+      ]
+    }
+  ],
+  "steady": {
+    "neededReportsPerSecond": 16.7,
+    "headroom": 39.7,
+    "fleetBurstDrainSeconds": 15
+  },
+  "outbox": {
+    "nodeStatusEvents": 40000,
+    "bytesPerEvent": 1180
+  },
+  "conditionRows": 20000
+}

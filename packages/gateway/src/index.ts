@@ -90,6 +90,7 @@ export {
   inventoryStore,
   isTerminalUpdate,
   nodeSpecColumn,
+  statusKey,
 } from './store.js';
 export type {
   GatewayStore,

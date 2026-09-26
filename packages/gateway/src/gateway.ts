@@ -54,6 +54,7 @@ import {
   createGatewayStore,
   FencedError,
   isTerminalUpdate,
+  statusKey,
   type CommandOwner,
   type GatewayStore,
   type InventoryIngest,
@@ -385,6 +386,8 @@ interface Session {
   /** `node_certs.allowed_kinds` of this session's certificate; null = unrestricted. */
   allowedKinds: string[] | null;
   pendingStatus?: StatusReport;
+  /** `statusKey` of the last report this session published as `node.status`. */
+  publishedStatus?: string;
   closed: boolean;
 }
 
@@ -1134,7 +1137,10 @@ export function createGateway(options: GatewayOptions): Gateway {
         const report = session.pendingStatus;
         if (!report || session.closed) continue;
         session.pendingStatus = undefined;
-        await store.status(session.nodeId, session.tenantId, report);
+        // Every report reaches the handlers; `node.status` only when it says something new (statusKey).
+        const key = statusKey(report);
+        await store.status(session.nodeId, session.tenantId, report, { publish: key !== session.publishedStatus });
+        session.publishedStatus = key;
         flushed++;
       }
       return flushed;
