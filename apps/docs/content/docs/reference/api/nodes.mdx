@@ -254,7 +254,7 @@ Returns the node and `revokedCertificates`, the number of certificates revoked; 
 
 `POST /api/compute/nodes/delete`
 
-Tombstones a node that is `retired`, `adopting` or `enrolling` (or failed from `adopting` or `enrolling`) and has no open allocation.
+Tombstones a node that is `retired`, `adopting` or `enrolling` (or failed from `adopting` or `enrolling`), or an `adopted` node that is cordoned, and has no open allocation. An adopted host has no retire workflow: cordon it, wait until it holds nothing, then delete it. For example, after its TPM or disk was replaced, deleting it lets the machine join again under a new identity.
 
 Any other state, or an open allocation, is `INVALID_STATE`; a node that changed pools during the call is `CONFLICT`. The node's devices stop being bookable, its scalar resources are removed, its certificates are revoked, its hardware key and attestor bindings are freed so the machine can join again as a new node, and its pending commands are cancelled. The node leaves its pool and the projection, so nobody sees it; audit rows and past allocations keep referencing it.
 

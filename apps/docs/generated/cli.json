@@ -2994,6 +2994,76 @@
       "examples": ["better-compute nodes taint node_01k5w… --add gpu=degraded:NoSchedule"]
     },
     {
+      "name": "nodes delete",
+      "aliases": [],
+      "group": "Nodes",
+      "summary": "Remove a retired or cordoned adopted node for good (nodes.delete)",
+      "description": "nodes delete tombstones a node that is retired, a cordoned adopted node (cordon it first), or one that never got past adoption or enrollment, once it holds no allocation. Its certificates are revoked and its hardware key and attestor bindings (e.g. a TPM) are freed, so the machine can join again as a new node: after a TPM swap, cordon, delete, then run `bcd join --reset --yes` and `bcd join` on the machine. It cannot be undone, so it needs --yes. Decided as compute:nodes:delete.",
+      "usage": "better-compute nodes delete NODE --tenant ID [--reason TEXT] [--if-version N] [--yes] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "node",
+          "description": "The node id (node_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--reason",
+          "value": "TEXT",
+          "optional": true,
+          "description": "Why (recorded in the node’s events)"
+        },
+        {
+          "flag": "--if-version",
+          "value": "N",
+          "optional": true,
+          "description": "Only if the node is still at this version (nodes.get’s version)"
+        },
+        {
+          "flag": "--yes",
+          "optional": true,
+          "description": "Confirm: the node is removed for good"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute nodes delete node_01k5w… --reason \"TPM replaced\" --yes"]
+    },
+    {
       "name": "join-tokens create",
       "aliases": [],
       "group": "Nodes",
