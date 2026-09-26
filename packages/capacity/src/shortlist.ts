@@ -259,21 +259,25 @@ export async function shortlistPlan(
   let shortlist: Candidate[];
   let outside: Iterable<Candidate>;
   let sorted: boolean;
+  // `onlyNodes` narrows the candidates before the shortlist is cut, so the allowed nodes are never
+  // crowded out of it by better-scoring ones the request may not use.
+  const only = request.onlyNodes ? new Set(request.onlyNodes) : undefined;
   if (source.ranked) {
     const ordered = source.ranked();
     const skip = new Set(excluded);
+    const allowed = (nodeId: string) => !skip.has(nodeId) && (!only || only.has(nodeId));
     shortlist = [];
     let next = 0;
     for (; next < ordered.length && shortlist.length < size; next++)
-      if (!skip.has(ordered[next]!.nodeId)) shortlist.push(ordered[next]!);
+      if (allowed(ordered[next]!.nodeId)) shortlist.push(ordered[next]!);
     const from = next;
     outside = (function* () {
       for (let at = from; at < ordered.length; at++)
-        if (!skip.has(ordered[at]!.nodeId)) yield ordered[at]!;
+        if (allowed(ordered[at]!.nodeId)) yield ordered[at]!;
     })();
     sorted = true;
   } else {
-    const rows = await source.counts!();
+    const rows = (await source.counts!()).filter((row) => !only || only.has(row.nodeId));
     const scoreOf = partialScorer(request, context.weights, source.imageCached);
     const scored = rows.map((row) => ({ nodeId: row.nodeId, partial: scoreOf(row) }));
     shortlist = topCandidates(scored, size);

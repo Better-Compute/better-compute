@@ -778,6 +778,25 @@ describe('rollups and eligibility SQL', () => {
   });
 });
 
+describe('onlyNodes', () => {
+  it('places only on the named nodes, inline and from the pool index', async () => {
+    await addNode('node_a', { gpus: 2 });
+    await addNode('node_b', { gpus: 2 });
+    await addNode('node_c', { gpus: 2 });
+    expect(await place(request(1, { onlyNodes: ['node_c'] }))).toMatchObject({
+      status: 'placed',
+      allocations: [{ nodeId: 'node_c' }],
+    });
+    const indexed = await db.transaction(async (tx) => {
+      const index = await PoolIndex.load(tx, (await readPool(tx, 'pool_1'))!, T0);
+      return placeFromIndex(tx, index, request(1, { onlyNodes: ['node_b'] }), context());
+    });
+    expect(indexed).toMatchObject({ status: 'placed', allocations: [{ nodeId: 'node_b' }] });
+    // Named nodes that cannot take it: pending, never elsewhere.
+    expect(await place(request(3, { onlyNodes: ['node_a'] }))).toMatchObject({ status: 'pending' });
+  });
+});
+
 describe('archived pools', () => {
   it('take no new placements', async () => {
     await addNode('node_a', { gpus: 1 });

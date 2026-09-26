@@ -185,6 +185,11 @@ export interface PlacementRequest {
   /** Nodes to leave out (a replan after a conflict). */
   excludeNodes?: readonly string[];
   /**
+   * The only nodes the placement may use (e.g. the host an instance's persistent volumes live on);
+   * absent: any node of the pool. `excludeNodes` still applies within them.
+   */
+  onlyNodes?: readonly string[];
+  /**
    * Labels every candidate node must carry, with exactly these values, or with any value where the
    * value is `'*'` (e.g. a runtime a host's bcd advertised in Hello.drivers:
    * `{ 'bc.dev/driver.kata': '*' }`); absent: no label constraint.

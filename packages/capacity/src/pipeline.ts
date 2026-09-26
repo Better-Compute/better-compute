@@ -305,12 +305,17 @@ export function planPlacement(
   const plugins = options.plugins ?? [];
   const weights = { ...defaultScorerWeights, ...options.weights };
   const excluded = new Set(request.excludeNodes ?? []);
+  const only = request.onlyNodes ? new Set(request.onlyNodes) : undefined;
   const ranked: NodePlan[] = [];
   const rejected: Rejection[] = [];
 
   nodeLoop: for (const node of nodes) {
     if (excluded.has(node.id)) {
       rejected.push({ nodeId: node.id, filter: 'excluded', reason: 'excluded by the request' });
+      continue;
+    }
+    if (only && !only.has(node.id)) {
+      rejected.push({ nodeId: node.id, filter: 'excluded', reason: 'not one of the request’s nodes' });
       continue;
     }
     if (node.poolId !== request.poolId) {

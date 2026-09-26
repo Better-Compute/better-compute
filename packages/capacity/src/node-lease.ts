@@ -105,7 +105,8 @@ export async function leaseCandidates(
       [dedicatedTaint(request.tenantId)],
     ],
   );
-  const nodeIds = rows.map((row) => row.id);
+  const only = request.onlyNodes ? new Set(request.onlyNodes) : undefined;
+  const nodeIds = rows.map((row) => row.id).filter((id) => !only || only.has(id));
   const [devices, labels] = [await readDevices(tx, nodeIds), await readNodeLabels(tx, nodeIds)];
   const byNode = new Map<string, Device[]>();
   for (const device of devices)
