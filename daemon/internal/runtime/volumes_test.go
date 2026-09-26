@@ -73,6 +73,42 @@ func TestVolumesAreSparseGrowNeverShrinkAndAreDiscarded(t *testing.T) {
 	}
 }
 
+// Sparse volumes are still promised: a volume or a growth the filesystem could not hold, once every
+// volume is written, is refused.
+func TestVolumesNeverPromiseMoreThanTheFilesystemHolds(t *testing.T) {
+	// 100 GiB, 12 GiB free: the reserve is 5 GiB, so 7 GiB can be promised.
+	v := &Volumes{Dir: t.TempDir(), statfs: func(string) (uint64, uint64, error) { return 100 << 30, 12 << 30, nil }}
+	if _, err := v.Ensure(&agentv1.HostVolume{VolumeId: "vol_a", SizeBytes: 4 << 30, Serial: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	// vol_a is unwritten: its 4 GiB are promised, 3 GiB are left.
+	err := func() error {
+		_, err := v.Ensure(&agentv1.HostVolume{VolumeId: "vol_b", SizeBytes: 4 << 30, Serial: "b"})
+		return err
+	}()
+	if err == nil || !strings.Contains(err.Error(), "3072 MiB can still be promised") {
+		t.Fatalf("a 4 GiB volume beside it: %v", err)
+	}
+	if _, err := v.Ensure(&agentv1.HostVolume{VolumeId: "vol_b", SizeBytes: 3 << 30, Serial: "b"}); err != nil {
+		t.Fatalf("3 GiB refused: %v", err)
+	}
+	// Nothing left: a growth is refused too, and the volume keeps its size.
+	if _, err := v.Ensure(&agentv1.HostVolume{VolumeId: "vol_a", SizeBytes: 5 << 30, Serial: "a"}); err == nil {
+		t.Fatal("a growth beyond the filesystem was accepted")
+	}
+	if got, _ := v.Get("vol_a"); got.SizeBytes != 4<<30 {
+		t.Fatalf("vol_a is %d bytes", got.SizeBytes)
+	}
+	s, err := v.Space()
+	if err != nil || s.Committed != 7<<30 || s.Reserve != 5<<30 || s.Promisable() != 0 {
+		t.Fatalf("space = %+v, %v", s, err)
+	}
+	// Unchanged sizes need nothing more.
+	if _, err := v.Ensure(&agentv1.HostVolume{VolumeId: "vol_a", SizeBytes: 4 << 30, Serial: "a"}); err != nil {
+		t.Fatalf("an unchanged volume: %v", err)
+	}
+}
+
 // A running guest is told its volume grew, by the disk it was started with; a stopped one is not.
 func TestGrownVolumesAreToldToRunningGuests(t *testing.T) {
 	ctx := t.Context()
