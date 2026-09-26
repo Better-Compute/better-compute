@@ -293,6 +293,7 @@ function WidgetGrid({
   const gridRef = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState<string | null>(null);
   const [preview, setPreview] = useState<WidgetInstance[] | null>(null);
+  const [announcement, setAnnouncement] = useState('');
   const [columns, setColumns] = useState(12);
   const shown = preview ?? items;
 
@@ -373,9 +374,13 @@ function WidgetGrid({
       className="grid"
       style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, gridAutoRows: ROW, gap: GAP, gridAutoFlow: 'row dense' }}
     >
+      <span aria-live="polite" className="sr-only">
+        {announcement}
+      </span>
       {resolved.map(({ instance, def }) => (
         <div
           key={instance.key}
+          data-widget-key={instance.key}
           style={{ gridColumn: `span ${span(instance.w)}`, gridRow: `span ${instance.h}` }}
           className={cx('min-w-0 transition-opacity', dragging === instance.key && 'opacity-40')}
           onDragOver={(event) => {
@@ -418,6 +423,44 @@ function WidgetGrid({
                 onDragEnd: () => {
                   setDragging(null);
                   setPreview(null);
+                },
+                // Keyboard arranging: arrows move, Shift+arrows resize, Delete removes.
+                onKeyDown: (event) => {
+                  const index = items.findIndex((i) => i.key === instance.key);
+                  const min = def.minSize ?? { w: 2, h: 2 };
+                  const max = def.maxSize ?? { w: 12, h: 10 };
+                  let next: WidgetInstance[] | null = null;
+                  let said = '';
+                  if (event.shiftKey && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
+                    const w = Math.min(max.w, Math.max(min.w, instance.w + (event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0)));
+                    const h = Math.min(max.h, Math.max(min.h, instance.h + (event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0)));
+                    next = items.map((i) => (i.key === instance.key ? { ...i, w, h } : i));
+                    said = `${def.title} resized to ${w} by ${h}`;
+                  } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+                    if (index > 0) {
+                      next = [...items];
+                      [next[index - 1], next[index]] = [next[index]!, next[index - 1]!];
+                      said = `${def.title} moved to position ${index} of ${items.length}`;
+                    }
+                  } else if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+                    if (index < items.length - 1) {
+                      next = [...items];
+                      [next[index + 1], next[index]] = [next[index]!, next[index + 1]!];
+                      said = `${def.title} moved to position ${index + 2} of ${items.length}`;
+                    }
+                  } else if (event.key === 'Delete' || event.key === 'Backspace') {
+                    next = items.filter((i) => i.key !== instance.key);
+                    said = `${def.title} removed`;
+                  } else return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (!next) return;
+                  onChange(next);
+                  setAnnouncement(said);
+                  // The node moves in the DOM; put focus back on its handle.
+                  requestAnimationFrame(() =>
+                    gridRef.current?.querySelector<HTMLElement>(`[data-widget-key="${CSS.escape(instance.key)}"] [aria-roledescription="movable widget"]`)?.focus(),
+                  );
                 },
               }}
             >

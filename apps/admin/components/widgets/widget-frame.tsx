@@ -87,7 +87,14 @@ export function WidgetFrame({
     >
       <header className="flex h-9 shrink-0 items-center gap-2 border-b border-separator-border pr-1 pl-3">
         {editing && (
-          <span {...dragHandleProps} className="-ml-1.5 cursor-grab text-text-tertiary active:cursor-grabbing" aria-label={`Drag ${title}`}>
+          <span
+            {...dragHandleProps}
+            role="button"
+            tabIndex={0}
+            aria-roledescription="movable widget"
+            aria-label={`${title}, ${size.w} by ${size.h}. Arrow keys move, Shift+arrows resize, Delete removes.`}
+            className="-ml-1.5 cursor-grab text-text-tertiary outline-none focus-visible:text-signal focus-visible:ring-2 focus-visible:ring-border-focus-ring active:cursor-grabbing"
+          >
             <RiDraggable className="size-4" aria-hidden />
           </span>
         )}
