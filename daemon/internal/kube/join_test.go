@@ -384,7 +384,8 @@ func TestJoinUnderHelper(t *testing.T) {
 }
 
 // The spec drops k8s-join: bcd cordons the Node, deletes its workload pods (not DaemonSet or static
-// ones, not finished ones), records the release; the unit's return uncordons it.
+// ones unless they ask for a bcd.dev device, not finished ones) with a capped grace period, records
+// the release; the unit's return uncordons it.
 func TestReleaseCordonsAndDrains(t *testing.T) {
 	c := newFakeCluster(t)
 	var tokens []string
@@ -398,6 +399,7 @@ func TestReleaseCordonsAndDrains(t *testing.T) {
 			return []byte(`{"items":[
 				{"metadata":{"name":"train","namespace":"ml"},"status":{"phase":"Running"}},
 				{"metadata":{"name":"bcd-x","namespace":"bcd-system","ownerReferences":[{"kind":"DaemonSet"}]},"status":{"phase":"Running"}},
+				{"metadata":{"name":"miner","namespace":"ds","ownerReferences":[{"kind":"DaemonSet"}]},"spec":{"containers":[{"resources":{"limits":{"bcd.dev/gpu":"1"}}}]},"status":{"phase":"Running"}},
 				{"metadata":{"name":"etcd","namespace":"kube-system","annotations":{"kubernetes.io/config.mirror":"x"}},"status":{"phase":"Running"}},
 				{"metadata":{"name":"done","namespace":"ml"},"status":{"phase":"Succeeded"}},
 				{"metadata":{"name":"infer","namespace":"ai"},"status":{"phase":"Pending"}}]}`), nil
@@ -421,8 +423,9 @@ func TestReleaseCordonsAndDrains(t *testing.T) {
 	want := []string{
 		"cordon gpu-node-7",
 		"get pods --all-namespaces --field-selector spec.nodeName=gpu-node-7 -o json",
-		"delete pod --namespace ai infer --wait=false --ignore-not-found",
-		"delete pod --namespace ml train --wait=false --ignore-not-found",
+		"delete pod --namespace ai infer --wait=false --ignore-not-found --grace-period=30",
+		"delete pod --namespace ds miner --wait=false --ignore-not-found --grace-period=30",
+		"delete pod --namespace ml train --wait=false --ignore-not-found --grace-period=30",
 	}
 	if strings.Join(ran, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("ran:\n%s", strings.Join(ran, "\n"))

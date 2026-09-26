@@ -83,15 +83,16 @@ func (d *devicesConverger) updateReleasing(change func(map[string]releasing)) er
 	return d.saveReleasing(m)
 }
 
-// inUse reports whether a pod still holds a device of the allocation (tests replace it).
-func (d *devicesConverger) inUse(ctx context.Context, allocationID string) bool {
+// inUse reports whether a pod may still hold a device of the allocation (tests replace it); kube
+// also checks the host's pod processes for its whole GPUs.
+func (d *devicesConverger) inUse(ctx context.Context, allocationID string, deviceIDs []string) bool {
 	if d.inUseHook != nil {
 		return d.inUseHook(ctx, allocationID)
 	}
 	if d.a.kube == nil {
 		return false
 	}
-	return d.a.kube.InUse(ctx, allocationID)
+	return d.a.kube.InUseDevices(ctx, allocationID, deviceIDs)
 }
 
 // releaseActions reports the pending releases no pod holds any more; wanted ones (bound again) are
@@ -117,7 +118,7 @@ func (d *devicesConverger) releaseActions(wanted map[string]bool) []converge.Act
 		actions = append(actions, converge.Action{
 			Description: "report the release of " + id + " once no pod holds it",
 			Apply: func(ctx context.Context) error {
-				if d.inUse(ctx, id) {
+				if d.inUse(ctx, id, r.DeviceIDs) {
 					if since := time.Since(r.Since); since > releaseStuckAfter {
 						d.a.log.Warn("a released Kubernetes allocation is still in use", "allocation", id, "since", since.Round(time.Second).String())
 					}

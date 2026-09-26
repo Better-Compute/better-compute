@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -162,6 +163,42 @@ func TestDRADriver(t *testing.T) {
 	if got := prepare(procPrepareV1, Claim{Namespace: "ml", Name: "c6", UID: "u6"}); got["u6"].Error != "" {
 		t.Fatalf("u6 after u1 let go = %+v", got["u6"])
 	}
+	unprepare := func(uid string) {
+		t.Helper()
+		if _, err := draClient[ClaimsRequest, UnprepareResponse](info.Msg.Endpoint, procUnprepareV1).CallUnary(ctx, connect.NewRequest(&ClaimsRequest{Claims: []Claim{{UID: uid}}})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The record outlives bcd (security review 2 #2, #6): a restarted Manager still has gpu-1
+	// prepared for u6, so a1 stays in use whatever pod-resources says.
+	restarted := &Manager{Sys: sys, Dir: dir, PodResources: m.PodResources, RegistryDir: m.RegistryDir, DRAPluginDir: m.DRAPluginDir}
+	restarted.init()
+	if !restarted.dra.preparedWithSuffix(draDeviceName("", "a1")) || !restarted.InUse(ctx, "a1") {
+		t.Fatal("the prepared record did not survive a restart")
+	}
+	// One claim per device, checked and recorded under one lock: of two concurrent prepares, one wins.
+	unprepare("u6")
+	var wg sync.WaitGroup
+	var won atomic.Int32
+	for _, c := range []Claim{{Namespace: "ml", Name: "c1", UID: "u1"}, {Namespace: "ml", Name: "c6", UID: "u6"}} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := draClient[ClaimsRequest, PrepareResponse](info.Msg.Endpoint, procPrepareV1).CallUnary(ctx, connect.NewRequest(&ClaimsRequest{Claims: []Claim{c}}))
+			if err == nil && resp.Msg.Claims[c.UID].Error == "" {
+				won.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if won.Load() != 1 {
+		t.Fatalf("%d concurrent claims prepared gpu-1", won.Load())
+	}
+	unprepare("u1")
+	unprepare("u6")
+	if got := prepare(procPrepareV1, Claim{Namespace: "ml", Name: "c6", UID: "u6"}); got["u6"].Error != "" {
+		t.Fatalf("u6 again = %+v", got["u6"])
+	}
 
 	// A pod holds gpu-1 through its claim when compute releases it.
 	var reaped []string
@@ -197,6 +234,21 @@ func TestDRADriver(t *testing.T) {
 	kubelet.mu.Lock()
 	kubelet.podList = nil
 	kubelet.mu.Unlock()
+	// No pod lists gpu-1 now, but u6 is still prepared: a1 is in use until the kubelet unprepares it.
+	if !m.InUse(ctx, "a1") {
+		t.Fatal("a device still prepared for a claim counted as free")
+	}
+	unprepare("u6")
+	if m.InUse(ctx, "a1") {
+		t.Fatal("a1 in use after its claim was unprepared")
+	}
+	// An unreadable record fails closed.
+	if err := os.WriteFile(filepath.Join(dir, "dra", "prepared.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if again := (&Manager{Sys: sys, Dir: dir, PodResources: m.PodResources, DRAPluginDir: m.DRAPluginDir}); !again.InUse(ctx, "a1") {
+		t.Fatal("an unreadable prepared record counted as nothing prepared")
+	}
 
 	// Back to the device plugins: the DRA sockets go.
 	sys.Set(StateFile, `{"server":"https://10.0.0.1:6443","nodeName":"n1","gpu":true}`)

@@ -64,6 +64,9 @@ type Manager struct {
 	// RegistryDir is the kubelet's plugins_registry and DRAPluginDir the DRA driver's own directory
 	// (defaults under /var/lib/kubelet).
 	RegistryDir, DRAPluginDir string
+	// ProcRoot is the host's /proc (default): InUse's process backstop reads the GPUs' device minors
+	// and the pods' open files there. As a DaemonSet that needs hostPID.
+	ProcRoot string
 
 	trigger chan struct{}
 	dra     *draDriver
@@ -255,6 +258,18 @@ func (m *Manager) Sync(ctx context.Context) {
 		if state, ok, err := ReadState(m.Sys); err == nil && ok && state.Released {
 			conditions = append(conditions, Condition{Type: ConditionKubernetesReleased, Reason: "Released",
 				Message: "compute released this machine from " + state.Server + ": Node " + state.NodeName + " is cordoned and drained"})
+		}
+		// The reaper keeps running (security review 2 #1): a node that stopped offering GPUs (released,
+		// gpu off, its kubelet restarting) still evicts the pods holding devices compute does not bind
+		// here, DaemonSet pods included. Released or gpu off, no bcd.dev device is bound at all.
+		if m.worker() {
+			if holds, err := ReadHolds(m.Sys); err == nil {
+				var want map[string]map[string]atom
+				if m.offersGPUs() {
+					want = m.atoms(holds)
+				}
+				conditions = append(conditions, m.reap(ctx, want, false)...)
+			}
 		}
 		return
 	}

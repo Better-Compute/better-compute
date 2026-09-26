@@ -69,8 +69,12 @@ type draDriver struct {
 	apiVersion  string
 	// live: a slice with devices is out there (deleted once none are left).
 	live bool
-	// prepared maps a prepared device (its DRA name) to the claim UID it was prepared for.
-	prepared map[string]string
+	// prepared maps a prepared device (its DRA name) to the claim UID it was prepared for, kept in
+	// <DRAPluginDir>/prepared.json across bcd restarts (preparedLocked); nil until read. A device
+	// stays prepared, and in use, until the kubelet unprepares its claim. unreadable: the file could
+	// not be read, so every device counts as prepared (InUse fails closed) until it is written again.
+	prepared   map[string]string
+	unreadable bool
 }
 
 // lastPublished reports whether the node's slice offers devices now.
@@ -182,8 +186,11 @@ func (d *draDriver) serviceHandler() http.Handler {
 		// Nothing to undo on the host (the CDI specs are the holds'): only the device→claim record.
 		out := &UnprepareResponse{Claims: map[string]string{}}
 		for _, c := range req.Msg.Claims {
-			d.unprepared(c.UID)
 			out.Claims[c.UID] = ""
+			if err := d.unprepared(c.UID); err != nil {
+				// The kubelet retries a failed unprepare; meanwhile the devices stay in use.
+				out.Claims[c.UID] = "record the unprepared claim: " + err.Error()
+			}
 		}
 		return connect.NewResponse(out), nil
 	}
@@ -272,9 +279,6 @@ func (d *draDriver) prepareClaim(ctx context.Context, c Claim, node string, devi
 		if r.AdminAccess != nil && *r.AdminAccess {
 			return ClaimResult{Error: fmt.Sprintf("device %s/%s: admin access to gpu.bcd.dev devices is refused", r.Pool, r.Device)}
 		}
-		if other := d.preparedFor(r.Device); other != "" && other != c.UID {
-			return ClaimResult{Error: fmt.Sprintf("device %s/%s is prepared for claim %s", r.Pool, r.Device, other)}
-		}
 		p := byDevice[r.Device]
 		if p == nil {
 			p = &PreparedDevice{PoolName: r.Pool, DeviceName: r.Device, CDIDeviceIDs: append([]string(nil), a.cdi...)}
@@ -283,36 +287,107 @@ func (d *draDriver) prepareClaim(ctx context.Context, c Claim, node string, devi
 		}
 		p.RequestNames = append(p.RequestNames, r.Request)
 	}
-	res := ClaimResult{}
+	// One claim per device: checked and recorded under one lock, so two concurrent prepares cannot
+	// both take a device (review 2 #6), and on disk before the kubelet hears of it.
 	d.mu.Lock()
-	if d.prepared == nil {
-		d.prepared = map[string]string{}
+	defer d.mu.Unlock()
+	prepared := d.preparedLocked()
+	for _, name := range order {
+		if other := prepared[name]; other != "" && other != c.UID {
+			return ClaimResult{Error: fmt.Sprintf("device %s/%s is prepared for claim %s", node, name, other)}
+		}
 	}
+	next := make(map[string]string, len(prepared)+len(order))
+	for k, v := range prepared {
+		next[k] = v
+	}
+	res := ClaimResult{}
 	for _, name := range order {
 		res.Devices = append(res.Devices, *byDevice[name])
-		d.prepared[name] = c.UID
+		next[name] = c.UID
 	}
-	d.mu.Unlock()
+	if err := d.savePreparedLocked(next); err != nil {
+		return ClaimResult{Error: fmt.Sprintf("record the prepared devices: %v", err)}
+	}
 	return res
 }
 
-// preparedFor returns the claim a device is prepared for ("" when none). The record lives in memory:
-// after a bcd restart the kubelet's own checkpoint still keeps a device to one claim.
-func (d *draDriver) preparedFor(device string) string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.prepared[device]
+func (d *draDriver) preparedPath() string { return filepath.Join(d.m.DRAPluginDir, "prepared.json") }
+
+// preparedLocked returns the device → claim record, reading it from disk the first time (d.mu held).
+func (d *draDriver) preparedLocked() map[string]string {
+	if d.prepared != nil {
+		return d.prepared
+	}
+	d.prepared = map[string]string{}
+	raw, err := os.ReadFile(d.preparedPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return d.prepared
+	}
+	if err == nil {
+		err = json.Unmarshal(raw, &d.prepared)
+	}
+	if err != nil {
+		d.prepared = map[string]string{}
+		d.unreadable = true
+		d.m.Log.Warn("the DRA prepared-devices record is unreadable: every gpu.bcd.dev device counts as in use until the kubelet prepares or unprepares a claim", "path", d.preparedPath(), "error", err.Error())
+	}
+	return d.prepared
+}
+
+// savePreparedLocked writes the record (d.mu held) and, once written, uses it.
+func (d *draDriver) savePreparedLocked(next map[string]string) error {
+	if err := os.MkdirAll(d.m.DRAPluginDir, 0o750); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(next)
+	if err != nil {
+		return err
+	}
+	tmp := d.preparedPath() + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, d.preparedPath()); err != nil {
+		return err
+	}
+	d.prepared, d.unreadable = next, false
+	return nil
 }
 
 // unprepared forgets a claim's devices.
-func (d *draDriver) unprepared(uid string) {
+func (d *draDriver) unprepared(uid string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for device, claim := range d.prepared {
-		if claim == uid {
-			delete(d.prepared, device)
+	prepared := d.preparedLocked()
+	next := map[string]string{}
+	for device, claim := range prepared {
+		if claim != uid {
+			next[device] = claim
 		}
 	}
+	if len(next) == len(prepared) && !d.unreadable {
+		return nil
+	}
+	return d.savePreparedLocked(next)
+}
+
+// preparedWithSuffix reports whether a device whose DRA name ends in suffix (an allocation's tag) is
+// prepared for a claim: a pod may hold it until the kubelet unprepares the claim. An unreadable
+// record answers true.
+func (d *draDriver) preparedWithSuffix(suffix string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	prepared := d.preparedLocked()
+	if d.unreadable {
+		return true
+	}
+	for device := range prepared {
+		if strings.HasSuffix(device, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // byDeviceName indexes the advertised devices (every resource) by their DRA device name.
