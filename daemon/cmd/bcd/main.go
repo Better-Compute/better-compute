@@ -63,7 +63,7 @@ func commands() []command {
 		fs.String("config", config.DefaultPath, "configuration file written by the install script")
 	}
 	noFlags := func(*flag.FlagSet) {}
-	return []command{
+	return append([]command{
 		{name: "node", summary: "run the node agent: session, journal, inventory, convergence, commands", flags: withConfig, run: runNode},
 		{name: "site", summary: "run the site agent: proxy DHCP, iPXE, image cache, BMC", flags: withConfig, run: runSite},
 		{name: "ramdisk", summary: "run inside the PXE ramdisk: inspect, diag, wipe, image stream, kexec", flags: ramdiskFlags, run: runRamdisk},
@@ -74,8 +74,11 @@ func commands() []command {
 		{name: "helper", summary: "run as root beside an unprivileged bcd node: typed privileged operations on [helper] socket", flags: withConfig, run: runHelper},
 		{name: "update", summary: "show self-update state; --clear-failed lets failed versions be tried again", flags: updateFlags, run: runUpdate},
 		{name: "version", summary: "print the version", flags: noFlags, run: runVersion},
-	}
+	}, extraCommands...)
 }
+
+// extraCommands are test builds' own commands (helper-call under the helpere2e tag); none in a release.
+var extraCommands []command
 
 func joinFlags(fs *flag.FlagSet) {
 	fs.String("config", config.DefaultPath, "configuration file written by the install script")
