@@ -757,6 +757,9 @@ export function reservationAttributes(
     binding: spec.binding ?? 'hold',
     spot: spec.spot ?? false,
     renewable: spec.leaseSeconds !== undefined,
+    // (§3.8) The host CPU and memory it books, over every node of a gang, for policies to bound.
+    vcpu: (spec.resources?.vcpu ?? 0) * (spec.gang?.size ?? 1),
+    memoryGiB: (spec.resources?.memoryGiB ?? 0) * (spec.gang?.size ?? 1),
   };
   if (spec.projectId !== undefined) attributes.projectId = spec.projectId;
   return attributes;
@@ -862,10 +865,18 @@ export async function prepareCreate(
     fail(`Pool ${pool.id} does not join a Kubernetes cluster (policy.kubernetes)`);
   const id =
     existing?.id ?? (await draftId('rsv', input.tenantId, caller.identityId, input.idempotencyKey));
-  const spec = reservationSpec(input);
-  if (!existing && input.binding !== 'node' && input.resources === undefined) {
-    const share = await perGpuShare(tx, pool, wholeGpus(input.devices));
-    if (Object.keys(share).length > 0) spec.resources = share;
+  // A retried draft keeps what it resolved the first time (its share may have moved since).
+  let spec: ReservationSpec;
+  if (existing) spec = existing.request;
+  else {
+    spec = reservationSpec(input);
+    if (input.binding !== 'node') {
+      const share = await perGpuShare(tx, pool, wholeGpus(input.devices));
+      const resources = hostResources(input.resources, share);
+      if (Object.keys(resources).length > 0) spec.resources = resources;
+      else delete spec.resources;
+      if (Object.keys(share).length > 0) spec.hostShare = share;
+    }
   }
   if (!existing)
     await tx.query(
@@ -1037,15 +1048,39 @@ function placementRequest(row: ReservationRow, during: TimeRange) {
 }
 
 /**
- * What a reservation charges to quota: its devices. The host CPU and memory it books with them
- * (§3.8) ride on the GPUs and are bounded by the hosts, not by quota rows (an offer names device
- * classes; a missing row would grant 0).
+ * What a reservation charges to quota: its devices, plus the host resources it books above the
+ * share its GPUs carry (`hostShare`, §3.8). The share needs no quota row (an offer names device
+ * classes); anything more is charged as `vcpu`/`memoryGiB` (hugepages as memory), and a missing row
+ * grants 0, so a tenant can't take a host's CPUs and memory with one GPU's quota. A reservation
+ * made before `hostShare` existed charges its devices only.
  */
-function reservationDemand(request: ReservationSpec): Record<string, number> {
+export function reservationDemand(request: ReservationSpec): Record<string, number> {
+  const excess: Record<string, number> = {};
+  if (request.hostShare)
+    for (const [name, amount] of Object.entries(request.resources ?? {})) {
+      const over = amount - (request.hostShare[name] ?? 0);
+      if (over > 0) excess[name] = over;
+    }
   return quotaDemand({
     devices: request.devices,
+    resources: excess,
     ...(request.gang !== undefined ? { gang: request.gang } : {}),
   });
+}
+
+/**
+ * The host resources a reservation books (§3.8): what it asked for, never below its GPUs' share, so
+ * `resources: {}` cannot book GPUs whose workloads then run without limits.
+ */
+export function hostResources(
+  requested: Readonly<ReservationResources> | undefined,
+  share: Readonly<ReservationResources>,
+): ReservationResources {
+  const resources: ReservationResources = { ...requested };
+  for (const [name, amount] of Object.entries(share))
+    resources[name] = Math.max(resources[name] ?? 0, amount);
+  for (const [name, amount] of Object.entries(resources)) if (!(amount > 0)) delete resources[name];
+  return resources;
 }
 
 function requestedDuration(row: ReservationRow): number {

@@ -2710,23 +2710,51 @@ describe('host CPU and memory booked with the GPUs (§3.8)', () => {
     };
   }
 
-  it('books explicit resources on the chosen host, keeps quota to devices, and frees them on release', async () => {
+  const offerQuota = (quota: Record<string, number>) =>
+    call(
+      'pools',
+      'offer',
+      { tenantId: 'root', poolId, toTenantId: 'acme', quota },
+      { who: { ...caller, tenantId: 'root', identityId: 'usr_root' } },
+    );
+  const used = async () =>
+    Object.fromEntries((await readQuotas(db, 'acme', poolId)).map((row) => [row.resource, row.used]));
+
+  it('books what was asked on the chosen host, charges only the excess over the GPUs’ share, and frees it on release', async () => {
+    // 4 GPUs per host: the share is 16 CPUs and 128 GiB per GPU.
     await hostRows({ [NA]: { vcpu: 64, memoryGiB: 512 }, [NB]: { vcpu: 64, memoryGiB: 512 } });
+    await offerQuota({ gpu: 8, vcpu: 16 });
     const created = (await call(
       'reservations',
       'create',
-      create({ resources: { vcpu: 24, memoryGiB: 200 } }),
+      create({ resources: { vcpu: 40, memoryGiB: 100 } }),
     )) as Rsv;
     expect(created.state).toBe('placed');
     const [allocation] = await booked(created.id);
-    expect(allocation!.resources).toEqual({ vcpu: 24, memoryGiB: 200 });
-    expect(await allocated(allocation!.nodeId)).toEqual({ memoryGiB: 200, vcpu: 24 });
-    // Quota counts the GPUs only: the offer names `gpu`, and a missing row would grant 0.
-    expect(await readQuotas(db, 'acme', poolId)).toEqual([
-      expect.objectContaining({ resource: 'gpu', used: 2 }),
-    ]);
+    // Memory is floored at the share (2 × 128 GiB); CPUs are what was asked.
+    expect(allocation!.resources).toEqual({ vcpu: 40, memoryGiB: 256 });
+    expect(await allocated(allocation!.nodeId)).toEqual({ memoryGiB: 256, vcpu: 40 });
+    // The GPUs, plus the 8 CPUs above the 32 their share carries.
+    expect(await used()).toEqual({ gpu: 2, vcpu: 8 });
+    expect(recorded.authz.at(-1)?.attributes).toMatchObject({ vcpu: 40, memoryGiB: 256 });
     await call('reservations', 'release', { tenantId: 'acme', reservationId: created.id });
     expect(await allocated(allocation!.nodeId)).toEqual({ memoryGiB: 0, vcpu: 0 });
+    expect(await used()).toEqual({ gpu: 0, vcpu: 0 });
+  });
+
+  it('floors resources at the share, and refuses excess beyond quota', async () => {
+    await hostRows({ [NA]: { vcpu: 64, memoryGiB: 512 }, [NB]: { vcpu: 64, memoryGiB: 512 } });
+    // `resources: {}` still books (and limits) the share: never GPUs without host limits.
+    const empty = (await call(
+      'reservations',
+      'create',
+      create({ resources: {}, idempotencyKey: 'empty' }),
+    )) as Rsv;
+    expect((await booked(empty.id))[0]!.resources).toEqual({ vcpu: 32, memoryGiB: 256 });
+    // One GPU's quota never takes a host's CPUs: excess needs `vcpu` quota, and the offer has none.
+    await expect(
+      call('reservations', 'create', create({ resources: { vcpu: 64 }, idempotencyKey: 'greedy' })),
+    ).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED', details: { resource: 'vcpu' } });
   });
 
   it('defaults to the smallest per-GPU share among the pool’s hosts', async () => {
@@ -2771,6 +2799,7 @@ describe('host CPU and memory booked with the GPUs (§3.8)', () => {
 
   it('leaves a request that fits no host pending', async () => {
     await hostRows({ [NA]: { vcpu: 64, memoryGiB: 512 }, [NB]: { vcpu: 64, memoryGiB: 512 } });
+    await offerQuota({ gpu: 8, vcpu: 100 });
     const created = (await call(
       'reservations',
       'create',
@@ -2805,11 +2834,18 @@ describe('host CPU and memory booked with the GPUs (§3.8)', () => {
       [NA, JSON.stringify(sections)],
     );
     await db.query(`INSERT INTO node_inventory (node_id, applied_snapshot_id) VALUES ($1, 'inv_limits')`, [NA]);
+    // The share is 8 CPUs and 64 GiB per GPU; the hugepages above it are charged as memory.
+    await db.query(
+      `UPDATE pools SET policy = '{"perGpu":{"vcpu":8,"memoryGiB":64}}'::jsonb WHERE id = $1`,
+      [poolId],
+    );
+    await offerQuota({ gpu: 8, memoryGiB: 4 });
     const created = (await call(
       'reservations',
       'create',
       create({ resources: { vcpu: 16, memoryGiB: 128, hugepages1Gi: 4 } }),
     )) as Rsv;
+    expect(await used()).toEqual({ gpu: 2, memoryGiB: 4 });
     await reconcile(created.id); // → binding
     const [assignment] = await deviceAssignments(db, NA);
     const nodes = new Set(assignment!.deviceIds.map((id) => (Number(id.slice(-1)) < 2 ? 0 : 1)));

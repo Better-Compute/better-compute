@@ -154,13 +154,20 @@ describe('Kubernetes-bound reservations (§3.8)', () => {
     const sizedAssignment = (specs.rows[0]!.spec.devices?.assignments ?? []).find(
       (a: { allocationId: string }) => a.allocationId === s.allocationId,
     );
+    // What was booked: the request, floored at the GPU's share of the host (a21c1c1 + review M7).
+    const booked = (
+      (await api.reservations.get(dev.root, {
+        tenantId: dev.rootTenantId,
+        reservationId: sized.id,
+      })) as { request: { resources: { vcpu: number; memoryGiB: number } } }
+    ).request.resources;
+    expect(booked.vcpu).toBeGreaterThanOrEqual(4);
+    expect(booked.memoryGiB).toBeGreaterThanOrEqual(32);
     expect(sizedAssignment).toMatchObject({
       binding: 'BINDING_KUBERNETES',
       limits: {
-        cpuMillis: 4000,
-        memoryBytes: String(32 * 2 ** 30),
-        cpus: expect.any(String),
-        mems: expect.any(String),
+        cpuMillis: booked.vcpu * 1000,
+        memoryBytes: String(booked.memoryGiB * 2 ** 30),
       },
     });
     expect(s.spec.annotations['bcd.dev/binding']).toBe('kubernetes');

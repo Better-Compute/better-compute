@@ -384,8 +384,14 @@ export interface NodeBindingSpec {
   profileId: string;
   profileVersion?: number;
 }
-/** What a reservation stores of its request (the admission-only fields removed). */
-export type ReservationSpec = Omit<ReservationRequest, 'tenantId' | 'idempotencyKey' | 'wait'>;
+/**
+ * What a reservation stores of its request (the admission-only fields removed), plus `hostShare`:
+ * the host CPU and memory its GPUs carry without quota (the pool's per-GPU share at creation, §3.8);
+ * `resources` above it are charged to quota.
+ */
+export type ReservationSpec = Omit<ReservationRequest, 'tenantId' | 'idempotencyKey' | 'wait'> & {
+  hostShare?: ReservationResources;
+};
 
 export type OperationState = 'pending' | 'running' | 'succeeded' | 'failed';
 /** The async operation behind a long call (§9.1); `wait` blocks until it is terminal. */

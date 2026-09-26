@@ -63,6 +63,7 @@ import {
   listReservations,
   parseCreateReservation,
   parseExtendReservation,
+  hostResources,
   perGpuShare,
   placeQueued,
   placerWork,
@@ -1100,7 +1101,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
         const resources =
           input.binding === 'node'
             ? undefined
-            : (input.resources ?? (await perGpuShare(tx, pool, wholeGpus(input.devices))));
+            : hostResources(input.resources, await perGpuShare(tx, pool, wholeGpus(input.devices)));
         const request = {
           tenantId: input.tenantId,
           poolId: input.poolId,
