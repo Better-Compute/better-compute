@@ -242,9 +242,19 @@ describe('FakeHypervisor: paused instances, restores and snapshots (v0.5 sandbox
     expect(hypervisor.statuses()).toMatchObject([
       { instanceId: 'inst_w', state: InstanceObservedState.PAUSED },
     ]);
-    // Memory stays resident: a second 2-vCPU instance does not fit next to it.
+    // Memory stays resident: a second 2-vCPU instance does not fit next to it. As bcd's host admission, that is
+    // not a failure: it stays stopped with the reason, and the section retries.
     const other = spec('inst_x', { nics: [] });
-    expect(hypervisor.converge(section(paused, other)).state).toBe(SectionState.FAILED);
+    expect(hypervisor.converge(section(paused, other))).toMatchObject({
+      state: SectionState.PROGRESSING,
+      reason: 'Retrying',
+      message: 'ResourcesExhausted: this host cannot start inst_x now',
+    });
+    expect(hypervisor.domains.get('inst_x')).toMatchObject({
+      state: 'stopped',
+      boots: 0,
+      message: expect.stringMatching(/^ResourcesExhausted: /),
+    });
     // Resumed in place: running, still one boot.
     hypervisor.converge(section(spec('inst_w')));
     expect(hypervisor.domains.get('inst_w')).toMatchObject({ state: 'running', boots: 1 });

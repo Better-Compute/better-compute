@@ -171,6 +171,7 @@ export {
 export { FakeImds, type FakeImdsOptions, type ImdsMint } from './daemon/imds.js';
 export {
   FakeHypervisor,
+  RESOURCES_EXHAUSTED,
   overlayPath,
   seedPath,
   tapName,

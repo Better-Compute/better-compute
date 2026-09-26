@@ -172,6 +172,11 @@ const STATE: Record<FakeDomainState, InstanceObservedState> = {
   paused: InstanceObservedState.PAUSED,
 };
 const INSTANCE_DIR = '/var/lib/bcd/instances/';
+/**
+ * What bcd's host admission puts before an instance's status message when it refused its start
+ * (`agent.ResourcesExhausted`): the instance stays stopped and the section retries.
+ */
+export const RESOURCES_EXHAUSTED = 'ResourcesExhausted';
 const IMAGE_FORMATS = new Set(['raw', 'qcow2', 'iso']);
 
 /** Where an instance's overlay disk lives. */
@@ -255,6 +260,8 @@ export class FakeHypervisor {
     this.specErrors.clear();
     let progressing = false;
     const failures: string[] = [];
+    /** Starts host admission refused this pass (`ResourcesExhausted`). */
+    const exhausted: string[] = [];
     // (v1.1) Host volumes: created or grown when the store has room (bcd refuses otherwise, and the
     // volume keeps its size); never shrunk.
     const listed = new Map((section?.volumes ?? []).map((volume) => [volume.volumeId, volume]));
@@ -391,7 +398,9 @@ export class FakeHypervisor {
         // A paused domain resumes (or stays paused) in place; anything else boots first.
         if (domain.state !== 'running' && domain.state !== 'paused') {
           if (!this.fits(domain)) {
-            fail(spec, 'not enough free vCPU or memory on this host');
+            // bcd's host admission: not an error; it stays stopped with the reason, and the next pass tries again.
+            domain.message = `${RESOURCES_EXHAUSTED}: not enough free vCPU or memory on this host`;
+            exhausted.push(id);
             continue;
           }
           // cloud-hypervisor's taps are root's (ch.taps), made when the VMM starts.
@@ -427,6 +436,13 @@ export class FakeHypervisor {
       return { state: SectionState.PROGRESSING, reason: 'FetchingUserData', message: 'waiting for user data', statuses };
     if (failures.length)
       return { state: SectionState.FAILED, reason: 'InstanceFailed', message: failures.join('; ').slice(0, 1024), statuses };
+    if (exhausted.length)
+      return {
+        state: SectionState.PROGRESSING,
+        reason: 'Retrying',
+        message: `${RESOURCES_EXHAUSTED}: this host cannot start ${exhausted.sort().join(', ')} now`.slice(0, 1024),
+        statuses,
+      };
     return { state: SectionState.CONVERGED, statuses };
   }
 
