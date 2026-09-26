@@ -1,0 +1,253 @@
+[
+  {
+    "name": "nvidia-driver",
+    "summary": "The NVIDIA driver branch (and the open kernel modules or not)",
+    "description": "Installs the driver branch (Ubuntu's server packages, NVIDIA's CUDA repository, DNF module streams, SUSE's G06 packages) and loads it. A different driver already loaded is swapped only while no process holds the GPUs; otherwise the unit reports `RebootRequired`. It keeps `nvidia-persistenced` running where it is installed.",
+    "settings": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": "string",
+          "pattern": "^[0-9]{3}$",
+          "x-bc": {
+            "kind": "string"
+          }
+        },
+        "open": {
+          "type": "boolean",
+          "x-bc": {
+            "kind": "boolean"
+          }
+        }
+      },
+      "required": ["branch"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "container-toolkit",
+    "summary": "The NVIDIA container toolkit, generating CDI specs",
+    "description": "Installs the NVIDIA container toolkit, configures containerd and Docker with its runtime (with `cdi`, CDI enabled), and regenerates `/etc/cdi/nvidia.yaml` whenever the driver or the GPU and MIG device list changes.",
+    "settings": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "cdi": {
+          "type": "boolean",
+          "default": true,
+          "x-bc": {
+            "kind": "boolean"
+          }
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "mig-layout",
+    "summary": "A MIG layout: a named profile per GPU, or the pool's layout",
+    "description": "Partitions every MIG-capable GPU to the layout: `all-disabled`, `all-<profile>` (as many as fit, e.g. `all-1g.10gb`) or `mixed:<n>x<profile>+<profile>…` (per GPU, e.g. `mixed:3g.40gb+2x2g.20gb`), with a compute instance in each GPU instance. A GPU holding allocations is left as it is until they end. A MIG mode change that needs a GPU reset, which fails, reports `RebootRequired`.",
+    "settings": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string",
+          "enum": ["pool", "profile"],
+          "default": "profile",
+          "x-bc": {
+            "kind": "option"
+          }
+        },
+        "layout": {
+          "type": "string",
+          "maxLength": 64,
+          "x-bc": {
+            "kind": "string"
+          }
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "fabric-manager",
+    "summary": "NVIDIA Fabric Manager for NVSwitch systems",
+    "description": "On NVSwitch systems only (nothing to do elsewhere): installs and runs NVIDIA Fabric Manager; node condition `FabricManagerDown`, which makes the node NoSchedule, while it is not running.",
+    "settings": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "sysctl",
+    "summary": "Kernel parameters",
+    "description": "Free-form: each key a sysctl name with a scalar value, written to `/etc/sysctl.d/90-bcd.conf` and set live. A key the kernel does not have yet (its module is not loaded) is retried. Keys that would run programs as root or lower the host's defenses are refused (`kernel.core_pattern`, `kernel.modprobe`, `kernel.usermodehelper.*`, `fs.binfmt_misc.*`, `kernel.randomize_va_space`, `kernel.yama.*`, `user.*` and the like).",
+    "settings": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "hugepages",
+    "summary": "Huge pages: 2 MiB pages allocated at runtime, 1 GiB pages through the kernel command line (effective after a reboot), and the transparent huge page policy",
+    "description": "2 MiB pages are allocated at runtime; 1 GiB pages at runtime when the kernel finds the memory, else through the boot loader (`hugepagesz=1G hugepages=N`) with `RebootRequired`. With `perNuma` the counts are per NUMA node. 1 GiB pages are mounted at `/dev/hugepages1G` (a systemd mount unit), 2 MiB pages at systemd's `/dev/hugepages`.",
+    "settings": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "pages2m": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4194304,
+          "x-bc": {
+            "kind": "int"
+          }
+        },
+        "pages1g": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16384,
+          "x-bc": {
+            "kind": "int"
+          }
+        },
+        "transparent": {
+          "type": "string",
+          "enum": ["always", "madvise", "never"],
+          "x-bc": {
+            "kind": "option"
+          }
+        },
+        "perNuma": {
+          "type": "boolean",
+          "x-bc": {
+            "kind": "boolean"
+          }
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "gpu-sharing",
+    "summary": "How a shared pool's GPUs are split between clients: MPS (bcd-mps.service, 100/replicas % of the SMs each) or time-slicing (MPS stopped)",
+    "description": "`mps` runs the MPS control daemon (`bcd-mps.service`, each client limited to 100/`replicas` percent of the SMs, node condition `MPSDown` while it is down); `timeslice` stops it.",
+    "settings": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["mps", "timeslice"],
+          "x-bc": {
+            "kind": "option"
+          }
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 48,
+          "x-bc": {
+            "kind": "int"
+          }
+        }
+      },
+      "required": ["mode"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "cpu",
+    "summary": "Host CPUs: the cpufreq governor (live), and CPUs isolated from the kernel scheduler for pinned VMs and holds (isolcpus/nohz_full/rcu_nocbs, effective after a reboot)",
+    "description": "Sets the frequency governor on every CPU that has one, and isolates CPUs from the scheduler for pinned vCPUs (`isolcpus`, `nohz_full`, `rcu_nocbs` through the boot loader, `RebootRequired` until the kernel shows them isolated). CPU 0 is never isolated.",
+    "settings": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "iommu",
+    "summary": "The IOMMU for GPU passthrough to VMs and sandboxes: intel_iommu=on or amd_iommu=on (by CPU vendor) and iommu=pt on the kernel command line, effective after a reboot",
+    "description": "Turns the IOMMU on for GPUs passed through to VMs and sandboxes (`intel_iommu=on` or `amd_iommu=on`, and `iommu=pt` unless `passthrough` is false) through the boot loader, with `RebootRequired` until an IOMMU is active.",
+    "settings": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "passthrough": {
+          "type": "boolean",
+          "default": true,
+          "x-bc": {
+            "kind": "boolean"
+          }
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "gpu-settings",
+    "summary": "Per-GPU settings kept by bcd: the power cap (nvidia-smi -pl, re-applied on drift) and ECC (effective after a reboot)",
+    "description": "Caps each GPU's board power (applied again whenever it drifts; outside a GPU's range the unit fails) and sets the ECC mode, which changes at the GPU's next reset (`RebootRequired` until then).",
+    "settings": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "powerLimitWatts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000,
+          "x-bc": {
+            "kind": "int"
+          }
+        },
+        "ecc": {
+          "type": "boolean",
+          "x-bc": {
+            "kind": "boolean"
+          }
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "kernel-modules",
+    "summary": "Kernel modules loaded at boot and now (modules-load.d), with their options (modprobe.d): kvm_intel/kvm_amd, vhost_net and tun for VM hosts",
+    "description": "Modules loaded now and at every boot (`/etc/modules-load.d/bcd.conf`) with their options (`/etc/modprobe.d/bcd.conf`). A loaded module whose options differ is reloaded only when nothing uses it; otherwise they apply when it next loads. Sandbox hosts load `kvm_intel` or `kvm_amd`, `vhost_net`, `tun` and, for GPU passthrough, `vfio-pci`.",
+    "settings": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "k8s-join",
+    "summary": "Joins the node to a Kubernetes cluster as a worker (kubeadm join with a bootstrap token fetched by reference) and keeps its kubelet, labels and taints; GPUs through containerd's NVIDIA runtime and CDI",
+    "description": "Joins the machine to a Kubernetes cluster as a worker with a bootstrap token fetched through the secret broker, only to clusters root pins in `[kubernetes] allowed_clusters` under `bcd helper`. See [Kubernetes](/docs/daemon/kubernetes).",
+    "settings": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  }
+]
