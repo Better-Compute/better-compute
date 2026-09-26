@@ -12,6 +12,7 @@ import {
   type AuthzRow,
   type Clock,
   type Condition,
+  type DeviceAssignment,
   type DeviceClass,
   type DeviceRequest,
   type EventPublisher,
@@ -32,6 +33,7 @@ import {
   type ReservationSpec,
   type ReservationState,
   type ReservationVerb,
+  type ResourceLimits,
   type SchedulerPlugin,
   type SqlTx,
   type TimeRange,
@@ -43,6 +45,7 @@ import {
   type AllocationRecord,
 } from './bookings.js';
 import { chargeQuota, quotaDemand, refundQuota } from './quota.js';
+import { formatCpuList, parseCpuList } from './cpulist.js';
 import { dedicatedTaint, schedulableSqlTolerating } from './eligibility.js';
 import { assertGang, planGangs } from './gang.js';
 import { assertSelector } from './selector.js';
@@ -2430,25 +2433,109 @@ export async function wakeStartedOnNode(
 
 /**
  * The `devices` section of a node's spec (§7.3): CDI assignments for every reservation that has
- * started on it (`binding` or `active`), each ending at the booking's end.
+ * started on it (`binding` or `active`), each ending at the booking's end, with the host resources
+ * booked with the devices as limits (§3.8, `assignmentLimits`).
  */
-export async function deviceAssignments(
-  tx: SqlTx,
-  nodeId: string,
-): Promise<{ allocationId: string; deviceIds: string[]; until: number }[]> {
-  const { rows } = await tx.query<{ id: string; atoms: string[]; end_ms: number }>(
-    `SELECT a.id, a.atoms, (extract(epoch FROM upper(a.during)) * 1000)::float8 AS end_ms
+export async function deviceAssignments(tx: SqlTx, nodeId: string): Promise<DeviceAssignment[]> {
+  const { rows } = await tx.query<{
+    id: string;
+    atoms: string[];
+    end_ms: number;
+    resources: Record<string, number> | string | null;
+  }>(
+    `SELECT a.id, a.atoms, (extract(epoch FROM upper(a.during)) * 1000)::float8 AS end_ms, a.resources
        FROM allocations a JOIN reservations r ON r.id = a.owner_id AND a.owner_kind = 'reservation'
       WHERE a.node_id = $1 AND a.released_at IS NULL AND r.state IN ('binding', 'active')
         AND cardinality(a.atoms) > 0 AND r.request->>'binding' IS DISTINCT FROM 'node'
       ORDER BY a.id`,
     [nodeId],
   );
-  return rows.map((row) => ({
-    allocationId: row.id,
-    deviceIds: [...row.atoms],
-    until: Number(row.end_ms),
+  const booked = rows.map((row) => ({
+    row,
+    resources: (typeof row.resources === 'string'
+      ? JSON.parse(row.resources)
+      : (row.resources ?? {})) as Record<string, number>,
   }));
+  const topology = booked.some(({ resources }) => hostBooked(resources))
+    ? await nodeTopology(tx, nodeId, [...new Set(rows.flatMap((row) => row.atoms))])
+    : undefined;
+  return booked.map(({ row, resources }) => {
+    const assignment: DeviceAssignment = {
+      allocationId: row.id,
+      deviceIds: [...row.atoms],
+      until: Number(row.end_ms),
+    };
+    const limits = topology ? assignmentLimits(resources, row.atoms, topology) : undefined;
+    if (limits) assignment.limits = limits;
+    return assignment;
+  });
+}
+
+const hostBooked = (resources: Readonly<Record<string, number>>): boolean =>
+  (resources.vcpu ?? 0) > 0 || (resources.memoryGiB ?? 0) > 0 || (resources.hugepages1Gi ?? 0) > 0;
+
+/** A host's NUMA nodes (applied inventory) and the NUMA node of each of some devices. */
+export interface NodeTopology {
+  numa: ReadonlyMap<number, { cpus: readonly number[]; memoryBytes: number }>;
+  deviceNuma: ReadonlyMap<string, number>;
+}
+
+async function nodeTopology(tx: SqlTx, nodeId: string, deviceIds: string[]): Promise<NodeTopology> {
+  // proto3 JSON leaves a zero id out: NUMA node 0 has no `id`.
+  const numaRows = await tx.query<{ id: string | null; cpus: string | null; memory: string | null }>(
+    `SELECT e->>'id' AS id, e->>'cpus' AS cpus, e->>'memoryBytes' AS memory
+       FROM node_inventory ni JOIN inventory_snapshots s ON s.id = ni.applied_snapshot_id,
+            jsonb_array_elements(CASE WHEN jsonb_typeof(s.sections->'cpu'->'numaNodes') = 'array'
+                                      THEN s.sections->'cpu'->'numaNodes' ELSE '[]'::jsonb END) e
+      WHERE ni.node_id = $1`,
+    [nodeId],
+  );
+  const deviceRows = await tx.query<{ id: string; numa: string | null }>(
+    `SELECT id, attributes->>'numaNode' AS numa FROM devices WHERE node_id = $1 AND id = ANY($2::text[])`,
+    [nodeId, deviceIds],
+  );
+  const numa = new Map<number, { cpus: number[]; memoryBytes: number }>();
+  for (const row of numaRows.rows)
+    numa.set(Number(row.id ?? 0), {
+      cpus: parseCpuList(row.cpus ?? ''),
+      memoryBytes: Number(row.memory ?? 0),
+    });
+  const deviceNuma = new Map<string, number>();
+  for (const row of deviceRows.rows)
+    if (row.numa !== null && /^\d+$/.test(row.numa)) deviceNuma.set(row.id, Number(row.numa));
+  return { numa, deviceNuma };
+}
+
+/**
+ * The limits bcd applies to an allocation (§3.8): `cpu.max` from `vcpu`, `memory.max` from
+ * `memoryGiB`, 1 GiB hugepages as booked, and a cpuset on the devices' NUMA nodes: `cpus` when those
+ * nodes have at least `vcpu` CPUs, `mems` when they hold at least the booked memory (else memory may
+ * come from any node rather than OOM on a local one). Undefined when nothing is booked.
+ */
+export function assignmentLimits(
+  resources: Readonly<Record<string, number>>,
+  deviceIds: readonly string[],
+  topology: NodeTopology,
+): ResourceLimits | undefined {
+  if (!hostBooked(resources)) return undefined;
+  const limits: ResourceLimits = {};
+  const vcpu = resources.vcpu ?? 0;
+  const memoryBytes = (resources.memoryGiB ?? 0) * 2 ** 30;
+  if (vcpu > 0) limits.cpuMillis = vcpu * 1000;
+  if (memoryBytes > 0) limits.memoryBytes = memoryBytes;
+  if ((resources.hugepages1Gi ?? 0) > 0) limits.hugepages1Gi = resources.hugepages1Gi!;
+  const nodes = [...new Set(deviceIds.map((id) => topology.deviceNuma.get(id)))];
+  const local = nodes.every((node) => node !== undefined && topology.numa.has(node))
+    ? (nodes as number[]).sort((a, b) => a - b).map((node) => [node, topology.numa.get(node)!] as const)
+    : [];
+  if (local.length > 0) {
+    const cpus = local.flatMap(([, entry]) => entry.cpus);
+    if (vcpu > 0 && cpus.length >= vcpu) limits.cpus = formatCpuList(cpus);
+    const localBytes = local.reduce((sum, [, entry]) => sum + entry.memoryBytes, 0);
+    if (memoryBytes > 0 && localBytes >= memoryBytes)
+      limits.mems = local.map(([node]) => String(node)).join(',');
+  }
+  return limits;
 }
 
 /**

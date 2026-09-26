@@ -21,6 +21,9 @@ import {
   capacityModule,
   createCapacityPort,
   deviceAssignments,
+  assignmentLimits,
+  formatCpuList,
+  parseCpuList,
   activeRecheckMs,
   cancelPendingReservation,
   capacityTenantDeleted,
@@ -2726,6 +2729,82 @@ describe('host CPU and memory booked with the GPUs (§3.8)', () => {
     )) as Rsv;
     expect(created.state).toBe('pending');
     expect(created.conditions.map((condition) => condition.type)).toContain('Unschedulable');
+  });
+
+  it('hands bcd the booked resources as limits, on the devices’ NUMA node', async () => {
+    await hostRows({ [NA]: { vcpu: 64, memoryGiB: 512, hugepages1Gi: 16 } });
+    for (let index = 0; index < 4; index++)
+      await db.query(
+        `UPDATE devices SET attributes = attributes || jsonb_build_object('numaNode', $2::int) WHERE id = $1`,
+        [`GPU-na-${index}`, index < 2 ? 0 : 1],
+      );
+    await db.query(`DELETE FROM node_inventory`);
+    await db.query(`DELETE FROM inventory_snapshots`);
+    const sections = {
+      cpu: {
+        threads: 64,
+        // NUMA node 0 has no `id`: proto3 JSON leaves zeros out.
+        numaNodes: [
+          { cpus: '0-15,32-47', memoryBytes: String(256 * 2 ** 30) },
+          { id: 1, cpus: '16-31,48-63', memoryBytes: String(256 * 2 ** 30) },
+        ],
+      },
+    };
+    await db.query(
+      `INSERT INTO inventory_snapshots (id, node_id, sha256, section_hashes, sections, collected_at)
+       VALUES ('inv_limits', $1, '\\x00', '{}', $2::jsonb, compute_now())`,
+      [NA, JSON.stringify(sections)],
+    );
+    await db.query(`INSERT INTO node_inventory (node_id, applied_snapshot_id) VALUES ($1, 'inv_limits')`, [NA]);
+    const created = (await call(
+      'reservations',
+      'create',
+      create({ resources: { vcpu: 16, memoryGiB: 128, hugepages1Gi: 4 } }),
+    )) as Rsv;
+    await reconcile(created.id); // → binding
+    const [assignment] = await deviceAssignments(db, NA);
+    const nodes = new Set(assignment!.deviceIds.map((id) => (Number(id.slice(-1)) < 2 ? 0 : 1)));
+    expect(assignment!.limits).toEqual({
+      cpuMillis: 16_000,
+      memoryBytes: 128 * 2 ** 30,
+      hugepages1Gi: 4,
+      cpus: nodes.size === 2 ? '0-63' : nodes.has(0) ? '0-15,32-47' : '16-31,48-63',
+      mems: [...nodes].sort().join(','),
+    });
+    // The spec carries them to the node.
+    const spec = await module.nodeSpec!(moduleContext(db), { id: NA } as never);
+    expect(spec.devices!.assignments).toEqual([assignment]);
+    await db.query(`DELETE FROM node_inventory`);
+    await db.query(`DELETE FROM inventory_snapshots`);
+  });
+
+  it('keeps the cpuset or memory binding off when the NUMA nodes are too small or unknown', () => {
+    const topology = {
+      numa: new Map([
+        [0, { cpus: [0, 1, 2, 3], memoryBytes: 8 * 2 ** 30 }],
+        [1, { cpus: [4, 5, 6, 7], memoryBytes: 64 * 2 ** 30 }],
+      ]),
+      deviceNuma: new Map([
+        ['g0', 0],
+        ['g1', 1],
+      ]),
+    };
+    expect(assignmentLimits({}, ['g0'], topology)).toBeUndefined();
+    // 8 CPUs do not fit node 0's 4; 16 GiB do not fit its 8.
+    expect(assignmentLimits({ vcpu: 8, memoryGiB: 16 }, ['g0'], topology)).toEqual({
+      cpuMillis: 8000,
+      memoryBytes: 16 * 2 ** 30,
+    });
+    expect(assignmentLimits({ vcpu: 8, memoryGiB: 16 }, ['g0', 'g1'], topology)).toEqual({
+      cpuMillis: 8000,
+      memoryBytes: 16 * 2 ** 30,
+      cpus: '0-7',
+      mems: '0,1',
+    });
+    // A device without a known NUMA node: no cpuset at all.
+    expect(assignmentLimits({ vcpu: 2 }, ['g1', 'gx'], topology)).toEqual({ cpuMillis: 2000 });
+    expect(parseCpuList('0-3, 8,10-9,x')).toEqual([0, 1, 2, 3, 8]);
+    expect(formatCpuList([8, 3, 2, 1, 0, 10, 11])).toBe('0-3,8,10-11');
   });
 
   it('validates resources and the kubernetes binding', async () => {
