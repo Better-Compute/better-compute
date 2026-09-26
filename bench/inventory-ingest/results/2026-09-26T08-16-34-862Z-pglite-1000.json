@@ -1,0 +1,255 @@
+{
+  "suite": "inventory-ingest",
+  "date": "2026-09-26T08:16:34.862Z",
+  "commit": "3d6f79a",
+  "referenceHardware": false,
+  "machine": {
+    "cpus": 64,
+    "cpuModel": "AMD Ryzen Threadripper PRO 9995WX 96-Cores",
+    "memoryBytes": 274182045696
+  },
+  "node": "v25.6.0",
+  "adapter": "pglite",
+  "config": {
+    "nodes": 1000,
+    "batch": 500,
+    "gpusPerNode": 8,
+    "sections": 6
+  },
+  "joinStorm": [
+    {
+      "step": "report (batched hashes)",
+      "perSecond": 15668,
+      "seconds": 0.1,
+      "statementsPerNode": 0,
+      "perStatement": [
+        {
+          "sql": "WITH e AS (SELECT * FROM unnest($1::text[], $2::text[], $3::text[]) AS e(node_id",
+          "perNode": 0,
+          "msPerNode": 0.039
+        }
+      ]
+    },
+    {
+      "step": "ingest (batched sections)",
+      "perSecond": 3559,
+      "seconds": 0.3,
+      "statementsPerNode": 0.02,
+      "perStatement": [
+        {
+          "sql": "INSERT INTO node_inventory_sections (node_id, section, sha256, content, received",
+          "perNode": 0.01,
+          "msPerNode": 0.181
+        },
+        {
+          "sql": "INSERT INTO work_queue (kind, key, shard, gen, not_before) SELECT $1, k, 0, 1, c",
+          "perNode": 0.01,
+          "msPerNode": 0.02
+        }
+      ]
+    },
+    {
+      "step": "apply (per node)",
+      "perSecond": 92,
+      "seconds": 10.9,
+      "latencyMs": {
+        "p50": 10.43,
+        "p99": 21.94,
+        "max": 74.52
+      },
+      "statementsPerNode": 18,
+      "perStatement": [
+        {
+          "sql": "WITH gone AS ( DELETE FROM node_labels WHERE node_id = $1 AND source = 'inventor",
+          "perNode": 1,
+          "msPerNode": 0.854
+        },
+        {
+          "sql": "INSERT INTO devices (id, node_id, parent_id, class, bookable, healthy, attribute",
+          "perNode": 1,
+          "msPerNode": 0.829
+        },
+        {
+          "sql": "INSERT INTO work_queue (kind, key, shard, gen, not_before) VALUES ($1, $2, 0, 1,",
+          "perNode": 2,
+          "msPerNode": 0.732
+        },
+        {
+          "sql": "SELECT n.id, n.owner_tenant_id, n.trust, n.site_id, n.role, n.pool_id, n.no_sche",
+          "perNode": 1,
+          "msPerNode": 0.705
+        },
+        {
+          "sql": "SELECT (SELECT array_agg(DISTINCT b.device_id) FROM device_bookings b JOIN devic",
+          "perNode": 1,
+          "msPerNode": 0.67
+        },
+        {
+          "sql": "INSERT INTO inventory_snapshots (id, node_id, sha256, section_hashes, sections, ",
+          "perNode": 1,
+          "msPerNode": 0.651
+        },
+        {
+          "sql": "WITH node AS ( UPDATE nodes SET no_schedule_reasons = $4, hardware_key = decode(",
+          "perNode": 1,
+          "msPerNode": 0.601
+        },
+        {
+          "sql": "INSERT INTO node_conditions (node_id, type, status, reason, since) SELECT $1, c.",
+          "perNode": 1,
+          "msPerNode": 0.598
+        },
+        {
+          "sql": "SELECT sections FROM inventory_snapshots WHERE node_id = $1 ORDER BY collected_a",
+          "perNode": 1,
+          "msPerNode": 0.57
+        },
+        {
+          "sql": "UPDATE nodes SET hardware_key = decode($2, 'hex'), hardware_key_trusted = true W",
+          "perNode": 1,
+          "msPerNode": 0.482
+        },
+        {
+          "sql": "SELECT section, sha256, content FROM node_inventory_sections WHERE node_id = $1",
+          "perNode": 1,
+          "msPerNode": 0.455
+        },
+        {
+          "sql": "SELECT id, parent_id, class, bookable, healthy, attributes FROM devices WHERE no",
+          "perNode": 1,
+          "msPerNode": 0.374
+        }
+      ]
+    }
+  ],
+  "steady": [
+    {
+      "step": "report (batched hashes)",
+      "perSecond": 6082,
+      "seconds": 0.2,
+      "statementsPerNode": 0,
+      "perStatement": [
+        {
+          "sql": "WITH e AS (SELECT * FROM unnest($1::text[], $2::text[], $3::text[]) AS e(node_id",
+          "perNode": 0,
+          "msPerNode": 0.065
+        }
+      ]
+    }
+  ],
+  "change": [
+    {
+      "step": "report (batched hashes)",
+      "perSecond": 12161,
+      "seconds": 0.1,
+      "statementsPerNode": 0,
+      "perStatement": [
+        {
+          "sql": "WITH e AS (SELECT * FROM unnest($1::text[], $2::text[], $3::text[]) AS e(node_id",
+          "perNode": 0,
+          "msPerNode": 0.058
+        }
+      ]
+    },
+    {
+      "step": "ingest (batched sections)",
+      "perSecond": 8312,
+      "seconds": 0.1,
+      "statementsPerNode": 0,
+      "perStatement": [
+        {
+          "sql": "INSERT INTO node_inventory_sections (node_id, section, sha256, content, received",
+          "perNode": 0,
+          "msPerNode": 0.073
+        },
+        {
+          "sql": "INSERT INTO work_queue (kind, key, shard, gen, not_before) SELECT $1, k, 0, 1, c",
+          "perNode": 0,
+          "msPerNode": 0.014
+        }
+      ]
+    },
+    {
+      "step": "apply (per node)",
+      "perSecond": 105,
+      "seconds": 9.6,
+      "latencyMs": {
+        "p50": 9.16,
+        "p99": 20.56,
+        "max": 23.65
+      },
+      "statementsPerNode": 19,
+      "perStatement": [
+        {
+          "sql": "INSERT INTO devices (id, node_id, parent_id, class, bookable, healthy, attribute",
+          "perNode": 1,
+          "msPerNode": 0.669
+        },
+        {
+          "sql": "INSERT INTO work_queue (kind, key, shard, gen, not_before) VALUES ($1, $2, 0, 1,",
+          "perNode": 2,
+          "msPerNode": 0.666
+        },
+        {
+          "sql": "SELECT n.id, n.owner_tenant_id, n.trust, n.site_id, n.role, n.pool_id, n.no_sche",
+          "perNode": 1,
+          "msPerNode": 0.612
+        },
+        {
+          "sql": "SELECT sections FROM inventory_snapshots WHERE node_id = $1 ORDER BY collected_a",
+          "perNode": 1,
+          "msPerNode": 0.598
+        },
+        {
+          "sql": "SELECT (SELECT array_agg(DISTINCT b.device_id) FROM device_bookings b JOIN devic",
+          "perNode": 1,
+          "msPerNode": 0.595
+        },
+        {
+          "sql": "INSERT INTO inventory_snapshots (id, node_id, sha256, section_hashes, sections, ",
+          "perNode": 1,
+          "msPerNode": 0.592
+        },
+        {
+          "sql": "WITH gone AS ( DELETE FROM node_labels WHERE node_id = $1 AND source = 'inventor",
+          "perNode": 1,
+          "msPerNode": 0.577
+        },
+        {
+          "sql": "INSERT INTO outbox (topic, payload) VALUES ($1, $2::jsonb)",
+          "perNode": 2,
+          "msPerNode": 0.567
+        },
+        {
+          "sql": "INSERT INTO node_conditions (node_id, type, status, reason, since) SELECT $1, c.",
+          "perNode": 1,
+          "msPerNode": 0.469
+        },
+        {
+          "sql": "SELECT id, parent_id, class, bookable, healthy, attributes FROM devices WHERE no",
+          "perNode": 1,
+          "msPerNode": 0.454
+        },
+        {
+          "sql": "WITH node AS ( UPDATE nodes SET no_schedule_reasons = $4, hardware_key = decode(",
+          "perNode": 1,
+          "msPerNode": 0.385
+        },
+        {
+          "sql": "SELECT section, sha256, content FROM node_inventory_sections WHERE node_id = $1",
+          "perNode": 1,
+          "msPerNode": 0.38
+        }
+      ]
+    }
+  ],
+  "needs": {
+    "steadyReportsPerSecond": 10,
+    "steadyHeadroom": 608.2,
+    "joinStormSeconds": 11.3
+  },
+  "rows": {
+    "snapshots": 2000,
+    "gpuDevices": 8000
+  }
+}
