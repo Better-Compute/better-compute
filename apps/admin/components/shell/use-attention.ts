@@ -2,6 +2,7 @@
 
 import type { AttentionItem } from '@/lib/data';
 import { collectAttention } from '@/lib/modules';
+import { useModuleVersion } from './use-modules';
 import { useLive, useWorkspaceSettings } from './workspace';
 
 /**
@@ -10,5 +11,6 @@ import { useLive, useWorkspaceSettings } from './workspace';
  */
 export function useAttentionItems(): AttentionItem[] {
   const { source } = useWorkspaceSettings();
-  return useLive((now, scope) => collectAttention(now, scope, { source }), { bucketMs: 10_000, deps: [source] });
+  const modules = useModuleVersion();
+  return useLive((now, scope) => collectAttention(now, scope, { source }), { bucketMs: 10_000, deps: [source, modules] });
 }

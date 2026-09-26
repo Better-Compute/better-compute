@@ -14,11 +14,13 @@ import {
   RiKeyboardLine,
   RiLayoutColumnLine,
   RiPauseLine,
+  RiPuzzle2Line,
   RiTimeLine,
   RiTvLine,
 } from 'react-icons/ri';
 import { sites } from '@/lib/data';
-import { allCommands, allNav, allWidgets, navForPath, searchAll } from '@/lib/modules';
+import { allCommands, allNav, allWidgets, isModuleHidden, modules, navForPath, searchAll, setModuleHidden } from '@/lib/modules';
+import { useModuleVersion } from './use-modules';
 import { loadState, type Dashboard } from '@/components/widgets/layout';
 import { readVisits } from './pins';
 import { usePeek } from './peek';
@@ -170,6 +172,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
   }, [open]);
 
   const pageCommands = useRegisteredPageCommands();
+  const moduleVersion = useModuleVersion();
 
   const entries = useMemo<Entry[]>(() => {
     const go = (href: string) => () => router.push(href);
@@ -266,9 +269,25 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
           queueDashboardAction({ type: 'add', id: w.id });
         },
       })),
+      // Modules: show or hide one in this browser.
+      ...modules
+        .filter((module) => module.id !== 'overview')
+        .map((module) => {
+          const hidden = isModuleHidden(module.id);
+          return {
+            id: `module:${module.id}`,
+            label: `${hidden ? 'Show' : 'Hide'} the ${module.title} module`,
+            group: 'Workspace',
+            hint: hidden ? 'hidden in this browser' : `${module.nav.length} pages · ${module.widgets.length} widgets`,
+            icon: RiPuzzle2Line,
+            keywords: ['module', 'enable', 'disable', 'plugin', module.id],
+            perform: () => setModuleHidden(module.id, !hidden),
+          };
+        }),
       // Pools, tenants, nodes, reservations… come from the modules' own `search` (see results below).
     ];
-  }, [router, workspace, resolvedTheme, setTheme, pageCommands, visits, dashboards]);
+    // moduleVersion: the lists above change when a module is shown or hidden.
+  }, [router, workspace, resolvedTheme, setTheme, pageCommands, visits, dashboards, moduleVersion]);
 
   const results = useMemo(() => {
     const q = query.trim();

@@ -10,7 +10,9 @@ import { SegmentedControl, SegmentedControlItem } from '@/components/base/segmen
 import { Grid, KeyValue, PageHeader, Panel } from '@/components/ui/panel';
 import { Mono, Tag } from '@/components/ui/signal';
 import { loadState, saveState, STORAGE_KEY, type DashboardState } from '@/components/widgets/layout';
-import { modules } from '@/lib/modules';
+import { Switch } from '@/components/base/switch/switch';
+import { isModuleHidden, modules, setModuleHidden } from '@/lib/modules';
+import { useModuleVersion } from './use-modules';
 import { RANGES, useWorkspace, type Density, type RangeKey } from './workspace';
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
@@ -31,6 +33,8 @@ export function SettingsPage() {
   const workspace = useWorkspace();
   const file = useRef<HTMLInputElement>(null);
   const [message, setMessage] = useState<string | null>(null);
+  useModuleVersion();
+  const hiddenCount = modules.filter((module) => isModuleHidden(module.id)).length;
 
   const exportLayouts = () => {
     const blob = new Blob([JSON.stringify(loadState(), null, 2)], { type: 'application/json' });
@@ -115,10 +119,22 @@ export function SettingsPage() {
           </div>
         </Panel>
         <ConnectionPanel />
-        <Panel className="col-span-12" title="Installed modules" icon={RiPuzzle2Line} meta={`${modules.length} modules`} flush>
+        <Panel
+          id="modules"
+          className="col-span-12"
+          title="Installed modules"
+          icon={RiPuzzle2Line}
+          meta={`${modules.length - hiddenCount} of ${modules.length} shown`}
+          flush
+        >
+          <p className="border-b border-separator-border px-3 py-2 text-caption-1-regular text-text-secondary">
+            Hide a module you don&apos;t use in this browser: its pages leave the sidebar and ⌘K, its widgets leave your dashboards
+            (they come back with it) and its alerts leave the queue. Links to its entities still peek.
+          </p>
           <table className="w-full text-left">
             <thead>
               <tr className="border-b border-separator-border font-mono text-[11px] tracking-wide text-text-tertiary uppercase">
+                <th className="w-24 px-3 py-2 font-medium">Shown</th>
                 <th className="px-3 py-2 font-medium">Module</th>
                 <th className="px-3 py-2 font-medium">Pages</th>
                 <th className="px-3 py-2 font-medium">Widgets</th>
@@ -127,7 +143,19 @@ export function SettingsPage() {
             </thead>
             <tbody>
               {modules.map((module) => (
-                <tr key={module.id} className="border-b border-separator-border/70 align-top text-body-regular last:border-0">
+                <tr
+                  key={module.id}
+                  className={`border-b border-separator-border/70 align-top text-body-regular last:border-0 ${isModuleHidden(module.id) ? 'opacity-55' : ''}`}
+                >
+                  <td className="px-3 py-2.5">
+                    <Switch
+                      size="sm"
+                      aria-label={`Show ${module.title}`}
+                      isSelected={!isModuleHidden(module.id)}
+                      isDisabled={module.id === 'overview'}
+                      onChange={(on) => setModuleHidden(module.id, !on)}
+                    />
+                  </td>
                   <td className="px-3 py-2.5">
                     <div className="font-medium text-text-primary">{module.title}</div>
                     <Mono dim>{module.id}</Mono>

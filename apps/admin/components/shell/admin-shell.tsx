@@ -5,6 +5,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Dialog, Heading, Modal, ModalOverlay } from 'react-aria-components';
 import { allCommands, allNav } from '@/lib/modules';
 import { CommandPalette, PALETTE_EVENTS } from './command-palette';
+import { HiddenModuleBanner } from './hidden-module-banner';
 import { PageCommandsProvider } from './page-commands';
 import { PeekProvider } from './peek';
 import { recordVisit } from './pins';
@@ -168,6 +169,7 @@ function ShellFrame({ children }: { children: ReactNode }) {
       <div className="flex min-w-0 flex-1 flex-col">
         <Topbar onOpenPalette={() => setPalette(true)} onOpenNav={() => setMobileNav(true)} />
         <TimeTravelBanner />
+        <HiddenModuleBanner />
         <main id="main" ref={mainRef} tabIndex={-1} className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-5 outline-none lg:px-6">
           {children}
         </main>

@@ -1,8 +1,21 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { drift, noise } from '@/lib/data/core';
 import { attention, attentionGroup, controlPlane, fleetPulse, nodeStates, poolPulse, type AttentionItem } from '@/lib/data/platform';
 import { pools, poolNodePlacement, sites } from '@/lib/data/topology';
-import { collectAttention, modules, navForPath, searchAll, widgetById, widgetSettings } from '@/lib/modules';
+import {
+  allNav,
+  allWidgets,
+  collectAttention,
+  enabledModules,
+  isModuleHidden,
+  moduleForPath,
+  modules,
+  navForPath,
+  searchAll,
+  setModuleHidden,
+  widgetById,
+  widgetSettings,
+} from '@/lib/modules';
 import { decodeDashboard, encodeDashboard, PRESETS } from '@/components/widgets/layout';
 import { overrideFrom, settingsSummary } from '@/components/widgets/configure';
 
@@ -133,6 +146,31 @@ describe('module registry', () => {
     const def = widgetById('overview.pulse')!;
     expect(widgetSettings(def)).toMatchObject({ metric: 'utilization', compare: true });
     expect(widgetSettings(def, { metric: 'power', text: 'kept' })).toMatchObject({ metric: 'power', compare: true, text: 'kept' });
+  });
+
+  it('hides a module per browser: nav, widgets and alerts leave, its pages still resolve, overview stays', () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('window', {
+      localStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) },
+      dispatchEvent: () => true,
+    });
+    try {
+      const fleetHref = modules.find((m) => m.id === 'fleet')!.nav[0]!.href;
+      setModuleHidden('overview', true);
+      expect(isModuleHidden('overview')).toBe(false);
+      setModuleHidden('fleet', true);
+      expect(JSON.parse(store.get('bc-admin:modules-hidden')!)).toEqual(['fleet']);
+      expect(enabledModules().map((m) => m.id)).not.toContain('fleet');
+      expect(allNav().some((n) => n.href === fleetHref)).toBe(false);
+      expect(allWidgets().some((w) => w.module === 'fleet')).toBe(false);
+      expect(navForPath(fleetHref)?.href).toBe(fleetHref);
+      expect(moduleForPath(`${fleetHref}/x`)?.id).toBe('fleet');
+      expect(collectAttention(T0).length).toBeGreaterThan(0);
+    } finally {
+      setModuleHidden('fleet', false);
+      vi.unstubAllGlobals();
+    }
+    expect(allWidgets().some((w) => w.module === 'fleet')).toBe(true);
   });
 });
 

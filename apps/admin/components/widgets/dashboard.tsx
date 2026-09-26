@@ -17,7 +17,8 @@ import { PALETTE_EVENTS, takeDashboardAction } from '@/components/shell/command-
 import { useFeedback } from '@/components/ui/feedback';
 import { useKiosk } from '@/components/shell/kiosk';
 import { Drawer, Menu, ToolButton } from '@/components/ui/overlay';
-import { allWidgets, modules, widgetById, widgetSettings, type WidgetDef } from '@/lib/modules';
+import { allWidgets, enabledModules, isModuleHidden, widgetById, widgetSettings, type WidgetDef } from '@/lib/modules';
+import { useModuleVersion } from '@/components/shell/use-modules';
 import { ConfigureWidget, overrideFrom, settingsSummary } from './configure';
 import { ScopeOverrideProvider } from '@/components/shell/workspace';
 import { cx } from '@/utils/cx';
@@ -346,9 +347,12 @@ function WidgetGrid({
     return () => observer.disconnect();
   }, []);
 
+  // A hidden module's widgets stay in the layout (they come back with the module) but aren't drawn, even
+  // while arranging; a widget whose module is gone shows as a placeholder there so it can be removed.
+  useModuleVersion();
   const resolved = shown
     .map((instance) => ({ instance, def: widgetById(instance.widget) }))
-    .filter((entry) => entry.def || editing);
+    .filter((entry) => entry.def || (editing && !isModuleHidden(entry.instance.widget.split('.')[0] ?? '')));
 
   const span = (w: number) => (columns === 12 ? w : columns === 6 ? Math.min(6, Math.max(3, Math.ceil(w / 2))) : 1);
 
@@ -539,19 +543,21 @@ function WidgetCatalog({
   present: Set<string>;
 }) {
   const [query, setQuery] = useState('');
+  const moduleVersion = useModuleVersion();
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return modules
+    return enabledModules()
       .map((module) => ({
         module,
         widgets: module.widgets.filter((w) => !q || `${w.title} ${w.description} ${w.id}`.toLowerCase().includes(q)),
       }))
       .filter((group) => group.widgets.length);
-  }, [query]);
+    // moduleVersion: the catalog follows modules shown or hidden in Settings.
+  }, [query, moduleVersion]);
   const total = allWidgets().length;
 
   return (
-    <Drawer open={open} onOpenChange={onOpenChange} title="Add a widget" subtitle={`${total} widgets from ${modules.length} modules`} width={520}>
+    <Drawer open={open} onOpenChange={onOpenChange} title="Add a widget" subtitle={`${total} widgets from ${enabledModules().length} modules`} width={520}>
       <label className="mb-4 flex h-9 items-center gap-2 border border-border-button-default bg-background-primary-default px-2 focus-within:ring-2 focus-within:ring-border-focus-ring">
         <RiSearchLine className="size-4 text-text-tertiary" aria-hidden />
         <input

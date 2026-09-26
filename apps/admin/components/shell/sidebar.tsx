@@ -7,6 +7,7 @@ import { ThemeToggle } from '@/components/application/theme/theme-toggle';
 import { allNav, navForPath, navGroups, type NavItem } from '@/lib/modules';
 import { cx } from '@/utils/cx';
 import { useFoldedGroups, usePins } from './pins';
+import { useModuleVersion } from './use-modules';
 import { useWorkspaceSettings } from './workspace';
 
 /**
@@ -28,6 +29,7 @@ export function Sidebar({
   const pathname = usePathname();
   const active = navForPath(pathname);
   const { source, live } = useWorkspaceSettings();
+  useModuleVersion();
   const groups = navGroups();
   const { pins, toggle } = usePins();
   const folded = useFoldedGroups();

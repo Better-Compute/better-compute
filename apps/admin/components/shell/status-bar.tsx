@@ -3,7 +3,8 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { controlPlane, fmtDuration, fmtNum } from '@/lib/data';
-import { collectAttention, modules } from '@/lib/modules';
+import { collectAttention, enabledModules } from '@/lib/modules';
+import { useModuleVersion } from './use-modules';
 import { Led } from '@/components/ui/signal';
 import { WidgetBoundary } from '@/components/widgets/widget-frame';
 import { cx } from '@/utils/cx';
@@ -73,7 +74,8 @@ export function StatusBar() {
   const outbox = components.find((c) => c.id === 'events');
   const sessions = components.filter((c) => c.kind === 'gateway').reduce((sum, c) => sum + c.rate, 0);
   const degraded = components.filter((c) => c.status !== 'ok');
-  const extras = modules.flatMap((module) => (module.status ?? []).map((Item, index) => ({ key: `${module.id}:${index}`, Item })));
+  useModuleVersion();
+  const extras = enabledModules().flatMap((module) => (module.status ?? []).map((Item, index) => ({ key: `${module.id}:${index}`, Item })));
 
   return (
     <footer data-tour="statusbar" className="hidden h-7 shrink-0 items-stretch divide-x divide-separator-border overflow-x-auto border-t border-separator-border bg-surface-sunken font-mono text-[11px] text-text-secondary sm:flex">

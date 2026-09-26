@@ -166,6 +166,68 @@ export const modules: AdminModule[] = [
 ];
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
+// ── Per-browser module switches ──────────────────────────────────────────────────────────────────────────────
+// An operator can hide a module they don't use (Settings → Installed modules): its pages leave the sidebar,
+// the palette, search and the widget catalog, its widgets leave dashboards and its alerts leave the queue.
+// Peeks and watch describers stay, so a link from another module still opens. The Overview can't be hidden.
+
+const HIDDEN_KEY = 'bc-admin:modules-hidden';
+const HIDDEN_EVENT = 'bc-admin:modules-changed';
+let hidden = new Set<string>();
+let hiddenVersion = 0;
+
+function readHidden() {
+  if (typeof window === 'undefined') return;
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(HIDDEN_KEY) ?? '[]') as unknown;
+    const next = new Set(Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string' && id !== 'overview') : []);
+    if ([...next].join() !== [...hidden].join()) {
+      hidden = next;
+      hiddenVersion++;
+    }
+  } catch {
+    // keep what we have
+  }
+}
+
+/** The modules this browser shows (installed minus hidden). */
+export const enabledModules = (): AdminModule[] => modules.filter((module) => !hidden.has(module.id));
+export const isModuleHidden = (id: string) => hidden.has(id);
+
+export function setModuleHidden(id: string, hide: boolean) {
+  if (id === 'overview' || typeof window === 'undefined') return;
+  const next = new Set(hidden);
+  if (hide) next.add(id);
+  else next.delete(id);
+  try {
+    window.localStorage.setItem(HIDDEN_KEY, JSON.stringify([...next]));
+  } catch {
+    // applies to this page only
+  }
+  hidden = next;
+  hiddenVersion++;
+  window.dispatchEvent(new Event(HIDDEN_EVENT));
+}
+
+/** Subscribe to module switches (for useSyncExternalStore): returns a version that changes on each switch. */
+export const moduleSwitches = {
+  subscribe(callback: () => void) {
+    const onChange = () => {
+      readHidden();
+      callback();
+    };
+    window.addEventListener(HIDDEN_EVENT, onChange);
+    window.addEventListener('storage', onChange);
+    readHidden();
+    return () => {
+      window.removeEventListener(HIDDEN_EVENT, onChange);
+      window.removeEventListener('storage', onChange);
+    };
+  },
+  version: () => hiddenVersion,
+  serverVersion: () => 0,
+};
+
 const groupRank = (group: string) => {
   const index = GROUP_ORDER.indexOf(group);
   return index === -1 ? GROUP_ORDER.length : index;
@@ -173,7 +235,7 @@ const groupRank = (group: string) => {
 
 export function navGroups(): { group: string; items: NavItem[] }[] {
   const groups = new Map<string, NavItem[]>();
-  for (const item of modules.flatMap((module) => module.nav)) {
+  for (const item of enabledModules().flatMap((module) => module.nav)) {
     groups.set(item.group, [...(groups.get(item.group) ?? []), item]);
   }
   return [...groups]
@@ -181,16 +243,16 @@ export function navGroups(): { group: string; items: NavItem[] }[] {
     .map(([group, items]) => ({ group, items }));
 }
 
-export const allNav = () => modules.flatMap((module) => module.nav);
-export const allWidgets = () => modules.flatMap((module) => module.widgets);
-export const allCommands = () => modules.flatMap((module) => module.commands ?? []);
+export const allNav = () => enabledModules().flatMap((module) => module.nav);
+export const allWidgets = () => enabledModules().flatMap((module) => module.widgets);
+export const allCommands = () => enabledModules().flatMap((module) => module.commands ?? []);
 export const widgetById = (id: string) => allWidgets().find((widget) => widget.id === id);
 export const peekFor = (kind: string): PeekDef | undefined => modules.find((module) => module.peeks?.[kind])?.peeks?.[kind];
 
 /** Every module's search results for a query, grouped in module order. A failing module is skipped. */
 export function searchAll(query: string, context: { now: number; siteId?: string }): SearchResult[] {
   if (query.trim().length < 2) return [];
-  return modules.flatMap((module) => {
+  return enabledModules().flatMap((module) => {
     try {
       return (module.search?.(query.trim(), context) ?? []).slice(0, 8);
     } catch {
@@ -212,7 +274,7 @@ export function collectAttention(
 ): AttentionItem[] {
   const items = [
     ...platformAttention(now, scope),
-    ...modules.flatMap((module) => {
+    ...enabledModules().flatMap((module) => {
       try {
         return module.attention?.(now, scope, context) ?? [];
       } catch {
@@ -223,9 +285,16 @@ export function collectAttention(
   return items.sort((a, b) => severityRank[a.severity] - severityRank[b.severity] || b.at - a.at);
 }
 
-/** The nav item a path belongs to: the longest href that prefixes it. */
+/** The module that owns a path (hidden or not). */
+export function moduleForPath(pathname: string): AdminModule | undefined {
+  const item = navForPath(pathname);
+  return item && modules.find((module) => module.nav.includes(item));
+}
+
+/** The nav item a path belongs to: the longest href that prefixes it (a hidden module's pages still resolve). */
 export function navForPath(pathname: string): NavItem | undefined {
-  return allNav()
+  return modules
+    .flatMap((module) => module.nav)
     .filter((item) => pathname === item.href || (item.href !== '/' && pathname.startsWith(`${item.href}/`)))
     .sort((a, b) => b.href.length - a.href.length)[0];
 }

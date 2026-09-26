@@ -2,10 +2,10 @@
 
 import { RiDashboard3Line } from 'react-icons/ri';
 import { fmtNum, fmtPct, siteById, topologyTotals } from '@/lib/data';
-import { collectAttention } from '@/lib/modules';
 import { useCapacityTotals } from '@/components/capacity/data';
 import { useFleetSummary } from '@/components/fleet/summary';
-import { useLive, useWorkspaceSettings, RANGES } from '@/components/shell/workspace';
+import { useAttentionItems } from '@/components/shell/use-attention';
+import { useWorkspaceSettings, RANGES } from '@/components/shell/workspace';
 import { PageHeader } from '@/components/ui/panel';
 import { Tag } from '@/components/ui/signal';
 
@@ -15,7 +15,7 @@ export function OverviewHeader() {
   // The same numbers /capacity and /nodes show, from whichever source the workspace reads.
   const capacity = useCapacityTotals();
   const fleet = useFleetSummary();
-  const items = useLive((now, scope) => collectAttention(now, scope, { source }), { bucketMs: 10_000, deps: [source] });
+  const items = useAttentionItems();
   const topology = topologyTotals(siteId ? { siteId } : undefined);
   const critical = items.filter((i) => i.severity === 'critical').length;
   const site = siteId ? siteById(siteId) : undefined;
