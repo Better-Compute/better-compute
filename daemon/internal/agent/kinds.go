@@ -367,6 +367,7 @@ func (a *Agent) refreshSections() {
 	}
 	if len(changed) > 0 {
 		a.sendSections(sections, changed)
+		a.hashesChanged.Store(true)
 	}
 }
 

@@ -445,8 +445,9 @@ func (a *Agent) heartbeat(s *sess) {
 		RunningCommands:      uint32(running),
 		PendingEvents:        uint32(stats.Count),
 	}
-	// Every 10th heartbeat carries the inventory hashes (PLAN.md §10.1).
-	if s.heartbeats%10 == 0 {
+	// Every 10th heartbeat carries the inventory hashes (PLAN.md §10.1), and the first after the
+	// sections changed.
+	if a.hashesChanged.Swap(false) || s.heartbeats%10 == 0 {
 		hb.InventoryHashes = a.inventoryHashes()
 	}
 	a.sendLocked(&agentv1.AgentFrame{Msg: &agentv1.AgentFrame_Heartbeat{Heartbeat: hb}})

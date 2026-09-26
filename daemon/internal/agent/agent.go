@@ -221,10 +221,13 @@ type Agent struct {
 	workloads     map[string]*pendingWorkload
 	upgradeNeeded bool
 
-	invMu       sync.Mutex
-	inv         *inventory.NodeInventory
-	collected   []inventory.Section
-	collectedAt time.Time
+	invMu     sync.Mutex
+	inv       *inventory.NodeInventory
+	collected []inventory.Section
+	// hashesChanged: a re-collection sent changed sections; the next heartbeat carries the hashes
+	// (the gateway applies an inventory only once the hashes and the sections agree).
+	hashesChanged atomic.Bool
+	collectedAt   time.Time
 }
 
 // New builds an agent over an opened journal and a joined identity.
