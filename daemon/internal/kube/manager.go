@@ -223,7 +223,7 @@ func (m *Manager) syncLabels(ctx context.Context) {
 			labels[k] = v
 		}
 	}
-	steps, err := planNode(ctx, m.Sys, m.NodeName, State{}, labels, nil)
+	steps, err := planNode(ctx, m.Sys, m.NodeName, State{}, labels)
 	if err != nil {
 		m.Log.Warn("read the Node's labels", "node", m.NodeName, "error", err.Error())
 		return

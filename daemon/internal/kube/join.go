@@ -162,12 +162,17 @@ func (u JoinUnit) Plan(ctx context.Context, sys hostconfig.System, settings json
 		// The unit is back after a release: the Node takes pods again.
 		actions = append(actions, runCmd(sys, kubectl("uncordon", name)))
 	}
-	steps, err = planNode(ctx, sys, name, state, labels, p.taints)
+	steps, err = planNode(ctx, sys, name, state, labels)
 	if err != nil {
 		return nil, err
 	}
 	actions = append(actions, steps...)
-	want := State{Server: p.Server, NodeName: name, Labels: keys(labels), Taints: taintStrings(p.taints), GPU: p.gpu, GPUAPI: p.GPUAPI}
+	// Taints stay as registered: bcd set them at the join and cannot change them since.
+	registered := state.Taints
+	if registered == nil {
+		registered = []string{}
+	}
+	want := State{Server: p.Server, NodeName: name, Labels: keys(labels), Taints: registered, GPU: p.gpu, GPUAPI: p.GPUAPI}
 	if !equalState(state, want) {
 		actions = append(actions, writeState(sys, want))
 	}
@@ -661,10 +666,10 @@ func kubectl(args ...string) hostconfig.Cmd {
 	return hostconfig.Cmd{Name: "kubectl", Args: append([]string{"--kubeconfig", KubeletConf}, args...)}
 }
 
-// planNode keeps the Node's labels and taints: the spec's and bcd.dev/*, with the kubelet's own
+// planNode keeps the Node's labels: the spec's and bcd.dev/*, with the kubelet's own
 // credentials (NodeRestriction lets a node label itself outside kubernetes.io and k8s.io). It
 // removes only what bcd set before (State) or owns (bcd.dev/*).
-func planNode(ctx context.Context, sys hostconfig.System, name string, state State, labels map[string]string, taints []Taint) ([]converge.Action, error) {
+func planNode(ctx context.Context, sys hostconfig.System, name string, state State, labels map[string]string) ([]converge.Action, error) {
 	out, err := sys.Run(ctx, kubectl("get", "node", name, "-o", "json"))
 	if err != nil {
 		// Registering right after the join, or the API server unreachable: retry.
@@ -700,6 +705,18 @@ func planNode(ctx context.Context, sys hostconfig.System, name string, state Sta
 	if len(set)+len(remove) > 0 {
 		actions = append(actions, runCmd(sys, kubectl(append([]string{"label", "node", name, "--overwrite"}, append(set, remove...)...)...)))
 	}
+	// Taints: NodeRestriction forbids a kubelet to change its Node's taints, so they are set only at
+	// registration (the JoinConfiguration); a later difference is reported (Conditions), not retried.
+	return actions, nil
+}
+
+// ConditionTaintsDrift: the Node's taints differ from the unit's, which the kubelet's credentials
+// cannot fix (a cluster admin must).
+const ConditionTaintsDrift = "KubernetesTaintsDrift"
+
+// taintDrift returns the kubectl taint arguments that would bring the Node's taints to the unit's:
+// its taints set, and those bcd set before (State) and the unit no longer names removed.
+func taintDrift(node nodeObject, taints []Taint, state State) []string {
 	have := map[string]string{}
 	for _, t := range node.Spec.Taints {
 		have[t.Key+":"+t.Effect] = t.Value
@@ -721,10 +738,38 @@ func planNode(ctx context.Context, sys hostconfig.System, name string, state Sta
 			taintArgs = append(taintArgs, m[1]+":"+m[3]+"-")
 		}
 	}
-	if len(taintArgs) > 0 {
-		actions = append(actions, runCmd(sys, kubectl(append([]string{"taint", "node", name, "--overwrite"}, taintArgs...)...)))
+	return taintArgs
+}
+
+// Conditions reports KubernetesTaintsDrift while the Node's taints differ from the unit's
+// (hostconfig.Reporter): the command a cluster admin runs to fix it is in the message.
+func (u JoinUnit) Conditions(ctx context.Context, sys hostconfig.System, settings json.RawMessage) []hostconfig.Condition {
+	p, err := parseSettings(settings)
+	if err != nil {
+		return nil
 	}
-	return actions, nil
+	state, ok, err := ReadState(sys)
+	if err != nil || !ok || state.Released || state.NodeName == "" {
+		return nil
+	}
+	out, err := sys.Run(ctx, kubectl("get", "node", state.NodeName, "-o", "json"))
+	if err != nil {
+		return nil
+	}
+	var node nodeObject
+	if json.Unmarshal(out, &node) != nil {
+		return nil
+	}
+	drift := taintDrift(node, p.taints, state)
+	if len(drift) == 0 {
+		return nil
+	}
+	return []hostconfig.Condition{{
+		Type:   ConditionTaintsDrift,
+		Reason: "NodeRestriction",
+		Message: fmt.Sprintf("the Node's taints differ from the pool's and a kubelet cannot change its own taints; as a cluster admin run: kubectl taint node %s --overwrite %s",
+			state.NodeName, strings.Join(drift, " ")),
+	}}
 }
 
 func writeState(sys hostconfig.System, s State) converge.Action {

@@ -88,6 +88,20 @@ func (c *fakeCluster) handle(_ context.Context, cmd hostconfig.Cmd) ([]byte, err
 			n.Metadata.Labels = map[string]string{"kubernetes.io/hostname": "gpu-node-7"}
 			// The kubelet registers with the labels and taints of the configuration.
 			for _, line := range strings.Split(cfg, "\n") {
+				trimmed := strings.TrimSpace(line)
+				unquote := func(v string) string { var s string; json.Unmarshal([]byte(v), &s); return s }
+				type taint = struct {
+					Key    string `json:"key"`
+					Value  string `json:"value"`
+					Effect string `json:"effect"`
+				}
+				if v, ok := strings.CutPrefix(trimmed, "- key: "); ok {
+					n.Spec.Taints = append(n.Spec.Taints, taint{Key: unquote(v)})
+				} else if v, ok := strings.CutPrefix(trimmed, "effect: "); ok && len(n.Spec.Taints) > 0 {
+					n.Spec.Taints[len(n.Spec.Taints)-1].Effect = unquote(v)
+				} else if v, ok := strings.CutPrefix(trimmed, "value: "); ok && len(n.Spec.Taints) > 0 && !strings.Contains(v, "=") {
+					n.Spec.Taints[len(n.Spec.Taints)-1].Value = unquote(v)
+				}
 				if v, ok := strings.CutPrefix(strings.TrimSpace(line), "value: "); ok && strings.Contains(v, "=") {
 					var pairs string
 					json.Unmarshal([]byte(v), &pairs)
@@ -257,8 +271,25 @@ func TestJoinFromBareHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	labels := c.node.Metadata.Labels
-	if labels["tier"] != "a" || labels["team"] != "" || labels["someone/else"] != "x" || labels["bcd.dev/node-id"] != "node-7" || len(c.node.Spec.Taints) != 0 {
-		t.Fatalf("after the change: labels %v taints %+v", labels, c.node.Spec.Taints)
+	if labels["tier"] != "a" || labels["team"] != "" || labels["someone/else"] != "x" || labels["bcd.dev/node-id"] != "node-7" {
+		t.Fatalf("after the change: labels %v", labels)
+	}
+	// A kubelet cannot change its Node's taints (NodeRestriction): the drift is reported with the
+	// command a cluster admin runs, and bcd never tries.
+	if len(c.node.Spec.Taints) != 1 {
+		t.Fatalf("taints = %+v", c.node.Spec.Taints)
+	}
+	for _, cmd := range c.sys.Commands() {
+		if strings.Contains(cmd, " taint ") {
+			t.Fatalf("bcd ran %q", cmd)
+		}
+	}
+	conds := u.Conditions(context.Background(), c.sys, json.RawMessage(changed))
+	if len(conds) != 1 || conds[0].Type != ConditionTaintsDrift || !strings.Contains(conds[0].Message, "kubectl taint node gpu-node-7 --overwrite gpu:NoSchedule-") {
+		t.Fatalf("conditions = %+v", conds)
+	}
+	if conds := u.Conditions(context.Background(), c.sys, json.RawMessage(settings)); len(conds) != 0 {
+		t.Fatalf("no drift with the registered taints: %+v", conds)
 	}
 	if state, _, _ := ReadState(c.sys); state.GPU {
 		t.Fatal("gpu: false must reach the state the device plugin reads")
