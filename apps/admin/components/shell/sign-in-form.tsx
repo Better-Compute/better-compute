@@ -3,6 +3,8 @@
 import { useState, type FormEvent } from 'react';
 import { RiLockLine, RiShieldKeyholeLine } from 'react-icons/ri';
 import { Button } from '@/components/base/buttons/button';
+import { safeNext } from '@/lib/redirect';
+import { adminHeaders, rotateSessionKey } from '@/lib/session-key';
 import { BrandMark } from './sidebar';
 
 type Step = { kind: 'password' } | { kind: 'code'; challenge: string; hint?: string };
@@ -29,9 +31,11 @@ export function SignInForm({ next }: { next: string }) {
     setBusy(true);
     setError(null);
     try {
+      // A new sign-in gets a new browser key; the code step must use the key its challenge was made for.
+      if (step.kind === 'password') rotateSessionKey();
       const response = await fetch('/api/session', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-better-compute': '1' },
+        headers: { 'content-type': 'application/json', ...adminHeaders() },
         body: JSON.stringify(
           step.kind === 'password'
             ? { organization: organization.trim() || undefined, email: email.trim(), password }
@@ -40,7 +44,8 @@ export function SignInForm({ next }: { next: string }) {
       });
       const body = (await response.json().catch(() => ({}))) as { ok?: boolean; step?: 'code'; challenge?: string; hint?: string; error?: { message: string } };
       if (body.ok) {
-        window.location.assign(next);
+        // Checked again here against the real origin (the page already passed it through safeNext).
+        window.location.assign(safeNext(next, window.location.origin));
         return;
       }
       if (body.step === 'code' && body.challenge) {

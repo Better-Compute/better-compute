@@ -84,21 +84,28 @@ export async function callIam(
 }
 
 /**
- * The proxy acts with the server's credential, so only this admin's own page may call it. The custom
+ * The proxy acts with the operator's (or the server's) credential, so only this admin's own page may call it. The custom
  * x-better-compute header stops cross-site forms; this check stops other hosts on the network and DNS
  * rebinding (a hostile page resolving its name to this machine): the Host header must be an allowed name,
  * and a present Origin must be that same host. ADMIN_ALLOWED_HOSTS (comma-separated host[:port]) adds names
  * for a deployment behind a proxy; loopback names are always allowed.
  */
+const hostOf = (request: Request) => (request.headers.get('host') ?? '').toLowerCase();
+
+/** True when the request was addressed to a loopback name (localhost, 127.0.0.1, [::1], *.localhost). */
+export function isLoopbackHost(request: Request): boolean {
+  const name = hostOf(request).replace(/:\d+$/, '');
+  return name === 'localhost' || name === '127.0.0.1' || name === '[::1]' || name.endsWith('.localhost');
+}
+
 export function callerAllowed(request: Request): boolean {
-  const host = (request.headers.get('host') ?? '').toLowerCase();
+  const host = hostOf(request);
   const name = host.replace(/:\d+$/, '');
   const extra = (process.env.ADMIN_ALLOWED_HOSTS ?? '')
     .split(',')
     .map((h) => h.trim().toLowerCase())
     .filter(Boolean);
-  const loopback = name === 'localhost' || name === '127.0.0.1' || name === '[::1]' || name.endsWith('.localhost');
-  if (!loopback && !extra.includes(host) && !extra.includes(name)) return false;
+  if (!isLoopbackHost(request) && !extra.includes(host) && !extra.includes(name)) return false;
   const origin = request.headers.get('origin');
   if (origin) {
     try {
@@ -124,15 +131,20 @@ export const METHOD_PATH = /^[a-z][A-Za-z0-9]*(\/[a-z][A-Za-z0-9]*){1,3}$/;
 /**
  * Read methods: the last segment is a getter or a listing (get, list, summary, version, status, timeline,
  * preview, history, diff, show, describe, catalog, search, find, estimate, optionally followed by more words:
- * `listSshCerts`, `getPolicy`). The admin has no operator login yet and the proxy holds one server credential,
- * so it forwards only these; mutations (cordon, drain, create, cancel, delete, set…) are refused until
- * per-operator authentication lands.
+ * `listSshCerts`, `getPolicy`). Signed out, the proxy forwards only these (with the shared connection, if
+ * any); mutations need an operator's own session. A name that reads *and* writes (`getOrCreate`,
+ * `listAndPrune`, `findAndLock`) is not a read. This is a name check, so give ADMIN_COMPUTE_TOKEN a read-only
+ * role too: the API's own authorization is the real boundary.
  */
 const READ_METHOD = /^(get|list|summary|version|status|timeline|preview|history|diff|show|describe|catalog|search|find|estimate)([A-Z][A-Za-z0-9]*)?$/;
+const WRITE_WORD =
+  /(?:Or|And|Then|Create|Delete|Update|Set|Put|Upsert|Insert|Remove|Prune|Purge|Revoke|Rotate|Write|Apply|Cancel|Release|Drain|Cordon|Reset|Ensure|Sync|Claim|Acquire|Lock|Mark|Ack|Refresh|Issue|Grant|Start|Stop|Run|Exec|Send|Save|Commit|Assign|Allocate|Reserve|Book)(?=[A-Z]|$)/;
 
 export function isReadMethod(path: string): boolean {
   if (!METHOD_PATH.test(path)) return false;
-  return READ_METHOD.test(path.split('/').at(-1)!);
+  const method = path.split('/').at(-1)!;
+  const match = READ_METHOD.exec(method);
+  return Boolean(match) && !WRITE_WORD.test(match![2] ?? '');
 }
 
 /** POST a method to the upstream API; returns the raw status and JSON envelope. */

@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { SignInForm } from '@/components/shell/sign-in-form';
+import { safeNext } from '@/lib/redirect';
 
 export const metadata: Metadata = { title: 'Sign in' };
 
@@ -8,7 +9,7 @@ export default async function SignInPage({ searchParams }: { searchParams: Promi
   const { next } = await searchParams;
   return (
     <main className="grid min-h-dvh place-items-center bg-background-full px-4">
-      <SignInForm next={next && /^\/(?![/\\])/.test(next) ? next : '/'} />
+      <SignInForm next={safeNext(next)} />
     </main>
   );
 }

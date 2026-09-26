@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { adminHeaders } from './session-key';
 
 // The browser side of live mode: `api.$request('capacity/summary', { tenantId })` goes through this app's
 // /api/upstream proxy to the configured compute API. It has console-kit's ComputeRequester shape, so every
@@ -21,7 +22,7 @@ export class ApiError extends Error {
 async function request<Output = unknown>(path: string, input: unknown = {}, options: { signal?: AbortSignal } = {}): Promise<Output> {
   const response = await fetch(`/api/upstream/${path}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-better-compute': '1' },
+    headers: { 'content-type': 'application/json', ...adminHeaders() },
     body: JSON.stringify(input ?? {}),
     cache: 'no-store',
     signal: options.signal,

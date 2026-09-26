@@ -31,7 +31,13 @@ pick **Live API** in Settings → Connection.
 `POST /api/upstream/<method>`, which accepts only this admin's own page (Host/Origin allowlist plus the
 `x-better-compute` header). Operators **sign in** (`/signin`) with their better-iam account; the admin keeps
 their own session token sealed in an HttpOnly cookie and forwards it as the bearer, so every change is
-authorized and audited as that person. Signed out, the proxy only forwards read methods. `lib/api.ts`
+authorized and audited as that person. Cookies ignore ports, so the cookie alone is not a session: it is bound
+to a random key in this origin's localStorage (`lib/session-key.ts`, header `x-bc-session-key`), and a copy
+replayed by another local server opens nothing. Sign-in is throttled per account (10 failures / 15 min), a
+second-factor challenge takes 5 codes and signs in once, sign-out revokes the session here even when
+better-iam can't be reached, and beyond loopback sign-in needs https (the cookie is then `__Host-`).
+Signed out, the proxy only forwards read methods (by name: give `ADMIN_COMPUTE_TOKEN` a read-only role, the
+API's authorization is the real boundary). `lib/api.ts`
 exposes the proxy as a console-kit `ComputeRequester`; `useConnection().status.writable` says whether
 changes are possible. Modules with a live source switch on `useWorkspaceSettings().source === 'live'`;
 widgets without one say "sim".

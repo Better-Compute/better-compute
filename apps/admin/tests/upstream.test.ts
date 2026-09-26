@@ -53,6 +53,12 @@ describe('isReadMethod', () => {
     for (const path of ['nodes/cordon', 'nodes/drain', 'nodes/delete', 'reservations/create', 'reservations/cancel', 'quotas/set', 'metal/wipe', 'nodes/getaway', 'getx'])
       expect(isReadMethod(path), path).toBe(false);
   });
+  it('refuses names that read and write, but not words that merely start like a verb', () => {
+    for (const path of ['keys/getOrCreate', 'jobs/listAndPrune', 'locks/findAndLock', 'nodes/getThenDrain', 'certs/getRotate', 'tokens/getIssue'])
+      expect(isReadMethod(path), path).toBe(false);
+    for (const path of ['nodes/listRunning', 'org/getSettings', 'capacity/listBookings', 'nodes/getLocks', 'tickets/listIssues', 'nodes/getOrphans', 'reservations/getReservation'])
+      expect(isReadMethod(path), path).toBe(true);
+  });
   it('refuses anything that is not a method path', () => {
     for (const path of ['../health', 'nodes/../list', 'nodes/list%2F..', 'nodes\\list', 'nodes/list?x=1', '']) expect(isReadMethod(path), path).toBe(false);
   });

@@ -2,6 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import type { ConnectionStatus } from '@/lib/api';
+import { adminHeaders } from '@/lib/session-key';
 
 // One shared probe of the compute API (every 30 s, and on demand): the status bar, Settings and any module that
 // offers a live view read it from here.
@@ -11,7 +12,7 @@ const ConnectionContext = createContext<{ status: ConnectionStatus | null; refre
 export function ConnectionProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<ConnectionStatus | null>(null);
   const refresh = useCallback(() => {
-    fetch('/api/upstream/status', { cache: 'no-store' })
+    fetch('/api/upstream/status', { cache: 'no-store', headers: adminHeaders() })
       .then((response) => response.json() as Promise<ConnectionStatus>)
       .then((next) => setStatus({ ...next, checkedAt: Date.now() }))
       .catch((error: unknown) => setStatus({ configured: false, error: { code: 'NETWORK', message: String(error) }, checkedAt: Date.now() }));

@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation';
 import { RiLoginBoxLine, RiLogoutBoxRLine, RiUserLine } from 'react-icons/ri';
 import { Menu, ToolButton } from '@/components/ui/overlay';
 import { useFeedback } from '@/components/ui/feedback';
+import { adminHeaders, rotateSessionKey } from '@/lib/session-key';
 import { useConnection } from './connection';
 
 /**
@@ -29,9 +30,16 @@ export function OperatorMenu() {
       </Link>
     );
   const signOut = async () => {
-    await fetch('/api/session', { method: 'DELETE', headers: { 'x-better-compute': '1' } }).catch(() => undefined);
+    const out = (await fetch('/api/session', { method: 'DELETE', headers: adminHeaders() })
+      .then((response) => response.json())
+      .catch(() => ({ warning: 'The admin server did not answer; your session may still be active.' }))) as { warning?: string };
+    rotateSessionKey();
     refresh();
-    toast({ title: 'Signed out', detail: 'The live connection is read-only again.', status: 'ok' });
+    toast(
+      out.warning
+        ? { title: 'Signed out of the admin', detail: out.warning, status: 'warn' }
+        : { title: 'Signed out', detail: 'The live connection is read-only again.', status: 'ok' },
+    );
   };
   return (
     <Menu
