@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/better-compute/better-compute/daemon/internal/agent"
@@ -169,6 +170,7 @@ func hostChecks(cfg *config.Config) []doctorCheck {
 	}
 	out = append(out, hostKubeChecks(cfg)...)
 	out = append(out, helperRuntimeChecks(cfg, exec.LookPath, realLibvirtHost)...)
+	out = append(out, tssCheck(cfg, userInGroup)...)
 	if u, err := url.Parse(cfg.GatewayURL); err == nil {
 		host := u.Host
 		if u.Port() == "" {
@@ -212,8 +214,26 @@ func hostChecks(cfg *config.Config) []doctorCheck {
 	return append(out, configChecks(cfg, role)...)
 }
 
+// tssCheck: under [helper] bcd node never opens the TPM (bcd helper holds its node keys, 8870b8d). A node
+// user still in the tss group (install scripts 0ba2a79 to 8870b8d put it there) can open the TPM
+// resource manager, which filters no command: it could lock or clear the TPM's hierarchies.
+func tssCheck(cfg *config.Config, inGroup func(name, group string) (bool, error)) []doctorCheck {
+	if cfg.Helper.Socket == "" || cfg.Helper.User == "" {
+		return nil
+	}
+	node := cfg.Helper.User
+	switch in, err := inGroup(node, "tss"); {
+	case err != nil && !strings.Contains(err.Error(), "unknown group"):
+		return []doctorCheck{{"warn", "tpm", err.Error()}}
+	case in:
+		return []doctorCheck{{"fail", "tpm", node + " is in the tss group: it can send the TPM any command (lock or clear its hierarchies); " +
+			"bcd helper holds the node keys, so remove it (gpasswd -d " + node + " tss) and restart bcd.service"}}
+	}
+	return nil
+}
+
 // nodeKeyCheck says what holds the node key: the TPM, or a file (a warning where a TPM is there: the
-// next renewal moves the key into it, unless bcd node cannot open the TPM).
+// next renewal moves the key into it, through bcd helper when bcd node runs unprivileged).
 func nodeKeyCheck(key crypto.Signer, haveTPM bool) doctorCheck {
 	switch {
 	case agent.NodeKeyKind(key) == "tpm":
