@@ -10,6 +10,7 @@ import { PeekProvider } from './peek';
 import { StatusBar } from './status-bar';
 import { TimeTravelBanner } from './time-machine';
 import { Tour } from './tour';
+import { AttentionWatcher } from './attention-watcher';
 import { Sidebar } from './sidebar';
 import { Topbar } from './topbar';
 import { useWorkspace } from './workspace';
@@ -141,6 +142,7 @@ export function AdminShell({ children }: { children: ReactNode }) {
       <CommandPalette open={palette} onOpenChange={setPalette} />
       <ShortcutSheet open={keys} onOpenChange={setKeys} />
       <Tour />
+      <AttentionWatcher />
     </div>
     </PeekProvider>
     </PageCommandsProvider>
