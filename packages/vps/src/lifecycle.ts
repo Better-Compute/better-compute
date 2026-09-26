@@ -3,6 +3,7 @@ import {
   instanceStateTable,
   isComputeError,
   type CallContext,
+  type Condition,
   type ExternalMachine,
   type InstanceNicSpec,
   type InstanceSpec,
@@ -16,6 +17,11 @@ import { refundQuota } from '@better-compute/capacity';
 import { readAccount } from './accounts.js';
 import {
   dropSealedUserData,
+  exhaustedHostsCondition,
+  exhaustedHostsOf,
+  exhaustedReplaceMs,
+  hostExhaustedCondition,
+  maxExhaustedReplacements,
   instanceWork,
   isSecretRef,
   moveInstance,
@@ -33,7 +39,7 @@ import {
 import { releaseAddress } from './ipam.js';
 import { specPlacement, type HostPlacement } from './placement.js';
 import { markSandboxReady, sandboxWork } from './sandboxes.js';
-import { instanceVolumeSpecs } from './volumes.js';
+import { instanceVolumeSpecs, volumePlacement } from './volumes.js';
 
 // The Instance controller (PLAN.md §11.1, §3.6): converges `state` toward `desiredState`.
 // - Hosted pools: the daemon's runtime converges `NodeSpec.instances`; its reports arrive through
@@ -138,6 +144,22 @@ async function recreateOnLoss(tx: SqlTx, poolId: string): Promise<boolean> {
   return rows[0]?.recreate === true;
 }
 
+/**
+ * Whether an instance whose host refused to start it may go elsewhere: nothing of its tenant's is on that host
+ * yet. A new instance (`provisioning`), an unclaimed warm one, or a warm one a sandbox claimed that has not run
+ * for it (the sandbox is not ready); never one whose volumes live there.
+ */
+async function replaceable(tx: SqlTx, row: InstanceRow): Promise<boolean> {
+  const warm = row.warmTemplateId !== undefined || row.sandboxId !== undefined;
+  if (row.state !== 'provisioning' && !(row.state === 'stopped' && warm)) return false;
+  if (await volumePlacement(tx, row.id)) return false;
+  if (row.state === 'provisioning' || row.sandboxId === undefined) return true;
+  const { rows } = await tx.query<{ ready_at: unknown }>(`SELECT ready_at FROM sandboxes WHERE id = $1`, [
+    row.sandboxId,
+  ]);
+  return rows.length === 1 && rows[0]!.ready_at === null;
+}
+
 /** One hosted-pool step in one transaction; the next wake-up time, or `undefined` when settled. */
 async function reconcileHosted(
   deps: InstanceDeps,
@@ -235,8 +257,54 @@ async function reconcileHosted(
     return undefined;
   }
 
+  // Its host's bcd refuses to start it (host admission, ResourcesExhausted: the control plane's booking
+  // and the host drifted apart). One with nothing of its tenant's on that host yet is placed elsewhere
+  // once the refusal has stood `exhaustedReplaceMs`, away from every host that refused it, at most
+  // `maxExhaustedReplacements` times; then it fails. One that ran there, or whose volumes live there, waits.
+  const refusal = row.nodeId
+    ? row.conditions.find((c) => c.type === hostExhaustedCondition && c.status === 'true' && c.reason === row.nodeId)
+    : undefined;
+  if (refusal && row.desiredState !== 'stopped' && (await replaceable(tx, row))) {
+    const due = refusal.since + exhaustedReplaceMs;
+    if (now < due) return Math.min(due, now + pollTransitionalMs);
+    const from = row.nodeId!;
+    const avoided = exhaustedHostsOf(row.conditions);
+    if (avoided.length >= maxExhaustedReplacements) {
+      const failed = await moveInstance(tx, row, 'fail', 'error');
+      await publishInstance(deps, tx, failed, 'instance.failed', { reason: 'resources-exhausted', nodeId: from });
+      return undefined;
+    }
+    if (row.allocationId) await deps.capacity.release(tx, row.allocationId);
+    await releaseAddress(tx, row.id);
+    // Its spec drops the instance there, so that host removes the domain it could not start.
+    await deps.desired.invalidate(tx, from);
+    const again = await moveInstance(tx, row, 'recreate', 'scheduling', {
+      nodeId: null,
+      allocationId: null,
+      addresses: [],
+      reportedState: null,
+      conditions: [
+        ...row.conditions.filter((c) => c.type !== hostExhaustedCondition && c.type !== exhaustedHostsCondition),
+        {
+          type: exhaustedHostsCondition,
+          status: 'true',
+          reason: 'ResourcesExhausted',
+          message: [...avoided, from].join(','),
+          since: now,
+        },
+      ],
+    });
+    await publishInstance(deps, tx, again, 'instance.recreating', { reason: 'resources-exhausted', fromNodeId: from });
+    return now;
+  }
+
   const reported = row.reportedState;
   if (reported === row.desiredState && settled(reported)) {
+    // Its host started it: the refusals (here and on the hosts it left) are over.
+    if (row.conditions.some((c) => c.type === hostExhaustedCondition || c.type === exhaustedHostsCondition))
+      row = await updateInstance(tx, row, {
+        conditions: row.conditions.filter((c) => c.type !== hostExhaustedCondition && c.type !== exhaustedHostsCondition),
+      });
     if (row.state !== reported) {
       const next = await advance(tx, row, reported);
       if (next.state !== row.state) await publishInstance(deps, tx, next, `instance.${next.state}`);
@@ -456,6 +524,9 @@ export async function reconcileInstance(
   });
 }
 
+/** What bcd's host admission puts before the message of an instance whose start it refused. */
+export const resourcesExhausted = 'ResourcesExhausted';
+
 /** One instance as a host runtime reports it. */
 export interface InstanceReport {
   id: string;
@@ -485,11 +556,19 @@ export async function reportInstances(
     addresses: string[];
     identity_rebind_ref: string | null;
     identity_rebound_ref: string | null;
+    conditions: Condition[] | string;
   }>(
-    `SELECT id, reported_state, addresses, identity_rebind_ref, identity_rebound_ref FROM instances
+    `SELECT id, reported_state, addresses, identity_rebind_ref, identity_rebound_ref, conditions FROM instances
       WHERE node_id = $1 AND state <> 'deleted' AND NOT draft FOR UPDATE`,
     [nodeId],
   );
+  let clock: number | undefined;
+  const now = async () => {
+    clock ??= Number(
+      (await tx.query<{ now: string }>(`SELECT (extract(epoch FROM compute_now()) * 1000)::bigint AS now`)).rows[0]!.now,
+    );
+    return clock;
+  };
   const placed = new Map(rows.map((row) => [row.id, row]));
   const orphans: string[] = [];
   let updated = 0;
@@ -501,6 +580,27 @@ export async function reportInstances(
       continue;
     }
     seen.add(report.id);
+    // bcd's host admission refused its start (it stays stopped with the reason, and retries): recorded
+    // once as a condition naming this node, cleared once the node reports anything else.
+    const conditions: Condition[] =
+      typeof row.conditions === 'string' ? JSON.parse(row.conditions) : (row.conditions ?? []);
+    const refused = report.state === 'stopped' && (report.message?.startsWith(`${resourcesExhausted}:`) ?? false);
+    const standing = conditions.some((c) => c.type === hostExhaustedCondition && c.reason === nodeId);
+    if (refused !== standing) {
+      const next = refused
+        ? withCondition(
+            conditions,
+            { type: hostExhaustedCondition, status: 'true', reason: nodeId, message: report.message!.slice(0, 512) },
+            await now(),
+          )
+        : conditions.filter((c) => !(c.type === hostExhaustedCondition && c.reason === nodeId));
+      await tx.query(`UPDATE instances SET conditions = $2::jsonb, version = version + 1 WHERE id = $1`, [
+        report.id,
+        JSON.stringify(next),
+      ]);
+      await work.enqueue(tx, instanceWork, report.id);
+      updated++;
+    }
     // The guest confirmed it installed the identity this spec sends: exec signs for it alone now.
     if (
       report.identityReboundRef !== undefined &&

@@ -26,6 +26,7 @@ import { create } from '@bufbuild/protobuf';
 import { encodeMessage, InstanceSnapshotResultSchema } from '@better-compute/protocol';
 import {
   builtinRuntimeTraits,
+  exhaustedReplaceMs,
   identityRebindFiles,
   instanceSpecs,
   instanceWork,
@@ -1081,6 +1082,59 @@ describe('warm pools', () => {
     expect(await live()).toBe(0);
     // The sandbox of a deleted template lives on.
     expect((await getSandbox(cold.id)).state).toBe('starting');
+  });
+});
+
+describe('hosts that cannot start a sandbox (bcd host admission, §3.8)', () => {
+  const refusal = 'ResourcesExhausted: 2048 MiB of memory needed, 512 MiB left on this host';
+  const placement = async (instanceId: string) =>
+    (
+      await db.query<{ node_id: string | null; state: string }>(`SELECT node_id, state FROM instances WHERE id = $1`, [
+        instanceId,
+      ])
+    ).rows[0]!;
+  /** The instance's host refuses its start for a minute; then it reconciles. Resolves to that host. */
+  const refused = async (instanceId: string) => {
+    const from = (await placement(instanceId)).node_id!;
+    await db.transaction((tx) =>
+      reportInstances(tx, moduleContext(db).work, from, [{ id: instanceId, state: 'stopped', message: refusal }], {
+        complete: false,
+      }),
+    );
+    clock.advance(exhaustedReplaceMs);
+    await setSimClock(db, clock.now());
+    await reconcileInstance(instanceId); // → scheduling
+    await reconcileInstance(instanceId); // → the other host
+    return from;
+  };
+
+  it('moves a starting sandbox to another host and keeps its TTL clock', async () => {
+    const template = await createTemplate();
+    const sandbox = await createSandbox(template.id);
+    const from = await refused(sandbox.instanceId);
+    const moved = await placement(sandbox.instanceId);
+    expect(moved.state).toBe('provisioning');
+    expect(moved.node_id).not.toBe(from);
+    expect(await getSandbox(sandbox.id)).toMatchObject({ state: 'starting', expiresAt: sandbox.expiresAt });
+    expect(eventTypes()).toContain('instance.recreating');
+  });
+
+  it('gives a warm claim its host cannot boot a fresh placement', async () => {
+    const template = await createTemplate({ warm: { min: 1 } });
+    await reconcileSandboxes();
+    // A runtime without pause keeps its warm instances stopped: a claim has to boot one.
+    await db.query(`UPDATE instances SET desired_state = 'stopped' WHERE warm_template_id = $1`, [template.id]);
+    await hostsReport('stopped');
+    const [warm] = (
+      await db.query<{ id: string }>(`SELECT id FROM instances WHERE warm_template_id = $1`, [template.id])
+    ).rows;
+    const sandbox = await createSandbox(template.id);
+    expect(sandbox).toMatchObject({ warm: true, instanceId: warm!.id });
+    const from = await refused(warm!.id);
+    const moved = await placement(warm!.id);
+    expect(moved.state).toBe('provisioning');
+    expect(moved.node_id).not.toBe(from);
+    expect(await getSandbox(sandbox.id)).toMatchObject({ state: 'starting', expiresAt: sandbox.expiresAt });
   });
 });
 

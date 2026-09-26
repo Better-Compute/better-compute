@@ -32,6 +32,10 @@ import {
 } from '@better-compute/capacity';
 import {
   defineProvider,
+  exhaustedAvoidMs,
+  exhaustedHostsCondition,
+  exhaustedReplaceMs,
+  hostExhaustedCondition,
   instanceStatusHandler,
   instanceWork,
   reportInstances,
@@ -735,6 +739,106 @@ describe('hosted instances', () => {
     expect(moved.state).toBe('provisioning');
     expect(moved.nodeId).not.toBe(created.nodeId);
     expect(moved.addresses).toEqual(['10.0.0.2']);
+  });
+
+  const refusal = 'ResourcesExhausted: 4096 MiB of memory needed, 1024 MiB left on this host';
+  const exhausted = (view: View) => view.conditions.find((c) => c.type === hostExhaustedCondition);
+
+  it('places a new instance elsewhere when its host cannot start it (bcd host admission), away from that host', async () => {
+    const created = (await call('instances', 'create', createHosted())) as View;
+    const first = created.nodeId!;
+    await report(first, [{ id: created.id, state: 'stopped', message: refusal }]);
+    expect(exhausted(await get(created.id))).toMatchObject({ reason: first, message: refusal });
+    // Its host may free the memory: for a minute it stays.
+    await reconcile(created.id);
+    expect(await get(created.id)).toMatchObject({ state: 'provisioning', nodeId: first });
+    clock.advance(exhaustedReplaceMs);
+    await setSimClock(db, clock.now());
+    await reconcile(created.id); // → scheduling, its booking and address given back
+    await reconcile(created.id); // → the other host (the first one is free again, but refused it)
+    const moved = await get(created.id);
+    expect(moved.state).toBe('provisioning');
+    expect(moved.nodeId).toBeDefined();
+    expect(moved.nodeId).not.toBe(first);
+    const { rows } = await db.query<{ node_id: string }>(
+      `SELECT node_id FROM allocations WHERE owner_kind = 'instance' AND owner_id = $1 AND released_at IS NULL`,
+      [created.id],
+    );
+    expect(rows).toEqual([{ node_id: moved.nodeId }]);
+    expect(recorded.events.filter((type) => type === 'instance.recreating')).toHaveLength(1);
+    // The first host's spec drops it, so its bcd removes the domain it could not start.
+    expect(recorded.invalidated).toContain(first);
+    // The new host starts it: the refusal is over.
+    await report(moved.nodeId!, [{ id: created.id, state: 'running' }]);
+    await reconcile(created.id);
+    const running = await get(created.id);
+    expect(running.state).toBe('running');
+    expect(exhausted(running)).toBeUndefined();
+    expect(running.conditions.find((c) => c.type === exhaustedHostsCondition)).toBeUndefined();
+  });
+
+  it('keeps away from every host that refused it, and fails after the last re-placement', async () => {
+    const created = (await call('instances', 'create', createHosted())) as View;
+    const first = created.nodeId!;
+    const refuse = async (node: string) => {
+      await report(node, [{ id: created.id, state: 'stopped', message: refusal }]);
+      clock.advance(exhaustedReplaceMs);
+      await setSimClock(db, clock.now());
+      await reconcile(created.id);
+      await reconcile(created.id);
+    };
+    await refuse(first);
+    const second = (await get(created.id)).nodeId!;
+    expect(second).not.toBe(first);
+    await refuse(second);
+    // Both hosts of the pool refused it: it waits for another (Unschedulable), away from both.
+    const waiting = await get(created.id);
+    expect(waiting.state).toBe('scheduling');
+    expect(waiting.conditions.find((c) => c.type === exhaustedHostsCondition)).toMatchObject({
+      message: `${first},${second}`,
+    });
+    expect(waiting.conditions.map((c) => c.type)).toContain('Unschedulable');
+    // After the avoid window a host may take it again; one more refusal past the cap fails it.
+    // (a third host it was moved off, as if the pool had one more)
+    await db.query(
+      `UPDATE instances SET conditions = (
+         SELECT jsonb_agg(CASE WHEN c->>'type' = $3 THEN jsonb_set(c, '{message}', to_jsonb($2::text)) ELSE c END)
+           FROM jsonb_array_elements(conditions) c) WHERE id = $1`,
+      [created.id, `${first},${second},node_01jz00000000000000000000zz`, exhaustedHostsCondition],
+    );
+    clock.advance(exhaustedAvoidMs);
+    await setSimClock(db, clock.now());
+    await reconcile(created.id);
+    const again = await get(created.id);
+    expect(again.state).toBe('provisioning');
+    await refuse(again.nodeId!);
+    const failed = await get(created.id);
+    expect(failed.state).toBe('error');
+    expect(exhausted(failed)).toMatchObject({ reason: again.nodeId, message: refusal });
+    expect(recorded.events).toContain('instance.failed');
+  });
+
+  it('keeps an instance that ran on its host there when its host refuses a restart', async () => {
+    const created = (await call('instances', 'create', createHosted())) as View;
+    const node = created.nodeId!;
+    await report(node, [{ id: created.id, state: 'running' }]);
+    await reconcile(created.id);
+    await call('instances', 'stop', { tenantId: 'acme', instanceId: created.id });
+    await report(node, [{ id: created.id, state: 'stopped' }]);
+    await reconcile(created.id);
+    await call('instances', 'start', { tenantId: 'acme', instanceId: created.id });
+    await report(node, [{ id: created.id, state: 'stopped', message: refusal }]);
+    clock.advance(2 * exhaustedReplaceMs);
+    await setSimClock(db, clock.now());
+    await reconcile(created.id);
+    // Its disk is on that host: it waits there, and says why.
+    const waiting = await get(created.id);
+    expect(waiting).toMatchObject({ state: 'stopped', desiredState: 'running', nodeId: node });
+    expect(exhausted(waiting)).toMatchObject({ reason: node });
+    await report(node, [{ id: created.id, state: 'running' }]);
+    expect(exhausted(await get(created.id))).toBeUndefined();
+    await reconcile(created.id);
+    expect((await get(created.id)).state).toBe('running');
   });
 
   it('lists the caller’s instances by default, everyone’s with scope all', async () => {

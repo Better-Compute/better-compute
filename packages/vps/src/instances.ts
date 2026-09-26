@@ -625,6 +625,35 @@ export function withoutCondition(conditions: readonly Condition[], type: string)
   return conditions.filter((entry) => entry.type !== type);
 }
 
+/**
+ * The condition of an instance whose host's bcd refuses to start it (its host admission: the report is `stopped`
+ * with a `ResourcesExhausted:` message, PLAN.md §3.8). `reason` is that node, `message` bcd's words.
+ */
+export const hostExhaustedCondition = 'HostResourcesExhausted';
+/**
+ * The hosts that could not start the instance and that it was placed away from, oldest first: `message` lists
+ * their ids (comma-separated), `since` is the last re-placement.
+ */
+export const exhaustedHostsCondition = 'ExhaustedHosts';
+/** How long a new instance's host may refuse to start it before the instance is placed elsewhere. */
+export const exhaustedReplaceMs = 60_000;
+/** How long a re-placed instance keeps away from the hosts that could not start it, from its last re-placement. */
+export const exhaustedAvoidMs = 10 * 60_000;
+/** Re-placements after refusals; the next refusal fails the instance (no ping-pong across a drifted pool). */
+export const maxExhaustedReplacements = 3;
+
+/** The hosts that refused to start the instance and that it was placed away from (`exhaustedHostsCondition`). */
+export function exhaustedHostsOf(conditions: readonly Condition[]): string[] {
+  const listed = conditions.find((c) => c.type === exhaustedHostsCondition && c.status === 'true');
+  return listed?.message ? listed.message.split(',').filter(Boolean) : [];
+}
+
+/** The hosts `row` keeps away from now: all it was moved off after refusals, within `exhaustedAvoidMs`. */
+function exhaustedHosts(row: InstanceRow, now: number): string[] {
+  const listed = row.conditions.find((c) => c.type === exhaustedHostsCondition && c.status === 'true');
+  return listed && now - listed.since < exhaustedAvoidMs ? exhaustedHostsOf(row.conditions) : [];
+}
+
 export async function publishInstance(
   deps: Pick<InstanceDeps, 'events'>,
   tx: SqlTx,
@@ -1084,6 +1113,8 @@ export async function scheduleHosted(
   // Agent memory: an instance that attaches volumes runs on the host they live on, if its bcd keeps them.
   const volumes = await volumePlacement(tx, row.id);
   if (volumes) Object.assign(nodeLabels, volumes.nodeLabels);
+  // Not back onto a host whose bcd just could not start it (lifecycle's resources-exhausted re-placement).
+  const avoid = exhaustedHosts(row, now);
   const outcome = await deps.capacity.reserve(
     tx,
     {
@@ -1098,6 +1129,7 @@ export async function scheduleHosted(
       during: { start: now, end: openEnded },
       ...(Object.keys(nodeLabels).length > 0 ? { nodeLabels } : {}),
       ...(volumes ? { onlyNodes: volumes.onlyNodes } : {}),
+      ...(avoid.length > 0 ? { excludeNodes: avoid } : {}),
     },
     admission ? { admission } : undefined,
   );

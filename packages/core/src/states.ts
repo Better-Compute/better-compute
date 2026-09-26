@@ -466,7 +466,9 @@ export type InstanceDesiredState = 'running' | 'stopped' | 'deleted' | 'paused';
 /**
  * `complete` finishes the current phase (scheduled, provisioned, started, rebooted, resized, deleted);
  * a finished resize names `running` or `stopped`. `lose` follows the host's loss; `recover` is the
- * host reporting the instance again, and `recreate` places it anew per pool policy. `pause` and
+ * host reporting the instance again, and `recreate` places it anew per pool policy, or (from
+ * `provisioning`, or `stopped` for a claimed warm instance) elsewhere when its host's bcd cannot
+ * start it (host admission, §3.8). `pause` and
  * `resume` (v0.5) follow the runtime's report: a paused instance keeps its host and allocation.
  */
 export const instanceVerbs = [
@@ -495,7 +497,13 @@ export const instanceStateTable = defineStateTable<InstanceState, InstanceVerb>(
   transitions: {
     pending: { schedule: 'scheduling', fail: 'error', delete: 'deleting' },
     scheduling: { complete: 'provisioning', fail: 'error', delete: 'deleting' },
-    provisioning: { complete: 'starting', fail: 'error', delete: 'deleting', lose: 'lost' },
+    provisioning: {
+      complete: 'starting',
+      fail: 'error',
+      delete: 'deleting',
+      lose: 'lost',
+      recreate: 'scheduling',
+    },
     starting: { complete: 'running', fail: 'error', delete: 'deleting', lose: 'lost' },
     running: {
       stop: 'stopped',
@@ -519,6 +527,7 @@ export const instanceStateTable = defineStateTable<InstanceState, InstanceVerb>(
       fail: 'error',
       delete: 'deleting',
       lose: 'lost',
+      recreate: 'scheduling',
     },
     rebooting: { complete: 'running', fail: 'error', delete: 'deleting', lose: 'lost' },
     resizing: {
