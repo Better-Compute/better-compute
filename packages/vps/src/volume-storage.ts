@@ -28,6 +28,8 @@ CREATE TABLE host_volume_storage (
 };
 
 const GiB = 2 ** 30;
+/** volumes.ts `volumeWork` (not imported: volumes.ts imports this module). */
+const volumeWorkKind = 'vps.volumes';
 /** A report is written when a value moved by at least this much, or the stored one is this old. */
 const writeDeltaBytes = GiB;
 const refreshSeconds = 300;
@@ -40,11 +42,22 @@ const refreshSeconds = 300;
 export function volumeStorageStatusHandler() {
   return async function vpsVolumeStorage(
     tx: SqlTx,
-    context: { nodeId: string },
+    context: { nodeId: string; work?: { enqueue(tx: SqlTx, kind: string, key: string): Promise<void> } },
     report: Pick<StatusReport, 'volumeStorage'>,
   ): Promise<boolean> {
     const storage = report.volumeStorage;
     if (!storage || storage.totalBytes === 0n) return false;
+    // The host applied a spec past a volume's deletion (the gateway advanced observed_generation in this
+    // transaction): finish it now, not at the next periodic vps.volumes pass.
+    if (context.work) {
+      const done = await tx.query<{ id: string }>(
+        `SELECT v.id FROM sandbox_volumes v JOIN nodes n ON n.id = v.node_id
+          WHERE v.node_id = $1 AND v.state = 'deleting'
+            AND n.generation > COALESCE(v.deleting_generation, -1) AND n.observed_generation >= n.generation`,
+        [context.nodeId],
+      );
+      for (const row of done.rows) await context.work.enqueue(tx, volumeWorkKind, row.id);
+    }
     const values = [storage.totalBytes, storage.availableBytes, storage.reservedBytes, storage.committedBytes, storage.outstandingBytes].map(String);
     const { rowCount } = await tx.query(
       `INSERT INTO host_volume_storage AS h (node_id, total_bytes, available_bytes, reserved_bytes, committed_bytes, outstanding_bytes)

@@ -22,7 +22,8 @@ import { checkNoLeaks, instancesSettled } from './support/vps-leaks.js';
 // - a sandbox always runs on its volumes' host;
 // - data survives: what a guest wrote on a volume is there for the next sandbox that attaches it, across reboots.
 
-const SANDBOXES = Number(process.env.E2E_VOLUME_SANDBOXES ?? 240);
+// 40 in the default suite (about a minute); the nightly's guarded job runs 240.
+const SANDBOXES = Number(process.env.E2E_VOLUME_SANDBOXES ?? 40);
 const VOLUMES = 12;
 const GiB = 2n ** 30n;
 const STORE = { totalBytes: 150n * GiB, reservedBytes: 10n * GiB };

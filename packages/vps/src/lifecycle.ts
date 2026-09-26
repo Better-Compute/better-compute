@@ -32,7 +32,7 @@ import {
 } from './instances.js';
 import { releaseAddress } from './ipam.js';
 import { specPlacement, type HostPlacement } from './placement.js';
-import { markSandboxReady } from './sandboxes.js';
+import { markSandboxReady, sandboxWork } from './sandboxes.js';
 import { instanceVolumeSpecs } from './volumes.js';
 
 // The Instance controller (PLAN.md §11.1, §3.6): converges `state` toward `desiredState`.
@@ -105,6 +105,8 @@ async function finishDeletion(
   if (row.nodeId) await deps.desired.invalidate(tx, row.nodeId);
   await publishInstance(deps, tx, deleted, 'instance.deleted');
   await dropSealedUserData(deps, row);
+  // A sandbox's deletion finishes with its instance, not a periodic sandbox pass later.
+  if (row.sandboxId !== undefined) await deps.work.enqueue(tx, sandboxWork, 'all');
   return deleted;
 }
 

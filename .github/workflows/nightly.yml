@@ -45,6 +45,8 @@ jobs:
     timeout-minutes: 120
     env:
       BETTER_COMPUTE_IAM_GUARD: throw
+      # tests/e2e/volumes.test.ts at full scale (the default suite runs 40).
+      E2E_VOLUME_SANDBOXES: '240'
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
