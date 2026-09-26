@@ -34,6 +34,35 @@ type telemetryConverger struct {
 	mu      sync.Mutex
 	applied *agentv1.TelemetrySection
 	cancel  context.CancelFunc
+	// The export's last outcome, for bcd status.
+	lastExport time.Time
+	lastError  string
+}
+
+// TelemetryStatus is the OTLP export as bcd status shows it.
+type TelemetryStatus struct {
+	Endpoint   string    `json:"endpoint"`
+	LastExport time.Time `json:"lastExport,omitzero"`
+	LastError  string    `json:"lastError,omitempty"`
+}
+
+func (t *telemetryConverger) status() *TelemetryStatus {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.applied.GetOtlpEndpoint() == "" {
+		return nil
+	}
+	return &TelemetryStatus{Endpoint: t.applied.GetOtlpEndpoint(), LastExport: t.lastExport, LastError: t.lastError}
+}
+
+func (t *telemetryConverger) record(err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if err == nil {
+		t.lastExport, t.lastError = time.Now(), ""
+	} else {
+		t.lastError = err.Error()
+	}
 }
 
 func (t *telemetryConverger) Section() converge.Section { return converge.SectionTelemetry }
@@ -88,6 +117,7 @@ func (t *telemetryConverger) start(sec *agentv1.TelemetrySection) {
 		t.cancel = nil
 	}
 	t.applied = proto.Clone(sec).(*agentv1.TelemetrySection)
+	t.lastExport, t.lastError = time.Time{}, ""
 	if sec.GetOtlpEndpoint() == "" || t.a.ctx == nil {
 		return
 	}
@@ -123,6 +153,7 @@ func (t *telemetryConverger) run(ctx context.Context, sec *agentv1.TelemetrySect
 	exp := &telemetry.Exporter{Endpoint: sec.GetOtlpEndpoint(), Resource: resource, Scope: "bcd", ScopeVersion: a.o.Version, Start: time.Now()}
 	lastErr := ""
 	report := func(err error) {
+		t.record(err)
 		if msg := errText(err); msg != lastErr {
 			lastErr = msg
 			if err != nil {

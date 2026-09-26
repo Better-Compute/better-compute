@@ -103,5 +103,50 @@ func runStatus(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "identity   certificate until %s, trust bundle v%d, signed intent %s\n",
 		st.CertificateNotAfter.UTC().Format(time.RFC3339), st.TrustVersion, signing)
+	printMachine(stdout, st)
 	return exitOK
+}
+
+// printMachine prints the GPUs, the Kubernetes worker and the telemetry export of a status.
+func printMachine(stdout io.Writer, st agent.Status) {
+	if len(st.GPUs) > 0 {
+		fmt.Fprintf(stdout, "gpus       %d\n", len(st.GPUs))
+		for _, g := range st.GPUs {
+			line := fmt.Sprintf("  %d %s  %3d%%  %3d C  %4d/%d W  %.1f/%.1f GiB", g.Index, g.UUID, g.UtilizationPct, g.TemperatureC,
+				g.PowerDrawW, g.PowerLimitW, float64(g.MemoryUsed)/(1<<30), float64(g.MemoryTotal)/(1<<30))
+			if g.Held != "" {
+				line += "  held by " + g.Held
+			}
+			if !g.Healthy {
+				line += "  UNHEALTHY"
+			}
+			fmt.Fprintln(stdout, line)
+		}
+	}
+	if k := st.Kubernetes; k != nil {
+		where := k.NodeName
+		if k.Server != "" {
+			where += " of " + k.Server
+		}
+		var offered []string
+		for _, r := range []string{"bcd.dev/gpu", "bcd.dev/gpu.mig", "bcd.dev/gpu.slot"} {
+			if n := k.Advertised[r]; n > 0 {
+				offered = append(offered, fmt.Sprintf("%d %s", n, r))
+			}
+		}
+		if len(offered) == 0 {
+			offered = []string{"no devices"}
+		}
+		fmt.Fprintf(stdout, "kubernetes %s node %s, offering %s\n", k.Mode, where, strings.Join(offered, ", "))
+	}
+	if t := st.Telemetry; t != nil {
+		state := "no export yet"
+		if !t.LastExport.IsZero() {
+			state = "last export " + t.LastExport.UTC().Format(time.RFC3339)
+		}
+		if t.LastError != "" {
+			state += ", failing: " + t.LastError
+		}
+		fmt.Fprintf(stdout, "telemetry  %s, %s\n", t.Endpoint, state)
+	}
 }

@@ -34,6 +34,11 @@ type Status struct {
 	CertificateNotAfter time.Time `json:"certificateNotAfter"`
 	TrustVersion        uint64    `json:"trustVersion"`
 	CommandSigning      bool      `json:"commandSigning"`
+
+	// GPUs, Kubernetes and Telemetry: the machine's side (status_gpu.go).
+	GPUs       []GPUStatus      `json:"gpus,omitempty"`
+	Kubernetes *KubeStatus      `json:"kubernetes,omitempty"`
+	Telemetry  *TelemetryStatus `json:"telemetry,omitempty"`
 }
 
 // SectionStatus is one NodeSpec section's last converger outcome.
@@ -44,8 +49,17 @@ type SectionStatus struct {
 	Message string `json:"message,omitempty"`
 }
 
-// Status reports the agent's state.
+// Status reports the agent's state, and the machine's: its GPUs read now, the kubelet device
+// plugins and the telemetry export.
 func (a *Agent) Status() Status {
+	st := a.agentStatus()
+	st.GPUs = a.gpuStatus()
+	st.Kubernetes = a.kubeStatus()
+	st.Telemetry = a.telemetry.status()
+	return st
+}
+
+func (a *Agent) agentStatus() Status {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	meta, _ := a.j.Meta()

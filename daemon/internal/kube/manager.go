@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect"
@@ -56,6 +57,17 @@ type Manager struct {
 	// stale remembers when a pod was first seen holding a released device (namespace/name → time).
 	stale     map[string]time.Time
 	labelSync time.Time
+	// advertised is each resource's device count as of the last pass (Advertised).
+	advertised atomic.Pointer[map[string]int]
+}
+
+// Advertised returns how many devices each bcd.dev resource advertises to the kubelet now (none
+// while the node is not a worker), for bcd status.
+func (m *Manager) Advertised() map[string]int {
+	if p := m.advertised.Load(); p != nil {
+		return *p
+	}
+	return map[string]int{}
 }
 
 func (m *Manager) init() {
@@ -180,6 +192,7 @@ func (m *Manager) Sync(ctx context.Context) {
 		}
 		m.stopAll()
 		m.plugins = map[string]*plugin{}
+		m.advertised.Store(&map[string]int{})
 		return
 	}
 	holds, err := ReadHolds(m.Sys)
@@ -189,6 +202,11 @@ func (m *Manager) Sync(ctx context.Context) {
 		return
 	}
 	want := m.atoms(holds)
+	counts := map[string]int{}
+	for resource, atoms := range want {
+		counts[resource] = len(atoms)
+	}
+	m.advertised.Store(&counts)
 	for _, resource := range Resources {
 		atoms := want[resource]
 		p := m.plugins[resource]
