@@ -1,6 +1,6 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Dialog, Heading, Modal, ModalOverlay } from 'react-aria-components';
 import { allCommands, allNav } from '@/lib/modules';
@@ -26,6 +26,12 @@ export function AdminShell({ children }: { children: ReactNode }) {
   const [palette, setPalette] = useState(false);
   const [keys, setKeys] = useState(false);
   const chord = useRef<{ key: string; at: number } | null>(null);
+  const mainRef = useRef<HTMLElement>(null);
+  const pathname = usePathname();
+
+  useEffect(() => {
+    mainRef.current?.scrollTo({ top: 0 });
+  }, [pathname]);
 
   useEffect(() => {
     try {
@@ -96,14 +102,16 @@ export function AdminShell({ children }: { children: ReactNode }) {
   }, [router, live, setLive, palette]);
 
   return (
-    <div className="flex min-h-dvh">
+    // App shell: the window never scrolls; <main> does, so the sidebar and top bar stay put and scroll position
+    // is per page (reset on navigation below).
+    <div className="flex h-dvh overflow-hidden">
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[70] focus:bg-surface-raised focus:px-3 focus:py-2">
         Skip to content
       </a>
       <Sidebar collapsed={collapsed} onToggle={toggleSidebar} />
       <div className="flex min-w-0 flex-1 flex-col">
         <Topbar onOpenPalette={() => setPalette(true)} />
-        <main id="main" className="min-w-0 flex-1 px-4 py-5 lg:px-6">
+        <main id="main" ref={mainRef} tabIndex={-1} className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-5 outline-none lg:px-6">
           {children}
         </main>
       </div>

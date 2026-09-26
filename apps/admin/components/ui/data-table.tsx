@@ -60,6 +60,11 @@ export interface DataTableProps<Row> {
   className?: string;
   /** Max height before the body scrolls (sticky header). */
   maxHeight?: number | string;
+  /** Controlled search text (drive it from the URL or chips); uncontrolled when omitted. */
+  query?: string;
+  onQueryChange?: (query: string) => void;
+  /** Marks a row with a left rail: red for 'crit', amber for 'warn'. */
+  rowTone?: (row: Row) => 'crit' | 'warn' | undefined;
 }
 
 function toCsv<Row>(rows: Row[], columns: Column<Row>[]) {
@@ -89,9 +94,17 @@ export function DataTable<Row>({
   exportName,
   className,
   maxHeight,
+  query: controlledQuery,
+  onQueryChange,
+  rowTone,
 }: DataTableProps<Row>) {
   const { density } = useWorkspace();
-  const [query, setQuery] = useState('');
+  const [localQuery, setLocalQuery] = useState('');
+  const query = controlledQuery ?? localQuery;
+  const setQuery = (next: string) => {
+    if (controlledQuery === undefined) setLocalQuery(next);
+    onQueryChange?.(next);
+  };
   const [sort, setSort] = useState(initialSort);
   const [hidden, setHidden] = useState(() => new Set(columns.filter((c) => c.defaultHidden).map((c) => c.id)));
   const [filters, setFilters] = useState<Record<string, string | undefined>>({});
@@ -336,6 +349,7 @@ export function DataTable<Row>({
               const id = rowId(row);
               const isActive = activeId === id;
               const isCursor = cursor === index;
+              const tone = rowTone?.(row);
               return (
                 <tr
                   key={id}
@@ -346,7 +360,9 @@ export function DataTable<Row>({
                     onRowClick && 'cursor-pointer hover:bg-background-secondary-default/60',
                     selected.has(id) && 'bg-signal-soft/60',
                     isActive && 'bg-background-secondary-default',
-                    isCursor && 'shadow-[inset_2px_0_0_var(--color-signal-fill)]',
+                    tone === 'crit' && 'shadow-[inset_3px_0_0_var(--color-red-500)]',
+                    tone === 'warn' && 'shadow-[inset_3px_0_0_var(--color-signal-fill)]',
+                    isCursor && 'outline outline-1 -outline-offset-1 outline-signal-fill/70',
                   )}
                 >
                   {bulkActions && (

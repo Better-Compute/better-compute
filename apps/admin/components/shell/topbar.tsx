@@ -27,7 +27,7 @@ export function Topbar({ onOpenPalette }: { onOpenPalette(): void }) {
   const rest = nav && pathname !== nav.href ? pathname.slice(nav.href.length).split('/').filter(Boolean) : [];
 
   return (
-    <header className="sticky top-0 z-30 flex h-12 shrink-0 items-center gap-3 border-b border-separator-border bg-background-full/85 px-4 backdrop-blur supports-[backdrop-filter]:bg-background-full/70">
+    <header className="relative z-30 flex h-12 shrink-0 items-center gap-3 border-b border-separator-border bg-background-full px-4">
       <ol className="flex min-w-0 flex-1 items-center gap-1 font-mono text-[12px]" aria-label="Breadcrumb">
         {nav ? (
           <>

@@ -22,7 +22,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle(
     <nav
       aria-label="Admin"
       className={cx(
-        'sticky top-0 flex h-dvh shrink-0 flex-col border-r border-separator-border bg-surface-sunken transition-[width] duration-200 ease-out',
+        'flex h-full shrink-0 flex-col border-r border-separator-border bg-surface-sunken transition-[width] duration-200 ease-out',
         collapsed ? 'w-14' : 'w-60',
       )}
     >

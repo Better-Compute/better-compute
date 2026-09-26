@@ -13,16 +13,14 @@ import {
   fmtNum,
   fmtPct,
   fmtRelative,
-  noise,
-  floorTo,
-  MINUTE,
-  poolNodeId,
+  nodeStates,
   pulseSeries,
   sites,
-  type PoolPulse,
+  type NodeState,
 } from '@/lib/data';
 import type { WidgetProps } from '@/lib/modules';
 import { useLive, useWorkspace } from '@/components/shell/workspace';
+import { useFeedback } from '@/components/ui/feedback';
 import { Gauge, Legend, Sparkline, StackedBar, TimeSeriesChart } from '@/components/ui/charts';
 import { Stat } from '@/components/ui/stat';
 import { Led, SeverityIcon, Tag, type Status } from '@/components/ui/signal';
@@ -136,7 +134,17 @@ export function AttentionQueue() {
   const items = useLive((now, scope) => attention(now, scope), { bucketMs: 10_000 });
   const { now } = useWorkspace();
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const { toast } = useFeedback();
   const open = items.filter((item) => !dismissed.has(item.id));
+  const ack = (id: string, title: string) => {
+    setDismissed((d) => new Set(d).add(id));
+    toast({
+      title: 'Acknowledged',
+      detail: title,
+      status: 'ok',
+      action: { label: 'undo', onAction: () => setDismissed((d) => { const next = new Set(d); next.delete(id); return next; }) },
+    });
+  };
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-3 border-b border-separator-border px-3 py-1.5 font-mono text-[11px] text-text-tertiary">
@@ -157,7 +165,7 @@ export function AttentionQueue() {
             </Link>
             <button
               type="button"
-              onClick={() => setDismissed((d) => new Set(d).add(item.id))}
+              onClick={() => ack(item.id, item.title)}
               className="h-6 shrink-0 self-start px-1.5 font-mono text-[10px] text-text-tertiary opacity-0 group-hover:opacity-100 hover:text-text-primary focus:opacity-100"
             >
               ack
@@ -168,29 +176,6 @@ export function AttentionQueue() {
       </ul>
     </div>
   );
-}
-
-type NodeState = 'busy' | 'idle' | 'degraded' | 'offline' | 'provisioning';
-
-function nodeStates(pulse: PoolPulse, t: number): { id: string; state: NodeState; load: number }[] {
-  const { pool, nodes } = pulse;
-  const bucket = floorTo(t, 20 * MINUTE) / MINUTE;
-  const ranked = Array.from({ length: pool.nodes }, (_, i) => ({ i, r: noise(`${pool.id}:${i}:fault`, bucket) }))
-    .sort((a, b) => a.r - b.r)
-    .map((entry) => entry.i);
-  const states = new Array<NodeState>(pool.nodes).fill('idle');
-  let k = 0;
-  for (let n = 0; n < nodes.offline; n++) states[ranked[k++]!] = 'offline';
-  for (let n = 0; n < nodes.provisioning; n++) states[ranked[k++]!] = 'provisioning';
-  for (let n = 0; n < nodes.degraded; n++) states[ranked[k++]!] = 'degraded';
-  return states.map((state, i) => {
-    const load = Math.min(1, Math.max(0, pulse.utilization + (noise(`${pool.id}:${i}:load`, Math.floor(t / (5 * MINUTE))) - 0.5) * 0.9));
-    return {
-      id: poolNodeId(pool, i),
-      state: state === 'idle' && load > 0.15 ? 'busy' : state,
-      load,
-    };
-  });
 }
 
 const cellStyle: Record<NodeState, string> = {

@@ -13,6 +13,7 @@ import {
 } from 'react-icons/ri';
 import { Button } from '@/components/base/buttons/button';
 import { PALETTE_EVENTS } from '@/components/shell/command-palette';
+import { useFeedback } from '@/components/ui/feedback';
 import { Drawer, Menu, ToolButton } from '@/components/ui/overlay';
 import { allWidgets, modules, widgetById, type WidgetDef } from '@/lib/modules';
 import { cx } from '@/utils/cx';
@@ -41,6 +42,7 @@ export function Dashboards() {
   const [editing, setEditing] = useState(false);
   const [catalog, setCatalog] = useState(false);
   const [maximized, setMaximized] = useState<WidgetDef | null>(null);
+  const { confirm, toast } = useFeedback();
 
   useEffect(() => {
     setState(loadState());
@@ -89,8 +91,16 @@ export function Dashboards() {
     if (name) setState((current) => ({ ...current, dashboards: current.dashboards.map((x) => (x.id === d.id ? { ...x, name } : x)) }));
   };
 
-  const remove = (d: Dashboard) => {
+  const remove = async (d: Dashboard) => {
     if (state.dashboards.length === 1) return;
+    const ok = await confirm({
+      title: `Delete “${d.name}”?`,
+      body: `Its ${d.items.length} widgets and their sizes go with it. Other dashboards are not affected.`,
+      confirmLabel: 'Delete dashboard',
+      danger: true,
+    });
+    if (!ok) return;
+    toast({ title: `Deleted “${d.name}”`, status: 'ok', action: { label: 'undo', onAction: () => setState((current) => ({ ...current, active: d.id, dashboards: [...current.dashboards, d] })) } });
     setState((current) => {
       const dashboards = current.dashboards.filter((x) => x.id !== d.id);
       return { ...current, dashboards, active: current.active === d.id ? dashboards[0]!.id : current.active };
@@ -214,7 +224,7 @@ function WidgetGrid({
     if (!element) return;
     const observer = new ResizeObserver(([entry]) => {
       const width = entry?.contentRect.width ?? 1200;
-      setColumns(width < 640 ? 1 : width < 1024 ? 6 : 12);
+      setColumns(width < 600 ? 1 : width < 860 ? 6 : 12);
     });
     observer.observe(element);
     return () => observer.disconnect();

@@ -66,6 +66,31 @@ export function poolPulse(pool: Pool, t: number): PoolPulse {
   };
 }
 
+export type NodeState = 'busy' | 'idle' | 'degraded' | 'offline' | 'provisioning';
+
+/**
+ * Which of a pool's nodes are offline, provisioning and degraded at `t` (the pulse only has counts): nodes are
+ * ranked by a per-node fault draw that changes every 20 minutes, and the lowest ranks take the fault states in
+ * that order. The rest are busy or idle by their own load. Shared by the Fleet wall and the fleet module, so a
+ * node is offline on every page at once.
+ */
+export function nodeStates(pulse: PoolPulse, t: number): { id: string; index: number; state: NodeState; load: number }[] {
+  const { pool, nodes } = pulse;
+  const bucket = floorTo(t, 20 * MINUTE) / MINUTE;
+  const ranked = Array.from({ length: pool.nodes }, (_, i) => ({ i, r: noise(`${pool.id}:${i}:fault`, bucket) }))
+    .sort((a, b) => a.r - b.r)
+    .map((entry) => entry.i);
+  const states = new Array<NodeState>(pool.nodes).fill('idle');
+  let k = 0;
+  for (let n = 0; n < nodes.offline; n++) states[ranked[k++]!] = 'offline';
+  for (let n = 0; n < nodes.provisioning; n++) states[ranked[k++]!] = 'provisioning';
+  for (let n = 0; n < nodes.degraded; n++) states[ranked[k++]!] = 'degraded';
+  return states.map((state, i) => {
+    const load = clamp(pulse.utilization + (noise(`${pool.id}:${i}:load`, Math.floor(t / (5 * MINUTE))) - 0.5) * 0.9, 0, 1);
+    return { id: poolNodeId(pool, i), index: i, state: state === 'idle' && load > 0.15 ? 'busy' : state, load };
+  });
+}
+
 export interface FleetPulse {
   t: number;
   nodes: { total: number; ready: number; degraded: number; offline: number; provisioning: number };
@@ -327,19 +352,24 @@ const attentionTemplates: ((key: string, t: number) => Omit<AttentionItem, 'id' 
 /** The open items at `t`: each slot turns over every few hours, so the queue changes slowly and plausibly. */
 export function attention(t: number, scope?: Scope): AttentionItem[] {
   const items: AttentionItem[] = [];
-  for (let slot = 0; slot < 9; slot++) {
+  for (let slot = 0; slot < attentionTemplates.length; slot++) {
     const period = (2 + slot) * HOUR;
-    const bucket = floorTo(t + slot * 17 * MINUTE, period);
+    // Slots turn over at staggered times; an item opened somewhere between its slot's start and now.
+    const offset = slot * 17 * MINUTE;
+    const bucket = floorTo(t + offset, period) - offset;
     const key = `att:${slot}:${bucket}`;
-    if (noise(key, 99) < 0.28) continue;
-    // One template per slot (slot 8 wraps to a second XID on another node), so the queue never repeats itself.
+    if (noise(key, 99) < 0.2) continue;
+    // One template per slot, so the queue never repeats itself.
     const template = attentionTemplates[slot % attentionTemplates.length]!;
     const item = template(key, t);
     if (scope?.siteId && !item.detail.includes(scope.siteId) && !item.title.includes(scope.siteId)) {
       if (item.subject.startsWith('node/') || item.subject.startsWith('site/') || item.subject.startsWith('pool/'))
         continue;
     }
-    items.push({ ...item, id: key, at: bucket + Math.floor(noise(key, 101) * Math.min(period, t - bucket + 1)) });
+    // Fixed open time within the slot; not open yet → not in the queue yet.
+    const at = bucket + Math.floor(noise(key, 101) * period * 0.6);
+    if (at > t) continue;
+    items.push({ ...item, id: key, at });
   }
   const rank: Record<Severity, number> = { critical: 0, warning: 1, info: 2 };
   return items.sort((a, b) => rank[a.severity] - rank[b.severity] || b.at - a.at);
