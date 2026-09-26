@@ -43,6 +43,10 @@ func kubeChecks(cfg *config.Config, sys hostconfig.System, active func(unit stri
 		out = append(out, doctorCheck{"ok", "kubelet", fmt.Sprintf("node %s of %s", state.NodeName, state.Server)})
 	}
 	if state.GPU {
+		// bcd withdraws every GPU while another path hands them out (ForeignGpuExposure).
+		if msg := kube.ToolkitExposure(sys); msg != "" {
+			out = append(out, doctorCheck{"fail", "gpu-isolation", msg})
+		}
 		if _, err := sys.ReadDir("/var/lib/kubelet/device-plugins"); err != nil {
 			out = append(out, doctorCheck{"warn", "device-plugin", "no /var/lib/kubelet/device-plugins: bcd cannot hand GPUs to the kubelet"})
 		} else {

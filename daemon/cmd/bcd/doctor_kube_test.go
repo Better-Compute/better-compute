@@ -41,6 +41,12 @@ func TestKubeChecks(t *testing.T) {
 	if got[1].status != "ok" || got[1].detail != "node gpu-7 of https://10.0.0.1:6443" || got[2].status != "ok" {
 		t.Fatalf("joined = %+v", got)
 	}
+	// A toolkit that lets pods pick GPUs by environment variable (its default) fails GPU isolation.
+	sys.Set(kube.ToolkitConfigs[0], "[nvidia-container-runtime]\n")
+	got = kubeChecks(allowed, sys, active)
+	if len(got) != 4 || got[2].check != "gpu-isolation" || got[2].status != "fail" {
+		t.Fatalf("toolkit = %+v", got)
+	}
 }
 
 func TestGpuChecks(t *testing.T) {

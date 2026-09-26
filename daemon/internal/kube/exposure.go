@@ -51,10 +51,10 @@ var ToolkitConfigs = []string{
 
 var envvarUnprivileged = regexp.MustCompile(`(?m)^\s*accept-nvidia-visible-devices-envvar-when-unprivileged\s*=\s*(true|false)\s*$`)
 
-// toolkitExposure reports a toolkit config that lets an unprivileged pod pick GPUs with
+// ToolkitExposure reports a toolkit config that lets an unprivileged pod pick GPUs with
 // NVIDIA_VISIBLE_DEVICES: the key true, or absent (the toolkit's default is true). An unreadable or
 // missing file is not evidence.
-func toolkitExposure(sys hostconfig.System) string {
+func ToolkitExposure(sys hostconfig.System) string {
 	for _, path := range ToolkitConfigs {
 		b, err := sys.ReadFile(path)
 		if errors.Is(err, fs.ErrNotExist) || err != nil {
@@ -126,7 +126,7 @@ func (m *Manager) exposure(ctx context.Context) *Condition {
 	if foreign, err := m.foreignGpuResources(ctx); err == nil && len(foreign) > 0 {
 		why = append(why, "the kubelet also offers "+strings.Join(foreign, ", ")+" (disable that device plugin: devicePlugin.enabled=false in the GPU operator)")
 	}
-	if msg := toolkitExposure(m.Sys); msg != "" {
+	if msg := ToolkitExposure(m.Sys); msg != "" {
 		why = append(why, msg)
 	}
 	if len(why) == 0 {
