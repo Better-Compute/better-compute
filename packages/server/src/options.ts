@@ -19,6 +19,7 @@ import {
   type Notifier,
   type ProviderDefinition,
   type SchedulerOptions,
+  type PoolPolicyValidator,
   type SchedulerPlugin,
   type SecretStore,
   type SinkOptions,
@@ -436,6 +437,15 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
   }
   const ports = resolvePorts(options.ports);
   const capacity = resolveCapacity(options.capacity, options.scheduler, schedulerPlugins);
+  // Pool policy checks the modules own (provision's host units): pools.create/update run them.
+  const policyValidators = listed.filter(
+    (extension) =>
+      isRecord(extension) &&
+      extension.extension === 'pool-policy' &&
+      typeof extension.validate === 'function',
+  ) as PoolPolicyValidator[];
+  if (policyValidators.length)
+    capacity.policyValidators = [...(capacity.policyValidators ?? []), ...policyValidators];
   const join = options.pki?.join;
   if (join !== undefined) {
     requireMethods(join, 'pki.join', [

@@ -3,6 +3,7 @@ import {
   type CommandKindSpec,
   type ComputeModule,
   type ModuleContext,
+  type PoolPolicyValidator,
   type ProfileDocument,
   type ReconcileContext,
   type Reconciler,
@@ -28,7 +29,20 @@ import { provisionMigrations } from './migrations.js';
 import type { ImageSignatureVerifier } from './images.js';
 import { profileSource } from './profiles.js';
 import { userDataStep, type UserDataOptions } from './renderers.js';
-import { builtinConfigUnits, provisionNodeSpec, type ConfigUnitDefinition } from './config-units.js';
+import {
+  builtinConfigUnits,
+  provisionNodeSpec,
+  validatePoolHostPolicy,
+  type ConfigUnitDefinition,
+} from './config-units.js';
+
+/** Refuses a pool policy whose host units (hugepages, kernel modules, kubernetes, sharing) nodes could not take. */
+export const poolHostPolicyValidator: PoolPolicyValidator = Object.freeze({
+  extension: 'pool-policy',
+  id: 'provision.host-units',
+  validate: (policy: Readonly<Record<string, unknown>>, pool: { class: string; sharing?: string }) =>
+    validatePoolHostPolicy(policy, pool.sharing ?? null),
+});
 import {
   defaultRemediationPolicy,
   healthWorkKind,
@@ -139,7 +153,7 @@ export function provisionModule(options: ProvisionOptions = {}): ProvisionModule
   const module = defineModule({
     name: 'provision',
     migrations: [...provisionMigrations],
-    extensions: steps.list().filter((step) => !borrowed.has(step)),
+    extensions: [...steps.list().filter((step) => !borrowed.has(step)), poolHostPolicyValidator],
     profiles: moduleProfiles.filter((profile) => !borrowedProfiles.has(profile)),
     nodeSpec: provisionNodeSpec(
       [...builtinConfigUnits, ...(options.configUnits ?? [])],

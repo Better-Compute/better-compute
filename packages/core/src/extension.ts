@@ -64,7 +64,8 @@ export type ExtensionKind =
   | 'sink'
   | 'provider'
   | 'image-source'
-  | 'node-adapter';
+  | 'node-adapter'
+  | 'pool-policy';
 
 /** Anything a module contributes through `extensions`. `kind:id@version` must be unique. */
 export interface Extension {
@@ -549,6 +550,20 @@ export interface DuplexStream {
 }
 
 /** How the control plane reaches a node: `bcd/v1`, `provider-api/v1`, later `agentless-ssh/v1`. */
+/**
+ * Checks the parts of a pool policy its module reads (e.g. provision's host units: hugepages,
+ * kernel modules, `kubernetes`), as the nodes will get them. `pools.create` and `pools.update` run every
+ * listed validator before writing, so a bad policy is refused there (`INVALID_INPUT`) rather than
+ * breaking every node's spec later. Throw a `ComputeError` to refuse.
+ */
+export interface PoolPolicyValidator extends Extension {
+  readonly extension: 'pool-policy';
+  validate(
+    policy: Readonly<Record<string, unknown>>,
+    pool: { class: string; sharing?: string },
+  ): Promise<void>;
+}
+
 export interface NodeAdapter extends Extension {
   readonly extension: 'node-adapter';
   supports(node: NodeRecord): boolean;

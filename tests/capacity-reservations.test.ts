@@ -319,6 +319,37 @@ describe('capacityModule API surface', () => {
       }
   });
 
+  it('runs the pool-policy validators on pools.create and pools.update', async () => {
+    const seen: unknown[] = [];
+    const checked = capacityModule({
+      policyValidators: [
+        {
+          extension: 'pool-policy',
+          id: 'test.hugepages',
+          async validate(policy, pool) {
+            seen.push({ policy, pool });
+            if (policy.hugepages !== undefined) throw new Error('hugepages.count must be > 0');
+          },
+        },
+      ],
+    }).api!(moduleContext(db)) as CapacityApi;
+    const who = { who: { ...caller, tenantId: 'root', identityId: 'usr_root' }, api: checked };
+    const base = { tenantId: 'root', siteId: 'site_01jz00000000000000000000aa', class: 'metal-host' };
+    await expect(
+      call('pools', 'create', { ...base, policy: { hugepages: { size: '1Gi', count: 0 } } }, who),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT', message: 'policy: hugepages.count must be > 0' });
+    const pool = (await call('pools', 'create', { ...base, sharing: 'mig' }, who)) as { id: string };
+    expect(seen.at(-1)).toEqual({ policy: {}, pool: { class: 'metal-host', sharing: 'mig' } });
+    await expect(
+      call(
+        'pools',
+        'update',
+        { tenantId: 'root', poolId: pool.id, policy: { hugepages: { size: '2Mi', count: 0 } } },
+        who,
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
   it('declares its migration, reconcilers and a devices node spec', () => {
     expect(module.name).toBe('capacity');
     expect(module.migrations!.map((migration) => migration.name)).toEqual([

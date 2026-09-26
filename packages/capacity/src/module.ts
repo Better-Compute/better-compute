@@ -19,6 +19,7 @@ import {
   type PoolAgent,
   type PoolClass,
   type PoolPolicy,
+  type PoolPolicyValidator,
   type Placer,
   type PlacementOutcome,
   type PlacementRequest,
@@ -678,6 +679,32 @@ export interface CapacityModuleOptions extends PlacementOptions {
    * placement.
    */
   onPlacement?: PlacementObserver;
+  /**
+   * Other modules' checks of the policy parts they read (`pool-policy` extensions, e.g. provision's
+   * host units), run by `pools.create` and `pools.update` before writing a policy.
+   */
+  policyValidators?: readonly PoolPolicyValidator[];
+}
+
+/** Runs the `pool-policy` validators; any other failure than a ComputeError is `INVALID_INPUT`. */
+async function validatePolicy(
+  options: CapacityModuleOptions,
+  policy: PoolPolicy,
+  pool: { class: string; sharing?: string },
+): Promise<void> {
+  for (const validator of options.policyValidators ?? [])
+    try {
+      await validator.validate(policy as Readonly<Record<string, unknown>>, {
+        class: pool.class,
+        ...(pool.sharing !== undefined ? { sharing: pool.sharing } : {}),
+      });
+    } catch (error) {
+      if (error instanceof ComputeError) throw error;
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `policy: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
 }
 
 function depsFrom(
@@ -784,6 +811,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
         );
         if (site.rows[0]?.owner_tenant_id !== input.tenantId)
           throw new ComputeError('NOT_FOUND', `Site ${input.siteId} not found`);
+        await validatePolicy(options, input.policy, input);
         const pool: Pool = {
           id: poolId,
           ownerTenantId: input.tenantId,
@@ -919,7 +947,10 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
         const tx = context.sql;
         const pool = await ownedPool(tx, input.tenantId, input.poolId, true);
         const next: Pool = { ...pool, version: pool.version + 1 };
-        if (input.policy !== undefined) next.policy = input.policy;
+        if (input.policy !== undefined) {
+          await validatePolicy(options, input.policy, pool);
+          next.policy = input.policy;
+        }
         if (next.policy.singleTenant === true && pool.policy.singleTenant !== true)
           await assertSingleTenantable(tx, pool);
         if (input.gpuModel !== undefined) next.gpuModel = input.gpuModel;
