@@ -50,8 +50,15 @@ type Manager struct {
 	Labels   func() map[string]string
 	// LabelInterval spaces the hosted label syncs (default 1 min).
 	LabelInterval time.Duration
+	// GPUAPI is how a hosted node offers its GPUs (APIDevicePlugin, the default, or APIDRA); a node
+	// k8s-join joined takes its record's gpuApi.
+	GPUAPI string
+	// RegistryDir is the kubelet's plugins_registry and DRAPluginDir the DRA driver's own directory
+	// (defaults under /var/lib/kubelet).
+	RegistryDir, DRAPluginDir string
 
 	trigger chan struct{}
+	dra     *draDriver
 	once    sync.Once
 	plugins map[string]*plugin
 	// stale remembers when a pod was first seen holding a released device (namespace/name → time).
@@ -81,6 +88,13 @@ func (m *Manager) init() {
 		if m.PodResources == "" {
 			m.PodResources = defaultPodResourcesSock
 		}
+		if m.RegistryDir == "" {
+			m.RegistryDir = defaultRegistryDir
+		}
+		if m.DRAPluginDir == "" {
+			m.DRAPluginDir = defaultDRAPluginDir
+		}
+		m.dra = &draDriver{m: m}
 		if m.Interval <= 0 {
 			m.Interval = 5 * time.Second
 		}
@@ -129,9 +143,28 @@ func (m *Manager) Run(ctx context.Context) {
 }
 
 func (m *Manager) stopAll() {
+	m.stopPlugins()
+	if m.dra != nil {
+		m.dra.stop()
+	}
+}
+
+func (m *Manager) stopPlugins() {
 	for _, p := range m.plugins {
 		p.stop()
 	}
+	m.plugins = map[string]*plugin{}
+}
+
+// api is the GPU API of this node: its k8s-join record's, else GPUAPI; the device plugins by default.
+func (m *Manager) api() string {
+	if state, ok, err := ReadState(m.Sys); err == nil && ok && state.GPUAPI != "" {
+		return state.GPUAPI
+	}
+	if m.GPUAPI == APIDRA {
+		return APIDRA
+	}
+	return APIDevicePlugin
 }
 
 func (m *Manager) logf(msg string, args ...any) { m.Log.Info(msg, args...) }
@@ -191,7 +224,6 @@ func (m *Manager) Sync(ctx context.Context) {
 			m.Log.Info("device plugins stopped: the node is not a bcd-joined Kubernetes worker with gpu on")
 		}
 		m.stopAll()
-		m.plugins = map[string]*plugin{}
 		m.advertised.Store(&map[string]int{})
 		return
 	}
@@ -207,6 +239,21 @@ func (m *Manager) Sync(ctx context.Context) {
 		counts[resource] = len(atoms)
 	}
 	m.advertised.Store(&counts)
+	if m.api() == APIDRA {
+		// DRA or the device plugins, never both: one GPU offered twice could go to two pods.
+		m.stopPlugins()
+		if !m.dra.serving() {
+			if err := m.dra.start(); err != nil {
+				m.Log.Warn("DRA driver", "error", err.Error())
+			}
+		}
+		if err := m.dra.publish(ctx, want); err != nil {
+			m.Log.Warn("DRA ResourceSlice", "error", err.Error())
+		}
+		m.syncLabels(ctx)
+		return
+	}
+	m.dra.stop()
 	for _, resource := range Resources {
 		atoms := want[resource]
 		p := m.plugins[resource]

@@ -121,6 +121,9 @@ type Options struct {
 	// KubernetesAllowed are the clusters the k8s-join unit may join ([kubernetes] allowed_clusters);
 	// empty allows any when bcd node applies units itself (as root), none under bcd helper.
 	KubernetesAllowed []kube.Cluster
+	// KubernetesGPUAPI is how a hosted node offers its GPUs ([kubernetes] gpu_api: kube.APIDevicePlugin
+	// or kube.APIDRA); a node k8s-join joined follows its unit's gpuApi.
+	KubernetesGPUAPI string
 }
 
 // Agent is the node agent.

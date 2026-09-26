@@ -47,8 +47,10 @@ type Settings struct {
 	NodeLabels        map[string]string `json:"nodeLabels,omitempty"`
 	// Taints are "key[=value]:Effect".
 	Taints []string `json:"taints,omitempty"`
-	// GPU exposes compute-bound GPUs to the kubelet through bcd's device plugin (default true).
-	GPU *bool `json:"gpu,omitempty"`
+	// GPU exposes compute-bound GPUs to the kubelet (default true), through bcd's device plugins or,
+	// with GPUAPI "dra", its DRA driver (gpu.bcd.dev ResourceSlices).
+	GPU    *bool  `json:"gpu,omitempty"`
+	GPUAPI string `json:"gpuApi,omitempty"`
 }
 
 var (
@@ -140,6 +142,9 @@ func parseSettings(raw json.RawMessage) (*parsed, error) {
 	}
 	if s.TokenRef == "" {
 		return nil, terminal("tokenRef is required")
+	}
+	if s.GPUAPI != "" && s.GPUAPI != APIDevicePlugin && s.GPUAPI != APIDRA {
+		return nil, terminal("gpuApi must be %q or %q", APIDevicePlugin, APIDRA)
 	}
 	if s.KubernetesVersion != "" {
 		if !versionPattern.MatchString(s.KubernetesVersion) {

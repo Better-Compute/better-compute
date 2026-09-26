@@ -112,6 +112,10 @@ func newKubeManager(a *Agent) *kube.Manager {
 		Hosted:   a.o.ExternalHost,
 		NodeName: os.Getenv("NODE_NAME"),
 		Labels:   a.kubeLabels,
+		GPUAPI:   a.o.KubernetesGPUAPI,
+		// The DRA driver's sockets live beside the device plugins' (fakehw maps them under its root).
+		RegistryDir:  a.host.Path("/var/lib/kubelet/plugins_registry"),
+		DRAPluginDir: a.host.Path("/var/lib/kubelet/plugins/" + kube.DRADriverName),
 	}
 }
 

@@ -403,6 +403,10 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
 		return exitFailure
 	}
+	if api := cfg.KubernetesGPUAPI; api != "" && api != kube.APIDevicePlugin && api != kube.APIDRA {
+		fmt.Fprintf(stderr, "bcd %s: [kubernetes] gpu_api must be %q or %q\n", mode, kube.APIDevicePlugin, kube.APIDRA)
+		return exitFailure
+	}
 	var update *agent.UpdateOptions
 	if mode == "node" || mode == "site" {
 		if update, err = updateOptions(cfg, log); err != nil {
@@ -447,6 +451,7 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		Update:         update,
 		// k8s-join: under bcd helper the helper enforces the allowlist itself (and requires one).
 		KubernetesAllowed: kubernetesAllowed,
+		KubernetesGPUAPI:  cfg.KubernetesGPUAPI,
 		GPUSampler:        gpuSampler(),
 		// [host] units = false: the GPU operator (or another tool) owns the host's configuration.
 		ExternalHost: cfg.ExternalHost,

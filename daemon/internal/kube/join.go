@@ -51,8 +51,9 @@ type State struct {
 	// Labels and Taints are what the unit set, so it can remove what the spec drops.
 	Labels []string `json:"labels"`
 	Taints []string `json:"taints"`
-	// GPU lets the device plugin register.
-	GPU bool `json:"gpu"`
+	// GPU lets the device plugins (or the DRA driver, GPUAPI "dra") offer GPUs.
+	GPU    bool   `json:"gpu"`
+	GPUAPI string `json:"gpuApi,omitempty"`
 }
 
 // ReadState reads StateFile; ok is false when the node was never joined by bcd.
@@ -145,7 +146,7 @@ func (u JoinUnit) Plan(ctx context.Context, sys hostconfig.System, settings json
 	labels := u.desiredLabels(p)
 	if !joined {
 		actions = append(actions, u.joinSteps(sys, p, name, labels)...)
-		actions = append(actions, writeState(sys, State{Server: p.Server, NodeName: name, Labels: keys(labels), Taints: taintStrings(p.taints), GPU: p.gpu}))
+		actions = append(actions, writeState(sys, State{Server: p.Server, NodeName: name, Labels: keys(labels), Taints: taintStrings(p.taints), GPU: p.gpu, GPUAPI: p.GPUAPI}))
 		return append(actions, stop(nil)), nil
 	}
 	if !sameServer(server, p) {
@@ -159,7 +160,7 @@ func (u JoinUnit) Plan(ctx context.Context, sys hostconfig.System, settings json
 		return nil, err
 	}
 	actions = append(actions, steps...)
-	want := State{Server: p.Server, NodeName: name, Labels: keys(labels), Taints: taintStrings(p.taints), GPU: p.gpu}
+	want := State{Server: p.Server, NodeName: name, Labels: keys(labels), Taints: taintStrings(p.taints), GPU: p.gpu, GPUAPI: p.GPUAPI}
 	if !equalState(state, want) {
 		actions = append(actions, writeState(sys, want))
 	}
