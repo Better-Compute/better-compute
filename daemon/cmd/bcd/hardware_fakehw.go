@@ -85,9 +85,11 @@ func newSimHost(dataDir string, seed uint64, onReboot func()) (agent.Host, error
 	}, nil
 }
 
-// newRuntimes is the fake instance runtime of a fakehw VPS host (FakeHypervisor's default id).
+// newRuntimes is the fake instance runtime of a fakehw VPS host (FakeHypervisor's default id); it
+// writes the libvirt plan of each domain too (plannedFake).
 func newRuntimes(dataDir, bootID string) []runtime.Runtime {
-	return []runtime.Runtime{&runtime.Fake{RuntimeName: "libvirt-kvm", Path: filepath.Join(dataDir, "fakehw-runtime.json"), BootID: bootID}}
+	fake := &runtime.Fake{RuntimeName: "libvirt-kvm", Path: filepath.Join(dataDir, "fakehw-runtime.json"), BootID: bootID}
+	return []runtime.Runtime{newPlannedFake(dataDir, fake)}
 }
 
 func newUUID() string {

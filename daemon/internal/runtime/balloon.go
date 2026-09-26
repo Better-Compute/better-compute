@@ -7,9 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
-	"sync"
 )
 
 // Ballooner is a runtime that resizes a running guest's virtio balloon (InstancePlacement.balloon):
@@ -131,34 +131,57 @@ func (c *CloudHypervisor) Balloons(ctx context.Context) (map[string]uint64, erro
 	return out, nil
 }
 
-// The fake's balloons, by runtime file and domain (the fake keeps no balloon in its JSON state).
-var fakeBalloons sync.Map
+// fakeBalloonsFile keeps the fake's balloons beside its state (<Path>.balloons, id → bytes), so they
+// outlive the process and tests read them as they read the domains.
+func (f *Fake) fakeBalloonsFile() string { return f.Path + ".balloons" }
 
-// SetBalloon records the size (never above the domain's memory).
+func (f *Fake) loadBalloons() map[string]uint64 {
+	sizes := map[string]uint64{}
+	if raw, err := os.ReadFile(f.fakeBalloonsFile()); err == nil {
+		_ = json.Unmarshal(raw, &sizes)
+	}
+	return sizes
+}
+
+// SetBalloon records the size (never above the domain's memory) of a running domain.
 func (f *Fake) SetBalloon(ctx context.Context, id string, guestBytes uint64) error {
 	domains, err := f.List(ctx)
 	if err != nil {
 		return err
 	}
 	for _, d := range domains {
-		if d.ID == id {
-			fakeBalloons.Store(f.Path+"\x00"+id, min(guestBytes, d.MemoryBytes))
-			return nil
+		if d.ID != id {
+			continue
 		}
+		if d.State != StateRunning {
+			return fmt.Errorf("domain %s is not running", id)
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		sizes := f.loadBalloons()
+		sizes[id] = min(guestBytes, d.MemoryBytes)
+		raw, err := json.Marshal(sizes)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(f.fakeBalloonsFile(), raw, 0o600)
 	}
 	return fmt.Errorf("no domain %s", id)
 }
 
-// Balloons returns the recorded sizes of the fake's domains.
+// Balloons returns the recorded sizes of the fake's running domains.
 func (f *Fake) Balloons(ctx context.Context) (map[string]uint64, error) {
 	domains, err := f.List(ctx)
 	if err != nil {
 		return nil, err
 	}
+	f.mu.Lock()
+	sizes := f.loadBalloons()
+	f.mu.Unlock()
 	out := map[string]uint64{}
 	for _, d := range domains {
-		if v, ok := fakeBalloons.Load(f.Path + "\x00" + d.ID); ok {
-			out[d.ID] = v.(uint64)
+		if v, ok := sizes[d.ID]; ok && d.State == StateRunning {
+			out[d.ID] = v
 		}
 	}
 	return out, nil
