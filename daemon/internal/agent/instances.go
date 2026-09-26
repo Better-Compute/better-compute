@@ -46,16 +46,41 @@ type instancesConverger struct {
 	volumes *runtime.Volumes
 }
 
-// ensureVolumes creates and grows the section's volumes; it returns the ones that failed.
-func (c *instancesConverger) ensureVolumes(section *agentv1.InstancesSection) map[string]string {
-	failed := map[string]string{}
+// ensureVolumes creates and grows the section's volumes; it returns the ones that failed, and the
+// ones that grew.
+func (c *instancesConverger) ensureVolumes(section *agentv1.InstancesSection) (failed map[string]string, grown map[string]bool) {
+	failed, grown = map[string]string{}, map[string]bool{}
 	for _, hv := range section.GetVolumes() {
-		if err := c.volumes.Ensure(hv); err != nil {
+		grew, err := c.volumes.Ensure(hv)
+		if err != nil {
 			failed[hv.GetVolumeId()] = err.Error()
 			c.a.log.Warn("volume not ensured", "volume", hv.GetVolumeId(), "err", err.Error())
 		}
+		grown[hv.GetVolumeId()] = grew
 	}
-	return failed
+	return failed, grown
+}
+
+// tellGrownVolumes tells a running or paused instance's runtime which of its volumes grew this pass,
+// so the guest sees the new size now rather than at its next start.
+func (c *instancesConverger) tellGrownVolumes(ctx context.Context, r runtime.Runtime, spec *agentv1.InstanceSpec, grown map[string]bool) {
+	g, ok := r.(runtime.VolumeGrower)
+	if !ok {
+		return
+	}
+	for _, iv := range spec.GetVolumes() {
+		if !grown[iv.GetVolumeId()] {
+			continue
+		}
+		v, err := c.volumes.Get(iv.GetVolumeId())
+		if err == nil {
+			err = g.GrowVolume(ctx, spec.GetInstanceId(), runtime.AttachedVolume{Volume: v, ReadOnly: iv.GetReadOnly()})
+		}
+		if err != nil {
+			c.a.log.Warn("the guest was not told its volume grew; it sees it at its next start",
+				"instance", spec.GetInstanceId(), "volume", iv.GetVolumeId(), "err", err.Error())
+		}
+	}
 }
 
 // volumeRefusals are the instances whose volumes cannot be attached: one the section does not list,
@@ -265,7 +290,8 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 	}
 	specErrors := map[string]string{}
 	// Volumes exist (and have grown) before the instances that attach them are defined.
-	refusedVolumes := volumeRefusals(section, c.ensureVolumes(section))
+	failedVolumes, grownVolumes := c.ensureVolumes(section)
+	refusedVolumes := volumeRefusals(section, failedVolumes)
 	// The rules go in before any domain starts: taps are matched by name, so they apply from the
 	// first frame.
 	unenforceable := c.enforceNetworkPolicies(ctx, section.GetInstances())
@@ -386,6 +412,7 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 			specErrors[id] = err.Error()
 			continue
 		}
+		c.tellGrownVolumes(ctx, r, spec, grownVolumes)
 		// A bcx runtime is told its taps' names; one that did not use them would run outside the
 		// rules, which match by name: it stops (fail closed).
 		if _, plugin := r.(*PluginRuntime); plugin && tapRulesApply(spec) &&

@@ -107,6 +107,8 @@ type chRecord struct {
 	// to the running VMM's user (read-write ones), which stop gives back.
 	Volumes      []AttachedVolume `json:"volumes,omitempty"`
 	GivenVolumes []string         `json:"givenVolumes,omitempty"`
+	// StartedVolumes are the volume paths the running VM was started with, in disk order (vol<i>).
+	StartedVolumes []string `json:"startedVolumes,omitempty"`
 }
 
 // union adds b's strings to a's, once.
@@ -142,6 +144,7 @@ func (c *CloudHypervisor) instanceDir(id string) string { return filepath.Join(c
 func (c *CloudHypervisor) socket(id string) string {
 	return filepath.Join(c.instanceDir(id), "api.sock")
 }
+
 // unitName always carries its ".service" suffix: an instance id ending in ".slice" or ".mount"
 // never names another kind of unit (security review 12 L7).
 func unitName(id string) string { return "bcd-ch-" + id + ".service" }
@@ -766,7 +769,9 @@ func (c *CloudHypervisor) start(ctx context.Context, r *chRecord, paused bool) e
 	// A read-write volume is the VMM user's while it runs (exclusive: the agent never attaches one
 	// read-write beside anything else); a read-only one stays root's, readable (its 0700 directory
 	// is closed to everyone the unit's bind mount does not reach).
+	r.StartedVolumes = nil
 	for _, v := range r.Volumes {
+		r.StartedVolumes = append(r.StartedVolumes, v.Path)
 		uid, mode := 0, os.FileMode(0o644)
 		if !v.ReadOnly {
 			uid, mode = int(r.UID), 0o600
@@ -1226,6 +1231,26 @@ func restoredConfig(saved, fresh map[string]any, spec *agentv1.InstanceSpec) (ma
 		}
 	}
 	return cfg, nil
+}
+
+// GrowVolume tells a running (or paused) VM one of its volumes grew (vm.resize-disk to the file's
+// size). A volume the VM was not started with has nothing to be told.
+func (c *CloudHypervisor) GrowVolume(ctx context.Context, id string, v AttachedVolume) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	r, err := c.record(id)
+	if err != nil {
+		return err
+	}
+	if st, _ := c.state(ctx, id); st == StateStopped {
+		return nil
+	}
+	i := slices.Index(r.StartedVolumes, v.Path)
+	if i < 0 {
+		return nil
+	}
+	_, err = c.api(ctx, id, http.MethodPut, "vm.resize-disk", map[string]any{"disk": fmt.Sprintf("vol%d", i), "desired_size": v.SizeBytes})
+	return err
 }
 
 // Console opens a running managed instance's serial console (its socket).

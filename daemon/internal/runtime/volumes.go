@@ -52,46 +52,48 @@ type volumeMeta struct {
 func (v *Volumes) path(id string) string     { return filepath.Join(v.Dir, id+".raw") }
 func (v *Volumes) metaPath(id string) string { return filepath.Join(v.Dir, id+".json") }
 
-// Ensure creates hv when missing, grows it when its size grew, and records its serial.
-func (v *Volumes) Ensure(hv *agentv1.HostVolume) error {
+// Ensure creates hv when missing, grows it when its size grew, and records its serial. grew: an
+// existing volume got bigger (running guests attaching it can be told, VolumeGrower).
+func (v *Volumes) Ensure(hv *agentv1.HostVolume) (grew bool, err error) {
 	id, size := hv.GetVolumeId(), hv.GetSizeBytes()
 	if !volumeIDPattern.MatchString(id) {
-		return fmt.Errorf("volume id %q", id)
+		return false, fmt.Errorf("volume id %q", id)
 	}
 	if !volumeSerialPattern.MatchString(hv.GetSerial()) {
-		return fmt.Errorf("volume %s: serial %q is not 1 to 20 of [a-z0-9-]", id, hv.GetSerial())
+		return false, fmt.Errorf("volume %s: serial %q is not 1 to 20 of [a-z0-9-]", id, hv.GetSerial())
 	}
 	if size == 0 || size%512 != 0 {
-		return fmt.Errorf("volume %s: %d bytes is not a whole number of 512-byte sectors", id, size)
+		return false, fmt.Errorf("volume %s: %d bytes is not a whole number of 512-byte sectors", id, size)
 	}
 	if err := os.MkdirAll(v.Dir, 0o700); err != nil {
-		return err
+		return false, err
 	}
 	f, err := os.OpenFile(v.path(id), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("volume %s is not a regular file", id)
+		return false, fmt.Errorf("volume %s is not a regular file", id)
 	}
 	switch have := uint64(info.Size()); {
 	case size < have:
-		return fmt.Errorf("volume %s is %d bytes and never shrinks to %d", id, have, size)
+		return false, fmt.Errorf("volume %s is %d bytes and never shrinks to %d", id, have, size)
 	case size > have:
 		if err := f.Truncate(int64(size)); err != nil { // sparse: no blocks until the guest writes
-			return err
+			return false, err
 		}
+		grew = have > 0
 	}
 	meta, _ := json.Marshal(volumeMeta{Serial: hv.GetSerial()})
 	if old, err := os.ReadFile(v.metaPath(id)); err == nil && string(old) == string(meta) {
-		return nil
+		return grew, nil
 	}
-	return os.WriteFile(v.metaPath(id), meta, 0o600)
+	return grew, os.WriteFile(v.metaPath(id), meta, 0o600)
 }
 
 // Get is the volume id, or an error when this host has none by that id.

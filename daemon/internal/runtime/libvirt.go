@@ -629,6 +629,32 @@ func (l *Libvirt) checkRestored(_ context.Context, dir string) error {
 	return nil
 }
 
+// GrowVolume tells a running (or paused) domain one of its volumes grew: blockresize to the file's
+// size, which the guest sees as a capacity change. A domain that does not have the volume in its
+// live definition (attached since, applied at its next start) has nothing to be told.
+func (l *Libvirt) GrowVolume(ctx context.Context, id string, v AttachedVolume) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if st, _ := l.virsh(ctx, "domstate", id); stateOf(string(st)) == StateStopped {
+		return nil
+	}
+	raw, err := l.virsh(ctx, "dumpxml", id)
+	if err != nil {
+		return err
+	}
+	var x domainXML
+	if err := xml.Unmarshal(raw, &x); err != nil {
+		return err
+	}
+	for _, disk := range x.Devices.Disks {
+		if disk.Source.File == v.Path && disk.Target.Dev != "" {
+			_, err := l.virsh(ctx, "blockresize", id, disk.Target.Dev, strconv.FormatUint(v.SizeBytes, 10)+"B")
+			return err
+		}
+	}
+	return nil
+}
+
 // searchable gives "others" search permission (x, never read) on dir and its ancestors up to the
 // data directory: libvirt runs QEMU as its own user (libvirt-qemu, qemu), which must reach the
 // disks, base image and volumes libvirt hands it (dynamic ownership relabels files, never the
@@ -713,7 +739,6 @@ func (l *Libvirt) checkDisk(dir string, meta instanceMetaXML) error {
 	}
 	return checkOverlay(filepath.Join(dir, "disk.qcow2"), base, format)
 }
-
 
 // grow enlarges the disk to size bytes; a smaller size is refused.
 func (l *Libvirt) grow(ctx context.Context, id, dir string, size uint64) error {

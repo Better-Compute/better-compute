@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"slices"
@@ -13,8 +14,8 @@ import (
 func TestVolumesAreSparseGrowNeverShrinkAndAreDiscarded(t *testing.T) {
 	v := &Volumes{Dir: t.TempDir() + "/volumes"}
 	hv := &agentv1.HostVolume{VolumeId: "vol_mem", SizeBytes: 1 << 30, Serial: "bcv-mem1"}
-	if err := v.Ensure(hv); err != nil {
-		t.Fatal(err)
+	if grew, err := v.Ensure(hv); err != nil || grew {
+		t.Fatalf("created: grew %v, %v", grew, err)
 	}
 	got, err := v.Get("vol_mem")
 	if err != nil || got.SizeBytes != 1<<30 || got.Serial != "bcv-mem1" {
@@ -31,8 +32,11 @@ func TestVolumesAreSparseGrowNeverShrinkAndAreDiscarded(t *testing.T) {
 		t.Fatal(err)
 	}
 	hv.SizeBytes = 2 << 30
-	if err := v.Ensure(hv); err != nil {
-		t.Fatal(err)
+	if grew, err := v.Ensure(hv); err != nil || !grew {
+		t.Fatalf("grown: grew %v, %v", grew, err)
+	}
+	if grew, err := v.Ensure(hv); err != nil || grew {
+		t.Fatalf("unchanged: grew %v, %v", grew, err)
 	}
 	if got, _ := v.Get("vol_mem"); got.SizeBytes != 2<<30 {
 		t.Fatalf("grown to %d", got.SizeBytes)
@@ -41,7 +45,7 @@ func TestVolumesAreSparseGrowNeverShrinkAndAreDiscarded(t *testing.T) {
 		t.Fatal("the grow lost the volume's data")
 	}
 	hv.SizeBytes = 1 << 30
-	if err := v.Ensure(hv); err == nil || !strings.Contains(err.Error(), "never shrinks") {
+	if _, err := v.Ensure(hv); err == nil || !strings.Contains(err.Error(), "never shrinks") {
 		t.Fatalf("shrink: %v", err)
 	}
 	for name, bad := range map[string]*agentv1.HostVolume{
@@ -50,7 +54,7 @@ func TestVolumesAreSparseGrowNeverShrinkAndAreDiscarded(t *testing.T) {
 		"long":   {VolumeId: "vol_b", SizeBytes: 512, Serial: strings.Repeat("a", 21)},
 		"size":   {VolumeId: "vol_b", SizeBytes: 1000, Serial: "b"},
 	} {
-		if err := v.Ensure(bad); err == nil {
+		if _, err := v.Ensure(bad); err == nil {
 			t.Errorf("%s accepted", name)
 		}
 	}
@@ -68,13 +72,70 @@ func TestVolumesAreSparseGrowNeverShrinkAndAreDiscarded(t *testing.T) {
 	}
 }
 
+// A running guest is told its volume grew, by the disk it was started with; a stopped one is not.
+func TestGrownVolumesAreToldToRunningGuests(t *testing.T) {
+	ctx := t.Context()
+	vol := AttachedVolume{Volume: Volume{ID: "vol_a", Path: "/var/lib/bcd/volumes/vol_a.raw", SizeBytes: 4 << 30}}
+
+	virt := &fakeVirt{domains: map[string]*fakeDomain{"inst_v": {state: "running", xml: []byte(`<domain><name>inst_v</name><devices>
+<disk type="file" device="disk"><source file="/x/disk.qcow2"/><target dev="vda" bus="virtio"/></disk>
+<disk type="file" device="disk"><source file="/var/lib/bcd/volumes/vol_a.raw"/><target dev="vdb" bus="virtio"/></disk>
+</devices></domain>`)}}}
+	var calls []string
+	l := &Libvirt{Dir: t.TempDir(), Exec: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		return virt.exec(ctx, name, args...)
+	}}
+	if err := l.GrowVolume(ctx, "inst_v", vol); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(calls, "virsh -c qemu:///system blockresize inst_v vdb 4294967296B") {
+		t.Fatalf("virsh calls = %v", calls)
+	}
+	virt.domains["inst_v"].state = "shut off"
+	calls = nil
+	if err := l.GrowVolume(ctx, "inst_v", vol); err != nil || slices.ContainsFunc(calls, func(c string) bool { return strings.Contains(c, "blockresize") }) {
+		t.Fatalf("a stopped domain: %v %v", calls, err)
+	}
+
+	var resized []any
+	c := &CloudHypervisor{Dir: t.TempDir(), API: func(_ context.Context, _, _, path string, body any, _ []*os.File) ([]byte, int, error) {
+		switch path {
+		case "/api/v1/vm.info":
+			return []byte(`{"state":"Running"}`), 200, nil
+		case "/api/v1/vm.resize-disk":
+			resized = append(resized, body)
+		}
+		return nil, 200, nil
+	}}
+	r := &chRecord{ID: "inst_c", Managed: chManaged, StartedVolumes: []string{"/v/other.raw", vol.Path}}
+	if err := os.MkdirAll(c.instanceDir(r.ID), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.save(r); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.GrowVolume(ctx, "inst_c", vol); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := json.Marshal(resized); string(raw) != `[{"desired_size":4294967296,"disk":"vol1"}]` {
+		t.Fatalf("resized = %s", raw)
+	}
+	// Attached since the VM started: nothing to tell it until its next start.
+	other := vol
+	other.Path = "/v/new.raw"
+	if err := c.GrowVolume(ctx, "inst_c", other); err != nil || len(resized) != 1 {
+		t.Fatalf("a volume the VM was not started with: %v %v", resized, err)
+	}
+}
+
 func TestInstancesAttachVolumesInOrderBySerial(t *testing.T) {
 	v := &Volumes{Dir: t.TempDir()}
 	for _, hv := range []*agentv1.HostVolume{
 		{VolumeId: "vol_a", SizeBytes: 1 << 20, Serial: "bcv-a"},
 		{VolumeId: "vol_b", SizeBytes: 1 << 20, Serial: "bcv-b"},
 	} {
-		if err := v.Ensure(hv); err != nil {
+		if _, err := v.Ensure(hv); err != nil {
 			t.Fatal(err)
 		}
 	}

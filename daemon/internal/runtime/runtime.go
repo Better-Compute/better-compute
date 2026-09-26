@@ -113,6 +113,12 @@ type Restore struct {
 // state lives in the devices, which no VMM saves (a disk-only snapshot still works).
 var ErrMemorySnapshotWithGPUs = errors.New("an instance with passthrough GPUs cannot be snapshotted with its memory; snapshot its disk only")
 
+// VolumeGrower is a runtime that tells a running guest one of its volumes grew (the file already
+// has; without it the guest sees the new size at its next start).
+type VolumeGrower interface {
+	GrowVolume(ctx context.Context, id string, v AttachedVolume) error
+}
+
 // ErrMemorySnapshotWithVolumes refuses a memory snapshot of an instance with a read-write volume:
 // the volume lives on (and changes) after the snapshot, and a guest restored with its old page cache
 // over the new blocks would corrupt its filesystem (a disk-only snapshot still works).
