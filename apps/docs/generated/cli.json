@@ -8698,6 +8698,118 @@
       "examples": ["better-compute metal abort node_01k5w… --reason \"wrong profile\""]
     },
     {
+      "name": "metal discovered",
+      "aliases": [],
+      "group": "Metal",
+      "summary": "Machines a site saw PXE-booting from unknown MACs (metal.discovered)",
+      "description": "metal discovered lists what the site agent saw PXE/HTTP-boot from MACs with no boot entry: MAC, SMBIOS UUID, architecture, relay, first and last seen, and the enrolled machine it is a candidate for. Nothing in it is trusted or bound: confirm a candidate with metal confirm-mac.",
+      "usage": "better-compute metal discovered --tenant ID --site ID [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--site",
+          "value": "ID",
+          "optional": false,
+          "description": "The site (site_…)"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute metal discovered --site site_01k5w… --format table"]
+    },
+    {
+      "name": "metal confirm-mac",
+      "aliases": [],
+      "group": "Metal",
+      "summary": "Bind the PXE MAC of a machine enrolled without one (metal.confirmMac)",
+      "description": "metal confirm-mac is the operator's decision that --mac is this machine's PXE MAC, usually the candidate metal discovered shows for it. Only then is the machine booted from that MAC; a MAC another machine holds is CONFLICT. The decision is audited (node.pxe-mac.confirmed).",
+      "usage": "better-compute metal confirm-mac NODE --tenant ID --mac MAC [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "node",
+          "description": "The node id (node_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--mac",
+          "value": "MAC",
+          "optional": false,
+          "description": "The machine's PXE MAC (aa:bb:cc:dd:ee:ff)"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute metal confirm-mac node_01k5w… --mac 3c:ec:ef:12:34:56"]
+    },
+    {
       "name": "metal power",
       "aliases": [],
       "group": "Metal",
@@ -11212,7 +11324,7 @@
       "group": "Fleet",
       "summary": "Write the POSIX sh script that installs bcd on a server and joins it to a pool",
       "description": "daemon install-script emits the bcd installer (PLAN.md §3.3, §6). The script reads the join token only from BCD_JOIN_TOKEN or standard input, downloads the pinned bcd for the machine's architecture from {base-url}{base-path}/downloads/bcd/{version}/linux-{arch}, checks it against --sha256 (or the digests of a --release-manifest verified here under --release-pins, product bcd, version --bcd-version), installs /usr/local/bin/bcd, /etc/bcd/config.toml (mode 0600: gateway URL, site and the serving CA, join signing and join encryption key pins, in bcd's sha256/<base64> form), the JoinService encryption key, and a hardened bcd.service, then runs bcd join and starts the service. Run on a configured host without a token, it upgrades bcd in place. The pins come from the PKI bundle's public half (pki init), so no secret is needed. The script holds no secret either: create the join token separately (joinTokens.create) and hand it over out of band. --plugins prepares the node for bcx driver plugins: a [plugins] section (dir /usr/local/lib/bcd/plugins, a child of bcd's delegated cgroup) and a bcd.service.d drop-in that lets bcd run each plugin under its own uid in its own cgroup (CAP_SETUID/CAP_SETGID/CAP_KILL, Delegate=yes); --privileged-plugins names the ones that run as root and make namespaces (Kata). --install-plugins bcx-ipmi also installs plugins a release ships: each archive from {base-url}{base-path}/downloads/{name}/{version}/linux-{arch} is checked against its digest in the verified --release-manifest, only the plugin's own regular file is taken from it, and its binary digest becomes its line in the plugins' pins file. Any node whose config.toml has a [plugins] section gets the drop-in, and an upgrade keeps the sections the operator configured.",
-      "usage": "better-compute daemon install-script --pool ID --site ID --gateway-url URL --base-url URL [--base-path PATH] --bcd-version VERSION [--sha256 ARCH=HEX,…] [--release-manifest PATH] [--release-pins PINS] [--release-threshold N] [--plugins] [--install-plugins NAMES] [--unprivileged] [--websocket-url URL] [--websocket-audience HOST] [--proxy-ca-file PATH] [--bmc-networks CIDRS] [--approver-set-sha256 HEX] [--instance-bridges BRIDGES] [--command-root-sha256 HEX,…] [--privileged-plugins NAMES] [--release-sequence N] [--pki PATH] [--out PATH]",
+      "usage": "better-compute daemon install-script --pool ID --site ID --gateway-url URL --base-url URL [--base-path PATH] --bcd-version VERSION [--sha256 ARCH=HEX,…] [--release-manifest PATH] [--release-pins PINS] [--release-threshold N] [--plugins] [--install-plugins NAMES] [--unprivileged] [--attestor tpm] [--websocket-url URL] [--websocket-audience HOST] [--proxy-ca-file PATH] [--bmc-networks CIDRS] [--approver-set-sha256 HEX] [--instance-bridges BRIDGES] [--command-root-sha256 HEX,…] [--privileged-plugins NAMES] [--release-sequence N] [--pki PATH] [--out PATH]",
       "target": "none",
       "args": [],
       "flags": [
@@ -11296,6 +11408,12 @@
           "flag": "--unprivileged",
           "optional": true,
           "description": "Run bcd node as the unprivileged bcd user beside a root bcd helper (privilege separation)"
+        },
+        {
+          "flag": "--attestor",
+          "value": "tpm",
+          "optional": true,
+          "description": "Join with the host's TPM (the tpm attestor: its endorsement key is the credential; the attestor's policy decides the pool) instead of a join token"
         },
         {
           "flag": "--websocket-url",
