@@ -2751,6 +2751,24 @@ describe('host CPU and memory booked with the GPUs (§3.8)', () => {
     expect((await booked(created.id))[0]!.resources).toEqual({});
   });
 
+  it('previews with the same host resources create would book', async () => {
+    await hostRows({ [NA]: { vcpu: 64, memoryGiB: 512 }, [NB]: { vcpu: 8, memoryGiB: 512 } });
+    const fits = (await call('capacity', 'preview', create({ resources: { vcpu: 40 } }))) as {
+      fits: boolean;
+      candidates: { nodeId: string }[];
+    };
+    expect(fits.fits).toBe(true);
+    expect(fits.candidates.map((candidate) => candidate.nodeId)).toEqual([NA]);
+    const none = (await call('capacity', 'preview', create({ resources: { vcpu: 65 } }))) as {
+      fits: boolean;
+      reason?: string;
+    };
+    expect(none).toMatchObject({ fits: false, reason: expect.stringContaining('vcpu') });
+    // Without resources, the default share (2 CPUs per GPU from nb) fits both hosts.
+    const share = (await call('capacity', 'preview', create())) as { candidates: unknown[] };
+    expect(share.candidates).toHaveLength(2);
+  });
+
   it('leaves a request that fits no host pending', async () => {
     await hostRows({ [NA]: { vcpu: 64, memoryGiB: 512 }, [NB]: { vcpu: 64, memoryGiB: 512 } });
     const created = (await call(

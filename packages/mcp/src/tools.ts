@@ -127,7 +127,35 @@ const reservationShape: Record<string, JsonSchema> = {
   gpuProduct: { type: 'string', maxLength: 64, description: 'GPU product, e.g. "H100-SXM5-80GB"' },
   nvlink: { type: 'boolean', description: 'All GPUs must share one NVLink domain' },
   selector,
+  vcpu: {
+    type: 'integer',
+    minimum: 0,
+    maximum: 4096,
+    description: 'Host CPUs to book with the GPUs (default: the pool’s per-GPU share)',
+  },
+  memoryGiB: {
+    type: 'integer',
+    minimum: 0,
+    maximum: 65_536,
+    description: 'Host memory in GiB to book with the GPUs (default: the pool’s per-GPU share)',
+  },
+  kubernetes: {
+    type: 'boolean',
+    description:
+      'Give the GPUs to the node’s Kubernetes kubelet instead of a CDI hold (pools that join a cluster)',
+  },
 };
+
+/** The reservation fields the shape's host options set (§3.8): resources and binding. */
+function hostOptions(args: Record<string, unknown>) {
+  const resources: Record<string, number> = {};
+  if (typeof args.vcpu === 'number') resources.vcpu = args.vcpu;
+  if (typeof args.memoryGiB === 'number') resources.memoryGiB = args.memoryGiB;
+  return {
+    binding: args.kubernetes === true ? 'kubernetes' : 'hold',
+    ...(Object.keys(resources).length ? { resources } : {}),
+  };
+}
 
 /** Retries `call` after a person approves a held-back action, with the same idempotency key. */
 async function withConfirmation(
@@ -231,7 +259,7 @@ export function computeTools(
           poolId: args.poolId,
           devices: [deviceRequest(args)],
           duration: args.duration,
-          binding: 'hold',
+          ...hostOptions(args),
           idempotencyKey: context.newKey(),
         }),
     },
@@ -269,7 +297,7 @@ export function computeTools(
             poolId: args.poolId,
             devices: [deviceRequest(args)],
             duration: args.duration,
-            binding: 'hold',
+            ...hostOptions(args),
             idempotencyKey: key,
             wait: { timeoutMs: ((args.waitSeconds as number | undefined) ?? 20) * 1000 },
           }),

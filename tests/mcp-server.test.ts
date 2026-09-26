@@ -460,6 +460,26 @@ describe('tools', () => {
     expect(result.structuredContent.idempotencyKey).toBe(calls[2]!.input.idempotencyKey);
     expect(JSON.parse(result.content[0].text)).toEqual(result.structuredContent);
     expect(calls[4]!.input).toMatchObject({ kind: 'diag.nvml', nodeId: NODE });
+    // No host options: the pool's per-GPU share (the request carries no resources).
+    expect(calls[2]!.input.resources).toBeUndefined();
+  });
+
+  it('books host CPU and memory and the kubernetes binding when asked (§3.8)', async () => {
+    const { api, calls } = recorder();
+    const mcp = mcpWith(api);
+    await rpc(mcp, 'tools/call', {
+      name: 'reserve_gpus',
+      arguments: { poolId: POOL, gpus: 2, duration: '1h', vcpu: 32, memoryGiB: 256, kubernetes: true },
+    });
+    await rpc(mcp, 'tools/call', {
+      name: 'preview_reservation',
+      arguments: { poolId: POOL, gpus: 2, duration: '1h', vcpu: 32 },
+    });
+    expect(calls[0]!.input).toMatchObject({
+      binding: 'kubernetes',
+      resources: { vcpu: 32, memoryGiB: 256 },
+    });
+    expect(calls[1]!.input).toMatchObject({ binding: 'hold', resources: { vcpu: 32 } });
   });
 
   it('refuses bad arguments before calling compute, and reports compute errors as tool errors', async () => {

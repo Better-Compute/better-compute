@@ -63,6 +63,7 @@ import {
   listReservations,
   parseCreateReservation,
   parseExtendReservation,
+  perGpuShare,
   placeQueued,
   placerWork,
   prepareCreate,
@@ -73,6 +74,7 @@ import {
   renewReservation,
   reservationView,
   reservationWork,
+  wholeGpus,
   type AllocationBindingCheck,
   type CreateReservationInput,
   type ExtendReservationInput,
@@ -1093,11 +1095,18 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
         const now = context.clock.now();
         const start = Math.max(input.start ?? now, now);
         const during = { start, end: start + input.duration };
+        // The host CPU and memory create would book with the devices (§3.8), so a preview that
+        // fits is a create that fits.
+        const resources =
+          input.binding === 'node'
+            ? undefined
+            : (input.resources ?? (await perGpuShare(tx, pool, wholeGpus(input.devices))));
         const request = {
           tenantId: input.tenantId,
           poolId: input.poolId,
           reservationId: 'rsv_preview',
           devices: input.devices,
+          ...(resources && Object.keys(resources).length > 0 ? { resources } : {}),
           ...(input.topology !== undefined ? { topology: input.topology } : {}),
           ...(input.gang !== undefined ? { gang: input.gang } : {}),
           during,
