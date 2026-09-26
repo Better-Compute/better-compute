@@ -192,6 +192,7 @@ export const capacityModule: AdminModule = {
   commands: [
     { id: 'capacity.new', label: 'Plan a reservation', group: 'Capacity', icon: RiSearchEyeLine, keywords: ['book', 'reserve', 'gpus', 'preview'], href: '/reservations/new', shortcut: 'n r' },
     { id: 'capacity.report', label: 'Capacity report (copy as Markdown)', group: 'Capacity', icon: RiFileTextLine, keywords: ['summary', 'weekly', 'review', 'markdown', 'export', 'share'], href: '/capacity/report' },
+    { id: 'capacity.compare', label: 'Compare pools side by side', group: 'Capacity', icon: RiServerLine, keywords: ['compare', 'versus', 'vs', 'pools', 'which pool'], href: '/pools/compare' },
     { id: 'capacity.flavors', label: 'Flavors: instance and sandbox shapes', group: 'Capacity', icon: RiLayoutGridLine, keywords: ['instance types', 'shapes', 'sizes', 'vps', 'flavors'], href: '/flavors' },
     { id: 'capacity.pending', label: 'Show pending reservations', group: 'Capacity', icon: RiTimerLine, keywords: ['waiting', 'unschedulable', 'queue'], href: '/reservations' },
     { id: 'capacity.timeline', label: 'Reservation timeline (Gantt)', group: 'Capacity', icon: RiCalendarScheduleLine, keywords: ['gantt', 'schedule', 'calendar'], href: '/reservations?view=timeline' },

@@ -3,8 +3,8 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMemo, useState } from 'react';
-import { RiLayoutGridLine, RiServerLine } from 'react-icons/ri';
-import { ButtonLink } from '@/components/base/buttons/button';
+import { RiLayoutGridLine, RiScales2Line, RiServerLine } from 'react-icons/ri';
+import { Button, ButtonLink } from '@/components/base/buttons/button';
 import { Sparkline, StackedBar } from '@/components/ui/charts';
 import { DataTable, type Column } from '@/components/ui/data-table';
 import { PageHeader, Panel } from '@/components/ui/panel';
@@ -206,6 +206,20 @@ export function PoolsPage() {
           initialSort={{ id: 'utilization', dir: 'desc' }}
           exportName="pools"
           viewKey="capacity.pools"
+          bulkActions={(selected, clear) => (
+            <Button
+              size="xs"
+              variant="secondary"
+              leadingIcon={RiScales2Line}
+              disabled={selected.length < 2}
+              onClick={() => {
+                router.push(`/pools/compare?ids=${selected.slice(0, 4).map((row) => row.id).join(',')}`);
+                clear();
+              }}
+            >
+              {selected.length < 2 ? 'Select 2–4 to compare' : `Compare ${Math.min(4, selected.length)}`}
+            </Button>
+          )}
         />
       ) : (
         <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))' }}>
