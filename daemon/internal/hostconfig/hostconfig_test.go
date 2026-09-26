@@ -578,6 +578,79 @@ func TestFabricManagerDownCondition(t *testing.T) {
 	}
 }
 
+func TestCPUList(t *testing.T) {
+	cpus, err := ParseCPUList("8-11,4,5,10")
+	if err != nil || FormatCPUList(cpus) != "4-5,8-11" {
+		t.Fatalf("%v %v", cpus, err)
+	}
+	for _, bad := range []string{"4-2", "a", "1,,2", "0-9000", "4 - 5"} {
+		if _, err := ParseCPUList(bad); err == nil {
+			t.Fatalf("%q parsed", bad)
+		}
+	}
+}
+
+func cpuHost(n int, governor string) *FakeSystem {
+	sys := NewFakeSystem()
+	for i := range n {
+		dir := fmt.Sprintf("%s/cpu%d/cpufreq", CPUDir, i)
+		sys.Set(dir+"/scaling_governor", governor+"\n")
+		sys.Set(dir+"/scaling_available_governors", "performance powersave\n")
+	}
+	sys.Set(CPUDir+"/online", fmt.Sprintf("0-%d\n", n-1))
+	sys.Set(CPUIsolated, "\n")
+	return sys
+}
+
+func TestCPUGovernorAndIsolation(t *testing.T) {
+	sys := cpuHost(8, "powersave")
+	sys.Programs["update-grub"] = true
+	r := Builtin(Options{})
+	cfg := unit("cpu", `{"governor":"performance","isolate":"4-7"}`)
+	_, err := runAll(t, r, sys, cfg)
+	if err == nil || errors.Is(err, converge.ErrTerminal) || !strings.Contains(err.Error(), "reboot the node") {
+		t.Fatalf("err = %v", err)
+	}
+	for i := range 8 {
+		if v, _ := sys.Get(fmt.Sprintf("%s/cpu%d/cpufreq/scaling_governor", CPUDir, i)); v != "performance\n" {
+			t.Fatalf("cpu%d governor %q", i, v)
+		}
+	}
+	if f, _ := sys.Get("/etc/default/grub.d/90-bcd-cpu.cfg"); !strings.Contains(f, "isolcpus=managed_irq,domain,4-7 nohz_full=4-7 rcu_nocbs=4-7") {
+		t.Fatalf("drop-in:\n%s", f)
+	}
+	if got := sys.Commands(); !slices.Equal(got, []string{"update-grub"}) {
+		t.Fatalf("commands %q", got)
+	}
+	// After the reboot the kernel shows them isolated: converged, nothing rewritten.
+	sys.Ran = nil
+	sys.Set(CPUIsolated, "4-7\n")
+	if n, err := runAll(t, r, sys, cfg); err != nil || n != 0 {
+		t.Fatalf("converged: %d %v", n, err)
+	}
+	// Dropped from the spec: the arguments go.
+	if _, err := runAll(t, r, sys); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := sys.Get("/etc/default/grub.d/90-bcd-cpu.cfg"); ok {
+		t.Fatal("drop-in left")
+	}
+	for _, bad := range []string{`{"isolate":"0-3"}`, `{"governor":"turbo"}`, `{"isolate":"x"}`} {
+		if _, err := runAll(t, r, sys, unit("cpu", bad)); !errors.Is(err, converge.ErrTerminal) {
+			t.Fatalf("%s: %v", bad, err)
+		}
+	}
+	// A governor the driver does not offer is terminal; a VM without cpufreq has nothing to set.
+	if _, err := runAll(t, r, sys, unit("cpu", `{"governor":"schedutil"}`)); !errors.Is(err, converge.ErrTerminal) {
+		t.Fatalf("schedutil: %v", err)
+	}
+	vm := NewFakeSystem()
+	vm.Set(CPUDir+"/cpu0/online", "1\n")
+	if n, err := runAll(t, r, vm, unit("cpu", `{"governor":"performance"}`)); err != nil || n != 0 {
+		t.Fatalf("vm: %d %v", n, err)
+	}
+}
+
 func TestOSRelease(t *testing.T) {
 	sys := NewFakeSystem()
 	sys.Set("/etc/os-release", "ID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"9.4\"\n")

@@ -111,12 +111,12 @@ type Options struct {
 }
 
 // Builtin returns the units bcd ships, in convergence order: kernel modules, then the sysctls they
-// provide, memory, the driver, Fabric Manager, the MIG layout, GPU sharing on top of it, and the
-// container toolkit last, so its CDI spec describes the partitioned GPUs. A cluster join is added
-// after them (Registry.Add).
+// provide, memory, CPUs, the driver, Fabric Manager, the MIG layout, GPU sharing on top of it, and
+// the container toolkit last, so its CDI spec describes the partitioned GPUs. A cluster join is
+// added after them (Registry.Add).
 func Builtin(o Options) *Registry {
 	return NewRegistry(
-		KernelModules{}, Sysctl{}, Hugepages{},
+		KernelModules{}, Sysctl{}, Hugepages{}, CPU{},
 		NvidiaDriver{}, FabricManager{}, MigLayout{Busy: o.GPUBusy}, GPUSharing{}, ContainerToolkit{},
 	)
 }
