@@ -117,19 +117,20 @@ func (s *Server) ch(ctx context.Context, verb string, req *CHRequest) (any, erro
 		return nil, err
 	case "stop":
 		unit := "bcd-ch-" + id + ".service"
+		// The VMM's user as the unit says it (root's view, not the record's), before it goes.
+		var vmm uint64
+		if out, err := p.Run(ctx, "systemctl", "show", "--property=User", "--value", unit); err == nil {
+			vmm, _ = strconv.ParseUint(strings.TrimSpace(string(out)), 10, 32)
+		}
 		_, _ = p.Run(ctx, "systemctl", "stop", unit)
 		out, err := p.Run(ctx, "systemctl", "show", "--property=ActiveState", "--value", unit)
 		if err != nil {
 			return nil, err
 		}
 		state := strings.TrimSpace(string(out))
-		if state == "inactive" || state == "failed" {
-			// Its VFIO devices back to root (the VMM is gone).
-			if _, gpus, err := runtime.CHGPUs(p.Root, id); err == nil {
-				for _, g := range gpus {
-					_ = giveGroup(p, g.Addr, 0)
-				}
-			}
+		if (state == "inactive" || state == "failed") && vmm != 0 {
+			// Its VFIO devices back to root: exactly the groups that user holds.
+			giveBackGroupsOf(p, uint32(vmm))
 		}
 		return state, nil
 	}
@@ -228,11 +229,63 @@ func giveGroup(p CHPolicy, addr string, uid int) error {
 	if err != nil {
 		return err
 	}
-	dev := p.path("/dev/vfio/" + g)
+	return giveDevice(p.path("/dev/vfio/"+g), uid)
+}
+
+func giveDevice(dev string, uid int) error {
 	if err := os.Lchown(dev, uid, uid); err != nil {
 		return err
 	}
 	return os.Chmod(dev, 0o600)
+}
+
+// groupOwner is who holds an address's /dev/vfio group now (root's observation, not a record's).
+func groupOwner(p CHPolicy, addr string) (uint32, error) {
+	g, err := groupOf(p, addr)
+	if err != nil {
+		return 0, err
+	}
+	fi, err := os.Lstat(p.path("/dev/vfio/" + g))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil // not opened yet: the kernel makes it on bind
+	}
+	if err != nil {
+		return 0, err
+	}
+	uid, ok := fileOwner(fi)
+	if !ok {
+		return 0, errors.New("the VFIO group's owner cannot be read here")
+	}
+	return uid, nil
+}
+
+// giveBackGroupsOf gives every /dev/vfio group uid holds back to root.
+func giveBackGroupsOf(p CHPolicy, uid uint32) {
+	entries, _ := os.ReadDir(p.path("/dev/vfio"))
+	for _, e := range entries {
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue
+		}
+		dev := p.path("/dev/vfio/" + e.Name())
+		if fi, err := os.Lstat(dev); err == nil {
+			if owner, ok := fileOwner(fi); ok && owner == uid {
+				_ = giveDevice(dev, 0)
+			}
+		}
+	}
+}
+
+// liveUIDSet are the users of the running VMM units.
+func liveUIDSet(ctx context.Context, p CHPolicy) (map[uint32]string, error) {
+	live, err := p.Root.LiveUIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := map[uint32]string{}
+	for id, uid := range live {
+		out[uid] = id
+	}
+	return out, nil
 }
 
 func (s *Server) chVFIO(ctx context.Context, p CHPolicy, id string) error {
@@ -252,9 +305,24 @@ func (s *Server) chVFIO(ctx context.Context, p CHPolicy, id string) error {
 	if p.VFIO == nil && len(gpus) > 0 {
 		return errors.New("ch.vfio: no VFIO binder configured")
 	}
+	var holders map[uint32]string
+	if len(gpus) > 0 {
+		if holders, err = liveUIDSet(ctx, p); err != nil {
+			return fmt.Errorf("ch.vfio: the running VMM units: %w", err)
+		}
+	}
 	for _, g := range gpus {
 		if busy[anyGPU] || busy[g.UUID] {
 			return fmt.Errorf("ch.vfio: GPU %s holds work", g.UUID)
+		}
+		// A GPU passed through is on vfio-pci, where neither nvidia-smi nor a CDI hold sees it: who
+		// holds its group now decides (never another running VM's).
+		owner, err := groupOwner(p, g.Addr)
+		if err != nil {
+			return err
+		}
+		if other, live := holders[owner]; owner != 0 && owner != uid && live {
+			return fmt.Errorf("ch.vfio: GPU %s is passed through to instance %s", g.UUID, other)
 		}
 		if err := checkGroup(p, g.Addr); err != nil {
 			return err
@@ -270,20 +338,9 @@ func (s *Server) chVFIO(ctx context.Context, p CHPolicy, id string) error {
 }
 
 func chUnVFIO(ctx context.Context, p CHPolicy, id string, addrs []string) error {
-	// Never one another running instance was given.
-	taken := map[string]bool{}
-	if live, err := p.Root.LiveUIDs(ctx); err == nil {
-		for other := range live {
-			if other == id {
-				continue
-			}
-			if _, theirs, err := runtime.CHGPUs(p.Root, other); err == nil {
-				for _, g := range theirs {
-					taken[g.Addr] = true
-				}
-			}
-		}
-	} else {
+	// Never a group a running VMM holds (root's observation of /dev/vfio, not a record's).
+	holders, err := liveUIDSet(ctx, p)
+	if err != nil {
 		return fmt.Errorf("ch.unvfio: the running VMM units: %w", err)
 	}
 	var first error
@@ -291,7 +348,14 @@ func chUnVFIO(ctx context.Context, p CHPolicy, id string, addrs []string) error 
 		if !pciAddr.MatchString(addr) || !p.Root.PCI[addr] {
 			return fmt.Errorf("ch.unvfio: %q is not one of this host's GPUs", addr)
 		}
-		if taken[addr] {
+		owner, err := groupOwner(p, addr)
+		if err != nil {
+			if first == nil {
+				first = err
+			}
+			continue
+		}
+		if _, live := holders[owner]; owner != 0 && live {
 			continue
 		}
 		if err := giveGroup(p, addr, 0); err != nil && first == nil {

@@ -6,3 +6,5 @@ import "io/fs"
 
 // rootOnly: the helper runs on Linux only (peer_other.go refuses every peer elsewhere).
 func rootOnly(fs.FileInfo) bool { return true }
+
+func fileOwner(fs.FileInfo) (uint32, bool) { return 0, false }

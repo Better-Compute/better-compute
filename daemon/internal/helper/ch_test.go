@@ -218,14 +218,44 @@ func TestCHVFIOTakesOnlyWholeGroupsOfThisHostsGPUs(t *testing.T) {
 		t.Fatal("unvfio of a device not this host's GPU")
 	}
 	if os.Geteuid() != 0 {
-		return // giving /dev/vfio/<g> to the VMM's user needs root
+		t.Log("not root: giving /dev/vfio/<g> away is not tested")
+		return
 	}
-	_ = os.MkdirAll(filepath.Join(f.sys, "dev/vfio"), 0o755)
-	_ = os.WriteFile(filepath.Join(f.sys, "dev/vfio/7"), nil, 0o600)
+	dev := filepath.Join(f.sys, "dev/vfio/7")
+	_ = os.MkdirAll(filepath.Dir(dev), 0o755)
+	_ = os.WriteFile(dev, nil, 0o600)
+	// Another running VM holds the group (root sees its owner): never taken, never given back.
+	other := uint32(0x7FFD0000 + 9)
+	f.live["inst_otherxxxxxxxx"] = other
+	_ = os.Lchown(dev, int(other), int(other))
+	if _, err := s.ch(ctx, "vfio", &CHRequest{Instance: chInstance}); err == nil || !strings.Contains(err.Error(), "inst_otherxxxxxxxx") {
+		t.Fatalf("a group another VM holds: %v", err)
+	}
+	if _, err := s.ch(ctx, "unvfio", &CHRequest{Instance: chInstance, Addrs: []string{"0000:3b:00.0"}}); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Lstat(dev); owner(fi) != other {
+		t.Fatal("unvfio took another running VM's group")
+	}
+	// Free again: taken, and given back when this instance's unit stops (its user, as the unit says).
+	delete(f.live, "inst_otherxxxxxxxx")
+	_ = os.Lchown(dev, 0, 0)
 	if _, err := s.ch(ctx, "vfio", &CHRequest{Instance: chInstance}); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.bound) != 1 {
-		t.Fatalf("bound %v", f.bound)
+	if fi, _ := os.Lstat(dev); owner(fi) != vmmUID || len(f.bound) != 1 {
+		t.Fatalf("owner %d, bound %v", owner(fi), f.bound)
 	}
+	f.live[chInstance] = vmmUID
+	if state, err := s.ch(ctx, "stop", &CHRequest{Instance: chInstance}); err != nil || state != "inactive" {
+		t.Fatalf("stop = %v, %v", state, err)
+	}
+	if fi, _ := os.Lstat(dev); owner(fi) != 0 {
+		t.Fatal("the stopped VM's group was not given back")
+	}
+}
+
+func owner(fi os.FileInfo) uint32 {
+	uid, _ := fileOwner(fi)
+	return uid
 }
