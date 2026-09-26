@@ -139,6 +139,15 @@ func TestNodeKeyInTheTPM(t *testing.T) {
 	if _, _, err := LoadState(dir); err == nil || !strings.Contains(err.Error(), "TPM") {
 		t.Fatalf("a TPM key without the TPM: %v", err)
 	}
+	// A cleared TPM (another owner seed) derives another key from the record: join again, it says how.
+	cleared, err := tpmsim.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	useTPM(t, cleared)
+	if _, _, err := LoadState(dir); err == nil || !strings.Contains(err.Error(), "was the TPM cleared") || !strings.Contains(err.Error(), "bcd join --reset --yes") {
+		t.Fatalf("a cleared TPM: %v", err)
+	}
 }
 
 func sha(b []byte) []byte {

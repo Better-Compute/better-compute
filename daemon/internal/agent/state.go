@@ -101,8 +101,15 @@ func LoadState(dir string) (*State, crypto.Signer, error) {
 		return nil, nil, fmt.Errorf("agent: %w", err)
 	}
 	if pub, err := pki.NodePublic(key); err != nil || !pub.Equal(leafKey) {
+		kind := NodeKeyKind(key)
 		closeKey(key)
-		return nil, nil, errors.New("agent: the node key does not match the node certificate")
+		if kind == "tpm" {
+			// The TPM derives another key from the same record: its owner hierarchy's seed changed
+			// (TPM2_Clear, a firmware reset). The key is gone for good.
+			return nil, nil, errors.New("agent: the node key does not match the node certificate: the TPM derives another key " +
+				"from node.key (was the TPM cleared?); join again: bcd join --reset --yes, then bcd join")
+		}
+		return nil, nil, errors.New("agent: the node key does not match the node certificate; join again: bcd join --reset --yes, then bcd join")
 	}
 	return &s, key, nil
 }

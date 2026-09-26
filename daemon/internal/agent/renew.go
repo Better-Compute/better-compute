@@ -89,7 +89,10 @@ func renewalCertifier(leaf *x509.Certificate) (tpm.KeyCertifier, error) {
 	got, err := tpm.Name(c.AKPublic())
 	if err != nil || !bytes.Equal(got, name) {
 		c.Close()
-		return nil, errors.New("renewal: this TPM's attestation key is not the one the certificate names (was the TPM cleared? run bcd join again)")
+		// The AK is an endorsement-hierarchy primary: a TPM2_Clear keeps it (and loses the node key, which
+		// LoadState reports). Another AK is another TPM, or one whose endorsement seed was changed.
+		return nil, errors.New("renewal: this TPM's attestation key is not the one the certificate names (another TPM, " +
+			"or its endorsement seed changed): the certificate cannot be renewed here; join again: bcd join --reset --yes, then bcd join")
 	}
 	return c, nil
 }

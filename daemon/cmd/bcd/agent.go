@@ -184,6 +184,13 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 		return nil
 	}
 
+	// --reset: an identity that loads but no longer works (a cleared TPM, an expired or refused
+	// certificate) would otherwise answer "already joined" forever.
+	if fs.Lookup("reset").Value.String() == "true" {
+		if code := resetIdentity(cfg.DataDir, fs.Lookup("yes").Value.String() == "true", stdout, stderr); code != exitOK {
+			return code
+		}
+	}
 	if state, _, err := agent.LoadState(cfg.DataDir); err == nil {
 		if nodeID != "" && state.NodeID != nodeID {
 			fmt.Fprintf(stderr, "bcd join: this machine already joined as %s, not %s\n", state.NodeID, nodeID)

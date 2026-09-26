@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -196,10 +197,14 @@ func hostChecks(cfg *config.Config) []doctorCheck {
 		}
 	}
 	switch {
-	case err != nil:
+	case errors.Is(err, agent.ErrNotJoined):
 		out = append(out, doctorCheck{"warn", "identity", err.Error()})
+	case err != nil:
+		// An identity that is there but does not load: bcd join would say "already joined" for ever.
+		out = append(out, doctorCheck{"fail", "identity", err.Error() + " (to join again as root: bcd join --reset --yes, then bcd join)"})
 	case time.Now().After(state.NotAfter):
-		out = append(out, doctorCheck{"fail", "identity", fmt.Sprintf("node %s: the certificate expired at %s; join again", state.NodeID, state.NotAfter.Format(time.RFC3339))})
+		out = append(out, doctorCheck{"fail", "identity", fmt.Sprintf("node %s: the certificate expired at %s; join again as root: bcd join --reset --yes, then bcd join",
+			state.NodeID, state.NotAfter.Format(time.RFC3339))})
 	default:
 		out = append(out, doctorCheck{"ok", "identity", fmt.Sprintf("node %s (site %s, role %s), certificate valid for %s",
 			state.NodeID, state.SiteID, state.Role, time.Until(state.NotAfter).Round(time.Minute))})
@@ -214,7 +219,7 @@ func nodeKeyCheck(key crypto.Signer, haveTPM bool) doctorCheck {
 	case agent.NodeKeyKind(key) == "tpm":
 		return doctorCheck{"ok", "node key", "in the TPM: it cannot be copied off this machine"}
 	case haveTPM:
-		return doctorCheck{"warn", "node key", "a file key although this host has a TPM: the next renewal moves it into the TPM (bcd node must be able to open /dev/tpmrm0)"}
+		return doctorCheck{"warn", "node key", "a file key although this host has a TPM: the next renewal moves it into the TPM (through bcd helper when bcd node runs unprivileged)"}
 	}
 	return doctorCheck{"ok", "node key", "a file key (this host has no TPM)"}
 }

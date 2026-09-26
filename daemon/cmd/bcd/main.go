@@ -91,6 +91,8 @@ func joinFlags(fs *flag.FlagSet) {
 	fs.String("join-signing-pin", "", "sha256/<base64> pin of the key that signs JoinResponse (required to join without config.toml)")
 	fs.String("join-encryption-pin", "", "sha256/<base64> pin of the key the join token is sealed to (required to join without config.toml)")
 	fs.String("data-dir", config.DefaultDataDir, "the data directory a configuration written by bcd join names")
+	fs.Bool("reset", false, "move this node's identity (identity.json, node.key) aside first, so it joins again (as root; with --yes)")
+	fs.Bool("yes", false, "confirm --reset")
 }
 
 func simFlags(fs *flag.FlagSet) {
