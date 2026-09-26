@@ -6,9 +6,19 @@ name: daemon
 on:
   push:
     branches: [main]
-    paths: ['daemon/**', 'proto/**', '.github/workflows/daemon.yml']
+    paths:
+      - 'daemon/**'
+      - 'proto/**'
+      - 'packages/provider-kubernetes/**'
+      - 'scripts/k8s-render-manifests.mjs'
+      - '.github/workflows/daemon.yml'
   pull_request:
-    paths: ['daemon/**', 'proto/**', '.github/workflows/daemon.yml']
+    paths:
+      - 'daemon/**'
+      - 'proto/**'
+      - 'packages/provider-kubernetes/**'
+      - 'scripts/k8s-render-manifests.mjs'
+      - '.github/workflows/daemon.yml'
   workflow_dispatch:
 permissions:
   contents: read
@@ -46,3 +56,43 @@ jobs:
           version: '~> v2'
           args: check
           workdir: daemon
+  # The DaemonSet image (daemon/Containerfile) and its manifests (provider-kubernetes): the image builds
+  # (with the sha256-pinned kubectl), its binaries run, and a real API server accepts the manifests
+  # (server-side dry run on kind: schema, Pod Security admission on the namespace).
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: daemon
+          file: daemon/Containerfile
+          platforms: linux/amd64
+          build-args: VERSION=0.0.0-ci
+          tags: bcd:ci
+          load: true
+      - name: the image's binaries run
+        run: |
+          docker run --rm bcd:ci --version
+          docker run --rm --entrypoint kubectl bcd:ci version --client
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: render the manifests
+        run: node --import ./tests/fixtures/bcx-loader.mjs scripts/k8s-render-manifests.mjs bcd:ci "$RUNNER_TEMP/bcd.json"
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: bcd-ci
+      # A dry run creates nothing, so the namespaced objects need their Namespace for real first (with
+      # its Pod Security labels, which then admit, or refuse, the DaemonSet's privileged pod).
+      - name: the API server accepts them (server-side dry run)
+        run: |
+          jq '.items[] | select(.kind == "Namespace")' "$RUNNER_TEMP/bcd.json" | kubectl apply -f -
+          kubectl apply --dry-run=server -f "$RUNNER_TEMP/bcd.json"

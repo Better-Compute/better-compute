@@ -18,6 +18,9 @@
     - Hosted-Kubernetes join tokens land nodes `tenant-controlled`.
     - Slots per shared GPU are capped at 48.
   - MCP `reserve_gpus` takes `vcpu`, `memoryGiB` and `kubernetes`.
+  - **Breaking (metrics):** bcd's `bcd.instance.memory.balloon` is now `bcd.instance.memory.balloon.reclaimed` (9bdd43a). It reports flavor memory minus current guest memory, only for guests with a balloon. Dashboards and alerts on the old name need updating.
+  - Hosted-Kubernetes bcd uses the kubelet's credentials (e7d0765; NodeRestriction confines it to its own Node), never a service account.
+  - CI builds the DaemonSet image (daemon/Containerfile) and server-side dry-runs the rendered manifests on a kind cluster.
 
 - Round 4, server/core/mcp/client ([f85da7]):
   - Security: admissions decide on the committed row (`IamPort.refreshResource`; §12.4 "draft in memory before require" was unimplemented, so `extend` decided on stale projection rows: BoundedExtend allowed 72 h + 1 h). A node reports only its own allocations. With `pki.commandSigning`, a reservation goes active only on the node's own signed `AllocationBound` (`pkiAllocationBindingCheck`). The secret broker releases an instance's user data only when it names a secret of the instance's own tenant. Certificate roles live in the Subject OU `bc-role:<role>` (no private OIDs; Go cannot parse the 2.25 arc).
