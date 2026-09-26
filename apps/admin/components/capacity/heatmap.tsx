@@ -89,6 +89,8 @@ export const CapacityHeatmap = memo(function CapacityHeatmap({
   const [ref, width] = useWidth<HTMLDivElement>(720);
   const [hover, setHover] = useState<{ row: number; col: number; x: number; y: number } | null>(null);
   const [drag, setDrag] = useState<{ row: number; c0: number; c1: number } | null>(null);
+  // Phones: short labels and no summary column, so the hours keep most of the width.
+  compact = compact || width < 640;
   const summaryW = compact ? 0 : SUMMARY_W;
   const labelW = compact ? 104 : LABEL_W;
   const plotW = Math.max(40, width - labelW - summaryW);

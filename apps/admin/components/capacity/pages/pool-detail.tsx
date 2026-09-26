@@ -267,7 +267,7 @@ export function PoolDetailPage({ poolId }: { poolId: string }) {
           <TabPanel id="schedule">
             <Panel
               title="Schedule"
-              meta={`${nodes.length} nodes · rows are nodes, bar height is GPUs held`}
+              meta={`${nodes.length} nodes · bar height = GPUs held`}
               actions={
                 <Segmented
                   label="Schedule span"
@@ -299,7 +299,7 @@ export function PoolDetailPage({ poolId }: { poolId: string }) {
         </TabPanel>
 
         <TabPanel id="tenants">
-          <Panel title="Who may book this pool" meta="pools.offer · quotas.get" flush>
+          <Panel title="Who may book this pool" meta="pools.offer · quotas.get" flush bodyClassName="overflow-x-auto">
             <table className="w-full text-body-regular">
               <thead>
                 <tr className="border-b border-separator-border font-mono text-[11px] tracking-wide text-text-tertiary uppercase">

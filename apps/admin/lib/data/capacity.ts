@@ -1440,7 +1440,11 @@ export interface CapacityTotals {
 
 /** GPU totals from the capacity rollup at `now`, optionally for one site: the numbers /capacity shows. */
 export function capacityTotals(now: number, scope: { siteId?: string } = {}): CapacityTotals {
-  const snapshot = capacityAt(now);
+  return capacityTotalsFrom(capacityAt(now), scope);
+}
+
+/** capacityTotals over any snapshot (the live one included). */
+export function capacityTotalsFrom(snapshot: CapacitySnapshot, scope: { siteId?: string } = {}): CapacityTotals {
   const pools: CapacityTotals['pools'] = {};
   const gpus = { total: 0, allocatable: 0, allocated: 0, reserved: 0, available: 0, freeNow: 0, unschedulable: 0, utilization: 0 };
   const siteOf = new Map(snapshot.pools.map((pool) => [pool.id, pool.siteId]));
@@ -1554,12 +1558,31 @@ const SEVERITY_RANK: Record<InsightSeverity, number> = { critical: 0, warning: 1
 
 export function capacityInsights(now: number, scope: { siteId?: string } = {}): CapacityInsight[] {
   const snapshot = capacityAt(now);
+  const source = sharedCapacitySource();
+  return insightsFrom(snapshot, (poolId, range) => source.timelineSync(poolId, range), scope);
+}
+
+/** A pool's timeline, or undefined when not (yet) known (live timelines load asynchronously). */
+export type TimelineLookup = (poolId: string, range: { from: number; to: number; stepMinutes?: number }) => CapacityTimeline | undefined;
+
+/**
+ * Insights over any snapshot. Timeline-based ones (full soon, unplaceable) appear once `timelineOf` answers;
+ * atom-based ones (fragmentation) need `atoms` on reservations, which live data may not carry.
+ */
+export function insightsFrom(snapshot: CapacitySnapshot, timelineOf: TimelineLookup, scope: { siteId?: string } = {}): CapacityInsight[] {
   const key = scope.siteId ?? '*';
   const cached = insightCache.get(snapshot)?.get(key);
   if (cached) return cached;
   const t = snapshot.now;
   const hour = Math.floor(t / HOUR) * HOUR;
-  const source = sharedCapacitySource();
+  let complete = true;
+  const source = {
+    timelineSync: (poolId: string, range: { from: number; to: number; stepMinutes?: number }) => {
+      const found = timelineOf(poolId, range);
+      if (!found) complete = false;
+      return found ?? { poolId, allocatable: 0, buckets: [] };
+    },
+  };
   const pools = snapshot.pools.filter((pool) => !scope.siteId || pool.siteId === scope.siteId);
   const inScope = new Set(pools.map((pool) => pool.id));
   const nameOf = (poolId: string) => topoPools.find((pool) => pool.id === poolId)?.name ?? poolId;
@@ -1642,6 +1665,7 @@ export function capacityInsights(now: number, scope: { siteId?: string } = {}): 
     if (reservation.state === 'pending' && inScope.has(reservation.poolId)) stuck.set(reservation.poolId, [...(stuck.get(reservation.poolId) ?? []), reservation]);
   for (const [poolId, list] of stuck) {
     const timeline = source.timelineSync(poolId, { from: hour, to: hour + 7 * DAY });
+    if (!timeline.buckets.length) continue; // not loaded yet (live)
     const never = list.filter((reservation) => {
       const need = reservationGpus(reservation);
       const length = durationMs(reservation.request.duration);
@@ -1732,9 +1756,12 @@ export function capacityInsights(now: number, scope: { siteId?: string } = {}): 
     });
 
   out.sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || a.title.localeCompare(b.title));
-  const byScope = insightCache.get(snapshot) ?? new Map<string, CapacityInsight[]>();
-  byScope.set(key, out);
-  insightCache.set(snapshot, byScope);
+  // Only cache a full answer: while live timelines are still loading, the next call should see them.
+  if (complete) {
+    const byScope = insightCache.get(snapshot) ?? new Map<string, CapacityInsight[]>();
+    byScope.set(key, out);
+    insightCache.set(snapshot, byScope);
+  }
   return out;
 }
 

@@ -201,7 +201,9 @@ export function UsagePage() {
           className="col-span-12 xl:col-span-7"
           title="Breakdown"
           meta={`${breakdown.length} ${group === 'identity' ? 'people' : `${group}s`}`}
-          actions={
+          flush
+        >
+          <div className="overflow-x-auto border-b border-separator-border px-3 py-2">
             <Segmented
               label="Group by"
               value={group}
@@ -214,9 +216,7 @@ export function UsagePage() {
                 { id: 'identity', label: 'person' },
               ]}
             />
-          }
-          flush
-        >
+          </div>
           <ul className="max-h-[440px] overflow-y-auto">
             {breakdown.map((entry) => (
               <li key={entry.key} className="grid grid-cols-[minmax(0,14rem)_1fr_5.5rem_4rem] items-center gap-3 border-b border-separator-border px-3 py-1.5 last:border-0">

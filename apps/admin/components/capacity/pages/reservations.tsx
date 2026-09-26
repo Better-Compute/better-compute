@@ -182,20 +182,18 @@ export function ReservationsPage() {
       ) : (
         <Panel
           title="Timeline"
-          meta={poolId ? `${poolId} · rows are nodes` : undefined}
-          actions={
-            <div className="flex items-center gap-2">
-              <Select
-                label="Pool"
-                value={poolId}
-                onChange={setPoolId}
-                options={gpuPools.map((row) => ({ id: row.id, label: row.name, description: `${row.short} · ${row.siteId}` }))}
-                className="w-56"
-              />
-              <Segmented label="Window" value={span} onChange={(value) => setSpan(value as WindowKey)} options={(Object.keys(WINDOWS) as WindowKey[]).map((id) => ({ id, label: id }))} />
-            </div>
-          }
+          meta={poolId ? 'rows are nodes' : undefined}
         >
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <Select
+              label="Pool"
+              value={poolId}
+              onChange={setPoolId}
+              options={gpuPools.map((row) => ({ id: row.id, label: row.name, description: `${row.short} · ${row.siteId}` }))}
+              className="w-56 max-w-full"
+            />
+            <Segmented label="Window" value={span} onChange={(value) => setSpan(value as WindowKey)} options={(Object.keys(WINDOWS) as WindowKey[]).map((id) => ({ id, label: id }))} />
+          </div>
           {poolId ? (
             <>
               <ReservationGantt

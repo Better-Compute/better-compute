@@ -6,9 +6,9 @@ import { RiArrowRightLine, RiEyeOffLine } from 'react-icons/ri';
 import { useScope } from '@/components/shell/workspace';
 import { EmptyState } from '@/components/ui/panel';
 import { SeverityIcon } from '@/components/ui/signal';
-import { capacityInsights, type CapacityInsight } from '@/lib/data/capacity';
+import { capacityInsights, insightsFrom, type CapacityInsight } from '@/lib/data/capacity';
 import { cx } from '@/utils/cx';
-import { useCapacity } from './data';
+import { useCapacity, useTimelineLookup } from './data';
 
 // Capacity insights as a list: what to know, why, and the one click that helps. Snoozing is per browser (for a
 // shift, 8 hours) and only hides the item here; the condition itself stays until the data changes.
@@ -27,7 +27,11 @@ function readSnoozed(): Record<string, number> {
 export function useInsights() {
   const snapshot = useCapacity();
   const scope = useScope();
-  const all = useMemo(() => capacityInsights(snapshot.now, scope), [snapshot, scope]);
+  const timelineOf = useTimelineLookup();
+  const all = useMemo(
+    () => (snapshot.source === 'sim' ? capacityInsights(snapshot.now, scope) : insightsFrom(snapshot, timelineOf, scope)),
+    [snapshot, scope, timelineOf],
+  );
   const [snoozed, setSnoozed] = useState<Record<string, number>>({});
   useEffect(() => setSnoozed(readSnoozed()), []);
   const snooze = useCallback(

@@ -137,7 +137,7 @@ export function CapacityOverviewPage() {
           <Stat label="Spend, 30 days" value={fmtMoney(spend30, { short: true })} hint="estimated at list price" tone="neutral" />
         </Panel>
 
-        <Panel className="col-span-12" title="Insights" icon={RiLightbulbFlashLine} meta="what needs a look, and the next step" flush>
+        <Panel className="col-span-12" title="Insights" icon={RiLightbulbFlashLine} flush>
           <InsightList limit={4} />
         </Panel>
 
@@ -146,26 +146,25 @@ export function CapacityOverviewPage() {
           title="Bookings by pool and hour"
           icon={RiCalendarScheduleLine}
           meta={`${fmtStamp(from)} → ${fmtStamp(to)} UTC`}
-          actions={
-            <div className="flex flex-wrap items-center gap-2">
-              <Segmented
-                label="Heatmap span"
-                value={span}
-                onChange={setSpan}
-                options={(Object.keys(SPANS) as SpanKey[]).map((id) => ({ id, label: SPANS[id].label }))}
-              />
-              <Segmented
-                label="Show as"
-                value={heatView}
-                onChange={setHeatView}
-                options={[
-                  { id: 'chart', label: 'Chart' },
-                  { id: 'table', label: 'Table' },
-                ]}
-              />
-            </div>
-          }
         >
+          {/* Controls live in the body, where they can wrap on a phone; a panel header can't. */}
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <Segmented
+              label="Heatmap span"
+              value={span}
+              onChange={setSpan}
+              options={(Object.keys(SPANS) as SpanKey[]).map((id) => ({ id, label: SPANS[id].label }))}
+            />
+            <Segmented
+              label="Show as"
+              value={heatView}
+              onChange={setHeatView}
+              options={[
+                { id: 'chart', label: 'Chart' },
+                { id: 'table', label: 'Table' },
+              ]}
+            />
+          </div>
           {matrix.rows.length && heatView === 'table' ? (
             <HeatmapTable matrix={matrix} now={snapshot.now} />
           ) : matrix.rows.length ? (

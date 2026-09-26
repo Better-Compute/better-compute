@@ -5,7 +5,10 @@ import { useScope, useWorkspace } from '@/components/shell/workspace';
 import { useFeedback } from '@/components/ui/feedback';
 import {
   capacityAt,
+  capacityTotalsFrom,
   sharedCapacitySource,
+  type CapacityTotals,
+  type TimelineLookup,
   DAY,
   HOUR,
   type CapacitySnapshot,
@@ -119,6 +122,34 @@ export function useTimelines(poolIds: readonly string[], from: number, to: numbe
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [key, from, to, stepMinutes, snapshot, live, tenantId, live ? liveVer : 0],
   );
+}
+
+/**
+ * A synchronous timeline lookup for pure derivations (insights): the simulation answers at once; live answers
+ * what is cached and starts loading the rest (the component re-renders when it arrives).
+ */
+export function useTimelineLookup(): TimelineLookup {
+  const snapshot = useCapacity();
+  const { live, tenantId } = useMode();
+  const liveVer = useLiveStore();
+  return useMemo<TimelineLookup>(
+    () =>
+      live
+        ? (poolId, range) => liveTimeline(tenantId, poolId, range.from, range.to, range.stepMinutes ?? 60)
+        : (poolId, range) => capacitySource(snapshot.now).timelineSync(poolId, range),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [live, tenantId, snapshot, live ? liveVer : 0],
+  );
+}
+
+/**
+ * GPU totals as /capacity shows them, from whichever source the workspace reads (for the Overview and other
+ * modules' KPIs, so they agree with the capacity pages in live mode too).
+ */
+export function useCapacityTotals(): CapacityTotals {
+  const snapshot = useCapacity();
+  const scope = useScope();
+  return useMemo(() => capacityTotalsFrom(snapshot, scope), [snapshot, scope]);
 }
 
 /** A window around now, aligned to the hour so ticking doesn't reshuffle columns. */

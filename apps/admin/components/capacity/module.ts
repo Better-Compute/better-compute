@@ -98,10 +98,14 @@ const SETTINGS: Record<string, WidgetSetting[]> = {
   ],
 };
 
-/** Attach settings, and padding for every widget but the KPI strip (which draws edge-to-edge cells). */
+/**
+ * Attach settings, and padding for every widget but the KPI strip (which draws edge-to-edge cells). Every capacity
+ * widget reads through the mode-aware hooks, so all of them honour the live API (`live: true`).
+ */
 const withSettings = (widgets: WidgetDef[]): WidgetDef[] =>
   widgets.map((widget) => ({
     ...widget,
+    live: true,
     ...(SETTINGS[widget.id] ? { settings: SETTINGS[widget.id] } : {}),
     component: widget.id === 'capacity.kpis' ? widget.component : padded(widget.component),
   }));
