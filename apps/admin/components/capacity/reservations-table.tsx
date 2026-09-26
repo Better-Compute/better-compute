@@ -40,7 +40,7 @@ export function ReservationsTable({
       cell: (r) => <StateTag state={r.state} />,
       width: 150,
     },
-    { id: 'tenant', header: 'Tenant', value: (r) => tenantName(r.tenantId), cell: (r) => <span className="truncate">{tenantName(r.tenantId)}</span>, width: 150 },
+    { id: 'tenant', header: 'Tenant', value: (r) => tenantName(r.tenantId), cell: (r) => <span className="truncate" title={tenantName(r.tenantId)}>{tenantName(r.tenantId)}</span>, width: 180 },
     { id: 'project', header: 'Project', value: (r) => r.projectId ?? '', cell: (r) => <span className="font-mono text-[12px] text-text-secondary">{r.projectId}</span>, width: 120 },
     ...(hidePool ? [] : [{ id: 'pool', header: 'Pool', value: (r: Reservation) => r.poolId, cell: (r: Reservation) => <span className="font-mono text-[12px]">{r.poolId}</span>, width: 140 }]),
     {
