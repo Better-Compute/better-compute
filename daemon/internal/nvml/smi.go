@@ -131,6 +131,9 @@ func (s SMI) Snapshot(ctx context.Context) (*Snapshot, error) {
 	}
 	if out, err := s.run(ctx, "nvlink", "-s"); err == nil {
 		applyNvlinks(snap.Section, parseNvlinks(out))
+		if remote, err := s.run(ctx, "nvlink", "-R"); err == nil {
+			applyNvlinkPeers(snap.Section, parseNvlinkPeers(remote))
+		}
 	}
 	for _, g := range snap.Section.Gpus {
 		if g.Mig != nil && g.Mig.Current == inventory.MigMode_MIG_MODE_ENABLED {
@@ -700,6 +703,67 @@ func parseNvlinks(out []byte) map[string][]*inventory.NvlinkLink {
 		links[current] = append(links[current], &inventory.NvlinkLink{Link: uint32(n), State: state})
 	}
 	return links
+}
+
+// "	 Link 0: Remote Device 00000000:C5:00.0: Link 29"
+var nvlinkRemote = regexp.MustCompile(`^\s*Link (\d+): Remote Device ([0-9A-Fa-f]+:[0-9A-Fa-f]+:[0-9A-Fa-f]+\.[0-9A-Fa-f]+)`)
+
+// parseNvlinkPeers reads `nvidia-smi nvlink -R`: each GPU's links and the PCI bus id at their far end.
+func parseNvlinkPeers(out []byte) map[string]map[uint32]string {
+	peers := map[string]map[uint32]string{}
+	current := ""
+	sc := bufio.NewScanner(bytes.NewReader(out))
+	for sc.Scan() {
+		line := sc.Text()
+		if m := nvlinkGPU.FindStringSubmatch(line); m != nil {
+			current = m[1]
+			continue
+		}
+		m := nvlinkRemote.FindStringSubmatch(line)
+		if m == nil || current == "" {
+			continue
+		}
+		n, _ := strconv.ParseUint(m[1], 10, 32)
+		if peers[current] == nil {
+			peers[current] = map[uint32]string{}
+		}
+		peers[current][uint32(n)] = strings.ToUpper(m[2])
+	}
+	return peers
+}
+
+// applyNvlinkPeers names each link's peer: the GPU on that bus, else "nvswitch:<bus>" (a link to
+// anything but a GPU of this node goes through an NVSwitch).
+func applyNvlinkPeers(section *inventory.GpusSection, peers map[string]map[uint32]string) {
+	byBus := map[string]string{}
+	for _, g := range section.Gpus {
+		byBus[pciBusID(g.PciBusId)] = g.Uuid
+	}
+	for _, g := range section.Gpus {
+		for _, l := range g.Nvlinks {
+			bus, ok := peers[g.Uuid][l.Link]
+			if !ok {
+				continue
+			}
+			if uuid := byBus[pciBusID(bus)]; uuid != "" {
+				l.Peer = uuid
+			} else {
+				l.Peer = "nvswitch:" + pciBusID(bus)
+			}
+		}
+	}
+}
+
+// pciBusID widens a bus id to NVML's 8-digit domain: 0000:C5:00.0 → 00000000:C5:00.0.
+func pciBusID(bus string) string {
+	domain, rest, ok := strings.Cut(strings.ToUpper(bus), ":")
+	if !ok {
+		return strings.ToUpper(bus)
+	}
+	for len(domain) < 8 {
+		domain = "0" + domain
+	}
+	return domain + ":" + rest
 }
 
 func applyNvlinks(section *inventory.GpusSection, links map[string][]*inventory.NvlinkLink) {

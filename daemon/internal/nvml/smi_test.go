@@ -34,6 +34,13 @@ GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-22222222-2222-2222-2222-222222222222)
 	 Link 0: 25 GB/s
 `
 
+const nvlinkRemoteOut = `GPU 0: NVIDIA H100 80GB HBM3 (UUID: GPU-11111111-1111-1111-1111-111111111111)
+	 Link 0: Remote Device 00000000:2A:00.0: Link 3
+	 Link 1: Remote Device 00000000:C5:00.0: Link 29
+GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-22222222-2222-2222-2222-222222222222)
+	 Link 0: Remote Device 00000000:18:00.0: Link 0
+`
+
 const lgipOut = `+-----------------------------------------------------------------------------+
 | GPU instance profiles:                                                      |
 | GPU   Name             ID    Instances   Memory     P2P    SM    DEC   ENC  |
@@ -64,6 +71,7 @@ func replay(t *testing.T, fail map[string]bool) (SMI, *[]string) {
 		"--query-gpu=driver_version --format=csv,noheader":   "580.65.06\n580.65.06\n",
 		"topo -m":   topoOut,
 		"nvlink -s": nvlinkOut,
+		"nvlink -R": nvlinkRemoteOut,
 		"mig -lgip": lgipOut,
 	}
 	var calls []string
@@ -111,9 +119,10 @@ func TestSnapshotReadsEveryQuery(t *testing.T) {
 		CudaComputeCapabilityMinor: 0,
 		// MIG capable, off, switching on at the next reset.
 		Mig: &inventory.GpuMig{Capable: true, Current: inventory.MigMode_MIG_MODE_DISABLED, Pending: inventory.MigMode_MIG_MODE_ENABLED},
+		// Link 0 reaches the A100 on 2A:00.0; link 1 an NVSwitch.
 		Nvlinks: []*inventory.NvlinkLink{
-			{Link: 0, State: inventory.LinkState_LINK_STATE_UP},
-			{Link: 1, State: inventory.LinkState_LINK_STATE_DOWN},
+			{Link: 0, State: inventory.LinkState_LINK_STATE_UP, Peer: "GPU-22222222-2222-2222-2222-222222222222"},
+			{Link: 1, State: inventory.LinkState_LINK_STATE_DOWN, Peer: "nvswitch:00000000:C5:00.0"},
 		},
 		Topology: []*inventory.GpuPeerLink{{PeerUuid: a100.Uuid, Link: inventory.GpuLinkType_GPU_LINK_TYPE_NV, Nvlinks: 12}},
 		Fabric:   &inventory.GpuFabric{ClusterUuid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", CliqueId: 32766},
