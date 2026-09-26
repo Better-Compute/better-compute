@@ -155,6 +155,7 @@ import {
   type SandboxVolume,
   type VolumeRef,
 } from './volumes.js';
+import { volumeStorageStatusHandler } from './volume-storage.js';
 import {
   deleteSnapshot,
   getSnapshot,
@@ -1185,6 +1186,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     tenantDeleted: (context, tenantId) =>
       vpsTenantDeleted(depsOf(context), context, tenantId, options.snapshots),
     commandKinds: [instanceSnapshotKind],
+    // Runtime hosts' volume stores (StatusReport.volume_storage): what volumes are booked against.
+    statusHandlers: [volumeStorageStatusHandler()],
     async nodeSpec(context, node) {
       const instances = await instanceSpecs(
         context.sql,

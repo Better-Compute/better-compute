@@ -12,6 +12,7 @@ import {
 import { chargeQuota, hourMs, meterAllocation, refundQuota, resizeAllocation } from '@better-compute/capacity';
 import { fail, id, int, key, name, object, optional, tenant } from './input.js';
 import { openEnded, visibleVpsPool, type InstanceDeps } from './instances.js';
+import { assertVolumeStorage, volumeStorageNodes } from './volume-storage.js';
 
 // Agent memory (PLAN.md §3.8, [595a2f]'s seam 014bf0d): a sandbox volume is a persistent disk on one host
 // that the tenant's sandboxes attach across runs, so an agent keeps its memory, caches and checkouts. It is
@@ -373,10 +374,17 @@ export async function createVolume(
   const taken = await tx.query(`SELECT 1 FROM sandbox_volumes WHERE tenant_id = $1 AND name = $2 AND state <> 'deleted'`, [input.tenantId, input.name]);
   if (taken.rows.length > 0) throw new ComputeError('CONFLICT', `Volume ${input.name} already exists`);
   if (!deps.capacity) throw new ComputeError('INVALID_CONFIG', 'Volumes need the capacity module');
+  // Only hosts whose volume store can really hold it (review 2, MED 2), their rows locked until commit.
+  const fits = await volumeStorageNodes(tx, input.poolId, input.sizeGiB);
+  if (fits.length === 0)
+    throw new ComputeError('CAPACITY_UNAVAILABLE', `No host in pool ${input.poolId} has ${input.sizeGiB} GiB free in its volume store`, undefined, {
+      reason: 'volume-storage',
+    });
   const outcome = await deps.capacity.reserve(tx, {
     tenantId: input.tenantId,
     poolId: input.poolId,
     volumeId,
+    onlyNodes: fits,
     devices: [],
     resources: { diskGiB: input.sizeGiB },
     during: { start: deps.clock.now(), end: openEnded },
@@ -644,6 +652,8 @@ export async function resizeVolume(
   if (input.sizeGiB < current) fail(`A volume never shrinks: ${row.id} is ${current} GiB`);
   if (!row.allocation_id) throw new ComputeError('INVALID_STATE', `Volume ${row.id} has no disk booking`);
   const grow = { diskGiB: input.sizeGiB - current };
+  // The growth must fit the host's volume store, as bcd checks (review 2, MED 2).
+  if (row.node_id) await assertVolumeStorage(tx, row.node_id, grow.diskGiB, `growing volume ${row.id}`);
   await chargeQuota(tx, row.tenant_id, row.pool_id, grow);
   const outcome = await resizeAllocation(tx, row.allocation_id, { diskGiB: input.sizeGiB });
   if (outcome.status !== 'resized') {

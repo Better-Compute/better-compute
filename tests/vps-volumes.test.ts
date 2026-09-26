@@ -25,6 +25,8 @@ import {
   setIpPool,
   volumeMeter,
   volumeSerial,
+  volumeHeadroomGiB,
+  volumeStorageStatusHandler,
   volumeWork,
   vps,
   vpsMigrations,
@@ -172,6 +174,21 @@ async function hostsReport(state: 'running' | 'absent'): Promise<void> {
 }
 
 const nodes = ['node_01jz00000000000000000000va', 'node_01jz00000000000000000000vb'];
+const GiB = 2n ** 30n;
+const storageHandler = volumeStorageStatusHandler();
+/** A host's StatusReport.volume_storage, through the vps status handler. */
+const storage = (node: string, s: { availableGiB: number; reservedGiB?: number; committedGiB?: number; outstandingGiB?: number }) =>
+  db.transaction((tx) =>
+    storageHandler(tx, { nodeId: node }, {
+      volumeStorage: {
+        totalBytes: 2000n * GiB,
+        availableBytes: BigInt(s.availableGiB) * GiB,
+        reservedBytes: BigInt(s.reservedGiB ?? 20) * GiB,
+        committedBytes: BigInt(s.committedGiB ?? 0) * GiB,
+        outstandingBytes: BigInt(s.outstandingGiB ?? 0) * GiB,
+      },
+    } as never),
+  );
 let pool: string;
 
 beforeAll(async () => {
@@ -183,6 +200,7 @@ afterAll(async () => {
 });
 beforeEach(async () => {
   for (const table of [
+    'host_volume_storage',
     'volume_attachments',
     'sandbox_volumes',
     'sandboxes',
@@ -226,6 +244,8 @@ beforeEach(async () => {
       await db.query(`INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, $2, '1', 'system')`, [node, label]);
     for (const [resource, allocatable] of [['vcpu', 16], ['memoryGiB', 64], ['diskGiB', 1000]] as const)
       await db.query(`INSERT INTO node_resources (node_id, resource, allocatable, ratio, allocated) VALUES ($1, $2, $3, 1, 0)`, [node, resource, allocatable]);
+    // Each host's bcd reports its volume store: 1000 GiB free, 20 GiB kept for itself, no volumes yet.
+    await storage(node, { availableGiB: 1000, reservedGiB: 20 });
   }
   await setIpPool(db, { poolId: pool, cidr: '10.0.0.0/28', gateway: '10.0.0.1' });
   await call('flavors', 'create', { tenantId: 'root', poolId: pool, name: 's1.small', vcpu: 2, memoryGiB: 4, diskGiB: 20 }, root);
@@ -373,7 +393,7 @@ describe('sandbox volumes', () => {
     denied.add(volume.id);
     await expect(call('sandboxVolumes', 'resize', { tenantId: 'acme', volumeId: volume.id, sizeGiB: 90 })).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
     denied.clear();
-    await expect(call('sandboxVolumes', 'resize', { tenantId: 'acme', volumeId: volume.id, sizeGiB: 5000 })).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED' });
+    await expect(call('sandboxVolumes', 'resize', { tenantId: 'acme', volumeId: volume.id, sizeGiB: 5000 })).rejects.toMatchObject({ code: 'CAPACITY_UNAVAILABLE' });
     expect(authzOps.filter((op) => op.op === 'pending').map((op) => op.attributes)).toEqual([{ sizeGiB: 90 }, null, { sizeGiB: 5000 }, null]);
     const { rows } = await db.query<{ resizing_request: string | null }>('SELECT resizing_request FROM sandbox_volumes WHERE id = $1', [volume.id]);
     expect(rows[0]!.resizing_request).toBeNull();
@@ -385,6 +405,32 @@ describe('sandbox volumes', () => {
       );
     await prepare(100);
     await expect(prepare(120)).rejects.toMatchObject({ code: 'CONFLICT', details: { reason: 'resize-in-flight' } });
+  });
+
+  it("book against what the host's volume store can really hold, never overcommitted (review 2, MED 2)", async () => {
+    const [a, b] = nodes as [string, string];
+    // Host a's store is nearly full of other volumes' unwritten space; host b has no report (an older bcd).
+    await storage(a, { availableGiB: 100, reservedGiB: 20, outstandingGiB: 50 });
+    await db.query('DELETE FROM host_volume_storage WHERE node_id = $1', [b]);
+    expect((await volumeHeadroomGiB(db as never, [a, b])).get(a)).toBe(30);
+    await expect(createVolume({ sizeGiB: 40 })).rejects.toMatchObject({ code: 'CAPACITY_UNAVAILABLE', details: { reason: 'volume-storage' } });
+    const small = await createVolume({ sizeGiB: 25 });
+    expect(small.nodeId).toBe(a);
+    // Booked but not yet reported by bcd (committed 0): counts against the headroom until it is.
+    expect((await volumeHeadroomGiB(db as never, [a])).get(a)).toBe(5);
+    await expect(createVolume({ name: 'second', sizeGiB: 10, idempotencyKey: 'vol-2' })).rejects.toMatchObject({ code: 'CAPACITY_UNAVAILABLE' });
+    await expect(call('sandboxVolumes', 'resize', { tenantId: 'acme', volumeId: small.id, sizeGiB: 40 })).rejects.toMatchObject({
+      code: 'CAPACITY_UNAVAILABLE',
+      details: { reason: 'volume-storage', freeGiB: 5 },
+    });
+    // bcd reports the volume (committed 25 GiB, all of it unwritten): the same headroom, by bcd's own rule.
+    await storage(a, { availableGiB: 100, reservedGiB: 20, outstandingGiB: 75, committedGiB: 25 });
+    expect((await volumeHeadroomGiB(db as never, [a])).get(a)).toBe(5);
+    // More room on the host (a disk grown): the growth fits and is booked.
+    await storage(a, { availableGiB: 300, reservedGiB: 20, outstandingGiB: 75, committedGiB: 25 });
+    expect((await call('sandboxVolumes', 'resize', { tenantId: 'acme', volumeId: small.id, sizeGiB: 40 })).sizeGiB).toBe(40);
+    // An unchanged report (within 1 GiB) writes nothing.
+    expect(await storage(a, { availableGiB: 300, reservedGiB: 20, outstandingGiB: 75, committedGiB: 25 })).toBe(false);
   });
 
   it('are listed per caller by default, the whole tenant with scope all', async () => {
