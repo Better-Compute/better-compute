@@ -227,21 +227,34 @@ describe('xidStatusHandler', () => {
     ]);
     expect((await state()).reasons).toEqual([]);
     // A unit waiting for a reboot: recorded, not NoSchedule. The kube manager's faults are NoSchedule: GPUs another
-    // path exposes to pods, pod-resources out of reach, a release a pod still holds (security review 2, MED 4).
-    await report(6, ['RebootRequired', 'ForeignGpuExposure', 'PodResourcesUnavailable', 'KubernetesReleaseStuck']);
+    // path exposes to pods, pod-resources out of reach, a release a pod still holds (security review 2, MED 4),
+    // releases bcd could not read (a18f423).
+    await report(6, [
+      'RebootRequired',
+      'ForeignGpuExposure',
+      'PodResourcesUnavailable',
+      'KubernetesReleaseStuck',
+      'KubernetesReleasesUnreadable',
+    ]);
     expect(
       (
         await f.db.query<{ type: string }>(
           `SELECT type FROM node_conditions WHERE node_id = $1 AND status = 'true'
-              AND type IN ('ForeignGpuExposure', 'PodResourcesUnavailable', 'KubernetesReleaseStuck') ORDER BY type`,
+              AND type IN ('ForeignGpuExposure', 'PodResourcesUnavailable', 'KubernetesReleaseStuck',
+                           'KubernetesReleasesUnreadable') ORDER BY type`,
           [node],
         )
       ).rows.map((row) => row.type),
-    ).toEqual(['ForeignGpuExposure', 'KubernetesReleaseStuck', 'PodResourcesUnavailable']);
+    ).toEqual(['ForeignGpuExposure', 'KubernetesReleaseStuck', 'KubernetesReleasesUnreadable', 'PodResourcesUnavailable']);
     expect((await f.db.query<{ status: string }>(`SELECT status FROM node_conditions WHERE node_id = $1 AND type = 'RebootRequired'`, [node])).rows).toEqual([
       { status: 'true' },
     ]);
-    expect((await state()).reasons).toEqual(['ForeignGpuExposure', 'KubernetesReleaseStuck', 'PodResourcesUnavailable']);
+    expect((await state()).reasons).toEqual([
+      'ForeignGpuExposure',
+      'KubernetesReleaseStuck',
+      'KubernetesReleasesUnreadable',
+      'PodResourcesUnavailable',
+    ]);
     await report(7, ['RebootRequired']);
     expect((await state()).reasons).toEqual([]);
 

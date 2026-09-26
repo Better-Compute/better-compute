@@ -33,6 +33,10 @@ export const daemonNodeConditions: Readonly<Record<string, { noSchedule: boolean
   // the release unreported, so the GPUs stay booked): the kube reaper could not evict, and the GPUs may still be in
   // use. NoSchedule until it clears: an operator looks at the node before it takes more work.
   KubernetesReleaseStuck: { noSchedule: true },
+  // bcd's pending Kubernetes releases (releasing.json) could not be read: every GPU of the node stays claimed until
+  // kube says no pod holds one of an allocation bcd does not know (a18f423). NoSchedule meanwhile, or new holds on
+  // those GPUs would fail on the node with overlap.
+  KubernetesReleasesUnreadable: { noSchedule: true },
   // The spec dropped k8s-join and bcd cordoned and drained the Node.
   KubernetesReleased: { noSchedule: false },
   // The pool's taints changed after the Node registered (NodeRestriction forbids the kubelet to change them): the
@@ -122,7 +126,8 @@ async function recordDaemonConditions(
  *   `recordHostPressure` (Disk/Memory/CpuPressure conditions, written only on a change, NoSchedule on
  *   vps-host pools, `node.condition.changed` events);
  * - bcd's own conditions (`daemonNodeConditions`: the host units' FabricManagerDown and MPSDown, the
- *   kube manager's ForeignGpuExposure, PodResourcesUnavailable and KubernetesReleaseStuck, and
+ *   kube manager's ForeignGpuExposure, PodResourcesUnavailable, KubernetesReleaseStuck and
+ *   KubernetesReleasesUnreadable, and
  *   HostManagedExternally from the host section's state) follow the report, written only on a
  *   change, the faults NoSchedule while true; ForeignGpuExposure also wakes the node's started
  *   reservations.
