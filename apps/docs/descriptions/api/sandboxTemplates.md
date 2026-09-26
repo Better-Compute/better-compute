@@ -8,6 +8,13 @@ Checks the pool, flavor, image and runtime once and stores a template under a na
 - **Lifetime.** `defaultTtlSeconds` defaults to 3,600 and `maxTtlSeconds` to 86,400 or the default TTL, whichever is larger; both lie between 60 seconds and 30 days, and a default above the maximum is `INVALID_INPUT`.
 - **Warm pool.** `warm.min` and `warm.max` are 0 to 64; `max` defaults to `min`, and a `max` below `min` is `INVALID_INPUT`.
 - **User data.** At most 32 KiB. A URI must be a `secret://` reference to a secret of the same tenant, otherwise `INVALID_INPUT`.
+- **Volumes.** `volumes` lists up to 8 sandbox volumes (`sandboxVolumes`) that each sandbox of the template attaches:
+  - each entry names a volume by `volumeId` or by `name` (one of them), with a `mountPath` and an optional `readOnly`;
+  - each volume must be the tenant's, `ready` and in the template's pool (`NOT_FOUND`, `INVALID_STATE`, `INVALID_INPUT`), and named once;
+  - a mount path is absolute, without `.` or `..`, never over a system directory (`/`, `/etc`, `/usr`, `/proc`, …), and never inside another entry's (`INVALID_INPUT`);
+  - a template with volumes keeps no warm pool (`warm.max` must be 0), since a warm instance would hold the volumes.
+
+  Its sandboxes run on the volumes' host only. A read-write attachment needs the volume to itself, so a second sandbox of a template that attaches a volume read-write is `CONFLICT` (`details.reason: 'volume-in-use'`) while the first lives.
 
 A live template with the same name is `CONFLICT`. The caller becomes the template's owner in the authorization projection. Publishes no event.
 
@@ -25,7 +32,7 @@ A deleted template, or one of another tenant, is `NOT_FOUND`.
 
 ## update
 
-Changes a template's flavor, image, user data, TTL bounds or warm pool; returns the template with its version raised.
+Changes a template's flavor, image, user data, TTL bounds, warm pool or volumes; returns the template with its version raised.
 
 The pool, name and runtime stay. A new `flavor` or `imageId` is checked against the pool as on `create`, and the pool must still run the template's runtime (`INVALID_INPUT`). Omitted fields keep their values, `userData: null` removes the user data, and `warm` replaces the warm pool, `max` again defaulting to `min`. A `defaultTtlSeconds` above `maxTtlSeconds` after the change is `INVALID_INPUT`. A deleted or missing template is `NOT_FOUND`. The secrets the template references are decided with the update; if another change added secret references while this one was decided, it is `CONFLICT` with `details.reason: 'secrets-changed'`: retry, and the new references are decided too.
 
