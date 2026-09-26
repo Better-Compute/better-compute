@@ -83,7 +83,8 @@ func TestHelperRuntimeChecks(t *testing.T) {
 	if len(got) != 2 || got[0].status != "fail" || !strings.Contains(got[0].detail, "not in the libvirt group") || got[1].status != "warn" {
 		t.Fatalf("checks = %v", got)
 	}
-	if got := helperRuntimeChecks(cfg, both, member(true)); got[0].status != "ok" {
+	// A member works, but the libvirt group is root-equivalent: no privilege separation.
+	if got := helperRuntimeChecks(cfg, both, member(true)); got[0].status != "warn" || !strings.Contains(got[0].detail, "no privilege separation") {
 		t.Fatalf("a member: %v", got)
 	}
 }

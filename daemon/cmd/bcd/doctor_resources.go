@@ -123,7 +123,9 @@ func helperRuntimeChecks(cfg *config.Config, lookPath func(string) (string, erro
 		case !ok:
 			out = append(out, doctorCheck{"fail", "libvirt", cfg.Helper.User + " is not in the libvirt group: bcd node cannot drive libvirt-kvm under [helper]"})
 		default:
-			out = append(out, doctorCheck{"ok", "libvirt", cfg.Helper.User + " drives libvirt through the libvirt group"})
+			// qemu:///system is root-equivalent (a storage pool over /etc, a domain with a host disk,
+			// DAC relabels): the helper separates nothing on this host until libvirt goes through it.
+			out = append(out, doctorCheck{"warn", "libvirt", cfg.Helper.User + " drives libvirt through the libvirt group, which is root-equivalent: [helper] gives no privilege separation on this libvirt host"})
 		}
 	}
 	if _, err := lookPath("cloud-hypervisor"); err == nil {
