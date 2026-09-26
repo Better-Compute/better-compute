@@ -1,0 +1,326 @@
+'use client';
+
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { useMemo, useState } from 'react';
+import { RiAddLine, RiArrowRightUpLine, RiBarChartBoxLine, RiCalendarScheduleLine, RiTimerLine } from 'react-icons/ri';
+import { ButtonLink } from '@/components/base/buttons/button';
+import { Legend, StackedBar, TimeSeriesChart } from '@/components/ui/charts';
+import { EmptyState, Grid, PageHeader, Panel } from '@/components/ui/panel';
+import { Mono, Tag } from '@/components/ui/signal';
+import { Stat } from '@/components/ui/stat';
+import { fmtDuration, fmtMoney, fmtNum, fmtPct, fmtRelative, fmtStamp } from '@/lib/data/format';
+import { reservationGpus } from '@/lib/data/capacity';
+import { DAY, HOUR, useHourWindow, usePoolRows, useTenantName, useTimelines } from '../data';
+import { CapacityHeatmap } from '../heatmap';
+import { byModel, costOf, fleetSeries, fleetTotals, heatMatrix, pressure, quotaCells } from '../model';
+import { HeatLegend, Segmented, StateTag, utcDay } from '../ui';
+
+const SPANS = {
+  '3d': { back: 24, ahead: 72, label: '−1d / +3d' },
+  '7d': { back: 48, ahead: 168, label: '−2d / +7d' },
+  '14d': { back: 168, ahead: 168, label: '−7d / +7d' },
+} as const;
+type SpanKey = keyof typeof SPANS;
+
+/** Capacity: what exists, what is booked now and ahead, where it is tight, and what's next. */
+export function CapacityOverviewPage() {
+  const router = useRouter();
+  const { snapshot, rows } = usePoolRows();
+  const tenantName = useTenantName();
+  const [span, setSpan] = useState<SpanKey>('7d');
+  const { from, to, hour } = useHourWindow(SPANS[span].back, SPANS[span].ahead);
+  const gpuRows = useMemo(() => rows.filter((row) => row.unit === 'gpu'), [rows]);
+  const timelines = useTimelines(
+    gpuRows.map((row) => row.id),
+    from,
+    to,
+  );
+  const matrix = useMemo(() => heatMatrix(gpuRows, timelines, from, HOUR, (to - from) / HOUR), [gpuRows, timelines, from, to]);
+  const totals = useMemo(() => fleetTotals(rows), [rows]);
+  const series = useMemo(() => fleetSeries([...timelines.values()]), [timelines]);
+  const models = useMemo(() => byModel(rows), [rows]);
+
+  const ahead = useMemo(() => {
+    let peak = { ratio: 0, t: hour };
+    series.times.forEach((t, index) => {
+      if (t < hour) return;
+      const ratio = series.allocatable[index] ? series.booked[index]! / series.allocatable[index]! : 0;
+      if (ratio > peak.ratio) peak = { ratio, t };
+    });
+    return peak;
+  }, [series, hour]);
+
+  const pressures = useMemo(
+    () =>
+      gpuRows
+        .map((row) => ({ row, ...pressure(row, timelines.get(row.id)!, snapshot.now, 8, DAY) }))
+        .sort((a, b) => (b.waitMs ?? Infinity) - (a.waitMs ?? Infinity)),
+    [gpuRows, timelines, snapshot.now],
+  );
+
+  const poolIds = useMemo(() => new Set(rows.map((row) => row.id)), [rows]);
+  const upcoming = useMemo(() => {
+    const until = snapshot.now + 6 * HOUR;
+    const events: { t: number; kind: 'start' | 'end'; id: string; tenantId: string; poolId: string; gpus: number; state: (typeof snapshot.reservations)[number]['state'] }[] = [];
+    for (const reservation of snapshot.reservations) {
+      if (!reservation.during || !poolIds.has(reservation.poolId)) continue;
+      if (reservation.state === 'placed' && reservation.during.start > snapshot.now && reservation.during.start <= until)
+        events.push({ t: reservation.during.start, kind: 'start', id: reservation.id, tenantId: reservation.tenantId, poolId: reservation.poolId, gpus: reservationGpus(reservation), state: reservation.state });
+      if ((reservation.state === 'active' || reservation.state === 'binding') && reservation.during.end > snapshot.now && reservation.during.end <= until)
+        events.push({ t: reservation.during.end, kind: 'end', id: reservation.id, tenantId: reservation.tenantId, poolId: reservation.poolId, gpus: reservationGpus(reservation), state: reservation.state });
+    }
+    return events.sort((a, b) => a.t - b.t);
+  }, [snapshot, poolIds]);
+
+  const alerts = useMemo(
+    () =>
+      quotaCells(snapshot.quotas)
+        .filter((cell) => cell.level !== 'ok' && poolIds.has(cell.poolId) && cell.tenantId !== snapshot.tenantId)
+        .sort((a, b) => b.ratio - a.ratio)
+        .slice(0, 8),
+    [snapshot, poolIds],
+  );
+
+  const consumers = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const reservation of snapshot.reservations) {
+      if (!poolIds.has(reservation.poolId)) continue;
+      if (reservation.state !== 'active' && reservation.state !== 'binding') continue;
+      map.set(reservation.tenantId, (map.get(reservation.tenantId) ?? 0) + reservationGpus(reservation));
+    }
+    return [...map].sort((a, b) => b[1] - a[1]);
+  }, [snapshot, poolIds]);
+
+  const spend30 = useMemo(
+    () => snapshot.usage.filter((window) => poolIds.has(window.tags.poolId ?? '')).reduce((total, window) => total + costOf(window, snapshot.prices), 0),
+    [snapshot, poolIds],
+  );
+  const upcoming24 = useMemo(
+    () => snapshot.reservations.filter((r) => r.state === 'placed' && r.during && r.during.start < snapshot.now + DAY && poolIds.has(r.poolId)).length,
+    [snapshot, poolIds],
+  );
+
+  return (
+    <>
+      <PageHeader
+        icon={RiBarChartBoxLine}
+        title="Capacity"
+        description={`${fmtNum(totals.allocated)} of ${fmtNum(totals.allocatable)} schedulable GPUs are allocated (${fmtPct(totals.utilization, 0)}) and ${fmtNum(totals.freeNow)} are free right now. Bookings peak at ${fmtPct(ahead.ratio, 0)} ${fmtRelative(ahead.t, snapshot.now)} (${fmtStamp(ahead.t)} UTC).`}
+        meta={
+          <>
+            <Tag status={snapshot.source === 'sim' ? 'pending' : 'live'}>{snapshot.source === 'sim' ? 'simulated' : 'live'}</Tag>
+            <Tag status="ok" led={false}>
+              {totals.pools} pools · {fmtNum(totals.gpus)} GPUs · {fmtNum(totals.vcpus.total)} vCPUs
+            </Tag>
+            {totals.pending > 0 && <Tag status="pending">{totals.pending} waiting for capacity</Tag>}
+          </>
+        }
+        actions={
+          <ButtonLink href="/reservations/new" size="small" leadingIcon={RiAddLine}>
+            Plan a reservation
+          </ButtonLink>
+        }
+      />
+
+      <Grid>
+        <Panel className="col-span-12" bodyClassName="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3 xl:grid-cols-6">
+          <Stat label="Schedulable GPUs" value={fmtNum(totals.allocatable)} unit={`/ ${fmtNum(totals.gpus)}`} hint={`${fmtNum(totals.unavailable)} out of service`} />
+          <Stat label="Allocated now" value={fmtPct(totals.utilization, 0)} unit={`${fmtNum(totals.allocated)} GPUs`} trend={series.booked.slice(0, Math.max(2, series.times.findIndex((t) => t >= hour) + 1))} />
+          <Stat label="Free now" value={fmtNum(totals.freeNow)} unit="GPUs" hint={`${fmtNum(totals.reserved)} of them booked later`} tone="neutral" />
+          <Stat label="Starting in 24 h" value={fmtNum(upcoming24)} unit="reservations" hint={`peak ${fmtPct(ahead.ratio, 0)} ${fmtRelative(ahead.t, snapshot.now)}`} />
+          <Stat label="Waiting" value={fmtNum(totals.pending)} unit="pending" hint="need capacity or a confirmation" tone="neutral" />
+          <Stat label="Spend, 30 days" value={fmtMoney(spend30, { short: true })} hint="estimated at list price" tone="neutral" />
+        </Panel>
+
+        <Panel
+          className="col-span-12"
+          title="Bookings by pool and hour"
+          icon={RiCalendarScheduleLine}
+          meta={`${fmtStamp(from)} → ${fmtStamp(to)} UTC`}
+          actions={
+            <Segmented
+              label="Heatmap span"
+              value={span}
+              onChange={setSpan}
+              options={(Object.keys(SPANS) as SpanKey[]).map((id) => ({ id, label: SPANS[id].label }))}
+            />
+          }
+        >
+          {matrix.rows.length ? (
+            <>
+              <CapacityHeatmap matrix={matrix} now={snapshot.now} onSelect={(poolId) => router.push(`/pools/${poolId}`)} />
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                <HeatLegend />
+                <span className="font-mono text-[10px] text-text-tertiary">left of NOW: booked history · right: the reservation book · click a row for the pool</span>
+              </div>
+            </>
+          ) : (
+            <EmptyState title="No GPU pools in this scope" />
+          )}
+        </Panel>
+
+        <Panel className="col-span-12 xl:col-span-8" title="Fleet bookings vs schedulable GPUs" meta="hourly">
+          <TimeSeriesChart
+            times={series.times}
+            height={220}
+            series={[
+              { id: 'booked', label: 'Booked GPUs', values: series.booked, tone: 'signal', area: true },
+              { id: 'allocatable', label: 'Schedulable', values: series.allocatable, tone: 'neutral', dashed: true },
+            ]}
+            yMax={Math.max(1, ...series.allocatable) * 1.12}
+            xFormat={(t) => `${utcDay(t)} ${new Date(t).toISOString().slice(11, 13)}h`}
+            markers={[{ t: snapshot.now, label: 'now', tone: 'neutral' }]}
+          />
+          <Legend
+            className="mt-2"
+            items={[
+              { label: 'booked GPUs', tone: 'signal' },
+              { label: 'schedulable GPUs (dashed)', tone: 'neutral' },
+            ]}
+          />
+        </Panel>
+
+        <Panel className="col-span-12 xl:col-span-4" title="By GPU model" meta={`${models.length} models`}>
+          <ul className="flex flex-col gap-3">
+            {models.map((model) => (
+              <li key={model.short}>
+                <div className="mb-1 flex items-baseline justify-between gap-2">
+                  <span className="font-mono text-[12px] text-text-primary">{model.short}</span>
+                  <span className="font-mono text-[11px] tabular-nums text-text-tertiary">
+                    {fmtNum(model.allocated)} / {fmtNum(model.allocatable)} · {fmtNum(model.freeNow)} free
+                  </span>
+                </div>
+                <StackedBar
+                  height={8}
+                  total={model.total}
+                  parts={[
+                    { label: 'allocated', value: model.allocated, tone: 'signal' },
+                    { label: 'free', value: model.freeNow, tone: 'muted' },
+                    { label: 'out of service', value: model.total - model.allocatable, tone: 'hatch' },
+                  ]}
+                />
+              </li>
+            ))}
+          </ul>
+          <Legend
+            className="mt-4"
+            items={[
+              { label: 'allocated', tone: 'signal' },
+              { label: 'free', tone: 'muted' },
+              { label: 'out of service', tone: 'hatch' },
+            ]}
+          />
+        </Panel>
+
+        <Panel className="col-span-12 lg:col-span-6" title="Where it is tight" icon={RiTimerLine} meta="earliest 8 GPUs for 24 h" flush>
+          <table className="w-full text-body-regular">
+            <thead>
+              <tr className="border-b border-separator-border font-mono text-[11px] tracking-wide text-text-tertiary uppercase">
+                <th className="px-3 py-2 text-left font-normal">Pool</th>
+                <th className="px-3 py-2 text-right font-normal">Free now</th>
+                <th className="px-3 py-2 text-right font-normal">Next 8×24h</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pressures.map(({ row, start, waitMs }) => (
+                <tr key={row.id} className="border-b border-separator-border last:border-0 hover:bg-background-secondary-default">
+                  <td className="px-3 py-1.5">
+                    <Link href={`/pools/${row.id}`} className="font-mono text-[12px] text-text-primary hover:underline">
+                      {row.name}
+                    </Link>
+                    <span className="ml-2 font-mono text-[11px] text-text-tertiary">{row.short}</span>
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono tabular-nums">{fmtNum(row.freeNow)}</td>
+                  <td className="px-3 py-1.5 text-right font-mono tabular-nums">
+                    {start === undefined ? (
+                      <Tag status="crit">none in 7 d</Tag>
+                    ) : waitMs! < HOUR ? (
+                      <Tag status="ok">now</Tag>
+                    ) : (
+                      <Tag status={waitMs! > DAY ? 'warn' : 'ok'} led={waitMs! > DAY}>
+                        in {fmtDuration(waitMs!)}
+                      </Tag>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Panel>
+
+        <Panel className="col-span-12 lg:col-span-6" title="Next 6 hours" meta={`${upcoming.length} changes`} flush>
+          {upcoming.length ? (
+            <ul className="max-h-[340px] overflow-y-auto">
+              {upcoming.slice(0, 40).map((event) => (
+                <li key={`${event.id}:${event.kind}`} className="flex items-center gap-3 border-b border-separator-border px-3 py-1.5 last:border-0">
+                  <span className="w-14 shrink-0 font-mono text-[11px] tabular-nums text-text-tertiary">{fmtRelative(event.t, snapshot.now)}</span>
+                  <Tag status={event.kind === 'start' ? 'pending' : 'ok'} className="w-14 justify-center">
+                    {event.kind === 'start' ? 'starts' : 'ends'}
+                  </Tag>
+                  <Link href={`/reservations?id=${event.id}`} className="min-w-0 truncate">
+                    <Mono>{event.id}</Mono>
+                  </Link>
+                  <span className="min-w-0 flex-1 truncate text-caption-1-regular text-text-secondary">
+                    {tenantName(event.tenantId)} · {event.poolId}
+                  </span>
+                  <span className="shrink-0 font-mono text-[12px] tabular-nums">{event.gpus} GPU</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <EmptyState title="Nothing starts or ends in the next 6 hours" />
+          )}
+        </Panel>
+
+        <Panel
+          className="col-span-12 lg:col-span-6"
+          title="Tenants near quota"
+          meta={`${alerts.length} at ≥80%`}
+          actions={
+            <Link href="/quotas" className="inline-flex items-center gap-1 font-mono text-[11px] text-signal hover:underline">
+              quotas <RiArrowRightUpLine className="size-3.5" aria-hidden />
+            </Link>
+          }
+        >
+          {alerts.length ? (
+            <ul className="flex flex-col gap-2.5">
+              {alerts.map((cell) => (
+                <li key={`${cell.tenantId}:${cell.poolId}:${cell.resource}`} className="grid grid-cols-[1fr_auto] items-center gap-x-3 gap-y-1">
+                  <span className="truncate text-caption-1-medium text-text-primary">
+                    {tenantName(cell.tenantId)} <span className="font-mono text-[11px] text-text-tertiary">· {cell.poolId} · {cell.resource}</span>
+                  </span>
+                  <span className="font-mono text-[11px] tabular-nums text-text-secondary">
+                    {fmtNum(cell.used)} / {fmtNum(cell.max)}
+                  </span>
+                  <div className="col-span-2 h-1.5 bg-background-secondary-default">
+                    <div className="h-full" style={{ width: `${cell.ratio * 100}%`, background: cell.level === 'full' ? 'var(--color-red-500)' : 'var(--color-signal-fill)' }} />
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <EmptyState title="Every tenant is under 80% of its quota" />
+          )}
+        </Panel>
+
+        <Panel className="col-span-12 lg:col-span-6" title="Who holds GPUs now" meta={`${consumers.length} tenants`}>
+          <ul className="flex flex-col gap-2.5">
+            {consumers.map(([tenantId, gpus]) => (
+              <li key={tenantId} className="grid grid-cols-[9rem_1fr_4rem] items-center gap-3">
+                <span className="truncate text-caption-1-medium text-text-primary">{tenantName(tenantId)}</span>
+                <div className="h-2 bg-background-secondary-default">
+                  <div className="h-full bg-signal-fill" style={{ width: `${(gpus / (consumers[0]?.[1] || 1)) * 100}%` }} />
+                </div>
+                <span className="text-right font-mono text-[12px] tabular-nums">{fmtNum(gpus)}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-3 text-caption-1-regular text-text-tertiary">
+            GPUs of active reservations. <StateTag state="active" className="ml-1" />
+          </p>
+        </Panel>
+      </Grid>
+    </>
+  );
+}
