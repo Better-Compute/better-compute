@@ -11,7 +11,7 @@ import {
   RiSearchLine,
   RiTimeLine,
 } from 'react-icons/ri';
-import { fmtRelative, sites } from '@/lib/data';
+import { fmtRelative, fmtStamp, sites } from '@/lib/data';
 import { collectAttention, navForPath } from '@/lib/modules';
 import { Select } from '@/components/ui/overlay';
 import { SeverityIcon } from '@/components/ui/signal';
@@ -24,7 +24,7 @@ import { useAttentionItems } from './use-attention';
 /** Breadcrumbs on the left; the workspace controls (search, scope, range, clock, attention) on the right. */
 export function Topbar({ onOpenPalette, onOpenNav }: { onOpenPalette(): void; onOpenNav(): void }) {
   const pathname = usePathname();
-  const { range, setRange, siteId, setSiteId } = useWorkspaceSettings();
+  const { range, setRange, siteId, setSiteId, compareAt, setCompareAt } = useWorkspaceSettings();
   const nav = navForPath(pathname);
   const rest = nav && pathname !== nav.href ? pathname.slice(nav.href.length).split('/').filter(Boolean) : [];
 
@@ -92,6 +92,16 @@ export function Topbar({ onOpenPalette, onOpenNav }: { onOpenPalette(): void; on
       />
       </div>
 
+      {compareAt && (
+        <span className="hidden h-8 items-center border border-signal-fill/50 bg-signal-soft font-mono text-[11px] text-signal xl:inline-flex">
+          <Link href="/" className="px-2 hover:underline" title="What changed since this moment (on the Overview)">
+            vs {fmtStamp(compareAt)}
+          </Link>
+          <button type="button" onClick={() => setCompareAt(undefined)} aria-label="Stop comparing" className="grid h-full w-6 place-items-center border-l border-signal-fill/40 hover:bg-signal-fill/20">
+            ×
+          </button>
+        </span>
+      )}
       <TimeMachine />
 
       <AttentionBell />
