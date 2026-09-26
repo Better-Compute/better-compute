@@ -1098,9 +1098,28 @@ Host resources an allocation may use (cgroup v2 semantics). Zero or empty = not 
 
 (v0.3) VPS instances on this host; the daemon converges each toward desired_state.
 
-| Field       | Number | Type                                     | Description |
-| ----------- | ------ | ---------------------------------------- | ----------- |
-| `instances` | 1      | repeated [`InstanceSpec`](#instancespec) |             |
+| Field       | Number | Type                                     | Description                                                                                                                                                                                                                                                                                                                                                               |
+| ----------- | ------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `instances` | 1      | repeated [`InstanceSpec`](#instancespec) |                                                                                                                                                                                                                                                                                                                                                                           |
+| `volumes`   | 2      | repeated [`HostVolume`](#hostvolume)     | (v1.1, agent memory) Persistent volumes kept on this host across instances. bcd creates each missing one (a sparse qcow2 under its state directory, never shrunk) and destroys (discards, then unlinks) one the section no longer lists once no instance attaches it: an absent volume is a deleted volume, so a spec is only ever missing one the control plane deleted. |
+
+### HostVolume
+
+| Field        | Number | Type     | Description                                                                                                                                         |
+| ------------ | ------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `volume_id`  | 1      | `string` |                                                                                                                                                     |
+| `size_bytes` | 2      | `uint64` |                                                                                                                                                     |
+| `serial`     | 3      | `string` | The virtio-blk serial (at most 20 bytes, [a-z0-9-]); the guest finds the disk at /dev/disk/by-id/virtio-\<serial> and mounts it from its user data. |
+
+### InstanceVolume
+
+(v1.1) A HostVolume attached to an instance as an extra virtio disk, in list order after the
+root disk. bcd refuses (InstanceStatus error) an instance naming a volume the section lacks.
+
+| Field       | Number | Type     | Description |
+| ----------- | ------ | -------- | ----------- |
+| `volume_id` | 1      | `string` |             |
+| `read_only` | 2      | `bool`   |             |
 
 ### InstanceSpec
 
@@ -1122,6 +1141,7 @@ Host resources an allocation may use (cgroup v2 semantics). Zero or empty = not 
 | `identity_rebind_ref` | 14     | `string`                                          | (v0.5, review 13 H2) After a restore, the guest's per-instance identity (SSH host keys, machine id, workload credentials) must not stay the snapshot's. A secret ref (fetched with SecretRequest) of the new identity material; bcd delivers it to the running guest (a hotplugged raw disk read by a vps-installed guest unit) and reports the ref back in InstanceStatus.identity_rebound_ref once the guest acked it. Changing it asks for a new rebind. |
 | `ssh_from_host_only`  | 15     | `bool`                                            | (review 13 L5) Port 22 of the guest is reachable only from the host (bcd's tunnel dial), never from other guests or the network, whatever network_policy allows.                                                                                                                                                                                                                                                                                            |
 | `placement`           | 16     | [`InstancePlacement`](#instanceplacement)         | (v1.1 §3.8) Where the guest's vCPUs and memory live on the host. Absent: the runtime's default (floating vCPUs, host memory).                                                                                                                                                                                                                                                                                                                               |
+| `volumes`             | 17     | repeated [`InstanceVolume`](#instancevolume)      | (v1.1, agent memory) Persistent volumes to attach (InstancesSection.volumes).                                                                                                                                                                                                                                                                                                                                                                               |
 
 ### InstancePlacement
 
@@ -1146,11 +1166,13 @@ A content-addressed image the daemon may fetch and cache.
 
 ### InstanceNic
 
-| Field       | Number | Type              | Description                            |
-| ----------- | ------ | ----------------- | -------------------------------------- |
-| `network`   | 1      | `string`          | Bridge or network name on the host.    |
-| `mac`       | 2      | `string`          |                                        |
-| `addresses` | 3      | repeated `string` | Addresses assigned by IPAM, CIDR form. |
+| Field         | Number | Type              | Description                                                                                                                                                                                                    |
+| ------------- | ------ | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `network`     | 1      | `string`          | Bridge or network name on the host.                                                                                                                                                                            |
+| `mac`         | 2      | `string`          |                                                                                                                                                                                                                |
+| `addresses`   | 3      | repeated `string` | Addresses assigned by IPAM, CIDR form.                                                                                                                                                                         |
+| `gateway`     | 4      | `string`          | (v1.1) The IPAM range's default gateway; empty: no default route through this NIC. bcd renders it, with `addresses`, into the guest's NoCloud network-config (the guest runs no DHCP client against the host). |
+| `nameservers` | 5      | repeated `string` | (v1.1) DNS servers for the guest; empty: the guest keeps its image's resolver configuration.                                                                                                                   |
 
 ### AccessSection
 

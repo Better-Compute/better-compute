@@ -166,6 +166,13 @@
     "exports": ["."]
   },
   {
+    "name": "@better-compute/provider-kubernetes",
+    "directory": "packages/provider-kubernetes",
+    "description": "Kubernetes as a capacity source for better-compute: bcd as a DaemonSet adopts a cluster's nodes and GPUs into a pool.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
     "name": "@better-compute/provider-proxmox",
     "directory": "packages/provider-proxmox",
     "description": "Proxmox VE provider for better-compute: QEMU VMs cloned from templates as VPS instances.",

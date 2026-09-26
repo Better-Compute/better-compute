@@ -3899,6 +3899,60 @@
             "type": "InstanceSpec",
             "label": "repeated",
             "description": ""
+          },
+          {
+            "name": "volumes",
+            "number": 2,
+            "type": "HostVolume",
+            "label": "repeated",
+            "description": "(v1.1, agent memory) Persistent volumes kept on this host across instances. bcd creates each\nmissing one (a sparse qcow2 under its state directory, never shrunk) and destroys (discards,\nthen unlinks) one the section no longer lists once no instance attaches it: an absent volume\nis a deleted volume, so a spec is only ever missing one the control plane deleted."
+          }
+        ]
+      },
+      {
+        "name": "HostVolume",
+        "description": "",
+        "fields": [
+          {
+            "name": "volume_id",
+            "number": 1,
+            "type": "string",
+            "label": "",
+            "description": ""
+          },
+          {
+            "name": "size_bytes",
+            "number": 2,
+            "type": "uint64",
+            "label": "",
+            "description": ""
+          },
+          {
+            "name": "serial",
+            "number": 3,
+            "type": "string",
+            "label": "",
+            "description": "The virtio-blk serial (at most 20 bytes, [a-z0-9-]); the guest finds the disk at\n/dev/disk/by-id/virtio-<serial> and mounts it from its user data."
+          }
+        ]
+      },
+      {
+        "name": "InstanceVolume",
+        "description": "(v1.1) A HostVolume attached to an instance as an extra virtio disk, in list order after the\nroot disk. bcd refuses (InstanceStatus error) an instance naming a volume the section lacks.",
+        "fields": [
+          {
+            "name": "volume_id",
+            "number": 1,
+            "type": "string",
+            "label": "",
+            "description": ""
+          },
+          {
+            "name": "read_only",
+            "number": 2,
+            "type": "bool",
+            "label": "",
+            "description": ""
           }
         ]
       },
@@ -4017,6 +4071,13 @@
             "type": "InstancePlacement",
             "label": "",
             "description": "(v1.1 §3.8) Where the guest's vCPUs and memory live on the host. Absent: the runtime's default\n(floating vCPUs, host memory)."
+          },
+          {
+            "name": "volumes",
+            "number": 17,
+            "type": "InstanceVolume",
+            "label": "repeated",
+            "description": "(v1.1, agent memory) Persistent volumes to attach (InstancesSection.volumes)."
           }
         ]
       },
@@ -4119,6 +4180,20 @@
             "type": "string",
             "label": "repeated",
             "description": "Addresses assigned by IPAM, CIDR form."
+          },
+          {
+            "name": "gateway",
+            "number": 4,
+            "type": "string",
+            "label": "",
+            "description": "(v1.1) The IPAM range's default gateway; empty: no default route through this NIC. bcd renders\nit, with `addresses`, into the guest's NoCloud network-config (the guest runs no DHCP client\nagainst the host)."
+          },
+          {
+            "name": "nameservers",
+            "number": 5,
+            "type": "string",
+            "label": "repeated",
+            "description": "(v1.1) DNS servers for the guest; empty: the guest keeps its image's resolver configuration."
           }
         ]
       },
