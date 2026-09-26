@@ -63,6 +63,8 @@ sources:
   - packages/mcp/src/tools.ts
   - daemon/internal/agent/netpolicy.go
   - daemon/internal/agent/rebind.go
+  - packages/pki/src/attestors/tpm.ts
+  - packages/server/src/join/service.ts
 ---
 
 Better Compute runs commands as root on your machines, so its security model starts from one question: who can make
@@ -89,7 +91,7 @@ are built, and ends with a hardening checklist.
 | Cross-tenant access, forged attributes | Tenant pre-check before any database access; SQL tenant scoping; idempotency keys scoped to tenant and identity; attributes only from compute's own projection | Built |
 | Stolen join token | Short TTL, `maxUses` (default 1), `expect` binding; tokens stored hashed, revocable, and sealed to JoinService in transit, bound to the CSR | Built |
 | Compromised node | `nodeId` only from the certificate's SAN; 24 h certificates with pushed revocation; secrets bound to current work; reports only about its own allocations; its attested results speak only for itself | Built |
-| Cloned node identity | A certificate alternating between two machines more than 3 times in 10 minutes is revoked (duplicate-identity quarantine) | Built in the gateway |
+| Cloned node identity | A certificate alternating between two machines more than 3 times in 10 minutes is revoked (duplicate-identity quarantine); a `tpm` join admits only a node key the machine's TPM certifies it made and never lets out (`nodeKey: 'certified'`, the default) | Quarantine built in the gateway; the TPM node-key proof built at join time (cf24876), not yet carried through renewal |
 | Compromised gateway | Holds no key in its code; commands and NodeSpecs signed; Renew and `JoinResponse` verified end to end; secrets as JWE; results and `AllocationBound` reports signed by the node. It can delay, drop or read frames, not forge intent, identity, results, bindings or secrets | Built, with the [process caveat](#gateway-processes) |
 | Compromised api or worker | Admissions still need IAM decisions; worker keys last 24 h; tickets are audited; fleet-wide destructive batches need k-of-n operator approval checked on the machine (the [destructive-batch quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)) | Built, the quorum included (v1.0): bcd and the FakeDaemon enforce it, the server stores, approves and holds batches, the gateway attaches approvals and proofs, the CLI reviews and signs, and the built-in workflows create their batches (f66e236, e594a4f). Open: metal's leaves do not bind payloads yet |
 | Exploited node agent process | With `bcd helper`, `bcd node` parses everything from the network as an unprivileged account; the root helper serves only that account (`SO_PEERCRED`) running an installed bcd binary, a few typed operations with fixed file paths, bcd's own nftables table and the host's own GPUs, and logs each one | Built in bcd (28dc2ae, Linux), self-update included (2d67b25); opt-in with `daemon install-script --unprivileged` (169c459), while the default install still runs `bcd node` as root |
@@ -118,7 +120,10 @@ are built, and ends with a hardening checklist.
   [discovering new machines](/docs/guides/bare-metal/sites#discovering-new-machines)). Driver plugins run
   sandboxed (below), and each `bmc.*` kind admits only its own BMC operations, so a `bmc.query`, which needs no batch,
   cannot carry a power or RAID change, and `site.httpProxy` never reaches a BMC. With approver keys in its trust bundle it enforces the destructive-batch quorum. Its node key is in the
-  host's TPM when bcd can open one (non-exportable, but root on the node can use it), else a 0600 file; see
+  host's TPM when bcd can open one (non-exportable, but root on the node can use it), else a 0600 file. A `tpm` join
+  proves it to the control plane: the TPM's AK certifies the key over the CSR's hash, the attestor refuses the join
+  without that proof by default, and `node.joined` records `nodeKey: 'tpm'` (cf24876). Other joins and every renewal
+  prove nothing about where the key lives; see
   [the node key in the TPM](/docs/guides/nodes/attestation#the-node-key-in-the-tpm). `bcd node` can run unprivileged beside the root `bcd helper` ([below](#privilege-separation-on-the-node)),
   when installed with `--unprivileged`, self-update included; by default it runs as root. See
   [the daemon](/docs/daemon#what-bcd-does-today).
@@ -683,6 +688,9 @@ change; see [sinks](/docs/extending/sinks#audit-sinks).
 - Nodes that run no bcx plugins installed with `daemon install-script --unprivileged`, so `bcd node` is not root,
   with `command_root_sha256` pinned so `bcd helper` checks host units against signed specs from the first request.
 - `trustedProxies` set to your load balancers when IAM policies condition on `request.sourceIp`.
+- On TPM 2.0 fleets, `tpmAttestor` left at `nodeKey: 'certified'`, with `policy.joinAttestors: ['tpm']` on the pools
+  that must take no other kind of join, so every node there starts with a node key its TPM holds (see
+  [tpm](/docs/guides/nodes/attestation#tpm)).
 
 </Step>
 <Step>

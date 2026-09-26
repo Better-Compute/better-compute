@@ -177,7 +177,9 @@ sequenceDiagram
 1. **Key and CSR.** The daemon generates a P-256 key and a PKCS#10 request. bcd makes the key in the host's TPM
    when it can open one, and its 0600 `node.key` under the data directory then holds only the key's record; otherwise
    `node.key` is the key itself, a PKCS#8 file (see
-   [the node key in the TPM](/docs/guides/nodes/attestation#the-node-key-in-the-tpm)).
+   [the node key in the TPM](/docs/guides/nodes/attestation#the-node-key-in-the-tpm)). Only a `tpm` join proves
+   where the key lives: there the key is made in the attestor's TPM and the TPM's attestation key certifies it
+   (cf24876; see [tpm](/docs/guides/nodes/attestation#tpm)).
 2. **Sealed token.** The token is encrypted as a compact JWE (`ECDH-ES+A256KW`, `A256GCM`) to the JoinService
    encryption key pinned in the daemon's config. The protected header carries `typ: bcjt+jwe`, `iat` and `csr`,
    the SHA-256 of the request. The gateway relays the call but can neither read the token nor replay the sealed
@@ -190,7 +192,10 @@ sequenceDiagram
    the role, and consumes one use. JoinService then enforces `expect`, the placeholder rule and the reclaim
    rules below, checks that the pool runs the daemon and belongs to the token's tenant, and inserts the node in
    `adopting` with `identityGeneration` 1. It writes the node's authorization projection row, publishes
-   `node.joined` and writes the `node.joined` audit row. A node in a pool without acceptance checks (and a site
+   `node.joined` and writes the `node.joined` audit row. Both carry the attestor, whether the join was a reclaim
+   (the audit action is then `node.reclaimed`), `hardwareKeyTrusted`, the certificate serial and `nodeKey`: `tpm`
+   when the attestor proved the node key lives in the machine's TPM, else `unattested`, which is every token join
+   (cf24876). A node in a pool without acceptance checks (and a site
    agent) is queued for its controllers at once and adopted; when the pool runs acceptance checks the node is
    still disconnected, so JoinService does not queue it, and its first `Hello` wakes the controller that starts
    acceptance.
@@ -256,7 +261,10 @@ gateway only relays, so a compromised gateway cannot mint certificates. A renewa
 - the node is not `retired`, and the caller's mTLS identity is that node;
 - `client_time` is within 60 seconds of server time, and the same proof was not used in the last 120 seconds.
 
-The new certificate keeps the role and the allowed kinds of the old one. A certificate that expired while the
+The new certificate keeps the role and the allowed kinds of the old one. A renewal proves possession of the key,
+not where it lives: bcd makes the next key in the TPM when it can, but no TPM certification travels with `Renew`
+yet, so the proof a `tpm` join gives about the node key covers only the first certificate (see
+[the node key in the TPM](/docs/guides/nodes/attestation#the-node-key-in-the-tpm)). A certificate that expired while the
 machine was offline cannot be renewed; when the server has the `x509pop` attestor configured, the machine
 re-joins with it within 7 days instead (see [attestation](/docs/guides/nodes/attestation)).
 

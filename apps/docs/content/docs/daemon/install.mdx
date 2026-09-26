@@ -241,6 +241,12 @@ policy decides where the machine joins. It differs in two places:
   a node with `[helper]`, the join also keeps the signed join record the helper binds host units to (see
   [signed specs](/docs/daemon/host-config#signed-specs)).
 
+The join makes the node key in the same TPM and sends the TPM's certification of it, which `tpmAttestor` requires by
+default (`nodeKey: 'certified'`, cf24876). With `[helper]`, the key goes in the TPM only when the helper's user can
+open `/dev/tpmrm0`, which the script arranges through the `tss` group ([below](#running-bcd-node-unprivileged));
+if it cannot, the key is a file and such an attestor refuses the join. See
+[bcd with its TPM](/docs/guides/nodes/attestation#bcd-with-its-tpm).
+
 ```bash
 better-compute daemon install-script --pool pool_tpm --site fsn1 \
   --gateway-url https://gw.eu.example.com --base-url https://compute.example.com \

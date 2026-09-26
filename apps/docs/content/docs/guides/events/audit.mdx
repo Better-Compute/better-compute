@@ -65,7 +65,9 @@ Rows are written by:
 - **Composite calls** such as `fleet.apply`, one row per sub-call, under the sub-call's savepoint, so a failed
   sub-call leaves no row.
 - **The join service**: `node.joined` or `node.reclaimed` on the node, with the attestor, join token, certificate
-  serial, revoked serials and hardware key in `details`.
+  serial, revoked serials, hardware key and `nodeKey` in `details`. `nodeKey` is `tpm` when the attestor proved the
+  node key lives in the machine's TPM (a `tpm` join, cf24876; see
+  [the node key in the TPM](/docs/guides/nodes/attestation#the-node-key-in-the-tpm)), else `unattested`.
 - **The secret broker**: `secret.released` when a node receives a secret, with the secret reference as the
   resource and the node, request, certificate serial and version in `details`, never the value.
 

@@ -606,7 +606,8 @@ Other limits hold with or without the helper:
 - **Keys.** The node key is in the host's TPM when bcd can open one (50e18f9, 0ba2a79): `/var/lib/bcd/node.key` then
   holds only the record the key is derived from again, and the key cannot be copied off the machine, though root on
   the node can derive and use it. Otherwise it is a 0600 PKCS#8 file, which the next renewal moves into the TPM once
-  one is usable. bcd never exports it. It signs only statements of the form "this node says": the mTLS handshake,
+  one is usable. A `bcd join --attestor tpm` also proves it to the control plane: the TPM's attestation key certifies
+  the join's key (cf24876); renewals carry no such proof yet. bcd never exports it. It signs only statements of the form "this node says": the mTLS handshake,
   renewal proofs of possession, attested results, allocation reports, and secret and workload-token requests.
 - **Allowlists.** Each role accepts only its own command kinds; anything else is rejected `UNSUPPORTED`.
 - **Bounds.** A command body is at most 1 MiB and a desired-state body at most 4 MiB. The journal is capped at 64

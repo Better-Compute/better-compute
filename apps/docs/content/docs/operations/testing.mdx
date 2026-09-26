@@ -62,6 +62,10 @@ sources:
   - tests/metal-discovery-e2e.test.ts
   - tests/pki-attestors-tpm-bcd.test.ts
   - daemon/internal/tpm/contract_test.go
+  - tests/pki-attestors-tpm.test.ts
+  - packages/testing/src/daemon/instances.ts
+  - tests/e2e/volumes.test.ts
+  - tests/testing-daemon-instances.test.ts
 ---
 
 import { Activity, Scale, Terminal } from '@/lib/icons';
@@ -274,6 +278,53 @@ faults per direction from the link's seeded RNG: `latencyMs` (default 1), `jitte
 (default 50). Controls: `stall`, `partition` and `heal`, `halfOpen`, `reset`, `dropNext`, `duplicateNext` and
 `intercept`. `createDaemonHarness()` wires one daemon to scripted servers on a sim scheduler.
 
+**Host volumes** (38405a0). A `FakeHypervisor` keeps [sandbox volumes](/docs/guides/vps/sandboxes#volumes) the way bcd
+does, so a FakeDaemon VPS host can stand in for bcd in volume tests:
+
+- `InstancesSection.volumes` are created, or grown in place, only when the store has room (available minus reserved
+  minus outstanding); otherwise the volume keeps its size and the instances naming it fail. A volume is never shrunk,
+  and one no longer listed is destroyed once nothing has it open. The files would be `volumePath(id)`,
+  `/var/lib/bcd/volumes/<id>.raw`.
+- An instance's `InstanceSpec.volumes` are opened at boot, and what counts is what running and paused domains really
+  have open, not their specs: one writer, and read-only volumes shared only with other readers. A pass applies stops
+  before starts, so a volume handed from one instance to another is closed before it is opened again.
+- Volumes survive `powerLoss`; `wipe()` clears them. The hooks `writeVolume(instanceId, volumeId, content, bytes?)`
+  (a content marker, 1 MiB written by default), `volumeContent(volumeId)` and `openBy(volumeId)` let a test check
+  what a guest would find and who has a volume open.
+- With `volumeStore: { totalBytes, reservedBytes? }` in its options, `volumeStorage()` feeds
+  `StatusReport.volume_storage`, which the FakeDaemon sends in every status report: available is total minus what
+  guests wrote, reserved defaults to bcd's 5% of the total with a 2 GiB floor, committed is the sum of the sizes,
+  and outstanding the sum of size minus written.
+
+`tests/testing-daemon-instances.test.ts` has the unit test.
+
+### Volumes at scale
+
+`tests/e2e/volumes.test.ts` (38405a0) is the v0.5 zero-leak churn applied to volumes, the "agent memory" of PLAN.md
+§3.8. It runs the whole stack, the real server runtime and the real gateway, with three FakeDaemon VPS hosts on the
+`cloud-hypervisor` runtime, each reporting a 150 GiB volume store with 10 GiB reserved. It needs no Go and no WSL.
+
+1. It waits until every host has reported its resources, its volume store (`host_volume_storage`) and the
+   system-sourced `bc.dev/cap.instance.volumes` label.
+2. It creates 12 volumes concurrently, then an over-asking round, some of which must fail `CAPACITY_UNAVAILABLE`.
+3. It makes a read-write template per volume and shared read-only ones.
+4. It churns `E2E_VOLUME_SANDBOXES` sandboxes (240 by default): created (some refused `CONFLICT` beside a live
+   writer), deleted, expiring at 60 s, writing markers, volumes growing, two host reboots and two volumes retired.
+
+Mid-churn and at the end it checks that:
+
+- the v0.3 no-leak diff is clean (domains, overlays, taps, IP leases, bookings);
+- the hosts' volumes and `sandbox_volumes` agree, at the booked size;
+- a read-write volume never has two writers, on the hosts or in `volume_attachments`;
+- every sandbox runs on its volumes' host, with them open;
+- headroom never goes below zero and no host's store is over-promised;
+- the markers are on the hosts, and a new sandbox of a volume's template finds the last writer's marker after the
+  reboots.
+
+Deleting everything leaves no host volume and no volume booking. At 240 sandboxes the run takes about 9 minutes; it
+passed the first time, with nothing to fix in vps. Its hosts are FakeDaemons; bcd's own volume handling is covered
+by its Go tests (see [the Go daemon](#the-go-daemon)).
+
 ## The Go daemon
 
 bcd has its own tests in `daemon/` (Go 1.26 or later) and one end-to-end suite against the real control plane.
@@ -443,13 +494,18 @@ Since 8a9af54 the test makes a manufacturer root, the fakehw TPM carries an EK c
 allow-list for the TPM pool); with `BCD_FAKEHW_TPM_KEYS=1` the node key is made in the same TPM. It checks the two
 rounds, `resolve` seeing the EK certificate chained to the manufacturer and the SHA-256 PCR bank 0 to 7, the node in
 the resolved pool and bound to `sha256(EK)` in `node_bindings`, `node.key` holding only a `BCD TPM NODE KEY`
-record, a rejoin as the same node after the identity is removed (a reinstall), `already joined` on a further run,
+record, the node key certified by the TPM's AK so that both joins' `node.joined` events say `nodeKey: 'tpm'` (cf24876;
+the attestor keeps its default `nodeKey: 'certified'`), a rejoin as the same node after the identity is removed (a
+reinstall), `already joined` on a further run,
 and `bcd node`, whose session and statements are signed in the TPM, adopted on that identity. Its wire format is pinned in both directions without a stack too: bcd's `TestTSContract`
 and `tests/pki-attestors-tpm-bcd.test.ts` share the fixtures in `daemon/internal/tpm/testdata`, which
 `scripts/daemon-tpm-fixture.mjs` regenerates (see [bcd with its TPM](/docs/guides/nodes/attestation#bcd-with-its-tpm)).
 Since b973e05 those fixtures include a test manufacturer root (`ek-root.der`) and the EK certificate it issued
 (`ek-cert.der`) in the sim's NV, so that pair runs `tpmAttestor` with `ekRoots` and no `allowUncertifiedEk`, and
-checks that another root is refused (`ek-certificate-chain`).
+checks that another root is refused (`ek-certificate-chain`). Since cf24876 the fixture's answer also carries the AK's
+certification of a node key in the sim, which the TypeScript side admits as `nodeKey: 'tpm'` and refuses for another
+CSR key (`node-key-not-csr`); `tests/pki-attestors-tpm.test.ts` covers the same checks with the TypeScript software
+TPM, and suites whose software TPM holds no node key opt into `nodeKey: 'any'`.
 None of these touches a hardware TPM.
 
 On Linux the suites run in `pnpm test` whenever Go is installed; they build the binary first. On Windows they are

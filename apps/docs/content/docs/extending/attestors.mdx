@@ -147,6 +147,7 @@ roles it may admit (`node`, `site`, `ramdisk`), and `verify` receives:
     'context.clock': { type: 'Clock', description: 'Prefer compute_now() in SQL for anything compared with stored times.' },
     'context.claims': { type: 'HardwareClaims', description: '{ productUuid?, serial?, macs?, gpuUuids?, hostname?, arch? } as the agent claims them. Claims, not proof.' },
     'context.csrSha256': { type: 'Uint8Array', description: 'SHA-256 of JoinRequest.csr. Bind signed evidence to it, so it cannot be replayed with another key.' },
+    'context.csrSpkiSha256': { type: 'Uint8Array', description: "SHA-256 of the CSR's SubjectPublicKeyInfo: the node key the certificate will certify. tpm checks that the key its AK certified is this one (cf24876)." },
     'context.role': { type: 'AgentRole', description: 'The role the agent asks for.' },
   }}
 />
@@ -165,13 +166,15 @@ roles it may admit (`node`, `site`, `ramdisk`), and `verify` receives:
     certTtlSeconds: { type: 'number', description: 'Caps the certificate lifetime: min(this, the service TTL of at most 86,400 s, and 7,200 s for ramdisks).' },
     allowedKinds: { type: 'readonly string[]', description: "Restricts the command kinds the certificate allows: exact kinds or prefix.* globs. A malformed entry fails the join with INVALID_CONFIG." },
     bind: { type: 'Uint8Array', description: 'A 32-byte stable hardware identity (a hash). Bound to the node in node_bindings after issuing; the same subject can never admit another node.' },
+    nodeKey: { type: "'tpm'", description: "Where you proved the node key lives: 'tpm' when the machine's TPM certified the CSR's key as one it made and never lets out. Absent means not proven. JoinService records it as nodeKey in node.joined and the join audit row ('unattested' when absent)." },
   }}
 />
 
 JoinService then checks the rest itself: the token's `expect` binding when you returned a `tokenId`, a trusted hardware
 key already enrolled (a reclaim through a token needs `allowReclaim`), and that a reclaimed node keeps its tenant,
 site, pool and role. It inserts the node in `adopting` (or re-keys the existing one), issues the certificate, writes
-`node.joined` with `attestor: '<your id>'` and an audit row, all in the same transaction.
+`node.joined` with `attestor: '<your id>'` and `nodeKey` (your result's, or `unattested`) and an audit row, all in the
+same transaction.
 
 `allowedKinds` is how the `discovery` attestor gives a ramdisk only `inventory.refresh`, `logs.collect`, `diag.*`,
 `disk.wipe`, `deploy.*` and `boot.kexec`. Entries must be registered kind names (or `prefix.*`): matching is exact,

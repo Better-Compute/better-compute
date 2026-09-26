@@ -13,6 +13,7 @@ sources:
   - packages/pki/src/attestors/discovery.ts
   - packages/pki/src/attestors/cloud-iid.ts
   - packages/pki/src/attestors/tpm.ts
+  - packages/pki/src/attestors/tpm2.ts
   - packages/pki/src/attestors/join-requests.ts
   - packages/server/src/join/service.ts
   - packages/core/src/extension.ts
@@ -32,8 +33,10 @@ sources:
   - daemon/internal/tpm/nodekey.go
   - daemon/internal/tpm/contract_test.go
   - scripts/daemon-tpm-fixture.mjs
+  - tests/pki-attestors-tpm.test.ts
   - tests/pki-attestors-tpm-bcd.test.ts
   - tests/e2e/bcd-tpm.test.ts
+  - daemon/internal/tpm/attest.go
   - packages/server/src/join/pool-policy.ts
   - tests/server-join-pool-attestors.test.ts
 ---
@@ -58,7 +61,7 @@ event (see [joining](/docs/guides/nodes/joining)).
 | `provisioned` | v0.2 | `node` | a sealed single-use `provisioned` token and a product UUID claim | the OS a deploy or provider bootstrap installed | the target node re-keyed, or a new node |
 | `discovery` | v0.2 | `ramdisk` | a sealed single-use `discovery` token and a signed discovery assertion | the ramdisk the site's boot server just booted | a ramdisk identity of at most 2 hours |
 | `cloud-iid` | v0.3 | `node` (configurable) | a provider-signed instance identity | the cloud instance your provider account created | whatever `resolve` answers |
-| `tpm` | v0.5 | `node` (configurable) | TPM endorsement and attestation keys, then an activated credential and a quote | the TPM holding that endorsement key | the node bound to that key |
+| `tpm` | v0.5 | `node` (configurable) | TPM endorsement and attestation keys, then an activated credential, a quote and the AK's certification of the node key | the TPM holding that endorsement key, and (by default) that the same TPM holds the CSR's key | the node bound to that key |
 
 Only `join-token` is built into the server. You add the others, and one with id `join-token` replaces the
 built-in:
@@ -244,12 +247,24 @@ It follows the go-attestation enrollment flow as a two-round join.
    the secret and a quote of its PCRs whose `extraData` is `sha256(secret ‖ sha256(csr))`. The attestor checks
    the secret, the quote signature, the nonce, that the PCR values match the quote's digest, and your
    `pcrPolicy`.
+3. **Node key** (cf24876). The same answer carries `nodeKey { public, certifyInfo, signature }`: a `TPM2_Certify`
+   of the node key by the AK, qualified by `sha256(csr)`. The attestor checks that the certification is signed by
+   the AK it just proved beside the EK, that it is a `TPM_ST_ATTEST_CERTIFY` whose `extraData` is `sha256(csr)`,
+   that the certified name is the TPM name of `public`, that the key was made in the TPM and can never leave it
+   (`fixedTPM`, `fixedParent`, `sensitiveDataOrigin` and `sign` set, `decrypt` clear), and that its
+   SubjectPublicKeyInfo is the CSR's (JoinService passes its SHA-256 as `csrSpkiSha256`). A certification that
+   fails a check is refused with `node-key-malformed`, `node-key-signature`, `node-key-nonce`, `node-key-name`,
+   `node-key-attributes` or `node-key-not-csr`. With the default `nodeKey: 'certified'`, an answer without one is
+   refused too (`node-key-not-certified`); `nodeKey: 'any'` admits it, and the result then makes no claim about
+   the key.
 
 It then decides where the machine joins, keyed by the SHA-256 of the EK: the node that key is already bound to
 (a reclaim), else your `resolve` allow-list (for example a vendor's delivery manifest), else operator
 `enrollment` through [join requests](/docs/guides/nodes/joining). JoinService binds the EK to the node
 (`node_bindings`): a later join proving it reclaims that node, and it can never admit another one
-(`bound-elsewhere`).
+(`bound-elsewhere`). When the node key was certified, the result carries `nodeKey: 'tpm'`, and JoinService records
+it in the `node.joined` event and in the join's audit row (`nodeKey`: `tpm`, or `unattested` for every other join;
+see [joining](/docs/guides/nodes/joining#the-join-flow)).
 
 | Option | Meaning |
 | --- | --- |
@@ -261,6 +276,16 @@ It then decides where the machine joins, keyed by the SHA-256 of the EK: the nod
 | `resolve(tx, identity, { role })` | Where an unbound EK joins, or `undefined`. |
 | `enrollment` | `{ tenantId, siteId, poolId?, pendingTtlSeconds?, retryAfterSeconds? }`: defer unknown EKs for approval. |
 | `challengeTtlMs` | Challenge lifetime, at most 5 minutes. |
+| `nodeKey` | `'certified'` (the default): admit a join only when the AK certifies the CSR's key as one this TPM made and never lets out. `'any'`: also admit a node key held elsewhere, such as a file. |
+
+<Callout type="warn" title="The node key is proven at join time only">
+Since cf24876 `nodeKey: 'certified'` is the default, so a `tpm` join whose agent keeps its node key outside the TPM
+is refused (`node-key-not-certified`); set `nodeKey: 'any'` to keep admitting those. The proof covers the key the
+join certifies. A renewal sends no certification yet: the next key bcd makes at renewal is in the TPM when it can
+open one, but the control plane cannot tell, and nothing in `node_certs` records it. Carrying the proof through
+renewal (the AK's name in a SAN URI and a `RenewRequest.key_attestation`, the second part of this work) is not
+built.
+</Callout>
 
 ### bcd with its TPM
 
@@ -282,6 +307,13 @@ bcd join --config /etc/bcd/config.toml --attestor tpm
 - **The rounds.** `agent.Join` sends the evidence, answers up to 3 challenge rounds for the same CSR, and waits out
   a pending approval (`enrollment`) before a fresh challenge round. A machine that already joined answers
   `already joined as <node>` without touching the TPM.
+- **The node key, certified** (cf24876). When node keys can use a TPM on this host (below), `agent.Join` makes the
+  join's node key in the attestor's own TPM (`tpm.Attestor.HoldNodeKey`, through the `NodeKeyHolder` interface),
+  and the round-2 answer carries the AK's `TPM2_Certify` of it over `sha256(csr)`. If the TPM cannot make that key,
+  the join stops with an error rather than falling back to a file. When node keys cannot use the TPM (under
+  `[helper]` when the helper's user cannot open `/dev/tpmrm0`, or a fakehw build without `BCD_FAKEHW_TPM_KEYS=1`),
+  the key is a file, the answer carries no certification, and an attestor left at `nodeKey: 'certified'` refuses
+  the join.
 - **The install script.** [`daemon install-script --attestor tpm`](/docs/daemon/install#generate-the-script)
   (a006d9f) writes a script that reads no token, fails early without `/dev/tpmrm0`, and runs
   `bcd join --config /etc/bcd/config.toml --attestor tpm < /dev/null` before (re)starting the units, so the same
@@ -317,17 +349,26 @@ results, discovery assertions, secret and workload-token requests) and the WebSo
   `/dev/tpmrm0`). `bcd status` prints `node key in the TPM` or `node key a file` on its identity line, and its
   JSON carries `nodeKey` (`tpm` or `file`).
 
-`internal/tpm` also has `CertifyNodeKey`, which has the AK certify a node key (`TPM2_Certify`) over qualifying data.
-Neither the join nor a renewal sends such a certification, so the control plane cannot tell a TPM key from a file
-key: nothing in the certificate, `node_certs` or the attestor's decision depends on it.
+What the control plane knows about it depends on how the key was made:
+
+| When | Proven to the control plane | Where it shows |
+| --- | --- | --- |
+| A `tpm` join (cf24876) | Yes: the AK certifies the key (`CertifyNodeKey`, `TPM2_Certify` over `sha256(csr)`) and `tpmAttestor` checks it, refusing the join under the default `nodeKey: 'certified'` when it is missing | `nodeKey: 'tpm'` in `node.joined` and the `node.joined` or `node.reclaimed` audit row |
+| A join with any other attestor | No: bcd still makes the key in the TPM when it can, but sends no certification | `nodeKey: 'unattested'` |
+| A renewal | No: the next key is made in the TPM when bcd can open one, but a renewal carries no certification yet | nothing; the certificate and `node_certs` do not record where the key lives |
+
+So the join-time gap is closed for `tpm` joins: such a node's first certificate names a key that cannot leave its
+TPM. After the first renewal the control plane again has only bcd's word for it (`bcd status` and `bcd doctor`
+report it locally).
 
 What is tested, and with what TPM:
 
 | Test | TPM | What it proves |
 | --- | --- | --- |
-| `TestTSContract` (`daemon/internal/tpm`) | `tpmsim` fixture, with a manufacturer EK certificate in NV (b973e05) | bcd's round-1 evidence is still byte for byte the fixture's, including the EK certificate bcd reads from NV index `0x01C00002` (`tpm.EKCertIndex`) and sends as `ekCert`, and the challenge `tpmAttestor` made for it activates and quotes through bcd's client (TypeScript to Go) |
-| `tests/pki-attestors-tpm-bcd.test.ts` | the same fixture | `tpmAttestor` with `ekRoots: [ek-root.der]` and no `allowUncertifiedEk` verifies the EK certificate's chain, challenges bcd's evidence and admits bcd's answer; it refuses the EK under another root (`ek-certificate-chain`), and the answer for another CSR (`challenge-for-another-csr`) or after the challenge expired (`challenge-expired`) (Go to TypeScript) |
-| `tests/e2e/bcd-tpm.test.ts` (`BCD_E2E=1`, WSL or Linux; db9bd46, 8a9af54) | `tpmsim` in a fakehw bcd, with an EK certificate from a manufacturer root the test makes (`BCD_FAKEHW_TPM_EK_CA`) and the node key in that TPM (`BCD_FAKEHW_TPM_KEYS=1`) | a real `bcd join --attestor tpm` with no token against the dev stack's JoinService, whose `tpmAttestor` trusts only that root (`ekRoots`, no `allowUncertifiedEk`): two rounds, `resolve` seeing the EK certificate chained to the manufacturer and the SHA-256 PCR bank 0 to 7, the node in the resolved pool and bound to `sha256(EK)` in `node_bindings`; `node.key` a `BCD TPM NODE KEY` record; with its identity removed (a reinstall) the same TPM joins as the same node; `bcd node` on that identity, signing its session and statements in the TPM, is adopted |
+| `TestTSContract` (`daemon/internal/tpm`) | `tpmsim` fixture, with a manufacturer EK certificate in NV (b973e05) | bcd's round-1 evidence is still byte for byte the fixture's, including the EK certificate bcd reads from NV index `0x01C00002` (`tpm.EKCertIndex`) and sends as `ekCert`, and the challenge `tpmAttestor` made for it activates and quotes through bcd's client (TypeScript to Go); since cf24876 the answer also carries the AK's certification of a node key held in the sim (`answer.nodeKey`) |
+| `tests/pki-attestors-tpm.test.ts` | `tpmProducer` over a `SoftwareTpm` whose `nodeKey` it certifies as bcd does | under `nodeKey: 'certified'`, a certified CSR key is admitted with `nodeKey: 'tpm'`; no certification is `node-key-not-certified`, and a certified key other than the CSR's is `node-key-not-csr`; `nodeKey: 'any'` admits the uncertified answer without a `nodeKey` claim |
+| `tests/pki-attestors-tpm-bcd.test.ts` | the same fixture | `tpmAttestor` with `ekRoots: [ek-root.der]` and no `allowUncertifiedEk` verifies the EK certificate's chain, challenges bcd's evidence and admits bcd's answer, with its node key certified (`nodeKey: 'tpm'`), while a CSR key other than the certified one is `node-key-not-csr`; it refuses the EK under another root (`ek-certificate-chain`), and the answer for another CSR (`challenge-for-another-csr`) or after the challenge expired (`challenge-expired`) (Go to TypeScript) |
+| `tests/e2e/bcd-tpm.test.ts` (`BCD_E2E=1`, WSL or Linux; db9bd46, 8a9af54) | `tpmsim` in a fakehw bcd, with an EK certificate from a manufacturer root the test makes (`BCD_FAKEHW_TPM_EK_CA`) and the node key in that TPM (`BCD_FAKEHW_TPM_KEYS=1`) | a real `bcd join --attestor tpm` with no token against the dev stack's JoinService, whose `tpmAttestor` trusts only that root (`ekRoots`, no `allowUncertifiedEk`): two rounds, `resolve` seeing the EK certificate chained to the manufacturer and the SHA-256 PCR bank 0 to 7, the node in the resolved pool and bound to `sha256(EK)` in `node_bindings`; `node.key` a `BCD TPM NODE KEY` record; the node key certified by the AK, so `node.joined` says `nodeKey: 'tpm'` for this join and for the rejoin below (cf24876); with its identity removed (a reinstall) the same TPM joins as the same node; `bcd node` on that identity, signing its session and statements in the TPM, is adopted |
 
 `scripts/daemon-tpm-fixture.mjs` regenerates the fixtures in `daemon/internal/tpm/testdata` after a deliberate change
 of either side, so a format change fails a test rather than a machine's join. Since b973e05 the contract runs the
