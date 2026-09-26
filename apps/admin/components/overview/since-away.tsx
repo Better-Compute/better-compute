@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import { RiCloseLine, RiHistoryLine } from 'react-icons/ri';
+import { RiCloseLine, RiScales3Line, RiHistoryLine } from 'react-icons/ri';
 import { activity, capacityTotals, fleetPulse, fmtDuration, fmtNum, fmtPct, fmtStamp, HOUR, MINUTE } from '@/lib/data';
 import { collectAttention } from '@/lib/modules';
 import { useScope, useWallNow, useWorkspaceSettings } from '@/components/shell/workspace';
@@ -17,18 +17,16 @@ const MIN_AWAY = 30 * MINUTE;
 const MAX_AWAY = 7 * 24 * HOUR;
 
 /**
- * "Since you were away": what changed between the operator's last visit and now, in one strip — node health,
- * GPU use, critical items that opened, notable events — with a replay of that moment through time travel.
+ * "Since you were away": what changed between the operator's last visit and now, with a replay of that moment
+ * through time travel.
  */
 export function SinceAway() {
-  const { travelTo } = useWorkspaceSettings();
   const kiosk = useKiosk();
-  const wallNow = useWallNow(60_000);
-  const scope = useScope();
+  const { compareAt } = useWorkspaceSettings();
   const [since, setSince] = useState<number | null>(null);
   const [dismissed, setDismissed] = useState(false);
 
-  // Read the last visit once, then keep stamping "seen" while the panel is open and live.
+  // Read the last visit once, then keep stamping "seen" while the panel is open.
   useEffect(() => {
     try {
       const last = Number(window.localStorage.getItem(KEY));
@@ -55,8 +53,29 @@ export function SinceAway() {
     };
   }, []);
 
+  // An explicit comparison (from time travel) replaces the automatic one.
+  if (!since || dismissed || kiosk.on || compareAt) return null;
+  return <ChangeDigest since={since} title="Since you were away" icon="away" onClose={() => setDismissed(true)} />;
+}
+
+/** "Compared with <moment>": the digest for a moment the operator pinned from time travel (?compare=). */
+export function CompareDigest() {
+  const kiosk = useKiosk();
+  const { compareAt, setCompareAt } = useWorkspaceSettings();
+  if (!compareAt || kiosk.on) return null;
+  return <ChangeDigest since={compareAt} title="Compared with" icon="compare" onClose={() => setCompareAt(undefined)} />;
+}
+
+/**
+ * What changed between `since` and now, in one strip: node health, GPU use, attention items that opened,
+ * notable events, and a replay of `since` through time travel.
+ */
+export function ChangeDigest({ since, title, icon, onClose }: { since: number; title: string; icon: 'away' | 'compare'; onClose(): void }) {
+  const { travelTo } = useWorkspaceSettings();
+  const wallNow = useWallNow(60_000);
+  const scope = useScope();
+
   const digest = useMemo(() => {
-    if (!since) return null;
     const now = Math.floor(wallNow / MINUTE) * MINUTE;
     const before = fleetPulse(since, scope);
     const after = fleetPulse(now, scope);
@@ -75,11 +94,9 @@ export function SinceAway() {
       critical: events.filter((event) => event.severity === 'critical').slice(0, 3),
       events: events.length,
     };
-    // Computed once per visit (not per tick): it describes the gap, not the present.
+    // It describes the gap, not the present: recompute when the moment or scope changes, not per tick.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [since, scope]);
-
-  if (!digest || dismissed || kiosk.on) return null;
 
   const change = (before: number, after: number, format: (v: number) => string, worseWhenUp = false) => {
     const diff = after - before;
@@ -95,26 +112,31 @@ export function SinceAway() {
       </span>
     );
   };
+  const Icon = icon === 'compare' ? RiScales3Line : RiHistoryLine;
 
   return (
-    <section aria-label="Since you were away" className="mb-4 border border-separator-border bg-surface-raised">
-      <header className="flex items-center gap-2 border-b border-separator-border px-3 py-2">
-        <RiHistoryLine className="size-4 text-signal" aria-hidden />
-        <h2 className="font-mono text-[12px] font-medium tracking-wide text-text-secondary uppercase">Since you were away</h2>
+    <section aria-label={title} className="mb-4 border border-separator-border bg-surface-raised">
+      <header className="flex flex-wrap items-center gap-2 border-b border-separator-border px-3 py-2">
+        <Icon className="size-4 text-signal" aria-hidden />
+        <h2 className="font-mono text-[12px] font-medium tracking-wide text-text-secondary uppercase">
+          {title}
+          {icon === 'compare' ? ` ${fmtStamp(since)} UTC` : ''}
+        </h2>
         <span className="font-mono text-[11px] text-text-tertiary">
-          {fmtDuration(digest.away)} · since {fmtStamp(since!)} UTC · {fmtNum(digest.events)}
+          {fmtDuration(digest.away)}
+          {icon === 'away' ? ` · since ${fmtStamp(since)} UTC` : ' ago'} · {fmtNum(digest.events)}
           {digest.events >= 400 ? '+' : ''} events
         </span>
         <div className="ml-auto flex items-center gap-2">
           <button
             type="button"
-            onClick={() => travelTo(since!)}
+            onClick={() => travelTo(since)}
             className="h-7 border border-separator-border px-2 font-mono text-[11px] text-text-secondary hover:border-signal-fill hover:text-signal"
-            title="Time-travel the whole panel to your last visit"
+            title="Time-travel the whole panel to that moment"
           >
             replay that moment
           </button>
-          <button type="button" onClick={() => setDismissed(true)} aria-label="Dismiss" className="grid size-7 place-items-center text-text-tertiary hover:text-text-primary">
+          <button type="button" onClick={onClose} aria-label="Dismiss" className="grid size-7 place-items-center text-text-tertiary hover:text-text-primary">
             <RiCloseLine className="size-4" aria-hidden />
           </button>
         </div>
@@ -131,7 +153,7 @@ export function SinceAway() {
           <div className="text-caption-1-regular text-text-tertiary">free {change(digest.free.before, digest.free.after, (v) => fmtNum(v))}</div>
         </div>
         <div className="min-w-0">
-          <div className="font-mono text-[10px] tracking-wide text-text-tertiary uppercase">Opened while away</div>
+          <div className="font-mono text-[10px] tracking-wide text-text-tertiary uppercase">Opened since</div>
           {digest.opened.length === 0 ? (
             <span className="text-caption-1-regular">nothing new needs you</span>
           ) : (

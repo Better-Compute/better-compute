@@ -46,6 +46,9 @@ export interface Workspace {
   wallNow: number;
   /** Time travel: pause the whole panel at `t` (clamped to the past). `setLive(true)` returns to live. */
   travelTo(t: number): void;
+  /** A pinned moment to compare now against (?compare=); the Overview shows what changed since. */
+  compareAt: number | undefined;
+  setCompareAt(t: number | undefined): void;
 }
 
 const WorkspaceContext = createContext<Omit<Workspace, 'now' | 'wallNow' | 'window'> | null>(null);
@@ -68,6 +71,7 @@ export function WorkspaceProvider({ initialNow, children }: { initialNow: number
   const [siteId, setSiteId] = useState<string | undefined>(undefined);
   const [density, setDensity] = useState<Density>('comfortable');
   const [dataSource, setDataSource] = useState<'simulated' | 'live'>('simulated');
+  const [compareAt, setCompareAt] = useState<number | undefined>(undefined);
   const liveAvailable = useLiveAvailable();
   const source = dataSource === 'live' && liveAvailable ? 'live' : 'simulated';
   const [hydrated, setHydrated] = useState(false);
@@ -80,6 +84,8 @@ export function WorkspaceProvider({ initialNow, children }: { initialNow: number
     const urlRange = params.get('range');
     const urlSite = params.get('site');
     const urlAt = Number(params.get('at'));
+    const urlCompare = Number(params.get('compare'));
+    if (Number.isFinite(urlCompare) && urlCompare > 0 && urlCompare < Date.now()) setCompareAt(urlCompare);
     const nextRange = urlRange && urlRange in RANGES ? (urlRange as RangeKey) : saved.range;
     if (nextRange && nextRange in RANGES) setRange(nextRange);
     if (urlSite || saved.siteId) setSiteId(urlSite === 'all' ? undefined : (urlSite ?? saved.siteId));
@@ -110,8 +116,9 @@ export function WorkspaceProvider({ initialNow, children }: { initialNow: number
     set('site', siteId);
     set('range', range === '24h' ? undefined : range);
     set('at', live ? undefined : String(now));
+    set('compare', compareAt ? String(compareAt) : undefined);
     if (url.href !== window.location.href) window.history.replaceState(window.history.state, '', url.href);
-  }, [hydrated, siteId, range, live, now]);
+  }, [hydrated, siteId, range, live, now, compareAt]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -148,8 +155,8 @@ export function WorkspaceProvider({ initialNow, children }: { initialNow: number
   useEffect(() => clock.set(now, wallNow), [clock, now, wallNow]);
 
   const settings = useMemo<WorkspaceSettings>(
-    () => ({ live, setLive, range, setRange, siteId, setSiteId, density, setDensity, source, dataSource, setDataSource, travelTo }),
-    [live, setLive, range, siteId, density, travelTo, source, dataSource],
+    () => ({ live, setLive, range, setRange, siteId, setSiteId, density, setDensity, source, dataSource, setDataSource, travelTo, compareAt, setCompareAt }),
+    [live, setLive, range, siteId, density, travelTo, source, dataSource, compareAt],
   );
 
   return (

@@ -1,5 +1,6 @@
 'use client';
 
+import { useRouter } from 'next/navigation';
 import { useMemo } from 'react';
 import { Button as AriaButton, Dialog, DialogTrigger, Popover } from 'react-aria-components';
 import { RiHistoryLine, RiPauseFill, RiPlayFill, RiSkipForwardFill } from 'react-icons/ri';
@@ -22,8 +23,9 @@ const STEPS = [
  * shows the whole panel as it was — for incident review, or to see what a pool looked like before a change.
  */
 export function TimeMachine() {
-  const { now, wallNow, live, setLive, travelTo } = useWorkspace();
+  const { now, wallNow, live, setLive, travelTo, setCompareAt } = useWorkspace();
   const scope = useScope();
+  const router = useRouter();
   const start = Math.floor((wallNow - SPAN) / HOUR) * HOUR;
   const behind = wallNow - now;
   // Context for the scrubber: GPU utilization over the week, and when critical items opened.
@@ -125,6 +127,20 @@ export function TimeMachine() {
                 {s.label}
               </button>
             ))}
+            {!live && (
+              <button
+                type="button"
+                onClick={() => {
+                  setCompareAt(now);
+                  setLive(true);
+                  router.push('/');
+                }}
+                title="Go back to live and show what changed since this moment on the Overview"
+                className="h-7 border border-signal-fill/60 px-2 font-mono text-[11px] text-signal hover:bg-signal-soft"
+              >
+                compare with now
+              </button>
+            )}
             <span className="ml-auto font-mono text-[10px] text-text-tertiary">
               <kbd>,</kbd> <kbd>.</kbd> ±5 min · shift ±1 h · <kbd>p</kbd> {live ? 'pause' : 'live'}
             </span>
