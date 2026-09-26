@@ -400,7 +400,7 @@ better-compute forward --instance inst_01k5w… --port 8888 --local-port 0
 Reserve GPUs from a pool (reservations.create)
 
 ```sh
-better-compute reserve --tenant ID --pool ID --gpus N --for DURATION [--selector EXPR] [--model MODEL] [--product PRODUCT] [--nvlink] [--project ID] [--start TIME] [--lease SECONDS] [--key KEY] [--wait SECONDS] [--config PATH] [--url URL]
+better-compute reserve --tenant ID --pool ID --gpus N --for DURATION [--selector EXPR] [--model MODEL] [--product PRODUCT] [--nvlink] [--project ID] [--start TIME] [--lease SECONDS] [--key KEY] [--wait SECONDS] [--cpus N] [--memory GIB] [--kubernetes] [--config PATH] [--url URL]
 ```
 
 reserve asks for --gpus whole GPUs from --pool for --for, decided by better-iam as compute:reservations:create on the reservation draft and placed by the pool's placer (PLAN.md §3.4, §10.3). --selector takes the shorthand `gpuProduct in (H100-SXM5-80GB), vramGiB >= 80`; --model and --product add a gpuModel or gpuProduct match. It waits up to --wait seconds for the placement and prints the reservation, whose binding lists the booked GPU UUIDs once active. Every run sends a new idempotency key unless --key is given: repeat the command with the same --key to retry safely.
@@ -420,6 +420,9 @@ reserve asks for --gpus whole GPUs from --pool for --for, decided by better-iam 
 | `--lease SECONDS`   | Renewable lease: released unless renewed within this many seconds                                             |         |                         |
 | `--key KEY`         | Idempotency key, to retry an earlier request                                                                  |         |                         |
 | `--wait SECONDS`    | How long to wait for the placement                                                                            | `20`    |                         |
+| `--cpus N`          | Host CPUs to book with the GPUs (default: the pool's per-GPU share)                                           |         |                         |
+| `--memory GIB`      | Host memory in GiB to book with the GPUs (default: the pool's per-GPU share)                                  |         |                         |
+| `--kubernetes`      | Give the GPUs to the node's kubelet (pools that join a Kubernetes cluster)                                    |         |                         |
 | `--config PATH`     | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`         | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT`   | Output as json (indented, default), compact (one line), or table                                              |         |                         |
@@ -427,6 +430,7 @@ reserve asks for --gpus whole GPUs from --pool for --for, decided by better-iam 
 
 ```sh
 better-compute reserve --pool pool_01k… --gpus 4 --for 8h
+better-compute reserve --pool pool_01k… --gpus 2 --for 8h --cpus 32 --memory 256 --kubernetes
 better-compute reserve --pool pool_01k… --gpus 8 --for 3d --model H100 --nvlink --selector "vramGiB >= 80"
 better-compute reserve --pool pool_01k… --gpus 2 --for 1h --start +2h --key nightly-2026-09-24
 ```
@@ -558,7 +562,7 @@ better-compute pools list
 Show free and allocated capacity: a summary, or one pool (capacity.summary, capacity.byPool)
 
 ```sh
-better-compute capacity --tenant ID [--pool ID] [--preview] [--gpus N] [--for DURATION] [--selector EXPR] [--config PATH] [--url URL]
+better-compute capacity --tenant ID [--pool ID] [--preview] [--gpus N] [--for DURATION] [--selector EXPR] [--cpus N] [--memory GIB] [--kubernetes] [--config PATH] [--url URL]
 ```
 
 capacity prints what the tenant can see: per pool and per GPU model, total, allocatable, allocated, reserved and available. With --pool it prints that pool's rollup. With --preview and a --gpus request it asks where such a reservation would fit right now (capacity.preview) without booking anything.
@@ -571,6 +575,9 @@ capacity prints what the tenant can see: per pool and per GPU model, total, allo
 | `--gpus N`        | GPUs for --preview                                                                                            |         |                         |
 | `--for DURATION`  | Duration for --preview                                                                                        |         |                         |
 | `--selector EXPR` | Selector shorthand for --preview                                                                              |         |                         |
+| `--cpus N`        | Host CPUs to book with the GPUs (default: the pool's per-GPU share)                                           |         |                         |
+| `--memory GIB`    | Host memory in GiB to book with the GPUs (default: the pool's per-GPU share)                                  |         |                         |
+| `--kubernetes`    | Give the GPUs to the node's kubelet (pools that join a Kubernetes cluster)                                    |         |                         |
 | `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`       | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                                              |         |                         |
