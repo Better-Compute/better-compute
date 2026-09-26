@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { xidStatusHandler } from '@better-compute/gateway';
 import { ConditionStatus, InstanceObservedState, SectionState, type StatusReport } from '@better-compute/protocol';
-import { agentFrame, gatewayFixture, type GatewayFixture } from './support/gateway.js';
+import { agentFrame, gatewayFixture, SITE, TENANT, type GatewayFixture } from './support/gateway.js';
 
 // Status-driven health (§10.1) and session versions for Rollout (§6, v0.4) at the gateway.
 
@@ -226,26 +226,66 @@ describe('xidStatusHandler', () => {
       { status: 'true' },
     ]);
     expect((await state()).reasons).toEqual([]);
-    // A unit waiting for a reboot, and the kube manager's conditions: recorded, not NoSchedule.
-    await report(6, ['RebootRequired', 'ForeignGpuExposure', 'PodResourcesUnavailable']);
+    // A unit waiting for a reboot: recorded, not NoSchedule. The kube manager's faults are NoSchedule: GPUs another
+    // path exposes to pods, pod-resources out of reach, a release a pod still holds (security review 2, MED 4).
+    await report(6, ['RebootRequired', 'ForeignGpuExposure', 'PodResourcesUnavailable', 'KubernetesReleaseStuck']);
     expect(
       (
         await f.db.query<{ type: string }>(
-          `SELECT type FROM node_conditions WHERE node_id = $1 AND status = 'true' AND type IN ('ForeignGpuExposure', 'PodResourcesUnavailable') ORDER BY type`,
+          `SELECT type FROM node_conditions WHERE node_id = $1 AND status = 'true'
+              AND type IN ('ForeignGpuExposure', 'PodResourcesUnavailable', 'KubernetesReleaseStuck') ORDER BY type`,
           [node],
         )
       ).rows.map((row) => row.type),
-    ).toEqual(['ForeignGpuExposure', 'PodResourcesUnavailable']);
+    ).toEqual(['ForeignGpuExposure', 'KubernetesReleaseStuck', 'PodResourcesUnavailable']);
     expect((await f.db.query<{ status: string }>(`SELECT status FROM node_conditions WHERE node_id = $1 AND type = 'RebootRequired'`, [node])).rows).toEqual([
       { status: 'true' },
     ]);
+    expect((await state()).reasons).toEqual(['ForeignGpuExposure', 'KubernetesReleaseStuck', 'PodResourcesUnavailable']);
+    await report(7, ['RebootRequired']);
     expect((await state()).reasons).toEqual([]);
 
     // A tenant-controlled node's reports are advisory: the condition, never a NoSchedule reason.
     await f.db.query(`UPDATE nodes SET trust = 'tenant-controlled' WHERE id = $1`, [node]);
-    await report(7, ['FabricManagerDown']);
+    await report(8, ['FabricManagerDown']);
     expect(await state()).toMatchObject({ reasons: [] });
     expect((await state()).conditions).toContainEqual({ type: 'FabricManagerDown', status: 'true' });
+  });
+
+  it('wakes the node’s started reservations when its GPUs are exposed to pods by another path, and when that clears', async () => {
+    f = await gatewayFixture({ reports: { status: xidStatusHandler } });
+    const node = await f.addNode();
+    await f.db.query(
+      `INSERT INTO pools (id, owner_tenant_id, site_id, class, sharing, agent, policy, version)
+       VALUES ('pool_fx', $1, $2, 'metal-host', 'exclusive', 'bcd', '{}', 1)`,
+      [TENANT, SITE],
+    );
+    await f.db.query(
+      `INSERT INTO reservations (id, tenant_id, pool_id, state, request, request_hash, owner_identity_id, idempotency_key, version)
+       VALUES ('rsv_fx', $1, 'pool_fx', 'active', '{}', '\\x00', 'idn_a', 'rsv_fx', 1)`,
+      [TENANT],
+    );
+    await f.db.query(
+      `INSERT INTO allocations (id, tenant_id, pool_id, node_id, owner_kind, owner_id, atoms, during, version)
+       VALUES ('alloc_fx', $1, 'pool_fx', $2, 'reservation', 'rsv_fx', ARRAY['GPU-fx'], tstzrange(compute_now(), compute_now() + interval '1 day'), 1)`,
+      [TENANT, node],
+    );
+    const woken = async () =>
+      (await f.db.query<{ key: string }>(`SELECT key FROM work_queue WHERE kind = 'capacity.reservations'`)).rows.map((row) => row.key);
+    const { handle } = await f.connect(node);
+    const report = async (generation: number, types: string[]) => {
+      await handle.receive(status(generation, types.map((type) => ({ type }))));
+      await f.gateway.jobs.status.tick();
+    };
+    await report(1, ['RebootRequired']);
+    expect(await woken()).toEqual([]);
+    await report(2, ['RebootRequired', 'ForeignGpuExposure']);
+    expect(await woken()).toEqual(['rsv_fx']);
+    await f.db.query(`DELETE FROM work_queue WHERE kind = 'capacity.reservations'`);
+    await report(3, ['RebootRequired', 'ForeignGpuExposure']);
+    expect(await woken()).toEqual([]);
+    await report(4, []);
+    expect(await woken()).toEqual(['rsv_fx']);
   });
 
   it('ignores XIDs without a policy and conditions without a device', async () => {
