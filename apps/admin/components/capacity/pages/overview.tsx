@@ -3,10 +3,10 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMemo, useState } from 'react';
-import { RiAddLine, RiArrowRightUpLine, RiBarChartBoxLine, RiCalendarScheduleLine, RiLightbulbFlashLine, RiTimerLine } from 'react-icons/ri';
+import { RiAddLine, RiArrowRightUpLine, RiBarChartBoxLine, RiCalendarScheduleLine, RiLightbulbFlashLine, RiLineChartLine, RiTimerLine } from 'react-icons/ri';
 import { InsightList } from '../insights';
 import { ButtonLink } from '@/components/base/buttons/button';
-import { Legend, StackedBar, TimeSeriesChart } from '@/components/ui/charts';
+import { Legend, Sparkline, StackedBar, TimeSeriesChart } from '@/components/ui/charts';
 import { EmptyState, Grid, PageHeader, Panel } from '@/components/ui/panel';
 import { Mono, Tag } from '@/components/ui/signal';
 import { Stat } from '@/components/ui/stat';
@@ -15,7 +15,7 @@ import { reservationGpus } from '@/lib/data/capacity';
 import { DAY, HOUR, useHourWindow, usePoolRows, useTenantName, useTimelines } from '../data';
 import { SourceNotice } from '../source-notice';
 import { CapacityHeatmap, HeatmapTable } from '../heatmap';
-import { byModel, costOf, fleetSeries, fleetTotals, heatMatrix, pressure, quotaCells } from '../model';
+import { byModel, costOf, fleetSeries, fleetTotals, heatMatrix, pressure, quotaCells, runway, type PoolRow } from '../model';
 import { HeatLegend, planHref, Segmented, StateTag, utcDay } from '../ui';
 
 const SPANS = {
@@ -24,6 +24,75 @@ const SPANS = {
   '14d': { back: 168, ahead: 168, label: '−7d / +7d' },
 } as const;
 type SpanKey = keyof typeof SPANS;
+
+/**
+ * Per pool: the last 14 days of daily booked share, its trend in points per week, and when the trend would reach
+ * 95%. Planning signal for "order hardware now or later".
+ */
+function RunwayPanel({ rows }: { rows: PoolRow[] }) {
+  const { from, hour } = useHourWindow(14 * 24, 0);
+  const timelines = useTimelines(
+    rows.map((row) => row.id),
+    from,
+    hour,
+  );
+  const list = useMemo(
+    () =>
+      rows
+        .map((row) => {
+          const timeline = timelines.get(row.id);
+          return { row, ...(timeline ? runway(timeline) : { daily: [] as number[], slopePerWeek: 0, current: 0, daysToCeiling: undefined }) };
+        })
+        .sort((a, b) => (a.daysToCeiling ?? Infinity) - (b.daysToCeiling ?? Infinity) || b.slopePerWeek - a.slopePerWeek),
+    [rows, timelines],
+  );
+  return (
+    <Panel className="col-span-12 lg:col-span-6" title="Runway" icon={RiLineChartLine} meta="14-day trend → 95% booked" flush>
+      <table className="w-full text-body-regular">
+        <thead>
+          <tr className="border-b border-separator-border font-mono text-[11px] tracking-wide text-text-tertiary uppercase">
+            <th className="px-3 py-2 text-left font-normal">Pool</th>
+            <th className="px-3 py-2 text-left font-normal">Daily booked, 14 d</th>
+            <th className="px-3 py-2 text-right font-normal">Trend</th>
+            <th className="px-3 py-2 text-right font-normal">95% in</th>
+          </tr>
+        </thead>
+        <tbody>
+          {list.map(({ row, daily, slopePerWeek, daysToCeiling }) => (
+            <tr key={row.id} className="border-b border-separator-border last:border-0">
+              <td className="px-3 py-1.5">
+                <Link href={`/pools/${row.id}`} className="text-caption-1-medium hover:underline">
+                  {row.name}
+                </Link>
+              </td>
+              <td className="w-32 px-3 py-1.5">
+                <Sparkline values={daily} height={18} max={1} min={0} area={false} />
+              </td>
+              <td className="px-3 py-1.5 text-right font-mono text-[12px] tabular-nums">
+                <span className={slopePerWeek > 0.02 ? 'text-signal' : 'text-text-secondary'}>
+                  {slopePerWeek >= 0 ? '+' : '−'}
+                  {Math.abs(slopePerWeek * 100).toFixed(1)} pt/wk
+                </span>
+              </td>
+              <td className="px-3 py-1.5 text-right">
+                {daysToCeiling === undefined ? (
+                  <span className="font-mono text-[11px] text-text-tertiary">not at this trend</span>
+                ) : daysToCeiling === 0 ? (
+                  <Tag status="crit">already</Tag>
+                ) : (
+                  <Tag status={daysToCeiling < 30 ? 'warn' : 'ok'} led={daysToCeiling < 30}>
+                    {Math.round(daysToCeiling)} d
+                  </Tag>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="px-3 py-2 font-mono text-[10px] text-text-tertiary">least-squares line through daily averages; extrapolates the recent weeks, not a promise</p>
+    </Panel>
+  );
+}
 
 /** Capacity: what exists, what is booked now and ahead, where it is tight, and what's next. */
 export function CapacityOverviewPage() {
@@ -273,6 +342,8 @@ export function CapacityOverviewPage() {
             </tbody>
           </table>
         </Panel>
+
+        <RunwayPanel rows={gpuRows} />
 
         <Panel className="col-span-12 lg:col-span-6" title="Next 6 hours" meta={`${upcoming.length} changes`} flush>
           {upcoming.length ? (

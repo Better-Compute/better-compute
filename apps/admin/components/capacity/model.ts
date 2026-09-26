@@ -203,6 +203,36 @@ export function pressure(row: PoolRow, timeline: CapacityTimeline, now: number, 
   return { start, waitMs: start === undefined ? undefined : Math.max(0, start - now) };
 }
 
+/**
+ * Runway: the daily average share booked over a past timeline, a least-squares trend through it, and when the
+ * trend would reach `ceiling` (default 95%). A planning signal, not a forecast: it extrapolates the last weeks.
+ */
+export function runway(timeline: CapacityTimeline, ceiling = 0.95) {
+  const byDay = new Map<number, { sum: number; count: number }>();
+  for (const bucket of timeline.buckets) {
+    const day = Math.floor(bucket.start / DAY);
+    const entry = byDay.get(day) ?? { sum: 0, count: 0 };
+    entry.sum += timeline.allocatable > 0 ? Math.min(1, bucket.booked / timeline.allocatable) : 0;
+    entry.count += 1;
+    byDay.set(day, entry);
+  }
+  const daily = [...byDay.entries()].sort((a, b) => a[0] - b[0]).map(([, entry]) => entry.sum / entry.count);
+  const n = daily.length;
+  if (n < 3) return { daily, slopePerWeek: 0, current: daily.at(-1) ?? 0, daysToCeiling: undefined as number | undefined };
+  const meanX = (n - 1) / 2;
+  const meanY = daily.reduce((a, b) => a + b, 0) / n;
+  let num = 0;
+  let den = 0;
+  daily.forEach((y, x) => {
+    num += (x - meanX) * (y - meanY);
+    den += (x - meanX) ** 2;
+  });
+  const slope = den ? num / den : 0;
+  const current = meanY + slope * (n - 1 - meanX);
+  const daysToCeiling = current >= ceiling ? 0 : slope > 0.0005 ? (ceiling - current) / slope : undefined;
+  return { daily, slopePerWeek: slope * 7, current, daysToCeiling: daysToCeiling !== undefined && daysToCeiling > 365 ? undefined : daysToCeiling };
+}
+
 // --- Reservations -------------------------------------------------------------------------------------------
 
 export type StateTone = 'live' | 'pending' | 'ok' | 'off' | 'crit' | 'warn';

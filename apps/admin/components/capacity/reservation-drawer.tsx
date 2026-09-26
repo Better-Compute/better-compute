@@ -14,6 +14,7 @@ import { fmtDuration, fmtMoney, fmtNum, fmtRelative, fmtStamp } from '@/lib/data
 import { durationMs, HOUR, reservationGpus, type Reservation, type ReservationState } from '@/lib/data/capacity';
 import { cx } from '@/utils/cx';
 import { DAY, useCapacity, useCapacityActions, useHourWindow, usePoolRows, useTenantName, useTimelines } from './data';
+import { ReservationGantt } from './gantt';
 import { reservationSpend, stateStyle } from './model';
 import { planHref, StateTag } from './ui';
 
@@ -129,6 +130,31 @@ function Alternatives({ reservation }: { reservation: Reservation }) {
       </ul>
       <p className="mt-1 font-mono text-[10px] text-text-tertiary">earliest window for {fmtNum(gpus)} GPUs × {fmtDuration(length)}; amber = sooner than it starts now</p>
     </section>
+  );
+}
+
+/**
+ * The reservation's own nodes, with everything else booked on them around its window: who was there before, who
+ * comes after, and what sits on the other GPUs.
+ */
+function NeighbourSchedule({ reservation }: { reservation: Reservation }) {
+  const snapshot = useCapacity();
+  const tenantName = useTenantName();
+  const ids = reservation.nodeIds ?? [];
+  const nodes = useMemo(() => snapshot.nodes.filter((node) => ids.includes(node.id)), [snapshot.nodes, ids.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
+  const length = reservation.during!.end - reservation.during!.start;
+  const pad = Math.max(6 * HOUR, length * 0.5);
+  const from = reservation.during!.start - pad;
+  const to = reservation.during!.end + pad;
+  const around = useMemo(
+    () => snapshot.reservations.filter((entry) => entry.poolId === reservation.poolId && entry.during && entry.nodeIds?.some((id) => ids.includes(id)) && entry.during.end > from && entry.during.start < to),
+    [snapshot.reservations, reservation.poolId, ids.join(','), from, to], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  if (!nodes.length) return null;
+  return (
+    <div className="mt-3">
+      <ReservationGantt reservations={around} nodes={nodes} from={from} to={to} now={snapshot.now} selectedId={reservation.id} tenantName={tenantName} gpusPerNode={nodes[0]?.gpus ?? 8} maxHeight={180} />
+    </div>
   );
 }
 
@@ -318,6 +344,7 @@ export function ReservationDrawer({ reservation, onClose }: { reservation?: Rese
                 </li>
               ))}
             </ul>
+            {r.during && <NeighbourSchedule reservation={r} />}
           </section>
         )}
 
