@@ -144,6 +144,11 @@ const kit = definePlugin({
             }
             return { status: 'decide', resource: tenant(input) };
           },
+          // Records what it decided in the input, as vps's per-volume decisions do: the handler
+          // must see it (invoke runs the input check ran on, not a fresh parse).
+          async check(_context, input) {
+            (input as ItemInput & { checked?: string }).checked = `checked ${input.label}`;
+          },
         },
         async handler(context, input) {
           trace.push('handler');
@@ -152,7 +157,8 @@ const kit = definePlugin({
             'INSERT INTO plg_kit_items (id, tenant_id, owner, label) VALUES ($1, $2, $3, $4)',
             [id, input.tenantId, context.caller!.identityId, input.label],
           );
-          return { id, label: input.label, admission: context.admission! };
+          const checked = (input as ItemInput & { checked?: string }).checked;
+          return { id, label: input.label, admission: context.admission!, ...(checked ? { checked } : {}) };
         },
       }),
     },
@@ -325,7 +331,7 @@ describe('composite methods: check, then invoke', () => {
     expect(trace).toEqual(['prepare', 'prepare', 'handler']);
 
     const id = await draftId('itm', ACME, 'id-user', 'k-1');
-    expect(result.item).toMatchObject({ id, label: 'gpu' });
+    expect(result.item).toMatchObject({ id, label: 'gpu', checked: 'checked gpu' });
     for (const admission of [result.note.admission, result.item.admission])
       expect(admission).toMatchObject({
         tenantId: ACME,

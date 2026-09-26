@@ -121,6 +121,12 @@ interface Grant {
   /** The decision `check` made; absent for public methods and for admission replays. */
   decision?: Decision;
   decidedAt: number;
+  /**
+   * The validated input `admission.check` ran on. A check may record what it decided in it (e.g.
+   * vps's `decidedVolumes`), which the handler then holds the write to, so `invoke` runs the same
+   * object instead of validating the raw input again (the grant key already pins the raw input).
+   */
+  checkedInput?: unknown;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -300,8 +306,11 @@ export function createComposites(options: CompositeOptions): Composites {
             );
           }
           // Budget-style checks that may call IAM; `check` runs with no transaction open.
-          if (admission.check)
+          if (admission.check) {
             await admission.check(run.contextFor(database, undefined, 'caller'), input, decided);
+            grant(key, { entry, tenantId, decision, decidedAt: clock.now(), checkedInput: input });
+            return;
+          }
           grant(key, { entry, tenantId, decision, decidedAt: clock.now() });
           return;
         }
@@ -328,7 +337,8 @@ export function createComposites(options: CompositeOptions): Composites {
 
         const { entry } = granted;
         const { definition } = entry;
-        const input = definition.validate(raw ?? {});
+        const input =
+          granted.checkedInput !== undefined ? granted.checkedInput : definition.validate(raw ?? {});
         // A savepoint of the composite's transaction: a failed sub-call leaves nothing behind.
         return database.transaction(async (savepoint) => {
           const sql = envelope.within(savepoint);

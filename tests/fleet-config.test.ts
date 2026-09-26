@@ -200,6 +200,9 @@ let composite: Composite;
 
 function methodContext(sql: SqlExecutor): MethodContext {
   const grants: string[] = [];
+  // As the server's composite does: the input an admission `check` ran on (and recorded its
+  // decisions in, e.g. vps's decidedVolumes) is the one invoke runs.
+  const checked = new Map<string, unknown>();
   const context = {
     ...moduleContext(sql),
     caller: root,
@@ -207,8 +210,20 @@ function methodContext(sql: SqlExecutor): MethodContext {
     async check(path: string, input: unknown) {
       const definition = routes[path];
       if (!definition) throw new ComputeError('NOT_FOUND', `no ${path}`);
-      definition.validate(input);
+      const parsed = definition.validate(input);
       if (composite.deny === path) throw new ComputeError('ACCESS_DENIED', `denied ${path}`);
+      if (definition.admission?.check) {
+        const outside = {
+          ...moduleContext(sql),
+          caller: root,
+          credential: { kind: 'test' },
+          // Root is allowed everything here; the per-volume decisions are what the check records.
+          iam: { require: async () => undefined, authorize: async () => true },
+          requestId: 'req',
+        } as unknown as MethodContext;
+        await definition.admission.check(outside, parsed, { type: 'compute-tenant', id: 'root' });
+        checked.set(canonical({ path, input }), parsed);
+      }
       grants.push(canonical({ path, input }));
       composite.checks.push(path);
       await composite.afterCheck?.();
@@ -218,7 +233,9 @@ function methodContext(sql: SqlExecutor): MethodContext {
       if (index < 0) throw new ComputeError('ACCESS_DENIED', `not checked: ${path}`);
       grants.splice(index, 1);
       const definition = routes[path]!;
-      const parsed = definition.validate(input);
+      const key = canonical({ path, input });
+      const parsed = checked.has(key) ? checked.get(key) : definition.validate(input);
+      checked.delete(key);
       const inner = {
         ...moduleContext(within(tx)),
         caller: root,
