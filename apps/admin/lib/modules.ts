@@ -101,6 +101,8 @@ export interface AdminModule {
   /** Entities for the palette. Called with the query (≥ 2 chars) and the workspace clock; return ≤ 8. */
   search?: (query: string, context: { now: number; siteId?: string }) => SearchResult[];
   peeks?: Record<string, PeekDef>;
+  /** Small live readouts for the status bar at the bottom of every page (render one compact inline item). */
+  status?: ComponentType[];
 }
 
 /** Sidebar sections, top to bottom. Unknown groups sort after these, alphabetically. */

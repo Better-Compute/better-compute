@@ -5,6 +5,7 @@ import { useMemo, useState } from 'react';
 import {
   activity,
   attention,
+  capacityTotals,
   controlPlane,
   fleetPulse,
   fmtClock,
@@ -32,9 +33,13 @@ import { cx } from '@/utils/cx';
 export function KpiStrip({ size }: WidgetProps) {
   const { window: range } = useWorkspace();
   const pulse = useLive((now, scope) => fleetPulse(now, scope));
+  // GPU numbers come from the capacity rollup, so they match /capacity to the GPU.
+  const capacity = useLive((now, scope) => capacityTotals(now, scope), { bucketMs: 15_000 });
   const series = useLive((now, scope) => pulseSeries(now, 36, range.step * 2, scope), { bucketMs: 30_000, deps: [range.step] });
-  const prev = series[0];
-  const delta = (current: number, before?: number) => (before ? (current - before) / before : undefined);
+  // Trends are shapes over the range; the delta compares the range's ends of the same series.
+  const trendDelta = (values: number[]) => (values.length > 1 && values[0] ? (values.at(-1)! - values[0]) / values[0] : undefined);
+  const gpuUtil = series.map((p) => p.gpuUtilization);
+  const gpuAlloc = series.map((p) => p.gpusAllocated);
   const cards = [
     {
       label: 'Nodes ready',
@@ -45,21 +50,21 @@ export function KpiStrip({ size }: WidgetProps) {
     },
     {
       label: 'GPU utilization',
-      value: fmtPct(pulse.gpuUtilization),
-      delta: delta(pulse.gpuUtilization, prev?.gpuUtilization),
-      trend: series.map((p) => p.gpuUtilization),
+      value: fmtPct(capacity.gpus.utilization),
+      delta: trendDelta(gpuUtil),
+      trend: gpuUtil,
     },
     {
       label: 'GPUs allocated',
-      value: fmtNum(pulse.gpus.allocated),
-      unit: `/ ${fmtNum(pulse.gpus.total)}`,
-      delta: delta(pulse.gpus.allocated, prev?.gpusAllocated),
-      trend: series.map((p) => p.gpusAllocated),
+      value: fmtNum(capacity.gpus.allocated),
+      unit: `/ ${fmtNum(capacity.gpus.allocatable)}`,
+      delta: trendDelta(gpuAlloc),
+      trend: gpuAlloc,
     },
     {
       label: 'GPUs free now',
-      value: fmtNum(pulse.gpus.available),
-      hint: `${fmtNum(pulse.gpus.reserved)} held for reservations`,
+      value: fmtNum(capacity.gpus.freeNow),
+      hint: `${fmtNum(capacity.gpus.reserved)} booked ahead · ${fmtNum(capacity.gpus.unschedulable)} unschedulable`,
       goodWhen: 'up' as const,
     },
     {
@@ -71,7 +76,7 @@ export function KpiStrip({ size }: WidgetProps) {
     {
       label: 'Sandboxes live',
       value: fmtNum(pulse.sandboxesLive),
-      delta: delta(pulse.sandboxesLive, prev?.sandboxesLive),
+      delta: trendDelta(series.map((p) => p.sandboxesLive)),
       trend: series.map((p) => p.sandboxesLive),
       tone: 'neutral' as const,
     },

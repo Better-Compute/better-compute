@@ -6,7 +6,6 @@ import { Dialog, Modal, ModalOverlay } from 'react-aria-components';
 import { useTheme } from 'next-themes';
 import {
   RiArrowRightLine,
-  RiBuilding2Line,
   RiContrast2Line,
   RiDashboardLine,
   RiGlobalLine,
@@ -14,11 +13,9 @@ import {
   RiKeyboardLine,
   RiLayoutColumnLine,
   RiPauseLine,
-  RiServerLine,
-  RiTeamLine,
   RiTimeLine,
 } from 'react-icons/ri';
-import { pools, sites, tenants } from '@/lib/data';
+import { sites } from '@/lib/data';
 import { allCommands, allNav, searchAll } from '@/lib/modules';
 import { usePeek } from './peek';
 import { cx } from '@/utils/cx';
@@ -173,24 +170,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
         keywords: [site.city, site.region],
         perform: () => workspace.setSiteId(site.id),
       })),
-      ...pools.map((pool) => ({
-        id: `pool:${pool.id}`,
-        label: `${pool.name} (${pool.id})`,
-        group: 'Pools',
-        hint: `${pool.short} · ${pool.nodes} nodes · ${pool.siteId}`,
-        icon: RiServerLine,
-        keywords: [pool.model, pool.kind, pool.siteId],
-        perform: go(`/pools/${pool.id}`),
-      })),
-      ...tenants.map((tenant) => ({
-        id: `tenant:${tenant.id}`,
-        label: tenant.name,
-        group: 'Tenants',
-        hint: tenant.id,
-        icon: tenant.id === 'ten_root' ? RiBuilding2Line : RiTeamLine,
-        keywords: [tenant.slug],
-        perform: go(`/quotas?tenant=${tenant.id}`),
-      })),
+      // Pools, tenants, nodes, reservations… come from the modules' own `search` (see results below).
     ];
   }, [router, workspace, resolvedTheme, setTheme, pageCommands]);
 

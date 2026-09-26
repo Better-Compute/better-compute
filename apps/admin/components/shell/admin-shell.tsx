@@ -7,6 +7,7 @@ import { allCommands, allNav } from '@/lib/modules';
 import { CommandPalette, PALETTE_EVENTS } from './command-palette';
 import { PageCommandsProvider } from './page-commands';
 import { PeekProvider } from './peek';
+import { StatusBar } from './status-bar';
 import { TimeTravelBanner } from './time-machine';
 import { Sidebar } from './sidebar';
 import { Topbar } from './topbar';
@@ -134,6 +135,7 @@ export function AdminShell({ children }: { children: ReactNode }) {
         <main id="main" ref={mainRef} tabIndex={-1} className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-5 outline-none lg:px-6">
           {children}
         </main>
+        <StatusBar />
       </div>
       <CommandPalette open={palette} onOpenChange={setPalette} />
       <ShortcutSheet open={keys} onOpenChange={setKeys} />

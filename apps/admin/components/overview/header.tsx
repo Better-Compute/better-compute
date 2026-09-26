@@ -1,7 +1,7 @@
 'use client';
 
 import { RiDashboard3Line } from 'react-icons/ri';
-import { attention, fleetPulse, fmtNum, fmtPct, siteById, topologyTotals } from '@/lib/data';
+import { attention, capacityTotals, fmtNum, fmtPct, siteById, topologyTotals } from '@/lib/data';
 import { useLive, useWorkspace, RANGES } from '@/components/shell/workspace';
 import { PageHeader } from '@/components/ui/panel';
 import { Tag } from '@/components/ui/signal';
@@ -9,7 +9,8 @@ import { Tag } from '@/components/ui/signal';
 /** The Overview's header: one sentence that says whether the fleet is fine, then the dashboards below. */
 export function OverviewHeader() {
   const { siteId, range, source } = useWorkspace();
-  const pulse = useLive((now, scope) => fleetPulse(now, scope), { bucketMs: 10_000 });
+  const capacity = useLive((now, scope) => capacityTotals(now, scope), { bucketMs: 15_000 });
+  const pulse = { gpuUtilization: capacity.gpus.utilization, gpus: { available: capacity.gpus.freeNow } };
   const items = useLive((now, scope) => attention(now, scope), { bucketMs: 10_000 });
   const totals = topologyTotals(siteId ? { siteId } : undefined);
   const critical = items.filter((i) => i.severity === 'critical').length;
