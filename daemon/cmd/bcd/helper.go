@@ -103,6 +103,8 @@ func runHelper(fs *flag.FlagSet, _, stderr io.Writer) int {
 	srv.JoinSigningPin, _ = config.DecodePin(cfg.JoinSigningKeyPin) // validated when the file was loaded
 	// libvirt for a node outside the libvirt group: checked definitions and bcd's domains only.
 	srv.Virsh, srv.LibvirtPolicy = libvirtHelper(cfg, host, int(uid), int(gid))
+	// cloud-hypervisor for that node: taps, VFIO and the VMM's unit, built by root from what it checks.
+	srv.CHPolicy = chHelper(cfg, host, int(uid))
 	if os.Geteuid() == 0 {
 		// The config decides what root does for the node ([host] units, the pins): root's alone.
 		if err := rootOnlyFile(configFile); err != nil {

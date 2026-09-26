@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/better-compute/better-compute/daemon/internal/hostconfig"
@@ -80,6 +81,8 @@ type Request struct {
 	Intent *HostIntent `json:"intent,omitempty"`
 	// libvirt.<verb>: the operation's arguments.
 	Libvirt *LibvirtRequest `json:"libvirt,omitempty"`
+	// ch.<verb>: the operation's arguments (ch.go).
+	CH *CHRequest `json:"ch,omitempty"`
 }
 
 // Response is the helper's answer.
@@ -234,6 +237,9 @@ type Server struct {
 	OpenConsole   func(path string) (*os.File, error)
 	// SliceRunner runs systemctl for slice.apply and slice.remove (default: the real one).
 	SliceRunner slice.Runner
+	// CHPolicy serves ch.* (ch.go); nil refuses them. chMu serializes launches (one VMM user each).
+	CHPolicy func() (CHPolicy, error)
+	chMu     sync.Mutex
 }
 
 // SliceTimeout bounds slice.apply and slice.remove (a few systemctl calls).
@@ -394,7 +400,7 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 		answer(nil, fmt.Errorf("protocol version %d; this helper speaks %d", req.V, Version))
 		return
 	}
-	if req.Op == "host.unit" || strings.HasPrefix(req.Op, "libvirt.") {
+	if req.Op == "host.unit" || strings.HasPrefix(req.Op, "libvirt.") || strings.HasPrefix(req.Op, "ch.") {
 		_ = conn.SetDeadline(time.Now().Add(HostUnitTimeout + time.Minute))
 	}
 	result, err := s.do(ctx, req)
@@ -402,7 +408,11 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 	if err != nil {
 		outcome = err.Error()
 	}
-	s.logf("helper: operation", "pid", peer.PID, "op", req.Op, "kind", req.Kind, "name", req.Name, "gpu", req.GPU, "version", req.Version, "unit", req.Unit, "outcome", outcome)
+	instance := ""
+	if req.CH != nil {
+		instance = req.CH.Instance
+	}
+	s.logf("helper: operation", "pid", peer.PID, "op", req.Op, "kind", req.Kind, "name", req.Name, "gpu", req.GPU, "version", req.Version, "unit", req.Unit, "instance", instance, "outcome", outcome)
 	answer(result, err)
 }
 
@@ -412,6 +422,9 @@ func (s *Server) do(ctx context.Context, req Request) (any, error) {
 	}
 	if req.Op == "libvirt.console" {
 		return s.console(ctx, req.Libvirt)
+	}
+	if verb, ok := strings.CutPrefix(req.Op, "ch."); ok {
+		return s.ch(ctx, verb, req.CH)
 	}
 	return nil, s.op(ctx, req)
 }

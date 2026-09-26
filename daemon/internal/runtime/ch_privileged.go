@@ -192,17 +192,20 @@ func CHLaunch(ctx context.Context, p CHRootPolicy, id string) ([]string, error) 
 	return c.launchArgs(r), nil
 }
 
-// CHGPUs are the PCI addresses of a checked record's GPUs, and its VMM user (root's ch.vfio).
-func CHGPUs(p CHRootPolicy, id string) (uid uint32, addrs []string, err error) {
+// CHGPU is one GPU of a checked record.
+type CHGPU struct{ UUID, Addr string }
+
+// CHGPUs are a checked record's GPUs, and its VMM user (root's ch.vfio).
+func CHGPUs(p CHRootPolicy, id string) (uid uint32, gpus []CHGPU, err error) {
 	r, err := CHRecord(p, id)
 	if err != nil {
 		return 0, nil, err
 	}
 	for _, gpu := range r.GPUs {
 		addr, _ := p.GPUAddress(gpu)
-		addrs = append(addrs, addr)
+		gpus = append(gpus, CHGPU{UUID: gpu, Addr: addr})
 	}
-	return r.UID, addrs, nil
+	return r.UID, gpus, nil
 }
 
 // ---- the node's side ----------------------------------------------------------------------------

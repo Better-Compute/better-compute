@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -80,6 +81,19 @@ func TestUnreadableKubernetesReleasesKeepEveryGPUClaimed(t *testing.T) {
 	s.push(desired(1, &agentv1.NodeSpec{Devices: &agentv1.DevicesSection{}}))
 	s.next(t, "status", func(f *agentv1.AgentFrame) bool { return f.GetStatus().GetObservedGeneration() == 1 })
 	d := h.agent.devices
+	// Until the test says otherwise a pod may hold a GPU: a background pass must not clear the claim
+	// (this harness node was never a Kubernetes worker, so kube would say none does).
+	unaccounted := true
+	var asked []string
+	var hookMu sync.Mutex
+	d.releasesUnaccounted = func(_ context.Context, live map[string]bool, gpus []string) bool {
+		hookMu.Lock()
+		defer hookMu.Unlock()
+		if live["alloc_live"] { // the test's own call, not a background pass's
+			asked = gpus
+		}
+		return unaccounted
+	}
 	if err := os.WriteFile(d.releasingPath(), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -99,21 +113,17 @@ func TestUnreadableKubernetesReleasesKeepEveryGPUClaimed(t *testing.T) {
 		t.Fatalf("conditions = %v", conds)
 	}
 	// A pod may still hold one: kept. None does: the GPUs are free again.
-	unaccounted := true
-	var asked []string
-	d.releasesUnaccounted = func(_ context.Context, _ map[string]bool, gpus []string) bool {
-		asked = gpus
-		return unaccounted
-	}
 	// Live allocations' GPUs are left out of the process check (a slot's GPU too: it is shared).
 	d.clearUnreadable(context.Background(), map[string]bool{"alloc_live": true}, []string{gpus[0].Uuid, gpus[1].Uuid + "/s0"})
 	if !d.releasesUnreadable() {
 		t.Fatal("cleared while a pod may hold a GPU")
 	}
+	hookMu.Lock()
 	if len(asked) != len(gpus)-2 || slices.Contains(asked, gpus[0].Uuid) || slices.Contains(asked, gpus[1].Uuid) {
 		t.Fatalf("asked about %v", asked)
 	}
 	unaccounted = false
+	hookMu.Unlock()
 	d.clearUnreadable(context.Background(), nil, nil)
 	if d.releasesUnreadable() || len(d.releasingDevices()) != 0 || len(d.currentConditions()) != 0 {
 		t.Fatal("the claim outlived the pods")

@@ -164,7 +164,12 @@ func helperRuntimeChecks(cfg *config.Config, lookPath func(string) (string, erro
 		}
 	}
 	if _, err := lookPath("cloud-hypervisor"); err == nil {
-		out = append(out, doctorCheck{"warn", "cloud-hypervisor", "not offered under [helper]: its VMMs need bcd node to run as root"})
+		// Its taps, VFIO and VMM units go through the helper (ch.*); its files are shared by ACL.
+		if len(cfg.Helper.Bridges()) == 0 {
+			out = append(out, doctorCheck{"warn", "cloud-hypervisor", "no [helper] instance_bridges: the helper refuses every instance tap"})
+		} else {
+			out = append(out, doctorCheck{"ok", "cloud-hypervisor", "taps, VFIO and VMM units go through bcd helper"})
+		}
 	}
 	return out
 }

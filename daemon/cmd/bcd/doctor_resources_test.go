@@ -93,8 +93,13 @@ func TestHelperRuntimeChecks(t *testing.T) {
 	// Set up as the installer does: QEMU in the node's group, no relabelling, the node not in libvirt.
 	groups["libvirt-qemu:bcd"] = true
 	if got := statuses(helperRuntimeChecks(cfg, both, host)); got != "libvirt:ok cloud-hypervisor:warn" {
+		t.Fatalf("set up without instance bridges: %s", got)
+	}
+	cfg.Helper.InstanceBridges = "br0"
+	if got := statuses(helperRuntimeChecks(cfg, both, host)); got != "libvirt:ok cloud-hypervisor:ok" {
 		t.Fatalf("set up: %s", got)
 	}
+	cfg.Helper.InstanceBridges = ""
 	// The root-equivalent group, relabelling on, QEMU outside the node's group: each fails.
 	groups["bcd:libvirt"], groups["libvirt-qemu:bcd"] = true, false
 	host.qemuConf = func() ([]byte, error) { return []byte("#dynamic_ownership = 0\n"), nil }

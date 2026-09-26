@@ -138,6 +138,14 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 		return exitFailure
 	}
 	log := newLogger(cfg, stderr)
+	// bcd join runs as root; under [helper] the node key is bcd node's, another user's: in the TPM only
+	// when that user can open it (else a file, which a renewal moves into the TPM once it can).
+	if device := nodeKeyDevice(); agent.TPM != nil && device != "" && cfg.Helper.Socket != "" && os.Geteuid() == 0 {
+		if err := userCanOpen(cfg.Helper.User, device); err != nil {
+			log.Warn("the node key stays a file: bcd node cannot use the TPM", "error", err.Error())
+			agent.TPM = nil
+		}
+	}
 	role := commonv1.AgentRole_AGENT_ROLE_NODE
 	switch fs.Lookup("role").Value.String() {
 	case "node":
@@ -330,24 +338,53 @@ func runtimesFor(mode, dataDir string, host agent.Host) []runtime.Runtime {
 	return newRuntimes(dataDir, bootID)
 }
 
-// forHelper fits the runtimes to an unprivileged bcd node. cloud-hypervisor is dropped: it launches
-// its VMMs with systemd-run, creates their taps and hands them files, all as root, so it is not
-// advertised and the control plane places nothing on it here. libvirt's privileged operations go
-// through bcd helper (hv), where root validates every definition and path; the node only reads
-// libvirt's read-only socket, so it needs no (root-equivalent) libvirt group.
-func forHelper(runtimes []runtime.Runtime, hv runtime.Hypervisor, log *slog.Logger) []runtime.Runtime {
-	out := runtimes[:0:0]
+// forHelper fits the runtimes to an unprivileged bcd node: their privileged work goes through bcd
+// helper (c), where root validates every definition and path. libvirt's operations are the helper's
+// libvirt.* (the node only reads libvirt's read-only socket, so it needs no root-equivalent libvirt
+// group); cloud-hypervisor's taps, VFIO and VMM unit are its ch.*, the node sharing its files with
+// each VMM's user through ACLs.
+func forHelper(runtimes []runtime.Runtime, c helper.Client, log *slog.Logger) []runtime.Runtime {
 	for _, r := range runtimes {
 		switch r := r.(type) {
 		case *runtime.CloudHypervisor:
-			log.Warn("cloud-hypervisor needs bcd node to run as root; it is not offered under [helper]")
-			continue
+			r.Privileged = helperCH{c}
 		case *runtime.Libvirt:
-			r.Hypervisor = hv
+			r.Hypervisor = helperHypervisor{c}
 		}
-		out = append(out, r)
 	}
-	return out
+	return runtimes
+}
+
+// helperCH is runtime.CHPrivileged over bcd helper's ch.* ops.
+type helperCH struct{ c helper.Client }
+
+func (h helperCH) do(ctx context.Context, verb string, req helper.CHRequest) error {
+	_, err := h.c.CH(ctx, verb, req)
+	return err
+}
+
+func (h helperCH) Taps(ctx context.Context, id string, networks []string) error {
+	return h.do(ctx, "taps", helper.CHRequest{Instance: id, Networks: networks})
+}
+
+func (h helperCH) Untaps(ctx context.Context, id string, nics int) error {
+	return h.do(ctx, "untaps", helper.CHRequest{Instance: id, NICs: nics})
+}
+
+func (h helperCH) BindVFIO(ctx context.Context, id string) error {
+	return h.do(ctx, "vfio", helper.CHRequest{Instance: id})
+}
+
+func (h helperCH) ReleaseVFIO(ctx context.Context, id string, addrs []string) error {
+	return h.do(ctx, "unvfio", helper.CHRequest{Instance: id, Addrs: addrs})
+}
+
+func (h helperCH) Launch(ctx context.Context, id string) error {
+	return h.do(ctx, "launch", helper.CHRequest{Instance: id})
+}
+
+func (h helperCH) Stop(ctx context.Context, id string) (string, error) {
+	return h.c.CH(ctx, "stop", helper.CHRequest{Instance: id})
 }
 
 // helperHypervisor is runtime.Hypervisor over bcd helper's libvirt ops.
@@ -428,7 +465,7 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 	drivers := agent.DriversOf(plugins)
 	runtimes := runtimesFor(mode, cfg.DataDir, host)
 	if underHelper {
-		runtimes = forHelper(runtimes, helperHypervisor{helper.Client{Socket: cfg.Helper.Socket}}, log)
+		runtimes = forHelper(runtimes, helper.Client{Socket: cfg.Helper.Socket}, log)
 	}
 	if mode == "node" {
 		// Runtimes the plugins serve (a Kata or Firecracker plugin), beside the built-in ones.
