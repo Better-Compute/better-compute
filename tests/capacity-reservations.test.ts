@@ -814,6 +814,22 @@ describe('the reservation lifecycle', () => {
     expect((await conditions()).map((condition) => condition.type)).not.toContain(
       'NodeUnreachable',
     );
+
+    // GPUs exposed outside bcd on its node (review 2, M4): Degraded while the condition holds.
+    await db.query(
+      `INSERT INTO node_conditions (node_id, type, status, reason, since)
+       VALUES ($1, 'ForeignGpuExposure', 'true', 'nvidia.com/gpu allocatable', compute_now())`,
+      [allocation.node_id],
+    );
+    await reconcile(created.id);
+    expect(await conditions()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'Degraded', reason: 'ForeignGpuExposure' }),
+      ]),
+    );
+    await db.query(`DELETE FROM node_conditions WHERE node_id = $1`, [allocation.node_id]);
+    await reconcile(created.id);
+    expect((await conditions()).map((condition) => condition.type)).not.toContain('Degraded');
   });
 
   it('re-places after a bind timeout, and fails after the retries run out', async () => {

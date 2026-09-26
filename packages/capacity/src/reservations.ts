@@ -2435,6 +2435,7 @@ export async function reconcileReservation(
     lost: string | number;
     unhealthy: string[] | null;
     unreachable: string[] | null;
+    exposed: string[] | null;
   }>(
     `WITH live AS (
        SELECT id, node_id, atoms, binding FROM allocations
@@ -2443,7 +2444,10 @@ export async function reconcileReservation(
             (SELECT array_agg(d.id ORDER BY d.id) FROM live l JOIN devices d ON d.id = ANY(l.atoms)
               WHERE NOT d.healthy) AS unhealthy,
             (SELECT array_agg(DISTINCT n.id ORDER BY n.id) FROM live l JOIN nodes n ON n.id = l.node_id
-              WHERE n.connectivity <> 'connected') AS unreachable`,
+              WHERE n.connectivity <> 'connected') AS unreachable,
+            (SELECT array_agg(DISTINCT c.node_id ORDER BY c.node_id) FROM live l
+               JOIN node_conditions c ON c.node_id = l.node_id
+              WHERE c.type = 'ForeignGpuExposure' AND c.status = 'true') AS exposed`,
     [id],
   );
   const state = rows[0];
@@ -2455,14 +2459,23 @@ export async function reconcileReservation(
           reason: 'BindingLost',
           message: 'a node dropped the devices',
         }
-      : state?.unhealthy?.length
+      : state?.exposed?.length
         ? {
+            // Another path on the node (the GPU operator's device plugin, env-var access) can give
+            // these GPUs to someone else: not exclusively the tenant's any more (review 2, M4).
             type: 'Degraded',
             status: 'true',
-            reason: 'AtomUnhealthy',
-            message: `unhealthy: ${state.unhealthy.join(', ')}`,
+            reason: 'ForeignGpuExposure',
+            message: `GPUs exposed outside bcd on ${state.exposed.join(', ')}`,
           }
-        : undefined;
+        : state?.unhealthy?.length
+          ? {
+              type: 'Degraded',
+              status: 'true',
+              reason: 'AtomUnhealthy',
+              message: `unhealthy: ${state.unhealthy.join(', ')}`,
+            }
+          : undefined;
   let conditions = degraded
     ? withCondition(row.conditions, degraded, now)
     : withoutCondition(row.conditions, 'Degraded');
