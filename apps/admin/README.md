@@ -41,6 +41,12 @@ and the attention queue. Its pages live under `app/(admin)/<route>/`.
 | `peeks`     | A compact view per entity kind, opened in a side sheet by `<EntityLink kind id>` from any page        |
 | `status`    | Compact readouts in the status bar (`StatusItem`)                                                     |
 | `attention` | Items that need an operator: `(now, scope, { source }) => AttentionItem[]` (pure: time travel)        |
+| `watch`     | Per entity kind, `(id, now, { source }) => WatchState \| null`: the Watching widget and change toasts   |
+
+Widgets get `{ size, editing, settings, updateSettings }`. `settings` are the instance's values for the
+widget's declared `settings`; `updateSettings(patch)` lets a widget save its own state (a note, a filter).
+Every widget can be pinned to a site in Configure (`useScope()` and `useLive()` follow the pin) and, with
+`pins: { range: true }`, to a time range read through `useRange()`.
 
 | Path                  | What                                                                                          |
 | --------------------- | --------------------------------------------------------------------------------------------- |
@@ -51,6 +57,23 @@ and the attention queue. Its pages live under `app/(admin)/<route>/`.
 | `components/overview` | Overview module: KPIs, utilization, attention, fleet wall, control plane, sites, digest       |
 | `lib/data`            | Seeded generators over a shared topology; platform signals; formatting                        |
 | `lib/api.ts`, `lib/upstream.ts`, `app/api/upstream` | The live connection                                             |
+
+## For operators
+
+- **Time travel**: the clock in the top bar scrubs back 7 days; `,` `.` step; "compare with now" pins a moment
+  and the Overview shows what changed (`?compare=`). Links carry `?site=&range=&at=`.
+- **Dashboards**: presets plus your own; arrange with the mouse or the keyboard (`e`, then arrows); configure
+  and pin widgets; share with "Copy share link" (`?dashboard=`); export/import JSON in Settings.
+- **Peek and watch**: click any id to peek; "watch" it to follow it in the Watching widget and get a toast when
+  it changes. Critical items toast as they open.
+- **Wall display**: `?kiosk=1` (or ⌘K → Wall display) for a NOC screen; dashboards rotate (`&rotate=45`).
+
+## Tests and build
+
+```bash
+pnpm --filter @better-compute/admin test        # vitest over apps/admin/tests (pure logic, fixed clocks)
+pnpm --filter @better-compute/admin build       # next build --webpack (Turbopack's build trips on next/font)
+```
 
 ## Rules of the room
 
