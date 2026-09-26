@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/better-compute/better-compute/daemon/internal/hostconfig"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
 	"github.com/better-compute/better-compute/daemon/internal/selfupdate"
 )
@@ -64,6 +65,11 @@ type Request struct {
 	Version string `json:"version,omitempty"`
 	// update.settle
 	Running string `json:"running,omitempty"`
+	// host.unit: a config unit of NodeSpec.host and its settings (absent: the unit left the spec, and
+	// what it wrote is cleaned); GPUsBusy are the GPUs holding allocations (mig-layout skips them).
+	Unit     string          `json:"unit,omitempty"`
+	Settings json.RawMessage `json:"settings,omitempty"`
+	GPUsBusy []string        `json:"gpusBusy,omitempty"`
 }
 
 // Response is the helper's answer.
@@ -191,6 +197,45 @@ type Server struct {
 	Update *selfupdate.Manager
 	// OnSwap runs after a swap (the helper arms its own deadline watchdog).
 	OnSwap func(p *selfupdate.Pending)
+	// HostUnits builds the config units host.unit applies, as root, against HostSystem; nil refuses
+	// host.unit. The units validate their settings themselves (hostconfig), exactly as in bcd node.
+	HostUnits  func(hostconfig.Options) *hostconfig.Registry
+	HostSystem hostconfig.System
+}
+
+// HostUnitTimeout bounds host.unit: a driver install builds kernel modules.
+const HostUnitTimeout = 30 * time.Minute
+
+var unitName = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
+
+// hostUnit plans one unit again, as root, and applies it.
+func (s *Server) hostUnit(ctx context.Context, req Request) error {
+	if s.HostUnits == nil || s.HostSystem == nil {
+		return errors.New("host config units are not configured on this helper")
+	}
+	if !unitName.MatchString(req.Unit) {
+		return fmt.Errorf("%q is not a config unit name", req.Unit)
+	}
+	if len(req.GPUsBusy) > 1024 {
+		return errors.New("too many busy GPUs")
+	}
+	busy := make(map[string]bool, len(req.GPUsBusy))
+	for _, g := range req.GPUsBusy {
+		busy[g] = true
+	}
+	r := s.HostUnits(hostconfig.Options{GPUBusy: func(uuid string) bool { return busy[uuid] }})
+	ctx, cancel := context.WithTimeout(ctx, HostUnitTimeout)
+	defer cancel()
+	steps, err := r.PlanUnit(ctx, s.HostSystem, req.Unit, req.Settings)
+	if err != nil {
+		return err
+	}
+	for _, step := range steps {
+		if err := step.Apply(ctx); err != nil {
+			return fmt.Errorf("%s: %w", step.Description, err)
+		}
+	}
+	return nil
 }
 
 // Serve accepts connections on l until ctx is done.
@@ -274,12 +319,15 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 		answer(nil, fmt.Errorf("protocol version %d; this helper speaks %d", req.V, Version))
 		return
 	}
+	if req.Op == "host.unit" {
+		_ = conn.SetDeadline(time.Now().Add(HostUnitTimeout + time.Minute))
+	}
 	result, err := s.do(ctx, req)
 	outcome := "ok"
 	if err != nil {
 		outcome = err.Error()
 	}
-	s.logf("helper: operation", "pid", peer.PID, "op", req.Op, "kind", req.Kind, "name", req.Name, "gpu", req.GPU, "version", req.Version, "outcome", outcome)
+	s.logf("helper: operation", "pid", peer.PID, "op", req.Op, "kind", req.Kind, "name", req.Name, "gpu", req.GPU, "version", req.Version, "unit", req.Unit, "outcome", outcome)
 	answer(result, err)
 }
 
@@ -367,6 +415,8 @@ func (s *Server) op(ctx context.Context, req Request) error {
 		return s.Ops.CheckFirewall(ctx, req.Rules)
 	case "ssh.reload":
 		return s.Ops.ReloadSSH()
+	case "host.unit":
+		return s.hostUnit(ctx, req)
 	}
 	return fmt.Errorf("unknown operation %q", req.Op)
 }
@@ -545,6 +595,12 @@ func (u UpdateClient) RollBack(version, reason string) (*selfupdate.Pending, err
 func (u UpdateClient) Settle(running string) (selfupdate.Settlement, error) {
 	var s selfupdate.Settlement
 	return s, u.call(Request{Op: "update.settle", Running: running}, &s)
+}
+
+// HostUnit asks the helper to apply a config unit (settings nil: clean it), sparing busy GPUs.
+func (c Client) HostUnit(ctx context.Context, unit string, settings json.RawMessage, gpusBusy []string) error {
+	c.Timeout = HostUnitTimeout + time.Minute
+	return c.Do(ctx, Request{Op: "host.unit", Unit: unit, Settings: settings, GPUsBusy: gpusBusy})
 }
 
 // WriteFile writes a file bcd node owns, named by its path (classified into kind and id).

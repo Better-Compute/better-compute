@@ -17,6 +17,7 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/agent"
 	"github.com/better-compute/better-compute/daemon/internal/config"
 	"github.com/better-compute/better-compute/daemon/internal/helper"
+	"github.com/better-compute/better-compute/daemon/internal/hostconfig"
 	"github.com/better-compute/better-compute/daemon/internal/selfupdate"
 )
 
@@ -77,6 +78,9 @@ func runHelper(fs *flag.FlagSet, _, stderr io.Writer) int {
 			return false
 		},
 		Log: func(msg string, args ...any) { log.Info(msg, args...) },
+		// NodeSpec.host units, planned again and applied as root (the node plans unprivileged).
+		HostUnits:  agent.HostUnits,
+		HostSystem: &hostconfig.OSSystem{Root: host.Root},
 	}
 	if os.Geteuid() == 0 {
 		// Every directory on the way to the slots and to the socket must be root's alone: a path the

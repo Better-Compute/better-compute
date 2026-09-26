@@ -219,7 +219,7 @@ func (a *Agent) convergeOnce(ctx context.Context) bool {
 	}
 	a.devices.generation = generation
 	a.access.generation = generation
-	convergers := []converge.Converger{a.devices, a.access, a.instances, telemetryConverger{}, siteConverger{a}}
+	convergers := []converge.Converger{a.hostcfg, a.devices, a.access, a.instances, telemetryConverger{}, siteConverger{a}}
 	if a.o.Update != nil {
 		convergers = append(convergers, daemonConverger{a})
 	}
@@ -272,6 +272,7 @@ func (a *Agent) convergeOnce(ctx context.Context) bool {
 	status.ObservedGeneration = a.observed
 	status.Pressure = a.pressure
 	status.Conditions = append(status.Conditions, cloneConditions(a.faults)...)
+	status.Conditions = append(status.Conditions, a.hostcfg.currentConditions()...)
 	if stored, ok, err := a.j.Spec(); err == nil && ok {
 		status.AppliedSpecHash = stored.Hash
 	}

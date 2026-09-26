@@ -664,8 +664,14 @@ func TestUnknownSectionIsUnsupported(t *testing.T) {
 	for _, c := range status.GetConditions() {
 		reasons[c.GetReason()] = true
 	}
-	if !reasons["1"] || !reasons["42"] || status.GetObservedGeneration() != 1 {
+	// The host section has a converger (hostconfig); an empty sysctl unit converges.
+	if reasons["1"] || !reasons["42"] || status.GetObservedGeneration() != 1 {
 		t.Fatalf("status = %v", status)
+	}
+	for _, st := range status.GetSections() {
+		if st.GetSection() == "host" && st.GetState() != agentv1.SectionState_SECTION_STATE_CONVERGED {
+			t.Fatalf("host section = %v", st)
+		}
 	}
 }
 

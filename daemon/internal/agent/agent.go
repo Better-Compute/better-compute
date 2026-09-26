@@ -146,6 +146,7 @@ type Agent struct {
 	// bootURL is the boot server's own URL (BootHandler), under which it serves the cache.
 	bootURL    string
 	access     *accessConverger
+	hostcfg    *hostConverger
 	convergeCh chan struct{}
 	rng        *rand.Rand
 	ctx        context.Context
@@ -278,6 +279,7 @@ func New(o Options) (*Agent, error) {
 	a.cache.maxBytes = o.CacheMaxBytes
 	a.loadFaults()
 	a.access = &accessConverger{a: a}
+	a.hostcfg = newHostConverger(a)
 	a.key.Store(o.Key)
 	return a, nil
 }
