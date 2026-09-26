@@ -643,6 +643,12 @@ importers:
         specifier: workspace:*
         version: link:../vps
 
+  packages/provider-kubernetes:
+    dependencies:
+      '@better-compute/core':
+        specifier: workspace:*
+        version: link:../core
+
   packages/provider-proxmox:
     dependencies:
       '@better-compute/core':
