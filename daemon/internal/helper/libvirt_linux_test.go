@@ -78,6 +78,9 @@ func TestHelperLibvirt(t *testing.T) {
 	if err := op("start", LibvirtRequest{Domain: "inst_01k5w0000000000000000000ab"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := op("start", LibvirtRequest{Domain: "inst_01k5w0000000000000000000ab", Paused: true}); err != nil || fake.calls[len(fake.calls)-1] != "start inst_01k5w0000000000000000000ab --paused" {
+		t.Fatalf("paused start: %v %q", err, fake.calls[len(fake.calls)-1])
+	}
 	if err := op("destroy", LibvirtRequest{Domain: "legacy-vm"}); err == nil {
 		t.Fatal("a foreign domain was destroyed")
 	}

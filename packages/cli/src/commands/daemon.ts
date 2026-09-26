@@ -268,6 +268,12 @@ export const daemonCommands = [
         value: 'HEX',
         description: "Pin the deployment's approver set (pki trust-version prints it): its first set, or nothing destructive",
       },
+      'instance-bridges': {
+        type: 'string',
+        value: 'BRIDGES',
+        description:
+          'With --unprivileged, on VPS and sandbox hosts: the bridges instance NICs may join ([helper] instance_bridges, comma-separated)',
+      },
       'command-root-sha256': {
         type: 'string',
         value: 'HEX,…',
@@ -367,6 +373,9 @@ export const daemonCommands = [
         },
         ...(flags['approver-set-sha256'] ? { approverSetSha256: flags['approver-set-sha256'] } : {}),
         ...commandRootPins(flags['command-root-sha256'], pins),
+        ...(flags['instance-bridges'] !== undefined
+          ? { instanceBridges: flags['instance-bridges'].split(',').map((bridge) => bridge.trim()).filter(Boolean) }
+          : {}),
         ...(flags.unprivileged ? { unprivileged: true } : {}),
         ...(flags['websocket-url']
           ? {

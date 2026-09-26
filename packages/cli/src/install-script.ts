@@ -85,6 +85,11 @@ export interface InstallScriptOptions {
    * 2d67b25: the slots move to root's /usr/local/lib/bcd).
    */
   unprivileged?: boolean;
+  /**
+   * With `unprivileged`: the bridges an instance's NIC may join ([helper] instance_bridges). bcd helper defines no
+   * libvirt domain with a NIC on any other bridge (VPS and sandbox hosts).
+   */
+  instanceBridges?: readonly string[];
   /** Generation stamp for the header comment. */
   generatedAt?: string;
   generator?: string;
@@ -196,6 +201,11 @@ export function checkInstallScriptOptions(options: InstallScriptOptions): Instal
       throw invalid('--sha256', `names unknown architecture ${arch}`);
     if (!hexPattern.test(hash!))
       throw invalid('--sha256', `for ${arch} must be 64 lower-case hex digits`);
+  }
+  if (options.instanceBridges !== undefined) {
+    if (!options.unprivileged) throw invalid('--instance-bridges', 'needs --unprivileged: bcd helper checks them');
+    if (!options.instanceBridges.length || !options.instanceBridges.every((bridge) => /^[A-Za-z0-9_.-]{1,15}$/.test(bridge)))
+      throw invalid('--instance-bridges', 'must be interface names (1-15 of letters, digits, . _ -), comma-separated');
   }
   if (options.approverSetSha256 !== undefined && !hexPattern.test(options.approverSetSha256))
     throw invalid('--approver-set-sha256', 'must be 64 lower-case hex digits (pki trust-version prints it)');
@@ -554,7 +564,15 @@ if ! grep -Eq '^[[:space:]]*\\[[[:space:]]*helper[[:space:]]*\\]' /etc/bcd/confi
   cat >> /etc/bcd/config.toml.new <<'BCD_HELPER'
 ${bcdHelperSection}BCD_HELPER
 fi
+${
+  options.instanceBridges?.length
+    ? `# The bridges instances may join (bcd helper defines no domain with a NIC elsewhere), unless the operator set them.
+if ! grep -Eq '^[[:space:]]*instance_bridges[[:space:]]*=' /etc/bcd/config.toml.new; then
+  sed -i '/^[[:space:]]*\\[[[:space:]]*helper[[:space:]]*\\]/a instance_bridges = "${[...new Set(options.instanceBridges)].join(',')}"' /etc/bcd/config.toml.new
+fi
 `
+    : ''
+}`
     : ''
 }${
   options.websocket
@@ -658,9 +676,21 @@ ${bcdHelperUnit}BCD_HELPER_UNIT
   mv -f /etc/systemd/system/bcd-helper.service.new /etc/systemd/system/bcd-helper.service
   cat > /etc/systemd/system/bcd.service.d/unprivileged.conf.new <<'BCD_UNPRIVILEGED'
 ${bcdUnprivilegedDropIn}BCD_UNPRIVILEGED
-  # VPS hosts: the libvirt socket's group, when there is one.
-  if getent group libvirt >/dev/null 2>&1; then
-    printf 'SupplementaryGroups=libvirt\\n' >> /etc/systemd/system/bcd.service.d/unprivileged.conf.new
+  # VPS hosts: bcd node is never in the libvirt group (that is root). bcd helper defines and runs its domains,
+  # checked; bcd node reads on libvirt's read-only socket. qemu reaches the node's disk files through the bcd
+  # group, and libvirt chowns nothing (dynamic_ownership = 0), so no path the node names is ever chowned.
+  if [ -f /etc/libvirt/qemu.conf ]; then
+    if grep -Eq '^[[:space:]]*#?[[:space:]]*dynamic_ownership[[:space:]]*=' /etc/libvirt/qemu.conf; then
+      sed -i 's/^[[:space:]]*#\\{0,1\\}[[:space:]]*dynamic_ownership[[:space:]]*=.*/dynamic_ownership = 0/' /etc/libvirt/qemu.conf
+    else
+      printf 'dynamic_ownership = 0\\n' >> /etc/libvirt/qemu.conf
+    fi
+    for qemu_user in libvirt-qemu qemu; do
+      if id -u "$qemu_user" >/dev/null 2>&1; then
+        if command -v usermod >/dev/null 2>&1; then usermod -a -G bcd "$qemu_user"; else addgroup "$qemu_user" bcd; fi
+      fi
+    done
+    systemctl try-restart virtqemud.service libvirtd.service >/dev/null 2>&1 || true
   fi
   chmod 0644 /etc/systemd/system/bcd.service.d/unprivileged.conf.new
   mv -f /etc/systemd/system/bcd.service.d/unprivileged.conf.new /etc/systemd/system/bcd.service.d/unprivileged.conf

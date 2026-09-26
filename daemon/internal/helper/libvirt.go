@@ -32,6 +32,8 @@ type LibvirtRequest struct {
 	Bytes uint64 `json:"bytes,omitempty"`
 	// File is a node-owned file: attach-disk's disk, restore's memory state, save's destination.
 	File string `json:"file,omitempty"`
+	// Paused starts or restores the domain paused (start, restore).
+	Paused bool `json:"paused,omitempty"`
 }
 
 // LibvirtPolicy is the host's side of what the libvirt operations may touch.
@@ -91,6 +93,9 @@ func (s *Server) libvirt(ctx context.Context, verb string, req *LibvirtRequest) 
 		args := []string{verb, req.Domain}
 		if verb == "undefine" {
 			args = append(args, "--nvram", "--managed-save")
+		}
+		if verb == "start" && req.Paused {
+			args = append(args, "--paused")
 		}
 		_, err := s.Virsh(ctx, args...)
 		return err
@@ -223,8 +228,12 @@ func (s *Server) restoreDomain(ctx context.Context, policy LibvirtPolicy, req *L
 	if err := policy.CheckState(req.File); err != nil {
 		return fmt.Errorf("restore: %s: %w", req.File, err)
 	}
+	paused := []string{}
+	if req.Paused {
+		paused = append(paused, "--paused")
+	}
 	if len(req.XML) == 0 {
-		_, err := s.Virsh(ctx, "restore", req.File)
+		_, err := s.Virsh(ctx, append([]string{"restore", req.File}, paused...)...)
 		return err
 	}
 	name, err := ValidateDomainXML(req.XML, policy.Domain)
@@ -234,7 +243,8 @@ func (s *Server) restoreDomain(ctx context.Context, policy LibvirtPolicy, req *L
 	if name != req.Domain {
 		return errors.New("restore: the definition names another domain")
 	}
-	return s.virshWithXML(ctx, policy, req.XML, "restore", req.File, "--xml")
+	// virshWithXML appends the staged definition's path: --xml takes it.
+	return s.virshWithXML(ctx, policy, req.XML, append(append([]string{"restore", req.File}, paused...), "--xml")...)
 }
 
 // stateFile splits a memory state path into its state directory and a plain name in it.

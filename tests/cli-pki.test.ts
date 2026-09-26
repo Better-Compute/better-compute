@@ -551,6 +551,17 @@ describe('daemon install-script', () => {
     }
   });
 
+  it('writes [helper] instance_bridges with --unprivileged --instance-bridges', async () => {
+    const result = await run([...base, '--unprivileged', '--instance-bridges', 'br0, br-priv,br0']);
+    expect(result, JSON.stringify(result).slice(0, 400)).toMatchObject({ ok: true });
+    const script = result.stdout;
+    expect(script).toContain(`sed -i '/^[[:space:]]*\\[[[:space:]]*helper[[:space:]]*\\]/a instance_bridges = "br0,br-priv"'`);
+    expect((await run([...base, '--unprivileged'])).stdout).not.toContain('instance_bridges');
+    expect(await run([...base, '--instance-bridges', 'br0'])).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
+    for (const bad of ['br0;rm', 'a-bridge-name-too-long', ','])
+      expect(await run([...base, '--unprivileged', '--instance-bridges', bad]), bad).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
+  });
+
   it('gives a node with [plugins] the plugin drop-in, keeps the operator’s sections on upgrade', async () => {
     const shell = posixShell();
     if (!shell) return;
@@ -649,6 +660,8 @@ describe('daemon install-script', () => {
         `id() { ${account ? 'return 0' : 'return 1'}; }`,
         `getent() { ${libvirt ? 'return 0' : 'return 1'}; }`,
         `useradd() { echo "useradd $*" >> ${calls}; }`,
+        `usermod() { echo "usermod $*" >> ${calls}; }`,
+        `systemctl() { echo "systemctl $*" >> ${calls}; }`,
         `chgrp() { echo "chgrp $*" >> ${calls}; }`,
       ].join('\n');
       await writeFile(file, `set -eu\n${shims}\n: > ${calls}\nmkdir -p ${root}/etc/bcd ${root}/etc/systemd/system\n${block}`);
@@ -693,11 +706,17 @@ describe('daemon install-script', () => {
     const start = node.script.slice(node.script.indexOf('bcd join --config'));
     expect(start.indexOf('chown -R bcd:bcd /var/lib/bcd')).toBeGreaterThan(0);
     expect(start.indexOf('systemctl enable --now bcd-helper.service')).toBeLessThan(start.indexOf('systemctl enable --now bcd.service'));
-    // An upgrade without the flag keeps the node unprivileged (one [helper]); an existing account is reused; libvirt on VPS hosts.
+    // An upgrade without the flag keeps the node unprivileged (one [helper]); an existing account is reused. On a VPS
+    // host bcd node is never in libvirt's group (bcd helper runs libvirt): qemu reaches its files through the bcd
+    // group, and libvirt chowns nothing.
+    await mkdir(`${root}/etc/libvirt`, { recursive: true });
+    await writeFile(`${root}/etc/libvirt/qemu.conf`, 'user = "libvirt-qemu"\n#dynamic_ownership = 1\n');
     node = await apply([], { account: true, libvirt: true });
     expect(node.config.match(/^\s*\[\s*helper\s*\]/gm)).toHaveLength(1);
     expect(node.calls.some((c) => c.startsWith('useradd'))).toBe(false);
-    expect(node.dropIn).toContain('SupplementaryGroups=libvirt');
+    expect(node.dropIn).not.toContain('libvirt');
+    expect(await readFile(`${root}/etc/libvirt/qemu.conf`, 'utf8')).toBe('user = "libvirt-qemu"\ndynamic_ownership = 0\n');
+    expect(node.calls).toEqual(expect.arrayContaining(['usermod -a -G bcd libvirt-qemu']));
     node = await apply(['--unprivileged'], { account: true });
     expect(node.config.match(/^\s*\[\s*helper\s*\]/gm)).toHaveLength(1);
     // The operator removes [helper]: the next run removes the drop-in and bcd node is root again.
