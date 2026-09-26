@@ -164,6 +164,11 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 
 	// finish writes a bootstrapped configuration and spends the token file.
 	finish := func(state *agent.State) error {
+		// Under [helper] bcd join runs as root and bcd node as its user: the identity root just wrote
+		// is handed to that user, or the node could not read its own key.
+		if err := handToNode(cfg); err != nil {
+			return err
+		}
 		if bootstrapped {
 			cfg.Site = state.SiteID
 			if err := writeConfig(file, cfg, bootstrapJWK); err != nil {

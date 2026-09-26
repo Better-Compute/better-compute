@@ -202,7 +202,8 @@ func hostChecks(cfg *config.Config) []doctorCheck {
 	case errors.Is(err, agent.ErrNotJoined):
 		out = append(out, doctorCheck{"warn", "identity", err.Error()})
 	case err != nil:
-		// An identity that is there but does not load: bcd join would say "already joined" for ever.
+		// An identity that is there but does not load: bcd join joins again, but cannot tell whose the
+		// journal is, and bcd node refuses another node's; --reset moves the journal aside with it.
 		out = append(out, doctorCheck{"fail", "identity", err.Error() + " (to join again as root: bcd join --reset --yes, then bcd join)"})
 	case time.Now().After(state.NotAfter):
 		out = append(out, doctorCheck{"fail", "identity", fmt.Sprintf("node %s: the certificate expired at %s; join again as root: bcd join --reset --yes, then bcd join",
