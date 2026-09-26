@@ -328,15 +328,20 @@ func (d *devicesConverger) Plan(ctx context.Context, desired []byte) ([]converge
 					cdi = append(cdi, "bcd.dev/gpu="+cdiDeviceName(dev))
 				}
 				d.a.log.Info("allocation bound", "allocation", id, "generation", generation, "devices", len(ids))
+				bound := &agentv1.AllocationBound{
+					AllocationId: id,
+					Generation:   generation,
+					DeviceIds:    ids,
+					CdiDevices:   cdi,
+					CdiSpecPath:  cdiSpecPath(id),
+					EnvFile:      envFilePath(id),
+				}
+				if sliced(as) {
+					// Where the user runs the workload (reservations.get: binding.cgroupParent).
+					bound.CgroupParent = holdSlice(id)
+				}
 				d.a.emitAttested(journal.ClassTransition, "allocation.bound", &agentv1.AttestedReportBody{
-					Report: &agentv1.AttestedReportBody_AllocationBound{AllocationBound: &agentv1.AllocationBound{
-						AllocationId: id,
-						Generation:   generation,
-						DeviceIds:    ids,
-						CdiDevices:   cdi,
-						CdiSpecPath:  cdiSpecPath(id),
-						EnvFile:      envFilePath(id),
-					}},
+					Report: &agentv1.AttestedReportBody_AllocationBound{AllocationBound: bound},
 				})
 				d.a.kube.Trigger()
 				return nil

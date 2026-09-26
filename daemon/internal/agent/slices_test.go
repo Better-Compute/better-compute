@@ -28,6 +28,12 @@ func TestAHoldWithLimitsRunsInItsSlice(t *testing.T) {
 	record := h.host.Path(fakeSliceDir + "/bcd-alloc-alloc_1.slice.json")
 
 	s.push(desired(1, withHold))
+	events := s.next(t, "AllocationBound", func(f *agentv1.AgentFrame) bool { return f.GetEvents() != nil }).GetEvents()
+	rb := &agentv1.AttestedReportBody{}
+	_ = proto.Unmarshal(events.GetEvents()[0].GetAttested().GetBody(), rb)
+	if got := rb.GetAllocationBound().GetCgroupParent(); got != "bcd-alloc-alloc_1.slice" {
+		t.Fatalf("AllocationBound.cgroup_parent = %q", got)
+	}
 	converged(1)
 	raw, err := os.ReadFile(record)
 	if err != nil || !strings.Contains(string(raw), `"cpus":"0-7"`) || !strings.Contains(string(raw), `"memoryBytes":17179869184`) {

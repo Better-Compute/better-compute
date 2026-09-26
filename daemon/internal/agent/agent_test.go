@@ -400,7 +400,9 @@ func TestSessionInventorySpecAndCommands(t *testing.T) {
 	verifyNodeSig(t, h.key, pki.PurposeAttestedReport, report.GetNodeSig(), report.GetBody())
 	rb := &agentv1.AttestedReportBody{}
 	_ = proto.Unmarshal(report.GetBody(), rb)
-	if rb.GetAllocationBound().GetAllocationId() != "alloc_1" || rb.GetBootId() != "boot-1" || batch.GetEvents()[0].GetSeq() != 1 {
+	if rb.GetAllocationBound().GetAllocationId() != "alloc_1" || rb.GetBootId() != "boot-1" || batch.GetEvents()[0].GetSeq() != 1 ||
+		rb.GetAllocationBound().GetCgroupParent() != "" { // no limits: no slice
+
 		t.Fatalf("bound = %v", rb)
 	}
 	status := s.next(t, "status", func(f *agentv1.AgentFrame) bool { return f.GetStatus() != nil }).GetStatus()
