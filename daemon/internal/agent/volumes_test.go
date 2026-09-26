@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -64,6 +66,24 @@ func TestVolumeRefusalsKeepOneWriter(t *testing.T) {
 		if got[id] != msg {
 			t.Errorf("%s: %q, want %q", id, got[id], msg)
 		}
+	}
+}
+
+// A volume a running VM still has open is never destroyed, even unlisted and dropped from its spec.
+func TestCollectVolumesKeepsWhatRunningDomainsHaveOpen(t *testing.T) {
+	store := &runtime.Volumes{Dir: t.TempDir()}
+	for _, id := range []string{"vol_open", "vol_free"} {
+		if _, err := store.Ensure(&agentv1.HostVolume{VolumeId: id, SizeBytes: 1 << 20, Serial: "s"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := &instancesConverger{a: &Agent{log: slog.New(slog.NewTextHandler(io.Discard, nil))}, volumes: store}
+	domains := map[string]runtime.Domain{"inst_a": {ID: "inst_a", Managed: true, State: runtime.StateRunning,
+		Volumes: []runtime.AttachedVolume{{Volume: runtime.Volume{ID: "vol_open"}}}}}
+	c.collectVolumes(&agentv1.InstancesSection{Instances: []*agentv1.InstanceSpec{{InstanceId: "inst_a",
+		DesiredState: agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING}}}, nil, domains)
+	if ids, _ := store.List(); len(ids) != 1 || ids[0] != "vol_open" {
+		t.Fatalf("volumes = %v", ids)
 	}
 }
 
