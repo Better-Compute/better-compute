@@ -344,7 +344,9 @@ sockets. Only `TestRealKernel` touches a real kernel.
 | `internal/agent` `TestHoldsAndVMsShareTheHostsMemory`, `TestAHoldTheHostCannotFitFailsAsResourcesExhausted` | Host admission of holds beside VMs, and `resources-exhausted` (31555bf) |
 | `internal/agent`, `internal/runtime` volume tests | Persistent volumes: sparse, grown and never shrunk, discarded; attached in order by serial; one writer, handoffs within a pass, what running VMs have open; grown volumes told to running guests (550da91, b5415a2, 448dc5f, 39458f9, 408e002) |
 | `internal/kube` `TestHostedManager`, `TestDRADriver`, `TestResourceSliceV1beta1`, `TestUnhealthyDevicesAreNeverOffered` | Hosted mode's device plugins and `bcd.dev/*` labels without a join (1e5f96b); the DRA driver's registration, slice, prepare and reaper (7d24836, fa8611e); an unhealthy GPU never offered by either API (6f5a99f) |
-| `cmd/bcd` `TestResourceChecks`, `TestHelperRuntimeChecks` | `bcd doctor`'s cgroup, huge page, `vfio-pci` and systemd checks (ab26e87), and the `libvirt` and `cloud-hypervisor` checks under the helper: the node out of the `libvirt` group, `dynamic_ownership = 0` and QEMU's user in the node's group (ed3c7d2) |
+| `cmd/bcd` `TestResourceChecks`, `TestHelperRuntimeChecks` | `bcd doctor`'s cgroup, huge page, `vfio-pci` and systemd checks (ab26e87), and the `libvirt` and `cloud-hypervisor` checks under the helper: the node out of the `libvirt` group, `dynamic_ownership = 0` and QEMU's user in the node's group (ed3c7d2), and `cloud-hypervisor` warning without `[helper] instance_bridges` (7fe74a1) |
+| `cmd/bcd` `TestAnUnprivilegedNodesRuntimes`, `internal/helper` `ch_test.go`, `internal/runtime` `TestCloudHypervisorUnderTheHelper`, `TestCHRecordRefusals` | `cloud-hypervisor` under the helper against fakes (d86fcbe, 7fe74a1, 94843ec): both runtimes kept for an unprivileged node, taps only of bcd's names on allowed bridges, a launch never taking another running unit's uid, VFIO only for whole groups of this host's GPUs and never a group another running VMM's user owns, root's checks of the instance record |
+| `internal/agent` `TestNodeKeyInTheTPM`, `internal/tpm` `TestNodeKey`, `cmd/bcd` `TestUserCanOpen` | The node key in `tpmsim` (965c14d, 50e18f9, 0ba2a79): a join stores only the record, the key loads again, node statements verify under the certificate's key and `kid`, renewal makes the next key in the TPM (and moves a file-key node there), no TPM means no load; SHA-256 and -384 signatures, a CSR, `TPM2_Certify` by the AK; whether the helper's user can open the TPM device |
 | `internal/agent` `TestResolveAtomNamesParentsAndWhatTheDriverSees`, `TestHoldConflictsAcrossWholeGPUsPartsAndVMs`, `TestCDISpecOfPartsAndLimits` | MIG and slot atoms resolved against the inventory, parent-aware conflicts and the VM passthrough guard, CDI names without `/`, the slice annotation and env, one `NVIDIA_VISIBLE_DEVICES` per hold (46a61db, d02ba4f) |
 | `internal/slice`, `internal/agent` slice tests | The hold slice's systemd properties and hugetlb limits, the name and cpulist checks, removal only once empty (1d03c28, 260e33c) |
 | `internal/kube` `TestJoinFromBareHost`, `TestJoinRefusesAnotherCluster`, `TestJoinSettingsAreCheckedAgain`, `TestJoinUnderHelper`, `TestContainerdImport`, `TestJoinConfigurationV1beta3` | The `k8s-join` unit against `FakeSystem` (88ecb07) |
@@ -433,13 +435,16 @@ on the fakehw build's file-backed `libvirt-kvm` runtime (not the libvirt runtime
 `StatusReport.instances` carries it and the vps module moves it to
 `running`, and `instances.delete` removes the domain from the host. It has the same gating.
 
-`tests/e2e/bcd-tpm.test.ts` (db9bd46, same gating) runs the `tpm` join end to end: a fakehw bcd whose software TPM
-lives in `<data_dir>/fakehw-tpm.json` runs `bcd join --attestor tpm` with no token against the dev stack's
-JoinService with `tpmAttestor` (`allowUncertifiedEk`, and a `resolve` allow-list for the TPM pool;
-`createDevStack({ attestors })` passes join attestors to `betterCompute()`). It checks the two rounds, the SHA-256 PCR
-bank 0 to 7 reaching `resolve`, the node in the resolved pool and bound to `sha256(EK)` in `node_bindings`, a rejoin
-as the same node after the identity is removed (a reinstall), `already joined` on a further run, and `bcd node`
-adopted on that identity. Its wire format is pinned in both directions without a stack too: bcd's `TestTSContract`
+`tests/e2e/bcd-tpm.test.ts` (db9bd46, 8a9af54, same gating) runs the `tpm` join end to end: a fakehw bcd whose
+software TPM lives in `<data_dir>/fakehw-tpm.json` runs `bcd join --attestor tpm` with no token against the dev
+stack's JoinService with `tpmAttestor` (`createDevStack({ attestors })` passes join attestors to `betterCompute()`).
+Since 8a9af54 the test makes a manufacturer root, the fakehw TPM carries an EK certificate it issued
+(`BCD_FAKEHW_TPM_EK_CA`), and the attestor trusts only that root (`ekRoots`, no `allowUncertifiedEk`, and a `resolve`
+allow-list for the TPM pool); with `BCD_FAKEHW_TPM_KEYS=1` the node key is made in the same TPM. It checks the two
+rounds, `resolve` seeing the EK certificate chained to the manufacturer and the SHA-256 PCR bank 0 to 7, the node in
+the resolved pool and bound to `sha256(EK)` in `node_bindings`, `node.key` holding only a `BCD TPM NODE KEY`
+record, a rejoin as the same node after the identity is removed (a reinstall), `already joined` on a further run,
+and `bcd node`, whose session and statements are signed in the TPM, adopted on that identity. Its wire format is pinned in both directions without a stack too: bcd's `TestTSContract`
 and `tests/pki-attestors-tpm-bcd.test.ts` share the fixtures in `daemon/internal/tpm/testdata`, which
 `scripts/daemon-tpm-fixture.mjs` regenerates (see [bcd with its TPM](/docs/guides/nodes/attestation#bcd-with-its-tpm)).
 Since b973e05 those fixtures include a test manufacturer root (`ek-root.der`) and the EK certificate it issued

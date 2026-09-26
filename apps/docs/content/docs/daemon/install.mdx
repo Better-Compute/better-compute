@@ -275,7 +275,7 @@ refuse token joins with `policy.joinAttestors: ['tpm']` (see
     <File name="pins (sha256sum format) and the plugin binaries, yours to add" />
   </Folder>
   <Folder name="/var/lib/bcd (0700)" defaultOpen>
-    <File name="node.key (0600, the node key)" />
+    <File name="node.key (0600, the node key, or its TPM record)" />
     <File name="identity.json (certificate chain, trust bundle, server time mark)" />
     <File name="journal.db (the bbolt journal)" />
     <File name="host-intent.json (0600, the signed spec that last set the host section)" />
@@ -301,8 +301,10 @@ refuse token joins with `policy.joinAttestors: ['tpm']` (see
 The script writes the binary, `config.toml`, `join-encryption.jwk`, the unit and, on a plugin node, the drop-in and
 the (empty) plugin directory. The other paths belong to the daemon: `bcd join` writes the key and
 `identity.json` under `data_dir`, `bcd node` opens the journal there, serves the status socket at `socket_path`, and
-writes CDI specs for `hold` bindings (with env files under `/run/bcd/allocations`). A renewal writes the next key as
-`node.key.next` and promotes it only once the new certificate is stored. A journal that does not open is moved aside
+writes CDI specs for `hold` bindings (with env files under `/run/bcd/allocations`). On a host with a TPM
+(`/dev/tpmrm0`) the key is made in the TPM and `node.key` holds only its record, a PEM block `BCD TPM NODE KEY`;
+otherwise it is a PKCS#8 file (see [the node key in the TPM](/docs/guides/nodes/attestation#the-node-key-in-the-tpm)).
+A renewal writes the next key as `node.key.next` and promotes it only once the new certificate is stored. A journal that does not open is moved aside
 as `journal.db.corrupt-<unix time>` and a new one starts. The token is consumed by the join and never written
 anywhere. With `--proxy-ca-file` the script also writes `/etc/bcd/websocket-proxy-ca.pem`. After its first
 [self-update](#self-update) bcd owns `<data_dir>/bin/bcd-a`, `bcd-b`, `current`, `previous` and `slots.json`,
@@ -611,7 +613,7 @@ user = "bcd"
 | --- | --- |
 | `[helper] socket` | The absolute path of the helper's unix socket. Unset (the default), `bcd node` does its privileged work itself, as root |
 | `[helper] user` | The account `bcd node` runs as, and the only caller the helper serves besides root; its primary group owns the socket. Required with `socket`, and never `root` |
-| `[helper] instance_bridges` | On a VPS or sandbox host: the bridges instance NICs may join, which the helper checks every domain against; unset, it defines no domain with a NIC. `--instance-bridges br0,br-priv` adds it |
+| `[helper] instance_bridges` | On a VPS or sandbox host: the bridges instance NICs may join, which the helper checks every libvirt domain and every `cloud-hypervisor` tap (`ch.taps`, 7fe74a1) against; unset, it defines no domain with a NIC and creates no tap. `--instance-bridges br0,br-priv` adds it |
 
 The socket is not in `/run/bcd`: the `bcd` user owns that directory, and a directory the node can write would let it
 redirect root's work on the socket path with a symlink. So it lives in the helper's own root-owned runtime directory.
@@ -646,7 +648,13 @@ without the section, so disable that unit yourself). In helper mode it:
    restarts `virtqemud.service` or `libvirtd.service` if it runs. libvirt then chowns no path the node names, and
    QEMU reaches the node's disk files through the `bcd` group (see
    [libvirt through the helper](/docs/daemon#libvirt-through-the-helper));
-6. after `bcd join` (which runs as root), gives `/var/lib/bcd` to `bcd:bcd` and starts `bcd-helper.service` before
+6. on a host with `/dev/tpmrm0` (0ba2a79): adds the `bcd` user to the `tss` group, so `bcd node` can open the TPM
+   that holds its node key. Where the group is missing it creates it (`groupadd --system tss`, or busybox
+   `addgroup -S tss`), and where the device is not already group `tss` it writes the udev rule
+   `/etc/udev/rules.d/60-bcd-tpm.rules` (`KERNEL=="tpmrm[0-9]*", GROUP="tss", MODE="0660"`) and applies the same
+   group and mode to the device at once. `bcd join` (as root) makes the key in the TPM only when the helper's user can
+   open the device; otherwise the key stays a file with a warning, and a later renewal moves it into the TPM;
+7. after `bcd join` (which runs as root), gives `/var/lib/bcd` to `bcd:bcd` and starts `bcd-helper.service` before
    `bcd.service`; an upgrade run does the same with restarts.
 
 ```ini title="/etc/systemd/system/bcd-helper.service"
@@ -701,9 +709,12 @@ plugins yet: bcd node would need root to start them").
 </Callout>
 
 What the helper does not do runs with the `bcd` account's own rights: the journal and key, the status socket, the
-`libvirt-kvm` runtime's reads (`virsh -r`, libvirt's read-only socket) and its files under `data_dir/libvirt`, and
-reading `/dev/kmsg`. Defining and running libvirt domains goes through the helper's checked `libvirt.*` operations
-(ed3c7d2; see [libvirt through the helper](/docs/daemon#libvirt-through-the-helper)). Only
+`libvirt-kvm` runtime's reads (`virsh -r`, libvirt's read-only socket) and its files under `data_dir/libvirt`, the
+`cloud-hypervisor` runtime's files, which it shares with each VMM's user through ACL entries, and reading
+`/dev/kmsg`. Defining and running libvirt domains goes through the helper's checked `libvirt.*` operations
+(ed3c7d2; see [libvirt through the helper](/docs/daemon#libvirt-through-the-helper)), and `cloud-hypervisor`'s taps,
+VFIO groups and VMM units through its `ch.*` operations (7fe74a1; see
+[cloud-hypervisor through the helper](/docs/daemon#cloud-hypervisor-through-the-helper)). Only
 `bcd node` uses the helper; `bcd site` ignores `[helper]`. `tests/e2e/bcd.test.ts` runs both processes by hand on a
 fakehw build, a GPU hold and a signed self-update included; `tests/cli-pki.test.ts` checks the script's section,
 account, units and drop-in.
@@ -712,8 +723,9 @@ account, units and drop-in.
 
 The join itself is `bcd join`, which the script runs for you:
 
-1. bcd generates a P-256 key and a CSR. PLAN.md keeps the key in the TPM when there is one; bcd today writes it to
-   `node.key` (0600) under `data_dir`.
+1. bcd generates a P-256 key and a CSR. On a host with a TPM the key is made in the TPM (50e18f9) and `node.key`
+   (0600) under `data_dir` keeps only its record; without one, or when the TPM cannot hold the key, `node.key` is a
+   PKCS#8 file. See [the node key in the TPM](/docs/guides/nodes/attestation#the-node-key-in-the-tpm).
 2. It seals the token to the JoinService encryption key and calls `Join` on the gateway over TLS pinned to the
    serving CA, with its hardware claims and the attestor `join-token`. The gateway relays the call; it can neither
    read the token nor forge the answer. A deferral is retried with the same CSR; retryable errors back off.

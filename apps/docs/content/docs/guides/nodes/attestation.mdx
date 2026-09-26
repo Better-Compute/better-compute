@@ -26,6 +26,10 @@ sources:
   - daemon/cmd/bcd/agent.go
   - daemon/cmd/bcd/hardware_host.go
   - daemon/cmd/bcd/hardware_fakehw.go
+  - daemon/cmd/bcd/tpmaccess_unix.go
+  - daemon/cmd/bcd/doctor.go
+  - daemon/internal/agent/nodekey.go
+  - daemon/internal/tpm/nodekey.go
   - daemon/internal/tpm/contract_test.go
   - scripts/daemon-tpm-fixture.mjs
   - tests/pki-attestors-tpm-bcd.test.ts
@@ -283,11 +287,39 @@ bcd join --config /etc/bcd/config.toml --attestor tpm
   `bcd join --config /etc/bcd/config.toml --attestor tpm < /dev/null` before (re)starting the units, so the same
   script installs and upgrades.
 
-The node key is still a file under the data directory, not a TPM key. Since 965c14d `internal/tpm` has the pieces
-for one, not yet used by `bcd join` or the session: `NodeKey`, an unrestricted, non-exportable P-256 signing key
-derived as a primary of the owner hierarchy from a 32-byte per-key unique (nothing is stored in the TPM; anyone
-with owner auth, root on the node, can derive and use it too), usable as a Go `crypto.Signer` for CSRs, TLS and node
-statements, and `CertifyNodeKey`, which has the AK certify that key (`TPM2_Certify`) over qualifying data.
+### The node key in the TPM
+
+Independent of the attestor, bcd keeps its node key in the host's TPM when there is one (965c14d, 50e18f9,
+0ba2a79). The node key signs the mTLS handshake, CSRs, renewal proofs, node statements (attested reports, command
+results, discovery assertions, secret and workload-token requests) and the WebSocket proof; in bcd it is a Go
+`crypto.Signer`, whatever holds it, and the wire does not change: the same P1363 signatures and the same `kid`
+(SHA-256 of the key's SPKI).
+
+- **The key.** `tpm.NodeKeyTemplate` is an unrestricted P-256 signing key (`fixedTPM`, `fixedParent`,
+  `sensitiveDataOrigin`, `userWithAuth`, `noDA`, `sign`), a primary of the owner hierarchy derived from a 32-byte
+  per-key unique. Nothing is stored in or evicted to the TPM: bcd keeps the unique and derives the same key again at
+  every load. Each signature uses ECDSA with the digest's hash (SHA-256, -384 or -512, for TLS).
+- **On disk.** `node.key` (and `node.key.next` during a renewal) then holds only the record: a PEM block of type
+  `BCD TPM NODE KEY` whose bytes are the unique, mode 0600. A key in the TPM does not load without that TPM.
+- **When.** Every new node key is made in the TPM when bcd can open one: at `bcd join` and at every renewal's next
+  key. A host build uses `/dev/tpmrm0` when it exists; a fakehw build uses its software TPM only with
+  `BCD_FAKEHW_TPM_KEYS=1`. When the TPM cannot hold the key, bcd logs a warning and makes a PKCS#8 file key instead.
+  A node that joined with a file key moves into the TPM at its next renewal.
+- **Under `[helper]`.** `bcd join` runs as root, but the key belongs to `bcd node`, which runs as the helper's
+  user. The join makes the key in the TPM only when that user can read and write `/dev/tpmrm0` (world `rw`, owner
+  `rw` as that user, or group `rw` with the user a member); otherwise it is a file key with the warning "the node key
+  stays a file: bcd node cannot use the TPM". The install script, on a node with `[helper]` and `/dev/tpmrm0`, adds the
+  `bcd` user to the `tss` group (see [running bcd node unprivileged](/docs/daemon/install#running-bcd-node-unprivileged)).
+- **What it protects.** Such a key cannot be copied off the machine, but anyone with the owner hierarchy's
+  authorization on that TPM (root on the node) can derive and use it: non-exportable, not root-proof.
+- **Seeing it.** `bcd doctor` has a `node key` check: `ok` "in the TPM", `ok` for a file key on a host with no TPM,
+  and `warn` for a file key on a host with a TPM (the next renewal moves it, if `bcd node` can open
+  `/dev/tpmrm0`). `bcd status` prints `node key in the TPM` or `node key a file` on its identity line, and its
+  JSON carries `nodeKey` (`tpm` or `file`).
+
+`internal/tpm` also has `CertifyNodeKey`, which has the AK certify a node key (`TPM2_Certify`) over qualifying data.
+Neither the join nor a renewal sends such a certification, so the control plane cannot tell a TPM key from a file
+key: nothing in the certificate, `node_certs` or the attestor's decision depends on it.
 
 What is tested, and with what TPM:
 
@@ -295,15 +327,16 @@ What is tested, and with what TPM:
 | --- | --- | --- |
 | `TestTSContract` (`daemon/internal/tpm`) | `tpmsim` fixture, with a manufacturer EK certificate in NV (b973e05) | bcd's round-1 evidence is still byte for byte the fixture's, including the EK certificate bcd reads from NV index `0x01C00002` (`tpm.EKCertIndex`) and sends as `ekCert`, and the challenge `tpmAttestor` made for it activates and quotes through bcd's client (TypeScript to Go) |
 | `tests/pki-attestors-tpm-bcd.test.ts` | the same fixture | `tpmAttestor` with `ekRoots: [ek-root.der]` and no `allowUncertifiedEk` verifies the EK certificate's chain, challenges bcd's evidence and admits bcd's answer; it refuses the EK under another root (`ek-certificate-chain`), and the answer for another CSR (`challenge-for-another-csr`) or after the challenge expired (`challenge-expired`) (Go to TypeScript) |
-| `tests/e2e/bcd-tpm.test.ts` (`BCD_E2E=1`, WSL or Linux; db9bd46) | `tpmsim` in a fakehw bcd | a real `bcd join --attestor tpm` with no token against the dev stack's JoinService: two rounds, the SHA-256 PCR bank 0 to 7 reaching `resolve`, the node in the resolved pool and bound to `sha256(EK)` in `node_bindings`; with its identity removed (a reinstall) the same TPM joins as the same node; `bcd node` on that identity is adopted |
+| `tests/e2e/bcd-tpm.test.ts` (`BCD_E2E=1`, WSL or Linux; db9bd46, 8a9af54) | `tpmsim` in a fakehw bcd, with an EK certificate from a manufacturer root the test makes (`BCD_FAKEHW_TPM_EK_CA`) and the node key in that TPM (`BCD_FAKEHW_TPM_KEYS=1`) | a real `bcd join --attestor tpm` with no token against the dev stack's JoinService, whose `tpmAttestor` trusts only that root (`ekRoots`, no `allowUncertifiedEk`): two rounds, `resolve` seeing the EK certificate chained to the manufacturer and the SHA-256 PCR bank 0 to 7, the node in the resolved pool and bound to `sha256(EK)` in `node_bindings`; `node.key` a `BCD TPM NODE KEY` record; with its identity removed (a reinstall) the same TPM joins as the same node; `bcd node` on that identity, signing its session and statements in the TPM, is adopted |
 
 `scripts/daemon-tpm-fixture.mjs` regenerates the fixtures in `daemon/internal/tpm/testdata` after a deliberate change
 of either side, so a format change fails a test rather than a machine's join. Since b973e05 the contract runs the
 attestor as against a real TPM: `ek-root.der` is a test manufacturer root and `ek-cert.der` the EK certificate it
 issued for the sim's EK (made once by the Go test, and kept with `sim.json` when the fixtures are regenerated), and
-the attestor verifies that chain through `ekRoots`. The dev-stack e2e (`tests/e2e/bcd-tpm.test.ts`) still uses
-`allowUncertifiedEk`, since the software TPM there carries no manufacturer certificate. Every test uses a software TPM: no test
-has run against a hardware TPM, a real manufacturer's EK certificate or a real `/dev/tpmrm0`.
+the attestor verifies that chain through `ekRoots`. Since 8a9af54 the dev-stack e2e does the same: a fakehw bcd
+given `BCD_FAKEHW_TPM_EK_CA` (a PEM file with the root's certificate and its PKCS#8 key) issues its software TPM an EK
+certificate in NV at each load, so `allowUncertifiedEk` is no longer used by any bcd test. Every test uses a software
+TPM: no test has run against a hardware TPM, a real manufacturer's EK certificate or a real `/dev/tpmrm0`.
 
 ## Single-use evidence
 

@@ -50,6 +50,8 @@ sources:
   - daemon/internal/runtime/balloon.go
   - daemon/internal/agent/balloon.go
   - daemon/internal/runtime/cloudhypervisor.go
+  - daemon/internal/runtime/ch_privileged.go
+  - daemon/internal/helper/ch.go
   - daemon/internal/runtime/qcow2.go
   - daemon/internal/agent/netpolicy.go
   - daemon/internal/agent/rebind.go
@@ -411,9 +413,26 @@ Reads (`list`, `domstate`,
 `dumpxml`, `domstats`) use libvirt's read-only socket (`virsh -r`). libvirt runs with
 `dynamic_ownership = 0`, so instead of the relabelling and `o+x` above, QEMU's user is in the node's group: disks are
 0660 (read-only ones 0640) and the directories on the way get group search. See
-[libvirt through the helper](/docs/daemon#libvirt-through-the-helper). The helper does not offer `cloud-hypervisor`,
-whose VMMs need root (the `systemd-run` units, the taps, files handed to the VMM's user): bcd logs a warning, does
-not advertise the runtime, and `bcd doctor` warns.
+[libvirt through the helper](/docs/daemon#libvirt-through-the-helper).
+
+**cloud-hypervisor under bcd helper** (d86fcbe, 7fe74a1, 94843ec). Until 7fe74a1 an unprivileged node dropped
+`cloud-hypervisor` (its VMMs need root: the `systemd-run` units, the taps, files handed to the VMM's user) and did
+not advertise it. Now it runs there too, with its root-only steps behind the helper's `ch.*` operations
+(`runtime.CHPrivileged`):
+
+| Step | As root | Under bcd helper |
+| --- | --- | --- |
+| Files | bcd chowns the instance's files to the VMM's user for the run | The node keeps owning every file and grants the VMM's user POSIX ACL entries on the instance directory and what is in it, inherited by what the VMM creates there; the unit's `UMask` is `0007` instead of `0077` (its group is the VMM's own), so those entries stay effective. Volumes get a read-write or read-only entry for the run, removed at the stop |
+| Taps | `ip tuntap add` by bcd | `ch.taps`: root creates exactly `runtime.TapName(instance, i)`, owned by the node (which opens it and hands the VMM the fd, as above), on a bridge of `[helper] instance_bridges`, and refuses an existing interface of that name that is not a tap. `ch.untaps` deletes only those names |
+| GPUs | bcd binds each IOMMU group to `vfio-pci` | `ch.vfio`: root takes the GPUs from the instance's record, only GPUs of this host that root does not see holding work and whose `/dev/vfio` group no other running VMM unit's user owns (94843ec), and only when every device of the group is one of this host's GPUs, a function of one, or a PCI bridge; it binds them to `vfio-pci` and gives `/dev/vfio/<group>` (0600) to the VMM's user. `ch.unvfio` gives them back to root and unbinds them, never a group a running VMM unit's user owns; `ch.stop` gives back exactly the groups the stopped unit's user owned. Root decides who holds a group from `/dev/vfio` itself, never from a node-written record |
+| The VMM unit | `systemd-run` with bcd's arguments | `ch.launch`: root reads and checks the record itself (`runtime.CHRecord`: `vm.json` and the disk and seed the node's regular files, no symlink in the instance directory, the base image `images/<64 hex>.<qcow2 or raw>` and the overlay re-checked, volumes in the volume store, GPUs of this host, the VMM user in bcd's range and not another running unit's, vCPU and memory bounds), then builds the same confined unit (`runtime.CHLaunch`) with root's own `cloud-hypervisor` binary, under a lock. No command line of the node's reaches root. `ch.stop` stops the unit, answers its state and takes the VFIO devices back |
+
+The node still drives each VMM over its API socket; what it asks there (`vm.create`'s disks and firmware,
+`vm.add-disk`) the VMM reaches only as its own user, in its mount namespace, through its ACL entries. Every `ch.*`
+call names the instance by the domain-name pattern and is logged with it. `bcd doctor` checks
+`[helper] instance_bridges`: without it, it warns that the helper refuses every instance tap. Like the rest of
+`cloud-hypervisor`, this path is tested against fake tools only (the runtime's `TestCloudHypervisorUnderTheHelper`
+and `TestCHRecordRefusals`, the helper's `ch.*` tests), not a real VMM under the helper.
 
 #### Memory ballooning
 
@@ -496,7 +515,9 @@ disks behind [sandbox volumes](/docs/guides/vps/sandboxes#volumes), across the i
   each VMM user that has it open, removed when that VMM stops, so it is readable by exactly those VMMs rather than by
   a group; the last reader gone, it is root's 0600 without an ACL. On a filesystem without ACLs it falls back to
   group `kvm` and 0640, reverted once no other instance of the runtime was given it. Under `bcd helper`, a stopped or
-  destroyed `libvirt-kvm` domain's volumes go back to 0600 unless another running domain still has them open.
+  destroyed `libvirt-kvm` domain's volumes go back to 0600 unless another running domain still has them open, and a
+  `cloud-hypervisor` volume stays the node's: the VMM's user gets an ACL entry, read-write or read-only, for the run,
+  removed at the stop (d86fcbe).
 
 A bcd that keeps volumes advertises `instance.volumes`, and only such hosts receive instances with volumes.
 
@@ -536,11 +557,12 @@ privilege, because it never names a tap: bcd creates and bridges the persistent 
 and hands the file descriptors to the VMM over `SCM_RIGHTS`. `vm.create` carries no NICs, `vm.add-net` adds each NIC
 with its fd, a restore passes them as `net_fds`, and the saved configuration's NICs carry no tap name. The instance's
 files and its GPUs' `/dev/vfio` groups are chowned to the VMM's uid at start, and the groups are given back to root
-at stop. `systemd-run` gets these properties:
+at stop; under `bcd helper` the node grants ACL entries instead and root hands over the groups (see
+[cloud-hypervisor under bcd helper](#the-runtimes)). `systemd-run` gets these properties:
 
 | Property | Value |
 | --- | --- |
-| Identity and privileges | `User=` and `Group=` the instance's uid, `CapabilityBoundingSet=` and `AmbientCapabilities=` empty, `NoNewPrivileges=yes`, `LimitMEMLOCK=infinity`, `UMask=0077` |
+| Identity and privileges | `User=` and `Group=` the instance's uid, `CapabilityBoundingSet=` and `AmbientCapabilities=` empty, `NoNewPrivileges=yes`, `LimitMEMLOCK=infinity`, `UMask=0077` (`0007` under `bcd helper`, so the inherited ACL entries stay effective) |
 | Devices | `DevicePolicy=closed` with `DeviceAllow=/dev/kvm rw`; with GPUs also `/dev/vfio/vfio rw` and `char-vfio rw` |
 | Files | `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `ProtectProc=invisible`; read-only `TemporaryFileSystem`s over `/run` and `/var` (hiding systemd's, D-Bus's and every daemon's sockets, bcd's data, libvirt and other instances), and over bcd's `instances/` and `images/` when its directory is outside `/var`; `InaccessiblePaths` for `/etc/bcd`, `/etc/ssh`, `/etc/libvirt`, `/etc/shadow` and `/etc/gshadow`; only the instance's own directory bound read-write (`BindPaths`, `ReadWritePaths`) and its base image read-only (`BindReadOnlyPaths`), so a disk naming another file finds nothing to open |
 | Kernel and system | `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups`, `ProtectClock`, `ProtectHostname`, `RestrictSUIDSGID`, `RestrictRealtime`, `RestrictNamespaces`, `LockPersonality`, and `SystemCallFilter=~@debug @mount @reboot @swap @module @raw-io @clock @cpu-emulation @obsolete` |

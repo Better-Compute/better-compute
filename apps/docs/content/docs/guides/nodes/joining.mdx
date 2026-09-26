@@ -174,8 +174,10 @@ sequenceDiagram
   G-->>B: Welcome
 ```
 
-1. **Key and CSR.** The daemon generates a P-256 key and a PKCS#10 request. PLAN.md keeps the key in the TPM when
-   there is one; bcd today stores it as a 0600 `node.key` file under its data directory.
+1. **Key and CSR.** The daemon generates a P-256 key and a PKCS#10 request. bcd makes the key in the host's TPM
+   when it can open one, and its 0600 `node.key` under the data directory then holds only the key's record; otherwise
+   `node.key` is the key itself, a PKCS#8 file (see
+   [the node key in the TPM](/docs/guides/nodes/attestation#the-node-key-in-the-tpm)).
 2. **Sealed token.** The token is encrypted as a compact JWE (`ECDH-ES+A256KW`, `A256GCM`) to the JoinService
    encryption key pinned in the daemon's config. The protected header carries `typ: bcjt+jwe`, `iat` and `csr`,
    the SHA-256 of the request. The gateway relays the call but can neither read the token nor replay the sealed

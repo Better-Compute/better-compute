@@ -345,7 +345,8 @@ runtime, plugin runtimes included. The live usage series come only from runtimes
 A domain whose usage cannot be read is left out of the live series. Plugin runtimes report none, and a fakehw
 build's file-backed runtime reports synthetic usage (half the configured memory, a second of CPU per boot). Under
 [`bcd helper`](/docs/daemon#privilege-separation) `libvirt-kvm` reads `domstats` on libvirt's read-only socket
-(since 12e9ced; before it the read was refused there), and `cloud-hypervisor` is not offered. The series are
+(since 12e9ced; before it the read was refused there), and `cloud-hypervisor`, offered there since 7fe74a1, reads
+the same cgroup and tap counters as the node's own user (no test covers those reads under the helper). The series are
 tested against a fake `/proc`, sysfs, cgroup tree and captured `domstats` output
 (`internal/agent` `telemetry_host_test.go`, `internal/runtime` `usage_test.go`).
 
