@@ -145,12 +145,19 @@ describe('kubernetes manifest', () => {
     // distribution and packages given.
     expect(manifests).toContain('/etc/containerd/config.toml');
     expect(manifests).toContain('/usr/local/nvidia/toolkit/.config');
-    const k3s = harness({ 'container-runtime': 'k3s', 'nvidia-toolkit': 'packages' });
+    const k3s = harness({
+      'container-runtime': 'k3s',
+      'nvidia-toolkit': 'packages',
+      'kubelet-credentials': 'k3s',
+    });
     await k3s.command.run(k3s.context);
     const rendered = k3s.out.join('\n');
     expect(rendered).toContain('/var/lib/rancher/k3s/agent/etc/containerd/config.toml');
     expect(rendered).toContain('/etc/nvidia-container-runtime');
     expect(rendered).not.toContain('/usr/local/nvidia/toolkit/.config');
+    // As the k3s kubelet: its kubeconfig, mounted where bcd's kubectl reads it.
+    expect(rendered).toContain('/var/lib/rancher/k3s/agent/kubelet.kubeconfig');
+    expect(manifests).toContain('/var/lib/kubelet/pki');
     // Never created when missing: an empty directory would pass for "no toolkit, no runtime".
     for (const path of [
       '/var/lib/rancher/k3s/agent/etc/containerd/config.toml',

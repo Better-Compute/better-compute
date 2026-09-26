@@ -220,6 +220,13 @@ export function kubernetesManifestCommand(
         description:
           "The nodes' container runtime, whose config bcd reads (read-only) to rule out other paths to the GPUs (default containerd)",
       },
+      'kubelet-credentials': {
+        type: 'string' as const,
+        value: 'DISTRO',
+        choices: ['kubeadm', 'k3s', 'rke2'],
+        description:
+          "Where the kubelet's kubeconfig and client certificates live, which bcd acts with (read-only; default kubeadm: /etc/kubernetes/kubelet.conf and /var/lib/kubelet/pki)",
+      },
       'nvidia-toolkit': {
         type: 'string' as const,
         value: 'INSTALL',
@@ -341,6 +348,9 @@ export function kubernetesManifestCommand(
                 | 'rke2'
                 | 'cri-o',
             }
+          : {}),
+        ...(text(flags['kubelet-credentials'])
+          ? { kubeletCredentials: flags['kubelet-credentials'] as 'kubeadm' | 'k3s' | 'rke2' }
           : {}),
         ...(text(flags['nvidia-toolkit'])
           ? { nvidiaToolkit: flags['nvidia-toolkit'] as 'gpu-operator' | 'packages' }
