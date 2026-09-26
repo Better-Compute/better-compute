@@ -134,6 +134,13 @@ describe('kubernetes manifest', () => {
     expect(manifests).toContain('nvidia.com/gpu.present');
     expect(manifests).toContain('gpu_api');
     expect(h.notes.join('\n')).toContain('0600');
+    // The operator is told to retire the token once the nodes joined, and what isolation bcd needs.
+    expect(h.notes.join('\n')).toContain('join-tokens revoke jt_1');
+    expect(h.notes.join('\n')).toContain('devicePlugin.enabled=false');
+    expect(manifests).toMatch(/"runtimeClassName":\s*"nvidia"/);
+    const bare = harness({ 'nvidia-runtime-class': 'none' });
+    await bare.command.run(bare.context);
+    expect(bare.out.join('\n')).not.toContain('runtimeClassName');
   });
 
   it('reads --control-plane over https and writes --out to a new file', async () => {

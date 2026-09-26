@@ -38,6 +38,8 @@ bcd hands a pod exactly the GPUs its reservation holds, and it can only enforce 
 
 The generated DaemonSet carries these requirements in its `bcd.dev/requires` annotation, so they travel with the manifests.
 
+bcd checks the first two on every pass. If the kubelet can also allocate `nvidia.com/*` devices (pod-resources), or a toolkit `config.toml` (`/etc/nvidia-container-runtime/` or the operator's `/usr/local/nvidia/toolkit/.config/nvidia-container-runtime/`) accepts `NVIDIA_VISIBLE_DEVICES` from unprivileged pods (the key true, or absent: the toolkit's default), it offers no GPUs at all. It stops its device plugins, deletes its DRA ResourceSlice, and reports the node condition `ForeignGpuExposure`, naming what to close.
+
 ## Host paths and Pod Security
 
 bcd keeps its node key and journal in the hostPath `/var/lib/bcd` (files 0600, owned by root). Any pod allowed to mount host paths as root can read them, and with the key it can act as the node. Restrict host paths for everything else: label workload namespaces with Pod Security Admission `baseline` or `restricted` (both forbid hostPath and privileged pods). Only `bcd-system`, which the manifests label `pod-security.kubernetes.io/enforce: privileged`, and your platform's own system namespaces should run privileged. The pod runs without `hostPID` and with no service account token.

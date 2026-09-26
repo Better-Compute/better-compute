@@ -3,6 +3,7 @@ import { writeFile } from 'node:fs/promises';
 import { ComputeError, parseDuration } from '@better-compute/core';
 import {
   bcdDaemonSetManifests,
+  gpuIsolationRequirements,
   renderKubernetesManifests,
   type BcdDaemonSetOptions,
   type BcdPins,
@@ -212,6 +213,12 @@ export function kubernetesManifestCommand(
         description:
           'How bcd offers the GPUs compute binds to the kubelet (default device-plugin; dra needs resource.k8s.io)',
       },
+      'nvidia-runtime-class': {
+        type: 'string' as const,
+        value: 'NAME',
+        description:
+          "The RuntimeClass bcd's own container runs under to read the GPUs with nvidia-smi (default nvidia; none for no RuntimeClass)",
+      },
       ttl: {
         type: 'string' as const,
         value: 'DURATION',
@@ -312,6 +319,14 @@ export function kubernetesManifestCommand(
           ? { gpuApi: flags['gpu-api'] }
           : {}),
         ...(gateway.serverName ? { gatewayServerName: gateway.serverName } : {}),
+        ...(text(flags['nvidia-runtime-class'])
+          ? {
+              nvidiaRuntimeClass:
+                flags['nvidia-runtime-class'] === 'none'
+                  ? null
+                  : (flags['nvidia-runtime-class'] as string),
+            }
+          : {}),
       };
       // Rendered first: a bad image or pin fails before a token exists.
       const manifests = renderKubernetesManifests(bcdDaemonSetManifests(daemonSet));
@@ -346,6 +361,9 @@ export function kubernetesManifestCommand(
       await writeNew(secretFile, renderKubernetesManifests([secret]), 0o600);
       context.note(
         `Wrote the join token Secret to ${secretFile} (0600); apply it before the manifests.`,
+      );
+      context.note(
+        `Once every node has joined, revoke the token (join-tokens revoke ${created.id ?? '<id>'}) and delete the Secret ${namespace}/${secretName}; a later batch of nodes gets a fresh token. ${gpuIsolationRequirements}`,
       );
       const out = text(flags.out);
       if (!out) {
