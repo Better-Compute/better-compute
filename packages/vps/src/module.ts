@@ -1042,7 +1042,12 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         name: hostResourcesWork,
         shardBy: 'none',
         periodic: [{ key: 'all', every: options.hostSyncEvery ?? '30s' }],
-        async run(context) {
+        // `all` (the periodic pass) or one node id (inventory wakes a host it re-inventoried).
+        async run(context, key) {
+          if (key && key !== 'all') {
+            await syncHostResources(context.sql, { reserve, nodeId: key });
+            return 'DONE';
+          }
           await syncHostResources(context.sql, { reserve });
           await wakeInstancesOnLostHosts(context.sql, context.work);
           return 'DONE';
