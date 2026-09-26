@@ -51,6 +51,8 @@ beforeAll(async () => {
         caCertSha256: pin,
         joinTokenRef: 'secret://root/k8s-bootstrap',
         labels: { team: 'ml' },
+        // A platform site's pool joins only a cluster the platform operates (round-5 review M4).
+        platformOperated: true,
       },
     },
     idempotencyKey: 'k8s-pool',

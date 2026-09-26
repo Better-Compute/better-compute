@@ -689,6 +689,23 @@ export interface CapacityModuleOptions extends PlacementOptions {
   policyValidators?: readonly PoolPolicyValidator[];
 }
 
+/**
+ * A pool on a platform site whose policy joins its machines to a Kubernetes cluster (the `k8s-join`
+ * set) must say the platform operates that cluster (`platformOperated`): that cluster's admins get
+ * root on the machines through privileged pods, while the nodes keep their platform identity
+ * (round-5 review M4). Tenant sites' nodes are tenant-owned anyway.
+ */
+async function assertKubernetesJoin(tx: SqlTx, siteId: string, policy: PoolPolicy): Promise<void> {
+  const kubernetes = policy.kubernetes;
+  if (!kubernetes?.apiServer || kubernetes.platformOperated === true) return;
+  const { rows } = await tx.query<{ kind: string }>(`SELECT kind FROM sites WHERE id = $1`, [siteId]);
+  if (rows[0] && rows[0].kind !== 'custom')
+    throw new ComputeError(
+      'INVALID_INPUT',
+      'policy.kubernetes: a platform site’s pool joins only a cluster the platform operates; confirm it with policy.kubernetes.platformOperated: true',
+    );
+}
+
 /** Runs the `pool-policy` validators; any other failure than a ComputeError is `INVALID_INPUT`. */
 async function validatePolicy(
   options: CapacityModuleOptions,
@@ -815,6 +832,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
         if (site.rows[0]?.owner_tenant_id !== input.tenantId)
           throw new ComputeError('NOT_FOUND', `Site ${input.siteId} not found`);
         await validatePolicy(options, input.policy, input);
+        await assertKubernetesJoin(tx, input.siteId, input.policy);
         const pool: Pool = {
           id: poolId,
           ownerTenantId: input.tenantId,
@@ -952,6 +970,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
         const next: Pool = { ...pool, version: pool.version + 1 };
         if (input.policy !== undefined) {
           await validatePolicy(options, input.policy, pool);
+          await assertKubernetesJoin(tx, pool.siteId, input.policy);
           next.policy = input.policy;
         }
         if (next.policy.singleTenant === true && pool.policy.singleTenant !== true)

@@ -319,6 +319,30 @@ describe('capacityModule API surface', () => {
       }
   });
 
+  it('lets a platform site’s pool join only a cluster the platform operates (review M4)', async () => {
+    const who = { who: { ...caller, tenantId: 'root', identityId: 'usr_root' } };
+    const join = {
+      apiServer: 'https://k8s.example:6443',
+      caCertSha256: `sha256:${'ab'.repeat(32)}`,
+      joinTokenRef: 'secret://root/k8s-join',
+    };
+    const base = { tenantId: 'root', siteId: 'site_01jz00000000000000000000aa', class: 'metal-host' };
+    await expect(
+      call('pools', 'create', { ...base, policy: { kubernetes: join } }, who),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT', message: expect.stringContaining('platformOperated') });
+    const pool = (await call(
+      'pools',
+      'create',
+      { ...base, policy: { kubernetes: { ...join, platformOperated: true } } },
+      who,
+    )) as { id: string };
+    await expect(
+      call('pools', 'update', { tenantId: 'root', poolId: pool.id, policy: { kubernetes: join } }, who),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    // Hosted mode (no join set) needs no confirmation.
+    await call('pools', 'update', { tenantId: 'root', poolId: pool.id, policy: { kubernetes: {} } }, who);
+  });
+
   it('runs the pool-policy validators on pools.create and pools.update', async () => {
     const seen: unknown[] = [];
     const checked = capacityModule({
