@@ -246,6 +246,11 @@ func (a *Agent) convergeOnce(ctx context.Context) bool {
 		// Everything the runtimes hold, managed or not: the control plane finds leaks by it.
 		status.Instances = a.instances.report(ctx, a.instances.specErrors, a.instances.currentSpecs())
 		status.InstancesComplete = true
+		// What the volume store may still promise (capacity books volumes by the same rule).
+		if s, err := a.instances.volumes.Space(); err == nil {
+			status.VolumeStorage = &agentv1.VolumeStorage{TotalBytes: s.Total, AvailableBytes: s.Avail, ReservedBytes: s.Reserve,
+				CommittedBytes: s.Committed, OutstandingBytes: s.Outstanding}
+		}
 	}
 	for _, r := range report.Sections {
 		if r.Section == "site" && spec.Site == nil {

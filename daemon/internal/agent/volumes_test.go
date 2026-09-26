@@ -169,6 +169,10 @@ func TestVolumesLiveAcrossInstancesAndGoWhenUnlisted(t *testing.T) {
 	if ids, _ := store.List(); len(ids) != 2 {
 		t.Fatalf("volumes = %v", ids)
 	}
+	// The status says what the store has promised, for capacity to book by.
+	if vs := st.GetVolumeStorage(); vs.GetCommittedBytes() != 2<<20 || vs.GetTotalBytes() == 0 || vs.GetReservedBytes() < 2<<30 {
+		t.Fatalf("volume storage = %v", vs)
+	}
 
 	// vol_b unlisted and unattached: destroyed. vol_a is unlisted too, but inst_1 still attaches it.
 	st = pass(2, &agentv1.InstancesSection{Instances: []*agentv1.InstanceSpec{withA("inst_1")}})
