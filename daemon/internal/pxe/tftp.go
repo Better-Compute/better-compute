@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -35,6 +36,45 @@ const (
 type TFTPServer struct {
 	Root    string
 	Timeout time.Duration
+	// MaxTransfers bounds concurrent transfers (default 64) and MaxPerSource those of one address
+	// (default 4): each takes a goroutine and a socket, and any host on the segment can ask. A
+	// request beyond either is dropped (answering it would take a socket too).
+	MaxTransfers, MaxPerSource int
+
+	mu       sync.Mutex
+	active   int
+	bySource map[string]int
+}
+
+// admit counts a transfer from source in, or reports that the server is at its bounds.
+func (s *TFTPServer) admit(source string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	total, per := s.MaxTransfers, s.MaxPerSource
+	if total <= 0 {
+		total = 64
+	}
+	if per <= 0 {
+		per = 4
+	}
+	if s.bySource == nil {
+		s.bySource = map[string]int{}
+	}
+	if s.active >= total || s.bySource[source] >= per {
+		return false
+	}
+	s.active++
+	s.bySource[source]++
+	return true
+}
+
+func (s *TFTPServer) done(source string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.active--
+	if s.bySource[source]--; s.bySource[source] <= 0 {
+		delete(s.bySource, source)
+	}
 }
 
 // Serve answers read requests on conn until ctx is done.
@@ -52,8 +92,18 @@ func (s *TFTPServer) Serve(ctx context.Context, conn net.PacketConn) error {
 			}
 			return err
 		}
+		source := from.String()
+		if ua, ok := from.(*net.UDPAddr); ok {
+			source = ua.IP.String()
+		}
+		if !s.admit(source) {
+			continue
+		}
 		req := append([]byte(nil), buf[:n]...)
-		go s.transfer(ctx, req, from)
+		go func() {
+			defer s.done(source)
+			s.transfer(ctx, req, from)
+		}()
 	}
 }
 

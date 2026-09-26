@@ -95,6 +95,24 @@ func TestProxyDHCPAnswersPreparedMachines(t *testing.T) {
 // fileField returns the BOOTP file field of a parsed reply (kept for the test).
 func (p *packet) fileField() []byte { return p.options[optBootfileName] }
 
+// Transfers are bounded overall and per source: any host on the segment can ask.
+func TestTFTPBoundsItsTransfers(t *testing.T) {
+	s := &TFTPServer{MaxTransfers: 3, MaxPerSource: 2}
+	if !s.admit("10.0.0.1") || !s.admit("10.0.0.1") || s.admit("10.0.0.1") {
+		t.Fatal("a third transfer from one source")
+	}
+	if !s.admit("10.0.0.2") || s.admit("10.0.0.3") {
+		t.Fatal("a fourth transfer overall")
+	}
+	s.done("10.0.0.1")
+	if !s.admit("10.0.0.3") {
+		t.Fatal("a finished transfer's slot was not given back")
+	}
+	if len(s.bySource) != 3 || s.active != 3 {
+		t.Fatalf("active %d, sources %v", s.active, s.bySource)
+	}
+}
+
 func TestTFTPServesFilesUnderItsRoot(t *testing.T) {
 	root := t.TempDir()
 	file := make([]byte, 3000)
