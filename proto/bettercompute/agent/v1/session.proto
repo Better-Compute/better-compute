@@ -754,6 +754,25 @@ message StatusReport {
   // The approver set held after that bundle, as in Hello (set whenever trust_version is).
   uint64 approver_set_epoch = 10;
   bytes approver_set_sha256 = 11;
+  // (v1.1, site agents only) Machines seen PXE/HTTP-booting (DHCP PXEClient/HTTPClient) from a MAC
+  // with no live boot entry: never answered, never enrolled; a list for metal to match (by
+  // product_uuid, the SMBIOS UUID a BMC also reports) or an operator to act on. The whole list,
+  // capped at 256 (oldest last_seen evicted, forgotten 24 h after last seen).
+  repeated DiscoveredMachine discovered = 12;
+}
+
+message DiscoveredMachine {
+  // Lowercase colon form.
+  string mac = 1;
+  // DHCP option 97 (the SMBIOS system UUID); empty when the client sent none.
+  string product_uuid = 2;
+  // DHCP option 93, as the site agent names it: x86_64-efi, bios, arm64-efi, x86_64-efi-http, …
+  string arch = 3;
+  google.protobuf.Timestamp first_seen = 4;
+  google.protobuf.Timestamp last_seen = 5;
+  uint32 count = 6;
+  // giaddr when the request was relayed (which L2 segment it came from); empty when direct.
+  string relay = 7;
 }
 
 // Linux pressure stall information (/proc/pressure/*, "some" avg10, percent of wall time) and CPU

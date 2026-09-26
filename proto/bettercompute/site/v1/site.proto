@@ -70,6 +70,13 @@ message ProxyDhcpEntry {
   // SecretRequest{workflow_id} and puts it only into the ramdisk's boot parameters it serves, so the
   // token never travels in plaintext in commands.body.
   string discovery_token_ref = 8;
+  // (v1.1) Boot this ISO instead of the ramdisk, for BMC drivers without virtual media (ipmi): the
+  // sha256 of a SiteSpec.cache_images entry with format "iso". The machine's iPXE script is then
+  // `sanboot --no-describe <site agent>/cache/<hex>`, the vendor or OS ISO as is (no discovery token,
+  // no bc.* parameters). A digest the cache does not hold verified is never answered (the site
+  // section fails) rather than falling back to the ramdisk. `boot_file` still chains iPXE;
+  // `ipxe_script_url` is ignored while this is set.
+  bytes sanboot_sha256 = 9;
 }
 
 enum BootArch {

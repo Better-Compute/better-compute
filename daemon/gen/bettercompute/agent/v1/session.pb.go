@@ -4359,8 +4359,13 @@ type StatusReport struct {
 	// The approver set held after that bundle, as in Hello (set whenever trust_version is).
 	ApproverSetEpoch  uint64 `protobuf:"varint,10,opt,name=approver_set_epoch,json=approverSetEpoch,proto3" json:"approver_set_epoch,omitempty"`
 	ApproverSetSha256 []byte `protobuf:"bytes,11,opt,name=approver_set_sha256,json=approverSetSha256,proto3" json:"approver_set_sha256,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// (v1.1, site agents only) Machines seen PXE/HTTP-booting (DHCP PXEClient/HTTPClient) from a MAC
+	// with no live boot entry: never answered, never enrolled; a list for metal to match (by
+	// product_uuid, the SMBIOS UUID a BMC also reports) or an operator to act on. The whole list,
+	// capped at 256 (oldest last_seen evicted, forgotten 24 h after last seen).
+	Discovered    []*DiscoveredMachine `protobuf:"bytes,12,rep,name=discovered,proto3" json:"discovered,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StatusReport) Reset() {
@@ -4470,6 +4475,109 @@ func (x *StatusReport) GetApproverSetSha256() []byte {
 	return nil
 }
 
+func (x *StatusReport) GetDiscovered() []*DiscoveredMachine {
+	if x != nil {
+		return x.Discovered
+	}
+	return nil
+}
+
+type DiscoveredMachine struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Lowercase colon form.
+	Mac string `protobuf:"bytes,1,opt,name=mac,proto3" json:"mac,omitempty"`
+	// DHCP option 97 (the SMBIOS system UUID); empty when the client sent none.
+	ProductUuid string `protobuf:"bytes,2,opt,name=product_uuid,json=productUuid,proto3" json:"product_uuid,omitempty"`
+	// DHCP option 93, as the site agent names it: x86_64-efi, bios, arm64-efi, x86_64-efi-http, …
+	Arch      string                 `protobuf:"bytes,3,opt,name=arch,proto3" json:"arch,omitempty"`
+	FirstSeen *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=first_seen,json=firstSeen,proto3" json:"first_seen,omitempty"`
+	LastSeen  *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=last_seen,json=lastSeen,proto3" json:"last_seen,omitempty"`
+	Count     uint32                 `protobuf:"varint,6,opt,name=count,proto3" json:"count,omitempty"`
+	// giaddr when the request was relayed (which L2 segment it came from); empty when direct.
+	Relay         string `protobuf:"bytes,7,opt,name=relay,proto3" json:"relay,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DiscoveredMachine) Reset() {
+	*x = DiscoveredMachine{}
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[44]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DiscoveredMachine) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DiscoveredMachine) ProtoMessage() {}
+
+func (x *DiscoveredMachine) ProtoReflect() protoreflect.Message {
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[44]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DiscoveredMachine.ProtoReflect.Descriptor instead.
+func (*DiscoveredMachine) Descriptor() ([]byte, []int) {
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{44}
+}
+
+func (x *DiscoveredMachine) GetMac() string {
+	if x != nil {
+		return x.Mac
+	}
+	return ""
+}
+
+func (x *DiscoveredMachine) GetProductUuid() string {
+	if x != nil {
+		return x.ProductUuid
+	}
+	return ""
+}
+
+func (x *DiscoveredMachine) GetArch() string {
+	if x != nil {
+		return x.Arch
+	}
+	return ""
+}
+
+func (x *DiscoveredMachine) GetFirstSeen() *timestamppb.Timestamp {
+	if x != nil {
+		return x.FirstSeen
+	}
+	return nil
+}
+
+func (x *DiscoveredMachine) GetLastSeen() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastSeen
+	}
+	return nil
+}
+
+func (x *DiscoveredMachine) GetCount() uint32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+func (x *DiscoveredMachine) GetRelay() string {
+	if x != nil {
+		return x.Relay
+	}
+	return ""
+}
+
 // Linux pressure stall information (/proc/pressure/*, "some" avg10, percent of wall time) and CPU
 // steal (percent over the last report interval).
 type HostPressure struct {
@@ -4484,7 +4592,7 @@ type HostPressure struct {
 
 func (x *HostPressure) Reset() {
 	*x = HostPressure{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[44]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4496,7 +4604,7 @@ func (x *HostPressure) String() string {
 func (*HostPressure) ProtoMessage() {}
 
 func (x *HostPressure) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[44]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4509,7 +4617,7 @@ func (x *HostPressure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostPressure.ProtoReflect.Descriptor instead.
 func (*HostPressure) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{44}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *HostPressure) GetCpuSomeAvg10() float32 {
@@ -4562,7 +4670,7 @@ type InstanceStatus struct {
 
 func (x *InstanceStatus) Reset() {
 	*x = InstanceStatus{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[45]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4574,7 +4682,7 @@ func (x *InstanceStatus) String() string {
 func (*InstanceStatus) ProtoMessage() {}
 
 func (x *InstanceStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[45]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4587,7 +4695,7 @@ func (x *InstanceStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InstanceStatus.ProtoReflect.Descriptor instead.
 func (*InstanceStatus) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{45}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *InstanceStatus) GetInstanceId() string {
@@ -4647,7 +4755,7 @@ type SectionStatus struct {
 
 func (x *SectionStatus) Reset() {
 	*x = SectionStatus{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[46]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4659,7 +4767,7 @@ func (x *SectionStatus) String() string {
 func (*SectionStatus) ProtoMessage() {}
 
 func (x *SectionStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[46]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4672,7 +4780,7 @@ func (x *SectionStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SectionStatus.ProtoReflect.Descriptor instead.
 func (*SectionStatus) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{46}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *SectionStatus) GetSection() string {
@@ -4729,7 +4837,7 @@ type Condition struct {
 
 func (x *Condition) Reset() {
 	*x = Condition{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[47]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4741,7 +4849,7 @@ func (x *Condition) String() string {
 func (*Condition) ProtoMessage() {}
 
 func (x *Condition) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[47]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4754,7 +4862,7 @@ func (x *Condition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Condition.ProtoReflect.Descriptor instead.
 func (*Condition) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{47}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *Condition) GetType() string {
@@ -4822,7 +4930,7 @@ type InventorySection struct {
 
 func (x *InventorySection) Reset() {
 	*x = InventorySection{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[48]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4834,7 +4942,7 @@ func (x *InventorySection) String() string {
 func (*InventorySection) ProtoMessage() {}
 
 func (x *InventorySection) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[48]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4847,7 +4955,7 @@ func (x *InventorySection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InventorySection.ProtoReflect.Descriptor instead.
 func (*InventorySection) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{48}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *InventorySection) GetSection() string {
@@ -4898,7 +5006,7 @@ type EventBatch struct {
 
 func (x *EventBatch) Reset() {
 	*x = EventBatch{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[49]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4910,7 +5018,7 @@ func (x *EventBatch) String() string {
 func (*EventBatch) ProtoMessage() {}
 
 func (x *EventBatch) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[49]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4923,7 +5031,7 @@ func (x *EventBatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EventBatch.ProtoReflect.Descriptor instead.
 func (*EventBatch) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{49}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *EventBatch) GetJournalId() string {
@@ -4958,7 +5066,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[50]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4970,7 +5078,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[50]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4983,7 +5091,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{50}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *Event) GetSeq() uint64 {
@@ -5055,7 +5163,7 @@ type AttestedReport struct {
 
 func (x *AttestedReport) Reset() {
 	*x = AttestedReport{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[51]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5067,7 +5175,7 @@ func (x *AttestedReport) String() string {
 func (*AttestedReport) ProtoMessage() {}
 
 func (x *AttestedReport) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[51]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5080,7 +5188,7 @@ func (x *AttestedReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttestedReport.ProtoReflect.Descriptor instead.
 func (*AttestedReport) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{51}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *AttestedReport) GetBody() []byte {
@@ -5113,7 +5221,7 @@ type AttestedReportBody struct {
 
 func (x *AttestedReportBody) Reset() {
 	*x = AttestedReportBody{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[52]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5125,7 +5233,7 @@ func (x *AttestedReportBody) String() string {
 func (*AttestedReportBody) ProtoMessage() {}
 
 func (x *AttestedReportBody) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[52]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5138,7 +5246,7 @@ func (x *AttestedReportBody) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttestedReportBody.ProtoReflect.Descriptor instead.
 func (*AttestedReportBody) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{52}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *AttestedReportBody) GetNodeId() string {
@@ -5218,7 +5326,7 @@ type AllocationBound struct {
 
 func (x *AllocationBound) Reset() {
 	*x = AllocationBound{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[53]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5230,7 +5338,7 @@ func (x *AllocationBound) String() string {
 func (*AllocationBound) ProtoMessage() {}
 
 func (x *AllocationBound) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[53]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5243,7 +5351,7 @@ func (x *AllocationBound) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AllocationBound.ProtoReflect.Descriptor instead.
 func (*AllocationBound) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{53}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *AllocationBound) GetAllocationId() string {
@@ -5307,7 +5415,7 @@ type AllocationReleased struct {
 
 func (x *AllocationReleased) Reset() {
 	*x = AllocationReleased{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[54]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5319,7 +5427,7 @@ func (x *AllocationReleased) String() string {
 func (*AllocationReleased) ProtoMessage() {}
 
 func (x *AllocationReleased) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[54]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5332,7 +5440,7 @@ func (x *AllocationReleased) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AllocationReleased.ProtoReflect.Descriptor instead.
 func (*AllocationReleased) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{54}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *AllocationReleased) GetAllocationId() string {
@@ -5370,7 +5478,7 @@ type AllocationFailed struct {
 
 func (x *AllocationFailed) Reset() {
 	*x = AllocationFailed{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[55]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5382,7 +5490,7 @@ func (x *AllocationFailed) String() string {
 func (*AllocationFailed) ProtoMessage() {}
 
 func (x *AllocationFailed) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[55]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5395,7 +5503,7 @@ func (x *AllocationFailed) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AllocationFailed.ProtoReflect.Descriptor instead.
 func (*AllocationFailed) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{55}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *AllocationFailed) GetAllocationId() string {
@@ -5440,7 +5548,7 @@ type Ack struct {
 
 func (x *Ack) Reset() {
 	*x = Ack{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[56]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5452,7 +5560,7 @@ func (x *Ack) String() string {
 func (*Ack) ProtoMessage() {}
 
 func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[56]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5465,7 +5573,7 @@ func (x *Ack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ack.ProtoReflect.Descriptor instead.
 func (*Ack) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{56}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *Ack) GetJournalId() string {
@@ -5511,7 +5619,7 @@ type SecretRequest struct {
 
 func (x *SecretRequest) Reset() {
 	*x = SecretRequest{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[57]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5523,7 +5631,7 @@ func (x *SecretRequest) String() string {
 func (*SecretRequest) ProtoMessage() {}
 
 func (x *SecretRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[57]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5536,7 +5644,7 @@ func (x *SecretRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecretRequest.ProtoReflect.Descriptor instead.
 func (*SecretRequest) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{57}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *SecretRequest) GetRef() string {
@@ -5602,7 +5710,7 @@ type SecretResponse struct {
 
 func (x *SecretResponse) Reset() {
 	*x = SecretResponse{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[58]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5614,7 +5722,7 @@ func (x *SecretResponse) String() string {
 func (*SecretResponse) ProtoMessage() {}
 
 func (x *SecretResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[58]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5627,7 +5735,7 @@ func (x *SecretResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecretResponse.ProtoReflect.Descriptor instead.
 func (*SecretResponse) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{58}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *SecretResponse) GetRef() string {
@@ -5678,7 +5786,7 @@ type WorkloadTokenRequest struct {
 
 func (x *WorkloadTokenRequest) Reset() {
 	*x = WorkloadTokenRequest{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[59]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5690,7 +5798,7 @@ func (x *WorkloadTokenRequest) String() string {
 func (*WorkloadTokenRequest) ProtoMessage() {}
 
 func (x *WorkloadTokenRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[59]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5703,7 +5811,7 @@ func (x *WorkloadTokenRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkloadTokenRequest.ProtoReflect.Descriptor instead.
 func (*WorkloadTokenRequest) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{59}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *WorkloadTokenRequest) GetRequestId() string {
@@ -5756,7 +5864,7 @@ type WorkloadTokenResponse struct {
 
 func (x *WorkloadTokenResponse) Reset() {
 	*x = WorkloadTokenResponse{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[60]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5768,7 +5876,7 @@ func (x *WorkloadTokenResponse) String() string {
 func (*WorkloadTokenResponse) ProtoMessage() {}
 
 func (x *WorkloadTokenResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[60]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5781,7 +5889,7 @@ func (x *WorkloadTokenResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkloadTokenResponse.ProtoReflect.Descriptor instead.
 func (*WorkloadTokenResponse) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{60}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *WorkloadTokenResponse) GetRequestId() string {
@@ -5825,7 +5933,7 @@ type Drain struct {
 
 func (x *Drain) Reset() {
 	*x = Drain{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[61]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5837,7 +5945,7 @@ func (x *Drain) String() string {
 func (*Drain) ProtoMessage() {}
 
 func (x *Drain) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[61]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5850,7 +5958,7 @@ func (x *Drain) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Drain.ProtoReflect.Descriptor instead.
 func (*Drain) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{61}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *Drain) GetReconnectAfterMs() uint32 {
@@ -5880,7 +5988,7 @@ type RevocationNotice struct {
 
 func (x *RevocationNotice) Reset() {
 	*x = RevocationNotice{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[62]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5892,7 +6000,7 @@ func (x *RevocationNotice) String() string {
 func (*RevocationNotice) ProtoMessage() {}
 
 func (x *RevocationNotice) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[62]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5905,7 +6013,7 @@ func (x *RevocationNotice) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevocationNotice.ProtoReflect.Descriptor instead.
 func (*RevocationNotice) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{62}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *RevocationNotice) GetReason() string {
@@ -5935,7 +6043,7 @@ type OpenTunnel struct {
 
 func (x *OpenTunnel) Reset() {
 	*x = OpenTunnel{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[63]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5947,7 +6055,7 @@ func (x *OpenTunnel) String() string {
 func (*OpenTunnel) ProtoMessage() {}
 
 func (x *OpenTunnel) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[63]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5960,7 +6068,7 @@ func (x *OpenTunnel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenTunnel.ProtoReflect.Descriptor instead.
 func (*OpenTunnel) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{63}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *OpenTunnel) GetTunnelId() string {
@@ -5995,7 +6103,7 @@ type TunnelFrame struct {
 
 func (x *TunnelFrame) Reset() {
 	*x = TunnelFrame{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[64]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6007,7 +6115,7 @@ func (x *TunnelFrame) String() string {
 func (*TunnelFrame) ProtoMessage() {}
 
 func (x *TunnelFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[64]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6020,7 +6128,7 @@ func (x *TunnelFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TunnelFrame.ProtoReflect.Descriptor instead.
 func (*TunnelFrame) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{64}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *TunnelFrame) GetTunnelId() string {
@@ -6117,7 +6225,7 @@ type TunnelOpened struct {
 
 func (x *TunnelOpened) Reset() {
 	*x = TunnelOpened{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[65]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6129,7 +6237,7 @@ func (x *TunnelOpened) String() string {
 func (*TunnelOpened) ProtoMessage() {}
 
 func (x *TunnelOpened) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[65]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6142,7 +6250,7 @@ func (x *TunnelOpened) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TunnelOpened.ProtoReflect.Descriptor instead.
 func (*TunnelOpened) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{65}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{66}
 }
 
 type TerminalSize struct {
@@ -6155,7 +6263,7 @@ type TerminalSize struct {
 
 func (x *TerminalSize) Reset() {
 	*x = TerminalSize{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[66]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6167,7 +6275,7 @@ func (x *TerminalSize) String() string {
 func (*TerminalSize) ProtoMessage() {}
 
 func (x *TerminalSize) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[66]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6180,7 +6288,7 @@ func (x *TerminalSize) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TerminalSize.ProtoReflect.Descriptor instead.
 func (*TerminalSize) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{66}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *TerminalSize) GetRows() uint32 {
@@ -6207,7 +6315,7 @@ type TunnelClosed struct {
 
 func (x *TunnelClosed) Reset() {
 	*x = TunnelClosed{}
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[67]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6219,7 +6327,7 @@ func (x *TunnelClosed) String() string {
 func (*TunnelClosed) ProtoMessage() {}
 
 func (x *TunnelClosed) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[67]
+	mi := &file_bettercompute_agent_v1_session_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6232,7 +6340,7 @@ func (x *TunnelClosed) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TunnelClosed.ProtoReflect.Descriptor instead.
 func (*TunnelClosed) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{67}
+	return file_bettercompute_agent_v1_session_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *TunnelClosed) GetExitCode() int32 {
@@ -6577,7 +6685,7 @@ const file_bettercompute_agent_v1_session_proto_rawDesc = "" +
 	"\tsignature\x18\x04 \x01(\fR\tsignature\"y\n" +
 	"\vSpecRequest\x12'\n" +
 	"\x0fhave_generation\x18\x01 \x01(\x04R\x0ehaveGeneration\x12A\n" +
-	"\x06reason\x18\x02 \x01(\x0e2).bettercompute.agent.v1.SpecRequestReasonR\x06reason\"\xda\x04\n" +
+	"\x06reason\x18\x02 \x01(\x0e2).bettercompute.agent.v1.SpecRequestReasonR\x06reason\"\xa5\x05\n" +
 	"\fStatusReport\x12/\n" +
 	"\x13observed_generation\x18\x01 \x01(\x04R\x12observedGeneration\x12-\n" +
 	"\x12applied_generation\x18\x02 \x01(\x04R\x11appliedGeneration\x12*\n" +
@@ -6592,7 +6700,19 @@ const file_bettercompute_agent_v1_session_proto_rawDesc = "" +
 	"\rtrust_version\x18\t \x01(\x04R\ftrustVersion\x12,\n" +
 	"\x12approver_set_epoch\x18\n" +
 	" \x01(\x04R\x10approverSetEpoch\x12.\n" +
-	"\x13approver_set_sha256\x18\v \x01(\fR\x11approverSetSha256\"\xa1\x01\n" +
+	"\x13approver_set_sha256\x18\v \x01(\fR\x11approverSetSha256\x12I\n" +
+	"\n" +
+	"discovered\x18\f \x03(\v2).bettercompute.agent.v1.DiscoveredMachineR\n" +
+	"discovered\"\xfc\x01\n" +
+	"\x11DiscoveredMachine\x12\x10\n" +
+	"\x03mac\x18\x01 \x01(\tR\x03mac\x12!\n" +
+	"\fproduct_uuid\x18\x02 \x01(\tR\vproductUuid\x12\x12\n" +
+	"\x04arch\x18\x03 \x01(\tR\x04arch\x129\n" +
+	"\n" +
+	"first_seen\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\tfirstSeen\x127\n" +
+	"\tlast_seen\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\blastSeen\x12\x14\n" +
+	"\x05count\x18\x06 \x01(\rR\x05count\x12\x14\n" +
+	"\x05relay\x18\a \x01(\tR\x05relay\"\xa1\x01\n" +
 	"\fHostPressure\x12$\n" +
 	"\x0ecpu_some_avg10\x18\x01 \x01(\x02R\fcpuSomeAvg10\x12*\n" +
 	"\x11memory_some_avg10\x18\x02 \x01(\x02R\x0fmemorySomeAvg10\x12\"\n" +
@@ -6797,7 +6917,7 @@ func file_bettercompute_agent_v1_session_proto_rawDescGZIP() []byte {
 }
 
 var file_bettercompute_agent_v1_session_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
-var file_bettercompute_agent_v1_session_proto_msgTypes = make([]protoimpl.MessageInfo, 70)
+var file_bettercompute_agent_v1_session_proto_msgTypes = make([]protoimpl.MessageInfo, 71)
 var file_bettercompute_agent_v1_session_proto_goTypes = []any{
 	(Binding)(0),                  // 0: bettercompute.agent.v1.Binding
 	(InstanceNetworkPolicy)(0),    // 1: bettercompute.agent.v1.InstanceNetworkPolicy
@@ -6850,100 +6970,101 @@ var file_bettercompute_agent_v1_session_proto_goTypes = []any{
 	(*DaemonSection)(nil),         // 48: bettercompute.agent.v1.DaemonSection
 	(*SpecRequest)(nil),           // 49: bettercompute.agent.v1.SpecRequest
 	(*StatusReport)(nil),          // 50: bettercompute.agent.v1.StatusReport
-	(*HostPressure)(nil),          // 51: bettercompute.agent.v1.HostPressure
-	(*InstanceStatus)(nil),        // 52: bettercompute.agent.v1.InstanceStatus
-	(*SectionStatus)(nil),         // 53: bettercompute.agent.v1.SectionStatus
-	(*Condition)(nil),             // 54: bettercompute.agent.v1.Condition
-	(*InventorySection)(nil),      // 55: bettercompute.agent.v1.InventorySection
-	(*EventBatch)(nil),            // 56: bettercompute.agent.v1.EventBatch
-	(*Event)(nil),                 // 57: bettercompute.agent.v1.Event
-	(*AttestedReport)(nil),        // 58: bettercompute.agent.v1.AttestedReport
-	(*AttestedReportBody)(nil),    // 59: bettercompute.agent.v1.AttestedReportBody
-	(*AllocationBound)(nil),       // 60: bettercompute.agent.v1.AllocationBound
-	(*AllocationReleased)(nil),    // 61: bettercompute.agent.v1.AllocationReleased
-	(*AllocationFailed)(nil),      // 62: bettercompute.agent.v1.AllocationFailed
-	(*Ack)(nil),                   // 63: bettercompute.agent.v1.Ack
-	(*SecretRequest)(nil),         // 64: bettercompute.agent.v1.SecretRequest
-	(*SecretResponse)(nil),        // 65: bettercompute.agent.v1.SecretResponse
-	(*WorkloadTokenRequest)(nil),  // 66: bettercompute.agent.v1.WorkloadTokenRequest
-	(*WorkloadTokenResponse)(nil), // 67: bettercompute.agent.v1.WorkloadTokenResponse
-	(*Drain)(nil),                 // 68: bettercompute.agent.v1.Drain
-	(*RevocationNotice)(nil),      // 69: bettercompute.agent.v1.RevocationNotice
-	(*OpenTunnel)(nil),            // 70: bettercompute.agent.v1.OpenTunnel
-	(*TunnelFrame)(nil),           // 71: bettercompute.agent.v1.TunnelFrame
-	(*TunnelOpened)(nil),          // 72: bettercompute.agent.v1.TunnelOpened
-	(*TerminalSize)(nil),          // 73: bettercompute.agent.v1.TerminalSize
-	(*TunnelClosed)(nil),          // 74: bettercompute.agent.v1.TunnelClosed
-	nil,                           // 75: bettercompute.agent.v1.Hello.InventoryHashesEntry
-	nil,                           // 76: bettercompute.agent.v1.Heartbeat.InventoryHashesEntry
-	(v1.AgentRole)(0),             // 77: bettercompute.common.v1.AgentRole
-	(*v1.Signature)(nil),          // 78: bettercompute.common.v1.Signature
-	(*v1.TrustBundle)(nil),        // 79: bettercompute.common.v1.TrustBundle
-	(*timestamppb.Timestamp)(nil), // 80: google.protobuf.Timestamp
-	(*v1.DriverManifest)(nil),     // 81: bettercompute.common.v1.DriverManifest
-	(*v1.SignedTrustBundle)(nil),  // 82: bettercompute.common.v1.SignedTrustBundle
-	(v1.Lane)(0),                  // 83: bettercompute.common.v1.Lane
-	(*anypb.Any)(nil),             // 84: google.protobuf.Any
-	(v1.CommandState)(0),          // 85: bettercompute.common.v1.CommandState
-	(v1.CommandRejectReason)(0),   // 86: bettercompute.common.v1.CommandRejectReason
-	(*v11.SiteSpec)(nil),          // 87: bettercompute.site.v1.SiteSpec
+	(*DiscoveredMachine)(nil),     // 51: bettercompute.agent.v1.DiscoveredMachine
+	(*HostPressure)(nil),          // 52: bettercompute.agent.v1.HostPressure
+	(*InstanceStatus)(nil),        // 53: bettercompute.agent.v1.InstanceStatus
+	(*SectionStatus)(nil),         // 54: bettercompute.agent.v1.SectionStatus
+	(*Condition)(nil),             // 55: bettercompute.agent.v1.Condition
+	(*InventorySection)(nil),      // 56: bettercompute.agent.v1.InventorySection
+	(*EventBatch)(nil),            // 57: bettercompute.agent.v1.EventBatch
+	(*Event)(nil),                 // 58: bettercompute.agent.v1.Event
+	(*AttestedReport)(nil),        // 59: bettercompute.agent.v1.AttestedReport
+	(*AttestedReportBody)(nil),    // 60: bettercompute.agent.v1.AttestedReportBody
+	(*AllocationBound)(nil),       // 61: bettercompute.agent.v1.AllocationBound
+	(*AllocationReleased)(nil),    // 62: bettercompute.agent.v1.AllocationReleased
+	(*AllocationFailed)(nil),      // 63: bettercompute.agent.v1.AllocationFailed
+	(*Ack)(nil),                   // 64: bettercompute.agent.v1.Ack
+	(*SecretRequest)(nil),         // 65: bettercompute.agent.v1.SecretRequest
+	(*SecretResponse)(nil),        // 66: bettercompute.agent.v1.SecretResponse
+	(*WorkloadTokenRequest)(nil),  // 67: bettercompute.agent.v1.WorkloadTokenRequest
+	(*WorkloadTokenResponse)(nil), // 68: bettercompute.agent.v1.WorkloadTokenResponse
+	(*Drain)(nil),                 // 69: bettercompute.agent.v1.Drain
+	(*RevocationNotice)(nil),      // 70: bettercompute.agent.v1.RevocationNotice
+	(*OpenTunnel)(nil),            // 71: bettercompute.agent.v1.OpenTunnel
+	(*TunnelFrame)(nil),           // 72: bettercompute.agent.v1.TunnelFrame
+	(*TunnelOpened)(nil),          // 73: bettercompute.agent.v1.TunnelOpened
+	(*TerminalSize)(nil),          // 74: bettercompute.agent.v1.TerminalSize
+	(*TunnelClosed)(nil),          // 75: bettercompute.agent.v1.TunnelClosed
+	nil,                           // 76: bettercompute.agent.v1.Hello.InventoryHashesEntry
+	nil,                           // 77: bettercompute.agent.v1.Heartbeat.InventoryHashesEntry
+	(v1.AgentRole)(0),             // 78: bettercompute.common.v1.AgentRole
+	(*v1.Signature)(nil),          // 79: bettercompute.common.v1.Signature
+	(*v1.TrustBundle)(nil),        // 80: bettercompute.common.v1.TrustBundle
+	(*timestamppb.Timestamp)(nil), // 81: google.protobuf.Timestamp
+	(*v1.DriverManifest)(nil),     // 82: bettercompute.common.v1.DriverManifest
+	(*v1.SignedTrustBundle)(nil),  // 83: bettercompute.common.v1.SignedTrustBundle
+	(v1.Lane)(0),                  // 84: bettercompute.common.v1.Lane
+	(*anypb.Any)(nil),             // 85: google.protobuf.Any
+	(v1.CommandState)(0),          // 86: bettercompute.common.v1.CommandState
+	(v1.CommandRejectReason)(0),   // 87: bettercompute.common.v1.CommandRejectReason
+	(*v11.SiteSpec)(nil),          // 88: bettercompute.site.v1.SiteSpec
 }
 var file_bettercompute_agent_v1_session_proto_depIdxs = []int32{
 	8,   // 0: bettercompute.agent.v1.JoinRequest.claims:type_name -> bettercompute.agent.v1.HardwareClaims
-	77,  // 1: bettercompute.agent.v1.JoinRequest.role:type_name -> bettercompute.common.v1.AgentRole
-	78,  // 2: bettercompute.agent.v1.JoinResponse.sig:type_name -> bettercompute.common.v1.Signature
-	79,  // 3: bettercompute.agent.v1.JoinResponseBody.trust:type_name -> bettercompute.common.v1.TrustBundle
-	77,  // 4: bettercompute.agent.v1.JoinResponseBody.role:type_name -> bettercompute.common.v1.AgentRole
-	80,  // 5: bettercompute.agent.v1.JoinResponseBody.issued_at:type_name -> google.protobuf.Timestamp
+	78,  // 1: bettercompute.agent.v1.JoinRequest.role:type_name -> bettercompute.common.v1.AgentRole
+	79,  // 2: bettercompute.agent.v1.JoinResponse.sig:type_name -> bettercompute.common.v1.Signature
+	80,  // 3: bettercompute.agent.v1.JoinResponseBody.trust:type_name -> bettercompute.common.v1.TrustBundle
+	78,  // 4: bettercompute.agent.v1.JoinResponseBody.role:type_name -> bettercompute.common.v1.AgentRole
+	81,  // 5: bettercompute.agent.v1.JoinResponseBody.issued_at:type_name -> google.protobuf.Timestamp
 	11,  // 6: bettercompute.agent.v1.JoinResponseBody.deferral:type_name -> bettercompute.agent.v1.JoinDeferral
 	12,  // 7: bettercompute.agent.v1.JoinDeferral.pending:type_name -> bettercompute.agent.v1.JoinPending
 	13,  // 8: bettercompute.agent.v1.JoinDeferral.challenge:type_name -> bettercompute.agent.v1.JoinChallenge
-	80,  // 9: bettercompute.agent.v1.JoinChallenge.not_after:type_name -> google.protobuf.Timestamp
-	80,  // 10: bettercompute.agent.v1.RenewRequest.client_time:type_name -> google.protobuf.Timestamp
-	80,  // 11: bettercompute.agent.v1.RenewResponse.not_after:type_name -> google.protobuf.Timestamp
+	81,  // 9: bettercompute.agent.v1.JoinChallenge.not_after:type_name -> google.protobuf.Timestamp
+	81,  // 10: bettercompute.agent.v1.RenewRequest.client_time:type_name -> google.protobuf.Timestamp
+	81,  // 11: bettercompute.agent.v1.RenewResponse.not_after:type_name -> google.protobuf.Timestamp
 	18,  // 12: bettercompute.agent.v1.AgentFrame.hello:type_name -> bettercompute.agent.v1.Hello
 	21,  // 13: bettercompute.agent.v1.AgentFrame.heartbeat:type_name -> bettercompute.agent.v1.Heartbeat
 	27,  // 14: bettercompute.agent.v1.AgentFrame.update:type_name -> bettercompute.agent.v1.CommandUpdate
-	56,  // 15: bettercompute.agent.v1.AgentFrame.events:type_name -> bettercompute.agent.v1.EventBatch
+	57,  // 15: bettercompute.agent.v1.AgentFrame.events:type_name -> bettercompute.agent.v1.EventBatch
 	50,  // 16: bettercompute.agent.v1.AgentFrame.status:type_name -> bettercompute.agent.v1.StatusReport
-	55,  // 17: bettercompute.agent.v1.AgentFrame.inventory:type_name -> bettercompute.agent.v1.InventorySection
+	56,  // 17: bettercompute.agent.v1.AgentFrame.inventory:type_name -> bettercompute.agent.v1.InventorySection
 	49,  // 18: bettercompute.agent.v1.AgentFrame.spec_request:type_name -> bettercompute.agent.v1.SpecRequest
-	64,  // 19: bettercompute.agent.v1.AgentFrame.secret_request:type_name -> bettercompute.agent.v1.SecretRequest
-	66,  // 20: bettercompute.agent.v1.AgentFrame.workload_token_request:type_name -> bettercompute.agent.v1.WorkloadTokenRequest
+	65,  // 19: bettercompute.agent.v1.AgentFrame.secret_request:type_name -> bettercompute.agent.v1.SecretRequest
+	67,  // 20: bettercompute.agent.v1.AgentFrame.workload_token_request:type_name -> bettercompute.agent.v1.WorkloadTokenRequest
 	19,  // 21: bettercompute.agent.v1.ServerFrame.welcome:type_name -> bettercompute.agent.v1.Welcome
 	23,  // 22: bettercompute.agent.v1.ServerFrame.command:type_name -> bettercompute.agent.v1.Command
 	29,  // 23: bettercompute.agent.v1.ServerFrame.cancel:type_name -> bettercompute.agent.v1.Cancel
 	30,  // 24: bettercompute.agent.v1.ServerFrame.desired:type_name -> bettercompute.agent.v1.DesiredState
-	63,  // 25: bettercompute.agent.v1.ServerFrame.ack:type_name -> bettercompute.agent.v1.Ack
-	70,  // 26: bettercompute.agent.v1.ServerFrame.open_tunnel:type_name -> bettercompute.agent.v1.OpenTunnel
-	68,  // 27: bettercompute.agent.v1.ServerFrame.drain:type_name -> bettercompute.agent.v1.Drain
-	69,  // 28: bettercompute.agent.v1.ServerFrame.revoked:type_name -> bettercompute.agent.v1.RevocationNotice
-	65,  // 29: bettercompute.agent.v1.ServerFrame.secret:type_name -> bettercompute.agent.v1.SecretResponse
-	67,  // 30: bettercompute.agent.v1.ServerFrame.workload_token:type_name -> bettercompute.agent.v1.WorkloadTokenResponse
-	77,  // 31: bettercompute.agent.v1.Hello.role:type_name -> bettercompute.common.v1.AgentRole
-	81,  // 32: bettercompute.agent.v1.Hello.drivers:type_name -> bettercompute.common.v1.DriverManifest
+	64,  // 25: bettercompute.agent.v1.ServerFrame.ack:type_name -> bettercompute.agent.v1.Ack
+	71,  // 26: bettercompute.agent.v1.ServerFrame.open_tunnel:type_name -> bettercompute.agent.v1.OpenTunnel
+	69,  // 27: bettercompute.agent.v1.ServerFrame.drain:type_name -> bettercompute.agent.v1.Drain
+	70,  // 28: bettercompute.agent.v1.ServerFrame.revoked:type_name -> bettercompute.agent.v1.RevocationNotice
+	66,  // 29: bettercompute.agent.v1.ServerFrame.secret:type_name -> bettercompute.agent.v1.SecretResponse
+	68,  // 30: bettercompute.agent.v1.ServerFrame.workload_token:type_name -> bettercompute.agent.v1.WorkloadTokenResponse
+	78,  // 31: bettercompute.agent.v1.Hello.role:type_name -> bettercompute.common.v1.AgentRole
+	82,  // 32: bettercompute.agent.v1.Hello.drivers:type_name -> bettercompute.common.v1.DriverManifest
 	27,  // 33: bettercompute.agent.v1.Hello.unacked_results:type_name -> bettercompute.agent.v1.CommandUpdate
-	75,  // 34: bettercompute.agent.v1.Hello.inventory_hashes:type_name -> bettercompute.agent.v1.Hello.InventoryHashesEntry
+	76,  // 34: bettercompute.agent.v1.Hello.inventory_hashes:type_name -> bettercompute.agent.v1.Hello.InventoryHashesEntry
 	20,  // 35: bettercompute.agent.v1.Welcome.credits:type_name -> bettercompute.agent.v1.LaneCredits
-	80,  // 36: bettercompute.agent.v1.Welcome.server_time:type_name -> google.protobuf.Timestamp
-	82,  // 37: bettercompute.agent.v1.Welcome.trust:type_name -> bettercompute.common.v1.SignedTrustBundle
-	83,  // 38: bettercompute.agent.v1.LaneCredits.lane:type_name -> bettercompute.common.v1.Lane
+	81,  // 36: bettercompute.agent.v1.Welcome.server_time:type_name -> google.protobuf.Timestamp
+	83,  // 37: bettercompute.agent.v1.Welcome.trust:type_name -> bettercompute.common.v1.SignedTrustBundle
+	84,  // 38: bettercompute.agent.v1.LaneCredits.lane:type_name -> bettercompute.common.v1.Lane
 	20,  // 39: bettercompute.agent.v1.Heartbeat.credits:type_name -> bettercompute.agent.v1.LaneCredits
 	22,  // 40: bettercompute.agent.v1.Heartbeat.load:type_name -> bettercompute.agent.v1.NodeLoad
-	76,  // 41: bettercompute.agent.v1.Heartbeat.inventory_hashes:type_name -> bettercompute.agent.v1.Heartbeat.InventoryHashesEntry
-	78,  // 42: bettercompute.agent.v1.Command.signature:type_name -> bettercompute.common.v1.Signature
+	77,  // 41: bettercompute.agent.v1.Heartbeat.inventory_hashes:type_name -> bettercompute.agent.v1.Heartbeat.InventoryHashesEntry
+	79,  // 42: bettercompute.agent.v1.Command.signature:type_name -> bettercompute.common.v1.Signature
 	24,  // 43: bettercompute.agent.v1.Command.batch_approval:type_name -> bettercompute.agent.v1.BatchApproval
 	25,  // 44: bettercompute.agent.v1.Command.batch_proof:type_name -> bettercompute.agent.v1.BatchProof
-	80,  // 45: bettercompute.agent.v1.BatchApproval.not_after:type_name -> google.protobuf.Timestamp
-	78,  // 46: bettercompute.agent.v1.BatchApproval.signatures:type_name -> bettercompute.common.v1.Signature
-	84,  // 47: bettercompute.agent.v1.CommandBody.payload:type_name -> google.protobuf.Any
-	83,  // 48: bettercompute.agent.v1.CommandBody.lane:type_name -> bettercompute.common.v1.Lane
-	80,  // 49: bettercompute.agent.v1.CommandBody.not_after:type_name -> google.protobuf.Timestamp
-	85,  // 50: bettercompute.agent.v1.CommandUpdate.state:type_name -> bettercompute.common.v1.CommandState
-	78,  // 51: bettercompute.agent.v1.CommandUpdate.node_sig:type_name -> bettercompute.common.v1.Signature
-	86,  // 52: bettercompute.agent.v1.CommandUpdate.reject_reason:type_name -> bettercompute.common.v1.CommandRejectReason
+	81,  // 45: bettercompute.agent.v1.BatchApproval.not_after:type_name -> google.protobuf.Timestamp
+	79,  // 46: bettercompute.agent.v1.BatchApproval.signatures:type_name -> bettercompute.common.v1.Signature
+	85,  // 47: bettercompute.agent.v1.CommandBody.payload:type_name -> google.protobuf.Any
+	84,  // 48: bettercompute.agent.v1.CommandBody.lane:type_name -> bettercompute.common.v1.Lane
+	81,  // 49: bettercompute.agent.v1.CommandBody.not_after:type_name -> google.protobuf.Timestamp
+	86,  // 50: bettercompute.agent.v1.CommandUpdate.state:type_name -> bettercompute.common.v1.CommandState
+	79,  // 51: bettercompute.agent.v1.CommandUpdate.node_sig:type_name -> bettercompute.common.v1.Signature
+	87,  // 52: bettercompute.agent.v1.CommandUpdate.reject_reason:type_name -> bettercompute.common.v1.CommandRejectReason
 	28,  // 53: bettercompute.agent.v1.CommandUpdate.error:type_name -> bettercompute.agent.v1.CommandError
-	78,  // 54: bettercompute.agent.v1.DesiredState.signature:type_name -> bettercompute.common.v1.Signature
+	79,  // 54: bettercompute.agent.v1.DesiredState.signature:type_name -> bettercompute.common.v1.Signature
 	32,  // 55: bettercompute.agent.v1.DesiredStateBody.full:type_name -> bettercompute.agent.v1.NodeSpec
 	32,  // 56: bettercompute.agent.v1.DesiredStateBody.patch:type_name -> bettercompute.agent.v1.NodeSpec
 	33,  // 57: bettercompute.agent.v1.NodeSpec.host:type_name -> bettercompute.agent.v1.HostSection
@@ -6952,7 +7073,7 @@ var file_bettercompute_agent_v1_session_proto_depIdxs = []int32{
 	46,  // 60: bettercompute.agent.v1.NodeSpec.access:type_name -> bettercompute.agent.v1.AccessSection
 	47,  // 61: bettercompute.agent.v1.NodeSpec.telemetry:type_name -> bettercompute.agent.v1.TelemetrySection
 	48,  // 62: bettercompute.agent.v1.NodeSpec.daemon:type_name -> bettercompute.agent.v1.DaemonSection
-	87,  // 63: bettercompute.agent.v1.NodeSpec.site:type_name -> bettercompute.site.v1.SiteSpec
+	88,  // 63: bettercompute.agent.v1.NodeSpec.site:type_name -> bettercompute.site.v1.SiteSpec
 	34,  // 64: bettercompute.agent.v1.HostSection.units:type_name -> bettercompute.agent.v1.ConfigUnit
 	36,  // 65: bettercompute.agent.v1.DevicesSection.assignments:type_name -> bettercompute.agent.v1.DeviceAssignment
 	0,   // 66: bettercompute.agent.v1.DeviceAssignment.binding:type_name -> bettercompute.agent.v1.Binding
@@ -6968,40 +7089,43 @@ var file_bettercompute_agent_v1_session_proto_depIdxs = []int32{
 	43,  // 76: bettercompute.agent.v1.InstanceSpec.placement:type_name -> bettercompute.agent.v1.InstancePlacement
 	41,  // 77: bettercompute.agent.v1.InstanceSpec.volumes:type_name -> bettercompute.agent.v1.InstanceVolume
 	3,   // 78: bettercompute.agent.v1.SpecRequest.reason:type_name -> bettercompute.agent.v1.SpecRequestReason
-	53,  // 79: bettercompute.agent.v1.StatusReport.sections:type_name -> bettercompute.agent.v1.SectionStatus
-	54,  // 80: bettercompute.agent.v1.StatusReport.conditions:type_name -> bettercompute.agent.v1.Condition
-	52,  // 81: bettercompute.agent.v1.StatusReport.instances:type_name -> bettercompute.agent.v1.InstanceStatus
-	51,  // 82: bettercompute.agent.v1.StatusReport.pressure:type_name -> bettercompute.agent.v1.HostPressure
-	4,   // 83: bettercompute.agent.v1.InstanceStatus.state:type_name -> bettercompute.agent.v1.InstanceObservedState
-	5,   // 84: bettercompute.agent.v1.SectionStatus.state:type_name -> bettercompute.agent.v1.SectionState
-	6,   // 85: bettercompute.agent.v1.Condition.status:type_name -> bettercompute.agent.v1.ConditionStatus
-	80,  // 86: bettercompute.agent.v1.InventorySection.collected_at:type_name -> google.protobuf.Timestamp
-	57,  // 87: bettercompute.agent.v1.EventBatch.events:type_name -> bettercompute.agent.v1.Event
-	80,  // 88: bettercompute.agent.v1.Event.observed_at:type_name -> google.protobuf.Timestamp
-	58,  // 89: bettercompute.agent.v1.Event.attested:type_name -> bettercompute.agent.v1.AttestedReport
-	62,  // 90: bettercompute.agent.v1.Event.allocation_failed:type_name -> bettercompute.agent.v1.AllocationFailed
-	78,  // 91: bettercompute.agent.v1.AttestedReport.node_sig:type_name -> bettercompute.common.v1.Signature
-	60,  // 92: bettercompute.agent.v1.AttestedReportBody.allocation_bound:type_name -> bettercompute.agent.v1.AllocationBound
-	61,  // 93: bettercompute.agent.v1.AttestedReportBody.allocation_released:type_name -> bettercompute.agent.v1.AllocationReleased
-	78,  // 94: bettercompute.agent.v1.SecretRequest.node_sig:type_name -> bettercompute.common.v1.Signature
-	78,  // 95: bettercompute.agent.v1.WorkloadTokenRequest.node_sig:type_name -> bettercompute.common.v1.Signature
-	80,  // 96: bettercompute.agent.v1.WorkloadTokenResponse.expires_at:type_name -> google.protobuf.Timestamp
-	72,  // 97: bettercompute.agent.v1.TunnelFrame.opened:type_name -> bettercompute.agent.v1.TunnelOpened
-	73,  // 98: bettercompute.agent.v1.TunnelFrame.resize:type_name -> bettercompute.agent.v1.TerminalSize
-	74,  // 99: bettercompute.agent.v1.TunnelFrame.closed:type_name -> bettercompute.agent.v1.TunnelClosed
-	7,   // 100: bettercompute.agent.v1.AgentGateway.Join:input_type -> bettercompute.agent.v1.JoinRequest
-	14,  // 101: bettercompute.agent.v1.AgentGateway.Renew:input_type -> bettercompute.agent.v1.RenewRequest
-	16,  // 102: bettercompute.agent.v1.AgentGateway.Session:input_type -> bettercompute.agent.v1.AgentFrame
-	71,  // 103: bettercompute.agent.v1.AgentGateway.Tunnel:input_type -> bettercompute.agent.v1.TunnelFrame
-	9,   // 104: bettercompute.agent.v1.AgentGateway.Join:output_type -> bettercompute.agent.v1.JoinResponse
-	15,  // 105: bettercompute.agent.v1.AgentGateway.Renew:output_type -> bettercompute.agent.v1.RenewResponse
-	17,  // 106: bettercompute.agent.v1.AgentGateway.Session:output_type -> bettercompute.agent.v1.ServerFrame
-	71,  // 107: bettercompute.agent.v1.AgentGateway.Tunnel:output_type -> bettercompute.agent.v1.TunnelFrame
-	104, // [104:108] is the sub-list for method output_type
-	100, // [100:104] is the sub-list for method input_type
-	100, // [100:100] is the sub-list for extension type_name
-	100, // [100:100] is the sub-list for extension extendee
-	0,   // [0:100] is the sub-list for field type_name
+	54,  // 79: bettercompute.agent.v1.StatusReport.sections:type_name -> bettercompute.agent.v1.SectionStatus
+	55,  // 80: bettercompute.agent.v1.StatusReport.conditions:type_name -> bettercompute.agent.v1.Condition
+	53,  // 81: bettercompute.agent.v1.StatusReport.instances:type_name -> bettercompute.agent.v1.InstanceStatus
+	52,  // 82: bettercompute.agent.v1.StatusReport.pressure:type_name -> bettercompute.agent.v1.HostPressure
+	51,  // 83: bettercompute.agent.v1.StatusReport.discovered:type_name -> bettercompute.agent.v1.DiscoveredMachine
+	81,  // 84: bettercompute.agent.v1.DiscoveredMachine.first_seen:type_name -> google.protobuf.Timestamp
+	81,  // 85: bettercompute.agent.v1.DiscoveredMachine.last_seen:type_name -> google.protobuf.Timestamp
+	4,   // 86: bettercompute.agent.v1.InstanceStatus.state:type_name -> bettercompute.agent.v1.InstanceObservedState
+	5,   // 87: bettercompute.agent.v1.SectionStatus.state:type_name -> bettercompute.agent.v1.SectionState
+	6,   // 88: bettercompute.agent.v1.Condition.status:type_name -> bettercompute.agent.v1.ConditionStatus
+	81,  // 89: bettercompute.agent.v1.InventorySection.collected_at:type_name -> google.protobuf.Timestamp
+	58,  // 90: bettercompute.agent.v1.EventBatch.events:type_name -> bettercompute.agent.v1.Event
+	81,  // 91: bettercompute.agent.v1.Event.observed_at:type_name -> google.protobuf.Timestamp
+	59,  // 92: bettercompute.agent.v1.Event.attested:type_name -> bettercompute.agent.v1.AttestedReport
+	63,  // 93: bettercompute.agent.v1.Event.allocation_failed:type_name -> bettercompute.agent.v1.AllocationFailed
+	79,  // 94: bettercompute.agent.v1.AttestedReport.node_sig:type_name -> bettercompute.common.v1.Signature
+	61,  // 95: bettercompute.agent.v1.AttestedReportBody.allocation_bound:type_name -> bettercompute.agent.v1.AllocationBound
+	62,  // 96: bettercompute.agent.v1.AttestedReportBody.allocation_released:type_name -> bettercompute.agent.v1.AllocationReleased
+	79,  // 97: bettercompute.agent.v1.SecretRequest.node_sig:type_name -> bettercompute.common.v1.Signature
+	79,  // 98: bettercompute.agent.v1.WorkloadTokenRequest.node_sig:type_name -> bettercompute.common.v1.Signature
+	81,  // 99: bettercompute.agent.v1.WorkloadTokenResponse.expires_at:type_name -> google.protobuf.Timestamp
+	73,  // 100: bettercompute.agent.v1.TunnelFrame.opened:type_name -> bettercompute.agent.v1.TunnelOpened
+	74,  // 101: bettercompute.agent.v1.TunnelFrame.resize:type_name -> bettercompute.agent.v1.TerminalSize
+	75,  // 102: bettercompute.agent.v1.TunnelFrame.closed:type_name -> bettercompute.agent.v1.TunnelClosed
+	7,   // 103: bettercompute.agent.v1.AgentGateway.Join:input_type -> bettercompute.agent.v1.JoinRequest
+	14,  // 104: bettercompute.agent.v1.AgentGateway.Renew:input_type -> bettercompute.agent.v1.RenewRequest
+	16,  // 105: bettercompute.agent.v1.AgentGateway.Session:input_type -> bettercompute.agent.v1.AgentFrame
+	72,  // 106: bettercompute.agent.v1.AgentGateway.Tunnel:input_type -> bettercompute.agent.v1.TunnelFrame
+	9,   // 107: bettercompute.agent.v1.AgentGateway.Join:output_type -> bettercompute.agent.v1.JoinResponse
+	15,  // 108: bettercompute.agent.v1.AgentGateway.Renew:output_type -> bettercompute.agent.v1.RenewResponse
+	17,  // 109: bettercompute.agent.v1.AgentGateway.Session:output_type -> bettercompute.agent.v1.ServerFrame
+	72,  // 110: bettercompute.agent.v1.AgentGateway.Tunnel:output_type -> bettercompute.agent.v1.TunnelFrame
+	107, // [107:111] is the sub-list for method output_type
+	103, // [103:107] is the sub-list for method input_type
+	103, // [103:103] is the sub-list for extension type_name
+	103, // [103:103] is the sub-list for extension extendee
+	0,   // [0:103] is the sub-list for field type_name
 }
 
 func init() { file_bettercompute_agent_v1_session_proto_init() }
@@ -7040,15 +7164,15 @@ func file_bettercompute_agent_v1_session_proto_init() {
 		(*DesiredStateBody_Full)(nil),
 		(*DesiredStateBody_Patch)(nil),
 	}
-	file_bettercompute_agent_v1_session_proto_msgTypes[50].OneofWrappers = []any{
+	file_bettercompute_agent_v1_session_proto_msgTypes[51].OneofWrappers = []any{
 		(*Event_Attested)(nil),
 		(*Event_AllocationFailed)(nil),
 	}
-	file_bettercompute_agent_v1_session_proto_msgTypes[52].OneofWrappers = []any{
+	file_bettercompute_agent_v1_session_proto_msgTypes[53].OneofWrappers = []any{
 		(*AttestedReportBody_AllocationBound)(nil),
 		(*AttestedReportBody_AllocationReleased)(nil),
 	}
-	file_bettercompute_agent_v1_session_proto_msgTypes[64].OneofWrappers = []any{
+	file_bettercompute_agent_v1_session_proto_msgTypes[65].OneofWrappers = []any{
 		(*TunnelFrame_Opened)(nil),
 		(*TunnelFrame_Data)(nil),
 		(*TunnelFrame_Resize)(nil),
@@ -7060,7 +7184,7 @@ func file_bettercompute_agent_v1_session_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bettercompute_agent_v1_session_proto_rawDesc), len(file_bettercompute_agent_v1_session_proto_rawDesc)),
 			NumEnums:      7,
-			NumMessages:   70,
+			NumMessages:   71,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

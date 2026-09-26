@@ -352,8 +352,15 @@ type ProxyDhcpEntry struct {
 	// SecretRequest{workflow_id} and puts it only into the ramdisk's boot parameters it serves, so the
 	// token never travels in plaintext in commands.body.
 	DiscoveryTokenRef string `protobuf:"bytes,8,opt,name=discovery_token_ref,json=discoveryTokenRef,proto3" json:"discovery_token_ref,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// (v1.1) Boot this ISO instead of the ramdisk, for BMC drivers without virtual media (ipmi): the
+	// sha256 of a SiteSpec.cache_images entry with format "iso". The machine's iPXE script is then
+	// `sanboot --no-describe <site agent>/cache/<hex>`, the vendor or OS ISO as is (no discovery token,
+	// no bc.* parameters). A digest the cache does not hold verified is never answered (the site
+	// section fails) rather than falling back to the ramdisk. `boot_file` still chains iPXE;
+	// `ipxe_script_url` is ignored while this is set.
+	SanbootSha256 []byte `protobuf:"bytes,9,opt,name=sanboot_sha256,json=sanbootSha256,proto3" json:"sanboot_sha256,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ProxyDhcpEntry) Reset() {
@@ -440,6 +447,13 @@ func (x *ProxyDhcpEntry) GetDiscoveryTokenRef() string {
 		return x.DiscoveryTokenRef
 	}
 	return ""
+}
+
+func (x *ProxyDhcpEntry) GetSanbootSha256() []byte {
+	if x != nil {
+		return x.SanbootSha256
+	}
+	return nil
 }
 
 // site.httpProxy: one HTTPS request made by the site agent on the control plane's behalf, for
@@ -1242,7 +1256,7 @@ const file_bettercompute_site_v1_site_proto_rawDesc = "" +
 	"\x0eBootLeaseState\x12\x16\n" +
 	"\x06active\x18\x01 \x01(\bR\x06active\x12\x14\n" +
 	"\x05epoch\x18\x02 \x01(\x04R\x05epoch\x12\x15\n" +
-	"\x06ttl_ms\x18\x03 \x01(\rR\x05ttlMs\"\xc9\x02\n" +
+	"\x06ttl_ms\x18\x03 \x01(\rR\x05ttlMs\"\xf0\x02\n" +
 	"\x0eProxyDhcpEntry\x12\x10\n" +
 	"\x03mac\x18\x01 \x01(\tR\x03mac\x12!\n" +
 	"\fproduct_uuid\x18\x02 \x01(\tR\vproductUuid\x123\n" +
@@ -1252,7 +1266,8 @@ const file_bettercompute_site_v1_site_proto_rawDesc = "" +
 	"\vworkflow_id\x18\x06 \x01(\tR\n" +
 	"workflowId\x127\n" +
 	"\tnot_after\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\bnotAfter\x12.\n" +
-	"\x13discovery_token_ref\x18\b \x01(\tR\x11discoveryTokenRef\"\xce\x02\n" +
+	"\x13discovery_token_ref\x18\b \x01(\tR\x11discoveryTokenRef\x12%\n" +
+	"\x0esanboot_sha256\x18\t \x01(\fR\rsanbootSha256\"\xce\x02\n" +
 	"\x10HttpProxyRequest\x12$\n" +
 	"\x0etarget_node_id\x18\x01 \x01(\tR\ftargetNodeId\x12\x10\n" +
 	"\x03url\x18\x02 \x01(\tR\x03url\x12\x16\n" +
