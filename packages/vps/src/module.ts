@@ -129,6 +129,23 @@ import {
 } from './sandboxes.js';
 import { vpsTenantDeleted } from './tenancy.js';
 import {
+  createVolume,
+  deleteVolume,
+  finishVolumeDeletions,
+  getVolume,
+  hostVolumeSpecs,
+  listVolumes,
+  meterVolumes,
+  parseCreateVolume,
+  parseListVolumes,
+  parseVolumeRef,
+  volumeWork,
+  type CreateVolumeInput,
+  type ListVolumesInput,
+  type SandboxVolume,
+  type VolumeRef,
+} from './volumes.js';
+import {
   deleteSnapshot,
   getSnapshot,
   instanceSnapshotKind,
@@ -247,6 +264,13 @@ export type VpsApi = {
     get: MethodDefinition<SnapshotRef, SandboxSnapshot>;
     delete: MethodDefinition<SnapshotRef, { deleted: true }>;
   };
+  /** Agent memory: persistent volumes sandboxes attach across runs (volumes.ts). */
+  sandboxVolumes: {
+    create: MethodDefinition<CreateVolumeInput, SandboxVolume>;
+    list: MethodDefinition<ListVolumesInput, { items: SandboxVolume[] }>;
+    get: MethodDefinition<VolumeRef, SandboxVolume>;
+    delete: MethodDefinition<VolumeRef, SandboxVolume>;
+  };
 };
 
 function tenantResource<I extends { tenantId: string }>(input: I) {
@@ -269,6 +293,9 @@ function templateResource<I extends { templateId: string }>(input: I) {
 }
 function snapshotResource<I extends { snapshotId: string }>(input: I) {
   return { type: 'sandbox-snapshot', id: input.snapshotId };
+}
+function volumeResource<I extends { volumeId: string }>(input: I) {
+  return { type: 'sandbox-volume', id: input.volumeId };
 }
 
 function parsePool(raw: unknown): PoolInput {
@@ -947,6 +974,36 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         handler: (context, input) => deleteSnapshot(depsOf(context), context.sql, input),
       }),
     },
+    sandboxVolumes: {
+      create: defineMethod({
+        action: 'compute:sandboxes:manage',
+        kind: 'mutation',
+        resource: tenantResource,
+        validate: describedBy(schemas.createVolume, parseCreateVolume),
+        handler: (context, input) => createVolume(depsOf(context), context, input),
+      }),
+      list: defineMethod({
+        action: 'compute:sandboxes:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(schemas.listVolumes, parseListVolumes),
+        handler: (context, input) => listVolumes(context.sql, input),
+      }),
+      get: defineMethod({
+        action: 'compute:sandboxes:read',
+        kind: 'read',
+        resource: volumeResource,
+        validate: describedBy(schemas.volume, parseVolumeRef),
+        handler: (context, input) => getVolume(context.sql, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:sandboxes:manage',
+        kind: 'mutation',
+        resource: volumeResource,
+        validate: describedBy(schemas.volume, parseVolumeRef),
+        handler: (context, input) => deleteVolume(depsOf(context), context.sql, input),
+      }),
+    },
   });
 
   return defineModule({
@@ -1024,6 +1081,21 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         periodic: [{ key: 'all', every: '5m' }],
         async run(context) {
           await context.sql.transaction((tx) => meterInstances(tx, context.clock.now()));
+          // Agent memory: vps.volume.gib.hours while a volume's disk is booked.
+          await context.sql.transaction((tx) => meterVolumes(tx, context.clock.now()));
+          return 'DONE';
+        },
+      },
+      {
+        // Agent memory: a deleted volume is gone (its disk booking released) once its host applied a
+        // spec without it; a delete wakes it with the volume id, the periodic pass catches the rest.
+        name: volumeWork,
+        shardBy: 'none',
+        periodic: [{ key: 'all', every: '30s' }],
+        async run(context, key) {
+          await context.sql.transaction((tx) =>
+            finishVolumeDeletions(depsOf(context), tx, key.startsWith('vol_') ? { onlyId: key } : {}),
+          );
           return 'DONE';
         },
       },
@@ -1042,7 +1114,12 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         node.id,
         options.hostNetwork ? { network: options.hostNetwork } : {},
       );
-      return instances.length > 0 ? { instances } : {};
+      // Agent memory: the volumes this host keeps (a deleted one is absent, so bcd destroys it).
+      const volumes = await hostVolumeSpecs(context.sql, node.id);
+      return {
+        ...(instances.length > 0 ? { instances } : {}),
+        ...(volumes.length > 0 ? { volumes } : {}),
+      };
     },
   });
 }

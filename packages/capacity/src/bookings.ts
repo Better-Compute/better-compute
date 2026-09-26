@@ -9,7 +9,7 @@ interface RawAllocation {
   tenant_id: string;
   pool_id: string;
   node_id: string;
-  owner_kind: 'reservation' | 'instance';
+  owner_kind: 'reservation' | 'instance' | 'volume';
   owner_id: string;
   atoms: string[];
   resources: Record<string, number> | string;

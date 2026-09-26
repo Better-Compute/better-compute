@@ -13,6 +13,7 @@ import {
   type DroppedSnapshot,
   type SnapshotStore,
 } from './snapshots.js';
+import { deleteTenantVolumes } from './volumes.js';
 
 // VPS's part of a tenant teardown (PLAN.md §12.8: the IAM tenant was deleted; the built-in `tenancy`
 // reconciler calls `ComputeModule.tenantDeleted` until every module answers DONE). Hosted instances
@@ -79,7 +80,10 @@ export async function vpsTenantDeleted(
       `SELECT 1 FROM instances WHERE tenant_id = $1 AND NOT draft AND state <> 'deleted' LIMIT 1`,
       [tenantId],
     );
-    return left.rows.length > 0 ? ('SYNC_AGAIN' as const) : ('DONE' as const);
+    if (left.rows.length > 0) return 'SYNC_AGAIN' as const;
+    // 4. then its volumes (agent memory), which no instance attaches any more: gone once their hosts
+    //    applied a spec without them.
+    return (await deleteTenantVolumes(deps, tx, tenantId)) ? ('SYNC_AGAIN' as const) : ('DONE' as const);
   });
   // Objects go once no live restore needs them (the instances above are on their way out).
   dropped = await purgeSettledSnapshots(context.sql, { authz: deps.authz });

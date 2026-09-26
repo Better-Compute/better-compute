@@ -81,6 +81,7 @@ const planActions: Record<string, string[]> = {
   'compute-sandbox': a('sandboxes', 'create', 'read', 'update', 'exec', 'delete'),
   'compute-sandbox-template': a('sandboxes', 'read', 'manage'),
   'compute-sandbox-snapshot': a('sandboxes', 'read', 'delete'),
+  'compute-sandbox-volume': a('sandboxes', 'read', 'manage'),
 };
 
 describe('resource types (§12.3)', () => {
@@ -98,6 +99,7 @@ describe('resource types (§12.3)', () => {
       'compute-reservation': 'compute-pool',
       'compute-instance': 'compute-pool',
       'compute-sandbox': 'compute-pool',
+      'compute-sandbox-volume': 'compute-pool',
     });
     expect(types['compute-project']?.relations).toEqual(['member', 'admin']);
     expect(types['compute-pool']?.relations).toEqual(['viewer', 'user', 'operator', 'admin']);

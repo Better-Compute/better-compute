@@ -33,6 +33,7 @@ import {
 import { releaseAddress } from './ipam.js';
 import { specPlacement, type HostPlacement } from './placement.js';
 import { markSandboxReady } from './sandboxes.js';
+import { instanceVolumeSpecs } from './volumes.js';
 
 // The Instance controller (PLAN.md §11.1, §3.6): converges `state` toward `desiredState`.
 // - Hosted pools: the daemon's runtime converges `NodeSpec.instances`; its reports arrive through
@@ -605,6 +606,8 @@ export async function instanceSpecs(
     [nodeId],
   );
   const network = options.network ?? defaultHostNetwork;
+  // Agent memory: the host volumes each instance attaches, in order.
+  const volumes = await instanceVolumeSpecs(tx, rows.map((row) => row.id));
   return rows.flatMap((row) => {
     const image = typeof row.image === 'string' ? JSON.parse(row.image) : row.image;
     if (!image) return [];
@@ -644,6 +647,8 @@ export async function instanceSpecs(
       typeof row.host_placement === 'string' ? JSON.parse(row.host_placement) : (row.host_placement ?? undefined),
     );
     if (placement) spec.placement = placement;
+    const attached = volumes.get(row.id);
+    if (attached?.length) spec.volumes = attached;
     const nic: InstanceNicSpec = { network, mac: row.mac, addresses: row.address ? [row.address] : [] };
     // The guest's network-config (bcd renders it into the NoCloud seed): route and resolvers.
     if (row.gateway) nic.gateway = row.gateway;

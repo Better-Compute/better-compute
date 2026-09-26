@@ -51,6 +51,30 @@ const machineRef = (description: string): InputSchema => ({
   description,
 });
 const templateId = idOf('sbxt', 'The sandbox template');
+const volumeId = idOf('vol', 'The sandbox volume');
+/** A template's volumes (agent memory): each by id or name, where the guest mounts it. */
+const templateVolumes: InputSchema = {
+  type: 'array',
+  maxItems: 8,
+  items: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['mountPath'],
+    properties: {
+      volumeId,
+      name: nameOf('The volume by name (instead of volumeId)'),
+      mountPath: {
+        type: 'string',
+        pattern: '^/[A-Za-z0-9._\\-/]{1,254}$',
+        maxLength: 255,
+        description: 'Where the guest mounts it, e.g. /workspace (never over /, /etc, /usr or another system path)',
+      },
+      readOnly: { type: 'boolean', default: false, description: 'Mount it read-only; many sandboxes may share it read-only' },
+    },
+  },
+  description:
+    'Persistent volumes every sandbox attaches (agent memory): sandboxes run on the volumes’ host; one read-write attachment at a time, or any number of read-only ones. A template with volumes keeps no warm pool',
+};
 const sandboxId = idOf('sbx', 'The sandbox');
 const ttlSeconds = (description: string): InputSchema =>
   integer(60, 30 * 24 * 3600, `${description}, in seconds (1 minute to 30 days)`);
@@ -286,6 +310,7 @@ export const schemas = {
         description:
           'What sandboxes reach: egress (default), private (the pool subnet and the host) or none (the host only; exec still works)',
       },
+      volumes: templateVolumes,
     },
     ['tenantId', 'name', 'poolId', 'flavor', 'imageId'],
   ),
@@ -309,8 +334,28 @@ export const schemas = {
         description:
           'What sandboxes reach: egress (default), private (the pool subnet and the host) or none (the host only; exec still works)',
       },
+      volumes: { ...templateVolumes, description: 'Replaces the template’s volumes ([] removes them from future sandboxes)' },
     },
     ['tenantId', 'templateId'],
+  ),
+  volume: strictObject({ tenantId, volumeId }, ['tenantId', 'volumeId']),
+  createVolume: strictObject(
+    {
+      tenantId,
+      poolId: { ...poolId, description: 'A hosted (vps-host) pool offered to the tenant: the volume lives on one of its hosts' },
+      name: nameOf('The volume name, unique in the tenant, e.g. agent-memory'),
+      sizeGiB: integer(1, 16_384, 'Its size in GiB, booked as disk on its host and charged to the diskGiB quota'),
+      idempotencyKey,
+    },
+    ['tenantId', 'poolId', 'name', 'sizeGiB', 'idempotencyKey'],
+  ),
+  listVolumes: strictObject(
+    {
+      tenantId,
+      poolId: { ...poolId, description: 'Only this pool’s volumes' },
+      includeDeleted: { type: 'boolean', default: false, description: 'Include deleted volumes' },
+    },
+    ['tenantId'],
   ),
   sandbox: strictObject({ tenantId, sandboxId }, ['tenantId', 'sandboxId']),
   createSandbox: strictObject(

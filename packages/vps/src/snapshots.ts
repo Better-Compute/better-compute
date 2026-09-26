@@ -392,6 +392,29 @@ export async function snapshotSandbox(
       'UNSUPPORTED',
       `Runtime ${instance.runtime} does not snapshot instances (RuntimeTraits.snapshot)`,
     );
+  // Agent memory: a read-write volume keeps changing after the snapshot, so a memory restore would lay
+  // old page cache over new blocks (bcd refuses it too). Disk-only snapshots are fine.
+  if (input.includeMemory) {
+    // A passed-through GPU's state (VFIO) cannot be captured: bcd refuses such a memory snapshot too.
+    if (instance.shape.gpus > 0)
+      throw new ComputeError(
+        'INVALID_STATE',
+        `Sandbox ${sandbox.id} has ${instance.shape.gpus} GPU${instance.shape.gpus > 1 ? 's' : ''}: a GPU's state cannot be captured, so its memory cannot be snapshotted; pass includeMemory: false for a disk snapshot`,
+        undefined,
+        { reason: 'memory-snapshot-with-gpus' },
+      );
+    const writable = await tx.query<{ volume_id: string }>(
+      `SELECT volume_id FROM volume_attachments WHERE instance_id = $1 AND NOT read_only`,
+      [instance.id],
+    );
+    if (writable.rows.length > 0)
+      throw new ComputeError(
+        'INVALID_STATE',
+        `Sandbox ${sandbox.id} attaches volume ${writable.rows[0]!.volume_id} read-write: its memory cannot be snapshotted; pass includeMemory: false for a disk snapshot`,
+        undefined,
+        { reason: 'memory-snapshot-with-volumes' },
+      );
+  }
   const target = await store.presign({
     tenantId: input.tenantId,
     sandboxId: sandbox.id,

@@ -170,6 +170,8 @@ export interface PlacementRequest {
   /** Exactly one of these owns the resulting allocations. */
   reservationId?: string;
   instanceId?: string;
+  /** (v1.1, agent memory) A persistent volume's disk (vps `sandboxVolumes`): scalar resources, no devices. */
+  volumeId?: string;
   devices: readonly DeviceRequest[];
   topology?: Topology;
   /** Multi-node placement: `devices` per node, `size` nodes sharing one `topologyKey` value (§10.3). */

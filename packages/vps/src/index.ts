@@ -18,6 +18,7 @@ export * from './hosts.js';
 export * from './bootstraps.js';
 export * from './sandboxes.js';
 export * from './snapshots.js';
+export * from './volumes.js';
 export * from './tenancy.js';
 export * from './describe.js';
 export * from './placement.js';

@@ -425,7 +425,8 @@ export interface Allocation {
   tenantId: string;
   poolId: string;
   nodeId: string;
-  owner: { kind: 'reservation' | 'instance'; id: string };
+  /** `volume` (v1.1, agent memory): a persistent volume's disk, scalar resources only. */
+  owner: { kind: 'reservation' | 'instance' | 'volume'; id: string };
   /** Booked atom ids. */
   atoms: string[];
   /** Claimed scalar amounts (`vcpu`, `memoryGiB`, …). */

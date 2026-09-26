@@ -50,6 +50,16 @@ import {
   type VpsImage,
 } from './instances.js';
 import {
+  attachTemplateVolumes,
+  parseTemplateVolumes,
+  resolveTemplateVolumes,
+  templateVolumeMounts,
+  templateVolumesOf,
+  volumeCloudConfig,
+  type TemplateVolume,
+  type TemplateVolumeInput,
+} from './volumes.js';
+import {
   dropOwnerSnapshots,
   dropSnapshots,
   purgeSettledSnapshots,
@@ -237,6 +247,8 @@ export interface SandboxTemplate {
   env: Record<string, string>;
   /** What sandboxes may reach: `egress` (default), `private` (pool subnet + host) or `none` (host only). */
   network: SandboxNetwork;
+  /** Agent memory: persistent volumes every sandbox attaches, in order (they run on the volumes' host). */
+  volumes: TemplateVolume[];
   version: number;
 }
 
@@ -262,6 +274,8 @@ export interface TemplateInput {
   warm?: { min: number; max?: number };
   env?: Record<string, string>;
   network?: SandboxNetwork;
+  /** Volumes by id or name, where the guest mounts them, read-only or not. */
+  volumes?: TemplateVolumeInput[];
 }
 
 export interface TemplateUpdate {
@@ -277,6 +291,8 @@ export interface TemplateUpdate {
   /** Replaces the whole map (`{}` removes every variable). */
   env?: Record<string, string>;
   network?: SandboxNetwork;
+  /** Replaces the whole list (`[]` detaches every volume from future sandboxes). */
+  volumes?: TemplateVolumeInput[];
   /**
    * Set by the admission check, never by the caller (the parser keeps known fields only): the
    * secret refs its `compute:secrets:manage` decision covered, read outside the transaction.
@@ -346,6 +362,7 @@ export function parseTemplateInput(raw: unknown): TemplateInput {
     'warm',
     'env',
     'network',
+    'volumes',
   ]);
   const tenantId = tenant(input.tenantId);
   const result: TemplateInput = {
@@ -368,6 +385,7 @@ export function parseTemplateInput(raw: unknown): TemplateInput {
   if (input.warm !== undefined) result.warm = warm(input.warm);
   if (input.env !== undefined) result.env = env(input.env, tenantId);
   if (input.network !== undefined) result.network = network(input.network);
+  if (input.volumes !== undefined) result.volumes = parseTemplateVolumes(input.volumes);
   return result;
 }
 
@@ -383,6 +401,7 @@ export function parseTemplateUpdate(raw: unknown): TemplateUpdate {
     'warm',
     'env',
     'network',
+    'volumes',
   ]);
   const tenantId = tenant(input.tenantId);
   const result: TemplateUpdate = {
@@ -400,6 +419,7 @@ export function parseTemplateUpdate(raw: unknown): TemplateUpdate {
   if (input.warm !== undefined) result.warm = warm(input.warm);
   if (input.env !== undefined) result.env = env(input.env, tenantId);
   if (input.network !== undefined) result.network = network(input.network);
+  if (input.volumes !== undefined) result.volumes = parseTemplateVolumes(input.volumes);
   return result;
 }
 
@@ -426,6 +446,7 @@ interface RawTemplate {
   warm_max: number;
   env: Record<string, string> | string;
   network: SandboxNetwork;
+  volumes: unknown;
   instance_version: string | number;
   created_by: string;
   deleted: boolean;
@@ -448,6 +469,7 @@ const templateColumnsOf = (alias: string) =>
     'warm_max',
     'env',
     'network',
+    'volumes',
     'instance_version',
     'created_by',
     'deleted',
@@ -478,6 +500,7 @@ function toTemplate(raw: RawTemplate): TemplateRow {
     warm: { min: Number(raw.warm_min), max: Number(raw.warm_max) },
     env: typeof raw.env === 'string' ? JSON.parse(raw.env) : { ...(raw.env ?? {}) },
     network: raw.network ?? 'egress',
+    volumes: templateVolumesOf(raw.volumes),
     instanceVersion: Number(raw.instance_version ?? 1),
     version: Number(raw.version),
     createdBy: raw.created_by,
@@ -490,7 +513,7 @@ function toTemplate(raw: RawTemplate): TemplateRow {
 /** The public view of a template. */
 export function templateView(row: TemplateRow): SandboxTemplate {
   const { createdBy: _by, deleted: _deleted, instanceVersion: _instances, ...view } = row;
-  return { ...view, warm: { ...view.warm }, env: { ...view.env } };
+  return { ...view, warm: { ...view.warm }, env: { ...view.env }, volumes: view.volumes.map((volume) => ({ ...volume })) };
 }
 
 async function readTemplate(
@@ -605,6 +628,11 @@ export async function createTemplate(
   await assertNetworkDeliverable(tx, input.poolId, input.network);
   await assertTenantSecrets(tx, input.tenantId, templateSecretRefs(input));
   const { defaultTtl, maxTtl } = ttlBounds(input.defaultTtlSeconds, input.maxTtlSeconds);
+  const volumes = await resolveTemplateVolumes(
+    tx,
+    { tenantId: input.tenantId, poolId: input.poolId, warmMax: input.warm?.max ?? input.warm?.min ?? 0 },
+    input.volumes ?? [],
+  );
   const taken = await tx.query(
     `SELECT 1 FROM sandbox_templates WHERE tenant_id = $1 AND name = $2 AND NOT deleted`,
     [input.tenantId, input.name],
@@ -614,8 +642,9 @@ export async function createTemplate(
   const templateId = newId('sbxt');
   const { rows } = await tx.query<RawTemplate>(
     `INSERT INTO sandbox_templates (id, tenant_id, name, pool_id, flavor, image_id, runtime, user_data,
-                                    default_ttl_seconds, max_ttl_seconds, warm_min, warm_max, created_by, env, network, version)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, 1)
+                                    default_ttl_seconds, max_ttl_seconds, warm_min, warm_max, created_by, env, network,
+                                    volumes, version)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, $16::jsonb, 1)
      RETURNING ${templateColumns}`,
     [
       templateId,
@@ -633,6 +662,7 @@ export async function createTemplate(
       caller.identityId,
       JSON.stringify(input.env ?? {}),
       input.network ?? 'egress',
+      JSON.stringify(volumes),
     ],
   );
   await deps.authz.upsert(tx, {
@@ -716,7 +746,7 @@ async function assertNetworkDeliverable(
 /** Whether an update changes what the template's instances are made of. */
 function shapes(
   current: TemplateRow,
-  next: { flavor: string; imageId: string; userData: string | null; input: TemplateUpdate },
+  next: { flavor: string; imageId: string; userData: string | null; input: TemplateUpdate; volumes?: TemplateVolume[] },
 ): boolean {
   return (
     next.flavor !== current.flavor ||
@@ -725,7 +755,8 @@ function shapes(
     (next.input.env !== undefined &&
       JSON.stringify(Object.entries(next.input.env).sort()) !==
         JSON.stringify(Object.entries(current.env).sort())) ||
-    (next.input.network !== undefined && next.input.network !== current.network)
+    (next.input.network !== undefined && next.input.network !== current.network) ||
+    (next.volumes !== undefined && JSON.stringify(next.volumes) !== JSON.stringify(current.volumes))
   );
 }
 
@@ -758,7 +789,20 @@ export async function updateTemplate(
     ? { min: input.warm.min, max: input.warm.max ?? input.warm.min }
     : current.warm;
   const userDataValue = input.userData === undefined ? (current.userData ?? null) : input.userData;
-  const reshapes = shapes(current, { flavor, imageId: image, userData: userDataValue, input });
+  // A new volume list is resolved as on create; a warm pool beside volumes is refused either way.
+  const volumes =
+    input.volumes !== undefined
+      ? await resolveTemplateVolumes(tx, { tenantId: current.tenantId, poolId: current.poolId, warmMax: warmPool.max }, input.volumes)
+      : current.volumes;
+  if (volumes.length > 0 && warmPool.max > 0)
+    throw new ComputeError('INVALID_INPUT', 'A template with volumes keeps no warm pool (warm.max must be 0): a warm instance would hold its volumes');
+  const reshapes = shapes(current, {
+    flavor,
+    imageId: image,
+    userData: userDataValue,
+    input,
+    ...(input.volumes !== undefined ? { volumes } : {}),
+  });
   // The check decided on the template it read outside any transaction: secrets added since (by
   // someone allowed to) were not part of that decision, and new code must not inherit them.
   if (reshapes) {
@@ -779,7 +823,7 @@ export async function updateTemplate(
     `UPDATE sandbox_templates
         SET flavor = $2, image_id = $3, runtime = $4, user_data = $5, default_ttl_seconds = $6,
             max_ttl_seconds = $7, warm_min = $8, warm_max = $9, env = $10::jsonb,
-            network = $11, instance_version = instance_version + $12, version = version + 1
+            network = $11, instance_version = instance_version + $12, volumes = $13::jsonb, version = version + 1
       WHERE id = $1
       RETURNING ${templateColumns}`,
     [
@@ -795,6 +839,7 @@ export async function updateTemplate(
       JSON.stringify(input.env ?? current.env),
       input.network ?? current.network,
       reshapes ? 1 : 0,
+      JSON.stringify(volumes),
     ],
   );
   return templateView(toTemplate(rows[0]!));
@@ -1335,11 +1380,13 @@ async function createManagedInstance(
     ? await secretVersions(tx, template.tenantId, templateSecretRefs(template))
     : undefined;
   const memoryRestore = spec.restoreFrom?.includeMemory === true;
+  // Agent memory: the template's volumes, formatted once and mounted by serial from the user data.
+  const mounts = await templateVolumeMounts(tx, template.volumes);
   const { userData: rendered, hostCertValidBefore: generated } = await instanceUserData(
     deps,
     template,
     spec.instanceId,
-    { hostKey: !memoryRestore },
+    { hostKey: !memoryRestore, mounts },
   );
   const hostCertValidBefore = memoryRestore
     ? spec.restoreFrom!.hostCertified
@@ -1394,6 +1441,8 @@ async function createManagedInstance(
       hostCertValidBefore === undefined ? null : new Date(hostCertValidBefore).toISOString(),
     ],
   );
+  // Before placement: scheduleHosted pins the instance to its volumes' host.
+  await attachTemplateVolumes(tx, spec.instanceId, template.volumes);
   if (memoryRestore) await sealIdentityRebind(deps, tx, template.tenantId, spec.instanceId);
   if (secretsAt && Object.keys(secretsAt).length > 0)
     await tx.query(`UPDATE instances SET warm_secret_versions = $2::jsonb WHERE id = $1`, [
@@ -1479,6 +1528,8 @@ export function sandboxUserData(
     env?: Readonly<Record<string, string>>;
     /** A host key certified by the sandbox CA: sshd presents it, so exec clients pin the guest. */
     hostKey?: { privateKeyPem: string; certificate: string };
+    /** Agent memory: volumes to format once and mount by serial (`volumeCloudConfig`). */
+    volumes?: readonly { serial: string; mountPath: string; readOnly: boolean }[];
   },
 ): string {
   const text = (value: string) => JSON.stringify(value);
@@ -1539,6 +1590,8 @@ export function sandboxUserData(
       '    owner: "root:root"',
       `    content: ${text(env.map(([name, value]) => `${name}=${shellQuote(value)}\n`).join(''))}`,
     );
+  // write_files may end with no entry (no exec, no env): an empty list is valid cloud-config.
+  lines.push(...volumeCloudConfig(parts.volumes ?? []));
   if (exec)
     lines.push(
       'runcmd:',
@@ -1567,10 +1620,11 @@ async function instanceUserData(
   deps: InstanceDeps,
   template: TemplateRow,
   instanceId: string,
-  options: { hostKey: boolean },
+  options: { hostKey: boolean; mounts?: readonly { serial: string; mountPath: string; readOnly: boolean }[] },
 ): Promise<{ userData: string | null; hostCertValidBefore?: number }> {
   const names = Object.keys(template.env);
-  if (!deps.sandboxExec && names.length === 0) return { userData: template.userData ?? null };
+  const mounts = options.mounts ?? [];
+  if (!deps.sandboxExec && names.length === 0 && mounts.length === 0) return { userData: template.userData ?? null };
   assertEnvDeliverable(deps, template.env, template.userData);
   const env: Record<string, string> = {};
   for (const name of names.sort()) {
@@ -1589,6 +1643,7 @@ async function instanceUserData(
       ...(deps.sandboxExec ? { exec: deps.sandboxExec } : {}),
       env,
       ...(hostKey ? { hostKey } : {}),
+      ...(mounts.length > 0 ? { volumes: mounts } : {}),
     }),
     ...(hostKey ? { hostCertValidBefore: hostKey.validBefore } : {}),
   };

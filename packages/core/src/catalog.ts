@@ -38,6 +38,7 @@ export const computeResourceKinds = [
   'sandbox',
   'sandbox-template',
   'sandbox-snapshot',
+  'sandbox-volume',
 ] as const;
 export type ComputeResourceKind = (typeof computeResourceKinds)[number];
 
@@ -216,6 +217,13 @@ const definitions = {
       "A sandbox's snapshot (disk and memory; tenant-private, owned by who took it; may outlive its sandbox)",
     actions: a('sandboxes', 'read', 'delete'),
     attributes: { sandboxId: 'string', templateId: 'string', includeMemory: 'boolean' },
+  },
+  'sandbox-volume': {
+    description:
+      "A tenant's persistent sandbox volume (agent memory): a disk on one host of a pool that its sandboxes attach across runs",
+    actions: a('sandboxes', 'read', 'manage'),
+    attributes: { sizeGiB: 'number' },
+    parent: 'pool',
   },
 } as const satisfies Record<ComputeResourceKind, KindDefinition>;
 
@@ -552,6 +560,13 @@ group('sandboxSnapshots', 'vps', [
   ['list', 'read', 'sandboxes:read', 'tenant', 'v0.5', list],
   ['get', 'read', 'sandboxes:read', 'sandbox-snapshot', 'v0.5'],
   ['delete', 'mutation', 'sandboxes:delete', 'sandbox-snapshot', 'v0.5'],
+]);
+// Agent memory (v1.1, PLAN.md §3.8): persistent volumes sandboxes attach across runs.
+group('sandboxVolumes', 'vps', [
+  ['create', 'mutation', 'sandboxes:manage', 'tenant', 'v1.0'],
+  ['list', 'read', 'sandboxes:read', 'tenant', 'v1.0'],
+  ['get', 'read', 'sandboxes:read', 'sandbox-volume', 'v1.0'],
+  ['delete', 'mutation', 'sandboxes:manage', 'sandbox-volume', 'v1.0'],
 ]);
 group('commandBatches', 'quorum', [
   ['create', 'mutation', 'batches:create', 'tenant', 'v1.0'],

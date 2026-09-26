@@ -45,6 +45,7 @@ import {
   placementResources,
   type FlavorPlacement,
 } from './placement.js';
+import { volumePlacement } from './volumes.js';
 import { builtinRuntimeTraits, runtimeNodeLabels, type RuntimeTraits } from './runtime.js';
 
 // Instances (PLAN.md §3.6, §11.1): request-as-resource drafts decided on `compute-instance/{draftId}`,
@@ -1075,6 +1076,9 @@ export async function scheduleHosted(
     // A flavor placement (§3.8), hugepages above all, only where bcd applies it.
     ...(row.shape.placement ? { [placementCapabilityLabel]: '*' } : {}),
   };
+  // Agent memory: an instance that attaches volumes runs on the host they live on, if its bcd keeps them.
+  const volumes = await volumePlacement(tx, row.id, row.poolId);
+  if (volumes) Object.assign(nodeLabels, volumes.nodeLabels);
   const outcome = await deps.capacity.reserve(
     tx,
     {
@@ -1088,6 +1092,7 @@ export async function scheduleHosted(
       resources: placementResources(row.shape),
       during: { start: now, end: openEnded },
       ...(Object.keys(nodeLabels).length > 0 ? { nodeLabels } : {}),
+      ...(volumes ? { excludeNodes: volumes.excludeNodes } : {}),
     },
     admission ? { admission } : undefined,
   );

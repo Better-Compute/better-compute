@@ -108,8 +108,9 @@ export function assertPlacementRequest(request: PlacementRequest): void {
   const fail = (message: string): never => {
     throw new ComputeError('INVALID_INPUT', message);
   };
-  if ((request.reservationId === undefined) === (request.instanceId === undefined))
-    fail('A placement belongs to exactly one reservation or instance');
+  const owners = [request.reservationId, request.instanceId, request.volumeId].filter((owner) => owner !== undefined);
+  if (owners.length !== 1) fail('A placement belongs to exactly one reservation, instance or volume');
+  if (request.volumeId !== undefined && (request.devices?.length ?? 0) > 0) fail('A volume books scalar resources, never devices');
   if (!Array.isArray(request.devices)) fail('devices must be a list');
   let total = 0;
   for (const device of request.devices) {
@@ -215,7 +216,9 @@ async function commitPlan(
     const owner: Allocation['owner'] =
       request.reservationId !== undefined
         ? { kind: 'reservation', id: request.reservationId }
-        : { kind: 'instance', id: request.instanceId! };
+        : request.volumeId !== undefined
+          ? { kind: 'volume', id: request.volumeId }
+          : { kind: 'instance', id: request.instanceId! };
     const { rows } = await tx.query<{ current: boolean }>(
       `INSERT INTO allocations (id, tenant_id, pool_id, node_id, owner_kind, owner_id, atoms,
                                 resources, during, version)
