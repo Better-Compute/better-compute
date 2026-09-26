@@ -112,6 +112,9 @@ type Options struct {
 	// Kubernetes DaemonSet beside the GPU operator). No NodeSpec.host unit is applied, and the host
 	// section reports HostManagedExternally.
 	ExternalHost bool
+	// GPUSampler reads the GPUs' live state for the OTLP export (NodeSpec.telemetry); nil exports no
+	// bcd.gpu.* readings.
+	GPUSampler GPUSampler
 	// InventoryInterval re-collects the inventory without a reason (default 10 min); an XID
 	// re-collects it soon regardless.
 	InventoryInterval time.Duration
@@ -160,6 +163,8 @@ type Agent struct {
 	hostcfg *hostConverger
 	// kube runs the kubelet device plugins on a Kubernetes worker (kube.go).
 	kube *kube.Manager
+	// telemetry runs the OTLP export NodeSpec.telemetry names (telemetry.go).
+	telemetry *telemetryConverger
 	// rescan asks inventoryLoop for a collection soon (gpuhealth.go).
 	rescan     chan struct{}
 	convergeCh chan struct{}
@@ -297,6 +302,7 @@ func New(o Options) (*Agent, error) {
 	a.access = &accessConverger{a: a}
 	a.hostcfg = newHostConverger(a)
 	a.kube = newKubeManager(a)
+	a.telemetry = &telemetryConverger{a: a}
 	a.key.Store(o.Key)
 	return a, nil
 }

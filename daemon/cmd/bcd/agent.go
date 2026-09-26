@@ -428,6 +428,7 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		Update:         update,
 		// k8s-join: under bcd helper the helper enforces the allowlist itself (and requires one).
 		KubernetesAllowed: kubernetesAllowed,
+		GPUSampler:        gpuSampler(),
 		// [host] units = false: the GPU operator (or another tool) owns the host's configuration.
 		ExternalHost: cfg.ExternalHost,
 	}

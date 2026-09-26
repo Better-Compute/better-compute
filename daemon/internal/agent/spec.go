@@ -219,7 +219,7 @@ func (a *Agent) convergeOnce(ctx context.Context) bool {
 	}
 	a.devices.generation = generation
 	a.access.generation = generation
-	convergers := []converge.Converger{a.devices, a.access, a.instances, telemetryConverger{}, siteConverger{a}}
+	convergers := []converge.Converger{a.devices, a.access, a.instances, a.telemetry, siteConverger{a}}
 	if !a.o.ExternalHost {
 		convergers = append(convergers, a.hostcfg)
 	}
@@ -351,10 +351,3 @@ func unknownFields(raw []byte) []int {
 	sort.Ints(out)
 	return out
 }
-
-// telemetryConverger records the OTLP target; bcd's own exporter arrives with telemetry (P8).
-type telemetryConverger struct{}
-
-func (telemetryConverger) Section() converge.Section { return converge.SectionTelemetry }
-
-func (telemetryConverger) Plan(context.Context, []byte) ([]converge.Action, error) { return nil, nil }
