@@ -132,8 +132,15 @@ Round-5 security review (subagent over a760805..HEAD; 2 HIGH, 7 MED, 3 LOW):
 Security review 2 (1f0210a..HEAD; sub-reviews for kube, volumes, PXE/control plane; the helper/libvirt part is pending):
 - Kube: M1–M3 and L6 → [6baab5]; M4 → [d320b8] ebd9806 plus capacity 4570dfe; M5 owner-only kubernetes binding 3825ec7; L7 → [927015].
 - Volumes: M1/L3 → [927015]; M2 → [06192c] 851016e plus the volume_storage seam 37d6d6d ([927015] consumes); L4 → [06192c] bdeb452.
-- Helper (final report at 6cb30e9): HIGH libvirt.restore without XML skips the validator; MED signed intent is node-optional without pins (take roots from the join record); LOW the base image is not re-checked. All → [d320b8]; the runtime restore --xml is with [06192c].
+- Helper (final report at 6cb30e9): all closed by [d320b8]. HIGH restore without XML: b6df6f1 (node already sends --xml). MED signed intent from the join record's roots: 71ccf71. LOW base-image check: 3fcd1a1.
 - PXE/control plane: M8/M6/cpulist 004579e (mine); PXE M1/L5/L7 → [06192c]; discovery spoofing L6 → [927015] (confirmation before binding a MAC).
+- Volumes MED2 (booking against the host's store): 131f5ee plus doctor findings 1617d84 ([927015]).
+- Status: review 2 is fully closed.
+
+Since review 2:
+- e7d922c: a released, bound Kubernetes binding stays booked until AllocationReleased, a lost node or the booking's end. Found by [6baab5]'s 1k sim (40b1ce8); fixed by me.
+- Assigned: [d320b8] TPM-resident node keys and an EK-chain test (docs gap 3); [927015] console metal discovered/confirm-MAC page (docs gap 4); real-cluster DaemonSet run (gap 2) open.
+- Perf: [d320b8] f86c877 inventory ingest at 10k, 87 applies/s and 12.5k unchanged reports/s. Nothing to optimize.
 
 E landed ([6baab5]):
 - GPUs and health: cb987e5 nvidia-smi backend (+5026330 NVLink peers); 662fb55 diag.nvml, XID rescans, reset clears XIDs; 6f5a99f unhealthy GPUs never offered.
