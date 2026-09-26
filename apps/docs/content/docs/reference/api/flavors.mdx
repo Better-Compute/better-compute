@@ -43,6 +43,12 @@ The pool must be owned by or offered to the tenant; otherwise the call is `NOT_F
 Adds a flavor to a `vps-host` or `provider` pool the tenant owns and returns it at version 1.
 
 - `gpus` defaults to 0. A flavor of a provider pool needs `offerId`, the provider offer it creates; without it the call is `INVALID_INPUT`.
+- `placement` (hosted pools only; `INVALID_INPUT` on a provider pool) says where the guest lives on its host, and sandbox templates on the flavor inherit it:
+  - `hugepages: '2Mi' | '1Gi'` backs guest memory with hugepages. These are booked from the host's hugepage pools instead of its memory, still charged to quota as `memoryGiB`, and never ballooned.
+  - `numaAffine` keeps the vCPUs and memory on one NUMA node: the GPUs' node, or otherwise the least-loaded node with room for the memory.
+  - `pinned` gives each vCPU a host CPU that no other pinned guest on the host has.
+  - A host that cannot honour `numaAffine` or `pinned` still runs the guest, floating, and the instance carries a `PlacementDegraded` condition with the reason (`NoNumaTopology`, `NoNumaNodeFits`, `GpuNumaUnknown`, `NumaMemoryTooSmall` or `NotEnoughFreeCpus`).
+  - Resizing to a flavor with a different `placement` is `UNSUPPORTED`.
 - `NOT_FOUND` when the tenant does not own the pool; `INVALID_STATE` when the pool is of another class.
 - `CONFLICT` when the pool already has a flavor with that name, archived ones included.
 
@@ -53,16 +59,20 @@ Adds a flavor to a `vps-host` or `provider` pool the tenant owns and returns it 
 
 **Input**
 
-| Field       | Type    | Required | Constraints                                                       |
-| ----------- | ------- | -------- | ----------------------------------------------------------------- |
-| `tenantId`  | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
-| `poolId`    | string  | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
-| `name`      | string  | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`      |
-| `vcpu`      | integer | yes      | 1-1024                                                            |
-| `memoryGiB` | integer | yes      | 1-16384                                                           |
-| `diskGiB`   | integer | yes      | 1-65536                                                           |
-| `gpus`      | integer |          | 0-16; default `0`                                                 |
-| `offerId`   | string  |          | 1-128 characters                                                  |
+| Field                  | Type                | Required | Constraints                                                       |
+| ---------------------- | ------------------- | -------- | ----------------------------------------------------------------- |
+| `tenantId`             | string              | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`               | string              | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `name`                 | string              | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`      |
+| `vcpu`                 | integer             | yes      | 1-1024                                                            |
+| `memoryGiB`            | integer             | yes      | 1-16384                                                           |
+| `diskGiB`              | integer             | yes      | 1-65536                                                           |
+| `gpus`                 | integer             |          | 0-16; default `0`                                                 |
+| `offerId`              | string              |          | 1-128 characters                                                  |
+| `placement`            | object              |          |                                                                   |
+| `placement.numaAffine` | boolean             |          |                                                                   |
+| `placement.pinned`     | boolean             |          |                                                                   |
+| `placement.hugepages`  | one of `2Mi`, `1Gi` |          |                                                                   |
 
 ## update
 
@@ -79,16 +89,20 @@ The input is the full shape, as for `create`. An omitted `offerId` keeps the sto
 
 **Input**
 
-| Field       | Type    | Required | Constraints                                                       |
-| ----------- | ------- | -------- | ----------------------------------------------------------------- |
-| `tenantId`  | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
-| `poolId`    | string  | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
-| `name`      | string  | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`      |
-| `vcpu`      | integer | yes      | 1-1024                                                            |
-| `memoryGiB` | integer | yes      | 1-16384                                                           |
-| `diskGiB`   | integer | yes      | 1-65536                                                           |
-| `gpus`      | integer |          | 0-16; default `0`                                                 |
-| `offerId`   | string  |          | 1-128 characters                                                  |
+| Field                  | Type                | Required | Constraints                                                       |
+| ---------------------- | ------------------- | -------- | ----------------------------------------------------------------- |
+| `tenantId`             | string              | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`               | string              | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `name`                 | string              | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`      |
+| `vcpu`                 | integer             | yes      | 1-1024                                                            |
+| `memoryGiB`            | integer             | yes      | 1-16384                                                           |
+| `diskGiB`              | integer             | yes      | 1-65536                                                           |
+| `gpus`                 | integer             |          | 0-16; default `0`                                                 |
+| `offerId`              | string              |          | 1-128 characters                                                  |
+| `placement`            | object              |          |                                                                   |
+| `placement.numaAffine` | boolean             |          |                                                                   |
+| `placement.pinned`     | boolean             |          |                                                                   |
+| `placement.hugepages`  | one of `2Mi`, `1Gi` |          |                                                                   |
 
 ## delete
 

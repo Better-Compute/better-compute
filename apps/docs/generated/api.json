@@ -944,13 +944,33 @@
               "minLength": 1,
               "maxLength": 128,
               "description": "Provider pools: the provider offer this flavor creates (required there)"
+            },
+            "placement": {
+              "type": "object",
+              "properties": {
+                "numaAffine": {
+                  "type": "boolean",
+                  "description": "vCPUs and memory on one NUMA node (its GPUs’ node when it has any)"
+                },
+                "pinned": {
+                  "type": "boolean",
+                  "description": "Each vCPU on its own host CPU"
+                },
+                "hugepages": {
+                  "enum": ["2Mi", "1Gi"],
+                  "description": "Back guest memory with hugepages of this size (books the host’s hugepages)"
+                }
+              },
+              "required": [],
+              "additionalProperties": false,
+              "description": "Hosted pools (v1.1): where the guest lives on its host; sandbox templates inherit it"
             }
           },
           "required": ["tenantId", "poolId", "name", "vcpu", "memoryGiB", "diskGiB"],
           "additionalProperties": false
         },
         "summary": "Adds a flavor to a `vps-host` or `provider` pool the tenant owns and returns it at version 1.",
-        "description": "Adds a flavor to a `vps-host` or `provider` pool the tenant owns and returns it at version 1.\n\n- `gpus` defaults to 0. A flavor of a provider pool needs `offerId`, the provider offer it creates; without it the call is `INVALID_INPUT`.\n- `NOT_FOUND` when the tenant does not own the pool; `INVALID_STATE` when the pool is of another class.\n- `CONFLICT` when the pool already has a flavor with that name, archived ones included."
+        "description": "Adds a flavor to a `vps-host` or `provider` pool the tenant owns and returns it at version 1.\n\n- `gpus` defaults to 0. A flavor of a provider pool needs `offerId`, the provider offer it creates; without it the call is `INVALID_INPUT`.\n- `placement` (hosted pools only; `INVALID_INPUT` on a provider pool) says where the guest lives on its host, and sandbox templates on the flavor inherit it:\n  - `hugepages: '2Mi' | '1Gi'` backs guest memory with hugepages. These are booked from the host's hugepage pools instead of its memory, still charged to quota as `memoryGiB`, and never ballooned.\n  - `numaAffine` keeps the vCPUs and memory on one NUMA node: the GPUs' node, or otherwise the least-loaded node with room for the memory.\n  - `pinned` gives each vCPU a host CPU that no other pinned guest on the host has.\n  - A host that cannot honour `numaAffine` or `pinned` still runs the guest, floating, and the instance carries a `PlacementDegraded` condition with the reason (`NoNumaTopology`, `NoNumaNodeFits`, `GpuNumaUnknown`, `NumaMemoryTooSmall` or `NotEnoughFreeCpus`).\n  - Resizing to a flavor with a different `placement` is `UNSUPPORTED`.\n- `NOT_FOUND` when the tenant does not own the pool; `INVALID_STATE` when the pool is of another class.\n- `CONFLICT` when the pool already has a flavor with that name, archived ones included."
       },
       {
         "method": "update",
@@ -1010,6 +1030,26 @@
               "minLength": 1,
               "maxLength": 128,
               "description": "Provider pools: the provider offer this flavor creates (required there)"
+            },
+            "placement": {
+              "type": "object",
+              "properties": {
+                "numaAffine": {
+                  "type": "boolean",
+                  "description": "vCPUs and memory on one NUMA node (its GPUs’ node when it has any)"
+                },
+                "pinned": {
+                  "type": "boolean",
+                  "description": "Each vCPU on its own host CPU"
+                },
+                "hugepages": {
+                  "enum": ["2Mi", "1Gi"],
+                  "description": "Back guest memory with hugepages of this size (books the host’s hugepages)"
+                }
+              },
+              "required": [],
+              "additionalProperties": false,
+              "description": "Hosted pools (v1.1): where the guest lives on its host; sandbox templates inherit it"
             }
           },
           "required": ["tenantId", "poolId", "name", "vcpu", "memoryGiB", "diskGiB"],
@@ -2089,6 +2129,10 @@
               "type": "boolean",
               "default": false
             },
+            "hosted": {
+              "type": "string",
+              "enum": ["kubernetes"]
+            },
             "idempotencyKey": {
               "type": "string",
               "maxLength": 128,
@@ -2099,7 +2143,7 @@
           "additionalProperties": false
         },
         "summary": "Mints a role-`node` join token for one pool and returns its record with the bearer `token`, which is never shown again.",
-        "description": "Mints a role-`node` join token for one pool and returns its record with the bearer `token`, which is never shown again.\n\nOnly the pool's owner tenant can mint tokens for it; another tenant gets `NOT_FOUND`. A pool whose machines run no daemon (its `agent` is not `bcd`) answers `INVALID_STATE`. `expect` pins the token to one machine and must name at least one identifier, otherwise the call is `INVALID_INPUT`. `ttlSeconds` runs from 60 to 86,400 and `maxUses` defaults to 1.\n\nThe token id derives from the tenant, the calling identity and `idempotencyKey`. A retry with the same key returns the stored record without `token` and without a new IAM decision. The same key with a different pool, `expect` or `allowReclaim` is `CONFLICT`.\n\nPublishes `security.join-token.created`, whose `pinned` field says whether the token has an `expect` binding."
+        "description": "Mints a role-`node` join token for one pool and returns its record with the bearer `token`, which is never shown again.\n\nOnly the pool's owner tenant can mint tokens for it; another tenant gets `NOT_FOUND`. A pool whose machines run no daemon (its `agent` is not `bcd`) answers `INVALID_STATE`. `expect` pins the token to one machine and must name at least one identifier, otherwise the call is `INVALID_INPUT`. `ttlSeconds` runs from 60 to 86,400 and `maxUses` defaults to 1.\n\n`hosted: 'kubernetes'` marks a token for `bcd` running as a DaemonSet on a Kubernetes cluster. That cluster's admins have root on its machines, so a node joining with it becomes `tenant-controlled`, with a `node-tenant` certificate that never receives platform secrets. The exception is a pool whose `policy.kubernetes.platformOperated` is true. The token decides this, never the machine's claims, and it only ever lowers `platform` trust: a tenant's own site stays `tenant-owned`.\n\nThe token id derives from the tenant, the calling identity and `idempotencyKey`. A retry with the same key returns the stored record without `token` and without a new IAM decision. The same key with a different pool, `expect`, `allowReclaim` or `hosted` is `CONFLICT`.\n\nPublishes `security.join-token.created`, whose `pinned` field says whether the token has an `expect` binding; `hosted` is included when set."
       },
       {
         "method": "list",
