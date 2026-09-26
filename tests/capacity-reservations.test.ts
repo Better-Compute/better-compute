@@ -329,6 +329,8 @@ describe('capacityModule API surface', () => {
       reservationWork,
       'capacity.rollup',
       'capacity.usage',
+      // §3.8: every host's vcpu/memoryGiB/hugepages from inventory.
+      'capacity.hosts',
       'capacity.mig',
     ]);
     expect(module.reconcilers![1]!.periodic).toEqual([{ key: 'all', every: '5m' }]);

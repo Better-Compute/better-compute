@@ -30,6 +30,7 @@ import {
 } from '@better-compute/core';
 import { readAllocation, releaseAllocation } from './bookings.js';
 import { capacityMigrations } from './migrations.js';
+import { nodeResourcesWork, syncNodeResources } from './host-resources.js';
 import { describeCreateReservation, describeExtendReservation } from './describe.js';
 import { planGangs } from './gang.js';
 import { planPlacement, summarizeRejections } from './pipeline.js';
@@ -653,6 +654,8 @@ export interface CapacityModuleOptions extends PlacementOptions {
   rollupEvery?: `${number}${'s' | 'm' | 'h'}`;
   /** How often the usage job writes closed hourly windows (default `5m`). */
   usageEvery?: `${number}${'s' | 'm' | 'h'}`;
+  /** How often every host's vcpu/memoryGiB/hugepages rows follow inventory (default `30s`, §3.8). */
+  hostSyncEvery?: `${number}${'s' | 'm' | 'h'}`;
   /** The notice a preempted spot reservation gets before its atoms are taken (default 2 min). */
   spotNoticeMs?: number;
   /**
@@ -1441,6 +1444,16 @@ export function capacityModule(
       return 'DONE';
     },
   };
+  // §3.8: every host's vcpu, memoryGiB and hugepages from its inventory (vps-host pools keep vps's).
+  const hostsReconciler: Reconciler = {
+    name: nodeResourcesWork,
+    shardBy: 'none',
+    periodic: [{ key: 'all', every: options.hostSyncEvery ?? '30s' }],
+    async run(context) {
+      await syncNodeResources(context.sql);
+      return 'DONE';
+    },
+  };
   return defineModule({
     name: 'capacity',
     migrations: [...capacityMigrations],
@@ -1449,6 +1462,7 @@ export function capacityModule(
       reservationsReconciler,
       rollupReconciler,
       usageReconciler,
+      hostsReconciler,
       { name: migGateWork, shardBy: 'node', run: runMigGate },
       ...(options.placer === 'pool-lease' ? [placerReconciler] : []),
     ],

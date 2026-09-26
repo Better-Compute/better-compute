@@ -26,3 +26,4 @@ export * from './mig.js';
 export * from './iam-reactions.js';
 export * from './tenancy.js';
 export * from './describe.js';
+export * from './host-resources.js';
