@@ -16,6 +16,9 @@ describe('deploy/kubernetes', () => {
     expect(daemonset).toMatch(/name: join-token, mountPath: \/var\/run\/bcd-join, readOnly: true/);
     // The token is minted as hosted, so the trust comes from the pool, never from the node.
     expect(daemonset).toContain('--hosted kubernetes');
+    // Where join finds the well-known document, base path included when compute is mounted in an app.
+    expect(daemonset).toContain('<server>/.well-known/better-compute');
+    expect(daemonset).toContain('https://app.example.com/api/compute');
   });
 
   it('keeps the identity on the host and gives the pod no Kubernetes API identity', () => {

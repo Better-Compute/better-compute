@@ -3,6 +3,11 @@
 # Before applying (namespace bcd-system):
 #   kubectl -n bcd-system create configmap bcd-config \
 #     --from-file=config.toml=config.toml --from-literal=server=https://compute.example.com
+# `server` is the URL under which the control plane serves /.well-known/better-compute (bcd join
+# fetches <server>/.well-known/better-compute and pins the key it finds): the origin for
+# `better-compute serve` (https://compute.example.com), or the origin and the API's base path when
+# compute is mounted inside an application (https://app.example.com/api/compute). Check it with
+# `curl <server>/.well-known/better-compute`.
 #   kubectl -n bcd-system create secret generic bcd-join --from-file=token=join-token
 # config.toml starts from config.toml.example; the join token is minted for this cluster's pool,
 # with one use per node (`better-compute join-tokens create --pool <pool> --max-uses <nodes>
