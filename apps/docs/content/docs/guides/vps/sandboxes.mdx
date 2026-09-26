@@ -46,6 +46,9 @@ sources:
   - tests/mcp-server.test.ts
   - tests/e2e/sandboxes.test.ts
   - tests/e2e/volumes.test.ts
+  - tests/e2e/helper-vps.test.ts
+  - packages/vps/src/volume-storage.ts
+  - packages/vps/src/runtime.ts
   - PLAN.md
 ---
 
@@ -399,7 +402,9 @@ like any other and the sandbox goes back to `starting`.
   have changed or gone (7fb1e01). It publishes `sandbox.extended`.
 - [delete](/docs/reference/api/sandboxes#delete) marks the sandbox `deleting`, sets its instance's `desiredState` to
   `deleted` (publishing `instance.deleting` with `sandboxId`) and wakes the reconciler. It is idempotent. The
-  `vps.instances` reconciler releases the allocation, IP lease, quota and sealed user data as for any instance.
+  `vps.instances` reconciler releases the allocation, IP lease, quota and sealed user data as for any instance. When
+  it finishes deleting a sandbox's instance it wakes `vps.sandboxes` in the same transaction (df4b371), so the sandbox
+  becomes `deleted` right after its instance, not at the next 15-second pass.
 
 ```ts
 await client.sandboxes.extend({ tenantId: 'acme', sandboxId: sandbox.id, by: '30m' });
@@ -695,7 +700,10 @@ once (b5415a2); the filesystem grows at the next sandbox's first boot. It publis
 **Delete.** `sandboxVolumes.delete` is refused (`CONFLICT`) while a live instance attaches the volume or a live
 template names it. Otherwise the volume becomes `deleting` and leaves its host's spec, so bcd destroys it, but its disk
 stays booked until the host has applied a later spec generation (or the host is gone or retired). The `vps.volumes`
-reconciler then releases the booking, which gives the quota back, and marks the volume `deleted`. The events are
+reconciler then releases the booking, which gives the quota back, and marks the volume `deleted`. Since df4b371 the
+status report in which the host's applied generation passes the deletion wakes `vps.volumes` for that volume in the
+same transaction (when the report carries the host's volume store), so the deletion finishes then rather than at the
+next 30-second periodic pass, which remains the fallback. The events are
 `sandbox.volume.deleting` and `sandbox.volume.deleted`. Tenant teardown deletes a tenant's volumes after its instances.
 
 **Metering.** `vps.volume.gib.hours`, the size per hour, from the booking until it is released, by the `vps.usage`
@@ -909,8 +917,8 @@ Snapshot views carry `ownerIdentityId`, since only the owner can restore one.
 
 ## The reconciler
 
-`vps.sandboxes` runs every 15 seconds (`shardBy: 'none'`, one worker at a time), and `sandboxes.delete` and settled
-snapshot commands wake it. Each pass does six things:
+`vps.sandboxes` runs every 15 seconds (`shardBy: 'none'`, one worker at a time), and `sandboxes.delete`, settled
+snapshot commands and the deletion of a sandbox's instance (df4b371) wake it. Each pass does six things:
 
 1. **Snapshots.** Pending snapshots whose command ended are settled, as above.
 2. **Expiring.** A sandbox about to expire publishes `sandbox.expiring` with its `expiresAt`, once per expiry
@@ -1216,11 +1224,12 @@ API and FleetConfig do the same.
 | Layer | State |
 | --- | --- |
 | API, admission, TTL, warm pools, `env`, `network`, snapshots, exec trust, guard, teardown | Built and tested against PGlite with emulated host reports (`tests/vps-sandboxes.test.ts`, 33 tests; `tests/server-sandbox-exec.test.ts`) |
-| End to end | `tests/e2e/sandboxes.test.ts` runs the real server runtime and gateway with three FakeDaemon VPS hosts whose fake `cloud-hypervisor` pauses: a warm claim reaches `ready` without a placement (the paused instance resumes on the same node and allocation, booted once) and the pool refills to `warm.min`; 500 sandboxes (`E2E_SANDBOXES`) with a 60 s TTL expire on their own, each publishing `sandbox.expired` then `sandbox.deleted` once, with no leaks on hosts or in the database (domains, overlays, taps, IP leases, bookings, scalar claims) and the readiness and expiry series counted; a memory snapshot taken on one sandbox restores its guest memory into a new one (and the stored object goes with the sandbox); deleting a warm template drains its pool until the hosts are empty; `instances.stop`, `start` and `delete` on a sandbox's instance are refused `INVALID_STATE` naming the sandbox, and another tenant gets `NOT_FOUND` restoring from or reading the snapshot (bfb1d45). `tests/e2e/volumes.test.ts` (38405a0) runs the same shape over volumes: 240 sandboxes (`E2E_VOLUME_SANDBOXES`) churned over 12 volumes on three hosts with 150 GiB volume stores, through two host reboots, with no leak, no second writer, no overbooked store, and the last writer's data found by the next sandbox; see [volumes at scale](/docs/operations/testing#volumes-at-scale) |
+| End to end | `tests/e2e/sandboxes.test.ts` runs the real server runtime and gateway with three FakeDaemon VPS hosts whose fake `cloud-hypervisor` pauses: a warm claim reaches `ready` without a placement (the paused instance resumes on the same node and allocation, booted once) and the pool refills to `warm.min`; 500 sandboxes (`E2E_SANDBOXES`) with a 60 s TTL expire on their own, each publishing `sandbox.expired` then `sandbox.deleted` once, with no leaks on hosts or in the database (domains, overlays, taps, IP leases, bookings, scalar claims) and the readiness and expiry series counted; a memory snapshot taken on one sandbox restores its guest memory into a new one (and the stored object goes with the sandbox); deleting a warm template drains its pool until the hosts are empty; `instances.stop`, `start` and `delete` on a sandbox's instance are refused `INVALID_STATE` naming the sandbox, and another tenant gets `NOT_FOUND` restoring from or reading the snapshot (bfb1d45). `tests/e2e/volumes.test.ts` (38405a0) runs the same shape over volumes: 40 sandboxes by default and 240 in the nightly run (`E2E_VOLUME_SANDBOXES`, df4b371) churned over 12 volumes on three hosts with 150 GiB volume stores, through two host reboots, with no leak, no second writer, no overbooked store, and the last writer's data found by the next sandbox; see [volumes at scale](/docs/operations/testing#volumes-at-scale) |
+| Under `bcd helper` | `tests/e2e/helper-vps.test.ts` (1c9684a) runs 12 sandboxes (`E2E_HELPER_SANDBOXES`) on two FakeDaemon VPS hosts playing a bcd under `bcd helper` (`helperVpsHost()`: `cloud-hypervisor`, with `br0` as the one bridge of `[helper] instance_bridges`), through the real server runtime and gateway: the hosts carry the system label `bc.dev/driver.cloud-hypervisor` from their `Hello`, every sandbox reaches `ready` with its VMM running, their live usage (`bcd.instance.*`) is exported to the collector `nodeTelemetryModule` names and a guest's work shows up in its host's next export, and deleting them leaves no leak and no usage in the next export. On the Go side `TestCloudHypervisorUnderTheHelper` starts a VMM through root's `ch.*` operations and reads its usage as the node, with no `ch.*` call |
 | Volumes on the FakeDaemon | `FakeHypervisor` keeps host volumes as bcd does (38405a0): created or grown only with room in the store, never shrunk, one writer, kept across power loss, and reported in `StatusReport.volume_storage` when given a `volumeStore` |
 | Upgrade | `tests/sim/upgrade.test.ts` runs a sandbox on a VPS host through the v1.0 upgrade in place: it stays running with the same boot count and keeps its expiry |
 | FakeDaemon `FakeHypervisor` | Boots then pauses on a desired `PAUSED`, resumes without a reboot, runs `instance.snapshot` and carries guest memory to a restored domain, records the network policy without enforcing it |
-| bcd | The `instances` converger, `instance.snapshot` and `restore_from`, instance `ssh` tunnels, and the `network` policy as host nftables rules (Go unit tests). A host build with `virsh` runs `libvirt-kvm` (362317c): paused warm instances (`virsh suspend`), snapshots as a tar of the flattened disk, the seed and `virsh save`'s memory state, restores that refuse another runtime or CPU model; tested against a fake `virsh` and `qemu-img` only. A host build with the `cloud-hypervisor` binary runs `cloud-hypervisor` (2598f0a): paused warm instances (`vm.pause`), snapshots as a tar of the flattened disk, the seed and cloud-hypervisor's own snapshot of the paused VM, restores with the snapshot's configuration rebuilt from an allowlist around the new instance's disks, taps and console, refusing another runtime, CPU model, or vCPU and memory size; each VMM in a confined `bcd-ch-<id>.service` unit with its taps bridged before it starts (security review 12, fixed in 933c51b); tested against a fake VMM API only. Both runtimes refuse a tenant image or restored snapshot that names a backing file or an external data file. A template's `runtime` is its pool's, so a sandbox runs on `cloud-hypervisor` only in a pool whose runtime is `cloud-hypervisor`, on hosts that have it. fakehw builds run a file-backed runtime, and a bcx plugin can serve one (none is written; plugin runtimes take no snapshots) |
+| bcd | The `instances` converger, `instance.snapshot` and `restore_from`, instance `ssh` tunnels, and the `network` policy as host nftables rules (Go unit tests). A host build with `virsh` runs `libvirt-kvm` (362317c): paused warm instances (`virsh suspend`), snapshots as a tar of the flattened disk, the seed and `virsh save`'s memory state, restores that refuse another runtime or CPU model; tested against a fake `virsh` and `qemu-img` only. A host build with the `cloud-hypervisor` binary runs `cloud-hypervisor` (2598f0a): paused warm instances (`vm.pause`), snapshots as a tar of the flattened disk, the seed and cloud-hypervisor's own snapshot of the paused VM, restores with the snapshot's configuration rebuilt from an allowlist around the new instance's disks, taps and console, refusing another runtime, CPU model, or vCPU and memory size; each VMM in a confined `bcd-ch-<id>.service` unit with its taps bridged before it starts (security review 12, fixed in 933c51b); tested against a fake VMM API only. Both runtimes refuse a tenant image or restored snapshot that names a backing file or an external data file. A template's `runtime` is its pool's, so a sandbox runs on `cloud-hypervisor` only in a pool whose runtime is `cloud-hypervisor`. Since 0fca413 it also lands only on a host whose bcd advertised `cloud-hypervisor` in `Hello` (the node label `bc.dev/driver.cloud-hypervisor`), built-in runtimes included: a host without the binary, or under `bcd helper` before 7fe74a1, does not advertise it, and a sandbox with no such host stays `starting`, its instance `Unschedulable` with a message naming the label (`tests/vps-sandboxes.test.ts`). fakehw builds run a file-backed runtime, and a bcx plugin can serve one (none is written; plugin runtimes take no snapshots) |
 | Provider pools | Not allowed for sandboxes |
 
 On a host whose bcd runs no instance runtime (no `virsh`, no `cloud-hypervisor`, no runtime plugin), a sandbox's instance is placed but

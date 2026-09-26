@@ -188,6 +188,8 @@ checkbox appears only for a pool the tenant owns that has `policy.kubernetes`.
   CPU, memory and 1 GiB pages with the GPUs, or the pool's per-GPU share when left out (see
   [host resources](/docs/guides/capacity/reservations#host-resources)). `capacity.preview` books the same host
   resources, so a preview that fits is a create that fits (17f600b).
+- It places only on nodes whose bcd advertises `binding.kubernetes` (and `devices.limits` when it books host
+  resources), since an older bcd would drop the binding; see [older daemons](#older-daemons).
 - An agent can ask for it too: the [MCP](/docs/guides/clients/mcp) tools `reserve_gpus` and `preview_reservation`
   take `kubernetes: true` (binding `kubernetes`), with optional `vcpu` and `memoryGiB`.
 - At the start, the node's spec gains a device assignment with `BINDING_KUBERNETES`. bcd binds it like a hold: it
@@ -457,6 +459,23 @@ parent in its CDI spec or env. The booked `resources` still count: bcd's host ad
 memory and huge pages beside the VMs and other holds, and refuses a hold that does not fit with `resources-exhausted`,
 which the control plane re-places (see [device assignments](/docs/daemon/delivery#device-assignments)). Size the pods'
 requests to the reservation yourself; compute does not write them.
+
+## Older daemons
+
+A bcd from before 409f783 does not know `BINDING_KUBERNETES` or `DeviceAssignment.limits` and drops both as unknown
+fields: the GPUs of a Kubernetes reservation would never reach the kubelet (they would fail as an unsupported binding
+only after placement), and a host share would run unbounded. A GPU host's bcd now advertises two capabilities in its
+`Hello`, which the gateway writes as system labels (see [capabilities](/docs/daemon/sessions#hello)):
+
+| Capability | System label | Capacity requires it for |
+| --- | --- | --- |
+| `binding.kubernetes` | `bc.dev/cap.binding.kubernetes` | Any reservation with `binding: 'kubernetes'` |
+| `devices.limits` | `bc.dev/cap.devices.limits` | Any reservation that books host resources, which a Kubernetes reservation does by default (the pool's per-GPU share) |
+
+Placement enforces them on create, on re-placing a pending reservation, on repairing a booking and in
+`capacity.preview`, so in a pool whose nodes run mixed bcd versions a Kubernetes reservation lands only on upgraded
+nodes, and waits `pending` when none fits. An operator-set label of the same name does not count. A host without GPUs
+advertises neither.
 
 ## What is missing
 

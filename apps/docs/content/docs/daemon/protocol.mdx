@@ -343,7 +343,13 @@ Refusals that end a stream use gRPC status codes:
 the highest version inside both ranges (`negotiateProtocolVersion`) and returns it in `Welcome.protocol_version`,
 along with its own capabilities. It also stores the daemon's capabilities as `node_sessions.capabilities`, so the API
 can refuse what an old daemon cannot do safely: `tunnels.open` opens an instance `ssh` or `tcp` tunnel only when the
-node advertises `tunnel.instance-dial` (see [sessions](/docs/daemon/sessions#hello)). Today both sides speak exactly version 1 (`PROTOCOL_VERSION = { min: 1, max: 1 }`
+node advertises `tunnel.instance-dial` (see [sessions](/docs/daemon/sessions#hello)). The gateway also writes each
+capability as the system node label `bc.dev/cap.<name>=1`, and placement gates on those labels so an older bcd never
+gets a spec field it would drop as unknown: vps places instances that need `instance.network-policy`,
+`instance.ssh-host-only`, `instance.placement` or `instance.volumes` only where they are advertised, and capacity
+places reservations that book host resources only on `devices.limits` nodes and `binding: 'kubernetes'` ones only on
+`binding.kubernetes` nodes (409f783). A plain GPU hold without host resources needs no capability and still places on
+an N-2 daemon. Today both sides speak exactly version 1 (`PROTOCOL_VERSION = { min: 1, max: 1 }`
 in TypeScript, `ProtoMin` and `ProtoMax` in Go). When the ranges do not overlap, the daemon is below the server's
 minimum: `Welcome.upgrade_required` is set, `Welcome.protocol_version` is the gateway's minimum, no desired state or
 command other than `daemon.upgrade` is sent, and the FakeDaemon and bcd reject anything else `UNSUPPORTED`. bcd

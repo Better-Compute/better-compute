@@ -256,9 +256,9 @@ the label `bc.dev/driver.<id>=<version>` with source `system` (a missing version
 `[a-z0-9._-]` are skipped), and driver labels the daemon no longer advertises are dropped, in one statement that
 writes nothing when they did not change. Operators cannot overwrite them either. Placement can require them with
 `PlacementRequest.nodeLabels`, where `'*'` accepts any version (see
-[placement](/docs/guides/capacity/placement#eligibility-filters)). The vps module does this for plugin runtimes: an
-instance whose runtime is not built into `bcd` (`libvirt-kvm`, `cloud-hypervisor`) is placed only on hosts carrying
-`bc.dev/driver.<runtime>`.
+[placement](/docs/guides/capacity/placement#eligibility-filters)). The vps module does this for every runtime: a hosted
+instance is placed only on hosts carrying `bc.dev/driver.<runtime>`, bcd's built-in `libvirt-kvm` and
+`cloud-hypervisor` included since 0fca413 (before, only plugin runtimes needed it).
 
 Since 14ceb1e the same statement also writes one label per kind each advertised driver serves,
 `bc.dev/driver-kind.<id>.<kind>=1` (a site agent hosting `bcx-ipmi` carries `bc.dev/driver-kind.ipmi.power`,

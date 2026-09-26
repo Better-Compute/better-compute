@@ -205,8 +205,8 @@ every plugin it runs [sandboxed](/docs/extending/drivers#the-plugin-sandbox): un
 seccomp filter that refuses mounts, namespaces, `bpf` and module loading, so a runtime that needs them (Kata) must be
 named in `[plugins] privileged`, which runs it as root without the filter. Go
 unit tests (`pluginruntime_test.go`) cover it; no Kata plugin exists yet. The control-plane half is in place: the gateway writes each driver a daemon advertises in
-`Hello.drivers` as the node label `bc.dev/driver.<id>=<version>`, and vps places an instance whose runtime is not built
-into bcd only on nodes carrying `bc.dev/driver.<runtime>` (`runtimeNodeLabels`, through
+`Hello.drivers` as the node label `bc.dev/driver.<id>=<version>`, and vps places an instance, whatever its runtime (bcd's
+built-ins too since 0fca413), only on nodes carrying `bc.dev/driver.<runtime>` (`runtimeNodeLabels`, through
 `PlacementRequest.nodeLabels`; see [placement](/docs/guides/capacity/placement#eligibility-filters)). See
 [drivers](/docs/extending/drivers#driver-plugins-in-bcd).
 

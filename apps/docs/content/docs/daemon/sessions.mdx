@@ -23,6 +23,9 @@ sources:
   - daemon/internal/journal/rules.go
   - daemon/internal/agent/conn.go
   - bench/gateway-streams/README.md
+  - daemon/internal/agent/netpolicy.go
+  - daemon/internal/agent/capabilities_test.go
+  - packages/capacity/src/reservations.ts
   - PLAN.md
 ---
 
@@ -120,7 +123,8 @@ at its next session. The API reads the column to refuse what the connected daemo
 | --- | --- | --- |
 | `tunnel.instance-dial` | `tunnels.open` | The daemon dials an instance's own address for instance `ssh` and `tcp` tunnels. Without it those tunnels are `UNSUPPORTED` with details `{ reason: 'daemon-capability', capability }`; `exec` and node consoles are not affected |
 
-On a node with GPUs, bcd advertises the capabilities `cdi` and `nvml` and the driver `nvidia`, and a node agent
+On a node with GPUs, bcd advertises the capabilities `cdi`, `devices.limits` and `binding.kubernetes` (409f783),
+`nvml` when its inventory reports a CUDA driver version, and the driver `nvidia`, and a node agent
 lists each built-in instance runtime it runs as a driver of kind `runtime` (`libvirt-kvm`: on a host build with
 `virsh`, the libvirt runtime of 362317c, and on a fakehw build its file-backed runtime; `cloud-hypervisor`: on a host
 build with the `cloud-hypervisor` binary, 2598f0a); a runtime a bcx plugin serves
@@ -141,6 +145,20 @@ instance that needs one only on nodes carrying its label, so an older bcd that w
 | `instance.volumes` | An instance that attaches [sandbox volumes](/docs/guides/vps/sandboxes#volumes) (82f4f51) |
 
 The FakeDaemon advertises all four when it plays a VPS host.
+
+A GPU host's bcd advertises what it enforces for device assignments the same way (409f783), and capacity's placement
+requires the label on create, re-place, repair and `capacity.preview`:
+
+| Capability | Label capacity requires it for |
+| --- | --- |
+| `devices.limits` | A reservation that books host resources (`vcpu`, `memoryGiB`, `hugepages1Gi`, or the pool's per-GPU share): bcd enforces `DeviceAssignment.limits` as the hold's cgroup slice. See [host resources](/docs/guides/capacity/reservations#host-resources) |
+| `binding.kubernetes` | A reservation with `binding: 'kubernetes'`: bcd hands the devices to the kubelet and reports their release only once no pod holds them. See [older daemons](/docs/guides/capacity/kubernetes#older-daemons) |
+
+An older bcd drops both fields as unknown, so these keep it from getting a reservation it would run without limits or
+never hand to the kubelet. A plain GPU hold without host resources, and a `node` binding, need neither, so they still
+place on older daemons (N-2 skew). Capacity counts a `bc.dev/` label only when its source is `system`: an operator
+label of the same name does not stand in for the capability. The FakeDaemon advertises both for GPU hosts unless a
+skew profile or `capabilities` gives its list explicitly.
 
 ### The Hello transaction
 

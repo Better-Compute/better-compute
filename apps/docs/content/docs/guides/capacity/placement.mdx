@@ -19,6 +19,7 @@ sources:
   - tests/capacity-pipeline.test.ts
   - tests/capacity-placer.test.ts
   - tests/capacity-shortlist.test.ts
+  - packages/capacity/src/reservations.ts
   - PLAN.md
 ---
 
@@ -164,12 +165,21 @@ reads the locked nodes' labels again (bb6da07, in `commitPlan` and `commitPlansB
 between, such as a capability a downgraded daemon no longer advertises, makes that commit a lost race, and the placer
 replans without the node. A value of `'*'` (`anyLabelValue`) asks only for the label to exist, whatever its value,
 on every path. The capacity API does not take `nodeLabels` from callers; a module sets it on the requests it builds
-through the capacity port. The vps module does (PLAN.md's walkthrough 4): a hosted instance whose runtime `bcd` does
-not build in (anything but `libvirt-kvm` and `cloud-hypervisor`, which host builds run when `virsh` or the `cloud-hypervisor` binary is installed) asks for `bc.dev/driver.<runtime>: '*'`
-(`runtimeNodeLabels`), so a plugin runtime such as `firecracker` lands only on hosts whose daemon advertised that
-driver, in any version. The two built-ins ask for no label, although a host build runs each only when its tool is
-installed, so give every host of a pool the pool's runtime: an instance placed on a host without it fails there
-(`runtime <id> is not installed on this host`).
+through the capacity port. The vps module does (PLAN.md's walkthrough 4): every hosted instance asks for
+`bc.dev/driver.<runtime>: '*'` (`runtimeNodeLabels`), so it lands only on hosts whose daemon advertised that runtime,
+in any version. Since 0fca413 that includes bcd's built-ins, `libvirt-kvm` and `cloud-hypervisor`, which a host build
+runs (and advertises) only when `virsh` or the `cloud-hypervisor` binary is installed, and `cloud-hypervisor` under
+`bcd helper` only since 7fe74a1; before, the built-ins asked for no label and an instance could be placed on a host
+without its runtime. A host that does not advertise the runtime is passed over, and with none left the instance is
+`Unschedulable` with a message naming the label.
+
+Capacity sets `nodeLabels` on its own reservations too (409f783, `requiredCapabilities`): a reservation that books host
+resources asks for `bc.dev/cap.devices.limits: '*'`, and one with `binding: 'kubernetes'` for
+`bc.dev/cap.binding.kubernetes: '*'`, the capabilities a GPU host's bcd advertises in `Hello` when it enforces
+`DeviceAssignment.limits` and serves Kubernetes bindings. A `node` binding asks for neither. It applies on create,
+re-place, repair and `capacity.preview`, where a node without the label is rejected with filter `labels`. Capacity
+reads a `bc.dev/` label only when its source is `system`, so an operator cannot fake a capability. See
+[capabilities](/docs/daemon/sessions#hello).
 
 ## Device fit and selectors
 

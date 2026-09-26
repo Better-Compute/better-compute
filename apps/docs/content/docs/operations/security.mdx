@@ -504,7 +504,10 @@ A sandbox is a tenant VM for code you do not trust, often written by an agent. T
 - **Capability labels are bcd's alone** (c1fd430, 0ff3ded, 736d3e5; review L11). The `bc.dev/` labels above, and the
   `bc.dev/driver.*` and `bc.dev/driver-kind.*` labels, are what bcd advertises, written by the gateway with source
   `system`. An operator could otherwise forge one and land sandboxes, placed flavors or volumes on a bcd that does
-  not enforce them. So [`nodes.label`](/docs/reference/api/nodes#label) refuses to set or remove any `bc.dev/` key,
+  not enforce them. Since 409f783 the same goes for GPU reservations: capacity books host resources only on nodes
+  labelled `bc.dev/cap.devices.limits` and binds `kubernetes` reservations only on `bc.dev/cap.binding.kubernetes`
+  ones, since an older bcd would run the hold without its CPU and memory limits (see
+  [capabilities](/docs/daemon/sessions#hello)). So [`nodes.label`](/docs/reference/api/nodes#label) refuses to set or remove any `bc.dev/` key,
   and every reader counts a `bc.dev/` label only with source `system`: placement (the node labels it reads and the
   exact shortlist), metal's driver kinds for a site's BMC drivers, provision's `when:` expressions and the host spec
   it builds, and the vps self-check that trusts `bc.dev/cap.instance.network-policy`. A `Hello` whose `bc.dev/`

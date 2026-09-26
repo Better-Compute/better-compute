@@ -413,7 +413,9 @@ another node's allocation is ignored like an unknown one. A report that arrives 
 those devices as `bcd.dev/gpu`, `bcd.dev/gpu.mig` or `bcd.dev/gpu.slot` until the reservation ends. It needs a pool
 with `policy.kubernetes` (`INVALID_INPUT` otherwise), and only the pool's owner may book it (3825ec7): the kubelet
 gives bound GPUs to any pod of the cluster, so a tenant the pool is merely offered to gets `INVALID_INPUT` and books
-holds instead. See [Kubernetes workers](/docs/guides/capacity/kubernetes).
+holds instead. It places only on nodes whose bcd advertises the `binding.kubernetes` capability (system label
+`bc.dev/cap.binding.kubernetes`, 409f783): an older bcd drops `BINDING_KUBERNETES`, and its GPUs would never reach the
+kubelet. See [Kubernetes workers](/docs/guides/capacity/kubernetes#older-daemons).
 
 ### Host resources
 
@@ -445,6 +447,18 @@ A reservation can book a host's CPUs, memory and 1 GiB huge pages with its GPUs 
   the reservation.
 - **Preview.** `capacity.preview` books the same host resources as `reservations.create` would, the request's or the
   pool's per-GPU share, so a preview that fits is a create that fits (17f600b); a `node` binding books none.
+- **Only on a bcd that enforces them** (409f783). An older bcd drops `DeviceAssignment.limits` as an unknown field and
+  would run the workload unbounded, so a reservation that books any host resource (a non-zero `vcpu`, `memoryGiB` or
+  `hugepages1Gi`, including the per-GPU share) places only on nodes with the system label
+  `bc.dev/cap.devices.limits`, which the gateway writes from the `devices.limits` capability a GPU host's bcd
+  advertises in `Hello` (see [capabilities](/docs/daemon/sessions#hello)). An operator label of the same name does not
+  count: capacity reads `bc.dev/` labels only when their source is `system`. The requirement applies to create, to
+  re-placing a pending reservation, to repairing a booking and to `capacity.preview` (a node without the label is
+  rejected with filter `labels`, `needs label bc.dev/cap.devices.limits=*`); the placer also re-reads the labels under
+  lock when it commits, so a daemon downgraded between plan and commit is caught. When no advertising node fits, the
+  reservation waits `pending` like any other. A plain GPU hold that books no host resources (a pool whose hosts have no
+  resource rows) needs no capability, so it still places on older daemons within the N-2 skew window, as does a
+  `node` binding.
 - **From the CLI and the console.** `better-compute reserve` and `better-compute capacity --preview` take `--cpus`
   (0 to 4096) and `--memory` (GiB, 0 to 65,536), sent as `resources`, and `--kubernetes` for `binding: 'kubernetes'`
   (ea36a94). `@better-compute/console-kit`'s reservation form takes the same three as `vcpu`, `memoryGiB` and

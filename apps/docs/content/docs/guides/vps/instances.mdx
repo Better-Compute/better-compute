@@ -556,10 +556,12 @@ plugin (a Kata runtime is PLAN.md's walkthrough 4) is written yet; see
 [walkthrough 4](/docs/extending/walkthroughs#walkthrough-4-a-kata-runtime-over-bcx). `vps({ runtimes })` only names the ids: the first one is recorded on every new
 hosted instance and sent in its spec.
 
-The control plane already places plugin runtimes correctly: an instance whose runtime is not one of bcd's built-ins
-(`bcdBuiltinRuntimes`: `libvirt-kvm`, `cloud-hypervisor`) is placed only on hosts carrying the node label
-`bc.dev/driver.<runtime>`, in any version (`runtimeNodeLabels`). The gateway writes that label from the drivers a
-daemon advertises in `Hello`; see [placement](/docs/guides/capacity/placement#eligibility-filters).
+A hosted instance is placed only on hosts carrying the node label `bc.dev/driver.<runtime>`, in any version
+(`runtimeNodeLabels`), for plugin runtimes and, since 0fca413, for bcd's built-ins (`libvirt-kvm`,
+`cloud-hypervisor`) too. The gateway writes that label from the drivers a daemon advertises in `Hello`; every bcd
+since v0.3 (fab94d4) advertises each runtime it runs, and runs one only where its tools are (`cloud-hypervisor` under
+`bcd helper` only since 7fe74a1). A pool with no host advertising the runtime leaves the instance `Unschedulable`,
+with a message naming the missing label; see [placement](/docs/guides/capacity/placement#eligibility-filters).
 
 ## Events
 

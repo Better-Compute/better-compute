@@ -346,9 +346,13 @@ A domain whose usage cannot be read is left out of the live series. Plugin runti
 build's file-backed runtime reports synthetic usage (half the configured memory, a second of CPU per boot). Under
 [`bcd helper`](/docs/daemon#privilege-separation) `libvirt-kvm` reads `domstats` on libvirt's read-only socket
 (since 12e9ced; before it the read was refused there), and `cloud-hypervisor`, offered there since 7fe74a1, reads
-the same cgroup and tap counters as the node's own user (no test covers those reads under the helper). The series are
-tested against a fake `/proc`, sysfs, cgroup tree and captured `domstats` output
-(`internal/agent` `telemetry_host_test.go`, `internal/runtime` `usage_test.go`).
+the same cgroup and tap counters as the node's own user, with no `ch.*` operation: since 1c9684a
+`TestCloudHypervisorUnderTheHelper` (`internal/runtime`) reads a helper-started domain's usage from a fake cgroup tree
+and tap statistics and checks that root was asked nothing. The series are tested against a fake `/proc`, sysfs,
+cgroup tree and captured `domstats` output (`internal/agent` `telemetry_host_test.go`, `internal/runtime`
+`usage_test.go`). On the control-plane side, `tests/e2e/helper-vps.test.ts` runs sandboxes on FakeDaemon VPS hosts
+under the helper and checks that their `bcd.instance.*` usage reaches the collector `nodeTelemetryModule` names, and
+leaves the next export once they are deleted (see [testing](/docs/operations/testing)).
 
 GPU points carry `gpu.uuid`, `gpu.index` and `gpu.model`. The resource carries `service.name=bcd`,
 `service.version`, `host.name`, `bcd.node.id` and `bcd.site.id`, then the section's own attributes (which cannot

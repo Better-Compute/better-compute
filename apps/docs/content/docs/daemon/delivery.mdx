@@ -241,6 +241,13 @@ fit fails with `AllocationFailed{reason: resources-exhausted}`, and the control 
 the bound holds in turn, so VMs and holds never take what the other was promised. A Kubernetes hold's booked limits
 count here too, although it has no slice. A host whose memory cannot be read binds without the check, with a warning.
 
+**Capabilities** (409f783). An older bcd drops `DeviceAssignment.limits` and `BINDING_KUBERNETES` as unknown fields,
+so a hold would run without its limits, or a Kubernetes reservation's GPUs would fail as `unsupported-binding` only
+after placement. On a GPU host bcd's `Hello` therefore advertises `devices.limits` and `binding.kubernetes`, which the
+gateway writes as `bc.dev/cap.<name>` system labels, and capacity places a reservation that books host resources only
+on `devices.limits` nodes and a `binding: 'kubernetes'` one only on `binding.kubernetes` nodes (see
+[capabilities](/docs/daemon/sessions#hello)). A plain GPU hold without limits still goes to older daemons.
+
 Under [privilege separation](/docs/daemon#privilege-separation) (`[helper] socket` set, 28dc2ae) the converger does
 the same work through `bcd helper`: the node asks for a `file.write` or `file.remove` of kind `cdi` or
 `allocation-env` with the allocation id, and the root helper builds the path itself; a hold's slice is
@@ -369,7 +376,9 @@ key: `virsh` turns on `libvirt-kvm` (`runtime.Libvirt`, 362317c; files under `da
 `cloud-hypervisor` binary turns on `cloud-hypervisor` (`runtime.CloudHypervisor`, 2598f0a; files under
 `data_dir/cloud-hypervisor`). A host with both runs both. Each instance names its runtime in its spec
 (`InstanceSpec.runtime`, which the control plane takes from the pool), and an instance whose runtime this host lacks
-fails with `runtime <id> is not installed on this host`.
+fails with `runtime <id> is not installed on this host`. Since 0fca413 the control plane does not send one there:
+bcd advertises each runtime it runs in `Hello` (the node label `bc.dev/driver.<runtime>`), and vps places a hosted
+instance only on hosts carrying its runtime's label.
 
 | Concern | `libvirt-kvm` | `cloud-hypervisor` |
 | --- | --- | --- |

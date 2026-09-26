@@ -66,6 +66,10 @@ sources:
   - packages/testing/src/daemon/instances.ts
   - tests/e2e/volumes.test.ts
   - tests/testing-daemon-instances.test.ts
+  - packages/testing/src/daemon/profiles.ts
+  - tests/e2e/helper-vps.test.ts
+  - tests/testing-helper-vps-host.test.ts
+  - tests/testing-fake-daemon.test.ts
 ---
 
 import { Activity, Scale, Terminal } from '@/lib/icons';
@@ -298,6 +302,52 @@ does, so a FakeDaemon VPS host can stand in for bcd in volume tests:
 
 `tests/testing-daemon-instances.test.ts` has the unit test.
 
+**A VPS host under `bcd helper`** (1c9684a). The FakeDaemon plays the control-plane side of a bcd that runs
+unprivileged under [`bcd helper`](/docs/daemon#privilege-separation), with `cloud-hypervisor` through root's `ch.*`
+operations:
+
+- **Runtimes in `Hello`.** A FakeDaemon with `instances` lists each of its `FakeHypervisor`'s runtimes as a driver
+  manifest of kind `runtime` (`runsOn: NODE`, its daemon version), as bcd does for its built-ins, so the gateway labels
+  the node `bc.dev/driver.<runtime>`. An explicit `drivers` option replaces the list.
+- **`FakeHypervisorOptions.helper: { instanceBridges }`** plays `[helper] instance_bridges`: a NIC on any other
+  bridge (an empty list refuses every NIC) fails its instance in the helper's words, `libvirt-kvm` before the domain
+  exists (`domain: bridge "…" is not an instance network`) and `cloud-hypervisor` when it starts (`ch.taps: "…" is not
+  an instance bridge of this host ([helper] instance_bridges)`). `helperVpsHost(options?)` is the preset:
+  `{ runtimes: ['cloud-hypervisor'], helper: { instanceBridges: ['br0'] } }`, merged under `options`.
+- **Live usage.** `FakeHypervisor.usage()` returns each domain's usage as bcd's `runtime.UsageReader`s read it:
+  `cloud-hypervisor`'s managed domains that are running or paused, `libvirt-kvm`'s running ones, none for other
+  runtimes. The default is fakehw's synthetic usage (a CPU second per boot, half the configured memory, zero I/O and
+  network); `setUsage(instanceId, usage)` merges `cpuSeconds`, `memoryBytes`, `ioReadBytes`, `ioWriteBytes`,
+  `netRxBytes` and `netTxBytes` over it (`FakeUsage`), and the domain's next boot clears it.
+- **`FakeDaemonOptions.telemetry: { export(batch) }`** receives the OTLP export the `telemetry` section runs, never
+  over the Session. While the section names an `otlp_endpoint`, the FakeDaemon exports once when the section applies,
+  then every `export_interval_ms` (default 60 s, at least 5 s); an unchanged section keeps its export and interval, a
+  changed one restarts it, and an empty endpoint stops it. Each `FakeTelemetryExport` has `nodeId`, `endpoint`, `at`,
+  a `resource` (the section's `resource_attributes`, then `service.name=bcd`, `service.version` and `bcd.node.id`,
+  which win) and `metrics` from `instanceMetrics()`: `bcd.instances`, `bcd.instance.vcpu`, `bcd.instance.memory` and
+  the live `bcd.instance.cpu.time`, `memory.used`, `io.read`, `io.write`, `network.receive` and `network.transmit`
+  (`FakeMetric`, `FakeMetricPoint`). `headers_ref` is not fetched, and the GPU and host series are not modelled.
+  Without the option nothing is exported; the section converges either way.
+- **`DevJoinOptions.daemon`** gives one `dev.join` its own FakeDaemon options over the stack's, such as
+  `{ instances: helperVpsHost() }` for helper hosts beside root ones. A `FakeHypervisor` instance passed there would be
+  shared by every machine of the join, so pass options.
+
+`tests/testing-helper-vps-host.test.ts` covers these on a harness. `tests/e2e/helper-vps.test.ts` runs 12 sandboxes
+(`E2E_HELPER_SANDBOXES`) on two helper hosts through the whole stack, with `nodeTelemetryModule` pointing the hosts at
+a fake collector: both hosts carry the system label `bc.dev/driver.cloud-hypervisor`, every sandbox reaches `ready`,
+each host's next export carries its sandboxes' usage, a guest's `setUsage` shows up in the export after, and deleting
+them leaves no leak and no usage in the next export.
+
+Since 0fca413 vps places every hosted instance, built-in runtimes included, only on a host carrying
+`bc.dev/driver.<runtime>`, so these labels are what lets the sandboxes place at all. The PGlite vps suites seed the
+labels a current bcd's `Hello` writes, and `tests/vps-sandboxes.test.ts` checks that a `cloud-hypervisor` sandbox
+waits, `Unschedulable` naming the label, until a host advertises the runtime.
+
+**Device capabilities.** A FakeDaemon with GPUs advertises `cdi`, `nvml`, `devices.limits` and `binding.kubernetes`
+(409f783, 2782094), so capacity places host-resource and Kubernetes reservations on it. A skew profile or an explicit
+`capabilities` list replaces the defaults, so an older-bcd profile gets neither, as it should (see
+[capabilities](/docs/daemon/sessions#hello)).
+
 ### Volumes at scale
 
 `tests/e2e/volumes.test.ts` (38405a0) is the v0.5 zero-leak churn applied to volumes, the "agent memory" of PLAN.md
@@ -308,7 +358,8 @@ does, so a FakeDaemon VPS host can stand in for bcd in volume tests:
    system-sourced `bc.dev/cap.instance.volumes` label.
 2. It creates 12 volumes concurrently, then an over-asking round, some of which must fail `CAPACITY_UNAVAILABLE`.
 3. It makes a read-write template per volume and shared read-only ones.
-4. It churns `E2E_VOLUME_SANDBOXES` sandboxes (240 by default): created (some refused `CONFLICT` beside a live
+4. It churns `E2E_VOLUME_SANDBOXES` sandboxes (40 by default since df4b371; the nightly `guarded` job sets 240):
+   created (some refused `CONFLICT` beside a live
    writer), deleted, expiring at 60 s, writing markers, volumes growing, two host reboots and two volumes retired.
 
 Mid-churn and at the end it checks that:
@@ -321,9 +372,16 @@ Mid-churn and at the end it checks that:
 - the markers are on the hosts, and a new sandbox of a volume's template finds the last writer's marker after the
   reboots.
 
-Deleting everything leaves no host volume and no volume booking. At 240 sandboxes the run takes about 9 minutes; it
-passed the first time, with nothing to fix in vps. Its hosts are FakeDaemons; bcd's own volume handling is covered
-by its Go tests (see [the Go daemon](#the-go-daemon)).
+Deleting everything leaves no host volume and no volume booking. It passed the first time, but at 240 sandboxes it
+took about 9 minutes, much of it deletions waiting on periodic passes: a deleted
+sandbox stayed `deleting` for up to 15 seconds, until the next `vps.sandboxes` pass, and a deleted volume up to 30
+seconds, until the next `vps.volumes` pass. Since df4b371 both finish when their instance or host does: the instance
+reconciler wakes `vps.sandboxes` when it deletes a sandbox's instance, and the volume-store status handler wakes
+`vps.volumes` for each `deleting` volume whose host has applied a later spec, in the same transaction (see
+[sandboxes](/docs/guides/vps/sandboxes#read-extend-and-delete)). The run now takes about 43 seconds at 240 sandboxes
+and 11 at 40, so the default suite runs 40 and the nightly `guarded` job (`.github/workflows/nightly.yml`) sets
+`E2E_VOLUME_SANDBOXES=240`. Its hosts are FakeDaemons; bcd's own volume handling is covered by its Go tests (see
+[the Go daemon](#the-go-daemon)).
 
 ## The Go daemon
 
@@ -396,7 +454,7 @@ sockets. Only `TestRealKernel` touches a real kernel.
 | `internal/agent`, `internal/runtime` volume tests | Persistent volumes: sparse, grown and never shrunk, discarded; attached in order by serial; one writer, handoffs within a pass, what running VMs have open; grown volumes told to running guests (550da91, b5415a2, 448dc5f, 39458f9, 408e002) |
 | `internal/kube` `TestHostedManager`, `TestDRADriver`, `TestResourceSliceV1beta1`, `TestUnhealthyDevicesAreNeverOffered` | Hosted mode's device plugins and `bcd.dev/*` labels without a join (1e5f96b); the DRA driver's registration, slice, prepare and reaper (7d24836, fa8611e); an unhealthy GPU never offered by either API (6f5a99f) |
 | `cmd/bcd` `TestResourceChecks`, `TestHelperRuntimeChecks` | `bcd doctor`'s cgroup, huge page, `vfio-pci` and systemd checks (ab26e87), and the `libvirt` and `cloud-hypervisor` checks under the helper: the node out of the `libvirt` group, `dynamic_ownership = 0` and QEMU's user in the node's group (ed3c7d2), and `cloud-hypervisor` warning without `[helper] instance_bridges` (7fe74a1) |
-| `cmd/bcd` `TestAnUnprivilegedNodesRuntimes`, `internal/helper` `ch_test.go`, `internal/runtime` `TestCloudHypervisorUnderTheHelper`, `TestCHRecordRefusals` | `cloud-hypervisor` under the helper against fakes (d86fcbe, 7fe74a1, 94843ec): both runtimes kept for an unprivileged node, taps only of bcd's names on allowed bridges, a launch never taking another running unit's uid, VFIO only for whole groups of this host's GPUs and never a group another running VMM's user owns, root's checks of the instance record |
+| `cmd/bcd` `TestAnUnprivilegedNodesRuntimes`, `internal/helper` `ch_test.go`, `internal/runtime` `TestCloudHypervisorUnderTheHelper`, `TestCHRecordRefusals` | `cloud-hypervisor` under the helper against fakes (d86fcbe, 7fe74a1, 94843ec): both runtimes kept for an unprivileged node, taps only of bcd's names on allowed bridges, a launch never taking another running unit's uid, VFIO only for whole groups of this host's GPUs and never a group another running VMM's user owns, root's checks of the instance record; since 1c9684a the running domain's live usage (CPU time, memory, tap counters) read from its cgroup and taps as the node, with no `ch.*` operation |
 | `internal/agent` `TestNodeKeyInTheTPM`, `internal/tpm` `TestNodeKey`, `cmd/bcd` `TestUserCanOpen` | The node key in `tpmsim` (965c14d, 50e18f9, 0ba2a79): a join stores only the record, the key loads again, node statements verify under the certificate's key and `kid`, renewal makes the next key in the TPM (and moves a file-key node there), no TPM means no load; SHA-256 and -384 signatures, a CSR, `TPM2_Certify` by the AK; whether the helper's user can open the TPM device |
 | `internal/agent` `TestResolveAtomNamesParentsAndWhatTheDriverSees`, `TestHoldConflictsAcrossWholeGPUsPartsAndVMs`, `TestCDISpecOfPartsAndLimits` | MIG and slot atoms resolved against the inventory, parent-aware conflicts and the VM passthrough guard, CDI names without `/`, the slice annotation and env, one `NVIDIA_VISIBLE_DEVICES` per hold (46a61db, d02ba4f) |
 | `internal/slice`, `internal/agent` slice tests | The hold slice's systemd properties and hugetlb limits, the name and cpulist checks, removal only once empty (1d03c28, 260e33c) |
