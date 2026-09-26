@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/converge"
@@ -65,6 +66,8 @@ const (
 type hold struct {
 	deviceIDs  []string
 	generation uint64
+	// kubernetes: a Kubernetes binding (its release waits for the pods, kuberelease.go).
+	kubernetes bool
 }
 
 // devicesConverger materializes DevicesSection (PLAN.md §3.4, P6): it releases holds no longer
@@ -81,6 +84,10 @@ type devicesConverger struct {
 	// the instances converger under mu).
 	mu     sync.Mutex
 	limits map[string]*agentv1.ResourceLimits
+	// Kubernetes releases (kuberelease.go): inUseHook replaces kube's InUse in tests; recheck is the
+	// pending backstop pass.
+	inUseHook func(ctx context.Context, allocationID string) bool
+	recheck   *time.Timer
 }
 
 func (d *devicesConverger) setLimits(id string, l *agentv1.ResourceLimits) {
@@ -134,16 +141,34 @@ func (d *devicesConverger) Plan(ctx context.Context, desired []byte) ([]converge
 		}
 	}
 	sort.Strings(released)
+	// Kubernetes releases pending from earlier passes: reported once no pod holds their devices.
+	actions = append(actions, d.releaseActions(wanted)...)
 	for _, id := range released {
 		h := observed[id]
 		delete(observed, id)
 		actions = append(actions, converge.Action{
 			Description: "release " + id,
 			Apply: func(ctx context.Context) error {
+				if h.kubernetes {
+					// Recorded before the CDI spec goes, so a crash in between never loses the report.
+					if err := d.updateReleasing(func(m map[string]releasing) {
+						m[id] = releasing{DeviceIDs: h.deviceIDs, Generation: generation, Since: time.Now()}
+					}); err != nil {
+						return err
+					}
+				}
 				for _, p := range []string{cdiSpecPath(id), envFilePath(id)} {
 					if err := host.RemoveFile(p); err != nil {
 						return err
 					}
+				}
+				if h.kubernetes {
+					// No longer advertised: the kube reaper evicts pods still holding the devices, and
+					// AllocationReleased waits for them (kuberelease.go).
+					d.a.log.Info("allocation releasing", "allocation", id, "generation", generation, "kubernetes", true)
+					d.a.kube.Trigger()
+					d.recheckSoon()
+					return nil
 				}
 				// Its slice goes once empty; a workload still running keeps it (and its limits).
 				if name := holdSlice(id); d.a.sliceExists(name) {
@@ -188,7 +213,8 @@ func (d *devicesConverger) Plan(ctx context.Context, desired []byte) ([]converge
 			},
 		})
 	}
-	claimed := map[string]string{}
+	// Devices of pending Kubernetes releases stay claimed until reported.
+	claimed := d.releasingDevices()
 	kept := map[string]*agentv1.ResourceLimits{}
 	for _, as := range section.GetAssignments() {
 		if h, ok := observed[as.GetAllocationId()]; ok {
@@ -437,7 +463,7 @@ func (d *devicesConverger) observed() (map[string]hold, error) {
 			continue
 		}
 		gen, _ := strconv.ParseUint(spec.Annotations[annotationGeneration], 10, 64)
-		h := hold{generation: gen}
+		h := hold{generation: gen, kubernetes: spec.Annotations[kube.AnnotationBinding] == kube.BindingKubernetes}
 		for _, dev := range spec.Devices {
 			// The real atom id (a MIG instance's or slot's has a "/" a CDI name cannot).
 			if real := dev.Annotations[annotationDeviceID]; real != "" {
@@ -451,10 +477,14 @@ func (d *devicesConverger) observed() (map[string]hold, error) {
 	return out, nil
 }
 
-// assignedDevices lists the devices of the live holds (gpu.reset refuses them).
+// assignedDevices lists the devices of the live holds, and of Kubernetes releases pods may still
+// hold (gpu.reset, VM passthrough and hostconfig refuse them).
 func (d *devicesConverger) assignedDevices() map[string]bool {
 	holds, err := d.observed()
 	out := map[string]bool{}
+	for dev := range d.releasingDevices() {
+		out[dev] = true
+	}
 	if err != nil {
 		return out
 	}

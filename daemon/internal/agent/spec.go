@@ -294,6 +294,7 @@ func (a *Agent) convergeOnce(ctx context.Context) bool {
 	status.Conditions = append(status.Conditions, cloneConditions(a.faults)...)
 	status.Conditions = append(status.Conditions, a.hostcfg.currentConditions()...)
 	status.Conditions = append(status.Conditions, a.kubeConditions()...)
+	status.Conditions = append(status.Conditions, a.devices.currentConditions()...)
 	if stored, ok, err := a.j.Spec(); err == nil && ok {
 		status.AppliedSpecHash = stored.Hash
 	}
