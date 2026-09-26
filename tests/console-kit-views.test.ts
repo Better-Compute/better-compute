@@ -212,4 +212,28 @@ describe('reservation form', () => {
     expect((await form.submit()).status).toBe('editing');
     expect(calls).toEqual([]);
   });
+
+  it('books host CPU and memory and the kubernetes binding, previewed the same (§3.8)', async () => {
+    const timers: (() => void)[] = [];
+    const { api, calls } = fakeApi({
+      'capacity/preview': () => ({ fits: true, candidates: [{}] }),
+      'reservations/create': () => ({ id: 'rsv_k', state: 'placed' }),
+    });
+    const form = createReservationForm(api, {
+      tenantId: 'acme',
+      setTimer: (callback) => timers.push(callback),
+      clearTimer: () => undefined,
+    });
+    form.change({ poolId: 'pool_k', gpus: 2, duration: '1h', vcpu: 32, memoryGiB: 256, kubernetes: true });
+    timers.at(-1)!();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await form.submit();
+    for (const path of ['capacity/preview', 'reservations/create'])
+      expect(calls.find((call) => call.path === path)!.input).toMatchObject({
+        binding: 'kubernetes',
+        resources: { vcpu: 32, memoryGiB: 256 },
+      });
+    form.change({ vcpu: -1 });
+    expect(form.get().errors.vcpu).toBeDefined();
+  });
 });

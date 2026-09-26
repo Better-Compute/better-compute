@@ -22,6 +22,12 @@ export interface ReservationFormValues {
   start?: number;
   /** A renewable lease in seconds. */
   leaseSeconds?: number;
+  /** (v1.1) Host CPUs to book with the GPUs; absent: the pool's per-GPU share (the floor). */
+  vcpu?: number;
+  /** (v1.1) Host memory in GiB to book with the GPUs; absent: the pool's per-GPU share. */
+  memoryGiB?: number;
+  /** (v1.1) Give the GPUs to the node's kubelet (pools that join a Kubernetes cluster). */
+  kubernetes?: boolean;
 }
 
 export type ReservationFormErrors = Partial<Record<keyof ReservationFormValues, string>>;
@@ -79,7 +85,25 @@ export function validateReservation(values: Partial<ReservationFormValues>): Res
       values.leaseSeconds > 86_400)
   )
     errors.leaseSeconds = 'A lease of 30 s to 24 h';
+  if (values.vcpu !== undefined && (!Number.isInteger(values.vcpu) || values.vcpu < 0 || values.vcpu > 4096))
+    errors.vcpu = 'Host CPUs, 0 to 4096';
+  if (
+    values.memoryGiB !== undefined &&
+    (!Number.isInteger(values.memoryGiB) || values.memoryGiB < 0 || values.memoryGiB > 65_536)
+  )
+    errors.memoryGiB = 'Host memory in GiB, 0 to 65536';
   return errors;
+}
+
+/** The host resources and binding a request carries (§3.8): only what the form sets. */
+function hostFields(values: ReservationFormValues) {
+  const resources: Record<string, number> = {};
+  if (values.vcpu !== undefined) resources.vcpu = values.vcpu;
+  if (values.memoryGiB !== undefined) resources.memoryGiB = values.memoryGiB;
+  return {
+    binding: values.kubernetes ? 'kubernetes' : 'hold',
+    ...(Object.keys(resources).length ? { resources } : {}),
+  };
 }
 
 /** The device request `reservations.create` and `capacity.preview` take. */
@@ -132,7 +156,7 @@ export function createReservationForm(
     poolId: values.poolId,
     devices: [deviceRequest(values)],
     duration: values.duration,
-    binding: 'hold',
+    ...hostFields(values),
     idempotencyKey,
     ...(values.projectId ? { projectId: values.projectId } : {}),
     ...(values.start !== undefined ? { start: values.start } : {}),
@@ -146,7 +170,8 @@ export function createReservationForm(
     store.set((current) => ({ ...current, previewing: true }));
     try {
       const values = state.values as ReservationFormValues;
-      // The preview takes the placement fields only (as `better-compute capacity --preview`).
+      // The preview takes the placement fields only (as `better-compute capacity --preview`),
+      // host resources included: they decide where it fits.
       const result = await api.$request<{ fits: boolean; reason?: string; candidates?: unknown[] }>(
         'capacity/preview',
         {
@@ -154,7 +179,7 @@ export function createReservationForm(
           poolId: values.poolId,
           devices: [deviceRequest(values)],
           duration: values.duration,
-          binding: 'hold',
+          ...hostFields(values),
           idempotencyKey: key(),
         },
       );
