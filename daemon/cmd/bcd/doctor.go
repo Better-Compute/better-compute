@@ -11,6 +11,8 @@ import (
 
 	"github.com/better-compute/better-compute/daemon/internal/agent"
 	"github.com/better-compute/better-compute/daemon/internal/config"
+	"github.com/better-compute/better-compute/daemon/internal/helper"
+	"github.com/better-compute/better-compute/daemon/internal/hostconfig"
 	"github.com/better-compute/better-compute/daemon/internal/selfupdate"
 )
 
@@ -100,11 +102,37 @@ func configChecks(cfg *config.Config, role string) []doctorCheck {
 				out = append(out, doctorCheck{"fail", "helper", err.Error()})
 			}
 		}
+		out = append(out, helperBindingChecks(cfg, &hostconfig.OSSystem{})...)
 	}
 	if role == "site" && cfg.BMCNetworks == "" {
 		out = append(out, doctorCheck{"warn", "bmc", "no [site] bmc_networks: site.httpProxy's BMC refusal relies on the BMCs this agent has driven"})
 	}
 	return out
+}
+
+// helperBindingChecks (root, [helper]): bcd helper applies host units only for the node root's signed
+// join record names. A node joined before bcd join kept that record has none, and the helper binds to
+// the node the first signed spec it accepts names (trust on first use): a finding, so operators can
+// pin it deliberately.
+func helperBindingChecks(cfg *config.Config, sys hostconfig.System) []doctorCheck {
+	if cfg.Helper.Socket == "" {
+		return nil
+	}
+	pin, _ := config.DecodePin(cfg.JoinSigningKeyPin)
+	joined, err := helper.ReadJoinRecord(sys, pin)
+	state, _, stateErr := agent.LoadState(cfg.DataDir)
+	switch {
+	case err != nil:
+		return []doctorCheck{{"fail", "helper", err.Error() + ": bcd helper refuses every host unit"}}
+	case joined == "" && stateErr == nil:
+		return []doctorCheck{{"warn", "helper", fmt.Sprintf("host units bind to the node the first signed spec names (trust on first use): %s joined before bcd join kept a signed join record (%s). To pin it, re-join as root: bcd join with a new token after moving %s's identity aside (a tpm or provisioned re-join keeps the node id)",
+			state.NodeID, helper.JoinRecord, cfg.DataDir)}}
+	case joined == "":
+		return nil // not joined yet
+	case stateErr == nil && joined != state.NodeID:
+		return []doctorCheck{{"fail", "helper", fmt.Sprintf("root's join record names %s, but this machine's identity is %s: bcd helper refuses its specs; re-run the join as root", joined, state.NodeID)}}
+	}
+	return []doctorCheck{{"ok", "helper", "host units bind to " + joined + " (root's signed join record)"}}
 }
 
 // hostChecks are doctor's host checks (PLAN.md §14): virtualization support for VPS hosts, the

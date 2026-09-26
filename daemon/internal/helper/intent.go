@@ -66,22 +66,32 @@ func WriteJoinRecord(sys hostconfig.System, resp *agentv1.JoinResponse) error {
 // before the record existed: the first signed spec names it). A record that does not verify
 // refuses: it is root's, so something is wrong.
 func (s *Server) joinedNode() (string, error) {
-	raw, err := s.HostSystem.ReadFile(JoinRecord)
+	id, err := ReadJoinRecord(s.HostSystem, s.JoinSigningPin)
+	if err != nil {
+		return "", fmt.Errorf("host.unit: %w", err)
+	}
+	return id, nil
+}
+
+// ReadJoinRecord returns the node id root's join record names, checked against the join signing
+// pin; "" and no error without a record.
+func ReadJoinRecord(sys hostconfig.System, pin []byte) (string, error) {
+	raw, err := sys.ReadFile(JoinRecord)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("host.unit: %s: %w", JoinRecord, err)
+		return "", fmt.Errorf("%s: %w", JoinRecord, err)
 	}
 	resp := &agentv1.JoinResponse{}
 	body := &agentv1.JoinResponseBody{}
-	if len(s.JoinSigningPin) == 0 || proto.Unmarshal(raw, resp) != nil ||
-		!pki.VerifySignature(pki.PurposeJoinResponse, [][]byte{resp.GetBody()}, resp.GetSig(), pki.Trust{Pin: s.JoinSigningPin}) ||
+	if len(pin) == 0 || proto.Unmarshal(raw, resp) != nil ||
+		!pki.VerifySignature(pki.PurposeJoinResponse, [][]byte{resp.GetBody()}, resp.GetSig(), pki.Trust{Pin: pin}) ||
 		proto.Unmarshal(resp.GetBody(), body) != nil {
-		return "", fmt.Errorf("host.unit: %s is not a JoinResponse signed by the pinned JoinService key", JoinRecord)
+		return "", fmt.Errorf("%s is not a JoinResponse signed by the pinned JoinService key", JoinRecord)
 	}
 	if body.GetNodeId() == "" || len(body.GetCertChain()) == 0 {
-		return "", fmt.Errorf("host.unit: %s issued no identity", JoinRecord)
+		return "", fmt.Errorf("%s issued no identity", JoinRecord)
 	}
 	return body.GetNodeId(), nil
 }
