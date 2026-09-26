@@ -84,7 +84,19 @@ scalar claims in place on the node, quota first. `list` defaults to `scope: 'min
   it with the instance. A tenant may pass its own `secret://<tenant>/<id>` ref as `userData`; refs of
   other tenants, `vault://` and `env://` are refused.
 - **NICs.** Each spec carries `allocationId` and one NIC on `vps({ hostNetwork })` (default `br0`)
-  with the IPAM address in CIDR form and a stable locally administered MAC.
+  with the IPAM address in CIDR form and a stable locally administered MAC. A leased NIC also gets the range's gateway and `setIpPool({ dns })` nameservers; bcd writes them into the guest's NoCloud network-config.
+- **Host placement (§3.8, v1.1).** A flavor's `placement` is `{ numaAffine, pinned, hugepages }`, and sandbox templates inherit it.
+  - Hugepage flavors book `hugepages1Gi`/`hugepages2Mi` rather than `memoryGiB` (quota still counts `memoryGiB`). `vps.hosts` leaves hugepage pools out of `memoryGiB`.
+  - After placement, `chooseHostPlacement` picks the GPUs' NUMA node, or the least-loaded one that holds the memory. For pinned flavors it picks CPUs no other pinned guest has: isolated CPUs first, never the host's reserved ones. It stores the result in `instances.host_placement`, which becomes `InstanceSpec.placement`.
+  - A host that can't honour it runs the guest floating, with `PlacementDegraded { reason }`.
+  - Guests of pools that overcommit memory get a balloon, except hugepage and GPU guests.
+- **Capability gates.** A placement needs the bcd capability label for what the host must enforce:
+  - `bc.dev/cap.instance.ssh-host-only` for sandboxes;
+  - `bc.dev/cap.instance.placement` for placed flavors;
+  - `bc.dev/cap.instance.network-policy` for private/none networks;
+  - `bc.dev/cap.instance.volumes` for volumes.
+
+  An older bcd would silently drop the field.
 - **Admission hooks.** `instances.create` passes its decision to `CapacityPort.reserve`, so scheduler
   plugins' `admit` hooks run once; the reconciler's scheduling retries do not pass it.
 
