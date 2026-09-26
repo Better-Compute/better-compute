@@ -717,7 +717,7 @@ export function computeTools(
             pattern: '^[a-z0-9][a-z0-9._-]{0,62}$',
             description: 'A name unique in the tenant, e.g. "agent-notes"',
           },
-          sizeGiB: { type: 'integer', minimum: 1, maximum: 65_536, description: 'Size in GiB' },
+          sizeGiB: { type: 'integer', minimum: 1, maximum: 16_384, description: 'Size in GiB' },
           idempotencyKey,
         },
         additionalProperties: false,
@@ -752,7 +752,7 @@ export function computeTools(
         required: ['volumeId', 'sizeGiB'],
         properties: {
           volumeId: id('vol', 'The volume'),
-          sizeGiB: { type: 'integer', minimum: 1, maximum: 65_536, description: 'The new size in GiB' },
+          sizeGiB: { type: 'integer', minimum: 1, maximum: 16_384, description: 'The new size in GiB' },
         },
         additionalProperties: false,
       },

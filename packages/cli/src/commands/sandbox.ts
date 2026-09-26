@@ -84,7 +84,37 @@ async function templateFields(
     fields.env = env;
   }
   if (flags.network) fields.network = flags.network;
+  if (flags.volumes !== undefined) fields.volumes = parseVolumes(String(flags.volumes));
   return fields;
+}
+
+/**
+ * `--volumes NAME:/mount[:ro],…` (agent memory): the persistent volumes every sandbox mounts, in
+ * order, by volume name (or id, vol_…); an empty value removes them all.
+ */
+function parseVolumes(value: string): { name?: string; volumeId?: string; mountPath: string; readOnly: boolean }[] {
+  return value
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => {
+      const [volume, mountPath, mode, ...rest] = item.split(':');
+      if (!volume || !mountPath?.startsWith('/') || rest.length || (mode !== undefined && mode !== 'ro'))
+        throw usageError(`--volumes ${item}: use NAME:/mount/path or NAME:/mount/path:ro`);
+      return {
+        ...(/^vol_[0-9a-z]{26,52}$/.test(volume) ? { volumeId: volume } : { name: volume }),
+        mountPath,
+        readOnly: mode === 'ro',
+      };
+    });
+}
+
+const volumeArg = [{ name: 'volume', description: 'The volume id (vol_…)', required: true }];
+
+function volumeId(args: string[]): string {
+  const id = args[0]!;
+  if (!/^vol_[0-9a-z]{26,52}$/.test(id)) throw usageError(`${id} is not a volume id (vol_…)`);
+  return id;
 }
 
 const templateFlags = {
@@ -105,6 +135,11 @@ const templateFlags = {
     value: 'MODE',
     choices: ['egress', 'private', 'none'],
     description: 'What sandboxes may reach (default egress)',
+  },
+  volumes: {
+    type: 'string',
+    value: 'NAME:/PATH[:ro],…',
+    description: 'Persistent volumes (agent memory) every sandbox mounts, in order; "" removes them',
   },
 } as const;
 
@@ -491,6 +526,95 @@ export const sandboxCommands = [
     examples: ['better-compute sandbox templates --format table'],
     async run({ flags, api }) {
       return (await api()).call('sandboxTemplates/list', { tenantId: flags.tenant });
+    },
+  }),
+  // Agent memory (v1.1): persistent volumes that outlive sandboxes (sandboxVolumes).
+  defineCommand({
+    name: 'sandbox-volume create',
+    group: 'Sandboxes',
+    summary: 'Create a persistent volume (agent memory) on a pool (sandboxVolumes.create)',
+    description:
+      'sandbox-volume create books --size GiB of disk on one host of --pool; sandboxes of templates that mount it (sandbox-template --volumes) run on that host and keep its data across runs. It is billed until deleted. Repeat with the same --key to retry safely.',
+    target: 'token',
+    flags: {
+      tenant: tenantFlag,
+      pool: { type: 'string', value: 'ID', required: true, description: 'The pool (pool_…)' },
+      name: { type: 'string', value: 'NAME', required: true, description: 'A name unique in the tenant' },
+      size: { type: 'integer', value: 'GIB', required: true, min: 1, max: 16_384, description: 'Size in GiB' },
+      key: { type: 'string', value: 'KEY', description: 'Idempotency key, to retry the same request' },
+    },
+    examples: ['better-compute sandbox-volume create --pool pool_01k5w… --name agent-notes --size 20'],
+    async run({ flags, api }) {
+      return (await api()).call('sandboxVolumes/create', {
+        tenantId: flags.tenant,
+        poolId: flags.pool,
+        name: flags.name,
+        sizeGiB: flags.size,
+        idempotencyKey: flags.key ?? newIdempotencyKey(),
+      });
+    },
+  }),
+  defineCommand({
+    name: 'sandbox-volume list',
+    group: 'Sandboxes',
+    summary: 'List the tenant’s persistent volumes (sandboxVolumes.list)',
+    target: 'token',
+    flags: {
+      tenant: tenantFlag,
+      pool: { type: 'string', value: 'ID', description: 'Only this pool’s (pool_…)' },
+      deleted: { type: 'boolean', description: 'Include deleted volumes' },
+    },
+    examples: ['better-compute sandbox-volume list --format table'],
+    async run({ flags, api }) {
+      return (await api()).call('sandboxVolumes/list', {
+        tenantId: flags.tenant,
+        ...(flags.pool ? { poolId: flags.pool } : {}),
+        ...(flags.deleted ? { includeDeleted: true } : {}),
+      });
+    },
+  }),
+  defineCommand({
+    name: 'sandbox-volume get',
+    group: 'Sandboxes',
+    summary: 'Show a persistent volume (sandboxVolumes.get)',
+    target: 'token',
+    args: volumeArg,
+    flags: { tenant: tenantFlag },
+    examples: ['better-compute sandbox-volume get vol_01k5w…'],
+    async run({ flags, args, api }) {
+      return (await api()).call('sandboxVolumes/get', { tenantId: flags.tenant, volumeId: volumeId(args) });
+    },
+  }),
+  defineCommand({
+    name: 'sandbox-volume resize',
+    group: 'Sandboxes',
+    summary: 'Grow a persistent volume (sandboxVolumes.resize)',
+    description: 'sandbox-volume resize grows the volume to --size GiB; volumes never shrink.',
+    target: 'token',
+    args: volumeArg,
+    flags: {
+      tenant: tenantFlag,
+      size: { type: 'integer', value: 'GIB', required: true, min: 1, max: 16_384, description: 'The new size in GiB' },
+    },
+    examples: ['better-compute sandbox-volume resize vol_01k5w… --size 40'],
+    async run({ flags, args, api }) {
+      return (await api()).call('sandboxVolumes/resize', {
+        tenantId: flags.tenant,
+        volumeId: volumeId(args),
+        sizeGiB: flags.size,
+      });
+    },
+  }),
+  defineCommand({
+    name: 'sandbox-volume delete',
+    group: 'Sandboxes',
+    summary: 'Delete a persistent volume and wipe its data (sandboxVolumes.delete)',
+    target: 'token',
+    args: volumeArg,
+    flags: { tenant: tenantFlag },
+    examples: ['better-compute sandbox-volume delete vol_01k5w…'],
+    async run({ flags, args, api }) {
+      return (await api()).call('sandboxVolumes/delete', { tenantId: flags.tenant, volumeId: volumeId(args) });
     },
   }),
 ];

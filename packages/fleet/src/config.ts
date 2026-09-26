@@ -380,8 +380,9 @@ export function validateFleetConfig(value: unknown): FleetConfig {
         result.network = template.network as FleetSandboxTemplate['network'];
       }
       if (template.volumes !== undefined) {
-        if (!Array.isArray(template.volumes) || template.volumes.length > 24)
-          fail(`${path}.volumes`, 'must list at most 24 volumes');
+        // vps's maxTemplateVolumes (fleet does not depend on vps).
+        if (!Array.isArray(template.volumes) || template.volumes.length > 8)
+          fail(`${path}.volumes`, 'must list at most 8 volumes');
         result.volumes = template.volumes.map((raw, index) => {
           const at = `${path}.volumes[${index}]`;
           const volume = record(raw, at);

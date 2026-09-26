@@ -67,6 +67,50 @@ describe('sandbox commands', () => {
     ]);
   });
 
+  it('manages persistent volumes and mounts them in templates (agent memory)', async () => {
+    const { calls, run } = recorder();
+    const VOL = 'vol_01k5w000000000000000000abc';
+    await run([
+      'sandbox-volume', 'create', '--pool', 'pool_01k5w000000000000000000abc', '--name', 'agent-notes',
+      '--size', '20', '--key', 'v1',
+    ]);
+    await run(['sandbox-volume', 'list', '--deleted']);
+    await run(['sandbox-volume', 'get', VOL]);
+    await run(['sandbox-volume', 'resize', VOL, '--size', '40']);
+    await run(['sandbox-volume', 'delete', VOL]);
+    await run(['sandbox-template', 'update', TEMPLATE, '--volumes', `agent-notes:/mnt/memory, ${VOL}:/data:ro`]);
+    expect(calls).toEqual([
+      {
+        path: 'sandboxVolumes/create',
+        body: {
+          tenantId: 'org_acme',
+          poolId: 'pool_01k5w000000000000000000abc',
+          name: 'agent-notes',
+          sizeGiB: 20,
+          idempotencyKey: 'v1',
+        },
+      },
+      { path: 'sandboxVolumes/list', body: { tenantId: 'org_acme', includeDeleted: true } },
+      { path: 'sandboxVolumes/get', body: { tenantId: 'org_acme', volumeId: VOL } },
+      { path: 'sandboxVolumes/resize', body: { tenantId: 'org_acme', volumeId: VOL, sizeGiB: 40 } },
+      { path: 'sandboxVolumes/delete', body: { tenantId: 'org_acme', volumeId: VOL } },
+      {
+        path: 'sandboxTemplates/update',
+        body: {
+          tenantId: 'org_acme',
+          templateId: TEMPLATE,
+          volumes: [
+            { name: 'agent-notes', mountPath: '/mnt/memory', readOnly: false },
+            { volumeId: VOL, mountPath: '/data', readOnly: true },
+          ],
+        },
+      },
+    ]);
+    await expect(
+      run(['sandbox-template', 'update', TEMPLATE, '--volumes', 'notes:relative']),
+    ).rejects.toThrow(/--volumes notes:relative/);
+  });
+
   it('manages templates: create, update (only the fields given), delete', async () => {
     const { calls, run } = recorder();
     const dir = await mkdtemp(join(tmpdir(), 'bc-sbxt-'));
