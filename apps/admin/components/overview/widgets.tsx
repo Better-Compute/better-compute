@@ -24,7 +24,7 @@ import { useLive, useWorkspace } from '@/components/shell/workspace';
 import { useFeedback } from '@/components/ui/feedback';
 import { useAcks } from '@/components/shell/pins';
 import { EntityLink, usePeek } from '@/components/shell/peek';
-import { Gauge, Legend, Sparkline, StackedBar, TimeSeriesChart } from '@/components/ui/charts';
+import { Gauge, Legend, Sparkline, StackedBar, TimeSeriesChart, useWidth } from '@/components/ui/charts';
 import { Stat } from '@/components/ui/stat';
 import { Led, SeverityIcon, Tag, type Status } from '@/components/ui/signal';
 import { cx } from '@/utils/cx';
@@ -88,9 +88,11 @@ export function KpiStrip({ size }: WidgetProps) {
       tone: 'neutral' as const,
     },
   ];
-  const count = size.w >= 12 ? 7 : size.w >= 8 ? 5 : size.w >= 6 ? 4 : 2;
+  // As many cards as fit at ~150 px each (the grid unit says nothing on a phone, where every widget is 1 column).
+  const [ref, width] = useWidth<HTMLDivElement>(size.w * 100);
+  const count = Math.max(2, Math.min(cards.length, Math.floor(width / 150)));
   return (
-    <div className="grid h-full divide-x divide-separator-border" style={{ gridTemplateColumns: `repeat(${count}, minmax(0, 1fr))` }}>
+    <div ref={ref} className="grid h-full divide-x divide-separator-border" style={{ gridTemplateColumns: `repeat(${count}, minmax(0, 1fr))` }}>
       {cards.slice(0, count).map((card) => (
         <Stat key={card.label} className="justify-center px-3 py-2" size="sm" {...card} />
       ))}
