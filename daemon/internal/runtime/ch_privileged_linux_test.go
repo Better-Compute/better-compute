@@ -97,6 +97,35 @@ func TestCloudHypervisorUnderTheHelper(t *testing.T) {
 	if st, _ := c.state(ctx, "inst_h"); st != StateRunning {
 		t.Fatalf("state %s", st)
 	}
+	// Live usage is read as the node itself: the VMM unit's cgroup (world-readable) and its taps' counters, no
+	// ch.* operation.
+	fake := t.TempDir()
+	oldCg, oldNet := cgroupRoot, sysClassNet
+	cgroupRoot, sysClassNet = filepath.Join(fake, "cgroup"), filepath.Join(fake, "net")
+	t.Cleanup(func() { cgroupRoot, sysClassNet = oldCg, oldNet })
+	for path, content := range map[string]string{
+		filepath.Join(cgroupRoot, "bcd-instances.slice", unitName("inst_h"), "cpu.stat"):       "usage_usec 2500000\n",
+		filepath.Join(cgroupRoot, "bcd-instances.slice", unitName("inst_h"), "memory.current"): "1073741824\n",
+		filepath.Join(sysClassNet, TapName("inst_h", 0), "statistics", "tx_bytes"):             "900\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o444); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := len(root.ops)
+	usage, err := c.Usage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u := usage["inst_h"]; u.CPUSeconds != 2.5 || u.MemoryBytes != 1<<30 || u.NetRxBytes != 900 {
+		t.Fatalf("usage = %+v", usage)
+	}
+	if len(root.ops) != before {
+		t.Fatalf("reading usage asked root: %v", root.ops[before:])
+	}
 	if err := c.SetState(ctx, "inst_h", StateStopped); err != nil {
 		t.Fatal(err)
 	}

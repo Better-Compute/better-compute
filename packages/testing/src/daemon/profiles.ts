@@ -1,4 +1,5 @@
 import { PROTOCOL_VERSION, type InventorySectionName, type ProtocolRange } from '@better-compute/protocol';
+import type { FakeHypervisorOptions } from './instances.js';
 
 // Daemon builds for version-skew tests (PLAN.md §7.6: N−1 minors before 1.0, N−2 from v1.0). A
 // profile makes a FakeDaemon behave like an older bcd: the protocol range and version it announces,
@@ -55,6 +56,19 @@ export const daemonSkewProfiles: readonly DaemonProfile[] = Object.freeze<Daemon
     withoutHello: ['trustVersion'],
   },
 ]);
+
+/**
+ * A VPS host whose bcd runs unprivileged under `bcd helper` (config.toml `[helper]`, PLAN.md §3.8), as
+ * `FakeDaemonOptions.instances`. What bcd runs there depends on the host: `cloud-hypervisor` when its binary is installed
+ * (under the helper since 7fe74a1: root's `ch.*` operations make its taps, bind its GPUs and start its VMM units),
+ * `libvirt-kvm` when `virsh` is. Each NIC joins only a bridge of `[helper] instance_bridges`. The default is a
+ * cloud-hypervisor host with `br0`, the bridge vps attaches hosted instances to. Hello advertises the runtimes (the
+ * gateway labels the node `bc.dev/driver.<runtime>`), and the telemetry section exports their instances' live usage
+ * (`FakeDaemonOptions.telemetry`), as bcd does.
+ */
+export function helperVpsHost(options: FakeHypervisorOptions = {}): FakeHypervisorOptions {
+  return { runtimes: ['cloud-hypervisor'], helper: { instanceBridges: ['br0'] }, ...options };
+}
 
 /** A build below the server's `proto_min`: it gets `upgrade_required` and only `daemon.upgrade`. */
 export const belowMinimumProfile: DaemonProfile = Object.freeze<DaemonProfile>({

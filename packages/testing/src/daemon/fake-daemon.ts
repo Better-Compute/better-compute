@@ -45,6 +45,7 @@ import {
   NodeRebootResultSchema,
   NodeSpecSchema,
   PROTOCOL_VERSION,
+  RunsOn,
   SectionState,
   SignatureSchema,
   SpecRequestReason,
@@ -76,6 +77,7 @@ import {
   type SectionStatusSchema,
   type ServerFrame,
   type StatusReportSchema,
+  type TelemetrySection,
   type Welcome,
 } from '@better-compute/protocol';
 import type { EventLog, LogValue } from '../event-log.js';
@@ -232,6 +234,40 @@ export interface FakeDaemonOptions {
    * current build.
    */
   profile?: DaemonProfile;
+  /**
+   * Where the telemetry section's OTLP export lands (P8: it never rides the Session). While the spec's `telemetry`
+   * names an `otlp_endpoint`, the daemon hands `export` what bcd sends there: once when the section applies, then
+   * every `export_interval_ms` (default 60 s, at least 5 s), with bcd's resource and its instance series
+   * (`instanceMetrics()`). `headers_ref` is not fetched, and the GPU and host series are not modelled. Without this
+   * option nothing is exported; the section converges either way.
+   */
+  telemetry?: { export(batch: FakeTelemetryExport): void };
+}
+
+/** One point of a `FakeMetric`: its attributes and value (bytes, seconds or a count). */
+export interface FakeMetricPoint {
+  attributes: Record<string, string>;
+  value: number;
+}
+
+/** One OTLP metric as bcd exports it: a gauge, or a cumulative sum (`sum`). */
+export interface FakeMetric {
+  name: string;
+  unit: string;
+  sum?: boolean;
+  points: FakeMetricPoint[];
+}
+
+/** One OTLP export (`FakeDaemonOptions.telemetry`). */
+export interface FakeTelemetryExport {
+  nodeId: string;
+  /** The section's `otlp_endpoint`. */
+  endpoint: string;
+  /** When it was sent, by the daemon's clock (ms). */
+  at: number;
+  /** `service.name=bcd`, `service.version`, `bcd.node.id`, then the section's `resource_attributes` (bcd's win). */
+  resource: Record<string, string>;
+  metrics: FakeMetric[];
 }
 
 interface Session {
@@ -277,6 +313,8 @@ interface Process {
   lastStatus: MessageInitShape<typeof StatusReportSchema> | undefined;
   collected: { sections: EncodedSection[]; at: number };
   convergeTimer: Timer | undefined;
+  /** The OTLP export the telemetry section runs: what it was started for, and its next tick. */
+  telemetry: { key: string; timer: Timer | undefined } | undefined;
 }
 
 const LANES = [Lane.CONTROL, Lane.PROVISION, Lane.BULK] as const;
@@ -568,6 +606,50 @@ export class FakeDaemon {
     };
   }
 
+  /**
+   * The instance series bcd exports from a VPS host (none elsewhere): `bcd.instances` by `runtime` and `state`, each
+   * domain's configured `bcd.instance.vcpu` and `bcd.instance.memory` (managed or not), and the live usage its runtime
+   * reads (`FakeHypervisor.usage`): `bcd.instance.cpu.time`, `memory.used`, `io.read`, `io.write`,
+   * `network.receive`, `network.transmit`, by `instance.id` and `runtime`. Series without points are left out.
+   */
+  instanceMetrics(): FakeMetric[] {
+    const hv = this.hypervisor;
+    if (!hv) return [];
+    const metric = (name: string, unit: string, sum = false): FakeMetric => ({ name, unit, ...(sum ? { sum } : {}), points: [] });
+    const instances = metric('bcd.instances', '{instance}');
+    const vcpu = metric('bcd.instance.vcpu', '{cpu}');
+    const memory = metric('bcd.instance.memory', 'By');
+    const cpuTime = metric('bcd.instance.cpu.time', 's', true);
+    const memUsed = metric('bcd.instance.memory.used', 'By');
+    const ioRead = metric('bcd.instance.io.read', 'By', true);
+    const ioWrite = metric('bcd.instance.io.write', 'By', true);
+    const netRx = metric('bcd.instance.network.receive', 'By', true);
+    const netTx = metric('bcd.instance.network.transmit', 'By', true);
+    const counts = new Map<string, number>();
+    const domains = [...hv.domains.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
+    for (const domain of domains) {
+      const key = `${domain.runtime}/${domain.state}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+      const attributes = { 'instance.id': domain.id, runtime: domain.runtime, managed: String(domain.managed) };
+      vcpu.points.push({ attributes, value: domain.vcpu });
+      memory.points.push({ attributes: { ...attributes, hugepages: '0' }, value: Number(domain.memoryBytes) });
+    }
+    for (const key of [...counts.keys()].sort()) {
+      const [runtime, state] = key.split('/') as [string, string];
+      instances.points.push({ attributes: { runtime, state }, value: counts.get(key)! });
+    }
+    for (const [id, usage] of hv.usage()) {
+      const attributes = { 'instance.id': id, runtime: hv.domains.get(id)!.runtime };
+      cpuTime.points.push({ attributes, value: usage.cpuSeconds });
+      memUsed.points.push({ attributes, value: Number(usage.memoryBytes) });
+      ioRead.points.push({ attributes, value: Number(usage.ioReadBytes) });
+      ioWrite.points.push({ attributes, value: Number(usage.ioWriteBytes) });
+      netRx.points.push({ attributes, value: Number(usage.netRxBytes) });
+      netTx.points.push({ attributes, value: Number(usage.netTxBytes) });
+    }
+    return [instances, vcpu, memory, cpuTime, memUsed, ioRead, ioWrite, netRx, netTx].filter((m) => m.points.length > 0);
+  }
+
   /** Server time as the daemon sees it (local clock + Welcome offset). */
   serverNow(): number {
     return this.localNow() + (this.proc?.offsetMs ?? 0);
@@ -603,6 +685,7 @@ export class FakeDaemon {
       lastStatus: undefined,
       collected: { sections: [], at: 0 },
       convergeTimer: undefined,
+      telemetry: undefined,
     };
     this.proc = proc;
     this.stateValue = 'running';
@@ -834,7 +917,8 @@ export class FakeDaemon {
         if (report.state === SectionState.PROGRESSING) progressing = true;
         sections.push({ section: 'daemon', generation: BigInt(generation), ...report });
       } else if (name === 'telemetry') {
-        // Recorded as the OTLP target; nothing to materialize in the fake.
+        // The OTLP export (to `options.telemetry`), restarted when the section changes.
+        this.applyTelemetry(spec.telemetry);
         sections.push({ section: 'telemetry', state: SectionState.CONVERGED, generation: BigInt(generation) });
       } else trivial(name, spec[name]);
     }
@@ -854,6 +938,36 @@ export class FakeDaemon {
     this.sendStatus();
     if (progressing)
       proc.convergeTimer = this.later(this.options.convergeRetryMs ?? 30_000, () => this.converge('retry'));
+  }
+
+  /**
+   * (Re)starts the OTLP export for `section`, as bcd's telemetry converger does: an unchanged section keeps the running
+   * export, a changed one replaces it, and an empty endpoint stops it.
+   */
+  private applyTelemetry(section: TelemetrySection | undefined): void {
+    const proc = this.requireProcess();
+    const endpoint = section?.otlpEndpoint ?? '';
+    const key = endpoint
+      ? JSON.stringify([endpoint, section!.exportIntervalMs, section!.resourceAttributes, section!.headersRef])
+      : '';
+    if ((proc.telemetry?.key ?? '') === key) return;
+    proc.telemetry?.timer?.cancel();
+    const state: NonNullable<Process['telemetry']> = { key, timer: undefined };
+    proc.telemetry = state;
+    const sink = this.options.telemetry;
+    if (!key || !sink) return;
+    const intervalMs = Math.max(section!.exportIntervalMs || 60_000, 5_000);
+    const resource: Record<string, string> = {};
+    for (const pair of section!.resourceAttributes) {
+      const at = pair.indexOf('=');
+      if (at > 0) resource[pair.slice(0, at).trim()] = pair.slice(at + 1).trim();
+    }
+    Object.assign(resource, { 'service.name': 'bcd', 'service.version': this.daemonVersion, 'bcd.node.id': this.nodeId });
+    const tick = () => {
+      sink.export({ nodeId: this.nodeId, endpoint, at: this.localNow(), resource: { ...resource }, metrics: this.instanceMetrics() });
+      state.timer = this.later(intervalMs, tick);
+    };
+    state.timer = this.later(0, tick);
   }
 
   // ---- session ----------------------------------------------------------------------------------
@@ -898,10 +1012,20 @@ export class FakeDaemon {
       drivers: [
         ...(lacks.has('drivers')
           ? []
-          : this.options.drivers ??
-          (this.hw.gpuUuids.length > 0
-            ? [{ id: 'nvidia', version: this.daemonVersion, kinds: ['config'], configSchemaJson: '{"type":"object"}' }]
-            : [])),
+          : this.options.drivers ?? [
+            // Each runtime the VPS host runs, as bcd advertises its built-in ones (fab94d4): the gateway labels the
+            // node bc.dev/driver.<runtime>, so a host without a runtime is told apart from one with it.
+            ...(this.hypervisor?.runtimes ?? []).map((id) => ({
+              id,
+              version: this.daemonVersion,
+              kinds: ['runtime'],
+              runsOn: RunsOn.NODE,
+              configSchemaJson: '{"type":"object"}',
+            })),
+            ...(this.hw.gpuUuids.length > 0
+              ? [{ id: 'nvidia', version: this.daemonVersion, kinds: ['config'], configSchemaJson: '{"type":"object"}' }]
+              : []),
+          ]),
       ],
       lastEpoch: BigInt(meta.lastEpoch),
       appliedGeneration: BigInt(meta.appliedGeneration),

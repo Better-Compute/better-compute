@@ -68,6 +68,22 @@ export interface FakeDomain {
   networkPolicy: 'egress' | 'private' | 'none';
   /** (v1.1) The host volumes it attaches (`InstanceSpec.volumes`), open while it runs or is paused. */
   volumes: { volumeId: string; readOnly: boolean }[];
+  /** What the guest used since it booted, as a test set it (`setUsage`); cleared at every boot. */
+  usage?: Partial<FakeUsage>;
+}
+
+/**
+ * One domain's live usage as bcd's runtimes read it (`runtime.UsageReader`; the `bcd.instance.*` OTLP series),
+ * from the guest's side and cumulative since it booted, except `memoryBytes`, a gauge.
+ */
+export interface FakeUsage {
+  cpuSeconds: number;
+  memoryBytes: bigint;
+  ioReadBytes: bigint;
+  ioWriteBytes: bigint;
+  /** What the guest received (its tap's transmitted bytes). */
+  netRxBytes: bigint;
+  netTxBytes: bigint;
 }
 
 /**
@@ -116,6 +132,13 @@ export interface FakeHypervisorOptions {
    * the host reports none. `reservedBytes` defaults to bcd's: 5% of the total, at least 2 GiB.
    */
   volumeStore?: { totalBytes: bigint; reservedBytes?: bigint };
+  /**
+   * The node runs unprivileged under `bcd helper` (config.toml `[helper]`), whose root side checks what the node
+   * asks for: an instance NIC joins only a bridge of `instanceBridges` (`[helper] instance_bridges`; empty refuses
+   * every NIC). A NIC on another network fails its instance with the helper's refusal: `libvirt-kvm`'s checked
+   * definition before the domain exists, `cloud-hypervisor`'s `ch.taps` when it starts. See `helperVpsHost`.
+   */
+  helper?: { instanceBridges: readonly string[] };
 }
 
 /** `StatusReport.volume_storage`, as bcd computes it for its data directory. */
@@ -180,6 +203,8 @@ export class FakeHypervisor {
   readonly snapshotStore: Map<string, Uint8Array>;
   /** (v1.1) Host volumes by id (`InstancesSection.volumes`); their files are `volumePath(id)`. */
   readonly volumes = new Map<string, FakeVolume>();
+  /** `[helper] instance_bridges` when the node runs under bcd helper (`FakeHypervisorOptions.helper`). */
+  readonly helper: FakeHypervisorOptions['helper'];
   private readonly volumeStore: FakeHypervisorOptions['volumeStore'];
   private readonly capacity: NonNullable<FakeHypervisorOptions['capacity']>;
   /** Fetched user data by ref: the value, or the broker's refusal. */
@@ -198,6 +223,17 @@ export class FakeHypervisor {
     this.capacity = { ...options.capacity };
     this.snapshotStore = options.snapshotStore ?? new Map();
     this.volumeStore = options.volumeStore;
+    this.helper = options.helper ? { instanceBridges: [...options.helper.instanceBridges] } : undefined;
+  }
+
+  /** The helper's refusal of the spec's NICs, in its runtime's words (undefined: allowed, or no helper). */
+  private helperRefusal(spec: InstanceSpec): string | undefined {
+    if (!this.helper) return undefined;
+    const bridge = spec.nics.find((nic) => !this.helper!.instanceBridges.includes(nic.network))?.network;
+    if (bridge === undefined) return undefined;
+    return spec.runtime === 'cloud-hypervisor'
+      ? `ch.taps: ${JSON.stringify(bridge)} is not an instance bridge of this host ([helper] instance_bridges)`
+      : `domain: bridge ${JSON.stringify(bridge)} is not an instance network`;
   }
 
   /**
@@ -296,6 +332,12 @@ export class FakeHypervisor {
       const addresses = spec.nics.flatMap((nic) => nic.addresses);
       const macs = spec.nics.map((nic) => nic.mac);
       let domain = existing;
+      // Under bcd helper, root checks libvirt's definition before the domain exists.
+      const refused = this.helperRefusal(spec);
+      if (refused && spec.runtime !== 'cloud-hypervisor') {
+        fail(spec, refused);
+        continue;
+      }
       if (!domain) {
         domain = {
           id,
@@ -352,6 +394,11 @@ export class FakeHypervisor {
             fail(spec, 'not enough free vCPU or memory on this host');
             continue;
           }
+          // cloud-hypervisor's taps are root's (ch.taps), made when the VMM starts.
+          if (refused) {
+            fail(spec, refused);
+            continue;
+          }
           // Its volumes open at boot: each on this host, and one writer at a time (checked against what
           // running and paused domains really have open, not what their specs say now).
           const attach = spec.volumes.map((volume) => ({ volumeId: volume.volumeId, readOnly: volume.readOnly }));
@@ -362,6 +409,7 @@ export class FakeHypervisor {
           }
           domain.volumes = attach;
           domain.boots++;
+          delete domain.usage;
         }
         domain.state = wanted === InstanceDesiredState.PAUSED ? 'paused' : 'running';
       } else domain.state = 'stopped';
@@ -508,6 +556,43 @@ export class FakeHypervisor {
   /** What a guest reading `volumeId` would find (`writeVolume`'s last content), if the host has it. */
   volumeContent(volumeId: string): string | undefined {
     return this.volumes.get(volumeId)?.content;
+  }
+
+  // ---- live usage ---------------------------------------------------------------------------------
+
+  /**
+   * Live usage of the domains whose runtime reads it, as bcd's `runtime.UsageReader`s do: `cloud-hypervisor`'s
+   * managed domains that run or are paused (the VMM unit's cgroup and the taps' counters, which the node reads as
+   * its own user under bcd helper too), `libvirt-kvm`'s running domains, managed or not (`virsh domstats
+   * --state-running`). Other runtimes (plugins) report none. A guest's numbers are what `setUsage` gave it since it
+   * booted, over bcd's fakehw synthetic usage: half its memory and a CPU second per boot.
+   */
+  usage(): Map<string, FakeUsage> {
+    const out = new Map<string, FakeUsage>();
+    for (const domain of [...this.domains.values()].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+      const read =
+        domain.runtime === 'cloud-hypervisor'
+          ? domain.managed && (domain.state === 'running' || domain.state === 'paused')
+          : domain.runtime === 'libvirt-kvm' && domain.state === 'running';
+      if (!read) continue;
+      out.set(domain.id, {
+        cpuSeconds: domain.boots,
+        memoryBytes: domain.memoryBytes / 2n,
+        ioReadBytes: 0n,
+        ioWriteBytes: 0n,
+        netRxBytes: 0n,
+        netTxBytes: 0n,
+        ...domain.usage,
+      });
+    }
+    return out;
+  }
+
+  /** What the guest of `instanceId` used since it booted (merged over earlier calls); its next boot clears it. */
+  setUsage(instanceId: string, usage: Partial<FakeUsage>): void {
+    const domain = this.domains.get(instanceId);
+    if (!domain) throw new Error(`no instance ${instanceId} on this host`);
+    domain.usage = { ...domain.usage, ...usage };
   }
 
   /** The instance's guest fails (reported ERROR) until `clearFault`. */

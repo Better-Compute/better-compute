@@ -85,10 +85,19 @@ export type {
 } from './fake-hw.js';
 
 export { FakeDaemon, cdiSpecPath, envFilePath, mergeSpec } from './daemon/fake-daemon.js';
-export type { FakeDaemonOptions, FakeDaemonState, FakeQuorumTrust, Verdict } from './daemon/fake-daemon.js';
+export type {
+  FakeDaemonOptions,
+  FakeDaemonState,
+  FakeMetric,
+  FakeMetricPoint,
+  FakeQuorumTrust,
+  FakeTelemetryExport,
+  Verdict,
+} from './daemon/fake-daemon.js';
 export {
   belowMinimumProfile,
   daemonSkewProfiles,
+  helperVpsHost,
   type DaemonProfile,
   type ProfileHelloField,
   type ProfileSpecSection,
@@ -169,6 +178,7 @@ export {
   type FakeDomainState,
   type FakeHypervisorOptions,
   type FakeSnapshot,
+  type FakeUsage,
   type InstancesConvergeResult,
   type UserDataFetch,
 } from './daemon/instances.js';

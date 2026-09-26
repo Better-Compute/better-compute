@@ -168,6 +168,11 @@ export interface DevJoinOptions {
   variant?: FakeHardwareVariant;
   /** Seeds serials, UUIDs and MACs; machine `i` gets `<seed>-<i>` (default: random per call). */
   seed?: string;
+  /**
+   * These machines' FakeDaemon options, over the stack's `daemon` ones: e.g. `{ instances: helperVpsHost() }` for VPS
+   * hosts under bcd helper beside root ones. A `FakeHypervisor` instance here would be shared by every machine.
+   */
+  daemon?: Partial<Omit<FakeDaemonOptions, 'nodeId' | 'scheduler' | 'dial' | 'hardware' | 'tunnels'>>;
 }
 
 export interface DevSiteJoinOptions {
@@ -724,6 +729,7 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
         const daemon = new FakeDaemon({
           backoff: { minMs: 100, maxMs: 5_000 },
           ...daemonOptions,
+          ...joinOptions.daemon,
           nodeId,
           hardware,
           // The key its certificate certifies: attested results (wipes, diagnostics) are node-signed.
