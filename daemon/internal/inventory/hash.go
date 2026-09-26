@@ -78,8 +78,8 @@ func SectionHashes(inv *NodeInventory) (map[string][]byte, error) {
 }
 
 // Canonicalize sorts every repeated field of inv by its stable key, as inventory.proto requires
-// before encoding: CPU flags and OS runtimes by value; NUMA nodes by id; hugepage pools by page
-// size; DIMMs by slot; disks by name; NICs by MAC; GPUs by index; MIG profiles by id and instances
+// before encoding: CPU flags and OS runtimes by value; NUMA nodes by id; hugepage pools (the host's
+// and each NUMA node's) by page size; DIMMs by slot; disks by name; NICs by MAC; GPUs by index; MIG profiles by id and instances
 // by (gi_id, ci_id); NVLinks by link number; topology by peer UUID. Keys are expected to be unique;
 // ties keep their order, and nil elements sort first.
 func Canonicalize(inv *NodeInventory) {
@@ -89,6 +89,11 @@ func Canonicalize(inv *NodeInventory) {
 	if c := inv.Cpu; c != nil {
 		sort.Strings(c.Flags)
 		sortBy(c.NumaNodes, func(n *NumaNode) uint32 { return n.Id })
+		for _, n := range c.NumaNodes {
+			if n != nil {
+				sortBy(n.Hugepages, func(p *HugepagePool) uint64 { return p.PageSizeBytes })
+			}
+		}
 	}
 	if m := inv.Memory; m != nil {
 		sortBy(m.Hugepages, func(p *HugepagePool) uint64 { return p.PageSizeBytes })

@@ -61,6 +61,9 @@ func fakeRoot(t *testing.T) string {
 	write("/proc/cpuinfo", cpuinfo)
 	write("/sys/devices/system/node/node0/cpulist", "0-7\n")
 	write("/sys/devices/system/node/node0/meminfo", "Node 0 MemTotal:       1048576 kB\nNode 0 MemFree: 1 kB\n")
+	write("/sys/devices/system/node/node0/hugepages/hugepages-1048576kB/nr_hugepages", "4\n")
+	write("/sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages", "16\n")
+	write("/sys/devices/system/cpu/isolated", "2-3,6-7\n")
 	write("/proc/meminfo", "MemTotal:        2097152 kB\nMemFree: 10 kB\n")
 	write("/sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages", "16\n")
 	write("/sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages", "0\n")
@@ -121,8 +124,12 @@ func TestCollectorReadsProcAndSys(t *testing.T) {
 	}
 	c := inv.Cpu
 	if c == nil || c.Sockets != 2 || c.Cores != 4 || c.Threads != 8 || c.Vendor != "GenuineIntel" || len(c.Flags) != 3 ||
-		len(c.NumaNodes) != 1 || c.NumaNodes[0].Cpus != "0-7" || c.NumaNodes[0].MemoryBytes != 1<<30 {
+		len(c.NumaNodes) != 1 || c.NumaNodes[0].Cpus != "0-7" || c.NumaNodes[0].MemoryBytes != 1<<30 || c.IsolatedCpus != "2-3,6-7" {
 		t.Fatalf("cpu = %+v", c)
+	}
+	// NUMA-local hugepage pools, sorted by page size (2Mi before 1Gi).
+	if hp := c.NumaNodes[0].Hugepages; len(hp) != 2 || hp[0].PageSizeBytes != 2<<20 || hp[0].Total != 16 || hp[1].PageSizeBytes != 1<<30 || hp[1].Total != 4 {
+		t.Fatalf("numa hugepages = %+v", hp)
 	}
 	m := inv.Memory
 	if m == nil || m.TotalBytes != 2<<30 || len(m.Hugepages) != 2 || m.Hugepages[0].PageSizeBytes != 2<<20 || m.Hugepages[0].Total != 16 ||

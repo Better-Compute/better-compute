@@ -151,6 +151,10 @@ type CpuSection struct {
 	Flags []string
 	// Sorted by id.
 	NumaNodes []*NumaNode
+	// (v1.1 §3.8) CPUs the kernel isolates from the scheduler (/sys/devices/system/cpu/isolated,
+	// cpulist form; empty when none): bcd pins VMs and holds there first, and never counts them for
+	// the host's own reserve.
+	IsolatedCpus string
 }
 
 // NumaNode mirrors bettercompute.agent.v1.NumaNode.
@@ -159,6 +163,9 @@ type NumaNode struct {
 	// Kernel cpulist form, e.g. "0-31,64-95".
 	Cpus        string
 	MemoryBytes uint64
+	// (v1.1 §3.8) The node's hugepage pools (/sys/devices/system/node/nodeN/hugepages), sorted by page
+	// size: NUMA-local hugepage backing books from these.
+	Hugepages []*HugepagePool
 }
 
 // MemorySection mirrors bettercompute.agent.v1.MemorySection.

@@ -13,8 +13,12 @@ import {
   OsSectionSchema,
   SystemSectionSchema,
   CpuSectionSchema,
+  HugepagePoolSchema,
+  MemorySectionSchema,
+  NumaNodeSchema,
 } from '@better-compute/protocol';
 import {
+  cpulistCount,
   devicesFromGpus,
   diffInventory,
   gpuLinks,
@@ -217,6 +221,34 @@ describe('planDevices', () => {
 });
 
 describe('labels and conditions', () => {
+  it('labels host CPU, NUMA, memory and hugepages (PLAN.md §3.8)', () => {
+    const pool = (pageSizeBytes: bigint, total: bigint) => create(HugepagePoolSchema, { pageSizeBytes, total });
+    const labels = Object.fromEntries(
+      inventoryLabels({
+        cpu: create(CpuSectionSchema, {
+          architecture: 'x86_64',
+          sockets: 2,
+          threads: 192,
+          isolatedCpus: '2-5,98-101\n',
+          numaNodes: [create(NumaNodeSchema, { id: 0, cpus: '0-95' }), create(NumaNodeSchema, { id: 1, cpus: '96-191' })],
+        }),
+        memory: create(MemorySectionSchema, { totalBytes: 2048n << 30n, hugepages: [pool(2n << 20n, 0n), pool(1n << 30n, 512n)] }),
+      }).map((l) => [l.key, l.value]),
+    );
+    expect(labels).toMatchObject({
+      'cpu.count': '192',
+      'cpu.sockets': '2',
+      'cpu.isolated': '8',
+      'numa.nodes': '2',
+      'memory.totalGiB': '2048',
+      'hugepages.2Mi': '0',
+      'hugepages.1Gi': '512',
+    });
+    expect(cpulistCount('0-3,8,10-11')).toBe(7);
+    expect(cpulistCount('')).toBe(0);
+    expect(cpulistCount('3-1')).toBe(0);
+  });
+
   it('derives GFD-style labels, sorted by key', () => {
     const labels = inventoryLabels({
       gpus: board(8),
@@ -225,6 +257,7 @@ describe('labels and conditions', () => {
     });
     expect(Object.fromEntries(labels.map((l) => [l.key, l.value]))).toEqual({
       'cpu.arch': 'x86_64',
+      'cpu.isolated': '0',
       'cpu.model': 'AMD-EPYC-9654-96-Core-Processor',
       'cpu.vendor': 'AuthenticAMD',
       'cuda.driver.major': '12',

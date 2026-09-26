@@ -221,9 +221,33 @@ func (c Collector) cpu() *CpuSection {
 				node.MemoryBytes = kib(line[i+len("MemTotal:"):])
 			}
 		}
+		// NUMA-local hugepage pools (§3.8): what a pinned VM or hold on this node can back its memory with.
+		node.Hugepages = c.hugepagePools("/sys/devices/system/node/" + name + "/hugepages")
 		s.NumaNodes = append(s.NumaNodes, node)
 	}
+	// "1-3,65-67", or empty when nothing is isolated.
+	s.IsolatedCpus = c.read("/sys/devices/system/cpu/isolated")
 	return s
+}
+
+// hugepagePools reads the hugepages-<n>kB directories under dir (the host's /sys/kernel/mm/hugepages or a
+// NUMA node's), sorted by page size. Only the configured total: free pages change with every VM and would
+// move the inventory hash.
+func (c Collector) hugepagePools(dir string) []*HugepagePool {
+	var pools []*HugepagePool
+	for _, name := range c.list(dir) {
+		// hugepages-2048kB
+		size, ok := strings.CutPrefix(name, "hugepages-")
+		size, ok2 := strings.CutSuffix(size, "kB")
+		n, err := strconv.ParseUint(size, 10, 64)
+		if !ok || !ok2 || err != nil {
+			continue
+		}
+		total, _ := c.uint(dir + "/" + name + "/nr_hugepages")
+		pools = append(pools, &HugepagePool{PageSizeBytes: n * 1024, Total: total})
+	}
+	sort.Slice(pools, func(i, j int) bool { return pools[i].PageSizeBytes < pools[j].PageSizeBytes })
+	return pools
 }
 
 func machine(goarch string) string {
@@ -270,17 +294,7 @@ func (c Collector) memory() *MemorySection {
 	if s.TotalBytes == 0 {
 		return nil
 	}
-	for _, name := range c.list("/sys/kernel/mm/hugepages") {
-		// hugepages-2048kB
-		size, ok := strings.CutPrefix(name, "hugepages-")
-		size, ok2 := strings.CutSuffix(size, "kB")
-		n, err := strconv.ParseUint(size, 10, 64)
-		if !ok || !ok2 || err != nil {
-			continue
-		}
-		total, _ := c.uint("/sys/kernel/mm/hugepages/" + name + "/nr_hugepages")
-		s.Hugepages = append(s.Hugepages, &HugepagePool{PageSizeBytes: n * 1024, Total: total})
-	}
+	s.Hugepages = c.hugepagePools("/sys/kernel/mm/hugepages")
 	if mcs := c.list("/sys/devices/system/edac/mc"); len(mcs) > 0 {
 		edac := &EdacCounters{}
 		found := false

@@ -46,6 +46,7 @@ func (m *CpuSection) encode(w *protoWriter) {
 	for _, v := range m.NumaNodes {
 		w.message(8, v.encode)
 	}
+	w.str(9, m.IsolatedCpus)
 }
 
 func (m *NumaNode) encode(w *protoWriter) {
@@ -55,6 +56,9 @@ func (m *NumaNode) encode(w *protoWriter) {
 	w.u32(1, m.Id)
 	w.str(2, m.Cpus)
 	w.u64(3, m.MemoryBytes)
+	for _, v := range m.Hugepages {
+		w.message(4, v.encode)
+	}
 }
 
 func (m *MemorySection) encode(w *protoWriter) {

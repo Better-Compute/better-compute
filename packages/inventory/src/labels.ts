@@ -24,6 +24,14 @@ export const inventoryLabelKeys = [
   'cpu.arch',
   'cpu.vendor',
   'cpu.model',
+  // (v1.1 §3.8) Host CPU and memory: selectors and `when:` expressions over them, e.g. `numa.nodes > 1`.
+  'cpu.count',
+  'cpu.sockets',
+  'cpu.isolated',
+  'numa.nodes',
+  'memory.totalGiB',
+  'hugepages.2Mi',
+  'hugepages.1Gi',
   'os.distro',
   'os.kernel',
   'kvm.available',
@@ -58,6 +66,21 @@ export function cpuModelLabelValue(model: string): string {
     .replace(/[-.]+$/, '');
 }
 
+/** How many CPUs a kernel cpulist names (`0-3,8,10-11` → 7); 0 for an empty or malformed one. */
+export function cpulistCount(list: string): number {
+  let count = 0;
+  for (const part of list.trim().split(',')) {
+    if (!part) continue;
+    const match = /^(\d+)(?:-(\d+))?$/.exec(part.trim());
+    if (!match) return 0;
+    const from = Number(match[1]);
+    const to = match[2] === undefined ? from : Number(match[2]);
+    if (to < from) return 0;
+    count += to - from + 1;
+  }
+  return count;
+}
+
 function gpuLabels(section: GpusSection | undefined, labels: Map<string, string>): void {
   const gpus = section?.gpus.filter((gpu) => gpu.uuid) ?? [];
   labels.set('gpu.present', String(gpus.length > 0));
@@ -89,6 +112,22 @@ export function inventoryLabels(sections: InventorySections): Label[] {
   if (sections.cpu?.vendor) labels.set('cpu.vendor', sections.cpu.vendor);
   const cpuModel = cpuModelLabelValue(sections.cpu?.model ?? '');
   if (cpuModel) labels.set('cpu.model', cpuModel);
+  const cpu = sections.cpu;
+  if (cpu) {
+    if (cpu.threads > 0) labels.set('cpu.count', String(cpu.threads));
+    if (cpu.sockets > 0) labels.set('cpu.sockets', String(cpu.sockets));
+    labels.set('cpu.isolated', String(cpulistCount(cpu.isolatedCpus)));
+    if (cpu.numaNodes.length > 0) labels.set('numa.nodes', String(cpu.numaNodes.length));
+  }
+  const memory = sections.memory;
+  if (memory && memory.totalBytes > 0n) {
+    labels.set('memory.totalGiB', String(bytesToGiB(memory.totalBytes)));
+    // Configured pool sizes, in pages (0 when the size exists but holds none).
+    for (const pool of memory.hugepages) {
+      const key = pool.pageSizeBytes === 2n << 20n ? 'hugepages.2Mi' : pool.pageSizeBytes === 1n << 30n ? 'hugepages.1Gi' : undefined;
+      if (key) labels.set(key, String(pool.total));
+    }
+  }
   if (sections.os?.distro) labels.set('os.distro', sections.os.distro);
   if (sections.os?.kernel) labels.set('os.kernel', sections.os.kernel);
   if (sections.os) labels.set('kvm.available', String(sections.os.kvm));
