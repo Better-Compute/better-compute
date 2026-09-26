@@ -23,6 +23,8 @@ export interface DashboardState {
   version: 1;
   active: string;
   dashboards: Dashboard[];
+  /** Preset ids this browser has already been given, so new presets arrive once and deleted ones stay gone. */
+  presetsSeen?: string[];
 }
 
 const item = (widget: string, w: number, h: number): WidgetInstance => ({ key: widget, widget, w, h });
@@ -38,10 +40,29 @@ export const PRESETS: { id: string; name: string; description: string; items: Wi
       item('overview.pulse', 8, 4),
       item('overview.attention', 4, 4),
       item('overview.fleet-wall', 8, 4),
-      item('overview.control-plane', 4, 4),
-      item('overview.sites', 6, 4),
-      item('overview.activity', 6, 4),
+      item('fleet.health', 4, 4),
       item('capacity.heatmap', 12, 4),
+      item('overview.control-plane', 4, 4),
+      item('overview.sites', 4, 4),
+      item('fleet.batches', 4, 4),
+      item('fleet.rollout', 4, 2),
+      item('fleet.sandboxes', 4, 2),
+      item('overview.activity', 4, 4),
+    ],
+  },
+  {
+    id: 'fleet',
+    name: 'Fleet',
+    description: 'Machines and devices: health by pool, every GPU, what is unhealthy, rollouts and quorum batches.',
+    items: [
+      item('fleet.health', 4, 4),
+      item('fleet.gpu-wall', 8, 4),
+      item('fleet.unhealthy', 4, 4),
+      item('overview.fleet-wall', 8, 4),
+      item('fleet.rollout', 4, 2),
+      item('fleet.sandboxes', 4, 2),
+      item('fleet.batches', 4, 3),
+      item('overview.sites', 8, 4),
     ],
   },
   {
@@ -65,9 +86,11 @@ export const PRESETS: { id: string; name: string; description: string; items: Wi
     description: 'What is broken and what changed: attention, control plane, activity.',
     items: [
       item('overview.attention', 6, 5),
-      item('overview.control-plane', 6, 5),
-      item('overview.fleet-wall', 12, 4),
-      item('overview.activity', 12, 4),
+      item('fleet.unhealthy', 6, 5),
+      { ...item('fleet.gpu-wall', 8, 4), settings: { unhealthyOnly: true } },
+      item('fleet.batches', 4, 4),
+      item('overview.control-plane', 4, 4),
+      { ...item('overview.activity', 8, 4), settings: { severity: 'warning' } },
     ],
   },
 ];
@@ -79,6 +102,18 @@ export function defaultState(): DashboardState {
     version: 1,
     active: 'operations',
     dashboards: PRESETS.map((preset) => ({ id: preset.id, name: preset.name, items: preset.items.map((i) => ({ ...i })) })),
+    presetsSeen: PRESETS.map((preset) => preset.id),
+  };
+}
+
+/** Presets added since this browser last loaded are appended (once). */
+function withNewPresets(state: DashboardState): DashboardState {
+  const seen = new Set(state.presetsSeen ?? state.dashboards.map((d) => d.id));
+  const fresh = PRESETS.filter((preset) => !seen.has(preset.id) && !state.dashboards.some((d) => d.id === preset.id));
+  return {
+    ...state,
+    dashboards: [...state.dashboards, ...fresh.map((preset) => ({ id: preset.id, name: preset.name, items: preset.items.map((i) => ({ ...i })) }))],
+    presetsSeen: [...new Set([...seen, ...PRESETS.map((preset) => preset.id)])],
   };
 }
 
@@ -88,7 +123,7 @@ export function loadState(): DashboardState {
     if (!raw) return defaultState();
     const parsed = JSON.parse(raw) as DashboardState;
     if (parsed.version !== 1 || !Array.isArray(parsed.dashboards) || parsed.dashboards.length === 0) return defaultState();
-    return parsed;
+    return withNewPresets(parsed);
   } catch {
     return defaultState();
   }
