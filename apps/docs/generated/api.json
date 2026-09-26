@@ -5906,7 +5906,7 @@
     "group": "sandboxVolumes",
     "slug": "sandbox-volumes",
     "module": "vps",
-    "overview": "Sandbox volumes are persistent disks on one host that a tenant's sandboxes attach across runs, so an agent keeps its memory, caches and checkouts. A volume is placed when it is created: its size is booked as `diskGiB` on one host of the pool, charged to the tenant's quota, and the host keeps it as a sparse qcow2 file. A sandbox template names volumes with a mount path. Sandboxes of that template then run on the volume's host only, attach it as an extra virtio disk, and mount it by serial (`/dev/disk/by-id/virtio-<serial>`) from their user data. The first mount formats it as ext4, and no later one ever does. A volume takes any number of read-only attachments or one read-write attachment, never both. Volumes are metered as `vps.volume.gib.hours` from creation until the disk is released. See [Sandboxes](/docs/guides/vps/sandboxes).",
+    "overview": "Sandbox volumes are persistent disks on one host that a tenant's sandboxes attach across runs, so an agent keeps its memory, caches and checkouts. A volume is placed when it is created: its size is booked as `diskGiB` on one host of the pool, charged to the tenant's quota, and the host keeps it as a sparse raw file. A sandbox template names volumes with a mount path. Sandboxes of that template then run on the volume's host only, attach it as an extra virtio disk, and mount it by serial (`/dev/disk/by-id/virtio-<serial>`) from their user data. The first mount formats it as ext4, and no later one ever does. A volume takes any number of read-only attachments or one read-write attachment, never both. Volumes are metered as `vps.volume.gib.hours` from creation until the disk is released. See [Sandboxes](/docs/guides/vps/sandboxes).",
     "methods": [
       {
         "method": "create",
@@ -6066,8 +6066,8 @@
           "required": ["tenantId", "volumeId", "sizeGiB"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Grows a volume to `sizeGiB` on the host it lives on and returns it with the new size. A volume never shrinks.",
+        "description": "Grows a volume to `sizeGiB` on the host it lives on and returns it with the new size. A volume never shrinks.\n\n- A size below the current one is `INVALID_INPUT`. The current size returns the volume unchanged.\n- The growth is charged to the tenant's `diskGiB` quota first (`QUOTA_EXCEEDED` past it), then booked on the volume's host. When the host has no room it is `CAPACITY_UNAVAILABLE`: the quota charge is refunded and nothing changes.\n- Only a `ready` volume grows (`INVALID_STATE` otherwise).\n\nThe host grows the file as soon as its spec carries the new size, even while a running sandbox has the volume attached: the guest's disk grows live. The filesystem on it grows when the next sandbox that attaches the volume boots, because its user data runs `resize2fs` on every writable volume. Inside a running guest, run `resize2fs /dev/disk/by-id/virtio-<serial>` to use the space at once. Publishes `sandbox.volume.resized`. Decided as `compute:sandboxes:manage` on the volume."
       },
       {
         "method": "delete",
