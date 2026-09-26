@@ -11,7 +11,7 @@ package agent
 
 import (
 	"context"
-	"crypto/ecdsa"
+	"crypto"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -55,8 +55,9 @@ var ErrRevoked = errors.New("agent: this node's certificate was revoked")
 
 // Options configure an Agent.
 type Options struct {
-	State   *State
-	Key     *ecdsa.PrivateKey
+	State *State
+	// Key is the node key: a file key, or one in the TPM (LoadState).
+	Key     crypto.Signer
 	DataDir string
 	Journal journal.Journal
 	Host    Host
@@ -66,7 +67,7 @@ type Options struct {
 	// RenewAfter, when set, brings the first renewal forward to this long after start (tests).
 	RenewAfter time.Duration
 	// OnRenewed is called after a renewal is stored (the caller rebuilds its mTLS client).
-	OnRenewed func(*State, *ecdsa.PrivateKey)
+	OnRenewed func(*State, crypto.Signer)
 	// SignerPin is join_signing_key_pin: Welcome trust bundles must be signed by that key.
 	SignerPin []byte
 	// BMCNetworks are the site's BMC networks from the local configuration ([site] bmc_networks):
@@ -187,7 +188,7 @@ type Agent struct {
 	restarting atomic.Bool
 	upd        updater
 	// key is the node key (read without mu: attested results are signed under it).
-	key atomic.Pointer[ecdsa.PrivateKey]
+	key atomic.Pointer[heldKey]
 
 	mu     sync.Mutex
 	state  *State
@@ -323,12 +324,12 @@ func New(o Options) (*Agent, error) {
 	a.hostcfg = newHostConverger(a)
 	a.kube = newKubeManager(a)
 	a.telemetry = &telemetryConverger{a: a}
-	a.key.Store(o.Key)
+	a.storeKey(o.Key)
 	return a, nil
 }
 
 // Identity returns the node's current identity and key (renewal replaces them).
-func (a *Agent) Identity() (*State, *ecdsa.PrivateKey) {
+func (a *Agent) Identity() (*State, crypto.Signer) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.state, a.currentKey()

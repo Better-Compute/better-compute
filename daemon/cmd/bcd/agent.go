@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/tls"
 	"errors"
@@ -47,6 +48,8 @@ func loadConfig(fs *flag.FlagSet) (*config.Config, string, error) {
 	if cfg.DevInsecureH2C && !devBuild {
 		return nil, file, errors.New("dev_insecure_h2c is only accepted by fakehw development builds")
 	}
+	// Node keys in the TPM where there is one.
+	agent.TPM = nodeKeyTPM(cfg.DataDir)
 	return cfg, file, nil
 }
 
@@ -62,7 +65,7 @@ func newLogger(cfg *config.Config, w io.Writer) *slog.Logger {
 
 // newClient builds the gateway client: TLS pinned to the serving CA with the node certificate when
 // there is one, or h2c with the test-node header for a dev gateway.
-func newClient(cfg *config.Config, state *agent.State, key *ecdsa.PrivateKey) (*transport.Client, error) {
+func newClient(cfg *config.Config, state *agent.State, key crypto.Signer) (*transport.Client, error) {
 	pin, err := config.DecodePin(cfg.ServingCASPKIPin)
 	if err != nil {
 		return nil, err
@@ -472,7 +475,7 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 			return client.Load().Tunnel(ctx), nil
 		},
 		Renewer: clientRenewer{client: &client},
-		OnRenewed: func(s *agent.State, k *ecdsa.PrivateKey) {
+		OnRenewed: func(s *agent.State, k crypto.Signer) {
 			next, err := newClient(cfg, s, k)
 			if err != nil {
 				log.Error("rebuild the gateway client after renewal", "error", err.Error())
@@ -504,7 +507,7 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		opts.RenewAfter = d // fakehw builds only: renew soon after start (e2e)
 	}
 	if cfg.WebSocket.URL != "" && (mode == "node" || mode == "site") {
-		if err := useWebSocket(&opts, cfg, func() (*agent.State, *ecdsa.PrivateKey) {
+		if err := useWebSocket(&opts, cfg, func() (*agent.State, crypto.Signer) {
 			if running == nil {
 				return nil, nil
 			}

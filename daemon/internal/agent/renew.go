@@ -75,12 +75,19 @@ func (a *Agent) renewOnce(ctx context.Context) error {
 	now := a.serverNowLocked()
 	a.mu.Unlock()
 	current := a.currentKey()
-	next, err := pki.GenerateKey()
+	// The next key: in the TPM when the host has one (a node with a file key moves into the TPM here).
+	next, record, err := newNodeKey(a.log)
 	if err != nil {
 		return err
 	}
+	promoted := false
+	defer func() {
+		if !promoted {
+			closeKey(next)
+		}
+	}()
 	nextPath := filepath.Join(a.o.DataDir, NextKeyFile)
-	if err := pki.SavePrivateKey(nextPath, next); err != nil {
+	if err := saveNodeKey(nextPath, record); err != nil {
 		return err
 	}
 	req, err := pki.RenewRequest(state.NodeID, current, next, state.Chain, now)
@@ -106,7 +113,11 @@ func (a *Agent) renewOnce(ctx context.Context) error {
 			renewed.SiteID, renewed.NodeID, renewed.Role, state.SiteID, state.NodeID, state.Role)
 	}
 	leaf, _ := renewed.Leaf()
-	if pub, ok := leaf.PublicKey.(*ecdsa.PublicKey); !ok || !pub.Equal(&next.PublicKey) {
+	nextPub, err := pki.NodePublic(next)
+	if err != nil {
+		return err
+	}
+	if pub, ok := leaf.PublicKey.(*ecdsa.PublicKey); !ok || !pub.Equal(nextPub) {
 		return errors.New("renewal: the certificate does not certify the new key")
 	}
 	renewed.TrustVersion = state.TrustVersion
@@ -116,7 +127,7 @@ func (a *Agent) renewOnce(ctx context.Context) error {
 	// The next key must be on disk before the certificate that names it: whatever removed it during
 	// the request (a LoadState elsewhere discards a node.key.next the certificate does not match), a
 	// stored certificate without its key would leave the node without an identity.
-	if err := pki.SavePrivateKey(nextPath, next); err != nil {
+	if err := saveNodeKey(nextPath, record); err != nil {
 		return err
 	}
 	if err := SaveState(a.o.DataDir, renewed); err != nil {
@@ -128,8 +139,12 @@ func (a *Agent) renewOnce(ctx context.Context) error {
 	a.mu.Lock()
 	a.state = renewed
 	a.mu.Unlock()
-	a.key.Store(next)
-	a.log.Info("certificate renewed", "notAfter", renewed.NotAfter.Format(time.RFC3339))
+	a.storeKey(next)
+	promoted = true
+	// A TPM key's handle is unloaded once nothing can still be signing with it (a handshake, a
+	// statement started just before).
+	time.AfterFunc(5*time.Minute, func() { closeKey(current) })
+	a.log.Info("certificate renewed", "notAfter", renewed.NotAfter.Format(time.RFC3339), "key", NodeKeyKind(next))
 	if a.o.OnRenewed != nil {
 		a.o.OnRenewed(renewed, next)
 	}

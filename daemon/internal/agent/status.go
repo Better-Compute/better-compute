@@ -32,8 +32,10 @@ type Status struct {
 	WaitingEvents  int    `json:"waitingEvents"`
 
 	CertificateNotAfter time.Time `json:"certificateNotAfter"`
-	TrustVersion        uint64    `json:"trustVersion"`
-	CommandSigning      bool      `json:"commandSigning"`
+	// NodeKey is what holds the node key: "tpm" or "file".
+	NodeKey        string `json:"nodeKey"`
+	TrustVersion   uint64 `json:"trustVersion"`
+	CommandSigning bool   `json:"commandSigning"`
 
 	// GPUs, Kubernetes and Telemetry: the machine's side (status_gpu.go).
 	GPUs       []GPUStatus      `json:"gpus,omitempty"`
@@ -83,6 +85,7 @@ func (a *Agent) agentStatus() Status {
 		DroppedMetrics:      stats.DroppedMetrics,
 		WaitingEvents:       len(a.overflow),
 		CertificateNotAfter: a.state.NotAfter,
+		NodeKey:             NodeKeyKind(a.currentKey()),
 		TrustVersion:        a.state.TrustVersion,
 		CommandSigning:      len(a.state.TrustRoots) > 0,
 	}

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/x509"
 	"encoding/json"
@@ -16,7 +17,7 @@ import (
 // Files in the data directory. The identity outlives a lost journal: a corrupt or wiped journal
 // starts over with a new journal_id, but the node keeps its key and certificate (PLAN.md §6).
 const (
-	// KeyFile is the node key (PKCS#8 PEM, 0600) when there is no TPM.
+	// KeyFile is the node key (0600): PKCS#8 PEM, or the record of a key in the TPM (nodekey.go).
 	KeyFile = "node.key"
 	// NextKeyFile holds the key a renewal is certifying until its certificate is stored.
 	NextKeyFile = "node.key.next"
@@ -61,9 +62,10 @@ func (s *State) Leaf() (*x509.Certificate, error) {
 	return x509.ParseCertificate(s.Chain[0])
 }
 
-// LoadState reads the identity and the node key from dir. A renewal interrupted after its
-// certificate was stored promotes the next key; one interrupted before keeps the current key.
-func LoadState(dir string) (*State, *ecdsa.PrivateKey, error) {
+// LoadState reads the identity and the node key from dir (a file key, or one in the TPM). A renewal
+// interrupted after its certificate was stored promotes the next key; one interrupted before keeps
+// the current key.
+func LoadState(dir string) (*State, crypto.Signer, error) {
 	data, err := os.ReadFile(filepath.Join(dir, StateFile))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil, ErrNotJoined
@@ -83,8 +85,10 @@ func LoadState(dir string) (*State, *ecdsa.PrivateKey, error) {
 	if !ok {
 		return nil, nil, errors.New("agent: the node certificate is not P-256")
 	}
-	if next, err := pki.LoadPrivateKey(filepath.Join(dir, NextKeyFile)); err == nil {
-		if next.PublicKey.Equal(leafKey) {
+	if next, err := loadNodeKey(filepath.Join(dir, NextKeyFile)); err == nil {
+		pub, _ := pki.NodePublic(next)
+		closeKey(next)
+		if pub != nil && pub.Equal(leafKey) {
 			if err := os.Rename(filepath.Join(dir, NextKeyFile), filepath.Join(dir, KeyFile)); err != nil {
 				return nil, nil, fmt.Errorf("agent: promote the renewed key: %w", err)
 			}
@@ -92,11 +96,12 @@ func LoadState(dir string) (*State, *ecdsa.PrivateKey, error) {
 			_ = os.Remove(filepath.Join(dir, NextKeyFile))
 		}
 	}
-	key, err := pki.LoadPrivateKey(filepath.Join(dir, KeyFile))
+	key, err := loadNodeKey(filepath.Join(dir, KeyFile))
 	if err != nil {
 		return nil, nil, fmt.Errorf("agent: %w", err)
 	}
-	if !key.PublicKey.Equal(leafKey) {
+	if pub, err := pki.NodePublic(key); err != nil || !pub.Equal(leafKey) {
+		closeKey(key)
 		return nil, nil, errors.New("agent: the node key does not match the node certificate")
 	}
 	return &s, key, nil

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"errors"
 	"flag"
@@ -167,7 +168,7 @@ func (s *simulator) boot(parent context.Context, dir string, seed uint64, log *s
 		Dial:       func(ctx context.Context) (agent.Stream, error) { return client.Load().Session(ctx), nil },
 		DialTunnel: func(ctx context.Context) (agent.TunnelStream, error) { return client.Load().Tunnel(ctx), nil },
 		Renewer:    clientRenewer{client: &client},
-		OnRenewed: func(st *agent.State, k *ecdsa.PrivateKey) {
+		OnRenewed: func(st *agent.State, k crypto.Signer) {
 			if next, err := newClient(&cfg, st, k); err == nil {
 				client.Swap(next).Close()
 			}
@@ -185,7 +186,7 @@ func (s *simulator) boot(parent context.Context, dir string, seed uint64, log *s
 }
 
 // join joins a machine with the simulator's token (a few at a time).
-func (s *simulator) join(ctx context.Context, cfg *config.Config, host agent.Host, log *slog.Logger) (*agent.State, *ecdsa.PrivateKey, error) {
+func (s *simulator) join(ctx context.Context, cfg *config.Config, host agent.Host, log *slog.Logger) (*agent.State, crypto.Signer, error) {
 	select {
 	case s.joins <- struct{}{}:
 	case <-ctx.Done():

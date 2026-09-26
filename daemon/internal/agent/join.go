@@ -109,10 +109,12 @@ func Join(ctx context.Context, o JoinOptions) (*State, error) {
 	if o.Role == commonv1.AgentRole_AGENT_ROLE_UNSPECIFIED {
 		o.Role = commonv1.AgentRole_AGENT_ROLE_NODE
 	}
-	key, err := pki.GenerateKey()
+	// The node key: in the TPM when the host has one, else a file.
+	key, record, err := newNodeKey(o.Log)
 	if err != nil {
 		return nil, err
 	}
+	defer closeKey(key) // the agent loads it again from the data directory
 	csr, err := pki.CreateCSR(key)
 	if err != nil {
 		return nil, err
@@ -213,11 +215,12 @@ func Join(ctx context.Context, o JoinOptions) (*State, error) {
 				return nil, fmt.Errorf("agent: keep the signed join response: %w", err)
 			}
 		}
-		return persistJoin(o, key, out.Body)
+		return persistJoin(o, record, out.Body)
 	}
 }
 
-func persistJoin(o JoinOptions, key *ecdsa.PrivateKey, body *agentv1.JoinResponseBody) (*State, error) {
+// persistJoin stores the node key's record and the identity.
+func persistJoin(o JoinOptions, record []byte, body *agentv1.JoinResponseBody) (*State, error) {
 	state, err := stateFromLeaf(body.GetCertChain())
 	if err != nil {
 		return nil, err
@@ -233,7 +236,11 @@ func persistJoin(o JoinOptions, key *ecdsa.PrivateKey, body *agentv1.JoinRespons
 	if err := os.MkdirAll(o.DataDir, 0o700); err != nil {
 		return nil, err
 	}
-	if old, _, err := LoadState(o.DataDir); err == nil && old.NodeID != state.NodeID {
+	old, oldKey, err := LoadState(o.DataDir)
+	if err == nil {
+		closeKey(oldKey)
+	}
+	if err == nil && old.NodeID != state.NodeID {
 		journal := filepath.Join(o.DataDir, JournalFile)
 		if _, err := os.Stat(journal); err == nil {
 			aside := fmt.Sprintf("%s.%s-%d", journal, old.NodeID, o.Now().Unix())
@@ -243,7 +250,7 @@ func persistJoin(o JoinOptions, key *ecdsa.PrivateKey, body *agentv1.JoinRespons
 		}
 	}
 	_ = os.Remove(filepath.Join(o.DataDir, NextKeyFile))
-	if err := pki.SavePrivateKey(filepath.Join(o.DataDir, KeyFile), key); err != nil {
+	if err := saveNodeKey(filepath.Join(o.DataDir, KeyFile), record); err != nil {
 		return nil, err
 	}
 	if err := SaveState(o.DataDir, state); err != nil {

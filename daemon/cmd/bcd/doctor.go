@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -184,10 +186,14 @@ func hostChecks(cfg *config.Config) []doctorCheck {
 			out = append(out, doctorCheck{"ok", "gateway", fmt.Sprintf("%s reachable in %s", host, time.Since(start).Round(time.Millisecond))})
 		}
 	}
-	state, _, err := agent.LoadState(cfg.DataDir)
+	state, key, err := agent.LoadState(cfg.DataDir)
 	role := ""
 	if err == nil {
 		role = state.Role
+		out = append(out, nodeKeyCheck(key, nodeKeyTPM(cfg.DataDir) != nil))
+		if c, ok := key.(io.Closer); ok {
+			_ = c.Close()
+		}
 	}
 	switch {
 	case err != nil:
@@ -199,4 +205,16 @@ func hostChecks(cfg *config.Config) []doctorCheck {
 			state.NodeID, state.SiteID, state.Role, time.Until(state.NotAfter).Round(time.Minute))})
 	}
 	return append(out, configChecks(cfg, role)...)
+}
+
+// nodeKeyCheck says what holds the node key: the TPM, or a file (a warning where a TPM is there: the
+// next renewal moves the key into it, unless bcd node cannot open the TPM).
+func nodeKeyCheck(key crypto.Signer, haveTPM bool) doctorCheck {
+	switch {
+	case agent.NodeKeyKind(key) == "tpm":
+		return doctorCheck{"ok", "node key", "in the TPM: it cannot be copied off this machine"}
+	case haveTPM:
+		return doctorCheck{"warn", "node key", "a file key although this host has a TPM: the next renewal moves it into the TPM (bcd node must be able to open /dev/tpmrm0)"}
+	}
+	return doctorCheck{"ok", "node key", "a file key (this host has no TPM)"}
 }

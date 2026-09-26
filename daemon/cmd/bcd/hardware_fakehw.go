@@ -35,6 +35,18 @@ func collectInventory() (*inventory.NodeInventory, error) {
 	return fakehw.Inventory(fakeSeed()), nil
 }
 
+// nodeKeyTPM keeps a fake machine's node keys in its software TPM when BCD_FAKEHW_TPM_KEYS=1 (the
+// TPM node-key path end to end); else they are files.
+func nodeKeyTPM(dataDir string) func() (tpm.Transport, error) {
+	if os.Getenv("BCD_FAKEHW_TPM_KEYS") != "1" {
+		return nil
+	}
+	return func() (tpm.Transport, error) {
+		t, _, err := openTPM(dataDir)
+		return t, err
+	}
+}
+
 // openTPM is the fake machine's TPM: a software TPM (tpmsim) kept in <data_dir>/fakehw-tpm.json, the
 // same EK on every join of this machine.
 func openTPM(dataDir string) (tpm.Transport, func(), error) {

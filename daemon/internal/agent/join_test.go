@@ -121,25 +121,8 @@ func (j *joinService) Join(_ context.Context, req *agentv1.JoinRequest) (*agentv
 	if j.calls == 1 {
 		body.Deferral = &agentv1.JoinDeferral{Kind: &agentv1.JoinDeferral_Pending{Pending: &agentv1.JoinPending{RequestId: "jr_1", RetryAfterSeconds: 1}}}
 	} else {
-		csr, err := x509.ParseCertificateRequest(req.GetCsr())
-		if err != nil {
-			j.t.Fatal(err)
-		}
-		spiffe, _ := url.Parse("spiffe://compute.test/site/site_1/node/" + j.nodeID)
-		tmpl := &x509.Certificate{
-			SerialNumber: big.NewInt(7),
-			Subject:      pkix.Name{OrganizationalUnit: []string{pki.RolePrefix + "node"}},
-			NotBefore:    time.Now().Add(-time.Minute), NotAfter: time.Now().Add(24 * time.Hour),
-			URIs:        []*url.URL{spiffe},
-			KeyUsage:    x509.KeyUsageDigitalSignature,
-			ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		}
-		der, err := x509.CreateCertificate(rand.Reader, tmpl, j.ca, csr.PublicKey, j.caKey)
-		if err != nil {
-			j.t.Fatal(err)
-		}
 		body.NodeId = j.nodeID
-		body.CertChain = [][]byte{der}
+		body.CertChain = [][]byte{j.leaf(req.GetCsr())}
 		body.TrustDomain = "compute.test"
 		body.SiteId = "site_1"
 		body.Role = commonv1.AgentRole_AGENT_ROLE_NODE
@@ -151,6 +134,28 @@ func (j *joinService) Join(_ context.Context, req *agentv1.JoinRequest) (*agentv
 		j.t.Fatal(err)
 	}
 	return &agentv1.JoinResponse{Body: b, Sig: &commonv1.Signature{Kid: "join", Sig: sig, Chain: [][]byte{j.signDER}}}, nil
+}
+
+// leaf is the node certificate the fixture's CA issues for a CSR's key (after checking its signature).
+func (j *joinService) leaf(csrDER []byte) []byte {
+	csr, err := x509.ParseCertificateRequest(csrDER)
+	if err != nil || csr.CheckSignature() != nil {
+		j.t.Fatalf("CSR: %v", err)
+	}
+	spiffe, _ := url.Parse("spiffe://compute.test/site/site_1/node/" + j.nodeID)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(7),
+		Subject:      pkix.Name{OrganizationalUnit: []string{pki.RolePrefix + "node"}},
+		NotBefore:    time.Now().Add(-time.Minute), NotAfter: time.Now().Add(24 * time.Hour),
+		URIs:        []*url.URL{spiffe},
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, j.ca, csr.PublicKey, j.caKey)
+	if err != nil {
+		j.t.Fatal(err)
+	}
+	return der
 }
 
 // tpmGateway is JoinService with the tpm attestor: round 1 gets a credential challenge for the AK

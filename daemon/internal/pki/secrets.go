@@ -1,6 +1,7 @@
 package pki
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"encoding/hex"
@@ -45,7 +46,7 @@ type SecretBinding struct {
 }
 
 // NewSecretRequest builds a node-signed SecretRequest and its one-time key.
-func NewSecretRequest(nodeKey *ecdsa.PrivateKey, ref string, bind SecretBinding) (*agentv1.SecretRequest, *ecdsa.PrivateKey, error) {
+func NewSecretRequest(nodeKey crypto.Signer, ref string, bind SecretBinding) (*agentv1.SecretRequest, *ecdsa.PrivateKey, error) {
 	eph, err := GenerateKey()
 	if err != nil {
 		return nil, nil, err
@@ -92,7 +93,7 @@ func WorkloadTokenRequestSigningInput(r *agentv1.WorkloadTokenRequest) []byte {
 }
 
 // NewWorkloadTokenRequest builds a node-signed WorkloadTokenRequest and its one-time key.
-func NewWorkloadTokenRequest(nodeKey *ecdsa.PrivateKey, instanceID, audience string) (*agentv1.WorkloadTokenRequest, *ecdsa.PrivateKey, error) {
+func NewWorkloadTokenRequest(nodeKey crypto.Signer, instanceID, audience string) (*agentv1.WorkloadTokenRequest, *ecdsa.PrivateKey, error) {
 	eph, err := GenerateKey()
 	if err != nil {
 		return nil, nil, err

@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/ecdsa"
+	"crypto"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -17,7 +17,7 @@ import (
 // useWebSocket switches the agent's session and renewals to the WebSocket fallback ([websocket],
 // PLAN.md §7.1). Every dial takes the running agent's identity (current), so a renewal takes
 // effect at the next one. Tunnels need the gRPC transport and are refused.
-func useWebSocket(o *agent.Options, cfg *config.Config, current func() (*agent.State, *ecdsa.PrivateKey)) error {
+func useWebSocket(o *agent.Options, cfg *config.Config, current func() (*agent.State, crypto.Signer)) error {
 	pin, err := config.DecodePin(cfg.ServingCASPKIPin)
 	if err != nil {
 		return err

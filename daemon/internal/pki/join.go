@@ -2,6 +2,7 @@ package pki
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
@@ -37,7 +38,7 @@ func ParseJoinToken(s string) (id string, ok bool) {
 
 // CreateCSR returns a DER PKCS#10 request for key with an empty subject: the node's identity comes
 // from the certificate the JoinService issues, never from the request.
-func CreateCSR(key *ecdsa.PrivateKey) ([]byte, error) {
+func CreateCSR(key crypto.Signer) ([]byte, error) {
 	return x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
 }
 
@@ -268,7 +269,7 @@ func VerifyChain(chain [][]byte, roots [][]byte, now time.Time) error {
 
 // RenewRequest builds a RenewRequest: a CSR for next (the current key, or a new one to rotate),
 // signed as proof of possession by current over renew-pop [sha256(csr), node_id, client_time].
-func RenewRequest(nodeID string, current, next *ecdsa.PrivateKey, chain [][]byte, now time.Time) (*agentv1.RenewRequest, error) {
+func RenewRequest(nodeID string, current, next crypto.Signer, chain [][]byte, now time.Time) (*agentv1.RenewRequest, error) {
 	csr, err := CreateCSR(next)
 	if err != nil {
 		return nil, err

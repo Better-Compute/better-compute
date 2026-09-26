@@ -2,7 +2,7 @@ package agent
 
 import (
 	"context"
-	"crypto/ecdsa"
+	"crypto"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -420,4 +420,15 @@ func (a *Agent) rebootedPayload(c journal.Command) []byte {
 }
 
 // currentKey is the node key; renewal swaps it. Callers may hold a.mu (the key is read without it).
-func (a *Agent) currentKey() *ecdsa.PrivateKey { return a.key.Load() }
+func (a *Agent) currentKey() crypto.Signer {
+	if h := a.key.Load(); h != nil {
+		return h.signer
+	}
+	return nil
+}
+
+// heldKey holds the node key for the atomic swap (an interface cannot be an atomic.Pointer's type).
+type heldKey struct{ signer crypto.Signer }
+
+// storeKey makes key the node key.
+func (a *Agent) storeKey(key crypto.Signer) { a.key.Store(&heldKey{key}) }

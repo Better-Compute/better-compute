@@ -101,8 +101,12 @@ func runStatus(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 	if st.CommandSigning {
 		signing = "enforced"
 	}
-	fmt.Fprintf(stdout, "identity   certificate until %s, trust bundle v%d, signed intent %s\n",
-		st.CertificateNotAfter.UTC().Format(time.RFC3339), st.TrustVersion, signing)
+	key := "a file"
+	if st.NodeKey == "tpm" {
+		key = "in the TPM"
+	}
+	fmt.Fprintf(stdout, "identity   certificate until %s, node key %s, trust bundle v%d, signed intent %s\n",
+		st.CertificateNotAfter.UTC().Format(time.RFC3339), key, st.TrustVersion, signing)
 	printMachine(stdout, st)
 	return exitOK
 }

@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"time"
@@ -75,6 +76,16 @@ func newSimHost(string, uint64, func()) (agent.Host, error) {
 // tpmDevice is the kernel's TPM resource manager: it loads and flushes contexts per open file, so
 // bcd's transient keys never collide with another TPM user's.
 const tpmDevice = "/dev/tpmrm0"
+
+// nodeKeyTPM keeps node keys in the host's TPM when the kernel's resource manager is there. bcd node
+// must be able to open it (root, or the bcd user in the device's group, as the install script sets
+// up): a new key falls back to a file when it cannot, and a key already in the TPM needs it.
+func nodeKeyTPM(string) func() (tpm.Transport, error) {
+	if _, err := os.Stat(tpmDevice); err != nil {
+		return nil
+	}
+	return func() (tpm.Transport, error) { return tpm.OpenDevice(tpmDevice) }
+}
 
 // openTPM is the host's TPM for the tpm join attestor.
 func openTPM(string) (tpm.Transport, func(), error) {

@@ -3,6 +3,7 @@ package transport
 import (
 	"bufio"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha1" //nolint:gosec // RFC 6455's Sec-WebSocket-Accept is defined over SHA-1
@@ -54,7 +55,7 @@ type WSOptions struct {
 	ProxyRoots *x509.CertPool
 	// NodeID, Key and Chain (DER, leaf first) are the node's identity for the proof.
 	NodeID string
-	Key    *ecdsa.PrivateKey
+	Key    crypto.Signer
 	Chain  [][]byte
 	// Audience is the gateway's public host the proof names (default: the URL's host name).
 	Audience string
@@ -300,7 +301,7 @@ func randomB64(n int) string {
 
 // AgentProof is the proof JWT bcd sends with the upgrade (exported for tests and the gateway's
 // interop check).
-func AgentProof(key *ecdsa.PrivateKey, chain [][]byte, nodeID, audience, nonce string, now time.Time) (string, error) {
+func AgentProof(key crypto.Signer, chain [][]byte, nodeID, audience, nonce string, now time.Time) (string, error) {
 	x5c := make([]string, len(chain))
 	for i, der := range chain {
 		x5c[i] = base64.StdEncoding.EncodeToString(der)
