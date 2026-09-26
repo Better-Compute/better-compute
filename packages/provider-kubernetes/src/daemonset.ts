@@ -193,6 +193,35 @@ export const kubeadmKubeletCredentials = Object.freeze({
   kubeconfig: '/etc/kubernetes/kubelet.conf',
   certificateDirs: Object.freeze(['/var/lib/kubelet/pki']),
 });
+/** One directory of the kubelet's state bcd's container mounts. */
+export interface KubeletStateMount {
+  volume: string;
+  path: string;
+  readOnly: boolean;
+  type: 'Directory' | 'DirectoryOrCreate';
+}
+
+/**
+ * The parts of /var/lib/kubelet bcd uses (daemon/internal/kube), and nothing else. The rest of the kubelet's
+ * state holds every pod's volumes, secrets and service account tokens, and its checkpoints:
+ * - `device-plugins`, read-write: bcd serves its plugin sockets there and dials the kubelet's registration socket;
+ * - `pod-resources`, read-only: bcd only connects to its socket, and a read-only bind mount allows connect();
+ * - with `gpuApi: 'dra'`, `plugins_registry` and `plugins/gpu.bcd.dev`, read-write: bcd's registration and
+ *   DRA driver sockets.
+ */
+export function kubeletStateMounts(gpuApi: 'device-plugin' | 'dra'): KubeletStateMount[] {
+  return [
+    { volume: 'kubelet-device-plugins', path: '/var/lib/kubelet/device-plugins', readOnly: false, type: 'Directory' },
+    { volume: 'kubelet-pod-resources', path: '/var/lib/kubelet/pod-resources', readOnly: true, type: 'Directory' },
+    ...(gpuApi === 'dra'
+      ? ([
+          { volume: 'kubelet-plugins-registry', path: '/var/lib/kubelet/plugins_registry', readOnly: false, type: 'DirectoryOrCreate' },
+          { volume: 'kubelet-dra-plugin', path: '/var/lib/kubelet/plugins/gpu.bcd.dev', readOnly: false, type: 'DirectoryOrCreate' },
+        ] as const)
+      : []),
+  ];
+}
+
 /** Where bcd's kubectl reads the kubelet's kubeconfig inside its container. */
 export const kubeletKubeconfigPath = '/etc/kubernetes/kubelet.conf';
 const absolutePath = /^\/(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/;
@@ -257,9 +286,13 @@ export function bcdDaemonSetManifests(options: BcdDaemonSetOptions): KubernetesO
   for (const dir of kubelet.certificateDirs) {
     if (typeof dir !== 'string' || !absolutePath.test(dir)) invalid(`kubeletCredentials.certificateDirs: ${String(dir)} is not an absolute path`);
     // Never a directory that holds more than the kubelet's own credentials.
-    if (['/etc', '/etc/kubernetes', '/etc/kubernetes/pki', '/var/lib/kubelet', '/var', '/'].includes(dir))
+    if (
+      ['/etc', '/etc/kubernetes', '/etc/kubernetes/pki', '/var/lib/kubelet', '/var/lib', '/var', '/'].includes(dir) ||
+      (dir.startsWith('/var/lib/kubelet/') && dir !== '/var/lib/kubelet/pki')
+    )
       invalid(`kubeletCredentials.certificateDirs: ${dir} holds more than the kubelet's certificates`);
   }
+  const kubeletDirs = kubeletStateMounts(options.gpuApi ?? 'device-plugin');
   const config = bcdConfigToml(options);
   let jwk: string | undefined;
   if (options.joinEncryptionJwk !== undefined) {
@@ -384,7 +417,8 @@ export function bcdDaemonSetManifests(options: BcdDaemonSetOptions): KubernetesO
                 mount('tmp', '/tmp'),
                 mount('dev', '/dev'),
                 mount('sys', '/sys'),
-                mount('kubelet', '/var/lib/kubelet'),
+                // Of the kubelet's state, only what bcd talks to (never the pods' volumes, secrets and tokens).
+                ...kubeletDirs.map((dir) => mount(dir.volume, dir.path, dir.readOnly)),
                 // The kubelet's kubeconfig and client certificates only (never the host's /etc/kubernetes).
                 mount('kubelet-kubeconfig', kubeletKubeconfigPath, true),
                 ...kubelet.certificateDirs.map((dir, i) => mount(`kubelet-pki-${i}`, dir, true)),
@@ -405,7 +439,7 @@ export function bcdDaemonSetManifests(options: BcdDaemonSetOptions): KubernetesO
             { name: 'tmp', emptyDir: {} },
             hostPath('dev', '/dev', 'Directory'),
             hostPath('sys', '/sys', 'Directory'),
-            hostPath('kubelet', '/var/lib/kubelet', 'Directory'),
+            ...kubeletDirs.map((dir) => hostPath(dir.volume, dir.path, dir.type)),
             hostPath('kubelet-kubeconfig', kubelet.kubeconfig, 'File'),
             ...kubelet.certificateDirs.map((dir, i) => hostPath(`kubelet-pki-${i}`, dir, 'Directory')),
             hostPath('cdi-etc', '/etc/cdi', 'DirectoryOrCreate'),

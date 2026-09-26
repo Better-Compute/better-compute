@@ -76,7 +76,37 @@ describe('bcd as a Kubernetes DaemonSet', () => {
     });
     expect(bcd.volumeMounts.find((m: { name: string }) => m.name === 'kubelet-pki-0')).toEqual({ name: 'kubelet-pki-0', mountPath: '/var/lib/kubelet/pki', readOnly: true });
     expect(pod.volumes.some((v: { hostPath?: { path: string } }) => v.hostPath?.path === '/etc/kubernetes')).toBe(false);
-    expect(bcd.volumeMounts.find((m: { name: string }) => m.name === 'kubelet')).toMatchObject({ mountPath: '/var/lib/kubelet' });
+    // Exactly these host paths and modes: of the kubelet's state only the sockets bcd talks to, never
+    // /var/lib/kubelet itself (every pod's volumes, secrets and tokens).
+    const hostMounts = (p: typeof pod) =>
+      Object.fromEntries(
+        p.containers[0].volumeMounts
+          .map((m: { name: string; mountPath: string; readOnly?: boolean }) => {
+            const volume = p.volumes.find((v: { name: string }) => v.name === m.name);
+            return volume?.hostPath ? [volume.hostPath.path, `${m.readOnly ? 'ro' : 'rw'} ${m.mountPath}`] : undefined;
+          })
+          .filter(Boolean),
+      );
+    expect(hostMounts(pod)).toEqual({
+      '/var/lib/bcd': 'rw /var/lib/bcd',
+      '/dev': 'rw /dev',
+      '/sys': 'rw /sys',
+      '/var/lib/kubelet/device-plugins': 'rw /var/lib/kubelet/device-plugins',
+      '/var/lib/kubelet/pod-resources': 'ro /var/lib/kubelet/pod-resources',
+      '/etc/kubernetes/kubelet.conf': 'ro /etc/kubernetes/kubelet.conf',
+      '/var/lib/kubelet/pki': 'ro /var/lib/kubelet/pki',
+      '/etc/cdi': 'rw /etc/cdi',
+      '/var/run/cdi': 'rw /var/run/cdi',
+      '/etc/nvidia-container-runtime': 'ro /etc/nvidia-container-runtime',
+      '/usr/local/nvidia/toolkit/.config/nvidia-container-runtime': 'ro /usr/local/nvidia/toolkit/.config/nvidia-container-runtime',
+    });
+    // The DRA driver adds its registration and plugin directories, and nothing else.
+    const dra = hostMounts(podOf(bcdDaemonSetManifests({ ...options, gpuApi: 'dra' })));
+    expect(Object.keys(dra).filter((path) => !(path in hostMounts(pod)))).toEqual([
+      '/var/lib/kubelet/plugins_registry',
+      '/var/lib/kubelet/plugins/gpu.bcd.dev',
+    ]);
+    expect(dra['/var/lib/kubelet/plugins/gpu.bcd.dev']).toBe('rw /var/lib/kubelet/plugins/gpu.bcd.dev');
     expect(pod.tolerations).toEqual([{ operator: 'Exists' }]);
     // The NVIDIA toolkit's configs, read only, for bcd's GPU isolation check.
     for (const path of ['/etc/nvidia-container-runtime', '/usr/local/nvidia/toolkit/.config/nvidia-container-runtime'])
@@ -149,7 +179,7 @@ describe('bcd as a Kubernetes DaemonSet', () => {
     // Inside the container at the path bcd's kubectl uses; the certificates at their own paths, as the kubeconfig names them.
     expect(bcd.volumeMounts.find((m: { name: string }) => m.name === 'kubelet-kubeconfig').mountPath).toBe('/etc/kubernetes/kubelet.conf');
     expect(bcd.volumeMounts.find((m: { name: string }) => m.name === 'kubelet-pki-0')).toMatchObject({ mountPath: '/var/lib/rancher/k3s/agent', readOnly: true });
-    for (const dir of ['/etc/kubernetes', '/etc/kubernetes/pki', '/var/lib/kubelet', '/'])
+    for (const dir of ['/etc/kubernetes', '/etc/kubernetes/pki', '/var/lib/kubelet', '/var/lib/kubelet/pods', '/'])
       expect(() => bcdDaemonSetManifests({ ...options, kubeletCredentials: { kubeconfig: k3s.kubeconfig, certificateDirs: [dir] } })).toThrow(/certificateDirs/);
     expect(() => bcdDaemonSetManifests({ ...options, kubeletCredentials: { kubeconfig: 'relative/kubelet.conf', certificateDirs: ['/x'] } })).toThrow(/kubeconfig/);
   });
