@@ -1593,6 +1593,26 @@ describe('snapshots', () => {
 });
 
 describe('template network and versions', () => {
+  it('lands a sandbox only where bcd enforces ssh from the host only', async () => {
+    const template = await createTemplate({ name: 'ssh' });
+    await db.query(`DELETE FROM node_labels WHERE key = 'bc.dev/cap.instance.ssh-host-only'`);
+    const stuck = await createSandbox(template.id, { idempotencyKey: 'old-bcd' });
+    expect(stuck).toMatchObject({ state: 'starting', instanceState: 'scheduling' });
+    await db.query(
+      `INSERT INTO node_labels (node_id, key, value, source)
+       VALUES ('node_01jz00000000000000000000vb', 'bc.dev/cap.instance.ssh-host-only', '1', 'system')`,
+    );
+    const placed = (await createSandbox(template.id, { idempotencyKey: 'new-bcd' })) as {
+      instanceState: string;
+      nodeId?: string;
+    };
+    expect(placed.instanceState).toBe('provisioning');
+    const { rows } = await db.query<{ node_id: string }>(
+      `SELECT node_id FROM instances WHERE sandbox_id IS NOT NULL AND node_id IS NOT NULL`,
+    );
+    expect(rows.map((row) => row.node_id)).toEqual(['node_01jz00000000000000000000vb']);
+  });
+
   it("carries the template's network to the instance spec; egress stays implicit", async () => {
     const closed = await createTemplate({ name: 'closed', network: 'none' });
     const open = await createTemplate({ name: 'open' });
