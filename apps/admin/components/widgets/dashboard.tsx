@@ -81,12 +81,21 @@ export function Dashboards() {
       }
       const def = widgetById(action.id);
       if (!def) return;
-      setState((current) => ({
-        ...current,
-        dashboards: current.dashboards.map((d) =>
-          d.id === current.active ? { ...d, items: [{ key: uniqueKey(def.id, d.items), widget: def.id, w: def.defaultSize.w, h: def.defaultSize.h }, ...d.items] } : d,
-        ),
-      }));
+      const settings = action.settings && typeof action.settings === 'object'
+        ? Object.fromEntries(Object.entries(action.settings).filter(([, v]) => ['string', 'number', 'boolean'].includes(typeof v)))
+        : undefined;
+      setState((current) => {
+        const target = action.dashboardId && current.dashboards.some((d) => d.id === action.dashboardId) ? action.dashboardId : current.active;
+        return {
+          ...current,
+          active: target,
+          dashboards: current.dashboards.map((d) =>
+            d.id === target
+              ? { ...d, items: [{ key: uniqueKey(def.id, d.items), widget: def.id, w: def.defaultSize.w, h: def.defaultSize.h, ...(settings ? { settings } : {}) }, ...d.items] }
+              : d,
+          ),
+        };
+      });
       setEditing(true);
       toast({ title: `Added “${def.title}”`, detail: 'At the top of this dashboard; drag it or use the arrow keys to place it.', status: 'ok' });
     };

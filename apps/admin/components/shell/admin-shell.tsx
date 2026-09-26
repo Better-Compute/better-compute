@@ -78,13 +78,21 @@ function ShellFrame({ children }: { children: ReactNode }) {
   useEffect(() => {
     const onToggle = () => toggleSidebar();
     const onKeys = () => setKeys(true);
+    // Helpers without a router (addToDashboard, openDashboard) ask the shell to navigate; in-app paths only.
+    const onNavigate = (event: Event) => {
+      const href = (event as CustomEvent<unknown>).detail;
+      if (typeof href === 'string' && /^\/(?![/\\])/.test(href)) router.push(href);
+    };
     window.addEventListener(PALETTE_EVENTS.toggleSidebar, onToggle);
     window.addEventListener(PALETTE_EVENTS.showShortcuts, onKeys);
+    window.addEventListener('bc-admin:navigate', onNavigate);
     return () => {
       window.removeEventListener(PALETTE_EVENTS.toggleSidebar, onToggle);
       window.removeEventListener(PALETTE_EVENTS.showShortcuts, onKeys);
+      window.removeEventListener('bc-admin:navigate', onNavigate);
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {

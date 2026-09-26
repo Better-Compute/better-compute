@@ -92,11 +92,13 @@ const RECENT_KEY = 'bc-admin:palette-recent';
 
 const DASHBOARD_ACTION_KEY = 'bc-admin:dashboard-action';
 
+type DashboardAction = { type: 'open' | 'add'; id: string; dashboardId?: string; settings?: Record<string, string | number | boolean> };
+
 /**
  * Ask the Overview's dashboards to open one or add a widget. Kept in sessionStorage so it survives the
  * navigation to the Overview; the event covers the case where the dashboards are already mounted.
  */
-function queueDashboardAction(action: { type: 'open' | 'add'; id: string }) {
+function queueDashboardAction(action: DashboardAction) {
   try {
     window.sessionStorage.setItem(DASHBOARD_ACTION_KEY, JSON.stringify(action));
   } catch {
@@ -106,14 +108,31 @@ function queueDashboardAction(action: { type: 'open' | 'add'; id: string }) {
 }
 
 /** The queued dashboard action, removed as it is read. */
-export function takeDashboardAction(): { type: 'open' | 'add'; id: string } | null {
+export function takeDashboardAction(): DashboardAction | null {
   try {
     const raw = window.sessionStorage.getItem(DASHBOARD_ACTION_KEY);
     window.sessionStorage.removeItem(DASHBOARD_ACTION_KEY);
-    return raw ? (JSON.parse(raw) as { type: 'open' | 'add'; id: string }) : null;
+    const parsed = raw ? (JSON.parse(raw) as Partial<DashboardAction> | null) : null;
+    if (!parsed || (parsed.type !== 'open' && parsed.type !== 'add') || typeof parsed.id !== 'string') return null;
+    return parsed as DashboardAction;
   } catch {
     return null;
   }
+}
+
+/**
+ * For module pages: put a widget on a dashboard (the active one, or `dashboardId`) with initial settings,
+ * e.g. a "pin to dashboard" button on a page panel that has a widget twin. Navigates to the Overview.
+ */
+export function addToDashboard(widgetId: string, options: { dashboardId?: string; settings?: Record<string, string | number | boolean> } = {}) {
+  queueDashboardAction({ type: 'add', id: widgetId, ...options });
+  window.dispatchEvent(new CustomEvent('bc-admin:navigate', { detail: '/' }));
+}
+
+/** For module pages: open a dashboard by id on the Overview. */
+export function openDashboard(id: string) {
+  queueDashboardAction({ type: 'open', id });
+  window.dispatchEvent(new CustomEvent('bc-admin:navigate', { detail: '/' }));
 }
 
 export const PALETTE_EVENTS = {
