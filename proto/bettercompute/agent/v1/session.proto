@@ -645,6 +645,12 @@ message InstanceNic {
   string mac = 2;
   // Addresses assigned by IPAM, CIDR form.
   repeated string addresses = 3;
+  // (v1.1) The IPAM range's default gateway; empty: no default route through this NIC. bcd renders
+  // it, with `addresses`, into the guest's NoCloud network-config (the guest runs no DHCP client
+  // against the host).
+  string gateway = 4;
+  // (v1.1) DNS servers for the guest; empty: the guest keeps its image's resolver configuration.
+  repeated string nameservers = 5;
 }
 
 // (v0.3) Interactive access material. Empty in v0.1.

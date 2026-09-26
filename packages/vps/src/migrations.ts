@@ -135,6 +135,12 @@ export const vpsPlacementMigration: Migration = {
 ALTER TABLE instances ADD COLUMN host_placement jsonb;`,
 };
 
+/** (v1.1) DNS servers a pool's IPAM hands its guests (with the gateway, in their network-config). */
+export const vpsIpPoolDnsMigration: Migration = {
+  name: 'vps/0019_ip_pool_dns',
+  sql: `ALTER TABLE ip_pools ADD COLUMN dns inet[] NOT NULL DEFAULT '{}';`,
+};
+
 /** The VPS module's migrations, in ledger order. */
 export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsBaseMigration,
@@ -155,4 +161,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsWarmSecretVersionsMigration,
   vpsIdentityRebindMigration,
   vpsPlacementMigration,
+  vpsIpPoolDnsMigration,
 ]);

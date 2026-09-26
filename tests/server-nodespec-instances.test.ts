@@ -65,6 +65,47 @@ describe('NodeSpec instances section (v0.5)', () => {
       specHash(plain),
     );
   });
+
+  it('carries a NIC’s gateway and nameservers for the guest’s network-config (v1.1)', async () => {
+    const nic = { network: 'br0', mac: '02:00:00:00:00:01', addresses: ['10.0.0.2/24'] };
+    const wire = await wireNodeSpec(tx, {
+      instances: [instance({ nics: [{ ...nic, gateway: '10.0.0.1', nameservers: ['1.1.1.1'] }] })],
+    });
+    expect(fromJson(NodeSpecSchema, wire as never).instances!.instances[0]!.nics[0]).toMatchObject({
+      gateway: '10.0.0.1',
+      nameservers: ['1.1.1.1'],
+    });
+    // Unset: hashes as before.
+    const bare = await wireNodeSpec(tx, { instances: [instance({ nics: [nic] })] });
+    expect(specHash(await wireNodeSpec(tx, { instances: [instance({ nics: [{ ...nic, nameservers: [] }] })] }))).toBe(
+      specHash(bare),
+    );
+  });
+});
+
+describe('NodeSpec telemetry (v1.1)', () => {
+  it('carries the headers ref and sorted resource attributes', async () => {
+    const wire = await wireNodeSpec(tx, {
+      telemetry: {
+        otlpEndpoint: 'https://otel.example:4318',
+        intervalSeconds: 15,
+        headersRef: 'secret://otel/headers',
+        resourceAttributes: { 'site.region': 'eu', 'deployment.environment': 'prod' },
+      },
+    });
+    expect(fromJson(NodeSpecSchema, wire as never).telemetry).toMatchObject({
+      otlpEndpoint: 'https://otel.example:4318',
+      exportIntervalMs: 15_000,
+      headersRef: 'secret://otel/headers',
+      resourceAttributes: ['deployment.environment=prod', 'site.region=eu'],
+    });
+    const plain = await wireNodeSpec(tx, { telemetry: { otlpEndpoint: 'https://otel.example:4318' } });
+    expect(
+      specHash(
+        await wireNodeSpec(tx, { telemetry: { otlpEndpoint: 'https://otel.example:4318', resourceAttributes: {} } }),
+      ),
+    ).toBe(specHash(plain));
+  });
 });
 
 describe('NodeSpec resources on the wire (v1.1 §3.8)', () => {

@@ -3846,7 +3846,13 @@ type InstanceNic struct {
 	Network string `protobuf:"bytes,1,opt,name=network,proto3" json:"network,omitempty"`
 	Mac     string `protobuf:"bytes,2,opt,name=mac,proto3" json:"mac,omitempty"`
 	// Addresses assigned by IPAM, CIDR form.
-	Addresses     []string `protobuf:"bytes,3,rep,name=addresses,proto3" json:"addresses,omitempty"`
+	Addresses []string `protobuf:"bytes,3,rep,name=addresses,proto3" json:"addresses,omitempty"`
+	// (v1.1) The IPAM range's default gateway; empty: no default route through this NIC. bcd renders
+	// it, with `addresses`, into the guest's NoCloud network-config (the guest runs no DHCP client
+	// against the host).
+	Gateway string `protobuf:"bytes,4,opt,name=gateway,proto3" json:"gateway,omitempty"`
+	// (v1.1) DNS servers for the guest; empty: the guest keeps its image's resolver configuration.
+	Nameservers   []string `protobuf:"bytes,5,rep,name=nameservers,proto3" json:"nameservers,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3898,6 +3904,20 @@ func (x *InstanceNic) GetMac() string {
 func (x *InstanceNic) GetAddresses() []string {
 	if x != nil {
 		return x.Addresses
+	}
+	return nil
+}
+
+func (x *InstanceNic) GetGateway() string {
+	if x != nil {
+		return x.Gateway
+	}
+	return ""
+}
+
+func (x *InstanceNic) GetNameservers() []string {
+	if x != nil {
+		return x.Nameservers
 	}
 	return nil
 }
@@ -6369,11 +6389,13 @@ const file_bettercompute_agent_v1_session_proto_rawDesc = "" +
 	"\x03url\x18\x02 \x01(\tR\x03url\x12\x16\n" +
 	"\x06sha256\x18\x03 \x01(\fR\x06sha256\x12\x16\n" +
 	"\x06format\x18\x04 \x01(\tR\x06format\x12 \n" +
-	"\vcompression\x18\x05 \x01(\tR\vcompression\"W\n" +
+	"\vcompression\x18\x05 \x01(\tR\vcompression\"\x93\x01\n" +
 	"\vInstanceNic\x12\x18\n" +
 	"\anetwork\x18\x01 \x01(\tR\anetwork\x12\x10\n" +
 	"\x03mac\x18\x02 \x01(\tR\x03mac\x12\x1c\n" +
-	"\taddresses\x18\x03 \x03(\tR\taddresses\"\xc6\x01\n" +
+	"\taddresses\x18\x03 \x03(\tR\taddresses\x12\x18\n" +
+	"\agateway\x18\x04 \x01(\tR\agateway\x12 \n" +
+	"\vnameservers\x18\x05 \x03(\tR\vnameservers\"\xc6\x01\n" +
 	"\rAccessSection\x121\n" +
 	"\x15exec_ticket_jwks_json\x18\x01 \x01(\tR\x12execTicketJwksJson\x12+\n" +
 	"\x12ssh_ca_public_keys\x18\x02 \x03(\tR\x0fsshCaPublicKeys\x12%\n" +

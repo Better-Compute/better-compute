@@ -233,11 +233,13 @@ function wireInstance(instance: InstanceSpec): Json {
   if (instance.allocationId) wire.allocationId = instance.allocationId;
   // NIC order is the guest's interface order, so it is kept as the module gave it.
   if (instance.nics?.length)
-    wire.nics = instance.nics.map((nic) => ({
-      network: nic.network,
-      mac: nic.mac,
-      addresses: [...nic.addresses],
-    }));
+    wire.nics = instance.nics.map((nic) => {
+      const entry: JsonObject = { network: nic.network, mac: nic.mac, addresses: [...nic.addresses] };
+      // Set only when known, so NICs without them hash as before.
+      if (nic.gateway) entry.gateway = nic.gateway;
+      if (nic.nameservers?.length) entry.nameservers = [...nic.nameservers];
+      return entry;
+    });
   if (instance.restoreFrom)
     wire.restoreFrom = {
       ref: instance.restoreFrom.imageId,
@@ -298,6 +300,12 @@ export async function wireNodeSpec(tx: SqlTx, spec: NodeSpec): Promise<JsonObjec
     if (spec.telemetry.otlpEndpoint) telemetry.otlpEndpoint = spec.telemetry.otlpEndpoint;
     if (spec.telemetry.intervalSeconds)
       telemetry.exportIntervalMs = Math.round(spec.telemetry.intervalSeconds * 1000);
+    if (spec.telemetry.headersRef) telemetry.headersRef = spec.telemetry.headersRef;
+    // "key=value", sorted, for a stable spec hash.
+    const attributes = Object.entries(spec.telemetry.resourceAttributes ?? {})
+      .map(([key, value]) => `${key}=${value}`)
+      .sort();
+    if (attributes.length) telemetry.resourceAttributes = attributes;
     wire.telemetry = telemetry;
   }
   if (spec.daemon) {

@@ -4,6 +4,7 @@ import {
   isComputeError,
   type CallContext,
   type ExternalMachine,
+  type InstanceNicSpec,
   type InstanceSpec,
   type InstanceState,
   type ModuleContext,
@@ -577,6 +578,8 @@ export async function instanceSpecs(
     allocation_id: string | null;
     atoms: string[] | null;
     address: string | null;
+    gateway: string | null;
+    dns: string[] | null;
     mac: string;
     restore_from: { snapshotId: string; url: string; sha256: string } | string | null;
     network_policy: 'private' | 'none' | null;
@@ -589,6 +592,8 @@ export async function instanceSpecs(
             i.host_placement,
             (i.sandbox_id IS NOT NULL OR i.warm_template_id IS NOT NULL) AS sandboxed,
             host(l.address) || '/' || masklen(p.cidr) AS address,
+            CASE WHEN l.address IS NOT NULL THEN host(p.gateway) END AS gateway,
+            CASE WHEN l.address IS NOT NULL THEN ARRAY(SELECT host(d) FROM unnest(p.dns) d) END AS dns,
             regexp_replace('02' || substr(encode(sha256(convert_to(i.id, 'UTF8')), 'hex'), 1, 10),
                            '(..)(?=.)', '\\1:', 'g') AS mac
        FROM instances i
@@ -639,7 +644,11 @@ export async function instanceSpecs(
       typeof row.host_placement === 'string' ? JSON.parse(row.host_placement) : (row.host_placement ?? undefined),
     );
     if (placement) spec.placement = placement;
-    spec.nics = [{ network, mac: row.mac, addresses: row.address ? [row.address] : [] }];
+    const nic: InstanceNicSpec = { network, mac: row.mac, addresses: row.address ? [row.address] : [] };
+    // The guest's network-config (bcd renders it into the NoCloud seed): route and resolvers.
+    if (row.gateway) nic.gateway = row.gateway;
+    if (row.dns?.length) nic.nameservers = [...row.dns];
+    spec.nics = [nic];
     return [spec];
   });
 }

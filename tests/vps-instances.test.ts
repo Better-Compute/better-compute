@@ -411,6 +411,7 @@ describe('vps() API surface', () => {
       'vps/0016_warm_secret_versions',
       'vps/0017_identity_rebind',
       'vps/0018_placement',
+      'vps/0019_ip_pool_dns',
     ]);
     expect(module.requires).toEqual(['capacity']);
     expect(() => vps({ runtimes: [] })).toThrow(ComputeError);
@@ -489,6 +490,8 @@ describe('hosted instances', () => {
             network: 'br0',
             mac: expect.stringMatching(/^02(:[0-9a-f]{2}){5}$/),
             addresses: [expect.stringMatching(/^10\.0\.0\.2\/\d+$/)],
+            // The range's gateway, for the guest's network-config (no dns configured: none).
+            gateway: '10.0.0.1',
           },
         ],
       },
@@ -862,6 +865,28 @@ describe('flavors and IPAM', () => {
     await expect(
       call('instances', 'create', createHosted({ idempotencyKey: 'x' })),
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('hands guests the range’s gateway and DNS servers', async () => {
+    expect(
+      await setIpPool(db, {
+        poolId: hostedPool,
+        cidr: '10.0.0.0/29',
+        gateway: '10.0.0.1',
+        dns: ['1.1.1.1', '9.9.9.9'],
+      }),
+    ).toMatchObject({ gateway: '10.0.0.1', dns: ['1.1.1.1', '9.9.9.9'] });
+    const created = (await call('instances', 'create', createHosted())) as View;
+    const spec = await module.nodeSpec!(moduleContext(db), { id: created.nodeId! } as never);
+    expect(spec.instances![0]!.nics).toEqual([
+      {
+        network: 'br0',
+        mac: expect.any(String),
+        addresses: ['10.0.0.2/29'],
+        gateway: '10.0.0.1',
+        nameservers: ['1.1.1.1', '9.9.9.9'],
+      },
+    ]);
   });
 
   it('never leases an address twice, and says so when the range runs out', async () => {
