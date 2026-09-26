@@ -171,14 +171,12 @@ export const capacityModule: AdminModule = {
     { href: '/capacity', label: 'Capacity', icon: RiBarChartBoxLine, group: 'Capacity', shortcut: 'g c', keywords: ['gpus', 'heatmap', 'forecast', 'utilization', 'free'], description: 'GPUs booked now and ahead, per pool and hour' },
     { href: '/pools', label: 'Pools', icon: RiServerLine, group: 'Capacity', shortcut: 'g l', keywords: ['pool', 'site', 'gpu model', 'policy', 'offers'], description: 'Scheduling domains: capacity, schedule, tenants, policy' },
     { href: '/reservations', label: 'Reservations', icon: RiCalendarEventLine, group: 'Capacity', shortcut: 'g r', keywords: ['bookings', 'gantt', 'release', 'cancel', 'extend', 'pending'], description: 'Every booking: table, timeline, what is waiting' },
-    { href: '/reservations/new', label: 'Plan a reservation', icon: RiSearchEyeLine, group: 'Capacity', shortcut: 'n r', keywords: ['book', 'preview', 'placement', 'earliest', 'dry run', 'find gpus'], description: 'Dry-run placement, earliest fit, cost and alternatives' },
     { href: '/capacity/scenarios', label: 'What-if', icon: RiFlaskLine, group: 'Capacity', shortcut: 'g w', keywords: ['scenario', 'maintenance', 'expansion', 'burst', 'forecast', 'plan', 'simulate'], description: 'Maintenance, growth or a launch against the real book' },
-    { href: '/capacity/report', label: 'Report', icon: RiFileTextLine, group: 'Capacity', keywords: ['summary', 'weekly', 'review', 'markdown', 'export', 'share'], description: 'The period in one page, copyable as Markdown' },
     { href: '/capacity/tenants', label: 'Tenants', icon: RiBuilding2Line, group: 'Capacity', shortcut: 'g t', keywords: ['customers', 'organizations', 'accounts', 'spend', 'quota'], description: 'Who holds what, their ceilings, bookings ahead and spend' },
     { href: '/quotas', label: 'Quotas', icon: RiScales3Line, group: 'Capacity', shortcut: 'g q', keywords: ['limits', 'tenants', 'ceiling', 'quotas.set'], description: 'Tenant × pool ceilings and use' },
     { href: '/usage', label: 'Usage & spend', icon: RiMoneyDollarCircleLine, group: 'Capacity', shortcut: 'g u', keywords: ['billing', 'cost', 'meters', 'csv', 'invoice', 'gpu hours'], description: 'Metered usage priced at list, by tenant, project, pool' },
-    { href: '/flavors', label: 'Flavors', icon: RiLayoutGridLine, group: 'Capacity', keywords: ['instance types', 'shapes', 'sizes', 'vps'], description: 'Instance and sandbox shapes per pool' },
   ],
+  // Seven destinations in the sidebar; the planner, the report and flavors are one step away (page buttons, ⌘K).
   widgets: withSettings([
     { id: 'capacity.kpis', title: 'Capacity KPIs', description: 'GPUs allocated, free now, booked later, pending, spend.', icon: RiStackLine, module: 'capacity', defaultSize: { w: 12, h: 2 }, minSize: { w: 4, h: 2 }, maxSize: { w: 12, h: 3 }, href: '/capacity', component: CapacityKpisWidget },
     { id: 'capacity.heatmap', title: 'Booking heatmap', description: 'Share of GPUs booked per pool and hour, history and ahead.', icon: RiCalendarScheduleLine, module: 'capacity', defaultSize: { w: 8, h: 4 }, minSize: { w: 4, h: 3 }, href: '/capacity', component: CapacityHeatmapWidget },
@@ -193,6 +191,8 @@ export const capacityModule: AdminModule = {
   ]),
   commands: [
     { id: 'capacity.new', label: 'Plan a reservation', group: 'Capacity', icon: RiSearchEyeLine, keywords: ['book', 'reserve', 'gpus', 'preview'], href: '/reservations/new', shortcut: 'n r' },
+    { id: 'capacity.report', label: 'Capacity report (copy as Markdown)', group: 'Capacity', icon: RiFileTextLine, keywords: ['summary', 'weekly', 'review', 'markdown', 'export', 'share'], href: '/capacity/report' },
+    { id: 'capacity.flavors', label: 'Flavors: instance and sandbox shapes', group: 'Capacity', icon: RiLayoutGridLine, keywords: ['instance types', 'shapes', 'sizes', 'vps', 'flavors'], href: '/flavors' },
     { id: 'capacity.pending', label: 'Show pending reservations', group: 'Capacity', icon: RiTimerLine, keywords: ['waiting', 'unschedulable', 'queue'], href: '/reservations' },
     { id: 'capacity.timeline', label: 'Reservation timeline (Gantt)', group: 'Capacity', icon: RiCalendarScheduleLine, keywords: ['gantt', 'schedule', 'calendar'], href: '/reservations?view=timeline' },
     { id: 'capacity.export-usage', label: 'Export usage as CSV', group: 'Capacity', icon: RiDownloadLine, keywords: ['billing', 'csv', 'download'], href: '/usage' },

@@ -3,7 +3,8 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMemo, useState } from 'react';
-import { RiServerLine } from 'react-icons/ri';
+import { RiLayoutGridLine, RiServerLine } from 'react-icons/ri';
+import { ButtonLink } from '@/components/base/buttons/button';
 import { Sparkline, StackedBar } from '@/components/ui/charts';
 import { DataTable, type Column } from '@/components/ui/data-table';
 import { PageHeader, Panel } from '@/components/ui/panel';
@@ -174,15 +175,20 @@ export function PoolsPage() {
           </>
         }
         actions={
-          <Segmented
-            label="View"
-            value={view}
-            onChange={setView}
-            options={[
-              { id: 'table', label: 'Table' },
-              { id: 'cards', label: 'Cards' },
-            ]}
-          />
+          <>
+            <ButtonLink href="/flavors" size="small" variant="secondary" leadingIcon={RiLayoutGridLine}>
+              Flavors
+            </ButtonLink>
+            <Segmented
+              label="View"
+              value={view}
+              onChange={setView}
+              options={[
+                { id: 'table', label: 'Table' },
+                { id: 'cards', label: 'Cards' },
+              ]}
+            />
+          </>
         }
       />
       {view === 'table' ? (

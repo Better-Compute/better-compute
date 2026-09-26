@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMemo, useState } from 'react';
-import { RiAddLine, RiArrowRightUpLine, RiBarChartBoxLine, RiCalendarScheduleLine, RiLightbulbFlashLine, RiLineChartLine, RiTimerLine } from 'react-icons/ri';
+import { RiAddLine, RiArrowRightUpLine, RiBarChartBoxLine, RiCalendarScheduleLine, RiFileTextLine, RiLightbulbFlashLine, RiLineChartLine, RiTimerLine } from 'react-icons/ri';
 import { InsightList } from '../insights';
 import { ButtonLink } from '@/components/base/buttons/button';
 import { Legend, Sparkline, StackedBar, TimeSeriesChart } from '@/components/ui/charts';
@@ -190,9 +190,14 @@ export function CapacityOverviewPage() {
           </>
         }
         actions={
-          <ButtonLink href="/reservations/new" size="small" leadingIcon={RiAddLine}>
-            Plan a reservation
-          </ButtonLink>
+          <>
+            <ButtonLink href="/capacity/report" size="small" variant="secondary" leadingIcon={RiFileTextLine}>
+              Report
+            </ButtonLink>
+            <ButtonLink href="/reservations/new" size="small" leadingIcon={RiAddLine}>
+              Plan a reservation
+            </ButtonLink>
+          </>
         }
       />
 
