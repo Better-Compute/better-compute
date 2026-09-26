@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -99,13 +100,21 @@ func TestUnreadableKubernetesReleasesKeepEveryGPUClaimed(t *testing.T) {
 	}
 	// A pod may still hold one: kept. None does: the GPUs are free again.
 	unaccounted := true
-	d.releasesUnaccounted = func(context.Context, map[string]bool) bool { return unaccounted }
-	d.clearUnreadable(context.Background(), nil)
+	var asked []string
+	d.releasesUnaccounted = func(_ context.Context, _ map[string]bool, gpus []string) bool {
+		asked = gpus
+		return unaccounted
+	}
+	// Live allocations' GPUs are left out of the process check (a slot's GPU too: it is shared).
+	d.clearUnreadable(context.Background(), map[string]bool{"alloc_live": true}, []string{gpus[0].Uuid, gpus[1].Uuid + "/s0"})
 	if !d.releasesUnreadable() {
 		t.Fatal("cleared while a pod may hold a GPU")
 	}
+	if len(asked) != len(gpus)-2 || slices.Contains(asked, gpus[0].Uuid) || slices.Contains(asked, gpus[1].Uuid) {
+		t.Fatalf("asked about %v", asked)
+	}
 	unaccounted = false
-	d.clearUnreadable(context.Background(), nil)
+	d.clearUnreadable(context.Background(), nil, nil)
 	if d.releasesUnreadable() || len(d.releasingDevices()) != 0 || len(d.currentConditions()) != 0 {
 		t.Fatal("the claim outlived the pods")
 	}

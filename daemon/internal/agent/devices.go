@@ -88,9 +88,10 @@ type devicesConverger struct {
 	// pending backstop pass.
 	inUseHook func(ctx context.Context, allocationID string) bool
 	recheck   *time.Timer
-	// releasesUnaccounted reports whether a pod may hold a bcd GPU of an allocation outside live
-	// (fail closed): it clears the unreadable-releases marker. nil: only an operator clears it.
-	releasesUnaccounted func(ctx context.Context, live map[string]bool) bool
+	// releasesUnaccounted reports whether a pod may hold a bcd GPU of an allocation outside live, or
+	// has one of gpus open (fail closed): it clears the unreadable-releases marker. nil: kube's
+	// HeldOutside (tests replace it).
+	releasesUnaccounted func(ctx context.Context, live map[string]bool, gpus []string) bool
 }
 
 func (d *devicesConverger) setLimits(id string, l *agentv1.ResourceLimits) {

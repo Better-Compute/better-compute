@@ -133,18 +133,23 @@ func (d *devicesConverger) releaseActions(wanted map[string]bool) []converge.Act
 	if d.releasesUnreadable() {
 		actions = append(actions, converge.Action{Description: "free the GPUs once no pod holds one of an unknown release", Apply: func(ctx context.Context) error {
 			live := map[string]bool{}
+			var liveDevices []string
 			for id := range wanted {
 				live[id] = true
 			}
-			for id := range pending {
+			for id, r := range pending {
 				live[id] = true
+				liveDevices = append(liveDevices, r.DeviceIDs...)
 			}
-			if held, err := d.observed(); err == nil {
-				for id := range held {
-					live[id] = true
-				}
+			held, err := d.observed()
+			if err != nil {
+				return nil // the holds unknown: nothing to decide on
 			}
-			d.clearUnreadable(ctx, live)
+			for id, h := range held {
+				live[id] = true
+				liveDevices = append(liveDevices, h.deviceIDs...)
+			}
+			d.clearUnreadable(ctx, live, liveDevices)
 			return nil
 		}})
 	}
@@ -194,6 +199,32 @@ func (d *devicesConverger) recheckSoon() {
 	})
 }
 
+// unaccounted reports whether a pod may hold a bcd GPU of an allocation outside live (fail closed).
+func (d *devicesConverger) unaccounted(ctx context.Context, live map[string]bool, liveDevices []string) bool {
+	ask := d.releasesUnaccounted
+	if ask == nil {
+		if d.a.kube == nil {
+			return true
+		}
+		ask = d.a.kube.HeldOutside
+	}
+	// The GPUs no live allocation has, whole or in part (a MIG instance's or slot's GPU is shared).
+	taken := map[string]bool{}
+	for _, dev := range liveDevices {
+		gpu, _, _ := strings.Cut(dev, "/")
+		taken[gpu] = true
+	}
+	d.a.invMu.Lock()
+	var free []string
+	for _, uuid := range gpuUUIDs(d.a.inv) {
+		if !taken[uuid] {
+			free = append(free, uuid)
+		}
+	}
+	d.a.invMu.Unlock()
+	return ask(ctx, live, free)
+}
+
 // unknownRelease names, in claims, the GPUs held for releases an unreadable file lost.
 const unknownRelease = "(pending Kubernetes releases that could not be read)"
 
@@ -222,8 +253,10 @@ func (d *devicesConverger) releasingDevices() map[string]string {
 
 // clearUnreadable drops the marker once kube says no pod holds a bcd GPU of an allocation other than
 // live ones (the node's holds and its pending releases): whatever the lost file held has let go.
-func (d *devicesConverger) clearUnreadable(ctx context.Context, live map[string]bool) {
-	if !d.releasesUnreadable() || d.releasesUnaccounted == nil || d.releasesUnaccounted(ctx, live) {
+// liveDevices are the live allocations' atoms: their GPUs are left out of kube's process check,
+// which cannot tell a live pod's process from a lost one's.
+func (d *devicesConverger) clearUnreadable(ctx context.Context, live map[string]bool, liveDevices []string) {
+	if !d.releasesUnreadable() || d.unaccounted(ctx, live, liveDevices) {
 		return
 	}
 	if err := os.Remove(d.unreadableMarker()); err == nil {
