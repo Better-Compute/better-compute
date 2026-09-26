@@ -97,6 +97,8 @@ func (a *Agent) onDesired(d *agentv1.DesiredState) {
 			a.log.Warn("desired state refused", "generation", generation, "reason", err.Error())
 			return
 		}
+		// bcd helper applies host units only with the signed body that set them.
+		a.hostcfg.noteSignedSpec(d, body)
 	}
 	full, err := marshal(&agentv1.DesiredStateBody{
 		NodeId:      body.GetNodeId(),

@@ -91,6 +91,12 @@ type Config struct {
 	// set is taken as it comes.
 	ApproverSetSHA256 string
 
+	// CommandRootSHA256 pins the command-signing roots (comma-separated lowercase hex SHA-256 of each
+	// root certificate's DER), given at install and never taken from the control plane. bcd helper
+	// applies a host config unit only with a spec signed under a pinned root. Empty: no pin (an
+	// install without signed intent).
+	CommandRootSHA256 string
+
 	// DataDir holds the journal, and the node key when there is no TPM (default /var/lib/bcd).
 	DataDir string
 
@@ -412,6 +418,9 @@ func (c *Config) Validate() error {
 	if _, err := c.ApproverSetPin(); err != nil {
 		return err
 	}
+	if _, err := c.CommandRootPins(); err != nil {
+		return err
+	}
 	if _, err := c.BMCNets(); err != nil {
 		return err
 	}
@@ -508,6 +517,27 @@ func (c *Config) ApproverSetPin() ([]byte, error) {
 	return pin, nil
 }
 
+// CommandRootPins decodes command_root_sha256 (nil when unset), each distinct pin once.
+func (c *Config) CommandRootPins() ([][]byte, error) {
+	var pins [][]byte
+	seen := map[string]bool{}
+	for _, p := range strings.Split(c.CommandRootSHA256, ",") {
+		if p = strings.TrimSpace(p); p == "" || seen[p] {
+			continue
+		}
+		pin, err := hex.DecodeString(p)
+		if err != nil || len(pin) != sha256.Size || strings.ToLower(p) != p {
+			return nil, errors.New("command_root_sha256 must be 64 lowercase hex digits per root, comma-separated")
+		}
+		seen[p] = true
+		pins = append(pins, pin)
+	}
+	if len(pins) > 16 {
+		return nil, errors.New("command_root_sha256 pins at most 16 roots")
+	}
+	return pins, nil
+}
+
 // DecodePin returns the SHA-256 digest a pin carries.
 func DecodePin(pin string) ([]byte, error) {
 	encoded, ok := strings.CutPrefix(pin, PinPrefix)
@@ -537,6 +567,7 @@ var fields = []field{
 	{key: "join_signing_key_pin", kind: kindString, required: true, set: func(c *Config, v value) { c.JoinSigningKeyPin = v.str }},
 	{key: "join_encryption_key_pin", kind: kindString, required: true, set: func(c *Config, v value) { c.JoinEncryptionKeyPin = v.str }},
 	{key: "approver_set_sha256", kind: kindString, set: func(c *Config, v value) { c.ApproverSetSHA256 = v.str }},
+	{key: "command_root_sha256", kind: kindString, set: func(c *Config, v value) { c.CommandRootSHA256 = v.str }},
 	{key: "data_dir", kind: kindString, set: func(c *Config, v value) { c.DataDir = v.str }},
 	{key: "socket_path", kind: kindString, set: func(c *Config, v value) { c.SocketPath = v.str }},
 	{section: "journal", key: "max_bytes", kind: kindInt, set: func(c *Config, v value) { c.Journal.MaxBytes = v.num }},

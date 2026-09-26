@@ -91,6 +91,11 @@ func runHelper(fs *flag.FlagSet, _, stderr io.Writer) int {
 		},
 		HostSystem: &hostconfig.OSSystem{Root: host.Root},
 	}
+	// Signed intent for host units: pinned at install, never from the control plane or the node.
+	if srv.CommandRootPins, err = cfg.CommandRootPins(); err != nil {
+		fmt.Fprintf(stderr, "bcd helper: %v\n", err)
+		return exitFailure
+	}
 	if os.Geteuid() == 0 {
 		// Every directory on the way to the slots and to the socket must be root's alone: a path the
 		// node could swap for a symlink would steer root's writes (review 11 L1, L2).

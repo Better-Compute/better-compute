@@ -75,6 +75,8 @@ type Request struct {
 	Unit     string          `json:"unit,omitempty"`
 	Settings json.RawMessage `json:"settings,omitempty"`
 	GPUsBusy []string        `json:"gpusBusy,omitempty"`
+	// host.unit: the signed spec the unit rests on (needed when command_root_sha256 is set).
+	Intent *HostIntent `json:"intent,omitempty"`
 }
 
 // Response is the helper's answer.
@@ -209,6 +211,12 @@ type Server struct {
 	// host.unit. The units validate their settings themselves (hostconfig), exactly as in bcd node.
 	HostUnits  func(hostconfig.Options) *hostconfig.Registry
 	HostSystem hostconfig.System
+	// CommandRootPins are the SHA-256 digests of the command-signing root certificates (root's
+	// config.toml command_root_sha256, given at install, never taken from the control plane). Set,
+	// every host.unit must carry the signed spec that asks for it (checkIntent).
+	CommandRootPins [][]byte
+	// Now is the clock worker certificates are checked at (default time.Now).
+	Now func() time.Time
 	// SliceRunner runs systemctl for slice.apply and slice.remove (default: the real one).
 	SliceRunner slice.Runner
 }
@@ -257,6 +265,9 @@ func (s *Server) hostUnit(ctx context.Context, req Request) error {
 	}
 	if len(req.GPUsBusy) > 1024 {
 		return errors.New("too many busy GPUs")
+	}
+	if err := s.checkIntent(req); err != nil {
+		return err
 	}
 	busy := make(map[string]bool, len(req.GPUsBusy))
 	for _, g := range req.GPUsBusy {
@@ -645,9 +656,9 @@ func (u UpdateClient) Settle(running string) (selfupdate.Settlement, error) {
 }
 
 // HostUnit asks the helper to apply a config unit (settings nil: clean it), sparing busy GPUs.
-func (c Client) HostUnit(ctx context.Context, unit string, settings json.RawMessage, gpusBusy []string) error {
+func (c Client) HostUnit(ctx context.Context, unit string, settings json.RawMessage, gpusBusy []string, intent *HostIntent) error {
 	c.Timeout = HostUnitTimeout + time.Minute
-	return c.Do(ctx, Request{Op: "host.unit", Unit: unit, Settings: settings, GPUsBusy: gpusBusy})
+	return c.Do(ctx, Request{Op: "host.unit", Unit: unit, Settings: settings, GPUsBusy: gpusBusy, Intent: intent})
 }
 
 // ApplySlice asks the helper to create or update a hold's slice with its limits.

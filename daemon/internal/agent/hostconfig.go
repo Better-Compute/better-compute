@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -37,6 +39,18 @@ type hostConverger struct {
 	conditions []*agentv1.Condition
 	// reboots are this pass's units that converge only after a reboot (RebootRequired).
 	reboots map[string]string
+	// intent is the signed spec that last set the host section (hostIntentFile): bcd helper applies
+	// a unit only with it (helper.HostIntent).
+	intent *storedIntent
+}
+
+// hostIntentFile keeps, in data_dir, the signed DesiredState that last set the host section. The
+// node's word is worth nothing to the helper: it verifies the signature and the body itself.
+const hostIntentFile = "host-intent.json"
+
+type storedIntent struct {
+	Body      []byte `json:"body"`
+	Signature []byte `json:"signature"`
 }
 
 func newHostConverger(a *Agent) *hostConverger {
@@ -44,7 +58,54 @@ func newHostConverger(a *Agent) *hostConverger {
 	if real, ok := a.host.(*RealHost); ok && real.Helper != nil {
 		c.helper = real.Helper
 	}
+	if raw, err := os.ReadFile(filepath.Join(a.o.DataDir, hostIntentFile)); err == nil {
+		var in storedIntent
+		if json.Unmarshal(raw, &in) == nil {
+			c.intent = &in
+		}
+	}
 	return c
+}
+
+// noteSignedSpec keeps a signed DesiredState that sets the host section: a full spec, or a patch
+// with host set (the caller holds a.mu).
+func (c *hostConverger) noteSignedSpec(d *agentv1.DesiredState, body *agentv1.DesiredStateBody) {
+	sets := false
+	switch s := body.GetSpec().(type) {
+	case *agentv1.DesiredStateBody_Full:
+		sets = true
+	case *agentv1.DesiredStateBody_Patch:
+		sets = s.Patch.Host != nil
+	}
+	if !sets || d.GetSignature() == nil {
+		return
+	}
+	sig, err := marshal(d.GetSignature())
+	if err != nil {
+		return
+	}
+	in := &storedIntent{Body: d.GetBody(), Signature: sig}
+	c.mu.Lock()
+	c.intent = in
+	c.mu.Unlock()
+	raw, _ := json.Marshal(in)
+	if err := writeFile(filepath.Join(c.a.o.DataDir, hostIntentFile), raw, 0o600); err != nil {
+		c.a.log.Warn("store the signed host section", "error", err.Error())
+	}
+}
+
+// helperIntent is what host.unit carries: the signed spec and the roots it chains to.
+func (c *hostConverger) helperIntent() *helper.HostIntent {
+	c.mu.Lock()
+	in := c.intent
+	c.mu.Unlock()
+	if in == nil {
+		return nil
+	}
+	c.a.mu.Lock()
+	roots := c.a.state.TrustRoots
+	c.a.mu.Unlock()
+	return &helper.HostIntent{Body: in.Body, Signature: in.Signature, Roots: roots}
 }
 
 func (c *hostConverger) Section() converge.Section { return converge.SectionHost }
@@ -68,7 +129,7 @@ func (c *hostConverger) Plan(ctx context.Context, desired []byte) ([]converge.Ac
 					return fmt.Errorf("stage the bootstrap token: %w", err)
 				}
 			}
-			return h.HostUnit(ctx, unit, settings, busy)
+			return h.HostUnit(ctx, unit, settings, busy, c.helperIntent())
 		}
 	}
 	c.mu.Lock()

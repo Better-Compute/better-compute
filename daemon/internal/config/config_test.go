@@ -241,6 +241,22 @@ func TestSiteBMCNetworks(t *testing.T) {
 	}
 }
 
+func TestCommandRootSHA256(t *testing.T) {
+	a, b := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
+	cfg, err := Parse([]byte(required() + "command_root_sha256 = \"" + a + ", " + b + "," + a + "\"\n"))
+	if pins, perr := cfg.CommandRootPins(); err != nil || perr != nil || len(pins) != 2 || pins[1][0] != 0xcd {
+		t.Fatalf("pins = %v %v %v", pins, err, perr)
+	}
+	for _, bad := range []string{"xyz", strings.ToUpper(a), a[:62]} {
+		if _, err := Parse([]byte(required() + "command_root_sha256 = \"" + bad + "\"\n")); err == nil {
+			t.Fatalf("%q accepted", bad)
+		}
+	}
+	if cfg, _ := Parse([]byte(required())); cfg.CommandRootSHA256 != "" {
+		t.Fatal("pinned by default")
+	}
+}
+
 func TestHostSection(t *testing.T) {
 	cfg, err := Parse([]byte(required()))
 	if err != nil || cfg.ExternalHost {

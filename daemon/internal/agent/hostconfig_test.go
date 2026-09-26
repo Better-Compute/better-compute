@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,8 @@ import (
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/hostconfig"
+	"github.com/better-compute/better-compute/daemon/internal/pki"
+	"google.golang.org/protobuf/proto"
 )
 
 func hostFile(t *testing.T, root, abs, data string) {
@@ -119,6 +122,39 @@ func TestHostDriftRepairedWithoutANewSpec(t *testing.T) {
 			t.Fatal("the drifted sysctl was not repaired")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// With signed intent the node keeps the signed body that set the host section, for bcd helper.
+func TestSignedHostSectionKeptForTheHelper(t *testing.T) {
+	worker := newSigner(t, "worker")
+	h := newHarness(t, func(o *Options) {
+		o.State.TrustRoots = [][]byte{worker.root}
+		o.State.TrustVersion = 1
+	})
+	s, _ := h.open()
+	f := desired(3, &agentv1.NodeSpec{Host: &agentv1.HostSection{Units: []*agentv1.ConfigUnit{{Unit: "sysctl", ConfigJson: `{}`}}}})
+	f.GetDesired().Signature = worker.sign(t, pki.PurposeDesiredState, f.GetDesired().GetBody())
+	s.push(f)
+	s.next(t, "status", func(f *agentv1.AgentFrame) bool { return f.GetStatus() != nil })
+	in := h.agent.hostcfg.helperIntent()
+	if in == nil || !bytes.Equal(in.Body, f.GetDesired().GetBody()) || len(in.Roots) != 1 || !bytes.Equal(in.Roots[0], worker.root) {
+		t.Fatalf("intent = %+v", in)
+	}
+	// A patch that leaves the host section alone keeps the body that set it.
+	patch, _ := proto.Marshal(&agentv1.DesiredStateBody{
+		NodeId: testNode, Generation: 4, BaseGeneration: 3, SpecHash: []byte{4},
+		Spec: &agentv1.DesiredStateBody_Patch{Patch: &agentv1.NodeSpec{Devices: &agentv1.DevicesSection{}}},
+	})
+	s.push(&agentv1.ServerFrame{Msg: &agentv1.ServerFrame_Desired{Desired: &agentv1.DesiredState{Body: patch, Signature: worker.sign(t, pki.PurposeDesiredState, patch)}}})
+	s.next(t, "status", func(f *agentv1.AgentFrame) bool { return f.GetStatus().GetAppliedGeneration() == 4 })
+	if in := h.agent.hostcfg.helperIntent(); !bytes.Equal(in.Body, f.GetDesired().GetBody()) {
+		t.Fatal("a patch without host replaced the host section's signed body")
+	}
+	// It survives a restart.
+	raw, err := os.ReadFile(filepath.Join(h.agent.o.DataDir, hostIntentFile))
+	if err != nil || !bytes.Contains(raw, []byte(`"body"`)) {
+		t.Fatalf("stored = %s, %v", raw, err)
 	}
 }
 

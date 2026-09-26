@@ -41,7 +41,7 @@ func TestHelperHostUnit(t *testing.T) {
 	go func() { _ = srv.Serve(ctx, ln) }()
 	c := Client{Socket: sock}
 
-	if err := c.HostUnit(ctx, "sysctl", json.RawMessage(`{"vm.swappiness":10}`), []string{"GPU-b"}); err != nil {
+	if err := c.HostUnit(ctx, "sysctl", json.RawMessage(`{"vm.swappiness":10}`), []string{"GPU-b"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if v, _ := sys.Get("/proc/sys/vm/swappiness"); v != "10\n" {
@@ -51,7 +51,7 @@ func TestHelperHostUnit(t *testing.T) {
 		t.Fatalf("busy GPUs = %v", busy)
 	}
 	// What the unit refuses, the helper refuses: a key that would run a program as root.
-	err = c.HostUnit(ctx, "sysctl", json.RawMessage(`{"kernel.core_pattern":"|/tmp/x"}`), nil)
+	err = c.HostUnit(ctx, "sysctl", json.RawMessage(`{"kernel.core_pattern":"|/tmp/x"}`), nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "refused") {
 		t.Fatalf("core_pattern: %v", err)
 	}
@@ -59,18 +59,18 @@ func TestHelperHostUnit(t *testing.T) {
 		t.Fatalf("core_pattern written: %q", v)
 	}
 	for _, unit := range []string{"../etc", "Sysctl", "", strings.Repeat("a", 65)} {
-		if err := c.HostUnit(ctx, unit, json.RawMessage(`{}`), nil); err == nil || !strings.Contains(err.Error(), "not a config unit name") {
+		if err := c.HostUnit(ctx, unit, json.RawMessage(`{}`), nil, nil); err == nil || !strings.Contains(err.Error(), "not a config unit name") {
 			t.Fatalf("%q: %v", unit, err)
 		}
 	}
-	if err := c.HostUnit(ctx, "slurm-join", json.RawMessage(`{}`), nil); err == nil || !strings.Contains(err.Error(), "not supported") {
+	if err := c.HostUnit(ctx, "slurm-join", json.RawMessage(`{}`), nil, nil); err == nil || !strings.Contains(err.Error(), "not supported") {
 		t.Fatalf("unknown unit: %v", err)
 	}
 	// No settings: the unit left the spec, and its drop-in goes.
 	if _, ok := sys.Get(hostconfig.SysctlFile); !ok {
 		t.Fatal("no drop-in written")
 	}
-	if err := c.HostUnit(ctx, "sysctl", nil, nil); err != nil {
+	if err := c.HostUnit(ctx, "sysctl", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := sys.Get(hostconfig.SysctlFile); ok {
@@ -78,7 +78,7 @@ func TestHelperHostUnit(t *testing.T) {
 	}
 	// A helper without host units refuses the operation.
 	srv.HostUnits = nil
-	if err := c.HostUnit(ctx, "sysctl", json.RawMessage(`{}`), nil); err == nil || !strings.Contains(err.Error(), "not configured") {
+	if err := c.HostUnit(ctx, "sysctl", json.RawMessage(`{}`), nil, nil); err == nil || !strings.Contains(err.Error(), "not configured") {
 		t.Fatalf("unconfigured: %v", err)
 	}
 }
