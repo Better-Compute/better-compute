@@ -223,9 +223,11 @@ type Server struct {
 	JoinSigningPin []byte
 	// Now is the clock worker certificates are checked at (default time.Now).
 	Now func() time.Time
-	// Virsh and LibvirtPolicy serve libvirt.* (libvirt.go); nil refuses them.
+	// Virsh and LibvirtPolicy serve libvirt.* (libvirt.go); nil refuses them. OpenConsole opens a
+	// console pty (default openPty; tests replace it).
 	Virsh         Virsh
 	LibvirtPolicy func() (LibvirtPolicy, error)
+	OpenConsole   func(path string) (*os.File, error)
 	// SliceRunner runs systemctl for slice.apply and slice.remove (default: the real one).
 	SliceRunner slice.Runner
 }
@@ -346,6 +348,14 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 			resp.Error = err.Error()
 			var r *selfupdate.Refusal
 			resp.Refused = errors.As(err, &r)
+		} else if f, ok := result.(*os.File); ok {
+			// A file handed to the node (a console's pty): the answer carries its descriptor.
+			defer f.Close()
+			raw, _ := json.Marshal(resp)
+			if sendFile(conn, append(raw, '\n'), f) != nil {
+				_ = conn.Close()
+			}
+			return
 		} else if result != nil {
 			resp.Result, _ = json.Marshal(result)
 		}
@@ -392,6 +402,9 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 func (s *Server) do(ctx context.Context, req Request) (any, error) {
 	if strings.HasPrefix(req.Op, "update.") {
 		return s.update(req)
+	}
+	if req.Op == "libvirt.console" {
+		return s.console(ctx, req.Libvirt)
 	}
 	return nil, s.op(ctx, req)
 }

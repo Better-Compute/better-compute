@@ -3,6 +3,7 @@ package helper
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,6 +121,55 @@ func TestHelperLibvirt(t *testing.T) {
 	}
 	if err := op("restore", LibvirtRequest{Domain: "inst_01k5w0000000000000000000ab", File: filepath.Join(state, "memory.state"), XML: []byte(goodDomain)}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The console's pty travels as a descriptor over the helper socket, for bcd's domains only.
+func TestHelperConsoleHandsTheDescriptor(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "helper.sock")
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, w, err := os.Pipe() // stands in for the pty
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	var opened []string
+	srv := &Server{
+		Ops: &fakeOps{}, Root: t.TempDir(), Allowed: me,
+		Virsh: func(_ context.Context, args ...string) ([]byte, error) {
+			if args[1] == "inst_01k5w0000000000000000000ab" {
+				return []byte(`<domain><metadata><bc:instance xmlns:bc="https://better-compute.dev/libvirt/1" id="inst_01k5w0000000000000000000ab"/></metadata><devices><console type="pty" tty="/dev/pts/7"><source path="/dev/pts/7"/></console></devices></domain>`), nil
+			}
+			return []byte(`<domain><devices><console type="pty"><source path="/dev/pts/3"/></console></devices></domain>`), nil
+		},
+		OpenConsole: func(path string) (*os.File, error) { opened = append(opened, path); return r, nil },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = srv.Serve(ctx, ln) }()
+	c := Client{Socket: sock}
+
+	f, err := c.Console(ctx, "inst_01k5w0000000000000000000ab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := w.Write([]byte("login: ")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 16)
+	n, err := f.Read(buf)
+	if err != nil || string(buf[:n]) != "login: " || len(opened) != 1 || opened[0] != "/dev/pts/7" {
+		t.Fatalf("read %q %v, opened %v", buf[:n], err, opened)
+	}
+	if _, err := c.Console(ctx, "legacy-vm"); err == nil {
+		t.Fatal("a name that is no instance id got a console")
+	}
+	if _, err := c.Console(ctx, "inst_01k5w0000000000000000000zz"); err == nil || !strings.Contains(err.Error(), "not bcd's") {
+		t.Fatalf("a foreign domain's console: %v", err)
 	}
 }
 

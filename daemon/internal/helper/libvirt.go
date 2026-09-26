@@ -3,6 +3,7 @@ package helper
 import (
 	"bytes"
 	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -248,6 +249,59 @@ func stateFile(dirs []string, file string) (dir, name string, err error) {
 		}
 	}
 	return "", "", fmt.Errorf("%s is outside the instances' state directories", file)
+}
+
+// ptsPath is a console pty libvirt hands a domain.
+var ptsPath = regexp.MustCompile(`^/dev/pts/[0-9]{1,6}$`)
+
+// console opens the pty of a bcd domain's serial console for the node: libvirt's pty is root's, and
+// the node gets the one descriptor, never the path's permissions.
+func (s *Server) console(ctx context.Context, req *LibvirtRequest) (*os.File, error) {
+	if s.Virsh == nil {
+		return nil, errors.New("libvirt operations are not configured on this helper")
+	}
+	if req == nil || !DomainName.MatchString(req.Domain) {
+		return nil, errors.New("console: an instance id")
+	}
+	out, err := s.Virsh(ctx, "dumpxml", req.Domain)
+	if err != nil {
+		return nil, err
+	}
+	var dom struct {
+		Metadata struct {
+			Instance struct {
+				ID string `xml:"id,attr"`
+			} `xml:"https://better-compute.dev/libvirt/1 instance"`
+		} `xml:"metadata"`
+		Consoles []struct {
+			Type   string `xml:"type,attr"`
+			Source struct {
+				Path string `xml:"path,attr"`
+			} `xml:"source"`
+		} `xml:"devices>console"`
+	}
+	if err := xml.Unmarshal(out, &dom); err != nil {
+		return nil, fmt.Errorf("console: %w", err)
+	}
+	if dom.Metadata.Instance.ID != req.Domain {
+		return nil, fmt.Errorf("domain %s is not bcd's", req.Domain)
+	}
+	for _, c := range dom.Consoles {
+		if c.Type == "pty" && ptsPath.MatchString(c.Source.Path) {
+			open := s.OpenConsole
+			if open == nil {
+				open = openPty
+			}
+			return open(c.Source.Path)
+		}
+	}
+	return nil, errors.New("console: the domain has no pty console (is it running?)")
+}
+
+// Console asks the helper for a bcd domain's console: the pty's descriptor, read and written by the
+// caller.
+func (c Client) Console(ctx context.Context, domain string) (*os.File, error) {
+	return c.callForFile(ctx, Request{Op: "libvirt.console", Libvirt: &LibvirtRequest{Domain: domain}})
 }
 
 // Libvirt runs a libvirt.<verb> through the helper.
