@@ -146,6 +146,9 @@ type Fake struct {
 type fakeState struct {
 	BootID  string            `json:"bootId"`
 	Domains map[string]Domain `json:"domains"`
+	// Attach: each domain's spec'd volumes, open from its next start (Domain.Volumes), as on a real
+	// runtime.
+	Attach map[string][]AttachedVolume `json:"attach,omitempty"`
 }
 
 func (f *Fake) Name() string { return f.RuntimeName }
@@ -172,7 +175,7 @@ func (f *Fake) load() (*fakeState, error) {
 		// The host rebooted: every domain is stopped.
 		for id, d := range st.Domains {
 			if d.State == StateRunning || d.State == StatePaused {
-				d.State = StateStopped
+				d.State, d.Volumes = StateStopped, nil
 			}
 			st.Domains[id] = d
 		}
@@ -256,6 +259,14 @@ func (f *Fake) Ensure(_ context.Context, spec *agentv1.InstanceSpec, userData []
 	d.VCPU, d.MemoryBytes, d.DiskBytes = spec.GetVcpu(), spec.GetMemoryBytes(), spec.GetDiskBytes()
 	d.GPUs, d.MACs, d.Addresses = append([]string(nil), spec.GetGpuDeviceIds()...), macs, addrs
 	st.Domains[d.ID] = d
+	var vols []AttachedVolume
+	for _, iv := range spec.GetVolumes() {
+		vols = append(vols, AttachedVolume{Volume: Volume{ID: iv.GetVolumeId()}, ReadOnly: iv.GetReadOnly()})
+	}
+	if st.Attach == nil {
+		st.Attach = map[string][]AttachedVolume{}
+	}
+	st.Attach[d.ID] = vols
 	return f.save(st)
 }
 
@@ -269,6 +280,13 @@ func (f *Fake) Snapshot(_ context.Context, id string, includeMemory bool, cpuMod
 	d, ok := st.Domains[id]
 	if !ok || !d.Managed {
 		return "", fmt.Errorf("no managed domain %s", id)
+	}
+	if includeMemory {
+		for _, v := range d.Volumes {
+			if !v.ReadOnly {
+				return "", ErrMemorySnapshotWithVolumes
+			}
+		}
 	}
 	snap := fakeSnapshot{Runtime: f.RuntimeName, IncludeMemory: includeMemory, Domain: d}
 	if includeMemory {
@@ -306,6 +324,10 @@ func (f *Fake) SetState(_ context.Context, id, state string) error {
 			return ErrNoCapacity
 		}
 		d.Boots++
+		d.Volumes = st.Attach[id]
+	}
+	if state == StateStopped {
+		d.Volumes = nil
 	}
 	d.State, d.Message = state, ""
 	st.Domains[id] = d
@@ -321,6 +343,7 @@ func (f *Fake) Destroy(_ context.Context, id string) error {
 	}
 	if d, ok := st.Domains[id]; ok && d.Managed {
 		delete(st.Domains, id)
+		delete(st.Attach, id)
 	}
 	return f.save(st)
 }
