@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/converge"
@@ -157,14 +158,22 @@ func (a *Agent) triggerConverge() {
 	}
 }
 
+// driftInterval is how often a converged spec is converged again anyway (P2, level-triggered): what
+// changed on the host behind bcd's back (a sysctl, a kernel module, a service, a CDI spec, a mount
+// lost at a reboot) is repaired within it, even when no new spec arrives.
+var driftInterval = 10 * time.Minute
+
 func (a *Agent) convergeLoop(ctx context.Context) {
 	var retry <-chan struct{}
+	drift := time.NewTicker(driftInterval)
+	defer drift.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-a.convergeCh:
 		case <-retry:
+		case <-drift.C:
 		}
 		progressing := a.convergeOnce(ctx)
 		retry = nil

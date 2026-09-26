@@ -278,8 +278,42 @@ func planBootPages(sys System, want int64) ([]converge.Action, error) {
 	return steps, nil
 }
 
-// planHugetlbMount mounts a hugetlbfs of 1 GiB pages for the VMMs.
+// Hugepages1GMountUnit mounts /dev/hugepages1G at every boot, before the VMMs start (systemd
+// names a mount unit after its path).
+const Hugepages1GMountUnit = "/etc/systemd/system/dev-hugepages1G.mount"
+
+var hugepages1GMountUnit = generatedHeader("hugepages") + `[Unit]
+Description=1 GiB huge pages for VM memory (bcd)
+DefaultDependencies=no
+Before=sysinit.target
+ConditionPathExists=` + Hugepages1GDir + `
+
+[Mount]
+What=hugetlbfs
+Where=` + Hugepages1GMount + `
+Type=hugetlbfs
+Options=pagesize=1G
+
+[Install]
+WantedBy=sysinit.target
+`
+
+// planHugetlbMount mounts a hugetlbfs of 1 GiB pages for the VMMs: a systemd mount unit, so it is
+// there from boot, else a mount now (bcd mounts it again after each boot).
 func planHugetlbMount(sys System) ([]converge.Action, error) {
+	var actions []converge.Action
+	systemd := sys.LookPath("systemctl")
+	if systemd {
+		unit, err := ensureFile(sys, Hugepages1GMountUnit, []byte(hugepages1GMountUnit), 0o644)
+		if err != nil {
+			return nil, err
+		}
+		if len(unit) > 0 {
+			actions = append(append(actions, unit...),
+				run(sys, Cmd{Name: "systemctl", Args: []string{"daemon-reload"}}),
+				run(sys, Cmd{Name: "systemctl", Args: []string{"enable", "dev-hugepages1G.mount"}}))
+		}
+	}
 	mounts, _, err := readTrim(sys, "/proc/mounts")
 	if err != nil {
 		return nil, err
@@ -287,11 +321,14 @@ func planHugetlbMount(sys System) ([]converge.Action, error) {
 	for _, line := range strings.Split(mounts, "\n") {
 		f := strings.Fields(line)
 		if len(f) >= 4 && f[1] == Hugepages1GMount && f[2] == "hugetlbfs" && strings.Contains(","+f[3]+",", ",pagesize=1024M,") {
-			return nil, nil
+			return actions, nil
 		}
 	}
-	return []converge.Action{
+	if systemd {
+		return append(actions, run(sys, Cmd{Name: "systemctl", Args: []string{"start", "dev-hugepages1G.mount"}})), nil
+	}
+	return append(actions,
 		run(sys, Cmd{Name: "mkdir", Args: []string{"-p", Hugepages1GMount}}),
 		run(sys, Cmd{Name: "mount", Args: []string{"-t", "hugetlbfs", "-o", "pagesize=1G", "hugetlbfs", Hugepages1GMount}}),
-	}, nil
+	), nil
 }

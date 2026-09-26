@@ -227,6 +227,28 @@ func TestHugepages(t *testing.T) {
 	}
 }
 
+func TestHugepages1GMountUnitOnSystemd(t *testing.T) {
+	sys := hugepageHost()
+	sys.Programs["systemctl"] = true
+	r := NewRegistry(Hugepages{})
+	if _, err := runAll(t, r, sys, unit("hugepages", `{"pages1g":2}`)); err != nil {
+		t.Fatal(err)
+	}
+	if f, _ := sys.Get(Hugepages1GMountUnit); !strings.Contains(f, "Where=/dev/hugepages1G\nType=hugetlbfs\nOptions=pagesize=1G") {
+		t.Fatalf("mount unit:\n%s", f)
+	}
+	want := []string{"systemctl daemon-reload", "systemctl enable dev-hugepages1G.mount", "systemctl start dev-hugepages1G.mount"}
+	if got := sys.Commands(); !slices.Equal(got, want) {
+		t.Fatalf("commands %q", got)
+	}
+	// Mounted (from boot, by the unit): nothing to do.
+	sys.Ran = nil
+	sys.Set("/proc/mounts", "hugetlbfs /dev/hugepages1G hugetlbfs rw,relatime,pagesize=1024M 0 0\n")
+	if n, err := runAll(t, r, sys, unit("hugepages", `{"pages1g":2}`)); err != nil || n != 0 || len(sys.Ran) != 0 {
+		t.Fatalf("converged: %d %v %q", n, err, sys.Commands())
+	}
+}
+
 func TestHugepages1GFallsBackToTheBootLoader(t *testing.T) {
 	sys := hugepageHost()
 	sys.Set("/proc/mounts", "hugetlbfs /dev/hugepages1G hugetlbfs rw,pagesize=1024M 0 0\n")

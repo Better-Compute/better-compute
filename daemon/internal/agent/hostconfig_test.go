@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/hostconfig"
@@ -89,6 +90,35 @@ func TestHostSectionReportsRebootRequired(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(root, "etc/default/grub.d/90-bcd-cpu.cfg")); !strings.Contains(string(b), "isolcpus=managed_irq,domain,2-3") {
 		t.Fatalf("drop-in = %q", b)
+	}
+}
+
+// Drift behind bcd's back is repaired by the periodic pass, without a new spec.
+func TestHostDriftRepairedWithoutANewSpec(t *testing.T) {
+	was := driftInterval
+	driftInterval = 50 * time.Millisecond
+	t.Cleanup(func() { driftInterval = was })
+	h := newHarness(t, nil)
+	root := h.host.root
+	hostFile(t, root, "/proc/sys/vm/swappiness", "60\n")
+	s, _ := h.open()
+	s.push(desired(1, &agentv1.NodeSpec{Host: &agentv1.HostSection{Units: []*agentv1.ConfigUnit{
+		{Unit: "sysctl", ConfigJson: `{"vm.swappiness":10}`},
+	}}}))
+	s.next(t, "status", func(f *agentv1.AgentFrame) bool { return f.GetStatus() != nil })
+	swappiness := filepath.Join(root, "proc/sys/vm/swappiness")
+	if err := os.WriteFile(swappiness, []byte("60\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if b, _ := os.ReadFile(swappiness); string(b) == "10\n" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the drifted sysctl was not repaired")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
