@@ -75,7 +75,7 @@ import {
   renewReservation,
   reservationView,
   reservationWork,
-  wholeGpus,
+  gpuEquivalent,
   type AllocationBindingCheck,
   type CreateReservationInput,
   type ExtendReservationInput,
@@ -1120,7 +1120,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
         const resources =
           input.binding === 'node'
             ? undefined
-            : hostResources(input.resources, await perGpuShare(tx, pool, wholeGpus(input.devices)));
+            : hostResources(input.resources, await perGpuShare(tx, pool, gpuEquivalent(input.devices, pool)));
         const request = {
           tenantId: input.tenantId,
           poolId: input.poolId,

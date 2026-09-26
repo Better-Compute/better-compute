@@ -675,17 +675,38 @@ function policyObject(value: unknown): Record<string, unknown> | undefined {
 }
 
 /**
- * The host CPU and memory a reservation without `resources` books per node with its whole GPUs
- * (§3.8): `policy.perGpu`'s values, else the smallest per-GPU share among the pool's GPU hosts
- * (`floor(allocatable × ratio ÷ bookable GPUs)`), so the share fits on every host. Requests for MIG
- * instances or slots only (no whole GPUs) book none, and neither do hosts without the rows.
+ * How many GPUs' worth a request books (§3.8): its whole GPUs, plus each MIG instance or slot as
+ * its fraction of a GPU (MIG: 1/7; time-slice/MPS: 1/`policy.sharing.replicas`, default 4 or 10),
+ * so fractional work also carries (and is limited to) its share of the host.
+ */
+export function gpuEquivalent(
+  devices: readonly DeviceRequest[],
+  pool: { sharing?: string; policy?: unknown },
+): number {
+  const replicas = policyObject(policyObject(pool.policy)?.sharing)?.replicas;
+  const perGpu =
+    pool.sharing === 'mig'
+      ? 7
+      : typeof replicas === 'number' && replicas >= 1
+        ? Math.floor(replicas)
+        : pool.sharing === 'mps'
+          ? 10
+          : 4;
+  return wholeGpus(devices) + gpuSlices(devices) / perGpu;
+}
+
+/**
+ * The host CPU and memory a reservation books per node for `gpus` GPUs' worth (`gpuEquivalent`),
+ * §3.8: `policy.perGpu`'s values, else the smallest per-GPU share among the pool's GPU hosts
+ * (`floor(allocatable × ratio ÷ physical GPUs)`), so the share fits on every host. Hosts without
+ * the rows book none.
  */
 export async function perGpuShare(
   tx: Pick<SqlTx, 'query'>,
   pool: { id: string; policy?: unknown },
   gpus: number,
 ): Promise<ReservationResources> {
-  if (gpus <= 0) return {};
+  if (!(gpus > 0)) return {};
   const perGpu = policyObject(policyObject(pool.policy)?.perGpu);
   const share: ReservationResources = {};
   const derived: string[] = [];
@@ -696,18 +717,19 @@ export async function perGpuShare(
     else derived.push(name);
   }
   if (derived.length > 0) {
+    // Physical GPUs, bookable or not: a shared pool's GPUs are its slices' parents.
     const { rows } = await tx.query<{ resource: string; share: string }>(
-      `SELECT nr.resource, min(floor(nr.allocatable * nr.ratio / g.gpus))::text AS share
+      `SELECT nr.resource, min(nr.allocatable * nr.ratio / g.gpus)::text AS share
          FROM nodes n
          JOIN (SELECT node_id, count(*) AS gpus FROM devices
-                WHERE class = 'gpu' AND bookable GROUP BY node_id) g
+                WHERE class = 'gpu' AND parent_id IS NULL GROUP BY node_id) g
            ON g.node_id = n.id
          JOIN node_resources nr ON nr.node_id = n.id AND nr.resource = ANY($2::text[])
         WHERE n.pool_id = $1 AND n.deleted_at IS NULL
         GROUP BY nr.resource`,
       [pool.id, derived],
     );
-    for (const row of rows) share[row.resource] = Number(row.share) * gpus;
+    for (const row of rows) share[row.resource] = Math.floor(Number(row.share) * gpus);
   }
   for (const [name, amount] of Object.entries(share))
     if (amount > 0) share[name] = Math.min(amount, hostResourceLimits[name] ?? 0);
@@ -876,11 +898,13 @@ export async function prepareCreate(
   else {
     spec = reservationSpec(input);
     if (input.binding !== 'node') {
-      const share = await perGpuShare(tx, pool, wholeGpus(input.devices));
+      const share = await perGpuShare(tx, pool, gpuEquivalent(input.devices, pool));
       const resources = hostResources(input.resources, share);
       if (Object.keys(resources).length > 0) spec.resources = resources;
       else delete spec.resources;
-      if (Object.keys(share).length > 0) spec.hostShare = share;
+      // Always recorded, `{}` included (MIG/slot requests, pools with no share): its presence is
+      // what makes everything above it chargeable (review 2 found M8 open without it).
+      spec.hostShare = share;
     }
   }
   if (!existing)
@@ -1061,7 +1085,7 @@ function placementRequest(row: ReservationRow, during: TimeRange) {
  */
 export function reservationDemand(request: ReservationSpec): Record<string, number> {
   const excess: Record<string, number> = {};
-  if (request.hostShare)
+  if (request.hostShare !== undefined)
     for (const [name, amount] of Object.entries(request.resources ?? {})) {
       const over = amount - (request.hostShare[name] ?? 0);
       if (over > 0) excess[name] = over;
@@ -2073,11 +2097,8 @@ export async function markAllocationBound(
   binding: { cdiDevices: readonly string[]; envFile?: string; cgroupParent?: string },
   options: { nodeId?: string; evidence?: BindingEvidence } = {},
 ): Promise<boolean> {
-  // The slice bcd bound a hold into (§3.8), kept only when it looks like one of bcd's.
-  const slice =
-    typeof binding.cgroupParent === 'string' && /^bcd-alloc-[A-Za-z0-9_-]{1,120}\.slice$/.test(binding.cgroupParent)
-      ? binding.cgroupParent
-      : undefined;
+  // The slice bcd bound a hold into (§3.8): exactly this allocation's, never another name.
+  const slice = binding.cgroupParent === `bcd-alloc-${allocationId}.slice` ? binding.cgroupParent : undefined;
   const { rows } = await tx.query<{ owner_id: string; owner_kind: string }>(
     `UPDATE allocations SET binding = $2::jsonb, bound_at = COALESCE(bound_at, compute_now()),
                             bound_report = $4, bound_sig_kid = $5, bound_sig = $6,

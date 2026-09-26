@@ -4,6 +4,7 @@ import { ComputeError, isComputeError, newId, type ComputeErrorBody } from '@bet
 import { spkiPin } from '@better-compute/pki';
 import { serveDownload } from './downloads.js';
 import type { Operations } from './operations.js';
+import { forwardingHeaders } from './proxy.js';
 import type { ResolvedOptions } from './options.js';
 import type { RegisteredMethod, Registry } from './registry.js';
 import {
@@ -125,18 +126,6 @@ function errorResponse(error: unknown): Response {
 export interface HandlerInfo {
   peer?: { address?: string };
 }
-
-/** Headers that claim a client address; stripped from what IAM sees (review of round 5, M6). */
-const forwardingHeaders = [
-  'x-forwarded-for',
-  'forwarded',
-  'x-real-ip',
-  'x-client-ip',
-  'true-client-ip',
-  'cf-connecting-ip',
-  'fastly-client-ip',
-  'x-cluster-client-ip',
-] as const;
 
 export interface HttpHost {
   options: ResolvedOptions;

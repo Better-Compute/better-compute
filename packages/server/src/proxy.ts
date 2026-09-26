@@ -9,6 +9,21 @@ import { ComputeError } from '@better-compute/core';
 // not a trusted proxy is the caller, whatever the headers say. A trusted proxy that sends no usable
 // header leaves the caller unknown (no sourceIp: IAM conditions on it do not match).
 
+/**
+ * Headers that claim a client address. Stripped from every credential IAM sees, whichever way the
+ * call came in (HTTP or the in-process API), and replaced by the verified `sourceIp` alone.
+ */
+export const forwardingHeaders = [
+  'x-forwarded-for',
+  'forwarded',
+  'x-real-ip',
+  'x-client-ip',
+  'true-client-ip',
+  'cf-connecting-ip',
+  'fastly-client-ip',
+  'x-cluster-client-ip',
+] as const;
+
 /** Resolves the caller's address from the socket peer and the request's forwarding headers. */
 export type SourceAddressResolver = (peer: string | undefined, headers: Headers) => string | undefined;
 

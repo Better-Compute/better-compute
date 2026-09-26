@@ -17,6 +17,7 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { cachesFor, publicCaches, type ComputeCaches } from './caches.js';
+import { forwardingHeaders } from './proxy.js';
 import { bindConfirmation, matchesBinding } from './confirmation-bindings.js';
 import { checkPlan, createComposites, outsideComposite, type CompositeCall } from './composite.js';
 import { createListRecipe, readOnlyExecutor, runsOutsideTransaction } from './list.js';
@@ -106,18 +107,22 @@ export function presentedCredential(
   if (!credential || typeof credential !== 'object') return undefined;
   const token =
     typeof credential.token === 'string' && credential.token ? credential.token : undefined;
+  const sourceIp =
+    typeof credential.sourceIp === 'string' && credential.sourceIp ? credential.sourceIp : undefined;
   let headers: Headers | undefined;
   if (credential.headers !== undefined) {
     headers = new Headers(credential.headers);
     if (!acceptIamCookie) headers.delete('cookie');
+    // A caller's own forwarding headers never reach IAM (an embedded IAM reading X-Forwarded-For
+    // would take their word): only the verified address, on every path in (review 2, M6).
+    for (const name of forwardingHeaders) headers.delete(name);
+    if (sourceIp) headers.set('x-forwarded-for', sourceIp);
   }
   const present =
     token !== undefined ||
     headers?.has('authorization') === true ||
     headers?.has('cookie') === true;
   if (!present) return undefined;
-  const sourceIp =
-    typeof credential.sourceIp === 'string' && credential.sourceIp ? credential.sourceIp : undefined;
   return {
     ...(headers ? { headers } : {}),
     ...(token !== undefined ? { token } : {}),
