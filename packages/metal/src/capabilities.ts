@@ -76,7 +76,8 @@ const agentBuiltinDrivers: ReadonlySet<string> = new Set(['redfish']);
 
 /**
  * The kinds (concerns) the site agents of `siteId` report `driver` serves: each Hello writes
- * `bc.dev/driver-kind.<driver>.<kind>` labels (14ceb1e). `undefined` when no agent reports the driver
+ * `bc.dev/driver-kind.<driver>.<kind>` labels (14ceb1e); only those, source `system`, never an operator's
+ * (review L11). `undefined` when no agent reports the driver
  * (an older agent, or a built-in driver), so the table decides alone.
  */
 export async function siteDriverKinds(tx: SqlTx, siteId: string, driver: string): Promise<ReadonlySet<string> | undefined> {
@@ -85,7 +86,8 @@ export async function siteDriverKinds(tx: SqlTx, siteId: string, driver: string)
   const { rows } = await tx.query<{ kind: string }>(
     `SELECT DISTINCT substr(l.key, $3::int) AS kind
        FROM node_labels l JOIN nodes agent ON agent.id = l.node_id
-      WHERE agent.site_id = $1 AND agent.role = 'site' AND agent.deleted_at IS NULL AND starts_with(l.key, $2)`,
+      WHERE agent.site_id = $1 AND agent.role = 'site' AND agent.deleted_at IS NULL AND starts_with(l.key, $2)
+        AND l.source = 'system'`,
     [siteId, prefix, prefix.length + 1],
   );
   return rows.length ? new Set(rows.map((row) => row.kind)) : undefined;

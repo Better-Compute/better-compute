@@ -2862,12 +2862,14 @@ const certificateCovers = (a: `${string}.`, until: string) =>
 
 /**
  * A private or none network on a host that does not say it enforces it (placed before the
- * capability constraint, or its bcd since downgraded): the guest would have full egress. `a` must
+ * capability constraint, or its bcd since downgraded): the guest would have full egress. Only the gateway's
+ * own label (source `system`, from Hello) counts, never an operator's (review L11). `a` must
  * name the instances alias: a bare `node_id` in the subquery would resolve to `node_labels`' own.
  */
 const networkUnenforced = (a: `${string}.`) =>
   `(${a}network_policy IS NOT NULL AND ${a}node_id IS NOT NULL AND NOT EXISTS (
-      SELECT 1 FROM node_labels nl WHERE nl.node_id = ${a}node_id AND nl.key = '${networkPolicyCapabilityLabel}'))`;
+      SELECT 1 FROM node_labels nl WHERE nl.node_id = ${a}node_id AND nl.key = '${networkPolicyCapabilityLabel}'
+        AND nl.source = 'system'))`;
 
 /**
  * Deletes up to `count` of a template's warm instances: stale ones (`warmStale`), or else current

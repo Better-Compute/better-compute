@@ -504,7 +504,11 @@ function nextStep(workflow: WorkflowRow, steps: StepRow[]): StepRow | undefined 
 
 async function nodeLabels(tx: SqlTx, nodeId: string | null): Promise<Record<string, string>> {
   if (!nodeId) return {};
-  const { rows } = await tx.query<{ key: string; value: string }>('SELECT key, value FROM node_labels WHERE node_id = $1', [nodeId]);
+  // A bc.dev/ label is bcd's own (source `system`, from Hello); an operator row never counts (review L11).
+  const { rows } = await tx.query<{ key: string; value: string }>(
+    `SELECT key, value FROM node_labels WHERE node_id = $1 AND (NOT starts_with(key, 'bc.dev/') OR source = 'system')`,
+    [nodeId],
+  );
   return Object.fromEntries(rows.map((row) => [row.key, row.value]));
 }
 

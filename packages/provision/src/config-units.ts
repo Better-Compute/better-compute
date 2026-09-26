@@ -510,7 +510,11 @@ export async function hostSpecFor(
   if (!row) return {};
   const fromPool = poolHostConfig(row.pool_policy, row.pool_sharing);
   if (!row.host_config && Object.keys(fromPool).length === 0) return {};
-  const labels = await sql.query<{ key: string; value: string }>('SELECT key, value FROM node_labels WHERE node_id = $1', [nodeId]);
+  // `when:` sees a bc.dev/ label only when bcd set it (source `system`, review L11).
+  const labels = await sql.query<{ key: string; value: string }>(
+    `SELECT key, value FROM node_labels WHERE node_id = $1 AND (NOT starts_with(key, 'bc.dev/') OR source = 'system')`,
+    [nodeId],
+  );
   const poolPolicy = row.gated_layout !== null ? { ...(row.pool_policy ?? {}), migLayout: row.gated_layout } : row.pool_policy;
   const host = await resolveHostConfig({ ...(row.host_config ?? {}), ...fromPool }, {
     labels: Object.fromEntries(labels.rows.map((label) => [label.key, label.value])),
