@@ -406,7 +406,12 @@ events. It never drops a hold on its own.
   - one writer: an instance beside a running or paused writer, or a writer beside readers, is
     refused and stopped;
   - once unlisted and unattached, a volume's blocks are punched out and the file is unlinked;
-  - a memory snapshot of an instance with a read-write volume is refused.
+  - a memory snapshot of an instance with a read-write volume is refused;
+  - sparse, but never overcommitted: a new volume or a growth must fit in the filesystem's
+    available space, less a reserve (5%, at least 2 GiB), less every volume's unwritten space.
+    `StatusReport.volume_storage` reports these numbers;
+  - a cloud-hypervisor read-only volume is readable by exactly the VMM users that have it open (a
+    POSIX ACL entry each). Under the helper, a libvirt domain's volumes go back to 0600 when it stops.
 - *Placement* (`runtime/placement.go`). `InstanceSpec.placement` pins the vCPUs one to one when
   `cpus` has exactly `vcpu` entries; with more entries the vCPUs float within them. Placement also
   sets memory binding (`mems`, strict), hugepage backing (2 MiB or 1 GiB, locked) and the balloon,
@@ -436,6 +441,12 @@ and a discovery assertion the agent signs.
   - The ISO must be a cache image the site spec names as `iso`.
   - Until it is cached, the machine waits; it never falls back to the ramdisk.
   - If the site spec doesn't name the digest as an iso, the site section fails.
+- The image cache serves only under grants, at `/cache/t/<grant>/<sha256>`:
+  - a boot's grant (its ramdisk's `bc.cache`, its sanboot URL) lasts until its entry lapses, and
+    only while the lease is held;
+  - a BMC firmware URL's grant covers that one image for 2 hours.
+- Discovery takes only well-formed fields: canonical UUIDs and short arch names.
+- Request headers are capped at 8 KiB, and TFTP runs at most 64 transfers, 4 per source.
 
 **Access** (`agent/access.go`). The access converger writes the sshd drop-in, CA, principals
 (`<account>@<nodeId>` only) and KRL. It reloads sshd only when the drop-in changed, and it removes
