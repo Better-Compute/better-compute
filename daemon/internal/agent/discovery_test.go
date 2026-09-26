@@ -23,7 +23,7 @@ import (
 func TestDiscoveryListIsCappedAndForgets(t *testing.T) {
 	var d discovery
 	now := time.Now()
-	if !d.seen(now, "B8:3F:D2:00:00:01", "4C4C4544-0001", "x86_64-efi", "10.20.0.1") {
+	if !d.seen(now, "B8:3F:D2:00:00:01", "4C4C4544-0001-2233-4455-667788990011", "x86_64-efi", "10.20.0.1") {
 		t.Fatal("a new machine did not ask for a report")
 	}
 	if d.seen(now.Add(time.Second), "b8:3f:d2:00:00:01", "", "", "") {
@@ -33,7 +33,7 @@ func TestDiscoveryListIsCappedAndForgets(t *testing.T) {
 		t.Fatal("a second new machine within 30 s asked for a report")
 	}
 	list := d.list(now.Add(3 * time.Second))
-	if len(list) != 2 || list[0].GetMac() != "b8:3f:d2:00:00:01" || list[0].GetCount() != 2 || list[0].GetProductUuid() != "4c4c4544-0001" ||
+	if len(list) != 2 || list[0].GetMac() != "b8:3f:d2:00:00:01" || list[0].GetCount() != 2 || list[0].GetProductUuid() != "4c4c4544-0001-2233-4455-667788990011" ||
 		list[0].GetRelay() != "10.20.0.1" || list[0].GetArch() != "x86_64-efi" || !list[0].GetFirstSeen().AsTime().Equal(now) {
 		t.Fatalf("list = %v", list)
 	}
@@ -51,6 +51,23 @@ func TestDiscoveryListIsCappedAndForgets(t *testing.T) {
 	// Forgotten a day after it was last seen.
 	if got := d.list(now.Add(discoveryTTL + time.Hour)); len(got) != 0 {
 		t.Fatalf("%d machines a day later", len(got))
+	}
+	// Only canonical UUIDs and short arch names are taken; a MAC DHCP never showed is not taken over
+	// HTTP when proxyDHCP runs here.
+	var e discovery
+	e.seen(now, "02:00:00:00:00:01", strings.Repeat("a", 1<<20), strings.Repeat("x", 100), "not-an-ip")
+	if got := e.list(now); len(got) != 1 || got[0].GetProductUuid() != "" || got[0].GetArch() != "" || got[0].GetRelay() != "" {
+		t.Fatalf("unchecked fields kept: %v", got)
+	}
+	if e.seen(now, "not-a-mac", "", "", "") {
+		t.Fatal("a bad MAC was taken")
+	}
+	e.dhcp = true
+	if e.sighting(now, "02:00:00:00:00:02", "", "", "", true); len(e.list(now)) != 1 {
+		t.Fatal("an HTTP-only sighting was taken beside proxyDHCP")
+	}
+	if e.sighting(now, "02:00:00:00:00:01", "", "x86_64-efi", "", true); e.list(now)[0].GetArch() != "x86_64-efi" {
+		t.Fatal("an HTTP sighting of a DHCP-seen MAC was dropped")
 	}
 	if archName(pxe.Arch(42)) != "arch-42" {
 		t.Fatalf("archName(42) = %s", archName(pxe.Arch(42)))
@@ -82,13 +99,13 @@ func TestUnknownMachinesAreListedAndSanbootBootsTheCachedISO(t *testing.T) {
 
 	cfg := BootConfig{URL: "http://10.20.0.2:8080", ServerIP: net.ParseIP("10.20.0.2")}
 	unknown, _ := net.ParseMAC("b8:3f:d2:00:00:77")
-	if _, ok := h.agent.pxeAnswer(cfg, pxe.Request{MAC: unknown, Arch: pxe.ArchEFIx86_64, UUID: "4c4c4544-0077", Relay: net.ParseIP("10.30.0.1")}); ok {
+	if _, ok := h.agent.pxeAnswer(cfg, pxe.Request{MAC: unknown, Arch: pxe.ArchEFIx86_64, UUID: "4c4c4544-0077-2233-4455-667788990011", Relay: net.ParseIP("10.30.0.1")}); ok {
 		t.Fatal("answered an unknown machine")
 	}
 	st := s.next(t, "status with the discovered machine", func(f *agentv1.AgentFrame) bool {
 		return len(f.GetStatus().GetDiscovered()) == 1
 	}).GetStatus()
-	if m := st.GetDiscovered()[0]; m.GetMac() != "b8:3f:d2:00:00:77" || m.GetProductUuid() != "4c4c4544-0077" || m.GetArch() != "x86_64-efi" || m.GetRelay() != "10.30.0.1" {
+	if m := st.GetDiscovered()[0]; m.GetMac() != "b8:3f:d2:00:00:77" || m.GetProductUuid() != "4c4c4544-0077-2233-4455-667788990011" || m.GetArch() != "x86_64-efi" || m.GetRelay() != "10.30.0.1" {
 		t.Fatalf("discovered = %v", m)
 	}
 

@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"net"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +41,8 @@ type discovery struct {
 	mu       sync.Mutex
 	machines map[string]*discoveredMachine
 	lastPush time.Time
+	// dhcp: this agent answers proxyDHCP, so every PXE machine shows there first.
+	dhcp bool
 }
 
 // archName names a PXE client architecture (DiscoveredMachine.arch).
@@ -58,16 +62,48 @@ func archName(a pxe.Arch) string {
 	return "arch-" + strconv.Itoa(int(a)) // RFC 4578 / IANA number
 }
 
+var (
+	// What an unknown machine says is taken only in these shapes: anything else is dropped, so no
+	// client can grow the status report (review 2 MED).
+	canonicalUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	archShape     = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
+)
+
 // seen records a request from mac; it reports whether a status report should go out now (a new
-// machine, not within discoveryPush of the last push).
+// machine, not within discoveryPush of the last push). httpOnly: a sighting over HTTP (an iPXE
+// fetch), recorded only for a MAC DHCP already showed when dhcp is on (proxyDHCP runs here).
 func (d *discovery) seen(now time.Time, mac, uuid, arch, relay string) bool {
+	return d.sighting(now, mac, uuid, arch, relay, false)
+}
+
+func (d *discovery) sighting(now time.Time, mac, uuid, arch, relay string, httpOnly bool) bool {
+	hw, err := net.ParseMAC(mac)
+	if err != nil {
+		return false
+	}
+	mac = hw.String()
+	if uuid = strings.ToLower(uuid); !canonicalUUID.MatchString(uuid) {
+		uuid = ""
+	}
+	if arch = strings.ToLower(arch); !archShape.MatchString(arch) {
+		arch = ""
+	}
+	if ip := net.ParseIP(relay); ip != nil {
+		relay = ip.String()
+	} else {
+		relay = ""
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if httpOnly && d.dhcp {
+		if _, known := d.machines[mac]; !known {
+			return false
+		}
+	}
 	if d.machines == nil {
 		d.machines = map[string]*discoveredMachine{}
 	}
 	d.expire(now)
-	mac = strings.ToLower(mac)
 	m, known := d.machines[mac]
 	if !known {
 		if len(d.machines) >= discoveryCap {
@@ -79,7 +115,7 @@ func (d *discovery) seen(now time.Time, mac, uuid, arch, relay string) bool {
 	m.last = now
 	m.count++
 	if uuid != "" {
-		m.uuid = strings.ToLower(uuid)
+		m.uuid = uuid
 	}
 	if arch != "" {
 		m.arch = arch
@@ -139,8 +175,8 @@ func (d *discovery) list(now time.Time) []*agentv1.DiscoveredMachine {
 }
 
 // discovered records an unknown PXE machine and pushes a status report when it is new.
-func (a *Agent) discovered(mac, uuid, arch, relay string) {
-	if a.discovery.seen(a.serverNow(), mac, uuid, arch, relay) {
+func (a *Agent) discovered(mac, uuid, arch, relay string, httpOnly bool) {
+	if a.discovery.sighting(a.serverNow(), mac, uuid, arch, relay, httpOnly) {
 		a.log.Info("an unknown machine PXE-booted", "mac", mac, "uuid", uuid, "arch", arch)
 		a.triggerConverge()
 	}

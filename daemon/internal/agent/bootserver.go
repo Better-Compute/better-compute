@@ -69,7 +69,7 @@ func (a *Agent) pxeAnswer(cfg BootConfig, r pxe.Request) (pxe.Answer, bool) {
 		if r.Relay != nil {
 			relay = r.Relay.String()
 		}
-		a.discovered(r.MAC.String(), r.UUID, archName(r.Arch), relay)
+		a.discovered(r.MAC.String(), r.UUID, archName(r.Arch), relay, false)
 		return pxe.Answer{}, false
 	}
 	base := strings.TrimRight(cfg.URL, "/")
@@ -173,6 +173,13 @@ func (a *Agent) ServeBoot(ctx context.Context, cfg BootConfig) error {
 		return errors.New("boot: listen, kernel and initrd are required")
 	}
 	mux := a.BootHandler(cfg)
+	if len(cfg.ProxyDHCP) > 0 {
+		// Every PXE machine shows in DHCP first: an HTTP sighting of a MAC DHCP never showed is not
+		// taken (anyone can fetch a URL).
+		a.discovery.mu.Lock()
+		a.discovery.dhcp = true
+		a.discovery.mu.Unlock()
+	}
 	for _, addr := range cfg.ProxyDHCP {
 		conn, err := net.ListenPacket("udp4", addr)
 		if err != nil {
@@ -197,7 +204,9 @@ func (a *Agent) ServeBoot(ctx context.Context, cfg BootConfig) error {
 	if err != nil {
 		return err
 	}
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	// Machines send a request line and a few headers: 8 KiB bounds what an unknown client can make
+	// this agent hold (review 2 MED).
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, MaxHeaderBytes: 8 << 10}
 	go func() {
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -258,7 +267,7 @@ func (a *Agent) serveIPXE(w http.ResponseWriter, r *http.Request, cfg BootConfig
 			if b, p := q.Get("buildarch"), q.Get("platform"); b != "" {
 				arch = b + "-" + p // iPXE's ${buildarch}-${platform}: x86_64-efi, i386-pcbios, arm64-efi
 			}
-			a.discovered(mac, q.Get("uuid"), arch, "")
+			a.discovered(mac, q.Get("uuid"), arch, "", true)
 		}
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = fmt.Fprint(w, "#!ipxe\necho No boot is prepared for this machine.\nexit\n")
