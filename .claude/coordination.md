@@ -88,6 +88,21 @@ ex-6a20b8 (bcd), so bcd's areas are split below. Seams are in a760805 (proto, co
 | E. GPU backend (nvidia-smi based), Kubernetes node side: k8s-join unit inside A's framework, device plugin for BINDING_KUBERNETES (only bound devices), bcd.dev/* Node labels/taints, cordon/drain on release; live GPU samples as OTLP metrics | [6baab5] | `daemon/internal/nvml/**`, `daemon/internal/kube/**` |
 | F. proto/core seams, server nodespec wiring, PLAN, coordination, reviews | [595a2f] | proto, `packages/core`, `packages/server` |
 
+C was taken by [595a2f] (a21c1c1, c5a419c, 9d55b36). B is done; the details are in daemon/README "Devices" and "Instances". Commits:
+- a184ec2 placement;
+- 0dd122a host admission;
+- 46a61db, d02ba4f MIG/slot/kubernetes holds;
+- 1d03c28, 260e33c hold slices (helper slice.apply/remove);
+- be4de2a VFIO bind/release and no memory snapshots with GPUs;
+- b8a1801 bcx runtimes told tap names, rebind, host-only SSH and placement (stopped if their taps bypass the rules);
+- 539c4ce gpu.reset/diag.dcgm refuse GPUs in use by parts or VMs;
+- 0791fc9 NoCloud network-config v2 on the 387c22f seam;
+- 3e25c78 vps sandbox cloud-config installs the rebind guest half.
+
+Open:
+- Instance runtimes under `[helper]`: CH's systemd-run, taps and VFIO sysfs writes need root, so VPS/sandbox hosts run bcd as root for now.
+- The balloon is never set by the control plane yet.
+
 ## Round 4 allocation (proposed by [f85da7], 2026-09-24 late; all round-3 sessions are gone)
 
 Six "Feature building continuation" sessions started at once. If two proposals collide, this one stands (it was written

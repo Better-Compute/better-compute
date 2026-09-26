@@ -189,6 +189,7 @@ Files the daemon owns:
 | `/etc/systemd/system/bcd-rollback.service`, `bcd.service.d/50-bcd-rollback.conf` | written by the first update under systemd |
 | `/etc/cdi/bcd-<allocationId>.json` | CDI spec per GPU hold |
 | `/run/bcd/allocations/<allocationId>.env` | the hold's environment (`BCD_ALLOCATION_ID`, `BCD_RESERVATION_ID`, `NVIDIA_VISIBLE_DEVICES`, …) |
+| `bcd-alloc-<allocationId>.slice` | a hold's runtime slice when it has limits (`/sys/fs/cgroup/bcd.slice/bcd-alloc.slice/…`); under a fake root, `/run/bcd/slices/<name>.json` |
 | `/etc/ssh/sshd_config.d/10-better-compute.conf`, `/etc/ssh/bc_ca.pub`, `/etc/ssh/bc_principals/<account>`, `/etc/ssh/bc_krl` | break-glass SSH, written by the access converger |
 
 ## Behaviour
@@ -261,7 +262,8 @@ no tunnels.
 **Privilege separation** (`internal/helper`, `cmd/bcd/helper.go`). With `[helper]`, `bcd node` runs
 unprivileged and asks `bcd helper` (root) over a unix socket for: files named by kind and id
 (CDI specs, allocation env files, the SSH drop-in, CA, principals and KRL), reboots, resets of the
-host's own GPUs, bcd's nftables table, sshd reloads, and self-update (`update.*`: the node
+host's own GPUs, bcd's nftables table, sshd reloads, hold slices (`slice.apply`, `slice.remove`:
+only `bcd-alloc-*.slice`, emptied before removal), and self-update (`update.*`: the node
 downloads; the helper verifies the manifest with its own pins and floor, re-hashes the staged
 binary into root's slots, swaps, and swaps back on its own deadline). Peers are checked by
 SO_PEERCRED and `/proc/<pid>/exe`; requests are versioned, strictly decoded JSON; every operation
@@ -341,10 +343,48 @@ from 30 s to 10 min on failure. It is crash-safe:
 - Specs apply only at a higher generation. A patch must be based on the applied generation, and
   the stored spec is enforced while offline.
 
-**Devices** (`agent/devices.go`). The devices converger writes one CDI spec and one env file per
-`hold` binding of GPUs. It releases holds that are no longer desired and reports
-`allocation.bound`, `allocation.released` and `allocation.failed` as signed events. It never drops
-a hold on its own.
+**Devices** (`agent/devices.go`, `agent/holds.go`, `internal/slice`). The devices converger writes one
+CDI spec and one env file per `hold` or `kubernetes` binding. It releases holds that are no longer
+desired and reports `allocation.bound`, `allocation.released` and `allocation.failed` as signed
+events. It never drops a hold on its own.
+
+- It holds whole GPUs, MIG instances (`gpu.mig`, `<gpu>/gi<g>/ci<c>`, resolved to the MIG UUID from
+  inventory) and slots (`gpu.slot`, `<gpu>/s<k>`).
+- Conflicts are parent-aware. A GPU held whole excludes its parts, and a GPU a VM has passed
+  through excludes every hold on it.
+- A hold with `DeviceAssignment.limits` runs in its own systemd slice
+  `bcd.slice/bcd-alloc.slice/bcd-alloc-<id>.slice`:
+  - AllowedCPUs and AllowedMemoryNodes;
+  - CPUQuota from cpu_millis;
+  - MemoryMax, with MemoryHigh at 90% of it;
+  - hugetlb limits.
+- The slice is created before the CDI spec (`bcd.dev/cgroup-parent`, `BCD_CGROUP_PARENT`) and
+  restored when it is missing. It is removed on release only once it is empty.
+- Slots get `CUDA_MPS_PIPE_DIRECTORY` when the MPS daemon runs.
+- A `kubernetes` binding is marked `bcd.dev/binding` for the device plugin and has no
+  `NVIDIA_VISIBLE_DEVICES` of its own.
+
+**Instances** (`agent/instances.go`, `agent/admission.go`, `runtime/`).
+
+- *Admission.* bcd admits a start only when the host has memory for it:
+  - MemTotal minus the hugetlb pool and 1 GiB, less what running and paused domains hold (their
+    memory plus VMM overhead);
+  - free hugepages of the right size, per NUMA node for a placed instance.
+  
+  A refused start reports `ResourcesExhausted`, stays stopped and is tried again on the next pass.
+- *Placement* (`runtime/placement.go`). `InstanceSpec.placement` pins the vCPUs one to one when
+  `cpus` has exactly `vcpu` entries; with more entries the vCPUs float within them. Placement also
+  sets memory binding (`mems`, strict), hugepage backing (2 MiB or 1 GiB, locked) and the balloon,
+  which is off unless asked for and never allowed with hugepages.
+- *VFIO* (`runtime/vfio.go`). A GPU instance's IOMMU group is moved onto `vfio-pci` at start and
+  given back to its driver at stop and delete. GPU instances are never memory-snapshotted.
+- *NoCloud seed* (`runtime/netconfig.go`). It carries network-config v2 for leased NICs:
+  - each NIC is matched by MAC and gets its CIDR addresses;
+  - the gateway becomes the default route, and the NIC's nameservers are set;
+  - NICs without addresses keep DHCP.
+- *bcx runtimes* (`agent/pluginruntime.go`). A plugin runtime is told each NIC's tap name, the
+  guest's gateway and nameservers, the rebind ref, host-only SSH and placement. When bcd's tap rules
+  guard an instance and a running instance's taps are missing, the instance is stopped (fail closed).
 
 **Access** (`agent/access.go`). The access converger writes the sshd drop-in, CA, principals
 (`<account>@<nodeId>` only) and KRL. It reloads sshd only when the drop-in changed, and it removes
@@ -359,12 +399,12 @@ is the full list):
 | `inventory.refresh` | resends inventory sections, optionally re-collecting them |
 | `diag.nvml` | per-GPU health checks (ECC, row remapping, PCIe link, recent Xids) |
 | `logs.collect` | collects `journalctl` output, redacts it and uploads it to a presigned https URL |
-| `gpu.reset` | resets a GPU that has no live hold (destructive) |
+| `gpu.reset` | resets a GPU with no live hold on it or its MIG instances and slots, and no VM passthrough; otherwise `gpu-busy` (destructive) |
 | `node.reboot` | reboots; self-terminating, so it completes after the restart (destructive) |
 | `daemon.upgrade` | self-update; self-terminating, it completes after the new binary is welcomed |
 | `instance.snapshot` | snapshots a VPS instance and uploads it to a presigned https URL |
 | `driver.invoke` | one operation of a bcx plugin's driver (destructive) |
-| `disk.wipe`, `deploy.image`, `boot.kexec`, `diag.dcgm` | ramdisk kinds; images and boot files are written and read in userspace for ext and FAT |
+| `disk.wipe`, `deploy.image`, `boot.kexec`, `diag.dcgm` | ramdisk kinds; images and boot files are written and read in userspace for ext and FAT. `diag.dcgm` from level 2 refuses GPUs in use, as `gpu.reset` does |
 | `bmc.*`, `site.httpProxy`, `boot.*`, `site.proxyDhcp` | site agent kinds |
 
 Tunnels (`agent/tunnels.go`, at most 16) are session frames, not kinds. They open only for an exec
