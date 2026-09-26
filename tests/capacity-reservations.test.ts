@@ -2952,10 +2952,15 @@ describe('host CPU and memory booked with the GPUs (§3.8)', () => {
         WHERE id = $1`,
       [poolId],
     );
+    // A tenant the pool is only offered to cannot book into its owner's cluster (review 2, M5).
+    await expect(
+      call('reservations', 'create', create({ binding: 'kubernetes', idempotencyKey: 'key-k8s' })),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT', message: expect.stringContaining('owner') });
     const created = (await call(
       'reservations',
       'create',
-      create({ binding: 'kubernetes', idempotencyKey: 'key-k8s' }),
+      create({ tenantId: 'root', binding: 'kubernetes', idempotencyKey: 'key-k8s' }),
+      { who: { ...caller, tenantId: 'root', identityId: 'usr_root' } },
     )) as Rsv;
     expect(created.state).toBe('placed');
     expect((await storedRequest(created.id)).binding).toBe('kubernetes');

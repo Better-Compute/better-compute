@@ -863,6 +863,11 @@ export async function prepareCreate(
     fail(`Pool ${pool.id} does not lease whole nodes (policy.tenantRoot)`);
   if (input.binding === 'kubernetes' && !isKubernetesPool(pool))
     fail(`Pool ${pool.id} does not join a Kubernetes cluster (policy.kubernetes)`);
+  // The kubelet hands bound GPUs to any pod of the cluster that asks: the device plugin and DRA
+  // cannot tell tenants apart. So a pool's cluster is its owner's, and only the owner books GPUs
+  // into it (round-5 review 2, M5); tenants it is offered to use holds or instances.
+  if (input.binding === 'kubernetes' && pool.ownerTenantId !== input.tenantId)
+    fail(`Pool ${pool.id}'s Kubernetes cluster is its owner's: only the owner books binding kubernetes`);
   const id =
     existing?.id ?? (await draftId('rsv', input.tenantId, caller.identityId, input.idempotencyKey));
   // A retried draft keeps what it resolved the first time (its share may have moved since).
