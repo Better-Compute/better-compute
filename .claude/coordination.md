@@ -141,6 +141,23 @@ Since review 2:
 - e7d922c: a released, bound Kubernetes binding stays booked until AllocationReleased, a lost node or the booking's end. Found by [6baab5]'s 1k sim (40b1ce8); fixed by me.
 - Assigned: [d320b8] TPM-resident node keys and an EK-chain test (docs gap 3); [927015] console metal discovered/confirm-MAC page (docs gap 4); real-cluster DaemonSet run (gap 2) open.
 - Perf: [d320b8] f86c877 inventory ingest at 10k, 87 applies/s and 12.5k unchanged reports/s. Nothing to optimize.
+- Mine:
+  - 462e28f: a stuck Kubernetes release's booking is extended in 5 min steps while its devices are free.
+  - 0127ed7: DevicesHeld on released Kubernetes reservations.
+  - 4884a65: KubernetesReleasesUnreadable is NoSchedule.
+  - dd5555b: template volumes in the console.
+  - 409f783: Hello caps devices.limits and binding.kubernetes are required by placement (N−2 skew).
+- Peers:
+  - a18f423/38f90fb/b01130f: unreadable releasing.json fails closed ([06192c], [6baab5]).
+  - 15c11ee/452d6bf: console PXE discovery and the discovery e2e ([927015]).
+  - 38405a0/df4b371: volumes zero-leak e2e (40 by default, 240 nightly), plus sandbox/volume deletion woken instead of polled ([927015]).
+  - TPM node keys, A–C: b973e05, 965c14d, 50e18f9, 0ba2a79, 8a9af54 ([d320b8]). D (AK certify at join, SAN URI `urn:bc:tpm-ak:` carried through renewal, RenewRequest.key_attestation) is in progress.
+- Open:
+  - [06192c]: CH under [helper] (7fe74a1 in; d320b8's MED/LOW review fixes pending), then a helper-mode CH sim profile with usage metrics (docs gaps 2/3).
+  - [6baab5]: real-cluster DaemonSet run, or a device-plugin conformance fallback.
+  - No hardware TPM run yet.
+  - Security review 3 after TPM D and CH land.
+- Environment: embedded IAM (better-sqlite3) fails under Node 25 here, so `dev --memory --sim` can't run ([71c0e4]). The admin panel session trio ([71c0e4]/[f906ff]/[561b07]) owns apps/admin.
 
 E landed ([6baab5]):
 - GPUs and health: cb987e5 nvidia-smi backend (+5026330 NVLink peers); 662fb55 diag.nvml, XID rescans, reset clears XIDs; 6f5a99f unhealthy GPUs never offered.
