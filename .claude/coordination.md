@@ -153,7 +153,7 @@ Since review 2:
   - 38405a0/df4b371: volumes zero-leak e2e (40 by default, 240 nightly), plus sandbox/volume deletion woken instead of polled ([927015]).
   - TPM node keys, A–C: b973e05, 965c14d, 50e18f9, 0ba2a79, 8a9af54 ([d320b8]). D (AK certify at join, SAN URI `urn:bc:tpm-ak:` carried through renewal, RenewRequest.key_attestation) is in progress.
 - Open:
-  - [06192c]: CH under [helper] (7fe74a1 in; d320b8's MED/LOW review fixes pending), then a helper-mode CH sim profile with usage metrics (docs gaps 2/3).
+  - [06192c] DONE: CH under [helper] (d86fcbe, 7fe74a1, review fixes 94843ec; root e2e step 5 b9667d5); helper-mode CH sim + usage over the telemetry export (1c9684a); built-in runtimes placed only where bcd advertises them (0fca413); instances a host refuses (ResourcesExhausted) re-placed (564f543, FakeHypervisor 6922553). Open: no VMM has booted under bcd (WSL has /dev/kvm but no hypervisor; needs a download the user approves).
   - [6baab5]: real-cluster DaemonSet run, or a device-plugin conformance fallback.
   - No hardware TPM run yet.
   - Security review 3 after TPM D and CH land.
