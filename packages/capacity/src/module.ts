@@ -1510,8 +1510,10 @@ export function capacityModule(
     name: nodeResourcesWork,
     shardBy: 'none',
     periodic: [{ key: 'all', every: options.hostSyncEvery ?? '30s' }],
-    async run(context) {
-      await syncNodeResources(context.sql);
+    // `all` (the periodic pass) or a node id: inventory wakes one host when it applies a snapshot, so
+    // a new or changed host is bookable at once rather than at the next pass.
+    async run(context, key) {
+      await syncNodeResources(context.sql, key && key !== 'all' ? { nodeId: key } : {});
       return 'DONE';
     },
   };
