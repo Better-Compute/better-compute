@@ -225,8 +225,13 @@ func (s *Server) saveDomain(ctx context.Context, policy LibvirtPolicy, req *Libv
 	return dst.Close()
 }
 
-// restoreDomain restores a memory state the node holds, with a checked definition when it gives one.
+// restoreDomain restores a memory state the node holds, always under a definition the helper checked:
+// a state file embeds the domain's definition, written by the node, and `virsh restore` without
+// --xml would start whatever it says (disks, PCI devices, qemu arguments) as root (review 2 HIGH).
 func (s *Server) restoreDomain(ctx context.Context, policy LibvirtPolicy, req *LibvirtRequest) error {
+	if len(req.XML) == 0 {
+		return errors.New("restore: needs the domain's definition (--xml): the one a state file embeds is the node's, unchecked")
+	}
 	if _, _, err := stateFile(policy.StateDirs, req.File); err != nil {
 		return err
 	}
@@ -239,10 +244,6 @@ func (s *Server) restoreDomain(ctx context.Context, policy LibvirtPolicy, req *L
 	paused := []string{}
 	if req.Paused {
 		paused = append(paused, "--paused")
-	}
-	if len(req.XML) == 0 {
-		_, err := s.Virsh(ctx, append([]string{"restore", req.File}, paused...)...)
-		return err
 	}
 	name, err := ValidateDomainXML(req.XML, policy.Domain)
 	if err != nil {

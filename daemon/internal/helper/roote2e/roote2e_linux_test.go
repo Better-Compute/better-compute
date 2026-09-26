@@ -277,8 +277,15 @@ esac
 	if fi, err := os.Stat(state); err != nil || fi.Sys().(*syscall.Stat_t).Uid != uid {
 		t.Fatalf("saved state: %v", err)
 	}
+	// restore: only under a definition the helper checked, never the one the node's state file embeds.
+	expect("restore without a definition", libvirt("restore", helper.LibvirtRequest{Domain: instance, File: state}), "needs the domain's definition")
+	expect("restore", libvirt("restore", helper.LibvirtRequest{Domain: instance, File: state, XML: []byte(good)}), "ok")
 	virshLog, _ := os.ReadFile(filepath.Join(logs, "virsh"))
-	for _, want := range []string{"define /var/lib/bcd-hostconfig/libvirt/domain-", "start " + instance, "save " + instance + " /var/lib/bcd-hostconfig/libvirt/"} {
+	if strings.Contains(string(virshLog), "restore "+state+"\n") {
+		t.Fatalf("virsh restored without --xml:\n%s", virshLog)
+	}
+	for _, want := range []string{"define /var/lib/bcd-hostconfig/libvirt/domain-", "start " + instance, "save " + instance + " /var/lib/bcd-hostconfig/libvirt/",
+		"restore " + state + " --xml /var/lib/bcd-hostconfig/libvirt/domain-"} {
 		if !strings.Contains(string(virshLog), want) {
 			t.Fatalf("virsh calls lack %q:\n%s", want, virshLog)
 		}

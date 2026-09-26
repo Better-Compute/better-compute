@@ -128,7 +128,17 @@ func TestHelperLibvirt(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(outside, "memory.state")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("root wrote through the symlink")
 	}
-	// restore: the definition must be checked and name the same domain.
+	// restore: the definition must be given, checked, and name the same domain. Without one, virsh
+	// would start the definition the node-written state file embeds.
+	calls := len(fake.calls)
+	if err := op("restore", LibvirtRequest{Domain: "inst_01k5w0000000000000000000ab", File: filepath.Join(state, "memory.state")}); err == nil || !strings.Contains(err.Error(), "needs the domain's definition") {
+		t.Fatalf("a restore without a definition: %v", err)
+	}
+	for _, c := range fake.calls[calls:] {
+		if strings.HasPrefix(c, "restore") {
+			t.Fatalf("virsh restore ran for a refused restore: %v", fake.calls[calls:])
+		}
+	}
 	if err := op("restore", LibvirtRequest{Domain: "inst_01k5w0000000000000000000zz", File: filepath.Join(state, "memory.state"), XML: []byte(goodDomain)}); err == nil {
 		t.Fatal("a restore under another domain's definition was taken")
 	}
