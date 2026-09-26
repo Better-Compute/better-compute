@@ -273,8 +273,9 @@ export function createHttp({ options, registry, operations }: HttpHost) {
       const headers = new Headers(request.headers);
       headers.set('x-request-id', requestId);
       const traceparent = traceparentOf(request.headers);
-      // The caller's address as the host verified it, never a forwarding header the client sent.
-      const peer = info?.peer?.address;
+      // The caller's address as the host verified it: the peer, or behind a trusted proxy the hop it
+      // reported (`trustedProxies`); never a forwarding header an untrusted peer sent.
+      const peer = options.sourceAddress(info?.peer?.address, request.headers);
       const data = await operations.call(method, { headers, ...(peer ? { sourceIp: peer } : {}) }, body, {
         requestId,
         signal: request.signal,
@@ -328,7 +329,7 @@ export function createHttp({ options, registry, operations }: HttpHost) {
         }
         body = new Uint8Array(Buffer.concat(chunks));
       }
-      // The socket peer is the verified caller address (no proxy is trusted here).
+      // The socket peer; the handler resolves trusted proxies (`trustedProxies`) from it.
       const address = req.socket?.remoteAddress;
       await send(
         res,

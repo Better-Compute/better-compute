@@ -29,6 +29,7 @@ import type { CapacityModuleOptions } from '@better-compute/capacity';
 import { localSealedSecretStore, type CommandSigningAuthority } from '@better-compute/pki';
 import type { DownloadsOptions } from './downloads.js';
 import { guardIamPort, type IamGuardMode } from './iam-guard.js';
+import { sourceAddressResolver, type SourceAddressResolver } from './proxy.js';
 import { pkiAllocationBindingCheck } from './join/allocation-binding.js';
 import type { JoinCrypto, JoinTrustBundle } from './join/crypto.js';
 import { createCommandSigner, type CommandSigner } from './runtime/command-signing.js';
@@ -244,6 +245,13 @@ export interface ComputeOptions<
   clock?: Clock;
   /** Accept the IAM session cookie on same-origin requests (a console on one origin); default false. */
   acceptIamCookie?: boolean;
+  /**
+   * Load balancers or reverse proxies in front of the server (addresses or CIDR ranges). When the
+   * socket peer is one of them, the caller's address (`request.sourceIp` for IAM) is read from
+   * X-Forwarded-For, right to left, skipping these proxies; otherwise the peer is the caller and
+   * forwarding headers are ignored. Default: none trusted.
+   */
+  trustedProxies?: string[];
   /** Where modules and the server log (`ModuleContext.log`); default: warnings and errors as JSON on stderr. */
   log?: Logger;
   /** IAM jobs the `iam` worker role runs under singleton leases (compute is the IAM host family). */
@@ -270,6 +278,8 @@ export interface ResolvedOptions {
   origin: string;
   basePath: string;
   acceptIamCookie: boolean;
+  /** The caller's address from the socket peer and, behind `trustedProxies`, X-Forwarded-For. */
+  sourceAddress: SourceAddressResolver;
   clock: Clock;
   log: Logger;
   notifier?: Notifier;
@@ -373,6 +383,9 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
 
   if (options.acceptIamCookie !== undefined && typeof options.acceptIamCookie !== 'boolean')
     throw invalid('acceptIamCookie must be a boolean');
+  if (options.trustedProxies !== undefined && !Array.isArray(options.trustedProxies))
+    throw invalid('trustedProxies must be an array of addresses or CIDR ranges');
+  const sourceAddress = sourceAddressResolver(options.trustedProxies ?? []);
   if (options.clock !== undefined) requireMethods(options.clock, 'clock', ['now']);
   if (options.log !== undefined)
     requireMethods(options.log, 'log', ['debug', 'info', 'warn', 'error']);
@@ -492,6 +505,7 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
     origin: baseURL.origin,
     basePath,
     acceptIamCookie: options.acceptIamCookie ?? false,
+    sourceAddress,
     clock,
     log,
     ...(options.notifier ? { notifier: options.notifier } : {}),

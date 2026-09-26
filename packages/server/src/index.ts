@@ -181,8 +181,9 @@ export interface BetterCompute<
   api: ComputeApi<M, P>;
   /**
    * The fetch transport: `app.all('/api/compute/*', (c) => compute.handler(c.req.raw))`. Pass
-   * `{ peer: { address } }` from the socket (or a trusted proxy's hop) so remote IAM sees the caller's
-   * address for `request.sourceIp` conditions; client forwarding headers are never trusted for it.
+   * `{ peer: { address } }` from the socket so remote IAM sees the caller's address for
+   * `request.sourceIp` conditions; X-Forwarded-For counts only when that peer is one of
+   * `trustedProxies`.
    */
   handler(request: Request, info?: HandlerInfo): Promise<Response>;
   /** The Node.js transport: `createServer(compute.nodeHandler)`. */
