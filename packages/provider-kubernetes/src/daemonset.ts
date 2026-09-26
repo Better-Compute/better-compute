@@ -178,6 +178,12 @@ export const gpuIsolationRequirements =
   'Pod Security baseline or restricted (no hostPath: /var/lib/bcd holds the node key). Revoke the join token and delete its Secret ' +
   'once every node has joined.';
 
+/**
+ * Where the NVIDIA container toolkit keeps its config.toml: the distribution packages', and the GPU
+ * operator's. bcd reads either (9f860ad) to refuse a toolkit that hands GPUs out by environment variable.
+ */
+export const nvidiaToolkitConfigDirs = ['/etc/nvidia-container-runtime', '/usr/local/nvidia/toolkit/.config/nvidia-container-runtime'] as const;
+
 const dataDir = '/var/lib/bcd';
 const configPath = '/etc/bcd/config.toml';
 const tokenDir = '/etc/bcd/token';
@@ -351,6 +357,9 @@ export function bcdDaemonSetManifests(options: BcdDaemonSetOptions): KubernetesO
                 mount('kubernetes', '/etc/kubernetes', true),
                 mount('cdi-etc', '/etc/cdi'),
                 mount('cdi-run', '/var/run/cdi'),
+                // Read only, so bcd can see a permissive NVIDIA container toolkit (README "GPU isolation").
+                mount('nvidia-runtime-etc', nvidiaToolkitConfigDirs[0], true),
+                mount('nvidia-runtime-operator', nvidiaToolkitConfigDirs[1], true),
               ],
             },
           ],
@@ -366,6 +375,8 @@ export function bcdDaemonSetManifests(options: BcdDaemonSetOptions): KubernetesO
             hostPath('kubernetes', '/etc/kubernetes', 'Directory'),
             hostPath('cdi-etc', '/etc/cdi', 'DirectoryOrCreate'),
             hostPath('cdi-run', '/var/run/cdi', 'DirectoryOrCreate'),
+            hostPath('nvidia-runtime-etc', nvidiaToolkitConfigDirs[0], 'DirectoryOrCreate'),
+            hostPath('nvidia-runtime-operator', nvidiaToolkitConfigDirs[1], 'DirectoryOrCreate'),
           ],
         },
       },

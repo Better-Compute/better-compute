@@ -64,6 +64,9 @@ describe('bcd as a Kubernetes DaemonSet', () => {
     expect(bcd.volumeMounts.find((m: { name: string }) => m.name === 'kubernetes')).toMatchObject({ mountPath: '/etc/kubernetes', readOnly: true });
     expect(bcd.volumeMounts.find((m: { name: string }) => m.name === 'kubelet')).toMatchObject({ mountPath: '/var/lib/kubelet' });
     expect(pod.tolerations).toEqual([{ operator: 'Exists' }]);
+    // The NVIDIA toolkit's configs, read only, for bcd's GPU isolation check.
+    for (const path of ['/etc/nvidia-container-runtime', '/usr/local/nvidia/toolkit/.config/nvidia-container-runtime'])
+      expect(bcd.volumeMounts.find((m: { mountPath: string }) => m.mountPath === path)).toMatchObject({ readOnly: true });
     expect(pod.priorityClassName).toBe('system-node-critical');
   });
 
