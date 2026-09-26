@@ -407,6 +407,9 @@ func (l *Libvirt) List(ctx context.Context) ([]Domain, error) {
 				m := x.Metadata.Instance
 				d.Managed, d.AllocationID, d.Image, d.RestoredFrom = true, m.Allocation, m.Image, m.Restored
 				d.VCPU, d.MemoryBytes = x.VCPU.Value, x.Memory.Value*1024
+				if x.MemoryBacking != nil {
+					d.HugepageSize = x.MemoryBacking.Hugepages.Page.Size * 1024
+				}
 				if m.Addresses != "" {
 					d.Addresses = strings.Split(m.Addresses, ",")
 				}

@@ -61,6 +61,15 @@ type Domain struct {
 	Snapshots int `json:"snapshots,omitempty"`
 	// Principals are the sshd principals a rebind gave its guest (the fake's).
 	Principals string `json:"principals,omitempty"`
+	// HugepageSize: its memory is backed by hugepages of this size (placement, PLAN.md §3.8); 0:
+	// normal pages. Host admission counts it against the hugepage pool, not the host's memory.
+	HugepageSize uint64 `json:"hugepageSize,omitempty"`
+}
+
+// SelfAdmitting is a runtime that checks host capacity itself (the fake, against its own limits),
+// so bcd's host-side admission leaves it alone.
+type SelfAdmitting interface {
+	AdmitsItself() bool
 }
 
 // fakeSnapshot is the fake runtime's snapshot format.
@@ -122,6 +131,9 @@ type fakeState struct {
 }
 
 func (f *Fake) Name() string { return f.RuntimeName }
+
+// AdmitsItself: the fake's domains are bounded by its own VCPU and MemoryBytes, not the host's.
+func (f *Fake) AdmitsItself() bool { return true }
 
 func (f *Fake) load() (*fakeState, error) {
 	st := &fakeState{BootID: f.BootID, Domains: map[string]Domain{}}

@@ -217,6 +217,10 @@ func (c *CloudHypervisor) List(ctx context.Context) ([]Domain, error) {
 			RestoredFrom: r.RestoredFrom, Addresses: r.Addresses, MACs: r.MACs, GPUs: r.GPUs,
 			VCPU: r.VCPU, MemoryBytes: r.MemoryBytes, DiskBytes: r.DiskBytes,
 		}
+		// A restored instance runs on normal pages (its saved config keeps none).
+		if r.Placement != nil && r.RestoredFrom == "" {
+			d.HugepageSize = r.Placement.HugepageSize
+		}
 		d.State, d.Message = c.state(ctx, r.ID)
 		out = append(out, d)
 	}

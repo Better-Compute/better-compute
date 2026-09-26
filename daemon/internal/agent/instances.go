@@ -32,6 +32,9 @@ type instancesConverger struct {
 	// specs and specErrors are the last pass's instances and those that failed.
 	specs      []*agentv1.InstanceSpec
 	specErrors map[string]string
+	// exhausted: the last pass's starts host-side admission refused (admission.go); they stay
+	// stopped, with the reason as their message, and are tried again.
+	exhausted map[string]string
 	// firewall is the network-policy ruleset last loaded (netpolicy.go); "" before the first pass.
 	firewall string
 	// stale: the loaded table went missing (an external flush); the next pass loads it again.
@@ -152,6 +155,9 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 	// first frame.
 	unenforceable := c.enforceNetworkPolicies(ctx, section.GetInstances())
 	var waiting []string
+	// Host-side admission (admission.go): read once per pass, then charged start by start.
+	var hostMem *hostMemory
+	exhausted := map[string]string{}
 	for _, spec := range section.GetInstances() {
 		id := spec.GetInstanceId()
 		existing, exists := domains[id]
@@ -224,6 +230,28 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 			specErrors[id] = err.Error()
 			continue
 		}
+		if starts(spec, existing, exists) {
+			if self, ok := r.(runtime.SelfAdmitting); !ok || !self.AdmitsItself() {
+				if hostMem == nil {
+					probed, err := probeHostMemory(domains)
+					if err != nil {
+						c.a.log.Warn("host memory unreadable; starting without host-side admission", "err", err)
+						probed = nil
+					}
+					hostMem = probed
+				}
+				if hostMem != nil {
+					if err := hostMem.admit(spec); err != nil {
+						if strings.HasPrefix(err.Error(), ResourcesExhausted) {
+							exhausted[id] = err.Error()
+						} else {
+							specErrors[id] = err.Error()
+						}
+						continue
+					}
+				}
+			}
+		}
 		if err := r.SetState(ctx, id, wantedState(spec.GetDesiredState())); err != nil {
 			specErrors[id] = err.Error()
 			continue
@@ -235,6 +263,7 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 	}
 	c.a.pruneRebinds(section.GetInstances())
 	c.specErrors = specErrors
+	c.exhausted = exhausted
 	keep := map[string]bool{}
 	for _, spec := range section.GetInstances() {
 		if d := spec.GetRestoreFrom().GetSha256(); len(d) == 32 && spec.GetDesiredState() != agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED {
@@ -244,6 +273,15 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 	c.a.collectSnapshots(keep)
 	if len(waiting) > 0 {
 		return fmt.Errorf("waiting for the user data or snapshot of %s", strings.Join(waiting, ", "))
+	}
+	if len(exhausted) > 0 && len(specErrors) == 0 {
+		// Not terminal: memory may free up (another instance stops); the next pass tries again.
+		ids := make([]string, 0, len(exhausted))
+		for id := range exhausted {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		return fmt.Errorf("%s: this host cannot start %s now", ResourcesExhausted, strings.Join(ids, ", "))
 	}
 	if len(specErrors) > 0 {
 		var msgs []string
@@ -258,6 +296,17 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 		return converge.Terminal(errors.New(msg))
 	}
 	return nil
+}
+
+// starts reports whether applying spec starts a domain that is not running (a resume from paused is
+// not a start: its memory is already the host's).
+func starts(spec *agentv1.InstanceSpec, existing runtime.Domain, exists bool) bool {
+	switch spec.GetDesiredState() {
+	case agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING, agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_PAUSED:
+	default:
+		return false
+	}
+	return !exists || (existing.State != runtime.StateRunning && existing.State != runtime.StatePaused)
 }
 
 // report lists the runtimes' domains, plus specs that failed before a domain existed.
@@ -287,6 +336,9 @@ func (c *instancesConverger) report(ctx context.Context, specErrors map[string]s
 			}
 			if msg, failed := specErrors[d.ID]; failed && d.Managed {
 				st.State, st.Message = agentv1.InstanceObservedState_INSTANCE_OBSERVED_STATE_ERROR, msg
+			} else if msg, waits := c.exhausted[d.ID]; waits && d.Managed {
+				// Not an error: it stays stopped until the host can give it its memory.
+				st.Message = msg
 			}
 			out = append(out, st)
 		}
