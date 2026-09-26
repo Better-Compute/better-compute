@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { fleetAttention } from '@/components/fleet/attention';
+import { watchBatch, watchNode, watchRollout, watchSandbox } from '@/components/fleet/watch';
 import { applyActions, fleetActions, storeState } from '@/components/fleet/store';
 import { gpuHolders } from '@/lib/data/capacity';
 import { eventsBetween, rolloutNodeStates, scopeFleet, simulateFleet, type NodeInfo } from '@/lib/data/fleet';
@@ -155,5 +156,35 @@ describe('fleetAttention', () => {
 
   it('shows nothing in live mode until the poller has an answer', () => {
     expect(fleetAttention(T0, {}, { source: 'live' })).toEqual([]);
+  });
+});
+
+describe('watch describers', () => {
+  const snapshot = simulateFleet(T0);
+  const sim = { source: 'simulated' as const };
+
+  it('describes nodes by health', () => {
+    const offline = snapshot.nodes.find((node) => node.health === 'offline')!;
+    expect(watchNode(offline.id, T0, sim)!.status).toBe('crit');
+    const ready = snapshot.nodes.find((node) => node.health === 'ready' && !node.cordoned && !node.conditions.some((c) => c.status === 'true' && c.type !== 'DaemonOutdated' && c.type !== 'RebootRequired' && c.type !== 'CertExpiring'))!;
+    const state = watchNode(ready.id, T0, sim)!;
+    expect(state.status).toBe('ok');
+    expect(state.summary).toMatch(/^ready/);
+    expect(state.href).toBe(`/nodes/${ready.id}`);
+    expect(watchNode('n-nowhere-000', T0, sim)).toBeNull();
+  });
+
+  it('describes sandboxes, rollouts and batches', () => {
+    expect(watchSandbox('sbx_gone', T0, sim)!.status).toBe('off');
+    const live = snapshot.sandboxes.find((sandbox) => sandbox.state === 'ready' && sandbox.expiresAt - T0 > 10 * 60_000)!;
+    expect(watchSandbox(live.id, T0, sim)!.status).toBe('live');
+    const running = snapshot.rollouts.find((rollout) => rollout.state === 'running' || rollout.state === 'paused')!;
+    expect(watchRollout(running.id, T0, sim)!.summary).toContain(`wave ${running.wave + 1}/`);
+    const pending = snapshot.batches.find((batch) => batch.state === 'pending')!;
+    expect(watchBatch(pending.batchId, T0, sim)!.status).toBe('pending');
+  });
+
+  it('returns nothing in live mode before the poller has answered', () => {
+    expect(watchNode(snapshot.nodes[0]!.id, T0, { source: 'live' })).toBeNull();
   });
 });

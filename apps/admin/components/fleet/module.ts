@@ -18,6 +18,7 @@ import {
 } from 'react-icons/ri';
 import type { AdminModule } from '@/lib/modules';
 import { fleetAttention } from './attention';
+import { watchBatch, watchNode, watchRollout, watchSandbox } from './watch';
 import { NodePeek, SandboxPeek, searchFleet } from './peeks';
 import { BatchesStatus, NodesStatus, RolloutStatus } from './status';
 import { BatchesWidget, GpuWallWidget, HealthWidget, RolloutWidget, SandboxesWidget, UnhealthyWidget, poolKindOptions } from './widgets';
@@ -176,6 +177,7 @@ export const fleetModule: AdminModule = {
   ],
   search: searchFleet,
   attention: fleetAttention,
+  watch: { node: watchNode, sandbox: watchSandbox, rollout: watchRollout, commandBatch: watchBatch },
   peeks: {
     node: { title: (id) => id.replace(/^n-/, ''), href: (id) => `/nodes/${id}`, icon: RiServerLine, component: NodePeek },
     sandbox: { title: (id) => id, href: (id) => `/sandboxes?sandbox=${id}`, icon: RiBox3Line, component: SandboxPeek },
