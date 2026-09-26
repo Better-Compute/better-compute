@@ -5,4 +5,5 @@ export * from './topology';
 export * from './platform';
 // ── domain sources (one line each) ──
 export * from './fleet';
+export * from './fleet-health';
 export * from './capacity';

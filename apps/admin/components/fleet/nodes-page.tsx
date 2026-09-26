@@ -15,7 +15,9 @@ import {
   RiStackLine,
   RiTableLine,
 } from 'react-icons/ri';
+import { usePageCommands } from '@/components/shell/page-commands';
 import { useWorkspace } from '@/components/shell/workspace';
+import type { CommandDef } from '@/lib/modules';
 import { StackedBar } from '@/components/ui/charts';
 import { DataTable, type Column } from '@/components/ui/data-table';
 import { Drawer } from '@/components/ui/overlay';
@@ -27,9 +29,9 @@ import { poolById } from '@/lib/data/topology';
 import { cx } from '@/utils/cx';
 import { PRESETS, activeFilterCount, countBy, matches, readFilters, writeFilters, type NodeFilters, type PresetId } from './filters';
 import { NodeDetail } from './node-detail';
+import { useFleetCommands } from './commands';
 import { RackView } from './rack-view';
-import { fleetActions } from './store';
-import { ActionButton, ConditionSummary, CountChip, FacetMenu, GpuCells, NodeStatusTag, UtilBar, nodeStatus, useConfirm } from './ui';
+import { ActionButton, ConditionSummary, CountChip, FacetMenu, GpuCells, NodeStatusTag, UtilBar, nodeStatus } from './ui';
 import { useFleet } from './use-fleet';
 
 type View = 'table' | 'racks';
@@ -45,7 +47,7 @@ export function NodesPage() {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
-  const [confirm, ask] = useConfirm();
+  const commands = useFleetCommands();
 
   const filters = useMemo(() => readFilters(new URLSearchParams(params.toString())), [params]);
   const view: View = params.get('view') === 'racks' ? 'racks' : 'table';
@@ -89,69 +91,40 @@ export function NodesPage() {
     };
   }, [nodes]);
 
-  const bulk = (selected: FleetNode[], clear: () => void) => {
-    const ids = selected.map((node) => node.id);
-    const names = selected.length === 1 ? selected[0]!.hostname : `${selected.length} nodes`;
-    const booked = selected.reduce((sum, node) => sum + node.gpus.filter((gpu) => gpu.allocation).length, 0);
-    return (
-      <>
-        <ActionButton
-          icon={RiLockLine}
-          onPress={() =>
-            ask({
-              title: `Cordon ${names}?`,
-              body: 'New work stops landing on them. Running work keeps running.',
-              method: `nodes.cordon × ${ids.length}`,
-              confirmLabel: 'Cordon',
-              reason: true,
-              onConfirm: (reason) => {
-                fleetActions.cordon(ids, now, reason || undefined);
-                clear();
-              },
-            })
-          }
-        >
-          Cordon
-        </ActionButton>
-        <ActionButton icon={RiLockUnlockLine} onPress={() => (fleetActions.uncordon(ids, now), clear())}>
-          Uncordon
-        </ActionButton>
-        <ActionButton
-          icon={RiHandHeartLine}
-          onPress={() =>
-            ask({
-              title: `Drain ${names}?`,
-              body: `Cordons them and moves work off: ${booked} booked GPUs are rescheduled or released under their reservations' policies.`,
-              method: `nodes.drain × ${ids.length}`,
-              confirmLabel: 'Drain',
-              danger: selected.length > 8,
-              reason: true,
-              ...(selected.length > 8 ? { typeToConfirm: `drain ${selected.length}` } : {}),
-              onConfirm: (reason) => {
-                fleetActions.drain(ids, now, reason || undefined);
-                clear();
-              },
-            })
-          }
-        >
-          Drain
-        </ActionButton>
-        <ActionButton
-          icon={RiPriceTag3Line}
-          onPress={() => {
-            const input = window.prompt('Label to set on the selected nodes (key=value)');
-            const match = input && /^([A-Za-z0-9][A-Za-z0-9._/-]*)=(.*)$/.exec(input.trim());
-            if (match && !match[1]!.startsWith('bc.dev/')) {
-              fleetActions.label(ids, { [match[1]!]: match[2]! }, [], now);
-              clear();
-            }
-          }}
-        >
-          Label…
-        </ActionButton>
-      </>
-    );
-  };
+  const bulk = (selected: FleetNode[], clear: () => void) => (
+    <>
+      <ActionButton icon={RiLockLine} onPress={() => commands.cordon(selected)}>
+        Cordon
+      </ActionButton>
+      <ActionButton icon={RiLockUnlockLine} onPress={() => (commands.uncordon(selected), clear())}>
+        Uncordon
+      </ActionButton>
+      <ActionButton icon={RiHandHeartLine} onPress={() => commands.drain(selected)}>
+        Drain
+      </ActionButton>
+      <ActionButton icon={RiPriceTag3Line} onPress={() => commands.labelPrompt(selected)}>
+        Label…
+      </ActionButton>
+    </>
+  );
+
+  usePageCommands(
+    useMemo<CommandDef[]>(
+      () => [
+        ...(open
+          ? [
+              { id: 'node.cordon', label: `${open.cordoned ? 'Uncordon' : 'Cordon'} ${open.hostname}`, group: 'This page', icon: open.cordoned ? RiLockUnlockLine : RiLockLine, run: () => (open.cordoned ? commands.uncordon([open]) : commands.cordon([open])) },
+              { id: 'node.drain', label: `Drain ${open.hostname}`, group: 'This page', icon: RiHandHeartLine, run: () => commands.drain([open]) },
+              { id: 'node.label', label: `Label ${open.hostname}…`, group: 'This page', icon: RiPriceTag3Line, run: () => commands.labelPrompt([open]) },
+            ]
+          : []),
+        { id: 'nodes.view', label: view === 'racks' ? 'Show the node table' : 'Show rack elevations', group: 'This page', icon: view === 'racks' ? RiTableLine : RiLayoutColumnLine, run: () => navigate((next) => (view === 'racks' ? next.delete('view') : next.set('view', 'racks'))) },
+        ...(Object.keys(PRESETS) as PresetId[]).map((id) => ({ id: `nodes.preset.${id}`, label: `View: ${PRESETS[id].label}`, group: 'This page', icon: RiFilter3Line, run: () => setFilters({ preset: id }) })),
+      ],
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      [open?.id, open?.cordoned, view, commands, params],
+    ),
+  );
 
   const columns: Column<FleetNode>[] = [
     {
@@ -203,7 +176,6 @@ export function NodesPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      {confirm}
       <PageHeader
         title="Nodes"
         icon={RiServerLine}

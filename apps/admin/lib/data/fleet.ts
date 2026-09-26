@@ -17,7 +17,9 @@
  */
 
 import { DAY, HOUR, MINUTE, drift, hash, noise, rng } from './core';
-import { nodeStates, poolPulse, type Severity } from './platform';
+import { gpuHolders } from './capacity';
+import { nodeHealth, type NodeHealth } from './fleet-health';
+import { poolPulse, type Severity } from './platform';
 import { poolNodeId, poolNodePlacement, pools as topologyPools, sites as topologySites, tenants, type Pool, type Site } from './topology';
 
 // --- API shapes (mirrors of packages/*; keep in step) ------------------------------------------------
@@ -416,7 +418,6 @@ export interface FleetGpu extends Device {
   telemetry?: GpuTelemetry;
 }
 
-export type NodeHealth = 'ready' | 'degraded' | 'offline' | 'provisioning';
 
 export interface FleetNode extends NodeDetail {
   hostname: string;
@@ -812,44 +813,37 @@ function applyOverlay(structure: Structure, now: number): FleetNode[] {
     }
 
   const t = now / (20 * 1000); // telemetry steps every 20 s
+  const holders = gpuHolders(now);
   for (const pool of topologyPools) {
     const pulse = poolPulse(pool, now);
     const members = structure.nodes.filter((node) => node.poolId === pool.id);
     const faultBucket = Math.floor(now / (20 * MINUTE));
-    // The same nodes the Overview's fleet wall marks: platform.ts nodeStates() picks which ones are offline,
-    // provisioning or degraded for poolPulse's counts.
-    const states = nodeStates(pulse, now);
-    const pick = (state: string) => new Set(states.filter((entry) => entry.state === state).map((entry) => entry.id));
-    const offline = pick('offline');
-    const provisioning = pick('provisioning');
-    const degraded = pick('degraded');
+    // One health decision per node, shared with capacity and the Overview (fleet-health.ts).
+    const info = new Map(members.map((node) => [node.id, nodeHealth(node.id, now, node.unit)!]));
     const site = topologySites.find((each) => each.id === pool.siteId)!;
     const metal = site.provider === 'metal';
 
-    // Bookings: allocated units spread over ready + degraded nodes in a stable order that drifts hourly.
+    // Host pools: allocated vCPUs spread over live hosts in a stable order that drifts every 6 h. GPU pools read
+    // capacity's per-GPU holders instead (below), so a GPU cell names the reservation /reservations shows.
     const perNode = pool.kind === 'gpu' ? pool.gpusPerNode : pool.vcpusPerNode;
-    const bookable = ranked(
-      members.filter((node) => !offline.has(node.id) && !provisioning.has(node.id)),
-      (node) => `${node.id}:book:${Math.floor(now / (6 * HOUR))}`,
-    );
-    let toBook = pulse.allocated;
     const bookedUnits = new Map<string, number>();
-    for (const node of bookable) {
-      const take = Math.min(perNode - (degraded.has(node.id) ? Math.ceil(perNode * 0.25) : 0), toBook);
-      bookedUnits.set(node.id, Math.max(0, take));
-      toBook -= Math.max(0, take);
-      if (toBook <= 0) break;
+    if (pool.kind !== 'gpu') {
+      const bookable = ranked(
+        members.filter((node) => ['ready', 'degraded'].includes(info.get(node.id)!.health)),
+        (node) => `${node.id}:book:${Math.floor(now / (6 * HOUR))}`,
+      );
+      let toBook = pulse.allocated;
+      for (const node of bookable) {
+        const take = Math.min(perNode, toBook);
+        bookedUnits.set(node.id, take);
+        toBook -= take;
+        if (toBook <= 0) break;
+      }
     }
 
     for (const base of members) {
       const r = rng(hash(`${base.id}:${faultBucket}`));
-      const health: NodeHealth = offline.has(base.id)
-        ? 'offline'
-        : degraded.has(base.id)
-          ? 'degraded'
-          : provisioning.has(base.id)
-            ? 'provisioning'
-            : 'ready';
+      const { health, hold, cordoned } = info.get(base.id)!;
       const conditions: Condition[] = [...(background.get(base.id) ?? [])];
       let connectivity: Connectivity = 'connected';
       let provisionState: ProvisionState = base.provisionState;
@@ -870,17 +864,15 @@ function applyOverlay(structure: Structure, now: number): FleetNode[] {
           if (provisionState === 'enrolling') power = 'off';
         } else provisionState = 'adopting';
       }
-      // Sticky operator state: a few failed/rescue/retiring/cordoned machines per metal pool, by seed.
-      const sticky = noise(`${base.id}:sticky`);
-      if (metal && health === 'ready' && sticky < 0.012) {
+      // Held states last across fault buckets: failed and rescue park with maintenance on.
+      if (hold === 'failed') {
         provisionState = 'failed';
         maintenance = true;
         conditions.push({ type: 'AcceptanceFailed', status: 'true', reason: 'DiagFailed', message: 'diag.nvml: dcgmi diag -r 2 reported 1 failure', since: now - (2 + noise(`${base.id}:af`) * 30) * HOUR });
-      } else if (metal && health === 'ready' && sticky < 0.018) {
+      } else if (hold === 'rescue') {
         provisionState = 'rescue';
         maintenance = true;
-      } else if (pool.id === 'pool_a100_ams2' && base.unit < 10 && noise(`${base.id}:retire`) < 0.5) provisionState = 'retiring';
-      const cordoned = provisionState === 'retiring' || (health !== 'offline' && noise(`${base.id}:cordon`, Math.floor(now / (8 * HOUR))) < 0.025);
+      } else if (hold === 'retiring') provisionState = 'retiring';
       if (base.daemonVersion !== CURRENT_BCD)
         conditions.push({ type: 'DaemonOutdated', status: 'true', reason: `bcd ${base.daemonVersion}`, message: `Release ${CURRENT_BCD} is current`, since: now - 2 * DAY });
 
@@ -888,15 +880,10 @@ function applyOverlay(structure: Structure, now: number): FleetNode[] {
       const fault = conditions.find((condition) => gpuFault(condition.type));
       const badGpu = fault ? Number(/GPU (\d+)/.exec(fault.message ?? '')?.[1] ?? -1) : -1;
       const booked = live ? (bookedUnits.get(base.id) ?? 0) : 0;
-      const tenantA = choose(CUSTOMER_TENANTS, noise(`${base.id}:tA:${Math.floor(now / (6 * HOUR))}`));
-      const tenantB = choose(CUSTOMER_TENANTS, noise(`${base.id}:tB:${Math.floor(now / (6 * HOUR))}`));
-      let assigned = 0;
       const gpus = base.gpus.map((gpu) => {
         const unhealthy = gpu.index === badGpu;
-        const isBooked = !unhealthy && assigned < booked;
-        if (isBooked) assigned++;
-        const tenantId = gpu.index < base.gpus.length / 2 ? tenantA : tenantB;
-        const reservationKey = `${base.id}:${tenantId}:${Math.floor(now / (6 * HOUR))}`;
+        const holder = unhealthy ? undefined : holders.get(`${base.id}/gpu${gpu.index}`);
+        const isBooked = Boolean(holder);
         const utilization = !live || unhealthy ? 0 : isBooked ? Math.min(1, 0.52 + 0.48 * drift(`${gpu.id}:u`, now, 90_000)) : 0.01 * noise(`${gpu.id}:i`, Math.floor(t));
         const powerLimitW = gpuSpec[gpu.model]?.powerW ?? 400;
         const next: FleetGpu = {
@@ -905,7 +892,7 @@ function applyOverlay(structure: Structure, now: number): FleetNode[] {
           bookable: !unhealthy,
           eccUncorrectable: unhealthy && fault?.type === 'EccUncorrectable' ? 2 + Math.floor(noise(gpu.id) * 6) : 0,
           ...(unhealthy && fault && /^Xid\d+$/.test(fault.type) ? { xid: { code: Number(fault.type.slice(3)), at: fault.since } } : {}),
-          ...(isBooked ? { allocation: { reservationId: sid('rsv', reservationKey, 12), tenantId, since: Math.floor(now / (6 * HOUR)) * 6 * HOUR - noise(reservationKey) * 20 * HOUR } } : {}),
+          ...(holder ? { allocation: { reservationId: holder.reservationId, tenantId: holder.tenantId, since: holder.since } } : {}),
           ...(live
             ? {
                 telemetry: {

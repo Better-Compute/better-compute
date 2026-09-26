@@ -1,18 +1,7 @@
 'use client';
 
-import { useState, type ComponentType, type ReactNode } from 'react';
-import {
-  Button as AriaButton,
-  Dialog,
-  Heading,
-  Menu as AriaMenu,
-  MenuItem,
-  MenuTrigger,
-  Modal,
-  ModalOverlay,
-  Popover,
-  type Selection,
-} from 'react-aria-components';
+import type { ComponentType, ReactNode } from 'react';
+import { Button as AriaButton, Menu as AriaMenu, MenuItem, MenuTrigger, Popover, type Selection } from 'react-aria-components';
 import { RiArrowDownSLine, RiCheckLine } from 'react-icons/ri';
 import { cx } from '@/utils/cx';
 import { Led, Tag, type Status } from '@/components/ui/signal';
@@ -280,112 +269,6 @@ export function FacetMenu({
         )}
       </Popover>
     </MenuTrigger>
-  );
-}
-
-// --- Confirm dialog for destructive or fleet-wide actions --------------------------------------------------------
-
-export interface ConfirmRequest {
-  title: string;
-  body: ReactNode;
-  /** The API call this makes, shown in mono so the operator knows exactly what runs. */
-  method: string;
-  confirmLabel: string;
-  danger?: boolean;
-  /** Ask for a reason (recorded on the audit entry). */
-  reason?: boolean;
-  /** Type this text to enable the button (irreversible actions). */
-  typeToConfirm?: string;
-  onConfirm(reason: string): void;
-}
-
-export function useConfirm() {
-  const [request, setRequest] = useState<ConfirmRequest | null>(null);
-  const dialog = <ConfirmDialog request={request} onClose={() => setRequest(null)} />;
-  return [dialog, setRequest] as const;
-}
-
-function ConfirmDialog({ request, onClose }: { request: ConfirmRequest | null; onClose(): void }) {
-  const [reason, setReason] = useState('');
-  const [typed, setTyped] = useState('');
-  const blocked = Boolean(request?.typeToConfirm && typed !== request.typeToConfirm);
-  const close = () => {
-    setReason('');
-    setTyped('');
-    onClose();
-  };
-  return (
-    <ModalOverlay
-      isOpen={request !== null}
-      onOpenChange={(open) => !open && close()}
-      isDismissable
-      className="fixed inset-0 z-[60] grid place-items-center bg-neutral-950/50 p-4 entering:animate-[fade-in_120ms_ease-out]"
-    >
-      <Modal className="w-full max-w-md border border-separator-border bg-surface-raised shadow-lg outline-none entering:animate-[pop-in_140ms_ease-out]">
-        <Dialog className="outline-none" role="alertdialog">
-          {request && (
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                if (blocked) return;
-                request.onConfirm(reason.trim());
-                close();
-              }}
-            >
-              <div className="flex flex-col gap-3 p-5">
-                <Heading slot="title" className="font-mono text-[15px] font-medium text-text-primary">
-                  {request.title}
-                </Heading>
-                <div className="text-body-2-regular text-text-secondary">{request.body}</div>
-                <code className="self-start border border-separator-border bg-surface-sunken px-1.5 py-0.5 font-mono text-[11px] text-text-secondary">
-                  {request.method}
-                </code>
-                {request.reason && (
-                  <label className="flex flex-col gap-1">
-                    <span className="font-mono text-[11px] tracking-wide text-text-tertiary uppercase">Reason (audit log)</span>
-                    <input
-                      autoFocus
-                      value={reason}
-                      onChange={(event) => setReason(event.target.value)}
-                      placeholder="e.g. XID 79 on GPU 3, RMA ticket 4411"
-                      className="h-9 border border-border-button-default bg-background-primary-default px-2 text-body-2-regular text-text-primary outline-none placeholder:text-text-placeholder focus:border-signal-500"
-                    />
-                  </label>
-                )}
-                {request.typeToConfirm && (
-                  <label className="flex flex-col gap-1">
-                    <span className="text-caption-1-regular text-text-secondary">
-                      Type <span className="font-mono text-text-primary">{request.typeToConfirm}</span> to confirm
-                    </span>
-                    <input
-                      autoFocus={!request.reason}
-                      value={typed}
-                      onChange={(event) => setTyped(event.target.value)}
-                      className="h-9 border border-border-button-default bg-background-primary-default px-2 font-mono text-body-2-regular text-text-primary outline-none focus:border-signal-500"
-                    />
-                  </label>
-                )}
-              </div>
-              <div className="flex justify-end gap-2 border-t border-separator-border bg-surface-sunken px-5 py-3">
-                <button type="button" onClick={close} className="h-8 border border-border-button-default px-3 text-body-2-medium text-text-primary hover:bg-background-secondary-default">
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={blocked}
-                  className={cx(
-                    'h-8 px-3 text-body-2-medium disabled:opacity-40',
-                    request.danger ? 'bg-red-600 text-white hover:bg-red-500' : 'bg-signal-500 text-neutral-950 hover:bg-signal-400',
-                  )}
-                >
-                  {request.confirmLabel}
-                </button>
-              </div>
-            </form>
-          )}
-        </Dialog>
-      </Modal>
-    </ModalOverlay>
   );
 }
 

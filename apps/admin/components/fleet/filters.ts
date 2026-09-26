@@ -1,4 +1,5 @@
-import { CURRENT_BCD, isSchedulable, nodeSeverity, type FleetNode, type NodeHealth } from '@/lib/data/fleet';
+import { CURRENT_BCD, isSchedulable, nodeSeverity, type FleetNode } from '@/lib/data/fleet';
+import type { NodeHealth } from '@/lib/data/fleet-health';
 
 // Node filters shared by the nodes page, the rack view and the palette: saved views ("presets") and facets,
 // round-tripped through the URL (?preset=attention&health=offline,degraded&pool=pool_h100_fra1) so any view can

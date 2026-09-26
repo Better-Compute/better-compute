@@ -17,6 +17,8 @@ import { isSchedulable } from '@/lib/data/fleet';
 // the API (nodes.cordon, rollouts.pause, commandBatches.approve…) and drop this overlay.
 
 export interface NodeOverride {
+  /** When the operator last changed it: views of an earlier moment (time travel) don't show it. */
+  at?: number;
   cordoned?: boolean;
   /** nodes.drain: cordoned plus workloads moving off, done after `drainMs`. */
   drainAt?: number;
@@ -42,8 +44,8 @@ interface State {
   nodes: Record<string, NodeOverride>;
   rollouts: Record<string, { state: RolloutState; reason?: string; at: number }>;
   batches: Record<string, { approvals: CommandBatchView['approvals']; state?: BatchState }>;
-  discovered: Record<string, { confirmedFor?: string; ignored?: boolean }>;
-  sandboxes: Record<string, { deletedAt?: number; extendSeconds?: number }>;
+  discovered: Record<string, { confirmedFor?: string; ignored?: boolean; at: number }>;
+  sandboxes: Record<string, { deletedAt?: number; extendSeconds?: number; at: number }>;
   audit: AuditEntry[];
 }
 
@@ -80,7 +82,7 @@ function audit(entry: Omit<AuditEntry, 'id'>): AuditEntry {
 
 function patchNodes(ids: readonly string[], now: number, method: string, summary: (count: number) => string, patch: (current: NodeOverride) => NodeOverride) {
   const nodes = { ...state.nodes };
-  for (const id of ids) nodes[id] = patch(nodes[id] ?? {});
+  for (const id of ids) nodes[id] = { ...patch(nodes[id] ?? {}), at: now };
   commit({
     ...state,
     nodes,
@@ -154,20 +156,20 @@ export const fleetActions = {
   confirmMac(mac: string, nodeId: string, now: number) {
     commit({
       ...state,
-      discovered: { ...state.discovered, [mac]: { confirmedFor: nodeId } },
+      discovered: { ...state.discovered, [mac]: { confirmedFor: nodeId, at: now } },
       audit: [audit({ at: now, method: 'metal.confirmMac', subject: `node/${nodeId}`, summary: `Confirmed PXE MAC ${mac}` }), ...state.audit],
     });
   },
   ignoreMac(mac: string, now: number) {
     commit({
       ...state,
-      discovered: { ...state.discovered, [mac]: { ignored: true } },
+      discovered: { ...state.discovered, [mac]: { ignored: true, at: now } },
       audit: [audit({ at: now, method: 'metal.discovered', subject: `mac/${mac}`, summary: `Ignored unknown machine ${mac}` }), ...state.audit],
     });
   },
   deleteSandboxes(ids: readonly string[], now: number) {
     const sandboxes = { ...state.sandboxes };
-    for (const id of ids) sandboxes[id] = { ...sandboxes[id], deletedAt: now };
+    for (const id of ids) sandboxes[id] = { ...sandboxes[id], deletedAt: now, at: now };
     commit({
       ...state,
       sandboxes,
@@ -176,7 +178,7 @@ export const fleetActions = {
   },
   extendSandboxes(ids: readonly string[], seconds: number, now: number) {
     const sandboxes = { ...state.sandboxes };
-    for (const id of ids) sandboxes[id] = { ...sandboxes[id], extendSeconds: (sandboxes[id]?.extendSeconds ?? 0) + seconds };
+    for (const id of ids) sandboxes[id] = { ...sandboxes[id], extendSeconds: (sandboxes[id]?.extendSeconds ?? 0) + seconds, at: now };
     commit({
       ...state,
       sandboxes,
@@ -186,7 +188,23 @@ export const fleetActions = {
 };
 
 /** The snapshot with the operator's actions applied. Pure; memoize on (snapshot, actions). */
-export function applyActions(snapshot: FleetSnapshot, actions: State): FleetSnapshot {
+export function applyActions(snapshot: FleetSnapshot, all: State): FleetSnapshot {
+  // Time travel: a view of an earlier moment shows only what operators had done by then.
+  const t = snapshot.now;
+  const upTo = <V extends { at?: number }>(record: Record<string, V>) =>
+    Object.fromEntries(Object.entries(record).filter(([, value]) => (value.at ?? 0) <= t)) as Record<string, V>;
+  const actions: State = {
+    nodes: upTo(all.nodes),
+    rollouts: upTo(all.rollouts),
+    batches: Object.fromEntries(
+      Object.entries(all.batches)
+        .map(([id, batch]) => [id, { ...batch, approvals: batch.approvals.filter((approval) => approval.at <= t) }] as const)
+        .filter(([, batch]) => batch.approvals.length > 0),
+    ),
+    discovered: upTo(all.discovered),
+    sandboxes: upTo(all.sandboxes),
+    audit: all.audit.filter((entry) => entry.at <= t),
+  };
   const touched = Object.keys(actions.nodes).length > 0;
   const nodes = touched
     ? snapshot.nodes.map((node) => {
@@ -208,12 +226,7 @@ export function applyActions(snapshot: FleetSnapshot, actions: State): FleetSnap
       const override = actions.batches[batch.batchId];
       if (!override) return batch;
       const approved = override.state === 'approved';
-      return {
-        ...batch,
-        approvals: override.approvals,
-        ...(override.state ? { state: override.state } : {}),
-        ...(approved ? { approvedAt: override.approvals.at(-1)!.at } : {}),
-        members: batch.members.map((member) => {
+      const members = batch.members.map((member) => {
           if (override.state === 'cancelled') return { ...member, state: 'cancelled', awaitingApproval: undefined } as typeof member;
           if (approved) {
             const done = snapshot.now - override.approvals.at(-1)!.at > 20_000;
@@ -221,7 +234,16 @@ export function applyActions(snapshot: FleetSnapshot, actions: State): FleetSnap
             return { ...rest, state: done ? 'succeeded' : 'running' };
           }
           return member;
-        }),
+        });
+      const commands: Record<string, number> = {};
+      for (const member of members) commands[member.state] = (commands[member.state] ?? 0) + 1;
+      return {
+        ...batch,
+        approvals: override.approvals,
+        ...(override.state ? { state: override.state } : {}),
+        ...(approved ? { approvedAt: override.approvals.at(-1)!.at } : {}),
+        members,
+        commands,
       };
     }),
     discovered: snapshot.discovered

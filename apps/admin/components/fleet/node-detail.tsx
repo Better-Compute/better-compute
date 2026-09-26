@@ -32,7 +32,8 @@ import { HOUR } from '@/lib/data/core';
 import { fmtDuration, fmtGiB, fmtPct, fmtRelative, fmtStamp } from '@/lib/data/format';
 import { poolById, siteById, tenantById } from '@/lib/data/topology';
 import { cx } from '@/utils/cx';
-import { fleetActions, useFleetActions } from './store';
+import { useFleetCommands } from './commands';
+import { useFleetActions } from './store';
 import {
   ActionButton,
   GpuCell,
@@ -42,7 +43,6 @@ import {
   instanceStatus,
   provisionStatus,
   sandboxStatus,
-  useConfirm,
 } from './ui';
 
 const actionLabel: Record<string, string> = {
@@ -55,7 +55,7 @@ const actionLabel: Record<string, string> = {
 /** Everything about one node: header actions, then tabs for GPUs, conditions, labels, workloads, events. */
 export function NodeDetail({ node, snapshot, compact }: { node: FleetNode; snapshot: FleetSnapshot; compact?: boolean }) {
   const { now } = useWorkspace();
-  const [confirm, ask] = useConfirm();
+  const commands = useFleetCommands();
   const pool = node.poolId ? poolById(node.poolId) : undefined;
   const site = siteById(node.siteId);
   const workflow = snapshot.workflows.find((each) => each.nodeId === node.id);
@@ -64,44 +64,8 @@ export function NodeDetail({ node, snapshot, compact }: { node: FleetNode; snaps
   const active = node.conditions.filter((condition) => condition.status === 'true');
   const [selectedGpu, setSelectedGpu] = useState<number | undefined>(undefined);
 
-  const cordon = () =>
-    ask({
-      title: `Cordon ${node.hostname}?`,
-      body: 'New reservations, instances and sandboxes stop landing here. Running work is not touched.',
-      method: `nodes.cordon { nodeId: "${node.id}", version: ${node.version} }`,
-      confirmLabel: 'Cordon',
-      reason: true,
-      onConfirm: (reason) => fleetActions.cordon([node.id], now, reason || undefined),
-    });
-  const drain = () =>
-    ask({
-      title: `Drain ${node.hostname}?`,
-      body: (
-        <>
-          Cordons the node and moves work off it: {node.gpus.filter((gpu) => gpu.allocation).length} booked GPUs, {node.instanceCount} instances and{' '}
-          {node.sandboxCount} sandboxes are rescheduled or released under their policies.
-        </>
-      ),
-      method: `nodes.drain { nodeId: "${node.id}" }`,
-      confirmLabel: 'Drain node',
-      reason: true,
-      onConfirm: (reason) => fleetActions.drain([node.id], now, reason || undefined),
-    });
-  const revoke = () =>
-    ask({
-      title: 'Revoke this node’s identity?',
-      body: 'Every certificate of the current identity generation is revoked and the gateway drops its session. The machine must rejoin with a new join token.',
-      method: `nodes.revokeIdentity { nodeId: "${node.id}" }`,
-      confirmLabel: 'Revoke identity',
-      danger: true,
-      reason: true,
-      typeToConfirm: node.hostname,
-      onConfirm: () => fleetActions.revokeIdentity(node.id, now),
-    });
-
   return (
     <div className="flex flex-col gap-4">
-      {confirm}
       <div className="flex flex-wrap items-center gap-2">
         <NodeStatusTag node={node} />
         <Tag status={connectivityStatus[node.connectivity]} led>
@@ -118,24 +82,24 @@ export function NodeDetail({ node, snapshot, compact }: { node: FleetNode; snaps
 
       <div className="flex flex-wrap gap-1.5">
         {node.cordoned ? (
-          <ActionButton icon={RiLockUnlockLine} onPress={() => fleetActions.uncordon([node.id], now)}>
+          <ActionButton icon={RiLockUnlockLine} onPress={() => commands.uncordon([node])}>
             Uncordon
           </ActionButton>
         ) : (
-          <ActionButton icon={RiLockLine} onPress={cordon}>
+          <ActionButton icon={RiLockLine} onPress={() => commands.cordon([node])}>
             Cordon
           </ActionButton>
         )}
-        <ActionButton icon={RiHandHeartLine} onPress={drain} disabled={node.conditions.some((c) => c.type === 'Draining')}>
+        <ActionButton icon={RiHandHeartLine} onPress={() => commands.drain([node])} disabled={node.conditions.some((c) => c.type === 'Draining')}>
           Drain
         </ActionButton>
-        <ActionButton icon={RiToolsLine} onPress={() => fleetActions.maintenance([node.id], !node.maintenance, now)}>
+        <ActionButton icon={RiToolsLine} onPress={() => commands.maintenance([node], !node.maintenance)}>
           {node.maintenance ? 'Leave maintenance' : 'Maintenance'}
         </ActionButton>
         <ActionButton icon={RiKey2Line} title="nodes.issueSshCert: a 15-minute break-glass certificate bound to this node">
           Break-glass SSH
         </ActionButton>
-        <ActionButton icon={RiShieldKeyholeLine} danger onPress={revoke}>
+        <ActionButton icon={RiShieldKeyholeLine} danger onPress={() => commands.revokeIdentity(node)}>
           Revoke identity
         </ActionButton>
         {compact && (
@@ -272,7 +236,7 @@ export function NodeDetail({ node, snapshot, compact }: { node: FleetNode; snaps
                       </p>
                     </div>
                     {info.severity !== 'info' && (
-                      <ActionButton onPress={() => fleetActions.acknowledge(node.id, condition.type, now)}>Acknowledge</ActionButton>
+                      <ActionButton onPress={() => commands.acknowledge(node, condition.type)}>Acknowledge</ActionButton>
                     )}
                   </li>
                 );
@@ -300,7 +264,7 @@ export function NodeDetail({ node, snapshot, compact }: { node: FleetNode; snaps
                 ).map((reservation) => (
                   <li key={reservation.id} className="flex items-center gap-3 border border-separator-border px-3 py-2">
                     <Led status="live" />
-                    <Link href={`/reservations/${reservation.id}`} className="font-mono text-[12px] text-text-primary hover:underline">
+                    <Link href={`/reservations?id=${reservation.id}`} className="font-mono text-[12px] text-text-primary hover:underline">
                       {reservation.id}
                     </Link>
                     <span className="text-caption-1-regular text-text-secondary">{tenantById(reservation.tenant)?.name ?? reservation.tenant}</span>
@@ -451,7 +415,7 @@ function GpuTable({ gpus, now, highlight }: { gpus: readonly FleetGpu[]; now: nu
 }
 
 function LabelsEditor({ node }: { node: FleetNode }) {
-  const { now } = useWorkspace();
+  const commands = useFleetCommands();
   const [key, setKey] = useState('');
   const [value, setValue] = useState('');
   const [taint, setTaint] = useState('');
@@ -467,7 +431,7 @@ function LabelsEditor({ node }: { node: FleetNode }) {
             <span className="text-text-tertiary">{label.key}=</span>
             <span className="text-text-primary">{label.value}</span>
             {removable ? (
-              <button type="button" aria-label={`Remove ${label.key}`} onClick={() => fleetActions.label([node.id], {}, [label.key], now)} className="grid h-full w-5 place-items-center text-text-tertiary hover:text-text-primary">
+              <button type="button" aria-label={`Remove ${label.key}`} onClick={() => commands.label([node], {}, [label.key])} className="grid h-full w-5 place-items-center text-text-tertiary hover:text-text-primary">
                 <RiCloseLine className="size-3" aria-hidden />
               </button>
             ) : (
@@ -488,7 +452,7 @@ function LabelsEditor({ node }: { node: FleetNode }) {
         onSubmit={(event) => {
           event.preventDefault();
           if (!valid) return;
-          fleetActions.label([node.id], { [key]: value }, [], now);
+          commands.label([node], { [key]: value });
           setKey('');
           setValue('');
         }}
@@ -510,7 +474,7 @@ function LabelsEditor({ node }: { node: FleetNode }) {
           {taints.map((name) => (
             <span key={name} className="hatch inline-flex h-6 items-center gap-1 border border-separator-border pl-1.5 font-mono text-[11px] text-text-primary">
               {name}
-              <button type="button" aria-label={`Remove taint ${name}`} onClick={() => fleetActions.taint([node.id], [], [name], now)} className="grid h-full w-5 place-items-center text-text-tertiary hover:text-text-primary">
+              <button type="button" aria-label={`Remove taint ${name}`} onClick={() => commands.taint([node], [], [name])} className="grid h-full w-5 place-items-center text-text-tertiary hover:text-text-primary">
                 <RiCloseLine className="size-3" aria-hidden />
               </button>
             </span>
@@ -520,7 +484,7 @@ function LabelsEditor({ node }: { node: FleetNode }) {
             onSubmit={(event) => {
               event.preventDefault();
               if (!taint.trim()) return;
-              fleetActions.taint([node.id], [taint.trim()], [], now);
+              commands.taint([node], [taint.trim()]);
               setTaint('');
             }}
           >
