@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
@@ -29,7 +30,9 @@ var imageFormats = map[string]bool{"raw": true, "qcow2": true, "iso": true}
 
 type instancesConverger struct {
 	a *Agent
-	// specs and specErrors are the last pass's instances and those that failed.
+	// specs and specErrors are the last pass's instances and those that failed. specs is also read
+	// off the converger (devices, gpu.reset, diag.dcgm): through currentSpecs, under specsMu.
+	specsMu    sync.Mutex
 	specs      []*agentv1.InstanceSpec
 	specErrors map[string]string
 	// exhausted: the last pass's starts host-side admission refused (admission.go); they stay
@@ -80,6 +83,13 @@ func (c *instancesConverger) enforceNetworkPolicies(ctx context.Context, specs [
 
 func (c *instancesConverger) Section() converge.Section { return converge.SectionInstances }
 
+// currentSpecs are the last pass's instances.
+func (c *instancesConverger) currentSpecs() []*agentv1.InstanceSpec {
+	c.specsMu.Lock()
+	defer c.specsMu.Unlock()
+	return c.specs
+}
+
 func (c *instancesConverger) runtime(name string) runtime.Runtime {
 	for _, r := range c.a.o.Runtimes {
 		if r.Name() == name {
@@ -104,7 +114,9 @@ func (c *instancesConverger) Plan(_ context.Context, desired []byte) ([]converge
 	if err := proto.Unmarshal(desired, section); err != nil {
 		return nil, converge.Terminal(fmt.Errorf("instances section: %w", err))
 	}
+	c.specsMu.Lock()
 	c.specs = section.GetInstances()
+	c.specsMu.Unlock()
 	if len(c.a.o.Runtimes) == 0 {
 		if len(section.GetInstances()) > 0 {
 			return nil, converge.Terminal(errors.New("this host runs no instance runtime"))

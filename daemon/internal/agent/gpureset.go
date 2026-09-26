@@ -44,15 +44,8 @@ func (a *Agent) runGpuReset(ctx context.Context, cmd dispatch.Command) (journal.
 	if len(req.GetGpuUuids()) == 0 {
 		return journal.Result{}, invalidPayload(errors.New("gpu_uuids is empty"))
 	}
-	busy := a.devices.assignedDevices()
-	var blocked []string
-	for _, u := range req.GetGpuUuids() {
-		if busy[u] {
-			blocked = append(blocked, u)
-		}
-	}
-	if len(blocked) > 0 {
-		return journal.Result{}, &KindError{Code: "gpu-busy", Message: strings.Join(blocked, ", ") + " has a live assignment"}
+	if err := a.refuseBusyGPUs(req.GetGpuUuids()); err != nil {
+		return journal.Result{}, err
 	}
 	a.invMu.Lock()
 	known := map[string]bool{}
@@ -101,4 +94,31 @@ func (a *Agent) runGpuReset(ctx context.Context, cmd dispatch.Command) (journal.
 		}
 	}
 	return succeeded(result)
+}
+
+// refuseBusyGPUs fails with gpu-busy when a listed GPU is in use: a live hold names it or one of
+// its MIG instances or slots, or a VM has it passed through. Resetting or stressing it would take
+// it from under its workload.
+func (a *Agent) refuseBusyGPUs(uuids []string) error {
+	var assigned []string
+	if a.devices != nil {
+		for id := range a.devices.assignedDevices() {
+			assigned = append(assigned, id)
+		}
+	}
+	passed := a.passedGPUs()
+	var blocked []string
+	for _, u := range uuids {
+		switch {
+		case gpuBusy(assigned, u):
+			blocked = append(blocked, u+" has a live assignment")
+		case passed[u] != "":
+			blocked = append(blocked, u+" is passed through to "+passed[u])
+		}
+	}
+	if len(blocked) == 0 {
+		return nil
+	}
+	sort.Strings(blocked)
+	return &KindError{Code: "gpu-busy", Message: strings.Join(blocked, "; ")}
 }

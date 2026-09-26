@@ -233,7 +233,7 @@ func (a *Agent) convergeOnce(ctx context.Context) bool {
 	status := &agentv1.StatusReport{AppliedGeneration: generation}
 	if len(a.o.Runtimes) > 0 {
 		// Everything the runtimes hold, managed or not: the control plane finds leaks by it.
-		status.Instances = a.instances.report(ctx, a.instances.specErrors, a.instances.specs)
+		status.Instances = a.instances.report(ctx, a.instances.specErrors, a.instances.currentSpecs())
 		status.InstancesComplete = true
 	}
 	for _, r := range report.Sections {

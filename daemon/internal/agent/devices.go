@@ -285,7 +285,7 @@ func (a *Agent) passedGPUs() map[string]string {
 	if a.instances == nil {
 		return out
 	}
-	for _, spec := range a.instances.specs {
+	for _, spec := range a.instances.currentSpecs() {
 		if spec.GetDesiredState() == agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED {
 			continue
 		}

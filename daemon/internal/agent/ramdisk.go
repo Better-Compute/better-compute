@@ -410,6 +410,19 @@ func (a *Agent) runDiagDcgm(ctx context.Context, cmd dispatch.Command) (journal.
 		gpus = append(gpus, a.inv.Gpus.Gpus...)
 	}
 	a.invMu.Unlock()
+	// Level 1 only checks deployment; from level 2 DCGM loads the GPUs, which would disturb (and be
+	// skewed by) a workload on them. No uuids means every GPU.
+	if level >= 2 {
+		targets := req.GetGpuUuids()
+		if len(targets) == 0 {
+			for _, g := range gpus {
+				targets = append(targets, g.Uuid)
+			}
+		}
+		if err := a.refuseBusyGPUs(targets); err != nil {
+			return journal.Result{}, err
+		}
+	}
 	result, err := a.host.RunDCGM(ctx, level, req.GetGpuUuids(), gpus)
 	if err != nil {
 		return journal.Result{}, &KindError{Code: "dcgm-failed", Message: err.Error()}
