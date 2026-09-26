@@ -96,10 +96,15 @@ describe('bcd as a Kubernetes DaemonSet', () => {
       '/etc/kubernetes/kubelet.conf': 'ro /etc/kubernetes/kubelet.conf',
       '/var/lib/kubelet/pki': 'ro /var/lib/kubelet/pki',
       '/etc/cdi': 'rw /etc/cdi',
-      '/var/run/cdi': 'rw /var/run/cdi',
-      '/etc/nvidia-container-runtime': 'ro /etc/nvidia-container-runtime',
-      '/usr/local/nvidia/toolkit/.config/nvidia-container-runtime': 'ro /usr/local/nvidia/toolkit/.config/nvidia-container-runtime',
+      '/var/run/cdi': 'ro /var/run/cdi',
+      // What bcd reads to refuse a runtime or toolkit that hands GPUs out by environment variable (f88bcdb).
+      '/etc/containerd/config.toml': 'ro /etc/containerd/config.toml',
+      '/usr/local/nvidia/toolkit/.config': 'ro /usr/local/nvidia/toolkit/.config',
     });
+    // Those must exist, never be created: an unreadable config withdraws every GPU, by design.
+    const typeOf = (path: string) => pod.volumes.find((v: { hostPath?: { path: string } }) => v.hostPath?.path === path).hostPath.type;
+    expect(typeOf('/etc/containerd/config.toml')).toBe('File');
+    expect(typeOf('/usr/local/nvidia/toolkit/.config')).toBe('Directory');
     // The DRA driver adds its registration and plugin directories, and nothing else.
     const dra = hostMounts(podOf(bcdDaemonSetManifests({ ...options, gpuApi: 'dra' })));
     expect(Object.keys(dra).filter((path) => !(path in hostMounts(pod)))).toEqual([
@@ -108,9 +113,6 @@ describe('bcd as a Kubernetes DaemonSet', () => {
     ]);
     expect(dra['/var/lib/kubelet/plugins/gpu.bcd.dev']).toBe('rw /var/lib/kubelet/plugins/gpu.bcd.dev');
     expect(pod.tolerations).toEqual([{ operator: 'Exists' }]);
-    // The NVIDIA toolkit's configs, read only, for bcd's GPU isolation check.
-    for (const path of ['/etc/nvidia-container-runtime', '/usr/local/nvidia/toolkit/.config/nvidia-container-runtime'])
-      expect(bcd.volumeMounts.find((m: { mountPath: string }) => m.mountPath === path)).toMatchObject({ readOnly: true });
     expect(pod.priorityClassName).toBe('system-node-critical');
   });
 
@@ -169,6 +171,25 @@ describe('bcd as a Kubernetes DaemonSet', () => {
     expect(pod.tolerations).toEqual([{ key: 'nvidia.com/gpu', operator: 'Exists', effect: 'NoSchedule' }]);
     expect(pod.priorityClassName).toBeUndefined();
     expect(pod.imagePullSecrets).toEqual([{ name: 'registry-creds' }]);
+  });
+
+  it("mounts the nodes' container runtime and toolkit configs read-only, by distribution or by path", () => {
+    const hostPaths = (patch: Partial<BcdDaemonSetOptions>) =>
+      podOf(bcdDaemonSetManifests({ ...options, ...patch }))
+        .volumes.filter((v: { name: string }) => v.name.startsWith('gpu-exposure-'))
+        .map((v: { hostPath: { path: string; type: string } }) => `${v.hostPath.type} ${v.hostPath.path}`);
+    expect(hostPaths({ containerRuntime: 'k3s', nvidiaToolkit: 'packages' })).toEqual([
+      'File /var/lib/rancher/k3s/agent/etc/containerd/config.toml',
+      'Directory /etc/nvidia-container-runtime',
+    ]);
+    expect(hostPaths({ containerRuntime: 'cri-o' })).toEqual(['File /etc/crio/crio.conf', 'Directory /etc/crio/crio.conf.d', 'Directory /usr/local/nvidia/toolkit/.config']);
+    expect(hostPaths({ containerRuntime: { files: ['/etc/containerd/config.toml'], dirs: ['/etc/containerd/conf.d'] }, nvidiaToolkit: { files: [], dirs: ['/opt/nvidia/toolkit/.config'] } })).toEqual([
+      'File /etc/containerd/config.toml',
+      'Directory /etc/containerd/conf.d',
+      'Directory /opt/nvidia/toolkit/.config',
+    ]);
+    expect(() => bcdDaemonSetManifests({ ...options, containerRuntime: 'docker' as never })).toThrow(/containerRuntime/);
+    expect(() => bcdDaemonSetManifests({ ...options, nvidiaToolkit: { files: ['relative'], dirs: [] } })).toThrow(/nvidiaToolkit/);
   });
 
   it("mounts another distribution's kubelet credentials where bcd reads them, and never a whole config tree", () => {

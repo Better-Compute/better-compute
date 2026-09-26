@@ -38,7 +38,7 @@ bcd hands a pod exactly the GPUs its reservation holds, and it can only enforce 
 
 The generated DaemonSet carries these requirements in its `bcd.dev/requires` annotation, so they travel with the manifests.
 
-bcd checks the first two on every pass. If the kubelet can also allocate `nvidia.com/*` devices (pod-resources), or a toolkit `config.toml` (`/etc/nvidia-container-runtime/` or the operator's `/usr/local/nvidia/toolkit/.config/nvidia-container-runtime/`) accepts `NVIDIA_VISIBLE_DEVICES` from unprivileged pods (the key true, or absent: the toolkit's default), it offers no GPUs at all. It stops its device plugins, deletes its DRA ResourceSlice, and reports the node condition `ForeignGpuExposure`, naming what to close.
+bcd checks the first two on every pass. If the kubelet can also allocate `nvidia.com/*` devices (pod-resources), or a toolkit `config.toml` (`/etc/nvidia-container-runtime/` or the operator's `/usr/local/nvidia/toolkit/.config/nvidia-container-runtime/`) accepts `NVIDIA_VISIBLE_DEVICES` from unprivileged pods (the key true, or absent: the toolkit's default), it offers no GPUs at all. It finds the applicable toolkit config through the container runtime's configuration (`containerRuntime`, the runtime's `BinaryName`), and a runtime or toolkit config it cannot read counts as exposure too, so both are mounted read-only and must exist (`containerRuntime`, `nvidiaToolkit`). It stops its device plugins, deletes its DRA ResourceSlice, and reports the node condition `ForeignGpuExposure`, naming what to close.
 
 ## Host paths and Pod Security
 
@@ -74,6 +74,8 @@ bcd keeps its node key and journal in the hostPath `/var/lib/bcd` (files 0600, o
 | `priorityClassName` | `system-node-critical` | `null` for none. |
 | `imagePullSecrets`, `resources` | none; 100m / 128Mi requests, 512Mi limit | |
 | `hostUnits` | `false` | |
+| `containerRuntime` | `containerd` (`/etc/containerd/config.toml`) | `k3s`, `rke2`, `cri-o` (`/etc/crio/crio.conf` and `crio.conf.d`), or `{ files, dirs }`, e.g. to add containerd's `conf.d`. Mounted read-only as `File`/`Directory` and never created: every path must exist on every selected node, because hosted bcd withdraws all GPUs when it cannot read the runtime's configuration. |
+| `nvidiaToolkit` | `gpu-operator` (`/usr/local/nvidia/toolkit/.config`) | `packages` (`/etc/nvidia-container-runtime`), or `{ files, dirs }` for another `toolkit.installDir`. Read-only, must exist. |
 | `nvidiaRuntimeClass` | `nvidia` | The RuntimeClass that gives bcd's own container the driver's utilities (`nvidia-smi`, NVML; `NVIDIA_VISIBLE_DEVICES=all` with the `utility` capability only). `null` when the image carries them. Workload pods are unaffected. |
 | `gpuApi` | device plugin | `dra` for bcd's DRA driver (`[kubernetes] gpu_api`). |
 | `kubeletCredentials` | kubeadm's: `/etc/kubernetes/kubelet.conf`, `/var/lib/kubelet/pki` | `{ kubeconfig, certificateDirs }` of another distribution (k3s: `/var/lib/rancher/k3s/agent/kubelet.kubeconfig`, `/var/lib/rancher/k3s/agent`). The kubeconfig lands where bcd reads it, and the directories at their own paths, all read-only. A directory that holds more than the kubelet's certificates (`/etc/kubernetes`, its `pki`, `/var/lib/kubelet`) is refused. |

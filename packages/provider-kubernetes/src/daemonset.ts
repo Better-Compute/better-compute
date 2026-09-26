@@ -101,6 +101,18 @@ export interface BcdDaemonSetOptions {
    * cluster CA's keys.
    */
   kubeletCredentials?: { kubeconfig: string; certificateDirs: readonly string[] };
+  /**
+   * The nodes' container runtime, whose configuration bcd reads read-only (`containerRuntimeConfigs`): default
+   * `containerd` (`/etc/containerd/config.toml`), or `k3s`, `rke2`, `cri-o`, or the paths themselves. Every
+   * path must exist on every selected node: hosted bcd withdraws all GPUs when it cannot read it.
+   */
+  containerRuntime?: keyof typeof containerRuntimeConfigs | HostConfigPaths;
+  /**
+   * Where the NVIDIA container toolkit's config lives (`nvidiaToolkitConfigs`): default `gpu-operator`
+   * (`/usr/local/nvidia/toolkit/.config`), `packages` (`/etc/nvidia-container-runtime`), or the paths
+   * themselves (another `toolkit.installDir`). Read-only; it must exist.
+   */
+  nvidiaToolkit?: keyof typeof nvidiaToolkitConfigs | HostConfigPaths;
 }
 
 const dns1123Label = /^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$/;
@@ -226,11 +238,50 @@ export function kubeletStateMounts(gpuApi: 'device-plugin' | 'dra'): KubeletStat
 export const kubeletKubeconfigPath = '/etc/kubernetes/kubelet.conf';
 const absolutePath = /^\/(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/;
 
+/** Host paths bcd reads, read-only, to find a runtime or toolkit that hands GPUs out by environment variable. */
+export interface HostConfigPaths {
+  files: readonly string[];
+  dirs: readonly string[];
+}
+
 /**
- * Where the NVIDIA container toolkit keeps its config.toml: the distribution packages', and the GPU
- * operator's. bcd reads either (9f860ad) to refuse a toolkit that hands GPUs out by environment variable.
+ * The container runtime's configuration on each node, by distribution (`containerRuntime`). bcd reads it to
+ * learn which NVIDIA runtime is configured (f88bcdb). Hosted, a configuration it cannot read withdraws every
+ * GPU (ForeignGpuExposure), so these paths must exist: they are mounted as `File` or `Directory`, never
+ * created. A containerd `imports` directory (`/etc/containerd/conf.d`) is not included by default; list it
+ * with `{ files, dirs }` where the nodes have one.
  */
-export const nvidiaToolkitConfigDirs = ['/etc/nvidia-container-runtime', '/usr/local/nvidia/toolkit/.config/nvidia-container-runtime'] as const;
+export const containerRuntimeConfigs: Readonly<Record<'containerd' | 'k3s' | 'rke2' | 'cri-o', HostConfigPaths>> = Object.freeze({
+  containerd: { files: ['/etc/containerd/config.toml'], dirs: [] },
+  k3s: { files: ['/var/lib/rancher/k3s/agent/etc/containerd/config.toml'], dirs: [] },
+  rke2: { files: ['/var/lib/rancher/rke2/agent/etc/containerd/config.toml'], dirs: [] },
+  'cri-o': { files: ['/etc/crio/crio.conf'], dirs: ['/etc/crio/crio.conf.d'] },
+});
+
+/**
+ * Where the NVIDIA container toolkit keeps its config.toml (`nvidiaToolkit`): the GPU operator's install
+ * directory (`/usr/local/nvidia/toolkit/.config`, or `<toolkit.installDir>/toolkit/.config`), or the
+ * distribution packages' `/etc/nvidia-container-runtime`. Mounted read-only as `Directory`, never created.
+ */
+export const nvidiaToolkitConfigs: Readonly<Record<'gpu-operator' | 'packages', HostConfigPaths>> = Object.freeze({
+  'gpu-operator': { files: [], dirs: ['/usr/local/nvidia/toolkit/.config'] },
+  packages: { files: [], dirs: ['/etc/nvidia-container-runtime'] },
+});
+
+/** The paths of a preset or a `{ files, dirs }` option, checked. */
+function hostConfigPaths<K extends string>(
+  value: K | HostConfigPaths | undefined,
+  presets: Readonly<Record<K, HostConfigPaths>>,
+  fallback: K,
+  what: string,
+): HostConfigPaths {
+  const paths = value === undefined ? presets[fallback] : typeof value === 'string' ? presets[value] : value;
+  if (!paths) invalid(`${what} must be one of ${Object.keys(presets).join(', ')}, or { files, dirs }`);
+  const all = [...(paths!.files ?? []), ...(paths!.dirs ?? [])];
+  if (all.length === 0 || all.length > 8) invalid(`${what} must name 1 to 8 paths`);
+  for (const path of all) if (typeof path !== 'string' || !absolutePath.test(path)) invalid(`${what}: ${String(path)} is not an absolute path`);
+  return { files: [...paths!.files], dirs: [...paths!.dirs] };
+}
 
 const dataDir = '/var/lib/bcd';
 const configPath = '/etc/bcd/config.toml';
@@ -293,6 +344,14 @@ export function bcdDaemonSetManifests(options: BcdDaemonSetOptions): KubernetesO
       invalid(`kubeletCredentials.certificateDirs: ${dir} holds more than the kubelet's certificates`);
   }
   const kubeletDirs = kubeletStateMounts(options.gpuApi ?? 'device-plugin');
+  // What bcd reads to refuse a runtime or toolkit that hands GPUs out by environment variable (read-only, must exist).
+  const runtimeConfig = hostConfigPaths(options.containerRuntime, containerRuntimeConfigs, 'containerd', 'containerRuntime');
+  const toolkitConfig = hostConfigPaths(options.nvidiaToolkit, nvidiaToolkitConfigs, 'gpu-operator', 'nvidiaToolkit');
+  const exposureInputs = [
+    ...[...runtimeConfig.files, ...toolkitConfig.files].map((path) => ({ path, type: 'File' as const })),
+    ...[...runtimeConfig.dirs, ...toolkitConfig.dirs].map((path) => ({ path, type: 'Directory' as const })),
+  ].map((entry, i) => ({ ...entry, volume: `gpu-exposure-${i}` }));
+  if (new Set(exposureInputs.map((entry) => entry.path)).size !== exposureInputs.length) invalid('containerRuntime and nvidiaToolkit name a path twice');
   const config = bcdConfigToml(options);
   let jwk: string | undefined;
   if (options.joinEncryptionJwk !== undefined) {
@@ -422,11 +481,12 @@ export function bcdDaemonSetManifests(options: BcdDaemonSetOptions): KubernetesO
                 // The kubelet's kubeconfig and client certificates only (never the host's /etc/kubernetes).
                 mount('kubelet-kubeconfig', kubeletKubeconfigPath, true),
                 ...kubelet.certificateDirs.map((dir, i) => mount(`kubelet-pki-${i}`, dir, true)),
+                // bcd writes each hold's CDI spec to /etc/cdi and reads NVIDIA's generated one in both.
                 mount('cdi-etc', '/etc/cdi'),
-                mount('cdi-run', '/var/run/cdi'),
-                // Read only, so bcd can see a permissive NVIDIA container toolkit (README "GPU isolation").
-                mount('nvidia-runtime-etc', nvidiaToolkitConfigDirs[0], true),
-                mount('nvidia-runtime-operator', nvidiaToolkitConfigDirs[1], true),
+                mount('cdi-run', '/var/run/cdi', true),
+                // Read only: the runtime's and toolkit's configs, so bcd can see one that hands GPUs out by
+                // environment variable (README "GPU isolation").
+                ...exposureInputs.map((entry) => mount(entry.volume, entry.path, true)),
               ],
             },
           ],
@@ -444,8 +504,8 @@ export function bcdDaemonSetManifests(options: BcdDaemonSetOptions): KubernetesO
             ...kubelet.certificateDirs.map((dir, i) => hostPath(`kubelet-pki-${i}`, dir, 'Directory')),
             hostPath('cdi-etc', '/etc/cdi', 'DirectoryOrCreate'),
             hostPath('cdi-run', '/var/run/cdi', 'DirectoryOrCreate'),
-            hostPath('nvidia-runtime-etc', nvidiaToolkitConfigDirs[0], 'DirectoryOrCreate'),
-            hostPath('nvidia-runtime-operator', nvidiaToolkitConfigDirs[1], 'DirectoryOrCreate'),
+            // Never created: a missing config must stay missing, which bcd treats as exposure.
+            ...exposureInputs.map((entry) => hostPath(entry.volume, entry.path, entry.type)),
           ],
         },
       },
