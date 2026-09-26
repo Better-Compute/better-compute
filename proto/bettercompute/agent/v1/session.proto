@@ -152,6 +152,21 @@ message RenewRequest {
   // Proof of possession by the CURRENT node key. Purpose "renew-pop", parts
   // [sha256(csr), node_id, client_time]. Accepted within ±60 s of server time; 120 s replay cache.
   bytes pop_sig = 4;
+  // Required when the current certificate names a TPM attestation key (URI SAN
+  // urn:bc:tpm-ak:<nameAlg>:<digest>): that AK certifies the CSR's key as one the TPM holds. The new
+  // certificate carries the statement forward from the old one; without this the renewal is refused.
+  TpmKeyAttestation key_attestation = 5;
+}
+
+// TPM2_Certify of a node key by the AK a certificate names, qualifying data sha256(csr).
+message TpmKeyAttestation {
+  // TPMT_PUBLIC of the AK: its TPM name must be the one in the certificate.
+  bytes ak_public = 1;
+  // TPMT_PUBLIC of the node key: the CSR's key, fixedTPM | fixedParent | sensitiveDataOrigin.
+  bytes key_public = 2;
+  // The TPMS_ATTEST (TPM_ST_ATTEST_CERTIFY) and the AK's TPMT_SIGNATURE over it.
+  bytes certify_info = 3;
+  bytes signature = 4;
 }
 
 message RenewResponse {

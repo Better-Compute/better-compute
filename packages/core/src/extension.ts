@@ -355,6 +355,12 @@ export interface AttestationResult {
    * with the join (`node.joined`).
    */
   nodeKey?: 'tpm';
+  /**
+   * A `urn:bc:` statement about the node key that JoinService writes into the certificate beside its
+   * SPIFFE ID (tpm: `urn:bc:tpm-ak:<nameAlg>:<digest>`, the AK that certified it). Renewals carry it
+   * forward from the old certificate, and only with a new key that same AK certifies.
+   */
+  nodeKeyUri?: string;
 }
 
 /**

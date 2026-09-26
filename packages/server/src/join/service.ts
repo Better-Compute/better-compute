@@ -300,10 +300,15 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
       ttlSeconds: number;
       /** `node_certs.allowed_kinds`: exact kinds or `prefix.*`; undefined/null = unrestricted. */
       allowedKinds?: readonly string[] | null;
+      /** `urn:bc:` statements about the node key, after the SPIFFE ID (a TPM AK). */
+      nodeKeyStatements?: readonly string[];
     },
   ) {
     const issued = await crypto.nodeCa.sign(input.csr, {
-      uriSans: [`spiffe://${crypto.trustDomain}/site/${input.siteId}/node/${input.nodeId}`],
+      uriSans: [
+        `spiffe://${crypto.trustDomain}/site/${input.siteId}/node/${input.nodeId}`,
+        ...(input.nodeKeyStatements ?? []),
+      ],
       role: input.role,
       usage: 'client',
       ttlSeconds: input.ttlSeconds,
@@ -700,6 +705,9 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
         spkiSha256: csr.spkiSha256,
         ttlSeconds,
         allowedKinds: checkedKinds(result.allowedKinds),
+        // The attestor's statement about the node key (tpm: the AK that certified it); every renewal
+        // must prove it again.
+        ...(result.nodeKeyUri ? { nodeKeyStatements: [result.nodeKeyUri] } : {}),
       });
       // A hardware subject the attestor proved (a TPM EK hash) is bound to this node for good: a
       // later join proving it reclaims this node, and it can never admit another one.
@@ -871,6 +879,19 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
       if (!(await crypto.verifyNodeSignature(leaf, statement, request.popSig)))
         throw denyRenew('proof');
       if (!remember(toHex(sha256(statement)), now)) throw denyRenew('replay');
+      // What compute proved about the current key (a TPM AK certified it) must hold for the new one, or
+      // there is no renewal, never a downgrade. The statements are read from the presented leaf, which
+      // is byte-for-byte compute's own record (above), never from the CSR, and carried forward.
+      const statements = current.nodeKeyStatements ?? [];
+      if (statements.length) {
+        const reason = crypto.verifyKeyStatements
+          ? await crypto.verifyKeyStatements(statements, request.keyAttestation, csr)
+          : 'key-statement-unsupported';
+        if (reason) {
+          log?.warn('renew refused', { nodeId: row.node_id, reason });
+          throw denyRenew(reason);
+        }
+      }
 
       const issued = await issue(crypto, tx, {
         nodeId: row.node_id,
@@ -883,6 +904,7 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
           row.role === 'ramdisk' ? Math.min(certTtlSeconds, ramdiskMaxTtlS) : certTtlSeconds,
         // A restricted certificate renews restricted: the gateway caches the set per session.
         allowedKinds: row.allowed_kinds,
+        nodeKeyStatements: statements,
       });
       const renewed: RenewResponse = {
         $typeName: 'bettercompute.agent.v1.RenewResponse',

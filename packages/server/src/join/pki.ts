@@ -1,15 +1,18 @@
 import { verify, type KeyObject } from 'node:crypto';
 import type { CertificateAuthority } from '@better-compute/core';
 import {
+  isNodeKeyStatement,
   openSealedToken,
   parseCertificate,
   parseCsr,
   publicJwk,
   sha256,
   spkiPin,
+  tpmAkUriPrefix,
+  verifyTpmKeyAttestation,
   type SigningKey,
 } from '@better-compute/pki';
-import type { JoinCrypto, JoinPublicKeys, JoinTrustBundle } from './crypto.js';
+import type { CsrInfo, JoinCrypto, JoinPublicKeys, JoinTrustBundle, KeyAttestation } from './crypto.js';
 
 export interface PkiJoinCryptoOptions {
   /** SPIFFE trust domain of node certificates (`spiffe://<td>/site/<site>/node/<id>`). */
@@ -76,7 +79,17 @@ export function pkiJoinCrypto(options: PkiJoinCryptoOptions): JoinCrypto {
         spkiSha256: sha256(parsed.subjectPublicKeyInfo),
         notBefore: parsed.notBefore,
         notAfter: parsed.notAfter,
+        nodeKeyStatements: parsed.uriSans.filter(isNodeKeyStatement),
       };
+    },
+    verifyKeyStatements(statements: readonly string[], attestation: KeyAttestation | undefined, csr: CsrInfo) {
+      for (const statement of statements) {
+        const reason = statement.startsWith(tpmAkUriPrefix)
+          ? verifyTpmKeyAttestation(statement, attestation, csr)
+          : 'key-statement-unknown';
+        if (reason) return reason;
+      }
+      return undefined;
     },
     verifyNodeSignature(der: Uint8Array, statement: Uint8Array, signature: Uint8Array) {
       try {

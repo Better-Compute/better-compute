@@ -280,6 +280,89 @@ function pcrValues(
   return banks;
 }
 
+/** An AK's TPM2_Certify of a node key: its TPMT_PUBLIC, the TPMS_ATTEST and the TPMT_SIGNATURE. */
+export interface TpmNodeKeyProof {
+  keyPublic: Uint8Array;
+  certifyInfo: Uint8Array;
+  signature: Uint8Array;
+}
+
+/**
+ * That `ak` certified, over `csrSha256`, a key this TPM made and never lets out (fixedTPM, fixedParent,
+ * sensitiveDataOrigin, an unrestricted signing key), and that it is the CSR's key. Refuses with
+ * `node-key-*`.
+ */
+function checkNodeKeyCertified(
+  ak: TpmPublic,
+  proof: TpmNodeKeyProof,
+  csrSha256: Uint8Array,
+  csrSpkiSha256: Uint8Array | undefined,
+): void {
+  let certified: TpmPublic;
+  let signature;
+  let certify;
+  try {
+    certified = parseTpmPublic(proof.keyPublic);
+    signature = parseTpmSignature(proof.signature);
+    certify = parseCertify(proof.certifyInfo);
+  } catch {
+    return fail('node-key-malformed');
+  }
+  if (!verifyTpmSignature(ak, proof.certifyInfo, signature)) fail('node-key-signature');
+  if (!timingSafeEqualBytes(certify.extraData, csrSha256)) fail('node-key-nonce');
+  if (!timingSafeEqualBytes(certify.name, tpmName(certified))) fail('node-key-name');
+  if (!isTpmResidentSigningKey(certified)) fail('node-key-attributes');
+  if (!csrSpkiSha256 || !timingSafeEqualBytes(sha256(spki(certified.publicKey)), csrSpkiSha256))
+    fail('node-key-not-csr');
+}
+
+export const tpmAkUriPrefix = 'urn:bc:tpm-ak:';
+const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
+
+/**
+ * The certificate statement naming the AK that certified a node key: `urn:bc:tpm-ak:<nameAlg>:<digest>`
+ * (the TPM name, hex). The AK's name covers its whole public area, so only that key matches it.
+ */
+export function tpmAkUri(akName: Uint8Array): string {
+  if (akName.length < 3) throw new TypeError('A TPM name is nameAlg ‖ digest');
+  return `${tpmAkUriPrefix}${hex(akName.subarray(0, 2))}:${hex(akName.subarray(2))}`;
+}
+
+/** The AK name in a `urn:bc:tpm-ak:` statement; undefined for any other URI. */
+export function parseTpmAkUri(uri: string): Uint8Array | undefined {
+  const match = /^urn:bc:tpm-ak:([0-9a-f]{4}):((?:[0-9a-f]{2}){20,64})$/.exec(uri);
+  return match ? new Uint8Array(Buffer.from(match[1]! + match[2]!, 'hex')) : undefined;
+}
+
+/**
+ * A renewal of a certificate that names its TPM AK (`urn:bc:tpm-ak:`): the new node key must be
+ * certified by that same AK, over sha256 of the renewal's CSR, as one the TPM holds and the CSR's.
+ * Returns the refusal reason, or undefined when it holds. No downgrade: a missing attestation refuses.
+ */
+export function verifyTpmKeyAttestation(
+  uri: string,
+  attestation: (TpmNodeKeyProof & { akPublic: Uint8Array }) | undefined,
+  csr: { sha256: Uint8Array; spkiSha256: Uint8Array },
+): string | undefined {
+  const akName = parseTpmAkUri(uri);
+  if (!akName) return 'tpm-ak-uri';
+  if (!attestation?.akPublic?.length) return 'key-attestation-missing';
+  try {
+    let ak: TpmPublic;
+    try {
+      ak = parseTpmPublic(attestation.akPublic);
+    } catch {
+      return fail('key-attestation-ak');
+    }
+    if (!timingSafeEqualBytes(tpmName(ak), akName) || !isAttestationKey(ak)) fail('key-attestation-ak');
+    checkNodeKeyCertified(ak, attestation, csr.sha256, csr.spkiSha256);
+    return undefined;
+  } catch (error) {
+    if (error instanceof Refusal) return error.message;
+    throw error;
+  }
+}
+
 /** The control-plane half of `tpm`. */
 export function tpmAttestor(options: TpmAttestorOptions): AttestorVerifier {
   if (!(options.challengeKey instanceof Uint8Array) || options.challengeKey.length !== 32)
@@ -388,28 +471,22 @@ export function tpmAttestor(options: TpmAttestorOptions): AttestorVerifier {
         const keyProof = answer.nodeKey;
         let nodeKey: 'tpm' | undefined;
         if (keyProof) {
-          let certified: TpmPublic;
-          let info: Uint8Array;
-          let certifySignature;
-          let certify;
+          let proof: TpmNodeKeyProof;
           try {
-            certified = parseTpmPublic(fromBase64url(keyProof.public));
-            info = fromBase64url(keyProof.certifyInfo);
-            certifySignature = parseTpmSignature(fromBase64url(keyProof.signature));
-            certify = parseCertify(info);
+            proof = {
+              keyPublic: fromBase64url(keyProof.public),
+              certifyInfo: fromBase64url(keyProof.certifyInfo),
+              signature: fromBase64url(keyProof.signature),
+            };
           } catch {
             return fail('node-key-malformed');
           }
-          if (!verifyTpmSignature(ak, info, certifySignature)) fail('node-key-signature');
-          if (!timingSafeEqualBytes(certify.extraData, csrSha256)) fail('node-key-nonce');
-          if (!timingSafeEqualBytes(certify.name, tpmName(certified))) fail('node-key-name');
-          if (!isTpmResidentSigningKey(certified)) fail('node-key-attributes');
-          const spkiSha256 = sha256(spki(certified.publicKey));
-          if (!context.csrSpkiSha256 || !timingSafeEqualBytes(spkiSha256, context.csrSpkiSha256)) fail('node-key-not-csr');
+          checkNodeKeyCertified(ak, proof, csrSha256, context.csrSpkiSha256);
           nodeKey = 'tpm';
         }
         if (!nodeKey && (options.nodeKey ?? 'certified') === 'certified') fail('node-key-not-certified');
-        const keyed = nodeKey ? { nodeKey } : {};
+        // The certificate names the AK (urn:bc:tpm-ak:), so each renewal must be certified by it again.
+        const keyed = nodeKey ? { nodeKey, nodeKeyUri: tpmAkUri(akName) } : {};
 
         // Where the machine joins: 1) the node this EK is bound to (a re-join after reinstall or a
         // lost key is a reclaim of that node); 2) the host's allow-list; 3) operator enrollment.
@@ -499,6 +576,30 @@ export interface SoftwareTpm {
 }
 
 /**
+ * The software TPM's AK certifies `key` (its public half) as a key it holds, over `csrSha256`: the
+ * join answer's `nodeKey`, and with `akPublic` a renewal's `RenewRequest.key_attestation`.
+ */
+export function softwareTpmCertify(
+  tpm: SoftwareTpm,
+  key: KeyObject,
+  csrSha256: Uint8Array,
+): TpmNodeKeyProof & { akPublic: Uint8Array } {
+  const ak = parseTpmPublic(tpm.akPublic);
+  const keyPublic = marshalTpmPublic({ key, attributes: nodeKeyAttributes });
+  const certifyInfo = marshalCertify({
+    qualifiedSigner: tpmName(ak),
+    extraData: csrSha256,
+    clock: 1n,
+    resetCount: 0,
+    restartCount: 0,
+    firmwareVersion: 1n,
+    name: tpmName({ nameAlg: TPM_ALG.SHA256, bytes: keyPublic }),
+    qualifiedName: new Uint8Array(34),
+  });
+  return { akPublic: tpm.akPublic, keyPublic, certifyInfo, signature: signTpmAttest(tpm.akPrivateKey, certifyInfo) };
+}
+
+/**
  * The agent half of `tpm` over a software TPM. `produce({ nonce })` needs `nonce = sha256(csr)`
  * (runAgentJoin passes it); with a `challenge` it activates the credential and quotes.
  */
@@ -550,21 +651,11 @@ export function tpmProducer(tpm: SoftwareTpm): NodeAttestor {
       }
       let nodeKey: { public: string; certifyInfo: string; signature: string } | undefined;
       if (tpm.nodeKey) {
-        const keyPublic = marshalTpmPublic({ key: tpm.nodeKey, attributes: nodeKeyAttributes });
-        const info = marshalCertify({
-          qualifiedSigner: tpmName(ak),
-          extraData: input.nonce,
-          clock: 1n,
-          resetCount: 0,
-          restartCount: 0,
-          firmwareVersion: 1n,
-          name: tpmName({ nameAlg: TPM_ALG.SHA256, bytes: keyPublic }),
-          qualifiedName: new Uint8Array(34),
-        });
+        const proof = softwareTpmCertify(tpm, tpm.nodeKey, input.nonce);
         nodeKey = {
-          public: base64url(keyPublic),
-          certifyInfo: base64url(info),
-          signature: base64url(signTpmAttest(tpm.akPrivateKey, info)),
+          public: base64url(proof.keyPublic),
+          certifyInfo: base64url(proof.certifyInfo),
+          signature: base64url(proof.signature),
         };
       }
       return encode({

@@ -42,6 +42,8 @@ type joinService struct {
 	nodeID  string
 	calls   int
 	csrs    [][]byte
+	// statements are the urn:bc: URI SANs its certificates carry after the SPIFFE ID (a TPM AK).
+	statements []*url.URL
 }
 
 func selfSigned(t *testing.T, key *ecdsa.PrivateKey, cn string, ca bool) []byte {
@@ -147,7 +149,7 @@ func (j *joinService) leaf(csrDER []byte) []byte {
 		SerialNumber: big.NewInt(7),
 		Subject:      pkix.Name{OrganizationalUnit: []string{pki.RolePrefix + "node"}},
 		NotBefore:    time.Now().Add(-time.Minute), NotAfter: time.Now().Add(24 * time.Hour),
-		URIs:        []*url.URL{spiffe},
+		URIs:        append([]*url.URL{spiffe}, j.statements...),
 		KeyUsage:    x509.KeyUsageDigitalSignature,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}

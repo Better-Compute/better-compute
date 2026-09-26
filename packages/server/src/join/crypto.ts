@@ -21,6 +21,19 @@ export interface CertificateInfo {
   spkiSha256: Uint8Array;
   notBefore: number;
   notAfter: number;
+  /**
+   * Its `urn:bc:` URI SANs: what compute proved about the node key when it issued it (`urn:bc:tpm-ak:`,
+   * the TPM AK that certified it). Renew proves them again for the new key and carries them forward.
+   */
+  nodeKeyStatements?: readonly string[];
+}
+
+/** `RenewRequest.key_attestation`: TPM2_Certify of the CSR's key by the AK the certificate names. */
+export interface KeyAttestation {
+  akPublic: Uint8Array;
+  keyPublic: Uint8Array;
+  certifyInfo: Uint8Array;
+  signature: Uint8Array;
 }
 
 /** A signature by the pinned JoinService signing key (pki's `Signature` message satisfies it). */
@@ -92,6 +105,16 @@ export interface JoinCrypto {
     statement: Uint8Array,
     signature: Uint8Array,
   ): boolean | Promise<boolean>;
+  /**
+   * A renewal of a certificate with `nodeKeyStatements`: whether `attestation` proves each of them
+   * again for the CSR's key (`urn:bc:tpm-ak:`: that AK certified it, over sha256(csr), as a key the TPM
+   * holds). Returns the refusal reason, or undefined. Without it such a certificate cannot renew.
+   */
+  verifyKeyStatements?(
+    statements: readonly string[],
+    attestation: KeyAttestation | undefined,
+    csr: CsrInfo,
+  ): string | undefined | Promise<string | undefined>;
   /** ES256 by the pinned JoinService signing key over `signingInput(purpose, parts)`. */
   sign(
     purpose: Extract<SigningPurpose, 'join-response' | 'trust-bundle'>,

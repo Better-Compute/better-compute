@@ -2,7 +2,7 @@ import { ComputeError, type AgentRole } from '@better-compute/core';
 import type { AgentCertificateRole } from './ca.js';
 import { spkiSha256 } from './keys.js';
 import type { RevocationSet } from './revocation.js';
-import { parseNodeSpiffeId } from './spiffe.js';
+import { nodeSpiffeIdOf } from './spiffe.js';
 import { verifyCertificateChain, type ParsedCertificate } from './x509.js';
 
 /** Who an agent certificate says the peer is. `nodeId` comes from the SAN only (PLAN.md §13). */
@@ -62,7 +62,7 @@ export function agentIdentityFromChain(
   }
   const leaf = path[0]!;
   if (options.revocations?.has(leaf.serial)) throw deny('certificate revoked');
-  const spiffe = leaf.uriSans.length === 1 ? parseNodeSpiffeId(leaf.uriSans[0]!) : undefined;
+  const spiffe = nodeSpiffeIdOf(leaf.uriSans);
   if (!spiffe || leaf.dnsSans.length) throw deny('certificate has no single node identity');
   if (options.trustDomain !== undefined && spiffe.trustDomain !== options.trustDomain)
     throw deny('foreign trust domain');

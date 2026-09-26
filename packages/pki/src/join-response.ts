@@ -14,7 +14,7 @@ import {
 } from '@better-compute/protocol';
 import { parseCsr } from './csr.js';
 import { sha256, timingSafeEqualBytes } from './keys.js';
-import { parseNodeSpiffeId } from './spiffe.js';
+import { nodeSpiffeIdOf } from './spiffe.js';
 import { verifySignature, type SignerTrust, type SigningKey } from './signing.js';
 import { parseCertificate, verifyCertificateChain } from './x509.js';
 
@@ -148,7 +148,7 @@ export function verifyJoinResponse(
   if (!leafDer) throw deny('empty certificate chain');
   const leaf = parseCertificate(leafDer);
   if (!leaf.publicKey.equals(csr.publicKey)) throw deny('certificate is for another key');
-  const spiffe = leaf.uriSans.length === 1 ? parseNodeSpiffeId(leaf.uriSans[0]!) : undefined;
+  const spiffe = nodeSpiffeIdOf(leaf.uriSans);
   if (
     !spiffe ||
     spiffe.nodeId !== body.nodeId ||

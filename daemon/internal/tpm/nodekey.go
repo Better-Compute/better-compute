@@ -110,6 +110,47 @@ func (a *Attestor) CertifyNodeKey(k *NodeKey, qualifying []byte) (attest, signat
 	return a.tpm.Certify(k.handle, a.ak, qualifying)
 }
 
+// Certifier is the AK alone, without the EK: at each renewal of a certificate that names this AK
+// (urn:bc:tpm-ak:), it certifies the next node key, which it derives on its own connection.
+type Certifier struct {
+	tpm   *TPM
+	ak    uint32
+	akPub []byte
+}
+
+// NewCertifier loads the AK (the same primary the join's Attestor certified the node key with).
+func NewCertifier(t Transport) (*Certifier, error) {
+	c := &Certifier{tpm: New(t)}
+	h, pub, err := c.tpm.CreatePrimary(RHEndorsement, AKTemplate())
+	if err != nil {
+		return nil, fmt.Errorf("tpm: the attestation key: %w", err)
+	}
+	c.ak, c.akPub = h, pub
+	return c, nil
+}
+
+// AKPublic is the AK's TPMT_PUBLIC; its Name is what the certificate names.
+func (c *Certifier) AKPublic() []byte { return c.akPub }
+
+// NodeKey derives the node key of unique where this AK can certify it.
+func (c *Certifier) NodeKey(unique []byte) (*NodeKey, error) { return loadNodeKey(c.tpm, unique) }
+
+// CertifyNodeKey has the AK certify k over qualifying (sha256 of the renewal's CSR).
+func (c *Certifier) CertifyNodeKey(k *NodeKey, qualifying []byte) (attest, signature []byte, err error) {
+	if k.tpm != c.tpm {
+		return nil, nil, errors.New("tpm: the node key is loaded in another TPM connection")
+	}
+	return c.tpm.Certify(k.handle, c.ak, qualifying)
+}
+
+// Close unloads the AK.
+func (c *Certifier) Close() {
+	if c.ak != 0 {
+		_ = c.tpm.Flush(c.ak)
+		c.ak = 0
+	}
+}
+
 // ParseCertify reads a TPMS_ATTEST of TPM2_Certify: its extraData (the qualifying data) and the
 // certified object's name.
 func ParseCertify(attest []byte) (extraData, name []byte, err error) {

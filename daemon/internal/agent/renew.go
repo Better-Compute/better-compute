@@ -1,8 +1,12 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -10,8 +14,10 @@ import (
 	"path/filepath"
 	"time"
 
+	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
 	"github.com/better-compute/better-compute/daemon/internal/session"
+	"github.com/better-compute/better-compute/daemon/internal/tpm"
 	"github.com/better-compute/better-compute/daemon/internal/transport"
 )
 
@@ -66,6 +72,42 @@ func (a *Agent) renewLoop(ctx context.Context) {
 	}
 }
 
+// renewalCertifier opens the AK a certificate names (urn:bc:tpm-ak:), or nil when it names none. It
+// fails when the TPM is unavailable or its AK is another (a cleared TPM: the node must join again).
+func renewalCertifier(leaf *x509.Certificate) (*tpm.Certifier, error) {
+	name, err := pki.TPMAKName(leaf)
+	if err != nil || name == nil {
+		return nil, err
+	}
+	t, err := openTPM()
+	if err != nil {
+		return nil, fmt.Errorf("renewal: the certificate's node key is in the TPM, which is unavailable: %w", err)
+	}
+	c, err := tpm.NewCertifier(t)
+	if err != nil {
+		return nil, fmt.Errorf("renewal: %w", err)
+	}
+	got, err := tpm.Name(c.AKPublic())
+	if err != nil || !bytes.Equal(got, name) {
+		c.Close()
+		return nil, errors.New("renewal: this TPM's attestation key is not the one the certificate names (was the TPM cleared? run bcd join again)")
+	}
+	return c, nil
+}
+
+// certifiedKey makes the next node key where the certifier's AK can certify it.
+func certifiedKey(c *tpm.Certifier) (crypto.Signer, []byte, error) {
+	unique := make([]byte, tpm.NodeKeyUniqueSize)
+	if _, err := rand.Read(unique); err != nil {
+		return nil, nil, err
+	}
+	key, err := c.NodeKey(unique)
+	if err != nil {
+		return nil, nil, fmt.Errorf("renewal: the next node key in the TPM: %w", err)
+	}
+	return key, tpmKeyRecord(unique), nil
+}
+
 // renewOnce renews the certificate with a fresh key, proven by the current one. The next key is
 // written before the request, and the new certificate is stored before the key is promoted, so a
 // crash at any point leaves a matching key and certificate (LoadState promotes or discards).
@@ -75,8 +117,25 @@ func (a *Agent) renewOnce(ctx context.Context) error {
 	now := a.serverNowLocked()
 	a.mu.Unlock()
 	current := a.currentKey()
-	// The next key: in the TPM when the host has one (a node with a file key moves into the TPM here).
-	next, record, err := newNodeKey(a.log)
+	currentLeaf, err := state.Leaf()
+	if err != nil {
+		return err
+	}
+	// A certificate that names the TPM's AK renews only with a next key that AK certifies; the control
+	// plane refuses anything else, so a TPM that cannot is an error here, never a file key.
+	certifier, err := renewalCertifier(currentLeaf)
+	if err != nil {
+		return err
+	}
+	var next crypto.Signer
+	var record []byte
+	if certifier != nil {
+		defer certifier.Close()
+		next, record, err = certifiedKey(certifier)
+	} else {
+		// The next key: in the TPM when the host has one (a node with a file key moves into the TPM here).
+		next, record, err = newNodeKey(a.log)
+	}
 	if err != nil {
 		return err
 	}
@@ -93,6 +152,19 @@ func (a *Agent) renewOnce(ctx context.Context) error {
 	req, err := pki.RenewRequest(state.NodeID, current, next, state.Chain, now)
 	if err != nil {
 		return err
+	}
+	if certifier != nil {
+		digest := sha256.Sum256(req.GetCsr())
+		info, signature, err := certifier.CertifyNodeKey(next.(*tpm.NodeKey), digest[:])
+		if err != nil {
+			return fmt.Errorf("renewal: the TPM's attestation key certifying the next key: %w", err)
+		}
+		req.KeyAttestation = &agentv1.TpmKeyAttestation{
+			AkPublic:    certifier.AKPublic(),
+			KeyPublic:   next.(*tpm.NodeKey).PublicArea(),
+			CertifyInfo: info,
+			Signature:   signature,
+		}
 	}
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()

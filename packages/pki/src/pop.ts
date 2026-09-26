@@ -5,7 +5,7 @@ import { renewPopSigningInput } from '@better-compute/protocol';
 import { parseCsr, type ParsedCsr } from './csr.js';
 import { base64url, sha256 } from './keys.js';
 import type { RevocationSet } from './revocation.js';
-import { parseNodeSpiffeId } from './spiffe.js';
+import { nodeSpiffeIdOf } from './spiffe.js';
 import { verifyCertificateChain, type ParsedCertificate } from './x509.js';
 
 /** `RenewRequest.client_time` is accepted within this distance of server time. */
@@ -134,7 +134,7 @@ export function verifyRenewPop(
   }
   const leaf = path[0]!;
   if (options.revocations?.has(leaf.serial)) throw deny('certificate revoked');
-  const identity = leaf.uriSans.length === 1 ? parseNodeSpiffeId(leaf.uriSans[0]!) : undefined;
+  const identity = nodeSpiffeIdOf(leaf.uriSans);
   if (!identity) throw deny('certificate has no node identity');
   if (options.expectedNodeId !== undefined && identity.nodeId !== options.expectedNodeId)
     throw deny('certificate is for another node');

@@ -9,8 +9,10 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -181,13 +183,45 @@ type Identity struct {
 var segmentPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 var trustDomainPattern = regexp.MustCompile(`^[a-z0-9._-]{1,255}$`)
 
+// NodeKeyStatement reports whether a URI SAN is a `urn:bc:` statement about the node's key (e.g.
+// urn:bc:tpm-ak:<nameAlg>:<digest>, the TPM attestation key that certified it): never an identity.
+func NodeKeyStatement(u *url.URL) bool {
+	return u.Scheme == "urn" && strings.HasPrefix(u.Opaque, "bc:")
+}
+
+// TPMAKName is the TPM name (nameAlg ‖ digest) of the attestation key a node certificate names
+// (urn:bc:tpm-ak:<nameAlg>:<digest>, hex), or nil when it names none: its node key is in that TPM, and
+// every renewal must have that AK certify the next one.
+func TPMAKName(cert *x509.Certificate) ([]byte, error) {
+	for _, u := range cert.URIs {
+		rest, ok := strings.CutPrefix(u.Opaque, "bc:tpm-ak:")
+		if u.Scheme != "urn" || !ok {
+			continue
+		}
+		alg, digest, ok := strings.Cut(rest, ":")
+		a, errA := hex.DecodeString(alg)
+		d, errD := hex.DecodeString(digest)
+		if !ok || errA != nil || errD != nil || len(a) != 2 || len(d) < 20 {
+			return nil, errors.New("pki: a malformed urn:bc:tpm-ak statement")
+		}
+		return append(a, d...), nil
+	}
+	return nil, nil
+}
+
 // NodeIdentity reads the single SPIFFE URI SAN spiffe://<td>/site/<site>/node/<node> and the role
-// extension of an agent certificate.
+// extension of an agent certificate. Every other URI SAN must be a NodeKeyStatement.
 func NodeIdentity(cert *x509.Certificate) (Identity, error) {
-	if len(cert.URIs) != 1 {
+	var ids []*url.URL
+	for _, u := range cert.URIs {
+		if !NodeKeyStatement(u) {
+			ids = append(ids, u)
+		}
+	}
+	if len(ids) != 1 {
 		return Identity{}, errors.New("certificate has no single URI SAN")
 	}
-	u := cert.URIs[0]
+	u := ids[0]
 	if u.Scheme != "spiffe" || !trustDomainPattern.MatchString(u.Host) || u.RawQuery != "" || u.Fragment != "" {
 		return Identity{}, errors.New("not a SPIFFE ID")
 	}

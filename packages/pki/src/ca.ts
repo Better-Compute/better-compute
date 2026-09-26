@@ -20,7 +20,7 @@ import {
   type PublicKeyInput,
 } from './keys.js';
 import { createRevocationSet, normalizeSerial, type RevocationSet } from './revocation.js';
-import { parseNodeSpiffeId } from './spiffe.js';
+import { isNodeKeyStatement, parseNodeSpiffeId } from './spiffe.js';
 import {
   buildCertificate,
   distinguishedName,
@@ -204,8 +204,16 @@ export function createLocalCa(
     switch (kind) {
       case 'node': {
         if (profile.usage !== 'client') throw invalid('A node CA issues client certificates only');
-        if (dnsSans.length || uriSans.length !== 1)
-          throw invalid('A node certificate has exactly one SPIFFE URI SAN and no DNS SANs');
+        // Its SPIFFE ID first, then any `urn:bc:` statements about its key (a TPM AK).
+        if (
+          dnsSans.length ||
+          uriSans.length === 0 ||
+          uriSans.length > 4 ||
+          !uriSans.slice(1).every(isNodeKeyStatement)
+        )
+          throw invalid(
+            'A node certificate has exactly one SPIFFE URI SAN (then only urn:bc: statements) and no DNS SANs',
+          );
         const spiffe = parseNodeSpiffeId(uriSans[0]!);
         if (!spiffe) throw invalid('The URI SAN must be spiffe://<td>/site/<site>/node/<node>');
         if (options.trustDomain !== undefined && spiffe.trustDomain !== options.trustDomain)

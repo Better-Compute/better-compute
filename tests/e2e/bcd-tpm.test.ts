@@ -192,14 +192,34 @@ describe.skipIf(!enabled)('bcd join --attestor tpm', () => {
     const noop = await tpmJoin();
     expect(noop.stdout).toContain(`already joined as ${nodeId}`);
 
-    const { cmd, args } = linux([...tpmEnv(), toLinux(binary), 'node', '--config', toLinux(config)]);
+    // The certificate names the AK that certified the node key (urn:bc:tpm-ak:), so every renewal must
+    // have that AK certify the next key.
+    const certs = async () =>
+      (
+        await dev.database.query<{ der: Uint8Array }>('SELECT der FROM node_certs WHERE node_id = $1 ORDER BY not_before, serial', [nodeId])
+      ).rows.map((row) => parseCertificate(new Uint8Array(row.der)).uriSans);
+    const akUri = `urn:bc:tpm-ak:${Buffer.from(seen[0]!.akName.subarray(0, 2)).toString('hex')}:${Buffer.from(seen[0]!.akName.subarray(2)).toString('hex')}`;
+    expect((await certs()).at(-1)).toContain(akUri);
+    const issued = (await certs()).length;
+
+    // bcd node, renewing soon after it starts (fakehw only): its TPM's AK certifies the new key.
+    const { cmd, args } = linux([...tpmEnv(), 'BCD_RENEW_AFTER=3s', toLinux(binary), 'node', '--config', toLinux(config)]);
     node = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'] });
     node.stderr!.on('data', (chunk: Buffer) => {
       nodeLog += chunk.toString();
       if (process.env.BCD_E2E_LOG) process.stderr.write(chunk);
     });
-    await dev.waitFor([nodeId], { timeoutMs: 120_000 }).catch((error) => {
+    const withLog = (error: unknown) => {
       throw new Error(`${error}\n--- bcd log ---\n${nodeLog.slice(-4000)}`);
-    });
+    };
+    await dev.waitFor([nodeId], { timeoutMs: 120_000 }).catch(withLog);
+    const deadline = Date.now() + 60_000;
+    while (!nodeLog.includes('certificate renewed') && Date.now() < deadline) await new Promise((r) => setTimeout(r, 250));
+    if (!nodeLog.includes('certificate renewed')) withLog('bcd did not renew');
+    const after = await certs();
+    expect(after.length).toBe(issued + 1);
+    // The renewed certificate still names the AK: carried from the old one, the new key proven by it.
+    expect(after.at(-1)).toContain(akUri);
+    expect(sh(`head -n 1 '${dataDir}/node.key'`)).toBe('-----BEGIN BCD TPM NODE KEY-----');
   }, 240_000);
 });

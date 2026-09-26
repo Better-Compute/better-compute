@@ -77,3 +77,23 @@ export function parseNodeSpiffeId(uri: string): NodeSpiffeId | undefined {
   if (site !== 'site' || node !== 'node' || !siteId || !nodeId || extra.length) return undefined;
   return { trustDomain: parsed.trustDomain, siteId, nodeId };
 }
+
+/**
+ * `urn:bc:` URI SANs: what compute proved about a node's key, beside its SPIFFE ID (`urn:bc:tpm-ak:`,
+ * the TPM attestation key that certified it). Never an identity: renewals carry them forward.
+ */
+export const nodeKeyStatementPrefix = 'urn:bc:';
+const statementPattern = /^urn:bc:[a-z0-9-]+:[\x21-\x7e]{1,512}$/;
+
+export function isNodeKeyStatement(uri: string): boolean {
+  return statementPattern.test(uri);
+}
+
+/**
+ * The agent identity in a node certificate's URI SANs: exactly one SPIFFE ID, every other URI a
+ * `urn:bc:` statement. Undefined for any other set.
+ */
+export function nodeSpiffeIdOf(uriSans: readonly string[]): NodeSpiffeId | undefined {
+  const identities = uriSans.filter((uri) => !isNodeKeyStatement(uri));
+  return identities.length === 1 ? parseNodeSpiffeId(identities[0]!) : undefined;
+}

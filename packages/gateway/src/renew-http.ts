@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { systemClock, type Clock } from '@better-compute/core';
-import { parseCertificate, parseNodeSpiffeId } from '@better-compute/pki';
+import { nodeSpiffeIdOf, parseCertificate } from '@better-compute/pki';
 import { decodeMessage, encodeMessage, RenewRequestSchema, RenewResponseSchema } from '@better-compute/protocol';
 import type { Gateway } from './gateway.js';
 import { GrpcCode, GrpcError, toGrpcError } from './grpc.js';
@@ -55,7 +55,7 @@ function leafNodeId(der: Uint8Array | undefined): string | undefined {
   if (!der?.byteLength) return undefined;
   try {
     const leaf = parseCertificate(der);
-    return leaf.uriSans.length === 1 ? parseNodeSpiffeId(leaf.uriSans[0]!)?.nodeId : undefined;
+    return nodeSpiffeIdOf(leaf.uriSans)?.nodeId;
   } catch {
     return undefined;
   }
