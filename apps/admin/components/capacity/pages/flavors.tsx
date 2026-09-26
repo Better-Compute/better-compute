@@ -121,6 +121,7 @@ export function FlavorList({ poolId }: { poolId?: string }) {
       searchPlaceholder="Search flavors"
       initialSort={{ id: 'vcpu', dir: 'asc' }}
       exportName={poolId ? `flavors-${poolId}` : 'flavors'}
+      viewKey={poolId ? 'capacity.pool-flavors' : 'capacity.flavors'}
     />
   );
 }

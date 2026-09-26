@@ -4,6 +4,7 @@ import {
   RiCalendarEventLine,
   RiCalendarScheduleLine,
   RiDownloadLine,
+  RiLightbulbFlashLine,
   RiLayoutGridLine,
   RiMoneyDollarCircleLine,
   RiPieChart2Line,
@@ -17,11 +18,12 @@ import type { AdminModule, CommandDef, SearchResult, WidgetDef, WidgetSetting } 
 import { capacityAt, reservationGpus } from '@/lib/data/capacity';
 import { pools, tenants } from '@/lib/data/topology';
 import { PoolPeek, ReservationPeek, TenantPeek } from './peeks';
-import { FreeGpusStatus, WaitingStatus } from './status';
+import { FreeGpusStatus, InsightsStatus, WaitingStatus } from './status';
 import {
   CapacityHeatmapWidget,
   CapacityKpisWidget,
   FinderWidget,
+  InsightsWidget,
   ModelsWidget,
   padded,
   PoolsWidget,
@@ -141,7 +143,7 @@ function search(query: string, context: { now: number; siteId?: string }): Searc
 
 export const capacityModule: AdminModule = {
   search,
-  status: [FreeGpusStatus, WaitingStatus],
+  status: [FreeGpusStatus, WaitingStatus, InsightsStatus],
   peeks: {
     pool: { title: (id) => pools.find((pool) => pool.id === id)?.name ?? id, href: (id) => `/pools/${id}`, icon: RiServerLine, component: PoolPeek },
     reservation: { title: (id) => `Reservation ${id}`, href: (id) => `/reservations?id=${id}`, icon: RiCalendarEventLine, component: ReservationPeek },
@@ -168,6 +170,7 @@ export const capacityModule: AdminModule = {
     { id: 'usage.spend', title: 'Spend', description: '30-day estimated spend and the top tenants.', icon: RiMoneyDollarCircleLine, module: 'capacity', defaultSize: { w: 4, h: 3 }, minSize: { w: 3, h: 2 }, href: '/usage', component: SpendWidget },
     { id: 'capacity.finder', title: 'Find GPUs', description: 'Where N GPUs are free for a duration, soonest first.', icon: RiSearchEyeLine, module: 'capacity', defaultSize: { w: 4, h: 4 }, minSize: { w: 3, h: 3 }, href: '/reservations/new', component: FinderWidget },
     { id: 'capacity.pressure', title: 'Where it is tight', description: 'Per pool: when 8 GPUs are next free for 24 h.', icon: RiTimerLine, module: 'capacity', defaultSize: { w: 4, h: 3 }, minSize: { w: 3, h: 2 }, href: '/capacity', component: PressureWidget },
+    { id: 'capacity.insights', title: 'Capacity insights', description: 'Pools about to fill, unplaceable work, fragmentation, quota ceilings, billing dead letters.', icon: RiLightbulbFlashLine, module: 'capacity', defaultSize: { w: 4, h: 4 }, minSize: { w: 3, h: 2 }, href: '/capacity', component: InsightsWidget },
   ]),
   commands: [
     { id: 'capacity.new', label: 'Plan a reservation', group: 'Capacity', icon: RiSearchEyeLine, keywords: ['book', 'reserve', 'gpus', 'preview'], href: '/reservations/new', shortcut: 'n r' },

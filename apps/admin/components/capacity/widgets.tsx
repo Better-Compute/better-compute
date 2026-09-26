@@ -14,8 +14,9 @@ import { reservationGpus } from '@/lib/data/capacity';
 import { cx } from '@/utils/cx';
 import { DAY, HOUR, useHourWindow, usePoolRows, useTenantName, useTimelines } from './data';
 import { CapacityHeatmap } from './heatmap';
+import { InsightList } from './insights';
 import { byModel, costOf, dailySpend, fleetSeries, fleetTotals, heatMatrix, pressure, quotaCells, rollup } from './model';
-import { Segmented } from './ui';
+import { planHref, Segmented } from './ui';
 
 // Dashboard widgets of the capacity module. Each renders only its body (the shell's WidgetFrame draws the title
 // bar, menu and resize handle) and adapts to its grid size: 12 columns, 80 px rows.
@@ -67,7 +68,7 @@ export function CapacityKpisWidget({ size }: WidgetProps) {
 
 const HEAT_WINDOWS: Record<string, [number, number]> = { '12/48': [12, 48], '24/96': [24, 96], '48/168': [48, 168], '168/168': [168, 168] };
 
-export function CapacityHeatmapWidget({ size, settings }: WidgetProps) {
+export function CapacityHeatmapWidget({ size, settings, editing }: WidgetProps) {
   const router = useRouter();
   const { snapshot, rows } = usePoolRows();
   const chosen = HEAT_WINDOWS[String(settings.window)];
@@ -87,7 +88,16 @@ export function CapacityHeatmapWidget({ size, settings }: WidgetProps) {
   const matrix = useMemo(() => heatMatrix(gpuRows, timelines, from, HOUR, (to - from) / HOUR), [gpuRows, timelines, from, to]);
   if (!matrix.rows.length) return <EmptyState title="No GPU pools in scope" />;
   const rowHeight = Math.max(12, Math.min(24, Math.floor((bodyHeight(size.h) - 30) / matrix.rows.length)));
-  return <CapacityHeatmap matrix={matrix} now={snapshot.now} rowHeight={rowHeight} compact={size.w < 8} onSelect={(poolId) => router.push(`/pools/${poolId}`)} />;
+  return (
+    <CapacityHeatmap
+      matrix={matrix}
+      now={snapshot.now}
+      rowHeight={rowHeight}
+      compact={size.w < 8}
+      onSelect={(poolId) => router.push(`/pools/${poolId}`)}
+      onRange={editing ? undefined : (poolId, start, end) => router.push(planHref(poolId, start, end))}
+    />
+  );
 }
 
 export function PoolsWidget({ size, settings }: WidgetProps) {
@@ -275,7 +285,16 @@ export function SpendWidget({ size, settings }: WidgetProps) {
   );
 }
 
-const FINDER_GPUS = ['1', '8', '16', '32', '64'] as const;
+/** Capacity insights, most severe first; compact below 4 rows. */
+export function InsightsWidget({ size }: WidgetProps) {
+  return (
+    <div className="-m-3">
+      <InsightList compact={size.h < 4} limit={Math.max(2, Math.floor(bodyHeight(size.h) / (size.h < 4 ? 36 : 64)))} />
+    </div>
+  );
+}
+
+const FINDER_GPUS =['1', '8', '16', '32', '64'] as const;
 const FINDER_DURATIONS = { '4h': 4 * HOUR, '1d': DAY, '3d': 3 * DAY, '7d': 7 * DAY } as const;
 
 /** "Where can I get N GPUs for D?" across every pool, answered from the timelines. */

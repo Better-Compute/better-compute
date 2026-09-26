@@ -91,6 +91,10 @@ export function HoverRow({ label, value }: { label: ReactNode; value: ReactNode 
   );
 }
 
+/** The planner, prefilled with a pool and a window (start in ms, whole hours). */
+export const planHref = (poolId: string, start?: number, end?: number) =>
+  `/reservations/new?pool=${encodeURIComponent(poolId)}${start !== undefined ? `&start=${start}` : ''}${start !== undefined && end !== undefined ? `&hours=${Math.max(1, Math.round((end - start) / 3_600_000))}` : ''}`;
+
 export const utcDay = (t: number) => {
   const date = new Date(t);
   return `${date.toLocaleString('en', { month: 'short', timeZone: 'UTC' })} ${date.getUTCDate()}`;

@@ -20,17 +20,21 @@ export const CapacityHeatmap = memo(function CapacityHeatmap({
   now,
   rowHeight = 22,
   onSelect,
+  onRange,
   compact,
 }: {
   matrix: HeatMatrix;
   now: number;
   rowHeight?: number;
   onSelect?(poolId: string, t: number): void;
+  /** Dragging across a row selects [start, end) of that pool (e.g. to plan a reservation there). */
+  onRange?(poolId: string, start: number, end: number): void;
   /** Hide the right-hand summary column (small widgets). */
   compact?: boolean;
 }) {
   const [ref, width] = useWidth<HTMLDivElement>(720);
   const [hover, setHover] = useState<{ row: number; col: number; x: number; y: number } | null>(null);
+  const [drag, setDrag] = useState<{ row: number; c0: number; c1: number } | null>(null);
   const summaryW = compact ? 0 : SUMMARY_W;
   const labelW = compact ? 104 : LABEL_W;
   const plotW = Math.max(40, width - labelW - summaryW);
@@ -67,24 +71,40 @@ export const CapacityHeatmap = memo(function CapacityHeatmap({
       ref={ref}
       className="relative w-full select-none"
       style={{ height }}
+      onPointerDown={(event) => {
+        if (!hover || event.button !== 0) return;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        setDrag({ row: hover.row, c0: hover.col, c1: hover.col });
+      }}
       onPointerMove={(event) => {
         const box = event.currentTarget.getBoundingClientRect();
         const x = event.clientX - box.left;
         const y = event.clientY - box.top;
         const col = Math.floor((x - labelW) / cellW);
         const row = Math.floor((y - HEADER_H) / rowHeight);
+        if (drag) {
+          setDrag({ ...drag, c1: Math.max(0, Math.min(matrix.columns - 1, col)) });
+          return setHover({ row: drag.row, col: Math.max(0, Math.min(matrix.columns - 1, col)), x, y });
+        }
         if (col < 0 || col >= matrix.columns || row < 0 || row >= matrix.rows.length) return setHover(null);
         setHover({ row, col, x, y });
       }}
-      onPointerLeave={() => setHover(null)}
-      onClick={() => {
-        if (hover && hovered && onSelect) onSelect(hovered.row.id, matrix.from + hover.col * matrix.step);
+      onPointerUp={() => {
+        if (!drag) return;
+        const entry = matrix.rows[drag.row];
+        const [a, b] = drag.c0 <= drag.c1 ? [drag.c0, drag.c1] : [drag.c1, drag.c0];
+        setDrag(null);
+        if (!entry) return;
+        if (b > a && onRange) onRange(entry.row.id, matrix.from + a * matrix.step, matrix.from + (b + 1) * matrix.step);
+        else onSelect?.(entry.row.id, matrix.from + a * matrix.step);
       }}
+      onPointerCancel={() => setDrag(null)}
+      onPointerLeave={() => !drag && setHover(null)}
     >
       <svg
         width={width}
         height={height}
-        className={cx('block', onSelect && 'cursor-pointer')}
+        className={cx('block', onRange ? 'cursor-crosshair touch-none' : onSelect && 'cursor-pointer')}
         role="img"
         aria-label={`Share of GPUs booked per pool, hourly from ${fmtStamp(matrix.from)} to ${fmtStamp(to)} UTC`}
       >
@@ -132,6 +152,18 @@ export const CapacityHeatmap = memo(function CapacityHeatmap({
             <rect x={labelW + hover.col * cellW - 0.5} y={HEADER_H} width={cellW} height={matrix.rows.length * rowHeight} fill="none" stroke="var(--color-text-tertiary)" strokeWidth={1} />
           </g>
         )}
+        {drag && (
+          <rect
+            pointerEvents="none"
+            x={labelW + Math.min(drag.c0, drag.c1) * cellW}
+            y={HEADER_H + drag.row * rowHeight}
+            width={(Math.abs(drag.c1 - drag.c0) + 1) * cellW}
+            height={rowHeight}
+            fill="var(--color-signal-soft)"
+            stroke="var(--color-text-primary)"
+            strokeWidth={1.5}
+          />
+        )}
         {nowX >= labelW && nowX <= labelW + plotW && (
           <g pointerEvents="none">
             <line x1={nowX} x2={nowX} y1={HEADER_H - 4} y2={height} stroke="var(--color-text-primary)" strokeWidth={1.5} />
@@ -142,7 +174,16 @@ export const CapacityHeatmap = memo(function CapacityHeatmap({
           </g>
         )}
       </svg>
-      {hover && hovered && bucket && (
+      {drag && (
+        <HoverCard x={hover?.x ?? 0} y={(hover?.y ?? 0) + 12} containerWidth={width}>
+          <div className="font-mono text-[12px] text-text-primary">{matrix.rows[drag.row]?.row.name}</div>
+          <div className="font-mono text-[11px] text-text-secondary">
+            {fmtStamp(matrix.from + Math.min(drag.c0, drag.c1) * matrix.step)} UTC · {Math.abs(drag.c1 - drag.c0) + 1} h
+          </div>
+          <div className="mt-1 font-mono text-[10px] text-text-tertiary">release to plan a reservation here</div>
+        </HoverCard>
+      )}
+      {!drag && hover && hovered && bucket && (
         <HoverCard x={hover.x} y={hover.y + 12} containerWidth={width}>
           <div className="mb-1 flex items-baseline justify-between gap-3">
             <span className="font-mono text-[12px] text-text-primary">{hovered.row.name}</span>

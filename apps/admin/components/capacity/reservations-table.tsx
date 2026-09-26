@@ -123,6 +123,7 @@ export function ReservationsTable({
       searchPlaceholder="Search id, tenant, project"
       initialSort={{ id: 'start', dir: 'desc' }}
       exportName="reservations"
+      viewKey={hidePool ? 'capacity.pool-reservations' : 'capacity.reservations'}
       facets={[
         { id: 'state', label: 'State', value: (r) => r.state },
         ...(hidePool ? [] : [{ id: 'pool', label: 'Pool', value: (r: Reservation) => r.poolId }]),

@@ -197,6 +197,7 @@ export function PoolsPage() {
           searchPlaceholder="Search pools"
           initialSort={{ id: 'utilization', dir: 'desc' }}
           exportName="pools"
+          viewKey="capacity.pools"
         />
       ) : (
         <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))' }}>

@@ -125,9 +125,14 @@ export function PlannerPage() {
   const perNodeMax = row ? (snapshot.nodes.find((node) => node.poolId === row.id)?.gpus ?? 8) : 8;
   const [perNode, setPerNode] = useState(Math.min(8, perNodeMax));
   const [nodes, setNodes] = useState(1);
-  const [duration, setDuration] = useState<(typeof DURATIONS)[number]['id']>('1d');
-  const [startMode, setStartMode] = useState<StartMode>('now');
-  const [at, setAt] = useState<string>('');
+  // ?start=<ms>&hours=<n> (from a heatmap drag or a link) prefill the window.
+  const linkedHours = Number(search.get('hours')) || undefined;
+  const linkedStart = Number(search.get('start')) || undefined;
+  const preset = linkedHours ? DURATIONS.find((entry) => entry.ms === linkedHours * HOUR) : undefined;
+  const [customMs] = useState(linkedHours && !preset ? linkedHours * HOUR : undefined);
+  const [duration, setDuration] = useState<string>(preset?.id ?? (customMs ? 'custom' : '1d'));
+  const [startMode, setStartMode] = useState<StartMode>(linkedStart && linkedStart > snapshot.now + 60_000 ? 'at' : 'now');
+  const [at, setAt] = useState<string>(linkedStart && linkedStart > snapshot.now + 60_000 ? new Date(linkedStart).toISOString().slice(0, 16) : '');
   const [spot, setSpot] = useState(false);
   const tenantsForPool = useMemo(() => snapshot.offers.filter((offer) => offer.poolId === row?.id).map((offer) => offer.tenantId), [snapshot, row]);
   const [tenantId, setTenantId] = useState<string>(snapshot.tenantId);
@@ -140,7 +145,8 @@ export function PlannerPage() {
     windowAhead.hour,
     windowAhead.to,
   );
-  const durationMs = DURATIONS.find((entry) => entry.id === duration)!.ms;
+  const durationMs = duration === 'custom' && customMs ? customMs : (DURATIONS.find((entry) => entry.id === duration) ?? DURATIONS[3]).ms;
+  const durationOptions = [...DURATIONS.map((entry) => ({ id: entry.id as string, label: entry.id as string })), ...(customMs ? [{ id: 'custom', label: `${customMs / HOUR}h` }] : [])];
   const gpus = Math.min(perNode, perNodeMax) * nodes;
   const timeline = row ? timelines.get(row.id) : undefined;
   const earliest = timeline ? earliestFit(timeline, gpus, durationMs, { notBefore: windowAhead.hour }) : undefined;
@@ -250,7 +256,7 @@ export function PlannerPage() {
               </div>
             </Field>
             <Field label="Duration">
-              <Segmented label="Duration" value={duration} onChange={(value) => setDuration(value as typeof duration)} options={DURATIONS.map((entry) => ({ id: entry.id, label: entry.id }))} />
+              <Segmented label="Duration" value={duration} onChange={setDuration} options={durationOptions} />
             </Field>
             <Field label="Start" hint={startMode === 'earliest' ? (earliest ? `${fmtStamp(earliest)} UTC (${fmtRelative(earliest, snapshot.now)})` : 'no window in 7 days') : undefined}>
               <div className="flex flex-wrap items-center gap-2">

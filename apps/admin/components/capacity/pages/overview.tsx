@@ -3,7 +3,8 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMemo, useState } from 'react';
-import { RiAddLine, RiArrowRightUpLine, RiBarChartBoxLine, RiCalendarScheduleLine, RiTimerLine } from 'react-icons/ri';
+import { RiAddLine, RiArrowRightUpLine, RiBarChartBoxLine, RiCalendarScheduleLine, RiLightbulbFlashLine, RiTimerLine } from 'react-icons/ri';
+import { InsightList } from '../insights';
 import { ButtonLink } from '@/components/base/buttons/button';
 import { Legend, StackedBar, TimeSeriesChart } from '@/components/ui/charts';
 import { EmptyState, Grid, PageHeader, Panel } from '@/components/ui/panel';
@@ -14,7 +15,7 @@ import { reservationGpus } from '@/lib/data/capacity';
 import { DAY, HOUR, useHourWindow, usePoolRows, useTenantName, useTimelines } from '../data';
 import { CapacityHeatmap } from '../heatmap';
 import { byModel, costOf, fleetSeries, fleetTotals, heatMatrix, pressure, quotaCells } from '../model';
-import { HeatLegend, Segmented, StateTag, utcDay } from '../ui';
+import { HeatLegend, planHref, Segmented, StateTag, utcDay } from '../ui';
 
 const SPANS = {
   '3d': { back: 24, ahead: 72, label: '−1d / +3d' },
@@ -106,7 +107,7 @@ export function CapacityOverviewPage() {
       <PageHeader
         icon={RiBarChartBoxLine}
         title="Capacity"
-        description={`${fmtNum(totals.allocated)} of ${fmtNum(totals.allocatable)} schedulable GPUs are allocated (${fmtPct(totals.utilization, 0)}) and ${fmtNum(totals.freeNow)} are free right now. Bookings peak at ${fmtPct(ahead.ratio, 0)} ${fmtRelative(ahead.t, snapshot.now)} (${fmtStamp(ahead.t)} UTC).`}
+        description={`${fmtNum(totals.allocated)} of ${fmtNum(totals.allocatable)} schedulable GPUs are allocated (${fmtPct(totals.utilization, 0)}) and ${fmtNum(totals.freeNow)} are free right now. Bookings peak at ${fmtPct(ahead.ratio, 0)} ${ahead.t <= snapshot.now ? 'this hour' : `${fmtRelative(ahead.t, snapshot.now)} (${fmtStamp(ahead.t)} UTC)`}.`}
         meta={
           <>
             <Tag status={snapshot.source === 'sim' ? 'pending' : 'live'}>{snapshot.source === 'sim' ? 'simulated' : 'live'}</Tag>
@@ -128,9 +129,13 @@ export function CapacityOverviewPage() {
           <Stat label="Schedulable GPUs" value={fmtNum(totals.allocatable)} unit={`/ ${fmtNum(totals.gpus)}`} hint={`${fmtNum(totals.unavailable)} out of service`} />
           <Stat label="Allocated now" value={fmtPct(totals.utilization, 0)} unit={`${fmtNum(totals.allocated)} GPUs`} trend={series.booked.slice(0, Math.max(2, series.times.findIndex((t) => t >= hour) + 1))} />
           <Stat label="Free now" value={fmtNum(totals.freeNow)} unit="GPUs" hint={`${fmtNum(totals.reserved)} of them booked later`} tone="neutral" />
-          <Stat label="Starting in 24 h" value={fmtNum(upcoming24)} unit="reservations" hint={`peak ${fmtPct(ahead.ratio, 0)} ${fmtRelative(ahead.t, snapshot.now)}`} />
+          <Stat label="Starting in 24 h" value={fmtNum(upcoming24)} unit="reservations" hint={`peak ${fmtPct(ahead.ratio, 0)} ${ahead.t <= snapshot.now ? 'this hour' : fmtRelative(ahead.t, snapshot.now)}`} />
           <Stat label="Waiting" value={fmtNum(totals.pending)} unit="pending" hint="need capacity or a confirmation" tone="neutral" />
           <Stat label="Spend, 30 days" value={fmtMoney(spend30, { short: true })} hint="estimated at list price" tone="neutral" />
+        </Panel>
+
+        <Panel className="col-span-12" title="Insights" icon={RiLightbulbFlashLine} meta="what needs a look, and the next step" flush>
+          <InsightList limit={4} />
         </Panel>
 
         <Panel
@@ -149,10 +154,15 @@ export function CapacityOverviewPage() {
         >
           {matrix.rows.length ? (
             <>
-              <CapacityHeatmap matrix={matrix} now={snapshot.now} onSelect={(poolId) => router.push(`/pools/${poolId}`)} />
+              <CapacityHeatmap
+                matrix={matrix}
+                now={snapshot.now}
+                onSelect={(poolId) => router.push(`/pools/${poolId}`)}
+                onRange={(poolId, start, end) => router.push(planHref(poolId, start, end))}
+              />
               <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
                 <HeatLegend />
-                <span className="font-mono text-[10px] text-text-tertiary">left of NOW: booked history · right: the reservation book · click a row for the pool</span>
+                <span className="font-mono text-[10px] text-text-tertiary">left of NOW: history · right: the reservation book · click a row for the pool · drag along a row to plan a reservation there</span>
               </div>
             </>
           ) : (

@@ -1510,6 +1510,222 @@ export function nodeBookings(nodeId: string, now: number, window: { back?: numbe
     .sort((a, b) => a.during!.start - b.during!.start);
 }
 
+// --- Insights -------------------------------------------------------------------------------------------------
+//
+// What an operator should know about capacity right now, derived from the same snapshot every page reads. Shaped
+// like the shell's AttentionItem (plus a suggested action), so "Needs attention" can merge them.
+
+export type InsightSeverity = 'critical' | 'warning' | 'info';
+export type InsightKind =
+  | 'pool-full-soon'
+  | 'unplaceable'
+  | 'fragmented'
+  | 'quota-full'
+  | 'quota-idle'
+  | 'out-of-service'
+  | 'preemption'
+  | 'lease-lapsing'
+  | 'billing-dead-letter';
+
+export interface CapacityInsight {
+  id: string;
+  kind: InsightKind;
+  severity: InsightSeverity;
+  title: string;
+  detail: string;
+  source: 'capacity';
+  href: string;
+  at: number;
+  subject: string;
+  action?: { label: string; href: string };
+}
+
+const insightCache = new WeakMap<CapacitySnapshot, Map<string, CapacityInsight[]>>();
+const SEVERITY_RANK: Record<InsightSeverity, number> = { critical: 0, warning: 1, info: 2 };
+
+export function capacityInsights(now: number, scope: { siteId?: string } = {}): CapacityInsight[] {
+  const snapshot = capacityAt(now);
+  const key = scope.siteId ?? '*';
+  const cached = insightCache.get(snapshot)?.get(key);
+  if (cached) return cached;
+  const t = snapshot.now;
+  const hour = Math.floor(t / HOUR) * HOUR;
+  const source = sharedCapacitySource();
+  const pools = snapshot.pools.filter((pool) => !scope.siteId || pool.siteId === scope.siteId);
+  const inScope = new Set(pools.map((pool) => pool.id));
+  const nameOf = (poolId: string) => topoPools.find((pool) => pool.id === poolId)?.name ?? poolId;
+  const shortOf = (poolId: string) => topoPools.find((pool) => pool.id === poolId)?.short ?? '';
+  const tenantName = (id: string) => snapshot.tenants.find((tenant) => tenant.id === id)?.name ?? id;
+  const clock = (ms: number) => new Date(ms).toISOString().slice(11, 16);
+  const inHours = (ms: number) => (ms < HOUR ? `${Math.max(1, Math.round(ms / 60_000))} min` : `${Math.round(ms / HOUR)} h`);
+  const out: CapacityInsight[] = [];
+  const push = (insight: Omit<CapacityInsight, 'source' | 'at'> & { at?: number }) => out.push({ source: 'capacity', at: t, ...insight });
+
+  for (const pool of pools) {
+    const summary = snapshot.summary.pools.find((entry) => entry.poolId === pool.id);
+    const row = summary?.capacity.find((entry) => entry.resource === 'gpu');
+    if (!row) continue;
+    const name = nameOf(pool.id);
+
+    // Fully booked within 72 h: the first full bucket and how long it lasts.
+    const timeline = source.timelineSync(pool.id, { from: hour, to: hour + 72 * HOUR });
+    const fullAt = timeline.buckets.findIndex((bucket) => bucket.start > t && bucket.free <= 0);
+    if (fullAt >= 0 && timeline.allocatable > 0) {
+      let span = 0;
+      while (timeline.buckets[fullAt + span] && timeline.buckets[fullAt + span]!.free <= 0) span += 1;
+      const start = timeline.buckets[fullAt]!.start;
+      push({
+        id: `capacity.full.${pool.id}.${start}`,
+        kind: 'pool-full-soon',
+        severity: start - t < 12 * HOUR ? 'warning' : 'info',
+        title: `${name} is fully booked in ${inHours(start - t)}`,
+        detail: `No ${shortOf(pool.id)} GPU is free from ${clock(start)} UTC for ${span} h. New requests there will wait in pending.`,
+        href: `/pools/${pool.id}?tab=schedule`,
+        subject: `pool/${pool.id}`,
+        action: { label: 'Find another pool', href: `/reservations/new?pool=${pool.id}` },
+      });
+    }
+
+    // Fragmentation: enough free GPUs in total, but no node holds a whole node's worth.
+    const nodes = snapshot.nodes.filter((node) => node.poolId === pool.id && node.health === 'ok');
+    const perNode = nodes[0]?.gpus ?? 0;
+    if (perNode >= 4) {
+      const held = new Set<string>();
+      for (const reservation of snapshot.reservations)
+        if (reservation.poolId === pool.id && reservation.during && liveStates.has(reservation.state) && reservation.during.start <= t && reservation.during.end > t)
+          for (const atom of reservation.atoms ?? []) held.add(atom);
+      const freePerNode = nodes.map((node) => Array.from({ length: node.gpus }, (_, gpu) => gpu).filter((gpu) => !held.has(`${node.id}/gpu${gpu}`)).length);
+      const free = freePerNode.reduce((sum, value) => sum + value, 0);
+      const whole = freePerNode.filter((value) => value === perNode).length;
+      if (free >= perNode * 2 && whole === 0)
+        push({
+          id: `capacity.fragmented.${pool.id}`,
+          kind: 'fragmented',
+          severity: 'warning',
+          title: `${name} is fragmented`,
+          detail: `${free} GPUs are free, but no node has all ${perNode} free: a ${perNode}-GPU request can't land now. Bin-packing will heal it as bookings end.`,
+          href: `/pools/${pool.id}`,
+          subject: `pool/${pool.id}`,
+          action: { label: 'See the rack', href: `/pools/${pool.id}` },
+        });
+    }
+
+    // Out of service: a large share of the pool can't take work.
+    const out_ = row.total - row.allocatable;
+    if (row.total > 0 && out_ / row.total >= 0.08)
+      push({
+        id: `capacity.oos.${pool.id}`,
+        kind: 'out-of-service',
+        severity: out_ / row.total >= 0.15 ? 'critical' : 'warning',
+        title: `${Math.round((out_ / row.total) * 100)}% of ${name} is out of service`,
+        detail: `${out_} of ${row.total} GPUs sit on nodes that are offline, degraded, provisioning or held.`,
+        href: `/nodes?pool=${pool.id}`,
+        subject: `pool/${pool.id}`,
+        action: { label: 'Open the nodes', href: `/nodes?pool=${pool.id}` },
+      });
+  }
+
+  // Pending work with no window in 7 days, per pool.
+  const stuck = new Map<string, Reservation[]>();
+  for (const reservation of snapshot.reservations)
+    if (reservation.state === 'pending' && inScope.has(reservation.poolId)) stuck.set(reservation.poolId, [...(stuck.get(reservation.poolId) ?? []), reservation]);
+  for (const [poolId, list] of stuck) {
+    const timeline = source.timelineSync(poolId, { from: hour, to: hour + 7 * DAY });
+    const never = list.filter((reservation) => {
+      const need = reservationGpus(reservation);
+      const length = durationMs(reservation.request.duration);
+      let run = 0;
+      for (const bucket of timeline.buckets) {
+        run = bucket.free >= need ? run + HOUR : 0;
+        if (run >= length) return false;
+      }
+      return true;
+    });
+    if (never.length)
+      push({
+        id: `capacity.unplaceable.${poolId}`,
+        kind: 'unplaceable',
+        severity: 'critical',
+        title: `${never.length} reservation${never.length === 1 ? '' : 's'} can't be placed in ${nameOf(poolId)} this week`,
+        detail: `${never.map((reservation) => `${reservation.id} (${reservationGpus(reservation)} GPU, ${reservation.request.duration})`).slice(0, 3).join(', ')}${never.length > 3 ? '…' : ''}: no window in the next 7 days. Move them, or free capacity.`,
+        href: `/reservations?pool=${poolId}`,
+        subject: `pool/${poolId}`,
+        action: { label: 'Review pending', href: `/reservations` },
+      });
+  }
+
+  // Quotas: at the ceiling, or large and unused for the whole usage window.
+  const usedRecently = new Set(snapshot.usage.filter((window) => window.windowStart >= t - 7 * DAY).map((window) => `${window.tags.tenantId}|${window.tags.poolId}`));
+  for (const quota of snapshot.quotas) {
+    if (quota.resource !== 'gpu' || !inScope.has(quota.poolId) || !quota.tenantId || quota.tenantId === snapshot.tenantId) continue;
+    const available = quota.available ?? Math.max(0, quota.max - quota.used);
+    if (quota.max > 0 && available <= 0)
+      push({
+        id: `capacity.quota-full.${quota.tenantId}.${quota.poolId}`,
+        kind: 'quota-full',
+        severity: 'warning',
+        title: `${tenantName(quota.tenantId)} is at its ${shortOf(quota.poolId)} quota`,
+        detail: `${quota.used} of ${quota.max} GPUs in ${nameOf(quota.poolId)}; its next booking there fails with QUOTA_EXCEEDED.`,
+        href: `/quotas?tenant=${quota.tenantId}`,
+        subject: `tenant/${quota.tenantId}`,
+        action: { label: 'Adjust quota', href: `/quotas?tenant=${quota.tenantId}` },
+      });
+    else if (quota.max >= 32 && quota.used === 0 && !usedRecently.has(`${quota.tenantId}|${quota.poolId}`))
+      push({
+        id: `capacity.quota-idle.${quota.tenantId}.${quota.poolId}`,
+        kind: 'quota-idle',
+        severity: 'info',
+        title: `${tenantName(quota.tenantId)} hasn't used its ${quota.max}-GPU ${shortOf(quota.poolId)} quota in 7 days`,
+        detail: `Nothing booked in ${nameOf(quota.poolId)} since last week. Lowering it would tighten the pool's over-commit.`,
+        href: `/quotas?tenant=${quota.tenantId}`,
+        subject: `tenant/${quota.tenantId}`,
+      });
+  }
+
+  // Spot work under preemption notice, and leases about to lapse.
+  const notices = snapshot.reservations.filter((reservation) => inScope.has(reservation.poolId) && reservation.conditions.some((condition) => condition.type === 'PreemptionNotice'));
+  if (notices.length)
+    push({
+      id: 'capacity.preemption',
+      kind: 'preemption',
+      severity: 'info',
+      title: `${notices.length} spot reservation${notices.length === 1 ? '' : 's'} under preemption notice`,
+      detail: `${notices.reduce((sum, reservation) => sum + reservationGpus(reservation), 0)} GPUs go back to regular work when the notices run out.`,
+      href: '/reservations',
+      subject: 'reservations/spot',
+    });
+  const lapsing = snapshot.reservations.filter((reservation) => inScope.has(reservation.poolId) && reservation.leaseExpiresAt !== undefined && reservation.leaseExpiresAt - t < 10 * 60_000 && reservation.leaseExpiresAt > t);
+  if (lapsing.length)
+    push({
+      id: 'capacity.leases',
+      kind: 'lease-lapsing',
+      severity: 'info',
+      title: `${lapsing.length} lease${lapsing.length === 1 ? '' : 's'} lapse within 10 minutes unless renewed`,
+      detail: lapsing.slice(0, 4).map((reservation) => reservation.id).join(', '),
+      href: `/reservations?id=${lapsing[0]!.id}`,
+      subject: 'reservations/leases',
+    });
+
+  // Billing refused usage windows: someone must look.
+  const dead = snapshot.usage.filter((window) => window.outcome === 'dead-lettered' && inScope.has(window.tags.poolId ?? ''));
+  if (dead.length)
+    push({
+      id: 'capacity.dead-letter',
+      kind: 'billing-dead-letter',
+      severity: 'critical',
+      title: `${dead.length} usage window${dead.length === 1 ? '' : 's'} dead-lettered by billing`,
+      detail: `${[...new Set(dead.map((window) => tenantName(window.tags.tenantId ?? '')))].slice(0, 3).join(', ')}: spend is under-reported until they are re-driven.`,
+      href: '/usage',
+      subject: 'usage/dead-letter',
+    });
+
+  out.sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || a.title.localeCompare(b.title));
+  const byScope = insightCache.get(snapshot) ?? new Map<string, CapacityInsight[]>();
+  byScope.set(key, out);
+  insightCache.set(snapshot, byScope);
+  return out;
+}
+
 // --- Live source ----------------------------------------------------------------------------------------
 
 /** `$request(path, body)` against /api/compute, as console-kit's ComputeRequester does. */
