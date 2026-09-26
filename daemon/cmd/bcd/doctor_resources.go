@@ -108,24 +108,59 @@ func systemdVersion() int {
 	return 0
 }
 
-// helperRuntimeChecks: under [helper] bcd node is unprivileged. libvirt-kvm then needs its user in
-// the libvirt group (virsh reaches qemu:///system through it), and cloud-hypervisor is not offered.
-// inGroup reports whether the user belongs to the group (errors: unknown user or group).
-func helperRuntimeChecks(cfg *config.Config, lookPath func(string) (string, error), inGroup func(user, group string) (bool, error)) []doctorCheck {
+// libvirtHost is what helperRuntimeChecks reads of a libvirt host (tests replace it).
+type libvirtHost struct {
+	// inGroup reports whether the user belongs to the group (errors: unknown user or group).
+	inGroup func(user, group string) (bool, error)
+	// primaryGroup is a user's primary group's name.
+	primaryGroup func(user string) (string, error)
+	// qemuConf is /etc/libvirt/qemu.conf.
+	qemuConf func() ([]byte, error)
+	// userExists reports a local user.
+	userExists func(name string) bool
+}
+
+var dynamicOwnershipOff = regexp.MustCompile(`(?m)^\s*dynamic_ownership\s*=\s*0\s*$`)
+
+// helperRuntimeChecks: under [helper] bcd node is unprivileged. libvirt-kvm goes through the helper
+// (root validates every definition), so the node's user must NOT be in the root-equivalent libvirt
+// group; libvirt must not relabel files (dynamic_ownership = 0), and QEMU's user reaches the node's
+// files through the node's group. cloud-hypervisor is not offered.
+func helperRuntimeChecks(cfg *config.Config, lookPath func(string) (string, error), host libvirtHost) []doctorCheck {
 	if cfg.Helper.Socket == "" || cfg.Helper.User == "" {
 		return nil
 	}
 	var out []doctorCheck
 	if _, err := lookPath("virsh"); err == nil {
-		switch ok, err := inGroup(cfg.Helper.User, "libvirt"); {
-		case err != nil:
+		node := cfg.Helper.User
+		switch in, err := host.inGroup(node, "libvirt"); {
+		case err != nil && !strings.Contains(err.Error(), "unknown group"):
 			out = append(out, doctorCheck{"fail", "libvirt", err.Error()})
-		case !ok:
-			out = append(out, doctorCheck{"fail", "libvirt", cfg.Helper.User + " is not in the libvirt group: bcd node cannot drive libvirt-kvm under [helper]"})
+		case in:
+			out = append(out, doctorCheck{"fail", "libvirt", node + " is in the libvirt group, which is root-equivalent: under [helper] libvirt goes through the helper, so remove it (gpasswd -d " + node + " libvirt)"})
 		default:
-			// qemu:///system is root-equivalent (a storage pool over /etc, a domain with a host disk,
-			// DAC relabels): the helper separates nothing on this host until libvirt goes through it.
-			out = append(out, doctorCheck{"warn", "libvirt", cfg.Helper.User + " drives libvirt through the libvirt group, which is root-equivalent: [helper] gives no privilege separation on this libvirt host"})
+			out = append(out, doctorCheck{"ok", "libvirt", "libvirt goes through bcd helper; " + node + " reads its read-only socket only"})
+		}
+		if conf, err := host.qemuConf(); err != nil || !dynamicOwnershipOff.Match(conf) {
+			out = append(out, doctorCheck{"fail", "libvirt", "/etc/libvirt/qemu.conf lacks dynamic_ownership = 0: libvirt would chown the node's files, which the node could race to a root file"})
+		}
+		qemu := ""
+		for _, name := range []string{"libvirt-qemu", "qemu"} {
+			if host.userExists(name) {
+				qemu = name
+				break
+			}
+		}
+		group, gerr := host.primaryGroup(node)
+		switch {
+		case qemu == "":
+			out = append(out, doctorCheck{"warn", "libvirt", "no libvirt-qemu or qemu user: QEMU's user is unknown"})
+		case gerr != nil:
+			out = append(out, doctorCheck{"fail", "libvirt", gerr.Error()})
+		default:
+			if in, err := host.inGroup(qemu, group); err != nil || !in {
+				out = append(out, doctorCheck{"fail", "libvirt", qemu + " is not in group " + group + ": QEMU cannot open the node's disks (usermod -aG " + group + " " + qemu + ")"})
+			}
 		}
 	}
 	if _, err := lookPath("cloud-hypervisor"); err == nil {
@@ -149,6 +184,24 @@ func userInGroup(name, group string) (bool, error) {
 		return false, err
 	}
 	return slices.Contains(gids, g.Gid) || u.Gid == g.Gid, nil
+}
+
+// realLibvirtHost reads this host.
+var realLibvirtHost = libvirtHost{
+	inGroup: userInGroup,
+	primaryGroup: func(name string) (string, error) {
+		u, err := user.Lookup(name)
+		if err != nil {
+			return "", err
+		}
+		g, err := user.LookupGroupId(u.Gid)
+		if err != nil {
+			return "", err
+		}
+		return g.Name, nil
+	},
+	qemuConf:   func() ([]byte, error) { return os.ReadFile("/etc/libvirt/qemu.conf") },
+	userExists: func(name string) bool { _, err := user.Lookup(name); return err == nil },
 }
 
 // hostResourceChecks runs resourceChecks against this host.

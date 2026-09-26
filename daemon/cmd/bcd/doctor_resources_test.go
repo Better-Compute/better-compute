@@ -72,19 +72,35 @@ func TestResourceChecks(t *testing.T) {
 func TestHelperRuntimeChecks(t *testing.T) {
 	cfg := &config.Config{}
 	both := func(string) (string, error) { return "/usr/bin/x", nil }
-	member := func(ok bool) func(string, string) (bool, error) {
-		return func(string, string) (bool, error) { return ok, nil }
+	groups := map[string]bool{} // "user:group"
+	host := libvirtHost{
+		inGroup:      func(u, g string) (bool, error) { return groups[u+":"+g], nil },
+		primaryGroup: func(string) (string, error) { return "bcd", nil },
+		qemuConf:     func() ([]byte, error) { return []byte("# user = \"qemu\"\ndynamic_ownership = 0\n"), nil },
+		userExists:   func(name string) bool { return name == "libvirt-qemu" },
 	}
-	if got := helperRuntimeChecks(cfg, both, member(false)); got != nil {
+	if got := helperRuntimeChecks(cfg, both, host); got != nil {
 		t.Fatalf("without [helper]: %v", got)
 	}
 	cfg.Helper.Socket, cfg.Helper.User = "/run/bcd/helper.sock", "bcd"
-	got := helperRuntimeChecks(cfg, both, member(false))
-	if len(got) != 2 || got[0].status != "fail" || !strings.Contains(got[0].detail, "not in the libvirt group") || got[1].status != "warn" {
-		t.Fatalf("checks = %v", got)
+	statuses := func(got []doctorCheck) string {
+		var s []string
+		for _, c := range got {
+			s = append(s, c.check+":"+c.status)
+		}
+		return strings.Join(s, " ")
 	}
-	// A member works, but the libvirt group is root-equivalent: no privilege separation.
-	if got := helperRuntimeChecks(cfg, both, member(true)); got[0].status != "warn" || !strings.Contains(got[0].detail, "no privilege separation") {
-		t.Fatalf("a member: %v", got)
+	// Set up as the installer does: QEMU in the node's group, no relabelling, the node not in libvirt.
+	groups["libvirt-qemu:bcd"] = true
+	if got := statuses(helperRuntimeChecks(cfg, both, host)); got != "libvirt:ok cloud-hypervisor:warn" {
+		t.Fatalf("set up: %s", got)
+	}
+	// The root-equivalent group, relabelling on, QEMU outside the node's group: each fails.
+	groups["bcd:libvirt"], groups["libvirt-qemu:bcd"] = true, false
+	host.qemuConf = func() ([]byte, error) { return []byte("#dynamic_ownership = 0\n"), nil }
+	got := helperRuntimeChecks(cfg, both, host)
+	if statuses(got) != "libvirt:fail libvirt:fail libvirt:fail cloud-hypervisor:warn" ||
+		!strings.Contains(got[0].detail, "root-equivalent") || !strings.Contains(got[1].detail, "dynamic_ownership") || !strings.Contains(got[2].detail, "usermod") {
+		t.Fatalf("misconfigured: %v", got)
 	}
 }

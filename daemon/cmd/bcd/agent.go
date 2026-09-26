@@ -299,20 +299,35 @@ func runtimesFor(mode, dataDir string, host agent.Host) []runtime.Runtime {
 	return newRuntimes(dataDir, bootID)
 }
 
-// withoutRootRuntimes drops the runtimes an unprivileged bcd node cannot drive: cloud-hypervisor
-// launches its VMMs with systemd-run, creates their taps and hands them files, all as root. They
-// are not advertised, so the control plane places no instance on them here. libvirt stays: libvirtd
-// does its privileged work (the node's user needs the libvirt group; bcd doctor checks it).
-func withoutRootRuntimes(runtimes []runtime.Runtime, log *slog.Logger) []runtime.Runtime {
+// forHelper fits the runtimes to an unprivileged bcd node. cloud-hypervisor is dropped: it launches
+// its VMMs with systemd-run, creates their taps and hands them files, all as root, so it is not
+// advertised and the control plane places nothing on it here. libvirt's privileged operations go
+// through bcd helper (hv), where root validates every definition and path; the node only reads
+// libvirt's read-only socket, so it needs no (root-equivalent) libvirt group.
+func forHelper(runtimes []runtime.Runtime, hv runtime.Hypervisor, log *slog.Logger) []runtime.Runtime {
 	out := runtimes[:0:0]
 	for _, r := range runtimes {
-		if _, ch := r.(*runtime.CloudHypervisor); ch {
+		switch r := r.(type) {
+		case *runtime.CloudHypervisor:
 			log.Warn("cloud-hypervisor needs bcd node to run as root; it is not offered under [helper]")
 			continue
+		case *runtime.Libvirt:
+			r.Hypervisor = hv
 		}
 		out = append(out, r)
 	}
 	return out
+}
+
+// helperHypervisor is runtime.Hypervisor over bcd helper's libvirt ops.
+type helperHypervisor struct{ c helper.Client }
+
+func (h helperHypervisor) Libvirt(ctx context.Context, verb string, op runtime.LibvirtOp) error {
+	return h.c.Libvirt(ctx, verb, helper.LibvirtRequest{Domain: op.Domain, XML: op.XML, Target: op.Target, Bytes: op.Bytes, File: op.File})
+}
+
+func (h helperHypervisor) Console(ctx context.Context, domain string) (*os.File, error) {
+	return h.c.Console(ctx, domain)
 }
 
 // clientRenewer calls Renew on whichever client is current.
@@ -382,7 +397,7 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 	drivers := agent.DriversOf(plugins)
 	runtimes := runtimesFor(mode, cfg.DataDir, host)
 	if underHelper {
-		runtimes = withoutRootRuntimes(runtimes, log)
+		runtimes = forHelper(runtimes, helperHypervisor{helper.Client{Socket: cfg.Helper.Socket}}, log)
 	}
 	if mode == "node" {
 		// Runtimes the plugins serve (a Kata or Firecracker plugin), beside the built-in ones.

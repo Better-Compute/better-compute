@@ -50,6 +50,11 @@ type Libvirt struct {
 	GPUAddress func(id string) (string, bool)
 	// Volumes is the host's volume store (volumes.go); nil: instances with volumes are refused.
 	Volumes *Volumes
+	// Hypervisor, for an unprivileged bcd node (under [helper]): privileged operations go through
+	// it, reads through libvirt's read-only socket, and the files QEMU opens are shared through the
+	// node's group (libvirt with dynamic_ownership off; libvirt-qemu in that group) rather than
+	// relabelled. nil: virsh on qemu:///system as root.
+	Hypervisor Hypervisor
 	// HTTP downloads base images (https only; default a client without a total timeout).
 	HTTP *http.Client
 	// ShutdownTimeout bounds a graceful shutdown before the domain is destroyed (default 60 s).
@@ -90,6 +95,12 @@ func (l *Libvirt) run(ctx context.Context, name string, args ...string) ([]byte,
 }
 
 func (l *Libvirt) virsh(ctx context.Context, args ...string) ([]byte, error) {
+	if l.Hypervisor != nil {
+		if len(args) > 0 && readOnlyVerbs[args[0]] {
+			return l.run(ctx, "virsh", append([]string{"-r", "-c", l.uri()}, args...)...)
+		}
+		return l.privileged(ctx, args)
+	}
 	return l.run(ctx, "virsh", append([]string{"-c", l.uri()}, args...)...)
 }
 
@@ -563,6 +574,22 @@ func (l *Libvirt) Ensure(ctx context.Context, spec *agentv1.InstanceSpec, userDa
 			return err
 		}
 	}
+	if l.Hypervisor != nil {
+		// No relabelling (dynamic_ownership off): QEMU opens the node's files through its group.
+		images := filepath.Join(l.Dir, "images") + string(filepath.Separator)
+		for _, disk := range d.Devices.Disks {
+			if strings.HasPrefix(disk.Source.File, images) {
+				continue // base images are 0644 already
+			}
+			mode := os.FileMode(0o660)
+			if disk.ReadOnly != nil {
+				mode = 0o640
+			}
+			if err := os.Chmod(disk.Source.File, mode); err != nil {
+				return err
+			}
+		}
+	}
 	return l.define(ctx, d, dir)
 }
 
@@ -670,6 +697,11 @@ func (l *Libvirt) GrowVolume(ctx context.Context, id string, v AttachedVolume) e
 // directories on their way). Listing stays closed, and bcd's own files there are 0600.
 func (l *Libvirt) searchable(dir string) error {
 	stop := filepath.Dir(filepath.Clean(l.Dir))
+	// Under a Hypervisor QEMU is in the node's group: the group's search bit, not others'.
+	bit := os.FileMode(0o001)
+	if l.Hypervisor != nil {
+		bit = 0o010
+	}
 	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
 		if !strings.HasPrefix(d+"/", stop+"/") {
 			return nil // outside bcd's data directory: not bcd's to change
@@ -678,8 +710,8 @@ func (l *Libvirt) searchable(dir string) error {
 		if err != nil {
 			return err
 		}
-		if perm := info.Mode().Perm(); perm&0o001 == 0 {
-			if err := os.Chmod(d, perm|0o001); err != nil {
+		if perm := info.Mode().Perm(); perm&bit == 0 {
+			if err := os.Chmod(d, perm|bit); err != nil {
 				return err
 			}
 		}
@@ -1072,6 +1104,10 @@ func (l *Libvirt) Console(ctx context.Context, id string) (io.ReadWriteCloser, e
 	if err := xml.Unmarshal(raw, &x); err != nil || x.Metadata == nil || x.Metadata.Instance.ID != id {
 		return nil, fmt.Errorf("no managed domain %s", id)
 	}
+	if l.Hypervisor != nil {
+		// libvirt's pty is root's: the helper finds and opens it and hands over the descriptor.
+		return l.Hypervisor.Console(ctx, id)
+	}
 	if x.Devices.Serial == nil || x.Devices.Serial.Source == nil || !strings.HasPrefix(x.Devices.Serial.Source.Path, "/dev/pts/") {
 		return nil, fmt.Errorf("domain %s has no serial console (is it running?)", id)
 	}
@@ -1097,7 +1133,10 @@ func (l *Libvirt) Rebind(ctx context.Context, id string, b Rebind) error {
 	}
 	path := filepath.Join(l.instanceDir(id), "rebind.img")
 	scrub(path)
-	if err = os.WriteFile(path, img, 0o600); err == nil {
+	if err = os.WriteFile(path, img, 0o600); err == nil && l.Hypervisor != nil {
+		err = os.Chmod(path, 0o660) // QEMU writes the acknowledgement through the node's group
+	}
+	if err == nil {
 		_, err = l.virsh(ctx, "attach-disk", id, path, "vdz", "--targetbus", "virtio", "--subdriver", "raw", "--serial", RebindSerial, "--live")
 	}
 	l.mu.Unlock()

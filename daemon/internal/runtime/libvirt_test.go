@@ -41,8 +41,19 @@ func (f *fakeVirt) exec(_ context.Context, name string, args ...string) ([]byte,
 	defer f.mu.Unlock()
 	switch name {
 	case "virsh":
+		readOnly := args[0] == "-r"
+		if readOnly {
+			args = args[1:]
+		}
 		args = args[2:] // -c <uri>
-		f.calls = append(f.calls, "virsh "+strings.Join(args, " "))
+		if readOnly {
+			f.calls = append(f.calls, "virsh -r "+strings.Join(args, " "))
+			if !readOnlyVerbs[args[0]] {
+				return nil, fmt.Errorf("virsh -r %s: operation forbidden for read only access", args[0])
+			}
+		} else {
+			f.calls = append(f.calls, "virsh "+strings.Join(args, " "))
+		}
 		return f.virsh(args)
 	case "qemu-img":
 		f.calls = append(f.calls, "qemu-img "+args[0])
