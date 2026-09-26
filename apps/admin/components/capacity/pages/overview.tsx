@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMemo, useState } from 'react';
 import { RiAddLine, RiArrowRightUpLine, RiBarChartBoxLine, RiCalendarScheduleLine, RiFileTextLine, RiLightbulbFlashLine, RiLineChartLine, RiTimerLine } from 'react-icons/ri';
+import { HourDrawer } from '../hour-drawer';
 import { InsightList } from '../insights';
 import { ButtonLink } from '@/components/base/buttons/button';
 import { Legend, Sparkline, StackedBar, TimeSeriesChart } from '@/components/ui/charts';
@@ -101,6 +102,7 @@ export function CapacityOverviewPage() {
   const tenantName = useTenantName();
   const [span, setSpan] = useState<SpanKey>('7d');
   const [heatView, setHeatView] = useState<'chart' | 'table'>('chart');
+  const [cell, setCell] = useState<{ poolId: string; t: number } | undefined>();
   const { from, to, hour } = useHourWindow(SPANS[span].back, SPANS[span].ahead);
   const gpuRows = useMemo(() => rows.filter((row) => row.unit === 'gpu'), [rows]);
   const timelines = useTimelines(
@@ -246,12 +248,12 @@ export function CapacityOverviewPage() {
               <CapacityHeatmap
                 matrix={matrix}
                 now={snapshot.now}
-                onSelect={(poolId) => router.push(`/pools/${poolId}`)}
+                onSelect={(poolId, t) => setCell({ poolId, t })}
                 onRange={(poolId, start, end) => router.push(planHref(poolId, start, end))}
               />
               <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
                 <HeatLegend />
-                <span className="font-mono text-[10px] text-text-tertiary">left of NOW: history · right: the reservation book · click a row for the pool · drag along a row to plan a reservation there</span>
+                <span className="font-mono text-[10px] text-text-tertiary">left of NOW: history · right: the reservation book · click a cell for who holds it · drag along a row to plan a reservation there</span>
               </div>
             </>
           ) : (
@@ -422,6 +424,7 @@ export function CapacityOverviewPage() {
           </p>
         </Panel>
       </Grid>
+      <HourDrawer target={cell} onClose={() => setCell(undefined)} />
     </>
   );
 }

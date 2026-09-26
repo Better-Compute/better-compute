@@ -129,8 +129,12 @@ export const CapacityHeatmap = memo(function CapacityHeatmap({
       style={{ height }}
       onPointerDown={(event) => {
         if (!hover || event.button !== 0) return;
-        event.currentTarget.setPointerCapture(event.pointerId);
         setDrag({ row: hover.row, c0: hover.col, c1: hover.col });
+        try {
+          event.currentTarget.setPointerCapture(event.pointerId);
+        } catch {
+          // Synthetic or already-released pointers can't be captured; the drag still works inside the chart.
+        }
       }}
       onPointerMove={(event) => {
         const box = event.currentTarget.getBoundingClientRect();

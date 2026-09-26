@@ -158,7 +158,9 @@ export function QuotasPage() {
                             {cell ? (
                               <CellMeter cell={cell} resource={resource} onEdit={() => setTarget({ tenantId, poolId: pool.id, resource })} />
                             ) : (
-                              <span className="block px-2 py-1.5 font-mono text-[11px] text-text-tertiary">not offered</span>
+                              <span className="block px-2 py-1.5 text-center font-mono text-[11px] text-text-tertiary/60" title="Not offered to this tenant">
+                                —
+                              </span>
                             )}
                           </td>
                         );

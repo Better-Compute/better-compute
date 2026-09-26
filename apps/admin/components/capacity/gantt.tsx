@@ -258,7 +258,11 @@ export const ReservationGantt = memo(function ReservationGantt({
           onPointerDown={(event) => {
             if (event.button !== 0 || (event.target as Element).tagName === 'rect' && (event.target as Element).getAttribute('data-bar')) return;
             drag.current = { x: event.clientX, from, to };
-            event.currentTarget.setPointerCapture(event.pointerId);
+            try {
+              event.currentTarget.setPointerCapture(event.pointerId);
+            } catch {
+              // Synthetic or released pointers can't be captured; panning still works inside the chart.
+            }
           }}
           onPointerMove={(event) => {
             if (!drag.current) return;
