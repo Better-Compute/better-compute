@@ -16,6 +16,7 @@ import (
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/helper"
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
+	"github.com/better-compute/better-compute/daemon/internal/slice"
 )
 
 // Host is the machine under the agent: its boot, its hardware and its filesystem. The real host
@@ -50,6 +51,10 @@ type Host interface {
 	// RemoveFile removes one (absent is fine). Under bcd helper, the helper does both.
 	WriteFile(abs string, data []byte, mode os.FileMode) error
 	RemoveFile(abs string) error
+	// ApplySlice creates or updates a GPU hold's cgroup slice with its limits; RemoveSlice stops it
+	// once it is empty (slices.go, PLAN.md §3.8).
+	ApplySlice(ctx context.Context, name string, limits slice.Limits) error
+	RemoveSlice(ctx context.Context, name string) error
 
 	// The ramdisk's operations (ramdisk.go, ramdisk_host.go).
 	SecureErase(ctx context.Context, d *inventory.Disk, mode agentv1.WipeMode) (method string, verified bool, err error)

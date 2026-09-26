@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -30,6 +31,7 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
 	"github.com/better-compute/better-compute/daemon/internal/journal"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
+	"github.com/better-compute/better-compute/daemon/internal/slice"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -220,6 +222,21 @@ func (h *fakeHost) WriteFile(abs string, data []byte, mode os.FileMode) error {
 
 func (h *fakeHost) RemoveFile(abs string) error {
 	if err := os.Remove(h.Path(abs)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (h *fakeHost) ApplySlice(_ context.Context, name string, limits slice.Limits) error {
+	raw, err := json.Marshal(limits)
+	if err != nil {
+		return err
+	}
+	return writeFile(h.Path(fakeSliceDir+"/"+name+".json"), raw, 0o644)
+}
+
+func (h *fakeHost) RemoveSlice(_ context.Context, name string) error {
+	if err := os.Remove(h.Path(fakeSliceDir + "/" + name + ".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil

@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -30,6 +31,7 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/hostconfig"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
 	"github.com/better-compute/better-compute/daemon/internal/selfupdate"
+	"github.com/better-compute/better-compute/daemon/internal/slice"
 )
 
 // Version is the node ↔ helper protocol version.
@@ -67,6 +69,9 @@ type Request struct {
 	Running string `json:"running,omitempty"`
 	// host.unit: a config unit of NodeSpec.host and its settings (absent: the unit left the spec, and
 	// what it wrote is cleaned); GPUsBusy are the GPUs holding allocations (mig-layout skips them).
+	// slice.apply / slice.remove: a GPU hold's slice (PLAN.md §3.8) and its limits.
+	Slice    string          `json:"slice,omitempty"`
+	Limits   *slice.Limits   `json:"limits,omitempty"`
 	Unit     string          `json:"unit,omitempty"`
 	Settings json.RawMessage `json:"settings,omitempty"`
 	GPUsBusy []string        `json:"gpusBusy,omitempty"`
@@ -203,6 +208,37 @@ type Server struct {
 	// host.unit. The units validate their settings themselves (hostconfig), exactly as in bcd node.
 	HostUnits  func(hostconfig.Options) *hostconfig.Registry
 	HostSystem hostconfig.System
+	// SliceRunner runs systemctl for slice.apply and slice.remove (default: the real one).
+	SliceRunner slice.Runner
+}
+
+// SliceTimeout bounds slice.apply and slice.remove (a few systemctl calls).
+const SliceTimeout = 30 * time.Second
+
+// ExecRunner runs a command, its output in the error.
+func ExecRunner(ctx context.Context, name string, args ...string) error {
+	if out, err := exec.CommandContext(ctx, name, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("%s: %v: %s", name, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// holdSlice applies or removes a hold's slice, as root, after slice.Check: only bcd-alloc-<id>.slice
+// names and cpulists get to systemctl and cgroupfs.
+func (s *Server) holdSlice(ctx context.Context, req Request) error {
+	run := s.SliceRunner
+	if run == nil {
+		run = ExecRunner
+	}
+	ctx, cancel := context.WithTimeout(ctx, SliceTimeout)
+	defer cancel()
+	if req.Op == "slice.remove" {
+		return slice.Remove(ctx, run, s.Root, req.Slice)
+	}
+	if req.Limits == nil {
+		return errors.New("slice.apply needs limits")
+	}
+	return slice.Apply(ctx, run, s.Root, req.Slice, *req.Limits)
 }
 
 // HostUnitTimeout bounds host.unit: a driver install builds kernel modules.
@@ -419,6 +455,8 @@ func (s *Server) op(ctx context.Context, req Request) error {
 		return s.Ops.ReloadSSH()
 	case "host.unit":
 		return s.hostUnit(ctx, req)
+	case "slice.apply", "slice.remove":
+		return s.holdSlice(ctx, req)
 	}
 	return fmt.Errorf("unknown operation %q", req.Op)
 }
@@ -603,6 +641,16 @@ func (u UpdateClient) Settle(running string) (selfupdate.Settlement, error) {
 func (c Client) HostUnit(ctx context.Context, unit string, settings json.RawMessage, gpusBusy []string) error {
 	c.Timeout = HostUnitTimeout + time.Minute
 	return c.Do(ctx, Request{Op: "host.unit", Unit: unit, Settings: settings, GPUsBusy: gpusBusy})
+}
+
+// ApplySlice asks the helper to create or update a hold's slice with its limits.
+func (c Client) ApplySlice(ctx context.Context, name string, limits slice.Limits) error {
+	return c.Do(ctx, Request{Op: "slice.apply", Slice: name, Limits: &limits})
+}
+
+// RemoveSlice asks the helper to stop a hold's slice once it is empty (slice.ErrBusy's text if not).
+func (c Client) RemoveSlice(ctx context.Context, name string) error {
+	return c.Do(ctx, Request{Op: "slice.remove", Slice: name})
 }
 
 // WriteFile writes a file bcd node owns, named by its path (classified into kind and id).

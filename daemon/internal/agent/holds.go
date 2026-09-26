@@ -8,6 +8,7 @@ import (
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
+	"github.com/better-compute/better-compute/daemon/internal/slice"
 )
 
 // Hold atoms (PLAN.md §10.6): a whole GPU ("gpu", its UUID), a MIG compute instance ("gpu.mig",
@@ -129,7 +130,7 @@ func cdiDeviceName(id string) string {
 }
 
 // holdSlice is the cgroup-v2 slice a hold with limits runs its workloads in (PLAN.md §3.8).
-func holdSlice(allocationID string) string { return "bcd-alloc-" + allocationID + ".slice" }
+func holdSlice(allocationID string) string { return slice.Name(allocationID) }
 
 // mpsPipeDir is where the MPS control daemon (hostconfig's gpu-sharing unit) listens; slot holds get
 // it as CUDA_MPS_PIPE_DIRECTORY when it runs.

@@ -108,10 +108,16 @@ func (d *devicesConverger) Plan(_ context.Context, desired []byte) ([]converge.A
 		delete(observed, id)
 		actions = append(actions, converge.Action{
 			Description: "release " + id,
-			Apply: func(context.Context) error {
+			Apply: func(ctx context.Context) error {
 				for _, p := range []string{cdiSpecPath(id), envFilePath(id)} {
 					if err := host.RemoveFile(p); err != nil {
 						return err
+					}
+				}
+				// Its slice goes once empty; a workload still running keeps it (and its limits).
+				if name := holdSlice(id); d.a.sliceExists(name) {
+					if err := host.RemoveSlice(ctx, name); err != nil {
+						d.a.log.Info("hold slice kept", "allocation", id, "reason", err.Error())
 					}
 				}
 				d.a.log.Info("allocation released", "allocation", id, "generation", generation)
@@ -120,6 +126,7 @@ func (d *devicesConverger) Plan(_ context.Context, desired []byte) ([]converge.A
 						AllocationId: id, Generation: generation, DeviceIds: h.deviceIDs,
 					}},
 				})
+				d.a.kube.Trigger()
 				return nil
 			},
 		})
@@ -168,6 +175,15 @@ func (d *devicesConverger) Plan(_ context.Context, desired []byte) ([]converge.A
 			ids = append(ids, dev.GetId())
 		}
 		if _, held := observed[id]; held {
+			if limits := as.GetLimits(); limits != nil && !d.a.sliceExists(holdSlice(id)) {
+				// Runtime properties vanish on a reboot; the hold (its CDI spec) does not.
+				actions = append(actions, converge.Action{
+					Description: "restore the slice of " + id,
+					Apply: func(ctx context.Context) error {
+						return host.ApplySlice(ctx, holdSlice(id), sliceLimits(limits))
+					},
+				})
+			}
 			if _, err := os.Stat(host.Path(envFilePath(id))); errors.Is(err, os.ErrNotExist) {
 				atoms, _, _ := resolve(as)
 				actions = append(actions, converge.Action{
@@ -198,7 +214,12 @@ func (d *devicesConverger) Plan(_ context.Context, desired []byte) ([]converge.A
 		}
 		actions = append(actions, converge.Action{
 			Description: "bind " + id,
-			Apply: func(context.Context) error {
+			Apply: func(ctx context.Context) error {
+				if limits := as.GetLimits(); limits != nil {
+					if err := host.ApplySlice(ctx, holdSlice(id), sliceLimits(limits)); err != nil {
+						return fmt.Errorf("the slice of %s: %w", id, err)
+					}
+				}
 				spec, err := json.Marshal(newCDISpec(as, generation, atoms, mps))
 				if err != nil {
 					return err
@@ -225,6 +246,7 @@ func (d *devicesConverger) Plan(_ context.Context, desired []byte) ([]converge.A
 						EnvFile:      envFilePath(id),
 					}},
 				})
+				d.a.kube.Trigger()
 				return nil
 			},
 		})
