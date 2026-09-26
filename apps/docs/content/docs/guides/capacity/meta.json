@@ -9,6 +9,7 @@
     "quotas-and-usage",
     "gang-and-calendar",
     "spot-and-preemption",
-    "fractional-gpus"
+    "fractional-gpus",
+    "kubernetes"
   ]
 }

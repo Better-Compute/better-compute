@@ -6,6 +6,8 @@ icon: Ticket
 packages: ['@better-compute/capacity']
 sources:
   - packages/capacity/src/reservations.ts
+  - packages/capacity/src/host-resources.ts
+  - packages/capacity/src/schemas.ts
   - packages/capacity/src/migrations.ts
   - packages/server/src/join/allocation-binding.ts
   - packages/server/src/join/gateway-reports.ts
@@ -109,8 +111,9 @@ can retry. See the [CLI reference](/docs/reference/cli).
     idempotencyKey: { type: 'string', description: '1 to 128 letters, digits, dots, underscores, colons or hyphens. Scoped to the tenant and the caller.', required: true },
     start: { type: 'number', description: 'Epoch milliseconds; a later start makes a calendar reservation.', default: 'now' },
     topology: { type: "'any' | 'nvlink-all'", description: 'nvlink-all requires every GPU of a device request to be NVLink-connected.', default: "'any'" },
-    binding: { type: "'hold' | 'node'", description: "hold hands the devices to software on the node; node leases whole machines (v0.5).", default: "'hold'" },
+    binding: { type: "'hold' | 'node' | 'kubernetes'", description: "hold hands the devices to software on the node; node leases whole machines (v0.5); kubernetes hands them to the node's kubelet, in a pool with policy.kubernetes (v1.1).", default: "'hold'" },
     node: { type: '{ profileId: string; profileVersion?: number }', description: "binding 'node' only: the metal profile to deploy." },
+    resources: { type: '{ vcpu?: number; memoryGiB?: number; hugepages1Gi?: number }', description: 'Host CPUs (0 to 4096), memory in GiB (0 to 65536) and 1 GiB pages (0 to 4096) per node, booked with the devices (v1.1). Left out: the pool\'s per-GPU share. Refused with binding node. See host resources below.' },
     leaseSeconds: { type: 'number', description: '30 to 86400. Makes the reservation renewable: it is released unless renewed within this period.' },
     projectId: { type: 'string', description: 'A project (prj_) to account the reservation to.' },
     spot: { type: 'boolean', description: 'Preemptible, billed at the spot meter (v0.5).', default: 'false' },
@@ -233,7 +236,9 @@ answer whether or not anything exists.
 
 The idempotency row is looked up and locked. The pool must be owned by or offered to the tenant and
 not archived, or the answer is `NOT_FOUND`. Device classes must fit the pool's sharing mode, and
-`binding: 'node'` needs a `tenantRoot` pool. Then the draft is inserted with its row in the IAM
+`binding: 'node'` needs a `tenantRoot` pool, `binding: 'kubernetes'` a pool with `policy.kubernetes`. A request
+without `resources` gets the pool's per-GPU share of host CPU and memory here, stored in the request (see
+[host resources](#host-resources)). Then the draft is inserted with its row in the IAM
 <Term id="authz-projection">authz projection</Term>, parented to the pool and owned by the caller:
 
 | Attribute | Value |
@@ -396,6 +401,34 @@ reports `AllocationBound` with the CDI device names; once every allocation is bo
 The gateway accepts a report only about an allocation placed on the reporting node's own session; a report naming
 another node's allocation is ignored like an unknown one. A report that arrives while the reservation is still
 `placed` is judged as soon as the start is reached, not after the bind timeout.
+
+**`kubernetes`** (v1.1, a21c1c1) is a hold whose devices the node hands to its kubelet: the assignment carries
+`BINDING_KUBERNETES`, bcd binds it like a hold and marks its CDI spec for its device plugin, which advertises exactly
+those devices as `bcd.dev/gpu`, `bcd.dev/gpu.mig` or `bcd.dev/gpu.slot` until the reservation ends. It needs a pool
+with `policy.kubernetes` (`INVALID_INPUT` otherwise). See [Kubernetes workers](/docs/guides/capacity/kubernetes).
+
+### Host resources
+
+A reservation can book a host's CPUs, memory and 1 GiB huge pages with its GPUs (PLAN.md §3.8, a21c1c1):
+
+- **What is bookable.** The `capacity.hosts` reconciler (every 30 seconds, `hostSyncEvery`) keeps each host's
+  `vcpu`, `memoryGiB`, `hugepages2Mi` and `hugepages1Gi` rows in step with its applied inventory (8a7f8eb); see
+  [pools](/docs/guides/capacity/pools#pool-policy). A host without rows books none.
+- **`resources`.** `{ vcpu, memoryGiB, hugepages1Gi }` per node (per gang member for a gang), booked on the devices'
+  node in the same guarded statement as the devices, so a node that cannot give them is not a fit.
+- **Without `resources`**, a request for whole GPUs books the pool's per-GPU share of CPU and memory, times its whole
+  GPUs: `policy.perGpu.vcpu` and `policy.perGpu.memoryGiB` where set, otherwise the smallest share any GPU host of the
+  pool can give (`floor(allocatable × ratio ÷ bookable GPUs)`), so the share fits on every host. It is resolved once,
+  when the draft is written, and stored in the request. Requests for MIG instances or slots only book none, so pools
+  behave as before until their hosts have rows.
+- **Quota.** Host resources are not charged to quota; the devices are.
+- **On the node** (c5a419c, 260e33c), the booked resources become the assignment's limits: `cpu_millis` from
+  `vcpu`, `memory_bytes` from `memoryGiB`, `hugepages_1gi`, and a cpuset on the NUMA nodes of the hold's devices when
+  those nodes have enough CPUs (`cpus`) or memory (`mems`). bcd creates the cgroup slice `bcd-alloc-<allocation>.slice`
+  with those limits, names it in the CDI spec (`bcd.dev/cgroup-parent`) and the env (`BCD_CGROUP_PARENT`), and keeps
+  it until it is empty after the release. The workload manager on the node (containerd, Slurm, a wrapper) places the
+  workload in it; see [device assignments](/docs/daemon/delivery#device-assignments). The kubelet does not, so a
+  `kubernetes` binding's pods are not limited by it.
 
 ### Attested bindings
 

@@ -5,7 +5,7 @@ metaTitle: VPS networking and pool IPAM
 icon: Network
 status: beta
 packages: ['@better-compute/vps']
-sources: ['packages/vps/src/ipam.ts', 'packages/vps/src/migrations.ts', 'packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/server/src/controllers/nodespec.ts', 'proto/bettercompute/agent/v1/session.proto', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-proxmox/src/proxmox.ts', 'packages/provision/src/profile.ts', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts', 'daemon/internal/agent/netpolicy.go', 'daemon/internal/runtime/cloudhypervisor.go', 'daemon/internal/helper/helper.go', 'PLAN.md']
+sources: ['packages/vps/src/ipam.ts', 'daemon/internal/runtime/netconfig.go', 'packages/vps/src/migrations.ts', 'packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/server/src/controllers/nodespec.ts', 'proto/bettercompute/agent/v1/session.proto', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-proxmox/src/proxmox.ts', 'packages/provision/src/profile.ts', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts', 'daemon/internal/agent/netpolicy.go', 'daemon/internal/runtime/cloudhypervisor.go', 'daemon/internal/helper/helper.go', 'PLAN.md']
 ---
 
 A VM is not much use until you know its address. Better Compute keeps networking deliberately small: an address
@@ -43,6 +43,7 @@ const range = await compute.context.sql.transaction((tx) =>
     gateway: { type: 'string', description: 'The gateway address. It is never leased, even when it falls inside the range.', required: true },
     firstHost: { type: 'string', description: 'The first address to lease.', default: 'the address after the gateway' },
     lastHost: { type: 'string', description: 'The last address to lease.', default: 'the address before the broadcast address' },
+    dns: { type: 'string[]', description: "DNS servers for the guests (ip_pools.dns, migration vps/0019_ip_pool_dns; 387c22f). Empty: guests keep their image's resolvers.", default: '[]' },
   }}
 />
 
@@ -109,6 +110,16 @@ A hosted instance's network reaches its host in `InstanceSpec.nics`, in the `ins
 | `network` | The host bridge: `br0`, or `vps({ hostNetwork })` |
 | `mac` | A stable locally administered MAC: `02` followed by the first 10 hex digits of the SHA-256 of the instance id |
 | `addresses` | The IPAM lease in CIDR form (the address with the range's prefix length), or none without a lease |
+| `gateway` | The range's gateway, for a NIC with a lease (387c22f) |
+| `nameservers` | The range's `dns`, for a NIC with a lease, when it has any (387c22f) |
+
+**The guest's network configuration.** Since 0791fc9 bcd writes a cloud-init `network-config` (version 2) into the
+NoCloud seed of `libvirt-kvm` and `cloud-hypervisor` guests when a NIC has static configuration: each such NIC matched
+by its MAC, its addresses static, a default route (`0.0.0.0/0`, or `::/0` for an IPv6 gateway) through its gateway, and
+its nameservers. A NIC without addresses keeps DHCP, and with no static NIC at all bcd writes no `network-config`, so
+the image's own fallback (DHCP on the first NIC) stays. bcd parses every value and quotes it again, so a malformed
+lease fails the seed rather than adding YAML to it. A bcx runtime plugin gets each NIC's gateway and nameservers in its
+spec.
 
 The NodeSpec encoder keeps NIC order, since it is the guest's interface order. The spec also carries the instance's
 `allocationId`, which the host names when it fetches the user data. The FakeDaemon's fake hypervisor creates a tap

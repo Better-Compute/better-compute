@@ -119,7 +119,9 @@ const template = await client.sandboxTemplates.create({
 />
 
 The checks are those of a hosted `instances.create`: the pool must be visible to the tenant, and its runtime must boot
-the image's format and pass through the flavor's GPUs. Unknown fields are `INVALID_INPUT`.
+the image's format and pass through the flavor's GPUs. Unknown fields are `INVALID_INPUT`. A sandbox takes its
+flavor's [placement](/docs/guides/vps/flavors#placement) with the rest of its shape (9d55b36): huge-page-backed memory,
+a NUMA node, pinned vCPUs.
 
 A template that names secrets, in `env` or as a `secret://` user data, hands them to every sandbox's guest, which can
 read them, while secrets are otherwise write-only. So those references must be secrets the tenant wrote itself with
@@ -623,6 +625,11 @@ sweeper or the gateway wakes `vps.sandboxes` with the snapshot id:
 
 `sandboxes.get` lists a sandbox's snapshots (`id`, `state`, `includeMemory`, `keep`, `runtime`, `sha256`,
 `sizeBytes`, `cpuModel`, `reason`, `createdAt`, `readyAt`).
+
+A sandbox with passthrough GPUs cannot be snapshotted with its memory: since be4de2a both runtimes refuse it on the
+host before capturing anything, because the GPU's state lives in the device and no VMM saves it, so the snapshot ends
+`failed`. The control plane does not check this up front. Take a disk-only snapshot (`includeMemory: false`) of such
+a sandbox instead.
 
 ### Restore
 

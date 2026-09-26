@@ -321,6 +321,27 @@ session (`newHarness`), answering its `SecretRequest`s with sealed JWEs:
 | `internal/bootparams` `TestRenderParseRoundTrip`, `cmd/bcd` `TestRamdiskNeedsBootParameters` | The kernel command line round-trips; `bcd ramdisk` without its parameters exits 2 |
 | `cmd/bcd` `TestSimNeedsNodesAndAConfiguration` | `bcd sim --nodes 0` exits 2; `bcd sim` with a missing configuration file exits 1 |
 
+**Host configuration, holds and Kubernetes (v1.1).** These run against fakes: `hostconfig.FakeSystem` (an in-memory
+host whose files and command answers a test scripts), a fake root for a real `Agent`, and a fake kubelet on real unix
+sockets. None has run on a real machine.
+
+| Test | Checks |
+| --- | --- |
+| `internal/hostconfig` (18 tests) | Every config unit's plan and apply, drift, cleanup, refusals and reboot cases: sysctl, kernel modules before the sysctl they provide, huge pages with the GRUB and grubby fallbacks and per-NUMA pools, the NVIDIA driver installed or asking for a reboot, the toolkit's CDI regeneration, Fabric Manager and `FabricManagerDown`, the MIG layout grammar and busy GPUs, MPS and `MPSDown`, unknown units not blocking the others (6c2343f). See [host configuration](/docs/daemon/host-config#what-the-tests-cover) |
+| `internal/agent` `TestHostSectionConverges`, `TestGPUBusy` | The host section through a real `Agent` under a fake root, with `FabricManagerDown` in the status report; a GPU is busy when a hold's atom id names it (0f68c9a) |
+| `internal/agent` `TestResolveAtomNamesParentsAndWhatTheDriverSees`, `TestHoldConflictsAcrossWholeGPUsPartsAndVMs`, `TestCDISpecOfPartsAndLimits` | MIG and slot atoms resolved against the inventory, parent-aware conflicts and the VM passthrough guard, CDI names without `/`, the slice annotation and env, one `NVIDIA_VISIBLE_DEVICES` per hold (46a61db, d02ba4f) |
+| `internal/slice`, `internal/agent` slice tests | The hold slice's systemd properties and hugetlb limits, the name and cpulist checks, removal only once empty (1d03c28, 260e33c) |
+| `internal/kube` `TestJoinFromBareHost`, `TestJoinRefusesAnotherCluster`, `TestJoinSettingsAreCheckedAgain`, `TestJoinUnderHelper`, `TestContainerdImport`, `TestJoinConfigurationV1beta3` | The `k8s-join` unit against `FakeSystem` (88ecb07) |
+| `internal/kube` `TestDevicePlugin`, `TestResourceOf`, `TestWireMatchesUpstream` | The device plugin against a fake kubelet: registration, ListAndWatch with health and NUMA, Allocate and its refusal of an unbound device, preferred allocation, the reaper's grace period, re-registration after a kubelet restart; the hand-encoded messages against the upstream descriptors |
+| `internal/agent` `TestHostAdmissionCountsCommittedMemoryNotUse`, `TestHostAdmissionTakesHugepagesFromThePlacementNodes`, `TestStartsOnlyWhatIsNotAlreadyRunning` | Host-side admission of instance starts (0dd122a) |
+| `internal/agent` telemetry tests, `internal/telemetry` | The OTLP exporter against a fake collector (27c7ee2) |
+| `internal/runtime` netconfig tests | The NoCloud `network-config` for leased NICs (0791fc9) |
+| `cmd/bcd` `TestKubernetesDaemonSetContract` | `@better-compute/provider-kubernetes`'s generated `config.toml` and command lines parse with bcd's own parser and flags (2c9f953) |
+
+The FakeDaemon holds `BINDING_KUBERNETES` assignments like bcd since 4e61f59: its CDI spec carries
+`bcd.dev/binding: kubernetes` and no `NVIDIA_VISIBLE_DEVICES`, while a plain hold's spec sets it once for the whole
+hold (`tests/testing-fake-daemon.test.ts`).
+
 **End to end.** `tests/e2e/bcd.test.ts` runs the real binary (linux/amd64, fakehw, `BCD_FAKEHW_SEED=41`) against
 `createDevStack({ externalTls })`: the dev stack's mTLS listener with a dev serving CA, which the test pins in a
 generated `config.toml` together with the join keys, `gateway_server_name = "gw.dev.local"` and a data directory

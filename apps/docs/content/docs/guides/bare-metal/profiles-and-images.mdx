@@ -284,11 +284,26 @@ digest. `provisionModule` refuses anything else with `INVALID_CONFIG`, including
 ## Host config
 
 `hostConfig` is not a step: when the workflow succeeds, its units become the node's desired state
-(the NodeSpec `host` section), and the daemon corrects drift continuously. Built-in units are
-`nvidia-driver` (`branch`, three digits; `open`), `container-toolkit` (`cdi`, default true),
-`mig-layout` (`from: 'pool'` takes the pool's `policy.migLayout`, or a `layout`), `fabric-manager`
-and `sysctl` (sysctl names with scalar values). Any unit takes `when`, a label expression. Add units
-with `provisionModule({ configUnits })`.
+(the NodeSpec `host` section), and bcd's host converger applies them and sets drift back on its next
+pass (6c2343f). The built-in units, in the order bcd applies them:
+
+| Unit | Settings |
+| --- | --- |
+| `kernel-modules` | `load` (module names), `options` (module: `"key=value ..."`) |
+| `sysctl` | sysctl names with scalar values; keys that run programs as root or lower the host's defenses are `INVALID_INPUT` |
+| `hugepages` | `pages2m`, `pages1g`, `transparent` (`always`, `madvise`, `never`), `perNuma` |
+| `nvidia-driver` | `branch` (three digits), `open` |
+| `fabric-manager` | none |
+| `mig-layout` | `from: 'pool'` takes the pool's `policy.migLayout`, or a `layout` |
+| `gpu-sharing` | `mode` (`mps` or `timeslice`), `replicas` (1 to 48) |
+| `container-toolkit` | `cdi`, default true |
+| `k8s-join` | `server`, `caCertSha256`, `tokenRef`, `kubernetesVersion`, `nodeLabels`, `taints`, `gpu` |
+
+Any unit takes `when`, a label expression. The pool can set units too, and a pool's unit replaces the profile's:
+`policy.hugepages`, `policy.kernelModules` and `policy.kubernetes`, and `gpu-sharing` for a pool shared by `mps` or
+`timeslice`. [Host configuration](/docs/daemon/host-config) describes what each unit does on the machine, the files it
+writes, what it refuses and when it asks for a reboot. Add units with `provisionModule({ configUnits })`; bcd
+applies only the units it knows, and fails the `host` section on any other.
 
 ## The image catalog
 

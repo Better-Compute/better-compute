@@ -395,7 +395,11 @@ runtime when `virsh` is installed (362317c) and on `cloud-hypervisor` when the `
 (2598f0a): qcow2 overlays on sha256-verified base images, NoCloud seeds, taps, VFIO GPUs. Both runtimes have been
 tested only against fake tools (a fake `virsh`, a fake cloud-hypervisor API, a fake `qemu-img`); no VM has booted
 through either on a real KVM host yet. A host with neither and without a bcx runtime plugin fails a non-empty `instances` section with `this host
-runs no instance runtime`. fakehw builds run instances on a file-backed runtime of the same name, which
+runs no instance runtime`. bcd also refuses on its own a start whose memory (or huge pages) the host cannot back
+(0dd122a): the instance stays stopped with a status message starting `ResourcesExhausted:`, which is not an error, so
+the reconciler keeps waiting for the start rather than failing the instance, and bcd tries again on its next pass (see
+[host-side admission](/docs/daemon/delivery#instances)). A flavor's [placement](/docs/guides/vps/flavors#placement)
+reaches the host as `InstanceSpec.placement` (9d55b36). fakehw builds run instances on a file-backed runtime of the same name, which
 `tests/e2e/bcd-vps.test.ts` drives through the control plane; see [delivery](/docs/daemon/delivery#the-runtimes). The
 TypeScript FakeDaemon plays a VPS host on a fake hypervisor (domains, overlay disks, NoCloud seeds, taps), fetching
 user data through the broker, and `tests/e2e/vps.test.ts` runs hosted instances through the real server and gateway

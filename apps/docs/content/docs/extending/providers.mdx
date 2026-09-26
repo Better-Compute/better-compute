@@ -46,6 +46,9 @@ Provider pools run today: the `vps.instances` reconciler drives an account's cli
 machines run too: `providerAccounts.bootstrap` and the `vps.bootstraps` reconciler call `ProviderImpl.identify` and
 `bootstrap` to turn a rented server (Hetzner Robot) into a bcd host; see [bootstrapping machines](#bootstrapping-machines).
 The provider packages are not on npm and sit outside the `better-compute` umbrella.
+`@better-compute/provider-kubernetes` is not an adapter of this kind: it has no `defineProvider()` and creates no
+machines. It renders the manifests that run bcd as a DaemonSet on a cluster's existing nodes, which then join a pool
+like any bcd host; see [bcd on Kubernetes](/docs/daemon/kubernetes).
 </Callout>
 
 ## The shape of an adapter

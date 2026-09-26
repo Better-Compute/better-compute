@@ -98,14 +98,23 @@ revoked, expired and used-up tokens), and `join-tokens revoke` takes the token i
     maxUses: { type: 'number', description: 'How many machines may join with it, 1 to 10,000.', default: '1' },
     expect: { type: '{ productUuid?, serial?, mac?, gpuUuid? }', description: 'Binds the token to one machine; name at least one identifier. mac is aa:bb:cc:dd:ee:ff, gpuUuid starts with GPU-.' },
     allowReclaim: { type: 'boolean', description: 'Lets a known machine with a new key reclaim its node.', default: 'false' },
+    hosted: { type: "'kubernetes'", description: 'For bcd running as a DaemonSet on a Kubernetes cluster (a27156a): its nodes join tenant-controlled unless the pool has policy.kubernetes.platformOperated true. See /docs/daemon/kubernetes#trust.' },
     idempotencyKey: { type: 'string', description: 'Scoped to the tenant and the calling identity.', required: true },
   }}
 />
 
 The answer is the token record (`id`, `poolId`, `siteId`, `role: 'node'`, `usesLeft`, `expect`, `allowReclaim`,
-`expiresAt`) plus `token`. A retry with the same idempotency key returns the record without `token`; the same
-key with a different pool, `expect` or `allowReclaim` fails with `CONFLICT`. Creating a token publishes
-`security.join-token.created`, whose `pinned` field says whether it has an `expect` binding.
+`hosted`, `expiresAt`) plus `token`. A retry with the same idempotency key returns the record without `token`; the
+same key with a different pool, `expect`, `allowReclaim` or `hosted` fails with `CONFLICT`. Creating a token
+publishes `security.join-token.created`, whose `pinned` field says whether it has an `expect` binding, with `hosted`
+when it is set.
+
+A **hosted** token (`--hosted kubernetes` in the CLI) is for [bcd as a DaemonSet](/docs/daemon/kubernetes) on a
+cluster whose admins have root on its machines through privileged pods. A node that joins with it is
+`tenant-controlled`, with a `node-tenant` certificate that never receives platform secrets, unless the token's pool
+has `policy.kubernetes.platformOperated: true`. The token decides, never the machine's claims, and it only lowers
+`platform` trust (a tenant's own site stays `tenant-owned`); a reclaim through a hosted token lowers an existing
+`platform` node too.
 
 [`joinTokens.list`](/docs/reference/api/join-tokens#list) (`compute:join-tokens:read`) lists a pool's live
 tokens, and every token with `includeInactive: true`; pages hold up to 200 (100 by default).
@@ -354,7 +363,10 @@ The daemon accepts these keys only when they match its pins, so the fetch needs 
 bcd implements half of it. Its configuration has no control-plane URL, so the fetch happens only when
 `join-encryption.jwk` is absent and `bcd join --server https://…` names the control plane: bcd then reads
 `<server>/.well-known/better-compute` and uses `join.encryptionJwk` if it matches `join_encryption_key_pin`. That is
-how an OS a deploy installed joins (`--server`, `--token-file` and `--node-id`, from the deploy's user data). A key
+how an OS a deploy installed joins (`--server`, `--token-file` and `--node-id`, from the deploy's user data), and how
+[bcd as a DaemonSet](/docs/daemon/kubernetes) joins a cluster's nodes. `--token-file` takes only a file its owner
+alone can read (0600 or 0400; a Kubernetes Secret needs `defaultMode: 0400`), a regular file of at most 4 KiB, and
+deletes it after the join; a read-only Secret mount it cannot delete is a warning, not a failure (c29bb16). A key
 file that is present but does not match the pin still fails `bcd join`: after rotating the key, generate the install
 script again and rerun it, which rewrites the file and the pins.
 

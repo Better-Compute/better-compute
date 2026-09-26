@@ -28,6 +28,12 @@ sources:
   - daemon/internal/agent/commands.go
   - daemon/internal/agent/spec.go
   - daemon/internal/agent/devices.go
+  - daemon/internal/agent/holds.go
+  - daemon/internal/agent/slices.go
+  - daemon/internal/slice/slice.go
+  - daemon/internal/agent/admission.go
+  - daemon/internal/runtime/vfio.go
+  - packages/capacity/src/reservations.ts
   - daemon/internal/agent/access.go
   - daemon/internal/agent/gpureset.go
   - daemon/internal/agent/host.go
@@ -76,7 +82,7 @@ idempotent `plan(desired, observed)` and `apply`:
 
 | Section | Holds | Phase |
 | --- | --- | --- |
-| `host` | Host configuration units (driver, container toolkit, MIG layout, fabric manager, sysctl), each a config driver id and canonical JSON | v0.2 |
+| `host` | Config units (kernel modules, sysctl, huge pages, the NVIDIA driver, Fabric Manager, the MIG layout, GPU sharing, the container toolkit, a Kubernetes join), each a unit name and its settings as canonical JSON; see [host configuration](/docs/daemon/host-config) | v0.2 |
 | `devices` | Device assignments: allocation, reservation, binding, devices, extra env lines | v0.1 |
 | `instances` | VPS instances with their runtime, size, image, NICs and GPUs | v0.3 |
 | `access` | The exec-ticket JWKS, SSH CA keys and principals, revoked certificate serials; filled when `tunnels` is configured | v0.3 |
@@ -136,12 +142,14 @@ The daemon stores the last full spec, its hash and its signature in the journal,
 a retryable failure keeps the section `PROGRESSING` and it is retried on the next pass. A section the daemon has no
 converger for converges trivially when empty and is `UNSUPPORTED` otherwise, which counts as terminal, with
 condition `SectionUnsupported` (reason: the field number) so the rest of the spec still converges. bcd applies the
-rule with `converge.Run`. It has convergers for `devices`, `access`, `instances` (below), `telemetry` (which accepts
-the section; bcd's own OTLP exporter is not written), `site` (the boot lease the boot server obeys, and the
+rule with `converge.Run`. It has convergers for `host` (the config units, 6c2343f; see
+[host configuration](/docs/daemon/host-config)), `devices`, `access`, `instances` (below), `telemetry` (since 27c7ee2
+bcd's OTLP export of its own metrics; see [node metrics](/docs/operations/observability#node-metrics-from-bcd)), `site` (the boot lease the boot server obeys, and the
 `cache_images` the site agent pulls into its image cache: the section stays `PROGRESSING` while images warm and
 `FAILED` for an image whose bytes do not match its digest) and, on `bcd node` and `bcd site`, `daemon`
-([self-update](/docs/daemon/install#self-update)). So in bcd today a non-empty `host` section is `UNSUPPORTED`, and
-so is a section number it does not know. A non-empty `daemon` section is `UNSUPPORTED` in `bcd sim` and
+([self-update](/docs/daemon/install#self-update)). A section number bcd does not know is `UNSUPPORTED`. With
+`[host] units = false` bcd has no `host` converger: a `host` section with units is `UNSUPPORTED` with reason
+`HostManagedExternally`, which raises no condition and does not hold back `observed_generation` (a193249). A non-empty `daemon` section is `UNSUPPORTED` in `bcd sim` and
 `bcd ramdisk`. A `bcd node` under [`bcd helper`](/docs/daemon#privilege-separation) converges it too: it downloads
 the release, and the helper verifies and swaps it (2d67b25). The FakeDaemon, in turn, converges `instances` and
 `daemon` when its options enable them but has no `access` converger.
@@ -164,13 +172,56 @@ cannot honor (a device missing, a device already held by another allocation, an 
 `AllocationFailed` event with a reason such as `overlap` or `device-missing`, and the section fails terminally at
 that generation. The daemon never drops an assignment on its own, not even while disconnected. bcd and the
 FakeDaemon both implement this converger: bcd writes the CDI spec and env file in the FakeDaemon's shape, reads its
-holds back from `/etc/cdi` on every pass, supports the `hold` binding and GPUs only (anything else fails with
-`unsupported-binding` or `unsupported-device`), and signs `AllocationBound` and `AllocationReleased` with the node
-key. `tests/e2e/bcd.test.ts` binds and releases a 2-GPU reservation through it.
+holds back from `/etc/cdi` on every pass, and signs `AllocationBound` and `AllocationReleased` with the node key.
+`tests/e2e/bcd.test.ts` binds and releases a 2-GPU reservation through it.
+
+What bcd holds (46a61db, d02ba4f):
+
+| Device class | Atom id | Resolves to | Held when |
+| --- | --- | --- | --- |
+| `gpu` | the GPU's UUID | itself | the inventory has it |
+| `gpu.mig` | `<gpuUuid>/gi<g>/ci<c>` | the MIG instance's `MIG-…` UUID from the inventory | the instance exists; until the [`mig-layout` unit](/docs/daemon/host-config#mig-layout) has made it, the hold fails with `device-missing` |
+| `gpu.slot` | `<gpuUuid>/s<k>` | its GPU | the GPU exists |
+
+- **Conflicts** are parent-aware: a whole GPU is refused (`overlap`) while part of it is held, a MIG instance or slot
+  while its GPU is held whole, and two holds never share an atom. No hold is bound on a GPU the `instances` converger
+  passes through to a VM.
+- **CDI names** cannot contain `/`, so each device's CDI name is its atom id with `/` as `_`, and the real id rides in
+  the device annotation `bcd.dev/device-id` (CDI 0.6), which is how bcd reads its holds back. `AllocationBound`
+  reports the names as `bcd.dev/gpu=<name>`.
+- **Env.** Devices carry no env of their own. A hold's spec has one spec-level `NVIDIA_VISIBLE_DEVICES` listing what
+  the driver knows (a MIG instance's UUID; a GPU once, however many of its slots are held), and so does the env file.
+  Every workload also gets `BCD_ALLOCATION_ID`, and a slot hold gets `CUDA_MPS_PIPE_DIRECTORY=/run/nvidia-mps` when
+  that directory exists (the [`gpu-sharing` unit](/docs/daemon/host-config#gpu-sharing) runs MPS).
+- **Bindings.** `BINDING_HOLD` and `BINDING_KUBERNETES` bind the same way; a Kubernetes hold's spec also carries the
+  annotation `bcd.dev/binding: kubernetes` and no `NVIDIA_VISIBLE_DEVICES`, since the kubelet device plugin hands a
+  pod only part of it and sets its own (see [Kubernetes workers](/docs/guides/capacity/kubernetes)). Any other binding
+  fails with `unsupported-binding`, and any other device class with `unsupported-device`.
+
+**Host resources.** A reservation that booked host CPU, memory or 1 GiB pages (see
+[host resources](/docs/guides/capacity/reservations#host-resources)) reaches the node as `DeviceAssignment.limits`
+(c5a419c): `cpu_millis` from `vcpu` (1000 per CPU), `memory_bytes` from `memoryGiB`, `hugepages_1gi`, and a cpuset on
+the NUMA nodes of the hold's devices, `cpus` only when those nodes have at least `vcpu` CPUs and `mems` only when they
+hold the booked memory. bcd then creates the hold's cgroup-v2 slice before the CDI spec names it (260e33c):
+
+| Slice `bcd-alloc-<allocation>.slice` | From |
+| --- | --- |
+| `AllowedCPUs`, `AllowedMemoryNodes` | `cpus`, `mems` |
+| `CPUQuota` | `cpu_millis`, as whole percents of one CPU |
+| `MemoryMax`, and `MemoryHigh` at 90% of it | `memory_bytes` |
+| `hugetlb.2MB.max`, `hugetlb.1GB.max` in cgroupfs | `hugepages_2mi`, `hugepages_1gi` (systemd has no property; bcd enables the `hugetlb` controller on the slice's ancestors) |
+
+The limits are runtime properties (`systemctl set-property --runtime`), which a reboot drops while the hold stays,
+so a pass that finds a held hold's slice missing creates it again. The CDI spec names the slice in the annotation
+`bcd.dev/cgroup-parent`, and every workload gets `BCD_CGROUP_PARENT=bcd-alloc-<allocation>.slice`: containerd, Slurm
+or a wrapper places the workload there; bcd does not move processes. On release, bcd stops the slice only once
+`cgroup.events` says it is empty, so a release never kills a workload; a slice still in use is kept, and bcd does not
+come back to stop it later. A hold without limits gets no slice, and nothing changes for it.
 
 Under [privilege separation](/docs/daemon#privilege-separation) (`[helper] socket` set, 28dc2ae) the converger does
 the same work through `bcd helper`: the node asks for a `file.write` or `file.remove` of kind `cdi` or
-`allocation-env` with the allocation id, and the root helper builds the path itself. A refused or failed operation is
+`allocation-env` with the allocation id, and the root helper builds the path itself; a hold's slice is
+`slice.apply` or `slice.remove`, which accept only a `bcd-alloc-<id>.slice` name and cpulists. A refused or failed operation is
 an error of the action that asked for it (`helper: …`), exactly as a failed direct write would be: retryable, so the
 section stays `PROGRESSING` until a later pass succeeds. The `access`
 converger's sshd files and reload, the instances' nftables table and its 5-second check, `gpu.reset`,
@@ -201,8 +252,32 @@ agents, over the runtimes the build provides) follows the FakeDaemon's `FakeHype
   defines the domain. A refusal fails that instance; an unavailable broker keeps the section `PROGRESSING`.
 - Desired states are `RUNNING`, `PAUSED` (a resume is not a boot) and `STOPPED`. After a host reboot the runtime's
   domains are stopped and the next pass starts the ones that should run.
-- An unknown runtime, a bad image, refused user data or a start beyond the host's capacity fails only that instance
-  (`ERROR` with its message); the section is then `FAILED` with reason `InstanceFailed`.
+- An unknown runtime, a bad image, refused user data or a start the runtime refuses for lack of capacity fails only
+  that instance (`ERROR` with its message); the section is then `FAILED` with reason `InstanceFailed`.
+- **Placement** (a184ec2). `InstanceSpec.placement` (from a flavor's `placement`, chosen by vps; see
+  [flavors](/docs/guides/vps/flavors#placement)) names host CPUs (`cpus`, a cpulist of at least as many CPUs as
+  vCPUs), NUMA nodes for the memory (`mems`), a huge page size (2 MiB or 1 GiB, with the memory in whole pages) and a
+  balloon (never with huge pages). bcd checks it before anything is created, and a placement the host cannot apply
+  fails the instance. `libvirt-kvm` maps it to a vCPU `cpuset` (floating) or `vcpupin` (exactly one CPU per vCPU),
+  `numatune` in strict mode, locked `memoryBacking` huge pages and an explicit `memballoon` (none unless asked);
+  `cloud-hypervisor` to `cpus.affinity`, `memory.hugepages` and a balloon with free page reporting, with
+  `AllowedCPUs` and `AllowedMemoryNodes` on the VMM's unit, whose `MemoryMax` drops to the VMM's overhead when the
+  guest's memory is in huge pages. A restore keeps bcd's pinning, never the snapshot's.
+- **Host-side admission** (0dd122a). Before a runtime starts a domain that is not running (a new one, a stopped one;
+  a resume from `PAUSED` is not a start), bcd checks that the host can give it its memory, whatever the control plane
+  decided, so a drifted control plane never overcommits a node. It counts what is committed, not what is used, since
+  a VM that has not touched its memory yet will:
+  - normal memory: `MemTotal` less the huge page pool (`Hugetlb`) and 1 GiB of headroom for the host, against the
+    memory plus VMM overhead (1/32 of the memory plus 256 MiB) of every running or paused domain bcd manages on
+    normal pages, and of the starts admitted earlier in the same pass;
+  - huge pages, for an instance whose `placement` asks for them: free pages of that size on the placement's NUMA
+    nodes, or free less reserved pages host-wide without one; its VMM overhead still counts against normal memory.
+
+  A start that does not fit stays stopped, and the instance's status message reads `ResourcesExhausted: … MiB of
+  memory needed, … MiB left on this host` (or the huge pages needed and free). It is not `ERROR`, so vps does not fail
+  the instance or its sandbox; the section stays `PROGRESSING` and the start is tried again on the next pass. A
+  runtime that checks capacity itself (the fakehw runtime) is left alone, and a host whose `/proc/meminfo` cannot be
+  read starts without the check, with a warning.
 - On a host with a runtime, every status report lists everything the runtimes hold in `StatusReport.instances`,
   with `instances_complete`.
 - `restore_from` boots a new instance from a snapshot instead of an image. bcd downloads it, over https only since a
@@ -249,6 +324,10 @@ agents, over the runtimes the build provides) follows the FakeDaemon's `FakeHype
   source is one of the host's own addresses on the instances' bridges, where the tunnel dial comes from; a family
   with no host address has its tcp/22 dropped outright. Both rules sit ahead of every accept, so an exec certificate
   is usable only through a tunnel, which the control plane closes on revocation, and no guest-side KRL is needed.
+- The rules match taps by name, so a bcx runtime plugin is told each NIC's tap name (`runtime.TapName`) in its spec
+  (b8a1801). When the rules guard an instance (a `PRIVATE` or `NONE` policy, or SSH from the host only) and a running
+  instance of a plugin runtime has no interface under one of those names, bcd stops it and fails it with `runtime <id>
+  did not create taps …: its network rules cannot apply`: it fails closed rather than run a guest outside the rules.
 
 #### The runtimes
 
@@ -266,7 +345,7 @@ fails with `runtime <id> is not installed on this host`.
 | Growing a disk | `qemu-img resize -f qcow2` while stopped, `virsh blockresize` while running; a smaller size fails the instance | `qemu-img resize -f qcow2` while stopped, `vm.resize-disk` while running; a smaller size fails the instance |
 | User data | A NoCloud seed ISO (volume `cidata`, `user-data` and `meta-data` with the instance id as `instance-id` and `local-hostname`), built with `genisoimage`, else `xorriso`, attached as a read-only cdrom | The same seed ISO, attached as a read-only disk |
 | NICs | virtio NICs on the named bridges, on taps named `runtime.TapName`, so bcd's nftables rules exist before the tap does | Persistent taps named `runtime.TapName` (`ip tuntap add`), put on their bridge and brought up by bcd before the VMM starts (933c51b); since b12c217 bcd opens each tap and hands its fd to the VMM (`vm.add-net`, or `net_fds` on a restore), which never names a tap. A guest reboot reopens the same tap; a failed attach means no VM; a NIC without a network is refused; the taps are deleted when the VM stops or is destroyed |
-| GPUs | VFIO passthrough (`<hostdev>` PCI, managed), the PCI address taken from the inventory's GPU bus id; a GPU without one fails the instance | VFIO passthrough of `/sys/bus/pci/devices/<address>/`, the address found the same way; a GPU without one fails the instance |
+| GPUs | VFIO passthrough (`<hostdev>` PCI, managed: libvirt rebinds the device itself), the PCI address taken from the inventory's GPU bus id; a GPU without one fails the instance | VFIO passthrough of `/sys/bus/pci/devices/<address>/`, the address found the same way; a GPU without one fails the instance. Since be4de2a bcd binds every endpoint of the GPU's IOMMU group to `vfio-pci` itself before the start (`driver_override`, unbind, `drivers_probe`; the GPU's audio function too, since VFIO refuses a group with a device on a host driver; bridges stay on `pcieport`) and checks that they moved, so a host without `vfio-pci` loaded fails the start. It records the groups and addresses it handed to the VMM: a stop gives the groups back to root, and a destroy hands the devices back to their host driver, even when the spec dropped a GPU meanwhile |
 | CPU | `host-passthrough`, so a memory snapshot restores only on the same CPU model | `boot_vcpus` and `max_vcpus` both the instance's vCPUs; a memory snapshot restores only on the same CPU model |
 | Ownership | bcd marks each domain it defines in its metadata (namespace `https://better-compute.dev/libvirt/1`: allocation, image digest, addresses, the snapshot it was restored from). Any other domain of the connection is listed as unmanaged, the leak the control plane reports, and is never defined over, stopped or destroyed | cloud-hypervisor keeps no registry, so bcd's record is `instances/<id>/vm.json` (allocation, image digest, addresses, MACs, bridges, GPUs and the VM configuration). `List` reports only directories with that record, with the state from `vm.info`; a directory without one is not bcd's and is never defined over or removed |
 | States | `start` (or `start --paused`), `suspend` and `resume`; a stop is `virsh shutdown`, then `virsh destroy` after 60 seconds; a start that fails with "Cannot allocate memory" is a capacity failure. Delete destroys and undefines the domain and removes its directory | `vm.create` and `vm.boot` (then `vm.pause` for a paused start), `vm.pause` and `vm.resume`; a stop is the ACPI power button for up to 60 seconds, then `vm.shutdown`, `vmm.shutdown` and `systemctl stop`, and it fails unless `systemctl show` then reports the unit `inactive` or `failed`, so a VMM that survived is never forgotten; a boot that fails for lack of memory is a capacity failure. Delete stops the VM (and so never removes the directory of a VMM still running) and removes its taps and directory |
@@ -274,7 +353,10 @@ fails with `runtime <id> is not installed on this host`.
 | Restores | Unpacks the tar into the new instance's directory, refusing one taken by another runtime or, with memory, on another CPU model, then [checks](#tenant-images) its disk and seed; a memory restore's first start is `virsh restore` with the new domain's XML | The same refusals and checks. A memory snapshot's `config.json` must have exactly the instance's vCPUs (`boot_vcpus` and `max_vcpus`) and memory size, and is rebuilt before its first start, which is `vm.restore` then `vm.resume`: from the snapshot it keeps only CPU, memory and platform keys (`cpus`, `memory`, `platform` allowlists), bcd supplies the payload, disks, NICs, serial, console, rng and devices, and anything else (`fs`, `pmem`, `vsock`, memory zones, CPU affinity, a debug console, landlock rules) is dropped |
 | Console | The pty libvirt gave the domain's serial port, for [instance console tunnels](/docs/guides/access/tunnels#the-node-half) | The serial port's unix socket, `instances/<id>/serial.sock` |
 
-A snapshot is tied to the runtime that took it: `meta.json` names it, and the other runtime refuses the tar.
+A snapshot is tied to the runtime that took it: `meta.json` names it, and the other runtime refuses the tar. Both
+runtimes refuse a memory snapshot of an instance with passthrough GPUs up front, since the GPU's state lives in the
+device and no VMM saves it (`an instance with passthrough GPUs cannot be snapshotted with its memory; snapshot its
+disk only`, be4de2a); a disk-only snapshot of such an instance still works.
 
 #### Tenant images
 
@@ -374,8 +456,10 @@ A guest that does not answer is tried at most 3 times per reference, 5 minutes a
 refuses to release, or a malformed one, is not retried. Nothing is reported then, so the control plane keeps
 refusing exec while the identity is shared: it fails closed. The guest half (the udev rule, the unit and the script)
 is written in `daemon/README.md`, and vps's sandbox user data installs it verbatim at first boot (3e25c78), so
-restores of sandboxes booted since then answer. A runtime that is not a rebinder (a bcx runtime plugin) never
-rebinds. The Fake runtime acts as a compliant guest. Tests: `TestParseRebind`, `TestRebindImage`, the
+restores of sandboxes booted since then answer. A bcx runtime plugin is not a rebinder: since b8a1801 its spec
+carries `identityRebindRef`, `sshFromHostOnly`, `placement` and each NIC's tap name, but bcd neither rebinds through
+it nor reports `identity_rebound_ref` for it (and plugins take no snapshots, so they restore none). The Fake runtime
+acts as a compliant guest. Tests: `TestParseRebind`, `TestRebindImage`, the
 `cloud-hypervisor` and `libvirt-kvm` rebinds against an acknowledging and a silent fake guest, and
 `TestIdentityRebind`, which drives the converger through the secret fetch, the status report and a restart. See
 [a restore's own SSH identity](/docs/guides/vps/sandboxes#a-restores-own-ssh-identity).
@@ -532,14 +616,16 @@ always wins over a late cancel.
 `gpu_uuids`, after a release or for remediation such as XID 63. bcd checks the list before touching anything:
 
 - an empty list fails `invalid-payload`;
-- a GPU that still has a live CDI hold from the `devices` section fails the whole command `gpu-busy`, so a reset
-  never pulls a GPU from under a running workload;
+- a GPU that a live CDI hold from the `devices` section names, whole or by one of its MIG instances or slots, or
+  that a VM has passed through, fails the whole command `gpu-busy`, naming the hold or the instance (539c4ce), so a
+  reset never pulls a GPU from under a running workload; `diag.dcgm` applies the same check from level 2;
 - a GPU the inventory does not know comes back `reset: false` with the message `unknown GPU`.
 
 Each remaining GPU is reset with `nvidia-smi --gpu-reset -i <uuid>`; a failure is that GPU's `message`. bcd then
 collects a fresh inventory and marks each reset GPU `healthy` unless it shows uncorrectable volatile ECC errors or a
 pending or failed row remap. Since cb987e5 a host build reads ECC counters and row remapping from `nvidia-smi -q -x`
-when it is installed; without it the inventory carries neither, and every GPU that reset reads `healthy`. The fake
+when it is installed; without it the inventory carries neither, and every GPU that reset reads `healthy`. A GPU that
+reset and reads healthy loses its XID conditions at once instead of keeping them for the rest of the boot (662fb55). The fake
 HGX node of the `fakehw` build carries them too. The FakeDaemon's
 `fakeGpuReset` (opt in with its `kinds` option) follows the same checks.
 

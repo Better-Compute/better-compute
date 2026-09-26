@@ -11,6 +11,9 @@ sources:
   - packages/observability/src/spans.ts
   - packages/observability/src/traceparent.ts
   - packages/observability/src/database.ts
+  - packages/observability/src/node-telemetry.ts
+  - daemon/internal/agent/telemetry.go
+  - daemon/internal/telemetry/otlp.go
   - packages/cli/src/host/metrics.ts
   - packages/server/src/operations.ts
   - packages/cli/src/commands/serve.ts
@@ -257,7 +260,74 @@ the forwarded headers, and the admission context of a mutation's audit row recor
 header finds the call.
 
 **Logs.** `betterCompute({ log })` takes a `Logger`; the default writes warnings and errors as JSON to standard error.
-GPU telemetry does not go through the control plane (principle P8); send it from the nodes straight to your TSDB.
+GPU telemetry does not go through the control plane (principle P8); the nodes send it straight to your collector.
+
+## Node metrics from bcd
+
+bcd exports its own metrics over OTLP/HTTP, in the JSON encoding, to the collector its NodeSpec's `telemetry`
+section names (27c7ee2). Nothing reaches the gateway, the session or PostgreSQL.
+
+**Where to.** `nodeTelemetryModule(options)` (53aa356) gives every node that section: `options` are the platform's
+collector, and a pool's `policy.telemetry` wins field by field, with `resourceAttributes` merged by key. A node whose
+result has no endpoint gets no section, and exports nothing. The module is not registered by default; add it to your
+modules:
+
+```ts title="compute.ts"
+import { nodeTelemetryModule } from 'better-compute/observability';
+
+betterCompute({
+  // …
+  modules: [
+    nodeTelemetryModule({
+      otlpEndpoint: 'https://otel.example.internal:4318',
+      intervalSeconds: 30,
+      headersRef: 'secret://root/sec_01k…', // the collector's auth headers
+      resourceAttributes: { 'deployment.environment': 'prod' },
+    }),
+  ],
+});
+```
+
+| Setting | Rules |
+| --- | --- |
+| `otlpEndpoint` | `https://`, or `http://` to `localhost`, `127.0.0.1` or `[::1]`; no credentials. bcd appends `/v1/metrics` unless the path already ends with it |
+| `intervalSeconds` | 5 to 3600; bcd's default is 60 seconds and its minimum 5 |
+| `headersRef` | A secret reference to the headers: a JSON object, or `Name: value` lines |
+| `resourceAttributes` | At most 32, single-line values of at most 256 characters; keys under `bcd.` and `service.` are bcd's own |
+| `roles` | Module option only: the node roles that export (default all, site agents included) |
+
+The module checks its options when it is built (`INVALID_INPUT`). A pool whose `policy.telemetry` fails the same
+checks is skipped, and its nodes keep the default; `better-compute doctor` (and the support bundle) reports such
+pools as `pool-telemetry-invalid`, from `nodeTelemetryFindings(sql)`.
+
+**What.** Every interval, bcd sends:
+
+| Metric | Unit | From |
+| --- | --- | --- |
+| `bcd.gpu.memory.used`, `bcd.gpu.memory.total`, `bcd.gpu.memory.reserved` | bytes | `nvidia-smi`, per GPU |
+| `bcd.gpu.utilization`, `bcd.gpu.memory.utilization` | ratio (0 to 1) | `nvidia-smi` |
+| `bcd.gpu.temperature` | Celsius | `nvidia-smi` |
+| `bcd.gpu.power.draw`, `bcd.gpu.power.limit` | watts | `nvidia-smi` |
+| `bcd.gpu.clock.sm`, `bcd.gpu.clock.memory` | MHz | `nvidia-smi` |
+| `bcd.gpu.processes` | processes | `nvidia-smi` |
+| `bcd.gpu.mig.memory.used`, `bcd.gpu.mig.memory.total` | bytes | `nvidia-smi`, per MIG instance (`mig.id`) |
+| `bcd.gpu.ecc.errors` | errors, cumulative sum | the inventory's aggregate ECC counters, `type` `correctable` or `uncorrectable` |
+| `bcd.gpu.rows.remapped` | rows | the inventory's row remapping, by `type` |
+| `bcd.gpu.xid.active` | conditions | bcd's active XID conditions per GPU |
+| `bcd.host.pressure.cpu`, `bcd.host.pressure.memory`, `bcd.host.pressure.io` | percent | PSI `some avg10` |
+| `bcd.host.cpu.steal` | percent | CPU steal |
+
+GPU points carry `gpu.uuid`, `gpu.index` and `gpu.model`. The resource carries `service.name=bcd`,
+`service.version`, `host.name`, `bcd.node.id` and `bcd.site.id`, then the section's own attributes (which cannot
+replace those). bcd fetches the headers with a `SecretRequest` that names workflow `host:telemetry` and step
+`headersRef`; the secret broker releases the reference only while the node's current spec names it there (binding
+rule 3; see [sealed secrets](/docs/operations/security#sealed-secrets)).
+
+**Failures.** An endpoint that is not an http(s) URL, or a malformed resource attribute, fails the `telemetry`
+section terminally; an empty endpoint stops the export. A collector's 4xx answer other than 429 drops that batch;
+anything else is tried again on the next interval. bcd logs a failure once, not every interval, and logs when the
+export resumes. The exporter restarts whenever the section changes. It is tested against a fake collector; no real
+one has received it yet.
 
 ## Health and readiness
 
@@ -320,6 +390,7 @@ better-compute doctor --strict --query "findings[].check"
 | `workflows-failed` | info | `provision`: workflows that failed in the last day; inspect with `workflows.get`, retry with `workflows.retry` |
 | `metal-failed` | warning | `metal`: machines `failed` with maintenance on, waiting for `metal.recover` or `metal.retire`, listed with their failure codes |
 | `metal-stalled` | warning | `metal`: machines more than 10 minutes in a workflow-driven state without an active workflow, so no worker runs the `metal` reconciler (a rescued machine resting after its rescue workflow is not stalled) |
+| `pool-telemetry-invalid` | warning | Pools whose `policy.telemetry` fails `nodeTelemetryModule`'s checks; their nodes export to the default collector (or none) until it is fixed |
 | `audit.checkpoints` | warning | Audit rows older than 3 hours not sealed by a checkpoint |
 | `history-partitions` | warning | `retentionModule()`: this or next month's partition of a history table is missing, so the retention pass is not running |
 | `history-default-partition` | warning | `retentionModule()`: rows of the last 13 months sit in a history table's default partition |

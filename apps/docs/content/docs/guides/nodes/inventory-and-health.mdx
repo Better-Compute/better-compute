@@ -68,8 +68,12 @@ it (cb987e5, `nvml.SMI`, no cgo): `nvidia-smi -q -x` for identity, VRAM, ECC cou
 instances, fabric clique, power limit, persistence and compute mode, plus `-L`, `--query-gpu compute_cap`,
 `topo -m`, `nvlink -s` and `mig -lgip`, merged into the sysfs GPUs by UUID. Live samples (memory used, utilization,
 temperature, power, clocks, processes) travel with the section but stay out of its hash, so they never make a new
-inventory version. There is no `bmc` section. It collects when the process starts (so after every boot) and
-whenever `inventory.refresh` or `diag.nvml` asks for a rescan; the event-driven and 12-hour rescans are not built.
+inventory version. There is no `bmc` section. The `cpu` section carries the kernel's isolated CPUs
+(`/sys/devices/system/cpu/isolated`) and each NUMA node its own huge page pools (configured totals only: free pages
+change with every VM and would move the hash; badb8c2). It collects when the process starts (so after every boot),
+whenever `inventory.refresh` or `diag.nvml` asks for a rescan, after a config unit applied, every 10 minutes (GPU
+error counters and MIG state change without an event bcd sees) and about 2 seconds after an XID burst (662fb55),
+sending only the sections that changed; the 12-hour rescan is not built.
 The fakehw build reports the full fake HGX board instead. None of this has run on a real GPU host yet: the
 `nvidia-smi` parsers are tested against captured output.
 
@@ -224,6 +228,18 @@ Inventory also writes node labels with source `inventory`, the way NVIDIA's GPU 
 `gpu.present`, `gpu.count`, `gpu.product`, `gpu.model`, `gpu.vramGiB`, `cuda.driver.major`,
 `nvidia.driver.version`, `mig.capable`, `fabric.domain`, `cpu.arch`, `cpu.vendor`, `cpu.model`, `os.distro`,
 `os.kernel` and `kvm.available`. A label whose GPUs disagree reads `mixed`. `nodes.label` cannot overwrite them.
+Since badb8c2 the host's CPU and memory have labels too, for selectors and `when:` expressions such as
+`numa.nodes > 1`:
+
+| Label | Value |
+| --- | --- |
+| `cpu.count` | Logical CPUs |
+| `cpu.sockets` | Sockets |
+| `cpu.isolated` | How many CPUs the kernel isolates (0 when none) |
+| `numa.nodes` | NUMA nodes |
+| `memory.totalGiB` | Installed memory in whole GiB |
+| `hugepages.2Mi`, `hugepages.1Gi` | Configured pages in the host's 2 MiB and 1 GiB pools (0 when the size exists but holds none) |
+
 `cpu.model` is the reported model with trademark marks dropped and every other run of characters outside
 `A-Z a-z 0-9 . _` turned into `-` (`AMD EPYC 9654 96-Core Processor` reads `AMD-EPYC-9654-96-Core-Processor`);
 a sandbox snapshot that includes memory restores only on hosts with an equal value (see
@@ -354,7 +370,9 @@ eight-GPU machine, while a GPU that fell off the bus usually needs a reboot of t
   every later report. An XID for a bus id the inventory does not know is only logged. bcd keeps these conditions for
   the rest of the boot: they are stored with the boot id in `data_dir/faults.json` (mode 0600), so a restart of bcd
   in the same boot reports them again even though it reads the kernel log from its end, while the first start after
-  a reboot finds another boot id and drops them. The reboot that remediation runs therefore clears them.
+  a reboot finds another boot id and drops them. The reboot that remediation runs therefore clears them, and so does
+  a `gpu.reset` that leaves the GPU healthy, for that GPU (662fb55). An XID also makes bcd collect its inventory again
+  about 2 seconds later, since the GPU's ECC and row-remap counters move with it.
 - **Remediation.** Node-level faults queue the `health` reconciler of the provision module. It waits until
   the node holds no live allocation, then runs a `node.reboot` workflow (`Xid79`, `Xid95`) or a GPU reset
   (`RowRemapPending`; bcd's `gpu.reset` refuses a GPU that still has a live hold, see
@@ -387,7 +405,10 @@ The NodeLifecycle controller runs them for a node in `adopting` once it is conne
    `node.acceptance.started` with the attempt, command ids and checks.
 3. `diag.nvml` checks the GPUs inventory found against `policy.expect.gpuCount` (else against the number
    found). Other kinds run with their default payload in this release; a kind that is not registered fails the
-   attempt with `UnsupportedCheck`.
+   attempt with `UnsupportedCheck`. On bcd (662fb55), `diag.nvml` fails `nvml.init` when the driver's management
+   interface (`nvidia-smi`) did not answer, and per GPU fails `ecc.uncorrectable`, `row-remap.pending`,
+   `row-remap.failure`, `pcie.link` (a link narrower than its maximum width) and `xid.recent` (an XID this boot),
+   each with its reason; bcd advertises the `nvml` capability in `Hello` only when that data is there.
 4. When every command settled: all succeeded (and `diag.nvml` reported `passed`) makes the node `adopted`,
    sets `AcceptanceFailed` to `false` (reason `Passed`), refreshes its IAM projection, asks the NodeSpec
    controller for generation 1 and publishes `node.adopted`. Otherwise `AcceptanceFailed` turns `true` with the
@@ -400,4 +421,9 @@ A failure is sticky: the controller does not retry on its own. Fix the cause, th
 
 `diag.nvml` is the v0.1 check. The `diag.dcgm` kind comes with the metal module, whose commissioning profile
 runs it at level 2 (and the dedicated-root release at level 1); as a pool acceptance check it runs with its
-default payload until check arguments (`with`) are mapped per kind.
+default payload until check arguments (`with`) are mapped per kind. From level 2, bcd refuses it `gpu-busy` for a
+GPU a hold or a VM is using (539c4ce).
+
+On the node itself, `bcd doctor` prints one `gpu` line per GPU with its load, and warns on a pending row remap or MIG
+mode change and fails on failed remapping or uncorrectable ECC errors (f9d7af9; see
+[bcd doctor](/docs/daemon#modes)).

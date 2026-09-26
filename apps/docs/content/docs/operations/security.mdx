@@ -310,9 +310,22 @@ gateway's report handlers also ignore reports about allocations placed on anothe
   (`join-tokens create`, `site-tokens create`, a webhook's signing secret) can go to a new 0600 file with `--out` or
   `--secret-out` instead of the output.
 - The broker (`gatewayServices.secret`) releases a value only when the request is signed by the node's current,
-  unrevoked, platform certificate, names the session's node, is bound to work that node is doing right now (a live
-  command of the step that carries the reference, or a live allocation on it), and uses a fresh request id. The
-  answer is a JWE to the request's one-time key, expiring within 5 minutes.
+  unrevoked, platform certificate, names the session's node, is bound to work that node is doing right now, and uses
+  a fresh request id. The answer is a JWE to the request's one-time key, expiring within 5 minutes. A reference is
+  bound when:
+  1. a live command of the named workflow step, addressed to the node, carries it;
+  2. a live allocation on the node references it (an instance's user data, or what a module's `allocationRefs`
+     accepts);
+  3. the node's own spec names it as a credential (e93bf9c, b7346a9): the request names workflow `host:<unit>` and
+     step `<field>` (both signed), the pair is allowed, the node's current spec (`nodes.spec`, rewritten with every
+     generation) has that unit or section naming exactly this reference in that field, and the reference is a
+     `secret://` reference of the node's owner or its pool's owner. The node's certificate is checked again in the
+     same statement that reads the spec, so a spec from before a policy edit cannot release an old reference.
+     Allowed by default: the `k8s-join` config unit's `tokenRef` (the kubeadm bootstrap token; see
+     [k8s-join](/docs/daemon/host-config#k8s-join)) and the `telemetry` section's `headersRef` (the OTLP exporter's
+     headers; see [node metrics](/docs/operations/observability#node-metrics-from-bcd)). `createSecretBroker`'s
+     `hostUnitRefs` and `specRefs` options set the lists, and `[]` turns either off; `betterCompute()` uses the
+     defaults. The audit row's details carry `hostUnit`.
 - A hosted VPS instance's user data is released only when its `secret://` reference belongs to the instance's own
   tenant, so one tenant's VM cannot boot with another tenant's secret. Since the guest reads its user data,
   `instances.create` accepts only a secret the tenant wrote with `secrets.put` (a `secret_refs` row; never a

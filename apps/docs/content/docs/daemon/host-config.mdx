@@ -1,0 +1,550 @@
+---
+title: Host configuration
+metaTitle: How bcd applies NodeSpec.host config units
+description: The config units bcd converges from NodeSpec.host, in order, with their settings, files, refusals and reboot cases, and how bcd helper applies them as root.
+icon: SlidersHorizontal
+status: experimental
+packages: ['@better-compute/provision', '@better-compute/server']
+sources:
+  - daemon/internal/hostconfig/hostconfig.go
+  - daemon/internal/hostconfig/kernel.go
+  - daemon/internal/hostconfig/hugepages.go
+  - daemon/internal/hostconfig/nvidia.go
+  - daemon/internal/hostconfig/mig.go
+  - daemon/internal/hostconfig/gpusharing.go
+  - daemon/internal/hostconfig/pkg.go
+  - daemon/internal/hostconfig/os.go
+  - daemon/internal/hostconfig/hostconfig_test.go
+  - daemon/internal/agent/hostconfig.go
+  - daemon/internal/agent/hostconfig_test.go
+  - daemon/internal/agent/kube.go
+  - daemon/internal/agent/spec.go
+  - daemon/internal/converge/converge.go
+  - daemon/internal/helper/helper.go
+  - daemon/cmd/bcd/helper.go
+  - daemon/internal/config/config.go
+  - daemon/internal/kube/join.go
+  - daemon/internal/kube/settings.go
+  - daemon/internal/kube/allow.go
+  - daemon/internal/kube/join_test.go
+  - packages/provision/src/config-units.ts
+  - packages/server/src/controllers/nodespec.ts
+  - packages/server/src/join/secret-broker.ts
+  - packages/gateway/src/store.ts
+  - PLAN.md
+---
+
+A node's <Term id="nodespec">NodeSpec</Term> has a `host` section: a list of
+<Term id="config-unit">config units</Term>, each a unit name and
+its settings as canonical JSON. `bcd node` applies them with its host converger (6c2343f): kernel modules and
+parameters, huge pages, the NVIDIA driver, Fabric Manager, the MIG layout, GPU sharing, the container toolkit and,
+since 7579184, a Kubernetes join. This page describes what each unit does to the machine, and what it refuses.
+
+<Callout type="info" title="A host configured by something else: [host] units = false">
+When another tool owns the machine's configuration, for example the NVIDIA GPU operator when bcd runs as a
+Kubernetes DaemonSet, set `units = false` under `[host]` in `config.toml` (a193249). bcd then has no host converger:
+it applies no unit, and a `host` section that lists units is reported `UNSUPPORTED` with reason
+`HostManagedExternally`. That state does not hold back `observed_generation` and raises no `SectionUnsupported`
+condition. The inventory still reports what the host has, so capacity never books huge pages or MIG instances the
+other tool did not set up.
+</Callout>
+
+<Callout type="warn" title="Tested against fakes, not on a real host">
+The units are tested against `FakeSystem`, an in-memory host whose files and command answers the tests script, and
+one agent test runs the host section through a real `Agent` under a fake root, where programs are recorded instead
+of run. No test has installed a driver, partitioned a GPU, reserved huge pages or joined a cluster on a real
+machine, and no test covers the `host.unit` helper operation. See [what the tests cover](#what-the-tests-cover).
+</Callout>
+
+## Where the units come from
+
+bcd does not choose units. The control plane builds the `host` section, and provision is the module that fills it
+(`hostSpecFor` in `packages/provision/src/config-units.ts`):
+
+- **A profile's `hostConfig`.** When a workflow succeeds, the `hostConfig` of its profile becomes the node's units. A
+  unit may carry `when:`, a label expression that turns it on per node. See
+  [profiles and images](/docs/guides/bare-metal/profiles-and-images#host-config).
+- **The pool.** `policy.hugepages` becomes `hugepages`, `policy.kernelModules` becomes `kernel-modules`,
+  `policy.kubernetes` becomes `k8s-join` when it names the cluster (`apiServer`, `caCertSha256` and `joinTokenRef`,
+  all three or none; 7db110a), and a pool shared by `mps`
+  or `timeslice` gets `gpu-sharing` (1f0f683), on every machine of the pool, adopted ones included. A pool's unit
+  replaces the profile's unit of the same name.
+- **The MIG layout gate.** `mig-layout { from: 'pool' }` takes the pool's `policy.migLayout`, or the layout the
+  capacity module froze the node at while a layout change waits for its GPUs to be free (see
+  [the MIG layout gate](/docs/guides/capacity/fractional-gpus#the-mig-layout-gate)).
+
+The control plane validates each unit against its manifest and refuses an unknown unit with `INVALID_INPUT`. The
+server writes the units to the wire sorted by name, each settings object as canonical JSON (`wireNodeSpec`). bcd
+decodes the settings again, strictly: an unknown field or trailing data is a terminal failure, so settings it does
+not understand are never half applied.
+
+## Order
+
+bcd applies the units in a fixed order, whatever order the spec lists them in:
+
+```mermaid
+flowchart LR
+  KM["kernel-modules"] --> SY["sysctl"] --> HP["hugepages"] --> ND["nvidia-driver"] --> FM["fabric-manager"]
+  FM --> MIG["mig-layout"] --> GS["gpu-sharing"] --> CT["container-toolkit"] --> KJ["k8s-join"]
+```
+
+Modules load before the parameters they provide (`net.bridge.*` needs `br_netfilter`), memory is reserved before
+workloads need it, the driver comes before Fabric Manager and the MIG layout, GPU sharing sits on the partitioned
+GPUs, the container toolkit comes after them so its CDI spec describes the GPUs as partitioned, and a cluster join is
+last.
+
+Each unit that is not converged becomes one action, and that action plans the unit again when it runs, against the
+host as the units before it left it. So when `kernel-modules` loads `br_netfilter`, the `sysctl` unit in the same
+pass finds the `net.bridge.*` keys it could not find when the pass started.
+
+## Level-triggered
+
+A unit's plan compares its settings with what the host shows now: the files bcd owns, `/proc/sys`, `/sys`, the
+loaded modules, the installed packages, `nvidia-smi`. It writes only what differs. A converged unit plans no steps,
+and a changed setting or a local edit is planned away the next time the unit runs: a sysctl someone changed by hand
+is set back, a deleted drop-in is written again, and every file bcd writes starts with a header saying local edits
+are replaced.
+
+That correction happens on a converge pass, not continuously. bcd runs a pass when it starts, when a new spec
+arrives, every 30 seconds (`ConvergeRetry`) while any section is `PROGRESSING`, and after a few events of other
+sections (a failed firewall reload, a finished snapshot download). A host whose sections all converged is not
+re-read on a timer, so drift is corrected at the next pass, whenever that is.
+
+After a unit applies, bcd refreshes its inventory, so the driver version, the MIG devices and the huge page pools
+it reports follow what the unit changed.
+
+## Status and failures
+
+The host converger reports one section, `host`, in `StatusReport` (see
+[convergence and status](/docs/daemon/delivery#convergence-and-status)):
+
+| Outcome | Section state | Examples |
+| --- | --- | --- |
+| Every unit converged | `CONVERGED` | |
+| A step failed and may succeed later | `PROGRESSING`, retried every 30 seconds | A package install failed, a sysctl key the kernel does not have yet, a 1 GiB page shortfall that waits for a reboot, a driver in use, a busy GPU that mig-layout skipped, no driver loaded yet for `fabric-manager` or `container-toolkit` |
+| Settings no retry can fix | `FAILED`, terminal: `observed_generation` still advances | Unknown fields, a bad driver branch, a refused sysctl, a MIG profile the GPU does not have, a distribution bcd has no packages for, a unit this bcd does not know |
+
+Failures are kept apart where retrying could not help. A unit whose settings are refused, and a unit name this bcd
+does not know (`unit <name> is not supported by this daemon`), are reported after every other unit had its turn,
+so they do not hold the rest back; the section is then `FAILED` with each such unit named. A unit named twice fails
+the whole section.
+
+A step that fails while it runs is different: the pass stops at that unit, and the units after it wait for the
+next pass. So a `hugepages` unit waiting for a reboot, or a `mig-layout` unit waiting for busy GPUs, keeps the units
+after it (`nvidia-driver` onwards, or `gpu-sharing` and `container-toolkit`) from running until it converges. The
+`host` section never holds back the other sections: `devices`, `instances` and the rest converge on their own.
+
+Two units report **conditions** besides the section state: `FabricManagerDown` and `MPSDown`, both with reason
+`NotRunning`, as `StatusReport.conditions` with status true while the fault lasts. The gateway publishes every report
+in the `node.status` event; no control-plane handler turns these two into node conditions yet, so they do not affect
+placement.
+
+## What removing a unit does
+
+Removing a unit from the spec stops bcd managing that concern. It does not undo it: a driver stays installed, a
+toolkit stays configured, huge page pools and boot arguments stay, a MIG layout stays, Fabric Manager keeps running,
+and a node joined to a cluster stays joined. Three units clean up after themselves, because their state is only
+bcd's own files:
+
+| Unit | When it leaves the spec |
+| --- | --- |
+| `sysctl` | `/etc/sysctl.d/90-bcd.conf` is removed; the live values stay until the next boot |
+| `kernel-modules` | `/etc/modules-load.d/bcd.conf` and `/etc/modprobe.d/bcd.conf` are removed; loaded modules stay loaded |
+| `gpu-sharing` | `bcd-mps.service` is disabled and stopped, its unit file removed, and systemd reloaded; stopping MPS sets the GPUs' compute mode back to `DEFAULT` |
+
+## Under bcd helper
+
+When `bcd node` runs unprivileged beside [`bcd helper`](/docs/daemon#privilege-separation), it still plans every
+unit itself, reading the host as its own account can. A unit that is not converged is sent to the helper as one
+`host.unit` request: the unit name, its settings (none when it left the spec and should be cleaned) and the GPUs
+that live holds use. The helper builds the same units, plans the unit again as root, and applies it.
+
+| `host.unit` | Value |
+| --- | --- |
+| Unit name | `^[a-z0-9-]{1,64}$` |
+| Busy GPUs | At most 1024 |
+| Timeout | 30 minutes (a driver install builds kernel modules), plus a minute on the connection |
+| Checks | The units decode and validate the settings themselves, exactly as in `bcd node` |
+
+The helper does not see the signed spec; it applies what the node asks for, within what the units accept. That is
+why the `sysctl` unit refuses keys that would run a program as root, and why a Kubernetes join under the helper
+needs root's own allowlist of clusters (see [k8s-join](#k8s-join)). Programs a unit runs are bounded to 20 minutes
+each.
+
+## kernel-modules
+
+Loads kernel modules now and at every boot, with their options. A sandbox or VPS host loads `kvm_intel` or
+`kvm_amd`, `vhost_net` and `tun` this way.
+
+| Setting | Type | Rules |
+| --- | --- | --- |
+| `load` | `string[]` | At most 64 names, each `^[a-z0-9_-]{1,64}$` |
+| `options` | `Record<module, string>` | At most 64 entries; each value `key=value ...` of letters, digits and `_.,:=/ -`, at most 256 characters, each key `^[A-Za-z0-9_]{1,64}$` |
+
+- **Files.** `/etc/modules-load.d/bcd.conf` lists the modules to load, sorted. `/etc/modprobe.d/bcd.conf` holds one
+  `options <module> <options>` line per module with options, and is removed when there are none.
+- **Loading.** A module not loaded (no `/sys/module/<name>`, dashes read as underscores) is loaded with
+  `modprobe -- <module>`.
+- **Changed options.** When a loaded module's parameter under `/sys/module/<name>/parameters/` differs from the
+  option (`Y`/`N` and `1`/`0` compare equal), bcd reloads it (`modprobe -r`, then `modprobe`) only when its
+  `refcnt` is 0. A module in use, such as `kvm_intel` under running VMs, is never pulled from under them: its new
+  options take effect the next time it loads, which in practice means the next reboot. bcd does not report that it is
+  waiting.
+
+## sysctl
+
+Kernel parameters, each a sysctl name with a scalar value: `{ "vm.swappiness": 10 }`.
+
+- **Names** match `^[a-z0-9_]+(?:\.[a-z0-9_-]+)+$` (the same check as provision's). **Values** are numbers,
+  booleans (`true` is `1`, `false` is `0`) or single-line strings of at most 4096 characters; whitespace is
+  collapsed, since the kernel shows multi-value tunables tab-separated.
+- **Files.** `/etc/sysctl.d/90-bcd.conf`, one `name = value` line per key, sorted, for early boot. bcd also sets
+  each live value under `/proc/sys` that differs. An empty object removes the file.
+- **Missing keys.** A key the kernel does not have yet is retried, not refused: bcd applies the others, then reports
+  `this kernel has no <keys> (is the module that provides it loaded?)` and the section stays `PROGRESSING`. Load the
+  module with `kernel-modules` and the same pass sets it.
+- **Refused keys.** Some keys are refused whoever sends them, because they run a program as root or lower the
+  host's defenses, and bcd helper applies this unit as root on behalf of an unprivileged node. A refused key fails
+  the unit terminally and nothing is written. Since 1f0f683 provision holds the same list (`forbiddenSysctls`), so a
+  profile or pool naming one of these keys is `INVALID_INPUT` when the host section is resolved, before it reaches a
+  node.
+
+| Refused | Why |
+| --- | --- |
+| `kernel.core_pattern`, `kernel.modprobe`, `kernel.usermodehelper.*`, `kernel.poweroff_cmd`, `kernel.hotplug` | Name or control a program the kernel runs as root |
+| `fs.binfmt_misc.*` | Registers interpreters the kernel runs |
+| `fs.suid_dumpable`, `fs.protected_*`, `kernel.randomize_va_space`, `kernel.kptr_restrict`, `kernel.dmesg_restrict`, `kernel.yama.*`, `kernel.kexec_load_disabled`, `kernel.unprivileged_bpf_disabled`, `kernel.perf_event_paranoid`, `kernel.sysrq`, `vm.mmap_min_addr`, `vm.unprivileged_userfaultfd`, `net.core.bpf_jit_harden` | Lower the host's defenses |
+| `kernel.modules_disabled` | Cannot be undone without a reboot |
+| `user.*`, `kernel.unprivileged_userns_clone`, `kernel.apparmor_restrict_unprivileged_userns` | Change who may create namespaces |
+
+## hugepages
+
+The host's persistent huge page pools, the memory VMs back their guests with, and the transparent huge page policy.
+
+| Setting | Type | Rules |
+| --- | --- | --- |
+| `pages2m` | integer | 2 MiB pages; 0 to 2^24 on the node (provision allows at most 4,194,304) |
+| `pages1g` | integer | 1 GiB pages; 0 to 2^24 on the node (provision allows at most 16,384) |
+| `transparent` | `'always' \| 'madvise' \| 'never'` | Written to `/sys/kernel/mm/transparent_hugepage/enabled` |
+| `perNuma` | boolean | The counts are per NUMA node instead of host totals |
+
+A pool's `policy.hugepages: { size: '2Mi' | '1Gi', count, perNuma? }` becomes this unit with `pages2m` or `pages1g`.
+
+- **2 MiB pages** are allocated at runtime: bcd writes the count to `nr_hugepages` (the host's under
+  `/sys/kernel/mm/hugepages/hugepages-2048kB`, or each NUMA node's under
+  `/sys/devices/system/node/node<N>/hugepages` with `perNuma`) and reads back what the kernel allocated. A shortfall
+  (memory fragmented or short) is retried.
+- **1 GiB pages** are tried at runtime too, which works on a freshly booted host. When the kernel cannot find that
+  much contiguous memory, bcd reserves the pages on the kernel command line instead: with `update-grub`, a GRUB
+  drop-in `/etc/default/grub.d/90-bcd-hugepages.cfg` adding `hugepagesz=1G hugepages=<n>` to `GRUB_CMDLINE_LINUX`,
+  then `update-grub`; with `grubby`, `grubby --update-kernel=ALL --args=...` (removing the previous arguments first);
+  with neither, the step fails. It records the reserved count in `/var/lib/bcd/hugepages-1g-boot` and reports
+  `... the boot loader reserves them from the next boot: reboot the node`. **bcd never reboots.** With `perNuma` the
+  boot reservation is the host total (the count times the NUMA nodes), since the kernel spreads boot pages over the
+  nodes. Once a boot reservation exists it is kept in step with the count, and `pages1g: 0` removes it.
+- **A kernel without 1 GiB pages** (no `hugepages-1048576kB` directory) fails the unit terminally unless `pages1g`
+  is 0; so does a kernel without transparent huge pages when `transparent` is set, and `perNuma` on a kernel that
+  shows no NUMA nodes.
+- **Mounts.** With `pages1g` above 0, bcd mounts a `hugetlbfs` of 1 GiB pages at `/dev/hugepages1G`
+  (`mount -t hugetlbfs -o pagesize=1G`) unless `/proc/mounts` already shows one. The mount is not written to
+  `fstab`; the next pass after a reboot mounts it again. 2 MiB pages use systemd's `/dev/hugepages`, which bcd does
+  not manage.
+
+The configured pools are what inventory reports (`memory.hugepages`, and per NUMA node since badb8c2), what the
+capacity module books as `hugepages2Mi` and `hugepages1Gi` (and takes out of `memoryGiB`), and what bcd's own
+[admission of instance starts](/docs/daemon/delivery#instances) checks free pages against.
+
+## nvidia-driver
+
+The NVIDIA driver branch, installed and loaded.
+
+| Setting | Type | Rules |
+| --- | --- | --- |
+| `branch` | string | Three digits, such as `"580"` |
+| `open` | boolean | `true` for the open kernel modules, `false` for the proprietary ones; unset accepts whichever is installed |
+
+A loaded driver of the branch and flavor is converged; bcd then only keeps `nvidia-persistenced` running where it is
+installed (`systemctl enable --now`), so the GPUs stay initialized between jobs. Otherwise:
+
+1. **Install.** When `modinfo nvidia` does not show the branch and flavor, bcd installs the branch's packages with
+   the distribution's package manager (from `/etc/os-release`). Unset `open` installs the proprietary flavor. The
+   repositories are the OS image's business: a package they do not carry fails the step, which is retried.
+
+   | Distribution | Packages |
+   | --- | --- |
+   | Ubuntu | `nvidia-headless-<branch>-server` (`-open` for the open flavor) and `nvidia-utils-<branch>-server` |
+   | Other Debian family | `nvidia-open-<branch>`, or `cuda-drivers-<branch>` |
+   | RHEL family (RHEL, Rocky, Alma, Fedora, CentOS) | the DNF module stream `@nvidia-driver:<branch>-open`, or `<branch>-dkms` |
+   | SUSE family | `nvidia-open-driver-G06-signed-kmp-default` or `nvidia-driver-G06-kmp-default`, with `nvidia-compute-utils-G06` (these names do not carry the branch) |
+   | Anything else | Refused (terminal) |
+
+   `apt-get` runs with `DEBIAN_FRONTEND=noninteractive`, `--no-install-recommends` and `--force-confold` after an
+   `apt-get update`; `dnf -y install` and `zypper --non-interactive install` elsewhere.
+2. **Swap a loaded driver.** When another driver is loaded, bcd stops `nvidia-fabricmanager`, `nvidia-persistenced`
+   and `nvidia-dcgm`, then unloads `nvidia_uvm`, `nvidia_drm`, `nvidia_modeset` and `nvidia`. `modprobe -r` refuses
+   while anything holds the GPUs, and the step fails with `driver <version> is in use; reboot the node to load
+   branch <branch>`.
+3. **Load.** `modprobe nvidia` and `modprobe nvidia_uvm`, then a check of the loaded driver. If the loaded one is
+   still not the branch and flavor, the step fails with `reboot the node`.
+
+bcd never reboots; both reboot cases are retried, and the section stays `PROGRESSING` until someone reboots the
+machine (for example with `node.reboot`).
+
+## fabric-manager
+
+NVIDIA Fabric Manager, installed and running, on NVSwitch systems. It has no settings (`{}`).
+
+- A host without NVSwitches (nothing under `/proc/driver/nvidia-nvswitch/devices`) has nothing to do, so a profile
+  can name the unit for every node of a mixed pool.
+- On an NVSwitch host it needs a loaded driver (until then it is retried) and installs Fabric Manager when
+  `nv-fabricmanager` is missing: `nvidia-fabricmanager-<branch of the loaded driver>` on the Debian family,
+  `nvidia-fabric-manager` elsewhere. It then runs `systemctl enable --now nvidia-fabricmanager` when it installed it
+  or the service is not active.
+- While an NVSwitch host runs without it, the unit reports `FabricManagerDown`: NVLink between its GPUs is down, and
+  CUDA fails to initialize multi-GPU jobs.
+
+## mig-layout
+
+Every MIG-capable GPU of the host partitioned to one layout.
+
+| Setting | Type | Rules |
+| --- | --- | --- |
+| `from` | `'pool' \| 'profile'` | Where the control plane took the layout from; bcd does not use it |
+| `layout` | string | The layout; empty means the control plane resolved none, and the unit does nothing |
+
+The layout grammar:
+
+| Layout | Meaning |
+| --- | --- |
+| `all-disabled` | MIG mode off |
+| `all-<profile>` | As many instances of one profile as fit on an empty GPU (`all-1g.10gb`), from `nvidia-smi mig -lgip` |
+| `mixed:<n>x<profile>+<profile>+...` | These GPU instances on each GPU (`mixed:3g.40gb+2x2g.20gb`); a count is 1 to 8, and a layout holds 1 to 8 instances |
+
+A profile is `<n>g.<n>gb`. Profiles that carry a `+` of their own (such as `1g.10gb+me`) cannot be expressed. A
+layout that does not parse, or a profile the GPU does not have, is terminal.
+
+For each GPU that `nvidia-smi --query-gpu` shows as MIG-capable (current mode `Enabled` or `Disabled`):
+
+- **Mode.** bcd turns MIG mode on (`nvidia-smi -i <n> -mig 1`) or off (`-mig 0`). When the change waits for a GPU
+  reset, as on Ampere, it runs `nvidia-smi --gpu-reset -i <n>`; a failed reset fails the step with `reboot the node`.
+- **Instances.** When the GPU's instances (`nvidia-smi mig -lgi`) are not the layout's, bcd destroys the compute
+  instances, then the GPU instances ("not found" counts as done), and creates the layout's GPU instances, largest
+  first, each with a compute instance filling it (`nvidia-smi mig -cgi <profiles> -C`).
+- **Busy GPUs.** A GPU that a live hold uses (a hold's device id names it, or a MIG instance or slot of it,
+  `<gpu>/gi<g>/ci<c>` or `<gpu>/s<k>`; 0f68c9a) is left alone. The
+  other GPUs are repartitioned, and the unit then fails, retryably, with `mig-layout: <uuids> hold allocations; they
+  are repartitioned once those end`. The control plane changes a pool's layout only once the GPUs' atoms are free
+  (the [MIG layout gate](/docs/guides/capacity/fractional-gpus#the-mig-layout-gate)); this is bcd's own guard.
+
+A hold on a MIG instance the layout has not created yet fails with `device-missing` until this unit has made it (see
+[device assignments](/docs/daemon/delivery#device-assignments)).
+
+## gpu-sharing
+
+How a `timeslice` or `mps` pool's GPUs are shared.
+
+| Setting | Type | Rules |
+| --- | --- | --- |
+| `mode` | `'mps' \| 'timeslice'` | Required |
+| `replicas` | integer | 1 to 48 (MPS serves at most 48 clients per GPU); default 10 |
+
+- **`mps`** needs `nvidia-cuda-mps-control`, which ships with the driver's utilities (until it is installed the
+  unit is retried). bcd writes `/etc/systemd/system/bcd-mps.service` and, when it changed, runs `systemctl
+  daemon-reload`, `enable` and `restart`; otherwise it starts the service when it is not active. The service runs
+  the MPS control daemon with `CUDA_MPS_PIPE_DIRECTORY=/run/nvidia-mps` and `CUDA_MPS_LOG_DIRECTORY=/var/log/nvidia-mps`,
+  sets every GPU's compute mode to `EXCLUSIVE_PROCESS` before it starts and back to `DEFAULT` after it stops, and
+  limits each client by default to `100 / replicas` percent of the SMs (at least 1), with
+  `set_default_active_thread_percentage`. It restarts on failure after 5 seconds. While the service is not active
+  the unit reports `MPSDown`, since its clients fail. A slot hold gets `CUDA_MPS_PIPE_DIRECTORY` in its env when
+  `/run/nvidia-mps` exists.
+- **`timeslice`** uses the GPUs' default time slicing: the replicas are the slots the control plane hands out. bcd
+  stops and removes `bcd-mps.service` if it installed one.
+
+Provision renders this unit from the pool (1f0f683): a pool whose `sharing` is `mps` or `timeslice` gets
+`gpu-sharing { mode, replicas }`, with `replicas` from `policy.sharing.replicas`, by default 10 for MPS and 4 for
+time slicing, the same numbers of slots the capacity module derives. A profile may also name the unit.
+
+<Callout type="warn" title="Replicas above 48">
+The capacity module accepts `policy.sharing.replicas` up to 64, but the `gpu-sharing` manifest and bcd stop at 48.
+A pool with more replicas gets `INVALID_INPUT` when its nodes' host sections are resolved, and the pools API does not
+check this when the policy is set.
+</Callout>
+
+## container-toolkit
+
+The NVIDIA container toolkit, the container runtimes configured with it, and the vendor CDI spec.
+
+| Setting | Type | Rules |
+| --- | --- | --- |
+| `cdi` | boolean | Default `true` (in the control plane's manifest and in bcd) |
+
+- **Install.** `nvidia-container-toolkit` with the distribution's package manager when `nvidia-ctk` is missing.
+- **Runtimes.** For each runtime installed on the host, containerd (`containerd`, `/etc/containerd/config.toml`)
+  and Docker (`dockerd`, `/etc/docker/daemon.json`), whose configuration does not mention
+  `nvidia-container-runtime` yet: `nvidia-ctk runtime configure --runtime=<name>` (with `--cdi.enabled` when `cdi`
+  is on), then `systemctl restart containerd` or `docker`. A runtime already configured is not configured again, so
+  turning `cdi` on later does not rewrite it.
+- **CDI.** With `cdi`, bcd generates `/etc/cdi/nvidia.yaml` with `nvidia-ctk cdi generate --format=yaml` and records
+  what it describes in `/var/lib/bcd/cdi-nvidia.stamp`: a SHA-256 of the loaded driver version and `nvidia-smi -L`,
+  which lists every GPU and MIG device. The spec is generated again whenever that changes, so a driver update or a
+  new MIG layout gets a new spec in the same pass. It needs a loaded driver; until then the unit is retried.
+  `cdi: false` generates nothing and removes nothing.
+
+This spec is NVIDIA's. bcd's own hold specs are `/etc/cdi/bcd-<allocation>.json`, written by the `devices`
+converger; the [Kubernetes device plugin](/docs/guides/capacity/kubernetes#the-device-plugin) names both.
+
+## k8s-join
+
+Joins the machine to a Kubernetes cluster as a worker, and keeps its kubelet, labels and taints (88ecb07, wired into
+the agent, the helper and the configuration in 7579184). Compute never runs a control plane and never schedules
+pods; it hands a cluster machines and GPUs. The whole flow is on [Kubernetes workers](/docs/guides/capacity/kubernetes).
+
+| Setting | Type | Rules |
+| --- | --- | --- |
+| `server` | string | The API server, `https://host[:port]` (port 443 when left out), no credentials, path or query |
+| `caCertSha256` | string | The SHA-256 of the cluster CA's public key, 64 hex digits, optionally `sha256:` (kubeadm's `--discovery-token-ca-cert-hash`) |
+| `tokenRef` | string | A secret reference to a kubeadm bootstrap token; the token never travels in the spec |
+| `kubernetesVersion` | string | A release such as `1.34.1`; picks the package repository when kubeadm and the kubelet are missing |
+| `nodeLabels` | `Record<string, string>` | At most 64 Kubernetes labels; the `kubernetes.io` and `k8s.io` prefixes are refused |
+| `taints` | `string[]` | `key[=value]:NoSchedule\|PreferNoSchedule\|NoExecute`, no key and effect twice |
+| `gpu` | boolean | Default `true`: bcd's device plugin hands compute-bound GPUs to the kubelet |
+
+A pool's `policy.kubernetes: { apiServer, caCertSha256, joinTokenRef, labels?, taints?, kubernetesVersion?, gpu? }`
+becomes this unit when it names the cluster: `apiServer`, `caCertSha256` and `joinTokenRef` go together, and a
+partial set is `INVALID_INPUT` (7db110a). A pool without them is one whose nodes already run bcd as a DaemonSet
+inside the cluster, and needs no unit (see [on Kubernetes](/docs/daemon/kubernetes)). bcd checks the settings again on the node, since labels, taints and the fetched token end up in
+YAML and on command lines. Each pass converges, in order:
+
+1. **Packages.** When `kubeadm`, `kubelet` or `kubectl` is missing, bcd adds the `pkgs.k8s.io` repository of
+   `kubernetesVersion`'s minor release and installs them: on the Debian family the source
+   `/etc/apt/sources.list.d/bcd-kubernetes.list` with its key fetched over https into
+   `/etc/apt/keyrings/bcd-kubernetes.gpg`, `apt-get install`, then `apt-mark hold`; on the RHEL family
+   `/etc/yum.repos.d/bcd-kubernetes.repo` and `dnf install --disableexcludes=bcd-kubernetes`. It installs
+   `containerd` too when it is missing. Missing packages without `kubernetesVersion`, or another distribution, are
+   terminal. A pass that installed packages ends there, and the next one plans the rest.
+2. **Kernel.** `overlay` and `br_netfilter` in `/etc/modules-load.d/90-bcd-k8s.conf`, loaded now; then
+   `net.bridge.bridge-nf-call-iptables`, `net.bridge.bridge-nf-call-ip6tables` and `net.ipv4.ip_forward` at 1 in
+   `/etc/sysctl.d/90-bcd-k8s.conf` and live; and `swapoff -a` whenever `/proc/swaps` lists swap, since the kubelet
+   refuses to run with it. Do not set those `net.bridge.*` keys to 0 in the `sysctl` unit on the same machine: the two
+   units would set them back and forth.
+3. **containerd.** `/etc/containerd/config.toml` imports `/etc/containerd/conf.d/*.toml` (a new file when there is
+   none; an `imports` list without it is terminal, for the operator to fix), and bcd's drop-in
+   `/etc/containerd/conf.d/90-bcd-k8s.toml` turns CDI on (`/etc/cdi`, `/var/run/cdi`) and the systemd cgroup driver
+   for runc, in config version 2 or 3 as the installed containerd reads. containerd is restarted when either
+   changed, and started when it is not running.
+4. **Join.** While `/etc/kubernetes/kubelet.conf` does not exist, bcd fetches the bootstrap token, writes a
+   `JoinConfiguration` (API `kubeadm.k8s.io/v1beta4` from kubeadm 1.31, `v1beta3` before) with the endpoint, the
+   token, the CA pin, the Node name, containerd's socket, the labels and the taints to `/run/bcd/k8s-join.yaml`
+   (0600), runs `kubeadm join --config`, and removes the file whatever happened. The Node name is the host name,
+   lower-cased with `_` and spaces as `-`; one that is not a DNS subdomain is terminal. It records what it manages in
+   `/etc/bcd/k8s-join.json`.
+5. **Kept.** Once joined: a kubelet whose kubeconfig names another API server is terminal (`reset it by hand
+   (kubeadm reset) to move it`): bcd never resets a node joined elsewhere. It starts the kubelet when it is not
+   active, and keeps the Node's labels and taints with the kubelet's own credentials (`kubectl --kubeconfig
+   /etc/kubernetes/kubelet.conf label` and `taint`), removing only labels and taints it set before or labels under
+   `bcd.dev/`. Besides the spec's labels, bcd sets `bcd.dev/node-id`, `bcd.dev/site`, `bcd.dev/gpu.count`,
+   `bcd.dev/gpu.product` and `bcd.dev/gpu.driver` from its identity and inventory.
+
+**The token.** `bcd node` fetches it with a `SecretRequest` that names workflow `host:k8s-join` and step `tokenRef`.
+The secret broker releases it only while the node's current spec names that reference in that field (binding rule 3,
+e93bf9c; see [sealed secrets](/docs/operations/security#sealed-secrets)). The token is removed once the join
+succeeded.
+
+**Which clusters.** Joining a cluster gives it root on the machine (privileged pods), so root decides which clusters
+are allowed, in `config.toml`:
+
+```toml title="/etc/bcd/config.toml"
+[kubernetes]
+allowed_clusters = "https://10.0.0.1:6443#sha256:<64 hex digits>,https://k8s.example.com#sha256:<64 hex digits>"
+```
+
+Each entry is an API server and its CA pin; a malformed entry stops bcd from starting. `bcd node` running as root
+enforces the list when it is set and joins any cluster when it is empty. Under bcd helper the list is required: the
+helper builds the unit with root's list, and an empty list refuses every join (`joining a Kubernetes cluster needs
+[kubernetes] allowed_clusters in bcd's config`). Since the helper cannot ask the control plane for secrets, the node
+fetches the token first and stages it at `/run/bcd/k8s/bootstrap-token` (helper file kind `k8s-token`, mode 0600),
+where the helper's join reads it.
+
+## Examples
+
+### A sandbox host
+
+A pool of VM hosts for [sandboxes](/docs/guides/vps/sandboxes): KVM with nested virtualization, `vhost_net` and
+`tun` for the guests' NICs, 1 GiB pages per NUMA node for pinned guests. The modules and pages belong to the pool,
+so they go in its policy, here in a [FleetConfig](/docs/guides/fleet-config) document:
+
+```json title="fleet.json"
+{
+  "version": 1,
+  "pools": [
+    {
+      "name": "sandbox-fra",
+      "site": "fra",
+      "class": "vps-host",
+      "policy": {
+        "kernelModules": {
+          "load": ["kvm_intel", "vhost_net", "tun", "br_netfilter"],
+          "options": { "kvm_intel": "nested=1" }
+        },
+        "hugepages": { "size": "1Gi", "count": 64, "perNuma": true }
+      }
+    }
+  ]
+}
+```
+
+Kernel parameters come only from a profile's `hostConfig`, so the machines' deploy profile carries them:
+
+```ts title="profiles/sandbox-host.ts"
+hostConfig: {
+  sysctl: {
+    // Keep bridged guest traffic out of the host's IP firewall. bcd's instance rules live in the
+    // bridge family and do not need br_netfilter, but the keys exist only once it is loaded.
+    'net.bridge.bridge-nf-call-iptables': 0,
+    'net.bridge.bridge-nf-call-ip6tables': 0,
+  },
+},
+```
+
+On such a host, `kernel-modules` writes both drop-ins and loads the modules; `kvm_intel` loaded before without
+`nested=1` is reloaded only if no VM holds it. `sysctl` then finds the `net.bridge.*` keys in the same pass. The
+`hugepages` unit sets 64 pages on each NUMA node and mounts `/dev/hugepages1G`; on a host that has been up for a while
+it may instead set up the boot loader and ask for a reboot. An Intel host needs `kvm_intel`, an AMD one `kvm_amd`;
+use a `when:` expression on a profile unit, or separate pools, for mixed hardware.
+
+### A GPU host
+
+A MIG pool of H100 hosts with the open driver of branch 580, Fabric Manager where there are NVSwitches, the pool's
+layout, and the container toolkit with CDI:
+
+```ts title="profiles/ubuntu-gpu-host.ts"
+hostConfig: {
+  'nvidia-driver': { branch: '580', open: true },
+  'fabric-manager': {},
+  'mig-layout': { from: 'pool' },
+  'container-toolkit': { cdi: true },
+},
+```
+
+with the pool's `policy.migLayout`, for example `"all-1g.10gb"`. In one pass bcd installs and loads the driver (or
+reports that a reboot is needed), installs and starts Fabric Manager on an NVSwitch board, turns MIG mode on and
+creates seven `1g.10gb` instances on each idle GPU, configures containerd with the toolkit, and generates
+`/etc/cdi/nvidia.yaml` for the new MIG devices. The inventory refresh that follows reports them, and the control
+plane derives the pool's `gpu.mig` atoms from it.
+
+## What the tests cover
+
+| Test | Checks |
+| --- | --- |
+| `internal/hostconfig` (18 tests, against `FakeSystem`) | sysctl converges, is idempotent on tab-separated values, corrects drift and cleans up; refused keys and object values are terminal, a missing key is retried; kernel modules before the sysctl they provide, in one pass, and no reload of a module in use; unknown units and refused settings do not block other units; 2 MiB and 1 GiB pages, the GRUB and grubby fallbacks, per-NUMA pools and the host-total boot reservation; the driver installed and loaded on Ubuntu, a flavor mismatch, and a driver in use asking for a reboot; the toolkit's runtime configuration and CDI regeneration after a MIG change; Fabric Manager only with NVSwitches, and `FabricManagerDown`; the MIG layout grammar, a mixed layout largest first, a busy GPU left alone, and `all-disabled`; MPS with its unit file and `MPSDown`, then time slicing removing it; the RHEL family's driver stream |
+| `internal/agent` `TestHostSectionConverges` | A real `Agent` under a fake root (programs are recorded, not run): a sysctl applied and its drop-in written, an NVSwitch host without Fabric Manager keeping the section `PROGRESSING` with `FabricManagerDown` in the status report |
+| `internal/kube` `TestJoinFromBareHost`, `TestJoinRefusesAnotherCluster`, `TestJoinSettingsAreCheckedAgain`, `TestJoinUnderHelper`, `TestContainerdImport`, `TestJoinConfigurationV1beta3` | The join unit against `FakeSystem`: from a bare host to a joined Node with its labels and taints, the refusal to move a node joined elsewhere, settings checked again, the helper's allowlist and staged token, containerd's import line |
+
+Nothing here has run on a real machine. The helper's `host.unit` operation has no test of its own.
+
+<Cards>
+  <Card title="Delivery" href="/docs/daemon/delivery">Desired state, sections, device assignments and instances.</Card>
+  <Card title="Profiles and images" href="/docs/guides/bare-metal/profiles-and-images#host-config">Where a profile's hostConfig is declared.</Card>
+  <Card title="Kubernetes workers" href="/docs/guides/capacity/kubernetes">From policy.kubernetes to GPUs in pods.</Card>
+  <Card title="Fractional GPUs" href="/docs/guides/capacity/fractional-gpus">MIG layouts, slots and the layout gate.</Card>
+</Cards>

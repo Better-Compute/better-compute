@@ -5,7 +5,7 @@ metaTitle: VPS flavors and instance shapes
 icon: SlidersHorizontal
 status: beta
 packages: ['@better-compute/vps', '@better-compute/capacity']
-sources: ['packages/vps/src/flavors.ts', 'packages/vps/src/instances.ts', 'packages/vps/src/usage.ts', 'packages/vps/src/module.ts', 'packages/vps/src/hosts.ts', 'packages/capacity/src/bookings.ts', 'packages/capacity/src/placer.ts', 'packages/capacity/src/shortlist.ts', 'packages/postgres/src/migrations/0002_base.ts', 'packages/provision/src/profile.ts', 'packages/fleet/README.md', 'packages/cli/src/commands/catalog.ts', 'packages/cli/src/commands/metal.ts', 'tests/vps-instances.test.ts']
+sources: ['packages/vps/src/flavors.ts', 'packages/vps/src/placement.ts', 'packages/vps/src/migrations.ts', 'packages/capacity/src/quota.ts', 'packages/vps/src/instances.ts', 'packages/vps/src/usage.ts', 'packages/vps/src/module.ts', 'packages/vps/src/hosts.ts', 'packages/capacity/src/bookings.ts', 'packages/capacity/src/placer.ts', 'packages/capacity/src/shortlist.ts', 'packages/postgres/src/migrations/0002_base.ts', 'packages/provision/src/profile.ts', 'packages/fleet/README.md', 'packages/cli/src/commands/catalog.ts', 'packages/cli/src/commands/metal.ts', 'tests/vps-instances.test.ts']
 ---
 
 Tenants should not have to know how many vCPUs a host has or what a provider calls its server types. A
@@ -39,6 +39,7 @@ await compute.api.flavors.create(
     diskGiB: { type: 'number', description: 'GiB of disk, 1 to 65536.', required: true },
     gpus: { type: 'number', description: 'Whole GPUs passed through to the VM, 0 to 16.', default: '0' },
     offerId: { type: 'string', description: "Provider pools: the provider offer this flavor creates, 1 to 128 characters. Required there; hosted pools ignore it.", },
+    placement: { type: "{ numaAffine?: boolean; pinned?: boolean; hugepages?: '2Mi' | '1Gi' }", description: 'Hosted pools only (INVALID_INPUT on a provider pool): where the guest lives on its host. Sandbox templates on the flavor inherit it. See placement below.' },
   }}
 />
 
@@ -91,7 +92,7 @@ inventory, for nodes of `vps-host` pools that are not `tenant-controlled`:
 | Scalar | `allocatable` |
 | --- | --- |
 | `vcpu` | logical CPUs (`cpu.threads`) minus the reserve |
-| `memoryGiB` | installed memory in whole GiB minus the reserve |
+| `memoryGiB` | installed memory less the host's huge page pools, in whole GiB, minus the reserve (9d55b36) |
 | `diskGiB` | non-removable disks in whole GiB minus the reserve |
 
 The reserve is what a host keeps for itself, `vps({ hostReserve })`, by default 2 vCPU, 8 GiB and 100 GiB. `ratio` is
@@ -107,6 +108,25 @@ Hosted instances are metered from placement until their allocation is released: 
 `vps.memory.gib.hours` at `memoryGiB` per hour, and for GPU flavors `gpu.<model>.hours` at `gpus` per hour, where the
 model is the pool's `gpuModel` in lower case. The `vps.usage` job writes the windows every 5 minutes; see
 [billing and usage](/docs/guides/iam/billing-and-usage).
+
+### Placement
+
+A flavor's `placement` (9d55b36, migration `vps/0018_placement`) says where its guests live on their host:
+
+| Field | Effect |
+| --- | --- |
+| `hugepages: '2Mi' \| '1Gi'` | Guest memory is backed by huge pages of that size, never ballooned. The instance books the host's `hugepages1Gi` (one per GiB) or `hugepages2Mi` (512 per GiB) row instead of `memoryGiB`; the capacity module keeps those rows from each host's configured pools (see [host resources](/docs/guides/capacity/reservations#host-resources)). Quota still charges it as `memoryGiB` |
+| `numaAffine: true` | vCPUs and memory on one NUMA node: the node of the instance's GPUs, or without GPUs the least-loaded node with room for the memory |
+| `pinned: true` | Each vCPU gets its own host CPU that no other pinned guest on the host has |
+
+After capacity places the instance on a host, vps chooses the host placement from the host's inventory (its NUMA
+nodes, its GPUs' NUMA nodes) and the other guests' placements, stores it in `instances.host_placement`, and sends it
+to the host as `InstanceSpec.placement` (`cpus`, `mems`, `hugepageSizeBytes`), which bcd maps onto `libvirt-kvm` or
+`cloud-hypervisor` (see [instances](/docs/daemon/delivery#instances)). Placements on one host take turns on its `vcpu`
+row, so the second sees the first's pinned CPUs. A host that cannot honour `numaAffine` or `pinned` still runs the
+guest, floating, and the instance carries a `PlacementDegraded` condition naming why: `NoNumaTopology`,
+`NoNumaNodeFits`, `GpuNumaUnknown`, `NumaMemoryTooSmall` or `NotEnoughFreeCpus`. Huge pages are never degraded:
+they were booked, and bcd's own admission refuses a start the free pages cannot back.
 
 ## Flavors on provider pools
 
@@ -152,7 +172,8 @@ same. It computes the difference per resource between the old shape and the new 
 4. otherwise refunds the shrinkage and stores the new shape.
 
 The allocation never moves to another host, and GPU atoms are never added or removed: a different GPU count is
-`UNSUPPORTED`, and so is resizing a provider instance. Create a new instance instead.
+`UNSUPPORTED`, and so is a flavor with a different `placement` and resizing a provider instance. Create a new
+instance instead. A resize with the same `placement` chooses the host placement again for the new shape.
 
 ## Update and delete
 

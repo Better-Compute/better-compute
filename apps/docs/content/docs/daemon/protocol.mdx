@@ -219,7 +219,9 @@ Commands carry secret references (`secret://`, `vault://`, `env://`), never valu
 sends [`SecretRequest`](/docs/reference/protocol#secretrequest)`{ref, workflow_id, step_id, allocation_id, epk,
 node_sig, request_id}`, where `epk` is a fresh
 P-256 public key used once and `node_sig` covers every other field. The broker checks the signature and that the
-reference is bound to the agent's current step or allocation, and answers with a
+reference is bound to the agent's current step or allocation, or, for a credential the node's own spec names, to
+workflow `host:<unit or section>` and step `<field>` (`host:k8s-join` / `tokenRef`, `host:telemetry` / `headersRef`;
+see [sealed secrets](/docs/operations/security#sealed-secrets)), and answers with a
 [`SecretResponse`](/docs/reference/protocol#secretresponse) holding a compact JWE
 (`ECDH-ES+A256KW`, `A256GCM`) to `epk`, or with an `error` of `not-found`, `not-bound`, `access-denied` or
 `unavailable`. Gateways see ciphertext only. A session whose certificate is tenant-controlled always gets
@@ -232,7 +234,8 @@ the request, waits at most 10 seconds and ignores an answer to nothing. The Go t
 fixtures produced by `@better-compute/pki`. These bcd features send one: a site agent's BMC operations (the
 credential, and for `bmc.rotate` the new one) and `site.httpProxy` secret headers, bound to the command's workflow
 step; its boot server's discovery tokens, bound to the boot entry's workflow; the ramdisk's `deploy.image` user data,
-bound to the step; and a VPS host's instance user data, bound to the instance's allocation.
+bound to the step; a VPS host's instance user data, bound to the instance's allocation; the `k8s-join` unit's
+bootstrap token (7579184) and the OTLP exporter's headers (27c7ee2), bound to the node's spec.
 
 ### Workload tokens (v0.5)
 

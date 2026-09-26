@@ -352,8 +352,8 @@ through the step result's `joinTokenId`, so the installed OS re-keys the same no
 ## Config units
 
 A profile's `hostConfig` is not a step: when the workflow succeeds, its units become the node's NodeSpec `host`
-section, which the daemon converges and keeps correcting. A unit is `{ name, description, settings }`, where
-`settings` is a manifest:
+section, which bcd's host converger applies (see [host configuration](/docs/daemon/host-config)). A unit is
+`{ name, description, settings }`, where `settings` is a manifest:
 
 ```ts
 import { field, manifest } from 'better-compute/core';
@@ -370,9 +370,11 @@ provisionModule({
 ```
 
 Any unit takes `when:`, a label expression that turns it on per node. An unknown unit or invalid settings is
-`INVALID_INPUT` when the host section is resolved. The built-ins are `nvidia-driver`, `container-toolkit`,
-`mig-layout`, `fabric-manager` and `sysctl`. A new unit is data to the control plane; the daemon's host converger has
-to know how to apply it.
+`INVALID_INPUT` when the host section is resolved. The built-ins are `kernel-modules`, `sysctl`, `hugepages`,
+`nvidia-driver`, `fabric-manager`, `mig-layout`, `gpu-sharing`, `container-toolkit` and `k8s-join`; a unit you add with
+the name of a built-in replaces it. A new unit is data to the control plane only: bcd applies the units it was built
+with, and reports any other as `unit <name> is not supported by this daemon`, which fails the `host` section
+terminally once the known units have had their turn.
 
 ## Images
 

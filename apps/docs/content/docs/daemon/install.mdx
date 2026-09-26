@@ -316,6 +316,8 @@ keys and wrong types are all errors with a line number, so a typo fails loudly. 
 | `[websocket] proxy_ca_file` | no | | An absolute path to a PEM file of a TLS-inspecting proxy's CA, trusted for the TLS connection only, never for the gateway's proof |
 | `[websocket] audience` | no | `gateway_server_name`, else the URL's host | The gateway's public host the node's proof names |
 | `[imds] listen` | no | | Where a VPS host serves its instances' metadata service, for example `169.254.169.254:80` on the instances' bridge; empty turns it off |
+| `[host] units` | no | `true` | `false` when something else manages the host's configuration (the NVIDIA GPU operator beside [bcd as a DaemonSet](/docs/daemon/kubernetes)): bcd applies no `NodeSpec.host` unit and reports the section `UNSUPPORTED` with reason `HostManagedExternally` (a193249). See [host configuration](/docs/daemon/host-config) |
+| `[kubernetes] allowed_clusters` | under `bcd helper`, for a `k8s-join` | | Comma-separated `https://host[:port]#sha256:<CA pin>` entries: the only clusters the `k8s-join` unit may join this machine to (7579184). `bcd node` running as root enforces it when set; `bcd helper` requires it and refuses every join without it. A malformed entry stops `bcd node` and `bcd helper` from starting. See [k8s-join](/docs/daemon/host-config#k8s-join) |
 | `[boot] ...` | no | | A site agent's boot server; see [site agents](#a-site-agent) |
 | `[plugins] dir` | no | | A directory of bcx driver plugins and their `pins` file (sha256sum format); only pinned plugins run. Empty runs none. See [driver plugins in bcd](/docs/extending/drivers#driver-plugins-in-bcd) |
 | `[plugins] user` | no | | Who plugins run as when bcd is root (no supplementary groups); unset, each plugin gets its own uid from a block bcd keeps, `0x7FFE0000` to `0x7FFEFFFF`. `root` is refused |
@@ -674,6 +676,12 @@ $ bcd join bcjt_jt_01...
 bcd join: takes no positional arguments
 bcd join reads the join token from BCD_JOIN_TOKEN or stdin, never from arguments
 ```
+
+`--token-file PATH` reads the token from a file instead (c29bb16). The file must be its owner's alone: mode 0600 or
+0400 (a Kubernetes Secret volume with `defaultMode: 0400`, whose `..data` symlink bcd follows), a regular file, and
+at most 4 KiB; anything else is refused before the token is read. Once the join succeeds, or when the machine had
+already joined, bcd deletes the file, since a token is single use; on a read-only mount such as a Secret volume it
+cannot, and logs a warning instead of failing. [bcd on Kubernetes](/docs/daemon/kubernetes) joins this way.
 
 The node then opens its session (see [sessions](/docs/daemon/sessions)) and appears as `adopting`. Tokens,
 attestors, refusals and certificates are covered in [joining nodes](/docs/guides/nodes/joining).

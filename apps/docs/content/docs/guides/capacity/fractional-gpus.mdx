@@ -174,14 +174,22 @@ Shipped in the control plane:
   repartitions go through the gate, and no parent and child, or atoms of different layouts, are ever live at once.
 
 On the node, `bcd` (built and tested end to end, not released) holds device assignments through its devices
-converger: CDI specs, env files and node-signed `AllocationBound` and `AllocationReleased` reports.
-It does not apply MIG layouts: it has no converger for the NodeSpec `host` section, where the `mig-layout`
-config unit lives, and reports that section `SectionUnsupported`, so nothing repartitions a GPU on a real node
-yet.
+converger: CDI specs, env files and node-signed `AllocationBound` and `AllocationReleased` reports. Since 46a61db it
+holds `gpu.mig` atoms (resolved to the MIG instance's `MIG-…` UUID from the inventory; `device-missing` until the
+instance exists) and `gpu.slot` atoms (their GPU), refuses a whole GPU while part of it is held and a part while the
+whole is held, and gives a slot hold `CUDA_MPS_PIPE_DIRECTORY` when MPS runs (see
+[device assignments](/docs/daemon/delivery#device-assignments)).
+
+bcd's host converger (6c2343f) applies the layout: the [`mig-layout` unit](/docs/daemon/host-config#mig-layout)
+partitions every idle MIG-capable GPU (`all-disabled`, `all-<profile>`, `mixed:<n>x<profile>+…`), leaves a GPU that
+a live hold uses alone, and asks for a reboot when a mode change needs a GPU reset that fails. For `mps` and
+`timeslice` pools, provision renders the [`gpu-sharing` unit](/docs/daemon/host-config#gpu-sharing) (1f0f683), with
+which bcd runs the MPS control daemon as `bcd-mps.service`. All of it is tested against fakes; no GPU has been
+repartitioned on a real node.
 
 Still to come in v0.5:
 
-- applying MIG layouts on the node (the `host` section's `mig-layout` unit in `bcd`);
+- a MIG repartition and an MPS pool on real hardware;
 - the remaining v0.5 exit tests and the real-hardware nightly.
 
 PLAN.md plans to reset GPUs on release and leaves one question open: clearing memory between tenants

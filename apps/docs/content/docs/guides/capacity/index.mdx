@@ -55,9 +55,11 @@ flowchart LR
 
 A booking is `(device_id, allocation_id, during)`, where `during` is a `tstzrange`. The allocation
 also records scalar claims (`vcpu`, `memoryGiB`, `diskGiB`) that VPS instances take from
-`node_resources`; GPU reservations usually claim devices only. Booking and enforcing a host's CPU, memory and
-hugepages with GPU reservations, and handing reserved GPUs to Kubernetes, are planned, not built: see
-[the roadmap](/docs/reference/roadmap#cpu-memory-and-kubernetes-planned).
+`node_resources`. Since v1.1's first pieces, GPU reservations also book host CPUs, memory and 1 GiB huge pages
+with their devices ([host resources](/docs/guides/capacity/reservations#host-resources)), which the node turns into
+a cgroup slice for the workload, and a reservation can hand its GPUs to a node's kubelet
+([Kubernetes workers](/docs/guides/capacity/kubernetes)). What is still missing is on
+[the roadmap](/docs/reference/roadmap#cpu-memory-and-kubernetes-v11).
 
 ## Capacity math
 

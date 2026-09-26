@@ -114,6 +114,12 @@
     "href": "/docs/guides/nodes/inventory-and-health"
   },
   {
+    "id": "config-unit",
+    "term": "Config unit",
+    "definition": "One concern of a machine's host configuration in its NodeSpec `host` section, such as `nvidia-driver`, `mig-layout` or `hugepages`: a unit name and validated settings. Profiles' `hostConfig` and pool policies produce them; bcd's host converger applies them in a fixed order.",
+    "href": "/docs/daemon/host-config"
+  },
+  {
     "id": "cordon",
     "term": "Cordon",
     "definition": "A flag that stops new placements on a node and changes nothing else: existing allocations keep running and commands still flow. `nodes.uncordon` clears it.",

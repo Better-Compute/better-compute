@@ -112,7 +112,31 @@ for in each mode.
     hardwareProfile: { type: 'string', description: 'The metal hardware profile whose driver bindings nodes inherit.' },
     sharing: {
       type: '{ replicas?: number }',
-      description: 'timeslice and mps pools: slot atoms per GPU (1 to 64). Defaults are 4 for timeslice and 10 for mps.',
+      description: 'timeslice and mps pools: slot atoms per GPU (1 to 64). Defaults are 4 for timeslice and 10 for mps. The same number reaches each host in the gpu-sharing config unit, which allows at most 48 (/docs/daemon/host-config#gpu-sharing).',
+    },
+    hostReserve: {
+      type: '{ vcpu?: number; memoryGiB?: number }',
+      description: "(v1.1) What each host keeps for itself out of its bookable CPUs and memory, for pools other than vps-host. Default 2 CPUs and 8 GiB; huge page pools come out of memory on top of it.",
+    },
+    perGpu: {
+      type: '{ vcpu?: number; memoryGiB?: number }',
+      description: "(v1.1) The host CPUs and memory a reservation books per whole GPU when it asks for no resources. Default: the smallest share any GPU host of the pool can give. See /docs/guides/capacity/reservations#host-resources.",
+    },
+    hugepages: {
+      type: "{ size: '2Mi' | '1Gi'; count: number; perNuma?: boolean }",
+      description: "(v1.1) Huge pages every host reserves, through the hugepages config unit (per NUMA node with perNuma). See /docs/daemon/host-config#hugepages.",
+    },
+    kernelModules: {
+      type: '{ load?: string[]; options?: Record<string, string> }',
+      description: '(v1.1) Kernel modules every host loads, through the kernel-modules config unit. See /docs/daemon/host-config#kernel-modules.',
+    },
+    kubernetes: {
+      type: '{ apiServer?, caCertSha256?, joinTokenRef?, labels?, taints?, kubernetesVersion?, gpu?, platformOperated? }',
+      description: "(v1.1) The pool's hosts work for a Kubernetes cluster, and reservations may use binding 'kubernetes'. apiServer, caCertSha256 and joinTokenRef together make every host join through the k8s-join unit; none of them marks a pool whose bcd runs as a DaemonSet in the cluster. See /docs/guides/capacity/kubernetes.",
+    },
+    telemetry: {
+      type: '{ otlpEndpoint?, intervalSeconds?, headersRef?, resourceAttributes? }',
+      description: "(v1.1) Where the pool's hosts export bcd's metrics, over the deployment's nodeTelemetryModule default. See /docs/operations/observability#node-metrics-from-bcd.",
     },
     migLayout: { type: 'string', description: 'mig pools: the layout the mig-layout config unit applies, such as all-1g.10gb. A change reaches each node only once its GPUs are free (the MIG layout gate, /docs/guides/capacity/fractional-gpus#the-mig-layout-gate).' },
     tenantRoot: {
@@ -134,10 +158,19 @@ for in each mode.
   }}
 />
 
-The placer reads the overcommit ratio stored on each `node_resources` row, not the policy. Only the
-vps module fills those rows from `overcommit`: for `vps-host` pools, its `vps.hosts` work writes
-`vcpu`, `memoryGiB` and `diskGiB` from each host's inventory with the pool's ratio (default 1, clamped
-to 0.1 to 100); on other pool classes the field has no effect. `admission.budgetCheck: 'meter'` adds a Better IAM
+The placer reads the overcommit ratio stored on each `node_resources` row, not the policy. For `vps-host` pools the
+vps module's `vps.hosts` work writes `vcpu`, `memoryGiB` (less the huge page pools) and `diskGiB` from each host's
+inventory with the pool's ratio (default 1, clamped to 0.1 to 100). For every other pool, since 8a7f8eb, capacity's
+`capacity.hosts` reconciler (every 30 seconds) writes `vcpu` (logical CPUs less `hostReserve.vcpu`, with the ratio)
+and `memoryGiB` (installed memory less the huge page pools and `hostReserve.memoryGiB`, with the ratio), and for every
+pool `hugepages2Mi` and `hugepages1Gi` (the configured pages, never overcommitted). `tenant-controlled` nodes get no
+rows, a row never shrinks below what is allocated, and unchanged rows are not rewritten. GPU reservations book these
+rows with their devices (see [host resources](/docs/guides/capacity/reservations#host-resources)).
+
+The host policy fields (`hugepages`, `kernelModules`, `kubernetes`, and a `sharing` mode of `mps` or `timeslice`)
+become config units in every host's NodeSpec, through provision (see
+[host configuration](/docs/daemon/host-config#where-the-units-come-from)). The pools API stores the policy as given
+and does not check them; a bad value is `INVALID_INPUT` when a node's spec is built. `admission.budgetCheck: 'meter'` adds a Better IAM
 `billing.check` to every reservation and instance admission in the pool, on top of the IAM policy described in
 [quotas and usage](/docs/guides/capacity/quotas-and-usage).
 
