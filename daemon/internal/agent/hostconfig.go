@@ -100,11 +100,11 @@ func (c *hostConverger) busyGPUs() []string {
 	return out
 }
 
-// gpuBusy reports whether a GPU holds allocations: a hold names it (or a slot of it, GPU-<uuid>…).
-// A MIG device's UUID does not name its GPU, so any held MIG device keeps every GPU as it is.
+// gpuBusy reports whether a GPU holds allocations: a hold names it, or one of its atoms (a hold's
+// device ids name their GPU first: "<gpuUuid>/gi<g>/ci<c>" for MIG, "<gpuUuid>/s<k>" for slots).
 func gpuBusy(assigned []string, uuid string) bool {
 	for _, id := range assigned {
-		if strings.HasPrefix(id, uuid) || !strings.HasPrefix(id, "GPU-") {
+		if parent, _, _ := strings.Cut(id, "/"); parent == uuid {
 			return true
 		}
 	}

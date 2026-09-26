@@ -97,7 +97,10 @@ func TestGPUBusy(t *testing.T) {
 	if !gpuBusy([]string{"GPU-aaaa"}, "GPU-aaaa") || gpuBusy([]string{"GPU-aaaa"}, "GPU-bbbb") {
 		t.Fatal("whole GPU holds")
 	}
-	if !gpuBusy([]string{"MIG-cccc"}, "GPU-bbbb") {
-		t.Fatal("a held MIG device must keep every GPU as it is")
+	if !gpuBusy([]string{"GPU-bbbb/gi1/ci0"}, "GPU-bbbb") || !gpuBusy([]string{"GPU-bbbb/s3"}, "GPU-bbbb") {
+		t.Fatal("a held MIG instance or slot keeps its GPU as it is")
+	}
+	if gpuBusy([]string{"GPU-aaaa/gi1/ci0"}, "GPU-aaaa0") {
+		t.Fatal("a UUID prefix is not its GPU")
 	}
 }
