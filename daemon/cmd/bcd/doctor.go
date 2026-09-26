@@ -122,9 +122,11 @@ func hostChecks(cfg *config.Config) []doctorCheck {
 		out = append(out, doctorCheck{"warn", "iommu", "no IOMMU: GPU passthrough to instances is unavailable"})
 	}
 	out = append(out, toolChecks(exec.LookPath)...)
+	out = append(out, gpuChecks(gpuSampler())...)
 	if cfg == nil {
 		return out
 	}
+	out = append(out, hostKubeChecks(cfg)...)
 	if u, err := url.Parse(cfg.GatewayURL); err == nil {
 		host := u.Host
 		if u.Port() == "" {
