@@ -296,6 +296,10 @@ the VMM creates, under `UMask=0007` and its own private group). Root does only w
 - the VMM's unit, which root builds from the record it checks itself (`runtime.CHLaunch`), with
   root's binary and never another running unit's uid.
 
+The node reads live usage (`bcd.instance.*`: the unit's cgroup, the taps' counters) as itself, with
+no `ch.*` call. `node scripts/helper-e2e.mjs` drives `ch.*` through a real helper as root, with real
+taps in a private network namespace and a stubbed `systemd-run` (b9667d5). No VMM has run under it yet.
+
 `bcd doctor` checks all of this.
 
 **Identity rebind** (`agent/rebind.go`, `runtime/rebind.go`; review 13 H2). A memory-restored guest
