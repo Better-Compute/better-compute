@@ -106,7 +106,8 @@ CPU2 Temp        | no reading        | ns
 FAN3             | 0 RPM             | cr
 PS1 Status       | 0x01              | ok`,
 	}
-	script := "#!/bin/sh\ncat /dev/fd/3 >/dev/null\ncase \"$*\" in\n"
+	script := "#!/bin/sh\ncat /dev/fd/3 >/dev/null\ncase \"$*\" in\n" +
+		"*'mc guid'*) echo 'System GUID  : 4C4C4544-0042-3810-8051-B2C04F4E3232'; echo 'Timestamp    : 01/01/1970 00:00:00' ;;\n"
 	for key, out := range outputs {
 		file := filepath.Join(dir, key)
 		_ = os.WriteFile(file, []byte(out+"\n"), 0o600)
@@ -135,7 +136,7 @@ PS1 Status       | 0x01              | ok`,
 		t.Fatalf("%s: %v", out, err)
 	}
 	if got.Manufacturer != "Supermicro" || got.Model != "SYS-220U-TNR" || got.SerialNumber != "S98765" || got.Power != "on" ||
-		got.Macs == nil || len(got.Macs) != 0 || got.IPAddresses == nil || got.ProductUUID != nil ||
+		got.Macs == nil || len(got.Macs) != 0 || got.IPAddresses == nil || got.ProductUUID == nil || *got.ProductUUID != "4c4c4544-0042-3810-8051-b2c04f4e3232" ||
 		got.Board["product"] != "X12DPi-NT6" || got.BMC["firmware"] != "1.73" || got.BMC["mac"] != "0c:c4:7a:aa:bb:cc" || got.BMC["ipAddress"] != "10.0.0.9" ||
 		got.Sensors.Count != 4 || got.Sensors.OK != 2 || len(got.Sensors.Problems) != 1 || got.Sensors.Problems[0]["name"] != "FAN3" {
 		t.Fatalf("inspect = %s", out)

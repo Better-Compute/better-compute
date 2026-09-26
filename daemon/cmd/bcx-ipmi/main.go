@@ -5,8 +5,8 @@
 //	power.getPower                          chassis power status   → {"power":"on"|"off"}
 //	power.setPower {action}                 chassis power on|off|cycle|reset|soft
 //	management.setBootDevice {device, persistent}   chassis bootdev pxe|disk|cdrom|bios [options=persistent]
-//	inspect.inspect                         fru print 0, chassis power status, mc info, lan print, sdr list
-//	                                        ? the Redfish driver's shape, less the host's NICs and UUID
+//	inspect.inspect                         fru print 0, chassis power status, mc info, mc guid, lan print, sdr list
+//	                                        → the Redfish driver's shape, less the host's NICs
 //
 // The BMC's address comes as config ({"address": "10.0.0.5[:623]", "options": {"cipherSuite": 17}}) and its
 // credentials as secrets (username, password). The password reaches ipmitool through a pipe it
@@ -310,11 +310,16 @@ func first(values ...string) string {
 // maxProblems bounds the sensors an inspection lists by name.
 const maxProblems = 32
 
+var canonicalGUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// zeroGUID is what BMCs without a system GUID answer.
+const zeroGUID = "00000000-0000-0000-0000-000000000000"
+
 // inspect is inspect.inspect in the shape the Redfish driver answers (manufacturer, model,
 // serialNumber, productUuid, power, macs, ipAddresses), from the builtin FRU, the power state, the
-// BMC's own identity and LAN settings and its sensors. IPMI cannot name the host's NICs or its
-// SMBIOS UUID reliably: macs and ipAddresses are empty and productUuid is left out. The FRU and the
-// power state are required; the rest is best effort.
+// BMC's own identity and LAN settings, the system GUID and the sensors. IPMI cannot name the host's
+// NICs: macs and ipAddresses are empty. productUuid is the system GUID when the BMC has one. The FRU
+// and the power state are required; the rest is best effort.
 func inspect(ipmi func(...string) (string, error)) (string, error) {
 	fru, err := ipmi("fru", "print", "0")
 	if err != nil {
@@ -338,6 +343,14 @@ func inspect(ipmi func(...string) (string, error)) (string, error) {
 	if text, err := ipmi("mc", "info"); err == nil {
 		m := fields(text)
 		bmc["firmware"], bmc["manufacturer"] = m["Firmware Revision"], m["Manufacturer Name"]
+	}
+	// Get System GUID: the host's SMBIOS UUID on most boards, printed in whichever byte order this
+	// ipmitool and BMC use (metal matches it in each), so a machine enrolled without MACs is found
+	// when it PXE-boots (option 97).
+	if text, err := ipmi("mc", "guid"); err == nil {
+		if guid := strings.ToLower(fields(text)["System GUID"]); canonicalGUID.MatchString(guid) && guid != zeroGUID {
+			result["productUuid"] = guid
+		}
 	}
 	if text, err := ipmi("lan", "print"); err == nil {
 		l := fields(text)
