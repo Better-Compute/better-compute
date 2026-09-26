@@ -1029,9 +1029,10 @@ func (l *Libvirt) Snapshot(ctx context.Context, id string, includeMemory bool, c
 		if _, err := l.virsh(ctx, "save", id, memory); err != nil {
 			return "", err
 		}
-		// Carry on from the saved state (it keeps pointing at this domain's own disk).
+		// Carry on from the saved state, with bcd's own definition (never the one embedded in the
+		// state file, which the helper does not validate).
 		defer func() {
-			args := []string{"restore", memory}
+			args := []string{"restore", memory, "--xml", filepath.Join(dir, "domain.xml")}
 			if state == StatePaused {
 				args = append(args, "--paused")
 			}
