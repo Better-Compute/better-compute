@@ -30,6 +30,7 @@ import {
   type InstanceRow,
 } from './instances.js';
 import { releaseAddress } from './ipam.js';
+import { specPlacement, type HostPlacement } from './placement.js';
 import { markSandboxReady } from './sandboxes.js';
 
 // The Instance controller (PLAN.md §11.1, §3.6): converges `state` toward `desiredState`.
@@ -580,10 +581,12 @@ export async function instanceSpecs(
     restore_from: { snapshotId: string; url: string; sha256: string } | string | null;
     network_policy: 'private' | 'none' | null;
     identity_rebind_ref: string | null;
+    host_placement: HostPlacement | string | null;
     sandboxed: boolean;
   }>(
     `SELECT i.id, i.state, i.desired_state, i.runtime, i.flavor, i.image, i.user_data, i.ssh_keys,
             i.allocation_id, a.atoms, i.restore_from, i.network_policy, i.identity_rebind_ref,
+            i.host_placement,
             (i.sandbox_id IS NOT NULL OR i.warm_template_id IS NOT NULL) AS sandboxed,
             host(l.address) || '/' || masklen(p.cidr) AS address,
             regexp_replace('02' || substr(encode(sha256(convert_to(i.id, 'UTF8')), 'hex'), 1, 10),
@@ -631,6 +634,11 @@ export async function instanceSpecs(
     if (row.sandboxed) spec.sshFromHostOnly = true;
     // A memory restore's own identity, which the host installs into the resumed guest (§3.7).
     if (row.identity_rebind_ref) spec.identityRebindRef = row.identity_rebind_ref;
+    // Where its vCPUs and memory live on the host (§3.8), as chosen at placement.
+    const placement = specPlacement(
+      typeof row.host_placement === 'string' ? JSON.parse(row.host_placement) : (row.host_placement ?? undefined),
+    );
+    if (placement) spec.placement = placement;
     spec.nics = [{ network, mac: row.mac, addresses: row.address ? [row.address] : [] }];
     return [spec];
   });

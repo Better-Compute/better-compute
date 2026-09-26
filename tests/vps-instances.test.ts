@@ -27,6 +27,7 @@ import {
   capacityMigrations,
   capacityModule,
   createCapacityPort,
+  parseCpuList,
   readQuotas,
 } from '@better-compute/capacity';
 import {
@@ -297,6 +298,8 @@ const tables = [
   'node_resources',
   'devices',
   'quota_usage',
+  'node_inventory',
+  'inventory_snapshots',
   'nodes',
   'pool_offers',
   'pools',
@@ -407,6 +410,7 @@ describe('vps() API surface', () => {
       'vps/0015_snapshot_agent',
       'vps/0016_warm_secret_versions',
       'vps/0017_identity_rebind',
+      'vps/0018_placement',
     ]);
     expect(module.requires).toEqual(['capacity']);
     expect(() => vps({ runtimes: [] })).toThrow(ComputeError);
@@ -877,6 +881,151 @@ describe('flavors and IPAM', () => {
     ).rejects.toMatchObject({
       code: 'CAPACITY_UNAVAILABLE',
     });
+  });
+});
+
+describe('flavor placement: NUMA, pinned CPUs, hugepages (§3.8)', () => {
+  const GiB = 2 ** 30;
+  const VA = 'node_01jz00000000000000000000va';
+  const VB = 'node_01jz00000000000000000000vb';
+
+  beforeEach(async () => {
+    await db.query(`DELETE FROM node_inventory`);
+    await db.query(`DELETE FROM inventory_snapshots`);
+    for (const node of [VA, VB]) {
+      const sections = {
+        cpu: {
+          threads: 16,
+          numaNodes: [
+            { cpus: '0-7', memoryBytes: String(32 * GiB) },
+            { id: 1, cpus: '8-15', memoryBytes: String(32 * GiB) },
+          ],
+        },
+      };
+      await db.query(
+        `INSERT INTO inventory_snapshots (id, node_id, sha256, section_hashes, sections, collected_at)
+         VALUES ($1, $2, '\\x00', '{}', $3::jsonb, compute_now())`,
+        [`inv_${node.slice(-2)}`, node, JSON.stringify(sections)],
+      );
+      await db.query(`INSERT INTO node_inventory (node_id, applied_snapshot_id) VALUES ($1, $2)`, [
+        node,
+        `inv_${node.slice(-2)}`,
+      ]);
+    }
+    for (const [name, vcpu, memoryGiB, placement] of [
+      ['numa.pinned', 4, 8, { numaAffine: true, pinned: true }],
+      ['numa.big', 12, 8, { numaAffine: true, pinned: true }],
+      ['huge.1g', 2, 8, { hugepages: '1Gi' }],
+    ] as const)
+      await call(
+        'flavors',
+        'create',
+        { tenantId: 'root', poolId: hostedPool, name, vcpu, memoryGiB, diskGiB: 40, placement },
+        root,
+      );
+  });
+
+  async function placement(instanceId: string, nodeId: string) {
+    const spec = await module.nodeSpec!(moduleContext(db), { id: nodeId } as never);
+    return spec.instances?.find((instance) => instance.id === instanceId)?.placement;
+  }
+
+  it('pins each guest to its own CPUs on one NUMA node, bound to its memory', async () => {
+    const seen = new Map<string, number[]>();
+    for (const key of ['p-1', 'p-2', 'p-3']) {
+      const created = (await call(
+        'instances',
+        'create',
+        createHosted({ flavor: 'numa.pinned', idempotencyKey: key }),
+      )) as View;
+      const got = await placement(created.id, created.nodeId!);
+      expect(got).toMatchObject({ mems: expect.stringMatching(/^[01]$/) });
+      const cpus = parseCpuList(got!.cpus);
+      expect(cpus).toHaveLength(4);
+      // All on the NUMA node the memory is bound to.
+      const node = Number(got!.mems);
+      expect(cpus.every((cpu) => (node === 0 ? cpu < 8 : cpu >= 8))).toBe(true);
+      for (const cpu of cpus) {
+        const key = `${created.nodeId}:${cpu}`;
+        expect(seen.has(key), `CPU ${key} pinned twice`).toBe(false);
+        seen.set(key, cpus);
+      }
+    }
+  });
+
+  it('runs a guest that no NUMA node can hold floating, with PlacementDegraded', async () => {
+    const created = (await call(
+      'instances',
+      'create',
+      createHosted({ flavor: 'numa.big', idempotencyKey: 'big' }),
+    )) as View & { conditions: { type: string; reason?: string }[] };
+    expect(created.conditions).toContainEqual(
+      expect.objectContaining({ type: 'PlacementDegraded', reason: 'NoNumaNodeFits' }),
+    );
+    // Still pinned, across the host.
+    expect(parseCpuList((await placement(created.id, created.nodeId!))!.cpus)).toHaveLength(12);
+  });
+
+  it('books hugepage-backed memory from the hugepages rows, and hands the page size to bcd', async () => {
+    const pending = (await call(
+      'instances',
+      'create',
+      createHosted({ flavor: 'huge.1g', idempotencyKey: 'h-0' }),
+    )) as View & { conditions: { type: string }[] };
+    // No host has 1 GiB hugepages yet.
+    expect(pending.state).toBe('scheduling');
+    expect(pending.conditions.map((condition) => condition.type)).toContain('Unschedulable');
+    await db.query(
+      `INSERT INTO node_resources (node_id, resource, allocatable, ratio, allocated) VALUES ($1, 'hugepages1Gi', 16, 1, 0)`,
+      [VB],
+    );
+    const created = (await call(
+      'instances',
+      'create',
+      createHosted({ flavor: 'huge.1g', idempotencyKey: 'h-1' }),
+    )) as View;
+    expect(created.nodeId).toBe(VB);
+    const { rows } = await db.query<{ resource: string; allocated: string }>(
+      `SELECT resource, allocated::text FROM node_resources WHERE node_id = $1 ORDER BY resource`,
+      [VB],
+    );
+    expect(Object.fromEntries(rows.map((row) => [row.resource, Number(row.allocated)]))).toEqual({
+      diskGiB: 40,
+      hugepages1Gi: 8,
+      memoryGiB: 0,
+      vcpu: 2,
+    });
+    expect(await placement(created.id, VB)).toEqual({ hugepageSizeBytes: GiB });
+  });
+
+  it('validates placement, and refuses a resize that changes it', async () => {
+    await expect(
+      call(
+        'flavors',
+        'create',
+        {
+          tenantId: 'root',
+          poolId: hostedPool,
+          name: 'bad',
+          vcpu: 1,
+          memoryGiB: 1,
+          diskGiB: 1,
+          placement: { hugepages: '4Mi' },
+        },
+        root,
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    const created = (await call(
+      'instances',
+      'create',
+      createHosted({ flavor: 'numa.pinned', idempotencyKey: 'r-1' }),
+    )) as View;
+    await call('instances', 'stop', { tenantId: 'acme', instanceId: created.id });
+    await report(created.nodeId!, [{ id: created.id, state: 'stopped' }]);
+    await reconcile(created.id);
+    await expect(
+      call('instances', 'resize', { tenantId: 'acme', instanceId: created.id, flavor: 'g1.large' }),
+    ).rejects.toMatchObject({ code: 'UNSUPPORTED' });
   });
 });
 

@@ -40,6 +40,11 @@ import {
   tenant,
 } from './input.js';
 import { leaseAddress } from './ipam.js';
+import {
+  chooseHostPlacement,
+  placementResources,
+  type FlavorPlacement,
+} from './placement.js';
 import { builtinRuntimeTraits, runtimeNodeLabels, type RuntimeTraits } from './runtime.js';
 
 // Instances (PLAN.md §3.6, §11.1): request-as-resource drafts decided on `compute-instance/{draftId}`,
@@ -274,6 +279,8 @@ export interface InstanceShape {
   diskGiB: number;
   gpus: number;
   offerId?: string;
+  /** (v1.1 §3.8) The flavor's placement, as admitted. */
+  placement?: FlavorPlacement;
 }
 
 interface RawInstance {
@@ -640,6 +647,7 @@ export function shapeOf(flavor: FlavorRecord): InstanceShape {
     gpus: flavor.gpus,
   };
   if (flavor.offerId !== undefined) shape.offerId = flavor.offerId;
+  if (flavor.placement !== undefined) shape.placement = { ...flavor.placement };
   return shape;
 }
 
@@ -992,8 +1000,44 @@ export async function denyCreateInstance(
 }
 
 /**
- * Places a hosted instance: vCPU/memory/disk scalar claims plus whole-GPU atoms (VFIO) through the
- * CapacityPort, then an IP lease. `pending` keeps `scheduling` with `Unschedulable`.
+ * Records where on its host an instance's vCPUs and memory go (§3.8, `chooseHostPlacement`) in
+ * `host_placement`, and returns its conditions with `PlacementDegraded` set or cleared.
+ */
+async function placeOnHost(
+  tx: SqlTx,
+  row: InstanceRow,
+  nodeId: string,
+  deviceIds: readonly string[],
+  now: number,
+): Promise<Condition[]> {
+  const choice = await chooseHostPlacement(tx, {
+    id: row.id,
+    nodeId,
+    shape: row.shape,
+    deviceIds,
+  });
+  await tx.query(`UPDATE instances SET host_placement = $2::jsonb WHERE id = $1`, [
+    row.id,
+    choice.placement ? JSON.stringify(choice.placement) : null,
+  ]);
+  return choice.degraded
+    ? withCondition(
+        row.conditions,
+        {
+          type: 'PlacementDegraded',
+          status: 'true',
+          reason: choice.degraded,
+          message: 'The host cannot give this flavor its NUMA or pinned placement; the guest floats',
+        },
+        now,
+      )
+    : withoutCondition(row.conditions, 'PlacementDegraded');
+}
+
+/**
+ * Places a hosted instance: vCPU/memory/disk scalar claims (hugepages for hugepage-backed flavors)
+ * plus whole-GPU atoms (VFIO) through the CapacityPort, its host placement, then an IP lease.
+ * `pending` keeps `scheduling` with `Unschedulable`.
  */
 export async function scheduleHosted(
   deps: InstanceDeps,
@@ -1023,11 +1067,7 @@ export async function scheduleHosted(
       // Lets the image-cached scorer prefer hosts whose runtime already holds the image.
       imageId: row.imageId,
       devices: row.shape.gpus > 0 ? [{ class: 'gpu', count: row.shape.gpus }] : [],
-      resources: {
-        vcpu: row.shape.vcpu,
-        memoryGiB: row.shape.memoryGiB,
-        diskGiB: row.shape.diskGiB,
-      },
+      resources: placementResources(row.shape),
       during: { start: now, end: openEnded },
       ...(Object.keys(nodeLabels).length > 0 ? { nodeLabels } : {}),
     },
@@ -1046,12 +1086,13 @@ export async function scheduleHosted(
   }
   const allocation = outcome.allocations[0]!;
   const address = await leaseAddress(tx, row.poolId, row.id);
+  const conditions = await placeOnHost(tx, row, allocation.nodeId, allocation.atoms, now);
   const next = await moveInstance(tx, row, 'complete', 'provisioning', {
     nodeId: allocation.nodeId,
     allocationId: allocation.id,
     addresses: address ? [address] : [],
     reportedState: null,
-    conditions: withoutCondition(row.conditions, 'Unschedulable'),
+    conditions: withoutCondition(conditions, 'Unschedulable'),
   });
   await deps.desired.invalidate(tx, allocation.nodeId);
   await deps.work.enqueue(tx, instanceWork, row.id);
@@ -1179,6 +1220,8 @@ export async function resizeInstance(
   const shape = shapeOf(flavor);
   if (shape.gpus !== row.shape.gpus)
     throw new ComputeError('UNSUPPORTED', 'Changing the GPU count needs a new instance');
+  if (JSON.stringify(shape.placement ?? {}) !== JSON.stringify(row.shape.placement ?? {}))
+    throw new ComputeError('UNSUPPORTED', 'Changing the flavor placement needs a new instance');
   if (!row.allocationId)
     throw new ComputeError('INVALID_STATE', `Instance ${row.id} holds no allocation`);
 
@@ -1192,11 +1235,7 @@ export async function resizeInstance(
     if (delta < 0) shrink[resource] = -delta;
   }
   await chargeQuota(tx, row.tenantId, row.poolId, grow);
-  const outcome = await resizeAllocation(tx, row.allocationId, {
-    vcpu: shape.vcpu,
-    memoryGiB: shape.memoryGiB,
-    diskGiB: shape.diskGiB,
-  });
+  const outcome = await resizeAllocation(tx, row.allocationId, placementResources(shape));
   if (outcome.status === 'conflict') {
     await refundQuota(tx, row.tenantId, row.poolId, grow);
     throw new ComputeError(
@@ -1213,7 +1252,22 @@ export async function resizeInstance(
     flavorId: flavor.id,
     shape,
   });
-  const resized = await moveInstance(tx, resizing, 'complete', 'stopped');
+  let resized = await moveInstance(tx, resizing, 'complete', 'stopped');
+  // A pinned or NUMA-bound guest's CPUs follow its new vCPU count (§3.8).
+  if (resized.nodeId && (shape.placement?.pinned || shape.placement?.numaAffine)) {
+    const { rows } = await tx.query<{ atoms: string[] }>(
+      `SELECT atoms FROM allocations WHERE id = $1`,
+      [row.allocationId],
+    );
+    const conditions = await placeOnHost(
+      tx,
+      resized,
+      resized.nodeId,
+      rows[0]?.atoms ?? [],
+      deps.clock.now(),
+    );
+    resized = await updateInstance(tx, resized, { conditions });
+  }
   await upsertInstanceAuthz(deps, tx, resized);
   await wake(deps, tx, resized);
   await publishInstance(deps, tx, resized, 'instance.resized', { flavor: shape.name });

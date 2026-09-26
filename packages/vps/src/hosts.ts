@@ -9,7 +9,8 @@ import type { RuntimeTraits } from './runtime.js';
 
 // Host capacity (PLAN.md §10.2): a VPS host's scalar resources come from its inventory.
 //   allocatable = capacity − systemReserved, per resource; available = allocatable × ratio − allocated
-// `vcpu` is the logical CPU count (`cpu.threads`), `memoryGiB` the installed memory, `diskGiB` the
+// `vcpu` is the logical CPU count (`cpu.threads`), `memoryGiB` the installed memory less its hugepage
+// pools (booked as hugepages1Gi / hugepages2Mi, v1.1 §3.8), `diskGiB` the
 // non-removable disks; `ratio` is the pool's `policy.overcommit[resource]` (default 1, clamped to
 // 0.1…100). Nodes of `vps-host` pools only, from their applied snapshot; a `tenant-controlled` node's
 // inventory is advisory and never adds capacity (§10.1). Rows are written only when they change.
@@ -67,7 +68,12 @@ WITH h AS (
     FROM h
   UNION ALL
   SELECT h.node_id, 'memoryGiB',
-         GREATEST(0, floor(COALESCE((h.sections->'memory'->>'totalBytes')::numeric, 0) / 1073741824)::bigint - $3::bigint),
+         -- Hugepage pools are not ordinary memory: hugepage-backed flavors book them (capacity.hosts).
+         GREATEST(0, floor((COALESCE((h.sections->'memory'->>'totalBytes')::numeric, 0) - COALESCE((
+           SELECT sum(COALESCE((e->>'pageSizeBytes')::numeric, 0) * COALESCE((e->>'total')::numeric, 0))
+             FROM jsonb_array_elements(CASE WHEN jsonb_typeof(h.sections->'memory'->'hugepages') = 'array'
+                                            THEN h.sections->'memory'->'hugepages' ELSE '[]'::jsonb END) e), 0))
+           / 1073741824)::bigint - $3::bigint),
          ${ratio('memoryGiB')}
     FROM h
   UNION ALL

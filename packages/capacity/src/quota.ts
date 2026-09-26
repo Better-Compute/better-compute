@@ -10,8 +10,19 @@ import { ComputeError, type DeviceRequest, type SqlTx } from '@better-compute/co
 // reserve and release transactions never wait on each other in a cycle.
 
 /**
- * What a request counts against quota, per resource: device classes by count, then scalars; a gang
- * counts once for all its nodes (`size` × the per-node request).
+ * What a scalar counts against quota as (§3.8): hugepages are memory, so hugepage-backed memory
+ * charges `memoryGiB` (1 GiB pages one each, 2 MiB pages 512 to the GiB, rounded up) and offers need
+ * no hugepage quota rows.
+ */
+export function quotaScalar(resource: string, amount: number): [string, number] {
+  if (resource === 'hugepages1Gi') return ['memoryGiB', amount];
+  if (resource === 'hugepages2Mi') return ['memoryGiB', Math.ceil(amount / 512)];
+  return [resource, amount];
+}
+
+/**
+ * What a request counts against quota, per resource: device classes by count, then scalars
+ * (`quotaScalar`); a gang counts once for all its nodes (`size` × the per-node request).
  */
 export function quotaDemand(request: {
   devices: readonly DeviceRequest[];
@@ -22,8 +33,11 @@ export function quotaDemand(request: {
   const nodes = request.gang?.size ?? 1;
   for (const device of request.devices)
     if (device.count > 0) demand[device.class] = (demand[device.class] ?? 0) + device.count * nodes;
-  for (const [resource, amount] of Object.entries(request.resources ?? {}))
-    if (amount > 0) demand[resource] = (demand[resource] ?? 0) + amount * nodes;
+  for (const [name, count] of Object.entries(request.resources ?? {})) {
+    if (!(count > 0)) continue;
+    const [resource, amount] = quotaScalar(name, count);
+    demand[resource] = (demand[resource] ?? 0) + amount * nodes;
+  }
   return demand;
 }
 

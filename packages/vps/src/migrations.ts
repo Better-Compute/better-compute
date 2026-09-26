@@ -124,6 +124,17 @@ export const vpsSealedUserDataMigration: Migration = {
   sql: `ALTER TABLE instances ADD COLUMN user_data_sealed bool NOT NULL DEFAULT false;`,
 };
 
+/**
+ * (v1.1 §3.8) A flavor's `placement` ({numaAffine, pinned, hugepages}) and, per instance, where on
+ * its host it landed (`host_placement`: cpus, mems, hugepageSizeBytes, pinned), which the next
+ * placement on that host reads to keep pinned CPUs exclusive.
+ */
+export const vpsPlacementMigration: Migration = {
+  name: 'vps/0018_placement',
+  sql: `ALTER TABLE flavors ADD COLUMN placement jsonb;
+ALTER TABLE instances ADD COLUMN host_placement jsonb;`,
+};
+
 /** The VPS module's migrations, in ledger order. */
 export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsBaseMigration,
@@ -143,4 +154,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsSnapshotAgentMigration,
   vpsWarmSecretVersionsMigration,
   vpsIdentityRebindMigration,
+  vpsPlacementMigration,
 ]);

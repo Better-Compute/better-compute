@@ -2457,7 +2457,7 @@ export async function deviceAssignments(tx: SqlTx, nodeId: string): Promise<Devi
       : (row.resources ?? {})) as Record<string, number>,
   }));
   const topology = booked.some(({ resources }) => hostBooked(resources))
-    ? await nodeTopology(tx, nodeId, [...new Set(rows.flatMap((row) => row.atoms))])
+    ? await readNodeTopology(tx, nodeId, [...new Set(rows.flatMap((row) => row.atoms))])
     : undefined;
   return booked.map(({ row, resources }) => {
     const assignment: DeviceAssignment = {
@@ -2480,7 +2480,11 @@ export interface NodeTopology {
   deviceNuma: ReadonlyMap<string, number>;
 }
 
-async function nodeTopology(tx: SqlTx, nodeId: string, deviceIds: string[]): Promise<NodeTopology> {
+export async function readNodeTopology(
+  tx: Pick<SqlTx, 'query'>,
+  nodeId: string,
+  deviceIds: readonly string[],
+): Promise<NodeTopology> {
   // proto3 JSON leaves a zero id out: NUMA node 0 has no `id`.
   const numaRows = await tx.query<{ id: string | null; cpus: string | null; memory: string | null }>(
     `SELECT e->>'id' AS id, e->>'cpus' AS cpus, e->>'memoryBytes' AS memory

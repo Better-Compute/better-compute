@@ -1370,7 +1370,8 @@ export function createCapacityPort(
         `SELECT class, count(*) AS count FROM devices WHERE id = ANY($1::text[]) GROUP BY class`,
         [allocation.atoms],
       );
-      const demand: Record<string, number> = { ...allocation.resources };
+      // What reserve charged: the scalars as quotaDemand counts them (hugepages as memoryGiB).
+      const demand = quotaDemand({ devices: [], resources: allocation.resources });
       for (const row of rows) demand[row.class] = (demand[row.class] ?? 0) + Number(row.count);
       await refundQuota(tx, allocation.tenantId, allocation.poolId, demand);
       await releaseAllocation(tx, allocationId);

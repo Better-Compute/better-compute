@@ -103,6 +103,23 @@ const flavorShape = strictObject(
       maxLength: 128,
       description: 'Provider pools: the provider offer this flavor creates (required there)',
     },
+    placement: {
+      ...strictObject(
+        {
+          numaAffine: {
+            type: 'boolean',
+            description: 'vCPUs and memory on one NUMA node (its GPUs’ node when it has any)',
+          },
+          pinned: { type: 'boolean', description: 'Each vCPU on its own host CPU' },
+          hugepages: {
+            enum: ['2Mi', '1Gi'],
+            description: 'Back guest memory with hugepages of this size (books the host’s hugepages)',
+          },
+        },
+        [],
+      ),
+      description: 'Hosted pools (v1.1): where the guest lives on its host; sandbox templates inherit it',
+    },
   },
   ['tenantId', 'poolId', 'name', 'vcpu', 'memoryGiB', 'diskGiB'],
 );
