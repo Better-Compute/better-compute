@@ -48,7 +48,7 @@
   {
     "name": "mig-layout",
     "summary": "A MIG layout: a named profile per GPU, or the pool's layout",
-    "description": "Partitions every MIG-capable GPU to the layout: `all-disabled`, `all-<profile>` (as many as fit, e.g. `all-1g.10gb`) or `mixed:<n>x<profile>+<profile>…` (per GPU, e.g. `mixed:3g.40gb+2x2g.20gb`), with a compute instance in each GPU instance. A GPU holding allocations is left as it is until they end. A MIG mode change that needs a GPU reset, which fails, reports `RebootRequired`.",
+    "description": "Partitions every MIG-capable GPU to the layout: `all-disabled`, `all-<profile>` (as many as fit, e.g. `all-1g.10gb`) or `mixed:<n>x<profile>+<profile>…` (per GPU, e.g. `mixed:3g.40gb+2x2g.20gb`), with a compute instance in each GPU instance. A GPU holding allocations or running compute processes is left as it is until they end (under `bcd helper`, the helper sees that itself, never taking the node's word). A MIG mode change that needs a GPU reset, which fails, reports `RebootRequired`.",
     "settings": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -88,7 +88,7 @@
   {
     "name": "sysctl",
     "summary": "Kernel parameters",
-    "description": "Free-form: each key a sysctl name with a scalar value, written to `/etc/sysctl.d/90-bcd.conf` and set live. A key the kernel does not have yet (its module is not loaded) is retried. Keys that would run programs as root or lower the host's defenses are refused (`kernel.core_pattern`, `kernel.modprobe`, `kernel.usermodehelper.*`, `fs.binfmt_misc.*`, `kernel.randomize_va_space`, `kernel.yama.*`, `user.*` and the like).",
+    "description": "Free-form: each key a sysctl name with a scalar value, written to `/etc/sysctl.d/90-bcd.conf` and set live. A key the kernel does not have yet (its module is not loaded) is retried. Keys that would run programs as root or lower the host's defenses are refused (`kernel.core_pattern`, `kernel.modprobe`, `kernel.usermodehelper.*`, `fs.binfmt_misc.*`, `kernel.randomize_va_space`, `kernel.yama.*`, `user.*` and the like), and a few take only their hardened values: `dev.tty.legacy_tiocsti` and `dev.tty.ldisc_autoload` only 0, `kernel.io_uring_disabled` only 1 or 2, `net.ipv4.ip_unprivileged_port_start` only 1024 and above.",
     "settings": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -229,7 +229,7 @@
   {
     "name": "kernel-modules",
     "summary": "Kernel modules loaded at boot and now (modules-load.d), with their options (modprobe.d): kvm_intel/kvm_amd, vhost_net and tun for VM hosts",
-    "description": "Modules loaded now and at every boot (`/etc/modules-load.d/bcd.conf`) with their options (`/etc/modprobe.d/bcd.conf`). A loaded module whose options differ is reloaded only when nothing uses it; otherwise they apply when it next loads. Sandbox hosts load `kvm_intel` or `kvm_amd`, `vhost_net`, `tun` and, for GPU passthrough, `vfio-pci`.",
+    "description": "Modules loaded now and at every boot (`/etc/modules-load.d/bcd.conf`) with their options (`/etc/modprobe.d/bcd.conf`). A loaded module whose options differ is reloaded only when nothing uses it; otherwise they apply when it next loads. Sandbox hosts load `kvm_intel` or `kvm_amd`, `vhost_net`, `tun` and, for GPU passthrough, `vfio-pci`. Options that turn off DMA isolation for passed-through devices (`vfio` `enable_unsafe_noiommu_mode`, `vfio_iommu_type1` `allow_unsafe_interrupts`) are refused.",
     "settings": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
