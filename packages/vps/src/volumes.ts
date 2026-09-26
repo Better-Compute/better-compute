@@ -1,6 +1,8 @@
 import {
   ComputeError,
   draftId,
+  newId,
+  type AdmissionPlan,
   type HostVolumeSpec,
   type InstanceSpec,
   type Migration,
@@ -30,6 +32,18 @@ export const maxVolumeGiB = 16_384;
 /** Volumes one template may attach. */
 export const maxTemplateVolumes = 8;
 const GiB = 2 ** 30;
+
+/**
+ * A resize's admission hold (review 2, LOW 3): the projection keeps one pending `sizeGiB`, so one resize
+ * at a time is decided on it. Another request's hold older than `resizeHoldMs` is taken over.
+ */
+export const vpsVolumeResizeHoldMigration: Migration = {
+  name: 'vps/0021_volume_resize_hold',
+  sql: `
+ALTER TABLE sandbox_volumes ADD COLUMN resizing_request text;
+ALTER TABLE sandbox_volumes ADD COLUMN resizing_at timestamptz;
+`,
+};
 
 export const vpsVolumesMigration: Migration = {
   name: 'vps/0020_volumes',
@@ -512,6 +526,8 @@ export async function finishVolumeDeletions(
 
 export interface ResizeVolumeInput extends VolumeRef {
   sizeGiB: number;
+  /** Set by the admission (`prepareResizeVolume`), never by the caller: this request's hold on the pending size. */
+  hold?: string;
 }
 
 export function parseResizeVolume(raw: unknown): ResizeVolumeInput {
@@ -525,8 +541,95 @@ export function parseResizeVolume(raw: unknown): ResizeVolumeInput {
  * nothing changes). bcd grows the file, live in a running guest; the guest's filesystem follows at the next
  * sandbox's first boot (`resize2fs` in its user data).
  */
+/** How long a resize's hold on the pending size lasts before another request may take it over. */
+export const resizeHoldMs = 60_000;
+
+/**
+ * `sandboxVolumes.create` transaction 1 (review 2, LOW 3): the decision is on the volume itself,
+ * `sandbox-volume/<id>` (the id derives from tenant, caller and key), whose projection row carries the
+ * requested `sizeGiB` under its pool, so a policy can bound the size. A key already used replays.
+ */
+export async function prepareCreateVolume(
+  context: MethodContext,
+  input: CreateVolumeInput,
+  tx: SqlTx,
+): Promise<AdmissionPlan<SandboxVolume>> {
+  const caller = context.caller;
+  if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
+  const volumeId = await draftId('vol', input.tenantId, caller.identityId, input.idempotencyKey);
+  const existing = await readVolume(tx, { tenantId: input.tenantId, volumeId });
+  if (existing) {
+    if (existing.request_hash !== requestHash(input)) throw new ComputeError('CONFLICT', 'This idempotency key was used for a different volume');
+    return { status: 'replay', result: volumeView(existing) };
+  }
+  await context.authz.upsert(tx, {
+    type: 'sandbox-volume',
+    id: volumeId,
+    tenantId: input.tenantId,
+    attributes: { sizeGiB: input.sizeGiB },
+    parentType: 'pool',
+    parentId: input.poolId,
+    ownerId: caller.identityId,
+  });
+  return { status: 'decide', resource: { type: 'sandbox-volume', id: volumeId } };
+}
+
+/** `sandboxVolumes.create` refused: the projection row staged for a volume that was never created goes. */
+export async function denyCreateVolume(context: MethodContext, input: CreateVolumeInput, tx: SqlTx): Promise<void> {
+  if (!context.caller) return;
+  const volumeId = await draftId('vol', input.tenantId, context.caller.identityId, input.idempotencyKey);
+  if (!(await readVolume(tx, { tenantId: input.tenantId, volumeId })))
+    await context.authz.remove(tx, { type: 'sandbox-volume', id: volumeId, tenantId: input.tenantId });
+}
+
+/**
+ * `sandboxVolumes.resize` transaction 1 (review 2, LOW 3): the new size goes into the projection as the
+ * volume's pending `sizeGiB`, so the decision (and any policy bounding it) sees the size it would grant, as
+ * `sandboxes.extend` does with its lifetime. Refusals come first; the current size replays. One resize at
+ * a time holds the pending value (`CONFLICT` resize-in-flight); a stalled hold is taken over after 60 s.
+ */
+export async function prepareResizeVolume(
+  context: MethodContext,
+  input: ResizeVolumeInput,
+  tx: SqlTx,
+): Promise<AdmissionPlan<SandboxVolume>> {
+  const row = await readVolume(tx, input, { lock: true });
+  if (!row) throw new ComputeError('NOT_FOUND', `Volume ${input.volumeId} not found`);
+  if (row.state !== 'ready') throw new ComputeError('INVALID_STATE', `Volume ${row.id} is ${row.state}`);
+  const current = Number(row.size_gib);
+  if (input.sizeGiB === current) return { status: 'replay', result: volumeView(row) };
+  if (input.sizeGiB < current) fail(`A volume never shrinks: ${row.id} is ${current} GiB`);
+  const hold = newId('hold');
+  const { rowCount } = await tx.query(
+    `UPDATE sandbox_volumes SET resizing_request = $2, resizing_at = compute_now()
+      WHERE id = $1 AND (resizing_request IS NULL OR resizing_at < compute_now() - make_interval(secs => $3::float8))`,
+    [row.id, hold, resizeHoldMs / 1000],
+  );
+  if (rowCount === 0)
+    throw new ComputeError('CONFLICT', `Another resize of volume ${row.id} is being decided; retry once it settles`, undefined, {
+      volumeId: row.id,
+      reason: 'resize-in-flight',
+      retryAfterSeconds: resizeHoldMs / 1000,
+    });
+  input.hold = hold;
+  await context.authz.setPending(tx, { type: 'sandbox-volume', id: row.id, tenantId: row.tenant_id }, { sizeGiB: input.sizeGiB });
+  return { status: 'decide', resource: { type: 'sandbox-volume', id: row.id } };
+}
+
+/** Ends a resize's hold, if it is still this request's, and clears the pending size it staged. */
+export async function releaseResizeHold(authz: InstanceDeps['authz'], tx: SqlTx, input: ResizeVolumeInput): Promise<boolean> {
+  if (input.hold === undefined) return false;
+  const { rowCount } = await tx.query(
+    `UPDATE sandbox_volumes SET resizing_request = NULL, resizing_at = NULL WHERE id = $1 AND tenant_id = $2 AND resizing_request = $3`,
+    [input.volumeId, input.tenantId, input.hold],
+  );
+  if (rowCount === 0) return false;
+  await authz.setPending(tx, { type: 'sandbox-volume', id: input.volumeId, tenantId: input.tenantId }, null);
+  return true;
+}
+
 export async function resizeVolume(
-  deps: Pick<InstanceDeps, 'desired' | 'events'>,
+  deps: Pick<InstanceDeps, 'desired' | 'events' | 'authz'>,
   tx: SqlTx,
   input: ResizeVolumeInput,
 ): Promise<SandboxVolume> {
@@ -534,7 +637,10 @@ export async function resizeVolume(
   if (!row) throw new ComputeError('NOT_FOUND', `Volume ${input.volumeId} not found`);
   if (row.state !== 'ready') throw new ComputeError('INVALID_STATE', `Volume ${row.id} is ${row.state}`);
   const current = Number(row.size_gib);
-  if (input.sizeGiB === current) return volumeView(row);
+  if (input.sizeGiB === current) {
+    await releaseResizeHold(deps.authz, tx, input);
+    return volumeView(row);
+  }
   if (input.sizeGiB < current) fail(`A volume never shrinks: ${row.id} is ${current} GiB`);
   if (!row.allocation_id) throw new ComputeError('INVALID_STATE', `Volume ${row.id} has no disk booking`);
   const grow = { diskGiB: input.sizeGiB - current };
@@ -548,6 +654,17 @@ export async function resizeVolume(
     `UPDATE sandbox_volumes SET size_gib = $2, version = version + 1 WHERE id = $1 RETURNING ${columns}`,
     [row.id, input.sizeGiB],
   );
+  // The projection now says the size the volume has: later decisions (and policies) see it.
+  await releaseResizeHold(deps.authz, tx, input);
+  await deps.authz.upsert(tx, {
+    type: 'sandbox-volume',
+    id: row.id,
+    tenantId: row.tenant_id,
+    attributes: { sizeGiB: input.sizeGiB },
+    parentType: 'pool',
+    parentId: row.pool_id,
+    ownerId: row.created_by,
+  });
   if (row.node_id) await deps.desired.invalidate(tx, row.node_id);
   await deps.events.publish(tx, {
     type: 'sandbox.volume.resized',

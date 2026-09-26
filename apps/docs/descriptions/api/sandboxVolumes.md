@@ -7,7 +7,7 @@ Books the volume's disk on one host of a hosted pool and puts it in that host's 
 - `sizeGiB` runs from 1 to 16,384. The name is unique among the tenant's volumes that are not deleted (`CONFLICT` otherwise).
 - `CAPACITY_UNAVAILABLE` when no host of the pool has the disk free (the reason is in the details), and `QUOTA_EXCEEDED` past the tenant's `diskGiB` quota.
 - A provider pool is `INVALID_INPUT`: volumes live on hosted (`vps-host`) pools.
-- Decided as `compute:sandboxes:manage` on the tenant.
+- Decided as `compute:sandboxes:manage` on the volume it would create (`compute-sandbox-volume`, under the pool), whose `sizeGiB` attribute is the requested size, so a policy can bound it. A refusal leaves nothing behind.
 
 The volume id derives from the tenant, the caller and `idempotencyKey`. A retry with the same key returns the same volume; the same key with another pool, name or size is `CONFLICT`. Publishes `sandbox.volume.created` with the host.
 
@@ -31,7 +31,7 @@ Grows a volume to `sizeGiB` on the host it lives on and returns it with the new 
 - The growth is charged to the tenant's `diskGiB` quota first (`QUOTA_EXCEEDED` past it), then booked on the volume's host. When the host has no room it is `CAPACITY_UNAVAILABLE`: the quota charge is refunded and nothing changes.
 - Only a `ready` volume grows (`INVALID_STATE` otherwise).
 
-The host grows the file as soon as its spec carries the new size, even while a running sandbox has the volume attached: the guest's disk grows live. The filesystem on it grows when the next sandbox that attaches the volume boots, because its user data runs `resize2fs` on every writable volume. Inside a running guest, run `resize2fs /dev/disk/by-id/virtio-<serial>` to use the space at once. Publishes `sandbox.volume.resized`. Decided as `compute:sandboxes:manage` on the volume.
+The host grows the file as soon as its spec carries the new size, even while a running sandbox has the volume attached: the guest's disk grows live. The filesystem on it grows when the next sandbox that attaches the volume boots, because its user data runs `resize2fs` on every writable volume. Inside a running guest, run `resize2fs /dev/disk/by-id/virtio-<serial>` to use the space at once. Publishes `sandbox.volume.resized`. Decided as `compute:sandboxes:manage` on the volume, with the new size as its pending `sizeGiB` (as `sandboxes.extend` decides a lifetime), so a policy bounds the size it grants; afterwards the volume's `sizeGiB` is the new size. One resize of a volume is decided at a time: another one meanwhile is `CONFLICT` (`details.reason: 'resize-in-flight'`), and a stalled one is taken over after 60 s.
 
 ## delete
 

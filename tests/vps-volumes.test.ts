@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   apiMethod,
   ComputeError,
+  draftId,
   manualClock,
   newId,
   type Caller,
@@ -42,6 +43,7 @@ const events: string[] = [];
 const invalidated: string[] = [];
 const decisions: { action: string; resource: string }[] = [];
 const denied = new Set<string>();
+const authzOps: { op: string; resource: string; attributes?: Record<string, unknown> | null }[] = [];
 
 const alice: Caller = { identityId: 'usr_alice', identityKind: 'user', tenantId: 'acme', sessionId: 's', sessionKind: 'user', mfa: false };
 const root: Caller = { ...alice, identityId: 'usr_root', tenantId: 'root' };
@@ -60,7 +62,17 @@ function moduleContext(sql: SqlExecutor): ModuleContext {
     log: { debug() {}, info() {}, warn() {}, error() {} },
     secrets: { resolve: async (ref: string) => `resolved:${ref}` },
     capacity: createCapacityPort({ clock }, { random: () => 0, topN: 1 }),
-    authz: { async upsert() {}, async remove() {}, async setPending() {} },
+    authz: {
+      async upsert(_tx: SqlTx, row: { type: string; id: string; attributes?: Record<string, unknown> }) {
+        authzOps.push({ op: 'upsert', resource: `${row.type}/${row.id}`, attributes: row.attributes ?? {} });
+      },
+      async remove(_tx: SqlTx, ref: { type: string; id: string }) {
+        authzOps.push({ op: 'remove', resource: `${ref.type}/${ref.id}` });
+      },
+      async setPending(_tx: SqlTx, ref: { type: string; id: string }, pending: Record<string, unknown> | null) {
+        authzOps.push({ op: 'pending', resource: `${ref.type}/${ref.id}`, attributes: pending });
+      },
+    },
     events: {
       async publish(_tx, event) {
         events.push(event.type);
@@ -110,19 +122,33 @@ type Definition = {
   validate(raw: unknown): unknown;
   handler(context: MethodContext, input: unknown): Promise<unknown>;
   admission?: {
-    prepare(context: MethodContext, input: unknown, tx: SqlTx): Promise<{ status: string; result?: unknown }>;
+    prepare(context: MethodContext, input: unknown, tx: SqlTx): Promise<{ status: string; result?: unknown; resource?: { type: string; id: string } }>;
     check?(context: MethodContext, input: unknown): Promise<void>;
+    denied?(context: MethodContext, input: unknown, tx: SqlTx, error: unknown): Promise<void>;
+    abandoned?(context: MethodContext, input: unknown, tx: SqlTx, error: unknown): Promise<void>;
   };
 };
+/** As the envelope runs a method: prepare, the decision on its resource (denied → `denied`), the check, the handler (a throw → `abandoned`). */
 async function run(definition: Definition, raw: unknown, who: Caller): Promise<any> {
   const input = definition.validate(raw);
   const context = (tx: SqlTx) => ({ ...moduleContext(within(tx)), caller: who, requestId: 'req' }) as MethodContext;
-  if (definition.admission) {
-    const plan = await db.transaction((tx) => definition.admission!.prepare(context(tx), input, tx));
+  const admission = definition.admission;
+  if (admission) {
+    const plan = await db.transaction((tx) => admission.prepare(context(tx), input, tx));
     if (plan.status === 'replay') return plan.result;
-    await definition.admission.check?.({ ...moduleContext(db), caller: who, credential: { kind: 'session', token: 't' }, requestId: 'req' } as never, input);
+    if (plan.resource && denied.has(plan.resource.id)) {
+      const error = new ComputeError('ACCESS_DENIED', `denied on ${plan.resource.type}/${plan.resource.id}`);
+      await db.transaction((tx) => admission.denied?.(context(tx), input, tx, error) ?? Promise.resolve());
+      throw error;
+    }
+    await admission.check?.({ ...moduleContext(db), caller: who, credential: { kind: 'session', token: 't' }, requestId: 'req' } as never, input);
   }
-  return db.transaction((tx) => definition.handler(context(tx), input));
+  try {
+    return await db.transaction((tx) => definition.handler(context(tx), input));
+  } catch (error) {
+    if (admission?.abandoned) await db.transaction((tx) => admission.abandoned!(context(tx), input, tx, error));
+    throw error;
+  }
 }
 const call = (group: keyof VpsApi, method: string, raw: unknown, who: Caller = alice) =>
   run((api[group] as Record<string, Definition>)[method]!, raw, who);
@@ -182,6 +208,7 @@ beforeEach(async () => {
   invalidated.length = 0;
   decisions.length = 0;
   denied.clear();
+  authzOps.length = 0;
   clock = manualClock(T0);
   await useSimClock(db, T0);
   await db.query(`INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ('site_01jz00000000000000000000aa', 'root', 'shared', 'eu', 1)`);
@@ -314,6 +341,50 @@ describe('sandbox volumes', () => {
     await expect(
       db.transaction((tx) => definition.handler({ ...moduleContext(within(tx)), caller: alice, requestId: 'req' } as MethodContext, widened)),
     ).rejects.toMatchObject({ code: 'CONFLICT', details: { reason: 'volumes-changed' } });
+  });
+
+  it('are decided with their size: on create, and with the new size pending on resize (review 2, LOW 3)', async () => {
+    authzOps.length = 0;
+    const volume = await createVolume();
+    const resource = `sandbox-volume/${volume.id}`;
+    // Create: the decision is on the volume, whose projection row already carries the size (prepare), and
+    // the handler writes it again once the volume exists.
+    expect(authzOps.filter((op) => op.resource === resource)).toEqual([
+      { op: 'upsert', resource, attributes: { sizeGiB: 50 } },
+      { op: 'upsert', resource, attributes: { sizeGiB: 50 } },
+    ]);
+    // Refused: nothing is created, and the staged row goes.
+    authzOps.length = 0;
+    const refusedId = await draftId('vol', 'acme', alice.identityId, 'vol-denied');
+    denied.add(refusedId);
+    await expect(createVolume({ name: 'refused', idempotencyKey: 'vol-denied' })).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    expect(authzOps.map((op) => `${op.op} ${op.resource}`)).toEqual([`upsert sandbox-volume/${refusedId}`, `remove sandbox-volume/${refusedId}`]);
+    expect((await db.query('SELECT 1 FROM sandbox_volumes WHERE id = $1', [refusedId])).rowCount).toBe(0);
+    // Resize: decided with the new size pending, then the row says it.
+    authzOps.length = 0;
+    await call('sandboxVolumes', 'resize', { tenantId: 'acme', volumeId: volume.id, sizeGiB: 80 });
+    expect(authzOps).toEqual([
+      { op: 'pending', resource, attributes: { sizeGiB: 80 } },
+      { op: 'pending', resource, attributes: null },
+      { op: 'upsert', resource, attributes: { sizeGiB: 80 } },
+    ]);
+    // A refused resize clears its pending size, and so does one whose handler failed (no room on the host).
+    authzOps.length = 0;
+    denied.add(volume.id);
+    await expect(call('sandboxVolumes', 'resize', { tenantId: 'acme', volumeId: volume.id, sizeGiB: 90 })).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    denied.clear();
+    await expect(call('sandboxVolumes', 'resize', { tenantId: 'acme', volumeId: volume.id, sizeGiB: 5000 })).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED' });
+    expect(authzOps.filter((op) => op.op === 'pending').map((op) => op.attributes)).toEqual([{ sizeGiB: 90 }, null, { sizeGiB: 5000 }, null]);
+    const { rows } = await db.query<{ resizing_request: string | null }>('SELECT resizing_request FROM sandbox_volumes WHERE id = $1', [volume.id]);
+    expect(rows[0]!.resizing_request).toBeNull();
+    // One resize at a time holds the pending size.
+    const definition = (api.sandboxVolumes as unknown as Record<string, Definition>).resize!;
+    const prepare = (sizeGiB: number) =>
+      db.transaction((tx) =>
+        definition.admission!.prepare({ ...moduleContext(within(tx)), caller: alice, requestId: 'req' } as MethodContext, definition.validate({ tenantId: 'acme', volumeId: volume.id, sizeGiB }), tx),
+      );
+    await prepare(100);
+    await expect(prepare(120)).rejects.toMatchObject({ code: 'CONFLICT', details: { reason: 'resize-in-flight' } });
   });
 
   it('are listed per caller by default, the whole tenant with scope all', async () => {

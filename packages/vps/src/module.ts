@@ -140,6 +140,10 @@ import {
   parseListVolumes,
   parseResizeVolume,
   parseVolumeRef,
+  denyCreateVolume,
+  prepareCreateVolume,
+  prepareResizeVolume,
+  releaseResizeHold,
   resizeVolume,
   templateVolumeDecisions,
   templateVolumesOf,
@@ -1022,8 +1026,14 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       create: defineMethod({
         action: 'compute:sandboxes:manage',
         kind: 'mutation',
-        resource: tenantResource,
+        // The envelope decides on the volume `prepare` returns.
+        resource: (input: CreateVolumeInput) => ({ type: 'sandbox-volume', id: `draft:${input.idempotencyKey}` }),
         validate: describedBy(schemas.createVolume, parseCreateVolume),
+        // Decided on the volume, whose projection row carries the requested size (review 2, LOW 3).
+        admission: {
+          prepare: (context, input, tx) => prepareCreateVolume(context, input, tx),
+          denied: (context, input, tx) => denyCreateVolume(context, input, tx),
+        },
         handler: (context, input) => createVolume(depsOf(context), context, input),
       }),
       list: defineMethod({
@@ -1045,6 +1055,17 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         kind: 'mutation',
         resource: volumeResource,
         validate: describedBy(schemas.resizeVolume, parseResizeVolume),
+        // The new size is decided as the volume's pending sizeGiB, as sandboxes.extend decides a lifetime.
+        admission: {
+          prepare: (context, input, tx) => prepareResizeVolume(context, input, tx),
+          denied: async (context, input, tx) => {
+            await releaseResizeHold(context.authz, tx, input);
+          },
+          // Transaction 2 threw (CAPACITY_UNAVAILABLE, QUOTA_EXCEEDED): its own clearing rolled back.
+          abandoned: async (context, input, tx) => {
+            await releaseResizeHold(context.authz, tx, input);
+          },
+        },
         handler: (context, input) => resizeVolume(depsOf(context), context.sql, input),
       }),
       delete: defineMethod({

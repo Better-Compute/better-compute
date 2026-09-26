@@ -567,7 +567,8 @@ group('sandboxSnapshots', 'vps', [
 ]);
 // Agent memory (v1.1, PLAN.md §3.8): persistent volumes sandboxes attach across runs.
 group('sandboxVolumes', 'vps', [
-  ['create', 'mutation', 'sandboxes:manage', 'tenant', 'v1.0'],
+  // Decided on the volume (its id derives from tenant, caller and key), with the requested sizeGiB.
+  ['create', 'mutation', 'sandboxes:manage', 'sandbox-volume', 'v1.0'],
   ['list', 'read', 'sandboxes:read', 'tenant', 'v1.0'],
   ['get', 'read', 'sandboxes:read', 'sandbox-volume', 'v1.0'],
   ['resize', 'mutation', 'sandboxes:manage', 'sandbox-volume', 'v1.0'],

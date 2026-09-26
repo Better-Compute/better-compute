@@ -1,6 +1,6 @@
 import type { Migration } from '@better-compute/core';
 import { vpsProviderBootstrapsMigration } from './bootstraps.js';
-import { vpsVolumesMigration } from './volumes.js';
+import { vpsVolumeResizeHoldMigration, vpsVolumesMigration } from './volumes.js';
 import {
   vpsIdentityRebindMigration,
   vpsSandboxExpiringMigration,
@@ -164,4 +164,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsPlacementMigration,
   vpsIpPoolDnsMigration,
   vpsVolumesMigration,
+  vpsVolumeResizeHoldMigration,
 ]);
