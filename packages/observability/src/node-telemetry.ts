@@ -135,6 +135,9 @@ export function nodeTelemetryModule(
 
 /** `doctor`: pools whose `policy.telemetry` cannot be sent to their nodes (their nodes use the defaults). */
 export async function nodeTelemetryFindings(sql: Pick<SqlExecutor, 'query'>): Promise<Finding[]> {
+  // A deployment without capacity has no pools to check.
+  const { rows: table } = await sql.query<{ ok: boolean }>(`SELECT to_regclass('pools') IS NOT NULL AS ok`);
+  if (!table[0]?.ok) return [];
   const { rows } = await sql.query<{ id: string; telemetry: unknown }>(
     `SELECT id, policy->'telemetry' AS telemetry FROM pools WHERE policy ? 'telemetry' ORDER BY id`,
   );

@@ -1,5 +1,6 @@
 import { writeFile } from 'node:fs/promises';
 import type { Finding } from '@better-compute/core';
+import { nodeTelemetryFindings } from '@better-compute/observability';
 import { findSecrets, redactSecrets } from '@better-compute/pki';
 import type { AnyCompute, AnyComputeOptions } from '../config.js';
 import { CliError } from '../errors.js';
@@ -185,6 +186,7 @@ export const supportCommands = [
       if (reachable) {
         findings.push(...(await quorumFindings(compute.context.sql, options)));
         findings.push(...(await daemonFindings(compute.context.sql)));
+        findings.push(...(await nodeTelemetryFindings(compute.context.sql)));
       }
       const host = await resolveHost((await configModule()).host, { compute, options, env, cwd });
       findings.push(...hostFindings(compute, options, host));

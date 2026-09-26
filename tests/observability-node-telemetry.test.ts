@@ -12,6 +12,7 @@ import {
 function sqlWith(pools: Record<string, unknown>): SqlExecutor {
   return {
     query: async (text: string, params?: unknown[]) => {
+      if (text.includes('to_regclass')) return { rows: [{ ok: true }] };
       if (text.includes('WHERE id = $1')) {
         const id = params![0] as string;
         return { rows: id in pools ? [{ telemetry: pools[id] ?? null }] : [] };
