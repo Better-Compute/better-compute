@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -127,7 +128,9 @@ func TestBMCOperationsKeepToTheirKind(t *testing.T) {
 	defer upstream.Close()
 	h.agent.BootHandler(BootConfig{URL: "http://10.0.0.2:8080"})
 	cached, err := h.agent.verifiedFirmware(context.Background(), upstream.URL+"/bios.bin", hex.EncodeToString(sum[:]))
-	if err != nil || cached != "http://10.0.0.2:8080/cache/"+hex.EncodeToString(sum[:]) || !h.agent.cache.has(hex.EncodeToString(sum[:])) {
+	// Under a grant of that one image (cachegrant.go).
+	if err != nil || !regexp.MustCompile(`^http://10\.0\.0\.2:8080/cache/t/[0-9a-f]{32}/`+hex.EncodeToString(sum[:])+`$`).MatchString(cached) ||
+		!h.agent.cache.has(hex.EncodeToString(sum[:])) {
 		t.Fatalf("verified firmware = %q, %v", cached, err)
 	}
 	if _, err := h.agent.verifiedFirmware(context.Background(), upstream.URL+"/bios.bin", strings.Repeat("cd", 32)); err == nil {

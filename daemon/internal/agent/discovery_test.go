@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -130,8 +131,19 @@ func TestUnknownMachinesAreListedAndSanbootBootsTheCachedISO(t *testing.T) {
 		return resp.StatusCode, string(b)
 	}
 	code, script := get("b8:3f:d2:00:00:77")
-	if code != http.StatusOK || script != "#!ipxe\nsanboot --no-describe http://10.20.0.2:8080/cache/"+hex.EncodeToString(digest[:])+"\n" {
+	m := regexp.MustCompile(`^#!ipxe\nsanboot --no-describe http://10\.20\.0\.2:8080(/cache/t/[0-9a-f]{32}/` + hex.EncodeToString(digest[:]) + `)\n$`).FindStringSubmatch(script)
+	if code != http.StatusOK || m == nil {
 		t.Fatalf("sanboot script (%d):\n%s", code, script)
+	}
+	// The ISO is served under that grant (iPXE reads it with range requests).
+	resp, err := http.Get(srv.URL + m[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	served, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || len(served) != len(iso) {
+		t.Fatalf("the ISO under its grant: %d, %d bytes", resp.StatusCode, len(served))
 	}
 	// An entry naming an image the site does not cache as an iso never boots, and fails the site.
 	other := sha256.Sum256([]byte("not cached"))

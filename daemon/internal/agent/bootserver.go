@@ -227,7 +227,7 @@ func (a *Agent) BootHandler(cfg BootConfig) *http.ServeMux {
 	a.mu.Unlock()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /boot/ipxe", func(w http.ResponseWriter, r *http.Request) { a.serveIPXE(w, r, cfg) })
-	mux.HandleFunc("GET /cache/", a.cache.serve)
+	mux.HandleFunc("GET /cache/", a.serveCache) // only under a grant (cachegrant.go)
 	// iPXE's second stage: chain to this machine's script with what iPXE knows about it.
 	mux.HandleFunc("GET /boot/chain.ipxe", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -274,7 +274,7 @@ func (a *Agent) serveIPXE(w http.ResponseWriter, r *http.Request, cfg BootConfig
 		return
 	}
 	if digest := entry.GetSanbootSha256(); len(digest) > 0 {
-		a.serveSanboot(w, mac, digest, cfg)
+		a.serveSanboot(w, mac, digest, cfg, bootGrantEnd(entry, now))
 		return
 	}
 	token, err := a.discoveryToken(r.Context(), entry)
@@ -315,6 +315,10 @@ func (a *Agent) serveIPXE(w http.ResponseWriter, r *http.Request, cfg BootConfig
 	assertion, _ := marshal(&sitev1.SignedDiscoveryAssertion{Body: body, Sig: sig})
 	params := cfg.Join
 	params.Token, params.Assertion = token, assertion
+	if params.Cache != "" {
+		// Its ramdisk's cache, under a grant of this boot (it appends /<sha256>).
+		params.Cache = strings.TrimRight(params.Cache, "/") + "/t/" + a.grantCache(bootGrantEnd(entry, now), "", true)
+	}
 	args := append([]string{"initrd=initrd"}, bootparams.Render(params)...)
 	if cfg.Cmdline != "" {
 		args = append(args, cfg.Cmdline)

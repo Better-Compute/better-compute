@@ -169,6 +169,8 @@ type Agent struct {
 	// cache images the site spec names as iso, which boot entries may sanboot (under mu).
 	discovery   discovery
 	sanbootISOs map[string]bool
+	// cacheGrants are the /cache URLs handed out (cachegrant.go).
+	cacheGrants cacheGrants
 	access      *accessConverger
 	hostcfg     *hostConverger
 	// kube runs the kubelet device plugins on a Kubernetes worker (kube.go).

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,7 +73,17 @@ func TestSiteCacheWarmsAndServes(t *testing.T) {
 	}
 	srv := httptest.NewServer(h.agent.BootHandler(BootConfig{}))
 	defer srv.Close()
-	resp, err := http.Get(srv.URL + "/cache/" + hex.EncodeToString(good[:]))
+	// Never without a grant; a grant of one image serves only it.
+	for _, path := range []string{"/cache/" + hex.EncodeToString(good[:]), "/cache/t/00000000000000000000000000000000/" + hex.EncodeToString(good[:])} {
+		if resp, err := http.Get(srv.URL + path); err != nil || resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s served without a grant: %v", path, resp.Status)
+		}
+	}
+	other := strings.Replace(h.agent.cacheURL(srv.URL, time.Now().Add(time.Hour), hex.EncodeToString(bad[:]), false), hex.EncodeToString(bad[:]), hex.EncodeToString(good[:]), 1)
+	if resp, err := http.Get(other); err != nil || resp.StatusCode != http.StatusNotFound {
+		t.Fatal("a grant of another image served this one")
+	}
+	resp, err := http.Get(h.agent.cacheURL(srv.URL, time.Now().Add(time.Hour), hex.EncodeToString(good[:]), false))
 	if err != nil {
 		t.Fatal(err)
 	}

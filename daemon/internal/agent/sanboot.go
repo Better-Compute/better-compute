@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -23,7 +22,7 @@ func (a *Agent) sanbootable(digest string) bool {
 	return iso && a.cache.has(digest)
 }
 
-func (a *Agent) serveSanboot(w http.ResponseWriter, mac string, digest []byte, cfg BootConfig) {
+func (a *Agent) serveSanboot(w http.ResponseWriter, mac string, digest []byte, cfg BootConfig, grantEnd time.Time) {
 	hexDigest := hex.EncodeToString(digest)
 	if len(digest) != 32 || !a.sanbootable(hexDigest) {
 		a.log.Warn("sanboot image not available", "mac", mac, "sha256", hexDigest)
@@ -32,7 +31,7 @@ func (a *Agent) serveSanboot(w http.ResponseWriter, mac string, digest []byte, c
 		return
 	}
 	a.log.Info("sanboot script served", "mac", mac, "sha256", hexDigest)
-	_, _ = fmt.Fprintf(w, "#!ipxe\nsanboot --no-describe %s/cache/%s\n", strings.TrimRight(cfg.URL, "/"), hexDigest)
+	_, _ = fmt.Fprintf(w, "#!ipxe\nsanboot --no-describe %s\n", a.cacheURL(cfg.URL, grantEnd, hexDigest, true))
 }
 
 // sanbootProblems are the live boot entries whose sanboot image the site spec does not name as a

@@ -337,7 +337,8 @@ func (a *Agent) verifiedFirmware(ctx context.Context, url, digest string) (strin
 		}
 		a.cache.saveMeta(digest, cacheMeta{Ref: "firmware", LastUsed: time.Now()})
 	}
-	return strings.TrimRight(base, "/") + "/cache/" + digest, nil
+	// The BMC fetches it under a grant of that one image (cachegrant.go).
+	return a.cacheURL(base, time.Now().Add(firmwareGrantTTL), digest, false), nil
 }
 
 // ---- site.httpProxy ----------------------------------------------------------------------------
