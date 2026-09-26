@@ -112,7 +112,9 @@ func sortedKeys[V any](m map[string]V) []string {
 //	bcd.instances             count, by runtime and state
 //	bcd.instance.vcpu         configured vCPUs, by instance.id and runtime
 //	bcd.instance.memory       configured memory bytes, by instance.id, runtime and hugepages
-//	bcd.instance.memory.balloon  what a ballooned guest's balloon leaves it, by instance.id, runtime
+//	bcd.instance.memory.balloon.reclaimed  bytes a ballooned guest lends the host (its memory
+//	                          minus what the balloon leaves it), by instance.id and runtime; only
+//	                          guests whose spec gives them a balloon (placement.balloon)
 func (a *Agent) instanceMetrics(ctx context.Context) []telemetry.Metric {
 	if len(a.o.Runtimes) == 0 {
 		return nil
@@ -127,7 +129,13 @@ func (a *Agent) instanceMetrics(ctx context.Context) []telemetry.Metric {
 	ioWrite := telemetry.Metric{Name: "bcd.instance.io.write", Unit: "By", Sum: true}
 	netRx := telemetry.Metric{Name: "bcd.instance.network.receive", Unit: "By", Sum: true}
 	netTx := telemetry.Metric{Name: "bcd.instance.network.transmit", Unit: "By", Sum: true}
-	balloon := telemetry.Metric{Name: "bcd.instance.memory.balloon", Unit: "By"}
+	reclaimed := telemetry.Metric{Name: "bcd.instance.memory.balloon.reclaimed", Unit: "By"}
+	ballooned := map[string]bool{}
+	for _, spec := range a.instances.currentSpecs() {
+		if spec.GetPlacement().GetBalloon() {
+			ballooned[spec.GetInstanceId()] = true
+		}
+	}
 	for _, r := range a.o.Runtimes {
 		domains, err := r.List(ctx)
 		if err != nil {
@@ -151,11 +159,18 @@ func (a *Agent) instanceMetrics(ctx context.Context) []telemetry.Metric {
 				}
 			}
 		}
-		if b, ok := r.(runtime.Ballooner); ok {
+		if b, ok := r.(runtime.Ballooner); ok && len(ballooned) > 0 {
 			if sizes, err := b.Balloons(ctx); err == nil {
-				for _, id := range sortedKeys(sizes) {
-					v := int64(sizes[id])
-					balloon.Points = append(balloon.Points, telemetry.Point{Attrs: map[string]string{"instance.id": id, "runtime": r.Name()}, Int: &v})
+				for _, d := range domains {
+					if !d.Managed || !ballooned[d.ID] || d.State != runtime.StateRunning {
+						continue
+					}
+					current, ok := sizes[d.ID]
+					if !ok || current > d.MemoryBytes {
+						current = d.MemoryBytes // no reading: deflated
+					}
+					v := int64(d.MemoryBytes - current)
+					reclaimed.Points = append(reclaimed.Points, telemetry.Point{Attrs: map[string]string{"instance.id": d.ID, "runtime": r.Name()}, Int: &v})
 				}
 			}
 		}
@@ -179,7 +194,7 @@ func (a *Agent) instanceMetrics(ctx context.Context) []telemetry.Metric {
 		instances.Points = append(instances.Points, telemetry.Point{Attrs: map[string]string{"runtime": k[0], "state": k[1]}, Int: &n})
 	}
 	var out []telemetry.Metric
-	for _, m := range []telemetry.Metric{instances, vcpu, memory, balloon, cpuTime, memUsed, ioRead, ioWrite, netRx, netTx} {
+	for _, m := range []telemetry.Metric{instances, vcpu, memory, reclaimed, cpuTime, memUsed, ioRead, ioWrite, netRx, netTx} {
 		if len(m.Points) > 0 {
 			out = append(out, m)
 		}

@@ -110,6 +110,10 @@ func (m *Manager) init() {
 			m.DRAPluginDir = defaultDRAPluginDir
 		}
 		m.dra = &draDriver{m: m}
+		if m.Hosted {
+			// The DaemonSet's service account, not the kubelet's kubeconfig (incluster.go).
+			m.Sys = inClusterSystem{m.Sys}
+		}
 		if m.Interval <= 0 {
 			m.Interval = 5 * time.Second
 		}

@@ -68,14 +68,19 @@ func TestBalloonPass(t *testing.T) {
 	if _, ok := sizes()["inst_fixed"]; ok {
 		t.Fatal("a guest without a balloon was resized")
 	}
-	byName := map[string]bool{}
+	// What it lends is reported for it alone (inst_fixed has no balloon).
+	var reported bool
 	for _, m := range h.agent.instanceMetrics(ctx) {
-		if m.Name == "bcd.instance.memory.balloon" && len(m.Points) == 1 && m.Points[0].Attrs["instance.id"] == "inst_lent" && uint64(*m.Points[0].Int) == floor {
-			byName[m.Name] = true
+		if m.Name != "bcd.instance.memory.balloon.reclaimed" {
+			continue
 		}
+		if len(m.Points) != 1 || m.Points[0].Attrs["instance.id"] != "inst_lent" || uint64(*m.Points[0].Int) != memory-floor {
+			t.Fatalf("reclaimed = %+v, want inst_lent lending %d", m.Points, memory-floor)
+		}
+		reported = true
 	}
-	if !byName["bcd.instance.memory.balloon"] {
-		t.Fatal("no bcd.instance.memory.balloon for inst_lent")
+	if !reported {
+		t.Fatal("no bcd.instance.memory.balloon.reclaimed")
 	}
 	// Room again: it deflates a step at a time, back to its full memory.
 	meminfo(16, 12<<10)
