@@ -132,6 +132,7 @@ Round-5 security review (subagent over a760805..HEAD; 2 HIGH, 7 MED, 3 LOW):
 Security review 2 (1f0210a..HEAD; sub-reviews for kube, volumes, PXE/control plane; the helper/libvirt part is pending):
 - Kube: M1–M3 and L6 → [6baab5]; M4 → [d320b8] ebd9806 plus capacity 4570dfe; M5 owner-only kubernetes binding 3825ec7; L7 → [927015].
 - Volumes: M1/L3 → [927015]; M2 → [06192c] 851016e plus the volume_storage seam 37d6d6d ([927015] consumes); L4 → [06192c] bdeb452.
+- Helper (final report at 6cb30e9): HIGH libvirt.restore without XML skips the validator; MED signed intent is node-optional without pins (take roots from the join record); LOW the base image is not re-checked. All → [d320b8]; the runtime restore --xml is with [06192c].
 - PXE/control plane: M8/M6/cpulist 004579e (mine); PXE M1/L5/L7 → [06192c]; discovery spoofing L6 → [927015] (confirmation before binding a MAC).
 
 E landed ([6baab5]):
