@@ -54,14 +54,28 @@ describe('bcd as a Kubernetes DaemonSet', () => {
     expect(JSON.stringify(plain.containers[0].env)).not.toMatch(/NVIDIA/);
     expect(pod.automountServiceAccountToken).toBe(false);
     expect(pod.hostNetwork).toBe(true);
-    // The token Secret is referenced by name only, read-only, as `token`.
+    // The token Secret is referenced by name only, read-only, as `token`. Optional (review 2, LOW 7): once the
+    // operator deletes it after rollout, a joined node's pod still starts (bcd join spends nothing there).
     expect(pod.volumes.find((v: { name: string }) => v.name === 'join-token')).toEqual({
       name: 'join-token',
-      secret: { secretName: 'bcd-join', defaultMode: 0o400, items: [{ key: 'token', path: 'token' }] },
+      secret: { secretName: 'bcd-join', defaultMode: 0o400, optional: true, items: [{ key: 'token', path: 'token' }] },
     });
-    // Identity survives pod restarts; the kubelet's credentials are read-only.
+    // Identity survives pod restarts.
     expect(pod.volumes.find((v: { name: string }) => v.name === 'data')).toEqual({ name: 'data', hostPath: { path: '/var/lib/bcd', type: 'DirectoryOrCreate' } });
-    expect(bcd.volumeMounts.find((m: { name: string }) => m.name === 'kubernetes')).toMatchObject({ mountPath: '/etc/kubernetes', readOnly: true });
+    // Hosted bcd's kubectl runs as the kubelet (e7d0765): its kubeconfig and client certificates, read-only,
+    // and nothing else of /etc/kubernetes (admin.conf and the CA keys on a control-plane node). No service account.
+    expect(pod.automountServiceAccountToken).toBe(false);
+    expect(bcd.volumeMounts.find((m: { name: string }) => m.name === 'kubelet-kubeconfig')).toEqual({
+      name: 'kubelet-kubeconfig',
+      mountPath: '/etc/kubernetes/kubelet.conf',
+      readOnly: true,
+    });
+    expect(pod.volumes.find((v: { name: string }) => v.name === 'kubelet-kubeconfig')).toEqual({
+      name: 'kubelet-kubeconfig',
+      hostPath: { path: '/etc/kubernetes/kubelet.conf', type: 'File' },
+    });
+    expect(bcd.volumeMounts.find((m: { name: string }) => m.name === 'kubelet-pki-0')).toEqual({ name: 'kubelet-pki-0', mountPath: '/var/lib/kubelet/pki', readOnly: true });
+    expect(pod.volumes.some((v: { hostPath?: { path: string } }) => v.hostPath?.path === '/etc/kubernetes')).toBe(false);
     expect(bcd.volumeMounts.find((m: { name: string }) => m.name === 'kubelet')).toMatchObject({ mountPath: '/var/lib/kubelet' });
     expect(pod.tolerations).toEqual([{ operator: 'Exists' }]);
     // The NVIDIA toolkit's configs, read only, for bcd's GPU isolation check.
@@ -125,5 +139,18 @@ describe('bcd as a Kubernetes DaemonSet', () => {
     expect(pod.tolerations).toEqual([{ key: 'nvidia.com/gpu', operator: 'Exists', effect: 'NoSchedule' }]);
     expect(pod.priorityClassName).toBeUndefined();
     expect(pod.imagePullSecrets).toEqual([{ name: 'registry-creds' }]);
+  });
+
+  it("mounts another distribution's kubelet credentials where bcd reads them, and never a whole config tree", () => {
+    const k3s = { kubeconfig: '/var/lib/rancher/k3s/agent/kubelet.kubeconfig', certificateDirs: ['/var/lib/rancher/k3s/agent'] };
+    const pod = podOf(bcdDaemonSetManifests({ ...options, kubeletCredentials: k3s }));
+    const bcd = pod.containers[0];
+    expect(pod.volumes.find((v: { name: string }) => v.name === 'kubelet-kubeconfig').hostPath).toEqual({ path: k3s.kubeconfig, type: 'File' });
+    // Inside the container at the path bcd's kubectl uses; the certificates at their own paths, as the kubeconfig names them.
+    expect(bcd.volumeMounts.find((m: { name: string }) => m.name === 'kubelet-kubeconfig').mountPath).toBe('/etc/kubernetes/kubelet.conf');
+    expect(bcd.volumeMounts.find((m: { name: string }) => m.name === 'kubelet-pki-0')).toMatchObject({ mountPath: '/var/lib/rancher/k3s/agent', readOnly: true });
+    for (const dir of ['/etc/kubernetes', '/etc/kubernetes/pki', '/var/lib/kubelet', '/'])
+      expect(() => bcdDaemonSetManifests({ ...options, kubeletCredentials: { kubeconfig: k3s.kubeconfig, certificateDirs: [dir] } })).toThrow(/certificateDirs/);
+    expect(() => bcdDaemonSetManifests({ ...options, kubeletCredentials: { kubeconfig: 'relative/kubelet.conf', certificateDirs: ['/x'] } })).toThrow(/kubeconfig/);
   });
 });

@@ -26,7 +26,7 @@ writeFileSync('bcd.json', renderKubernetesManifests(manifests)); // kubectl appl
 2. Create a join token for the pool with `hosted: 'kubernetes'` (core/0027), `maxUses` equal to the node count and a short TTL (an hour covers a rollout). JoinService lands these nodes at trust `tenant-controlled` unless the pool is `platformOperated: true`. The token decides this, never the node.
 3. Store the token in the cluster: `kubectl -n bcd-system create secret generic bcd-join --from-literal=token=bcjt_…`.
 4. Configure the GPU stack as [GPU isolation](#gpu-isolation) says, then apply the manifests.
-5. **When every node has joined, revoke the token and delete the Secret.** A DaemonSet cannot use one single-use token per node, so the token is multi-use; anyone who reads the Secret while it is live can join a machine to the pool. A node that has joined keeps its identity in `/var/lib/bcd` and joins again without a token. For nodes added later, mint a new token and Secret, and remove both again.
+5. **When every node has joined, revoke the token and delete the Secret.** A DaemonSet cannot use one single-use token per node, so the token is multi-use; anyone who reads the Secret while it is live can join a machine to the pool. A node that has joined keeps its identity in `/var/lib/bcd` and joins again without a token. The token volume is optional, so its pods still start after the Secret is gone. For nodes added later, mint a new token and Secret, and remove both again.
 
 ## GPU isolation
 
@@ -49,7 +49,7 @@ bcd keeps its node key and journal in the hostPath `/var/lib/bcd` (files 0600, o
 | | |
 | --- | --- |
 | `join` (init) | `bcd join` with the token Secret mounted read-only. It runs as root for the hostPath data directory, but has no capabilities, no privilege escalation and a read-only root. On a node that joined before, it succeeds without spending the token. |
-| `bcd` | `bcd node`, privileged. It needs devices, cgroups, CDI specs under `/etc/cdi` and `/var/run/cdi`, the kubelet's device-plugin socket under `/var/lib/kubelet`, and `/etc/kubernetes/kubelet.conf` read-only to keep its own Node's `bcd.dev/*` labels (NodeRestriction allows those). It never sees the token. Its liveness probe is `bcd status`. |
+| `bcd` | `bcd node`, privileged. It needs devices, cgroups, CDI specs under `/etc/cdi` and `/var/run/cdi`, the kubelet's device-plugin socket under `/var/lib/kubelet`, and the kubelet's credentials read-only (`kubeletCredentials`: by default `/etc/kubernetes/kubelet.conf` and `/var/lib/kubelet/pki`). Nothing else of the host's `/etc/kubernetes` is mounted: on a control-plane node that holds `admin.conf` and the cluster CA's keys. It has no service account, and NodeRestriction confines the kubelet's credentials to its own Node and that Node's pods. It never sees the token. Its liveness probe is `bcd status`. |
 | Pod | Host network, no service account token (bcd needs no API access of its own), `system-node-critical`, tolerates every taint by default, and rolls when `config.toml` changes (`bcd.dev/config-sha256`). |
 
 **What the cluster needs:**
@@ -76,6 +76,7 @@ bcd keeps its node key and journal in the hostPath `/var/lib/bcd` (files 0600, o
 | `hostUnits` | `false` | |
 | `nvidiaRuntimeClass` | `nvidia` | The RuntimeClass that gives bcd's own container the driver's utilities (`nvidia-smi`, NVML; `NVIDIA_VISIBLE_DEVICES=all` with the `utility` capability only). `null` when the image carries them. Workload pods are unaffected. |
 | `gpuApi` | device plugin | `dra` for bcd's DRA driver (`[kubernetes] gpu_api`). |
+| `kubeletCredentials` | kubeadm's: `/etc/kubernetes/kubelet.conf`, `/var/lib/kubelet/pki` | `{ kubeconfig, certificateDirs }` of another distribution (k3s: `/var/lib/rancher/k3s/agent/kubelet.kubeconfig`, `/var/lib/rancher/k3s/agent`). The kubeconfig lands where bcd reads it, and the directories at their own paths, all read-only. A directory that holds more than the kubelet's certificates (`/etc/kubernetes`, its `pki`, `/var/lib/kubelet`) is refused. |
 | `gatewayServerName`, `logLevel` | none, `info` | |
 
 The contract with bcd is checked on both sides. `scripts/daemon-k8s-contract.mjs` writes `daemon/cmd/bcd/testdata/k8s-daemonset.json`, and bcd's `TestKubernetesDaemonSetContract` parses its `config.toml` and command lines with bcd's own parser and flag sets. Tests: [`tests/provider-kubernetes.test.ts`](../../tests/provider-kubernetes.test.ts).

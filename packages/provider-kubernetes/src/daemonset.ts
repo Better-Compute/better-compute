@@ -91,6 +91,16 @@ export interface BcdDaemonSetOptions {
    * accept-nvidia-visible-devices-envvar-when-unprivileged=false; workload pods still get CDI devices only.
    */
   nvidiaRuntimeClass?: string | null;
+  /**
+   * The kubelet's credentials, which hosted bcd's kubectl uses for its own Node and that Node's pods
+   * (NodeRestriction is the fence; bcd has no service account). Default kubeadm's: the kubeconfig
+   * `/etc/kubernetes/kubelet.conf` and the certificates it names in `/var/lib/kubelet/pki`. The
+   * kubeconfig is mounted read-only where bcd reads it (`/etc/kubernetes/kubelet.conf`), and each
+   * certificate directory at its own path, so the paths inside the kubeconfig resolve. Nothing else
+   * of the host's /etc/kubernetes is mounted: on a control-plane node that holds admin.conf and the
+   * cluster CA's keys.
+   */
+  kubeletCredentials?: { kubeconfig: string; certificateDirs: readonly string[] };
 }
 
 const dns1123Label = /^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$/;
@@ -176,7 +186,16 @@ export const gpuIsolationRequirements =
   'bcd must be the only source of GPUs on these nodes. NVIDIA GPU operator: devicePlugin.enabled=false; container toolkit ' +
   'accept-nvidia-visible-devices-envvar-when-unprivileged=false (CDI only); CDI --device-name-strategy=uuid. Workload namespaces: ' +
   'Pod Security baseline or restricted (no hostPath: /var/lib/bcd holds the node key). Revoke the join token and delete its Secret ' +
-  'once every node has joined.';
+  'once every node has joined: the token volume is optional, so a joined node restarts without it; a new node needs a new token Secret.';
+
+/** kubeadm's kubelet credentials (`BcdDaemonSetOptions.kubeletCredentials`). */
+export const kubeadmKubeletCredentials = Object.freeze({
+  kubeconfig: '/etc/kubernetes/kubelet.conf',
+  certificateDirs: Object.freeze(['/var/lib/kubelet/pki']),
+});
+/** Where bcd's kubectl reads the kubelet's kubeconfig inside its container. */
+export const kubeletKubeconfigPath = '/etc/kubernetes/kubelet.conf';
+const absolutePath = /^\/(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/;
 
 /**
  * Where the NVIDIA container toolkit keeps its config.toml: the distribution packages', and the GPU
@@ -199,8 +218,10 @@ const joinKeyFile = 'join-encryption.jwk';
  * - a `join` init container: `bcd join` with the token Secret mounted read-only, unprivileged, no
  *   capabilities. On a node that joined before it succeeds without spending anything;
  * - the `bcd` container: `bcd node`, privileged (devices, cgroups, CDI specs, the kubelet's device-plugin
- *   socket), with the kubelet's credentials read-only for its own Node's `bcd.dev/*` labels. It never sees
- *   the token;
+ *   socket), with only the kubelet's kubeconfig and client certificates read-only, for its own Node and
+ *   that Node's pods. It never sees the token;
+ * - the token volume is optional: after the Secret is deleted, a joined node's pod still starts (bcd join
+ *   finds the node's identity and spends nothing);
  * - no service account token (bcd needs no Kubernetes API access of its own), host networking;
  * - identity and journal in the hostPath /var/lib/bcd, so a restarted pod is the same node.
  */
@@ -229,6 +250,16 @@ export function bcdDaemonSetManifests(options: BcdDaemonSetOptions): KubernetesO
   for (const [kind, values] of Object.entries(resources))
     for (const [resource, value] of Object.entries(values))
       if (typeof value !== 'string' || !quantity.test(value)) invalid(`resources.${kind}.${resource} must be a quantity such as 100m or 128Mi`);
+  const kubelet = options.kubeletCredentials ?? kubeadmKubeletCredentials;
+  if (typeof kubelet.kubeconfig !== 'string' || !absolutePath.test(kubelet.kubeconfig)) invalid('kubeletCredentials.kubeconfig must be an absolute path');
+  if (!Array.isArray(kubelet.certificateDirs) || kubelet.certificateDirs.length === 0 || kubelet.certificateDirs.length > 4)
+    invalid('kubeletCredentials.certificateDirs must list 1 to 4 directories');
+  for (const dir of kubelet.certificateDirs) {
+    if (typeof dir !== 'string' || !absolutePath.test(dir)) invalid(`kubeletCredentials.certificateDirs: ${String(dir)} is not an absolute path`);
+    // Never a directory that holds more than the kubelet's own credentials.
+    if (['/etc', '/etc/kubernetes', '/etc/kubernetes/pki', '/var/lib/kubelet', '/var', '/'].includes(dir))
+      invalid(`kubeletCredentials.certificateDirs: ${dir} holds more than the kubelet's certificates`);
+  }
   const config = bcdConfigToml(options);
   let jwk: string | undefined;
   if (options.joinEncryptionJwk !== undefined) {
@@ -354,7 +385,9 @@ export function bcdDaemonSetManifests(options: BcdDaemonSetOptions): KubernetesO
                 mount('dev', '/dev'),
                 mount('sys', '/sys'),
                 mount('kubelet', '/var/lib/kubelet'),
-                mount('kubernetes', '/etc/kubernetes', true),
+                // The kubelet's kubeconfig and client certificates only (never the host's /etc/kubernetes).
+                mount('kubelet-kubeconfig', kubeletKubeconfigPath, true),
+                ...kubelet.certificateDirs.map((dir, i) => mount(`kubelet-pki-${i}`, dir, true)),
                 mount('cdi-etc', '/etc/cdi'),
                 mount('cdi-run', '/var/run/cdi'),
                 // Read only, so bcd can see a permissive NVIDIA container toolkit (README "GPU isolation").
@@ -365,14 +398,16 @@ export function bcdDaemonSetManifests(options: BcdDaemonSetOptions): KubernetesO
           ],
           volumes: [
             { name: 'config', configMap: { name: `${name}-config`, defaultMode: 0o400 } },
-            { name: 'join-token', secret: { secretName, defaultMode: 0o400, items: [{ key: secretKey, path: 'token' }] } },
+            // Optional: once the Secret is deleted after rollout, a joined node's pod still starts.
+            { name: 'join-token', secret: { secretName, defaultMode: 0o400, optional: true, items: [{ key: secretKey, path: 'token' }] } },
             hostPath('data', dataDir, 'DirectoryOrCreate'),
             { name: 'run', emptyDir: { medium: 'Memory' } },
             { name: 'tmp', emptyDir: {} },
             hostPath('dev', '/dev', 'Directory'),
             hostPath('sys', '/sys', 'Directory'),
             hostPath('kubelet', '/var/lib/kubelet', 'Directory'),
-            hostPath('kubernetes', '/etc/kubernetes', 'Directory'),
+            hostPath('kubelet-kubeconfig', kubelet.kubeconfig, 'File'),
+            ...kubelet.certificateDirs.map((dir, i) => hostPath(`kubelet-pki-${i}`, dir, 'Directory')),
             hostPath('cdi-etc', '/etc/cdi', 'DirectoryOrCreate'),
             hostPath('cdi-run', '/var/run/cdi', 'DirectoryOrCreate'),
             hostPath('nvidia-runtime-etc', nvidiaToolkitConfigDirs[0], 'DirectoryOrCreate'),
