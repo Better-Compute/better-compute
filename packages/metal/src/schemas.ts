@@ -88,12 +88,10 @@ export const schemas = {
         description:
           "The machine's own IP addresses, the only hosts site.httpProxy may reach for it (agentless pools); out-of-band inspection replaces them when it reports some",
       },
-      productUuid: {
-        ...text(64),
-        pattern: '^\\{?[0-9A-Fa-f]{8}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{12}\\}?$',
-        description:
-          'The SMBIOS product UUID (what the BMC reports). Without macs, PXE discovery fills the MAC from the site agent that sees this machine PXE-booting (metal.discovered)',
-      },
+      productUuid: text(
+        64,
+        'The SMBIOS product UUID (what the BMC reports). Without macs, PXE discovery fills the MAC from the site agent that sees this machine PXE-booting (metal.discovered); only a well-formed UUID matches',
+      ),
       arch: { enum: ['x86_64', 'arm64'], default: 'x86_64' },
       uefi: { type: 'boolean', default: true, description: 'Boots in UEFI mode (false: legacy BIOS)' },
       hardwareProfile: text(64, "Overrides the pool's policy.hardwareProfile"),

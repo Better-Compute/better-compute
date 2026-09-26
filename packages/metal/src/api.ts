@@ -287,8 +287,11 @@ function validateEnroll(raw: unknown): EnrollInput {
       return macPattern.test(normalized) ? normalized : fail(`${mac} is not a MAC address`);
     });
   }
-  if (input.productUuid !== undefined)
-    out.productUuid = normalizeUuid(text(input.productUuid, 'productUuid', 64)) ?? fail('productUuid must be a UUID (8-4-4-4-12 hex digits)');
+  if (input.productUuid !== undefined) {
+    // A UUID in any case or with braces is stored in canonical form; anything else as given (it never matches).
+    const given = text(input.productUuid, 'productUuid', 64);
+    out.productUuid = normalizeUuid(given) ?? given.toLowerCase();
+  }
   if (input.arch !== undefined) out.arch = input.arch === 'x86_64' || input.arch === 'arm64' ? input.arch : fail("arch must be 'x86_64' or 'arm64'");
   if (input.uefi !== undefined) out.uefi = typeof input.uefi === 'boolean' ? input.uefi : fail('uefi must be true or false');
   if (input.hardwareProfile !== undefined) out.hardwareProfile = text(input.hardwareProfile, 'hardwareProfile', 64);
