@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -257,6 +258,75 @@ func TestDevicePlugin(t *testing.T) {
 	m.Sync(ctx)
 	if _, err := os.Stat(filepath.Join(dir, "bcd-gpu.mig.sock")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the plugin socket stayed: %v", err)
+	}
+}
+
+// As the cluster's DaemonSet: no join state, the plugins run on the kubelet alone, and the Manager
+// keeps the Node's bcd.dev/* labels (and only those) at most every LabelInterval.
+func TestHostedManager(t *testing.T) {
+	dir, err := os.MkdirTemp("", "kdh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	kubelet := startKubelet(t, dir)
+	sys := hostconfig.NewFakeSystem()
+	sys.Set(CDIDir+"/bcd-a1.json", holdFile("a1", BindingKubernetes, "GPU-1"))
+	nodeLabels := map[string]string{"kubernetes.io/hostname": "w1", "bcd.dev/stale": "x", "team": "ml"}
+	var gets int
+	sys.Handler = func(_ context.Context, cmd hostconfig.Cmd) ([]byte, error) {
+		args := cmd.Args[2:]
+		switch args[0] {
+		case "get":
+			gets++
+			b := `{"metadata":{"labels":{`
+			first := true
+			for k, v := range nodeLabels {
+				if !first {
+					b += ","
+				}
+				first = false
+				b += `"` + k + `":"` + v + `"`
+			}
+			return []byte(b + `}}}`), nil
+		case "label":
+			for _, a := range args[4:] {
+				if k, ok := strings.CutSuffix(a, "-"); ok {
+					delete(nodeLabels, k)
+				} else {
+					k, v, _ := strings.Cut(a, "=")
+					nodeLabels[k] = v
+				}
+			}
+		}
+		return nil, nil
+	}
+	now := time.Unix(1_800_000_000, 0)
+	m := &Manager{
+		Sys: sys, Dir: dir, PodResources: filepath.Join(dir, "pod-resources.sock"),
+		Hosted: true, NodeName: "w1",
+		Labels: func() map[string]string {
+			return map[string]string{"bcd.dev/node-id": "node_1", "bcd.dev/gpu.product": "NVIDIA-H100", "team": "ignored"}
+		},
+		Now: func() time.Time { return now },
+	}
+	m.Sync(context.Background())
+	t.Cleanup(m.stopAll)
+	if regs := kubelet.registrations(); len(regs) != 1 || regs[0].ResourceName != ResourceGPU {
+		t.Fatalf("registrations = %+v", regs)
+	}
+	want := map[string]string{"kubernetes.io/hostname": "w1", "team": "ml", "bcd.dev/node-id": "node_1", "bcd.dev/gpu.product": "NVIDIA-H100"}
+	if !reflect.DeepEqual(nodeLabels, want) {
+		t.Fatalf("labels = %v", nodeLabels)
+	}
+	m.Sync(context.Background())
+	if gets != 1 {
+		t.Fatalf("label syncs within the interval = %d", gets)
+	}
+	now = now.Add(2 * time.Minute)
+	m.Sync(context.Background())
+	if gets != 2 {
+		t.Fatalf("label syncs after the interval = %d", gets)
 	}
 }
 

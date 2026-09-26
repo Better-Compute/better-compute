@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -106,6 +107,11 @@ func newKubeManager(a *Agent) *kube.Manager {
 		},
 		Healthy: a.gpuHealthy,
 		Log:     a.log.With("component", "kube"),
+		// As the cluster's DaemonSet (provider-kubernetes, [host] units = false) the node is a worker
+		// without k8s-join; the DaemonSet names its Node in NODE_NAME.
+		Hosted:   a.o.ExternalHost,
+		NodeName: os.Getenv("NODE_NAME"),
+		Labels:   a.kubeLabels,
 	}
 }
 

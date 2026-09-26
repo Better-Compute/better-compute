@@ -39,12 +39,23 @@ type Manager struct {
 	Interval, Grace time.Duration
 	Now             func() time.Time
 	Log             *slog.Logger
+	// Hosted: bcd runs as the cluster's DaemonSet ([host] units = false; provider-kubernetes). The
+	// node is a worker because the cluster says so, not because k8s-join joined it: the plugins run
+	// whenever the kubelet is there, and the Manager keeps the Node's bcd.dev/* labels itself (the
+	// join unit does on a node it joined).
+	Hosted bool
+	// NodeName is the Node (the DaemonSet's NODE_NAME) and Labels its bcd.dev/* labels, for Hosted.
+	NodeName string
+	Labels   func() map[string]string
+	// LabelInterval spaces the hosted label syncs (default 1 min).
+	LabelInterval time.Duration
 
 	trigger chan struct{}
 	once    sync.Once
 	plugins map[string]*plugin
 	// stale remembers when a pod was first seen holding a released device (namespace/name → time).
-	stale map[string]time.Time
+	stale     map[string]time.Time
+	labelSync time.Time
 }
 
 func (m *Manager) init() {
@@ -113,14 +124,51 @@ func (m *Manager) stopAll() {
 
 func (m *Manager) logf(msg string, args ...any) { m.Log.Info(msg, args...) }
 
-// enabled reports whether bcd joined this node with gpu on and the kubelet is up.
+// enabled reports whether the kubelet is up on a node bcd joined with gpu on (or, Hosted, on any
+// node the DaemonSet runs on).
 func (m *Manager) enabled() bool {
-	state, ok, err := ReadState(m.Sys)
-	if err != nil || !ok || !state.GPU {
-		return false
+	if !m.Hosted {
+		state, ok, err := ReadState(m.Sys)
+		if err != nil || !ok || !state.GPU {
+			return false
+		}
 	}
-	_, err = os.Stat(filepath.Join(m.Dir, kubeletSocketName))
+	_, err := os.Stat(filepath.Join(m.Dir, kubeletSocketName))
 	return err == nil
+}
+
+// syncLabels keeps a hosted Node's bcd.dev/* labels (at most every LabelInterval): the same plan as
+// the join unit's, with no taints and nothing recorded but bcd.dev/*.
+func (m *Manager) syncLabels(ctx context.Context) {
+	if !m.Hosted || m.NodeName == "" || m.Labels == nil {
+		return
+	}
+	interval := m.LabelInterval
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	now := m.Now()
+	if !m.labelSync.IsZero() && now.Sub(m.labelSync) < interval {
+		return
+	}
+	m.labelSync = now
+	labels := map[string]string{}
+	for k, v := range m.Labels() {
+		if strings.HasPrefix(k, BcdLabelPrefix) && checkLabelKey(k) == nil && checkLabelValue(v) {
+			labels[k] = v
+		}
+	}
+	steps, err := planNode(ctx, m.Sys, m.NodeName, State{}, labels, nil)
+	if err != nil {
+		m.Log.Warn("read the Node's labels", "node", m.NodeName, "error", err.Error())
+		return
+	}
+	for _, s := range steps {
+		if err := s.Apply(ctx); err != nil {
+			m.Log.Warn("label the Node", "node", m.NodeName, "error", err.Error())
+			return
+		}
+	}
 }
 
 // Sync runs one pass.
@@ -159,6 +207,7 @@ func (m *Manager) Sync(ctx context.Context) {
 		}
 	}
 	m.reap(ctx, want)
+	m.syncLabels(ctx)
 }
 
 // atoms builds each resource's advertised devices from the holds.
