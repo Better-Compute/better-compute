@@ -62,6 +62,9 @@ describe('bcd as a Kubernetes DaemonSet', () => {
     expect(toml).toContain('[host]\nunits = false');
     expect(toml).not.toMatch(/bcjt_|token =/);
     expect(bcdConfigToml({ ...options, hostUnits: true })).toContain('[host]\nunits = true');
+    expect(bcdConfigToml({ ...options, gpuApi: 'dra' })).toContain('[kubernetes]\ngpu_api = "dra"');
+    expect(toml).not.toContain('[kubernetes]');
+    expect(() => bcdConfigToml({ ...options, gpuApi: 'nvml' as never })).toThrow(/gpuApi/);
     const sha = (o: BcdDaemonSetOptions) =>
       (bcdDaemonSetManifests(o).find((object) => object.kind === 'DaemonSet') as any).spec.template.metadata.annotations['bcd.dev/config-sha256'];
     expect(sha(options)).toMatch(/^[0-9a-f]{64}$/);

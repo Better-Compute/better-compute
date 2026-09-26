@@ -28,9 +28,13 @@ profile into persisted steps for one node or instance (PLAN.md §11.2). It depen
       runtime and 1 GiB pages through the kernel command line, reporting when a reboot is pending;
     - `kernel-modules` takes `{ load?, options? }`, e.g. `kvm_intel` with `nested=1` for VM hosts;
     - `gpu-sharing` takes `{ mode: mps | timeslice, replicas? }`;
-    - `k8s-join` takes `{ server, caCertSha256, tokenRef, kubernetesVersion?, nodeLabels?, taints?, gpu? }`.
-      The kubeadm bootstrap token is only ever a `secret://` reference that bcd fetches through the
-      broker, never in the spec. Labels and taints use Kubernetes syntax, without the
+    - `cpu` takes `{ governor?, isolate? }`. `isolate` is a cpulist of CPUs isolated from the scheduler, never
+      CPU 0, and takes effect after a reboot;
+    - `iommu` takes `{ passthrough? }`, for GPU passthrough to VMs (effective after a reboot);
+    - `gpu-settings` takes `{ powerLimitWatts?, ecc? }`, each GPU's power cap and ECC mode;
+    - `k8s-join` takes `{ server, caCertSha256, tokenRef, kubernetesVersion?, nodeLabels?, taints?, gpu?, gpuApi? }`.
+      `gpuApi` is `device-plugin` (default) or `dra`. The kubeadm bootstrap token is only ever a
+      `secret://` reference that bcd fetches through the broker, never in the spec. Labels and taints use Kubernetes syntax, without the
       `kubernetes.io`/`k8s.io` prefixes.
 
     `when:` is checked against the node's labels, and `mig-layout` can take `from: 'pool'`. The units
@@ -44,6 +48,7 @@ profile into persisted steps for one node or instance (PLAN.md §11.2). It depen
       (provider-kubernetes);
     - `policy.hugepages` `{ size, count, perNuma }` gives `hugepages`;
     - `policy.kernelModules` gives `kernel-modules`;
+    - `policy.cpu`, `policy.iommu` and `policy.gpu` give `cpu`, `iommu` and `gpu-settings`;
     - a pool shared by `mps` or `timeslice` gives `gpu-sharing`.
 
     The pools API checks a policy with `validatePoolHostPolicy`. A pool's layout reaches a node only

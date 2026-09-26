@@ -13,9 +13,10 @@
       "name": "bcd-join",
       "key": "token"
     },
-    "gatewayServerName": "gw.eu-central.example.com"
+    "gatewayServerName": "gw.eu-central.example.com",
+    "gpuApi": "dra"
   },
-  "config": "# Written by @better-compute/provider-kubernetes: bcd as a DaemonSet. Never holds the join token.\ngateway_url = \"https://gw.eu-central.example.com:8443\"\nsite = \"site_k8s_contract\"\nserving_ca_spki_pin = \"sha256/AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\"\njoin_signing_key_pin = \"sha256/AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\"\njoin_encryption_key_pin = \"sha256/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=\"\ndata_dir = \"/var/lib/bcd\"\ngateway_server_name = \"gw.eu-central.example.com\"\n\n[log]\nlevel = \"info\"\njson = true\n\n[host]\nunits = false\n",
+  "config": "# Written by @better-compute/provider-kubernetes: bcd as a DaemonSet. Never holds the join token.\ngateway_url = \"https://gw.eu-central.example.com:8443\"\nsite = \"site_k8s_contract\"\nserving_ca_spki_pin = \"sha256/AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\"\njoin_signing_key_pin = \"sha256/AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\"\njoin_encryption_key_pin = \"sha256/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=\"\ndata_dir = \"/var/lib/bcd\"\ngateway_server_name = \"gw.eu-central.example.com\"\n\n[log]\nlevel = \"info\"\njson = true\n\n[host]\nunits = false\n\n[kubernetes]\ngpu_api = \"dra\"\n",
   "join": [
     "/usr/local/bin/bcd",
     "join",

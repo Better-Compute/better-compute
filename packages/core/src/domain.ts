@@ -116,6 +116,10 @@ export interface PoolPolicy {
    * scheduler (cpulist, never CPU 0; effective after a reboot) that pinned VMs and holds book first.
    */
   cpu?: { governor?: 'performance' | 'schedutil' | 'ondemand' | 'powersave'; isolate?: string };
+  /** (v1.1 §3.8) The `iommu` config unit: the IOMMU for GPU passthrough to VMs (effective after a reboot). */
+  iommu?: { passthrough?: boolean };
+  /** (v1.1 §3.8) The `gpu-settings` config unit: each GPU's power cap and ECC mode. */
+  gpu?: { powerLimitWatts?: number; ecc?: boolean };
   /**
    * (v1.1 §3.8) The pool's machines join this Kubernetes cluster (the `k8s-join` config unit), and
    * reservations may use `binding: 'kubernetes'`: their devices go to the kubelet through bcd's device

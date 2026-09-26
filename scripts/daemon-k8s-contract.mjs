@@ -23,6 +23,7 @@ const options = {
   controlPlaneUrl: 'https://compute.example.com/api/compute',
   joinTokenSecret: { name: 'bcd-join', key: 'token' },
   gatewayServerName: 'gw.eu-central.example.com',
+  gpuApi: 'dra',
 };
 const objects = kubernetes.bcdDaemonSetManifests(options);
 const configMap = objects.find((object) => object.kind === 'ConfigMap');

@@ -78,6 +78,11 @@ export interface BcdDaemonSetOptions {
   /** The name the gateway certificate carries, when it differs from the gatewayUrl host. */
   gatewayServerName?: string;
   logLevel?: 'debug' | 'info' | 'warn' | 'error';
+  /**
+   * How bound GPUs reach pods: bcd's device plugins (`bcd.dev/gpu`, the default) or its DRA driver
+   * (`gpu.bcd.dev`, needs resource.k8s.io on the API server). A node runs one, never both.
+   */
+  gpuApi?: 'device-plugin' | 'dra';
 }
 
 const dns1123Label = /^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$/;
@@ -123,7 +128,10 @@ function controlPlane(value: string): string {
 const tomlString = (value: string) => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 
 /** bcd's /etc/bcd/config.toml for a node of the pool (daemon/internal/config's subset of TOML). */
-export function bcdConfigToml(options: Pick<BcdDaemonSetOptions, 'gatewayUrl' | 'siteId' | 'pins' | 'hostUnits' | 'gatewayServerName' | 'logLevel'>): string {
+export function bcdConfigToml(
+  options: Pick<BcdDaemonSetOptions, 'gatewayUrl' | 'siteId' | 'pins' | 'hostUnits' | 'gatewayServerName' | 'logLevel' | 'gpuApi'>,
+): string {
+  if (options.gpuApi !== undefined && options.gpuApi !== 'device-plugin' && options.gpuApi !== 'dra') invalid('gpuApi must be device-plugin or dra');
   const gateway = httpsOrigin(options.gatewayUrl, 'gatewayUrl');
   if (!siteIdPattern.test(options.siteId)) invalid('siteId must be a site id');
   for (const name of ['servingCaPin', 'joinSigningPin', 'joinEncryptionPin'] as const)
@@ -147,6 +155,7 @@ export function bcdConfigToml(options: Pick<BcdDaemonSetOptions, 'gatewayUrl' | 
     // The cluster's own tooling owns drivers, MIG and kernel settings unless the pool says otherwise.
     `units = ${options.hostUnits === true ? 'true' : 'false'}`,
     '',
+    ...(options.gpuApi ? ['[kubernetes]', `gpu_api = ${tomlString(options.gpuApi)}`, ''] : []),
   ];
   return lines.join('\n');
 }

@@ -86,6 +86,20 @@ export const builtinConfigUnits: readonly ConfigUnitDefinition[] = Object.freeze
     settings: manifest({}) as Manifest<Record<string, Json>>,
   },
   {
+    name: 'iommu',
+    description:
+      'The IOMMU for GPU passthrough to VMs and sandboxes: intel_iommu=on or amd_iommu=on (by CPU vendor) and iommu=pt on the kernel command line, effective after a reboot',
+    settings: manifest({ passthrough: field.boolean().default(true) }) as Manifest<Record<string, Json>>,
+  },
+  {
+    name: 'gpu-settings',
+    description: 'Per-GPU settings kept by bcd: the power cap (nvidia-smi -pl, re-applied on drift) and ECC (effective after a reboot)',
+    settings: manifest({
+      powerLimitWatts: field.int({ min: 1, max: 10_000 }).optional(),
+      ecc: field.boolean().optional(),
+    }) as Manifest<Record<string, Json>>,
+  },
+  {
     name: 'kernel-modules',
     description:
       'Kernel modules loaded at boot and now (modules-load.d), with their options (modprobe.d): kvm_intel/kvm_amd, vhost_net and tun for VM hosts',
@@ -221,9 +235,9 @@ function validateK8sJoin(settings: Record<string, Json>): Record<string, Json> {
   const bad = (message: string): never => {
     throw new ComputeError('INVALID_INPUT', `hostConfig.k8s-join.${message}`);
   };
-  const allowed = new Set(['server', 'caCertSha256', 'tokenRef', 'kubernetesVersion', 'nodeLabels', 'taints', 'gpu']);
+  const allowed = new Set(['server', 'caCertSha256', 'tokenRef', 'kubernetesVersion', 'nodeLabels', 'taints', 'gpu', 'gpuApi']);
   for (const key of Object.keys(settings)) if (!allowed.has(key)) bad(`${key} is not a setting (${[...allowed].join(', ')})`);
-  const { server, caCertSha256, tokenRef, kubernetesVersion, nodeLabels, taints, gpu } = settings;
+  const { server, caCertSha256, tokenRef, kubernetesVersion, nodeLabels, taints, gpu, gpuApi } = settings;
   let url: URL | undefined;
   try {
     url = typeof server === 'string' ? new URL(server) : undefined;
@@ -235,10 +249,17 @@ function validateK8sJoin(settings: Record<string, Json>): Record<string, Json> {
   // kubeadm's --discovery-token-ca-cert-hash: "sha256:<hex>" or the bare hex.
   const pin = typeof caCertSha256 === 'string' ? caCertSha256.toLowerCase().replace(/^sha256:/, '') : '';
   if (!/^[0-9a-f]{64}$/.test(pin)) bad('caCertSha256 must be the SHA-256 of the cluster CA public key, 64 hex digits (optionally "sha256:")');
-  // The bootstrap token never travels in the spec: the daemon fetches it by reference.
-  if (typeof tokenRef !== 'string' || !isSecretRef(tokenRef)) bad('tokenRef must be a secret:// (or vault://, env://) reference to the bootstrap token');
+  // The bootstrap token never travels in the spec: the daemon fetches it by reference, through the broker,
+  // which releases secret:// refs only.
+  if (typeof tokenRef !== 'string' || !isSecretRef(tokenRef) || !tokenRef.startsWith('secret://'))
+    bad('tokenRef must be a secret:// reference to the bootstrap token (the broker releases secret:// refs only)');
   const out: Record<string, Json> = { server: url!.origin, caCertSha256: pin, tokenRef: tokenRef as string, gpu: gpu ?? true };
   if (typeof out.gpu !== 'boolean') bad('gpu must be true or false');
+  // How GPUs reach the kubelet: bcd's device plugins (default) or its DRA driver (gpu.bcd.dev), never both.
+  if (gpuApi !== undefined) {
+    if (gpuApi !== 'device-plugin' && gpuApi !== 'dra') bad('gpuApi must be device-plugin or dra');
+    out.gpuApi = gpuApi as string;
+  }
   if (kubernetesVersion !== undefined) {
     if (typeof kubernetesVersion !== 'string' || !/^1\.[0-9]{2}\.[0-9]{1,3}$/.test(kubernetesVersion)) bad('kubernetesVersion must be a release such as 1.34.1');
     out.kubernetesVersion = kubernetesVersion as string;
@@ -343,6 +364,8 @@ const isRecord = (value: unknown): value is Record<string, unknown> => !!value &
  *   { pages2m | pages1g: count, perNuma };
  * - `policy.kernelModules` { load?, options? } → `kernel-modules`;
  * - `policy.cpu` { governor?, isolate? } → `cpu`;
+ * - `policy.iommu` { passthrough? } → `iommu` (GPU passthrough to VMs; set it on vps-host pools with GPU flavors);
+ * - `policy.gpu` { powerLimitWatts?, ecc? } → `gpu-settings`;
  * - a pool shared by `mps` or `timeslice` → `gpu-sharing` { mode, replicas: `policy.sharing.replicas`,
  *   default 10 for MPS and 4 for time-slicing }.
  * They win over a profile's `hostConfig` for the same unit: the pool's operator decides cluster
@@ -360,7 +383,7 @@ export function poolHostConfig(
   const kubernetes = policy?.kubernetes;
   if (kubernetes !== undefined) {
     if (!isRecord(kubernetes)) throw new ComputeError('INVALID_INPUT', 'policy.kubernetes must be an object');
-    const { apiServer, caCertSha256, joinTokenRef, labels, taints, kubernetesVersion, gpu, platformOperated, ...rest } = kubernetes;
+    const { apiServer, caCertSha256, joinTokenRef, labels, taints, kubernetesVersion, gpu, gpuApi, platformOperated, ...rest } = kubernetes;
     const unknown = Object.keys(rest);
     if (unknown.length) throw new ComputeError('INVALID_INPUT', `policy.kubernetes.${unknown[0]} is not a setting`);
     if (platformOperated !== undefined && typeof platformOperated !== 'boolean')
@@ -375,7 +398,7 @@ export function poolHostConfig(
   // Machines join the cluster only when the pool names it: a pool whose bcd runs as a DaemonSet inside the
   // cluster (hosted, provider-kubernetes) is in it already, and kubeadm join would fail there.
   if (isRecord(kubernetes) && kubernetes.joinTokenRef !== undefined) {
-    const { apiServer, caCertSha256, joinTokenRef, labels, taints, kubernetesVersion, gpu } = kubernetes;
+    const { apiServer, caCertSha256, joinTokenRef, labels, taints, kubernetesVersion, gpu, gpuApi } = kubernetes;
     config['k8s-join'] = {
       server: apiServer as Json,
       caCertSha256: caCertSha256 as Json,
@@ -384,6 +407,7 @@ export function poolHostConfig(
       ...(taints !== undefined ? { taints: taints as Json } : {}),
       ...(kubernetesVersion !== undefined ? { kubernetesVersion: kubernetesVersion as Json } : {}),
       ...(gpu !== undefined ? { gpu: gpu as Json } : {}),
+      ...(gpuApi !== undefined ? { gpuApi: gpuApi as Json } : {}),
     };
   }
   if (policy?.hugepages !== undefined) {
@@ -401,6 +425,14 @@ export function poolHostConfig(
   if (policy?.cpu !== undefined) {
     if (!isRecord(policy.cpu)) throw new ComputeError('INVALID_INPUT', 'policy.cpu must be an object');
     config.cpu = { ...(policy.cpu as Record<string, Json>) };
+  }
+  if (policy?.iommu !== undefined) {
+    if (!isRecord(policy.iommu)) throw new ComputeError('INVALID_INPUT', 'policy.iommu must be an object');
+    config.iommu = { ...(policy.iommu as Record<string, Json>) };
+  }
+  if (policy?.gpu !== undefined) {
+    if (!isRecord(policy.gpu)) throw new ComputeError('INVALID_INPUT', 'policy.gpu must be an object');
+    config['gpu-settings'] = { ...(policy.gpu as Record<string, Json>) };
   }
   if (policy?.kernelModules !== undefined) {
     if (!isRecord(policy.kernelModules)) throw new ComputeError('INVALID_INPUT', 'policy.kernelModules must be an object');

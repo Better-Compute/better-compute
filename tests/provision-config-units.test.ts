@@ -133,6 +133,19 @@ describe('hugepages, kernel-modules and k8s-join (PLAN.md §3.8)', () => {
     await expect(validatePoolHostPolicy({ cpu: { isolate: '0,2' } })).rejects.toThrow(/CPU 0/);
   });
 
+  it('validates iommu, gpu-settings and the k8s-join gpuApi, rendered from policy.iommu and policy.gpu', async () => {
+    expect(await resolveHostConfig({ iommu: {}, 'gpu-settings': { powerLimitWatts: 500, ecc: true } }, { labels: {} })).toEqual({
+      config: { iommu: { passthrough: true }, 'gpu-settings': { powerLimitWatts: 500, ecc: true } },
+    });
+    await expect(resolveHostConfig({ 'gpu-settings': { powerLimitWatts: 0 } }, { labels: {} })).rejects.toThrow(/gpu-settings/);
+    expect(poolHostConfig({ iommu: { passthrough: true }, gpu: { ecc: false } })).toEqual({ iommu: { passthrough: true }, 'gpu-settings': { ecc: false } });
+    const join = { server: 'https://k8s.example:6443', caCertSha256: 'ab'.repeat(32), tokenRef: 'secret://acme/k8s' };
+    expect((await resolveHostConfig({ 'k8s-join': { ...join, gpuApi: 'dra' } }, { labels: {} })).config!['k8s-join']).toMatchObject({ gpuApi: 'dra' });
+    await expect(resolveHostConfig({ 'k8s-join': { ...join, gpuApi: 'nvml' } }, { labels: {} })).rejects.toThrow(/gpuApi/);
+    // The broker releases secret:// refs only.
+    await expect(resolveHostConfig({ 'k8s-join': { ...join, tokenRef: 'vault://kv/k8s' } }, { labels: {} })).rejects.toThrow(/secret:\/\//);
+  });
+
   it('never joins a hosted pool (bcd as a DaemonSet inside the cluster already)', async () => {
     expect(poolHostConfig({ kubernetes: { platformOperated: true } })).toEqual({});
     await expect(validatePoolHostPolicy({ kubernetes: { platformOperated: 'yes' } })).rejects.toThrow(/platformOperated/);
