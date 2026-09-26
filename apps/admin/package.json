@@ -7,9 +7,10 @@
   "description": "The better-compute operator admin panel: fleet, capacity and operations in one modular, widget-based workspace (Next.js 16 + BoardUI, the docs' instrument theme).",
   "scripts": {
     "dev": "next dev --port 4200",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start --port 4200",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node ../../node_modules/vitest/vitest.mjs run --root ../.. --config apps/admin/vitest.config.ts"
   },
   "dependencies": {
     "@better-compute/console-kit": "workspace:*",
