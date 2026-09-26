@@ -14,6 +14,8 @@ describe('deploy/kubernetes', () => {
     expect(daemonset).toMatch(/secretName: bcd-join\n\s+#[^\n]*\n\s+defaultMode: 0400\n\s+optional: true/);
     expect(daemonset).toContain('--token-file=/var/run/bcd-join/token');
     expect(daemonset).toMatch(/name: join-token, mountPath: \/var\/run\/bcd-join, readOnly: true/);
+    // The token is minted as hosted, so the trust comes from the pool, never from the node.
+    expect(daemonset).toContain('--hosted kubernetes');
   });
 
   it('keeps the identity on the host and gives the pod no Kubernetes API identity', () => {

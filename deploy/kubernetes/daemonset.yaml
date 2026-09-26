@@ -6,8 +6,10 @@
 #   kubectl -n bcd-system create secret generic bcd-join --from-file=token=join-token
 # config.toml starts from config.toml.example; the join token is minted for this cluster's pool,
 # with one use per node (`better-compute join-tokens create --pool <pool> --max-uses <nodes>
-# --out join-token`). Each node joins once with it; delete the Secret once every node has joined
-# (the pods keep running without it).
+# --hosted kubernetes --out join-token`). Each node joins once with it; delete the Secret once every
+# node has joined (the pods keep running without it). A hosted token makes the nodes
+# tenant-controlled (the cluster's admins have root on them) unless the pool's
+# policy.kubernetes.platformOperated is true.
 #
 # The machines stay the cluster's: bcd applies no host configuration ([host] units = false; the
 # NVIDIA GPU operator owns the driver, toolkit and MIG), never reboots them, and takes no self-update
