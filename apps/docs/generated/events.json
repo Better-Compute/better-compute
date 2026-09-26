@@ -114,6 +114,12 @@
     "description": "A bare-metal machine enrolled"
   },
   {
+    "type": "node.pxe-mac.discovered",
+    "subject": "node/{id}",
+    "module": "metal",
+    "description": "PXE discovery filled an enrolled machine's MAC: its product UUID was seen from exactly one MAC by a site agent ({ nodeId, mac, productUuid, siteId, agentNodeId })"
+  },
+  {
     "type": "node.provision.*",
     "subject": "node/{id}",
     "module": "metal",

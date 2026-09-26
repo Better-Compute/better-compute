@@ -81,7 +81,8 @@
         "metal/0003_tenant_root",
         "metal/0004_bmc_credentials",
         "metal/0005_batch",
-        "metal/0006_bmc_driver_options"
+        "metal/0006_bmc_driver_options",
+        "metal/0007_discovered"
       ]
     },
     {

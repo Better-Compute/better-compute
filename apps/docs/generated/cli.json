@@ -1785,7 +1785,7 @@
       "group": "Sandboxes",
       "summary": "Create a sandbox template for the tenant (sandboxTemplates.create)",
       "description": "sandbox-template create defines what `sandbox create --template` starts: --pool, --flavor and --image (and the pool's --runtime), the default and longest lifetimes, a warm pool kept ready (--warm-min/--warm-max), user data from a file, environment variables from secret references and the network mode. Decided as compute:sandboxes:manage on the tenant.",
-      "usage": "better-compute sandbox-template create --tenant ID --name NAME --pool ID [--runtime ID] [--flavor NAME] [--image ID] [--user-data FILE] [--default-ttl DURATION] [--max-ttl DURATION] [--warm-min N] [--warm-max N] [--env NAME=REF,…] [--network MODE] [--config PATH] [--url URL]",
+      "usage": "better-compute sandbox-template create --tenant ID --name NAME --pool ID [--runtime ID] [--flavor NAME] [--image ID] [--user-data FILE] [--default-ttl DURATION] [--max-ttl DURATION] [--warm-min N] [--warm-max N] [--env NAME=REF,…] [--network MODE] [--volumes NAME:/PATH[:ro],…] [--config PATH] [--url URL]",
       "target": "token",
       "args": [],
       "flags": [
@@ -1870,6 +1870,12 @@
           "choices": ["egress", "private", "none"]
         },
         {
+          "flag": "--volumes",
+          "value": "NAME:/PATH[:ro],…",
+          "optional": true,
+          "description": "Persistent volumes (agent memory) every sandbox mounts, in order; \"\" removes them"
+        },
+        {
           "flag": "--config",
           "value": "PATH",
           "optional": true,
@@ -1907,7 +1913,7 @@
       "group": "Sandboxes",
       "summary": "Change a sandbox template (sandboxTemplates.update)",
       "description": "sandbox-template update changes only the fields given; --no-user-data removes the user data. Sandboxes already running keep what they started with; the warm pool is refilled from the new definition.",
-      "usage": "better-compute sandbox-template update TEMPLATE --tenant ID [--flavor NAME] [--image ID] [--user-data FILE] [--default-ttl DURATION] [--max-ttl DURATION] [--warm-min N] [--warm-max N] [--env NAME=REF,…] [--network MODE] [--no-user-data] [--config PATH] [--url URL]",
+      "usage": "better-compute sandbox-template update TEMPLATE --tenant ID [--flavor NAME] [--image ID] [--user-data FILE] [--default-ttl DURATION] [--max-ttl DURATION] [--warm-min N] [--warm-max N] [--env NAME=REF,…] [--network MODE] [--volumes NAME:/PATH[:ro],…] [--no-user-data] [--config PATH] [--url URL]",
       "target": "token",
       "args": [
         {
@@ -1978,6 +1984,12 @@
           "optional": true,
           "description": "What sandboxes may reach (default egress)",
           "choices": ["egress", "private", "none"]
+        },
+        {
+          "flag": "--volumes",
+          "value": "NAME:/PATH[:ro],…",
+          "optional": true,
+          "description": "Persistent volumes (agent memory) every sandbox mounts, in order; \"\" removes them"
         },
         {
           "flag": "--no-user-data",
@@ -2115,6 +2127,302 @@
         }
       ],
       "examples": ["better-compute sandbox templates --format table"]
+    },
+    {
+      "name": "sandbox-volume create",
+      "aliases": [],
+      "group": "Sandboxes",
+      "summary": "Create a persistent volume (agent memory) on a pool (sandboxVolumes.create)",
+      "description": "sandbox-volume create books --size GiB of disk on one host of --pool; sandboxes of templates that mount it (sandbox-template --volumes) run on that host and keep its data across runs. It is billed until deleted. Repeat with the same --key to retry safely.",
+      "usage": "better-compute sandbox-volume create --tenant ID --pool ID --name NAME --size GIB [--key KEY] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--pool",
+          "value": "ID",
+          "optional": false,
+          "description": "The pool (pool_…)"
+        },
+        {
+          "flag": "--name",
+          "value": "NAME",
+          "optional": false,
+          "description": "A name unique in the tenant"
+        },
+        {
+          "flag": "--size",
+          "value": "GIB",
+          "optional": false,
+          "description": "Size in GiB"
+        },
+        {
+          "flag": "--key",
+          "value": "KEY",
+          "optional": true,
+          "description": "Idempotency key, to retry the same request"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute sandbox-volume create --pool pool_01k5w… --name agent-notes --size 20"
+      ]
+    },
+    {
+      "name": "sandbox-volume list",
+      "aliases": [],
+      "group": "Sandboxes",
+      "summary": "List the tenant’s persistent volumes (sandboxVolumes.list)",
+      "description": "List the tenant’s persistent volumes (sandboxVolumes.list)",
+      "usage": "better-compute sandbox-volume list --tenant ID [--pool ID] [--deleted] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--pool",
+          "value": "ID",
+          "optional": true,
+          "description": "Only this pool’s (pool_…)"
+        },
+        {
+          "flag": "--deleted",
+          "optional": true,
+          "description": "Include deleted volumes"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute sandbox-volume list --format table"]
+    },
+    {
+      "name": "sandbox-volume get",
+      "aliases": [],
+      "group": "Sandboxes",
+      "summary": "Show a persistent volume (sandboxVolumes.get)",
+      "description": "Show a persistent volume (sandboxVolumes.get)",
+      "usage": "better-compute sandbox-volume get VOLUME --tenant ID [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "volume",
+          "description": "The volume id (vol_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute sandbox-volume get vol_01k5w…"]
+    },
+    {
+      "name": "sandbox-volume resize",
+      "aliases": [],
+      "group": "Sandboxes",
+      "summary": "Grow a persistent volume (sandboxVolumes.resize)",
+      "description": "sandbox-volume resize grows the volume to --size GiB; volumes never shrink.",
+      "usage": "better-compute sandbox-volume resize VOLUME --tenant ID --size GIB [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "volume",
+          "description": "The volume id (vol_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--size",
+          "value": "GIB",
+          "optional": false,
+          "description": "The new size in GiB"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute sandbox-volume resize vol_01k5w… --size 40"]
+    },
+    {
+      "name": "sandbox-volume delete",
+      "aliases": [],
+      "group": "Sandboxes",
+      "summary": "Delete a persistent volume and wipe its data (sandboxVolumes.delete)",
+      "description": "Delete a persistent volume and wipe its data (sandboxVolumes.delete)",
+      "usage": "better-compute sandbox-volume delete VOLUME --tenant ID [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "volume",
+          "description": "The volume id (vol_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute sandbox-volume delete vol_01k5w…"]
     },
     {
       "name": "nodes list",

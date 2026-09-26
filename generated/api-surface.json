@@ -2349,6 +2349,38 @@
         "additionalProperties": false
       }
     },
+    "metal.discovered": {
+      "route": "POST /api/compute/metal/discovered",
+      "kind": "read",
+      "action": "compute:sites:read",
+      "resource": "compute-site",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "siteId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "The site whose PXE discovery list to read"
+          }
+        },
+        "required": [
+          "tenantId",
+          "siteId"
+        ],
+        "additionalProperties": false
+      }
+    },
     "metal.enroll": {
       "route": "POST /api/compute/metal/enroll",
       "kind": "mutation",
@@ -2458,7 +2490,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 64,
-            "description": "The SMBIOS product UUID"
+            "description": "The SMBIOS product UUID (what the BMC reports). Without macs, PXE discovery fills the MAC from the site agent that sees this machine PXE-booting (metal.discovered); only a well-formed UUID matches"
           },
           "arch": {
             "enum": [
