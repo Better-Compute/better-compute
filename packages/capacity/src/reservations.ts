@@ -530,6 +530,27 @@ export async function reservationView(tx: SqlTx, row: ReservationRow): Promise<R
       view.binding = hold;
     }
   }
+  // A released Kubernetes binding whose pods still hold the devices (deferRelease): booked and billed
+  // until its node reports them free, which the tenant should see.
+  if (row.state === 'released' && row.request.binding === 'kubernetes') {
+    const { rows } = await tx.query<{ node_id: string; since: number | string }>(
+      `SELECT node_id, (binding->>'releasing')::float8 AS since FROM allocations
+        WHERE owner_kind = 'reservation' AND owner_id = $1 AND released_at IS NULL
+          AND binding ? 'releasing' ORDER BY id`,
+      [row.id],
+    );
+    if (rows.length > 0)
+      view.conditions = [
+        ...row.conditions.filter((entry) => entry.type !== 'DevicesHeld'),
+        {
+          type: 'DevicesHeld',
+          status: 'true',
+          reason: 'PodsHoldDevices',
+          message: `pods on ${[...new Set(rows.map((entry) => entry.node_id))].join(', ')} still hold the devices; they stay booked and billed until the node reports them free`,
+          since: Math.min(...rows.map((entry) => Number(entry.since))),
+        },
+      ];
+  }
   return view;
 }
 

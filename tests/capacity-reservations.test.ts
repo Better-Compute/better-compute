@@ -3029,11 +3029,13 @@ describe('host CPU and memory booked with the GPUs (§3.8)', () => {
     const first = await start('k8s-deferred');
     expect(await allocated(first.nodeId)).toEqual({ memoryGiB: 256, vcpu: 32 });
     await call('reservations', 'release', { tenantId: 'root', reservationId: first.id }, root);
-    // Released for the tenant and withdrawn from the node's spec, but still booked.
-    expect(
-      ((await call('reservations', 'get', { tenantId: 'root', reservationId: first.id }, root)) as Rsv)
-        .state,
-    ).toBe('released');
+    // Released for the tenant and withdrawn from the node's spec, but still booked (and shown so).
+    const get = async (id: string) =>
+      (await call('reservations', 'get', { tenantId: 'root', reservationId: id }, root)) as Rsv;
+    expect(await get(first.id)).toMatchObject({
+      state: 'released',
+      conditions: [{ type: 'DevicesHeld', status: 'true', reason: 'PodsHoldDevices', since: T0 }],
+    });
     expect(await deviceAssignments(db, first.nodeId)).toEqual([]);
     expect(await state(first.allocationId)).toEqual({ released: false, releasing: true, open: 2 });
     expect(await allocated(first.nodeId)).toEqual({ memoryGiB: 256, vcpu: 32 });
@@ -3043,6 +3045,7 @@ describe('host CPU and memory booked with the GPUs (§3.8)', () => {
     ).toBe(true);
     expect(await state(first.allocationId)).toEqual({ released: true, releasing: true, open: 0 });
     expect(await allocated(first.nodeId)).toEqual({ memoryGiB: 0, vcpu: 0 });
+    expect((await get(first.id)).conditions.map((entry) => entry.type)).not.toContain('DevicesHeld');
     expect(
       await db.transaction((tx) => markAllocationReleased(tx, work, first.allocationId)),
     ).toBe(false);
