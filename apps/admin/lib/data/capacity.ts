@@ -12,6 +12,7 @@
 // Everything here is SSR-safe: no randomness or clock reads at module load.
 
 import { DAY, HOUR } from './core';
+import { nodeHealth } from './fleet-health';
 import { poolPulse } from './platform';
 import { poolNodeId, pools as topoPools, sites as topoSites, tenants as topoTenants, type Pool as TopoPool } from './topology';
 
@@ -130,6 +131,17 @@ export interface CapacityRow {
   maintenance?: number;
   unreachable?: number;
   updatedAt?: number;
+  /**
+   * Admin extra (sim; absent from the API): unbooked GPUs on schedulable nodes right now. Without it the views
+   * fall back to allocatable − allocated.
+   */
+  freeNow?: number;
+}
+
+/** Free GPUs now, and the share of schedulable GPUs in use, from a rollup row. */
+export function rowFree(row: CapacityRow): { freeNow: number; utilization: number } {
+  const freeNow = row.freeNow ?? Math.max(0, row.allocatable - row.allocated);
+  return { freeNow, utilization: row.allocatable > 0 ? Math.min(1, (row.allocatable - freeNow) / row.allocatable) : 0 };
 }
 
 export interface CapacitySummary {
@@ -612,15 +624,9 @@ function planFleet(seed: number, epoch: number): Plan {
   for (const pool of POOLS) {
     const poolNodes: PlannedNode[] = [];
     for (let index = 0; index < pool.nodes; index += 1) {
-      const roll = rng();
-      const health: PlannedNode['health'] =
-        roll < 0.025 ? 'unhealthy' : roll < 0.05 ? 'maintenance' : roll < 0.065 ? 'provisioning' : roll < 0.072 ? 'unreachable' : 'ok';
-      poolNodes.push({
-        id: poolNodeId(pool.topo, index),
-        poolId: pool.id,
-        gpus: pool.gpusPerNode,
-        health,
-      });
+      rng(); // keeps the plan's random sequence stable (this roll once picked a per-week health)
+      // Health is not planned: it comes from the fleet's nodeHealth at the clock (see healthAt).
+      poolNodes.push({ id: poolNodeId(pool.topo, index), poolId: pool.id, gpus: pool.gpusPerNode, health: 'ok' });
     }
     nodes.push(...poolNodes);
 
@@ -715,7 +721,7 @@ function planFleet(seed: number, epoch: number): Plan {
       }
     };
     for (const node of poolNodes) {
-      if (node.health === 'provisioning' || node.gpus === 0) continue;
+      if (node.gpus === 0) continue;
       walk(node, Array.from({ length: node.gpus }, (_, gpu) => gpu), from, to, 0);
     }
   }
@@ -891,6 +897,22 @@ interface Derived {
   quotas: QuotaRow[];
   usage: UsageWindow[];
   timelines: Map<string, CapacityTimeline>;
+  /** Every node with its health at the clock (from the fleet). */
+  nodes: CapacityNode[];
+}
+
+/**
+ * A node's capacity health at `now`, decided by the fleet module (lib/data/fleet-health.ts), so capacity never
+ * counts or books a GPU on a node the fleet shows as broken: offline → unreachable, degraded → unhealthy,
+ * provisioning → provisioning, ready but held (failed, rescue, retiring) or cordoned → maintenance.
+ */
+function healthAt(nodeId: string, now: number): CapacityNode['health'] {
+  const info = nodeHealth(nodeId, now);
+  if (!info) return 'ok';
+  if (info.health === 'offline') return 'unreachable';
+  if (info.health === 'degraded') return 'unhealthy';
+  if (info.health === 'provisioning') return 'provisioning';
+  return info.schedulable ? 'ok' : 'maintenance';
 }
 
 /** A stable uniform [0, 1) per booking. */
@@ -915,6 +937,7 @@ function derive(plan: Plan, now: number, overlay: Overlay): Derived {
   const reservations = all.map((booking) => toReservation(booking, now, overlay));
   const byId = new Map(all.map((booking) => [booking.id, booking]));
   const holding = reservations.filter((reservation) => holdsDevices(reservation.state));
+  const nodesNow: CapacityNode[] = plan.nodes.map((node) => (node.gpus > 0 ? { ...node, health: healthAt(node.id, now) } : node));
 
   // Rollup per pool (whole GPUs by atom, PLAN §10.6 semantics).
   const summary: CapacitySummary = { pools: [], byGpuModel: {} };
@@ -953,7 +976,7 @@ function derive(plan: Plan, now: number, overlay: Overlay): Derived {
       });
       continue;
     }
-    const poolNodes = plan.nodes.filter((node) => node.poolId === pool.id);
+    const poolNodes = nodesNow.filter((node) => node.poolId === pool.id);
     const counts = { total: 0, allocatable: 0, provisioning: 0, unhealthy: 0, maintenance: 0, unreachable: 0 };
     for (const node of poolNodes) {
       counts.total += node.gpus;
@@ -975,6 +998,10 @@ function derive(plan: Plan, now: number, overlay: Overlay): Derived {
     }
     const allocated = now_.size;
     const reserved = later.size;
+    // Exact free GPUs now: unbooked atoms on schedulable nodes (a booking on a broken node doesn't free a
+    // healthy GPU, so allocatable − allocated would undercount).
+    let freeNow = 0;
+    for (const node of poolNodes) if (node.health === 'ok') for (let gpu = 0; gpu < node.gpus; gpu += 1) if (!now_.has(`${node.id}/${gpu}`)) freeNow += 1;
     const gpuRow: CapacityRow = {
       poolId: pool.id,
       resource: 'gpu',
@@ -982,6 +1009,7 @@ function derive(plan: Plan, now: number, overlay: Overlay): Derived {
       allocated,
       reserved,
       available: Math.max(0, counts.allocatable - allocated - reserved),
+      freeNow,
       updatedAt: now,
     };
     const scalar = (resource: string, perNode: number, perGpu: number): CapacityRow => {
@@ -1083,7 +1111,7 @@ function derive(plan: Plan, now: number, overlay: Overlay): Derived {
   }
   usage.sort((a, b) => a.windowStart - b.windowStart);
 
-  return { reservations, summary, quotas, usage, timelines: new Map() };
+  return { reservations, summary, quotas, usage, timelines: new Map(), nodes: nodesNow };
 }
 
 /** Hourly (or `stepMinutes`) booked/free GPUs of one pool from the bookings. */
@@ -1201,8 +1229,9 @@ export function createSimCapacitySource(options: SimOptions = {}): SimCapacitySo
       }
       return taken;
     };
+    // Only nodes the fleet calls schedulable at this moment (healthAt 'ok').
     const rank = (taken: Map<string, Set<number>>) =>
-      fleet.nodes
+      derived.nodes
         .filter((node) => node.poolId === pool.id && node.health === 'ok')
         .map((node) => {
           const used = taken.get(node.id) ?? new Set<number>();
@@ -1273,7 +1302,7 @@ export function createSimCapacitySource(options: SimOptions = {}): SimCapacitySo
         sites: SITES,
         prices: PRICES,
         nodesByPool,
-        nodes: fleet.nodes.filter((node) => node.gpus > 0),
+        nodes: derived.nodes.filter((node) => node.gpus > 0),
         source: 'sim',
     };
     memo = { derived, snapshot: value };
@@ -1411,7 +1440,7 @@ export function capacityTotals(now: number, scope: { siteId?: string } = {}): Ca
     const row = entry.capacity.find((capacity) => capacity.resource === 'gpu');
     if (!row) continue;
     const unschedulable = row.total - row.allocatable;
-    const freeNow = Math.max(0, row.allocatable - row.allocated);
+    const { freeNow, utilization } = rowFree(row);
     pools[entry.poolId] = {
       total: row.total,
       allocatable: row.allocatable,
@@ -1419,7 +1448,7 @@ export function capacityTotals(now: number, scope: { siteId?: string } = {}): Ca
       reserved: row.reserved,
       freeNow,
       unschedulable,
-      utilization: row.allocatable ? row.allocated / row.allocatable : 0,
+      utilization,
     };
     gpus.total += row.total;
     gpus.allocatable += row.allocatable;
@@ -1429,7 +1458,7 @@ export function capacityTotals(now: number, scope: { siteId?: string } = {}): Ca
     gpus.freeNow += freeNow;
     gpus.unschedulable += unschedulable;
   }
-  gpus.utilization = gpus.allocatable ? gpus.allocated / gpus.allocatable : 0;
+  gpus.utilization = gpus.allocatable ? Math.min(1, (gpus.allocatable - gpus.freeNow) / gpus.allocatable) : 0;
   return { gpus, pools };
 }
 

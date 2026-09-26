@@ -8,6 +8,7 @@ import {
   HOUR,
   holdsDevices,
   liveStates,
+  rowFree,
   reservationGpus,
   type AdminPool,
   type CapacityRow,
@@ -77,6 +78,7 @@ export function poolRows(snapshot: CapacitySnapshot, scope: { siteId?: string } 
       const topo = poolById(pool.id);
       const unavailable = (row.provisioning ?? 0) + (row.unhealthy ?? 0) + (row.maintenance ?? 0) + (row.unreachable ?? 0);
       const count = counts.get(pool.id) ?? { active: 0, pending: 0, startingSoon: 0, endingSoon: 0 };
+      const { freeNow, utilization } = rowFree(row);
       return [
         {
           pool,
@@ -88,12 +90,14 @@ export function poolRows(snapshot: CapacitySnapshot, scope: { siteId?: string } 
           row,
           total: row.total,
           allocatable: row.allocatable,
-          allocated: row.allocated,
+          // In use on schedulable nodes, so allocated + free + out of service add up to the total in every bar.
+          // The API's own `allocated` (which also counts bookings on broken nodes) stays on `row`.
+          allocated: row.allocatable - freeNow,
           reserved: row.reserved,
           available: row.available,
-          freeNow: Math.max(0, row.allocatable - row.allocated),
+          freeNow,
           unavailable: Math.max(unavailable, row.total - row.allocatable),
-          utilization: row.allocatable > 0 ? row.allocated / row.allocatable : 0,
+          utilization,
           ...count,
           tenants: tenants.get(pool.id)?.size ?? 0,
           price: topo?.price ?? 0,
