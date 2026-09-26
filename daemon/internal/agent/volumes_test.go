@@ -78,11 +78,23 @@ func TestCollectVolumesKeepsWhatRunningDomainsHaveOpen(t *testing.T) {
 		}
 	}
 	c := &instancesConverger{a: &Agent{log: slog.New(slog.NewTextHandler(io.Discard, nil))}, volumes: store}
-	domains := map[string]runtime.Domain{"inst_a": {ID: "inst_a", Managed: true, State: runtime.StateRunning,
-		Volumes: []runtime.AttachedVolume{{Volume: runtime.Volume{ID: "vol_open"}}}}}
-	c.collectVolumes(&agentv1.InstancesSection{Instances: []*agentv1.InstanceSpec{{InstanceId: "inst_a",
-		DesiredState: agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING}}}, nil, domains)
+	open := []runtime.AttachedVolume{{Volume: runtime.Volume{ID: "vol_open"}}}
+	domains := map[string]runtime.Domain{"inst_a": {ID: "inst_a", Managed: true, State: runtime.StateRunning, Volumes: open}}
+	section := &agentv1.InstancesSection{Instances: []*agentv1.InstanceSpec{{InstanceId: "inst_a",
+		DesiredState: agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING}}}
+	c.collectVolumes(section, nil, domains)
 	if ids, _ := store.List(); len(ids) != 1 || ids[0] != "vol_open" {
+		t.Fatalf("volumes = %v", ids)
+	}
+	// Its delete failed this pass: still open, kept.
+	section.Instances[0].DesiredState = agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED
+	c.collectVolumes(section, map[string]string{"inst_a": "virsh: busy"}, domains)
+	if ids, _ := store.List(); len(ids) != 1 {
+		t.Fatalf("volumes = %v", ids)
+	}
+	// Deleted this pass: it let go, and the volume goes in the same pass.
+	c.collectVolumes(section, nil, domains)
+	if ids, _ := store.List(); len(ids) != 0 {
 		t.Fatalf("volumes = %v", ids)
 	}
 }

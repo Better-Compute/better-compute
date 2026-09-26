@@ -165,15 +165,28 @@ func volumeRefusals(section *agentv1.InstancesSection, failed map[string]string,
 
 // collectVolumes destroys the stored volumes the section no longer lists that no instance still
 // attaches: neither in its spec (an instance whose delete failed keeps its volumes) nor open in a
-// domain that ran at the start of the pass (the next pass, once it stopped, collects them).
+// domain still running after the pass. One this pass stopped or deleted without error has let
+// go (unnamed domains were destroyed first, or the pass ended early).
 func (c *instancesConverger) collectVolumes(section *agentv1.InstancesSection, specErrors map[string]string, domains map[string]runtime.Domain) {
 	keep := map[string]bool{}
 	for _, v := range section.GetVolumes() {
 		keep[v.GetVolumeId()] = true
 	}
-	for _, d := range domains {
-		for _, v := range d.Volumes {
-			keep[v.ID] = true
+	stillRunning := map[string]bool{}
+	for _, spec := range section.GetInstances() {
+		_, failed := specErrors[spec.GetInstanceId()]
+		switch spec.GetDesiredState() {
+		case agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING, agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_PAUSED:
+			stillRunning[spec.GetInstanceId()] = true
+		default:
+			stillRunning[spec.GetInstanceId()] = failed
+		}
+	}
+	for id, d := range domains {
+		if stillRunning[id] {
+			for _, v := range d.Volumes {
+				keep[v.ID] = true
+			}
 		}
 	}
 	for _, spec := range section.GetInstances() {
