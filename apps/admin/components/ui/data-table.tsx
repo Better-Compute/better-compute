@@ -74,6 +74,7 @@ export interface DataTableProps<Row> {
 }
 
 interface ViewState {
+  widths?: Record<string, number>;
   query?: string;
   filters: Record<string, string | undefined>;
   sort?: { id: string; dir: 'asc' | 'desc' };
@@ -152,6 +153,24 @@ export function DataTable<Row>({
   const [limit, setLimit] = useState(pageSize);
   const [cursor, setCursor] = useState(-1);
   const bodyRef = useRef<HTMLTableSectionElement>(null);
+  // Operator-set column widths (px), from dragging a header's right edge; saved with the view.
+  const [widths, setWidths] = useState<Record<string, number>>({});
+  const widthOf = (column: Column<Row>) => (widths[column.id] ? `${widths[column.id]}px` : column.width);
+  const startColumnResize = (column: Column<Row>) => (event: React.PointerEvent<HTMLSpanElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const th = event.currentTarget.parentElement;
+    if (!th) return;
+    const startX = event.clientX;
+    const startWidth = th.getBoundingClientRect().width;
+    const move = (e: PointerEvent) => setWidths((w) => ({ ...w, [column.id]: Math.max(56, Math.round(startWidth + e.clientX - startX)) }));
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
 
   // Saved views: restore the last state once, then keep it current; named views are snapshots of it.
   const [views, setViews] = useState<StoredViews>({ saved: [] });
@@ -162,11 +181,13 @@ export function DataTable<Row>({
     filters,
     ...(sort ? { sort } : {}),
     hidden: [...hidden],
+    ...(Object.keys(widths).length ? { widths } : {}),
   });
   const applyState = (state: ViewState) => {
     setFilters(state.filters ?? {});
     setSort(state.sort ?? initialSort);
     setHidden(new Set(state.hidden ?? defaultHidden));
+    setWidths(state.widths ?? {});
     if (controlledQuery === undefined) setLocalQuery(state.query ?? '');
   };
   useEffect(() => {
@@ -182,7 +203,7 @@ export function DataTable<Row>({
     const next = { ...views, current: snapshot() };
     storeViews(viewKey, next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewKey, viewsLoaded, filters, sort, hidden, localQuery, views]);
+  }, [viewKey, viewsLoaded, filters, sort, hidden, localQuery, views, widths]);
   const updateViews = (next: StoredViews) => {
     setViews(next);
     if (viewKey) storeViews(viewKey, { ...next, current: snapshot() });
@@ -407,7 +428,9 @@ export function DataTable<Row>({
       )}
 
       <div className="min-h-0 overflow-auto" style={{ maxHeight }} tabIndex={0} onKeyDown={onKeyDown} aria-label="Table; j and k move, Enter opens">
-        <table className="w-full border-collapse text-left">
+        {/* Fixed layout once the operator sized a column: explicit widths hold, the rest share what's left, and the
+            table scrolls sideways if the sum outgrows the panel. */}
+        <table className="w-full border-collapse text-left" style={Object.keys(widths).length ? { tableLayout: 'fixed' } : undefined}>
           <thead className="sticky top-0 z-[1] bg-surface-raised">
             <tr className="border-b border-separator-border">
               {bulkActions && (
@@ -434,11 +457,11 @@ export function DataTable<Row>({
                 <th
                   key={column.id}
                   scope="col"
-                  style={{ width: column.width }}
+                  style={{ width: widthOf(column) }}
                   aria-sort={sort?.id === column.id ? (sort.dir === 'asc' ? 'ascending' : 'descending') : undefined}
                   className={cx(
                     cellPad,
-                    'font-mono text-[11px] font-medium tracking-wide whitespace-nowrap text-text-tertiary uppercase',
+                    'group/th relative font-mono text-[11px] font-medium tracking-wide whitespace-nowrap text-text-tertiary uppercase',
                     column.align === 'right' && 'text-right',
                     column.align === 'center' && 'text-center',
                   )}
@@ -452,6 +475,20 @@ export function DataTable<Row>({
                   ) : (
                     column.header
                   )}
+                  <span
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label={`Resize ${typeof column.header === 'string' ? column.header : column.id}; double-click to reset`}
+                    onPointerDown={startColumnResize(column)}
+                    onDoubleClick={() =>
+                      setWidths((w) => {
+                        const next = { ...w };
+                        delete next[column.id];
+                        return next;
+                      })
+                    }
+                    className="absolute top-1 right-0 bottom-1 w-1.5 cursor-col-resize touch-none border-r border-transparent group-hover/th:border-separator-border-strong hover:border-signal-fill"
+                  />
                 </th>
               ))}
             </tr>
@@ -504,7 +541,7 @@ export function DataTable<Row>({
                         column.align === 'right' && 'text-right tabular-nums',
                         column.align === 'center' && 'text-center',
                       )}
-                      style={{ width: column.width }}
+                      style={{ width: widthOf(column) }}
                     >
                       {column.cell(row)}
                     </td>
