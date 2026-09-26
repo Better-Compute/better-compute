@@ -1,12 +1,14 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useRouter } from 'next/navigation';
+import { useEffect, useMemo } from 'react';
 import { useConnection } from '@/components/shell/connection';
 import { useWorkspaceSettings, useClockGetter } from '@/components/shell/workspace';
 import { api as client } from '@/lib/api';
 import { useFeedback } from '@/components/ui/feedback';
 import type { CommandBatchView, FleetNode, Rollout, Sandbox } from '@/lib/data/fleet';
 import { refreshLive } from './live';
+import { setFleetActor } from '@/lib/data/fleet-actions';
 import { fleetActions } from './store';
 
 // Every fleet action goes through here: the shared confirmation (naming the API call, taking an audit reason)
@@ -22,8 +24,12 @@ export function useFleetCommands() {
   const clock = useClockGetter();
   const connection = useConnection().status;
   const tenantId = connection?.tenantId;
-  // The live proxy forwards only reads until operators sign in; it will say `writable: true` once they can act.
-  const writable = (connection as { writable?: boolean } | null | undefined)?.writable === true;
+  // The live proxy forwards mutations only with a signed-in operator's own credential (status.writable).
+  const writable = connection?.writable === true;
+  const operator = connection?.operator ?? null;
+  const router = useRouter();
+  // Audit entries and simulated approvals name the signed-in operator.
+  useEffect(() => setFleetActor(operator?.email ?? operator?.name), [operator?.email, operator?.name]);
   const { toast, confirm, confirmWithReason } = useFeedback();
 
   return useMemo(() => {
@@ -37,7 +43,7 @@ export function useFleetCommands() {
     /** Live and read-only: refuse before asking anything (the proxy would answer 403 READ_ONLY). */
     const canWrite = () => {
       if (!remote || writable) return true;
-      toast({ title: 'Read-only until operator sign-in', detail: 'The live connection only reads; change the fleet with the CLI or the console for now.', status: 'warn' });
+      toast({ title: 'Sign in to make changes', detail: 'Signed out, the live connection only reads.', status: 'warn', action: { label: 'Sign in', onAction: () => router.push('/signin') } });
       return false;
     };
     const at = () => clock().now;
@@ -49,7 +55,7 @@ export function useFleetCommands() {
       const failed = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
       const first = failed[0]?.reason as { code?: string; message?: string } | undefined;
       if (first?.code === 'READ_ONLY') {
-        toast({ title: 'Read-only until operator sign-in', detail: 'The live connection only reads; change the fleet with the CLI or the console for now.', status: 'warn' });
+        toast({ title: 'Sign in to make changes', detail: 'Signed out, the live connection only reads.', status: 'warn', action: { label: 'Sign in', onAction: () => router.push('/signin') } });
         return false;
       }
       toast(
@@ -316,5 +322,5 @@ export function useFleetCommands() {
       },
     };
     return api;
-  }, [clock, live, source, tenantId, writable, toast, confirm, confirmWithReason]);
+  }, [clock, live, source, tenantId, writable, router, toast, confirm, confirmWithReason]);
 }

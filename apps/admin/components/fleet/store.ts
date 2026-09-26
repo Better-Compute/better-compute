@@ -151,7 +151,7 @@ export function auditEvents(entries: readonly AuditEntry[]): ComputeEvent[] {
     subject: entry.subject,
     time: new Date(entry.at).toISOString(),
     sequence: `op-${entry.at}`,
-    data: { summary: entry.summary, actor: 'you' },
+    data: { summary: entry.summary, actor: entry.actor },
   }));
 }
 

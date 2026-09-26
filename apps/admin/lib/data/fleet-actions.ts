@@ -23,6 +23,8 @@ export interface NodeOverride {
 export interface AuditEntry {
   id: string;
   at: number;
+  /** Who did it: the signed-in operator, or the local placeholder in a signed-out simulation. */
+  actor: string;
   /** The API method this maps to: `nodes.cordon`, `rollouts.pause`, … */
   method: string;
   subject: string;
@@ -61,9 +63,17 @@ export const actionsVersion = () => version;
 /** The overlay outside React (tests, pure callers). */
 export const storeState = () => state;
 
+export const LOCAL_ACTOR = 'you@legionedge.ai';
+let actor = LOCAL_ACTOR;
+/** Names the operator later actions are attributed to (the shell's signed-in operator). */
+export function setFleetActor(next: string | null | undefined) {
+  actor = next || LOCAL_ACTOR;
+}
+export const fleetActor = () => actor;
+
 let sequence = 0;
-function audit(entry: Omit<AuditEntry, 'id'>): AuditEntry {
-  return { ...entry, id: `op_${(++sequence).toString(36)}_${entry.at.toString(36)}` };
+function audit(entry: Omit<AuditEntry, 'id' | 'actor'>): AuditEntry {
+  return { ...entry, actor, id: `op_${(++sequence).toString(36)}_${entry.at.toString(36)}` };
 }
 
 function patchNodes(ids: readonly string[], now: number, method: string, summary: (count: number) => string, patch: (current: NodeOverride) => NodeOverride) {
@@ -122,7 +132,7 @@ export const fleetActions = {
       audit: [audit({ at: now, method, subject: `rollout/${id}`, summary: `${method.split('.')[1]![0]!.toUpperCase()}${method.split('.')[1]!.slice(1)}d rollout${reason ? `: ${reason}` : ''}` }), ...state.audit],
     });
   },
-  approveBatch(batch: CommandBatchView, now: number, approver = 'you@legionedge.ai') {
+  approveBatch(batch: CommandBatchView, now: number, approver = actor) {
     const current = state.batches[batch.batchId]?.approvals ?? batch.approvals;
     if (current.some((approval) => approval.approvedBy === approver)) return;
     const approvals = [...current, { kid: 'approver-you', at: now, approvedBy: approver }];

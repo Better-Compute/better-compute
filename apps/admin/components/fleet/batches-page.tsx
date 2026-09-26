@@ -22,6 +22,7 @@ import { fmtDuration, fmtRelative, fmtStamp } from '@/lib/data/format';
 import { cx } from '@/utils/cx';
 import { SubjectLink } from './activity-page';
 import { LiveNotice } from './live-notice';
+import { fleetActor } from '@/lib/data/fleet-actions';
 import { useFleetCommands } from './commands';
 import { ActionButton, CountChip, SectionLabel } from './ui';
 import { useFleet } from './use-fleet';
@@ -32,7 +33,6 @@ import { useFleet } from './use-fleet';
 type Batch = FleetSnapshot['batches'][number];
 
 const batchStatus: Record<BatchState, Status> = { pending: 'pending', approved: 'live', expired: 'off', cancelled: 'off' };
-const ME = 'you@legionedge.ai';
 
 export function BatchesPage() {
   const snapshot = useFleet();
@@ -80,7 +80,7 @@ function BatchCard({ batch, now }: { batch: Batch; now: number }) {
   const { toast } = useFeedback();
   const [expanded, setExpanded] = useState(batch.state === 'pending' && batch.scopeSize <= 12);
   const signed = batch.approvals.length;
-  const mine = batch.approvals.some((approval) => approval.approvedBy === ME);
+  const mine = batch.approvals.some((approval) => approval.approvedBy === fleetActor());
   const left = batch.notAfter - now;
   const kind = batch.members[0]?.kind ?? 'command';
   const commandStates = Object.entries(batch.commands);
