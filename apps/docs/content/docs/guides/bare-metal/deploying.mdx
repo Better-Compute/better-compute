@@ -427,8 +427,9 @@ Talos's are `GET`s.
 
 The host must also belong to the command's `target_node_id` (a2a853d). Metal puts the site's agentless machines
 (nodes of `agent: 'none'` pools that are not retired) into the site agent's spec as `SiteSpec.proxy_targets`, each
-with the addresses Redfish inspection recorded and never its BMC host, recomputed when inspection records addresses
-and when such a machine is retired (8391d74). bcd then requires an IP literal to be one of the target node's listed
+with the addresses Redfish inspection recorded or `metal.enroll`'s `addresses` gave (3f19859; the only source for an
+IPMI machine, whose inspection reports none), and never its BMC host. The list is recomputed when such a machine is
+enrolled with addresses, when inspection records addresses and when the machine is retired (8391d74). bcd then requires an IP literal to be one of the target node's listed
 addresses, and a name to match a listed name (case-insensitive, trailing dot ignored) or to resolve only to listed
 addresses; a target node the list does not name is refused too, all with `forbidden-target`. The check applies once
 the site's spec lists any target, which it does whenever the site has an agentless machine.

@@ -123,17 +123,19 @@ tested against fake tools only, not on a real host. A VPS profile can already de
 
 ### bcd's nftables tables
 
-Every instance tap is named `bc<10 hex digits>n<nic>` (`runtime.TapName`), and bcd owns two nftables tables, which
+Every instance tap is named `bc<10 hex digits>n<nic>` (`runtime.TapName`), and bcd owns three nftables tables, which
 it replaces together in one transaction before any domain starts:
 
 | Table | Holds |
 | --- | --- |
-| `bridge bcd_instances` | The per-tap rules: anti-spoofing (the NIC's MAC and addresses), the `private` and `none` network policies, and the drops every tap gets (DHCP server replies, router advertisements and redirects, the host's own addresses). See [sandbox networks](/docs/guides/vps/sandboxes#network) |
-| `inet bcd_taps` | A backstop (933c51b): `iifname "bc*" drop` on the input and forward hooks, and `oifname "bc*" drop` on forward. Frames of a tap that is on its bridge reach these hooks as the bridge's, so only a tap off its bridge, which the bridge table cannot see, is dropped here. With no instance NIC on the host the table is deleted and not loaded again |
+| `bridge bcd_instances` | The per-tap rules: anti-spoofing (the NIC's MAC and addresses), the `private` and `none` network policies, sandboxes' SSH-from-the-host-only rule, and the drops every tap gets (DHCP server replies, router advertisements and redirects, the host's own addresses). See [sandbox networks](/docs/guides/vps/sandboxes#network) |
+| `inet bcd_taps` | A backstop (933c51b): `iifname "bc*" drop` on the input and forward hooks, and `oifname "bc*" drop` on forward and (since b12c217) output. Frames of a tap that is on its bridge reach these hooks as the bridge's, so only a tap off its bridge, which the bridge table cannot see, is dropped here. With no instance NIC on the host the table is deleted and not loaded again |
+| `arp bcd_taps` | The same backstop for ARP, which the inet hooks never see (b12c217): `iifname "bc*" drop` on input and `oifname "bc*" drop` on output. Present exactly when `inet bcd_taps` is |
 
-bcd's 5-second check counts the rules of both tables against what it loaded, and under
-[privilege separation](/docs/daemon#privilege-separation) the root helper accepts a ruleset that names these two
-tables and no other.
+A NIC on a bridge whose name starts with `bc` would match every tap rule, so it fails its instance. bcd's 5-second
+check counts the rules of all three tables against what it loaded, and under
+[privilege separation](/docs/daemon#privilege-separation) the root helper accepts a ruleset that names these tables
+and no other.
 
 What is not there at all: IPv6 ranges, more than one range or lease per instance, and an API to manage ranges. Tunnels
 give you exec, SSH and single-port TCP access without routing to the instance network; see [tunnels](/docs/guides/access/tunnels).

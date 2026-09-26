@@ -53,6 +53,7 @@ sources:
   - daemon/internal/pki/secrets.go
   - tests/pki-rotation.test.ts
   - examples/shared/compose.ts
+  - packages/cli/src/commands/batch.ts
   - PLAN.md
 ---
 
@@ -673,11 +674,19 @@ The `commandBatches` group (phase v1.0), decided on the tenant:
 | Method | Action | Does |
 | --- | --- | --- |
 | `create` | `compute:batches:create` | A batch over the given scope, answered like `get`; idempotent per caller and key |
-| `get`, `list` | `compute:batches:read` | A batch's state (`pending`, `approved`, `expired`, `cancelled`), root, size, required approvals, the approvals so far and its commands by state; `list` pages by `state`, `limit`, `cursor` |
+| `get`, `list` | `compute:batches:read` | A batch's state (`pending`, `approved`, `expired`, `cancelled`), root, size, required approvals, the approvals so far and its commands by state, and who created it: `createdBy`, plus `createdByAgent` and `delegationId` when an agent proposed it for that person (below); `list` pages by `state`, `limit`, `cursor` |
 | `scope` | `compute:batches:read` | The leaves (`leafIndex`, `subject`, `kind`, `payloadSha256`, empty for any payload, and the stored `payload` with `value` in base64 when its creator gave one), up to 5,000 a page, for approvers to review; check a payload against its digest before trusting it |
 | `members` | `compute:batches:read` | The batch's commands, each with its node, subject, kind, state, `reason` and `awaitingApproval` while held; filter `state`, paged by `limit` and `cursor` (`better-compute batch members`, the console's batch view) |
 | `approve` | `compute:batches:approve` | Takes one `signature` (`kid`, `sig`): it must verify alone for a known approver key over exactly this batch, is stored, and once the stored signatures meet the threshold the batch turns `approved`, its encoded `BatchApproval` is stored, its held commands become due and `command.batch.approved` is published |
 | `cancel` | `compute:batches:approve` | Ends a pending batch and cancels its held commands |
+
+**An agent's proposal reads as the agent's.** When the caller of `commandBatches.create` is an agent acting through
+a delegation (MCP's `propose_command_batch`, or a delegated API call), the batch records the agent and the delegation
+beside the person in `createdBy` (`command_batches.created_by_agent` and `delegation_id`, migration
+`quorum/0008_batch_agent`; f3c5c4e, security review 14 M3), since its `reason` is then the agent's text, not the
+person's. `batch approve` notes "Proposed by agent X for Y (delegation D): the reason is the agent's own text"
+before the approver signs, `batch show` answers the same words as `proposedBy`, and the console's Batches page shows
+them as a warning line (bd80209); server strings pass through the CLI's printable filter first.
 
 The IAM decision comes on top of the signatures, never instead of them. A pending batch past its end reads as
 `expired`, and the `quorum.batches` reconciler records that every minute and cancels its held commands; a deleted
@@ -703,7 +712,7 @@ tenant's pending batches are cancelled.
 root from the listed `(subject, kind, payload digest)` leaves. Leaves that do not give the root and size the server
 asks approvers to sign, or more leaves than the size, are `SCOPE_MISMATCH` ("the control plane answered two
 different batches"); a page that does not advance, or an answer without a valid root and size, is
-`INVALID_RESPONSE`. It then shows the reason, every subject by kind (at most 12 per kind, then a count), and the
+`INVALID_RESPONSE`. It then shows the reason (and, for an agent's proposal, who proposed it for whom), every subject by kind (at most 12 per kind, then a count), and the
 approvals so far with the window's end, and signs the batch id, root, size, expiry and the deployment's trust domain.
 The review is enforced, not only shown:
 

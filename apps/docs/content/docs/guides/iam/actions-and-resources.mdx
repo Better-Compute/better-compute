@@ -16,6 +16,8 @@ sources:
   - apps/docs/generated/api.json
   - tests/iam-bridge-matrix.test.ts
   - tests/server-admission.test.ts
+  - packages/iam/src/remote.ts
+  - packages/server/src/http.ts
   - PLAN.md
 ---
 
@@ -93,6 +95,15 @@ the port then posts a signed `{ tenantId, type, id, lsn }` to the IAM host's ref
 position from after transaction 1 and re-reads the row. Any failure fails the admission with `UNAVAILABLE` (fail
 closed). Without `refresh` the remote port has no `refreshResource`, remote admissions can decide on a row up to the
 replica lag plus 1 second old, and `better-compute doctor` warns `iam.refresh`.
+
+The remote port forwards only identity and client-context headers with the caller's credential (`authorization`,
+`cookie` when there is no bearer, `origin`, `user-agent`, `x-request-id`), never the client's own
+`x-forwarded-for`, `x-real-ip` or `forwarded` (e7092bf, security review 14 L3): behind a proxy that appends to them,
+a caller could choose the `request.sourceIp` its policy conditions see. The address IAM sees is
+`Credential.sourceIp`, which the host verified and the port sends as `x-forwarded-for`. `compute.nodeHandler` sets it
+from the socket's peer address; a fetch host passes it as `compute.handler(request, { peer: { address } })`
+(d269738), from the socket or from the hop a proxy it trusts reported. Without it IAM sees no source address. See
+[hosting the API](/docs/operations/deployment#the-caller-address).
 
 ## Actions
 

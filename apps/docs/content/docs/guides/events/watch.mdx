@@ -277,8 +277,9 @@ See [the TypeScript client](/docs/guides/clients/typescript-client#watching-even
 **The CLI: `events watch`.** `better-compute events watch --url … [--tenant T] [--types …] [--since CURSOR]
 [--count N]` follows the same stream with `$watch` and prints one terminal-safe JSON line per event; its `--path`
 defaults to `/watch` (the console app serves `/api/compute/watch`). `--since` takes the stream's own `<txid>.<seq>`
-cursor, the `sequence` of a printed line (`--since 184467.12`, 86706b4), while `events list --cursor` keeps the
-colon form of `events.list` pages (`184467:12`). See [follow events live](/docs/guides/clients/cli#follow-events-live).
+cursor, the `sequence` of a printed line (`--since 184467.12`, 86706b4), and also the colon form of `events.list`
+pages (`184467:12`), the same outbox position, which it sends as the dotted one (867c837); `events list --cursor`
+takes only the colon form. See [follow events live](/docs/guides/clients/cli#follow-events-live).
 
 **Browsers and Node.js: console-kit.** `watchEvents` from `@better-compute/console-kit` reads the stream over
 `fetch` with callbacks instead of a loop, and can also send an `Authorization` header, which `EventSource` cannot. It keeps the last `id`, reconnects

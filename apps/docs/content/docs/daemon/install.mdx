@@ -865,7 +865,8 @@ so nothing is scheduled on it (see [operating nodes](/docs/guides/nodes/operatin
 ## Release artifacts
 
 bcd is configured to build with goreleaser from `daemon/` (`.goreleaser.yaml`) for Linux on amd64 and arm64, with
-cgo and `zig cc` because go-nvml will load `libnvidia-ml`. A release produces
+cgo and `zig cc`, set up for a go-nvml backend that would load `libnvidia-ml`; the GPU code in the tree today reads
+`nvidia-smi` and needs no cgo (cb987e5). A release produces
 `bcd_<version>_linux_{amd64,arm64}.tar.gz`, each with a `.sha256`, and the bare binaries
 `bcd_<version>_linux_{amd64,arm64}`. The bare binary is what the install script downloads, what a signed release
 manifest lists and what self-update verifies. The same release builds `bcx-ipmi`, the site agent's IPMI BMC
@@ -879,4 +880,5 @@ dispatch naming one), appends everything to that tag's GitHub release, and adds 
 
 Until then a binary comes from a plain `go build` in `daemon/`. The development and test builds are cross-compiled
 without cgo (`GOOS=linux GOARCH=amd64 CGO_ENABLED=0`); `node scripts/daemon-test.mjs --build-bcd` writes the fake
-hardware build to `daemon/bin/bcd-linux-amd64`. Since go-nvml is not wired in yet, a cgo build gains nothing today.
+hardware build to `daemon/bin/bcd-linux-amd64`. go-nvml is not a dependency, so a cgo build gains nothing today: the default build reads GPUs through `nvidia-smi`
+without cgo (cb987e5).

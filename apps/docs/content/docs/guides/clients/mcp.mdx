@@ -13,7 +13,9 @@ sources:
   - packages/mcp/src/tools.ts
   - packages/mcp/src/confirmations.ts
   - packages/mcp/src/endpoint.ts
+  - packages/mcp/src/remote-iam.ts
   - packages/cli/src/host/config.ts
+  - packages/cli/src/host/findings.ts
   - packages/better-compute/src/mcp.ts
   - tests/mcp-server.test.ts
   - tests/mcp-e2e-confirmation.test.ts
@@ -77,7 +79,7 @@ export const host = defineHost(({ compute }) => ({
     path: '/mcp', // the default
     handler: computeMcpEndpoint({
       compute,
-      gate: createMcpGate({ iam, tenantId: platformTenantId, tools: gateTools(), unlisted: 'deny' }),
+      gate: createMcpGate({ iam, tenantId: platformTenantId, tools: gateTools(), unlisted: 'deny', confirmations: false }),
       delegations: iam.api.delegations,
     }).handler,
   },
@@ -88,8 +90,17 @@ export const host = defineHost(({ compute }) => ({
 /.well-known/oauth-protected-resource{path}` for the gate's RFC 9728 metadata. A path that is not absolute, or a
 missing handler, is `INVALID_CONFIG`. The gate is required. Give it a fixed `tenantId` (the organization that runs the
 endpoint), or choose one per caller deliberately: deciding in each caller's own tenant would let any organization
-grant itself access. The compose audit test mounts it through a real `serve`: no token is 401, and an administrator
-lists the tools.
+grant itself access. Build it with `confirmations: false`: the gate only checks visibility, and confirmations belong
+to compute's own decisions, which carry the whole request. With the gate's default, a wildcard in a delegation's
+confirm list would also match the gate's read actions and file confirmation requests built from unvalidated tool
+arguments (daf58eb, security review 14 M2). The compose audit test mounts it through a real `serve`: no token is
+401, and an administrator lists the tools.
+
+`better-compute doctor` checks that the mounted handler is gated (b491aed, review 14 L6). It sends the handler one
+unauthenticated JSON-RPC `tools/list` (read-only, given up after 5 seconds). A gated endpoint answers 401 with its
+OAuth challenge; any 2xx is the error finding `host.mcp.ungated` ("host.mcp answers MCP at /mcp without a
+credential"), since a bare `createComputeMcp().handler`, or one with a fixed client, serves MCP to anyone or makes
+every caller act as one credential. A probe that fails or gets a non-2xx answer reports nothing.
 
 ## Mount the endpoint yourself
 
@@ -104,7 +115,7 @@ const mcp = createComputeMcp({
   confirmations: iamConfirmations(iam.api.delegations),
 });
 
-const gate = createMcpGate({ iam, tenantId, tools: gateTools(), unlisted: 'deny' });
+const gate = createMcpGate({ iam, tenantId, tools: gateTools(), unlisted: 'deny', confirmations: false });
 
 export default {
   fetch: (request: Request) => gate(request, (forwarded, caller) => mcp.handler(forwarded, caller)),
@@ -133,6 +144,7 @@ caller's `tenantId`, which the tools act in.
     serverInfo: { type: '{ name: string; version: string }', description: 'Reported at initialize.', default: "{ name: 'better-compute', version: '0.1.0' }" },
     instructions: { type: 'string', description: 'Shown to the model at initialize. The default explains the list, preview, reserve and retry flow.' },
     maxBodyBytes: { type: 'number', description: 'Largest JSON-RPC request body.', default: '1048576 (1 MiB)' },
+    maxConcurrentCallsPerCaller: { type: 'number', description: "Tool calls one caller may have in flight at once, counted per caller identity (tenant and identity), else per Authorization header. Above it a call answers the tool error RATE_LIMITED with retryAfterMs 2000. Counted per server instance (48d41a4).", default: '4' },
     newKey: { type: '() => string', description: 'Idempotency keys for tools that create things.', default: 'mcp- and 24 random hex characters' },
   }}
 />
@@ -141,8 +153,10 @@ caller's `tenantId`, which the tools act in.
 
 When Better IAM runs in another process, give the gate `remoteMcpIam()` instead of a `betterIam()` instance (v0.4).
 It wraps a `createIamClient<BetterIam>()` from `@better-iam/client` and answers the gate's calls over Better IAM's
-HTTP API, each with the caller's own credential (only identity headers are forwarded), so every decision is still
-made and audited as the caller:
+HTTP API, each with the caller's own credential, so every decision is still made and audited as the caller. Only
+`authorization`, `user-agent` and `x-request-id` are forwarded; since 7890821 (review 14 L3) neither cookies nor the
+client's own `x-forwarded-for`, which behind an appending proxy would let the caller choose `request.sourceIp` for
+policy conditions:
 
 | Gate call | Better IAM API |
 | --- | --- |
@@ -160,6 +174,7 @@ const gate = createMcpGate({
   tenantId,
   tools: gateTools(),
   unlisted: 'deny',
+  confirmations: false,
 });
 ```
 
@@ -192,7 +207,7 @@ framework.
 | `start_instance` | `instances.start` | any authenticated caller | idempotent |
 | `stop_instance` | `instances.stop` | any authenticated caller | destructive, idempotent |
 | `delete_instance` | `instances.delete` | any authenticated caller | destructive, idempotent |
-| `list_sandbox_templates` | `sandboxTemplates.list` | any authenticated caller | read-only |
+| `list_sandbox_templates` | `sandboxTemplates.list`, without each template's `userData` and `env` | any authenticated caller | read-only |
 | `create_sandbox` | `sandboxes.create`, confirmation-aware | `compute:sandboxes:read` on the template | idempotent |
 | `list_sandboxes` | `sandboxes.list`: the caller's own by default, `scope: 'all'`, filter `templateId`, `limit` 1 to 200, `cursor` | any authenticated caller | read-only |
 | `get_sandbox` | `sandboxes.get` | any authenticated caller | read-only |
@@ -215,8 +230,10 @@ domain) and `selector` (up to 32 `{ key, op, values }` expressions with `In`, `N
 pool the call returns once the reservation is placed or the wait runs out; see
 [waiting for placement](/docs/guides/capacity/reservations#waiting-for-placement).
 
-`create_instance` takes `poolId`, `flavor` and `imageId`, and optionally `sshKeys`, an `idempotencyKey` and
-`waitSeconds` (0 to 30, default 20), which it sends as `wait: { timeoutMs }`: the call returns once the instance is running or has
+`create_instance` takes `poolId`, `flavor` and `imageId`, and optionally an `idempotencyKey` and
+`waitSeconds` (0 to 30, default 20). It takes no `sshKeys` (7890821, review 14 H1): an agent under prompt injection
+could install an attacker's key, so people add keys themselves and the agent reaches the VM through tunnels. The wait
+is sent as `wait: { timeoutMs }`: the call returns once the instance is running or has
 failed, or the wait runs out, so the agent does not have to poll `get_instance`; see
 [waiting for the instance](/docs/guides/vps/instances#waiting-for-the-instance).
 
@@ -237,7 +254,9 @@ too), and `delete_sandbox_snapshot` deletes one (`snap_…`) for good. No tool t
 
 Every argument is checked against the tool's JSON Schema before anything is called: ids must match their prefix
 (`pool_…`, `node_…`, `rsv_…`, `inst_…`, `sbxt_…`, `sbx_…`, `snap_…`, `batch_…`), and unknown arguments are refused. A bad argument is a tool error `INVALID_INPUT`
-with the path of the first problem.
+with the path of the first problem. The check reads own properties only (`constructor`, `__proto__` and the like are
+never arguments) and enforces `minItems` and `uniqueItems`, and the list tools put the caller's `tenantId` after
+the arguments, so an argument can never replace it (7890821, review 14 L1).
 
 **Batch tools read and propose, never approve.** `list_command_batches` and `get_command_batch` show the tenant's
 [destructive-batch](/docs/operations/pki#the-destructive-batch-quorum-v10) quorum: a batch's reason, size, the
@@ -276,6 +295,10 @@ deliberately light:
   `list_sandboxes`, `get_sandbox`, `extend_sandbox`, `delete_sandbox`, `list_sandbox_snapshots`,
   `delete_sandbox_snapshot`) are open to any authenticated caller, since compute decides each call on the tenant,
   the sandbox, the snapshot or the draft.
+
+The rules accept only well-formed ids: a `poolId` of letters, digits and `._:-` (at most 128 characters), a
+`node_…` or a `sbxt_…` id. Anything else throws, so the gate denies the call (7890821, review 14 M2): the gate runs
+before compute validates anything, and unvalidated text must never reach a confirmation a person reads.
 
 Every tool the server can list has a rule: a test builds a server with every option on and requires a gate rule for
 each of its tools, so a gate with `unlisted: 'deny'` never hides a tool by omission.
@@ -326,7 +349,9 @@ server instructions tell the model to do exactly this.
 confirmation's state every `intervalMs` (default 2 s) for up to `timeoutMs` (default 25 s). On `approved` it
 retries once with the same key and returns the result; on `denied` or `expired` it returns
 `{ status: 'confirmation-denied' | 'confirmation-expired', confirmationId, idempotencyKey }`; on a timeout it returns
-`confirmation-required` as above.
+`confirmation-required` as above. If checking the approval fails, it still returns that pending result with its
+`idempotencyKey` and a note to retry with the same key (7890821, review 14 L4), so the agent never files a second
+draft and a second request for the same person.
 
 `iamConfirmations(iam.api.delegations, { timeoutMs?, intervalMs?, now? })` builds that poller per request from
 Better IAM's `delegations.getConfirmation`, called with the caller's own bearer token in the caller's tenant, so an
@@ -344,6 +369,12 @@ to `expired`. Without a bearer token or a tenant it returns nothing and the tool
 - `exec_command` is off unless you pass `execCommand: true`, and even then it only runs `inventory.refresh`,
   `logs.collect` and `node.reboot`. `node.reboot` restarts the machine; under the quorum it needs a batch from
   `propose_command_batch` that people approved.
+- One caller has at most `maxConcurrentCallsPerCaller` (default 4) tool calls in flight. A call can wait about
+  85 seconds for an approval or an instance to start, so an agent looping on retries would otherwise pile up held
+  requests; above the cap a call answers `RATE_LIMITED` with `retryAfterMs: 2000` (48d41a4, review 14 L5).
+- The person approving a `create_instance`, `reserve_gpus`, `extend_reservation` or `create_sandbox` reads compute's
+  description of the request, and the approval admits only that request; see
+  [delegated confirmation](/docs/guides/iam/delegated-confirmation#what-the-person-sees).
 - `run_diagnostic` runs `diag.nvml` only. It returns the queued command; the result arrives when the node finishes,
   and `node_status` or the command's own methods show it.
 - `reserve_gpus` always books with `binding: 'hold'`; whole-node leases, spot, gangs and calendar starts are not

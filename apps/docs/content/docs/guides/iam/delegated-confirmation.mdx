@@ -8,6 +8,10 @@ packages: ['@better-compute/server', '@better-compute/capacity', '@better-comput
 sources:
   - PLAN.md
   - packages/server/src/operations.ts
+  - packages/server/src/confirmation-bindings.ts
+  - packages/capacity/src/describe.ts
+  - packages/vps/src/describe.ts
+  - tests/approval-descriptions.test.ts
   - packages/iam/src/confirmation.ts
   - packages/iam/src/embedded.ts
   - packages/iam/src/remote.ts
@@ -76,27 +80,54 @@ sequenceDiagram
   I-->>C: ACCESS_DENIED
   C->>I: requestConfirmation (reason, validSeconds 900)
   I-->>C: confirmationId, expiresAt
-  C->>C: draft to awaiting-confirmation
+  C->>C: bind the reason's digest, draft to awaiting-confirmation
   C-->>A: 403 CONFIRMATION_REQUIRED
   I->>P: confirmation request
   P->>I: decideConfirmation, approve
   A->>I: getConfirmation (poll)
   A->>C: reservations.create, same input, key k1
   C->>I: require on the same draft
-  I-->>C: allowed, approval used
+  I-->>C: allowed by the approval
+  C->>C: same text as approved
   C-->>A: placed reservation
 ```
 
 When the one decision of an admission is refused and the caller's session is delegated, the envelope asks Better
 IAM for a confirmation with the caller's own credential:
 
-1. It sends the decision's action and resource, the reason and `validSeconds: 900`. The reason is
-   `<group>.<method>: <action> on <type>/<id>` unless the method describes itself.
+1. It sends the decision's action and resource, the reason and `validSeconds: 900`. The reason is the method's own
+   description of the request (see [what the person sees](#what-the-person-sees)), else
+   `<group>.<method>: <action> on <type>/<id>`.
 2. If a pending request for the same action and resource already exists, compute reuses it instead of asking the
    person twice.
 3. Better IAM answers `INVALID_INPUT` when the delegation does not hold the action back. The caller then gets a
    plain `ACCESS_DENIED`.
-4. Otherwise the caller gets `CONFIRMATION_REQUIRED` (HTTP 403), and the method's denial hook parks the draft.
+4. Otherwise compute records a digest of the reason against the confirmation (see
+   [one approval, one request](#one-approval-one-request)), the caller gets `CONFIRMATION_REQUIRED` (HTTP 403), and
+   the method's denial hook parks the draft.
+
+## What the person sees
+
+The person approves what the confirmation's reason says, so a method that can be held back describes the request
+itself (`MethodAdmission.describe`, ec36c63, security review 14 H1). Without it, an agent under prompt injection
+could add an SSH key, more GPUs or a longer lifetime, and the person would read only an action and an id. The
+descriptions name every parameter that changes what is booked, what runs, or for how long:
+
+| Method | The reason names |
+| --- | --- |
+| `reservations.create` | The pool; each device request as `<count>× <class>` with its selector, sharing and topology; the duration and start (`now` or an ISO time); a gang's size and topology key; a non-`any` topology; a whole-node binding with its profile and version; spot; the lease; the project |
+| `reservations.extend` | The reservation and the absolute end: `prepare` resolves `by` into `until` first, so the handler applies what was described |
+| `instances.create` | The pool, flavor and image; each SSH key as its OpenSSH `SHA256:` fingerprint, never the key; user data by size and a 12-hex-digit SHA-256 prefix, or its `secret://` reference, never the text; created started or stopped; the project |
+| `sandboxes.create` | The template, the lifetime (or the template's default) and the snapshot it restores |
+| `sandboxes.extend` | The sandbox and the absolute end, resolved as for reservations |
+
+```text title="reason"
+reservations.create: pool pool_01k5w…; 4× gpu; for 8h from now
+```
+
+The text is deterministic (no clock and no database reads), so the same request always yields the same text.
+Caller-supplied values are clipped to one short line, with control, format and line-separator characters replaced,
+so a name cannot forge extra lines in the prompt.
 
 Better IAM hides the reason for a denial, so compute cannot tell "held back" from "forbidden by policy" before
 asking. A request for a confirm-listed action that a policy forbids therefore also creates a confirmation request,
@@ -194,8 +225,27 @@ await iam.api.delegations.decideConfirmation(alice, {
 });
 ```
 
-An approval opens exactly that action on that resource, once, within the request's `validSeconds`: compute asks
-for 900 seconds (15 minutes). The person has 30 minutes to decide before the request lapses.
+Better IAM's approval opens that action on that resource within the request's `validSeconds`: compute asks for 900
+seconds (15 minutes). The person has 30 minutes to decide before the request lapses. Compute narrows the approval
+further to the one request the person saw (below).
+
+## One approval, one request
+
+Better IAM keys an approval by action and resource and keeps it open for its validity, so after one approved
+`reservations.extend` of `rsv_X` an agent could extend `rsv_X` again, by more, and IAM would allow it. Compute binds
+each approval to its text (06d7f04, security review 14 M1):
+
+- When the envelope asks for a confirmation, it records the SHA-256 of the reason the person is shown, keyed by
+  tenant, delegation, action and resource, with the confirmation's expiry, in `confirmation_bindings` (migration
+  `confirmations/0001_bindings`, owned by an always-hosted `confirmations` module). The first text wins, so a reused
+  pending confirmation keeps the text the person saw.
+- After IAM allows a delegated call, every unexpired binding on its decision must match the digest of the call's own
+  text. Otherwise the call is refused with `ACCESS_DENIED` and `details.reason: 'approval-mismatch'` ("The approval
+  given for this resource was for a different request; ask again for this one"), and the method's `abandoned` hook
+  clears what `prepare` staged. A decision with no open binding goes ahead as before.
+
+So the retry must be the same request: an agent that changes the lifetime, the devices or an SSH key after the
+approval needs a new one.
 
 The agent polls the request and retries with the **same input and the same idempotency key**:
 
@@ -237,8 +287,8 @@ export async function reserve() {
 ```
 
 On the retry, `prepare` finds the waiting draft. Before its deadline it moves the draft back to `draft`, removes
-the condition and decides again; the approved triple of action, type and id allows it, Better IAM marks the
-approval used, and placement continues as usual. After the deadline the retry returns the `expired` reservation
+the condition and decides again; the approved triple of action, type and id allows it, the call's text matches the
+one the person approved, and placement continues as usual. After the deadline the retry returns the `expired` reservation
 without a decision. The same key with a different request is `CONFLICT`.
 
 Stop when the person rejects. A retry after a rejection is decided again, denied again, and creates a new
@@ -259,7 +309,11 @@ Delegated confirmation never reveals more than a denial would:
   confirmation failed; the request stays denied".
 - Only methods with an admission ask. Any other method a delegated session is refused answers `ACCESS_DENIED`.
 
-`tests/server-admission.test.ts` covers the envelope's side and `tests/iam-bridge-confirmation.test.ts` the round
+- A delegated call whose text differs from the one an open approval was given for gets `ACCESS_DENIED`
+  (`approval-mismatch`).
+
+`tests/server-admission.test.ts` covers the envelope's side (the text binding included),
+`tests/approval-descriptions.test.ts` the descriptions, and `tests/iam-bridge-confirmation.test.ts` the round
 trip through a real Better IAM, including the reuse of a pending request and an approval that opens only the
 draft it was asked for.
 

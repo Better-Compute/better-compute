@@ -63,13 +63,18 @@ on a jittered 12-hour rescan, and when you run `inventory.refresh`.
 <Callout type="info" title="What bcd collects today">
 bcd's `inventory.Collector` reads procfs and sysfs without cgo. It fills `system`, `cpu`, `memory`, `disks`, `nics`
 (from sysfs, not netlink) and `os`, and reads NVIDIA GPUs from the kernel driver's `/proc/driver/nvidia` files
-(UUID, model, VBIOS, bus id, driver version). NVML is not wired in yet, so on a real host the `gpus` section has no
-ECC counters, row remapping, MIG state or NVLinks, and there is no `bmc` section. It collects when the process
-starts (so after every boot) and whenever `inventory.refresh` or `diag.nvml` asks for a rescan; the event-driven and
-12-hour rescans are not built. The fakehw build reports the full fake HGX board instead.
+(UUID, model, VBIOS, bus id, driver version). Where `nvidia-smi` is installed, a host build completes the GPUs from
+it (cb987e5, `nvml.SMI`, no cgo): `nvidia-smi -q -x` for identity, VRAM, ECC counters, row remapping, MIG mode and
+instances, fabric clique, power limit, persistence and compute mode, plus `-L`, `--query-gpu compute_cap`,
+`topo -m`, `nvlink -s` and `mig -lgip`, merged into the sysfs GPUs by UUID. Live samples (memory used, utilization,
+temperature, power, clocks, processes) travel with the section but stay out of its hash, so they never make a new
+inventory version. There is no `bmc` section. It collects when the process starts (so after every boot) and
+whenever `inventory.refresh` or `diag.nvml` asks for a rescan; the event-driven and 12-hour rescans are not built.
+The fakehw build reports the full fake HGX board instead. None of this has run on a real GPU host yet: the
+`nvidia-smi` parsers are tested against captured output.
 
-Without NVML, bcd still sees XIDs: it follows the kernel log (`/dev/kmsg`) and reports each one as a condition, and
-it samples host pressure every 30 seconds. See [XID events](#health-quarantines-and-remediation) and
+bcd does not use the NVML library or its events. It sees XIDs by following the kernel log (`/dev/kmsg`) and reports
+each one as a condition, and it samples host pressure every 30 seconds. See [XID events](#health-quarantines-and-remediation) and
 [host pressure](#host-pressure).
 </Callout>
 
@@ -237,8 +242,10 @@ Since 14ceb1e the same statement also writes one label per kind each advertised 
 `bc.dev/driver-kind.<id>.<kind>=1` (a site agent hosting `bcx-ipmi` carries `bc.dev/driver-kind.ipmi.power`,
 `.management` and `.inspect`), and drops the ones a later `Hello` no longer lists. Kinds outside `[a-z][a-z0-9-]`
 (1 to 32 characters) are skipped, and at most 32 are read per driver. A placement or selector can require one with
-`'*'`, as for driver labels. These labels are groundwork for BMC steps that check a site agent's driver serves a
-concern before they run; no metal step reads them yet.
+`'*'`, as for driver labels. Metal reads them (a3ec8d0): before a verb starts a workflow, it keeps only the operations
+of the kinds the site's agents report for the node's BMC driver, and refuses the verb with `UNSUPPORTED` (reason
+`bmc-driver-unsupported`) when a step needs one they lack. The labels also make a driver metal's own table does not
+know checkable. See [what metal checks before a workflow](/docs/guides/bare-metal/bmc#what-metal-checks-before-a-workflow).
 
 ### The hardware key
 

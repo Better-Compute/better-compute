@@ -43,6 +43,7 @@ sources:
   - packages/console-kit/src/react-entry.ts
   - packages/console-kit/src/webhooks.ts
   - apps/console/src/app/(console)/webhooks/page.tsx
+  - apps/console/src/app/(console)/batches/page.tsx
   - PLAN.md
 ---
 
@@ -187,8 +188,10 @@ instance, releasing or cancelling a reservation (d40af29, 0919f86), and a bare-m
 The **Sandboxes** page (`createSandboxesView` in console-kit) works on [sandboxes](/docs/guides/vps/sandboxes) of the
 session's tenant. With no template, the create form says an administrator creates them. Create sends `sandboxes.create` with a fresh `console-…` idempotency key and waits up to 20 seconds
 for the sandbox to leave `starting`. The list shows the person's own sandboxes, or, with **Everyone's sandboxes**,
-the tenant's (`scope: 'all'`), each with its template name, `warm` and the snapshot it was restored from. The
-countdown ticks every second from `expiresAt` and reads `expired` at zero.
+the tenant's (`scope: 'all'`), each with its template name, `warm` and the snapshot it was restored from. A memory
+restore whose `identityRebound` is `false` (console-kit's `SandboxRow` carries it) shows a warning that it still
+answers to its source's SSH identity, so exec waits until the source and sibling restores are gone or the host gives
+it its own (9958865). The countdown ticks every second from `expiresAt` and reads `expired` at zero.
 
 Its buttons are not gated by IAM checks in advance: the call is decided and an error is shown in place. **+30 min**
 is `sandboxes.extend` with `by` of 30 minutes, **Snapshot** takes a memory snapshot that goes with the sandbox, and
@@ -210,7 +213,9 @@ image, warm minimum and longest lifetime in hours. console-kit's `SandboxesView`
 The **Batches** page (`createBatchesView` in console-kit, b24d043) shows the tenant's
 [destructive batches](/docs/operations/pki#the-destructive-batch-quorum-v10): fleet-wide reimages, wipes and power
 actions held until enough approvers sign their scope. It lists pending batches by default, with a filter for
-`approved`, `expired`, `cancelled` or all, and counts down each pending batch's window from `notAfter`.
+`approved`, `expired`, `cancelled` or all, and counts down each pending batch's window from `notAfter`. Each row shows
+its reason and who created it; a batch an agent proposed shows a warning line instead, "Proposed by agent X for Y
+(delegation D): the reason is the agent's own text" (bd80209, from `createdByAgent` and `delegationId`).
 
 **Details** loads the batch (`commandBatches.get`) and its whole scope (`commandBatches.scope`, paged 5,000 at a time
 and capped at 20,000 entries, with a warning when cut short), grouped by command kind. Subjects read as a person

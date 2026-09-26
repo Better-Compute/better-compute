@@ -17,6 +17,7 @@ sources:
   - packages/metal/src/store.ts
   - packages/metal/src/api.ts
   - packages/metal/src/steps.ts
+  - packages/metal/src/capabilities.ts
   - packages/metal/README.md
   - packages/vps/src/runtime.ts
   - packages/provision/src/expand.ts
@@ -67,7 +68,8 @@ each kind is data: a binding on the node, inherited from its pool's hardware pro
 - **The built-in drivers run in bcd, partly.** They live inside `bcd site` and `bcd ramdisk`, the Go daemon's v0.2
   modes, which are written but not released. Redfish (with BIOS settings, RAID layouts and firmware updates), PXE
   and iPXE, image streaming and kexec are there. IPMI power, boot device and inspection run in `bcx-ipmi`, a bcx plugin the
-  site agent hosts (51806ab, 7818f19); vendor BMCs are not there. See [what bcd does today](/docs/daemon#what-bcd-does-today).
+  site agent hosts (51806ab, 7818f19), and an IPMI machine enrolls and commissions to `ready` (a3ec8d0); vendor BMCs
+  are not there. See [what bcd does today](/docs/daemon#what-bcd-does-today).
 - **No control-plane code calls a driver's operations yet.** Metal's BMC steps build commands for the site agent
   instead. Direct calls from TypeScript (`ctx.drivers.for(node)`) are planned for v0.5.
 - **bcx works in TypeScript and in bcd.** `@better-compute/driver-sdk` (v0.5 draft) serves and hosts plugins end to
@@ -258,7 +260,7 @@ plugins it hosts (see [driver plugins in bcd](#driver-plugins-in-bcd)); no end-t
 
 The control plane never dials into a site. Metal's BMC steps run in the control plane, where the node's BMC address and
 credential reference are, and send one `BmcOperationRequest` (`driver`, `address`, `credentialsRef`, `operation`,
-`argsJson`, optional `tlsSpkiSha256`) to the site's agent under a kind such as `bmc.query`, `bmc.boot`,
+`argsJson`, optional `tlsSpkiSha256` and `driverOptionsJson`) to the site's agent under a kind such as `bmc.query`, `bmc.boot`,
 `bmc.power`, `bmc.rotate` or `bmc.firmware`. The site agent fetches the credential by reference, runs `<concern>.<operation>` on the named driver,
 and answers a `BmcOperationResult`. PLAN.md drives BMCs through bmclib (Redfish, IPMI and vendor BMCs); `bcd site`
 has its own Redfish client built in (see [Redfish in bcd site](/docs/guides/bare-metal/bmc#redfish-in-bcd-site)),
@@ -267,9 +269,12 @@ and since 51806ab it sends a `bmc.*` operation whose `driver` is anything else t
 - It picks the hosted driver whose id is the request's `driver` and whose manifest lists the operation's concern
   among its kinds (`power.setPower`: concern `power`, operation `setPower`). No such driver answers
   `unsupported-driver` ("no hosted driver ipmi implements power"), and nothing is invoked.
-- It calls `Invoke` with the concern as `kind`, the operation, the BMC `address` and `tlsSpkiSha256` (hex) as
-  `config_json`, the remaining arguments as `args_json`, the command id as the idempotency key, the command's
-  `traceparent` and its `not_after` as the deadline.
+- It calls `Invoke` with the concern as `kind`, the operation, the BMC `address`, `tlsSpkiSha256` (hex) and the
+  request's `driver_options_json` (as `options`) as `config_json`, the remaining arguments as `args_json`, the
+  command id as the idempotency key, the command's `traceparent` and its `not_after` as the deadline. The options are
+  nested, so they can never override the address or the key pin (7753df0). Options that are not a JSON object fail the
+  command (`invalid-payload`); the built-in Redfish driver takes none, so a Redfish request with options answers
+  `invalid-config`.
 - The credential is fetched by reference as for Redfish and sent only as secrets (`username`, `password`, and a
   rotation's `newPassword`, which is taken out of the arguments), never in the arguments or the config.
 - The kind's operation allowlist, the destructive-batch quorum and the site agent's memory of BMC addresses (which
@@ -306,11 +311,14 @@ on [BMC drivers and credentials](/docs/guides/bare-metal/bmc).
 A failed FRU read or power read fails the operation; a failed `mc info`, `lan print` or `sdr list` only leaves its
 part out. Each `ipmitool` run is a separate process with the password through its own pipe.
 
-- **Config** is `{ "address": "10.0.0.5[:623]", "cipherSuite": 17 | 3 }`: a host name or IP address with an
-  optional port (a `scheme://` prefix is stripped; anything else is `invalid-address`), and the RMCP+ cipher suite,
-  17 (HMAC-SHA256, AES-128) by default or 3 for BMCs without 17; any other value is `invalid-config` (933c51b). The
-  site agent's config today carries only the address and the BMC's key pin, so a metal operation always runs with
-  suite 17.
+- **Config** is `{ "address": "10.0.0.5[:623]", "options": { "cipherSuite": 17 } }`: a host name or IP address
+  with an optional port (a `scheme://` prefix is stripped; anything else is `invalid-address`), and the BMC's driver
+  options, which the site agent nests under `options` exactly as enrollment set them (`bmc.driverOptions`, 7753df0).
+  The plugin decodes them strictly: `cipherSuite` is the only key, and any other key is `invalid-config`. The RMCP+
+  cipher suite is 17 (HMAC-SHA256, AES-128) by default, or 3, 8 or 12 for older BMCs: only suites with an integrity
+  HMAC and AES. Suite 0 (the IPMI authentication bypass), 1 and 2 (no encryption) and anything else are
+  `invalid-config`. The manifest's `config_schema_json` says the same. Enroll an old BMC with
+  `bmc.driverOptions: { "cipherSuite": 3 }`; see [enrolling a machine](/docs/guides/bare-metal/bmc#enrolling-a-machine).
 - **No key pin.** IPMI has no TLS, so a BMC enrolled with a `tlsSpkiSha256` pin is refused (`pin-unsupported`) rather
   than driven unpinned: use a Redfish driver, or remove the pin.
 - **Credentials** come as the secrets `username` and `password`. The password reaches `ipmitool` through a pipe it
@@ -318,7 +326,8 @@ part out. Each `ipmitool` run is a separate process with the password through it
   any process of the same user); an IPMI 2.0 password has at most 20 bytes. `ipmitool` runs by absolute path (the
   first of `/usr/bin`, `/usr/sbin`, `/usr/local/bin` and `/usr/local/sbin` that has it) with a fixed
   `PATH=/usr/sbin:/usr/bin:/sbin:/bin` and nothing else in its environment (933c51b). A username outside
-  `[A-Za-z0-9._@-]{1,64}`, a missing password or a longer one is `credentials-unavailable`.
+  `[A-Za-z0-9._@-]{1,64}`, a missing password, a longer one, or one with whitespace (`ipmitool -f` keeps only the
+file's first word; b12c217) is `credentials-unavailable`.
 - **Arguments** are checked against fixed sets before anything runs: an unknown action or device is `invalid-args`,
   and any other operation is `unsupported-operation`.
 - **Failures.** Each `ipmitool` run has 30 seconds (`unreachable`, retryable, on timeout); a failing `ipmitool` is
@@ -331,10 +340,17 @@ and the api's downloads route serves that archive (97b2ac2; see
 [serving the binaries](/docs/daemon/install#serving-the-binaries)); `daemon install-script --install-plugins bcx-ipmi`
 installs it with its pin after checking the archive against the signed release manifest (adf2ae9; see
 [installing plugins from the release](/docs/daemon/install#installing-plugins-from-the-release)). To use it, have it
-in a site agent's `[plugins] dir` (below) and enroll the machine's BMC with driver `ipmi`, without a key pin and with
-its PXE `macs`, since IPMI inspection finds none; see
-[IPMI through bcx-ipmi](/docs/guides/bare-metal/bmc#ipmi-through-bcx-ipmi) for what metal can and cannot do with it.
-Its tests run it against a fake `ipmitool` only.
+in a site agent's `[plugins] dir` (below) and enroll the machine's BMC with driver `ipmi`, without a key pin, and with
+its PXE `macs` in a pool with an agent, since IPMI inspection finds none. Metal knows what `ipmi` serves and refuses
+up front, with `UNSUPPORTED` (reason `bmc-driver-unsupported`), any verb whose workflows need more (a3ec8d0); see
+[IPMI through bcx-ipmi](/docs/guides/bare-metal/bmc#ipmi-through-bcx-ipmi) and
+[what metal checks before a workflow](/docs/guides/bare-metal/bmc#what-metal-checks-before-a-workflow). Its tests
+run it against a fake `ipmitool` only.
+
+A driver of your own is checked the same way once metal knows its operations: `metal({ bmcDrivers: { 'acme-bmc':
+['power.getPower', 'power.setPower', 'management.setBootDevice'] } })`. Otherwise the kinds its site agents report
+(the `bc.dev/driver-kind.<id>.<kind>` labels each agent's Hello writes) decide, and a driver neither names is not
+checked in advance.
 
 ## Out-of-process drivers: bcx
 

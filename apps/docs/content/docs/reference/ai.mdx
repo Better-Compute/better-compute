@@ -128,7 +128,8 @@ Two things to tell an assistant:
   end, and whose site and ramdisk modes are written with Go unit tests, but no binary is published. Its VPS host
   runs instances on `libvirt-kvm` or `cloud-hypervisor` (both tested only against fake tools, never on real
   hardware) or, on fake-hardware builds, a file-backed runtime; its sim mode (many node agents in one process) runs
-  only on fake-hardware builds; self-update and the WebSocket fallback are written, NVML is not. The
+  only on fake-hardware builds; self-update and the WebSocket fallback are written, and GPUs are read through `nvidia-smi` rather than the NVML
+library (cb987e5). The
   TypeScript `FakeDaemon` in `@better-compute/testing` runs those paths. See
   [what bcd does today](/docs/daemon#what-bcd-does-today).
 

@@ -53,6 +53,16 @@ sources:
   - packages/pki/src/quorum.ts
   - packages/server/src/api/secrets.ts
   - packages/vps/src/module.ts
+  - packages/server/src/confirmation-bindings.ts
+  - packages/server/src/operations.ts
+  - packages/capacity/src/describe.ts
+  - packages/vps/src/describe.ts
+  - packages/server/src/quorum/quorum.ts
+  - packages/iam/src/remote.ts
+  - packages/mcp/src/server.ts
+  - packages/mcp/src/tools.ts
+  - daemon/internal/agent/netpolicy.go
+  - daemon/internal/agent/rebind.go
 ---
 
 Better Compute runs commands as root on your machines, so its security model starts from one question: who can make
@@ -391,11 +401,19 @@ A sandbox is a tenant VM for code you do not trust, often written by an agent. T
   `none` network never resumes under `egress`), and an owner who leaves without a successor has every snapshot
   dropped (7b01053, security review 13). A deleted snapshot's object is purged only once its upload settled and no
   live instance restores from it.
-- **No exec into a shared identity.** A memory restore resumes with its source's sshd principal and host key, so a
-  certificate for one such guest would open the others. Today `sandboxes.exec` refuses with `INVALID_STATE`
-  (`restore-shares-identity`) while another live guest of the tenant shares the sandbox's identity: the source, a
-  sibling restore of the same snapshot, or a restore of the sandbox itself (87ff2c5, review 13 H2). Disk-only
-  restores are not affected. The refusal stays until bcd gives a restored guest its own identity.
+- **Each restore gets its own identity.** A memory restore resumes with its source's sshd principal and host key, so
+  a certificate for one such guest would open the others (review 13 H2). vps seals each memory restore its own
+  principals and, with `certifyHostKey`, a fresh certified host key (5346523); bcd hot-adds them to the running guest
+  on a 1 MiB `bc-rebind` disk that it zeroes and deletes afterwards (ca08d5c), and the guest half vps installs at
+  first boot (3e25c78) installs them and acknowledges. Only when the host reports the acknowledged reference does exec
+  sign for the restore alone. Until then `sandboxes.exec` refuses with `INVALID_STATE` (`restore-shares-identity`)
+  while another live guest of the tenant shares the identity (87ff2c5): a guest that never acknowledges (booted
+  before the guest half, on a runtime that cannot rebind) stays refused, which fails closed. Disk-only restores are
+  not affected. See [a restore's own SSH identity](/docs/guides/vps/sandboxes#a-restores-own-ssh-identity).
+- **SSH only from the host.** Every sandbox instance's spec sets `ssh_from_host_only`, and bcd drops tcp/22 into its
+  taps from anything but the host's own bridge addresses (474d51f, review 13 L5). An exec certificate therefore works
+  only through a tunnel, which is re-authorized every 60 seconds and closed on revocation, and one guest cannot reach
+  another's sshd. A bcd from before 474d51f ignores the field; nothing gates placement on it.
 - **Replays and races.** A sandbox create's idempotency hash covers the caller's agent and delegation, so an agent
   cannot replay its person's key (or the reverse) to take over a sandbox, and a template update decided on one set
   of secrets is refused (`CONFLICT`, `secrets-changed`) if the template names others by the time it writes
@@ -411,14 +429,16 @@ A sandbox is a tenant VM for code you do not trust, often written by an agent. T
   labelled `bc.dev/cap.instance.network-policy`, since an older bcd would drop the policy and give full egress.
   `private` spans the pool's whole IPAM subnet, other tenants' instances included on a shared pool.
 
-- **The tenant's image is hostile to the host.** Both bcd runtimes check every base image, and every restored
-  snapshot's disk and seed, with `qemu-img info -f <declared format>`, and refuse one that names a backing file or an
-  external data file, is not its declared format, or is `raw` or `iso` but probes as another format, so the root
-  hypervisor never opens a host disk or another instance's disk for a guest (security review 12, 933c51b). On
-  `cloud-hypervisor` each VMM runs in a confined `bcd-ch-<id>.service` unit that sees only its own instance directory
-  and base image, opens only KVM, tun and VFIO devices, and is bounded by its flavor; its taps are on their bridge
-  before it starts; and a memory snapshot restores only into the same vCPUs and memory, with its configuration
-  rebuilt from an allowlist. See [the runtimes](/docs/daemon/delivery#the-runtimes).
+- **The tenant's image is hostile to the host.** Both bcd runtimes read every `qcow2` base image's header in Go,
+  without `qemu-img` or any other tool probing it, and refuse one that names a backing file or an external data
+  file, sets an unknown incompatible feature, is encrypted or is not a qcow2; `raw` and `iso` images are opened with
+  their format stated and never probed (security review 12, 933c51b; the Go check since its verification,
+  b12c217). An instance's own disk must name exactly its recorded base before every start, snapshot and resize, since
+  a VMM can rewrite its header, and a restored snapshot's disk must name none. On `cloud-hypervisor` each VMM runs in
+  a confined `bcd-ch-<id>.service` unit as its instance's own uid, with no capabilities and no network (bcd hands it
+  its taps as file descriptors), `/run` and `/var` hidden, only KVM and VFIO devices, only its own instance directory
+  and base image visible, and limits from its flavor; a memory snapshot restores only into the same vCPUs and
+  memory, with its configuration rebuilt from an allowlist. See [the runtimes](/docs/daemon/delivery#the-runtimes).
 
 - **The guest is pinned too.** With `vps({ sandboxExec: { certifyHostKey } })`, each guest presents a host key the
   sandbox CA certified (its private key only in sealed user data), and `sandbox exec` checks it with
@@ -477,6 +497,34 @@ See [tenancy](/docs/guides/iam/tenancy).
 - Every answer carries `cache-control: no-store`, `x-content-type-options: nosniff` and `referrer-policy:
   no-referrer`.
 - `X-Request-Id` is echoed only when it matches `^[A-Za-z0-9._:-]{1,128}$`, and IAM sees the same id.
+- IAM sees the caller's address only as the host verified it: `nodeHandler` passes the socket's peer, a fetch host
+  passes `compute.handler(request, { peer: { address } })`, and remote IAM gets that as `x-forwarded-for`. The
+  client's own `x-forwarded-for`, `x-real-ip` and `forwarded` are never forwarded, so a caller cannot choose the
+  `request.sourceIp` its policies see (e7092bf, d269738, review 14 L3; the MCP server's remote IAM likewise, 7890821).
+  See [the caller address](/docs/operations/deployment#the-caller-address).
+
+### Delegated approvals
+
+An agent's held-back request reaches a person as text, so the text must say what the request does, and the approval
+must admit only that (security review 14):
+
+- **Approvers see what they approve.** `reservations.create`, `reservations.extend`, `instances.create`,
+  `sandboxes.create` and `sandboxes.extend` describe themselves (`MethodAdmission.describe`, ec36c63): pool, devices,
+  lifetime, image, SSH keys as fingerprints, user data by size and digest, the snapshot a sandbox restores. The text
+  is deterministic, and caller strings are clipped to one line with control characters removed.
+- **An approval admits one request.** The envelope records a digest of that text per confirmation, keyed by
+  tenant, delegation, action and resource (`confirmations/0001_bindings`), and a delegated call whose text differs
+  is refused with `ACCESS_DENIED` (`approval-mismatch`), even while Better IAM's approval for that action and
+  resource is still open (06d7f04, M1).
+- **An agent's batch reads as the agent's.** A destructive batch an agent proposed records the agent and its
+  delegation (`quorum/0008_batch_agent`, f3c5c4e), and `batch approve`, `batch show` and the console say "proposed by
+  agent X for Y" (bd80209, M3).
+- **The MCP gate stays out of confirmations.** Build it with `createMcpGate({ confirmations: false })` (daf58eb, M2);
+  its rules accept only well-formed ids, `create_instance` takes no SSH keys (7890821, H1), `doctor` flags an
+  ungated `host.mcp` handler (`host.mcp.ungated`, b491aed, L6), and one caller has at most 4 tool calls in flight
+  (48d41a4, L5).
+
+See [delegated confirmation](/docs/guides/iam/delegated-confirmation) and [MCP](/docs/guides/clients/mcp).
 
 ### Rate limits and admission
 

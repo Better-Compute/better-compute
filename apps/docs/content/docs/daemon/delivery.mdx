@@ -41,7 +41,11 @@ sources:
   - daemon/internal/runtime/runtime.go
   - daemon/internal/runtime/libvirt.go
   - daemon/internal/runtime/cloudhypervisor.go
+  - daemon/internal/runtime/qcow2.go
   - daemon/internal/agent/netpolicy.go
+  - daemon/internal/agent/rebind.go
+  - daemon/internal/runtime/rebind.go
+  - daemon/README.md
   - daemon/cmd/bcd/hardware_host.go
   - packages/metal/src/commands.ts
   - packages/metal/src/reconcile.ts
@@ -227,16 +231,24 @@ agents, over the runtimes the build provides) follows the FakeDaemon's `FakeHype
   guarded address, the link-local one included, is bound to its tap, so no other port may send from it or claim it
   (ARP, neighbour adverts), and a deleted instance keeps its guard until its domain is gone. The metadata service
   and instance tunnels, which name an instance by its address, trust only addresses the loaded rules bind, never one
-  two instances claim. The same transaction loads a backstop table, `inet bcd_taps` (933c51b): `iifname "bc*" drop`
-  on the input and forward hooks and `oifname "bc*" drop` on forward. A tap on its bridge reaches those hooks as the
-  bridge, so only a tap off its bridge, which the bridge table cannot see, is dropped there. Every 5 seconds bcd lists
-  both tables (`nft -j list table bridge bcd_instances`, then `inet bcd_taps`) and counts their rules against the
+  two instances claim. The same transaction loads backstop tables (933c51b, completed in b12c217): `inet bcd_taps`
+  with `iifname "bc*" drop` on the input and forward hooks and `oifname "bc*" drop` on forward and output, and
+  `arp bcd_taps` with the same drops on ARP input and output, which the inet hooks never see. A tap on its bridge
+  reaches those hooks as the bridge, so only a tap off its bridge, which the bridge table cannot see, is dropped
+  there. A NIC on a bridge whose name starts with `bc` (it would match every tap rule) fails its instance. Every 5
+  seconds bcd lists the tables (`nft -j list table bridge bcd_instances`, then `inet` and `arp bcd_taps`) and counts their rules against the
   ruleset it loaded, so a reload, `flush ruleset`, or a flushed table or chain ends that trust at
   once; bcd then loads the last ruleset again itself, outside any converge pass, and if that fails the next pass
   retries (6827df8). A host whose nft cannot load the table keeps egress instances running, logs a warning and
   retries on the next pass. bcd advertises the `Hello` capability `instance.network-policy` on
   hosts with a runtime, which the gateway writes as the node label `bc.dev/cap.instance.network-policy=1`; vps
   places `private` and `none` instances only there.
+- An instance with `ssh_from_host_only` (vps sets it on every sandbox instance) takes tcp/22 only from the host
+  (474d51f, security review 13 L5), whatever its policy. For each of its taps the same table drops tcp/22 forwarded
+  from any other bridge port (`oifname <tap> tcp dport 22 drop`) and tcp/22 the host sends into the tap unless its
+  source is one of the host's own addresses on the instances' bridges, where the tunnel dial comes from; a family
+  with no host address has its tcp/22 dropped outright. Both rules sit ahead of every accept, so an exec certificate
+  is usable only through a tunnel, which the control plane closes on revocation, and no guest-side KRL is needed.
 
 #### The runtimes
 
@@ -253,7 +265,7 @@ fails with `runtime <id> is not installed on this host`.
 | Disk | A qcow2 overlay (`instances/<id>/disk.qcow2`) on a base image downloaded once over https only, verified against the image's SHA-256 and [checked](#tenant-images) before it becomes visible, and kept as `images/<sha256>.<format>` (`qcow2`, `raw` or `iso`). An `iso` image boots from a cdrom onto a blank qcow2 disk | The same overlay on the same verified and checked base images (it reuses `libvirt-kvm`'s image code over its own directory). Disks carry an explicit `image_type` (`Qcow2` for the overlay, `Raw` for the seed), and `backing_files` is on only for bcd's own overlay, never for a restored disk. An `iso` image is refused ("cloud-hypervisor boots disk images, not an iso") |
 | Growing a disk | `qemu-img resize -f qcow2` while stopped, `virsh blockresize` while running; a smaller size fails the instance | `qemu-img resize -f qcow2` while stopped, `vm.resize-disk` while running; a smaller size fails the instance |
 | User data | A NoCloud seed ISO (volume `cidata`, `user-data` and `meta-data` with the instance id as `instance-id` and `local-hostname`), built with `genisoimage`, else `xorriso`, attached as a read-only cdrom | The same seed ISO, attached as a read-only disk |
-| NICs | virtio NICs on the named bridges, on taps named `runtime.TapName`, so bcd's nftables rules exist before the tap does | Persistent taps named `runtime.TapName` (`ip tuntap add`), put on their bridge and brought up before the VMM starts, then given to the VM with the NIC's MAC. A guest reboot reopens the same tap; a failed attach means no VM; a NIC without a network is refused; the taps are deleted when the VM stops or is destroyed (933c51b) |
+| NICs | virtio NICs on the named bridges, on taps named `runtime.TapName`, so bcd's nftables rules exist before the tap does | Persistent taps named `runtime.TapName` (`ip tuntap add`), put on their bridge and brought up by bcd before the VMM starts (933c51b); since b12c217 bcd opens each tap and hands its fd to the VMM (`vm.add-net`, or `net_fds` on a restore), which never names a tap. A guest reboot reopens the same tap; a failed attach means no VM; a NIC without a network is refused; the taps are deleted when the VM stops or is destroyed |
 | GPUs | VFIO passthrough (`<hostdev>` PCI, managed), the PCI address taken from the inventory's GPU bus id; a GPU without one fails the instance | VFIO passthrough of `/sys/bus/pci/devices/<address>/`, the address found the same way; a GPU without one fails the instance |
 | CPU | `host-passthrough`, so a memory snapshot restores only on the same CPU model | `boot_vcpus` and `max_vcpus` both the instance's vCPUs; a memory snapshot restores only on the same CPU model |
 | Ownership | bcd marks each domain it defines in its metadata (namespace `https://better-compute.dev/libvirt/1`: allocation, image digest, addresses, the snapshot it was restored from). Any other domain of the connection is listed as unmanaged, the leak the control plane reports, and is never defined over, stopped or destroyed | cloud-hypervisor keeps no registry, so bcd's record is `instances/<id>/vm.json` (allocation, image digest, addresses, MACs, bridges, GPUs and the VM configuration). `List` reports only directories with that record, with the state from `vm.info`; a directory without one is not bcd's and is never defined over or removed |
@@ -266,45 +278,66 @@ A snapshot is tied to the runtime that took it: `meta.json` names it, and the ot
 
 #### Tenant images
 
-A tenant's image is untrusted input to a hypervisor that runs as root. Security review 12 (fixed in 933c51b) found
-that a qcow2 image could name a backing file, such as the host's disk or another instance's, and the hypervisor would
-open it. Both runtimes now check every base image with `qemu-img info -U --output=json -f <declared format>` (`raw`
-for an `iso`) when it is downloaded, before it is renamed into `images/`, and again every time an instance uses it,
-so an image cached before the check is checked too. The image is refused, and the instance fails, when:
+A tenant's image is untrusted input to a hypervisor. Security review 12 (fixed in 933c51b) found that a qcow2 image
+could name a backing file, such as the host's disk or another instance's, and the hypervisor would open it. Its
+verification found that probing the image with `qemu-img info` was itself a risk, since `qemu-img` may follow what an
+image names, so since b12c217 no tool inspects a tenant image: bcd reads a qcow2 header and its header extensions in
+Go (`runtime/qcow2.go`), which opens nothing else. A `qcow2` base image is checked when it is downloaded, before it is
+renamed into `images/`, and again every time an instance uses it, and it is refused, failing the instance, when:
 
-- it names a backing file (`backing-filename`) or an external data file (`data-file`);
-- it is not the format it was declared as (`qemu-img info -f` fails);
-- it is `raw` or `iso` but its content probes as another format.
+- it is not a qcow2 (version 2 or 3) at all, or its header is truncated or malformed;
+- it names a backing file;
+- it names an external data file (incompatible feature bit 2, or the data-file header extension), or sets an
+  incompatible feature bit bcd does not know;
+- it is encrypted.
 
-A restored snapshot's disk (as `qcow2`) and seed (as `raw`) get the same check, and a failed check removes the new
-instance's directory. Every `qemu-img` resize, convert and info bcd runs on an instance disk passes `-f qcow2`, so no
-format is ever probed from the disk's content. `qemu-img info` never opens a backing file itself.
+`raw` and `iso` images are never probed: every tool opens them with their format stated, so their content is only
+data. Base images are mode 0644 in a 0700 `images/` directory, so an unprivileged VMM can read only the one bound into
+its unit.
+
+An instance's own disk is checked too, because a VMM that once ran it can rewrite its header (`checkOverlay`):
+`disk.qcow2` must name exactly the recorded base image and format as its backing file, or none for a restored
+snapshot or an iso install. `cloud-hypervisor` checks it before every start, snapshot and resize; `libvirt-kvm`
+before every start, snapshot and grow, with the base format now recorded in the domain's metadata. A restored
+snapshot's disk must be such a flat qcow2, and its seed is attached as raw, never probed; a failed check removes the
+new instance's directory. `qemu-img create -u` builds an overlay without opening the base, and `libvirt-kvm`'s grow
+reads the virtual size from the header.
 
 #### The cloud-hypervisor unit
 
-Each VMM runs as root, since it opens taps and VFIO groups, in its own transient unit `bcd-ch-<id>.service` in
-`bcd-instances.slice`. The unit name always ends in `.service`, so an instance id never names another kind of unit.
-`systemd-run` gets these properties:
+Each VMM runs in its own transient unit `bcd-ch-<id>.service` in `bcd-instances.slice`, as its instance's own
+unprivileged user (b12c217): a uid from `0x7FFD0000` up, kept in `vm.json`, with `User=` and `Group=` set to it. The
+unit name always ends in `.service`, so an instance id never names another kind of unit. The VMM needs no network
+privilege, because it never names a tap: bcd creates and bridges the persistent taps, opens each one (`TUNSETIFF`)
+and hands the file descriptors to the VMM over `SCM_RIGHTS`. `vm.create` carries no NICs, `vm.add-net` adds each NIC
+with its fd, a restore passes them as `net_fds`, and the saved configuration's NICs carry no tap name. The instance's
+files and its GPUs' `/dev/vfio` groups are chowned to the VMM's uid at start, and the groups are given back to root
+at stop. `systemd-run` gets these properties:
 
 | Property | Value |
 | --- | --- |
-| Devices | `DevicePolicy=closed` with `DeviceAllow=/dev/kvm rw` and `/dev/net/tun rw`; with GPUs also `/dev/vfio/vfio rw` and `char-vfio rw` |
-| Privileges | `CapabilityBoundingSet=CAP_NET_ADMIN CAP_IPC_LOCK`, `NoNewPrivileges=yes`, `LimitMEMLOCK=infinity` |
-| Files | `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`; a read-only `TemporaryFileSystem` over bcd's `instances/` and `images/` directories, with only the instance's own directory bound read-write (`BindPaths`, `ReadWritePaths`) and its base image read-only (`BindReadOnlyPaths`), so a disk naming another file finds nothing to open |
-| Kernel and system | `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups`, `ProtectClock`, `ProtectHostname`, `RestrictSUIDSGID`, `RestrictRealtime`, `RestrictNamespaces`, `LockPersonality` |
-| Network | `IPAddressDeny=any`, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK` |
-| Limits from the flavor | `MemoryMax` = memory + memory/32 + 256 MiB, `TasksMax` = 4 per vCPU + 128, `CPUQuota` = (vCPUs + 1) x 100% |
+| Identity and privileges | `User=` and `Group=` the instance's uid, `CapabilityBoundingSet=` and `AmbientCapabilities=` empty, `NoNewPrivileges=yes`, `LimitMEMLOCK=infinity`, `UMask=0077` |
+| Devices | `DevicePolicy=closed` with `DeviceAllow=/dev/kvm rw`; with GPUs also `/dev/vfio/vfio rw` and `char-vfio rw` |
+| Files | `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `ProtectProc=invisible`; read-only `TemporaryFileSystem`s over `/run` and `/var` (hiding systemd's, D-Bus's and every daemon's sockets, bcd's data, libvirt and other instances), and over bcd's `instances/` and `images/` when its directory is outside `/var`; `InaccessiblePaths` for `/etc/bcd`, `/etc/ssh`, `/etc/libvirt`, `/etc/shadow` and `/etc/gshadow`; only the instance's own directory bound read-write (`BindPaths`, `ReadWritePaths`) and its base image read-only (`BindReadOnlyPaths`), so a disk naming another file finds nothing to open |
+| Kernel and system | `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups`, `ProtectClock`, `ProtectHostname`, `RestrictSUIDSGID`, `RestrictRealtime`, `RestrictNamespaces`, `LockPersonality`, and `SystemCallFilter=~@debug @mount @reboot @swap @module @raw-io @clock @cpu-emulation @obsolete` |
+| Network | `PrivateNetwork=yes`, `RestrictAddressFamilies=AF_UNIX`, `IPAddressDeny=any` |
+| Limits from the flavor | `MemoryMax` = memory + memory/32 + 256 MiB, `TasksMax` = 4 per vCPU + 128, `CPUQuota` = (vCPUs + 1) x 100%; a restored memory configuration drops hugepages, which `MemoryMax` would not charge |
+
+This needs systemd 247 or later and a cloud-hypervisor whose API takes NIC file descriptors.
 
 <Callout type="warn" title="Tested against fakes only">
 `libvirt-kvm`'s tests (`daemon/internal/runtime/libvirt_test.go`) run it against a fake `virsh` and `qemu-img`:
 the domain XML, metadata, states, grow and shrink, snapshot and clone with memory, a CPU mismatch, destroy, a
-mismatched image digest, and the image checks (`TestBaseImageChecks`: a backing file, a `qcow2` that is not one, `raw`
-and `iso` images that probe as qcow2, an image cached before the check). `cloud-hypervisor`'s tests (`cloudhypervisor_test.go`) run it against a fake VMM API
-and fake `systemd-run`, `qemu-img`, `ip` and seed tools: define, the states, a memory snapshot, a restore into a clone
-with its paths rewritten, a memory snapshot of a larger VM refused, the rebuilt restore configuration
-(`TestRestoredConfig`), taps bridged before the VMM exists, the unit's properties, a VMM that survives its stop, stop
-and destroy, and a directory that is not bcd's left alone. Neither has run on a real KVM host, and no end-to-end test
-drives either through the control plane.
+mismatched image digest, and the image checks against real qcow2 headers (the fake `qemu-img` writes them since
+b12c217): `TestBaseImageChecks` (a backing file, a data file, a `qcow2` that is not one, an image cached before the
+check) and `TestCheckOverlay` (an overlay naming another backing file or format). `cloud-hypervisor`'s tests
+(`cloudhypervisor_test.go`) run it against a fake VMM API and fake `systemd-run`, `qemu-img`, `ip` and seed tools:
+define, the states, a memory snapshot, a restore into a clone with its paths rewritten, a memory snapshot of a larger
+VM refused, the rebuilt restore configuration (`TestRestoredConfig`), taps bridged before the VMM exists, the unit's
+uid and confinement properties, NICs added and restored with fds, the chowns and the VFIO group handed back, a
+rewritten overlay that will not start, a VMM that survives its stop, stop and destroy, a directory that is not bcd's
+left alone, and the identity rebind. Neither has run on a real KVM host, and no end-to-end test drives either
+through the control plane.
 </Callout>
 
 fakehw builds run a file-backed runtime named `libvirt-kvm` instead, whose domains outlive the process and honor vCPU
@@ -312,6 +345,40 @@ and memory limits; `tests/e2e/bcd-vps.test.ts` drives that one through the contr
 whose driver lists the kind `runtime` is also a runtime (`list`, `apply`, `remove` over `Invoke`; no snapshots). A
 host with neither tool and no runtime plugin runs no instances: a non-empty section fails with `this host runs no
 instance runtime`, and `bcd doctor` warns ("neither virsh nor cloud-hypervisor: this host runs no VPS instances").
+
+#### Identity rebind
+
+A memory restore resumes its source guest with the source's sshd principals and host key, so an exec certificate
+for one restore would open the source and its siblings (security review 13 H2). When vps gives a memory restore its
+own identity, its spec carries `InstanceSpec.identity_rebind_ref`, a sealed bundle
+`{"v":1,"account","principals","hostKey"?,"hostCertificate"?}`, and bcd installs it into the running guest
+(`agent/rebind.go`, `runtime/rebind.go`; ca08d5c):
+
+1. Once the instance runs, the agent fetches the bundle with a `SecretRequest` bound to the instance's allocation,
+   as for user data, and checks it (`runtime.ParseRebind`: version 1, the account name, principal lines, and a PEM
+   host key with an OpenSSH certificate line, or neither). It works off the converge pass, since the guest may take a
+   while.
+2. The runtime writes a raw 1 MiB disk holding a tar at offset 0 (`nonce`, `account`, `principals` and, with a host
+   key, `host_key` and `host_key-cert.pub`), reserves its last 4 KiB for the guest's answer, and hot-adds it with
+   virtio serial `bc-rebind`: `vm.add-disk` on `cloud-hypervisor` (the file chowned to the VMM's user), `virsh
+   attach-disk … vdz --live` on `libvirt-kvm`.
+3. The guest's udev rule starts `bc-rebind@<dev>.service`, whose script installs the principals and host key under
+   `/etc/ssh`, reloads sshd and writes `BCREBOUND <nonce>` at the start of the last 4 KiB.
+4. bcd waits up to 2 minutes for that line, then removes the disk (`vm.remove-device`, `virsh detach-disk vdz
+   --live`) and zeroes and deletes its file either way, so the secret never stays on the host.
+5. On success it records the reference in `data_dir/instances-rebound.json` and reports it as
+   `InstanceStatus.identity_rebound_ref`, from which vps re-points exec at the restore alone. Instances no spec names
+   any more are pruned from the file.
+
+A guest that does not answer is tried at most 3 times per reference, 5 minutes apart; a bundle the control plane
+refuses to release, or a malformed one, is not retried. Nothing is reported then, so the control plane keeps
+refusing exec while the identity is shared: it fails closed. The guest half (the udev rule, the unit and the script)
+is written in `daemon/README.md`, and vps's sandbox user data installs it verbatim at first boot (3e25c78), so
+restores of sandboxes booted since then answer. A runtime that is not a rebinder (a bcx runtime plugin) never
+rebinds. The Fake runtime acts as a compliant guest. Tests: `TestParseRebind`, `TestRebindImage`, the
+`cloud-hypervisor` and `libvirt-kvm` rebinds against an acknowledging and a silent fake guest, and
+`TestIdentityRebind`, which drives the converger through the secret fetch, the status report and a restart. See
+[a restore's own SSH identity](/docs/guides/vps/sandboxes#a-restores-own-ssh-identity).
 
 ## Commands
 
@@ -471,8 +538,9 @@ always wins over a late cancel.
 
 Each remaining GPU is reset with `nvidia-smi --gpu-reset -i <uuid>`; a failure is that GPU's `message`. bcd then
 collects a fresh inventory and marks each reset GPU `healthy` unless it shows uncorrectable volatile ECC errors or a
-pending or failed row remap. NVML is not wired yet, so on a real host the inventory carries no ECC or row-remap data
-and every GPU that reset reads `healthy`; the fake HGX node of the `fakehw` build does carry them. The FakeDaemon's
+pending or failed row remap. Since cb987e5 a host build reads ECC counters and row remapping from `nvidia-smi -q -x`
+when it is installed; without it the inventory carries neither, and every GPU that reset reads `healthy`. The fake
+HGX node of the `fakehw` build carries them too. The FakeDaemon's
 `fakeGpuReset` (opt in with its `kinds` option) follows the same checks.
 
 ### Signed commands and attested results

@@ -226,7 +226,8 @@ and a hardened `bcd.service`, and runs `bcd join`. The control plane serves that
 
 No binary is released yet. `daemon/` is a Go module whose v0.1 node agent is built and tested: `bcd join`,
 `bcd node` and `bcd status` run end to end against a real gateway in `tests/e2e/bcd.test.ts`. What is missing is a
-release (goreleaser is configured but has not run), NVML, and the later modes. You can build it yourself with Go 1.26
+release (goreleaser is configured but has not run), a run on a real GPU host (GPUs are read through `nvidia-smi`,
+cb987e5), and the later modes. You can build it yourself with Go 1.26
 or later (`go build ./cmd/bcd` in `daemon/`). The TypeScript `FakeDaemon` in `better-compute/testing` speaks the real
 protocol for everything else. See [installing the daemon](/docs/daemon/install).
 

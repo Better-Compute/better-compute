@@ -26,6 +26,9 @@ sources:
   - daemon/internal/redfish/redfish_test.go
   - daemon/cmd/bcx-ipmi/main.go
   - packages/metal/src/profiles.ts
+  - packages/metal/src/capabilities.ts
+  - packages/metal/src/reconcile.ts
+  - tests/metal-bmc-capabilities.test.ts
   - packages/cli/src/commands/metal.ts
   - PLAN.md
 ---
@@ -102,7 +105,10 @@ it to the site agent of the machine's site:
 }
 ```
 
-The agent fetches the credentials by reference (below), runs `<concern>.<operation>` on the driver
+A BMC enrolled with `bmc.driverOptions` also carries them in `driverOptionsJson` (site/v1 field 7, 51a3dfe), as
+canonical JSON with sorted keys, so a batch leaf bound to the payload keeps the same bytes; the built-in Redfish driver
+takes none and answers `invalid-config` if a request has any. The agent fetches the credentials by reference (below),
+runs `<concern>.<operation>` on the driver
 and answers a `BmcOperationResult` (`ok`, `resultJson`, `errorCode`, `message`). The command kinds
 are all on the `control` lane and accepted only by agents with role `site`:
 
@@ -169,7 +175,8 @@ fallback fills a JSON without a username), and runs the operation:
 - **Failures.** A BMC that refuses or fails does not fail the command: it succeeds with `ok: false` and a stable
   `errorCode`, as the FakeDaemon's fake site answers. The codes are `unreachable` (including a pin mismatch),
   `auth-failed` (401 or 403), `unsupported` (404, 405, or an operation the client does not have), `bmc-error`,
-  `invalid-args`, `invalid-address`, `credentials-unavailable` and `unsupported-driver`.
+  `invalid-args`, `invalid-address`, `invalid-config` (driver options on a Redfish BMC, 7753df0),
+  `credentials-unavailable` and `unsupported-driver`.
 - **Each kind carries only its own operations.** The kind decides the lane, retry safety and whether the batch
   quorum applies, so bcd runs an operation only under the kind metal assigns it: `bmc.query` (`power.getPower`,
   `inspect.inspect`, `firmware.components`, `bios.getSettings`, `raid.getLayout`), `bmc.boot`
@@ -188,7 +195,7 @@ fallback fills a JSON without a username), and runs the operation:
 
 A machine whose BMC speaks IPMI rather than Redfish is enrolled with `bmc.driver: 'ipmi'`. `bcd site` hands its
 `bmc.*` operations to the hosted bcx driver `ipmi`, which `daemon/cmd/bcx-ipmi` serves over `ipmitool -I lanplus`
-(51806ab), with RMCP+ cipher suite 17 (933c51b):
+(51806ab), with RMCP+ cipher suite 17 unless the BMC's `bmc.driverOptions` name another (933c51b, 7753df0):
 
 | Operation | Kind | `ipmitool` |
 | --- | --- | --- |
@@ -200,36 +207,96 @@ A machine whose BMC speaks IPMI rather than Redfish is enrolled with `bmc.driver
 - The operation allowlist per kind, the batch quorum and the site agent's BMC memory apply exactly as for Redfish.
 - The site agent fetches the credential as for Redfish and hands the plugin the username and password only as
   secrets; the plugin passes the password to `ipmitool` through a pipe (`-f /dev/fd/3`), never on its command line
-  or in its environment. An IPMI 2.0 password has at most 20 bytes (`credentials-unavailable` otherwise).
+  or in its environment. An IPMI 2.0 password has at most 20 bytes and, since `ipmitool -f` keeps only the first word,
+no whitespace (`credentials-unavailable` otherwise).
 - The BMC address is a host or IP address with an optional port (`10.20.0.14`, `10.20.0.14:623`).
 - IPMI has no TLS: enroll an `ipmi` BMC without `bmc.tlsSpkiSha256`. With a pin, every operation fails
   `pin-unsupported` rather than running unpinned.
-- Everything else (virtual media, firmware, BIOS, RAID, rotation) is Redfish only: for a concern `ipmi` does not
-  list (`virtual-media`, `bios`, ...) the site agent answers `unsupported-driver`, and for an unknown operation of a
-  concern it lists the plugin answers `unsupported-operation`. Either fails the step with `DRIVER_ERROR`.
+- Everything else (virtual media, firmware, BIOS, RAID, rotation) is Redfish only. Metal knows this and refuses a
+  verb that would need it before any workflow starts (a3ec8d0; see
+  [what metal checks before a workflow](#what-metal-checks-before-a-workflow)). Should such an operation still reach
+  the site agent, it answers `unsupported-driver` for a concern `ipmi` does not list (`virtual-media`, `bios`, ...),
+  and the plugin answers `unsupported-operation` for an unknown operation of a concern it lists; either fails the
+  step with `DRIVER_ERROR`.
 
-<Callout type="warn" title="Not the whole metal lifecycle">
-With `inspect` served, the stock `metal-enroll` workflow (`power.getPower`, then `inspect.oob`) runs on an `ipmi`
-machine. What IPMI inspection does not give metal still matters:
+An `ipmi` machine enrolls and commissions to `ready` (a3ec8d0, 3f19859, f62f9e9). The rules that get it there:
 
-- **PXE MACs.** `inspect.oob` records only the MACs, SMBIOS UUID and addresses an inspection reports, and IPMI
-  reports none. Without `macs` given at enrollment, `metal-inspect`'s `metal.ensureRamdisk` fails with
-  `INVALID_STATE` ("has no known PXE MAC"), so pass the machine's PXE MACs to `metal.enroll`. The missing product
-  UUID changes nothing else in the code: a boot entry then carries no `productUuid`, and the ramdisk's discovery
-  token is bound to its MAC.
-- **Agentless machines.** `site.httpProxy` reaches only the addresses inspection recorded, and IPMI records none, so
-  an `ipmi` machine in a pool with `agent: 'none'` gets no proxy targets.
-- **Redfish-only steps.** A hardware profile with BIOS settings or a RAID layout (`bios.apply`, `bios.verify`,
-  `raid.apply`), firmware updates and checks, BMC password rotation (so the stock dedicated-root teardown,
-  `metal-tenant-root-release`, which rotates it) and a deploy profile that mounts virtual media (`media.insert`) fail
-  with `DRIVER_ERROR` on an `ipmi` machine. Metal's profiles do not yet skip or refuse up front the steps a machine's
-  driver cannot serve. The gateway already records what each site agent's drivers serve as node labels
-  (`bc.dev/driver-kind.<id>.<kind>=1`, 14ceb1e; see [labels](/docs/guides/nodes/inventory-and-health#labels)), but
-  no step reads them yet.
+- **Out-of-band inspection is optional.** `inspect.oob` runs `bcx-ipmi`'s FRU inspection when the agent's plugin
+  serves `inspect`, and records what it reports. When the driver lacks `inspect`, or the site agent answers
+  `unsupported-driver` or `unsupported-operation` (a `bcx-ipmi` from before 7818f19), the step is skipped with a
+  `skipped` result, and the ramdisk inspects in band later.
+- **PXE MACs at enrollment.** IPMI inspection reports no host MACs, so a machine in a pool with an agent (one the
+  ramdisk boots) must be enrolled with its `macs`. Without them `metal.enroll` is `UNSUPPORTED` with reason
+  `bmc-driver-unsupported` ("enroll the machine with macs"). Metal does not yet learn PXE MACs from the site agent's
+  DHCP or discovery traffic. An inspection that reports no MACs keeps the enrolled ones. The missing product UUID
+  changes nothing else: a boot entry then carries no `productUuid`, and the ramdisk's discovery token is bound to
+  its MAC.
+- **Agentless machines take their addresses at enrollment.** In a pool with `agent: 'none'`, pass the machine's own
+  IPs as `addresses` (IP literals, at most 16, deduplicated). The site's agents get them as
+  `SiteSpec.proxy_targets` at once, so `site.httpProxy` can reach the machine. Out-of-band inspection replaces them
+  only when it reports some, and IPMI reports none, so they stand.
+- **Driver options.** `bmc.driverOptions` is a JSON object of at most 1 KiB that metal sends on every BMC operation
+  of the machine (`driverOptionsJson` of the request, canonical JSON with sorted keys). `bcx-ipmi` takes one key,
+  `cipherSuite`: 17 by default, or 3, 8 or 12 for BMCs without 17. Keys that look like credentials are
+  `INVALID_INPUT`, and the `redfish` driver takes no options (`INVALID_INPUT` at enrollment). See
+  [bcx-ipmi](/docs/extending/drivers#bcx-ipmi-the-ipmi-driver).
+- **What stays Redfish only.** A deploy profile that mounts virtual media, a hardware profile with BIOS settings or
+  a RAID layout, and the dedicated-root teardown (`metal-tenant-root-release`, which rotates the BMC password and
+  checks firmware) are refused for an `ipmi` machine with `UNSUPPORTED`. There is no PXE path yet that boots an ISO
+  for a driver without virtual media.
 
-Enrollment, `metal-inspect`, and commissioning without BIOS or RAID settings use only power, boot device, inspection
-and in-band ramdisk work, which `bcx-ipmi` and the ramdisk serve. None of this has run against a real BMC.
-</Callout>
+```ts title="An IPMI machine"
+await compute.api.metal.enroll(credential, {
+  tenantId: 'root',
+  siteId: 'site_…',
+  poolId: 'pool_…', // a pool with an agent: the ramdisk boots it by its PXE MAC
+  bmc: {
+    address: '10.20.0.14',
+    driver: 'ipmi',
+    credentials: 'secret://root/bmc-bm-7', // no tlsSpkiSha256: IPMI has no TLS
+    driverOptions: { cipherSuite: 3 }, // an older BMC without suite 17
+  },
+  macs: ['b8:ce:f6:00:00:07'],
+});
+```
+
+None of this has run against a real BMC.
+
+### What metal checks before a workflow
+
+Metal keeps a table of the BMC operations each driver serves (`builtinBmcDrivers` in
+`packages/metal/src/capabilities.ts`): `redfish` serves every operation metal sends, plus `inspect.macs` (its
+inspection reports the PXE MACs); `ipmi` serves `power.getPower`, `power.setPower`, `management.setBootDevice` and
+`inspect.inspect`. Each metal step needs certain operations: `metal.ensureRamdisk` needs the boot device and power,
+`media.insert` virtual media, `metal.firmwareCheck` `firmware.components`, `metal.rotateBmcCredential`
+`management.rotateCredential`, and `bios.apply`, `bios.verify` and `raid.apply` count only when the node's hardware
+profile sets BIOS settings or a RAID layout. `inspect.oob` is optional, and a step with `onFailure: 'continue'`
+never counts.
+
+Before the workflows start, metal checks every step of the profiles a call will run against the node's driver, and
+refuses with `UNSUPPORTED`:
+
+```json title="error details"
+{
+  "reason": "bmc-driver-unsupported",
+  "driver": "ipmi",
+  "unmet": [{ "profile": "metal-commission@2", "step": "bios.apply", "operations": ["bios.getSettings", "bios.applySettings"] }]
+}
+```
+
+| Where | What is checked |
+| --- | --- |
+| `metal.enroll` | The `enrolling`, `inspecting` and `commissioning` chain, and that the PXE MACs are knowable |
+| Every lifecycle verb | The chain of workflows the verb starts; the verb is rolled back with it |
+| `metal.deploy` | A stored deploy profile (the tenant's or a public one), at the call |
+| A module-shipped deploy profile | When the reconciler starts it: under a savepoint, rolled back, and the node fails with the same error |
+| `metal.unrescue`, `metal.power` | The unrescue profile; `power.setPower` |
+
+`metal({ bmcDrivers: { <id>: [operations] } })` declares the operations of other drivers, or replaces the built-in
+entries. The site's agents narrow the table: each agent's Hello writes `bc.dev/driver-kind.<driver>.<kind>` labels
+for the drivers it hosts (14ceb1e; see [labels](/docs/guides/nodes/inventory-and-health#labels)), and metal keeps
+only the operations of the kinds they report. That also makes a driver the table does not know checkable. A driver
+neither names is not checked in advance; its site agent answers at run time. Built-in Redfish is never in the labels.
 
 The plugin is not built into bcd. A release ships it as `bcx-ipmi_<version>_linux_<arch>.tar.gz`, the api's
 downloads route serves it, and `daemon install-script --install-plugins bcx-ipmi --release-manifest …` installs it
@@ -258,6 +325,7 @@ const node = await compute.api.metal.enroll(credential, {
   uefi: true,
 });
 // node.bmc = { driver: 'redfish', address: 'https://10.0.0.10', credentialsSet: true }
+// node.addresses = [] until inspection reports some (the view adds bmc.driverOptions when set)
 ```
 
 <TypeTable
@@ -269,7 +337,9 @@ const node = await compute.api.metal.enroll(credential, {
     'bmc.driver': { type: 'string', description: 'A driver id such as redfish or ipmi.', required: true },
     'bmc.credentials': { type: "'secret://…' | { username, password }", description: 'A secret reference, or inline credentials stored at once and never echoed.', required: true },
     'bmc.tlsSpkiSha256': { type: 'string', description: "64 hex digits: the SHA-256 of the BMC certificate's SubjectPublicKeyInfo, pinned." },
-    macs: { type: 'string[]', description: 'Up to 16 PXE MACs. Redfish out-of-band inspection finds them when left out; IPMI inspection does not, so an ipmi machine needs them here.' },
+    'bmc.driverOptions': { type: 'object', description: 'Options for the BMC driver, sent on every BMC operation: a JSON object of at most 1 KiB, never credential-like keys (e.g. bcx-ipmi { cipherSuite: 3 }). The redfish driver takes none. Stored in metal_nodes.bmc_driver_options (metal/0006).' },
+    macs: { type: 'string[]', description: 'Up to 16 PXE MACs. Redfish out-of-band inspection finds them when left out; IPMI inspection does not, so an ipmi machine in a pool with an agent is UNSUPPORTED without them.' },
+    addresses: { type: 'string[]', description: "Up to 16 IP literals: the machine's own addresses, the only hosts site.httpProxy may reach for an agentless machine. Out-of-band inspection replaces them when it reports some." },
     productUuid: { type: 'string', description: 'The SMBIOS product UUID, when known.' },
     arch: { type: "'x86_64' | 'arm64'", description: 'Selects the boot architecture of the PXE entry.', default: "'x86_64'" },
     uefi: { type: 'boolean', description: 'UEFI or legacy BIOS boot.', default: 'true' },
@@ -290,7 +360,8 @@ better-compute metal enroll --tenant root --site site_01k5w… --pool pool_01k5w
 
 `--bmc-credentials` must be a `secret://`, `vault://` or `env://` reference; otherwise pass `--bmc-username` with
 `--bmc-password-file` (one trailing newline is dropped, and an empty file is refused), never both forms. `--legacy-bios`
-sends `uefi: false`, and `--arch`, `--product-uuid` and `--hardware-profile` map to the fields below. See
+sends `uefi: false`, and `--arch`, `--product-uuid` and `--hardware-profile` map to the fields below. The command has
+no flags for `bmc.driverOptions` or `addresses` yet: enroll a machine that needs them through the API. See
 [metal enroll](/docs/reference/cli#metal-enroll).
 
 `bmc.driver`, `bmc.tlsSpkiSha256` and every entry of `macs` must be JSON strings: a missing driver,
@@ -299,8 +370,10 @@ upper-case hex and a MAC `-` separators; both are stored lower case, MACs with `
 
 The first workflow, `metal-enroll`, proves the credentials work (`power.getPower`) and inspects the
 machine out of band (`inspect.oob`), recording the PXE MACs, SMBIOS UUID and IP addresses the BMC
-reports (Redfish reports them; IPMI reports none, and what was enrolled is kept). A machine whose BMC does not answer
-fails in `enrolling`.
+reports (Redfish reports them; IPMI reports none, and what was enrolled is kept). A driver without out-of-band
+inspection skips that step. A machine whose BMC does not answer fails in `enrolling`. Before the node is created,
+`metal.enroll` checks that its driver can serve enrollment through commissioning (see
+[what metal checks before a workflow](#what-metal-checks-before-a-workflow)).
 
 ## Credentials
 

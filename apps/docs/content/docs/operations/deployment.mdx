@@ -23,6 +23,8 @@ sources:
   - examples/shared/compose.ts
   - examples/postgres/README.md
   - examples/postgres/docker-compose.yml
+  - packages/server/src/http.ts
+  - packages/iam/src/remote.ts
   - PLAN.md
 ---
 
@@ -241,6 +243,22 @@ When you embed, you take over what `serve` does for you:
 - run the gateway with `createGateway` and `serveGateway` from `better-compute/gateway`, or run it with
   `serve --roles gateway` from the same configuration;
 - call `compute.stop()` on shutdown so leases are released at once rather than after they expire.
+
+### The caller address
+
+IAM policies can condition on `request.sourceIp`, so compute hands IAM the caller's address only as the host
+verified it (d269738, security review 14 L3). `compute.nodeHandler` (and so `serve`) takes the socket's peer
+address. With `compute.handler`, pass it yourself as the second argument, `HandlerInfo`:
+
+```ts
+// behind no proxy, the socket's peer is the caller
+const response = await compute.handler(request, { peer: { address: socket.remoteAddress } });
+```
+
+Behind a load balancer, pass the hop your own proxy configuration trusts, never a value read from the client's
+`x-forwarded-for`. The address becomes `Credential.sourceIp`, which remote IAM receives as `x-forwarded-for`; the
+client's own forwarding headers never reach IAM (e7092bf). Without an address, IAM sees none. `serve` has no
+trusted-proxy setting, so behind a load balancer it reports the balancer's address.
 
 ## Containers
 

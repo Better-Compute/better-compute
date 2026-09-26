@@ -32,6 +32,10 @@ sources:
   - packages/testing/src/daemon/instances.ts
   - proto/bettercompute/agent/v1/session.proto
   - daemon/internal/agent/snapshot.go
+  - daemon/internal/agent/rebind.go
+  - daemon/internal/agent/netpolicy.go
+  - daemon/internal/runtime/rebind.go
+  - daemon/README.md
   - daemon/internal/runtime/libvirt.go
   - tests/vps-sandboxes.test.ts
   - tests/server-sandbox-exec.test.ts
@@ -54,7 +58,7 @@ its boot data sealed through the secret broker.
 
 `vps()` serves three API groups for it (v0.5, beta): [sandboxTemplates](/docs/reference/api/sandbox-templates),
 [sandboxes](/docs/reference/api/sandboxes), whose `exec` method the tunnels module contributes, and
-[sandboxSnapshots](/docs/reference/api/sandbox-snapshots). All 15 methods are served. Migrations `vps/0004_sandboxes` to `vps/0012_host_cert_validity` add their tables, columns and indexes, and the
+[sandboxSnapshots](/docs/reference/api/sandbox-snapshots). All 15 methods are served. Migrations `vps/0004_sandboxes` to `vps/0017_identity_rebind` add their tables, columns and indexes, and the
 `vps.sandboxes` reconciler expires sandboxes, keeps warm pools filled and settles snapshots.
 
 <Callout type="warn" title="The control plane is done; the host runtime is untested on real hardware">
@@ -204,6 +208,16 @@ never one two instances claim. Every 5 seconds bcd counts the rules in its table
 nftables reload, `flush ruleset`, or a flushed table or chain ends that trust at once, and bcd loads the ruleset
 again right away rather than waiting for the next converge pass.
 
+**SSH only from the host.** Every sandbox instance, warm ones included, has `InstanceSpec.ssh_from_host_only` set
+(5346523), whatever its `network`, and bcd enforces it in the same table (474d51f, security review 13 L5). For each
+of the instance's taps, tcp/22 forwarded from another bridge port (another guest, an uplink) is dropped, and tcp/22
+the host sends into the tap is dropped unless its source is one of the host's own addresses on the instances'
+bridges, where the exec tunnel's dial comes from; with no host address of a family, that family's tcp/22 is dropped
+outright. Both rules sit ahead of every accept. So an exec certificate is usable only through a tunnel, which the
+control plane re-authorizes and closes on revocation, and guests on one pool cannot reach each other's sshd. An
+ordinary instance is unaffected. A bcd from before 474d51f ignores the field, and no capability or placement label
+guards it.
+
 ## Create a sandbox
 
 ```ts title="sandbox.ts"
@@ -311,6 +325,7 @@ A policy can bound what callers start, for example short CPU-only sandboxes:
     readyAt: { type: 'number', description: 'When its instance first ran.' },
     expiredAt: { type: 'number', description: 'Set when the sandbox ended by reaching expiresAt.' },
     fromSnapshot: { type: 'string', description: 'The snapshot it was restored from.' },
+    identityRebound: { type: 'boolean', description: "A memory restore: false while it still answers to its source's SSH identity (exec refuses with restore-shares-identity), true once the host installed its own. Absent for other sandboxes." },
     snapshots: { type: 'SandboxSnapshot[]', description: 'Its snapshots, newest first, deleted ones left out. Only sandboxes.get returns them.' },
     ownerIdentityId: { type: 'string', description: 'Who created it; list defaults to these.', required: true },
     idempotencyKey: { type: 'string', description: 'The key of the create.', required: true },
@@ -494,7 +509,8 @@ fails at login.
 
 It answers `{ sandboxId, instanceId, nodeId, tunnelId, ticket, path, expiresAt, certificate, serial, keyId, principal,
 account, validBefore, hostPrincipal, hostCertified, hostCertificate }`; `hostPrincipal` is the name the guest's host
-certificate carries (its instance, or the original one after a memory restore), `hostCertificate` is `valid`,
+certificate carries (its instance, or the original one after a memory restore until the host gives the restore its
+own identity), `hostCertificate` is `valid`,
 `expired` or `none`, and `hostCertified` says whether it is `valid`. Open `GET {basePath}/{path}` as a WebSocket before `expiresAt` (the ticket is single use and
 lives 60 s) and speak SSH over it as `account`, with the certificate saved beside your key as `<key>-cert.pub`. The
 key id is `bc:<identityId>:<sandboxId>:ssh_<id>`.
@@ -506,7 +522,7 @@ key id is `bc:<identityId>:<sandboxId>:ssh_<id>`.
 | The session ends within a minute | `ACCESS_DENIED`, `details.reason: 'session-ending'` |
 | The sandbox is not `ready` (its instance not `running`), or is being deleted | `INVALID_STATE` |
 | The sandbox expires within a minute (or already has): extend it first | `INVALID_STATE`, `details.reason: 'sandbox-expiring'` |
-| Another live guest of the tenant shares the sandbox's SSH identity: its memory snapshot's source, a sibling restore, or a memory restore of this sandbox (87ff2c5; see [restore](#restore)) | `INVALID_STATE`, `details.reason: 'restore-shares-identity'` |
+| Another live guest of the tenant shares the sandbox's SSH identity: its memory snapshot's source, a sibling restore, or a memory restore of this sandbox, until the host gives the restore its own (87ff2c5; see [a restore's own SSH identity](#a-restores-own-ssh-identity)) | `INVALID_STATE`, `details.reason: 'restore-shares-identity'` |
 | The node is not connected, or its daemon does not advertise `tunnel.instance-dial` | as for `tunnels.open` |
 | More tunnels than the per-identity limit, shared with `tunnels.open` | `RATE_LIMITED` |
 | An RSA or malformed key | `INVALID_INPUT` |
@@ -627,23 +643,78 @@ needs the same CPU features. bcd downloads the object over https only into `data
 the digest before using it, fails the instance for a snapshot from another runtime or a memory snapshot from another
 CPU model, and deletes the file once no spec restores from it.
 
-<Callout type="warn" title="No exec while a memory restore shares its guest's SSH identity">
+### A restore's own SSH identity
+
 A memory restore resumes the guest with its source's sshd identity: the principal of the instance the memory was
-captured on, and its host key. A certificate for one of those guests would therefore open the others, and guests on
-a pool can reach each other. Today `sandboxes.exec` (and `better-compute sandbox exec`) refuses with `INVALID_STATE`
-and `details.reason: 'restore-shares-identity'` while another live guest of the tenant (any state but `deleting` or
+captured on, and its host key. A certificate for one of those guests would therefore open the others. So
+`sandboxes.exec` (and `better-compute sandbox exec`) refuses with `INVALID_STATE` and
+`details.reason: 'restore-shares-identity'` while another live guest of the tenant (any state but `deleting` or
 `deleted`) shares the sandbox's identity (87ff2c5, security review 13 H2):
 
 - exec into a memory-restored sandbox is refused while its source, or a sibling restored from the same snapshot, is
   still live; restores of restores carry the original principal and count too;
 - exec into the source is refused while a memory restore of it is live.
 
-Delete the other guest to exec again. Disk-only snapshots (`includeMemory: false`,
-`better-compute sandbox snapshot --no-memory`) are not affected: their restores boot fresh, and exec signs for the
-restored instance itself. The refusal lasts until bcd gives a restored guest its own principal and host key. The
-planned route is a new identity delivered to the restored guest by bcd: the
-wire already has fields for it (`InstanceSpec.identity_rebind_ref` and `ssh_from_host_only`,
-`InstanceStatus.identity_rebound_ref`; 27e0999), but nothing sets or honours them yet.
+Disk-only snapshots (`includeMemory: false`, `better-compute sandbox snapshot --no-memory`) are not affected: their
+restores boot fresh, and exec signs for the restored instance itself.
+
+The refusal lasts until the host gives the restored guest its own identity (5346523, ca08d5c):
+
+```mermaid
+sequenceDiagram
+  participant V as vps
+  participant B as bcd (host)
+  participant G as Restored guest
+  V->>V: seal { v: 1, account, principals, hostKey?, hostCertificate? }
+  V->>B: InstanceSpec.identity_rebind_ref
+  B->>V: SecretRequest (allocation_id)
+  V-->>B: the bundle, sealed to a one-time key
+  B->>G: hot-add a 1 MiB disk, serial bc-rebind
+  G->>G: install principals and host key, reload sshd
+  G-->>B: BCREBOUND nonce, in the disk's last 4 KiB
+  B->>B: remove the disk, zero and delete its file
+  B->>V: InstanceStatus.identity_rebound_ref
+  V->>V: principal and host certificate become the restore's own
+```
+
+1. **vps seals it.** A memory restore on a deployment with `vps({ sandboxExec })` and a secret broker gets its own
+   bundle: the principals file for `<account>@<instance>` and, with `certifyHostKey`, a fresh host key and its
+   certificate, as JSON `{ v: 1, account, principals, hostKey?, hostCertificate? }`. The reference goes in
+   `instances.identity_rebind_ref`, the certificate's expiry in `rebind_cert_valid_before` (migration
+   `vps/0017_identity_rebind`), and the spec carries it as `InstanceSpec.identity_rebind_ref`. The bundle is deleted
+   with the instance's sealed user data.
+2. **bcd delivers it.** Once the instance runs, the host's agent fetches the bundle with a `SecretRequest` bound to
+   the instance's allocation, checks it (version 1, the account name, principal lines, and a PEM host key with an
+   OpenSSH certificate line, or neither), and hands it to the runtime off the converge pass. `cloud-hypervisor` and
+   `libvirt-kvm` hot-add a raw 1 MiB disk with virtio serial `bc-rebind` holding a tar (`nonce`, `account`,
+   `principals`, and `host_key` with `host_key-cert.pub` when there is a host key), and wait up to 2 minutes for the
+   guest's `BCREBOUND <nonce>` at the start of the disk's last 4 KiB. Either way bcd then removes the disk and zeroes
+   and deletes its file. See [identity rebind](/docs/daemon/delivery#identity-rebind).
+3. **The guest installs it.** A udev rule starts `bc-rebind@<dev>.service`, whose script copies the principals and
+   host key into `/etc/ssh`, reloads sshd and writes the acknowledgement.
+4. **vps re-points exec.** bcd records the applied reference in `data_dir/instances-rebound.json` and reports it as
+   `InstanceStatus.identity_rebound_ref`. When it equals the spec's, vps sets the instance's principal to the instance
+   itself and its host certificate to the bundle's: exec then signs for that restore alone, the grant's
+   `hostPrincipal` names it, and it no longer counts for `restore-shares-identity`.
+
+`sandboxes.get` and `list` show the state as `identityRebound` (96435d6): `false` while a memory restore still
+answers to its source's identity, `true` once the host installed its own, and absent for other sandboxes. Readiness
+does not wait for it: a restore is `ready` when its instance runs.
+
+The guest's side is bcd's contract in `daemon/README.md` ("Identity rebind"): the udev rule
+`/etc/udev/rules.d/90-bc-rebind.rules`, the oneshot `/etc/systemd/system/bc-rebind@.service` and the script
+`/usr/local/sbin/bc-rebind`. With `sandboxExec` configured, vps's sandbox user data writes all three verbatim at first
+boot (owner root, the script 0755) and runs `systemctl daemon-reload` and `udevadm control --reload` before reloading
+sshd (3e25c78). A memory restore resumes without cloud-init, so it inherits them from its source. A test compares the
+rendered files byte for byte with the README block, so the two cannot drift apart.
+
+<Callout type="warn" title="When exec stays refused">
+A guest without the guest half never acknowledges, so bcd gives up after 3 tries 5 minutes apart and reports
+nothing. That fails closed: the restore keeps its source's identity, and exec stays refused while the source or a
+sibling is live. It applies to restores of snapshots whose source booted before 3e25c78 (or without `sandboxExec`),
+to a runtime that cannot hot-add the disk (a bcx runtime plugin), and to a bundle the control plane refuses to
+release or bcd finds malformed (not retried). Delete the other guests to exec into such a restore. None of this has
+run on a real KVM host: the runtimes' rebind is tested against fake guests.
 </Callout>
 
 ### Lifetime
@@ -906,7 +977,10 @@ Because the guest is untrusted and the command may come from an agent or a model
 host (a command such as `-oProxyCommand=…` runs in the guest, never as an ssh option on your machine) and turns off
 the parts of your ssh configuration that would hand the guest anything: agent and X11 forwarding (`-a -x`), all port
 forwardings, `ProxyCommand` and `ProxyJump`, connection sharing (`ControlMaster`, `ControlPath`) and
-`PermitLocalCommand`. `sandbox-template create|update|delete` manage templates from a terminal. See
+`PermitLocalCommand`. When `sandboxes.exec` refuses with `restore-shares-identity`, `sandbox exec` adds a hint:
+delete the sandbox it was restored from or its sibling restores, or wait until the host gives it its own identity,
+which `sandbox get` shows as `identityRebound: true` (9958865). `sandbox-template create|update|delete` manage
+templates from a terminal. See
 [the CLI guide](/docs/guides/clients/cli#sandboxes) and the [reference](/docs/reference/cli#sandbox-create).
 
 ## Agents over MCP
@@ -929,7 +1003,9 @@ draft. See
 The console's **Sandboxes** page lists the tenant's templates with their warm pool sizes in a create form (template
 and lifetime in minutes, capped at the template's maximum), and the person's own sandboxes, or everyone's, with a
 countdown to `expiresAt` that turns to a warning in the last 5 minutes. Each row offers **+30 min**, **Snapshot** and
-**Delete**, and shows the `better-compute sandbox exec sbx_…` line to copy, since a shell runs through the CLI. On a
+**Delete**, and shows the `better-compute sandbox exec sbx_…` line to copy, since a shell runs through the CLI. A
+memory restore whose `identityRebound` is `false` carries a warning that it still answers to its source's SSH
+identity, so exec waits until the source and sibling restores are gone or the host gives it its own (9958865). On a
 deployment without a `SnapshotStore`, the first **Snapshot** answers `INVALID_CONFIG`; the page then says snapshots
 are not configured and hides the button for the session. See [the console](/docs/guides/clients/console#screens).
 

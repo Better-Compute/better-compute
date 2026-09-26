@@ -529,14 +529,17 @@ through its `Runtime` interface. Both are written, and a host build runs each on
   disk images only (`iso` is refused), and needs `systemd-run` and the firmware at
   `/usr/share/cloud-hypervisor/CLOUDHV.fd`, which `bcd doctor` checks.
 
-Both runtimes treat a tenant's image as hostile (security review 12, fixed in 933c51b). Every base image is checked
-with `qemu-img info -f <declared format>` when it is downloaded and again each time an instance uses it, and so are
-a restored snapshot's disk and seed: an image that names a backing file or an external data file, is not its
-declared format, or is `raw` or `iso` but probes as another format is refused, which fails that instance. On
-`cloud-hypervisor` each instance's taps exist, on their bridge, before its VMM starts, so a guest reboot never puts
-a tap outside the instance firewall; the VMM's unit sees only its own instance directory and base image, opens only
-KVM, tun and (with GPUs) VFIO devices, and is bounded by the flavor's memory, vCPUs and a task limit; and a memory
-snapshot restores only into an instance with the same vCPUs and memory. See
+Both runtimes treat a tenant's image as hostile (security review 12, fixed in 933c51b and hardened in b12c217). bcd
+reads a `qcow2` base image's header in Go when it is downloaded and again each time an instance uses it, with no tool
+probing the image: one that names a backing file or an external data file, sets an unknown incompatible feature, is
+encrypted or is not a qcow2 is refused, which fails that instance. `raw` and `iso` images are opened with their
+format stated and never probed. An instance's disk must name exactly its recorded base before every start, snapshot
+and resize, and a restored snapshot's disk must name none. On `cloud-hypervisor` bcd creates each instance's taps on
+their bridge before its VMM starts and hands them to the VMM as file descriptors, so a guest reboot never puts a tap
+outside the instance firewall; the VMM runs as the instance's own uid with no capabilities and no network, its unit
+sees only its own instance directory and base image with `/run` and `/var` hidden, opens only KVM and (with GPUs)
+VFIO devices, and is bounded by the flavor's memory, vCPUs and a task limit; and a memory snapshot restores only
+into an instance with the same vCPUs and memory. See
 [the runtimes](/docs/daemon/delivery#the-runtimes).
 
 Both give a 60-second graceful shutdown, VFIO GPUs, a serial console for instance console tunnels, and snapshots and
