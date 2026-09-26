@@ -5,6 +5,7 @@ import {
   openSealedToken,
   parseCertificate,
   parseCsr,
+  parseTpmAkUri,
   publicJwk,
   sha256,
   spkiPin,
@@ -91,6 +92,7 @@ export function pkiJoinCrypto(options: PkiJoinCryptoOptions): JoinCrypto {
       }
       return undefined;
     },
+    knowsKeyStatement: (statement: string) => parseTpmAkUri(statement) !== undefined,
     verifyNodeSignature(der: Uint8Array, statement: Uint8Array, signature: Uint8Array) {
       try {
         const key = parseCertificate(der).publicKey;

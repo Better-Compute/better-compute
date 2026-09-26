@@ -510,6 +510,10 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
       // A two-round join: the attestor's rows commit, nothing is issued, the agent comes back.
       if (isAttestationDeferral(result)) return deferred(crypto, attestorId, csr.sha256, result);
       if (result.role !== role) throw deny('role');
+      // A statement about the node key goes into the certificate only when renewals can prove it again
+      // (verifyKeyStatements): any other would leave a certificate that can never renew.
+      if (result.nodeKeyUri !== undefined && !crypto.knowsKeyStatement?.(result.nodeKeyUri))
+        throw deny('node-key-statement');
 
       const token = result.tokenId
         ? (
@@ -815,10 +819,54 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
     return response;
   }
 
+  /**
+   * `security.renew.refused`, in its own transaction after the renewal's rolled back. It is the node
+   * owner's, naming the node, only once the caller proved the current key (a refused key attestation, a
+   * replay); every other refusal (anyone can present a public certificate) is the root tenant's and
+   * names no node. Reasons only, rate-bounded per reason with the join refusals.
+   */
+  async function recordRenewRefusal(error: unknown, context: GatewayCallContext): Promise<void> {
+    const details = (isComputeError(error) ? error.details : undefined) ?? {};
+    const reason = `renew:${typeof details.reason === 'string' ? details.reason : 'denied'}`;
+    const authenticated = typeof details.tenantId === 'string' && typeof details.nodeId === 'string';
+    const tenantId = authenticated ? (details.tenantId as string) : options.rootTenantId;
+    if (!tenantId) return;
+    const admitted = refusals.take(`renew\0${reason}`, clock.now());
+    if (admitted === undefined) return;
+    try {
+      await database.transaction((tx) =>
+        events.publish(tx, {
+          type: 'security.renew.refused',
+          tenantId,
+          subject: authenticated ? `node/${details.nodeId as string}` : 'renew',
+          data: {
+            reason,
+            ...(authenticated ? { nodeId: details.nodeId as string } : {}),
+            ...(context.gatewayId ? { gatewayId: context.gatewayId } : {}),
+            suppressed: admitted,
+          },
+        }),
+      );
+    } catch (failure) {
+      log?.error('recording a renew refusal failed', {
+        error: failure instanceof Error ? failure.message : String(failure),
+      });
+    }
+  }
+
   async function renew(
     request: RenewRequest,
     context: GatewayCallContext = {},
   ): Promise<RenewResponse> {
+    try {
+      return await renewOnce(request, context);
+    } catch (error) {
+      if (isComputeError(error, 'ACCESS_DENIED')) await recordRenewRefusal(error, context);
+      throw error;
+    }
+  }
+
+  async function renewOnce(request: RenewRequest, context: GatewayCallContext): Promise<RenewResponse> {
     const crypto = requireCrypto();
     const leaf = request?.chain?.[0];
     if (!(leaf instanceof Uint8Array) || leaf.length === 0) throw denyRenew('chain');
@@ -847,6 +895,7 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
       // the chain check, revocation and identity generation in one lookup (P1: Postgres is truth).
       const { rows } = await tx.query<{
         node_id: string;
+        owner_tenant_id: string;
         role: AgentRole;
         der: Uint8Array;
         usable: boolean;
@@ -856,7 +905,7 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
         current_gen: boolean;
         allowed_kinds: string[] | null;
       }>(
-        `SELECT c.node_id, c.role, c.der, c.allowed_kinds, n.site_id, n.provision_state, n.identity_gen,
+        `SELECT c.node_id, n.owner_tenant_id, c.role, c.der, c.allowed_kinds, n.site_id, n.provision_state, n.identity_gen,
                 (c.revoked_at IS NULL AND c.not_after > compute_now()) AS usable,
                 c.identity_gen = n.identity_gen AS current_gen
            FROM node_certs c JOIN nodes n ON n.id = c.node_id
@@ -878,7 +927,14 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
       });
       if (!(await crypto.verifyNodeSignature(leaf, statement, request.popSig)))
         throw denyRenew('proof');
-      if (!remember(toHex(sha256(statement)), now)) throw denyRenew('replay');
+      // From here the caller holds the current key: a refusal is the node owner's to see.
+      const proven = (reason: string) =>
+        new ComputeError('ACCESS_DENIED', 'Renew refused', undefined, {
+          reason,
+          tenantId: row.owner_tenant_id,
+          nodeId: row.node_id,
+        });
+      if (!remember(toHex(sha256(statement)), now)) throw proven('replay');
       // What compute proved about the current key (a TPM AK certified it) must hold for the new one, or
       // there is no renewal, never a downgrade. The statements are read from the presented leaf, which
       // is byte-for-byte compute's own record (above), never from the CSR, and carried forward.
@@ -889,7 +945,7 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
           : 'key-statement-unsupported';
         if (reason) {
           log?.warn('renew refused', { nodeId: row.node_id, reason });
-          throw denyRenew(reason);
+          throw proven(reason);
         }
       }
 

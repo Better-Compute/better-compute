@@ -2,7 +2,7 @@ import { createPublicKey, generateKeyPairSync, randomBytes, type KeyObject } fro
 import { afterEach, describe, expect, it } from 'vitest';
 import { create } from '@bufbuild/protobuf';
 import { timestampFromMs } from '@bufbuild/protobuf/wkt';
-import { isComputeError } from '@better-compute/core';
+import { defineAttestor, isComputeError } from '@better-compute/core';
 import {
   akAttributes,
   createCsr,
@@ -83,6 +83,13 @@ async function setup() {
         nodeKey: 'any',
         resolve: async () => ({ tenantId: tenants.root.id, role: 'node', poolId: 'pool_r' }),
       }),
+      // An attestor whose statement about the node key no renewal could prove.
+      defineAttestor({
+        id: 'unprovable',
+        version: '1.0.0',
+        roles: ['node'],
+        verify: async () => ({ tenantId: tenants.root.id, role: 'node', poolId: 'pool_r', nodeKeyUri: 'urn:bc:other-key:1' }),
+      }),
     ],
   });
   let serial = 0;
@@ -121,7 +128,13 @@ async function setup() {
       }),
     };
   };
-  return { fixture, service, join, renewal };
+  const refusedEvents = async () =>
+    (
+      await database.query<{ payload: { tenantId: string; subject: string; data: { reason: string; nodeId?: string } } }>(
+        `SELECT payload FROM outbox WHERE topic = 'security.renew.refused' ORDER BY seq`,
+      )
+    ).rows.map((row) => ({ tenantId: row.payload.tenantId, subject: row.payload.subject, ...row.payload.data }));
+  return { fixture, service, join, renewal, refusedEvents, signingKey, nodeCa, rootTenantId: tenants.root.id };
 }
 
 async function refusal(promise: Promise<unknown>): Promise<string | undefined> {
@@ -176,6 +189,34 @@ describe('renewing a TPM-held node key', () => {
     expect(await refusal(service.renew(renewal(next, good.next).request))).toBe('key-attestation-missing');
     const again = await service.renew(renewal(next, good.next, (csr, k) => softwareTpmCertify(tpm, k, sha256(csr))).request);
     expect(statementsOf(again.certChain[0]!)).toEqual([statement]);
+  });
+
+  it('publishes security.renew.refused: the owner’s, naming the node, only once the caller proved the current key', async () => {
+    const { service, join, renewal, refusedEvents, rootTenantId } = await setup();
+    const key = generateP256KeyPair().privateKey;
+    const node = await join(softwareTpm(key), key);
+    // A proof by the current key, without the AK's attestation.
+    expect(await refusal(service.renew(renewal(node, key).request))).toBe('key-attestation-missing');
+    // Someone else's key over the node's (public) certificate.
+    expect(await refusal(service.renew(renewal(node, generateP256KeyPair().privateKey).request))).toBe('proof');
+    expect(await refusedEvents()).toEqual([
+      { tenantId: rootTenantId, subject: `node/${node.nodeId}`, reason: 'renew:key-attestation-missing', nodeId: node.nodeId, suppressed: 0 },
+      { tenantId: rootTenantId, subject: 'renew', reason: 'renew:proof', suppressed: 0 },
+    ]);
+  });
+
+  it('issues no certificate with a key statement no renewal could prove', async () => {
+    const { fixture, service, signingKey, nodeCa } = await setup();
+    const joined = runAgentJoin({
+      send: (request) => service.join(request),
+      signer: { publicKey: signingKey.publicKey },
+      wait: (ms) => fixture.advance(ms).then(() => undefined),
+      now: () => fixture.clock.now(),
+      nodeCaRoots: [nodeCa.certificate],
+      claims: { productUuid: '4c4c4544-0042-3510-8052-b7c04f4e4e99', productSerial: 'SN-R-U', permanentMacs: ['3c:ec:ef:90:90:99'] },
+      attestor: { id: 'unprovable', produce: async () => ({ attestor: 'unprovable', payload: new Uint8Array([1]) }) },
+    });
+    expect(await refusal(joined)).toBe('node-key-statement');
   });
 
   it('a node key the TPM did not certify gets no AK statement and renews without one', async () => {

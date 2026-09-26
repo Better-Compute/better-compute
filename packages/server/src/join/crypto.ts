@@ -115,6 +115,11 @@ export interface JoinCrypto {
     attestation: KeyAttestation | undefined,
     csr: CsrInfo,
   ): string | undefined | Promise<string | undefined>;
+  /**
+   * Whether `verifyKeyStatements` can prove this statement again (`urn:bc:tpm-ak:` today). JoinService
+   * issues no certificate with any other: it could never renew.
+   */
+  knowsKeyStatement?(statement: string): boolean;
   /** ES256 by the pinned JoinService signing key over `signingInput(purpose, parts)`. */
   sign(
     purpose: Extract<SigningPurpose, 'join-response' | 'trust-bundle'>,
