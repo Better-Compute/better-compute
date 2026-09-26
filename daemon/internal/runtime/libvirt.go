@@ -107,8 +107,12 @@ type domainXML struct {
 		Unit  string `xml:"unit,attr"`
 		Value uint64 `xml:",chardata"`
 	} `xml:"memory"`
-	VCPU uint32 `xml:"vcpu"`
-	OS   struct {
+	VCPU vcpuXML `xml:"vcpu"`
+	// Placement (PLAN.md §3.8): pinned vCPUs, NUMA-bound memory, its backing.
+	CPUTune       *cputuneXML       `xml:"cputune,omitempty"`
+	NUMATune      *numatuneXML      `xml:"numatune,omitempty"`
+	MemoryBacking *memoryBackingXML `xml:"memoryBacking,omitempty"`
+	OS            struct {
 		Type  string `xml:"type"`
 		Boots []struct {
 			Dev string `xml:"dev,attr"`
@@ -122,6 +126,44 @@ type domainXML struct {
 		Mode string `xml:"mode,attr"`
 	} `xml:"cpu,omitempty"`
 	Devices devicesXML `xml:"devices"`
+}
+
+// vcpuXML is the vCPU count; cpuset lets them float within a host CPU set (placement.cpus).
+type vcpuXML struct {
+	Placement string `xml:"placement,attr,omitempty"`
+	CPUSet    string `xml:"cpuset,attr,omitempty"`
+	Value     uint32 `xml:",chardata"`
+}
+
+type cputuneXML struct {
+	VCPUPins []vcpupinXML `xml:"vcpupin"`
+}
+
+type vcpupinXML struct {
+	VCPU   uint32 `xml:"vcpu,attr"`
+	CPUSet string `xml:"cpuset,attr"`
+}
+
+type numatuneXML struct {
+	Memory struct {
+		Mode    string `xml:"mode,attr"`
+		Nodeset string `xml:"nodeset,attr"`
+	} `xml:"memory"`
+}
+
+type memoryBackingXML struct {
+	Hugepages struct {
+		Page struct {
+			Size    uint64 `xml:"size,attr"`
+			Unit    string `xml:"unit,attr"`
+			Nodeset string `xml:"nodeset,attr,omitempty"`
+		} `xml:"page"`
+	} `xml:"hugepages"`
+	Locked *struct{} `xml:"locked,omitempty"`
+}
+
+type memballoonXML struct {
+	Model string `xml:"model,attr"`
 }
 
 type metadataXML struct {
@@ -142,6 +184,8 @@ type devicesXML struct {
 	Disks      []diskXML      `xml:"disk"`
 	Interfaces []interfaceXML `xml:"interface"`
 	Hostdevs   []hostdevXML   `xml:"hostdev"`
+	// Explicit, so libvirt never adds its default virtio balloon to a guest that should have none.
+	Memballoon *memballoonXML `xml:"memballoon,omitempty"`
 	Serial     *serialXML     `xml:"serial"`
 	Console    *struct {
 		Type string `xml:"type,attr"`
@@ -208,7 +252,10 @@ var pciAddress = regexp.MustCompile(`^([0-9a-fA-F]{4}):([0-9a-fA-F]{2}):([0-9a-f
 func (l *Libvirt) domainFor(spec *agentv1.InstanceSpec, dir, cdrom string, meta instanceMetaXML) (*domainXML, error) {
 	d := &domainXML{Type: "kvm", Name: spec.GetInstanceId(), Metadata: &metadataXML{Instance: meta}}
 	d.Memory.Unit, d.Memory.Value = "KiB", spec.GetMemoryBytes()/1024
-	d.VCPU = spec.GetVcpu()
+	d.VCPU.Value = spec.GetVcpu()
+	if err := applyLibvirtPlacement(d, spec); err != nil {
+		return nil, err
+	}
 	d.OS.Type = "hvm"
 	if cdrom != "" {
 		d.OS.Boots = append(d.OS.Boots, struct {
@@ -271,6 +318,44 @@ func (l *Libvirt) domainFor(spec *agentv1.InstanceSpec, dir, cdrom string, meta 
 	return d, nil
 }
 
+// applyLibvirtPlacement renders spec's placement (PLAN.md §3.8): vCPUs pinned one to one (vcpupin)
+// or floating within the CPU set (vcpu cpuset), memory bound strictly to its NUMA nodes (numatune),
+// backed by hugepages from those nodes' pools (memoryBacking), and a virtio balloon only when asked
+// for (libvirt would otherwise add one to every guest).
+func applyLibvirtPlacement(d *domainXML, spec *agentv1.InstanceSpec) error {
+	p, err := PlacementOf(spec)
+	if err != nil {
+		return err
+	}
+	d.Devices.Memballoon = &memballoonXML{Model: "none"}
+	if p == nil {
+		return nil
+	}
+	if len(p.CPUs) > 0 {
+		d.VCPU.Placement, d.VCPU.CPUSet = "static", FormatCPUList(p.CPUs)
+		if p.Pinned(spec.GetVcpu()) {
+			d.CPUTune = &cputuneXML{}
+			for i, cpu := range p.CPUs {
+				d.CPUTune.VCPUPins = append(d.CPUTune.VCPUPins, vcpupinXML{VCPU: uint32(i), CPUSet: strconv.Itoa(cpu)})
+			}
+		}
+	}
+	if len(p.MemNodes) > 0 {
+		d.NUMATune = &numatuneXML{}
+		d.NUMATune.Memory.Mode, d.NUMATune.Memory.Nodeset = "strict", FormatCPUList(p.MemNodes)
+	}
+	if p.HugepageSize != 0 {
+		d.MemoryBacking = &memoryBackingXML{}
+		d.MemoryBacking.Hugepages.Page.Size, d.MemoryBacking.Hugepages.Page.Unit = p.HugepageSize/1024, "KiB"
+		// Guest memory in hugepages is never swapped or reclaimed: lock it, as the pages are.
+		d.MemoryBacking.Locked = &struct{}{}
+	}
+	if p.Balloon {
+		d.Devices.Memballoon.Model = "virtio"
+	}
+	return nil
+}
+
 func (l *Libvirt) define(ctx context.Context, d *domainXML, dir string) error {
 	raw, err := xml.MarshalIndent(d, "", "  ")
 	if err != nil {
@@ -321,7 +406,7 @@ func (l *Libvirt) List(ctx context.Context) ([]Domain, error) {
 			if xml.Unmarshal(raw, &x) == nil && x.Metadata != nil && x.Metadata.Instance.ID == name {
 				m := x.Metadata.Instance
 				d.Managed, d.AllocationID, d.Image, d.RestoredFrom = true, m.Allocation, m.Image, m.Restored
-				d.VCPU, d.MemoryBytes = x.VCPU, x.Memory.Value*1024
+				d.VCPU, d.MemoryBytes = x.VCPU.Value, x.Memory.Value*1024
 				if m.Addresses != "" {
 					d.Addresses = strings.Split(m.Addresses, ",")
 				}

@@ -90,6 +90,8 @@ type chRecord struct {
 	MemoryBytes  uint64          `json:"memoryBytes"`
 	DiskBytes    uint64          `json:"diskBytes"`
 	MACs         []string        `json:"macs,omitempty"`
+	// Placement is the spec's (PLAN.md §3.8): the VMM unit's CPU and memory-node confinement.
+	Placement *Placement `json:"placement,omitempty"`
 }
 
 const chManaged = "better-compute/cloud-hypervisor/1"
@@ -256,9 +258,28 @@ func (c *CloudHypervisor) vmConfig(spec *agentv1.InstanceSpec, dir string, overl
 		}
 		devices = append(devices, map[string]any{"path": "/sys/bus/pci/devices/" + addr + "/"})
 	}
+	placement, err := PlacementOf(spec)
+	if err != nil {
+		return nil, err
+	}
+	cpus := map[string]any{"boot_vcpus": spec.GetVcpu(), "max_vcpus": spec.GetVcpu()}
+	memory := map[string]any{"size": spec.GetMemoryBytes()}
+	// Placement (PLAN.md §3.8): a pinned vCPU runs on its own host CPU (a floating set is the unit's
+	// AllowedCPUs); hugepage-backed memory comes from a hugetlb memfd, so the confined VMM needs no
+	// hugetlbfs mount, and the pages are taken from the unit's NUMA nodes (AllowedMemoryNodes).
+	if placement.Pinned(spec.GetVcpu()) {
+		var affinity []any
+		for i, cpu := range placement.CPUs {
+			affinity = append(affinity, map[string]any{"vcpu": i, "host_cpus": []int{cpu}})
+		}
+		cpus["affinity"] = affinity
+	}
+	if placement != nil && placement.HugepageSize != 0 {
+		memory["hugepages"], memory["hugepage_size"] = true, placement.HugepageSize
+	}
 	cfg := map[string]any{
-		"cpus":    map[string]any{"boot_vcpus": spec.GetVcpu(), "max_vcpus": spec.GetVcpu()},
-		"memory":  map[string]any{"size": spec.GetMemoryBytes()},
+		"cpus":    cpus,
+		"memory":  memory,
 		"payload": map[string]any{"firmware": c.firmware()},
 		"disks":   disks,
 		"serial":  map[string]any{"mode": "Socket", "socket": filepath.Join(dir, "serial.sock")},
@@ -270,6 +291,10 @@ func (c *CloudHypervisor) vmConfig(spec *agentv1.InstanceSpec, dir string, overl
 	}
 	if len(devices) > 0 {
 		cfg["devices"] = devices
+	}
+	if placement != nil && placement.Balloon {
+		// Free pages go back to the host; the guest keeps what it uses (never with hugepages).
+		cfg["balloon"] = map[string]any{"size": 0, "deflate_on_oom": true, "free_page_reporting": true}
 	}
 	return cfg, nil
 }
@@ -283,6 +308,11 @@ func (c *CloudHypervisor) Ensure(ctx context.Context, spec *agentv1.InstanceSpec
 	id := spec.GetInstanceId()
 	if !instanceID.MatchString(id) {
 		return fmt.Errorf("instance id %q", id)
+	}
+	// Checked before anything is created: a spec the host cannot apply exactly is refused whole.
+	placement, err := PlacementOf(spec)
+	if err != nil {
+		return err
 	}
 	dir := c.instanceDir(id)
 	r, err := c.record(id)
@@ -355,6 +385,7 @@ func (c *CloudHypervisor) Ensure(ctx context.Context, spec *agentv1.InstanceSpec
 	}
 	r.Config, _ = json.Marshal(cfg)
 	r.VCPU, r.MemoryBytes, r.DiskBytes = spec.GetVcpu(), spec.GetMemoryBytes(), spec.GetDiskBytes()
+	r.Placement = placement
 	r.GPUs = append([]string(nil), spec.GetGpuDeviceIds()...)
 	r.Addresses, r.MACs, r.Networks = nil, nil, nil
 	for _, n := range spec.GetNics() {
@@ -424,7 +455,7 @@ func (c *CloudHypervisor) unitProperties(r *chRecord) []string {
 		"InaccessiblePaths=-/etc/bcd -/etc/ssh -/etc/libvirt -/etc/shadow -/etc/gshadow",
 		"BindPaths=" + dir, "ReadWritePaths=" + dir,
 		"LimitMEMLOCK=infinity",
-		fmt.Sprintf("MemoryMax=%d", r.MemoryBytes+r.MemoryBytes/32+256<<20),
+		fmt.Sprintf("MemoryMax=%d", chMemoryMax(r)),
 		fmt.Sprintf("TasksMax=%d", 4*r.VCPU+128),
 		fmt.Sprintf("CPUQuota=%d%%", 100*(r.VCPU+1)),
 	}
@@ -441,7 +472,29 @@ func (c *CloudHypervisor) unitProperties(r *chRecord) []string {
 	if len(r.GPUs) > 0 {
 		props = append(props, "DeviceAllow=/dev/vfio/vfio rw", "DeviceAllow=char-vfio rw")
 	}
+	// Placement (PLAN.md §3.8): the whole VMM (vCPU threads included) runs on the booked CPUs and
+	// allocates from the booked NUMA nodes, restored instances too (their saved config keeps no
+	// affinity of its own).
+	if p := r.Placement; p != nil {
+		if len(p.CPUs) > 0 {
+			props = append(props, "AllowedCPUs="+FormatCPUList(p.CPUs))
+		}
+		if len(p.MemNodes) > 0 {
+			props = append(props, "AllowedMemoryNodes="+FormatCPUList(p.MemNodes))
+		}
+	}
 	return props
+}
+
+// chMemoryMax bounds a VMM's memory cgroup: the guest's memory plus overhead. Hugepage-backed guest
+// memory is charged to the hugetlb pool, not the memory cgroup, so there only the overhead counts
+// (a restored instance runs on normal pages: its saved config keeps none).
+func chMemoryMax(r *chRecord) uint64 {
+	overhead := r.MemoryBytes/32 + 256<<20
+	if r.Placement != nil && r.Placement.HugepageSize != 0 && r.RestoredFrom == "" {
+		return overhead
+	}
+	return r.MemoryBytes + overhead
 }
 
 // launch starts the instance's VMM as a confined transient unit and waits for its API.
@@ -1019,8 +1072,13 @@ func restoredConfig(saved, fresh map[string]any, spec *agentv1.InstanceSpec) (ma
 		}
 		return out
 	}
+	restoredCPUs := keep(cpus, "boot_vcpus", "max_vcpus", "topology", "kvm_hyperv", "max_phys_bits", "features")
+	// bcd's own pinning, never the snapshot's (placement, PLAN.md §3.8).
+	if affinity, ok := section(fresh, "cpus")["affinity"]; ok {
+		restoredCPUs["affinity"] = affinity
+	}
 	cfg := map[string]any{
-		"cpus":   keep(cpus, "boot_vcpus", "max_vcpus", "topology", "kvm_hyperv", "max_phys_bits", "features"),
+		"cpus": restoredCPUs,
 		// No hugepages: they are not charged to the unit's MemoryMax.
 		"memory": keep(memory, "size", "mergeable", "shared", "prefault", "thp"),
 	}
