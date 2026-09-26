@@ -128,9 +128,13 @@ describe('metal driver kinds', () => {
 });
 
 describe('metal verbs', () => {
-  const rows = apiSurface.filter((row) => row.group === 'metal');
+  // The verbs are the group's mutations; metal.discovered (PXE discovery) is a read on the site.
+  const rows = apiSurface.filter((row) => row.group === 'metal' && row.kind === 'mutation');
 
   it('are the metal methods of the §9.2 table', () => {
+    expect(apiSurface.filter((row) => row.group === 'metal' && row.kind !== 'mutation')).toMatchObject([
+      { method: 'discovered', action: 'compute:sites:read', resource: 'site' },
+    ]);
     expect([...metalVerbs]).toEqual(rows.map((row) => row.method));
     for (const row of rows) {
       expect(row.module).toBe('metal');

@@ -1,4 +1,5 @@
 import { ComputeError, type Json, type ProfileDocument, type ProfileStep, type SqlTx } from '@better-compute/core';
+import { isMatchableUuid } from './discovery.js';
 import type { HardwareProfile } from './module-types.js';
 import type { MetalNodeRow } from './store.js';
 
@@ -158,9 +159,22 @@ export interface UnmetBmcNeed {
 }
 
 /**
+ * What a media step needs instead when the driver lacks virtual media: an ISO from the catalog
+ * (`with.image`) is booted with iPXE `sanboot` from the site cache (ProxyDhcpEntry.sanboot_sha256), which
+ * needs only the PXE boot device. A bare `url` or `fromStep` ISO has no verified cache copy: no fallback.
+ */
+export function sanbootFallback(step: Pick<ProfileStep, 'use' | 'with'>): BmcOperationName[] | undefined {
+  if (step.use === 'media.eject') return [];
+  if (step.use === 'media.insert' && typeof (step.with as Record<string, unknown> | undefined)?.image === 'string')
+    return ['management.setBootDevice'];
+  return undefined;
+}
+
+/**
  * The steps of `profiles` that need BMC operations `node`'s driver does not serve. Optional steps, and
- * steps that may fail (`onFailure: 'continue'`), are left out: they never stop the workflow. Empty for a
- * driver not in the table.
+ * steps that may fail (`onFailure: 'continue'`), are left out: they never stop the workflow. A media step
+ * the driver cannot serve counts its sanboot fallback (`sanbootFallback`) instead. Empty for a driver not
+ * in the table.
  */
 export function unmetBmcNeeds(
   profiles: readonly ProfileDocument[],
@@ -175,7 +189,9 @@ export function unmetBmcNeeds(
       if (step.onFailure === 'continue') continue;
       const need = stepBmcNeed(step, node, options.hardwareProfiles);
       if (!need || need.optional) continue;
-      const missing = need.operations.filter((operation) => !served.has(operation));
+      let missing = need.operations.filter((operation) => !served.has(operation));
+      const fallback = missing.length ? sanbootFallback(step) : undefined;
+      if (fallback) missing = fallback.filter((operation) => !served.has(operation));
       if (missing.length) unmet.push({ profile: `${profile.id}@${profile.version}`, step: step.use, operations: missing });
     }
   return unmet;
@@ -203,22 +219,24 @@ export function assertBmcNeeds(
 }
 
 /**
- * A machine the ramdisk will boot (a pool with an agent) needs its PXE MACs: from out-of-band inspection
- * when the driver reports them, else given at enroll. `UNSUPPORTED` (`bmc-driver-unsupported`) otherwise.
- * Only the table says whether inspection finds MACs: a driver it does not know is not checked.
+ * A machine the ramdisk will boot (a pool with an agent) needs its PXE MACs. They come from out-of-band
+ * inspection when the driver reports them, else from enroll, else from PXE discovery by its product UUID
+ * (discovery.ts). A usable UUID is one given at enroll or reported by the BMC. `UNSUPPORTED`
+ * (`bmc-driver-unsupported`) otherwise. Only the table says whether inspection finds MACs: a driver it
+ * does not know is not checked.
  */
 export function assertPxeMacsKnowable(
-  node: Pick<MetalNodeRow, 'bmc_driver' | 'macs' | 'pool_agent'>,
+  node: Pick<MetalNodeRow, 'bmc_driver' | 'macs' | 'pool_agent'> & Partial<Pick<MetalNodeRow, 'product_uuid'>>,
   options: Pick<CapabilityOptions, 'bmcDrivers' | 'reportedKinds'> = {},
 ): void {
-  if (node.pool_agent === 'none' || node.macs.length > 0) return;
+  if (node.pool_agent === 'none' || node.macs.length > 0 || isMatchableUuid(node.product_uuid)) return;
   if (!servedBmcOperations(node.bmc_driver, options.bmcDrivers)) return;
   const served = servedBmcOperations(node.bmc_driver, options.bmcDrivers, options.reportedKinds)!;
   if (served.has(inspectFindsMacs)) return;
   throw bmcDriverUnsupported(
     node.bmc_driver,
     [{ profile: 'metal-inspect', step: 'metal.ensureRamdisk', operations: [inspectFindsMacs] }],
-    'It cannot report the PXE MACs the ramdisk boots from: enroll the machine with macs',
+    'It cannot report the PXE MACs the ramdisk boots from: enroll the machine with macs, or with its productUuid for PXE discovery',
   );
 }
 

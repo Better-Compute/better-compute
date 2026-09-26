@@ -8,10 +8,11 @@ Creates a metal node from a BMC address, driver and credentials in the given poo
 - `bmc.credentials` is a `secret://` reference or an inline username and password. Inline credentials go to the secret broker before anything is written, and only the reference is stored; without a secret broker they are `INVALID_CONFIG`.
 - The node's driver bindings come from the BMC (power, management, virtual media), then the hardware profile (`hardwareProfile`, else the pool's `policy.hardwareProfile`). An unknown hardware profile is `INVALID_INPUT`.
 - `bmc.driverOptions` is a JSON object of at most 1 KiB for the BMC driver (e.g. `{ "cipherSuite": 3 }` for older IPMI BMCs), sent on every BMC request and validated by the driver. Keys that look like credentials are `INVALID_INPUT`: credentials travel only as `bmc.credentials`.
-- `addresses` are the machine's own IP literals (at most 16). In an agentless pool the site's agents can reach the machine through them at once; out-of-band inspection replaces them only when it reports some (IPMI reports none). A driver that cannot report MACs needs `macs` given here.
+- `addresses` are the machine's own IP literals (at most 16). In an agentless pool the site's agents can reach the machine through them at once; out-of-band inspection replaces them only when it reports some (IPMI reports none).
+- A driver that cannot report MACs (IPMI) needs `macs`, or `productUuid` (the SMBIOS UUID its BMC reports). With the UUID alone, PXE discovery fills the MAC: the first boot PXE-boots the machine once with no boot entry, and its site agent lists it (see `discovered`). A firmware placeholder UUID (all zeros, all ones, `03000200-0400-0500-0006-000700080009`) cannot stand in for the MACs.
 - `NOT_FOUND` when the pool does not exist or the tenant does not own it; `INVALID_INPUT` when the pool is not in `siteId`.
 
-Each call creates a new node; there is no idempotency key. Publishes `node.enrolled`.
+Each call creates a new node; there is no idempotency key. Publishes `node.enrolled`, and `node.pxe-mac.discovered` when a site agent had already seen the machine.
 
 ## manage
 
@@ -97,3 +98,12 @@ Runs one lifecycle verb on many nodes of a pool at once (`manage`, `inspect`, `p
 - `wipe` applies to `undeploy` only.
 
 Decided as `compute:nodes:provision` on the pool, then per node.
+
+## discovered
+
+Lists the machines the site's agents saw PXE-booting from a MAC with no boot entry in the last 24 hours, newest first. The agents never answer or enroll them.
+
+- Decided as `compute:sites:read` on the site, and only the tenant that owns the site sees it (`NOT_FOUND` otherwise): the list describes the site's network.
+- Each machine has its `mac`, the `productUuid` its DHCP request carried (as sent: SMBIOS stores the first three fields byte-swapped), its `arch`, when it was first and last seen, a request `count` summed over agents, the DHCP `relays` it came through, and the `agentNodeIds` that saw it.
+- `nodeId` names the enrolled machine with that MAC, or the one whose MAC it filled. An enrolled machine without MACs gets one only when its product UUID, in any byte order, was seen from exactly one MAC, no other machine of the site shares the UUID, and the MAC is not already enrolled. It then publishes `node.pxe-mac.discovered`.
+- At most 256 machines per agent, as each agent's last status report lists them.

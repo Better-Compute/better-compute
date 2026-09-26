@@ -178,6 +178,11 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
       actions: action('sandboxes', 'read', 'delete'),
       attributes: { sandboxId: 'string', templateId: 'string', includeMemory: 'boolean' },
     },
+    [`${p}sandbox-volume`]: {
+      parent: `${p}pool`,
+      actions: action('sandboxes', 'read', 'manage'),
+      attributes: { sizeGiB: 'number' },
+    },
   };
 }
 

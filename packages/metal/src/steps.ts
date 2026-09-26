@@ -40,11 +40,13 @@ import {
 } from './bmc-rotation.js';
 import {
   assertPxeMacsKnowable,
+  bmcDriverUnsupported,
   servesBmcOperation,
   siteDriverKinds,
   unsupportedBmcCodes,
   type BmcDriverCapabilities,
 } from './capabilities.js';
+import { isMatchableUuid, matchDiscoveredMachines } from './discovery.js';
 import { invalidateSiteProxyTargets } from './proxy-targets.js';
 import { newIdentityGeneration, tenantRootPolicy } from './tenant-root.js';
 import { bmcResult, dcgmResult, deployResult, inventoryRefreshResult, wipeResult } from './results.js';
@@ -157,14 +159,18 @@ export function canonicalJson(value: Json): string {
 const bootArch = (node: Pick<MetalNodeRow, 'arch' | 'uefi'>) =>
   node.arch === 'arm64' ? 'BOOT_ARCH_ARM64_EFI' : node.uefi ? 'BOOT_ARCH_X86_64_EFI' : 'BOOT_ARCH_BIOS';
 
-/** One `bettercompute.site.v1.ProxyDhcpEntry` per PXE MAC, as proto3 JSON. */
-export function proxyDhcpEntriesJson(node: MetalNodeRow, workflowId: string, notAfter: Date): Json[] {
+/**
+ * One `bettercompute.site.v1.ProxyDhcpEntry` per PXE MAC, as proto3 JSON. `sanbootSha256` (hex): the entry
+ * boots that cached ISO with iPXE `sanboot` instead of the ramdisk (a driver without virtual media).
+ */
+export function proxyDhcpEntriesJson(node: MetalNodeRow, workflowId: string, notAfter: Date, sanbootSha256?: string): Json[] {
   return node.macs.map((mac) => ({
     mac,
     ...(node.product_uuid ? { productUuid: node.product_uuid } : {}),
     arch: bootArch(node),
     workflowId,
     notAfter: notAfter.toISOString(),
+    ...(sanbootSha256 ? { sanbootSha256: Buffer.from(sanbootSha256, 'hex').toString('base64') } : {}),
   }));
 }
 
@@ -188,19 +194,20 @@ export const discoveryTokenTtlSeconds = 900;
  * join token for the ramdisk, bound to that MAC (`expect`). It travels only as a secret ref: the
  * site agent fetches the bearer with a SecretRequest for this workflow step and renders it into that
  * MAC's iPXE script, so no command body ever holds it. A token is minted only when its entry's
- * command is first sent, not on every poll of the step. boot.cleanUp deletes the refs.
+ * command is first sent, not on every poll of the step. boot.cleanUp deletes the refs. A sanboot entry
+ * (`sanbootSha256`) boots an ISO as is: it carries no token.
  */
-async function prepareBootEntries(context: StepContext, node: MetalNodeRow, keyPrefix?: string): Promise<void> {
+async function prepareBootEntries(context: StepContext, node: MetalNodeRow, keyPrefix?: string, sanbootSha256?: string): Promise<void> {
   if (node.macs.length === 0)
     throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no known PXE MAC; inspect it out of band first`);
   const agent = await siteAgent(context, node.node_id);
   const { rows } = await context.sql.query<{ not_after: Date }>(`SELECT compute_now() + interval '2 hours' AS not_after`);
-  const entries = proxyDhcpEntriesJson(node, context.workflowId, rows[0]!.not_after);
+  const entries = proxyDhcpEntriesJson(node, context.workflowId, rows[0]!.not_after, sanbootSha256);
   for (const [i, entry] of entries.entries()) {
     const key = `${keyPrefix ?? 'entry'}-${i}`;
     const sent = await context.sql.query('SELECT 1 FROM commands WHERE node_id = $1 AND idempotency_key = $2', [agent, stepCommandKey(context, key)]);
     let payload = entry;
-    if (!sent.rowCount && context.pki && context.secrets) {
+    if (!sent.rowCount && !sanbootSha256 && context.pki && context.secrets) {
       const mac = node.macs[i]!;
       const { token } = await context.sql.transaction((tx) =>
         context.pki!.issueJoinToken(tx, {
@@ -234,6 +241,16 @@ async function discoveryTokenRefs(context: StepContext): Promise<string[]> {
     for (const match of Buffer.from(row.body).toString('latin1').matchAll(/secret:\/\/[A-Za-z0-9._:-]{1,128}\/[A-Za-z0-9._-]{1,128}/g))
       refs.add(match[0]);
   return [...refs];
+}
+
+/** Whether the workflow's last media step sanbooted an ISO (media.insert without virtual media) not ejected since. */
+async function sanbootActive(context: StepContext): Promise<boolean> {
+  const { rows } = await context.sql.query<{ action: string; result: { sanboot?: unknown } | null }>(
+    `SELECT action, result FROM workflow_steps WHERE workflow_id = $1 AND action IN ('media.insert', 'media.eject') AND state = 'succeeded'
+      ORDER BY index DESC LIMIT 1`,
+    [context.workflowId],
+  );
+  return rows[0]?.action === 'media.insert' && typeof rows[0].result?.sanboot === 'string';
 }
 
 const powerActions = ['on', 'off', 'graceful-off', 'reset', 'graceful-restart', 'cycle', 'nmi'] as const;
@@ -299,12 +316,17 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
     }),
     async run(input, context) {
       const node = await metalNode(context);
-      await bmc(context, 'bmc.boot', 'management.setBootDevice', {
-        device: input.device,
-        persistent: input.persistent ?? false,
-        uefi: node.uefi,
-      });
-      return { device: input.device };
+      // The workflow's ISO is sanbooted (media.insert without virtual media): the "CD" is on the network.
+      const device = input.device === 'cd' && (await sanbootActive(context)) ? 'pxe' : input.device;
+      await bmc(
+        context,
+        'bmc.boot',
+        'management.setBootDevice',
+        { device, persistent: input.persistent ?? false, uefi: node.uefi },
+        undefined,
+        node,
+      );
+      return { device, ...(device !== input.device ? { sanboot: true } : {}) };
     },
   });
 
@@ -324,6 +346,8 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       const pxeMacs = () => {
         if (node.pool_agent === 'none' || node.macs.length > 0) return;
         assertPxeMacsKnowable(node, { ...(options.bmcDrivers ? { bmcDrivers: options.bmcDrivers } : {}), reportedKinds });
+        // Its product UUID is known: PXE discovery fills the MAC (metal.ensureRamdisk waits for it).
+        if (isMatchableUuid(node.product_uuid)) return;
         throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no known PXE MAC: enroll it with macs`);
       };
       if (servesBmcOperation(node.bmc_driver, 'inspect.inspect', options.bmcDrivers, reportedKinds) === false) {
@@ -357,7 +381,13 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
           );
           // The site's agents may now reach (site.httpProxy) the addresses of an agentless machine.
           if (addresses.length && context.node) await invalidateSiteProxyTargets(tx, context.desired, context.node.siteId);
+          // A UUID the BMC reports, without MACs: a site agent may already have seen it PXE-booting.
+          if (macs.length === 0 && node.macs.length === 0 && isMatchableUuid(uuid))
+            node.macs = (await matchDiscoveredMachines(tx, node.site_id, { nodeId: node.node_id, events: context.events, work: context.work })).map(
+              (match) => match.mac,
+            );
         });
+      if (uuid) node.product_uuid = uuid;
       // IPMI inspects (FRU, chassis) but cannot name the host's NICs.
       if (macs.length === 0) pxeMacs();
       return result;
@@ -404,6 +434,8 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   /**
    * Boots the machine into the ramdisk unless it is already there: one-time PXE, the boot entry,
    * a power cycle, then it waits for the ramdisk to join. Each command is sent once per attempt.
+   * A machine known only by its product UUID is PXE-booted once without an entry first: its site agent
+   * lists it (StatusReport.discovered), the match fills its MAC (discovery.ts), and the step goes on.
    */
   const ensureRamdisk = defineStep({
     id: 'metal.ensureRamdisk',
@@ -413,11 +445,19 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
     retrySafe: true,
     input: manifest({}),
     async run(_input, context) {
-      const node = await metalNode(context);
+      let node = await metalNode(context);
       if (await ramdiskConnected(context, node.node_id)) return { ramdisk: 'connected' };
-      if (node.macs.length === 0)
+      if (node.macs.length === 0 && !isMatchableUuid(node.product_uuid))
         throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no known PXE MAC; inspect it out of band first`);
       await bmc(context, 'bmc.boot', 'management.setBootDevice', { device: 'pxe', persistent: false, uefi: node.uefi }, 'boot-device', node);
+      if (node.macs.length === 0) {
+        await bmc(context, 'bmc.power', 'power.setPower', { action: 'cycle' }, 'discovery-cycle', node);
+        const matched = await context.sql.transaction((tx) =>
+          matchDiscoveredMachines(tx, node.site_id, { nodeId: node.node_id, events: context.events, work: context.work }),
+        );
+        if (matched.length === 0) throw stepNotReady(5_000);
+        node = await metalNode(context);
+      }
       await prepareBootEntries(context, node, 'boot-entry');
       await bmc(context, 'bmc.power', 'power.setPower', { action: 'cycle' }, 'power-cycle', node);
       if (!(await ramdiskConnected(context, node.node_id))) throw stepNotReady(5_000);
@@ -428,46 +468,111 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   /**
    * Mounts an ISO (an https URL, usually the site cache) through the BMC's virtual media: a fixed
    * `url`, or `fromStep`, the `url` an earlier step of the workflow returned (a per-node ISO a
-   * plugin rendered, §5.6 walkthrough 1).
+   * plugin rendered, §5.6 walkthrough 1), or `image`, an iso of the catalog (its source).
+   * A driver without virtual media (ipmi) boots an `image` with iPXE `sanboot` instead. The image is
+   * pinned at the site so its agents cache it; once one holds it verified, the machine's boot entry names
+   * its digest (ProxyDhcpEntry.sanboot_sha256). A later `management.setBootDevice` to `cd` then boots
+   * from PXE, and `media.eject` removes the entry.
    */
   const mediaInsert = defineStep({
     id: 'media.insert',
     runsOn: 'control-plane',
-    sends: ['bmc.boot'],
+    sends: ['bmc.boot', 'boot.prepareRamdisk'],
     relays: ['site'],
-    timeout: '5m',
+    timeout: '30m',
     retrySafe: true,
     input: manifest({
       url: field.string({ pattern: '^https://', maxLength: 2048 }).optional(),
       fromStep: field.string({ maxLength: 128 }).optional(),
+      image: field.string({ maxLength: 200 }).optional(),
     }),
     async run(input, context) {
-      let url = input.url;
-      if (!url && input.fromStep) {
-        const { rows } = await context.sql.query<{ result: { url?: unknown } | null }>(
-          `SELECT result FROM workflow_steps WHERE workflow_id = $1 AND action = $2 AND state = 'succeeded'
-            ORDER BY index DESC LIMIT 1`,
-          [context.workflowId, input.fromStep],
-        );
-        const found = rows[0]?.result?.url;
-        if (typeof found === 'string' && /^https:\/\/\S{1,2040}$/.test(found)) url = found;
-        else throw new ComputeError('INVALID_STATE', `media.insert: step ${input.fromStep} returned no https url`);
+      const node = await metalNode(context);
+      let image: Awaited<ReturnType<typeof verifyImageForUse>> | undefined;
+      if (input.image) {
+        const resolved = await resolveImageRef(context.sql, node.tenant_id, input.image);
+        if (!resolved) throw new ComputeError('NOT_FOUND', `Image ${input.image} is not in the catalog`);
+        image = await verifyImageForUse(context.sql, resolved, options.images);
+        if (image.format !== 'iso') throw new ComputeError('INVALID_INPUT', `media.insert: image ${input.image} is ${image.format}, not an iso`);
       }
-      if (!url) throw new ComputeError('INVALID_INPUT', 'media.insert needs url or fromStep');
-      await bmc(context, 'bmc.boot', 'virtual-media.insert', { url });
-      return { inserted: url };
+      const reportedKinds = await siteDriverKinds(context.sql, node.site_id, node.bmc_driver);
+      if (servesBmcOperation(node.bmc_driver, 'virtual-media.insert', options.bmcDrivers, reportedKinds) !== false) {
+        try {
+          return await insertVirtualMedia(input, context, node, image);
+        } catch (error) {
+          // The site agent's driver says it has no virtual media: sanboot a catalog iso instead.
+          const code = isComputeError(error, 'DRIVER_ERROR') ? error.details?.errorCode : undefined;
+          if (!image || typeof code !== 'string' || !unsupportedBmcCodes.has(code)) throw error;
+        }
+      }
+      if (!image)
+        throw bmcDriverUnsupported(
+          node.bmc_driver,
+          [{ profile: 'media.insert', step: 'media.insert', operations: ['virtual-media.insert'] }],
+          'Name the ISO with image (an iso of the catalog) to boot it with sanboot from the site cache',
+        );
+      const sanboot = image;
+      await context.sql.transaction((tx) =>
+        pinImageForWorkflow(tx, context.desired, { workflowId: context.workflowId, imageId: sanboot.id, siteId: node.site_id }),
+      );
+      // Only a digest the site's cache holds verified is booted (a boot entry for another fails the site section).
+      const { rows } = await context.sql.query<{ state: string }>('SELECT state FROM image_locations WHERE image_id = $1 AND site_id = $2', [
+        sanboot.id,
+        node.site_id,
+      ]);
+      if (rows[0]?.state !== 'ready') throw stepNotReady(10_000);
+      await prepareBootEntries(context, node, 'sanboot-entry', sanboot.sha256);
+      return { sanboot: sanboot.sha256, imageId: sanboot.id, entries: node.macs.length };
     },
   });
+  /** The virtual-media half of media.insert. */
+  async function insertVirtualMedia(
+    input: { url?: string | undefined; fromStep?: string | undefined },
+    context: StepContext,
+    node: MetalNodeRow,
+    image: { source: string } | undefined,
+  ): Promise<Json> {
+    let url = input.url;
+    if (!url && input.fromStep) {
+      const { rows } = await context.sql.query<{ result: { url?: unknown } | null }>(
+        `SELECT result FROM workflow_steps WHERE workflow_id = $1 AND action = $2 AND state = 'succeeded'
+          ORDER BY index DESC LIMIT 1`,
+        [context.workflowId, input.fromStep],
+      );
+      const found = rows[0]?.result?.url;
+      if (typeof found === 'string' && /^https:\/\/\S{1,2040}$/.test(found)) url = found;
+      else throw new ComputeError('INVALID_STATE', `media.insert: step ${input.fromStep} returned no https url`);
+    }
+    if (!url && image && /^https:\/\/\S{1,2040}$/.test(image.source)) url = image.source;
+    if (!url) throw new ComputeError('INVALID_INPUT', 'media.insert needs url, fromStep or an image with an https source');
+    await bmc(context, 'bmc.boot', 'virtual-media.insert', { url }, undefined, node);
+    return { inserted: url };
+  }
   const mediaEject = defineStep({
     id: 'media.eject',
     runsOn: 'control-plane',
-    sends: ['bmc.boot'],
+    sends: ['bmc.boot', 'boot.cleanUp'],
     relays: ['site'],
     timeout: '5m',
     retrySafe: true,
     input: manifest({}),
-    async run(_input, context) {
-      await bmc(context, 'bmc.boot', 'virtual-media.eject', {});
+    async run(_input, context): Promise<Json> {
+      const node = await metalNode(context);
+      // A sanbooted ISO: its boot entry goes, and so does the pin that kept it in the site cache.
+      if (await sanbootActive(context)) {
+        await awaitCommand(context, {
+          nodeId: await siteAgent(context, node.node_id),
+          kind: 'boot.cleanUp',
+          key: 'sanboot-cleanup',
+          payload: { nodeId: node.node_id, macs: node.macs, workflowId: context.workflowId },
+        });
+        await context.sql.transaction((tx) => releaseImagePins(tx, context.desired, context.workflowId));
+        return { ejected: true, sanboot: true };
+      }
+      const reportedKinds = await siteDriverKinds(context.sql, node.site_id, node.bmc_driver);
+      if (servesBmcOperation(node.bmc_driver, 'virtual-media.eject', options.bmcDrivers, reportedKinds) === false)
+        return { ejected: false, skipped: `the ${node.bmc_driver} driver has no virtual media` };
+      await bmc(context, 'bmc.boot', 'virtual-media.eject', {}, undefined, node);
       return { ejected: true };
     },
   });

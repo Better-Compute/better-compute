@@ -144,6 +144,20 @@ declaration merging. After that, `defineDriver({ implements: { power: … } })` 
 - **`MetalOptions`** takes `hardwareProfiles`: per-concern driver bindings that a pool's nodes
   inherit.
 
+## PXE discovery and sanboot
+
+- Site agents list the machines they see PXE-booting with no boot entry (`StatusReport.discovered`).
+  The gateway stores the list with `metalDiscoveryStatusHandler()`: add it to `reports.status`, next to
+  `xidStatusHandler`. `metal.discovered` serves the list to the site's owner.
+- A machine enrolled with `productUuid` and no `macs` (IPMI) gets its MAC when its UUID was seen from
+  exactly one MAC, in either SMBIOS byte order. No other machine of the site may share the UUID, and
+  placeholder UUIDs never match. `metal.ensureRamdisk` PXE-boots such a machine once to be seen, then
+  boots it from its entry. Nothing is ever enrolled automatically.
+- `media.insert` with `image` (an `iso` of the catalog) needs no virtual media. On a driver without it,
+  the ISO is pinned at the site and booted with iPXE `sanboot` from the site cache
+  (`ProxyDhcpEntry.sanboot_sha256`), once an agent holds it verified. A later `setBootDevice` to `cd`
+  boots from PXE instead, and `media.eject` removes the entry.
+
 ## Destructive-command batches (PLAN.md §13, the v1.0 quorum)
 
 Wipes, image writes, kexec and the BMC's power, boot, storage, firmware and credential operations

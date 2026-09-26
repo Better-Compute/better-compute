@@ -95,4 +95,33 @@ ALTER TABLE metal_nodes ADD COLUMN batch_id text;
 ALTER TABLE metal_nodes ADD COLUMN bmc_driver_options jsonb CHECK (bmc_driver_options IS NULL OR jsonb_typeof(bmc_driver_options) = 'object');
 `,
   },
+  {
+    name: 'metal/0007_discovered',
+    sql: `
+-- PXE discovery (discovery.ts): the machines a site agent saw PXE-booting with no live boot entry
+-- (StatusReport.discovered), as its last report listed them, replaced whole on each change.
+-- matched_node_id: the enrolled machine whose MACs this entry filled.
+CREATE TABLE metal_discovered (
+  agent_node_id text NOT NULL REFERENCES nodes ON DELETE CASCADE,
+  site_id text NOT NULL,
+  mac text NOT NULL CHECK (mac ~ '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$'),
+  product_uuid text CHECK (product_uuid ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
+  arch text NOT NULL DEFAULT '',
+  first_seen timestamptz,
+  last_seen timestamptz,
+  count bigint NOT NULL DEFAULT 0,
+  relay text,
+  matched_node_id text,
+  PRIMARY KEY (agent_node_id, mac)
+);
+CREATE INDEX metal_discovered_site ON metal_discovered (site_id);
+CREATE INDEX metal_discovered_uuid ON metal_discovered (product_uuid) WHERE product_uuid IS NOT NULL;
+-- The digest of each agent's last stored list, so an unchanged report writes nothing.
+CREATE TABLE metal_discovery_reports (
+  agent_node_id text PRIMARY KEY REFERENCES nodes ON DELETE CASCADE,
+  sha256 bytea NOT NULL,
+  reported_at timestamptz NOT NULL DEFAULT compute_now()
+);
+`,
+  },
 ]);

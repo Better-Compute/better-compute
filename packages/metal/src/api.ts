@@ -32,6 +32,7 @@ import {
 } from './capabilities.js';
 import { isIP } from 'node:net';
 import { metalPayloads } from './commands.js';
+import { isMatchableUuid, listDiscovered, matchDiscoveredMachines, normalizeUuid, type DiscoveredMachineView } from './discovery.js';
 import type { HardwareProfile } from './module-types.js';
 import { invalidateSiteProxyTargets } from './proxy-targets.js';
 import { stateProfile, unrescueProfile } from './profiles.js';
@@ -168,6 +169,11 @@ export type MetalApi = {
      * transaction. With the deployment's quorum on, those commands wait for the batch's approvals.
      */
     bulk: MethodDefinition<BulkInput, BulkOutput>;
+    /**
+     * The machines the site's agents saw PXE-booting with no boot entry (StatusReport.discovered), seen in
+     * the last 24 h: never answered, never enrolled. Each names the enrolled machine with its MAC, if any.
+     */
+    discovered: MethodDefinition<DiscoveredInput, DiscoveredOutput>;
   };
 };
 
@@ -178,7 +184,16 @@ export interface PowerOutput {
   held?: boolean;
 }
 
-export type BulkVerb = 'manage' | 'inspect' | 'provide' | 'undeploy' | 'rescue' | 'retire';
+export interface DiscoveredInput {
+  tenantId: string;
+  siteId: string;
+}
+export interface DiscoveredOutput {
+  siteId: string;
+  machines: DiscoveredMachineView[];
+}
+
+export type BulkVerb ='manage' | 'inspect' | 'provide' | 'undeploy' | 'rescue' | 'retire';
 const bulkVerbs: Readonly<Record<BulkVerb, ProvisionVerb>> = {
   manage: 'manage',
   inspect: 'inspect',
@@ -272,7 +287,8 @@ function validateEnroll(raw: unknown): EnrollInput {
       return macPattern.test(normalized) ? normalized : fail(`${mac} is not a MAC address`);
     });
   }
-  if (input.productUuid !== undefined) out.productUuid = text(input.productUuid, 'productUuid', 64).toLowerCase();
+  if (input.productUuid !== undefined)
+    out.productUuid = normalizeUuid(text(input.productUuid, 'productUuid', 64)) ?? fail('productUuid must be a UUID (8-4-4-4-12 hex digits)');
   if (input.arch !== undefined) out.arch = input.arch === 'x86_64' || input.arch === 'arm64' ? input.arch : fail("arch must be 'x86_64' or 'arm64'");
   if (input.uefi !== undefined) out.uefi = typeof input.uefi === 'boolean' ? input.uefi : fail('uefi must be true or false');
   if (input.hardwareProfile !== undefined) out.hardwareProfile = text(input.hardwareProfile, 'hardwareProfile', 64);
@@ -321,6 +337,7 @@ async function enroll(context: MethodContext, caps: Capabilities, input: EnrollI
     const planned = {
       bmc_driver: input.bmc.driver,
       macs: input.macs ?? [],
+      product_uuid: input.productUuid ?? null,
       pool_agent: pool.agent,
       hardware_profile: profile ?? null,
       pool_policy: pool.policy,
@@ -374,6 +391,9 @@ async function enroll(context: MethodContext, caps: Capabilities, input: EnrollI
       subject: `node/${id}`,
       data: { nodeId: id, poolId: input.poolId, siteId: input.siteId },
     });
+    // Without MACs but with its UUID: a site agent may already have seen it PXE-booting (discovery.ts).
+    if (!input.macs?.length && isMatchableUuid(input.productUuid))
+      await matchDiscoveredMachines(tx, input.siteId, { nodeId: id, events: context.events, work: context.work });
     return metalNodeView(await readMetalNode(tx, id));
   });
 }
@@ -617,6 +637,21 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
             });
             return { commandId: command.id, ...(batch ? { batchId: batch.batchId, held: batch.held } : {}) };
           }),
+      }),
+      discovered: defineMethod<DiscoveredInput, DiscoveredOutput>({
+        action: 'compute:sites:read',
+        kind: 'read',
+        resource: (input) => ({ type: 'site', id: input.siteId }),
+        validate: describedBy(schemas.discovered, (raw): DiscoveredInput => {
+          const input = object(raw, ['tenantId', 'siteId']);
+          return { tenantId: tenant(input.tenantId), siteId: text(input.siteId, 'siteId', 128) };
+        }),
+        handler: async (context, input) => {
+          // The site's network is its owner's: only the owning tenant sees what boots on it.
+          const { rows } = await context.sql.query<{ owner_tenant_id: string }>('SELECT owner_tenant_id FROM sites WHERE id = $1', [input.siteId]);
+          if (rows[0]?.owner_tenant_id !== input.tenantId) throw new ComputeError('NOT_FOUND', `Site ${input.siteId} does not exist`);
+          return { siteId: input.siteId, machines: await listDiscovered(context.sql, input.siteId) };
+        },
       }),
       bulk: defineMethod<BulkInput, BulkOutput>({
         action: 'compute:nodes:provision',
