@@ -48,6 +48,11 @@ export interface WidgetDef {
   href?: string;
   /** Per-instance options; the component reads them from `props.settings`. */
   settings?: WidgetSetting[];
+  /**
+   * True when the widget reads the live API while the workspace source is 'live'. In live mode, widgets
+   * without it keep showing the simulation and their frame says so.
+   */
+  live?: boolean;
   component: ComponentType<WidgetProps>;
 }
 

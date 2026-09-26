@@ -427,6 +427,7 @@ function WidgetCatalog({
                     <span className="flex items-center gap-2">
                       <widget.icon className="size-4 text-text-tertiary group-hover:text-signal" aria-hidden />
                       <span className="flex-1 truncate text-body-medium text-text-primary">{widget.title}</span>
+                      {widget.live && <span className="border border-signal-fill/50 px-1 font-mono text-[9px] text-signal uppercase">live</span>}
                       {present.has(widget.id) && <span className="font-mono text-[10px] text-text-tertiary">on board</span>}
                     </span>
                     <span className="line-clamp-2 text-caption-1-regular text-text-secondary">{widget.description}</span>

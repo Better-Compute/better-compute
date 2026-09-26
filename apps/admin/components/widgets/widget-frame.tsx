@@ -15,6 +15,7 @@ import {
   RiRulerLine,
 } from 'react-icons/ri';
 import { widgetSettings, type WidgetDef } from '@/lib/modules';
+import { useWorkspace } from '@/components/shell/workspace';
 import { Menu, ToolButton } from '@/components/ui/overlay';
 import { EmptyState } from '@/components/ui/panel';
 import { cx } from '@/utils/cx';
@@ -76,6 +77,7 @@ export function WidgetFrame({
   children: ReactNode;
 }) {
   const title = customTitle || def.title;
+  const { source } = useWorkspace();
   return (
     <div
       className={cx(
@@ -100,6 +102,11 @@ export function WidgetFrame({
           )}
           {summary && <span className="truncate text-[10px] font-normal tracking-normal text-text-tertiary normal-case">{summary}</span>}
         </h3>
+        {source === 'live' && !def.live && (
+          <span title="This widget has no live source yet; it shows the simulation" className="shrink-0 border border-dashed border-separator-border-strong px-1 font-mono text-[9px] tracking-wide text-text-tertiary uppercase">
+            sim
+          </span>
+        )}
         {editing && (
           <span className="font-mono text-[10px] text-text-tertiary tabular-nums">
             {size.w}×{size.h}
