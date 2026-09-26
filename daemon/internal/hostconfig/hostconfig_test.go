@@ -407,9 +407,16 @@ func TestContainerToolkitCDI(t *testing.T) {
 			return []byte("cdiVersion: 0.5.0\nkind: nvidia.com/gpu\n"), nil
 		case c.Name == "nvidia-ctk" && c.Args[0] == "runtime":
 			sys.Set("/etc/containerd/config.toml", "version = 2\n# nvidia-container-runtime\n")
+		case c.Name == "nvidia-ctk" && c.Args[0] == "config":
+			have, _ := sys.Get(ToolkitConfig)
+			key, value, _ := strings.Cut(c.Args[3], "=")
+			sys.Set(ToolkitConfig, have+"  "+key+" = "+value+"\n")
 		}
 		return nil, nil
 	}
+	// The packaged config leaves the env-var key commented out (the toolkit's default lets unprivileged
+	// containers pick GPUs with NVIDIA_VISIBLE_DEVICES).
+	sys.Set(ToolkitConfig, "[nvidia-container-runtime]\n#accept-nvidia-visible-devices-envvar-when-unprivileged = true\n")
 	r := NewRegistry(ContainerToolkit{})
 	if _, err := runAll(t, r, sys, unit("container-toolkit", `{"cdi":true}`)); err != nil {
 		t.Fatal(err)
@@ -418,8 +425,14 @@ func TestContainerToolkitCDI(t *testing.T) {
 		t.Fatalf("spec = %q", spec)
 	}
 	cmds := strings.Join(sys.Commands(), "\n")
-	if !strings.Contains(cmds, "nvidia-ctk runtime configure --runtime=containerd --cdi.enabled\nsystemctl restart containerd") {
-		t.Fatalf("commands:\n%s", cmds)
+	for _, want := range []string{
+		"nvidia-ctk runtime configure --runtime=containerd --cdi.enabled\nsystemctl restart containerd",
+		"nvidia-ctk config --in-place --set accept-nvidia-visible-devices-envvar-when-unprivileged=false",
+		"nvidia-ctk config --in-place --set accept-nvidia-visible-devices-as-volume-mounts=false",
+	} {
+		if !strings.Contains(cmds, want) {
+			t.Fatalf("commands lack %q:\n%s", want, cmds)
+		}
 	}
 	if n, err := runAll(t, r, sys, unit("container-toolkit", `{}`)); err != nil || n != 0 {
 		t.Fatalf("converged: %d %v", n, err)

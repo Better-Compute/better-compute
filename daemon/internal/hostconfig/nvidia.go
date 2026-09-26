@@ -260,6 +260,16 @@ type containerToolkitSettings struct {
 
 func (ContainerToolkit) Name() string { return "container-toolkit" }
 
+// ToolkitConfig is the NVIDIA container runtime's configuration (nvidia-ctk config writes it).
+const ToolkitConfig = "/etc/nvidia-container-runtime/config.toml"
+
+// The keys that keep an unprivileged container from choosing GPUs itself, set false (kube's exposure
+// check reads them the same way).
+var (
+	envvarRefused = regexp.MustCompile(`(?m)^\s*accept-nvidia-visible-devices-envvar-when-unprivileged\s*=\s*false\s*$`)
+	mountsRefused = regexp.MustCompile(`(?m)^\s*accept-nvidia-visible-devices-as-volume-mounts\s*=\s*false\s*$`)
+)
+
 // containerRuntimes are the runtimes nvidia-ctk configures: the program that marks one installed,
 // the file its configuration lives in, and the systemd unit restarted after.
 var containerRuntimes = []struct{ name, program, config, service string }{
@@ -306,6 +316,23 @@ func (c ContainerToolkit) Plan(ctx context.Context, sys System, settings json.Ra
 	}
 	if !cdi {
 		return actions, nil
+	}
+	// With CDI, a container gets GPUs by the CDI names bcd hands out, and nothing else: the toolkit's
+	// runtime must not let an unprivileged container pick GPUs itself (with NVIDIA_VISIBLE_DEVICES, or as
+	// volume mounts). The packaged config leaves the env-var key commented out, and its default lets
+	// them: a pod could take GPUs other tenants hold (kube's ForeignGpuExposure check withdraws them).
+	// The runtime reads its config per container: no restart.
+	toolkit, _, err := readTrim(sys, ToolkitConfig)
+	if err != nil {
+		return nil, err
+	}
+	for _, key := range []struct {
+		name    string
+		refused *regexp.Regexp
+	}{{"accept-nvidia-visible-devices-envvar-when-unprivileged", envvarRefused}, {"accept-nvidia-visible-devices-as-volume-mounts", mountsRefused}} {
+		if !key.refused.MatchString(toolkit) {
+			actions = append(actions, run(sys, Cmd{Name: "nvidia-ctk", Args: []string{"config", "--in-place", "--set", key.name + "=false"}}))
+		}
 	}
 	stamp, err := cdiStamp(ctx, sys)
 	if err != nil {
