@@ -418,6 +418,22 @@ events. It never drops a hold on its own.
   guest's gateway and nameservers, the rebind ref, host-only SSH and placement. When bcd's tap rules
   guard an instance and a running instance's taps are missing, the instance is stopped (fail closed).
 
+**Site boot server** (`agent/bootserver.go`, `agent/discovery.go`, `agent/sanboot.go`). While a site
+agent holds the `site:<id>:boot` lease, it answers PXE only for machines metal prepared
+(`boot.prepareRamdisk`). Their iPXE script boots the site ramdisk with a single-use discovery token
+and a discovery assertion the agent signs.
+
+- An unknown machine that PXE-boots is never answered. It is listed in `StatusReport.discovered`:
+  MAC, SMBIOS UUID (DHCP option 97), arch, first and last seen, count, and relay (giaddr).
+  - The list holds at most 256 machines and forgets one 24 hours after it was last seen.
+  - A new machine asks for a status report, at most one per 30 seconds.
+  - Metal matches machines enrolled without MACs (IPMI) by UUID.
+- An entry with `sanboot_sha256` boots that ISO with `sanboot` from the agent's verified cache, for
+  BMCs without virtual media.
+  - The ISO must be a cache image the site spec names as `iso`.
+  - Until it is cached, the machine waits; it never falls back to the ramdisk.
+  - If the site spec doesn't name the digest as an iso, the site section fails.
+
 **Access** (`agent/access.go`). The access converger writes the sshd drop-in, CA, principals
 (`<account>@<nodeId>` only) and KRL. It reloads sshd only when the drop-in changed, and it removes
 everything it wrote when the section is empty. It also keeps the JWKS that tunnel tickets are
