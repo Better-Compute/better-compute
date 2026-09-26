@@ -970,7 +970,7 @@
           "additionalProperties": false
         },
         "summary": "Adds a flavor to a `vps-host` or `provider` pool the tenant owns and returns it at version 1.",
-        "description": "Adds a flavor to a `vps-host` or `provider` pool the tenant owns and returns it at version 1.\n\n- `gpus` defaults to 0. A flavor of a provider pool needs `offerId`, the provider offer it creates; without it the call is `INVALID_INPUT`.\n- `placement` (hosted pools only; `INVALID_INPUT` on a provider pool) says where the guest lives on its host, and sandbox templates on the flavor inherit it:\n  - `hugepages: '2Mi' | '1Gi'` backs guest memory with hugepages. These are booked from the host's hugepage pools instead of its memory, still charged to quota as `memoryGiB`, and never ballooned.\n  - `numaAffine` keeps the vCPUs and memory on one NUMA node: the GPUs' node, or otherwise the least-loaded node with room for the memory.\n  - `pinned` gives each vCPU a host CPU that no other pinned guest on the host has.\n  - A host that cannot honour `numaAffine` or `pinned` still runs the guest, floating, and the instance carries a `PlacementDegraded` condition with the reason (`NoNumaTopology`, `NoNumaNodeFits`, `GpuNumaUnknown`, `NumaMemoryTooSmall` or `NotEnoughFreeCpus`).\n  - Resizing to a flavor with a different `placement` is `UNSUPPORTED`.\n- `NOT_FOUND` when the tenant does not own the pool; `INVALID_STATE` when the pool is of another class.\n- `CONFLICT` when the pool already has a flavor with that name, archived ones included."
+        "description": "Adds a flavor to a `vps-host` or `provider` pool the tenant owns and returns it at version 1.\n\n- `gpus` defaults to 0. A flavor of a provider pool needs `offerId`, the provider offer it creates; without it the call is `INVALID_INPUT`.\n- `placement` (hosted pools only; `INVALID_INPUT` on a provider pool) says where the guest lives on its host, and sandbox templates on the flavor inherit it:\n  - `hugepages: '2Mi' | '1Gi'` backs guest memory with hugepages. These are booked from the host's hugepage pools instead of its memory, still charged to quota as `memoryGiB`, and never ballooned.\n  - `numaAffine` keeps the vCPUs and memory on one NUMA node: the GPUs' node, or otherwise the least-loaded node with room for the memory.\n  - `pinned` gives each vCPU a host CPU that no other pinned guest on the host has.\n  - A host that cannot honour `numaAffine` or `pinned` still runs the guest, floating, and the instance carries a `PlacementDegraded` condition with the reason (`NoNumaTopology`, `NoNumaNodeFits`, `GpuNumaUnknown`, `NumaMemoryTooSmall` or `NotEnoughFreeCpus`).\n  - Resizing to a flavor with a different `placement` is `UNSUPPORTED`.\n- In a pool that overcommits memory (`policy.overcommit.memoryGiB` > 1), every guest gets a virtio balloon so the host can reclaim its free memory. The exceptions are hugepage-backed guests and guests with GPUs, whose memory is pinned. This needs no flavor field.\n- `NOT_FOUND` when the tenant does not own the pool; `INVALID_STATE` when the pool is of another class.\n- `CONFLICT` when the pool already has a flavor with that name, archived ones included."
       },
       {
         "method": "update",
@@ -5631,13 +5631,48 @@
             "network": {
               "enum": ["egress", "private", "none"],
               "description": "What sandboxes reach: egress (default), private (the pool subnet and the host) or none (the host only; exec still works)"
+            },
+            "volumes": {
+              "type": "array",
+              "maxItems": 8,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["mountPath"],
+                "properties": {
+                  "volumeId": {
+                    "type": "string",
+                    "pattern": "^vol_[0-9a-hjkmnp-tv-z]{26,52}$",
+                    "maxLength": 56,
+                    "description": "The sandbox volume"
+                  },
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+                    "maxLength": 63,
+                    "description": "The volume by name (instead of volumeId)"
+                  },
+                  "mountPath": {
+                    "type": "string",
+                    "pattern": "^/[A-Za-z0-9._\\-/]{1,254}$",
+                    "maxLength": 255,
+                    "description": "Where the guest mounts it, e.g. /workspace (never over /, /etc, /usr or another system path)"
+                  },
+                  "readOnly": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Mount it read-only; many sandboxes may share it read-only"
+                  }
+                }
+              },
+              "description": "Persistent volumes every sandbox attaches (agent memory): sandboxes run on the volumes’ host; one read-write attachment at a time, or any number of read-only ones. A template with volumes keeps no warm pool"
             }
           },
           "required": ["tenantId", "name", "poolId", "flavor", "imageId"],
           "additionalProperties": false
         },
         "summary": "Checks the pool, flavor, image and runtime once and stores a template under a name unique in the tenant; returns the template.",
-        "description": "Checks the pool, flavor, image and runtime once and stores a template under a name unique in the tenant; returns the template.\n\n- **Checks.** The pool must be owned by or offered to the tenant and not archived (`NOT_FOUND`), and be a hosted `vps-host` pool: a provider pool is `INVALID_INPUT`. A missing or archived flavor and an image that does not resolve are `NOT_FOUND`; `INVALID_CONFIG` when `vps()` has no `images`. The pool's runtime must boot the image's format and pass through the flavor's GPUs (`INVALID_INPUT`), and `runtime`, when given, must equal the pool's runtime (`INVALID_INPUT`). The template stores the pool's runtime.\n- **Lifetime.** `defaultTtlSeconds` defaults to 3,600 and `maxTtlSeconds` to 86,400 or the default TTL, whichever is larger; both lie between 60 seconds and 30 days, and a default above the maximum is `INVALID_INPUT`.\n- **Warm pool.** `warm.min` and `warm.max` are 0 to 64; `max` defaults to `min`, and a `max` below `min` is `INVALID_INPUT`.\n- **User data.** At most 32 KiB. A URI must be a `secret://` reference to a secret of the same tenant, otherwise `INVALID_INPUT`.\n\nA live template with the same name is `CONFLICT`. The caller becomes the template's owner in the authorization projection. Publishes no event."
+        "description": "Checks the pool, flavor, image and runtime once and stores a template under a name unique in the tenant; returns the template.\n\n- **Checks.** The pool must be owned by or offered to the tenant and not archived (`NOT_FOUND`), and be a hosted `vps-host` pool: a provider pool is `INVALID_INPUT`. A missing or archived flavor and an image that does not resolve are `NOT_FOUND`; `INVALID_CONFIG` when `vps()` has no `images`. The pool's runtime must boot the image's format and pass through the flavor's GPUs (`INVALID_INPUT`), and `runtime`, when given, must equal the pool's runtime (`INVALID_INPUT`). The template stores the pool's runtime.\n- **Lifetime.** `defaultTtlSeconds` defaults to 3,600 and `maxTtlSeconds` to 86,400 or the default TTL, whichever is larger; both lie between 60 seconds and 30 days, and a default above the maximum is `INVALID_INPUT`.\n- **Warm pool.** `warm.min` and `warm.max` are 0 to 64; `max` defaults to `min`, and a `max` below `min` is `INVALID_INPUT`.\n- **User data.** At most 32 KiB. A URI must be a `secret://` reference to a secret of the same tenant, otherwise `INVALID_INPUT`.\n- **Volumes.** `volumes` lists up to 8 sandbox volumes (`sandboxVolumes`) that each sandbox of the template attaches:\n  - each entry names a volume by `volumeId` or by `name` (one of them), with a `mountPath` and an optional `readOnly`;\n  - each volume must be the tenant's, `ready` and in the template's pool (`NOT_FOUND`, `INVALID_STATE`, `INVALID_INPUT`), and named once;\n  - a mount path is absolute, without `.` or `..`, never over a system directory (`/`, `/etc`, `/usr`, `/proc`, …), and never inside another entry's (`INVALID_INPUT`);\n  - a template with volumes keeps no warm pool (`warm.max` must be 0), since a warm instance would hold the volumes.\n\n  Its sandboxes run on the volumes' host only. A read-write attachment needs the volume to itself, so a second sandbox of a template that attaches a volume read-write is `CONFLICT` (`details.reason: 'volume-in-use'`) while the first lives.\n\nA live template with the same name is `CONFLICT`. The caller becomes the template's owner in the authorization projection. Publishes no event."
       },
       {
         "method": "list",
@@ -5789,13 +5824,48 @@
             "network": {
               "enum": ["egress", "private", "none"],
               "description": "What sandboxes reach: egress (default), private (the pool subnet and the host) or none (the host only; exec still works)"
+            },
+            "volumes": {
+              "type": "array",
+              "maxItems": 8,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["mountPath"],
+                "properties": {
+                  "volumeId": {
+                    "type": "string",
+                    "pattern": "^vol_[0-9a-hjkmnp-tv-z]{26,52}$",
+                    "maxLength": 56,
+                    "description": "The sandbox volume"
+                  },
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+                    "maxLength": 63,
+                    "description": "The volume by name (instead of volumeId)"
+                  },
+                  "mountPath": {
+                    "type": "string",
+                    "pattern": "^/[A-Za-z0-9._\\-/]{1,254}$",
+                    "maxLength": 255,
+                    "description": "Where the guest mounts it, e.g. /workspace (never over /, /etc, /usr or another system path)"
+                  },
+                  "readOnly": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Mount it read-only; many sandboxes may share it read-only"
+                  }
+                }
+              },
+              "description": "Replaces the template’s volumes ([] removes them from future sandboxes)"
             }
           },
           "required": ["tenantId", "templateId"],
           "additionalProperties": false
         },
-        "summary": "Changes a template's flavor, image, user data, TTL bounds or warm pool; returns the template with its version raised.",
-        "description": "Changes a template's flavor, image, user data, TTL bounds or warm pool; returns the template with its version raised.\n\nThe pool, name and runtime stay. A new `flavor` or `imageId` is checked against the pool as on `create`, and the pool must still run the template's runtime (`INVALID_INPUT`). Omitted fields keep their values, `userData: null` removes the user data, and `warm` replaces the warm pool, `max` again defaulting to `min`. A `defaultTtlSeconds` above `maxTtlSeconds` after the change is `INVALID_INPUT`. A deleted or missing template is `NOT_FOUND`. The secrets the template references are decided with the update; if another change added secret references while this one was decided, it is `CONFLICT` with `details.reason: 'secrets-changed'`: retry, and the new references are decided too.\n\nSandboxes that exist keep their instances, and warm instances already created stay claimable with the shape they were created with; new sandboxes and warm refills use the new values. A lower `warm.max` makes the reconciler delete the excess. Publishes no event."
+        "summary": "Changes a template's flavor, image, user data, TTL bounds, warm pool or volumes; returns the template with its version raised.",
+        "description": "Changes a template's flavor, image, user data, TTL bounds, warm pool or volumes; returns the template with its version raised.\n\nThe pool, name and runtime stay. A new `flavor` or `imageId` is checked against the pool as on `create`, and the pool must still run the template's runtime (`INVALID_INPUT`). Omitted fields keep their values, `userData: null` removes the user data, and `warm` replaces the warm pool, `max` again defaulting to `min`. A `defaultTtlSeconds` above `maxTtlSeconds` after the change is `INVALID_INPUT`. A deleted or missing template is `NOT_FOUND`. The secrets the template references are decided with the update; if another change added secret references while this one was decided, it is `CONFLICT` with `details.reason: 'secrets-changed'`: retry, and the new references are decided too.\n\nSandboxes that exist keep their instances, and warm instances already created stay claimable with the shape they were created with; new sandboxes and warm refills use the new values. A lower `warm.max` makes the reconciler delete the excess. Publishes no event."
       },
       {
         "method": "delete",
@@ -5829,6 +5899,169 @@
         },
         "summary": "Deletes a template so that `get`, `list`, `update` and `sandboxes.create` no longer find it; returns `deleted: true`.",
         "description": "Deletes a template so that `get`, `list`, `update` and `sandboxes.create` no longer find it; returns `deleted: true`.\n\nThe template leaves the authorization projection and its name is free for a new template. Its sandboxes live on until they are deleted or expire, and the `vps.sandboxes` reconciler deletes all of its warm instances. A template already deleted is `NOT_FOUND`. Publishes no event."
+      }
+    ]
+  },
+  {
+    "group": "sandboxVolumes",
+    "slug": "sandbox-volumes",
+    "module": "vps",
+    "overview": "Sandbox volumes are persistent disks on one host that a tenant's sandboxes attach across runs, so an agent keeps its memory, caches and checkouts. A volume is placed when it is created: its size is booked as `diskGiB` on one host of the pool, charged to the tenant's quota, and the host keeps it as a sparse qcow2 file. A sandbox template names volumes with a mount path. Sandboxes of that template then run on the volume's host only, attach it as an extra virtio disk, and mount it by serial (`/dev/disk/by-id/virtio-<serial>`) from their user data. The first mount formats it as ext4, and no later one ever does. A volume takes any number of read-only attachments or one read-write attachment, never both. Volumes are metered as `vps.volume.gib.hours` from creation until the disk is released. See [Sandboxes](/docs/guides/vps/sandboxes).",
+    "methods": [
+      {
+        "method": "create",
+        "route": "POST /api/compute/sandboxVolumes/create",
+        "kind": "mutation",
+        "action": "compute:sandboxes:manage",
+        "resource": "compute-tenant",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "poolId": {
+              "type": "string",
+              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "A hosted (vps-host) pool offered to the tenant: the volume lives on one of its hosts"
+            },
+            "name": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+              "maxLength": 63,
+              "description": "The volume name, unique in the tenant, e.g. agent-memory"
+            },
+            "sizeGiB": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384,
+              "description": "Its size in GiB, booked as disk on its host and charged to the diskGiB quota"
+            },
+            "idempotencyKey": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+            }
+          },
+          "required": ["tenantId", "poolId", "name", "sizeGiB", "idempotencyKey"],
+          "additionalProperties": false
+        },
+        "summary": "Books the volume's disk on one host of a hosted pool and puts it in that host's spec; returns the volume `ready`, with its `serial` and `nodeId`.",
+        "description": "Books the volume's disk on one host of a hosted pool and puts it in that host's spec; returns the volume `ready`, with its `serial` and `nodeId`.\n\n- `sizeGiB` runs from 1 to 16,384. The name is unique among the tenant's volumes that are not deleted (`CONFLICT` otherwise).\n- `CAPACITY_UNAVAILABLE` when no host of the pool has the disk free (the reason is in the details), and `QUOTA_EXCEEDED` past the tenant's `diskGiB` quota.\n- A provider pool is `INVALID_INPUT`: volumes live on hosted (`vps-host`) pools.\n- Decided as `compute:sandboxes:manage` on the tenant.\n\nThe volume id derives from the tenant, the caller and `idempotencyKey`. A retry with the same key returns the same volume; the same key with another pool, name or size is `CONFLICT`. Publishes `sandbox.volume.created` with the host."
+      },
+      {
+        "method": "list",
+        "route": "POST /api/compute/sandboxVolumes/list",
+        "kind": "read",
+        "action": "compute:sandboxes:read",
+        "resource": "compute-tenant",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "poolId": {
+              "type": "string",
+              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "Only this pool’s volumes"
+            },
+            "includeDeleted": {
+              "type": "boolean",
+              "default": false,
+              "description": "Include deleted volumes"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
+        "summary": "Returns the tenant's volumes, oldest first, optionally in one pool; `includeDeleted: true` adds deleted ones.",
+        "description": "Returns the tenant's volumes, oldest first, optionally in one pool; `includeDeleted: true` adds deleted ones.\n\nAt most 500 volumes are returned. Decided as `compute:sandboxes:read` on the tenant."
+      },
+      {
+        "method": "get",
+        "route": "POST /api/compute/sandboxVolumes/get",
+        "kind": "read",
+        "action": "compute:sandboxes:read",
+        "resource": "compute-sandbox-volume",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "volumeId": {
+              "type": "string",
+              "pattern": "^vol_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 56,
+              "description": "The sandbox volume"
+            }
+          },
+          "required": ["tenantId", "volumeId"],
+          "additionalProperties": false
+        },
+        "summary": "Returns one volume of the tenant: its size, serial, host and state (`ready`, `deleting` or `deleted`).",
+        "description": "Returns one volume of the tenant: its size, serial, host and state (`ready`, `deleting` or `deleted`).\n\nA volume of another tenant is `NOT_FOUND`. Decided as `compute:sandboxes:read` on the volume."
+      },
+      {
+        "method": "delete",
+        "route": "POST /api/compute/sandboxVolumes/delete",
+        "kind": "mutation",
+        "action": "compute:sandboxes:manage",
+        "resource": "compute-sandbox-volume",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "volumeId": {
+              "type": "string",
+              "pattern": "^vol_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 56,
+              "description": "The sandbox volume"
+            }
+          },
+          "required": ["tenantId", "volumeId"],
+          "additionalProperties": false
+        },
+        "summary": "Takes the volume out of its host's spec, and the host discards its file; the volume is `deleting` until the host has applied a spec without it, then `deleted`, and its disk booking and quota come back.",
+        "description": "Takes the volume out of its host's spec, and the host discards its file; the volume is `deleting` until the host has applied a spec without it, then `deleted`, and its disk booking and quota come back.\n\n- `CONFLICT` while a sandbox that is not deleted attaches it, or while a template names it: delete those sandboxes, and update or delete the template, first.\n- Deleting a volume that is already `deleting` or `deleted` returns it unchanged.\n\nPublishes `sandbox.volume.deleting`, then `sandbox.volume.deleted`. Decided as `compute:sandboxes:manage` on the volume."
       }
     ]
   },

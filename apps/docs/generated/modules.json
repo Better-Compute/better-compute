@@ -92,6 +92,7 @@
         "providerAccounts",
         "sandboxSnapshots",
         "sandboxTemplates",
+        "sandboxVolumes",
         "sandboxes"
       ],
       "migrations": [
@@ -113,7 +114,8 @@
         "vps/0016_warm_secret_versions",
         "vps/0017_identity_rebind",
         "vps/0018_placement",
-        "vps/0019_ip_pool_dns"
+        "vps/0019_ip_pool_dns",
+        "vps/0020_volumes"
       ]
     },
     {
@@ -176,6 +178,7 @@
     "vps.instances",
     "vps.sandboxes",
     "vps.usage",
+    "vps.volumes",
     "workflow"
   ]
 }

@@ -5546,6 +5546,43 @@
               "none"
             ],
             "description": "What sandboxes reach: egress (default), private (the pool subnet and the host) or none (the host only; exec still works)"
+          },
+          "volumes": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mountPath"
+              ],
+              "properties": {
+                "volumeId": {
+                  "type": "string",
+                  "pattern": "^vol_[0-9a-hjkmnp-tv-z]{26,52}$",
+                  "maxLength": 56,
+                  "description": "The sandbox volume"
+                },
+                "name": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+                  "maxLength": 63,
+                  "description": "The volume by name (instead of volumeId)"
+                },
+                "mountPath": {
+                  "type": "string",
+                  "pattern": "^/[A-Za-z0-9._\\-/]{1,254}$",
+                  "maxLength": 255,
+                  "description": "Where the guest mounts it, e.g. /workspace (never over /, /etc, /usr or another system path)"
+                },
+                "readOnly": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Mount it read-only; many sandboxes may share it read-only"
+                }
+              }
+            },
+            "description": "Persistent volumes every sandbox attaches (agent memory): sandboxes run on the volumes’ host; one read-write attachment at a time, or any number of read-only ones. A template with volumes keeps no warm pool"
           }
         },
         "required": [
@@ -5744,11 +5781,201 @@
               "none"
             ],
             "description": "What sandboxes reach: egress (default), private (the pool subnet and the host) or none (the host only; exec still works)"
+          },
+          "volumes": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mountPath"
+              ],
+              "properties": {
+                "volumeId": {
+                  "type": "string",
+                  "pattern": "^vol_[0-9a-hjkmnp-tv-z]{26,52}$",
+                  "maxLength": 56,
+                  "description": "The sandbox volume"
+                },
+                "name": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+                  "maxLength": 63,
+                  "description": "The volume by name (instead of volumeId)"
+                },
+                "mountPath": {
+                  "type": "string",
+                  "pattern": "^/[A-Za-z0-9._\\-/]{1,254}$",
+                  "maxLength": 255,
+                  "description": "Where the guest mounts it, e.g. /workspace (never over /, /etc, /usr or another system path)"
+                },
+                "readOnly": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Mount it read-only; many sandboxes may share it read-only"
+                }
+              }
+            },
+            "description": "Replaces the template’s volumes ([] removes them from future sandboxes)"
           }
         },
         "required": [
           "tenantId",
           "templateId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sandboxVolumes.create": {
+      "route": "POST /api/compute/sandboxVolumes/create",
+      "kind": "mutation",
+      "action": "compute:sandboxes:manage",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A hosted (vps-host) pool offered to the tenant: the volume lives on one of its hosts"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+            "maxLength": 63,
+            "description": "The volume name, unique in the tenant, e.g. agent-memory"
+          },
+          "sizeGiB": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16384,
+            "description": "Its size in GiB, booked as disk on its host and charged to the diskGiB quota"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "name",
+          "sizeGiB",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sandboxVolumes.delete": {
+      "route": "POST /api/compute/sandboxVolumes/delete",
+      "kind": "mutation",
+      "action": "compute:sandboxes:manage",
+      "resource": "compute-sandbox-volume",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "volumeId": {
+            "type": "string",
+            "pattern": "^vol_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The sandbox volume"
+          }
+        },
+        "required": [
+          "tenantId",
+          "volumeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sandboxVolumes.get": {
+      "route": "POST /api/compute/sandboxVolumes/get",
+      "kind": "read",
+      "action": "compute:sandboxes:read",
+      "resource": "compute-sandbox-volume",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "volumeId": {
+            "type": "string",
+            "pattern": "^vol_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The sandbox volume"
+          }
+        },
+        "required": [
+          "tenantId",
+          "volumeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sandboxVolumes.list": {
+      "route": "POST /api/compute/sandboxVolumes/list",
+      "kind": "read",
+      "action": "compute:sandboxes:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "Only this pool’s volumes"
+          },
+          "includeDeleted": {
+            "type": "boolean",
+            "default": false,
+            "description": "Include deleted volumes"
+          }
+        },
+        "required": [
+          "tenantId"
         ],
         "additionalProperties": false
       }

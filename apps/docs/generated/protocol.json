@@ -3905,7 +3905,7 @@
             "number": 2,
             "type": "HostVolume",
             "label": "repeated",
-            "description": "(v1.1, agent memory) Persistent volumes kept on this host across instances. bcd creates each\nmissing one (a sparse qcow2 under its state directory, never shrunk) and destroys (discards,\nthen unlinks) one the section no longer lists once no instance attaches it: an absent volume\nis a deleted volume, so a spec is only ever missing one the control plane deleted."
+            "description": "(v1.1, agent memory) Persistent volumes kept on this host across instances. bcd creates each\nmissing one (a sparse raw file under its data directory; growing is a truncate, seen by the\nguest at its next start; never shrunk) and destroys (hole-punches, then unlinks) one the section\nno longer lists once no instance attaches it: an absent volume is a deleted volume, so a spec is\nonly ever missing one the control plane deleted. Only a bcd with the `instance.volumes`\ncapability keeps them."
           }
         ]
       },
@@ -3918,14 +3918,14 @@
             "number": 1,
             "type": "string",
             "label": "",
-            "description": ""
+            "description": "[A-Za-z0-9_-]{1,80}."
           },
           {
             "name": "size_bytes",
             "number": 2,
             "type": "uint64",
             "label": "",
-            "description": ""
+            "description": "A positive multiple of 512."
           },
           {
             "name": "serial",
