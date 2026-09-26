@@ -241,7 +241,7 @@ beforeEach(async () => {
       [node, pool],
     );
     // What a current bcd advertises in Hello (sandbox guests land only where ssh-from-host is enforced).
-    for (const label of ['bc.dev/cap.instance.ssh-host-only', 'bc.dev/cap.instance.network-policy', 'bc.dev/cap.instance.placement', 'bc.dev/cap.instance.volumes'])
+    for (const label of ['bc.dev/cap.instance.ssh-host-only', 'bc.dev/cap.instance.network-policy', 'bc.dev/cap.instance.placement', 'bc.dev/cap.instance.volumes', 'bc.dev/driver.libvirt-kvm', 'bc.dev/driver.cloud-hypervisor'])
       await db.query(`INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, $2, '1', 'system')`, [node, label]);
     for (const [resource, allocatable] of [['vcpu', 16], ['memoryGiB', 64], ['diskGiB', 1000]] as const)
       await db.query(`INSERT INTO node_resources (node_id, resource, allocatable, ratio, allocated) VALUES ($1, $2, $3, 1, 0)`, [node, resource, allocatable]);
@@ -495,7 +495,7 @@ describe('sandbox volumes', () => {
        VALUES ($1, 'site_01jz00000000000000000000aa', $2, 'root', 'host', 'adopted', false, false, 'connected', 'platform', 1, 1, 1, 1, 0, 1)`,
       [third, pool],
     );
-    for (const label of ['bc.dev/cap.instance.ssh-host-only', 'bc.dev/cap.instance.volumes'])
+    for (const label of ['bc.dev/cap.instance.ssh-host-only', 'bc.dev/cap.instance.volumes', 'bc.dev/driver.libvirt-kvm', 'bc.dev/driver.cloud-hypervisor'])
       await db.query(`INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, $2, '1', 'system')`, [third, label]);
     for (const [resource, allocatable] of [['vcpu', 64], ['memoryGiB', 256], ['diskGiB', 4000]] as const)
       await db.query(`INSERT INTO node_resources (node_id, resource, allocatable, ratio, allocated) VALUES ($1, $2, $3, 1, 0)`, [third, resource, allocatable]);

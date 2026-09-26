@@ -1065,7 +1065,7 @@ export async function scheduleHosted(
   admission?: AdmissionContext,
 ): Promise<InstanceRow> {
   const now = deps.clock.now();
-  // A plugin runtime lands only on hosts whose bcd advertised it (walkthrough 4); a memory snapshot
+  // The runtime lands only on hosts whose bcd advertised it (walkthrough 4; built-ins too); a memory snapshot
   // only on hosts with the CPU model it was captured on (§3.7).
   const nodeLabels: Record<string, string> = {
     ...runtimeNodeLabels(row.runtime),

@@ -340,6 +340,12 @@ beforeEach(async () => {
                'platform', 1, 1, 1, 1, 0, 1)`,
       [node, hostedPool],
     );
+    // The runtimes its bcd advertises in Hello (the gateway labels the node bc.dev/driver.<runtime>).
+    for (const runtime of ['libvirt-kvm', 'cloud-hypervisor'])
+      await db.query(`INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, $2, '0.5.0', 'system')`, [
+        node,
+        `bc.dev/driver.${runtime}`,
+      ]);
     for (const [resource, allocatable, ratio] of [
       ['vcpu', 16, 2],
       ['memoryGiB', 64, 1],
@@ -1104,7 +1110,7 @@ describe('flavor placement: NUMA, pinned CPUs, hugepages (§3.8)', () => {
       createHosted({ flavor: 'numa.pinned', idempotencyKey: 'cap-1' }),
     )) as View;
     expect(created.nodeId).toBe(VB);
-    await db.query(`DELETE FROM node_labels`);
+    await db.query(`DELETE FROM node_labels WHERE key = 'bc.dev/cap.instance.placement'`);
     const pending = (await call(
       'instances',
       'create',

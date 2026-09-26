@@ -386,6 +386,12 @@ beforeEach(async () => {
       `INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, 'bc.dev/cap.instance.ssh-host-only', '1', 'system')`,
       [node],
     );
+    // And the runtimes it advertises (bc.dev/driver.<runtime>).
+    for (const runtime of ['libvirt-kvm', 'cloud-hypervisor'])
+      await db.query(`INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, $2, '0.5.0', 'system')`, [
+        node,
+        `bc.dev/driver.${runtime}`,
+      ]);
   }
   await setIpPool(db, { poolId: pool, cidr: '10.0.0.0/28', gateway: '10.0.0.1' });
   await call(
@@ -1609,6 +1615,30 @@ describe('template network and versions', () => {
     expect(placed.instanceState).toBe('provisioning');
     const { rows } = await db.query<{ node_id: string }>(
       `SELECT node_id FROM instances WHERE sandbox_id IS NOT NULL AND node_id IS NOT NULL`,
+    );
+    expect(rows.map((row) => row.node_id)).toEqual(['node_01jz00000000000000000000vb']);
+  });
+
+  it('lands a cloud-hypervisor sandbox only on a host whose bcd says it runs cloud-hypervisor', async () => {
+    const template = await createTemplate({ name: 'ch-hosts' });
+    // Hosts whose bcd does not run it (under bcd helper before 7fe74a1, or no cloud-hypervisor binary): no
+    // bc.dev/driver.cloud-hypervisor from their Hello, and no sandbox.
+    await db.query(`DELETE FROM node_labels WHERE key = 'bc.dev/driver.cloud-hypervisor'`);
+    const stuck = await createSandbox(template.id, { idempotencyKey: 'no-ch-host' });
+    expect(stuck).toMatchObject({ state: 'starting', instanceState: 'scheduling' });
+    const { rows: why } = await db.query<{ conditions: { message?: string }[] }>(
+      `SELECT conditions FROM instances WHERE sandbox_id = $1`,
+      [stuck.id],
+    );
+    expect(JSON.stringify(why[0]!.conditions)).toContain('bc.dev/driver.cloud-hypervisor');
+    await db.query(
+      `INSERT INTO node_labels (node_id, key, value, source)
+       VALUES ('node_01jz00000000000000000000vb', 'bc.dev/driver.cloud-hypervisor', '0.5.0', 'system')`,
+    );
+    const placed = (await createSandbox(template.id, { idempotencyKey: 'ch-host' })) as { instanceState: string };
+    expect(placed.instanceState).toBe('provisioning');
+    const { rows } = await db.query<{ node_id: string }>(
+      `SELECT DISTINCT node_id FROM instances WHERE sandbox_id IS NOT NULL AND node_id IS NOT NULL`,
     );
     expect(rows.map((row) => row.node_id)).toEqual(['node_01jz00000000000000000000vb']);
   });

@@ -186,6 +186,12 @@ beforeAll(async () => {
      VALUES ($1, $2, $3, 'root', 'host', 'adopted', false, false, 'connected', 'platform', 1, 1, 1, 1, 0, 1)`,
     [NODE, SITE, poolId],
   );
+  // The runtimes its bcd advertises in Hello (the gateway labels the node bc.dev/driver.<runtime>).
+  for (const runtime of ['libvirt-kvm', 'cloud-hypervisor'])
+    await db.query(`INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, $2, '0.5.0', 'system')`, [
+      NODE,
+      `bc.dev/driver.${runtime}`,
+    ]);
   for (const [resource, allocatable] of [
     ['vcpu', 64],
     ['memoryGiB', 256],

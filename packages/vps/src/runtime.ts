@@ -72,12 +72,14 @@ export const builtinRuntimeTraits: Readonly<Record<string, RuntimeTraits>> = Obj
 export const bcdBuiltinRuntimes: ReadonlySet<string> = new Set(['libvirt-kvm', 'cloud-hypervisor']);
 
 /**
- * The node labels a host must carry to run `runtime` (§5.6 walkthrough 4): none for bcd's built-ins;
- * for a plugin runtime, the driver label the gateway writes from Hello.drivers
- * (`bc.dev/driver.<id>=<version>`), any version.
+ * The node labels a host must carry to run `runtime` (§5.6 walkthrough 4): the driver label the gateway
+ * writes from Hello.drivers (`bc.dev/driver.<id>=<version>`), any version. That holds for bcd's built-ins
+ * too: every bcd that runs instances (fab94d4, v0.3) advertises each runtime it runs, and runs one only
+ * where its tools are, and `cloud-hypervisor` under bcd helper only since 7fe74a1. A host that does not
+ * say it runs the runtime never gets the instance.
  */
-export function runtimeNodeLabels(runtime: string): Record<string, string> | undefined {
-  return bcdBuiltinRuntimes.has(runtime) ? undefined : { [`bc.dev/driver.${runtime}`]: '*' };
+export function runtimeNodeLabels(runtime: string): Record<string, string> {
+  return { [`bc.dev/driver.${runtime}`]: '*' };
 }
 
 /** An instance as the runtime reports it on its host (`paused`: v0.5, a runtime with `pause`). */
