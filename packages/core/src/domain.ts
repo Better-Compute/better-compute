@@ -123,6 +123,12 @@ export interface PoolPolicy {
    * scheduler (cpulist, never CPU 0; effective after a reboot) that pinned VMs and holds book first.
    */
   cpu?: { governor?: 'performance' | 'schedutil' | 'ondemand' | 'powersave'; isolate?: string };
+  /**
+   * (v0.5 §13) The attestors that may admit a machine into this pool, by id (`join-token`, `tpm`, `x509pop`, …):
+   * a join or reclaim admitted by any other is refused (`security.join.refused`, reason `pool-attestor`), and a
+   * node moves into the pool only with an attestor binding (`node_bindings`) by one of them. Unset: any.
+   */
+  joinAttestors?: string[];
   /** (v1.1 §3.8) The `iommu` config unit: the IOMMU for GPU passthrough to VMs (effective after a reboot). */
   iommu?: { passthrough?: boolean };
   /** (v1.1 §3.8) The `gpu-settings` config unit: each GPU's power cap and ECC mode. */

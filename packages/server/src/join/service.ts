@@ -531,6 +531,19 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
         if (pool.agent !== 'bcd') throw deny('pool');
         if (pool.owner_tenant_id !== result.tenantId) throw deny('tenant');
         if (result.siteId && result.siteId !== pool.site_id) throw deny('site');
+        // A pool that admits only some attestors (PoolPolicy.joinAttestors): the one that admitted this
+        // join, a reclaim included, must be listed (a token join is `join-token`).
+        const listed = (
+          (typeof pool.policy === 'string' ? JSON.parse(pool.policy) : pool.policy) as PoolPolicy | null
+        )?.joinAttestors;
+        if (Array.isArray(listed) && !listed.includes(attestorId))
+          // The attestor verified the machine: the refusal is the pool owner's to see (security.join.refused).
+          throw new ComputeError('ACCESS_DENIED', 'Join refused', undefined, {
+            reason: 'pool-attestor',
+            tenantId: pool.owner_tenant_id,
+            ...(result.tokenId ? { tokenId: result.tokenId } : {}),
+            ...(result.nodeId ? { nodeId: result.nodeId } : {}),
+          });
       }
       if (role === 'site' && pool) throw deny('pool');
       const siteId = pool?.site_id ?? result.siteId;

@@ -31,6 +31,7 @@ import type { DownloadsOptions } from './downloads.js';
 import { guardIamPort, type IamGuardMode } from './iam-guard.js';
 import { sourceAddressResolver, type SourceAddressResolver } from './proxy.js';
 import { pkiAllocationBindingCheck } from './join/allocation-binding.js';
+import { joinAttestorsValidator } from './join/pool-policy.js';
 import type { JoinCrypto, JoinTrustBundle } from './join/crypto.js';
 import { createCommandSigner, type CommandSigner } from './runtime/command-signing.js';
 import type { TunnelsOptions } from './tunnels/module.js';
@@ -457,8 +458,20 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
       extension.extension === 'pool-policy' &&
       typeof extension.validate === 'function',
   ) as PoolPolicyValidator[];
-  if (policyValidators.length)
-    capacity.policyValidators = [...(capacity.policyValidators ?? []), ...policyValidators];
+  // PoolPolicy.joinAttestors names attestors JoinService runs: join-token and every registered one.
+  const attestorIds = new Set([
+    'join-token',
+    ...[...(options.attestors ?? []), ...listed].flatMap((extension) =>
+      isRecord(extension) && extension.extension === 'attestor' && typeof extension.id === 'string'
+        ? [extension.id]
+        : [],
+    ),
+  ]);
+  capacity.policyValidators = [
+    ...(capacity.policyValidators ?? []),
+    ...policyValidators,
+    joinAttestorsValidator(attestorIds),
+  ];
   const join = options.pki?.join;
   if (join !== undefined) {
     requireMethods(join, 'pki.join', [
