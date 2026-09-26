@@ -6,6 +6,7 @@ import { EmptyState, KeyValue, PageHeader, Panel } from '@/components/ui/panel';
 import { Mono, Tag, type Status } from '@/components/ui/signal';
 import type { FleetChange } from '@/lib/data/fleet';
 import { fmtRelative, fmtStamp } from '@/lib/data/format';
+import { LiveNotice } from './live-notice';
 import { useFleet } from './use-fleet';
 
 // Fleet drift (fleet.status): the applied FleetConfig against what the control plane holds now. Drift is what
@@ -21,6 +22,7 @@ export function DriftPage() {
   const drift = status.drift;
   return (
     <div className="flex flex-col gap-4">
+      <LiveNotice />
       <PageHeader
         title="Fleet drift"
         icon={RiGitPullRequestLine}

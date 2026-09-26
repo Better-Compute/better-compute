@@ -21,6 +21,7 @@ import type { BatchState, FleetSnapshot } from '@/lib/data/fleet';
 import { fmtDuration, fmtRelative, fmtStamp } from '@/lib/data/format';
 import { cx } from '@/utils/cx';
 import { SubjectLink } from './activity-page';
+import { LiveNotice } from './live-notice';
 import { useFleetCommands } from './commands';
 import { ActionButton, CountChip, SectionLabel } from './ui';
 import { useFleet } from './use-fleet';
@@ -48,6 +49,7 @@ export function BatchesPage() {
 
   return (
     <div className="flex flex-col gap-4">
+      <LiveNotice />
       <PageHeader
         title="Command batches"
         icon={RiShieldCheckLine}

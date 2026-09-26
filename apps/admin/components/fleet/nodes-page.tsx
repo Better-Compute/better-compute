@@ -29,6 +29,7 @@ import { poolById } from '@/lib/data/topology';
 import { cx } from '@/utils/cx';
 import { PRESETS, activeFilterCount, countBy, matches, readFilters, writeFilters, type NodeFilters, type PresetId } from './filters';
 import { NodeDetail } from './node-detail';
+import { LiveNotice } from './live-notice';
 import { useFleetCommands } from './commands';
 import { RackView } from './rack-view';
 import { ActionButton, ConditionSummary, CountChip, FacetMenu, GpuCells, NodeStatusTag, UtilBar, nodeStatus } from './ui';
@@ -176,6 +177,7 @@ export function NodesPage() {
 
   return (
     <div className="flex flex-col gap-4">
+      <LiveNotice />
       <PageHeader
         title="Nodes"
         icon={RiServerLine}

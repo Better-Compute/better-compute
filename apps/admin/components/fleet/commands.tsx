@@ -1,9 +1,12 @@
 'use client';
 
 import { useMemo } from 'react';
+import { useConnection } from '@/components/shell/connection';
 import { useWorkspace } from '@/components/shell/workspace';
+import { api as client } from '@/lib/api';
 import { useFeedback } from '@/components/ui/feedback';
 import type { CommandBatchView, FleetNode, Rollout, Sandbox } from '@/lib/data/fleet';
+import { refreshLive } from './live';
 import { fleetActions } from './store';
 
 // Every fleet action goes through here: the shared confirmation (naming the API call, taking an audit reason)
@@ -15,7 +18,8 @@ const names = (nodes: readonly FleetNode[]) => (nodes.length === 1 ? nodes[0]!.h
 const LABEL = /^([A-Za-z0-9](?:[A-Za-z0-9._/-]{0,126}[A-Za-z0-9])?)(?:=(.{0,63})|-)$/;
 
 export function useFleetCommands() {
-  const { now, live } = useWorkspace();
+  const { now, live, source } = useWorkspace();
+  const tenantId = useConnection().status?.tenantId;
   const { toast, confirm, confirmWithReason } = useFeedback();
 
   return useMemo(() => {
@@ -27,6 +31,20 @@ export function useFleetCommands() {
       return false;
     };
     const at = () => now;
+    const remote = source === 'live';
+    /** Live mode: run each call against the API, report how many succeeded, then refresh the fleet. */
+    const send = async (label: string, calls: [path: string, input: Record<string, unknown>][]) => {
+      if (!tenantId) return void toast({ title: 'No tenant', detail: 'The connection has no tenant; check Settings → Connection.', status: 'crit' });
+      const results = await Promise.allSettled(calls.map(([path, input]) => client.$request(path, { tenantId, ...input })));
+      const failed = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+      const first = failed[0]?.reason as { code?: string; message?: string } | undefined;
+      toast(
+        failed.length
+          ? { title: `${label}: ${failed.length} of ${calls.length} failed`, detail: first ? `${first.code ?? 'ERROR'}: ${first.message ?? ''}` : undefined, status: 'crit', timeout: 0 }
+          : { title: `${label}: done`, detail: calls.length > 1 ? `${calls.length} calls to ${calls[0]![0]}` : calls[0]![0], status: 'ok' },
+      );
+      void refreshLive();
+    };
 
     const api = {
       live,
@@ -43,6 +61,7 @@ export function useFleetCommands() {
           });
           if (reason === null) return;
         }
+        if (remote) return send(`Cordon ${names(nodes)}`, nodes.map((node) => ['nodes/cordon', { nodeId: node.id, version: node.version, ...(reason ? { reason } : {}) }]));
         fleetActions.cordon(ids(nodes), at(), reason || undefined);
         toast({
           title: `Cordoned ${names(nodes)}`,
@@ -53,6 +72,7 @@ export function useFleetCommands() {
       },
       uncordon(nodes: readonly FleetNode[]) {
         if (!canAct()) return;
+        if (remote) return send(`Uncordon ${names(nodes)}`, nodes.map((node) => ['nodes/uncordon', { nodeId: node.id }]));
         fleetActions.uncordon(ids(nodes), at());
         toast({
           title: `Uncordoned ${names(nodes)}`,
@@ -76,6 +96,7 @@ export function useFleetCommands() {
           ...(big ? { typeToConfirm: `drain ${nodes.length}` } : {}),
         });
         if (reason === null) return;
+        if (remote) return send(`Drain ${names(nodes)}`, nodes.map((node) => ['nodes/drain', { nodeId: node.id, ...(reason ? { reason } : {}) }]));
         fleetActions.drain(ids(nodes), at(), reason || undefined);
         toast({
           title: `Draining ${names(nodes)}`,
@@ -86,6 +107,7 @@ export function useFleetCommands() {
       },
       maintenance(nodes: readonly FleetNode[], on: boolean) {
         if (!canAct()) return;
+        if (remote) return void toast({ title: 'Not in live mode', detail: on ? 'Put metal nodes into maintenance with metal.manage (CLI: better-compute metal manage).' : 'Return nodes with metal.provide.', status: 'warn' });
         fleetActions.maintenance(ids(nodes), on, at());
         toast({
           title: `${on ? 'Maintenance on' : 'Maintenance off'}: ${names(nodes)}`,
@@ -105,11 +127,13 @@ export function useFleetCommands() {
           typeToConfirm: node.hostname,
         });
         if (reason === null) return;
+        if (remote) return send(`Revoke ${node.hostname}'s identity`, [['nodes/revokeIdentity', { nodeId: node.id, ...(reason ? { reason } : {}) }]]);
         fleetActions.revokeIdentity(node.id, at());
         toast({ title: `Identity revoked: ${node.hostname}`, detail: `Identity generation ${node.identityGeneration + 1}; certificates below it are refused.`, status: 'crit' });
       },
       label(nodes: readonly FleetNode[], set: Record<string, string>, remove: readonly string[] = []) {
         if (!canAct()) return;
+        if (remote) return void send(`Label ${names(nodes)}`, nodes.map((node) => ['nodes/label', { nodeId: node.id, set, remove: [...remove] }]));
         fleetActions.label(ids(nodes), set, remove, at());
         const text = [...Object.entries(set).map(([k, v]) => `${k}=${v}`), ...remove.map((k) => `−${k}`)].join(', ');
         toast({ title: `Labels on ${names(nodes)}`, detail: text, status: 'ok' });
@@ -135,6 +159,7 @@ export function useFleetCommands() {
       },
       taint(nodes: readonly FleetNode[], add: readonly string[], remove: readonly string[] = []) {
         if (!canAct()) return;
+        if (remote) return void send(`Taint ${names(nodes)}`, nodes.map((node) => ['nodes/taint', { nodeId: node.id, add: [...add], remove: [...remove] }]));
         fleetActions.taint(ids(nodes), add, remove, at());
         toast({
           title: `Taints on ${names(nodes)}`,
@@ -160,10 +185,12 @@ export function useFleetCommands() {
             reason: { required: true },
           });
           if (reason === null) return;
+          if (remote) return send(`Abort rollout ${rollout.version}`, [['rollouts/abort', { rolloutId: rollout.id, reason }]]);
           fleetActions.rollout(rollout.id, 'aborted', at(), reason);
           toast({ title: `Rollout ${rollout.version} aborted`, detail: reason, status: 'crit' });
           return;
         }
+        if (remote) return send(`${next === 'paused' ? 'Pause' : 'Resume'} rollout ${rollout.version}`, [[next === 'paused' ? 'rollouts/pause' : 'rollouts/resume', { rolloutId: rollout.id }]]);
         fleetActions.rollout(rollout.id, next, at());
         toast({
           title: `Rollout ${rollout.version} ${next === 'paused' ? 'paused' : 'resumed'}`,
@@ -174,6 +201,13 @@ export function useFleetCommands() {
       },
       async approveBatch(batch: CommandBatchView) {
         if (!canAct()) return;
+        if (remote)
+          return void toast({
+            title: 'Sign with your approver key',
+            detail: `Approvals are signatures over the scope root; run: better-compute batch approve {batch.batchId}`,
+            status: 'warn',
+            timeout: 0,
+          });
         const ok = await confirm({
           title: 'Sign and approve this batch?',
           body: (
@@ -204,6 +238,7 @@ export function useFleetCommands() {
           danger: true,
         });
         if (!ok) return;
+        if (remote) return send('Cancel batch', [['commandBatches/cancel', { batchId: batch.batchId }]]);
         fleetActions.cancelBatch(batch, at());
         toast({ title: 'Batch cancelled', detail: batch.reason, status: 'off' });
       },
@@ -216,6 +251,7 @@ export function useFleetCommands() {
           confirmLabel: 'Confirm MAC',
         });
         if (!ok) return;
+        if (remote) return send(`Confirm ${mac}`, [['metal/confirmMac', { nodeId, mac }]]);
         fleetActions.confirmMac(mac, nodeId, at());
         toast({ title: `MAC confirmed for ${node?.hostname ?? nodeId}`, detail: 'Inspection starts on the next PXE boot.', status: 'live' });
       },
@@ -234,15 +270,17 @@ export function useFleetCommands() {
           danger: true,
         });
         if (!ok) return;
+        if (remote) return send(`Delete ${sandboxes.length === 1 ? 'sandbox' : `${sandboxes.length} sandboxes`}`, sandboxes.map((sandbox) => ['sandboxes/delete', { sandboxId: sandbox.id }]));
         fleetActions.deleteSandboxes(sandboxes.map((sandbox) => sandbox.id), at());
         toast({ title: `Deleted ${sandboxes.length === 1 ? 'sandbox' : `${sandboxes.length} sandboxes`}`, status: 'off' });
       },
       extendSandboxes(sandboxes: readonly Sandbox[], seconds: number) {
         if (!canAct()) return;
+        if (remote) return void send(`Extend ${sandboxes.length === 1 ? 'sandbox' : `${sandboxes.length} sandboxes`}`, sandboxes.map((sandbox) => ['sandboxes/extend', { sandboxId: sandbox.id, by: seconds * 1000 }]));
         fleetActions.extendSandboxes(sandboxes.map((sandbox) => sandbox.id), seconds, at());
         toast({ title: `Extended ${sandboxes.length === 1 ? 'sandbox' : `${sandboxes.length} sandboxes`} by ${Math.round(seconds / 60)} min`, status: 'live' });
       },
     };
     return api;
-  }, [now, live, toast, confirm, confirmWithReason]);
+  }, [now, live, source, tenantId, toast, confirm, confirmWithReason]);
 }

@@ -15,6 +15,7 @@ import { fmtNum, fmtRelative, fmtStamp } from '@/lib/data/format';
 import { poolById, tenantById } from '@/lib/data/topology';
 import { countBy } from './filters';
 import { CountChip, SectionLabel, instanceStatus } from './ui';
+import { LiveNotice } from './live-notice';
 import { useFleet } from './use-fleet';
 
 // VPS instances (vps module): long-lived VMs on host pools. The page is the population by state, flavor and
@@ -63,6 +64,7 @@ export function InstancesPage() {
 
   return (
     <div className="flex flex-col gap-4">
+      <LiveNotice />
       <PageHeader title="Instances" icon={RiInstanceLine} description="VPS instances on host pools: long-lived VMs placed by capacity and run by bcd's libvirt or cloud-hypervisor runtime.">
         <div className="flex flex-col gap-2">
           <StackedBar

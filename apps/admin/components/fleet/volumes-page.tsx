@@ -10,6 +10,7 @@ import { Stat } from '@/components/ui/stat';
 import type { SandboxVolume } from '@/lib/data/fleet';
 import { fmtGiB, fmtNum, fmtRelative } from '@/lib/data/format';
 import { poolById, tenantById } from '@/lib/data/topology';
+import { LiveNotice } from './live-notice';
 import { useFleet } from './use-fleet';
 
 // Sandbox volumes (vps sandboxVolumes): persistent disks agents keep across sandboxes ("agent memory"),
@@ -46,6 +47,7 @@ export function VolumesPage() {
 
   return (
     <div className="flex flex-col gap-4">
+      <LiveNotice />
       <PageHeader title="Volumes" icon={RiHardDrive2Line} description="Persistent sandbox volumes (agent memory): pinned to the node that holds them, attached to one writer at a time, metered by size." />
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <Panel>

@@ -14,6 +14,7 @@ import { tenantById } from '@/lib/data/topology';
 import { cx } from '@/utils/cx';
 import { UtilBar } from './ui';
 import { GpuWallWidget } from './widgets';
+import { LiveNotice } from './live-notice';
 import { useFleet } from './use-fleet';
 
 // Devices: every GPU in scope as inventory (model, PCI, MIG) plus bcd's live readings and capacity's holder.
@@ -66,6 +67,7 @@ export function DevicesPage() {
 
   return (
     <div className="flex flex-col gap-4">
+      <LiveNotice />
       <PageHeader title="GPUs" icon={RiCpuLine} description="Every GPU: inventory from bcd, live readings (OTLP samples from nvidia-smi / NVML), health from XID and ECC policy, and the reservation holding it." />
       <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
         <Panel>

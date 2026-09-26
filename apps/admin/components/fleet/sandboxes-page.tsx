@@ -17,6 +17,7 @@ import type { FleetSnapshot, Sandbox, SandboxTemplate } from '@/lib/data/fleet';
 import { fmtBytes, fmtDuration, fmtNum, fmtPct, fmtRelative, fmtStamp } from '@/lib/data/format';
 import { poolById, tenantById } from '@/lib/data/topology';
 import { cx } from '@/utils/cx';
+import { LiveNotice } from './live-notice';
 import { useFleetCommands } from './commands';
 import { ActionButton, SectionLabel, sandboxStatus } from './ui';
 import { useFleet } from './use-fleet';
@@ -117,6 +118,7 @@ export function SandboxesPage() {
 
   return (
     <div className="flex flex-col gap-4">
+      <LiveNotice />
       <PageHeader
         title="Sandboxes"
         icon={RiBox3Line}

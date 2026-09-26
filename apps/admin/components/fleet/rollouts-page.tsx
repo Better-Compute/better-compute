@@ -11,6 +11,7 @@ import { CURRENT_BCD, rolloutNodeStates, type FleetSnapshot, type RolloutNodeSta
 import { fmtDuration, fmtPct, fmtRelative, fmtStamp } from '@/lib/data/format';
 import { poolById } from '@/lib/data/topology';
 import { cx } from '@/utils/cx';
+import { LiveNotice } from './live-notice';
 import { useFleetCommands } from './commands';
 import { countBy } from './filters';
 import { ActionButton, SectionLabel, rolloutNodeStatus } from './ui';
@@ -40,6 +41,7 @@ export function RolloutsPage() {
   const history = snapshot.rollouts.filter((rollout) => rollout !== current);
   return (
     <div className="flex flex-col gap-4">
+      <LiveNotice />
       <PageHeader
         title="Rollouts"
         icon={RiRocket2Line}
