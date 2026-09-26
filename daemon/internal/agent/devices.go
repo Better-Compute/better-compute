@@ -40,8 +40,10 @@ type cdiSpec struct {
 }
 
 type cdiDevice struct {
-	Name           string   `json:"name"`
-	ContainerEdits cdiEdits `json:"containerEdits"`
+	Name string `json:"name"`
+	// Annotations carry the atom's real id (CDI names allow no "/"; CDI 0.6 device annotations).
+	Annotations    map[string]string `json:"annotations,omitempty"`
+	ContainerEdits cdiEdits          `json:"containerEdits"`
 }
 
 type cdiEdits struct {
@@ -52,6 +54,10 @@ const (
 	annotationAllocation  = "bcd.dev/allocation-id"
 	annotationReservation = "bcd.dev/reservation-id"
 	annotationGeneration  = "bcd.dev/generation"
+	annotationDeviceID    = "bcd.dev/device-id"
+	// annotationCgroupParent names the hold's slice (PLAN.md §3.8), for containerd, Slurm or a
+	// wrapper to place the workload in; BCD_CGROUP_PARENT carries it in the env.
+	annotationCgroupParent = "bcd.dev/cgroup-parent"
 )
 
 type hold struct {
@@ -126,11 +132,30 @@ func (d *devicesConverger) Plan(_ context.Context, desired []byte) ([]converge.A
 		}
 	}
 	d.a.invMu.Lock()
-	present := map[string]bool{}
-	for _, g := range gpuUUIDs(d.a.inv) {
-		present[g] = true
-	}
+	inv := d.a.inv
 	d.a.invMu.Unlock()
+	// GPUs VMs have (VFIO): never held beside them.
+	passed := d.a.passedGPUs()
+	mps := d.mpsRunning()
+	resolve := func(as *agentv1.DeviceAssignment) ([]atom, string, string) {
+		atoms := make([]atom, 0, len(as.GetDevices()))
+		var missing []string
+		for _, dev := range as.GetDevices() {
+			a, reason, message := resolveAtom(inv, dev)
+			if reason == "device-missing" {
+				missing = append(missing, message)
+				continue
+			}
+			if reason != "" {
+				return nil, reason, message
+			}
+			atoms = append(atoms, a)
+		}
+		if len(missing) > 0 {
+			return nil, "device-missing", strings.Join(missing, "; ")
+		}
+		return atoms, "", ""
+	}
 
 	type failure struct{ id, reason, message string }
 	var failures []failure
@@ -143,10 +168,11 @@ func (d *devicesConverger) Plan(_ context.Context, desired []byte) ([]converge.A
 		}
 		if _, held := observed[id]; held {
 			if _, err := os.Stat(host.Path(envFilePath(id))); errors.Is(err, os.ErrNotExist) {
+				atoms, _, _ := resolve(as)
 				actions = append(actions, converge.Action{
 					Description: "rewrite the env file of " + id,
 					Apply: func(context.Context) error {
-						return host.WriteFile(envFilePath(id), envFile(as), 0o644)
+						return host.WriteFile(envFilePath(id), envFile(as, atoms, mps), 0o644)
 					},
 				})
 			}
@@ -156,21 +182,12 @@ func (d *devicesConverger) Plan(_ context.Context, desired []byte) ([]converge.A
 			failures = append(failures, failure{id, "unsupported-binding", fmt.Sprintf("binding %s is not supported", as.GetBinding())})
 			continue
 		}
-		if foreign := foreignDevice(as); foreign != "" {
-			failures = append(failures, failure{id, "unsupported-device", fmt.Sprintf("device class %s cannot be held", foreign)})
+		atoms, reason, message := resolve(as)
+		if reason != "" {
+			failures = append(failures, failure{id, reason, message})
 			continue
 		}
-		var missing []string
-		for _, dev := range ids {
-			if !present[dev] {
-				missing = append(missing, dev)
-			}
-		}
-		if len(missing) > 0 {
-			failures = append(failures, failure{id, "device-missing", strings.Join(missing, ", ") + " not present"})
-			continue
-		}
-		if msg := overlap(ids, claimed, id); msg != "" {
+		if msg := holdConflict(id, atoms, claimed, passed); msg != "" {
 			failures = append(failures, failure{id, "overlap", msg})
 			continue
 		}
@@ -180,20 +197,20 @@ func (d *devicesConverger) Plan(_ context.Context, desired []byte) ([]converge.A
 		actions = append(actions, converge.Action{
 			Description: "bind " + id,
 			Apply: func(context.Context) error {
-				spec, err := json.Marshal(newCDISpec(as, generation))
+				spec, err := json.Marshal(newCDISpec(as, generation, atoms, mps))
 				if err != nil {
 					return err
 				}
 				if err := host.WriteFile(cdiSpecPath(id), spec, 0o644); err != nil {
 					return err
 				}
-				if err := host.WriteFile(envFilePath(id), envFile(as), 0o644); err != nil {
+				if err := host.WriteFile(envFilePath(id), envFile(as, atoms, mps), 0o644); err != nil {
 					return err
 				}
 				delete(d.failed, id)
 				cdi := make([]string, 0, len(ids))
 				for _, dev := range ids {
-					cdi = append(cdi, "bcd.dev/gpu="+dev)
+					cdi = append(cdi, "bcd.dev/gpu="+cdiDeviceName(dev))
 				}
 				d.a.log.Info("allocation bound", "allocation", id, "generation", generation, "devices", len(ids))
 				d.a.emitAttested(journal.ClassTransition, "allocation.bound", &agentv1.AttestedReportBody{
@@ -238,27 +255,28 @@ func (d *devicesConverger) Plan(_ context.Context, desired []byte) ([]converge.A
 	return actions, nil
 }
 
-func foreignDevice(as *agentv1.DeviceAssignment) string {
-	for _, dev := range as.GetDevices() {
-		if c := dev.GetDeviceClass(); c != "" && c != "gpu" {
-			return c
+// passedGPUs are the GPUs the instances converger's last pass gave VMs (VFIO): GPU UUID → instance.
+func (a *Agent) passedGPUs() map[string]string {
+	out := map[string]string{}
+	if a.instances == nil {
+		return out
+	}
+	for _, spec := range a.instances.specs {
+		if spec.GetDesiredState() == agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED {
+			continue
+		}
+		for _, gpu := range spec.GetGpuDeviceIds() {
+			out[gpu] = spec.GetInstanceId()
 		}
 	}
-	return ""
+	return out
 }
 
-func overlap(ids []string, claimed map[string]string, id string) string {
-	seen := map[string]bool{}
-	for _, dev := range ids {
-		if seen[dev] {
-			return "a device is listed twice"
-		}
-		seen[dev] = true
-		if owner, ok := claimed[dev]; ok && owner != id {
-			return dev + " is assigned to " + owner
-		}
-	}
-	return ""
+// mpsRunning reports whether the MPS control daemon's pipe directory exists (hostconfig's
+// gpu-sharing unit in mps mode).
+func (d *devicesConverger) mpsRunning() bool {
+	info, err := os.Stat(d.a.host.Path(mpsPipeDir))
+	return err == nil && info.IsDir()
 }
 
 // observed reads the holds back from the CDI directory.
@@ -293,7 +311,12 @@ func (d *devicesConverger) observed() (map[string]hold, error) {
 		gen, _ := strconv.ParseUint(spec.Annotations[annotationGeneration], 10, 64)
 		h := hold{generation: gen}
 		for _, dev := range spec.Devices {
-			h.deviceIDs = append(h.deviceIDs, dev.Name)
+			// The real atom id (a MIG instance's or slot's has a "/" a CDI name cannot).
+			if real := dev.Annotations[annotationDeviceID]; real != "" {
+				h.deviceIDs = append(h.deviceIDs, real)
+			} else {
+				h.deviceIDs = append(h.deviceIDs, dev.Name)
+			}
 		}
 		out[id] = h
 	}
@@ -315,7 +338,23 @@ func (d *devicesConverger) assignedDevices() map[string]bool {
 	return out
 }
 
-func newCDISpec(as *agentv1.DeviceAssignment, generation uint64) cdiSpec {
+// holdEnv is what every workload of a hold gets beside its devices: the allocation, the slice it
+// runs in when the hold has limits, and the MPS pipe for slots when MPS runs.
+func holdEnv(as *agentv1.DeviceAssignment, atoms []atom, mps bool) []string {
+	env := []string{"BCD_ALLOCATION_ID=" + as.GetAllocationId()}
+	if as.GetLimits() != nil {
+		env = append(env, "BCD_CGROUP_PARENT="+holdSlice(as.GetAllocationId()))
+	}
+	for _, a := range atoms {
+		if a.class == "gpu.slot" && mps {
+			env = append(env, "CUDA_MPS_PIPE_DIRECTORY="+mpsPipeDir)
+			break
+		}
+	}
+	return env
+}
+
+func newCDISpec(as *agentv1.DeviceAssignment, generation uint64, atoms []atom, mps bool) cdiSpec {
 	spec := cdiSpec{
 		CdiVersion: "0.6.0",
 		Kind:       "bcd.dev/gpu",
@@ -324,27 +363,33 @@ func newCDISpec(as *agentv1.DeviceAssignment, generation uint64) cdiSpec {
 			annotationReservation: as.GetReservationId(),
 			annotationGeneration:  strconv.FormatUint(generation, 10),
 		},
-		ContainerEdits: cdiEdits{Env: []string{"BCD_ALLOCATION_ID=" + as.GetAllocationId()}},
+		ContainerEdits: cdiEdits{Env: holdEnv(as, atoms, mps)},
 	}
-	for _, dev := range as.GetDevices() {
+	if as.GetLimits() != nil {
+		spec.Annotations[annotationCgroupParent] = holdSlice(as.GetAllocationId())
+	}
+	for _, a := range atoms {
 		spec.Devices = append(spec.Devices, cdiDevice{
-			Name:           dev.GetId(),
-			ContainerEdits: cdiEdits{Env: []string{"NVIDIA_VISIBLE_DEVICES=" + dev.GetId()}},
+			Name:           cdiDeviceName(a.id),
+			Annotations:    map[string]string{annotationDeviceID: a.id},
+			ContainerEdits: cdiEdits{Env: []string{"NVIDIA_VISIBLE_DEVICES=" + a.visible}},
 		})
 	}
 	return spec
 }
 
-func envFile(as *agentv1.DeviceAssignment) []byte {
-	ids := make([]string, 0, len(as.GetDevices()))
-	for _, dev := range as.GetDevices() {
-		ids = append(ids, dev.GetId())
+func envFile(as *agentv1.DeviceAssignment, atoms []atom, mps bool) []byte {
+	visible := make([]string, 0, len(atoms))
+	seen := map[string]bool{}
+	for _, a := range atoms {
+		// Two slots of one GPU are one device to the driver.
+		if !seen[a.visible] {
+			seen[a.visible] = true
+			visible = append(visible, a.visible)
+		}
 	}
-	lines := []string{
-		"BCD_ALLOCATION_ID=" + as.GetAllocationId(),
-		"BCD_RESERVATION_ID=" + as.GetReservationId(),
-		"NVIDIA_VISIBLE_DEVICES=" + strings.Join(ids, ","),
-	}
+	lines := holdEnv(as, atoms, mps)
+	lines = append(lines, "BCD_RESERVATION_ID="+as.GetReservationId(), "NVIDIA_VISIBLE_DEVICES="+strings.Join(visible, ","))
 	lines = append(lines, as.GetEnv()...)
 	return []byte(strings.Join(lines, "\n") + "\n")
 }
