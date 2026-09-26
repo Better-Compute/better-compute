@@ -18,7 +18,8 @@ import {
   RiTvLine,
 } from 'react-icons/ri';
 import { sites } from '@/lib/data';
-import { allCommands, allNav, navForPath, searchAll } from '@/lib/modules';
+import { allCommands, allNav, allWidgets, navForPath, searchAll } from '@/lib/modules';
+import { loadState, type Dashboard } from '@/components/widgets/layout';
 import { readVisits } from './pins';
 import { usePeek } from './peek';
 import { cx } from '@/utils/cx';
@@ -89,7 +90,35 @@ function Highlight({ text, hits }: { text: string; hits: number[] }) {
 
 const RECENT_KEY = 'bc-admin:palette-recent';
 
+const DASHBOARD_ACTION_KEY = 'bc-admin:dashboard-action';
+
+/**
+ * Ask the Overview's dashboards to open one or add a widget. Kept in sessionStorage so it survives the
+ * navigation to the Overview; the event covers the case where the dashboards are already mounted.
+ */
+function queueDashboardAction(action: { type: 'open' | 'add'; id: string }) {
+  try {
+    window.sessionStorage.setItem(DASHBOARD_ACTION_KEY, JSON.stringify(action));
+  } catch {
+    // Without storage the event below still works when the Overview is open.
+  }
+  window.setTimeout(() => window.dispatchEvent(new Event(PALETTE_EVENTS.dashboardAction)), 60);
+}
+
+/** The queued dashboard action, removed as it is read. */
+export function takeDashboardAction(): { type: 'open' | 'add'; id: string } | null {
+  try {
+    const raw = window.sessionStorage.getItem(DASHBOARD_ACTION_KEY);
+    window.sessionStorage.removeItem(DASHBOARD_ACTION_KEY);
+    return raw ? (JSON.parse(raw) as { type: 'open' | 'add'; id: string }) : null;
+  } catch {
+    return null;
+  }
+}
+
 export const PALETTE_EVENTS = {
+  /** A queued dashboard action is waiting (takeDashboardAction). */
+  dashboardAction: 'bc-admin:dashboard-action',
   editDashboard: 'bc-admin:edit-dashboard',
   toggleSidebar: 'bc-admin:toggle-sidebar',
   showShortcuts: 'bc-admin:show-shortcuts',
@@ -105,6 +134,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
   const [cursor, setCursor] = useState(0);
   const [recent, setRecent] = useState<string[]>([]);
   const [visits, setVisits] = useState<string[]>([]);
+  const [dashboards, setDashboards] = useState<Dashboard[]>([]);
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -112,6 +142,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     setQuery('');
     setCursor(0);
     setVisits(readVisits().filter((href) => href !== window.location.pathname + window.location.search));
+    setDashboards(loadState().dashboards);
     try {
       setRecent(JSON.parse(window.localStorage.getItem(RECENT_KEY) ?? '[]'));
     } catch {
@@ -191,9 +222,34 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
         keywords: [site.city, site.region],
         perform: () => workspace.setSiteId(site.id),
       })),
+      // Dashboards and widgets: switch to one, or add a widget to the active dashboard.
+      ...dashboards.map((d) => ({
+        id: `dash:${d.id}`,
+        label: `Dashboard: ${d.name}`,
+        group: 'Dashboards',
+        hint: `${d.items.length} widgets`,
+        icon: RiDashboardLine,
+        keywords: ['overview', 'switch'],
+        perform: () => {
+          router.push('/');
+          queueDashboardAction({ type: 'open', id: d.id });
+        },
+      })),
+      ...allWidgets().map((w) => ({
+        id: `widget:${w.id}`,
+        label: `Add widget: ${w.title}`,
+        group: 'Dashboards',
+        hint: w.description,
+        icon: w.icon,
+        keywords: ['widget', 'add', w.module, w.id],
+        perform: () => {
+          router.push('/');
+          queueDashboardAction({ type: 'add', id: w.id });
+        },
+      })),
       // Pools, tenants, nodes, reservations… come from the modules' own `search` (see results below).
     ];
-  }, [router, workspace, resolvedTheme, setTheme, pageCommands, visits]);
+  }, [router, workspace, resolvedTheme, setTheme, pageCommands, visits, dashboards]);
 
   const results = useMemo(() => {
     const q = query.trim();

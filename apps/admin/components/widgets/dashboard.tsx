@@ -13,7 +13,7 @@ import {
   RiShareLine,
 } from 'react-icons/ri';
 import { Button } from '@/components/base/buttons/button';
-import { PALETTE_EVENTS } from '@/components/shell/command-palette';
+import { PALETTE_EVENTS, takeDashboardAction } from '@/components/shell/command-palette';
 import { useFeedback } from '@/components/ui/feedback';
 import { useKiosk } from '@/components/shell/kiosk';
 import { Drawer, Menu, ToolButton } from '@/components/ui/overlay';
@@ -69,8 +69,36 @@ export function Dashboards() {
   }, [state, hydrated]);
   useEffect(() => {
     const onEdit = () => setEditing((current) => !current);
+    // From the palette: switch dashboard, or add a widget to the active one (then show it being arranged).
+    // Queued in sessionStorage so it survives the navigation here; the event covers "already on the Overview".
+    const onAction = () => {
+      const action = takeDashboardAction();
+      if (!action) return;
+      if (action.type === 'open') {
+        setState((current) => (current.dashboards.some((d) => d.id === action.id) ? { ...current, active: action.id } : current));
+        return;
+      }
+      const def = widgetById(action.id);
+      if (!def) return;
+      setState((current) => ({
+        ...current,
+        dashboards: current.dashboards.map((d) =>
+          d.id === current.active ? { ...d, items: [{ key: uniqueKey(def.id, d.items), widget: def.id, w: def.defaultSize.w, h: def.defaultSize.h }, ...d.items] } : d,
+        ),
+      }));
+      setEditing(true);
+      toast({ title: `Added “${def.title}”`, detail: 'At the top of this dashboard; drag it or use the arrow keys to place it.', status: 'ok' });
+    };
+    // After the saved state loads (the effect above runs first), apply anything queued before we mounted.
+    const pending = window.setTimeout(onAction, 0);
     window.addEventListener(PALETTE_EVENTS.editDashboard, onEdit);
-    return () => window.removeEventListener(PALETTE_EVENTS.editDashboard, onEdit);
+    window.addEventListener(PALETTE_EVENTS.dashboardAction, onAction);
+    return () => {
+      window.clearTimeout(pending);
+      window.removeEventListener(PALETTE_EVENTS.editDashboard, onEdit);
+      window.removeEventListener(PALETTE_EVENTS.dashboardAction, onAction);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Wall display: rotate through the dashboards without touching the saved active one.
