@@ -16,6 +16,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,6 +61,9 @@ type CloudHypervisor struct {
 	VFIOGroup func(addr string) (string, error)
 	// GPUAddress maps a GPU device id to its PCI address ("0000:3b:00.0") for VFIO.
 	GPUAddress func(id string) (string, bool)
+	// VFIO binds a passthrough GPU's IOMMU group to vfio-pci before start and releases it after
+	// destroy (tests replace it; default SysfsVFIO on the real sysfs).
+	VFIO VFIOBinder
 	// HTTP downloads base images (https only).
 	HTTP *http.Client
 	// ShutdownTimeout bounds a graceful (ACPI) shutdown before the VM is stopped (default 60 s).
@@ -92,6 +96,22 @@ type chRecord struct {
 	MACs         []string        `json:"macs,omitempty"`
 	// Placement is the spec's (PLAN.md §3.8): the VMM unit's CPU and memory-node confinement.
 	Placement *Placement `json:"placement,omitempty"`
+	// GivenGroups are the VFIO group devices handed to the running VMM's user, and BoundAddrs the
+	// PCI addresses put on vfio-pci for it: what stop gives back and destroy releases, even when the
+	// spec dropped a GPU meanwhile (its GPUs apply only at the next start).
+	GivenGroups []string `json:"givenGroups,omitempty"`
+	BoundAddrs  []string `json:"boundAddrs,omitempty"`
+}
+
+// union adds b's strings to a's, once.
+func union(a, b []string) []string {
+	out := append([]string(nil), a...)
+	for _, s := range b {
+		if !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 const chManaged = "better-compute/cloud-hypervisor/1"
@@ -699,7 +719,20 @@ func (c *CloudHypervisor) start(ctx context.Context, r *chRecord, paused bool) e
 	if err := c.taps(ctx, r); err != nil {
 		return err
 	}
+	// Every endpoint of each GPU's IOMMU group on vfio-pci, before its group is handed over.
+	for _, addr := range c.gpuAddresses(r) {
+		if err := c.vfio().Bind(addr); err != nil {
+			return err
+		}
+		r.BoundAddrs = union(r.BoundAddrs, []string{addr})
+	}
 	if err := c.giveFiles(r, int(r.UID)); err != nil {
+		return err
+	}
+	if groups, err := c.vfioGroups(r); err == nil {
+		r.GivenGroups = union(r.GivenGroups, groups)
+	}
+	if err := c.save(r); err != nil {
 		return err
 	}
 	if err := c.launch(ctx, r); err != nil {
@@ -830,11 +863,14 @@ func (c *CloudHypervisor) stop(ctx context.Context, r *chRecord) error {
 		return fmt.Errorf("the VMM's unit %s is %q after the stop", unitName(id), s)
 	}
 	c.deleteTaps(ctx, r)
-	// The GPUs' VFIO groups go back to root.
-	if groups, err := c.vfioGroups(r); err == nil {
-		for _, g := range groups {
-			_ = c.chown(g, 0)
-		}
+	// The GPUs' VFIO groups go back to root: those the VMM was given, whatever the spec says now.
+	groups, _ := c.vfioGroups(r)
+	for _, g := range union(r.GivenGroups, groups) {
+		_ = c.chown(g, 0)
+	}
+	if len(r.GivenGroups) > 0 {
+		r.GivenGroups = nil
+		_ = c.save(r)
 	}
 	return nil
 }
@@ -856,7 +892,39 @@ func (c *CloudHypervisor) Destroy(ctx context.Context, id string) error {
 	if err := c.stop(ctx, r); err != nil {
 		return err
 	}
+	// The GPUs go back to their host driver (best effort: a GPU left on vfio-pci is only unusable
+	// to the host until the next pass or boot).
+	for _, addr := range union(r.BoundAddrs, c.gpuAddresses(r)) {
+		_ = c.vfio().Release(addr)
+	}
 	return os.RemoveAll(c.instanceDir(id))
+}
+
+// VFIOBinder puts a PCI device's IOMMU group on vfio-pci and takes it back (SysfsVFIO).
+type VFIOBinder interface {
+	Bind(addr string) error
+	Release(addr string) error
+}
+
+func (c *CloudHypervisor) vfio() VFIOBinder {
+	if c.VFIO != nil {
+		return c.VFIO
+	}
+	return SysfsVFIO{}
+}
+
+// gpuAddresses are the PCI addresses of the instance's GPUs that have one.
+func (c *CloudHypervisor) gpuAddresses(r *chRecord) []string {
+	var out []string
+	for _, gpu := range r.GPUs {
+		if c.GPUAddress == nil {
+			continue
+		}
+		if addr, ok := c.GPUAddress(gpu); ok && pciAddress.MatchString(addr) {
+			out = append(out, addr)
+		}
+	}
+	return out
 }
 
 // ---- snapshots ----------------------------------------------------------------------------------
@@ -872,6 +940,10 @@ func (c *CloudHypervisor) Snapshot(ctx context.Context, id string, includeMemory
 	r, err := c.record(id)
 	if err != nil {
 		return "", fmt.Errorf("no managed domain %s", id)
+	}
+	if includeMemory && len(r.GPUs) > 0 {
+		// A VFIO device's state is the GPU's own: no VMM captures it.
+		return "", ErrMemorySnapshotWithGPUs
 	}
 	if err := c.checkDisk(r); err != nil {
 		return "", err

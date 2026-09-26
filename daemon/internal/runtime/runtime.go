@@ -109,6 +109,10 @@ type Restore struct {
 	CPUModel string
 }
 
+// ErrMemorySnapshotWithGPUs refuses a memory snapshot of an instance with passthrough GPUs: their
+// state lives in the devices, which no VMM saves (a disk-only snapshot still works).
+var ErrMemorySnapshotWithGPUs = errors.New("an instance with passthrough GPUs cannot be snapshotted with its memory; snapshot its disk only")
+
 // ErrNoCapacity reports a start beyond the host's free vCPU or memory.
 var ErrNoCapacity = errors.New("not enough free vCPU or memory on this host")
 

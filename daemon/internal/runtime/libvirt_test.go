@@ -326,6 +326,14 @@ func TestLibvirtRuntime(t *testing.T) {
 
 	// A memory snapshot of a running domain: saved, flattened, packed; the domain carries on.
 	_ = l.SetState(ctx, "inst_web", StateRunning)
+	// A passthrough GPU's state is the device's: no memory snapshot while the domain has one.
+	if _, err := l.Snapshot(ctx, "inst_web", true, "AMD EPYC 9654", &bytes.Buffer{}); err != ErrMemorySnapshotWithGPUs {
+		t.Fatalf("memory snapshot with a GPU: %v", err)
+	}
+	spec.GpuDeviceIds = nil
+	if err := l.Ensure(ctx, spec, nil, nil); err != nil {
+		t.Fatal(err)
+	}
 	var snap bytes.Buffer
 	cpu, err := l.Snapshot(ctx, "inst_web", true, "AMD EPYC 9654", &snap)
 	if err != nil || cpu != "AMD EPYC 9654" {

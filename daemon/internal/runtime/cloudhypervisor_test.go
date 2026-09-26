@@ -199,7 +199,7 @@ func TestCloudHypervisorRuntime(t *testing.T) {
 	dir := t.TempDir()
 	c := &CloudHypervisor{Dir: dir, Exec: ch.exec, API: ch.api, HTTP: srv.Client(), Poll: 1, ShutdownTimeout: 1, Chown: ch.chown,
 		OpenTap:   func(string) (*os.File, error) { return os.CreateTemp(t.TempDir(), "tap") },
-		VFIOGroup: func(string) (string, error) { return "42", nil },
+		VFIOGroup: func(string) (string, error) { return "42", nil }, VFIO: &fakeVFIO{},
 		GPUAddress: func(id string) (string, bool) { return map[string]string{"GPU-1": "0000:3b:00.0"}[id], id == "GPU-1" }}
 	ctx := context.Background()
 	spec := &agentv1.InstanceSpec{
@@ -282,6 +282,16 @@ func TestCloudHypervisorRuntime(t *testing.T) {
 		}
 	}
 
+	// A passthrough GPU's state is the device's: no memory snapshot while the VM has one.
+	if _, err := c.Snapshot(ctx, "inst_web", true, "AMD EPYC 9654", &bytes.Buffer{}); err != ErrMemorySnapshotWithGPUs {
+		t.Fatalf("memory snapshot with a GPU: %v", err)
+	}
+	// Dropped from the spec (applies at the next start): the running VMM keeps its group until it
+	// stops, and gives it back then all the same.
+	spec.GpuDeviceIds = nil
+	if err := c.Ensure(ctx, spec, nil, nil); err != nil {
+		t.Fatal(err)
+	}
 	// A memory snapshot of the running VM: paused for it, then carries on.
 	var snap bytes.Buffer
 	cpu, err := c.Snapshot(ctx, "inst_web", true, "AMD EPYC 9654", &snap)

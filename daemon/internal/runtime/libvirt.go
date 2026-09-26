@@ -795,6 +795,15 @@ func (l *Libvirt) Snapshot(ctx context.Context, id string, includeMemory bool, c
 	if !exists || !managed {
 		return "", fmt.Errorf("no managed domain %s", id)
 	}
+	if includeMemory {
+		// A VFIO device's state is the GPU's own: qemu cannot save it.
+		if raw, err := l.virsh(ctx, "dumpxml", id); err == nil {
+			var x domainXML
+			if xml.Unmarshal(raw, &x) == nil && len(x.Devices.Hostdevs) > 0 {
+				return "", ErrMemorySnapshotWithGPUs
+			}
+		}
+	}
 	dir := l.instanceDir(id)
 	if err := l.checkDisk(dir, dom); err != nil {
 		return "", err
