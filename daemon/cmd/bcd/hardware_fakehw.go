@@ -45,9 +45,13 @@ func newHost(dataDir string) (agent.Host, error) {
 			return nil, err
 		}
 	}
+	root := filepath.Join(dataDir, "fakehw-root")
 	return &agent.RealHost{
-		Collect:    collectInventory,
-		Root:       filepath.Join(dataDir, "fakehw-root"),
+		// What the host units changed under the fake root (hugepages) shows in the inventory.
+		Collect: func() (*inventory.NodeInventory, error) {
+			return fakehw.ApplyRoot(fakehw.Inventory(fakeSeed()), root), nil
+		},
+		Root:       root,
 		BootIDFile: bootFile,
 		RebootFunc: func(string) error {
 			if err := os.WriteFile(bootFile, []byte(newUUID()+"\n"), 0o600); err != nil {
@@ -71,9 +75,10 @@ func newSimHost(dataDir string, seed uint64, onReboot func()) (agent.Host, error
 			return nil, err
 		}
 	}
+	root := filepath.Join(dataDir, "fakehw-root")
 	return &agent.RealHost{
-		Collect:    func() (*inventory.NodeInventory, error) { return fakehw.Inventory(seed), nil },
-		Root:       filepath.Join(dataDir, "fakehw-root"),
+		Collect:    func() (*inventory.NodeInventory, error) { return fakehw.ApplyRoot(fakehw.Inventory(seed), root), nil },
+		Root:       root,
 		BootIDFile: bootFile,
 		RebootFunc: func(string) error {
 			if err := os.WriteFile(bootFile, []byte(newUUID()+"\n"), 0o600); err != nil {
