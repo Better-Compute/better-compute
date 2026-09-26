@@ -2,6 +2,8 @@
 
 import Link from 'next/link';
 import type { ReactNode } from 'react';
+import { RiPushpinLine } from 'react-icons/ri';
+import { addToDashboard } from '@/components/shell/command-palette';
 import { SegmentedControl, SegmentedControlItem } from '@/components/base/segmented-control/segmented-control';
 import { Tag } from '@/components/ui/signal';
 import { fmtStamp } from '@/lib/data/format';
@@ -10,6 +12,24 @@ import { cx } from '@/utils/cx';
 import { stateStyle } from './model';
 
 // Small pieces the capacity pages share. Anything generally useful moves to components/ui via the shell's owner.
+
+/**
+ * In a panel header whose content has a dashboard widget twin: puts that widget on the active dashboard with the
+ * panel's current view (model, sort, window...) and goes there, in arrange mode.
+ */
+export function PinButton({ widgetId, settings }: { widgetId: string; settings?: Record<string, string | number | boolean> }) {
+  return (
+    <button
+      type="button"
+      onClick={() => addToDashboard(widgetId, settings ? { settings } : {})}
+      title="Add this view to the dashboard"
+      className="inline-flex items-center gap-1 font-mono text-[11px] text-text-tertiary outline-none hover:text-text-primary focus-visible:ring-2 focus-visible:ring-border-focus-ring"
+    >
+      <RiPushpinLine className="size-3.5" aria-hidden />
+      pin
+    </button>
+  );
+}
 
 /** Next to mutation controls: why they won't act right now (useCapacityActions().readOnly). */
 export function ReadOnlyHint({ reason }: { reason: 'past' | 'signed-out' | undefined }) {

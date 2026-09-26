@@ -70,13 +70,14 @@ const SETTINGS: Record<string, WidgetSetting[]> = {
       options: [
         { value: 'auto', label: 'Fit the widget' },
         { value: '12/48', label: '12 h back · 48 h ahead' },
+        { value: '24/72', label: '1 d back · 3 d ahead' },
         { value: '24/96', label: '1 d back · 4 d ahead' },
         { value: '48/168', label: '2 d back · 7 d ahead' },
         { value: '168/168', label: '7 d back · 7 d ahead' },
       ],
     },
     { id: 'model', label: 'GPU model', type: 'select', default: 'all', options: modelOptions },
-    { id: 'sort', label: 'Rows', type: 'select', default: 'pool', options: [{ value: 'pool', label: 'By pool' }, { value: 'utilization', label: 'Busiest first' }] },
+    { id: 'sort', label: 'Rows', type: 'select', default: 'pool', options: [{ value: 'pool', label: 'By pool' }, { value: 'utilization', label: 'Busiest first' }, { value: 'free', label: 'Most free first' }] },
   ],
   'capacity.pools': [
     { id: 'sort', label: 'Sort', type: 'select', default: 'utilization', options: [{ value: 'utilization', label: 'Busiest first' }, { value: 'free', label: 'Most free first' }, { value: 'name', label: 'By name' }] },

@@ -19,7 +19,7 @@ import { DAY, HOUR, useHourWindow, usePoolRows, useTenantName, useTimelines } fr
 import { SourceNotice } from '../source-notice';
 import { CapacityHeatmap, HeatmapTable } from '../heatmap';
 import { byModel, costOf, fleetSeries, fleetTotals, heatMatrix, pressure, quotaCells, runway, type PoolRow } from '../model';
-import { HeatLegend, planHref, Segmented, StateTag, utcDay } from '../ui';
+import { HeatLegend, PinButton, planHref, Segmented, StateTag, utcDay } from '../ui';
 import { Term } from '../term';
 
 const SPANS = {
@@ -209,7 +209,7 @@ export function CapacityOverviewPage() {
           <Stat label={<Term id="spend">Spend, 30 days</Term>} value={fmtMoney(spend30, { short: true })} hint="estimated at list price" tone="neutral" />
         </Panel>
 
-        <Panel className="col-span-12" title="Insights" icon={RiLightbulbFlashLine} flush>
+        <Panel className="col-span-12" title="Insights" icon={RiLightbulbFlashLine} flush actions={<PinButton widgetId="capacity.insights" />}>
           <InsightList limit={4} />
         </Panel>
 
@@ -218,6 +218,12 @@ export function CapacityOverviewPage() {
           title="Bookings by pool and hour"
           icon={RiCalendarScheduleLine}
           meta={`${fmtStamp(from)} → ${fmtStamp(to)} UTC`}
+          actions={
+            <PinButton
+              widgetId="capacity.heatmap"
+              settings={{ window: `${SPANS[span].back}/${SPANS[span].ahead}`, model: heatModel, sort: heatSort === 'busy' ? 'utilization' : heatSort }}
+            />
+          }
         >
           {/* Controls live in the body, where they can wrap on a phone; a panel header can't. */}
           <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -296,7 +302,7 @@ export function CapacityOverviewPage() {
           />
         </Panel>
 
-        <Panel className="col-span-12 xl:col-span-4" title="By GPU model" meta={`${models.length} models`}>
+        <Panel className="col-span-12 xl:col-span-4" title="By GPU model" meta={`${models.length} models`} actions={<PinButton widgetId="capacity.models" />}>
           <ul className="flex flex-col gap-3">
             {models.map((model) => (
               <li key={model.short}>
@@ -328,7 +334,7 @@ export function CapacityOverviewPage() {
           />
         </Panel>
 
-        <Panel className="col-span-12 lg:col-span-6" title="Where it is tight" icon={RiTimerLine} meta="earliest 8 GPUs for 24 h" flush>
+        <Panel className="col-span-12 lg:col-span-6" title="Where it is tight" icon={RiTimerLine} meta="earliest 8 GPUs for 24 h" flush actions={<PinButton widgetId="capacity.pressure" settings={{ gpus: 8, hours: 24 }} />}>
           <table className="w-full text-body-regular">
             <thead>
               <tr className="border-b border-separator-border font-mono text-[11px] tracking-wide text-text-tertiary uppercase">
@@ -366,7 +372,7 @@ export function CapacityOverviewPage() {
 
         <RunwayPanel rows={gpuRows} />
 
-        <Panel className="col-span-12 lg:col-span-6" title="Next 6 hours" meta="starts and ends" flush bodyClassName="max-h-[340px] overflow-y-auto">
+        <Panel className="col-span-12 lg:col-span-6" title="Next 6 hours" meta="starts and ends" flush bodyClassName="max-h-[340px] overflow-y-auto" actions={<PinButton widgetId="reservations.upcoming" settings={{ horizon: 6 }} />}>
           <UpcomingList hours={6} />
         </Panel>
 
@@ -375,9 +381,12 @@ export function CapacityOverviewPage() {
           title="Tenants near quota"
           meta={`${alerts.length} at ≥80%`}
           actions={
-            <Link href="/quotas" className="inline-flex items-center gap-1 font-mono text-[11px] text-signal hover:underline">
-              quotas <RiArrowRightUpLine className="size-3.5" aria-hidden />
-            </Link>
+            <span className="flex items-center gap-3">
+              <PinButton widgetId="quotas.alerts" settings={{ threshold: 80 }} />
+              <Link href="/quotas" className="inline-flex items-center gap-1 font-mono text-[11px] text-signal hover:underline">
+                quotas <RiArrowRightUpLine className="size-3.5" aria-hidden />
+              </Link>
+            </span>
           }
         >
           {alerts.length ? (

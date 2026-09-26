@@ -16,7 +16,7 @@ import { DAY, useCapacity, usePoolRows, useTenantName } from '../data';
 import { SourceNotice } from '../source-notice';
 import { SPOT_RATE, SpotList } from '../spot';
 import { dailySpend, rollup } from '../model';
-import { HoverCard, HoverRow, Segmented, utcDay } from '../ui';
+import { HoverCard, HoverRow, PinButton, Segmented, utcDay } from '../ui';
 
 const RANGES = { '7d': 7, '14d': 14, '30d': 30 } as const;
 type RangeKey = keyof typeof RANGES;
@@ -202,6 +202,7 @@ export function UsagePage() {
           className="col-span-12 xl:col-span-7"
           title="Breakdown"
           meta={`${breakdown.length} ${group === 'identity' ? 'people' : `${group}s`}`}
+          actions={<PinButton widgetId="usage.spend" settings={{ days: Math.min(30, RANGES[range]), group: group === 'identity' ? 'tenant' : group }} />}
           flush
         >
           <div className="overflow-x-auto border-b border-separator-border px-3 py-2">
@@ -282,7 +283,7 @@ export function UsagePage() {
           </table>
         </Panel>
 
-        <Panel className="col-span-12" title="Spot" meta={`spot GPU-hours are billed at ${Math.round(SPOT_RATE * 100)}% of list`} flush>
+        <Panel className="col-span-12" title="Spot" meta={`spot GPU-hours are billed at ${Math.round(SPOT_RATE * 100)}% of list`} flush actions={<PinButton widgetId="capacity.spot" />}>
           <SpotList />
         </Panel>
       </Grid>

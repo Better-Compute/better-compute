@@ -68,7 +68,7 @@ export function CapacityKpisWidget({ size }: WidgetProps) {
   );
 }
 
-const HEAT_WINDOWS: Record<string, [number, number]> = { '12/48': [12, 48], '24/96': [24, 96], '48/168': [48, 168], '168/168': [168, 168] };
+const HEAT_WINDOWS: Record<string, [number, number]> = { '12/48': [12, 48], '24/72': [24, 72], '24/96': [24, 96], '48/168': [48, 168], '168/168': [168, 168] };
 
 export function CapacityHeatmapWidget({ size, settings, editing }: WidgetProps) {
   const router = useRouter();
@@ -80,7 +80,7 @@ export function CapacityHeatmapWidget({ size, settings, editing }: WidgetProps) 
   const sort = String(settings.sort ?? 'pool');
   const gpuRows = useMemo(() => {
     const list = rows.filter((row) => row.unit === 'gpu' && (model === 'all' || row.short === model));
-    return sort === 'utilization' ? [...list].sort((a, b) => b.utilization - a.utilization) : list;
+    return sort === 'utilization' ? [...list].sort((a, b) => b.utilization - a.utilization) : sort === 'free' ? [...list].sort((a, b) => b.freeNow - a.freeNow) : list;
   }, [rows, model, sort]);
   const timelines = useTimelines(
     gpuRows.map((row) => row.id),
