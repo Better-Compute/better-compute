@@ -205,6 +205,8 @@ export interface DevFleetOptions {
    * XID health handler (as `serve` composes them), e.g. vps's `instanceStatusHandler({ events })`.
    */
   reports?: Partial<NonNullable<GatewayOptions['reports']>>;
+  /** The control plane's modules: their `statusHandlers` run after XID health, before `reports.status` (as in `serve`). */
+  modules?: readonly Pick<ComputeModule, 'statusHandlers'>[];
   /** Options for every FakeDaemon (default reconnect backoff 100 ms → 5 s). */
   daemon?: Partial<Omit<FakeDaemonOptions, 'nodeId' | 'scheduler' | 'dial' | 'hardware' | 'tunnels'>> & {
     /** What runs in each tunnel (default `echoShell`); the fleet dials the Tunnel streams. */
@@ -381,15 +383,20 @@ function gatewayTunnelConn(
   };
 }
 
-/** The server's report hooks plus `extra`; status handlers compose after XID health, as in `serve`. */
+/** The server's report hooks plus `extra`; status handlers compose after XID health, modules' first, as in `serve`. */
 function reportHandlers(
   extra: DevFleetOptions['reports'] = {},
+  modules: DevFleetOptions['modules'] = [],
 ): NonNullable<GatewayOptions['reports']> {
   const { status, ...rest } = extra;
   return {
     ...gatewayReportHandlers,
     ...rest,
-    status: [xidStatusHandler, ...(status === undefined ? [] : Array.isArray(status) ? status : [status])],
+    status: [
+      xidStatusHandler,
+      ...modules.flatMap((module) => module.statusHandlers ?? []),
+      ...(status === undefined ? [] : Array.isArray(status) ? status : [status]),
+    ],
   } as NonNullable<GatewayOptions['reports']>;
 }
 
@@ -514,7 +521,7 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
           key,
           (kind) => Object.hasOwn(compute.jobs, kind) && !(builtinJobNames as readonly string[]).includes(kind),
         ),
-      reports: reportHandlers(options.reports),
+      reports: reportHandlers(options.reports, options.modules),
       dispatchIntervalMs: 250,
       specSweepMs: 1_000,
       revocations,
@@ -950,6 +957,7 @@ export async function createDevStack(options: DevStackOptions = {}): Promise<Dev
       rootTenantId: iam.rootTenantId,
       insecureHeaderAuth: true,
       tunnels,
+      modules: [...(iam.modules ?? []), ...(options.modules ?? [])],
       ...(options.region ? { region: options.region } : {}),
       ...(options.gateway ? { gateway: options.gateway } : {}),
       ...(options.daemon ? { daemon: options.daemon } : {}),

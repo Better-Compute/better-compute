@@ -135,5 +135,13 @@ export const schemas = {
     },
     ['tenantId', 'poolId', 'verb', 'nodeIds', 'reason'],
   ),
+  confirmMac: strictObject(
+    {
+      tenantId,
+      nodeId,
+      mac: { type: 'string', pattern: '^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$', description: "The machine's PXE MAC (':' or '-' separated)" },
+    },
+    ['tenantId', 'nodeId', 'mac'],
+  ),
   discovered: strictObject({ tenantId, siteId: text(128, 'The site whose PXE discovery list to read') }, ['tenantId', 'siteId']),
 } satisfies Record<string, InputSchema>;

@@ -33,6 +33,10 @@ export interface MetalNodeRow {
   /** Options for the BMC driver (enroll `bmc.driverOptions`), sent on every BMC operation. */
   bmc_driver_options: Record<string, Json> | null;
   macs: string[];
+  /** Where `macs` came from: `operator` (enroll, metal.confirmMac), `inspection`, or `discovered` (PXE discovery, trusted pool). */
+  mac_source: 'operator' | 'inspection' | 'discovered';
+  /** A MAC PXE discovery found for a machine without MACs, awaiting metal.confirmMac. */
+  discovered_mac: string | null;
   product_uuid: string | null;
   arch: 'x86_64' | 'arm64';
   uefi: boolean;
@@ -59,7 +63,7 @@ export interface MetalNodeRow {
 
 const select = `SELECT m.node_id, m.tenant_id, n.site_id, n.pool_id, n.provision_state, n.failed_from, n.maintenance,
     n.power, n.role, n.version AS node_version, m.bmc_driver, m.bmc_address, m.bmc_credentials,
-    m.bmc_tls_spki_sha256, m.bmc_driver_options, m.macs, m.product_uuid, m.arch, m.uefi, m.hardware_profile, m.phase, m.workflow_id,
+    m.bmc_tls_spki_sha256, m.bmc_driver_options, m.macs, m.mac_source, m.discovered_mac, m.product_uuid, m.arch, m.uefi, m.hardware_profile, m.phase, m.workflow_id,
     m.deploy_profile_id, m.deploy_profile_version, m.release_wipe, m.last_error, m.addresses,
     p.agent AS pool_agent, p.policy AS pool_policy, n.trust, m.lease_allocation_id, m.tenant_root, m.batch_id
   FROM metal_nodes m JOIN nodes n ON n.id = m.node_id LEFT JOIN pools p ON p.id = n.pool_id`;

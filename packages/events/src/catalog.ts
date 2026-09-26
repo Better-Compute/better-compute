@@ -143,7 +143,13 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     subject: 'node/{id}',
     module: 'metal',
     description:
-      "PXE discovery filled an enrolled machine's MAC: its product UUID was seen from exactly one MAC by a site agent ({ nodeId, mac, productUuid, siteId, agentNodeId })",
+      'PXE discovery found the MAC of a machine enrolled without MACs, first seen under its product UUID right after metal power-cycled it: a candidate for metal.confirmMac, or bound at once on a pool that trusts its provisioning network ({ nodeId, mac, productUuid, siteId, agentNodeId, bound })',
+  },
+  {
+    type: 'node.pxe-mac.confirmed',
+    subject: 'node/{id}',
+    module: 'metal',
+    description: "An operator bound a machine's PXE MAC with metal.confirmMac ({ nodeId, mac, discovered, requestId })",
   },
   {
     type: 'node.provision.*',

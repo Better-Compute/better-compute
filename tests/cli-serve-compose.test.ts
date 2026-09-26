@@ -287,6 +287,14 @@ describe('serve composition audit', () => {
       options: { reports: { status: instances }, maxStreams: 10 },
     }) as { reports: Record<string, unknown>; maxStreams: number; region: string };
     expect(composed.reports.status).toEqual([xid, instances]);
+    // Registered modules' status handlers (metal's PXE discovery list) run after XID health, before the configuration's.
+    const discovery = async () => undefined;
+    const withModules = gatewayOptions({ xidStatusHandler: xid }, fake, { database: {}, modules: [{ name: 'metal', statusHandlers: [discovery] }, { name: 'vps' }] } as any, {
+      region: 'eu-1',
+      tls: {},
+      options: { reports: { status: instances } },
+    }) as { reports: Record<string, unknown> };
+    expect(withModules.reports.status).toEqual([xid, discovery, instances]);
     expect(Object.keys(composed.reports)).toEqual(
       expect.arrayContaining(['allocationBound', 'allocationReleased', 'allocationFailed']),
     );

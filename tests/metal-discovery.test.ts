@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { generateKeyPairSync, sign } from 'node:crypto';
+import { createHash, generateKeyPairSync, sign } from 'node:crypto';
+import { create, toBinary } from '@bufbuild/protobuf';
+import { NicsSectionSchema, SystemSectionSchema } from '@better-compute/protocol';
 import { setSimClock, useSimClock } from '@better-compute/postgres';
 import { addImageSigner, createProfile, defineProfile, imageSigningInput, registerImage } from '@better-compute/provision';
 import {
   discoveredEntries,
   isMatchableUuid,
+  matchDiscoveredMachine,
   metalDiscoveryStatusHandler,
   metalWorkKind,
   normalizeUuid,
@@ -15,12 +18,14 @@ import {
 import { tickSiteBoot } from '@better-compute/server';
 import { createMetalSim, type MetalSim } from './extensions/metal-sim.js';
 
-// PXE discovery and sanboot (PLAN.md §3.5; seams e763001, bcd 0056e1e). A site agent lists the machines it
-// saw PXE-booting with no boot entry (StatusReport.discovered). metal stores each agent's list and serves
-// it per site (metal.discovered). It fills the PXE MAC of an enrolled machine that has none when its
-// product UUID, in any of its byte orders, was seen from exactly one MAC; ambiguous and placeholder UUIDs
-// never match. A driver without virtual media (ipmi) boots a catalog ISO with iPXE sanboot from the site
-// cache instead of media.insert.
+// PXE discovery and sanboot (PLAN.md §3.5; seams e763001, bcd 0056e1e; review 2 LOW 6).
+// - A site agent lists the machines it saw PXE-booting with no boot entry (StatusReport.discovered).
+//   metal stores each agent's list and serves it per site (metal.discovered). Storing binds nothing.
+// - For a machine enrolled without MACs, metal.ensureRamdisk power-cycles it into PXE with its BMC. A MAC
+//   first seen after that cycle under its UUID (any byte order), and the only MAC that UUID was seen from
+//   in 24 h, is a candidate. An operator binds it with metal.confirmMac. Only a pool that trusts its
+//   provisioning network binds it at once, and then the ramdisk's inventory must match the machine.
+// - A driver without virtual media (ipmi) boots a catalog ISO with iPXE sanboot from the site cache.
 
 const AGENT = 'node_siteagent00000000000000001';
 const OTHER_AGENT = 'node_siteagent00000000000000002';
@@ -37,20 +42,22 @@ const BMC_UUID = '4c4c4544-0042-3510-8052-b4c04f365931';
 const DHCP_UUID = '44454c4c-4200-1035-8052-b4c04f365931';
 
 const seconds = (ms: number) => ({ seconds: BigInt(Math.floor(ms / 1000)), nanos: 0 });
-const machine = (mac: string, productUuid = '', extra: Record<string, unknown> = {}) =>
-  ({ mac, productUuid, arch: 'x86_64-efi', firstSeen: seconds(Date.now() - 60_000), lastSeen: seconds(Date.now()), count: 3, relay: '', ...extra }) as never;
+/** A DiscoveredMachine first seen at `at` (default: a minute ago) and last seen now. */
+const machine = (mac: string, productUuid = '', extra: Record<string, unknown> = {}, at = Date.now() - 60_000) =>
+  ({ mac, productUuid, arch: 'x86_64-efi', firstSeen: seconds(at), lastSeen: seconds(Math.max(at, Date.now())), count: 3, relay: '', ...extra }) as never;
 
 /** Runs a status report through the handler as the gateway does. */
 async function report(s: MetalSim, handler: ReturnType<typeof metalDiscoveryStatusHandler>, nodeId: string, discovered: unknown[]) {
-  return s.db.transaction((tx) => handler(tx, { nodeId, events: s.context.events, work: s.context.work }, { discovered } as never));
+  return s.db.transaction((tx) => handler(tx, { nodeId }, { discovered } as never));
 }
 
+let bmcs = 0;
 const enrollIpmi = (s: MetalSim, extra: Record<string, unknown> = {}) =>
   s.call('enroll', {
     tenantId: 'root',
     siteId: 'site_a',
     poolId: 'pool_metal',
-    bmc: { address: `https://10.20.0.${Math.floor(Math.random() * 200) + 1}`, driver: 'ipmi', credentials: 'secret://root/bmc' },
+    bmc: { address: `https://10.20.0.${++bmcs}`, driver: 'ipmi', credentials: 'secret://root/bmc' },
     ...extra,
   });
 
@@ -84,7 +91,7 @@ describe('UUID spellings', () => {
 });
 
 describe('the discovery status handler', () => {
-  it("stores a site agent's list, lists it per site for its owner only, and ignores other nodes", async () => {
+  it("stores a site agent's list, binds nothing, lists it for the site owner only, and ignores other nodes", async () => {
     sim = await createMetalSim();
     const s = sim;
     await s.addSiteAgent(AGENT);
@@ -98,66 +105,88 @@ describe('the discovery status handler', () => {
     const handler = metalDiscoveryStatusHandler();
     // A host listing machines is never stored.
     expect(await report(s, handler, HOST, [machine('52:54:00:aa:00:09', DHCP_UUID)])).toBeUndefined();
-    expect(await report(s, handler, AGENT, [machine('52:54:00:aa:00:01', DHCP_UUID), machine('52:54:00:aa:00:02')])).toEqual({ stored: 2, matched: 0 });
-    expect(await report(s, handler, OTHER_AGENT, [machine('52:54:00:aa:00:01', DHCP_UUID, { relay: '10.9.0.1' })])).toEqual({ stored: 1, matched: 0 });
+    expect(await report(s, handler, AGENT, [machine('52:54:00:aa:00:01', DHCP_UUID), machine('52:54:00:aa:00:02')])).toEqual({ stored: 2, changed: true });
+    expect(await report(s, handler, AGENT, [machine('52:54:00:aa:00:01', DHCP_UUID), machine('52:54:00:aa:00:02')])).toMatchObject({ stored: 2 });
+    expect(await report(s, handler, OTHER_AGENT, [machine('52:54:00:aa:00:01', DHCP_UUID, { relay: '10.9.0.1' })])).toEqual({ stored: 1, changed: true });
     const listed = await s.call('discovered', { tenantId: 'root', siteId: 'site_a' });
     expect(listed.machines.map((m: { mac: string }) => m.mac)).toEqual(['52:54:00:aa:00:01', '52:54:00:aa:00:02']);
     expect(listed.machines[0]).toMatchObject({ productUuid: DHCP_UUID, count: 6, relays: ['10.9.0.1'], agentNodeIds: [AGENT, OTHER_AGENT] });
     await expect(s.call('discovered', { tenantId: 'someone-else', siteId: 'site_a' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    // A machine enrolled with that UUID later gets no MAC from the list: discovery data alone binds nothing.
+    const enrolled = await enrollIpmi(s, { productUuid: BMC_UUID });
+    expect(enrolled).toMatchObject({ macs: [], macSource: 'operator' });
+    expect(enrolled.discoveredMac).toBeUndefined();
     // The agent's next list replaces its entries; an empty one clears them.
     await report(s, handler, AGENT, [machine('52:54:00:aa:00:02')]);
     await report(s, handler, OTHER_AGENT, []);
     expect((await s.call('discovered', { tenantId: 'root', siteId: 'site_a' })).machines.map((m: { mac: string }) => m.mac)).toEqual(['52:54:00:aa:00:02']);
     expect((await s.db.query('SELECT 1 FROM metal_discovered WHERE agent_node_id = $1', [HOST])).rowCount).toBe(0);
   });
+});
 
-  it('fills the MAC of an IPMI machine enrolled with its UUID only, at enroll, and publishes it', async () => {
+describe('matching a machine metal just power-cycled', () => {
+  it('proposes only a MAC first seen after the cycle, the only one its UUID came from, of no other machine', async () => {
     sim = await createMetalSim();
     const s = sim;
     await s.addSiteAgent(AGENT);
     const handler = metalDiscoveryStatusHandler();
-    await report(s, handler, AGENT, [machine('52:54:00:aa:01:01', DHCP_UUID)]);
-    const enrolled = await enrollIpmi(s, { productUuid: BMC_UUID.toUpperCase() });
-    expect(enrolled.macs).toEqual(['52:54:00:aa:01:01']);
-    expect(s.events.find((e) => e.type === 'node.pxe-mac.discovered')).toMatchObject({
-      subject: `node/${enrolled.nodeId}`,
-      data: { mac: '52:54:00:aa:01:01', productUuid: BMC_UUID, agentNodeId: AGENT, siteId: 'site_a' },
-    });
-    const listed = await s.call('discovered', { tenantId: 'root', siteId: 'site_a' });
-    expect(listed.machines[0]).toMatchObject({ mac: '52:54:00:aa:01:01', nodeId: enrolled.nodeId });
-  });
-
-  it('never matches a UUID seen from two MACs, a UUID two machines share, or a placeholder UUID', async () => {
-    sim = await createMetalSim();
-    const s = sim;
-    await s.addSiteAgent(AGENT);
-    const handler = metalDiscoveryStatusHandler();
-    const placeholder = '03000200-0400-0500-0006-000700080009';
-    const shared = '11111111-2222-3333-4444-555555555555';
+    const since = new Date();
+    const match = (nodeId: string, trust = false) => s.db.transaction((tx) => matchDiscoveredMachine(tx, { nodeId, since, trust }, { events: s.context.events }));
+    const node = await enrollIpmi(s, { productUuid: BMC_UUID });
+    // Seen only before the power cycle (a spoofer waiting on the network, or a stale entry): no candidate.
+    await report(s, handler, AGENT, [machine('52:54:00:aa:02:01', DHCP_UUID, {}, since.getTime() - 3_600_000)]);
+    expect(await match(node.nodeId)).toEqual({ bound: false, reason: 'not-seen' });
+    // Seen from that MAC before and from a fresh one now: ambiguous, an operator decides.
     await report(s, handler, AGENT, [
-      machine('52:54:00:aa:02:01', DHCP_UUID),
-      machine('52:54:00:aa:02:02', DHCP_UUID),
-      machine('52:54:00:aa:02:03', placeholder),
+      machine('52:54:00:aa:02:01', DHCP_UUID, {}, since.getTime() - 3_600_000),
+      machine('52:54:00:aa:02:02', DHCP_UUID, {}, since.getTime() + 5_000),
     ]);
-    const spoofed = await enrollIpmi(s, { productUuid: BMC_UUID });
-    expect(spoofed.macs).toEqual([]);
-    // A placeholder UUID can't stand in for the MACs at all.
-    await expect(enrollIpmi(s, { productUuid: placeholder })).rejects.toMatchObject({ code: 'UNSUPPORTED' });
-    const a = await enrollIpmi(s, { productUuid: shared });
-    const b = await enrollIpmi(s, { productUuid: shared });
-    await report(s, handler, AGENT, [machine('52:54:00:aa:02:04', shared, { count: 9 })]);
-    const macs = await s.db.query<{ macs: string[] }>('SELECT macs FROM metal_nodes WHERE node_id = ANY($1::text[])', [[a.nodeId, b.nodeId, spoofed.nodeId]]);
-    expect(macs.rows.map((row) => row.macs)).toEqual([[], [], []]);
-    expect(s.events.some((e) => e.type === 'node.pxe-mac.discovered')).toBe(false);
+    expect(await match(node.nodeId)).toEqual({ bound: false, reason: 'ambiguous' });
+    // Only the fresh MAC: a candidate, published once, never bound without confirmation.
+    await report(s, handler, AGENT, [machine('52:54:00:aa:02:02', DHCP_UUID, {}, since.getTime() + 5_000)]);
+    expect(await match(node.nodeId)).toEqual({ mac: '52:54:00:aa:02:02', bound: false });
+    expect(await match(node.nodeId)).toEqual({ mac: '52:54:00:aa:02:02', bound: false });
+    expect(s.events.filter((e) => e.type === 'node.pxe-mac.discovered')).toMatchObject([
+      { subject: `node/${node.nodeId}`, data: { mac: '52:54:00:aa:02:02', bound: false, agentNodeId: AGENT } },
+    ]);
+    const row = await s.db.query<{ macs: string[]; discovered_mac: string }>('SELECT macs, discovered_mac FROM metal_nodes WHERE node_id = $1', [node.nodeId]);
+    expect(row.rows[0]).toEqual({ macs: [], discovered_mac: '52:54:00:aa:02:02' });
+    expect((await s.call('discovered', { tenantId: 'root', siteId: 'site_a' })).machines[0]).toMatchObject({ candidateFor: node.nodeId });
+    // Another enrolled machine with the same UUID: neither gets a candidate.
+    const twin = await enrollIpmi(s, { productUuid: DHCP_UUID });
+    expect(await match(twin.nodeId)).toEqual({ bound: false, reason: 'shared-uuid' });
+    // A placeholder UUID never stands in for the MACs at all.
+    await expect(enrollIpmi(s, { productUuid: '03000200-0400-0500-0006-000700080009' })).rejects.toMatchObject({ code: 'UNSUPPORTED' });
   });
 
-  it('boots a machine known by its UUID: one PXE boot to be discovered, then the ramdisk from its boot entry', async () => {
-    sim = await createMetalSim({ pxe: 'boot-server' });
+  it('binds by hand: metal.confirmMac, audited, refused for a MAC another machine has', async () => {
+    sim = await createMetalSim();
     const s = sim;
+    await s.addSiteAgent(AGENT);
+    const other = await enrollIpmi(s, { macs: ['52:54:00:aa:04:01'] });
+    const node = await enrollIpmi(s, { productUuid: BMC_UUID });
+    await expect(s.call('confirmMac', { tenantId: 'root', nodeId: node.nodeId, mac: '52:54:00:aa:04:01' })).rejects.toMatchObject({ code: 'CONFLICT' });
+    await expect(s.call('confirmMac', { tenantId: 'root', nodeId: node.nodeId, mac: 'nope' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    const confirmed = await s.call('confirmMac', { tenantId: 'root', nodeId: node.nodeId, mac: '52-54-00-AA-04-02' });
+    expect(confirmed).toMatchObject({ macs: ['52:54:00:aa:04:02'], macSource: 'operator' });
+    expect(s.events.find((e) => e.type === 'node.pxe-mac.confirmed')).toMatchObject({ data: { mac: '52:54:00:aa:04:02', discovered: false } });
+    await expect(s.call('confirmMac', { tenantId: 'root', nodeId: node.nodeId, mac: '52:54:00:aa:04:03' })).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    await expect(s.call('confirmMac', { tenantId: 'root', nodeId: other.nodeId, mac: '52:54:00:aa:04:04' })).rejects.toMatchObject({ code: 'INVALID_STATE' });
+  });
+});
+
+describe('booting a machine known only by its UUID', () => {
+  /** A boot-server sim (machines PXE-boot only from a live entry) on the sim clock, with one agent. */
+  async function bootServer(policy: Record<string, unknown> = {}) {
+    const s = (sim = await createMetalSim({ pxe: 'boot-server' }));
     let now = Date.now();
     await useSimClock(s.db, now);
     await s.addSiteAgent(AGENT);
-    const handler = metalDiscoveryStatusHandler();
+    await s.db.query(
+      `INSERT INTO pools (id, owner_tenant_id, site_id, class, sharing, agent, policy, version)
+       VALUES ('pool_uuid', 'root', 'site_a', 'metal-host', 'exclusive', 'bcd', $1::jsonb, 1)`,
+      [JSON.stringify(policy)],
+    );
     let ticks = 0;
     const second = async () => {
       now += 1000;
@@ -172,25 +201,80 @@ describe('the discovery status handler', () => {
         if (item.kind === metalWorkKind) await reconcileMetalNode(s.context, item.key);
         else if (item.kind === 'workflow') await s.provision.reconcilers![0]!.run({ ...s.context, signal } as never, item.key);
     };
-    const enrolled = await enrollIpmi(s, { productUuid: BMC_UUID });
-    expect(enrolled.macs).toEqual([]);
+    const until = async (done: () => Promise<boolean> | boolean, limit = 600) => {
+      for (let i = 0; i < limit && !(await done()); i++) await second();
+    };
+    const enrolled = await enrollIpmi(s, { poolId: 'pool_uuid', productUuid: BMC_UUID });
     const m = s.machineOf(enrolled.nodeId);
-    // Until the discovery power cycle, the machine is not asking for DHCP.
-    for (let i = 0; i < 120 && !m.pxeWaiting; i++) await second();
+    // Until metal's discovery power cycle, the machine is not asking for DHCP.
+    await until(() => m.pxeWaiting === true, 120);
     expect(m.pxeWaiting).toBe(true);
+    // The site agent sees it PXE-booting (no entry answers it) and lists it, first seen now.
+    await report(s, metalDiscoveryStatusHandler(), AGENT, [machine(s.macOf(enrolled.nodeId), DHCP_UUID, {}, now)]);
+    return { s, m, nodeId: enrolled.nodeId as string, second, until, now: () => now };
+  }
+  const nodeRow = (s: MetalSim, nodeId: string) =>
+    s.db
+      .query<{ macs: string[]; mac_source: string; discovered_mac: string | null; last_error: unknown }>(
+        'SELECT macs, mac_source, discovered_mac, last_error FROM metal_nodes WHERE node_id = $1',
+        [nodeId],
+      )
+      .then((r) => r.rows[0]!);
+
+  it('waits for metal.confirmMac by default, then boots the ramdisk from the confirmed MAC', async () => {
+    const { s, m, nodeId, until } = await bootServer();
+    await until(async () => (await nodeRow(s, nodeId)).discovered_mac !== null, 60);
+    expect(await nodeRow(s, nodeId)).toMatchObject({ macs: [], discovered_mac: s.macOf(nodeId) });
+    // Nothing boots from a MAC nobody confirmed: no entry, no discovery token.
+    await until(() => false, 20);
     expect(s.seen.some((c) => c.kind === 'boot.prepareRamdisk')).toBe(false);
-    // The site agent sees it PXE-booting (no entry answers it) and lists it.
-    await report(s, handler, AGENT, [machine(s.macOf(enrolled.nodeId), DHCP_UUID)]);
-    for (let i = 0; i < 600 && (await s.state(enrolled.nodeId)).provision_state !== 'ready'; i++) await second();
-    expect(await s.state(enrolled.nodeId)).toMatchObject({ provision_state: 'ready' });
-    const { rows } = await s.db.query<{ macs: string[] }>('SELECT macs FROM metal_nodes WHERE node_id = $1', [enrolled.nodeId]);
-    expect(rows[0]!.macs).toEqual([s.macOf(enrolled.nodeId)]);
-    const entry = s.seen.find((c) => c.kind === 'boot.prepareRamdisk')!;
-    expect(entry.payload).toMatchObject({ mac: s.macOf(enrolled.nodeId), productUuid: BMC_UUID });
-    expect(entry.payload.sanbootSha256).toBeUndefined();
+    expect(s.tokenRequests.some((t) => t.role === 'discovery')).toBe(false);
+    await s.call('confirmMac', { tenantId: 'root', nodeId, mac: s.macOf(nodeId) });
+    await until(async () => (await s.state(nodeId)).provision_state === 'ready');
+    expect(await s.state(nodeId)).toMatchObject({ provision_state: 'ready' });
+    expect(await nodeRow(s, nodeId)).toMatchObject({ macs: [s.macOf(nodeId)], mac_source: 'operator', discovered_mac: null });
     // Still asking for DHCP after the discovery cycle, it booted the ramdisk from the entry.
     expect(m.bootedBy).toBe(AGENT);
-    expect(s.seen.filter((c) => c.kind === 'bmc.power' && c.args.action === 'cycle').length).toBeGreaterThanOrEqual(1);
+    expect(s.events.find((e) => e.type === 'node.pxe-mac.confirmed')).toMatchObject({ data: { discovered: true } });
+  });
+
+  /** The ramdisk's system and nics sections, as the ramdisk reports them after it connected. */
+  async function reportInventory(s: MetalSim, nodeId: string, productUuid: string, macs: string[]) {
+    const sections = {
+      system: toBinary(SystemSectionSchema, create(SystemSectionSchema, { productUuid })),
+      nics: toBinary(NicsSectionSchema, create(NicsSectionSchema, { nics: macs.map((mac) => ({ mac })) })),
+    };
+    for (const [section, content] of Object.entries(sections))
+      await s.db.query(
+        `INSERT INTO node_inventory_sections (node_id, section, sha256, content) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (node_id, section) DO UPDATE SET sha256 = EXCLUDED.sha256, content = EXCLUDED.content, received_at = compute_now()`,
+        [nodeId, section, createHash('sha256').update(content).digest('hex'), content],
+      );
+  }
+
+  it('binds at once on a pool that trusts its provisioning network, and checks the ramdisk is that machine', async () => {
+    const { s, m, nodeId, until } = await bootServer({ trustProvisioningNetwork: true });
+    await until(() => m.bootedBy === AGENT, 120);
+    expect(await nodeRow(s, nodeId)).toMatchObject({ macs: [s.macOf(nodeId)], mac_source: 'discovered' });
+    expect(s.events.find((e) => e.type === 'node.pxe-mac.discovered')).toMatchObject({ data: { bound: true } });
+    // inventory.refresh waits for the ramdisk's own sections, then compares them.
+    await until(() => false, 10);
+    expect((await s.state(nodeId)).provision_state).not.toBe('ready');
+    await reportInventory(s, nodeId, BMC_UUID, [s.macOf(nodeId), '52:54:00:ff:ff:01']);
+    await until(async () => (await s.state(nodeId)).provision_state === 'ready');
+    expect(await s.state(nodeId)).toMatchObject({ provision_state: 'ready' });
+  });
+
+  it('fails the workflow when the machine that booted from a discovered MAC reports another UUID', async () => {
+    const { s, m, nodeId, until } = await bootServer({ trustProvisioningNetwork: true });
+    await until(() => m.bootedBy === AGENT, 120);
+    await reportInventory(s, nodeId, '11111111-2222-3333-4444-555555555555', [s.macOf(nodeId)]);
+    await until(async () => (await s.state(nodeId)).provision_state === 'failed');
+    expect(await s.state(nodeId)).toMatchObject({ provision_state: 'failed' });
+    expect((await nodeRow(s, nodeId)).last_error).toMatchObject({
+      code: 'DRIVER_ERROR',
+      message: expect.stringContaining('reports product UUID 11111111-2222-3333-4444-555555555555'),
+    });
   });
 });
 

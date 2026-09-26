@@ -46,7 +46,7 @@ import {
   unsupportedBmcCodes,
   type BmcDriverCapabilities,
 } from './capabilities.js';
-import { isMatchableUuid, matchDiscoveredMachines } from './discovery.js';
+import { isMatchableUuid, matchDiscoveredMachine, verifyMachineIdentity } from './discovery.js';
 import { invalidateSiteProxyTargets } from './proxy-targets.js';
 import { newIdentityGeneration, tenantRootPolicy } from './tenant-root.js';
 import { bmcResult, dcgmResult, deployResult, inventoryRefreshResult, wipeResult } from './results.js';
@@ -374,6 +374,8 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
         await context.sql.transaction(async (tx) => {
           await tx.query(
             `UPDATE metal_nodes SET macs = CASE WHEN cardinality($2::text[]) > 0 THEN $2::text[] ELSE macs END,
+               mac_source = CASE WHEN cardinality($2::text[]) > 0 THEN 'inspection' ELSE mac_source END,
+               discovered_mac = CASE WHEN cardinality($2::text[]) > 0 THEN NULL ELSE discovered_mac END,
                product_uuid = COALESCE($3, product_uuid),
                addresses = CASE WHEN cardinality($4::text[]) > 0 THEN $4::text[] ELSE addresses END,
                updated_at = compute_now() WHERE node_id = $1`,
@@ -381,11 +383,6 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
           );
           // The site's agents may now reach (site.httpProxy) the addresses of an agentless machine.
           if (addresses.length && context.node) await invalidateSiteProxyTargets(tx, context.desired, context.node.siteId);
-          // A UUID the BMC reports, without MACs: a site agent may already have seen it PXE-booting.
-          if (macs.length === 0 && node.macs.length === 0 && isMatchableUuid(uuid))
-            node.macs = (await matchDiscoveredMachines(tx, node.site_id, { nodeId: node.node_id, events: context.events, work: context.work })).map(
-              (match) => match.mac,
-            );
         });
       if (uuid) node.product_uuid = uuid;
       // IPMI inspects (FRU, chassis) but cannot name the host's NICs.
@@ -434,8 +431,10 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   /**
    * Boots the machine into the ramdisk unless it is already there: one-time PXE, the boot entry,
    * a power cycle, then it waits for the ramdisk to join. Each command is sent once per attempt.
-   * A machine known only by its product UUID is PXE-booted once without an entry first: its site agent
-   * lists it (StatusReport.discovered), the match fills its MAC (discovery.ts), and the step goes on.
+   * A machine known only by its product UUID is PXE-booted once without an entry first. Its site agent
+   * lists it (StatusReport.discovered), and a MAC first seen after that power cycle under its UUID becomes
+   * a candidate (discovery.ts). The step waits until an operator confirms it (`metal.confirmMac`), or binds
+   * it at once on a pool with `trustProvisioningNetwork: true`.
    */
   const ensureRamdisk = defineStep({
     id: 'metal.ensureRamdisk',
@@ -452,10 +451,23 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       await bmc(context, 'bmc.boot', 'management.setBootDevice', { device: 'pxe', persistent: false, uefi: node.uefi }, 'boot-device', node);
       if (node.macs.length === 0) {
         await bmc(context, 'bmc.power', 'power.setPower', { action: 'cycle' }, 'discovery-cycle', node);
-        const matched = await context.sql.transaction((tx) =>
-          matchDiscoveredMachines(tx, node.site_id, { nodeId: node.node_id, events: context.events, work: context.work }),
+        // Only a MAC first seen after this BMC power cycle counts: when metal sent it.
+        const { rows } = await context.sql.query<{ sent: Date }>('SELECT not_before AS sent FROM commands WHERE idempotency_key = $1 LIMIT 1', [
+          stepCommandKey(context, 'discovery-cycle'),
+        ]);
+        const trust = (node.pool_policy as { trustProvisioningNetwork?: unknown } | null)?.trustProvisioningNetwork === true;
+        const found = await context.sql.transaction((tx) =>
+          matchDiscoveredMachine(tx, { nodeId: node.node_id, since: rows[0]?.sent ?? new Date(0), trust }, { events: context.events, work: context.work }),
         );
-        if (matched.length === 0) throw stepNotReady(5_000);
+        if (!found.bound) {
+          context.emit({
+            phase: 'pxe-discovery',
+            message: found.mac
+              ? `PXE discovery found ${found.mac}: waiting for metal.confirmMac`
+              : `waiting for PXE discovery (${found.reason ?? 'not-seen'}); metal.confirmMac binds a MAC by hand`,
+          });
+          throw stepNotReady(5_000);
+        }
         node = await metalNode(context);
       }
       await prepareBootEntries(context, node, 'boot-entry');
@@ -587,6 +599,13 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
     input: manifest({}),
     async run(_input, context) {
       const outcome = await awaitCommand(context, { nodeId: requireNode(context), kind: 'inventory.refresh', payload: { rescan: true } });
+      // The machine that booted must be the one enrolled (review 2, LOW 6): a MAC from PXE discovery could
+      // be a spoofer's. A mismatch fails the workflow before anything is written to the machine.
+      const machine = await metalNode(context).catch((error: unknown) => {
+        if (isComputeError(error, 'NOT_FOUND')) return undefined;
+        throw error;
+      });
+      if (machine && !(await verifyMachineIdentity(context.sql, machine)).checked) throw stepNotReady(5_000);
       return inventoryRefreshResult(outcome);
     },
   });

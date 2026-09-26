@@ -149,10 +149,13 @@ declaration merging. After that, `defineDriver({ implements: { power: … } })` 
 - Site agents list the machines they see PXE-booting with no boot entry (`StatusReport.discovered`).
   The gateway stores the list with `metalDiscoveryStatusHandler()`: add it to `reports.status`, next to
   `xidStatusHandler`. `metal.discovered` serves the list to the site's owner.
-- A machine enrolled with `productUuid` and no `macs` (IPMI) gets its MAC when its UUID was seen from
-  exactly one MAC, in either SMBIOS byte order. No other machine of the site may share the UUID, and
-  placeholder UUIDs never match. `metal.ensureRamdisk` PXE-boots such a machine once to be seen, then
-  boots it from its entry. Nothing is ever enrolled automatically.
+- A machine enrolled with `productUuid` and no `macs` (IPMI): `metal.ensureRamdisk` power-cycles it into
+  PXE with its BMC. A MAC first seen within 10 minutes after that cycle, under its UUID in any byte order,
+  becomes its candidate. It must be the only MAC the UUID came from in 24 h, and belong to no other machine.
+- Discovery data is spoofable, so the candidate waits for an operator's `metal.confirmMac`: no boot entry
+  and no discovery token until then. A pool with `policy.trustProvisioningNetwork: true` binds it at once.
+  The ramdisk's inventory (UUID, NICs) must then match before `inventory.refresh` succeeds.
+- Nothing is ever enrolled automatically.
 - `media.insert` with `image` (an `iso` of the catalog) needs no virtual media. On a driver without it,
   the ISO is pinned at the site and booted with iPXE `sanboot` from the site cache
   (`ProxyDhcpEntry.sanboot_sha256`), once an agent holds it verified. A later `setBootDevice` to `cd`

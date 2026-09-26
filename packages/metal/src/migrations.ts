@@ -124,4 +124,16 @@ CREATE TABLE metal_discovery_reports (
 );
 `,
   },
+  {
+    name: 'metal/0008_mac_source',
+    sql: `
+-- Where the PXE MACs came from (review 2, LOW 6): the operator (enroll, metal.confirmMac), out-of-band
+-- inspection, or PXE discovery on a pool that trusts its provisioning network. discovered_mac: a MAC PXE
+-- discovery found for a machine without MACs, awaiting metal.confirmMac; never booted until confirmed.
+ALTER TABLE metal_nodes ADD COLUMN mac_source text NOT NULL DEFAULT 'operator'
+  CHECK (mac_source IN ('operator', 'inspection', 'discovered'));
+ALTER TABLE metal_nodes ADD COLUMN discovered_mac text CHECK (discovered_mac ~ '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$');
+ALTER TABLE metal_nodes ADD COLUMN discovered_mac_at timestamptz;
+`,
+  },
 ]);

@@ -477,6 +477,8 @@ group('metal', 'metal', [
   ['power', 'mutation', 'nodes:power', 'node', 'v0.2'],
   // One verb on many nodes as one destructive-command batch (§13 quorum); each node is also decided.
   ['bulk', 'mutation', 'nodes:provision', 'pool', 'v1.0'],
+  // An operator binds the PXE MAC of a machine enrolled without MACs (usually the one PXE discovery proposed).
+  ['confirmMac', 'mutation', 'nodes:provision', 'node', 'v1.0'],
   // PXE discovery: what the site's agents saw booting with no boot entry (never answered or enrolled).
   ['discovered', 'read', 'sites:read', 'site', 'v1.0'],
 ]);

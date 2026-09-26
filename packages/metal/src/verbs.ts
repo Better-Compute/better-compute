@@ -19,6 +19,8 @@ export const metalVerbs = [
   'power',
   // (v1.0 §13) Another verb on many nodes of one pool, as one destructive-command batch.
   'bulk',
+  // (v1.0) Binds the PXE MAC of a machine enrolled without MACs (PXE discovery proposes it).
+  'confirmMac',
 ] as const;
 export type MetalVerb = (typeof metalVerbs)[number];
 
@@ -44,4 +46,6 @@ export const metalVerbTransitions: Readonly<Record<MetalVerb, ProvisionVerb | nu
     power: null,
     // Applies the verb it names to each node.
     bulk: null,
+    // Changes only the node's MACs.
+    confirmMac: null,
   });

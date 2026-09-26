@@ -79,6 +79,13 @@ export interface PoolPolicy {
   /** The hardware profile per-node driver bindings inherit from. */
   hardwareProfile?: string;
   /**
+   * Bare metal: bind a PXE MAC found by PXE discovery at once, without `metal.confirmMac`. Only for a
+   * provisioning network no untrusted host can reach: any host on it can claim a machine's UUID from its
+   * own MAC and boot the machine's ramdisk with its discovery token (the ramdisk's inventory is still
+   * checked against the machine's UUID before anything is written).
+   */
+  trustProvisioningNetwork?: boolean;
+  /**
    * Fractional-GPU parameters for `timeslice` and `mps` pools (§10.6): slot atoms per GPU
    * (defaults: timeslice 4, mps 10). Ignored by `exclusive` and `mig` pools.
    */

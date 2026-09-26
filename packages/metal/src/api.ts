@@ -32,7 +32,7 @@ import {
 } from './capabilities.js';
 import { isIP } from 'node:net';
 import { metalPayloads } from './commands.js';
-import { isMatchableUuid, listDiscovered, matchDiscoveredMachines, normalizeUuid, type DiscoveredMachineView } from './discovery.js';
+import { listDiscovered, normalizeUuid, type DiscoveredMachineView } from './discovery.js';
 import type { HardwareProfile } from './module-types.js';
 import { invalidateSiteProxyTargets } from './proxy-targets.js';
 import { stateProfile, unrescueProfile } from './profiles.js';
@@ -75,6 +75,10 @@ export interface MetalNodeView {
   power: 'on' | 'off' | 'unknown';
   bmc: { driver: string; address: string; credentialsSet: boolean; driverOptions?: Record<string, Json> };
   macs: string[];
+  /** Where `macs` came from: the operator, out-of-band inspection, or PXE discovery (a trusted pool). */
+  macSource: 'operator' | 'inspection' | 'discovered';
+  /** A MAC PXE discovery found for this machine, awaiting `metal.confirmMac`. */
+  discoveredMac?: string;
   /** The machine's own IPs (inspection or the operator). */
   addresses: string[];
   workflowId?: string;
@@ -96,8 +100,10 @@ export function metalNodeView(row: MetalNodeRow): MetalNodeView {
       ...(row.bmc_driver_options ? { driverOptions: row.bmc_driver_options } : {}),
     },
     macs: row.macs,
+    macSource: row.mac_source,
     addresses: row.addresses,
   };
+  if (row.discovered_mac && row.macs.length === 0) view.discoveredMac = row.discovered_mac;
   if (row.pool_id) view.poolId = row.pool_id;
   if (row.failed_from) view.failedFrom = row.failed_from;
   if (row.workflow_id) view.workflowId = row.workflow_id;
@@ -174,8 +180,18 @@ export type MetalApi = {
      * the last 24 h: never answered, never enrolled. Each names the enrolled machine with its MAC, if any.
      */
     discovered: MethodDefinition<DiscoveredInput, DiscoveredOutput>;
+    /**
+     * Binds the PXE MAC of a machine enrolled without MACs, an operator's decision: usually the candidate PXE
+     * discovery found (`discoveredMac`), or any MAC the operator knows. Until then the machine is never
+     * booted from a discovered MAC (review 2, LOW 6).
+     */
+    confirmMac: MethodDefinition<ConfirmMacInput, MetalNodeView>;
   };
 };
+
+export interface ConfirmMacInput extends MetalNodeInput {
+  mac: string;
+}
 
 export interface PowerOutput {
   commandId: string;
@@ -394,9 +410,6 @@ async function enroll(context: MethodContext, caps: Capabilities, input: EnrollI
       subject: `node/${id}`,
       data: { nodeId: id, poolId: input.poolId, siteId: input.siteId },
     });
-    // Without MACs but with its UUID: a site agent may already have seen it PXE-booting (discovery.ts).
-    if (!input.macs?.length && isMatchableUuid(input.productUuid))
-      await matchDiscoveredMachines(tx, input.siteId, { nodeId: id, events: context.events, work: context.work });
     return metalNodeView(await readMetalNode(tx, id));
   });
 }
@@ -655,6 +668,43 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
           if (rows[0]?.owner_tenant_id !== input.tenantId) throw new ComputeError('NOT_FOUND', `Site ${input.siteId} does not exist`);
           return { siteId: input.siteId, machines: await listDiscovered(context.sql, input.siteId) };
         },
+      }),
+      confirmMac: defineMethod<ConfirmMacInput, MetalNodeView>({
+        action: 'compute:nodes:provision',
+        kind: 'mutation',
+        resource: onNode,
+        validate: describedBy(schemas.confirmMac, (raw): ConfirmMacInput => {
+          const input = nodeInput(raw, ['mac']);
+          const mac = typeof input.mac === 'string' ? input.mac.toLowerCase().replace(/-/g, ':') : '';
+          if (!macPattern.test(mac)) fail(`${JSON.stringify(input.mac)} is not a MAC address`);
+          return { tenantId: input.tenantId, nodeId: input.nodeId, mac };
+        }),
+        handler: (context, input) =>
+          context.sql.transaction(async (tx) => {
+            const node = await readMetalNode(tx, input.nodeId, { tenantId: input.tenantId, lock: true });
+            if (node.provision_state === 'retired') throw new ComputeError('INVALID_STATE', `Node ${node.node_id} is retired`);
+            if (node.macs.length > 0) throw new ComputeError('INVALID_STATE', `Node ${node.node_id} already has its PXE MACs`);
+            const taken = await tx.query<{ node_id: string }>(
+              `SELECT m.node_id FROM metal_nodes m JOIN nodes n ON n.id = m.node_id
+                WHERE n.site_id = $1 AND n.deleted_at IS NULL AND $2 = ANY(m.macs) LIMIT 1`,
+              [node.site_id, input.mac],
+            );
+            if (taken.rows[0]) throw new ComputeError('CONFLICT', `MAC ${input.mac} is node ${taken.rows[0].node_id}'s`);
+            await tx.query(
+              `UPDATE metal_nodes SET macs = ARRAY[$2::text], mac_source = 'operator', discovered_mac = NULL, discovered_mac_at = NULL,
+                 updated_at = compute_now(), version = version + 1 WHERE node_id = $1`,
+              [node.node_id, input.mac],
+            );
+            await context.work.enqueue(tx, metalWorkKind, node.node_id);
+            // Audited: who bound which MAC, and whether it was the one discovery proposed.
+            await context.events.publish(tx, {
+              type: 'node.pxe-mac.confirmed',
+              tenantId: node.tenant_id,
+              subject: `node/${node.node_id}`,
+              data: { nodeId: node.node_id, mac: input.mac, discovered: node.discovered_mac === input.mac, requestId: context.requestId },
+            });
+            return metalNodeView(await readMetalNode(tx, node.node_id));
+          }),
       }),
       bulk: defineMethod<BulkInput, BulkOutput>({
         action: 'compute:nodes:provision',

@@ -431,7 +431,7 @@ describe('apiSurface (§9.2)', () => {
       webhooks: 'events',
     });
     // Methods added to a group in a later phase than the group's own.
-    const later: Record<string, string> = { 'metal.bulk': 'v1.0', 'metal.discovered': 'v1.0' };
+    const later: Record<string, string> = { 'metal.bulk': 'v1.0', 'metal.discovered': 'v1.0', 'metal.confirmMac': 'v1.0' };
     for (const [path, phase] of Object.entries(later)) expect(apiMethod(...(path.split('.') as [string, string]))?.phase, path).toBe(phase);
     const phaseOf = (group: string) =>
       new Set(apiSurface.filter((row) => row.group === group && !later[`${row.group}.${row.method}`]).map((row) => row.phase));

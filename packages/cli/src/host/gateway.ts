@@ -187,11 +187,14 @@ export function gatewayOptions(
           } as Parameters<typeof authorize>[0]['claims'],
         })
     : undefined;
-  // Status handlers compose (the gateway runs each): XID health always, then the configuration's, such
+  // Status handlers compose (the gateway runs each): XID health always, then every registered module's
+  // (`ComputeModule.statusHandlers`, e.g. metal's PXE discovery list), then the configuration's, such
   // as vps's `instanceStatusHandler({ events, log })` when it registers `vps()`.
   const { status, ...reports } = (extra.reports ?? {}) as Record<string, unknown>;
+  const modules = ((options as { modules?: readonly { statusHandlers?: readonly unknown[] }[] }).modules ?? []);
   const statusHandlers = [
     pkg.xidStatusHandler,
+    ...modules.flatMap((module) => module.statusHandlers ?? []),
     ...(status === undefined ? [] : Array.isArray(status) ? status : [status]),
   ];
   return {

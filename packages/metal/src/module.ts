@@ -3,6 +3,7 @@ import type { ImageUseOptions } from '@better-compute/provision';
 import { metalApi, type MetalApi } from './api.js';
 import type { BmcDriverCapabilities } from './capabilities.js';
 import { metalCommandKinds } from './commands.js';
+import { metalDiscoveryStatusHandler } from './discovery.js';
 import { metalFindings } from './findings.js';
 import { teardownTenantMetal } from './tenancy.js';
 import { metalMigrations } from './migrations.js';
@@ -73,6 +74,8 @@ export function metal(options: MetalOptions = {}): ComputeModule<'metal', MetalA
       selfCheck: (context) => metalFindings(context.sql),
       // Site agents: the agentless machines site.httpProxy may reach, and nothing else.
       nodeSpec: metalNodeSpec,
+      // Site agents' PXE discovery lists (StatusReport.discovered): stored, never bound (discovery.ts).
+      statusHandlers: [metalDiscoveryStatusHandler()],
       // A deleted tenant's machines are retired, one legal transition per sweep, until none is left.
       async tenantDeleted(context, tenantId) {
         return (await teardownTenantMetal(context, tenantId)).remaining > 0 ? 'SYNC_AGAIN' : 'DONE';

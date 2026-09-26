@@ -1190,6 +1190,17 @@ export interface CliCommandSpec {
   readonly group?: string;
 }
 
+/**
+ * A consumer of a node's coalesced StatusReport, run by the gateway in the status transaction under its own
+ * savepoint (the gateway's `StatusHandler`). `report` is the protocol's `StatusReport`; core does not import
+ * the protocol, so it is typed `never` here and handlers declare the real type.
+ */
+export type ModuleStatusHandler = (
+  tx: SqlTx,
+  context: { nodeId: string; tenantId: string; work: WorkQueue; events?: EventPublisher },
+  report: never,
+) => Promise<unknown>;
+
 /** A module (§5.4): API groups, reconcilers, command kinds, migrations, catalog, NodeSpec sections. */
 export interface ComputeModule<Name extends string = string, A extends ApiGroups = {}> {
   name: Name;
@@ -1203,6 +1214,11 @@ export interface ComputeModule<Name extends string = string, A extends ApiGroups
   reconcilers?: Reconciler[];
   commandKinds?: CommandKindSpec[];
   nodeSpec?(context: ModuleContext, node: NodeRecord): Promise<NodeSpecPart>;
+  /**
+   * StatusReport consumers (e.g. metal's PXE discovery list). `serve` and the dev stack run every
+   * registered module's after the gateway's XID health handler, then the host's `reports.status`.
+   */
+  statusHandlers?: readonly ModuleStatusHandler[];
   /** Merged into the IAM plugin's catalog. */
   catalog?: { actions?: string[]; resourceTypes?: Record<string, ComputeResourceType> };
   commands?: CliCommandSpec[];

@@ -150,7 +150,7 @@ describe('metal verbs', () => {
     for (const [method, verb] of Object.entries(metalVerbTransitions)) {
       if (verb === null) {
         // enroll creates the node, power is its own axis, bulk applies the verb it names.
-        expect(['enroll', 'power', 'bulk']).toContain(method);
+        expect(['enroll', 'power', 'bulk', 'confirmMac']).toContain(method);
         continue;
       }
       expect(provisionVerbs).toContain(verb);
