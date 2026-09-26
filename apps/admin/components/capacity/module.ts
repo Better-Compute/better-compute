@@ -1,6 +1,7 @@
 import {
   RiAddLine,
   RiBarChartBoxLine,
+  RiBuilding2Line,
   RiCalendarEventLine,
   RiCalendarScheduleLine,
   RiDownloadLine,
@@ -125,7 +126,7 @@ function search(query: string, context: { now: number; siteId?: string }): Searc
   }
   for (const tenant of tenants)
     if (matches(query, tenant.id, tenant.name, tenant.slug))
-      results.push({ id: `tenant:${tenant.id}`, label: tenant.name, group: 'Tenants', hint: tenant.id, icon: RiScales3Line, href: `/quotas?tenant=${tenant.id}`, peek: { kind: 'tenant', id: tenant.id } });
+      results.push({ id: `tenant:${tenant.id}`, label: tenant.name, group: 'Tenants', hint: tenant.id, icon: RiBuilding2Line, href: `/capacity/tenants/${tenant.id}`, peek: { kind: 'tenant', id: tenant.id } });
   const q = query.toLowerCase();
   if (q.length >= 3 && (q.startsWith('rsv') || /[0-9]/.test(q))) {
     const snapshot = capacityAt(context.now);
@@ -153,7 +154,7 @@ export const capacityModule: AdminModule = {
   peeks: {
     pool: { title: (id) => pools.find((pool) => pool.id === id)?.name ?? id, href: (id) => `/pools/${id}`, icon: RiServerLine, component: PoolPeek },
     reservation: { title: (id) => `Reservation ${id}`, href: (id) => `/reservations?id=${id}`, icon: RiCalendarEventLine, component: ReservationPeek },
-    tenant: { title: (id) => tenants.find((tenant) => tenant.id === id)?.name ?? id, href: (id) => `/quotas?tenant=${id}`, icon: RiScales3Line, component: TenantPeek },
+    tenant: { title: (id) => tenants.find((tenant) => tenant.id === id)?.name ?? id, href: (id) => `/capacity/tenants/${id}`, icon: RiBuilding2Line, component: TenantPeek },
   },
   id: 'capacity',
   title: 'Capacity',
@@ -163,6 +164,7 @@ export const capacityModule: AdminModule = {
     { href: '/reservations', label: 'Reservations', icon: RiCalendarEventLine, group: 'Capacity', shortcut: 'g r', keywords: ['bookings', 'gantt', 'release', 'cancel', 'extend', 'pending'], description: 'Every booking: table, timeline, what is waiting' },
     { href: '/reservations/new', label: 'Plan a reservation', icon: RiSearchEyeLine, group: 'Capacity', shortcut: 'n r', keywords: ['book', 'preview', 'placement', 'earliest', 'dry run', 'find gpus'], description: 'Dry-run placement, earliest fit, cost and alternatives' },
     { href: '/capacity/scenarios', label: 'What-if', icon: RiFlaskLine, group: 'Capacity', shortcut: 'g w', keywords: ['scenario', 'maintenance', 'expansion', 'burst', 'forecast', 'plan', 'simulate'], description: 'Maintenance, growth or a launch against the real book' },
+    { href: '/capacity/tenants', label: 'Tenants', icon: RiBuilding2Line, group: 'Capacity', shortcut: 'g t', keywords: ['customers', 'organizations', 'accounts', 'spend', 'quota'], description: 'Who holds what, their ceilings, bookings ahead and spend' },
     { href: '/quotas', label: 'Quotas', icon: RiScales3Line, group: 'Capacity', shortcut: 'g q', keywords: ['limits', 'tenants', 'ceiling', 'quotas.set'], description: 'Tenant × pool ceilings and use' },
     { href: '/usage', label: 'Usage & spend', icon: RiMoneyDollarCircleLine, group: 'Capacity', shortcut: 'g u', keywords: ['billing', 'cost', 'meters', 'csv', 'invoice', 'gpu hours'], description: 'Metered usage priced at list, by tenant, project, pool' },
     { href: '/flavors', label: 'Flavors', icon: RiLayoutGridLine, group: 'Capacity', keywords: ['instance types', 'shapes', 'sizes', 'vps'], description: 'Instance and sandbox shapes per pool' },

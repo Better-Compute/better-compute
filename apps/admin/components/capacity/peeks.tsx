@@ -63,7 +63,7 @@ export function PoolPeek({ id }: { id: string }) {
           <ul>
             {holders.map(([tenantId, gpus]) => (
               <li key={tenantId} className="flex items-center justify-between border-b border-separator-border px-3 py-1.5 last:border-0">
-                <EntityLink kind="tenant" id={tenantId} href={`/quotas?tenant=${tenantId}`}>
+                <EntityLink kind="tenant" id={tenantId} href={`/capacity/tenants/${tenantId}`}>
                   {tenantName(tenantId)}
                 </EntityLink>
                 <span className="font-mono text-[12px] tabular-nums">{fmtNum(gpus)} GPUs</span>
@@ -106,7 +106,7 @@ export function ReservationPeek({ id }: { id: string }) {
       <KeyValue
         columns={2}
         items={[
-          { label: 'Tenant', value: <EntityLink kind="tenant" id={r.tenantId} href={`/quotas?tenant=${r.tenantId}`}>{tenantName(r.tenantId)}</EntityLink> },
+          { label: 'Tenant', value: <EntityLink kind="tenant" id={r.tenantId} href={`/capacity/tenants/${r.tenantId}`}>{tenantName(r.tenantId)}</EntityLink> },
           { label: 'Pool', value: <EntityLink kind="pool" id={r.poolId} href={`/pools/${r.poolId}`} /> },
           { label: 'GPUs', value: fmtNum(reservationGpus(r)), mono: true },
           { label: 'Spend so far', value: fmtMoney(spend, { cents: true }), mono: true },
@@ -188,6 +188,9 @@ export function TenantPeek({ id }: { id: string }) {
       </Panel>
       <p className="font-mono text-[11px] text-text-tertiary">projects: {tenant.projects.join(', ')}</p>
       <div className="flex flex-wrap gap-2">
+        <ButtonLink href={`/capacity/tenants/${id}`} size="small" variant="secondary" trailingIcon={RiArrowRightUpLine}>
+          Open tenant
+        </ButtonLink>
         <ButtonLink href={`/quotas?tenant=${id}`} size="small" variant="secondary">
           Quotas
         </ButtonLink>

@@ -8,6 +8,7 @@ import { timelineView } from '@better-compute/console-kit';
 import { ButtonLink } from '@/components/base/buttons/button';
 import { Tab, TabList, TabPanel, Tabs } from '@/components/base/tabs/tabs';
 import { usePageCommands } from '@/components/shell/page-commands';
+import { EntityLink } from '@/components/shell/peek';
 import { Meter } from '@/components/ui/charts';
 import { EmptyState, Grid, KeyValue, PageHeader, Panel } from '@/components/ui/panel';
 import { Mono, Tag } from '@/components/ui/signal';
@@ -316,9 +317,9 @@ export function PoolDetailPage({ poolId }: { poolId: string }) {
                 {offers.map((offer) => (
                   <tr key={offer.tenantId} className="border-b border-separator-border last:border-0">
                     <td className="px-3 py-2">
-                      <Link href={`/quotas?tenant=${offer.tenantId}`} className="text-body-medium hover:underline">
+                      <EntityLink kind="tenant" id={offer.tenantId} href={`/capacity/tenants/${offer.tenantId}`} className="font-sans text-body-medium">
                         {tenantName(offer.tenantId)}
-                      </Link>
+                      </EntityLink>
                       {offer.tenantId === snapshot.tenantId && <span className="ml-2 font-mono text-[11px] text-text-tertiary">owner</span>}
                       {offer.includeDescendants && <span className="ml-2 font-mono text-[11px] text-text-tertiary">+ sub-tenants</span>}
                     </td>
