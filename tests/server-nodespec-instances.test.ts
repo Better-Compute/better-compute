@@ -83,6 +83,32 @@ describe('NodeSpec instances section (v0.5)', () => {
   });
 });
 
+describe('NodeSpec persistent volumes (v1.1, agent memory)', () => {
+  it('lists the host’s volumes sorted and each instance’s attachments in order', async () => {
+    const wire = await wireNodeSpec(tx, {
+      volumes: [
+        { id: 'vol_b', sizeBytes: 20 * 2 ** 30, serial: 'bcv-b' },
+        { id: 'vol_a', sizeBytes: 10 * 2 ** 30, serial: 'bcv-a' },
+      ],
+      instances: [
+        instance({ volumes: [{ volumeId: 'vol_b' }, { volumeId: 'vol_a', readOnly: true }] }),
+      ],
+    });
+    const decoded = fromJson(NodeSpecSchema, wire as never).instances!;
+    expect(decoded.volumes.map((volume) => [volume.volumeId, volume.sizeBytes, volume.serial])).toEqual([
+      ['vol_a', 10n * 2n ** 30n, 'bcv-a'],
+      ['vol_b', 20n * 2n ** 30n, 'bcv-b'],
+    ]);
+    expect(decoded.instances[0]!.volumes.map((volume) => [volume.volumeId, volume.readOnly])).toEqual([
+      ['vol_b', false],
+      ['vol_a', true],
+    ]);
+    // A host with volumes and no instances still gets the section (bcd keeps them).
+    const only = await wireNodeSpec(tx, { volumes: [{ id: 'vol_a', sizeBytes: 2 ** 30, serial: 'bcv-a' }] });
+    expect(fromJson(NodeSpecSchema, only as never).instances!.volumes).toHaveLength(1);
+  });
+});
+
 describe('NodeSpec telemetry (v1.1)', () => {
   it('carries the headers ref and sorted resource attributes', async () => {
     const wire = await wireNodeSpec(tx, {

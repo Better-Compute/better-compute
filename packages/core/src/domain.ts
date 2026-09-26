@@ -696,6 +696,8 @@ export interface InstanceSpec {
   sshFromHostOnly?: boolean;
   /** (v1.1 §3.8) Pinned CPUs, NUMA-bound memory, hugepages, balloon. */
   placement?: InstancePlacement;
+  /** (v1.1, agent memory) Host volumes attached as extra virtio disks, in order. */
+  volumes?: { volumeId: string; readOnly?: boolean }[];
 }
 /** One instance NIC: the host bridge or network, its MAC and its IPAM addresses. */
 export interface InstanceNicSpec {
@@ -754,10 +756,23 @@ export interface NodeSpec {
   host?: HostSpec;
   devices?: DevicesSpec;
   instances?: InstanceSpec[];
+  /**
+   * (v1.1, agent memory) Persistent volumes kept on this host (the instances section's `volumes`):
+   * bcd creates missing ones and destroys unlisted ones no instance attaches.
+   */
+  volumes?: HostVolumeSpec[];
   access?: AccessSpec;
   telemetry?: TelemetrySpec;
   daemon?: DaemonSpec;
   site?: SiteSpec;
+}
+
+/** (v1.1) A persistent volume on a host. */
+export interface HostVolumeSpec {
+  id: string;
+  sizeBytes: number;
+  /** virtio-blk serial, ≤20 bytes of [a-z0-9-]: the guest's /dev/disk/by-id/virtio-<serial>. */
+  serial: string;
 }
 
 // --- Admission, audit, events, projects ---------------------------------------------------------

@@ -5,6 +5,7 @@ import {
   type Condition,
   type DeviceAssignment,
   type ResourceLimits,
+  type HostVolumeSpec,
   type InstanceSpec,
   type Json,
   type Label,
@@ -111,12 +112,14 @@ export function mergeNodeSpecs(parts: readonly NodeSpecPart[]): NodeSpec {
   const spec: NodeSpec = { generation: 0, host: {}, devices: { assignments: [] } };
   const assignments = new Map<string, DeviceAssignment>();
   const instances = new Map<string, InstanceSpec>();
+  const volumes = new Map<string, HostVolumeSpec>();
   for (const part of parts) {
     if (!part || typeof part !== 'object') continue;
     if (part.host?.config) spec.host = { config: { ...spec.host?.config, ...part.host.config } };
     for (const assignment of part.devices?.assignments ?? [])
       assignments.set(assignment.allocationId, assignment);
     for (const instance of part.instances ?? []) instances.set(instance.id, instance);
+    for (const volume of part.volumes ?? []) volumes.set(volume.id, volume);
     if (part.access)
       spec.access = {
         ...spec.access,
@@ -135,6 +138,7 @@ export function mergeNodeSpecs(parts: readonly NodeSpecPart[]): NodeSpec {
   }
   spec.devices = { assignments: [...assignments.values()] };
   if (instances.size) spec.instances = [...instances.values()];
+  if (volumes.size) spec.volumes = [...volumes.values()];
   return spec;
 }
 
@@ -260,6 +264,12 @@ function wireInstance(instance: InstanceSpec): Json {
     placement.hugepageSizeBytes = String(instance.placement.hugepageSizeBytes);
   if (instance.placement?.balloon) placement.balloon = true;
   if (Object.keys(placement).length) wire.placement = placement;
+  // Attach order is the guest's disk order, so it is kept as the module gave it.
+  if (instance.volumes?.length)
+    wire.volumes = instance.volumes.map((volume) => ({
+      volumeId: volume.volumeId,
+      ...(volume.readOnly ? { readOnly: true } : {}),
+    }));
   return wire;
 }
 
@@ -276,10 +286,20 @@ export async function wireNodeSpec(tx: SqlTx, spec: NodeSpec): Promise<JsonObjec
   wire.host = units.length ? { units } : {};
   const assignments = await wireAssignments(tx, spec.devices?.assignments ?? []);
   wire.devices = assignments.length ? { assignments } : {};
-  if (spec.instances?.length)
-    wire.instances = {
-      instances: [...spec.instances].sort((a, b) => (a.id < b.id ? -1 : 1)).map(wireInstance),
-    };
+  if (spec.instances?.length || spec.volumes?.length) {
+    const section: JsonObject = {};
+    if (spec.instances?.length)
+      section.instances = [...spec.instances].sort((a, b) => (a.id < b.id ? -1 : 1)).map(wireInstance);
+    if (spec.volumes?.length)
+      section.volumes = [...spec.volumes]
+        .sort((a, b) => (a.id < b.id ? -1 : 1))
+        .map((volume) => ({
+          volumeId: volume.id,
+          sizeBytes: String(BigInt(Math.round(volume.sizeBytes))),
+          serial: volume.serial,
+        }));
+    wire.instances = section;
+  }
   if (spec.access) {
     const access: JsonObject = {};
     if (spec.access.execTicketJwks !== undefined)
