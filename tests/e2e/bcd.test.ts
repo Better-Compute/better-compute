@@ -80,6 +80,16 @@ let dataDir: string;
 let nodeId: string;
 let node: ChildProcess | undefined;
 let nodeLog = '';
+// The OTLP collector NodeSpec.telemetry names (set by the telemetry test; http to the WSL host).
+let telemetryEndpoint: string | undefined;
+const telemetryModule = {
+  name: 'e2e-telemetry',
+  async nodeSpec() {
+    return telemetryEndpoint
+      ? { telemetry: { otlpEndpoint: telemetryEndpoint, intervalSeconds: 5, resourceAttributes: { 'e2e.suite': 'bcd' } } }
+      : {};
+  },
+};
 
 /**
  * Runs a Linux command to completion without blocking the event loop: the gateway it talks to runs in
@@ -131,7 +141,10 @@ describe.skipIf(!enabled)('bcd, the Go daemon, against the control plane (W1)', 
       tunnels: {},
       capacity: { attestedBindings: pkiAllocationBindingCheck() },
       // daemon.upgrade is the rollout module's kind.
-      modules: [rolloutModule({ release: { pins: [spkiPin(releaseKey.publicKey)] }, downloadsUrl: 'https://downloads.invalid' })],
+      modules: [
+        rolloutModule({ release: { pins: [spkiPin(releaseKey.publicKey)] }, downloadsUrl: 'https://downloads.invalid' }),
+        telemetryModule,
+      ],
     });
     api = dev.compute.api;
     ({ poolId } = await dev.createPool({ key: 'bcd', expectGpuCount: 8 }));
@@ -240,6 +253,58 @@ describe.skipIf(!enabled)('bcd, the Go daemon, against the control plane (W1)', 
       sh(`test -e '${dataDir}/fakehw-root/etc/cdi/bcd-${allocationId}.json' && echo held || echo gone`) === 'gone',
     );
   }, 120_000);
+
+  it('exports its GPU metrics over OTLP to the collector NodeSpec.telemetry names', async () => {
+    type Kv = { key: string; value: { stringValue?: string } };
+    const posts: any[] = [];
+    const collector = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk: Buffer) => (body += chunk.toString()));
+      req.on('end', () => {
+        if (req.url === '/v1/metrics' && req.headers['content-type'] === 'application/json') posts.push(JSON.parse(body));
+        res.writeHead(200, { 'content-type': 'application/json' }).end('{}');
+      });
+    });
+    await new Promise<void>((resolve) => collector.listen(0, '0.0.0.0', resolve));
+    const host = windows ? sh("ip route show default | awk '{print $3}'") : '127.0.0.1';
+    const renderSpec = () =>
+      dev.database.query(
+        `INSERT INTO work_queue (kind, key, shard, gen, not_before)
+         SELECT 'nodespec', id, shard, 1, compute_now() FROM nodes WHERE id = $1
+         ON CONFLICT (kind, key) DO UPDATE SET gen = work_queue.gen + 1, not_before = LEAST(work_queue.not_before, EXCLUDED.not_before)`,
+        [nodeId],
+      );
+    try {
+      telemetryEndpoint = `http://${host}:${(collector.address() as AddressInfo).port}`;
+      await renderSpec();
+      const export_ = await until(
+        'an OTLP export with every GPU',
+        async () =>
+          posts.find((post) => {
+            const metrics = post.resourceMetrics?.[0]?.scopeMetrics?.[0]?.metrics ?? [];
+            return metrics.some((m: any) => m.name === 'bcd.gpu.utilization' && m.gauge.dataPoints.length === 8);
+          }),
+        90_000,
+      ).catch((error) => {
+        throw new Error(`${error}\n--- bcd log ---\n${nodeLog.slice(-4000)}`);
+      });
+      const resource = Object.fromEntries(
+        (export_.resourceMetrics[0].resource.attributes as Kv[]).map((a) => [a.key, a.value.stringValue]),
+      );
+      expect(resource).toMatchObject({ 'service.name': 'bcd', 'bcd.node.id': nodeId, 'bcd.site.id': expect.any(String), 'e2e.suite': 'bcd' });
+      const names = (export_.resourceMetrics[0].scopeMetrics[0].metrics as { name: string }[]).map((m) => m.name);
+      expect(names).toEqual(
+        expect.arrayContaining(['bcd.gpu.memory.used', 'bcd.gpu.temperature', 'bcd.gpu.power.draw', 'bcd.gpu.xid.active']),
+      );
+      // The section's status is CONVERGED: the export runs in the daemon, not the session.
+      const { rows } = await dev.database.query<{ spec: any }>(`SELECT spec FROM nodes WHERE id = $1`, [nodeId]);
+      expect(rows[0]!.spec.telemetry).toMatchObject({ otlpEndpoint: telemetryEndpoint, exportIntervalMs: 5000 });
+    } finally {
+      telemetryEndpoint = undefined;
+      await renderSpec();
+      collector.close();
+    }
+  }, 150_000);
 
   it('opens a console tunnel to a real shell on the node', async () => {
     const opened = await api.tunnels.open(dev.root, { tenantId: dev.rootTenantId, nodeId, op: 'console' });
