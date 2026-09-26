@@ -29,6 +29,9 @@
       "path": "./packages/provider-proxmox"
     },
     {
+      "path": "./packages/provider-kubernetes"
+    },
+    {
       "path": "./packages/pki"
     },
     {
