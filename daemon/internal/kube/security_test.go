@@ -94,6 +94,43 @@ func TestReboundGPUIsReclaimed(t *testing.T) {
 	if !reflect.DeepEqual(*reaped, []reapCall{{"ml/old", false}, {"ml/old", true}}) {
 		t.Fatalf("reaped = %v", *reaped)
 	}
+	// The pod is gone: Freed tells the devices converger.
+	freed := 0
+	m.Freed = func() { freed++ }
+	kubelet.mu.Lock()
+	kubelet.podList = nil
+	kubelet.mu.Unlock()
+	m.Sync(ctx)
+	if freed != 1 {
+		t.Fatalf("freed = %d", freed)
+	}
+}
+
+// InUse: whether a pod still holds a device of an allocation (device plugin id or DRA claim), failing
+// closed on a worker without pod-resources, and false on a node that is not a worker.
+func TestInUse(t *testing.T) {
+	m, kubelet, sys, _, _ := securityRig(t)
+	ctx := context.Background()
+	kubelet.mu.Lock()
+	kubelet.podList = []PodResources{
+		{Name: "a", Namespace: "ml", Containers: []ContainerResources{{Name: "main", Devices: []ContainerDevices{{ResourceName: ResourceGPU, DeviceIDs: []string{"GPU-1@a1"}}}}}},
+		{Name: "b", Namespace: "ml", Containers: []ContainerResources{{Name: "main", Claimed: []ClaimedDevice{{Driver: DRADriverName, Pool: "n1", Device: draDeviceName("GPU-2", "a2")}}}}},
+		{Name: "c", Namespace: "ml", Containers: []ContainerResources{{Name: "main", Claimed: []ClaimedDevice{{Driver: DRADriverName, Pool: "other-node", Device: draDeviceName("GPU-3", "a3")}}}}},
+	}
+	kubelet.mu.Unlock()
+	for alloc, want := range map[string]bool{"a1": true, "a2": true, "a3": false, "a4": false} {
+		if got := m.InUse(ctx, alloc); got != want {
+			t.Errorf("InUse(%s) = %v", alloc, got)
+		}
+	}
+	m.PodResources = filepath.Join(m.Dir, "absent.sock")
+	if !m.InUse(ctx, "a4") {
+		t.Fatal("a worker without pod-resources must answer in use")
+	}
+	sys.Delete(StateFile)
+	if m.InUse(ctx, "a1") {
+		t.Fatal("a node that is not a worker holds nothing for Kubernetes")
+	}
 }
 
 // Another path to the GPUs withdraws bcd's offer and raises ForeignGpuExposure: a second device plugin

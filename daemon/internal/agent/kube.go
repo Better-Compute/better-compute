@@ -120,6 +120,8 @@ func newKubeManager(a *Agent) *kube.Manager {
 		// ForeignGpuExposure, PodResourcesUnavailable, KubernetesReleased reach the control plane with
 		// the next status.
 		Changed: a.triggerConverge,
+		// A pod let go of released devices: the devices converger reports what InUse frees.
+		Freed: a.triggerConverge,
 		// The DRA driver's sockets live beside the device plugins' (fakehw maps them under its root).
 		RegistryDir:  a.host.Path("/var/lib/kubelet/plugins_registry"),
 		DRAPluginDir: a.host.Path("/var/lib/kubelet/plugins/" + kube.DRADriverName),

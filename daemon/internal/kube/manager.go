@@ -55,6 +55,9 @@ type Manager struct {
 	// Changed is called after a pass whose conditions differ from the previous one's (the agent then
 	// sends a status with them).
 	Changed func()
+	// Freed is called when a pod that held released devices is gone (the devices converger then
+	// reports the allocations InUse no longer holds).
+	Freed func()
 	// GPUAPI is how a hosted node offers its GPUs (APIDevicePlugin, the default, or APIDRA); a node
 	// k8s-join joined takes its record's gpuApi.
 	GPUAPI string
@@ -432,11 +435,16 @@ func (m *Manager) reap(ctx context.Context, want map[string]map[string]atom, hol
 		}
 		m.deleted[key] = now
 	}
+	freed := false
 	for key := range m.stale {
 		if !seen[key] {
 			delete(m.stale, key)
 			delete(m.deleted, key)
+			freed = true
 		}
+	}
+	if freed && m.Freed != nil {
+		m.Freed()
 	}
 	return nil
 }
