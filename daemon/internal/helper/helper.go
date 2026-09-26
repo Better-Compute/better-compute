@@ -78,6 +78,8 @@ type Request struct {
 	GPUsBusy []string        `json:"gpusBusy,omitempty"`
 	// host.unit: the signed spec the unit rests on (needed when command_root_sha256 is set).
 	Intent *HostIntent `json:"intent,omitempty"`
+	// libvirt.<verb>: the operation's arguments.
+	Libvirt *LibvirtRequest `json:"libvirt,omitempty"`
 }
 
 // Response is the helper's answer.
@@ -221,6 +223,9 @@ type Server struct {
 	JoinSigningPin []byte
 	// Now is the clock worker certificates are checked at (default time.Now).
 	Now func() time.Time
+	// Virsh and LibvirtPolicy serve libvirt.* (libvirt.go); nil refuses them.
+	Virsh         Virsh
+	LibvirtPolicy func() (LibvirtPolicy, error)
 	// SliceRunner runs systemctl for slice.apply and slice.remove (default: the real one).
 	SliceRunner slice.Runner
 }
@@ -372,7 +377,7 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 		answer(nil, fmt.Errorf("protocol version %d; this helper speaks %d", req.V, Version))
 		return
 	}
-	if req.Op == "host.unit" {
+	if req.Op == "host.unit" || strings.HasPrefix(req.Op, "libvirt.") {
 		_ = conn.SetDeadline(time.Now().Add(HostUnitTimeout + time.Minute))
 	}
 	result, err := s.do(ctx, req)
@@ -472,6 +477,9 @@ func (s *Server) op(ctx context.Context, req Request) error {
 		return s.hostUnit(ctx, req)
 	case "slice.apply", "slice.remove":
 		return s.holdSlice(ctx, req)
+	}
+	if verb, ok := strings.CutPrefix(req.Op, "libvirt."); ok {
+		return s.libvirt(ctx, verb, req.Libvirt)
 	}
 	return fmt.Errorf("unknown operation %q", req.Op)
 }
