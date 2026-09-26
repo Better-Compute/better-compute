@@ -290,9 +290,30 @@ holds.
 - `placeablePending(tx, { now })` is the offline solver for I7 (§15). It returns the pending
   reservations that would fit right now, and should be empty after a quiet period.
 
+## Host resources (§3.8, v1.1)
+
+- The `capacity.hosts` reconciler (`syncNodeResources`, every `hostSyncEvery`, default 30 s) keeps
+  every host's `vcpu`, `memoryGiB`, `hugepages2Mi` and `hugepages1Gi` rows in step with its applied
+  inventory:
+  - allocatable is the inventory total minus `policy.hostReserve` (default 2 CPUs and 8 GiB), with
+    hugepage pools carved out of memory;
+  - the ratio is `policy.overcommit` (hugepages never overcommit);
+  - vps keeps `vps-host` pools' `vcpu`/`memoryGiB`/`diskGiB`;
+  - `tenant-controlled` nodes add nothing;
+  - rows never shrink below what is allocated.
+- Reservations take `resources` ({ `vcpu`, `memoryGiB`, `hugepages1Gi` }, per node for a gang).
+  - Without it, whole-GPU requests get `perGpuShare`: `policy.perGpu`, else the smallest per-GPU share among the pool's GPU hosts. The share is resolved at the draft and stored in the reservation's request.
+  - These are placed with the devices and never charged to quota (`reservationDemand` counts devices only).
+  - `capacity.preview` books the same.
+- `deviceAssignments` gives each started hold `limits` (`assignmentLimits`): `cpuMillis`, `memoryBytes`, `hugepages1Gi`, and a cpuset on the devices' NUMA nodes (`readNodeTopology`).
+  - The cpuset leaves out the host's reserved CPUs, and is set only when the nodes have room: CPUs for `cpus`, memory for `mems`.
+- `PlacementRequest.onlyNodes` restricts a placement to named nodes (volume hosts). The exact shortlist narrows before cutting, so they can't be crowded out.
+- `pool-policy` extensions (`policyValidators`) check pool policies at `pools.create` and `pools.update`.
+- The cpulist helpers are `parseCpuList` and `formatCpuList`.
+
 ## Quotas (§10.3, D9)
 
-- `quotaDemand(request)` counts device classes and scalars.
+- `quotaDemand(request)` counts device classes and scalars. Hugepages count as `memoryGiB` (`quotaScalar`).
 - `chargeQuota` is all-or-nothing, inside a savepoint. It throws `QUOTA_EXCEEDED` with
   `details: { resource, poolId, requested, max, used }`. A missing row grants 0.
 - `refundQuota` never drives a counter below 0.
