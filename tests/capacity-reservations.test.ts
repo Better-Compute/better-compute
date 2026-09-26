@@ -37,6 +37,7 @@ import {
   meterReservations,
   readQuotas,
   reservationWork,
+  stuckReleaseStepMs,
   wakePendingForNode,
   wakeStartedOnNode,
   type AllocationBindingCheck,
@@ -3066,5 +3067,33 @@ describe('host CPU and memory booked with the GPUs (§3.8)', () => {
     await call('reservations', 'release', { tenantId: 'root', reservationId: third.id }, root);
     const [unbound] = await booked(third.id);
     expect(await allocated(unbound!.nodeId)).toEqual({ memoryGiB: 0, vcpu: 0 });
+
+    // Pods still holding the GPUs at the booking's end (bcd: KubernetesReleaseStuck): the booking
+    // is carried on a step at a time, so the GPUs are never offered while pods use them.
+    const fourth = await start('k8s-stuck');
+    await call('reservations', 'release', { tenantId: 'root', reservationId: fourth.id }, root);
+    const bookedUntil = async () =>
+      Number(
+        (
+          await db.query<{ end_ms: number }>(
+            `SELECT max(extract(epoch FROM upper(during)) * 1000)::float8 AS end_ms
+               FROM device_bookings WHERE allocation_id = $1`,
+            [fourth.allocationId],
+          )
+        ).rows[0]!.end_ms,
+      );
+    expect(await bookedUntil()).toBe(T0 + 2 * HOUR);
+    await advance(2 * HOUR - 60_000);
+    expect(await db.transaction((tx) => finishStaleReleases(tx, work))).toBe(0);
+    expect(await bookedUntil()).toBe(clock.now() + stuckReleaseStepMs);
+    await advance(stuckReleaseStepMs - 60_000);
+    expect(await db.transaction((tx) => finishStaleReleases(tx, work))).toBe(0);
+    expect(await bookedUntil()).toBe(clock.now() + stuckReleaseStepMs);
+    expect(await state(fourth.allocationId)).toEqual({ released: false, releasing: true, open: 2 });
+    expect(
+      await db.transaction((tx) => markAllocationReleased(tx, work, fourth.allocationId)),
+    ).toBe(true);
+    expect(await state(fourth.allocationId)).toMatchObject({ released: true, open: 0 });
+    expect(await allocated(fourth.nodeId)).toEqual({ memoryGiB: 0, vcpu: 0 });
   });
 });

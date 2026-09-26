@@ -2278,20 +2278,61 @@ export async function markAllocationReleased(
   return wakeOwner(tx, work, rows[0]);
 }
 
+/** How far a stuck Kubernetes release's booking is carried past its end at a time. */
+export const stuckReleaseStepMs = 5 * 60_000;
+
 /**
  * Ends the deferred releases (`deferRelease`) no report will end: the node is lost, or the booking
- * reached its end (its devices are bookable from then on anyway). Run by the hosts pass (§3.8);
- * answers how many it ended. A later AllocationReleased for one is the usual acknowledgement.
+ * reached its end and could not be carried on because another allocation booked those devices
+ * next (that one may then fail on the node until the pods let go). While the node is reachable
+ * and the devices are free, a booking about to end is carried `stuckReleaseStepMs` further, so a
+ * GPU pods still hold is never offered again. Run by the hosts pass (§3.8); answers how many it
+ * ended. A later AllocationReleased for one is the usual acknowledgement.
  */
 export async function finishStaleReleases(
   tx: SqlTx,
   work: ModuleContext['work'],
   limit = 500,
 ): Promise<number> {
+  // Pods still holding the devices at the booking's end (bcd: KubernetesReleaseStuck) keep them
+  // booked, a step at a time, while the node is reachable and no one else booked them next.
+  const { rows: due } = await tx.query<{ id: string }>(
+    `SELECT a.id FROM allocations a JOIN nodes n ON n.id = a.node_id
+      WHERE a.released_at IS NULL AND a.binding ? 'releasing' AND n.connectivity <> 'lost'
+        AND (SELECT max(upper(b.during)) FROM device_bookings b WHERE b.allocation_id = a.id)
+            <= compute_now() + make_interval(secs => $2 / 1000.0)
+      ORDER BY a.id LIMIT $1 FOR UPDATE OF a`,
+    [limit, stuckReleaseStepMs / 2],
+  );
+  for (const allocation of due) {
+    // The booked devices (atoms, and any parent a fraction books) are locked as the placer does.
+    await tx.query(
+      `SELECT 1 FROM devices WHERE id IN (SELECT device_id FROM device_bookings WHERE allocation_id = $1)
+        ORDER BY id FOR UPDATE`,
+      [allocation.id],
+    );
+    await tx.query(
+      `WITH last AS (
+         SELECT max(upper(during)) AS until,
+                tstzrange(max(upper(during)), compute_now() + make_interval(secs => $2 / 1000.0)) AS step
+           FROM device_bookings WHERE allocation_id = $1
+       )
+       UPDATE device_bookings b SET during = tstzrange(lower(b.during), upper(last.step))
+         FROM last
+        WHERE b.allocation_id = $1 AND upper(b.during) = last.until
+          AND NOT EXISTS (SELECT 1 FROM device_bookings o
+                           WHERE o.allocation_id <> $1 AND o.during && last.step
+                             AND o.device_id IN (SELECT device_id FROM device_bookings
+                                                  WHERE allocation_id = $1))`,
+      [allocation.id, stuckReleaseStepMs],
+    );
+  }
   const { rows } = await tx.query<{ id: string; pool_id: string }>(
     `SELECT a.id, a.pool_id FROM allocations a JOIN nodes n ON n.id = a.node_id
       WHERE a.released_at IS NULL AND a.binding ? 'releasing'
-        AND (n.connectivity = 'lost' OR upper(a.during) <= compute_now())
+        AND (n.connectivity = 'lost'
+             OR NOT EXISTS (SELECT 1 FROM device_bookings b
+                             WHERE b.allocation_id = a.id AND upper(b.during) > compute_now()))
       ORDER BY a.id LIMIT $1`,
     [limit],
   );
