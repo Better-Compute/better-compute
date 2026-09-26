@@ -157,7 +157,14 @@ Since review 2:
   - [6baab5]: real-cluster DaemonSet run, or a device-plugin conformance fallback.
   - No hardware TPM run yet.
   - Security review 3 after TPM D and CH land.
-- Environment: embedded IAM (better-sqlite3) fails under Node 25 here, so `dev --memory --sim` can't run ([71c0e4]). The admin panel session trio ([71c0e4]/[f906ff]/[561b07]) owns apps/admin.
+- Security review 3 (6cb30e9..HEAD; subagent; 1 HIGH, 1 MED, 5 LOW):
+  - HIGH admin proxy (shared token, no auth, all interfaces): ab71e52 ([71c0e4]) gives loopback + Origin + read-only. Per-operator auth is next.
+  - MED rebind erased the deferred release: e7a56d7 (mine), plus a 24 h carry cap and a terminal-reservation leak sweep. The description was fixed in 33578b8.
+  - LOW-MED bcd in tss = TPM owner control → [d320b8].
+  - LOW releasing.json ENOSPC/Stat fail-open, ch.vfio holders beyond bcd-ch, CHRecord symlink race → [06192c].
+  - Clean: TPM renewal/join certify/EK chain, ch.* argv/bridges/uids, capability labels, composite input.
+- Also since: 7911c5f (composite invoke keeps the checked input; fleet.apply of templates with volumes), 0fca413 (built-in runtimes need bc.dev/driver.<runtime>), 564f543 (ResourcesExhausted re-place ≤3), 1c9684a (helper-mode CH sim), d94f1f3 (TPM-attested renewal).
+- Environment: embedded IAM (better-sqlite3) fails under Node 25 here, so `dev --memory --sim` can't run ([71c0e4]). tests/rollout-controller "completes…" flakes under full-suite load (passes alone). The admin panel session trio ([71c0e4]/[f906ff]/[561b07]) owns apps/admin.
 
 E landed ([6baab5]):
 - GPUs and health: cb987e5 nvidia-smi backend (+5026330 NVLink peers); 662fb55 diag.nvml, XID rescans, reset clears XIDs; 6f5a99f unhealthy GPUs never offered.
