@@ -687,6 +687,111 @@ export function computeTools(
           by: args.by,
         }),
     },
+    // Agent memory (v1.1): persistent volumes that outlive sandboxes; templates name them.
+    {
+      name: 'list_sandbox_volumes',
+      title: 'List sandbox volumes',
+      description:
+        'Lists the persistent volumes of this tenant (agent memory): name, size, pool and host. A template that names a volume mounts it in every sandbox it creates, and the data survives the sandboxes.',
+      inputSchema: {
+        type: 'object',
+        properties: { poolId: id('pool', 'Only this pool') },
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      run: (args, context) =>
+        context.api.$request('sandboxVolumes/list', { ...args, tenantId: context.tenantId }),
+    },
+    {
+      name: 'create_sandbox_volume',
+      title: 'Create a sandbox volume',
+      description:
+        'Creates a persistent volume (agent memory) of sizeGiB on a pool. It lives on one host, so sandboxes that mount it run there. It is billed until deleted. Always pass the idempotencyKey from an earlier attempt when retrying.',
+      inputSchema: {
+        type: 'object',
+        required: ['poolId', 'name', 'sizeGiB'],
+        properties: {
+          poolId: id('pool', 'The pool to create it on'),
+          name: {
+            type: 'string',
+            pattern: '^[a-z0-9][a-z0-9._-]{0,62}$',
+            description: 'A name unique in the tenant, e.g. "agent-notes"',
+          },
+          sizeGiB: { type: 'integer', minimum: 1, maximum: 65_536, description: 'Size in GiB' },
+          idempotencyKey,
+        },
+        additionalProperties: false,
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      async run(args, context) {
+        const key = (args.idempotencyKey as string | undefined) ?? context.newKey();
+        const volume = await withConfirmation(context, key, () =>
+          context.api.$request('sandboxVolumes/create', {
+            tenantId: context.tenantId,
+            poolId: args.poolId,
+            name: args.name,
+            sizeGiB: args.sizeGiB,
+            idempotencyKey: key,
+          }),
+        );
+        return { idempotencyKey: key, volume };
+      },
+    },
+    {
+      name: 'resize_sandbox_volume',
+      title: 'Grow a sandbox volume',
+      description:
+        'Grows a persistent volume to sizeGiB (it never shrinks). Sandboxes see the new size at their next boot.',
+      inputSchema: {
+        type: 'object',
+        required: ['volumeId', 'sizeGiB'],
+        properties: {
+          volumeId: id('vol', 'The volume'),
+          sizeGiB: { type: 'integer', minimum: 1, maximum: 65_536, description: 'The new size in GiB' },
+        },
+        additionalProperties: false,
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      run: (args, context) =>
+        context.api.$request('sandboxVolumes/resize', {
+          tenantId: context.tenantId,
+          volumeId: args.volumeId,
+          sizeGiB: args.sizeGiB,
+        }),
+    },
+    {
+      name: 'delete_sandbox_volume',
+      title: 'Delete a sandbox volume',
+      description:
+        'Deletes a persistent volume and wipes its data on the host. It cannot be undone, and a volume a sandbox still mounts is refused.',
+      inputSchema: {
+        type: 'object',
+        required: ['volumeId'],
+        properties: { volumeId: id('vol', 'The volume') },
+        additionalProperties: false,
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      run: (args, context) =>
+        context.api.$request('sandboxVolumes/delete', {
+          tenantId: context.tenantId,
+          volumeId: args.volumeId,
+        }),
+    },
     // Destructive-batch quorum (v1.0, §13): read-only. Approving is a person's signature with an
     // approver key held off the control plane, so there is no approve tool.
     {

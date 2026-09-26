@@ -102,6 +102,10 @@ describe('JSON-RPC over Streamable HTTP', () => {
       'create_sandbox',
       'list_sandboxes',
       'extend_sandbox',
+      'list_sandbox_volumes',
+      'create_sandbox_volume',
+      'resize_sandbox_volume',
+      'delete_sandbox_volume',
       'list_command_batches',
       'get_command_batch',
       'list_sandbox_snapshots',
@@ -281,6 +285,45 @@ describe('create_instance', () => {
     expect(text).toContain('sbxt_1');
     expect(text).not.toContain('hunter2');
     expect(text).not.toContain('TOKEN');
+  });
+
+  it('manages agent-memory volumes in the caller’s tenant (v1.1)', async () => {
+    const { api, calls } = recorder();
+    const mcp = mcpWith(api);
+    const VOLUME = 'vol_01k5w0000000000000000000dd';
+    await rpc(mcp, 'tools/call', { name: 'list_sandbox_volumes', arguments: { poolId: POOL } });
+    const created = await rpc(mcp, 'tools/call', {
+      name: 'create_sandbox_volume',
+      arguments: { poolId: POOL, name: 'agent-notes', sizeGiB: 10 },
+    });
+    await rpc(mcp, 'tools/call', {
+      name: 'resize_sandbox_volume',
+      arguments: { volumeId: VOLUME, sizeGiB: 20 },
+    });
+    await rpc(mcp, 'tools/call', { name: 'delete_sandbox_volume', arguments: { volumeId: VOLUME } });
+    expect(calls.map((call) => [call.path, call.input])).toEqual([
+      ['sandboxVolumes/list', { tenantId: 'org_acme', poolId: POOL }],
+      [
+        'sandboxVolumes/create',
+        {
+          tenantId: 'org_acme',
+          poolId: POOL,
+          name: 'agent-notes',
+          sizeGiB: 10,
+          idempotencyKey: created.body.result.structuredContent.idempotencyKey,
+        },
+      ],
+      ['sandboxVolumes/resize', { tenantId: 'org_acme', volumeId: VOLUME, sizeGiB: 20 }],
+      ['sandboxVolumes/delete', { tenantId: 'org_acme', volumeId: VOLUME }],
+    ]);
+    // Bad arguments never reach compute.
+    const bad = await rpc(mcp, 'tools/call', {
+      name: 'create_sandbox_volume',
+      arguments: { poolId: POOL, name: 'Bad Name', sizeGiB: 10 },
+    });
+    expect(bad.body.result.isError).toBe(true);
+    expect(calls).toHaveLength(4);
+    expect(gateTools().create_sandbox_volume).toMatchObject({ action: 'compute:pools:read' });
   });
 
   it('caps the calls one caller has in flight (review 14 L5)', async () => {

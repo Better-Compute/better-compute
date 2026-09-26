@@ -400,6 +400,11 @@ export function gateTools(
     get_command_batch: { public: true },
     list_sandbox_snapshots: { public: true },
     delete_sandbox_snapshot: { public: true },
+    // Agent memory (v1.1): creating a volume needs to see its pool; compute decides the rest.
+    list_sandbox_volumes: { public: true },
+    create_sandbox_volume: poolRead,
+    resize_sandbox_volume: { public: true },
+    delete_sandbox_volume: { public: true },
   };
   if (options.execCommand) {
     rules.exec_command = nodeRead;
