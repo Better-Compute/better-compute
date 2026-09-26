@@ -393,6 +393,61 @@ describe('secret broker', () => {
     expect(await get(own, bound)).toBe('');
   });
 
+  it('releases a host unit’s credential (k8s-join.tokenRef) named by the node’s current spec only', async () => {
+    const agent = await node();
+    const token = await store.put(TENANT, 'abcdef.0123456789abcdef');
+    const foreign = await store.put('org_other', 'abcdef.foreign-token-xx');
+    const setSpec = (units: { unit: string; configJson: string }[] | null) =>
+      db.query('UPDATE nodes SET spec = $2::jsonb WHERE id = $1', [
+        agent.id,
+        units === null ? null : JSON.stringify({ host: { units } }),
+      ]);
+    const join = (ref: string) => ({
+      unit: 'k8s-join',
+      configJson: JSON.stringify({ server: 'https://k8s.example:6443', caCertSha256: 'a'.repeat(64), tokenRef: ref }),
+    });
+    const b = broker();
+    // The daemon names the unit and field it fetches for: workflow host:<unit>, step <field>.
+    const hostUnit = { workflowId: 'host:k8s-join', stepId: 'tokenRef' };
+    const get = async (ref: string, fields: Parameters<typeof ask>[2] = hostUnit) =>
+      (await b.secret(ask(agent, ref, fields).request, { peerNodeId: agent.id })).error;
+
+    expect(await get(token)).toBe('not-bound'); // no spec
+    await setSpec([join(token)]);
+    const { request, ephemeralKey } = ask(agent, token, hostUnit);
+    const response = await b.secret(request, { peerNodeId: agent.id });
+    expect(response.error).toBe('');
+    expect(openSecretResponse(response, ephemeralKey, { ref: token, requestId: request.requestId, now })).toBe(
+      'abcdef.0123456789abcdef',
+    );
+    const audit = await db.query<{ details: Record<string, unknown> }>(
+      `SELECT details FROM audit_events WHERE action = 'secret.released' AND resource_id = $1`,
+      [token],
+    );
+    expect(audit.rows[0]?.details).toMatchObject({ nodeId: agent.id, hostUnit: 'k8s-join' });
+
+    // Only the allowed (unit, field) pair, named as such.
+    expect(await get(token, { workflowId: 'wf_1', stepId: 'bmc' })).toBe('not-bound');
+    expect(await get(token, { workflowId: 'host:k8s-join', stepId: 'server' })).toBe('not-bound');
+    await setSpec([{ unit: 'sysctl', configJson: JSON.stringify({ tokenRef: token }) }]);
+    expect(await get(token)).toBe('not-bound');
+    expect(await get(token, { workflowId: 'host:sysctl', stepId: 'tokenRef' })).toBe('not-bound');
+    // Another tenant's secret named in the spec stays sealed.
+    await setSpec([join(foreign)]);
+    expect(await get(foreign)).toBe('not-bound');
+    // The spec moved on (a policy edit): the old ref is no longer released.
+    const next = await store.put(TENANT, 'abcdef.next-token-xxxxxx');
+    await setSpec([join(next)]);
+    expect(await get(token)).toBe('not-bound');
+    expect(await get(next)).toBe('');
+    // A revoked key reads nothing, and the rule can be turned off.
+    expect(
+      (await broker({ hostUnitRefs: [] }).secret(ask(agent, next, hostUnit).request, { peerNodeId: agent.id })).error,
+    ).toBe('not-bound');
+    await db.query('UPDATE node_certs SET revoked_at = compute_now() WHERE serial = $1', [agent.serial]);
+    expect(await get(next)).toBe('access-denied');
+  });
+
   it('answers not-found / unavailable without detail, and bounds refusal events', async () => {
     const agent = await node();
     const missing = 'secret://org_acme/nope';

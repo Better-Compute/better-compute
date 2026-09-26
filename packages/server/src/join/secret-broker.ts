@@ -29,7 +29,9 @@ import type { GatewayCallContext } from './service.js';
 //  2. the certificate is a platform identity (never `node-tenant`: the tenant has root there);
 //  3. the ref is bound to work that node is doing right now — a non-terminal command of the named
 //     workflow step addressed to it that carries the ref, or an allocation placed on it whose
-//     instance/telemetry references it;
+//     instance/telemetry references it, or a config unit of its current NodeSpec `host` section
+//     that names it as its credential (`k8s-join.tokenRef`, the bootstrap token; the request names
+//     workflow `host:k8s-join`, step `tokenRef`);
 //  4. the request id was not used before.
 // The answer is a JWE to the request's one-time key with a short `exp`. The audit row and events
 // carry the ref (and its version), never the value.
@@ -55,7 +57,22 @@ export interface SecretBrokerOptions {
   ): Promise<boolean>;
   /** `security.secret.refused` events per (reason) per minute (default 60). */
   refusalEventsPerMinute?: number;
+  /**
+   * The config-unit settings fields that name a credential the node fetches for itself (binding
+   * rule 3). Default: only `k8s-join.tokenRef`; `[]` turns the rule off.
+   */
+  hostUnitRefs?: readonly HostUnitRef[];
 }
+
+/** A config unit's settings field holding a secret ref its node may fetch. */
+export interface HostUnitRef {
+  unit: string;
+  field: string;
+}
+
+export const defaultHostUnitRefs: readonly HostUnitRef[] = Object.freeze([
+  { unit: 'k8s-join', field: 'tokenRef' },
+]);
 
 export interface SecretBrokerPort {
   secret(request: SecretRequest, context?: GatewayCallContext): Promise<SecretResponse>;
@@ -175,6 +192,49 @@ async function boundToAllocation(
   );
 }
 
+/** A host unit's request names `host:<unit>` as its workflow and the settings field as its step. */
+export const hostUnitWorkflowPrefix = 'host:';
+
+/**
+ * Binding rule 3: the request names `workflowId: host:<unit>`, `stepId: <field>` (both signed) for
+ * an allowed (unit, field); the node's current spec (`nodes.spec`, rewritten with every generation)
+ * has that unit naming the ref in that field; and the ref is the node owner's or its pool's tenant's.
+ * The certificate is checked again in the same statement, so the spec and the key are read together.
+ * Returns the unit.
+ */
+async function boundToHostUnit(
+  tx: SqlTx,
+  nodeId: string,
+  opened: OpenedSecretRequest,
+  allowed: readonly HostUnitRef[],
+): Promise<string | undefined> {
+  if (opened.allocationId || !opened.workflowId.startsWith(hostUnitWorkflowPrefix)) return undefined;
+  const unit = opened.workflowId.slice(hostUnitWorkflowPrefix.length);
+  const refs = allowed.filter((r) => r.unit === unit && r.field === opened.stepId);
+  const refTenant = parseSecretRef(opened.ref)?.tenantId;
+  if (!refs.length || refTenant === undefined) return undefined;
+  const { rows } = await tx.query<{ unit: string }>(
+    `SELECT u.value->>'unit' AS unit
+       FROM nodes n
+       JOIN node_certs c ON c.node_id = n.id AND c.identity_gen = n.identity_gen AND c.serial = $2
+                        AND c.revoked_at IS NULL
+       LEFT JOIN pools p ON p.id = n.pool_id
+       CROSS JOIN LATERAL jsonb_array_elements(
+         CASE WHEN jsonb_typeof(n.spec->'host'->'units') = 'array' THEN n.spec->'host'->'units' ELSE '[]'::jsonb END
+       ) u
+      WHERE n.id = $1 AND n.provision_state <> 'retired'
+        AND $5 IN (n.owner_tenant_id, p.owner_tenant_id)
+        AND jsonb_typeof(u.value->'configJson') = 'string'
+        AND EXISTS (
+          SELECT 1 FROM jsonb_to_recordset($3::jsonb) AS allowed(unit text, field text)
+           WHERE allowed.unit = u.value->>'unit'
+             AND ((u.value->>'configJson')::jsonb)->>allowed.field = $4)
+      LIMIT 1`,
+    [nodeId, opened.serial, JSON.stringify(refs), opened.ref, refTenant],
+  );
+  return rows[0]?.unit;
+}
+
 export function createSecretBroker(options: SecretBrokerOptions): SecretBrokerPort {
   const { database, clock, events, log } = options;
   const ttlMs = Math.min(options.ttlSeconds ?? maxSecretTtlSeconds, maxSecretTtlSeconds) * 1000;
@@ -182,6 +242,7 @@ export function createSecretBroker(options: SecretBrokerOptions): SecretBrokerPo
   for (const store of options.stores) for (const scheme of store.schemes) stores.set(scheme, store);
   const seen = new Map<string, number>();
   const refusals = refusalBucket(options.refusalEventsPerMinute ?? 60);
+  const hostUnitRefs = options.hostUnitRefs ?? defaultHostUnitRefs;
 
   function remember(key: string, now: number): boolean {
     for (const [stored, expiry] of seen) {
@@ -240,6 +301,7 @@ export function createSecretBroker(options: SecretBrokerOptions): SecretBrokerPo
       if (!nodeId) throw new Refused('access-denied', 'no-peer');
       const now = clock.now();
       const roles = new Map<string, string>();
+      let hostUnit: string | undefined;
       const { opened, owner } = await database.transaction(async (tx) => {
         const node = (
           await tx.query<{ owner_tenant_id: string }>(
@@ -258,10 +320,13 @@ export function createSecretBroker(options: SecretBrokerOptions): SecretBrokerPo
             isBound: async (candidate) => {
               // A lessee's OS (node-tenant) never gets platform secrets (§13).
               if (roles.get(candidate.serial) === 'node-tenant') return false;
-              return (
+              if (
                 (await boundToStep(tx, nodeId, candidate)) ||
                 (await boundToAllocation(tx, nodeId, candidate, options.allocationRefs))
-              );
+              )
+                return true;
+              hostUnit = await boundToHostUnit(tx, nodeId, candidate, hostUnitRefs);
+              return hostUnit !== undefined;
             },
           });
         } catch (error) {
@@ -317,7 +382,7 @@ export function createSecretBroker(options: SecretBrokerOptions): SecretBrokerPo
       }
       const expiresAt = now + ttlMs;
       const response = sealSecretResponse(opened, value, { expiresAt });
-      await audit(opened, nodeId, owner, context, expiresAt);
+      await audit(opened, nodeId, owner, context, expiresAt, hostUnit);
       return response;
     } catch (error) {
       if (error instanceof Refused) {
@@ -344,6 +409,7 @@ export function createSecretBroker(options: SecretBrokerOptions): SecretBrokerPo
     owner: string,
     context: GatewayCallContext,
     expiresAt: number,
+    hostUnit: string | undefined,
   ): Promise<void> {
     const tenantId = parseSecretRef(opened.ref)?.tenantId ?? owner;
     await database.transaction(async (tx) => {
@@ -367,6 +433,7 @@ export function createSecretBroker(options: SecretBrokerOptions): SecretBrokerPo
             workflowId: opened.workflowId || null,
             stepId: opened.stepId || null,
             allocationId: opened.allocationId || null,
+            ...(hostUnit ? { hostUnit } : {}),
             version: version === undefined ? null : Number(version),
             expiresAt: new Date(expiresAt).toISOString(),
             ...(context.gatewayId ? { gatewayId: context.gatewayId } : {}),

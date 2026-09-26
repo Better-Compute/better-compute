@@ -13,8 +13,13 @@ export { pkiAllocationBindingCheck } from './allocation-binding.js';
 export type { PkiAllocationBindingCheckOptions } from './allocation-binding.js';
 export type { GatewayReportContext, GatewayReportHandlers } from './gateway-reports.js';
 export { createGatewayServices } from './gateway-services.js';
-export { createSecretBroker, maxSecretTtlSeconds } from './secret-broker.js';
-export type { SecretBrokerOptions, SecretBrokerPort } from './secret-broker.js';
+export {
+  createSecretBroker,
+  defaultHostUnitRefs,
+  hostUnitWorkflowPrefix,
+  maxSecretTtlSeconds,
+} from './secret-broker.js';
+export type { HostUnitRef, SecretBrokerOptions, SecretBrokerPort } from './secret-broker.js';
 export { createWorkloadBroker } from './workload-broker.js';
 export type {
   WorkloadBrokerOptions,
