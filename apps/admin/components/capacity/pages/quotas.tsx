@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useMemo, useState } from 'react';
 import { RiScales3Line } from 'react-icons/ri';
+import { usePageCommands } from '@/components/shell/page-commands';
 import { EmptyState, Grid, PageHeader, Panel } from '@/components/ui/panel';
 import { Tag } from '@/components/ui/signal';
 import { fmtGiB, fmtNum, fmtPct } from '@/lib/data/format';
@@ -59,6 +60,15 @@ export function QuotasPage() {
   const focusTenant = search.get('tenant') ?? undefined;
   const [hideOperator, setHideOperator] = useState(true);
 
+  usePageCommands(
+    useMemo(
+      () => [
+        ...RESOURCES.map((entry) => ({ id: `quotas.resource.${entry.id}`, label: `Show ${entry.label} quotas`, group: 'This page', run: () => setResource(entry.id) })),
+        { id: 'quotas.operator', label: 'Show or hide the operator row', group: 'This page', run: () => setHideOperator((value) => !value) },
+      ],
+      [],
+    ),
+  );
   const cells = useMemo(() => quotaCells(snapshot.quotas.filter((row) => row.resource === resource)), [snapshot, resource]);
   const pools = useMemo(() => rows.filter((row) => cells.some((cell) => cell.poolId === row.id)), [rows, cells]);
   const tenants = useMemo(() => {

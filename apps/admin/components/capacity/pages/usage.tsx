@@ -1,6 +1,7 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
+import { usePageCommands } from '@/components/shell/page-commands';
 import { RiDownloadLine, RiMoneyDollarCircleLine, RiRefreshLine } from 'react-icons/ri';
 import { usageCsv } from '@better-compute/console-kit';
 import { Button } from '@/components/base/buttons/button';
@@ -81,6 +82,24 @@ function SpendColumns({ times, values, secondary }: { times: number[]; values: n
   );
 }
 
+/** ⌘K "This page" commands; the latest handlers are read through a ref so the list registers once. */
+function UsageCommands(handlers: { onRange(range: RangeKey): void; onGroup(group: GroupKey): void; onExport(): void; onResetPrices(): void }) {
+  const ref = useRef(handlers);
+  ref.current = handlers;
+  usePageCommands(
+    useMemo(
+      () => [
+        { id: 'usage.export', label: 'Export these usage windows as CSV', group: 'This page', icon: RiDownloadLine, run: () => ref.current.onExport() },
+        ...(Object.keys(RANGES) as RangeKey[]).map((range) => ({ id: `usage.range.${range}`, label: `Usage over the last ${range}`, group: 'This page', run: () => ref.current.onRange(range) })),
+        ...(['tenant', 'project', 'pool', 'meter', 'identity'] as GroupKey[]).map((group) => ({ id: `usage.group.${group}`, label: `Break spend down by ${group === 'identity' ? 'person' : group}`, group: 'This page', run: () => ref.current.onGroup(group) })),
+        { id: 'usage.prices', label: 'Back to list prices', group: 'This page', icon: RiRefreshLine, run: () => ref.current.onResetPrices() },
+      ],
+      [],
+    ),
+  );
+  return null;
+}
+
 /** Usage windows (usage.list) summed and priced: where the money goes, by tenant, project, pool, meter or person. */
 export function UsagePage() {
   const snapshot = useCapacity();
@@ -139,6 +158,7 @@ export function UsagePage() {
 
   return (
     <>
+      <UsageCommands onRange={setRange} onGroup={setGroup} onExport={exportCsv} onResetPrices={() => setOverrides({})} />
       <PageHeader
         icon={RiMoneyDollarCircleLine}
         title="Usage & spend"

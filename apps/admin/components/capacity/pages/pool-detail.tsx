@@ -7,6 +7,7 @@ import { RiAddLine, RiArrowLeftLine, RiEditLine, RiServerLine } from 'react-icon
 import { timelineView } from '@better-compute/console-kit';
 import { ButtonLink } from '@/components/base/buttons/button';
 import { Tab, TabList, TabPanel, Tabs } from '@/components/base/tabs/tabs';
+import { usePageCommands } from '@/components/shell/page-commands';
 import { Meter } from '@/components/ui/charts';
 import { EmptyState, Grid, KeyValue, PageHeader, Panel } from '@/components/ui/panel';
 import { Mono, Tag } from '@/components/ui/signal';
@@ -100,6 +101,38 @@ export function PoolDetailPage({ poolId }: { poolId: string }) {
   const cells = useMemo(() => quotaCells(snapshot.quotas.filter((q) => q.poolId === poolId)), [snapshot, poolId]);
   const flavors = useMemo(() => snapshot.flavors.filter((flavor) => flavor.poolId === poolId), [snapshot, poolId]);
   const capacity = snapshot.summary.pools.find((entry) => entry.poolId === poolId)?.capacity ?? [];
+  const isGpu = row?.unit === 'gpu';
+  const hasFlavors = flavors.length > 0;
+  usePageCommands(
+    useMemo(
+      () => [
+        ...(isGpu ? [{ id: 'pool.book', label: 'Book GPUs in this pool', group: 'This page', icon: RiAddLine, href: `/reservations/new?pool=${poolId}` }] : []),
+        ...[
+          ['now', 'Show the rack and resources'],
+          ...(isGpu ? [['schedule', 'Show the schedule (Gantt)']] : []),
+          ['reservations', "Show this pool's reservations"],
+          ['tenants', 'Show tenants and quotas'],
+          ['policy', 'Show the policy'],
+          ...(hasFlavors ? [['flavors', 'Show flavors']] : []),
+        ].map(([id, label]) => ({ id: `pool.tab.${id}`, label: label!, group: 'This page', run: () => setTab(id!) })),
+        ...(isGpu
+          ? (Object.keys(SCHEDULE) as ScheduleKey[]).map((key) => ({
+              id: `pool.schedule.${key}`,
+              label: `Schedule span: ${key}`,
+              group: 'This page',
+              keywords: ['gantt', 'zoom'],
+              run: () => {
+                setTab('schedule');
+                setSchedule(key);
+              },
+            }))
+          : []),
+        { id: 'pool.copy-id', label: `Copy pool id (${poolId})`, group: 'This page', run: () => void navigator.clipboard?.writeText(poolId) },
+        { id: 'pool.nodes', label: "Open this pool's nodes", group: 'This page', href: `/nodes?pool=${poolId}` },
+      ],
+      [poolId, isGpu, hasFlavors],
+    ),
+  );
 
   if (!row)
     return (

@@ -6,6 +6,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { RiAddLine, RiCalendarEventLine, RiHourglassLine } from 'react-icons/ri';
 import { earliestFit } from '@better-compute/console-kit';
 import { ButtonLink } from '@/components/base/buttons/button';
+import { usePageCommands } from '@/components/shell/page-commands';
 import { Select } from '@/components/ui/overlay';
 import { EmptyState, PageHeader, Panel } from '@/components/ui/panel';
 import { Mono, Tag } from '@/components/ui/signal';
@@ -61,6 +62,23 @@ export function ReservationsPage() {
   const pending = useMemo(() => all.filter((r) => r.state === 'pending' || r.state === 'awaiting-confirmation'), [all]);
   const pendingPools = useMemo(() => [...new Set(pending.map((r) => r.poolId))], [pending]);
   const pendingTimelines = useTimelines(pendingPools, window_.hour, window_.hour + 7 * 24 * HOUR);
+
+  usePageCommands(
+    useMemo(
+      () => [
+        { id: 'rsv.view.table', label: 'Reservations as a table', group: 'This page', run: () => setView('table') },
+        { id: 'rsv.view.timeline', label: 'Reservations as a timeline (Gantt)', group: 'This page', run: () => setView('timeline') },
+        ...(['pending', 'active', 'placed', 'failed'] as ReservationState[]).map((state) => ({
+          id: `rsv.only.${state}`,
+          label: `Only ${stateStyle[state].label} reservations`,
+          group: 'This page',
+          run: () => setStates(new Set([state])),
+        })),
+        { id: 'rsv.all', label: 'All reservations (clear the state filter)', group: 'This page', run: () => setStates(new Set()) },
+      ],
+      [],
+    ),
+  );
 
   const toggle = (state: ReservationState) =>
     setStates((current) => {

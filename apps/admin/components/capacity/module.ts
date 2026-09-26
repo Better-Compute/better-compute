@@ -15,7 +15,7 @@ import {
   RiTimerLine,
 } from 'react-icons/ri';
 import type { AdminModule, CommandDef, SearchResult, WidgetDef, WidgetSetting } from '@/lib/modules';
-import { capacityAt, reservationGpus } from '@/lib/data/capacity';
+import { capacityAt, capacityInsights, reservationGpus } from '@/lib/data/capacity';
 import { pools, tenants } from '@/lib/data/topology';
 import { PoolPeek, ReservationPeek, TenantPeek } from './peeks';
 import { FreeGpusStatus, InsightsStatus, WaitingStatus } from './status';
@@ -143,6 +143,7 @@ function search(query: string, context: { now: number; siteId?: string }): Searc
 
 export const capacityModule: AdminModule = {
   search,
+  attention: (now, scope) => capacityInsights(now, scope),
   status: [FreeGpusStatus, WaitingStatus, InsightsStatus],
   peeks: {
     pool: { title: (id) => pools.find((pool) => pool.id === id)?.name ?? id, href: (id) => `/pools/${id}`, icon: RiServerLine, component: PoolPeek },

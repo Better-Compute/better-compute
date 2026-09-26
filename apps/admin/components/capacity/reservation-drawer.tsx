@@ -1,5 +1,6 @@
 'use client';
 
+import { usePageCommands } from '@/components/shell/page-commands';
 import { EntityLink } from '@/components/shell/peek';
 import { useMemo } from 'react';
 import { RiAddLine, RiArrowDownSLine, RiCloseCircleLine, RiFileCopyLine, RiStopCircleLine } from 'react-icons/ri';
@@ -74,6 +75,27 @@ export function ReservationDrawer({ reservation, onClose }: { reservation?: Rese
     [snapshot, reservation],
   );
   const spend = useMemo(() => (current ? reservationSpend(current, snapshot.usage, snapshot.prices) : 0), [current, snapshot]);
+  // While open, the reservation's verbs are in ⌘K under "This page".
+  const id = current?.id;
+  const state = current?.state;
+  usePageCommands(
+    useMemo(() => {
+      if (!id || !state) return [];
+      const live = state === 'active' || state === 'binding' || state === 'releasing';
+      const cancellable = state === 'placed' || state === 'pending' || state === 'awaiting-confirmation';
+      return [
+        ...(live
+          ? [
+              { id: 'rsv.release', label: `Release ${id}`, group: 'This page', icon: RiStopCircleLine, run: () => void actions.release(id) },
+              ...[1, 6, 24].map((hours) => ({ id: `rsv.extend.${hours}`, label: `Extend ${id} by ${hours} h`, group: 'This page', icon: RiAddLine, run: () => void actions.extend(id, hours * HOUR) })),
+            ]
+          : []),
+        ...(cancellable ? [{ id: 'rsv.cancel', label: `Cancel ${id}`, group: 'This page', icon: RiCloseCircleLine, run: () => void actions.cancel(id) }] : []),
+        { id: 'rsv.copy-cli', label: `Copy CLI for ${id}`, group: 'This page', icon: RiFileCopyLine, run: () => void navigator.clipboard?.writeText(`better-compute reservations get ${id}`) },
+      ];
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [id, state]),
+  );
   if (!current) return null;
 
   const r = current;

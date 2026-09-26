@@ -1165,25 +1165,33 @@ export function createSimCapacitySource(options: SimOptions = {}): SimCapacitySo
   const clock = options.now ?? (() => Date.now());
   const latency = options.latencyMs ?? 0;
   const overlay: Overlay = { ends: new Map(), states: new Map(), created: [], quotas: new Map() };
-  let plan: Plan | undefined;
-  let cache: { key: string; derived: Derived } | undefined;
+  // Small LRUs: the live clock plus a few look-backs (attention lookbacks, time travel) stay cached side by side
+  // instead of evicting each other. Two weekly plans cover a look-back across a week boundary.
+  const plans = new Map<number, Plan>();
+  const cache = new Map<string, Derived>();
   let revision = 0;
 
   const planFor = (now: number) => {
     const epoch = Math.floor(now / WEEK) * WEEK;
-    if (!plan || plan.epoch !== epoch) {
-      plan = planFleet(seed, epoch);
-      cache = undefined;
+    let found = plans.get(epoch);
+    if (!found) {
+      found = planFleet(seed, epoch);
+      plans.set(epoch, found);
+      if (plans.size > 2) plans.delete(plans.keys().next().value!);
     }
-    return plan;
+    return found;
   };
   const current = () => {
     const now = clock();
     const fleet = planFor(now);
     // States move by the minute; recompute at most once per 15 s of simulated time.
     const key = `${fleet.epoch}:${Math.floor(now / 15_000)}:${revision}`;
-    if (!cache || cache.key !== key) cache = { key, derived: derive(fleet, now, overlay) };
-    return { now, fleet, derived: cache.derived };
+    let derived = cache.get(key);
+    if (derived) cache.delete(key);
+    else derived = derive(fleet, now, overlay);
+    cache.set(key, derived);
+    if (cache.size > 8) cache.delete(cache.keys().next().value!);
+    return { now, fleet, derived };
   };
   const wait = () => (latency > 0 ? new Promise((resolve) => setTimeout(resolve, latency)) : Promise.resolve());
   const find = (id: string) => {
@@ -1263,11 +1271,12 @@ export function createSimCapacitySource(options: SimOptions = {}): SimCapacitySo
     };
   };
 
-  let memo: { derived: Derived; snapshot: CapacitySnapshot } | undefined;
+  const memo = new WeakMap<Derived, CapacitySnapshot>();
   const snapshot = (): CapacitySnapshot => {
     const { now, fleet, derived } = current();
     // Same derivation → same object, so views memoize on identity.
-    if (memo?.derived === derived) return memo.snapshot;
+    const known = memo.get(derived);
+    if (known) return known;
     const nodesByPool: Record<string, string[]> = {};
     for (const node of fleet.nodes) (nodesByPool[node.poolId] ??= []).push(node.id);
     const value: CapacitySnapshot = {
@@ -1305,7 +1314,7 @@ export function createSimCapacitySource(options: SimOptions = {}): SimCapacitySo
         nodes: derived.nodes.filter((node) => node.gpus > 0),
         source: 'sim',
     };
-    memo = { derived, snapshot: value };
+    memo.set(derived, value);
     return value;
   };
   const timelineSync = (poolId: string, range: { from: number; to: number; stepMinutes?: number }) => {
@@ -1559,7 +1568,9 @@ export function capacityInsights(now: number, scope: { siteId?: string } = {}): 
   const clock = (ms: number) => new Date(ms).toISOString().slice(11, 16);
   const inHours = (ms: number) => (ms < HOUR ? `${Math.max(1, Math.round(ms / 60_000))} min` : `${Math.round(ms / HOUR)} h`);
   const out: CapacityInsight[] = [];
-  const push = (insight: Omit<CapacityInsight, 'source' | 'at'> & { at?: number }) => out.push({ source: 'capacity', at: t, ...insight });
+  // `at` defaults to the start of the hour the condition is observed in, so a queue doesn't show every item as
+  // "opened seconds ago" on each tick; kinds that know their origin pass it.
+  const push = (insight: Omit<CapacityInsight, 'source' | 'at'> & { at?: number }) => out.push({ source: 'capacity', at: hour, ...insight });
 
   for (const pool of pools) {
     const summary = snapshot.summary.pools.find((entry) => entry.poolId === pool.id);
@@ -1713,6 +1724,7 @@ export function capacityInsights(now: number, scope: { siteId?: string } = {}): 
       id: 'capacity.dead-letter',
       kind: 'billing-dead-letter',
       severity: 'critical',
+      at: Math.min(...dead.map((window) => window.windowEnd)),
       title: `${dead.length} usage window${dead.length === 1 ? '' : 's'} dead-lettered by billing`,
       detail: `${[...new Set(dead.map((window) => tenantName(window.tags.tenantId ?? '')))].slice(0, 3).join(', ')}: spend is under-reported until they are re-driven.`,
       href: '/usage',
