@@ -3,3 +3,4 @@
  * cluster's nodes and GPUs into a pool. Compute books the devices; it never schedules pods.
  */
 export * from './daemonset.js';
+export * from './cli.js';
