@@ -10,6 +10,7 @@ import { Drawer } from '@/components/ui/overlay';
 import { Grid, KeyValue, PageHeader, Panel } from '@/components/ui/panel';
 import { Led, Mono, Tag } from '@/components/ui/signal';
 import { Stat } from '@/components/ui/stat';
+import { LiveVitals } from './live-vitals';
 
 const status = { ok: 'ok', degraded: 'warn', down: 'crit' } as const;
 
@@ -45,6 +46,7 @@ export function ControlPlanePage() {
         meta={degraded.length ? <Tag status="warn">{degraded.length} degraded</Tag> : <Tag status="live">all nominal</Tag>}
       />
       <Grid>
+        <LiveVitals />
         <Panel className="col-span-12 md:col-span-6 xl:col-span-3" title="API p99" meta="req/s">
           <Stat label="latency" value={fmtDuration(api.latencyMs)} hint={`${fmtNum(api.rate)} req/s`} trend={api.series} />
         </Panel>
