@@ -236,6 +236,10 @@ func (h *fakeHost) ApplySlice(_ context.Context, name string, limits slice.Limit
 }
 
 func (h *fakeHost) RemoveSlice(_ context.Context, name string) error {
+	// A "<name>.busy" marker stands for a workload still in the slice.
+	if _, err := os.Stat(h.Path(fakeSliceDir + "/" + name + ".busy")); err == nil {
+		return slice.ErrBusy
+	}
 	if err := os.Remove(h.Path(fakeSliceDir + "/" + name + ".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}

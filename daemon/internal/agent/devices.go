@@ -96,6 +96,14 @@ func (d *devicesConverger) setLimits(id string, l *agentv1.ResourceLimits) {
 	}
 }
 
+// sliced says whether a hold runs in its own slice: one with limits, unless the kubelet runs its
+// workloads. A Kubernetes binding's pods live in the kubelet's own cgroups (kubepods.slice), where
+// the kubelet enforces the pods' requests and limits; bcd's slice would stay empty. The booked
+// limits still count in bcd's host admission.
+func sliced(as *agentv1.DeviceAssignment) bool {
+	return as.GetLimits() != nil && as.GetBinding() != agentv1.Binding_BINDING_KUBERNETES
+}
+
 // admits says whether limits need host admission: a memory limit or hugepages.
 func admits(l *agentv1.ResourceLimits) bool {
 	return l.GetMemoryBytes() > 0 || l.GetHugepages_2Mi() > 0 || l.GetHugepages_1Gi() > 0
@@ -150,6 +158,32 @@ func (d *devicesConverger) Plan(ctx context.Context, desired []byte) ([]converge
 					}},
 				})
 				d.a.kube.Trigger()
+				return nil
+			},
+		})
+	}
+	// A slice whose hold is gone, but whose workload outlived the release, stays until it is empty:
+	// every pass (the drift pass too) tries to stop it again.
+	owned := map[string]bool{}
+	for id := range wanted {
+		owned[holdSlice(id)] = true
+	}
+	for _, id := range released {
+		owned[holdSlice(id)] = true
+	}
+	for _, name := range d.a.holdSliceNames() {
+		if owned[name] {
+			continue
+		}
+		name := name
+		actions = append(actions, converge.Action{
+			Description: "stop the leftover slice " + name,
+			Apply: func(ctx context.Context) error {
+				if err := host.RemoveSlice(ctx, name); err != nil {
+					d.a.log.Info("leftover slice kept until its workload exits", "slice", name, "reason", err.Error())
+				} else {
+					d.a.log.Info("leftover slice stopped", "slice", name)
+				}
 				return nil
 			},
 		})
@@ -223,7 +257,7 @@ func (d *devicesConverger) Plan(ctx context.Context, desired []byte) ([]converge
 			ids = append(ids, dev.GetId())
 		}
 		if _, held := observed[id]; held {
-			if limits := as.GetLimits(); limits != nil && !d.a.sliceExists(holdSlice(id)) {
+			if limits := as.GetLimits(); sliced(as) && !d.a.sliceExists(holdSlice(id)) {
 				// Runtime properties vanish on a reboot; the hold (its CDI spec) does not.
 				actions = append(actions, converge.Action{
 					Description: "restore the slice of " + id,
@@ -270,7 +304,7 @@ func (d *devicesConverger) Plan(ctx context.Context, desired []byte) ([]converge
 		actions = append(actions, converge.Action{
 			Description: "bind " + id,
 			Apply: func(ctx context.Context) error {
-				if limits := as.GetLimits(); limits != nil {
+				if limits := as.GetLimits(); sliced(as) {
 					if err := host.ApplySlice(ctx, holdSlice(id), sliceLimits(limits)); err != nil {
 						return fmt.Errorf("the slice of %s: %w", id, err)
 					}
@@ -424,7 +458,7 @@ func (d *devicesConverger) assignedDevices() map[string]bool {
 // runs in when the hold has limits, and the MPS pipe for slots when MPS runs.
 func holdEnv(as *agentv1.DeviceAssignment, atoms []atom, mps bool) []string {
 	env := []string{"BCD_ALLOCATION_ID=" + as.GetAllocationId()}
-	if as.GetLimits() != nil {
+	if sliced(as) {
 		env = append(env, "BCD_CGROUP_PARENT="+holdSlice(as.GetAllocationId()))
 	}
 	for _, a := range atoms {
@@ -447,7 +481,7 @@ func newCDISpec(as *agentv1.DeviceAssignment, generation uint64, atoms []atom, m
 		},
 		ContainerEdits: cdiEdits{Env: holdEnv(as, atoms, mps)},
 	}
-	if as.GetLimits() != nil {
+	if sliced(as) {
 		spec.Annotations[annotationCgroupParent] = holdSlice(as.GetAllocationId())
 	}
 	if as.GetBinding() == agentv1.Binding_BINDING_KUBERNETES {

@@ -364,7 +364,12 @@ events. It never drops a hold on its own.
   - MemoryMax, with MemoryHigh at 90% of it;
   - hugetlb limits.
 - The slice is created before the CDI spec (`bcd.dev/cgroup-parent`, `BCD_CGROUP_PARENT`) and
-  restored when it is missing. It is removed on release only once it is empty.
+  restored when it is missing. It is removed on release only once it is empty. Every pass,
+  including the 10-minute drift pass, tries again to stop a slice whose workload outlived its
+  release.
+- A `kubernetes` binding gets no slice. Its pods live in the kubelet's cgroups (`kubepods.slice`),
+  where the kubelet enforces their requests and limits. The booked limits still count in bcd's
+  host admission.
 - Slots get `CUDA_MPS_PIPE_DIRECTORY` when the MPS daemon runs.
 - A `kubernetes` binding is marked `bcd.dev/binding` for the device plugin and has no
   `NVIDIA_VISIBLE_DEVICES` of its own.

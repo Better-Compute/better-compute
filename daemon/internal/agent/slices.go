@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"os"
 	"path"
+	"path/filepath"
+	"sort"
+	"strings"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/helper"
@@ -58,6 +61,27 @@ func (h *RealHost) RemoveSlice(ctx context.Context, name string) error {
 		return nil
 	}
 	return slice.Remove(ctx, helper.ExecRunner, "", name)
+}
+
+// holdSliceNames lists the hold slices on the host (cgroup directories, or a fake root's records).
+func (a *Agent) holdSliceNames() []string {
+	dir, suffix := a.host.Path(fakeSliceDir), ".json"
+	if rh, ok := a.host.(*RealHost); ok && !rh.fakeRoot() {
+		dir, suffix = filepath.Dir(slice.Dir("", slice.Name("x"))), ""
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		name, ok := strings.CutSuffix(e.Name(), suffix)
+		if ok && slice.Check(name, slice.Limits{}) == nil {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // sliceExists reports whether a hold's slice is there: after a reboot (runtime properties gone, the

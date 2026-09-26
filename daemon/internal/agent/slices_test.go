@@ -7,6 +7,7 @@ import (
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/fakehw"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestAHoldWithLimitsRunsInItsSlice(t *testing.T) {
@@ -51,10 +52,37 @@ func TestAHoldWithLimitsRunsInItsSlice(t *testing.T) {
 		t.Fatalf("the slice was not restored: %v", err)
 	}
 
-	// Released: the (empty) slice goes with the hold.
+	// Released while a workload still runs in it: the slice stays, and every pass tries again until
+	// it is empty.
+	busy := h.host.Path(fakeSliceDir + "/bcd-alloc-alloc_1.slice.busy")
+	if err := os.WriteFile(busy, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	s.push(desired(3, &agentv1.NodeSpec{Devices: &agentv1.DevicesSection{}}))
 	converged(3)
+	if _, err := os.Stat(record); err != nil {
+		t.Fatalf("a busy slice was removed: %v", err)
+	}
+	if _, err := os.Stat(h.host.Path("/etc/cdi/bcd-alloc_1.json")); !os.IsNotExist(err) {
+		t.Fatalf("the hold outlived its release: %v", err)
+	}
+	_ = os.Remove(busy)
+	s.push(desired(4, &agentv1.NodeSpec{Devices: &agentv1.DevicesSection{}}))
+	converged(4)
 	if _, err := os.Stat(record); !os.IsNotExist(err) {
-		t.Fatalf("the slice outlived its hold: %v", err)
+		t.Fatalf("the emptied slice was left: %v", err)
+	}
+
+	// A Kubernetes binding's pods live in the kubelet's cgroups: no slice, no cgroup parent.
+	kube := proto.Clone(withHold).(*agentv1.NodeSpec)
+	kube.Devices.Assignments[0].AllocationId, kube.Devices.Assignments[0].Binding = "alloc_k", agentv1.Binding_BINDING_KUBERNETES
+	s.push(desired(5, kube))
+	converged(5)
+	if _, err := os.Stat(h.host.Path(fakeSliceDir + "/bcd-alloc-alloc_k.slice.json")); !os.IsNotExist(err) {
+		t.Fatalf("a Kubernetes binding got a slice: %v", err)
+	}
+	cdi, _ = os.ReadFile(h.host.Path("/etc/cdi/bcd-alloc_k.json"))
+	if len(cdi) == 0 || strings.Contains(string(cdi), "cgroup-parent") || strings.Contains(string(cdi), "BCD_CGROUP_PARENT") {
+		t.Fatalf("CDI spec = %s", cdi)
 	}
 }
