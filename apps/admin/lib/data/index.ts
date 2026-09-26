@@ -6,4 +6,5 @@ export * from './platform';
 // ── domain sources (one line each) ──
 export * from './fleet';
 export * from './fleet-health';
+export * from './fleet-actions';
 export * from './capacity';

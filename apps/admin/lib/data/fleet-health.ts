@@ -6,6 +6,7 @@
 // Cheap and pure: poolPulse + nodeStates per pool, memoized per 20-minute fault bucket.
 
 import { HOUR, MINUTE, noise } from './core';
+import { storeState } from './fleet-actions';
 import { nodeStates, poolPulse } from './platform';
 import { poolNodeId, poolNodePlacement, pools, sites, type Pool } from './topology';
 
@@ -16,8 +17,12 @@ export type NodeHold = 'failed' | 'rescue' | 'retiring';
 export interface NodeHealthInfo {
   health: NodeHealth;
   hold?: NodeHold;
-  /** Cordoned by an operator (simulated; operator actions in the admin overlay come on top). */
+  /** Cordoned (simulated cordons, plus cordons and drains operators made here by `now`). */
   cordoned: boolean;
+  /** An operator put it into maintenance. */
+  maintenance?: boolean;
+  /** An operator started a drain; work is moving off (or has). */
+  draining?: boolean;
   /** New reservations may land here. */
   schedulable: boolean;
 }
@@ -77,6 +82,18 @@ export function nodeHealth(nodeId: string, now: number, unit?: number): NodeHeal
   const health = poolHealth(ref.pool, now).get(nodeId) ?? 'ready';
   const top = unit ?? poolNodePlacement(ref.pool, ref.index).unit;
   const hold = nodeHold(nodeId, health, ref.metal, ref.pool, top);
-  const cordoned = simulatedCordon(nodeId, health, hold, now);
-  return { health, ...(hold ? { hold } : {}), cordoned, schedulable: health === 'ready' && !hold && !cordoned };
+  // Operator actions taken by `now` (lib/data/fleet-actions.ts), so capacity never places on a node an operator took out.
+  const override = storeState().nodes[nodeId];
+  const acted = override && (override.at ?? 0) <= now ? override : undefined;
+  const cordoned = acted?.cordoned ?? simulatedCordon(nodeId, health, hold, now);
+  const maintenance = acted?.maintenance ?? false;
+  const draining = acted?.drainAt !== undefined && acted.drainAt <= now;
+  return {
+    health,
+    ...(hold ? { hold } : {}),
+    cordoned,
+    ...(maintenance ? { maintenance } : {}),
+    ...(draining ? { draining } : {}),
+    schedulable: health === 'ready' && !hold && !cordoned && !maintenance && !draining,
+  };
 }

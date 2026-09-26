@@ -188,3 +188,16 @@ describe('watch describers', () => {
     expect(watchNode(snapshot.nodes[0]!.id, T0, { source: 'live' })).toBeNull();
   });
 });
+describe('nodeHealth with operator actions', () => {
+  it('takes a cordoned or drained node out of scheduling from the moment of the action', () => {
+    const node = simulateFleet(T0).nodes.find((each) => nodeHealth(each.id, T0, each.unit)!.schedulable && each.id !== 'n-fra1-h100-001')!;
+    fleetActions.drain([node.id], T0 + 5_000, 'test');
+    expect(nodeHealth(node.id, T0, node.unit)!.schedulable).toBe(true);
+    const after = nodeHealth(node.id, T0 + 6_000, node.unit)!;
+    expect(after.schedulable).toBe(false);
+    expect(after.cordoned).toBe(true);
+    expect(after.draining).toBe(true);
+    fleetActions.uncordon([node.id], T0 + 7_000);
+    expect(nodeHealth(node.id, T0 + 8_000, node.unit)!.schedulable).toBe(true);
+  });
+});
