@@ -42,6 +42,107 @@ type instancesConverger struct {
 	firewall string
 	// stale: the loaded table went missing (an external flush); the next pass loads it again.
 	stale atomic.Bool
+	// volumes is the host's volume store (runtime.VolumeDir), shared with the runtimes.
+	volumes *runtime.Volumes
+}
+
+// ensureVolumes creates and grows the section's volumes; it returns the ones that failed.
+func (c *instancesConverger) ensureVolumes(section *agentv1.InstancesSection) map[string]string {
+	failed := map[string]string{}
+	for _, hv := range section.GetVolumes() {
+		if err := c.volumes.Ensure(hv); err != nil {
+			failed[hv.GetVolumeId()] = err.Error()
+			c.a.log.Warn("volume not ensured", "volume", hv.GetVolumeId(), "err", err.Error())
+		}
+	}
+	return failed
+}
+
+// volumeRefusals are the instances whose volumes cannot be attached: one the section does not list,
+// one that failed, or one another running (or paused) instance has when either attachment is
+// read-write (a raw volume has one writer and no readers beside it). The first in spec order keeps
+// the volume.
+func volumeRefusals(section *agentv1.InstancesSection, failed map[string]string) map[string]string {
+	listed := map[string]bool{}
+	for _, v := range section.GetVolumes() {
+		listed[v.GetVolumeId()] = true
+	}
+	type user struct {
+		id string
+		rw bool
+	}
+	users := map[string][]user{}
+	out := map[string]string{}
+	for _, spec := range section.GetInstances() {
+		state := spec.GetDesiredState()
+		if state == agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED {
+			continue
+		}
+		active := state == agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING ||
+			state == agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_PAUSED
+		id := spec.GetInstanceId()
+	volumes:
+		for _, iv := range spec.GetVolumes() {
+			vid := iv.GetVolumeId()
+			switch {
+			case !listed[vid]:
+				out[id] = "volume " + vid + " is not on this host"
+			case failed[vid] != "":
+				out[id] = "volume " + vid + ": " + failed[vid]
+			case active:
+				for _, u := range users[vid] {
+					if u.rw {
+						out[id] = fmt.Sprintf("volume %s is attached read-write to %s", vid, u.id)
+						break
+					} else if !iv.GetReadOnly() {
+						out[id] = fmt.Sprintf("volume %s is attached to %s: a read-write attachment is exclusive", vid, u.id)
+						break
+					}
+				}
+			}
+			if out[id] != "" {
+				break volumes
+			}
+		}
+		if out[id] == "" && active {
+			for _, iv := range spec.GetVolumes() {
+				users[iv.GetVolumeId()] = append(users[iv.GetVolumeId()], user{id, !iv.GetReadOnly()})
+			}
+		}
+	}
+	return out
+}
+
+// collectVolumes destroys the stored volumes the section no longer lists that no instance still
+// attaches (an instance whose delete failed keeps its volumes).
+func (c *instancesConverger) collectVolumes(section *agentv1.InstancesSection, specErrors map[string]string) {
+	keep := map[string]bool{}
+	for _, v := range section.GetVolumes() {
+		keep[v.GetVolumeId()] = true
+	}
+	for _, spec := range section.GetInstances() {
+		deleted := spec.GetDesiredState() == agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED
+		if _, failed := specErrors[spec.GetInstanceId()]; !deleted || failed {
+			for _, iv := range spec.GetVolumes() {
+				keep[iv.GetVolumeId()] = true
+			}
+		}
+	}
+	ids, err := c.volumes.List()
+	if err != nil {
+		c.a.log.Warn("volumes not listed", "err", err.Error())
+		return
+	}
+	for _, id := range ids {
+		if keep[id] {
+			continue
+		}
+		if err := c.volumes.Destroy(id); err != nil {
+			c.a.log.Warn("volume not destroyed", "volume", id, "err", err.Error())
+			continue
+		}
+		c.a.log.Info("volume destroyed", "volume", id)
+	}
 }
 
 // enforceNetworkPolicies loads the instances' firewall (anti-spoofing and network policies) when it
@@ -163,6 +264,8 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 		}
 	}
 	specErrors := map[string]string{}
+	// Volumes exist (and have grown) before the instances that attach them are defined.
+	refusedVolumes := volumeRefusals(section, c.ensureVolumes(section))
 	// The rules go in before any domain starts: taps are matched by name, so they apply from the
 	// first frame.
 	unenforceable := c.enforceNetworkPolicies(ctx, section.GetInstances())
@@ -192,6 +295,16 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 		}
 		if msg, bad := unenforceable[id]; bad {
 			// Never running without its policy: a running domain stops.
+			specErrors[id] = msg
+			if exists && existing.State != runtime.StateStopped {
+				if err := r.SetState(ctx, id, runtime.StateStopped); err != nil {
+					specErrors[id] = msg + "; stopping it failed: " + err.Error()
+				}
+			}
+			continue
+		}
+		if msg, bad := refusedVolumes[id]; bad {
+			// A second writer (or a reader beside one) would corrupt the volume: it stops.
 			specErrors[id] = msg
 			if exists && existing.State != runtime.StateStopped {
 				if err := r.SetState(ctx, id, runtime.StateStopped); err != nil {
@@ -292,6 +405,7 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 		}
 	}
 	c.a.pruneRebinds(section.GetInstances())
+	c.collectVolumes(section, specErrors)
 	c.specErrors = specErrors
 	c.exhausted = exhausted
 	keep := map[string]bool{}

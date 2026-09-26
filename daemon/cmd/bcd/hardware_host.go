@@ -54,12 +54,14 @@ func newRuntimes(dataDir, _ string) []runtime.Runtime {
 		return "", false
 	}
 	// Each runtime whose tools are installed: libvirt-kvm (virsh) and cloud-hypervisor.
+	// One volume store for every runtime (the agent keeps the same directory).
+	volumes := &runtime.Volumes{Dir: runtime.VolumeDir(dataDir)}
 	var out []runtime.Runtime
 	if _, err := exec.LookPath("virsh"); err == nil {
-		out = append(out, &runtime.Libvirt{Dir: filepath.Join(dataDir, "libvirt"), GPUAddress: gpuAddress})
+		out = append(out, &runtime.Libvirt{Dir: filepath.Join(dataDir, "libvirt"), GPUAddress: gpuAddress, Volumes: volumes})
 	}
 	if _, err := exec.LookPath("cloud-hypervisor"); err == nil {
-		out = append(out, &runtime.CloudHypervisor{Dir: filepath.Join(dataDir, "cloud-hypervisor"), GPUAddress: gpuAddress})
+		out = append(out, &runtime.CloudHypervisor{Dir: filepath.Join(dataDir, "cloud-hypervisor"), GPUAddress: gpuAddress, Volumes: volumes})
 	}
 	return out
 }

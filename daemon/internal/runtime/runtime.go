@@ -113,6 +113,11 @@ type Restore struct {
 // state lives in the devices, which no VMM saves (a disk-only snapshot still works).
 var ErrMemorySnapshotWithGPUs = errors.New("an instance with passthrough GPUs cannot be snapshotted with its memory; snapshot its disk only")
 
+// ErrMemorySnapshotWithVolumes refuses a memory snapshot of an instance with a read-write volume:
+// the volume lives on (and changes) after the snapshot, and a guest restored with its old page cache
+// over the new blocks would corrupt its filesystem (a disk-only snapshot still works).
+var ErrMemorySnapshotWithVolumes = errors.New("an instance with a read-write volume cannot be snapshotted with its memory; snapshot its disk only")
+
 // ErrNoCapacity reports a start beyond the host's free vCPU or memory.
 var ErrNoCapacity = errors.New("not enough free vCPU or memory on this host")
 

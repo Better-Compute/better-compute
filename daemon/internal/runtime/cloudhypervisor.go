@@ -64,6 +64,8 @@ type CloudHypervisor struct {
 	// VFIO binds a passthrough GPU's IOMMU group to vfio-pci before start and releases it after
 	// destroy (tests replace it; default SysfsVFIO on the real sysfs).
 	VFIO VFIOBinder
+	// Volumes is the host's volume store (volumes.go); nil: instances with volumes are refused.
+	Volumes *Volumes
 	// HTTP downloads base images (https only).
 	HTTP *http.Client
 	// ShutdownTimeout bounds a graceful (ACPI) shutdown before the VM is stopped (default 60 s).
@@ -101,6 +103,10 @@ type chRecord struct {
 	// spec dropped a GPU meanwhile (its GPUs apply only at the next start).
 	GivenGroups []string `json:"givenGroups,omitempty"`
 	BoundAddrs  []string `json:"boundAddrs,omitempty"`
+	// Volumes are the spec's (volumes.go), bound into the VMM's unit; GivenVolumes the paths handed
+	// to the running VMM's user (read-write ones), which stop gives back.
+	Volumes      []AttachedVolume `json:"volumes,omitempty"`
+	GivenVolumes []string         `json:"givenVolumes,omitempty"`
 }
 
 // union adds b's strings to a's, once.
@@ -266,6 +272,18 @@ func (c *CloudHypervisor) vmConfig(spec *agentv1.InstanceSpec, dir string, overl
 		map[string]any{"id": "disk0", "path": filepath.Join(dir, "disk.qcow2"), "image_type": "Qcow2", "backing_files": overlay},
 		map[string]any{"id": "seed", "path": filepath.Join(dir, "seed.iso"), "readonly": true, "image_type": "Raw"},
 	}
+	// Volumes, in attach order; the guest finds each by its serial.
+	vols, err := c.Volumes.Attached(spec)
+	if err != nil {
+		return nil, err
+	}
+	for i, v := range vols {
+		if _, err := VolumeDisk(i); err != nil {
+			return nil, err
+		}
+		disks = append(disks, map[string]any{"id": fmt.Sprintf("vol%d", i), "path": v.Path, "readonly": v.ReadOnly,
+			"image_type": "Raw", "serial": v.Serial})
+	}
 	var nets []any
 	for i, nic := range spec.GetNics() {
 		// No tap name: the VMM gets the tap's fd (start).
@@ -336,6 +354,9 @@ func (c *CloudHypervisor) Ensure(ctx context.Context, spec *agentv1.InstanceSpec
 	// Checked before anything is created: a spec the host cannot apply exactly is refused whole.
 	placement, err := PlacementOf(spec)
 	if err != nil {
+		return err
+	}
+	if _, err := c.Volumes.Attached(spec); err != nil {
 		return err
 	}
 	dir := c.instanceDir(id)
@@ -411,6 +432,9 @@ func (c *CloudHypervisor) Ensure(ctx context.Context, spec *agentv1.InstanceSpec
 	r.VCPU, r.MemoryBytes, r.DiskBytes = spec.GetVcpu(), spec.GetMemoryBytes(), spec.GetDiskBytes()
 	r.Placement = placement
 	r.GPUs = append([]string(nil), spec.GetGpuDeviceIds()...)
+	if r.Volumes, err = c.Volumes.Attached(spec); err != nil {
+		return err
+	}
 	r.Addresses, r.MACs, r.Networks = nil, nil, nil
 	for _, n := range spec.GetNics() {
 		r.Addresses = append(r.Addresses, n.GetAddresses()...)
@@ -489,6 +513,13 @@ func (c *CloudHypervisor) unitProperties(r *chRecord) []string {
 	}
 	if r.Base != "" {
 		props = append(props, "BindReadOnlyPaths="+r.Base)
+	}
+	for _, v := range r.Volumes {
+		if v.ReadOnly {
+			props = append(props, "BindReadOnlyPaths="+v.Path)
+		} else {
+			props = append(props, "BindPaths="+v.Path, "ReadWritePaths="+v.Path)
+		}
 	}
 	if kvm, err := user.LookupGroup("kvm"); err == nil {
 		props = append(props, "SupplementaryGroups="+kvm.Gid)
@@ -732,6 +763,22 @@ func (c *CloudHypervisor) start(ctx context.Context, r *chRecord, paused bool) e
 	if groups, err := c.vfioGroups(r); err == nil {
 		r.GivenGroups = union(r.GivenGroups, groups)
 	}
+	// A read-write volume is the VMM user's while it runs (exclusive: the agent never attaches one
+	// read-write beside anything else); a read-only one stays root's, readable (its 0700 directory
+	// is closed to everyone the unit's bind mount does not reach).
+	for _, v := range r.Volumes {
+		uid, mode := 0, os.FileMode(0o644)
+		if !v.ReadOnly {
+			uid, mode = int(r.UID), 0o600
+			r.GivenVolumes = union(r.GivenVolumes, []string{v.Path})
+		}
+		if err := c.chown(v.Path, uid); err != nil {
+			return err
+		}
+		if err := os.Chmod(v.Path, mode); err != nil {
+			return err
+		}
+	}
 	if err := c.save(r); err != nil {
 		return err
 	}
@@ -868,8 +915,13 @@ func (c *CloudHypervisor) stop(ctx context.Context, r *chRecord) error {
 	for _, g := range union(r.GivenGroups, groups) {
 		_ = c.chown(g, 0)
 	}
-	if len(r.GivenGroups) > 0 {
-		r.GivenGroups = nil
+	// Its read-write volumes go back to root, closed again.
+	for _, p := range r.GivenVolumes {
+		_ = c.chown(p, 0)
+		_ = os.Chmod(p, 0o600)
+	}
+	if len(r.GivenGroups) > 0 || len(r.GivenVolumes) > 0 {
+		r.GivenGroups, r.GivenVolumes = nil, nil
 		_ = c.save(r)
 	}
 	return nil
@@ -944,6 +996,13 @@ func (c *CloudHypervisor) Snapshot(ctx context.Context, id string, includeMemory
 	if includeMemory && len(r.GPUs) > 0 {
 		// A VFIO device's state is the GPU's own: no VMM captures it.
 		return "", ErrMemorySnapshotWithGPUs
+	}
+	if includeMemory {
+		for _, v := range r.Volumes {
+			if !v.ReadOnly {
+				return "", ErrMemorySnapshotWithVolumes
+			}
+		}
 	}
 	if err := c.checkDisk(r); err != nil {
 		return "", err

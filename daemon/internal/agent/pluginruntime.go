@@ -30,6 +30,9 @@ import (
 type PluginRuntime struct {
 	ID   string
 	Host DriverHost
+	// Volumes is the host's volume store (the agent sets it): a plugin is given each attached
+	// volume's path and serial.
+	Volumes *runtime.Volumes
 
 	mu sync.Mutex
 	// specs are the instances' last specs (core JSON shape), for SetState; firstBoot holds a new
@@ -74,6 +77,15 @@ type coreInstanceSpec struct {
 	IdentityRebindRef string         `json:"identityRebindRef,omitempty"`
 	SSHFromHostOnly   bool           `json:"sshFromHostOnly,omitempty"`
 	Placement         *corePlacement `json:"placement,omitempty"`
+	// Persistent volumes in attach order (raw files on this host; the guest finds each by serial).
+	Volumes []coreVolume `json:"volumes,omitempty"`
+}
+
+type coreVolume struct {
+	ID       string `json:"id"`
+	Path     string `json:"path"`
+	Serial   string `json:"serial"`
+	ReadOnly bool   `json:"readOnly,omitempty"`
 }
 
 type corePlacement struct {
@@ -233,6 +245,13 @@ func (a *Agent) missingTaps(spec *agentv1.InstanceSpec) []string {
 // applies it: the plugin's apply both defines and starts.
 func (p *PluginRuntime) Ensure(_ context.Context, spec *agentv1.InstanceSpec, userData []byte, restore *runtime.Restore) error {
 	c := coreSpecOf(spec)
+	vols, err := p.Volumes.Attached(spec)
+	if err != nil {
+		return err
+	}
+	for _, v := range vols {
+		c.Volumes = append(c.Volumes, coreVolume{ID: v.ID, Path: v.Path, Serial: v.Serial, ReadOnly: v.ReadOnly})
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.specs == nil {

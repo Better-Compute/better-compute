@@ -48,6 +48,8 @@ type Libvirt struct {
 	Exec func(ctx context.Context, name string, args ...string) ([]byte, error)
 	// GPUAddress maps a GPU device id to its PCI address ("0000:3b:00.0") for VFIO.
 	GPUAddress func(id string) (string, bool)
+	// Volumes is the host's volume store (volumes.go); nil: instances with volumes are refused.
+	Volumes *Volumes
 	// HTTP downloads base images (https only; default a client without a total timeout).
 	HTTP *http.Client
 	// ShutdownTimeout bounds a graceful shutdown before the domain is destroyed (default 60 s).
@@ -214,6 +216,7 @@ type diskXML struct {
 		Bus string `xml:"bus,attr"`
 	} `xml:"target"`
 	ReadOnly *struct{} `xml:"readonly"`
+	Serial   string    `xml:"serial,omitempty"`
 }
 
 type interfaceXML struct {
@@ -278,6 +281,25 @@ func (l *Libvirt) domainFor(spec *agentv1.InstanceSpec, dir, cdrom string, meta 
 	disk.Source.File = filepath.Join(dir, "disk.qcow2")
 	disk.Target.Dev, disk.Target.Bus = "vda", "virtio"
 	d.Devices.Disks = append(d.Devices.Disks, disk)
+	// Volumes after the root disk, in attach order; the guest finds each by its serial.
+	vols, err := l.Volumes.Attached(spec)
+	if err != nil {
+		return nil, err
+	}
+	for i, v := range vols {
+		dev, err := VolumeDisk(i)
+		if err != nil {
+			return nil, err
+		}
+		vd := diskXML{Type: "file", Device: "disk", Serial: v.Serial}
+		vd.Driver.Name, vd.Driver.Type = "qemu", "raw"
+		vd.Source.File = v.Path
+		vd.Target.Dev, vd.Target.Bus = dev, "virtio"
+		if v.ReadOnly {
+			vd.ReadOnly = &struct{}{}
+		}
+		d.Devices.Disks = append(d.Devices.Disks, vd)
+	}
 	cd := func(file, dev string) {
 		c := diskXML{Type: "file", Device: "cdrom", ReadOnly: &struct{}{}}
 		c.Driver.Name, c.Driver.Type = "qemu", "raw"
@@ -447,6 +469,10 @@ func (l *Libvirt) Ensure(ctx context.Context, spec *agentv1.InstanceSpec, userDa
 	id := spec.GetInstanceId()
 	if !instanceID.MatchString(id) {
 		return fmt.Errorf("instance id %q", id)
+	}
+	// Checked before anything is created.
+	if _, err := l.Volumes.Attached(spec); err != nil {
+		return err
 	}
 	dir := l.instanceDir(id)
 	exists, managed, meta := l.managed(ctx, id)
@@ -812,6 +838,12 @@ func (l *Libvirt) Snapshot(ctx context.Context, id string, includeMemory bool, c
 			var x domainXML
 			if xml.Unmarshal(raw, &x) == nil && len(x.Devices.Hostdevs) > 0 {
 				return "", ErrMemorySnapshotWithGPUs
+			}
+			for _, disk := range x.Devices.Disks {
+				// A writable disk beside the root (vda) and the rebind disk (vdz): a volume.
+				if disk.Device == "disk" && disk.ReadOnly == nil && disk.Target.Dev != "vda" && disk.Target.Dev != "vdz" {
+					return "", ErrMemorySnapshotWithVolumes
+				}
 			}
 		}
 	}

@@ -293,7 +293,12 @@ func New(o Options) (*Agent, error) {
 		return nil, err
 	}
 	a.devices = &devicesConverger{a: a}
-	a.instances = &instancesConverger{a: a}
+	a.instances = &instancesConverger{a: a, volumes: &runtime.Volumes{Dir: runtime.VolumeDir(o.DataDir)}}
+	for _, r := range o.Runtimes {
+		if p, ok := r.(*PluginRuntime); ok && p.Volumes == nil {
+			p.Volumes = a.instances.volumes
+		}
+	}
 	a.boot = newBootEntries(o.DataDir)
 	a.cache = newImageCache(filepath.Join(o.DataDir, "cache"))
 	a.cache.changed = a.refreshSections
