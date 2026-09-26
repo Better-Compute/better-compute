@@ -79,6 +79,13 @@ export const builtinConfigUnits: readonly ConfigUnitDefinition[] = Object.freeze
     }) as Manifest<Record<string, Json>>,
   },
   {
+    name: 'cpu',
+    description:
+      'Host CPUs: the cpufreq governor (live), and CPUs isolated from the kernel scheduler for pinned VMs and holds (isolcpus/nohz_full/rcu_nocbs, effective after a reboot)',
+    // Validated by validateCpu: the cpulist needs more than a pattern.
+    settings: manifest({}) as Manifest<Record<string, Json>>,
+  },
+  {
     name: 'kernel-modules',
     description:
       'Kernel modules loaded at boot and now (modules-load.d), with their options (modprobe.d): kvm_intel/kvm_amd, vhost_net and tun for VM hosts',
@@ -151,6 +158,33 @@ function labelKeyProblem(key: string): string | undefined {
   // The kubelet refuses to set most of these itself, and the rest belong to the cluster.
   if (prefix !== undefined && reservedPrefix.test(prefix)) return 'uses a prefix reserved for Kubernetes (kubernetes.io, k8s.io)';
   return undefined;
+}
+
+const governors = ['performance', 'schedutil', 'ondemand', 'powersave'];
+const cpulist = /^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$/;
+
+/** `cpu` settings: `governor`, and `isolate` (a kernel cpulist that never includes CPU 0, the housekeeping CPU). */
+function validateCpu(settings: Record<string, Json>): Record<string, Json> {
+  const bad = (message: string): never => {
+    throw new ComputeError('INVALID_INPUT', `hostConfig.cpu.${message}`);
+  };
+  for (const key of Object.keys(settings)) if (key !== 'governor' && key !== 'isolate') bad(`${key} is not a setting (governor, isolate)`);
+  const out: Record<string, Json> = {};
+  if (settings.governor !== undefined) {
+    if (typeof settings.governor !== 'string' || !governors.includes(settings.governor)) bad(`governor must be one of ${governors.join(', ')}`);
+    out.governor = settings.governor;
+  }
+  if (settings.isolate !== undefined) {
+    const list = settings.isolate;
+    if (typeof list !== 'string' || list.length > 256 || !cpulist.test(list)) bad('isolate must be a cpulist such as 4-63,68-127 (at most 256 characters)');
+    for (const part of (list as string).split(',')) {
+      const [from, to = from] = part.split('-').map(Number);
+      if (to! < from!) bad(`isolate: ${part} is a descending range`);
+      if (from === 0) bad('isolate must not include CPU 0, which the kernel keeps for housekeeping');
+    }
+    out.isolate = list;
+  }
+  return out;
 }
 
 const moduleName = /^[a-z0-9_-]{1,64}$/;
@@ -254,6 +288,7 @@ async function validateUnit(unit: ConfigUnitDefinition, name: string, settings: 
   }
   if (name === 'k8s-join') return validateK8sJoin(settings);
   if (name === 'kernel-modules') return validateKernelModules(settings);
+  if (name === 'cpu') return validateCpu(settings);
   const result = await unit.settings['~standard'].validate(settings);
   if ('issues' in result && result.issues)
     throw new ComputeError(
@@ -307,6 +342,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> => !!value &
  * - `policy.hugepages` { size: '2Mi' | '1Gi', count, perNuma? } (core PoolPolicy) → `hugepages`
  *   { pages2m | pages1g: count, perNuma };
  * - `policy.kernelModules` { load?, options? } → `kernel-modules`;
+ * - `policy.cpu` { governor?, isolate? } → `cpu`;
  * - a pool shared by `mps` or `timeslice` → `gpu-sharing` { mode, replicas: `policy.sharing.replicas`,
  *   default 10 for MPS and 4 for time-slicing }.
  * They win over a profile's `hostConfig` for the same unit: the pool's operator decides cluster
@@ -361,6 +397,10 @@ export function poolHostConfig(
       [size === '2Mi' ? 'pages2m' : 'pages1g']: count as Json,
       ...(perNuma !== undefined ? { perNuma: perNuma as Json } : {}),
     };
+  }
+  if (policy?.cpu !== undefined) {
+    if (!isRecord(policy.cpu)) throw new ComputeError('INVALID_INPUT', 'policy.cpu must be an object');
+    config.cpu = { ...(policy.cpu as Record<string, Json>) };
   }
   if (policy?.kernelModules !== undefined) {
     if (!isRecord(policy.kernelModules)) throw new ComputeError('INVALID_INPUT', 'policy.kernelModules must be an object');

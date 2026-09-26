@@ -121,6 +121,18 @@ describe('hugepages, kernel-modules and k8s-join (PLAN.md §3.8)', () => {
     expect(poolHostConfig({}, 'mig')['gpu-sharing']).toBeUndefined();
   });
 
+  it('validates the cpu unit: a governor, and isolated CPUs that never include CPU 0', async () => {
+    expect(await resolveHostConfig({ cpu: { governor: 'performance', isolate: '4-63,68-127' } }, { labels: {} })).toEqual({
+      config: { cpu: { governor: 'performance', isolate: '4-63,68-127' } },
+    });
+    await expect(resolveHostConfig({ cpu: { isolate: '0-7' } }, { labels: {} })).rejects.toThrow(/CPU 0/);
+    await expect(resolveHostConfig({ cpu: { isolate: '8-4' } }, { labels: {} })).rejects.toThrow(/descending/);
+    await expect(resolveHostConfig({ cpu: { isolate: '4-7 nohz_full=1' } }, { labels: {} })).rejects.toThrow(/cpulist/);
+    await expect(resolveHostConfig({ cpu: { governor: 'turbo' } }, { labels: {} })).rejects.toThrow(/governor/);
+    expect(poolHostConfig({ cpu: { governor: 'performance' } }).cpu).toEqual({ governor: 'performance' });
+    await expect(validatePoolHostPolicy({ cpu: { isolate: '0,2' } })).rejects.toThrow(/CPU 0/);
+  });
+
   it('never joins a hosted pool (bcd as a DaemonSet inside the cluster already)', async () => {
     expect(poolHostConfig({ kubernetes: { platformOperated: true } })).toEqual({});
     await expect(validatePoolHostPolicy({ kubernetes: { platformOperated: 'yes' } })).rejects.toThrow(/platformOperated/);

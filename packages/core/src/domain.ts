@@ -112,6 +112,11 @@ export interface PoolPolicy {
   /** (v1.1 §3.8) Hugepage pools the `hugepages` config unit reserves on each host (per NUMA node when `perNuma`). */
   hugepages?: { size: '2Mi' | '1Gi'; count: number; perNuma?: boolean };
   /**
+   * (v1.1 §3.8) The `cpu` config unit on each host: the cpufreq governor, and CPUs isolated from the kernel
+   * scheduler (cpulist, never CPU 0; effective after a reboot) that pinned VMs and holds book first.
+   */
+  cpu?: { governor?: 'performance' | 'schedutil' | 'ondemand' | 'powersave'; isolate?: string };
+  /**
    * (v1.1 §3.8) The pool's machines join this Kubernetes cluster (the `k8s-join` config unit), and
    * reservations may use `binding: 'kubernetes'`: their devices go to the kubelet through bcd's device
    * plugin, and only those. `joinTokenRef` is a `secret://` ref of a kubeadm bootstrap token.
