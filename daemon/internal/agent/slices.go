@@ -36,9 +36,7 @@ func (h *RealHost) ApplySlice(ctx context.Context, name string, limits slice.Lim
 	if err := slice.Check(name, limits); err != nil {
 		return err
 	}
-	if h.Helper != nil {
-		return h.Helper.ApplySlice(ctx, name, limits)
-	}
+	// A simulated host (fakehw) has no cgroups of its own, under the helper too: a record.
 	if h.fakeRoot() {
 		raw, err := json.Marshal(limits)
 		if err != nil {
@@ -46,19 +44,22 @@ func (h *RealHost) ApplySlice(ctx context.Context, name string, limits slice.Lim
 		}
 		return writeFile(h.Path(path.Join(fakeSliceDir, name+".json")), raw, 0o644)
 	}
+	if h.Helper != nil {
+		return h.Helper.ApplySlice(ctx, name, limits)
+	}
 	return slice.Apply(ctx, helper.ExecRunner, "", name, limits)
 }
 
 // RemoveSlice stops a hold's slice once it is empty (slice.ErrBusy while a workload still runs).
 func (h *RealHost) RemoveSlice(ctx context.Context, name string) error {
-	if h.Helper != nil {
-		return h.Helper.RemoveSlice(ctx, name)
-	}
 	if h.fakeRoot() {
 		if err := os.Remove(h.Path(path.Join(fakeSliceDir, name+".json"))); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		return nil
+	}
+	if h.Helper != nil {
+		return h.Helper.RemoveSlice(ctx, name)
 	}
 	return slice.Remove(ctx, helper.ExecRunner, "", name)
 }
