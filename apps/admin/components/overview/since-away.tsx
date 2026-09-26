@@ -3,7 +3,8 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { RiCloseLine, RiHistoryLine } from 'react-icons/ri';
-import { activity, attention, capacityTotals, fleetPulse, fmtDuration, fmtNum, fmtPct, fmtStamp, HOUR, MINUTE } from '@/lib/data';
+import { activity, capacityTotals, fleetPulse, fmtDuration, fmtNum, fmtPct, fmtStamp, HOUR, MINUTE } from '@/lib/data';
+import { collectAttention } from '@/lib/modules';
 import { useScope, useWorkspace } from '@/components/shell/workspace';
 import { SeverityIcon } from '@/components/ui/signal';
 import { cx } from '@/utils/cx';
@@ -58,7 +59,7 @@ export function SinceAway() {
     const after = fleetPulse(now, scope);
     const gpuBefore = capacityTotals(since, scope).gpus;
     const gpuAfter = capacityTotals(now, scope).gpus;
-    const opened = attention(now, scope).filter((item) => item.at > since && item.severity !== 'info');
+    const opened = collectAttention(now, scope).filter((item) => item.at > since && item.severity !== 'info');
     const events = activity(now, 400, scope).filter((event) => event.at > since);
     return {
       now,

@@ -2,8 +2,8 @@
 
 import Link from 'next/link';
 import type { ReactNode } from 'react';
-import { attention, controlPlane, fmtDuration, fmtNum } from '@/lib/data';
-import { modules } from '@/lib/modules';
+import { controlPlane, fmtDuration, fmtNum } from '@/lib/data';
+import { collectAttention, modules } from '@/lib/modules';
 import { Led } from '@/components/ui/signal';
 import { WidgetBoundary } from '@/components/widgets/widget-frame';
 import { cx } from '@/utils/cx';
@@ -61,7 +61,7 @@ export function StatusBar() {
   const { source, live, now, wallNow, density, setDensity } = useWorkspace();
   const peek = usePeek();
   const components = useLive((t) => controlPlane(t), { bucketMs: 5_000 });
-  const items = useLive((t, scope) => attention(t, scope), { bucketMs: 10_000 });
+  const items = useLive((t, scope) => collectAttention(t, scope), { bucketMs: 10_000 });
   const acks = useAcks();
   const open = items.filter((item) => !acks.has(item.id));
   const critical = open.filter((item) => item.severity === 'critical').length;

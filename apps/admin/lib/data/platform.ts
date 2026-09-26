@@ -268,6 +268,8 @@ export interface AttentionItem {
   subject: string;
 }
 
+// Platform-level placeholders. Capacity items (quota pressure, forecasts, dead-lettered usage) come from the
+// capacity module's own `attention`, computed from its data; fleet items move there as the fleet module adds its.
 const attentionTemplates: ((key: string, t: number) => Omit<AttentionItem, 'id' | 'at'>)[] = [
   (key) => {
     const pool = pick(pools.filter((p) => p.kind === 'gpu'), key);
@@ -279,18 +281,6 @@ const attentionTemplates: ((key: string, t: number) => Omit<AttentionItem, 'id' 
       source: 'fleet',
       href: `/nodes/${node}`,
       subject: `node/${node}`,
-    };
-  },
-  (key) => {
-    const tenant = pick(tenants.slice(1), key);
-    const pool = pick(pools, key, 2);
-    return {
-      severity: 'warning',
-      title: `${tenant.name} at 94% of quota`,
-      detail: `${pool.short} in ${pool.siteId}: queued reservations will wait on QUOTA_EXCEEDED.`,
-      source: 'capacity',
-      href: `/quotas`,
-      subject: `tenant/${tenant.id}`,
     };
   },
   (key) => ({
@@ -319,25 +309,6 @@ const attentionTemplates: ((key: string, t: number) => Omit<AttentionItem, 'id' 
     source: 'fleet',
     href: '/rollouts',
     subject: 'rollout/bcd',
-  }),
-  (key) => {
-    const pool = pick(pools.filter((p) => p.kind === 'gpu'), key, 6);
-    return {
-      severity: 'info',
-      title: `${pool.short} pool forecast: full in ~${6 + Math.floor(noise(key, 7) * 30)}h`,
-      detail: `Booked-ahead demand in ${pool.siteId} exceeds free capacity by Friday.`,
-      source: 'capacity',
-      href: `/pools/${pool.id}`,
-      subject: `pool/${pool.id}`,
-    };
-  },
-  (key) => ({
-    severity: 'critical',
-    title: `${1 + Math.floor(noise(key, 8) * 3)} usage windows dead-lettered`,
-    detail: 'Billing refused the windows; spend is under-reported until someone re-drives them.',
-    source: 'capacity',
-    href: '/usage',
-    subject: 'usage/dead-letter',
   }),
   (key) => ({
     severity: 'info',

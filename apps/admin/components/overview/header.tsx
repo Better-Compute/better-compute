@@ -1,7 +1,8 @@
 'use client';
 
 import { RiDashboard3Line } from 'react-icons/ri';
-import { attention, capacityTotals, fmtNum, fmtPct, siteById, topologyTotals } from '@/lib/data';
+import { capacityTotals, fmtNum, fmtPct, siteById, topologyTotals } from '@/lib/data';
+import { collectAttention } from '@/lib/modules';
 import { useLive, useWorkspace, RANGES } from '@/components/shell/workspace';
 import { PageHeader } from '@/components/ui/panel';
 import { Tag } from '@/components/ui/signal';
@@ -11,7 +12,7 @@ export function OverviewHeader() {
   const { siteId, range, source } = useWorkspace();
   const capacity = useLive((now, scope) => capacityTotals(now, scope), { bucketMs: 15_000 });
   const pulse = { gpuUtilization: capacity.gpus.utilization, gpus: { available: capacity.gpus.freeNow } };
-  const items = useLive((now, scope) => attention(now, scope), { bucketMs: 10_000 });
+  const items = useLive((now, scope) => collectAttention(now, scope), { bucketMs: 10_000 });
   const totals = topologyTotals(siteId ? { siteId } : undefined);
   const critical = items.filter((i) => i.severity === 'critical').length;
   const site = siteId ? siteById(siteId) : undefined;

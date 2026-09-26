@@ -1,5 +1,6 @@
 import type { ComponentType } from 'react';
 import type { IconType } from 'react-icons';
+import { attention as platformAttention, type AttentionItem } from '@/lib/data/platform';
 
 // The admin panel is a set of modules. Each one contributes navigation, dashboard widgets and command-palette
 // commands through one descriptor, and owns its pages under app/(admin)/<route>/. The shell, the Overview grid
@@ -103,6 +104,11 @@ export interface AdminModule {
   peeks?: Record<string, PeekDef>;
   /** Small live readouts for the status bar at the bottom of every page (render one compact inline item). */
   status?: ComponentType[];
+  /**
+   * Items that need an operator, computed from the module's own data at `now` (pure: time travel calls it for
+   * past moments). Merged into the bell, the Needs attention page and the Overview queue.
+   */
+  attention?: (now: number, scope: { siteId?: string }) => AttentionItem[];
 }
 
 /** Sidebar sections, top to bottom. Unknown groups sort after these, alphabetically. */
@@ -151,6 +157,26 @@ export function searchAll(query: string, context: { now: number; siteId?: string
       return [];
     }
   });
+}
+
+const severityRank = { critical: 0, warning: 1, info: 2 } as const;
+
+/**
+ * Everything that needs an operator at `now`: the platform's own items plus every module's `attention`,
+ * most severe first, newest first within a severity. A failing module is skipped.
+ */
+export function collectAttention(now: number, scope: { siteId?: string } = {}): AttentionItem[] {
+  const items = [
+    ...platformAttention(now, scope),
+    ...modules.flatMap((module) => {
+      try {
+        return module.attention?.(now, scope) ?? [];
+      } catch {
+        return [];
+      }
+    }),
+  ];
+  return items.sort((a, b) => severityRank[a.severity] - severityRank[b.severity] || b.at - a.at);
 }
 
 /** The nav item a path belongs to: the longest href that prefixes it. */

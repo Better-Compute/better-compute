@@ -2,24 +2,8 @@
 
 import Link from 'next/link';
 import { useMemo, useState } from 'react';
-import {
-  activity,
-  attention,
-  capacityTotals,
-  controlPlane,
-  fleetPulse,
-  fmtClock,
-  fmtDuration,
-  fmtMoney,
-  fmtNum,
-  fmtPct,
-  fmtRelative,
-  nodeStates,
-  pulseSeries,
-  sites,
-  type NodeState,
-} from '@/lib/data';
-import type { WidgetProps } from '@/lib/modules';
+import { activity, capacityTotals, controlPlane, fleetPulse, fmtClock, fmtDuration, fmtMoney, fmtNum, fmtPct, fmtRelative, nodeStates, pulseSeries, sites, type NodeState } from '@/lib/data';
+import { collectAttention, type WidgetProps } from '@/lib/modules';
 import { useLive, useWorkspace } from '@/components/shell/workspace';
 import { useFeedback } from '@/components/ui/feedback';
 import { useAcks } from '@/components/shell/pins';
@@ -157,7 +141,7 @@ export function PulseChart({ size, settings }: WidgetProps) {
 
 /** The operator's queue: what needs a person, most severe first. */
 export function AttentionQueue() {
-  const items = useLive((now, scope) => attention(now, scope), { bucketMs: 10_000 });
+  const items = useLive((now, scope) => collectAttention(now, scope), { bucketMs: 10_000 });
   const { now } = useWorkspace();
   const acks = useAcks();
   const { toast } = useFeedback();

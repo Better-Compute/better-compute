@@ -11,8 +11,8 @@ import {
   RiSearchLine,
   RiTimeLine,
 } from 'react-icons/ri';
-import { attention, fmtRelative, sites } from '@/lib/data';
-import { navForPath } from '@/lib/modules';
+import { fmtRelative, sites } from '@/lib/data';
+import { collectAttention, navForPath } from '@/lib/modules';
 import { Select } from '@/components/ui/overlay';
 import { SeverityIcon } from '@/components/ui/signal';
 import { cx } from '@/utils/cx';
@@ -99,7 +99,7 @@ export function Topbar({ onOpenPalette, onOpenNav }: { onOpenPalette(): void; on
 }
 
 function AttentionBell() {
-  const all = useLive((now, scope) => attention(now, scope), { bucketMs: 10_000 });
+  const all = useLive((now, scope) => collectAttention(now, scope), { bucketMs: 10_000 });
   const acks = useAcks();
   const items = all.filter((item) => !acks.has(item.id));
   const { now } = useWorkspace();

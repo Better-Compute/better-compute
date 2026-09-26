@@ -4,7 +4,8 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMemo } from 'react';
 import { RiAlarmWarningLine, RiCheckDoubleLine, RiCheckLine, RiArrowGoBackLine } from 'react-icons/ri';
-import { attention, fmtRelative, fmtStamp, HOUR, type AttentionItem } from '@/lib/data';
+import { fmtRelative, fmtStamp, HOUR, type AttentionItem } from '@/lib/data';
+import { collectAttention } from '@/lib/modules';
 import { Button } from '@/components/base/buttons/button';
 import { usePageCommands } from '@/components/shell/page-commands';
 import { useAcks } from '@/components/shell/pins';
@@ -17,7 +18,8 @@ import { Stat } from '@/components/ui/stat';
 
 type Row = AttentionItem & { state: 'open' | 'acknowledged' | 'resolved' };
 
-const LOOKBACK = [1, 2, 4, 6, 9, 12, 18, 24];
+// Few lookbacks: module attention reads their data sources (tens of ms per call).
+const LOOKBACK = [1, 3, 8, 24];
 
 /** The operator queue as a table: open, acknowledged and resolved in the last day, with bulk acknowledge. */
 export function AttentionPage() {
@@ -25,11 +27,11 @@ export function AttentionPage() {
   const { now } = useWorkspace();
   const acks = useAcks();
   const { toast } = useFeedback();
-  const current = useLive((t, scope) => attention(t, scope), { bucketMs: 10_000 });
+  const current = useLive((t, scope) => collectAttention(t, scope), { bucketMs: 10_000 });
   const past = useLive(
     (t, scope) => {
       const seen = new Map<string, AttentionItem>();
-      for (const hours of LOOKBACK) for (const item of attention(t - hours * HOUR, scope)) if (!seen.has(item.id)) seen.set(item.id, item);
+      for (const hours of LOOKBACK) for (const item of collectAttention(t - hours * HOUR, scope)) if (!seen.has(item.id)) seen.set(item.id, item);
       return [...seen.values()];
     },
     { bucketMs: 5 * 60_000 },
