@@ -25,6 +25,9 @@ export const daemonNodeConditions: Readonly<Record<string, { noSchedule: boolean
   ForeignGpuExposure: { noSchedule: false },
   PodResourcesUnavailable: { noSchedule: false },
   KubernetesReleased: { noSchedule: false },
+  // The pool's taints changed after the Node registered (NodeRestriction forbids the kubelet to change them): the
+  // message carries the kubectl taint command a cluster admin runs.
+  KubernetesTaintsDrift: { noSchedule: false },
   // Not a fault: the host section is observed only ([host] units = false; the GPU operator owns
   // the host). Operators see it on the node; capacity books from the inventory alone.
   HostManagedExternally: { noSchedule: false },
