@@ -300,6 +300,14 @@ does, so a FakeDaemon VPS host can stand in for bcd in volume tests:
   guests wrote, reserved defaults to bcd's 5% of the total with a 2 GiB floor, committed is the sum of the sizes,
   and outstanding the sum of size minus written.
 
+**Host admission** (6922553). A start the `FakeHypervisor` has no free vCPU or memory for is no longer an instance
+failure. Like [bcd's host admission](/docs/daemon/delivery#instances) (`agent/admission.go`), the domain stays
+`stopped` with a message starting `ResourcesExhausted:` (the prefix is exported as `RESOURCES_EXHAUSTED`), and the
+section is `PROGRESSING` with reason `Retrying` and the message `ResourcesExhausted: this host cannot start <ids>
+now`, unless another instance failed in the same pass (then it is `FAILED`, `InstanceFailed`). The next pass tries
+the start again. That is the report vps turns into `HostResourcesExhausted` and a re-placement (see
+[hosts that cannot start an instance](/docs/guides/vps/instances#hosts-that-cannot-start-an-instance)).
+
 `tests/testing-daemon-instances.test.ts` has the unit test.
 
 **A VPS host under `bcd helper`** (1c9684a). The FakeDaemon plays the control-plane side of a bcd that runs
@@ -456,6 +464,7 @@ sockets. Only `TestRealKernel` touches a real kernel.
 | `cmd/bcd` `TestResourceChecks`, `TestHelperRuntimeChecks` | `bcd doctor`'s cgroup, huge page, `vfio-pci` and systemd checks (ab26e87), and the `libvirt` and `cloud-hypervisor` checks under the helper: the node out of the `libvirt` group, `dynamic_ownership = 0` and QEMU's user in the node's group (ed3c7d2), and `cloud-hypervisor` warning without `[helper] instance_bridges` (7fe74a1) |
 | `cmd/bcd` `TestAnUnprivilegedNodesRuntimes`, `internal/helper` `ch_test.go`, `internal/runtime` `TestCloudHypervisorUnderTheHelper`, `TestCHRecordRefusals` | `cloud-hypervisor` under the helper against fakes (d86fcbe, 7fe74a1, 94843ec): both runtimes kept for an unprivileged node, taps only of bcd's names on allowed bridges, a launch never taking another running unit's uid, VFIO only for whole groups of this host's GPUs and never a group another running VMM's user owns, root's checks of the instance record; since 1c9684a the running domain's live usage (CPU time, memory, tap counters) read from its cgroup and taps as the node, with no `ch.*` operation |
 | `internal/agent` `TestNodeKeyInTheTPM`, `internal/tpm` `TestNodeKey`, `cmd/bcd` `TestUserCanOpen` | The node key in `tpmsim` (965c14d, 50e18f9, 0ba2a79): a join stores only the record, the key loads again, node statements verify under the certificate's key and `kid`, renewal makes the next key in the TPM (and moves a file-key node there), no TPM means no load; SHA-256 and -384 signatures, a CSR, `TPM2_Certify` by the AK; whether the helper's user can open the TPM device |
+| `internal/agent` `TestRenewCertifiedByTheAK` | A certificate naming the TPM's AK (`urn:bc:tpm-ak:`) renews twice with the next key made in `tpmsim` and certified by that AK over `sha256(csr)` in `key_attestation`; with no TPM, or another TPM's AK, the renewal fails before any request, never with a file key (d94f1f3). `tests/server-join-tpm-renew.test.ts` is the control-plane side: the statement carried through renewal and every refusal. See [renewing a TPM-held key](/docs/guides/nodes/attestation#renewing-a-tpm-held-key) |
 | `internal/agent` `TestResolveAtomNamesParentsAndWhatTheDriverSees`, `TestHoldConflictsAcrossWholeGPUsPartsAndVMs`, `TestCDISpecOfPartsAndLimits` | MIG and slot atoms resolved against the inventory, parent-aware conflicts and the VM passthrough guard, CDI names without `/`, the slice annotation and env, one `NVIDIA_VISIBLE_DEVICES` per hold (46a61db, d02ba4f) |
 | `internal/slice`, `internal/agent` slice tests | The hold slice's systemd properties and hugetlb limits, the name and cpulist checks, removal only once empty (1d03c28, 260e33c) |
 | `internal/kube` `TestJoinFromBareHost`, `TestJoinRefusesAnotherCluster`, `TestJoinSettingsAreCheckedAgain`, `TestJoinUnderHelper`, `TestContainerdImport`, `TestJoinConfigurationV1beta3` | The `k8s-join` unit against `FakeSystem` (88ecb07) |
@@ -555,7 +564,10 @@ the resolved pool and bound to `sha256(EK)` in `node_bindings`, `node.key` holdi
 record, the node key certified by the TPM's AK so that both joins' `node.joined` events say `nodeKey: 'tpm'` (cf24876;
 the attestor keeps its default `nodeKey: 'certified'`), a rejoin as the same node after the identity is removed (a
 reinstall), `already joined` on a further run,
-and `bcd node`, whose session and statements are signed in the TPM, adopted on that identity. Its wire format is pinned in both directions without a stack too: bcd's `TestTSContract`
+and `bcd node`, whose session and statements are signed in the TPM, adopted on that identity. Since d94f1f3 it also
+checks that the certificate names the TPM's AK (`urn:bc:tpm-ak:`), and that `bcd node` (with `BCD_RENEW_AFTER=3s`)
+renews with the AK certifying the next key: one more `node_certs` row, still carrying the statement, and `node.key`
+still a TPM record. Its wire format is pinned in both directions without a stack too: bcd's `TestTSContract`
 and `tests/pki-attestors-tpm-bcd.test.ts` share the fixtures in `daemon/internal/tpm/testdata`, which
 `scripts/daemon-tpm-fixture.mjs` regenerates (see [bcd with its TPM](/docs/guides/nodes/attestation#bcd-with-its-tpm)).
 Since b973e05 those fixtures include a test manufacturer root (`ek-root.der`) and the EK certificate it issued

@@ -157,12 +157,12 @@ service AgentGateway {
 | RPC | Auth | What the gateway does |
 | --- | --- | --- |
 | `Join` | server TLS, serving CA pinned | Counts it against the handshake bucket and relays it to JoinService. The token is sealed (compact JWE to the JoinService encryption key) and the response is signed with the join-signing key, so the gateway can neither read the one nor forge the other |
-| `Renew` | mTLS | Relays it with the peer's node id. JoinService verifies the proof of possession: a signature by the current node key under purpose `renew-pop`, within 60 s of server time, not replayed within 120 s |
+| `Renew` | mTLS | Relays it with the peer's node id. JoinService verifies the proof of possession: a signature by the current node key under purpose `renew-pop`, within 60 s of server time, not replayed within 120 s; for a certificate naming a TPM attestation key, also `key_attestation`, that AK's certification of the new key (d94f1f3; see [renewing a TPM-held key](/docs/guides/nodes/attestation#renewing-a-tpm-held-key)) |
 | `Session` | mTLS | Runs the session: see [sessions](/docs/daemon/sessions) |
 | `Tunnel` | mTLS | Relays one interactive stream, opened by the daemon after an `OpenTunnel` frame |
 
-The node id always comes from the certificate's SPIFFE URI SAN, `spiffe://<trust domain>/site/<site>/node/<node>`,
-never from a frame. `Join` also carries the hardware claims, the attestor name (`join-token` in v0.1;
+The node id always comes from the certificate's one SPIFFE URI SAN, `spiffe://<trust domain>/site/<site>/node/<node>`,
+never from a frame (any other URI SAN is a `urn:bc:` statement about the key, never an identity). `Join` also carries the hardware claims, the attestor name (`join-token` in v0.1;
 `x509pop`, `provisioned` and `discovery` in v0.2; `cloud-iid` in v0.3; `tpm` in v0.5), attestor evidence, the
 daemon version and the role (see [`JoinRequest`](/docs/reference/protocol#joinrequest) and
 [`HardwareClaims`](/docs/reference/protocol#hardwareclaims)). A

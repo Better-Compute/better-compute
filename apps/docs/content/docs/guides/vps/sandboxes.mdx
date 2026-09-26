@@ -367,6 +367,14 @@ A sandbox is `ready` the moment its instance reaches `running`: the instance rec
 not replaced; it ends with its TTL or a delete. If its pool sets `recreateOnHostLoss`, a lost instance is recreated
 like any other and the sandbox goes back to `starting`.
 
+A sandbox whose host's bcd cannot start its instance (host admission reports it stopped with `ResourcesExhausted:`)
+stays `starting` while vps places the instance elsewhere (564f543): after the refusal has stood a minute, a cold
+create's instance still in `provisioning`, or a claimed warm instance whose sandbox has not become ready, releases its
+booking and address and is scheduled away from every host that refused it. The sandbox keeps its `expiresAt`: the
+TTL counts from the create, not from the new placement. After three re-placements the next refusal fails the
+instance, and the sandbox with it. See
+[hosts that cannot start an instance](/docs/guides/vps/instances#hosts-that-cannot-start-an-instance).
+
 ## Read, extend and delete
 
 - [get](/docs/reference/api/sandboxes#get) returns one sandbox of the tenant with its snapshots, deleted ones

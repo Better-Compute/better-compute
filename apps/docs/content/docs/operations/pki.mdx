@@ -9,6 +9,9 @@ sources:
   - packages/pki/src/bundle.ts
   - packages/pki/src/ca.ts
   - packages/pki/src/spiffe.ts
+  - packages/pki/src/attestors/tpm.ts
+  - packages/server/src/join/service.ts
+  - daemon/internal/pki/join.go
   - packages/pki/src/intent.ts
   - packages/pki/src/quorum.ts
   - packages/server/src/quorum/quorum.ts
@@ -70,7 +73,7 @@ certificate, and the key that signs `JoinResponse` is not the one join tokens ar
 | Key | Signs or does | Lifetime | Who trusts it |
 | --- | --- | --- | --- |
 | Root CA | Only the three subordinate CAs | 10 years | Anchor above the CAs; can be kept offline |
-| Node CA | Agent client certificates: one SPIFFE URI SAN, the role as `OU=bc-role:<role>`, `clientAuth` | CA 1 year; leaves at most 24 h (ramdisk at most 2 h) | Gateways, as the trust anchor for daemon mTLS |
+| Node CA | Agent client certificates: one SPIFFE URI SAN (then only `urn:bc:` key statements), the role as `OU=bc-role:<role>`, `clientAuth` | CA 1 year; leaves at most 24 h (ramdisk at most 2 h) | Gateways, as the trust anchor for daemon mTLS |
 | Gateway serving CA | Gateway server certificates: DNS SANs, `serverAuth` | CA 1 year; leaves at most 30 days | Daemons, by its SPKI pin |
 | Internal CA | Control-plane mutual TLS between api, workers and gateways | CA 1 year; leaves at most 7 days | The control plane |
 | JoinService signing key | `JoinResponse` and `SignedTrustBundle` | Certificate 10 years | Daemons, by pin |
@@ -351,7 +354,7 @@ introduces the first set.
 
 ## Trust domain and SPIFFE IDs
 
-Every agent certificate carries exactly one URI SAN:
+Every agent certificate carries exactly one SPIFFE URI SAN, first:
 
 ```text
 spiffe://<trust-domain>/site/<siteId>/node/<nodeId>
@@ -360,6 +363,21 @@ spiffe://<trust-domain>/site/<siteId>/node/<nodeId>
 The trust domain is lower-case `a-z`, `0-9`, `.`, `-` and `_`, up to 255 characters, such as `compute.example.com`.
 The node id always comes from this SAN, never from a message field, so a daemon cannot speak for another node. The
 gateway checks the SPIFFE ID's trust domain against its configured one.
+
+Since d94f1f3 the SPIFFE ID may be followed by `urn:bc:` statements: what compute proved about the node's key when
+it issued the certificate. They are never identities. The node CA accepts at most four URI SANs, the SPIFFE ID and
+then only statements (`urn:bc:<kind>:<value>`, printable ASCII, `isNodeKeyStatement`), and no DNS SANs. The one
+statement today is written after a certified `tpm` join:
+
+```text
+urn:bc:tpm-ak:<nameAlg>:<digest>
+```
+
+It is the TPM name (hex: the 2-byte name algorithm, then a digest of 20 to 64 bytes) of the attestation key that
+certified the node key (`tpmAkUri`, `parseTpmAkUri` in `@better-compute/pki`; `pki.TPMAKName` in bcd). Every reader
+of a node identity takes the one URI SAN that is not a statement: `nodeSpiffeIdOf(uriSans)` in TypeScript (mTLS
+identity, proofs of possession, join responses, the gateway's renew relay) and `pki.NodeIdentity` in bcd, so a
+certificate with two SPIFFE IDs, or none, has no identity.
 
 The role travels in the subject as one `OU=bc-role:<role>` attribute (1 to 32 of `a-z`, `0-9` and `-`, starting
 with a letter; a subject with two roles is malformed): `node`, `site`, `ramdisk` or `node-tenant` for agents,
@@ -388,7 +406,10 @@ another attestor, and records it in `node_certs`:
 Lifetimes: `node` and `site` certificates live 24 h; `ramdisk` certificates at most 2 h, whatever the profile asks.
 A daemon renews at about 60% of its lifetime with `Renew`, signing a proof of possession with its **current** key
 over the new CSR, its node id and its clock. The api checks the chain, revocation, the SPIFFE ID, a ±60 s window and
-a 120 s replay cache keyed by the signed statement. A machine that lost its certificate re-joins with the `x509pop`
+a 120 s replay cache keyed by the signed statement. A certificate with a `urn:bc:tpm-ak:` statement also needs
+`RenewRequest.key_attestation`, that AK's certification of the new key; the statement is read from the presented
+leaf (byte for byte its `node_certs` row), never from the CSR, and copied into the new certificate (see
+[renewing a TPM-held key](/docs/guides/nodes/attestation#renewing-a-tpm-held-key)). A machine that lost its certificate re-joins with the `x509pop`
 attestor, which accepts a certificate of the current identity generation up to 7 days past its expiry. See
 [attestation](/docs/guides/nodes/attestation).
 

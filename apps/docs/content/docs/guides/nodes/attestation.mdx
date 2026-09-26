@@ -39,6 +39,13 @@ sources:
   - daemon/internal/tpm/attest.go
   - packages/server/src/join/pool-policy.ts
   - tests/server-join-pool-attestors.test.ts
+  - packages/pki/src/spiffe.ts
+  - packages/server/src/join/pki.ts
+  - daemon/internal/agent/renew.go
+  - daemon/internal/agent/renew_tpm_test.go
+  - daemon/internal/agent/state.go
+  - daemon/internal/pki/join.go
+  - tests/server-join-tpm-renew.test.ts
 ---
 
 A join token proves that someone with access to your API wanted a machine to join. That is enough for a server
@@ -264,7 +271,9 @@ It then decides where the machine joins, keyed by the SHA-256 of the EK: the nod
 (`node_bindings`): a later join proving it reclaims that node, and it can never admit another one
 (`bound-elsewhere`). When the node key was certified, the result carries `nodeKey: 'tpm'`, and JoinService records
 it in the `node.joined` event and in the join's audit row (`nodeKey`: `tpm`, or `unattested` for every other join;
-see [joining](/docs/guides/nodes/joining#the-join-flow)).
+see [joining](/docs/guides/nodes/joining#the-join-flow)). Since d94f1f3 the result also carries `nodeKeyUri`, the AK's
+name as `urn:bc:tpm-ak:<nameAlg>:<digest>`, which JoinService writes into the certificate so that every renewal must
+be certified by the same AK (see [renewing a TPM-held key](#renewing-a-tpm-held-key)).
 
 | Option | Meaning |
 | --- | --- |
@@ -278,14 +287,89 @@ see [joining](/docs/guides/nodes/joining#the-join-flow)).
 | `challengeTtlMs` | Challenge lifetime, at most 5 minutes. |
 | `nodeKey` | `'certified'` (the default): admit a join only when the AK certifies the CSR's key as one this TPM made and never lets out. `'any'`: also admit a node key held elsewhere, such as a file. |
 
-<Callout type="warn" title="The node key is proven at join time only">
+<Callout type="warn" title="nodeKey defaults to certified">
 Since cf24876 `nodeKey: 'certified'` is the default, so a `tpm` join whose agent keeps its node key outside the TPM
-is refused (`node-key-not-certified`); set `nodeKey: 'any'` to keep admitting those. The proof covers the key the
-join certifies. A renewal sends no certification yet: the next key bcd makes at renewal is in the TPM when it can
-open one, but the control plane cannot tell, and nothing in `node_certs` records it. Carrying the proof through
-renewal (the AK's name in a SAN URI and a `RenewRequest.key_attestation`, the second part of this work) is not
-built.
+is refused (`node-key-not-certified`), including a machine that joined with a file key before and joins again. Set
+`nodeKey: 'any'` to keep admitting those; their certificates then name no AK and renew without a TPM proof.
 </Callout>
+
+### Renewing a TPM-held key
+
+The join proves the first node key. Since d94f1f3 every renewal proves the next one the same way, so a certificate
+issued after a certified `tpm` join names, for its whole life and every renewal after it, a key that cannot leave
+that TPM.
+
+1. **The statement.** A certified join returns `nodeKeyUri` (`AttestationResult.nodeKeyUri`), and JoinService
+   issues the certificate with two URI SANs: the SPIFFE ID first, then
+   `urn:bc:tpm-ak:<nameAlg>:<digest>`, the AK's TPM name in hex (`tpmAkUri`; the name covers the AK's whole public
+   area, so only that key matches it). A join without a certified key (any other attestor, or `nodeKey: 'any'`
+   without a certification) gets no statement and renews as before.
+2. **Where Renew reads it.** From the presented leaf, which must already be byte for byte compute's own
+   `node_certs` row, never from the CSR. A CSR that asks for no SAN at all still gets the statement back, and a CSR
+   cannot remove it.
+3. **The proof.** A leaf with a `urn:bc:tpm-ak:` statement renews only with `RenewRequest.key_attestation`
+   (field 5, `TpmKeyAttestation`): the AK's public area (`ak_public`), the new key's public area (`key_public`),
+   and the AK's `TPM2_Certify` of that key (`certify_info`, `signature`) qualified by `sha256(csr)`.
+   `verifyTpmKeyAttestation` checks that the AK's TPM name is the one in the statement and that it has
+   attestation-key attributes, then runs the same checks as the join's node-key proof: the AK's signature, the
+   qualifying data, the certified name, `fixedTPM`, `fixedParent`, `sensitiveDataOrigin` and a signing key, and
+   that the key's SPKI is the CSR's.
+4. **No downgrade.** A missing or failing attestation refuses the renewal with `ACCESS_DENIED` ("Renew refused"),
+   and JoinService logs `renew refused` with the node id and the reason. The new certificate carries the statement
+   forward, so the next renewal needs the AK again.
+
+| Reason | Meaning |
+| --- | --- |
+| `key-attestation-missing` | The leaf names an AK and the request has no `key_attestation` |
+| `key-attestation-ak` | `ak_public` is not the named AK (another TPM's), or is not an attestation key |
+| `node-key-malformed`, `node-key-signature`, `node-key-nonce`, `node-key-name`, `node-key-attributes`, `node-key-not-csr` | The certification fails the same check as at join (a replayed certification for another CSR is `node-key-nonce`) |
+| `tpm-ak-uri` | The statement in the leaf is malformed |
+| `key-statement-unknown` | The leaf carries a `urn:bc:` statement this control plane does not know |
+| `key-statement-unsupported` | The `JoinCrypto` has no `verifyKeyStatements` (`pkiJoinCrypto` has one) |
+
+The node certificate's URI SANs are now exactly one SPIFFE ID followed only by `urn:bc:` statements (at most four
+URIs in all). The identity readers (`nodeSpiffeIdOf` in `@better-compute/pki`, used for mTLS identity, proofs of
+possession, join responses and the gateway's renew relay) and bcd's `pki.NodeIdentity` take the node id from the
+one SPIFFE ID and never from a statement; see [PKI](/docs/operations/pki#trust-domain-and-spiffe-ids).
+
+**bcd's side.** At each renewal `renewOnce` reads the current leaf. When it names an AK, bcd opens the TPM and loads
+that AK alone (`tpm.Certifier`, a primary of the endorsement hierarchy, no EK), checks that its TPM name is the one
+the certificate names, derives the next node key in the same connection, and has the AK certify it over
+`sha256(csr)` into `key_attestation`. There is no fallback: where a certificate without a statement would get a file
+key with a warning, this one fails the renewal instead and sends nothing.
+
+| At renewal | What bcd does |
+| --- | --- |
+| The TPM cannot be opened | `renewal: the certificate's node key is in the TPM, which is unavailable: ...` |
+| The TPM derives another AK | `renewal: this TPM's attestation key is not the one the certificate names (was the TPM cleared? run bcd join again)` |
+| The TPM cannot make or certify the next key | `renewal: the next node key in the TPM: ...` or `renewal: the TPM's attestation key certifying the next key: ...` |
+
+Each failure is logged as `renewal failed` with the attempt and `expiresIn`, and retried with backoff from
+30 seconds to 10 minutes. Retries do not help a TPM that lost the AK or the key: the certificate (at most
+24 hours) runs out, and the node goes offline.
+
+#### Recovering a node whose TPM changed
+
+A `tpm`-joined node recovers by joining again with its TPM, `bcd join --attestor tpm`. The attestor keys the
+machine on the SHA-256 of its EK, so what happens depends on whether the EK survived:
+
+- **The EK is the same** (for example after `TPM2_Clear`, which resets the owner hierarchy's seed but not the
+  endorsement seed the EK and AK come from). The node key is a primary of the owner hierarchy, so the same
+  `node.key` record now derives another key, and bcd no longer loads its identity ("the node key does not match the
+  node certificate"). `bcd join` then finds no usable identity and joins, and the attestor reclaims the node that EK
+  is bound to: the same node id, a new identity generation (every older certificate revoked), a new certified key
+  and a fresh AK statement. If `bcd join` still answers `already joined as <node>` (the identity loads, but renewal
+  fails), remove `identity.json` and `node.key` from the data directory first; that is what the e2e test does to
+  model a reinstall.
+- **The EK is new** (another TPM, a replaced board, a reset endorsement hierarchy). The machine is unknown to the
+  attestor, so it joins wherever your `resolve` or `enrollment` sends it, as a new node (with neither, it is
+  refused). The old node keeps its
+  binding to the old EK and stays offline until you remove it (see
+  [deleting a node](/docs/guides/nodes/operating-nodes#deleting-a-node), which frees its attestor bindings).
+
+A node that joined with a token has no statement, so its renewal does not depend on the TPM's AK. Its node key, if
+in the TPM, still needs that TPM to load: after a clear it joins again with a token, and a token join of a known
+machine needs `allowReclaim` (see [placeholder hardware and reclaims](/docs/guides/nodes/joining#placeholder-hardware-and-reclaims)).
 
 ### bcd with its TPM
 
@@ -335,8 +419,10 @@ results, discovery assertions, secret and workload-token requests) and the WebSo
   `BCD TPM NODE KEY` whose bytes are the unique, mode 0600. A key in the TPM does not load without that TPM.
 - **When.** Every new node key is made in the TPM when bcd can open one: at `bcd join` and at every renewal's next
   key. A host build uses `/dev/tpmrm0` when it exists; a fakehw build uses its software TPM only with
-  `BCD_FAKEHW_TPM_KEYS=1`. When the TPM cannot hold the key, bcd logs a warning and makes a PKCS#8 file key instead.
-  A node that joined with a file key moves into the TPM at its next renewal.
+  `BCD_FAKEHW_TPM_KEYS=1`. When the TPM cannot hold the key, bcd logs a warning and makes a PKCS#8 file key instead,
+  except at the renewal of a certificate that names an AK, which fails rather than leave the TPM (see
+  [renewing a TPM-held key](#renewing-a-tpm-held-key)). A node that joined with a file key moves into the TPM at its
+  next renewal.
 - **Under `[helper]`.** `bcd join` runs as root, but the key belongs to `bcd node`, which runs as the helper's
   user. The join makes the key in the TPM only when that user can read and write `/dev/tpmrm0` (world `rw`, owner
   `rw` as that user, or group `rw` with the user a member); otherwise it is a file key with the warning "the node key
@@ -353,12 +439,13 @@ What the control plane knows about it depends on how the key was made:
 
 | When | Proven to the control plane | Where it shows |
 | --- | --- | --- |
-| A `tpm` join (cf24876) | Yes: the AK certifies the key (`CertifyNodeKey`, `TPM2_Certify` over `sha256(csr)`) and `tpmAttestor` checks it, refusing the join under the default `nodeKey: 'certified'` when it is missing | `nodeKey: 'tpm'` in `node.joined` and the `node.joined` or `node.reclaimed` audit row |
-| A join with any other attestor | No: bcd still makes the key in the TPM when it can, but sends no certification | `nodeKey: 'unattested'` |
-| A renewal | No: the next key is made in the TPM when bcd can open one, but a renewal carries no certification yet | nothing; the certificate and `node_certs` do not record where the key lives |
+| A `tpm` join (cf24876) | Yes: the AK certifies the key (`CertifyNodeKey`, `TPM2_Certify` over `sha256(csr)`) and `tpmAttestor` checks it, refusing the join under the default `nodeKey: 'certified'` when it is missing | `nodeKey: 'tpm'` in `node.joined` and the `node.joined` or `node.reclaimed` audit row; `urn:bc:tpm-ak:` in the certificate (d94f1f3) |
+| A join with any other attestor | No: bcd still makes the key in the TPM when it can, but sends no certification | `nodeKey: 'unattested'`; no statement in the certificate |
+| A renewal of a certificate that names an AK (d94f1f3) | Yes: the same AK certifies the next key (`RenewRequest.key_attestation`), and JoinService refuses the renewal without it | the statement, carried into the new certificate and its `node_certs` row |
+| A renewal of any other certificate | No: the next key is made in the TPM when bcd can open one, but nothing proves it | nothing; the certificate and `node_certs` do not record where the key lives |
 
-So the join-time gap is closed for `tpm` joins: such a node's first certificate names a key that cannot leave its
-TPM. After the first renewal the control plane again has only bcd's word for it (`bcd status` and `bcd doctor`
+So for a certified `tpm` join the proof lasts: every certificate the node holds from then on names a key that its
+TPM made and certified. For every other node the control plane has only bcd's word (`bcd status` and `bcd doctor`
 report it locally).
 
 What is tested, and with what TPM:
@@ -368,7 +455,9 @@ What is tested, and with what TPM:
 | `TestTSContract` (`daemon/internal/tpm`) | `tpmsim` fixture, with a manufacturer EK certificate in NV (b973e05) | bcd's round-1 evidence is still byte for byte the fixture's, including the EK certificate bcd reads from NV index `0x01C00002` (`tpm.EKCertIndex`) and sends as `ekCert`, and the challenge `tpmAttestor` made for it activates and quotes through bcd's client (TypeScript to Go); since cf24876 the answer also carries the AK's certification of a node key held in the sim (`answer.nodeKey`) |
 | `tests/pki-attestors-tpm.test.ts` | `tpmProducer` over a `SoftwareTpm` whose `nodeKey` it certifies as bcd does | under `nodeKey: 'certified'`, a certified CSR key is admitted with `nodeKey: 'tpm'`; no certification is `node-key-not-certified`, and a certified key other than the CSR's is `node-key-not-csr`; `nodeKey: 'any'` admits the uncertified answer without a `nodeKey` claim |
 | `tests/pki-attestors-tpm-bcd.test.ts` | the same fixture | `tpmAttestor` with `ekRoots: [ek-root.der]` and no `allowUncertifiedEk` verifies the EK certificate's chain, challenges bcd's evidence and admits bcd's answer, with its node key certified (`nodeKey: 'tpm'`), while a CSR key other than the certified one is `node-key-not-csr`; it refuses the EK under another root (`ek-certificate-chain`), and the answer for another CSR (`challenge-for-another-csr`) or after the challenge expired (`challenge-expired`) (Go to TypeScript) |
-| `tests/e2e/bcd-tpm.test.ts` (`BCD_E2E=1`, WSL or Linux; db9bd46, 8a9af54) | `tpmsim` in a fakehw bcd, with an EK certificate from a manufacturer root the test makes (`BCD_FAKEHW_TPM_EK_CA`) and the node key in that TPM (`BCD_FAKEHW_TPM_KEYS=1`) | a real `bcd join --attestor tpm` with no token against the dev stack's JoinService, whose `tpmAttestor` trusts only that root (`ekRoots`, no `allowUncertifiedEk`): two rounds, `resolve` seeing the EK certificate chained to the manufacturer and the SHA-256 PCR bank 0 to 7, the node in the resolved pool and bound to `sha256(EK)` in `node_bindings`; `node.key` a `BCD TPM NODE KEY` record; the node key certified by the AK, so `node.joined` says `nodeKey: 'tpm'` for this join and for the rejoin below (cf24876); with its identity removed (a reinstall) the same TPM joins as the same node; `bcd node` on that identity, signing its session and statements in the TPM, is adopted |
+| `tests/e2e/bcd-tpm.test.ts` (`BCD_E2E=1`, WSL or Linux; db9bd46, 8a9af54) | `tpmsim` in a fakehw bcd, with an EK certificate from a manufacturer root the test makes (`BCD_FAKEHW_TPM_EK_CA`) and the node key in that TPM (`BCD_FAKEHW_TPM_KEYS=1`) | a real `bcd join --attestor tpm` with no token against the dev stack's JoinService, whose `tpmAttestor` trusts only that root (`ekRoots`, no `allowUncertifiedEk`): two rounds, `resolve` seeing the EK certificate chained to the manufacturer and the SHA-256 PCR bank 0 to 7, the node in the resolved pool and bound to `sha256(EK)` in `node_bindings`; `node.key` a `BCD TPM NODE KEY` record; the node key certified by the AK, so `node.joined` says `nodeKey: 'tpm'` for this join and for the rejoin below (cf24876); with its identity removed (a reinstall) the same TPM joins as the same node; `bcd node` on that identity, signing its session and statements in the TPM, is adopted; since d94f1f3 the certificate carries the AK's `urn:bc:tpm-ak:` statement, and `bcd node` renews (`BCD_RENEW_AFTER=3s`) with the AK certifying the next key, which stays a `BCD TPM NODE KEY` record while the new certificate keeps the statement |
+| `tests/server-join-tpm-renew.test.ts` (d94f1f3) | `tpmProducer` and `softwareTpmCertify` over `SoftwareTpm` | a certified join names the AK; a renewal without `key_attestation` is `key-attestation-missing`, another TPM's AK `key-attestation-ak`, a certification of another key `node-key-not-csr`, one for another CSR `node-key-nonce`; a good renewal keeps the statement although its CSR asks for no SAN, and the next renewal needs the AK again; an uncertified join (`nodeKey: 'any'`) gets no statement and renews without one |
+| `internal/agent` `TestRenewCertifiedByTheAK` (d94f1f3) | `tpmsim` | a certificate naming the sim's AK renews with the next key made in that TPM and certified by it; with no TPM the renewal fails (`unavailable`), and with another TPM (another AK) it fails before any request, never falling back to a file key |
 
 `scripts/daemon-tpm-fixture.mjs` regenerates the fixtures in `daemon/internal/tpm/testdata` after a deliberate change
 of either side, so a format change fails a test rather than a machine's join. Since b973e05 the contract runs the

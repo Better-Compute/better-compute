@@ -21,6 +21,8 @@ sources:
   - packages/cli/src/commands/admin.ts
   - proto/bettercompute/agent/v1/session.proto
   - tests/server-join.test.ts
+  - tests/server-join-tpm-renew.test.ts
+  - daemon/internal/agent/renew.go
 ---
 
 Joining turns a machine into a [node](/docs/guides/nodes): JoinService checks the machine's evidence, creates or
@@ -237,9 +239,11 @@ The certificate is the node's identity from here on. Its properties:
 
 - **Key and lifetime.** ECDSA P-256, at most 24 hours (JoinService's `certTtlSeconds`, default and maximum
   86,400). Ramdisk certificates last at most 2 hours, and an attestor may shorten either.
-- **Name.** One URI SAN, the <Term id="spiffe-id">SPIFFE ID</Term>
-  `spiffe://<trustDomain>/site/<siteId>/node/<nodeId>`. Names come only from JoinService, never from the CSR's
-  subject, and no tenant appears in the certificate.
+- **Name.** Exactly one SPIFFE URI SAN, the <Term id="spiffe-id">SPIFFE ID</Term>
+  `spiffe://<trustDomain>/site/<siteId>/node/<nodeId>`, first; any further URI SANs are `urn:bc:` statements about
+  the node key, never identities. Today the only one is `urn:bc:tpm-ak:<nameAlg>:<digest>`, written after a
+  certified `tpm` join (d94f1f3). Names and statements come only from JoinService, never from the CSR, and no tenant
+  appears in the certificate.
 - **Role.** One subject attribute `OU=bc-role:<role>` holds `node`, `site`, `ramdisk` or `node-tenant`. The
   certificate carries no private-arc OID, so Go's `crypto/x509` (and bcd) can parse it. See
   [PKI](/docs/operations/pki).
@@ -259,14 +263,23 @@ gateway only relays, so a compromised gateway cannot mint certificates. A renewa
 - the presented leaf is byte for byte a `node_certs` row, unrevoked, unexpired and of the node's current identity
   generation;
 - the node is not `retired`, and the caller's mTLS identity is that node;
-- `client_time` is within 60 seconds of server time, and the same proof was not used in the last 120 seconds.
+- `client_time` is within 60 seconds of server time, and the same proof was not used in the last 120 seconds;
+- when the leaf names a TPM attestation key (`urn:bc:tpm-ak:`), the request carries `key_attestation`: that AK's
+  `TPM2_Certify` of the CSR's key over `sha256(csr)`, as a key the TPM made and never lets out (d94f1f3).
 
-The new certificate keeps the role and the allowed kinds of the old one. A renewal proves possession of the key,
-not where it lives: bcd makes the next key in the TPM when it can, but no TPM certification travels with `Renew`
-yet, so the proof a `tpm` join gives about the node key covers only the first certificate (see
-[the node key in the TPM](/docs/guides/nodes/attestation#the-node-key-in-the-tpm)). A certificate that expired while the
-machine was offline cannot be renewed; when the server has the `x509pop` attestor configured, the machine
-re-joins with it within 7 days instead (see [attestation](/docs/guides/nodes/attestation)).
+The new certificate keeps the role, the allowed kinds and the `urn:bc:` statements of the old one. JoinService reads
+the statements from the presented leaf, which it has just matched to its own `node_certs` row, never from the CSR,
+so a node can neither drop the AK statement nor renew with a key outside its TPM: a missing or failing attestation
+is refused (`key-attestation-missing`, `key-attestation-ak`, `node-key-*`), never downgraded. bcd builds the
+attestation itself and fails the renewal loudly, without sending it, when the TPM is unavailable or derives another
+AK. See [renewing a TPM-held key](/docs/guides/nodes/attestation#renewing-a-tpm-held-key) for the checks and for how
+such a node recovers by joining again. A certificate without a statement (every join other than a certified `tpm`
+join) renews with a proof of possession only: bcd still makes the next key in the TPM when it can, but nothing
+proves it to the control plane.
+
+A certificate that expired while the machine was offline cannot be renewed; when the server has the `x509pop`
+attestor configured, the machine re-joins with it within 7 days instead (see
+[attestation](/docs/guides/nodes/attestation)).
 
 ## Adopting a brownfield server
 
@@ -515,5 +528,12 @@ decision fields `decidedAt`, `decidedBy`, `reason` and `consumedAt`. Decisions p
     Acceptance has not passed. Look for the `AcceptanceFailed` condition on `nodes.get` and the
     `node.acceptance.failed` event, then fix the cause and call `nodes.adopt`. See
     [inventory and health](/docs/guides/nodes/inventory-and-health).
+  </Accordion>
+  <Accordion title="bcd logs renewal failed: the TPM is unavailable or names another AK">
+    The certificate came from a certified `tpm` join and names its AK, so bcd renews only with that TPM. Restore
+    access to the TPM (`/dev/tpmrm0` for the user `bcd node` runs as) and the next retry renews. If the TPM was
+    cleared or replaced, run `bcd join --attestor tpm` again: an unchanged EK reclaims the same node, a new one joins
+    as a new node. See
+    [recovering a node whose TPM changed](/docs/guides/nodes/attestation#recovering-a-node-whose-tpm-changed).
   </Accordion>
 </Accordions>

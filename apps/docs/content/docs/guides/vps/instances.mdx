@@ -5,7 +5,7 @@ metaTitle: VPS instances and their lifecycle
 icon: Server
 status: beta
 packages: ['@better-compute/vps']
-sources: ['packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/vps/src/status.ts', 'packages/vps/src/runtime.ts', 'packages/vps/src/input.ts', 'packages/vps/src/sandboxes.ts', 'packages/vps/src/tenancy.ts', 'tests/vps-sandboxes.test.ts', 'packages/core/src/states.ts', 'packages/server/src/controllers/nodespec.ts', 'packages/server/src/tunnels/module.ts', 'packages/server/src/operations.ts', 'proto/bettercompute/agent/v1/session.proto', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts', 'daemon/internal/agent/requests.go', 'daemon/internal/agent/tunnels.go', 'packages/cli/src/commands/tunnel.ts', 'packages/cli/src/commands/nodes.ts', 'daemon/internal/runtime/cloudhypervisor.go', 'daemon/cmd/bcd/hardware_host.go', 'tests/server-tunnels.test.ts']
+sources: ['packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/vps/src/volumes.ts', 'packages/vps/src/status.ts', 'packages/vps/src/runtime.ts', 'packages/vps/src/input.ts', 'packages/vps/src/sandboxes.ts', 'packages/vps/src/tenancy.ts', 'tests/vps-sandboxes.test.ts', 'packages/core/src/states.ts', 'packages/server/src/controllers/nodespec.ts', 'packages/server/src/tunnels/module.ts', 'packages/server/src/operations.ts', 'proto/bettercompute/agent/v1/session.proto', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts', 'daemon/internal/agent/requests.go', 'daemon/internal/agent/tunnels.go', 'packages/cli/src/commands/tunnel.ts', 'packages/cli/src/commands/nodes.ts', 'daemon/internal/runtime/cloudhypervisor.go', 'daemon/cmd/bcd/hardware_host.go', 'tests/server-tunnels.test.ts']
 ---
 
 An <Term id="instance">instance</Term> is a VM in a VPS <Term id="pool">pool</Term>. You ask for one with a
@@ -385,6 +385,9 @@ From the reports, the reconciler moves the instance:
   `running` to `stopped` and back, or `running` to `paused` and back for warm instances. Each step publishes
   `instance.<state>`.
 - A reported `error` moves it to `error` with a `RuntimeError` condition and publishes `instance.failed`.
+- A reported `stopped` whose message starts `ResourcesExhausted:` is bcd's host admission refusing the start: the
+  instance gets a `HostResourcesExhausted` condition and, if nothing of its tenant's is on that host yet, is placed
+  elsewhere after a minute (see [hosts that cannot start an instance](#hosts-that-cannot-start-an-instance)).
 - While the report and `desiredState` disagree, it waits and looks again in 10 seconds.
 
 <Callout type="warn" title="The host side is written, not yet run on real hardware">
@@ -396,15 +399,44 @@ runtime when `virsh` is installed (362317c) and on `cloud-hypervisor` when the `
 tested only against fake tools (a fake `virsh`, a fake cloud-hypervisor API, a fake `qemu-img`); no VM has booted
 through either on a real KVM host yet. A host with neither and without a bcx runtime plugin fails a non-empty `instances` section with `this host
 runs no instance runtime`. bcd also refuses on its own a start whose memory (or huge pages) the host cannot back
-(0dd122a): the instance stays stopped with a status message starting `ResourcesExhausted:`, which is not an error, so
-the reconciler keeps waiting for the start rather than failing the instance, and bcd tries again on its next pass (see
-[host-side admission](/docs/daemon/delivery#instances)). A flavor's [placement](/docs/guides/vps/flavors#placement)
+(0dd122a): the instance stays stopped with a status message starting `ResourcesExhausted:`, which is not an error,
+and bcd tries again on its next pass (see [host-side admission](/docs/daemon/delivery#instances)); since 564f543 vps
+records it and moves a new instance elsewhere (see
+[hosts that cannot start an instance](#hosts-that-cannot-start-an-instance)). A flavor's [placement](/docs/guides/vps/flavors#placement)
 reaches the host as `InstanceSpec.placement` (9d55b36). fakehw builds run instances on a file-backed runtime of the same name, which
 `tests/e2e/bcd-vps.test.ts` drives through the control plane; see [delivery](/docs/daemon/delivery#the-runtimes). The
 TypeScript FakeDaemon plays a VPS host on a fake hypervisor (domains, overlay disks, NoCloud seeds, taps), fetching
 user data through the broker, and `tests/e2e/vps.test.ts` runs hosted instances through the real server and gateway
 with it.
 </Callout>
+
+### Hosts that cannot start an instance
+
+The control plane books a host's capacity, but the host can still lack room for a start: memory or huge pages
+taken by something the booking does not see, or a booking and a host that drifted apart. bcd's host admission then
+leaves the instance stopped with a message starting `ResourcesExhausted:` and retries on its next pass. Since
+564f543 vps acts on that report instead of leaving a new instance `provisioning` on that host for good:
+
+1. **The condition.** `reportInstances` records `HostResourcesExhausted` on the instance: `reason` is the reporting
+   node, `message` bcd's words (up to 512 characters). It is cleared as soon as that node reports the instance in
+   any other way.
+2. **Waiting a minute.** Once the refusal has stood for `exhaustedReplaceMs` (60 seconds), the reconciler re-places
+   the instance if nothing of its tenant's is on that host yet: an instance still in `provisioning`, or a warm
+   instance in `stopped` that no sandbox has claimed or whose sandbox has not become ready. It never moves one whose
+   `desiredState` is `stopped`, one that already ran there, or one whose volumes live on that host.
+3. **Placing it elsewhere.** It releases the allocation and the IP lease, invalidates the old host's NodeSpec (which
+   now drops the instance, so that host removes the domain it could not start), and moves the instance back to
+   `scheduling` (`recreate`), publishing `instance.recreating` with `reason: 'resources-exhausted'` and
+   `fromNodeId`. The `ExhaustedHosts` condition lists every host that refused it (comma-separated in `message`,
+   oldest first), and for `exhaustedAvoidMs` (10 minutes) after the last re-placement, scheduling passes them to
+   capacity as `excludeNodes`.
+4. **Giving up.** After `maxExhaustedReplacements` (3) re-placements, the next refusal that stands a minute fails
+   the instance: `error`, and `instance.failed` with `reason: 'resources-exhausted'` and the `nodeId`.
+
+An instance that is not re-placed keeps waiting with `HostResourcesExhausted`, and bcd keeps retrying the start.
+Both conditions are removed once the host reports the instance in its desired state. A sandbox whose instance is
+re-placed keeps its TTL: the clock does not restart. Tested in `tests/vps-instances.test.ts` (re-placement away from
+the host, the growing host list and the cap, a refused restart that waits) and `tests/vps-sandboxes.test.ts`.
 
 ### Provider pools
 
@@ -487,6 +519,10 @@ seconds:
 - If the pool's policy has `recreateOnHostLoss: true`, the instance releases its allocation and IP lease, goes back to
   `scheduling` (`instance.recreating`) and is placed again, on a host that is still schedulable, where it boots
   from its image.
+
+The same `recreate` verb also moves an instance in `provisioning`, or a warm one in `stopped`, off a host whose bcd
+cannot start it (564f543; `instanceStateTable` allows `recreate` from those two states); see
+[hosts that cannot start an instance](#hosts-that-cannot-start-an-instance).
 
 `recreateOnHostLoss` is read from the pool's stored `policy` document; it is not part of the `PoolPolicy` type yet,
 so a typed caller setting it through `pools.create` or `pools.update` needs a cast.
@@ -577,8 +613,9 @@ Instance events have subject `instance/<id>` and carry `state`, `desiredState` a
 | `instance.starting`, `instance.stopping`, `instance.deleting`   | `start`, `stop` or `delete` was called.               |
 | `instance.running`, `instance.stopped`, …                       | The reconciler moved `state` (named after the new state). |
 | `instance.resized`                                              | A resize finished (`data.flavor`).                    |
-| `instance.failed`                                               | The instance entered `error` (`data.reason`).         |
+| `instance.failed`                                               | The instance entered `error` (`data.reason`; `resources-exhausted` with `data.nodeId` after three re-placements). |
 | `instance.lost`, `instance.recovered`, `instance.recreating`    | Host or machine loss, and what followed.              |
+| `instance.recreating` with `reason: 'resources-exhausted'`      | The host's bcd could not start it for a minute; placed elsewhere (`data.fromNodeId`). See [hosts that cannot start an instance](#hosts-that-cannot-start-an-instance). |
 | `instance.deleted`                                              | Everything it held was released.                      |
 | `instance.orphaned`                                             | A host holds instances no row places there (subject `node/<id>`). |
 

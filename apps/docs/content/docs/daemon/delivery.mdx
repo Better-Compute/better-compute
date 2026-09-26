@@ -283,7 +283,9 @@ agents, over the runtimes the build provides) follows the FakeDaemon's `FakeHype
 - Desired states are `RUNNING`, `PAUSED` (a resume is not a boot) and `STOPPED`. After a host reboot the runtime's
   domains are stopped and the next pass starts the ones that should run.
 - An unknown runtime, a bad image, refused user data or a start the runtime refuses for lack of capacity fails only
-  that instance (`ERROR` with its message); the section is then `FAILED` with reason `InstanceFailed`.
+  that instance (`ERROR` with its message); the section is then `FAILED` with reason `InstanceFailed`. A start that
+  bcd's own host admission refuses is not a failure (below); the `FakeHypervisor`, whose only capacity check is its
+  vCPU and memory totals, reports a start beyond them that way since 6922553.
 - **Placement** (a184ec2). `InstanceSpec.placement` (from a flavor's `placement`, chosen by vps; see
   [flavors](/docs/guides/vps/flavors#placement)) names host CPUs (`cpus`, a cpulist of at least as many CPUs as
   vCPUs), NUMA nodes for the memory (`mems`), a huge page size (2 MiB or 1 GiB, with the memory in whole pages) and a
@@ -309,7 +311,12 @@ agents, over the runtimes the build provides) follows the FakeDaemon's `FakeHype
 
   A start that does not fit stays stopped, and the instance's status message reads `ResourcesExhausted: … MiB of
   memory needed, … MiB left on this host` (or the huge pages needed and free). It is not `ERROR`, so vps does not fail
-  the instance or its sandbox; the section stays `PROGRESSING` and the start is tried again on the next pass. A
+  the instance or its sandbox on the spot; the section stays `PROGRESSING` and the start is tried again on the next
+  pass. vps records the refusal as the instance condition `HostResourcesExhausted` and, since 564f543, once it has
+  stood a minute, places an instance with nothing of its tenant's on the host yet (a new one, or a warm one no
+  sandbox has seen run) on another host, dropping it from this host's spec; one that already ran here, or whose
+  volumes live here, keeps waiting for this host (see
+  [hosts that cannot start an instance](/docs/guides/vps/instances#hosts-that-cannot-start-an-instance)). A
   runtime that checks capacity itself (the fakehw runtime) is left alone, and a host whose `/proc/meminfo` cannot be
   read starts without the check, with a warning.
 - On a host with a runtime, every status report lists everything the runtimes hold in `StatusReport.instances`,

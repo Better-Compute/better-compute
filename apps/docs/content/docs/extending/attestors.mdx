@@ -167,6 +167,7 @@ roles it may admit (`node`, `site`, `ramdisk`), and `verify` receives:
     allowedKinds: { type: 'readonly string[]', description: "Restricts the command kinds the certificate allows: exact kinds or prefix.* globs. A malformed entry fails the join with INVALID_CONFIG." },
     bind: { type: 'Uint8Array', description: 'A 32-byte stable hardware identity (a hash). Bound to the node in node_bindings after issuing; the same subject can never admit another node.' },
     nodeKey: { type: "'tpm'", description: "Where you proved the node key lives: 'tpm' when the machine's TPM certified the CSR's key as one it made and never lets out. Absent means not proven. JoinService records it as nodeKey in node.joined and the join audit row ('unattested' when absent)." },
+    nodeKeyUri: { type: 'string', description: "A urn:bc: statement about the node key that JoinService writes into the certificate after its SPIFFE ID (tpm: urn:bc:tpm-ak:<nameAlg>:<digest>, the AK that certified it; d94f1f3). Renewals carry it forward and must prove it again for the new key: pkiJoinCrypto's verifyKeyStatements knows only urn:bc:tpm-ak:, and refuses the renewal of any other statement (key-statement-unknown)." },
   }}
 />
 

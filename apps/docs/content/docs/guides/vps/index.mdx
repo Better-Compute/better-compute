@@ -191,6 +191,7 @@ stateDiagram-v2
   pending --> scheduling
   scheduling --> provisioning: placed or created
   provisioning --> starting
+  provisioning --> scheduling: recreate, host cannot start it
   starting --> running
   running --> stopped: stop
   stopped --> starting: start
@@ -207,7 +208,9 @@ stateDiagram-v2
 ```
 
 Every state except `deleted` and `deleting` can move to `deleting`, and most can move to `error` and `lost`. The
-full table is `instanceStateTable` in `@better-compute/core`. `rebooting` is in the table, but no API method enters
+full table is `instanceStateTable` in `@better-compute/core`; since 564f543 it also allows `recreate` from
+`provisioning` and `stopped`, for an instance whose host cannot start it (see
+[hosts that cannot start an instance](/docs/guides/vps/instances#hosts-that-cannot-start-an-instance)). `rebooting` is in the table, but no API method enters
 it in this release. `paused` (v0.5: `running` to `paused` by `pause`, back by `resume`) is used only by the warm
 pools of [sandboxes](/docs/guides/vps/sandboxes#warm-pools); see [paused instances](/docs/guides/vps/instances#paused-instances).
 

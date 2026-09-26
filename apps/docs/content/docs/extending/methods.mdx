@@ -313,7 +313,10 @@ apply: defineMethod<ApplyInput, ApplyResult>({
   a transaction (`INVALID_STATE`).
 - **`ctx.invoke(tx, path, input)`** consumes one grant (else `ACCESS_DENIED`), runs the target's handler in a
   savepoint of `tx` without another decision, and writes the sub-call's own audit row. A failed sub-call leaves
-  nothing behind. Grants live only for the current call.
+  nothing behind. Grants live only for the current call. When the target has an `admission.check`, `invoke` runs the
+  very input object that check ran on, not a fresh validation of the raw input (7911c5f), so what the check recorded
+  in it reaches the handler: `sandboxTemplates.create` and `update` record their per-volume decisions there
+  (`decidedVolumes`), which is how `fleet.apply` can create or change a template that mounts volumes.
 - `check` refuses (`UNSUPPORTED`) other composites, admissions with a `denied` hook (reservations, instances) and
   list methods that decide their items one by one. Replay-only admissions work: `prepare` runs in a short
   transaction at `check` and again inside `invoke`.

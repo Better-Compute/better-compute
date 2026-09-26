@@ -199,8 +199,10 @@ Only the fields you list are compared, so TTL bounds and warm sizes the server f
 compared and replaced as a whole map. `volumes` is compared by value and in order, since the attach order is the
 guest's disk order, and replaced as a whole list. Fleet never creates or deletes volumes, because they hold data:
 each name must already exist ([`sandboxVolumes.create`](/docs/reference/api/sandbox-volumes#create)), and an export
-names the template's volumes by name again. See [sandboxes](/docs/guides/vps/sandboxes#templates) and
-[volumes](/docs/guides/vps/sandboxes#volumes).
+names the template's volumes by name again. Each volume is decided for the caller when the apply checks the call,
+as in a direct `sandboxTemplates.create` or `update`, and the write runs on those decisions; before 7911c5f an apply
+that created or changed a template with volumes always failed `CONFLICT` (`volumes-changed`). See
+[sandboxes](/docs/guides/vps/sandboxes#templates) and [volumes](/docs/guides/vps/sandboxes#volumes).
 
 </Tab>
 </Tabs>
