@@ -404,7 +404,10 @@ func TestContainerToolkitCDI(t *testing.T) {
 		case c.Name == "nvidia-smi":
 			return []byte(gpus), nil
 		case c.Name == "nvidia-ctk" && c.Args[0] == "cdi":
-			return []byte("cdiVersion: 0.5.0\nkind: nvidia.com/gpu\n"), nil
+			if strings.Join(c.Args, " ") != "cdi generate --format=json --device-name-strategy=uuid" {
+				t.Fatalf("nvidia-ctk %v", c.Args)
+			}
+			return []byte(`{"cdiVersion":"0.5.0","kind":"nvidia.com/gpu","devices":[{"name":"GPU-aaaa","containerEdits":{"deviceNodes":[{"path":"/dev/nvidia0"}]}}]}`), nil
 		case c.Name == "nvidia-ctk" && c.Args[0] == "runtime":
 			sys.Set("/etc/containerd/config.toml", "version = 2\n# nvidia-container-runtime\n")
 		case c.Name == "nvidia-ctk" && c.Args[0] == "config":
@@ -442,7 +445,55 @@ func TestContainerToolkitCDI(t *testing.T) {
 	if n, err := runAll(t, r, sys, unit("container-toolkit", `{}`)); err != nil || n != 1 {
 		t.Fatalf("regenerate: %d %v", n, err)
 	}
+	// A host whose spec bcd wrote as YAML with index names (before the JSON format): regenerated, and
+	// the YAML removed so no device is named twice.
+	sys.Set(LegacyCDISpecFile, "cdiVersion: 0.5.0\nkind: nvidia.com/gpu\n")
+	sys.Set(CDIStampFile, "an older stamp\n")
+	if n, err := runAll(t, r, sys, unit("container-toolkit", `{}`)); err != nil || n != 1 {
+		t.Fatalf("migrate: %d %v", n, err)
+	}
+	if _, ok := sys.Get(LegacyCDISpecFile); ok {
+		t.Fatal("the YAML spec was left beside the JSON one")
+	}
+	// An unusable spec is refused, not written.
+	gpus += "GPU 1: NVIDIA H100 80GB HBM3 (UUID: GPU-cccc)\n"
+	handler := sys.Handler
+	sys.Handler = func(ctx context.Context, c Cmd) ([]byte, error) {
+		if c.Name == "nvidia-ctk" && c.Args[0] == "cdi" {
+			return []byte("cdiVersion: 0.5.0\n"), nil
+		}
+		return handler(ctx, c)
+	}
+	if _, err := runAll(t, r, sys, unit("container-toolkit", `{}`)); err == nil || !strings.Contains(err.Error(), "no usable spec") {
+		t.Fatalf("unusable spec: %v", err)
+	}
 }
+
+// WSL 2: no nvidia module (the driver is the Windows host's) but /dev/dxg; nvidia-smi names the driver.
+func TestContainerToolkitCDIOnWSL(t *testing.T) {
+	sys := NewFakeSystem()
+	sys.Programs["nvidia-ctk"] = true
+	sys.Set("/dev/dxg", "")
+	sys.Handler = func(_ context.Context, c Cmd) ([]byte, error) {
+		switch {
+		case c.Name == "nvidia-smi" && c.Args[0] == "-L":
+			return []byte("GPU 0: NVIDIA GeForce RTX 5090 (UUID: GPU-5090)\n"), nil
+		case c.Name == "nvidia-smi":
+			return []byte("616.56\n"), nil
+		case c.Name == "nvidia-ctk" && c.Args[0] == "cdi":
+			return []byte(`{"cdiVersion":"0.5.0","kind":"nvidia.com/gpu","devices":[{"name":"all","containerEdits":{"deviceNodes":[{"path":"/dev/dxg"}]}}]}`), nil
+		}
+		return nil, nil
+	}
+	sys.Set(ToolkitConfig, "[nvidia-container-runtime]\naccept-nvidia-visible-devices-envvar-when-unprivileged = false\naccept-nvidia-visible-devices-as-volume-mounts = false\n")
+	if _, err := runAll(t, NewRegistry(ContainerToolkit{}), sys, unit("container-toolkit", `{"cdi":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if spec, _ := sys.Get(CDISpecFile); !strings.Contains(spec, "/dev/dxg") {
+		t.Fatalf("spec = %q", spec)
+	}
+}
+
 
 func TestFabricManagerOnlyWithNVSwitches(t *testing.T) {
 	sys := gpuHost("570.86.15")

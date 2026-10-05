@@ -6,7 +6,7 @@ Installs the driver branch (Ubuntu's server packages, NVIDIA's CUDA repository, 
 
 ## container-toolkit
 
-Installs the NVIDIA container toolkit, configures containerd and Docker with its runtime (with `cdi`, CDI enabled), and regenerates `/etc/cdi/nvidia.yaml` whenever the driver or the GPU and MIG device list changes. With `cdi` (the default), a container gets GPUs only by the CDI names bcd hands out. The unit sets `accept-nvidia-visible-devices-envvar-when-unprivileged` and `accept-nvidia-visible-devices-as-volume-mounts` to false in `/etc/nvidia-container-runtime/config.toml`. Otherwise an unprivileged container could choose GPUs other tenants hold with `NVIDIA_VISIBLE_DEVICES` (the packaged config leaves that key at its permissive default). On a Kubernetes node that is the `ForeignGpuExposure` condition.
+Installs the NVIDIA container toolkit, configures containerd and Docker with its runtime (with `cdi`, CDI enabled), and regenerates `/etc/cdi/nvidia.json` (JSON, GPUs and MIG devices named by UUID; it replaces the `/etc/cdi/nvidia.yaml` older versions wrote) whenever the driver or the GPU and MIG device list changes. A hold's CDI spec copies its devices' nodes, mounts and hooks from it, so `bcd.dev/gpu=<id>` alone is enough. With `cdi` (the default), a container gets GPUs only by the CDI names bcd hands out. The unit sets `accept-nvidia-visible-devices-envvar-when-unprivileged` and `accept-nvidia-visible-devices-as-volume-mounts` to false in `/etc/nvidia-container-runtime/config.toml`. Otherwise an unprivileged container could choose GPUs other tenants hold with `NVIDIA_VISIBLE_DEVICES` (the packaged config leaves that key at its permissive default). On a Kubernetes node that is the `ForeignGpuExposure` condition.
 
 ## mig-layout
 

@@ -672,7 +672,7 @@ The NVIDIA container toolkit, the container runtimes configured with it, and the
   [`ForeignGpuExposure` check](/docs/guides/capacity/kubernetes#gpu-isolation) withdrew every GPU. The runtime reads
   its configuration per container, so nothing restarts. `cdi: false`, the legacy mode that hands GPUs out through the
   variable, changes neither key.
-- **CDI.** With `cdi`, bcd generates `/etc/cdi/nvidia.yaml` with `nvidia-ctk cdi generate --format=yaml` and records
+- **CDI.** With `cdi`, bcd generates `/etc/cdi/nvidia.json` with `nvidia-ctk cdi generate --format=json --device-name-strategy=uuid` (replacing the `/etc/cdi/nvidia.yaml` older versions wrote) and records
   what it describes in `/var/lib/bcd-hostconfig/cdi-nvidia.stamp`: a SHA-256 of the loaded driver version and
   `nvidia-smi -L`, which lists every GPU and MIG device. The spec is generated again whenever that changes, so a
   driver update or a new MIG layout gets a new spec in the same pass. It needs a loaded driver; until then the unit is
@@ -832,7 +832,7 @@ hostConfig: {
 with the pool's `policy.migLayout`, for example `"all-1g.10gb"`. In one pass bcd installs and loads the driver (or
 reports that a reboot is needed, and still converges the units after it that do not need the new driver), installs
 and starts Fabric Manager on an NVSwitch board, turns MIG mode on and creates seven `1g.10gb` instances on each idle
-GPU, configures containerd with the toolkit, and generates `/etc/cdi/nvidia.yaml` for the new MIG devices. The
+GPU, configures containerd with the toolkit, and generates `/etc/cdi/nvidia.json` for the new MIG devices. The
 inventory refresh that follows reports them, and the control plane derives the pool's `gpu.mig` atoms from it.
 
 ## What the tests cover

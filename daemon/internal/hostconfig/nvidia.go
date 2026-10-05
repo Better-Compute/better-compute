@@ -20,8 +20,15 @@ const (
 	NvidiaProcVersion   = "/proc/driver/nvidia/version"
 	NVSwitchDevices     = "/proc/driver/nvidia-nvswitch/devices"
 	// CDISpecFile is the vendor CDI spec the container-toolkit unit generates (bcd's own
-	// allocation specs are /etc/cdi/bcd-<alloc>.json, from the devices converger).
-	CDISpecFile = "/etc/cdi/nvidia.yaml"
+	// allocation specs are /etc/cdi/bcd-<alloc>.json, from the devices converger). JSON, with GPUs
+	// and MIG devices named by UUID: the devices converger copies each held device's edits from it,
+	// and the device plugin names nvidia.com/gpu=<uuid> beside bcd's own.
+	CDISpecFile = "/etc/cdi/nvidia.json"
+	// LegacyCDISpecFile is where bcd wrote the spec before (YAML, index names); it is removed when
+	// the JSON one replaces it, or the two would name the same devices twice.
+	LegacyCDISpecFile = "/etc/cdi/nvidia.yaml"
+	// cdiFormat versions what CDIStampFile describes, so a host with an older spec regenerates.
+	cdiFormat = "json uuid v2"
 	// CDIStampFile records what the vendor CDI spec was generated for (driver and GPU list).
 	CDIStampFile = StateDir + "/cdi-nvidia.stamp"
 )
@@ -355,12 +362,22 @@ func (c ContainerToolkit) Plan(ctx context.Context, sys System, settings json.Ra
 			if err != nil {
 				return err
 			}
-			spec, err := sys.Run(ctx, Cmd{Name: "nvidia-ctk", Args: []string{"cdi", "generate", "--format=yaml"}})
+			spec, err := sys.Run(ctx, Cmd{Name: "nvidia-ctk", Args: []string{"cdi", "generate", "--format=json", "--device-name-strategy=uuid"}})
 			if err != nil {
 				return err
 			}
-			if len(strings.TrimSpace(string(spec))) == 0 {
-				return fmt.Errorf("nvidia-ctk cdi generate printed no spec")
+			var parsed struct {
+				Kind    string            `json:"kind"`
+				Devices []json.RawMessage `json:"devices"`
+			}
+			if err := json.Unmarshal(spec, &parsed); err != nil || parsed.Kind != "nvidia.com/gpu" || len(parsed.Devices) == 0 {
+				return fmt.Errorf("nvidia-ctk cdi generate printed no usable spec (%d bytes)", len(spec))
+			}
+			// The old YAML spec names the same devices: two specs naming one device make CDI refuse both.
+			if _, err := sys.ReadFile(LegacyCDISpecFile); err == nil && have != "" {
+				if err := sys.RemoveFile(LegacyCDISpecFile); err != nil {
+					return err
+				}
 			}
 			if err := sys.WriteFile(CDISpecFile, spec, 0o644); err != nil {
 				return err
@@ -370,11 +387,20 @@ func (c ContainerToolkit) Plan(ctx context.Context, sys System, settings json.Ra
 	}), nil
 }
 
-// cdiStamp identifies what the CDI spec describes: the loaded driver and every GPU and MIG device.
+// cdiStamp identifies what the CDI spec describes: its format, the loaded driver and every GPU and
+// MIG device.
 func cdiStamp(ctx context.Context, sys System) (string, error) {
 	version, _, err := loadedDriver(sys)
 	if err != nil {
 		return "", err
+	}
+	if version == "" && paravirtualGPU(sys) {
+		// WSL 2: the driver is the Windows host's (no nvidia module); nvidia-smi reports it.
+		out, err := sys.Run(ctx, Cmd{Name: "nvidia-smi", Args: []string{"--query-gpu=driver_version", "--format=csv,noheader"}})
+		if err != nil {
+			return "", err
+		}
+		version, _, _ = strings.Cut(strings.TrimSpace(string(out)), "\n")
 	}
 	if version == "" {
 		return "", fmt.Errorf("container-toolkit: no NVIDIA driver is loaded yet")
@@ -383,6 +409,21 @@ func cdiStamp(ctx context.Context, sys System) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256([]byte(version + "\n" + string(devices)))
+	sum := sha256.Sum256([]byte(cdiFormat + "\n" + version + "\n" + string(devices)))
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// paravirtualGPU reports WSL 2's GPU: /dev/dxg without /dev/nvidiactl (nvidia-ctk cdi generate
+// then writes its wsl mode spec on its own).
+func paravirtualGPU(sys System) bool {
+	names, err := sys.ReadDir("/dev")
+	if err != nil {
+		return false
+	}
+	dxg, ctl := false, false
+	for _, n := range names {
+		dxg = dxg || n == "dxg"
+		ctl = ctl || n == "nvidiactl"
+	}
+	return dxg && !ctl
 }

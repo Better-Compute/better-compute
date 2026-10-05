@@ -51,6 +51,11 @@ type cdiDevice struct {
 
 type cdiEdits struct {
 	Env []string `json:"env"`
+	// What a hold copies from NVIDIA's spec for its devices (cdivendor.go), kept as written there.
+	DeviceNodes    []json.RawMessage `json:"deviceNodes,omitempty"`
+	Mounts         []json.RawMessage `json:"mounts,omitempty"`
+	Hooks          []json.RawMessage `json:"hooks,omitempty"`
+	AdditionalGIDs []uint32          `json:"additionalGids,omitempty"`
 }
 
 const (
@@ -339,7 +344,13 @@ func (d *devicesConverger) Plan(ctx context.Context, desired []byte) ([]converge
 						return fmt.Errorf("the slice of %s: %w", id, err)
 					}
 				}
-				spec, err := json.Marshal(newCDISpec(as, generation, atoms, mps))
+				vendor := loadVendorCDI(d.a.host.Path("/"))
+				if vendor != nil && as.GetBinding() != agentv1.Binding_BINDING_KUBERNETES {
+					if missing := vendor.missing(atoms); len(missing) > 0 {
+						d.a.log.Warn("NVIDIA's CDI spec does not name held devices: they get no device nodes until the container-toolkit unit regenerates it", "allocation", id, "devices", strings.Join(missing, ","))
+					}
+				}
+				spec, err := json.Marshal(newCDISpec(as, generation, atoms, mps, vendor))
 				if err != nil {
 					return err
 				}
@@ -516,7 +527,9 @@ func holdEnv(as *agentv1.DeviceAssignment, atoms []atom, mps bool) []string {
 	return env
 }
 
-func newCDISpec(as *agentv1.DeviceAssignment, generation uint64, atoms []atom, mps bool) cdiSpec {
+// newCDISpec is the hold's CDI spec. A hold (not a Kubernetes binding, whose plugin names NVIDIA's
+// devices itself) carries vendor's edits for its devices, so its CDI names are all a container needs.
+func newCDISpec(as *agentv1.DeviceAssignment, generation uint64, atoms []atom, mps bool, vendor *vendorCDI) cdiSpec {
 	spec := cdiSpec{
 		CdiVersion: "0.6.0",
 		Kind:       "bcd.dev/gpu",
@@ -533,17 +546,28 @@ func newCDISpec(as *agentv1.DeviceAssignment, generation uint64, atoms []atom, m
 	if as.GetBinding() == agentv1.Binding_BINDING_KUBERNETES {
 		// Only these holds' devices are advertised to the kubelet (kube.ReadHolds).
 		spec.Annotations[kube.AnnotationBinding] = kube.BindingKubernetes
+		vendor = nil
 	} else {
 		// One key for the whole hold: per-device env would repeat NVIDIA_VISIBLE_DEVICES and the last
 		// device would win. (A Kubernetes pod may get part of a hold: the plugin sets its own in
 		// Allocate.)
 		spec.ContainerEdits.Env = append(spec.ContainerEdits.Env, "NVIDIA_VISIBLE_DEVICES="+strings.Join(visibleDevices(atoms), ","))
+		if vendor != nil {
+			spec.CdiVersion = laterCDIVersion(spec.CdiVersion, vendor.version)
+			spec.ContainerEdits = mergeEdits(spec.ContainerEdits, vendor.common)
+		}
 	}
 	for _, a := range atoms {
-		spec.Devices = append(spec.Devices, cdiDevice{
+		dev := cdiDevice{
 			Name:        cdiDeviceName(a.id),
 			Annotations: map[string]string{annotationDeviceID: a.id},
-		})
+		}
+		if vendor != nil {
+			if e, ok := vendor.edits(a.visible); ok {
+				dev.ContainerEdits = mergeEdits(cdiEdits{}, e)
+			}
+		}
+		spec.Devices = append(spec.Devices, dev)
 	}
 	return spec
 }

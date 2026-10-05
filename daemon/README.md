@@ -397,6 +397,12 @@ events. It never drops a hold on its own.
   where the kubelet enforces their requests and limits. The booked limits still count in bcd's
   host admission.
 - Slots get `CUDA_MPS_PIPE_DIRECTORY` when the MPS daemon runs.
+- A `hold`'s spec copies, from NVIDIA's JSON CDI spec (`/etc/cdi/nvidia.json`, which the
+  `container-toolkit` unit generates with UUID names), the device nodes of exactly its devices and
+  the driver's common mounts and hooks. So `bcd.dev/gpu=<id>` alone gives a container its GPUs,
+  even with the toolkit in CDI mode, where `NVIDIA_VISIBLE_DEVICES` grants nothing. On WSL 2 the
+  spec's one device, `all` (`/dev/dxg`), stands for each GPU. Without a JSON spec (none generated,
+  or the GPU operator's YAML) a hold carries only `NVIDIA_VISIBLE_DEVICES`.
 - A `kubernetes` binding is marked `bcd.dev/binding` for the device plugin and has no
   `NVIDIA_VISIBLE_DEVICES` of its own.
 

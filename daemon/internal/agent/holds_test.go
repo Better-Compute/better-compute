@@ -99,7 +99,7 @@ func TestCDISpecOfPartsAndLimits(t *testing.T) {
 		a, _, _ := resolveAtom(inv, d)
 		atoms = append(atoms, a)
 	}
-	spec := newCDISpec(as, 7, atoms, true)
+	spec := newCDISpec(as, 7, atoms, true, nil)
 	raw, _ := json.Marshal(spec)
 	out := string(raw)
 	for _, want := range []string{
@@ -122,7 +122,7 @@ func TestCDISpecOfPartsAndLimits(t *testing.T) {
 	}
 	// A Kubernetes binding is marked for the device plugin, which sets the visible devices per pod.
 	as.Binding = agentv1.Binding_BINDING_KUBERNETES
-	raw, _ = json.Marshal(newCDISpec(as, 7, atoms, true))
+	raw, _ = json.Marshal(newCDISpec(as, 7, atoms, true, nil))
 	if kubeOut := string(raw); !strings.Contains(kubeOut, `"bcd.dev/binding":"kubernetes"`) || strings.Contains(kubeOut, "NVIDIA_VISIBLE_DEVICES") {
 		t.Errorf("a Kubernetes hold's spec: %s", kubeOut)
 	}
