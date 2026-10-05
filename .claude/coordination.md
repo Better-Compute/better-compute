@@ -86,6 +86,25 @@ group changes go through the user.
 | B. real-host bcd run (non-fakehw vs dev stack, host wiring, cgroup v2 slices, opt-in `tests/e2e/bcd-host-real*`), instance runtimes on real KVM (libvirt / cloud-hypervisor), metal on emulation | [752b12] (ex-0b2be8) | `daemon/internal/runtime/**`, runtime half of `agent/instances.go`, `examples/emulated-site/**` |
 | C. GPUs: nvidia-smi on real Blackwell/WSL (fixtures), NVML backend, hostconfig GPU units, CDI, `doctor_gpu.go`; later TPM (swtpm), k3s | [14f380] (ex-d320b8) | `daemon/internal/nvml/**`, `daemon/internal/hostconfig/**` |
 
+After a restart (same day): [199392] = ex-d83a36 (A, plus helper ops `dmi.read`/`hw.read`, reviewed by C), [3c9f90] =
+ex-14f380 (C; also took B's open items, since ex-752b12 is not running).
+
+C landed:
+- 0915ab7: nvml reads the real RTX 5090 (serial "0", R616 placeholders, kmd_version).
+- f84f1f9: doctor_gpu.go.
+- 6ecb860: CDI. A hold's spec carries the vendor's device nodes, mounts and hooks; /etc/cdi/nvidia.json uses UUID names.
+- 2e71a60: no Linux driver on WSL; GPU units planned against the real host.
+- 9a6fee9: light GPU samples.
+
+Then:
+- an unprivileged bcd (no root, no [helper]) claims no GPU binding capability and fails holds as node-unprivileged; the real-host e2e is 3/3 green;
+- VFIO turns persistence mode off around the nvidia unbind.
+
+Open:
+- libvirt managed hostdevs need the same persistence toggle, root side (the helper's libvirt.start).
+- A real CDI container run needs nvidia-ctk; installing it needs the user.
+- The NVML backend needs a dependency the user must approve.
+
 ## Round 5: the complete node daemon (PLAN §3.8, v1.1), orchestrator [595a2f] (2026-09-25)
 
 User request: build out the full compute daemon for sandboxes and GPU nodes, with memory, and with Kubernetes support.
