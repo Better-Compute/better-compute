@@ -42,6 +42,9 @@ var (
 type HWInfo struct {
 	Dimms []*inventory.Dimm                 `json:"dimms,omitempty"`
 	NVMe  map[string]*inventory.SmartStatus `json:"nvme,omitempty"`
+	// BMC is what the BMC says in-band (inventory.IPMIBMC: reads only, its command set enforced in
+	// the device layer). Inventory only: never an attestation input.
+	BMC *inventory.BmcSection `json:"bmc,omitempty"`
 }
 
 func (s *Server) hwRead(ctx context.Context, req Request) (*HWInfo, error) {
@@ -55,6 +58,12 @@ func (s *Server) hwRead(ctx context.Context, req Request) (*HWInfo, error) {
 		base = "/"
 	}
 	out := &HWInfo{Dimms: inventory.DimmsFromSMBIOS(readMemoryDevices(filepath.Join(base, "sys", "firmware", "dmi", "entries")))}
+
+	bmc := s.BMC
+	if bmc == nil {
+		bmc = inventory.IPMIBMC
+	}
+	out.BMC = within(ctx, bmc)
 
 	health := s.NVMeHealth
 	if health == nil {
@@ -75,16 +84,7 @@ func (s *Server) hwRead(ctx context.Context, req Request) (*HWInfo, error) {
 		if len(out.NVMe) >= maxHWEntries || ctx.Err() != nil {
 			break // the rest stay unknown, as for an unprivileged read
 		}
-		// The command carries its own 5 s timeout; should a driver ignore it, the op still answers by
-		// its budget (the stuck read finishes, or not, on its own, as vfio's unbind does).
-		done := make(chan *inventory.SmartStatus, 1)
-		go func() { done <- health(ctrl) }()
-		var h *inventory.SmartStatus
-		select {
-		case h = <-done:
-		case <-ctx.Done():
-		}
-		if h != nil {
+		if h := within(ctx, func() *inventory.SmartStatus { return health(ctrl) }); h != nil {
 			if out.NVMe == nil {
 				out.NVMe = map[string]*inventory.SmartStatus{}
 			}
@@ -92,6 +92,23 @@ func (s *Server) hwRead(ctx context.Context, req Request) (*HWInfo, error) {
 		}
 	}
 	return out, nil
+}
+
+// within runs a device read against the op's budget. The reads carry their own timeouts (5 s per
+// NVMe command or IPMI request); should a driver ignore one, the op still answers by its budget and
+// the stuck read finishes, or not, on its own, as vfio's unbind does.
+func within[T any](ctx context.Context, read func() *T) *T {
+	if ctx.Err() != nil {
+		return nil
+	}
+	done := make(chan *T, 1)
+	go func() { done <- read() }()
+	select {
+	case v := <-done:
+		return v
+	case <-ctx.Done():
+		return nil
+	}
 }
 
 // readMemoryDevices reads up to maxHWEntries type 17 structures, each a regular file (never

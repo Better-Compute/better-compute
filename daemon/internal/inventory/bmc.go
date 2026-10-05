@@ -76,6 +76,22 @@ const (
 	ipmiLANParamMAC    = 5
 )
 
+// ipmiAllowed is the whole command set bcd ever sends a BMC, all reads: Get Device ID, Get Channel
+// Info, and Get LAN Configuration Parameters for the IP address (3) and MAC (5). The device layer
+// refuses anything else before it reaches the BMC, so no later change can send a Set by accident.
+func ipmiAllowed(netfn, cmd byte, data []byte) error {
+	switch {
+	case netfn == ipmiNetFnApp && cmd == ipmiGetDeviceID && len(data) == 0:
+		return nil
+	case netfn == ipmiNetFnApp && cmd == ipmiGetChannelInfo && len(data) == 1 && data[0] >= 1 && data[0] <= 11:
+		return nil
+	case netfn == ipmiNetFnTransport && cmd == ipmiGetLANConfig && len(data) == 4 && data[0] >= 1 && data[0] <= 11 &&
+		(data[1] == ipmiLANParamIP || data[1] == ipmiLANParamMAC) && data[2] == 0 && data[3] == 0:
+		return nil
+	}
+	return fmt.Errorf("ipmi: netfn %#02x cmd %#02x is not a command bcd sends", netfn, cmd)
+}
+
 // call strips a successful completion code.
 func ipmiCall(t ipmiTransport, netfn, cmd byte, data []byte) ([]byte, error) {
 	resp, err := t.request(netfn, cmd, data)
@@ -89,6 +105,27 @@ func ipmiCall(t ipmiTransport, netfn, cmd byte, data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("ipmi: completion code %#02x", resp[0])
 	}
 	return resp[1:], nil
+}
+
+// unicastMAC renders a BMC's MAC, dropping what no NIC answers to (zero, multicast, broadcast).
+func unicastMAC(b []byte) string {
+	if len(b) != 6 || b[0]&0x01 != 0 || string(b) == "\x00\x00\x00\x00\x00\x00" {
+		return ""
+	}
+	return net.HardwareAddr(b).String()
+}
+
+// hostIPv4 renders a BMC's IPv4 address, dropping what cannot be a host's (unset, loopback,
+// multicast, broadcast).
+func hostIPv4(b []byte) string {
+	if len(b) != 4 {
+		return ""
+	}
+	ip := net.IPv4(b[0], b[1], b[2], b[3])
+	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() || ip.Equal(net.IPv4bcast) {
+		return ""
+	}
+	return ip.String()
 }
 
 // ipmiVendors names IANA enterprise numbers of BMC firmware makers.
@@ -110,6 +147,9 @@ func queryBMC(t ipmiTransport) (*BmcSection, error) {
 		// Major in binary (bit 7 is "device available"), minor in BCD: 1.73 is 0x01 0x73.
 		FirmwareVersion: fmt.Sprintf("%d.%02x", id[2]&0x7f, id[3]),
 	}
+	if id[3]>>4 > 9 || id[3]&0x0f > 9 {
+		s.FirmwareVersion = fmt.Sprintf("%d.%d", id[2]&0x7f, id[3]) // not BCD after all
+	}
 	iana := uint32(id[6]) | uint32(id[7])<<8 | uint32(id[8]&0x0f)<<16
 	if s.Vendor = ipmiVendors[iana]; s.Vendor == "" {
 		s.Vendor = fmt.Sprintf("IANA %d", iana)
@@ -121,14 +161,10 @@ func queryBMC(t ipmiTransport) (*BmcSection, error) {
 			continue
 		}
 		if mac, err := ipmiCall(t, ipmiNetFnTransport, ipmiGetLANConfig, []byte{ch, ipmiLANParamMAC, 0, 0}); err == nil && len(mac) >= 7 {
-			if hw := net.HardwareAddr(mac[1:7]); hw.String() != "00:00:00:00:00:00" {
-				s.Mac = hw.String()
-			}
+			s.Mac = unicastMAC(mac[1:7])
 		}
 		if ip, err := ipmiCall(t, ipmiNetFnTransport, ipmiGetLANConfig, []byte{ch, ipmiLANParamIP, 0, 0}); err == nil && len(ip) >= 5 {
-			if addr := net.IP(ip[1:5]); !addr.IsUnspecified() {
-				s.Ip = addr.String()
-			}
+			s.Ip = hostIPv4(ip[1:5])
 		}
 		break
 	}

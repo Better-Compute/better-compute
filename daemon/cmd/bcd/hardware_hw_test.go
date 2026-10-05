@@ -15,6 +15,7 @@ func TestWithHelperHW(t *testing.T) {
 		return &helper.HWInfo{
 			Dimms: []*inventory.Dimm{{Slot: "A1"}},
 			NVMe:  map[string]*inventory.SmartStatus{"nvme0": {Healthy: false}, "nvme1": {Healthy: true}},
+			BMC:   &inventory.BmcSection{Vendor: "Dell", Mac: "d0:8e:79:00:00:01"},
 		}
 	}
 	local := func(ctrl string) *inventory.SmartStatus {
@@ -33,6 +34,9 @@ func TestWithHelperHW(t *testing.T) {
 	if h := c.NVMeHealth("nvme1"); h == nil || h.Healthy {
 		t.Fatalf("nvme1 = %+v (the local read)", h)
 	}
+	if b := c.BMC(); b == nil || b.Mac != "d0:8e:79:00:00:01" {
+		t.Fatalf("bmc = %+v", b)
+	}
 	if c.NVMeHealth("nvme9") != nil {
 		t.Fatal("a controller hw.read does not know")
 	}
@@ -41,10 +45,10 @@ func TestWithHelperHW(t *testing.T) {
 	}
 	// A helper that fails reads as none.
 	failed := withHelperHW(inventory.Collector{}, func() *helper.HWInfo { return nil })
-	if failed.Dimms() != nil || failed.NVMeHealth("nvme0") != nil {
+	if failed.Dimms() != nil || failed.NVMeHealth("nvme0") != nil || failed.BMC() != nil {
 		t.Fatal("a failed hw.read supplied something")
 	}
-	if c := withHelperHW(inventory.Collector{}, nil); c.Dimms != nil || c.NVMeHealth != nil {
+	if c := withHelperHW(inventory.Collector{}, nil); c.Dimms != nil || c.NVMeHealth != nil || c.BMC != nil {
 		t.Fatal("no helper, yet hooks")
 	}
 }

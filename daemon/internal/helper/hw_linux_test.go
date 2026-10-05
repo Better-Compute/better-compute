@@ -28,6 +28,8 @@ func serveHW(t *testing.T, allowed func(Peer) error) (Client, string, *[]string)
 		*asked = append(*asked, ctrl)
 		wear := uint32(len(*asked))
 		return &inventory.SmartStatus{Healthy: true, WearPercent: &wear}
+	}, BMC: func() *inventory.BmcSection {
+		return &inventory.BmcSection{Vendor: "Dell", FirmwareVersion: "7.10", Mac: "d0:8e:79:00:00:01", Ip: "10.0.0.5", Ipmi: true}
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -80,6 +82,9 @@ func TestHWReadReturnsParsedDIMMsAndNVMeHealth(t *testing.T) {
 	}
 	if len(got.Dimms) != 2 || got.Dimms[0].Slot != "A1" || got.Dimms[0].Serial != "SER0" || got.Dimms[0].SizeBytes != 16<<30 || got.Dimms[1].Slot != "B1" {
 		t.Fatalf("dimms = %+v", got.Dimms)
+	}
+	if b := got.BMC; b == nil || b.Vendor != "Dell" || b.Mac != "d0:8e:79:00:00:01" || b.Ip != "10.0.0.5" || b.FirmwareVersion != "7.10" {
+		t.Fatalf("bmc = %+v", got.BMC)
 	}
 	if strings.Join(*asked, ",") != "nvme0,nvme1" || len(got.NVMe) != 2 || got.NVMe["nvme0"] == nil || !got.NVMe["nvme0"].Healthy || *got.NVMe["nvme1"].WearPercent != 2 {
 		t.Fatalf("asked %v, nvme = %+v", *asked, got.NVMe)

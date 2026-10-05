@@ -62,12 +62,26 @@ var (
 	_ [48]byte = [unsafe.Sizeof(ipmiRecv{})]byte{}
 )
 
+// ipmiDevice is the one place bcd writes to the IPMI device: every request is checked against
+// ipmiAllowed first, and the device is opened for that request only.
 type ipmiDevice struct {
-	fd    int
+	path  string
 	msgid int64
 }
 
 func (d *ipmiDevice) request(netfn, cmd byte, data []byte) ([]byte, error) {
+	if err := ipmiAllowed(netfn, cmd, data); err != nil {
+		return nil, err
+	}
+	fd, err := unix.Open(d.path, unix.O_RDWR|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(fd)
+	return d.exchange(fd, netfn, cmd, data)
+}
+
+func (d *ipmiDevice) exchange(fd int, netfn, cmd byte, data []byte) ([]byte, error) {
 	addr := &ipmiSystemInterfaceAddr{AddrType: 0x0c, Channel: 0x0f}
 	d.msgid++
 	req := &ipmiReq{Addr: unsafe.Pointer(addr), AddrLen: uint32(unsafe.Sizeof(*addr)), Msgid: d.msgid,
@@ -77,7 +91,7 @@ func (d *ipmiDevice) request(netfn, cmd byte, data []byte) ([]byte, error) {
 	if len(data) > 0 {
 		req.Msg.Data = unsafe.Pointer(&buf[0])
 	}
-	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(d.fd), ipmictlSendCommand, uintptr(unsafe.Pointer(req))); errno != 0 {
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), ipmictlSendCommand, uintptr(unsafe.Pointer(req))); errno != 0 {
 		return nil, errno
 	}
 	runtime.KeepAlive(addr)
@@ -87,7 +101,7 @@ func (d *ipmiDevice) request(netfn, cmd byte, data []byte) ([]byte, error) {
 		if left <= 0 {
 			return nil, errors.New("ipmi: no response from the BMC within 5s")
 		}
-		fds := []unix.PollFd{{Fd: int32(d.fd), Events: unix.POLLIN}}
+		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
 		if n, err := unix.Poll(fds, int(left/time.Millisecond)+1); err != nil && err != unix.EINTR {
 			return nil, err
 		} else if n == 0 {
@@ -96,7 +110,7 @@ func (d *ipmiDevice) request(netfn, cmd byte, data []byte) ([]byte, error) {
 		raddr := make([]byte, ipmiMaxAddr)
 		resp := make([]byte, ipmiMaxMsg)
 		recv := &ipmiRecv{Addr: unsafe.Pointer(&raddr[0]), AddrLen: ipmiMaxAddr, Msg: ipmiMsg{Data: unsafe.Pointer(&resp[0]), DataLen: ipmiMaxMsg}}
-		_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(d.fd), ipmictlReceiveMsgTrunc, uintptr(unsafe.Pointer(recv)))
+		_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), ipmictlReceiveMsgTrunc, uintptr(unsafe.Pointer(recv)))
 		runtime.KeepAlive(raddr)
 		runtime.KeepAlive(resp)
 		if errno != 0 && errno != unix.EMSGSIZE {
@@ -116,12 +130,10 @@ func (d *ipmiDevice) request(netfn, cmd byte, data []byte) ([]byte, error) {
 // IPMIBMC asks the BMC through the kernel's IPMI interface (/dev/ipmi0; root) for its vendor,
 // firmware, MAC and address. nil without an IPMI interface or privilege.
 func IPMIBMC() *BmcSection {
-	fd, err := unix.Open("/dev/ipmi0", unix.O_RDWR|unix.O_CLOEXEC, 0)
-	if err != nil {
+	if err := unix.Access("/dev/ipmi0", unix.R_OK|unix.W_OK); err != nil {
 		return nil
 	}
-	defer unix.Close(fd)
-	s, err := queryBMC(&ipmiDevice{fd: fd})
+	s, err := queryBMC(&ipmiDevice{path: "/dev/ipmi0"})
 	if err != nil {
 		return nil
 	}

@@ -81,6 +81,54 @@ func TestQueryBMC(t *testing.T) {
 	}
 }
 
+// The command set is reads only; the rest never leaves bcd.
+func TestIPMIAllowed(t *testing.T) {
+	for _, ok := range [][]byte{
+		{0x06, 0x01}, {0x06, 0x42, 1}, {0x06, 0x42, 11}, {0x0c, 0x02, 2, 3, 0, 0}, {0x0c, 0x02, 11, 5, 0, 0},
+	} {
+		if err := ipmiAllowed(ok[0], ok[1], ok[2:]); err != nil {
+			t.Errorf("% x refused: %v", ok, err)
+		}
+	}
+	for _, bad := range [][]byte{
+		{0x0c, 0x01, 1, 3, 10, 0, 0, 9}, // Set LAN Configuration Parameters
+		{0x00, 0x02, 0x00},              // Chassis Control (power off)
+		{0x06, 0x02},                    // Cold Reset
+		{0x06, 0x43, 1, 1, 1, 1},        // Set User Access
+		{0x0c, 0x02, 1, 4, 0, 0},        // Get LAN param 4 (not ours)
+		{0x0c, 0x02, 1, 3, 1, 0},        // a set selector
+		{0x06, 0x42, 0}, {0x06, 0x42, 15}, {0x06, 0x01, 0},
+	} {
+		if err := ipmiAllowed(bad[0], bad[1], bad[2:]); err == nil {
+			t.Errorf("% x allowed", bad)
+		}
+	}
+}
+
+func TestBMCAddressValidation(t *testing.T) {
+	for in, want := range map[string]string{
+		"\x3c\xec\xef\x12\x34\x56": "3c:ec:ef:12:34:56", "\x00\x00\x00\x00\x00\x00": "", "\xff\xff\xff\xff\xff\xff": "",
+		"\x01\x00\x5e\x00\x00\x01": "", "\x3c\xec": "",
+	} {
+		if got := unicastMAC([]byte(in)); got != want {
+			t.Errorf("unicastMAC(% x) = %q", in, got)
+		}
+	}
+	for in, want := range map[string]string{
+		"\x0a\x00\x07\x15": "10.0.7.21", "\x00\x00\x00\x00": "", "\x7f\x00\x00\x01": "", "\xe0\x00\x00\x01": "",
+		"\xff\xff\xff\xff": "", "\x0a\x00": "",
+	} {
+		if got := hostIPv4([]byte(in)); got != want {
+			t.Errorf("hostIPv4(% x) = %q", in, got)
+		}
+	}
+	notBCD := supermicroBMC()
+	notBCD.answers[ipmiKey(0x06, 0x01)] = []byte{0x00, 0x20, 0x01, 0x03, 0x1a, 0x02, 0xbf, 0x7c, 0x2a, 0x00, 0x09, 0x18}
+	if s, _ := queryBMC(notBCD); s.FirmwareVersion != "3.26" {
+		t.Fatalf("non-BCD minor = %q", s.FirmwareVersion)
+	}
+}
+
 func TestCollectorBMC(t *testing.T) {
 	root := t.TempDir()
 	mk := func(p string) {

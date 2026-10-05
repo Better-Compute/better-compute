@@ -213,6 +213,8 @@ type Server struct {
 	KnownGPU func(uuid string) bool
 	// NVMeHealth reads one controller's health for hw.read (nil: inventory.NVMeHealth; tests fake it).
 	NVMeHealth func(controller string) *inventory.SmartStatus
+	// BMC asks the BMC in-band for hw.read (nil: inventory.IPMIBMC; tests fake it).
+	BMC func() *inventory.BmcSection
 	// Log records every operation and refusal.
 	Log func(msg string, args ...any)
 	// Update is self-update's privileged half (update.*); nil refuses them.

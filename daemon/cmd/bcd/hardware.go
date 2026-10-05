@@ -76,6 +76,18 @@ func withHelperHW(c inventory.Collector, source func() *helper.HWInfo) inventory
 		}
 		return nil
 	}
+	localBMC := c.BMC
+	c.BMC = func() *inventory.BmcSection {
+		if localBMC != nil {
+			if b := localBMC(); b != nil {
+				return b
+			}
+		}
+		if hw := get(); hw != nil {
+			return hw.BMC
+		}
+		return nil
+	}
 	local := c.NVMeHealth
 	c.NVMeHealth = func(ctrl string) *inventory.SmartStatus {
 		if local != nil {
