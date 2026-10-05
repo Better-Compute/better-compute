@@ -72,6 +72,20 @@ multi-gateway 10k + nightly sim ([3afca2]), spot/node leases/pool-lease placer (
 - Orchestrator [37c0ab]: installs/lockfile, core/protocol additive changes, server index/options/api/context.
 Open, unassigned: W1 Go daemon (needs Go installed), real-Postgres runs (no Postgres here), D15 hardware gates.
 
+## Round 6: the daemon on real hardware (2026-10-04, no orchestrator; agreed by the three sessions)
+
+User request: "continue building the daemon … to work on real hardware". The machine has WSL Ubuntu 26.04 (kernel
+6.18) with an RTX 5090 through /dev/dxg (nvidia-smi + libnvidia-ml.so.1 in /usr/lib/wsl/lib, no PCI sysfs, no
+/dev/nvidia*), /dev/kvm (AMD svm, nested=1), /dev/vfio, systemd PID 1, cgroup v2, 192 CPUs, 128 GB and no TPM. There is
+no passwordless sudo and the WSL user is not in group kvm, so installs (qemu/libvirt/cloud-hypervisor/swtpm/k3s) and
+group changes go through the user.
+
+| Area | Owner (former id) | Files |
+|---|---|---|
+| A. real-host inventory, `bcd hardware`, doctor preflight (KVM/IOMMU/VFIO/cgroup v2/nftables) | [d83a36] (ex-927015) | `daemon/internal/inventory/**`, new `cmd/bcd` hardware file, doctor checks |
+| B. real-host bcd run (non-fakehw vs dev stack, host wiring, cgroup v2 slices, opt-in `tests/e2e/bcd-host-real*`), instance runtimes on real KVM (libvirt / cloud-hypervisor), metal on emulation | [752b12] (ex-0b2be8) | `daemon/internal/runtime/**`, runtime half of `agent/instances.go`, `examples/emulated-site/**` |
+| C. GPUs: nvidia-smi on real Blackwell/WSL (fixtures), NVML backend, hostconfig GPU units, CDI, `doctor_gpu.go`; later TPM (swtpm), k3s | [14f380] (ex-d320b8) | `daemon/internal/nvml/**`, `daemon/internal/hostconfig/**` |
+
 ## Round 5: the complete node daemon (PLAN §3.8, v1.1), orchestrator [595a2f] (2026-09-25)
 
 User request: build out the full compute daemon for sandboxes and GPU nodes, with memory, and with Kubernetes support.
