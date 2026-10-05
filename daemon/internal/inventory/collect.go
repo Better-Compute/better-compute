@@ -24,6 +24,14 @@ type Collector struct {
 	Hostname func() string
 	// Now stamps CollectedAt (default time.Now).
 	Now func() time.Time
+	// Trace, when set, is told every absolute path the collector looks at (read, stat, readlink,
+	// listing), before it looks: Capture uses it to copy exactly those paths into a fixture tree. A
+	// listed directory comes with a trailing slash.
+	Trace func(abs string)
+	// GPUs, when set, supplies the GPU section when /proc/driver/nvidia lists none: WSL's paravirtual
+	// GPU (/dev/dxg) has no procfs entry and no PCI sysfs, so nvidia-smi is the only source there. Its
+	// section is taken as it comes (bus ids may name a virtual bus).
+	GPUs func() *GpusSection
 }
 
 // Collect gathers every section and canonicalizes the result.
@@ -43,11 +51,17 @@ func (c Collector) Collect() (*NodeInventory, error) {
 		Gpus:          c.gpus(),
 		Os:            c.os(),
 	}
+	if inv.Gpus == nil && c.GPUs != nil {
+		inv.Gpus = c.GPUs()
+	}
 	Canonicalize(inv)
 	return inv, nil
 }
 
 func (c Collector) p(abs string) string {
+	if c.Trace != nil {
+		c.Trace(abs)
+	}
 	if c.Root == "" {
 		return abs
 	}
@@ -91,7 +105,8 @@ func (c Collector) linkPath(abs string) string {
 }
 
 func (c Collector) list(abs string) []string {
-	entries, err := os.ReadDir(c.p(abs))
+	// The trailing slash tells Trace this is a listing (Capture copies the entries too).
+	entries, err := os.ReadDir(c.p(abs + "/"))
 	if err != nil {
 		return nil
 	}
