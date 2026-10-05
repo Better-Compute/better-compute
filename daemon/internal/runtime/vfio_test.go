@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,5 +125,25 @@ func TestNoMemorySnapshotOfAnInstanceWithGPUs(t *testing.T) {
 	}
 	if _, err := c.Snapshot(t.Context(), r.ID, true, "", nil); err != ErrMemorySnapshotWithGPUs {
 		t.Fatalf("memory snapshot with a GPU: %v", err)
+	}
+}
+
+// nvidia-persistenced holds GPUs open: the GPU's persistence goes off before its unbind from nvidia
+// and on again once nvidia has it back; the audio function and a failing nvidia-smi are no matter.
+func TestVFIOTogglesPersistenceAroundTheGPU(t *testing.T) {
+	v := fakeSysfs(t)
+	var calls []string
+	v.Persistence = func(addr string, on bool) error {
+		calls = append(calls, fmt.Sprintf("%s=%v", addr, on))
+		return errors.New("nvidia-smi: not found")
+	}
+	if err := v.Bind("0000:3b:00.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Release("0000:3b:00.0"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(calls, " "); got != "0000:3b:00.0=false 0000:3b:00.0=true" {
+		t.Fatalf("persistence calls: %s", got)
 	}
 }

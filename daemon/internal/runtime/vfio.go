@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -24,6 +25,29 @@ type SysfsVFIO struct {
 	probed func(dev string)
 	// blocked, in tests, stands for an unbind the driver never completes.
 	blocked chan struct{}
+	// Persistence sets a GPU's persistence mode (default: nvidia-smi -i <addr> -pm 0|1 on the real
+	// sysfs, nothing under a fake Root). nvidia-persistenced holds every GPU open in persistence mode,
+	// so the nvidia driver's unbind would wait for it until UnbindTimeout: Bind turns it off for the
+	// GPU first, and Release turns it back on once the driver has the GPU again. Best effort both ways.
+	Persistence func(addr string, on bool) error
+}
+
+func (v SysfsVFIO) persistence(addr string, on bool) error {
+	if v.Persistence != nil {
+		return v.Persistence(addr, on)
+	}
+	if v.Root != "" && v.Root != "/" {
+		return nil
+	}
+	mode := "0"
+	if on {
+		mode = "1"
+	}
+	out, err := exec.Command("nvidia-smi", "-i", addr, "-pm", mode).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("nvidia-smi -pm %s: %v: %s", mode, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // unbind writes dev to its driver's unbind file, but waits at most UnbindTimeout. A driver's remove
@@ -113,6 +137,11 @@ func (v SysfsVFIO) Bind(addr string) error {
 			return fmt.Errorf("override %s's driver: %w", dev, err)
 		}
 		if current := v.driver(dev); current != "" {
+			if current == "nvidia" {
+				// Ask nvidia-persistenced to let go of this GPU first; if that fails, the unbind's
+				// timeout still names it.
+				_ = v.persistence(dev, false)
+			}
 			// A GPU the host driver still uses refuses to unbind (or blocks): holds and VMs never
 			// share a GPU (both converger check it), so nothing of ours runs on it.
 			if err := v.unbind(dev); err != nil {
@@ -152,6 +181,10 @@ func (v SysfsVFIO) Release(addr string) error {
 		errs = append(errs, v.write("/sys/bus/pci/drivers_probe", dev))
 		if err := errors.Join(errs...); err != nil && first == nil {
 			first = fmt.Errorf("release %s: %w", dev, err)
+		}
+		if v.driver(dev) == "nvidia" {
+			// Back on the GPU driver: persistence mode on again, as bcd doctor expects.
+			_ = v.persistence(dev, true)
 		}
 	}
 	return first
