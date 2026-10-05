@@ -272,7 +272,9 @@ only `bcd-alloc-*.slice`, emptied before removal), the root-only DMI values (`dm
 arguments; product UUID, serials and asset tags from a fixed list under `/sys/class/dmi/id`, no
 symlinks, 128 printable bytes each), the root-only hardware details (`hw.read`: no arguments;
 DIMMs parsed from the SMBIOS type 17 entries and each NVMe controller's SMART / Health log page,
-both enumerated by the helper, parsed values only, at most 64 of each), and self-update (`update.*`: the node
+both enumerated by the helper, parsed values only, at most 64 of each, and the BMC's vendor,
+firmware, MAC and address over in-band IPMI, whose device layer sends only Get Device ID, Get
+Channel Info and Get LAN Configuration Parameters 3 and 5), and self-update (`update.*`: the node
 downloads; the helper verifies the manifest with its own pins and floor, re-hashes the staged
 binary into root's slots, swaps, and swaps back on its own deadline). Peers are checked by
 SO_PEERCRED and `/proc/<pid>/exe`; requests are versioned, strictly decoded JSON; every operation
