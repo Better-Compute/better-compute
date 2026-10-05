@@ -113,6 +113,11 @@ type Options struct {
 	// Kubernetes DaemonSet beside the GPU operator). No NodeSpec.host unit is applied, and the host
 	// section reports HostManagedExternally.
 	ExternalHost bool
+	// Unprivileged: bcd node runs as an ordinary user without [helper] on a real host, so it can
+	// neither write /etc/cdi nor create hold slices. Hello then claims no GPU binding capabilities
+	// (capacity places nothing that needs them here), and a hold that arrives anyway fails at once
+	// with reason "node-unprivileged" instead of retrying every 30 s.
+	Unprivileged bool
 	// GPUSampler reads the GPUs' live state for the OTLP export (NodeSpec.telemetry); nil exports no
 	// bcd.gpu.* readings.
 	GPUSampler GPUSampler

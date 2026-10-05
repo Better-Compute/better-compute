@@ -172,6 +172,27 @@ describe.skipIf(!enabled)('bcd on the real host (non-fakehw build)', () => {
       toTenantId: dev.rootTenantId,
       quota: { gpu: 8 },
     });
+    // bcd runs here as an ordinary user without [helper] (no sudo in CI or this WSL box): it cannot
+    // write /etc/cdi or create hold slices, so it must not claim it can, and nothing may bind on it.
+    const unprivileged = sh('id -u') !== '0';
+    const hasCap = (info.labels ?? []).some((l: { key: string }) => l.key === 'bc.dev/cap.devices.limits');
+    if (unprivileged) {
+      expect(hasCap, 'an unprivileged bcd advertised devices.limits').toBe(false);
+      const pending = await api.reservations.create(dev.root, {
+        tenantId: dev.rootTenantId,
+        poolId,
+        devices: [{ class: 'gpu', count: 1 }],
+        duration: '1h',
+        idempotencyKey: `bcd-real-unprivileged-${Date.now()}`,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 10_000));
+      const after = await api.reservations.get(dev.root, { tenantId: dev.rootTenantId, reservationId: pending.id });
+      process.stderr.write(`[real host] unprivileged bcd: reservation stays ${after.state} (no node may enforce it)\n`);
+      expect(after.state).not.toBe('binding');
+      expect(after.state).not.toBe('active');
+      await api.reservations.cancel?.(dev.root, { tenantId: dev.rootTenantId, reservationId: pending.id }).catch(() => {});
+      return;
+    }
     const created = await api.reservations.create(dev.root, {
       tenantId: dev.rootTenantId,
       poolId,

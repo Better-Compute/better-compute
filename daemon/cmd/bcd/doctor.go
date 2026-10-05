@@ -168,6 +168,15 @@ func hostChecks(cfg *config.Config) []doctorCheck {
 	if cfg == nil {
 		return out
 	}
+	if !devBuild {
+		gpus := 0
+		for _, c := range out {
+			if c.check == "gpu" {
+				gpus++
+			}
+		}
+		out = append(out, gpuPrivilegeCheck(cfg.Helper.Socket, os.Geteuid(), gpus)...)
+	}
 	out = append(out, hostKubeChecks(cfg)...)
 	out = append(out, helperRuntimeChecks(cfg, exec.LookPath, realLibvirtHost)...)
 	out = append(out, tssCheck(cfg, userInGroup)...)

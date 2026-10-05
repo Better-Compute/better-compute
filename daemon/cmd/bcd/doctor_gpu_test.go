@@ -155,3 +155,17 @@ func TestGpuErrorHint(t *testing.T) {
 func gpuDoctorWith(err error) []doctorCheck {
 	return gpuDoctor(func(context.Context) (*nvml.Snapshot, error) { return nil, err })
 }
+
+func TestGpuPrivilegeCheck(t *testing.T) {
+	if got := gpuPrivilegeCheck("", 1000, 1); len(got) != 1 || got[0].status != "warn" || !strings.Contains(got[0].detail, "uid 1000 without [helper]") {
+		t.Fatalf("unprivileged = %+v", got)
+	}
+	for _, c := range []struct {
+		socket     string
+		euid, gpus int
+	}{{"", 0, 1}, {"/run/bcd-helper.sock", 1000, 1}, {"", 1000, 0}} {
+		if got := gpuPrivilegeCheck(c.socket, c.euid, c.gpus); got != nil {
+			t.Fatalf("%+v = %+v", c, got)
+		}
+	}
+}

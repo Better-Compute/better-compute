@@ -188,8 +188,10 @@ func (a *Agent) hello() (*agentv1.Hello, error) {
 			ConfigSchemaJson: `{"type":"object"}`,
 		})
 	}
-	if gpus > 0 {
+	if gpus > 0 && !a.o.Unprivileged {
 		h.Capabilities = append(h.Capabilities, "cdi", DeviceLimitsCapability, KubernetesBindingCapability)
+	}
+	if gpus > 0 {
 		if nvml {
 			h.Capabilities = append(h.Capabilities, "nvml")
 		}

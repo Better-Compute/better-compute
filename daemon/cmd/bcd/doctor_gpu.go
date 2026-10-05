@@ -35,6 +35,16 @@ func gpuDoctor(sampler agent.GPUSampler) []doctorCheck {
 	return append(out, gpuHostChecks(gpuHostRoot, snap, systemdActive)...)
 }
 
+// gpuPrivilegeCheck: a GPU host whose bcd node would run as an ordinary user without [helper] cannot
+// bind GPUs (no /etc/cdi, no hold slices), so it advertises no binding capability and nothing is
+// placed on it. Say so where an operator looks, not only in the placement's silence.
+func gpuPrivilegeCheck(helperSocket string, euid, gpus int) []doctorCheck {
+	if gpus == 0 || euid == 0 || helperSocket != "" {
+		return nil
+	}
+	return []doctorCheck{{"warn", "gpu-binding", fmt.Sprintf("%d GPU(s), but bcd runs as uid %d without [helper]: it cannot write /etc/cdi or create hold slices, so no GPU reservation is placed here (run bcd node as root, or configure [helper])", gpus, euid)}}
+}
+
 // gpuErrorHint adds what to do to the nvidia-smi failures seen on real hosts.
 func gpuErrorHint(err error) error {
 	msg := err.Error()

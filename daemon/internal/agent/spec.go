@@ -264,10 +264,14 @@ func (a *Agent) convergeOnce(ctx context.Context) bool {
 			st.State = agentv1.SectionState_SECTION_STATE_PROGRESSING
 			st.Reason = "Retrying"
 			st.Message = errText(r.Err)
+			// The status report carries it to the control plane; the node's own log must say it too, or
+			// an operator on the host sees only "progressing" every 30 s.
+			a.log.Warn("section retrying", "section", string(r.Section), "generation", generation, "error", st.Message)
 		case converge.StatusFailed:
 			st.State = agentv1.SectionState_SECTION_STATE_FAILED
 			st.Reason = failedReason(r.Section)
 			st.Message = errText(r.Err)
+			a.log.Error("section failed", "section", string(r.Section), "generation", generation, "reason", st.Reason, "error", st.Message)
 		case converge.StatusUnsupported:
 			st.State = agentv1.SectionState_SECTION_STATE_UNSUPPORTED
 			if r.Section == converge.SectionHost && a.o.ExternalHost {

@@ -317,6 +317,12 @@ func (d *devicesConverger) Plan(ctx context.Context, desired []byte) ([]converge
 			failures = append(failures, failure{id, "unsupported-binding", fmt.Sprintf("binding %s is not supported", as.GetBinding())})
 			continue
 		}
+		if d.a.o.Unprivileged {
+			// Every bind writes /etc/cdi (and a slice for limits): root's work. Failing it now lets the
+			// control plane re-place it, where retrying would leave it binding forever.
+			failures = append(failures, failure{id, "node-unprivileged", "bcd node runs without root and without [helper]: it cannot write /etc/cdi or create hold slices (run bcd node as root, or under bcd helper)"})
+			continue
+		}
 		atoms, reason, message := resolve(as)
 		if reason != "" {
 			failures = append(failures, failure{id, reason, message})
