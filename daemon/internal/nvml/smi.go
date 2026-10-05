@@ -53,7 +53,8 @@ type Sample struct {
 	SMClockMHz, MemClockMHz   uint32
 	// Performance state, e.g. "P0".
 	PState string
-	// Processes running on the GPU (compute and graphics).
+	// Compute processes on the GPU (CUDA, MPS clients). Graphics-only ones (a desktop compositor, a
+	// workstation's or WSL's display) are not workloads and are left out.
 	Processes int
 	// MIG devices' memory, by MIG UUID (or "gi<g>/ci<c>" when -L gave no UUID).
 	Mig []MigSample
@@ -261,7 +262,10 @@ type smiGPU struct {
 		Memory string `xml:"mem_clock"`
 	} `xml:"clocks"`
 	Processes struct {
-		Infos []struct{} `xml:"process_info"`
+		Infos []struct {
+			// "C" compute, "G" graphics, "C+G", "M+C" (MPS).
+			Type string `xml:"type"`
+		} `xml:"process_info"`
 	} `xml:"processes"`
 }
 
@@ -492,7 +496,7 @@ func (l *smiLog) snapshot() *Snapshot {
 			PowerLimitMw:      g.PowerLimitMw,
 			SMClockMHz:        uint32(sm),
 			MemClockMHz:       uint32(memClock),
-			Processes:         len(x.Processes.Infos),
+			Processes:         computeProcesses(x),
 		}
 		if !na(x.PerformanceState) {
 			sample.PState = strings.TrimSpace(x.PerformanceState)

@@ -56,4 +56,13 @@ func TestSnapshotLiveHost(t *testing.T) {
 			t.Errorf("sample %s: %+v", sample.UUID, sample)
 		}
 	}
+	light, err := SMI{}.Samples(ctx)
+	if err != nil || len(light.Samples) != len(s.Gpus) {
+		t.Fatalf("samples: %+v %v", light, err)
+	}
+	for i, l := range light.Samples {
+		if l.UUID != s.Gpus[i].Uuid || l.MemoryTotal != snap.Samples[i].MemoryTotal || l.PowerLimitMw != snap.Samples[i].PowerLimitMw {
+			t.Errorf("light sample %d disagrees with the full one: %+v vs %+v", i, l, snap.Samples[i])
+		}
+	}
 }

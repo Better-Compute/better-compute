@@ -19,3 +19,6 @@ func gpuSampler() agent.GPUSampler {
 	seed := fakeSeed()
 	return func(context.Context) (*nvml.Snapshot, error) { return fakehw.GPUSnapshot(seed, time.Now()), nil }
 }
+
+// gpuSnapshot is the fake machine's full GPU read, for bcd doctor.
+func gpuSnapshot() agent.GPUSampler { return gpuSampler() }
