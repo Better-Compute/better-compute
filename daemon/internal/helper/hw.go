@@ -28,8 +28,10 @@ import (
 const (
 	maxHWEntries = 64
 	maxSMBIOSRaw = 4 << 10
-	hwBudget     = 30 * time.Second
 )
+
+// hwBudget bounds the whole op (a var: tests shorten it).
+var hwBudget = 30 * time.Second
 
 var (
 	smbiosMemoryEntry = regexp.MustCompile(`^17-[0-9]+$`)
@@ -73,7 +75,16 @@ func (s *Server) hwRead(ctx context.Context, req Request) (*HWInfo, error) {
 		if len(out.NVMe) >= maxHWEntries || ctx.Err() != nil {
 			break // the rest stay unknown, as for an unprivileged read
 		}
-		if h := health(ctrl); h != nil {
+		// The command carries its own 5 s timeout; should a driver ignore it, the op still answers by
+		// its budget (the stuck read finishes, or not, on its own, as vfio's unbind does).
+		done := make(chan *inventory.SmartStatus, 1)
+		go func() { done <- health(ctrl) }()
+		var h *inventory.SmartStatus
+		select {
+		case h = <-done:
+		case <-ctx.Done():
+		}
+		if h != nil {
 			if out.NVMe == nil {
 				out.NVMe = map[string]*inventory.SmartStatus{}
 			}

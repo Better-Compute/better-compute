@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
 )
@@ -103,6 +104,40 @@ func TestHWReadCaps(t *testing.T) {
 	}
 	if len(got.Dimms) != maxHWEntries || len(got.NVMe) != maxHWEntries || len(*asked) != maxHWEntries {
 		t.Fatalf("dimms %d, nvme %d, asked %d", len(got.Dimms), len(got.NVMe), len(*asked))
+	}
+}
+
+// A controller whose read never returns costs the op its budget, not the helper its connection:
+// the controllers read before it are answered.
+func TestHWReadBudget(t *testing.T) {
+	defer func(b time.Duration) { hwBudget = b }(hwBudget)
+	hwBudget = 200 * time.Millisecond
+	root := t.TempDir()
+	sock := filepath.Join(t.TempDir(), "helper.sock")
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stuck := make(chan struct{})
+	defer close(stuck)
+	srv := &Server{Ops: &fakeOps{}, Root: root, Allowed: me, NVMeHealth: func(ctrl string) *inventory.SmartStatus {
+		if ctrl == "nvme1" {
+			<-stuck
+		}
+		return &inventory.SmartStatus{Healthy: true}
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Serve(ctx, ln) }()
+	for _, name := range []string{"nvme0", "nvme1", "nvme2"} {
+		if err := os.MkdirAll(filepath.Join(root, "sys", "class", "nvme", name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := time.Now()
+	got, err := Client{Socket: sock}.ReadHW(context.Background())
+	if err != nil || len(got.NVMe) != 1 || got.NVMe["nvme0"] == nil || time.Since(start) > 5*time.Second {
+		t.Fatalf("got %+v, %v after %s", got, err, time.Since(start))
 	}
 }
 

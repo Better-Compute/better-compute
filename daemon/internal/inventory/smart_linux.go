@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux && (amd64 || arm64 || ppc64le || riscv64 || s390x || loong64)
 
 package inventory
 
@@ -9,7 +9,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// nvmeAdminCmd is the kernel's struct nvme_admin_cmd (linux/nvme_ioctl.h), 72 bytes.
+// nvmeAdminCmd is the kernel's struct nvme_admin_cmd (linux/nvme_ioctl.h), 72 bytes. The data
+// address is an unsafe.Pointer (a __u64 on these 64-bit targets), so the buffer it names escapes
+// to the heap and cannot move under the ioctl as a stack buffer could.
 type nvmeAdminCmd struct {
 	Opcode      uint8
 	Flags       uint8
@@ -17,7 +19,7 @@ type nvmeAdminCmd struct {
 	Nsid        uint32
 	Cdw2, Cdw3  uint32
 	Metadata    uint64
-	Addr        uint64
+	Addr        unsafe.Pointer
 	MetadataLen uint32
 	DataLen     uint32
 	Cdw10       uint32
@@ -51,12 +53,13 @@ func NVMeHealth(controller string) *SmartStatus {
 	cmd := nvmeAdminCmd{
 		Opcode:    0x02, // Get Log Page
 		Nsid:      0xffffffff,
-		Addr:      uint64(uintptr(unsafe.Pointer(&page[0]))),
+		Addr:      unsafe.Pointer(&page[0]),
 		DataLen:   uint32(len(page)),
 		Cdw10:     uint32(len(page)/4-1)<<16 | 0x02, // NUMDL (dwords - 1), log id
 		TimeoutMs: 5000,
 	}
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), nvmeIoctlAdminCmd, uintptr(unsafe.Pointer(&cmd)))
+	runtime.KeepAlive(&cmd)
 	runtime.KeepAlive(page)
 	if errno != 0 {
 		return nil
