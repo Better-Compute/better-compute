@@ -37,6 +37,10 @@ type Collector struct {
 	// read empty: the UUID and serials are root-only, so an unprivileged bcd node asks bcd helper. It
 	// is called at most once per collection, and only when a file read empty.
 	DMI func() map[string]string
+	// PassedThrough, when set, names the GPU last seen at a PCI address ("0000:18:00.0"), for NVIDIA
+	// GPUs bound to vfio-pci (passed through to a VM, invisible to the NVIDIA driver): without it
+	// they drop out of the inventory. GPUMemory.Lookup is the usual one.
+	PassedThrough func(pciAddress string) *Gpu
 }
 
 // Collect gathers every section and canonicalizes the result.
@@ -552,10 +556,10 @@ var pciAddress = regexp.MustCompile(`^[0-9a-f]{4,8}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-
 
 func (c Collector) gpus() *GpusSection {
 	buses := c.list("/proc/driver/nvidia/gpus")
-	if len(buses) == 0 {
-		return nil
+	s := &GpusSection{}
+	if len(buses) > 0 {
+		s.DriverVersion = nvidiaDriverVersion(c.read("/proc/driver/nvidia/version"))
 	}
-	s := &GpusSection{DriverVersion: nvidiaDriverVersion(c.read("/proc/driver/nvidia/version"))}
 	for _, bus := range buses {
 		info := map[string]string{}
 		for _, line := range strings.Split(c.read("/proc/driver/nvidia/gpus/"+bus+"/information"), "\n") {
@@ -582,6 +586,13 @@ func (c Collector) gpus() *GpusSection {
 	}
 	// Index in bus order, as nvidia-smi enumerates them by default (CUDA_DEVICE_ORDER=PCI_BUS_ID).
 	sort.Slice(s.Gpus, func(i, j int) bool { return s.Gpus[i].PciBusId < s.Gpus[j].PciBusId })
+	// GPUs passed through to VMs come after: nvidia-smi does not enumerate them, so the driver-bound
+	// GPUs keep the indices nvidia-smi gives them.
+	have := map[string]bool{}
+	for _, g := range s.Gpus {
+		have[normalizeBus(g.PciBusId)] = true
+	}
+	s.Gpus = append(s.Gpus, c.passedThroughGPUs(have)...)
 	for i, g := range s.Gpus {
 		g.Index = uint32(i)
 	}
