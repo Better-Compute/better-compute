@@ -52,7 +52,7 @@ func HostFindings(inv *NodeInventory, privileged bool) []Finding {
 		add("warn", "dmi", "no product UUID: the hardware key leans on serials and MACs")
 	case IsPlaceholderUUID(s.ProductUuid):
 		add("warn", "dmi", "the product UUID %s is a placeholder the vendor never set: the hardware key falls back to serials and MACs, and a reclaim needs `expect` or approval", s.ProductUuid)
-	case IsPlaceholderDMI(s.Serial):
+	case s.Serial != "" && IsPlaceholderDMI(s.Serial):
 		add("warn", "dmi", "the system serial is a placeholder (%q)", s.Serial)
 	default:
 		add("ok", "dmi", "%s %s, UUID %s", s.Vendor, s.Product, s.ProductUuid)

@@ -237,7 +237,8 @@ func runDoctor(fs *flag.FlagSet, stdout, _ io.Writer) int {
 		report("fail", "nvml", err.Error())
 	}
 
-	if inv, err := collectInventory(); err != nil {
+	inv, invErr := collectInventory()
+	if err := invErr; err != nil {
 		report("warn", "hardware", hardwareBackend+": "+err.Error())
 	} else if hashes, err := inventory.SectionHashes(inv); err != nil {
 		report("fail", "hardware", hardwareBackend+": "+err.Error())
@@ -251,6 +252,13 @@ func runDoctor(fs *flag.FlagSet, stdout, _ io.Writer) int {
 
 	for _, c := range hostChecks(cfg) {
 		report(c.status, c.check, c.detail)
+	}
+	if hardwareBackend == "host" {
+		// Real-host preflight (doctor_host.go): systemd, cgroup controllers, KVM, VFIO, the clock,
+		// and what the inventory will be missing.
+		for _, c := range hostPreflight("", inv, os.Geteuid() == 0, kernelClock) {
+			report(c.status, c.check, c.detail)
+		}
 	}
 	if failed {
 		return exitFailure
