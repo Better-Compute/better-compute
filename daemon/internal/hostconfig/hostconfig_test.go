@@ -890,3 +890,29 @@ func TestOSRelease(t *testing.T) {
 		t.Fatalf("pkgs %q", pkgs)
 	}
 }
+
+// WSL 2: never install a Linux driver over the Windows host's (/dev/dxg); the host's branch converges.
+func TestNvidiaDriverOnWSL(t *testing.T) {
+	sys := NewFakeSystem()
+	sys.Set("/dev/dxg", "")
+	sys.Set("/etc/os-release", "ID=ubuntu\nVERSION_ID=\"26.04\"\n")
+	sys.Handler = func(_ context.Context, c Cmd) ([]byte, error) {
+		if c.Name == "nvidia-smi" {
+			return []byte("616.56\n"), nil
+		}
+		return nil, nil
+	}
+	r := NewRegistry(NvidiaDriver{})
+	if n, err := runAll(t, r, sys, unit("nvidia-driver", `{"branch":"616"}`)); err != nil || n != 0 {
+		t.Fatalf("host branch: %d %v", n, err)
+	}
+	_, err := runAll(t, r, sys, unit("nvidia-driver", `{"branch":"570"}`))
+	if !errors.Is(err, converge.ErrTerminal) || !strings.Contains(err.Error(), "Windows host's driver 616.56") {
+		t.Fatalf("other branch: %v", err)
+	}
+	for _, c := range sys.Commands() {
+		if !strings.HasPrefix(c, "nvidia-smi") {
+			t.Fatalf("ran %q on WSL", c)
+		}
+	}
+}

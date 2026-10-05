@@ -126,6 +126,19 @@ func (d NvidiaDriver) Plan(ctx context.Context, sys System, settings json.RawMes
 	if loaded != "" && branchOf(loaded) == s.Branch && flavorOK(loadedOpen) {
 		return planPersistenced(ctx, sys), nil
 	}
+	if loaded == "" && paravirtualGPU(sys) {
+		// WSL 2: the Windows host's driver serves /dev/dxg. A Linux driver installed and loaded here
+		// would shadow its libraries and break every GPU of the VM: never install one.
+		out, err := sys.Run(ctx, Cmd{Name: "nvidia-smi", Args: []string{"--query-gpu=driver_version", "--format=csv,noheader"}})
+		if err != nil {
+			return nil, err
+		}
+		host, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+		if branchOf(host) == s.Branch {
+			return nil, nil
+		}
+		return nil, converge.Terminal(fmt.Errorf("nvidia-driver: this is WSL 2's paravirtual GPU, served by the Windows host's driver %s; bcd never installs a Linux driver here (set branch %s, or install that driver on Windows)", host, branchOf(host)))
+	}
 	var actions []converge.Action
 	installed, installedOpen := installedDriver(ctx, sys)
 	if installed == "" || branchOf(installed) != s.Branch || !flavorOK(installedOpen) {
