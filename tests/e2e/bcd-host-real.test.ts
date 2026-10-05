@@ -1,6 +1,8 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createPublicKey, randomBytes } from 'node:crypto';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,6 +59,14 @@ let dataDir: string;
 let nodeId: string;
 let node: ChildProcess | undefined;
 let nodeLog = '';
+// The OTLP collector NodeSpec.telemetry names (set by the telemetry test; http to the WSL host).
+let telemetryEndpoint: string | undefined;
+const telemetryModule = {
+  name: 'e2e-real-telemetry',
+  async nodeSpec() {
+    return telemetryEndpoint ? { telemetry: { otlpEndpoint: telemetryEndpoint, intervalSeconds: 5 } } : {};
+  },
+};
 
 describe.skipIf(!enabled)('bcd on the real host (non-fakehw build)', () => {
   beforeAll(async () => {
@@ -70,7 +80,7 @@ describe.skipIf(!enabled)('bcd on the real host (non-fakehw build)', () => {
     }
     const host = windows ? sh("ip route show default | awk '{print $3}'") : '127.0.0.1';
     if (!host) throw new Error('no route from WSL to the host');
-    dev = await createDevStack({ externalTls: { host: '0.0.0.0' } });
+    dev = await createDevStack({ externalTls: { host: '0.0.0.0' }, modules: [telemetryModule as any] });
     api = dev.compute.api;
     ({ poolId } = await dev.createPool({ key: 'real-host', gpuModel: null }));
     // A host without DMI identity (WSL, many VMs: no product UUID or serial) has no trusted hardware key,
@@ -214,6 +224,54 @@ describe.skipIf(!enabled)('bcd on the real host (non-fakehw build)', () => {
     await api.reservations.release(dev.root, { tenantId: dev.rootTenantId, reservationId: created.id });
   }, 240_000);
 
+  it("exports the real GPUs' live metrics over OTLP", async (context) => {
+    const gpus = Number(sh('nvidia-smi -L 2>/dev/null | grep -c "^GPU "') || '0');
+    if (!gpus) return context.skip();
+    const posts: any[] = [];
+    const collector = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk: Buffer) => (body += chunk.toString()));
+      req.on('end', () => {
+        if (req.url === '/v1/metrics') posts.push(JSON.parse(body));
+        res.writeHead(200, { 'content-type': 'application/json' }).end('{}');
+      });
+    });
+    await new Promise<void>((resolve) => collector.listen(0, '0.0.0.0', resolve));
+    const host = windows ? sh("ip route show default | awk '{print $3}'") : '127.0.0.1';
+    const renderSpec = () =>
+      dev.database.query(
+        `INSERT INTO work_queue (kind, key, shard, gen, not_before)
+         SELECT 'nodespec', id, shard, 1, compute_now() FROM nodes WHERE id = $1
+         ON CONFLICT (kind, key) DO UPDATE SET gen = work_queue.gen + 1, not_before = LEAST(work_queue.not_before, EXCLUDED.not_before)`,
+        [nodeId],
+      );
+    try {
+      telemetryEndpoint = `http://${host}:${(collector.address() as AddressInfo).port}`;
+      await renderSpec();
+      const metric = (post: any, name: string) =>
+        (post.resourceMetrics?.[0]?.scopeMetrics?.[0]?.metrics ?? []).find((m: any) => m.name === name);
+      const deadline = Date.now() + 90_000;
+      let found: any;
+      while (!found && Date.now() < deadline) {
+        found = posts.find((post) => metric(post, 'bcd.gpu.memory.total')?.gauge?.dataPoints?.length === gpus);
+        if (!found) await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      expect(found, `no OTLP export with ${gpus} GPU(s)\n--- bcd log ---\n${nodeLog.slice(-3000)}`).toBeDefined();
+      // The real numbers: total framebuffer as nvidia-smi reports it, and a power limit.
+      const totalMiB = Number(sh('nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1'));
+      const point = metric(found, 'bcd.gpu.memory.total').gauge.dataPoints[0];
+      expect(Number(point.asInt ?? point.asDouble)).toBe(totalMiB * 1024 * 1024);
+      const limit = metric(found, 'bcd.gpu.power.limit')?.gauge?.dataPoints?.[0];
+      expect(Number(limit?.asDouble ?? 0)).toBeGreaterThan(0);
+      process.stderr.write(
+        `[real host] OTLP: ${(found.resourceMetrics[0].scopeMetrics[0].metrics as { name: string }[]).map((m) => m.name).join(', ')}\n`,
+      );
+    } finally {
+      telemetryEndpoint = undefined;
+      await renderSpec();
+      collector.close();
+    }
+  }, 180_000);
   it('answers status on its socket and doctor about the host', async () => {
     const status = await runLinux([toLinux(binary), 'status', '--socket', `${dataDir}/bcd.sock`, '--json']);
     expect(status.status, status.stderr).toBe(0);
