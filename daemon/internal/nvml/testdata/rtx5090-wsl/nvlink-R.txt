@@ -1,0 +1,2 @@
+GPU 0: NVIDIA GeForce RTX 5090 (UUID: GPU-50905090-0000-4000-8000-509050905090)
+Device does not have or support Nvlink

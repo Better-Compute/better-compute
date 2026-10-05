@@ -192,9 +192,13 @@ func Enrich(base *inventory.GpusSection, snap *Snapshot) *inventory.GpusSection 
 // ---- nvidia-smi -q -x ----------------------------------------------------------------------------
 
 type smiLog struct {
-	DriverVersion string   `xml:"driver_version"`
-	CudaVersion   string   `xml:"cuda_version"`
-	GPUs          []smiGPU `xml:"gpu"`
+	// R616 deprecates driver_version and cuda_version ("removed in CUDA 14.0") for kmd_version and
+	// cuda_umd_version; the new names win when present.
+	DriverVersion  string   `xml:"driver_version"`
+	KmdVersion     string   `xml:"kmd_version"`
+	CudaVersion    string   `xml:"cuda_version"`
+	CudaUmdVersion string   `xml:"cuda_umd_version"`
+	GPUs           []smiGPU `xml:"gpu"`
 }
 
 type smiGPU struct {
@@ -307,10 +311,18 @@ func parseQuery(out []byte) (*smiLog, error) {
 // na reports nvidia-smi's "no value" spellings.
 func na(v string) bool {
 	switch strings.TrimSpace(v) {
-	case "", "N/A", "[N/A]", "Not Supported", "[Not Supported]", "Unknown Error", "None":
+	case "", "N/A", "[N/A]", "Not Supported", "[Not Supported]", "Unknown Error", "None",
+		// R616+ for fields NVML dropped (display_mode, power_state, applications_clocks).
+		"Requested functionality has been deprecated":
 		return true
 	}
 	return false
+}
+
+// noSerial reports a serial number nvidia-smi prints for boards without one: GeForce and most
+// workstation cards answer "0" (or zeros), which would make every such GPU share one serial.
+func noSerial(v string) bool {
+	return na(v) || strings.Trim(strings.TrimSpace(v), "0") == ""
 }
 
 // number reads the leading number of "81559 MiB", "700.00 W", "30 C", "0 %".
@@ -393,9 +405,9 @@ func computeMode(v string) string {
 }
 
 func (l *smiLog) snapshot() *Snapshot {
-	section := &inventory.GpusSection{DriverVersion: strings.TrimSpace(l.DriverVersion)}
-	if !na(l.CudaVersion) {
-		section.CudaDriverVersion = strings.TrimSpace(l.CudaVersion)
+	section := &inventory.GpusSection{DriverVersion: strings.TrimSpace(first(l.KmdVersion, l.DriverVersion))}
+	if cuda := first(l.CudaUmdVersion, l.CudaVersion); cuda != "" {
+		section.CudaDriverVersion = strings.TrimSpace(cuda)
 	}
 	snap := &Snapshot{Section: section}
 	for i, x := range l.GPUs {
@@ -416,7 +428,7 @@ func (l *smiLog) snapshot() *Snapshot {
 		if !na(x.ProductArchitecture) {
 			g.Architecture = strings.ToLower(strings.TrimSpace(x.ProductArchitecture))
 		}
-		if !na(x.Serial) {
+		if !noSerial(x.Serial) {
 			g.Serial = strings.TrimSpace(x.Serial)
 		}
 		if !na(x.VbiosVersion) {

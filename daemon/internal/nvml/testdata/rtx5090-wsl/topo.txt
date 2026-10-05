@@ -1,0 +1,1 @@
+nvidia-smi topo is not supported on WSL.

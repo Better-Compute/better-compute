@@ -98,7 +98,12 @@ for (const { importPath, dir } of targets) {
   const testFlags = [verbose ? '-test.v' : '', runPattern ? `-test.run '${runPattern}'` : '']
     .filter(Boolean)
     .join(' ');
-  const script = `cd '${toWsl(dir)}' && '${toWsl(binary)}' ${testFlags}`;
+  // BCD_* switches (BCD_REAL_GPU, BCD_HOSTCONFIG_REAL, …) reach the test inside WSL too.
+  const forwarded = Object.entries(process.env)
+    .filter(([name, value]) => /^BCD_[A-Z0-9_]+$/.test(name) && name !== 'BCD_WSL_DISTRO' && value !== undefined)
+    .map(([name, value]) => `${name}='${String(value).replace(/'/g, "'\\''")}'`)
+    .join(' ');
+  const script = `cd '${toWsl(dir)}' && ${forwarded ? `env ${forwarded} ` : ''}'${toWsl(binary)}' ${testFlags}`;
   const run = spawnSync('wsl.exe', ['-d', distro, '--', 'bash', '-lc', script], {
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
