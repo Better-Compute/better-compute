@@ -17,7 +17,25 @@ func (c Collector) dimms() []*Dimm {
 	if out := c.smbiosDimms(); len(out) > 0 {
 		return out
 	}
+	// An unprivileged node asks bcd helper (hw.read), which parses the same structures as root.
+	if c.Dimms != nil {
+		if out := c.Dimms(); len(out) > 0 {
+			return out
+		}
+	}
 	return c.edacDimms()
+}
+
+// DimmsFromSMBIOS parses type 17 structures (raw, as /sys/firmware/dmi/entries/17-*/raw holds
+// them) into DIMMs, skipping empty slots and qualifying repeated slot names.
+func DimmsFromSMBIOS(raws [][]byte) []*Dimm {
+	var out []*Dimm
+	for _, raw := range raws {
+		if d := parseMemoryDevice(raw); d != nil {
+			out = append(out, d)
+		}
+	}
+	return uniqueSlots(out)
 }
 
 func (c Collector) readRaw(abs string) []byte {
@@ -29,16 +47,13 @@ func (c Collector) readRaw(abs string) []byte {
 }
 
 func (c Collector) smbiosDimms() []*Dimm {
-	var out []*Dimm
+	var raws [][]byte
 	for _, name := range c.list("/sys/firmware/dmi/entries") {
-		if !strings.HasPrefix(name, "17-") {
-			continue
-		}
-		if d := parseMemoryDevice(c.readRaw("/sys/firmware/dmi/entries/" + name + "/raw")); d != nil {
-			out = append(out, d)
+		if strings.HasPrefix(name, "17-") {
+			raws = append(raws, c.readRaw("/sys/firmware/dmi/entries/"+name+"/raw"))
 		}
 	}
-	return uniqueSlots(out)
+	return DimmsFromSMBIOS(raws)
 }
 
 // smbiosMemoryTypes names SMBIOS 3.x memory types (type 17, offset 0x12).

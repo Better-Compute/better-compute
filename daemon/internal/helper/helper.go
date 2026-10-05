@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/better-compute/better-compute/daemon/internal/hostconfig"
+	"github.com/better-compute/better-compute/daemon/internal/inventory"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
 	"github.com/better-compute/better-compute/daemon/internal/selfupdate"
 	"github.com/better-compute/better-compute/daemon/internal/slice"
@@ -210,6 +211,8 @@ type Server struct {
 	Allowed func(p Peer) error
 	// KnownGPU reports whether the host has a GPU (gpu.reset names only those).
 	KnownGPU func(uuid string) bool
+	// NVMeHealth reads one controller's health for hw.read (nil: inventory.NVMeHealth; tests fake it).
+	NVMeHealth func(controller string) *inventory.SmartStatus
 	// Log records every operation and refusal.
 	Log func(msg string, args ...any)
 	// Update is self-update's privileged half (update.*); nil refuses them.
@@ -442,6 +445,9 @@ func (s *Server) do(ctx context.Context, req Request) (any, error) {
 	}
 	if req.Op == "dmi.read" {
 		return s.dmiRead(req) // dmi.go: root-only DMI values, no arguments
+	}
+	if req.Op == "hw.read" {
+		return s.hwRead(ctx, req) // hw.go: DIMMs and NVMe health, no arguments
 	}
 	return nil, s.op(ctx, req)
 }

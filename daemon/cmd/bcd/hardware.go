@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/better-compute/better-compute/daemon/internal/helper"
@@ -38,6 +39,56 @@ func helperDMI(c helper.Client) func() map[string]string {
 		}
 		return values
 	}
+}
+
+// hwSource supplies the root-only inventory details (DIMMs from SMBIOS, NVMe health): bcd helper's
+// hw.read when bcd node runs under [helper] (agent.go). nil: none.
+var hwSource func() *helper.HWInfo
+
+// helperHW asks bcd helper for them; a failure reads as none.
+func helperHW(c helper.Client) func() *helper.HWInfo {
+	return func() *helper.HWInfo {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		info, err := c.ReadHW(ctx)
+		if err != nil {
+			return nil
+		}
+		return info
+	}
+}
+
+// withHelperHW completes a collector with hw.read's answer, asked once per collection and only
+// consulted where the collector's own (unprivileged) read finds nothing.
+func withHelperHW(c inventory.Collector, source func() *helper.HWInfo) inventory.Collector {
+	if source == nil {
+		return c
+	}
+	var once sync.Once
+	var info *helper.HWInfo
+	get := func() *helper.HWInfo {
+		once.Do(func() { info = source() })
+		return info
+	}
+	c.Dimms = func() []*inventory.Dimm {
+		if hw := get(); hw != nil {
+			return hw.Dimms
+		}
+		return nil
+	}
+	local := c.NVMeHealth
+	c.NVMeHealth = func(ctrl string) *inventory.SmartStatus {
+		if local != nil {
+			if h := local(ctrl); h != nil {
+				return h
+			}
+		}
+		if hw := get(); hw != nil {
+			return hw.NVMe[ctrl]
+		}
+		return nil
+	}
+	return c
 }
 
 func hardwareFlags(fs *flag.FlagSet) {

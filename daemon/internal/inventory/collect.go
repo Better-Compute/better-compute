@@ -47,6 +47,9 @@ type Collector struct {
 	// NVMeHealth, when set, reads an NVMe controller's SMART / Health log ("nvme0"; NVMeHealth on
 	// Linux, root only): each NVMe disk's Smart.
 	NVMeHealth func(controller string) *SmartStatus
+	// Dimms, when set, supplies the DIMMs when the SMBIOS entries read nothing (root-only: an
+	// unprivileged node asks bcd helper), before the EDAC fallback.
+	Dimms func() []*Dimm
 }
 
 // Collect gathers every section and canonicalizes the result.
