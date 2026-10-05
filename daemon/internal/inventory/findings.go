@@ -2,6 +2,7 @@ package inventory
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -88,6 +89,36 @@ func HostFindings(inv *NodeInventory, privileged bool) []Finding {
 			add("warn", "memory", "%s; EDAC reports %d uncorrectable errors", detail, m.Edac.Uncorrectable)
 		} else {
 			add("ok", "memory", "%s", detail)
+		}
+		// DIMMs come from SMBIOS (root-only) or EDAC; a machine without SMBIOS (a VM) has neither.
+		switch {
+		case len(m.Dimms) > 0:
+			var total uint64
+			ecc, types := 0, map[string]bool{}
+			for _, d := range m.Dimms {
+				total += d.SizeBytes
+				if d.Ecc {
+					ecc++
+				}
+				if d.Type != "" {
+					types[d.Type] = true
+				}
+			}
+			kinds := make([]string, 0, len(types))
+			for t := range types {
+				kinds = append(kinds, t)
+			}
+			sort.Strings(kinds)
+			summary := fmt.Sprintf("%d DIMMs, %s %s", len(m.Dimms), humanBytes(total), strings.Join(kinds, "/"))
+			if ecc > 0 && ecc < len(m.Dimms) {
+				add("warn", "dimms", "%s; only %d of them ECC: the non-ECC modules leave memory errors uncorrected", summary, ecc)
+			} else if ecc > 0 {
+				add("ok", "dimms", "%s, ECC", summary)
+			} else {
+				add("ok", "dimms", "%s, no ECC", summary)
+			}
+		case inv.System != nil && privileged:
+			add("warn", "dimms", "the SMBIOS table lists no memory devices (/sys/firmware/dmi/entries/17-*): the DIMM layout is unknown")
 		}
 	}
 

@@ -380,6 +380,7 @@ func (c Collector) memory() *MemorySection {
 		return nil
 	}
 	s.Hugepages = c.hugepagePools("/sys/kernel/mm/hugepages")
+	s.Dimms = c.dimms()
 	if mcs := c.list("/sys/devices/system/edac/mc"); len(mcs) > 0 {
 		edac := &EdacCounters{}
 		found := false

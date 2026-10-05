@@ -132,6 +132,17 @@ func printHardware(w io.Writer, inv *inventory.NodeInventory) {
 	}
 	if m := inv.Memory; m != nil {
 		fmt.Fprintf(w, "Memory    %s\n", humanBytes(m.TotalBytes))
+		for _, d := range m.Dimms {
+			ecc := ""
+			if d.Ecc {
+				ecc = " ECC"
+			}
+			speed := ""
+			if d.SpeedMts > 0 {
+				speed = fmt.Sprintf(" %d MT/s", d.SpeedMts)
+			}
+			fmt.Fprintf(w, "  DIMM    %-12s %s %s%s%s %s\n", d.Slot, humanBytes(d.SizeBytes), orDash(d.Type), speed, ecc, strings.TrimSpace(d.Manufacturer+" "+d.PartNumber))
+		}
 	}
 	if d := inv.Disks; d != nil {
 		for _, disk := range d.Disks {

@@ -55,7 +55,7 @@ func TestHostPreflightReadyHost(t *testing.T) {
 	inv := &inventory.NodeInventory{
 		System: &inventory.SystemSection{Vendor: "Supermicro", Product: "SYS-821GE", ProductUuid: "4c4c4544-0000-1000-8000-abcdef012345"},
 		Cpu:    &inventory.CpuSection{Model: "Xeon", Sockets: 2, Cores: 112, Threads: 224, NumaNodes: []*inventory.NumaNode{{Id: 0}, {Id: 1}}},
-		Memory: &inventory.MemorySection{TotalBytes: 2 << 40},
+		Memory: &inventory.MemorySection{TotalBytes: 2 << 40, Dimms: []*inventory.Dimm{{Slot: "A1", SizeBytes: 64 << 30, Type: "DDR5", Ecc: true}}},
 		Disks:  &inventory.DisksSection{Disks: []*inventory.Disk{{Name: "nvme0n1"}}},
 		Nics:   &inventory.NicsSection{Nics: []*inventory.Nic{{Name: "eth0", Link: inventory.LinkState_LINK_STATE_UP}}},
 		Gpus:   &inventory.GpusSection{DriverVersion: "580.65.06", Gpus: []*inventory.Gpu{{Uuid: "GPU-a"}}},

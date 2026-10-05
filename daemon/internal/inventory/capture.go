@@ -260,6 +260,8 @@ func redactTree(root string) error {
 			out = redactValue(rel, value) + "\n"
 		case strings.HasSuffix(rel, "/address") || strings.HasSuffix(rel, "/perm_hwaddr"):
 			out = macPattern.ReplaceAllStringFunc(text, func(mac string) string { return redactMAC(mac) })
+		case strings.HasPrefix(rel, "sys/firmware/dmi/entries/17-") && strings.HasSuffix(rel, "/raw"):
+			out = string(redactMemoryDevice(b))
 		case strings.HasPrefix(rel, "proc/driver/nvidia/gpus/") && strings.HasSuffix(rel, "/information"):
 			out = gpuUUIDPattern.ReplaceAllStringFunc(text, func(u string) string { return "GPU-" + redactUUID(strings.TrimPrefix(u, "GPU-")) })
 		}
