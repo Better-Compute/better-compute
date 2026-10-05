@@ -83,6 +83,9 @@ func hostPreflight(root string, inv *inventory.NodeInventory, privileged bool, c
 		default:
 			out = append(out, doctorCheck{"ok", "vfio", "vfio-pci loaded with an IOMMU: GPUs can be passed to instances"})
 		}
+		if iommu {
+			out = append(out, iommuGroupCheck(root, read))
+		}
 	}
 
 	// Clock: certificates, tickets and signed intents all compare times.
@@ -107,6 +110,57 @@ func hostPreflight(root string, inv *inventory.NodeInventory, privileged bool, c
 		out = append(out, doctorCheck{f.Status, f.Check, f.Detail})
 	}
 	return out
+}
+
+// iommuGroupCheck predicts what bcd helper's checkGroup refuses at instance start: passing a GPU
+// through hands the VM its whole IOMMU group, so a group may hold only GPUs, their other functions
+// (audio, USB-C) and PCI bridges. A NIC or NVMe drive sharing a GPU's group (a slot behind a switch
+// or root port without ACS) makes that GPU unusable for VMs.
+func iommuGroupCheck(root string, read func(string) string) doctorCheck {
+	devices := listDir(filepath.Join(root, "sys", "bus", "pci", "devices"))
+	slot := func(addr string) string { return strings.TrimSuffix(addr, filepath.Ext(addr)) } // "0000:3b:00"
+	gpuSlots := map[string]bool{}
+	var gpus []string
+	for _, addr := range devices {
+		base := "/sys/bus/pci/devices/" + addr
+		class := read(base + "/class")
+		if read(base+"/vendor") == "0x10de" && (strings.HasPrefix(class, "0x0300") || strings.HasPrefix(class, "0x0302")) {
+			gpus = append(gpus, addr)
+			gpuSlots[slot(addr)] = true
+		}
+	}
+	if len(gpus) == 0 {
+		return doctorCheck{"warn", "iommu-groups", "no NVIDIA GPU among the PCI devices: the GPUs the inventory lists are not passthrough-capable here"}
+	}
+	var shared []string
+	ungrouped := 0
+	for _, gpu := range gpus {
+		groupDir := filepath.Join(root, "sys", "bus", "pci", "devices", gpu, "iommu_group")
+		link, err := os.Readlink(groupDir)
+		if err != nil {
+			ungrouped++
+			continue
+		}
+		var others []string
+		for _, dev := range listDir(filepath.Join(groupDir, "devices")) {
+			if gpuSlots[slot(dev)] || strings.HasPrefix(read("/sys/bus/pci/devices/"+dev+"/class"), "0x0604") {
+				continue
+			}
+			others = append(others, dev)
+		}
+		if len(others) > 0 {
+			shared = append(shared, fmt.Sprintf("%s (group %s) with %s", gpu, filepath.Base(link), strings.Join(others, ", ")))
+		}
+	}
+	switch {
+	case len(shared) > 0:
+		return doctorCheck{"warn", "iommu-groups", "GPUs share an IOMMU group with other devices, so they cannot be passed to instances: " +
+			strings.Join(shared, "; ") + " (move the GPU to a CPU-attached slot, or enable ACS on the switch/root port in the firmware setup)"}
+	case ungrouped > 0:
+		return doctorCheck{"warn", "iommu-groups", fmt.Sprintf("%d of %d GPUs have no IOMMU group: the IOMMU does not cover them (a firmware DMAR/IVRS exclusion, or the IOMMU off for their segment)", ungrouped, len(gpus))}
+	default:
+		return doctorCheck{"ok", "iommu-groups", fmt.Sprintf("%d GPUs each in an IOMMU group of their own (with their functions and bridges)", len(gpus))}
+	}
 }
 
 func listDir(dir string) []string {
