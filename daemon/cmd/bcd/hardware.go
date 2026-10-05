@@ -155,7 +155,11 @@ func printHardware(w io.Writer, inv *inventory.NodeInventory) {
 			if nic.SpeedMbps > 0 {
 				speed = fmt.Sprintf("%d Mb/s", nic.SpeedMbps)
 			}
-			fmt.Fprintf(w, "NIC       %-10s %s %s %s %s\n", nic.Name, nic.Mac, orDash(nic.Driver), orDash(nic.PciAddress), speed)
+			fw := ""
+			if nic.Firmware != "" {
+				fw = " fw " + nic.Firmware
+			}
+			fmt.Fprintf(w, "NIC       %-10s %s %s %s %s%s\n", nic.Name, nic.Mac, orDash(nic.Driver), orDash(nic.PciAddress), speed, fw)
 		}
 	}
 	if g := inv.Gpus; g != nil {

@@ -91,7 +91,7 @@ func fakeRoot(t *testing.T) string {
 	}
 	write("/sys/devices/pci0000:00/0000:17:00.0/numa_node", "0\n")
 	write("/sys/devices/pci0000:00/0000:17:00.0/sriov_totalvfs", "8\n")
-	mkdir("/sys/devices/pci0000:00/0000:17:00.0/infiniband/mlx5_0")
+	write("/sys/devices/pci0000:00/0000:17:00.0/infiniband/mlx5_0/fw_ver", "28.39.1002\n")
 	mkdir("/sys/devices/virtual/net/docker0")
 	link("/sys/class/net/docker0", "../../devices/virtual/net/docker0")
 
@@ -146,7 +146,7 @@ func TestCollectorReadsProcAndSys(t *testing.T) {
 	}
 	if nic := n.Nics[0]; nic.Mac != "b8:3f:d2:00:00:01" || nic.Driver != "mlx5_core" || nic.PciAddress != "0000:17:00.0" ||
 		nic.SpeedMbps != 100000 || nic.Rdma != RdmaType_RDMA_TYPE_ROCE || nic.Link != LinkState_LINK_STATE_UP || nic.SriovTotalVfs != 8 ||
-		nic.NumaNode == nil || *nic.NumaNode != 0 || nic.Mtu != 9000 {
+		nic.NumaNode == nil || *nic.NumaNode != 0 || nic.Mtu != 9000 || nic.Firmware != "28.39.1002" {
 		t.Fatalf("nic = %+v", nic)
 	}
 	g := inv.Gpus
@@ -165,6 +165,34 @@ func TestCollectorReadsProcAndSys(t *testing.T) {
 	// The result encodes and hashes like any inventory.
 	if hashes, err := SectionHashes(inv); err != nil || len(hashes) != 7 {
 		t.Fatalf("hashes = %d, %v", len(hashes), err)
+	}
+}
+
+// A NIC's firmware: the RDMA device's sysfs fw_ver first, else the driver (ethtool), "N/A" as none.
+func TestCollectorNICFirmware(t *testing.T) {
+	root := fakeRoot(t)
+	asked := []string{}
+	ethtool := func(answer string) func(string) string {
+		return func(name string) string { asked = append(asked, name); return answer }
+	}
+	inv, _ := Collector{Root: root, NICFirmware: ethtool("9.9")}.Collect()
+	if fw := inv.Nics.Nics[0].Firmware; fw != "28.39.1002" || len(asked) != 0 {
+		t.Fatalf("sysfs firmware = %q, ethtool asked for %v", fw, asked)
+	}
+	if err := os.Remove(filepath.Join(root, "sys/devices/pci0000:00/0000:17:00.0/infiniband/mlx5_0/fw_ver")); err != nil {
+		t.Fatal(err)
+	}
+	inv, _ = Collector{Root: root, NICFirmware: ethtool(" 22.41.1000 (MT_0000000359) ")}.Collect()
+	if fw := inv.Nics.Nics[0].Firmware; fw != "22.41.1000 (MT_0000000359)" || len(asked) != 1 || asked[0] != "eth0" {
+		t.Fatalf("ethtool firmware = %q, asked %v", fw, asked)
+	}
+	for _, none := range []string{"N/A", "", "  "} {
+		if inv, _ := (Collector{Root: root, NICFirmware: ethtool(none)}).Collect(); inv.Nics.Nics[0].Firmware != "" {
+			t.Fatalf("%q read as %q", none, inv.Nics.Nics[0].Firmware)
+		}
+	}
+	if inv, _ := (Collector{Root: root}).Collect(); inv.Nics.Nics[0].Firmware != "" {
+		t.Fatal("firmware without a source")
 	}
 }
 

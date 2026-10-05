@@ -41,6 +41,9 @@ type Collector struct {
 	// GPUs bound to vfio-pci (passed through to a VM, invisible to the NVIDIA driver): without it
 	// they drop out of the inventory. GPUMemory.Lookup is the usual one.
 	PassedThrough func(pciAddress string) *Gpu
+	// NICFirmware, when set, asks a NIC's driver for its firmware version (ethtool -i; EthtoolFirmware
+	// on Linux, unprivileged), for NICs without an RDMA device's sysfs fw_ver.
+	NICFirmware func(ifname string) string
 }
 
 // Collect gathers every section and canonicalizes the result.
@@ -531,6 +534,7 @@ func (c Collector) nics() *NicsSection {
 		if vfs, ok := c.uint(base + "/device/sriov_totalvfs"); ok {
 			n.SriovTotalVfs = uint32(vfs)
 		}
+		n.Firmware = c.nicFirmware(name)
 		if c.exists(base + "/device/infiniband") {
 			n.Rdma = RdmaType_RDMA_TYPE_ROCE
 			if c.read(base+"/type") == "32" {
@@ -549,6 +553,25 @@ func (c Collector) nics() *NicsSection {
 		return nil
 	}
 	return s
+}
+
+// nicFirmware is the NIC's firmware version: an RDMA device's fw_ver in sysfs, else the driver's
+// answer to ethtool's GDRVINFO (Collector.NICFirmware; sysfs has no general firmware file).
+func (c Collector) nicFirmware(name string) string {
+	base := "/sys/class/net/" + name + "/device/infiniband"
+	for _, dev := range c.list(base) {
+		if fw := c.read(base + "/" + dev + "/fw_ver"); fw != "" {
+			return fw
+		}
+	}
+	if c.NICFirmware == nil {
+		return ""
+	}
+	fw := strings.TrimSpace(c.NICFirmware(name))
+	if strings.EqualFold(fw, "n/a") {
+		return ""
+	}
+	return fw
 }
 
 var pciAddress = regexp.MustCompile(`^[0-9a-f]{4,8}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$`)
