@@ -40,7 +40,7 @@ var (
 
 // HWInfo is hw.read's answer.
 type HWInfo struct {
-	Dimms []*inventory.Dimm               `json:"dimms,omitempty"`
+	Dimms []*inventory.Dimm                 `json:"dimms,omitempty"`
 	NVMe  map[string]*inventory.SmartStatus `json:"nvme,omitempty"`
 }
 

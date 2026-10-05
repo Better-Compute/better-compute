@@ -50,6 +50,9 @@ type Collector struct {
 	// Dimms, when set, supplies the DIMMs when the SMBIOS entries read nothing (root-only: an
 	// unprivileged node asks bcd helper), before the EDAC fallback.
 	Dimms func() []*Dimm
+	// BMC, when set, asks the BMC in-band (IPMIBMC on Linux, root) for its vendor, firmware, MAC and
+	// address; without it the section says only which interfaces sysfs shows.
+	BMC func() *BmcSection
 }
 
 // Collect gathers every section and canonicalizes the result.
@@ -67,6 +70,7 @@ func (c Collector) Collect() (*NodeInventory, error) {
 		Disks:         c.disks(),
 		Nics:          c.nics(),
 		Gpus:          c.gpus(),
+		Bmc:           c.bmc(),
 		Os:            c.os(),
 	}
 	if inv.Gpus == nil && c.GPUs != nil {

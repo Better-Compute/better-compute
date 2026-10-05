@@ -218,8 +218,22 @@ func printHardware(w io.Writer, inv *inventory.NodeInventory) {
 			fmt.Fprintf(w, "GPU %-5d %s %s %s\n", gpu.Index, gpu.Name, gpu.PciBusId, gpu.Uuid)
 		}
 	}
+	if b := inv.Bmc; b != nil {
+		var ifaces []string
+		if b.Ipmi {
+			ifaces = append(ifaces, "IPMI")
+		}
+		if b.Redfish {
+			ifaces = append(ifaces, "Redfish")
+		}
+		fw := ""
+		if b.FirmwareVersion != "" {
+			fw = " fw " + b.FirmwareVersion
+		}
+		fmt.Fprintf(w, "BMC       %s %s %s (%s)%s\n", orDash(b.Vendor), orDash(b.Mac), orDash(b.Ip), strings.Join(ifaces, ", "), fw)
+	}
 	if o := inv.Os; o != nil {
-		fmt.Fprintf(w, "OS        %s %s, kernel %s, %s, runtimes %s\n", o.Distro, o.DistroVersion, o.Kernel, cgroupName(o.Cgroup), orDash(strings.Join(o.Runtimes, ",")))
+		fmt.Fprintf(w, "OS      %s %s, kernel %s, %s, runtimes %s\n", o.Distro, o.DistroVersion, o.Kernel, cgroupName(o.Cgroup), orDash(strings.Join(o.Runtimes, ",")))
 	}
 }
 

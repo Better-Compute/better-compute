@@ -144,6 +144,17 @@ func HostFindings(inv *NodeInventory, privileged bool) []Finding {
 		}
 	}
 
+	// The BMC: worth saying only where there is one (a VM or a desktop has none).
+	switch b := inv.Bmc; {
+	case b == nil:
+	case b.Mac != "":
+		add("ok", "bmc", "%s BMC %s at %s, firmware %s", strings.TrimSpace(b.Vendor), b.Mac, orNone(b.Ip), orNone(b.FirmwareVersion))
+	case b.Ipmi && privileged:
+		add("warn", "bmc", "the host has an IPMI interface but the BMC did not answer through /dev/ipmi0: load ipmi_devintf (modprobe), so the node reports its BMC's MAC and the operator can match it")
+	default:
+		add("ok", "bmc", "a BMC is present (%s); its MAC is read as root", map[bool]string{true: "Redfish host interface", false: "IPMI"}[b.Redfish])
+	}
+
 	if n := inv.Nics; n == nil || len(n.Nics) == 0 {
 		add("warn", "nics", "no physical NICs under /sys/class/net: the node has no MAC identity and no PXE MAC for metal")
 	} else {
@@ -176,6 +187,13 @@ func HostFindings(inv *NodeInventory, privileged bool) []Finding {
 		}
 	}
 	return out
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return s
 }
 
 func humanBytes(b uint64) string {

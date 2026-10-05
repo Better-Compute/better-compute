@@ -45,12 +45,12 @@ func synced() (bool, string, error) { return true, "synchronized (estimated erro
 // A ready GPU host: systemd, cgroup v2 with every controller delegated, KVM, an IOMMU and vfio-pci.
 func TestHostPreflightReadyHost(t *testing.T) {
 	root := preflightTree(t, map[string]string{
-		"/run/systemd/system/":              "",
-		"/sys/fs/cgroup/cgroup.controllers": "cpuset cpu io memory hugetlb pids rdma misc\n",
+		"/run/systemd/system/":                  "",
+		"/sys/fs/cgroup/cgroup.controllers":     "cpuset cpu io memory hugetlb pids rdma misc\n",
 		"/sys/fs/cgroup/cgroup.subtree_control": "cpuset cpu io memory hugetlb pids\n",
-		"/dev/kvm":                          "",
-		"/sys/class/iommu/dmar0/":           "",
-		"/sys/bus/pci/drivers/vfio-pci/":    "",
+		"/dev/kvm":                              "",
+		"/sys/class/iommu/dmar0/":               "",
+		"/sys/bus/pci/drivers/vfio-pci/":        "",
 	})
 	inv := &inventory.NodeInventory{
 		System: &inventory.SystemSection{Vendor: "Supermicro", Product: "SYS-821GE", ProductUuid: "4c4c4544-0000-1000-8000-abcdef012345"},
