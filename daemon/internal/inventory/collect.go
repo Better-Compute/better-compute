@@ -47,6 +47,9 @@ type Collector struct {
 	// NVMeHealth, when set, reads an NVMe controller's SMART / Health log ("nvme0"; NVMeHealth on
 	// Linux, root only): each NVMe disk's Smart.
 	NVMeHealth func(controller string) *SmartStatus
+	// DiskHealth, when set, reads a SATA or SAS disk's SMART health ("sda"; SmartctlHealth, root and
+	// smartmontools).
+	DiskHealth func(disk string) *SmartStatus
 	// Dimms, when set, supplies the DIMMs when the SMBIOS entries read nothing (root-only: an
 	// unprivileged node asks bcd helper), before the EDAC fallback.
 	Dimms func() []*Dimm
@@ -443,6 +446,9 @@ func (c Collector) disks() *DisksSection {
 			if ctrl := c.nvmeControllerOf(base); ctrl != "" {
 				d.Smart = c.NVMeHealth(ctrl)
 			}
+		}
+		if c.DiskHealth != nil && (d.Transport == DiskTransport_DISK_TRANSPORT_SATA || d.Transport == DiskTransport_DISK_TRANSPORT_SAS) {
+			d.Smart = c.DiskHealth(name)
 		}
 		s.Disks = append(s.Disks, d)
 	}

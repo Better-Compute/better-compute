@@ -27,7 +27,7 @@ const devBuild = false
 // collectInventory reads the host's inventory from procfs and sysfs (inventory.Collector), the GPUs
 // completed by nvidia-smi (MIG, NVLink, topology, ECC, row remapping) when the driver is installed.
 func collectInventory() (*inventory.NodeInventory, error) {
-	collector := inventory.Collector{DMI: dmiSource, PassedThrough: passedThrough(), NICFirmware: inventory.EthtoolFirmware, NVMeHealth: inventory.NVMeHealth, BMC: inventory.IPMIBMC}
+	collector := inventory.Collector{DMI: dmiSource, PassedThrough: passedThrough(), NICFirmware: inventory.EthtoolFirmware, NVMeHealth: inventory.NVMeHealth, DiskHealth: inventory.SmartctlHealth, BMC: inventory.IPMIBMC}
 	inv, err := withHelperHW(collector, hwSource).Collect()
 	if err != nil {
 		return nil, err
