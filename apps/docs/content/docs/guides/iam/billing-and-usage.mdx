@@ -70,7 +70,8 @@ BETTER_IAM_TOKEN=biam_... better-compute iam setup --audience https://compute.ex
   `BETTER_IAM_TOKEN` must hold a root session token or API key. It calls Better IAM through the optional peer
   `@better-iam/client`.
 - Without `--gpu-models` it creates a meter for every known family: `H100`, `H200`, `B200`, `GB200`, `A100`,
-  `L40S`, `L4` and `RTX-PRO-6000` (`gpu.rtx-pro-6000.hours`), plus `node.metal.hours`, `vps.vcpu.hours`,
+  `L40S`, `L4`, `RTX-PRO-6000` (`gpu.rtx-pro-6000.hours`), `GH200`, `L40`, `A40`, `A30`, `A10`, `RTX-6000-ADA`,
+  `RTX-A6000`, `RTX-5090`, `RTX-5080` and `RTX-4090`, plus `node.metal.hours`, `vps.vcpu.hours`,
   `vps.memory.gib.hours` and `vps.sandbox.warm` (warm sandbox vCPU hours).
 - The result lists `meters.created` and `meters.existing`. No prices are set: pricing is your decision, made
   with Better IAM's `billing.setPrice`.

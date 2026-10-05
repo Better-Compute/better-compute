@@ -190,7 +190,7 @@ gets two normalized names:
 - `gpuModel`, its family, such as `H100`.
 
 Pools, policies and meters use `gpuModel`: a pool holds exactly one. Selectors may use either. The mapping is the
-versioned table `gpuModels` (the plan's `gpu-models.json`, version 1), and `normalizeGpuProduct(name)` applies
+versioned table `gpuModels` (the plan's `gpu-models.json`, version 2), and `normalizeGpuProduct(name)` applies
 it: upper case, punctuation collapsed to `-`, a leading `NVIDIA` dropped.
 
 | Family | Products |
@@ -203,6 +203,13 @@ it: upper case, punctuation collapsed to `-`, a leading `NVIDIA` dropped.
 | `L40S` | `L40S-PCIE-48GB` |
 | `L4` | `L4-PCIE-24GB` |
 | `RTX-PRO-6000` | `RTX-PRO-6000-SERVER-96GB`, `RTX-PRO-6000-WORKSTATION-96GB`, `RTX-PRO-6000-MAXQ-96GB` |
+| `GH200` | `GH200-SUPERCHIP-96GB`, `GH200-SUPERCHIP-144GB` |
+| `L40`, `A40`, `A30`, `A10` | `L40-PCIE-48GB`, `A40-PCIE-48GB`, `A30-PCIE-24GB`, `A10-PCIE-24GB` |
+| `RTX-6000-ADA`, `RTX-A6000` | `RTX-6000-ADA-PCIE-48GB`, `RTX-A6000-PCIE-48GB` |
+| `RTX-5090`, `RTX-5080`, `RTX-4090` | `RTX-5090-PCIE-32GB`, `RTX-5080-PCIE-16GB`, `RTX-4090-PCIE-24GB` |
+
+Version 2 added the parts real hosts reported that version 1 missed: data-center cards outside the flagship lines,
+and the workstation and GeForce cards that edge, lab and single-tenant hosts run.
 
 A name the table does not know keeps its canonical form as `gpuProduct`, maps to `gpuModel: 'other'`, and raises
 `GpuModelUnknown`, which keeps the node from scheduling until the table knows it.

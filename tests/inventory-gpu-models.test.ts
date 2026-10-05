@@ -35,6 +35,19 @@ const known: [nvmlName: string, gpuProduct: string, gpuModel: GpuModel][] = [
     'RTX-PRO-6000-MAXQ-96GB',
     'RTX-PRO-6000',
   ],
+  // v2: names real hosts report (the RTX 5090 is nvidia-smi's on a WSL2 dev box, 2026-10-04).
+  ['NVIDIA GH200 480GB', 'GH200-SUPERCHIP-96GB', 'GH200'],
+  ['NVIDIA GH200 96GB HBM3', 'GH200-SUPERCHIP-96GB', 'GH200'],
+  ['NVIDIA GH200 144G HBM3e', 'GH200-SUPERCHIP-144GB', 'GH200'],
+  ['NVIDIA L40', 'L40-PCIE-48GB', 'L40'],
+  ['NVIDIA A40', 'A40-PCIE-48GB', 'A40'],
+  ['NVIDIA A30', 'A30-PCIE-24GB', 'A30'],
+  ['NVIDIA A10', 'A10-PCIE-24GB', 'A10'],
+  ['NVIDIA RTX 6000 Ada Generation', 'RTX-6000-ADA-PCIE-48GB', 'RTX-6000-ADA'],
+  ['NVIDIA RTX A6000', 'RTX-A6000-PCIE-48GB', 'RTX-A6000'],
+  ['NVIDIA GeForce RTX 5090', 'RTX-5090-PCIE-32GB', 'RTX-5090'],
+  ['NVIDIA GeForce RTX 5080', 'RTX-5080-PCIE-16GB', 'RTX-5080'],
+  ['NVIDIA GeForce RTX 4090', 'RTX-4090-PCIE-24GB', 'RTX-4090'],
 ];
 
 const productPattern = /^[A-Z0-9]+(?:-[A-Z0-9]+)*$/;
@@ -72,12 +85,9 @@ describe('normalizeGpuProduct', () => {
 
   it('maps names outside the table to other, keeping the canonical name', () => {
     const near: [string, string][] = [
-      ['NVIDIA GH200 480GB', 'GH200-480GB'],
-      ['NVIDIA L40', 'L40'],
       ['NVIDIA H800', 'H800'],
       ['NVIDIA H20', 'H20'],
       ['NVIDIA A800-SXM4-80GB', 'A800-SXM4-80GB'],
-      ['NVIDIA RTX 6000 Ada Generation', 'RTX-6000-ADA-GENERATION'],
       ['Quadro RTX 6000', 'QUADRO-RTX-6000'],
       ['Tesla V100-SXM2-32GB', 'TESLA-V100-SXM2-32GB'],
       ['NVIDIA H100', 'H100'],
@@ -133,7 +143,7 @@ describe('normalizeGpuProduct', () => {
 
 describe('gpuModels', () => {
   it('is versioned, frozen data', () => {
-    expect(gpuModels.version).toBe(1);
+    expect(gpuModels.version).toBe(2);
     expect(Object.isFrozen(gpuModels)).toBe(true);
     expect(Object.isFrozen(gpuModels.products)).toBe(true);
     expect(Object.isFrozen(gpuModels.products[0]!.nvmlNames)).toBe(true);

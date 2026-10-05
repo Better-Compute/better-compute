@@ -96,7 +96,8 @@ normalizeGpuProduct('NVIDIA GH200 480GB'); // { gpuProduct: 'GH200-480GB', gpuMo
   - Product names normalize to themselves, so the function is idempotent.
 - `gpuModels` is the versioned, JSON-serializable mapping table (the plan's `gpu-models.json`).
   Adding or renaming a product bumps `gpuModels.version`.
-- `gpuModelFamilies`: `H100`, `H200`, `B200`, `GB200`, `A100`, `L40S`, `L4`, `RTX-PRO-6000`.
+- `gpuModelFamilies`: `H100`, `H200`, `B200`, `GB200`, `A100`, `L40S`, `L4`, `RTX-PRO-6000`, and since version 2
+  `GH200`, `L40`, `A40`, `A30`, `A10`, `RTX-6000-ADA`, `RTX-A6000`, `RTX-5090`, `RTX-5080`, `RTX-4090`.
 
 | Family       | Products                                                                              |
 | ------------ | ------------------------------------------------------------------------------------- |
@@ -107,6 +108,10 @@ normalizeGpuProduct('NVIDIA GH200 480GB'); // { gpuProduct: 'GH200-480GB', gpuMo
 | A100         | `A100-SXM4-40GB`, `A100-SXM4-80GB`, `A100-PCIE-40GB`, `A100-PCIE-80GB`                |
 | L40S, L4     | `L40S-PCIE-48GB`, `L4-PCIE-24GB`                                                      |
 | RTX-PRO-6000 | `RTX-PRO-6000-SERVER-96GB`, `RTX-PRO-6000-WORKSTATION-96GB`, `RTX-PRO-6000-MAXQ-96GB` |
+| GH200        | `GH200-SUPERCHIP-96GB`, `GH200-SUPERCHIP-144GB`                                       |
+| L40, A40, A30, A10 | `L40-PCIE-48GB`, `A40-PCIE-48GB`, `A30-PCIE-24GB`, `A10-PCIE-24GB`              |
+| RTX-6000-ADA, RTX-A6000 | `RTX-6000-ADA-PCIE-48GB`, `RTX-A6000-PCIE-48GB`                            |
+| RTX-5090, RTX-5080, RTX-4090 | `RTX-5090-PCIE-32GB`, `RTX-5080-PCIE-16GB`, `RTX-4090-PCIE-24GB`      |
 
 ## Other exports
 

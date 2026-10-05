@@ -12,6 +12,18 @@ export const gpuModelFamilies = [
   'L40S',
   'L4',
   'RTX-PRO-6000',
+  // v2 (real hosts report these): data-center parts the first table missed, and the workstation and
+  // GeForce cards that edge, lab and single-tenant hosts run.
+  'GH200',
+  'L40',
+  'A40',
+  'A30',
+  'A10',
+  'RTX-6000-ADA',
+  'RTX-A6000',
+  'RTX-5090',
+  'RTX-5080',
+  'RTX-4090',
 ] as const;
 /** A GPU family (`gpuModel`), or `other` for a name the table does not know. */
 export type GpuModel = (typeof gpuModelFamilies)[number] | 'other';
@@ -39,7 +51,7 @@ export interface GpuModelTable {
  * `MAXQ`. Memory is the marketed capacity.
  */
 export const gpuModels: GpuModelTable = deepFreeze({
-  version: 1,
+  version: 2,
   families: [...gpuModelFamilies],
   products: [
     { product: 'H100-SXM5-80GB', model: 'H100', nvmlNames: ['NVIDIA H100 80GB HBM3'] },
@@ -74,6 +86,18 @@ export const gpuModels: GpuModelTable = deepFreeze({
       model: 'RTX-PRO-6000',
       nvmlNames: ['NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition'],
     },
+    // v2
+    { product: 'GH200-SUPERCHIP-96GB', model: 'GH200', nvmlNames: ['NVIDIA GH200 480GB', 'NVIDIA GH200 96GB HBM3'] },
+    { product: 'GH200-SUPERCHIP-144GB', model: 'GH200', nvmlNames: ['NVIDIA GH200 144G HBM3e'] },
+    { product: 'L40-PCIE-48GB', model: 'L40', nvmlNames: ['NVIDIA L40'] },
+    { product: 'A40-PCIE-48GB', model: 'A40', nvmlNames: ['NVIDIA A40'] },
+    { product: 'A30-PCIE-24GB', model: 'A30', nvmlNames: ['NVIDIA A30'] },
+    { product: 'A10-PCIE-24GB', model: 'A10', nvmlNames: ['NVIDIA A10'] },
+    { product: 'RTX-6000-ADA-PCIE-48GB', model: 'RTX-6000-ADA', nvmlNames: ['NVIDIA RTX 6000 Ada Generation'] },
+    { product: 'RTX-A6000-PCIE-48GB', model: 'RTX-A6000', nvmlNames: ['NVIDIA RTX A6000'] },
+    { product: 'RTX-5090-PCIE-32GB', model: 'RTX-5090', nvmlNames: ['NVIDIA GeForce RTX 5090'] },
+    { product: 'RTX-5080-PCIE-16GB', model: 'RTX-5080', nvmlNames: ['NVIDIA GeForce RTX 5080'] },
+    { product: 'RTX-4090-PCIE-24GB', model: 'RTX-4090', nvmlNames: ['NVIDIA GeForce RTX 4090'] },
   ],
 });
 
