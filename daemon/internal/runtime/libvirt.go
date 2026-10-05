@@ -59,6 +59,9 @@ type Libvirt struct {
 	HTTP *http.Client
 	// ShutdownTimeout bounds a graceful shutdown before the domain is destroyed (default 60 s).
 	ShutdownTimeout time.Duration
+	// GPUPersistence sets a passthrough GPU's persistence mode around starts and stops (persistence.go;
+	// default NvidiaPersistence, tests fake it). Unused under a Hypervisor: the helper does it.
+	GPUPersistence func(addr string, on bool) error
 
 	mu sync.Mutex
 }
@@ -825,6 +828,8 @@ func (l *Libvirt) SetState(ctx context.Context, id, state string) error {
 		if err := l.checkDisk(l.instanceDir(id), meta); err != nil {
 			return err
 		}
+		// libvirt's managed hostdevs unbind the GPUs from nvidia: let nvidia-persistenced close them.
+		l.domainGPUPersistence(ctx, id, false)
 		if _, err := os.Stat(memory); err == nil {
 			args := []string{"restore", memory, "--xml", filepath.Join(l.instanceDir(id), "domain.xml")}
 			if paused {
@@ -875,8 +880,12 @@ func (l *Libvirt) stop(ctx context.Context, id string) error {
 		return err
 	}
 	l.closeVolumes(ctx, id)
+	l.gpusBack(ctx, id)
 	return nil
 }
+
+// gpusBack: a stopped domain's managed hostdevs are back on nvidia; persistence on again.
+func (l *Libvirt) gpusBack(ctx context.Context, id string) { l.domainGPUPersistence(ctx, id, true) }
 
 // closeVolumes: under a Hypervisor a stopped domain's volumes, shared with QEMU through the node's
 // group while it ran, are closed again (0600) unless another running domain still has them open.
@@ -965,6 +974,7 @@ func (l *Libvirt) Destroy(ctx context.Context, id string) error {
 			}
 		}
 		l.closeVolumes(ctx, id) // while its definition still names them
+		l.gpusBack(ctx, id)
 		if _, err := l.virsh(ctx, "undefine", id, "--nvram", "--managed-save"); err != nil {
 			return err
 		}

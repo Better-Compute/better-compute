@@ -240,6 +240,10 @@ type Server struct {
 	// console pty (default openPty; tests replace it).
 	Virsh         Virsh
 	LibvirtPolicy func() (LibvirtPolicy, error)
+	// GPUPersistence sets a passthrough GPU's persistence mode around libvirt.start/restore/destroy
+	// (runtime.NvidiaPersistence in bcd helper; nil: none, as in tests): nvidia-persistenced holds GPUs
+	// open, and libvirt's managed hostdevs cannot unbind them from nvidia until it lets go.
+	GPUPersistence func(addr string, on bool) error
 	OpenConsole   func(path string) (*os.File, error)
 	// SliceRunner runs systemctl for slice.apply and slice.remove (default: the real one).
 	SliceRunner slice.Runner

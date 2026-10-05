@@ -20,6 +20,7 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/helper"
 	"github.com/better-compute/better-compute/daemon/internal/hostconfig"
 	"github.com/better-compute/better-compute/daemon/internal/kube"
+	"github.com/better-compute/better-compute/daemon/internal/runtime"
 	"github.com/better-compute/better-compute/daemon/internal/selfupdate"
 )
 
@@ -103,6 +104,7 @@ func runHelper(fs *flag.FlagSet, _, stderr io.Writer) int {
 	srv.JoinSigningPin, _ = config.DecodePin(cfg.JoinSigningKeyPin) // validated when the file was loaded
 	// libvirt for a node outside the libvirt group: checked definitions and bcd's domains only.
 	srv.Virsh, srv.LibvirtPolicy = libvirtHelper(cfg, host, int(uid), int(gid))
+	srv.GPUPersistence = runtime.NvidiaPersistence
 	// cloud-hypervisor for that node: taps, VFIO and the VMM's unit, built by root from what it checks.
 	srv.CHPolicy = chHelper(cfg, host, int(uid))
 	// The node's keys in the TPM, which only root opens (loadConfig: root's TPM, never the helper's own).

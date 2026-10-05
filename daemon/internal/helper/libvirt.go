@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/better-compute/better-compute/daemon/internal/runtime"
 )
 
 // Libvirt operations for an unprivileged bcd node (security review round 5, with [06192c]): the node
@@ -97,7 +99,14 @@ func (s *Server) libvirt(ctx context.Context, verb string, req *LibvirtRequest) 
 		if verb == "start" && req.Paused {
 			args = append(args, "--paused")
 		}
+		if verb == "start" {
+			s.domainGPUPersistence(ctx, req.Domain, false)
+		}
 		_, err := s.Virsh(ctx, args...)
+		if err == nil && verb == "destroy" {
+			// Its managed hostdevs are back on nvidia.
+			s.domainGPUPersistence(ctx, req.Domain, true)
+		}
 		return err
 	case verb == "blockresize":
 		if !diskTarget.MatchString(req.Target) || req.Bytes == 0 {
@@ -252,6 +261,7 @@ func (s *Server) restoreDomain(ctx context.Context, policy LibvirtPolicy, req *L
 	if name != req.Domain {
 		return errors.New("restore: the definition names another domain")
 	}
+	s.domainGPUPersistence(ctx, req.Domain, false) // checked: now let nvidia-persistenced close its GPUs
 	// virshWithXML appends the staged definition's path: --xml takes it.
 	return s.virshWithXML(ctx, policy, req.XML, append(append([]string{"restore", req.File}, paused...), "--xml")...)
 }
@@ -327,4 +337,18 @@ func (c Client) Console(ctx context.Context, domain string) (*os.File, error) {
 func (c Client) Libvirt(ctx context.Context, verb string, req LibvirtRequest) error {
 	c.Timeout = HostUnitTimeout // a memory save can be large
 	return c.Do(ctx, Request{Op: "libvirt." + verb, Libvirt: &req})
+}
+
+// domainGPUPersistence sets the persistence mode of the GPUs bcd's domain passes through (best effort).
+func (s *Server) domainGPUPersistence(ctx context.Context, domain string, on bool) {
+	if s.GPUPersistence == nil {
+		return
+	}
+	raw, err := s.Virsh(ctx, "dumpxml", domain)
+	if err != nil {
+		return
+	}
+	for _, addr := range runtime.DomainGPUs(raw) {
+		_ = s.GPUPersistence(addr, on)
+	}
 }

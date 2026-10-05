@@ -147,3 +147,16 @@ func TestVFIOTogglesPersistenceAroundTheGPU(t *testing.T) {
 		t.Fatalf("persistence calls: %s", got)
 	}
 }
+func TestDomainGPUs(t *testing.T) {
+	raw := []byte(`<domain><devices>
+		<hostdev mode="subsystem" type="pci" managed="yes"><source><address domain="0x0000" bus="0x3b" slot="0x00" function="0x0"/></source></hostdev>
+		<hostdev mode="subsystem" type="pci" managed="yes"><source><address domain="0x0001" bus="0xc5" slot="0x1f" function="0x7"/></source></hostdev>
+		<hostdev mode="subsystem" type="usb"><source/></hostdev>
+	</devices></domain>`)
+	if got := strings.Join(DomainGPUs(raw), " "); got != "0000:3b:00.0 0001:c5:1f.7" {
+		t.Fatalf("DomainGPUs = %s", got)
+	}
+	if DomainGPUs([]byte("not xml")) != nil {
+		t.Fatal("garbage parsed")
+	}
+}

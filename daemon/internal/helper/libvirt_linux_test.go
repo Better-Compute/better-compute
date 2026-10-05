@@ -200,3 +200,32 @@ func TestHelperConsoleHandsTheDescriptor(t *testing.T) {
 func (s *Server) do2(ctx context.Context, verb string, req *LibvirtRequest) error {
 	return s.libvirt(ctx, verb, req)
 }
+
+// libvirt's managed hostdevs unbind a domain's GPUs from nvidia: persistence goes off for exactly
+// those before start, and on again after destroy; a foreign or unknown domain toggles nothing.
+func TestHelperLibvirtGPUPersistence(t *testing.T) {
+	s, _, _ := libvirtServer(t)
+	inner := s.Virsh
+	s.Virsh = func(ctx context.Context, args ...string) ([]byte, error) {
+		if args[0] == "dumpxml" && args[1] == "inst_01k5w0000000000000000000ab" {
+			return []byte(`<domain><metadata><bc:instance xmlns:bc="https://better-compute.dev/libvirt/1" id="inst_01k5w0000000000000000000ab"/></metadata>` +
+				`<devices><hostdev mode="subsystem" type="pci" managed="yes"><source><address domain="0x0000" bus="0x3b" slot="0x00" function="0x0"/></source></hostdev></devices></domain>`), nil
+		}
+		return inner(ctx, args...)
+	}
+	var calls []string
+	s.GPUPersistence = func(addr string, on bool) error {
+		calls = append(calls, addr+map[bool]string{true: "=on", false: "=off"}[on])
+		return nil
+	}
+	ctx := context.Background()
+	for _, verb := range []string{"start", "destroy"} {
+		if err := s.do2(ctx, verb, &LibvirtRequest{Domain: "inst_01k5w0000000000000000000ab"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = s.do2(ctx, "start", &LibvirtRequest{Domain: "legacy-vm"})
+	if got := strings.Join(calls, " "); got != "0000:3b:00.0=off 0000:3b:00.0=on" {
+		t.Fatalf("persistence: %s", got)
+	}
+}
