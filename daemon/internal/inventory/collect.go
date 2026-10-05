@@ -44,6 +44,9 @@ type Collector struct {
 	// NICFirmware, when set, asks a NIC's driver for its firmware version (ethtool -i; EthtoolFirmware
 	// on Linux, unprivileged), for NICs without an RDMA device's sysfs fw_ver.
 	NICFirmware func(ifname string) string
+	// NVMeHealth, when set, reads an NVMe controller's SMART / Health log ("nvme0"; NVMeHealth on
+	// Linux, root only): each NVMe disk's Smart.
+	NVMeHealth func(controller string) *SmartStatus
 }
 
 // Collect gathers every section and canonicalizes the result.
@@ -428,6 +431,11 @@ func (c Collector) disks() *DisksSection {
 			Rotational: c.read(base+"/queue/rotational") == "1",
 			Removable:  c.read(base+"/removable") == "1",
 			Transport:  c.transport(name, base),
+		}
+		if c.NVMeHealth != nil && d.Transport == DiskTransport_DISK_TRANSPORT_NVME {
+			if ctrl := c.nvmeControllerOf(base); ctrl != "" {
+				d.Smart = c.NVMeHealth(ctrl)
+			}
 		}
 		s.Disks = append(s.Disks, d)
 	}

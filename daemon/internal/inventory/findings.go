@@ -125,7 +125,23 @@ func HostFindings(inv *NodeInventory, privileged bool) []Finding {
 	if d := inv.Disks; d == nil || len(d.Disks) == 0 {
 		add("warn", "disks", "no physical disks under /sys/block (virtio and USB count; loop, dm and md do not)")
 	} else {
-		add("ok", "disks", "%d disks", len(d.Disks))
+		var bad []string
+		for _, disk := range d.Disks {
+			switch sm := disk.Smart; {
+			case sm == nil:
+			case !sm.Healthy:
+				bad = append(bad, disk.Name+" reports a critical warning (spare, reliability or read-only)")
+			case sm.WearPercent != nil && *sm.WearPercent >= 90:
+				bad = append(bad, fmt.Sprintf("%s is %d%% worn", disk.Name, *sm.WearPercent))
+			case sm.MediaErrors != nil && *sm.MediaErrors > 0:
+				bad = append(bad, fmt.Sprintf("%s has %d media errors", disk.Name, *sm.MediaErrors))
+			}
+		}
+		if len(bad) > 0 {
+			add("warn", "disks", "%d disks; %s: replace before it fails", len(d.Disks), strings.Join(bad, "; "))
+		} else {
+			add("ok", "disks", "%d disks", len(d.Disks))
+		}
 	}
 
 	if n := inv.Nics; n == nil || len(n.Nics) == 0 {
