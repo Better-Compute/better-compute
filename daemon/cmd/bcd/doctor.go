@@ -164,7 +164,7 @@ func hostChecks(cfg *config.Config) []doctorCheck {
 	}
 	out = append(out, toolChecks(exec.LookPath)...)
 	out = append(out, hostResourceChecks()...)
-	out = append(out, gpuChecks(gpuSampler())...)
+	out = append(out, gpuDoctor(gpuSampler())...)
 	if cfg == nil {
 		return out
 	}

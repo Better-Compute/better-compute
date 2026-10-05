@@ -11,6 +11,9 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/nvml"
 )
 
+// gpuHostRoot is empty: the fake GPUs have no PCI functions to compare with.
+const gpuHostRoot = ""
+
 // gpuSampler reads the fake machine's GPUs (fakehw.GPUSnapshot) for the OTLP export.
 func gpuSampler() agent.GPUSampler {
 	seed := fakeSeed()
