@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/better-compute/better-compute/daemon/internal/helper"
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
 )
 
@@ -18,6 +21,24 @@ import (
 // inventory.Collector{Root: dir} replays, so a new machine model becomes a test fixture
 // (daemon/internal/inventory/testdata/hosts); --redact first replaces serials, UUIDs, MACs and the
 // hostname with stable stand-ins.
+
+// dmiSource fills the root-only DMI values (product UUID, serials) an unprivileged collection reads
+// empty: set to bcd helper's dmi.read when bcd node runs under [helper] (agent.go). nil: none.
+var dmiSource func() map[string]string
+
+// helperDMI asks bcd helper for the root-only DMI values; a failure reads as none (the inventory
+// then carries what an unprivileged read saw, and doctor says so).
+func helperDMI(c helper.Client) func() map[string]string {
+	return func() map[string]string {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		values, err := c.ReadDMI(ctx)
+		if err != nil {
+			return nil
+		}
+		return values
+	}
+}
 
 func hardwareFlags(fs *flag.FlagSet) {
 	fs.Bool("json", false, "print the full inventory as JSON")

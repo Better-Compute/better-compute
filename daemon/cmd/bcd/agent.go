@@ -465,6 +465,8 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		if rh, ok := host.(*agent.RealHost); ok {
 			rh.Helper = &helper.Client{Socket: cfg.Helper.Socket}
 		}
+		// The product UUID and serials are root-only in sysfs: the inventory asks the helper for them.
+		dmiSource = helperDMI(helper.Client{Socket: cfg.Helper.Socket})
 	}
 	plugins := startPlugins(context.Background(), cfg.PluginsDir, cfg.Plugins, log)
 	defer func() {

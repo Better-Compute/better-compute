@@ -33,6 +33,10 @@ type Collector struct {
 	// GPU (/dev/dxg) has no procfs entry and no PCI sysfs, so nvidia-smi is the only source there. Its
 	// section is taken as it comes (bus ids may name a virtual bus).
 	GPUs func() *GpusSection
+	// DMI, when set, supplies DMI values (by sysfs file name: product_uuid, product_serial, ...) that
+	// read empty: the UUID and serials are root-only, so an unprivileged bcd node asks bcd helper. It
+	// is called at most once per collection, and only when a file read empty.
+	DMI func() map[string]string
 }
 
 // Collect gathers every section and canonicalizes the result.
@@ -124,7 +128,22 @@ func (c Collector) list(abs string) []string {
 const efiGlobal = "8be4df61-93ca-11d2-aa0d-00e098032b8c"
 
 func (c Collector) system() *SystemSection {
-	dmi := func(name string) string { return c.read("/sys/class/dmi/id/" + name) }
+	var privileged map[string]string
+	asked := false
+	dmi := func(name string) string {
+		if v := c.read("/sys/class/dmi/id/" + name); v != "" || c.DMI == nil {
+			return v
+		}
+		// Only where DMI exists at all: a machine without SMBIOS has nothing root could read either.
+		if !c.exists("/sys/class/dmi/id") {
+			return ""
+		}
+		if !asked {
+			asked = true
+			privileged = c.DMI()
+		}
+		return strings.TrimSpace(privileged[name])
+	}
 	s := &SystemSection{
 		Vendor:        dmi("sys_vendor"),
 		Product:       dmi("product_name"),

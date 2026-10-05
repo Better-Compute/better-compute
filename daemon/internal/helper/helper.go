@@ -440,6 +440,9 @@ func (s *Server) do(ctx context.Context, req Request) (any, error) {
 	if verb, ok := strings.CutPrefix(req.Op, "tpm."); ok {
 		return s.tpmOp(verb, req.TPM)
 	}
+	if req.Op == "dmi.read" {
+		return s.dmiRead(req) // dmi.go: root-only DMI values, no arguments
+	}
 	return nil, s.op(ctx, req)
 }
 

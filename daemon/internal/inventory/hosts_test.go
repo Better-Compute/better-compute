@@ -197,6 +197,34 @@ func TestHostX86ServerEdgeCases(t *testing.T) {
 	}
 }
 
+// Unprivileged, the root-only DMI files read empty; the DMI hook (bcd helper) fills them, once.
+func TestDMIHookFillsRootOnlyFiles(t *testing.T) {
+	tr := newTree(t)
+	tr.file("/sys/class/dmi/id/sys_vendor", "Dell Inc.\n")
+	tr.file("/sys/class/dmi/id/product_name", "PowerEdge XE9680\n")
+	calls := 0
+	hook := func() map[string]string {
+		calls++
+		return map[string]string{"product_uuid": "4C4C4544-0051-3010-8044-B4C04F4E3433", "product_serial": "7Q4D3S3", "board_serial": " .7Q4D3S3.CNFCP0042Q00HV. "}
+	}
+	inv, err := Collector{Root: tr.root, Hostname: func() string { return "h" }, DMI: hook}.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := inv.System; s.ProductUuid != "4c4c4544-0051-3010-8044-b4c04f4e3433" || s.Serial != "7Q4D3S3" || s.BoardSerial != ".7Q4D3S3.CNFCP0042Q00HV." || s.Vendor != "Dell Inc." {
+		t.Fatalf("system = %+v", s)
+	}
+	if calls != 1 {
+		t.Fatalf("the hook ran %d times", calls)
+	}
+	// No SMBIOS at all (WSL, containers): nothing to ask root for.
+	empty := newTree(t)
+	empty.file("/proc/meminfo", "MemTotal: 1024 kB\n")
+	if _, err := (Collector{Root: empty.root, Hostname: func() string { return "h" }, DMI: hook}).Collect(); err != nil || calls != 1 {
+		t.Fatalf("asked without DMI: calls=%d err=%v", calls, err)
+	}
+}
+
 // A fixture archive refuses entries that would leave its tree.
 func TestExtractFixtureStaysInside(t *testing.T) {
 	if runtime.GOOS == "windows" {

@@ -268,7 +268,9 @@ no tunnels.
 unprivileged and asks `bcd helper` (root) over a unix socket for: files named by kind and id
 (CDI specs, allocation env files, the SSH drop-in, CA, principals and KRL), reboots, resets of the
 host's own GPUs, bcd's nftables table, sshd reloads, hold slices (`slice.apply`, `slice.remove`:
-only `bcd-alloc-*.slice`, emptied before removal), and self-update (`update.*`: the node
+only `bcd-alloc-*.slice`, emptied before removal), the root-only DMI values (`dmi.read`: no
+arguments; product UUID, serials and asset tags from a fixed list under `/sys/class/dmi/id`, no
+symlinks, 128 printable bytes each), and self-update (`update.*`: the node
 downloads; the helper verifies the manifest with its own pins and floor, re-hashes the staged
 binary into root's slots, swaps, and swaps back on its own deadline). Peers are checked by
 SO_PEERCRED and `/proc/<pid>/exe`; requests are versioned, strictly decoded JSON; every operation
