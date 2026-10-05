@@ -5,6 +5,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -172,6 +173,7 @@ func (c Collector) cpu() *CpuSection {
 	cores := map[string]bool{}
 	var threads uint32
 	physical, core := "0", ""
+	armPart := ""
 	flush := func() {
 		if core != "" {
 			cores[physical+"/"+core] = true
@@ -201,6 +203,8 @@ func (c Collector) cpu() *CpuSection {
 			}
 		case "model name":
 			s.Model = value
+		case "CPU part":
+			armPart = strings.ToLower(value)
 		case "physical id":
 			physical = value
 			sockets[value] = true
@@ -214,10 +218,17 @@ func (c Collector) cpu() *CpuSection {
 	}
 	flush()
 	s.Threads = threads
+	if len(sockets) == 0 {
+		// arm64 (and some VMs) print no "physical id"/"core id": the kernel's topology says it.
+		sockets, cores = c.sysfsTopology()
+	}
 	s.Sockets = uint32(max(len(sockets), 1))
 	s.Cores = uint32(len(cores))
 	if s.Cores == 0 {
 		s.Cores = threads
+	}
+	if s.Model == "" && armPart != "" {
+		s.Model = armCore(s.Vendor, armPart)
 	}
 	for fl := range flags {
 		s.Flags = append(s.Flags, fl)
@@ -275,6 +286,40 @@ func machine(goarch string) string {
 	return goarch
 }
 
+// sysfsTopology reads every online CPU's package and core id from
+// /sys/devices/system/cpu/cpu<N>/topology: sockets, and cores keyed "<package>/<core>".
+func (c Collector) sysfsTopology() (sockets, cores map[string]bool) {
+	sockets, cores = map[string]bool{}, map[string]bool{}
+	for _, name := range c.list("/sys/devices/system/cpu") {
+		n, ok := strings.CutPrefix(name, "cpu")
+		if _, err := strconv.Atoi(n); !ok || err != nil {
+			continue
+		}
+		dir := "/sys/devices/system/cpu/" + name + "/topology"
+		pkg := c.read(dir + "/physical_package_id")
+		core := c.read(dir + "/core_id")
+		if pkg == "" || core == "" {
+			continue // offline CPUs have no topology directory
+		}
+		sockets[pkg] = true
+		cores[pkg+"/"+core] = true
+	}
+	return sockets, cores
+}
+
+// armCore names an Arm core from /proc/cpuinfo's "CPU part" (MIDR part number), for server parts
+// whose cpuinfo has no model name. Unknown parts read as "<vendor> <part>".
+func armCore(vendor, part string) string {
+	known := map[string]string{
+		"0xd0c": "Neoverse-N1", "0xd40": "Neoverse-V1", "0xd49": "Neoverse-N2", "0xd4f": "Neoverse-V2",
+		"0xd8e": "Neoverse-N3", "0xd84": "Neoverse-V3", "0xd83": "Neoverse-V3AE", "0xac3": "AmpereOne", "0xac4": "AmpereOne",
+	}
+	if name, ok := known[part]; ok {
+		return name
+	}
+	return strings.TrimSpace(vendor + " " + part)
+}
+
 func armImplementer(code string) string {
 	switch strings.ToLower(code) {
 	case "0x41":
@@ -283,6 +328,8 @@ func armImplementer(code string) string {
 		return "NVIDIA"
 	case "0xc0":
 		return "Ampere"
+	case "0x48":
+		return "HiSilicon"
 	}
 	return code
 }
@@ -348,7 +395,7 @@ func (c Collector) disks() *DisksSection {
 		d := &Disk{
 			Name:       name,
 			Model:      c.read(base + "/device/model"),
-			Serial:     c.read(base + "/device/serial"),
+			Serial:     c.diskSerial(base),
 			Wwn:        c.wwn(base),
 			SizeBytes:  sectors * 512,
 			Rotational: c.read(base+"/queue/rotational") == "1",
@@ -361,6 +408,24 @@ func (c Collector) disks() *DisksSection {
 		return nil
 	}
 	return s
+}
+
+// diskSerial: NVMe controllers expose `serial`; SCSI, SAS and SATA disks (behind libata) do not, but
+// the kernel caches their Unit Serial Number VPD page (0x80) as device/vpd_pg80: a 4-byte header
+// (peripheral byte, page code 0x80, big-endian length), then the serial, space padded.
+func (c Collector) diskSerial(base string) string {
+	if s := c.read(base + "/device/serial"); s != "" {
+		return s
+	}
+	b, err := os.ReadFile(c.p(base + "/device/vpd_pg80"))
+	if err != nil || len(b) < 4 || b[1] != 0x80 {
+		return ""
+	}
+	n := int(b[2])<<8 | int(b[3])
+	if n > len(b)-4 {
+		n = len(b) - 4
+	}
+	return strings.TrimSpace(strings.Trim(string(b[4:4+n]), "\x00"))
 }
 
 func (c Collector) wwn(base string) string {
@@ -387,7 +452,9 @@ func (c Collector) transport(name, base string) DiskTransport {
 		return DiskTransport_DISK_TRANSPORT_SATA
 	case strings.Contains(target, "/virtio"):
 		return DiskTransport_DISK_TRANSPORT_VIRTIO
-	case strings.Contains(target, "/host") || strings.Contains(target, "/end_device"):
+	case strings.Contains(target, "/end_device-") || strings.Contains(target, "/expander-") || strings.Contains(target, "/port-"):
+		// A SAS topology (the SAS transport class names its nodes so). A bare SCSI host is not
+		// enough: Hyper-V's storvsc, iSCSI and a RAID controller's virtual drives sit under one too.
 		return DiskTransport_DISK_TRANSPORT_SAS
 	}
 	return DiskTransport_DISK_TRANSPORT_UNSPECIFIED
@@ -403,11 +470,26 @@ func (c Collector) nics() *NicsSection {
 		if !c.exists(base+"/device") || strings.Contains(c.linkPath(base), "/virtual/") {
 			continue
 		}
+		// SR-IOV virtual functions come and go with the VFs bcd hands to VMs: they are not the
+		// machine's NICs (they would move the inventory hash on every VM start).
+		if c.exists(base + "/device/physfn") {
+			continue
+		}
+		driver := c.link(base + "/device/driver")
+		// A BMC's Redfish host interface (iDRAC, iLO, XCC, Supermicro) is a USB CDC-Ethernet device on
+		// the host: the BMC's, not the node's, and its MAC must not take part in the node's identity.
+		if (driver == "cdc_ether" || driver == "rndis_host") && strings.Contains(c.linkPath(base), "/usb") {
+			continue
+		}
+		pci := c.link(base + "/device")
+		if !pciAddress.MatchString(pci) {
+			pci = "" // a VMBus or platform device has no PCI address
+		}
 		n := &Nic{
 			Name:       name,
 			Mac:        strings.ToLower(c.read(base + "/address")),
-			Driver:     c.link(base + "/device/driver"),
-			PciAddress: c.link(base + "/device"),
+			Driver:     driver,
+			PciAddress: pci,
 			Rdma:       RdmaType_RDMA_TYPE_NONE,
 			Link:       LinkState_LINK_STATE_DOWN,
 		}
@@ -444,6 +526,8 @@ func (c Collector) nics() *NicsSection {
 	}
 	return s
 }
+
+var pciAddress = regexp.MustCompile(`^[0-9a-f]{4,8}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$`)
 
 // ---- gpus --------------------------------------------------------------------------------------
 

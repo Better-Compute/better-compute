@@ -39,7 +39,7 @@ func Capture(dst string, opts CaptureOptions) (*NodeInventory, error) {
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		return nil, err
 	}
-	m := &mirror{src: opts.Src, dst: dst, done: map[string]bool{}}
+	m := &mirror{src: opts.Src, dst: dst, done: map[string]bool{}, redact: opts.Redact}
 	c := Collector{Root: opts.Src, Trace: func(abs string) { m.path(abs) }}
 	inv, err := c.Collect()
 	if err != nil {
@@ -60,6 +60,17 @@ type mirror struct {
 	src, dst string
 	done     map[string]bool
 	err      error
+	// redact also renames path components that are identifiers (a VMBus device's instance UUID).
+	redact bool
+}
+
+// names rewrites UUID path components when redacting; the same UUID always gets the same stand-in,
+// so links and the paths they point to still meet.
+func (m *mirror) names(p string) string {
+	if !m.redact {
+		return p
+	}
+	return uuidPattern.ReplaceAllStringFunc(p, redactUUID)
 }
 
 func (m *mirror) real(abs string) string {
@@ -69,7 +80,9 @@ func (m *mirror) real(abs string) string {
 	return filepath.Join(m.src, filepath.FromSlash(abs))
 }
 
-func (m *mirror) out(abs string) string { return filepath.Join(m.dst, filepath.FromSlash(abs)) }
+func (m *mirror) out(abs string) string {
+	return filepath.Join(m.dst, filepath.FromSlash(m.names(abs)))
+}
 
 // path mirrors abs, resolving symlinks component by component and recreating each one it crosses.
 func (m *mirror) path(abs string) {
@@ -111,12 +124,15 @@ func (m *mirror) walk(abs string, depth int) {
 				return
 			}
 			target = filepath.ToSlash(target)
-			m.link(next, target)
 			// Continue from where the link points, with the components still to go.
 			resolved := target
 			if !path.IsAbs(target) {
 				resolved = path.Join(cur, target)
+			} else if rel, err := filepath.Rel(cur, target); err == nil {
+				// The copy keeps links relative, so it replays under any root.
+				target = filepath.ToSlash(rel)
 			}
+			m.link(next, target)
 			rest := strings.Join(parts[i+1:], "/")
 			m.walk(path.Join(resolved, rest), depth+1)
 			return
@@ -148,7 +164,7 @@ func (m *mirror) link(abs, target string) {
 		m.err = err
 		return
 	}
-	if err := os.Symlink(filepath.FromSlash(target), out); err != nil && m.err == nil {
+	if err := os.Symlink(filepath.FromSlash(m.names(target)), out); err != nil && m.err == nil {
 		m.err = err
 	}
 }
