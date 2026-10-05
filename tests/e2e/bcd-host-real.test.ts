@@ -151,6 +151,48 @@ describe.skipIf(!enabled)('bcd on the real host (non-fakehw build)', () => {
     );
   }, 300_000);
 
+  it('binds and releases a reservation of the real GPU', async (context) => {
+    const inventory = JSON.stringify(
+      await api.inventory.get(dev.root, { tenantId: dev.rootTenantId, nodeId }),
+    );
+    if (!/"uuid":"GPU-/.test(inventory)) return context.skip();
+    // A GPU the control plane's model table does not know (consumer cards, new SKUs) is NoSchedule
+    // GpuModelUnknown: nothing places on it, so say so instead of waiting for a placement.
+    const info = await api.nodes.get(dev.root, { tenantId: dev.rootTenantId, nodeId });
+    const unknown = (info.conditions ?? []).find(
+      (c: { type: string; status: string }) => c.type === 'GpuModelUnknown' && c.status === 'true',
+    );
+    if (unknown) {
+      process.stderr.write(`[real host] GPU not schedulable: ${unknown.message ?? 'GpuModelUnknown'}\n`);
+      return context.skip();
+    }
+    await api.pools.offer(dev.root, {
+      tenantId: dev.rootTenantId,
+      poolId,
+      toTenantId: dev.rootTenantId,
+      quota: { gpu: 8 },
+    });
+    const created = await api.reservations.create(dev.root, {
+      tenantId: dev.rootTenantId,
+      poolId,
+      devices: [{ class: 'gpu', count: 1 }],
+      duration: '1h',
+      idempotencyKey: `bcd-real-reserve-${Date.now()}`,
+    });
+    const deadline = Date.now() + 120_000;
+    let current: any;
+    for (;;) {
+      current = await api.reservations.get(dev.root, { tenantId: dev.rootTenantId, reservationId: created.id });
+      if (current.state === 'active' || current.state === 'failed' || Date.now() > deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    process.stderr.write(`[real host] reservation ${created.id}: ${current.state} ${current.reason ?? ''}\n`);
+    expect(current.state, `${JSON.stringify(current)}\n--- bcd log ---\n${nodeLog.slice(-4000)}`).toBe('active');
+    const files = sh(`find '${dataDir}' /etc/cdi -name 'bcd-*.json' 2>/dev/null`);
+    process.stderr.write(`[real host] CDI holds: ${files || '(none)'}\n`);
+    await api.reservations.release(dev.root, { tenantId: dev.rootTenantId, reservationId: created.id });
+  }, 240_000);
+
   it('answers status on its socket and doctor about the host', async () => {
     const status = await runLinux([toLinux(binary), 'status', '--socket', `${dataDir}/bcd.sock`, '--json']);
     expect(status.status, status.stderr).toBe(0);
