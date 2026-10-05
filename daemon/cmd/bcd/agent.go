@@ -553,6 +553,8 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		GPUSampler:        gpuSampler(),
 		// [host] units = false: the GPU operator (or another tool) owns the host's configuration.
 		ExternalHost: cfg.ExternalHost,
+		// A fakehw build writes under its fake root and needs no privilege.
+		Unprivileged: !devBuild && mode == "node" && os.Geteuid() != 0 && !underHelper,
 	}
 	if d, err := time.ParseDuration(os.Getenv("BCD_RENEW_AFTER")); devBuild && err == nil {
 		opts.RenewAfter = d // fakehw builds only: renew soon after start (e2e)
