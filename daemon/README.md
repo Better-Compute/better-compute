@@ -401,6 +401,10 @@ events. It never drops a hold on its own.
   where the kubelet enforces their requests and limits. The booked limits still count in bcd's
   host admission.
 - Slots get `CUDA_MPS_PIPE_DIRECTORY` when the MPS daemon runs.
+- A `bcd node` running as an ordinary user without `[helper]` cannot write `/etc/cdi` or create slices.
+  Its Hello claims no `cdi`, `devices.limits` or `binding.kubernetes`, so capacity places no GPU
+  reservation there. A hold that arrives anyway fails at once as `node-unprivileged`, and
+  `bcd doctor` warns (`gpu-binding`).
 - A `hold`'s spec copies, from NVIDIA's JSON CDI spec (`/etc/cdi/nvidia.json`, which the
   `container-toolkit` unit generates with UUID names), the device nodes of exactly its devices and
   the driver's common mounts and hooks. So `bcd.dev/gpu=<id>` alone gives a container its GPUs,
@@ -440,6 +444,9 @@ events. It never drops a hold on its own.
   which is off unless asked for and never allowed with hugepages.
 - *VFIO* (`runtime/vfio.go`). A GPU instance's IOMMU group is moved onto `vfio-pci` at start and
   given back to its driver at stop and delete. GPU instances are never memory-snapshotted.
+  nvidia-persistenced holds every GPU open, so the GPU's persistence mode goes off before it leaves
+  nvidia (`nvidia-smi -pm 0`) and on again once nvidia has it back. libvirt's managed hostdevs get the
+  same around `start`/`restore` and `destroy`, done by root (bcd itself, or `bcd helper`).
 - *NoCloud seed* (`runtime/netconfig.go`). It carries network-config v2 for leased NICs:
   - each NIC is matched by MAC and gets its CIDR addresses;
   - the gateway becomes the default route, and the NIC's nameservers are set;
