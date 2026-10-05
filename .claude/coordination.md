@@ -86,6 +86,11 @@ group changes go through the user.
 | B. real-host bcd run (non-fakehw vs dev stack, host wiring, cgroup v2 slices, opt-in `tests/e2e/bcd-host-real*`), instance runtimes on real KVM (libvirt / cloud-hypervisor), metal on emulation | [752b12] (ex-0b2be8) | `daemon/internal/runtime/**`, runtime half of `agent/instances.go`, `examples/emulated-site/**` |
 | C. GPUs: nvidia-smi on real Blackwell/WSL (fixtures), NVML backend, hostconfig GPU units, CDI, `doctor_gpu.go`; later TPM (swtpm), k3s | [14f380] (ex-d320b8) | `daemon/internal/nvml/**`, `daemon/internal/hostconfig/**` |
 
+Restart (2026-10-04, later): A is [199392] (ex-d83a36), C is [3c9f90] (ex-14f380). ex-752b12 is not running, so [3c9f90]
+also takes B's open items (persistenced around the VFIO unbind: f25abbe; the real-host e2e GPU bind). A landed in round 6:
+c5c52c4 (vfio-bound GPUs stay in the inventory), 6cf5122 (doctor iommu-groups), 82fef0e (DIMMs: SMBIOS/EDAC), 9b83ece (NIC
+firmware), 362435e (NVMe health), 32beca7 (helper `hw.read`, agreed with C).
+
 After a restart (same day): [199392] = ex-d83a36 (A, plus helper ops `dmi.read`/`hw.read`, reviewed by C), [3c9f90] =
 ex-14f380 (C; also took B's open items, since ex-752b12 is not running).
 
