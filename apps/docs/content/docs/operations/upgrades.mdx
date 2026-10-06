@@ -1,0 +1,292 @@
+---
+title: Upgrades
+metaTitle: Upgrading the control plane, gateways and bcd
+description: The order an upgrade runs in, how migrations behave, the version skew allowed between the server, gateways and bcd, rolling bcd out with signed releases, and the API surface freeze that keeps clients working.
+icon: RefreshCw
+status: experimental
+packages: ['@better-compute/postgres', '@better-compute/server', '@better-compute/gateway', '@better-compute/rollout', '@better-compute/protocol', '@better-compute/cli']
+sources:
+  - packages/postgres/src/migrate.ts
+  - packages/postgres/src/migrations/0018_partitioned_history.ts
+  - packages/server/src/index.ts
+  - packages/server/src/self-check.ts
+  - packages/server/src/http.ts
+  - packages/cli/src/commands/serve.ts
+  - packages/gateway/src/gateway.ts
+  - packages/protocol/src/version.ts
+  - packages/core/src/errors.ts
+  - scripts/api-surface.mjs
+  - package.json
+  - tests/sim/upgrade.test.ts
+---
+
+An upgrade of Better Compute touches four things that run different code: the database schema, the control-plane
+processes (api and workers), the gateways, and `bcd` on every machine. They are upgraded one at a time, in an order
+that keeps every pair that talks to each other compatible at every moment. This page is the operator's runbook for
+that order. The detail of each piece lives on its own page and is linked rather than repeated.
+
+<Callout type="warn" title="What has and has not been exercised">
+The upgrade order is proven in the fleet simulator: `tests/sim/upgrade.test.ts` runs the real control plane with
+three gateways and simulated daemons through expand migrations, workers, gateways one at a time and a signed bcd
+rollout, under load, and checks that no allocation moves, no VM reboots and invariants I1, I2, I5 and I8 hold
+(80195df). Both "releases" in that test are the same build plus one extra migration and a FakeDaemon that reports a
+new version; it is not an upgrade between two published releases. Every package is at 0.1.0 and no bcd release has
+been cut, so no deployment has been upgraded from one real release to the next yet.
+</Callout>
+
+## The order
+
+PLAN.md §7.6 fixes the order, and the code is built around it:
+
+| Step | What | Why this position |
+| --- | --- | --- |
+| 1 | Expand migrations: `better-compute migrate` | New code may read new columns and tables; old code ignores them |
+| 2 | Workers and api | They read and write the expanded schema; old gateways still work against it |
+| 3 | Gateways, one at a time, each drained first | A gateway's restart costs its nodes a reconnect; one at a time keeps the rest of the region up |
+| 4 | bcd, in waves within each pool's disruption budget | The daemon is the last to move, so the control plane always speaks its protocol |
+| 5 | Contract migrations, in the following release | Only once no process of the old release is left |
+
+Two rules follow from it. A newer daemon is never put in front of an older control plane, and a database is never
+migrated backwards: a release whose migrations ran cannot be undone by deploying the previous code (see
+[rolling back](#rolling-back)).
+
+## Before you start
+
+- Read the [changelog](/docs/reference/changelog) between the two versions for new migrations, changed options and
+  new module requirements.
+- Take a backup you know how to restore: [backup and recovery](/docs/operations/backup-and-recovery). It is the only
+  way back from a migration.
+- Run `better-compute doctor` and clear its errors first. A half-done command-signing root rotation
+  (`pki.rotation`), an unsigned quorum change (`pki.quorum-unsigned`) or overdue work (`workers.queue`) is easier to
+  finish before the upgrade than to untangle in the middle of it.
+- Check that no rollout is running (`better-compute rollouts list --tenant root`); a node can be in only one running
+  or paused rollout.
+
+## Step 1: migrate
+
+```bash
+better-compute migrate
+```
+
+`migrate` runs `compute.initialize()`: it checks every method's IAM action against the merged catalog and the
+normative method table (`INVALID_CONFIG` before touching the store if one disagrees), applies the base schema and
+every module's migrations, anchors the process clock to `compute_now()`, settles the trust bundle version, and
+starts the modules. It is idempotent: run it as a one-off job on every deploy. The ledger, the naming rules and the
+full list of migrations are on [database](/docs/operations/database#migrations); what matters for an upgrade is how
+it decides what to run and what to refuse.
+
+**What runs.** Migrations run in registration order: the base schema (owner `core`), the built-in modules, your
+`modules`, then your `plugins`. Each runs in its own transaction and is recorded in `compute_migrations` in the same
+transaction, so a failed one leaves nothing behind and is retried on the next run. A migration that fails is
+reported as `INTERNAL_ERROR` naming it (`Migration <name> failed: …`). Migrations run without the executor's
+statement timeout.
+
+**Concurrent migrators.** Every migration transaction first takes `pg_advisory_xact_lock(1650683248, 1)`, a
+transaction-level lock that is safe behind PgBouncer in transaction mode. Two processes migrating at once serialize,
+and the second skips what the first applied.
+
+**What it refuses.** Before applying anything, `migrate` compares the ledger with what this build knows and stops
+with `INVALID_CONFIG` ("Refusing to migrate: … Run the better-compute release that migrated this database, or a
+newer one.") when:
+
+| Ledger holds | Meaning |
+| --- | --- |
+| A migration numbered above this build's last one for an owner it knows | A newer release migrated this database |
+| An unknown name at or below an owner's last number | A released migration was renamed or removed |
+| `compute_schema_version` above this build's base schema version | A newer release applied base migrations this build lacks |
+| A server below `server_version_num` 160000 | PostgreSQL older than 16 |
+
+The error's `details` carry `newer`, `unknown`, `schemaVersion` and `knownSchemaVersion`. Migrations of owners this
+build has no migrations for at all are ignored, so removing a module from the configuration does not block startup;
+its tables stay.
+
+**Verify.** After the job, `better-compute doctor` reports `migrations` as an error when any migration of this
+release and these modules is not in the ledger ("Migrations not applied: …").
+
+### Expand and contract
+
+The migrations in the tree today add tables, columns and indexes, and widen checks (`core/0015_inventory_images` and
+`core/0028_volume_allocations` drop a `CHECK` constraint and add a wider one). None drops a column or table that an
+earlier release reads. The one heavy migration is `core/0018_partitioned_history`: it renames `audit_events`,
+`inventory_snapshots` and `usage_windows`, creates partitioned tables under the same names, copies every row with
+its values intact and drops the old tables, all in one transaction, so those tables are locked for as long as the
+copy takes. Plan for that on a large database. PLAN.md puts destructive changes ("contract": dropping a column the
+old release still reads) in the release after the one that stopped using them, so that during step 2 the old and new
+processes can share the schema. None has been needed so far.
+
+<Callout type="warn" title="serve --no-migrate and worker roles">
+The deployment pages run `migrate` once and start processes with `serve --no-migrate`. In the current code that works
+for `--roles api` and `--roles gateway`, but not for worker roles: `serve` calls `compute.start({ roles })` for
+`controllers`, `scheduler`, `sinks` and `iam`, and `start()` refuses with `INVALID_STATE` ("Call initialize() before
+start()") unless `initialize()` ran in the same process (`packages/server/src/index.ts`, `packages/cli/src/commands/serve.ts`).
+No test starts a worker with `--no-migrate`. Until that changes, start worker processes without `--no-migrate`:
+`initialize()` is idempotent and serializes on the migration lock, so it costs one ledger read when the job already
+ran. The consequence for upgrades: a worker of the old release that restarts after step 1 runs `initialize()`, finds
+the newer migrations in the ledger and refuses to start, so replace old workers with new ones rather than restarting
+them.
+</Callout>
+
+## Step 2: workers and api
+
+Roll api processes behind their load balancer as you would any stateless service, using `GET /readyz` for readiness
+(see [health checks](/docs/operations/deployment#health-checks)). Clients retry failed calls with their idempotency
+keys.
+
+Workers can be replaced in any order, and old and new workers may run side by side for a while: shard and singleton
+leases make every job single-writer whatever release holds it. Stop old workers with SIGTERM so they release their
+leases at once; a worker that is killed loses them only when they expire, after 15 seconds (see
+[high availability](/docs/operations/high-availability#worker-failover)). When a reconciler is new in the release, it
+runs only once a new worker holds the lease for its shard or singleton.
+
+The new processes publish the trust bundle again. Its version follows its content, so an upgrade that changes
+nothing in the bundle keeps the version, and one that does (new roots, a quorum) takes the next version once; see
+[PKI](/docs/operations/pki#signed-intent).
+
+## Step 3: gateways
+
+Upgrade gateways one at a time. `serve` handles SIGTERM by draining the gateway first: every daemon is told to
+reconnect elsewhere (`Drain`, with a random delay of up to 60 seconds), the listeners close with a 2-second grace and
+the `gateway:<id>` lease is released (see [shutdown](/docs/operations/deployment#shutdown)). Daemons redial through the
+L4 balancer and re-home onto the remaining gateways; the next `Hello` replays whatever was in flight, and the
+daemon's journal deduplicates it, so nothing runs twice. Wait for the drained gateway's sessions to settle on the
+others before stopping the next one: `doctor`'s `fleet.gateway-headroom` warns when a gateway holds 80% of its
+`maxStreams`.
+
+A gateway killed instead of drained costs the same reconnect, only all at once; see
+[failure modes](/docs/daemon/failure-modes#gateway-crash).
+
+## Step 4: bcd
+
+### Version skew
+
+Each `Hello` carries the daemon's `proto_min`, `proto_max`, `daemon_version` and `capabilities`. The gateway picks the
+highest protocol version inside both ranges (`negotiateProtocolVersion`); when the ranges do not overlap it sets
+`Welcome.upgrade_required`, and that session accepts only the `daemon.upgrade` command kind: no desired state, no
+other command. The full rules, the capability labels (`bc.dev/cap.<name>=1`) and the per-feature gating are on
+[version skew](/docs/daemon/protocol#version-skew). In short:
+
+| Item | Today |
+| --- | --- |
+| Protocol versions | Exactly 1 on both sides (`PROTOCOL_VERSION = { min: 1, max: 1 }`, `ProtoMin`/`ProtoMax` in Go). No version beyond 1 is defined |
+| A gateway's range | `createGateway({ protocol: { min, max } })`, default `PROTOCOL_VERSION`; for staged bumps and the skew tests |
+| Skew policy | Daemons may lag N-1 minor versions before 1.0 and N-2 from 1.0 |
+| Skew matrix | `tests/skew-matrix.test.ts`: FakeDaemon profiles for N (0.5.0), N-1 (0.4.0) and N-2 (0.3.0) against real dev stacks, each welcomed and adopted, with the kinds it lacks rejected `UNSUPPORTED`; a below-minimum profile gets `upgrade_required` |
+| What is recorded | `node_sessions.daemon_version` and `proto_max` (`core/0008_session_versions`); `capabilities` (`core/0024_session_capabilities`) |
+| Feature gating | Placement places instances that need `instance.network-policy`, `instance.ssh-host-only`, `instance.placement` or `instance.volumes`, and reservations that book host resources (`devices.limits`) or bind through Kubernetes (`binding.kubernetes`), only on nodes that advertise them; `tunnels.open` needs `tunnel.instance-dial` for instance tunnels |
+
+The skew profiles are FakeDaemon behaviours, not old bcd binaries: no older bcd release exists to run. `doctor`
+reports `fleet.daemon-skew` when connected daemons speak a protocol below the server's minimum.
+
+`UPGRADE_REQUIRED` is also a stable API error code (HTTP 426, gRPC `FAILED_PRECONDITION`) in `@better-compute/core`;
+nothing in the server raises it today. On the daemon path the signal is the `Welcome.upgrade_required` flag, not an
+error.
+
+### Rolling bcd out
+
+From v0.4 the daemon is upgraded through desired state, not by hand. The full guide is
+[rollouts](/docs/guides/rollouts); the sequence is:
+
+<Steps>
+<Step>
+
+#### Sign the release offline
+
+`better-compute release sign` writes `manifest.json` over goreleaser's output with a `--sequence` that must grow with
+every release, and `release cosign` adds signatures up to your threshold. Nothing on a server can sign one.
+
+</Step>
+<Step>
+
+#### Serve the binaries
+
+Put each release's bare binaries where `rolloutModule({ downloadsUrl })` points, or let the api serve them with
+`downloads: { dir }` (see [serving the binaries](/docs/daemon/install#serving-the-binaries)).
+
+</Step>
+<Step>
+
+#### Register and roll
+
+`releases.register` verifies the manifest under the configured pins and refuses a lower sequence (`rollback`).
+`rollouts.create` moves the version through waves (1%, 10%, 50%, 100% by default) within each pool's disruption
+budget, pauses itself when more than 5% of a wave fails, and soaks 600 seconds between waves.
+
+</Step>
+<Step>
+
+#### The node swaps itself
+
+bcd takes only a manifest signed by the keys in its own `[update] release_pins`, checks the sequence against its
+release floor and the binary's SHA-256, stages it in the other of two slots, swaps with a 120-second deadline and
+confirms on the new binary's first `Welcome`; without one it swaps back. See
+[self-update](/docs/daemon/install#self-update).
+
+</Step>
+</Steps>
+
+A node too old to share a protocol version with the gateway is in an upgrade-only session; the rollout controller
+sees its `proto_max` below the minimum and enqueues `daemon.upgrade` with the same target, so it can still be
+upgraded (see [daemon.upgrade for restricted sessions](/docs/guides/rollouts#daemonupgrade-for-restricted-sessions)).
+
+Nodes installed without `--release-pins` refuse every self-update and must be upgraded by re-running the install
+script; see [upgrades before v0.4](/docs/daemon/install#before-v04-rerun-the-script). Workloads are not touched by a
+bcd swap: in the simulator's upgrade test every VM keeps running and is booted exactly as often as before.
+
+<Callout type="info" title="Status of self-update">
+bcd's self-update is implemented (de9f380, c139b9c) and `tests/e2e/bcd.test.ts` runs a real `daemon.upgrade` to a
+second signed build, including through `bcd helper` on an unprivileged node (2d67b25). No bcd release has been
+cut, so no real host has self-updated in production.
+</Callout>
+
+### Kubernetes DaemonSets
+
+bcd running as a DaemonSet is upgraded by Kubernetes, not by rollouts; see [bcd on Kubernetes](/docs/daemon/kubernetes#upgrades).
+
+## Step 5: contract migrations
+
+A release that drops something the previous release used ships its contract migration one release later. Run
+`better-compute migrate` again only after no process of the old release is left, workers and gateways included
+(check the `gateways` directory rows' version and the `workers` heartbeats).
+
+## The API surface
+
+Clients (the TypeScript client, the CLI, MCP, your own code) talk to the api through a method surface that PLAN.md
+§16 freezes for v1.0. `scripts/api-surface.mjs` runs in `pnpm lint:repo` and fails CI when a served method
+disappears, its route, kind, IAM action or resource changes, an IAM alternative goes, or its input schema rejects an
+input the frozen schema accepted; error codes may not disappear or change HTTP status. Additions pass. The rules and
+the update commands are on [the API surface freeze](/docs/operations/testing#the-api-surface-freeze).
+
+For an operator, this means an upgrade within the frozen surface does not break a client built against the older
+release. A client built against a newer release can call methods an older server does not have: the older api answers
+those with `NOT_FOUND` ("Endpoint not found"), so upgrade servers before clients that need new methods.
+
+## Rolling back
+
+| What | How |
+| --- | --- |
+| api and worker code, before migrating | Deploy the previous build |
+| api and worker code, after migrating | Not possible on the same database: the old build refuses to migrate it, and old workers refuse to start (see the callout above). Restore the database from the backup taken before step 1 together with the old build; see [restore](/docs/operations/backup-and-recovery#restore-order) |
+| Gateways | Deploy the previous build, one at a time, as in step 3, with `--no-migrate`: a gateway-only process starts without `initialize()`, while one that runs it refuses the newer ledger |
+| bcd, not yet confirmed | `rollouts.abort` with `rollback: true` sends nodes still upgrading back; bcd's own watchdog swaps back an update that never got a `Welcome` |
+| bcd, confirmed | Not possible: the release floor rose, and bcd refuses every older binary. Roll forward with a new release at a higher sequence; see [rolling forward](/docs/guides/rollouts#undo-a-bad-release-by-rolling-forward) |
+
+## Checklist
+
+```bash
+better-compute doctor                                    # clean before you start
+# back up the database and the PKI bundle (backup-and-recovery)
+better-compute migrate                                   # step 1, once
+# step 2: replace api processes, then workers (SIGTERM releases their leases)
+# step 3: one gateway at a time; SIGTERM drains it
+better-compute doctor                                    # migrations, fleet.gateway-headroom
+better-compute releases register dist/manifest.json --tenant root
+better-compute rollouts create --tenant root --version 1.4.0 --key bcd-1.4.0   # step 4
+better-compute rollouts get <rolloutId> --tenant root --query nodes
+```
+
+<Cards>
+  <Card title="Database" href="/docs/operations/database#migrations">The ledger, the order and every migration.</Card>
+  <Card title="Rollouts" href="/docs/guides/rollouts">Signed releases, waves and the failure gate.</Card>
+  <Card title="Version skew" href="/docs/daemon/protocol#version-skew">Negotiation, capabilities and the skew matrix.</Card>
+  <Card title="Backup and recovery" href="/docs/operations/backup-and-recovery">The way back from a migration.</Card>
+</Cards>

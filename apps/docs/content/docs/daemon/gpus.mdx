@@ -1,0 +1,390 @@
+---
+title: GPUs on a node
+metaTitle: How bcd reads, tracks and checks the NVIDIA GPUs of a node
+description: How bcd reads a node's NVIDIA GPUs through nvidia-smi, merges them into the inventory, keeps passed-through GPUs, builds CDI specs from NVIDIA's, handles persistence mode, XIDs, diag.nvml and gpu.reset, what works on WSL 2, and what bcd doctor checks.
+icon: Cpu
+status: experimental
+packages: ['@better-compute/inventory', '@better-compute/capacity']
+sources:
+  - daemon/internal/nvml/nvml_common.go
+  - daemon/internal/nvml/nvml.go
+  - daemon/internal/nvml/nvml_stub.go
+  - daemon/internal/nvml/smi.go
+  - daemon/internal/nvml/smi_sample.go
+  - daemon/internal/nvml/smi_real_test.go
+  - daemon/internal/nvml/smi_live_test.go
+  - daemon/internal/nvml/testdata/rtx5090-wsl
+  - daemon/internal/inventory/collect.go
+  - daemon/internal/inventory/passthrough.go
+  - daemon/cmd/bcd/hardware_host.go
+  - daemon/cmd/bcd/gpusampler_host.go
+  - daemon/cmd/bcd/doctor_gpu.go
+  - daemon/cmd/bcd/doctor_kube.go
+  - daemon/cmd/bcd/doctor.go
+  - daemon/cmd/bcd/main.go
+  - daemon/internal/agent/cdivendor.go
+  - daemon/internal/agent/cdivendor_test.go
+  - daemon/internal/agent/devices.go
+  - daemon/internal/agent/conn.go
+  - daemon/internal/agent/kinds.go
+  - daemon/internal/agent/gpureset.go
+  - daemon/internal/agent/gpuhealth.go
+  - daemon/internal/agent/healthwatch.go
+  - daemon/internal/agent/status_gpu.go
+  - daemon/internal/agent/kube.go
+  - daemon/internal/agent/telemetry.go
+  - daemon/internal/health/health.go
+  - daemon/internal/runtime/persistence.go
+  - daemon/internal/runtime/vfio.go
+  - daemon/internal/runtime/libvirt.go
+  - daemon/internal/helper/libvirt.go
+  - daemon/internal/hostconfig/nvidia.go
+  - daemon/internal/hostconfig/hostconfig_test.go
+  - daemon/internal/hostconfig/realgpu_test.go
+  - daemon/.goreleaser.yaml
+  - daemon/Containerfile
+---
+
+bcd manages NVIDIA GPUs only, and it talks to them through one tool: `nvidia-smi`, which ships with every NVIDIA
+driver. There is no NVML library binding in the binary. This page follows a GPU through bcd: how it is read, how it
+enters the <Term id="inventory">inventory</Term>, how a GPU passed through to a VM stays there, how bcd builds the
+<Term id="cdi">CDI</Term> specs that hand GPUs to containers, what it does with persistence mode, XIDs and resets, and
+what is different on WSL 2. Holding GPUs for a reservation is on [devices and holds](/docs/daemon/devices-and-holds);
+the host units that install the driver, partition MIG and set up MPS are on
+[host configuration](/docs/daemon/host-config); what the control plane does with GPU names, atoms and health is on
+[inventory and health](/docs/guides/nodes/inventory-and-health).
+
+<Callout type="warn" title="One real GPU so far">
+The parsers are tested against captured `nvidia-smi` output, and since round 6 (2026-10-04) against one real card: a
+GeForce RTX 5090 under WSL 2, driver 616.56, CUDA 13.4 (0915ab7). No data-center GPU, no MIG, no NVLink, no
+passthrough and no CDI container has been run on real hardware. See
+[running bcd on real hardware](/docs/daemon/real-hardware#what-has-run-on-real-hardware).
+</Callout>
+
+## Where GPU facts come from
+
+A host build of bcd collects the inventory in two layers (`collectInventory` in `daemon/cmd/bcd/hardware_host.go`):
+
+1. **procfs and sysfs.** `inventory.Collector` lists `/proc/driver/nvidia/gpus/*/information`: each GPU's UUID,
+   model, VBIOS and bus id, its NUMA node from `/sys/bus/pci/devices/<bus>/numa_node`, a driver version from
+   `/proc/driver/nvidia/version`, and an architecture guessed from the model name. The GPUs are indexed in bus
+   order, as `nvidia-smi` numbers them by default.
+2. **nvidia-smi.** `nvml.SMI.Snapshot` reads everything else, within one minute for the whole read, and
+   `nvml.Enrich` merges it into the first layer by UUID (below).
+
+A host without `nvidia-smi` on the `PATH` has no NVIDIA driver to manage: the snapshot fails with
+`nvml: nvidia-smi not found (no NVIDIA driver on this host)` and the inventory keeps whatever procfs showed. Only the
+second layer fills the CUDA driver version, so bcd uses that field to tell the two apart: without it, `Hello` does not
+advertise the `nvml` capability and [`diag.nvml`](#diagnvml) fails its `nvml.init` check.
+
+### The nvidia-smi queries
+
+A snapshot runs these, each bounded to 30 seconds (`SMI.Timeout`; a wedged GPU can hang `nvidia-smi`):
+
+| Query | Gives | When |
+| --- | --- | --- |
+| `nvidia-smi -q -x` | Identity, framebuffer memory, ECC mode and counters, row remapping, MIG mode and instances, power readings, clocks, fabric cluster and clique, persistence and compute mode, processes | Always. Its failure fails the snapshot |
+| `nvidia-smi -L` | Each MIG device's UUID and profile, matched to the `-q -x` instance by its device number | Always; optional |
+| `--query-gpu=uuid,compute_cap --format=csv,noheader` | CUDA compute capability | Always; optional |
+| `nvidia-smi topo -m` | The topology matrix (`NV<n>`, `PIX`, `PXB`, `PHB`, `NODE`, `SYS`/`SOC`) | With more than one GPU; optional |
+| `nvidia-smi nvlink -s`, then `nvlink -R` | Link states, then each link's far end: a GPU of this node by bus id, else `nvswitch:<bus>` | Always; optional |
+| `nvidia-smi mig -lgip` | The MIG profiles each GPU offers | When a GPU has MIG enabled; optional |
+
+Only the `-q -x` query is required. An optional query that fails leaves its fields empty, which is how a driver that
+answers "not supported here" with a non-zero exit is handled: `topo -m` exits 3 on WSL and `mig -lgip` exits 6 on a
+GPU without MIG, and the captured RTX 5090 fixtures replay exactly that.
+
+### What the parser tolerates
+
+`nvidia-smi`'s XML changes between driver branches and SKUs. The parser in `daemon/internal/nvml/smi.go` reads these
+cases, most of them found on the real RTX 5090 (0915ab7):
+
+| Case | Reading |
+| --- | --- |
+| `N/A`, `[N/A]`, `Not Supported`, `[Not Supported]`, `Unknown Error`, `None`, and R616's `Requested functionality has been deprecated` | No value: the field is left empty |
+| Serial `0` (or all zeros), as GeForce and most workstation boards answer | No serial, rather than one serial every such GPU shares |
+| `kmd_version` and `cuda_umd_version` (R616 deprecates `driver_version` and `cuda_version`) | The new names win when present |
+| `gpu_power_readings` (R535 and later) or `power_readings` | Draw from `instant_power_draw`, else `power_draw`, else `average_power_draw`; limit from `current_power_limit`, else `enforced_power_limit`, else `power_limit` |
+| ECC counters as `sram_*`/`dram_*` (R525 and later) or `single_bit`/`double_bit` totals | Both layouts sum to correctable and uncorrectable counts |
+| A fabric cluster UUID of zeros | No fabric |
+| `Exclusive_Process` compute mode | `exclusive-process` |
+| The DTD the XML declares | Not loaded (the decoder is not strict) |
+
+### Live samples
+
+The inventory holds facts that only change with the hardware: identity, memory size, ECC mode and counters, row
+remapping, MIG layout, NVLink, topology. Usage is a **sample**, and never enters the inventory hash, so a busy GPU
+does not resend its section every heartbeat.
+
+A full snapshot runs `nvidia-smi` up to six times and `-q -x` walks every field of every GPU, which takes seconds of
+driver time on an 8-GPU board. Since 9a6fee9 the readers that sample often use `SMI.Samples` instead: one CSV query
+for exactly a sample's fields, plus one for the compute processes.
+
+```bash
+nvidia-smi --query-gpu=uuid,memory.total,memory.used,memory.reserved,memory.free,utilization.gpu,utilization.memory,temperature.gpu,power.draw,power.limit,clocks.sm,clocks.mem,pstate,mig.mode.current --format=csv,noheader,nounits
+nvidia-smi --query-compute-apps=gpu_uuid --format=csv,noheader
+```
+
+`Samples` falls back to the full snapshot when a GPU is in MIG mode (a MIG device's memory is in `-q -x` only), when
+the driver refuses a field it predates (`memory.reserved` before R510), or when a line has the wrong number of
+columns. A host without `nvidia-smi` gets `ErrNoDriver`, not a fallback.
+
+| Reader | Uses |
+| --- | --- |
+| The OTLP export of the `telemetry` section (every 5 seconds at the shortest) | `Samples` (`gpuSampler`); see [node metrics](/docs/operations/observability#node-metrics-from-bcd) |
+| `bcd status`, one line per GPU | `Samples`, waited for at most 10 seconds; see [bcd status](/docs/daemon#bcd-status) |
+| `bcd doctor` | The full `Snapshot` (`gpuSnapshot`), for the health fields |
+| The inventory | The full `Snapshot` |
+
+A sample's process count is **compute processes only**: in the `-q -x` path, entries whose type contains `C` (`C`,
+`C+G`, `M+C` for MPS clients); in the CSV path, the lines of `--query-compute-apps`. A desktop compositor or WSL's
+Xwayland is a graphics process and no workload. The live test checks that both paths agree on the real GPU.
+
+## The inventory merge
+
+`nvml.Enrich(base, snapshot)` merges by UUID:
+
+- The section's driver, CUDA driver and NVML versions are replaced by the snapshot's when it has them.
+- A GPU both layers know takes every field from `nvidia-smi`, but keeps the collector's index, and the collector's
+  NUMA node and architecture when `nvidia-smi` gave none (it reports no NUMA node at all).
+- A GPU only `nvidia-smi` knows is appended with the next index. That is the WSL 2 case: the paravirtual GPU has no
+  `/proc/driver/nvidia` entry and no PCI sysfs, so the whole section comes from `nvidia-smi`, its bus id names a
+  virtual bus (`00000000:F1:00.0` in the fixture) and it has no NUMA node.
+
+The result is canonicalized and hashed like every other section. bcd collects the inventory again every 10 minutes
+(`DefaultInventoryInterval`), since ECC counters, row remapping and MIG state change without an event bcd sees, about
+2 seconds after an XID burst, after a host unit changed something, and on `inventory.refresh`.
+
+### GPUs passed through to VMs
+
+A GPU a VM holds is bound to `vfio-pci`. The NVIDIA driver lets go of it, so neither `/proc/driver/nvidia` nor
+`nvidia-smi` lists it any more, and an inventory read from them would drop the very GPU the VM uses: the control plane
+would retire its device mid-allocation, and a VM restarting would no longer find its GPU's PCI address. Since c5c52c4
+bcd keeps them:
+
+- **Remember.** After every enriched collection, `inventory.GPUMemory` records each GPU by its PCI address in
+  `<data_dir>/gpus-seen.json` (0600, written atomically): UUID, name, architecture, VRAM, serial, VBIOS, board part
+  number and compute capability. GPUs the collection did not list are kept, since they may be passed through right
+  now.
+- **Find.** `Collector.PassedThrough` walks `/sys/bus/pci/devices` for NVIDIA functions (vendor `0x10de`) of class
+  `0x0300xx` (VGA) or `0x0302xx` (3D controller) bound to `vfio-pci` that the driver did not list, and reports the
+  GPU last seen at that address, with its NUMA node from sysfs.
+- **Order.** They come after the driver's GPUs, so the driver-bound GPUs keep the indices `nvidia-smi` gives them.
+- **Limits.** A function never seen on the NVIDIA driver is left out: without a UUID there is nothing to name it by.
+  A remembered GPU carries only what stays true while a VM has it, not MIG, NVLink or topology state, which the
+  guest's driver owns meanwhile.
+
+Only `bcd node` keeps the memory (`newHost` and `newRuntimes` point it at the data directory). `bcd hardware` and
+`bcd doctor` collect without it, so they do not list a GPU that is passed through at that moment. The runtimes'
+`GPUAddress`, which resolves a GPU's UUID to its PCI address for VFIO, reads through the same memory.
+
+## CDI: NVIDIA's spec and bcd's
+
+Containers get GPUs through CDI specs in `/etc/cdi`. Two kinds live there on a bcd GPU host:
+
+| Spec | Written by | Names devices |
+| --- | --- | --- |
+| `/etc/cdi/nvidia.json`, kind `nvidia.com/gpu` | The [`container-toolkit` unit](/docs/daemon/host-config#container-toolkit): `nvidia-ctk cdi generate --format=json --device-name-strategy=uuid` | By GPU or MIG device UUID, with their device nodes, the driver's libraries as mounts and the `nvidia-cdi-hook` hooks |
+| `/etc/cdi/bcd-<allocation>.json`, kind `bcd.dev/gpu` | The `devices` converger, for each hold | By atom id, `bcd.dev/gpu=<id>` |
+
+With the toolkit in CDI mode, `NVIDIA_VISIBLE_DEVICES` grants nothing, and NVIDIA's own device names are not tied to
+any hold. So since 6ecb860 bcd copies NVIDIA's edits into each hold's spec (`agent/cdivendor.go`):
+
+- bcd reads every `*.json` spec of kind `nvidia.com/gpu` in `/etc/cdi`, then `/var/run/cdi`, skipping its own
+  `bcd-*` files. A YAML spec (the GPU operator's, or the `nvidia.yaml` older bcd versions wrote) is not read, and a
+  hold then carries only `NVIDIA_VISIBLE_DEVICES`, as before 6ecb860.
+- A hold's spec gets the vendor spec's common edits (device nodes such as `/dev/nvidiactl` and `/dev/nvidia-uvm`,
+  library mounts, hooks, additional GIDs) once, without the vendor's `NVIDIA_VISIBLE_DEVICES=void`, and each held
+  device gets exactly the edits of the device it stands for: a whole GPU or a slot its GPU's, a MIG instance its
+  `MIG-…` device's. Another GPU's device node never leaks in.
+- The hold spec's `cdiVersion` rises to the vendor's when that is later (additional GIDs need 0.7.0).
+- A held device the vendor spec does not name is logged ("NVIDIA's CDI spec does not name held devices"): the spec
+  is stale until the toolkit unit regenerates it, which it does whenever the driver version or `nvidia-smi -L`
+  changes.
+
+`bcd.dev/gpu=<id>` alone is therefore all a container needs. A Kubernetes binding is left alone: its spec carries no
+vendor edits, since the kubelet device plugin names NVIDIA's devices itself. The spec's full contents are on
+[devices and holds](/docs/daemon/devices-and-holds#the-cdi-spec).
+
+## Persistence mode around passthrough
+
+The [`nvidia-driver` unit](/docs/daemon/host-config#nvidia-driver) keeps `nvidia-persistenced` running, which holds
+every GPU open in persistence mode, and `bcd doctor` warns when persistence is off. But the NVIDIA driver's unbind
+waits until a GPU is closed, so on a converged GPU host every passthrough start hung until the unbind timed out.
+Since f25abbe and 5bb9f22 bcd turns persistence off for exactly the GPUs a VM takes, and on again once they are back
+on `nvidia`, with `nvidia-smi -i <pci address> -pm 0` or `-pm 1`:
+
+| Path | Off | On again |
+| --- | --- | --- |
+| `cloud-hypervisor` (`runtime.SysfsVFIO`) | In `Bind`, before unbinding a GPU from `nvidia` | In `Release`, for each device the kernel gave back to `nvidia` |
+| `libvirt-kvm`, bcd running `virsh` as root | Before `virsh start` or `virsh restore`, for every PCI hostdev in the domain's XML (`runtime.DomainGPUs`) | After the domain stops, once libvirt's managed hostdevs are back on `nvidia` |
+| `libvirt-kvm` under [`bcd helper`](/docs/daemon#libvirt-through-the-helper) | `libvirt.start` and a checked `libvirt.restore`, as root | `libvirt.destroy`, as root |
+
+Every call is best effort: a failure is ignored, and the unbind still has its own 30-second timeout
+(`SysfsVFIO.UnbindTimeout`), whose error names the likely holder: `its driver has not let go after 30s: something
+still has the device open (nvidia-persistenced, a process on the GPU)`. Tests inject the persistence call; nothing
+runs the real `nvidia-smi` under a fake `virsh` or a fake sysfs.
+
+No passthrough has run on real hardware, so this sequence is tested against fakes only.
+
+## XIDs and GPU health
+
+### XIDs from the kernel log
+
+bcd watches XIDs for the life of the process (`watchXids`, `daemon/internal/health`). It opens `/dev/kmsg`, seeks to
+its end, and parses every record whose text matches the driver's line:
+
+```text
+NVRM: Xid (PCI:0000:18:00): 79, pid=1234, name=python, GPU has fallen off the bus.
+```
+
+The bus id is widened to NVML's form (`00000000:18:00.0`) and matched against the inventory's GPUs. A match raises the
+device condition `Xid<n>` (status true, `device_id` the GPU's UUID, the driver's text as message), one per XID number
+and GPU; an XID on a bus the inventory does not know is only logged. Each XID also:
+
+- asks for an inventory collection about 2 seconds later (a burst is read once), since the GPU's ECC and row-remap
+  counters move with it;
+- triggers the Kubernetes side, whose device plugins mark the GPU unhealthy and whose DRA slice drops it;
+- re-sends the status report at once, with the condition.
+
+The conditions are kept for the rest of the boot in `<data_dir>/faults.json` (0600) with the boot id, so a bcd restart
+in the same boot reports them again although it reads the kernel log from its end; the first start after a reboot
+finds another boot id and drops them. A [`gpu.reset`](#gpureset) that leaves the GPU healthy drops that GPU's
+(662fb55). What the control plane does with each XID (quarantine, NoSchedule, remediation) is on
+[inventory and health](/docs/guides/nodes/inventory-and-health#health-quarantines-and-remediation).
+
+PLAN.md's NVML event stream is not implemented: XIDs come only from the kernel log, and SXid lines from NVSwitches are
+not parsed.
+
+### Healthy
+
+`gpuHealthy` is the one rule bcd uses for "may this GPU take work":
+
+- no failed or pending row remap;
+- no uncorrectable volatile ECC errors;
+- no `Xid*` condition for the GPU this boot.
+
+`bcd status` prints `UNHEALTHY` for a GPU that fails it, and the Kubernetes device plugins and DRA driver offer it as
+unhealthy.
+
+### diag.nvml
+
+`diag.nvml` (control lane, roles `node` and `ramdisk`, attested result) collects the inventory again and checks the
+GPUs it lists, or only those in `gpu_uuids`:
+
+| Check | Fails when |
+| --- | --- |
+| `nvml.init` | The inventory has no CUDA driver version: `nvidia-smi` did not answer ("the NVIDIA driver's management interface (nvidia-smi) did not answer"), or no GPU section at all ("NVML is not available on this node"). Nothing else is checked |
+| `gpu.count` | With `expected_gpu_count`: fewer GPUs visible than expected |
+| `gpu.present` | A UUID in `gpu_uuids` the inventory does not list ("not visible to NVML") |
+| `ecc.uncorrectable` | Uncorrectable volatile ECC errors since the driver loaded |
+| `row-remap.pending` | A row remap waits for a GPU reset |
+| `row-remap.failure` | Row remapping failed: the GPU needs replacing |
+| `pcie.link` | The negotiated PCIe link width (`current_link_width` in sysfs) is below `max_link_width`. Width only: an idle GPU lowers its link speed on purpose, never its width. A GPU without those sysfs files (WSL) never fails it |
+| `xid.recent` | The GPU has `Xid*` conditions this boot; the message lists them |
+
+The result's `passed` is true only when every check of every GPU passed.
+
+### gpu.reset
+
+`gpu.reset` runs `nvidia-smi --gpu-reset -i <uuid>` per GPU, through `bcd helper`'s `gpu.reset` operation when the
+node is unprivileged. It refuses the whole command with `gpu-busy` when a listed GPU, or one of its MIG instances or
+slots, has a live hold or a pending Kubernetes release, or is passed through to a VM; it answers `unknown GPU` for a
+UUID the inventory does not list; and after the resets it collects the inventory again and marks each reset GPU
+`healthy` unless it shows uncorrectable volatile ECC errors or a pending or failed row remap. The full rules are on
+[delivery](/docs/daemon/delivery#gpureset-and-live-holds).
+
+## WSL 2 paravirtual GPUs
+
+Under WSL 2 a GPU is a paravirtual device: the Windows host's driver serves it through `/dev/dxg`, CUDA works through
+the libraries in `/usr/lib/wsl/lib`, and the Linux side has no NVIDIA kernel module, no `/dev/nvidia*` and no PCI
+function for the GPU. bcd recognises it as `/dev/dxg` without `/dev/nvidiactl` (`paravirtualGPU` in host config,
+the `gpu-host` check in doctor). It is the machine round 6 ran on.
+
+| Works | How |
+| --- | --- |
+| Inventory | Entirely from `nvidia-smi` (procfs has no entry): name, UUID, architecture, VRAM, VBIOS, power limit, persistence and compute mode, compute capability. No serial (the board answers `0`), no NUMA node, a virtual bus id, no topology (`topo -m` exits 3), no NVLink, no MIG |
+| Live samples, OTLP GPU metrics, `bcd status` | Through `Samples`, as on any host; the real-host e2e checks `bcd.gpu.memory.total` against `nvidia-smi` |
+| `nvidia-driver` unit | Converges when `branch` is the Windows driver's branch (read from `nvidia-smi`). Any other branch is terminal: `nvidia-driver: this is WSL 2's paravirtual GPU, served by the Windows host's driver 616.56; bcd never installs a Linux driver here (set branch 616, or install that driver on Windows)`. bcd never installs or loads a Linux driver there, which would shadow the Windows host's libraries and break every GPU of the VM (2e71a60) |
+| `container-toolkit` unit | The CDI stamp takes the driver version from `nvidia-smi`, and `nvidia-ctk cdi generate` writes its WSL mode spec: one device, `all`, with `/dev/dxg` |
+| Hold specs | The vendor spec's single `all` device stands for each GPU, so a hold's `bcd.dev/gpu=<uuid>` carries `/dev/dxg` and the WSL library mounts |
+
+| Does not work | Why |
+| --- | --- |
+| VFIO passthrough | No PCI function to bind to `vfio-pci` |
+| `gpu.reset`, MIG, DCGM | The paravirtual device supports none of them; `bcd doctor`'s `gpu-host` warning says so |
+| XIDs | They are printed by the NVIDIA kernel module, which does not run in the WSL kernel |
+| `diag.nvml`'s `pcie.link` | No sysfs link width to compare, so the check never fails |
+
+The `container-toolkit` behaviour on WSL is tested against a fake host only: the WSL machine round 6 used has no
+`nvidia-ctk`, so no WSL CDI spec was generated for real. `TestRealGPUUnitsPlan` planned the unit there and saw it plan
+the toolkit install, the runtime configuration and `/etc/cdi/nvidia.json`.
+
+## bcd doctor's GPU checks
+
+`bcd doctor` reads every GPU once with the full snapshot and prints these lines (f9d7af9, f84f1f9, da60bbd). The
+real-host checks around them (systemd, cgroups, KVM, VFIO, IOMMU groups, the clock) are on
+[running bcd on real hardware](/docs/daemon/real-hardware#bcd-doctor-as-preflight).
+
+| Check | Status | When |
+| --- | --- | --- |
+| `nvml` | `ok` | `nvidia-smi` answered: `driver <version>, <n> GPUs` |
+| `nvml` | `warn` | No `nvidia-smi`, or a binary built with `-tags nonvml` (`nvml: not available in this build`) |
+| `nvml` | `fail` | `nvidia-smi` failed otherwise |
+| `hardware` | `ok` | The inventory collected and hashed: `host: <n> GPUs, <m> inventory sections hashed` |
+| `gpu` | `ok`, `warn`, `fail` | One line per GPU: UUID, name, busy %, temperature, power draw of its limit, memory used of its total. `warn` for a pending row remap or a MIG mode change waiting for a reset; `fail` for failed row remapping or uncorrectable volatile ECC errors |
+| `gpus` | `fail` | The snapshot failed; the message carries a hint (below) |
+| `gpu-host` | `warn` | WSL 2's paravirtual GPU: "CUDA containers work (CDI: nvidia-ctk cdi generate --mode=wsl), but there is no VFIO passthrough, gpu.reset, MIG or DCGM here". On WSL the checks below are skipped |
+| `nouveau` | `fail` | `nouveau` is in `/proc/modules`: blacklist it, rebuild the initramfs, reboot |
+| `gpu-bus` | `ok` | `<n> NVIDIA GPU(s) on the PCI bus: <k> on nvidia`, plus how many are on `vfio-pci` (passthrough) |
+| `gpu-bus` | `fail` | More GPUs bound to `nvidia` than `nvidia-smi` sees: a GPU fell off the bus or did not initialize (`dmesg`: Xid 79, `RmInitAdapter failed`) |
+| `gpu-bus` | `warn` | GPUs on the PCI bus but no NVIDIA driver answers (install it with the `nvidia-driver` unit), or GPUs with no driver bound at all |
+| `persistence` | `warn` | Persistence mode is off on a GPU `nvidia-smi` sees: every first CUDA call then re-initializes it |
+| `fabric-manager` | `ok`, `fail` | NVSwitch functions (class `0x0680`) on the bus, and whether `nvidia-fabricmanager` is active; without it CUDA fails on every GPU |
+| `gpu-binding` | `warn` | GPUs, but bcd would run as a non-root user without `[helper]`; see [unprivileged nodes](/docs/daemon/devices-and-holds#unprivileged-nodes) |
+
+`gpu-bus` compares NVIDIA display functions (class `0x03xxxx`) in `/sys/bus/pci/devices` with the GPUs `nvidia-smi`
+lists. A `fakehw` build skips every host check, since it has no real bus to compare.
+
+When the snapshot fails, `gpuErrorHint` adds what to do for the failures seen on real hosts:
+
+| `nvidia-smi` says | Hint |
+| --- | --- |
+| `Driver/library version mismatch` | The loaded kernel module and the user-space libraries differ, usually after a driver upgrade: reboot, or unload and reload the `nvidia` modules |
+| `couldn't communicate with the NVIDIA driver` | The `nvidia` module is not loaded: `modprobe nvidia`; under Secure Boot it must be signed by an enrolled key (see `dmesg`) |
+| `No devices were found` | The driver sees no GPU: compare `lspci -d 10de:` with `dmesg` (`RmInitAdapter failed`, Xid 79) |
+| A timeout or `signal: killed` | `nvidia-smi` did not answer: a GPU may be wedged (Xid 79 or 119); `gpu.reset` or a reboot recovers it |
+
+## The NVML backend
+
+`daemon/internal/nvml` is named for NVML, but no build links it today. Build tags pick what `nvml.Probe` (doctor's
+`nvml` check) does; the inventory and samples go through `nvml.SMI` in every host build:
+
+| Build | `nvml.Probe` | Inventory and samples |
+| --- | --- | --- |
+| Default, as the release builds it (no tags, `daemon/.goreleaser.yaml`) | `SMI.Probe`: `nvidia-smi --query-gpu=driver_version` | `nvidia-smi` |
+| `-tags nonvml` (the container image, `tests/e2e/bcd-host-real.test.ts`, the logic tests) | Fails with `ErrNotBuilt` | `nvidia-smi` in a host build; fake GPUs with `fakehw` |
+| `-tags fakehw` | As above | The fake HGX node of `internal/fakehw` |
+| A go-nvml (cgo) backend | Not built: a TODO in `nvml.go` until the dependency is approved | |
+
+Both host builds need no cgo and never load `libnvidia-ml`. The costs of going through `nvidia-smi` are that every
+read spawns a process (bounded to 30 seconds), and that there are no NVML events: XIDs come from the kernel log
+instead.
+
+## Tests and fixtures
+
+| Test | Against |
+| --- | --- |
+| `smi_test.go` | `testdata/q.xml`, a two-GPU answer in `nvidia-smi`'s XML (an H100, and an A100 in MIG mode), with hand-written answers to the other queries: every query read, optional queries failing, `Probe`'s count, and `Enrich` keeping the sysfs facts |
+| `TestSnapshotRealRTX5090WSL`, `TestSamplesRealRTX5090WSL` | `testdata/rtx5090-wsl`: every query bcd makes, as the real RTX 5090 answered under WSL 2, identifiers anonymized, with the non-zero exits of `topo -m` and `mig -lgip` replayed |
+| `TestSamplesFallBack` | A MIG GPU, a driver refusing `memory.reserved`, short columns, and no driver |
+| `TestSnapshotLiveHost` | The host's real `nvidia-smi`, only with `BCD_REAL_GPU=1`: every GPU must yield a UUID, name, architecture, VRAM, compute capability and bus id, and the light samples must agree with the full ones |
+| `TestRealGPUUnitsPlan` (`internal/hostconfig`) | Plans `nvidia-driver`, `gpu-settings`, `mig-layout`, `fabric-manager` and `container-toolkit` against the real driver with `BCD_REAL_GPU=1`, applying nothing |
+| `TestHoldSpecCarriesNvidiaEdits`, `TestHoldSpecOnWSL` | Hold specs built from a vendor spec in the shape `nvidia-ctk` writes, and from WSL's |
+| `doctor_gpu_test.go` | The doctor checks over fake `/dev`, `/proc` and `/sys` trees |
+
+```bash
+# On a host with an NVIDIA GPU (scripts/daemon-test.mjs forwards BCD_* variables into WSL on Windows):
+BCD_REAL_GPU=1 node scripts/daemon-test.mjs --run TestSnapshotLiveHost ./internal/nvml/
+BCD_REAL_GPU=1 node scripts/daemon-test.mjs --run TestRealGPUUnitsPlan ./internal/hostconfig/
+```

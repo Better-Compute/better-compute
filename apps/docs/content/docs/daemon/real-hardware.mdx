@@ -1,0 +1,266 @@
+---
+title: Running bcd on real hardware
+metaTitle: Bring up bcd on a real server or workstation (bcd hardware, bcd doctor, WSL 2)
+description: A bring-up checklist for bcd on a real machine, what bcd hardware and bcd doctor check before a join, what changes between root, bcd helper and an unprivileged node, WSL 2 specifics, and exactly what has and has not run on real hardware.
+icon: Server
+status: experimental
+packages: ['@better-compute/inventory']
+sources:
+  - daemon/cmd/bcd/main.go
+  - daemon/cmd/bcd/hardware.go
+  - daemon/cmd/bcd/hardware_host.go
+  - daemon/cmd/bcd/hardware_hw_test.go
+  - daemon/cmd/bcd/doctor.go
+  - daemon/cmd/bcd/doctor_host.go
+  - daemon/cmd/bcd/doctor_gpu.go
+  - daemon/cmd/bcd/doctor_kube.go
+  - daemon/cmd/bcd/clock_linux.go
+  - daemon/cmd/bcd/agent.go
+  - daemon/internal/inventory/collect.go
+  - daemon/internal/inventory/findings.go
+  - daemon/internal/inventory/capture.go
+  - daemon/internal/inventory/fixture.go
+  - daemon/internal/inventory/passthrough.go
+  - daemon/internal/helper/dmi.go
+  - daemon/internal/helper/hw.go
+  - daemon/internal/agent/conn.go
+  - daemon/internal/agent/devices.go
+  - daemon/internal/nvml/smi_live_test.go
+  - daemon/internal/nvml/smi_real_test.go
+  - daemon/internal/hostconfig/realgpu_test.go
+  - daemon/internal/hostconfig/nvidia.go
+  - tests/e2e/bcd-host-real.test.ts
+  - daemon/.goreleaser.yaml
+  - daemon/Containerfile
+---
+
+Most of bcd is tested against fakes: a fake HGX node (`fakehw`), a fake host for the config units, fake `virsh`,
+`qemu-img` and `nvidia-smi`. Round 6 (2026-10-04, `bbfa7f4` onwards) ran it on a real machine for the first time and
+fixed what that found. This page is for the operator bringing bcd up on a new server or workstation: the order to do
+things in, the two local commands that tell you what bcd sees (`bcd hardware`, `bcd doctor`), how the privilege mode
+changes what bcd can do, what is special about WSL 2, and an exact list of what has and has not run on real hardware.
+Installing the binary and the systemd units is on [installing bcd](/docs/daemon/install); the GPU side in depth is on
+[GPUs on a node](/docs/daemon/gpus).
+
+<Callout type="warn" title="One real machine so far">
+Everything below that ran on real hardware ran on one machine: a workstation running WSL 2 (Ubuntu) on an AMD
+Threadripper PRO 9995WX (192 threads) with one GeForce RTX 5090 (driver 616.56, CUDA 13.4), as an ordinary user,
+without root, an IOMMU, DMI identity or a TPM. No bare-metal server and no data-center GPU has run bcd yet.
+</Callout>
+
+## Which build
+
+Real hardware needs a host build: one without the `fakehw` tag, which reads `/proc`, `/sys` and `nvidia-smi`.
+
+| Build | Tags | Used by |
+| --- | --- | --- |
+| Release | none (`daemon/.goreleaser.yaml`: real NVML and real hardware) | The install script's pinned binaries |
+| Host, cgo-free | `nonvml` | `daemon/Containerfile` (bcd as a DaemonSet), `tests/e2e/bcd-host-real.test.ts` |
+| Simulated | `nonvml,fakehw` | Unit tests, the other e2e suites, `bcd sim` |
+
+Both host builds read GPUs through `nvidia-smi`; the `nonvml` build only makes doctor's `nvml` check warn (see
+[the NVML backend](/docs/daemon/gpus#the-nvml-backend)). `bcd version` prints the build tags. `bcd hardware` says
+which backend it runs (`host` or `fakehw`) in its first line, and `--capture` refuses a fakehw build.
+
+```bash
+cd daemon
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags nonvml -o bin/bcd ./cmd/bcd
+```
+
+## Bring-up checklist
+
+1. **Firmware.** Turn on VT-x or AMD-V for VMs, and VT-d or AMD-Vi for GPU passthrough. Under Secure Boot the NVIDIA
+   kernel module must be signed by an enrolled key.
+2. **Operating system.** systemd as init, cgroup v2 (unified) mounted at `/sys/fs/cgroup`, an NTP client, and
+   `nouveau` blacklisted on a GPU host. Install the NVIDIA driver yourself, or leave it to the
+   [`nvidia-driver` unit](/docs/daemon/host-config#nvidia-driver).
+3. **Look before joining.** Copy a host build of bcd onto the machine and run `sudo bcd hardware`. Read the findings:
+   a missing product UUID, placeholder serials or no NICs change how the machine can join (below).
+4. **Preflight.** Write `/etc/bcd/config.toml` (the install script does) and run `sudo bcd doctor --config
+   /etc/bcd/config.toml`. Fix every `fail` line. The install script runs doctor too, but only prints its warning.
+5. **Pick the privilege mode.** Root (the install script's default) or `--unprivileged` with `bcd helper`. Running
+   `bcd node` as an ordinary user without the helper works for trying bcd out, but takes no GPU holds
+   ([below](#root-bcd-helper-or-unprivileged)).
+6. **Join.** A machine whose DMI gives no product UUID or serials (WSL, many VMs, boards with unprogrammed SMBIOS)
+   has no trusted <Term id="hardware-key">hardware key</Term>, and JoinService refuses it unless the join token is
+   bound to an identifier it does have: create the token with `expect: { mac }` (`--expect-mac` on the CLI), the MAC
+   of its default-route NIC (see
+   [binding a token to one machine](/docs/guides/nodes/joining#binding-a-token-to-one-machine)).
+7. **Check the node.** `nodes.get` lists its conditions. `GpuModelUnknown` keeps a GPU node from scheduling until the
+   control plane's model table knows the card (see [GPU naming](/docs/guides/nodes/inventory-and-health#gpu-naming));
+   `GpuCountMismatch` means the pool expected another count or model.
+8. **Watch it run.** `bcd status` shows the session, the generations, each section and one line per GPU (see
+   [bcd status](/docs/daemon#bcd-status)).
+
+## bcd hardware
+
+`bcd hardware` (e82d3a8) prints what this binary sees of the machine, without joining or talking to anything: the
+inventory bcd would report and a list of bring-up findings. Run it as root: the product UUID, serials, DIMMs and NVMe
+health are root-only, and an ordinary user reads them empty.
+
+| Flag | Does |
+| --- | --- |
+| (none) | A summary per section, then the findings |
+| `--json` | The whole inventory as JSON, and no findings |
+| `--capture DIR` | Copies exactly the procfs and sysfs files the collector read into `DIR`, so `inventory.Collector{Root: DIR}` replays the same machine (identical section hashes). A path ending in `.tar.gz` writes a reproducible archive instead, since sysfs symlinks do not survive a Windows checkout. Host builds only |
+| `--redact` | With `--capture`: replaces serials, UUIDs, MACs, WWNs, GPU UUIDs and the hostname with stable stand-ins of the same shape (UUID path components too), so a fixture tells nothing about the machine. Without `--capture` it is a usage error (exit 2) |
+
+The summary has one line per system, CPU (with its NUMA nodes and isolated CPUs), memory (with each DIMM), disk, NIC,
+GPU, BMC and OS:
+
+```text
+bcd <version> (host backend)
+
+System    <vendor> <product> (board <vendor> <board>), BIOS <vendor> <version>, UEFI (Secure Boot), TPM 2.0
+CPU       <model> (<vendor> x86_64): 2 sockets, 96 cores, 192 threads
+  node0   cpus 0-47,96-143, 503.8 GiB
+Memory    1007.6 GiB
+  DIMM    <slot>       64.0 GiB DDR5 4800 MT/s ECC <manufacturer> <part>
+Disk      nvme0n1    3.5 TiB   nvme <model> (serial <serial>, wwn <wwn>)
+NIC       eth0       <mac> mlx5_core 0000:18:00.0 100000 Mb/s fw <version>
+GPU 0     NVIDIA H100 80GB HBM3 00000000:1B:00.0 GPU-<uuid>
+BMC       <vendor> <mac> <ip> (IPMI, Redfish) fw <version>
+OS      ubuntu 24.04, kernel <release>, cgroup v2, runtimes containerd,libvirt
+
+Findings
+  ok    dmi       <vendor> <product>, UUID <uuid>
+  ...
+```
+
+The GPUs come from the same collection `bcd node` makes (procfs, then `nvidia-smi`; see
+[where GPU facts come from](/docs/daemon/gpus#where-gpu-facts-come-from)), except that `bcd hardware` keeps no memory
+of GPUs, so a GPU passed through to a VM at that moment is not listed. A capture copies procfs and sysfs only;
+`nvidia-smi`'s answers are not part of it (GPU fixtures are captured separately, under
+`daemon/internal/nvml/testdata`).
+
+### Findings
+
+`inventory.HostFindings` reviews the collection. Every finding has a status (`ok`, `warn`, `fail`), and `bcd
+hardware` exits 1 when one fails:
+
+| Check | Says |
+| --- | --- |
+| `dmi` | `warn`: no DMI at all (a container, or a VM without SMBIOS; the node is identified by MACs only); the product UUID and serials read empty because bcd is not root; no product UUID; a placeholder product UUID (`00000000-…`, `ffffffff-…`, `03000200-0400-0500-0006-000700080009` and similar), so the hardware key falls back to serials and MACs and a reclaim needs `expect` or approval; a placeholder system serial |
+| `cpu`, `numa` | `fail` when `/proc/cpuinfo` is unreadable; `warn` without `/sys/devices/system/node` (NUMA-pinned placements cannot be honoured) |
+| `memory` | `fail` when `/proc/meminfo` is unreadable; `warn` when EDAC reports uncorrectable errors; otherwise the total and the huge page pools |
+| `dimms` | `warn` when only some DIMMs are ECC, or (as root) when the SMBIOS table lists no memory devices |
+| `disks` | `warn` with no physical disk under `/sys/block`, or a disk reporting a critical warning, at least 90% wear or media errors |
+| `bmc` | `warn` when the host has an IPMI interface but the BMC did not answer through `/dev/ipmi0` (load `ipmi_devintf`) |
+| `nics` | `warn` with no physical NIC: no MAC identity, no PXE MAC for metal |
+| `gpus` | `ok`: the GPU count and driver version |
+| `cgroup` | `fail` without cgroup v2: hold slices and instance limits need it (`systemd.unified_cgroup_hierarchy=1`) |
+| `kvm` | `warn` without `/dev/kvm` |
+| `iommu` | `warn` for GPUs without an IOMMU: no passthrough |
+
+Round 6 fixed what the first real machine showed (e82d3a8): disks behind Hyper-V's storvsc, iSCSI or a RAID
+controller's virtual drives are no longer called SAS; SCSI and SATA serials come from the kernel's `vpd_pg80`; a NIC
+on VMBus has no PCI address; SR-IOV virtual functions and a BMC's Redfish USB host interface are not the machine's
+NICs; and arm64 topology comes from sysfs, with core names from the MIDR part (Grace reads `Neoverse-V2`). Later
+commits added DIMMs from SMBIOS (82fef0e), NIC firmware (9b83ece), NVMe health (362435e), SATA and SAS health through
+`smartctl` (97089e9) and the BMC (9ddb5ea).
+
+## bcd doctor as preflight
+
+`bcd doctor --config FILE` checks the configuration, `nvidia-smi`, the inventory, the host and the node's identity,
+one line per check, and exits 1 when any check fails. The checks it always had are listed on
+[the overview](/docs/daemon#modes), the GPU checks on [GPUs on a node](/docs/daemon/gpus#bcd-doctors-gpu-checks).
+Since e2a0cf0 a host build ends with a real-host preflight (`doctor_host.go`):
+
+| Check | `ok` | Otherwise |
+| --- | --- | --- |
+| `systemd` | systemd is init (`/run/systemd/system`) | `fail`: hold slices, the helper's units and instance units are systemd units |
+| `delegation` | The cgroup root delegates `cpu`, `cpuset`, `memory`, `io`, `pids` and `hugetlb` (`cgroup.subtree_control`) | `warn` naming the controllers the kernel offers but the root does not delegate; systemd enables one once a unit asks for it, so this usually settles once bcd's slices exist |
+| `kvm` | (only reported when missing) | `warn` with the cause: the CPU has `vmx` or `svm` but the module is not loaded or is blacklisted; a VM without nested virtualization; or no VT-x/AMD-V flags (enable them in the firmware) |
+| `vfio` | On a GPU host with an IOMMU: `vfio-pci` loaded | `warn`: passthrough loads it on first use |
+| `iommu-groups` | Each GPU in an IOMMU group of its own (with its other functions and PCI bridges) | `warn` (6cf5122) naming each GPU that shares its group with another device, such as a NIC or an NVMe drive behind a PCIe switch or a root port without ACS: `bcd helper` refuses to pass such a GPU through, so move it to a CPU-attached slot or enable ACS. Also `warn` for GPUs with no IOMMU group, and for an inventory with GPUs but no NVIDIA function on the PCI bus (a paravirtual GPU) |
+| `clock` | The kernel says an NTP client keeps the clock synchronized (`adjtimex`, read-only), with its estimated error | `fail` when unsynchronized: certificates, tickets and signed intents compare times; `warn` when it cannot be read |
+| The findings | | Every finding of [`bcd hardware`](#findings) that is not `ok`, except `kvm`, `iommu` and `cgroup`, which other checks report |
+
+The GPU checks of f84f1f9 (`gpu-bus`, `nouveau`, `persistence`, `fabric-manager`, `gpu-host`) and da60bbd
+(`gpu-binding`) run in the same pass. On the round-6 workstation doctor reported `nvml` ok (616.56), the `gpu` line
+ok, `gpu-host` warning about WSL, `systemd` ok, the clock synchronized, `hugetlb` not yet delegated and no DMI.
+
+## Root, bcd helper or unprivileged
+
+bcd runs in one of three ways, and they differ in what reaches the control plane:
+
+| | `bcd node` as root | `bcd node` as `bcd`, beside a root `bcd helper` | `bcd node` as an ordinary user, no `[helper]` |
+| --- | --- | --- | --- |
+| Set up by | The install script's default | `daemon install-script --unprivileged` ([running bcd node unprivileged](/docs/daemon/install#running-bcd-node-unprivileged)) | Running the binary by hand, as the real-host e2e does |
+| GPU holds | Writes `/etc/cdi` and hold slices itself | Through the helper's `file.write` and `slice.apply` | Refused at once with `node-unprivileged` ([unprivileged nodes](/docs/daemon/devices-and-holds#unprivileged-nodes)) |
+| `Hello` capabilities on a GPU host | `cdi`, `devices.limits`, `binding.kubernetes` | The same | None of the three, so reservations with host resources or a Kubernetes binding are never placed there |
+| Host config units | Applied directly | Applied by the helper's `host.unit`, from signed specs ([under bcd helper](/docs/daemon/host-config#under-bcd-helper)) | |
+| Product UUID and serials | Read from sysfs | Asked from the helper's `dmi.read` (a fixed list of `/sys/class/dmi/id` files, 128 bytes each, no arguments) | Read empty: the hardware key leans on MACs |
+| DIMMs (SMBIOS type 17), NVMe health, the BMC in-band | Read directly | Asked from the helper's `hw.read` (parsed values only, at most 64 entries each, 30 seconds overall) | DIMMs from EDAC only; no NVMe health; the BMC's interfaces from sysfs only |
+| SATA and SAS health (`smartctl`) | Read with smartmontools installed | Not part of `hw.read`: `smartctl` needs root | Not read: `smartctl` needs root |
+| GPU passthrough persistence | Set by bcd around its own `virsh` and VFIO calls | Set by the helper around `libvirt.start`, `libvirt.restore` and `libvirt.destroy` | |
+| `doctor` | Also checks the helper's directories, its binding and signed-intent pins when `[helper]` is set | Run it as root to get those | Warns `gpu-binding` on a GPU host |
+
+`dmi.read` and `hw.read` (29ed48d, 32beca7, 45bc17f) are read-only and take no arguments: the helper enumerates the
+entries and controllers itself and never lets the node name a path. What they return is inventory only, never an
+attestation input.
+
+## WSL 2
+
+WSL 2 is a convenient place to try bcd on a GPU workstation, and it is where round 6 ran. It is a Hyper-V VM with a
+Linux kernel, and differs from a server in ways bcd notices:
+
+| Area | On WSL 2 | Effect on bcd |
+| --- | --- | --- |
+| GPU | Paravirtual, through `/dev/dxg`; no `/dev/nvidia*`, no NVIDIA kernel module, no PCI function, no `/proc/driver/nvidia` | Inventory and samples from `nvidia-smi` only; no passthrough, `gpu.reset`, MIG, DCGM or XIDs; the `nvidia-driver` unit never installs a Linux driver. See [WSL 2 paravirtual GPUs](/docs/daemon/gpus#wsl-2-paravirtual-gpus) |
+| DMI | Usually no product UUID or serials | No trusted hardware key: bind the join token to the MAC (`expect: { mac }`) |
+| TPM | None | The node key is a PKCS#8 file; `--attestor tpm` cannot be used |
+| IOMMU | None | No passthrough; doctor's `iommu` warns |
+| KVM | `/dev/kvm` when nested virtualization is on | VMs possible; doctor's `kvm` says why when it is missing |
+| systemd | Only when enabled for the distribution | Doctor's `systemd` check fails without it, and hold slices cannot work |
+| cgroups | v2, but `hugetlb` not delegated at the root at first | Doctor's `delegation` warns |
+| Devices | Disks on Hyper-V's storvsc, NICs on VMBus | Disks are not SAS; NICs have no PCI address (fixed in e82d3a8) |
+| Networking | The Windows host is the default route | A control plane on Windows is reached at the default-route address, with `gateway_server_name` naming the certificate's host |
+
+`testdata/hosts/wsl2-threadripper-9995wx.tar.gz` in `daemon/internal/inventory` is that machine, captured with
+`bcd hardware --capture … --redact`: the first real-host fixture, replayed by the inventory tests.
+
+## What has run on real hardware
+
+Every item here ran on the round-6 workstation, as an ordinary user unless it says otherwise.
+
+| What | Where | Result |
+| --- | --- | --- |
+| Join, adoption and the real inventory | `tests/e2e/bcd-host-real.test.ts` with `BCD_E2E_REAL=1` (92e3385) | A dev stack on Windows with external TLS; a `nonvml` host build in WSL joins over TLS 1.3 and mTLS with a token bound to the default-route MAC, is adopted, and its inventory matches the kernel: `uname -r`, the CPU count and memory within 5%. One GPU in inventory through `nvidia-smi` |
+| An unprivileged GPU node | The same suite (da60bbd) | No `bc.dev/cap.devices.limits` label, and a 1-GPU reservation never reaches `binding` or `active` there. Before the GPU model table's version 2 (223022b) the RTX 5090 was `GpuModelUnknown` and the reservation step skipped (8e9602c) |
+| OTLP GPU metrics | The same suite (898a23c) | `NodeSpec.telemetry` pointed at a collector in the test; the export carries every GPU `nvidia-smi` lists, `bcd.gpu.memory.total` equal to `nvidia-smi`'s framebuffer, and a power limit. 4 of 4 tests passed |
+| `bcd status` and `bcd doctor` | The same suite | `status --json` answers with the node, connected, role `node`; doctor runs and reports |
+| `nvidia-smi` parsing | `TestSnapshotLiveHost` in `daemon/internal/nvml` with `BCD_REAL_GPU=1` (0915ab7, 9a6fee9) | Every GPU yields UUID, name, architecture, VRAM, compute capability and bus id; light samples agree with full ones |
+| GPU host units, planned only | `TestRealGPUUnitsPlan` in `daemon/internal/hostconfig` with `BCD_REAL_GPU=1` (2e71a60) | `nvidia-driver` with the host's branch and `gpu-settings` with the current power limit plan nothing; branch 470 is refused terminally; `container-toolkit` plans the toolkit install, runtime configuration and `/etc/cdi/nvidia.json`. Nothing is applied |
+| Kernel settings, as root | `TestRealKernel` in `daemon/internal/hostconfig` | A sysctl, the transparent huge page policy and 2 MiB pages set and put back (see [host configuration](/docs/daemon/host-config)) |
+| Doctor's real-host and GPU checks | Run by hand (e2a0cf0, f84f1f9) | As listed [above](#bcd-doctor-as-preflight) |
+
+```bash
+# Linux, or Windows with WSL (BCD_WSL_DISTRO, default Ubuntu); builds bcd with -tags nonvml first
+BCD_E2E_REAL=1 pnpm vitest run tests/e2e/bcd-host-real.test.ts
+# The real-GPU Go tests (scripts/daemon-test.mjs forwards BCD_* into WSL)
+BCD_REAL_GPU=1 node scripts/daemon-test.mjs --run TestSnapshotLiveHost ./internal/nvml/
+BCD_REAL_GPU=1 node scripts/daemon-test.mjs --run TestRealGPUUnitsPlan ./internal/hostconfig/
+```
+
+The suite asserts only what holds on any Linux host and logs the rest (GPU count, KVM), so it runs on a laptop, in
+WSL or on a GPU server; its GPU tests skip without `nvidia-smi`.
+
+## What has not
+
+- **A GPU hold on real hardware.** bcd ran unprivileged without `[helper]`, so no CDI spec was written to a real
+  `/etc/cdi`, no hold slice was created on a real systemd, and the reservation test took its unprivileged branch.
+- **A container from a CDI name.** The workstation has no `nvidia-ctk`, so no vendor spec was generated and no
+  container was started with `bcd.dev/gpu=<id>`.
+- **Passthrough.** No IOMMU, so no GPU was bound to `vfio-pci`, and the persistence-mode sequence around it
+  (f25abbe, 5bb9f22) and the passed-through GPU memory (c5c52c4) are tested against fakes only. Neither
+  `libvirt-kvm` nor `cloud-hypervisor` has run a real VM.
+- **MIG, NVLink, NVSwitch, Fabric Manager, MPS.** The only GPU is a GeForce card without them.
+- **Data-center GPUs, ECC and row remapping, XIDs, `gpu.reset`, DCGM.** None on a real board.
+- **Applying host units.** Driver installs, MIG layouts, boot arguments, 1 GiB pages, power limits and Kubernetes
+  joins are planned against the real driver at most, never applied.
+- **The TPM.** No TPM on the workstation; every TPM test uses the software TPM.
+- **Root-only readers.** The NVMe and IPMI ioctl paths, DIMMs from SMBIOS and `smartctl` have not run as root on a
+  real server.
+- **A released binary through the install script.** No release has been tagged (see
+  [installing bcd](/docs/daemon/install)).

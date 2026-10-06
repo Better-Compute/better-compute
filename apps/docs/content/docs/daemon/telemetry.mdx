@@ -1,0 +1,447 @@
+---
+title: Telemetry and status
+metaTitle: bcd telemetry - the OTLP metric export, its metrics, and bcd status over the local socket
+description: How bcd exports its own GPU, host and instance metrics over OTLP/HTTP to the collector NodeSpec.telemetry names, every metric with its unit, type and attributes, how failures behave, and what bcd status reads from the agent's local socket.
+icon: Activity
+status: experimental
+packages: ['@better-compute/observability', '@better-compute/server']
+sources:
+  - daemon/internal/agent/telemetry.go
+  - daemon/internal/agent/telemetry_host.go
+  - daemon/internal/agent/telemetry_test.go
+  - daemon/internal/agent/status.go
+  - daemon/internal/agent/status_gpu.go
+  - daemon/internal/agent/status_gpu_test.go
+  - daemon/internal/agent/healthwatch.go
+  - daemon/internal/agent/agent.go
+  - daemon/internal/agent/spec.go
+  - daemon/internal/telemetry/otlp.go
+  - daemon/internal/telemetry/otlp_test.go
+  - daemon/internal/health/health.go
+  - daemon/internal/nvml/smi_sample.go
+  - daemon/internal/nvml/smi_real_test.go
+  - daemon/internal/nvml/smi_live_test.go
+  - daemon/internal/journal/journal.go
+  - daemon/internal/config/config.go
+  - daemon/cmd/bcd/main.go
+  - daemon/cmd/bcd/status.go
+  - daemon/cmd/bcd/agent.go
+  - daemon/cmd/bcd/gpusampler_host.go
+  - daemon/cmd/bcd/gpusampler_fakehw.go
+  - proto/bettercompute/agent/v1/session.proto
+  - packages/observability/src/node-telemetry.ts
+  - packages/core/src/domain.ts
+  - packages/server/src/controllers/nodespec.ts
+  - packages/server/src/join/secret-broker.ts
+  - tests/e2e/bcd.test.ts
+  - tests/e2e/bcd-host-real.test.ts
+---
+
+bcd reports on itself in two places. Every interval it pushes its own metrics, GPU readings, host pressure, memory
+and huge page pools, and the VMs and sandboxes it runs, over OTLP/HTTP straight to a collector (27c7ee2). And on the
+machine itself it answers `bcd status` on a local unix socket (a4c305b, ad8791f). Neither goes through the gateway or
+the session, and neither reaches PostgreSQL: principle P8 keeps telemetry off the control plane's path.
+
+This page is the daemon's side: what bcd sends, how, and what happens when the collector is not there. The control
+plane's side, the `nodeTelemetryModule` that tells each node where to export and the doctor finding for a pool with a
+bad `policy.telemetry`, is in [node metrics from bcd](/docs/operations/observability#node-metrics-from-bcd). The
+control plane's own Prometheus series are a different thing and are listed in the
+[metrics reference](/docs/reference/metrics).
+
+<Callout type="warn" title="Mostly tested against fakes">
+The exporter, the metric set and `bcd status` are tested against an in-process fake collector, a fake GPU sampler
+(`fakehw.GPUSnapshot`) and fake `/proc` and sysfs trees. Two runs go further. The fakehw bcd in `tests/e2e/bcd.test.ts`
+posts its metrics to a local OTLP receiver the test runs. Since 898a23c, `tests/e2e/bcd-host-real.test.ts`
+(`BCD_E2E_REAL=1`) runs the non-fakehw bcd on a real RTX 5090 under WSL and checks that the real `nvidia-smi` numbers
+reach the receiver. No collector product (an OpenTelemetry Collector, Grafana Alloy, a vendor endpoint) has received
+the export yet, and no data-center GPU (ECC, MIG, row remapping) has been sampled live. See
+[what the tests cover](#what-the-tests-cover).
+</Callout>
+
+## Where the export is configured
+
+There is no telemetry key in `config.toml`. The export is configured only by the `telemetry` section of the node's
+<Term id="nodespec">NodeSpec</Term>, so the control plane can point a fleet at a new collector without touching any
+host:
+
+```proto title="proto/bettercompute/agent/v1/session.proto"
+// Where bcd sends its own telemetry (OTLP). Never the session or Postgres (P8).
+message TelemetrySection {
+  // Empty disables export.
+  string otlp_endpoint = 1;
+  uint32 export_interval_ms = 2;
+  // Extra "key=value" resource attributes.
+  repeated string resource_attributes = 3;
+  // Secret ref of the exporter's auth headers, fetched with SecretRequest.
+  string headers_ref = 4;
+}
+```
+
+The control plane fills the section from `TelemetrySpec` (`packages/core/src/domain.ts`). The NodeSpec controller
+(`packages/server/src/controllers/nodespec.ts`) merges each module's `telemetry` part field by field and renders it
+to the wire:
+
+| `TelemetrySpec` field | Wire field | How it is rendered |
+| --- | --- | --- |
+| `otlpEndpoint` | `otlp_endpoint` | As given |
+| `intervalSeconds` | `export_interval_ms` | `round(intervalSeconds * 1000)`; omitted when unset |
+| `headersRef` | `headers_ref` | As given (a `secret://`, `vault://` or `env://` reference) |
+| `resourceAttributes` | `resource_attributes` | An object rendered as `key=value` strings, sorted, so the spec hash is stable |
+
+The only built-in module that sets it is `nodeTelemetryModule` from `@better-compute/observability` (53aa356). It is
+not registered by default. Its options, the pool override and the checks it runs are described in
+[node metrics from bcd](/docs/operations/observability#node-metrics-from-bcd). Any module can return a
+`telemetry` part, and the e2e suites use a small one of their own.
+
+The `telemetry` section converges like any other: see [convergence and status](/docs/daemon/delivery#convergence-and-status).
+Every mode that runs the agent has the converger: `bcd node`, `bcd site` and `bcd ramdisk`.
+
+## What bcd checks
+
+The control plane checks more than bcd does. `nodeTelemetryModule` allows `http://` only to `localhost`,
+`127.0.0.1` or `[::1]`, limits the interval to 5 to 3600 seconds, and keeps `bcd.*` and `service.*` attribute keys
+for bcd. bcd itself checks only what it needs to run safely, when it plans the section:
+
+| Input | bcd's rule | On failure |
+| --- | --- | --- |
+| `otlp_endpoint` | Empty, or an `http://` or `https://` URL with a host and no user info (`telemetry.MetricsURL`). `/v1/metrics` is appended unless the path already ends with it | The section fails terminally: `FAILED`, and the exporter is not changed |
+| `resource_attributes` | Each entry is `key=value` with a non-blank key. Key and value are trimmed; the value may contain `=` | The section fails terminally |
+| `export_interval_ms` | 0 means the default, 60 s. Anything below 5 s is raised to 5 s | Never fails |
+| `headers_ref` | Not checked at plan time. It is fetched when the exporter starts | See [headers](#headers) |
+
+So bcd accepts plain `http://` to any host. The e2e suites rely on this to reach a receiver on the WSL host's
+address. A deployment that wants TLS everywhere gets it from the module's check, not from bcd.
+
+A terminal failure is tested in `TestTelemetryExportsGPUMetrics`: an `ftp://x` endpoint leaves the `telemetry`
+section `FAILED`, and the agent keeps running.
+
+## How the exporter runs
+
+The converger keeps one exporter goroutine, under the agent's context:
+
+- **Start and restart.** When the section differs from the one applied (`proto.Equal`), the plan has one action:
+  `export telemetry to <endpoint>`, or `stop the OTLP export` when the endpoint is empty. Applying it cancels the
+  running exporter, resets the last export and last error, and starts a new one if there is an endpoint. Any change,
+  even to one resource attribute, restarts the exporter. An empty section on a node that never exported is a no-op.
+- **Stop.** A section with an empty endpoint, or no section, stops the export. The exporter also stops with the
+  agent.
+- **First export.** The exporter sends once as soon as it starts, then every interval on a ticker.
+- **Each tick.** It samples the metrics and posts them, under one deadline equal to the interval. So a slow
+  `nvidia-smi` or a slow collector cannot pile up exports. The HTTP client has its own 10 s timeout.
+- **One batch per tick.** The exporter keeps no queue. A batch that fails is not sent again. The next tick samples
+  fresh values and sends those.
+
+### The request
+
+Each export is one `POST` to `<endpoint>/v1/metrics` with `Content-Type: application/json`. The body is an
+`ExportMetricsServiceRequest` in the OTLP JSON encoding (the protobuf JSON mapping). bcd builds it itself and links
+no OpenTelemetry SDK. The request has one resource, one scope (`bcd` and bcd's version), and the metrics that have
+at least one point:
+
+```json title="An export, abridged (from TestExportEncodesOTLPJSON)"
+{
+  "resourceMetrics": [{
+    "resource": { "attributes": [
+      { "key": "bcd.node.id", "value": { "stringValue": "n1" } },
+      { "key": "service.name", "value": { "stringValue": "bcd" } }
+    ] },
+    "scopeMetrics": [{
+      "scope": { "name": "bcd", "version": "1.0.0" },
+      "metrics": [
+        { "name": "bcd.gpu.utilization", "unit": "1",
+          "gauge": { "dataPoints": [{ "timeUnixNano": "200000000005", "asDouble": 0.87,
+            "attributes": [{ "key": "gpu.uuid", "value": { "stringValue": "GPU-1" } }] }] } },
+        { "name": "bcd.gpu.ecc.errors", "unit": "{error}",
+          "sum": { "aggregationTemporality": 2, "isMonotonic": true, "dataPoints": [{
+            "startTimeUnixNano": "100000000000", "timeUnixNano": "200000000005", "asInt": "5",
+            "attributes": [
+              { "key": "gpu.uuid", "value": { "stringValue": "GPU-1" } },
+              { "key": "type", "value": { "stringValue": "correctable" } }] }] } }
+      ]
+    }]
+  }]
+}
+```
+
+- Attributes are string values, sorted by key.
+- Integer points use `asInt` (a string, as the JSON mapping requires); others use `asDouble`.
+- Every point of an export has the same `timeUnixNano`, the time of the export.
+- Sums are cumulative and monotonic (`aggregationTemporality: 2`). Their `startTimeUnixNano` is when the exporter
+  started, not when the process started, so a restart of the exporter (any section change) starts a new series start.
+- No metric carries a `description`.
+
+### Resource attributes
+
+| Attribute | Value |
+| --- | --- |
+| `service.name` | `bcd` |
+| `service.version` | bcd's version (`-X main.version`, `0.0.0-dev` in a dev build) |
+| `host.name` | The host's hostname |
+| `bcd.node.id` | The node id |
+| `bcd.site.id` | The site id from the node's state, read when the exporter starts |
+| The section's `resource_attributes` | Added after these. A key that collides with one of the five above is ignored |
+
+### Headers
+
+`headers_ref` names a secret that holds the collector's auth headers. The exporter fetches it with a
+`SecretRequest` bound to workflow `host:telemetry` and step `headersRef`. The secret broker releases it only while the
+node's current NodeSpec names that reference in `telemetry.headersRef` (binding rule 3 in
+`packages/server/src/join/secret-broker.ts`; see [secrets](/docs/daemon/protocol#secrets) and
+[sealed secrets](/docs/operations/security#sealed-secrets)).
+
+The secret is parsed by `telemetry.ParseHeaders` in one of two forms:
+
+```text title="A JSON object"
+{"Authorization":"Bearer a"}
+```
+
+```text title="Name: value or name=value, separated by newlines or commas"
+Authorization: Bearer a
+X-Scope-OrgID: t1
+```
+
+A header name that is empty or contains a space, tab, CR, LF or `:`, or a value that contains CR or LF, is refused.
+The headers are set on every request after `Content-Type`, so a `Content-Type` in the secret replaces bcd's.
+
+While the headers cannot be fetched or parsed, the exporter sends nothing. It does not export without them. It
+records the error (`headers <ref>: …`) and tries the fetch again on every tick until one succeeds. After that it keeps
+the headers for the life of that exporter. A rotated secret reaches bcd only when the exporter restarts: a section
+change, or an agent restart.
+
+## Failure behaviour
+
+| What happens | What bcd does |
+| --- | --- |
+| The endpoint is not an http(s) URL, or an attribute is malformed | The `telemetry` section is `FAILED` with reason `ConvergeFailed` (terminal), and bcd logs `section failed`; the previous exporter keeps running |
+| The collector cannot be reached, times out, or answers 5xx or 429 | The batch is lost. The error is recorded and the next tick sends fresh values |
+| The collector answers 4xx other than 429 | The exporter marks it permanent (`telemetry.PermanentError`). The batch is lost; the exporter still tries again next tick, since the agent loop treats both kinds alike |
+| The headers secret cannot be fetched or parsed | Nothing is sent; the fetch is tried again every tick |
+| `nvidia-smi` fails or is missing | The `bcd.gpu.*` gauges from samples are left out of that export. The inventory-based GPU series (ECC, row remapping, XIDs) and the host series are still sent |
+| The kernel has no PSI | The `bcd.host.pressure.*` and `bcd.host.cpu.steal` series are left out |
+
+Logging is per change, not per tick. The first failure logs a warning (`telemetry export`, with `endpoint` and
+`error`). The same error again logs nothing. A different error logs again. The first success after a failure logs
+`telemetry export resumed`. The latest outcome is always in [`bcd status`](#bcd-status): the last successful export
+and the last error.
+
+A failing export never fails the section, holds back `observed_generation`, or touches the session. The control plane
+learns nothing about it. Watch the collector's side (a node's series going stale) or `bcd status` on the machine.
+
+## The metrics
+
+All metrics are sampled at the moment of the export, except host pressure (below). A metric with no points in an
+export is left out of it. Gauges are OTLP gauges; sums are cumulative monotonic OTLP sums.
+
+### GPUs
+
+GPU points carry `gpu.uuid`, `gpu.index` and `gpu.model`, from the inventory. A sampled GPU the inventory does not
+list carries only `gpu.uuid`.
+
+| Metric | Unit | Type | Attributes | Source |
+| --- | --- | --- | --- | --- |
+| `bcd.gpu.memory.used` | `By` | gauge, int | GPU | `nvidia-smi` `memory.used` |
+| `bcd.gpu.memory.total` | `By` | gauge, int | GPU | `memory.total` |
+| `bcd.gpu.memory.reserved` | `By` | gauge, int | GPU | `memory.reserved` |
+| `bcd.gpu.utilization` | `1` | gauge, double | GPU | `utilization.gpu` / 100 (0 to 1) |
+| `bcd.gpu.memory.utilization` | `1` | gauge, double | GPU | `utilization.memory` / 100 |
+| `bcd.gpu.temperature` | `Cel` | gauge, double | GPU | `temperature.gpu` |
+| `bcd.gpu.power.draw` | `W` | gauge, double | GPU | `power.draw` |
+| `bcd.gpu.power.limit` | `W` | gauge, double | GPU | `power.limit` |
+| `bcd.gpu.clock.sm` | `MHz` | gauge, double | GPU | `clocks.sm` |
+| `bcd.gpu.clock.memory` | `MHz` | gauge, double | GPU | `clocks.mem` |
+| `bcd.gpu.processes` | `{process}` | gauge, int | GPU | Compute processes on the GPU (`--query-compute-apps`); graphics processes are not counted (9a6fee9) |
+| `bcd.gpu.mig.memory.used` | `By` | gauge, int | GPU, `mig.id` | Each MIG instance's memory, from the full `-q -x` read |
+| `bcd.gpu.mig.memory.total` | `By` | gauge, int | GPU, `mig.id` | Each MIG instance's memory size |
+| `bcd.gpu.xid.active` | `{condition}` | gauge, int | GPU | bcd's active device fault conditions for the GPU (XIDs seen this boot); 0 when none. Sent for every inventory GPU |
+| `bcd.gpu.ecc.errors` | `{error}` | sum, int | GPU, `type` (`correctable`, `uncorrectable`) | The inventory's aggregate ECC counters; only for GPUs that report ECC |
+| `bcd.gpu.rows.remapped` | `{row}` | gauge, int | GPU, `type` (`correctable`, `uncorrectable`) | The inventory's row remapping counts; only for GPUs that report them |
+
+The sampled series (the first eleven, and MIG) come from one `nvidia-smi` call per export since 9a6fee9:
+
+```bash
+nvidia-smi --query-gpu=uuid,memory.total,memory.used,memory.reserved,memory.free,utilization.gpu,utilization.memory,temperature.gpu,power.draw,power.limit,clocks.sm,clocks.mem,pstate,mig.mode.current --format=csv,noheader,nounits
+nvidia-smi --query-compute-apps=gpu_uuid --format=csv,noheader
+```
+
+bcd falls back to the full read (`nvidia-smi -q -x` and the rest of `nvml.SMI.Snapshot`, several seconds of driver
+time on a large board) when a GPU is in MIG mode, since only `-q -x` has the MIG instances' memory; when the driver
+refuses a field (`memory.reserved` before R510); or when a line does not have the expected columns. If `nvidia-smi`
+is missing (`ErrNoDriver`), there is no fallback and no sample.
+
+The ECC, row remapping and XID series come from bcd's inventory and fault state, not from a new read, so they only
+change when the inventory or the fault set does.
+
+A fakehw build samples `fakehw.GPUSnapshot` for its seed instead of `nvidia-smi` (`gpusampler_fakehw.go`).
+
+### Host
+
+| Metric | Unit | Type | Attributes | Source |
+| --- | --- | --- | --- | --- |
+| `bcd.host.pressure.cpu` | `%` | gauge, double | none | PSI `/proc/pressure/cpu` `some avg10` |
+| `bcd.host.pressure.memory` | `%` | gauge, double | none | PSI `/proc/pressure/memory` `some avg10` |
+| `bcd.host.pressure.io` | `%` | gauge, double | none | PSI `/proc/pressure/io` `some avg10` |
+| `bcd.host.cpu.steal` | `%` | gauge, double | none | Share of CPU time stolen between the last two samples (`/proc/stat`) |
+| `bcd.host.memory.total` | `By` | gauge, int | none | `/proc/meminfo` `MemTotal` (3111284) |
+| `bcd.host.memory.available` | `By` | gauge, int | none | `/proc/meminfo` `MemAvailable` |
+| `bcd.host.hugepages.total` | `{page}` | gauge, int | `page.size` (bytes) | `/sys/kernel/mm/hugepages/hugepages-<n>kB/nr_hugepages` |
+| `bcd.host.hugepages.free` | `{page}` | gauge, int | `page.size` (bytes) | `.../free_hugepages` |
+
+Host pressure is not read at export time. The agent's health loop samples it every 30 s (`HealthInterval`) and also
+sends it to the control plane in `StatusReport.pressure`. The export uses the latest sample. So the four pressure
+series are missing for the first 30 s after bcd starts, and may be up to 30 s old. The first steal reading is 0, as
+it needs a baseline.
+
+### Instances
+
+These come only from a host with an instance runtime (VPS and sandbox hosts). The configured series cover every
+runtime, plugin runtimes included. The live usage series come only from runtimes that read it (`runtime.UsageReader`).
+
+| Metric | Unit | Type | Attributes | Source |
+| --- | --- | --- | --- | --- |
+| `bcd.instances` | `{instance}` | gauge, int | `runtime`, `state` | Domains each runtime lists, managed or not, counted by state |
+| `bcd.instance.vcpu` | `{cpu}` | gauge, int | `instance.id`, `runtime`, `managed` | Configured vCPUs |
+| `bcd.instance.memory` | `By` | gauge, int | `instance.id`, `runtime`, `managed`, `hugepages` (backing page size in bytes, `0` for normal pages) | Configured memory |
+| `bcd.instance.memory.balloon.reclaimed` | `By` | gauge, int | `instance.id`, `runtime` | Configured memory less what the balloon leaves the guest; running, managed guests with `placement.balloon` only (9bdd43a) |
+| `bcd.instance.cpu.time` | `s` | sum, double | `instance.id`, `runtime` | CPU time since the domain started (0b21b4b) |
+| `bcd.instance.memory.used` | `By` | gauge, int | `instance.id`, `runtime` | Memory the domain uses now |
+| `bcd.instance.io.read` | `By` | sum, int | `instance.id`, `runtime` | Disk bytes read |
+| `bcd.instance.io.write` | `By` | sum, int | `instance.id`, `runtime` | Disk bytes written |
+| `bcd.instance.network.receive` | `By` | sum, int | `instance.id`, `runtime` | Bytes the guest received |
+| `bcd.instance.network.transmit` | `By` | sum, int | `instance.id`, `runtime` | Bytes the guest sent |
+
+Where each runtime reads its usage (cgroup v2 and tap counters for `cloud-hypervisor`, `virsh domstats` for
+`libvirt-kvm`) and how that works under `bcd helper` is described in
+[node metrics from bcd](/docs/operations/observability#node-metrics-from-bcd). The balloon itself is described in
+[memory ballooning](/docs/daemon/delivery#memory-ballooning). A runtime whose `List` fails is left out of that export.
+
+<Callout type="info" title="Cardinality">
+`instance.id` is an attribute on every instance series, so a host's series count grows with the instances it has
+held. bcd sends only what it lists now: a deleted instance leaves the next export. Plan your collector's or backend's
+staleness and limits for that. No GPU or host series carries a tenant id.
+</Callout>
+
+## The status socket
+
+`bcd node`, `bcd site` and `bcd ramdisk` serve their status on a unix socket (a4c305b):
+
+- **Path.** `socket_path` in `config.toml`, default `/run/bcd/bcd.sock`. It must be absolute. `bcd ramdisk` uses
+  `<data dir>/bcd.sock`.
+- **Permissions.** The directory is created with mode 0700 and the socket is set to 0600, so only the account that
+  runs the agent (root, or the unprivileged node user under `bcd helper`) and root can connect.
+- **Protocol.** HTTP over the socket. One route: `GET /status`, which answers the agent's `Status` as JSON.
+  The server's read-header timeout is 5 s.
+- **Lifetime.** A stale socket from an earlier process is removed at start; the socket is removed again on shutdown.
+  If the socket cannot be created, bcd logs `status socket unavailable` and runs without it. It is never fatal.
+
+The socket serves only `bcd status` today. `bcd doctor` reads the host itself and does not use it. It is the only
+local endpoint bcd has: see [outbound only](/docs/daemon#outbound-only).
+
+## bcd status
+
+```text
+bcd status [--socket /run/bcd/bcd.sock] [--json]
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--socket` | `/run/bcd/bcd.sock` | The agent's socket. `bcd status` does not read `config.toml`, so pass this when `socket_path` is not the default |
+| `--json` | `false` | Print the status as indented JSON instead of text |
+
+It exits 0 when it read a status, and 1 when it could not. When there is no socket, or the connection is refused, it
+prints `bcd status: the node agent is not running (no socket at <path>)`; the client times out after 5 s. In the
+Kubernetes DaemonSet, `bcd status` is the `bcd` container's liveness probe (see [Kubernetes](/docs/daemon/kubernetes)).
+
+### Text output
+
+```text
+node       node_01k… (site site_1, role node)
+bcd        0.4.0, boot 3f6c…
+session    connected (epoch 12, clock offset -3 ms)
+spec       applied 41, observed 41
+  host       CONVERGED
+  devices    CONVERGED
+  telemetry  FAILED ConvergeFailed: converge: terminal failure: otlp endpoint "ftp://x" is not an http(s) URL
+commands   0 running, 0 waiting for a spec
+events     2 unacked, 0 waiting, 0 metrics dropped
+identity   certificate until 2026-10-06T08:00:00Z, node key in the TPM, trust bundle v3, signed intent enforced
+gpus       2
+  0 GPU-5f1c…   87%   61 C   540/700 W  71.2/79.6 GiB  held by alloc_01k…
+  1 GPU-9a02…    0%   34 C    72/700 W  0.0/79.6 GiB  UNHEALTHY
+telemetry  https://otel.example.internal:4318, last export 2026-09-26T08:12:00Z
+```
+
+The values above are illustrative; the lines and their order are what `runStatus` prints. The section lines show each
+NodeSpec section's last state with the `SECTION_STATE_` prefix removed, then its reason and message when there are
+any. The `gpus`, `kubernetes` and `telemetry` lines are described in [bcd status](/docs/daemon#bcd-status). The
+telemetry line is printed only while the applied section has an endpoint:
+
+| Telemetry line | Meaning |
+| --- | --- |
+| `<endpoint>, no export yet` | The exporter started and has not succeeded yet |
+| `<endpoint>, last export <time>` | The last export succeeded at that time (UTC) |
+| `<endpoint>, last export <time>, failing: <error>` | An export succeeded once, and the latest attempt failed |
+| `<endpoint>, no export yet, failing: <error>` | No export has succeeded since the exporter started |
+
+`metrics dropped` on the `events` line is not about OTLP. It counts metric-class events the journal dropped when it
+was full (see [the journal](/docs/daemon/delivery#the-journal)). An OTLP export that fails is never journaled.
+
+### JSON output
+
+`--json` prints the same `agent.Status` the socket serves:
+
+| Field | Meaning |
+| --- | --- |
+| `nodeId`, `siteId`, `role`, `version` | Identity and bcd's version |
+| `bootId`, `incarnation`, `journalId` | This boot, this process, and the journal's id |
+| `connected`, `epoch`, `clockOffsetMs` | Whether a session is open and welcomed, its epoch, and server time minus local time from the last Welcome |
+| `appliedGeneration`, `observedGeneration` | The spec generations (see [generations](/docs/daemon/delivery#generations)) |
+| `sections` | Each section's `section`, `state`, `reason`, `message`; omitted before the first status report |
+| `running`, `deferred` | Command ids running, and waiting for a spec; always arrays |
+| `pendingEvents`, `waitingEvents`, `droppedMetrics` | Unacked journal events, events waiting for journal room, metric events dropped |
+| `certificateNotAfter`, `nodeKey`, `trustVersion`, `commandSigning` | Certificate expiry, `tpm` or `file`, the trust bundle version, and whether signed intent is enforced |
+| `gpus` | Per GPU: `uuid`, `index`, `model`, `healthy`, `held`, `utilizationPct`, `temperatureC`, `powerDrawW`, `powerLimitW`, `memoryUsedBytes`, `memoryTotalBytes`, `processes`; omitted on a host without GPUs |
+| `kubernetes` | `mode` (`joined` or `hosted`), `server`, `nodeName`, `advertised`; omitted when the node is not a Kubernetes worker |
+| `telemetry` | `endpoint`, `lastExport` (omitted before the first success), `lastError` (omitted when the last attempt succeeded); omitted when there is no endpoint |
+
+The GPU fields are read when you ask. Each `bcd status` runs the GPU sampler (the same `nvidia-smi` query as the
+export) with a 10 s timeout. If it fails or times out, the GPUs are still listed from the inventory, with zero
+readings and the inventory's memory total. Power is rounded to whole watts. Health is bcd's own verdict (no failed or
+pending row remap, no uncorrectable ECC, no XID this boot), the same one that keeps a GPU from new holds.
+
+## Relation to control-plane observability
+
+The two sides do not overlap:
+
+| | bcd's export (this page) | The control plane's metrics |
+| --- | --- | --- |
+| What | One node's GPUs, host and instances | Sessions, commands, queues, placements, IAM, certificates |
+| Protocol | OTLP/HTTP JSON, pushed | Prometheus text, scraped from `GET /metrics` |
+| Names | `bcd.*`, OTLP style | `better_compute_*` |
+| Configured by | NodeSpec `telemetry` (`nodeTelemetryModule`) | `createMetrics` and `host.metrics` in the host configuration |
+| Reference | The tables above | [Metrics reference](/docs/reference/metrics) |
+
+What the control plane does learn about a node's health travels in the session instead: `StatusReport` carries host
+pressure, section states and conditions such as XIDs, and the gateway turns them into node conditions and
+`node.status` events (see [convergence and status](/docs/daemon/delivery#convergence-and-status)). That path drives
+scheduling and health policy. The OTLP export is only for your dashboards and alerts. For alerting on the control
+plane, see [what to alert on](/docs/operations/observability#what-to-alert-on).
+
+## What the tests cover
+
+| Test | What it proves | Against |
+| --- | --- | --- |
+| `TestExportEncodesOTLPJSON` (`internal/telemetry`) | The OTLP JSON shape: path, content type, headers, sorted resource attributes, gauge and sum points, empty metrics left out | `httptest` collector |
+| `TestExportErrors` | 400 is permanent, 429 is not; `ftp://` is refused; `/v1/metrics` is appended | `httptest` collector |
+| `TestParseHeaders` | Both header forms, and the refused names and values | Unit |
+| `TestTelemetryExportsGPUMetrics` (`internal/agent`) | A NodeSpec starts the export with the node's resource attributes and one point per GPU; an empty section stops it; a bad endpoint fails the section | Fake session, fake GPU sampler, `httptest` collector |
+| `TestHostAndInstanceMetrics` | Host memory, huge page pools and instance series | Fake `/proc`, sysfs and runtimes |
+| `TestStatusShowsGPUsHoldsAndTelemetry` | `Status()` lists GPUs with live readings and holds, and an export with no collector shows its error | Fake GPU sampler, closed port |
+| `TestStatusWithoutAnAgent` (`cmd/bcd`) | `bcd status` without a socket exits 1 with `not running` | No agent |
+| `TestSamplesRealRTX5090WSL`, `TestSamplesFallBack` (`internal/nvml`) | The light sample query parses real captured output; MIG mode and an old driver fall back to the full read | Captured output from a real RTX 5090 under WSL |
+| `TestSnapshotLiveHost` (`BCD_REAL_GPU=1`) | The light samples agree with the full read on the live GPUs | Real `nvidia-smi` |
+| `tests/e2e/bcd.test.ts` | The fakehw bcd, joined to a dev stack, exports every GPU to a receiver named by NodeSpec; the stored spec has `exportIntervalMs: 5000` | Real bcd process, fake GPUs |
+| `tests/e2e/bcd-host-real.test.ts` (`BCD_E2E_REAL=1`, 898a23c) | The non-fakehw bcd exports the real GPU's live metrics; the total memory matches `nvidia-smi` and the power limit is non-zero | Real RTX 5090 under WSL |
+
+Nothing has tested ECC, row remapping, MIG memory or XIDs on a real data-center GPU, the export through a TLS
+collector with auth headers on a real network, or a collector product. The test layout is in
+[testing](/docs/operations/testing).

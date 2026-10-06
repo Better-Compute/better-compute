@@ -1,0 +1,285 @@
+---
+title: Troubleshooting bcd
+metaTitle: Troubleshooting the bcd node agent - symptoms, causes and fixes
+description: Symptom, cause and fix for the ways bcd fails on real hosts - joins, pins and TLS, the clock, renewals, revocation, sections stuck progressing, GPU holds, nvidia-smi, KVM and the helper socket - with the doctor check that detects each.
+icon: LifeBuoy
+status: experimental
+packages: []
+sources:
+  - daemon/cmd/bcd/main.go
+  - daemon/cmd/bcd/agent.go
+  - daemon/cmd/bcd/status.go
+  - daemon/cmd/bcd/helper.go
+  - daemon/cmd/bcd/wellknown.go
+  - daemon/cmd/bcd/tokenfile.go
+  - daemon/cmd/bcd/websocket.go
+  - daemon/cmd/bcd/doctor.go
+  - daemon/cmd/bcd/doctor_gpu.go
+  - daemon/cmd/bcd/doctor_host.go
+  - daemon/cmd/bcd/doctor_kube.go
+  - daemon/cmd/bcd/doctor_resources.go
+  - daemon/cmd/bcd/rootdir_unix.go
+  - daemon/internal/config/config.go
+  - daemon/internal/agent/agent.go
+  - daemon/internal/agent/conn.go
+  - daemon/internal/agent/join.go
+  - daemon/internal/agent/renew.go
+  - daemon/internal/agent/state.go
+  - daemon/internal/agent/spec.go
+  - daemon/internal/agent/devices.go
+  - daemon/internal/agent/slices.go
+  - daemon/internal/slice/slice.go
+  - daemon/internal/session/session.go
+  - daemon/internal/transport/transport.go
+  - daemon/internal/transport/ws.go
+  - daemon/internal/pki/join.go
+  - daemon/internal/helper/helper.go
+  - daemon/internal/kube/allow.go
+  - daemon/internal/nvml/smi.go
+  - daemon/internal/runtime/cloudhypervisor.go
+  - daemon/internal/inventory/findings.go
+  - packages/server/src/join/service.ts
+---
+
+This page maps what you see on a host (a log line, a refusal, a section that never converges) to its cause and
+fix, drawn from the error strings in `daemon/`. Each entry names the [`bcd doctor`](/docs/daemon/commands#doctor-checks)
+check that detects it, where one does. What happens to the fleet when a gateway, the database or the network fails
+is on [failure modes](/docs/daemon/failure-modes); this page is about one host.
+
+<Callout type="info" title="Where these come from">
+Most entries come from unit tests against fakes. The GPU, unprivileged-node and section-logging entries come from
+running bcd on a real RTX 5090 under WSL 2 (`tests/e2e/bcd-host-real.test.ts`; f84f1f9, da60bbd). The KVM,
+libvirt, cloud-hypervisor and Kubernetes entries have not been seen on a real host yet.
+</Callout>
+
+## Where to look first
+
+```bash
+sudo bcd doctor --config /etc/bcd/config.toml   # one line per check; exit 1 when one fails
+sudo bcd status                                 # the running agent: session, sections, certificate
+journalctl -u bcd.service -e                    # bcd's JSON log lines
+journalctl -u bcd-helper.service -e             # on a node installed with --unprivileged
+```
+
+`bcd status` lists every NodeSpec section with its state, reason and message. Since da60bbd the node's own log
+says the same: a section that cannot converge logs `section retrying` (WARN) with the error on every pass, about
+every 30 seconds, and one that failed for good logs `section failed` (ERROR) with its reason
+(`AllocationFailed`, `InstanceFailed`, `UpdateFailed` or `ConvergeFailed`). Before that commit an operator on the
+host saw only `PROGRESSING`.
+
+```json
+{"level":"WARN","msg":"section retrying","section":"devices","generation":42,"error":"the slice of alloc_01k…: start bcd-alloc-alloc_01k….slice: …"}
+```
+
+Session problems log at INFO as `session ended; redialing` with the reason and the back-off.
+
+## bcd will not start
+
+| Symptom | Cause | Fix | Doctor |
+| --- | --- | --- | --- |
+| `bcd node: config /etc/bcd/config.toml: line N: ...` | A key, section or value the [strict parser](/docs/daemon/configuration#format) refuses | Fix the line | `config` (fail) |
+| `dev_insecure_h2c is only accepted by fakehw development builds` | A development setting in a host build | Remove `dev_insecure_h2c` and use an `https://` gateway | `config` passes; the agent refuses |
+| `agent: this node has not joined (run bcd join)` | No `identity.json` in `data_dir` | [Join](/docs/daemon/commands#bcd-join) | `identity` (warn) |
+| `agent: the node key does not match the node certificate; join again: ...` | `node.key` and `identity.json` belong to different keys; with a TPM key, "(was the TPM cleared?)" | `bcd join --reset --yes`, then join; see [TPM cleared or unavailable](/docs/daemon/failure-modes#tpm-cleared-or-unavailable) | `identity` (fail) |
+| `session: the journal belongs to node X, not Y` | A `journal.db` left by another identity, e.g. after copying `identity.json` by hand | `bcd join --reset --yes` moves the journal aside with the identity (b4fcc2e) | none |
+| `[kubernetes] gpu_api must be "device-plugin" or "dra"` | Any other value | Fix it | none |
+| `[kubernetes] allowed_clusters: "..." is not https://host[:port]#sha256:<64 hex>` | A malformed entry | Fix it; no path, a 64-digit hex CA digest | `kubernetes` (fail) |
+| `bcd site: this data directory holds a node identity; join with a site token (bcd join --role site)` | `bcd site` on a node's data directory | Join a site agent separately | none |
+| `bcd status: the node agent is not running (no socket at /run/bcd/bcd.sock)` | The agent is not running, or `socket_path` is elsewhere | Start `bcd.service`; pass `--socket` | none |
+
+## Joining
+
+Server-side refusals are deliberately opaque: every refused join is `ACCESS_DENIED` "Join refused", and the reason
+is recorded as a `security.join.refused` event. Read the reasons in [refusals](/docs/guides/nodes/joining#refusals).
+A refused join is not retried and does not consume the token.
+
+| Symptom (`bcd join: ...`) | Cause | Fix |
+| --- | --- | --- |
+| `no join token: set BCD_JOIN_TOKEN or pass the token on standard input` (exit 2) | Nothing in the variable or on standard input | `printf '%s\n' "$TOKEN" \| sudo bcd join`; `sudo` drops the environment unless `-E` |
+| `that is not a join token (bcjt_...)` (exit 2) | The input is not `bcjt_<id>.<secret>` | Pass the token itself |
+| `... is readable by others (mode 0644): make it 0600 (a Kubernetes Secret: defaultMode 0400)` | `--token-file` others can read | `chmod 0600`, or `defaultMode: 0400` |
+| `the JoinService encryption key: open /etc/bcd/join-encryption.jwk: no such file or directory` | The key file is missing and no `--server` was given | Rerun the install script, or add `--server https://...`; see [the join key and its fallback](/docs/guides/nodes/joining#the-join-key-and-its-fallback) |
+| `the JoinService encryption key does not match join_encryption_key_pin` | The file or well-known key is another deployment's, or rotated | Reinstall with the current bundle's pins and key |
+| `pki: join response rejected: bad signature` | The response was not signed by the key `join_signing_key_pin` names: a wrong pin, or a gateway answering for another control plane | Check the pin against the bundle (`bootstrapPins`) |
+| `pki: join response rejected: response is for another CSR` | The answer was not for this join's CSR | Retry; persistent, suspect the path to the gateway |
+| `agent: join: ... Join refused` | JoinService refused it | Read `security.join.refused` for the reason |
+| log `join failed, retrying` | The gateway is unreachable, busy (`RESOURCE_EXHAUSTED`) or timing out; bcd retries up to 20 times | Check `gateway_url` and the network; doctor `gateway` |
+| log `join is pending approval` | The pool requires approval | Approve the join request; bcd asks again by itself |
+| `this machine already joined as X, not Y` | `--node-id` names another node than the identity on disk | Use the right node id, or `--reset --yes` |
+| `joining without config.toml needs --serving-ca-pin, --join-signing-pin and --join-encryption-pin from the install` | `--server` bootstrap on a host build without the three pins | Pass all three |
+| `the control plane's well-known document does not match --serving-ca-pin: refusing to join` | The published pin differs from the install's | Treat it as an attack or a stale pin; do not drop the flag |
+| `the control plane does not publish its gateway (well-known gateway.url); install /etc/bcd/config.toml instead` | The server's options set no `gateway.url` | Install a `config.toml`, or configure `gateway` on the server |
+| `the TPM: open /dev/tpmrm0: ...` | `--attestor tpm` without a usable TPM | Run as root on a host with the kernel resource manager |
+| `already joined as X` but the node cannot connect | The identity loads but its certificate expired, was revoked or is refused at renewal | `bcd join --reset --yes` as root, then join; see [joining again with --reset](/docs/daemon/install#joining-again-with---reset) |
+
+Doctor: `gateway` fails when the gateway is not reachable over TCP within 5 seconds; `identity` warns before the
+first join.
+
+## Pins and TLS
+
+bcd trusts no system root for the gateway: the chain must contain a CA whose SPKI equals `serving_ca_spki_pin`,
+and the leaf must name the host. These appear as the `reason` of `session ended; redialing`, and as the failure of
+`bcd join`.
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `transport: the gateway chain does not include the pinned serving CA` | The gateway's serving certificate is from another CA, a TLS-inspecting proxy answered, or the pin is wrong | Issue the gateway certificate from the bundle's serving CA (`pki issue-gateway`); behind an inspecting proxy, use the [WebSocket fallback](/docs/daemon/protocol#websocket-fallback-v04) |
+| `transport: gateway certificate: x509: certificate is valid for A, not B` | `gateway_url` names an IP address or another name than the certificate | Set `gateway_server_name` to the certificate's name |
+| `transport: gateway certificate: x509: certificate has expired or is not yet valid` | The gateway certificate expired, or this host's clock is wrong | Renew the gateway certificate; check doctor `clock` |
+| `transport: the WebSocket endpoint's certificate is neither the pinned gateway's nor the configured proxy's` | An inspecting proxy whose CA is not `[websocket] proxy_ca_file` | Point `proxy_ca_file` at the proxy's CA |
+| `transport: gateway proof rejected: ...` | Over the fallback, the gateway's in-band proof does not chain to the pinned serving CA, or names another audience | Check `[websocket] audience` and the gateway's certificate |
+| `the WebSocket fallback needs command-signing roots (every command and spec signed)` | `[websocket] url` on a node whose trust bundle has no command-signing roots | Configure `pki.commandSigning` on the server, or drop `[websocket]` |
+
+Doctor: none checks TLS; `gateway` tests TCP only.
+
+## The clock
+
+Certificates, signed intents, exec tickets and renewal proofs all compare times. Since e2a0cf0 doctor asks the
+kernel (`adjtimex`) whether the clock is synchronized.
+
+| Symptom | Cause | Fix | Doctor |
+| --- | --- | --- | --- |
+| `the kernel reports the clock unsynchronized: run an NTP client (systemd-timesyncd or chrony); ...` | No NTP client keeps the clock | Enable `systemd-timesyncd` or `chrony` | `clock` (fail) |
+| log `protocol: server time went backwards; refusing the session` | A `Welcome` more than 5 minutes before bcd's server time mark: a gateway with a wrong clock, or a replay | Fix the gateway's clock; bcd drops each such session and redials | none |
+| `renewal failed` ending `Renew refused`, with `security.renew.refused` reason `client time outside the window` | `client_time` more than 60 seconds from server time | Synchronize the clock | `clock` |
+
+bcd evaluates `not_after` through the offset the last `Welcome` gave it, so its own clock matters for TLS and
+proofs, not for command deadlines. See [clock skew](/docs/daemon/failure-modes#clock-skew).
+
+## Renewals, expiry and revocation
+
+bcd renews at 60% of the certificate's life. A failed renewal logs `renewal failed` (WARN) with the error, the
+attempt and `expiresIn`, and retries with back-off from 30 seconds to 10 minutes (or when the gateway's pushback
+says).
+
+| Symptom | Cause | Fix | Doctor |
+| --- | --- | --- | --- |
+| `renewal failed` with an error ending `Renew refused` | JoinService refused it; the reason is a `security.renew.refused` event | Read the event ([refused renewals](/docs/operations/security#refused-renewals)) | none |
+| `renewal: the certificate's node key is in the TPM, which is unavailable: ...` | The TPM, or under `[helper]` the helper that holds it, cannot be reached | Restore `/dev/tpmrm0` or start `bcd-helper.service`; the next retry renews | `node key` |
+| `renewal: this TPM's attestation key is not the one the certificate names ...` | Another TPM, or its endorsement seed changed | Join again: `bcd join --reset --yes --attestor tpm` | none |
+| `the certificate expired at ...; join again as root: bcd join --reset --yes, then bcd join` | Renewal kept failing until expiry, or the machine was off | Join again | `identity` (fail) |
+| log `certificate revoked`, then `bcd node: agent: this node's certificate was revoked` (exit 1) | The control plane revoked the certificate (`nodes.revokeIdentity`, `nodes.delete`, a cloned identity) | systemd restarts bcd, but the gateway refuses the serial at the handshake. Join again with a new token, `--reset --yes` | `identity` stays `ok` until expiry |
+
+See [certificate expiry](/docs/daemon/failure-modes#certificate-expiry), [certificate
+revocation](/docs/daemon/failure-modes#certificate-revocation) and
+[renewal](/docs/guides/nodes/joining#renewal).
+
+## Sections stuck progressing
+
+A section is `PROGRESSING` with reason `Retrying` while its converger returns an error that is not terminal, and
+the spec is not observed meanwhile. The log line `section retrying` carries the error. Common ones:
+
+| Error in `section retrying` | Cause | Fix | Doctor |
+| --- | --- | --- | --- |
+| `helper: dial unix /run/bcd-helper/helper.sock: connect: no such file or directory` | `bcd helper` is not running | `systemctl start bcd-helper.service`; see why it stopped below | `helper` |
+| `helper: not allowed` | The helper refused the connection | See [helper socket refusals](#helper-socket-refusals) | `helper` |
+| `helper: protocol version N, not M` or `protocol version N; this helper speaks M` | The node and the helper are different builds | Restart both units after replacing the binary | none |
+| `the slice of ...: start bcd-alloc-....slice: ...` or `set the limits of ...` | `systemctl` refused the hold's slice: not root, or systemd is not init | Run `bcd node` as root or under `[helper]`; doctor `systemd` | `systemd`, `cgroups` |
+| `the slice of ...: enable hugetlb under /sys/fs/cgroup...` or `limit 2MB hugepages of ...` | A hold with hugepage limits, and bcd cannot write cgroupfs: no `hugetlb` controller, or `/sys/fs/cgroup` is read-only for the process (the install unit sets `ProtectControlGroups=yes` for `bcd.service`; `bcd-helper.service` does not) | Enable `hugetlb`; check which process writes the slice (the helper, under `[helper]`) | `cgroups` (warn) |
+| `... /etc/cdi/...: read-only file system` | `/etc/cdi` did not exist when `bcd.service` started: the unit's `ReadWritePaths=-/etc/cdi` skips a missing path, and `ProtectSystem=strict` leaves `/etc` read-only | `mkdir -m 0755 /etc/cdi` (the install script does it) and restart `bcd.service` | none |
+
+A `host` section that fails a unit keeps going with the others; see [status and
+failures](/docs/daemon/host-config#status-and-failures).
+
+## GPU holds
+
+The `devices` converger fails an assignment it can never bind at once, so the control plane re-places it instead
+of waiting. The reason travels in `AllocationFailed`.
+
+| Reason | Message | Cause | Fix | Doctor |
+| --- | --- | --- | --- | --- |
+| `node-unprivileged` | `bcd node runs without root and without [helper]: it cannot write /etc/cdi or create hold slices (run bcd node as root, or under bcd helper)` | A host build of `bcd node` running as an ordinary user with no `[helper]` (da60bbd). Such a node also claims no `cdi`, `devices.limits` or `binding.kubernetes` capability in `Hello`, so capacity should not place there | Run it as root, or install with `--unprivileged` | `gpu-binding` (warn) |
+| `device-missing` | The devices it names | A GPU, MIG instance or slot the assignment names is not on the host | Check `bcd status` GPUs and the inventory | `gpu-bus`, `gpus` |
+| `overlap` | The conflicting hold | A device is already held by another allocation, or passed to a VM | Release the other hold | none |
+| `resources-exhausted` | What does not fit | The hold's limits do not fit what the host has left | Re-placed by the control plane | `hugepages`, `cgroups` |
+| `unsupported-binding` | `binding ... is not supported` | A binding this bcd does not implement | Upgrade bcd | none |
+
+Before da60bbd an unprivileged node retried the hold every 30 seconds on systemd's "Access denied" for the slice,
+logging nothing above debug, and the reservation stayed `binding` forever. A log warning `NVIDIA's CDI spec does
+not name held devices` means the vendor spec predates the GPUs; the [container-toolkit](/docs/daemon/host-config#container-toolkit)
+unit regenerates it.
+
+## nvidia-smi errors
+
+bcd reads GPUs through `nvidia-smi`. Doctor's `gpus` check fails with the tool's error and, since f84f1f9, a hint
+for the failures seen on real hosts:
+
+| Error contains | Hint bcd adds | Fix |
+| --- | --- | --- |
+| `Driver/library version mismatch` | The kernel module and user-space libraries differ, usually after a driver upgrade | Reboot, or unload and reload the `nvidia` modules |
+| `couldn't communicate with the NVIDIA driver` | The `nvidia` module is not loaded | `modprobe nvidia`; under Secure Boot the module must be signed by an enrolled key (see `dmesg`) |
+| `No devices were found` | The driver sees no GPU | Compare `lspci -d 10de:` with `dmesg` (`RmInitAdapter failed`, Xid 79) |
+| a timeout or `signal: killed` | `nvidia-smi` did not answer within a minute: a GPU may be wedged (Xid 79 or 119) | `gpu.reset` or a reboot |
+
+Related checks around the GPUs:
+
+| Doctor check | Symptom | Fix |
+| --- | --- | --- |
+| `nvml` (warn) | `nvml: nvidia-smi not found (no NVIDIA driver on this host)` | Install the driver, or ignore on a host without GPUs |
+| `nouveau` (fail) | `nouveau` is loaded and keeps the NVIDIA driver off the GPUs | Blacklist it, rebuild the initramfs, reboot |
+| `gpu-bus` (fail) | More GPUs bound to `nvidia` than `nvidia-smi` sees: one fell off the bus | `gpu.reset` or a reboot; check `dmesg` |
+| `gpu-bus` (warn) | GPUs on the bus with no driver bound, or no driver answering | Install the driver ([nvidia-driver](/docs/daemon/host-config#nvidia-driver)) |
+| `fabric-manager` (fail) | NVSwitches but `nvidia-fabricmanager` inactive: CUDA fails on every GPU | Start it ([fabric-manager](/docs/daemon/host-config#fabric-manager)) |
+| `persistence` (warn) | Persistence mode off | Enable `nvidia-persistenced` |
+| `gpu` (fail) | `row remapping failed (RMA)` or uncorrectable ECC errors | Take the GPU out of service |
+| `gpu-host` (warn) | A WSL 2 paravirtual GPU (`/dev/dxg`) | Expected: no VFIO, `gpu.reset`, MIG or DCGM there |
+
+## KVM and instances
+
+| Symptom | Cause | Fix | Doctor |
+| --- | --- | --- | --- |
+| `the CPU supports virtualization but /dev/kvm is missing: load kvm_intel or kvm_amd (modprobe), and check it is not blacklisted` | The module is not loaded | `modprobe kvm_intel` or `kvm_amd` | `kvm` (warn) |
+| `this is a VM without nested virtualization: ...` | bcd runs in a VM | Enable nested virtualization on its host | `kvm` (warn) |
+| `no VT-x/AMD-V flags: enable virtualization in the firmware setup` | Disabled in firmware | Enable Intel VT-x or AMD SVM | `kvm` (warn) |
+| A non-empty `instances` section fails with `this host runs no instance runtime` | Neither `virsh` nor `cloud-hypervisor` on `PATH`, and no runtime plugin | Install a runtime | `libvirt` (warn) |
+| Instances without disks, user data or network policy | `qemu-img`, `genisoimage`/`xorriso` or `nft` missing | Install them | `qemu-img`, `seed`, `nftables` (fail) |
+| cloud-hypervisor instances do not boot | No `/usr/share/cloud-hypervisor/CLOUDHV.fd` | Install the firmware | `cloud-hypervisor` (warn) |
+| A cloud-hypervisor VMM cannot open `/dev/kvm` | Each VMM runs as its own uid with `DevicePolicy=closed` and `DeviceAllow=/dev/kvm rw`; bcd adds the `kvm` group to the unit only when a `kvm` group exists | Make `/dev/kvm` group `kvm` (the usual udev rule) | none |
+| GPUs cannot be passed to instances | No IOMMU, `vfio-pci` not loaded, or a GPU shares its IOMMU group with a NIC or disk | Enable the IOMMU; `modprobe vfio-pci`; move the GPU or enable ACS | `iommu`, `vfio`, `iommu-groups` |
+| Under `[helper]`, `libvirt` fails | The `bcd` account is in the `libvirt` group, `dynamic_ownership = 0` is missing, or QEMU's user is not in the `bcd` group | Rerun the install script with `--unprivileged`; see [upgrading an unprivileged libvirt host](/docs/daemon/install#upgrading-an-unprivileged-libvirt-host) | `libvirt` (fail) |
+| Under `[helper]`, no instance gets a NIC | `[helper] instance_bridges` is empty | Set the bridges | `cloud-hypervisor` (warn) |
+
+## Helper socket refusals
+
+On a node installed with `--unprivileged`, every privileged operation goes to `bcd helper`. The node only sees the
+answer; the helper's log says why.
+
+| Node sees | Helper logs | Cause | Fix |
+| --- | --- | --- | --- |
+| `helper: not allowed` | `helper: connection refused` reason `uid N gid M is not bcd` | The caller is neither root nor the `[helper] user` with its primary group | Run `bcd node` as that user (the `unprivileged.conf` drop-in) |
+| `helper: not allowed` | reason `the peer does not run an installed bcd binary` | `bcd node` runs from a path other than `[update] entrypoint`, a slot binary or the helper's own binary | Run the installed binary |
+| `helper: malformed request` | `helper: malformed request` | A request with unknown fields: a different build | Restart both units on the same binary |
+| `helper: dial unix ...: no such file or directory` | (nothing) | The helper is not running | `journalctl -u bcd-helper.service`; it may have refused to start (below) |
+
+`bcd helper` refuses to start, and logs to standard error, when:
+
+| Message | Cause | Fix | Doctor |
+| --- | --- | --- | --- |
+| `/usr/local/lib must be a directory root owns that no one else can write (the helper socket lives there)` | A directory on the way to the slots, the socket or the entrypoint is group-writable, such as `root:staff` 2775 on older Debian (c139b9c, 9e71b1f) | `chmod g-w` that directory | `helper` (fail) |
+| `/etc/bcd/config.toml must be a regular file root owns that no one else can write` | The config was given to `bcd`, made group-writable or replaced by a symlink (3fa9021) | `chown root /etc/bcd/config.toml`, `chmod 0640` with group `bcd` | none |
+| `helper.user: user: unknown user bcd` | The account does not exist | Rerun the install script, which creates it | none |
+| `runs as root` | Started without root | Run it from `bcd-helper.service` | none |
+
+Host units through the helper fail when the helper cannot bind them to a node:
+
+| Symptom | Cause | Fix | Doctor |
+| --- | --- | --- | --- |
+| `helper` warns `host units bind to the node the first signed spec names (trust on first use)` | The node joined before `bcd join` kept root's signed join record | Re-join as root to pin it | `helper` (warn) |
+| `root's join record names X, but this machine's identity is Y` | The identity changed without a root join | Re-run the join as root | `helper` (fail) |
+| `bcd helper applies host units unsigned unless the node itself presents a trust bundle ...` | Neither `command_root_sha256` nor the join record names command-signing roots | Pin them with `--command-root-sha256` | `helper` (fail) |
+| `bcd is in the tss group: it can send the TPM any command ...` | An install from between 0ba2a79 and 8870b8d | `gpasswd -d bcd tss`, restart `bcd.service` | `tpm` (fail) |
+
+See [privilege separation](/docs/daemon#privilege-separation) and [signed specs](/docs/daemon/host-config#signed-specs).
+
+## Kubernetes and self-update
+
+| Symptom | Cause | Fix | Doctor |
+| --- | --- | --- | --- |
+| `joining a Kubernetes cluster needs [kubernetes] allowed_clusters in bcd's config ...` | A `k8s-join` unit with no allow-list (9f860ad) | Add the cluster as `https://host:port#sha256:<CA digest>` | `kubernetes` (fail on a joined node) |
+| `joined to ... but the kubelet is not running` | The kubelet stopped | Start it | `kubelet` (fail) |
+| GPUs withdrawn with `ForeignGpuExposure` | Another path hands out GPUs | See [GPU isolation](/docs/daemon/kubernetes#gpu-isolation) | `gpu-isolation` (fail) |
+| `no [update] release_pins: self-update is refused (reinstall to upgrade)` | No release keys pinned | Regenerate the script with `--release-pins` | `update` (warn) |
+| `bcd X failed (...); bcd update --clear-failed lets a rollout retry it` | A version did not confirm and was swapped back | Fix the cause, then `bcd update --clear-failed` | `update` (warn) |
+| `/usr/local/bin/bcd does not link to .../current: bcd.service would not start the current slot` | The install script replaced the entrypoint link with a file | The next self-update adopts it; or relink | `slots` (fail) |
+
+See [self-update](/docs/daemon/install#self-update) and [bcd on Kubernetes](/docs/daemon/kubernetes).

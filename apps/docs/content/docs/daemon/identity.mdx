@@ -1,0 +1,294 @@
+---
+title: Node identity
+metaTitle: bcd node identity, joining, renewal, revocation and TPM node keys
+description: What makes up a bcd node's identity on disk, how bcd join creates it with each attestor, how renewal replaces the key every day, what revocation does on the node, how bcd join --reset recovers, and how node keys live in the TPM.
+icon: KeyRound
+status: experimental
+packages: ['@better-compute/pki', '@better-compute/server']
+sources:
+  - daemon/internal/agent/join.go
+  - daemon/internal/agent/state.go
+  - daemon/internal/agent/renew.go
+  - daemon/internal/agent/nodekey.go
+  - daemon/internal/agent/agent.go
+  - daemon/internal/agent/conn.go
+  - daemon/internal/agent/hostconfig.go
+  - daemon/internal/pki/join.go
+  - daemon/internal/tpm/tpm.go
+  - daemon/internal/tpm/nodekey.go
+  - daemon/internal/tpm/attest.go
+  - daemon/internal/helper/tpmkeys.go
+  - daemon/internal/helper/intent.go
+  - daemon/cmd/bcd/agent.go
+  - daemon/cmd/bcd/main.go
+  - daemon/cmd/bcd/reset.go
+  - daemon/cmd/bcd/tokenfile.go
+  - daemon/cmd/bcd/helper.go
+  - daemon/cmd/bcd/hardware_host.go
+  - daemon/cmd/bcd/hardware_fakehw.go
+  - daemon/cmd/bcd/doctor.go
+  - packages/pki/src/attestors/index.ts
+  - packages/pki/src/attestors/common.ts
+  - packages/pki/src/attestors/provisioned.ts
+  - packages/pki/src/attestors/discovery.ts
+  - packages/pki/src/attestors/x509pop.ts
+  - packages/pki/src/attestors/cloud-iid.ts
+  - packages/pki/src/attestors/tpm.ts
+  - packages/pki/src/attestors/tpm2.ts
+  - packages/pki/src/attestors/join-requests.ts
+  - tests/e2e/bcd-tpm.test.ts
+---
+
+A node's identity is a P-256 key and a short-lived certificate the control plane's JoinService issued for it. bcd
+creates it once with `bcd join`, replaces the key and certificate at 60% of every certificate's lifetime, and uses
+the key for every TLS handshake and every statement the node signs. This page describes the node's side: the files,
+the join, renewal, revocation, recovery with `bcd join --reset`, and node keys held in the host's TPM.
+
+The control plane's side is elsewhere: [joining nodes](/docs/guides/nodes/joining) covers tokens, the join
+transaction and certificates, [attestation](/docs/guides/nodes/attestation) covers each attestor and the TPM proofs,
+and [PKI](/docs/operations/pki) covers the keys and pins behind it all.
+
+<Callout type="warn" title="Real joins, software TPMs only">
+`tests/e2e/bcd.test.ts` joins real bcd binaries (fakehw builds) to a real control plane and gateway over mTLS, with
+renewal. `tests/e2e/bcd-tpm.test.ts` runs a real `bcd join --attestor tpm` and a renewal certified by the AK against
+the dev stack, with `tpmsim`, bcd's software TPM. Every TPM test uses a software TPM: none has run against a hardware
+TPM, a real manufacturer's EK certificate or a real `/dev/tpmrm0`. The round 6 development host has no TPM.
+</Callout>
+
+## What the identity is
+
+Everything lives in the data directory (`data_dir`, default `/var/lib/bcd`):
+
+| File | Mode | What |
+| --- | --- | --- |
+| `identity.json` | 0600 | The identity the verified `JoinResponse` and later renewals established (below) |
+| `node.key` | 0600 | The node key: a PKCS#8 PEM (`PRIVATE KEY`), or, for a key in the TPM, only its record, a PEM block of type `BCD TPM NODE KEY` whose bytes are the 32-byte unique the key is derived from |
+| `node.key.next` | 0600 | The key a renewal is certifying, until its certificate is stored |
+| `journal.db` | 0600 | The command journal; it belongs to one node id, and `bcd node` refuses another node's |
+
+`identity.json` holds:
+
+| Field | Meaning |
+| --- | --- |
+| `nodeId`, `siteId`, `trustDomain`, `role` | Read from the leaf certificate's SPIFFE ID and its `OU=bc-role:<role>` attribute (`node`, `site` or `ramdisk`) |
+| `chain` | The certificate chain, leaf first, DER |
+| `notAfter` | The leaf's expiry |
+| `trustVersion`, `trustRoots`, `trustBundle` | The trust bundle the node holds: its version, command-signing roots and the whole serialized bundle (approver keys for the destructive-batch quorum). No roots means signed intent is not enforced |
+| `signedTrustBundle` | The same bundle as the JoinService key signed it, from a `Welcome`; [bcd helper](/docs/daemon/helper#hostunit) takes host units' roots from it |
+| `serverTime` | The server time high-water mark, mirrored from the journal at each `Welcome`, so a lost journal does not reset it |
+
+The identity outlives a lost journal: a corrupt or wiped journal starts over with a new journal id, but the node keeps
+its key and certificate (see [journal loss](/docs/daemon/failure-modes#journal-loss)).
+
+### Loading it
+
+Every agent mode loads the identity with `LoadState` at start:
+
+1. No `identity.json` is `this node has not joined (run bcd join)`.
+2. A `node.key.next` whose public key the stored leaf certifies is promoted to `node.key` (a renewal stopped after it
+   stored the certificate); any other `node.key.next` is removed (a renewal stopped before).
+3. `node.key` must be the leaf's key. If it is not: `the node key does not match the node certificate; join again:
+   bcd join --reset --yes, then bcd join`. For a TPM key the message adds `the TPM derives another key from node.key
+   (was the TPM cleared?)`, since a cleared owner hierarchy derives another key from the same record.
+
+`bcd doctor`'s `identity` check reports the same: a warning when the node has not joined, a failure for an identity
+that does not load or an expired certificate, each ending with the way back.
+
+## Joining
+
+`bcd join` creates the identity. It runs as root, takes the join credential from one source, and never from a
+command-line argument (a positional argument is refused without being echoed).
+
+| Credential | How | Attestor |
+| --- | --- | --- |
+| A join token | `BCD_JOIN_TOKEN` (unset once read), else the first line of standard input (at most 4 KiB) | `join-token` |
+| A token file | `--token-file PATH`: a regular file, mode 0600 or 0400, at most 4 KiB; deleted once the join succeeds or the machine had already joined (a read-only mount logs a warning instead) | `join-token` |
+| A provisioned token | `--node-id <node>` with a token: the OS a deploy installed joins as that node, and the join fails unless the issued identity is that node | `provisioned` |
+| The TPM | `--attestor tpm`: no token is read or sent (`BCD_JOIN_TOKEN` is dropped; `--token-file` is a usage error) | `tpm` |
+| The kernel command line | `bcd ramdisk` only: the `bc.token` and the site agent's `bc.assertion` | `discovery` |
+
+`--role site` joins a site agent with a site token; the token decides what is allowed. `--server`, the three pin flags
+and `--data-dir` bootstrap a machine that has no `config.toml` from the control plane's well-known document (see
+[joining from the well-known document](/docs/daemon/install#joining-from-the-well-known-document)). bcd produces no
+`x509pop` or `cloud-iid` evidence: those attestors exist in `@better-compute/pki`, but a bcd node whose certificate
+expired offline re-joins with a token, the TPM or `--reset` instead.
+
+### What the join does
+
+`agent.Join` (`daemon/internal/agent/join.go`):
+
+1. **The key.** For a `tpm` join on a host whose node keys use the TPM, the key is made in the attestor's own TPM
+   connection so the AK can certify it; otherwise a key in the host's TPM when there is one, else a PKCS#8 file key
+   (see [node keys in the TPM](#node-keys-in-the-tpm)). Then a PKCS#10 CSR.
+2. **The seal.** A token is sealed to the JoinService encryption key, which must match `join_encryption_key_pin`
+   (from `join-encryption.jwk` beside the config, or the well-known document with `--server` when that file is
+   absent). The seal is bound to the CSR's SHA-256.
+3. **`Join`.** Sent over TLS pinned to the serving CA (`serving_ca_spki_pin`), with the CSR, the hardware claims
+   (product UUID and serials, permanent MACs, GPU UUIDs, hostname, boot id), the attestor, its evidence, the daemon
+   version and the role. Retryable failures back off, up to 20 attempts; a gateway's `grpc-retry-pushback-ms` is
+   waited out exactly.
+4. **The answer.** `pki.OpenJoinResponse` verifies the signature under `join_signing_key_pin`, that `csr_sha256` is
+   this request's, that the leaf certifies this key, the SPIFFE ID and the role. A deferral is answered with the same
+   CSR: a `JoinChallenge` for this attestor (at most 3 rounds, refused once its `not_after` passed), or a `JoinPending`
+   approval, waited out (at least one second) and, for an attestor with a challenge, followed by a fresh round.
+5. **Root's record.** On a node with `[helper]`, when `bcd join` runs as root, the verified `JoinResponse` is written
+   as signed to `/var/lib/bcd-hostconfig/join-response.pb` (0600) before the identity (a966cd4). A failed record fails
+   the join and leaves no identity. bcd helper takes the node id and the command-signing roots for host units from it.
+6. **Persist.** If the data directory held another node's identity, its `journal.db` is moved aside as
+   `journal.db.<oldNode>-<unix time>`. A stale `node.key.next` is removed, then `node.key` and `identity.json` are
+   written.
+7. **Hand over.** Under `[helper]`, root `Lchown`s `identity.json` and `node.key` to the `[helper] user`, so the
+   unprivileged `bcd node` can read them (b4fcc2e); a name swapped for a symlink changes only the link.
+
+It prints `joined as <node> (site <site>, role <role>); certificate valid until <time>`. On a machine whose identity
+loads, `bcd join` reads no credential, answers `already joined as <node> (site <site>, role <role>)` and exits 0, so a
+join unit can run on every boot; a different `--node-id` is refused. Every refusal from the control plane is the same
+`ACCESS_DENIED` ("Join refused"); the reason is only server-side (see [refusals](/docs/guides/nodes/joining#refusals)).
+
+### The pins
+
+| `config.toml` key | Protects |
+| --- | --- |
+| `serving_ca_spki_pin` | The TLS connection to the gateway: never system roots |
+| `join_encryption_key_pin` | The key a token is sealed to |
+| `join_signing_key_pin` | The `JoinResponse` signature, trust bundles, and root's join record under the helper |
+| `command_root_sha256` (optional) | Command-signing roots for host units under the helper (see [signed specs](/docs/daemon/host-config#signed-specs)) |
+
+The install script writes them from the PKI bundle; a malformed pin stops bcd from starting.
+
+## Renewal
+
+A node certificate lasts at most 24 hours (a ramdisk's at most 2). The agent renews at 60% of the leaf's lifetime
+(`renewFraction`), with `Renew` on the gateway, which relays to JoinService. `renewOnce`:
+
+1. **Chooses the next key.** If the leaf names a TPM AK (`urn:bc:tpm-ak:`, written after a certified `tpm` join;
+   d94f1f3), bcd loads that AK alone, checks its TPM name is the one the certificate names, and makes the next key in
+   that TPM. Otherwise the next key goes into the TPM when the host has one, so a file-key node moves into the TPM
+   here, else it is a file.
+2. **Writes `node.key.next` first**, then builds the request: a new CSR, the current chain, the client time and a
+   proof of possession by the current key (purpose `renew-pop`).
+3. **Attaches the AK's proof** for a certificate that names one: `key_attestation` with the AK's public area, the new
+   key's public area, and the AK's `TPM2_Certify` of it over `sha256(csr)`.
+4. **Checks the answer**: the new leaf names the same node, site, trust domain and role, and certifies the new key.
+5. **Stores in order**: `node.key.next` again (in case something removed it), then `identity.json`, then renames
+   `node.key.next` over `node.key`. A crash at any point leaves a key and certificate that match. The new state keeps
+   the trust version, roots, bundle and server time. The old key is unloaded 5 minutes later, once nothing can still
+   be signing with it.
+
+A failed renewal is logged as `renewal failed` with the attempt and `expiresIn`, and retried with backoff from 30
+seconds to 10 minutes, or exactly when a busy gateway says (it allows 6 renewals per node and hour). There is no
+downgrade for a certificate that names an AK: when the TPM is unavailable, or derives another AK, the renewal fails
+before anything is sent, and keeps failing until the certificate expires.
+
+| At renewal | Message |
+| --- | --- |
+| The TPM cannot be opened | `renewal: the certificate's node key is in the TPM, which is unavailable: ...` |
+| Another AK | `renewal: this TPM's attestation key is not the one the certificate names (another TPM, or its endorsement seed changed): the certificate cannot be renewed here; join again: bcd join --reset --yes, then bcd join` |
+| No next key in the TPM | `renewal: the next node key in the TPM: ...` |
+| No certification | `renewal: the TPM's attestation key certifying the next key: ...` |
+| An answer for another identity | `renewal: the certificate is for <site>/<node> (<role>), not ...` |
+| An answer for another key | `renewal: the certificate does not certify the new key` |
+
+The control plane's checks and refusal reasons are on [renewal](/docs/guides/nodes/joining#renewal) and [renewing a
+TPM-held key](/docs/guides/nodes/attestation#renewing-a-tpm-held-key). A certificate that expired cannot be renewed;
+see [joining again](#joining-again-with---reset).
+
+## Revocation
+
+The control plane revokes a node's certificates with `nodes.revokeIdentity`, by deleting the node, or on its own for a
+certificate that looks cloned (see [revoking a node's
+identity](/docs/guides/nodes/operating-nodes#revoking-a-nodes-identity)). A gateway with a revocation feed then sends
+the node's live session a `RevocationNotice` and closes it.
+
+On the node, the notice is logged as `certificate revoked` with its reason, the agent stops (`ErrRevoked`), and
+`bcd node` exits 1 with `agent: this node's certificate was revoked`. It does not redial with that certificate, and
+nothing on the node deletes or renames the identity. The revoked certificate cannot renew, re-join or open a session
+again (the gateway answers `UNAUTHENTICATED`), and a later identity generation means older certificates stay dead. The
+machine comes back only by joining again with fresh evidence: a new token, or the TPM, after `bcd join --reset`.
+
+## Joining again with --reset
+
+An identity that loads but no longer works (expired, revoked, refused at renewal, naming an AK this TPM no longer has)
+makes `bcd join` answer `already joined` forever. Since a1c1a46, `--reset` moves it aside first:
+
+```bash
+# as root: show what would move (moves nothing, exits 2)
+bcd join --config /etc/bcd/config.toml --reset
+# move it aside and join again, with a new token on standard input
+bcd join --config /etc/bcd/config.toml --reset --yes < join-token.txt
+# or with the TPM
+bcd join --config /etc/bcd/config.toml --reset --yes --attestor tpm
+```
+
+| Behaviour | Detail |
+| --- | --- |
+| Root only | Outside fakehw builds a non-root `--reset` fails with `bcd join --reset: run it as root` |
+| What moves | `identity.json`, `node.key`, `node.key.next` and `journal.db`, whichever exist, each renamed `<name>.reset-<UTC time>` (for example `node.key.reset-20260926T114200Z`). Nothing is deleted |
+| Without `--yes` | Prints the files, that the following join makes a new key and joins again (a new node unless the attestor proves this machine and reclaims it), and exits 2 |
+| Then | The usual join, with the usual credential; if it fails, the identity stays moved aside and a later `bcd join` joins |
+
+Whether the machine comes back as the same node depends on the attestor. `tpm` with the same EK and `provisioned`
+reclaim their node; a token join of a known machine needs a token with `allowReclaim`, or the old node deleted first.
+The cases are on [joining again with --reset](/docs/daemon/install#joining-again-with---reset) and [recovering a node
+whose TPM changed](/docs/guides/nodes/attestation#recovering-a-node-whose-tpm-changed). Under `[helper]`, restart
+`bcd-helper.service` and `bcd.service` afterwards; the join also rewrites root's join record, so the helper binds host
+units to the new node.
+
+## Node keys in the TPM
+
+bcd keeps the node key in the host's TPM when there is one (965c14d, 50e18f9, 0ba2a79). Whatever holds it, the key is
+a Go `crypto.Signer`, and nothing on the wire changes: the same P1363 signatures and the same `kid`.
+
+| Property | Value |
+| --- | --- |
+| Template | `tpm.NodeKeyTemplate`: an unrestricted P-256 signing key, `fixedTPM`, `fixedParent`, `sensitiveDataOrigin`, `userWithAuth`, `noDA`, `sign`, a primary of the owner hierarchy derived from a 32-byte unique |
+| Storage | Nothing is persisted in the TPM. `node.key` keeps the unique, and the key is derived again at every load |
+| Signatures | ECDSA with the digest's hash (SHA-256, -384 or -512) |
+| Device | `/dev/tpmrm0`, the kernel's resource manager, opened once per process so the keys' handles stay valid together. A fakehw build uses its software TPM only with `BCD_FAKEHW_TPM_KEYS=1` |
+| When | Every new key: at `bcd join` and at every renewal. When the TPM cannot hold a key, bcd logs a warning and makes a file key instead, except at the renewal of a certificate that names an AK, which fails |
+| What it protects | The key cannot be copied off the machine, but root on the node can derive and use it: non-exportable, not root-proof |
+
+`internal/tpm` is bcd's own TPM 2.0 client (f61b32d): it builds the TPM's command format directly over the transport,
+with no library, and sends only `CreatePrimary`, `ReadPublic`, `NV_ReadPublic`, `NV_Read`, `StartAuthSession`,
+`PolicySecret`, `ActivateCredential`, `Quote`, `PCR_Read`, `Sign`, `Certify` and `FlushContext`. The same package
+builds the `tpm` attestor's evidence (EK, AK, the EK certificate from NV index `0x01C00002`) and its round-2 answer;
+see [bcd with its TPM](/docs/guides/nodes/attestation#bcd-with-its-tpm).
+
+### Through bcd helper
+
+The kernel's resource manager filters no command, so whoever can open `/dev/tpmrm0` could change the hierarchies'
+authorization, clear the TPM or trip its lockout. Since 8870b8d (security review 3) an unprivileged `bcd node` never
+opens it:
+
+| Process | Opens the TPM |
+| --- | --- |
+| `bcd join` (root) | Itself, `[helper]` or not |
+| `bcd node` as root (no `[helper]`) | Itself |
+| `bcd node` under `[helper]` | Never: `agent.TPM` is `helper.TPMKeys`, the helper's `tpm.*` operations |
+| `bcd helper` (root) | Itself, for the node |
+
+The node sends `tpm.nodekey`, `tpm.sign`, `tpm.ak`, `tpm.certify` and `tpm.release`, each naming a key by its unique,
+with a 30-second timeout. It checks every answer: the derived key must have the node-key attributes, every signature
+must verify against the key's public half (`the helper's signature is not the node key's` otherwise), and a
+certification must come from the AK the helper announced (`the helper certified with another AK`). What the helper
+checks is on [bcd helper](/docs/daemon/helper#tpm). The install script no longer puts `bcd` in the `tss` group, and
+`bcd doctor`'s `tpm` check fails while it is still a member.
+
+### Seeing where the key is
+
+| Tool | Shows |
+| --- | --- |
+| `bcd status` | `node key in the TPM` or `node key a file` on its identity line; `nodeKey` (`tpm` or `file`) in `--json` |
+| `bcd doctor` `node key` | `ok` in the TPM; `ok` for a file key on a host without a TPM; `warn` for a file key on a host with one ("the next renewal moves it into the TPM") |
+| The control plane | `nodeKey: 'tpm'` in `node.joined` and the audit row only for a certified `tpm` join, and the `urn:bc:tpm-ak:` statement in its certificates; every other node is `unattested`, and the control plane has only bcd's word |
+
+## What the tests cover
+
+| Test | Covers |
+| --- | --- |
+| `internal/agent` join, state and renewal tests | Deferrals, challenges, verification refusals, the next-key promotion and discard, `TestRenewCertifiedByTheAK` against `tpmsim` (no TPM or another AK fails before any request) |
+| `TestJoinReset`, `TestJoinHandsTheIdentityToTheNode` (`cmd/bcd`) | The dry run, the move (journal included), no identity loading afterwards, and the hand-over to the helper's user (as root) |
+| `internal/tpm` `TestTSContract` | bcd's evidence and answer against the TypeScript `tpmAttestor` through fixtures, both directions |
+| `internal/helper` `TestHelperTPMKeys` | The `tpm.*` operations against `tpmsim` |
+| `tests/e2e/bcd.test.ts` | Real joins, sessions and renewal of fakehw bcd binaries against the real gateway |
+| `tests/e2e/bcd-tpm.test.ts` | A tokenless `bcd join --attestor tpm` with an EK certificate from a test manufacturer root, a rejoin as the same node, and a renewal certified by the AK, all on `tpmsim` |

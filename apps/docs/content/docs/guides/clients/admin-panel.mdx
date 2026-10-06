@@ -1,0 +1,436 @@
+---
+title: Admin panel
+metaTitle: The operator admin panel (apps/admin)
+description: The operator panel in apps/admin, a keyboard-first workspace over capacity, the fleet and the control plane that runs on a simulated fleet or, through a loopback-only proxy, on a real compute API as the signed-in operator.
+icon: Gauge
+status: experimental
+packages: ['@better-compute/console-kit']
+sources:
+  - apps/admin/README.md
+  - apps/admin/package.json
+  - apps/admin/next.config.mjs
+  - apps/admin/vitest.config.ts
+  - apps/admin/.gitignore
+  - apps/admin/lib/upstream.ts
+  - apps/admin/lib/session.ts
+  - apps/admin/lib/session-key.ts
+  - apps/admin/lib/throttle.ts
+  - apps/admin/lib/redirect.ts
+  - apps/admin/lib/methods.ts
+  - apps/admin/lib/api.ts
+  - apps/admin/lib/journal.ts
+  - apps/admin/lib/modules.ts
+  - apps/admin/lib/data/capacity.ts
+  - apps/admin/lib/data/fleet-live.ts
+  - apps/admin/lib/data/topology.ts
+  - apps/admin/app/api/session/route.ts
+  - apps/admin/app/api/upstream/[...path]/route.ts
+  - apps/admin/app/api/upstream/status/route.ts
+  - apps/admin/app/api/upstream/health/route.ts
+  - apps/admin/app/signin/page.tsx
+  - apps/admin/app/(admin)/page.tsx
+  - apps/admin/components/shell/connection.tsx
+  - apps/admin/components/shell/connection-panel.tsx
+  - apps/admin/components/shell/sign-in-form.tsx
+  - apps/admin/components/shell/settings-page.tsx
+  - apps/admin/components/shell/workspace.tsx
+  - apps/admin/components/overview/module.ts
+  - apps/admin/components/overview/control-plane-page.tsx
+  - apps/admin/components/overview/live-vitals.tsx
+  - apps/admin/components/capacity/module.ts
+  - apps/admin/components/capacity/data.tsx
+  - apps/admin/components/capacity/live.ts
+  - apps/admin/components/capacity/source-notice.tsx
+  - apps/admin/components/capacity/pages/scenarios.tsx
+  - apps/admin/components/fleet/module.ts
+  - apps/admin/components/fleet/live.ts
+  - apps/admin/components/fleet/use-fleet.ts
+  - apps/admin/components/fleet/live-notice.tsx
+  - apps/admin/components/fleet/commands.tsx
+  - apps/admin/components/fleet/activity-page.tsx
+  - apps/admin/tests/upstream.test.ts
+  - apps/admin/tests/signin.test.ts
+  - apps/admin/tests/session.test.ts
+  - apps/admin/tests/foundation.test.ts
+  - apps/admin/tests/fleet.test.ts
+  - apps/admin/tests/capacity-sim.test.ts
+  - apps/admin/tests/capacity-model.test.ts
+  - apps/admin/tests/capacity-diagnose.test.ts
+  - apps/admin/tests/capacity-ask.test.ts
+  - apps/admin/tests/capacity-watch.test.ts
+  - .claude/launch.json
+---
+
+`apps/admin` is a web panel for the people who run a better-compute fleet: GPU capacity and bookings, nodes and
+workloads, rollouts and destructive batches, and the control plane, all in one workspace with dashboards, a command
+palette and keyboard shortcuts. It is a Next.js 16 app (`@better-compute/admin`, private, not published), styled with
+BoardUI components copied from `apps/docs` in the docs' "instrument" theme (d0e4e8f).
+
+It differs from the [console](/docs/guides/clients/console) in where it lives and whom it serves. The console hosts
+Better IAM and Better Compute in its own process and is the UI for tenants and operators alike. The admin panel
+hosts neither: it is a separate server that talks to a compute API somewhere else, through its own server-side
+proxy, and it is built for platform operators. By default it does not talk to any API at all; it runs on a
+deterministic simulated fleet.
+
+<Callout type="warn" title="Development-grade, tested against stubs">
+  The admin panel has unit tests over its pure logic and its server routes, with `fetch` stubbed (see
+  [What is tested](#what-is-tested)). No test in the repository runs it against a real compute API or a real
+  Better IAM, and its tests are not part of the root `tests/**` suite. Its auth state lives in one process's memory
+  (see [Limits of the auth state](#limits-of-the-auth-state)). Run one instance, on loopback.
+</Callout>
+
+## Run it
+
+The scripts in `apps/admin/package.json` bind to `127.0.0.1` on port 4200:
+
+| Script | Runs |
+| --- | --- |
+| `dev` | `next dev --hostname 127.0.0.1 --port 4200` |
+| `build` | `next build --webpack` (the README notes Turbopack's build trips on `next/font`) |
+| `start` | `next start --hostname 127.0.0.1 --port 4200` |
+| `typecheck` | `tsc --noEmit` |
+| `test` | vitest from the repository root with `apps/admin/vitest.config.ts` |
+
+```bash
+cd apps/admin
+node node_modules/next/dist/bin/next dev --port 4200   # as the README shows; pnpm dev binds 127.0.0.1
+pnpm --filter @better-compute/admin test
+pnpm --filter @better-compute/admin build
+```
+
+`next.config.mjs` reads `NEXT_DIST_DIR` for the output directory (default `.next`) so that concurrent dev servers
+and builds do not share one; `.claude/launch.json` starts the panel with `NEXT_DIST_DIR=.next-admin` on port 4200.
+Open `http://127.0.0.1:4200/`.
+
+With no further configuration the panel shows the simulation: 5 sites and 9 pools totalling 440 nodes
+(`lib/data/topology.ts`), generated as a pure function of time. Because the data is a function of the clock, the
+clock in the top bar can be paused and scrubbed back 7 days ("time travel"), and every view replays that moment.
+
+## Connect a compute API
+
+Live mode is configured **on the admin server**, never in the browser, so the proxy cannot be pointed elsewhere
+from a page (2dacaf8). `upstreamConfig()` reads the environment first:
+
+| Variable | Meaning |
+| --- | --- |
+| `ADMIN_COMPUTE_URL` | The compute API base including its base path, e.g. `http://127.0.0.1:3300/api/compute`. Must be `http` or `https`; a URL with a username, password, query or fragment is refused (live mode stays off) and a trailing `/` is trimmed. |
+| `ADMIN_IAM_URL` | Better IAM's API base for operator sign-in. Default: the compute URL's origin plus `/api/iam`. |
+| `ADMIN_COMPUTE_TENANT` | The tenant views default to and the tenant operators sign in to when they leave the organization field empty (normally the platform's root tenant). |
+| `ADMIN_SESSION_SECRET` | At least 32 characters; seals operator sessions. Unset in development (`NODE_ENV` not `production`), a random key is written to `apps/admin/.admin-secret` (mode `0600`, gitignored). Unset or short in production: no sign-in. |
+| `ADMIN_COMPUTE_TOKEN` | Optional. A bearer for the shared connection signed-out viewers read through. Give it a read-only role. |
+| `ADMIN_ALLOWED_HOSTS` | Comma-separated `host` or `host:port` names to accept besides loopback, for a deployment behind a reverse proxy. |
+
+When `ADMIN_COMPUTE_URL` is unset, the panel reads `apps/admin/.upstream.json` from its working directory instead
+(gitignored), with the keys `url`, `iamUrl`, `tenantId` and `token`:
+
+```json title="apps/admin/.upstream.json"
+{ "url": "http://127.0.0.1:3300/api/compute", "tenantId": "ten_…" }
+```
+
+Then pick **Live API** under Settings → Connection. The choice is stored per browser (`bc-admin:workspace` in
+localStorage) and takes effect only while the API answers; until then, and whenever the status probe fails, the
+workspace source stays `simulated`. Time travel always replays the simulation: live data is always "now".
+
+## The security model
+
+Three routes on the admin server stand between the browser and the API. Each starts with the same caller check,
+`callerAllowed` (ab71e52):
+
+- the `Host` header must be a loopback name (`localhost`, `127.0.0.1`, `[::1]` or `*.localhost`) or one listed in
+  `ADMIN_ALLOWED_HOSTS`, which stops other machines on the network and DNS rebinding;
+- an `Origin` header, when present, must name that same host.
+
+The POST routes also require `x-better-compute: 1`, which a cross-site form cannot send, the same CSRF boundary
+the compute API uses ([the HTTP API](/docs/guides/clients#the-http-api)).
+
+| Route | Does |
+| --- | --- |
+| `POST /api/upstream/<group>/<method>` | The proxy. Forwards one method to `ADMIN_COMPUTE_URL` with the JSON body. |
+| `GET /api/upstream/status` | Whether an API is configured, whether `system/version` answers (4 s timeout) and its latency, and who the admin acts as. Never returns a token. |
+| `GET /api/upstream/health` | The API's public `GET {base}/health`, with the round trip measured from the admin server. |
+| `POST`, `DELETE /api/session` | Operator sign-in and sign-out against Better IAM. |
+
+### The proxy
+
+`POST /api/upstream/<path>` refuses, in order:
+
+| Answer | When |
+| --- | --- |
+| `403 ACCESS_DENIED` | the caller check fails or `x-better-compute: 1` is missing |
+| `503 NOT_CONFIGURED` | no compute API is configured |
+| `400 INVALID_INPUT` | the path is not a method path (`group/method`, two to four lowerCamel segments) |
+| `403 READ_ONLY` | no operator is signed in and the method is not a read (below) |
+| `413 INVALID_INPUT` | the request body is over 1 MiB |
+| `400 INVALID_INPUT` | the body is not JSON |
+| `502 UPSTREAM_UNREACHABLE` | the API did not answer; the message has any URL replaced with `<url>` |
+
+Otherwise it POSTs to `{ADMIN_COMPUTE_URL}/{path}` with `x-better-compute: 1`, no redirects, a 15 s timeout, and
+the bearer described below. It passes back the API's status, JSON envelope and any `Retry-After` header. An answer
+over 8 MiB becomes a `502 INVALID_RESPONSE`; an answer without JSON keeps its status with an `INVALID_RESPONSE`
+error envelope; a 204, 205 or 304 status becomes a 502.
+
+### Read methods and writes
+
+Signed out, the proxy forwards only **read methods**, decided by name in `lib/methods.ts`: the method's last
+segment must be one of `get`, `list`, `summary`, `version`, `status`, `timeline`, `preview`, `history`, `diff`,
+`show`, `describe`, `catalog`, `search`, `find` or `estimate`, optionally followed by more words (`listSshCerts`,
+`getPolicy`), and none of those words may be a write word such as `Or`, `And`, `Create`, `Delete`, `Set`, `Lock`,
+`Revoke` or `Reserve`. So `capacity/preview` and `quotas/get` are reads, and `getOrCreate`, `listAndPrune` and
+`findAndLock` are not.
+
+This is a name check, not authorization. The README and the code both say so: give `ADMIN_COMPUTE_TOKEN` a read-only
+role, because the compute API's own decision is the real boundary.
+
+### Who the proxy acts as
+
+| State | Bearer sent upstream | Methods forwarded |
+| --- | --- | --- |
+| Signed out, no `ADMIN_COMPUTE_TOKEN` | none | reads only; public methods such as `system/version` answer, others are refused by the API |
+| Signed out, `ADMIN_COMPUTE_TOKEN` set | the shared token | reads only |
+| Operator signed in | the operator's own Better IAM session token | every method |
+
+A signed-in operator's calls are authorized and audited by the compute API as that person (4392bc3); the shared
+token is never used for a change. The status route reports this as `readOnly`, `writable` and `operator` (identity
+id, name, email, expiry), and Settings → Connection shows it as "Acting as": the operator with **read & write**, or
+"shared connection" or "anonymous (public methods)" with **read-only** and a sign-in link.
+
+### Operator sign-in
+
+`/signin` asks for an optional organization, an email and a password. `POST /api/session`:
+
+1. Requires the caller check and `x-better-compute: 1`; beyond loopback, also https (checked on the request URL or
+   `x-forwarded-proto: https`), so passwords and cookies never cross the network in the clear.
+2. Requires the browser's session key (below), a configured API and a usable session secret.
+3. Resolves the tenant: empty means `ADMIN_COMPUTE_TENANT`; a `ten_…` id is used as is; a slug is looked up with
+   Better IAM's `tenants/lookup`. An unknown organization answers like wrong credentials.
+4. Calls Better IAM `auth/signIn`. Wrong email, wrong password and unknown account all answer the one message "Those
+   credentials did not work." Failures count per organization and email: after 10 in 15 minutes the account is
+   refused with `429` until the window ends.
+5. If Better IAM asks for a second factor, the admin seals the challenge (tenant, challenge, the browser key's hash,
+   a 5-minute expiry) and returns it; when an email code is available it calls `auth/requestMfaCode`. The code step
+   calls `auth/verifyMfa`. A challenge takes at most 5 wrong codes and signs in once. An account that must first
+   enroll a second factor is told to do that in the console.
+6. With a session token, it calls `auth/getSession` and seals the operator session: the token, identity id, tenant,
+   name, email and an expiry of the session's lifetime capped at 12 hours (and at its idle expiry).
+
+The sealed session goes into an HttpOnly, `SameSite=Strict`, `Path=/` cookie named `bc_admin_session`, or
+`__Host-bc_admin_session` with `Secure` on https. Sealing is AES-256-GCM under a SHA-256 of `ADMIN_SESSION_SECRET`,
+with the purpose (`session` or `mfa`) bound in as associated data, so a session cannot pass as a challenge or the
+reverse. The browser never sees the bearer.
+
+Cookies are not isolated by port, so on `localhost` every local server the browser visits receives this cookie. The
+cookie alone is therefore not a session (4fc4afc): at each sign-in the page makes a random key, keeps it in its own
+origin's localStorage (`bc-admin:session-key`), and sends it as `x-bc-session-key` on every call to `/api/session`
+and `/api/upstream`. The sealed payload holds the key's SHA-256, and a request opens a session only when one of its
+cookies (any of them, under either name) opens and matches that hash. A copied cookie replayed by another local
+server opens nothing.
+
+`DELETE /api/session` signs out every session cookie in the request that opens, with or without the key. Each is
+revoked in the admin until it expires, ended at Better IAM with `auth/signOut`, and the cookies are cleared. If
+Better IAM could not be reached, the answer says the session there ends when it expires.
+
+After sign-in, `/signin?next=…` returns only to a path on the admin itself: `safeNext` refuses anything that does not
+start with a single `/`, contains control characters, spaces or backslashes, or resolves to another origin, and
+falls back to `/`.
+
+### Limits of the auth state
+
+The sign-in throttle, the record of used MFA challenges and the sign-out denylist live in the admin process's
+memory (cb8f618). A restart forgets them, and several instances behind one name do not share them. Run one instance,
+and treat Better IAM's revocation as the real sign-out. The proxy route's own comment adds that the caller check is
+not operator authentication: put real authentication in front before exposing the admin beyond loopback.
+
+## How the browser calls the API
+
+`lib/api.ts` exposes the proxy as `api.$request(path, input)`, the shape of console-kit's `ComputeRequester`, so
+console-kit's view helpers can run on it. Errors come back as `ApiError` with the API's `code`, `message` and
+`details`. `useApi(path, input, { enabled, refreshMs })` is a React hook over it.
+
+Two pieces of connection state are shared by every page:
+
+- `ConnectionProvider` probes `/api/upstream/status` on load, every 30 s and on demand; the status bar, Settings and
+  the live views read `status.configured`, `status.ok`, `status.tenantId` and `status.writable` from it.
+- The change journal ("Your changes", 40fae79): every call that is not a read is recorded with its outcome in
+  localStorage (`bc-admin:journal`, the last 100), reachable from the operator menu and ⌘K. It keeps only
+  identifying input fields (ids, names, `reason`, `tenant`, `pool`, `site`; at most 6, each cut at 120 characters)
+  and drops any field whose name looks like a secret. A `READ_ONLY` refusal is not recorded. The compute API's
+  [audit log](/docs/guides/events/audit) stays the record.
+
+Settings → Connection also has **Try a method**: a method path and JSON input sent through the same proxy, with the
+answer or error and its time. It is bound by the same read-only rule.
+
+## Modules
+
+Everything the shell shows comes from `lib/modules.ts`. A module is one descriptor (`AdminModule`) that contributes
+navigation, dashboard widgets, palette commands, search results, peeks (a compact side sheet for one entity),
+status-bar readouts, attention items and watch describers. Three modules are installed: Overview, Capacity and
+Fleet. An operator can hide Capacity or Fleet per browser in Settings → Installed modules (3e53bf8); its pages leave
+the sidebar, palette, search and widget catalog and its alerts leave the queue, but its pages still resolve and its
+peeks still open from other modules. The Overview cannot be hidden.
+
+Each page below says what it reads in live mode. "Simulated only" means the page always shows the simulation, even
+with Live API selected.
+
+### Overview
+
+| Page | Path | Shows | Live mode |
+| --- | --- | --- | --- |
+| Overview | `/` | Dashboards of widgets from every module (presets plus your own; drag, resize, keyboard arrange, share links, JSON export and import), a "Since you were away" digest, and a comparison digest while comparing with a past moment | widgets that declare `live` read the API; the rest say "sim" |
+| Needs attention | `/attention` | The operator queue: platform items plus every module's attention items, most severe first, grouped by kind | each module's items come from its live data; nothing until the first answer |
+| Control plane | `/control-plane` | API, Better IAM bridge, database, workers, outbox and one gateway per site, with latency and throughput | simulated, except the **Live vitals** panel, which polls `/api/upstream/health` every 5 s (round trip, the database latency the API reports, share answered) and shows the server name and version from the status probe (6e76141) |
+| Settings | `/settings` | Workspace preferences, dashboards export and import, installed modules, and the Connection panel | n/a |
+
+Overview widgets: Fleet KPIs, Utilization, Needs attention, Fleet wall, Control plane, Sites, Activity, Watching,
+Notes and Power. Only Fleet KPIs, Watching and Notes declare live support.
+
+### Capacity
+
+The capacity module (c951695) covers pools, bookings over time, reservations, quotas, usage and flavors. In live mode
+(324b8b4) it builds one snapshot for the connected tenant (`status.tenantId`) and refreshes it every 15 s while a
+view reads it:
+
+| Call | Used for |
+| --- | --- |
+| [`pools/list`](/docs/reference/api/pools) | the pools |
+| [`capacity/summary`](/docs/reference/api/capacity) | GPU totals per pool and model |
+| [`reservations/list`](/docs/reference/api/reservations) | `scope: 'all'`, 200 a page, at most 10 pages (2,000) |
+| [`quotas/get`](/docs/reference/api/quotas) | quota rows |
+| [`usage/list`](/docs/reference/api/usage) | the last 30 days, one day at a time newest first, 500 a page, capped at 10,000 windows |
+| [`flavors/list`](/docs/reference/api/flavors) | per pool of class `vps-host` or `provider`; a failure gives that pool no flavors |
+| `capacity/timeline` | per pool on demand, cached 60 s, split into calls of at most 7 days and 336 buckets |
+
+When the reservation or usage caps are hit, or usage fails, the page says the data is partial. A failed snapshot shows
+the API's reason with **Use the simulation**. In live mode tenants, identities, offers, prices and node placement are
+not loaded: the snapshot has only the connected tenant.
+
+| Page | Path | Shows and does |
+| --- | --- | --- |
+| Capacity | `/capacity` | KPIs, the booking heatmap per pool and hour (history and ahead; drill into a cell, drag to plan), GPU models, runway, insights |
+| Pools | `/pools`, `/pools/[poolId]`, `/pools/compare` | each pool's capacity, schedule, tenants and policy; a week of bookings; pools side by side |
+| Reservations | `/reservations` | every booking as a table or a Gantt timeline; a drawer with **Extend**, **Release** and **Cancel** (and bulk release or cancel); "Why it's waiting" for a pending reservation (6267a60) |
+| Plan a reservation | `/reservations/new` | the planner: a shape, pool and window, previewed, then created; other shapes of the same GPU count dry-run |
+| What-if | `/capacity/scenarios` | maintenance, expansion or a burst evaluated against the current book; a maintenance plan can **Cordon these N now** through the fleet's cordon command |
+| Tenants | `/capacity/tenants`, `/capacity/tenants/[tenantId]` | who holds what, ceilings, bookings ahead and spend |
+| Quotas | `/quotas` | tenant by pool ceilings and use, an editor, and right-sizing suggestions |
+| Usage & spend | `/usage` | metered usage priced at list, by tenant, project, pool or meter, with a CSV export |
+| Report | `/capacity/report` | a capacity report as a page and as Markdown to copy |
+| Flavors | `/flavors` | instance and sandbox shapes |
+
+Capacity writes, with the API call each makes in live mode:
+
+| Action | Call |
+| --- | --- |
+| Preview a placement | `capacity/preview` (a read: allowed signed out) |
+| Create a reservation | `reservations/create` with an `admin-…` idempotency key |
+| Release, cancel | `reservations/release`, `reservations/cancel` |
+| Extend | `reservations/extend` with `by` in ms; an answer with `extended: false` is shown as "Can't extend by that much", with when the GPUs are free until |
+| Set a quota | `quotas/set` |
+
+Before acting, `useCapacityActions` refuses with a toast and no dialog while the clock is in the past, while live
+mode has no tenant yet, or while signed out in live mode (f38fab8). Live, destructive actions ask for a reason "kept
+in the audit log". A `READ_ONLY` answer means the session ended meanwhile: the panel re-probes the connection and
+says "Your sign-in has ended", adding for bulk actions that anything done before it ended is kept (a5b5924). The
+planner's search, `earliestFit`, `timelineView`, `usageCsv` and `quotaHint` come from
+[console-kit](/docs/guides/clients/console#console-kit).
+
+The palette also answers capacity questions: typing a shape such as `16 h200 3d` lists the pools where it fits soonest,
+each opening the planner prefilled (0acbc3d).
+
+### Fleet
+
+The fleet module (e2030b8) covers nodes, GPUs, workloads, the metal lifecycle and operations. In live mode (0d3bfed)
+one poller serves every fleet view for the connected tenant, every 15 s while something subscribes. Each group is
+optional: a module the server does not mount answers an error and only that part stays empty, named in the page's
+live notice.
+
+| Call | Input |
+| --- | --- |
+| [`nodes/list`](/docs/reference/api/nodes#list) | 50 a page, every page up to 40 (2,000 nodes) |
+| [`instances/list`](/docs/reference/api/instances) | first 200 |
+| [`sandboxes/list`](/docs/reference/api/sandboxes) | first 200 |
+| [`sandboxTemplates/list`](/docs/reference/api/sandbox-templates) | first page |
+| [`sandboxVolumes/list`](/docs/reference/api/sandbox-volumes) | first page |
+| [`rollouts/list`](/docs/reference/api/rollouts) | first page |
+| [`commandBatches/list`](/docs/reference/api/command-batches) | first page |
+| [`fleet/status`](/docs/reference/api/fleet) | drift |
+
+Live nodes are mapped without inventing data (`lib/data/fleet-live.ts`): health comes from connectivity, provision
+state and NoSchedule reasons (cordons, maintenance and taints do not count as faults), and the fields the list does
+not carry (GPU telemetry, labels, rack placement, daemon version, CPU and memory) are empty and shown as a dash. In
+live mode the GPU pages therefore have no GPUs, the rack view has no placement, the metal page has no PXE discoveries
+or workflows, and the Activity stream has no API events (the panel does not call the event stream).
+
+| Page | Path | Shows |
+| --- | --- | --- |
+| Nodes | `/nodes`, `/nodes/[nodeId]` | every machine: health, GPUs, lifecycle; a table with saved views, rack elevations (`?view=racks`), and a node page with conditions, labels, taints and recent events |
+| GPUs | `/devices` | every GPU: health, readings, holders; the GPU wall |
+| Bare metal | `/metal` | enrollment to deployment, workflows, PXE discoveries |
+| Sandboxes | `/sandboxes` | sandboxes, warm pools, TTLs, time to ready |
+| Instances | `/instances` | VPS instances by state, flavor, tenant and host |
+| Volumes | `/volumes` | sandbox volumes and where they live |
+| Fleet drift | `/drift` | the applied FleetConfig against the live control plane |
+| Rollouts | `/rollouts` | bcd releases wave by wave |
+| Command batches | `/batches` | destructive batches waiting for approver signatures |
+| Activity | `/activity` | the event stream, filterable and pausable: simulated events plus this browser's own actions |
+
+Fleet actions all go through `useFleetCommands` (`components/fleet/commands.tsx`), so pages, the node drawer and
+palette commands behave alike (5e65153). Live, each sends one call per node with the connected tenant, toasts how
+many succeeded, and refreshes the fleet:
+
+| Action | Call | Confirmation |
+| --- | --- | --- |
+| <Term id="cordon">Cordon</Term> | [`nodes/cordon`](/docs/reference/api/nodes#cordon) with `version` and optional `reason` | dialog with the call and a reason |
+| Uncordon | [`nodes/uncordon`](/docs/reference/api/nodes#uncordon) | none |
+| <Term id="drain">Drain</Term> | [`nodes/drain`](/docs/reference/api/nodes#drain) | dialog with a reason; over 8 nodes the reason is required and you type `drain N` |
+| Revoke identity | [`nodes/revokeIdentity`](/docs/reference/api/nodes#revokeidentity) | reason required; you type the hostname |
+| Label | [`nodes/label`](/docs/reference/api/nodes#label) with `set` and `remove` | `key=value` or `key-`; `bc.dev/` keys are refused |
+| Taint | [`nodes/taint`](/docs/reference/api/nodes#taint) with `add` and `remove` | none |
+| Pause, resume, abort a rollout | `rollouts/pause`, `rollouts/resume`, `rollouts/abort` (abort with a required reason) | abort only |
+| Cancel a batch | `commandBatches/cancel` | dialog |
+| Confirm a PXE MAC | `metal/confirmMac` | dialog |
+| Delete, extend sandboxes | `sandboxes/delete`, `sandboxes/extend` (`by` in ms) | delete only |
+
+Some actions do not reach the API in live mode. Maintenance on and off says to use `metal.manage` and
+`metal.provide` instead. Approving a batch shows the command `better-compute batch approve <batchId>`, because an
+approval is a signature by the approver's key, which a browser never holds (see the CLI's
+[destructive batches](/docs/guides/clients/cli#destructive-batches)). Acknowledging a condition and ignoring a MAC
+only change this browser's view.
+
+Every action is refused while the clock is in the past, and, live and signed out, refused before any dialog with
+"Sign in to make changes" (05ce45e). A `READ_ONLY` answer re-reads the connection and says the sign-in has ended
+(782c869). In the simulation the same actions apply to the simulated fleet, most with **Undo** in the toast.
+
+## Operator features
+
+- **Time travel**: scrub back 7 days, step with `,` and `.`, pause with `p`. "Compare with now" pins a moment and the
+  Overview shows what changed (`?compare=`). Links carry `?site=&range=&at=`. Nothing can be changed while viewing
+  the past.
+- **Peek and watch**: any id opens a peek; **watch** follows it in the Watching widget with a toast when it changes
+  (df8ac1c). Critical attention items toast as they open.
+- **Wall display**: `?kiosk=1` (or ⌘K, Wall display) for a NOC screen, rotating dashboards with `&rotate=45`
+  (c407294).
+- **Keyboard**: ⌘K or `/` for the palette, `g` plus a key to jump (for example `g n` Nodes, `g c` Capacity), `e` to
+  arrange a dashboard, `[` for the sidebar, `?` for every key.
+
+Preferences, dashboards, saved table views, watches, hidden modules and the journal are kept per browser in
+localStorage; nothing about the workspace is stored on the admin server.
+
+## What is tested
+
+`pnpm --filter @better-compute/admin test` runs vitest over `apps/admin/tests/*.test.ts` in a Node environment with
+fixed clocks. Components are not rendered; the config notes that the dev server and a browser cover them.
+
+| File | Covers |
+| --- | --- |
+| `upstream.test.ts` | the caller check (loopback, DNS rebinding, cross-origin `Origin`, `ADMIN_ALLOWED_HOSTS`); the read-method rule; URL cleaning; the proxy's refusals (header, host, read-only, path, body size); a 502 that leaks neither URL nor token; 503 unconfigured; status never returning the token; share-link and note-link sanitizing |
+| `signin.test.ts` | sign-in against a stubbed Better IAM: the sealed, key-bound cookie; https beyond loopback; one message for wrong credentials and unknown organizations; the per-account throttle; MFA through a sealed one-use challenge and its 5-code limit; forged challenges; sign-out at Better IAM and when it is unreachable; the proxy forwarding the operator's bearer only with both cookie and key |
+| `session.test.ts` | sealing round trips; expired, tampered, foreign and wrong-purpose values; the browser key; decoy cookies; revocation; cookie attributes; short secrets; the `next` redirect |
+| `foundation.test.ts` | the simulation core, fleet pulse, attention merging, the module registry and per-browser hiding, the change journal (no secrets, no reads, no `READ_ONLY`), widget pins, dashboard share links |
+| `fleet.test.ts` | the simulated fleet's invariants, `eventsBetween`, operator actions over time, `liveSnapshot` mapping, fleet attention and watch describers (nothing in live mode before the first answer) |
+| `capacity-*.test.ts` | the simulated capacity source, scenarios, runway, lanes, quota cells and suggestions, "Why it's waiting", the palette's capacity questions, and watch describers |
+
+The server routes are tested with a stubbed `fetch`, and the live mappings with hand-built API answers. Nothing here
+calls a running compute server or Better IAM.
+
+Related: [Clients](/docs/guides/clients), [Console](/docs/guides/clients/console),
+[CLI](/docs/guides/clients/cli), [API reference](/docs/reference/api).

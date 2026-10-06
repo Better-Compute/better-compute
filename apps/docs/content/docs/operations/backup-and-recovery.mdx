@@ -1,0 +1,335 @@
+---
+title: Backup and recovery
+metaTitle: Backing up and restoring a Better Compute deployment
+description: What state lives where (PostgreSQL, the PKI bundle and deployment secret, operator-held keys, bcd's data directory on each node), what to back up, the order to restore in, what a restore cannot bring back, and how nodes rejoin after a loss.
+icon: HardDrive
+status: experimental
+packages: ['@better-compute/postgres', '@better-compute/pki', '@better-compute/server', '@better-compute/cli']
+sources:
+  - packages/postgres/src/migrate.ts
+  - packages/cli/src/install-script.ts
+  - packages/server/src/join/service.ts
+  - packages/server/src/join/secret-broker.ts
+  - packages/pki/src/attestors/x509pop.ts
+  - packages/server/src/self-check.ts
+  - packages/gateway/src/store.ts
+  - packages/gateway/src/gateway.ts
+  - daemon/internal/agent/spec.go
+  - daemon/internal/journal/bolt.go
+---
+
+Better Compute keeps almost everything in one PostgreSQL database, a few things in files that only operators hold,
+and a small amount of state on every node. This page lists each piece, what losing it costs, and how to get back.
+
+<Callout type="warn" title="Nothing here is automated or tested">
+The repository has no backup or restore tooling, and no test restores a database under a running fleet. What follows
+describes the mechanisms that exist and what the code does with restored state; everything marked
+**Recommendation** is advice, not something the code enforces. The consequences of a restore listed under
+[what a restore cannot bring back](#what-a-restore-cannot-bring-back) are read from the code paths, not observed.
+</Callout>
+
+## What lives where
+
+### On the control plane
+
+| State | Where | If it is lost |
+| --- | --- | --- |
+| Every aggregate: tenants' reservations, allocations and bookings, pools, nodes, commands, workflows, instances, volumes' records, usage, audit events and checkpoints, releases and rollouts | PostgreSQL | Restore from backup. Nothing else holds it |
+| Runtime state: `leases`, `workers`, `work_queue`, `outbox` and its cursors, `node_sessions`, `gateways` | PostgreSQL | Rebuilt by running processes; worth nothing on its own |
+| Node certificates (`node_certs`), join tokens, join requests, node bindings | PostgreSQL | Restore; see [certificates issued after the backup](#what-a-restore-cannot-bring-back) |
+| Secrets in the default store (`sealed_secrets`, `secret_refs`) | PostgreSQL, sealed under the deployment secret | Unreadable without the secret, even from a good backup |
+| The published trust bundle's version and history (`trust_bundle_state`, `trust_bundle_history`) | PostgreSQL | Restore; see [the trust bundle](#the-trust-bundle-version) |
+| The PKI bundle: root, node, serving and internal CAs, JoinService keys, command-signing root, exec ticket key, SSH CAs, audit signing key | One JSON file, `pki.json` by default (`BETTER_COMPUTE_PKI`) | Cannot be recreated: a new `pki init` means new CAs and new pins, and every node rejoins |
+| The deployment secret | `BETTER_COMPUTE_SECRET`, in every process's environment | Nothing sealed under it opens: the PKI bundle, sealed secrets, webhook secrets |
+| The offline root key | The file `pki init --offline-root` wrote, if you used it | `pki renew-ca` needs it when the bundle holds no root |
+| Gateway serving and internal certificates | Files from `pki issue-gateway` | Reissue from the bundle |
+| Better IAM's data | Better IAM's own store | Compute keeps only a projection (`authz_projection`) and an inbox; see [IAM](#better-iam) |
+| The configuration | `better-compute.config.ts` and its environment | Yours, in source control |
+| bcd binaries served to nodes | `downloads.dir` or `downloads.blob` | Copy them again from the release |
+
+### Held by people, outside the deployment
+
+| Key | Created by | If it is lost |
+| --- | --- | --- |
+| Release signing keys | `better-compute release keygen` | Releases can no longer be signed under the pinned keys. New keys mean new pins in `rolloutModule({ release: { pins } })` and in every node's `[update] release_pins` (below) |
+| Approver keys | `better-compute batch keygen` | With fewer than the threshold left, no batch can be approved and no quorum change can be signed; daemons that hold the set then need re-provisioning or re-pinning (see [changing the approver set](/docs/operations/pki#changing-the-approver-set)) |
+| Workload identity issuer keys | `createWorkloadIssuer`, stored by you through `exportKeys()` | New keys: verifiers must re-read the JWKS |
+
+### On each node
+
+Under bcd's `data_dir` (`/var/lib/bcd` by default) and `/etc/bcd`; the full layout is in
+[files on the host](/docs/daemon/install#files-on-the-host).
+
+| File | Holds | If it is lost |
+| --- | --- | --- |
+| `/etc/bcd/config.toml`, `join-encryption.jwk` | Gateway URL, site, the three pins, `[update]` release pins and floor, other sections | Re-run the install script |
+| `node.key` | The node key, or only the record of a key in the TPM | The node's identity: it must join again |
+| `identity.json` | Certificate chain, trust bundle (with the approver quorum), the server time mark | The same |
+| `journal.db` | The command journal (bbolt, every write fsynced), unacked events and results | The control plane fails in-flight non-retry-safe commands `journal-lost`; see [journal loss](/docs/daemon/failure-modes#journal-loss) |
+| `volumes/<id>.raw` | Tenants' persistent volumes, as sparse raw files on this host only | Gone: the code keeps no replica and no backup of volumes |
+| Instance disks under `data_dir/libvirt` or `data_dir/cloud-hypervisor` | qcow2 overlays of running instances | Gone with the host |
+| `bin/`, `update.json`, `slots.json` (or root's `[update] slots_dir`) | Self-update slots and the release floor | Re-run the install script |
+| `batch-leaves.json`, `unbatched-destructive.json` | The quorum's used leaves and unbatched count | Rebuilt empty; see the warning below |
+| `/var/lib/bcd-hostconfig` | Host units' records and the helper's accepted signed spec | Re-applied from the next spec |
+
+## Backing up
+
+### PostgreSQL
+
+Use PostgreSQL's own tools. Nothing in Better Compute adds to or replaces them.
+
+**Recommendation.**
+
+- Continuous archiving with point-in-time recovery (base backups plus WAL), so you can choose the restore point and
+  lose as little as possible. A nightly `pg_dump` alone loses up to a day, and [a day matters](#certificates-issued-after-the-backup)
+  here because node certificates turn over every 14 hours or so.
+- Back up the whole database, every schema and table: compute's base schema and every module's tables share it, and
+  `compute_migrations` must stay consistent with them.
+- Keep the backups away from the database host, and test a restore on a scratch server regularly. `better-compute
+  doctor` against the restored copy is a quick sanity check: it reports a database that was never migrated, missing
+  migrations of this release, a missing `btree_gist`, and a `compute_now()` that does not read the database clock.
+- Back up Better IAM's store at the same moment, so tenants and grants match the compute data that refers to them.
+
+Two things in the database need care beyond that:
+
+- **Detached history partitions.** The retention module and the audit archiving step can detach monthly partitions
+  of `audit_events`, `inventory_snapshots` and `usage_windows`; a detached partition is a standalone table you export
+  and drop yourself. Keep those exports with your backups. See [archiving](/docs/guides/events/audit#archiving) and
+  [history partitions](/docs/operations/retention#history-partitions).
+- **An audit copy outside the database.** An audit sink copies every committed `audit_events` row out in commit
+  order (see [audit sinks](/docs/guides/events/audit#copy-it-out-with-an-audit-sink)). It is the record that survives
+  a database restore.
+
+### The PKI bundle and the secret
+
+Back up the bundle and `BETTER_COMPUTE_SECRET` together, and keep the offline root key apart from both. The bundle
+file is sealed: its private keys are encrypted under a key derived from the secret, and the seal also covers every
+certificate and pin, so a copy without the secret is useless and a copy changed without the secret no longer loads
+(`INVALID_CONFIG`: "restore it from a backup"). See [PKI](/docs/operations/pki#pki-init) and
+[the deployment secret](/docs/operations/configuration#the-deployment-secret).
+
+Take a new copy whenever the bundle changes: `pki rotate-command-root`, `pki renew-ca`, `pki add-sandbox-ca` and
+`pki reseal` all write it back. A bundle restored from before a command-signing root rotation lacks the new root,
+and daemons that already trust only the new one would refuse every command signed under the old.
+
+### Nodes
+
+**Recommendation.** Do not back up bcd's state files to restore them later. Recover a node by joining it again
+instead (below). Restoring an old copy is worse than losing the file:
+
+- an old `journal.db` keeps its `journal_id`, so the control plane believes the journal is intact and replays
+  in-flight commands into a journal that no longer knows they ran: the `journal-lost` rule, which exists to stop a
+  second execution, would not fire;
+- old `batch-leaves.json` and `unbatched-destructive.json` forget leaves and slots already used, so an approved batch
+  leaf could run again;
+- an old `update.json` lowers the release floor that keeps the node from going back to an older binary.
+
+Tenants' volumes and instance disks are the exception: they are tenant data, and the code does not replicate them.
+Whether and how to back them up is a decision for your service; nothing in bcd snapshots a volume.
+
+## Restore order
+
+<Steps>
+<Step>
+
+### Stop everything that writes
+
+Stop every api, worker and gateway process of the deployment. Daemons can stay up: they back off, keep enforcing
+their last spec and keep results and events in their journals (see
+[PostgreSQL unavailable](/docs/daemon/failure-modes#postgresql-unavailable)).
+
+</Step>
+<Step>
+
+### Restore the secret, the bundle and the configuration
+
+Every process needs the same `BETTER_COMPUTE_SECRET` and the PKI bundle the nodes pin. Without them, nothing below
+helps: see [losing the PKI](#the-pki-bundle-or-the-secret-is-lost).
+
+</Step>
+<Step>
+
+### Restore PostgreSQL
+
+Restore into a server that meets the [requirements](/docs/operations/hardware-requirements#postgresql): PostgreSQL 16
+or newer with `btree_gist` available. Restore Better IAM's store to the same point.
+
+</Step>
+<Step>
+
+### Migrate with the release that took the backup, or a newer one
+
+```bash
+better-compute migrate
+```
+
+`migrate` refuses a database that a newer release migrated, naming the migrations it does not know, so run the same
+or a newer release than the one that wrote the backup. A newer release applies its own migrations on top, as in an
+[upgrade](/docs/operations/upgrades#step-1-migrate).
+
+</Step>
+<Step>
+
+### Cordon, then start the control plane
+
+**Recommendation:** cordon every node before the workers start placing work, so nothing new lands on devices whose
+state the restored database may not reflect:
+
+```bash
+better-compute nodes cordon <node> --tenant <tenant> --reason 'database restored'
+```
+
+Then start workers, api and gateways. Daemons reconnect on their own.
+
+</Step>
+<Step>
+
+### Reconcile
+
+Work through [what a restore cannot bring back](#what-a-restore-cannot-bring-back): re-revoke, revoke tokens, rejoin
+nodes whose certificates the database does not know, raise the trust bundle version if needed, and check each node's
+generation before uncordoning it. `better-compute doctor` reports `fleet.cert-expiry` for connected nodes with no
+certificate valid for another hour.
+
+</Step>
+</Steps>
+
+## What a restore cannot bring back
+
+A restore rewinds the database, but not the nodes, the operators' keys or the outside world. Everything below follows
+from how the code treats state it does not recognise.
+
+### Work done after the backup
+
+Reservations, commands, workflows, instances and audit events written after the backup are gone from the control
+plane. A daemon still holding unacked results replays them at its next `Hello`; events it had already had
+acknowledged were deleted from its journal and are lost. Anyone holding an audit checkpoint signed after the backup
+can tell the trail was rewound (see [consistency proofs](/docs/guides/events/audit#consistency-proofs)).
+
+### Desired state ahead of the database
+
+bcd applies a desired state only when its generation is above the one it last applied
+(`daemon/internal/agent/spec.go`), and a gateway sends a spec only when the node's applied generation is below the
+database's. A node that applied generations written after the backup therefore ignores the restored specs and keeps
+enforcing its newer one, its holds, instances, volumes and access included, until the control plane's generation for
+it passes the node's. The specs that follow are built from the restored state, and the instance converger treats its
+section as the whole desired set: an instance created after the backup is removed, and a volume the section no longer
+lists and no running VM has open is destroyed, punched and unlinked (see [persistent volumes](/docs/daemon/delivery#persistent-volumes)).
+Nothing in the code detects or warns about this gap.
+
+**Recommendation:** keep the node cordoned and compare its `observed_generation` and what it runs (`bcd status`) with
+the restored records before letting new specs reach it.
+
+### Certificates issued after the backup
+
+Node certificates live 24 hours and are renewed at about 60% of that, so most nodes' current certificate is younger
+than a backup taken more than about 14 hours earlier. Such a certificate is missing from the restored `node_certs`:
+
+| Path | With a certificate the database does not know |
+| --- | --- |
+| Session (`Hello`) | Accepted: an unrecorded serial is treated as unrestricted, unless the node row itself is missing |
+| `Renew` | Refused: the presented leaf must be byte for byte a `node_certs` row |
+| Secret requests | Refused: the broker joins the certificate's serial to `node_certs` |
+| `x509pop` re-join | Refused for the same reason |
+| Attested bindings and results | Can be rejected: they are verified against the node's certificate in `node_certs` |
+
+The node keeps working until its certificate expires, then loses its session. Rejoin it before that (below). Nodes
+that joined for the first time after the backup have no row at all and are refused at `Hello`; they join again as
+new machines, or reclaim their old id if the restored database still holds their hardware key.
+
+### Revocations and consumed tokens
+
+Revocations made after the backup are undone: a certificate you revoked is valid again in the restored
+`node_certs`. Re-run them (`nodes.revokeIdentity`; see [revoking a node's identity](/docs/guides/nodes/operating-nodes#revoking-a-nodes-identity)).
+Join tokens used after the backup have their uses back, and tokens revoked after it are live again: revoke every
+token that should not be usable (`better-compute join-tokens list`, then `join-tokens revoke`).
+
+### The trust bundle version
+
+A daemon takes a trust bundle only when its version is above the one it holds. The restored `trust_bundle_state`
+may be below what daemons already hold (for example after a command-signing root rotation that happened after the
+backup), and then the bundle the restored deployment publishes is ignored. `pki.trustVersion` is a floor: set it at or
+above the highest `node_sessions.trust_version` the reconnected daemons report, and the next published bundle reaches
+them. `better-compute pki trust-version` shows how many connected daemons are behind. See
+[signed intent](/docs/operations/pki#signed-intent).
+
+### Releases
+
+A release registered after the backup is missing from `daemon_releases`. Nodes that confirmed it hold a release floor
+at its sequence and refuse every older binary, so a rollout of an older registered release fails on them. Register
+the newer manifest again; `releases.register` accepts it because its sequence is above every registered one.
+
+## Rejoining a node
+
+The same steps cover a node whose disk was lost, a node whose certificate the restored database does not know, and a
+node whose certificate expired while it was offline.
+
+1. **A certificate expired less than 7 days ago**, with the `x509pop` attestor configured and the certificate in
+   `node_certs`, re-joins with its old key. See [renewal](/docs/guides/nodes/joining#renewal).
+2. **Otherwise**, move the old identity aside and join again, as root:
+
+   ```bash
+   bcd join --config /etc/bcd/config.toml --reset --yes < join-token.txt     # with a token
+   bcd join --config /etc/bcd/config.toml --reset --yes --attestor tpm       # or with the TPM
+   ```
+
+   `--reset` renames `identity.json`, `node.key`, a pending `node.key.next` and `journal.db` to
+   `<name>.reset-<UTC time>` and deletes nothing. See [joining again with --reset](/docs/daemon/install#joining-again-with---reset).
+3. **Same node or a new one.** A machine whose trusted hardware key the database already holds reclaims its node id
+   with a token that has `allowReclaim` (identity generation up by one, older certificates revoked); a `tpm` join
+   with the same endorsement key reclaims the node bound to it. Without either, delete the old node first and the
+   machine joins as a new one. See [placeholder hardware and reclaims](/docs/guides/nodes/joining#placeholder-hardware-and-reclaims).
+4. **A lost disk** also lost `config.toml` and the binary: re-run the install script with a token, which installs,
+   joins and starts bcd in one go.
+
+The new journal makes the control plane fail the node's in-flight non-retry-safe commands with `journal-lost`, and
+their owners re-decide; see [resume rules](/docs/daemon/sessions#resume-rules).
+
+## Disaster scenarios
+
+| Scenario | What happens | Recovery |
+| --- | --- | --- |
+| An api, worker or gateway host is lost | Leases move to the survivors; nodes redial | Nothing to restore; see [high availability](/docs/operations/high-availability) |
+| The PostgreSQL primary fails, a synchronous standby takes over | The fleet stalls for the failover and resumes | Nothing to restore |
+| Failover to an asynchronous standby that lost commits | A small restore, for the lost transactions | [What a restore cannot bring back](#what-a-restore-cannot-bring-back), limited to that window |
+| The database is lost | — | [Restore order](#restore-order) |
+| A migration went wrong | `migrate` stops at the failing migration, which rolled back | Fix and re-run; to go back to the previous release, restore the pre-upgrade backup with it (see [rolling back](/docs/operations/upgrades#rolling-back)) |
+| A node's disk is lost | The node goes `disconnected`, then `unreachable`; nothing is released | [Rejoin it](#rejoining-a-node); its volumes and instance disks are gone |
+| A node's journal is corrupted | bcd moves it aside (`journal.db.corrupt-<unix time>`) and starts a new one | Nothing; `journal-lost` settles in-flight commands |
+| A node's TPM is cleared | The node key no longer loads; renewals fail | `bcd join --reset --yes --attestor tpm`; see [TPM cleared](/docs/daemon/failure-modes#tpm-cleared-or-unavailable) |
+| A release signing key is lost | — | New keys and pins; see [below](#a-release-signing-key-is-lost) |
+
+### The PKI bundle or the secret is lost
+
+There is no recovery that keeps the fleet. A bundle that is lost, or no longer opens because the secret changed,
+cannot be recreated: `pki init` makes new CAs and new JoinService keys, so every gateway certificate, every node
+certificate and every pin changes.
+
+1. `better-compute pki init` with the same trust domain, and `pki issue-gateway` for every gateway.
+2. New install scripts (`daemon install-script` reads the new pins) and join tokens.
+3. On every node, as root: re-run the new script, then `bcd join --reset --yes` with a token. With the database
+   intact, machines with a trusted hardware key reclaim their node ids through tokens with `allowReclaim`.
+4. Every secret in the default sealed store is unreadable if the secret, not only the bundle, was lost: set them
+   again.
+
+### A release signing key is lost
+
+Create new keys with `release keygen`, put their pins in `rolloutModule({ release: { pins } })`, and give every node
+the new pins in `/etc/bcd/config.toml` under `[update] release_pins`. Re-running the install script does not do it:
+when `config.toml` already has an `[update]` section, the script keeps it and prints that `--release-pins` was not
+applied. Until a node has the new pins, it refuses every release signed by the new keys. Sign the next release with a
+sequence above the last one, since nodes keep their release floor.
+
+## Better IAM
+
+Compute stores no IAM tenants, principals or policies of its own. It keeps the authorization projection
+(`authz_projection`, with its change feed `authz_changes`) that IAM's events maintain, and `iam_inbox`, the events it
+still has to apply. Restoring compute and IAM to different points leaves the projection describing one and the
+resources the other; **recommendation:** back both up at the same moment and restore both to it.
+
+<Cards>
+  <Card title="Database" href="/docs/operations/database">Requirements, migrations and the runtime tables.</Card>
+  <Card title="PKI" href="/docs/operations/pki">The bundle, rotations and losing the bundle.</Card>
+  <Card title="Failure modes" href="/docs/daemon/failure-modes">Journal loss, TPM, certificate expiry.</Card>
+  <Card title="Upgrades" href="/docs/operations/upgrades">Why a migration can only be undone by a restore.</Card>
+</Cards>

@@ -1,0 +1,359 @@
+---
+title: Devices and holds
+metaTitle: How bcd binds, refuses and releases GPU holds (the devices converger)
+description: The devices converger in bcd, which turns NodeSpec.devices into CDI holds. Covers the bindings and atoms it takes, conflicts, hold slices and host admission, the CDI spec and env file it writes, the AllocationBound, Released and Failed events and their reasons, unprivileged nodes, and Kubernetes releases.
+icon: LockKeyhole
+status: experimental
+packages: ['@better-compute/capacity', '@better-compute/server']
+sources:
+  - daemon/internal/agent/devices.go
+  - daemon/internal/agent/holds.go
+  - daemon/internal/agent/slices.go
+  - daemon/internal/agent/admission.go
+  - daemon/internal/agent/kuberelease.go
+  - daemon/internal/agent/cdivendor.go
+  - daemon/internal/agent/cdivendor_test.go
+  - daemon/internal/agent/conn.go
+  - daemon/internal/agent/agent.go
+  - daemon/internal/agent/netpolicy.go
+  - daemon/internal/agent/capabilities_test.go
+  - daemon/internal/agent/gpureset.go
+  - daemon/internal/agent/hostconfig.go
+  - daemon/internal/agent/status_gpu.go
+  - daemon/internal/slice/slice.go
+  - daemon/cmd/bcd/agent.go
+  - daemon/cmd/bcd/doctor_gpu.go
+  - proto/bettercompute/agent/v1/session.proto
+  - packages/capacity/src/reservations.ts
+  - tests/e2e/bcd-host-real.test.ts
+---
+
+A GPU <Term id="reservation">reservation</Term> reaches a machine as one entry of its
+<Term id="nodespec">NodeSpec</Term>'s `devices` section: a `DeviceAssignment` per
+<Term id="allocation">allocation</Term>. bcd's **devices converger** (`daemon/internal/agent/devices.go`) turns each
+into a **hold**: a <Term id="cdi">CDI</Term> spec and an env file a workload manager on the node consumes, with a
+cgroup slice when the reservation booked host CPU or memory. It reports every bind and release as a node-signed
+event, refuses what it cannot honour with a reason, and never drops a hold on its own. [Delivery](/docs/daemon/delivery#device-assignments)
+summarises it among the other sections; this page is the full account. The control plane's side (placing,
+booking, binding states) is in [reservations](/docs/guides/capacity/reservations#bindings),
+[atoms and bookings](/docs/guides/capacity#atoms-and-bookings), [fractional GPUs](/docs/guides/capacity/fractional-gpus)
+and [Kubernetes workers](/docs/guides/capacity/kubernetes).
+
+<Callout type="warn" title="Not yet run on a real GPU host as root">
+The converger is tested in Go against a fake host, and end to end by `tests/e2e/bcd.test.ts` with a fakehw build
+(binding and releasing GPU reservations, also from an unprivileged node beside a real `bcd helper`). The
+real-host e2e of round 6 ran bcd as an ordinary user without `[helper]`, so on real hardware only the refusal path
+below has run: no hold's CDI spec has been written to a real `/etc/cdi`, no hold slice created on a real systemd, and
+no container started from `bcd.dev/gpu=<id>`. See [running bcd on real hardware](/docs/daemon/real-hardware).
+</Callout>
+
+## The assignment
+
+| `DeviceAssignment` field | Meaning to bcd |
+| --- | --- |
+| `allocation_id` | The hold's name: its files, slice and events are keyed by it |
+| `reservation_id` | Written into the spec's annotations and the env file |
+| `binding` | `BINDING_HOLD` or `BINDING_KUBERNETES`; anything else is refused |
+| `devices` | Atoms, each an `id` and a `device_class` (an empty class reads as `gpu`) |
+| `limits` | Host resources booked with the devices: `cpus`, `mems`, `cpu_millis`, `memory_bytes`, `hugepages_2mi`, `hugepages_1gi`. Absent: devices only |
+| `env` | Extra `KEY=VALUE` lines for the env file |
+
+`instance_id` (for `BINDING_INSTANCE`) is not read: GPUs for VMs arrive in the `instances` section, not here.
+
+### Bindings
+
+| Binding | What bcd does |
+| --- | --- |
+| `BINDING_HOLD` | A CDI hold for a workload manager the operator runs on the node (containerd, Docker, Podman, Slurm, a wrapper). The spec carries NVIDIA's device edits, so `bcd.dev/gpu=<id>` is all a container needs |
+| `BINDING_KUBERNETES` | The same hold, marked for the kubelet: bcd's device plugins (or DRA driver) advertise exactly these devices on a node bound to a cluster. No `NVIDIA_VISIBLE_DEVICES` and no vendor edits in the spec, since a pod may get only part of the hold and the plugin sets its own. Its release waits for the pods ([below](#kubernetes-releases)) |
+| `BINDING_INSTANCE`, `BINDING_NODE`, anything else | `AllocationFailed` with `unsupported-binding` (`binding BINDING_INSTANCE is not supported`) |
+
+### Atoms
+
+Every device is an <Term id="atom">atom</Term>, resolved against the node's current inventory (`resolveAtom`,
+`holds.go`). The ids are the ones [inventory](/docs/guides/nodes/inventory-and-health#devices-and-atoms) gives:
+
+| Class | Id | Parent GPU | `NVIDIA_VISIBLE_DEVICES` names | Held when |
+| --- | --- | --- | --- | --- |
+| `gpu` | The GPU's UUID | Itself | The GPU's UUID | The inventory lists the GPU |
+| `gpu.mig` | `<gpuUuid>/gi<g>/ci<c>` | `<gpuUuid>` | The MIG device's `MIG-…` UUID | The GPU has that GPU and compute instance, with a UUID from `nvidia-smi -L` |
+| `gpu.slot` | `<gpuUuid>/s<k>` | `<gpuUuid>` | The parent GPU's UUID | The parent GPU is listed |
+
+A MIG instance the control plane booked but the [`mig-layout` unit](/docs/daemon/host-config#mig-layout) has not
+created yet is `device-missing` (`GPU-… has no MIG instance gi1/ci0`), as is a GPU the inventory does not list. A
+malformed MIG or slot id, or another class (`nic.vf`, `disk`), is `unsupported-device`. Slots are a bookkeeping unit:
+the driver sees the whole GPU, and MPS or time-slicing shares it (see
+[gpu-sharing](/docs/daemon/host-config#gpu-sharing)).
+
+## One pass
+
+The converger plans the whole section on every pass (a new spec, the 30-second retry, the 10-minute drift pass). It
+reads the holds that exist from `/etc/cdi/bcd-*.json`: a hold is its CDI spec, which survives a reboot, and the real
+atom ids are read back from each device's `bcd.dev/device-id` annotation. Then, in this order:
+
+1. **Kubernetes releases pending from earlier passes** are reported once no pod holds them, or dropped unreported
+   when the spec wants the allocation again ([below](#kubernetes-releases)).
+2. **Holds no longer wanted** are released: their CDI spec and env file removed, then `AllocationReleased`. A plain
+   hold's slice is stopped once it is empty; one still running a workload is kept with its limits.
+3. **Leftover slices** whose hold is neither wanted nor released in this pass are stopped again once empty (e01d7ff),
+   so a slice whose workload outlived its release goes when that workload exits.
+4. **Holds still wanted** are kept. Their slice is created again when it is missing (systemd's runtime properties
+   vanish on a reboot; the hold does not), and a missing env file is rewritten (it lives on tmpfs).
+5. **New holds**, in spec order, are checked: binding, privilege, atoms, conflicts, host admission. Each that passes
+   is bound; each that fails is collected.
+6. **Failures**, if any, are reported as one `AllocationFailed` per allocation, and the section fails terminally.
+
+Releases come before binds, so a spec that moves a GPU from one allocation to another in one generation works.
+Within the pass, every atom a new hold claims counts against the holds after it.
+
+### Conflicts
+
+A new hold is refused with `overlap` (`holdConflict`) when any of its atoms:
+
+| Conflict | Message |
+| --- | --- |
+| Is listed twice in the assignment | `a device is listed twice` |
+| Has a parent GPU a VM has, or is to have, through VFIO | `<gpu> is passed through to instance <id>` |
+| Is held by another allocation | `<atom> is assigned to <allocation>` |
+| Is a whole GPU while part of it (a MIG instance, a slot) is held | `<gpu> has <atom> assigned to <allocation>` |
+| Is part of a GPU another allocation holds whole | `<gpu> is assigned to <allocation>` |
+
+"Held" covers the live holds, the holds bound earlier in the same pass, and the devices of Kubernetes releases still
+pending. While the releases file is unreadable, every GPU of the node is held by
+`(pending Kubernetes releases that could not be read)`. The VFIO side counts the GPUs in the current instance specs
+and those running domains had at the last pass, so a GPU dropped from a running VM's spec stays the VM's until its
+next start. The other direction holds too: a VM start, `gpu.reset`, `diag.dcgm` from level 2 and the `mig-layout`
+unit refuse a GPU a live hold or a pending release names (see [gpu.reset and live holds](/docs/daemon/delivery#gpureset-and-live-holds)).
+
+### Hold slices
+
+A hold whose assignment carries `limits` runs in its own cgroup-v2 slice, created before the CDI spec names it
+(260e33c; `daemon/internal/slice`). A `BINDING_KUBERNETES` hold never gets one: its pods live in the kubelet's
+`kubepods.slice`, where the kubelet enforces their requests and limits (e01d7ff).
+
+| Slice | Value |
+| --- | --- |
+| Name | `bcd-alloc-<allocation>.slice`, refused unless it matches `^bcd-alloc-[A-Za-z0-9_]{1,80}\.slice$` |
+| Path | `/sys/fs/cgroup/bcd.slice/bcd-alloc.slice/bcd-alloc-<allocation>.slice` |
+| Created | `systemctl start`, then `systemctl set-property --runtime` with `AllowedCPUs` (`cpus`), `AllowedMemoryNodes` (`mems`), `CPUQuota` (`cpu_millis` as whole percents of one CPU, rounded up), `MemoryMax` (`memory_bytes`) and `MemoryHigh` (90% of it) |
+| Huge pages | `+hugetlb` written to `cgroup.subtree_control` of `/sys/fs/cgroup`, `bcd.slice` and `bcd-alloc.slice`, then `hugetlb.2MB.max` and `hugetlb.1GB.max` in bytes (systemd has no property for them) |
+| Checked | `cpus` and `mems` must be cpulists of at most 1024 characters; the helper applies the same check as root |
+| Stopped | `systemctl stop` only once `cgroup.events` says `populated 0`; a release never kills a workload |
+
+bcd does not move processes into the slice. It names it in the spec's `bcd.dev/cgroup-parent` annotation, in
+`BCD_CGROUP_PARENT` and in `AllocationBound.cgroup_parent`, and the workload manager places the workload there. Under
+`bcd helper` the slice is `slice.apply` and `slice.remove`, which accept only such a name and cpulists. A fakehw host
+keeps each slice as a JSON record under `/run/bcd/slices` instead.
+
+### Host admission
+
+Since 31555bf a new hold whose limits carry a memory limit or huge pages is admitted against the host first
+(`admission.go`), the same way an instance start is, so VMs and holds never take what the other was promised. A hold
+with only `cpus` or `cpu_millis` is not admitted. The host is read once per pass, when the first such hold needs it:
+
+| Quantity | Read from |
+| --- | --- |
+| Normal memory available | `MemTotal` from `/proc/meminfo`, less the whole huge page pool (`Hugetlb`) and 1 GiB of headroom for the host |
+| Committed normal memory | Every running or paused domain bcd manages: its memory (unless huge-page backed) plus VMM overhead (`memory/32 + 256 MiB`); and every bound hold's `MemoryMax`, a Kubernetes hold's booked memory included |
+| Free huge pages | Per size, host-wide `free_hugepages` less `resv_hugepages`, and each NUMA node's `free_hugepages`; less what the bound holds may still take (their huge page limits less what their slice has faulted in, `hugetlb.<size>.current`), from their `mems` nodes |
+
+A new hold must fit its `memory_bytes` in what normal memory is left, and its huge pages on its `mems` nodes (the
+whole host without `mems`), never more than the host-wide count. One that does not fit fails with
+`resources-exhausted`:
+
+```text
+ResourcesExhausted: 4096 MiB of memory needed, 1024 MiB left on this host
+ResourcesExhausted: 8 hugepages of 1048576 KiB needed, 2 free
+```
+
+A host whose memory cannot be read binds without the check and logs `host memory unreadable; binding without
+host-side admission`. A fakehw host is never admitted. The page sizes, pools and the instance side are on
+[host configuration](/docs/daemon/host-config#hugepages) and [delivery](/docs/daemon/delivery#instances).
+
+## What a bind writes
+
+A bind runs, in order: the slice (when sliced), the CDI spec, the env file, then the `AllocationBound` event. A
+failure of any write is retryable: the section stays `PROGRESSING`, the pass is tried again in 30 seconds, and no
+event is sent until every file is in place. Under [`bcd helper`](/docs/daemon#privilege-separation) the node asks
+root for a `file.write` of kind `cdi` or `allocation-env` with the allocation id, and the helper builds the path
+itself; a refused operation is retried the same way.
+
+### The CDI spec
+
+`/etc/cdi/bcd-<allocation>.json`, mode 0644, written atomically. A `BINDING_HOLD` on one whole GPU with limits, on a
+host whose toolkit wrote `/etc/cdi/nvidia.json` (vendor mounts and hooks shortened):
+
+```json title="/etc/cdi/bcd-alloc_01jz8k2v.json"
+{
+  "cdiVersion": "0.7.0",
+  "kind": "bcd.dev/gpu",
+  "annotations": {
+    "bcd.dev/allocation-id": "alloc_01jz8k2v",
+    "bcd.dev/reservation-id": "rsv_01jz8k1q",
+    "bcd.dev/generation": "42",
+    "bcd.dev/cgroup-parent": "bcd-alloc-alloc_01jz8k2v.slice"
+  },
+  "devices": [
+    {
+      "name": "GPU-5f1c2a90-0000-4000-8000-000000000001",
+      "annotations": { "bcd.dev/device-id": "GPU-5f1c2a90-0000-4000-8000-000000000001" },
+      "containerEdits": { "env": null, "deviceNodes": [{ "path": "/dev/nvidia0" }] }
+    }
+  ],
+  "containerEdits": {
+    "env": [
+      "BCD_ALLOCATION_ID=alloc_01jz8k2v",
+      "BCD_CGROUP_PARENT=bcd-alloc-alloc_01jz8k2v.slice",
+      "NVIDIA_VISIBLE_DEVICES=GPU-5f1c2a90-0000-4000-8000-000000000001"
+    ],
+    "deviceNodes": [{ "path": "/dev/nvidiactl" }, { "path": "/dev/nvidia-uvm" }],
+    "mounts": [{ "hostPath": "/usr/lib/x86_64-linux-gnu/libcuda.so.580.65.06", "containerPath": "…", "options": ["ro", "nosuid", "nodev", "bind"] }],
+    "hooks": [{ "hookName": "createContainer", "path": "/usr/bin/nvidia-cdi-hook", "args": ["nvidia-cdi-hook", "update-ldcache", "…"] }],
+    "additionalGids": [44]
+  }
+}
+```
+
+| Part | Contents |
+| --- | --- |
+| `cdiVersion` | `0.6.0` (device annotations need it), or the vendor spec's version when that is later |
+| `kind` | `bcd.dev/gpu` |
+| `annotations` | `bcd.dev/allocation-id`, `bcd.dev/reservation-id`, `bcd.dev/generation`; `bcd.dev/cgroup-parent` for a sliced hold; `bcd.dev/binding: kubernetes` for a Kubernetes hold (which is how the device plugins find what to advertise) |
+| `devices[].name` | The atom id with `/` as `_` (CDI names allow no `/`): `GPU-…_gi1_ci0`, `GPU-…_s3` |
+| `devices[].annotations` | `bcd.dev/device-id`, the real atom id |
+| `devices[].containerEdits` | For a hold: the vendor spec's edits for the device the atom stands for (a slot its GPU's, a MIG instance its `MIG-…` device's); none for a Kubernetes hold |
+| `containerEdits.env` | `BCD_ALLOCATION_ID`; `BCD_CGROUP_PARENT` when sliced; `CUDA_MPS_PIPE_DIRECTORY=/run/nvidia-mps` when the hold has a slot and that directory exists; for a hold (not Kubernetes) one `NVIDIA_VISIBLE_DEVICES` listing each GPU once and each MIG device's UUID |
+| `containerEdits`, the rest | For a hold: the vendor spec's common device nodes, mounts, hooks and additional GIDs, once, without its `NVIDIA_VISIBLE_DEVICES=void` |
+
+How bcd reads NVIDIA's spec, and what happens without one or with a stale one, is on
+[GPUs on a node](/docs/daemon/gpus#cdi-nvidias-spec-and-bcds). Without a JSON vendor spec a hold carries only the
+env, which works with a toolkit in its legacy mode but grants nothing in CDI mode.
+
+A container then asks for the devices by name, for example `--device bcd.dev/gpu=GPU-5f1c2a90-…` with Podman or
+Docker's CDI support, or the same name in containerd's CDI device list.
+
+### The env file
+
+`/run/bcd/allocations/<allocation>.env`, mode 0644, one `KEY=VALUE` per line, for a workload manager that reads env
+files rather than CDI:
+
+```text title="/run/bcd/allocations/alloc_01jz8k2v.env"
+BCD_ALLOCATION_ID=alloc_01jz8k2v
+BCD_CGROUP_PARENT=bcd-alloc-alloc_01jz8k2v.slice
+BCD_RESERVATION_ID=rsv_01jz8k1q
+NVIDIA_VISIBLE_DEVICES=GPU-5f1c2a90-0000-4000-8000-000000000001
+```
+
+The lines are `BCD_ALLOCATION_ID`, `BCD_CGROUP_PARENT` (sliced holds), `CUDA_MPS_PIPE_DIRECTORY` (slots with MPS
+running), `BCD_RESERVATION_ID`, `NVIDIA_VISIBLE_DEVICES`, then the assignment's `env` lines. Unlike the CDI spec, the
+env file carries `NVIDIA_VISIBLE_DEVICES` for a Kubernetes hold too. `/run` is tmpfs, so after a reboot the next pass
+writes it again from the hold's spec.
+
+## Events
+
+Every bind and release is an `AttestedReport`: the body (with the node id and boot id) is signed with the node key
+under purpose `attested-report`, so a gateway cannot forge a binding. Failures are plain events. All three are
+journaled before they are sent and replayed until acknowledged (see [events](/docs/daemon/delivery#events)).
+
+| Event | Fields | When |
+| --- | --- | --- |
+| `AllocationBound` (attested) | `allocation_id`, `generation`, `device_ids`, `cdi_devices` (`bcd.dev/gpu=<name>` each), `cdi_spec_path`, `env_file`, `cgroup_parent` (sliced holds only) | Once the slice, spec and env file are written |
+| `AllocationReleased` (attested) | `allocation_id`, `generation`, `device_ids` | A plain hold: once its files are removed. A Kubernetes hold: once no pod holds its devices |
+| `AllocationFailed` | `allocation_id`, `generation`, `reason`, `message` | The assignment cannot be honoured; reported once per allocation and generation |
+
+With [attested bindings](/docs/guides/capacity/reservations#attested-bindings) (on by default with command signing),
+a reservation turns active only on the node's own signed `AllocationBound`.
+
+### Failure reasons
+
+| Reason | Cause | Example message |
+| --- | --- | --- |
+| `unsupported-binding` | A binding other than `HOLD` or `KUBERNETES` | `binding BINDING_INSTANCE is not supported` |
+| `node-unprivileged` | bcd runs without root and without `[helper]` ([below](#unprivileged-nodes)) | `bcd node runs without root and without [helper]: it cannot write /etc/cdi or create hold slices (run bcd node as root, or under bcd helper)` |
+| `unsupported-device` | A class other than `gpu`, `gpu.mig`, `gpu.slot`, or a malformed MIG or slot id | `device class nic.vf cannot be held`; `"GPU-a/x" is not a MIG instance id (<gpu>/gi<g>/ci<c>)` |
+| `device-missing` | A GPU the inventory does not list, or a MIG instance not created yet; every missing device is named, joined by `; ` | `GPU-… not present`; `GPU-… has no MIG instance gi1/ci0` |
+| `overlap` | A [conflict](#conflicts) with a hold, a pending release or a VM | `GPU-… is assigned to alloc_…` |
+| `resources-exhausted` | [Host admission](#host-admission) refused the limits | `ResourcesExhausted: 4096 MiB of memory needed, 1024 MiB left on this host` |
+
+The checks run in that order for each new hold, and the first that fails decides. Once the failures are reported,
+the section is `FAILED` terminally at that generation (its message lists `<allocation>: <reason>` for each), so
+`observed_generation` still advances and the other sections converge. The holds of the same pass that passed their
+checks are bound anyway. A later generation that still carries a failed assignment reports it again.
+
+On the server, the gateway's `allocationFailed` handler marks the allocation failed (`markAllocationFailed`), which
+wakes the reservation at once instead of at the bind timeout: it gets the condition `BindTimeout` with reason
+`NodeRejectedBinding`, its bookings are released and it is placed again, up to two times (`maxBindRetries`), after
+which it fails. A node lease (`binding: 'node'`) fails at once. See
+[states and conditions](/docs/guides/capacity/reservations#states-and-conditions).
+
+## Unprivileged nodes
+
+Writing `/etc/cdi` and creating slices is root's work. A host build of `bcd node` running as an ordinary user without
+`[helper]` (`Options.Unprivileged`: not a fakehw build, mode `node`, effective uid not 0, no `[helper] socket`) can do
+neither. Before da60bbd such a node retried every hold every 30 seconds on `systemctl`'s "Access denied" and stayed
+`binding` forever, logging nothing above debug. Now:
+
+- **Hello claims nothing.** A GPU host normally advertises the capabilities `cdi`, `devices.limits` and
+  `binding.kubernetes` (and `nvml` when `nvidia-smi` answered). An unprivileged node advertises none of the first
+  three. The gateway writes capabilities as `bc.dev/cap.<name>` system labels, and capacity requires
+  `bc.dev/cap.devices.limits` for a reservation that books host resources and `bc.dev/cap.binding.kubernetes` for a
+  Kubernetes one (`requiredCapabilities`), so neither is ever placed there.
+- **A plain hold fails at once.** A GPU reservation that books no host resources requires no capability label and can
+  still be placed on the node. bcd fails it straight away with `node-unprivileged`, writes nothing, and the control
+  plane re-places it as above.
+- **Doctor says so.** `bcd doctor` warns `gpu-binding` on a host with GPUs whose bcd would run this way, and section
+  failures are now logged (`WARN` while retrying, `ERROR` when failed).
+
+Run `bcd node` as root, or as the unprivileged `bcd` account beside a root `bcd helper` (see
+[running bcd node unprivileged](/docs/daemon/install#running-bcd-node-unprivileged)); both bind holds.
+`TestAnUnprivilegedNodeTakesNoHolds` covers the capabilities and the refusal, and the real-host e2e checks on a real
+GPU host that the node carries no `bc.dev/cap.devices.limits` label and that a GPU reservation never becomes
+`binding` or `active` there.
+
+## Kubernetes releases
+
+A plain hold is released in the pass that sees it gone. A Kubernetes hold cannot be: pods may still have its devices.
+So its release is split (`kuberelease.go`):
+
+1. **Recorded first.** The release goes into `<data_dir>/releasing.json` (0600: device ids, generation, time) before
+   anything is removed, so a crash in between never loses it.
+2. **Withdrawn.** The CDI spec and env file are removed at once. The device plugins stop advertising the devices, and
+   the kube reaper evicts pods still holding them.
+3. **Reported when free.** Each pass asks whether any pod still holds a device of the allocation (the kubelet's
+   pod-resources, and the host's pod processes for whole GPUs; unreachable counts as held). Only when none does is
+   `AllocationReleased` sent and the record dropped. A pass is triggered when the reaper frees devices, with a
+   30-second recheck as a backstop.
+4. **Claimed meanwhile.** Until reported, the devices stay claimed on the node: no new hold, VM, `gpu.reset`,
+   `diag.dcgm` or `mig-layout` gets them, and the control plane keeps them booked.
+5. **Taken back.** A spec that wants the allocation again drops the pending release unreported.
+
+A release pending longer than 5 minutes raises `KubernetesReleaseStuck` (reason `PodsHoldDevices`). An unreadable
+`releasing.json` is renamed to `releasing.json.unreadable-<unix time>` (kept, never deleted), the marker
+`<data_dir>/releasing.unreadable` is written, every GPU of the node counts as claimed, and the node reports
+`KubernetesReleasesUnreadable` (reason `ReleasesFileUnreadable`). The marker goes once the kube side reports that no
+pod holds a bcd GPU of an allocation the node does not know, or when an operator removes it. What the control plane
+does meanwhile (carrying the booking, NoSchedule) is on
+[Kubernetes workers](/docs/guides/capacity/kubernetes#release) and
+[an unreadable releases file](/docs/guides/capacity/kubernetes#an-unreadable-releases-file).
+
+## Seeing the holds
+
+- `bcd status` shows, per GPU, the allocation holding it or one of its MIG instances or slots (see
+  [bcd status](/docs/daemon#bcd-status)).
+- `ls /etc/cdi/bcd-*.json` lists the holds, and `/run/bcd/allocations/` their env files.
+- `systemctl status bcd-alloc-<allocation>.slice` shows a sliced hold's cgroup and its processes.
+- On the control plane, `reservations.get` returns the binding, with `cgroupParent` for a sliced hold (see
+  [bindings](/docs/guides/capacity/reservations#bindings)).
+
+## Tests
+
+| Test | Covers |
+| --- | --- |
+| `holds_test.go` | Atom resolution (parents, what the driver sees), conflicts across whole GPUs, parts and VMs, the spec of MIG instances, slots and limits |
+| `cdivendor_test.go` | Vendor edits per device, the common edits once, `void` dropped, `cdiVersion`, Kubernetes holds left bare, a device the vendor spec does not name, WSL's `all` device |
+| `slices_test.go`, `internal/slice/slice_test.go` | A hold with limits in its slice; the properties and huge page limits; names and cpulists refused; removal never killing a workload |
+| `holdadmission_test.go`, `admission_test.go` | Holds and VMs sharing the host's memory, `resources-exhausted`, committed memory rather than use, huge pages from the placement's nodes |
+| `gpubusy_test.go` | A VM refused a GPU a hold has; `gpu.reset` and `diag.dcgm` refusing GPUs in use by parts or VMs |
+| `kuberelease_test.go` | A Kubernetes release waiting for its pods, the stuck condition, an unreadable releases file keeping every GPU claimed |
+| `capabilities_test.go` | Hello capabilities with and without GPUs, and the unprivileged refusal |
+| `tests/e2e/bcd.test.ts` | Bind and release through a real gateway with a fakehw build, directly and from an unprivileged node beside a real `bcd helper` |

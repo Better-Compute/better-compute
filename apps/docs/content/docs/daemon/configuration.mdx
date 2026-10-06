@@ -1,0 +1,356 @@
+---
+title: config.toml reference
+metaTitle: bcd config.toml reference - every key, default, validation rule and file bcd writes
+description: Every key and section of bcd's /etc/bcd/config.toml with its type, default, validation and the modes that read it, plus the files bcd keeps under data_dir and elsewhere.
+icon: Settings2
+status: experimental
+packages: []
+sources:
+  - daemon/internal/config/config.go
+  - daemon/internal/config/toml.go
+  - daemon/cmd/bcd/agent.go
+  - daemon/cmd/bcd/helper.go
+  - daemon/cmd/bcd/site.go
+  - daemon/cmd/bcd/ramdisk.go
+  - daemon/cmd/bcd/sim.go
+  - daemon/cmd/bcd/update.go
+  - daemon/cmd/bcd/plugins.go
+  - daemon/cmd/bcd/websocket.go
+  - daemon/cmd/bcd/wellknown.go
+  - daemon/cmd/bcd/reset.go
+  - daemon/cmd/bcd/doctor.go
+  - daemon/cmd/bcd/doctor_kube.go
+  - daemon/cmd/bcd/main.go
+  - daemon/cmd/bcd/hardware_host.go
+  - daemon/internal/kube/allow.go
+  - daemon/internal/agent/state.go
+  - daemon/internal/agent/join.go
+  - daemon/internal/agent/devices.go
+  - daemon/internal/agent/hostconfig.go
+  - daemon/internal/agent/healthwatch.go
+  - daemon/internal/agent/quorum.go
+  - daemon/internal/agent/site.go
+  - daemon/internal/agent/kuberelease.go
+  - daemon/internal/agent/rebind.go
+  - daemon/internal/agent/snapshot.go
+  - daemon/internal/agent/slices.go
+  - daemon/internal/journal/bolt.go
+  - daemon/internal/selfupdate/selfupdate.go
+  - daemon/internal/runtime/volumes.go
+  - daemon/internal/inventory/passthrough.go
+  - daemon/internal/slice/slice.go
+---
+
+`bcd node`, `bcd site`, `bcd helper`, `bcd join`, `bcd sim`, `bcd doctor` and `bcd update` read one file,
+`/etc/bcd/config.toml` unless `--config` names another. The [install script](/docs/daemon/install) writes it with
+mode 0600 (0640 `root:bcd` on a node installed with `--unprivileged`); `bcd join --server` writes it when a
+machine has none, and a ramdisk writes one into the OS it deploys. This page is the reference for every key
+`daemon/internal/config` accepts. The [commands](/docs/daemon/commands) page covers the flags, and
+[troubleshooting](/docs/daemon/troubleshooting) covers what goes wrong.
+
+## Format
+
+The parser accepts a documented subset of TOML 1.0, and refuses everything else with a line number, so a typo
+fails loudly instead of being ignored:
+
+| Accepted | Refused |
+| --- | --- |
+| Comments with `#`, on their own line or after a value | Arrays, inline tables, floats, dates and times |
+| `[section]` headers with a bare name (`A-Z a-z 0-9 _ -`) | Dotted section names and `[[arrays of tables]]` |
+| `key = value` with a bare key | Dotted or quoted keys |
+| Basic strings `"..."` (escapes `\b \t \n \f \r \" \\ \uXXXX \UXXXXXXXX`) and literal strings `'...'` | Multi-line strings |
+| Decimal integers with an optional sign and `_` between digits | Unknown keys and unknown sections |
+| `true` and `false` | A key or section given twice, a value of the wrong type |
+
+A file over 64 KiB or not valid UTF-8 is refused. Top-level keys must come before the first `[section]`: as in
+TOML, a key after a header belongs to that section. Errors read like this:
+
+```text
+config /etc/bcd/config.toml: line 9: unknown key plugins.directory
+config /etc/bcd/config.toml: line 4: log.json must be true or false
+config /etc/bcd/config.toml: site is required
+```
+
+Every command that loads the file stops with exit 1 on such an error, and `bcd doctor` fails its `config` check
+with the same text. Lists (pins, bridges, CIDRs, clusters, plugin names) are comma-separated strings, since arrays
+are not accepted.
+
+## A complete example
+
+```toml title="/etc/bcd/config.toml"
+# Written by the better-compute install script. bcd refuses unknown keys.
+gateway_url = "https://gw.eu.example.com"
+site = "fsn1"
+serving_ca_spki_pin = "sha256/..."
+join_signing_key_pin = "sha256/..."
+join_encryption_key_pin = "sha256/..."
+approver_set_sha256 = "<64 lower-case hex digits>"
+command_root_sha256 = "<64 hex>,<64 hex>"
+# data_dir = "/var/lib/bcd"
+# socket_path = "/run/bcd/bcd.sock"
+
+[journal]
+max_bytes = 67_108_864
+max_events = 10_000
+
+[log]
+level = "info"
+json = true
+
+[update]
+release_pins = "sha256/...,sha256/..."
+release_threshold = 2
+release_sequence = 12
+
+[helper]
+socket = "/run/bcd-helper/helper.sock"
+user = "bcd"
+instance_bridges = "br0"
+
+[imds]
+listen = "169.254.169.254:80"
+
+[kubernetes]
+allowed_clusters = "https://10.0.0.10:6443#sha256:<64 hex>"
+```
+
+No node needs every section. The install script writes the top-level keys and only the sections its flags ask for;
+see [generate the script](/docs/daemon/install#generate-the-script).
+
+## Who reads what
+
+| Section | `node` | `site` | `helper` | `join` | `sim` | `doctor`, `update` |
+| --- | --- | --- | --- | --- | --- | --- |
+| top-level keys | yes | yes | pins, `command_root_sha256`, `data_dir` | yes | yes | yes |
+| `[journal]`, `[log]` | yes | yes | `[log]` | `[log]` | yes | |
+| `[plugins]` | yes | yes | | | | |
+| `[update]` | yes | yes | yes | | | yes |
+| `[helper]` | yes | ignored | yes | hands the identity to `user` | | yes |
+| `[websocket]` | yes | yes | | | | |
+| `[site]` | | yes | | | | `doctor` |
+| `[imds]`, `[instances]` | yes | | | | | |
+| `[kubernetes]` | yes | validated only | `allowed_clusters` | | | `doctor` |
+| `[host]` | yes | | yes | | | `doctor` |
+| `[boot]` | | yes | | | | |
+
+`bcd ramdisk` reads no file: it builds the same structure from its `bc.*` boot parameters (see
+[the ramdisk](/docs/daemon/install#the-ramdisk)). `bcd hardware`, `bcd status` and `bcd version` read none.
+
+## Top-level keys
+
+| Key | Type | Required | Default | Validation and meaning |
+| --- | --- | --- | --- | --- |
+| `gateway_url` | string | yes | | `https://` with a host and no user info, else "gateway_url must be an https:// URL without credentials". The regional gateway bcd dials; port 443 unless given. `http://` only with `dev_insecure_h2c` |
+| `site` | string | yes | | Non-empty, no whitespace. The site id; a configuration `bcd join --server` writes holds the site the join answered |
+| `serving_ca_spki_pin` | string | yes | | A pin (below). Pins the gateway's serving CA: bcd trusts no system root for the gateway, and the chain the gateway sends must contain a CA with this SPKI |
+| `join_signing_key_pin` | string | yes | | A pin. The JoinService key that signs `JoinResponse` and the `SignedTrustBundle` `bcd helper` takes roots from |
+| `join_encryption_key_pin` | string | yes | | A pin. The JoinService key the token is sealed to; `join-encryption.jwk` (or the well-known key) is used only when it matches |
+| `approver_set_sha256` | string | no | | 64 lower-case hex digits. The only approver set a daemon without approver keys takes first; until it has that set it runs no destructive command. See [pinning the first set](/docs/operations/pki#pinning-the-first-set) |
+| `command_root_sha256` | string | no | | 1 to 16 comma-separated lower-case hex SHA-256 digests of command-signing root certificates (DER). `bcd helper` applies a `host.unit` only from a spec signed under them; see [signed specs](/docs/daemon/host-config#signed-specs) |
+| `data_dir` | string | no | `/var/lib/bcd` | Absolute path. Identity, journal and every other file in [the data directory](#the-data-directory) |
+| `socket_path` | string | no | `/run/bcd/bcd.sock` | Absolute path of the status socket that `bcd status` reads (its `--socket` flag does not read this key; pass the same path) |
+| `gateway_server_name` | string | no | | The name the gateway certificate must carry instead of `gateway_url`'s host: a gateway reached by IP address, behind an L4 balancer, or from WSL. Also the default `[websocket] audience` |
+| `dev_insecure_h2c` | bool | no | `false` | Allows `http://` (cleartext HTTP/2) for `gateway_url`, and `ws://` for `[websocket] url`. A host build refuses to start with it ("dev_insecure_h2c is only accepted by fakehw development builds") |
+
+A **pin** is `sha256/` followed by the standard base64 of the 32-byte SHA-256 of a SubjectPublicKeyInfo, the form
+HPKP and `curl --pinnedpubkey` use. Anything else is "a pin must be sha256/ followed by the standard base64 of a
+32-byte digest". The three pins come from the sealed PKI bundle (`bootstrapPins` in `better-compute/pki`, or
+`daemon install-script`); they are the node's trust anchors, never taken from the network. A `bcd join` pin flag
+that differs from the file is refused ("--serving-ca-pin does not match /etc/bcd/config.toml").
+
+## [journal]
+
+| Key | Type | Default | Validation and meaning |
+| --- | --- | --- | --- |
+| `max_bytes` | integer | `67108864` (64 MiB) | 1 to 64 MiB: may lower the cap, never raise it. The bbolt journal's size bound |
+| `max_events` | integer | `10000` | 1 to 10,000. Unacked events kept; when full, metric events are dropped oldest first, results and transitions never |
+
+See [the journal](/docs/daemon/delivery#the-journal).
+
+## [log]
+
+| Key | Type | Default | Validation and meaning |
+| --- | --- | --- | --- |
+| `level` | string | `info` | `debug`, `info`, `warn` or `error` |
+| `json` | bool | `true` | JSON lines on standard error; `false` for text. `bcd ramdisk` always logs JSON |
+
+## [update]
+
+Self-update ([self-update](/docs/daemon/install#self-update)). Without release pins bcd takes no new binary:
+the control plane alone can never hand a node one.
+
+| Key | Type | Default | Validation and meaning |
+| --- | --- | --- | --- |
+| `release_pins` | string | | Comma-separated pins of the release-signing keys; a pin listed twice counts once |
+| `release_threshold` | integer | `1` | At least 1, at most 16, and at most the number of distinct pins when pins are set. How many distinct pinned keys must have signed a release manifest |
+| `release_sequence` | integer | `0` | Not negative. The release the node was installed at: no manifest with a lower sequence is taken. The floor is the highest of this, the sequence linked into the binary, and the recorded floor in `update.json` |
+| `entrypoint` | string | `/usr/local/bin/bcd` | Absolute path; the binary `bcd.service` starts. The first update makes it a symlink to the slots' `current`. Under `[helper]` it may not be inside `data_dir` |
+| `slots_dir` | string | `<data_dir>/bin`; under `[helper]` `/usr/local/lib/bcd` | Absolute path for `bcd-a`, `bcd-b`, `current`, `previous`, `slots.json` and, beside them, `upgrade.json` and `update.json`. Under `[helper]` it may neither be inside `data_dir` nor contain it |
+
+<Callout type="warn" title="Why the slots stay out of data_dir under the helper">
+Under `[helper]` the unprivileged node owns `data_dir`. Slots or an entrypoint there would let it plant the binary
+root adopts and runs, so the configuration is refused ("under bcd helper, update.slots_dir may not be inside
+data_dir"; c139b9c, 9e71b1f), and `bcd helper` also refuses to start unless every directory down to the slots and
+the entrypoint is root's alone.
+</Callout>
+
+Without `slots_dir` and without `[helper]`, `upgrade.json` and `update.json` stay in `data_dir`.
+
+## [helper]
+
+Privilege separation: `bcd node` runs as `user` and sends its privileged work to `bcd helper`, as root, on
+`socket`. See [running bcd node unprivileged](/docs/daemon/install#running-bcd-node-unprivileged).
+
+| Key | Type | Default | Validation and meaning |
+| --- | --- | --- | --- |
+| `socket` | string | | Absolute path. Empty: no helper, and `bcd node` does its privileged work itself (as root). The install script uses `/run/bcd-helper/helper.sock`, outside the node's `/run/bcd` |
+| `user` | string | | Required with `socket`, never `root` ("helper.socket needs an absolute path and helper.user, the unprivileged account bcd node runs as"). The account `bcd node` runs as and the only non-root caller the helper serves |
+| `instance_bridges` | string | | Comma-separated interface names (1 to 15 of `A-Z a-z 0-9 _ . -`), else "helper.instance_bridges: ... is not an interface name". The bridges an instance NIC may join: the helper refuses any libvirt domain or `cloud-hypervisor` tap on another bridge, and with none set defines no NIC at all |
+
+Security notes:
+
+- The helper reads its own copy of this file as root and refuses to start unless it is a regular file root owns,
+  writable by no one else, in directories only root can write. `[host] units`, `command_root_sha256` and the join
+  pin in it decide what root does for the node, so never hand the file to the `bcd` account or make it
+  group-writable.
+- The socket's directory must be root's and closed to group and other writes; the helper creates the socket there
+  with mode 0660, group the node user's primary group.
+- The helper serves a peer only when its uid and gid are `user`'s (or root) and its `/proc/<pid>/exe` is the
+  entrypoint, a slot binary or the helper's own binary.
+- `bcd join` running as root with this section hands `identity.json` and `node.key` to `user` when it finishes, and
+  keeps root's signed join record that the helper binds host units to.
+
+## [plugins]
+
+bcx driver plugins (see [driver plugins in bcd](/docs/extending/drivers#driver-plugins-in-bcd) and [the plugin
+sandbox](/docs/extending/drivers#the-plugin-sandbox)). Read by `bcd node` and `bcd site`.
+
+| Key | Type | Default | Validation and meaning |
+| --- | --- | --- | --- |
+| `dir` | string | | Directory holding the plugin binaries and their `pins` file (sha256sum format). Empty: no plugin runs. A missing `pins` file logs "no plugin pins; no plugin runs" |
+| `user` | string | | Who plugins run as when bcd is root. `root` or `0` is refused. Unset, each plugin gets its own uid and gid from `0x7FFE0000` to `0x7FFEFFFF`, assigned in name order |
+| `privileged` | string | | Comma-separated plugin names that run as root with no shim and no seccomp filter, such as a Kata runtime; each logs "privileged plugin: root, no seccomp filter" |
+| `sandbox` | bool | `true` | Run other plugins through bcd's `__bcx-exec` shim with `no_new_privs` and a seccomp filter. Linux only: elsewhere set `false` or no plugin starts |
+| `cgroup` | string | | An absolute path ("plugins.cgroup must be an absolute path"), meant to be a directory under `/sys/fs/cgroup` in bcd's delegated cgroup; each plugin runs in a child `bcx-<name>`. If it cannot be prepared, no plugin runs ("the plugins' cgroup is not usable; no plugin runs") |
+| `memory_max` | integer | `0` (none) | Not negative. Each plugin cgroup's `memory.max` in bytes |
+| `pids_max` | integer | `0` (none) | Not negative. Each plugin cgroup's `pids.max` |
+
+A node with `[plugins]` needs the systemd drop-in that gives bcd `CAP_SETUID`, `CAP_SETGID` and its delegated
+cgroup; see [the plugin drop-in](/docs/daemon/install#the-plugin-drop-in). `--unprivileged` cannot host plugins.
+
+## [websocket]
+
+The [WebSocket fallback](/docs/daemon/protocol#websocket-fallback-v04) for networks whose TLS-inspecting proxy
+strips client certificates. Read by `bcd node` and `bcd site`; setting `url` turns it on.
+
+| Key | Type | Default | Validation and meaning |
+| --- | --- | --- | --- |
+| `url` | string | | `wss://` with a host and no user info (`ws://` only with `dev_insecure_h2c`), else "websocket.url must be a wss:// URL without credentials". The gateway's `.../v1/session` endpoint |
+| `proxy_ca_file` | string | | Absolute path of a PEM file holding the proxy's CA ("websocket.proxy_ca_file: ... holds no PEM certificate" otherwise). Trusted for the TLS connection only, never for the gateway's own proof, which must chain to the pinned serving CA |
+| `audience` | string | `gateway_server_name`, else the URL's host | The gateway's public host the node's proof names |
+
+Over the fallback bcd takes only signed commands and specs and opens no tunnels; a node whose trust bundle holds no
+command-signing roots refuses to dial ("the WebSocket fallback needs command-signing roots (every command and spec
+signed)"). Renewals go to `POST /v1/renew` on the same endpoint.
+
+## [site]
+
+| Key | Type | Default | Validation and meaning |
+| --- | --- | --- | --- |
+| `bmc_networks` | string | | Comma-separated CIDRs ("site.bmc_networks: ... is not a CIDR" otherwise). A site agent never sends `site.httpProxy` into them, whatever the control plane asks; doctor warns a site agent without it |
+
+## [boot]
+
+A site agent's boot server, read only by `bcd site`. See [a site agent](/docs/daemon/install#a-site-agent) for an
+example and [sites](/docs/guides/bare-metal/sites#the-boot-server-in-bcd-site) for its behaviour.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `listen` | string | | HTTP address of the boot server, e.g. `0.0.0.0:8080`; empty turns it off. Needs `join-encryption.jwk` beside the configuration |
+| `url` | string | | How machines reach the boot server; ramdisks it boots get `<url>/cache` as their image cache |
+| `kernel`, `initrd` | string | | URLs of the site's ramdisk kernel and initramfs |
+| `cmdline` | string | | Appended to every ramdisk's kernel command line |
+| `server_ip` | string | | The agent's IPv4 address on the provisioning network |
+| `proxy_dhcp` | bool | `false` | Answer PXE clients on UDP 67 and 4011 |
+| `tftp`, `tftp_root` | string | | TFTP's UDP address (e.g. `:69`) and the directory of iPXE builds |
+| `cache_max_bytes` | integer | `0` (unbounded) | The image cache's budget; least recently used images go first, never one `cache_images` still names |
+
+`proxy_dhcp` and `tftp` need `server_ip` (IPv4) and `url`, or `bcd site` exits 2. These keys are checked when
+`bcd site` starts, not when the file is parsed.
+
+## [imds]
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `listen` | string | | Where `bcd node` on a VPS host serves its instances' metadata service, for example `169.254.169.254:80` on the instances' bridge. Empty turns it off. A failure to serve is logged ("metadata service stopped"), not fatal |
+
+## [instances]
+
+| Key | Type | Default | Validation and meaning |
+| --- | --- | --- | --- |
+| `balloon_floor_percent` | integer | `50` | 10 to 100, else "instances.balloon_floor_percent must be between 10 and 100". The share of its memory a ballooned guest always keeps; see [memory ballooning](/docs/daemon/delivery#memory-ballooning) |
+
+## [kubernetes]
+
+| Key | Type | Default | Validation and meaning |
+| --- | --- | --- | --- |
+| `allowed_clusters` | string | | Comma-separated `https://host[:port]#sha256:<64 hex>` (the API server and its CA certificate's SHA-256; no path). The only clusters the `k8s-join` unit may join this machine to. Empty refuses every join, as root and under the helper alike. A malformed entry stops `bcd node` and `bcd helper` from starting |
+| `gpu_api` | string | `device-plugin` | `device-plugin` or `dra`. How a node bcd did not join itself (a DaemonSet) offers bound GPUs to the kubelet; any other value stops the agent with `[kubernetes] gpu_api must be "device-plugin" or "dra"` |
+
+Joining a cluster hands it root on the machine (privileged pods), which is why root, not the control plane, names
+the clusters. See [k8s-join](/docs/daemon/host-config#k8s-join) and [GPUs for pods](/docs/daemon/kubernetes#gpus-for-pods).
+Both keys are validated by the agent at start (`bcd node`, `bcd site`) and `allowed_clusters` also by `bcd helper`
+and `bcd doctor`, not by the parser, so a bad entry does not stop `bcd join` or `bcd update`.
+
+## [host]
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `units` | bool | `true` | `false` when something else manages the host's configuration, such as the NVIDIA GPU operator beside [bcd as a DaemonSet](/docs/daemon/kubernetes): bcd applies no `NodeSpec.host` unit and reports the section `UNSUPPORTED` with reason `HostManagedExternally`. `bcd helper` honours its own root-owned copy, refusing every `host.unit` |
+
+## The data directory
+
+`data_dir` (default `/var/lib/bcd`, mode 0700) is bcd's own. Under `[helper]` it belongs to the `bcd` account, so
+nothing root trusts lives there.
+
+| Path under `data_dir` | Written by | Holds |
+| --- | --- | --- |
+| `node.key` | `bcd join`, renewals | The node key (0600): PKCS#8 PEM, or a `BCD TPM NODE KEY` record of a key in the TPM |
+| `node.key.next` | renewals | The next key until its certificate is stored; promoted or discarded on the next load |
+| `identity.json` | `bcd join`, renewals, `Welcome` | Node id, site, role, certificate chain, expiry, trust bundle and the server time mark (0600) |
+| `journal.db` | the agent | The bbolt journal: commands, results, events, specs, spent exec-ticket ids |
+| `journal.db.corrupt-<unix>` | the agent | A journal that did not open, moved aside; a new one starts |
+| `journal.db.<old node>-<unix>` | `bcd join` | The journal of an earlier identity, moved aside by a join as another node |
+| `<name>.reset-<UTC time>` | `bcd join --reset --yes` | The identity, key, next key and journal moved aside; never deleted by bcd |
+| `faults.json` | the agent | This boot's XID conditions, so a restart in the same boot keeps them |
+| `gpus-seen.json` | `bcd node` (host builds) | GPUs the driver had, so one passed through to a VM keeps its inventory entry and PCI address |
+| `host-intent.json` | `bcd node` | The signed spec that last set the host section (0600), which `bcd helper` checks units against |
+| `releasing.json` | `bcd node` on Kubernetes | Pending Kubernetes releases |
+| `instances-rebound.json` | `bcd node` | Instances whose identity was rebound after a memory restore |
+| `batch-leaves.json`, `unbatched-destructive.json` | quorum nodes | Batch leaves already run; the rolling-hour count of unbatched destructive commands |
+| `bmc-hosts.json`, `boot-entries.json` | `bcd site` | BMCs the agent has driven; persisted boot entries |
+| `cache/` | `bcd site` | The image cache, `cache/<sha256>` |
+| `snapshots/` | `bcd node` | Snapshots being uploaded or restored |
+| `staging/` | `bcd node` | Self-update downloads, `staging/bcd-<version>` |
+| `bin/` | self-update | The slots (`bcd-a`, `bcd-b`, `current`, `previous`, `slots.json`) unless `[update] slots_dir` or `[helper]` moves them |
+| `upgrade.json`, `update.json` | self-update | A swap awaiting its `Welcome`; the release floor and failed versions (here only without `slots_dir` and `[helper]`) |
+| `libvirt/`, `cloud-hypervisor/` | the runtimes | Instance disks, seeds, base images and records (`instances/<id>/vm.json`) |
+| `volumes/` | the runtimes | Persistent volumes `<id>.raw` and `<id>.json` (0600) |
+| `sim/<i>/` | `bcd sim` | One simulated machine's whole data directory |
+
+Outside `data_dir`:
+
+| Path | Holds |
+| --- | --- |
+| `/etc/bcd/config.toml`, `/etc/bcd/join-encryption.jwk` | This file and the JoinService encryption key (public) |
+| `socket_path` (`/run/bcd/bcd.sock`) | The status socket, 0600 |
+| `/etc/cdi/bcd-<allocation>.json` | CDI specs of GPU holds (root's, or the helper's) |
+| `/run/bcd/allocations/<allocation>.env` | Each hold's env file, rewritten when missing after a reboot |
+| `/run/bcd/instances.nft` | The instance firewall ruleset |
+| `/sys/fs/cgroup/bcd.slice/bcd-alloc.slice/bcd-alloc-<allocation>.slice` | A hold's cgroup slice, created through `systemctl` |
+| `/var/lib/bcd-hostconfig/` | Root's host-unit records, `k8s-join.json`, `helper-intent.json` and the helper's libvirt staging |
+| `[update] slots_dir`, `[update] entrypoint` | The binary slots and the link `bcd.service` starts |
+| `/etc/systemd/system/bcd-rollback.service`, `bcd.service.d/50-bcd-rollback.conf` | Written by the first self-update under systemd |
+| `[helper] socket` | The helper's socket, 0660 |
+
+The install script's own files and units are listed in [files on the host](/docs/daemon/install#files-on-the-host).

@@ -1,0 +1,296 @@
+---
+title: High availability
+metaTitle: High availability of workers, gateways and site agents
+description: How worker processes share 256 shards and the singleton jobs through table leases, how a dead worker's or gateway's work moves and how fast, what fences a process that lost its lease, and why it all needs PostgreSQL.
+icon: Layers
+status: experimental
+packages: ['@better-compute/server', '@better-compute/gateway', '@better-compute/postgres', '@better-compute/core']
+sources:
+  - packages/server/src/runtime/leases.ts
+  - packages/server/src/runtime/workers.ts
+  - packages/server/src/runtime/reconcilers.ts
+  - packages/server/src/runtime/index.ts
+  - packages/server/src/options.ts
+  - packages/server/src/controllers/site-boot.ts
+  - packages/server/src/self-check.ts
+  - packages/gateway/src/gateway.ts
+  - packages/gateway/src/store.ts
+  - packages/observability/src/instrument.ts
+  - tests/realtime/lease-ha.test.ts
+---
+
+Better Compute has no leader election, no consensus protocol and no coordination service. Every process that must
+be the only one doing something holds a row in the `leases` table, and every write that depends on that holds the
+lease row for the length of its transaction. Availability then comes down to three questions: how many processes of
+each role you run, how quickly a dead process's leases move, and what stops a process that has lost its lease from
+writing anyway. This page answers them from the code and the tests. The topology itself (how many of each role,
+behind which balancer) is on [deployment](/docs/operations/deployment#a-highly-available-region).
+
+<Callout type="info" title="Where the numbers come from">
+The failover times below come from `tests/realtime/lease-ha.test.ts`, two worker processes on one PGlite store on the
+wall clock, and from the gateway-kill benchmark in the fleet simulator, which runs in simulated time. Neither is a
+measurement on PostgreSQL or on separate hosts.
+</Callout>
+
+## What needs a lease
+
+| Role | State | Single-writer by | Survives losing a process |
+| --- | --- | --- | --- |
+| api | None | Nothing: stateless | Yes, behind a load balancer; clients retry with idempotency keys |
+| Worker, sharded reconcilers | Work-queue claims | `shard:<n>` leases (or `scheduler/shard:<n>`) | Yes: shards move to the surviving workers |
+| Worker, singleton jobs | Cursors, sweeps | One `singleton:<job>` lease each | Yes: the lease moves to another worker |
+| Gateway | Sessions in memory | One `gateway:<id>` lease per process, and the per-node session epoch | Its sessions are lost; nodes redial another gateway |
+| Site agent (bare metal) | The active boot server | `site:<id>:boot` | Yes, with a standby agent at the site |
+| PostgreSQL | Everything durable | — | Only through your PostgreSQL HA |
+
+Lease names are checked against `^[A-Za-z0-9._:@/-]{1,200}$` and TTLs are whole milliseconds up to a day. The name
+`pool:<id>` is reserved in the code but held by nothing today: the pool-lease placer runs under the shard lease of
+its pool's shard. The metrics database collector takes one more row, `metrics:command-latency`, so that only one
+process observes command latency (see [the database collector](/docs/operations/observability#the-database-collector)).
+
+## Leases
+
+A lease is a row `(name, owner, epoch, expires_at)`. Acquiring and renewing are the same guarded update, so there is
+no separate election step:
+
+```sql
+UPDATE leases SET owner = $2,
+    epoch = CASE WHEN owner = $2 THEN epoch ELSE epoch + 1 END,
+    expires_at = compute_now() + make_interval(secs => $3::float8)
+  WHERE name = ANY($1::text[]) AND (owner = $2 OR expires_at < compute_now())
+  RETURNING name, epoch, expires_at, compute_now() AS now
+```
+
+- A process takes a lease only when it already holds it or the lease has expired. A live lease never changes hands.
+- The epoch rises on every change of owner, never on a renewal. A missing row is first inserted unowned and expired,
+  so the first holder gets epoch 1.
+- All of a worker's leases are renewed in one statement per pass (`acquireMany`).
+- Time is `compute_now()`, the database's clock, never the process's. Every renewal also samples it, and a process
+  more than 1 second off raises `ClockSkew` (see [one clock](/docs/operations/database#one-clock)).
+- Releasing sets `owner = NULL` and `expires_at = '-infinity'`, so a successor need not wait for the TTL.
+
+### Fencing
+
+Holding a lease is not enough: a process can pause (a long GC, a stalled VM) past its TTL and wake up believing it
+still owns the shard. So every transaction a reconciler or singleton job opens through `ctx.sql` starts with the
+fence, and a read-only transaction skips it:
+
+```sql
+SELECT 1 AS held FROM leases
+ WHERE name = $1 AND owner = $2 AND epoch = $3 AND expires_at > compute_now() FOR SHARE
+```
+
+If the row no longer matches, the transaction fails with `CONFLICT` ("Lease … is no longer held") and nothing it
+would have written commits. If it does match, the `FOR SHARE` lock makes a takeover's `UPDATE` wait until the
+transaction ends, so the old holder either finishes its transaction before the new one starts or never starts it. A
+bare `EXISTS` would not fence under `read committed`. Nested transactions are savepoints of the fenced one. See
+[leases and fencing](/docs/guides/concepts/consistency#leases-and-fencing) for why this, rather than an advisory
+lock, keeps PgBouncer's transaction pooling safe.
+
+## Workers and shards
+
+Every sharded reconciler key (a node, a pool) maps to one of 256 shards by FNV-1a hash (`shardOf` in
+`@better-compute/core`). Worker processes share the shards like this:
+
+1. **Heartbeat.** Each worker upserts its row in `workers` (`heartbeat_at = compute_now()`) on every membership pass.
+2. **Live set.** The live workers of its group are those that heartbeated within `liveWorkerMs` (30 seconds).
+3. **Rendezvous hashing.** For each shard, the owner is the live worker with the highest
+   `hash32("<worker>#<shard>")` (FNV-1a with murmur3's finalizer; ties go to the lower id). Every worker computes the
+   same answer from the same rows, with no coordination.
+4. **Take and let go.** A worker releases the shard leases it holds but no longer owns, then acquires or renews the
+   ones it owns, 15-second TTL.
+
+Adding a worker moves only the shards rendezvous hashing now assigns to it, about 1/N of them; the others stay put.
+A shard moves only when its holder lets it go on its next pass, or when its lease expires.
+
+**Groups.** Each worker role that runs sharded reconcilers has a membership of its own. The `controllers` group uses
+rows `<id>` and leases `shard:<n>`; the `scheduler` group, which runs reconcilers that declare `role: 'scheduler'`
+(the pool-lease placer), uses rows `scheduler/<id>` and leases `scheduler/shard:<n>`. So a scheduler-only process
+never takes node shards, and the placers scale apart from the controllers. A role with no sharded reconciler
+registered holds no shard leases at all.
+
+**Orphan shards.** A worker that stops renewing but whose heartbeat is not yet 30 seconds old is still in the live
+set, so rendezvous hashing still names it. Since 4eb0b7e the others do not wait for it to leave: a desired owner
+whose heartbeat is older than one lease TTL (15 seconds) is silent, and its shards are orphans. Every survivor tries
+to take the orphans on each pass, which succeeds only once a lease has expired, so the first survivor to try after
+expiry holds it. It keeps an orphan until the silent worker heartbeats again (the shard is then let go and its
+desired owner takes it back) or drops out of the live set (rendezvous hashing then names a new owner among the
+survivors). The acquire bumps the epoch, so fencing is unchanged. Rows of workers silent for 20 times `liveWorkerMs`
+(10 minutes) are deleted.
+
+### The renewal loop
+
+Renewals run on a timer of their own, the `lease-renewal` loop, never inside a reconcile batch, so a long batch
+cannot starve them (4eb0b7e). The loop ticks every `max(50, min(1000, renewMs / 5))` milliseconds (1 second by
+default); a tick costs nothing unless something is due, and then the membership pass and every due singleton are
+renewed in one statement each. A membership pass is due every `renewMs` (5 seconds), or earlier when a held lease
+has less than a third of its TTL left. A singleton is due once it was last taken `renewMs` ago.
+
+| Setting | Value | Configurable |
+| --- | --- | --- |
+| Shard and singleton lease TTL | 15 s | No (`leaseTtlMs`) |
+| Renewal period | 5 s | No (`renewMs`) |
+| Live worker window | 30 s | No (`liveWorkerMs`) |
+| CommandSweeper period | 5 s | No |
+| Claimed work item lease | 60 s | `worker.claimTtlMs` |
+| Level-trigger resync | 5 min plus jitter | `worker.resyncMs` |
+
+The configurable worker options are on [configuration](/docs/operations/configuration#worker). The work queue's own
+claims (`claimed_until`) are a second, independent safety net: a key claimed by a worker that died becomes claimable
+again after `claimTtlMs`, and a successful run deletes it only at the generation it claimed, so no wake-up is lost.
+
+### Singleton jobs
+
+Jobs that must run in exactly one place take a `singleton:<name>` lease on whichever worker gets it first:
+
+| Lease | Job | Worker role |
+| --- | --- | --- |
+| `singleton:command-sweeper` | The CommandSweeper: expires and fails commands past their deadlines | `controllers` |
+| `singleton:<reconciler>` | Each reconciler declared `shardBy: 'none'`: among them the Liveness controller, site boot, `capacity.reservations`, `capacity.usage`, retention, the rollout controller, the quorum batches, audit checkpoints and the IAM bridge's jobs | `controllers` (or `scheduler` for a scheduler reconciler) |
+| `singleton:outbox-dispatch:<sink>` | Outbox delivery to one event sink, from its stored cursor | `sinks` |
+| `singleton:iam:<job>` | Each IAM job of the embedded Better IAM host | `iam` |
+
+One lease per sink means several `sinks` workers split the sinks between them and a slow sink never holds the
+others back. A new epoch on a sink lease means this process has just taken it over and resumes from the cursor the
+previous holder saved after its last delivered batch, so delivery is at least once.
+
+### Worker failover
+
+`tests/realtime/lease-ha.test.ts` starts worker A with the `controllers` role, lets it take every shard and singleton
+lease, starts worker B, then kills A's database connection (no release, nothing it was running commits) while keys
+are enqueued continuously. It asserts that B holds every lease A held within the TTL plus a renewal period plus 2
+seconds of slack (22 seconds), that B keeps working afterwards, and that no key ever ran on both workers at once.
+
+| Measured on PGlite | Before 4eb0b7e | Since 4eb0b7e |
+| --- | --- | --- |
+| Singleton leases taken over | about 13 s | about 13 s |
+| All 256 shard leases taken over | 30 to 34 s (waited for A's heartbeat to leave the 30 s live window) | about 18.7 s (orphans taken as they expire) |
+| Lease renewal gap, p99 | 10.2 s | 5.2 s |
+
+The theoretical bound for a killed worker is the 15-second TTL plus up to one 5-second renewal period. A worker
+stopped with SIGTERM releases its leases and leaves the `workers` table at once (see
+[shutdown](/docs/operations/deployment#shutdown)), so its shards and singletons move on the survivors' next pass.
+
+While no worker runs at all, nothing new is decided: gateways keep dispatching commands that are already pending
+and keep ingesting results, but no reconciler runs and no command is swept. `doctor` reports work more than 5
+minutes overdue as `workers.queue`, adding "and no worker is alive" when no worker heartbeated in the last minute,
+and a stalled sweeper as `workers.sweeper`.
+
+## Gateways
+
+A gateway holds sessions in memory and nothing durable; see [memory and PostgreSQL](/docs/daemon/gateway#memory-and-postgresql).
+Its availability rests on two fences.
+
+**The gateway lease.** Each gateway process holds `gateway:<id>` (20-second TTL, renewed every 5 seconds; both
+configurable through `host.gateway.options` as `gatewayLeaseTtlMs` and `leaseRenewMs`). The id is a fresh `gw_…` per
+process unless you set one. Every routing transaction (the `Hello` transaction, dispatch) starts by re-reading the
+lease `FOR SHARE`. When another owner holds it, or renewals have failed for half the TTL (10 seconds), the gateway
+fences itself: it forgets the lease and closes every stream `UNAVAILABLE`. No other gateway ever takes a dead
+gateway's lease over; it simply expires. See [the lease and fencing](/docs/daemon/gateway#the-lease-and-fencing).
+
+**The session epoch.** Each node's `node_sessions` row carries a `session_epoch` that every `Hello` bumps while it
+routes the node to its own gateway. Routing and liveness writes carry `AND session_epoch = $myEpoch`, so a gateway
+whose node has said `Hello` elsewhere matches no row, learns that its session is a zombie and closes it. Results and
+events are facts and are accepted from any epoch, deduplicated. See [epochs and fencing](/docs/daemon/sessions#epochs-and-fencing).
+
+### Several gateways
+
+Gateways share nothing but PostgreSQL. A command is routed to a gateway by a join on `node_sessions.gateway_id` at
+dispatch time, so when a node reconnects through another gateway nothing needs rewriting, and `FOR UPDATE SKIP
+LOCKED` lets every gateway dispatch side by side. Run three or more per region behind an L4 balancer with TLS
+passthrough, each with headroom below `maxStreams` (5,000 by default) for the sessions of a lost peer: with three
+gateways, losing one moves a third of the region's nodes onto the other two. See
+[several gateways](/docs/daemon/gateway#several-gateways) and [admission and scale](/docs/daemon/gateway#admission-and-scale).
+
+### Gateway failover
+
+When a gateway dies:
+
+1. Its daemons see their streams end and redial with full-jitter back-off (0 to 1 second at first, doubling to 60
+   seconds); the balancer sends them to a live gateway, whose handshake bucket (200 per second), `maxPendingHellos`
+   (64) and retry pushback pace the herd.
+2. Each `Hello` bumps the epoch, routes the node to the new gateway and replays in-flight commands; the daemon's
+   journal deduplicates them.
+3. Nodes that do not come back become `disconnected` once the dead gateway's lease expires (20 seconds), and
+   `unreachable` only after the 40-second session lease plus a 120-second gateway-loss grace. Neither transition
+   releases an allocation.
+
+In the fleet simulator with three real gateways and the real control plane (`bench/multi-gateway`, simulated time),
+killing one gateway re-homed its nodes with these results:
+
+| Nodes | Moved | Re-home p50 | p99 | Invariant violations |
+| --- | --- | --- | --- | --- |
+| 1,000 | 334 | 0.5 s | 1.0 s | 0 |
+| 10,000 | 3,334 | 3.25 s | 13.25 s | 0 |
+
+PLAN.md's v0.4 gate is recovery under 60 seconds with no false unreachable marks and no duplicate executions. The
+details, and the zombie-gateway case, are on [failure modes](/docs/daemon/failure-modes#gateway-crash).
+
+A planned restart should drain instead: `serve` on SIGTERM sends every daemon `Drain` with a random delay of up to 60
+seconds and releases the lease, so the region absorbs the reconnects gradually.
+
+### Tunnels
+
+An interactive tunnel is relayed by the gateway that holds the node's session and dies with it. The caller opens a
+new one. Nothing else about tunnels is replicated.
+
+## Site agents
+
+A bare-metal site runs two site agents. The `site:<id>:boot` lease (15-second TTL) names the one connected agent that
+answers proxy DHCP and iPXE and vouches for discovery; its epoch rises on every change of holder and is published to
+the holder in its NodeSpec (`site.boot = { active, epoch }`). A holder that disconnects keeps the lease until it
+expires and self-fences after the TTL; only then is the first connected standby (by node id) promoted. The lease
+never changes hands while it is live, so two agents never both believe they are active at one epoch. BMC access and
+the image cache work on both agents at all times. See [one active boot server per site](/docs/guides/bare-metal/sites#one-active-boot-server-per-site).
+
+## PostgreSQL
+
+Every mechanism above is a table in one PostgreSQL database, so the database is the one component whose availability
+is not provided by the code.
+
+**Why PostgreSQL and not PGlite.** PGlite runs PostgreSQL in WebAssembly inside one process, on one connection, with
+every transaction serialized. Separate worker, api and gateway processes cannot share it, so on PGlite there is
+nothing to fail over to. `examples/postgres`, the production-shaped example, refuses `pglite:` URLs. Use PGlite for
+development, tests and the simulators only; see [database](/docs/operations/database#pglite).
+
+**What an outage does.** Nothing durable is lost, and the fleet stops changing until the database is back:
+
+| Component | During the outage | After |
+| --- | --- | --- |
+| Gateways | Cannot renew their leases, fence within 10 seconds, drop every stream, refuse new sessions `UNAVAILABLE` | Admit sessions again once a renewal succeeds |
+| Workers | Every loop logs its failed pass and retries; leases expire | Retake leases with new epochs |
+| Daemons | Back off up to 60 seconds, keep enforcing their last spec, keep results and events in the journal | Replay on the next `Welcome` |
+| Liveness | A sweep gap above 20 seconds holds every timed transition back for 5 minutes | No node is marked unreachable for the outage itself |
+
+The `pg` pool drops an idle connection that errors and reconnects on the next checkout, so a restarted or promoted
+server needs no process restart. PLAN.md sizes this for a database failover of about 30 seconds. See
+[PostgreSQL unavailable](/docs/daemon/failure-modes#postgresql-unavailable).
+
+**Recommendations** (not enforced by anything in the code):
+
+- Run PostgreSQL as a primary with a standby and automatic failover, behind PgBouncer in transaction mode, as PLAN.md's
+  HA region does. `postgres()` keeps no session state, so it is safe behind it (see
+  [pooling and PgBouncer](/docs/operations/database#pooling-and-pgbouncer)).
+- Prefer synchronous replication. A failover to an asynchronous standby that lost recent commits is, for the lost
+  transactions, a small point-in-time restore, with the consequences described in
+  [restoring an older database](/docs/operations/backup-and-recovery#what-a-restore-cannot-bring-back).
+- Keep clocks synchronized on every host. Leases use the database clock, but `ClockSkew` findings and certificates
+  still compare times.
+
+## Checklist
+
+| Goal | What to run |
+| --- | --- |
+| No single api | Two or more `--roles api` processes behind an L7 balancer with `/readyz` |
+| Workers fail over in about 20 s | Two or more worker processes with the same roles (`controllers,sinks,iam`, plus `scheduler` with the pool-lease placer) |
+| A gateway loss is a reconnect | Three or more gateways per region behind an L4 balancer, each with room for a lost peer's sessions |
+| PXE survives an agent | Two site agents per site |
+| The database survives a host | PostgreSQL HA with PgBouncer |
+| You notice | `doctor`'s `workers.queue`, `workers.sweeper`, `fleet.gateway-headroom` and `fleet.heartbeats`, and `better_compute_gateway_lease_held` with the gateway loop series on [observability](/docs/operations/observability#what-to-alert-on). There is no metric for worker shard or singleton leases; read the `leases` table |
+
+<Cards>
+  <Card title="Deployment" href="/docs/operations/deployment">Roles, balancers and the serve host.</Card>
+  <Card title="Failure modes" href="/docs/daemon/failure-modes">Each failure, what it costs and which invariant holds.</Card>
+  <Card title="Scaling" href="/docs/operations/scaling">How each tier scales and what breaks first.</Card>
+  <Card title="Backup and recovery" href="/docs/operations/backup-and-recovery">When the database itself is lost.</Card>
+</Cards>

@@ -1,0 +1,453 @@
+---
+title: bcd commands
+metaTitle: bcd command reference - every subcommand, flag, exit code and doctor check
+description: Every bcd subcommand with its flags, what it does and its exit codes, plus the full list of bcd doctor checks with their statuses and fixes.
+icon: SquareTerminal
+status: experimental
+packages: []
+sources:
+  - daemon/cmd/bcd/main.go
+  - daemon/cmd/bcd/agent.go
+  - daemon/cmd/bcd/status.go
+  - daemon/cmd/bcd/hardware.go
+  - daemon/cmd/bcd/hardware_host.go
+  - daemon/cmd/bcd/helper.go
+  - daemon/cmd/bcd/helpercall_e2e.go
+  - daemon/cmd/bcd/update.go
+  - daemon/cmd/bcd/sim.go
+  - daemon/cmd/bcd/site.go
+  - daemon/cmd/bcd/ramdisk.go
+  - daemon/cmd/bcd/reset.go
+  - daemon/cmd/bcd/tokenfile.go
+  - daemon/cmd/bcd/wellknown.go
+  - daemon/cmd/bcd/plugins.go
+  - daemon/cmd/bcd/websocket.go
+  - daemon/cmd/bcd/doctor.go
+  - daemon/cmd/bcd/doctor_gpu.go
+  - daemon/cmd/bcd/doctor_host.go
+  - daemon/cmd/bcd/doctor_kube.go
+  - daemon/cmd/bcd/doctor_resources.go
+  - daemon/cmd/bcd/clock_linux.go
+  - daemon/cmd/bcd/rootdir_unix.go
+  - daemon/cmd/bcd/gpusampler_host.go
+  - daemon/internal/inventory/findings.go
+  - daemon/internal/agent/status.go
+  - daemon/internal/agent/join.go
+  - daemon/internal/bcx/sandbox_linux.go
+  - daemon/internal/nvml/smi.go
+  - daemon/internal/nvml/nvml_common.go
+---
+
+`bcd` is one binary with one subcommand per mode or local task. This page lists every subcommand the code
+registers in `daemon/cmd/bcd/main.go`, its flags exactly as defined there, what it does, and how it exits. The
+[overview](/docs/daemon#modes) explains what each mode is for, [installing bcd](/docs/daemon/install) covers the
+install script that runs most of these for you, and [the config.toml reference](/docs/daemon/configuration) covers
+the file most of them read. When something goes wrong, start with `bcd doctor` (below) and
+[troubleshooting](/docs/daemon/troubleshooting).
+
+<Callout type="info" title="What has run where">
+Every command is covered by Go unit tests, mostly against fakes (fake sysfs trees, a fake `nvidia-smi`, a fake
+`virsh`). `bcd join`, `bcd node`, `bcd helper`, `bcd sim` and `bcd update` run in `tests/e2e/bcd.test.ts` as a
+fakehw build against a real gateway. On real hardware, `bcd hardware`, `bcd doctor`'s GPU checks and an
+unprivileged `bcd node` have run on one RTX 5090 under WSL 2 (`tests/e2e/bcd-host-real.test.ts`; 0915ab7,
+f84f1f9, da60bbd). No release has been tagged, so no installed host has run any of them from a release binary.
+</Callout>
+
+## Usage and exit codes
+
+```text
+bcd <command> [flags]
+bcd <command> -h    flags of one command
+bcd help            the command list (also -h, -help, --help)
+bcd --version       same as bcd version (also -version)
+```
+
+Every command uses Go's `flag` package: flags are `-name value` or `--name=value`, booleans are `--name` or
+`--name=false`. No command takes positional arguments. bcd never echoes an unexpected argument, so a token pasted
+on the command line does not reach a log:
+
+```bash
+$ bcd join bcjt_jt_01...
+bcd join: takes no positional arguments
+bcd join reads the join token from BCD_JOIN_TOKEN, stdin or --token-file, never from arguments
+```
+
+An unknown command name is echoed only when it looks like one (lower-case letters and `-`, at most 32 characters);
+anything else prints `bcd: unknown command` alone.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Success, `-h`, or an agent mode stopped by SIGINT or SIGTERM |
+| `1` | Failure: a configuration that does not load, a refused join, a doctor check that failed, an agent that cannot start |
+| `2` | Usage error: an unknown command or flag, a positional argument, a missing token, a command this build does not have |
+
+| Environment variable | Read by | Meaning |
+| --- | --- | --- |
+| `BCD_JOIN_TOKEN` | `bcd join`, `bcd sim` | The join token; unset by bcd as soon as it is read. Redacted from support bundles |
+| `NODE_NAME` | `bcd node` on Kubernetes | The Kubernetes Node bcd runs on, as a DaemonSet sets it (see [bcd on Kubernetes](/docs/daemon/kubernetes)) |
+| `BCD_RENEW_AFTER` | fakehw builds only | A Go duration: renew this soon after start (end-to-end tests) |
+| `BCD_FAKEHW_SEED`, `BCD_FAKEHW_TPM_KEYS`, `BCD_FAKEHW_TPM_EK_CA` | fakehw builds only | The fake machine's seed and simulated TPM |
+
+## The commands
+
+| Command | Runs as | Reads `config.toml` | Long-running |
+| --- | --- | --- | --- |
+| [`node`](#bcd-node) | root, or the `[helper] user` | yes | yes |
+| [`site`](#bcd-site) | root (its own unit) | yes | yes |
+| [`ramdisk`](#bcd-ramdisk) | root, inside the PXE initramfs | no (`bc.*` boot parameters) | yes |
+| [`helper`](#bcd-helper) | root | yes | yes |
+| [`sim`](#bcd-sim) | anyone; fakehw builds only | yes | yes |
+| [`join`](#bcd-join) | root | yes, or writes it | no |
+| [`status`](#bcd-status) | whoever owns the status socket | no | no |
+| [`doctor`](#bcd-doctor) | root for the full set of checks | yes | no |
+| [`hardware`](#bcd-hardware) | root for DMI serials | no | no |
+| [`update`](#bcd-update) | root on a helper node | yes | no |
+| [`version`](#bcd-version) | anyone | no | no |
+
+Two names exist that are not for operators: `__bcx-exec` is bcd re-executing itself as the
+[plugin sandbox's shim](/docs/extending/drivers#the-plugin-sandbox), and `helper-call` exists only in builds with
+the `helpere2e` tag, where the root helper end-to-end test sends one JSON request from standard input to
+`[helper] socket`. A release build has neither in its command list.
+
+## bcd node
+
+Runs the node agent: the session to the gateway, the journal, inventory, NodeSpec convergence, commands, tunnels,
+telemetry and self-update.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--config` | `/etc/bcd/config.toml` | The configuration file |
+
+At start it loads the configuration, refuses `dev_insecure_h2c` in a host build, loads the identity from
+`data_dir` (`identity.json` and `node.key`), opens the journal, starts the [bcx plugins](/docs/extending/drivers)
+of `[plugins] dir`, checks `[kubernetes]`, prepares self-update, switches to the WebSocket fallback when
+`[websocket] url` is set, serves `bcd status` on `socket_path`, and with `[imds] listen` serves the instance
+metadata service. With `[helper] socket` it sends its privileged work to `bcd helper` and reads the root-only
+inventory (DMI serials, DIMMs, NVMe health) through it; see [privilege
+separation](/docs/daemon#privilege-separation). A host build running as an ordinary user without `[helper]`
+starts anyway, but claims no GPU binding capability and fails every GPU hold at once as `node-unprivileged`
+(da60bbd).
+
+It logs JSON lines to standard error (`[log]`), and runs until SIGINT or SIGTERM. Exits:
+
+- `0` on a signal, or after a [self-update](/docs/daemon/install#self-update) swapped the binary slots, in which
+  case `main` execs the entrypoint (the new binary) with the same arguments.
+- `1` when it cannot start (`bcd node: agent: this node has not joined (run bcd join)`, a journal of another node,
+  an invalid `[kubernetes]` value) or when the certificate is revoked (`agent: this node's certificate was
+  revoked`).
+
+```bash
+bcd node --config /etc/bcd/config.toml
+```
+
+## bcd site
+
+Runs the [site agent](/docs/daemon/install#a-site-agent): the same agent with role `site` (BMC operations,
+`site.httpProxy`, boot entries) and, with `[boot] listen` set, the boot server (proxy DHCP, TFTP, iPXE, the image
+cache).
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--config` | `/etc/bcd/config.toml` | The configuration file |
+
+It refuses a data directory whose identity is not a site's ("this data directory holds a node identity; join with
+a site token (bcd join --role site)", exit 1). With `[boot] listen`, `join-encryption.jwk` must sit next to the
+configuration file (exit 1 otherwise), and `proxy_dhcp` or `tftp` need `[boot] server_ip` (IPv4) and `[boot] url`
+(exit 2). Without `[boot] listen` it logs a warning and serves no PXE machine. `[helper]` is ignored.
+
+```bash
+BCD_JOIN_TOKEN=bcjt_... bcd join --role site --config /etc/bcd/config.toml
+bcd site --config /etc/bcd/config.toml
+```
+
+## bcd ramdisk
+
+Runs inside the PXE ramdisk a site agent boots. It has no `config.toml`: it reads the `bc.*` parameters from the
+kernel command line (listed in [the ramdisk](/docs/daemon/install#the-ramdisk)), joins with the `discovery`
+attestor as role `ramdisk` unless the data directory already holds an identity, then runs the agent.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--cmdline` | `/proc/cmdline` | Where to read the `bc.*` boot parameters |
+| `--data-dir` | `/run/bcd` | Key, identity and journal, on tmpfs; the status socket is `<data-dir>/bcd.sock` |
+
+A missing or malformed boot parameter, or an `http://` gateway in a host build, exits 2. A `bc.jwk` that does not
+match its pin exits 1 ("bc.jwk does not match the join encryption pin"). Logs are always JSON. The OS a
+`deploy.image` installs gets a `config.toml` rendered from the same parameters (with the default `data_dir`) and the
+same `join-encryption.jwk`.
+
+## bcd helper
+
+Runs as root beside an unprivileged `bcd node` and serves its typed privileged operations on `[helper] socket`.
+See [running bcd node unprivileged](/docs/daemon/install#running-bcd-node-unprivileged) for the units and
+[privilege separation](/docs/daemon#privilege-separation) for the operations.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--config` | `/etc/bcd/config.toml` | The configuration file; it must have a `[helper]` section |
+
+Before it listens, it refuses to start (exit 1) when:
+
+| Message | Cause |
+| --- | --- |
+| `[helper] socket and user are not configured` | No `[helper] socket` |
+| `runs as root` | Not root (fakehw builds excepted) |
+| `helper.user: user: unknown user bcd` | `[helper] user` names no local account |
+| `<file> must be a regular file root owns that no one else can write` | `config.toml` is a symlink, not root's, or group- or world-writable, or a directory above it is (3fa9021) |
+| `<dir> must be a directory root owns that no one else can write (the helper socket lives there)` | A directory from `/` down to the slots directory, the socket's directory or the entrypoint's directory is not root's or is group- or world-writable (c139b9c, 9e71b1f) |
+| `[kubernetes] allowed_clusters: ... is not https://host[:port]#sha256:<64 hex>` | A malformed allow-list entry |
+| `command_root_sha256 must be 64 lowercase hex digits per root, comma-separated` | A malformed root pin |
+
+It then creates the socket's directory if needed, binds the socket (mode 0660, group the node account's primary
+group) in a private directory and renames it into place, re-arms the self-update watchdog for a swap still waiting
+for confirmation, and serves until a signal. Each refused connection is logged as `helper: connection refused` with
+the reason; see [troubleshooting](/docs/daemon/troubleshooting#helper-socket-refusals).
+
+```bash
+sudo bcd helper --config /etc/bcd/config.toml
+```
+
+## bcd sim
+
+Runs `--nodes` real node agents in one process against the configuration's gateway, each on a fake machine. It
+exists only in fakehw builds (`go build -tags fakehw`); a host build prints `bcd sim: needs a fakehw build (go build
+-tags fakehw)` and exits 2. See [bcd sim](/docs/daemon#bcd-sim) for what each simulated machine does.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--config` | `/etc/bcd/config.toml` | Gateway URL, pins, journal limits and logging; machines live under `<data_dir>/sim/<i>` |
+| `--nodes` | `1` | How many machines; below 1 exits 2 |
+| `--seed` | `1` | The fakehw seed of machine 0; machine `i` uses `seed + i` |
+
+When any machine has not joined, it reads one token from `BCD_JOIN_TOKEN` or standard input (exit 2 without one)
+and needs `join-encryption.jwk` next to the configuration (exit 1 without it). At most 16 joins run at once.
+
+```bash
+printf '%s\n' "$SIM_TOKEN" | bcd sim --config ./sim.toml --nodes 5 --seed 100
+```
+
+## bcd join
+
+Joins this machine to the fleet and writes `node.key` and `identity.json` under `data_dir`. The token comes from
+`BCD_JOIN_TOKEN`, else the first line of standard input (at most 4 KiB, a leading byte-order mark dropped), else
+`--token-file`; never from an argument.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--config` | `/etc/bcd/config.toml` | The configuration file; with `--server`, the file to write when it does not exist |
+| `--role` | `node` | `node` or `site`; anything else exits 2. The token decides what is allowed |
+| `--token-file` | | Read the token from this file: a regular file, mode 0600 or 0400 (others may not read it), at most 4 KiB. Removed once the join succeeds or the machine had already joined; a read-only mount only logs a warning |
+| `--node-id` | | The node an installed OS must join as; implies `--attestor provisioned`. A different identity exits 1 |
+| `--server` | | The control plane URL (`https://`): its `/.well-known/better-compute` supplies the join key when `join-encryption.jwk` is absent, and the gateway when `config.toml` is |
+| `--attestor` | `join-token` | `tpm` joins with the host's TPM (`/dev/tpmrm0`) and no token; `provisioned` with `--node-id`. `tpm` with `--token-file` exits 2 |
+| `--serving-ca-pin` | | `sha256/<base64>`; required with `--server` and no `config.toml` (host builds). With a `config.toml` it must equal `serving_ca_spki_pin` |
+| `--join-signing-pin` | | Same, for `join_signing_key_pin` |
+| `--join-encryption-pin` | | Same, for `join_encryption_key_pin` |
+| `--data-dir` | `/var/lib/bcd` | The `data_dir` a configuration written by `bcd join` names |
+| `--reset` | `false` | Move this node's identity and journal aside first, so it joins again; root only |
+| `--yes` | `false` | Confirm `--reset` |
+
+What it does, in order:
+
+1. Loads `config.toml`, or, when the file does not exist and `--server` is given, builds one from the well-known
+   document checked against the three pin flags ([joining from the well-known
+   document](/docs/daemon/install#joining-from-the-well-known-document)).
+2. With `--reset`: as root, renames `identity.json`, `node.key`, `node.key.next` and `journal.db` to
+   `<name>.reset-<UTC time>`. Without `--yes` it prints what it would move and exits 2. See [joining again with
+   --reset](/docs/daemon/install#joining-again-with---reset).
+3. If an identity loads, prints `already joined as <node> (site <site>, role <role>)` and exits 0, without reading
+   a token. Under `[helper]` it hands `identity.json` and `node.key` to the `[helper] user` first.
+4. Otherwise reads the credential, seals the token to the pinned JoinService key, and calls `Join` with the hardware
+   claims. Retryable failures (`UNAVAILABLE`, `RESOURCE_EXHAUSTED`, deadlines) retry with jittered back-off up to 20
+   attempts, or exactly when the gateway's `grpc-retry-pushback-ms` says; a pending approval waits and asks again;
+   a `tpm` join answers up to 3 challenge rounds.
+5. Verifies the signed `JoinResponse`, stores the key and identity, writes a bootstrapped `config.toml` (0600) and
+   `join-encryption.jwk` (0644), removes the token file, and prints
+   `joined as <node> (site <site>, role <role>); certificate valid until <time>`.
+
+| Exit | When |
+| --- | --- |
+| `0` | Joined, or already joined |
+| `1` | Configuration or key errors, a refused join (`Join refused`), a rejected `JoinResponse`, a pin flag that does not match `config.toml`, a joined node other than `--node-id`, `--reset` not as root |
+| `2` | A positional argument, a bad `--role`, no token (`no join token: set BCD_JOIN_TOKEN or pass the token on standard input`), something that is not a token (`that is not a join token (bcjt_...)`), `--attestor tpm` with `--token-file`, `--reset` without `--yes` |
+
+```bash
+# the token on standard input, as the install script does it
+printf '%s\n' "$TOKEN" | sudo bcd join --config /etc/bcd/config.toml
+# a site agent
+sudo BCD_JOIN_TOKEN=bcjt_... bcd join --role site
+# with the TPM, no token
+sudo bcd join --attestor tpm < /dev/null
+# an OS a deploy installed, with no config.toml yet
+sudo bcd join --server https://compute.example.com --token-file /etc/bcd/join-token --node-id node_01k5w... \
+  --serving-ca-pin sha256/... --join-signing-pin sha256/... --join-encryption-pin sha256/...
+```
+
+The join flow, the attestors and the server's refusals are covered in [joining
+nodes](/docs/guides/nodes/joining) and [attestation](/docs/guides/nodes/attestation).
+
+## bcd status
+
+Asks a running agent (node, site or ramdisk) for its state over its status socket. The socket is created mode 0600
+in a 0700 directory, so only the account the agent runs as (or root) can ask.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--socket` | `/run/bcd/bcd.sock` | The agent's unix socket (`socket_path` in `config.toml`) |
+| `--json` | `false` | Print the full status as indented JSON |
+
+```text
+node       node_01k5w... (site fsn1, role node)
+bcd        0.1.0, boot 6f0c...
+session    connected (epoch 14, clock offset -3 ms)
+spec       applied 42, observed 42
+  devices    CONVERGED
+  host       PROGRESSING Retrying: helper: not allowed
+commands   0 running, 0 waiting for a spec
+events     0 unacked, 0 waiting, 0 metrics dropped
+identity   certificate until 2026-10-06T02:11:00Z, node key in the TPM, trust bundle v3, signed intent enforced
+```
+
+The GPU, `kubernetes` and `telemetry` lines that follow are described in [bcd status](/docs/daemon#bcd-status).
+The JSON object has `nodeId`, `siteId`, `role`, `version`, `bootId`, `incarnation`, `journalId`, `connected`,
+`epoch`, `clockOffsetMs`, `appliedGeneration`, `observedGeneration`, `sections` (`section`, `state`, `reason`,
+`message`), `running`, `deferred`, `pendingEvents`, `droppedMetrics`, `waitingEvents`, `certificateNotAfter`,
+`nodeKey` (`tpm` or `file`), `trustVersion`, `commandSigning`, and, when present, `gpus`, `kubernetes` and
+`telemetry`. It exits 1 with `the node agent is not running (no socket at <path>)` when nothing listens.
+
+## bcd doctor
+
+Checks the host and prints one line per check: status (`ok`, `warn` or `fail`), check name, detail.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--config` | `/etc/bcd/config.toml` | The configuration file |
+
+It exits 1 when any check fails and 0 otherwise; warnings never fail it. A configuration that does not load fails
+`config` and skips every check that needs it (Kubernetes, helper, gateway, identity, update). Run it as root:
+the `helper` directory checks and the DMI finding only run or read correctly as root. The install script runs it
+before the join and only warns on failure.
+
+```bash
+sudo bcd doctor --config /etc/bcd/config.toml
+```
+
+An excerpt (a GPU host has many more lines):
+
+```text
+ok    config    /etc/bcd/config.toml: gateway https://gw.eu.example.com, site fsn1
+ok    nvml      driver …, 8 GPUs
+ok    hardware  host: 8 GPUs, … inventory sections hashed
+ok    kvm       /dev/kvm present
+ok    iommu     16 IOMMU units
+ok    gateway   gw.eu.example.com:443 reachable in 4ms
+ok    identity  node node_01k5w… (site fsn1, role node), certificate valid for 14h12m0s
+warn  update    no [update] release_pins: self-update is refused (reinstall to upgrade)
+ok    clock     synchronized (estimated error … µs)
+```
+
+The real-host preflight (`systemd`, `delegation`, the KVM cause, `vfio`, `iommu-groups`, `clock` and the
+inventory findings; e2a0cf0) runs only in host builds. The order is: configuration, NVML, hardware, host checks,
+GPU checks, Kubernetes and helper checks, gateway, identity, configuration checks, then the preflight.
+
+### Doctor checks
+
+| Check | Status | Means | Fix |
+| --- | --- | --- | --- |
+| `config` | `fail` | The file does not load; the detail names the line and key | Fix the key; see [config.toml](/docs/daemon/configuration) |
+| `config` | `warn` | `<file> has mode 0640; the install script writes 0600`: group or others have any access | `chmod 0600` on a root node. On a node installed with `--unprivileged` the script deliberately sets 0640 `root:bcd` so `bcd node` can read it; leave it |
+| `nvml` | `ok`, `warn`, `fail` | `nvidia-smi` answers with a driver version and GPU count; `warn` when it is missing or the build has `-tags nonvml`; `fail` for any other error | Install the driver ([nvidia-driver](/docs/daemon/host-config#nvidia-driver)), or see `gpus` |
+| `hardware` | `warn`, `fail` | The inventory could not be collected (`warn`) or hashed (`fail`) | Run `bcd hardware` for the detail |
+| `kvm` | `warn` | `no /dev/kvm`; on host builds a second line says why: module not loaded, a VM without nested virtualization, or VT-x/AMD-V off in firmware | `modprobe kvm_intel` or `kvm_amd`; enable nested virtualization or the firmware setting |
+| `iommu` | `warn` | No `/sys/class/iommu` units: no GPU passthrough | `intel_iommu=on` or `amd_iommu=on` and VT-d/AMD-Vi ([iommu](/docs/daemon/host-config#iommu)) |
+| `libvirt` | `warn` | Neither `virsh` nor `cloud-hypervisor`: no VPS instances | Install a runtime if the host should run instances |
+| `libvirt` | `fail` | Under `[helper]`: the node user is in the root-equivalent `libvirt` group; `qemu.conf` lacks `dynamic_ownership = 0`; QEMU's user is not in the node's group | `gpasswd -d bcd libvirt`; set `dynamic_ownership = 0`; `usermod -aG bcd libvirt-qemu`. Rerunning the install script does all three |
+| `cloud-hypervisor` | `warn`, `fail` | Firmware `/usr/share/cloud-hypervisor/CLOUDHV.fd` missing (`warn`); no `systemd-run` (`fail`); under `[helper]`, empty `instance_bridges` (`warn`) | Install the firmware or systemd; set `[helper] instance_bridges` |
+| `qemu-img`, `seed`, `nftables` | `fail` | With a runtime installed: no `qemu-img` (no disks), neither `genisoimage` nor `xorriso` (no user data), no `nft` (no anti-spoofing, metadata service or instance dials) | Install the package |
+| `cgroups` | `fail`, `warn` | No cgroup v2, or no `cpuset`, `cpu` or `memory` controller (`fail`); no `hugetlb` (`warn`) | Boot with the unified hierarchy; enable the controllers |
+| `hugepages` | `ok` | The free and total 2 MiB and 1 GiB pages, or that there is no pool | Set the [hugepages](/docs/daemon/host-config#hugepages) unit if flavors need them |
+| `vfio` | `warn` | An IOMMU but `vfio-pci` not loaded | `modprobe vfio-pci` |
+| `systemd` | `fail`, `warn` | Not the init system (host builds); with `cloud-hypervisor`, older than 247 (`fail`) or unknown (`warn`) | Hold slices and VMM units need systemd |
+| `delegation` | `warn` | Controllers the kernel offers are not in the cgroup root's `subtree_control` | Usually settles once bcd's first slice exists |
+| `gpu` | `ok`, `warn`, `fail` | One line per GPU: load, temperature, power, memory. `warn` for a pending row remap or MIG mode change; `fail` for failed row remapping (RMA) or uncorrectable ECC errors since the driver loaded | `gpu.reset` for pending changes; replace a GPU whose remapping failed |
+| `gpus` | `fail` | `nvidia-smi` failed; the detail ends with a hint (see [troubleshooting](/docs/daemon/troubleshooting#nvidia-smi-errors)) | Follow the hint |
+| `gpu-host` | `warn` | A WSL 2 paravirtual GPU: CUDA containers work, VFIO, `gpu.reset`, MIG and DCGM do not | Expected on WSL 2 |
+| `nouveau` | `fail` | The `nouveau` module is loaded | Blacklist it, rebuild the initramfs, reboot |
+| `gpu-bus` | `warn`, `fail` | NVIDIA GPUs on the PCI bus with no driver answering or unbound (`warn`); more GPUs bound to `nvidia` than `nvidia-smi` sees, a GPU that fell off the bus (`fail`) | Install the driver; `gpu.reset` or a reboot |
+| `persistence` | `warn` | Persistence mode off on some GPUs | Enable `nvidia-persistenced` |
+| `fabric-manager` | `fail` | NVSwitches present but `nvidia-fabricmanager` not active | Start it ([fabric-manager](/docs/daemon/host-config#fabric-manager)) |
+| `gpu-binding` | `warn` | GPUs, but `bcd node` would run as an ordinary user without `[helper]`: no GPU reservation is placed here | Run `bcd node` as root or configure `[helper]` |
+| `kubernetes` | `ok`, `fail` | The number of allowed clusters; `fail` for a malformed `[kubernetes] allowed_clusters`, an unreadable join state, or a node bcd joined to a cluster with no allow-list | List the cluster ([k8s-join](/docs/daemon/host-config#k8s-join)) |
+| `gpu-isolation` | `fail` | Another path hands out GPUs: the container toolkit lets unprivileged pods pick GPUs, another DRA driver offers them, or (with `[host] units = false`) the runtime configuration cannot be read | See [GPU isolation](/docs/daemon/kubernetes#gpu-isolation) |
+| `kubelet` | `ok`, `fail` | On a node bcd joined: whether the kubelet runs | `systemctl start kubelet` |
+| `device-plugin` | `warn` | `/var/lib/kubelet/device-plugins` missing | Check the kubelet's root directory |
+| `tpm` | `fail`, `warn` | Under `[helper]`: the node user is in the `tss` group (`fail`), or membership could not be read (`warn`) | `gpasswd -d bcd tss`, restart `bcd.service` |
+| `gateway` | `ok`, `fail` | A TCP connection to the gateway within 5 seconds (no TLS) | Firewall, DNS, `gateway_url` |
+| `node key` | `ok`, `warn` | Key in the TPM, or a file key on a host without one; `warn` for a file key on a host with a TPM (the next renewal moves it) | Nothing; wait for the renewal |
+| `identity` | `ok`, `warn`, `fail` | `warn`: not joined yet. `fail`: an identity that does not load, or an expired certificate; the detail ends with `bcd join --reset --yes, then bcd join` | [Join again](/docs/daemon/install#joining-again-with---reset) |
+| `update` | `ok`, `warn` | Release pins and threshold; `warn` without `[update] release_pins`, for a pending update, and for each failed version | Add pins; `bcd update --clear-failed` |
+| `slots` | `ok`, `fail` | The slots are in use but `[update] entrypoint` does not link to the slots' `current` | Relink, or rerun the install script |
+| `helper` | `ok`, `warn`, `fail` | As root under `[helper]`: a directory to the slots, socket or entrypoint not root's alone (`fail`); what host units bind to: root's signed join record (`ok`), trust on first use (`warn`), a record of another node or a bad signature (`fail`); no command-signing roots pinned anywhere (`fail`) | See [troubleshooting](/docs/daemon/troubleshooting#helper-socket-refusals) and [signed specs](/docs/daemon/host-config#signed-specs) |
+| `bmc` | `warn` | A site agent without `[site] bmc_networks` | Set the BMC networks |
+| `iommu-groups` | `ok`, `warn` | A GPU shares its IOMMU group with a NIC or disk, has no group, or no NVIDIA GPU is on the PCI bus | Move the GPU to a CPU-attached slot or enable ACS (6cf5122) |
+| `clock` | `ok`, `warn`, `fail` | `adjtimex` says the kernel clock is synchronized (`ok`, with the estimated error), unsynchronized (`fail`) or cannot be read (`warn`) | Run `systemd-timesyncd` or `chrony` |
+| `dmi`, `numa`, `dimms`, `disks`, `bmc`, `nics` | `warn` | Inventory findings: a placeholder or root-only product UUID, no NUMA nodes, non-ECC DIMMs, a worn or failing disk, a BMC that does not answer in-band, no physical NIC | See [bcd hardware](#bcd-hardware) |
+| `cpu`, `memory`, `inventory` | `fail`, `warn` | `/proc/cpuinfo` or `/proc/meminfo` unreadable, EDAC uncorrectable errors (`warn`), nothing collected | Check the host |
+
+The preflight drops findings whose status is `ok`, and the `kvm`, `iommu` and `cgroup` findings, which other
+checks already report.
+
+## bcd hardware
+
+Prints what bcd sees of this machine and the bring-up findings, without a configuration file (e82d3a8). Use it on a
+new server model before it joins.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--json` | `false` | Print the full `NodeInventory` as JSON instead of the summary |
+| `--capture` | | Copy every procfs and sysfs file the collector read into this directory, a fixture `inventory.Collector{Root: dir}` replays; a path ending in `.tar.gz` writes an archive instead (host builds only) |
+| `--redact` | `false` | With `--capture`: replace serials, UUIDs, MACs, WWNs and the hostname with stable stand-ins |
+
+The summary lists the system, CPU and NUMA nodes, memory and DIMMs, disks, NICs, GPUs, the BMC and the OS, then a
+`Findings` block with the same checks doctor's preflight prints. As an ordinary user the product UUID and serials
+read empty (they are root-only in sysfs) and the `dmi` finding says so. It exits 1 when a finding fails, and 2 for
+`--redact` without `--capture` or `--capture` in a fakehw build.
+
+```bash
+sudo bcd hardware
+sudo bcd hardware --capture ./r760-h100.tar.gz --redact
+```
+
+## bcd update
+
+Shows the self-update state: the running version, the release floor, the pin count and threshold, the slots, a
+pending update and the versions that failed to start.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--config` | `/etc/bcd/config.toml` | The configuration file |
+| `--clear-failed` | `false` | Forget the failed versions, so a rollout may try them again (9b56c7d); a local decision only |
+
+It reads the records from `[update] slots_dir`, else `/usr/local/lib/bcd` under `[helper]`, else `<data_dir>/bin`
+with the records in `data_dir`. On a helper node those are root's, so run it as root.
+
+```text
+version 0.9.1, release floor 12, 2 release pins (threshold 2)
+slots: current a (0.9.1), other b (0.9.0)
+failed: 0.9.2 (bcd 0.9.2 did not start)
+```
+
+See [self-update](/docs/daemon/install#self-update) for the slots and records.
+
+## bcd version
+
+Prints `bcd <version> <os>/<arch> <go version>`, plus ` tags=<tags>` for a build made with `-tags` (a fakehw build
+says `tags=fakehw`). The version is set at link time with `-ldflags "-X main.version=<version>"`; an unset one is
+`0.0.0-dev`.
+
+```bash
+$ go build -tags fakehw -ldflags "-X main.version=0.1.0" ./cmd/bcd && ./bcd version
+bcd 0.1.0 linux/amd64 go1.26.0 tags=fakehw
+```
+
+The module requires Go 1.26 (`daemon/go.mod`); the Go version printed is the toolchain's that built the binary.

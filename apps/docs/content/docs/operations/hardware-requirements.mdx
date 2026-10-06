@@ -1,0 +1,239 @@
+---
+title: Requirements and sizing
+metaTitle: Control plane sizing, node prerequisites, supported GPUs and ports
+description: What the control plane needs and how far the measured numbers go in sizing it, the PostgreSQL version, what a node must have before bcd can run (Linux, systemd, cgroup v2, the NVIDIA driver, KVM and IOMMU for VPS hosts), the GPUs the inventory knows, and the network ports.
+icon: Cpu
+status: experimental
+packages: ['@better-compute/server', '@better-compute/gateway', '@better-compute/postgres', '@better-compute/inventory', '@better-compute/cli']
+sources:
+  - bench/REFERENCE.md
+  - packages/postgres/src/migrate.ts
+  - packages/inventory/src/gpu-models.ts
+  - packages/gateway/src/gateway.ts
+  - packages/cli/src/host/config.ts
+  - packages/cli/src/host/gateway.ts
+  - packages/server/src/self-check.ts
+  - daemon/cmd/bcd/doctor_host.go
+  - daemon/cmd/bcd/doctor_gpu.go
+  - tests/e2e/bcd-host-real.test.ts
+---
+
+This page collects what each part of a deployment needs to run, and what is known about how big it has to be. The
+short version: the control plane is Node.js processes and one PostgreSQL database; a node is a Linux server with
+systemd and cgroup v2, plus the NVIDIA driver for GPUs and KVM with an IOMMU for virtual machines. Sizing beyond that
+is not validated yet, and the page says where the numbers come from.
+
+<Callout type="warn" title="No validated sizing yet">
+PLAN.md fixes reference machines for its performance gates, but no benchmark has run on them, and no run on real
+PostgreSQL is recorded. Every number below was measured on a development workstation, mostly on PGlite in one
+process, and is a floor, not a capacity plan. See [scaling](/docs/operations/scaling) for every measurement and its
+conditions.
+</Callout>
+
+## The control plane
+
+### Software
+
+| Requirement | Notes |
+| --- | --- |
+| Node.js 22.12 or newer | Every package's `engines`. A TypeScript configuration file needs 22.18 or newer. CI runs Node.js 22 and 24 |
+| PostgreSQL 16 or newer | See [below](#postgresql) |
+| PgBouncer, optional | Transaction mode is supported: no session state, no `LISTEN`/`NOTIFY`, no session advisory locks |
+| Better IAM | Embedded in the api and worker processes, or remote; see [installation](/docs/guides/installation#requirements) |
+
+The control plane has no container image of its own; any host or container that runs Node.js runs
+`better-compute serve` (see [containers](/docs/operations/deployment#containers)).
+
+### PostgreSQL
+
+| Requirement | Why |
+| --- | --- |
+| PostgreSQL 16 or newer | `migrate()` reads `server_version_num` and refuses anything below 160000 with `INVALID_CONFIG`. CI runs 17, and the reference machine runs 17 |
+| The `btree_gist` extension | The first migration creates it; the booking exclusion constraint needs it. On a managed service that does not let the database owner create it, a superuser runs `CREATE EXTENSION btree_gist` once |
+| `CREATE` on the database | Migrations create tables, indexes and functions |
+| One database per deployment | api, workers and gateways all connect to it; it is the only source of truth |
+
+PGlite (PostgreSQL in WebAssembly) is for development, tests and the simulators: one connection, transactions
+serialized, inside one process. It cannot be shared by separate processes, so it cannot run a split or highly
+available deployment. Details are on [database](/docs/operations/database#requirements).
+
+**Connections.** Each process holds its own pool, 10 connections by default (`postgres({ max })`, 1 to 100), so the
+total is roughly the pool size times the number of processes. PLAN.md lists connections among the first limits at
+scale and puts PgBouncer in front of PostgreSQL.
+
+### Reference machines
+
+`bench/REFERENCE.md` fixes the machines the PLAN.md §16 gates are quoted on:
+
+| Role | CPU | Memory | Storage | Software |
+| --- | --- | --- | --- | --- |
+| Gateway | 8 vCPU | 32 GiB | — | One `gateway` process on Node.js 24 |
+| PostgreSQL | 16 vCPU | 64 GiB | NVMe | PostgreSQL 17 |
+
+Not fixed yet (decision D15): the instance type or CPU model, the network between hosts, the hosts for the api,
+workers and load generators, PgBouncer's placement and the PostgreSQL configuration.
+
+### What has been measured
+
+| Quantity | Measured (workstation, mostly PGlite) | Gate |
+| --- | --- | --- |
+| Sessions one gateway holds | 5,000 mTLS sessions at 10 s heartbeats, dispatch p99 24 to 26 ms, 0 drops | 5,000 for 30 min, dispatch p99 below 500 ms |
+| Gateway memory at 5,000 sessions | 1,240 MiB RSS for the gateway process over 60 s with PGlite inside it; 2,016 MiB after 30 min, the growth traced to PGlite's WebAssembly memory while the JS heap stayed at 235 MiB | RSS below 2 GiB |
+| Commands | ack p99 378 ms at 100 commands/s on 1,000 nodes | p99 below 1.5 s at v0.4 |
+| Placements | 1,092 placements/s at 1,000 nodes and 464/s at 10,000 nodes (latest recorded run), pool-lease placer end to end | 200/s at v0.4 |
+| Gateway kill | re-home p99 13.25 s at 10,000 nodes over 3 gateways (simulated time) | below 60 s |
+| Cold start | 10,000 nodes connected, adopted and schedulable at 80 s (simulated time) | below 3 min |
+| PostgreSQL CPU at 10,000 nodes and 100,000 GPUs | not measured | below 50% on the reference PostgreSQL |
+
+### Sizing each tier
+
+**Recommendations**, derived from the defaults and the numbers above, not validated on production hardware:
+
+| Tier | Scales by | Starting point |
+| --- | --- | --- |
+| Gateways | Sessions: `maxStreams` is 5,000 per process by default, and `doctor` warns at 80% (`fleet.gateway-headroom`) | Enough gateways that the region's nodes fit in the survivors after losing one, and at least three per region (PLAN.md). For 10,000 nodes: three gateways hold about 3,333 each, and two survivors hold 5,000 each, exactly at the limit, so run four. Give each the reference 8 vCPU and 32 GiB until measured otherwise |
+| api | Requests; stateless | Three behind an L7 balancer for a highly available region (PLAN.md) |
+| Workers | Reconcile throughput; 256 shards split among them | Two or more, so a lost worker fails over (see [high availability](/docs/operations/high-availability)); add `scheduler` processes for the pool-lease placer |
+| PostgreSQL | Writes per second, connections | The reference 16 vCPU, 64 GiB and NVMe is what the 10,000-node gates are to be measured on; PLAN.md targets below 50% CPU there |
+
+PLAN.md's design point is 10,000 nodes and 100,000 GPUs per region on one PostgreSQL, and its estimate of the load at
+that size (liveness writes, reconnect storms, commands, events, placements) and the order in which limits are expected
+to bite are on [what breaks first](/docs/operations/scaling#what-breaks-first).
+
+**Storage.** `audit_events`, `inventory_snapshots` and `usage_windows` grow with time and are partitioned by month;
+the retention module prunes and drops what every cursor has passed (see [retention](/docs/operations/retention)). No
+growth rate per node has been measured.
+
+## Nodes
+
+### Platform
+
+| Requirement | Checked by | Notes |
+| --- | --- | --- |
+| Linux on amd64 or arm64 | The install script | `uname -m` of `x86_64`/`amd64` or `aarch64`/`arm64`; releases build only those two |
+| Root for the install | The install script | Also `systemctl`, `sha256sum`, and `curl` or `wget` with HTTPS |
+| systemd as init | `bcd doctor` `systemd` (fail) | bcd's hold slices, the helper's units and libvirt's scopes are systemd units |
+| cgroup v2 with `cpuset`, `cpu` and `memory` | `bcd doctor` `cgroups` (fail) | Holds with limits are confined in cgroup slices; without `hugetlb` (warn) a hold's huge page limits are not enforced |
+| Controllers delegated at the cgroup root | `bcd doctor` `delegation` (warn) | `cpu`, `cpuset`, `memory`, `io`, `pids`, `hugetlb` in `cgroup.subtree_control`; systemd usually enables them once bcd's slices exist |
+| A synchronized clock | `bcd doctor` `clock` (fail when the kernel reports it unsynchronized) | Certificates, exec tickets and signed intents compare times; run an NTP client such as systemd-timesyncd or chrony (e2a0cf0) |
+| A persistent `data_dir` | — | `/var/lib/bcd` by default: the node key, identity, journal and, on VPS hosts, instance disks and volumes |
+| Outbound HTTPS to the gateway | `bcd doctor` `gateway` (fail when no TCP connection within 5 s) | Nodes only dial out; see [ports](#network-and-ports) |
+| TPM 2.0, optional | `/dev/tpmrm0` | With one, the node key is made in the TPM, and the `tpm` attestor can join the machine without a token; see [attestation](/docs/guides/nodes/attestation) |
+
+No minimum kernel version is checked anywhere in bcd. The full list of `bcd doctor` checks is on
+[the daemon overview](/docs/daemon#modes); run it before the first join (the install script does, and only warns).
+
+### GPU hosts
+
+bcd reads GPUs through `nvidia-smi` and needs no NVML library or cgo (cb987e5): a host build without `nvidia-smi`
+reports no GPUs, and `bcd doctor`'s `nvml` check warns.
+
+| Requirement | Checked by | Notes |
+| --- | --- | --- |
+| The NVIDIA driver, with `nvidia-smi` | `nvml` (warn without it), `gpu-bus` | The [`nvidia-driver` host unit](/docs/daemon/host-config#nvidia-driver) can install it from desired state |
+| `nouveau` not loaded | `nouveau` (fail) | Blacklist it and rebuild the initramfs so the NVIDIA driver can bind the GPUs |
+| Every GPU on the bus bound and seen | `gpu-bus` (fail when `nvidia-smi` sees fewer GPUs than are bound to `nvidia`) | A GPU that fell off the bus (Xid 79) needs `gpu.reset` or a reboot |
+| Persistence mode | `persistence` (warn) | Without `nvidia-persistenced`, every first CUDA call re-initializes the GPU |
+| `nvidia-fabricmanager` on NVSwitch systems | `fabric-manager` (fail when NVSwitches are present and the unit is not active) | CUDA fails on every GPU until it runs; the [`fabric-manager` host unit](/docs/daemon/host-config#fabric-manager) manages it |
+| The NVIDIA Container Toolkit, for containers | — | CDI specs for holds; see the [`container-toolkit` host unit](/docs/daemon/host-config#container-toolkit) |
+| A healthy GPU | `gpu` per GPU | A pending row remap or MIG change warns; failed row remapping or uncorrectable ECC errors fail |
+
+On WSL 2 (`/dev/dxg` without `/dev/nvidiactl`), doctor says the paravirtual GPU runs CUDA but supports no VFIO
+passthrough, `gpu.reset`, MIG or DCGM, and the `nvidia-driver` unit never installs a Linux driver there (2e71a60).
+
+### VPS and sandbox hosts
+
+| Requirement | Checked by | Notes |
+| --- | --- | --- |
+| `/dev/kvm` | `kvm` (warn) | Doctor says why it is missing: VT-x/AMD-V off in the firmware, the `kvm_intel`/`kvm_amd` module not loaded, or a VM without nested virtualization |
+| An IOMMU, for GPU passthrough | `iommu` (warn) | The [`iommu` host unit](/docs/daemon/host-config#iommu) sets the kernel arguments |
+| `vfio-pci` | `vfio` (warn) | Loaded on first passthrough; doctor checks it is available |
+| Each GPU in an IOMMU group of its own | `iommu-groups` (warn) | Passthrough hands the VM the whole group, so a NIC or NVMe drive sharing a GPU's group makes that GPU unusable for VMs; move it to a CPU-attached slot or enable ACS |
+| `libvirt-kvm`: `virsh`, `qemu-img`, `genisoimage` or `xorriso`, `nft` | Doctor fails a host missing `qemu-img`, both ISO tools, or `nft` | Under `bcd helper`, also `dynamic_ownership = 0` and the group setup of the `libvirt` check |
+| `cloud-hypervisor`: the binary, `/usr/share/cloud-hypervisor/CLOUDHV.fd`, `systemd-run`, systemd 247 or newer, `nft` | `cloud-hypervisor`, `systemd` | One confined systemd unit per VMM |
+| Huge pages, for flavors that ask for them | `hugepages` | The [`hugepages` host unit](/docs/daemon/host-config#hugepages) reserves them |
+| Disk for volumes | — | A volume must fit in the data directory's free space less a reserve of 5% (at least 2 GiB) less every volume's unwritten space |
+
+### Site agents and Kubernetes
+
+A bare-metal site agent needs its provisioning network, the iPXE builds and a ramdisk image you supply, and its own
+systemd unit for the privileged ports; see [site agents and the ramdisk](/docs/daemon/install#site-agents-and-the-ramdisk).
+bcd on an existing Kubernetes cluster runs as a DaemonSet with its own host mounts; see
+[bcd on Kubernetes](/docs/daemon/kubernetes).
+
+### What has run on real hardware
+
+| Hardware | Status |
+| --- | --- |
+| A WSL 2 host with one GeForce RTX 5090 (driver R616) | bcd built without `fakehw` joins a dev stack over mTLS, is adopted, reports the real inventory and GPU, and answers `bcd status` and `bcd doctor` (`tests/e2e/bcd-host-real.test.ts`, opt in with `BCD_E2E_REAL=1`; 0915ab7, 92e3385, 898a23c) |
+| Data-center GPUs (H100, A100 and the rest) | Not run. The fake hardware build reports `NVIDIA H100 80GB HBM3`; the `nvidia-smi` parsing is tested against fixtures |
+| `libvirt-kvm` and `cloud-hypervisor` on a real KVM host | Not run; tested against fakes |
+| Host config units on a real machine | Not run, apart from `TestRealKernel`'s sysctl, transparent huge pages and 2 MiB pages |
+| TPM joins | Tested with the software TPM only |
+
+## Supported GPUs
+
+The inventory normalizes each GPU's NVML name into a product and a family through a versioned table
+(`gpuModels`, version 2, in `packages/inventory/src/gpu-models.ts`). Pools, policies and meters use the family. A name
+the table does not know maps to the family `other`, which raises the `GpuModelUnknown` condition and keeps the node
+from scheduling until a release adds it. The normalization rules are on [GPU naming](/docs/guides/nodes/inventory-and-health#gpu-naming).
+
+| Family | Product | NVML names |
+| --- | --- | --- |
+| `H100` | `H100-SXM5-80GB` | NVIDIA H100 80GB HBM3 |
+| `H100` | `H100-PCIE-80GB` | NVIDIA H100 PCIe |
+| `H100` | `H100-NVL-94GB` | NVIDIA H100 NVL |
+| `H200` | `H200-SXM5-141GB` | NVIDIA H200 |
+| `H200` | `H200-NVL-141GB` | NVIDIA H200 NVL |
+| `B200` | `B200-SXM-180GB` | NVIDIA B200 |
+| `GB200` | `GB200-SUPERCHIP-186GB` | NVIDIA GB200 |
+| `GH200` | `GH200-SUPERCHIP-96GB` | NVIDIA GH200 480GB, NVIDIA GH200 96GB HBM3 |
+| `GH200` | `GH200-SUPERCHIP-144GB` | NVIDIA GH200 144G HBM3e |
+| `A100` | `A100-SXM4-40GB` | NVIDIA A100-SXM4-40GB |
+| `A100` | `A100-SXM4-80GB` | NVIDIA A100-SXM4-80GB, NVIDIA A100-SXM-80GB |
+| `A100` | `A100-PCIE-40GB` | NVIDIA A100-PCIE-40GB |
+| `A100` | `A100-PCIE-80GB` | NVIDIA A100 80GB PCIe |
+| `L40S` | `L40S-PCIE-48GB` | NVIDIA L40S |
+| `L40` | `L40-PCIE-48GB` | NVIDIA L40 |
+| `L4` | `L4-PCIE-24GB` | NVIDIA L4 |
+| `A40` | `A40-PCIE-48GB` | NVIDIA A40 |
+| `A30` | `A30-PCIE-24GB` | NVIDIA A30 |
+| `A10` | `A10-PCIE-24GB` | NVIDIA A10 |
+| `RTX-PRO-6000` | `RTX-PRO-6000-SERVER-96GB` | NVIDIA RTX PRO 6000 Blackwell Server Edition |
+| `RTX-PRO-6000` | `RTX-PRO-6000-WORKSTATION-96GB` | NVIDIA RTX PRO 6000 Blackwell Workstation Edition |
+| `RTX-PRO-6000` | `RTX-PRO-6000-MAXQ-96GB` | NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition |
+| `RTX-6000-ADA` | `RTX-6000-ADA-PCIE-48GB` | NVIDIA RTX 6000 Ada Generation |
+| `RTX-A6000` | `RTX-A6000-PCIE-48GB` | NVIDIA RTX A6000 |
+| `RTX-5090` | `RTX-5090-PCIE-32GB` | NVIDIA GeForce RTX 5090 |
+| `RTX-5080` | `RTX-5080-PCIE-16GB` | NVIDIA GeForce RTX 5080 |
+| `RTX-4090` | `RTX-4090-PCIE-24GB` | NVIDIA GeForce RTX 4090 |
+
+"Supported" here means the inventory names the card and pools can hold it. What a card can do beyond whole-GPU holds
+depends on the card: MIG needs a MIG-capable part (see [fractional GPUs](/docs/guides/capacity/fractional-gpus)),
+passthrough needs the IOMMU setup above. Only NVIDIA GPUs are inventoried.
+
+## Network and ports
+
+Nodes only dial out. Everything the control plane sends a node travels down the session the node opened.
+
+| From | To | Port, default | Protocol | Notes |
+| --- | --- | --- | --- | --- |
+| Clients, browsers | api, through an L7 balancer | `--port`, 3000 | HTTP; the balancer terminates TLS | `serve` never terminates TLS for the API; `baseURL` is the public origin. `/healthz`, `/readyz` and `/metrics` are on the same listener |
+| Daemons | Gateways, through an L4 balancer with TLS passthrough | The port in `gateway_url`; the gateway listens on 8443 by default (`host.gateway.listen`) | gRPC over HTTP/2, mutual TLS 1.3 | A balancer that terminates TLS strips the client certificate |
+| Daemons behind a TLS-inspecting proxy | Gateway WebSocket fallback | 443 (`host.gateway.ws.listen`) | `wss://…/v1/session` | Identity proven in-band; see [WebSocket fallback](/docs/daemon/protocol#websocket-fallback-v04) |
+| api | Each gateway's control API | 8444 (`host.gateway.internal.listen`) | HTTP/2, mutual TLS from the internal CA | Pokes, tunnels, revocations; each gateway advertises its `internal_url` |
+| api, workers, gateways | PostgreSQL (or PgBouncer) | Your database's | PostgreSQL | |
+| Nodes | The control plane's downloads | HTTPS | `GET {basePath}/downloads/bcd/{version}/linux-{arch}` | Install script and self-update; the digest is checked against the signed manifest |
+| VPS hosts | Image sources, snapshot URLs | HTTPS | | Base images and snapshots are SHA-256 verified; `http://` is refused |
+| Nodes with a `telemetry` section | Your OTLP collector | Its endpoint | OTLP/HTTP | See [node metrics](/docs/operations/observability#node-metrics-from-bcd) |
+| Machines on the provisioning network | Site agent | UDP 67 and 4011 (proxy DHCP), UDP 69 (TFTP), `[boot] listen` (HTTP) | | Privileged ports; the install script's unit does not grant `CAP_NET_BIND_SERVICE` |
+| Site agent | BMCs | HTTPS for Redfish | Redfish, or IPMI over LAN through `bcx-ipmi` | Name the BMC networks in `[site] bmc_networks` so `site.httpProxy` never reaches into them |
+| Instances | Their host's metadata service | `[imds] listen`, for example `169.254.169.254:80` | HTTP | Answers only its own running instances |
+| Hosts and services | The workload identity issuer | 443 | HTTPS | The issuer URL must be https on 443 |
+
+<Cards>
+  <Card title="Scaling" href="/docs/operations/scaling">Every measurement and its conditions.</Card>
+  <Card title="Installing bcd" href="/docs/daemon/install">The install script and the files it writes.</Card>
+  <Card title="Host configuration" href="/docs/daemon/host-config">Drivers, IOMMU and huge pages from desired state.</Card>
+  <Card title="Deployment" href="/docs/operations/deployment">Roles, balancers and topologies.</Card>
+</Cards>

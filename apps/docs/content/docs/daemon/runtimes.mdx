@@ -1,0 +1,331 @@
+---
+title: Instance runtimes
+metaTitle: bcd instance runtimes, libvirt-kvm, cloud-hypervisor and bcx plugins
+description: The runtimes bcd runs VPS and sandbox instances on, what each one does for disks, NICs, GPUs, volumes, snapshots, consoles and seeds, how placement and admission apply, and how they run under bcd helper.
+icon: Server
+status: experimental
+packages: ['@better-compute/vps']
+sources:
+  - daemon/internal/runtime/runtime.go
+  - daemon/internal/runtime/libvirt.go
+  - daemon/internal/runtime/cloudhypervisor.go
+  - daemon/internal/runtime/hypervisor.go
+  - daemon/internal/runtime/ch_privileged.go
+  - daemon/internal/runtime/placement.go
+  - daemon/internal/runtime/netconfig.go
+  - daemon/internal/runtime/persistence.go
+  - daemon/internal/runtime/vfio.go
+  - daemon/internal/runtime/volumes.go
+  - daemon/internal/runtime/qcow2.go
+  - daemon/internal/runtime/rebind.go
+  - daemon/internal/runtime/balloon.go
+  - daemon/internal/runtime/plan.go
+  - daemon/internal/runtime/libvirt_test.go
+  - daemon/internal/runtime/cloudhypervisor_test.go
+  - daemon/internal/agent/instances.go
+  - daemon/internal/agent/pluginruntime.go
+  - daemon/internal/agent/rebind.go
+  - daemon/internal/agent/balloon.go
+  - daemon/cmd/bcd/agent.go
+  - daemon/cmd/bcd/hardware_host.go
+  - daemon/cmd/bcd/hardware_fakehw.go
+  - daemon/cmd/bcd/fakeplan_fakehw.go
+  - daemon/internal/helper/libvirt.go
+  - daemon/internal/helper/ch.go
+  - .claude/coordination.md
+---
+
+A VPS host's `bcd node` runs the instances its NodeSpec's `instances` section lists through a **runtime**: a driver
+for one hypervisor or container engine behind a small Go interface. The `instances` converger decides what should
+exist and in which state; the runtime makes it so. This page covers the runtimes themselves. What the converger does
+around them (the desired set, user data, admission, network rules, snapshot transfers) is on
+[instances](/docs/daemon/delivery#instances), and the control plane's side is on
+[VPS instances](/docs/guides/vps/instances#runtimes).
+
+<Callout type="warn" title="No VMM has booted under bcd on real KVM">
+`libvirt-kvm` (362317c) and `cloud-hypervisor` (2598f0a) are written, reviewed and tested against fake tools only: a
+fake `virsh` and `qemu-img`, a fake cloud-hypervisor REST API, fake `systemd-run`, `ip` and seed tools. As of round 6
+(`.claude/coordination.md`, 2026-10-04) no virtual machine has booted under bcd on a real KVM host: the development
+machine has `/dev/kvm` in WSL but no hypervisor installed, and installing one needs the user's approval. The end-to-end
+tests (`tests/e2e/bcd-vps.test.ts`, `bcd-placement.test.ts`) run a fakehw build's file-backed fake runtime through the
+real control plane. Treat everything below about real VMs as the code's intent, checked by unit tests, not as
+production behaviour.
+</Callout>
+
+## Which runtimes a host runs
+
+There is no configuration key. A host build of `bcd node` runs each built-in runtime whose tool is on its `PATH` when
+it starts (`newRuntimes` in `cmd/bcd/hardware_host.go`), then adds bcx plugin runtimes:
+
+| Runtime | Turned on by | Files under | Id (`InstanceSpec.runtime`) |
+| --- | --- | --- | --- |
+| `libvirt-kvm` | `virsh` on the `PATH` | `data_dir/libvirt` | `libvirt-kvm` |
+| `cloud-hypervisor` | `cloud-hypervisor` on the `PATH` | `data_dir/cloud-hypervisor` | `cloud-hypervisor` |
+| A bcx plugin runtime | A hosted driver plugin whose manifest lists the kind `runtime`, with an id no built-in runtime has | The plugin's own | The driver id |
+| The fake runtime | A fakehw build (`go build -tags fakehw`), always | `data_dir/fakehw-runtime.json` | `libvirt-kvm` |
+
+Only node agents run runtimes; `bcd site` and `bcd ramdisk` run none. Every runtime the
+node runs is advertised in `Hello.drivers` with kind `runtime`, which the gateway turns into the node label
+`bc.dev/driver.<runtime>`. vps places a hosted instance only on hosts that carry its runtime's label (0fca413). If a
+spec names a runtime this host lacks anyway, that instance fails with `runtime <id> is not installed on this host`.
+A host with no runtime at all fails a non-empty `instances` section terminally with `this host runs no instance
+runtime`, and `bcd doctor` warns ("neither virsh nor cloud-hypervisor: this host runs no VPS instances").
+
+All volumes share one store, `data_dir/volumes`, whatever the runtime (see [volumes](#volumes)).
+
+## The Runtime interface
+
+Every runtime implements `runtime.Runtime` (`daemon/internal/runtime/runtime.go`):
+
+| Method | Does |
+| --- | --- |
+| `Name()` | The driver id |
+| `List(ctx)` | Every domain the runtime holds, managed or not, with its state, resources, addresses, MACs, GPUs and open volumes |
+| `Ensure(ctx, spec, userData, restore)` | Defines the domain for a spec, or updates an existing one (resources, NICs, GPUs). It never starts it. `userData` is the NoCloud user data for a new domain; `restore` is a downloaded, verified snapshot a new domain boots from |
+| `SetState(ctx, id, state)` | Starts, stops, pauses or resumes a managed domain (`running`, `stopped`, `paused`) |
+| `Snapshot(ctx, id, includeMemory, cpuModel, w)` | Writes a snapshot tar of a managed domain to `w`, and answers the CPU model a memory state depends on |
+| `Destroy(ctx, id)` | Removes a managed domain with its disks and taps |
+
+Optional interfaces add what only some runtimes do: `Console` (a serial console), `Rebind` (the [identity
+rebind](/docs/daemon/delivery#identity-rebind) disk), `VolumeGrower` (tell a running guest a volume grew), the
+balloon's size and usage readers, `SelfAdmitting` (a runtime that checks capacity itself, so bcd's admission leaves
+it alone) and `NormalPagesRestore` (memory restores run on normal pages).
+
+Two rules hold for every runtime:
+
+- **Ownership.** A domain is `Managed` only when bcd created it. Every other domain is listed so the control plane can
+  report the leak, and is never defined over, started, stopped or destroyed.
+- **Tap names.** NIC `i` of instance `id` lives on the host interface `runtime.TapName(id, i)`: `bc`, the first 10 hex
+  digits of the SHA-256 of the instance id, `n`, then the index (it fits `IFNAMSIZ`). bcd's nftables rules match taps
+  by name, so they exist before the tap does.
+
+## libvirt-kvm
+
+`runtime.Libvirt` drives `virsh -c qemu:///system` and `qemu-img`. Each domain it defines carries bcd's metadata
+(namespace `https://better-compute.dev/libvirt/1`: allocation, image digest and format, addresses, the snapshot it
+was restored from), which is how bcd tells its own domains apart.
+
+| Concern | What `libvirt-kvm` does |
+| --- | --- |
+| Disk | A qcow2 overlay `instances/<id>/disk.qcow2` on a base image downloaded once over https, verified against its SHA-256, checked as a [tenant image](/docs/daemon/delivery#tenant-images) and kept as `images/<sha256>.<format>`. An `iso` image boots from a cdrom onto a blank qcow2 disk |
+| Grow | `qemu-img resize` while stopped, `virsh blockresize` while running; a smaller size fails the instance |
+| NICs | virtio NICs on the spec's bridges, on taps named `TapName` |
+| CPU | `host-passthrough`, so a memory snapshot restores only on the same CPU model |
+| States | `start` (`--paused` for a paused start), `suspend`, `resume`. A stop is `virsh shutdown`, then `virsh destroy` after 60 seconds (`ShutdownTimeout`). A start that fails with "Cannot allocate memory" is a capacity failure |
+| Delete | `destroy` and `undefine`, then the instance directory is removed |
+| Console | The pty libvirt gives the domain's serial port |
+
+Running as root, bcd adds `o+x` (search, never read) to each directory from `data_dir` down to a domain's disks,
+seed, volumes and base image, so QEMU's own user (`libvirt-qemu` or `qemu`) reaches them while listing stays closed
+(f7b8805). Under the helper the model is different (below).
+
+fakehw builds replace the runtime with a file-backed fake under the same id. It writes the domain XML bcd would define
+on a real host to `data_dir/fakehw-plans/<id>.xml` (or `<id>.error` when the spec would be refused) through
+`runtime.RenderLibvirt`, so tests can assert pinning, NUMA binding, huge pages, the balloon, volumes and GPU addresses
+that the fake cannot run.
+
+## cloud-hypervisor
+
+`runtime.CloudHypervisor` runs one cloud-hypervisor VMM per instance in a systemd transient unit
+`bcd-ch-<id>.service` in `bcd-instances.slice` (started with `systemd-run --collect`, so a VM outlives bcd), and drives
+it over its REST API on `instances/<id>/api.sock`. cloud-hypervisor keeps no registry, so `instances/<id>/vm.json`
+is bcd's record: the allocation, image and base, the VMM's uid, addresses, networks, MACs, GPUs, placement, volumes,
+the VM configuration, and what was handed to the running VMM (VFIO groups, bound PCI addresses, volumes). A directory
+without that record, marked `better-compute/cloud-hypervisor/1`, is not bcd's.
+
+| Concern | What `cloud-hypervisor` does |
+| --- | --- |
+| Firmware | Boots `/usr/share/cloud-hypervisor/CLOUDHV.fd`; `bcd doctor` warns when it is missing |
+| Disk | The same verified and checked qcow2 overlays as `libvirt-kvm` (it reuses that image code over its own directory), `image_type` stated for each disk, `backing_files` only for bcd's own overlay. An `iso` image is refused |
+| NICs | Persistent taps named `TapName`, created and bridged by bcd before the VMM starts (933c51b). Since b12c217 bcd opens each tap and hands its file descriptor to the VMM (`vm.add-net`, or `net_fds` on a restore), so the VMM never names a tap |
+| Identity | Each VMM runs as its instance's own uid from `0x7FFD0000` up, recorded in `vm.json`, with no capabilities and no network (see [the cloud-hypervisor unit](/docs/daemon/delivery#the-cloud-hypervisor-unit)) |
+| Grow | `qemu-img resize` while stopped, `vm.resize-disk` while running |
+| States | `vm.create` and `vm.boot` (then `vm.pause` for a paused start), `vm.pause`, `vm.resume`. A stop is the ACPI power button for up to 60 seconds, then `vm.shutdown`, `vmm.shutdown` and `systemctl stop`, and fails unless the unit is then `inactive` or `failed` |
+| Delete | Stops the VM first, so a running VMM's directory is never removed, then removes its taps and directory |
+| Console | The serial port's unix socket, `instances/<id>/serial.sock` |
+
+It needs systemd 247 or later, which `bcd doctor` checks, and a cloud-hypervisor whose API takes NIC file descriptors.
+
+## bcx plugin runtimes
+
+A bcx driver plugin whose manifest lists the kind `runtime` becomes a runtime on `bcd node` (`agent.PluginRuntime`,
+[walkthrough 4](/docs/extending/walkthroughs#walkthrough-4-a-kata-runtime-over-bcx)). It speaks the TypeScript
+`RuntimeDriver` contract over `Invoke`, with positional JSON arguments:
+
+| Operation | Arguments | Answer |
+| --- | --- | --- |
+| `list` | none | `[{ id, state, addresses, message? }]` |
+| `apply` | core's `InstanceSpec` with its `desiredState` | `{ id, state, addresses, message? }` |
+| `remove` | the instance id | `null` |
+
+`Ensure` only records the spec; `SetState` sends `apply` with the desired state, so the plugin both defines and starts.
+A new instance's user data and a restore (as a local `file://` URL of the verified snapshot) go with its first
+`apply` only. The idempotency key is `instance:<id>:apply:<state>` or `instance:<id>:remove`. Everything a runtime
+plugin lists counts as bcd's.
+
+What bcd passes a plugin, and what it does not:
+
+- **Passed** (b8a1801): each NIC's tap name, gateway and nameservers, the network policy, `sshFromHostOnly`,
+  `identityRebindRef`, the placement, and each volume's path and serial in attach order.
+- **Enforced by bcd.** When the tap rules guard an instance (a `PRIVATE` or `NONE` policy, or SSH from the host
+  only) and a running plugin instance has no interface under one of its tap names, bcd stops and fails it (`runtime
+  <id> did not create taps …: its network rules cannot apply`).
+- **Not supported.** Snapshots (`Snapshot` answers `unsupported`, so no plugin snapshot exists to restore from,
+  although a restore's verified file would be passed on); the identity rebind and `identity_rebound_ref`; consoles.
+
+Plugins need root to start, so an unprivileged node under the helper hosts none (see [bcd helper](/docs/daemon/helper)).
+
+## The fake runtime
+
+`runtime.Fake` keeps its domains in a JSON file, so they outlive the daemon process. A new boot id (a host reboot)
+stops every domain, as it would stop real VMs. It honors optional vCPU and memory limits itself (`AdmitsItself`, so
+bcd's host admission skips it), refuses a disk that shrinks, refuses a snapshot from another runtime and a memory
+snapshot from another CPU model, refuses a memory snapshot beside a read-write volume, echoes on its "console", and
+acts as a compliant guest for the identity rebind. The TypeScript `FakeHypervisor` follows the same rules, which is
+what `better-compute dev --sim` and the simulator run.
+
+## Passthrough GPUs
+
+An instance's `gpu_device_ids` are GPU UUIDs. Both built-in runtimes find each GPU's PCI address from the inventory's
+bus id (a GPU already on `vfio-pci` is found by its remembered address), and an instance whose GPU has none fails.
+
+| Step | `libvirt-kvm` | `cloud-hypervisor` |
+| --- | --- | --- |
+| Binding | Managed PCI `<hostdev>`: libvirt rebinds the device itself | bcd binds every endpoint of the GPU's IOMMU group to `vfio-pci` before the start (`driver_override`, unbind, `drivers_probe`), the GPU's audio function included; bridges stay on `pcieport` (be4de2a). It checks the devices moved, so a host without `vfio-pci` loaded fails the start |
+| Unbind bound | | An unbind waits at most 30 seconds (`UnbindTimeout`); past that the start fails rather than block every section |
+| Persistence mode | Off for the domain's GPUs before a start, on again after a destroy (5bb9f22) | Off before a GPU leaves `nvidia`, on again once it is back (f25abbe) |
+| Giving back | libvirt reattaches on destroy | A stop gives the groups back to root; a destroy hands the devices back to their host driver, even when the spec dropped a GPU meanwhile |
+
+Persistence mode matters because `nvidia-persistenced` (which the `nvidia-driver` [host
+unit](/docs/daemon/host-config#nvidia-driver) keeps running) holds every GPU open, and the driver's unbind waits until
+the GPU is closed. Both runtimes refuse a memory snapshot of an instance with passthrough GPUs, since the GPU's state
+lives in the device (`an instance with passthrough GPUs cannot be snapshotted with its memory; snapshot its disk
+only`). The host's IOMMU and `vfio-pci` come from the [iommu](/docs/daemon/host-config#iommu) and
+[kernel-modules](/docs/daemon/host-config#kernel-modules) units, and `bcd doctor` warns when `vfio-pci` is missing on
+a host with an active IOMMU.
+
+## NoCloud seeds
+
+User data never travels in the spec. The converger fetches it with a `SecretRequest` bound to the allocation, and the
+runtime writes it into a NoCloud seed, built with `genisoimage` (`-volid cidata -joliet -rock`), else `xorriso -as
+mkisofs` with the same options:
+
+| File | Content |
+| --- | --- |
+| `user-data` | The fetched user data, or `#cloud-config` with an empty object when there is none |
+| `meta-data` | `instance-id: <id>` and `local-hostname: <id>` |
+| `network-config` | Only when a NIC has leased addresses, a gateway or nameservers (0791fc9): cloud-init network config version 2, each NIC matched by MAC, its CIDR addresses static with DHCP off, a default route through its gateway, and its nameservers. A NIC without addresses keeps `dhcp4: true`. A NIC without a valid MAC beside static NICs fails the seed, since cloud-init would leave it unconfigured |
+
+`libvirt-kvm` attaches `seed.iso` as a read-only cdrom; `cloud-hypervisor` attaches the same file as a read-only raw
+disk. A restored instance keeps the seed in its snapshot, attached as raw and never probed. `bcd doctor` fails a VPS
+host without either `genisoimage` or `xorriso`.
+
+## Placement
+
+`InstanceSpec.placement` (from a flavor's `placement`, see [flavors](/docs/guides/vps/flavors#placement)) is checked
+before anything is created (`runtime.PlacementOf`), and a placement the host cannot apply fails the instance:
+
+| Field | Rule |
+| --- | --- |
+| `cpus` | A kernel cpulist with at least as many CPUs as vCPUs. With exactly one CPU per vCPU, vCPU `i` is pinned to the `i`-th CPU; otherwise the vCPUs float within the set. A range spans at most 4096 CPUs |
+| `mems` | A cpulist of NUMA nodes the memory is bound to |
+| `hugepage_size_bytes` | 0, 2 MiB or 1 GiB, and the memory must be a whole number of pages |
+| `balloon` | A virtio balloon, dropped when huge pages back the memory |
+
+| Placement | `libvirt-kvm` | `cloud-hypervisor` |
+| --- | --- | --- |
+| CPUs | `vcpu cpuset` (floating) or `cputune vcpupin` (pinned) | `cpus.affinity`, and `AllowedCPUs` on the VMM's unit |
+| NUMA | `numatune` in strict mode | `AllowedMemoryNodes` on the VMM's unit |
+| Huge pages | Locked `memoryBacking` huge pages | `memory.hugepages`; the unit's `MemoryMax` drops to the VMM's overhead |
+| Balloon | An explicit `memballoon` (`none` unless asked) | A balloon with free page reporting |
+
+A restore keeps bcd's pinning, never the snapshot's. A `cloud-hypervisor` memory restore runs on normal pages whatever
+the placement says, because its saved configuration keeps no huge pages; admission charges it that way
+(`RestoresOnNormalPages`). The balloon controller that resizes balloons under host memory pressure is on [memory
+ballooning](/docs/daemon/delivery#memory-ballooning). bcd advertises `instance.placement` in `Hello` on hosts with a
+runtime, and vps sends placements only there.
+
+## Admission
+
+Before a runtime starts a domain that is not running (a resume from `PAUSED` is not a start), bcd checks that the host
+can give it its memory (0dd122a), counting what is committed rather than used: running and paused managed domains on
+normal pages with their VMM overhead (1/32 of the memory plus 256 MiB), bound holds' memory limits, and starts
+already admitted in the same pass, against `MemTotal` less the huge page pool and 1 GiB of headroom. An instance
+with huge pages is checked against free pages of that size on its NUMA nodes and host-wide (aeaa982). A start that
+does not fit stays stopped with `ResourcesExhausted: …` in its status, is retried on the next pass, and is not an
+`ERROR`. The rules and what vps does with the refusal are on [instances](/docs/daemon/delivery#instances).
+
+A runtime that reports `ErrNoCapacity`, or a `libvirt-kvm` start that fails for lack of memory, is a capacity failure
+of that instance. A runtime that admits itself (the fake) is left alone, and a host whose `/proc/meminfo` cannot be
+read starts without the check, with a warning.
+
+## Volumes
+
+Persistent volumes are sparse raw files in `data_dir/volumes/<id>.raw`, shared by every runtime on the host and
+attached by serial (`/dev/disk/by-id/virtio-<serial>` in the guest), `vdb` onward after the root disk:
+
+| Runtime | Attached as |
+| --- | --- |
+| `libvirt-kvm` | Raw virtio disks, read-only when asked |
+| `cloud-hypervisor` | `Raw` disks with their serial, bound into the VMM's unit; a read-write one handed to the VMM's user while it runs, a read-only one readable by that user through an ACL entry |
+| A plugin | Path and serial in its spec |
+
+Growth is applied live through `VolumeGrower` (`virsh blockresize`, `vm.resize-disk`; b5415a2). bcd tracks which
+domains have which volumes open and never lets a second writer in, applies stops and deletes before starts, and
+never destroys a volume a running VM has open. Both built-in runtimes refuse a memory snapshot beside a read-write
+volume (`ErrMemorySnapshotWithVolumes`). The store's rules, space accounting and reports are on [persistent
+volumes](/docs/daemon/delivery#persistent-volumes).
+
+## Snapshots and restores
+
+`instance.snapshot` asks the runtime for a tar written to a staging file under `data_dir/snapshots`, which bcd hashes
+and uploads; `restore_from` downloads and verifies a snapshot before a new instance boots from it. The transfers are
+on [instances](/docs/daemon/delivery#instances); the runtimes' formats are:
+
+| Runtime | Tar contents | Restore |
+| --- | --- | --- |
+| `libvirt-kvm` | `meta.json` (runtime, CPU model, `includeMemory`), the overlay flattened onto its base (`qemu-img convert`), the seed, and with memory `virsh save`'s state. The domain then carries on with `virsh restore --xml` of bcd's own `domain.xml` (81f9c21). A disk-only snapshot of a running domain pauses it for the copy | Unpacks into the new instance's directory, checks the disk and seed, and starts with `virsh restore` and the new domain's XML |
+| `cloud-hypervisor` | `meta.json`, the flattened overlay, the seed, and with memory cloud-hypervisor's own snapshot of the paused VM under `ch/` (`config.json`, `state.json`, `memory-ranges`); a running VM is paused and resumed | The saved `config.json` must have exactly the instance's vCPUs and memory; bcd rebuilds it keeping only CPU, memory and platform keys and supplies payload, disks, NICs, serial, console, rng and devices itself, then `vm.restore` and `vm.resume` |
+
+A snapshot names its runtime in `meta.json`, and the other runtime refuses it. A memory snapshot restores only on the
+same CPU model. A memory restore's guest gets its own SSH identity through the [identity
+rebind](/docs/daemon/delivery#identity-rebind) (ca08d5c), which both built-in runtimes implement with a hot-added
+`vdz` disk.
+
+## Serial consoles
+
+Instance [console tunnels](/docs/guides/access/tunnels#the-node-half) (f8273ef) reach a running, managed instance's
+serial port, never the host's shell. `libvirt-kvm` opens the pty libvirt gave the domain's serial port;
+`cloud-hypervisor` dials `instances/<id>/serial.sock`; the fake echoes what it is sent, prefixed with `console: `. Under
+the helper, root opens the libvirt pty and passes the node its descriptor (`libvirt.console`). Plugin runtimes have
+no console.
+
+## Under bcd helper
+
+On an unprivileged `bcd node` (`[helper]` set), `forHelper` (`cmd/bcd/agent.go`) wires each built-in runtime to
+[bcd helper](/docs/daemon/helper):
+
+| Runtime | Goes through the helper | Stays with the node |
+| --- | --- | --- |
+| `libvirt-kvm` | Every privileged `virsh` verb, as `libvirt.*` (ed3c7d2): define, the state changes, blockresize, setmem, the rebind disk's attach and detach, save, restore and console; root validates each definition default-deny and acts only on bcd's domains | Reads over libvirt's read-only socket (`virsh -r` for `list`, `domstate`, `dumpxml`, `domstats`; any other verb is refused), its files under `data_dir/libvirt` |
+| `cloud-hypervisor` | Taps, VFIO groups and the VMM unit, as `ch.*` (d86fcbe, 7fe74a1); root builds the unit from the instance record it checks | Every file, shared with the VMM's uid through POSIX ACL entries (the unit's `UMask` becomes `0007`), and the VMM's API socket |
+
+libvirt then runs with `dynamic_ownership = 0`, and QEMU's user is in the node's group, so instance disks are 0660
+(read-only ones 0640) and the directories on the way get group search instead of others' search. Without `[helper]
+instance_bridges`, root defines no domain with a NIC and creates no tap. What root checks for each operation is on
+[bcd helper](/docs/daemon/helper#libvirt) and in the overview's [libvirt through the
+helper](/docs/daemon#libvirt-through-the-helper) and [cloud-hypervisor through the
+helper](/docs/daemon#cloud-hypervisor-through-the-helper).
+
+## What the tests cover
+
+| Tests | Against | Covers |
+| --- | --- | --- |
+| `internal/runtime` `libvirt_test.go` | A fake `virsh` and `qemu-img` (writing real qcow2 headers since b12c217) | Domain XML and metadata, states, grow and shrink, snapshot and clone with memory, a CPU mismatch, destroy, a mismatched image digest, base image and overlay checks |
+| `internal/runtime` `cloudhypervisor_test.go` | A fake VMM API and fake `systemd-run`, `qemu-img`, `ip` and seed tools | Define, states, memory snapshot and restore into a clone, the rebuilt restore configuration, taps before the VMM, the unit's uid and confinement, NIC fds, VFIO groups handed back, a rewritten overlay, a VMM that survives its stop, the rebind |
+| `internal/runtime` `placement_test.go`, `netconfig_test.go`, `vfio_test.go`, `volumes_test.go`, `balloon_test.go` | Fakes and temporary files | Placement parsing, network-config rendering, VFIO binding against a fake sysfs, the volume store, the balloon |
+| `internal/runtime` `hypervisor_test.go`, `ch_privileged_linux_test.go` and the helper's tests | Fake helper sockets and tools | Both runtimes under the helper |
+| `tests/e2e/bcd-vps.test.ts`, `bcd-placement.test.ts` | A fakehw bcd's fake runtime and the real control plane | Create, start, delete, placement plans and the balloon under simulated pressure |
+
+None of these runs a real VMM. Round 6 (2026-10-04) brought bcd onto a real host with an RTX 5090 in WSL, but that
+host has no hypervisor installed, so no instance has booted on real KVM.

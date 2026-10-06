@@ -273,7 +273,8 @@ check for each directory on the way to the slots, the helper socket or the entry
 condition that keeps `bcd helper` from starting (9e71b1f). A
 gateway that does not accept a TCP connection within 5
 seconds, or an expired node certificate, is a failure. It also warns when `config.toml` is readable by anyone but its owner, and exits 1 when any
-check fails. There is no clock check yet.
+check fails. Since e2a0cf0 it also checks that the host clock is synchronized (`clock`), and `bcd hardware`
+reports what the host really is; see [running bcd on real hardware](/docs/daemon/real-hardware).
 
 Since ab26e87 doctor also checks what enforcing booked host resources needs from the host:
 
