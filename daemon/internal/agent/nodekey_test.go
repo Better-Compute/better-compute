@@ -167,3 +167,45 @@ func popTime(req *agentv1.RenewRequest) []byte {
 	}
 	return out
 }
+
+// A renewal keeps the trust the node holds, the JoinService-signed bundle included: bcd helper takes
+// host units' command-signing roots from it, and losing it until the next Welcome would make a helper
+// node without a command_root_sha256 pin fall back to its join record's (possibly rotated) roots.
+func TestRenewalKeepsTheSignedTrustBundle(t *testing.T) {
+	f := joinFixture(t)
+	dir := t.TempDir()
+	if _, err := Join(context.Background(), JoinOptions{
+		Client: f, Token: "bcjt_join_01k5w0000000000000000000000." + strings.Repeat("A", 43),
+		EncryptionKey: &f.encKey.PublicKey, SignerPin: f.pin, DataDir: dir,
+		Sleep: func(context.Context, time.Duration) error { return nil },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, key, err := LoadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.TrustVersion, state.SignedTrustBundle, state.TrustBundle = 7, []byte("signed-bundle-v7"), []byte("bundle-v7")
+	a, err := New(Options{
+		State: state, Key: key, DataDir: dir, Journal: journal.NewMemory(state.NodeID, journal.MemoryOptions{}),
+		Host: &fakeHost{boot: "boot-1", root: t.TempDir(), inv: fakehw.Inventory(1)}, Dial: newGateway(t).dial,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Renewer: renewerFunc(func(_ context.Context, req *agentv1.RenewRequest) (*agentv1.RenewResponse, error) {
+			return &agentv1.RenewResponse{CertChain: [][]byte{f.leaf(req.GetCsr())}}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.renewOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	renewed, k, err := LoadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeKey(k)
+	if renewed.TrustVersion != 7 || string(renewed.SignedTrustBundle) != "signed-bundle-v7" || string(renewed.TrustBundle) != "bundle-v7" {
+		t.Fatalf("after renewal: version %d, signed %q, bundle %q", renewed.TrustVersion, renewed.SignedTrustBundle, renewed.TrustBundle)
+	}
+}

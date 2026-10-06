@@ -266,8 +266,9 @@ func runDoctor(fs *flag.FlagSet, stdout, _ io.Writer) int {
 	return exitOK
 }
 
-// permissionWarning flags a configuration file that others can read or write; the install script
-// writes it with mode 0600. Windows has no such mode bits.
+// permissionWarning flags a configuration file that others can read, or its group can write. The
+// install script writes it 0600, or 0640 root:bcd with --unprivileged, so that bcd node (in group
+// bcd) can read what root wrote: group read is that design, not a finding. Windows has no such bits.
 func permissionWarning(file string) string {
 	if runtime.GOOS == "windows" {
 		return ""
@@ -276,8 +277,8 @@ func permissionWarning(file string) string {
 	if err != nil {
 		return ""
 	}
-	if perm := uint32(st.Mode().Perm()); perm&0o077 != 0 {
-		return fmt.Sprintf("%s has mode %04o; the install script writes 0600", file, perm)
+	if perm := uint32(st.Mode().Perm()); perm&0o037 != 0 {
+		return fmt.Sprintf("%s has mode %04o; the install script writes 0600 (0640 root:bcd under [helper])", file, perm)
 	}
 	return ""
 }

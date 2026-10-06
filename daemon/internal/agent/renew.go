@@ -198,6 +198,10 @@ func (a *Agent) renewOnce(ctx context.Context) error {
 	renewed.TrustVersion = state.TrustVersion
 	renewed.TrustRoots = state.TrustRoots
 	renewed.TrustBundle = state.TrustBundle
+	// The signed form too: bcd helper takes host units' command-signing roots from it, and without it
+	// until the next Welcome a helper node with no command_root_sha256 pin falls back to its join
+	// record's roots (stale after a root rotation).
+	renewed.SignedTrustBundle = state.SignedTrustBundle
 	renewed.ServerTime = state.ServerTime
 	// The next key must be on disk before the certificate that names it: whatever removed it during
 	// the request (a LoadState elsewhere discards a node.key.next the certificate does not match), a

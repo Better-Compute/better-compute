@@ -272,7 +272,8 @@ update and each failed version (pointing at `bcd update --clear-failed`), and wa
 check for each directory on the way to the slots, the helper socket or the entrypoint that is not root's alone, the
 condition that keeps `bcd helper` from starting (9e71b1f). A
 gateway that does not accept a TCP connection within 5
-seconds, or an expired node certificate, is a failure. It also warns when `config.toml` is readable by anyone but its owner, and exits 1 when any
+seconds, or an expired node certificate, is a failure. It also warns when others can read `config.toml` or its group can write it (group read is the `--unprivileged`
+install's `root:bcd` 0640), and exits 1 when any
 check fails. Since e2a0cf0 it also checks that the host clock is synchronized (`clock`), and `bcd hardware`
 reports what the host really is; see [running bcd on real hardware](/docs/daemon/real-hardware).
 

@@ -310,3 +310,23 @@ func TestJoinBootstrapsItsConfigurationFromTheWellKnownDocument(t *testing.T) {
 		t.Fatalf("second re-join = %d, %q %q", code, stdout, stderr)
 	}
 }
+
+// config.toml: 0600, or 0640 for the --unprivileged install (root:bcd, read by bcd node) are fine;
+// anything others can read, or its group can write, is a warning.
+func TestPermissionWarning(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("no mode bits")
+	}
+	file := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(file, []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for mode, warn := range map[os.FileMode]bool{0o600: false, 0o640: false, 0o644: true, 0o660: true, 0o604: true} {
+		if err := os.Chmod(file, mode); err != nil {
+			t.Fatal(err)
+		}
+		if got := permissionWarning(file) != ""; got != warn {
+			t.Errorf("mode %04o: warning %v, want %v", mode, got, warn)
+		}
+	}
+}
