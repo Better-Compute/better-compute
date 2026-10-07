@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/events",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Event delivery for better-compute: per-tenant signed webhooks with retries and dead letters, and the SSE /watch stream, read from the outbox.",
   "type": "module",
   "license": "Apache-2.0",

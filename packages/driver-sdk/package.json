@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/driver-sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "bcx, the better-compute out-of-process driver protocol: serveDriver runs a defineDriver object as a plugin, externalDriver hosts one over auto-mTLS gRPC.",
   "type": "module",
   "license": "Apache-2.0",

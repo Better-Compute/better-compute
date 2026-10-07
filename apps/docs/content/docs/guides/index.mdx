@@ -124,7 +124,7 @@ owns only its machine PKI: the certificates that identify daemons.
 - **Embedded by default.** The IAM bridge (`better-compute/iam`) runs Better IAM in the same processes. A remote
   mode, where Better IAM runs elsewhere, is part of the v0.4 phase.
 
-Both are on npm: Better Compute 0.1.0 depends on Better IAM `^0.2.0`, and you install the two side by side
+Both are on npm: Better Compute 0.1.1 works with Better IAM `>=0.2.0 <0.4.0` (0.3 today), and you install the two side by side
 (`npm install better-compute better-iam`).
 
 ## What it covers
@@ -167,8 +167,8 @@ Both are on npm: Better Compute 0.1.0 depends on Better IAM `^0.2.0`, and you in
 
 ## Project status
 
-<Callout type="warn" title="Version 0.1.0">
-  Every package is at version 0.1.0 and on npm; see [Installation](/docs/guides/installation). This is an early
+<Callout type="warn" title="Version 0.1.1">
+  Every package is at version 0.1.1 and on npm; see [Installation](/docs/guides/installation). This is an early
   release: the Go daemon `bcd` has no released binary yet, and nothing has run on real GPU hardware, so machines
   join as simulated daemons (`better-compute dev --sim N`) or as a `bcd` you build yourself.
 </Callout>

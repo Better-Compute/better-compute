@@ -21,7 +21,7 @@ npm install better-compute better-iam
 
 `better-compute` is the umbrella package: it installs every `@better-compute/*` package it covers and exposes each one
 as a subpath (`better-compute/postgres`, `better-compute/client`, …), plus the `better-compute` command. Better IAM
-(`better-iam`, `^0.2.0`) is required for identity and authorization. Requirements: Node.js 22.12 or later (ESM only),
+(`better-iam`, `>=0.2.0 <0.4.0`) is required for identity and authorization. Requirements: Node.js 22.12 or later (ESM only),
 and PostgreSQL 16 or later in production or PGlite (`@electric-sql/pglite`) for development. See
 [Installation](https://better-compute.com/docs/guides/installation) for the optional peers and the packages outside the
 umbrella.
@@ -108,7 +108,7 @@ your own configuration file (`better-compute init`).
 
 ## Status
 
-Version 0.1.0 is an early release; APIs and the daemon protocol may still change before 1.0.
+Version 0.1.1 is an early release; APIs and the daemon protocol may still change before 1.0.
 
 - **Runs today:** the whole control plane (API, workers, gateway, CLI, MCP tools) runs from Node.js on PGlite or
   PostgreSQL. CI covers Node.js 22 and 24 on Ubuntu and Windows, and PostgreSQL 17.

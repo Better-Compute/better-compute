@@ -11,9 +11,9 @@ Better Compute is split into `@better-compute/*` packages. Most applications ins
 import it, and the server never imports the injected modules (`provision`, `metal`, `vps`): your application imports
 them and passes them in, so what you do not use costs nothing at run time.
 
-<Callout title="Version 0.1.0">
-  `better-compute` and every `@better-compute/*` package are published to npm at 0.1.0, on the `latest` dist-tag,
-  and depend on Better IAM `^0.2.0` (`better-iam` and `@better-iam/*`), which is on npm too. The Go daemon `bcd` is
+<Callout title="Version 0.1.1">
+  `better-compute` and every `@better-compute/*` package are published to npm at 0.1.1, on the `latest` dist-tag,
+  and accept Better IAM `>=0.2.0 <0.4.0` (`better-iam` and `@better-iam/*`; 0.3 is current), which is on npm too. The Go daemon `bcd` is
   not an npm package and has no released binary yet; see [the daemon](#the-daemon).
 </Callout>
 
@@ -204,10 +204,10 @@ The umbrella declares these as optional peer dependencies. Install the ones you 
 | Peer | Needed for |
 | --- | --- |
 | `@electric-sql/pglite` `^0.5.8` | `better-compute/pglite`, the testing fixture, `dev` without a database URL. Without it, the CLI fails with `MISSING_DEPENDENCY` and an install hint. |
-| `@better-iam/server`, `@better-iam/core` `^0.2.0` | Embedded Better IAM through the bridge |
-| `@better-iam/adapter-sqlite` `^0.2.0` | Better IAM on SQLite in development, and the embedded IAM of `dev --sim` |
-| `@better-iam/client` `^0.2.0` | `better-compute iam setup --meters`, which creates the billing meters in Better IAM |
-| `@better-iam/cli` `^0.2.0` | Declared for Better IAM's CLI; today the `better-compute` CLI reads its credential from `BETTER_COMPUTE_TOKEN` only |
+| `@better-iam/server`, `@better-iam/core` `>=0.2.0 <0.4.0` | Embedded Better IAM through the bridge |
+| `@better-iam/adapter-sqlite` `>=0.2.0 <0.4.0` | Better IAM on SQLite in development, and the embedded IAM of `dev --sim` |
+| `@better-iam/client` `>=0.2.0 <0.4.0` | `better-compute iam setup --meters`, which creates the billing meters in Better IAM |
+| `@better-iam/cli` `>=0.2.0 <0.4.0` | Declared for Better IAM's CLI; today the `better-compute` CLI reads its credential from `BETTER_COMPUTE_TOKEN` only |
 
 `@better-compute/cli` also declares `@better-compute/testing` as an optional peer, for `dev --sim` and `sim`; the
 umbrella depends on it, so installing `better-compute` provides it. See [Better IAM](/docs/guides/iam) for how the

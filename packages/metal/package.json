@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/metal",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Bare-metal lifecycle for better-compute: power, management, boot, deploy and inspect drivers.",
   "type": "module",
   "license": "Apache-2.0",

@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/fleet",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "FleetConfig as code for better-compute: export, plan and apply sites, pools, offers, quotas, flavors and provider accounts.",
   "type": "module",
   "license": "Apache-2.0",

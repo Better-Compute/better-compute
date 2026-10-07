@@ -1,6 +1,6 @@
 {
   "name": "better-compute",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Manage GPU and bare-metal capacity and provision nodes in many ways: one package with every better-compute subpath.",
   "type": "module",
   "license": "Apache-2.0",
@@ -173,12 +173,12 @@
     "@better-compute/vps": "workspace:*"
   },
   "peerDependencies": {
-    "@better-iam/adapter-sqlite": "^0.2.0",
-    "@better-iam/cli": "^0.2.0",
-    "@better-iam/client": "^0.2.0",
-    "@better-iam/core": "^0.2.0",
-    "@better-iam/mcp": "^0.2.0",
-    "@better-iam/server": "^0.2.0",
+    "@better-iam/adapter-sqlite": ">=0.2.0 <0.4.0",
+    "@better-iam/cli": ">=0.2.0 <0.4.0",
+    "@better-iam/client": ">=0.2.0 <0.4.0",
+    "@better-iam/core": ">=0.2.0 <0.4.0",
+    "@better-iam/mcp": ">=0.2.0 <0.4.0",
+    "@better-iam/server": ">=0.2.0 <0.4.0",
     "@electric-sql/pglite": "^0.5.8"
   },
   "peerDependenciesMeta": {
@@ -203,5 +203,13 @@
     "@electric-sql/pglite": {
       "optional": true
     }
+  },
+  "devDependencies": {
+    "@better-iam/adapter-sqlite": "^0.3.0",
+    "@better-iam/cli": "^0.3.0",
+    "@better-iam/client": "^0.3.0",
+    "@better-iam/core": "^0.3.0",
+    "@better-iam/mcp": "^0.3.0",
+    "@better-iam/server": "^0.3.0"
   }
 }

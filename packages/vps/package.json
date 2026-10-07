@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/vps",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "VPS instances for better-compute: runtimes, flavors and external providers.",
   "type": "module",
   "license": "Apache-2.0",

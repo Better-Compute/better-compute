@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "The better-compute command line.",
   "type": "module",
   "license": "Apache-2.0",
@@ -67,10 +67,10 @@
   "peerDependencies": {
     "@better-compute/testing": "workspace:*",
     "@electric-sql/pglite": "^0.5.8",
-    "@better-iam/server": "^0.2.0",
-    "@better-iam/cli": "^0.2.0",
-    "@better-iam/adapter-sqlite": "^0.2.0",
-    "@better-iam/client": "^0.2.0"
+    "@better-iam/server": ">=0.2.0 <0.4.0",
+    "@better-iam/cli": ">=0.2.0 <0.4.0",
+    "@better-iam/adapter-sqlite": ">=0.2.0 <0.4.0",
+    "@better-iam/client": ">=0.2.0 <0.4.0"
   },
   "peerDependenciesMeta": {
     "@better-compute/testing": {
@@ -91,5 +91,11 @@
     "@better-iam/client": {
       "optional": true
     }
+  },
+  "devDependencies": {
+    "@better-iam/adapter-sqlite": "^0.3.0",
+    "@better-iam/cli": "^0.3.0",
+    "@better-iam/client": "^0.3.0",
+    "@better-iam/server": "^0.3.0"
   }
 }

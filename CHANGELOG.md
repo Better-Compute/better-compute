@@ -6,6 +6,19 @@ All notable changes to the better-compute packages are documented here. The form
 
 ## Unreleased
 
+## 0.1.1 (2026-10-07)
+
+Better IAM 0.3 support. Every package now accepts Better IAM `>=0.2.0 <0.4.0` (dependencies and peers), so
+`npm install better-compute better-iam` resolves one Better IAM, the current 0.3.x, instead of a 0.3 umbrella beside
+the 0.2 packages 0.1.0 asked for.
+
+### Changed
+
+- **Better IAM range.** `^0.2.0` becomes `>=0.2.0 <0.4.0` on every `@better-iam/*` and `better-iam` dependency and
+  peer. The workspace builds and tests against 0.3.0 (its full suite and the IAM contract tests pass); 0.2.x keeps
+  working. Better IAM 0.3's breaking changes do not touch Better Compute: it declares none of the newly reserved
+  principal or resource attribute names, and its resource resolver returns no `classification`.
+
 ## 0.1.0 (2026-10-07)
 
 The first release on npm: the umbrella package `better-compute` and 26 `@better-compute/*` packages, all at 0.1.0.

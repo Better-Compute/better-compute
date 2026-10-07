@@ -10,5 +10,30 @@ allowBuilds:
   esbuild: true
   '@bufbuild/buf': false
 
+minimumReleaseAgeExclude:
+  - '@better-iam/adapter-postgres@0.3.0'
+  - '@better-iam/adapter-sqlite@0.3.0'
+  - '@better-iam/auth@0.3.0'
+  - '@better-iam/cli@0.3.0'
+  - '@better-iam/client@0.3.0'
+  - '@better-iam/core@0.3.0'
+  - '@better-iam/mcp@0.3.0'
+  - '@better-iam/server@0.3.0'
+  - '@better-iam/a2a@0.3.0'
+  - '@better-iam/adapter-libsql@0.3.0'
+  - '@better-iam/ldap@0.3.0'
+  - '@better-iam/middleware@0.3.0'
+  - '@better-iam/nestjs@0.3.0'
+  - '@better-iam/next@0.3.0'
+  - '@better-iam/oauth@0.3.0'
+  - '@better-iam/projects@0.3.0'
+  - '@better-iam/react-router@0.3.0'
+  - '@better-iam/react@0.3.0'
+  - '@better-iam/saml@0.3.0'
+  - '@better-iam/scim@0.3.0'
+  - '@better-iam/svelte@0.3.0'
+  - '@better-iam/vue@0.3.0'
+  - better-iam@0.3.0
+
 # Several sessions share this tree: `pnpm exec`/`pnpm run` must never start an install on their own.
 verifyDepsBeforeRun: false

@@ -14,7 +14,7 @@ identity provider, policy decision point and billing ledger.
 npm install better-compute better-iam
 ```
 
-- Better IAM (`better-iam`, `^0.2.0`) is required for identity and authorization. The umbrella declares the
+- Better IAM (`better-iam`, `>=0.2.0 <0.4.0`) is required for identity and authorization. The umbrella declares the
   `@better-iam/*` packages it uses (`server`, `core`, `client`, `cli`, `mcp`, `adapter-sqlite`) as optional peers, and
   `better-iam` brings them.
 - `@electric-sql/pglite` (`^0.5.8`) is an optional peer for `better-compute/pglite`, the testing fixture and

@@ -14,10 +14,10 @@
   },
   "dependencies": {
     "@better-compute/console-kit": "workspace:*",
-    "@better-iam/next": "^0.2.0",
-    "@better-iam/react": "^0.2.0",
+    "@better-iam/next": "^0.3.0",
+    "@better-iam/react": "^0.3.0",
     "better-compute": "workspace:*",
-    "better-iam": "^0.2.0",
+    "better-iam": "^0.3.0",
     "next": "^15.5.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",

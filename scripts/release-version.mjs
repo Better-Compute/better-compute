@@ -19,6 +19,14 @@ for (const entry of await readdir(join(root, 'packages'), { withFileTypes: true 
   manifest.version = version;
   await writeFile(path, JSON.stringify(manifest, null, 2) + '\n');
 }
+// The server reports its version (system.version, the well-known document) from a constant that must equal its
+// package.json version (tests/server-operation.test.ts checks).
+const versionFile = join(root, 'packages', 'server', 'src', 'version.ts');
+const versionSource = await readFile(versionFile, 'utf8');
+const updatedSource = versionSource.replace(/export const serverVersion = '[^']*';/, `export const serverVersion = '${version}';`);
+if (updatedSource === versionSource && !versionSource.includes(`export const serverVersion = '${version}';`))
+  throw new Error(`${versionFile}: no serverVersion constant to update`);
+await writeFile(versionFile, updatedSource);
 const date = new Date().toISOString().slice(0, 10);
 console.log(
   `Updated package metadata to ${version}. Next (RELEASING.md): move CHANGELOG.md's Unreleased notes under "## ${version} (${date})" and leave "## Unreleased" empty above it (\`node scripts/release-notes.mjs ${version}\` prints the release notes), then run pnpm install, pnpm check, pnpm pack:all, pnpm check:packed-types and pnpm test:packed.`,

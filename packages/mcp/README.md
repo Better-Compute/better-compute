@@ -14,7 +14,7 @@ It is also included in the umbrella package as `better-compute/mcp`:
 npm install better-compute
 ```
 
-Better IAM (`npm install better-iam`) provides the optional `@better-iam/mcp` peer (^0.2.0), whose gate decides who may call which tool. The package itself depends only on `@better-compute/client`.
+Better IAM (`npm install better-iam`) provides the optional `@better-iam/mcp` peer (>=0.2.0 <0.4.0), whose gate decides who may call which tool. The package itself depends only on `@better-compute/client`.
 
 ## Usage
 

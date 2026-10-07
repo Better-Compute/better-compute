@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Model Context Protocol tools for better-compute: pools, capacity, GPU reservations and node status for AI agents, gated by better-iam.",
   "type": "module",
   "license": "Apache-2.0",
@@ -52,7 +52,7 @@
     "@better-compute/client": "workspace:*"
   },
   "peerDependencies": {
-    "@better-iam/mcp": "^0.2.0"
+    "@better-iam/mcp": ">=0.2.0 <0.4.0"
   },
   "peerDependenciesMeta": {
     "@better-iam/mcp": {
@@ -60,6 +60,6 @@
     }
   },
   "devDependencies": {
-    "@better-iam/mcp": "^0.2.0"
+    "@better-iam/mcp": "^0.3.0"
   }
 }

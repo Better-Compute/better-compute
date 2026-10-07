@@ -14,7 +14,7 @@ It is also included in the umbrella package as `better-compute/iam`, `better-com
 npm install better-compute better-iam
 ```
 
-[Better IAM](https://github.com/Better-IAM/better-iam) (`npm install better-iam`, ^0.2.0) is required: it is compute's only identity provider, policy decision point and billing ledger. It provides the `@better-iam/*` peers this package uses. `@better-iam/core` is a required peer. `@better-iam/server` (embedded mode and IAM hosts), `@better-iam/client` (remote mode) and `@better-iam/adapter-sqlite` (the `./testing` kit) are optional peers.
+[Better IAM](https://github.com/Better-IAM/better-iam) (`npm install better-iam`, >=0.2.0 <0.4.0) is required: it is compute's only identity provider, policy decision point and billing ledger. It provides the `@better-iam/*` peers this package uses. `@better-iam/core` is a required peer. `@better-iam/server` (embedded mode and IAM hosts), `@better-iam/client` (remote mode) and `@better-iam/adapter-sqlite` (the `./testing` kit) are optional peers.
 
 ## Usage
 
