@@ -440,10 +440,14 @@ A caller whose tenant is neither the input's `tenantId` nor the root tenant gets
 reads or writes its database and before any IAM decision. For fleet-wide methods, the decision tenant is the
 root tenant, so only root-tenant callers pass.
 
-The check exists because Better IAM resolves the resource before it checks the tenant. Without it, an outsider
-probing ids would get `NOT_FOUND` for ids that do not exist and `ACCESS_DENIED` for ids that do, an existence
-oracle, and every probe would append a denial to the victim tenant's audit chain. With it, the answer is the same
-in every case, like Better IAM's own masked `TENANT_MISMATCH`, and no outsider traffic reaches the tenant's chain.
+The check was added because Better IAM 0.1 resolved the resource before it checked the tenant: without it, an
+outsider probing ids got `NOT_FOUND` for ids that do not exist and `ACCESS_DENIED` for ids that do, an existence
+oracle, and every probe appended a denial to the victim tenant's audit chain. Better IAM 0.2, which Better Compute
+now requires, checks the tenant first itself: a foreign tenant is denied (`TENANT_MISMATCH`, masked as
+`ACCESS_DENIED`) before any resolver runs, absent and present ids get the same answer, and the denial is audited on
+the caller's own tenant with the target in `targetTenantId` (pinned by `tests/iam-contract.test.ts`). Compute keeps
+its own check anyway: the answer is the same in every case, and an outsider costs no database access and no IAM
+decision.
 `tests/server-admission.test.ts` asserts that such a call makes one IAM call (`authenticate`) and no database
 access at all.
 

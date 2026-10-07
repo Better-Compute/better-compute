@@ -80,9 +80,15 @@ yet. This page tracks each item as:
   `bcd site` and `bcd ramdisk` are written and covered by Go unit tests only. The `instances` converger, instance
   tunnels and the IMDS run end to end only on fakehw builds (`tests/e2e/bcd-vps.test.ts`); the `libvirt-kvm` and
   `cloud-hypervisor` runtimes of host builds (362317c, 2598f0a) are tested against fake tools only. The release
-  pipeline exists but no release has been cut, no real server has run bcd, and GPUs are read through `nvidia-smi` (cb987e5), tested against captured output only, with no go-nvml backend; self-update, the WebSocket fallback and `bcd helper` (self-update included) are. Those are exercised through the TypeScript `FakeDaemon`. `bcd sim` runs many real node agents in one
-  process (fakehw builds only).
-  See [what bcd does today](/docs/daemon#what-bcd-does-today).
+  pipeline exists but no release has been cut. GPUs are read through `nvidia-smi` (cb987e5) with no go-nvml backend.
+  Self-update, the WebSocket fallback and `bcd helper` (self-update included) are done and exercised through the
+  TypeScript `FakeDaemon`. `bcd sim` runs many real node agents in one process (fakehw builds only).
+  One real host has run a host build of bcd (round 6, 2026-10-04): a WSL 2 workstation with a GeForce RTX 5090.
+  `tests/e2e/bcd-host-real.test.ts` (`BCD_E2E_REAL=1`) joins it to a dev stack, adopts it, reads its real inventory
+  and GPU, exports the GPU's live metrics over OTLP and answers `bcd status` and `bcd doctor`. That bcd ran as an
+  ordinary user without `[helper]`, so it binds no GPUs: no real `/etc/cdi` spec, hold slice, passthrough or MIG has
+  run yet. See [running bcd on real hardware](/docs/daemon/real-hardware) and
+  [what bcd does today](/docs/daemon#what-bcd-does-today).
 - **No PostgreSQL server has run the suites.** Local runs use PGlite (PostgreSQL 18 in WebAssembly). Suites that need
   real concurrency skip unless `BETTER_COMPUTE_POSTGRES_URL` is set, and every benchmark number below is from PGlite
   on a development machine, which the gates do not count.
@@ -95,7 +101,7 @@ yet. This page tracks each item as:
 | Phase | Theme | State |
 | --- | --- | --- |
 | [P0](#p0-scaffold) | Scaffold | Done |
-| [v0.1](#v01-adopt-and-reserve) | Adopt and reserve | Control plane done; bcd's node agent done and tested end to end, not released (a real GPU host and the install-script run are open; GPUs come from `nvidia-smi`, cb987e5); PostgreSQL and the reference gate runs |
+| [v0.1](#v01-adopt-and-reserve) | Adopt and reserve | Control plane done; bcd's node agent done and tested end to end, not released (one real GPU host has joined, been adopted and reported its GPU; a real GPU hold, a data-center GPU server and the install-script run are open; GPUs come from `nvidia-smi`, cb987e5); PostgreSQL and the reference gate runs |
 | [v0.2](#v02-metal) | Bare metal | Control plane done and tested in simulation; `bcd site` and `bcd ramdisk` written (Go unit tests only, not released), never run against the control plane or on hardware |
 | [v0.3](#v03-vps-and-access) | VPS and access | Control plane done; tunnels and the `access` section done in bcd (not released); `libvirt-kvm` and `cloud-hypervisor` written in bcd and tested against fake tools only |
 | [v0.4](#v04-scale-and-ha) | Scale and HA | Mostly done in simulation; `bcd helper` done, self-update through it included; the numbers need the reference PostgreSQL |
@@ -355,6 +361,6 @@ The work's owners are in `.claude/coordination.md` ("Round 5").
 | Writing more of bcd (Go is installed now; P0's code generation, W1's node agent, `bcd site`, `bcd ramdisk`, the `instances` converger, `libvirt-kvm`, `cloud-hypervisor`, self-update, the WebSocket fallback, `bcd helper`, bcx plugin supervision and the `bcx-ipmi` BMC driver are done) | Vendor BMC drivers, bcx plugins beside an unprivileged node, NVML events and a go-nvml backend; an end-to-end run of the site agent and ramdisk, and of bcd with a bcx plugin |
 | A bcd release | Installing real nodes with the install script |
 | A PostgreSQL 17 server | The concurrent capacity and torture suites, the IAM-lane gate, the 30-minute gateway gate, every v0.4 number |
-| The D15 hardware | Real inventory and CDI on an NVIDIA host, emulation CI on a KVM runner, the first `libvirt-kvm` run on real KVM, the MIG and real-hardware nightlies |
+| The D15 hardware | CDI and a bound GPU hold on an NVIDIA host (real inventory and live GPU metrics have run, on one RTX 5090 under WSL 2), emulation CI on a KVM runner, the first `libvirt-kvm` run on real KVM, the MIG and real-hardware nightlies |
 
 For what changed recently, see the [changelog](/docs/reference/changelog).
