@@ -98,9 +98,9 @@ No radial gradients, and no second hue.
 
 ## Deploying
 
-The package is private: `pnpm publish -r` skips it. Nothing in this repository is published to npm yet (Better
-Compute depends on Better IAM through vendored tarballs until Better IAM publishes), so the site builds against the
-workspace: `better-compute` is a `workspace:*` dependency.
+The package is private: `pnpm publish -r` skips it. The site builds against the workspace rather than the npm
+release, so the reference always matches the code it is built with: `better-compute` is a `workspace:*` dependency.
+The production site is `https://better-compute.com`.
 
 [`Dockerfile`](Dockerfile) builds the site from the repository root: install with the pinned pnpm
 (`--frozen-lockfile`), `tsc -b` for the packages, `scripts/generate.mjs` for the reference, then `next build`. It
@@ -115,7 +115,7 @@ Build arguments, read at build time and baked into the static pages:
 
 | Variable                             | Default                                            | Purpose                                                                                |
 | ------------------------------------ | -------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `DOCS_SITE_URL`                      | `http://localhost:4100`                            | Canonical origin (metadata, sitemap, `llms.txt`, social cards); `www.` redirects to it |
+| `DOCS_SITE_URL`                      | `https://better-compute.com`                       | Canonical origin (metadata, sitemap, `llms.txt`, social cards); `www.` redirects to it. Without it, `next dev` uses `http://localhost:4100` |
 | `NEXT_PUBLIC_DOCS_REPOSITORY_URL`    | `https://github.com/better-compute/better-compute` | GitHub button, "Edit this page", source, and issue links                               |
 | `NEXT_PUBLIC_DOCS_REPOSITORY_BRANCH` | `main`                                             | Branch for source and edit links                                                       |
 | `DOCS_X_HANDLE`                      | unset                                              | The site's X account (`@name`) as `twitter:site` and `twitter:creator` on link cards   |
@@ -208,8 +208,8 @@ transitions, limits and defaults, failure behavior. Prefer 400 to 1,500 words pe
 **Accuracy over coverage.** The sources of truth are `packages/*/src`, the package READMEs (some status lines are
 stale; trust the code), PLAN.md, `generated/*.json`, the examples, the tests, and `CHANGELOG.md`. Every identifier
 must exist in the source. When something is only designed in PLAN.md, say it is planned and for which phase; a
-method whose status is `planned` is planned for the phase shown. Nothing is on npm yet, and the Go daemon `bcd` is
-written in `daemon/` but not built or released; the TypeScript FakeDaemon in `@better-compute/testing` speaks the
+method whose status is `planned` is planned for the phase shown. The packages are on npm at 0.1.0 (with Better IAM
+`^0.2.0`), and the Go daemon `bcd` is built and tested in `daemon/` but not released; the TypeScript FakeDaemon in `@better-compute/testing` speaks the
 real protocol for tests, the simulator, and `better-compute dev --sim N`.
 
 **MDX safety.** Outside code, `{`, `}`, `<`, and `>` start JSX or expressions. Put identifiers and anything with
@@ -249,7 +249,7 @@ machine is clearer drawn. Keep labels short and quote labels that contain punctu
 | `<ApiEndpoint group="reservations" method="create" />`                      | A method's route, server and client calls, IAM action (or Public), and "Planned" badge, from the catalog.                 |
 | `<ApiGroupSummary group="reservations" />`                                  | A group's method count, served count, and how to call it.                                                                 |
 | ` ```mermaid ` fences                                                       | Diagrams.                                                                                                                 |
-| ` ```npm ` fences                                                           | `npm i x` rendered as npm / pnpm / yarn / bun tabs. Say near install commands that nothing is on npm yet.                 |
+| ` ```npm ` fences                                                           | `npm i x` rendered as npm / pnpm / yarn / bun tabs, for install commands.                                                 |
 
 Icons come from the site's registry, `lib/icons.ts`, which maps semantic names to react-icons (Remix Icon, the set
 BoardUI is drawn with; Simple Icons for vendor logos). Import them at the top of the page for `Feature` and `Card`

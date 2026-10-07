@@ -16,8 +16,17 @@ export const version: string = stats.version;
 /** Better Compute's creator, credited in page metadata, llms.txt, the site and docs footers, every docs page, and social cards. */
 export const creator = 'Sean Filimon';
 
-/** Canonical origin used for metadata, sitemap and llms.txt links. */
-export const siteUrl = (process.env.DOCS_SITE_URL ?? 'http://localhost:4100').replace(/\/$/, '');
+/** The production site; `DOCS_SITE_URL` overrides it. */
+export const productionSiteUrl = 'https://better-compute.com';
+
+/**
+ * Canonical origin used for metadata, sitemap and llms.txt links: `DOCS_SITE_URL` when set, else the production
+ * site in production builds (`next build`, `next start`) and the local dev server (`next dev`) otherwise.
+ */
+export const siteUrl = (
+  process.env.DOCS_SITE_URL ||
+  (process.env.NODE_ENV === 'production' ? productionSiteUrl : 'http://localhost:4100')
+).replace(/\/$/, '');
 
 const getContentUrl = createGetUrl(docsContentRoute);
 

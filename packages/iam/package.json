@@ -15,14 +15,14 @@
     "url": "https://github.com/better-compute/better-compute/issues"
   },
   "keywords": [
-    "gpu",
-    "bare-metal",
-    "capacity",
-    "provisioning",
-    "infrastructure",
+    "better-compute",
+    "better-iam",
     "iam",
     "authorization",
-    "better-iam"
+    "authz",
+    "policy",
+    "multi-tenant",
+    "usage-metering"
   ],
   "publishConfig": {
     "access": "public"
@@ -32,6 +32,7 @@
   },
   "files": [
     "dist",
+    "src",
     "README.md",
     "LICENSE"
   ],
@@ -59,10 +60,10 @@
     "@better-compute/core": "workspace:*"
   },
   "peerDependencies": {
-    "@better-iam/adapter-sqlite": "^0.1.0",
-    "@better-iam/client": "^0.1.0",
-    "@better-iam/core": "^0.1.0",
-    "@better-iam/server": "^0.1.0"
+    "@better-iam/adapter-sqlite": "^0.2.0",
+    "@better-iam/client": "^0.2.0",
+    "@better-iam/core": "^0.2.0",
+    "@better-iam/server": "^0.2.0"
   },
   "peerDependenciesMeta": {
     "@better-iam/adapter-sqlite": {
@@ -76,9 +77,9 @@
     }
   },
   "devDependencies": {
-    "@better-iam/adapter-sqlite": "0.1.0",
-    "@better-iam/client": "0.1.0",
-    "@better-iam/core": "0.1.0",
-    "@better-iam/server": "0.1.0"
+    "@better-iam/adapter-sqlite": "^0.2.0",
+    "@better-iam/client": "^0.2.0",
+    "@better-iam/core": "^0.2.0",
+    "@better-iam/server": "^0.2.0"
   }
 }

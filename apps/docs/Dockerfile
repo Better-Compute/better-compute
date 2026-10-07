@@ -13,14 +13,13 @@ COPY . .
 
 # pnpm 11.19.0 is pinned by the root package.json (`packageManager`); corepack provides exactly that version.
 RUN corepack enable && corepack prepare pnpm@11.19.0 --activate
-# better-iam resolves to the tarballs in vendor/better-iam (pnpm-workspace.yaml overrides) until it is published.
 RUN pnpm install --frozen-lockfile
 # The packages the generator loads (dist/ of core, server, postgres, pki, provision, metal, ... cli).
 RUN node node_modules/typescript/bin/tsc -b
 RUN node apps/docs/scripts/generate.mjs
 
-# Baked into the static pages at build time; DOCS_SITE_URL is the canonical origin (a custom domain).
-ARG DOCS_SITE_URL
+# Baked into the static pages at build time; DOCS_SITE_URL is the canonical origin (override it for another domain).
+ARG DOCS_SITE_URL=https://better-compute.com
 ARG NEXT_PUBLIC_DOCS_REPOSITORY_URL=https://github.com/better-compute/better-compute
 ARG NEXT_PUBLIC_DOCS_REPOSITORY_BRANCH=main
 # Optional: the site's X account on link cards, and search console ownership tokens.

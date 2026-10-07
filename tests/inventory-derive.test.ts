@@ -306,7 +306,7 @@ describe('labels and conditions', () => {
     const wrongModel = inventoryConditions({ gpus: board(8) }, { gpuModel: 'B200' });
     expect(wrongModel[0]!.message).toBe('expected B200 GPUs, found H100');
     const odd = board(1);
-    odd.gpus[0]!.name = 'NVIDIA GH200 480GB';
+    odd.gpus[0]!.name = 'NVIDIA Example X9 999GB'; // unknown to the model table (GH200 joined it in 223022b)
     expect(inventoryConditions({ gpus: odd })[1]).toMatchObject({ type: 'GpuModelUnknown', status: 'true' });
   });
 

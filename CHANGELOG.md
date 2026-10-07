@@ -1,8 +1,76 @@
 # Changelog
 
+All notable changes to the better-compute packages are documented here. The format is based on
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). Every package in `packages/` shares one version.
+
 ## Unreleased
 
-- Round 5, the complete node daemon (PLAN §3.8, v1.1; orchestrator [595a2f]):
+## 0.1.0 (2026-10-07)
+
+The first release on npm: the umbrella package `better-compute` and 26 `@better-compute/*` packages, all at 0.1.0.
+It needs Node.js 22.12 or later, PostgreSQL 16 or later (PGlite for development and tests) and Better IAM `^0.2.0`.
+
+### Added
+
+- **Control plane.** `betterCompute()` runs the API, gateway and worker in one process or separately. PostgreSQL is
+  the source of truth: bookings are guarded by `EXCLUDE` constraints and all SQL reads one clock, `compute_now()`.
+  Every mutation makes one Better IAM decision; fleet paths (heartbeats, inventory, commands) make none. Stores for
+  PostgreSQL and PGlite ship in `@better-compute/postgres`.
+- **Capacity and reservations** (`@better-compute/capacity`). Pools, selectors, NVLink- and NUMA-aware placement,
+  quotas, previews and reservations for whole GPUs, MIG partitions and shared GPU slots. Reservations also book host
+  resources (`vcpu`, `memoryGiB`, hugepages) and hand cgroup limits and a NUMA-local cpuset to the node. Usage is metered
+  in hourly windows.
+- **Bare metal** (`@better-compute/metal`, `@better-compute/provision`). Enroll, inspect, commission, deploy,
+  release, retire and rescue workflows over BMC and PXE, driven by a workflow engine with profiles and a signed image
+  catalog. A machine returns to `ready` only after an attested wipe. Also dedicated-root leases, two-phase BMC
+  password rotation, and GPU health remediation within a pool's disruption budget.
+- **VPS, sandboxes and volumes** (`@better-compute/vps`). Instances on your own hosts (IPAM, flavors with NUMA,
+  pinning and hugepage placement) or on providers (`@better-compute/provider-hetzner`,
+  `@better-compute/provider-proxmox`). Sandboxes add templates, TTLs, warm pools, snapshots and SSH exec with
+  short-lived certificates. Sandbox volumes and persistent host volumes attach to instances.
+- **Kubernetes workers** (`@better-compute/provider-kubernetes`). bcd runs as a DaemonSet and adopts a cluster's
+  nodes and GPUs into a pool; reservations with `binding: 'kubernetes'` hand devices to the kubelet through device
+  plugins or a DRA driver.
+- **Gateway and protocol** (`@better-compute/gateway`, `@better-compute/protocol`). Daemon sessions over gRPC with
+  mutual TLS, liveness, command dispatch, and join, renew and secret forwarding. The generated
+  `bettercompute.agent.v1` wire contracts are frozen.
+- **PKI and the destructive-batch quorum** (`@better-compute/pki`). Local CAs, SPIFFE node certificates, sealed join
+  tokens, attestors (join token, TPM, cloud instance identity, x509 proof of possession), command signing, a sealed
+  secret store and broker, and trust-root rotation. Destructive command batches can require a quorum of approvers
+  (`commandBatches`, `pki.approvers`). `@better-compute/audit` adds signed Merkle checkpoints over the audit log.
+- **Better IAM integration** (`@better-compute/iam`). The IAM plugin and catalog, the authorization projection, an
+  embedded or remote `IamPort`, and the usage sink, on Better IAM `^0.2.0` from npm.
+- **CLI** (`@better-compute/cli`, the `better-compute` command). PKI setup and certificate issuance, the bcd install
+  script, capacity shortcuts, `iam setup` and release signing.
+- **MCP** (`@better-compute/mcp`). Model Context Protocol tools for pools, capacity, GPU reservations, instances and
+  sandboxes, gated by Better IAM with confirmations for risky actions.
+- **Clients and consoles.** `@better-compute/client` is a typed, browser-safe API client with live `$watch`.
+  `@better-compute/console-kit` provides framework-free view models for consoles.
+- **Testing kit** (`@better-compute/testing`). Fixtures, the simulated `FakeDaemon`, a sim clock, the fleet
+  simulation and conformance runners.
+- **More packages.** `@better-compute/events` (signed webhooks and an SSE stream), `@better-compute/fleet` (fleet
+  configuration as code), `@better-compute/observability` (Prometheus metrics), `@better-compute/rollout` (signed bcd
+  releases and wave rollouts) and `@better-compute/driver-sdk` (out-of-process drivers).
+- **The Go daemon bcd** (`daemon/`). The node agent is built and tested end to end against a real gateway on the
+  fake-hardware build; the site and ramdisk modes are covered by Go unit tests. The release pipeline (goreleaser,
+  SBOMs, cosign signatures, SLSA3 provenance) is in place, but this release publishes no bcd binaries.
+
+### Known limitations
+
+- **No real-hardware runs.** Everything is tested against fakes and simulations: no real server has run bcd, and the
+  hardware gates (a GPU host, a KVM host, the reference benchmark machines) have not run. Local test runs and the
+  benchmark numbers use PGlite rather than a PostgreSQL server.
+- **bcd binaries are not released.** The install script and self-update need a published bcd, so until a release
+  carries binaries, build bcd from `daemon/` with Go.
+- See the [roadmap](https://better-compute.com/docs/reference/roadmap) for the state of every phase.
+
+## Development history (pre-0.1.0)
+
+The internal notes kept while the packages were built, before the first release. They cite sections of `PLAN.md`
+and commit hashes, and are kept for reference; the 0.1.0 entry above summarizes them.
+
+- Round 5, the complete node daemon (PLAN §3.8, v1.1):
   - Host resources on every host: `vcpu`, `memoryGiB`, `hugepages2Mi`, `hugepages1Gi` rows from inventory (`capacity.hosts`, `policy.hostReserve`). VPS hosts' memory now excludes hugepage pools.
   - Reservations take `resources` (`vcpu`, `memoryGiB`, `hugepages1Gi`) and default to the pool's per-GPU share (`policy.perGpu`, else the smallest host share). Host resources are not charged to quota. `capacity.preview` books the same.
   - `DeviceAssignment.limits` carry cgroup limits and a NUMA-local cpuset (without the host's reserved CPUs) to bcd.
@@ -25,7 +93,7 @@
   - Hosted-Kubernetes bcd uses the kubelet's credentials (e7d0765; NodeRestriction confines it to its own Node), never a service account.
   - CI builds the DaemonSet image (daemon/Containerfile) and server-side dry-runs the rendered manifests on a kind cluster.
 
-- Round 4, server/core/mcp/client ([f85da7]):
+- Round 4, server/core/mcp/client:
   - Security: admissions decide on the committed row (`IamPort.refreshResource`; §12.4 "draft in memory before require" was unimplemented, so `extend` decided on stale projection rows: BoundedExtend allowed 72 h + 1 h). A node reports only its own allocations. With `pki.commandSigning`, a reservation goes active only on the node's own signed `AllocationBound` (`pkiAllocationBindingCheck`). The secret broker releases an instance's user data only when it names a secret of the instance's own tenant. Certificate roles live in the Subject OU `bc-role:<role>` (no private OIDs; Go cannot parse the 2.25 arc).
   - Envelope: async-with-wait (`MethodDefinition.poll`, `wait: { timeoutMs }`), `MethodAdmission.check` (budget checks outside transactions, no `denied`), W3C `traceparent` onto enqueued commands.
   - Server: audit sinks (`sinks.audit`, module extensions), module-listed event sinks and scheduler plugins; `sinks.usage` refused. `GET {basePath}/downloads/bcd/{version}/linux-{arch}`; `supportBundles` presigned `logs.collect` uploads; `projects.archive`, `commands.cancel`, `usage.export`; selfCheck §14 operations findings; fewer statements per join; the node pass wakes started reservations on connectivity/schedulability changes; `site` NodeSpec sections merge per field (`NodeSpecPart`); `vps-host` nodes may be declared lost.
@@ -73,7 +141,7 @@
     - `lint:repo` checks the generated docs reference before the API freeze.
   - Tests: the §16 v0.3 MCP confirmation acceptance and §12.6 example policies end to end, §5.6 walkthrough 2 (acme-cloud), the authz matrix known-key replay step; `pnpm check` runs the remote-IAM suites, `proto-gen --check` and `buf breaking`. Tools: `scripts/private-commit.mjs` (compare-and-swap commits), `scripts/head-check.mjs` (tests the committed tree in a worktree).
 
-- Round 4, capacity and sandboxes ([097b34]):
+- Round 4, capacity and sandboxes:
   - Capacity:
     - The pool-lease placer reads a lazy `PoolIndex`: per-class counts from `capacity_device_counts` (trigger-kept), booked devices only, and full devices and links per node on first view. It loads the index before taking the pool lock. At 10k nodes on PGlite, `placeQueued` goes from ~500 to ~1,000 placements/s and lock hold p90 from 875 to 60 ms.
     - Also: single-tenant offers, `dedicated=<tenant>` taints, node label constraints (`nodeLabels`, `'*'` any value), the MIG layout gate, attested `AllocationBound`, admit hooks for node leases, the budget admission check, reservation `operation`/`poll`, active conditions, `onPlacement` metrics, the I7 solver, fast-check planning properties, `capacityTenantDeleted`, and JSON Schemas for every method.

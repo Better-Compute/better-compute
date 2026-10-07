@@ -1,6 +1,6 @@
 ---
 title: Quickstart
-description: Build Better Compute from a clone, run the development server with simulated GPU machines, reserve GPUs, watch capacity change and release them.
+description: Install Better Compute from npm, run the development server with simulated GPU machines, reserve GPUs, watch capacity change and release them.
 icon: Rocket
 packages: ['better-compute', '@better-compute/cli', '@better-compute/testing']
 sources: ['README.md', 'docs/development.md', 'examples/README.md', 'examples/dev/README.md', 'examples/dev/better-compute.config.ts', 'examples/shared/compose.ts', 'packages/cli/src/commands/serve.ts', 'packages/cli/src/commands/setup.ts', 'packages/cli/src/commands/capacity.ts', 'packages/cli/src/dev-sim.ts', 'packages/testing/src/dev/stack.ts', 'apps/docs/generated/cli.json']
@@ -13,56 +13,31 @@ machines get sealed join tokens, call the Join RPC, open a Session stream, pass 
 adopted by the real runtime.
 
 <Callout title="Requirements">
-  Node.js 22.12 or newer; 22.18 or newer to load a TypeScript configuration such as the one in `examples/dev`,
-  because Node.js strips types by default from 22.18. No database server is needed. Better Compute is not on npm
-  yet, so you build it from a clone.
+  Node.js 22.12 or newer; 22.18 or newer to load a TypeScript configuration such as `better-compute init` writes,
+  because Node.js strips types by default from 22.18. No database server is needed.
 </Callout>
 
 <Steps>
 <Step>
 
-### Clone and build
+### Install
 
-The workspace pins pnpm 11.19.0. Install with that version once, then run the pinned copy from `node_modules`
-(pnpm 12 refuses this workspace):
+In a new, empty project, install Better Compute, Better IAM (for the embedded IAM that `--sim` starts) and PGlite
+(the in-memory database):
+
+```npm
+npm install better-compute better-iam @electric-sql/pglite
+```
+
+With pnpm, also list `@better-iam/server`, `@better-iam/core` and `@better-iam/adapter-sqlite`; see
+[Installation](/docs/guides/installation#install-from-npm). Check the command:
 
 ```bash
-git clone https://github.com/better-compute/better-compute.git
-cd better-compute
-npx pnpm@11.19.0 install
-node node_modules/pnpm/bin/pnpm.mjs build   # tsc -b: every package's dist/
+npx better-compute version   # 0.1.0
 ```
 
-The install resolves every `better-iam` and `@better-iam/*` package from the tarballs in `vendor/better-iam`, so it
-needs no registry access for Better IAM.
-
-</Step>
-<Step>
-
-### Put the CLI on your path
-
-The `better-compute` command is `packages/cli/dist/index.js`. Point a shell alias at it, from the repository root:
-
-<Tabs items={['bash / zsh', 'PowerShell']}>
-<Tab value="bash / zsh">
-
-```bash
-alias better-compute="node '$PWD/packages/cli/dist/index.js'"
-better-compute version   # 0.1.0
-```
-
-</Tab>
-<Tab value="PowerShell">
-
-```text
-$bc = "$PWD\packages\cli\dist\index.js"
-function better-compute { node $bc @args }
-better-compute version
-```
-
-</Tab>
-</Tabs>
-
+This page writes the command as `better-compute`: in the project directory, run it as `npx better-compute` (or
+`pnpm exec better-compute`), or define an alias such as `alias better-compute="npx better-compute"`.
 `better-compute help` lists every command, and `better-compute help dev` shows one. The
 [CLI reference](/docs/reference/cli) has them all.
 
@@ -71,25 +46,24 @@ better-compute version
 
 ### Start the development server with simulated machines
 
-`examples/dev` is a configuration with every module registered (provision and metal, vps, events, fleet) and a
-host export that adds server-sent events at `GET /watch`:
-
 ```bash
-cd examples/dev
-better-compute dev --memory --sim 8
+npx better-compute dev --memory --sim 8
 ```
 
 - `dev` runs the API and every worker role on `127.0.0.1:3000`, and always migrates first.
-- `--memory` uses a throwaway in-memory PGlite. Leave it out to keep the data between runs.
+- `--memory` uses a throwaway in-memory PGlite. Leave it out to keep the data between runs, in
+  `.better-compute/dev-db`.
 - `--sim 8` adds a gateway on loopback (cleartext HTTP/2, sessions authenticated by a header, for local development
   only) and joins eight simulated machines through it. `--sim-variant l40s` gives 4×L40S machines instead;
   `hgx-h100-gpu-missing` gives machines that fail acceptance and are never adopted; `cpu` gives machines without GPUs.
+  The simulated machines come from `@better-compute/testing`, which the umbrella package depends on.
 
-The configuration has no IAM wired in, so `--sim` starts an embedded, in-memory Better IAM and prints a root
-administrator's token for it. Standard error shows:
+With no configuration file, `dev` runs the server's own groups and the built-in `inventory` and `capacity` modules,
+with a development secret generated once in `.better-compute/dev-secret`. No IAM is wired in, so `--sim` starts an
+embedded, in-memory Better IAM and prints a root administrator's token for it. Standard error shows:
 
 ```text
-Development database: pglite:memory for …/examples/dev/better-compute.config.ts
+Development database: pglite:memory (secret in …/.better-compute/dev-secret)
 better-compute listening on http://127.0.0.1:3000/api/compute
 Workers running: controllers, scheduler, sinks, iam
 Dev gateway (h2c, header auth, loopback only): http://127.0.0.1:52011
@@ -105,11 +79,26 @@ certificate, opened its session, passed acceptance, and became `adopted` at desi
 the placer starts to consider it. Leave this terminal running.
 
 <Accordions type="single">
-<Accordion title="Without the example configuration">
+<Accordion title="With the repository's example configuration">
 
-`dev` also works with no configuration at all. In an empty directory, `better-compute dev --memory --sim 8` runs the
-server's own groups and the built-in `inventory` and `capacity` modules, with a development secret generated once in
-`.better-compute/dev-secret`. Everything below works except `GET /watch`, which the example's host export adds.
+The repository's `examples/dev` is a configuration with every module registered (provision and metal, vps, events,
+fleet) and a host export that adds server-sent events at `GET /watch`, which the [watch events](#watch-events) step
+uses. It is not part of the npm packages, so run it from a clone:
+
+```bash
+git clone https://github.com/better-compute/better-compute.git
+cd better-compute
+npx pnpm@11.19.0 install
+node node_modules/pnpm/bin/pnpm.mjs build   # tsc -b: every package's dist/
+alias better-compute="node '$PWD/packages/cli/dist/index.js'"
+cd examples/dev
+better-compute dev --memory --sim 8
+```
+
+The workspace pins pnpm 11.19.0 (pnpm 12 refuses it). In PowerShell, define the command with
+`$bc = "$PWD\packages\cli\dist\index.js"; function better-compute { node $bc @args }` instead of the alias. The
+first line of the output then names the configuration:
+`Development database: pglite:memory for …/examples/dev/better-compute.config.ts`.
 
 </Accordion>
 </Accordions>
@@ -119,8 +108,8 @@ server's own groups and the built-in `inventory` and `capacity` modules, with a 
 
 ### Look around
 
-Open a second terminal, define the alias again with the path of your clone, and act as the root administrator that
-`dev` printed. With
+Open a second terminal in the same directory (in a clone, define the alias again), and act as the root administrator
+that `dev` printed. With
 `BETTER_COMPUTE_URL` set, the CLI calls the running server over HTTP instead of loading a configuration:
 
 ```bash
@@ -208,8 +197,10 @@ and `available` is 60.
 
 ### Watch events
 
-Events leave through a transactional outbox. The example's `/watch` route streams your tenant's events as
-server-sent events, and `events watch` prints them one JSON line each:
+Events leave through a transactional outbox. The `/watch` route of the repository's `examples/dev` configuration
+(see [with the repository's example configuration](#start-the-development-server-with-simulated-machines)) streams
+your tenant's events as server-sent events, and `events watch` prints them one JSON line each. A `dev` without a
+configuration has no `/watch` route, so skip this step there:
 
 ```bash
 better-compute events watch --types "node.*,reservation.*"
@@ -306,8 +297,8 @@ export const commands: CommandSpec<any>[] = [];
 
 It imports the umbrella package's subpaths, so run it in a project where `better-compute` resolves, with the
 optional peers `@electric-sql/pglite` (for PGlite) and `@better-iam/server`, `@better-iam/core` and
-`@better-iam/adapter-sqlite` (for the embedded Better IAM of `--sim`) installed. See
-[Installation](/docs/guides/installation) for installing from the packed tarballs. The template reads the secret
+`@better-iam/adapter-sqlite` (for the embedded Better IAM of `--sim`, all three in `better-iam`) installed: the
+project from the first step is one. See [Installation](/docs/guides/installation). The template reads the secret
 from the environment, and `betterCompute()` refuses one shorter than 32 characters with `INVALID_CONFIG`:
 
 ```bash

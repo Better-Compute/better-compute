@@ -3,6 +3,7 @@
 //   node scripts/release-version.mjs 0.2.0
 //
 // Apps, examples and the daemon (versioned by its git tag through goreleaser) are left alone.
+// The whole release checklist is RELEASING.md.
 import { existsSync } from 'node:fs';
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -18,6 +19,7 @@ for (const entry of await readdir(join(root, 'packages'), { withFileTypes: true 
   manifest.version = version;
   await writeFile(path, JSON.stringify(manifest, null, 2) + '\n');
 }
+const date = new Date().toISOString().slice(0, 10);
 console.log(
-  `Updated package metadata to ${version}; review the changes, move CHANGELOG.md's Unreleased notes under ## ${version}, and run pnpm install and pnpm check before packing.`,
+  `Updated package metadata to ${version}. Next (RELEASING.md): move CHANGELOG.md's Unreleased notes under "## ${version} (${date})" and leave "## Unreleased" empty above it (\`node scripts/release-notes.mjs ${version}\` prints the release notes), then run pnpm install, pnpm check, pnpm pack:all, pnpm check:packed-types and pnpm test:packed.`,
 );

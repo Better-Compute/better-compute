@@ -1,11 +1,38 @@
 # @better-compute/fleet
 
-FleetConfig as code for better-compute (PLAN.md §9.2 `fleet`, v0.2), in the style of better-iam's `TenantConfig`. A FleetConfig document describes one tenant's platform objects by name:
+FleetConfig as code for better-compute: export, plan and apply a tenant's sites, provider accounts, pools, offers, quotas, flavors and sandbox templates from one document.
+
+## Install
+
+```sh
+npm install @better-compute/fleet
+```
+
+It is also included in the umbrella package as `better-compute/fleet`:
+
+```sh
+npm install better-compute
+```
+
+## Usage
+
+```ts
+import { betterCompute } from 'better-compute';
+import { fleetModule } from '@better-compute/fleet';
+
+const compute = betterCompute({
+  // database, secret, baseURL, iam, and the modules that own the objects fleet manages ...
+  modules: [fleetModule({ driftEvery: '15m' })],
+});
+```
+
+A FleetConfig document, in the style of Better IAM's `TenantConfig`, describes one tenant's platform objects by name:
 
 - sites
 - provider accounts
 - pools, with their owner quota and the offers made to other tenants
 - VPS flavors
+- sandbox templates
 
 ```yaml
 version: 1
@@ -26,6 +53,8 @@ flavors:
   - { pool: vps-fra, name: g1.small, vcpu: 2, memoryGiB: 4, diskGiB: 40 }
 ```
 
+`validateFleetConfig(value)` checks a parsed document. Secrets appear only as `secret://` references, never as values.
+
 ## Methods
 
 Every method decides `compute:fleet:admin` on the `fleet` scope (`global`, which resolves only in the root tenant):
@@ -40,7 +69,7 @@ Every method decides `compute:fleet:admin` on the `fleet` scope (`global`, which
     - Flavors are deleted.
     - Offers are withdrawn.
     - A provider account is deleted only once no pool uses it.
-- **`fleet.apply`** runs the plan through the owning modules' own methods (`sites.create`, `pools.*`, `quotas.set`, `flavors.*`, `providerAccounts.*`). It is a composite method with `transaction: 'manual'`, and runs in two phases:
+- **`fleet.apply`** runs the plan through the owning modules' own methods (`sites.create`, `pools.*`, `quotas.set`, `flavors.*`, `providerAccounts.*`, `sandboxTemplates.*`). It is a composite method with `transaction: 'manual'`, and runs in two phases:
   1. Each call is decided for the caller with `ctx.check`, with no transaction open. The caller therefore needs each underlying permission as well as `fleet:admin`.
   2. Inside one transaction, fleet re-reads the state and plans again. If the call list changed, the state moved between the phases: nothing is applied and apply fails with `CONFIG_DRIFT` (409). Otherwise every call runs through `ctx.invoke`.
 
@@ -62,12 +91,11 @@ Applying the document again resets it. From the CLI, `better-compute fleet statu
 
 Created objects get deterministic ids. The idempotency key is `fleet:<tenant>:<kind>:<name>`, and the id is `draftId(prefix, tenant, caller, key)`, so a retried apply converges instead of duplicating. The module's table `fleet_names` (migration `fleet/0001_names`) maps names to ids.
 
-```ts
-import { fleetModule } from 'better-compute/fleet';
+## Documentation
 
-const compute = betterCompute({ ..., modules: [fleetModule()] });
-```
+- [Fleet configuration](https://better-compute.com/docs/guides/fleet-config)
+- [fleet API reference](https://better-compute.com/docs/reference/api/fleet)
 
 ## License
 
-[Apache License 2.0](LICENSE)
+[Apache License 2.0](https://github.com/better-compute/better-compute/blob/main/LICENSE)

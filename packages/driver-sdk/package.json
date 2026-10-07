@@ -15,15 +15,14 @@
     "url": "https://github.com/better-compute/better-compute/issues"
   },
   "keywords": [
-    "gpu",
-    "bare-metal",
-    "capacity",
-    "provisioning",
-    "infrastructure",
+    "better-compute",
     "driver",
     "plugin",
+    "sdk",
     "grpc",
-    "mtls"
+    "mtls",
+    "out-of-process",
+    "bare-metal"
   ],
   "publishConfig": {
     "access": "public"
@@ -33,6 +32,7 @@
   },
   "files": [
     "dist",
+    "src",
     "README.md",
     "LICENSE"
   ],

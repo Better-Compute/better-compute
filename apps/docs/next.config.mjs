@@ -2,8 +2,11 @@ import { createMDX } from 'fumadocs-mdx/next';
 
 const withMDX = createMDX({ macro: false });
 
-// The canonical origin, resolved the same way as `siteUrl` in lib/shared.ts (read at build time).
-const siteUrl = process.env.DOCS_SITE_URL;
+// The canonical origin, resolved the same way as `siteUrl` in lib/shared.ts (read at build time): DOCS_SITE_URL,
+// else https://better-compute.com in production (next sets NODE_ENV before it loads this file), else none.
+const siteUrl =
+  process.env.DOCS_SITE_URL ||
+  (process.env.NODE_ENV === 'production' ? 'https://better-compute.com' : undefined);
 const canonical = siteUrl ? new URL(siteUrl) : undefined;
 const escapeHost = (host) => host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 

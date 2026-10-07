@@ -15,12 +15,14 @@
     "url": "https://github.com/better-compute/better-compute/issues"
   },
   "keywords": [
+    "better-compute",
+    "control-plane",
     "gpu",
-    "bare-metal",
-    "capacity",
-    "provisioning",
-    "infrastructure",
-    "control-plane"
+    "scheduler",
+    "reservations",
+    "api-server",
+    "multi-tenant",
+    "typescript"
   ],
   "publishConfig": {
     "access": "public"
@@ -30,6 +32,7 @@
   },
   "files": [
     "dist",
+    "src",
     "README.md",
     "LICENSE"
   ],

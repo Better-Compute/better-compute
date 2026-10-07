@@ -6,11 +6,11 @@ import { buttonStyles } from '@/components/base/buttons/button';
 import { cx } from '@/utils/cx';
 
 /**
- * A command as a BoardUI secondary button: one click copies it. Nothing is on npm yet, so the hero offers the
- * development simulator (`better-compute dev --sim N` from the CLI manifest), which runs from a checkout.
+ * A command as a BoardUI secondary button: one click copies it. The hero offers the npm install of the umbrella
+ * package next to Better IAM, as in content/docs/guides/installation.mdx.
  */
 export function InstallCommand({
-  command = 'better-compute dev --memory --sim 8',
+  command = 'npm install better-compute better-iam',
   className,
 }: {
   command?: string;

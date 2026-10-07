@@ -389,7 +389,7 @@ describe('resolveResource and failure mode (b)', () => {
     ).toMatchObject([{ outcome: 'deny', action: create, actorId: alice.id }]);
   });
 
-  it('resolves before the tenant check, and resolves iam/{tenantId} itself only for iam:* actions (fact 4)', async () => {
+  it('denies a foreign tenant before resolving, and resolves iam/{tenantId} itself only for iam:* actions (fact 4)', async () => {
     const f = await iamFixture();
     const alice = await f.member('alice');
     const aliceSession = await f.signIn('alice');
@@ -397,21 +397,25 @@ describe('resolveResource and failure mode (b)', () => {
     const inRoot = (id: string) =>
       request(f, aliceSession, 'compute:fleet:admin', 'compute-fleet', id, f.rootTenantId);
 
-    // An Acme member asking in the root tenant: the resolver runs for the root tenant first, then TENANT_MISMATCH
-    // is masked, and the denial lands on the root tenant's audit chain.
+    // Better IAM 0.2: an Acme member asking in the root tenant is denied (TENANT_MISMATCH, masked) before any
+    // resolver runs, so a foreign tenant's resources are never looked up for it. The denial is audited on the
+    // caller's own tenant, naming the target tenant. (0.1 resolved first and audited on the root tenant.)
     f.projection.calls.length = 0;
     expect(await f.iam.authorize(inRoot('global'))).toEqual(denied);
-    expect(f.projection.calls).toEqual([
-      { tenantId: f.rootTenantId, type: 'compute-fleet', id: 'global' },
-    ]);
+    expect(f.projection.calls).toEqual([]);
     expect(
-      await f.iam.store.find('audit', { tenantId: f.rootTenantId, resourceId: 'global' }),
-    ).toMatchObject([{ outcome: 'deny', action: 'compute:fleet:admin', actorId: alice.id }]);
-    // An absent id answers 404 instead of 403: the existence oracle compute's own tenant pre-check closes (§3.4).
-    await expect(f.iam.authorize(inRoot('absent'))).rejects.toMatchObject({
-      code: 'NOT_FOUND',
-      status: 404,
-    });
+      await f.iam.store.find('audit', { tenantId: f.tenantId, resourceId: 'global' }),
+    ).toMatchObject([
+      {
+        outcome: 'deny',
+        action: 'compute:fleet:admin',
+        actorId: alice.id,
+        metadata: { targetTenantId: f.rootTenantId },
+      },
+    ]);
+    // An absent id is denied the same way, not 404: no existence oracle across tenants (§3.4 needs no help here).
+    expect(await f.iam.authorize(inRoot('absent'))).toEqual(denied);
+    expect(f.projection.calls).toEqual([]);
 
     // iam:* on iam/{tenantId} never reaches the resolver; a compute:* action on the same reference does.
     f.projection.calls.length = 0;

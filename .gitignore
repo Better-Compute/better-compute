@@ -10,6 +10,8 @@ work/
 .env
 .env.*
 .npmrc
+# local secrets: never commit
+.admin-secret
 .claude/settings.local.json
 daemon/bin/
 daemon/dist/

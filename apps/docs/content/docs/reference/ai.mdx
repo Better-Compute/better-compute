@@ -51,7 +51,7 @@ unknown group or method answers with the list of valid ones. `lookup_cli_command
 <Tab value="Claude Code">
 
 ```bash
-claude mcp add --transport http better-compute-docs https://docs.example.com/api/mcp
+claude mcp add --transport http better-compute-docs https://better-compute.com/api/mcp
 ```
 
 </Tab>
@@ -60,7 +60,7 @@ claude mcp add --transport http better-compute-docs https://docs.example.com/api
 ```json title=".cursor/mcp.json"
 {
   "mcpServers": {
-    "better-compute-docs": { "url": "https://docs.example.com/api/mcp" }
+    "better-compute-docs": { "url": "https://better-compute.com/api/mcp" }
   }
 }
 ```
@@ -71,7 +71,7 @@ claude mcp add --transport http better-compute-docs https://docs.example.com/api
 ```json title=".vscode/mcp.json"
 {
   "servers": {
-    "better-compute-docs": { "type": "http", "url": "https://docs.example.com/api/mcp" }
+    "better-compute-docs": { "type": "http", "url": "https://better-compute.com/api/mcp" }
   }
 }
 ```
@@ -79,9 +79,10 @@ claude mcp add --transport http better-compute-docs https://docs.example.com/api
 </Tab>
 </Tabs>
 
-Replace `https://docs.example.com` with the address where these docs are served. When you run them locally with
-`pnpm --filter @better-compute/docs dev`, that is `http://localhost:4100`. The links the lookup tools print use the
-site's canonical origin, `DOCS_SITE_URL`, which defaults to the same local address.
+These docs are served at `https://better-compute.com`. When you run them locally with
+`pnpm --filter @better-compute/docs dev`, use `http://localhost:4100` instead. The links the lookup tools print use
+the site's canonical origin, `DOCS_SITE_URL`, which defaults to `https://better-compute.com` in a production build
+and to the local address under `next dev`.
 
 A session might look like this: the assistant searches for "extend a reservation", reads
 `/docs/guides/capacity/reservations` with `get_page`, then calls `lookup_api_method` with `reservations.extend` to get
@@ -101,8 +102,8 @@ Any docs URL also returns Markdown when the request asks for it with `Accept: te
 pages get Markdown without special URLs:
 
 ```bash
-curl -H 'Accept: text/markdown' https://docs.example.com/docs/guides/quickstart
-curl https://docs.example.com/docs/guides/quickstart.md          # the same answer
+curl -H 'Accept: text/markdown' https://better-compute.com/docs/guides/quickstart
+curl https://better-compute.com/docs/guides/quickstart.md          # the same answer
 ```
 
 Both are rewritten to `/llms.mdx/docs/<page>/content.md`, which answers with a `Link: rel="canonical"` header that

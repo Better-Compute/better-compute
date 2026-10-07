@@ -27,8 +27,8 @@ import { proxmoxProvider } from '@better-compute/provider-proxmox';
 vps({ providers: [hetznerCloud, proxmoxProvider({ writeSnippet })] });
 ```
 
-The provider packages are not on npm yet, like the rest of Better Compute, and sit outside the `better-compute`
-umbrella: use them from the workspace by their own names.
+The provider packages are on npm like the rest of Better Compute, but sit outside the `better-compute` umbrella:
+install them by their own names (`npm install @better-compute/provider-hetzner @better-compute/provider-proxmox`).
 
 ## Provider accounts
 

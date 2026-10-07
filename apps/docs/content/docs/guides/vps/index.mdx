@@ -49,9 +49,8 @@ export const compute = betterCompute({
 });
 ```
 
-None of these packages is on npm yet: Better Compute depends on Better IAM through vendored tarballs until Better IAM
-publishes. Use them from the workspace. The provider packages sit outside the `better-compute` umbrella, so you
-import them by their own names.
+The provider packages are on npm but sit outside the `better-compute` umbrella, so you install and import them by
+their own names (`npm install @better-compute/provider-hetzner`).
 
 <TypeTable
   type={{

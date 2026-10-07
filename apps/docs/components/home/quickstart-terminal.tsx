@@ -5,16 +5,14 @@ import { cx } from '@/utils/cx';
 
 /**
  * The quickstart as a terminal session. Commands and output lines are the ones in
- * content/docs/guides/quickstart.mdx (pinned pnpm, the CLI alias, `dev --memory --sim 8`, `reserve`), trimmed.
+ * content/docs/guides/quickstart.mdx (the npm install, `dev --memory --sim 8`, `reserve`), trimmed.
  */
 const session: { kind: 'comment' | 'command' | 'output'; text: string }[] = [
-  { kind: 'comment', text: '# 1. Build from a clone (nothing is on npm yet)' },
-  { kind: 'command', text: 'git clone https://github.com/better-compute/better-compute.git' },
-  { kind: 'command', text: 'cd better-compute && npx pnpm@11.19.0 install' },
-  { kind: 'command', text: 'node node_modules/pnpm/bin/pnpm.mjs build' },
-  { kind: 'command', text: `alias better-compute="node '$PWD/packages/cli/dist/index.js'"` },
+  { kind: 'comment', text: '# 1. Install from npm' },
+  { kind: 'command', text: 'npm install better-compute better-iam @electric-sql/pglite' },
+  { kind: 'command', text: 'alias better-compute="npx better-compute"' },
   { kind: 'comment', text: '# 2. A control plane with eight simulated H100 machines' },
-  { kind: 'command', text: 'cd examples/dev && better-compute dev --memory --sim 8' },
+  { kind: 'command', text: 'better-compute dev --memory --sim 8' },
   { kind: 'output', text: 'better-compute listening on http://127.0.0.1:3000/api/compute' },
   { kind: 'output', text: 'Workers running: controllers, scheduler, sinks, iam' },
   { kind: 'output', text: '8 simulated node(s) adopted' },
@@ -29,7 +27,7 @@ export function QuickstartTerminal() {
     <Band id="quickstart" unit="06">
       <div className={cx('grid grid-cols-1 gap-10 py-16 md:py-20 lg:grid-cols-12', gutter)}>
         <div className="flex flex-col gap-6 lg:col-span-4">
-          <SectionHeading index="06" eyebrow="Quickstart" title="From a clone to a booked GPU">
+          <SectionHeading index="06" eyebrow="Quickstart" title="From npm install to a booked GPU">
             PGlite in memory, an embedded Better IAM, and simulated machines that join through a real
             gateway: the whole control plane on your laptop. Add --sim-variant cpu for machines without
             GPUs.

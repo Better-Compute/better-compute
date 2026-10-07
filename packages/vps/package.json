@@ -15,14 +15,15 @@
     "url": "https://github.com/better-compute/better-compute/issues"
   },
   "keywords": [
-    "gpu",
-    "bare-metal",
-    "capacity",
-    "provisioning",
-    "infrastructure",
+    "better-compute",
     "vps",
+    "sandbox",
+    "virtual-machines",
     "kvm",
-    "libvirt"
+    "libvirt",
+    "instances",
+    "flavors",
+    "gpu"
   ],
   "publishConfig": {
     "access": "public"
@@ -32,6 +33,7 @@
   },
   "files": [
     "dist",
+    "src",
     "README.md",
     "LICENSE"
   ],

@@ -4,12 +4,9 @@ import { spawnSync } from 'node:child_process';
 
 export const root = resolve(import.meta.dirname, '..');
 
-/** Workspace package globs (pnpm-workspace.yaml `packages`). */
-export const workspacePackages = ['packages/*', 'examples/*', 'apps/*'];
-
 /**
- * The one source of the native-build allowlist. `sync-better-iam.mjs` writes it into
- * pnpm-workspace.yaml and `packed-smoke.mjs` into its consumer workspace.
+ * The native-build allowlist: the same entries as `allowBuilds` in pnpm-workspace.yaml (keep the two
+ * in sync). `packed-smoke.mjs` writes it into its consumer workspace.
  * argon2 arrives through @better-iam/auth, better-sqlite3 through @better-iam/adapter-sqlite.
  * `false` denies a package's install script explicitly (buf's JS wrapper finds its platform binary
  * without the postinstall optimisation).

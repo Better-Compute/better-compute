@@ -1,6 +1,6 @@
 ---
 title: Installation
-description: Requirements, the better-compute umbrella package and its subpaths, packages outside it, optional peers, and installing before the first npm release.
+description: Requirements, installing better-compute and Better IAM from npm, the umbrella package's subpaths, packages outside it, optional peers, and building from a clone.
 icon: Download
 packages: ['better-compute']
 sources: ['README.md', 'docs/development.md', 'packages/better-compute/README.md', 'packages/better-compute/umbrella.json', 'packages/better-compute/package.json', 'packages/better-compute/src/index.ts', 'scripts/packed-smoke.mjs', 'scripts/tooling.mjs', 'packages/cli/src/config.ts', 'daemon/README.md', 'PLAN.md']
@@ -11,10 +11,10 @@ Better Compute is split into `@better-compute/*` packages. Most applications ins
 import it, and the server never imports the injected modules (`provision`, `metal`, `vps`): your application imports
 them and passes them in, so what you do not use costs nothing at run time.
 
-<Callout type="warn" title="Not on npm yet">
-  Every package is at version 0.1.0 and nothing is published. Better Compute depends on Better IAM, which is not on
-  npm either, and it will not publish while that dependency comes from vendored tarballs. Until then you install
-  from a clone, as described below.
+<Callout title="Version 0.1.0">
+  `better-compute` and every `@better-compute/*` package are published to npm at 0.1.0, on the `latest` dist-tag,
+  and depend on Better IAM `^0.2.0` (`better-iam` and `@better-iam/*`), which is on npm too. The Go daemon `bcd` is
+  not an npm package and has no released binary yet; see [the daemon](#the-daemon).
 </Callout>
 
 ## Requirements
@@ -31,56 +31,35 @@ them and passes them in, so what you do not use costs nothing at run time.
 Compute's own store is PostgreSQL or PGlite only. It needs `EXCLUDE` constraints, `SKIP LOCKED` and range types, so
 there is no SQLite adapter for it. Embedded Better IAM can still use Better IAM's SQLite adapter in development.
 
-## Install from a clone
-
-Build the workspace, pack every package, and install the tarballs in your project together with the vendored Better
-IAM tarballs. This is exactly what the repository's packed smoke test (`pnpm test:packed`) does in a fresh consumer.
+## Install from npm
 
 <Steps>
 <Step>
 
-### Build and pack
+### Install Better Compute and Better IAM
 
-```bash
-git clone https://github.com/better-compute/better-compute.git
-cd better-compute
-npx pnpm@11.19.0 install
-node node_modules/pnpm/bin/pnpm.mjs build
-node node_modules/pnpm/bin/pnpm.mjs pack:all   # writes artifacts/*.tgz, publishes nothing
+```npm
+npm install better-compute better-iam
 ```
 
-`pack:all` writes one tarball per package, named like `pnpm pack` names them: `@better-compute/core@0.1.0`
-becomes `artifacts/better-compute-core-0.1.0.tgz`, and the umbrella becomes `artifacts/better-compute-0.1.0.tgz`.
-The Better IAM tarballs are already in `vendor/better-iam`, one per package (`better-iam-server-0.1.0.tgz`, …).
+`better-compute` is the umbrella package: it depends on every `@better-compute/*` package in it and gives you the
+`better-compute` command. `better-iam` is Better IAM's umbrella package; it brings `@better-iam/server`,
+`@better-iam/core`, `@better-iam/adapter-sqlite` and the rest of Better IAM, which Better Compute declares as
+optional peers (`^0.2.0`; see [optional peers](#optional-peers)).
 
 </Step>
 <Step>
 
-### Point your project at the tarballs
+### Add PGlite for development
 
-The umbrella depends on the other `@better-compute/*` packages by version, and they depend on `@better-iam/*`
-packages, none of which a registry has. Override every one of them to its tarball. With pnpm:
+PGlite is the development database, and `better-compute dev` uses it when there is no database URL. It is an
+optional peer, so npm does not install it for you:
 
-```yaml title="pnpm-workspace.yaml"
-allowBuilds:
-  argon2: true
-  better-sqlite3: true
-  esbuild: true
-overrides:
-  better-compute: file:../better-compute/artifacts/better-compute-0.1.0.tgz
-  '@better-compute/core': file:../better-compute/artifacts/better-compute-core-0.1.0.tgz
-  '@better-compute/server': file:../better-compute/artifacts/better-compute-server-0.1.0.tgz
-  # ...one line for every tarball in artifacts/
-  '@better-iam/server': file:../better-compute/vendor/better-iam/better-iam-server-0.1.0.tgz
-  '@better-iam/core': file:../better-compute/vendor/better-iam/better-iam-core-0.1.0.tgz
-  # ...one line for every tarball in vendor/better-iam/
+```npm
+npm install @electric-sql/pglite
 ```
 
-Then add the umbrella and the optional peers you use:
-
-```bash
-pnpm add better-compute @electric-sql/pglite @better-iam/server @better-iam/core @better-iam/adapter-sqlite
-```
+A deployment that runs only against PostgreSQL does not need it.
 
 </Step>
 <Step>
@@ -88,20 +67,22 @@ pnpm add better-compute @electric-sql/pglite @better-iam/server @better-iam/core
 ### Check it
 
 ```bash
-pnpm exec better-compute --help
-pnpm exec better-compute init   # writes better-compute.config.ts
+npx better-compute --help
+npx better-compute init   # writes better-compute.config.ts
 ```
 
 </Step>
 </Steps>
 
-## Install from npm, after publication
+With pnpm, list the Better IAM packages Better Compute imports as your own dependencies, so the optional peers
+resolve under pnpm's strict layout, and allow the native builds (`allowBuilds` for `argon2` and `better-sqlite3` in
+`pnpm-workspace.yaml`):
 
-Once Better Compute is published, the umbrella is one install. This command does not work yet:
-
-```npm
-npm i better-compute
+```bash
+pnpm add better-compute better-iam @better-iam/server @better-iam/core @better-iam/adapter-sqlite @electric-sql/pglite
 ```
+
+Then import the subpaths you need:
 
 ```ts
 import { betterCompute } from 'better-compute';
@@ -112,6 +93,26 @@ import { createComputeClient } from 'better-compute/client';
 
 Each package is also published on its own as `@better-compute/<name>`, for services that need only part of the
 platform, for example a browser bundle that needs only `@better-compute/client`.
+
+## Install from a clone
+
+To work on Better Compute itself, or to try changes that are not released, build it from the repository. The
+workspace pins pnpm 11.19.0: install with that version once, then run the pinned copy from `node_modules`.
+
+```bash
+git clone https://github.com/better-compute/better-compute.git
+cd better-compute
+npx pnpm@11.19.0 install
+node node_modules/pnpm/bin/pnpm.mjs build   # tsc -b: every package's dist/
+```
+
+Better IAM resolves from npm like any other dependency. The `better-compute` command is then
+`packages/cli/dist/index.js`; the [quickstart](/docs/guides/quickstart) shows how to put it on your path and run the
+repository's example configuration. To use the local build in another project, `pack:all` writes one tarball per
+package to `artifacts/` (`@better-compute/core@0.1.0` becomes `artifacts/better-compute-core-0.1.0.tgz`) without
+publishing anything; install those in place of the registry versions. The repository's packed smoke test
+(`pnpm test:packed`) does exactly that in a fresh consumer. [Local development](/docs/operations/local-development)
+covers the workspace scripts.
 
 ## Subpath imports
 
@@ -197,23 +198,20 @@ Nothing in `packages/` imports a `@better-compute/provider-*` package; you pass 
 
 ## Optional peers
 
-The umbrella declares these as optional peer dependencies. Install the ones you use:
+The umbrella declares these as optional peer dependencies. Install the ones you use; `better-iam` brings all of the
+`@better-iam/*` ones:
 
 | Peer | Needed for |
 | --- | --- |
 | `@electric-sql/pglite` `^0.5.8` | `better-compute/pglite`, the testing fixture, `dev` without a database URL. Without it, the CLI fails with `MISSING_DEPENDENCY` and an install hint. |
-| `@better-iam/server`, `@better-iam/core` `^0.1.0` | Embedded Better IAM through the bridge |
-| `@better-iam/adapter-sqlite` `^0.1.0` | Better IAM on SQLite in development, and the embedded IAM of `dev --sim` |
-| `@better-iam/client` `^0.1.0` | `better-compute iam setup --meters`, which creates the billing meters in Better IAM |
-| `@better-iam/cli` `^0.1.0` | Declared for Better IAM's CLI; today the `better-compute` CLI reads its credential from `BETTER_COMPUTE_TOKEN` only |
+| `@better-iam/server`, `@better-iam/core` `^0.2.0` | Embedded Better IAM through the bridge |
+| `@better-iam/adapter-sqlite` `^0.2.0` | Better IAM on SQLite in development, and the embedded IAM of `dev --sim` |
+| `@better-iam/client` `^0.2.0` | `better-compute iam setup --meters`, which creates the billing meters in Better IAM |
+| `@better-iam/cli` `^0.2.0` | Declared for Better IAM's CLI; today the `better-compute` CLI reads its credential from `BETTER_COMPUTE_TOKEN` only |
 
-## Better IAM before it is published
-
-Better IAM 0.1.0 is not on npm, so the repository vendors its 23 packed tarballs and a `SOURCE.json` (source, pack
-time and sha256 of each) in `vendor/better-iam`. `pnpm-workspace.yaml` is generated by `scripts/sync-better-iam.mjs`
-and overrides every `better-iam` and `@better-iam/*` package, transitive ones included, to its tarball. The
-publishing job in CI skips until the umbrella's version is new on npm and Better IAM is on npm. See
-[Better IAM](/docs/guides/iam) for how the two fit together.
+`@better-compute/cli` also declares `@better-compute/testing` as an optional peer, for `dev --sim` and `sim`; the
+umbrella depends on it, so installing `better-compute` provides it. See [Better IAM](/docs/guides/iam) for how the
+two products fit together.
 
 ## The daemon
 

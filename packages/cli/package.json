@@ -15,12 +15,14 @@
     "url": "https://github.com/better-compute/better-compute/issues"
   },
   "keywords": [
+    "better-compute",
+    "cli",
+    "command-line",
     "gpu",
-    "bare-metal",
-    "capacity",
-    "provisioning",
-    "infrastructure",
-    "cli"
+    "reservations",
+    "control-plane",
+    "pki",
+    "devops"
   ],
   "publishConfig": {
     "access": "public"
@@ -30,6 +32,7 @@
   },
   "files": [
     "dist",
+    "src",
     "README.md",
     "LICENSE"
   ],
@@ -64,10 +67,10 @@
   "peerDependencies": {
     "@better-compute/testing": "workspace:*",
     "@electric-sql/pglite": "^0.5.8",
-    "@better-iam/server": "^0.1.0",
-    "@better-iam/cli": "^0.1.0",
-    "@better-iam/adapter-sqlite": "^0.1.0",
-    "@better-iam/client": "^0.1.0"
+    "@better-iam/server": "^0.2.0",
+    "@better-iam/cli": "^0.2.0",
+    "@better-iam/adapter-sqlite": "^0.2.0",
+    "@better-iam/client": "^0.2.0"
   },
   "peerDependenciesMeta": {
     "@better-compute/testing": {

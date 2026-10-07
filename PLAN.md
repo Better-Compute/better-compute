@@ -1440,7 +1440,7 @@ export const computeResolver = (projection: AuthzProjection, o: { prefix?: strin
 
 Admissions follow §3.4. Non-creating mutations authorize on the existing resource.
 
-**Compute rejects cross-tenant callers before IAM** (§3.4 step 3). IAM resolves the resource before its tenant check (`decisions.ts:685-690` vs `419-425`). Without the pre-check, an outsider would get 404 for absent ids and 403 for present ones, which is an existence oracle, and every such denial would land on the victim tenant's serialized audit chain. Root callers still go to IAM, which evaluates `ROOT_OVERRIDE` and audits it.
+**Compute rejects cross-tenant callers before IAM** (§3.4 step 3). IAM resolves the resource before its tenant check (`decisions.ts:685-690` vs `419-425`). Without the pre-check, an outsider would get 404 for absent ids and 403 for present ones, which is an existence oracle, and every such denial would land on the victim tenant's serialized audit chain. Root callers still go to IAM, which evaluates `ROOT_OVERRIDE` and audits it. Better IAM 0.2 itself denies a foreign tenant before resolving (no resolver call, the denial audited on the caller's tenant with `targetTenantId`; pinned by `tests/iam-contract.test.ts`); the pre-check stays, so outsiders still cost no database access or IAM decision.
 
 ### 12.5 Tenancy mapping
 

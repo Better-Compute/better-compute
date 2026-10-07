@@ -15,13 +15,14 @@
     "url": "https://github.com/better-compute/better-compute/issues"
   },
   "keywords": [
-    "gpu",
-    "bare-metal",
-    "capacity",
-    "provisioning",
-    "infrastructure",
-    "client",
-    "sdk"
+    "better-compute",
+    "api-client",
+    "sdk",
+    "typescript",
+    "typed-client",
+    "browser",
+    "fetch",
+    "gpu"
   ],
   "publishConfig": {
     "access": "public"
@@ -31,6 +32,7 @@
   },
   "files": [
     "dist",
+    "src",
     "README.md",
     "LICENSE"
   ],

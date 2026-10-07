@@ -1,30 +1,90 @@
 # @better-compute/cli
 
-The `better-compute` command line. It runs deployment jobs (`init`, `migrate`, `doctor`) and calls
-any API method as an IAM credential (`api`). It is a port of better-iam's `defineCommand` framework,
-so your own project commands get the same flag parsing, help, configuration loading and output.
+The `better-compute` command line: deployment jobs (`init`, `migrate`, `doctor`, `serve`), any API method as an IAM credential (`api`), and shortcuts for capacity, nodes, fleet, PKI and audit work.
 
-**Status: v0.1 in progress.**
+## Install
 
-- Setup: `init`, `migrate`, `doctor`, `version`, `help`.
-- API: `api`, plus the capacity shortcuts `reserve`, `release`, `extend`, `reservations list|get`,
-  `pools list` and `capacity`.
-- Machine PKI and fleet: `pki init|show|issue-gateway` and `daemon install-script`.
-- IAM: `iam setup`.
-- Arriving with the v0.1 runtime: `dev` and `serve`.
+```sh
+npm install @better-compute/cli
+```
 
-Commands may be two words (`pki init`); `help pki` lists a group.
+It is also included in the umbrella package as `better-compute/cli`, and the umbrella ships the `better-compute` bin:
+
+```sh
+npm install better-compute
+```
+
+Better IAM (`npm install better-iam`) provides the optional `@better-iam/*` peers the CLI uses:
+`@better-iam/client` for `iam setup --meters`, `@better-iam/cli` to reuse a session saved by
+`better-iam login`, and `@better-iam/server` with `@better-iam/adapter-sqlite` for the in-memory
+IAM that `dev --sim` starts when no IAM is configured. `@electric-sql/pglite` is an optional peer
+for PGlite databases, and `@better-compute/testing` is an optional peer for `sim` and `dev --sim`.
+
+## Usage
 
 ```sh
 better-compute help                 # every command; help <command> for one; help --json for tools
 better-compute init                 # writes better-compute.config.ts (PGlite in development)
 better-compute migrate              # finds the nearest better-compute.config.* (or --config PATH)
 better-compute doctor --strict      # selfCheck findings; exits 1 (DOCTOR_FINDINGS) on any warning
+better-compute serve                # the API and every worker role in one process
 better-compute api --list           # every route, whether it needs a token, its IAM action
 better-compute api system.version
 BETTER_COMPUTE_TOKEN=… better-compute api system.whoami --url https://compute.example.com
 BETTER_COMPUTE_TENANT=org_… better-compute reserve --pool pool_… --gpus 4 --for 8h --model H100
 ```
+
+From code, the same program runs in process and takes project commands:
+
+```ts
+import { createCli, defineCommand, runCli } from '@better-compute/cli';
+
+// One command line; failures reject with an error whose `code` says what went wrong.
+await runCli(['doctor', '--strict']);
+
+// A project CLI: the built-in commands plus your own.
+const seed = defineCommand({
+  name: 'seed',
+  summary: 'Create the demo sites and pools',
+  target: 'config',
+  flags: { region: { type: 'string', description: 'Region label', default: 'eu' } },
+  async run({ compute, flags }) {
+    const instance = await compute();
+    // ...create sites and pools through instance
+    return { created: true, region: flags.region };
+  },
+});
+await createCli({ commands: [seed] }).run(process.argv.slice(2));
+```
+
+The framework is a port of Better IAM's `defineCommand` framework, so project commands get the
+same flag parsing, help, configuration loading and output as the built-in ones.
+
+## Commands
+
+Commands may be two words (`pki init`); `help pki` lists a group.
+
+- **Setup:** `init`, `migrate`, `doctor`, `serve`, `dev`, `sim`, `version`, `completion`.
+- **API:** `api`, plus `auth login|status|logout` for saved credentials.
+- **Capacity:** `reserve`, `release`, `extend`, `reservations list|get`, `pools list`, `capacity`,
+  `quotas get|set`, `usage list|export`.
+- **Nodes and instances:** `nodes list|get|events|label|taint|cordon|uncordon|drain|delete`,
+  `join-tokens create|list|revoke`, `join-requests …`, `instances …`, `inventory get|history|diff`.
+- **Access and sandboxes:** `console`, `exec`, `forward`, `ssh-cert`,
+  `sandbox create|list|get|extend|snapshot|delete|exec|templates`, `sandbox-template …`,
+  `sandbox-volume …`.
+- **Bare metal:** `metal enroll|deploy|undeploy|abort|discovered|confirm-mac|power|bulk|…`,
+  `profiles …`, `provider-accounts …`, `sandbox-snapshot …`.
+- **Fleet and operations:** `fleet export|plan|status|apply`, `rollouts …`, `releases register|list`,
+  `workflows …`, `commands …`, `events list|watch`, `webhooks …`, catalog groups (`sites`, `projects`,
+  `images`, `flavors`) and admin groups (`pools create|update|archive|offer|unoffer`, `secrets`,
+  `site-tokens`, `drivers list`).
+- **Machine PKI and the daemon:** `pki init|show|issue-gateway|trust-version|renew-ca|reseal|…`,
+  `daemon install-script`, `release keygen|sign|cosign|verify`.
+- **Destructive batches:** `batch keygen|sign|sign-approvers|list|show|approve|create|members|cancel`.
+- **IAM and audit:** `iam setup`, `audit checkpoint|verify|prove|check-proof`, `support bundle`.
+
+`better-compute help` prints the full list with a summary for each command.
 
 ## Configuration
 
@@ -54,10 +114,11 @@ optional: `commands` (project commands built with `defineCommand`) and `cli.defa
 - `BETTER_COMPUTE_SECRET`, at least 32 characters.
 - `BETTER_COMPUTE_BASE_URL`, default `http://localhost:3000`.
 
-P0 has no IAM bridge. Environment-only deployments, and the `init` template, use
-`unconfiguredIam()`: no credential authenticates, so only the public methods (`system.version`,
-and `system.whoami` without a token) answer. `doctor` reports this as the `iam.not-configured`
-warning. Embedded better-iam plugs in as `iam: bridge.embedded(iam, { rootTenantId })` in v0.1.
+Environment-only deployments, and the configuration `init` writes, start with `unconfiguredIam()`:
+no credential authenticates, so only the public methods (`system.version`, and `system.whoami`
+without a token) answer. `doctor` reports this as the `iam.not-configured` warning. Better IAM
+plugs in through the IAM bridge from `better-compute/iam`:
+`iam: bridge.embedded(iam, { rootTenantId })`.
 
 ## `api`
 
@@ -76,12 +137,13 @@ better-compute api GROUP.METHOD [key=value ...] [--data JSON|@FILE|-] [--list [G
   route table, envelope, CSRF headers, 64 KiB body limit and JSON round trip.
 - **Remote** (`--url` or `BETTER_COMPUTE_URL`), calls use the typed client with a request id and
   one rate-limit retry. `https` is required except for localhost.
-- **Token.** The token is `BETTER_COMPUTE_TOKEN`. Public methods need none; `system.whoami`
-  carries the token when one is set.
+- **Token.** Token commands use `BETTER_COMPUTE_TOKEN`, else a session saved by `better-iam login`
+  (when `@better-iam/cli` is installed), else a profile saved with `better-compute auth login`.
+  Public methods need none; `system.whoami` carries the token when one is set.
 
 ## Capacity shortcuts
 
-These call the capacity routes as `BETTER_COMPUTE_TOKEN` (in process, or with `--url`), for the
+These call the capacity routes as the caller's token (in process, or with `--url`), for the
 tenant in `--tenant` or `BETTER_COMPUTE_TENANT`:
 
 | Command                                                                                                                                      | Route                                       |
@@ -93,8 +155,8 @@ tenant in `--tenant` or `BETTER_COMPUTE_TENANT`:
 | `pools list`                                                                                                                                 | `pools.list`                                |
 | `capacity [--pool ID] [--preview --gpus N --for D]`                                                                                          | `capacity.summary` / `.byPool` / `.preview` |
 
-- `--selector` takes the PLAN.md §10.3 shorthand, parsed by `@better-compute/capacity`, for example
-  `gpuProduct in (H100-SXM5-80GB), vramGiB >= 80, !fabric.domain`.
+- `--selector` takes the device selector shorthand, parsed by `@better-compute/capacity`, for
+  example `gpuProduct in (H100-SXM5-80GB), vramGiB >= 80, !fabric.domain`.
 - Times are ISO 8601, epoch milliseconds, or `+DURATION` from now.
 - `reserve` and `extend` send a new idempotency key on each run and print it on stderr. Repeat the
   command with `--key` to retry the same request safely.
@@ -115,17 +177,19 @@ better-compute iam setup --audience https://compute.example.com   # example poli
   and encryption keys. Private keys are sealed under `BETTER_COMPUTE_SECRET`; `--plaintext` stores
   PEM instead. `--offline-root` keeps the root key in its own file.
 - **The install script** reads the join token only from `BCD_JOIN_TOKEN` or standard input. It
-  checks the pinned SHA-256 of bcd, writes `/etc/bcd/config.toml` (0600, bcd's TOML subset with the
-  three pins) and a hardened `bcd.service`, and runs `bcd join`. On a host that is already
-  configured, running it without a token upgrades bcd in place.
-- **`iam setup`** prints the §12.6 example policies for an organization administrator. With
+  downloads the pinned bcd for the machine's architecture from the control plane's downloads route
+  and checks its SHA-256, writes `/etc/bcd/config.toml` (0600, bcd's TOML subset with the three
+  pins) and a hardened `bcd.service`, and runs `bcd join`. On a host that is already configured,
+  running it without a token upgrades bcd in place. bcd, the Go node agent, is not released as a
+  binary yet: the control plane serves a build you make from the repository and register.
+- **`iam setup`** prints example compute policies for an organization administrator. With
   `--meters --iam-url URL --root-tenant ID` and a root `BETTER_IAM_TOKEN`, it also creates the
-  §12.7 root meters through the optional peer `@better-iam/client`.
+  root billing meters in Better IAM through the optional peer `@better-iam/client`.
 
 ## Destructive batches (quorum)
 
-A fleet-wide reimage, wipe or BMC power action runs only after k approvers sign it. Each approver holds a P-256
-key off the control plane, and every daemon checks the signatures itself (PLAN.md §13).
+A fleet-wide reimage, wipe or BMC power action runs only after k approvers sign it. Each approver
+holds a P-256 key off the control plane, and every daemon checks the signatures itself.
 
 ```sh
 BETTER_COMPUTE_APPROVER_PASSPHRASE=… better-compute batch keygen --out ~/.better-compute/approver.pem
@@ -139,29 +203,33 @@ better-compute batch members --batch batch_…                               # i
 better-compute pki trust-version   # published version/epoch, the approver-set pin, nodes on another set
 ```
 
-- **`batch keygen`** writes the private key (mode 0600, encrypted under `BETTER_COMPUTE_APPROVER_PASSPHRASE`
-  when set) and `<out>.pub`. The public key goes into the deployment's `pki.approvers.keys`; the examples read
-  `BETTER_COMPUTE_APPROVER_KEYS` and `_THRESHOLD`.
-- **`batch approve`** pages the batch's scope and recomputes the Merkle root from it. It refuses with
-  `SCOPE_MISMATCH` when the listed commands do not give the root the server asks it to sign. It then prints every
-  subject by kind and signs the root, size, expiry and trust domain. Without `--yes` it stops after the summary.
-  `--root` approves only the root you reviewed, `--expect` only the subjects you list, and `--max-hours` (default
-  72) refuses long approval windows.
-- **`batch sign`** does the same offline from `batch show --scope-out`. Signing a bare `--root` needs
-  `--unchecked`.
-- **`batch sign-approvers`** is how the quorum itself changes. Each CURRENT approver signs the new set's keys,
-  threshold, tiers and unbatched cap for one trust-bundle `--version`. Daemons that hold approver keys refuse a
-  changed quorum, including its removal, without their threshold of such signatures.
-- Approvals and set changes sign the deployment's trust domain. The approver pins it with `--trust-domain` or
-  `BETTER_COMPUTE_TRUST_DOMAIN`, or it comes from the local PKI bundle; never from the server. A batch or scope
-  file of another domain is refused with `TRUST_DOMAIN_MISMATCH`.
-- `batch approve` and `batch sign` also show each operation a leaf binds, decoded from the stored payload the leaf's
-  digest covers. Payloads are decoded as the kind's own type and grouped by digest; `--operations-out FILE` writes
-  them in full. A payload that isn't the bound one, or that carries fields this CLI can't show, is `SCOPE_MISMATCH`.
-  Leaves shown only as a digest, and kinds whose type isn't known here, need `--allow-opaque`.
-- `daemon install-script --approver-set-sha256` pins a new node's first approver set; the digest comes from
-  `pki trust-version`, computed from the configured keys. `--release-pins`, `--release-sequence` and
-  `--bmc-networks` write bcd's `[update]` and `[site]` sections.
+- **`batch keygen`** writes the private key (mode 0600, encrypted under
+  `BETTER_COMPUTE_APPROVER_PASSPHRASE` when set) and `<out>.pub`. The public key goes into the
+  deployment's `pki.approvers.keys`; the examples read `BETTER_COMPUTE_APPROVER_KEYS` and
+  `_THRESHOLD`.
+- **`batch approve`** pages the batch's scope and recomputes the Merkle root from it. It refuses
+  with `SCOPE_MISMATCH` when the listed commands do not give the root the server asks it to sign.
+  It then prints every subject by kind and signs the root, size, expiry and trust domain. Without
+  `--yes` it stops after the summary. `--root` approves only the root you reviewed, `--expect`
+  only the subjects you list, and `--max-hours` (default 72) refuses long approval windows.
+- **`batch sign`** does the same offline from `batch show --scope-out`. Signing a bare `--root`
+  needs `--unchecked`.
+- **`batch sign-approvers`** is how the quorum itself changes. Each current approver signs the new
+  set's keys, threshold, tiers and unbatched cap for one trust-bundle `--version`. Daemons that
+  hold approver keys refuse a changed quorum, including its removal, without their threshold of
+  such signatures.
+- Approvals and set changes sign the deployment's trust domain. The approver pins it with
+  `--trust-domain` or `BETTER_COMPUTE_TRUST_DOMAIN`, or it comes from the local PKI bundle; never
+  from the server. A batch or scope file of another domain is refused with
+  `TRUST_DOMAIN_MISMATCH`.
+- `batch approve` and `batch sign` also show each operation a leaf binds, decoded from the stored
+  payload the leaf's digest covers. Payloads are decoded as the kind's own type and grouped by
+  digest; `--operations-out FILE` writes them in full. A payload that isn't the bound one, or that
+  carries fields this CLI can't show, is `SCOPE_MISMATCH`. Leaves shown only as a digest, and kinds
+  whose type isn't known here, need `--allow-opaque`.
+- `daemon install-script --approver-set-sha256` pins a new node's first approver set; the digest
+  comes from `pki trust-version`, computed from the configured keys. `--release-pins`,
+  `--release-sequence` and `--bmc-networks` write bcd's `[update]` and `[site]` sections.
 - Key files readable by others are refused, as ssh does.
 
 ## Output and exit codes
@@ -176,9 +244,22 @@ better-compute pki trust-version   # published version/epoch, the approver-set p
 
 ## From code
 
-- `runCli(argv, io)` and `main(argv, cli, io)` run a command line.
-- `createCli({ commands })` and `createCliProgram(builtins, version, io)` build a program.
+- `runCli(argv, io)` and `main(argv, cli, io)` run a command line; `runBinary()` is what the bin
+  does.
+- `createCli({ commands })` and `createCliProgram(builtins, version, io)` build a program;
+  `computeCommands(define)` turns every built-in command into another framework's commands, so a
+  host (for example Better IAM's CLI) can ship one binary.
 - `loadConfig()`, `configFromEnv()`, `localTransport()` and `remoteTransport()` are exported too.
 
 The package's bin is `dist/index.js`, and the `better-compute` umbrella ships it as
 `better-compute`.
+
+## Documentation
+
+- [CLI guide](https://better-compute.com/docs/guides/clients/cli)
+- [CLI reference](https://better-compute.com/docs/reference/cli)
+- [Configuration](https://better-compute.com/docs/operations/configuration)
+
+## License
+
+[Apache License 2.0](https://github.com/better-compute/better-compute/blob/main/LICENSE)

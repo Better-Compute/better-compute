@@ -1,36 +1,59 @@
 # @better-compute/pki
 
-Machine PKI for better-compute (PLAN.md §3.3, §7.7, §13): the CAs that identify agents and gateways,
-join tokens, the signed `JoinResponse`, and Renew proofs of possession. better-iam is the only
-identity provider for people and agents; this package covers machines only.
+Machine PKI for better-compute: the CAs that identify agents and gateways, join tokens, the signed `JoinResponse`, Renew proofs of possession, and the signing and sealing primitives built on them.
 
-**Status: v0.1 (W2), plus the v0.2 cryptography (secrets, signed intent, attested results) ready
-for the server to wire.** Node.js only (it runs in `api`, `worker` and the CLI). No dependencies
-beyond `node:crypto`, `@better-compute/core`, `@better-compute/protocol` and `@bufbuild/protobuf`:
-a minimal DER layer builds and parses the X.509 certificates and PKCS#10 requests. Everything is
-ECDSA P-256 with SHA-256.
+## Install
+
+```sh
+npm install @better-compute/pki
+```
+
+It is also included in the umbrella package as `better-compute/pki`:
+
+```sh
+npm install better-compute
+```
+
+## Usage
+
+```ts
+import { readFileSync, writeFileSync } from 'node:fs';
+import {
+  bootstrapPins,
+  createPkiBundle,
+  exportPkiBundle,
+  importPkiBundle,
+} from '@better-compute/pki';
+
+const secret = process.env.BETTER_COMPUTE_SECRET!; // at least 32 characters
+
+// Once: the root, the node, serving and internal CAs, and the JoinService keys.
+const bundle = createPkiBundle({ trustDomain: 'compute.example.com' });
+writeFileSync('pki.json', exportPkiBundle(bundle, { secret }), { mode: 0o600 });
+
+// At start: load it back, and give new machines the pins they check before trusting anything.
+const loaded = importPkiBundle(readFileSync('pki.json', 'utf8'), { secret });
+const { servingCaPin, joinSigningPin, joinEncryptionPin } = bootstrapPins(loaded);
+```
+
+Better IAM is the only identity provider for people and agents; this package covers machines only. It is Node.js only (it runs in `api`, `worker` and the CLI) and has no dependencies beyond `node:crypto`, `@better-compute/core`, `@better-compute/protocol` and `@bufbuild/protobuf`: a minimal DER layer builds and parses the X.509 certificates and PKCS#10 requests. Everything is ECDSA P-256 with SHA-256.
 
 ## Keys: no key does two jobs
 
-| Key                        | Factory                                  | Signs                                                                                        | Pinned by                           |
-| -------------------------- | ---------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------- |
-| offline root               | `createRootCa()`                         | subordinate CAs only                                                                         | —                                   |
+| Key                        | Factory                                  | Signs                                                                                                                      | Pinned by                           |
+| -------------------------- | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| offline root               | `createRootCa()`                         | subordinate CAs only                                                                                                       | —                                   |
 | per-region node CA         | `createNodeCa({ issuer?, trustDomain })` | agent client certs: one SPIFFE URI SAN (+ `urn:bc:` key statements), role extension, `clientAuth`, ≤ 24 h (ramdisk ≤ 2 h) | gateways (trust anchor)             |
-| gateway serving CA         | `createServingCa()`                      | gateway server certs: DNS SANs, `serverAuth`, ≤ 30 days                                      | daemons (`serving_ca_spki_pin`)     |
-| internal CA                | `createInternalCa()`                     | api ↔ gateway ↔ worker mTLS, ≤ 7 days                                                      | control plane                       |
-| JoinService signing key    | `createSigningKey()`                     | `JoinResponse`, `SignedTrustBundle`                                                          | daemons (`join_signing_key_pin`)    |
-| JoinService encryption key | `generateP256KeyPair()`                  | — (sealed join tokens are encrypted to it)                                                   | daemons (`join_encryption_key_pin`) |
+| gateway serving CA         | `createServingCa()`                      | gateway server certs: DNS SANs, `serverAuth`, ≤ 30 days                                                                    | daemons (`serving_ca_spki_pin`)     |
+| internal CA                | `createInternalCa()`                     | api ↔ gateway ↔ worker mTLS, ≤ 7 days                                                                                    | control plane                       |
+| JoinService signing key    | `createSigningKey()`                     | `JoinResponse`, `SignedTrustBundle`                                                                                        | daemons (`join_signing_key_pin`)    |
+| JoinService encryption key | `generateP256KeyPair()`                  | — (sealed join tokens are encrypted to it)                                                                                 | daemons (`join_encryption_key_pin`) |
 
-Each `LocalCertificateAuthority` implements core's `CertificateAuthority` (`sign(csr, profile)`) and
-adds `issue(publicKey, profile)`, `revoke`, `verify(chain)` and `export()`. Issued certificates never
-copy the CSR's subject: names come only from the profile. Pins use `bcd`'s form,
-`spkiPin(key)` → `sha256/<base64 of SHA-256(SPKI)>`.
+Each `LocalCertificateAuthority` implements core's `CertificateAuthority` (`sign(csr, profile)`) and adds `issue(publicKey, profile)`, `revoke`, `verify(chain)` and `export()`. Issued certificates never copy the CSR's subject: names come only from the profile. Pins use `bcd`'s form, `spkiPin(key)` → `sha256/<base64 of SHA-256(SPKI)>`.
 
-The role travels in a non-critical extension, `roleExtensionOid`
-(`2.25.121396728463777788658791269357486937304.1.1`, a UUID arc that needs no registration), as a
-UTF8String: `node`, `site`, `ramdisk`, `node-tenant`, `gateway`, `internal`.
+The role travels in a non-critical extension, `roleExtensionOid` (`2.25.121396728463777788658791269357486937304.1.1`, a UUID arc that needs no registration), as a UTF8String: `node`, `site`, `ramdisk`, `node-tenant`, `gateway`, `internal`.
 
-## Joining (§3.3)
+## Joining
 
 ```ts
 import {
@@ -43,7 +66,7 @@ import {
   signJoinResponse,
   claimsFromWire,
   nodeSpiffeId,
-} from 'better-compute/pki';
+} from '@better-compute/pki';
 
 // joinTokens.create: show `token` once, store `secretHash` in join_tokens.secret_hash.
 const { id, token, secretHash } = issueJoinToken();
@@ -78,37 +101,19 @@ const response = signJoinResponse(
 );
 ```
 
-**Sealed tokens are bound to the CSR.** `sealJoinToken(token, key, { csr })` puts
-`csr: base64url(sha256(csr))` and `iat` in the JWE's protected header, which the AEAD authenticates.
-A gateway relaying the `JoinRequest` cannot read the token, and it cannot replay the sealed blob
-with its own CSR either: `openSealedToken` refuses a seal made for another CSR. The Go daemon must
-set the same header members (`typ: "bcjt+jwe"`, `csr`, `iat`).
+**Sealed tokens are bound to the CSR.** `sealJoinToken(token, key, { csr })` puts `csr: base64url(sha256(csr))` and `iat` in the JWE's protected header, which the AEAD authenticates. A gateway relaying the `JoinRequest` cannot read the token, and it cannot replay the sealed blob with its own CSR either: `openSealedToken` refuses a seal made for another CSR. The Go daemon must set the same header members (`typ: "bcjt+jwe"`, `csr`, `iat`).
 
-`verifyJoinToken(token, row, { now, role, claims })` is the pure check behind the attestor. It
-returns `{ ok: false, reason }` with `malformed`, `unknown`, `secret-mismatch`, `revoked`,
-`expired`, `exhausted`, `role-mismatch` or `expect-mismatch`. The reason is for audit only: the agent
-always gets the same `ACCESS_DENIED`.
+`verifyJoinToken(token, row, { now, role, claims })` is the pure check behind the attestor. It returns `{ ok: false, reason }` with `malformed`, `unknown`, `secret-mismatch`, `revoked`, `expired`, `exhausted`, `role-mismatch` or `expect-mismatch`. The reason is for audit only: the agent always gets the same `ACCESS_DENIED`.
 
-`matchesExpect` compares a token's `expect` binding with the claims after format normalization
-(case, MAC separators, the `GPU-` prefix; `serial` may match the product, board or chassis serial).
-**`hardware_key` is not computed here**: it belongs to `@better-compute/inventory`, so JoinService
-and the Inventory controller always derive the same key. `claimsFromWire` maps `JoinRequest.claims`
-to core's claims shape.
+`matchesExpect` compares a token's `expect` binding with the claims after format normalization (case, MAC separators, the `GPU-` prefix; `serial` may match the product, board or chassis serial). **`hardware_key` is not computed here**: it belongs to `@better-compute/inventory`, so JoinService and the Inventory controller always derive the same key. `claimsFromWire` maps `JoinRequest.claims` to core's claims shape.
 
-## Renew (§7.7)
+## Renew
 
-`verifyRenewPop(request, { now, nodeCaRoots, replayCache, revocations })` is what `api` runs; the
-gateway only relays. It checks the current chain to the node CA, revocation, the SPIFFE identity,
-the new CSR, the proof by the **current** key over `renew-pop` [sha256(csr), node_id, client_time],
-the ±60 s window, and a 120 s replay cache. The cache is keyed by the signed statement, not the
-signature bytes, so the second valid ECDSA form `(r, n − s)` cannot be replayed. Agents sign with
-`signRenewPop`.
+`verifyRenewPop(request, { now, nodeCaRoots, replayCache, revocations })` is what `api` runs; the gateway only relays. It checks the current chain to the node CA, revocation, the SPIFFE identity, the new CSR, the proof by the **current** key over `renew-pop` [sha256(csr), node_id, client_time], the ±60 s window, and a 120 s replay cache. The cache is keyed by the signed statement, not the signature bytes, so the second valid ECDSA form `(r, n − s)` cannot be replayed. Agents sign with `signRenewPop`.
 
-## Attestors beyond `join-token` (v0.2, v0.3)
+## Attestors beyond `join-token`
 
-Each one is a core `AttestorVerifier`. Pass them to `createJoinService({ attestors })`; they run
-inside the join transaction, and every refusal looks the same to the agent (`ACCESS_DENIED`). The
-reason goes only to `onRefusal`, for audit.
+Each one is a core `AttestorVerifier`. Pass them to `betterCompute({ attestors })`; JoinService runs them inside the join transaction, and every refusal looks the same to the agent (`ACCESS_DENIED`). The reason goes only to `onRefusal`, for audit.
 
 | Attestor                                      | Evidence                                                                                                         | Admits                                                                                                                                  | Result                                           |
 | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
@@ -119,224 +124,125 @@ reason goes only to `onRefusal`, for audit.
 
 `cloud-iid` providers:
 
-- `gcpInstanceIdentity({ audience, fetch | jwks })`: the agent requests an identity token with
-  `aud = cloudIidAudience(audience, sha256(csr))` and `format=full`, so the token is bound to its CSR.
-- `awsInstanceIdentity({ certificates })`: the document and its `signature` are checked with the
-  region's AWS certificate, which the host supplies (none are bundled). A document can't be bound to
-  a CSR, so it is accepted only near `pendingTime`, and `resolve` should admit each instance only once.
+- `gcpInstanceIdentity({ audience, fetch | jwks })`: the agent requests an identity token with `aud = cloudIidAudience(audience, sha256(csr))` and `format=full`, so the token is bound to its CSR.
+- `awsInstanceIdentity({ certificates })`: the document and its `signature` are checked with the region's AWS certificate, which the host supplies (none are bundled). A document can't be bound to a CSR, so it is accepted only near `pendingTime`, and `resolve` should admit each instance only once.
 - `oidcInstanceIdentity(...)`: any issuer that signs JWTs into a JWKS.
 
-Agent side: `createX509popEvidence` / `x509popProducer`, `signDiscoveryAssertion` (for the site
-agent), `createCloudIidEvidence`. Tests: `tests/pki-attestors*.test.ts`, which include runs through
-the real JoinService.
+Agent side: `createX509popEvidence` / `x509popProducer`, `signDiscoveryAssertion` (for the site agent), `createCloudIidEvidence`.
 
-Single use. `cloud-iid` admits each (provider, account, instance) once. `discovery` admits each
-signed assertion once. Both are recorded in `attestation_uses` in the join transaction. A known
-machine that lost its certificate re-joins with `x509pop`.
+Single use. `cloud-iid` admits each (provider, account, instance) once. `discovery` admits each signed assertion once. Both are recorded in `attestation_uses` in the join transaction. A known machine that lost its certificate re-joins with `x509pop`.
 
-Two-round joins: an attestor may return a core `AttestationDeferral`. JoinService commits the
-transaction, answers with a signed deferral, and spends nothing, so attestors consume tokens and
-record uses only on the final round. Agents read the response with `openJoinResponse` (joined,
-pending or challenge; `verifyJoinResponse` refuses a deferral) and retry with the SAME CSR
-(`runAgentJoin` in `@better-compute/testing` is the reference loop).
+Two-round joins: an attestor may return a core `AttestationDeferral`. JoinService commits the transaction, answers with a signed deferral, and spends nothing, so attestors consume tokens and record uses only on the final round. Agents read the response with `openJoinResponse` (joined, pending or challenge; `verifyJoinResponse` refuses a deferral) and retry with the SAME CSR (`runAgentJoin` in `@better-compute/testing` is the reference loop).
 
-- `discoveryAttestor({ approval: 'unknown-machines' | 'always', hardwareKey })` defers with
-  `{ deferred: 'approval', requestId }`. It keeps one pending `join_requests` row per machine for
-  the newest CSR, and consumes the approved row when the retry arrives.
-- `tpmAttestor({ challengeKey, ekRoots, pcrSelection?, pcrPolicy?, resolve })` (v0.5):
-  - Round 1 checks the EK certificate chain and the AK's attributes, then answers with
-    `MakeCredential` plus a state sealed under `challengeKey` (AES-256-GCM, bound to the CSR,
-    ≤ 5 min).
-  - Round 2 checks the activated secret, and a quote by the AK with
-    `extraData = sha256(secret ‖ sha256(csr))`, PCR values matching the digest, and the policy.
-    Then `resolve(tx, { ekSha256, … })`.
+- `discoveryAttestor({ approval: 'unknown-machines' | 'always', hardwareKey })` defers with `{ deferred: 'approval', requestId }`. It keeps one pending `join_requests` row per machine for the newest CSR, and consumes the approved row when the retry arrives.
+- `tpmAttestor({ challengeKey, ekRoots?, pcrSelection?, pcrPolicy?, resolve?, enrollment? })`:
+  - Round 1 checks the EK certificate chain and the AK's attributes, then answers with `MakeCredential` plus a state sealed under `challengeKey` (AES-256-GCM, bound to the CSR, ≤ 5 min).
+  - Round 2 checks the activated secret, and a quote by the AK with `extraData = sha256(secret ‖ sha256(csr))`, PCR values matching the digest, and the policy. Then `resolve(tx, { ekSha256, … })`, or operator `enrollment` through `join_requests`.
   - The TPM 2.0 structures live in `tpm2.ts` (KDFa is checked against go-tpm's vectors).
-  - `tpmProducer(SoftwareTpm)` is the agent side for tests.
+  - `tpmProducer(SoftwareTpm)` is the agent side for tests. The TPM path is tested only against this software TPM; it has not run against a real TPM yet.
 
 ## Bundles, CLI, agent side
 
-- `createPkiBundle({ trustDomain })` creates the whole set. `exportPkiBundle(bundle, { secret })`
-  and `importPkiBundle(text, { secret })` seal it with HKDF-SHA256 + AES-256-GCM, with the trust
-  domain in the AAD. `readPkiPins(text)` reads only the public half. The CLI's `pki init`,
-  `pki show` and `pki issue-gateway` are built on these.
-- `agentIdentityFromChain(chainDer, { roots, now, revocations })` authenticates a gateway handshake.
-  A `node-tenant` certificate runs as `node` with `tenantControlled: true`.
-- `startAgentJoin`, `finishAgentJoin` and `prepareAgentRenew` are the agent half (for `FakeDaemon`
-  and the simulator). `tests/pki-flow.test.ts` runs join → handshake → rotate → revoke end to end.
+- `createPkiBundle({ trustDomain })` creates the whole set, including the audit signing key, the exec ticket key, the break-glass and sandbox SSH CAs and the command-signing root. `exportPkiBundle(bundle, { secret })` and `importPkiBundle(text, { secret })` seal it with HKDF-SHA256 + AES-256-GCM, with the trust domain in the AAD; the seal also authenticates the public parts. `readPkiPins(text)` reads only the public half. The CLI's `pki init`, `pki show` and `pki issue-gateway` are built on these.
+- `bootstrapPins(bundle)` gives the serving CA, join signing and join encryption pins a new machine is installed with.
+- `agentIdentityFromChain(chainDer, { roots, now, revocations })` authenticates a gateway handshake. A `node-tenant` certificate runs as `node` with `tenantControlled: true`.
+- `startAgentJoin`, `finishAgentJoin` and `prepareAgentRenew` are the agent half (for `FakeDaemon` and the simulator), exercised end to end through join, handshake, rotate and revoke.
 
-## v0.2: secrets, signed intent, attested results
+## Secrets, signed intent, attested results
 
-- **Secrets.** `localSealedSecretStore({ sql, keys })` is core's `SecretStore` over
-  `sealed_secrets`, and `sealedSecretsMigration` (`pki/0001_sealed_secrets`) creates that table.
+- **Secrets.** `localSealedSecretStore({ sql, keys })` is core's `SecretStore` over `sealed_secrets`, and `sealedSecretsMigration` (`pki/0001_sealed_secrets`) creates that table.
   - Values are sealed with AES-256-GCM under HKDF keys, with the AAD binding ref and tenant.
-  - `keys` may hold several ids. `reseal()` moves rows to the current key and reports rows it
-    cannot open.
+  - `keys` may hold several ids. `reseal()` moves rows to the current key and reports rows it cannot open.
   - Refs are `secret://<tenant>/<id>`.
-  - The broker runs `openSecretRequest(req, { nodeId, lookup, now, isBound })`: the node signature
-    against `node_certs`, the `epk` point, then the binding. Refusals carry `details.refusal` for
-    `SecretResponse.error`.
-  - `sealSecretResponse(opened, value, { expiresAt })` answers with a JWE to `epk`. With
-    `expiresAt` it also carries `exp`.
+  - The broker runs `openSecretRequest(req, { nodeId, lookup, now, isBound })`: the node signature against `node_certs`, the `epk` point, then the binding. Refusals carry `details.refusal` for `SecretResponse.error`.
+  - `sealSecretResponse(opened, value, { expiresAt })` answers with a JWE to `epk`. With `expiresAt` it also carries `exp`.
   - Agents use `createSecretRequest` and `openSecretResponse`, which refuses an expired answer.
-  - The broker itself is `createSecretBroker` in `@better-compute/server` (GatewayServices.secret).
-    It verifies against the node's current certificate, binds the request to live work, and caps
-    `exp` at 5 minutes.
-- **Signed intent.** `createCommandSigningAuthority()` is the root (in production, KMS or Vault
-  transit). It issues `issueWorkerKey({ workerId })` keys that last ≤ 24 h and carry the
-  command-signing EKU.
-  - `signCommand`/`verifyCommand` and `signDesiredState`/`verifyDesiredState` check the chain to
-    the `TrustBundle` roots, the EKU, purpose-bound ES256 and the node id. `required` comes from the
-    daemon's kind table, and a signature that is present is always checked.
-  - Root rotation: `addTrustRoot`, then switch once `trustVersionAcknowledged(version, acks,
-fleetSize)`, then `removeTrustRoot`.
-- **Attested results.** `verifyAttestedUpdate` (a `CommandUpdate.node_sig` over
-  [command_id, uint32(state), sha256(result)]) and `verifyAttestedReport` (AllocationBound or
-  AllocationReleased; the body must name the session's node) look the key up by `kid` in
-  `node_certs` (`nodeCertsLookup(tx)`).
+  - The broker itself is `createSecretBroker` in `@better-compute/server` (GatewayServices.secret). It verifies against the node's current certificate, binds the request to live work, and caps `exp` at 5 minutes.
+- **Signed intent.** `createCommandSigningAuthority()` is the root (in production, KMS or Vault transit). Its `issueWorkerKey({ workerId })` issues keys that last ≤ 24 h and carry the command-signing EKU.
+  - `signCommand`/`verifyCommand` and `signDesiredState`/`verifyDesiredState` check the chain to the `TrustBundle` roots, the EKU, purpose-bound ES256 and the node id. `required` comes from the daemon's kind table, and a signature that is present is always checked.
+  - Root rotation: `addTrustRoot`, then switch once `trustVersionAcknowledged(version, acks, fleetSize)`, then `removeTrustRoot`.
+- **Attested results.** `verifyAttestedUpdate` (a `CommandUpdate.node_sig` over [command_id, uint32(state), sha256(result)]) and `verifyAttestedReport` (AllocationBound or AllocationReleased; the body must name the session's node) look the key up by `kid` in `node_certs` (`nodeCertsLookup(tx)`).
   - A revoked certificate is refused.
   - An expired certificate is accepted for 7 more days, for results journaled offline.
   - Agents sign with `signCommandUpdate` and `signAttestedReport`.
 
-## v0.3: exec tickets and break-glass SSH
+## Exec tickets and break-glass SSH
 
-- **Keys in the bundle.** `pki init` bundles now carry an exec ticket key and the compute SSH CA,
-  sealed with the other keys.
-  - `execTicketIssuer(bundle, { issuer })` rebuilds the issuer. A key's `kid` is its RFC 7638
-    thumbprint, so api replicas, restarts and the gateway's JWKS all agree on it.
+- **Keys in the bundle.** `pki init` bundles carry an exec ticket key and the compute SSH CA, sealed with the other keys.
+  - `execTicketIssuer(bundle, { issuer })` rebuilds the issuer. A key's `kid` is its RFC 7638 thumbprint, so api replicas, restarts and the gateway's JWKS all agree on it.
   - `pki show` prints `execTicketKeyId` and `sshCaPublicKey`.
-  - Older bundles still load; they just lack both keys.
-- **Exec tickets** (§7.6). `createExecTicketIssuer({ issuer })` issues ES256 JWTs with
-  `typ: bc-exec+jwt`, `aud: node:<id>`, `sid`, `op` (`exec`, `console`, `ssh`, `tcp`), a single-use
-  `jti`, and a lifetime of at most 60 s.
+  - Older bundles without these keys still load.
+- **Exec tickets.** `createExecTicketIssuer({ issuer })` issues ES256 JWTs with `typ: bc-exec+jwt`, `aud: node:<id>`, `sid`, `op` (`exec`, `console`, `ssh`, `tcp`), a single-use `jti`, and a lifetime of at most 60 s.
   - `jwksJson()` is `AccessSection.exec_ticket_jwks_json`. `rotate()` keeps the previous key listed.
-  - The gateway and the daemon both run
-    `verifyExecTicket(token, { jwks, nodeId, now, jtiCache: createReplayCache() })`, which checks
-    `alg`, `typ`, key, audience, lifetime, op and replay.
-- **SSH break-glass** (§13). `createSshCertificateAuthority({ algorithm: 'ed25519' | 'ecdsa-p256' })`
-  issues OpenSSH cert-v01 user certificates.
+  - The gateway and the daemon both run `verifyExecTicket(token, { jwks, nodeId, now, jtiCache: createReplayCache() })`, which checks `alg`, `typ`, key, audience, lifetime, op and replay.
+- **SSH break-glass.** `createSshCertificateAuthority({ algorithm: 'ed25519' | 'ecdsa-p256' })` issues OpenSSH cert-v01 user certificates.
   - `publicKey` is an `AccessSection.ssh_ca_public_keys` entry.
-  - `issueUserCertificate({ publicKey, principals, keyId, validBefore })` refuses more than 1 h and
-    empty principals. It grants `permit-pty` only unless told otherwise.
-  - `parseSshCertificate` reads and verifies certificates, ssh-keygen's included. Tests round-trip
-    both ways with OpenSSH's `ssh-keygen`.
+  - `issueUserCertificate({ publicKey, principals, keyId, validBefore })` refuses more than 1 h and empty principals. It grants `permit-pty` only unless told otherwise.
+  - `parseSshCertificate` reads and verifies certificates, ssh-keygen's included. Tests round-trip both ways with OpenSSH's `ssh-keygen`.
 
-## v0.4: audit primitives
+## Audit primitives
 
-`@better-compute/audit` owns the checkpoint table, the commit-order cursor and the hourly job. This
-package supplies the cryptography and touches no database.
+`@better-compute/audit` owns the checkpoint table, the commit-order cursor and the hourly job. This package supplies the cryptography and touches no database.
 
-- `merkleLeafHash`, `merkleRoot`, `merkleInclusionProof` / `verifyMerkleInclusion` and
-  `merkleConsistencyProof` / `verifyMerkleConsistency` implement RFC 6962, checked against the
-  certificate-transparency reference roots.
+- `merkleLeafHash`, `merkleRoot`, `merkleInclusionProof` / `verifyMerkleInclusion` and `merkleConsistencyProof` / `verifyMerkleConsistency` implement RFC 6962, checked against the certificate-transparency reference roots.
 - `canonicalJson` defines the bytes that get hashed and signed.
-- `signCheckpoint(body, key)` / `verifyCheckpoint(signed, { pin })` handle purpose `audit-checkpoint`;
-  the signed bytes must be canonical.
-- The PKI bundle carries an `auditSigning` key, and `pki show` prints its `auditSigningKeyPin`.
-  Bundles written before this still load.
+- `signCheckpoint(body, key)` / `verifyCheckpoint(signed, { pin })` handle purpose `audit-checkpoint`; the signed bytes must be canonical.
+- The PKI bundle carries an `auditSigning` key, and `pki show` prints its `auditSigningKeyPin`. Bundles written without it still load.
 
-## Offline release signing (§13 supply chain)
+## Offline release signing
 
-`release.ts` is a TUF-lite scheme: a signed manifest of one release's artifacts. It can grow into
-real TUF roles later by bumping `spec`.
+`release.ts` is a TUF-lite scheme: a signed manifest of one release's artifacts. It can grow into real TUF roles later by bumping `spec`. It is meant for bcd releases; bcd is not released as a binary yet.
 
-- **Keys.** `createReleaseSigningKey()` creates a key that stays offline. Installers and daemons know
-  it only by its `sha256/…` pin.
-- **Building the manifest.** `buildReleaseManifest({ product, version, sequence, signers, artifacts })`
-  produces a body with these fields:
+- **Keys.** `createReleaseSigningKey()` creates a key that stays offline. Installers and daemons know it only by its `sha256/…` pin.
+- **Building the manifest.** `buildReleaseManifest({ product, version, sequence, signers, artifacts })` produces a body with these fields:
   - `type: 'bettercompute.release'` and `spec: 1`;
   - `product`, `version`, `issuedAt` and `expiresAt`;
   - a monotonic `sequence`, which is the rollback counter;
   - `keys: [{ kid, alg: 'ES256', spki }]`, the signers, cosigners included;
-  - `artifacts: [{ name, platform?, sha256, size }]`, sorted by name. `platform` is `linux-amd64`,
-    `linux-arm64` and so on, and `platformFromName` derives it from goreleaser names.
-- **Signing.** `signReleaseManifest(manifestOrSigned, keys)` signs the canonical body bytes under
-  purpose `release-manifest`. The result is
-  `{ manifest: base64(body), signatures: [{ kid, sig }] }`. Pass an already signed manifest to
-  cosign it.
-- **Verifying.** `verifyReleaseManifest(signed, { pins, threshold }, { minSequence, product })`
-  counts distinct pinned keys with a valid signature. `verifyReleaseArtifact(manifest, name, bytes)`
-  then checks a download against the manifest.
-- **CLI.** `release keygen|sign|cosign|verify`. `daemon install-script --release-manifest …
---release-pins …` pins the verified per-architecture digests of the bare `linux-<arch>` binaries,
-  so the script's `sha256sum -c` check follows from the release signature.
+  - `artifacts: [{ name, platform?, sha256, size }]`, sorted by name. `platform` is `linux-amd64`, `linux-arm64` and so on, and `platformFromName` derives it from goreleaser names.
+- **Signing.** `signReleaseManifest(manifestOrSigned, keys)` signs the canonical body bytes under purpose `release-manifest`. The result is `{ manifest: base64(body), signatures: [{ kid, sig }] }`. Pass an already signed manifest to cosign it.
+- **Verifying.** `verifyReleaseManifest(signed, { pins, threshold }, { minSequence, product })` counts distinct pinned keys with a valid signature. `verifyReleaseArtifact(manifest, name, bytes)` then checks a download against the manifest.
+- **CLI.** `release keygen|sign|cosign|verify`. `daemon install-script --release-manifest … --release-pins …` pins the verified per-architecture digests of the bare `linux-<arch>` binaries, so the script's `sha256sum -c` check follows from the release signature.
 
-## v0.5 (optional): workload identity
+## Workload identity (optional)
 
-- `createWorkloadIssuer({ issuer, defaultAudience })` issues ES256 OIDC tokens (`typ: JWT`, at most
-  15 min) with `sub: t:<tenantId>:instance:<id>`, `tenant_id`, `instance_id` and a unique `jti`.
+- `createWorkloadIssuer({ issuer, defaultAudience })` issues ES256 OIDC tokens (`typ: JWT`, at most 15 min) with `sub: t:<tenantId>:instance:<id>`, `tenant_id`, `instance_id` and a unique `jti`.
   - `discoveryDocument()` and `jwks()` are served on the public https:443 issuer host.
-  - Rotation has three steps: `addKey()` publishes the new key, `promote(kid)` starts signing with
-    it, and `retire(kid)` drops the old key, but only after its last token expired. A rotation
-    therefore never invalidates an issued token (the U6 lesson).
-- A tenant admin registers the issuer as an OIDC provider in better-iam and creates a
-  `web-identity` trust (`StringLike token.sub "t:<tenant>:*"`). Instances then exchange tokens at
-  `sts/assumeRoleWithWebIdentity`, which the tests do against a real better-iam.
+  - Rotation has three steps: `addKey()` publishes the new key, `promote(kid)` starts signing with it, and `retire(kid)` drops the old key, but only after its last token expired. A rotation therefore never invalidates an issued token.
+- A tenant admin registers the issuer as an OIDC provider in Better IAM and creates a `web-identity` trust (`StringLike token.sub "t:<tenant>:*"`). Instances then exchange tokens at `sts/assumeRoleWithWebIdentity`, which the tests do against a real Better IAM.
 - `createImdsTokenService({ issuer })` is the IMDSv2-style exchange:
   - `PUT /latest/api/token` returns a session token bound to the calling instance by an HMAC;
   - `GET /latest/identity-token` exchanges it for a workload token;
-  - a session token from another instance, a forwarded request (`X-Forwarded-For`) and a `GET` for
-    a session token are all refused.
+  - a session token from another instance, a forwarded request (`X-Forwarded-For`) and a `GET` for a session token are all refused.
 
-## Go parity (for `bcd`, W1)
+## Go parity (for `bcd`)
 
-Everything `bcd` produces or checks must match this package byte for byte. Use only Go's standard
-library: `crypto/ecdsa`, `crypto/ecdh`, `crypto/aes` + `crypto/cipher` (GCM), `crypto/sha256`,
-`crypto/x509`. RFC 3394 AES key wrap is about 30 lines; no JOSE library is needed.
+Everything `bcd` produces or checks must match this package byte for byte. Use only Go's standard library: `crypto/ecdsa`, `crypto/ecdh`, `crypto/aes` + `crypto/cipher` (GCM), `crypto/sha256`, `crypto/x509`. RFC 3394 AES key wrap is about 30 lines; no JOSE library is needed.
 
-- **Signatures.** ES256 over `signingInput(purpose, parts)` from
-  `packages/protocol/src/signing.ts`: `"bettercompute.v1/" ‖ purpose ‖ 0x00 ‖ (uint32_be(len) ‖
-part)*`, SHA-256.
-  - `Signature.sig` is raw `r ‖ s`, each left-padded to 32 bytes. Go's `ecdsa.Sign` returns
-    `r, s` big.Ints, so pad them; never send ASN.1.
+- **Signatures.** ES256 over `signingInput(purpose, parts)` from [`@better-compute/protocol`](https://github.com/better-compute/better-compute/blob/main/packages/protocol/src/signing.ts): `"bettercompute.v1/" ‖ purpose ‖ 0x00 ‖ (uint32_be(len) ‖ part)*`, SHA-256.
+  - `Signature.sig` is raw `r ‖ s`, each left-padded to 32 bytes. Go's `ecdsa.Sign` returns `r, s` big.Ints, so pad them; never send ASN.1.
   - Node keys: `kid` = base64url (no padding) of SHA-256 over the SPKI DER.
-  - Control-plane keys: `kid` = base64url of the certificate's subject key id, with the certificate
-    in `Signature.chain[0]`.
-- **Pins.** `sha256/` + standard base64 of SHA-256(SPKI DER), as `config.DecodePin` expects. To
-  check a JoinResponse, take the key from `sig.chain[0]` and compare its SPKI hash with
-  `join_signing_key_pin` before verifying.
-- **Sealed join token.** A compact JWE whose protected header is exactly
-  `{"typ":"bcjt+jwe","csr":<b64url sha256(CSR DER)>,"iat":<unix seconds>,"alg":"ECDH-ES+A256KW","enc":"A256GCM","epk":{"kty":"EC","crv":"P-256","x":…,"y":…}}`
-  (member order is free: the AAD is the header bytes as sent).
-  - KEK = Concat KDF: SHA-256(`00000001` ‖ Z ‖ len‖"ECDH-ES+A256KW" ‖ len‖"" ‖ len‖"" ‖
-    `00000100`), with 32-bit big-endian lengths and Z the ECDH x-coordinate.
+  - Control-plane keys: `kid` = base64url of the certificate's subject key id, with the certificate in `Signature.chain[0]`.
+- **Pins.** `sha256/` + standard base64 of SHA-256(SPKI DER), as `config.DecodePin` expects. To check a JoinResponse, take the key from `sig.chain[0]` and compare its SPKI hash with `join_signing_key_pin` before verifying.
+- **Sealed join token.** A compact JWE whose protected header is exactly `{"typ":"bcjt+jwe","csr":<b64url sha256(CSR DER)>,"iat":<unix seconds>,"alg":"ECDH-ES+A256KW","enc":"A256GCM","epk":{"kty":"EC","crv":"P-256","x":…,"y":…}}` (member order is free: the AAD is the header bytes as sent).
+  - KEK = Concat KDF: SHA-256(`00000001` ‖ Z ‖ len‖"ECDH-ES+A256KW" ‖ len‖"" ‖ len‖"" ‖ `00000100`), with 32-bit big-endian lengths and Z the ECDH x-coordinate.
   - The CEK (32 random bytes) is wrapped with RFC 3394 under the default IV `A6A6A6A6A6A6A6A6`.
   - Payload: A256GCM with a 12-byte IV and the AAD = ASCII of the base64url protected header.
   - Plaintext: the token's UTF-8.
-  - Load the key from `/etc/bcd/join-encryption.jwk`, else `/.well-known/better-compute`, and use
-    it only if it matches `join_encryption_key_pin`.
-- **Attestors (v0.2+).** `tests/pki-attestors-vectors.test.ts` pins the exact bytes for the
-  `x509pop` signing input (purpose `x509pop` over [sha256(csr), node_id, int64 s ‖ int32 ns]), a
-  `DiscoveryAssertion` body and its `discovery-assertion` signing input, the tpm quote nonce
-  `sha256(secret ‖ sha256(csr))`, TPML_PCR_SELECTION and PCR digest encodings, the GCP audience
-  `<audience>#<b64url sha256(csr)>`, and the allowed-kinds matcher. bcd must reproduce them. KDFa is
-  covered by go-tpm's own vectors (`tests/pki-attestors-tpm2.test.ts`).
+  - Load the key from `/etc/bcd/join-encryption.jwk`, else `/.well-known/better-compute`, and use it only if it matches `join_encryption_key_pin`.
+- **Attestors.** The repository's test vectors (`tests/pki-attestors-vectors.test.ts`) pin the exact bytes for the `x509pop` signing input (purpose `x509pop` over [sha256(csr), node_id, int64 s ‖ int32 ns]), a `DiscoveryAssertion` body and its `discovery-assertion` signing input, the tpm quote nonce `sha256(secret ‖ sha256(csr))`, TPML_PCR_SELECTION and PCR digest encodings, the GCP audience `<audience>#<b64url sha256(csr)>`, and the allowed-kinds matcher. bcd must reproduce them. KDFa is covered by go-tpm's own vectors.
 - **JoinResponse check.** In order:
   1. the signature under the pinned key;
   2. `csr_sha256` equals SHA-256 of the CSR you sent;
   3. the leaf's public key equals your key;
-  4. the leaf's one SPIFFE URI SAN is `spiffe://<trust_domain>/site/<site_id>/node/<node_id>`; any
-     other URI SAN is a `urn:bc:` statement about the node key (`urn:bc:tpm-ak:<nameAlg>:<digest>`,
-     the TPM AK that certified it, which every renewal must prove again with `key_attestation`),
-     never an identity (`nodeSpiffeIdOf`);
+  4. the leaf's one SPIFFE URI SAN is `spiffe://<trust_domain>/site/<site_id>/node/<node_id>`; any other URI SAN is a `urn:bc:` statement about the node key (`urn:bc:tpm-ak:<nameAlg>:<digest>`, the TPM AK that certified it, which every renewal must prove again with `key_attestation`), never an identity (`nodeSpiffeIdOf`);
   5. the role extension matches `role`.
-- **Certificates.** Agent certificates carry the role in non-critical extension
-  `2.25.121396728463777788658791269357486937304.1.1` as a UTF8String. Worker command-signing
-  certificates carry EKU `2.25.121396728463777788658791269357486937304.2.1`: in `x509.Verify`, pass
-  `KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}` and check `UnknownExtKeyUsage` yourself.
-  Nothing we issue is critical except BasicConstraints and KeyUsage, which Go understands.
-- **SecretResponse.** The JWE has `typ` `bcsecret+jwe` and carries `ref` and `rid` (request id) in
-  the protected header, plus `exp` (unix seconds, at most 5 minutes out). Check `ref`, `rid` and
-  `exp` before using the value, and drop the value from memory once the step is done. The recipient
-  is the request's one-time `epk` (65-byte uncompressed point). The signing input is pinned in
-  `tests/pki-attestors-vectors.test.ts`.
-- **Renew.** `pop_sig` covers `renew-pop` [sha256(new CSR), node_id, int64_be(seconds) ‖
-  int32_be(nanos)], signed with the current key. Renew at ~60% of the lifetime.
-- **Release manifests (v0.4 self-update).**
-  - **Signed bytes.** Base64-decode `manifest`; the result is the canonical JSON body. Each
-    `signatures[i].sig` is base64url raw `r ‖ s` over `signingInput('release-manifest', [body])`.
-  - **Trust.** Find each signature's key in the body's `keys` by `kid`. Parse the key's `spki` (DER
-    SubjectPublicKeyInfo) and accept it only if SHA-256(SPKI) matches a configured pin. Count each
-    pinned key at most once, and require `threshold` of them.
+- **Certificates.** Agent certificates carry the role in non-critical extension `2.25.121396728463777788658791269357486937304.1.1` as a UTF8String. Worker command-signing certificates carry EKU `2.25.121396728463777788658791269357486937304.2.1`: in `x509.Verify`, pass `KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}` and check `UnknownExtKeyUsage` yourself. Nothing we issue is critical except BasicConstraints and KeyUsage, which Go understands.
+- **SecretResponse.** The JWE has `typ` `bcsecret+jwe` and carries `ref` and `rid` (request id) in the protected header, plus `exp` (unix seconds, at most 5 minutes out). Check `ref`, `rid` and `exp` before using the value, and drop the value from memory once the step is done. The recipient is the request's one-time `epk` (65-byte uncompressed point). The signing input is pinned in the same test vectors.
+- **Renew.** `pop_sig` covers `renew-pop` [sha256(new CSR), node_id, int64_be(seconds) ‖ int32_be(nanos)], signed with the current key. Renew at ~60% of the lifetime.
+- **Release manifests (self-update).**
+  - **Signed bytes.** Base64-decode `manifest`; the result is the canonical JSON body. Each `signatures[i].sig` is base64url raw `r ‖ s` over `signingInput('release-manifest', [body])`.
+  - **Trust.** Find each signature's key in the body's `keys` by `kid`. Parse the key's `spki` (DER SubjectPublicKeyInfo) and accept it only if SHA-256(SPKI) matches a configured pin. Count each pinned key at most once, and require `threshold` of them.
   - **Check order:**
     1. the manifest verifies (threshold, and a canonical, spec 1 body for product `bcd`);
     2. `sequence` ≥ the stored sequence (persist the new one only after installing);
@@ -346,11 +252,17 @@ part)*`, SHA-256.
 
 ## Also here
 
-- `sealJwe` / `openJwe`: compact JWE, `ECDH-ES+A256KW` + `A256GCM` only, typed by `typ`. It also
-  serves `SecretResponse.jwe` (v0.2). Checked against the RFC 7518 Appendix C and RFC 3394 vectors.
-- `createSigningKey`, `signPurpose`, `verifySignature`: ES256 (raw `r ‖ s`) over the
-  `@better-compute/protocol` `signingInput` framing, so a signature never verifies for another
-  purpose. `verifySignature` takes a public key or a pin.
+- `sealJwe` / `openJwe`: compact JWE, `ECDH-ES+A256KW` + `A256GCM` only, typed by `typ`. It also serves `SecretResponse.jwe`. Checked against the RFC 7518 Appendix C and RFC 3394 vectors.
+- `createSigningKey`, `signPurpose`, `verifySignature`: ES256 (raw `r ‖ s`) over the `@better-compute/protocol` `signingInput` framing, so a signature never verifies for another purpose. `verifySignature` takes a public key or a pin.
 - `verifyCertificateChain`, `parseCertificate`, `parseCsr`, `createCsr`, and the SPIFFE ID helpers.
-- `createRevocationSet()`: the in-memory revocation view gateways consult on every handshake;
-  `subscribe` fires once per new revocation.
+- `createRevocationSet()`: the in-memory revocation view gateways consult on every handshake; `subscribe` fires once per new revocation.
+
+## Documentation
+
+- [PKI](https://better-compute.com/docs/operations/pki)
+- [Attestation](https://better-compute.com/docs/guides/nodes/attestation)
+- [Attestors](https://better-compute.com/docs/extending/attestors)
+
+## License
+
+[Apache License 2.0](https://github.com/better-compute/better-compute/blob/main/LICENSE)

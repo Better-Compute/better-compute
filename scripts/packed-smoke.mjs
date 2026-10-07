@@ -2,9 +2,9 @@
 // after `pnpm pack:all`).
 //
 // A fresh consumer in work/packed-XXXX depends on every artifacts/ tarball and on every optional peer
-// the packages declare: @better-iam/* from the vendored tarballs (vendor/better-iam; better-iam is not
-// on npm yet, PLAN.md §12.10), anything else from the registry. Its pnpm-workspace.yaml overrides every
-// better-compute and better-iam package to its tarball and takes `allowBuilds` from scripts/tooling.mjs.
+// the packages declare, installed from the registry at the declared range (@better-iam/* included).
+// Its pnpm-workspace.yaml overrides every better-compute package to its tarball and takes `allowBuilds`
+// from scripts/tooling.mjs.
 // smoke.mjs imports the umbrella's entry points, and `better-compute --help` runs through the installed bin.
 // The consumer directory is deleted afterwards (only ever inside work/).
 import { spawnSync } from 'node:child_process';
@@ -38,18 +38,8 @@ const missing = manifests
   .filter((file) => !existsSync(join(root, 'artifacts', file)));
 if (missing.length > 0) throw new Error(`Run pack:all first; missing ${missing.join(', ')}`);
 
-/** Vendored better-iam: `better-iam-core-0.1.0.tgz` → `@better-iam/core`. */
-const vendored = {};
-for (const file of await readdir(join(root, 'vendor', 'better-iam'))) {
-  const match = /^better-iam(?:-(.+?))?-\d+\.\d+\.\d+(?:-[\w.]+)?\.tgz$/.exec(file);
-  if (match)
-    vendored[match[1] ? `@better-iam/${match[1]}` : 'better-iam'] = fileSpec(
-      join(root, 'vendor', 'better-iam', file),
-    );
-}
-
 const dependencies = {};
-const overrides = { ...vendored };
+const overrides = {};
 for (const manifest of manifests) {
   dependencies[manifest.name] = fileSpec(
     join(root, 'artifacts', tarballOf(manifest.name, manifest.version)),
@@ -58,7 +48,7 @@ for (const manifest of manifests) {
 }
 for (const manifest of manifests)
   for (const [name, range] of Object.entries(manifest.peerDependencies ?? {}))
-    if (!Object.hasOwn(dependencies, name)) dependencies[name] = vendored[name] ?? range;
+    if (!Object.hasOwn(dependencies, name)) dependencies[name] = range;
 
 // Canonical paths: a Windows 8.3 short name (C:\Users\SEANFI~1) in the consumer's cwd makes Node load
 // the bin under two URLs and fail with ERR_REQUIRE_CYCLE_MODULE.

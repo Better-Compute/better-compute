@@ -16,10 +16,15 @@
   },
   "keywords": [
     "gpu",
+    "cpu",
+    "sandbox",
+    "control-plane",
+    "typescript",
+    "scheduler",
     "bare-metal",
-    "capacity",
-    "provisioning",
-    "infrastructure"
+    "vps",
+    "reservations",
+    "better-iam"
   ],
   "publishConfig": {
     "access": "public"
@@ -29,6 +34,7 @@
   },
   "files": [
     "dist",
+    "src",
     "README.md",
     "LICENSE"
   ],
@@ -167,11 +173,12 @@
     "@better-compute/vps": "workspace:*"
   },
   "peerDependencies": {
-    "@better-iam/adapter-sqlite": "^0.1.0",
-    "@better-iam/cli": "^0.1.0",
-    "@better-iam/client": "^0.1.0",
-    "@better-iam/core": "^0.1.0",
-    "@better-iam/server": "^0.1.0",
+    "@better-iam/adapter-sqlite": "^0.2.0",
+    "@better-iam/cli": "^0.2.0",
+    "@better-iam/client": "^0.2.0",
+    "@better-iam/core": "^0.2.0",
+    "@better-iam/mcp": "^0.2.0",
+    "@better-iam/server": "^0.2.0",
     "@electric-sql/pglite": "^0.5.8"
   },
   "peerDependenciesMeta": {
@@ -185,6 +192,9 @@
       "optional": true
     },
     "@better-iam/core": {
+      "optional": true
+    },
+    "@better-iam/mcp": {
       "optional": true
     },
     "@better-iam/server": {

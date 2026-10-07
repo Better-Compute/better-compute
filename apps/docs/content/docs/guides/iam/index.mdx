@@ -44,10 +44,11 @@ Better IAM plays four roles for compute:
 - **Flag store.** Tenant feature flags such as `compute.h100` gate features inside decisions and, through a
   cache, in code.
 
-<Callout type="info" title="Not on npm yet">
-  Better IAM has not been published to npm. This repository vendors its 23 packages as tarballs under
-  `vendor/better-iam` and pins them with pnpm overrides. `@better-compute/iam` needs `@better-iam/core` and
-  optionally `@better-iam/server` and `@better-iam/client`.
+<Callout type="info" title="Installing Better IAM">
+  Better IAM is on npm. Better Compute 0.1.0 works with Better IAM `^0.2.0`: install `better-iam` next to
+  `better-compute` (`npm install better-compute better-iam`). `@better-compute/iam` needs `@better-iam/core` and
+  optionally `@better-iam/server`, `@better-iam/client` and `@better-iam/adapter-sqlite`, all of which `better-iam`
+  brings. See [Installation](/docs/guides/installation#optional-peers).
 </Callout>
 
 ## What each side owns

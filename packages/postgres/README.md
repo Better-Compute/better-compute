@@ -1,23 +1,41 @@
 # @better-compute/postgres
 
-PostgreSQL storage for better-compute. It provides:
+PostgreSQL and PGlite storage for better-compute: the `SqlExecutor` implementations, the base schema and its migration ledger, the `compute_now()` clock, a Kysely dialect and the store conformance suite.
+
+## Install
+
+```sh
+npm install @better-compute/postgres
+```
+
+It is also included in the umbrella package as `better-compute/postgres`, with the PGlite entry at `better-compute/pglite`:
+
+```sh
+npm install better-compute
+```
+
+`@electric-sql/pglite` is an optional peer dependency, needed only for the `./pglite` entry (and the conformance suite run on PGlite): `npm install @electric-sql/pglite`.
+
+It needs Node.js 22.12 or later and PostgreSQL 16 or later (CI runs 17).
+
+## Usage
+
+```ts
+import { betterCompute } from 'better-compute';
+import { postgres } from '@better-compute/postgres';
+
+const database = postgres({ url: process.env.DATABASE_URL!, max: 20, statementTimeoutMs: 15_000 });
+await database.migrate(); // compute.initialize() does this, adding module and plugin migrations
+const compute = betterCompute({ database /* , iam, secret, baseURL, … */ });
+```
+
+The package provides:
 
 - the `SqlExecutor` implementations `postgres()` (node-postgres) and `pglite()` (`./pglite`);
 - the base schema, applied through an append-only migration ledger;
 - the `compute_now()` clock and its sim-clock helpers;
 - a Kysely dialect;
 - the store conformance suite (`./conformance`).
-
-It needs Node.js 22.12 or later and PostgreSQL 16 or later (CI runs 17).
-
-```ts
-import { betterCompute } from 'better-compute';
-import { postgres } from 'better-compute/postgres';
-
-const database = postgres({ url: process.env.DATABASE_URL!, max: 20, statementTimeoutMs: 15_000 });
-await database.migrate(); // compute.initialize() does this, adding module and plugin migrations
-const compute = betterCompute({ database /* , iam, secret, baseURL, … */ });
-```
 
 ## PostgreSQL
 
@@ -30,7 +48,7 @@ const compute = betterCompute({ database /* , iam, secret, baseURL, … */ });
 - It uses only unnamed prepared statements.
 - It takes no session-level advisory locks. Concurrent migrators serialize on a transaction-level `pg_advisory_xact_lock(1650683248, 1)`, which is released at `COMMIT`.
 
-Leases, the work queue and the outbox are tables (PLAN.md §8.4–8.5), so they work through the pooler.
+Leases, the work queue and the outbox are tables, so they work through the pooler.
 
 **Options.**
 
@@ -41,7 +59,7 @@ Leases, the work queue and the outbox are tables (PLAN.md §8.4–8.5), so they 
 
 ## Transactions
 
-`transaction(fn, { isolation?, readOnly? })` runs `fn` on one connection between `BEGIN` and `COMMIT`, and rolls back when `fn` throws. The default isolation is `read committed`: guarded updates and row locks carry the invariants (P4).
+`transaction(fn, { isolation?, readOnly? })` runs `fn` on one connection between `BEGIN` and `COMMIT`, and rolls back when `fn` throws. The default isolation is `read committed`: guarded updates and row locks carry the invariants.
 
 - **A caught statement error still aborts.** If a statement fails and `fn` catches the error, PostgreSQL has already aborted the transaction. The executor detects the `COMMIT` that PostgreSQL turned into a `ROLLBACK` and rejects with `INTERNAL_ERROR`. To try a statement that may fail, give it a savepoint of its own.
 - **The executor joins the caller's transaction.** Inside `fn`'s async call chain, the executor's own `query()` runs in that transaction, and `transaction()` opens a savepoint. The savepoint is released on success. When the nested `fn` throws, it is rolled back to, and the outer transaction carries on.
@@ -84,14 +102,7 @@ Pass parameters in these forms:
 
   Migrations of modules that are not configured are ignored.
 
-The base schema is the frozen v0.1 schema of PLAN.md §8.3:
-
-- the §8.3 tables as written;
-- the indexes behind the access paths the plan spells out;
-- `authz_changes`, the projection's change feed;
-- the v0.1 tables from the plan's "also" list: `gateways`, `allocations`, `usage_windows`, `usage_dead_letters`, `node_certs`, `inventory_snapshots`, `audit_events` and `pool_capacity_rollup`.
-
-`baseTables` lists every table. Later phases add their tables as new migrations. Released migrations never change.
+The base schema holds the control plane's core tables and the indexes behind their access paths, `authz_changes` (the projection's change feed), and tables such as `gateways`, `allocations`, `usage_windows`, `usage_dead_letters`, `node_certs`, `inventory_snapshots`, `audit_events` and `pool_capacity_rollup`. `baseTables` lists every table. New tables arrive as new migrations; released migrations never change.
 
 ## Partitioned history and retention
 
@@ -109,7 +120,7 @@ Audit rows are never pruned by a timer. `detachHistoryPartition(tx, 'audit_event
 
 ## One clock
 
-All SQL reads time through `compute_now()`, never `now()` (P9). `scripts/check-sql-now.mjs` enforces this. The only exception is `src/migrations/0001_clock.ts`, which defines the function. Column defaults use `compute_now()` too.
+All SQL reads time through `compute_now()`, never `now()`, and column defaults use `compute_now()` too. A repository check enforces this; the only exception is the migration that defines the function.
 
 For tests and the simulator:
 
@@ -134,7 +145,7 @@ These settings are database-wide. `computeNowMode(sql)` reports `system`, `sim`,
 
 ## Store conformance
 
-`storeConformanceCases()` from `./conformance` covers what the schema guarantees (PLAN.md §15):
+`storeConformanceCases()` from `@better-compute/postgres/conformance` covers what the schema guarantees:
 
 - `EXCLUDE` bookings, where overlaps come back as fewer rows from `ON CONFLICT DO NOTHING`;
 - extension conflicts inside savepoints;
@@ -149,6 +160,9 @@ These settings are database-wide. `computeNowMode(sql)` reports `system`, `sim`,
 Cases marked `postgresOnly` need concurrent connections: `FOR SHARE` against cordons and quarantines, lease takeover against a zombie's fence, `SKIP LOCKED` claims and dispatch, the outbox behind a long transaction, concurrent quota and bookings. PGlite runners skip them.
 
 ```ts
+import { storeConformanceCases } from '@better-compute/postgres/conformance';
+import { pglite } from '@better-compute/postgres/pglite';
+
 for (const test of storeConformanceCases().filter((c) => !c.postgresOnly))
   it(test.name, async () => {
     const db = pglite();
@@ -160,6 +174,14 @@ for (const test of storeConformanceCases().filter((c) => !c.postgresOnly))
   });
 ```
 
-In this repository, `tests/postgres-schema.test.ts` and `tests/pglite-*.test.ts` run on PGlite. `tests/postgres-conformance.test.ts` and `tests/postgres-executor.test.ts` run against real PostgreSQL, with a fresh schema per case, when `BETTER_COMPUTE_POSTGRES_URL` points at a database where they may create schemas: `pnpm test:postgres`.
+In the better-compute repository, the schema and PGlite tests run on PGlite, and the conformance and executor tests run against real PostgreSQL, with a fresh schema per case, when `BETTER_COMPUTE_POSTGRES_URL` points at a database where they may create schemas: `pnpm test:postgres`.
 
-License: Apache-2.0.
+## Documentation
+
+- [Database](https://better-compute.com/docs/operations/database)
+- [Retention](https://better-compute.com/docs/operations/retention)
+- [Consistency](https://better-compute.com/docs/guides/concepts/consistency)
+
+## License
+
+[Apache License 2.0](https://github.com/better-compute/better-compute/blob/main/LICENSE)

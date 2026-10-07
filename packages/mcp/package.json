@@ -15,14 +15,14 @@
     "url": "https://github.com/better-compute/better-compute/issues"
   },
   "keywords": [
-    "gpu",
-    "bare-metal",
-    "capacity",
-    "provisioning",
-    "infrastructure",
+    "better-compute",
     "mcp",
     "model-context-protocol",
-    "ai-agents"
+    "ai-agents",
+    "llm",
+    "gpu",
+    "reservations",
+    "better-iam"
   ],
   "publishConfig": {
     "access": "public"
@@ -32,6 +32,7 @@
   },
   "files": [
     "dist",
+    "src",
     "README.md",
     "LICENSE"
   ],
@@ -51,7 +52,7 @@
     "@better-compute/client": "workspace:*"
   },
   "peerDependencies": {
-    "@better-iam/mcp": "^0.1.0"
+    "@better-iam/mcp": "^0.2.0"
   },
   "peerDependenciesMeta": {
     "@better-iam/mcp": {
@@ -59,6 +60,6 @@
     }
   },
   "devDependencies": {
-    "@better-iam/mcp": "0.1.0"
+    "@better-iam/mcp": "^0.2.0"
   }
 }

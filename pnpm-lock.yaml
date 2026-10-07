@@ -4,31 +4,6 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-overrides:
-  better-iam: file:vendor/better-iam/better-iam-0.1.0.tgz
-  '@better-iam/a2a': file:vendor/better-iam/better-iam-a2a-0.1.0.tgz
-  '@better-iam/adapter-libsql': file:vendor/better-iam/better-iam-adapter-libsql-0.1.0.tgz
-  '@better-iam/adapter-postgres': file:vendor/better-iam/better-iam-adapter-postgres-0.1.0.tgz
-  '@better-iam/adapter-sqlite': file:vendor/better-iam/better-iam-adapter-sqlite-0.1.0.tgz
-  '@better-iam/auth': file:vendor/better-iam/better-iam-auth-0.1.0.tgz
-  '@better-iam/cli': file:vendor/better-iam/better-iam-cli-0.1.0.tgz
-  '@better-iam/client': file:vendor/better-iam/better-iam-client-0.1.0.tgz
-  '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
-  '@better-iam/mcp': file:vendor/better-iam/better-iam-mcp-0.1.0.tgz
-  '@better-iam/middleware': file:vendor/better-iam/better-iam-middleware-0.1.0.tgz
-  '@better-iam/nestjs': file:vendor/better-iam/better-iam-nestjs-0.1.0.tgz
-  '@better-iam/next': file:vendor/better-iam/better-iam-next-0.1.0.tgz
-  '@better-iam/nuxt': file:vendor/better-iam/better-iam-nuxt-0.1.0.tgz
-  '@better-iam/oauth': file:vendor/better-iam/better-iam-oauth-0.1.0.tgz
-  '@better-iam/projects': file:vendor/better-iam/better-iam-projects-0.1.0.tgz
-  '@better-iam/react': file:vendor/better-iam/better-iam-react-0.1.0.tgz
-  '@better-iam/react-router': file:vendor/better-iam/better-iam-react-router-0.1.0.tgz
-  '@better-iam/saml': file:vendor/better-iam/better-iam-saml-0.1.0.tgz
-  '@better-iam/scim': file:vendor/better-iam/better-iam-scim-0.1.0.tgz
-  '@better-iam/server': file:vendor/better-iam/better-iam-server-0.1.0.tgz
-  '@better-iam/svelte': file:vendor/better-iam/better-iam-svelte-0.1.0.tgz
-  '@better-iam/vue': file:vendor/better-iam/better-iam-vue-0.1.0.tgz
-
 importers:
 
   .:
@@ -37,26 +12,26 @@ importers:
         specifier: ^0.18.2
         version: 0.18.5
       '@better-iam/adapter-postgres':
-        specifier: file:vendor/better-iam/better-iam-adapter-postgres-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-adapter-postgres-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@better-iam/adapter-sqlite':
-        specifier: file:vendor/better-iam/better-iam-adapter-sqlite-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-adapter-sqlite-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@better-iam/cli':
-        specifier: file:vendor/better-iam/better-iam-cli-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-cli-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@better-iam/client':
-        specifier: file:vendor/better-iam/better-iam-client-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-client-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@better-iam/core':
-        specifier: file:vendor/better-iam/better-iam-core-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-core-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@better-iam/mcp':
-        specifier: file:vendor/better-iam/better-iam-mcp-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-mcp-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@better-iam/server':
-        specifier: file:vendor/better-iam/better-iam-server-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-server-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@bufbuild/buf':
         specifier: 1.73.0
         version: 1.73.0
@@ -152,17 +127,17 @@ importers:
         specifier: workspace:*
         version: link:../../packages/console-kit
       '@better-iam/next':
-        specifier: file:../../vendor/better-iam/better-iam-next-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-next-0.1.0.tgz(next@15.5.26(@types/node@22.20.4)(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(react@19.3.0)
+        specifier: ^0.2.0
+        version: 0.2.0(next@15.5.26(@types/node@22.20.4)(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(react@19.3.0)
       '@better-iam/react':
-        specifier: file:../../vendor/better-iam/better-iam-react-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-react-0.1.0.tgz(react@19.3.0)
+        specifier: ^0.2.0
+        version: 0.2.0(react@19.3.0)
       better-compute:
         specifier: workspace:*
         version: link:../../packages/better-compute
       better-iam:
-        specifier: file:../../vendor/better-iam/better-iam-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-0.1.0.tgz(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0))(@nestjs/core@12.1.0(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0))(reflect-metadata@0.2.2)(rxjs@7.8.2))(next@15.5.26(@types/node@22.20.4)(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(react-router@8.4.0(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(react@19.3.0)(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0)(svelte@5.57.1)(vue@3.5.43(typescript@5.9.3))
+        specifier: ^0.2.0
+        version: 0.2.0(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0))(@nestjs/core@12.1.0(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0))(reflect-metadata@0.2.2)(rxjs@7.8.2))(next@15.5.26(@types/node@22.20.4)(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(react-router@8.4.0(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(react@19.3.0)(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0)(svelte@5.57.1)(vue@3.5.43(typescript@5.9.3))
       next:
         specifier: ^15.5.0
         version: 15.5.26(@types/node@22.20.4)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -430,20 +405,23 @@ importers:
         specifier: workspace:*
         version: link:../vps
       '@better-iam/adapter-sqlite':
-        specifier: file:../../vendor/better-iam/better-iam-adapter-sqlite-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-adapter-sqlite-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@better-iam/cli':
-        specifier: file:../../vendor/better-iam/better-iam-cli-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-cli-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@better-iam/client':
-        specifier: file:../../vendor/better-iam/better-iam-client-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-client-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@better-iam/core':
-        specifier: file:../../vendor/better-iam/better-iam-core-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-core-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
+      '@better-iam/mcp':
+        specifier: ^0.2.0
+        version: 0.2.0
       '@better-iam/server':
-        specifier: file:../../vendor/better-iam/better-iam-server-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-server-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@electric-sql/pglite':
         specifier: ^0.5.8
         version: 0.5.8
@@ -496,17 +474,17 @@ importers:
         specifier: workspace:*
         version: link:../testing
       '@better-iam/adapter-sqlite':
-        specifier: file:../../vendor/better-iam/better-iam-adapter-sqlite-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-adapter-sqlite-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@better-iam/cli':
-        specifier: file:../../vendor/better-iam/better-iam-cli-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-cli-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@better-iam/client':
-        specifier: file:../../vendor/better-iam/better-iam-client-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-client-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@better-iam/server':
-        specifier: file:../../vendor/better-iam/better-iam-server-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-server-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@electric-sql/pglite':
         specifier: ^0.5.8
         version: 0.5.8
@@ -594,18 +572,19 @@ importers:
       '@better-compute/core':
         specifier: workspace:*
         version: link:../core
+    devDependencies:
       '@better-iam/adapter-sqlite':
-        specifier: file:../../vendor/better-iam/better-iam-adapter-sqlite-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-adapter-sqlite-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@better-iam/client':
-        specifier: file:../../vendor/better-iam/better-iam-client-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-client-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@better-iam/core':
-        specifier: file:../../vendor/better-iam/better-iam-core-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-core-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@better-iam/server':
-        specifier: file:../../vendor/better-iam/better-iam-server-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-server-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
 
   packages/inventory:
     dependencies:
@@ -621,9 +600,10 @@ importers:
       '@better-compute/client':
         specifier: workspace:*
         version: link:../client
+    devDependencies:
       '@better-iam/mcp':
-        specifier: file:../../vendor/better-iam/better-iam-mcp-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-mcp-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
 
   packages/metal:
     dependencies:
@@ -776,14 +756,14 @@ importers:
         specifier: workspace:*
         version: link:../server
       '@better-iam/adapter-sqlite':
-        specifier: file:../../vendor/better-iam/better-iam-adapter-sqlite-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-adapter-sqlite-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@better-iam/core':
-        specifier: file:../../vendor/better-iam/better-iam-core-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-core-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@better-iam/server':
-        specifier: file:../../vendor/better-iam/better-iam-server-0.1.0.tgz
-        version: file:vendor/better-iam/better-iam-server-0.1.0.tgz
+        specifier: ^0.2.0
+        version: 0.2.0
       '@bufbuild/protobuf':
         specifier: ^2.15.0
         version: 2.15.0
@@ -875,60 +855,53 @@ packages:
       '@types/react':
         optional: true
 
-  '@better-iam/a2a@file:vendor/better-iam/better-iam-a2a-0.1.0.tgz':
-    resolution: {integrity: sha512-qASpceQZBpG4W1fPxjNFTz5S8/D3/3w55AfGUq+xgeqCc+Gi7JuiWR9tXs3LeWHZFMuXZA7LPBnst9pejrhXjQ==, tarball: file:vendor/better-iam/better-iam-a2a-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/a2a@0.2.0':
+    resolution: {integrity: sha512-uycL/vLHj4FEk6fXNYU/ryx2gzvgRL/2va3cww3S9GZrJUZ/bjWlkWE9ak9yLFPaQxnFl0L4YZ6HLaied1TGHg==}
     engines: {node: '>=22.12.0'}
 
-  '@better-iam/adapter-libsql@file:vendor/better-iam/better-iam-adapter-libsql-0.1.0.tgz':
-    resolution: {integrity: sha512-2FQ53HBuNyLhGg3cRNikdSIeN3eXh2M1ChrG3oATJg/HslvhCOSf4nqY6W4/z1DZv3qVrnDQk9v4QpdJJtkmow==, tarball: file:vendor/better-iam/better-iam-adapter-libsql-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/adapter-libsql@0.2.0':
+    resolution: {integrity: sha512-53+j4HyWurtzu+4PHZIigsN/qPqTKPqcQQ2165/XhholB6jO3GqmY/BvRFuipFqa+fEh2xfvpTtfu6HX5xKZ5A==}
     engines: {node: '>=22.12.0'}
 
-  '@better-iam/adapter-postgres@file:vendor/better-iam/better-iam-adapter-postgres-0.1.0.tgz':
-    resolution: {integrity: sha512-RDBk6fg0RwGZTWd2maFQQEaEUPTEN4h+HVnkeZDEcocvicmO/SuAJNTq4/u5omeYp6nx40uGBqS2pNlWjut2jg==, tarball: file:vendor/better-iam/better-iam-adapter-postgres-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/adapter-postgres@0.2.0':
+    resolution: {integrity: sha512-uLGsrtxf4j51Fa4sjuY8xPvouwba61HwZLvaOArYoLJTqifnf0zwMWV+47VN7oy9oZD8BbNxaJEqMU4yBBnnVg==}
     engines: {node: '>=22.12.0'}
 
-  '@better-iam/adapter-sqlite@file:vendor/better-iam/better-iam-adapter-sqlite-0.1.0.tgz':
-    resolution: {integrity: sha512-N6zde8Ho2rzwnKbriua6w+aH0FYtzYeVBaY7GRO/ZnIhdROPZQgPbHJAGRXKDztT6idYOeEGz5e4aYYD/euyVQ==, tarball: file:vendor/better-iam/better-iam-adapter-sqlite-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/adapter-sqlite@0.2.0':
+    resolution: {integrity: sha512-Iqed/21qsMRa0wiSfcki6oa9pAlnHa0V+C+dbPm9D5cAP8hXa1kxzvNL1tBJ71MgbdqyzfyJOACVjoDKZWG8ag==}
     engines: {node: '>=22.12.0'}
 
-  '@better-iam/auth@file:vendor/better-iam/better-iam-auth-0.1.0.tgz':
-    resolution: {integrity: sha512-2XFOzf51RH8DNBHvTBvwuqoDiTrv338Wl1OUqAbS2H4DzZlRZL3nq7vzIoTTFD7hcFy/Jua8p/jlVblgD/obxw==, tarball: file:vendor/better-iam/better-iam-auth-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/auth@0.2.0':
+    resolution: {integrity: sha512-Q6Qt/upTsOjADrJG1ia8QnAxaa/6WMXfW7bPqpbayGrsE0GQ5XjnU8qpIi0aAMidZgEIynpf9LUvfH/fOAy3Sw==}
     engines: {node: '>=22.12.0'}
 
-  '@better-iam/cli@file:vendor/better-iam/better-iam-cli-0.1.0.tgz':
-    resolution: {integrity: sha512-3Qho1FFltYfgxg1N2SBQotB3FjkrCch/FbPOdGHqJQUj1msLhnAMgYNsAGgNEs3NiBNp4uS2CjGwFN5t1REQ8Q==, tarball: file:vendor/better-iam/better-iam-cli-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/cli@0.2.0':
+    resolution: {integrity: sha512-KVsEgUuqe7EuQRy44SgL74cCq7JjM0bUoecRnwybC+V0VQmdohiOqtzw3p2WqiaVdGq76dkuYx4A7VwLPPGbuQ==}
     engines: {node: '>=22.12.0'}
     hasBin: true
 
-  '@better-iam/client@file:vendor/better-iam/better-iam-client-0.1.0.tgz':
-    resolution: {integrity: sha512-+WizUb6/DYskmCOIlUwyzPWt+q1AWAxmLWf2j1o/B0B5sm2iX4Th1wtZ0T1+1j0TwUPFEzlMU9bcCqu/+iTnTQ==, tarball: file:vendor/better-iam/better-iam-client-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/client@0.2.0':
+    resolution: {integrity: sha512-Ne/pKLLoKTm4K0HjHpXMHUy5GLZSGHAhMpYBMkO5S/LaFUrtv3XeSNoDCyI/ssYgyTbCO5VyTKi9nVUKKcvc/Q==}
     engines: {node: '>=22.12.0'}
 
-  '@better-iam/core@file:vendor/better-iam/better-iam-core-0.1.0.tgz':
-    resolution: {integrity: sha512-5jlmEXto1opxsQtgzJBhEN0SAxiffBapis2J8Sau4FEbYsKkaomIJvcE4r/yphD0gjNx2zI5Q4UJ4Yg5ZOGihg==, tarball: file:vendor/better-iam/better-iam-core-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/core@0.2.0':
+    resolution: {integrity: sha512-ddbYA7MmkajOlHHUeUOdVqmJEm/LsDftU3a5ewTU2HbvmDNdHHjCEPhURsb0Legta+18xHcFyXtMeylWeQP49w==}
     engines: {node: '>=22.12.0'}
 
-  '@better-iam/mcp@file:vendor/better-iam/better-iam-mcp-0.1.0.tgz':
-    resolution: {integrity: sha512-suiaGE3erSFf4Cvvpf3yPg6wFFAgw0Sc81HUmRydj+MLEqBKUYfKeV7Rbn710QY0kGy06yTRryrmaBcPbqddnQ==, tarball: file:vendor/better-iam/better-iam-mcp-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/ldap@0.2.0':
+    resolution: {integrity: sha512-Q91lTK1yCI3Yf0h5qOSesOCqxCpvkbSG3RW88RW2vS2jjCDkTCUgf4pht+WxgvNsF7Y8jff54IqySuHdn7oQ+Q==}
     engines: {node: '>=22.12.0'}
 
-  '@better-iam/middleware@file:vendor/better-iam/better-iam-middleware-0.1.0.tgz':
-    resolution: {integrity: sha512-PYOBt4/SQrECOmMInsc3wzJhoKcW9HYIgQ+Ys6NjFg4kXr85DJ/klzUnvP0YwdwNkXNICTbG3vMYkgvanT2B0g==, tarball: file:vendor/better-iam/better-iam-middleware-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/mcp@0.2.0':
+    resolution: {integrity: sha512-VXe3aOnZN66WXgOfVXCpspWxhq6iGiP1ien5AGK2n3UewYtu+bKp3O36oNxHKAtw6P0xrb2wTK6NNs6EXmCuFw==}
     engines: {node: '>=22.12.0'}
 
-  '@better-iam/nestjs@file:vendor/better-iam/better-iam-nestjs-0.1.0.tgz':
-    resolution: {integrity: sha512-OpTjTXCdxAxdPlJ3CpJw6lBCPwOiajo4lIXD2C4S2k7b0LVwCErsyIvwplZ8o6YtUOB+hPuIDtkub9xtHQylpw==, tarball: file:vendor/better-iam/better-iam-nestjs-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/middleware@0.2.0':
+    resolution: {integrity: sha512-9StF2btnIx2B1E0eGvenRLxs2Tlggca/GT9b4ZAPxMb2U8iQfGYcg8VNVlMdro7YbbFx164VBPbtznE5Gbtumg==}
+    engines: {node: '>=22.12.0'}
+
+  '@better-iam/nestjs@0.2.0':
+    resolution: {integrity: sha512-i/SKTXfxADCaZMfRmhw8hP8RnI06ojL7WWqSWuZhfLTKbp1DR/VKJnN0bMrKBGfl85Pqw8RyJw0qekk4UQC43w==}
     engines: {node: '>=22.12.0'}
     peerDependencies:
       '@nestjs/common': ^11.0.0 || ^12.0.0
@@ -936,56 +909,47 @@ packages:
       reflect-metadata: ^0.1.13 || ^0.2.0
       rxjs: ^7.1.0
 
-  '@better-iam/next@file:vendor/better-iam/better-iam-next-0.1.0.tgz':
-    resolution: {integrity: sha512-IGtF5bo/nxqQaQCXTk7e0IuPUCQg6/6pUXDRxGax9ojaZlLt/R0K4eu0rjDAPDY+DKPr1eem7FTULWu6BJUagw==, tarball: file:vendor/better-iam/better-iam-next-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/next@0.2.0':
+    resolution: {integrity: sha512-oFTNdBhRX1EnrMVHxu7fjuU2iaFsvLklzoJ/uhxOZ0yV7uoEn+yWOIgwhtWNG+nzA7mGAfed/Jq93hADO8QD8w==}
     engines: {node: '>=22.12.0'}
     peerDependencies:
       next: ^15.0.0
       react: ^19.0.0
 
-  '@better-iam/oauth@file:vendor/better-iam/better-iam-oauth-0.1.0.tgz':
-    resolution: {integrity: sha512-kIVD8iLixoOOvVZYAKtzX+voAWxHeUmButFnE/jbKm2aTqd9uxUz+CGxvioyy6GbOeTV2mY1te3rp3LVlRlYsw==, tarball: file:vendor/better-iam/better-iam-oauth-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/oauth@0.2.0':
+    resolution: {integrity: sha512-MihywBCuXBbM363Db2omxnJ+eGSGgUXLtK+b1jJDw+GOuFwW6ZyMwVUChoVyoRBy+iMo5TXD6ggDI9LQ3t73vg==}
     engines: {node: '>=22.12.0'}
 
-  '@better-iam/projects@file:vendor/better-iam/better-iam-projects-0.1.0.tgz':
-    resolution: {integrity: sha512-Qn67IXc6XkQMxh8mtLGkhBKjqm2z4La2x4UxFPAba0HShZzDyB8cXTZRtkRzFcSEJ1TU5t6OLHX3t6jJMHpGBA==, tarball: file:vendor/better-iam/better-iam-projects-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/projects@0.2.0':
+    resolution: {integrity: sha512-1RkFN6+/qD+L7Vlbu0Qn6by+hO8Mkr39+g6SFGc4e09/A0iOMDzRTKWHFZaeazqai6mvdCm8paFFxV5ZDuvYiA==}
     engines: {node: '>=22.12.0'}
 
-  '@better-iam/react-router@file:vendor/better-iam/better-iam-react-router-0.1.0.tgz':
-    resolution: {integrity: sha512-sDHawGCTY7OQvYNSPx3ixmLSjfNjsxfUjcjivGGbsme+2Zlpeb67vHXEX1L6cqUmvlVKpXhiooglV9QoIinI2A==, tarball: file:vendor/better-iam/better-iam-react-router-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/react-router@0.2.0':
+    resolution: {integrity: sha512-nwuMwNgLQkx8g0j7oISjNhLgYFDi/0P6aSc0oWgnTTRrsaq9qLJZ/p0tKJKgJvQlgh/FNncIsW6txt1TmOCp2w==}
     engines: {node: '>=22.12.0'}
     peerDependencies:
       react-router: ^7.9.0 || ^8.0.0
 
-  '@better-iam/react@file:vendor/better-iam/better-iam-react-0.1.0.tgz':
-    resolution: {integrity: sha512-IhQ2dqUFAQX2+DFE9mFIaxdCrclmVzrMxr7tohzz+6RCEw7txZMvIeDoWeRIOX79doeTQd1Tsf0W6kkqq3gRxQ==, tarball: file:vendor/better-iam/better-iam-react-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/react@0.2.0':
+    resolution: {integrity: sha512-OhOgP69+XRElLfMSb8PSMf1CR9RsysledeynYbV8znyuoNkjFSoWnJkoI94Q3dOTvmKnn8UI+1rjSC5w3e8n4g==}
     engines: {node: '>=22.12.0'}
     peerDependencies:
       react: ^18.2.0 || ^19.0.0
 
-  '@better-iam/saml@file:vendor/better-iam/better-iam-saml-0.1.0.tgz':
-    resolution: {integrity: sha512-CX35NdFzTTsUF8qqjkwmi9jne2SmB5fYrCA0XwE2ECqELqJITMMTj7vwhKSZKFIXQ137KjBB2VfOfhVCAIO1Xg==, tarball: file:vendor/better-iam/better-iam-saml-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/saml@0.2.0':
+    resolution: {integrity: sha512-f3XRjrwxq5sFHSaj5svKDOot4vpdfR6EWW2bScgav7rmRbBGrFHeq2Q6ZILQqHzzv5aPdGQJK7zT6JsGr2YaIw==}
     engines: {node: '>=22.12.0'}
 
-  '@better-iam/scim@file:vendor/better-iam/better-iam-scim-0.1.0.tgz':
-    resolution: {integrity: sha512-/QYFFC96twnpdX2lWHB3zgCjAvQNYwBgzR1DNbTN2BTSdCHCFxNj6Oy4mRJ9C0aasGEOtkAHQBPSi5CkVrZBIQ==, tarball: file:vendor/better-iam/better-iam-scim-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/scim@0.2.0':
+    resolution: {integrity: sha512-0zDSOsqF4kT/zwSIR9z0is0cYGQVeTJLJbsbY9QT4MFj5ZjA560wMpO5hzrJTUksHeawlPSlf4QIAdXPa3OGMQ==}
     engines: {node: '>=22.12.0'}
 
-  '@better-iam/server@file:vendor/better-iam/better-iam-server-0.1.0.tgz':
-    resolution: {integrity: sha512-4vu4wSm++2+6lQuy/6aRVDPbc2nMPdDK5Qjy0cMWn/MwpGO5J0u8SpYArMl0hHkp1FDEEEQzNDZdKzsJCtkQCA==, tarball: file:vendor/better-iam/better-iam-server-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/server@0.2.0':
+    resolution: {integrity: sha512-Q9TvUZda9O/SXzUC8A64Ndl2oFdP79vS2+IHdVSkmQO2ON/P4iOVaZ9p9t91h9dtnaw7SF2A6VIRP0QZP4+RCA==}
     engines: {node: '>=22.12.0'}
 
-  '@better-iam/svelte@file:vendor/better-iam/better-iam-svelte-0.1.0.tgz':
-    resolution: {integrity: sha512-pYClcp95Zl/LrK96u8OrCmQjsxpL40AptHj+xucK330yXNCqyavrZ8gJ0gWw++gMD01GaEIkkh8kPUdatWNGYg==, tarball: file:vendor/better-iam/better-iam-svelte-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/svelte@0.2.0':
+    resolution: {integrity: sha512-dM7j4425FgtT0q0QFAfFoAu7F7ACmR+Tn7BOn95okfmnXAhNEdMIvmdxvxoDplHa3uI4xVRmIWgOJroRa77lzw==}
     engines: {node: '>=22.12.0'}
     peerDependencies:
       '@sveltejs/kit': ^2.0.0
@@ -994,9 +958,8 @@ packages:
       '@sveltejs/kit':
         optional: true
 
-  '@better-iam/vue@file:vendor/better-iam/better-iam-vue-0.1.0.tgz':
-    resolution: {integrity: sha512-c/Iq9+uj3+MgBfiOVtPjKKvLdN9T3L3fzNzq/zFog54/6i89tZcVjmDBgwk9bVjQYwAzgDeR072HYdCe4ruguw==, tarball: file:vendor/better-iam/better-iam-vue-0.1.0.tgz}
-    version: 0.1.0
+  '@better-iam/vue@0.2.0':
+    resolution: {integrity: sha512-ppIsVzhTlWY681+gJnEjzf9NGAfhqA/GS/wl4YWsziNPNG+Bn6jGX3F4A6zB+4S2Fy6S3545jSCZF2o4OtB8fQ==}
     engines: {node: '>=22.12.0'}
     peerDependencies:
       vue: ^3.3.0
@@ -2954,9 +2917,8 @@ packages:
     engines: {node: '>=6.0.0'}
     hasBin: true
 
-  better-iam@file:vendor/better-iam/better-iam-0.1.0.tgz:
-    resolution: {integrity: sha512-+lbY8hEdcjYuNAxbGusZpuSB7e4hqjUvcDj0OzM9EC8sPJIQeWS3yaU5VpuhhdXcDxDfAIb+PZrACq4EHf84yQ==, tarball: file:vendor/better-iam/better-iam-0.1.0.tgz}
-    version: 0.1.0
+  better-iam@0.2.0:
+    resolution: {integrity: sha512-5n9KnvBvRN21/6Ap+72t4ybZWACPMF0QAMmDt7hrNchgufgqzLvy9SDV5C5y+ivbq7+xzjotGLWANtvh6utcEA==}
     engines: {node: '>=22.12.0'}
     hasBin: true
     peerDependencies:
@@ -5250,137 +5212,139 @@ snapshots:
     optionalDependencies:
       '@types/react': 19.3.0
 
-  '@better-iam/a2a@file:vendor/better-iam/better-iam-a2a-0.1.0.tgz':
+  '@better-iam/a2a@0.2.0':
     dependencies:
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
+      '@better-iam/core': 0.2.0
 
-  '@better-iam/adapter-libsql@file:vendor/better-iam/better-iam-adapter-libsql-0.1.0.tgz':
+  '@better-iam/adapter-libsql@0.2.0':
     dependencies:
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
+      '@better-iam/core': 0.2.0
       '@libsql/client': 0.18.0
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
 
-  '@better-iam/adapter-postgres@file:vendor/better-iam/better-iam-adapter-postgres-0.1.0.tgz':
+  '@better-iam/adapter-postgres@0.2.0':
     dependencies:
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
+      '@better-iam/core': 0.2.0
       kysely: 0.28.17
       pg: 8.23.0
     transitivePeerDependencies:
       - pg-native
 
-  '@better-iam/adapter-sqlite@file:vendor/better-iam/better-iam-adapter-sqlite-0.1.0.tgz':
+  '@better-iam/adapter-sqlite@0.2.0':
     dependencies:
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
+      '@better-iam/core': 0.2.0
       better-sqlite3: 12.11.1
       kysely: 0.28.17
 
-  '@better-iam/auth@file:vendor/better-iam/better-iam-auth-0.1.0.tgz':
+  '@better-iam/auth@0.2.0':
     dependencies:
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
+      '@better-iam/core': 0.2.0
       '@simplewebauthn/server': 13.3.3
       argon2: 0.44.0
       otplib: 12.0.1
 
-  '@better-iam/cli@file:vendor/better-iam/better-iam-cli-0.1.0.tgz':
+  '@better-iam/cli@0.2.0':
     dependencies:
-      '@better-iam/adapter-postgres': file:vendor/better-iam/better-iam-adapter-postgres-0.1.0.tgz
-      '@better-iam/adapter-sqlite': file:vendor/better-iam/better-iam-adapter-sqlite-0.1.0.tgz
-      '@better-iam/client': file:vendor/better-iam/better-iam-client-0.1.0.tgz
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
-      '@better-iam/server': file:vendor/better-iam/better-iam-server-0.1.0.tgz
+      '@better-iam/adapter-postgres': 0.2.0
+      '@better-iam/adapter-sqlite': 0.2.0
+      '@better-iam/client': 0.2.0
+      '@better-iam/core': 0.2.0
+      '@better-iam/server': 0.2.0
     transitivePeerDependencies:
       - pg-native
 
-  '@better-iam/client@file:vendor/better-iam/better-iam-client-0.1.0.tgz':
+  '@better-iam/client@0.2.0':
     dependencies:
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
+      '@better-iam/core': 0.2.0
       '@simplewebauthn/browser': 13.3.0
 
-  '@better-iam/core@file:vendor/better-iam/better-iam-core-0.1.0.tgz': {}
+  '@better-iam/core@0.2.0': {}
 
-  '@better-iam/mcp@file:vendor/better-iam/better-iam-mcp-0.1.0.tgz':
-    dependencies:
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
+  '@better-iam/ldap@0.2.0': {}
 
-  '@better-iam/middleware@file:vendor/better-iam/better-iam-middleware-0.1.0.tgz':
+  '@better-iam/mcp@0.2.0':
     dependencies:
-      '@better-iam/client': file:vendor/better-iam/better-iam-client-0.1.0.tgz
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
+      '@better-iam/core': 0.2.0
 
-  '@better-iam/nestjs@file:vendor/better-iam/better-iam-nestjs-0.1.0.tgz(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0))(@nestjs/core@12.1.0(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0))(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)':
+  '@better-iam/middleware@0.2.0':
     dependencies:
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
-      '@better-iam/server': file:vendor/better-iam/better-iam-server-0.1.0.tgz
+      '@better-iam/client': 0.2.0
+      '@better-iam/core': 0.2.0
+
+  '@better-iam/nestjs@0.2.0(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0))(@nestjs/core@12.1.0(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0))(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)':
+    dependencies:
+      '@better-iam/core': 0.2.0
+      '@better-iam/server': 0.2.0
       '@nestjs/common': 12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0)
       '@nestjs/core': 12.1.0(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0))(reflect-metadata@0.2.2)(rxjs@7.8.2)
       reflect-metadata: 0.2.2
       rxjs: 7.8.2
 
-  '@better-iam/next@file:vendor/better-iam/better-iam-next-0.1.0.tgz(next@15.5.26(@types/node@22.20.4)(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(react@19.3.0)':
+  '@better-iam/next@0.2.0(next@15.5.26(@types/node@22.20.4)(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(react@19.3.0)':
     dependencies:
-      '@better-iam/client': file:vendor/better-iam/better-iam-client-0.1.0.tgz
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
-      '@better-iam/react': file:vendor/better-iam/better-iam-react-0.1.0.tgz(react@19.3.0)
+      '@better-iam/client': 0.2.0
+      '@better-iam/core': 0.2.0
+      '@better-iam/react': 0.2.0(react@19.3.0)
       next: 15.5.26(@types/node@22.20.4)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       react: 19.3.0
 
-  '@better-iam/oauth@file:vendor/better-iam/better-iam-oauth-0.1.0.tgz(supports-color@7.2.0)':
+  '@better-iam/oauth@0.2.0(supports-color@7.2.0)':
     dependencies:
-      '@better-iam/auth': file:vendor/better-iam/better-iam-auth-0.1.0.tgz
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
+      '@better-iam/auth': 0.2.0
+      '@better-iam/core': 0.2.0
       jose: 6.2.12
       oauth4webapi: 3.8.8
       oidc-provider: 9.12.2(supports-color@7.2.0)
     transitivePeerDependencies:
       - supports-color
 
-  '@better-iam/projects@file:vendor/better-iam/better-iam-projects-0.1.0.tgz':
+  '@better-iam/projects@0.2.0':
     dependencies:
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
+      '@better-iam/core': 0.2.0
 
-  '@better-iam/react-router@file:vendor/better-iam/better-iam-react-router-0.1.0.tgz(react-router@8.4.0(react-dom@19.3.0(react@19.3.0))(react@19.3.0))':
+  '@better-iam/react-router@0.2.0(react-router@8.4.0(react-dom@19.3.0(react@19.3.0))(react@19.3.0))':
     dependencies:
-      '@better-iam/middleware': file:vendor/better-iam/better-iam-middleware-0.1.0.tgz
+      '@better-iam/middleware': 0.2.0
       react-router: 8.4.0(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
 
-  '@better-iam/react@file:vendor/better-iam/better-iam-react-0.1.0.tgz(react@19.3.0)':
+  '@better-iam/react@0.2.0(react@19.3.0)':
     dependencies:
-      '@better-iam/client': file:vendor/better-iam/better-iam-client-0.1.0.tgz
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
+      '@better-iam/client': 0.2.0
+      '@better-iam/core': 0.2.0
       react: 19.3.0
 
-  '@better-iam/saml@file:vendor/better-iam/better-iam-saml-0.1.0.tgz(supports-color@7.2.0)':
+  '@better-iam/saml@0.2.0(supports-color@7.2.0)':
     dependencies:
-      '@better-iam/auth': file:vendor/better-iam/better-iam-auth-0.1.0.tgz
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
+      '@better-iam/auth': 0.2.0
+      '@better-iam/core': 0.2.0
       '@node-saml/node-saml': 5.1.0(supports-color@7.2.0)
       '@xmldom/xmldom': 0.8.15
     transitivePeerDependencies:
       - supports-color
 
-  '@better-iam/scim@file:vendor/better-iam/better-iam-scim-0.1.0.tgz':
+  '@better-iam/scim@0.2.0':
     dependencies:
-      '@better-iam/auth': file:vendor/better-iam/better-iam-auth-0.1.0.tgz
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
+      '@better-iam/auth': 0.2.0
+      '@better-iam/core': 0.2.0
 
-  '@better-iam/server@file:vendor/better-iam/better-iam-server-0.1.0.tgz':
+  '@better-iam/server@0.2.0':
     dependencies:
-      '@better-iam/auth': file:vendor/better-iam/better-iam-auth-0.1.0.tgz
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
+      '@better-iam/auth': 0.2.0
+      '@better-iam/core': 0.2.0
       jose: 6.2.12
 
-  '@better-iam/svelte@file:vendor/better-iam/better-iam-svelte-0.1.0.tgz(svelte@5.57.1)':
+  '@better-iam/svelte@0.2.0(svelte@5.57.1)':
     dependencies:
-      '@better-iam/client': file:vendor/better-iam/better-iam-client-0.1.0.tgz
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
-      '@better-iam/middleware': file:vendor/better-iam/better-iam-middleware-0.1.0.tgz
+      '@better-iam/client': 0.2.0
+      '@better-iam/core': 0.2.0
+      '@better-iam/middleware': 0.2.0
       svelte: 5.57.1
 
-  '@better-iam/vue@file:vendor/better-iam/better-iam-vue-0.1.0.tgz(vue@3.5.43(typescript@5.9.3))':
+  '@better-iam/vue@0.2.0(vue@3.5.43(typescript@5.9.3))':
     dependencies:
-      '@better-iam/client': file:vendor/better-iam/better-iam-client-0.1.0.tgz
+      '@better-iam/client': 0.2.0
       vue: 3.5.43(typescript@5.9.3)
 
   '@borewit/text-codec@0.2.2': {}
@@ -5694,15 +5658,15 @@ snapshots:
 
   '@internationalized/date@3.12.4':
     dependencies:
-      '@swc/helpers': 0.5.15
+      '@swc/helpers': 0.5.23
 
   '@internationalized/number@3.6.8':
     dependencies:
-      '@swc/helpers': 0.5.15
+      '@swc/helpers': 0.5.23
 
   '@internationalized/string@3.2.10':
     dependencies:
-      '@swc/helpers': 0.5.15
+      '@swc/helpers': 0.5.23
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
@@ -7093,29 +7057,30 @@ snapshots:
 
   baseline-browser-mapping@2.11.25: {}
 
-  better-iam@file:vendor/better-iam/better-iam-0.1.0.tgz(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0))(@nestjs/core@12.1.0(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0))(reflect-metadata@0.2.2)(rxjs@7.8.2))(next@15.5.26(@types/node@22.20.4)(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(react-router@8.4.0(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(react@19.3.0)(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0)(svelte@5.57.1)(vue@3.5.43(typescript@5.9.3)):
+  better-iam@0.2.0(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0))(@nestjs/core@12.1.0(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0))(reflect-metadata@0.2.2)(rxjs@7.8.2))(next@15.5.26(@types/node@22.20.4)(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(react-router@8.4.0(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(react@19.3.0)(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0)(svelte@5.57.1)(vue@3.5.43(typescript@5.9.3)):
     dependencies:
-      '@better-iam/a2a': file:vendor/better-iam/better-iam-a2a-0.1.0.tgz
-      '@better-iam/adapter-libsql': file:vendor/better-iam/better-iam-adapter-libsql-0.1.0.tgz
-      '@better-iam/adapter-postgres': file:vendor/better-iam/better-iam-adapter-postgres-0.1.0.tgz
-      '@better-iam/adapter-sqlite': file:vendor/better-iam/better-iam-adapter-sqlite-0.1.0.tgz
-      '@better-iam/auth': file:vendor/better-iam/better-iam-auth-0.1.0.tgz
-      '@better-iam/cli': file:vendor/better-iam/better-iam-cli-0.1.0.tgz
-      '@better-iam/client': file:vendor/better-iam/better-iam-client-0.1.0.tgz
-      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
-      '@better-iam/mcp': file:vendor/better-iam/better-iam-mcp-0.1.0.tgz
-      '@better-iam/middleware': file:vendor/better-iam/better-iam-middleware-0.1.0.tgz
-      '@better-iam/nestjs': file:vendor/better-iam/better-iam-nestjs-0.1.0.tgz(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0))(@nestjs/core@12.1.0(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0))(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)
-      '@better-iam/next': file:vendor/better-iam/better-iam-next-0.1.0.tgz(next@15.5.26(@types/node@22.20.4)(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(react@19.3.0)
-      '@better-iam/oauth': file:vendor/better-iam/better-iam-oauth-0.1.0.tgz(supports-color@7.2.0)
-      '@better-iam/projects': file:vendor/better-iam/better-iam-projects-0.1.0.tgz
-      '@better-iam/react': file:vendor/better-iam/better-iam-react-0.1.0.tgz(react@19.3.0)
-      '@better-iam/react-router': file:vendor/better-iam/better-iam-react-router-0.1.0.tgz(react-router@8.4.0(react-dom@19.3.0(react@19.3.0))(react@19.3.0))
-      '@better-iam/saml': file:vendor/better-iam/better-iam-saml-0.1.0.tgz(supports-color@7.2.0)
-      '@better-iam/scim': file:vendor/better-iam/better-iam-scim-0.1.0.tgz
-      '@better-iam/server': file:vendor/better-iam/better-iam-server-0.1.0.tgz
-      '@better-iam/svelte': file:vendor/better-iam/better-iam-svelte-0.1.0.tgz(svelte@5.57.1)
-      '@better-iam/vue': file:vendor/better-iam/better-iam-vue-0.1.0.tgz(vue@3.5.43(typescript@5.9.3))
+      '@better-iam/a2a': 0.2.0
+      '@better-iam/adapter-libsql': 0.2.0
+      '@better-iam/adapter-postgres': 0.2.0
+      '@better-iam/adapter-sqlite': 0.2.0
+      '@better-iam/auth': 0.2.0
+      '@better-iam/cli': 0.2.0
+      '@better-iam/client': 0.2.0
+      '@better-iam/core': 0.2.0
+      '@better-iam/ldap': 0.2.0
+      '@better-iam/mcp': 0.2.0
+      '@better-iam/middleware': 0.2.0
+      '@better-iam/nestjs': 0.2.0(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0))(@nestjs/core@12.1.0(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0))(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@better-iam/next': 0.2.0(next@15.5.26(@types/node@22.20.4)(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(react@19.3.0)
+      '@better-iam/oauth': 0.2.0(supports-color@7.2.0)
+      '@better-iam/projects': 0.2.0
+      '@better-iam/react': 0.2.0(react@19.3.0)
+      '@better-iam/react-router': 0.2.0(react-router@8.4.0(react-dom@19.3.0(react@19.3.0))(react@19.3.0))
+      '@better-iam/saml': 0.2.0(supports-color@7.2.0)
+      '@better-iam/scim': 0.2.0
+      '@better-iam/server': 0.2.0
+      '@better-iam/svelte': 0.2.0(svelte@5.57.1)
+      '@better-iam/vue': 0.2.0(vue@3.5.43(typescript@5.9.3))
     optionalDependencies:
       '@nestjs/common': 12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0)
       '@nestjs/core': 12.1.0(@nestjs/common@12.1.0(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0))(reflect-metadata@0.2.2)(rxjs@7.8.2)
@@ -8960,7 +8925,7 @@ snapshots:
       '@internationalized/date': 3.12.4
       '@internationalized/string': 3.2.10
       '@react-types/shared': 3.36.1(react@19.3.0)
-      '@swc/helpers': 0.5.15
+      '@swc/helpers': 0.5.23
       client-only: 0.0.1
       react: 19.3.0
       react-aria: 3.52.1(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -8973,7 +8938,7 @@ snapshots:
       '@internationalized/number': 3.6.8
       '@internationalized/string': 3.2.10
       '@react-types/shared': 3.36.1(react@19.3.0)
-      '@swc/helpers': 0.5.15
+      '@swc/helpers': 0.5.23
       aria-hidden: 1.2.6
       clsx: 2.1.1
       react: 19.3.0
@@ -9023,7 +8988,7 @@ snapshots:
       '@internationalized/number': 3.6.8
       '@internationalized/string': 3.2.10
       '@react-types/shared': 3.36.1(react@19.3.0)
-      '@swc/helpers': 0.5.15
+      '@swc/helpers': 0.5.23
       react: 19.3.0
       use-sync-external-store: 1.7.0(react@19.3.0)
 

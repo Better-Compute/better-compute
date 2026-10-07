@@ -1,16 +1,136 @@
 # better-compute
 
-An embeddable TypeScript control plane for GPU and bare-metal capacity. better-compute tracks what hardware exists, what is free and who holds it, with double-booking impossible by construction: the database referees every booking. It also makes machines useful: adopt a running server, deploy an image over PXE, or run a VPS on your own hosts or a provider's. [better-iam](https://github.com/Better-IAM/better-iam) is the only identity provider, policy decision point and billing ledger; better-compute owns only its machine PKI.
+[![npm version](https://img.shields.io/npm/v/better-compute.svg)](https://www.npmjs.com/package/better-compute)
+[![license](https://img.shields.io/npm/l/better-compute.svg)](LICENSE)
+[![CI](https://github.com/better-compute/better-compute/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/better-compute/better-compute/actions/workflows/ci.yml)
 
-**Status: P0 (scaffold) · Node.js 22.12+ · PostgreSQL 16+ (CI on 17), PGlite for development · Apache-2.0**
+An embeddable TypeScript control plane for GPU, CPU and bare-metal capacity. better-compute tracks what hardware
+exists, what is free and who holds it, and the database referees every booking, so double-booking is impossible by
+construction. It also makes machines useful: adopt a running server, deploy an image over PXE, run a VPS or a sandbox
+on your own hosts or a provider's, and reserve whole GPUs, MIG slices or gangs of nodes through one typed API, a CLI
+or MCP tools. [Better IAM](https://github.com/Better-IAM/better-iam) is the identity provider, policy decision point
+and billing ledger; better-compute owns only its machine PKI.
 
-Nothing is published yet. The package names are publication targets, and better-compute will not publish while it depends on better-iam through vendored tarballs. [PLAN.md](PLAN.md) is the approved design and roadmap.
+**Documentation: [better-compute.com/docs](https://better-compute.com/docs/guides)**
 
-## Runtime parts
+## Install
 
-- **`bcd`**, one Go binary on every server. Mode `node` runs on every machine (session, inventory, NVML health, CDI device holds, commands), `site` runs per datacenter (proxy DHCP, iPXE, image cache, BMC access) and `ramdisk` runs during PXE commissioning. It only ever dials out.
-- **The control plane**, `betterCompute(options)`. Like `betterIam()`, it returns `{ api, handler, nodeHandler, initialize, start, … }`, and it runs in process modes `api`, `gateway`, `worker` or `all`. Postgres is the truth: bookings are guarded by `EXCLUDE` constraints, and all SQL reads one clock, `compute_now()`.
-- **The API**, `POST /api/compute/{group}/{method}`, with a typed client inferred from the server, a CLI and (from v0.3) MCP tools. Every mutation makes one better-iam decision; fleet paths (heartbeats, inventory, commands) never call IAM.
+```sh
+npm install better-compute better-iam
+```
+
+`better-compute` is the umbrella package: it installs every `@better-compute/*` package it covers and exposes each one
+as a subpath (`better-compute/postgres`, `better-compute/client`, …), plus the `better-compute` command. Better IAM
+(`better-iam`, `^0.2.0`) is required for identity and authorization. Requirements: Node.js 22.12 or later (ESM only),
+and PostgreSQL 16 or later in production or PGlite (`@electric-sql/pglite`) for development. See
+[Installation](https://better-compute.com/docs/guides/installation) for the optional peers and the packages outside the
+umbrella.
+
+## Quickstart
+
+Run a complete control plane on your laptop: an in-memory PGlite database, an embedded Better IAM, a gateway, and eight
+simulated HGX H100 machines that join the way the real daemon does.
+
+```sh
+npm install better-compute better-iam @electric-sql/pglite
+npx better-compute dev --memory --sim 8
+```
+
+`dev` serves the API on `http://127.0.0.1:3000` and prints a root administrator's token and tenant for the embedded
+Better IAM. In a second terminal in the same directory, reserve four GPUs, look at the pool's capacity and release
+them:
+
+```sh
+export BETTER_COMPUTE_URL=http://127.0.0.1:3000
+export BETTER_COMPUTE_TOKEN='biam_ses_…'   # the root token dev printed
+export BETTER_COMPUTE_TENANT='…'           # the root tenant dev printed
+
+npx better-compute pools list --query "items[].id"
+npx better-compute reserve --pool pool_… --gpus 4 --for 1h
+npx better-compute capacity --pool pool_…     # allocated: 4, available: 60
+npx better-compute release rsv_…
+```
+
+In your own service, `betterCompute()` returns the API, a fetch handler and a Node.js handler, and the client is typed
+from your server instance without code generation:
+
+```ts
+import { betterCompute } from 'better-compute';
+import { postgres } from 'better-compute/postgres';
+
+export const compute = betterCompute({
+  database: postgres({ url: process.env.BETTER_COMPUTE_DATABASE_URL! }),
+  secret: process.env.BETTER_COMPUTE_SECRET!, // at least 32 characters
+  baseURL: 'https://compute.example.com',
+  rootTenantId, // the Better IAM root (platform) tenant
+  iam, // an IamPort from better-compute/iam
+});
+await compute.initialize(); // migrates, then starts the modules
+```
+
+```ts
+import { createComputeClient } from 'better-compute/client';
+import type { compute } from './compute.server'; // type-only
+
+const client = createComputeClient<typeof compute>({
+  baseURL: 'https://compute.example.com',
+  token: () => process.env.BETTER_COMPUTE_TOKEN,
+});
+await client.reservations.create({
+  tenantId,
+  poolId,
+  devices: [{ class: 'gpu', count: 4 }],
+  duration: 3_600_000,
+  binding: 'hold',
+  idempotencyKey: 'train-1',
+});
+```
+
+The [quickstart](https://better-compute.com/docs/guides/quickstart) walks through every step, including events and
+your own configuration file (`better-compute init`).
+
+## Documentation
+
+- [Guides](https://better-compute.com/docs/guides): [quickstart](https://better-compute.com/docs/guides/quickstart),
+  [installation](https://better-compute.com/docs/guides/installation),
+  [concepts](https://better-compute.com/docs/guides/concepts)
+- [Capacity](https://better-compute.com/docs/guides/capacity): pools, reservations, quotas, fractional GPUs, gangs and
+  spot
+- [Nodes](https://better-compute.com/docs/guides/nodes), [bare metal](https://better-compute.com/docs/guides/bare-metal)
+  and [VPS and sandboxes](https://better-compute.com/docs/guides/vps)
+- [IAM](https://better-compute.com/docs/guides/iam): how better-compute uses Better IAM for identity, policy and billing
+- [The daemon](https://better-compute.com/docs/daemon): `bcd`, its sessions, protocol and host configuration
+- [Extending](https://better-compute.com/docs/extending): modules, drivers, providers, scheduler plugins and sinks
+- [Operations](https://better-compute.com/docs/operations): configuration, database, deployment, PKI, observability
+  and security
+- [Reference](https://better-compute.com/docs/reference): the [API](https://better-compute.com/docs/reference/api),
+  the [CLI](https://better-compute.com/docs/reference/cli), errors, events and metrics
+
+## Status
+
+Version 0.1.0 is an early release; APIs and the daemon protocol may still change before 1.0.
+
+- **Runs today:** the whole control plane (API, workers, gateway, CLI, MCP tools) runs from Node.js on PGlite or
+  PostgreSQL. CI covers Node.js 22 and 24 on Ubuntu and Windows, and PostgreSQL 17.
+- **The daemon, `bcd`:** the Go node agent is built and tested against simulated and fake hardware, including end to
+  end against a real gateway, but it is not released as a binary yet. Build it from [`daemon/`](daemon) with Go, or use
+  the simulated machines of `better-compute dev --sim`.
+- **Hardware:** nothing has run on real GPU hardware or on a real TPM yet. GPU, MIG, NVLink and TPM attestation paths
+  are tested against captured output and fakes only.
+- **Better IAM** (`better-iam` on npm) is required for identity and authorization.
+
+The [roadmap](https://better-compute.com/docs/reference/roadmap) lists what each phase delivered and what is open.
+
+## How it fits together
+
+- **`bcd`** is one Go binary. Mode `node` runs on every machine (session, inventory, GPU health, CDI device holds,
+  commands), `site` runs per datacenter (proxy DHCP, iPXE, image cache, BMC access) and `ramdisk` runs during PXE
+  commissioning. It only ever dials out.
+- **The control plane** is `betterCompute(options)`, embedded in your Node.js service. It returns
+  `{ api, handler, nodeHandler, initialize, start, … }` and runs as `api`, `gateway`, `worker` or all three. Postgres
+  is the truth: bookings are guarded by `EXCLUDE` constraints, and all SQL reads one clock, `compute_now()`.
+- **The API** is `POST /api/compute/{group}/{method}`, with a typed client inferred from the server, a CLI and MCP
+  tools. Every mutation makes one Better IAM decision; fleet paths (heartbeats, inventory, commands) never call IAM.
 
 ```
 SDK · CLI · MCP ──► api (authn/z, admission, placement) ──► Postgres ◄── worker (controllers, sinks)
@@ -18,64 +138,74 @@ SDK · CLI · MCP ──► api (authn/z, admission, placement) ──► Postgr
 bcd node · bcd site · bcd ramdisk ──── gRPC over mTLS, outbound 443 ──── gateway (sessions, dispatch)
 ```
 
-## Package imports
+## Packages
 
-The umbrella `better-compute` installs the packages below together and exposes them as subpaths; each is also published on its own as `@better-compute/<name>`. Injected modules (`provision`, `metal`, `vps`) are loaded only when an application imports and passes them in: the server never imports them.
+The umbrella `better-compute` exposes the packages marked with a subpath; each is also published on its own as
+`@better-compute/<name>`. The server never imports the injected modules (`provision`, `metal`, `vps`): your
+application passes them in.
 
-| Import                     | Purpose                                                                                       | Status                |
-| -------------------------- | --------------------------------------------------------------------------------------------- | --------------------- |
-| `better-compute`           | `betterCompute`, `defineConfig`, `ComputeError`, the `define*` helpers, `manifest`, `field`   | P0                    |
-| `better-compute/core`      | Browser-safe contracts: IDs, errors, domain types, state tables, extension and port contracts | P0, frozen            |
-| `better-compute/protocol`  | Generated daemon ↔ control-plane wire types (`bettercompute.agent.v1` and friends)           | P0; `agent/v1` frozen |
-| `better-compute/inventory` | Inventory hashing and diffs, GPU model mapping, health conditions; `inventoryModule`          | stub; v0.1            |
-| `better-compute/provision` | Workflow engine, `defineStep`, `defineProfile`, images                                        | stub; v0.2            |
-| `better-compute/metal`     | Bare-metal verbs and drivers (power, boot, deploy, inspect); `metal()`                        | stub; v0.2            |
-| `better-compute/vps`       | VPS instances, runtimes, flavors, `defineProvider`; `vps()`                                   | stub; v0.3            |
-| `better-compute/server`    | The control plane: `betterCompute()`, operation envelope, router, controller runtimes         | shell; v0.1           |
-| `better-compute/postgres`  | PostgreSQL store (PgBouncer-safe), migrations, `compute_now()`, store conformance             | P0                    |
-| `better-compute/pglite`    | PGlite store for development and tests (one connection, serialized transactions)              | P0                    |
-| `better-compute/client`    | Typed, browser-safe API client                                                                | shell; v0.1           |
-| `better-compute/cli`       | The `better-compute` command line (also the package's bin)                                    | shell; v0.1           |
-| `better-compute/testing`   | Fixtures, simulated daemons, sim clock, conformance runners                                   | shell; v0.1           |
+| Package                               | Umbrella subpath                      | What it does                                                                                          |
+| ------------------------------------- | ------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `better-compute`                      | `better-compute`                      | The umbrella: `betterCompute`, `defineConfig`, `ComputeError`, the `define*` helpers, and the CLI bin |
+| `@better-compute/core`                | `/core`                               | Browser-safe contracts: ids, errors, domain types, state tables, extension contracts, the IAM catalog |
+| `@better-compute/server`              | `/server`                             | The control plane: `betterCompute()`, the operation envelope, router, controllers and worker runtime  |
+| `@better-compute/postgres`            | `/postgres`, `/pglite`                | PostgreSQL (PgBouncer-safe) and PGlite stores, migrations, `compute_now()`, store conformance         |
+| `@better-compute/capacity`            | `/capacity`                           | Pools, reservations, quotas, rollups and placement: fractional GPUs, gangs, calendar and spot         |
+| `@better-compute/inventory`           | `/inventory`                          | Hardware inventory: section hashing and diffs, GPU model mapping, labels and health conditions        |
+| `@better-compute/provision`           | `/provision`                          | The workflow engine, steps and profiles, images, and host configuration for nodes                     |
+| `@better-compute/metal`               | `/metal`                              | Bare-metal lifecycle: power, BMC management, PXE boot, deploy and inspect drivers; `metal()`          |
+| `@better-compute/vps`                 | `/vps`                                | VPS instances and sandboxes: runtimes, flavors, templates, snapshots and providers; `vps()`           |
+| `@better-compute/iam`                 | `/iam`, `/iam/plugin`, `/iam/testing` | The Better IAM bridge: IamPort, catalog and plugin, authz projection, inbox, usage and flags          |
+| `@better-compute/gateway`             | `/gateway`                            | Daemon sessions over gRPC on HTTP/2 mTLS, liveness, command dispatch and join forwarding              |
+| `@better-compute/pki`                 | `/pki`                                | Machine PKI: local CAs, SPIFFE node certificates, sealed join tokens, attestors, signed checkpoints   |
+| `@better-compute/protocol`            | `/protocol`                           | Generated daemon ↔ control-plane wire types (`bettercompute.agent.v1` and friends)                   |
+| `@better-compute/events`              | `/events`                             | Signed webhooks with retries and dead letters, and the server-sent `/watch` stream                    |
+| `@better-compute/fleet`               | `/fleet`                              | FleetConfig as code: export, plan and apply sites, pools, offers, quotas, flavors and accounts        |
+| `@better-compute/rollout`             | `/rollout`                            | Signed `bcd` releases and wave rollouts with A/B self-update, within disruption budgets               |
+| `@better-compute/audit`               | `/audit`                              | Tamper-evident audit: signed per-tenant Merkle checkpoints and inclusion proofs                       |
+| `@better-compute/observability`       | `/observability`                      | A bounded Prometheus registry and the standard `better_compute_*` metrics                             |
+| `@better-compute/client`              | `/client`                             | `createComputeClient`, the typed, browser-safe API client                                             |
+| `@better-compute/cli`                 | `/cli`                                | The `better-compute` command line: `dev`, `serve`, `migrate`, `doctor`, `reserve`, `pki`, `api`, …    |
+| `@better-compute/mcp`                 | `/mcp`                                | Model Context Protocol tools for AI agents, gated by Better IAM                                       |
+| `@better-compute/testing`             | `/testing`                            | Fixtures, the `FakeDaemon`, the fleet simulator, a sim clock and conformance runners                  |
+| `@better-compute/provider-hetzner`    | —                                     | Hetzner Cloud servers as VPS instances and offers, and Hetzner Robot bootstrap                        |
+| `@better-compute/provider-proxmox`    | —                                     | Proxmox VE QEMU VMs cloned from templates as VPS instances                                            |
+| `@better-compute/provider-kubernetes` | —                                     | Manifests that run `bcd` as a DaemonSet to adopt a Kubernetes cluster's nodes and GPUs into a pool    |
+| `@better-compute/driver-sdk`          | —                                     | bcx, the out-of-process driver protocol (draft): `serveDriver` and `externalDriver` over mTLS gRPC    |
+| `@better-compute/console-kit`         | —                                     | Framework-free view models for consoles over the typed client, with optional React bindings           |
 
-Later phases add `better-compute/capacity`, `/gateway`, `/pki`, `/iam` and `/iam/plugin` (v0.1) and `/mcp` (v0.3). Providers (`@better-compute/provider-hetzner` from v0.3, `provider-proxmox`), `@better-compute/driver-sdk` and `@better-compute/console-kit` stay outside the umbrella and are installed directly; `bcd` ships as release binaries.
+`bcd` is not an npm package; it will ship as release binaries.
 
-```ts
-import { betterCompute } from 'better-compute';
-import { metal } from 'better-compute/metal';
-import { postgres } from 'better-compute/postgres';
-```
+## Develop
 
-## Develop locally
-
-pnpm 11.19.0 is pinned (`packageManager`, a root devDependency, and CI). On a fresh clone install with that version, then use the pinned copy in `node_modules`; plain `pnpm` works when your global pnpm is 11.x (pnpm 12 refuses this workspace).
+Building from a clone needs pnpm 11.19.0 (pinned in `packageManager`; pnpm 12 refuses this workspace) and, for the
+daemon, Go:
 
 ```sh
-npx pnpm@11.19.0 install                                   # once, on a fresh clone
-node node_modules/pnpm/bin/pnpm.mjs check                  # typecheck, tests, repository rules, package validation
-node node_modules/pnpm/bin/pnpm.mjs exec vitest run tests/scripts-umbrella.test.ts
-node node_modules/pnpm/bin/pnpm.mjs pack:all
-node node_modules/pnpm/bin/pnpm.mjs check:packed-types
-node node_modules/pnpm/bin/pnpm.mjs test:packed            # installs the tarballs in a fresh consumer
+git clone https://github.com/better-compute/better-compute.git
+cd better-compute
+npx pnpm@11.19.0 install
+node node_modules/pnpm/bin/pnpm.mjs build   # tsc -b
+node node_modules/pnpm/bin/pnpm.mjs check   # typecheck, tests, repository rules, package validation
 ```
 
-Tests run against source (`tests/*.test.ts`, aliases in `vitest.config.ts`) on PGlite and embedded better-iam over in-memory SQLite, so no database server is needed. Postgres-only suites run when `BETTER_COMPUTE_POSTGRES_URL` is set:
+Tests run against source on PGlite and an embedded Better IAM, so no database server is needed; Postgres-only suites
+run when `BETTER_COMPUTE_POSTGRES_URL` is set (`pnpm test:postgres`). Inside `daemon/`,
+`go test -tags nonvml,fakehw ./...` runs the daemon's logic without GPUs. [docs/development.md](docs/development.md)
+covers the scripts and the repository rules CI enforces, and
+[local development](https://better-compute.com/docs/operations/local-development) covers the dev server and simulator.
 
-```sh
-BETTER_COMPUTE_POSTGRES_URL=postgres://postgres:postgres@localhost:5432/better_compute_test \
-  node node_modules/pnpm/bin/pnpm.mjs test:postgres
-```
+## Contributing
 
-The daemon needs Go (`daemon/go.mod`): `go test -tags nonvml,fakehw ./...` inside `daemon/` runs its logic without GPUs, on Linux or Windows. [docs/development.md](docs/development.md) covers the scripts, the repository rules CI enforces, the vendored better-iam and releases.
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the build and test commands, the commit style
+and the sign-off, and follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-## Documentation
+## Security
 
-- [PLAN.md](PLAN.md): architecture, contracts, security model and roadmap
-- [docs/development.md](docs/development.md): working in this repository
-- [docs/research/](docs/research/): the research the plan cites (better-iam, Daytona, prior art)
-- [bench/REFERENCE.md](bench/REFERENCE.md): the reference hardware benchmark results are quoted on
-- [CHANGELOG.md](CHANGELOG.md)
+Please report vulnerabilities privately through
+[GitHub Security Advisories](https://github.com/better-compute/better-compute/security/advisories/new), not in public
+issues. [SECURITY.md](SECURITY.md) describes supported versions, scope and what to expect.
 
 ## License
 
-[Apache License 2.0](LICENSE), including the Go daemon.
+[Apache License 2.0](LICENSE), including the Go daemon. See [NOTICE](NOTICE).

@@ -208,7 +208,8 @@ describe('report → pull → apply', () => {
 
   it('keeps taints and other controllers\' reasons when it rewrites its own', async () => {
     await db.query(`UPDATE nodes SET no_schedule_reasons = '{unreachable}' WHERE id = $1`, [node]);
-    await report(node, { gpus: encoded.gpus(8, 'NVIDIA GH200 480GB') });
+    // A card the model table does not know (GH200 joined it in 223022b): inventory's own reason.
+    await report(node, { gpus: encoded.gpus(8, 'NVIDIA Example X9 999GB') });
     await applyInventory(db, node);
     expect((await nodeRow()).no_schedule_reasons).toEqual(['GpuModelUnknown', 'unreachable']);
   });

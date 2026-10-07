@@ -15,13 +15,14 @@
     "url": "https://github.com/better-compute/better-compute/issues"
   },
   "keywords": [
-    "gpu",
-    "bare-metal",
-    "capacity",
-    "provisioning",
-    "infrastructure",
+    "better-compute",
     "proxmox",
-    "vps"
+    "proxmox-ve",
+    "qemu",
+    "kvm",
+    "vps",
+    "virtual-machines",
+    "provider"
   ],
   "publishConfig": {
     "access": "public"
@@ -31,6 +32,7 @@
   },
   "files": [
     "dist",
+    "src",
     "README.md",
     "LICENSE"
   ],

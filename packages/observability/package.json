@@ -15,14 +15,13 @@
     "url": "https://github.com/better-compute/better-compute/issues"
   },
   "keywords": [
-    "gpu",
-    "bare-metal",
-    "capacity",
-    "provisioning",
-    "infrastructure",
+    "better-compute",
+    "observability",
     "metrics",
     "prometheus",
-    "observability"
+    "monitoring",
+    "telemetry",
+    "gpu"
   ],
   "publishConfig": {
     "access": "public"
@@ -32,6 +31,7 @@
   },
   "files": [
     "dist",
+    "src",
     "README.md",
     "LICENSE"
   ],
