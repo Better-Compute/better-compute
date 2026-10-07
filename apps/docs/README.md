@@ -111,6 +111,28 @@ docker build -f apps/docs/Dockerfile -t better-compute-docs .
 docker run -p 3000:3000 -e PORT=3000 better-compute-docs
 ```
 
+The build context is the repository root; [`.dockerignore`](../../.dockerignore) keeps host builds out of it
+(`node_modules`, `dist`, `.next*` and every `*.tsbuildinfo`, which would otherwise make `tsc -b` skip packages).
+
+### Railway
+
+The repository root's [`railway.json`](../../railway.json) deploys this site with no dashboard settings: it builds
+`apps/docs/Dockerfile` from the repository root, checks `/` before switching traffic, restarts on failure, and only
+rebuilds when something the site is built from changes (`apps/docs`, `packages`, `proto`, the changelog, the
+lockfile).
+
+1. In Railway, **New Project → Deploy from GitHub repo** and pick `Better-Compute/better-compute`. Leave **Root
+   Directory** empty (`/`): the image needs the whole workspace.
+2. Under **Variables**, set `DOCS_SITE_URL` to the site's public origin (the Railway domain, e.g.
+   `https://better-compute-docs.up.railway.app`, until a custom domain is attached). Railway passes service variables
+   to the build as build arguments, so every row of the table below can be set the same way.
+3. Under **Settings → Networking**, generate a domain (or add `better-compute.com`). Railway sets `PORT`; the image's
+   `next start` listens on it on `0.0.0.0`.
+
+A build takes several minutes (the whole workspace is installed and compiled, the reference is regenerated, then
+`next build` prerenders every page) and needs about 4 GB of memory. A fork that hosts the docs elsewhere sets
+`NEXT_PUBLIC_DOCS_REPOSITORY_URL` too.
+
 Build arguments, read at build time and baked into the static pages:
 
 | Variable                             | Default                                            | Purpose                                                                                |

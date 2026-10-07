@@ -4,6 +4,9 @@
 #
 #   docker build -f apps/docs/Dockerfile -t better-compute-docs .
 #   docker run -p 3000:3000 better-compute-docs
+#
+# Railway builds this file through the root railway.json (build context: the repository root; service variables
+# such as DOCS_SITE_URL arrive as the build arguments below, and Railway's $PORT is what `next start` listens on).
 FROM node:24-bookworm-slim
 
 ENV CI=1 NEXT_TELEMETRY_DISABLED=1 COREPACK_ENABLE_DOWNLOAD_PROMPT=0

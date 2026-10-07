@@ -1,0 +1,24 @@
+# Build context of apps/docs/Dockerfile (and Railway, railway.json): the repository root. The image installs and
+# builds everything itself, so nothing built or installed on the host may leak in. A stale *.tsbuildinfo without its
+# dist/ in particular would make `tsc -b` skip packages it must build.
+.git
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+**/.next
+**/.next-*
+**/.source
+**/.turbo
+**/.cache
+artifacts
+coverage
+work
+.claude
+.env
+.env.*
+.npmrc
+.admin-secret
+daemon/bin
+daemon/dist
+apps/console/.console-data
+bench/**/results
