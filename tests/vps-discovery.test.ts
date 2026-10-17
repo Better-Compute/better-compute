@@ -122,6 +122,20 @@ describe('vps.discovery', () => {
     expect(row).toMatchObject({ instance_id: instance.id, gone: false });
   });
 
+  it('rediscovers on the next period although the pass took a while', async () => {
+    const world = await gceWorld({ discovery: { every: '1m' } });
+    world.cloud.machines.set('us-central1-a/legacy', gceVm('legacy'));
+    // The provider takes 10 s to list (within the run's 15 s lease).
+    world.cloud.onDiscover = () => world.fixture.advance(10_000).then(() => undefined);
+    const start = world.fixture.clock.now();
+    await world.discover(0);
+    expect(world.cloud.requests.filter((request) => request === 'discover')).toHaveLength(1);
+    // One period after the first pass started, the next `all` tick finds the account due.
+    await world.fixture.clock.set(start + 60_000);
+    await world.tick('vps.discovery');
+    expect(world.cloud.requests.filter((request) => request === 'discover')).toHaveLength(2);
+  });
+
   it('a provider without discover is skipped', async () => {
     const world = await gceWorld({ discovery: { every: '1m' } });
     const plain = await world.api.providerAccounts.create(world.root, {
@@ -425,6 +439,36 @@ describe('auto-attach', () => {
     // Refused once, not on every pass.
     await world.discover();
     expect(await refusals()).toHaveLength(1);
+  });
+
+  it('never attaches a machine of another account through a pool it labels', async () => {
+    const byo: FakeGce = { machines: new Map(), requests: [] };
+    const world = await gceWorld({
+      discovery: { every: '1m', autoAttach: { ownerIdentityId: owner } },
+      providers: [fakeGceProvider(byo, 'fake-gce-byo')],
+    });
+    const account = await world.api.providerAccounts.create(world.acme, {
+      tenantId: world.acmeTenant,
+      provider: 'fake-gce-byo',
+      name: 'acme-gcp',
+      config: {},
+    });
+    // Review probe: acme labels a VM of its own account for the root pool offered to it; the
+    // root account has a free VM with the same zone and name.
+    byo.machines.set('us-central1-a/legacy', gceVm('legacy', { labels: labelled(world) }));
+    world.cloud.machines.set('us-central1-a/legacy', gceVm('legacy'));
+    await world.discover(0);
+    await world.tick('vps.instances', 1);
+    expect(await attachedInstances(world)).toEqual([]);
+    const { rows } = await world.fixture.database.query<{
+      machine: { autoAttachError?: { code: string; message: string } };
+    }>(`SELECT machine FROM provider_machines WHERE account_id = $1`, [account.id]);
+    expect(rows[0]!.machine.autoAttachError).toMatchObject({
+      code: 'CONFLICT',
+      message: expect.stringContaining(account.id),
+    });
+    expect(world.cloud.requests.some((request) => request.startsWith('claim'))).toBe(false);
+    expect(world.cloud.machines.get('us-central1-a/legacy')!.labels).toEqual({});
   });
 
   it('records quota failure without failing the pass', async () => {

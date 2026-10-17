@@ -16,7 +16,10 @@ import {
 import { refundQuota } from '@better-compute/capacity';
 import { readAccount } from './accounts.js';
 import {
+  attachConflictCondition,
   dropSealedUserData,
+  ownershipBlocked,
+  ownershipLostCondition,
   exhaustedHostsCondition,
   exhaustedHostsOf,
   exhaustedReplaceMs,
@@ -93,6 +96,8 @@ async function finishDeletion(
   deps: InstanceDeps,
   tx: SqlTx,
   row: InstanceRow,
+  /** Finish as a detach whatever `onDelete` says (the machine is not ours to delete any more). */
+  options: { detached?: boolean } = {},
 ): Promise<InstanceRow> {
   if (row.allocationId) {
     try {
@@ -112,7 +117,8 @@ async function finishDeletion(
   // Its provider machine is free again (discovery's link); a detached one keeps running.
   if (row.externalId)
     await tx.query(`UPDATE provider_machines SET instance_id = NULL WHERE instance_id = $1`, [row.id]);
-  const detached = row.origin === 'attached' && row.onDelete === 'detach';
+  const detached =
+    row.origin === 'attached' && (row.onDelete === 'detach' || options.detached === true);
   await publishInstance(deps, tx, deleted, detached ? 'instance.detached' : 'instance.deleted', {
     ...(detached && row.externalId ? { externalId: row.externalId } : {}),
   });
@@ -327,6 +333,30 @@ async function reconcileHosted(
     : now + pollTransitionalMs;
 }
 
+/**
+ * Fails an instance with a condition (and `instance.failed`): to `error` where the state table
+ * allows it; an instance already in `error` or `lost` keeps its state and gains the condition.
+ */
+async function failWith(
+  deps: InstanceDeps,
+  tx: SqlTx,
+  row: InstanceRow,
+  condition: { type: string; reason: string; message: string },
+  now: number,
+): Promise<InstanceRow> {
+  const conditions = withCondition(
+    withoutCondition(row.conditions, 'ProviderError'),
+    { ...condition, status: 'true', message: condition.message.slice(0, 500) },
+    now,
+  );
+  const failed =
+    row.state === 'error' || row.state === 'lost'
+      ? await updateInstance(tx, row, { conditions })
+      : await moveInstance(tx, row, 'fail', 'error', { conditions });
+  await publishInstance(deps, tx, failed, 'instance.failed', { reason: condition.type });
+  return failed;
+}
+
 /** A provider call where a machine that is already gone (`NOT_FOUND`) gives `undefined`. */
 async function gone<T>(call: Promise<T>): Promise<T | undefined> {
   try {
@@ -354,19 +384,26 @@ type ProviderAction =
   | { kind: 'managed-delete' }
   /** `instances.reboot` was asked for and not done yet. */
   | { kind: 'reboot'; action: 'graceful-restart' | 'reset' }
+  /** Attached, ownership lost or never won: nothing more is asked of the provider. */
+  | { kind: 'blocked' }
+  /** Attached, ownership lost or never won, being deleted: finish as a detach, no provider call. */
+  | { kind: 'forget' }
   | { kind: 'none' };
 
 function providerAction(row: InstanceRow): ProviderAction {
   const attached = row.origin === 'attached';
+  // An attached instance that lost (or never won) its machine's ownership label never touches it.
+  const blocked = attached && ownershipBlocked(row.conditions);
   if (row.state === 'deleting') {
     if (!row.externalId) return { kind: 'none' };
+    if (blocked) return { kind: 'forget' };
     if (attached) return row.onDelete === 'detach' ? { kind: 'release' } : { kind: 'managed-delete' };
     return { kind: 'delete' };
   }
-  if (row.state === 'scheduling') {
-    if (attached && row.externalId && !row.claimed) return { kind: 'claim' };
-    return row.externalId ? { kind: 'get' } : { kind: 'create' };
-  }
+  if (blocked) return { kind: 'blocked' };
+  // Not claimed yet (in any state): the label first, before anything else is asked of it.
+  if (attached && row.externalId && !row.claimed) return { kind: 'claim' };
+  if (row.state === 'scheduling') return row.externalId ? { kind: 'get' } : { kind: 'create' };
   if (!row.externalId) return { kind: 'none' };
   if (row.state === 'running' && row.desiredState === 'running' && row.rebootPending)
     return { kind: 'reboot', action: row.rebootHard ? 'reset' : 'graceful-restart' };
@@ -410,6 +447,15 @@ async function reconcileProvider(
   const action = providerAction(row);
   const now = deps.clock.now();
 
+  if (action.kind === 'blocked') return undefined;
+  if (action.kind === 'forget') {
+    await sql.transaction(async (tx) => {
+      const current = await readInstance(tx, instanceId, { lock: true });
+      if (current && current.version === row.version)
+        await finishDeletion(deps, tx, current, { detached: true });
+    });
+    return undefined;
+  }
   if (action.kind === 'none') {
     if (row.state === 'deleting')
       await sql.transaction(async (tx) => {
@@ -423,8 +469,13 @@ async function reconcileProvider(
 
   let machine: ExternalMachine | undefined;
   let failure: unknown;
+  /** The provider writes ownership labels: every read of a claimed machine must name this instance. */
+  let labelled = false;
+  /** The delete path found the label gone or foreign: finish as a detach, nothing deleted. */
+  let forget = false;
   try {
     const client: ProviderImpl = await deps.clients.client(account, deps);
+    labelled = typeof client.claim === 'function';
     const context = callContext(deps, row.id, signal);
     if (action.kind === 'create') {
       // An attached machine existed before better-compute: it is adopted or lost, never made anew.
@@ -458,10 +509,17 @@ async function reconcileProvider(
     } else if (action.kind === 'release') {
       if (client.release) await gone(client.release(row.externalId!, row.id, context));
     } else if (action.kind === 'managed-delete') {
-      // The label first: a machine another instance claimed is refused (CONFLICT), never deleted.
-      const claimed = client.claim
-        ? await gone(client.claim(row.externalId!, row.id, context, { managed: true }))
-        : true;
+      // A claimed machine whose label is gone or names someone else is not re-acquired: the
+      // instance finishes as a detach, and the machine is left alone.
+      const seen = row.claimed && labelled ? await client.get(row.externalId!, context) : undefined;
+      if (row.claimed && labelled && seen !== undefined && seen.claimedBy !== row.id) forget = true;
+      // Otherwise the label first: a machine another instance claimed is refused (CONFLICT).
+      const claimed =
+        forget || (row.claimed && labelled && seen === undefined)
+          ? undefined
+          : client.claim
+            ? await gone(client.claim(row.externalId!, row.id, context, { managed: true }))
+            : true;
       if (claimed !== undefined)
         try {
           await client.delete(row.externalId!, context);
@@ -507,19 +565,11 @@ async function reconcileProvider(
       }
       // The machine's ownership label names another instance: this one never owns it.
       if (code === 'CONFLICT' && (action.kind === 'claim' || action.kind === 'managed-delete')) {
-        const failed = await moveInstance(tx, current, 'fail', 'error', {
-          conditions: withCondition(
-            withoutCondition(current.conditions, 'ProviderError'),
-            {
-              type: 'AttachConflict',
-              status: 'true',
-              reason: 'CONFLICT',
-              message: String((failure as Error)?.message ?? failure).slice(0, 500),
-            },
-            now,
-          ),
-        });
-        await publishInstance(deps, tx, failed, 'instance.failed', { reason: 'AttachConflict' });
+        await failWith(deps, tx, current, {
+          type: attachConflictCondition,
+          reason: 'CONFLICT',
+          message: String((failure as Error)?.message ?? failure),
+        }, now);
         return undefined;
       }
       current = await updateInstance(tx, current, {
@@ -543,7 +593,28 @@ async function reconcileProvider(
     }
     const conditions = withoutCondition(current.conditions, 'ProviderError');
     if (action.kind === 'delete' || action.kind === 'release' || action.kind === 'managed-delete') {
-      await finishDeletion(deps, tx, await updateInstance(tx, current, { conditions }));
+      await finishDeletion(deps, tx, await updateInstance(tx, current, { conditions }), {
+        detached: forget,
+      });
+      return undefined;
+    }
+    // A claimed attached machine must still carry this instance's label: one that lost it (or
+    // names another instance) is never adopted, recovered or acted on again.
+    if (
+      machine &&
+      labelled &&
+      current.origin === 'attached' &&
+      (current.claimed || action.kind === 'claim') &&
+      machine.claimedBy !== current.id
+    ) {
+      await failWith(deps, tx, current, {
+        type: ownershipLostCondition,
+        reason: machine.claimedBy === undefined ? 'LabelMissing' : 'LabelForeign',
+        message:
+          machine.claimedBy === undefined
+            ? `Machine ${machine.id} no longer carries this instance's ownership label`
+            : `Machine ${machine.id} is labelled for instance ${machine.claimedBy}`,
+      }, now);
       return undefined;
     }
     if (action.kind === 'claim') current = await updateInstance(tx, current, { claimed: true });
@@ -572,12 +643,27 @@ async function reconcileProvider(
       return undefined;
     }
     const reported = machineStates[machine.state];
-    current = await updateInstance(tx, current, {
-      conditions,
-      externalId: machine.id,
-      addresses: machine.addresses,
-      reportedState: reported ?? null,
-    });
+    await tx.query('SAVEPOINT vps_external_id');
+    try {
+      current = await updateInstance(tx, current, {
+        conditions,
+        externalId: machine.id,
+        addresses: machine.addresses,
+        reportedState: reported ?? null,
+      });
+      await tx.query('RELEASE SAVEPOINT vps_external_id');
+    } catch (error) {
+      await tx.query('ROLLBACK TO SAVEPOINT vps_external_id');
+      if ((error as { code?: unknown }).code !== '23505') throw error;
+      // instances_external_live: another live instance holds this machine (a reused id). Failing
+      // here ends the instance's retries instead of looping on the same refusal.
+      await failWith(deps, tx, current, {
+        type: 'DuplicateMachine',
+        reason: '23505',
+        message: `Machine ${machine.id} belongs to another live instance`,
+      }, now);
+      return undefined;
+    }
     if (current.state === 'scheduling') {
       current = await moveInstance(tx, current, 'complete', 'provisioning');
       await publishInstance(deps, tx, current, 'instance.provisioning', { externalId: machine.id });

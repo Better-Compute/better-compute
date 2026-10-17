@@ -56,6 +56,7 @@ import {
   readInstance,
   resizeInstance,
   setPower,
+  visibleVpsPool,
   type CreateInstanceInput,
   type ImageResolver,
   type CertifyHostKey,
@@ -771,8 +772,15 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           denied: (context, input, tx) => forgetAttach(context, input, tx),
           abandoned: (context, input, tx) => forgetAttach(context, input, tx),
         },
-        handler: (context, input) =>
-          attachMachine(context.sql, attachDeps(context), { ...input, caller: context.caller! }),
+        // The machine is expected in the pool's own provider account.
+        handler: async (context, input) => {
+          const pool = await visibleVpsPool(context.sql, input.tenantId, input.poolId);
+          return attachMachine(context.sql, attachDeps(context), {
+            ...input,
+            caller: context.caller!,
+            accountId: pool.providerAccountId ?? '',
+          });
+        },
       }),
       // D6: an attached instance goes, its machine stays (label released, quota refunded).
       detach: defineMethod({

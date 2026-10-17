@@ -20,6 +20,7 @@ import {
   instanceView,
   instanceWork,
   moveInstance,
+  ownershipBlocked,
   publishInstance,
   readInstance,
   updateInstance,
@@ -52,8 +53,9 @@ ALTER TABLE instances ADD COLUMN provider_claimed_at timestamptz;
 ALTER TABLE instances ADD COLUMN reboot_requested_at timestamptz;
 ALTER TABLE instances ADD COLUMN rebooted_at timestamptz;
 ALTER TABLE instances ADD COLUMN reboot_hard bool NOT NULL DEFAULT false;
+-- Lost and failed rows do not hold their machine id (a provider may reuse it, e.g. a Proxmox VMID).
 CREATE UNIQUE INDEX instances_external_live ON instances (provider_account_id, external_id)
-  WHERE external_id IS NOT NULL AND state NOT IN ('deleted');
+  WHERE external_id IS NOT NULL AND state NOT IN ('deleted', 'lost', 'error');
 `,
 };
 
@@ -273,12 +275,14 @@ export async function forgetAttach(
 
 /**
  * Attaches a provider machine to a tenant (in the caller's transaction): the API handler and
- * label-driven auto-attach both call it. Nothing is written unless it succeeds.
+ * label-driven auto-attach both call it. `accountId` is the provider account the machine is
+ * expected in (the API: the pool's; auto-attach: the account being discovered); a pool backed by
+ * another account is CONFLICT. Nothing is written unless it succeeds.
  */
 export async function attachMachine(
   tx: SqlTx,
   deps: AttachDeps,
-  input: AttachInstanceInput & { caller: Caller },
+  input: AttachInstanceInput & { caller: Caller; accountId: string },
 ): Promise<Instance> {
   const { caller } = input;
   const { request, hash, instanceId } = await attachRequest(input, caller);
@@ -298,6 +302,13 @@ export async function attachMachine(
   if (!pool.providerAccountId)
     throw new ComputeError('INVALID_STATE', `Provider pool ${pool.id} has no provider account`);
   const accountId = pool.providerAccountId;
+  if (accountId !== input.accountId)
+    throw new ComputeError(
+      'CONFLICT',
+      `Pool ${pool.id} is backed by provider account ${accountId}, not ${input.accountId}, where machine ${input.externalId} is`,
+      undefined,
+      { poolAccountId: accountId, accountId: input.accountId },
+    );
 
   // 2. Only the account's own tenant, or the platform, hands its machines out. Checked before the
   // machine, so a tenant learns nothing about machines of accounts it may not use.
@@ -334,6 +345,14 @@ export async function attachMachine(
       { instanceId: found.instanceId },
     );
   const { machine } = found;
+  // Its ownership label names another instance (another deployment, or a stale one).
+  if (machine.claimedBy !== undefined && machine.claimedBy !== instanceId)
+    throw new ComputeError(
+      'CONFLICT',
+      `Machine ${input.externalId} is labelled for instance ${machine.claimedBy}`,
+      undefined,
+      { claimedBy: machine.claimedBy },
+    );
   if (machine.state === 'deleting' || machine.state === 'deleted')
     throw new ComputeError('INVALID_STATE', `Machine ${input.externalId} is ${machine.state}`);
 
@@ -458,6 +477,11 @@ export async function rebootInstance(
     throw new ComputeError('NOT_FOUND', `Instance ${input.instanceId} not found`);
   if (row.poolClass !== 'provider')
     throw new ComputeError('UNSUPPORTED', 'Only provider instances can be rebooted for now');
+  if (row.origin === 'attached' && ownershipBlocked(row.conditions))
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Instance ${row.id} does not own its machine any more (AttachConflict/OwnershipLost)`,
+    );
   if (row.state !== 'running' || row.desiredState !== 'running')
     throw new ComputeError(
       'INVALID_STATE',

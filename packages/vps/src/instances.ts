@@ -649,6 +649,20 @@ export async function updateInstance(
   return next;
 }
 
+/** An attached instance whose claim was refused: its machine's label names another instance. */
+export const attachConflictCondition = 'AttachConflict';
+/** An attached instance whose machine no longer carries its ownership label. */
+export const ownershipLostCondition = 'OwnershipLost';
+
+/** Whether an (attached) instance lost or never won its machine: nothing more is asked of it. */
+export function ownershipBlocked(conditions: readonly Condition[]): boolean {
+  return conditions.some(
+    (condition) =>
+      condition.status === 'true' &&
+      (condition.type === attachConflictCondition || condition.type === ownershipLostCondition),
+  );
+}
+
 /** Moves an instance along the §11.1 table (and applies `sets` in the same guarded update). */
 export async function moveInstance(
   tx: SqlTx,
@@ -1281,6 +1295,11 @@ export async function setPower(
   let row = await lockOwned(tx, ref);
   if (row.desiredState === 'deleted' || row.state === 'deleting' || row.state === 'deleted')
     throw new ComputeError('INVALID_STATE', `Instance ${row.id} is being deleted`);
+  if (row.origin === 'attached' && ownershipBlocked(row.conditions))
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Instance ${row.id} does not own its machine any more (AttachConflict/OwnershipLost); detach or delete it`,
+    );
   if (row.desiredState !== desiredState) row = await updateInstance(tx, row, { desiredState });
   // An instance in error retries when started again.
   if (desiredState === 'running' && row.state === 'error' && (row.nodeId || row.externalId))

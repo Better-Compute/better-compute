@@ -152,7 +152,17 @@ async function publishMachine(
 const discovers = (client: ProviderImpl): boolean => typeof client.discover === 'function';
 
 /** Key `all`: seeds a row per discovering account, then enqueues the accounts that are due. */
-async function seedAccounts(deps: DiscoveryDeps, context: ReconcileContext): Promise<void> {
+/**
+ * How early an account counts as due: its pass ran a little after the `all` tick that enqueued
+ * it, so without slack the next tick (one period later) would find it just short and skip it.
+ */
+const dueSlackMs = (everyMs: number) => Math.min(everyMs / 10, 30_000);
+
+async function seedAccounts(
+  deps: DiscoveryDeps,
+  context: ReconcileContext,
+  everyMs: number,
+): Promise<void> {
   const { rows } = await context.sql.query<{ id: string }>(
     `SELECT id FROM provider_accounts ORDER BY id`,
   );
@@ -178,8 +188,9 @@ async function seedAccounts(deps: DiscoveryDeps, context: ReconcileContext): Pro
       );
     const due = await tx.query<{ account_id: string }>(
       `SELECT account_id FROM provider_discovery
-        WHERE next_at <= compute_now() AND account_id = ANY($1::text[]) ORDER BY account_id`,
-      [discovering],
+        WHERE next_at <= compute_now() + make_interval(secs => $2::float8)
+          AND account_id = ANY($1::text[]) ORDER BY account_id`,
+      [discovering, dueSlackMs(everyMs) / 1000],
     );
     const ids = due.rows.map((row) => row.account_id);
     if (ids.length === 0) return;
@@ -206,6 +217,8 @@ async function recordPass(
   account: ProviderAccount,
   machines: readonly ExternalMachine[],
   everyMs: number,
+  /** When the pass started (`compute_now()` as text): the next one is due a period after it. */
+  startedAt: string,
 ): Promise<Map<string, StoredMachine>> {
   const previous = new Map<string, MachineRow>();
   const { rows } = await tx.query<MachineRow>(
@@ -242,10 +255,10 @@ async function recordPass(
   );
   await tx.query(
     `UPDATE provider_discovery
-        SET next_at = compute_now() + make_interval(secs => $2::float8), last_ok_at = compute_now(),
+        SET next_at = $3::timestamptz + make_interval(secs => $2::float8), last_ok_at = compute_now(),
             last_error = NULL
       WHERE account_id = $1`,
-    [account.id, everyMs / 1000],
+    [account.id, everyMs / 1000, startedAt],
   );
 
   for (const machine of entries) {
@@ -304,6 +317,10 @@ async function discoverAccount(
   if (!account) return;
   const client = await deps.clients.client(account, deps);
   if (!client.discover) return;
+  const { rows: started } = await context.sql.query<{ at: string }>(
+    `SELECT compute_now()::text AS at`,
+  );
+  const startedAt = started[0]!.at;
   const signal = AbortSignal.any([context.signal, AbortSignal.timeout(discoveryBudgetMs)]);
   const call: CallContext = {
     idempotencyKey: `discovery:${account.id}`,
@@ -341,7 +358,7 @@ async function discoverAccount(
     return;
   }
   const previous = await context.sql.transaction((tx) =>
-    recordPass(deps, tx, account, machines, everyMs),
+    recordPass(deps, tx, account, machines, everyMs, startedAt),
   );
   await after?.(account, previous);
 }
@@ -452,7 +469,13 @@ async function autoAttach(
             runtime: deps.runtime,
             ...(rootTenantId !== undefined ? { rootTenantId } : {}),
           },
-          { ...input, idempotencyKey: `auto:${row.external_id}`, caller },
+          {
+            ...input,
+            // Per account: one machine id may exist in several accounts.
+            idempotencyKey: `auto:${account.id}:${row.external_id}`,
+            caller,
+            accountId: account.id,
+          },
         ),
       );
     } catch (error) {
@@ -486,7 +509,7 @@ export function discoveryReconciler(
     periodic: [{ key: 'all', every }],
     async run(context, key) {
       const resolved = deps(context);
-      if (key === 'all') await seedAccounts(resolved, context);
+      if (key === 'all') await seedAccounts(resolved, context, everyMs);
       else
         await discoverAccount(
           resolved,

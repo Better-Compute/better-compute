@@ -21,6 +21,10 @@ export interface FakeGce {
   requests: string[];
   /** Thrown by the next `discover`. */
   failNext?: Error;
+  /** Runs inside every `discover` before it lists (e.g. advancing the clock: provider latency). */
+  onDiscover?: () => Promise<void>;
+  /** The machine id the next `create`s return (a provider reusing an id). */
+  createId?: string;
 }
 
 const copy = (machine: ExternalMachine): ExternalMachine =>
@@ -65,7 +69,7 @@ export function fakeGceProvider(cloud: FakeGce, id = 'fake-gce'): ProviderDefini
       },
       async create(request, call) {
         const [zone, machineType] = request.offerId.split('/');
-        const vmId = `${zone}/${call.idempotencyKey.replaceAll('_', '-')}`;
+        const vmId = cloud.createId ?? `${zone}/${call.idempotencyKey.replaceAll('_', '-')}`;
         cloud.requests.push(`create ${vmId}`);
         const existing = cloud.machines.get(vmId);
         if (existing) return copy(existing);
@@ -108,6 +112,7 @@ export function fakeGceProvider(cloud: FakeGce, id = 'fake-gce'): ProviderDefini
       },
       async *discover() {
         cloud.requests.push('discover');
+        await cloud.onDiscover?.();
         const failure = cloud.failNext;
         if (failure) {
           delete cloud.failNext;

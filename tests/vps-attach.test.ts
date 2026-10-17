@@ -370,13 +370,10 @@ describe('lifecycle of attached instances', () => {
   });
 
   it('claim conflict fails the instance', async () => {
-    const world = await gceWorld({ discovery: { every: '1m' } });
-    world.cloud.machines.set(
-      LEGACY,
-      gceVm('legacy', { labels: { [instanceLabel]: 'inst_other' } }),
-    );
-    await world.discover(0);
+    const world = await legacyWorld();
     const instance = await world.api.instances.attach(world.root, attachInput(world));
+    // Labelled for someone else after discovery saw it free, before the claim.
+    vm(world)!.labels = { [instanceLabel]: 'inst_other' };
     await step(world);
     const failed = await view(world, instance.id);
     expect(failed.state).toBe('error');
@@ -386,9 +383,19 @@ describe('lifecycle of attached instances', () => {
     expect(await world.events('instance.failed')).toMatchObject([
       { data: { reason: 'AttachConflict' } },
     ]);
-    // Deleting it never touches the other instance's machine.
-    await world.api.instances.delete(world.acme, { ...asAcme(world), instanceId: instance.id });
+    // Review probe (a): the customer cannot start, stop or reboot it into the foreign machine.
+    const ref = { ...asAcme(world), instanceId: instance.id };
+    const calls = world.cloud.requests.length;
+    for (const method of ['start', 'stop', 'reboot'] as const)
+      expect(await code(world.api.instances[method](world.acme, ref)), method).toBe(
+        'INVALID_STATE',
+      );
+    await step(world, 60_000);
+    // Deleting it never touches the other instance's machine: finished as a detach, no call.
+    await world.api.instances.delete(world.acme, ref);
     await step(world);
+    expect(world.cloud.requests.slice(calls)).toEqual([]);
+    expect(await world.events('instance.detached')).toHaveLength(1);
     expect(await view(world, instance.id)).toMatchObject({ state: 'deleted' });
     expect(vm(world)).toMatchObject({
       state: 'running',
@@ -472,5 +479,129 @@ describe('instances.reboot', () => {
       expect(
         apiSurface.find((row) => row.group === 'instances' && row.method === method),
       ).toMatchObject({ action, resource: 'instance', kind: 'mutation', phase: 'v1.0' });
+  });
+});
+
+describe('ownership of attached machines (review fixes)', () => {
+  const step = async (world: GceWorld, ms = 1_000) => {
+    await world.fixture.advance(ms);
+    await world.tick('vps.instances', 1);
+  };
+  const view = (world: GceWorld, instanceId: string) =>
+    world.api.instances.get(world.acme, { tenantId: world.acmeTenant, instanceId });
+  const mutating = (requests: string[]) =>
+    requests.filter((request) => /^(power|delete|claim|release|create) /.test(request));
+
+  it('refuses a machine discovery saw labelled for another instance', async () => {
+    const world = await gceWorld({ discovery: { every: '1m' } });
+    world.cloud.machines.set(
+      LEGACY,
+      gceVm('legacy', { labels: { [instanceLabel]: 'inst_other' } }),
+    );
+    await world.discover(0);
+    await expect(world.api.instances.attach(world.root, attachInput(world))).rejects.toMatchObject({
+      code: 'CONFLICT',
+      details: { claimedBy: 'inst_other' },
+    });
+    expect(await quotaUsed(world, 'gpu')).toBe(0);
+    expect(await machineLink(world)).toBeNull();
+  });
+
+  it('a lost onDelete:delete instance never acquires a same-name stranger', async () => {
+    const world = await legacyWorld();
+    const instance = await world.api.instances.attach(
+      world.root,
+      attachInput(world, { onDelete: 'delete' }),
+    );
+    await step(world);
+    const ref = { tenantId: world.acmeTenant, instanceId: instance.id };
+    // Deleted out of band, then someone makes a VM with the same zone and name.
+    world.cloud.machines.delete(LEGACY);
+    await step(world, 60_000);
+    expect(await view(world, instance.id)).toMatchObject({ state: 'lost' });
+    world.cloud.machines.set(LEGACY, gceVm('legacy'));
+    const before = world.cloud.requests.length;
+    // Review probe (b): a wake reads the stranger, sees no label of ours, never recovers.
+    await world.api.instances.start(world.acme, ref);
+    await step(world);
+    const lost = await view(world, instance.id);
+    expect(lost.state).not.toBe('running');
+    expect(lost.conditions.map((condition: { type: string }) => condition.type)).toContain(
+      'OwnershipLost',
+    );
+    expect(await code(world.api.instances.stop(world.acme, ref))).toBe('INVALID_STATE');
+    // The delete finishes as a detach: the stranger is neither claimed nor deleted.
+    await world.api.instances.delete(world.acme, ref);
+    await step(world);
+    expect(await view(world, instance.id)).toMatchObject({ state: 'deleted' });
+    expect(mutating(world.cloud.requests.slice(before))).toEqual([]);
+    expect(world.cloud.machines.get(LEGACY)).toMatchObject({ state: 'running', labels: {} });
+    expect(await world.events('instance.detached')).toHaveLength(1);
+    expect(await quotaUsed(world, 'gpu')).toBe(0);
+  });
+
+  it('a running instance whose label is taken over fails with OwnershipLost and is left alone', async () => {
+    const world = await legacyWorld();
+    const instance = await world.api.instances.attach(world.root, attachInput(world));
+    await step(world);
+    world.cloud.machines.get(LEGACY)!.labels = { [instanceLabel]: 'inst_other' };
+    await step(world, 60_000);
+    const failed = await view(world, instance.id);
+    expect(failed).toMatchObject({ state: 'error' });
+    expect(failed.conditions).toContainEqual(
+      expect.objectContaining({
+        type: 'OwnershipLost',
+        message: expect.stringContaining('inst_other'),
+      }),
+    );
+    const before = world.cloud.requests.length;
+    const ref = { tenantId: world.acmeTenant, instanceId: instance.id };
+    expect(await code(world.api.instances.stop(world.acme, ref))).toBe('INVALID_STATE');
+    await step(world, 60_000);
+    expect(world.cloud.requests.slice(before)).toEqual([]);
+  });
+
+  it('a managed delete with the label intact still deletes', async () => {
+    const world = await legacyWorld();
+    const instance = await world.api.instances.attach(
+      world.root,
+      attachInput(world, { onDelete: 'delete' }),
+    );
+    await step(world);
+    await world.api.instances.delete(world.acme, {
+      tenantId: world.acmeTenant,
+      instanceId: instance.id,
+    });
+    await step(world);
+    expect(world.cloud.requests.slice(-3)).toEqual([
+      `get ${LEGACY}`,
+      `claim ${LEGACY} ${instance.id} managed`,
+      `delete ${LEGACY}`,
+    ]);
+    expect(world.cloud.machines.has(LEGACY)).toBe(false);
+  });
+
+  it('a created instance whose provider returns an id held by a live row ends in error/DuplicateMachine', async () => {
+    const world = await legacyWorld();
+    const attached = await world.api.instances.attach(world.root, attachInput(world));
+    await step(world);
+    world.cloud.createId = LEGACY;
+    const created = await world.api.instances.create(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: world.poolId,
+      flavor: 'a2.highgpu.1g',
+      imageId: 'debian-12',
+      idempotencyKey: 'vm-dup',
+    });
+    await step(world);
+    const failed = await view(world, created.id);
+    expect(failed.state).toBe('error');
+    expect(failed.conditions.map((condition: { type: string }) => condition.type)).toContain(
+      'DuplicateMachine',
+    );
+    // No retry loop, and the live owner is untouched.
+    await step(world, 60_000);
+    expect(world.cloud.requests.filter((request) => request.startsWith('create'))).toHaveLength(1);
+    expect(await view(world, attached.id)).toMatchObject({ state: 'running', externalId: LEGACY });
   });
 });
