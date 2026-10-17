@@ -53,6 +53,9 @@ CREATE TABLE networks (
   state text NOT NULL CHECK (state IN ('pending', 'ready', 'deleting', 'deleted', 'error')),
   desired_state text NOT NULL CHECK (desired_state IN ('present', 'deleted')),
   message text,
+  -- Set the first time the network reaches 'ready' and never cleared: instances can be put on a
+  -- network that went back to 'pending' because a subnet or rule was added.
+  provisioned_at timestamptz,
   -- The caller identity: idempotency keys are scoped to (tenant, caller), as the id derives from them.
   created_by text NOT NULL,
   idempotency_key text NOT NULL,
@@ -681,6 +684,7 @@ interface NetworkRow {
   request_hash: string;
   version: string | number;
   created_at: Date | string;
+  provisioned_at: Date | string | null;
 }
 interface SubnetRow {
   id: string;
@@ -707,7 +711,8 @@ interface RuleRow {
 type RuleSpec = Omit<RuleFields, 'enabled'>;
 
 const networkColumns = `id, tenant_id, project_id, pool_id, provider_account_id, name, description, state,
-  desired_state, message, encode(request_hash, 'hex') AS request_hash, version, created_at`;
+  desired_state, message, encode(request_hash, 'hex') AS request_hash, version, created_at,
+  provisioned_at`;
 const subnetColumns = `id, network_id, name, region, cidr::text AS cidr, state, desired_state, message`;
 const ruleColumns = `id, network_id, name, spec, enabled, state, desired_state, message, version`;
 
@@ -1242,13 +1247,25 @@ interface LockedNetwork {
 }
 
 /**
- * A ready network of this tenant on this provider account, and its live subnets, both locked
- * `FOR SHARE`: `networks.delete` and `networks.removeSubnet` (which lock them `FOR UPDATE`) wait for
- * the transaction that is putting an instance on them, and then see that instance.
+ * What an instance needs of a network when it is put on it:
+ * - `provisioned`: it has been `ready` once (`provisioned_at`) and is not being deleted. A network
+ *   that goes back to `pending` because a subnet or rule is added still takes instances.
+ * - `live`: it exists and is not being deleted.
+ * - `any`: it exists (attach links a machine that already runs on it, whatever the network is doing).
  */
-async function lockReadyNetwork(
+type NetworkNeed = 'provisioned' | 'live' | 'any';
+
+/**
+ * A network of this tenant on this provider account, and its live subnets, both locked `FOR SHARE`:
+ * `networks.delete` and `networks.removeSubnet` (which lock them `FOR UPDATE`) wait for the
+ * transaction that is putting an instance on them, and then see that instance. A network that is
+ * not the tenant's, is on another account, or does not exist is INVALID_INPUT; one that is not in
+ * the state `need` asks for is INVALID_STATE (a transient condition: retry).
+ */
+async function lockNetwork(
   tx: SqlTx,
   input: { tenantId: string; accountId: string; networkId: string },
+  need: NetworkNeed,
 ): Promise<LockedNetwork> {
   const { rows } = await tx.query<NetworkRow>(
     `SELECT ${networkColumns} FROM networks WHERE id = $1 AND tenant_id = $2 FOR SHARE`,
@@ -1262,10 +1279,16 @@ async function lockReadyNetwork(
       'INVALID_INPUT',
       `Network ${row.id} is on provider account ${row.provider_account_id}, not the pool's ${input.accountId}`,
     );
-  if (row.state !== 'ready' || row.desired_state !== 'present')
+  if (need !== 'any' && (row.desired_state !== 'present' || row.state === 'deleting'))
+    throw new ComputeError('INVALID_STATE', `Network ${row.id} is being deleted`, undefined, {
+      networkId: row.id,
+    });
+  if (need === 'provisioned' && row.provisioned_at === null)
     throw new ComputeError(
-      'INVALID_INPUT',
-      `Network ${row.id} is ${row.desired_state === 'present' ? row.state : 'being deleted'}; instances use a ready network`,
+      'INVALID_STATE',
+      `Network ${row.id} is ${row.state} and has not been provisioned yet; retry once it is ready`,
+      undefined,
+      { networkId: row.id, hint: 'retry once the network is ready' },
     );
   const subnets = await tx.query<SubnetRow>(
     `SELECT ${subnetColumns} FROM network_subnets
@@ -1275,11 +1298,20 @@ async function lockReadyNetwork(
   return { row, subnets: subnets.rows };
 }
 
+const subnetNotReady = (subnet: SubnetRow) =>
+  new ComputeError(
+    'INVALID_STATE',
+    `Subnet ${subnet.id} is ${subnet.desired_state === 'present' ? subnet.state : 'being deleted'}; retry once it is ready`,
+    undefined,
+    { subnetId: subnet.id, hint: 'retry once the subnet is ready' },
+  );
+
 /**
  * `instances.create` with a `networkId`: the network and subnet the VM is placed on. The network must
- * be the tenant's, ready, and on the pool's provider account; the subnet must be on it and ready,
- * and in the offer's region. Without a `subnetId` the network's only ready subnet in the offer's
- * region is used (zero or several: INVALID_INPUT naming them). Locks both until the transaction ends.
+ * be the tenant's, on the pool's provider account, provisioned (it was `ready` once) and not being
+ * deleted; the subnet must be on it, in the offer's region and `ready` (INVALID_STATE with a retry
+ * hint while it is not). Without a `subnetId` the network's only subnet in the offer's region is
+ * used (none, or several: INVALID_INPUT naming them). Locks both until the transaction ends.
  */
 export async function placeOnNetwork(
   tx: SqlTx,
@@ -1291,7 +1323,7 @@ export async function placeOnNetwork(
     offerId?: string;
   },
 ): Promise<{ networkId: string; subnetId: string }> {
-  const { row, subnets } = await lockReadyNetwork(tx, input);
+  const { row, subnets } = await lockNetwork(tx, input, 'provisioned');
   const region = offerRegion(input.offerId);
   if (input.subnetId !== undefined) {
     const subnet = subnets.find((entry) => entry.id === input.subnetId);
@@ -1300,42 +1332,39 @@ export async function placeOnNetwork(
         'INVALID_INPUT',
         `Subnet ${input.subnetId} is not a subnet of network ${row.id}`,
       );
-    if (subnet.state !== 'ready' || subnet.desired_state !== 'present')
-      throw new ComputeError(
-        'INVALID_INPUT',
-        `Subnet ${subnet.id} is ${subnet.state}; instances use a ready subnet`,
-      );
     if (region !== undefined && subnet.region !== region)
       throw new ComputeError(
         'INVALID_INPUT',
         `Subnet ${subnet.id} is in ${subnet.region}, but the flavor's offer is in ${region}`,
       );
+    if (subnet.state !== 'ready' || subnet.desired_state !== 'present')
+      throw subnetNotReady(subnet);
     return { networkId: row.id, subnetId: subnet.id };
   }
   const candidates = subnets.filter(
     (subnet) =>
-      subnet.state === 'ready' &&
-      subnet.desired_state === 'present' &&
-      (region === undefined || subnet.region === region),
+      subnet.desired_state === 'present' && (region === undefined || subnet.region === region),
   );
   const where = region === undefined ? '' : ` in ${region}`;
   if (candidates.length === 0)
     throw new ComputeError(
       'INVALID_INPUT',
-      `Network ${row.id} has no ready subnet${where}; add one (networks.addSubnet) or name another network`,
+      `Network ${row.id} has no subnet${where}; add one (networks.addSubnet) or name another network`,
       undefined,
       { networkId: row.id, ...(region !== undefined ? { region } : {}) },
     );
   if (candidates.length > 1)
     throw new ComputeError(
       'INVALID_INPUT',
-      `Network ${row.id} has ${candidates.length} ready subnets${where} (${candidates
+      `Network ${row.id} has ${candidates.length} subnets${where} (${candidates
         .map((subnet) => subnet.id)
         .join(', ')}); name one with subnetId`,
       undefined,
       { networkId: row.id, subnetIds: candidates.map((subnet) => subnet.id) },
     );
-  return { networkId: row.id, subnetId: candidates[0]!.id };
+  const only = candidates[0]!;
+  if (only.state !== 'ready') throw subnetNotReady(only);
+  return { networkId: row.id, subnetId: only.id };
 }
 
 /** The part after the last `/` of a provider resource reference (`global/networks/x` is `x`). */
@@ -1345,8 +1374,10 @@ const shortName = (reference: string): string => reference.slice(reference.lastI
  * `instances.attach`: the tenant network (and subnet) a discovered machine's NIC is on. A machine is
  * on a network when one of its NICs names the network's provider name. With `networkId` the machine
  * must be on that network, else INVALID_STATE ("attached VMs keep their existing network": GCE
- * cannot move a NIC to another VPC without a stop). Without it, a machine on one of the tenant's
- * ready networks (same provider account) is linked, and any other is not.
+ * cannot move a NIC to another VPC without a stop); that network must exist and not be deleting.
+ * Without it, a machine on any of the tenant's networks of the same provider account that is not
+ * deleted is linked, whatever state the network is in (it flips to `pending` whenever a subnet or
+ * rule is added): an unlinked VM would not be tagged, and its network could be deleted from under it.
  */
 export async function networkOfMachine(
   tx: SqlTx,
@@ -1363,45 +1394,36 @@ export async function networkOfMachine(
   else {
     const { rows } = await tx.query<{ id: string }>(
       `SELECT id FROM networks
-        WHERE tenant_id = $1 AND provider_account_id = $2 AND state = 'ready' AND desired_state = 'present'
+        WHERE tenant_id = $1 AND provider_account_id = $2 AND state <> 'deleted'
         ORDER BY id`,
       [input.tenantId, input.accountId],
     );
     candidates = rows.map((row) => row.id);
   }
+  const need: NetworkNeed = input.networkId !== undefined ? 'live' : 'any';
   for (const nic of input.nics) {
     const found = candidates.find(
       (candidate) => providerResourceName(candidate) === shortName(nic.network),
     );
     if (found === undefined) continue;
-    let locked: LockedNetwork;
-    try {
-      locked = await lockReadyNetwork(tx, {
-        tenantId: input.tenantId,
-        accountId: input.accountId,
-        networkId: found,
-      });
-    } catch (error) {
-      // A network that stopped being ready since it was listed is not one to link silently.
-      if (input.networkId === undefined && isComputeError(error, 'INVALID_INPUT')) continue;
-      throw error;
-    }
+    const locked = await lockNetwork(
+      tx,
+      { tenantId: input.tenantId, accountId: input.accountId, networkId: found },
+      need,
+    );
     const subnet =
       nic.subnet === undefined
         ? undefined
-        : locked.subnets.find(
-            (entry) =>
-              entry.state === 'ready' && providerResourceName(entry.id) === shortName(nic.subnet!),
-          );
+        : locked.subnets.find((entry) => providerResourceName(entry.id) === shortName(nic.subnet!));
     return { networkId: locked.row.id, ...(subnet ? { subnetId: subnet.id } : {}) };
   }
   if (input.networkId !== undefined) {
     // Say why a network that does not qualify is refused, before saying where the machine is.
-    await lockReadyNetwork(tx, {
-      tenantId: input.tenantId,
-      accountId: input.accountId,
-      networkId: input.networkId,
-    });
+    await lockNetwork(
+      tx,
+      { tenantId: input.tenantId, accountId: input.accountId, networkId: input.networkId },
+      'live',
+    );
     throw new ComputeError(
       'INVALID_STATE',
       `Machine ${input.externalId} is not on network ${input.networkId}; attached VMs keep their existing network`,
@@ -1785,7 +1807,8 @@ class NetworkWorker {
     const network = this.#network;
     const written = await this.sql.transaction(async (tx) => {
       const { rows } = await tx.query(
-        `UPDATE networks SET state = $3, message = $4
+        `UPDATE networks SET state = $3, message = $4,
+                provisioned_at = CASE WHEN $3 = 'ready' THEN coalesce(provisioned_at, compute_now()) ELSE provisioned_at END
           WHERE id = $1 AND version = $2 AND (state IS DISTINCT FROM $3 OR message IS DISTINCT FROM $4)
           RETURNING id`,
         [network.id, network.version, state, message ?? null],

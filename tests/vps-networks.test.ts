@@ -1458,7 +1458,10 @@ async function networkWith(
   let view = network;
   for (const subnet of subnets) view = await addSubnet(network.id, subnet);
   await db.query(`UPDATE network_subnets SET state = 'ready' WHERE network_id = $1`, [network.id]);
-  await db.query(`UPDATE networks SET state = 'ready' WHERE id = $1`, [network.id]);
+  await db.query(
+    `UPDATE networks SET state = 'ready', provisioned_at = compute_now() WHERE id = $1`,
+    [network.id],
+  );
   return { id: network.id, subnets: view.subnets };
 }
 const instanceRow = async (instanceId: string) =>
@@ -1521,20 +1524,21 @@ describe('instances', () => {
     expect(await instanceCount()).toBe(0);
   });
 
-  it('refuses a network or subnet not ready, and a network of another account', async () => {
-    const pending = await networkWith();
-    await db.query(`UPDATE networks SET state = 'pending' WHERE id = $1`, [pending.id]);
-    expect(await codeOf(createInstance({ networkId: pending.id }))).toBe('INVALID_INPUT');
-
-    const notReady = await networkWith();
-    await db.query(`UPDATE network_subnets SET state = 'pending' WHERE network_id = $1`, [
-      notReady.id,
+  it('a network never provisioned or being deleted is INVALID_STATE; another account INVALID_INPUT', async () => {
+    const fresh = await networkWith();
+    await db.query(`UPDATE networks SET state = 'pending', provisioned_at = NULL WHERE id = $1`, [
+      fresh.id,
     ]);
-    expect(
-      await codeOf(createInstance({ networkId: notReady.id, subnetId: notReady.subnets[0]!.id })),
-    ).toBe('INVALID_INPUT');
-    // Without a subnetId, a subnet that is not ready is no candidate either.
-    expect(await codeOf(createInstance({ networkId: notReady.id }))).toBe('INVALID_INPUT');
+    const refused = await createInstance({ networkId: fresh.id }).catch((error) => error);
+    expect(refused).toMatchObject({ code: 'INVALID_STATE' });
+    expect(refused.message).toContain('retry');
+
+    const deleting = await networkWith();
+    await db.query(
+      `UPDATE networks SET state = 'deleting', desired_state = 'deleted' WHERE id = $1`,
+      [deleting.id],
+    );
+    expect(await codeOf(createInstance({ networkId: deleting.id }))).toBe('INVALID_STATE');
 
     const foreign = await networkWith();
     await db.query(
@@ -1543,6 +1547,48 @@ describe('instances', () => {
     );
     expect(await codeOf(createInstance({ networkId: foreign.id }))).toBe('INVALID_INPUT');
     expect(await instanceCount()).toBe(0);
+  });
+
+  it('a subnet not ready yet is INVALID_STATE with a retry hint', async () => {
+    const network = await networkWith();
+    await db.query(`UPDATE network_subnets SET state = 'pending' WHERE network_id = $1`, [
+      network.id,
+    ]);
+    const named = await createInstance({
+      networkId: network.id,
+      subnetId: network.subnets[0]!.id,
+    }).catch((error) => error);
+    expect(named).toMatchObject({ code: 'INVALID_STATE' });
+    expect(named.message).toContain('retry');
+    // Without a subnetId, the only subnet of the region answers the same.
+    expect(await codeOf(createInstance({ networkId: network.id }))).toBe('INVALID_STATE');
+    expect(await instanceCount()).toBe(0);
+  });
+
+  it('the worker provisions a network once; a network back to pending still takes creates', async () => {
+    const network = await createNetwork();
+    await addSubnet(network.id, { name: 'a', cidr: '10.0.0.0/20' });
+    const provisioned = async () =>
+      (
+        await db.query<{ provisioned_at: Date | null }>(
+          `SELECT provisioned_at FROM networks WHERE id = $1`,
+          [network.id],
+        )
+      ).rows[0]!.provisioned_at;
+    // Never provisioned: creates wait.
+    expect(await provisioned()).toBeNull();
+    expect(await codeOf(createInstance({ networkId: network.id }))).toBe('INVALID_STATE');
+    await until(() => settled(network.id));
+    const first = await provisioned();
+    expect(first).not.toBeNull();
+    // A subnet is added: the network is pending again, but provisioned stays, and creates go through.
+    await addSubnet(network.id, { name: 'eu', region: 'europe-west4', cidr: '10.1.0.0/20' });
+    expect((await getNetwork(network.id)).state).toBe('pending');
+    expect(await provisioned()).toEqual(first);
+    const created = await createInstance({ networkId: network.id });
+    expect(created.networkId).toBe(network.id);
+    await until(() => settled(network.id));
+    expect(await provisioned()).toEqual(first);
   });
 
   it('picks the only subnet in the region, and refuses none or several', async () => {
@@ -1662,6 +1708,43 @@ describe('instances', () => {
     expect(
       await codeOf(call('networks', 'delete', { tenantId: 'root', networkId: network.id })),
     ).toBe('INVALID_STATE');
+  });
+
+  it('attach links a VM whose network is pending, so the network cannot be deleted from under it', async () => {
+    const network = await networkWith();
+    const subnet = network.subnets[0]!;
+    // A subnet was added: the network is pending until the worker converges it.
+    await addSubnet(network.id, { name: 'eu', region: 'europe-west4', cidr: '10.1.0.0/20' });
+    expect((await getNetwork(network.id)).state).toBe('pending');
+    await seeMachine(LEGACY, [
+      { network: providerResourceName(network.id), subnet: providerResourceName(subnet.id) },
+    ]);
+    const attached = await attach();
+    expect(attached).toMatchObject({ networkId: network.id, subnetId: subnet.id });
+    expect(await instanceRow(attached.id)).toMatchObject({
+      network_id: network.id,
+      subnet_id: subnet.id,
+    });
+    // An explicit networkId only needs the network to exist and not be deleting.
+    await seeMachine('us-central1-a/second', [{ network: providerResourceName(network.id) }]);
+    expect(
+      await attach({ externalId: 'us-central1-a/second', networkId: network.id }),
+    ).toMatchObject({ networkId: network.id });
+    const blocked = await call('networks', 'delete', {
+      tenantId: 'root',
+      networkId: network.id,
+    }).catch((error) => error);
+    expect(blocked).toMatchObject({ code: 'INVALID_STATE' });
+    expect(blocked.details.instanceIds).toContain(attached.id);
+    // A network being deleted takes no explicit attach.
+    await db.query(
+      `UPDATE networks SET state = 'deleting', desired_state = 'deleted' WHERE id = $1`,
+      [network.id],
+    );
+    await seeMachine('us-central1-a/third', [{ network: providerResourceName(network.id) }]);
+    expect(await codeOf(attach({ externalId: 'us-central1-a/third', networkId: network.id }))).toBe(
+      'INVALID_STATE',
+    );
   });
 
   it('attach refuses moving a VM to another network', async () => {
