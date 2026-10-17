@@ -1101,7 +1101,12 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         kind: 'read',
         resource: accountResource,
         validate: describedBy(discoverySchemas.listMachines, parseListMachines),
-        handler: (context, input) => listMachines(context.sql, input),
+        handler: (context, input) =>
+          listMachines(context.sql, input, {
+            platform:
+              context.iam.rootTenantId !== undefined &&
+              context.caller?.tenantId === context.iam.rootTenantId,
+          }),
       }),
       discover: defineMethod({
         action: 'compute:providers:manage',

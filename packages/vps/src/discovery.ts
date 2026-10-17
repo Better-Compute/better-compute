@@ -662,7 +662,12 @@ interface ListedMachine {
   gone_ms: number | null;
 }
 
-function machineView(accountId: string, row: ListedMachine): ProviderMachineView {
+function machineView(
+  accountId: string,
+  row: ListedMachine,
+  /** Whether the instance holding the machine may be named (see `listMachines`). */
+  showHolder: boolean,
+): ProviderMachineView {
   const machine = json(row.machine);
   const view: ProviderMachineView = {
     accountId,
@@ -682,8 +687,8 @@ function machineView(accountId: string, row: ListedMachine): ProviderMachineView
   if (machine.memoryGiB !== undefined) view.memoryGiB = machine.memoryGiB;
   if (machine.gpus !== undefined) view.gpus = { ...machine.gpus };
   if (machine.reservation !== undefined) view.reservation = machine.reservation;
-  if (row.instance_id !== null) view.instanceId = row.instance_id;
-  if (row.instance_tenant_id !== null) view.tenantId = row.instance_tenant_id;
+  if (showHolder && row.instance_id !== null) view.instanceId = row.instance_id;
+  if (showHolder && row.instance_tenant_id !== null) view.tenantId = row.instance_tenant_id;
   if (row.gone_ms !== null) view.goneAt = Math.round(Number(row.gone_ms));
   return view;
 }
@@ -712,7 +717,14 @@ async function lastPass(tx: SqlTx, accountId: string): Promise<number | undefine
 export async function listMachines(
   tx: SqlTx,
   input: ListMachinesInput,
+  /**
+   * `platform`: the caller is of the IAM root tenant. A machine held by an instance of another
+   * tenant (the account's pool is offered to it) is listed without that instance's id and tenant,
+   * except to the platform.
+   */
+  options: { platform?: boolean } = {},
 ): Promise<{ items: ProviderMachineView[]; cursor?: string; discoveredAt?: number }> {
+  const platform = options.platform === true;
   await ownAccount(tx, input);
   const after = input.cursor !== undefined ? parseCursor(input.cursor) : undefined;
   const { rows } = await tx.query<ListedMachine>(
@@ -739,7 +751,15 @@ export async function listMachines(
   );
   const page = rows.slice(0, input.limit);
   const result: { items: ProviderMachineView[]; cursor?: string; discoveredAt?: number } = {
-    items: page.map((row) => machineView(input.accountId, row)),
+    items: page.map((row) =>
+      machineView(
+        input.accountId,
+        row,
+        platform ||
+          row.instance_tenant_id === null ||
+          row.instance_tenant_id === input.tenantId,
+      ),
+    ),
   };
   if (rows.length > input.limit) {
     const last = page[page.length - 1]!;
