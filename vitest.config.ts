@@ -13,6 +13,7 @@ const scoped: Record<string, string> = {
   '@better-compute/metal': 'metal/src/index.ts',
   '@better-compute/vps': 'vps/src/index.ts',
   '@better-compute/provider-hetzner': 'provider-hetzner/src/index.ts',
+  '@better-compute/provider-gcp': 'provider-gcp/src/index.ts',
   '@better-compute/provider-proxmox': 'provider-proxmox/src/index.ts',
   '@better-compute/provider-kubernetes': 'provider-kubernetes/src/index.ts',
   '@better-compute/pki': 'pki/src/index.ts',
