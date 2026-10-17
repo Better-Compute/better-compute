@@ -6,6 +6,7 @@ import {
   type AdmissionContext,
   type AdmissionPlan,
   type AuthzAttributes,
+  type Caller,
   type CapacityPort,
   type Clock,
   type Condition,
@@ -138,6 +139,12 @@ export interface CreateInstanceInput {
   networkId?: string;
   /** (v1.0) A ready subnet of `networkId`; omitted: its only subnet in the offer's region. */
   subnetId?: string;
+  /**
+   * (v1.0) Who owns the instance in the tenant (default: the caller), so it shows in their
+   * `scope: 'mine'` list and owner policies apply to them. Only the platform (a root caller
+   * creating in another tenant) names someone else, as `instances.attach` does (D7).
+   */
+  ownerIdentityId?: string;
   idempotencyKey: string;
   /**
    * §9.1 async-with-wait: hold the answer up to `timeoutMs` (≤ 30 s) until the instance leaves
@@ -150,6 +157,46 @@ export interface CreateInstanceInput {
 const uriLike = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
 /** `secret://<tenantId>/<id>` (the local sealed store's refs). */
 const secretRefPattern = /^secret:\/\/([^/]+)\/([^/]+)$/;
+
+/** An IAM identity id, as `ownerIdentityId` names one (`instances.create`, `instances.attach`). */
+export const identityIdPattern = /^[A-Za-z0-9._:@-]{1,128}$/;
+
+/**
+ * Whether `caller` is the platform: a caller of the IAM root tenant. Without the root tenant's id,
+ * only root callers act across tenants (the envelope's pre-check), so a caller outside the tenant it
+ * acts in is one.
+ */
+export function platformCaller(
+  caller: Pick<Caller, 'tenantId'>,
+  tenantId: string,
+  rootTenantId: string | undefined,
+): boolean {
+  return rootTenantId !== undefined
+    ? caller.tenantId === rootTenantId
+    : caller.tenantId !== tenantId;
+}
+
+/**
+ * The owner of an instance `caller` creates in `tenantId`: `ownerIdentityId`, else the caller. Only
+ * a root caller creating in another tenant names someone else (it issues the instance to a person
+ * of that tenant); anyone else naming another identity is ACCESS_DENIED, before any decision.
+ */
+export function instanceOwner(
+  caller: Pick<Caller, 'tenantId' | 'identityId'>,
+  input: { tenantId: string; ownerIdentityId?: string },
+  rootTenantId: string | undefined,
+): string {
+  const owner = input.ownerIdentityId;
+  if (owner === undefined || owner === caller.identityId) return caller.identityId;
+  if (!platformCaller(caller, input.tenantId, rootTenantId) || caller.tenantId === input.tenantId)
+    throw new ComputeError(
+      'ACCESS_DENIED',
+      'Only the platform creates an instance for another identity, and only in another tenant',
+      undefined,
+      { reason: 'owner-not-caller' },
+    );
+  return owner;
+}
 
 /** Whether `userData` is a `secret://` ref (sealed by vps, or brought by the tenant). */
 export const isSecretRef = (userData: string | undefined): userData is `secret://${string}` =>
@@ -167,6 +214,7 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
     'desiredState',
     'networkId',
     'subnetId',
+    'ownerIdentityId',
     'idempotencyKey',
     'wait',
   ]);
@@ -211,6 +259,14 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
   if (subnetId !== undefined) {
     if (networkId === undefined) fail('subnetId needs a networkId');
     result.subnetId = subnetId;
+  }
+  if (input.ownerIdentityId !== undefined) {
+    if (
+      typeof input.ownerIdentityId !== 'string' ||
+      !identityIdPattern.test(input.ownerIdentityId)
+    )
+      fail('ownerIdentityId is invalid');
+    result.ownerIdentityId = input.ownerIdentityId;
   }
   if (input.wait !== undefined) {
     if (typeof input.wait !== 'object' || input.wait === null || Array.isArray(input.wait))
@@ -1098,13 +1154,14 @@ async function assertTenantPutSecret(tx: SqlTx, tenantId: string, ref: string): 
 }
 
 export async function prepareCreateInstance(
-  deps: Pick<InstanceDeps, 'images' | 'runtime' | 'runtimes'>,
+  deps: Pick<InstanceDeps, 'images' | 'runtime' | 'runtimes' | 'rootTenantId'>,
   context: MethodContext,
   input: CreateInstanceInput,
   tx: SqlTx,
 ): Promise<AdmissionPlan<Instance>> {
   const caller = context.caller;
   if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
+  const owner = instanceOwner(caller, input, deps.rootTenantId);
   const { idempotencyKey: _key, wait: _wait, ...request } = input;
   const hash = await sha256Hex(canonical(request));
   const instanceId = await draftId('inst', input.tenantId, caller.identityId, input.idempotencyKey);
@@ -1187,7 +1244,7 @@ export async function prepareCreateInstance(
         runtime,
         input.desiredState,
         pool.class === 'provider' ? pool.providerAccountId! : null,
-        caller.identityId,
+        owner,
         caller.agentId ?? null,
         caller.delegationId ?? null,
         input.idempotencyKey,
@@ -1203,7 +1260,7 @@ export async function prepareCreateInstance(
     attributes: instanceAttributes(shape, input.imageId, image?.verified ?? false, input.projectId),
     parentType: 'pool',
     parentId: input.poolId,
-    ownerId: caller.identityId,
+    ownerId: owner,
   });
   return { status: 'decide', resource: { type: 'instance', id: instanceId } };
 }

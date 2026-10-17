@@ -20,9 +20,11 @@ import {
   instanceDemand,
   instanceView,
   dropHeldMachineId,
+  identityIdPattern,
   instanceWork,
   moveInstance,
   ownershipBlocked,
+  platformCaller,
   publishInstance,
   readInstance,
   updateInstance,
@@ -89,7 +91,6 @@ export type AttachDeps = Pick<InstanceDeps, 'events' | 'work' | 'authz' | 'runti
 };
 
 const externalIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/;
-const identityPattern = /^[A-Za-z0-9._:@-]{1,128}$/;
 
 const field = (description: string, pattern: string, maxLength: number): InputSchema => ({
   type: 'string',
@@ -115,7 +116,7 @@ export const attachSchemas = {
       projectId: field('The project it belongs to', '^prj_[0-9a-hjkmnp-tv-z]{26,52}$', 56),
       ownerIdentityId: field(
         'The identity that owns it in the tenant (default: the caller)',
-        identityPattern.source,
+        identityIdPattern.source,
         128,
       ),
       onDelete: {
@@ -156,7 +157,7 @@ export function parseAttach(raw: unknown): AttachInstanceInput {
     fail('externalId is invalid');
   if (
     input.ownerIdentityId !== undefined &&
-    (typeof input.ownerIdentityId !== 'string' || !identityPattern.test(input.ownerIdentityId))
+    (typeof input.ownerIdentityId !== 'string' || !identityIdPattern.test(input.ownerIdentityId))
   )
     fail('ownerIdentityId is invalid');
   if (input.onDelete !== undefined && input.onDelete !== 'detach' && input.onDelete !== 'delete')
@@ -333,12 +334,10 @@ export async function attachMachine(
     [accountId],
   );
   const accountTenant = accounts[0]?.tenant_id;
-  const rootCaller =
-    deps.rootTenantId !== undefined
-      ? caller.tenantId === deps.rootTenantId
-      : // Without the root tenant's id: only root callers act across tenants (the envelope's check).
-        caller.tenantId !== input.tenantId;
-  if (accountTenant !== caller.tenantId && !rootCaller)
+  if (
+    accountTenant !== caller.tenantId &&
+    !platformCaller(caller, input.tenantId, deps.rootTenantId)
+  )
     throw new ComputeError(
       'ACCESS_DENIED',
       `Only the platform attaches machines of provider account ${accountId}`,

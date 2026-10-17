@@ -197,6 +197,13 @@ export const schemas = {
         'snet',
         'A ready subnet of that network; omitted: the network’s only subnet in the offer’s region',
       ),
+      ownerIdentityId: {
+        type: 'string',
+        pattern: '^[A-Za-z0-9._:@-]{1,128}$',
+        maxLength: 128,
+        description:
+          'Who owns it in the tenant (default: the caller); only a root caller creating in another tenant names someone else',
+      },
       idempotencyKey,
       wait: strictObject(
         {
