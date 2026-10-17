@@ -643,6 +643,7 @@ Rules for v0.1:
 
 ## Sessions
 
+- (Claude session, feat/gcp-attach-reservations, 2026-10-17, plan 2026-10-17-gcp-attach-reservations-networks) claims the new `packages/provider-gcp/**`, the new vps files (`packages/vps/src/{attach,discovery,reservations,networks}*.ts`, migrations `vps/0023`-`vps/0026`), and these symbols: additive optional core members `ProviderImpl.discover|claim|release|listReservations|networks` and `ExternalMachine` optional fields (zone, machineType, labels, networks, reservation, claimedBy, ...), `apiSurface` rows `instances.attach|detach|reboot`, `providerAccounts.machines|discover|reservations|bindReservation|unbindReservation`, `networks.*`, `firewallRules.*`; the additive core edit is in `packages/core/src/extension.ts` only.
 - (orchestrator, P0) Root workspace, scripts/tooling.mjs, scripts/sync-better-iam.mjs, vendor/better-iam,
   package manifests, vitest configs. P0 package work is fanned out by workflow; see the git log.
 - (orchestrator [56cfd7], v0.1 W5a + W5b) core seams landed: 1b8df8f (`MethodDefinition.admission`, `AuthzWriter`,
