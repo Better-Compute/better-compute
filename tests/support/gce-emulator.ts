@@ -533,6 +533,11 @@ export class GceEmulator {
         });
       }
     }
+    if (collection === 'machineTypes' && method === 'GET' && !name)
+      return this.#list(
+        url,
+        this.machineTypes.filter((t) => t.zone === zone).map((t) => this.#machineTypeBody(t)),
+      );
     if (collection === 'machineTypes' && method === 'GET' && name) {
       const type = this.machineTypes.find((t) => t.zone === zone && t.name === name);
       return type

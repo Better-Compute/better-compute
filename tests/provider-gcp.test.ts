@@ -1,8 +1,22 @@
 import { generateKeyPairSync } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
-import { isComputeError, manualClock, type Logger } from '@better-compute/core';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  isComputeError,
+  manualClock,
+  type CallContext,
+  type Logger,
+  type ProviderImpl,
+} from '@better-compute/core';
+import { runConformance } from '@better-compute/core/conformance';
+import { providerConformanceCases } from '@better-compute/vps';
 import {
   cachedTokenSource,
+  gcp,
+  gcpProvider,
+  gpuModel,
+  toMachine,
+  type GcpConfig,
+  type GcpProviderOptions,
   gceClient,
   impersonatedTokenSource,
   instanceName,
@@ -336,5 +350,524 @@ describe('auth & client', () => {
     expect(lines.join('\n')).not.toContain('ya29.');
     expect(String((error as Error).message)).not.toContain('ya29.');
     expect(JSON.stringify(error)).not.toContain('ya29.');
+  });
+});
+
+// -------------------------------------------------------------------------------------- compute
+
+const secrets = {
+  resolve: async (): Promise<string> => {
+    throw new Error('this account has no secrets');
+  },
+};
+
+function ctx(key = 'k1', clock = manualClock(1_000_000)): CallContext {
+  return {
+    idempotencyKey: key,
+    signal: new AbortController().signal,
+    clock,
+    secrets,
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+  };
+}
+
+const gcpAccount = { projectId: 'p', zones: ['us-central1-a'] };
+
+async function build(
+  emu: GceEmulator,
+  config: Record<string, unknown> = gcpAccount,
+  options: GcpProviderOptions = {},
+): Promise<ProviderImpl> {
+  const provider = gcpProvider({ fetch: emu.fetch, ...options });
+  const parsed = await provider.config['~standard'].validate(config);
+  if ('issues' in parsed && parsed.issues) throw new Error(parsed.issues[0]!.message);
+  return provider.create((parsed as { value: GcpConfig }).value, {
+    clock: manualClock(1_000_000),
+    secrets,
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+}
+
+describe('compute', () => {
+  it('passes every case of the ProviderImpl contract', async () => {
+    const report = await runConformance(providerConformanceCases(), () => {
+      const emu = new GceEmulator();
+      return {
+        provider: gcpProvider({ fetch: emu.fetch }),
+        config: gcpAccount,
+        offerId: 'us-central1-a/a3-highgpu-8g',
+        image: 'ubuntu-2404-lts',
+        context: { secrets },
+      };
+    });
+    expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
+    expect(report.passed).toHaveLength(providerConformanceCases().length);
+  });
+
+  it('is a well-formed definition with the documented capabilities', async () => {
+    expect(gcp).toMatchObject({ id: 'gcp', provides: ['vps'], extension: 'provider' });
+    expect(gcp.capabilities).toEqual([
+      'power',
+      'list',
+      'discover',
+      'claim',
+      'reservations',
+      'networks',
+    ]);
+    const parsed = await gcp.config['~standard'].validate({
+      projectId: 'p',
+      zones: ['us-central1-a'],
+    });
+    expect(parsed).toMatchObject({
+      value: { network: 'default', imageProject: 'ubuntu-os-cloud', diskGiB: 100 },
+    });
+    const none = await gcp.config['~standard'].validate({ projectId: 'p', zones: [] });
+    expect('issues' in none && none.issues?.length).toBeTruthy();
+    const inline = await gcp.config['~standard'].validate({
+      projectId: 'p',
+      zones: ['z'],
+      credentials: '{"private_key":"raw"}',
+    });
+    expect('issues' in inline && inline.issues?.length).toBeTruthy();
+  });
+
+  it('create retries are deduplicated by requestId', async () => {
+    const emu = new GceEmulator();
+    const impl = await build(emu);
+    const request = {
+      offerId: 'us-central1-a/n2-standard-4',
+      image: 'ubuntu-2404-lts',
+      userData: '#cloud-config\n',
+      name: 'ins_x',
+    };
+    const first = await impl.create(request, ctx('key-1'));
+    const again = await impl.create(request, ctx('key-1'));
+    expect(again.id).toBe(first.id);
+    const inserts = emu.requests.filter(
+      (r) => r.method === 'POST' && r.url.pathname.endsWith('/zones/us-central1-a/instances'),
+    );
+    expect(inserts).toHaveLength(2);
+    expect(inserts[0]!.url.searchParams.get('requestId')).toBe(requestIdFor('key-1'));
+    expect(inserts[1]!.url.searchParams.get('requestId')).toBe(requestIdFor('key-1'));
+    expect(emu.instances.size).toBe(1);
+  });
+
+  it('create builds the VM from the offer, image, user data, labels and network', async () => {
+    const emu = new GceEmulator();
+    const impl = await build(emu, { ...gcpAccount, diskGiB: 200 });
+    const machine = await impl.create(
+      {
+        offerId: 'us-central1-a/a3-highgpu-8g',
+        image: 'ubuntu-2404-lts',
+        userData: '#cloud-config\nusers: []\n',
+        name: 'ins_x',
+        network: { network: 'bc-net', subnet: 'bc-sub', tags: ['bc-abc'] },
+        labels: { 'better-compute-tenant': 'ten_1', 'better-compute-managed': 'false' },
+      },
+      ctx('key-1'),
+    );
+    expect(machine).toMatchObject({
+      id: 'us-central1-a/bc-ins-x',
+      state: 'pending',
+      zone: 'us-central1-a',
+      region: 'us-central1',
+      machineType: 'a3-highgpu-8g',
+      vcpu: 208,
+      memoryGiB: 1872,
+      gpus: { model: 'H100', count: 8 },
+      claimedBy: 'ins_x',
+    });
+    const body = emu.requests.find((r) => r.method === 'POST' && r.body?.name)!.body!;
+    expect(body).toMatchObject({
+      name: 'bc-ins-x',
+      machineType: 'zones/us-central1-a/machineTypes/a3-highgpu-8g',
+      labels: {
+        'better-compute-managed': 'true',
+        'better-compute-instance': 'ins_x',
+        'better-compute-tenant': 'ten_1',
+      },
+      metadata: { items: [{ key: 'user-data', value: '#cloud-config\nusers: []\n' }] },
+      scheduling: { onHostMaintenance: 'TERMINATE' },
+      tags: { items: ['bc-abc'] },
+    });
+    expect(body.disks[0].initializeParams).toMatchObject({
+      sourceImage: 'projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts',
+      diskSizeGb: '200',
+    });
+    expect(body.networkInterfaces[0]).toMatchObject({
+      network: 'global/networks/bc-net',
+      subnetwork: 'regions/us-central1/subnetworks/bc-sub',
+    });
+    const stored = emu.instances.get('us-central1-a/bc-ins-x')!;
+    expect(stored.labels['better-compute-managed']).toBe('true');
+  });
+
+  it('create without a network ref uses the configured network and subnet; a full image URL is kept', async () => {
+    const emu = new GceEmulator();
+    const impl = await build(emu, {
+      ...gcpAccount,
+      network: 'shared',
+      subnet: 'shared-a',
+      imageProject: 'my-images',
+    });
+    await impl.create(
+      {
+        offerId: 'us-central1-a/n2-standard-4',
+        image: 'ubuntu-2404-lts',
+        userData: '',
+        name: 'ins_a',
+      },
+      ctx('a'),
+    );
+    await impl.create(
+      {
+        offerId: 'us-central1-a/n2-standard-4',
+        image: 'https://compute.googleapis.com/compute/v1/projects/x/global/images/img-1',
+        userData: '',
+        name: 'ins_b',
+      },
+      ctx('b'),
+    );
+    const bodies = emu.requests
+      .filter((r) => r.method === 'POST' && r.body?.name)
+      .map((r) => r.body!);
+    expect(bodies[0]!.networkInterfaces[0]).toMatchObject({
+      network: 'global/networks/shared',
+      subnetwork: 'regions/us-central1/subnetworks/shared-a',
+    });
+    expect(bodies[0]!.disks[0].initializeParams.sourceImage).toBe(
+      'projects/my-images/global/images/family/ubuntu-2404-lts',
+    );
+    expect(bodies[1]!.disks[0].initializeParams.sourceImage).toBe(
+      'https://compute.googleapis.com/compute/v1/projects/x/global/images/img-1',
+    );
+    expect(bodies[0]!.scheduling.onHostMaintenance).toBe('MIGRATE');
+  });
+
+  it('create on a reservation offer sets SPECIFIC_RESERVATION affinity', async () => {
+    const emu = new GceEmulator();
+    const impl = await build(emu);
+    await impl.create(
+      {
+        offerId: 'us-central1-a/a3-highgpu-8g@rsv-a',
+        image: 'ubuntu-2404-lts',
+        userData: '',
+        name: 'ins_x',
+      },
+      ctx('k'),
+    );
+    expect(emu.instances.get('us-central1-a/bc-ins-x')!.reservationAffinity).toEqual({
+      consumeReservationType: 'SPECIFIC_RESERVATION',
+      key: 'compute.googleapis.com/reservation-name',
+      values: ['rsv-a'],
+    });
+  });
+
+  it('create reports capacity, quota and zone errors', async () => {
+    const emu = new GceEmulator();
+    const impl = await build(emu);
+    const request = (offerId: string) => ({
+      offerId,
+      image: 'ubuntu-2404-lts',
+      userData: '',
+      name: 'ins_x',
+    });
+    emu.failNextOperation = { code: 'ZONE_RESOURCE_POOL_EXHAUSTED', httpErrorStatusCode: 503 };
+    await expect(
+      impl.create(request('us-central1-a/a3-highgpu-8g'), ctx('k1')),
+    ).rejects.toMatchObject({
+      code: 'CAPACITY_UNAVAILABLE',
+      details: { provider: 'gcp', reason: 'ZONE_RESOURCE_POOL_EXHAUSTED' },
+    });
+    emu.failNext = { status: 403, reason: 'quotaExceeded', message: 'Quota GPUS exceeded' };
+    await expect(
+      impl.create(request('us-central1-a/a3-highgpu-8g'), ctx('k2')),
+    ).rejects.toMatchObject({
+      code: 'QUOTA_EXCEEDED',
+    });
+    await expect(
+      impl.create(request('europe-west4-a/n2-standard-4'), ctx('k3')),
+    ).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+    await expect(
+      impl.create(request('us-central1-a/no-such-type'), ctx('k4')),
+    ).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+    expect(emu.instances.size).toBe(0);
+  });
+
+  it('create adopts an existing VM that carries the same instance label', async () => {
+    const emu = new GceEmulator();
+    emu.addInstance('us-central1-a', 'bc-ins-x', {
+      labels: { 'better-compute-managed': 'true', 'better-compute-instance': 'ins_x' },
+    });
+    emu.addInstance('us-central1-a', 'bc-ins-y', {
+      labels: { 'better-compute-instance': 'someone-else' },
+    });
+    const impl = await build(emu);
+    const base = { offerId: 'us-central1-a/n2-standard-4', image: 'i', userData: '' };
+    const adopted = await impl.create({ ...base, name: 'ins_x' }, ctx('fresh-key'));
+    expect(adopted.id).toBe('us-central1-a/bc-ins-x');
+    await expect(impl.create({ ...base, name: 'ins_y' }, ctx('other-key'))).rejects.toMatchObject({
+      code: 'CONFLICT',
+    });
+  });
+
+  it('get maps the VM and answers undefined for a missing or malformed id', async () => {
+    const emu = new GceEmulator();
+    emu.addInstance('us-central1-a', 'vm1', { machineType: 'a3-highgpu-8g' });
+    const impl = await build(emu);
+    expect(await impl.get('us-central1-a/vm1', ctx())).toMatchObject({
+      id: 'us-central1-a/vm1',
+      state: 'running',
+      vcpu: 208,
+      memoryGiB: 1872,
+      gpus: { model: 'H100', count: 8 },
+      addresses: ['10.128.0.' + (Number(emu.instances.get('us-central1-a/vm1')!.id) % 250)],
+    });
+    expect(await impl.get('us-central1-a/missing', ctx())).toBeUndefined();
+    expect(await impl.get('not-an-id', ctx())).toBeUndefined();
+  });
+
+  it('delete refuses a VM without the managed label', async () => {
+    const emu = new GceEmulator();
+    emu.addInstance('us-central1-a', 'legacy');
+    emu.addInstance('us-central1-a', 'mine', { labels: { 'better-compute-managed': 'true' } });
+    const impl = await build(emu);
+    await expect(impl.delete('us-central1-a/legacy', ctx())).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+    });
+    expect(emu.instances.has('us-central1-a/legacy')).toBe(true);
+    await impl.delete('us-central1-a/mine', ctx());
+    expect(emu.instances.has('us-central1-a/mine')).toBe(false);
+    // Already gone, or never an id: counts as deleted.
+    await impl.delete('us-central1-a/mine', ctx());
+    await impl.delete('nonsense', ctx());
+  });
+
+  it('power maps actions', async () => {
+    const emu = new GceEmulator();
+    emu.addInstance('us-central1-a', 'vm1', { labels: { 'better-compute-instance': 'ins_1' } });
+    emu.addInstance('us-central1-a', 'legacy');
+    const impl = await build(emu);
+    const verbs = () =>
+      emu.requests
+        .filter((r) => r.method === 'POST' && r.url.pathname.includes('/instances/vm1/'))
+        .map((r) => r.url.pathname.split('/').pop() + r.url.search);
+    await impl.power!('us-central1-a/vm1', 'graceful-restart', ctx());
+    expect(verbs()).toEqual(['stop', 'start']);
+    emu.requests.length = 0;
+    await impl.power!('us-central1-a/vm1', 'off', ctx());
+    await impl.power!('us-central1-a/vm1', 'graceful-off', ctx());
+    await impl.power!('us-central1-a/vm1', 'on', ctx());
+    await impl.power!('us-central1-a/vm1', 'reset', ctx());
+    await impl.power!('us-central1-a/vm1', 'cycle', ctx());
+    expect(verbs()).toEqual(['stop?discardLocalSsd=false', 'stop', 'start', 'reset', 'reset']);
+    await expect(impl.power!('us-central1-a/vm1', 'nmi', ctx())).rejects.toMatchObject({
+      code: 'UNSUPPORTED',
+    });
+    await expect(impl.power!('us-central1-a/legacy', 'on', ctx())).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+    });
+    await expect(impl.power!('us-central1-a/ghost', 'on', ctx())).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+  });
+
+  it('graceful-restart waits for the stop, and gives up with UNAVAILABLE after 20 s', async () => {
+    const emu = new GceEmulator();
+    emu.addInstance('us-central1-a', 'vm1', { labels: { 'better-compute-instance': 'ins_1' } });
+    const impl = await build(emu, gcpAccount, { operationPollMs: 1 });
+    emu.operationDelayTicks = 2;
+    await impl.power!('us-central1-a/vm1', 'graceful-restart', ctx());
+    expect(emu.instances.get('us-central1-a/vm1')!.status).toBe('RUNNING');
+    expect(emu.requests.filter((r) => r.url.pathname.includes('/operations/'))).toHaveLength(3);
+    // Polling every 2 s, the wait gives up after 20 s of (fake) time.
+    const slow = await build(emu);
+    emu.operationDelayTicks = 1000;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const outcome = slow.power!('us-central1-a/vm1', 'graceful-restart', ctx()).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(await outcome).toMatchObject({ code: 'UNAVAILABLE' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('toMachine maps a3-highgpu-8g with 8 nvidia-h100-80gb', () => {
+    const machine = toMachine({
+      name: 'vm1',
+      zone: 'https://compute.googleapis.com/compute/v1/projects/p/zones/us-central1-a',
+      machineType:
+        'https://compute.googleapis.com/compute/v1/projects/p/zones/us-central1-a/machineTypes/a3-highgpu-8g',
+      status: 'RUNNING',
+      guestAccelerators: [
+        {
+          acceleratorType: 'zones/us-central1-a/acceleratorTypes/nvidia-h100-80gb',
+          acceleratorCount: 8,
+        },
+      ],
+      networkInterfaces: [{ networkIP: '10.0.0.2', accessConfigs: [{ natIP: '34.1.2.3' }] }],
+    });
+    expect(machine).toMatchObject({
+      id: 'us-central1-a/vm1',
+      state: 'running',
+      gpus: { model: 'H100', count: 8 },
+      vcpu: 208,
+      memoryGiB: 1872,
+      zone: 'us-central1-a',
+      region: 'us-central1',
+      offerId: 'us-central1-a/a3-highgpu-8g',
+      addresses: ['10.0.0.2', '34.1.2.3'],
+    });
+  });
+
+  it('maps statuses and accelerator models', () => {
+    const base = {
+      name: 'v',
+      zone: 'zones/z-a',
+      machineType: 'zones/z-a/machineTypes/n2-standard-4',
+    };
+    const state = (status: string) => toMachine({ ...base, status }).state;
+    expect(
+      [
+        'PROVISIONING',
+        'STAGING',
+        'RUNNING',
+        'STOPPING',
+        'SUSPENDING',
+        'SUSPENDED',
+        'TERMINATED',
+        'STOPPED',
+        'REPAIRING',
+        'WHAT',
+      ].map(state),
+    ).toEqual([
+      'pending',
+      'pending',
+      'running',
+      'stopped',
+      'stopped',
+      'stopped',
+      'stopped',
+      'stopped',
+      'error',
+      'unknown',
+    ]);
+    expect(toMachine(base).state).toBe('unknown');
+    const models = [
+      'nvidia-h100-80gb',
+      'nvidia-h100-mega-80gb',
+      'nvidia-h200-141gb',
+      'nvidia-b200',
+      'nvidia-a100-80gb',
+      'nvidia-tesla-a100',
+      'nvidia-l4',
+      'nvidia-l40s',
+      'nvidia-tesla-t4',
+    ].map(gpuModel);
+    expect(models).toEqual(['H100', 'H100', 'H200', 'B200', 'A100', 'A100', 'L4', 'L40S', 'other']);
+    expect(toMachine(base)).toMatchObject({ vcpu: 4 });
+    expect(
+      toMachine({ ...base, machineType: 'zones/z-a/machineTypes/n2-custom-6-12288' }),
+    ).toMatchObject({
+      vcpu: 6,
+      memoryGiB: 12,
+    });
+  });
+
+  it('listOffers filters by gpuModel and minGpus', async () => {
+    const emu = new GceEmulator();
+    const impl = await build(emu, { projectId: 'p', zones: ['us-central1-a', 'europe-west4-a'] });
+    const all = await impl.listOffers({});
+    expect(all.map((o) => o.id)).toEqual([
+      'europe-west4-a/a2-highgpu-1g',
+      'europe-west4-a/a3-highgpu-8g',
+      'europe-west4-a/e2-standard-2',
+      'europe-west4-a/g2-standard-4',
+      'europe-west4-a/n2-standard-4',
+      'us-central1-a/a2-highgpu-1g',
+      'us-central1-a/a3-highgpu-8g',
+      'us-central1-a/e2-standard-2',
+      'us-central1-a/g2-standard-4',
+      'us-central1-a/n2-standard-4',
+    ]);
+    expect(all.find((o) => o.id === 'us-central1-a/a3-highgpu-8g')).toEqual({
+      id: 'us-central1-a/a3-highgpu-8g',
+      kind: 'vps',
+      region: 'us-central1',
+      vcpu: 208,
+      memoryGiB: 1872,
+      gpus: { model: 'H100', count: 8 },
+      available: true,
+    });
+    const h100 = await impl.listOffers({ gpuModel: 'H100' });
+    expect(h100.map((o) => o.id)).toEqual([
+      'europe-west4-a/a3-highgpu-8g',
+      'us-central1-a/a3-highgpu-8g',
+    ]);
+    expect((await impl.listOffers({ minGpus: 8 })).map((o) => o.gpus?.count)).toEqual([8, 8]);
+    expect((await impl.listOffers({ minGpus: 1 })).every((o) => o.gpus)).toBe(true);
+    expect(await impl.listOffers({ gpuModel: 'B200' })).toEqual([]);
+    expect(
+      (await impl.listOffers({ region: 'us-central1', minVcpu: 100 })).map((o) => o.id),
+    ).toEqual(['us-central1-a/a3-highgpu-8g']);
+    expect(await impl.listOffers({ kind: 'metal' })).toEqual([]);
+    expect(await impl.listOffers({ minMemoryGiB: 2000 })).toEqual([]);
+  });
+
+  it('list yields only managed VMs in the configured zones', async () => {
+    const emu = new GceEmulator();
+    emu.addInstance('us-central1-a', 'mine', { labels: { 'better-compute-managed': 'true' } });
+    emu.addInstance('us-central1-a', 'mine2', { labels: { 'better-compute-managed': 'true' } });
+    emu.addInstance('us-central1-a', 'mine3', { labels: { 'better-compute-managed': 'true' } });
+    emu.addInstance('us-central1-a', 'legacy');
+    emu.addInstance('europe-west4-a', 'elsewhere', {
+      labels: { 'better-compute-managed': 'true' },
+    });
+    const impl = await build(emu);
+    const ids: string[] = [];
+    for await (const machine of impl.list!(ctx())) ids.push(machine.id);
+    expect(ids.sort()).toEqual([
+      'us-central1-a/mine',
+      'us-central1-a/mine2',
+      'us-central1-a/mine3',
+    ]);
+    const listing = emu.requests.filter((r) => r.url.pathname.endsWith('/aggregated/instances'));
+    expect(listing[0]!.url.searchParams.get('filter')).toBe('labels.better-compute-managed=true');
+  });
+
+  it('uses the key behind credentials, impersonation and a host token source', async () => {
+    const emu = new GceEmulator();
+    const keySecrets = { resolve: async () => keyJson };
+    const provider = gcpProvider({ fetch: emu.fetch });
+    const impl = await provider.create(
+      { projectId: 'p', zones: ['us-central1-a'], credentials: 'vault://kv/gcp' as never },
+      { clock: manualClock(0), secrets: keySecrets, log: ctx().log },
+    );
+    await impl.get('us-central1-a/x', ctx());
+    expect(emu.jwtClaims).toHaveLength(1);
+    const impersonating = await provider.create(
+      { projectId: 'p', zones: ['us-central1-a'], impersonate: 'target@p.iam.gserviceaccount.com' },
+      { clock: manualClock(0), secrets: keySecrets, log: ctx().log },
+    );
+    await impersonating.get('us-central1-a/x', ctx());
+    expect(
+      emu.requests.some((r) =>
+        r.url.pathname.endsWith('target@p.iam.gserviceaccount.com:generateAccessToken'),
+      ),
+    ).toBe(true);
+    const hostEmu = new GceEmulator();
+    const host = await build(hostEmu, gcpAccount, {
+      tokenSource: { token: async () => 'host-token' },
+    });
+    await host.get('us-central1-a/x', ctx()).catch(() => undefined);
+    expect(hostEmu.requests[0]!.headers.get('authorization')).toBe('Bearer host-token');
   });
 });

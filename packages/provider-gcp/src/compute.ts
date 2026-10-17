@@ -1,0 +1,387 @@
+import {
+  ComputeError,
+  isComputeError,
+  type CallContext,
+  type ExternalMachine,
+  type ImageRef,
+  type NetworkRef,
+  type Offer,
+  type OfferQuery,
+  type PowerAction,
+  type ProviderContext,
+  type ProviderImpl,
+} from '@better-compute/core';
+import { settled, waitForOperation, type GceClient, type GceOperation } from './client.js';
+import type { GcpConfig, GcpProviderOptions } from './config.js';
+import {
+  instanceName,
+  labels,
+  labelValue,
+  machineId,
+  offerId,
+  parseMachineId,
+  parseOfferId,
+  requestIdFor,
+} from './ids.js';
+import {
+  gpusOfType,
+  regionOf,
+  shapeOf,
+  toMachine,
+  type GceInstance,
+  type GceMachineType,
+  type MachineShape,
+} from './shapes.js';
+
+// Compute Engine VMs as VPS instances: offers from machine types, create (idempotent by requestId),
+// get, delete, power and list. A VM id is `zone/name`. Only VMs carrying the better-compute labels
+// are ever deleted or powered.
+
+const acceleratorFamily = /^(a2|a3|a4|g2)-/;
+const instanceWaitMs = 20_000;
+
+export class GcpCompute implements ProviderImpl {
+  protected readonly client: GceClient;
+  protected readonly config: GcpConfig;
+  protected readonly context: ProviderContext;
+  protected readonly options: GcpProviderOptions;
+  readonly #types = new Map<string, GceMachineType | undefined>();
+
+  constructor(
+    config: GcpConfig,
+    context: ProviderContext,
+    options: GcpProviderOptions,
+    client: GceClient,
+  ) {
+    this.config = config;
+    this.context = context;
+    this.options = options;
+    this.client = client;
+  }
+
+  // ------------------------------------------------------------------------------- shared
+
+  /** A machine type's resource, cached (shapes do not change); undefined when it does not exist. */
+  protected async machineType(
+    zone: string,
+    name: string,
+    signal: AbortSignal,
+  ): Promise<GceMachineType | undefined> {
+    const key = `${zone}/${name}`;
+    if (this.#types.has(key)) return this.#types.get(key);
+    try {
+      const type = await this.client.request<GceMachineType>(
+        'GET',
+        `/zones/${zone}/machineTypes/${name}`,
+        { signal },
+      );
+      this.#types.set(key, type);
+      return type;
+    } catch (error) {
+      if (isComputeError(error, 'NOT_FOUND')) {
+        this.#types.set(key, undefined);
+        return undefined;
+      }
+      // A denied or failed read is not fatal: the shape falls back to what the name says.
+      if (signal.aborted) throw error;
+      this.context.log.debug('gcp.machine_type_unreadable', { zone, machineType: name });
+      return undefined;
+    }
+  }
+
+  /** An instance as a machine, with the shape of its machine type. */
+  protected async toMachine(instance: GceInstance, signal: AbortSignal): Promise<ExternalMachine> {
+    const zone = instance.zone.split('/').pop()!;
+    const type = await this.machineType(zone, instance.machineType.split('/').pop()!, signal);
+    const shape: MachineShape | undefined = type ? shapeOf(type) : undefined;
+    return toMachine(instance, { projectId: this.config.projectId, ...(shape ? { shape } : {}) });
+  }
+
+  protected instance(zone: string, name: string, signal: AbortSignal): Promise<GceInstance> {
+    return this.client.request<GceInstance>('GET', `/zones/${zone}/instances/${name}`, { signal });
+  }
+
+  protected inConfiguredZone(instance: GceInstance): boolean {
+    return this.config.zones.includes(instance.zone.split('/').pop()!);
+  }
+
+  // ------------------------------------------------------------------------------- offers
+
+  async listOffers(query: OfferQuery): Promise<Offer[]> {
+    if (query.kind === 'metal') return [];
+    const signal = new AbortController().signal;
+    const zones = this.config.zones.filter(
+      (zone) =>
+        query.region === undefined || query.region === zone || query.region === regionOf(zone),
+    );
+    const offers: Offer[] = [];
+    for (const zone of zones) {
+      for await (const type of this.client.pages<GceMachineType>(
+        `/zones/${zone}/machineTypes`,
+        'items',
+        { query: { maxResults: '500' }, signal },
+      )) {
+        if (type.deprecated?.state && type.deprecated.state !== 'ACTIVE') continue;
+        this.#types.set(`${zone}/${type.name}`, { ...type, zone });
+        const gpus = gpusOfType(type);
+        if (
+          query.gpuModel !== undefined &&
+          gpus?.model.toLowerCase() !== query.gpuModel.toLowerCase()
+        )
+          continue;
+        if ((query.minGpus ?? 0) > (gpus?.count ?? 0)) continue;
+        if (type.guestCpus < (query.minVcpu ?? 0)) continue;
+        if (type.memoryMb / 1024 < (query.minMemoryGiB ?? 0)) continue;
+        offers.push({
+          id: offerId(zone, type.name),
+          kind: 'vps',
+          region: regionOf(zone),
+          vcpu: type.guestCpus,
+          memoryGiB: type.memoryMb / 1024,
+          ...(gpus ? { gpus } : {}),
+          available: true,
+        });
+      }
+    }
+    return offers.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  }
+
+  // ------------------------------------------------------------------------------- create
+
+  async create(
+    request: {
+      offerId: string;
+      image: ImageRef;
+      userData: string;
+      name: string;
+      network?: NetworkRef;
+      labels?: Readonly<Record<string, string>>;
+    },
+    context: CallContext,
+  ): Promise<ExternalMachine> {
+    const { zone, machineType, reservation } = parseOfferId(request.offerId);
+    if (!this.config.zones.includes(zone))
+      throw new ComputeError('INVALID_INPUT', `Zone ${zone} is not one of the account's zones`);
+    const type = await this.machineType(zone, machineType, context.signal);
+    const accelerated = type
+      ? (type.accelerators?.length ?? 0) > 0
+      : acceleratorFamily.test(machineType);
+    const name = instanceName(request.name);
+    const body: Record<string, unknown> = {
+      name,
+      machineType: `zones/${zone}/machineTypes/${machineType}`,
+      labels: {
+        ...Object.fromEntries(
+          Object.entries(request.labels ?? {}).map(([key, value]) => [
+            labelValue(key),
+            labelValue(value),
+          ]),
+        ),
+        [labels.managed]: 'true',
+        [labels.instance]: labelValue(request.name),
+      },
+      disks: [
+        {
+          boot: true,
+          autoDelete: true,
+          initializeParams: {
+            sourceImage: this.sourceImage(request.image),
+            diskSizeGb: String(this.config.diskGiB ?? 100),
+            diskType: `zones/${zone}/diskTypes/pd-balanced`,
+          },
+        },
+      ],
+      networkInterfaces: [this.networkInterface(zone, request.network)],
+      metadata: { items: [{ key: 'user-data', value: request.userData }] },
+      // GPU machines cannot live-migrate.
+      scheduling: accelerated
+        ? { onHostMaintenance: 'TERMINATE', automaticRestart: true }
+        : { onHostMaintenance: 'MIGRATE', automaticRestart: true },
+    };
+    if (request.network?.tags?.length) body.tags = { items: [...request.network.tags] };
+    if (reservation)
+      body.reservationAffinity = {
+        consumeReservationType: 'SPECIFIC_RESERVATION',
+        key: 'compute.googleapis.com/reservation-name',
+        values: [reservation],
+      };
+    let operation: GceOperation;
+    try {
+      operation = await this.client.request<GceOperation>('POST', `/zones/${zone}/instances`, {
+        body,
+        query: { requestId: requestIdFor(context.idempotencyKey) },
+        signal: context.signal,
+      });
+      settled(operation, `Creating ${machineId(zone, name)}`);
+    } catch (error) {
+      // The VM exists under another requestId (the 60-minute dedupe window passed): it is ours if
+      // it carries this instance's label.
+      if (isComputeError(error, 'CONFLICT')) {
+        const existing = await this.instance(zone, name, context.signal);
+        if (existing.labels?.[labels.instance] === labelValue(request.name))
+          return this.toMachine(existing, context.signal);
+      }
+      throw error;
+    }
+    const pending: GceInstance = {
+      name,
+      zone,
+      machineType,
+      status: 'PROVISIONING',
+      labels: body.labels as Record<string, string>,
+      ...(type?.accelerators
+        ? {
+            guestAccelerators: type.accelerators.map((accelerator) => ({
+              acceleratorType: accelerator.guestAcceleratorType,
+              acceleratorCount: accelerator.guestAcceleratorCount,
+            })),
+          }
+        : {}),
+    };
+    return this.toMachine(pending, context.signal);
+  }
+
+  /** An image family (or `projects/…`, `global/…` or URL reference) as a `sourceImage`. */
+  protected sourceImage(image: ImageRef): string {
+    if (/^https:\/\//.test(image) || image.startsWith('projects/') || image.startsWith('global/'))
+      return image;
+    return `projects/${this.config.imageProject ?? 'ubuntu-os-cloud'}/global/images/family/${image}`;
+  }
+
+  protected networkInterface(zone: string, network?: NetworkRef): Record<string, unknown> {
+    const name = network?.network ?? this.config.network ?? 'default';
+    const subnet = network ? network.subnet : this.config.subnet;
+    const path = (value: string, kind: string, scope: string) =>
+      /^https:\/\//.test(value) || value.startsWith('projects/') || value.startsWith(`${scope}/`)
+        ? value
+        : `${scope}/${kind}/${value}`;
+    return {
+      network: path(name, 'networks', 'global'),
+      ...(subnet ? { subnetwork: path(subnet, 'subnetworks', `regions/${regionOf(zone)}`) } : {}),
+      accessConfigs: [{ type: 'ONE_TO_ONE_NAT', name: 'External NAT' }],
+    };
+  }
+
+  // ------------------------------------------------------------------------------- get, delete
+
+  async get(id: string, context: CallContext): Promise<ExternalMachine | undefined> {
+    let target: { zone: string; name: string };
+    try {
+      target = parseMachineId(id);
+    } catch (error) {
+      if (isComputeError(error, 'INVALID_INPUT')) return undefined;
+      throw error;
+    }
+    try {
+      return await this.toMachine(
+        await this.instance(target.zone, target.name, context.signal),
+        context.signal,
+      );
+    } catch (error) {
+      if (isComputeError(error, 'NOT_FOUND')) return undefined;
+      throw error;
+    }
+  }
+
+  async delete(id: string, context: CallContext): Promise<void> {
+    let target: { zone: string; name: string };
+    try {
+      target = parseMachineId(id);
+    } catch {
+      return;
+    }
+    try {
+      const instance = await this.instance(target.zone, target.name, context.signal);
+      if (instance.labels?.[labels.managed] !== 'true')
+        throw new ComputeError(
+          'INVALID_STATE',
+          `${id} is not managed by better-compute and is never deleted by it`,
+          undefined,
+          { provider: 'gcp', reason: 'notManaged' },
+        );
+      const operation = await this.client.request<GceOperation>(
+        'DELETE',
+        `/zones/${target.zone}/instances/${target.name}`,
+        { signal: context.signal },
+      );
+      settled(operation, `Deleting ${id}`);
+    } catch (error) {
+      if (isComputeError(error, 'NOT_FOUND')) return;
+      throw error;
+    }
+  }
+
+  // ------------------------------------------------------------------------------- power, list
+
+  async power(id: string, action: PowerAction, context: CallContext): Promise<void> {
+    if (action === 'nmi') throw new ComputeError('UNSUPPORTED', 'Compute Engine has no NMI action');
+    const { zone, name } = parseMachineId(id);
+    const instance = await this.instance(zone, name, context.signal);
+    if (!instance.labels?.[labels.instance])
+      throw new ComputeError(
+        'INVALID_STATE',
+        `${id} is not an instance of better-compute and is never powered by it`,
+        undefined,
+        { provider: 'gcp', reason: 'notAttached' },
+      );
+    const act = async (verb: 'start' | 'stop' | 'reset', query?: Record<string, string>) =>
+      settled(
+        await this.client.request<GceOperation>(
+          'POST',
+          `/zones/${zone}/instances/${name}/${verb}`,
+          {
+            ...(query ? { query } : {}),
+            signal: context.signal,
+          },
+        ),
+        `${verb} ${id}`,
+      );
+    switch (action) {
+      case 'on':
+        await act('start');
+        return;
+      case 'graceful-off':
+        await act('stop');
+        return;
+      case 'off':
+        await act('stop', { discardLocalSsd: 'false' });
+        return;
+      case 'reset':
+      case 'cycle':
+        await act('reset');
+        return;
+      case 'graceful-restart': {
+        // A VM cannot be started until it has stopped: wait for the stop (at most 20 s).
+        const stopped = await waitForOperation(this.client, await act('stop'), {
+          signal: context.signal,
+          pollMs: this.options.operationPollMs ?? 2000,
+          maxMs: instanceWaitMs,
+          what: `stop ${id}`,
+        });
+        if (stopped.status !== 'DONE')
+          throw new ComputeError('UNAVAILABLE', `${id} is still stopping`, undefined, {
+            provider: 'gcp',
+            reason: 'stopping',
+            retryAfterMs: 5000,
+          });
+        await act('start');
+        return;
+      }
+      default:
+        throw new ComputeError('UNSUPPORTED', `Compute Engine has no ${String(action)} action`);
+    }
+  }
+
+  async *list(context: CallContext): AsyncIterable<ExternalMachine> {
+    for await (const instance of this.client.aggregated<GceInstance>(
+      '/aggregated/instances',
+      'instances',
+      {
+        query: { filter: `labels.${labels.managed}=true` },
+        signal: context.signal,
+      },
+    )) {
+      if (this.inConfiguredZone(instance)) yield await this.toMachine(instance, context.signal);
+    }
+  }
+}

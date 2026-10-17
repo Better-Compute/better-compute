@@ -199,3 +199,80 @@ export function gceClient(options: GceClientOptions): GceClient {
 
   return { request, pages, aggregated };
 }
+
+/** A Compute Engine `Operation` (the members this provider reads). */
+export interface GceOperation {
+  name: string;
+  status: 'PENDING' | 'RUNNING' | 'DONE';
+  selfLink?: string;
+  zone?: string;
+  region?: string;
+  error?: { errors?: { code?: string; message?: string }[] };
+  httpErrorStatusCode?: number;
+  httpErrorMessage?: string;
+}
+
+/** The project-relative path of an operation (`/zones/z/operations/op`), from its selfLink. */
+export function operationPath(operation: GceOperation): string {
+  const link = operation.selfLink
+    ? /\/projects\/[^/]+(\/.+?)(?:\?.*)?$/.exec(operation.selfLink)
+    : null;
+  if (link) return link[1]!;
+  if (operation.zone)
+    return `/zones/${operation.zone.split('/').pop()}/operations/${operation.name}`;
+  if (operation.region)
+    return `/regions/${operation.region.split('/').pop()}/operations/${operation.name}`;
+  return `/global/operations/${operation.name}`;
+}
+
+/** Throws the operation's error when it is finished and failed; returns the operation otherwise. */
+export function settled(operation: GceOperation, what?: string): GceOperation {
+  if (operation.status === 'DONE') {
+    const failure = operationFailure(operation, what);
+    if (failure) throw failure;
+  }
+  return operation;
+}
+
+/** Reads an operation once. */
+export async function getOperation(
+  client: GceClient,
+  operation: GceOperation,
+  signal: AbortSignal,
+): Promise<GceOperation> {
+  return client.request<GceOperation>('GET', operationPath(operation), { signal });
+}
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(signal.reason);
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/**
+ * Polls an operation until it is DONE, at most `maxMs / pollMs` reads apart by `pollMs`, and throws
+ * the operation's error if it failed. For in-call waits of at most 20 seconds; anything longer
+ * belongs to the reconciler. Returns the last state read (not DONE if the wait ran out).
+ */
+export async function waitForOperation(
+  client: GceClient,
+  operation: GceOperation,
+  options: { signal: AbortSignal; pollMs: number; maxMs: number; what?: string },
+): Promise<GceOperation> {
+  let current = settled(operation, options.what);
+  const reads = Math.max(1, Math.ceil(options.maxMs / Math.max(1, options.pollMs)));
+  for (let read = 0; current.status !== 'DONE' && read < reads; read++) {
+    if (read > 0) await sleep(options.pollMs, options.signal);
+    current = settled(await getOperation(client, current, options.signal), options.what);
+  }
+  return current;
+}

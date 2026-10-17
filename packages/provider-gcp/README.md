@@ -8,16 +8,16 @@ It is not part of the `better-compute` umbrella: install it next to `better-comp
 
 An account is data, validated by the provider's manifest:
 
-| Field | Meaning |
-|---|---|
-| `projectId` | The Google Cloud project id. |
-| `zones` | At least one zone. Offers and discovery are limited to these. |
-| `credentials` | A secret reference to a service-account key JSON. Absent: the metadata server. |
-| `impersonate` | A service-account email to impersonate with the base credentials. |
-| `network`, `subnet` | Used by `create` when no tenant network is given (default network `default`). |
-| `imageProject` | Where image families resolve (default `ubuntu-os-cloud`). |
-| `diskGiB` | Boot disk size (default 100). |
-| `discoverLabel` | `key=value`: discovery yields only VMs carrying this label. |
+| Field               | Meaning                                                                        |
+| ------------------- | ------------------------------------------------------------------------------ |
+| `projectId`         | The Google Cloud project id.                                                   |
+| `zones`             | At least one zone. Offers and discovery are limited to these.                  |
+| `credentials`       | A secret reference to a service-account key JSON. Absent: the metadata server. |
+| `impersonate`       | A service-account email to impersonate with the base credentials.              |
+| `network`, `subnet` | Used by `create` when no tenant network is given (default network `default`).  |
+| `imageProject`      | Where image families resolve (default `ubuntu-os-cloud`).                      |
+| `diskGiB`           | Boot disk size (default 100).                                                  |
+| `discoverLabel`     | `key=value`: discovery yields only VMs carrying this label.                    |
 
 ## Authentication
 
