@@ -352,6 +352,8 @@ type ProviderAction =
   | { kind: 'release' }
   /** Attached, deleted on delete: hand the machine to better-compute (managed), then delete it. */
   | { kind: 'managed-delete' }
+  /** `instances.reboot` was asked for and not done yet. */
+  | { kind: 'reboot'; action: 'graceful-restart' | 'reset' }
   | { kind: 'none' };
 
 function providerAction(row: InstanceRow): ProviderAction {
@@ -366,6 +368,8 @@ function providerAction(row: InstanceRow): ProviderAction {
     return row.externalId ? { kind: 'get' } : { kind: 'create' };
   }
   if (!row.externalId) return { kind: 'none' };
+  if (row.state === 'running' && row.desiredState === 'running' && row.rebootPending)
+    return { kind: 'reboot', action: row.rebootHard ? 'reset' : 'graceful-restart' };
   if (row.state === 'running' && row.desiredState === 'stopped' && row.reportedState === 'running')
     return { kind: 'power', action: 'graceful-off' };
   if (row.state === 'stopped' && row.desiredState === 'running' && row.reportedState === 'stopped')
@@ -464,6 +468,11 @@ async function reconcileProvider(
         } catch (error) {
           if (!isComputeError(error, 'NOT_FOUND')) throw error;
         }
+    } else if (action.kind === 'reboot') {
+      if (!client.power)
+        throw new ComputeError('UNSUPPORTED', `Provider ${account.provider} cannot reboot machines`);
+      await client.power(row.externalId!, action.action, context);
+      machine = await client.get(row.externalId!, context);
     } else if (action.kind === 'power') {
       if (!client.power)
         throw new ComputeError('UNSUPPORTED', `Provider ${account.provider} has no power control`);
@@ -479,6 +488,23 @@ async function reconcileProvider(
     if (!current || current.version !== row.version) return deps.clock.now();
     if (failure !== undefined) {
       const code = isComputeError(failure) ? failure.code : 'PROVIDER_ERROR';
+      // A reboot the provider cannot do is dropped (with the error as a condition): the instance runs on.
+      if (action.kind === 'reboot' && code === 'UNSUPPORTED') {
+        await updateInstance(tx, current, {
+          rebooted: true,
+          conditions: withCondition(
+            current.conditions,
+            {
+              type: 'ProviderError',
+              status: 'true',
+              reason: code,
+              message: String((failure as Error)?.message ?? failure).slice(0, 500),
+            },
+            now,
+          ),
+        });
+        return now + pollSteadyMs;
+      }
       // The machine's ownership label names another instance: this one never owns it.
       if (code === 'CONFLICT' && (action.kind === 'claim' || action.kind === 'managed-delete')) {
         const failed = await moveInstance(tx, current, 'fail', 'error', {
@@ -521,6 +547,13 @@ async function reconcileProvider(
       return undefined;
     }
     if (action.kind === 'claim') current = await updateInstance(tx, current, { claimed: true });
+    if (action.kind === 'reboot') {
+      // The request this run planned is done (a newer one bumps the version and re-plans).
+      current = await updateInstance(tx, current, { rebooted: true });
+      await publishInstance(deps, tx, current, 'instance.rebooted', {
+        hard: action.action === 'reset',
+      });
+    }
     if (!machine) {
       // `get` found nothing: gone underneath us.
       if (current.state === 'deleting') {

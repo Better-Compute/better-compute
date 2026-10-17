@@ -64,3 +64,11 @@ Deletes an attached instance without deleting its machine; returns the instance 
 - **Errors.** `INVALID_STATE` for an instance better-compute created (`origin: 'created'`): detaching it would leave a machine running that no one is billed for, so delete it instead. Instances of other tenants, or none, are `NOT_FOUND`. A `deleted` instance is returned unchanged.
 - **IAM.** Decided as `compute:instances:delete` on the instance.
 - **Events.** `instance.deleting`; `instance.detached` (not `instance.deleted`) follows when the label is released.
+
+## reboot
+
+Asks for a restart of a running provider instance's machine; returns the instance, still `running`. The `vps.instances` reconciler restarts the machine once, gracefully (`graceful-restart`) or, with `hard: true`, by a reset, and publishes `instance.rebooted` with `hard`.
+
+- **Semantics.** A second reboot asked for while the first is pending is one restart; one asked for after it restarts the machine again. A provider without power control drops the request and records a `ProviderError` condition.
+- **Errors.** `INVALID_STATE` when the instance is not running, or is being stopped or deleted. `UNSUPPORTED` for instances of hosted pools, for now. Instances of other tenants, or none, are `NOT_FOUND`.
+- **IAM.** Decided as `compute:instances:update` on the instance.

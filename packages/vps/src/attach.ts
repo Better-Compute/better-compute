@@ -416,6 +416,58 @@ export async function attachMachine(
   return instanceView(row);
 }
 
+export interface RebootInstanceInput extends InstanceRef {
+  /** `reset` instead of a graceful restart. */
+  hard: boolean;
+}
+
+export const rebootSchema = strictObject(
+  {
+    tenantId: field('The tenant the call acts in', '^[A-Za-z0-9._:-]{1,128}$', 128),
+    instanceId: field('The instance', '^inst_[0-9a-hjkmnp-tv-z]{26,52}$', 57),
+    hard: {
+      type: 'boolean',
+      default: false,
+      description: 'Reset the machine instead of restarting it gracefully',
+    },
+  },
+  ['tenantId', 'instanceId'],
+);
+
+export function parseReboot(raw: unknown): RebootInstanceInput {
+  const input = object(raw, ['tenantId', 'instanceId', 'hard']);
+  if (input.hard !== undefined && typeof input.hard !== 'boolean') fail('hard must be a boolean');
+  return {
+    tenantId: tenant(input.tenantId),
+    instanceId: id(input.instanceId, 'inst', 'instanceId'),
+    hard: input.hard === true,
+  };
+}
+
+/**
+ * `instances.reboot` (provider pools): records the request; the reconciler restarts the machine
+ * (`graceful-restart`, or `reset` when `hard`) once and publishes `instance.rebooted`.
+ */
+export async function rebootInstance(
+  deps: Pick<InstanceDeps, 'events' | 'work' | 'desired'>,
+  tx: SqlTx,
+  input: RebootInstanceInput,
+): Promise<Instance> {
+  let row = await readInstance(tx, input.instanceId, { tenantId: input.tenantId, lock: true });
+  if (!row || row.draft)
+    throw new ComputeError('NOT_FOUND', `Instance ${input.instanceId} not found`);
+  if (row.poolClass !== 'provider')
+    throw new ComputeError('UNSUPPORTED', 'Only provider instances can be rebooted for now');
+  if (row.state !== 'running' || row.desiredState !== 'running')
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Instance ${row.id} is ${row.state} (wanted ${row.desiredState}); only a running instance reboots`,
+    );
+  row = await updateInstance(tx, row, { rebootRequested: { hard: input.hard } });
+  await wake(deps, tx, row);
+  return instanceView(row);
+}
+
 /**
  * `instances.detach`: deletes an attached instance without deleting its machine. The reconciler
  * removes the ownership label, refunds quota and drops authz; the machine keeps running. A machine

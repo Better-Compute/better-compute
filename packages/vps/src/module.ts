@@ -79,6 +79,10 @@ import {
   attachMachine,
   attachSchemas,
   detachInstance,
+  parseReboot,
+  rebootInstance,
+  rebootSchema,
+  type RebootInstanceInput,
   forgetAttach,
   parseAttach,
   prepareAttach,
@@ -269,6 +273,7 @@ export type VpsApi = {
     delete: MethodDefinition<InstanceRef, Instance>;
     attach: MethodDefinition<AttachInstanceInput, Instance>;
     detach: MethodDefinition<InstanceRef, Instance>;
+    reboot: MethodDefinition<RebootInstanceInput, Instance>;
   };
   flavors: {
     list: MethodDefinition<PoolInput, { items: FlavorRecord[] }>;
@@ -776,6 +781,14 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         resource: instanceResource,
         validate: describedBy(schemas.instance, parseInstanceRef),
         handler: (context, input) => detachInstance(depsOf(context), context.sql, input),
+      }),
+      // R3: a restart (or reset) of a provider instance's machine, done once by the reconciler.
+      reboot: defineMethod({
+        action: 'compute:instances:update',
+        kind: 'mutation',
+        resource: instanceResource,
+        validate: describedBy(rebootSchema, parseReboot),
+        handler: (context, input) => rebootInstance(depsOf(context), context.sql, input),
       }),
     },
     flavors: {

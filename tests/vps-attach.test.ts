@@ -397,3 +397,80 @@ describe('lifecycle of attached instances', () => {
     expect(world.cloud.requests.some((request) => request.startsWith('delete'))).toBe(false);
   });
 });
+
+describe('instances.reboot', () => {
+  const step = async (world: GceWorld, ms = 1_000) => {
+    await world.fixture.advance(ms);
+    await world.tick('vps.instances', 1);
+  };
+  async function runningAttached(world: GceWorld) {
+    const instance = await world.api.instances.attach(world.root, attachInput(world));
+    await step(world);
+    return { tenantId: world.acmeTenant, instanceId: instance.id as string };
+  }
+  const powers = (world: GceWorld) =>
+    world.cloud.requests.filter((request) => request.startsWith('power'));
+
+  it('reboot issues graceful-restart once', async () => {
+    const world = await legacyWorld();
+    const ref = await runningAttached(world);
+    const answer = await world.api.instances.reboot(world.acme, ref);
+    expect(answer).toMatchObject({ id: ref.instanceId, state: 'running' });
+    await step(world);
+    await step(world, 60_000);
+    expect(powers(world)).toEqual([`power ${LEGACY} graceful-restart`]);
+    const rebooted = await world.events('instance.rebooted');
+    expect(rebooted).toMatchObject([{ data: { hard: false } }]);
+    expect(await world.api.instances.get(world.acme, ref)).toMatchObject({ state: 'running' });
+    // A second reboot is a second restart.
+    await world.api.instances.reboot(world.acme, ref);
+    await step(world);
+    expect(powers(world)).toHaveLength(2);
+  });
+
+  it('hard reboot issues reset', async () => {
+    const world = await legacyWorld();
+    const ref = await runningAttached(world);
+    await world.api.instances.reboot(world.acme, { ...ref, hard: true });
+    await step(world);
+    await step(world, 60_000);
+    expect(powers(world)).toEqual([`power ${LEGACY} reset`]);
+    expect(await world.events('instance.rebooted')).toMatchObject([{ data: { hard: true } }]);
+  });
+
+  it('reboot of a stopped instance is refused', async () => {
+    const world = await legacyWorld();
+    const ref = await runningAttached(world);
+    await world.api.instances.stop(world.acme, ref);
+    expect(await code(world.api.instances.reboot(world.acme, ref))).toBe('INVALID_STATE');
+    await step(world);
+    expect(await code(world.api.instances.reboot(world.acme, ref))).toBe('INVALID_STATE');
+    expect(powers(world)).toEqual([`power ${LEGACY} graceful-off`]);
+    // Not yet running (still scheduling) is refused the same way.
+    const fresh = await world.api.instances.create(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: world.poolId,
+      flavor: 'a2.highgpu.1g',
+      imageId: 'debian-12',
+      idempotencyKey: 'vm-1',
+    });
+    expect(
+      await code(
+        world.api.instances.reboot(world.acme, {
+          tenantId: world.acmeTenant,
+          instanceId: fresh.id,
+        }),
+      ),
+    ).toBe('INVALID_STATE');
+  });
+
+  it('api surface has the rows', () => {
+    for (const [method, action] of [
+      ['detach', 'compute:instances:delete'],
+      ['reboot', 'compute:instances:update'],
+    ] as const)
+      expect(
+        apiSurface.find((row) => row.group === 'instances' && row.method === method),
+      ).toMatchObject({ action, resource: 'instance', kind: 'mutation', phase: 'v1.0' });
+  });
+});
