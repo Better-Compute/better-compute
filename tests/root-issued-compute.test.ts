@@ -302,7 +302,7 @@ describe('platform-issued compute, end to end', () => {
       await p.tick('vps.instances', 5_000);
     }
     const rebooted = await p.fixture.database.query<{ subject: string }>(
-      `SELECT subject FROM outbox WHERE topic = 'instance.rebooted'`,
+      `SELECT payload->>'subject' AS subject FROM outbox WHERE topic = 'instance.rebooted'`,
     );
     expect(rebooted.rows.map((row) => row.subject)).toEqual([`instance/${issued.id}`]);
 
@@ -357,7 +357,13 @@ describe('platform-issued compute, end to end', () => {
       sources: ['0.0.0.0/0'],
       targets: { instanceIds: [onNetwork.id] },
     });
-    expect(await p.convergeNetwork(A, network.id)).toMatchObject({ state: 'ready' });
+    // A rule has its own state (the network's covers the VPC and its subnets).
+    const ruleState = async () =>
+      (await api.firewallRules.list(aOp, { tenantId: A, networkId: network.id })).items[0].state;
+    for (let round = 0; round < 10 && (await ruleState()) !== 'ready'; round++) {
+      p.emu.finishOperations();
+      await p.tick('vps.networks', 5_000);
+    }
     const rules = await api.firewallRules.list(aOp, { tenantId: A, networkId: network.id });
     expect(rules.items).toEqual([expect.objectContaining({ id: rule.id, state: 'ready' })]);
     expect(p.emu.firewalls.get(providerResourceName(rule.id))).toMatchObject({
