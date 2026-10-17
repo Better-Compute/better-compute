@@ -32,6 +32,11 @@ export interface ProviderConformanceSubject {
    * then checks only that the actions succeed.
    */
   powerObservable?: boolean;
+  /**
+   * A machine id the subject can claim and release (an existing machine the provider can see).
+   * The claim and discover cases are skipped without it.
+   */
+  attachable?: string;
 }
 
 const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -222,6 +227,46 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
         } finally {
           await cleanUp(impl, call, machine.id);
         }
+      },
+    },
+    {
+      name: 'claim then release round-trips the label',
+      async run(subject) {
+        const id = subject.attachable;
+        const { impl, call } = await client(subject);
+        if (!impl.claim || !impl.release || id === undefined) return;
+        const instanceId = key(subject, 'claim');
+        try {
+          const claimed = await impl.claim(id, instanceId, call('claim'));
+          checkMachine(claimed, 'claim');
+          checkEqual(claimed.claimedBy, instanceId, 'claim names the instance');
+          const seen = await impl.get(id, call('get-claimed'));
+          checkMachine(seen, 'get after claim');
+          checkEqual(seen.claimedBy, instanceId, 'get after claim names the instance');
+          await impl.release(id, `${instanceId}-other`, call('release-other'));
+          const kept = await impl.get(id, call('get-kept'));
+          checkEqual(kept?.claimedBy, instanceId, 'release for another instance keeps the label');
+          await impl.release(id, instanceId, call('release'));
+          const released = await impl.get(id, call('get-released'));
+          checkMachine(released, 'get after release');
+          check(released.claimedBy === undefined, 'release removes the label');
+        } finally {
+          await impl.release(id, instanceId, call('release-cleanup'));
+        }
+      },
+    },
+    {
+      name: 'discover yields the attachable machine',
+      async run(subject) {
+        const id = subject.attachable;
+        const { impl, call } = await client(subject);
+        if (!impl.discover || id === undefined) return;
+        let found: ExternalMachine | undefined;
+        for await (const machine of impl.discover(call('discover'))) {
+          checkMachine(machine, 'discover');
+          if (machine.id === id) found = machine;
+        }
+        check(found !== undefined, `discover yields machine ${id}`);
       },
     },
   ];

@@ -641,6 +641,105 @@ export interface ExternalMachine {
   offerId?: string;
   region?: string;
   addresses: string[];
+  /** Optional detail; providers that do not know a member omit it. */
+  zone?: string;
+  machineType?: string;
+  vcpu?: number;
+  memoryGiB?: number;
+  gpus?: { model: string; count: number };
+  labels?: Readonly<Record<string, string>>;
+  networks?: readonly {
+    network: string;
+    subnet?: string;
+    address?: string;
+    publicAddress?: string;
+    tags?: readonly string[];
+  }[];
+  /** The provider reservation this machine consumes, as a reservation id (see `ExternalReservation.id`). */
+  reservation?: string;
+  createdAt?: number;
+  /** The better-compute instance id the provider's ownership label names, if any. */
+  claimedBy?: string;
+}
+
+/** A provider capacity reservation (GCE reservations and the like), as the provider reports it. */
+export interface ExternalReservation {
+  /** `<zone>/<name>`, or `projects/<owner>/zones/<zone>/reservations/<name>` when shared in. */
+  id: string;
+  name: string;
+  zone: string;
+  region: string;
+  state: 'scheduled' | 'creating' | 'ready' | 'updating' | 'deleting' | 'error';
+  machineType: string;
+  vcpu: number;
+  memoryGiB: number;
+  gpus?: { model: string; count: number };
+  localSsdGiB?: number;
+  /** `specificReservation.count` (future reservations: `totalCount`). */
+  total: number;
+  /** `specificReservation.inUseCount` (future reservations: 0). */
+  inUse: number;
+  /** `specificReservationRequired`: only machines that name the reservation consume it. */
+  specificOnly: boolean;
+  shared: boolean;
+  /** Future/calendar reservations; `deleteAtTime` for on-demand ones. */
+  startsAt?: number;
+  endsAt?: number;
+  /** `<zone>/<machineType>@<name | projects/<owner>/reservations/<name>>`. */
+  offerId: string;
+}
+
+/** Where a created machine attaches: a provider network, optionally a subnet and managed tags. */
+export interface NetworkRef {
+  network: string;
+  subnet?: string;
+  tags?: readonly string[];
+}
+
+export interface ProviderNetworkSpec {
+  name: string;
+  description?: string;
+  mtu?: number;
+}
+export interface ProviderSubnetSpec {
+  network: string;
+  name: string;
+  region: string;
+  cidr: string;
+  privateGoogleAccess?: boolean;
+}
+export interface ProviderFirewallSpec {
+  network: string;
+  name: string;
+  direction: 'ingress' | 'egress';
+  action: 'allow' | 'deny';
+  priority: number;
+  rules: readonly { protocol: 'tcp' | 'udp' | 'icmp' | 'all'; ports?: readonly string[] }[];
+  sources?: readonly string[];
+  destinations?: readonly string[];
+  targetTags?: readonly string[];
+  disabled?: boolean;
+}
+export interface ProviderNetworkState {
+  id: string;
+  state: 'pending' | 'ready' | 'deleting' | 'deleted' | 'error';
+  message?: string;
+}
+
+/**
+ * Provider-side tenant networking. `ensure*` and `delete*` are idempotent and non-blocking: they
+ * return `pending` (or `deleting`) while a provider operation runs, and the reconciler calls them
+ * again later.
+ */
+export interface ProviderNetworks {
+  ensureNetwork(spec: ProviderNetworkSpec, context: CallContext): Promise<ProviderNetworkState>;
+  ensureSubnet(spec: ProviderSubnetSpec, context: CallContext): Promise<ProviderNetworkState>;
+  ensureFirewall(spec: ProviderFirewallSpec, context: CallContext): Promise<ProviderNetworkState>;
+  deleteNetwork(name: string, context: CallContext): Promise<ProviderNetworkState>;
+  deleteSubnet(region: string, name: string, context: CallContext): Promise<ProviderNetworkState>;
+  deleteFirewall(name: string, context: CallContext): Promise<ProviderNetworkState>;
+  /** Replaces the tags this provider manages (prefix `bc-`) on a machine; keeps every other tag. */
+  setTags(machineId: string, tags: readonly string[], context: CallContext): Promise<void>;
 }
 
 /** Rescue-system access; the credential is stored as a secret, never returned as a value. */
@@ -665,7 +764,14 @@ export interface CallContext {
 export interface ProviderImpl {
   listOffers(query: OfferQuery): Promise<Offer[]>;
   create(
-    request: { offerId: string; image: ImageRef; userData: string; name: string },
+    request: {
+      offerId: string;
+      image: ImageRef;
+      userData: string;
+      name: string;
+      network?: NetworkRef;
+      labels?: Readonly<Record<string, string>>;
+    },
     context: CallContext,
   ): Promise<ExternalMachine>;
   get(id: string, context: CallContext): Promise<ExternalMachine | undefined>;
@@ -699,6 +805,22 @@ export interface ProviderImpl {
   rescue?(id: string, context: CallContext): Promise<RescueAccess>;
   reinstall?(id: string, image: ImageRef, context: CallContext): Promise<void>;
   list?(context: CallContext): AsyncIterable<ExternalMachine>;
+  /** Every machine the account can see, including ones better-compute did not create. */
+  discover?(context: CallContext): AsyncIterable<ExternalMachine>;
+  /**
+   * Writes the ownership label naming `instanceId`. With `managed`, also writes
+   * `better-compute-managed=true`, which hands deletion of the machine to better-compute.
+   */
+  claim?(
+    id: string,
+    instanceId: string,
+    context: CallContext,
+    options?: { managed?: boolean },
+  ): Promise<ExternalMachine>;
+  /** Removes the ownership label if it names `instanceId`. */
+  release?(id: string, instanceId: string, context: CallContext): Promise<void>;
+  listReservations?(context: CallContext): Promise<ExternalReservation[]>;
+  networks?: ProviderNetworks;
 }
 
 export interface ProviderContext {
