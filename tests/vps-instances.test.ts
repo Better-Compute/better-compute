@@ -61,8 +61,14 @@ interface FakeCloud {
   machines: Map<string, ExternalMachine & { userData: string; key: string }>;
   creates: number;
   fail?: string;
+  /** Thrown by every `create` (a refusal the provider answers at once). */
+  createError?: ComputeError;
+  /** Thrown by every `get` (an insert the provider failed after accepting it, e.g. a stockout). */
+  getError?: ComputeError;
+  /** Every provider call (create, get, delete, power), in order. */
+  calls: string[];
 }
-const cloud: FakeCloud = { machines: new Map(), creates: 0 };
+const cloud: FakeCloud = { machines: new Map(), creates: 0, calls: [] };
 
 const fakeCloud = defineProvider({
   id: 'fake-cloud',
@@ -87,7 +93,9 @@ const fakeCloud = defineProvider({
         ];
       },
       async create(request, call) {
+        cloud.calls.push(`create ${call.idempotencyKey}`);
         await context.secrets.resolve('env://FAKE_TOKEN');
+        if (cloud.createError) throw cloud.createError;
         if (cloud.fail) throw new ComputeError('PROVIDER_ERROR', cloud.fail);
         const existing = [...cloud.machines.values()].find(
           (machine) => machine.key === call.idempotencyKey,
@@ -107,12 +115,16 @@ const fakeCloud = defineProvider({
         return machine;
       },
       async get(id) {
+        cloud.calls.push(`get ${id}`);
+        if (cloud.getError) throw cloud.getError;
         return cloud.machines.get(id);
       },
       async delete(id) {
+        cloud.calls.push(`delete ${id}`);
         if (!cloud.machines.delete(id)) throw new ComputeError('NOT_FOUND', 'gone');
       },
       async power(id, action) {
+        cloud.calls.push(`power ${id} ${action}`);
         const machine = cloud.machines.get(id);
         if (machine) machine.state = action === 'on' ? 'running' : 'stopped';
       },
@@ -126,6 +138,8 @@ interface Recorded {
   authz: AuthzRow[];
   removed: { type: string; id: string }[];
   events: string[];
+  /** Every published event with its data. */
+  published: { type: string; data: Record<string, unknown> }[];
   work: { key: string; notBefore?: number }[];
   invalidated: string[];
 }
@@ -172,6 +186,7 @@ function moduleContext(sql: SqlExecutor): ModuleContext {
     events: {
       async publish(_tx, event) {
         recorded.events.push(event.type);
+        recorded.published.push({ type: event.type, data: { ...event.data } });
       },
     },
     work: {
@@ -314,10 +329,13 @@ const tables = [
 let hostedPool: string;
 beforeEach(async () => {
   for (const table of tables) await db.query(`DELETE FROM ${table}`);
-  recorded = { authz: [], removed: [], events: [], work: [], invalidated: [] };
+  recorded = { authz: [], removed: [], events: [], published: [], work: [], invalidated: [] };
   cloud.machines.clear();
   cloud.creates = 0;
+  cloud.calls = [];
   delete cloud.fail;
+  delete cloud.createError;
+  delete cloud.getError;
   clock = manualClock(T0);
   await useSimClock(db, T0);
   await db.query(
@@ -377,7 +395,7 @@ beforeEach(async () => {
       { tenantId: 'root', poolId: hostedPool, name, vcpu, memoryGiB, diskGiB, gpus },
       root,
     );
-  recorded = { authz: [], removed: [], events: [], work: [], invalidated: [] };
+  recorded = { authz: [], removed: [], events: [], published: [], work: [], invalidated: [] };
 });
 
 const createHosted = (extra: Record<string, unknown> = {}) => ({
@@ -1393,6 +1411,93 @@ describe('provider instances', () => {
     await call('instances', 'delete', { tenantId: 'acme', instanceId: created.id });
     await reconcile(created.id);
     expect((await get(created.id)).state).toBe('deleted');
+  });
+
+  const used = async () =>
+    Object.fromEntries(
+      (await readQuotas(db, 'acme', providerPool)).map((row) => [row.resource, row.used]),
+    );
+
+  it('fails an instance whose create the provider failed after accepting it (W3a), and asks no more', async () => {
+    const created = (await call('instances', 'create', createProvider())) as View;
+    await reconcile(created.id);
+    expect((await get(created.id)).state).toBe('provisioning');
+    // The provider accepted the insert, then failed it: every read of the VM answers the stockout.
+    cloud.getError = new ComputeError(
+      'CAPACITY_UNAVAILABLE',
+      'ZONE_RESOURCE_POOL_EXHAUSTED: us-central1-a has no a3-highgpu-8g',
+    );
+    recorded.published = [];
+    await reconcile(created.id);
+    expect(await get(created.id)).toMatchObject({
+      state: 'error',
+      conditions: [
+        {
+          type: 'ProvisionFailed',
+          status: 'true',
+          reason: 'CAPACITY_UNAVAILABLE',
+          message: 'ZONE_RESOURCE_POOL_EXHAUSTED: us-central1-a has no a3-highgpu-8g',
+        },
+      ],
+    });
+    expect(recorded.published).toContainEqual({
+      type: 'instance.failed',
+      data: expect.objectContaining({ reason: 'CAPACITY_UNAVAILABLE' }),
+    });
+    // The quota stays charged until the instance is deleted.
+    expect(await used()).toMatchObject({ vcpu: 2, memoryGiB: 4, diskGiB: 40 });
+    // No retry loop: another tick (and asking it to start again) calls the provider no more.
+    const calls = cloud.calls.length;
+    await reconcile(created.id);
+    await call('instances', 'start', { tenantId: 'acme', instanceId: created.id });
+    await reconcile(created.id);
+    expect(cloud.calls.length).toBe(calls);
+    expect((await get(created.id)).state).toBe('error');
+
+    // Deleting it does not depend on `get`: one delete (NOT_FOUND is success), then refunded.
+    await call('instances', 'delete', { tenantId: 'acme', instanceId: created.id });
+    await reconcile(created.id);
+    expect((await get(created.id)).state).toBe('deleted');
+    expect(cloud.calls.slice(calls)).toEqual(['delete srv-1']);
+    expect((await readQuotas(db, 'acme', providerPool)).every((row) => row.used === 0)).toBe(true);
+  });
+
+  it('fails an instance whose create the provider refused at once (QUOTA_EXCEEDED)', async () => {
+    cloud.createError = new ComputeError('QUOTA_EXCEEDED', "Quota 'GPUS_ALL_REGIONS' exceeded");
+    const created = (await call('instances', 'create', createProvider())) as View;
+    await reconcile(created.id);
+    expect(await get(created.id)).toMatchObject({
+      state: 'error',
+      conditions: [{ type: 'ProvisionFailed', reason: 'QUOTA_EXCEEDED' }],
+    });
+    expect(recorded.published).toContainEqual({
+      type: 'instance.failed',
+      data: expect.objectContaining({ reason: 'QUOTA_EXCEEDED' }),
+    });
+    expect(await used()).toMatchObject({ vcpu: 2, memoryGiB: 4, diskGiB: 40 });
+    const calls = cloud.calls.length;
+    await reconcile(created.id);
+    expect(cloud.calls.length).toBe(calls);
+    await call('instances', 'delete', { tenantId: 'acme', instanceId: created.id });
+    await reconcile(created.id);
+    expect((await get(created.id)).state).toBe('deleted');
+    // It never got a machine: there is nothing to delete at the provider.
+    expect(cloud.calls.length).toBe(calls);
+    expect((await readQuotas(db, 'acme', providerPool)).every((row) => row.used === 0)).toBe(true);
+  });
+
+  it('still retries a capacity error once the machine exists (not a failed create)', async () => {
+    const created = (await call('instances', 'create', createProvider())) as View;
+    await reconcile(created.id);
+    [...cloud.machines.values()][0]!.state = 'running';
+    await reconcile(created.id);
+    expect((await get(created.id)).state).toBe('running');
+    cloud.getError = new ComputeError('CAPACITY_UNAVAILABLE', 'odd answer');
+    await reconcile(created.id);
+    expect(await get(created.id)).toMatchObject({
+      state: 'running',
+      conditions: [{ type: 'ProviderError', reason: 'CAPACITY_UNAVAILABLE' }],
+    });
   });
 
   it('lists offers and refuses to delete accounts in use', async () => {

@@ -681,6 +681,20 @@ export const ownershipLostCondition = 'OwnershipLost';
 /** Another live instance holds this instance's provider machine id (a provider reused it). */
 export const duplicateMachineCondition = 'DuplicateMachine';
 
+/**
+ * The provider refused (or, after accepting it, failed) the create of a provider-pool instance for
+ * capacity or quota (reason: `CAPACITY_UNAVAILABLE` / `QUOTA_EXCEEDED`). Final: the instance never
+ * gets a machine, the provider is asked nothing more until it is deleted.
+ */
+export const provisionFailedCondition = 'ProvisionFailed';
+
+/** Whether the instance's provider create failed for good (it holds no machine to act on). */
+export function provisionFailed(conditions: readonly Condition[]): boolean {
+  return conditions.some(
+    (condition) => condition.status === 'true' && condition.type === provisionFailedCondition,
+  );
+}
+
 /** Whether the instance is marked as sharing its machine id with a live instance. */
 export function duplicateBlocked(conditions: readonly Condition[]): boolean {
   return conditions.some(
@@ -1418,7 +1432,13 @@ export async function setPower(
     );
   if (row.desiredState !== desiredState) row = await updateInstance(tx, row, { desiredState });
   // An instance in error retries when started again, unless a live instance holds its machine id.
-  if (desiredState === 'running' && row.state === 'error' && (row.nodeId || row.externalId)) {
+  // One whose provider create failed (ProvisionFailed) has no machine to start: like a hosted one
+  // that was never placed, it stays in error until deleted.
+  if (
+    desiredState === 'running' &&
+    row.state === 'error' &&
+    (row.nodeId || (row.externalId && !provisionFailed(row.conditions)))
+  ) {
     const holder = await liveHolderOf(tx, row);
     const taken = () =>
       new ComputeError(

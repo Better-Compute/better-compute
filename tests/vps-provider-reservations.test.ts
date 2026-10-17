@@ -48,6 +48,8 @@ interface FakeCloud {
   created: string[];
   listCalls: number;
   failList?: Error;
+  /** Thrown by every `get` (an insert the provider failed after accepting it). */
+  getError?: Error;
 }
 const cloud: FakeCloud = { reservations: [], machines: new Map(), created: [], listCalls: 0 };
 
@@ -102,6 +104,7 @@ const fakeGcp = defineProvider({
       return machine;
     },
     async get(id) {
+      if (cloud.getError) throw cloud.getError;
       return cloud.machines.get(id);
     },
     async delete(id) {
@@ -317,6 +320,7 @@ beforeEach(async () => {
   cloud.created = [];
   cloud.listCalls = 0;
   delete cloud.failList;
+  delete cloud.getError;
   await db.query(
     `INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ($1, 'root', 'shared', 'eu', 1)`,
     [SITE],
@@ -729,6 +733,24 @@ describe('api & admission', () => {
     await reconcileInstance(created.id);
     expect((await listed())[0]).toMatchObject({ pending: 0, free: 1 });
     await create('vm-3');
+  });
+
+  it('a create the provider failed (ProvisionFailed) gives its slot back at once', async () => {
+    await bind();
+    await advance(MINUTE);
+    const created = await create('vm-1');
+    await reconcileInstance(created.id);
+    expect((await listed())[0]).toMatchObject({ pending: 1, free: 0 });
+    // GCP accepted the insert, then failed it: the instance never holds a reserved VM.
+    cloud.getError = new ComputeError('CAPACITY_UNAVAILABLE', 'ZONE_RESOURCE_POOL_EXHAUSTED');
+    await reconcileInstance(created.id);
+    const failed = await db.query<{ state: string }>(`SELECT state FROM instances WHERE id = $1`, [
+      created.id,
+    ]);
+    expect(failed.rows[0]!.state).toBe('error');
+    expect((await listed())[0]).toMatchObject({ pending: 0, free: 1 });
+    delete cloud.getError;
+    await create('vm-2');
   });
 
   it('a scheduled future reservation is listed but refuses bind until ready', async () => {

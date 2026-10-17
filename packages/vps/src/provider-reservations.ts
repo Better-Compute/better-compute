@@ -105,10 +105,12 @@ function reservationOf(row: ReservationRow): ExternalReservation {
 /**
  * Instances admitted against a reservation whose machine a scan may not have counted: the machine is
  * not created yet, or it became known (or the instance was admitted) after the scan began. Errored
- * instances that never got a machine hold nothing.
+ * instances that never got a machine hold nothing, nor do ones whose create the provider failed
+ * (`ProvisionFailed`: it accepted the create, then refused it).
  */
 const pendingCondition = `i.state NOT IN ('deleted', 'failed', 'lost')
   AND NOT (i.state = 'error' AND i.external_id IS NULL)
+  AND NOT (i.state = 'error' AND i.conditions @> '[{"type":"ProvisionFailed","status":"true"}]'::jsonb)
   AND (i.external_id IS NULL OR i.created_at > r.observed_at OR i.provider_reservation_at > r.observed_at)`;
 
 async function pendingByReservation(tx: SqlTx, accountId: string): Promise<Map<string, number>> {

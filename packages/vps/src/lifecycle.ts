@@ -24,6 +24,8 @@ import {
   liveHolderOf,
   ownershipBlocked,
   ownershipLostCondition,
+  provisionFailed,
+  provisionFailedCondition,
   exhaustedHostsCondition,
   exhaustedHostsOf,
   exhaustedReplaceMs,
@@ -407,6 +409,8 @@ function providerAction(row: InstanceRow): ProviderAction {
     return { kind: 'delete' };
   }
   if (blocked) return { kind: 'blocked' };
+  // The provider failed its create for good (W3a): it has no machine to ask about until deleted.
+  if (row.state === 'error' && provisionFailed(row.conditions)) return { kind: 'blocked' };
   // Not claimed yet (in any state): the label first, before anything else is asked of it.
   if (attached && row.externalId && !row.claimed) return { kind: 'claim' };
   if (row.state === 'scheduling') return row.externalId ? { kind: 'get' } : { kind: 'create' };
@@ -586,6 +590,29 @@ async function reconcileProvider(
           reason: 'CONFLICT',
           message: String((failure as Error)?.message ?? failure),
         }, now);
+        return undefined;
+      }
+      // W3a: the provider refused the create for capacity or quota, at once or (read back through
+      // `get` while it is still being created) after accepting it. Retrying cannot help: the
+      // instance fails, keeping its quota until it is deleted.
+      if (
+        (code === 'CAPACITY_UNAVAILABLE' || code === 'QUOTA_EXCEEDED') &&
+        (action.kind === 'create' || action.kind === 'get') &&
+        (current.state === 'scheduling' || current.state === 'provisioning')
+      ) {
+        const failed = await moveInstance(tx, current, 'fail', 'error', {
+          conditions: withCondition(
+            withoutCondition(current.conditions, 'ProviderError'),
+            {
+              type: provisionFailedCondition,
+              status: 'true',
+              reason: code,
+              message: String((failure as Error)?.message ?? failure).slice(0, 500),
+            },
+            now,
+          ),
+        });
+        await publishInstance(deps, tx, failed, 'instance.failed', { reason: code });
         return undefined;
       }
       current = await updateInstance(tx, current, {
