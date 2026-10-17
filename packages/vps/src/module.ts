@@ -546,7 +546,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         'vps({ bootstrap }).pins must be sha256/<base64> SPKI pins (servingCa, joinSigning, joinEncryption)',
       );
   }
-  /** The IAM root tenant, whose provider accounts are the platform's (ruling F1), when IAM names one. */
+  /** The IAM root tenant, whose provider accounts are the platform's (ruling F1); betterCompute() always names it. */
   const rootOf = (context: ModuleContext): { rootTenantId?: string } => {
     const rootTenantId = (context.iam as ModuleContext['iam'] | undefined)?.rootTenantId;
     return rootTenantId !== undefined ? { rootTenantId } : {};

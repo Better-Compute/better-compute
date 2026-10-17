@@ -77,8 +77,8 @@ field, `details.reason` is `secretRefScope`). The rule holds again when a client
 an account stored before it, or written around the API, fails that call with `ACCESS_DENIED` and nothing is read.
 A tenant's references reach the store with the tenant as the resolve context (`resolve(ref, { tenantId })`): the
 local-sealed store then serves only a secret stored for that tenant, and a `SecretStore` of your own for `vault://`
-gets the same context to check against. The root tenant is the IAM port's `rootTenantId`; without one, no account is
-the platform's.
+gets the same context to check against. The root tenant is the deployment's `rootTenantId`, given to
+`betterCompute()` or named by the IAM port (`bridge.embedded(iam, { rootTenantId })`): modules see it either way.
 
 ### Create an account
 

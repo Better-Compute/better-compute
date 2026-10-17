@@ -94,7 +94,7 @@ Anything wrong throws `INVALID_CONFIG` before a connection is opened.
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `rootTenantId` | `iam.rootTenantId` | The IAM root tenant. Required when the port does not name it; when both are given they must agree. |
+| `rootTenantId` | `iam.rootTenantId` | The IAM root tenant. Required when the port does not name it; when both are given they must agree. Modules read it from `context.iam.rootTenantId`, which names it either way. |
 | `basePath` | `/api/compute` | Where the handler is mounted. An absolute path without a trailing slash. |
 | `typePrefix` | `compute-` | IAM resource type prefix, the same as the IAM bridge's. |
 | `modules` | `[]` | Injected modules (`provisionModule()`, `metal()`, `vps()`, `eventsModule()`, …), registered after the built-ins. |

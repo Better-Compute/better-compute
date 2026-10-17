@@ -76,7 +76,6 @@ async function world(
     ],
   });
   const { compute, tenants, iam } = fixture;
-  (iam as { rootTenantId?: string }).rootTenantId = tenants.root.id;
   iam.allow({ token: tenants.root.token });
   iam.allow({ token: tenants.acme.token });
   const api = compute.api as any;

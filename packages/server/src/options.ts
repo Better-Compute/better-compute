@@ -28,7 +28,7 @@ import {
 import type { CapacityModuleOptions } from '@better-compute/capacity';
 import { localSealedSecretStore, type CommandSigningAuthority } from '@better-compute/pki';
 import type { DownloadsOptions } from './downloads.js';
-import { guardIamPort, type IamGuardMode } from './iam-guard.js';
+import { guardIamPort, withRootTenant, type IamGuardMode } from './iam-guard.js';
 import { sourceAddressResolver, type SourceAddressResolver } from './proxy.js';
 import { pkiAllocationBindingCheck } from './join/allocation-binding.js';
 import { joinAttestorsValidator } from './join/pool-policy.js';
@@ -511,7 +511,12 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
 
   return {
     database: hooks.database,
-    iam: guardIamPort(options.iam, hooks.inTransaction, guardMode, log),
+    iam: guardIamPort(
+      withRootTenant(options.iam, rootTenantId),
+      hooks.inTransaction,
+      guardMode,
+      log,
+    ),
     rootTenantId,
     typePrefix,
     baseURL,

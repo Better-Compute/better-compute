@@ -109,7 +109,8 @@ export interface IamCapabilities {
 export interface IamPort {
   /**
    * The IAM root tenant (platform). When set, `betterCompute({ rootTenantId })` may be omitted;
-   * when both are set they must agree.
+   * when both are set they must agree. The port in `ModuleContext.iam` always names the resolved root,
+   * also when only `betterCompute({ rootTenantId })` does.
    */
   readonly rootTenantId?: string;
   /** Embedded: `iam.authenticate` (1 lock acquisition, may write `lastSeenAt`); cached 30 s by the caller. */

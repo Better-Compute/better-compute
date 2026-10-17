@@ -55,3 +55,32 @@ export function guardIamPort(
     },
   });
 }
+
+// The deployment's root tenant is resolved once, from `betterCompute({ rootTenantId })` or the port's own
+// `rootTenantId` (they must agree). Modules decide what is the platform's from `context.iam.rootTenantId`
+// (vps provider accounts, discovery), so the port they get always names the resolved root, also when the host
+// names it only on betterCompute(). Same live view as above, over an empty target for frozen ports; its
+// methods run with the port itself as `this` (a class port's private fields), one bound copy per method.
+
+export function withRootTenant(iam: IamPort, rootTenantId: string): IamPort {
+  if (iam.rootTenantId === rootTenantId) return iam;
+  const own = { value: rootTenantId, writable: false, enumerable: true, configurable: true };
+  const bound = new WeakMap<object, unknown>();
+  return new Proxy({} as IamPort, {
+    get(_target, key) {
+      if (key === 'rootTenantId') return rootTenantId;
+      const value: unknown = Reflect.get(iam, key);
+      if (typeof value !== 'function') return value;
+      if (!bound.has(value)) bound.set(value, (value as (...a: unknown[]) => unknown).bind(iam));
+      return bound.get(value);
+    },
+    set: (_target, key, value) => key !== 'rootTenantId' && Reflect.set(iam, key, value),
+    has: (_target, key) => key === 'rootTenantId' || Reflect.has(iam, key),
+    ownKeys: () => [...new Set([...Reflect.ownKeys(iam), 'rootTenantId'])],
+    getOwnPropertyDescriptor(_target, key) {
+      if (key === 'rootTenantId') return own;
+      const descriptor = Reflect.getOwnPropertyDescriptor(iam, key);
+      return descriptor && { ...descriptor, configurable: true };
+    },
+  });
+}

@@ -23,7 +23,6 @@ async function world() {
     modules: [vps({ providers: [gcp], discovery: { every: '1m' } })],
   });
   const { compute, tenants, iam } = fixture;
-  (iam as { rootTenantId?: string }).rootTenantId = tenants.root.id;
   iam.allow({ token: tenants.root.token });
   iam.allow({ token: tenants.acme.token });
   // The platform's own VM in the platform's project.
