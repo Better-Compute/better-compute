@@ -76,9 +76,19 @@ import {
   type ProviderBootstrap,
 } from './bootstraps.js';
 import {
+  bindReservation,
+  listProviderReservations,
+  parseBindReservation,
+  parseReservations,
+  parseUnbindReservation,
   providerReservationsReconciler,
+  unbindReservation,
+  type BindReservationInput,
+  type ProviderReservationView,
   type ReservationDeps,
+  type ReservationsInput,
   type ReservationsOptions,
+  type UnbindReservationInput,
 } from './provider-reservations.js';
 import { vpsMigrations } from './migrations.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
@@ -264,6 +274,9 @@ export type VpsApi = {
     update: MethodDefinition<AccountRef & { config: unknown }, ProviderAccountView>;
     delete: MethodDefinition<AccountRef, { deleted: true }>;
     bootstrap: MethodDefinition<BootstrapInput, ProviderBootstrap>;
+    reservations: MethodDefinition<ReservationsInput, { items: ProviderReservationView[] }>;
+    bindReservation: MethodDefinition<BindReservationInput, { poolId: string; flavorId: string }>;
+    unbindReservation: MethodDefinition<UnbindReservationInput, { reservationId: string }>;
   };
   sandboxes: {
     create: MethodDefinition<CreateSandboxInput, Sandbox>;
@@ -888,6 +901,27 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         resource: accountResource,
         validate: describedBy(schemas.bootstrap, parseBootstrap),
         handler: (context, input) => startBootstrap(bootstrapDeps(context), context, input),
+      }),
+      reservations: defineMethod({
+        action: 'compute:providers:read',
+        kind: 'read',
+        resource: accountResource,
+        validate: describedBy(schemas.reservations, parseReservations),
+        handler: (context, input) => listProviderReservations(context.sql, input),
+      }),
+      bindReservation: defineMethod({
+        action: 'compute:providers:manage',
+        kind: 'mutation',
+        resource: accountResource,
+        validate: describedBy(schemas.bindReservation, parseBindReservation),
+        handler: (context, input) => bindReservation(context.sql, input),
+      }),
+      unbindReservation: defineMethod({
+        action: 'compute:providers:manage',
+        kind: 'mutation',
+        resource: accountResource,
+        validate: describedBy(schemas.unbindReservation, parseUnbindReservation),
+        handler: (context, input) => unbindReservation(context.sql, input),
       }),
     },
     // §3.7 (D24): a sandbox drives one hosted instance; templates are per tenant.

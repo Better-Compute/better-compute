@@ -21,6 +21,7 @@ import {
   reservationsWork,
   vps,
   vpsMigrations,
+  type ProviderReservationView,
   type VpsApi,
 } from '@better-compute/vps';
 
@@ -253,8 +254,10 @@ const reconcileInstance = async (instanceId: string) =>
 
 const eventsOf = (type: string) => published.filter((event) => event.type === type);
 
+type View = { id: string; state: string; externalId?: string };
 let accountId: string;
 let providerPool: string;
+let rsvFlavor: string;
 
 const tables = [
   'provider_reservation_scans',
@@ -323,6 +326,14 @@ beforeEach(async () => {
   published = [];
 });
 
+const listed = async (includeGone = false) =>
+  (
+    (await call('providerAccounts', 'reservations', {
+      tenantId: 'root',
+      accountId,
+      ...(includeGone ? { includeGone } : {}),
+    })) as { items: ProviderReservationView[] }
+  ).items;
 const rows = async () =>
   (
     await db.query<{ reservation_id: string; gone_at: Date | null; total: number; in_use: number }>(
@@ -360,6 +371,10 @@ describe('the vps.reservations worker', () => {
     expect(published.map((event) => event.type)).toEqual([
       'provider.reservation.detected',
       'provider.reservation.detected',
+    ]);
+    expect((await listed()).map((item) => [item.name, item.free, item.pending])).toEqual([
+      ['rsv-a', 2, 0],
+      ['rsv-b', 1, 0],
     ]);
   });
 
@@ -466,6 +481,12 @@ describe('the vps.reservations worker', () => {
     const stored = await rows();
     expect(stored.find((row) => row.reservation_id.endsWith('rsv-b'))!.gone_at).not.toBeNull();
     expect(stored.find((row) => row.reservation_id.endsWith('rsv-a'))!.gone_at).toBeNull();
+    expect((await listed()).map((item) => item.name)).toEqual(['rsv-a']);
+    const withGone = await listed(true);
+    expect(withGone.map((item) => [item.name, item.goneAt !== undefined])).toEqual([
+      ['rsv-a', false],
+      ['rsv-b', true],
+    ]);
     // It comes back: no longer gone.
     cloud.reservations = [reservation('rsv-a'), reservation('rsv-b')];
     await advance(6 * MINUTE);
@@ -520,5 +541,311 @@ describe('the vps.reservations worker', () => {
       [accountId],
     );
     expect(healed.rows[0]!.last_error).toBeNull();
+  });
+});
+
+describe('api & admission', () => {
+  const bind = (extra: Record<string, unknown> = {}) =>
+    call('providerAccounts', 'bindReservation', {
+      tenantId: 'root',
+      accountId,
+      reservationId: 'us-central1-a/rsv-a',
+      poolId: providerPool,
+      idempotencyKey: 'bind-1',
+      ...extra,
+    }) as Promise<{ poolId: string; flavorId: string }>;
+  const create = (key: string, flavor = 'rsv-rsv-a') =>
+    call(
+      'instances',
+      'create',
+      {
+        tenantId: 'acme',
+        poolId: providerPool,
+        flavor,
+        imageId: 'ubuntu-24.04',
+        sshKeys: [KEY],
+        idempotencyKey: key,
+      },
+      alice,
+    ) as Promise<View>;
+  const flavorsOf = async (poolId = providerPool) =>
+    (
+      (await call('flavors', 'list', { tenantId: 'root', poolId })) as {
+        items: {
+          id: string;
+          name: string;
+          offerId?: string;
+          vcpu: number;
+          gpus: number;
+          diskGiB: number;
+        }[];
+      }
+    ).items;
+
+  beforeEach(async () => {
+    cloud.reservations = [reservation('rsv-a', { total: 2, inUse: 1 })];
+    await pass();
+    rsvFlavor = 'rsv-rsv-a';
+  });
+
+  it('reservations lists free and pending', async () => {
+    await bind();
+    expect(await listed()).toMatchObject([
+      { id: 'us-central1-a/rsv-a', total: 2, inUse: 1, free: 1, pending: 0 },
+    ]);
+    await create('vm-1');
+    expect(await listed()).toMatchObject([
+      { total: 2, inUse: 1, free: 0, pending: 1, poolId: providerPool },
+    ]);
+  });
+
+  it('bindReservation creates a flavor with the reservation offer', async () => {
+    const bound = await bind();
+    expect(bound.poolId).toBe(providerPool);
+    const flavor = (await flavorsOf()).find((item) => item.name === rsvFlavor);
+    expect(flavor).toMatchObject({
+      id: bound.flavorId,
+      offerId: 'us-central1-a/a3-highgpu-8g@rsv-a',
+      vcpu: 208,
+      gpus: 8,
+      diskGiB: 100,
+    });
+    expect((await listed())[0]).toMatchObject({ poolId: providerPool, flavorId: bound.flavorId });
+    // Repeating it is a replay; a custom flavor name is honoured elsewhere.
+    expect(await bind()).toEqual(bound);
+    expect((await flavorsOf()).filter((item) => item.name === rsvFlavor)).toHaveLength(1);
+  });
+
+  it('binding the same reservation to another pool is a CONFLICT', async () => {
+    await bind();
+    const other = await newPool(accountId);
+    await expect(bind({ poolId: other })).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(await flavorsOf(other)).toEqual([]);
+  });
+
+  it('refuses binding to a pool backed by another account', async () => {
+    const otherAccount = await newAccount('fake-gcp', 'other');
+    const otherPool = await newPool(otherAccount);
+    await expect(bind({ poolId: otherPool })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(bind({ poolId: 'pool_01jz0000000000000000000zzz' })).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+    await expect(bind({ reservationId: 'us-central1-a/nope' })).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+    expect(await flavorsOf(otherPool)).toEqual([]);
+  });
+
+  it('instances.create on a bound flavor consumes the reservation in the provider', async () => {
+    await bind();
+    const created = await create('vm-1');
+    await reconcileInstance(created.id);
+    expect(cloud.created).toEqual(['us-central1-a/a3-highgpu-8g@rsv-a']);
+    const stored = await db.query<{ provider_reservation: string | null }>(
+      `SELECT provider_reservation FROM instances WHERE id = $1`,
+      [created.id],
+    );
+    expect(stored.rows[0]!.provider_reservation).toBe('us-central1-a/rsv-a');
+  });
+
+  it('a flavor that is not a reservation is admitted as before', async () => {
+    await call('flavors', 'create', {
+      tenantId: 'root',
+      poolId: providerPool,
+      name: 'plain',
+      vcpu: 2,
+      memoryGiB: 4,
+      diskGiB: 40,
+      offerId: 'n2-standard-2',
+    });
+    const created = await create('vm-plain', 'plain');
+    await reconcileInstance(created.id);
+    expect(cloud.created).toEqual(['n2-standard-2']);
+    const stored = await db.query(`SELECT 1 FROM instances WHERE provider_reservation IS NOT NULL`);
+    expect(stored.rows).toEqual([]);
+  });
+
+  it('admits only the free slots between polls', async () => {
+    await bind();
+    // total 2, inUse 1: one slot, two creates at once.
+    const outcomes = await Promise.allSettled([create('race-1'), create('race-2')]);
+    const admitted = outcomes.filter((outcome) => outcome.status === 'fulfilled');
+    const refused = outcomes.filter((outcome) => outcome.status === 'rejected');
+    expect(admitted).toHaveLength(1);
+    expect(refused).toHaveLength(1);
+    expect((refused[0] as PromiseRejectedResult).reason).toMatchObject({
+      code: 'CAPACITY_UNAVAILABLE',
+      details: { reservationId: 'us-central1-a/rsv-a', total: 2, inUse: 1, pending: 1 },
+    });
+    // The refusal leaves nothing admitted: one instance holds the slot.
+    const holding = await db.query(
+      `SELECT 1 FROM instances WHERE provider_reservation = 'us-central1-a/rsv-a' AND NOT draft`,
+    );
+    expect(holding.rows).toHaveLength(1);
+    // Later attempts are refused too, until a poll shows it freed.
+    await expect(create('later')).rejects.toMatchObject({ code: 'CAPACITY_UNAVAILABLE' });
+  });
+
+  it('a created VM counts once observed', async () => {
+    await bind();
+    await advance(MINUTE);
+    const created = await create('vm-1');
+    await reconcileInstance(created.id);
+    expect((await listed())[0]).toMatchObject({ pending: 1, free: 0 });
+    // The provider now counts the VM; the next pass was observed after the instance's machine existed.
+    cloud.reservations = [reservation('rsv-a', { total: 2, inUse: 2 })];
+    await advance(6 * MINUTE);
+    await pass();
+    expect((await listed())[0]).toMatchObject({ inUse: 2, pending: 0, free: 0 });
+  });
+
+  it('a VM created after a scan began stays pending until a later scan', async () => {
+    await bind();
+    await advance(MINUTE);
+    const created = await create('vm-1');
+    // A scan runs before the machine exists (the provider shows inUse 1) ...
+    await advance(5 * MINUTE);
+    await pass();
+    expect((await listed())[0]).toMatchObject({ inUse: 1, pending: 1, free: 0 });
+    // ... and the machine is created after it: that scan cannot have counted it.
+    await advance(MINUTE);
+    await reconcileInstance(created.id);
+    expect((await listed())[0]).toMatchObject({ pending: 1, free: 0 });
+    await expect(create('vm-2')).rejects.toMatchObject({
+      code: 'CAPACITY_UNAVAILABLE',
+      details: { pending: 1 },
+    });
+    cloud.reservations = [reservation('rsv-a', { total: 2, inUse: 2 })];
+    await advance(6 * MINUTE);
+    await pass();
+    expect((await listed())[0]).toMatchObject({ inUse: 2, pending: 0, free: 0 });
+  });
+
+  it('a deleted instance gives its slot back at once', async () => {
+    await bind();
+    const created = await create('vm-1');
+    await expect(create('vm-2')).rejects.toMatchObject({ code: 'CAPACITY_UNAVAILABLE' });
+    await call('instances', 'delete', { tenantId: 'acme', instanceId: created.id }, alice);
+    await reconcileInstance(created.id);
+    expect((await listed())[0]).toMatchObject({ pending: 0, free: 1 });
+    await create('vm-3');
+  });
+
+  it('a scheduled future reservation is bindable but not admissible until ready', async () => {
+    cloud.reservations = [
+      reservation('rsv-a', { total: 2, inUse: 1 }),
+      reservation('rsv-future', { state: 'scheduled', startsAt: T0 + 86_400_000, total: 4 }),
+    ];
+    await advance(6 * MINUTE);
+    await pass();
+    const bound = await bind({ reservationId: 'us-central1-a/rsv-future', flavorName: 'future' });
+    expect(bound.flavorId).toMatch(/^flv_/);
+    await expect(create('early', 'future')).rejects.toMatchObject({
+      code: 'CAPACITY_UNAVAILABLE',
+      details: { reservationId: 'us-central1-a/rsv-future', state: 'scheduled' },
+    });
+    cloud.reservations = [
+      reservation('rsv-a', { total: 2, inUse: 1 }),
+      reservation('rsv-future', { total: 4 }),
+    ];
+    await advance(6 * MINUTE);
+    await pass();
+    await create('ready', 'future');
+  });
+
+  it('refuses binding a reservation that is not ready or scheduled, or is gone', async () => {
+    cloud.reservations = [reservation('rsv-a'), reservation('rsv-bad', { state: 'error' })];
+    await advance(6 * MINUTE);
+    await pass();
+    await expect(bind({ reservationId: 'us-central1-a/rsv-bad' })).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+    });
+    cloud.reservations = [reservation('rsv-bad', { state: 'error' })];
+    await advance(6 * MINUTE);
+    await pass();
+    await expect(bind()).rejects.toMatchObject({ code: 'INVALID_STATE' });
+  });
+
+  it('unbind removes the unused flavor', async () => {
+    await bind();
+    expect(
+      await call('providerAccounts', 'unbindReservation', {
+        tenantId: 'root',
+        accountId,
+        reservationId: 'us-central1-a/rsv-a',
+      }),
+    ).toEqual({ reservationId: 'us-central1-a/rsv-a' });
+    expect((await flavorsOf()).map((item) => item.name)).toEqual([]);
+    expect((await listed())[0]!.poolId).toBeUndefined();
+    expect((await listed())[0]!.flavorId).toBeUndefined();
+    // Unbinding again is fine, and the reservation can be bound again.
+    await call('providerAccounts', 'unbindReservation', {
+      tenantId: 'root',
+      accountId,
+      reservationId: 'us-central1-a/rsv-a',
+    });
+    await bind();
+  });
+
+  it('unbind archives a flavor instances still use', async () => {
+    await bind();
+    const created = await create('vm-1');
+    await call('providerAccounts', 'unbindReservation', {
+      tenantId: 'root',
+      accountId,
+      reservationId: 'us-central1-a/rsv-a',
+    });
+    const flavor = await db.query<{ archived: boolean }>(
+      `SELECT archived FROM flavors WHERE name = $1`,
+      [rsvFlavor],
+    );
+    expect(flavor.rows).toEqual([{ archived: true }]);
+    expect(await flavorsOf()).toEqual([]);
+    await expect(create('vm-2')).rejects.toMatchObject({
+      code: expect.stringMatching(/NOT_FOUND|INVALID/),
+    });
+    expect(created.id).toMatch(/^inst_/);
+  });
+
+  it('a bound reservation that goes gone drops its flavor', async () => {
+    const bound = await bind();
+    cloud.reservations = [];
+    await advance(6 * MINUTE);
+    published = [];
+    await pass();
+    expect(eventsOf('provider.reservation.gone')).toMatchObject([
+      {
+        data: {
+          accountId,
+          reservationId: 'us-central1-a/rsv-a',
+          poolId: providerPool,
+          flavorId: bound.flavorId,
+        },
+      },
+    ]);
+    expect((await flavorsOf()).map((item) => item.name)).toEqual([]);
+    const [row] = await listed(true);
+    expect(row).toMatchObject({ id: 'us-central1-a/rsv-a' });
+    expect(row!.poolId).toBeUndefined();
+  });
+
+  it('listing and binding are scoped to the tenant that owns the account', async () => {
+    await expect(
+      call('providerAccounts', 'reservations', { tenantId: 'acme', accountId }, alice),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(
+      call(
+        'providerAccounts',
+        'bindReservation',
+        {
+          tenantId: 'acme',
+          accountId,
+          reservationId: 'us-central1-a/rsv-a',
+          poolId: providerPool,
+          idempotencyKey: 'x',
+        },
+        alice,
+      ),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 });

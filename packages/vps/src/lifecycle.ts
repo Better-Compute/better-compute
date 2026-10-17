@@ -466,12 +466,20 @@ async function reconcileProvider(
       return undefined;
     }
     const reported = machineStates[machine.state];
+    const machineKnown = current.externalId !== undefined;
     current = await updateInstance(tx, current, {
       conditions,
       externalId: machine.id,
       addresses: machine.addresses,
       reportedState: reported ?? null,
     });
+    // When the machine first became known: a reservation scan that began earlier may not count it.
+    if (!machineKnown)
+      await tx.query(
+        `UPDATE instances SET provider_reservation_at = compute_now()
+          WHERE id = $1 AND provider_reservation IS NOT NULL AND provider_reservation_at IS NULL`,
+        [current.id],
+      );
     if (current.state === 'scheduling') {
       current = await moveInstance(tx, current, 'complete', 'provisioning');
       await publishInstance(deps, tx, current, 'instance.provisioning', { externalId: machine.id });

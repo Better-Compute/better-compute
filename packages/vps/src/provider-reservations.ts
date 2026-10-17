@@ -1,4 +1,5 @@
 import {
+  ComputeError,
   isComputeError,
   parseDuration,
   type CallContext,
@@ -16,7 +17,8 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { readAccount, type ProviderClients } from './accounts.js';
-import { deleteFlavor } from './flavors.js';
+import { createFlavor, deleteFlavor } from './flavors.js';
+import { key as keyOf, name, object, optional, tenant, id } from './input.js';
 
 // Provider capacity reservations (GCE reservations and the like): the `vps.reservations` worker
 // reads what each account's provider reports into `provider_reservations`, publishes
@@ -450,4 +452,272 @@ async function dropFlavor(
   } catch (error) {
     if (!isComputeError(error, 'NOT_FOUND')) throw error;
   }
+}
+
+// --- The API ------------------------------------------------------------------------------------------
+
+export interface ReservationsInput {
+  tenantId: string;
+  accountId: string;
+  includeGone?: boolean;
+}
+export interface BindReservationInput {
+  tenantId: string;
+  accountId: string;
+  reservationId: string;
+  poolId: string;
+  flavorName?: string;
+  idempotencyKey: string;
+}
+export interface UnbindReservationInput {
+  tenantId: string;
+  accountId: string;
+  reservationId: string;
+}
+
+const reservationIdPattern = /^[A-Za-z0-9._/-]{1,300}$/;
+function reservationId(value: unknown): string {
+  if (typeof value !== 'string' || !reservationIdPattern.test(value))
+    throw new ComputeError('INVALID_INPUT', 'reservationId is invalid');
+  return value;
+}
+
+export function parseReservations(raw: unknown): ReservationsInput {
+  const input = object(raw, ['tenantId', 'accountId', 'includeGone']);
+  const result: ReservationsInput = {
+    tenantId: tenant(input.tenantId),
+    accountId: id(input.accountId, 'pacct', 'accountId'),
+  };
+  const includeGone = optional(input.includeGone, (value) => {
+    if (typeof value !== 'boolean')
+      throw new ComputeError('INVALID_INPUT', 'includeGone must be a boolean');
+    return value;
+  });
+  if (includeGone !== undefined) result.includeGone = includeGone;
+  return result;
+}
+
+export function parseBindReservation(raw: unknown): BindReservationInput {
+  const input = object(raw, [
+    'tenantId',
+    'accountId',
+    'reservationId',
+    'poolId',
+    'flavorName',
+    'idempotencyKey',
+  ]);
+  const result: BindReservationInput = {
+    tenantId: tenant(input.tenantId),
+    accountId: id(input.accountId, 'pacct', 'accountId'),
+    reservationId: reservationId(input.reservationId),
+    poolId: id(input.poolId, 'pool', 'poolId'),
+    idempotencyKey: keyOf(input.idempotencyKey),
+  };
+  const flavorName = optional(input.flavorName, (value) => name(value, 'flavorName'));
+  if (flavorName !== undefined) result.flavorName = flavorName;
+  return result;
+}
+
+export function parseUnbindReservation(raw: unknown): UnbindReservationInput {
+  const input = object(raw, ['tenantId', 'accountId', 'reservationId']);
+  return {
+    tenantId: tenant(input.tenantId),
+    accountId: id(input.accountId, 'pacct', 'accountId'),
+    reservationId: reservationId(input.reservationId),
+  };
+}
+
+async function requireAccount(tx: SqlTx, tenantId: string, accountId: string) {
+  const account = await readAccount(tx, accountId, tenantId);
+  if (!account) throw new ComputeError('NOT_FOUND', `Provider account ${accountId} not found`);
+  return account;
+}
+
+/** `providerAccounts.reservations`: the account's reservations with free and pending slots. */
+export async function listProviderReservations(
+  tx: SqlTx,
+  input: ReservationsInput,
+): Promise<{ items: ProviderReservationView[] }> {
+  await requireAccount(tx, input.tenantId, input.accountId);
+  const { rows } = await tx.query<ReservationRow>(
+    `SELECT ${rowColumns} FROM provider_reservations
+      WHERE account_id = $1 ${input.includeGone ? '' : 'AND gone_at IS NULL'}
+      ORDER BY reservation_id`,
+    [input.accountId],
+  );
+  const pending = await pendingByReservation(tx, input.accountId);
+  return {
+    items: rows.map((row) => viewOf(input.accountId, row, pending.get(row.reservation_id) ?? 0)),
+  };
+}
+
+async function lockReservation(
+  tx: SqlTx,
+  accountId: string,
+  reservationIdValue: string,
+): Promise<ReservationRow> {
+  const { rows } = await tx.query<ReservationRow>(
+    `SELECT ${rowColumns} FROM provider_reservations
+      WHERE account_id = $1 AND reservation_id = $2 FOR UPDATE`,
+    [accountId, reservationIdValue],
+  );
+  if (!rows[0]) throw new ComputeError('NOT_FOUND', `Reservation ${reservationIdValue} not found`);
+  return rows[0];
+}
+
+/**
+ * `providerAccounts.bindReservation`: creates a flavor of the pool for the reservation (through the
+ * ordinary flavor path) and remembers the binding. Repeating it for the same pool returns the binding.
+ */
+export async function bindReservation(
+  tx: SqlTx,
+  input: BindReservationInput,
+): Promise<{ poolId: string; flavorId: string }> {
+  const account = await requireAccount(tx, input.tenantId, input.accountId);
+  const row = await lockReservation(tx, input.accountId, input.reservationId);
+  const pool = await tx.query<{
+    class: string;
+    provider_account_id: string | null;
+    owner_tenant_id: string;
+    archived: boolean;
+  }>(
+    `SELECT class, provider_account_id, owner_tenant_id, archived_at IS NOT NULL AS archived
+       FROM pools WHERE id = $1`,
+    [input.poolId],
+  );
+  const target = pool.rows[0];
+  if (!target || target.owner_tenant_id !== input.tenantId)
+    throw new ComputeError('NOT_FOUND', `Pool ${input.poolId} not found`);
+  if (target.class !== 'provider' || target.provider_account_id !== input.accountId)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `Pool ${input.poolId} is not a provider pool of account ${input.accountId}`,
+    );
+  if (target.archived) throw new ComputeError('INVALID_STATE', `Pool ${input.poolId} is archived`);
+  if (row.pool_id !== null) {
+    if (row.pool_id === input.poolId && row.flavor_id !== null)
+      return { poolId: row.pool_id, flavorId: row.flavor_id };
+    throw new ComputeError(
+      'CONFLICT',
+      `Reservation ${input.reservationId} is already bound to pool ${row.pool_id}`,
+    );
+  }
+  const reservation = reservationOf(row);
+  if (row.gone_at !== null)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Reservation ${input.reservationId} is gone`,
+      undefined,
+      {
+        reservationId: input.reservationId,
+        state: 'gone',
+      },
+    );
+  if (reservation.state !== 'ready' && reservation.state !== 'scheduled')
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Reservation ${input.reservationId} is ${reservation.state}; bind it when it is ready or scheduled`,
+      undefined,
+      { reservationId: input.reservationId, state: reservation.state },
+    );
+  const diskGiB =
+    typeof account.config.diskGiB === 'number' && Number.isSafeInteger(account.config.diskGiB)
+      ? account.config.diskGiB
+      : 100;
+  const flavor = await createFlavor(tx, {
+    tenantId: input.tenantId,
+    poolId: input.poolId,
+    name: input.flavorName ?? `rsv-${reservation.name}`,
+    vcpu: reservation.vcpu,
+    memoryGiB: reservation.memoryGiB,
+    diskGiB,
+    gpus: reservation.gpus?.count ?? 0,
+    offerId: reservation.offerId,
+  });
+  await tx.query(
+    `UPDATE provider_reservations SET pool_id = $3, flavor_id = $4
+      WHERE account_id = $1 AND reservation_id = $2`,
+    [input.accountId, input.reservationId, input.poolId, flavor.id],
+  );
+  return { poolId: input.poolId, flavorId: flavor.id };
+}
+
+/** `providerAccounts.unbindReservation`: removes the unused flavor, or archives one instances use. */
+export async function unbindReservation(
+  tx: SqlTx,
+  input: UnbindReservationInput,
+): Promise<{ reservationId: string }> {
+  await requireAccount(tx, input.tenantId, input.accountId);
+  const row = await lockReservation(tx, input.accountId, input.reservationId);
+  if (row.pool_id !== null) {
+    await tx.query(
+      `UPDATE provider_reservations SET pool_id = NULL, flavor_id = NULL
+        WHERE account_id = $1 AND reservation_id = $2`,
+      [input.accountId, input.reservationId],
+    );
+    if (row.flavor_id !== null) await dropFlavor(tx, input.tenantId, row.pool_id, row.flavor_id);
+  }
+  return { reservationId: input.reservationId };
+}
+
+// --- Admission ----------------------------------------------------------------------------------------
+
+/**
+ * Admission against a reservation-backed offer (`<zone>/<machineType>@<reservation>`): locks the
+ * reservation's row (so concurrent creates are serialized by the database), refuses unless it is
+ * ready and has a slot the scan has not counted, and returns the reservation id to store in
+ * `instances.provider_reservation`. `undefined` for an offer that is not a reservation's.
+ */
+export async function claimReservationSlot(
+  tx: SqlTx,
+  input: { accountId: string; offerId: string },
+): Promise<string | undefined> {
+  if (input.offerId.indexOf('@') < 0) return undefined;
+  // An offer id names the reservation by its own spelling (a name, or a shared-in path); the stored
+  // reservation says which offer id it answers to.
+  const { rows } = await tx.query<ReservationRow>(
+    `SELECT ${rowColumns} FROM provider_reservations
+      WHERE account_id = $1 AND reservation->>'offerId' = $2
+      ORDER BY gone_at NULLS FIRST, reservation_id
+      LIMIT 1 FOR UPDATE`,
+    [input.accountId, input.offerId],
+  );
+  const row = rows[0];
+  const refuse = (message: string, details: Record<string, Json>): never => {
+    throw new ComputeError('CAPACITY_UNAVAILABLE', message, undefined, details);
+  };
+  if (!row)
+    return refuse(`Reservation of offer ${input.offerId} is not known`, {
+      reservationId: input.offerId.slice(input.offerId.indexOf('@') + 1),
+      state: 'missing',
+    });
+  const reservation = reservationOf(row);
+  if (row.gone_at !== null)
+    return refuse(`Reservation ${row.reservation_id} is gone`, {
+      reservationId: row.reservation_id,
+      state: 'gone',
+    });
+  if (reservation.state !== 'ready')
+    return refuse(`Reservation ${row.reservation_id} is ${reservation.state}, not ready`, {
+      reservationId: row.reservation_id,
+      state: reservation.state,
+    });
+  const { rows: counted } = await tx.query<{ pending: number | string }>(
+    `SELECT count(*) AS pending
+       FROM provider_reservations r
+       JOIN instances i ON i.provider_account_id = r.account_id AND i.provider_reservation = r.reservation_id
+      WHERE r.account_id = $1 AND r.reservation_id = $2 AND ${pendingCondition}`,
+    [input.accountId, row.reservation_id],
+  );
+  const pending = Number(counted[0]?.pending ?? 0);
+  const total = Number(row.total);
+  const inUse = Number(row.in_use);
+  if (total - inUse - pending < 1)
+    return refuse(`Reservation ${row.reservation_id} has no free slot`, {
+      reservationId: row.reservation_id,
+      total,
+      inUse,
+      pending,
+    });
+  return row.reservation_id;
 }

@@ -542,6 +542,16 @@ group('providerAccounts', 'vps', [
   ['update', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
   ['delete', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
   ['bootstrap', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
+  ['reservations', 'read', 'providers:read', 'provider-account', 'v1.0', list],
+  [
+    'bindReservation',
+    'mutation',
+    'providers:manage',
+    'provider-account',
+    'v1.0',
+    { or: [['flavors:manage', 'pool']] },
+  ],
+  ['unbindReservation', 'mutation', 'providers:manage', 'provider-account', 'v1.0'],
 ]);
 group('sandboxes', 'vps', [
   ['create', 'mutation', 'sandboxes:create', 'sandbox', 'v0.5'],
