@@ -75,6 +75,11 @@ import {
   type BootstrapOptions,
   type ProviderBootstrap,
 } from './bootstraps.js';
+import {
+  providerReservationsReconciler,
+  type ReservationDeps,
+  type ReservationsOptions,
+} from './provider-reservations.js';
 import { vpsMigrations } from './migrations.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
 import { describeCreateInstance, describeCreateSandbox, describeExtendSandbox } from './describe.js';
@@ -200,6 +205,11 @@ export interface VpsOptions {
    * from. Without it `providerAccounts.bootstrap` is INVALID_CONFIG.
    */
   bootstrap?: BootstrapOptions;
+  /**
+   * Provider capacity reservations: how often each account's provider is asked for its reservations
+   * (default `5m`). Accounts whose provider has no `listReservations` are skipped.
+   */
+  reservations?: ReservationsOptions;
   /**
    * Where sandbox snapshots are stored (§3.7): presigned uploads for `instance.snapshot` and the URL
    * restores fetch. Without it `sandboxes.snapshot` is INVALID_CONFIG.
@@ -425,6 +435,14 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     clients,
     ...(context.pki ? { pki: context.pki } : {}),
     ...(options.bootstrap ? { options: options.bootstrap } : {}),
+  });
+  const reservationDeps = (context: ModuleContext): ReservationDeps => ({
+    clock: context.clock,
+    events: context.events,
+    work: context.work,
+    log: context.log,
+    secrets: options.secrets ?? context.secrets ?? noSecrets,
+    clients,
   });
   if (options.hostNetwork !== undefined && !/^[A-Za-z0-9_.-]{1,15}$/.test(options.hostNetwork))
     throw new ComputeError('INVALID_CONFIG', 'vps({ hostNetwork }) must be an interface name');
@@ -1133,6 +1151,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           return 'DONE';
         },
       },
+      // Provider capacity reservations: provider_reservations per account, provider.reservation.* events.
+      providerReservationsReconciler(options.reservations ?? {}, reservationDeps),
       {
         // §3.7: sandbox expiry, sandbox.ready/deleted events, and warm pools per template.
         name: sandboxWork,
