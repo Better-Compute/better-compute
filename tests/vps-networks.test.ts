@@ -1747,6 +1747,37 @@ describe('instances', () => {
     );
   });
 
+  it('attach refuses a VM whose NIC is on a network being deleted', async () => {
+    const network = await networkWith();
+    await db.query(`DELETE FROM provider_machines`);
+    // The network has no instances, so it can be deleted; its VPC is then torn down.
+    await call('networks', 'delete', { tenantId: 'root', networkId: network.id });
+    await seeMachine(LEGACY, [{ network: providerResourceName(network.id) }]);
+    const refused = await attach().catch((error) => error);
+    expect(refused).toMatchObject({
+      code: 'INVALID_STATE',
+      details: { networkId: network.id },
+    });
+    // Neither linked nor silently skipped: no instance, the machine stays free, no quota charged.
+    expect(await instanceCount()).toBe(0);
+    expect(
+      (
+        await db.query<{ instance_id: string | null }>(
+          `SELECT instance_id FROM provider_machines WHERE external_id = $1`,
+          [LEGACY],
+        )
+      ).rows[0]!.instance_id,
+    ).toBeNull();
+    expect(
+      (
+        await db.query<{ used: string }>(
+          `SELECT used FROM quota_usage WHERE tenant_id = 'root' AND pool_id = $1 AND resource = 'vcpu'`,
+          [gcePool],
+        )
+      ).rows[0]!.used,
+    ).toBe(0);
+  });
+
   it('attach refuses moving a VM to another network', async () => {
     const network = await networkWith();
     await seeMachine(LEGACY, [{ network: 'default', address: '10.128.0.2' }]);

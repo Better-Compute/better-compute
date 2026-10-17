@@ -1250,10 +1250,10 @@ interface LockedNetwork {
  * What an instance needs of a network when it is put on it:
  * - `provisioned`: it has been `ready` once (`provisioned_at`) and is not being deleted. A network
  *   that goes back to `pending` because a subnet or rule is added still takes instances.
- * - `live`: it exists and is not being deleted.
- * - `any`: it exists (attach links a machine that already runs on it, whatever the network is doing).
+ * - `live`: it exists and is not being deleted (attach: whatever else the network is doing, e.g.
+ *   `pending` while a subnet is added, a machine on it is linked).
  */
-type NetworkNeed = 'provisioned' | 'live' | 'any';
+type NetworkNeed = 'provisioned' | 'live';
 
 /**
  * A network of this tenant on this provider account, and its live subnets, both locked `FOR SHARE`:
@@ -1279,7 +1279,7 @@ async function lockNetwork(
       'INVALID_INPUT',
       `Network ${row.id} is on provider account ${row.provider_account_id}, not the pool's ${input.accountId}`,
     );
-  if (need !== 'any' && (row.desired_state !== 'present' || row.state === 'deleting'))
+  if (row.desired_state !== 'present' || row.state === 'deleting')
     throw new ComputeError('INVALID_STATE', `Network ${row.id} is being deleted`, undefined, {
       networkId: row.id,
     });
@@ -1400,7 +1400,6 @@ export async function networkOfMachine(
     );
     candidates = rows.map((row) => row.id);
   }
-  const need: NetworkNeed = input.networkId !== undefined ? 'live' : 'any';
   for (const nic of input.nics) {
     const found = candidates.find(
       (candidate) => providerResourceName(candidate) === shortName(nic.network),
@@ -1409,7 +1408,7 @@ export async function networkOfMachine(
     const locked = await lockNetwork(
       tx,
       { tenantId: input.tenantId, accountId: input.accountId, networkId: found },
-      need,
+      'live',
     );
     const subnet =
       nic.subnet === undefined
