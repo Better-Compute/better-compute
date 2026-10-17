@@ -1430,15 +1430,25 @@ export async function setPower(
       'INVALID_STATE',
       `Instance ${row.id} does not own its machine any more (AttachConflict/OwnershipLost); detach or delete it`,
     );
+  // One whose provider create failed (ProvisionFailed) has no machine to start, and retrying would
+  // only meet the same refusal: it is refused before anything changes (W3d).
+  const failedCreate =
+    desiredState === 'running'
+      ? row.conditions.find(
+          (condition) =>
+            condition.status === 'true' && condition.type === provisionFailedCondition,
+        )
+      : undefined;
+  if (failedCreate)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Instance ${row.id}: create failed for ${failedCreate.reason}; delete it and create again`,
+      undefined,
+      { condition: provisionFailedCondition, reason: failedCreate.reason ?? null },
+    );
   if (row.desiredState !== desiredState) row = await updateInstance(tx, row, { desiredState });
   // An instance in error retries when started again, unless a live instance holds its machine id.
-  // One whose provider create failed (ProvisionFailed) has no machine to start: like a hosted one
-  // that was never placed, it stays in error until deleted.
-  if (
-    desiredState === 'running' &&
-    row.state === 'error' &&
-    (row.nodeId || (row.externalId && !provisionFailed(row.conditions)))
-  ) {
+  if (desiredState === 'running' && row.state === 'error' && (row.nodeId || row.externalId)) {
     const holder = await liveHolderOf(tx, row);
     const taken = () =>
       new ComputeError(

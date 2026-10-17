@@ -1446,13 +1446,32 @@ describe('provider instances', () => {
     });
     // The quota stays charged until the instance is deleted.
     expect(await used()).toMatchObject({ vcpu: 2, memoryGiB: 4, diskGiB: 40 });
-    // No retry loop: another tick (and asking it to start again) calls the provider no more.
+    // No retry loop: another tick calls the provider no more.
     const calls = cloud.calls.length;
     await reconcile(created.id);
-    await call('instances', 'start', { tenantId: 'acme', instanceId: created.id });
+    expect(cloud.calls.length).toBe(calls);
+    // Starting it again is refused before anything changes (W3d): it never got a machine.
+    const before = await get(created.id);
+    await expect(
+      call('instances', 'start', { tenantId: 'acme', instanceId: created.id }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message: expect.stringContaining(
+        'create failed for CAPACITY_UNAVAILABLE; delete it and create again',
+      ),
+      details: { condition: 'ProvisionFailed', reason: 'CAPACITY_UNAVAILABLE' },
+    });
+    expect(await get(created.id)).toMatchObject({
+      state: 'error',
+      desiredState: before.desiredState,
+    });
+    const { rows: versions } = await db.query<{ version: number }>(
+      `SELECT version FROM instances WHERE id = $1`,
+      [created.id],
+    );
+    expect(Number(versions[0]!.version)).toBe((before as View & { version: number }).version);
     await reconcile(created.id);
     expect(cloud.calls.length).toBe(calls);
-    expect((await get(created.id)).state).toBe('error');
 
     // Deleting it does not depend on `get`: one delete (NOT_FOUND is success), then refunded.
     await call('instances', 'delete', { tenantId: 'acme', instanceId: created.id });
