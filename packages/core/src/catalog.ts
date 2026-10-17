@@ -39,6 +39,7 @@ export const computeResourceKinds = [
   'sandbox-template',
   'sandbox-snapshot',
   'sandbox-volume',
+  'network',
 ] as const;
 export type ComputeResourceKind = (typeof computeResourceKinds)[number];
 
@@ -91,6 +92,8 @@ const definitions = {
       ...a('images', 'read', 'publish'),
       ...a('providers', 'read', 'manage'),
       ...a('sandboxes', 'read', 'manage'),
+      // v1.0 tenant networks: `networks.list` is gated on the tenant.
+      ...a('networks', 'read'),
       // v1.0 destructive-batch quorum (§13): on top of the approvers' signatures, never instead.
       ...a('batches', 'read', 'create', 'approve'),
     ],
@@ -224,6 +227,13 @@ const definitions = {
     actions: a('sandboxes', 'read', 'manage'),
     attributes: { sizeGiB: 'number' },
     parent: 'pool',
+  },
+  network: {
+    description:
+      'A tenant network (VPC) on a provider account, with its subnets and firewall rules',
+    parent: 'tenant',
+    actions: a('networks', 'create', 'read', 'update', 'delete'),
+    attributes: { providerAccountId: 'string', poolId: 'string', projectId: 'string' },
   },
 } as const satisfies Record<ComputeResourceKind, KindDefinition>;
 
@@ -573,6 +583,22 @@ group('sandboxVolumes', 'vps', [
   ['get', 'read', 'sandboxes:read', 'sandbox-volume', 'v1.0'],
   ['resize', 'mutation', 'sandboxes:manage', 'sandbox-volume', 'v1.0'],
   ['delete', 'mutation', 'sandboxes:manage', 'sandbox-volume', 'v1.0'],
+]);
+// Tenant networks (VPCs, subnets, firewall rules) on a provider account (v1.0).
+group('networks', 'vps', [
+  ['create', 'mutation', 'networks:create', 'network', 'v1.0'],
+  ['list', 'read', 'networks:read', 'tenant', 'v1.0', list],
+  ['get', 'read', 'networks:read', 'network', 'v1.0'],
+  ['update', 'mutation', 'networks:update', 'network', 'v1.0'],
+  ['delete', 'mutation', 'networks:delete', 'network', 'v1.0'],
+  ['addSubnet', 'mutation', 'networks:update', 'network', 'v1.0'],
+  ['removeSubnet', 'mutation', 'networks:update', 'network', 'v1.0'],
+]);
+group('firewallRules', 'vps', [
+  ['create', 'mutation', 'networks:update', 'network', 'v1.0'],
+  ['list', 'read', 'networks:read', 'network', 'v1.0', list],
+  ['update', 'mutation', 'networks:update', 'network', 'v1.0'],
+  ['delete', 'mutation', 'networks:update', 'network', 'v1.0'],
 ]);
 group('commandBatches', 'quorum', [
   ['create', 'mutation', 'batches:create', 'tenant', 'v1.0'],
