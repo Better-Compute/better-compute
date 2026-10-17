@@ -631,8 +631,10 @@ describe('compute', () => {
     const lookup = emu.requests.find((r) =>
       r.url.pathname.endsWith('/zones/us-central1-a/operations'),
     )!;
-    expect(lookup.url.searchParams.get('filter')).toContain('operationType="insert"');
-    expect(lookup.url.searchParams.get('filter')).toContain('instances/bc-ins-x');
+    // GCE's RE2 form: parenthesized eq expressions, no explicit AND, no `=` mixed in (I4).
+    expect(lookup.url.searchParams.get('filter')).toBe(
+      '(operationType eq insert) (targetLink eq .*/zones/us-central1-a/instances/bc-ins-x)',
+    );
     // A quota error on the operation maps the same way.
     emu.failNextOperation = { code: 'QUOTA_EXCEEDED', message: 'Quota GPUS exceeded' };
     const second = await impl.create({ ...request, name: 'ins_y' }, ctx('k2'));
@@ -703,6 +705,69 @@ describe('compute', () => {
     });
     expect(await impl.get('us-central1-a/missing', ctx())).toBeUndefined();
     expect(await impl.get('not-an-id', ctx())).toBeUndefined();
+  });
+
+  it('a missing VM whose insert operations cannot be listed is missing; a busy GCE is retried (I4)', async () => {
+    const emu = new GceEmulator();
+    let answer: { status: number; reason: string } | undefined;
+    const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === 'object' && 'url' in input ? input.url : String(input));
+      if (answer && url.pathname.endsWith('/operations'))
+        return emu.error(answer.status, answer.reason, `${answer.reason} (test)`);
+      return emu.fetch(input, init);
+    }) as typeof globalThis.fetch;
+    const warnings: string[] = [];
+    const provider = gcpProvider({ fetch });
+    const impl = await provider.create(
+      { projectId: 'p', zones: ['us-central1-a'] },
+      {
+        clock: manualClock(1_000_000),
+        secrets,
+        log: {
+          debug() {},
+          info() {},
+          warn: (message: string) => warnings.push(message),
+          error() {},
+        },
+        account: platformAccount,
+      },
+    );
+    // A filter GCE refuses, or no permission: unknown, so the VM deleted out of band reads as gone.
+    for (const refusal of [
+      { status: 400, reason: 'invalid' },
+      { status: 403, reason: 'forbidden' },
+    ]) {
+      answer = refusal;
+      expect(await impl.get('us-central1-a/deleted-by-hand', ctx())).toBeUndefined();
+    }
+    expect(warnings).toEqual([
+      'gcp.insert_operations_unreadable',
+      'gcp.insert_operations_unreadable',
+    ]);
+    // A busy GCE is not an answer: the caller retries.
+    answer = { status: 503, reason: 'backendError' };
+    await expect(impl.get('us-central1-a/deleted-by-hand', ctx())).rejects.toMatchObject({
+      code: 'UNAVAILABLE',
+    });
+  });
+
+  it('the emulator refuses the mixed filter syntax GCE refuses (I4)', async () => {
+    const emu = new GceEmulator();
+    emu.validTokens.add('t');
+    const list = (filter: string) =>
+      emu.fetch(
+        `${endpoint}/projects/p/zones/us-central1-a/operations?filter=${encodeURIComponent(filter)}`,
+        { headers: { authorization: 'Bearer t' } },
+      );
+    expect(
+      (await list('(operationType="insert") AND (targetLink eq ".*/instances/x")')).status,
+    ).toBe(400);
+    expect(
+      (await list('(operationType eq insert) AND (targetLink eq .*/instances/x)')).status,
+    ).toBe(400);
+    expect((await list('(operationType eq insert) (targetLink eq .*/instances/x)')).status).toBe(
+      200,
+    );
   });
 
   it('delete refuses a VM without the managed label', async () => {

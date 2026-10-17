@@ -355,7 +355,9 @@ export class GcpCompute implements ProviderImpl {
         'items',
         {
           query: {
-            filter: `(operationType="insert") AND (targetLink eq ".*/zones/${target.zone}/instances/${target.name}")`,
+            // GCE's RE2 syntax: parenthesized `eq` expressions joined by spaces (an implicit AND);
+            // an explicit AND, or a `=` expression mixed in, is refused with a 400.
+            filter: `(operationType eq insert) (targetLink eq .*/zones/${target.zone}/instances/${target.name})`,
             maxResults: '500',
           },
           signal,
@@ -366,9 +368,20 @@ export class GcpCompute implements ProviderImpl {
           newest = operation;
       }
     } catch (error) {
-      // Without permission to list operations a missing VM is simply missing.
-      if (isComputeError(error, 'ACCESS_DENIED')) return undefined;
-      throw error;
+      // A busy provider is asked again later; anything else (no permission to list operations, a
+      // filter GCE refuses) leaves the outcome unknown, and a missing VM is then simply missing:
+      // throwing here would keep every out-of-band delete from ever reading as gone.
+      if (
+        signal.aborted ||
+        (isComputeError(error) && ['RATE_LIMITED', 'UNAVAILABLE', 'TIMEOUT'].includes(error.code))
+      )
+        throw error;
+      this.context.log.warn('gcp.insert_operations_unreadable', {
+        machineId: machineId(target.zone, target.name),
+        code: isComputeError(error) ? error.code : 'unknown',
+        reason: isComputeError(error) ? String(error.details?.reason ?? '') : '',
+      });
+      return undefined;
     }
     if (!newest) return undefined;
     if (newest.status !== 'DONE')

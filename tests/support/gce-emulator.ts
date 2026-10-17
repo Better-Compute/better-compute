@@ -69,6 +69,9 @@ export function defaultMachineTypes(): EmulatedMachineType[] {
   return zones.flatMap((zone) => shapes.map((shape) => ({ ...shape, zone })));
 }
 
+/** A list filter GCE would refuse (HTTP 400 `invalid`). */
+class InvalidFilter extends Error {}
+
 export class GceEmulator {
   /** Keyed `zone/name`. Values are GCE `Instance` resources. */
   instances = new Map<string, Json>();
@@ -144,7 +147,12 @@ export class GceEmulator {
       delete this.failNext;
       return this.error(failure.status, failure.reason, failure.message, failure.headers);
     }
-    return this.#compute(method, url, body);
+    try {
+      return this.#compute(method, url, body);
+    } catch (error) {
+      if (error instanceof InvalidFilter) return this.error(400, 'invalid', error.message);
+      throw error;
+    }
   };
 
   // ---------------------------------------------------------------------------------- helpers
@@ -308,25 +316,57 @@ export class GceEmulator {
     return start + size < items.length ? { slice, next: String(start + size) } : { slice };
   }
 
-  /** `labels.k=v`, `labels.k:*`, `name=x` clauses joined by AND. */
+  /**
+   * GCE's two list-filter syntaxes, which do not mix: `=`/`!=` expressions (`labels.k=v`,
+   * `labels.k:*`, `name=x`) joined by AND, or RE2 `eq`/`ne` expressions, each in parentheses and
+   * joined by whitespace only (`(operationType eq insert) (name eq bc-.+)`), whose
+   * literal must match the whole field. An `eq`/`ne` filter with an explicit AND or OR, or one
+   * mixed with `=`, is refused as GCE refuses it (400 `invalid`).
+   */
   #filter(url: URL, items: Json[]): Json[] {
     const filter = url.searchParams.get('filter');
     if (!filter) return items;
+    if (/\s(eq|ne)\s/.test(filter)) {
+      const clause = /\(\s*([\w.-]+)\s+(eq|ne)\s+(?:"([^"]*)"|([^\s()"]+))\s*\)/y;
+      const clauses: { key: string; operator: string; pattern: RegExp }[] = [];
+      let at = 0;
+      const text = filter.trim();
+      while (at < text.length) {
+        clause.lastIndex = at;
+        const match = clause.exec(text);
+        if (!match)
+          throw new InvalidFilter(
+            `Invalid list filter expression: ${JSON.stringify(filter)} (eq/ne expressions are parenthesized, joined by spaces only)`,
+          );
+        clauses.push({
+          key: match[1]!,
+          operator: match[2]!,
+          pattern: new RegExp(`^(?:${match[3] ?? match[4]})$`),
+        });
+        at = clause.lastIndex;
+        while (text[at] === ' ') at++;
+      }
+      return items.filter((item) =>
+        clauses.every(({ key, operator, pattern }) => {
+          const actual = key.startsWith('labels.')
+            ? item.labels?.[key.slice('labels.'.length)]
+            : item[key];
+          return pattern.test(String(actual)) === (operator === 'eq');
+        }),
+      );
+    }
     return items.filter((item) =>
       filter.split(/\s+AND\s+/i).every((clause) => {
         const present = /^\(?\s*(labels\.[^\s:=]+)\s*:\s*\*\s*\)?$/.exec(clause.trim());
         if (present) return item.labels?.[present[1]!.slice('labels.'.length)] !== undefined;
-        const equal = /^\(?\s*([\w.-]+)\s*(=|!=|eq|ne)\s*"?([^")]*)"?\s*\)?$/.exec(clause.trim());
-        if (!equal) return true;
+        const equal = /^\(?\s*([\w.-]+)\s*(=|!=)\s*"?([^")]*)"?\s*\)?$/.exec(clause.trim());
+        if (!equal)
+          throw new InvalidFilter(`Invalid list filter expression: ${JSON.stringify(filter)}`);
         const [, key, operator, value] = equal;
         const actual = key!.startsWith('labels.')
           ? item.labels?.[key!.slice('labels.'.length)]
           : item[key!];
-        const same =
-          operator === 'eq' || operator === 'ne'
-            ? new RegExp(`^${value}$`).test(String(actual))
-            : String(actual) === value;
-        return operator === '=' || operator === 'eq' ? same : !same;
+        return (String(actual) === value) === (operator === '=');
       }),
     );
   }
