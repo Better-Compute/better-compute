@@ -22,7 +22,8 @@ All notable changes to the better-compute packages are documented here. The form
   recreating it, with `onDelete: 'detach'` (default) or `'delete'`; `instances.detach` releases one, and
   `instances.reboot` restarts a provider instance (graceful, or `hard`). Ownership is re-checked on every read: a
   VM whose label is lost or foreign fails its instance (`OwnershipLost`, `AttachConflict`) and is never acted on
-  again. Opt-in label-driven auto-attach (`discovery.autoAttach`).
+  again. Opt-in label-driven auto-attach (`discovery.autoAttach`). `instances.create` takes `ownerIdentityId` from
+  the platform (a root caller creating in another tenant), so a VM it issues to a customer is the customer's.
 - **Provider reservations.** The `vps.reservations` worker detects provider capacity reservations, on-demand and
   future (`vps({ reservations: { every } })`, default 5 minutes), and publishes `provider.reservation.*`.
   `providerAccounts.reservations` lists them with `free` and `pending`; `bindReservation` turns a `ready` one into

@@ -1382,6 +1382,8 @@ needs these changes:
    - a "Discovered VMs" page: `providerAccounts.machines`, plus an attach form with
      `instances.attach({ tenantId: <org tenant>, poolId, externalId, ownerIdentityId, onDelete })`
    - a "Reservations" page: `providerAccounts.reservations` plus `bindReservation`
+   - an "Issue a VM" form: `instances.create({ tenantId: <org tenant>, poolId, flavor, imageId, ownerIdentityId })`
+     (root callers only; the instance is then the customer's, in their `scope: 'mine'` list)
 4. **Customer console** (`apps/cloud`):
    - attached VMs show up through the existing `instances.list/get`; add `reboot` and `detach` to the facade in
      `apps/cloud/lib/compute/service/api.ts`
