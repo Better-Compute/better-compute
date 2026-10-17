@@ -111,6 +111,10 @@ CREATE TABLE network_firewall_rules (
 
 ALTER TABLE instances ADD COLUMN network_id text REFERENCES networks;
 ALTER TABLE instances ADD COLUMN subnet_id text REFERENCES network_subnets;
+-- The machine the networks reconciler last settled this instance's tags on, and when: a pass skips
+-- what is current, so tagging many machines resumes across runs instead of starting over (I7).
+ALTER TABLE instances ADD COLUMN network_tagged_machine text;
+ALTER TABLE instances ADD COLUMN network_tagged_at timestamptz;
 CREATE INDEX instances_network ON instances (network_id) WHERE network_id IS NOT NULL AND state <> 'deleted';
 `,
 };
@@ -1673,6 +1677,11 @@ export const networkPollMs = 5_000;
 const networkRetryMs = 30_000;
 /** A run stops starting provider calls after this long (the lease is 60 s); the rest waits for the next run. */
 const runBudgetMs = 40_000;
+/**
+ * A machine's tags, once set, are taken as current for this long: passes skip it meanwhile, so a
+ * network of many machines is tagged across runs; after it, a pass sets them again (drift).
+ */
+export const networkTagRefreshMs = 60 * 60_000;
 
 /** What converging one resource at the provider came to. */
 type Outcome = { state: NetworkState; message?: string };
@@ -1682,7 +1691,14 @@ interface Snapshot {
   account: ProviderAccount | undefined;
   subnets: SubnetRow[];
   rules: RuleRow[];
-  instances: { id: string; external_id: string }[];
+  instances: TaggedInstance[];
+}
+
+interface TaggedInstance {
+  id: string;
+  external_id: string;
+  network_tagged_machine: string | null;
+  tagged_ms: number | null;
 }
 
 async function loadSnapshot(tx: SqlTx, networkId: string): Promise<Snapshot | undefined> {
@@ -1694,15 +1710,18 @@ async function loadSnapshot(tx: SqlTx, networkId: string): Promise<Snapshot | un
   const rules = await readRules(tx, networkId, { includeDeleted: true });
   // Only instances that own their machine are tagged (I3): live (not deleting, lost or failed), and
   // an attached one only once claimed and while nothing says it lost the machine (B2, B5).
-  const instances = await tx.query<{ id: string; external_id: string }>(
-    `SELECT id, external_id FROM instances
+  // Never tagged first, then the longest ago: a run that runs out of time leaves the rest for the next.
+  const instances = await tx.query<TaggedInstance>(
+    `SELECT id, external_id, network_tagged_machine,
+            (extract(epoch FROM network_tagged_at) * 1000)::float8 AS tagged_ms
+       FROM instances
       WHERE network_id = $1 AND external_id IS NOT NULL
         AND state NOT IN ('deleted', 'deleting', 'lost', 'error')
         AND (origin <> 'attached' OR provider_claimed_at IS NOT NULL)
         AND NOT EXISTS (
           SELECT 1 FROM jsonb_array_elements(conditions) AS c
            WHERE c->>'status' = 'true' AND c->>'type' = ANY($2::text[]))
-      ORDER BY id`,
+      ORDER BY network_tagged_at NULLS FIRST, id`,
     [networkId, [attachConflictCondition, ownershipLostCondition, duplicateMachineCondition]],
   );
   return {
@@ -1933,6 +1952,21 @@ class NetworkWorker {
     });
   }
 
+  /**
+   * Records that this pass settled the instance's tags on its machine (tagged, or refused as not
+   * its own): later passes skip it until `networkTagRefreshMs` has passed or the machine changed.
+   */
+  async #tagged(instance: TaggedInstance): Promise<void> {
+    const now = this.deps.clock.now();
+    await this.sql.transaction((tx) =>
+      tx.query(
+        `UPDATE instances SET network_tagged_machine = $2, network_tagged_at = to_timestamp($3::float8 / 1000)
+          WHERE id = $1 AND external_id = $2`,
+        [instance.id, instance.external_id, now],
+      ),
+    );
+  }
+
   /** What the provider answered for a thing being created or updated, as the state we store. */
   #presentState(outcome: Outcome): Outcome {
     if (outcome.state === 'ready' || outcome.state === 'error') return outcome;
@@ -2020,8 +2054,38 @@ class NetworkWorker {
       else if (state.state !== 'ready') waiting = true;
     }
 
-    // Tags first, so a rule that targets an instance matches it as soon as the provider has the rule.
+    for (const rule of snapshot.rules) {
+      const name = providerResourceName(rule.id);
+      if (rule.desired_state === 'deleted') {
+        if (rule.state === 'deleted') continue;
+        const gone = await this.#attempt(() => networks.deleteFirewall(name, this.#call(rule.id)));
+        if (!gone) continue;
+        if (gone.state === 'deleted') await this.#setRule(rule, 'deleted');
+        else if (gone.state === 'error') await this.#setRule(rule, 'error', gone.message);
+        else {
+          this.#inFlight = true;
+          await this.#setRule(rule, 'deleting');
+        }
+        continue;
+      }
+      const result = await this.#attempt(() =>
+        networks.ensureFirewall(compileFirewall(this.#networkName, rule), this.#call(rule.id)),
+      );
+      if (!result) continue;
+      const state = this.#presentState(result);
+      await this.#setRule(rule, state.state, state.message);
+    }
+
+    // Rules before tags: a rule targets tags, so a tag set later still matches, and a network of
+    // many machines gets its rules in the first run. Tags resume across runs (I7): a machine whose
+    // tags are current is skipped, so a run out of time continues with the rest next time.
     for (const instance of snapshot.instances) {
+      if (
+        instance.network_tagged_machine === instance.external_id &&
+        instance.tagged_ms !== null &&
+        this.deps.clock.now() - instance.tagged_ms < networkTagRefreshMs
+      )
+        continue;
       const done = await this.#attempt(async () => {
         try {
           await networks.setTags(
@@ -2045,31 +2109,10 @@ class NetworkWorker {
         }
         return { id: instance.external_id, state: 'ready' };
       });
+      if (done && done.state !== 'error') await this.#tagged(instance);
       // A machine the provider no longer has is the instance reconciler's to settle, not an error here.
       if (done?.state === 'error' && !/not.?found/i.test(done.message ?? ''))
         problems.push(`instance ${instance.id}: ${done.message ?? 'could not be tagged'}`);
-    }
-
-    for (const rule of snapshot.rules) {
-      const name = providerResourceName(rule.id);
-      if (rule.desired_state === 'deleted') {
-        if (rule.state === 'deleted') continue;
-        const gone = await this.#attempt(() => networks.deleteFirewall(name, this.#call(rule.id)));
-        if (!gone) continue;
-        if (gone.state === 'deleted') await this.#setRule(rule, 'deleted');
-        else if (gone.state === 'error') await this.#setRule(rule, 'error', gone.message);
-        else {
-          this.#inFlight = true;
-          await this.#setRule(rule, 'deleting');
-        }
-        continue;
-      }
-      const result = await this.#attempt(() =>
-        networks.ensureFirewall(compileFirewall(this.#networkName, rule), this.#call(rule.id)),
-      );
-      if (!result) continue;
-      const state = this.#presentState(result);
-      await this.#setRule(rule, state.state, state.message);
     }
 
     if (problems.length > 0) await this.#setNetwork('error', problems.join('; ').slice(0, 500));

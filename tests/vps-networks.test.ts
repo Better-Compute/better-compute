@@ -1288,10 +1288,9 @@ describe('reconcile', () => {
     const wide = gce.firewalls.get(providerResourceName(everywhere.id))!;
     expect(wide.targetTags).toBeUndefined();
     expect(wide.disabled).toBe(true);
-    // Tags are set before the rules that use them.
+    // Rules first (I7): a rule targets tags, so a tag set later still matches.
     const setTags = gce.calls.indexOf('setTags vm-gpu-1');
-    expect(setTags).toBeGreaterThanOrEqual(0);
-    expect(setTags).toBeLessThan(
+    expect(setTags).toBeGreaterThan(
       gce.calls.findIndex(
         (entry) => entry === `ensureFirewall ${providerResourceName(targeted.id)}`,
       ),
@@ -1300,6 +1299,52 @@ describe('reconcile', () => {
     await runKey('all');
     await tick();
     expect(gce.tags.get('vm-gpu-1')).toEqual([networkTag(instanceId)]);
+  });
+
+  it('a network with more VMs than one run can tag gets its rules first and its tags across runs (I7)', async () => {
+    const network = await createNetwork();
+    await addSubnet(network.id, { name: 'a', cidr: '10.0.0.0/20' });
+    const instanceIds: string[] = [];
+    for (let index = 0; index < 100; index++)
+      instanceIds.push(
+        await insertInstance({ networkId: network.id, externalId: `vm-many-${index}` }),
+      );
+    const rule = await createRule(network.id, {
+      name: 'ssh-some',
+      targets: { instanceIds: instanceIds.slice(0, 3) },
+    });
+    // Each GET + setTags at the provider takes a second: one 40 s run tags about 40 machines.
+    gce.onSetTags = async () => {
+      clock.advance(1_000);
+    };
+    queue.clear();
+    await runKey(network.id);
+    // The first run applied the rule before it ran out of time on tags.
+    const firewall = `ensureFirewall ${providerResourceName(rule.id)}`;
+    expect(gce.firewalls.has(providerResourceName(rule.id))).toBe(true);
+    expect(gce.calls.indexOf(firewall)).toBeLessThan(
+      gce.calls.findIndex((entry) => entry.startsWith('setTags')),
+    );
+    expect(gce.tags.size).toBeGreaterThan(0);
+    expect(gce.tags.size).toBeLessThan(100);
+    expect(await getNetwork(network.id)).toMatchObject({ state: 'pending' });
+    // Later runs carry on where it stopped instead of starting again from the first VM.
+    await until(() => settled(network.id), 6);
+    expect(gce.tags.size).toBe(100);
+    const tagCalls = gce.calls.filter((entry) => entry.startsWith('setTags'));
+    expect(tagCalls).toHaveLength(100);
+    expect(new Set(tagCalls).size).toBe(100);
+    // The periodic pass finds them current and asks nothing.
+    gce.calls.length = 0;
+    await runKey('all');
+    await tick();
+    expect(gce.calls.filter((entry) => entry.startsWith('setTags'))).toEqual([]);
+    expect(await getNetwork(network.id)).toMatchObject({ state: 'ready' });
+    // After the refresh interval drift is corrected: every machine is looked at again.
+    clock.advance(61 * 60_000);
+    gce.onSetTags = undefined;
+    await runKey('all');
+    await until(async () => gce.calls.filter((e) => e.startsWith('setTags')).length === 100, 4);
   });
 
   it('tags only instances that own their machine, naming the instance (I3)', async () => {
