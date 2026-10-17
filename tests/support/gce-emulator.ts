@@ -22,6 +22,9 @@ interface Operation {
   targetLink: string;
   /** GETs that still answer RUNNING before the operation turns DONE. */
   remaining: number;
+  seq: number;
+  /** Runs once when the operation turns DONE without an error. */
+  complete?: () => void;
   error?: { errors: { code: string; message: string }[] };
   httpErrorStatusCode?: number;
 }
@@ -91,6 +94,13 @@ export class GceEmulator {
   beforeAction?: (action: string, instance: Json) => void;
   /** New operations stay RUNNING for this many operation GETs. */
   operationDelayTicks = 0;
+  /**
+   * Instance inserts are RUNNING for at least this many operation GETs, as on GCE (the VM shows as
+   * PROVISIONING meanwhile, and a failure such as a stockout only arrives on the operation).
+   */
+  insertDelayTicks = 1;
+  /** The VM only appears once its insert operation is DONE (GCE can answer 404 until then). */
+  deferInsert = false;
   /** Upper bound of a page; a request's `maxResults` can only lower it. */
   maxResults = 2;
 
@@ -157,6 +167,15 @@ export class GceEmulator {
       { error: { code: status, message, errors: [{ reason, message }] } },
       headers,
     );
+  }
+
+  /** Lets every running operation finish now (their effects complete; failed ones stay failed). */
+  finishOperations(): void {
+    for (const operation of this.operations.values()) {
+      if (operation.remaining <= 0) continue;
+      operation.remaining = 0;
+      if (!operation.error) operation.complete?.();
+    }
   }
 
   /** Adds an instance as GCE would return it; shorthand for tests that seed machines. */
@@ -228,6 +247,7 @@ export class GceEmulator {
     targetLink: string,
     apply: () => void,
     requestId?: string | null,
+    extras: { delay?: number; complete?: () => void } = {},
   ): Response {
     if (requestId && this.#requestIds.has(requestId))
       return this.json(200, this.#operationBody(this.#requestIds.get(requestId)!));
@@ -237,7 +257,9 @@ export class GceEmulator {
       scopeName,
       operationType,
       targetLink,
-      remaining: this.operationDelayTicks,
+      remaining: extras.delay ?? this.operationDelayTicks,
+      seq: this.#operationSeq,
+      ...(extras.complete ? { complete: extras.complete } : {}),
     };
     if (this.failNextOperation) {
       const failure = this.failNextOperation;
@@ -261,6 +283,8 @@ export class GceEmulator {
       operationType: operation.operationType,
       targetLink: operation.targetLink,
       selfLink: `${origin}/projects/p/${scopePath}/operations/${operation.name}`,
+      id: String(operation.seq),
+      insertTime: new Date(Date.UTC(2026, 9, 1, 0, 0, operation.seq)).toISOString(),
       status: operation.remaining > 0 ? 'RUNNING' : 'DONE',
     };
     if (operation.scope === 'zones')
@@ -292,13 +316,17 @@ export class GceEmulator {
       filter.split(/\s+AND\s+/i).every((clause) => {
         const present = /^\(?\s*(labels\.[^\s:=]+)\s*:\s*\*\s*\)?$/.exec(clause.trim());
         if (present) return item.labels?.[present[1]!.slice('labels.'.length)] !== undefined;
-        const equal = /^\(?\s*([\w.-]+)\s*(=|!=)\s*"?([^")]*)"?\s*\)?$/.exec(clause.trim());
+        const equal = /^\(?\s*([\w.-]+)\s*(=|!=|eq|ne)\s*"?([^")]*)"?\s*\)?$/.exec(clause.trim());
         if (!equal) return true;
         const [, key, operator, value] = equal;
         const actual = key!.startsWith('labels.')
           ? item.labels?.[key!.slice('labels.'.length)]
           : item[key!];
-        return operator === '=' ? String(actual) === value : String(actual) !== value;
+        const same =
+          operator === 'eq' || operator === 'ne'
+            ? new RegExp(`^${value}$`).test(String(actual))
+            : String(actual) === value;
+        return operator === '=' || operator === 'eq' ? same : !same;
       }),
     );
   }
@@ -367,10 +395,26 @@ export class GceEmulator {
         ((first === 'zones' || first === 'regions') && third === 'operations'))
     ) {
       const name = first === 'global' ? third : fourth;
+      if (!name) {
+        const scoped = [...this.operations.values()].filter(
+          (operation) =>
+            operation.scope === first && (first === 'global' || operation.scopeName === second),
+        );
+        return this.#list(
+          url,
+          this.#filter(
+            url,
+            scoped.map((operation) => this.#operationBody(operation)),
+          ),
+        );
+      }
       const operation = this.operations.get(name ?? '');
       if (!operation) return this.error(404, 'notFound', `Operation ${name} not found`);
       const body = this.#operationBody(operation);
-      if (operation.remaining > 0) operation.remaining -= 1;
+      if (operation.remaining > 0) {
+        operation.remaining -= 1;
+        if (operation.remaining === 0 && !operation.error) operation.complete?.();
+      }
       return this.json(200, body);
     }
 
@@ -478,17 +522,31 @@ export class GceEmulator {
         const typeName = String(body?.machineType).split('/').pop();
         if (!this.machineTypes.some((t) => t.zone === zone && t.name === typeName))
           return this.error(400, 'invalid', `Invalid value for field 'machineType': ${typeName}`);
+        const key = `${zone}/${instanceName}`;
+        const delay = Math.max(this.operationDelayTicks, this.insertDelayTicks);
+        const make = (status: string) => {
+          const instance = this.#buildInstance(zone, body!);
+          instance.status = status;
+          this.instances.set(key, instance);
+        };
         return this.#operation(
           'zones',
           zone,
           'insert',
           `${origin}/projects/p/zones/${zone}/instances/${instanceName}`,
           () => {
-            const instance = this.#buildInstance(zone, body!);
-            instance.status = 'RUNNING';
-            this.instances.set(`${zone}/${instanceName}`, instance);
+            if (delay === 0) make('RUNNING');
+            else if (!this.deferInsert) make('PROVISIONING');
           },
           requestId,
+          {
+            delay,
+            complete: () => {
+              const existing = this.instances.get(key);
+              if (existing) existing.status = 'RUNNING';
+              else if (this.deferInsert) make('RUNNING');
+            },
+          },
         );
       }
       const instance = this.instances.get(`${zone}/${name}`);
@@ -502,6 +560,10 @@ export class GceEmulator {
           target,
           () => {
             this.instances.delete(`${zone}/${name}`);
+            // Deleting a VM settles its insert (GCE finishes or cancels it).
+            for (const operation of this.operations.values())
+              if (operation.operationType === 'insert' && operation.targetLink === target)
+                operation.remaining = 0;
           },
           url.searchParams.get('requestId'),
         );
@@ -576,11 +638,14 @@ export class GceEmulator {
         'insert',
         target(created),
         () =>
-          store.set(created, {
-            kind: `compute#${kind.slice(0, -1)}`,
-            selfLink: target(created),
-            ...body,
-          }),
+          store.set(
+            created,
+            this.#withDefaults(kind, {
+              kind: `compute#${kind.slice(0, -1)}`,
+              selfLink: target(created),
+              ...body,
+            }),
+          ),
         url.searchParams.get('requestId'),
       );
     }
@@ -612,9 +677,20 @@ export class GceEmulator {
     }
     if (method === 'PATCH')
       return this.#operation('global', undefined, 'patch', target(name), () => {
-        store.set(name, { ...existing, ...body });
+        store.set(name, this.#withDefaults(kind, { ...existing, ...body }));
       });
     return this.error(404, 'notFound', 'unsupported');
+  }
+
+  /** What GCE fills in: a firewall rule's default source and destination ranges. */
+  #withDefaults(kind: 'networks' | 'firewalls', resource: Json): Json {
+    if (kind !== 'firewalls') return resource;
+    const rule: Json = { ...resource, direction: resource.direction ?? 'INGRESS' };
+    if (rule.direction === 'INGRESS' && !rule.sourceRanges?.length && !rule.sourceTags?.length)
+      rule.sourceRanges = ['0.0.0.0/0'];
+    if (rule.direction === 'EGRESS' && !rule.destinationRanges?.length)
+      rule.destinationRanges = ['0.0.0.0/0'];
+    return rule;
   }
 
   #networks(method: string, url: URL, name: string | undefined, body?: Json): Response {

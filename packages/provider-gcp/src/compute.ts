@@ -13,7 +13,13 @@ import {
   type ProviderImpl,
   type ProviderNetworks,
 } from '@better-compute/core';
-import { settled, waitForOperation, type GceClient, type GceOperation } from './client.js';
+import {
+  operationFailure,
+  settled,
+  waitForOperation,
+  type GceClient,
+  type GceOperation,
+} from './client.js';
 import type { GcpConfig, GcpProviderOptions } from './config.js';
 import {
   instanceName,
@@ -327,9 +333,56 @@ export class GcpCompute implements ProviderImpl {
         context.signal,
       );
     } catch (error) {
-      if (isComputeError(error, 'NOT_FOUND')) return undefined;
+      if (isComputeError(error, 'NOT_FOUND')) return this.insertOutcome(target, context.signal);
       throw error;
     }
+  }
+
+  /**
+   * What a VM that cannot be read is: GCE accepts an insert and reports its failure (a stockout,
+   * a quota) on the operation later, and the VM may not be visible while it runs. So when a VM is
+   * missing, its newest insert operation says whether it is still coming (a pending machine),
+   * failed (the operation's error), or there is nothing to find (undefined).
+   */
+  protected async insertOutcome(
+    target: { zone: string; name: string },
+    signal: AbortSignal,
+  ): Promise<ExternalMachine | undefined> {
+    let newest: GceOperation | undefined;
+    try {
+      for await (const operation of this.client.pages<GceOperation & { insertTime?: string }>(
+        `/zones/${target.zone}/operations`,
+        'items',
+        {
+          query: {
+            filter: `(operationType="insert") AND (targetLink eq ".*/zones/${target.zone}/instances/${target.name}")`,
+            maxResults: '500',
+          },
+          signal,
+        },
+      )) {
+        const time = (candidate: { insertTime?: string }) => Date.parse(candidate.insertTime ?? '');
+        if (!newest || time(operation) >= time(newest as { insertTime?: string }))
+          newest = operation;
+      }
+    } catch (error) {
+      // Without permission to list operations a missing VM is simply missing.
+      if (isComputeError(error, 'ACCESS_DENIED')) return undefined;
+      throw error;
+    }
+    if (!newest) return undefined;
+    if (newest.status !== 'DONE')
+      return {
+        id: machineId(target.zone, target.name),
+        name: target.name,
+        state: 'pending',
+        addresses: [],
+        zone: target.zone,
+        region: regionOf(target.zone),
+      };
+    const failure = operationFailure(newest, `Creating ${machineId(target.zone, target.name)}`);
+    if (failure) throw failure;
+    return undefined;
   }
 
   async delete(id: string, context: CallContext): Promise<void> {

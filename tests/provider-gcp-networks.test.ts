@@ -157,6 +157,74 @@ describe('networks', () => {
     expect(emu.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
   });
 
+  it('ensureFirewall converges when the spec drops a field', async () => {
+    const emu = new GceEmulator();
+    const networks = await networksOf(emu);
+    await networks.ensureFirewall(firewall, ctx());
+    expect(emu.firewalls.get('bc-allow-ssh')).toMatchObject({ targetTags: ['bc-abc'] });
+    const { targetTags: _tags, sources: _sources, ...bare } = firewall;
+    for (let i = 0; i < 3; i++)
+      expect(await networks.ensureFirewall(bare, ctx())).toMatchObject({ state: 'ready' });
+    expect(emu.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
+    const patch = emu.requests.find((r) => r.method === 'PATCH')!;
+    expect(patch.body).toMatchObject({ targetTags: [], sourceRanges: [], destinationRanges: [] });
+    // The rule now has no target tags, and GCE's default source.
+    expect(emu.firewalls.get('bc-allow-ssh')).toMatchObject({
+      targetTags: [],
+      sourceRanges: ['0.0.0.0/0'],
+    });
+  });
+
+  it('ensureFirewall converges for an egress rule without destinations', async () => {
+    const emu = new GceEmulator();
+    const networks = await networksOf(emu);
+    const egress: ProviderFirewallSpec = {
+      network: 'bc-net',
+      name: 'bc-out',
+      direction: 'egress',
+      action: 'allow',
+      priority: 1000,
+      rules: [{ protocol: 'all' }],
+    };
+    for (let i = 0; i < 3; i++)
+      expect(await networks.ensureFirewall(egress, ctx())).toMatchObject({ state: 'ready' });
+    expect(emu.firewalls.get('bc-out')).toMatchObject({ destinationRanges: ['0.0.0.0/0'] });
+    expect(emu.requests.filter((r) => r.method === 'PATCH')).toHaveLength(0);
+  });
+
+  it('ensure after delete creates the resource again instead of reporting the old operation', async () => {
+    const emu = new GceEmulator();
+    const networks = await networksOf(emu);
+    const subnet = {
+      network: 'bc-net',
+      name: 'bc-sub',
+      region: 'us-central1',
+      cidr: '10.10.0.0/24',
+    };
+    for (let round = 0; round < 2; round++) {
+      expect(await networks.ensureFirewall(firewall, ctx())).toMatchObject({ state: 'ready' });
+      expect(emu.firewalls.has('bc-allow-ssh')).toBe(true);
+      expect(await networks.ensureNetwork({ name: 'bc-net' }, ctx())).toMatchObject({
+        state: 'ready',
+      });
+      expect(emu.networks.has('bc-net')).toBe(true);
+      expect(await networks.ensureSubnet(subnet, ctx())).toMatchObject({ state: 'ready' });
+      expect(emu.subnetworks.has('us-central1/bc-sub')).toBe(true);
+      expect((await networks.deleteFirewall('bc-allow-ssh', ctx())).state).toBe('deleted');
+      expect((await networks.deleteSubnet('us-central1', 'bc-sub', ctx())).state).toBe('deleted');
+      expect((await networks.deleteNetwork('bc-net', ctx())).state).toBe('deleted');
+    }
+    // Once more, with the operation still running: pending, then it exists.
+    emu.operationDelayTicks = 1;
+    const states = [];
+    for (let i = 0; i < 4; i++) states.push((await networks.ensureFirewall(firewall, ctx())).state);
+    expect(states.at(-1)).toBe('ready');
+    expect(emu.firewalls.has('bc-allow-ssh')).toBe(true);
+    const ids = posts(emu, '/global/firewalls').map((r) => r.url.searchParams.get('requestId'));
+    // Each reused requestId was spotted by the missing resource and replaced.
+    expect(ids.slice(0, -1)).not.toContain(ids.at(-1));
+  });
+
   it('ensureFirewall maps deny and egress rules, and refuses to flip the action', async () => {
     const emu = new GceEmulator();
     const networks = await networksOf(emu);

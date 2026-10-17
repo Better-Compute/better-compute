@@ -83,16 +83,25 @@ function rules(list: { IPProtocol: string; ports?: readonly string[] }[] | undef
   );
 }
 
-/** The comparable form of a firewall: what this provider manages, as GCE returns it. */
+const anywhere = ['0.0.0.0/0'];
+
+/**
+ * The comparable form of a firewall: what this provider manages, as GCE returns it. GCE fills in
+ * the default ranges (ingress sources and egress destinations are 0.0.0.0/0 when left out), so a
+ * spec that leaves them out equals the rule GCE stored.
+ */
 function comparable(rule: GceFirewall): string {
+  const direction = rule.direction ?? 'INGRESS';
+  const sources = sorted(rule.sourceRanges);
+  const destinations = sorted(rule.destinationRanges);
   return JSON.stringify({
     network: lastSegment(rule.network),
-    direction: rule.direction ?? 'INGRESS',
+    direction,
     priority: rule.priority ?? 1000,
     allowed: rules(rule.allowed),
     denied: rules(rule.denied),
-    sourceRanges: sorted(rule.sourceRanges),
-    destinationRanges: sorted(rule.destinationRanges),
+    sourceRanges: direction === 'INGRESS' && !sources.length ? anywhere : sources,
+    destinationRanges: direction === 'EGRESS' && !destinations.length ? anywhere : destinations,
     targetTags: sorted(rule.targetTags),
     disabled: rule.disabled === true,
   });
@@ -102,7 +111,8 @@ export class GcpNetworks implements ProviderNetworks {
   readonly #client: GceClient;
   readonly #options: GcpProviderOptions;
   readonly #running = new Map<string, GceOperation>();
-  readonly #failures = new Map<string, number>();
+  /** Per resource: how often a create's requestId had to change (a failed or lost create). */
+  readonly #attempts = new Map<string, number>();
 
   constructor(client: GceClient, options: GcpProviderOptions) {
     this.#client = client;
@@ -111,10 +121,18 @@ export class GcpNetworks implements ProviderNetworks {
 
   // -------------------------------------------------------------------------------- plumbing
 
-  /** `requestId` for a create; varies after a failure seen by this process, so a retry is not deduplicated into the failed operation. */
+  /**
+   * `requestId` for a create. GCE answers a repeated requestId with the original operation (for
+   * at least 60 minutes), so after a create failed, or its resource was deleted since, a retry
+   * needs a new one or it would only get the old outcome back.
+   */
   #requestId(kind: Kind, key: string): string {
-    const failures = this.#failures.get(`${kind}:${key}`) ?? 0;
-    return requestIdFor(`${kind}:${key}${failures ? `:${failures}` : ''}`);
+    const attempts = this.#attempts.get(`${kind}:${key}`) ?? 0;
+    return requestIdFor(`${kind}:${key}${attempts ? `:${attempts}` : ''}`);
+  }
+
+  #newRequestId(memory: string): void {
+    this.#attempts.set(memory, (this.#attempts.get(memory) ?? 0) + 1);
   }
 
   /**
@@ -143,10 +161,9 @@ export class GcpNetworks implements ProviderNetworks {
     }
     this.#running.delete(memory);
     if (operation.error) {
-      this.#failures.set(memory, (this.#failures.get(memory) ?? 0) + 1);
+      this.#newRequestId(memory);
       return { failed: operation };
     }
-    this.#failures.delete(memory);
     return undefined;
   }
 
@@ -196,14 +213,21 @@ export class GcpNetworks implements ProviderNetworks {
     const found = await this.#find<T>(path, signal);
     if (found) return (await reconcile(found)) ?? state(id, 'ready');
     try {
-      const started = await this.#start(memory, 'POST', create.path, {
-        body: create.body,
-        requestId: this.#requestId(kind, id),
-        signal,
-      });
-      if (started && 'running' in started) return state(id, 'pending');
-      if (started) return state(id, 'error', failureMessage(started.failed));
-      return state(id, 'ready');
+      for (let attempt = 0; ; attempt++) {
+        const started = await this.#start(memory, 'POST', create.path, {
+          body: create.body,
+          requestId: this.#requestId(kind, id),
+          signal,
+        });
+        if (started && 'running' in started) return state(id, 'pending');
+        if (started) return state(id, 'error', failureMessage(started.failed));
+        // The operation is DONE. If the resource is not there, GCE handed back the outcome of an
+        // earlier create under the same requestId (the resource was deleted since): create again
+        // under a new one, once now and otherwise on the next call.
+        if (await this.#find(path, signal)) return state(id, 'ready');
+        this.#newRequestId(memory);
+        if (attempt > 0) return state(id, 'pending');
+      }
     } catch (error) {
       // Lost a race with another creator: the resource is there now.
       if (isComputeError(error, 'CONFLICT')) return state(id, 'pending');
@@ -322,8 +346,9 @@ export class GcpNetworks implements ProviderNetworks {
             'error',
             `Firewall rule ${spec.name} exists with the opposite action; delete it to change allow to deny`,
           );
+        // A PATCH keeps the fields it leaves out: say explicitly that the lists are now empty.
         const started = await this.#start(`fw:${spec.name}`, 'PATCH', path, {
-          body,
+          body: { sourceRanges: [], destinationRanges: [], targetTags: [], ...body },
           signal: context.signal,
         });
         if (started && 'running' in started) return state(spec.name, 'pending');

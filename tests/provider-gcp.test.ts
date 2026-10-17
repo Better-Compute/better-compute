@@ -575,6 +575,8 @@ describe('compute', () => {
       userData: '',
       name: 'ins_x',
     });
+    // An insert that is already DONE with an error (GCE answers some failures at once).
+    emu.insertDelayTicks = 0;
     emu.failNextOperation = { code: 'ZONE_RESOURCE_POOL_EXHAUSTED', httpErrorStatusCode: 503 };
     await expect(
       impl.create(request('us-central1-a/a3-highgpu-8g'), ctx('k1')),
@@ -599,6 +601,69 @@ describe('compute', () => {
       code: 'INVALID_INPUT',
     });
     expect(emu.instances.size).toBe(0);
+  });
+
+  it('an asynchronous stockout surfaces from get as CAPACITY_UNAVAILABLE', async () => {
+    const emu = new GceEmulator();
+    const impl = await build(emu);
+    const request = {
+      offerId: 'us-central1-a/a3-highgpu-8g',
+      image: 'ubuntu-2404-lts',
+      userData: '',
+      name: 'ins_x',
+    };
+    emu.failNextOperation = { code: 'ZONE_RESOURCE_POOL_EXHAUSTED', httpErrorStatusCode: 503 };
+    const machine = await impl.create(request, ctx('k1'));
+    expect(machine.state).toBe('pending');
+    // The insert is still running: the VM is on its way.
+    expect(await impl.get(machine.id, ctx())).toMatchObject({ id: machine.id, state: 'pending' });
+    emu.finishOperations();
+    await expect(impl.get(machine.id, ctx())).rejects.toMatchObject({
+      code: 'CAPACITY_UNAVAILABLE',
+      details: { provider: 'gcp', reason: 'ZONE_RESOURCE_POOL_EXHAUSTED' },
+    });
+    const lookup = emu.requests.find((r) =>
+      r.url.pathname.endsWith('/zones/us-central1-a/operations'),
+    )!;
+    expect(lookup.url.searchParams.get('filter')).toContain('operationType="insert"');
+    expect(lookup.url.searchParams.get('filter')).toContain('instances/bc-ins-x');
+    // A quota error on the operation maps the same way.
+    emu.failNextOperation = { code: 'QUOTA_EXCEEDED', message: 'Quota GPUS exceeded' };
+    const second = await impl.create({ ...request, name: 'ins_y' }, ctx('k2'));
+    emu.finishOperations();
+    await expect(impl.get(second.id, ctx())).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED' });
+    // A VM that never had an insert is simply absent.
+    expect(await impl.get('us-central1-a/never', ctx())).toBeUndefined();
+  });
+
+  it('get answers pending while the insert runs and the VM is not visible yet', async () => {
+    const emu = new GceEmulator();
+    emu.deferInsert = true;
+    const impl = await build(emu);
+    const machine = await impl.create(
+      { offerId: 'us-central1-a/n2-standard-4', image: 'i', userData: '', name: 'ins_x' },
+      ctx('k1'),
+    );
+    expect(emu.instances.size).toBe(0);
+    expect(await impl.get(machine.id, ctx())).toMatchObject({
+      id: 'us-central1-a/bc-ins-x',
+      state: 'pending',
+      zone: 'us-central1-a',
+    });
+    emu.finishOperations();
+    expect(await impl.get(machine.id, ctx())).toMatchObject({ state: 'running', vcpu: 4 });
+  });
+
+  it('a VM shows as pending while its insert runs and running after', async () => {
+    const emu = new GceEmulator();
+    const impl = await build(emu);
+    const machine = await impl.create(
+      { offerId: 'us-central1-a/n2-standard-4', image: 'i', userData: '', name: 'ins_x' },
+      ctx('k1'),
+    );
+    expect(await impl.get(machine.id, ctx())).toMatchObject({ state: 'pending' });
+    emu.finishOperations();
+    expect(await impl.get(machine.id, ctx())).toMatchObject({ state: 'running' });
   });
 
   it('create adopts an existing VM that carries the same instance label', async () => {
