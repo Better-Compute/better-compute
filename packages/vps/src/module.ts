@@ -75,6 +75,7 @@ import {
   type BootstrapOptions,
   type ProviderBootstrap,
 } from './bootstraps.js';
+import { discoveryReconciler, type DiscoveryOptions } from './discovery.js';
 import { vpsMigrations } from './migrations.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
 import { describeCreateInstance, describeCreateSandbox, describeExtendSandbox } from './describe.js';
@@ -200,6 +201,11 @@ export interface VpsOptions {
    * from. Without it `providerAccounts.bootstrap` is INVALID_CONFIG.
    */
   bootstrap?: BootstrapOptions;
+  /**
+   * The `vps.discovery` worker (R5): how often provider accounts whose provider can `discover` are
+   * listed into `provider_machines` (default `5m`), and opt-in label-driven auto-attach.
+   */
+  discovery?: DiscoveryOptions;
   /**
    * Where sandbox snapshots are stored (§3.7): presigned uploads for `instance.snapshot` and the URL
    * restores fetch. Without it `sandboxes.snapshot` is INVALID_CONFIG.
@@ -1133,6 +1139,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           return 'DONE';
         },
       },
+      // R5: provider_machines, listed per provider account (key `all` periodic, then per account).
+      discoveryReconciler(options.discovery ?? {}, depsOf),
       {
         // §3.7: sandbox expiry, sandbox.ready/deleted events, and warm pools per template.
         name: sandboxWork,
