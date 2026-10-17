@@ -595,16 +595,23 @@ export class GcpCompute implements ProviderImpl {
   }
 
   async release(id: string, instanceId: string, context: CallContext): Promise<void> {
+    // An id that never named a machine has nothing to release.
     try {
-      const owner = labelValue(instanceId);
+      parseMachineId(id);
+    } catch {
+      return;
+    }
+    const owner = labelValue(instanceId);
+    try {
       await this.#changeLabels(id, context.signal, (current) => {
         if (current[labels.instance] !== owner) return undefined;
         const { [labels.instance]: _removed, ...rest } = current;
         return rest;
       });
     } catch (error) {
-      // A machine that is gone, or an id that never named one, has nothing left to release.
-      if (isComputeError(error, 'NOT_FOUND') || isComputeError(error, 'INVALID_INPUT')) return;
+      // A machine that is gone has nothing left to release. Anything else (a 400 such as
+      // `resourceNotReady` while the VM stops) is the caller's to retry: the label is still there.
+      if (isComputeError(error, 'NOT_FOUND')) return;
       throw error;
     }
   }

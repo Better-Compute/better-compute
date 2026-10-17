@@ -95,6 +95,11 @@ export class GceEmulator {
   failNextOperation?: { code: string; message?: string; httpErrorStatusCode?: number };
   /** Runs before an instance action (`setLabels`, `setTags`, `start`, …) is checked and applied. */
   beforeAction?: (action: string, instance: Json) => void;
+  /**
+   * The next `times` POSTs of this instance action (`setLabels`, …) fail with this GCE error and
+   * change nothing (e.g. 400 `resourceNotReady` while a VM is stopping).
+   */
+  failAction?: { action: string; status: number; reason: string; message?: string; times: number };
   /** New operations stay RUNNING for this many operation GETs. */
   operationDelayTicks = 0;
   /**
@@ -613,6 +618,11 @@ export class GceEmulator {
         });
       }
       if (method === 'POST' && action) this.beforeAction?.(action, instance);
+      if (method === 'POST' && action && this.failAction?.action === action) {
+        const failure = this.failAction;
+        if (--failure.times <= 0) delete this.failAction;
+        return this.error(failure.status, failure.reason, failure.message);
+      }
       if (method === 'POST' && action === 'setLabels') {
         if (body?.labelFingerprint !== instance.labelFingerprint)
           return this.error(

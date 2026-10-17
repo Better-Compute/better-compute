@@ -1260,4 +1260,24 @@ describe('attach primitives', () => {
     await impl.release!('us-central1-a/gone', 'ins_1', ctx());
     await impl.release!('nonsense', 'ins_1', ctx());
   });
+
+  it('release is retried, not reported done, while GCE answers resourceNotReady (I5)', async () => {
+    const emu = new GceEmulator();
+    const vm = emu.addInstance('us-central1-a', 'legacy', { labels: { [owned]: 'ins_1' } });
+    const impl = await build(emu);
+    // The VM is mid-stop: setLabels is refused with a 400 that is not about the id.
+    emu.failAction = { action: 'setLabels', status: 400, reason: 'resourceNotReady', times: 1 };
+    await expect(impl.release!('us-central1-a/legacy', 'ins_1', ctx())).rejects.toMatchObject({
+      code: 'UNAVAILABLE',
+      details: { provider: 'gcp', status: 400, reason: 'resourceNotReady' },
+    });
+    expect(vm.labels).toEqual({ [owned]: 'ins_1' });
+    // Any other 400 on the label write is no success either.
+    emu.failAction = { action: 'setLabels', status: 400, reason: 'invalid', times: 1 };
+    await expect(impl.release!('us-central1-a/legacy', 'ins_1', ctx())).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+    await impl.release!('us-central1-a/legacy', 'ins_1', ctx());
+    expect(vm.labels).toEqual({});
+  });
 });

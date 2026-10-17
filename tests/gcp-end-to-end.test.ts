@@ -169,6 +169,49 @@ describe('provider-gcp through vps, end to end', () => {
     expect(w.emu.requests.some((request) => request.method === 'DELETE')).toBe(false);
   });
 
+  it('a detach GCE refuses with resourceNotReady is retried; instance.detached only after (I5)', async () => {
+    const w = await world();
+    w.emu.addInstance(ZONE, 'legacy', { labels: { team: 'ml' } });
+    await w.tick('vps.discovery', 60_000);
+    const instance = await w.api.instances.attach(w.root, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      externalId: `${ZONE}/legacy`,
+      ownerIdentityId: w.fixture.tenants.acme.caller.identityId,
+      idempotencyKey: 'attach-legacy',
+    });
+    expect(await settle(w, instance.id, 'running')).toMatchObject({ state: 'running' });
+    const legacy = w.emu.instances.get(`${ZONE}/legacy`)!;
+    const detached = async () =>
+      (await w.fixture.database.query(`SELECT 1 FROM outbox WHERE topic = 'instance.detached'`))
+        .rows.length;
+
+    // The customer stops the VM and detaches at once: GCE refuses the label write meanwhile.
+    w.emu.failAction = { action: 'setLabels', status: 400, reason: 'resourceNotReady', times: 2 };
+    await w.api.instances.delete(w.acme, { tenantId: w.acmeTenant, instanceId: instance.id });
+    await w.tick('vps.instances', 1_000);
+    // One label write was refused (the next is refused too): the detach is not done.
+    expect(w.emu.failAction?.times).toBe(1);
+    expect(legacy.labels['better-compute-instance']).toBe(instance.id);
+    expect(await detached()).toBe(0);
+    expect((await w.view(instance.id)).state).not.toBe('deleted');
+
+    expect(await settle(w, instance.id, 'deleted', 40)).toMatchObject({ state: 'deleted' });
+    expect(w.emu.failAction).toBeUndefined();
+    expect(legacy.labels).toEqual({ team: 'ml' });
+    expect(await detached()).toBe(1);
+    // The machine is free again: it can be attached anew.
+    await w.tick('vps.discovery', 60_000);
+    const again = await w.api.instances.attach(w.root, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      externalId: `${ZONE}/legacy`,
+      ownerIdentityId: w.fixture.tenants.acme.caller.identityId,
+      idempotencyKey: 'attach-legacy-again',
+    });
+    expect(again.id).not.toBe(instance.id);
+  });
+
   it('detects a reservation, binds it, and admits only its free slot', async () => {
     const w = await world();
     w.emu.reservations.push({

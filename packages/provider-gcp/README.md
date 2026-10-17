@@ -121,8 +121,8 @@ How vps uses them:
 
 ## Errors
 
-Compute Engine errors map to `ComputeError` codes (404 `NOT_FOUND`, 409 `alreadyExists` `CONFLICT`, 429 or a rate-limit 403 `RATE_LIMITED` with `retryAfterMs`, `quotaExceeded` `QUOTA_EXCEEDED`, other 403 `ACCESS_DENIED`, 400 `INVALID_INPUT`, 5xx `UNAVAILABLE`). A failed operation maps by its error code (`ZONE_RESOURCE_POOL_EXHAUSTED` `CAPACITY_UNAVAILABLE`, `QUOTA_EXCEEDED`, `RESOURCE_IN_USE_BY_ANOTHER_RESOURCE` `INVALID_STATE`, …). Each carries `details: { provider: 'gcp', status, reason }`.
+Compute Engine errors map to `ComputeError` codes (404 `NOT_FOUND`, 409 `alreadyExists` `CONFLICT`, 429 or a rate-limit 403 `RATE_LIMITED` with `retryAfterMs`, `quotaExceeded` `QUOTA_EXCEEDED`, other 403 `ACCESS_DENIED`, 400 `resourceNotReady` (a VM mid-transition) `UNAVAILABLE` with `retryAfterMs`, other 400 `INVALID_INPUT`, 5xx `UNAVAILABLE`). A failed operation maps by its error code (`ZONE_RESOURCE_POOL_EXHAUSTED` `CAPACITY_UNAVAILABLE`, `QUOTA_EXCEEDED`, `RESOURCE_IN_USE_BY_ANOTHER_RESOURCE` `INVALID_STATE`, …). Each carries `details: { provider: 'gcp', status, reason }`.
 
 ## Tests
 
-The tests run against an in-memory emulator of the endpoints the provider uses (`tests/support/gce-emulator.ts`), plugged in through the `fetch` option. `tests/gcp-end-to-end.test.ts` runs the provider and the emulator through vps: attach, stop and detach; reservation admission; a tenant network with a firewall rule; and a create GCE fails after accepting it.
+The tests run against an in-memory emulator of the endpoints the provider uses (`tests/support/gce-emulator.ts`), plugged in through the `fetch` option. `tests/gcp-end-to-end.test.ts` runs the provider and the emulator through vps: attach, stop and detach (also a detach GCE first refuses with `resourceNotReady`); reservation admission; a tenant network with a firewall rule; and a create GCE fails after accepting it.

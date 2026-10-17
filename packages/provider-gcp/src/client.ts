@@ -75,6 +75,10 @@ export function mapGceError(
       headers.get('retry-after') !== null && Number.isFinite(seconds) && seconds >= 0
         ? seconds * 1000
         : defaultRetryAfterMs;
+  } else if (status === 400 && reason === 'resourceNotReady') {
+    // The resource is mid-transition (a VM stopping or starting): the same call succeeds later.
+    code = 'UNAVAILABLE';
+    details.retryAfterMs = defaultRetryAfterMs;
   } else if (status === 403 && reason === 'quotaExceeded') code = 'QUOTA_EXCEEDED';
   else if (status === 403) code = 'ACCESS_DENIED';
   else if (status === 400) code = 'INVALID_INPUT';
