@@ -10,8 +10,9 @@ All notable changes to the better-compute packages are documented here. The form
 
 - **Google Compute Engine provider** (`@better-compute/provider-gcp`, new, outside the umbrella). Compute Engine VMs
   as VPS instances and offers, GPU machine types included, over plain `fetch` against the REST v1 API. Accounts take
-  `{ projectId, zones, credentials?, impersonate?, … }`; credentials are a service-account key reference, the
-  metadata server, or a host's own `tokenSource`. Create is idempotent through GCE's `requestId`, and the VMs it
+  `{ projectId, zones, credentials?, impersonate?, … }`; credentials are a service-account key reference, or for
+  root-tenant (platform) accounts only, the host's own `tokenSource` or the metadata server: a tenant's account
+  without its own key is `INVALID_CONFIG` (`ProviderContext.account`, new and optional, tells the provider whose it is). Create is idempotent through GCE's `requestId`, and the VMs it
   owns carry `better-compute-managed` and `better-compute-instance` labels; it never deletes or powers a VM without
   them. It implements discovery, ownership labels, reservations and networks.
 - **Discovery and attach** (`@better-compute/vps`). The `vps.discovery` worker lists every machine of accounts whose

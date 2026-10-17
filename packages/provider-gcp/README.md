@@ -12,16 +12,16 @@ npm install @better-compute/provider-gcp
 
 An account is data, validated by the provider's manifest:
 
-| Field               | Meaning                                                                        |
-| ------------------- | ------------------------------------------------------------------------------ |
-| `projectId`         | The Google Cloud project id.                                                   |
-| `zones`             | At least one zone. Offers, discovery and reservations are limited to these.    |
-| `credentials`       | A secret reference to a service-account key JSON. Absent: the metadata server. |
-| `impersonate`       | A service-account email to impersonate with the base credentials.              |
-| `network`, `subnet` | Used by `create` when no tenant network is given (default network `default`).  |
-| `imageProject`      | Where image families resolve (default `ubuntu-os-cloud`).                      |
-| `diskGiB`           | Boot disk size (default 100).                                                  |
-| `discoverLabel`     | `key=value`: discovery yields only VMs carrying this label.                    |
+| Field               | Meaning                                                                                               |
+| ------------------- | ----------------------------------------------------------------------------------------------------- |
+| `projectId`         | The Google Cloud project id.                                                                          |
+| `zones`             | At least one zone. Offers, discovery and reservations are limited to these.                           |
+| `credentials`       | A secret reference to a service-account key JSON. Absent: the host identity (platform accounts only). |
+| `impersonate`       | A service-account email to impersonate with the base credentials.                                     |
+| `network`, `subnet` | Used by `create` when no tenant network is given (default network `default`).                         |
+| `imageProject`      | Where image families resolve (default `ubuntu-os-cloud`).                                             |
+| `diskGiB`           | Boot disk size (default 100).                                                                         |
+| `discoverLabel`     | `key=value`: discovery yields only VMs carrying this label.                                           |
 
 ## Usage
 
@@ -44,7 +44,7 @@ await client.providerAccounts.create({
 });
 ```
 
-`gcpProvider({ fetch, endpoint, tokenSource, operationPollMs })` swaps the transport, the API endpoint, the token source (a host's workload-identity client) and the in-call operation poll interval (default 2 s, used only for waits of at most 20 s).
+`gcpProvider({ fetch, endpoint, tokenSource, operationPollMs })` swaps the transport, the API endpoint, the token source (a host's workload-identity client, used only by platform accounts that name no key) and the in-call operation poll interval (default 2 s, used only for waits of at most 20 s).
 
 ## IAM roles
 
@@ -116,6 +116,8 @@ How vps uses them:
 ## Authentication
 
 `serviceAccountTokenSource(keyJson)` signs a JWT with the key and exchanges it at the OAuth token endpoint. `metadataTokenSource()` reads the metadata server. `impersonatedTokenSource(base, email)` exchanges a base token through IAM Credentials. Each caches its token until a minute before expiry. A host that has its own workload-identity client passes `tokenSource` in the provider options. Tokens are never logged.
+
+**Tenant accounts bring their own key.** An account without `credentials` runs on the host's own identity (`tokenSource`, else the metadata server), which is the control plane's. vps tells the provider whose account it builds a client for (`ProviderContext.account`), and only an account of the root (platform) tenant may do that: a tenant's account without `credentials`, or with `impersonate` but no `credentials`, is `INVALID_CONFIG` at `providerAccounts.create` and `update` (and on every use, for a row stored before). Otherwise a tenant naming the platform's project would list, attach and delete the platform's VMs. `tokenSource` never overrides an account's `credentials`.
 
 ## Errors
 

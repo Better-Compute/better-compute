@@ -373,7 +373,7 @@ await compute.api.providerAccounts.create(
   type={{
     projectId: { type: 'string', description: 'The Google Cloud project id.', required: true },
     zones: { type: 'string[]', description: 'At least one zone. Offers, discovery and reservations are limited to these.', required: true },
-    credentials: { type: 'SecretRef', description: 'A service-account key JSON. Absent: the metadata server, or the tokenSource option.' },
+    credentials: { type: 'SecretRef', description: 'A service-account key JSON. Absent: the host identity (the tokenSource option, else the metadata server), which only a root-tenant account may use.' },
     impersonate: { type: 'string', description: 'A service-account email to impersonate with the base credentials.' },
     network: { type: 'string', description: 'The VPC that create uses for an instance on no tenant network.', default: "'default'" },
     subnet: { type: 'string', description: 'The subnetwork that create uses with that network.' },
@@ -402,8 +402,11 @@ future reservations), plus `roles/iam.serviceAccountTokenCreator` on the target 
 - **Power:** `on` is start, `off` and `graceful-off` stop, `reset` and `cycle` reset, and `graceful-restart` is a
   stop (waited for, at most 20 s) then a start; `nmi` is `UNSUPPORTED`.
 - **Credentials.** A key is exchanged for tokens at the OAuth endpoint and cached until a minute before expiry;
-  without one the metadata server is used. `gcpProvider({ tokenSource })` lets a host pass its own workload-identity
-  client. Tokens are never logged.
+  without one the host's own identity is used: `gcpProvider({ tokenSource })` (a workload-identity client), else the
+  metadata server. That identity is the control plane's, so only an account of the root (platform) tenant may rely on
+  it: a tenant's account must name its own key in `credentials` (`impersonate` alone is not enough), or
+  `providerAccounts.create` and `update` refuse it with `INVALID_CONFIG`. A `tokenSource` never overrides an account's
+  `credentials`. Tokens are never logged.
 - **Errors** map to `ComputeError` codes (`NOT_FOUND`, `CONFLICT`, `RATE_LIMITED` with `retryAfterMs`,
   `QUOTA_EXCEEDED`, `ACCESS_DENIED`, `INVALID_INPUT`, `UNAVAILABLE`), with `details: { provider: 'gcp', status, reason }`.
 

@@ -152,6 +152,8 @@ export interface ReservationDeps {
   log: Logger;
   secrets: SecretResolver;
   clients: ProviderClients;
+  /** The IAM root tenant: its provider accounts are the platform's (ruling F1). */
+  rootTenantId?: string;
 }
 
 /** A pass over one account must stay well inside the reconciler's claim. */

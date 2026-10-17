@@ -12,6 +12,9 @@ export const secrets = {
 
 const log = { debug() {}, info() {}, warn() {}, error() {} };
 
+/** A root-tenant account: the only kind that may use ambient credentials (ruling F1). */
+export const platformAccount = { id: 'pacct_platform', tenantId: 'root', platform: true };
+
 export function ctx(key = 'k1'): CallContext {
   return {
     idempotencyKey: key,
@@ -36,5 +39,6 @@ export async function build(
     clock: manualClock(1_000_000),
     secrets,
     log,
+    account: platformAccount,
   });
 }

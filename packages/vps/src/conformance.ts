@@ -23,7 +23,7 @@ export interface ProviderConformanceSubject {
   offerId: string;
   /** An image `create` accepts. */
   image: string;
-  /** Context overrides (secrets for the account's SecretRefs, a clock, a logger). */
+  /** Context overrides (secrets for the account's SecretRefs, a clock, a logger, the account). */
   context?: Partial<ProviderContext>;
   /** A per-run prefix so concurrent runs never share idempotency keys. */
   prefix?: string;
@@ -63,6 +63,7 @@ async function client(subject: ProviderConformanceSubject): Promise<{
         throw new ComputeError('INVALID_CONFIG', 'The conformance subject gave no secret resolver');
       },
     },
+    ...(subject.context?.account ? { account: subject.context.account } : {}),
   };
   const parsed = await subject.provider.config['~standard'].validate(subject.config);
   if ('issues' in parsed && parsed.issues)

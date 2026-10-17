@@ -815,6 +815,8 @@ export interface NetworkDeps {
   log: Logger;
   secrets: SecretResolver;
   clients: ProviderClients;
+  /** The IAM root tenant: its provider accounts are the platform's (ruling F1). */
+  rootTenantId?: string;
 }
 
 async function publish(

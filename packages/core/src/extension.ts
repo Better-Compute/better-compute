@@ -827,6 +827,13 @@ export interface ProviderContext {
   clock: Clock;
   secrets: SecretResolver;
   log: Logger;
+  /**
+   * (v1.0) The provider account the client is built for, as the module that builds it knows it.
+   * `platform` is true when the account belongs to the root (platform) tenant: a provider that can
+   * fall back on the host's own identity (ambient credentials: a metadata server, a workload-identity
+   * token source) allows that only for platform accounts. Absent: unknown, treated as not platform.
+   */
+  account?: { id: string; tenantId: string; platform: boolean };
 }
 
 /** A provider as written for `defineProvider` (vps). Accounts are data validated by `config`. */

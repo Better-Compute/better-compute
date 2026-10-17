@@ -1,10 +1,12 @@
 import {
   ComputeError,
+  isComputeError,
   isSecretRef,
   newId,
   type Clock,
   type Json,
   type Logger,
+  type ProviderContext,
   type ProviderDefinition,
   type ProviderImpl,
   type SecretResolver,
@@ -169,6 +171,8 @@ export async function createAccount(
   input: CreateAccountInput,
   /** The derived id of a keyed request; a fresh id otherwise. */
   accountId: string = newId('pacct'),
+  /** When given, the provider builds a client for the account first, so it refuses a bad one now. */
+  check?: ClientDeps,
 ): Promise<ProviderAccount> {
   if (input.idempotencyKey !== undefined) {
     const existing = await readAccount(tx, accountId, input.tenantId);
@@ -180,6 +184,8 @@ export async function createAccount(
   const provider = providerOf(providers, input.provider);
   const config = await validateConfig(provider, input.config);
   assertNoInlineSecrets(config);
+  if (check)
+    await checkClient(provider, config, { id: accountId, tenantId: input.tenantId }, check);
   const { rowCount } = await tx.query(
     `INSERT INTO provider_accounts (id, tenant_id, provider, name, config, version)
      VALUES ($1, $2, $3, $4, $5::jsonb, 1) ON CONFLICT DO NOTHING`,
@@ -199,12 +205,16 @@ export async function updateAccount(
   tx: SqlTx,
   providers: ReadonlyMap<string, ProviderDefinition>,
   input: { tenantId: string; accountId: string; config: unknown },
+  /** When given, the provider builds a client for the new config first (see `createAccount`). */
+  check?: ClientDeps,
 ): Promise<ProviderAccount> {
   const account = await readAccount(tx, input.accountId, input.tenantId);
   if (!account)
     throw new ComputeError('NOT_FOUND', `Provider account ${input.accountId} not found`);
-  const config = await validateConfig(providerOf(providers, account.provider), input.config);
+  const provider = providerOf(providers, account.provider);
+  const config = await validateConfig(provider, input.config);
   assertNoInlineSecrets(config);
+  if (check) await checkClient(provider, config, account, check);
   await tx.query(
     `UPDATE provider_accounts SET config = $2::jsonb, version = version + 1 WHERE id = $1`,
     [account.id, JSON.stringify(config)],
@@ -243,6 +253,48 @@ export interface ClientDeps {
   clock: Clock;
   secrets: SecretResolver;
   log: Logger;
+  /** The IAM root tenant (`iam.rootTenantId`): its accounts are the platform's (`ProviderContext.account`). */
+  rootTenantId?: string;
+}
+
+/**
+ * What a provider is told about the account it builds a client for: a root-tenant account is the
+ * platform's, and may use the host's ambient credentials (ruling F1). Without a known root tenant
+ * no account is the platform's.
+ */
+export function accountContext(
+  account: Pick<ProviderAccount, 'id' | 'tenantId'>,
+  rootTenantId: string | undefined,
+): NonNullable<ProviderContext['account']> {
+  return {
+    id: account.id,
+    tenantId: account.tenantId,
+    platform: rootTenantId !== undefined && account.tenantId === rootTenantId,
+  };
+}
+
+/**
+ * Builds (and drops) a client for an account about to be stored, so what the provider refuses when
+ * it builds one (`INVALID_CONFIG`: a tenant account relying on the platform's credentials) is
+ * refused up front rather than on first use. Building a client makes no provider call.
+ */
+async function checkClient(
+  provider: ProviderDefinition,
+  config: Record<string, Json>,
+  account: Pick<ProviderAccount, 'id' | 'tenantId'>,
+  deps: ClientDeps,
+): Promise<void> {
+  try {
+    await provider.create(config, {
+      clock: deps.clock,
+      secrets: deps.secrets,
+      log: deps.log,
+      account: accountContext(account, deps.rootTenantId),
+    });
+  } catch (error) {
+    // Only a refusal of the config itself refuses the account; anything else is met on first use.
+    if (isComputeError(error, 'INVALID_CONFIG')) throw error;
+  }
 }
 
 /** Builds provider clients from accounts, cached per (account id, version). */
@@ -260,7 +312,12 @@ export class ProviderClients {
     if (!client) {
       const provider = providerOf(this.#providers, account.provider);
       client = validateConfig(provider, account.config).then((config) =>
-        provider.create(config, { clock: deps.clock, secrets: deps.secrets, log: deps.log }),
+        provider.create(config, {
+          clock: deps.clock,
+          secrets: deps.secrets,
+          log: deps.log,
+          account: accountContext(account, deps.rootTenantId),
+        }),
       );
       client.catch(() => this.#cache.delete(cacheKey));
       for (const existing of this.#cache.keys())

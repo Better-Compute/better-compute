@@ -10,7 +10,9 @@ export const gcpConfig = manifest({
   credentials: field
     .secret()
     .optional()
-    .describe('Service-account key JSON, as a secret reference; absent means the metadata server'),
+    .describe(
+      'Service-account key JSON, as a secret reference; absent means the host identity (the token source or the metadata server), which only a platform account may use',
+    ),
   impersonate: field
     .string()
     .optional()
@@ -49,7 +51,11 @@ export interface GcpProviderOptions {
   fetch?: typeof fetch;
   /** Default `https://compute.googleapis.com/compute/v1`. */
   endpoint?: string;
-  /** Overrides `credentials` and the metadata server (a host's workload-identity client). */
+  /**
+   * The host's own identity (a workload-identity client), used instead of the metadata server by
+   * platform (root-tenant) accounts that name no `credentials`. Never overrides an account's
+   * `credentials`, and never serves a tenant's account.
+   */
   tokenSource?: TokenSource;
   /** Default 2000. Only used by in-call operation waits of at most 20 seconds. */
   operationPollMs?: number;

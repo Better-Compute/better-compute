@@ -755,7 +755,7 @@ export async function listMachines(
  * answer carries `discoveredAt` once a pass that started after the call has finished (`poll`).
  */
 export async function requestDiscovery(
-  deps: Pick<DiscoveryDeps, 'clients' | 'clock' | 'secrets' | 'log' | 'work'>,
+  deps: Pick<DiscoveryDeps, 'clients' | 'clock' | 'secrets' | 'log' | 'work' | 'rootTenantId'>,
   tx: SqlTx,
   input: DiscoverInput,
 ): Promise<{ queued: true; discoveredAt?: number }> {

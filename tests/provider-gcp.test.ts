@@ -45,6 +45,11 @@ const keyJson = JSON.stringify({
   token_uri: 'https://oauth2.googleapis.com/token',
 });
 
+/** A root-tenant account: the only kind that may use ambient credentials (ruling F1). */
+const platformAccount = { id: 'pacct_platform', tenantId: 'root', platform: true };
+/** A tenant's own account. */
+const tenantAccount = { id: 'pacct_acme', tenantId: 'acme', platform: false };
+
 function context(clock = manualClock(1_000_000)) {
   return { signal: new AbortController().signal, clock };
 }
@@ -386,6 +391,7 @@ async function build(
     clock: manualClock(1_000_000),
     secrets,
     log: { debug() {}, info() {}, warn() {}, error() {} },
+    account: platformAccount,
   });
 }
 
@@ -400,7 +406,7 @@ describe('compute', () => {
         attachable: 'us-central1-a/legacy',
         offerId: 'us-central1-a/a3-highgpu-8g',
         image: 'ubuntu-2404-lts',
-        context: { secrets },
+        context: { secrets, account: platformAccount },
       };
     });
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
@@ -923,7 +929,7 @@ describe('compute', () => {
     expect(emu.jwtClaims).toHaveLength(1);
     const impersonating = await provider.create(
       { projectId: 'p', zones: ['us-central1-a'], impersonate: 'target@p.iam.gserviceaccount.com' },
-      { clock: manualClock(0), secrets: keySecrets, log: ctx().log },
+      { clock: manualClock(0), secrets: keySecrets, log: ctx().log, account: platformAccount },
     );
     await impersonating.get('us-central1-a/x', ctx());
     expect(
@@ -937,6 +943,50 @@ describe('compute', () => {
     });
     await host.get('us-central1-a/x', ctx()).catch(() => undefined);
     expect(hostEmu.requests[0]!.headers.get('authorization')).toBe('Bearer host-token');
+  });
+
+  it('ambient credentials serve platform accounts only; a key is never overridden (F1)', async () => {
+    const emu = new GceEmulator();
+    emu.validTokens.add('host-token');
+    const keySecrets = { resolve: async () => keyJson };
+    const provider = gcpProvider({
+      fetch: emu.fetch,
+      tokenSource: { token: async () => 'host-token' },
+    });
+    const base = { clock: manualClock(0), secrets: keySecrets, log: ctx().log };
+    const ambient = { projectId: 'p', zones: ['us-central1-a'] };
+    // A tenant's account (or one whose owner is unknown) cannot run on the host's identity, with
+    // or without impersonation; refused when the client is built, before any request.
+    for (const account of [tenantAccount, undefined])
+      for (const config of [
+        ambient,
+        { ...ambient, impersonate: 'admin@p.iam.gserviceaccount.com' },
+      ]) {
+        const error = await Promise.resolve()
+          .then(() => provider.create(config, { ...base, ...(account ? { account } : {}) }))
+          .catch((e: unknown) => e);
+        expect(error).toMatchObject({
+          code: 'INVALID_CONFIG',
+          details: { reason: 'ambientCredentials' },
+        });
+      }
+    expect(emu.requests).toEqual([]);
+    // A tenant's account with its own key uses the key, even though the host has a token source.
+    const keyed = await provider.create(
+      { ...ambient, credentials: 'vault://kv/acme-gcp' as never },
+      { ...base, account: tenantAccount },
+    );
+    await keyed.get('us-central1-a/x', ctx()).catch(() => undefined);
+    expect(emu.jwtClaims).toHaveLength(1);
+    const computeCalls = emu.requests.filter((r) => r.url.hostname === 'compute.googleapis.com');
+    expect(computeCalls.length).toBeGreaterThan(0);
+    for (const call of computeCalls)
+      expect(call.headers.get('authorization')).not.toBe('Bearer host-token');
+    // The platform's own account still runs on the host identity.
+    const platform = await provider.create(ambient, { ...base, account: platformAccount });
+    const before = emu.requests.length;
+    await platform.get('us-central1-a/x', ctx()).catch(() => undefined);
+    expect(emu.requests[before]!.headers.get('authorization')).toBe('Bearer host-token');
   });
 });
 

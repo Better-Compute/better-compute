@@ -537,6 +537,11 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         'vps({ bootstrap }).pins must be sha256/<base64> SPKI pins (servingCa, joinSigning, joinEncryption)',
       );
   }
+  /** The IAM root tenant, whose provider accounts are the platform's (ruling F1), when IAM names one. */
+  const rootOf = (context: ModuleContext): { rootTenantId?: string } => {
+    const rootTenantId = (context.iam as ModuleContext['iam'] | undefined)?.rootTenantId;
+    return rootTenantId !== undefined ? { rootTenantId } : {};
+  };
   const bootstrapDeps = (context: ModuleContext): BootstrapDeps => ({
     clock: context.clock,
     events: context.events,
@@ -544,6 +549,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     log: context.log,
     secrets: options.secrets ?? context.secrets ?? noSecrets,
     clients,
+    ...rootOf(context),
     ...(context.pki ? { pki: context.pki } : {}),
     ...(options.bootstrap ? { options: options.bootstrap } : {}),
   });
@@ -554,6 +560,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     log: context.log,
     secrets: options.secrets ?? context.secrets ?? noSecrets,
     clients,
+    ...rootOf(context),
   });
   if (options.hostNetwork !== undefined && !/^[A-Za-z0-9_.-]{1,15}$/.test(options.hostNetwork))
     throw new ComputeError('INVALID_CONFIG', 'vps({ hostNetwork }) must be an interface name');
@@ -746,6 +753,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     log: context.log,
     secrets: options.secrets ?? context.secrets ?? noSecrets,
     clients,
+    ...rootOf(context),
   });
 
   const depsOf = (context: ModuleContext): InstanceDeps => {
@@ -759,6 +767,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       log: context.log,
       secrets: options.secrets ?? context.secrets ?? noSecrets,
       clients,
+      ...rootOf(context),
       runtime: runtimes[0]!,
       runtimes: runtimeTable,
     };
@@ -974,6 +983,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
             providers,
             input,
             await accountIdOf(context, input),
+            depsOf(context),
           );
           await context.authz.upsert(context.sql, {
             type: 'provider-account',
@@ -1035,7 +1045,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           const input = parseAccountRef(raw, ['config']);
           return { tenantId: input.tenantId, accountId: input.accountId, config: input.config };
         }),
-        handler: (context, input) => updateAccount(context.sql, providers, input),
+        handler: (context, input) =>
+          updateAccount(context.sql, providers, input, depsOf(context)),
       }),
       delete: defineMethod({
         action: 'compute:providers:manage',
