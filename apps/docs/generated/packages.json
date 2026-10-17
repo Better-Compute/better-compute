@@ -159,6 +159,13 @@
     "exports": ["."]
   },
   {
+    "name": "@better-compute/provider-gcp",
+    "directory": "packages/provider-gcp",
+    "description": "Google Compute Engine provider for better-compute: VMs as VPS instances and offers, attach, reservations and tenant networks.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
     "name": "@better-compute/provider-hetzner",
     "directory": "packages/provider-hetzner",
     "description": "Hetzner providers for better-compute: Hetzner Cloud servers as VPS instances and offers.",

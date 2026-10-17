@@ -89,8 +89,10 @@
     {
       "name": "vps",
       "groups": [
+        "firewallRules",
         "flavors",
         "instances",
+        "networks",
         "providerAccounts",
         "sandboxSnapshots",
         "sandboxTemplates",
@@ -119,7 +121,11 @@
         "vps/0019_ip_pool_dns",
         "vps/0020_volumes",
         "vps/0021_volume_resize_hold",
-        "vps/0022_volume_storage"
+        "vps/0022_volume_storage",
+        "vps/0023_provider_machines",
+        "vps/0024_instance_attach",
+        "vps/0025_provider_reservations",
+        "vps/0026_networks"
       ]
     },
     {
@@ -178,8 +184,11 @@
     "tunnels.ssh-certificates-gc",
     "tunnels.ssh-certificates-reauthorize",
     "vps.bootstraps",
+    "vps.discovery",
     "vps.hosts",
     "vps.instances",
+    "vps.networks",
+    "vps.reservations",
     "vps.sandboxes",
     "vps.usage",
     "vps.volumes",
