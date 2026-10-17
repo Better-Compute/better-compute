@@ -6,7 +6,7 @@ Stores a provider account for the tenant after validating its `config` with the 
 
 - **Idempotency.** `idempotencyKey` is optional. With a key, the account id derives from the tenant, the caller and the key, and a repeat returns the stored account without a second IAM decision; a different `provider` or `name` under the same key is `CONFLICT`. A name the tenant already uses for another account is also `CONFLICT`.
 - **IAM.** Decided as `compute:providers:manage` on the tenant.
-- **Errors.** `INVALID_INPUT` for an unknown provider (`details.known` lists the registered ones), a config the manifest rejects (`details.issues`), or a field ending in `token`, `secret`, `password` or `key` whose value is not a `secret://`, `vault://` or `env://` reference.
+- **Errors.** `INVALID_INPUT` for an unknown provider (`details.known` lists the registered ones), a config the manifest rejects (`details.issues`), or a field ending in `token`, `secret`, `password` or `key` whose value is not a `secret://`, `vault://` or `env://` reference. `INVALID_CONFIG` when the provider refuses to build a client for the account: a Google Cloud account of a tenant other than the root (platform) tenant must name its own service-account key in `credentials`, because without one it would run on the control plane's own identity (the metadata server or the host's token source).
 
 ## list
 
@@ -30,13 +30,13 @@ The optional `query` filters by `kind` (`metal` or `vps`), `region`, `gpuModel`,
 
 Replaces the account's `config`, validated as in `create`, and increments its version; returns the account.
 
-The provider and the name cannot change. The next provider call builds a new client from the new config. A missing account is `NOT_FOUND`; an invalid config is `INVALID_INPUT`.
+The provider and the name cannot change. The next provider call builds a new client from the new config. A missing account is `NOT_FOUND`; an invalid config is `INVALID_INPUT`, and one the provider refuses to build a client for is `INVALID_CONFIG`, as in `create`.
 
 ## delete
 
-Deletes a provider account that no pool and no instance uses; returns `deleted: true`.
+Deletes a provider account that no pool, no instance and no network uses; returns `deleted: true`.
 
-Archived pools and deleted instances do not count: deleted instances keep their history but drop the reference. A pool that is not archived, or an instance that is not deleted, on the account makes the call `INVALID_STATE`. A missing account is `NOT_FOUND`.
+Archived pools, deleted instances and deleted networks do not count: deleted instances keep their history but drop the reference, and deleted networks, with their subnets and rules, are removed with the account. A pool that is not archived, an instance that is not deleted, or a network that is not deleted (named in the message, ids in `details.networkIds`) on the account makes the call `INVALID_STATE`. A missing account is `NOT_FOUND`.
 
 ## bootstrap
 

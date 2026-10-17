@@ -191,13 +191,21 @@ await compute.api.firewallRules.create(
 - **States.** A network's `state` (`pending`, `ready`, `deleting`, `deleted`, `error`) covers the VPC and its
   subnets; each subnet and each rule has its own. A rule the provider refuses is `error` on the rule without taking
   the network out of `ready`. The reconciler publishes `network.*` events and re-applies drift every five minutes.
+- **Tags.** The reconciler applies rules first, then tags the instances that own their machine (an attached one once
+  claimed, never one that lost its machine); a tag set after its rule still matches. Tags set within the last hour
+  are skipped, so a large network is tagged over several runs, and a tag removed by hand comes back within the hour.
 - **Instances.** `instances.create` with `networkId` (and `subnetId`, or the network's only subnet in the offer's
   region) needs a network that has been provisioned (it reached `ready` once; one back in `pending` because a subnet
   or rule was added still takes instances), is not being deleted, and a `ready` subnet. A network not provisioned
   yet, or a subnet not ready yet, is `INVALID_STATE`, so retry. Attached machines keep their network and are linked to
   the tenant network their NIC is on.
 - **Deletion.** `networks.delete` and `removeSubnet` are `INVALID_STATE` while instances are on them. The reconciler
-  deletes rules, then subnets, then the VPC.
+  deletes rules, then subnets, then the VPC. A provider account with a network that is not deleted cannot be deleted.
+- **Shared project quotas.** All tenants' networks on one provider account live in that account's single project, so
+  they share its quotas for VPC networks, subnetworks and firewall rules: what one tenant creates, the others on the
+  account cannot. vps caps each tenant at 10 networks that are not deleted, and each network at 16 subnets and 100
+  firewall rules (`QUOTA_EXCEEDED`, the cap in `details.limit`). Size the project's quotas for the tenants you offer
+  the pool to, or give a tenant that needs more its own account (with its own key) and project.
 
 What is not there at all: IPv6 ranges, more than one range or lease per instance, and an API to manage ranges. Tunnels
 give you exec, SSH and single-port TCP access without routing to the instance network; see [tunnels](/docs/guides/access/tunnels).
