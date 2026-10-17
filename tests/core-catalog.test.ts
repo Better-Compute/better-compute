@@ -389,14 +389,17 @@ describe('apiSurface (§9.2)', () => {
         'images.list',
         'instances.list',
         'providerAccounts.list',
-        'providerAccounts.reservations',
         'sandboxes.list',
         'sandboxTemplates.list',
         'sandboxSnapshots.list',
         'networks.list',
-        'firewallRules.list',
       ],
     );
+    // The list recipe checks every item as the group's kind, one by one: only lists of
+    // tenant-level kinds follow it. A list read on one resource (an account's reservations, a
+    // network's rules) is an ordinary read decided on that resource.
+    for (const row of apiSurface.filter((entry) => entry.list))
+      expect(row.resource, `${row.group}.${row.method}`).toBe('tenant');
   });
 
   it('assigns each group to the module and phase the plan names', () => {

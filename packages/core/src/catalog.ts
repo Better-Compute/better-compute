@@ -557,7 +557,7 @@ group('providerAccounts', 'vps', [
   ['bootstrap', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
   ['machines', 'read', 'providers:read', 'provider-account', 'v1.0'],
   ['discover', 'mutation', 'providers:manage', 'provider-account', 'v1.0'],
-  ['reservations', 'read', 'providers:read', 'provider-account', 'v1.0', list],
+  ['reservations', 'read', 'providers:read', 'provider-account', 'v1.0'],
   [
     'bindReservation',
     'mutation',
@@ -611,7 +611,7 @@ group('networks', 'vps', [
 ]);
 group('firewallRules', 'vps', [
   ['create', 'mutation', 'networks:update', 'network', 'v1.0'],
-  ['list', 'read', 'networks:read', 'network', 'v1.0', list],
+  ['list', 'read', 'networks:read', 'network', 'v1.0'],
   ['update', 'mutation', 'networks:update', 'network', 'v1.0'],
   ['delete', 'mutation', 'networks:update', 'network', 'v1.0'],
 ]);

@@ -49,8 +49,12 @@ describe('network kind and rows', () => {
       expect(row.phase).toBe('v1.0');
       expect(row.module).toBe('vps');
     }
-    const list = rows.filter((row) => row.method === 'list');
-    expect(list.every((row) => row.list === true)).toBe(true);
+    // networks.list follows the list recipe (each network checked); firewallRules.list is a read
+    // decided on the network, whose rules are not authorization objects.
+    expect(rows.find((row) => row.group === 'networks' && row.method === 'list')?.list).toBe(true);
+    expect(
+      rows.find((row) => row.group === 'firewallRules' && row.method === 'list')?.list,
+    ).toBeUndefined();
     expect(rows.find((row) => row.group === 'networks' && row.method === 'list')?.resource).toBe(
       'tenant',
     );
