@@ -865,7 +865,8 @@ async function networkProvider(
       'UNSUPPORTED',
       `Pool ${poolId} is not a provider pool; networks live on provider accounts`,
     );
-  const account = await readAccount(tx, pool.providerAccountId);
+  // R1: only an account of the pool's owner tenant.
+  const account = await readAccount(tx, pool.providerAccountId, pool.ownerTenantId);
   if (!account) throw new ComputeError('UNSUPPORTED', `Pool ${poolId} has no provider account`);
   const client = await deps.clients.client(account, deps);
   if (typeof client.networks !== 'object' || client.networks === null)

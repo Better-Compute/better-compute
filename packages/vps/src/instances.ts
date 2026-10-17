@@ -988,11 +988,14 @@ export async function visibleVpsPool(
     runtime: string | null;
     single_tenant: boolean | null;
   }>(
-    `SELECT p.id, p.owner_tenant_id, p.class, p.agent, p.provider_account_id,
+    // R1: a provider pool's account counts only when the pool's owner tenant owns it; otherwise the
+    // pool has no account (INVALID_STATE downstream), whoever the caller is.
+    `SELECT p.id, p.owner_tenant_id, p.class, p.agent,
+            CASE WHEN a.tenant_id = p.owner_tenant_id THEN p.provider_account_id END AS provider_account_id,
             p.policy->>'runtime' AS runtime,
             CASE WHEN jsonb_typeof(p.policy->'singleTenant') = 'boolean'
                  THEN (p.policy->>'singleTenant')::boolean END AS single_tenant
-       FROM pools p
+       FROM pools p LEFT JOIN provider_accounts a ON a.id = p.provider_account_id
       WHERE p.id = $1 AND (p.owner_tenant_id = $2
             OR EXISTS (SELECT 1 FROM pool_offers o WHERE o.pool_id = p.id AND o.tenant_id = $2))
         AND p.archived_at IS NULL`,

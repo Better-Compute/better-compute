@@ -86,15 +86,25 @@ export async function assertOwnedPool(
   tx: SqlTx,
   tenantId: string,
   poolId: string,
-): Promise<{ class: string; agent: string; gpuModel?: string }> {
-  const { rows } = await tx.query<{ class: string; agent: string; gpu_model: string | null }>(
-    `SELECT class, agent, gpu_model FROM pools WHERE id = $1 AND owner_tenant_id = $2`,
+): Promise<{ class: string; agent: string; gpuModel?: string; ownAccount: boolean }> {
+  const { rows } = await tx.query<{
+    class: string;
+    agent: string;
+    gpu_model: string | null;
+    own_account: boolean;
+  }>(
+    // R1: whether the pool's provider account (if any) is its owner tenant's.
+    `SELECT p.class, p.agent, p.gpu_model,
+            EXISTS (SELECT 1 FROM provider_accounts a
+                     WHERE a.id = p.provider_account_id AND a.tenant_id = p.owner_tenant_id) AS own_account
+       FROM pools p WHERE p.id = $1 AND p.owner_tenant_id = $2`,
     [poolId, tenantId],
   );
   if (!rows[0]) throw new ComputeError('NOT_FOUND', `Pool ${poolId} not found`);
-  const pool: { class: string; agent: string; gpuModel?: string } = {
+  const pool: { class: string; agent: string; gpuModel?: string; ownAccount: boolean } = {
     class: rows[0].class,
     agent: rows[0].agent,
+    ownAccount: rows[0].own_account === true,
   };
   if (rows[0].gpu_model !== null) pool.gpuModel = rows[0].gpu_model;
   return pool;
@@ -144,6 +154,10 @@ export function parseFlavorInput(raw: unknown): FlavorInput {
   return result;
 }
 
+/** A provider pool whose account is missing or not its owner tenant's (R1): it offers nothing. */
+const noAccount = (poolId: string) =>
+  new ComputeError('INVALID_STATE', `Provider pool ${poolId} has no provider account`);
+
 /** Creates a flavor; a provider pool's flavor names the provider offer it creates. */
 export async function createFlavor(tx: SqlTx, input: FlavorInput): Promise<FlavorRecord> {
   const pool = await assertOwnedPool(tx, input.tenantId, input.poolId);
@@ -154,6 +168,7 @@ export async function createFlavor(tx: SqlTx, input: FlavorInput): Promise<Flavo
     );
   if (pool.class === 'provider' && input.offerId === undefined)
     throw new ComputeError('INVALID_INPUT', 'A provider pool flavor needs offerId');
+  if (pool.class === 'provider' && !pool.ownAccount) throw noAccount(input.poolId);
   if (pool.class === 'provider' && input.placement !== undefined)
     throw new ComputeError('INVALID_INPUT', 'A provider pool flavor has no host placement');
   const flavorId = newId('flv');
@@ -182,7 +197,8 @@ export async function createFlavor(tx: SqlTx, input: FlavorInput): Promise<Flavo
 
 /** Updates a flavor's shape. Live instances keep the shape they were admitted with. */
 export async function updateFlavor(tx: SqlTx, input: FlavorInput): Promise<FlavorRecord> {
-  await assertOwnedPool(tx, input.tenantId, input.poolId);
+  const pool = await assertOwnedPool(tx, input.tenantId, input.poolId);
+  if (pool.class === 'provider' && !pool.ownAccount) throw noAccount(input.poolId);
   const { rowCount } = await tx.query(
     `UPDATE flavors SET vcpu = $3, memory_gib = $4, disk_gib = $5, gpus = $6, offer_id = COALESCE($7, offer_id),
                         placement = $8::jsonb, archived = false, version = version + 1

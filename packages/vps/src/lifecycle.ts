@@ -14,7 +14,7 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { refundQuota } from '@better-compute/capacity';
-import { readAccount } from './accounts.js';
+import { readPoolAccount } from './accounts.js';
 import {
   attachConflictCondition,
   dropHeldMachineId,
@@ -447,8 +447,9 @@ async function reconcileProvider(
     if (row.desiredState === 'deleted' && row.state !== 'deleting')
       row = await beginDeletion(deps, tx, row);
     if (row.state === 'pending') row = await moveInstance(tx, row, 'schedule', 'scheduling');
+    // R1: only an account of the pool owner's tenant (a foreign one reads as none).
     const account = row.providerAccountId
-      ? await readAccount(tx, row.providerAccountId)
+      ? await readPoolAccount(tx, row.providerAccountId, row.poolId)
       : undefined;
     return { row, account };
   });

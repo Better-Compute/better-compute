@@ -190,12 +190,18 @@ async function tenantPools(tx: SqlTx, tenantId: string, poolId?: string): Promis
     [tenantId, poolId ?? null],
   );
   const quotas = await readQuotas(tx, tenantId, poolId);
-  return rows.map((row) => ({
-    ...toPool(row),
-    owned: row.owner_tenant_id === tenantId,
-    archived: row.archived === true,
-    quotas: quotas.filter((quota) => quota.poolId === row.id),
-  }));
+  return rows.map((row) => {
+    const pool: TenantPool = {
+      ...toPool(row),
+      owned: row.owner_tenant_id === tenantId,
+      archived: row.archived === true,
+      quotas: quotas.filter((quota) => quota.poolId === row.id),
+    };
+    // R1: the provider account behind a pool is its owner's business; a tenant it is offered to
+    // creates on the pool without knowing it.
+    if (!pool.owned) delete pool.providerAccountId;
+    return pool;
+  });
 }
 
 async function ownedPool(
@@ -212,6 +218,26 @@ async function ownedPool(
   );
   if (!rows[0]) throw new ComputeError('NOT_FOUND', `Pool ${poolId} not found`);
   return { ...toPool(rows[0]), archived: rows[0].archived === true };
+}
+
+/**
+ * R1: a provider pool runs on an account of its own tenant. `provider_accounts` belongs to the vps
+ * module; without it no account exists. Another tenant's account is NOT_FOUND, worded as an
+ * unknown one, so a pool never reveals whether an account id exists elsewhere.
+ */
+async function assertOwnAccount(tx: SqlTx, tenantId: string, accountId: string): Promise<void> {
+  const { rows } = await tx.query<{ found: string | null }>(
+    `SELECT to_regclass('provider_accounts')::text AS found`,
+  );
+  const owned =
+    rows[0]?.found != null &&
+    (
+      await tx.query(`SELECT 1 FROM provider_accounts WHERE id = $1 AND tenant_id = $2`, [
+        accountId,
+        tenantId,
+      ])
+    ).rows.length > 0;
+  if (!owned) throw new ComputeError('NOT_FOUND', `Provider account ${accountId} not found`);
 }
 
 async function findOwnedPool(
@@ -833,6 +859,8 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
         );
         if (site.rows[0]?.owner_tenant_id !== input.tenantId)
           throw new ComputeError('NOT_FOUND', `Site ${input.siteId} not found`);
+        if (input.providerAccountId !== undefined)
+          await assertOwnAccount(tx, input.tenantId, input.providerAccountId);
         await validatePolicy(options, input.policy, input);
         await assertKubernetesJoin(tx, input.siteId, input.policy);
         const pool: Pool = {

@@ -64,6 +64,24 @@ export async function readAccount(
   return rows[0] ? toAccount(rows[0]) : undefined;
 }
 
+/**
+ * The provider account an instance of `poolId` runs on, when the pool's owner tenant owns it (R1):
+ * a pool row naming another tenant's account never drives that account.
+ */
+export async function readPoolAccount(
+  tx: SqlTx,
+  accountId: string,
+  poolId: string,
+): Promise<ProviderAccount | undefined> {
+  const { rows } = await tx.query<RawAccount>(
+    `SELECT a.id, a.tenant_id, a.provider, a.name, a.config, a.version
+       FROM provider_accounts a JOIN pools p ON p.id = $2 AND p.owner_tenant_id = a.tenant_id
+      WHERE a.id = $1`,
+    [accountId, poolId],
+  );
+  return rows[0] ? toAccount(rows[0]) : undefined;
+}
+
 export async function listAccounts(tx: SqlTx, tenantId: string): Promise<ProviderAccount[]> {
   const { rows } = await tx.query<RawAccount>(
     `SELECT id, tenant_id, provider, name, config, version FROM provider_accounts
