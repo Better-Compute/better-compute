@@ -189,6 +189,14 @@ export const schemas = {
           'User data (at most 32 KiB), or secret://<tenantId>/<id> naming a secret of this tenant',
       },
       desiredState: { enum: ['running', 'stopped'], default: 'running' },
+      networkId: idOf(
+        'net',
+        'A ready tenant network of the pool’s provider account to place the instance on (provider pools)',
+      ),
+      subnetId: idOf(
+        'snet',
+        'A ready subnet of that network; omitted: the network’s only subnet in the offer’s region',
+      ),
       idempotencyKey,
       wait: strictObject(
         {

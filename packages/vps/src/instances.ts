@@ -41,6 +41,7 @@ import {
   tenant,
 } from './input.js';
 import { leaseAddress } from './ipam.js';
+import { placeOnNetwork } from './networks.js';
 import {
   chooseHostPlacement,
   placementResources,
@@ -131,6 +132,10 @@ export interface CreateInstanceInput {
   sshKeys: string[];
   userData?: string;
   desiredState: 'running' | 'stopped';
+  /** (v1.0) A ready tenant network of the pool's account to place the instance on (provider pools). */
+  networkId?: string;
+  /** (v1.0) A ready subnet of `networkId`; omitted: its only subnet in the offer's region. */
+  subnetId?: string;
   idempotencyKey: string;
   /**
    * §9.1 async-with-wait: hold the answer up to `timeoutMs` (≤ 30 s) until the instance leaves
@@ -158,6 +163,8 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
     'sshKeys',
     'userData',
     'desiredState',
+    'networkId',
+    'subnetId',
     'idempotencyKey',
     'wait',
   ]);
@@ -196,6 +203,13 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
   const projectId = optional(input.projectId, (value) => id(value, 'prj', 'projectId'));
   if (projectId !== undefined) result.projectId = projectId;
   if (input.userData !== undefined) result.userData = input.userData as string;
+  const networkId = optional(input.networkId, (value) => id(value, 'net', 'networkId'));
+  if (networkId !== undefined) result.networkId = networkId;
+  const subnetId = optional(input.subnetId, (value) => id(value, 'snet', 'subnetId'));
+  if (subnetId !== undefined) {
+    if (networkId === undefined) fail('subnetId needs a networkId');
+    result.subnetId = subnetId;
+  }
   if (input.wait !== undefined) {
     if (typeof input.wait !== 'object' || input.wait === null || Array.isArray(input.wait))
       fail('wait must be an object');
@@ -329,6 +343,8 @@ interface RawInstance {
   claimed: boolean;
   reboot_pending: boolean;
   reboot_hard: boolean;
+  network_id: string | null;
+  subnet_id: string | null;
 }
 
 /** How an instance came to be (vps/0024): created by better-compute, or an attached provider machine. */
@@ -451,6 +467,9 @@ export interface InstanceRow {
   /** A reboot was asked for and not yet done (`reboot_requested_at > rebooted_at`). */
   rebootPending: boolean;
   rebootHard: boolean;
+  /** (v1.0) The tenant network and subnet its machine is on (vps/0026). */
+  networkId?: string;
+  subnetId?: string;
 }
 
 const json = <T>(value: T | string): T =>
@@ -505,6 +524,8 @@ function toRow(raw: RawInstance): InstanceRow {
     row.networkPolicy = raw.network_policy;
   if (raw.identity_rebind_ref !== null && raw.identity_rebind_ref !== undefined)
     row.identityRebindRef = raw.identity_rebind_ref;
+  if (raw.network_id !== null && raw.network_id !== undefined) row.networkId = raw.network_id;
+  if (raw.subnet_id !== null && raw.subnet_id !== undefined) row.subnetId = raw.subnet_id;
   return row;
 }
 
@@ -517,7 +538,7 @@ const columns = `i.id, i.tenant_id, i.pool_id, i.project_id, i.flavor_id, i.flav
   (extract(epoch FROM i.host_cert_valid_before) * 1000)::float8 AS host_cert_valid_ms, i.network_policy,
   i.identity_rebind_ref, i.origin, i.on_delete, i.provider_claimed_at IS NOT NULL AS claimed,
   coalesce(i.reboot_requested_at > coalesce(i.rebooted_at, '-infinity'), false) AS reboot_pending,
-  i.reboot_hard`;
+  i.reboot_hard, i.network_id, i.subnet_id`;
 
 export async function readInstance(
   tx: SqlTx,
@@ -555,6 +576,8 @@ export function instanceView(row: InstanceRow): Instance {
   if (row.nodeId !== undefined) view.nodeId = row.nodeId;
   if (row.allocationId !== undefined) view.allocationId = row.allocationId;
   if (row.externalId !== undefined) view.externalId = row.externalId;
+  if (row.networkId !== undefined) view.networkId = row.networkId;
+  if (row.subnetId !== undefined) view.subnetId = row.subnetId;
   return view;
 }
 
@@ -1040,6 +1063,24 @@ export async function prepareCreateInstance(
     throw new ComputeError('INVALID_STATE', `Provider pool ${pool.id} has no provider account`);
   else image = await deps.images?.resolve(tx, input.tenantId, input.imageId);
 
+  // (v1.0) A tenant network: provider pools only, ready, on the pool's account. Locked until this
+  // transaction commits, so networks.delete sees the draft that is on it.
+  let placement: { networkId: string; subnetId: string } | undefined;
+  if (input.networkId !== undefined) {
+    if (pool.class !== 'provider' || !pool.providerAccountId)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `Pool ${pool.id} is not a provider pool; tenant networks hold provider instances only`,
+      );
+    placement = await placeOnNetwork(tx, {
+      tenantId: input.tenantId,
+      accountId: pool.providerAccountId,
+      networkId: input.networkId,
+      ...(input.subnetId !== undefined ? { subnetId: input.subnetId } : {}),
+      ...(flavor.offerId !== undefined ? { offerId: flavor.offerId } : {}),
+    });
+  }
+
   const shape = shapeOf(flavor);
   const runtime =
     pool.class === 'vps-host'
@@ -1054,9 +1095,9 @@ export async function prepareCreateInstance(
       `INSERT INTO instances (id, tenant_id, pool_id, project_id, flavor_id, flavor, image_id, image,
                               ssh_keys, user_data, runtime, draft, state, desired_state,
                               provider_account_id, owner_identity_id, agent_id, delegation_id,
-                              idempotency_key, request_hash, version)
+                              idempotency_key, request_hash, version, network_id, subnet_id)
        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::text[], $10, $11, true, 'pending', $12,
-               $13, $14, $15, $16, $17, decode($18, 'hex'), 1)`,
+               $13, $14, $15, $16, $17, decode($18, 'hex'), 1, $19, $20)`,
       [
         instanceId,
         input.tenantId,
@@ -1076,6 +1117,8 @@ export async function prepareCreateInstance(
         caller.delegationId ?? null,
         input.idempotencyKey,
         hash,
+        placement?.networkId ?? null,
+        placement?.subnetId ?? null,
       ],
     );
   await context.authz.upsert(tx, {

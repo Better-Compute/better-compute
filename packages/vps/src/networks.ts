@@ -1225,6 +1225,193 @@ export async function deleteNetwork(
   return viewOf(tx, row.id);
 }
 
+// Instances on networks (v1.0)
+
+/**
+ * The region an offer's machine lands in, when the offer id says (`us-central1-a/n2-standard-4` is
+ * in `us-central1`: the provider's offer ids lead with the zone); `undefined` for other shapes.
+ */
+function offerRegion(offerId: string | undefined): string | undefined {
+  const zone = offerId?.includes('/') ? offerId.slice(0, offerId.indexOf('/')) : undefined;
+  return zone ? zoneRegion(zone) : undefined;
+}
+
+interface LockedNetwork {
+  row: NetworkRow;
+  subnets: SubnetRow[];
+}
+
+/**
+ * A ready network of this tenant on this provider account, and its live subnets, both locked
+ * `FOR SHARE`: `networks.delete` and `networks.removeSubnet` (which lock them `FOR UPDATE`) wait for
+ * the transaction that is putting an instance on them, and then see that instance.
+ */
+async function lockReadyNetwork(
+  tx: SqlTx,
+  input: { tenantId: string; accountId: string; networkId: string },
+): Promise<LockedNetwork> {
+  const { rows } = await tx.query<NetworkRow>(
+    `SELECT ${networkColumns} FROM networks WHERE id = $1 AND tenant_id = $2 FOR SHARE`,
+    [input.networkId, input.tenantId],
+  );
+  const row = rows[0];
+  if (!row || row.state === 'deleted')
+    throw new ComputeError('INVALID_INPUT', `Network ${input.networkId} not found in this tenant`);
+  if (row.provider_account_id !== input.accountId)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `Network ${row.id} is on provider account ${row.provider_account_id}, not the pool's ${input.accountId}`,
+    );
+  if (row.state !== 'ready' || row.desired_state !== 'present')
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `Network ${row.id} is ${row.desired_state === 'present' ? row.state : 'being deleted'}; instances use a ready network`,
+    );
+  const subnets = await tx.query<SubnetRow>(
+    `SELECT ${subnetColumns} FROM network_subnets
+      WHERE network_id = $1 AND state <> 'deleted' ORDER BY name FOR SHARE`,
+    [row.id],
+  );
+  return { row, subnets: subnets.rows };
+}
+
+/**
+ * `instances.create` with a `networkId`: the network and subnet the VM is placed on. The network must
+ * be the tenant's, ready, and on the pool's provider account; the subnet must be on it and ready,
+ * and in the offer's region. Without a `subnetId` the network's only ready subnet in the offer's
+ * region is used (zero or several: INVALID_INPUT naming them). Locks both until the transaction ends.
+ */
+export async function placeOnNetwork(
+  tx: SqlTx,
+  input: {
+    tenantId: string;
+    accountId: string;
+    networkId: string;
+    subnetId?: string;
+    offerId?: string;
+  },
+): Promise<{ networkId: string; subnetId: string }> {
+  const { row, subnets } = await lockReadyNetwork(tx, input);
+  const region = offerRegion(input.offerId);
+  if (input.subnetId !== undefined) {
+    const subnet = subnets.find((entry) => entry.id === input.subnetId);
+    if (!subnet)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `Subnet ${input.subnetId} is not a subnet of network ${row.id}`,
+      );
+    if (subnet.state !== 'ready' || subnet.desired_state !== 'present')
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `Subnet ${subnet.id} is ${subnet.state}; instances use a ready subnet`,
+      );
+    if (region !== undefined && subnet.region !== region)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `Subnet ${subnet.id} is in ${subnet.region}, but the flavor's offer is in ${region}`,
+      );
+    return { networkId: row.id, subnetId: subnet.id };
+  }
+  const candidates = subnets.filter(
+    (subnet) =>
+      subnet.state === 'ready' &&
+      subnet.desired_state === 'present' &&
+      (region === undefined || subnet.region === region),
+  );
+  const where = region === undefined ? '' : ` in ${region}`;
+  if (candidates.length === 0)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `Network ${row.id} has no ready subnet${where}; add one (networks.addSubnet) or name another network`,
+      undefined,
+      { networkId: row.id, ...(region !== undefined ? { region } : {}) },
+    );
+  if (candidates.length > 1)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `Network ${row.id} has ${candidates.length} ready subnets${where} (${candidates
+        .map((subnet) => subnet.id)
+        .join(', ')}); name one with subnetId`,
+      undefined,
+      { networkId: row.id, subnetIds: candidates.map((subnet) => subnet.id) },
+    );
+  return { networkId: row.id, subnetId: candidates[0]!.id };
+}
+
+/** The part after the last `/` of a provider resource reference (`global/networks/x` is `x`). */
+const shortName = (reference: string): string => reference.slice(reference.lastIndexOf('/') + 1);
+
+/**
+ * `instances.attach`: the tenant network (and subnet) a discovered machine's NIC is on. A machine is
+ * on a network when one of its NICs names the network's provider name. With `networkId` the machine
+ * must be on that network, else INVALID_STATE ("attached VMs keep their existing network": GCE
+ * cannot move a NIC to another VPC without a stop). Without it, a machine on one of the tenant's
+ * ready networks (same provider account) is linked, and any other is not.
+ */
+export async function networkOfMachine(
+  tx: SqlTx,
+  input: {
+    tenantId: string;
+    accountId: string;
+    externalId: string;
+    nics: readonly { network: string; subnet?: string }[];
+    networkId?: string;
+  },
+): Promise<{ networkId?: string; subnetId?: string }> {
+  let candidates: string[];
+  if (input.networkId !== undefined) candidates = [input.networkId];
+  else {
+    const { rows } = await tx.query<{ id: string }>(
+      `SELECT id FROM networks
+        WHERE tenant_id = $1 AND provider_account_id = $2 AND state = 'ready' AND desired_state = 'present'
+        ORDER BY id`,
+      [input.tenantId, input.accountId],
+    );
+    candidates = rows.map((row) => row.id);
+  }
+  for (const nic of input.nics) {
+    const found = candidates.find(
+      (candidate) => providerResourceName(candidate) === shortName(nic.network),
+    );
+    if (found === undefined) continue;
+    let locked: LockedNetwork;
+    try {
+      locked = await lockReadyNetwork(tx, {
+        tenantId: input.tenantId,
+        accountId: input.accountId,
+        networkId: found,
+      });
+    } catch (error) {
+      // A network that stopped being ready since it was listed is not one to link silently.
+      if (input.networkId === undefined && isComputeError(error, 'INVALID_INPUT')) continue;
+      throw error;
+    }
+    const subnet =
+      nic.subnet === undefined
+        ? undefined
+        : locked.subnets.find(
+            (entry) =>
+              entry.state === 'ready' && providerResourceName(entry.id) === shortName(nic.subnet!),
+          );
+    return { networkId: locked.row.id, ...(subnet ? { subnetId: subnet.id } : {}) };
+  }
+  if (input.networkId !== undefined) {
+    // Say why a network that does not qualify is refused, before saying where the machine is.
+    await lockReadyNetwork(tx, {
+      tenantId: input.tenantId,
+      accountId: input.accountId,
+      networkId: input.networkId,
+    });
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Machine ${input.externalId} is not on network ${input.networkId}; attached VMs keep their existing network`,
+      undefined,
+      { hint: 'attached VMs keep their existing network', networkId: input.networkId },
+    );
+  }
+  return {};
+}
+
 // Firewall rules
 
 async function readRules(

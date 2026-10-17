@@ -40,6 +40,7 @@ import {
   type InstanceRow,
 } from './instances.js';
 import { releaseAddress } from './ipam.js';
+import { networkTag, providerResourceName } from './networks.js';
 import { specPlacement, type HostPlacement } from './placement.js';
 import { markSandboxReady, sandboxWork } from './sandboxes.js';
 import { instanceVolumeSpecs, volumePlacement } from './volumes.js';
@@ -492,6 +493,16 @@ async function reconcileProvider(
             ? await deps.secrets.resolve(row.userData)
             : renderUserData(row),
           name: row.id,
+          // (v1.0) On a tenant network: its subnet, and the tag the firewall rules target.
+          ...(row.networkId !== undefined && row.subnetId !== undefined
+            ? {
+                network: {
+                  network: providerResourceName(row.networkId),
+                  subnet: providerResourceName(row.subnetId),
+                  tags: [networkTag(row.id)],
+                },
+              }
+            : {}),
         },
         context,
       );

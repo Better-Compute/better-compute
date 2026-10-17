@@ -502,6 +502,10 @@ export interface Instance {
   origin?: 'created' | 'attached';
   /** What deleting does to a provider machine: `delete` it, or `detach` (it keeps running). */
   onDelete?: 'delete' | 'detach';
+  /** The tenant network (`networks.create`) the instance's machine is on. */
+  networkId?: string;
+  /** The subnet of that network it is in. */
+  subnetId?: string;
   addresses: string[];
   ownerIdentityId: string;
   idempotencyKey: string;

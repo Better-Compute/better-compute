@@ -6,6 +6,7 @@ import {
   type Caller,
   type ExternalMachine,
   type ManualClock,
+  type NetworkRef,
   type MethodContext,
   type ModuleContext,
   type ProviderFirewallSpec,
@@ -20,6 +21,7 @@ import { pglite } from '@better-compute/postgres/pglite';
 import { capacityMigrations, capacityModule } from '@better-compute/capacity';
 import {
   defineProvider,
+  instanceWork,
   maxRulesPerNetwork,
   networkTag,
   networksWork,
@@ -70,6 +72,8 @@ const gce = {
   subnets: new Map<string, ProviderSubnetSpec>(),
   firewalls: new Map<string, ProviderFirewallSpec>(),
   tags: new Map<string, string[]>(),
+  /** What `create` received, in order. */
+  creates: [] as { offerId: string; name: string; network?: NetworkRef }[],
   /** Every provider call, in order: `ensureNetwork bc-x`, `deleteFirewall bc-y`, `setTags vm-1`. */
   calls: [] as string[],
   /** Each ensure or delete answers `pending` this many times before it completes. */
@@ -88,6 +92,7 @@ const gce = {
     this.subnets.clear();
     this.firewalls.clear();
     this.tags.clear();
+    this.creates.length = 0;
     this.calls.length = 0;
     this.operationDelayTicks = 0;
     this.progress.clear();
@@ -142,8 +147,18 @@ const gceLike = defineProvider({
     async listOffers() {
       return [];
     },
-    async create() {
-      throw new Error('unused');
+    async create(request): Promise<ExternalMachine> {
+      gce.creates.push({
+        offerId: request.offerId,
+        name: request.name,
+        ...(request.network ? { network: request.network } : {}),
+      });
+      return {
+        id: `us-central1-a/${request.name}`,
+        name: request.name,
+        state: 'running',
+        addresses: [],
+      };
     },
     async get(machineId: string): Promise<ExternalMachine | undefined> {
       return { id: machineId, name: machineId, state: 'running', addresses: [] };
@@ -280,6 +295,7 @@ function moduleContext(sql: SqlExecutor): ModuleContext {
       },
     },
     desired: { async invalidate() {} },
+    iam: { rootTenantId: 'root' },
   } as unknown as ModuleContext;
 }
 function within(tx: SqlTx): SqlExecutor {
@@ -494,7 +510,7 @@ beforeAll(async () => {
   gcePool = await poolOn(gceAccount);
   hetznerPool = await poolOn(hetznerAccount);
   await db.query(
-    `INSERT INTO flavors (id, pool_id, name, vcpu, memory_gib, disk_gib, version) VALUES ('flv_net', $1, 'small', 1, 1, 10, 1)`,
+    `INSERT INTO flavors (id, pool_id, name, vcpu, memory_gib, disk_gib, offer_id, version) VALUES ('flv_net', $1, 'small', 1, 1, 10, 'us-central1-a/n2-standard-2', 1)`,
     [gcePool],
   );
 });
@@ -503,6 +519,7 @@ afterAll(async () => {
 });
 beforeEach(async () => {
   // Every test starts with no networks, rules or instances: a periodic pass would pick up the last test's.
+  await db.query(`DELETE FROM provider_machines`);
   await db.query(`DELETE FROM instances`);
   await db.query(`DELETE FROM network_firewall_rules`);
   await db.query(`DELETE FROM network_subnets`);
@@ -1392,5 +1409,292 @@ describe('reconcile', () => {
     expect(subnetCalls.findIndex((entry) => entry.startsWith('ensureSubnet'))).toBeGreaterThan(
       subnetCalls.findLastIndex((entry) => entry.startsWith('deleteSubnet')),
     );
+  });
+});
+
+// --- Instances on networks ---------------------------------------------------------------------
+
+const instanceMethod = (method: 'create' | 'attach' | 'get') =>
+  (api.instances as unknown as Record<string, Definition>)[method]!;
+const instanceReconciler = () => module.reconcilers!.find((entry) => entry.name === instanceWork)!;
+const runInstance = (instanceId: string) =>
+  instanceReconciler().run(
+    { ...moduleContext(db), signal: new AbortController().signal } as never,
+    instanceId,
+  );
+
+/** The tenant's quota on the pool, empty again. */
+async function giveQuota(tenantId = 'root') {
+  for (const [resource, max] of Object.entries({ vcpu: 64, memoryGiB: 256, diskGiB: 1000 }))
+    await db.query(
+      `INSERT INTO quota_usage (tenant_id, pool_id, resource, max, used) VALUES ($1, $2, $3, $4, 0)
+       ON CONFLICT (tenant_id, pool_id, resource) DO UPDATE SET max = $4, used = 0`,
+      [tenantId, gcePool, resource, max],
+    );
+}
+let instanceCounter = 0;
+const createInstance = (raw: Record<string, unknown> = {}, who: Caller = alice) =>
+  run(
+    instanceMethod('create'),
+    {
+      tenantId: who.tenantId,
+      poolId: gcePool,
+      flavor: 'small',
+      imageId: 'debian-12',
+      sshKeys: [],
+      idempotencyKey: `inst-${++instanceCounter}`,
+      ...raw,
+    },
+    who,
+  );
+
+/** A converged network with these subnets: ready, as the worker leaves it. */
+async function networkWith(
+  subnets: { name: string; region: string; cidr: string }[] = [
+    { name: 'a', region: 'us-central1', cidr: '10.0.0.0/20' },
+  ],
+) {
+  const network = await createNetwork();
+  let view = network;
+  for (const subnet of subnets) view = await addSubnet(network.id, subnet);
+  await db.query(`UPDATE network_subnets SET state = 'ready' WHERE network_id = $1`, [network.id]);
+  await db.query(`UPDATE networks SET state = 'ready' WHERE id = $1`, [network.id]);
+  return { id: network.id, subnets: view.subnets };
+}
+const instanceRow = async (instanceId: string) =>
+  (
+    await db.query<{ network_id: string | null; subnet_id: string | null; state: string }>(
+      `SELECT network_id, subnet_id, state FROM instances WHERE id = $1`,
+      [instanceId],
+    )
+  ).rows[0]!;
+const instanceCount = async () => (await db.query(`SELECT 1 FROM instances`)).rows.length;
+
+describe('instances', () => {
+  beforeEach(() => giveQuota());
+
+  it('create on a network places the VM in its subnet with its tag', async () => {
+    const network = await networkWith([
+      { name: 'a', region: 'us-central1', cidr: '10.0.0.0/20' },
+      { name: 'b', region: 'europe-west4', cidr: '10.1.0.0/20' },
+    ]);
+    const subnet = network.subnets.find((entry) => entry.region === 'us-central1')!;
+    const created = await createInstance({ networkId: network.id, subnetId: subnet.id });
+    expect(created).toMatchObject({ networkId: network.id, subnetId: subnet.id });
+    expect(await instanceRow(created.id)).toMatchObject({
+      network_id: network.id,
+      subnet_id: subnet.id,
+    });
+    // A later read carries them too.
+    expect(
+      await run(instanceMethod('get'), { tenantId: 'root', instanceId: created.id }, alice),
+    ).toMatchObject({ networkId: network.id, subnetId: subnet.id });
+
+    await runInstance(created.id);
+    expect(gce.creates).toHaveLength(1);
+    expect(gce.creates[0]!.network).toEqual({
+      network: providerResourceName(network.id),
+      subnet: providerResourceName(subnet.id),
+      tags: [networkTag(created.id)],
+    });
+  });
+
+  it('create without a network sends none, and a subnet needs a network', async () => {
+    const created = await createInstance();
+    expect(created.networkId).toBeUndefined();
+    await runInstance(created.id);
+    expect(gce.creates).toHaveLength(1);
+    expect(gce.creates[0]).not.toHaveProperty('network');
+    expect(await codeOf(createInstance({ subnetId: 'snet_01jz0000000000000000000000' }))).toBe(
+      'INVALID_INPUT',
+    );
+  });
+
+  it('refuses a network of another tenant', async () => {
+    const network = await networkWith();
+    await db.query(`UPDATE networks SET tenant_id = 'other' WHERE id = $1`, [network.id]);
+    expect(await codeOf(createInstance({ networkId: network.id }))).toBe('INVALID_INPUT');
+    // One that does not exist answers the same.
+    expect(await codeOf(createInstance({ networkId: 'net_01jz0000000000000000000000' }))).toBe(
+      'INVALID_INPUT',
+    );
+    expect(await instanceCount()).toBe(0);
+  });
+
+  it('refuses a network or subnet not ready, and a network of another account', async () => {
+    const pending = await networkWith();
+    await db.query(`UPDATE networks SET state = 'pending' WHERE id = $1`, [pending.id]);
+    expect(await codeOf(createInstance({ networkId: pending.id }))).toBe('INVALID_INPUT');
+
+    const notReady = await networkWith();
+    await db.query(`UPDATE network_subnets SET state = 'pending' WHERE network_id = $1`, [
+      notReady.id,
+    ]);
+    expect(
+      await codeOf(createInstance({ networkId: notReady.id, subnetId: notReady.subnets[0]!.id })),
+    ).toBe('INVALID_INPUT');
+    // Without a subnetId, a subnet that is not ready is no candidate either.
+    expect(await codeOf(createInstance({ networkId: notReady.id }))).toBe('INVALID_INPUT');
+
+    const foreign = await networkWith();
+    await db.query(
+      `UPDATE networks SET provider_account_id = (SELECT id FROM provider_accounts WHERE id <> $2 LIMIT 1) WHERE id = $1`,
+      [foreign.id, gceAccount],
+    );
+    expect(await codeOf(createInstance({ networkId: foreign.id }))).toBe('INVALID_INPUT');
+    expect(await instanceCount()).toBe(0);
+  });
+
+  it('picks the only subnet in the region, and refuses none or several', async () => {
+    const network = await networkWith([
+      { name: 'a', region: 'us-central1', cidr: '10.0.0.0/20' },
+      { name: 'b', region: 'europe-west4', cidr: '10.1.0.0/20' },
+    ]);
+    const central = network.subnets.find((entry) => entry.region === 'us-central1')!;
+    const europe = network.subnets.find((entry) => entry.region === 'europe-west4')!;
+    const created = await createInstance({ networkId: network.id });
+    expect(created).toMatchObject({ networkId: network.id, subnetId: central.id });
+
+    // No subnet in the offer's region: INVALID_INPUT naming the region.
+    await db.query(`UPDATE flavors SET offer_id = 'us-east1-b/n2-standard-2' WHERE id = 'flv_net'`);
+    const none = await createInstance({ networkId: network.id }).catch((error) => error);
+    expect(none).toMatchObject({ code: 'INVALID_INPUT' });
+    expect(none.message).toContain('us-east1');
+    await db.query(
+      `UPDATE flavors SET offer_id = 'us-central1-a/n2-standard-2' WHERE id = 'flv_net'`,
+    );
+
+    // Two subnets in the region: the caller must choose, and the error names both.
+    const crowded = await networkWith([
+      { name: 'a', region: 'us-central1', cidr: '10.0.0.0/20' },
+      { name: 'c', region: 'us-central1', cidr: '10.2.0.0/20' },
+    ]);
+    const several = await createInstance({ networkId: crowded.id }).catch((error) => error);
+    expect(several).toMatchObject({ code: 'INVALID_INPUT' });
+    for (const subnet of crowded.subnets) expect(several.message).toContain(subnet.id);
+    // A named subnet of another region is refused, and one of another network.
+    expect(await codeOf(createInstance({ networkId: network.id, subnetId: europe.id }))).toBe(
+      'INVALID_INPUT',
+    );
+    expect(
+      await codeOf(createInstance({ networkId: network.id, subnetId: crowded.subnets[0]!.id })),
+    ).toBe('INVALID_INPUT');
+  });
+
+  it('a created instance holds its network: it cannot be deleted from under it', async () => {
+    const network = await networkWith();
+    const created = await createInstance({ networkId: network.id });
+    expect(
+      await call('networks', 'delete', { tenantId: 'root', networkId: network.id }).catch(
+        (error) => error,
+      ),
+    ).toMatchObject({ code: 'INVALID_STATE', details: { instanceIds: [created.id] } });
+  });
+
+  // --- attach
+
+  const LEGACY = 'us-central1-a/legacy';
+  /** A machine discovery saw, on these NICs. */
+  async function seeMachine(externalId: string, networks: Record<string, string>[]) {
+    await db.query(
+      `INSERT INTO provider_machines (account_id, external_id, machine, last_seen_at)
+       VALUES ($1, $2, $3::jsonb, compute_now())
+       ON CONFLICT (account_id, external_id) DO UPDATE SET machine = $3::jsonb, instance_id = NULL, gone_at = NULL`,
+      [
+        gceAccount,
+        externalId,
+        JSON.stringify({
+          id: externalId,
+          name: externalId.split('/')[1],
+          state: 'running',
+          region: 'us-central1',
+          zone: 'us-central1-a',
+          machineType: 'n2-standard-2',
+          vcpu: 2,
+          memoryGiB: 8,
+          networks,
+          addresses: [],
+        }),
+      ],
+    );
+  }
+  const attach = (raw: Record<string, unknown> = {}) =>
+    run(
+      instanceMethod('attach'),
+      {
+        tenantId: 'root',
+        poolId: gcePool,
+        externalId: LEGACY,
+        idempotencyKey: `attach-${++instanceCounter}`,
+        ...raw,
+      },
+      alice,
+    );
+
+  it('attach links a VM already on a tenant network', async () => {
+    const network = await networkWith();
+    const subnet = network.subnets[0]!;
+    await seeMachine(LEGACY, [
+      {
+        network: providerResourceName(network.id),
+        subnet: providerResourceName(subnet.id),
+        address: '10.0.0.5',
+      },
+    ]);
+    const attached = await attach({ networkId: network.id });
+    expect(attached).toMatchObject({
+      origin: 'attached',
+      networkId: network.id,
+      subnetId: subnet.id,
+    });
+    expect(await instanceRow(attached.id)).toMatchObject({
+      network_id: network.id,
+      subnet_id: subnet.id,
+    });
+
+    // Without a networkId it is linked all the same: the VM's NIC says where it is.
+    await seeMachine('us-central1-a/other', [
+      { network: providerResourceName(network.id), subnet: providerResourceName(subnet.id) },
+    ]);
+    const automatic = await attach({ externalId: 'us-central1-a/other' });
+    expect(automatic).toMatchObject({ networkId: network.id, subnetId: subnet.id });
+    // So the network cannot be deleted while they are there.
+    expect(
+      await codeOf(call('networks', 'delete', { tenantId: 'root', networkId: network.id })),
+    ).toBe('INVALID_STATE');
+  });
+
+  it('attach refuses moving a VM to another network', async () => {
+    const network = await networkWith();
+    await seeMachine(LEGACY, [{ network: 'default', address: '10.128.0.2' }]);
+    const refused = await attach({ networkId: network.id }).catch((error) => error);
+    expect(refused).toMatchObject({
+      code: 'INVALID_STATE',
+      details: { hint: 'attached VMs keep their existing network' },
+    });
+    expect(await instanceCount()).toBe(0);
+    expect(
+      (
+        await db.query<{ instance_id: string | null }>(
+          `SELECT instance_id FROM provider_machines WHERE external_id = $1`,
+          [LEGACY],
+        )
+      ).rows[0]!.instance_id,
+    ).toBeNull();
+
+    // Without a networkId it attaches, on no tenant network.
+    const plain = await attach();
+    expect(plain.networkId).toBeUndefined();
+    expect(await instanceRow(plain.id)).toMatchObject({ network_id: null, subnet_id: null });
+
+    // A network of another tenant is not matched, even when the names agree.
+    const foreign = await networkWith();
+    await db.query(`UPDATE networks SET tenant_id = 'other' WHERE id = $1`, [foreign.id]);
+    await seeMachine('us-central1-a/foreign', [{ network: providerResourceName(foreign.id) }]);
+    expect(
+      await codeOf(attach({ externalId: 'us-central1-a/foreign', networkId: foreign.id })),
+    ).toBe('INVALID_INPUT');
+    const unlinked = await attach({ externalId: 'us-central1-a/foreign' });
+    expect(unlinked.networkId).toBeUndefined();
   });
 });

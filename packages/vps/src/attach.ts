@@ -14,6 +14,7 @@ import {
 import { chargeQuota } from '@better-compute/capacity';
 import type { StoredMachine } from './discovery.js';
 import { canonical, fail, id, key, name, object, optional, sha256Hex, tenant } from './input.js';
+import { networkOfMachine } from './networks.js';
 import {
   instanceAttributes,
   instanceDemand,
@@ -72,6 +73,11 @@ export interface AttachInstanceInput {
   /** `detach` (default): deleting releases the machine and leaves it running. */
   onDelete?: InstanceOnDelete;
   name?: string;
+  /**
+   * (v1.0) The tenant network the machine must already be on (`networks.create`); attach does not
+   * move a running VM. Omitted: the machine is linked to the tenant network its NIC is on, if any.
+   */
+  networkId?: string;
   idempotencyKey: string;
 }
 
@@ -118,6 +124,11 @@ export const attachSchemas = {
           'detach: deleting releases the machine, which keeps running; delete: deleting deletes it',
       },
       name: field('A display name', '^[a-z0-9][a-z0-9._-]{0,62}$', 63),
+      networkId: field(
+        'A ready tenant network the machine is already on (attach keeps its network); omitted: the tenant network its NIC is on, if any',
+        '^net_[0-9a-hjkmnp-tv-z]{26,52}$',
+        57,
+      ),
       idempotencyKey: field(
         'Scoped to (tenant, caller identity): a retry with the same key replays',
         '^[A-Za-z0-9._:-]{1,128}$',
@@ -137,6 +148,7 @@ export function parseAttach(raw: unknown): AttachInstanceInput {
     'ownerIdentityId',
     'onDelete',
     'name',
+    'networkId',
     'idempotencyKey',
   ]);
   if (typeof input.externalId !== 'string' || !externalIdPattern.test(input.externalId))
@@ -160,6 +172,8 @@ export function parseAttach(raw: unknown): AttachInstanceInput {
   if (input.onDelete !== undefined) result.onDelete = input.onDelete as InstanceOnDelete;
   const label = optional(input.name, (value) => name(value));
   if (label !== undefined) result.name = label;
+  const networkId = optional(input.networkId, (value) => id(value, 'net', 'networkId'));
+  if (networkId !== undefined) result.networkId = networkId;
   return result;
 }
 
@@ -173,6 +187,7 @@ async function attachRequest(input: AttachInstanceInput, caller: Caller) {
     ownerIdentityId: input.ownerIdentityId ?? caller.identityId,
     onDelete: input.onDelete ?? 'detach',
     name: input.name,
+    networkId: input.networkId,
   };
   return {
     request,
@@ -356,6 +371,15 @@ export async function attachMachine(
   if (machine.state === 'deleting' || machine.state === 'deleted')
     throw new ComputeError('INVALID_STATE', `Machine ${input.externalId} is ${machine.state}`);
 
+  // 3b. (v1.0) The tenant network its NIC is on. A running VM is not moved to another one.
+  const link = await networkOfMachine(tx, {
+    tenantId: input.tenantId,
+    accountId,
+    externalId: input.externalId,
+    nics: machine.networks ?? [],
+    ...(input.networkId !== undefined ? { networkId: input.networkId } : {}),
+  });
+
   // 4. Quota, as a provider-pool create charges it.
   const shape = machineShape(machine);
   const demand = instanceDemand(shape);
@@ -369,10 +393,11 @@ export async function attachMachine(
                               ssh_keys, user_data, runtime, draft, state, desired_state,
                               provider_account_id, external_id, addresses, quota_charged,
                               owner_identity_id, agent_id, delegation_id, idempotency_key,
-                              request_hash, version, origin, on_delete, attached_at)
+                              request_hash, version, origin, on_delete, attached_at,
+                              network_id, subnet_id)
        VALUES ($1, $2, $3, $4, NULL, $5::jsonb, NULL, NULL, '{}', NULL, $6, false, 'scheduling', $7,
                $8, $9, $10::text[], $11::jsonb, $12, $13, $14, $15, decode($16, 'hex'), 1,
-               'attached', $17, compute_now())`,
+               'attached', $17, compute_now(), $18, $19)`,
       [
         instanceId,
         input.tenantId,
@@ -391,6 +416,8 @@ export async function attachMachine(
         input.idempotencyKey,
         hash,
         request.onDelete,
+        link.networkId ?? null,
+        link.subnetId ?? null,
       ],
     );
     await tx.query('RELEASE SAVEPOINT vps_attach');
