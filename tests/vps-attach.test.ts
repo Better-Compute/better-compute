@@ -605,3 +605,83 @@ describe('ownership of attached machines (review fixes)', () => {
     expect(await view(world, attached.id)).toMatchObject({ state: 'running', externalId: LEGACY });
   });
 });
+
+describe('a reused machine id never revives a lost or failed instance (review round 2)', () => {
+  const step = async (world: GceWorld, ms = 1_000) => {
+    await world.fixture.advance(ms);
+    await world.tick('vps.instances', 1);
+  };
+  const view = (world: GceWorld, instanceId: string) =>
+    world.api.instances.get(world.acme, { tenantId: world.acmeTenant, instanceId });
+  const create = (world: GceWorld, idempotencyKey: string) =>
+    world.api.instances.create(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: world.poolId,
+      flavor: 'a2.highgpu.1g',
+      imageId: 'debian-12',
+      idempotencyKey,
+    });
+
+  it('a lost instance whose machine id a live instance reuses ends with DuplicateMachine, no loop', async () => {
+    const world = await gceWorld({ discovery: { every: '1m' } });
+    const a = await create(world, 'vm-a');
+    await step(world);
+    const machineId = (await view(world, a.id)).externalId as string;
+    expect(await view(world, a.id)).toMatchObject({ state: 'running' });
+    // A's machine is deleted out of band: A goes lost.
+    world.cloud.machines.delete(machineId);
+    await step(world, 60_000);
+    expect(await view(world, a.id)).toMatchObject({ state: 'lost' });
+    // The provider reuses the id for B's machine; B is live on it.
+    world.cloud.machines.set(machineId, gceVm('reused', { id: machineId }));
+    world.cloud.createId = machineId;
+    const b = await create(world, 'vm-b');
+    await step(world);
+    expect(await view(world, b.id)).toMatchObject({ state: 'running', externalId: machineId });
+    // Review probe: waking A reads B's machine. A never revives and the run does not loop.
+    const before = world.cloud.requests.length;
+    await world.api.instances.start(world.acme, { tenantId: world.acmeTenant, instanceId: a.id });
+    await step(world);
+    const duplicate = await view(world, a.id);
+    expect(duplicate.state).toBe('lost');
+    expect(duplicate.conditions).toContainEqual(
+      expect.objectContaining({ type: 'DuplicateMachine', message: expect.stringContaining(b.id) }),
+    );
+    const { rows } = await world.fixture.database.query(
+      `SELECT 1 FROM work_queue WHERE kind = 'vps.instances' AND key = $1`,
+      [a.id],
+    );
+    expect(rows).toEqual([]);
+    await step(world, 60_000);
+    // Deleting A finishes without touching B's machine.
+    await world.api.instances.delete(world.acme, { tenantId: world.acmeTenant, instanceId: a.id });
+    await step(world);
+    expect(await view(world, a.id)).toMatchObject({ state: 'deleted' });
+    expect(
+      world.cloud.requests
+        .slice(before)
+        .filter((request) => /^(power|delete|create) /.test(request)),
+    ).toEqual([]);
+    expect(await view(world, b.id)).toMatchObject({ state: 'running', externalId: machineId });
+    expect(world.cloud.machines.has(machineId)).toBe(true);
+  });
+
+  it('instances.start on a failed instance whose machine id a live instance holds is CONFLICT', async () => {
+    const world = await gceWorld({ discovery: { every: '1m' } });
+    const a = await create(world, 'vm-a');
+    await step(world);
+    const machineId = (await view(world, a.id)).externalId as string;
+    world.cloud.machines.get(machineId)!.state = 'error';
+    await step(world, 60_000);
+    expect(await view(world, a.id)).toMatchObject({ state: 'error' });
+    world.cloud.machines.get(machineId)!.state = 'running';
+    world.cloud.createId = machineId;
+    const b = await create(world, 'vm-b');
+    await step(world);
+    expect(await view(world, b.id)).toMatchObject({ state: 'running', externalId: machineId });
+    await expect(
+      world.api.instances.start(world.acme, { tenantId: world.acmeTenant, instanceId: a.id }),
+    ).rejects.toMatchObject({ code: 'CONFLICT', details: { instanceId: b.id } });
+    expect(await view(world, a.id)).toMatchObject({ state: 'error' });
+  });
+});

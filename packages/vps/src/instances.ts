@@ -678,6 +678,65 @@ export const attachConflictCondition = 'AttachConflict';
 /** An attached instance whose machine no longer carries its ownership label. */
 export const ownershipLostCondition = 'OwnershipLost';
 
+/** Another live instance holds this instance's provider machine id (a provider reused it). */
+export const duplicateMachineCondition = 'DuplicateMachine';
+
+/** Whether the instance is marked as sharing its machine id with a live instance. */
+export function duplicateBlocked(conditions: readonly Condition[]): boolean {
+  return conditions.some(
+    (condition) => condition.status === 'true' && condition.type === duplicateMachineCondition,
+  );
+}
+
+/**
+ * The live instance (not deleted, lost or failed: what `instances_external_live` covers) other
+ * than `row` that holds `row`'s provider machine id, if any. A lost or failed row must not move
+ * back into a live state while one does.
+ */
+export async function liveHolderOf(
+  tx: SqlTx,
+  row: Pick<InstanceRow, 'id' | 'providerAccountId' | 'externalId'>,
+): Promise<string | undefined> {
+  if (row.providerAccountId === undefined || row.externalId === undefined) return undefined;
+  const { rows } = await tx.query<{ id: string }>(
+    `SELECT id FROM instances
+      WHERE provider_account_id = $1 AND external_id = $2 AND id <> $3
+        AND state NOT IN ('deleted', 'lost', 'error')
+      ORDER BY id LIMIT 1`,
+    [row.providerAccountId, row.externalId, row.id],
+  );
+  return rows[0]?.id;
+}
+
+/**
+ * Before a lost or failed row moves into `deleting` (a live state of instances_external_live):
+ * when a live instance holds its machine id, the id is not this row's any more. It is dropped
+ * (with `DuplicateMachine`), so the deletion neither collides with the index nor calls the
+ * provider about the other instance's machine.
+ */
+export async function dropHeldMachineId(
+  tx: SqlTx,
+  row: InstanceRow,
+  now: number,
+): Promise<InstanceRow> {
+  if (row.state !== 'lost' && row.state !== 'error') return row;
+  const holder = await liveHolderOf(tx, row);
+  if (holder === undefined) return row;
+  return updateInstance(tx, row, {
+    externalId: null,
+    conditions: withCondition(
+      row.conditions,
+      {
+        type: duplicateMachineCondition,
+        status: 'true',
+        reason: 'LiveHolder',
+        message: `Machine ${row.externalId} belongs to live instance ${holder}`,
+      },
+      now,
+    ),
+  });
+}
+
 /** Whether an (attached) instance lost or never won its machine: nothing more is asked of it. */
 export function ownershipBlocked(conditions: readonly Condition[]): boolean {
   return conditions.some(
@@ -1358,9 +1417,31 @@ export async function setPower(
       `Instance ${row.id} does not own its machine any more (AttachConflict/OwnershipLost); detach or delete it`,
     );
   if (row.desiredState !== desiredState) row = await updateInstance(tx, row, { desiredState });
-  // An instance in error retries when started again.
-  if (desiredState === 'running' && row.state === 'error' && (row.nodeId || row.externalId))
-    row = await moveInstance(tx, row, 'start', 'starting', { reportedState: null });
+  // An instance in error retries when started again, unless a live instance holds its machine id.
+  if (desiredState === 'running' && row.state === 'error' && (row.nodeId || row.externalId)) {
+    const holder = await liveHolderOf(tx, row);
+    const taken = () =>
+      new ComputeError(
+        'CONFLICT',
+        `Machine ${row.externalId} of instance ${row.id} belongs to live instance ${holder ?? 'another'}`,
+        undefined,
+        holder !== undefined ? { instanceId: holder } : {},
+      );
+    if (holder !== undefined) throw taken();
+    await tx.query('SAVEPOINT vps_start');
+    try {
+      row = await moveInstance(tx, row, 'start', 'starting', {
+        reportedState: null,
+        conditions: row.conditions.filter((c) => c.type !== duplicateMachineCondition),
+      });
+      await tx.query('RELEASE SAVEPOINT vps_start');
+    } catch (error) {
+      await tx.query('ROLLBACK TO SAVEPOINT vps_start');
+      // instances_external_live: a live instance took the id in between.
+      if ((error as { code?: unknown }).code === '23505') throw taken();
+      throw error;
+    }
+  }
   await wake(deps, tx, row);
   await publishInstance(
     deps,
