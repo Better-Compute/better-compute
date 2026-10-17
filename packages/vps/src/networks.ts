@@ -2,9 +2,11 @@ import { createHash } from 'node:crypto';
 import {
   ComputeError,
   draftId,
+  isComputeError,
   newId,
   strictObject,
   type AdmissionPlan,
+  type CallContext,
   type Clock,
   type EventPublisher,
   type InputSchema,
@@ -13,11 +15,16 @@ import {
   type MethodContext,
   type Migration,
   type ModuleContext,
+  type ProviderFirewallSpec,
   type ProviderImpl,
+  type ProviderNetworkState,
+  type ProviderNetworks,
+  type Reconciler,
   type SecretResolver,
+  type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
-import { readAccount, type ProviderClients } from './accounts.js';
+import { readAccount, type ProviderAccount, type ProviderClients } from './accounts.js';
 import { visibleVpsPool } from './instances.js';
 import { canonical, fail, id, key, object, optional, sha256Hex, tenant } from './input.js';
 
@@ -1387,4 +1394,489 @@ export async function deleteRule(
   );
   await deps.work.enqueue(tx, networksWork, network.id);
   return ruleView((await readRule(tx, network.id, row.id))!);
+}
+
+// --- The reconciler ----------------------------------------------------------------------------
+
+/** How soon a pending provider operation is looked at again. */
+export const networkPollMs = 5_000;
+/** How soon a rate-limited or unavailable provider is tried again. */
+const networkRetryMs = 30_000;
+/** A run stops starting provider calls after this long (the lease is 60 s); the rest waits for the next run. */
+const runBudgetMs = 40_000;
+
+/** What converging one resource at the provider came to. */
+type Outcome = { state: NetworkState; message?: string };
+
+interface Snapshot {
+  network: NetworkRow;
+  account: ProviderAccount | undefined;
+  subnets: SubnetRow[];
+  rules: RuleRow[];
+  instances: { id: string; external_id: string }[];
+}
+
+async function loadSnapshot(tx: SqlTx, networkId: string): Promise<Snapshot | undefined> {
+  const network = await readNetwork(tx, { networkId });
+  if (!network) return undefined;
+  const subnets = (await readSubnets(tx, [networkId])).filter(
+    (subnet) => subnet.state !== 'deleted' || subnet.desired_state === 'present',
+  );
+  const rules = await readRules(tx, networkId, { includeDeleted: true });
+  const instances = await tx.query<{ id: string; external_id: string }>(
+    `SELECT id, external_id FROM instances
+      WHERE network_id = $1 AND state <> 'deleted' AND external_id IS NOT NULL ORDER BY id`,
+    [networkId],
+  );
+  return {
+    network,
+    account: await readAccount(tx, network.provider_account_id),
+    subnets,
+    rules,
+    instances: instances.rows,
+  };
+}
+
+/** The provider firewall a rule compiles to: a rule that names instances targets their network tags. */
+export function compileFirewall(networkName: string, rule: RuleRow): ProviderFirewallSpec {
+  const spec = specOf(rule);
+  const instanceIds = spec.targets?.instanceIds ?? [];
+  return {
+    network: networkName,
+    name: providerResourceName(rule.id),
+    direction: spec.direction,
+    action: spec.action,
+    priority: spec.priority,
+    rules: spec.rules,
+    ...(spec.sources ? { sources: spec.sources } : {}),
+    ...(spec.destinations ? { destinations: spec.destinations } : {}),
+    ...(instanceIds.length > 0 ? { targetTags: instanceIds.map(networkTag) } : {}),
+    ...(rule.enabled ? {} : { disabled: true }),
+  };
+}
+
+const text = (error: unknown) => String((error as Error)?.message ?? error).slice(0, 500);
+const transientCodes = ['RATE_LIMITED', 'UNAVAILABLE', 'TIMEOUT'];
+
+/**
+ * One step of one network: provider calls run outside any transaction, and each result is written in
+ * its own short one, guarded by the version it was decided on (a change made meanwhile wakes the
+ * reconciler again instead of being overwritten). Returns the next wake-up, or undefined when settled
+ * (an `error` waits for the periodic pass or the next change).
+ */
+export async function reconcileNetwork(
+  deps: NetworkDeps,
+  sql: SqlExecutor,
+  networkId: string,
+  signal: AbortSignal,
+): Promise<number | undefined> {
+  const snapshot = await sql.transaction((tx) => loadSnapshot(tx, networkId));
+  if (!snapshot || snapshot.network.state === 'deleted') return undefined;
+  const worker = new NetworkWorker(deps, sql, snapshot, signal);
+  const providerNetworks = await worker.providerNetworks();
+  if (!providerNetworks) return undefined;
+  return snapshot.network.desired_state === 'deleted'
+    ? worker.teardown(providerNetworks)
+    : worker.converge(providerNetworks);
+}
+
+class NetworkWorker {
+  /** Something is still in flight at the provider: look again soon. */
+  #inFlight = false;
+  /** The provider asked us to slow down. */
+  #backoff = false;
+  /** The run ran out of time, or the network changed meanwhile: continue at once. */
+  #again = false;
+  readonly #networkName: string;
+  readonly #started: number;
+
+  constructor(
+    private readonly deps: NetworkDeps,
+    private readonly sql: SqlExecutor,
+    private readonly snapshot: Snapshot,
+    private readonly signal: AbortSignal,
+  ) {
+    this.#networkName = providerResourceName(snapshot.network.id);
+    this.#started = deps.clock.now();
+  }
+
+  get #network() {
+    return this.snapshot.network;
+  }
+
+  #next(): number | undefined {
+    const now = this.deps.clock.now();
+    if (this.#backoff) return now + networkRetryMs;
+    if (this.#again) return now;
+    return this.#inFlight ? now + networkPollMs : undefined;
+  }
+
+  #call(idempotencyKey: string): CallContext {
+    return {
+      idempotencyKey,
+      signal: this.signal,
+      clock: this.deps.clock,
+      secrets: this.deps.secrets,
+      log: this.deps.log,
+    };
+  }
+
+  /** The account's client when its provider still provides networks; otherwise the network is in error. */
+  async providerNetworks(): Promise<ProviderNetworks | undefined> {
+    const { account } = this.snapshot;
+    try {
+      if (!account)
+        throw new ComputeError(
+          'NOT_FOUND',
+          `Provider account ${this.#network.provider_account_id} not found`,
+        );
+      const client = await this.deps.clients.client(account, this.deps);
+      if (!client.networks)
+        throw new ComputeError(
+          'UNSUPPORTED',
+          `Provider ${account.provider} does not provide tenant networks`,
+        );
+      return client.networks;
+    } catch (error) {
+      await this.#setNetwork('error', text(error));
+      return undefined;
+    }
+  }
+
+  /** Runs a provider call; a throw is an `error` outcome unless the provider is only busy (then: later). */
+  async #attempt(op: () => Promise<ProviderNetworkState>): Promise<Outcome | undefined> {
+    if (this.deps.clock.now() - this.#started > runBudgetMs) {
+      this.#again = true;
+      return undefined;
+    }
+    try {
+      const result = await op();
+      return {
+        state: result.state,
+        ...(result.message ? { message: result.message.slice(0, 500) } : {}),
+      };
+    } catch (error) {
+      if (this.signal.aborted || (isComputeError(error) && transientCodes.includes(error.code))) {
+        this.deps.log.warn('networks: provider busy, retrying', {
+          networkId: this.#network.id,
+          error: text(error),
+        });
+        this.#backoff = true;
+        return undefined;
+      }
+      return { state: 'error', message: text(error) };
+    }
+  }
+
+  /** Writes the network's state (guarded by its version) and publishes what changed. */
+  async #setNetwork(state: NetworkState, message?: string): Promise<void> {
+    const network = this.#network;
+    const written = await this.sql.transaction(async (tx) => {
+      const { rows } = await tx.query(
+        `UPDATE networks SET state = $3, message = $4
+          WHERE id = $1 AND version = $2 AND (state IS DISTINCT FROM $3 OR message IS DISTINCT FROM $4)
+          RETURNING id`,
+        [network.id, network.version, state, message ?? null],
+      );
+      if (rows.length === 0) return false;
+      if (state === 'ready' && network.state !== 'ready')
+        await publish(this.deps, tx, network, 'network.ready');
+      else if (state === 'error')
+        await publish(this.deps, tx, network, 'network.error', { message: message ?? '' });
+      return true;
+    });
+    if (written) {
+      network.state = state;
+      return;
+    }
+    // Unchanged, or changed through the API meanwhile (its version is newer): then converge again at once.
+    const { rows } = await this.sql.transaction((tx) =>
+      tx.query<{ version: string | number }>(`SELECT version FROM networks WHERE id = $1`, [
+        network.id,
+      ]),
+    );
+    if (rows[0] && Number(rows[0].version) !== Number(network.version)) this.#again = true;
+  }
+
+  async #setSubnet(subnet: SubnetRow, state: NetworkState, message?: string): Promise<void> {
+    await this.sql.transaction(async (tx) => {
+      const { rows } = await tx.query(
+        `UPDATE network_subnets SET state = $5, message = $6
+          WHERE id = $1 AND desired_state = $2 AND region = $3 AND cidr = $4::cidr
+            AND (state IS DISTINCT FROM $5 OR message IS DISTINCT FROM $6)
+          RETURNING id`,
+        [subnet.id, subnet.desired_state, subnet.region, subnet.cidr, state, message ?? null],
+      );
+      if (rows.length === 0) return;
+      if (state === 'ready' && subnet.state !== 'ready')
+        await publish(this.deps, tx, this.#network, 'network.subnet.ready', {
+          subnetId: subnet.id,
+          name: subnet.name,
+        });
+      subnet.state = state;
+    });
+  }
+
+  async #setRule(rule: RuleRow, state: NetworkState, message?: string): Promise<void> {
+    await this.sql.transaction(async (tx) => {
+      // Guarded by the version this run read: a rule changed through the API since was queued again then.
+      const { rows } = await tx.query(
+        `UPDATE network_firewall_rules SET state = $3, message = $4
+          WHERE id = $1 AND version = $2 AND (state IS DISTINCT FROM $3 OR message IS DISTINCT FROM $4)
+          RETURNING id`,
+        [rule.id, rule.version, state, message ?? null],
+      );
+      if (rows.length === 0) return;
+      if (state === 'ready' && rule.state !== 'ready')
+        await publish(this.deps, tx, this.#network, 'network.rule.ready', {
+          ruleId: rule.id,
+          name: rule.name,
+        });
+      if (state === 'error')
+        await publish(this.deps, tx, this.#network, 'network.rule.error', {
+          ruleId: rule.id,
+          name: rule.name,
+          message: message ?? '',
+        });
+      rule.state = state;
+    });
+  }
+
+  /** What the provider answered for a thing being created or updated, as the state we store. */
+  #presentState(outcome: Outcome): Outcome {
+    if (outcome.state === 'ready' || outcome.state === 'error') return outcome;
+    this.#inFlight = true;
+    return { state: 'pending' };
+  }
+
+  async converge(networks: ProviderNetworks): Promise<number | undefined> {
+    const { snapshot } = this;
+    const network = this.#network;
+    const ensured = await this.#attempt(() =>
+      networks.ensureNetwork(
+        {
+          name: this.#networkName,
+          ...(network.description !== null ? { description: network.description } : {}),
+        },
+        this.#call(network.id),
+      ),
+    );
+    if (!ensured) return this.#next();
+    const vpc = this.#presentState(ensured);
+    if (vpc.state === 'error') {
+      await this.#setNetwork('error', vpc.message ?? 'The provider refused the network');
+      return undefined;
+    }
+    if (vpc.state !== 'ready') {
+      // The network is not there yet (or is being recreated): subnets and rules need it.
+      await this.#setNetwork('pending');
+      return this.#next();
+    }
+
+    const problems: string[] = [];
+    let waiting = false;
+    for (const subnet of snapshot.subnets) {
+      const name = providerResourceName(subnet.id);
+      if (subnet.desired_state === 'deleted') {
+        if (subnet.state === 'deleted') continue;
+        const gone = await this.#attempt(() =>
+          networks.deleteSubnet(subnet.region, name, this.#call(subnet.id)),
+        );
+        if (!gone) continue;
+        if (gone.state === 'deleted') await this.#setSubnet(subnet, 'deleted');
+        else if (gone.state === 'error') await this.#setSubnet(subnet, 'error', gone.message);
+        else {
+          this.#inFlight = true;
+          await this.#setSubnet(subnet, 'deleting');
+        }
+        continue;
+      }
+      const result = await this.#attempt(() =>
+        networks.ensureSubnet(
+          { network: this.#networkName, name, region: subnet.region, cidr: subnet.cidr },
+          this.#call(subnet.id),
+        ),
+      );
+      if (!result) {
+        waiting = true;
+        continue;
+      }
+      const state = this.#presentState(result);
+      await this.#setSubnet(subnet, state.state, state.message);
+      if (state.state === 'error')
+        problems.push(`subnet ${subnet.name}: ${state.message ?? 'the provider refused it'}`);
+      else if (state.state !== 'ready') waiting = true;
+    }
+
+    // Tags first, so a rule that targets an instance matches it as soon as the provider has the rule.
+    for (const instance of snapshot.instances) {
+      const done = await this.#attempt(async () => {
+        await networks.setTags(
+          instance.external_id,
+          [networkTag(instance.id)],
+          this.#call(instance.id),
+        );
+        return { id: instance.external_id, state: 'ready' };
+      });
+      // A machine the provider no longer has is the instance reconciler's to settle, not an error here.
+      if (done?.state === 'error' && !/not.?found/i.test(done.message ?? ''))
+        problems.push(`instance ${instance.id}: ${done.message ?? 'could not be tagged'}`);
+    }
+
+    for (const rule of snapshot.rules) {
+      const name = providerResourceName(rule.id);
+      if (rule.desired_state === 'deleted') {
+        if (rule.state === 'deleted') continue;
+        const gone = await this.#attempt(() => networks.deleteFirewall(name, this.#call(rule.id)));
+        if (!gone) continue;
+        if (gone.state === 'deleted') await this.#setRule(rule, 'deleted');
+        else if (gone.state === 'error') await this.#setRule(rule, 'error', gone.message);
+        else {
+          this.#inFlight = true;
+          await this.#setRule(rule, 'deleting');
+        }
+        continue;
+      }
+      const result = await this.#attempt(() =>
+        networks.ensureFirewall(compileFirewall(this.#networkName, rule), this.#call(rule.id)),
+      );
+      if (!result) continue;
+      const state = this.#presentState(result);
+      await this.#setRule(rule, state.state, state.message);
+    }
+
+    if (problems.length > 0) await this.#setNetwork('error', problems.join('; ').slice(0, 500));
+    else if (waiting || this.#backoff || this.#again) await this.#setNetwork('pending');
+    else await this.#setNetwork('ready');
+    return this.#next();
+  }
+
+  /** Rules first, then subnets, then the network; each step waits for the one before it. */
+  async teardown(networks: ProviderNetworks): Promise<number | undefined> {
+    const { snapshot } = this;
+    const network = this.#network;
+    const problems: string[] = [];
+
+    let rulesLeft = false;
+    for (const rule of snapshot.rules) {
+      if (rule.state === 'deleted') continue;
+      const gone = await this.#attempt(() =>
+        networks.deleteFirewall(providerResourceName(rule.id), this.#call(rule.id)),
+      );
+      if (gone?.state === 'deleted') {
+        await this.#setRule(rule, 'deleted');
+        continue;
+      }
+      rulesLeft = true;
+      if (!gone) continue;
+      if (gone.state === 'error') {
+        await this.#setRule(rule, 'error', gone.message);
+        problems.push(`rule ${rule.name}: ${gone.message ?? 'the provider refused it'}`);
+      } else {
+        this.#inFlight = true;
+        await this.#setRule(rule, 'deleting');
+      }
+    }
+    if (rulesLeft) return this.#waitOnTeardown(problems);
+
+    let subnetsLeft = false;
+    for (const subnet of snapshot.subnets) {
+      if (subnet.state === 'deleted') continue;
+      const gone = await this.#attempt(() =>
+        networks.deleteSubnet(
+          subnet.region,
+          providerResourceName(subnet.id),
+          this.#call(subnet.id),
+        ),
+      );
+      if (gone?.state === 'deleted') {
+        await this.#setSubnet(subnet, 'deleted');
+        continue;
+      }
+      subnetsLeft = true;
+      if (!gone) continue;
+      if (gone.state === 'error') {
+        await this.#setSubnet(subnet, 'error', gone.message);
+        problems.push(`subnet ${subnet.name}: ${gone.message ?? 'the provider refused it'}`);
+      } else {
+        this.#inFlight = true;
+        await this.#setSubnet(subnet, 'deleting');
+      }
+    }
+    if (subnetsLeft) return this.#waitOnTeardown(problems);
+
+    const gone = await this.#attempt(() =>
+      networks.deleteNetwork(this.#networkName, this.#call(network.id)),
+    );
+    if (!gone) return this.#waitOnTeardown(problems);
+    if (gone.state === 'error') {
+      await this.#setNetwork('error', gone.message ?? 'The provider refused to delete the network');
+      return undefined;
+    }
+    if (gone.state !== 'deleted') {
+      this.#inFlight = true;
+      await this.#setNetwork('deleting');
+      return this.#next();
+    }
+    await this.sql.transaction(async (tx) => {
+      const { rows } = await tx.query(
+        `UPDATE networks SET state = 'deleted', message = NULL
+          WHERE id = $1 AND version = $2 AND state <> 'deleted' RETURNING id`,
+        [network.id, network.version],
+      );
+      if (rows.length === 0) return;
+      await tx.query(
+        `UPDATE network_firewall_rules SET state = 'deleted', message = NULL WHERE network_id = $1`,
+        [network.id],
+      );
+      await tx.query(
+        `UPDATE network_subnets SET state = 'deleted', message = NULL WHERE network_id = $1`,
+        [network.id],
+      );
+      await this.deps.authz.remove(tx, {
+        type: 'network',
+        id: network.id,
+        tenantId: network.tenant_id,
+      });
+      await publish(this.deps, tx, network, 'network.deleted');
+    });
+    return undefined;
+  }
+
+  async #waitOnTeardown(problems: string[]): Promise<number | undefined> {
+    if (problems.length > 0) await this.#setNetwork('error', problems.join('; ').slice(0, 500));
+    else await this.#setNetwork('deleting');
+    return problems.length > 0 && !this.#inFlight ? undefined : this.#next();
+  }
+}
+
+/**
+ * The `vps.networks` reconciler (key: a network id). `all` is the periodic pass: it queues every
+ * network that is not deleted, so networks still converging or in error are retried and ready ones
+ * are re-applied, which puts back what drifted at the provider (a firewall deleted by hand).
+ */
+export function networksReconciler(depsOf: (context: ModuleContext) => NetworkDeps): Reconciler {
+  return {
+    name: networksWork,
+    shardBy: 'none',
+    periodic: [{ key: 'all', every: '5m' }],
+    async run(context, key) {
+      const deps = depsOf(context);
+      if (key === 'all') {
+        await context.sql.transaction(async (tx) => {
+          const { rows } = await tx.query<{ id: string }>(
+            `SELECT id FROM networks WHERE state <> 'deleted' ORDER BY id`,
+          );
+          for (const row of rows) await context.work.enqueue(tx, networksWork, row.id);
+        });
+        return 'DONE';
+      }
+      const next = await reconcileNetwork(deps, context.sql, key, context.signal);
+      if (next !== undefined)
+        await context.sql.transaction((tx) =>
+          context.work.enqueue(tx, networksWork, key, { notBefore: next }),
+        );
+      return 'DONE';
+    },
+  };
 }

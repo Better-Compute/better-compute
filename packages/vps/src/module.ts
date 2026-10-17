@@ -167,6 +167,7 @@ import {
   listNetworks,
   listRules,
   networkSchemas,
+  networksReconciler,
   parseAddSubnet,
   parseCreateNetwork,
   parseCreateRule,
@@ -1331,6 +1332,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           return 'DONE';
         },
       },
+      // Tenant networks: VPCs, subnets, firewall rules and instance tags converged through the provider.
+      networksReconciler(networkDeps),
     ],
     selfCheck: async (context) => [
       ...(await vpsSelfCheck(context.sql, runtimeTable, runtimes[0]!)),

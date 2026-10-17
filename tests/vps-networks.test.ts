@@ -65,6 +65,10 @@ const gce = {
   progress: new Map<string, number>(),
   /** The next provider call throws this. */
   failNext: undefined as ComputeError | undefined,
+  /** Operations on these (`ensureSubnet bc-x`) answer `error`. */
+  refuse: new Set<string>(),
+  /** Awaited after `ensureNetwork` answered, before it returns: lets a test act while a run is in flight. */
+  afterEnsureNetwork: undefined as (() => Promise<void>) | undefined,
   /** The next ensure/delete answers this state instead. */
   answerNext: undefined as ProviderNetworkState['state'] | undefined,
   reset() {
@@ -77,11 +81,17 @@ const gce = {
     this.progress.clear();
     this.failNext = undefined;
     this.answerNext = undefined;
+    this.refuse.clear();
+    this.afterEnsureNetwork = undefined;
   },
-  /** Runs one ensure or delete: `pending` until it has been asked `operationDelayTicks + 1` times. */
+  /**
+   * Runs one ensure or delete: `pending` until it has been asked `operationDelayTicks + 1` times, unless
+   * the resource is already as asked (an ensure of what exists, a delete of what is gone).
+   */
   step(
     label: string,
     name: string,
+    settled: boolean,
     done: () => ProviderNetworkState['state'],
   ): ProviderNetworkState {
     this.calls.push(`${label} ${name}`);
@@ -95,6 +105,9 @@ const gce = {
       this.answerNext = undefined;
       return { id: name, state, ...(state === 'error' ? { message: 'the provider said no' } : {}) };
     }
+    if (this.refuse.has(`${label} ${name}`))
+      return { id: name, state: 'error', message: 'the provider said no' };
+    if (settled) return { id: name, state: done() };
     const asked = (this.progress.get(`${label} ${name}`) ?? 0) + 1;
     if (asked <= this.operationDelayTicks) {
       this.progress.set(`${label} ${name}`, asked);
@@ -126,39 +139,46 @@ const gceLike = defineProvider({
     async delete() {},
     networks: {
       async ensureNetwork(spec) {
-        return gce.step('ensureNetwork', spec.name, () => {
+        const answer = gce.step('ensureNetwork', spec.name, gce.networks.has(spec.name), () => {
           gce.networks.set(spec.name, spec);
           return 'ready';
         });
+        await gce.afterEnsureNetwork?.();
+        return answer;
       },
       async ensureSubnet(spec) {
-        return gce.step('ensureSubnet', spec.name, () => {
-          if (!gce.networks.has(spec.network))
-            throw new ComputeError('NOT_FOUND', `no network ${spec.network}`);
-          gce.subnets.set(`${spec.region}/${spec.name}`, spec);
-          return 'ready';
-        });
+        return gce.step(
+          'ensureSubnet',
+          spec.name,
+          gce.subnets.has(`${spec.region}/${spec.name}`),
+          () => {
+            if (!gce.networks.has(spec.network))
+              throw new ComputeError('NOT_FOUND', `no network ${spec.network}`);
+            gce.subnets.set(`${spec.region}/${spec.name}`, spec);
+            return 'ready';
+          },
+        );
       },
       async ensureFirewall(spec) {
-        return gce.step('ensureFirewall', spec.name, () => {
+        return gce.step('ensureFirewall', spec.name, gce.firewalls.has(spec.name), () => {
           gce.firewalls.set(spec.name, spec);
           return 'ready';
         });
       },
       async deleteNetwork(name) {
-        return gce.step('deleteNetwork', name, () => {
+        return gce.step('deleteNetwork', name, !gce.networks.has(name), () => {
           gce.networks.delete(name);
           return 'deleted';
         });
       },
       async deleteSubnet(region, name) {
-        return gce.step('deleteSubnet', name, () => {
+        return gce.step('deleteSubnet', name, !gce.subnets.has(`${region}/${name}`), () => {
           gce.subnets.delete(`${region}/${name}`);
           return 'deleted';
         });
       },
       async deleteFirewall(name) {
-        return gce.step('deleteFirewall', name, () => {
+        return gce.step('deleteFirewall', name, !gce.firewalls.has(name), () => {
           gce.firewalls.delete(name);
           return 'deleted';
         });
@@ -376,7 +396,7 @@ const createRule = (
 
 /** A minimal instance row on a provider pool (the instances API is not under test here). */
 async function insertInstance(options: {
-  externalId?: string;
+  externalId?: string | null;
   networkId?: string;
   subnetId?: string;
   state?: string;
@@ -395,7 +415,7 @@ async function insertInstance(options: {
       gcePool,
       options.state ?? 'running',
       gceAccount,
-      options.externalId ?? `vm-${keyCounter}`,
+      options.externalId === null ? null : (options.externalId ?? `vm-${keyCounter}`),
       options.networkId ?? null,
       options.subnetId ?? null,
     ],
@@ -454,7 +474,13 @@ beforeAll(async () => {
 afterAll(async () => {
   await db.close();
 });
-beforeEach(() => {
+beforeEach(async () => {
+  // Every test starts with no networks, rules or instances: a periodic pass would pick up the last test's.
+  await db.query(`DELETE FROM instances`);
+  await db.query(`DELETE FROM network_firewall_rules`);
+  await db.query(`DELETE FROM network_subnets`);
+  await db.query(`DELETE FROM networks`);
+  projected.clear();
   events.length = 0;
   authzOps.length = 0;
   queue.clear();
@@ -909,5 +935,358 @@ describe('api', () => {
     expect(providerResourceName('net_01JZ0000_x.y')).toBe('bc-net-01jz0000-x-y');
     expect(providerResourceName('net_' + 'a'.repeat(80))).toHaveLength(63);
     expect(providerResourceName('net_' + 'a'.repeat(80))).toMatch(/^[a-z]([-a-z0-9]*[a-z0-9])?$/);
+  });
+});
+
+// --- The reconciler ----------------------------------------------------------------------------
+
+const reconciler = () => module.reconcilers!.find((entry) => entry.name === networksWork)!;
+const runKey = (key: string) =>
+  reconciler().run({ ...moduleContext(db), signal: new AbortController().signal } as never, key);
+/** Five seconds pass, then every key that has come due runs once. */
+async function tick(): Promise<void> {
+  clock.advance(5_000);
+  await useSimClock(db, clock.now());
+  const due = [...queue].filter(([, at]) => at <= clock.now()).map(([key]) => key);
+  for (const key of due) {
+    queue.delete(key);
+    await runKey(key);
+  }
+}
+const getNetwork = (networkId: string): Promise<NetworkView> =>
+  call('networks', 'get', { tenantId: 'root', networkId });
+const listRules = async (networkId: string): Promise<FirewallRuleView[]> =>
+  (await call('firewallRules', 'list', { tenantId: 'root', networkId })).items;
+/** Ticks until `done` holds, at most `limit` times; returns how many it took. */
+async function until(done: () => Promise<boolean>, limit = 8): Promise<number> {
+  for (let ticks = 1; ticks <= limit; ticks++) {
+    await tick();
+    if (await done()) return ticks;
+  }
+  throw new Error(`not settled after ${limit} ticks; calls: ${gce.calls.join(', ')}`);
+}
+const settled = async (networkId: string) => {
+  const network = await getNetwork(networkId);
+  const rules = await listRules(networkId);
+  return (
+    network.state === 'ready' &&
+    network.subnets.every((subnet) => subnet.state === 'ready') &&
+    rules.every((rule) => rule.state === 'ready')
+  );
+};
+/** A network with the given subnet ranges and rules, converged. */
+async function readyNetwork(subnets = ['10.0.0.0/20'], rules = 1) {
+  const network = await createNetwork();
+  for (const [index, cidr] of subnets.entries())
+    await addSubnet(network.id, { cidr, name: `s${index}` });
+  const created: FirewallRuleView[] = [];
+  for (let index = 0; index < rules; index++)
+    created.push(await createRule(network.id, { name: `r${index}`, priority: 1000 + index }));
+  await until(() => settled(network.id));
+  events.length = 0;
+  gce.calls.length = 0;
+  return { network: await getNetwork(network.id), rules: created };
+}
+
+describe('reconcile', () => {
+  it('converges a network with a subnet and a rule to ready', async () => {
+    gce.operationDelayTicks = 1;
+    const network = await createNetwork();
+    const withSubnet = await addSubnet(network.id, { name: 'a', cidr: '10.0.0.0/20' });
+    const rule = await createRule(network.id, { name: 'ssh' });
+    const ticks = await until(() => settled(network.id), 5);
+    expect(ticks).toBeLessThanOrEqual(5);
+
+    const vpc = providerResourceName(network.id);
+    expect([...gce.networks.keys()]).toEqual([vpc]);
+    expect([...gce.subnets.values()]).toEqual([
+      {
+        network: vpc,
+        name: providerResourceName(withSubnet.subnets[0]!.id),
+        region: 'us-central1',
+        cidr: '10.0.0.0/20',
+      },
+    ]);
+    expect(gce.firewalls.get(providerResourceName(rule.id))).toEqual({
+      network: vpc,
+      name: providerResourceName(rule.id),
+      direction: 'ingress',
+      action: 'allow',
+      priority: 1000,
+      rules: [{ protocol: 'tcp', ports: ['22'] }],
+      sources: ['0.0.0.0/0'],
+    });
+    // The subnet and the rule wait for the network; every call names the provider's own resource names.
+    expect(gce.calls[0]).toBe(`ensureNetwork ${vpc}`);
+    expect(gce.calls.indexOf(`ensureNetwork ${vpc}`)).toBeLessThan(
+      gce.calls.findIndex((entry) => entry.startsWith('ensureSubnet')),
+    );
+    expect(events.map((event) => event.type)).toEqual([
+      'network.created',
+      'network.subnet.ready',
+      'network.rule.ready',
+      'network.ready',
+    ]);
+    expect(await getNetwork(network.id)).toMatchObject({ state: 'ready' });
+    expect((await getNetwork(network.id)).message).toBeUndefined();
+
+    // Settled: nothing is queued, so nothing is asked of the provider until the periodic pass.
+    expect(queue.size).toBe(0);
+    const calls = gce.calls.length;
+    await tick();
+    expect(gce.calls.length).toBe(calls);
+  });
+
+  it('deletes rules then subnets then the network', async () => {
+    const { network, rules } = await readyNetwork(['10.0.0.0/20', '10.1.0.0/20'], 2);
+    expect(gce.firewalls.size).toBe(2);
+    gce.operationDelayTicks = 1;
+    gce.calls.length = 0;
+    authzOps.length = 0;
+    await call('networks', 'delete', { tenantId: 'root', networkId: network.id });
+    await until(async () => (await getNetwork(network.id)).state === 'deleted', 10);
+
+    const deletes = gce.calls
+      .filter((entry) => entry.startsWith('delete'))
+      .map((entry) => entry.split(' ')[0]);
+    const firstOf = (kind: string) => deletes.indexOf(kind);
+    const lastOf = (kind: string) => deletes.lastIndexOf(kind);
+    expect(new Set(deletes)).toEqual(new Set(['deleteFirewall', 'deleteSubnet', 'deleteNetwork']));
+    expect(lastOf('deleteFirewall')).toBeLessThan(firstOf('deleteSubnet'));
+    expect(lastOf('deleteSubnet')).toBeLessThan(firstOf('deleteNetwork'));
+    expect(deletes.at(-1)).toBe('deleteNetwork');
+    // Nothing is left at the provider, and compute forgot the network.
+    expect([gce.networks.size, gce.subnets.size, gce.firewalls.size]).toEqual([0, 0, 0]);
+    expect(authzOps).toContainEqual({ op: 'remove', resource: `network/${network.id}` });
+    expect(events.map((event) => event.type)).toEqual(['network.deleting', 'network.deleted']);
+    const { rows } = await db.query<{ state: string }>(
+      `SELECT state FROM network_subnets WHERE network_id = $1 UNION ALL SELECT state FROM network_firewall_rules WHERE network_id = $1`,
+      [network.id],
+    );
+    expect(rows.map((row) => row.state)).toEqual(['deleted', 'deleted', 'deleted', 'deleted']);
+    expect(
+      (await call('networks', 'list', { tenantId: 'root' })).items.map(
+        (item: NetworkView) => item.id,
+      ),
+    ).not.toContain(network.id);
+    expect(
+      (await call('networks', 'list', { tenantId: 'root', includeDeleted: true })).items.map(
+        (item: NetworkView) => item.id,
+      ),
+    ).toContain(network.id);
+    expect(rules).toHaveLength(2);
+    // Nothing is queued any more; a later pass leaves a deleted network alone.
+    expect(queue.size).toBe(0);
+    gce.calls.length = 0;
+    await runKey('all');
+    expect(queue.has(network.id)).toBe(false);
+    expect(gce.calls).toEqual([]);
+  });
+
+  it('a rule targeting an instance tags the VM and uses targetTags', async () => {
+    const network = await createNetwork();
+    await addSubnet(network.id, { name: 'a', cidr: '10.0.0.0/20' });
+    const instanceId = await insertInstance({ networkId: network.id, externalId: 'vm-gpu-1' });
+    const other = await insertInstance({ networkId: network.id, externalId: 'vm-gpu-2' });
+    // Not tagged: no provider machine yet, and one that is deleted.
+    await insertInstance({ networkId: network.id, externalId: null });
+    await insertInstance({ networkId: network.id, externalId: 'vm-gone', state: 'deleted' });
+    const targeted = await createRule(network.id, {
+      name: 'jupyter',
+      rules: [{ protocol: 'tcp', ports: ['8888', '9000-9100'] }],
+      targets: { instanceIds: [instanceId] },
+    });
+    const everywhere = await createRule(network.id, {
+      name: 'icmp',
+      rules: [{ protocol: 'icmp' }],
+      enabled: false,
+    });
+    await until(() => settled(network.id));
+
+    expect(gce.tags.get('vm-gpu-1')).toEqual([networkTag(instanceId)]);
+    expect(gce.tags.get('vm-gpu-2')).toEqual([networkTag(other)]);
+    expect(gce.tags.has('vm-gone')).toBe(false);
+    expect(gce.tags.size).toBe(2);
+    const rule = gce.firewalls.get(providerResourceName(targeted.id))!;
+    expect(rule.targetTags).toEqual([networkTag(instanceId)]);
+    expect(rule.rules).toEqual([{ protocol: 'tcp', ports: ['8888', '9000-9100'] }]);
+    expect(rule.disabled).toBeUndefined();
+    // A rule without targets covers the network; a disabled one is passed as disabled.
+    const wide = gce.firewalls.get(providerResourceName(everywhere.id))!;
+    expect(wide.targetTags).toBeUndefined();
+    expect(wide.disabled).toBe(true);
+    // Tags are set before the rules that use them.
+    const setTags = gce.calls.indexOf('setTags vm-gpu-1');
+    expect(setTags).toBeGreaterThanOrEqual(0);
+    expect(setTags).toBeLessThan(
+      gce.calls.findIndex(
+        (entry) => entry === `ensureFirewall ${providerResourceName(targeted.id)}`,
+      ),
+    );
+    // The tag is a function of the instance id: stable across passes.
+    await runKey('all');
+    await tick();
+    expect(gce.tags.get('vm-gpu-1')).toEqual([networkTag(instanceId)]);
+  });
+
+  it('applies rule updates, subnet removal and rule removal', async () => {
+    const { network, rules } = await readyNetwork(['10.0.0.0/20', '10.1.0.0/20'], 1);
+    const ruleName = providerResourceName(rules[0]!.id);
+    await call('firewallRules', 'update', {
+      tenantId: 'root',
+      networkId: network.id,
+      ruleId: rules[0]!.id,
+      sources: ['192.0.2.0/24'],
+      action: 'deny',
+    });
+    expect((await listRules(network.id))[0]).toMatchObject({ state: 'pending', version: 2 });
+    await until(() => settled(network.id));
+    expect(gce.firewalls.get(ruleName)).toMatchObject({
+      action: 'deny',
+      sources: ['192.0.2.0/24'],
+    });
+    expect(events.map((event) => event.type)).toEqual(['network.rule.ready']);
+
+    const [first, second] = network.subnets;
+    await call('networks', 'removeSubnet', {
+      tenantId: 'root',
+      networkId: network.id,
+      subnetId: first!.id,
+    });
+    await until(async () => (await getNetwork(network.id)).subnets.length === 1);
+    expect([...gce.subnets.keys()]).toEqual([`us-central1/${providerResourceName(second!.id)}`]);
+    expect(await settled(network.id)).toBe(true);
+
+    await call('firewallRules', 'delete', {
+      tenantId: 'root',
+      networkId: network.id,
+      ruleId: rules[0]!.id,
+    });
+    await until(async () => (await listRules(network.id)).length === 0);
+    expect(gce.firewalls.size).toBe(0);
+    // The network stayed ready through all of it, and its name can be used again for a new rule.
+    expect((await getNetwork(network.id)).state).toBe('ready');
+    expect(await codeOf(createRule(network.id, { name: 'r0' }))).toBe('resolved');
+  });
+
+  it('reports a provider error on the network', async () => {
+    const network = await createNetwork();
+    await addSubnet(network.id, { name: 'a', cidr: '10.0.0.0/20' });
+    gce.failNext = new ComputeError(
+      'INVALID_INPUT',
+      'Invalid value for field resource.name: 400 Bad Request',
+    );
+    await tick();
+    const failed = await getNetwork(network.id);
+    expect(failed).toMatchObject({ state: 'error' });
+    expect(failed.message).toMatch(/400 Bad Request/);
+    expect(events.map((event) => event.type)).toEqual(['network.created', 'network.error']);
+    expect(events.at(-1)!.data).toMatchObject({
+      networkId: network.id,
+      message: expect.stringMatching(/400/),
+    });
+    // An error waits for the periodic pass instead of hammering the provider.
+    expect(queue.size).toBe(0);
+    expect(gce.networks.size).toBe(0);
+
+    // The periodic pass tries again and, once the provider agrees, the network is ready and the message gone.
+    await runKey('all');
+    expect(queue.has(network.id)).toBe(true);
+    await until(() => settled(network.id));
+    const healed = await getNetwork(network.id);
+    expect(healed.state).toBe('ready');
+    expect(healed.message).toBeUndefined();
+    expect(events.map((event) => event.type)).toEqual([
+      'network.created',
+      'network.error',
+      'network.subnet.ready',
+      'network.ready',
+    ]);
+  });
+
+  it('keeps going through a busy provider and reports a refused subnet or rule', async () => {
+    const network = await createNetwork();
+    await addSubnet(network.id, { name: 'a', cidr: '10.0.0.0/20' });
+    // Rate limited: the state does not change, the key comes back later (30 s), not at the 5 s poll.
+    gce.failNext = new ComputeError('RATE_LIMITED', 'slow down');
+    await tick();
+    expect((await getNetwork(network.id)).state).toBe('pending');
+    expect(queue.get(network.id)! - clock.now()).toBe(30_000);
+    clock.advance(30_000);
+    await useSimClock(db, clock.now());
+    await until(() => settled(network.id));
+
+    // A provider that answers `error` for a rule marks the rule, publishes network.rule.error, and keeps the network ready.
+    events.length = 0;
+    const rule = await createRule(network.id, { name: 'bad' });
+    gce.refuse.add(`ensureFirewall ${providerResourceName(rule.id)}`);
+    await tick();
+    expect((await listRules(network.id))[0]).toMatchObject({
+      id: rule.id,
+      state: 'error',
+      message: 'the provider said no',
+    });
+    expect(events.map((event) => event.type)).toEqual(['network.rule.error']);
+    expect((await getNetwork(network.id)).state).toBe('ready');
+    gce.refuse.clear();
+    await runKey('all');
+    await until(() => settled(network.id));
+    expect((await getNetwork(network.id)).state).toBe('ready');
+
+    // A refused subnet makes the network error, naming the subnet.
+    const second = await addSubnet(network.id, { name: 'b', cidr: '10.1.0.0/20' });
+    gce.refuse.add(
+      `ensureSubnet ${providerResourceName(second.subnets.find((subnet) => subnet.name === 'b')!.id)}`,
+    );
+    await tick();
+    const refused = await getNetwork(network.id);
+    expect(refused.state).toBe('error');
+    expect(refused.message).toMatch(/subnet b: the provider said no/);
+    expect(refused.subnets.find((subnet) => subnet.name === 'b')!.state).toBe('error');
+    expect(refused.subnets.find((subnet) => subnet.name === 'a')!.state).toBe('ready');
+  });
+
+  it('drift: a firewall deleted in GCP is recreated on the periodic pass', async () => {
+    const { network, rules } = await readyNetwork(['10.0.0.0/20'], 1);
+    const ruleName = providerResourceName(rules[0]!.id);
+    const subnetKey = [...gce.subnets.keys()][0]!;
+    gce.firewalls.delete(ruleName);
+    gce.subnets.delete(subnetKey);
+    // Nothing notices until the periodic pass: ready networks are queued by `all` as well.
+    await tick();
+    expect(gce.firewalls.has(ruleName)).toBe(false);
+    await runKey('all');
+    expect(queue.has(network.id)).toBe(true);
+    await tick();
+    expect(gce.firewalls.get(ruleName)).toMatchObject({
+      direction: 'ingress',
+      sources: ['0.0.0.0/0'],
+    });
+    expect(gce.subnets.has(subnetKey)).toBe(true);
+    expect(await settled(network.id)).toBe(true);
+    // Recreating the VPC itself puts the network back to pending until it exists again.
+    gce.networks.clear();
+    gce.operationDelayTicks = 1;
+    await runKey('all');
+    await tick();
+    expect((await getNetwork(network.id)).state).toBe('pending');
+    await until(() => settled(network.id));
+    expect(gce.networks.size).toBe(1);
+  });
+
+  it('does not overwrite a change made through the API while it converges', async () => {
+    const network = await createNetwork();
+    // A subnet is added after the run read the network but before it wrote: the stale write is dropped.
+    gce.afterEnsureNetwork = async () => {
+      gce.afterEnsureNetwork = undefined;
+      await addSubnet(network.id, { name: 'late', cidr: '10.5.0.0/24' });
+    };
+    await tick();
+    expect((await getNetwork(network.id)).state).toBe('pending');
+    await until(() => settled(network.id));
+    expect((await getNetwork(network.id)).subnets).toMatchObject([
+      { name: 'late', state: 'ready' },
+    ]);
+    expect(gce.subnets.size).toBe(1);
   });
 });
