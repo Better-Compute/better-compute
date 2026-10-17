@@ -138,6 +138,13 @@ export interface IamPort {
     session: { identityId: string; sessionId: string },
     decision: Decision,
   ): Promise<boolean>;
+  /**
+   * (v1.0) Whether `identityId` is an active identity of `tenantId`. Compute asks before it makes
+   * someone other than the caller the owner of a resource (`instances.create`/`attach` with
+   * `ownerIdentityId`), outside any transaction. Optional: without it the owner is checked for
+   * shape only.
+   */
+  isMember?(tenantId: string, identityId: string): Promise<boolean>;
   /** Delegated confirmation (v0.3); `'not-held-back'` when the action is not confirm-listed. */
   requestConfirmation(
     credential: Credential,

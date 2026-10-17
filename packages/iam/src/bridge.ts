@@ -394,6 +394,10 @@ export function createComputeIamBridge(options: ComputeIamBridgeOptions = {}): C
         flags,
         successorOf: embeddedOptions.successorOf ?? successorOf,
       });
+      // Owner checks (instances.create/attach ownerIdentityId): read from IAM's own store.
+      if (iam.store)
+        port.isMember = async (tenantId, identityId) =>
+          (await readIdentity(tenantId, identityId)).status === 'active';
       // §12.4: an admission's committed draft or pending change is in memory before `require`.
       port.refreshResource = async (tenantId, resource) => {
         if (!resource.type.startsWith(catalog.typePrefix)) return;

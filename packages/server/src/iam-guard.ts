@@ -18,6 +18,7 @@ const guarded: ReadonlySet<PropertyKey> = new Set([
   'authorize',
   'authorizeMany',
   'authorizeSession',
+  'isMember',
   'requestConfirmation',
   'billingCheck',
   'recordUsage',
