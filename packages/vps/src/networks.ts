@@ -25,7 +25,12 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { readAccount, type ProviderAccount, type ProviderClients } from './accounts.js';
-import { visibleVpsPool } from './instances.js';
+import {
+  attachConflictCondition,
+  duplicateMachineCondition,
+  ownershipLostCondition,
+  visibleVpsPool,
+} from './instances.js';
 import { canonical, fail, id, key, object, optional, sha256Hex, tenant } from './input.js';
 
 // Tenant networks (v1.0): a VPC on a provider account, its subnets and its firewall rules. The API
@@ -1687,10 +1692,18 @@ async function loadSnapshot(tx: SqlTx, networkId: string): Promise<Snapshot | un
     (subnet) => subnet.state !== 'deleted' || subnet.desired_state === 'present',
   );
   const rules = await readRules(tx, networkId, { includeDeleted: true });
+  // Only instances that own their machine are tagged (I3): live (not deleting, lost or failed), and
+  // an attached one only once claimed and while nothing says it lost the machine (B2, B5).
   const instances = await tx.query<{ id: string; external_id: string }>(
     `SELECT id, external_id FROM instances
-      WHERE network_id = $1 AND state <> 'deleted' AND external_id IS NOT NULL ORDER BY id`,
-    [networkId],
+      WHERE network_id = $1 AND external_id IS NOT NULL
+        AND state NOT IN ('deleted', 'deleting', 'lost', 'error')
+        AND (origin <> 'attached' OR provider_claimed_at IS NOT NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM jsonb_array_elements(conditions) AS c
+           WHERE c->>'status' = 'true' AND c->>'type' = ANY($2::text[]))
+      ORDER BY id`,
+    [networkId, [attachConflictCondition, ownershipLostCondition, duplicateMachineCondition]],
   );
   return {
     network,
@@ -2010,11 +2023,26 @@ class NetworkWorker {
     // Tags first, so a rule that targets an instance matches it as soon as the provider has the rule.
     for (const instance of snapshot.instances) {
       const done = await this.#attempt(async () => {
-        await networks.setTags(
-          instance.external_id,
-          [networkTag(instance.id)],
-          this.#call(instance.id),
-        );
+        try {
+          await networks.setTags(
+            instance.external_id,
+            [networkTag(instance.id)],
+            this.#call(instance.id),
+            instance.id,
+          );
+        } catch (error) {
+          // Not this instance's machine (any more), or not taggable yet: skipped, not an error;
+          // the instance reconciler settles ownership.
+          if (isComputeError(error, 'INVALID_STATE')) {
+            this.deps.log.warn('networks: instance not tagged', {
+              networkId: this.#network.id,
+              instanceId: instance.id,
+              error: text(error),
+            });
+            return { id: instance.external_id, state: 'pending' };
+          }
+          throw error;
+        }
         return { id: instance.external_id, state: 'ready' };
       });
       // A machine the provider no longer has is the instance reconciler's to settle, not an error here.

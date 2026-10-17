@@ -738,8 +738,17 @@ export interface ProviderNetworks {
   deleteNetwork(name: string, context: CallContext): Promise<ProviderNetworkState>;
   deleteSubnet(region: string, name: string, context: CallContext): Promise<ProviderNetworkState>;
   deleteFirewall(name: string, context: CallContext): Promise<ProviderNetworkState>;
-  /** Replaces the tags this provider manages (prefix `bc-`) on a machine; keeps every other tag. */
-  setTags(machineId: string, tags: readonly string[], context: CallContext): Promise<void>;
+  /**
+   * Replaces the tags this provider manages (prefix `bc-`) on a machine; keeps every other tag.
+   * (v1.0) With `instanceId`, only a machine whose ownership label names that instance is touched:
+   * any other is `INVALID_STATE` (it was re-claimed elsewhere, or never was this instance's).
+   */
+  setTags(
+    machineId: string,
+    tags: readonly string[],
+    context: CallContext,
+    instanceId?: string,
+  ): Promise<void>;
 }
 
 /** Rescue-system access; the credential is stored as a secret, never returned as a value. */

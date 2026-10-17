@@ -16,7 +16,7 @@ import {
   type GceOperation,
 } from './client.js';
 import type { GcpProviderOptions } from './config.js';
-import { labels, parseMachineId, requestIdFor } from './ids.js';
+import { labels, labelValue, parseMachineId, requestIdFor } from './ids.js';
 import type { GceInstance } from './shapes.js';
 
 // Tenant networking on Compute Engine: custom-mode VPC networks, subnets, firewall rules, and the
@@ -398,7 +398,12 @@ export class GcpNetworks implements ProviderNetworks {
 
   // ------------------------------------------------------------------------------------ tags
 
-  async setTags(machineId: string, tags: readonly string[], context: CallContext): Promise<void> {
+  async setTags(
+    machineId: string,
+    tags: readonly string[],
+    context: CallContext,
+    instanceId?: string,
+  ): Promise<void> {
     for (const tag of tags)
       if (!tag.startsWith(managedTagPrefix) || !tagPattern.test(tag))
         throw new ComputeError(
@@ -411,12 +416,21 @@ export class GcpNetworks implements ProviderNetworks {
       const instance = await this.#client.request<GceInstance>('GET', path, {
         signal: context.signal,
       });
-      if (!instance.labels?.[labels.instance])
+      const claimedBy = instance.labels?.[labels.instance];
+      if (!claimedBy)
         throw new ComputeError(
           'INVALID_STATE',
           `${machineId} is not an instance of better-compute; its tags are not touched`,
           undefined,
           { provider: 'gcp', reason: 'notAttached' },
+        );
+      // The VM another instance (re-)claimed carries that instance's tags, not these.
+      if (instanceId !== undefined && claimedBy !== labelValue(instanceId))
+        throw new ComputeError(
+          'INVALID_STATE',
+          `${machineId} belongs to instance ${claimedBy}, not ${instanceId}; its tags are not touched`,
+          undefined,
+          { provider: 'gcp', reason: 'notOwned', claimedBy },
         );
       const current = instance.tags?.items ?? [];
       const items = [

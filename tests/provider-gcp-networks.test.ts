@@ -370,6 +370,30 @@ describe('networks', () => {
     });
   });
 
+  it('setTags with an instance id touches only a VM labelled for that instance (I3)', async () => {
+    const emu = new GceEmulator();
+    // Re-claimed by another instance elsewhere: its tags are that instance's business.
+    const taken = emu.addInstance('us-central1-a', 'vm1', {
+      labels: { 'better-compute-instance': 'ins_other' },
+      tags: { items: ['bc-theirs'] },
+    });
+    const networks = await networksOf(emu);
+    await expect(
+      networks.setTags('us-central1-a/vm1', ['bc-mine'], ctx(), 'ins_1'),
+    ).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      details: { provider: 'gcp', reason: 'notOwned', claimedBy: 'ins_other' },
+    });
+    expect(taken.tags.items).toEqual(['bc-theirs']);
+    expect(emu.requests.some((r) => r.url.pathname.endsWith('/setTags'))).toBe(false);
+    // Its own VM is tagged (the label holds the label form of the id).
+    const own = emu.addInstance('us-central1-a', 'vm2', {
+      labels: { 'better-compute-instance': 'ins_01jzabc' },
+    });
+    await networks.setTags('us-central1-a/vm2', ['bc-mine'], ctx(), 'ins_01JZABC');
+    expect(own.tags.items).toEqual(['bc-mine']);
+  });
+
   it('setTags retries once on a stale fingerprint', async () => {
     const emu = new GceEmulator();
     const vm = emu.addInstance('us-central1-a', 'vm1', {

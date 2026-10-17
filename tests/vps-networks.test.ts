@@ -72,6 +72,12 @@ const gce = {
   subnets: new Map<string, ProviderSubnetSpec>(),
   firewalls: new Map<string, ProviderFirewallSpec>(),
   tags: new Map<string, string[]>(),
+  /** The instance id each setTags named. */
+  tagOwners: new Map<string, string | undefined>(),
+  /** Machines whose ownership label names this instance (absent: whoever asks). */
+  claimedBy: new Map<string, string>(),
+  /** Awaited at the start of every setTags (e.g. to let simulated time pass). */
+  onSetTags: undefined as (() => Promise<void>) | undefined,
   /** What `create` received, in order. */
   creates: [] as { offerId: string; name: string; network?: NetworkRef }[],
   /** Every provider call, in order: `ensureNetwork bc-x`, `deleteFirewall bc-y`, `setTags vm-1`. */
@@ -92,6 +98,9 @@ const gce = {
     this.subnets.clear();
     this.firewalls.clear();
     this.tags.clear();
+    this.tagOwners.clear();
+    this.claimedBy.clear();
+    this.onSetTags = undefined;
     this.creates.length = 0;
     this.calls.length = 0;
     this.operationDelayTicks = 0;
@@ -225,13 +234,19 @@ const gceLike = defineProvider({
           return 'deleted';
         });
       },
-      async setTags(machineId, tags) {
+      async setTags(machineId, tags, _call, instanceId) {
         gce.calls.push(`setTags ${machineId}`);
+        await gce.onSetTags?.();
         if (gce.failNext) {
           const error = gce.failNext;
           gce.failNext = undefined;
           throw error;
         }
+        gce.tagOwners.set(machineId, instanceId);
+        // Like GCE's ownership label: a machine re-claimed by another instance is refused.
+        const owner = gce.claimedBy.get(machineId);
+        if (instanceId !== undefined && owner !== undefined && owner !== instanceId)
+          throw new ComputeError('INVALID_STATE', `${machineId} belongs to instance ${owner}`);
         gce.tags.set(machineId, [...tags]);
       },
     },
@@ -1285,6 +1300,53 @@ describe('reconcile', () => {
     await runKey('all');
     await tick();
     expect(gce.tags.get('vm-gpu-1')).toEqual([networkTag(instanceId)]);
+  });
+
+  it('tags only instances that own their machine, naming the instance (I3)', async () => {
+    const network = await createNetwork();
+    await addSubnet(network.id, { name: 'a', cidr: '10.0.0.0/20' });
+    const setRow = (instanceId: string, sql: string) =>
+      db.query(`UPDATE instances SET ${sql} WHERE id = $1`, [instanceId]);
+    const condition = (type: string) =>
+      `conditions = '${JSON.stringify([{ type, status: 'true', since: 0 }])}'::jsonb`;
+    const created = await insertInstance({ networkId: network.id, externalId: 'vm-created' });
+    const attached = await insertInstance({ networkId: network.id, externalId: 'vm-attached' });
+    await setRow(attached, `origin = 'attached', provider_claimed_at = compute_now()`);
+    // Not taggable: gone or going, unclaimed, or no longer owning the machine.
+    const skipped: Record<string, string> = {};
+    for (const state of ['lost', 'error', 'deleting'])
+      skipped[state] = await insertInstance({
+        networkId: network.id,
+        externalId: `vm-${state}`,
+        state,
+      });
+    const unclaimed = await insertInstance({
+      networkId: network.id,
+      externalId: 'vm-unclaimed',
+      state: 'scheduling',
+    });
+    await setRow(unclaimed, `origin = 'attached'`);
+    for (const type of ['OwnershipLost', 'AttachConflict', 'DuplicateMachine']) {
+      const blocked = await insertInstance({ networkId: network.id, externalId: `vm-${type}` });
+      await setRow(
+        blocked,
+        `origin = 'attached', provider_claimed_at = compute_now(), ${condition(type)}`,
+      );
+    }
+    // Re-claimed elsewhere since: the provider refuses it, which is skipped, not an error.
+    const reclaimed = await insertInstance({ networkId: network.id, externalId: 'vm-reclaimed' });
+    gce.claimedBy.set('vm-reclaimed', 'inst_someone_else');
+    await until(() => settled(network.id));
+
+    expect([...gce.tags.keys()].sort()).toEqual(['vm-attached', 'vm-created']);
+    expect(gce.tags.get('vm-created')).toEqual([networkTag(created)]);
+    expect(gce.tagOwners.get('vm-created')).toBe(created);
+    expect(gce.tagOwners.get('vm-attached')).toBe(attached);
+    expect(gce.tagOwners.get('vm-reclaimed')).toBe(reclaimed);
+    const asked = gce.calls.filter((entry) => entry.startsWith('setTags')).map((e) => e.slice(8));
+    expect(asked.sort()).toEqual(['vm-attached', 'vm-created', 'vm-reclaimed']);
+    expect(await getNetwork(network.id)).toMatchObject({ state: 'ready' });
+    expect((await getNetwork(network.id)).message).toBeUndefined();
   });
 
   it('applies rule updates, subnet removal and rule removal', async () => {
