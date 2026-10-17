@@ -3,6 +3,7 @@ import {
   isComputeError,
   type CallContext,
   type ExternalMachine,
+  type ExternalReservation,
   type ImageRef,
   type NetworkRef,
   type Offer,
@@ -23,6 +24,7 @@ import {
   parseOfferId,
   requestIdFor,
 } from './ids.js';
+import { readReservations } from './reservations.js';
 import {
   gpusOfType,
   regionOf,
@@ -36,6 +38,20 @@ import {
 // Compute Engine VMs as VPS instances: offers from machine types, create (idempotent by requestId),
 // get, delete, power and list. A VM id is `zone/name`. Only VMs carrying the better-compute labels
 // are ever deleted or powered.
+
+/** Whether an offer satisfies the query's resource filters. */
+function matches(query: OfferQuery, offer: Offer): boolean {
+  if (
+    query.gpuModel !== undefined &&
+    offer.gpus?.model.toLowerCase() !== query.gpuModel.toLowerCase()
+  )
+    return false;
+  return (
+    (query.minGpus ?? 0) <= (offer.gpus?.count ?? 0) &&
+    offer.vcpu >= (query.minVcpu ?? 0) &&
+    offer.memoryGiB >= (query.minMemoryGiB ?? 0)
+  );
+}
 
 const acceleratorFamily = /^(a2|a3|a4|g2)-/;
 const instanceWaitMs = 20_000;
@@ -124,15 +140,7 @@ export class GcpCompute implements ProviderImpl {
         if (type.deprecated?.state && type.deprecated.state !== 'ACTIVE') continue;
         this.#types.set(`${zone}/${type.name}`, { ...type, zone });
         const gpus = gpusOfType(type);
-        if (
-          query.gpuModel !== undefined &&
-          gpus?.model.toLowerCase() !== query.gpuModel.toLowerCase()
-        )
-          continue;
-        if ((query.minGpus ?? 0) > (gpus?.count ?? 0)) continue;
-        if (type.guestCpus < (query.minVcpu ?? 0)) continue;
-        if (type.memoryMb / 1024 < (query.minMemoryGiB ?? 0)) continue;
-        offers.push({
+        const offer: Offer = {
           id: offerId(zone, type.name),
           kind: 'vps',
           region: regionOf(zone),
@@ -140,10 +148,47 @@ export class GcpCompute implements ProviderImpl {
           memoryGiB: type.memoryMb / 1024,
           ...(gpus ? { gpus } : {}),
           available: true,
-        });
+        };
+        if (matches(query, offer)) offers.push(offer);
       }
     }
+    // Capacity held by ready reservations is offered too, available while any of it is unused.
+    let reservations: ExternalReservation[] = [];
+    try {
+      reservations = await this.listReservations();
+    } catch (error) {
+      // Without permission to read reservations the on-demand offers still stand.
+      if (!isComputeError(error, 'ACCESS_DENIED')) throw error;
+      this.context.log.warn('gcp.reservations_unreadable', { reason: 'ACCESS_DENIED' });
+    }
+    for (const reservation of reservations) {
+      if (reservation.state !== 'ready' || reservation.vcpu <= 0 || reservation.memoryGiB <= 0)
+        continue;
+      if (!zones.includes(reservation.zone)) continue;
+      const offer: Offer = {
+        id: reservation.offerId,
+        kind: 'vps',
+        region: reservation.region,
+        vcpu: reservation.vcpu,
+        memoryGiB: reservation.memoryGiB,
+        ...(reservation.gpus ? { gpus: reservation.gpus } : {}),
+        available: reservation.total - reservation.inUse > 0,
+      };
+      if (matches(query, offer)) offers.push(offer);
+    }
     return offers.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  }
+
+  async listReservations(context?: CallContext): Promise<ExternalReservation[]> {
+    return readReservations(
+      {
+        client: this.client,
+        projectId: this.config.projectId,
+        zones: this.config.zones,
+        machineType: (zone, name, signal) => this.machineType(zone, name, signal),
+      },
+      context?.signal ?? new AbortController().signal,
+    );
   }
 
   // ------------------------------------------------------------------------------- create

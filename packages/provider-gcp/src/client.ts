@@ -12,6 +12,7 @@ import type { TokenSource } from './auth.js';
 // ComputeError codes and always carry `details: { provider: 'gcp', status, reason }`.
 
 export interface GceClient {
+  /** `path` is relative to the project, or starts with `/projects/<project>/` to name another. */
   request<T>(
     method: 'GET' | 'POST' | 'DELETE' | 'PATCH',
     path: string,
@@ -121,7 +122,8 @@ export function gceClient(options: GceClientOptions): GceClient {
     opts: { body?: unknown; query?: Record<string, string>; signal: AbortSignal },
   ): Promise<T> {
     const token = await options.tokens.token({ signal: opts.signal, clock });
-    const url = new URL(`${base}${path}`);
+    // A path that starts with /projects/ names another project (a shared template, say).
+    const url = new URL(path.startsWith('/projects/') ? `${endpoint}${path}` : `${base}${path}`);
     for (const [key, value] of Object.entries(opts.query ?? {})) url.searchParams.set(key, value);
     const what = `${method} ${path}`;
     let response: Response;
