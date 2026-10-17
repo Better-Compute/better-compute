@@ -266,6 +266,88 @@ describe('platform-issued compute on a real better-iam', () => {
     ).toBe('allowed');
   });
 
+  it('an owner must be an active identity of the tenant (R2), and only a root administrator issues (ROOT_OVERRIDE)', async () => {
+    // R2: better-iam says who belongs to Acme; Other's administrator does not.
+    expect(t.port.isMember).toBeTypeOf('function');
+    expect(await t.port.isMember!(A, op.identityId)).toBe(true);
+    expect(await t.port.isMember!(A, bAdmin.identityId)).toBe(false);
+    expect(
+      await outcome(
+        api.instances.create(
+          root,
+          createInput(A, { ownerIdentityId: bAdmin.identityId, idempotencyKey: 'for-outsider' }),
+        ),
+      ),
+    ).toBe('INVALID_INPUT');
+    expect(
+      await outcome(
+        api.instances.attach(root, {
+          tenantId: A,
+          poolId,
+          externalId: `${ZONE}/spare`,
+          ownerIdentityId: bAdmin.identityId,
+          idempotencyKey: 'spare-for-outsider',
+        }),
+      ),
+    ).toBe('INVALID_INPUT');
+
+    // A member of the root tenant holding compute:* there, but neither root administrator nor MFA:
+    // its calls into Acme are decided in Acme, where it holds nothing.
+    const member = await t.iam.api.identities.create(root, {
+      tenantId: R,
+      email: 'operator@root.test',
+      name: 'Operator',
+      password: 'a strong root operator password',
+    });
+    const policy = await t.iam.api.policies.create(root, {
+      tenantId: R,
+      name: 'root-compute-everything',
+      document: everything,
+    });
+    const role = await t.iam.api.roles.create(root, {
+      tenantId: R,
+      name: 'root-compute-everything',
+      policyIds: [policy.id],
+    });
+    await t.iam.api.bindings.create(root, {
+      tenantId: R,
+      roleId: role.id,
+      subjectType: 'identity',
+      subjectId: member.id,
+    });
+    const signedIn = await t.iam.api.auth.signIn({
+      tenantId: R,
+      email: 'operator@root.test',
+      password: 'a strong root operator password',
+    });
+    if (!('token' in signedIn)) throw new Error('Unexpected MFA for a root member');
+    const rootMember: Credential = { token: signedIn.token };
+    expect(await t.port.authenticate(rootMember)).toMatchObject({ tenantId: R, mfa: false });
+    expect(
+      await outcome(
+        api.instances.create(
+          rootMember,
+          createInput(A, { ownerIdentityId: op.identityId, idempotencyKey: 'member-issues' }),
+        ),
+      ),
+    ).toBe('ACCESS_DENIED');
+    expect(
+      await outcome(
+        api.instances.attach(rootMember, {
+          tenantId: A,
+          poolId,
+          externalId: `${ZONE}/spare`,
+          ownerIdentityId: op.identityId,
+          idempotencyKey: 'member-attaches',
+        }),
+      ),
+    ).toBe('ACCESS_DENIED');
+    // In its own tenant its grant holds.
+    expect(
+      await outcome(api.providerAccounts.machines(rootMember, { tenantId: R, accountId })),
+    ).toBe('allowed');
+  });
+
   it('Acme, with compute:* in its own tenant, reaches nothing of the root tenant', async () => {
     const who = admin.credential;
     const calls = (tenantId: string): Record<string, () => Promise<unknown>> => ({

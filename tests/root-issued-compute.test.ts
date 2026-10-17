@@ -65,13 +65,22 @@ interface Platform {
 }
 
 /** The platform: a root GCP account backing a provider pool offered to A and to B. */
-async function platform(): Promise<Platform> {
+async function platform(
+  options: { secrets?: { resolve(ref: string): Promise<string> } } = {},
+): Promise<Platform> {
   const emu = new GceEmulator();
   emu.validTokens.add('host-token');
   const gcp = gcpProvider({ fetch: emu.fetch, tokenSource: { token: async () => 'host-token' } });
   const fixture = await computeFixture({
     clock: 'sim',
-    modules: [vps({ providers: [gcp], discovery: { every: '1m' }, reservations: { every: '1m' } })],
+    modules: [
+      vps({
+        providers: [gcp],
+        discovery: { every: '1m' },
+        reservations: { every: '1m' },
+        ...(options.secrets ? { secrets: options.secrets as never } : {}),
+      }),
+    ],
   });
   const { compute, tenants, iam } = fixture;
   const R = tenants.root.id;
@@ -79,6 +88,8 @@ async function platform(): Promise<Platform> {
   const B = tenants.other.id;
   (iam as { rootTenantId?: string }).rootTenantId = R;
   iam.addCaller('token-acme-admin', { tenantId: A, identityId: 'identity-acme-admin' });
+  // A member of A holding no grant at all.
+  iam.addCaller('token-acme-nobody', { tenantId: A, identityId: 'identity-acme-nobody' });
   iam.allow({ token: tenants.root.token });
   for (const action of operatorActions)
     iam.allow({ token: tenants.acme.token, tenantId: A, action });
@@ -386,6 +397,8 @@ describe('platform-issued compute, end to end', () => {
 interface World extends Platform {
   legacy: string;
   issued: string;
+  /** Issued by root to A's operator (G1). */
+  g1: string;
   aNet: { id: string; subnetId: string; ruleId: string; instanceId: string };
   bNet: string;
   bVm: string;
@@ -415,6 +428,10 @@ async function isolationWorld(): Promise<World> {
     idempotencyKey: 'attach-legacy',
   });
   const issued = await api.instances.create(root, createInput(p, A, { idempotencyKey: 'issued' }));
+  const g1 = await api.instances.create(
+    root,
+    createInput(p, A, { ownerIdentityId: p.aOpId, idempotencyKey: 'g1' }),
+  );
   // A's network, subnet, instance on it and a rule targeting that instance.
   const network = await api.networks.create(aOp, {
     tenantId: A,
@@ -447,6 +464,7 @@ async function isolationWorld(): Promise<World> {
   for (const [tenantId, instanceId] of [
     [A, legacy.id],
     [A, issued.id],
+    [A, g1.id],
     [A, onNetwork.id],
     [B, bVm.id],
   ] as const)
@@ -471,6 +489,7 @@ async function isolationWorld(): Promise<World> {
     ...p,
     legacy: legacy.id,
     issued: issued.id,
+    g1: g1.id,
     aNet: { id: network.id, subnetId, ruleId: rule.id, instanceId: onNetwork.id },
     bNet: bNet.id,
     bVm: bVm.id,
@@ -541,7 +560,7 @@ describe('isolation between tenants, and between tenants and the root tenant', (
       };
     };
     const results: Record<string, unknown> = {};
-    for (const instanceId of [w.legacy, w.issued, w.aNet.instanceId]) {
+    for (const instanceId of [w.legacy, w.issued, w.g1, w.aNet.instanceId]) {
       // In its own tenant B finds nothing (NOT_FOUND, as for an id that does not exist) …
       for (const [method, call] of Object.entries(instanceCalls(B, instanceId)))
         results[`instances.${method} ${instanceId} in B`] = (await traced(call)).code;
@@ -624,12 +643,44 @@ describe('isolation between tenants, and between tenants and the root tenant', (
           diskGiB: 100,
           offerId: `${ZONE}/n2-standard-96`,
         }),
+      'flavors.update': () =>
+        api.flavors.update(who, {
+          tenantId,
+          poolId: w.poolId,
+          name: 'n2.standard.4',
+          vcpu: 96,
+          memoryGiB: 384,
+          diskGiB: 100,
+          offerId: `${ZONE}/n2-standard-96`,
+        }),
+      'flavors.delete': () =>
+        api.flavors.delete(who, { tenantId, poolId: w.poolId, name: 'n2.standard.4' }),
+      'pools.archive': () => api.pools.archive(who, { tenantId, poolId: w.poolId }),
+      'providerAccounts.offers': () =>
+        api.providerAccounts.offers(who, { tenantId, accountId: w.accountId }),
+      'providerAccounts.bootstrap': () =>
+        api.providerAccounts.bootstrap(who, {
+          tenantId,
+          accountId: w.accountId,
+          poolId: w.poolId,
+          offerId: 'n2-standard-4',
+          idempotencyKey: 'a-bootstrap',
+        }),
     });
     // In its own tenant compute finds none of the root's resources (NOT_FOUND) …
     const inA: Record<string, string> = {};
     for (const [method, call] of Object.entries(account(w.aAdmin, A)))
       inA[method] = (await traced(call)).code;
-    expect(inA).toEqual(Object.fromEntries(Object.keys(inA).map((key) => [key, 'NOT_FOUND'])));
+    expect(inA).toEqual(
+      Object.fromEntries(
+        Object.keys(inA).map((key) => [
+          key,
+          // This deployment has no vps({ bootstrap }), which is refused first (the account is
+          // then read by (id, tenantId) as everywhere else: bootstraps.ts clientFor).
+          key === 'providerAccounts.bootstrap' ? 'INVALID_CONFIG' : 'NOT_FOUND',
+        ]),
+      ),
+    );
     // … and naming the root tenant is refused before any decision.
     const inRoot: Record<string, unknown> = {};
     for (const [method, call] of Object.entries(account(w.aAdmin, R)))
@@ -678,9 +729,21 @@ describe('isolation between tenants, and between tenants and the root tenant', (
       code: 'ACCESS_DENIED',
       decided: false,
     });
-    // A still sees the pool it is offered, and its flavors, but nothing of B's offer.
-    expect(await outcome(api.pools.get(w.aAdmin, { tenantId: A, poolId: w.poolId }))).toBe(
-      'allowed',
+    // A still sees the pool it is offered, and its flavors, but nothing of B's offer, and not the
+    // provider account behind it (R1).
+    const seen = await api.pools.get(w.aAdmin, { tenantId: A, poolId: w.poolId });
+    expect(seen).toMatchObject({ id: w.poolId, owned: false });
+    expect(seen.providerAccountId).toBeUndefined();
+    expect(seen.quotas.length).toBeGreaterThan(0);
+    expect(seen.quotas.every((quota: { tenantId: string }) => quota.tenantId === A)).toBe(true);
+    expect(JSON.stringify(seen)).not.toContain(B);
+    const listed = (await api.pools.list(w.aAdmin, { tenantId: A })).items;
+    expect(listed.map((pool: { id: string }) => pool.id)).toEqual([w.poolId]);
+    expect(listed[0].providerAccountId).toBeUndefined();
+    expect(JSON.stringify(listed)).not.toContain(B);
+    // The owner still sees its account.
+    expect((await api.pools.get(w.root, { tenantId: R, poolId: w.poolId })).providerAccountId).toBe(
+      w.accountId,
     );
     const flavors = await api.flavors.list(w.aOp, { tenantId: A, poolId: w.poolId });
     expect(flavors.items.map((flavor: { name: string }) => flavor.name).sort()).toEqual([
@@ -833,6 +896,102 @@ describe('isolation between tenants, and between tenants and the root tenant', (
     await api.instances.delete(aAdmin, { tenantId: A, instanceId: own.id });
   });
 
+  it('a member of A without grants is refused A’s networks, rules and instances', async () => {
+    const { api, A } = w;
+    const nobody = { token: 'token-acme-nobody' };
+    const net = { tenantId: A, networkId: w.aNet.id };
+    const calls: Record<string, () => Promise<unknown>> = {
+      'networks.list': () => api.networks.list(nobody, { tenantId: A }),
+      'networks.get': () => api.networks.get(nobody, net),
+      'networks.create': () =>
+        api.networks.create(nobody, {
+          tenantId: A,
+          poolId: w.poolId,
+          name: 'mine',
+          idempotencyKey: 'nobody-net',
+        }),
+      'networks.update': () => api.networks.update(nobody, { ...net, description: 'x' }),
+      'networks.delete': () => api.networks.delete(nobody, net),
+      'networks.addSubnet': () =>
+        api.networks.addSubnet(nobody, { ...net, name: 'x', region: REGION, cidr: '10.98.0.0/24' }),
+      'networks.removeSubnet': () =>
+        api.networks.removeSubnet(nobody, { ...net, subnetId: w.aNet.subnetId }),
+      'firewallRules.list': () => api.firewallRules.list(nobody, net),
+      'firewallRules.create': () =>
+        api.firewallRules.create(nobody, {
+          ...net,
+          name: 'x',
+          direction: 'ingress',
+          rules: [{ protocol: 'tcp', ports: ['22'] }],
+          sources: ['0.0.0.0/0'],
+        }),
+      'firewallRules.update': () =>
+        api.firewallRules.update(nobody, { ...net, ruleId: w.aNet.ruleId, enabled: false }),
+      'firewallRules.delete': () =>
+        api.firewallRules.delete(nobody, { ...net, ruleId: w.aNet.ruleId }),
+      'instances.reboot': () => api.instances.reboot(nobody, { tenantId: A, instanceId: w.g1 }),
+      'instances.detach': () => api.instances.detach(nobody, { tenantId: A, instanceId: w.legacy }),
+      'instances.delete': () => api.instances.delete(nobody, { tenantId: A, instanceId: w.g1 }),
+      'instances.get': () => api.instances.get(nobody, { tenantId: A, instanceId: w.g1 }),
+    };
+    const results: Record<string, unknown> = {};
+    for (const [method, call] of Object.entries(calls)) results[method] = await traced(call);
+    expect(results).toEqual(
+      Object.fromEntries(
+        Object.keys(calls).map((key) => [key, { code: 'ACCESS_DENIED', decided: true }]),
+      ),
+    );
+  });
+
+  it('an owner other than the caller must be a member of the tenant when IAM can say (R2)', async () => {
+    const { api, root, A } = w;
+    const iam = w.fixture.iam as {
+      isMember?: (tenantId: string, identityId: string) => Promise<boolean>;
+    };
+    const asked: string[] = [];
+    iam.isMember = async (tenantId, identityId) => {
+      asked.push(`${tenantId}/${identityId}`);
+      return tenantId === A && identityId === w.aOpId;
+    };
+    try {
+      expect(
+        await outcome(
+          api.instances.create(
+            root,
+            createInput(w, A, { ownerIdentityId: 'identity-other', idempotencyKey: 'outsider' }),
+          ),
+        ),
+      ).toBe('INVALID_INPUT');
+      expect(
+        await outcome(
+          api.instances.attach(root, {
+            tenantId: A,
+            poolId: w.poolId,
+            externalId: `${ZONE}/spare`,
+            ownerIdentityId: 'identity-other',
+            idempotencyKey: 'outsider-attach',
+          }),
+        ),
+      ).toBe('INVALID_INPUT');
+      const member = await api.instances.create(
+        root,
+        createInput(w, A, { ownerIdentityId: w.aOpId, idempotencyKey: 'member' }),
+      );
+      expect(member.ownerIdentityId).toBe(w.aOpId);
+      expect(asked).toEqual([`${A}/identity-other`, `${A}/identity-other`, `${A}/${w.aOpId}`]);
+      await api.instances.delete(root, { tenantId: A, instanceId: member.id });
+      // Neither refusal left an instance behind; the spare machine is still free.
+      const listed = await api.instances.list(root, { tenantId: A, scope: 'all' });
+      expect(
+        listed.items.filter(
+          (item: { ownerIdentityId: string }) => item.ownerIdentityId === 'identity-other',
+        ),
+      ).toEqual([]);
+    } finally {
+      delete iam.isMember;
+    }
+  });
+
   it('nothing refused above changed A’s resources', async () => {
     const { api, aOp, root, A, R } = w;
     expect(await api.instances.get(aOp, { tenantId: A, instanceId: w.legacy })).toMatchObject({
@@ -841,7 +1000,7 @@ describe('isolation between tenants, and between tenants and the root tenant', (
       origin: 'attached',
       ownerIdentityId: w.aOpId,
     });
-    for (const instanceId of [w.issued, w.aNet.instanceId])
+    for (const instanceId of [w.issued, w.g1, w.aNet.instanceId])
       expect(await api.instances.get(aOp, { tenantId: A, instanceId })).toMatchObject({
         state: 'running',
         desiredState: 'running',
@@ -1170,5 +1329,238 @@ describe('isolation between tenants, and between tenants and the root tenant', (
       .map((row) => `${row.group}.${row.method}`);
     expect(added.length).toBeGreaterThanOrEqual(18);
     expect(added.filter((path) => !steps.some((step) => step.path === path))).toEqual([]);
+  });
+});
+
+/** Runs the instances reconciler a few rounds, letting GCE operations finish in between. */
+async function drive(p: Platform, rounds = 4): Promise<void> {
+  for (let round = 0; round < rounds; round++) {
+    p.emu.finishOperations();
+    await p.tick('vps.instances', 5_000);
+  }
+}
+
+describe('a pool never drives another tenant’s provider account (R1)', () => {
+  afterEach(closeFixtures);
+
+  it('A cannot build a provider pool on the root account; one that exists anyway drives nothing', async () => {
+    const p = await platform();
+    const { api, root, aAdmin, aOp, A, R } = p;
+    const ghost = `pacct_${'0'.repeat(26)}`;
+    p.emu.reservations.push(reservationA);
+    await p.tick('vps.reservations', 60_000);
+    const free = async () =>
+      (await api.providerAccounts.reservations(root, { tenantId: R, accountId: p.accountId }))
+        .items[0].free;
+    expect(await free()).toBe(2);
+
+    // The probe's flow: a site of A's own, then a provider pool on the root account.
+    const site = await api.sites.create(aAdmin, {
+      tenantId: A,
+      kind: 'custom',
+      region: REGION,
+      idempotencyKey: 'a-site',
+    });
+    const poolOn = (providerAccountId: string, key: string) =>
+      refusal(
+        api.pools.create(aAdmin, {
+          tenantId: A,
+          siteId: site.id,
+          class: 'provider',
+          providerAccountId,
+          idempotencyKey: key,
+          ownerQuota: { vcpu: 1000, memoryGiB: 10_000, diskGiB: 10_000, gpu: 64 },
+        }),
+      );
+    const onRoot = await poolOn(p.accountId, 'on-root');
+    const onGhost = await poolOn(ghost, 'on-ghost');
+    expect(onRoot.code).toBe('NOT_FOUND');
+    // Worded as for an account that does not exist: nothing says the root's exists.
+    expect(onRoot.message!.replace(p.accountId, '<id>')).toBe(
+      onGhost.message!.replace(ghost, '<id>'),
+    );
+    expect((await api.pools.list(aAdmin, { tenantId: A })).items).toEqual([
+      expect.objectContaining({ id: p.poolId, owned: false }),
+    ]);
+
+    // Defence in depth: a pool row of A on the root account that got in anyway.
+    const foreign = 'pool_0000000000000000000000f0r1';
+    await p.fixture.database.query(
+      `INSERT INTO pools (id, owner_tenant_id, site_id, class, sharing, agent, policy,
+                          provider_account_id, version)
+       VALUES ($1, $2, $3, 'provider', 'exclusive', 'none', '{}', $4, 1)`,
+      [foreign, A, site.id, p.accountId],
+    );
+    await api.quotas.set(root, { tenantId: A, poolId: foreign, resource: 'vcpu', max: 1000 });
+    await p.fixture.database.query(
+      `INSERT INTO flavors (id, pool_id, name, vcpu, memory_gib, disk_gib, gpus, offer_id, version)
+       VALUES ('flv_0000000000000000000000f0r1', $1, 'stolen', 4, 16, 100, 0, $2, 1)`,
+      [foreign, `${ZONE}/a3-highgpu-8g@rsv-a`],
+    );
+    const requests = p.emu.requests.length;
+    const flavor = (name: string) => ({
+      tenantId: A,
+      poolId: foreign,
+      name,
+      vcpu: 4,
+      memoryGiB: 16,
+      diskGiB: 100,
+      offerId: `${ZONE}/n2-standard-4`,
+    });
+    expect(await outcome(api.flavors.create(aAdmin, flavor('big')))).toBe('INVALID_STATE');
+    expect(await outcome(api.flavors.update(aAdmin, flavor('stolen')))).toBe('INVALID_STATE');
+    const onForeign = (who: Who, key: string) =>
+      outcome(
+        api.instances.create(
+          who,
+          createInput(p, A, { poolId: foreign, flavor: 'stolen', idempotencyKey: key }),
+        ),
+      );
+    expect(await onForeign(aAdmin, 'stolen')).toBe('INVALID_STATE');
+    // Not even the platform drives the root account through A's pool.
+    expect(await onForeign(root, 'root-stolen')).toBe('INVALID_STATE');
+    expect(
+      await outcome(
+        api.networks.create(aAdmin, {
+          tenantId: A,
+          poolId: foreign,
+          name: 'stolen',
+          idempotencyKey: 'stolen-net',
+        }),
+      ),
+    ).toBe('UNSUPPORTED');
+    expect(
+      await outcome(
+        api.providerAccounts.bindReservation(aAdmin, {
+          tenantId: A,
+          accountId: p.accountId,
+          reservationId: `${ZONE}/rsv-a`,
+          poolId: foreign,
+          idempotencyKey: 'stolen-bind',
+        }),
+      ),
+    ).toBe('NOT_FOUND');
+
+    // The reconciler: an instance moved onto the foreign pool is never created at the provider.
+    const moved = await api.instances.create(aOp, createInput(p, A, { idempotencyKey: 'moved' }));
+    await p.fixture.database.query(`UPDATE instances SET pool_id = $2 WHERE id = $1`, [
+      moved.id,
+      foreign,
+    ]);
+    await drive(p);
+    expect(vmOf(p, moved.id)).toBeUndefined();
+    expect(p.emu.requests.slice(requests).some((request) => request.method === 'POST')).toBe(false);
+    expect(await free()).toBe(2);
+    expect(p.emu.networks.size).toBe(0);
+
+    // The offered root pool still works for A.
+    const offered = await api.instances.create(aOp, createInput(p, A, { idempotencyKey: 'ok' }));
+    expect(await p.settle(A, offered.id, 'running')).toMatchObject({ state: 'running' });
+  });
+
+  it('a tenant’s own account: attach owners are its own, and machines hide other tenants’ instances (R3)', async () => {
+    const { generateKeyPairSync } = await import('node:crypto');
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const keyJson = JSON.stringify({
+      type: 'service_account',
+      client_email: 'sa@a-project.iam.gserviceaccount.com',
+      private_key: privateKey.export({ type: 'pkcs8', format: 'pem' }),
+      token_uri: 'https://oauth2.googleapis.com/token',
+    });
+    const p = await platform({ secrets: { resolve: async () => keyJson } });
+    const { api, root, aAdmin, b, A, B } = p;
+    // A's own GCP account (its own key), a pool on it, offered to B.
+    const account = await api.providerAccounts.create(aAdmin, {
+      tenantId: A,
+      provider: 'gcp',
+      name: 'a-gcp',
+      config: {
+        projectId: 'a-project',
+        zones: [ZONE],
+        credentials: 'secret://tenant-acme/gcp-key',
+      },
+    });
+    const site = await api.sites.create(aAdmin, {
+      tenantId: A,
+      kind: 'custom',
+      region: REGION,
+      idempotencyKey: 'a-site',
+    });
+    const pool = await api.pools.create(aAdmin, {
+      tenantId: A,
+      siteId: site.id,
+      class: 'provider',
+      providerAccountId: account.id,
+      idempotencyKey: 'a-pool',
+      ownerQuota: { vcpu: 100, memoryGiB: 1000, diskGiB: 1000, gpu: 0 },
+    });
+    await api.flavors.create(aAdmin, {
+      tenantId: A,
+      poolId: pool.id,
+      name: 'n2.standard.4',
+      vcpu: 4,
+      memoryGiB: 16,
+      diskGiB: 100,
+      offerId: `${ZONE}/n2-standard-4`,
+    });
+    await api.pools.offer(aAdmin, {
+      tenantId: A,
+      poolId: pool.id,
+      toTenantId: B,
+      quota: { vcpu: 100, memoryGiB: 1000, diskGiB: 1000, gpu: 0 },
+    });
+
+    // A attaches a VM of its own project: as itself, never for someone else (R3).
+    p.emu.addInstance(ZONE, 'a-vm');
+    await api.providerAccounts.discover(aAdmin, { tenantId: A, accountId: account.id });
+    await p.tick('vps.discovery', 60_000);
+    const attach = (ownerIdentityId: string | undefined, key: string) =>
+      api.instances.attach(aAdmin, {
+        tenantId: A,
+        poolId: pool.id,
+        externalId: `${ZONE}/a-vm`,
+        ...(ownerIdentityId ? { ownerIdentityId } : {}),
+        idempotencyKey: key,
+      });
+    expect(await outcome(attach(p.aOpId, 'for-op'))).toBe('ACCESS_DENIED');
+    expect(await outcome(attach('identity-other', 'for-b'))).toBe('ACCESS_DENIED');
+    const mine = await attach(undefined, 'mine');
+    expect(mine).toMatchObject({ tenantId: A, ownerIdentityId: 'identity-acme-admin' });
+
+    // B creates on A's offered pool: the machine is in A's project, the instance is B's.
+    const bVm = await api.instances.create(
+      b,
+      createInput(p, B, { poolId: pool.id, idempotencyKey: 'b-on-a' }),
+    );
+    expect(await p.settle(B, bVm.id, 'running')).toMatchObject({ state: 'running' });
+    await api.providerAccounts.discover(aAdmin, { tenantId: A, accountId: account.id });
+    await p.tick('vps.discovery', 60_000);
+    const machines = await api.providerAccounts.machines(aAdmin, {
+      tenantId: A,
+      accountId: account.id,
+      filter: 'all',
+    });
+    expect(machines.items).toHaveLength(2);
+    const own = machines.items.find((machine: { externalId: string }) =>
+      machine.externalId.endsWith('/a-vm'),
+    );
+    const others = machines.items.find(
+      (machine: { externalId: string }) => !machine.externalId.endsWith('/a-vm'),
+    );
+    expect(own).toMatchObject({ instanceId: mine.id, tenantId: A });
+    expect(others.instanceId).toBeUndefined();
+    expect(others.tenantId).toBeUndefined();
+    // Nothing names B. (The VM's own name and ownership label, which A sees in its own GCP project
+    // anyway, still carry the instance id vps gave it.)
+    expect(JSON.stringify(machines)).not.toContain(B);
+    // The platform sees who holds each.
+    const seen = await api.providerAccounts.machines(root, {
+      tenantId: A,
+      accountId: account.id,
+      filter: 'attached',
+    });
+    expect(seen.items.map((machine: { tenantId?: string }) => machine.tenantId).sort()).toEqual(
+      [A, B].sort(),
+    );
   });
 });
