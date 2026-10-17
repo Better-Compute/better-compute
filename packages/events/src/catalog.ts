@@ -190,6 +190,13 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
       'A sandbox snapshot settled: ready { snapshotId, includeMemory, sha256, sizeBytes } or failed { snapshotId, reason }',
   },
   {
+    type: 'network.*',
+    subject: 'network/{id}',
+    module: 'vps',
+    description:
+      'Tenant networks (VPCs): created, ready, error, deleting, deleted; network.subnet.ready and network.rule.ready/error when a subnet or firewall rule converges; data { networkId, ... }',
+  },
+  {
     type: 'fleet.*',
     subject: 'fleet/{id}',
     module: 'fleet',

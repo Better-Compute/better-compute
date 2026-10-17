@@ -71,6 +71,8 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
         ...action('images', 'read', 'publish'),
         ...action('providers', 'read', 'manage'),
         ...action('sandboxes', 'read', 'manage'),
+        // v1.0 tenant networks: `networks.list` is gated on the tenant.
+        ...action('networks', 'read'),
         // §13 destructive-batch quorum (v1.0).
         ...action('batches', 'read', 'create', 'approve'),
       ],
@@ -182,6 +184,11 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
       parent: `${p}pool`,
       actions: action('sandboxes', 'read', 'manage'),
       attributes: { sizeGiB: 'number' },
+    },
+    [`${p}network`]: {
+      parent: `${p}tenant`,
+      actions: action('networks', 'create', 'read', 'update', 'delete'),
+      attributes: { providerAccountId: 'string', poolId: 'string', projectId: 'string' },
     },
   };
 }
