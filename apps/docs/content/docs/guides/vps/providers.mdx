@@ -196,20 +196,33 @@ were given. The account, its credentials, the pool and its quotas stay the platf
 | Who | Can | Cannot |
 |---|---|---|
 | Root (root realm, root administrator, user session with MFA: `ROOT_OVERRIDE`) | Everything above, in any tenant, decided in the tenant that holds the resource | Bypass state rules (an account still in use is `INVALID_STATE`) |
-| A customer tenant, with grants in its own tenant | `instances:*` on its instances, `networks:*` on its networks, its own provider accounts (with their own key), attach and reservations on those | Read or change a root account (`get`, `machines`, `discover`, `reservations`, `bindReservation`, `unbindReservation`, `update`, `delete`); attach from a root account; change the root pool, its offers or flavors; set quotas; name another `ownerIdentityId` on `instances.create` |
+| A customer tenant, with grants in its own tenant | `instances:*` on its instances, `networks:*` on its networks, its own provider accounts (with their own key), pools on those, attach and reservations on them | Read or change a root account (`get`, `offers`, `machines`, `discover`, `reservations`, `bindReservation`, `unbindReservation`, `bootstrap`, `update`, `delete`); build a pool on an account that is not its own; attach from a root account; change the root pool, its offers or flavors; set quotas; make anyone but itself the owner of an instance (`ownerIdentityId` on `create` or `attach`) |
 | Another customer tenant | The same, for its own resources | See or act on the first tenant's instances, networks and rules; target them in its rules; put instances on its networks |
 
-Root-only is enforced by compute itself, not only by IAM: a tenant holding `compute:*` in its own tenant still
-reaches no root-level resource.
+IAM is the first gate: a tenant's grants are decided in its own tenant, on resources compute projects there. Compute
+then holds these rules itself, so a tenant holding `compute:*` in its own tenant still cannot use them to reach
+root-level resources or another tenant's:
 
-- Every handler reads by `(id, tenantId)`: a root account, the root pool's management and another tenant's
-  instances or networks are `NOT_FOUND` in the caller's own tenant.
 - Naming another tenant's `tenantId`, the root tenant's included, is `ACCESS_DENIED` by the envelope before any IAM
   decision or database read. `quotas.set` is decided on the fleet, in the root tenant.
-- `instances.attach` from an account the caller's tenant does not own is the platform's only (`ACCESS_DENIED`), as is
-  `instances.create` with an `ownerIdentityId` other than the caller's (and only into another tenant).
+- Handlers read by `(id, tenantId)`: a root account, the management of the root pool (`pools.update`, `offer`,
+  `unoffer`, `archive`, flavors) and another tenant's instances or networks are `NOT_FOUND` in the caller's own
+  tenant.
+- A provider pool runs only on an account of its own (owner) tenant: `pools.create` refuses another tenant's
+  account as `NOT_FOUND`, worded as for an unknown one, and vps uses a pool's account only when the pool's owner
+  owns it (instance creates and the provider reconciler, flavors, networks, reservation bindings). A pool offered to
+  other tenants keeps working for them; they are not shown its `providerAccountId`.
+- `instances.attach` from an account the caller's tenant does not own is the platform's only (`ACCESS_DENIED`).
+  Only a root caller acting in another tenant makes anyone but itself the owner (`ownerIdentityId` on `create` and
+  `attach`); when the IAM port can say (`IamPort.isMember`: the embedded better-iam bridge), the owner must be an
+  active identity of that tenant (`INVALID_INPUT` otherwise). Ports without it check the id's shape only.
 - A firewall rule's targets and an instance's `networkId` must be the tenant's own. Another tenant's are
   `INVALID_INPUT`, worded as for ones that do not exist.
+- `providerAccounts.machines` on a tenant's own account does not name the instance or tenant holding a machine
+  when that is another tenant (its pool was offered to it); the platform sees both.
+
+Not covered here: what a tenant may do in its own GCP project through its own key, and the platform's own operators,
+who act with `ROOT_OVERRIDE` everywhere.
 
 The IAM actions split the same way. Root-only by policy: `compute:providers:*` on root accounts,
 `compute:instances:attach` from root accounts, `compute:quotas:manage`, and `compute:pools:share` and

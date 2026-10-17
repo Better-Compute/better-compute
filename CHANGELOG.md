@@ -23,7 +23,11 @@ All notable changes to the better-compute packages are documented here. The form
   `instances.reboot` restarts a provider instance (graceful, or `hard`). Ownership is re-checked on every read: a
   VM whose label is lost or foreign fails its instance (`OwnershipLost`, `AttachConflict`) and is never acted on
   again. Opt-in label-driven auto-attach (`discovery.autoAttach`). `instances.create` takes `ownerIdentityId` from
-  the platform (a root caller creating in another tenant), so a VM it issues to a customer is the customer's.
+  the platform (a root caller creating in another tenant), so a VM it issues to a customer is the customer's;
+  `attach` takes another owner on the same terms, and with `IamPort.isMember` (new, optional; the embedded bridge
+  implements it) the owner must be an active member of the tenant. A provider pool runs only on an account of its
+  own tenant (`pools.create` refuses another's as `NOT_FOUND`), and offered tenants no longer see its
+  `providerAccountId`.
 - **Provider reservations.** The `vps.reservations` worker detects provider capacity reservations, on-demand and
   future (`vps({ reservations: { every } })`, default 5 minutes), and publishes `provider.reservation.*`.
   `providerAccounts.reservations` lists them with `free` and `pending`; `bindReservation` turns a `ready` one into
