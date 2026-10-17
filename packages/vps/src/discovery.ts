@@ -2,8 +2,10 @@ import {
   ComputeError,
   isComputeError,
   parseDuration,
+  strictObject,
   type CallContext,
   type Duration,
+  type InputSchema,
   type ExternalMachine,
   type Json,
   type Migration,
@@ -14,7 +16,7 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { readAccount, type ProviderAccount } from './accounts.js';
-import { canonical } from './input.js';
+import { canonical, fail, id, int, object, optional, tenant } from './input.js';
 import { instanceWork, type InstanceDeps } from './instances.js';
 
 // Provider machines (R5, D8): the `vps.discovery` worker lists every machine each provider account
@@ -381,3 +383,269 @@ export function discoveryReconciler(
     },
   };
 }
+
+// --- API: providerAccounts.machines and providerAccounts.discover ---------------------------------
+
+export interface ListMachinesInput {
+  tenantId: string;
+  accountId: string;
+  /** `free` (default): not attached; `attached`: attached or created by better-compute; `all`. */
+  filter: 'free' | 'attached' | 'all';
+  includeGone: boolean;
+  cursor?: string;
+  limit: number;
+}
+
+export interface DiscoverInput {
+  tenantId: string;
+  accountId: string;
+  /**
+   * `wait: true` holds the answer until a pass that started after the call has finished, through
+   * the envelope's async-with-wait (at most 30 s).
+   */
+  wait?: { timeoutMs: number };
+  /** Set by the handler: when the pass was asked for (`compute_now()`, epoch ms). */
+  requestedAt?: number;
+}
+
+const tenantField: InputSchema = {
+  type: 'string',
+  pattern: '^[A-Za-z0-9._:-]{1,128}$',
+  maxLength: 128,
+  description: 'The tenant that owns the provider account',
+};
+const accountField: InputSchema = {
+  type: 'string',
+  pattern: '^pacct_[0-9a-hjkmnp-tv-z]{26,52}$',
+  maxLength: 58,
+  description: 'The provider account',
+};
+
+export const discoverySchemas = {
+  listMachines: strictObject(
+    {
+      tenantId: tenantField,
+      accountId: accountField,
+      filter: {
+        enum: ['free', 'attached', 'all'],
+        default: 'free',
+        description: 'free: not attached; attached: attached to or created as an instance; all',
+      },
+      includeGone: {
+        type: 'boolean',
+        default: false,
+        description: 'Also list machines the provider no longer reports',
+      },
+      cursor: { type: 'string', maxLength: 1024, description: 'From the previous page' },
+      limit: { type: 'integer', minimum: 1, maximum: 500, default: 100 },
+    },
+    ['tenantId', 'accountId'],
+  ),
+  discover: strictObject(
+    {
+      tenantId: tenantField,
+      accountId: accountField,
+      wait: {
+        type: 'boolean',
+        default: false,
+        description: 'Hold the answer (at most 30 s) until a pass started after the call finished',
+      },
+    },
+    ['tenantId', 'accountId'],
+  ),
+};
+
+const cursorOf = (zone: string, externalId: string) =>
+  Buffer.from(JSON.stringify([zone, externalId])).toString('base64url');
+
+function parseCursor(value: unknown): [string, string] {
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(String(value), 'base64url').toString('utf8'));
+    if (
+      Array.isArray(parsed) &&
+      parsed.length === 2 &&
+      parsed.every((part) => typeof part === 'string')
+    )
+      return parsed as [string, string];
+  } catch {
+    // Falls through to the refusal.
+  }
+  fail('cursor is invalid');
+}
+
+export function parseListMachines(raw: unknown): ListMachinesInput {
+  const input = object(raw, ['tenantId', 'accountId', 'filter', 'includeGone', 'cursor', 'limit']);
+  if (
+    input.filter !== undefined &&
+    input.filter !== 'free' &&
+    input.filter !== 'attached' &&
+    input.filter !== 'all'
+  )
+    fail('filter must be free, attached or all');
+  if (input.includeGone !== undefined && typeof input.includeGone !== 'boolean')
+    fail('includeGone must be a boolean');
+  const result: ListMachinesInput = {
+    tenantId: tenant(input.tenantId),
+    accountId: id(input.accountId, 'pacct', 'accountId'),
+    filter: (input.filter as ListMachinesInput['filter'] | undefined) ?? 'free',
+    includeGone: input.includeGone === true,
+    limit: optional(input.limit, (value) => int(value, 'limit', 1, 500)) ?? 100,
+  };
+  if (input.cursor !== undefined) {
+    if (typeof input.cursor !== 'string' || input.cursor.length > 1024) fail('cursor is invalid');
+    parseCursor(input.cursor);
+    result.cursor = input.cursor;
+  }
+  return result;
+}
+
+export function parseDiscover(raw: unknown): DiscoverInput {
+  const input = object(raw, ['tenantId', 'accountId', 'wait']);
+  if (input.wait !== undefined && typeof input.wait !== 'boolean') fail('wait must be a boolean');
+  return {
+    tenantId: tenant(input.tenantId),
+    accountId: id(input.accountId, 'pacct', 'accountId'),
+    // The envelope's async-with-wait holds a mutation's answer for at most 30 s.
+    ...(input.wait === true ? { wait: { timeoutMs: 30_000 } } : {}),
+  };
+}
+
+interface ListedMachine {
+  external_id: string;
+  machine: StoredMachine | string;
+  instance_id: string | null;
+  instance_tenant_id: string | null;
+  zone: string;
+  first_seen_ms: number;
+  last_seen_ms: number;
+  gone_ms: number | null;
+}
+
+function machineView(accountId: string, row: ListedMachine): ProviderMachineView {
+  const machine = json(row.machine);
+  const view: ProviderMachineView = {
+    accountId,
+    externalId: row.external_id,
+    state: machine.state,
+    labels: { ...(machine.labels ?? {}) },
+    networks: machine.networks ?? [],
+    addresses: [...(machine.addresses ?? [])],
+    firstSeenAt: Math.round(Number(row.first_seen_ms)),
+    lastSeenAt: Math.round(Number(row.last_seen_ms)),
+  };
+  if (machine.name !== undefined) view.name = machine.name;
+  if (machine.zone !== undefined) view.zone = machine.zone;
+  if (machine.region !== undefined) view.region = machine.region;
+  if (machine.machineType !== undefined) view.machineType = machine.machineType;
+  if (machine.vcpu !== undefined) view.vcpu = machine.vcpu;
+  if (machine.memoryGiB !== undefined) view.memoryGiB = machine.memoryGiB;
+  if (machine.gpus !== undefined) view.gpus = { ...machine.gpus };
+  if (machine.reservation !== undefined) view.reservation = machine.reservation;
+  if (row.instance_id !== null) view.instanceId = row.instance_id;
+  if (row.instance_tenant_id !== null) view.tenantId = row.instance_tenant_id;
+  if (row.gone_ms !== null) view.goneAt = Math.round(Number(row.gone_ms));
+  return view;
+}
+
+async function ownAccount(
+  tx: SqlTx,
+  input: { tenantId: string; accountId: string },
+): Promise<ProviderAccount> {
+  const account = await readAccount(tx, input.accountId, input.tenantId);
+  if (!account)
+    throw new ComputeError('NOT_FOUND', `Provider account ${input.accountId} not found`);
+  return account;
+}
+
+async function lastPass(tx: SqlTx, accountId: string): Promise<number | undefined> {
+  const { rows } = await tx.query<{ ok_ms: number | null }>(
+    `SELECT (extract(epoch FROM last_ok_at) * 1000)::float8 AS ok_ms FROM provider_discovery
+      WHERE account_id = $1`,
+    [accountId],
+  );
+  const ms = rows[0]?.ok_ms;
+  return ms === null || ms === undefined ? undefined : Math.round(Number(ms));
+}
+
+/** `providerAccounts.machines`: a page of the account's machines, ordered by (zone, externalId). */
+export async function listMachines(
+  tx: SqlTx,
+  input: ListMachinesInput,
+): Promise<{ items: ProviderMachineView[]; cursor?: string; discoveredAt?: number }> {
+  await ownAccount(tx, input);
+  const after = input.cursor !== undefined ? parseCursor(input.cursor) : undefined;
+  const { rows } = await tx.query<ListedMachine>(
+    `SELECT m.external_id, m.machine, m.instance_id, i.tenant_id AS instance_tenant_id,
+            coalesce(m.machine->>'zone', '') AS zone,
+            (extract(epoch FROM m.first_seen_at) * 1000)::float8 AS first_seen_ms,
+            (extract(epoch FROM m.last_seen_at) * 1000)::float8 AS last_seen_ms,
+            (extract(epoch FROM m.gone_at) * 1000)::float8 AS gone_ms
+       FROM provider_machines m LEFT JOIN instances i ON i.id = m.instance_id
+      WHERE m.account_id = $1
+        AND ($2::boolean OR m.gone_at IS NULL)
+        AND ($3::text = 'all' OR ($3::text = 'free') = (m.instance_id IS NULL))
+        AND ($4::text IS NULL OR (coalesce(m.machine->>'zone', ''), m.external_id) > ($4::text, $5::text))
+      ORDER BY coalesce(m.machine->>'zone', ''), m.external_id
+      LIMIT $6`,
+    [
+      input.accountId,
+      input.includeGone,
+      input.filter,
+      after?.[0] ?? null,
+      after?.[1] ?? null,
+      input.limit + 1,
+    ],
+  );
+  const page = rows.slice(0, input.limit);
+  const result: { items: ProviderMachineView[]; cursor?: string; discoveredAt?: number } = {
+    items: page.map((row) => machineView(input.accountId, row)),
+  };
+  if (rows.length > input.limit) {
+    const last = page[page.length - 1]!;
+    result.cursor = cursorOf(last.zone, last.external_id);
+  }
+  const discovered = await lastPass(tx, input.accountId);
+  if (discovered !== undefined) result.discoveredAt = discovered;
+  return result;
+}
+
+/**
+ * `providerAccounts.discover`: the account's next pass is due now, and its key is enqueued. The
+ * answer carries `discoveredAt` once a pass that started after the call has finished (`poll`).
+ */
+export async function requestDiscovery(
+  deps: Pick<DiscoveryDeps, 'clients' | 'clock' | 'secrets' | 'log' | 'work'>,
+  tx: SqlTx,
+  input: DiscoverInput,
+): Promise<{ queued: true; discoveredAt?: number }> {
+  const account = await ownAccount(tx, input);
+  // Building the client validates its config; it calls no provider API.
+  if (!discovers(await deps.clients.client(account, deps)))
+    throw new ComputeError('UNSUPPORTED', `Provider ${account.provider} cannot list its machines`);
+  const { rows } = await tx.query<{ now_ms: number }>(
+    `INSERT INTO provider_discovery (account_id, next_at) VALUES ($1, compute_now())
+     ON CONFLICT (account_id) DO UPDATE SET next_at = compute_now()
+     RETURNING (extract(epoch FROM compute_now()) * 1000)::float8 AS now_ms`,
+    [account.id],
+  );
+  // What `poll` compares the next pass with (the envelope hands it the same validated input).
+  input.requestedAt = Math.floor(Number(rows[0]!.now_ms));
+  await deps.work.enqueue(tx, discoveryWork, account.id);
+  return { queued: true };
+}
+
+type DiscoverOutput = { queued: true; discoveredAt?: number };
+
+/** The `poll` of `providerAccounts.discover`: done once a pass finished after the call. */
+export const discoverPoll = {
+  done: (output: DiscoverOutput): boolean => output.discoveredAt !== undefined,
+  async refresh(
+    context: { sql: SqlTx },
+    input: DiscoverInput,
+    output: DiscoverOutput,
+  ): Promise<DiscoverOutput> {
+    const discovered = await lastPass(context.sql, input.accountId);
+    if (discovered === undefined || input.requestedAt === undefined) return output;
+    return discovered >= input.requestedAt ? { queued: true, discoveredAt: discovered } : output;
+  },
+};

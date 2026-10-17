@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { ComputeError } from '@better-compute/core';
+import { apiSurface, ComputeError } from '@better-compute/core';
 import { closeFixtures } from '@better-compute/testing';
 import { discoveryWork } from '@better-compute/vps';
 import { workRows } from './support/runtime.js';
@@ -154,5 +154,152 @@ describe('vps.discovery', () => {
     await world.fixture.advance(30_000);
     await world.tick(discoveryWork, 1);
     expect(await machineRows(world)).toHaveLength(1);
+  });
+});
+
+describe('api: providerAccounts.machines and providerAccounts.discover', () => {
+  it('machines lists free VMs by default and attached with filter', async () => {
+    const world = await gceWorld({ discovery: { every: '1m' } });
+    world.cloud.machines.set(
+      'us-central1-b/zeta',
+      gceVm('zeta', { id: 'us-central1-b/zeta', zone: 'us-central1-b' }),
+    );
+    world.cloud.machines.set('us-central1-a/legacy', gceVm('legacy'));
+    const instance = await world.api.instances.create(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: world.poolId,
+      flavor: 'a2.highgpu.1g',
+      imageId: 'debian-12',
+      idempotencyKey: 'vm-1',
+    });
+    await world.fixture.advance(1_000);
+    await world.tick('vps.instances', 1);
+    world.cloud.machines.set('us-central1-a/old', gceVm('old'));
+    await world.discover(0);
+    world.cloud.machines.delete('us-central1-a/old');
+    await world.discover();
+    const ref = { tenantId: world.rootTenant, accountId: world.accountId };
+    const free = await world.api.providerAccounts.machines(world.root, ref);
+    expect(free.items.map((item: { externalId: string }) => item.externalId)).toEqual([
+      'us-central1-a/legacy',
+      'us-central1-b/zeta',
+    ]);
+    expect(free.items[0]).toMatchObject({
+      accountId: world.accountId,
+      name: 'legacy',
+      state: 'running',
+      zone: 'us-central1-a',
+      machineType: 'a3-highgpu-8g',
+      gpus: { model: 'nvidia-h100-80gb', count: 8 },
+      labels: {},
+      networks: [{ network: 'default', address: '10.128.0.2' }],
+      addresses: ['10.128.0.2'],
+    });
+    expect(free.items[0].instanceId).toBeUndefined();
+    expect(typeof free.items[0].firstSeenAt).toBe('number');
+    expect(free.discoveredAt).toBe(world.fixture.clock.now());
+    const attached = await world.api.providerAccounts.machines(world.root, {
+      ...ref,
+      filter: 'attached',
+    });
+    expect(attached.items).toMatchObject([{ instanceId: instance.id, tenantId: world.acmeTenant }]);
+    const all = await world.api.providerAccounts.machines(world.root, {
+      ...ref,
+      filter: 'all',
+      includeGone: true,
+    });
+    expect(all.items).toHaveLength(4);
+    expect(all.items.find((item: { name?: string }) => item.name === 'old').goneAt).toBeTypeOf(
+      'number',
+    );
+    // Pages follow (zone, externalId).
+    const first = await world.api.providerAccounts.machines(world.root, {
+      ...ref,
+      filter: 'all',
+      limit: 2,
+    });
+    expect(first.items).toHaveLength(2);
+    const rest = await world.api.providerAccounts.machines(world.root, {
+      ...ref,
+      filter: 'all',
+      limit: 2,
+      cursor: first.cursor,
+    });
+    expect(
+      [...first.items, ...rest.items].map((item: { externalId: string }) => item.externalId),
+    ).toEqual(
+      (await world.api.providerAccounts.machines(world.root, { ...ref, filter: 'all' })).items.map(
+        (item: { externalId: string }) => item.externalId,
+      ),
+    );
+    expect(rest.cursor).toBeUndefined();
+    // Another tenant's account is not found.
+    await expect(
+      world.api.providerAccounts.machines(world.acme, {
+        tenantId: world.acmeTenant,
+        accountId: world.accountId,
+      }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('machines is denied without providers:read', async () => {
+    const world = await gceWorld({ discovery: { every: '1m' } });
+    world.fixture.iam.addCaller('token-nobody', { tenantId: world.rootTenant });
+    await expect(
+      world.api.providerAccounts.machines(
+        { token: 'token-nobody' },
+        { tenantId: world.rootTenant, accountId: world.accountId },
+      ),
+    ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+  });
+
+  it('discover with wait returns after the pass', async () => {
+    const world = await gceWorld({ discovery: { every: '1h' } });
+    world.cloud.machines.set('us-central1-a/legacy', gceVm('legacy'));
+    await world.discover(0);
+    world.cloud.machines.set('us-central1-a/web-1', gceVm('web-1'));
+    await world.fixture.advance(5_000);
+    const ref = { tenantId: world.rootTenant, accountId: world.accountId };
+    const [answer] = await Promise.all([
+      world.api.providerAccounts.discover(world.root, { ...ref, wait: true }),
+      (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        await world.tick('vps.discovery', 1);
+      })(),
+    ]);
+    expect(answer).toEqual({ queued: true, discoveredAt: world.fixture.clock.now() });
+    const { items } = await world.api.providerAccounts.machines(world.root, ref);
+    expect(items).toHaveLength(2);
+    // Without wait: queued, answered at once.
+    expect(await world.api.providerAccounts.discover(world.root, ref)).toEqual({ queued: true });
+    const plain = await world.api.providerAccounts.create(world.root, {
+      tenantId: world.rootTenant,
+      provider: 'fake-plain',
+      name: 'plain',
+      config: {},
+    });
+    await expect(
+      world.api.providerAccounts.discover(world.root, { ...ref, accountId: plain.id }),
+    ).rejects.toMatchObject({ code: 'UNSUPPORTED' });
+  });
+
+  it('api surface has the rows', () => {
+    expect(
+      apiSurface.find((row) => row.group === 'providerAccounts' && row.method === 'machines'),
+    ).toMatchObject({
+      action: 'compute:providers:read',
+      resource: 'provider-account',
+      phase: 'v1.0',
+      kind: 'read',
+      module: 'vps',
+    });
+    expect(
+      apiSurface.find((row) => row.group === 'providerAccounts' && row.method === 'discover'),
+    ).toMatchObject({
+      action: 'compute:providers:manage',
+      resource: 'provider-account',
+      phase: 'v1.0',
+      kind: 'mutation',
+    });
   });
 });

@@ -46,3 +46,19 @@ Records a request to turn one of the account's machines into a bcd host of a `vp
 - **Idempotency.** `idempotencyKey` is required. A repeat returns the bootstrap's current status; a different request under the same key is `CONFLICT`.
 - **Errors.** `INVALID_CONFIG` when `vps()` has no `bootstrap` options or the host has no PKI. `UNSUPPORTED` when the provider cannot identify and bootstrap machines. `NOT_FOUND` for a missing account or a pool the tenant does not own, `INVALID_STATE` for an archived pool, `INVALID_INPUT` for a pool of another class or agent.
 - **Events.** `provider.bootstrap.started`; the reconciler later publishes `provider.bootstrap.installed`, `provider.bootstrap.joined` or `provider.bootstrap.failed`. The join token it mints is single-use, bound to the machine, and never returned or stored.
+
+## machines
+
+Lists the machines the `vps.discovery` worker last saw in the account, ordered by zone and machine id; returns `items`, a `cursor` when more remain, and `discoveredAt`, the time of the account's last successful pass.
+
+- **Input.** `filter` is `free` (the default: machines no instance holds), `attached` (machines attached to, or created as, an instance) or `all`. `includeGone` also lists machines the provider stopped reporting, with `goneAt`. `limit` is 1 to 500 (default 100).
+- **Output.** Each machine has its state, zone, region, machine type, vCPU, memory, GPUs, labels, networks, addresses and any reservation it consumes. An attached or created machine has `instanceId` and the instance's `tenantId`.
+- **Errors.** An account of another tenant, or none, is `NOT_FOUND`. The worker lists accounts every 5 minutes by default (`vps({ discovery: { every } })`) and never changes a machine.
+
+## discover
+
+Makes the account's next discovery pass due now and wakes the worker; returns `queued: true`.
+
+- **Input.** With `wait: true`, the answer is held, for at most 30 seconds, until a pass that started after the call has finished, and then carries that pass's time as `discoveredAt`. A timeout is not an error: the answer then has no `discoveredAt`.
+- **Errors.** `UNSUPPORTED` when the account's provider cannot list its machines. An account of another tenant, or none, is `NOT_FOUND`.
+- **Events.** The pass publishes `provider.machine.discovered`, `provider.machine.changed` (with `changes`) and `provider.machine.gone`.

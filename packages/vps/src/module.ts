@@ -75,7 +75,19 @@ import {
   type BootstrapOptions,
   type ProviderBootstrap,
 } from './bootstraps.js';
-import { discoveryReconciler, type DiscoveryOptions } from './discovery.js';
+import {
+  discoverPoll,
+  discoveryReconciler,
+  discoverySchemas,
+  listMachines,
+  parseDiscover,
+  parseListMachines,
+  requestDiscovery,
+  type DiscoverInput,
+  type DiscoveryOptions,
+  type ListMachinesInput,
+  type ProviderMachineView,
+} from './discovery.js';
 import { vpsMigrations } from './migrations.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
 import { describeCreateInstance, describeCreateSandbox, describeExtendSandbox } from './describe.js';
@@ -260,6 +272,11 @@ export type VpsApi = {
     update: MethodDefinition<AccountRef & { config: unknown }, ProviderAccountView>;
     delete: MethodDefinition<AccountRef, { deleted: true }>;
     bootstrap: MethodDefinition<BootstrapInput, ProviderBootstrap>;
+    machines: MethodDefinition<
+      ListMachinesInput,
+      { items: ProviderMachineView[]; cursor?: string; discoveredAt?: number }
+    >;
+    discover: MethodDefinition<DiscoverInput, { queued: true; discoveredAt?: number }>;
   };
   sandboxes: {
     create: MethodDefinition<CreateSandboxInput, Sandbox>;
@@ -876,6 +893,22 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         resource: accountResource,
         validate: describedBy(schemas.bootstrap, parseBootstrap),
         handler: (context, input) => startBootstrap(bootstrapDeps(context), context, input),
+      }),
+      // R5: what the vps.discovery worker last saw in the account.
+      machines: defineMethod({
+        action: 'compute:providers:read',
+        kind: 'read',
+        resource: accountResource,
+        validate: describedBy(discoverySchemas.listMachines, parseListMachines),
+        handler: (context, input) => listMachines(context.sql, input),
+      }),
+      discover: defineMethod({
+        action: 'compute:providers:manage',
+        kind: 'mutation',
+        resource: accountResource,
+        validate: describedBy(discoverySchemas.discover, parseDiscover),
+        handler: (context, input) => requestDiscovery(depsOf(context), context.sql, input),
+        poll: discoverPoll,
       }),
     },
     // §3.7 (D24): a sandbox drives one hosted instance; templates are per tenant.
