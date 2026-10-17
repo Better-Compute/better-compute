@@ -43,6 +43,7 @@ import {
   completeCreateInstance,
   deleteInstance,
   denyCreateInstance,
+  assertOwnerMember,
   instanceSettled,
   instanceView,
   isSecretRef,
@@ -804,6 +805,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           // A pool's budget policy (stop-new/drain offers, `budgetCheck: 'meter'`) covers
           // instances as it covers reservations: SPEND_LIMIT_REACHED, with the draft kept.
           check: async (context, input) => {
+            await assertOwnerMember(context, input);
             if (isSecretRef(input.userData)) await userDataSecretCheck(context, input.tenantId);
             await budgetAdmissionCheck(context, input.tenantId, input.poolId);
           },
@@ -875,7 +877,10 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         resource: (input) => ({ type: 'instance', id: `draft:${input.idempotencyKey}` }),
         validate: describedBy(attachSchemas.attach, parseAttach),
         admission: {
-          prepare: (context, input, tx) => prepareAttach(context, input, tx),
+          prepare: (context, input, tx) =>
+            prepareAttach(context, input, tx, context.iam.rootTenantId),
+          // R2: another owner must be an active identity of the tenant (outside transactions).
+          check: (context, input) => assertOwnerMember(context, input),
           denied: (context, input, tx) => forgetAttach(context, input, tx),
           abandoned: (context, input, tx) => forgetAttach(context, input, tx),
         },

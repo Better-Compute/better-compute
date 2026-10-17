@@ -191,11 +191,32 @@ export function instanceOwner(
   if (!platformCaller(caller, input.tenantId, rootTenantId) || caller.tenantId === input.tenantId)
     throw new ComputeError(
       'ACCESS_DENIED',
-      'Only the platform creates an instance for another identity, and only in another tenant',
+      'Only the platform makes another identity the owner of an instance, and only in another tenant',
       undefined,
       { reason: 'owner-not-caller' },
     );
   return owner;
+}
+
+/**
+ * R2: an owner other than the caller must be an active identity of the tenant, when the IamPort can
+ * say (`isMember`); without it the owner is checked for shape only. Runs outside any transaction
+ * (an admission `check`). INVALID_INPUT otherwise.
+ */
+export async function assertOwnerMember(
+  context: Pick<MethodContext, 'iam' | 'caller'>,
+  input: { tenantId: string; ownerIdentityId?: string },
+): Promise<void> {
+  const owner = input.ownerIdentityId;
+  if (owner === undefined || owner === context.caller?.identityId) return;
+  if (typeof context.iam.isMember !== 'function') return;
+  if (!(await context.iam.isMember(input.tenantId, owner)))
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `ownerIdentityId ${owner} is not an active identity of tenant ${input.tenantId}`,
+      undefined,
+      { field: 'ownerIdentityId' },
+    );
 }
 
 /** Whether `userData` is a `secret://` ref (sealed by vps, or brought by the tenant). */

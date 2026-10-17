@@ -21,6 +21,7 @@ import {
   instanceView,
   dropHeldMachineId,
   identityIdPattern,
+  instanceOwner,
   instanceWork,
   moveInstance,
   ownershipBlocked,
@@ -251,9 +252,13 @@ export async function prepareAttach(
   context: MethodContext,
   input: AttachInstanceInput,
   tx: SqlTx,
+  rootTenantId?: string,
 ): Promise<AdmissionPlan<Instance>> {
   const caller = context.caller;
   if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
+  // R3: as for instances.create, only the platform (a root caller attaching into another tenant)
+  // makes someone other than the caller the owner; before any decision.
+  instanceOwner(caller, input, rootTenantId);
   const { request, hash, instanceId } = await attachRequest(input, caller);
   const existing = await readInstance(tx, instanceId, { tenantId: input.tenantId, lock: true });
   if (existing) {
