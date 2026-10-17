@@ -224,3 +224,176 @@ describe('instances.attach', () => {
     });
   });
 });
+
+describe('lifecycle of attached instances', () => {
+  /** One reconciler step after `ms` of sim time. */
+  const step = async (world: GceWorld, ms = 1_000) => {
+    await world.fixture.advance(ms);
+    await world.tick('vps.instances', 1);
+  };
+  const view = (world: GceWorld, instanceId: string) =>
+    world.api.instances.get(world.acme, { tenantId: world.acmeTenant, instanceId });
+  const vm = (world: GceWorld) => world.cloud.machines.get(LEGACY);
+  const asAcme = (world: GceWorld) => ({ tenantId: world.acmeTenant });
+
+  it('claims the VM label on first reconcile', async () => {
+    const world = await legacyWorld();
+    const instance = await world.api.instances.attach(world.root, attachInput(world));
+    await step(world);
+    expect(vm(world)!.labels).toEqual({ [instanceLabel]: instance.id });
+    expect(await view(world, instance.id)).toMatchObject({
+      state: 'running',
+      addresses: ['10.128.0.2'],
+    });
+    expect(world.cloud.requests).toContain(`claim ${LEGACY} ${instance.id}`);
+    expect(world.cloud.requests.some((request) => request.startsWith('create'))).toBe(false);
+    // Steady: later passes read, they do not claim again.
+    await step(world, 60_000);
+    expect(world.cloud.requests.filter((request) => request.startsWith('claim'))).toHaveLength(1);
+  });
+
+  it('adopts a stopped VM as stopped', async () => {
+    const world = await gceWorld({ discovery: { every: '1m' } });
+    world.cloud.machines.set(LEGACY, gceVm('legacy', { state: 'stopped' }));
+    await world.discover(0);
+    const instance = await world.api.instances.attach(world.root, attachInput(world));
+    expect(instance.desiredState).toBe('stopped');
+    await step(world);
+    expect(await view(world, instance.id)).toMatchObject({ state: 'stopped' });
+    expect(world.cloud.requests.some((request) => request.startsWith('power'))).toBe(false);
+  });
+
+  it('delete of an attached instance detaches by default', async () => {
+    const world = await legacyWorld();
+    const instance = await world.api.instances.attach(world.root, attachInput(world));
+    await step(world);
+    await world.api.instances.delete(world.acme, { ...asAcme(world), instanceId: instance.id });
+    await step(world);
+    expect(vm(world)).toMatchObject({ state: 'running', labels: {} });
+    expect(world.cloud.requests.some((request) => request.startsWith('delete'))).toBe(false);
+    expect(world.cloud.requests).toContain(`release ${LEGACY} ${instance.id}`);
+    expect(await view(world, instance.id)).toMatchObject({ state: 'deleted' });
+    expect((await world.events('instance.detached')).map((event) => event.data)).toMatchObject([
+      { externalId: LEGACY },
+    ]);
+    expect(await world.events('instance.deleted')).toEqual([]);
+    expect(await quotaUsed(world, 'gpu')).toBe(0);
+    expect(await quotaUsed(world, 'vcpu')).toBe(0);
+    expect(await machineLink(world)).toBeNull();
+    // The machine is free: it can be attached again (to a new instance).
+    await world.discover();
+    const again = await world.api.instances.attach(
+      world.root,
+      attachInput(world, { idempotencyKey: 'attach-legacy-2' }),
+    );
+    expect(again.id).not.toBe(instance.id);
+  });
+
+  it("onDelete:'delete' deletes the VM", async () => {
+    const world = await legacyWorld();
+    const instance = await world.api.instances.attach(
+      world.root,
+      attachInput(world, { onDelete: 'delete' }),
+    );
+    await step(world);
+    await world.api.instances.delete(world.acme, { ...asAcme(world), instanceId: instance.id });
+    await step(world);
+    expect(vm(world)).toBeUndefined();
+    const tail = world.cloud.requests.slice(-2);
+    expect(tail).toEqual([`claim ${LEGACY} ${instance.id} managed`, `delete ${LEGACY}`]);
+    expect(await view(world, instance.id)).toMatchObject({ state: 'deleted' });
+    expect(await world.events('instance.deleted')).toHaveLength(1);
+    expect(await quotaUsed(world, 'gpu')).toBe(0);
+  });
+
+  it('an attached instance whose VM vanished goes lost, never recreated', async () => {
+    const world = await legacyWorld();
+    const instance = await world.api.instances.attach(world.root, attachInput(world));
+    await step(world);
+    world.cloud.machines.delete(LEGACY);
+    await step(world, 60_000);
+    await step(world, 60_000);
+    expect(await view(world, instance.id)).toMatchObject({ state: 'lost' });
+    expect(world.cloud.requests.some((request) => request.startsWith('create'))).toBe(false);
+    // Discovery marking it gone wakes the instance; it stays lost.
+    await world.discover();
+    await step(world);
+    expect(await view(world, instance.id)).toMatchObject({ state: 'lost' });
+    expect(world.cloud.requests.some((request) => request.startsWith('create'))).toBe(false);
+  });
+
+  it('start/stop on an attached instance call the provider', async () => {
+    const world = await legacyWorld();
+    const instance = await world.api.instances.attach(world.root, attachInput(world));
+    await step(world);
+    const ref = { ...asAcme(world), instanceId: instance.id };
+    await world.api.instances.stop(world.acme, ref);
+    await step(world);
+    expect(world.cloud.requests).toContain(`power ${LEGACY} graceful-off`);
+    expect(await view(world, instance.id)).toMatchObject({ state: 'stopped' });
+    expect(vm(world)!.state).toBe('stopped');
+    await world.api.instances.start(world.acme, ref);
+    await step(world);
+    expect(world.cloud.requests).toContain(`power ${LEGACY} on`);
+    expect(await view(world, instance.id)).toMatchObject({ state: 'running' });
+  });
+
+  it('detach refuses a created instance', async () => {
+    const world = await legacyWorld();
+    const created = await world.api.instances.create(world.acme, {
+      ...asAcme(world),
+      poolId: world.poolId,
+      flavor: 'a2.highgpu.1g',
+      imageId: 'debian-12',
+      idempotencyKey: 'vm-1',
+    });
+    expect(
+      await code(
+        world.api.instances.detach(world.acme, { ...asAcme(world), instanceId: created.id }),
+      ),
+    ).toBe('INVALID_STATE');
+    // An attached one is detached: deleting at once, then deleted with its machine left running.
+    const attached = await world.api.instances.attach(
+      world.root,
+      attachInput(world, { onDelete: 'delete' }),
+    );
+    await step(world);
+    const detaching = await world.api.instances.detach(world.acme, {
+      ...asAcme(world),
+      instanceId: attached.id,
+    });
+    expect(detaching).toMatchObject({ state: 'deleting', onDelete: 'detach' });
+    await step(world);
+    expect(await view(world, attached.id)).toMatchObject({ state: 'deleted' });
+    expect(vm(world)).toMatchObject({ state: 'running', labels: {} });
+    expect(world.cloud.requests).not.toContain(`delete ${LEGACY}`);
+  });
+
+  it('claim conflict fails the instance', async () => {
+    const world = await gceWorld({ discovery: { every: '1m' } });
+    world.cloud.machines.set(
+      LEGACY,
+      gceVm('legacy', { labels: { [instanceLabel]: 'inst_other' } }),
+    );
+    await world.discover(0);
+    const instance = await world.api.instances.attach(world.root, attachInput(world));
+    await step(world);
+    const failed = await view(world, instance.id);
+    expect(failed.state).toBe('error');
+    expect(failed.conditions.map((condition: { type: string }) => condition.type)).toContain(
+      'AttachConflict',
+    );
+    expect(await world.events('instance.failed')).toMatchObject([
+      { data: { reason: 'AttachConflict' } },
+    ]);
+    // Deleting it never touches the other instance's machine.
+    await world.api.instances.delete(world.acme, { ...asAcme(world), instanceId: instance.id });
+    await step(world);
+    expect(await view(world, instance.id)).toMatchObject({ state: 'deleted' });
+    expect(vm(world)).toMatchObject({
+      state: 'running',
+      labels: { [instanceLabel]: 'inst_other' },
+    });
+    expect(world.cloud.requests.some((request) => request.startsWith('delete'))).toBe(false);
+  });
+});

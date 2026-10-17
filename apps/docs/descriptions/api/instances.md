@@ -55,3 +55,12 @@ Makes a provider machine that already runs an instance of a tenant, without recr
 - **IAM.** `compute:instances:attach` is decided on `compute-instance/` plus the instance id, whose attributes (`vcpu`, `memoryGiB`, `gpus`) policies can test. Only the platform (root callers) attaches machines of an account its own tenant does not own; a tenant attaches only from its own accounts (`ACCESS_DENIED` otherwise).
 - **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, or a machine discovery has not seen or marked gone (run `providerAccounts.discover`). `CONFLICT` with `details.instanceId` when another instance holds the machine. `INVALID_INPUT` for a pool that is not a provider pool, `QUOTA_EXCEEDED` when the machine does not fit the quota; nothing is written then.
 - **Events.** `instance.attached` with `instanceId`, `accountId`, `externalId`, `poolId` and `onDelete`.
+
+## detach
+
+Deletes an attached instance without deleting its machine; returns the instance in `deleting`. The reconciler removes the provider's ownership label (`release`), refunds the quota and drops the instance's access, and the machine keeps running in the provider account, free to be attached again.
+
+- **Semantics.** `onDelete` becomes `detach`, whatever the attach chose. `delete` on an attached instance does the same when its `onDelete` is `detach` (the default for attach); with `onDelete: 'delete'` the reconciler first marks the machine as managed by better-compute and then deletes it. A machine whose label names another instance is never deleted: the instance fails with an `AttachConflict` condition.
+- **Errors.** `INVALID_STATE` for an instance better-compute created (`origin: 'created'`): detaching it would leave a machine running that no one is billed for, so delete it instead. Instances of other tenants, or none, are `NOT_FOUND`. A `deleted` instance is returned unchanged.
+- **IAM.** Decided as `compute:instances:delete` on the instance.
+- **Events.** `instance.deleting`; `instance.detached` (not `instance.deleted`) follows when the label is released.

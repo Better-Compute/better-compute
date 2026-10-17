@@ -19,10 +19,14 @@ import {
   instanceDemand,
   instanceView,
   instanceWork,
+  moveInstance,
   publishInstance,
   readInstance,
+  updateInstance,
   visibleVpsPool,
+  wake,
   type InstanceDeps,
+  type InstanceRef,
   type InstanceOnDelete,
   type InstanceShape,
 } from './instances.js';
@@ -409,5 +413,32 @@ export async function attachMachine(
   if (input.name !== undefined) data.name = input.name;
   await publishInstance(deps, tx, row, 'instance.attached', data);
   await deps.work.enqueue(tx, instanceWork, instanceId);
+  return instanceView(row);
+}
+
+/**
+ * `instances.detach`: deletes an attached instance without deleting its machine. The reconciler
+ * removes the ownership label, refunds quota and drops authz; the machine keeps running. A machine
+ * better-compute created cannot be detached: it would keep running, billed to no one.
+ */
+export async function detachInstance(
+  deps: Pick<InstanceDeps, 'events' | 'work' | 'desired'>,
+  tx: SqlTx,
+  ref: InstanceRef,
+): Promise<Instance> {
+  let row = await readInstance(tx, ref.instanceId, { tenantId: ref.tenantId, lock: true });
+  if (!row || row.draft)
+    throw new ComputeError('NOT_FOUND', `Instance ${ref.instanceId} not found`);
+  if (row.origin !== 'attached')
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Instance ${row.id} was created by better-compute; delete it instead of detaching it`,
+    );
+  if (row.state === 'deleted') return instanceView(row);
+  row = await updateInstance(tx, row, { onDelete: 'detach', desiredState: 'deleted' });
+  if (row.state !== 'deleting')
+    row = await moveInstance(tx, row, 'delete', 'deleting', { reportedState: null });
+  await wake(deps, tx, row);
+  await publishInstance(deps, tx, row, 'instance.deleting', { onDelete: 'detach' });
   return instanceView(row);
 }

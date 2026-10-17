@@ -521,6 +521,7 @@ group('instances', 'vps', [
   ['resize', 'mutation', 'instances:update', 'instance', 'v0.3'],
   ['delete', 'mutation', 'instances:delete', 'instance', 'v0.3'],
   ['attach', 'mutation', 'instances:attach', 'instance', 'v1.0'],
+  ['detach', 'mutation', 'instances:delete', 'instance', 'v1.0'],
 ]);
 group('flavors', 'vps', [
   ['list', 'read', 'flavors:read', 'pool', 'v0.3'],

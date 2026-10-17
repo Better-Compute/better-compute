@@ -78,6 +78,7 @@ import {
 import {
   attachMachine,
   attachSchemas,
+  detachInstance,
   forgetAttach,
   parseAttach,
   prepareAttach,
@@ -267,6 +268,7 @@ export type VpsApi = {
     resize: MethodDefinition<InstanceRef & { flavor: string }, Instance>;
     delete: MethodDefinition<InstanceRef, Instance>;
     attach: MethodDefinition<AttachInstanceInput, Instance>;
+    detach: MethodDefinition<InstanceRef, Instance>;
   };
   flavors: {
     list: MethodDefinition<PoolInput, { items: FlavorRecord[] }>;
@@ -766,6 +768,14 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         },
         handler: (context, input) =>
           attachMachine(context.sql, attachDeps(context), { ...input, caller: context.caller! }),
+      }),
+      // D6: an attached instance goes, its machine stays (label released, quota refunded).
+      detach: defineMethod({
+        action: 'compute:instances:delete',
+        kind: 'mutation',
+        resource: instanceResource,
+        validate: describedBy(schemas.instance, parseInstanceRef),
+        handler: (context, input) => detachInstance(depsOf(context), context.sql, input),
       }),
     },
     flavors: {

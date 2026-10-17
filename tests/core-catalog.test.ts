@@ -438,6 +438,7 @@ describe('apiSurface (§9.2)', () => {
       'providerAccounts.machines': 'v1.0',
       'providerAccounts.discover': 'v1.0',
       'instances.attach': 'v1.0',
+      'instances.detach': 'v1.0',
     };
     for (const [path, phase] of Object.entries(later)) expect(apiMethod(...(path.split('.') as [string, string]))?.phase, path).toBe(phase);
     const phaseOf = (group: string) =>
