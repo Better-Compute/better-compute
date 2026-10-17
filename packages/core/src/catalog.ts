@@ -170,7 +170,7 @@ const definitions = {
   instance: {
     description: 'A VPS instance',
     parent: 'pool',
-    actions: a('instances', 'create', 'read', 'update', 'exec', 'delete'),
+    actions: a('instances', 'create', 'read', 'update', 'exec', 'delete', 'attach'),
     attributes: {
       vcpu: 'number',
       memoryGiB: 'number',
@@ -520,6 +520,7 @@ group('instances', 'vps', [
   ['stop', 'mutation', 'instances:update', 'instance', 'v0.3'],
   ['resize', 'mutation', 'instances:update', 'instance', 'v0.3'],
   ['delete', 'mutation', 'instances:delete', 'instance', 'v0.3'],
+  ['attach', 'mutation', 'instances:attach', 'instance', 'v1.0'],
 ]);
 group('flavors', 'vps', [
   ['list', 'read', 'flavors:read', 'pool', 'v0.3'],

@@ -44,3 +44,14 @@ Growth is charged to quota first and shrinkage refunded after; if the host lacks
 Sets `desiredState` to `deleted` and wakes the reconciler, which releases the allocation, IP lease and quota; returns the instance at once.
 
 The call is idempotent: an instance already `deleted` is returned unchanged, and stays readable through `get`. Publishes `instance.deleting`; `instance.deleted` follows when everything is released.
+
+## attach
+
+Makes a provider machine that already runs an instance of a tenant, without recreating it; returns the instance in `scheduling` with `origin: 'attached'`. The `vps.instances` reconciler then writes the provider's ownership label (`claim`) and follows the machine like any provider instance.
+
+- **Input.** `poolId` is a `provider` pool owned by or offered to `tenantId` and backed by the machine's provider account. `externalId` is the machine as `providerAccounts.machines` lists it, which discovery must have seen and which must be free. `ownerIdentityId` defaults to the caller, so an operator can hand the instance to a person of the tenant (it then shows in their `scope: 'mine'` list). `onDelete` is `detach` (the default: deleting releases the machine, which keeps running) or `delete` (deleting deletes the machine).
+- **Shape.** The flavor is the machine's own: its machine type, vCPU, memory and GPU count, with no disk. It is charged to the tenant's quota on the pool, as a create on a provider pool is.
+- **Idempotency.** `idempotencyKey` is required. The instance id derives from the tenant, the caller and the key: a retry returns the same instance, and a different request under the same key is `CONFLICT` with `details.instanceId`.
+- **IAM.** `compute:instances:attach` is decided on `compute-instance/` plus the instance id, whose attributes (`vcpu`, `memoryGiB`, `gpus`) policies can test. Only the platform (root callers) attaches machines of an account its own tenant does not own; a tenant attaches only from its own accounts (`ACCESS_DENIED` otherwise).
+- **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, or a machine discovery has not seen or marked gone (run `providerAccounts.discover`). `CONFLICT` with `details.instanceId` when another instance holds the machine. `INVALID_INPUT` for a pool that is not a provider pool, `QUOTA_EXCEEDED` when the machine does not fit the quota; nothing is written then.
+- **Events.** `instance.attached` with `instanceId`, `accountId`, `externalId`, `poolId` and `onDelete`.

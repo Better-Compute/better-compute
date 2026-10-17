@@ -289,9 +289,10 @@ interface RawInstance {
   tenant_id: string;
   pool_id: string;
   project_id: string | null;
-  flavor_id: string;
+  /** NULL for attached instances (vps/0024), which have neither. */
+  flavor_id: string | null;
   flavor: InstanceShape | string;
-  image_id: string;
+  image_id: string | null;
   image: VpsImage | string | null;
   ssh_keys: string[];
   user_data: string | null;
@@ -322,7 +323,17 @@ interface RawInstance {
   host_cert_valid_ms: number | null;
   network_policy: 'private' | 'none' | null;
   identity_rebind_ref: string | null;
+  origin: InstanceOrigin;
+  on_delete: InstanceOnDelete;
+  claimed: boolean;
+  reboot_pending: boolean;
+  reboot_hard: boolean;
 }
+
+/** How an instance came to be (vps/0024): created by better-compute, or an attached provider machine. */
+export type InstanceOrigin = 'created' | 'attached';
+/** What deleting the instance does to its provider machine: delete it, or detach (release) it. */
+export type InstanceOnDelete = 'delete' | 'detach';
 
 /** The sandbox snapshot an instance boots from (§3.7), verified by the host against `sha256`. */
 export interface InstanceRestore {
@@ -430,6 +441,15 @@ export interface InstanceRow {
   networkPolicy?: 'private' | 'none';
   /** A memory restore's own guest identity, sealed for the host to install (deleted with the row). */
   identityRebindRef?: string;
+  /** `attached`: a provider machine that existed before (instances.attach); never created here. */
+  origin: InstanceOrigin;
+  /** `detach`: deleting releases the machine (its label) and leaves it running. */
+  onDelete: InstanceOnDelete;
+  /** Attached: the provider's ownership label was written (`provider_claimed_at`). */
+  claimed: boolean;
+  /** A reboot was asked for and not yet done (`reboot_requested_at > rebooted_at`). */
+  rebootPending: boolean;
+  rebootHard: boolean;
 }
 
 const json = <T>(value: T | string): T =>
@@ -441,9 +461,9 @@ function toRow(raw: RawInstance): InstanceRow {
     tenantId: raw.tenant_id,
     poolId: raw.pool_id,
     poolClass: raw.pool_class,
-    flavorId: raw.flavor_id,
+    flavorId: raw.flavor_id ?? '',
     shape: json(raw.flavor),
-    imageId: raw.image_id,
+    imageId: raw.image_id ?? '',
     sshKeys: raw.ssh_keys ?? [],
     userDataSealed: raw.user_data_sealed === true,
     hostCertified: raw.host_certified === true,
@@ -460,6 +480,11 @@ function toRow(raw: RawInstance): InstanceRow {
     requestHash: raw.request_hash,
     conditions: json(raw.conditions) ?? [],
     version: Number(raw.version),
+    origin: raw.origin ?? 'created',
+    onDelete: raw.on_delete ?? 'delete',
+    claimed: raw.claimed === true,
+    rebootPending: raw.reboot_pending === true,
+    rebootHard: raw.reboot_hard === true,
   };
   if (raw.project_id !== null) row.projectId = raw.project_id;
   if (raw.image !== null) row.image = json(raw.image);
@@ -489,7 +514,9 @@ const columns = `i.id, i.tenant_id, i.pool_id, i.project_id, i.flavor_id, i.flav
   encode(i.request_hash, 'hex') AS request_hash, i.conditions, i.version, p.class AS pool_class,
   i.sandbox_id, i.warm_template_id, i.restore_from, i.host_certified,
   (extract(epoch FROM i.host_cert_valid_before) * 1000)::float8 AS host_cert_valid_ms, i.network_policy,
-  i.identity_rebind_ref`;
+  i.identity_rebind_ref, i.origin, i.on_delete, i.provider_claimed_at IS NOT NULL AS claimed,
+  coalesce(i.reboot_requested_at > coalesce(i.rebooted_at, '-infinity'), false) AS reboot_pending,
+  i.reboot_hard`;
 
 export async function readInstance(
   tx: SqlTx,
@@ -520,6 +547,8 @@ export function instanceView(row: InstanceRow): Instance {
     idempotencyKey: row.idempotencyKey,
     conditions: [...row.conditions],
     version: row.version,
+    origin: row.origin,
+    onDelete: row.onDelete,
   };
   if (row.projectId !== undefined) view.projectId = row.projectId;
   if (row.nodeId !== undefined) view.nodeId = row.nodeId;
@@ -545,6 +574,13 @@ export async function updateInstance(
     conditions: Condition[];
     flavorId: string;
     shape: InstanceShape;
+    onDelete: InstanceOnDelete;
+    /** true: `provider_claimed_at = compute_now()` (the provider label is written). */
+    claimed: true;
+    /** true: `rebooted_at = reboot_requested_at` (the asked-for reboot is done). */
+    rebooted: true;
+    /** A new reboot request, `reboot_requested_at = compute_now()`. */
+    rebootRequested: { hard: boolean };
   }>,
 ): Promise<InstanceRow> {
   const assignments = ['version = version + 1'];
@@ -570,6 +606,13 @@ export async function updateInstance(
   if (sets.conditions !== undefined) set('conditions', JSON.stringify(sets.conditions), '::jsonb');
   if (sets.flavorId !== undefined) set('flavor_id', sets.flavorId);
   if (sets.shape !== undefined) set('flavor', JSON.stringify(sets.shape), '::jsonb');
+  if (sets.onDelete !== undefined) set('on_delete', sets.onDelete);
+  if (sets.claimed) assignments.push('provider_claimed_at = compute_now()');
+  if (sets.rebooted) assignments.push('rebooted_at = reboot_requested_at');
+  if (sets.rebootRequested) {
+    assignments.push('reboot_requested_at = compute_now()');
+    set('reboot_hard', sets.rebootRequested.hard);
+  }
   const { rowCount } = await tx.query(
     `UPDATE instances SET ${assignments.join(', ')} WHERE id = $1 AND version = $2`,
     params,
@@ -596,6 +639,13 @@ export async function updateInstance(
   if (sets.conditions !== undefined) next.conditions = sets.conditions;
   if (sets.flavorId !== undefined) next.flavorId = sets.flavorId;
   if (sets.shape !== undefined) next.shape = sets.shape;
+  if (sets.onDelete !== undefined) next.onDelete = sets.onDelete;
+  if (sets.claimed) next.claimed = true;
+  if (sets.rebooted) next.rebootPending = false;
+  if (sets.rebootRequested) {
+    next.rebootPending = true;
+    next.rebootHard = sets.rebootRequested.hard;
+  }
   return next;
 }
 

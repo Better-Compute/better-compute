@@ -144,7 +144,7 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
     },
     [`${p}instance`]: {
       parent: `${p}pool`,
-      actions: action('instances', 'create', 'read', 'update', 'exec', 'delete'),
+      actions: action('instances', 'create', 'read', 'update', 'exec', 'delete', 'attach'),
       attributes: {
         vcpu: 'number',
         memoryGiB: 'number',

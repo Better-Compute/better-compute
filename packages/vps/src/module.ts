@@ -76,6 +76,15 @@ import {
   type ProviderBootstrap,
 } from './bootstraps.js';
 import {
+  attachMachine,
+  attachSchemas,
+  forgetAttach,
+  parseAttach,
+  prepareAttach,
+  type AttachDeps,
+  type AttachInstanceInput,
+} from './attach.js';
+import {
   discoverPoll,
   discoveryReconciler,
   discoverySchemas,
@@ -257,6 +266,7 @@ export type VpsApi = {
     stop: MethodDefinition<InstanceRef, Instance>;
     resize: MethodDefinition<InstanceRef & { flavor: string }, Instance>;
     delete: MethodDefinition<InstanceRef, Instance>;
+    attach: MethodDefinition<AttachInstanceInput, Instance>;
   };
   flavors: {
     list: MethodDefinition<PoolInput, { items: FlavorRecord[] }>;
@@ -652,6 +662,17 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     return deps;
   };
 
+  const attachDeps = (context: ModuleContext): AttachDeps => {
+    const deps = depsOf(context);
+    return {
+      events: deps.events,
+      work: deps.work,
+      authz: deps.authz,
+      runtime: deps.runtime,
+      ...(context.iam.rootTenantId !== undefined ? { rootTenantId: context.iam.rootTenantId } : {}),
+    };
+  };
+
   const api = (): VpsApi => ({
     instances: {
       create: defineMethod<CreateInstanceInput, Instance>({
@@ -731,6 +752,20 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         resource: instanceResource,
         validate: describedBy(schemas.instance, parseInstanceRef),
         handler: (context, input) => deleteInstance(depsOf(context), context.sql, input),
+      }),
+      // R1: a provider machine that already runs becomes a tenant's instance (decided on its id).
+      attach: defineMethod<AttachInstanceInput, Instance>({
+        action: 'compute:instances:attach',
+        kind: 'mutation',
+        resource: (input) => ({ type: 'instance', id: `draft:${input.idempotencyKey}` }),
+        validate: describedBy(attachSchemas.attach, parseAttach),
+        admission: {
+          prepare: (context, input, tx) => prepareAttach(context, input, tx),
+          denied: (context, input, tx) => forgetAttach(context, input, tx),
+          abandoned: (context, input, tx) => forgetAttach(context, input, tx),
+        },
+        handler: (context, input) =>
+          attachMachine(context.sql, attachDeps(context), { ...input, caller: context.caller! }),
       }),
     },
     flavors: {
