@@ -50,6 +50,13 @@ const machineRef = (description: string): InputSchema => ({
   maxLength: 128,
   description,
 });
+/** A provider reservation id: `<zone>/<name>`, or a shared-in `projects/<owner>/zones/<zone>/reservations/<name>`. */
+const reservationRef = (description: string): InputSchema => ({
+  type: 'string',
+  pattern: '^[A-Za-z0-9._/-]{1,300}$',
+  maxLength: 300,
+  description,
+});
 const templateId = idOf('sbxt', 'The sandbox template');
 const volumeId = idOf('vol', 'The sandbox volume');
 /** A template's volumes (agent memory): each by id or name, where the guest mounts it. */
@@ -278,6 +285,29 @@ export const schemas = {
       idempotencyKey,
     },
     ['tenantId', 'accountId', 'poolId', 'idempotencyKey'],
+  ),
+  reservations: strictObject(
+    {
+      tenantId,
+      accountId,
+      includeGone: { type: 'boolean', default: false, description: 'Also list reservations the provider no longer reports' },
+    },
+    ['tenantId', 'accountId'],
+  ),
+  bindReservation: strictObject(
+    {
+      tenantId,
+      accountId,
+      reservationId: reservationRef('The reservation, as `reservations` lists it'),
+      poolId: { ...poolId, description: 'A provider pool of this account that gets a flavor for the reservation' },
+      flavorName: nameOf('The flavor to create (default rsv-<reservation name>)'),
+      idempotencyKey,
+    },
+    ['tenantId', 'accountId', 'reservationId', 'poolId', 'idempotencyKey'],
+  ),
+  unbindReservation: strictObject(
+    { tenantId, accountId, reservationId: reservationRef('The reservation to unbind') },
+    ['tenantId', 'accountId', 'reservationId'],
   ),
 
   template: strictObject({ tenantId, templateId }, ['tenantId', 'templateId']),

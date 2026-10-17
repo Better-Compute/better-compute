@@ -16,6 +16,7 @@ export * from './accounts.js';
 export * from './ipam.js';
 export * from './hosts.js';
 export * from './bootstraps.js';
+export * from './provider-reservations.js';
 export * from './sandboxes.js';
 export * from './snapshots.js';
 export * from './volumes.js';

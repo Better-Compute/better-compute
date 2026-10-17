@@ -26,6 +26,7 @@ import {
 import { chargeQuota, refundQuota, resizeAllocation } from '@better-compute/capacity';
 import type { ProviderClients } from './accounts.js';
 import { readFlavorByName, type FlavorRecord } from './flavors.js';
+import { claimReservationSlot } from './provider-reservations.js';
 import {
   canonical,
   fail,
@@ -1183,6 +1184,19 @@ export async function completeCreateInstance(
   let next = await moveInstance(tx, row, 'schedule', 'scheduling', { draft: false });
   if (next.poolClass === 'vps-host') next = await sealUserData(deps, tx, next);
   if (next.poolClass === 'provider') {
+    // A reservation-backed offer is admitted by the database: the reservation row is locked, so two
+    // creates between two provider polls cannot both take the last slot (CAPACITY_UNAVAILABLE).
+    if (next.providerAccountId !== undefined && next.shape.offerId !== undefined) {
+      const reservation = await claimReservationSlot(tx, {
+        accountId: next.providerAccountId,
+        offerId: next.shape.offerId,
+      });
+      if (reservation !== undefined)
+        await tx.query(`UPDATE instances SET provider_reservation = $2 WHERE id = $1`, [
+          next.id,
+          reservation,
+        ]);
+    }
     const demand = instanceDemand(next.shape);
     await chargeQuota(tx, next.tenantId, next.poolId, demand);
     next = await updateInstance(tx, next, { quotaCharged: demand });

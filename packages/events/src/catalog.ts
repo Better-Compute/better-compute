@@ -190,6 +190,13 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
       'A sandbox snapshot settled: ready { snapshotId, includeMemory, sha256, sizeBytes } or failed { snapshotId, reason }',
   },
   {
+    type: 'provider.reservation.*',
+    subject: 'provider-account/{id}',
+    module: 'vps',
+    description:
+      'Provider capacity reservations seen by the vps.reservations worker: detected { accountId, reservationId, machineType, gpus?, total, state, startsAt? }, changed (+ free, inUse, changes), ready (a scheduled or creating reservation became ready), gone (+ poolId, flavorId when it was bound)',
+  },
+  {
     type: 'fleet.*',
     subject: 'fleet/{id}',
     module: 'fleet',

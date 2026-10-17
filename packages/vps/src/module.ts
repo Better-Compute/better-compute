@@ -75,6 +75,21 @@ import {
   type BootstrapOptions,
   type ProviderBootstrap,
 } from './bootstraps.js';
+import {
+  bindReservation,
+  listProviderReservations,
+  parseBindReservation,
+  parseReservations,
+  parseUnbindReservation,
+  providerReservationsReconciler,
+  unbindReservation,
+  type BindReservationInput,
+  type ProviderReservationView,
+  type ReservationDeps,
+  type ReservationsInput,
+  type ReservationsOptions,
+  type UnbindReservationInput,
+} from './provider-reservations.js';
 import { vpsMigrations } from './migrations.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
 import { describeCreateInstance, describeCreateSandbox, describeExtendSandbox } from './describe.js';
@@ -201,6 +216,11 @@ export interface VpsOptions {
    */
   bootstrap?: BootstrapOptions;
   /**
+   * Provider capacity reservations: how often each account's provider is asked for its reservations
+   * (default `5m`). Accounts whose provider has no `listReservations` are skipped.
+   */
+  reservations?: ReservationsOptions;
+  /**
    * Where sandbox snapshots are stored (§3.7): presigned uploads for `instance.snapshot` and the URL
    * restores fetch. Without it `sandboxes.snapshot` is INVALID_CONFIG.
    */
@@ -254,6 +274,9 @@ export type VpsApi = {
     update: MethodDefinition<AccountRef & { config: unknown }, ProviderAccountView>;
     delete: MethodDefinition<AccountRef, { deleted: true }>;
     bootstrap: MethodDefinition<BootstrapInput, ProviderBootstrap>;
+    reservations: MethodDefinition<ReservationsInput, { items: ProviderReservationView[] }>;
+    bindReservation: MethodDefinition<BindReservationInput, { poolId: string; flavorId: string }>;
+    unbindReservation: MethodDefinition<UnbindReservationInput, { reservationId: string }>;
   };
   sandboxes: {
     create: MethodDefinition<CreateSandboxInput, Sandbox>;
@@ -425,6 +448,14 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     clients,
     ...(context.pki ? { pki: context.pki } : {}),
     ...(options.bootstrap ? { options: options.bootstrap } : {}),
+  });
+  const reservationDeps = (context: ModuleContext): ReservationDeps => ({
+    clock: context.clock,
+    events: context.events,
+    work: context.work,
+    log: context.log,
+    secrets: options.secrets ?? context.secrets ?? noSecrets,
+    clients,
   });
   if (options.hostNetwork !== undefined && !/^[A-Za-z0-9_.-]{1,15}$/.test(options.hostNetwork))
     throw new ComputeError('INVALID_CONFIG', 'vps({ hostNetwork }) must be an interface name');
@@ -871,6 +902,27 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         validate: describedBy(schemas.bootstrap, parseBootstrap),
         handler: (context, input) => startBootstrap(bootstrapDeps(context), context, input),
       }),
+      reservations: defineMethod({
+        action: 'compute:providers:read',
+        kind: 'read',
+        resource: accountResource,
+        validate: describedBy(schemas.reservations, parseReservations),
+        handler: (context, input) => listProviderReservations(context.sql, input),
+      }),
+      bindReservation: defineMethod({
+        action: 'compute:providers:manage',
+        kind: 'mutation',
+        resource: accountResource,
+        validate: describedBy(schemas.bindReservation, parseBindReservation),
+        handler: (context, input) => bindReservation(context.sql, input),
+      }),
+      unbindReservation: defineMethod({
+        action: 'compute:providers:manage',
+        kind: 'mutation',
+        resource: accountResource,
+        validate: describedBy(schemas.unbindReservation, parseUnbindReservation),
+        handler: (context, input) => unbindReservation(context.sql, input),
+      }),
     },
     // §3.7 (D24): a sandbox drives one hosted instance; templates are per tenant.
     sandboxes: {
@@ -1133,6 +1185,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           return 'DONE';
         },
       },
+      // Provider capacity reservations: provider_reservations per account, provider.reservation.* events.
+      providerReservationsReconciler(options.reservations ?? {}, reservationDeps),
       {
         // §3.7: sandbox expiry, sandbox.ready/deleted events, and warm pools per template.
         name: sandboxWork,
