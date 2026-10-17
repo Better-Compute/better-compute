@@ -17,7 +17,11 @@ import { refundQuota } from '@better-compute/capacity';
 import { readAccount } from './accounts.js';
 import {
   attachConflictCondition,
+  dropHeldMachineId,
   dropSealedUserData,
+  duplicateBlocked,
+  duplicateMachineCondition,
+  liveHolderOf,
   ownershipBlocked,
   ownershipLostCondition,
   exhaustedHostsCondition,
@@ -115,8 +119,7 @@ async function finishDeletion(
   await deps.authz.remove(tx, { type: 'instance', id: row.id, tenantId: row.tenantId });
   if (row.nodeId) await deps.desired.invalidate(tx, row.nodeId);
   // Its provider machine is free again (discovery's link); a detached one keeps running.
-  if (row.externalId)
-    await tx.query(`UPDATE provider_machines SET instance_id = NULL WHERE instance_id = $1`, [row.id]);
+  await tx.query(`UPDATE provider_machines SET instance_id = NULL WHERE instance_id = $1`, [row.id]);
   const detached =
     row.origin === 'attached' && (row.onDelete === 'detach' || options.detached === true);
   await publishInstance(deps, tx, deleted, detached ? 'instance.detached' : 'instance.deleted', {
@@ -135,6 +138,7 @@ async function beginDeletion(
   row: InstanceRow,
 ): Promise<InstanceRow> {
   if (row.state === 'deleting' || row.state === 'deleted') return row;
+  row = await dropHeldMachineId(tx, row, deps.clock.now());
   const next = await moveInstance(tx, row, 'delete', 'deleting', { reportedState: null });
   if (next.nodeId) await deps.desired.invalidate(tx, next.nodeId);
   return next;
@@ -393,7 +397,8 @@ type ProviderAction =
 function providerAction(row: InstanceRow): ProviderAction {
   const attached = row.origin === 'attached';
   // An attached instance that lost (or never won) its machine's ownership label never touches it.
-  const blocked = attached && ownershipBlocked(row.conditions);
+  // Or whose machine id a live instance holds: that machine is the live one's.
+  const blocked = (attached && ownershipBlocked(row.conditions)) || duplicateBlocked(row.conditions);
   if (row.state === 'deleting') {
     if (!row.externalId) return { kind: 'none' };
     if (blocked) return { kind: 'forget' };
@@ -658,42 +663,70 @@ async function reconcileProvider(
       // instances_external_live: another live instance holds this machine (a reused id). Failing
       // here ends the instance's retries instead of looping on the same refusal.
       await failWith(deps, tx, current, {
-        type: 'DuplicateMachine',
+        type: duplicateMachineCondition,
         reason: '23505',
         message: `Machine ${machine.id} belongs to another live instance`,
       }, now);
       return undefined;
     }
-    if (current.state === 'scheduling') {
-      current = await moveInstance(tx, current, 'complete', 'provisioning');
-      await publishInstance(deps, tx, current, 'instance.provisioning', { externalId: machine.id });
+    // A lost or failed row holds no place in instances_external_live: before it can move back into
+    // a live state, the machine id must not belong to a live instance (a provider reused it).
+    if (current.state === 'lost' || current.state === 'error') {
+      const holder = await liveHolderOf(tx, current);
+      if (holder !== undefined) {
+        await failWith(deps, tx, current, {
+          type: duplicateMachineCondition,
+          reason: 'LiveHolder',
+          message: `Machine ${machine.id} belongs to live instance ${holder}`,
+        }, now);
+        return undefined;
+      }
     }
-    if (reported === 'error') {
-      const failed = await moveInstance(tx, current, 'fail', 'error');
-      await publishInstance(deps, tx, failed, 'instance.failed', { reason: 'provider' });
+    // The transitions below may put the row back into instances_external_live: a race that lands
+    // there as a unique violation fails the instance the same way, instead of a retry loop.
+    const settling = current;
+    await tx.query('SAVEPOINT vps_settle');
+    try {
+      if (current.state === 'scheduling') {
+        current = await moveInstance(tx, current, 'complete', 'provisioning');
+        await publishInstance(deps, tx, current, 'instance.provisioning', { externalId: machine.id });
+      }
+      if (reported === 'error') {
+        const failed = await moveInstance(tx, current, 'fail', 'error');
+        await publishInstance(deps, tx, failed, 'instance.failed', { reason: 'provider' });
+        return undefined;
+      }
+      if (reported === 'absent' && current.state !== 'deleting') {
+        const lost = await moveInstance(tx, current, 'lose', 'lost');
+        await publishInstance(deps, tx, lost, 'instance.lost');
+        return undefined;
+      }
+      if (reported === 'running' || reported === 'stopped') {
+        // A machine that booted while `stopped` is wanted gets powered off next round, and vice versa.
+        const booting = current.state === 'provisioning' || current.state === 'starting';
+        // An attached machine is adopted as it is, running or stopped.
+        const adopting = booting && current.origin === 'attached';
+        const target = booting && !adopting ? 'running' : reported;
+        const next =
+          reported === 'running' || current.state === 'running' || adopting
+            ? await advance(tx, current, target)
+            : current;
+        if (next.state !== current.state)
+          await publishInstance(deps, tx, next, `instance.${next.state}`);
+        current = next;
+        if (current.state === current.desiredState) return now + pollSteadyMs;
+      }
+      return now + pollTransitionalMs;
+    } catch (error) {
+      await tx.query('ROLLBACK TO SAVEPOINT vps_settle');
+      if ((error as { code?: unknown }).code !== '23505') throw error;
+      await failWith(deps, tx, settling, {
+        type: duplicateMachineCondition,
+        reason: '23505',
+        message: `Machine ${machine.id} belongs to another live instance`,
+      }, now);
       return undefined;
     }
-    if (reported === 'absent' && current.state !== 'deleting') {
-      const lost = await moveInstance(tx, current, 'lose', 'lost');
-      await publishInstance(deps, tx, lost, 'instance.lost');
-      return undefined;
-    }
-    if (reported === 'running' || reported === 'stopped') {
-      // A machine that booted while `stopped` is wanted gets powered off next round, and vice versa.
-      const booting = current.state === 'provisioning' || current.state === 'starting';
-      // An attached machine is adopted as it is, running or stopped.
-      const adopting = booting && current.origin === 'attached';
-      const target = booting && !adopting ? 'running' : reported;
-      const next =
-        reported === 'running' || current.state === 'running' || adopting
-          ? await advance(tx, current, target)
-          : current;
-      if (next.state !== current.state)
-        await publishInstance(deps, tx, next, `instance.${next.state}`);
-      current = next;
-      if (current.state === current.desiredState) return now + pollSteadyMs;
-    }
-    return now + pollTransitionalMs;
   });
 }
 

@@ -18,6 +18,7 @@ import {
   instanceAttributes,
   instanceDemand,
   instanceView,
+  dropHeldMachineId,
   instanceWork,
   moveInstance,
   ownershipBlocked,
@@ -498,7 +499,7 @@ export async function rebootInstance(
  * better-compute created cannot be detached: it would keep running, billed to no one.
  */
 export async function detachInstance(
-  deps: Pick<InstanceDeps, 'events' | 'work' | 'desired'>,
+  deps: Pick<InstanceDeps, 'events' | 'work' | 'desired' | 'clock'>,
   tx: SqlTx,
   ref: InstanceRef,
 ): Promise<Instance> {
@@ -512,6 +513,8 @@ export async function detachInstance(
     );
   if (row.state === 'deleted') return instanceView(row);
   row = await updateInstance(tx, row, { onDelete: 'detach', desiredState: 'deleted' });
+  // A lost or failed row whose machine id a live instance holds lets go of it first.
+  if (row.state !== 'deleting') row = await dropHeldMachineId(tx, row, deps.clock.now());
   if (row.state !== 'deleting')
     row = await moveInstance(tx, row, 'delete', 'deleting', { reportedState: null });
   await wake(deps, tx, row);
