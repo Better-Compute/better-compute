@@ -1153,6 +1153,65 @@ describe('reconcile', () => {
     expect(gce.calls).toEqual([]);
   });
 
+  it('an account with a live network is in use; once its networks are deleted it can be deleted (I2)', async () => {
+    const accounts = (api as unknown as Record<string, Record<string, Definition>>)
+      .providerAccounts!;
+    const account = (await run(
+      accounts.create!,
+      {
+        tenantId: 'root',
+        provider: 'fake-gce',
+        name: 'gcp-doomed',
+        config: { zones: ['us-central1-a'] },
+      },
+      alice,
+    )) as { id: string };
+    const pools = capacityModule().api!({} as ModuleContext) as unknown as Record<
+      string,
+      Record<string, Definition>
+    >;
+    const pool = (await run(
+      pools.pools!.create!,
+      { tenantId: 'root', siteId: SITE, class: 'provider', providerAccountId: account.id },
+      alice,
+    )) as { id: string };
+    const network = await createNetwork({ poolId: pool.id });
+    await addSubnet(network.id, { name: 'a', cidr: '10.0.0.0/20' });
+    await createRule(network.id, { name: 'ssh' });
+    await until(() => settled(network.id));
+    // The pool is archived, so only the network pins the account.
+    await db.query(`UPDATE pools SET archived_at = compute_now() WHERE id = $1`, [pool.id]);
+    const deleteAccount = () =>
+      run(accounts.delete!, { tenantId: 'root', accountId: account.id }, alice);
+    const inUse = await deleteAccount().catch((error: unknown) => error);
+    expect(inUse).toMatchObject({ code: 'INVALID_STATE' });
+    expect(String((inUse as Error).message)).toContain(network.name);
+
+    await call('networks', 'delete', { tenantId: 'root', networkId: network.id });
+    await until(async () => (await getNetwork(network.id)).state === 'deleted', 10);
+    // A deleted instance that was on the network keeps its history without the references.
+    const gone = await insertInstance({ networkId: network.id, state: 'deleted' });
+    await db.query(`UPDATE instances SET provider_account_id = $2 WHERE id = $1`, [
+      gone,
+      account.id,
+    ]);
+    await expect(deleteAccount()).resolves.toEqual({ deleted: true });
+    const left = await db.query(
+      `SELECT id FROM networks WHERE provider_account_id = $1
+       UNION ALL SELECT id FROM network_subnets WHERE network_id = $2
+       UNION ALL SELECT id FROM network_firewall_rules WHERE network_id = $2`,
+      [account.id, network.id],
+    );
+    expect(left.rows).toEqual([]);
+    const history = await db.query(
+      `SELECT network_id, subnet_id, provider_account_id FROM instances WHERE id = $1`,
+      [gone],
+    );
+    expect(history.rows).toEqual([
+      { network_id: null, subnet_id: null, provider_account_id: null },
+    ]);
+  });
+
   it('a rule targeting an instance tags the VM and uses targetTags', async () => {
     const network = await createNetwork();
     await addSubnet(network.id, { name: 'a', cidr: '10.0.0.0/20' });

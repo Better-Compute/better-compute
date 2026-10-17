@@ -223,8 +223,9 @@ export async function updateAccount(
 }
 
 /**
- * Deletes an account that no live pool and no live instance uses. Archived pools do not pin it, and
- * deleted instances keep their history but drop the reference.
+ * Deletes an account that no live pool, no live instance and no network that is not deleted uses.
+ * Archived pools do not pin it, deleted instances keep their history but drop the reference, and
+ * deleted networks (with their subnets and rules, all gone at the provider) are removed with it.
  */
 export async function deleteAccount(
   tx: SqlTx,
@@ -243,9 +244,34 @@ export async function deleteAccount(
   );
   if (pools.rows.length > 0 || live.rows.length > 0)
     throw new ComputeError('INVALID_STATE', `Provider account ${account.name} is in use`);
+  const networks = await tx.query<{ id: string; name: string }>(
+    `SELECT id, name FROM networks WHERE provider_account_id = $1 AND state <> 'deleted'
+      ORDER BY name LIMIT 50`,
+    [account.id],
+  );
+  if (networks.rows.length > 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Provider account ${account.name} is in use by networks ${networks.rows
+        .map((row) => row.name)
+        .join(', ')}: delete them first`,
+      undefined,
+      { networkIds: networks.rows.map((row) => row.id) },
+    );
   await tx.query(`UPDATE instances SET provider_account_id = NULL WHERE provider_account_id = $1`, [
     account.id,
   ]);
+  // Deleted networks: history that would pin the account (networks.provider_account_id).
+  const deleted = `SELECT id FROM networks WHERE provider_account_id = $1`;
+  await tx.query(
+    `UPDATE instances SET network_id = NULL, subnet_id = NULL WHERE network_id IN (${deleted})`,
+    [account.id],
+  );
+  await tx.query(`DELETE FROM network_firewall_rules WHERE network_id IN (${deleted})`, [
+    account.id,
+  ]);
+  await tx.query(`DELETE FROM network_subnets WHERE network_id IN (${deleted})`, [account.id]);
+  await tx.query(`DELETE FROM networks WHERE provider_account_id = $1`, [account.id]);
   await tx.query(`DELETE FROM provider_accounts WHERE id = $1`, [account.id]);
 }
 
