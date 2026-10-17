@@ -48,6 +48,18 @@ const alice: Caller = {
   sessionKind: 'user',
   mfa: false,
 };
+const bob: Caller = { ...alice, identityId: 'usr_bob' };
+const overlaps = (a: string, b: string) => {
+  const range = (cidr: string) => {
+    const [address, prefix] = cidr.split('/');
+    const [o1, o2, o3, o4] = address!.split('.').map(Number);
+    const start = ((o1! << 24) | (o2! << 16) | (o3! << 8) | o4!) >>> 0;
+    return [start, start + 2 ** (32 - Number(prefix)) - 1] as const;
+  };
+  const [aStart, aEnd] = range(a);
+  const [bStart, bEnd] = range(b);
+  return aStart <= bEnd && bStart <= aEnd;
+};
 const mallory: Caller = { ...alice, identityId: 'usr_mallory', tenantId: 'other' };
 
 // --- The fake provider -------------------------------------------------------------------------
@@ -147,6 +159,21 @@ const gceLike = defineProvider({
         return answer;
       },
       async ensureSubnet(spec) {
+        // Like GCE: a subnet whose range overlaps a live one of the network is refused.
+        const overlap = [...gce.subnets.values()].find(
+          (live) =>
+            live.network === spec.network &&
+            live.name !== spec.name &&
+            overlaps(live.cidr, spec.cidr),
+        );
+        if (overlap) {
+          gce.calls.push(`ensureSubnet ${spec.name}`);
+          return {
+            id: spec.name,
+            state: 'error',
+            message: `Invalid IPCidrRange: ${spec.cidr} conflicts with existing subnetwork ${overlap.name}`,
+          };
+        }
         return gce.step(
           'ensureSubnet',
           spec.name,
@@ -552,6 +579,32 @@ describe('api', () => {
     expect(authzOps.filter((op) => op.op === 'upsert')).toEqual([]);
     expect(await codeOf(createNetwork({ name: 'Bad_Name' }))).toBe('INVALID_INPUT');
     expect(await codeOf(createNetwork({ unknown: true }))).toBe('INVALID_INPUT');
+  });
+
+  it('scopes idempotency keys to the caller, and replays for the same caller', async () => {
+    const first = await createNetwork({ name: 'shared-key-a', idempotencyKey: 'same-key' }, alice);
+    const second = await createNetwork({ name: 'shared-key-b', idempotencyKey: 'same-key' }, bob);
+    expect(second.id).not.toBe(first.id);
+    expect(second.name).toBe('shared-key-b');
+    const { rows } = await db.query<{ created_by: string }>(
+      `SELECT created_by FROM networks WHERE id = ANY($1::text[]) ORDER BY created_by`,
+      [[first.id, second.id]],
+    );
+    expect(rows.map((row) => row.created_by)).toEqual(['usr_alice', 'usr_bob']);
+    // The same caller and key replays; another request under it is a conflict.
+    expect(
+      (await createNetwork({ name: 'shared-key-a', idempotencyKey: 'same-key' }, alice)).id,
+    ).toBe(first.id);
+    expect(
+      await codeOf(createNetwork({ name: 'shared-key-c', idempotencyKey: 'same-key' }, alice)),
+    ).toBe('CONFLICT');
+    // A taken name is still a name conflict, with its own message.
+    const clash = await createNetwork(
+      { name: 'shared-key-a', idempotencyKey: 'other-key' },
+      bob,
+    ).catch((error) => error);
+    expect(clash).toMatchObject({ code: 'CONFLICT' });
+    expect(clash.message).toMatch(/Network shared-key-a already exists/);
   });
 
   it('refuses a pool whose provider has no networks', async () => {
@@ -1288,5 +1341,56 @@ describe('reconcile', () => {
       { name: 'late', state: 'ready' },
     ]);
     expect(gce.subnets.size).toBe(1);
+  });
+
+  it('frees the name of a deleted network, and still refuses a live duplicate', async () => {
+    const network = await createNetwork({ name: 'reuse-me' });
+    expect(await codeOf(createNetwork({ name: 'reuse-me' }))).toBe('CONFLICT');
+    await until(() => settled(network.id));
+    await call('networks', 'delete', { tenantId: 'root', networkId: network.id });
+    await until(async () => (await getNetwork(network.id)).state === 'deleted');
+    const again = await createNetwork({ name: 'reuse-me' });
+    expect(again.id).not.toBe(network.id);
+    expect(again).toMatchObject({ name: 'reuse-me', state: 'pending' });
+    expect(await codeOf(createNetwork({ name: 'reuse-me' }))).toBe('CONFLICT');
+    await until(() => settled(again.id));
+    expect(gce.networks.has(providerResourceName(again.id))).toBe(true);
+  });
+
+  it('holds back a subnet that reuses the range of one still being deleted', async () => {
+    const { network } = await readyNetwork(['10.0.0.0/24'], 0);
+    const [old] = network.subnets;
+    gce.operationDelayTicks = 1;
+    await call('networks', 'removeSubnet', {
+      tenantId: 'root',
+      networkId: network.id,
+      subnetId: old!.id,
+    });
+    const replacement = await addSubnet(network.id, { name: 'b', cidr: '10.0.0.0/25' });
+    const newName = providerResourceName(replacement.subnets.find((s) => s.name === 'b')!.id);
+    gce.calls.length = 0;
+    events.length = 0;
+
+    // The old subnet is still at the provider: the new one waits (pending, no error, no network.error).
+    await tick();
+    const held = await getNetwork(network.id);
+    expect(held.state).toBe('pending');
+    expect(held.subnets.find((subnet) => subnet.name === 'b')).toMatchObject({ state: 'pending' });
+    expect(gce.calls.some((entry) => entry === `ensureSubnet ${newName}`)).toBe(false);
+    expect(gce.subnets.size).toBe(1);
+    expect(events.map((event) => event.type)).not.toContain('network.error');
+    expect(queue.has(network.id)).toBe(true);
+
+    await until(() => settled(network.id));
+    expect(events.map((event) => event.type)).not.toContain('network.error');
+    expect([...gce.subnets.values()].map((subnet) => subnet.cidr)).toEqual(['10.0.0.0/25']);
+    const final = await getNetwork(network.id);
+    expect(final.state).toBe('ready');
+    expect(final.subnets).toMatchObject([{ name: 'b', state: 'ready' }]);
+    // Every deletion in a pass comes before any ensure of a subnet.
+    const subnetCalls = gce.calls.filter((entry) => /^(delete|ensure)Subnet/.test(entry));
+    expect(subnetCalls.findIndex((entry) => entry.startsWith('ensureSubnet'))).toBeGreaterThan(
+      subnetCalls.findLastIndex((entry) => entry.startsWith('deleteSubnet')),
+    );
   });
 });

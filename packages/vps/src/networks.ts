@@ -53,13 +53,16 @@ CREATE TABLE networks (
   state text NOT NULL CHECK (state IN ('pending', 'ready', 'deleting', 'deleted', 'error')),
   desired_state text NOT NULL CHECK (desired_state IN ('present', 'deleted')),
   message text,
+  -- The caller identity: idempotency keys are scoped to (tenant, caller), as the id derives from them.
+  created_by text NOT NULL,
   idempotency_key text NOT NULL,
   request_hash bytea NOT NULL,
   version bigint NOT NULL,
   created_at timestamptz NOT NULL DEFAULT compute_now(),
-  UNIQUE (tenant_id, name),
-  UNIQUE (tenant_id, idempotency_key)
+  UNIQUE (tenant_id, created_by, idempotency_key)
 );
+-- A deleted network's name is free again.
+CREATE UNIQUE INDEX networks_name ON networks (tenant_id, name) WHERE state <> 'deleted';
 CREATE INDEX networks_live ON networks (state) WHERE state <> 'deleted';
 
 CREATE TABLE network_subnets (
@@ -908,10 +911,10 @@ export async function prepareCreateNetwork(
 }
 
 async function assertNameFree(tx: SqlTx, tenantId: string, name: string): Promise<void> {
-  const taken = await tx.query(`SELECT 1 FROM networks WHERE tenant_id = $1 AND name = $2`, [
-    tenantId,
-    name,
-  ]);
+  const taken = await tx.query(
+    `SELECT 1 FROM networks WHERE tenant_id = $1 AND name = $2 AND state <> 'deleted'`,
+    [tenantId, name],
+  );
   if (taken.rows.length > 0) throw new ComputeError('CONFLICT', `Network ${name} already exists`);
 }
 
@@ -957,8 +960,8 @@ export async function createNetwork(
   try {
     await tx.query(
       `INSERT INTO networks (id, tenant_id, project_id, pool_id, provider_account_id, name, description,
-                             state, desired_state, idempotency_key, request_hash, version)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 'present', $8, decode($9, 'hex'), 1)`,
+                             state, desired_state, created_by, idempotency_key, request_hash, version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 'present', $8, $9, decode($10, 'hex'), 1)`,
       [
         networkId,
         input.tenantId,
@@ -967,13 +970,22 @@ export async function createNetwork(
         accountId,
         input.name,
         input.description ?? null,
+        caller.identityId,
         input.idempotencyKey,
         hash,
       ],
     );
   } catch (error) {
-    if (uniqueViolation(error))
-      throw new ComputeError('CONFLICT', `Network ${input.name} already exists`);
+    if (uniqueViolation(error)) {
+      // The name index, or (a concurrent retry of the same request) the key.
+      const constraint = (error as { constraint?: string }).constraint ?? '';
+      if (constraint.includes('name'))
+        throw new ComputeError('CONFLICT', `Network ${input.name} already exists`);
+      throw new ComputeError(
+        'CONFLICT',
+        'This idempotency key is already being used by a concurrent request',
+      );
+    }
     throw error;
   }
   await deps.authz.upsert(tx, {
@@ -1455,6 +1467,19 @@ export function compileFirewall(networkName: string, rule: RuleRow): ProviderFir
   };
 }
 
+/** Whether two IPv4 CIDRs share addresses. */
+function cidrsOverlap(a: string, b: string): boolean {
+  const range = (cidr: string) => {
+    const [address = '', prefix = '32'] = cidr.split('/');
+    const octets = address.split('.').map(Number);
+    const start = ((octets[0]! << 24) | (octets[1]! << 16) | (octets[2]! << 8) | octets[3]!) >>> 0;
+    return [start, start + 2 ** (32 - Number(prefix)) - 1] as const;
+  };
+  const [aStart, aEnd] = range(a);
+  const [bStart, bEnd] = range(b);
+  return aStart <= bEnd && bStart <= aEnd;
+}
+
 const text = (error: unknown) => String((error as Error)?.message ?? error).slice(0, 500);
 const transientCodes = ['RATE_LIMITED', 'UNAVAILABLE', 'TIMEOUT'];
 
@@ -1675,6 +1700,7 @@ class NetworkWorker {
 
     const problems: string[] = [];
     let waiting = false;
+    // Deletions first: a range freed by `removeSubnet` is reused by a new subnet only once the old one is gone.
     for (const subnet of snapshot.subnets) {
       const name = providerResourceName(subnet.id);
       if (subnet.desired_state === 'deleted') {
@@ -1689,6 +1715,26 @@ class NetworkWorker {
           this.#inFlight = true;
           await this.#setSubnet(subnet, 'deleting');
         }
+      }
+    }
+    for (const subnet of snapshot.subnets) {
+      if (subnet.desired_state === 'deleted') continue;
+      const name = providerResourceName(subnet.id);
+      const blocking = snapshot.subnets.find(
+        (other) =>
+          other.desired_state === 'deleted' &&
+          other.state !== 'deleted' &&
+          cidrsOverlap(other.cidr, subnet.cidr),
+      );
+      if (blocking) {
+        // The provider refuses overlapping subnets: wait until the old one is gone.
+        this.#inFlight = true;
+        waiting = true;
+        await this.#setSubnet(
+          subnet,
+          'pending',
+          `Waiting for subnet ${blocking.name} to be deleted`,
+        );
         continue;
       }
       const result = await this.#attempt(() =>

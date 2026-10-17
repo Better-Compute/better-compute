@@ -7,7 +7,7 @@ The provider-side name of a network, a subnet and a rule is `bc-` and the resour
 Records a network on the pool's provider account and returns it `pending`, with no subnets yet.
 
 - The pool must be offered to the tenant, a `provider` pool, and its account's provider must support networks; otherwise the call is `UNSUPPORTED` (`NOT_FOUND` for a pool the tenant cannot see).
-- `name` is 1 to 42 characters, `[a-z]([-a-z0-9]*[a-z0-9])?`, unique among the tenant's networks, deleted ones included (`CONFLICT` otherwise).
+- `name` is 1 to 42 characters, `[a-z]([-a-z0-9]*[a-z0-9])?`, unique among the tenant's networks that are not deleted (`CONFLICT` otherwise; the name of a deleted network is free again).
 - Decided as `compute:networks:create` on the network it would create (`compute-network`, under the tenant), whose attributes are `providerAccountId`, `poolId` and `projectId`. A refusal leaves nothing behind.
 
 The network id derives from the tenant, the caller and `idempotencyKey`. A retry with the same key returns the same network; the same key with another pool, name, project or description is `CONFLICT`. The caller owns the network. Publishes `network.created`.
