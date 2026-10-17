@@ -172,6 +172,44 @@ import {
 } from './volumes.js';
 import { volumeStorageSelfCheck, volumeStorageStatusHandler } from './volume-storage.js';
 import {
+  addSubnet,
+  clearStagedNetwork,
+  createNetwork,
+  createRule,
+  deleteNetwork,
+  deleteRule,
+  getNetwork,
+  listNetworks,
+  listRules,
+  networkSchemas,
+  networksReconciler,
+  parseAddSubnet,
+  parseCreateNetwork,
+  parseCreateRule,
+  parseListNetworks,
+  parseNetworkRef,
+  parseRemoveSubnet,
+  parseRuleRef,
+  parseUpdateNetwork,
+  parseUpdateRule,
+  prepareCreateNetwork,
+  removeSubnet,
+  updateNetwork,
+  updateRule,
+  type AddSubnetInput,
+  type CreateNetworkInput,
+  type CreateRuleInput,
+  type FirewallRuleView,
+  type ListNetworksInput,
+  type NetworkDeps,
+  type NetworkRef,
+  type NetworkView,
+  type RemoveSubnetInput,
+  type RuleRef,
+  type UpdateNetworkInput,
+  type UpdateRuleInput,
+} from './networks.js';
+import {
   deleteSnapshot,
   getSnapshot,
   instanceSnapshotKind,
@@ -306,6 +344,22 @@ export type VpsApi = {
     resize: MethodDefinition<ResizeVolumeInput, SandboxVolume>;
     delete: MethodDefinition<VolumeRef, SandboxVolume>;
   };
+  /** Tenant networks (VPCs) and their subnets on a provider account (networks.ts). */
+  networks: {
+    create: MethodDefinition<CreateNetworkInput, NetworkView>;
+    list: MethodDefinition<ListNetworksInput, { items: NetworkView[] }>;
+    get: MethodDefinition<NetworkRef, NetworkView>;
+    update: MethodDefinition<UpdateNetworkInput, NetworkView>;
+    delete: MethodDefinition<NetworkRef, NetworkView>;
+    addSubnet: MethodDefinition<AddSubnetInput, NetworkView>;
+    removeSubnet: MethodDefinition<RemoveSubnetInput, NetworkView>;
+  };
+  firewallRules: {
+    create: MethodDefinition<CreateRuleInput, FirewallRuleView>;
+    list: MethodDefinition<NetworkRef, { items: FirewallRuleView[] }>;
+    update: MethodDefinition<UpdateRuleInput, FirewallRuleView>;
+    delete: MethodDefinition<RuleRef, FirewallRuleView>;
+  };
 };
 
 function tenantResource<I extends { tenantId: string }>(input: I) {
@@ -331,6 +385,9 @@ function snapshotResource<I extends { snapshotId: string }>(input: I) {
 }
 function volumeResource<I extends { volumeId: string }>(input: I) {
   return { type: 'sandbox-volume', id: input.volumeId };
+}
+function networkResource<I extends { networkId: string }>(input: I) {
+  return { type: 'network', id: input.networkId };
 }
 
 function parsePool(raw: unknown): PoolInput {
@@ -639,6 +696,16 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     warmBudgets.set(tenantId, { at: now, allowed });
     return allowed;
   };
+
+  const networkDeps = (context: ModuleContext): NetworkDeps => ({
+    clock: context.clock,
+    events: context.events,
+    work: context.work,
+    authz: context.authz,
+    log: context.log,
+    secrets: options.secrets ?? context.secrets ?? noSecrets,
+    clients,
+  });
 
   const depsOf = (context: ModuleContext): InstanceDeps => {
     const deps: InstanceDeps = {
@@ -1129,6 +1196,94 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         handler: (context, input) => deleteVolume(depsOf(context), context.sql, input),
       }),
     },
+    networks: {
+      create: defineMethod({
+        action: 'compute:networks:create',
+        kind: 'mutation',
+        // The envelope decides on the network `prepare` returns.
+        resource: (input: CreateNetworkInput) => ({ type: 'network', id: `draft:${input.idempotencyKey}` }),
+        validate: describedBy(networkSchemas.createNetwork, parseCreateNetwork),
+        admission: {
+          prepare: (context, input, tx) => prepareCreateNetwork(networkDeps(context), context, input, tx),
+          denied: (context, input, tx) => clearStagedNetwork(context, input, tx),
+          // Transaction 2 threw (CONFLICT on the name, UNSUPPORTED): the staged projection row goes.
+          abandoned: (context, input, tx) => clearStagedNetwork(context, input, tx),
+        },
+        handler: (context, input) => createNetwork(networkDeps(context), context, input),
+      }),
+      list: defineMethod({
+        action: 'compute:networks:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(networkSchemas.listNetworks, parseListNetworks),
+        handler: (context, input) => listNetworks(context.sql, input),
+      }),
+      get: defineMethod({
+        action: 'compute:networks:read',
+        kind: 'read',
+        resource: networkResource,
+        validate: describedBy(networkSchemas.network, parseNetworkRef),
+        handler: (context, input) => getNetwork(context.sql, input),
+      }),
+      update: defineMethod({
+        action: 'compute:networks:update',
+        kind: 'mutation',
+        resource: networkResource,
+        validate: describedBy(networkSchemas.updateNetwork, parseUpdateNetwork),
+        handler: (context, input) => updateNetwork(context.sql, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:networks:delete',
+        kind: 'mutation',
+        resource: networkResource,
+        validate: describedBy(networkSchemas.network, parseNetworkRef),
+        handler: (context, input) => deleteNetwork(networkDeps(context), context.sql, input),
+      }),
+      addSubnet: defineMethod({
+        action: 'compute:networks:update',
+        kind: 'mutation',
+        resource: networkResource,
+        validate: describedBy(networkSchemas.addSubnet, parseAddSubnet),
+        handler: (context, input) => addSubnet(networkDeps(context), context.sql, input),
+      }),
+      removeSubnet: defineMethod({
+        action: 'compute:networks:update',
+        kind: 'mutation',
+        resource: networkResource,
+        validate: describedBy(networkSchemas.removeSubnet, parseRemoveSubnet),
+        handler: (context, input) => removeSubnet(networkDeps(context), context.sql, input),
+      }),
+    },
+    firewallRules: {
+      create: defineMethod({
+        action: 'compute:networks:update',
+        kind: 'mutation',
+        resource: networkResource,
+        validate: describedBy(networkSchemas.createRule, parseCreateRule),
+        handler: (context, input) => createRule(networkDeps(context), context.sql, input),
+      }),
+      list: defineMethod({
+        action: 'compute:networks:read',
+        kind: 'read',
+        resource: networkResource,
+        validate: describedBy(networkSchemas.network, parseNetworkRef),
+        handler: (context, input) => listRules(context.sql, input),
+      }),
+      update: defineMethod({
+        action: 'compute:networks:update',
+        kind: 'mutation',
+        resource: networkResource,
+        validate: describedBy(networkSchemas.updateRule, parseUpdateRule),
+        handler: (context, input) => updateRule(networkDeps(context), context.sql, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:networks:update',
+        kind: 'mutation',
+        resource: networkResource,
+        validate: describedBy(networkSchemas.rule, parseRuleRef),
+        handler: (context, input) => deleteRule(networkDeps(context), context.sql, input),
+      }),
+    },
   });
 
   return defineModule({
@@ -1231,6 +1386,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           return 'DONE';
         },
       },
+      // Tenant networks: VPCs, subnets, firewall rules and instance tags converged through the provider.
+      networksReconciler(networkDeps),
     ],
     selfCheck: async (context) => [
       ...(await vpsSelfCheck(context.sql, runtimeTable, runtimes[0]!)),

@@ -197,6 +197,13 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
       'Provider capacity reservations seen by the vps.reservations worker: detected { accountId, reservationId, machineType, gpus?, total, state, startsAt? }, changed (+ free, inUse, changes), ready (a scheduled or creating reservation became ready), gone (+ poolId, flavorId when it was bound)',
   },
   {
+    type: 'network.*',
+    subject: 'network/{id}',
+    module: 'vps',
+    description:
+      'Tenant networks (VPCs): created, ready, error, deleting, deleted; network.subnet.ready and network.rule.ready/error when a subnet or firewall rule converges; data { networkId, ... }',
+  },
+  {
     type: 'fleet.*',
     subject: 'fleet/{id}',
     module: 'fleet',

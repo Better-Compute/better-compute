@@ -427,6 +427,7 @@ describe('vps() API surface', () => {
       'vps/0021_volume_resize_hold',
       'vps/0022_volume_storage',
       'vps/0025_provider_reservations',
+      'vps/0026_networks',
     ]);
     expect(module.requires).toEqual(['capacity']);
     expect(() => vps({ runtimes: [] })).toThrow(ComputeError);

@@ -3,6 +3,7 @@ import { vpsProviderBootstrapsMigration } from './bootstraps.js';
 import { vpsVolumeResizeHoldMigration, vpsVolumesMigration } from './volumes.js';
 import { vpsVolumeStorageMigration } from './volume-storage.js';
 import { providerReservationsMigration } from './provider-reservations.js';
+import { vpsNetworksMigration } from './networks.js';
 import {
   vpsIdentityRebindMigration,
   vpsSandboxExpiringMigration,
@@ -169,4 +170,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsVolumeResizeHoldMigration,
   vpsVolumeStorageMigration,
   providerReservationsMigration,
+  vpsNetworksMigration,
 ]);

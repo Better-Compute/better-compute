@@ -45,6 +45,7 @@ const planActions: Record<string, string[]> = {
     ...a('images', 'read', 'publish'),
     ...a('providers', 'read', 'manage'),
     ...a('sandboxes', 'read', 'manage'),
+    ...a('networks', 'read'),
     ...a('batches', 'read', 'create', 'approve'),
   ],
   'compute-project': [...a('projects', 'read', 'manage'), ...a('usage', 'read')],
@@ -82,6 +83,7 @@ const planActions: Record<string, string[]> = {
   'compute-sandbox-template': a('sandboxes', 'read', 'manage'),
   'compute-sandbox-snapshot': a('sandboxes', 'read', 'delete'),
   'compute-sandbox-volume': a('sandboxes', 'read', 'manage'),
+  'compute-network': a('networks', 'create', 'read', 'update', 'delete'),
 };
 
 describe('resource types (§12.3)', () => {
@@ -100,6 +102,7 @@ describe('resource types (§12.3)', () => {
       'compute-instance': 'compute-pool',
       'compute-sandbox': 'compute-pool',
       'compute-sandbox-volume': 'compute-pool',
+      'compute-network': 'compute-tenant',
     });
     expect(types['compute-project']?.relations).toEqual(['member', 'admin']);
     expect(types['compute-pool']?.relations).toEqual(['viewer', 'user', 'operator', 'admin']);
@@ -390,6 +393,8 @@ describe('apiSurface (§9.2)', () => {
         'sandboxes.list',
         'sandboxTemplates.list',
         'sandboxSnapshots.list',
+        'networks.list',
+        'firewallRules.list',
       ],
     );
   });
@@ -440,9 +445,14 @@ describe('apiSurface (§9.2)', () => {
       'providerAccounts.bindReservation': 'v1.0',
       'providerAccounts.unbindReservation': 'v1.0',
     };
-    for (const [path, phase] of Object.entries(later)) expect(apiMethod(...(path.split('.') as [string, string]))?.phase, path).toBe(phase);
+    for (const [path, phase] of Object.entries(later))
+      expect(apiMethod(...(path.split('.') as [string, string]))?.phase, path).toBe(phase);
     const phaseOf = (group: string) =>
-      new Set(apiSurface.filter((row) => row.group === group && !later[`${row.group}.${row.method}`]).map((row) => row.phase));
+      new Set(
+        apiSurface
+          .filter((row) => row.group === group && !later[`${row.group}.${row.method}`])
+          .map((row) => row.phase),
+      );
     for (const group of [
       'siteTokens',
       'joinRequests',
