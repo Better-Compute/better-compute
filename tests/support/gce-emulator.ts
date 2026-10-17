@@ -656,6 +656,19 @@ export class GceEmulator {
     if (!name || !existing)
       return this.error(404, 'notFound', `The resource '${target(String(name))}' was not found`);
     if (method === 'GET') return this.json(200, existing);
+    if (method === 'DELETE') {
+      const inUse = [...this.instances.values()].some((i) =>
+        (i.networkInterfaces as Json[]).some((nic) =>
+          String(nic.subnetwork ?? '').endsWith(`/subnetworks/${name}`),
+        ),
+      );
+      if (inUse)
+        return this.error(
+          400,
+          'resourceInUseByAnotherResource',
+          `The subnetwork resource '${target(name)}' is already being used`,
+        );
+    }
     if (method === 'DELETE')
       return this.#operation('regions', region, 'delete', target(name), () => {
         this.subnetworks.delete(`${region}/${name}`);

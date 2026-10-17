@@ -11,6 +11,7 @@ import {
   type PowerAction,
   type ProviderContext,
   type ProviderImpl,
+  type ProviderNetworks,
 } from '@better-compute/core';
 import { settled, waitForOperation, type GceClient, type GceOperation } from './client.js';
 import type { GcpConfig, GcpProviderOptions } from './config.js';
@@ -24,6 +25,7 @@ import {
   parseOfferId,
   requestIdFor,
 } from './ids.js';
+import { GcpNetworks } from './networks.js';
 import { readReservations } from './reservations.js';
 import {
   gpusOfType,
@@ -62,6 +64,7 @@ export class GcpCompute implements ProviderImpl {
   protected readonly context: ProviderContext;
   protected readonly options: GcpProviderOptions;
   readonly #types = new Map<string, GceMachineType | undefined>();
+  readonly networks: ProviderNetworks;
 
   constructor(
     config: GcpConfig,
@@ -73,6 +76,7 @@ export class GcpCompute implements ProviderImpl {
     this.context = context;
     this.options = options;
     this.client = client;
+    this.networks = new GcpNetworks(client, options);
   }
 
   // ------------------------------------------------------------------------------- shared
