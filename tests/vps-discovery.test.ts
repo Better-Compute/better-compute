@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { apiSurface, ComputeError } from '@better-compute/core';
 import { closeFixtures } from '@better-compute/testing';
-import { discoveryWork } from '@better-compute/vps';
+import { autoAttachLabels, autoAttachRefused, discoveryWork } from '@better-compute/vps';
 import { workRows } from './support/runtime.js';
-import { gceVm, gceWorld, type GceWorld } from './support/vps-gce.js';
+import {
+  fakeGceProvider,
+  gceVm,
+  gceWorld,
+  type FakeGce,
+  type GceWorld,
+} from './support/vps-gce.js';
 
 // The `vps.discovery` worker (R5): every provider account whose provider can `discover` is listed
 // into `provider_machines` on a period, with first sightings, changes and disappearances published
@@ -301,5 +307,159 @@ describe('api: providerAccounts.machines and providerAccounts.discover', () => {
       phase: 'v1.0',
       kind: 'mutation',
     });
+  });
+});
+
+describe('auto-attach', () => {
+  const owner = 'identity-platform';
+  const labelled = (world: GceWorld, extra: Record<string, string> = {}) => ({
+    [autoAttachLabels.tenant]: world.acmeTenant,
+    [autoAttachLabels.pool]: world.poolId,
+    ...extra,
+  });
+  async function attachedInstances(world: GceWorld) {
+    const { rows } = await world.fixture.database.query<{
+      id: string;
+      tenant_id: string;
+      owner_identity_id: string;
+      on_delete: string;
+      external_id: string;
+    }>(
+      `SELECT id, tenant_id, owner_identity_id, on_delete, external_id FROM instances
+        WHERE origin = 'attached' ORDER BY external_id`,
+    );
+    return rows;
+  }
+
+  it('auto-attaches a labelled VM to its tenant and pool', async () => {
+    const world = await gceWorld({
+      discovery: { every: '1m', autoAttach: { ownerIdentityId: owner } },
+    });
+    world.cloud.machines.set(
+      'us-central1-a/legacy',
+      gceVm('legacy', { labels: labelled(world, { [autoAttachLabels.owner]: 'identity-acme' }) }),
+    );
+    world.cloud.machines.set('us-central1-a/web-1', gceVm('web-1', { labels: labelled(world) }));
+    await world.discover(0);
+    const attached = await attachedInstances(world);
+    expect(attached).toMatchObject([
+      {
+        tenant_id: world.acmeTenant,
+        owner_identity_id: 'identity-acme',
+        on_delete: 'detach',
+        external_id: 'us-central1-a/legacy',
+      },
+      { tenant_id: world.acmeTenant, owner_identity_id: owner, external_id: 'us-central1-a/web-1' },
+    ]);
+    const mine = await world.api.instances.list(world.acme, { tenantId: world.acmeTenant });
+    expect(mine.items.map((item: { id: string }) => item.id)).toEqual([attached[0]!.id]);
+    // The instance reconciler then claims it, and the next pass leaves it alone.
+    await world.tick('vps.instances', 1);
+    expect(world.cloud.machines.get('us-central1-a/legacy')!.labels).toMatchObject({
+      'better-compute-instance': attached[0]!.id,
+    });
+    await world.discover();
+    expect(await attachedInstances(world)).toHaveLength(2);
+    expect(await world.events('instance.attached')).toHaveLength(2);
+  });
+
+  it('ignores VMs without both labels', async () => {
+    const world = await gceWorld({
+      discovery: { every: '1m', autoAttach: { ownerIdentityId: owner } },
+    });
+    world.cloud.machines.set(
+      'us-central1-a/tenant-only',
+      gceVm('tenant-only', { labels: { [autoAttachLabels.tenant]: world.acmeTenant } }),
+    );
+    world.cloud.machines.set(
+      'us-central1-a/pool-only',
+      gceVm('pool-only', { labels: { [autoAttachLabels.pool]: world.poolId } }),
+    );
+    world.cloud.machines.set('us-central1-a/bare', gceVm('bare'));
+    // Labelled, but its ownership label names an instance already: someone else's.
+    world.cloud.machines.set(
+      'us-central1-a/claimed',
+      gceVm('claimed', { labels: labelled(world, { 'better-compute-instance': 'inst_other' }) }),
+    );
+    await world.discover(0);
+    expect(await attachedInstances(world)).toEqual([]);
+  });
+
+  it('refuses a BYO account labelling a VM for another tenant', async () => {
+    const byo: FakeGce = { machines: new Map(), requests: [] };
+    const world = await gceWorld({
+      discovery: { every: '1m', autoAttach: { ownerIdentityId: owner } },
+      providers: [fakeGceProvider(byo, 'fake-gce-byo')],
+    });
+    const account = await world.api.providerAccounts.create(world.acme, {
+      tenantId: world.acmeTenant,
+      provider: 'fake-gce-byo',
+      name: 'acme-gcp',
+      config: {},
+    });
+    byo.machines.set(
+      'us-central1-a/sneaky',
+      gceVm('sneaky', {
+        labels: {
+          [autoAttachLabels.tenant]: world.fixture.tenants.other.id,
+          [autoAttachLabels.pool]: world.poolId,
+        },
+      }),
+    );
+    await world.discover(0);
+    expect(await attachedInstances(world)).toEqual([]);
+    const refusals = async () =>
+      (await world.events('provider.machine.changed')).filter(
+        (event) => event.data.accountId === account.id,
+      );
+    expect(await refusals()).toMatchObject([
+      {
+        tenantId: world.acmeTenant,
+        data: { externalId: 'us-central1-a/sneaky', changes: ['autoAttachRefused'] },
+      },
+    ]);
+    const { rows } = await world.fixture.database.query<{
+      machine: { autoAttachError?: { code: string } };
+    }>(`SELECT machine FROM provider_machines WHERE account_id = $1`, [account.id]);
+    expect(rows[0]!.machine.autoAttachError).toMatchObject({ code: autoAttachRefused });
+    // Refused once, not on every pass.
+    await world.discover();
+    expect(await refusals()).toHaveLength(1);
+  });
+
+  it('records quota failure without failing the pass', async () => {
+    const world = await gceWorld({
+      discovery: { every: '1m', autoAttach: { ownerIdentityId: owner } },
+      quota: { vcpu: 512, memoryGiB: 4096, diskGiB: 1000, gpu: 4 },
+    });
+    world.cloud.machines.set('us-central1-a/legacy', gceVm('legacy', { labels: labelled(world) }));
+    world.cloud.machines.set('us-central1-a/web-1', gceVm('web-1'));
+    await world.discover(0);
+    expect(await attachedInstances(world)).toEqual([]);
+    const { rows } = await world.fixture.database.query<{
+      external_id: string;
+      machine: { autoAttachError?: { code: string } };
+    }>(`SELECT external_id, machine FROM provider_machines ORDER BY external_id`);
+    expect(rows.map((row) => row.external_id)).toEqual([
+      'us-central1-a/legacy',
+      'us-central1-a/web-1',
+    ]);
+    expect(rows[0]!.machine.autoAttachError).toMatchObject({ code: 'QUOTA_EXCEEDED' });
+    const { rows: pass } = await world.fixture.database.query<{ ok: boolean; error: unknown }>(
+      `SELECT last_ok_at IS NOT NULL AS ok, last_error AS error FROM provider_discovery`,
+    );
+    expect(pass).toEqual([{ ok: true, error: null }]);
+    expect(await world.events('instance.attached')).toEqual([]);
+  });
+
+  it('disabled by default', async () => {
+    const world = await gceWorld({ discovery: { every: '1m' } });
+    world.cloud.machines.set('us-central1-a/legacy', gceVm('legacy', { labels: labelled(world) }));
+    await world.discover(0);
+    expect(await attachedInstances(world)).toEqual([]);
+    const { rows } = await world.fixture.database.query<{ machine: Record<string, unknown> }>(
+      `SELECT machine FROM provider_machines`,
+    );
+    expect(rows[0]!.machine.autoAttachError).toBeUndefined();
   });
 });

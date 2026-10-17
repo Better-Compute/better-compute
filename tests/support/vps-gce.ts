@@ -188,6 +188,8 @@ export interface GceWorldOptions extends Pick<VpsOptions, 'discovery'> {
   quota?: Record<string, number>;
   /** Whether iam.rootTenantId names the root tenant, as the IAM bridge sets it (default true). */
   iamRoot?: boolean;
+  /** More providers next to fake-gce and fake-plain (a second GCE account of its own). */
+  providers?: ProviderDefinition[];
 }
 
 export async function gceWorld(options: GceWorldOptions = {}): Promise<GceWorld> {
@@ -196,7 +198,7 @@ export async function gceWorld(options: GceWorldOptions = {}): Promise<GceWorld>
     clock: 'sim',
     modules: [
       vps({
-        providers: [fakeGceProvider(cloud), plainProvider],
+        providers: [fakeGceProvider(cloud), plainProvider, ...(options.providers ?? [])],
         ...(options.discovery !== undefined ? { discovery: options.discovery } : {}),
       }),
     ],

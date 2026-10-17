@@ -4,6 +4,7 @@ import {
   parseDuration,
   strictObject,
   type CallContext,
+  type Caller,
   type Duration,
   type InputSchema,
   type ExternalMachine,
@@ -16,6 +17,7 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { readAccount, type ProviderAccount } from './accounts.js';
+import { attachMachine, parseAttach } from './attach.js';
 import { canonical, fail, id, int, object, optional, tenant } from './input.js';
 import { instanceWork, type InstanceDeps } from './instances.js';
 
@@ -344,6 +346,124 @@ async function discoverAccount(
   await after?.(account, previous);
 }
 
+// --- Label-driven auto-attach (opt-in, D8) -----------------------------------------------------
+
+/** GCE-style labels that ask for a machine to be attached. */
+export const autoAttachLabels = {
+  tenant: 'better-compute-tenant',
+  pool: 'better-compute-pool',
+  owner: 'better-compute-owner',
+} as const;
+
+/** `autoAttachError.code` of a machine labelled for a tenant its account may not serve. */
+export const autoAttachRefused = 'AUTO_ATTACH_REFUSED';
+
+async function recordAutoAttachError(
+  context: ReconcileContext,
+  accountId: string,
+  externalId: string,
+  error: { code: string; message: string },
+): Promise<void> {
+  await context.sql.transaction((tx) =>
+    tx.query(
+      `UPDATE provider_machines
+          SET machine = machine || jsonb_build_object('autoAttachError', $3::jsonb)
+        WHERE account_id = $1 AND external_id = $2`,
+      [
+        accountId,
+        externalId,
+        JSON.stringify({ ...error, message: error.message.slice(0, 500), at: context.clock.now() }),
+      ],
+    ),
+  );
+}
+
+/**
+ * After an account's pass: every free machine labelled with both `better-compute-tenant` and
+ * `better-compute-pool` is attached to that tenant's pool (`onDelete: 'detach'`), each in its own
+ * transaction. A label may name only the account's own tenant, unless the platform owns the
+ * account. Failures are recorded on the machine (`machine.autoAttachError`), never the pass.
+ */
+async function autoAttach(
+  deps: DiscoveryDeps,
+  context: ReconcileContext,
+  settings: { ownerIdentityId: string },
+  account: ProviderAccount,
+  previous: Map<string, StoredMachine>,
+): Promise<void> {
+  const rootTenantId = context.iam.rootTenantId;
+  const { rows } = await context.sql.query<{
+    external_id: string;
+    machine: StoredMachine | string;
+  }>(
+    `SELECT external_id, machine FROM provider_machines
+      WHERE account_id = $1 AND instance_id IS NULL AND gone_at IS NULL ORDER BY external_id`,
+    [account.id],
+  );
+  for (const row of rows) {
+    const machine = json(row.machine);
+    const labels = machine.labels ?? {};
+    const tenantId = labels[autoAttachLabels.tenant];
+    const poolId = labels[autoAttachLabels.pool];
+    if (tenantId === undefined || poolId === undefined) continue;
+    // A machine whose ownership label names an instance belongs to someone already.
+    if (machine.claimedBy !== undefined) continue;
+    const platformAccount = rootTenantId !== undefined && account.tenantId === rootTenantId;
+    if (tenantId !== account.tenantId && !platformAccount) {
+      if (previous.get(row.external_id)?.autoAttachError?.code !== autoAttachRefused)
+        await context.sql.transaction((tx) =>
+          publishMachine(deps, tx, account, 'provider.machine.changed', {
+            externalId: row.external_id,
+            changes: ['autoAttachRefused'],
+          }),
+        );
+      await recordAutoAttachError(context, account.id, row.external_id, {
+        code: autoAttachRefused,
+        message: `Provider account ${account.id} of tenant ${account.tenantId} cannot attach machines to tenant ${tenantId}`,
+      });
+      continue;
+    }
+    // The platform's own service identity attaches (its tenant: the root tenant, else the account's).
+    const caller: Caller = {
+      identityId: settings.ownerIdentityId,
+      identityKind: 'service',
+      tenantId: rootTenantId ?? account.tenantId,
+      sessionId: 'vps.discovery',
+      sessionKind: 'role',
+      mfa: false,
+    };
+    try {
+      const input = parseAttach({
+        tenantId,
+        poolId,
+        externalId: row.external_id,
+        ownerIdentityId: labels[autoAttachLabels.owner] ?? settings.ownerIdentityId,
+        onDelete: 'detach',
+        // A key the API would refuse ('/' in machine ids) is fine here: it only derives the id.
+        idempotencyKey: 'auto-attach',
+      });
+      await context.sql.transaction((tx) =>
+        attachMachine(
+          tx,
+          {
+            events: deps.events,
+            work: deps.work,
+            authz: deps.authz,
+            runtime: deps.runtime,
+            ...(rootTenantId !== undefined ? { rootTenantId } : {}),
+          },
+          { ...input, idempotencyKey: `auto:${row.external_id}`, caller },
+        ),
+      );
+    } catch (error) {
+      await recordAutoAttachError(context, account.id, row.external_id, {
+        code: isComputeError(error) ? error.code : 'INTERNAL_ERROR',
+        message: String((error as Error)?.message ?? error),
+      });
+    }
+  }
+}
+
 /**
  * The `vps.discovery` reconciler (shardBy none): key `all` every `options.every`, and one key per
  * account. `deps` builds what it needs from the run's context (the module's provider clients).
@@ -351,17 +471,15 @@ async function discoverAccount(
 export function discoveryReconciler(
   options: DiscoveryOptions,
   deps: (context: ModuleContext) => DiscoveryDeps,
-  hooks: {
-    /** Runs after an account's pass committed (auto-attach). */
-    afterPass?: (
-      context: ReconcileContext,
-      account: ProviderAccount,
-      previous: Map<string, StoredMachine>,
-    ) => Promise<void>;
-  } = {},
 ): Reconciler {
   const every = options.every ?? '5m';
   const everyMs = parseDuration(every);
+  const settings = options.autoAttach || undefined;
+  if (settings !== undefined && !/^[A-Za-z0-9._:@-]{1,128}$/.test(String(settings.ownerIdentityId)))
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'vps({ discovery: { autoAttach } }).ownerIdentityId must be an identity id',
+    );
   return {
     name: discoveryWork,
     shardBy: 'none',
@@ -375,8 +493,8 @@ export function discoveryReconciler(
           context,
           key,
           everyMs,
-          hooks.afterPass
-            ? (account, previous) => hooks.afterPass!(context, account, previous)
+          settings
+            ? (account, previous) => autoAttach(resolved, context, settings, account, previous)
             : undefined,
         );
       return 'DONE';
