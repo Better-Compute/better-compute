@@ -613,10 +613,12 @@ export async function bindReservation(
         state: 'gone',
       },
     );
-  if (reservation.state !== 'ready' && reservation.state !== 'scheduled')
+  // Only a ready reservation is bound: a future (scheduled) one is fulfilled under a new id, which
+  // would orphan the binding.
+  if (reservation.state !== 'ready')
     throw new ComputeError(
       'INVALID_STATE',
-      `Reservation ${input.reservationId} is ${reservation.state}; bind it when it is ready or scheduled`,
+      `Reservation ${input.reservationId} is ${reservation.state}; bind it once it is ready`,
       undefined,
       { reservationId: input.reservationId, state: reservation.state },
     );

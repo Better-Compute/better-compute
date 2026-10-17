@@ -731,29 +731,47 @@ describe('api & admission', () => {
     await create('vm-3');
   });
 
-  it('a scheduled future reservation is bindable but not admissible until ready', async () => {
+  it('a scheduled future reservation is listed but refuses bind until ready', async () => {
     cloud.reservations = [
       reservation('rsv-a', { total: 2, inUse: 1 }),
       reservation('rsv-future', { state: 'scheduled', startsAt: T0 + 86_400_000, total: 4 }),
     ];
     await advance(6 * MINUTE);
     await pass();
-    const bound = await bind({ reservationId: 'us-central1-a/rsv-future', flavorName: 'future' });
-    expect(bound.flavorId).toMatch(/^flv_/);
-    await expect(create('early', 'future')).rejects.toMatchObject({
-      code: 'CAPACITY_UNAVAILABLE',
+    expect(await listed()).toMatchObject([
+      { name: 'rsv-a' },
+      { name: 'rsv-future', state: 'scheduled' },
+    ]);
+    const future = { reservationId: 'us-central1-a/rsv-future', flavorName: 'future' };
+    await expect(bind(future)).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message: expect.stringMatching(/once it is ready/),
       details: { reservationId: 'us-central1-a/rsv-future', state: 'scheduled' },
     });
+    expect((await flavorsOf()).map((item) => item.name)).toEqual([]);
     cloud.reservations = [
       reservation('rsv-a', { total: 2, inUse: 1 }),
       reservation('rsv-future', { total: 4 }),
     ];
     await advance(6 * MINUTE);
     await pass();
+    const bound = await bind(future);
+    expect(bound.flavorId).toMatch(/^flv_/);
     await create('ready', 'future');
   });
 
-  it('refuses binding a reservation that is not ready or scheduled, or is gone', async () => {
+  it('a bound reservation that stops being ready is not admissible', async () => {
+    await bind();
+    cloud.reservations = [reservation('rsv-a', { total: 2, inUse: 1, state: 'updating' })];
+    await advance(6 * MINUTE);
+    await pass();
+    await expect(create('vm-1')).rejects.toMatchObject({
+      code: 'CAPACITY_UNAVAILABLE',
+      details: { reservationId: 'us-central1-a/rsv-a', state: 'updating' },
+    });
+  });
+
+  it('refuses binding a reservation that is not ready, or is gone', async () => {
     cloud.reservations = [reservation('rsv-a'), reservation('rsv-bad', { state: 'error' })];
     await advance(6 * MINUTE);
     await pass();
