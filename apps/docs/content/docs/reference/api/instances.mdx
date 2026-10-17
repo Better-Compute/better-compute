@@ -31,6 +31,7 @@ Admits a VM from a pool, flavor and image after one IAM decision on the draft; r
 - **Idempotency.** `idempotencyKey` is required. The instance id derives from the tenant, the caller and the key: a retry of a finished request returns the same instance without a second decision, and a different request under the same key is `CONFLICT` with `details.instanceId`.
 - **IAM.** `compute:instances:create` is decided on `compute-instance/` plus the draft id, whose attributes (`vcpu`, `memoryGiB`, `gpus`, `imageId`, `imageVerified`, `projectId`) policies can test. A refusal deletes the draft; a delegated session can get `CONFIRMATION_REQUIRED`.
 - **Networks.** In a provider pool, `networkId` places the VM on a tenant network (`networks.create`) and `subnetId` in one of its subnets; the instance shows both. The network must be the tenant's and on the pool's provider account, must have been provisioned (it reached `ready` once; a network that went back to `pending` because a subnet or rule was added still takes instances) and must not be being deleted, and the subnet must be on it, in the offer's region and `ready`. A network not provisioned yet, being deleted, or a subnet not ready yet is `INVALID_STATE` with a retry hint. Without `subnetId` the network's only subnet in the offer's region is used; none, or several (the error names them), is `INVALID_INPUT`, as is an unknown network or subnet, one of another tenant or provider account, or a `subnetId` without a `networkId`. The VM is created in the subnet with a per-instance network tag, which the network's firewall rules target. The network and subnet stay until the instance is deleted: `networks.delete` and `networks.removeSubnet` are `INVALID_STATE` while it is on them.
+- **Owner.** The instance is owned by the caller, or by `ownerIdentityId`: the platform (a root caller creating in another tenant) issues an instance to a person of that tenant this way, as `attach` does, so it shows in their `scope: 'mine'` list and owner-conditioned policies (`resource.ownerId`) apply to them. Anyone else naming an identity other than their own, and a root caller in its own tenant, is `ACCESS_DENIED` before any decision; a malformed one is `INVALID_INPUT`.
 - **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, an archived pool, a missing or archived flavor, or an image a hosted pool cannot resolve. `INVALID_INPUT` for a pool that is not `vps-host` or `provider`. `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota; `CAPACITY_UNAVAILABLE` when a hosted pool has no free IP address. `INVALID_STATE` for a provider pool without an account, `INVALID_CONFIG` for a hosted pool when `vps()` has no `images`.
 - **Events.** `instance.created`, and `instance.scheduled` with the `nodeId` when a hosted instance is placed. When no host fits, the instance stays in `scheduling` with an `Unschedulable` condition and is retried every 30 seconds. In a provider pool, a create the provider refuses for capacity or quota (at once, or after accepting it, as GCE reports a stockout) moves the instance to `error` with a `ProvisionFailed` condition (reason `CAPACITY_UNAVAILABLE` or `QUOTA_EXCEEDED`) and publishes `instance.failed`; it is not retried, and deleting it refunds the quota.
 
@@ -41,21 +42,22 @@ Admits a VM from a pool, flavor and image after one IAM decision on the draft; r
 
 **Input**
 
-| Field            | Type                        | Required | Constraints                                                             |
-| ---------------- | --------------------------- | -------- | ----------------------------------------------------------------------- |
-| `tenantId`       | string                      | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`              |
-| `poolId`         | string                      | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$`       |
-| `projectId`      | string                      |          | at most 56 characters; matches `^prj_[0-9a-hjkmnp-tv-z]{26,52}$`        |
-| `flavor`         | string                      | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`            |
-| `imageId`        | string                      | yes      | at most 200 characters; matches `^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$` |
-| `sshKeys`        | list of string              |          | 0-32 items; default `[]`                                                |
-| `userData`       | string                      |          | at most 32768 characters                                                |
-| `desiredState`   | one of `running`, `stopped` |          | default `"running"`                                                     |
-| `networkId`      | string                      |          | at most 56 characters; matches `^net_[0-9a-hjkmnp-tv-z]{26,52}$`        |
-| `subnetId`       | string                      |          | at most 57 characters; matches `^snet_[0-9a-hjkmnp-tv-z]{26,52}$`       |
-| `idempotencyKey` | string                      | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`              |
-| `wait`           | object                      |          |                                                                         |
-| `wait.timeoutMs` | integer                     | yes      | 0-30000                                                                 |
+| Field             | Type                        | Required | Constraints                                                             |
+| ----------------- | --------------------------- | -------- | ----------------------------------------------------------------------- |
+| `tenantId`        | string                      | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`              |
+| `poolId`          | string                      | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$`       |
+| `projectId`       | string                      |          | at most 56 characters; matches `^prj_[0-9a-hjkmnp-tv-z]{26,52}$`        |
+| `flavor`          | string                      | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`            |
+| `imageId`         | string                      | yes      | at most 200 characters; matches `^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$` |
+| `sshKeys`         | list of string              |          | 0-32 items; default `[]`                                                |
+| `userData`        | string                      |          | at most 32768 characters                                                |
+| `desiredState`    | one of `running`, `stopped` |          | default `"running"`                                                     |
+| `networkId`       | string                      |          | at most 56 characters; matches `^net_[0-9a-hjkmnp-tv-z]{26,52}$`        |
+| `subnetId`        | string                      |          | at most 57 characters; matches `^snet_[0-9a-hjkmnp-tv-z]{26,52}$`       |
+| `ownerIdentityId` | string                      |          | at most 128 characters; matches `^[A-Za-z0-9._:@-]{1,128}$`             |
+| `idempotencyKey`  | string                      | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`              |
+| `wait`            | object                      |          |                                                                         |
+| `wait.timeoutMs`  | integer                     | yes      | 0-30000                                                                 |
 
 ## list
 
