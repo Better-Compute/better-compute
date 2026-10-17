@@ -6,6 +6,45 @@ All notable changes to the better-compute packages are documented here. The form
 
 ## Unreleased
 
+### Added
+
+- **Google Compute Engine provider** (`@better-compute/provider-gcp`, new, outside the umbrella). Compute Engine VMs
+  as VPS instances and offers, GPU machine types included, over plain `fetch` against the REST v1 API. Accounts take
+  `{ projectId, zones, credentials?, impersonate?, … }`; credentials are a service-account key reference, the
+  metadata server, or a host's own `tokenSource`. Create is idempotent through GCE's `requestId`, and the VMs it
+  owns carry `better-compute-managed` and `better-compute-instance` labels; it never deletes or powers a VM without
+  them. It implements discovery, ownership labels, reservations and networks.
+- **Discovery and attach** (`@better-compute/vps`). The `vps.discovery` worker lists every machine of accounts whose
+  provider can `discover` (`vps({ discovery: { every } })`, default 5 minutes) and publishes `provider.machine.*`.
+  `providerAccounts.machines` reads what it saw and `providerAccounts.discover` runs a pass now (`wait` holds the
+  answer for at most 30 s). `instances.attach` turns a running VM into an instance of a customer tenant without
+  recreating it, with `onDelete: 'detach'` (default) or `'delete'`; `instances.detach` releases one, and
+  `instances.reboot` restarts a provider instance (graceful, or `hard`). Ownership is re-checked on every read: a
+  VM whose label is lost or foreign fails its instance (`OwnershipLost`, `AttachConflict`) and is never acted on
+  again. Opt-in label-driven auto-attach (`discovery.autoAttach`).
+- **Provider reservations.** The `vps.reservations` worker detects provider capacity reservations, on-demand and
+  future (`vps({ reservations: { every } })`, default 5 minutes), and publishes `provider.reservation.*`.
+  `providerAccounts.reservations` lists them with `free` and `pending`; `bindReservation` turns a `ready` one into
+  a flavor of a provider pool, and `unbindReservation` removes it. `instances.create` on a bound flavor takes a free
+  slot under a database lock, so concurrent creates never over-commit it (`CAPACITY_UNAVAILABLE` otherwise).
+- **Tenant networks.** The `networks` and `firewallRules` groups let a tenant build VPCs, subnets and firewall rules
+  on a provider account that supports them; the `vps.networks` reconciler converges the provider and publishes
+  `network.*`. `instances.create` takes `networkId` and `subnetId` (the network must have been provisioned, the
+  subnet `ready`; `INVALID_STATE` until then), rules target instances by a per-instance network tag, and attached VMs
+  are linked to the tenant network their NIC is on. Network names are unique among live networks.
+- **Provider contract** (`@better-compute/core`, additive). Optional `ProviderImpl` members `discover`, `claim`,
+  `release`, `listReservations` and `networks`; optional `ExternalMachine` detail (`zone`, shape, `labels`,
+  `networks`, `reservation`, `claimedBy`, …); `create` takes an optional `network` and `labels`; `Instance`
+  gains `origin`, `onDelete`, `networkId` and `subnetId`; the `network` resource kind and IAM actions
+  `compute:instances:attach` and `compute:networks:*`.
+
+### Changed
+
+- **A provider create refused for capacity or quota ends the instance.** `CAPACITY_UNAVAILABLE` or `QUOTA_EXCEEDED`
+  from `create`, or from `get` while the instance is `scheduling` or `provisioning`, now moves it to `error` with a
+  `ProvisionFailed` condition and publishes `instance.failed` with that `reason`, instead of retrying forever. The
+  provider is asked nothing more about it until it is deleted, and deleting it refunds its quota.
+
 ## 0.1.1 (2026-10-07)
 
 Better IAM 0.3 support. Every package now accepts Better IAM `>=0.2.0 <0.4.0` (dependencies and peers), so

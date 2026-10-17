@@ -1919,6 +1919,12 @@ A phase closes only when its exit tests are green in CI. `bench/REFERENCE.md` de
   - IMDS cross-instance access fails.
 
 **v1.0: Freeze.**
+- *Provider depth (landed 2026-10-17):*
+  - `provider-gcp`: Compute Engine VMs as VPS instances and offers (GPU types included), over plain `fetch`; ownership labels; key, metadata, impersonated or host-supplied tokens;
+  - discovery and attach: the `vps.discovery` worker, `providerAccounts.machines`/`discover`, `instances.attach`/`detach`/`reboot`, ownership re-verified on every read, opt-in auto-attach;
+  - provider reservations: the `vps.reservations` worker, `providerAccounts.reservations`/`bindReservation`/`unbindReservation` (ready reservations only), database-refereed admission on bound flavors;
+  - tenant networks: `networks.*` and `firewallRules.*` with the `vps.networks` reconciler, instances on a tenant network's subnet, rules targeting instances by network tag;
+  - failed provider creates (capacity, quota) end in `error`/`ProvisionFailed` instead of retrying.
 - *Deliverables:* API/proto freeze; the N−2 skew guarantee; generated docs; an external security review; SLSA L3; npm publish with provenance after better-iam publishes.
 - *Acceptance:* upgrading from v0.5 disturbs no running allocation; no open critical or high findings.
 

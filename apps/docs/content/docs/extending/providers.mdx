@@ -4,7 +4,7 @@ metaTitle: Writing a VPS or cloud provider adapter
 description: Build a provider adapter with defineProvider, make create idempotent against an API that has no idempotency keys, map errors, and test it against an emulator.
 icon: Cloud
 status: beta
-packages: ['@better-compute/core', '@better-compute/vps', '@better-compute/provider-hetzner', '@better-compute/provider-proxmox']
+packages: ['@better-compute/core', '@better-compute/vps', '@better-compute/provider-hetzner', '@better-compute/provider-proxmox', '@better-compute/provider-gcp']
 sources:
   - packages/core/src/extension.ts
   - packages/core/src/conformance.ts
@@ -19,6 +19,13 @@ sources:
   - packages/provider-hetzner/src/robot.ts
   - packages/provider-proxmox/README.md
   - packages/provider-proxmox/src/proxmox.ts
+  - packages/provider-gcp/README.md
+  - packages/provider-gcp/src/compute.ts
+  - packages/provider-gcp/src/networks.ts
+  - packages/vps/src/discovery.ts
+  - packages/vps/src/attach.ts
+  - packages/vps/src/provider-reservations.ts
+  - packages/vps/src/networks.ts
   - packages/pki/src/attestors/provisioned.ts
   - packages/server/src/registry.ts
   - tests/vps-provider.test.ts
@@ -26,6 +33,8 @@ sources:
   - tests/provider-hetzner.test.ts
   - tests/provider-hetzner-robot.test.ts
   - tests/provider-proxmox.test.ts
+  - tests/provider-gcp.test.ts
+  - tests/gcp-end-to-end.test.ts
   - PLAN.md
 ---
 
@@ -41,8 +50,10 @@ This page is for adapter authors. How operators create accounts and provider poo
 
 <Callout title="Status">
 Provider pools run today: the `vps.instances` reconciler drives an account's client for every instance of a
-`class: 'provider'` pool (`agent: 'none'`). Three adapters ship: `hetzner-cloud` and `hetzner-robot` in
-`@better-compute/provider-hetzner`, and `proxmox` in `@better-compute/provider-proxmox`. Platform-owned provider
+`class: 'provider'` pool (`agent: 'none'`). Four adapters ship: `hetzner-cloud` and `hetzner-robot` in
+`@better-compute/provider-hetzner`, `proxmox` in `@better-compute/provider-proxmox`, and `gcp` in
+`@better-compute/provider-gcp`, which also implements every optional member below (discovery, ownership labels,
+reservations and networks). Platform-owned provider
 machines run too: `providerAccounts.bootstrap` and the `vps.bootstraps` reconciler call `ProviderImpl.identify` and
 `bootstrap` to turn a rented server (Hetzner Robot) into a bcd host; see [bootstrapping machines](#bootstrapping-machines).
 The provider packages are on npm but sit outside the `better-compute` umbrella, so you install them by name.
@@ -136,17 +147,25 @@ front, so a rotated secret takes effect and the value never lives longer than a 
 | `create(request, call)` | once per instance, retried until it answers | be idempotent by `call.idempotencyKey` |
 | `get(id, call)` | while the instance moves, and at steady state | return the machine, or `undefined` when it does not exist |
 | `delete(id, call)` | on instance deletion | treat an already-gone machine as deleted: throw `NOT_FOUND` or return |
-| `power?(id, action, call)` | on `instances.start` and `stop` (`on`, `graceful-off`) | act on power; without it a start or stop fails the instance `UNSUPPORTED` |
+| `power?(id, action, call)` | on `instances.start` and `stop` (`on`, `graceful-off`), and `instances.reboot` (`graceful-restart`, or `reset` when hard) | act on power; without it a start or stop fails the instance `UNSUPPORTED`, and a reboot is dropped with a `ProviderError` condition |
 | `reinstall?`, `rescue?`, `list?` | not yet | optional capabilities |
+| `discover?(call)` | `vps.discovery`, every `vps({ discovery: { every } })` | yield every machine the account can see, including ones better-compute did not create, with as much of `zone`, `machineType`, `vcpu`, `memoryGiB`, `gpus`, `labels`, `networks`, `reservation`, `createdAt` and `claimedBy` as the provider knows |
+| `claim?(id, instanceId, call, { managed? })` | the first reconcile of an attached instance; with `managed` before an `onDelete: 'delete'` deletion | write the ownership label naming `instanceId` (and with `managed`, the label that hands deletion to better-compute); `CONFLICT` when the label names another instance |
+| `release?(id, instanceId, call)` | deleting an attached instance that detaches | remove the ownership label only if it names `instanceId`, keep every other label; a gone machine is success |
+| `listReservations?(call)` | `vps.reservations`, every `vps({ reservations: { every } })` | return the account's capacity reservations as `ExternalReservation`s, each with an `offerId` that `create` consumes |
+| `networks?` | `vps.networks` | a `ProviderNetworks`: idempotent, non-blocking `ensureNetwork`, `ensureSubnet`, `ensureFirewall`, `deleteNetwork`, `deleteSubnet`, `deleteFirewall` (each answers `pending`/`deleting` while an operation runs and is called again), and `setTags`, which replaces only the `bc-` tags of a machine |
 | `identify?(machine, call)` | `vps.bootstraps`, in `identifying` | return `{ productUuid }`, the machine's SMBIOS UUID (Hetzner Robot reads it in rescue) |
 | `bootstrap?(machine, { joinToken, bcdUrl, sha256 }, call)` | `vps.bootstraps`, in `installing` | metal adapters: deliver a single-use join token without user data |
 
-`create` receives `{ offerId, image, userData, name }`: the flavor's `offerId`, the instance's image, the rendered user
-data, and the instance id as `name`. `call` is a `CallContext` of `{ idempotencyKey, signal, clock, secrets, log }`, and
+`create` receives `{ offerId, image, userData, name, network?, labels? }`: the flavor's `offerId`, the instance's image,
+the rendered user data, the instance id as `name`, and for an instance on a tenant network a `NetworkRef` of
+`{ network, subnet, tags }` (the provider-side names vps chose, used as given). `call` is a `CallContext` of `{ idempotencyKey, signal, clock, secrets, log }`, and
 vps passes the instance id as the key, so a retried create after a crash or a timeout must return the same machine.
 
 A machine is an `ExternalMachine`: `{ id, name?, state, offerId?, region?, addresses }`, with `state` one of `pending`,
-`running`, `stopped`, `rescue`, `deleting`, `deleted`, `error` or `unknown`. Map the provider's statuses onto these
+`running`, `stopped`, `rescue`, `deleting`, `deleted`, `error` or `unknown`, plus optional detail that discovery and
+attach use (`zone`, `machineType`, `vcpu`, `memoryGiB`, `gpus`, `labels`, `networks`, `reservation`, `createdAt`, and
+`claimedBy`, the instance the ownership label names). Map the provider's statuses onto these
 conservatively; Hetzner's `stopping` is still `running` and `rebuilding` is `pending`, and anything unknown is
 `unknown`.
 
@@ -194,11 +213,13 @@ code as its reason, then:
 | --- | --- | --- |
 | `UNSUPPORTED` | fails the instance | an action the provider cannot do (`nmi` on Hetzner Cloud or Proxmox) |
 | `INVALID_STATE`, `INVALID_CONFIG` | fails the instance | a request that can never succeed as configured |
+| `CAPACITY_UNAVAILABLE`, `QUOTA_EXCEEDED` | from `create`, or from `get` while the instance is `scheduling` or `provisioning`: fails the instance with a `ProvisionFailed` condition (no retry; the quota is refunded when it is deleted) | the provider refused the machine for capacity or quota, at once or after accepting the create (GCE reports a stockout on the insert operation, which `get` reads) |
+| `CONFLICT` | from `claim`: fails an attached instance with `AttachConflict` | the ownership label names another instance |
 | `PROVIDER_ERROR` | retries on a later poll | API errors, with `details` such as `{ status, code }`; an unreachable endpoint |
 | `RATE_LIMITED` | retries on a later poll | HTTP 429, with `details.retryAfterMs` |
 | `NOT_FOUND` | success, from `delete` | a machine that is already gone |
 
-Any other code is retried the same way, and a thrown value that is not a `ComputeError` is recorded as
+Any other code is retried the same way (`CAPACITY_UNAVAILABLE` too, once the machine exists), and a thrown value that is not a `ComputeError` is recorded as
 `PROVIDER_ERROR`. Keep secrets out of messages: the first 500 characters of the message are stored in the condition
 and returned with the instance.
 

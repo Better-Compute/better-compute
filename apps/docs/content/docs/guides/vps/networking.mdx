@@ -1,16 +1,17 @@
 ---
 title: Networking
-description: How VPS instances get addresses today, from one IPv4 range per hosted pool to what runtimes and providers report, and what is not built yet.
+description: How VPS instances get addresses, from one IPv4 range per hosted pool to what runtimes and providers report, and tenant networks (VPCs, subnets, firewall rules) on provider accounts.
 metaTitle: VPS networking and pool IPAM
 icon: Network
 status: beta
 packages: ['@better-compute/vps']
-sources: ['packages/vps/src/ipam.ts', 'daemon/internal/runtime/netconfig.go', 'packages/vps/src/migrations.ts', 'packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/server/src/controllers/nodespec.ts', 'proto/bettercompute/agent/v1/session.proto', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-proxmox/src/proxmox.ts', 'packages/provision/src/profile.ts', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts', 'daemon/internal/agent/netpolicy.go', 'daemon/internal/runtime/cloudhypervisor.go', 'daemon/internal/helper/helper.go', 'PLAN.md']
+sources: ['packages/vps/src/ipam.ts', 'packages/vps/src/networks.ts', 'packages/provider-gcp/src/networks.ts', 'daemon/internal/runtime/netconfig.go', 'packages/vps/src/migrations.ts', 'packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/server/src/controllers/nodespec.ts', 'proto/bettercompute/agent/v1/session.proto', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-proxmox/src/proxmox.ts', 'packages/provision/src/profile.ts', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts', 'daemon/internal/agent/netpolicy.go', 'daemon/internal/runtime/cloudhypervisor.go', 'daemon/internal/helper/helper.go', 'PLAN.md']
 ---
 
 A VM is not much use until you know its address. Better Compute keeps networking deliberately small: an address
-plan per hosted pool, and whatever the runtime or the provider reports. Software-defined networking beyond bridges,
-VLANs and IPAM is a non-goal for v1, as are volumes and live migration.
+plan per hosted pool, whatever the runtime or the provider reports, and, on provider accounts that support them,
+[tenant networks](#tenant-networks) the provider builds. Software-defined networking of its own beyond bridges, VLANs
+and IPAM is a non-goal for v1, as is live migration.
 
 Where an instance's addresses come from depends on its pool:
 
@@ -147,6 +148,56 @@ A NIC on a bridge whose name starts with `bc` would match every tap rule, so it 
 check counts the rules of all three tables against what it loaded, and under
 [privilege separation](/docs/daemon#privilege-separation) the root helper accepts a ruleset that names these tables
 and no other.
+
+## Tenant networks
+
+On a provider pool whose provider supports networks (Google Compute Engine), a tenant builds its own private networks
+through [networks](/docs/reference/api/networks) and [firewallRules](/docs/reference/api/firewall-rules), and the
+provider runs them: a VPC per network, subnets in it, and firewall rules. The calls record what the tenant wants and
+return at once; the `vps.networks` reconciler converges the provider.
+
+```ts
+const network = await compute.api.networks.create(
+  { token },
+  { tenantId, poolId, name: 'prod', idempotencyKey: 'net-prod' },
+);
+await compute.api.networks.addSubnet(
+  { token },
+  { tenantId, networkId: network.id, name: 'app', region: 'us-central1', cidr: '10.10.0.0/24' },
+);
+// Once the network has been ready once, instances can be created on it.
+const vm = await compute.api.instances.create(
+  { token },
+  { tenantId, poolId, flavor, imageId, sshKeys, networkId: network.id, idempotencyKey: 'vm-1' },
+);
+await compute.api.firewallRules.create(
+  { token },
+  {
+    tenantId,
+    networkId: network.id,
+    name: 'ssh',
+    direction: 'ingress',
+    rules: [{ protocol: 'tcp', ports: ['22'] }],
+    sources: ['0.0.0.0/0'],
+    targets: { instanceIds: [vm.id] },
+  },
+);
+```
+
+- **Names.** A network's name is unique among the tenant's networks that are not deleted; a deleted network's name
+  is free again. A retried create with the same `idempotencyKey` returns the same network for the same caller.
+  At the provider every resource is named `bc-` and its lower-cased id, and each instance's machine carries the tag
+  `bc-` and 16 hex digits of the sha256 of its instance id, which rules that name instances target.
+- **States.** A network's `state` (`pending`, `ready`, `deleting`, `deleted`, `error`) covers the VPC and its
+  subnets; each subnet and each rule has its own. A rule the provider refuses is `error` on the rule without taking
+  the network out of `ready`. The reconciler publishes `network.*` events and re-applies drift every five minutes.
+- **Instances.** `instances.create` with `networkId` (and `subnetId`, or the network's only subnet in the offer's
+  region) needs a network that has been provisioned (it reached `ready` once; one back in `pending` because a subnet
+  or rule was added still takes instances), is not being deleted, and a `ready` subnet. A network not provisioned
+  yet, or a subnet not ready yet, is `INVALID_STATE`, so retry. Attached machines keep their network and are linked to
+  the tenant network their NIC is on.
+- **Deletion.** `networks.delete` and `removeSubnet` are `INVALID_STATE` while instances are on them. The reconciler
+  deletes rules, then subnets, then the VPC.
 
 What is not there at all: IPv6 ranges, more than one range or lease per instance, and an API to manage ranges. Tunnels
 give you exec, SSH and single-port TCP access without routing to the instance network; see [tunnels](/docs/guides/access/tunnels).

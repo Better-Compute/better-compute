@@ -1,11 +1,11 @@
 ---
 title: Providers
-description: Provider accounts, the defineProvider contract, the Hetzner Cloud and Proxmox VE providers, conformance cases, and secret references for credentials.
+description: Provider accounts, the defineProvider contract, the Hetzner Cloud, Proxmox VE and Google Compute Engine providers, discovery and attach, provider reservations, conformance cases, and secret references for credentials.
 metaTitle: VPS providers and provider accounts
 icon: Cloud
 status: beta
-packages: ['@better-compute/vps', '@better-compute/provider-hetzner', '@better-compute/provider-proxmox']
-sources: ['packages/vps/src/accounts.ts', 'packages/vps/src/provider.ts', 'packages/vps/src/conformance.ts', 'packages/vps/src/module.ts', 'packages/vps/src/lifecycle.ts', 'packages/core/src/extension.ts', 'packages/core/src/manifest.ts', 'packages/provider-hetzner/README.md', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-hetzner/src/robot.ts', 'packages/provider-proxmox/README.md', 'packages/provider-proxmox/src/proxmox.ts', 'packages/server/src/api/secrets.ts', 'packages/server/src/ports.ts', 'packages/pki/src/secrets.ts', 'tests/vps-instances.test.ts', 'tests/vps-provider.test.ts', 'tests/provider-hetzner.test.ts', 'tests/provider-proxmox.test.ts']
+packages: ['@better-compute/vps', '@better-compute/provider-hetzner', '@better-compute/provider-proxmox', '@better-compute/provider-gcp']
+sources: ['packages/vps/src/accounts.ts', 'packages/vps/src/provider.ts', 'packages/vps/src/conformance.ts', 'packages/vps/src/module.ts', 'packages/vps/src/lifecycle.ts', 'packages/core/src/extension.ts', 'packages/core/src/manifest.ts', 'packages/provider-hetzner/README.md', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-hetzner/src/robot.ts', 'packages/provider-proxmox/README.md', 'packages/provider-proxmox/src/proxmox.ts', 'packages/provider-gcp/README.md', 'packages/provider-gcp/src/compute.ts', 'packages/provider-gcp/src/reservations.ts', 'packages/vps/src/discovery.ts', 'packages/vps/src/attach.ts', 'packages/vps/src/provider-reservations.ts', 'packages/server/src/api/secrets.ts', 'packages/server/src/ports.ts', 'packages/pki/src/secrets.ts', 'tests/vps-instances.test.ts', 'tests/vps-provider.test.ts', 'tests/provider-hetzner.test.ts', 'tests/provider-proxmox.test.ts', 'tests/provider-gcp.test.ts', 'tests/gcp-end-to-end.test.ts']
 ---
 
 A provider pool runs its instances on someone else's infrastructure: a public cloud, or a hypervisor cluster you
@@ -23,12 +23,13 @@ registers kinds, data configures instances**.
 import { vps } from 'better-compute/vps';
 import { hetznerCloud } from '@better-compute/provider-hetzner';
 import { proxmoxProvider } from '@better-compute/provider-proxmox';
+import { gcp } from '@better-compute/provider-gcp';
 
-vps({ providers: [hetznerCloud, proxmoxProvider({ writeSnippet })] });
+vps({ providers: [hetznerCloud, proxmoxProvider({ writeSnippet }), gcp] });
 ```
 
 The provider packages are on npm like the rest of Better Compute, but sit outside the `better-compute` umbrella:
-install them by their own names (`npm install @better-compute/provider-hetzner @better-compute/provider-proxmox`).
+install them by their own names (`npm install @better-compute/provider-hetzner @better-compute/provider-proxmox @better-compute/provider-gcp`).
 
 ## Provider accounts
 
@@ -86,6 +87,11 @@ The rest of the group:
 | [update](/docs/reference/api/provider-accounts#update)        | `compute:providers:manage` | Replaces `config` (validated again) and bumps `version`; the next call builds a fresh client.            |
 | [delete](/docs/reference/api/provider-accounts#delete)        | `compute:providers:manage` | Deletes the account, or `INVALID_STATE` while a non-archived pool or a non-deleted instance uses it.     |
 | [bootstrap](/docs/reference/api/provider-accounts#bootstrap)  | `compute:providers:manage` | Turns one of the account's machines into a bcd host of a pool; see [bootstrapping machines](/docs/extending/providers#bootstrapping-machines). |
+| [machines](/docs/reference/api/provider-accounts#machines)    | `compute:providers:read`   | The machines discovery last saw in the account, free, attached or all; see [discovery and attach](#discovery-and-attach). |
+| [discover](/docs/reference/api/provider-accounts#discover)    | `compute:providers:manage` | Runs the account's next discovery pass now; `wait: true` holds the answer for at most 30 s.               |
+| [reservations](/docs/reference/api/provider-accounts#reservations) | `compute:providers:read` | The provider's capacity reservations with `free` and `pending`; see [provider reservations](#provider-reservations). |
+| [bindReservation](/docs/reference/api/provider-accounts#bindreservation) | `compute:providers:manage` | Makes a `ready` reservation a flavor of a provider pool.                                           |
+| [unbindReservation](/docs/reference/api/provider-accounts#unbindreservation) | `compute:providers:manage` | Removes the binding; the flavor is deleted, or archived while instances use it.                 |
 
 Clients are built on demand from the validated config and cached per account id and version. A failed build is not
 cached.
@@ -117,6 +123,55 @@ const pool = await compute.api.pools.create(
 ```
 
 A provider pool needs `providerAccountId`, and its `agent` must be `none`. Only provider pools take an account.
+
+## Discovery and attach
+
+A provider that can list every machine of an account (`discover`, Google Compute Engine today) lets you hand a VM that
+already runs to a customer tenant without recreating it.
+
+- **The `vps.discovery` worker** lists each such account every `vps({ discovery: { every } })` (default `5m`) into
+  `provider_machines`, and publishes `provider.machine.discovered`, `changed` and `gone`. It never changes a machine.
+  [machines](/docs/reference/api/provider-accounts#machines) reads what it saw, and
+  [discover](/docs/reference/api/provider-accounts#discover) runs a pass now (`wait: true` holds the answer for at
+  most 30 s).
+- **[instances.attach](/docs/reference/api/instances#attach)** turns a free machine into an instance of a tenant's
+  provider pool backed by the same account. The instance is owned by `ownerIdentityId`, takes the machine's own shape
+  as its flavor, and is charged to the tenant's quota. Only the platform attaches from accounts its own tenant does
+  not own. The reconciler then writes the ownership label (`claim`) and adopts the machine as it is, running or
+  stopped.
+- **The tenant controls it** like any instance: `get`, `list`, `start`, `stop`, `reboot` and `delete`.
+  `onDelete: 'detach'` (the default) removes the label and leaves the machine running; `'delete'` deletes it.
+  [instances.detach](/docs/reference/api/instances#detach) always detaches.
+- **Ownership is re-checked on every read.** A machine whose label is gone or names another instance fails its
+  instance with `OwnershipLost` (`AttachConflict` when the first claim was refused). vps never powers, deletes or
+  relabels it again, and deleting the instance finishes as a detach without a provider call. An instance whose
+  machine id a live instance already holds fails with `DuplicateMachine` instead of retrying.
+- **Networks.** An attached machine keeps its network. When its NIC is on one of the tenant's
+  [networks](/docs/guides/vps/networking#tenant-networks) on the same account, the instance is linked to it; a
+  network being deleted refuses the attach with `INVALID_STATE`.
+- **Auto-attach** is opt-in. With `vps({ discovery: { autoAttach: { ownerIdentityId } } })`, a free machine labelled
+  `better-compute-tenant=<tenant>` and `better-compute-pool=<pool>` is attached to that pool after each pass
+  (`onDelete: 'detach'`), owned by the identity in its `better-compute-owner` label or else `ownerIdentityId`.
+
+## Provider reservations
+
+A provider that can list capacity reservations (`listReservations`, Google Compute Engine today) has them detected and
+offered as capacity that tenants create instances on.
+
+- **The `vps.reservations` worker** asks each such account every `vps({ reservations: { every } })` (default `5m`)
+  and publishes `provider.reservation.detected`, `changed`, `ready` and `gone`.
+  [reservations](/docs/reference/api/provider-accounts#reservations) lists them with `free` (`total - inUse - pending`)
+  and `pending` (creates admitted that the last scan may not have counted). `free` can be one pass behind the
+  provider.
+- **[bindReservation](/docs/reference/api/provider-accounts#bindreservation)** makes a `ready` reservation a flavor
+  (default name `rsv-<name>`) of a provider pool of the account. A `scheduled` (future) reservation is listed and
+  evented, and `provider.reservation.ready` fires when it is fulfilled, but it can be bound only once it is ready,
+  because the provider fulfils it under a new id.
+- **Admission.** `instances.create` on a bound flavor takes a free slot under a lock on the reservation, so concurrent
+  creates never over-commit it; with none free it is `CAPACITY_UNAVAILABLE` with the counts in `details`. The provider
+  stays the final referee: a create it refuses fails the instance with `ProvisionFailed`, and the slot is free again.
+- **[unbindReservation](/docs/reference/api/provider-accounts#unbindreservation)** removes the binding. The flavor is
+  deleted, or archived while instances use it; the worker does the same when a bound reservation goes away.
 
 ## The provider contract
 
@@ -160,8 +215,9 @@ A machine is an `ExternalMachine`: `{ id, name?, state, offerId?, region?, addre
 `CallContext` with `idempotencyKey`, an abort `signal`, `clock`, `secrets` and `log`.
 
 Throw `ComputeError`s. The reconciler records any failure as a `ProviderError` condition; `UNSUPPORTED`,
-`INVALID_STATE` and `INVALID_CONFIG` fail the instance, everything else (use `PROVIDER_ERROR` and `RATE_LIMITED`) is
-retried. User data from vps carries only the tenant's SSH keys or the tenant's own cloud-init, so a provider never has
+`INVALID_STATE` and `INVALID_CONFIG` fail the instance, and `CAPACITY_UNAVAILABLE` or `QUOTA_EXCEEDED` from `create`, or
+from `get` before the machine has run, fail it with a `ProvisionFailed` condition instead; everything else (use
+`PROVIDER_ERROR` and `RATE_LIMITED`) is retried. User data from vps carries only the tenant's SSH keys or the tenant's own cloud-init, so a provider never has
 to filter secrets out of it. [Providers](/docs/extending/providers) walks through writing one end to end.
 
 ## Conformance
@@ -292,3 +348,64 @@ export const proxmox = proxmoxProvider({
 
 `tests/provider-proxmox.test.ts` runs the conformance cases and the PVE specifics against an in-memory PVE emulator
 passed as `fetch`.
+
+## Google Compute Engine
+
+`@better-compute/provider-gcp` exports `gcp` and `gcpProvider(options)` (id `gcp`, `provides: ['vps']`, capabilities
+`power`, `list`, `discover`, `claim`, `reservations`, `networks`). Compute Engine VMs, GPU machine types included,
+become the instances of provider pools. It also serves [discovery and attach](#discovery-and-attach),
+[provider reservations](#provider-reservations) and [tenant networks](/docs/guides/vps/networking#tenant-networks),
+and calls the Compute Engine REST v1 API over plain `fetch`.
+
+```ts
+await compute.api.providerAccounts.create(
+  { token },
+  {
+    tenantId: 'root',
+    provider: 'gcp',
+    name: 'main',
+    config: { projectId: 'my-project', zones: ['us-central1-a'], credentials: 'secret://gcp/sa-key' },
+  },
+);
+```
+
+<TypeTable
+  type={{
+    projectId: { type: 'string', description: 'The Google Cloud project id.', required: true },
+    zones: { type: 'string[]', description: 'At least one zone. Offers, discovery and reservations are limited to these.', required: true },
+    credentials: { type: 'SecretRef', description: 'A service-account key JSON. Absent: the metadata server, or the tokenSource option.' },
+    impersonate: { type: 'string', description: 'A service-account email to impersonate with the base credentials.' },
+    network: { type: 'string', description: 'The VPC that create uses for an instance on no tenant network.', default: "'default'" },
+    subnet: { type: 'string', description: 'The subnetwork that create uses with that network.' },
+    imageProject: { type: 'string', description: 'Where image families resolve.', default: "'ubuntu-os-cloud'" },
+    diskGiB: { type: 'number', description: 'Boot disk size.', default: '100' },
+    discoverLabel: { type: 'string', description: 'key=value: discovery yields only VMs carrying this label.' },
+  }}
+/>
+
+The account's service account needs `roles/compute.instanceAdmin.v1` (instances, labels, tags and consuming
+reservations; on the owner and consumer projects for shared reservations), `roles/compute.networkAdmin` (networks
+and subnets), `roles/compute.securityAdmin` (firewalls) and `roles/compute.viewer` (discovery, reservations and
+future reservations), plus `roles/iam.serviceAccountTokenCreator` on the target when `impersonate` is set.
+
+- **Ids.** A VM is `zone/name`, named `bc-` and the lower-cased instance id. An offer is `zone/machineType`, or
+  `zone/machineType@reservation` for capacity a reservation holds, which create consumes by name.
+- **Idempotent create.** GCE's `requestId` is a UUIDv5 of the idempotency key. create does not wait for the insert;
+  the reconciler polls `get`, which answers for a VM GCE does not show yet from its insert operation: `pending` while
+  the operation runs, its error once it failed.
+- **Failed creates end.** A stockout (`ZONE_RESOURCE_POOL_EXHAUSTED`, mapped to `CAPACITY_UNAVAILABLE`) or a quota
+  error, at once or after GCE accepted the insert, moves the instance to `error` with `ProvisionFailed` and publishes
+  `instance.failed`. It is not retried, keeps its quota until it is deleted, and deletes without a VM.
+- **Ownership labels.** create labels the VM `better-compute-managed=true` and `better-compute-instance=<id>`. Attach
+  writes `better-compute-instance` only, and `better-compute-managed` just before an `onDelete: 'delete'` deletion.
+  `delete` acts only on managed VMs and `power` only on VMs carrying the instance label.
+- **Power:** `on` is start, `off` and `graceful-off` stop, `reset` and `cycle` reset, and `graceful-restart` is a
+  stop (waited for, at most 20 s) then a start; `nmi` is `UNSUPPORTED`.
+- **Credentials.** A key is exchanged for tokens at the OAuth endpoint and cached until a minute before expiry;
+  without one the metadata server is used. `gcpProvider({ tokenSource })` lets a host pass its own workload-identity
+  client. Tokens are never logged.
+- **Errors** map to `ComputeError` codes (`NOT_FOUND`, `CONFLICT`, `RATE_LIMITED` with `retryAfterMs`,
+  `QUOTA_EXCEEDED`, `ACCESS_DENIED`, `INVALID_INPUT`, `UNAVAILABLE`), with `details: { provider: 'gcp', status, reason }`.
+
+`tests/provider-gcp.test.ts` runs the conformance cases and the GCE specifics against an in-memory emulator passed as
+`fetch`, and `tests/gcp-end-to-end.test.ts` runs the provider and the emulator through vps.
