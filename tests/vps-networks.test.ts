@@ -931,6 +931,35 @@ describe('api', () => {
     expect(await codeOf(createRule(network.id, { name: 'fits-now' }))).toBe('resolved');
   });
 
+  it('allows at most 10 networks per tenant and 16 subnets per network (I6)', async () => {
+    const networks: NetworkView[] = [];
+    for (let index = 0; index < 10; index++) networks.push(await createNetwork());
+    const refused = await createNetwork().catch((error: unknown) => error);
+    expect(refused).toMatchObject({ code: 'QUOTA_EXCEEDED', details: { limit: 10 } });
+    // A refusal leaves no projection row behind.
+    expect([...projected.keys()].filter((key) => key.startsWith('network/'))).toHaveLength(10);
+    // A network being deleted still counts (its VPC exists); once deleted it does not.
+    await call('networks', 'delete', { tenantId: 'root', networkId: networks[0]!.id });
+    expect(await codeOf(createNetwork())).toBe('QUOTA_EXCEEDED');
+    await until(async () => (await getNetwork(networks[0]!.id)).state === 'deleted', 10);
+    await createNetwork();
+
+    const network = networks[1]!;
+    for (let index = 0; index < 16; index++)
+      await addSubnet(network.id, { name: `s${index}`, cidr: `10.0.${index}.0/24` });
+    const tooMany = await addSubnet(network.id, { name: 's16', cidr: '10.0.16.0/24' }).catch(
+      (error: unknown) => error,
+    );
+    expect(tooMany).toMatchObject({ code: 'QUOTA_EXCEEDED', details: { limit: 16 } });
+    // A removed subnet frees its place at once, as it frees its range.
+    await call('networks', 'removeSubnet', {
+      tenantId: 'root',
+      networkId: network.id,
+      subnetId: (await getNetwork(network.id)).subnets[0]!.id,
+    });
+    await addSubnet(network.id, { name: 's16', cidr: '10.0.16.0/24' });
+  });
+
   it('a different tenant cannot read the network', async () => {
     const network = await createNetwork();
     const rule = await createRule(network.id);

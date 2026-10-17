@@ -39,6 +39,15 @@ export const networksWork = 'vps.networks';
 /** At most this many firewall rules (not deleted) per network. */
 export const maxRulesPerNetwork = 100;
 
+/**
+ * At most this many networks (not deleted) per tenant, and subnets (not removed) per network
+ * (ruling F2). Every tenant's VPCs, subnets and firewalls live in the provider account's one
+ * project, whose quotas (VPC networks, subnetworks, firewall rules) all tenants on the account
+ * share: the caps keep one tenant from taking all of them.
+ */
+export const maxNetworksPerTenant = 10;
+export const maxSubnetsPerNetwork = 16;
+
 export const vpsNetworksMigration: Migration = {
   name: 'vps/0026_networks',
   sql: `
@@ -901,6 +910,7 @@ export async function prepareCreateNetwork(
   // Refusals come before anything is staged, so a refused request leaves no projection row behind.
   const { accountId } = await networkProvider(deps, tx, input.tenantId, input.poolId);
   await assertNameFree(tx, input.tenantId, input.name);
+  await assertNetworkAllowance(tx, input.tenantId);
   await context.authz.upsert(tx, {
     type: 'network',
     id: networkId,
@@ -915,6 +925,21 @@ export async function prepareCreateNetwork(
     ownerId: caller.identityId,
   });
   return { status: 'decide', resource: { type: 'network', id: networkId } };
+}
+
+/** QUOTA_EXCEEDED when the tenant already has `maxNetworksPerTenant` networks that are not deleted. */
+async function assertNetworkAllowance(tx: SqlTx, tenantId: string): Promise<void> {
+  const live = await tx.query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM networks WHERE tenant_id = $1 AND state <> 'deleted'`,
+    [tenantId],
+  );
+  if (Number(live.rows[0]!.count) >= maxNetworksPerTenant)
+    throw new ComputeError(
+      'QUOTA_EXCEEDED',
+      `A tenant has at most ${maxNetworksPerTenant} networks that are not deleted`,
+      undefined,
+      { limit: maxNetworksPerTenant },
+    );
 }
 
 async function assertNameFree(tx: SqlTx, tenantId: string, name: string): Promise<void> {
@@ -964,6 +989,11 @@ export async function createNetwork(
   }
   const { accountId } = await networkProvider(deps, tx, input.tenantId, input.poolId);
   await assertNameFree(tx, input.tenantId, input.name);
+  // Concurrent creates of one tenant count one after the other.
+  await tx.query(`SELECT pg_advisory_xact_lock(hashtext('better-compute:networks:' || $1))`, [
+    input.tenantId,
+  ]);
+  await assertNetworkAllowance(tx, input.tenantId);
   try {
     await tx.query(
       `INSERT INTO networks (id, tenant_id, project_id, pool_id, provider_account_id, name, description,
@@ -1115,6 +1145,18 @@ export async function addSubnet(
     throw new ComputeError(
       'CONFLICT',
       `cidr ${input.cidr} overlaps subnet ${overlap.rows[0].name} (${overlap.rows[0].cidr})`,
+    );
+  // The network row is locked (openNetwork): concurrent adds count one after the other.
+  const present = await tx.query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM network_subnets WHERE network_id = $1 AND desired_state = 'present'`,
+    [network.id],
+  );
+  if (Number(present.rows[0]!.count) >= maxSubnetsPerNetwork)
+    throw new ComputeError(
+      'QUOTA_EXCEEDED',
+      `A network has at most ${maxSubnetsPerNetwork} subnets`,
+      undefined,
+      { limit: maxSubnetsPerNetwork },
     );
   const same = await tx.query<SubnetRow>(
     `SELECT ${subnetColumns} FROM network_subnets WHERE network_id = $1 AND name = $2`,
