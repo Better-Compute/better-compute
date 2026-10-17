@@ -238,7 +238,8 @@ NodeSpec. Watch `state`, or the `instance.*` [events](/docs/guides/events), to s
 - `start` or `stop` on an instance that is being deleted is `INVALID_STATE`.
 - `start` on an instance in `error` that has a host or a provider machine retries it: it moves to `starting` and the
   runtime or provider is asked again. An instance that failed before it was placed stays in `error`; delete it and
-  create a new one.
+  create a new one. An instance whose provider create failed (`ProvisionFailed`) is refused with `INVALID_STATE`
+  (`details.condition` and `details.reason`) and left unchanged.
 - `delete` is idempotent. A deleted instance stays readable with `state: 'deleted'`; deleting it again returns it.
 - Deletion releases everything the instance held: the capacity allocation, the IP lease and the quota, and its
   authorization row.
@@ -469,7 +470,7 @@ characters). `UNSUPPORTED`, `INVALID_STATE` and `INVALID_CONFIG` move the instan
 refuses for capacity or quota: `CAPACITY_UNAVAILABLE` or `QUOTA_EXCEEDED` from `create`, or from `get` while the
 instance is `scheduling` or `provisioning` (GCE reports a stockout after accepting the insert), moves it to `error`
 with a `ProvisionFailed` condition naming the code and publishes `instance.failed` with that `reason`. Nothing more is
-asked of the provider, `start` does not revive it, and its quota stays charged until it is deleted, which refunds it.
+asked of the provider, `start` is refused with `INVALID_STATE` (delete it and create again), and its quota stays charged until it is deleted, which refunds it.
 An attached instance whose machine lost its ownership label fails with `OwnershipLost` and is never acted on again. A machine that `get` no longer finds makes the
 instance `lost`, and the reconciler stops polling it; delete it to refund its quota.
 

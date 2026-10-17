@@ -26,7 +26,7 @@ Drafts and instances of other tenants are `NOT_FOUND`.
 
 Sets `desiredState` to `running` and wakes the reconciler; returns the instance before anything has changed on the host or provider.
 
-An instance in `error` that has a host or a provider machine moves to `starting` and is tried again. An instance being deleted is `INVALID_STATE`. Publishes `instance.starting`.
+An instance in `error` that has a host or a provider machine moves to `starting` and is tried again. An instance whose provider create failed (a `ProvisionFailed` condition) is `INVALID_STATE` with `details: { condition: 'ProvisionFailed', reason }` and is left unchanged: delete it and create again. An instance being deleted is `INVALID_STATE`. Publishes `instance.starting`.
 
 ## stop
 

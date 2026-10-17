@@ -43,7 +43,8 @@ All notable changes to the better-compute packages are documented here. The form
 - **A provider create refused for capacity or quota ends the instance.** `CAPACITY_UNAVAILABLE` or `QUOTA_EXCEEDED`
   from `create`, or from `get` while the instance is `scheduling` or `provisioning`, now moves it to `error` with a
   `ProvisionFailed` condition and publishes `instance.failed` with that `reason`, instead of retrying forever. The
-  provider is asked nothing more about it until it is deleted, and deleting it refunds its quota.
+  provider is asked nothing more about it until it is deleted, `instances.start` on it is `INVALID_STATE`, and
+  deleting it refunds its quota.
 
 ## 0.1.1 (2026-10-07)
 
