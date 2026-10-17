@@ -98,6 +98,74 @@ describe('auth & client', () => {
     expect(await get()).not.toBe(a);
   });
 
+  it("pins the key's token_uri to Google's token endpoint: a tenant's key never steers the POST", async () => {
+    const posted: string[] = [];
+    const fetchImpl = (async (url: string | URL) => {
+      posted.push(String(url));
+      return new Response(JSON.stringify({ access_token: 'tok', expires_in: 3600 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+    const keyWith = (tokenUri: unknown) =>
+      JSON.stringify({ ...JSON.parse(keyJson), token_uri: tokenUri });
+    for (const tokenUri of [
+      'http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token',
+      'http://metadata.google.internal/computeMetadata/v1/',
+      'https://internal.platform.example/admin',
+      'http://oauth2.googleapis.com/token',
+      'https://oauth2.googleapis.com.evil.example/token',
+      'https://oauth2.googleapis.com/token?redirect=https://evil.example',
+      'https://oauth2.googleapis.com/token/../admin',
+      'https://OAUTH2.googleapis.com/token',
+      '',
+      42,
+    ])
+      expect(
+        () => serviceAccountTokenSource(keyWith(tokenUri), { fetch: fetchImpl }),
+        String(tokenUri),
+      ).toThrow(
+        expect.objectContaining({
+          code: 'INVALID_CONFIG',
+          details: { provider: 'gcp', reason: 'tokenUri' },
+        }),
+      );
+    expect(posted).toEqual([]);
+    // Google's endpoint, its documented older alias, and a key without token_uri (the default).
+    for (const [tokenUri, expected] of [
+      ['https://oauth2.googleapis.com/token', 'https://oauth2.googleapis.com/token'],
+      ['https://accounts.google.com/o/oauth2/token', 'https://accounts.google.com/o/oauth2/token'],
+      [undefined, 'https://oauth2.googleapis.com/token'],
+    ] as const) {
+      posted.length = 0;
+      const tokens = serviceAccountTokenSource(keyWith(tokenUri), { fetch: fetchImpl });
+      expect(await tokens.token(context())).toBe('tok');
+      expect(posted).toEqual([expected]);
+    }
+  });
+
+  it('a tenant account whose key names another token_uri fails INVALID_CONFIG; nothing is fetched', async () => {
+    const emu = new GceEmulator();
+    const evilKey = JSON.stringify({ ...JSON.parse(keyJson), token_uri: 'http://10.0.0.1/steal' });
+    const provider = gcpProvider({ fetch: emu.fetch });
+    const parsed = await provider.config['~standard'].validate({
+      ...gcpAccount,
+      credentials: 'secret://acme/gcp-key',
+    });
+    const impl = await provider.create((parsed as { value: GcpConfig }).value, {
+      clock: manualClock(0),
+      secrets: { resolve: async () => evilKey },
+      log: { debug() {}, info() {}, warn() {}, error() {} },
+      account: tenantAccount,
+    });
+    const failure = await impl.get('us-central1-a/vm-1', ctx()).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(isComputeError(failure, 'INVALID_CONFIG')).toBe(true);
+    expect(emu.requests).toEqual([]);
+  });
+
   it('metadata token source sends Metadata-Flavor: Google', async () => {
     const emu = new GceEmulator();
     const tokens = metadataTokenSource({ fetch: emu.fetch });

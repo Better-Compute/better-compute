@@ -22,12 +22,15 @@ import {
   deleteAccount,
   listAccounts,
   parseCreateAccount,
+  parseTenantVaultPaths,
   ProviderClients,
   readAccount,
   sameAccountRequest,
   updateAccount,
+  type ClientDeps,
   type CreateAccountInput,
   type ProviderAccount,
+  type TenantVaultPaths,
 } from './accounts.js';
 import {
   createFlavor,
@@ -270,6 +273,12 @@ export interface VpsOptions {
   images?: ImageResolver;
   /** Resolves provider credentials; defaults to the host's secret broker. */
   secrets?: SecretResolver;
+  /**
+   * The `vault://` paths each tenant's provider accounts may name, by tenant id (an entry ending
+   * in `/` allows every path under it). Without an entry a tenant's accounts use only
+   * `secret://<tenant>/…` refs; `env://` (the control plane's environment) stays the platform's.
+   */
+  tenantVaultPaths?: TenantVaultPaths;
   /** What each VPS host keeps for itself (default 2 vCPU, 8 GiB, 100 GiB disk). */
   hostReserve?: Partial<HostReserve>;
   /** How often host capacity is re-derived from inventory (default `30s`). */
@@ -575,7 +584,16 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       throw new ComputeError('INVALID_CONFIG', `Provider ${provider.id} is listed twice`);
     providers.set(provider.id, provider);
   }
-  const clients = new ProviderClients(providers);
+  const tenantVaultPaths =
+    options.tenantVaultPaths !== undefined
+      ? parseTenantVaultPaths(options.tenantVaultPaths)
+      : undefined;
+  const clients = new ProviderClients(providers, tenantVaultPaths);
+  /** What `providerAccounts.create/update` check an account's config with. */
+  const accountCheck = (context: ModuleContext): ClientDeps => ({
+    ...depsOf(context),
+    ...(tenantVaultPaths ? { tenantVaultPaths } : {}),
+  });
   const typePrefix = options.typePrefix ?? 'compute-';
   /**
    * A template that names secrets hands them to every sandbox's guest, which can read them: the
@@ -983,7 +1001,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
             providers,
             input,
             await accountIdOf(context, input),
-            depsOf(context),
+            accountCheck(context),
           );
           await context.authz.upsert(context.sql, {
             type: 'provider-account',
@@ -1046,7 +1064,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           return { tenantId: input.tenantId, accountId: input.accountId, config: input.config };
         }),
         handler: (context, input) =>
-          updateAccount(context.sql, providers, input, depsOf(context)),
+          updateAccount(context.sql, providers, input, accountCheck(context)),
       }),
       delete: defineMethod({
         action: 'compute:providers:manage',

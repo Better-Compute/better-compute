@@ -90,9 +90,18 @@ export interface Progress {
   bytes?: { done: number; total?: number };
 }
 
+/**
+ * (v1.0) Whose resource a value is resolved for: a tenant-owned provider account resolves its
+ * credentials with its own tenant here. A store given a context refuses (`ACCESS_DENIED`) a ref that
+ * is not that tenant's; without one it serves the ref as before.
+ */
+export interface SecretResolveContext {
+  tenantId: string;
+}
+
 /** Resolves a `SecretRef` just in time; values live only in memory. */
 export interface SecretResolver {
-  resolve(ref: SecretRef): Promise<string>;
+  resolve(ref: SecretRef, context?: SecretResolveContext): Promise<string>;
 }
 
 // --- Drivers -------------------------------------------------------------------------------------
@@ -511,7 +520,8 @@ export interface SecretStore {
   /** URI schemes it serves: `secret`, `vault`, `env`. */
   readonly schemes: readonly string[];
   put(tenantId: string, value: string, options?: { ref?: SecretRef }): Promise<SecretRef>;
-  resolve(ref: SecretRef): Promise<string>;
+  /** With `context`, refuses (`ACCESS_DENIED`) a ref that is not `context.tenantId`'s. */
+  resolve(ref: SecretRef, context?: SecretResolveContext): Promise<string>;
   delete(ref: SecretRef): Promise<void>;
 }
 

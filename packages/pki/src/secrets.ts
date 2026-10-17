@@ -215,14 +215,19 @@ export function localSealedSecretStore(
       if (rowCount !== 1) throw new ComputeError('CONFLICT', 'The ref belongs to another tenant');
       return ref as SecretRef;
     },
-    async resolve(ref) {
-      checkRef(ref);
+    async resolve(ref, context) {
+      const parsed = checkRef(ref);
+      // Resolved for a tenant (its provider account's credentials): only that tenant's secrets.
+      const foreign = () =>
+        new ComputeError('ACCESS_DENIED', `Secret ${ref} is not tenant ${context!.tenantId}'s`);
+      if (context && parsed.tenantId !== context.tenantId) throw foreign();
       const { rows } = await sql.query<SealedRow>(
         'SELECT ref, tenant_id, key_id, iv, ciphertext FROM sealed_secrets WHERE ref = $1',
         [ref],
       );
       const row = rows[0];
       if (!row) throw new ComputeError('NOT_FOUND', `Secret ${ref} not found`);
+      if (context && row.tenant_id !== context.tenantId) throw foreign();
       return open(row);
     },
     async delete(ref) {

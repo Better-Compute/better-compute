@@ -5,7 +5,7 @@ metaTitle: VPS providers and provider accounts
 icon: Cloud
 status: beta
 packages: ['@better-compute/vps', '@better-compute/provider-hetzner', '@better-compute/provider-proxmox', '@better-compute/provider-gcp']
-sources: ['packages/vps/src/accounts.ts', 'packages/vps/src/provider.ts', 'packages/vps/src/conformance.ts', 'packages/vps/src/module.ts', 'packages/vps/src/lifecycle.ts', 'packages/core/src/extension.ts', 'packages/core/src/manifest.ts', 'packages/provider-hetzner/README.md', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-hetzner/src/robot.ts', 'packages/provider-proxmox/README.md', 'packages/provider-proxmox/src/proxmox.ts', 'packages/provider-gcp/README.md', 'packages/provider-gcp/src/compute.ts', 'packages/provider-gcp/src/reservations.ts', 'packages/vps/src/discovery.ts', 'packages/vps/src/attach.ts', 'packages/vps/src/provider-reservations.ts', 'packages/server/src/api/secrets.ts', 'packages/server/src/ports.ts', 'packages/pki/src/secrets.ts', 'tests/vps-instances.test.ts', 'tests/vps-provider.test.ts', 'tests/provider-hetzner.test.ts', 'tests/provider-proxmox.test.ts', 'tests/provider-gcp.test.ts', 'tests/gcp-end-to-end.test.ts']
+sources: ['packages/vps/src/accounts.ts', 'packages/vps/src/provider.ts', 'packages/vps/src/conformance.ts', 'packages/vps/src/module.ts', 'packages/vps/src/lifecycle.ts', 'packages/core/src/extension.ts', 'packages/core/src/manifest.ts', 'packages/provider-hetzner/README.md', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-hetzner/src/robot.ts', 'packages/provider-proxmox/README.md', 'packages/provider-proxmox/src/proxmox.ts', 'packages/provider-gcp/README.md', 'packages/provider-gcp/src/compute.ts', 'packages/provider-gcp/src/reservations.ts', 'packages/vps/src/discovery.ts', 'packages/vps/src/attach.ts', 'packages/vps/src/provider-reservations.ts', 'packages/server/src/api/secrets.ts', 'packages/server/src/ports.ts', 'packages/pki/src/secrets.ts', 'tests/vps-instances.test.ts', 'tests/vps-provider.test.ts', 'tests/provider-hetzner.test.ts', 'tests/provider-proxmox.test.ts', 'tests/provider-gcp.test.ts', 'tests/gcp-end-to-end.test.ts', 'tests/vps-account-secret-scope.test.ts']
 ---
 
 A provider pool runs its instances on someone else's infrastructure: a public cloud, or a hypervisor cluster you
@@ -55,6 +55,30 @@ server's secret broker, which routes each reference to the store serving its sch
 local-sealed store, serves `secret://` only. An `env://` or `vault://` reference resolves only if you configure a
 `SecretStore` for that scheme in `betterCompute({ secrets })` (the list replaces the default) or pass your own
 resolver to `vps()`.
+
+### Whose references an account may name
+
+An account's references are scoped to its tenant, for every provider. An account of the root (platform) tenant may
+name any `secret://`, `vault://` or `env://` reference. An account of any other tenant may name only
+`secret://<its tenant>/…`, the secrets that tenant put with `secrets.put`, and the `vault://` paths you allow it:
+
+```ts
+vps({
+  providers: [hetznerCloud, gcp],
+  // An entry ending in / allows every path under it; any other entry allows that one path.
+  tenantVaultPaths: { 'org_acme': ['kv/tenants/acme/'] },
+});
+```
+
+`env://` stays the platform's: it reads the control plane's own environment. A tenant's account naming `env://`,
+a `vault://` path it is not allowed, the platform's secrets or another tenant's would run on credentials that are
+not the tenant's, so `providerAccounts.create` and `update` refuse it with `INVALID_CONFIG` (`details.path` names the
+field, `details.reason` is `secretRefScope`). The rule holds again when a client resolves the account's references:
+an account stored before it, or written around the API, fails that call with `ACCESS_DENIED` and nothing is read.
+A tenant's references reach the store with the tenant as the resolve context (`resolve(ref, { tenantId })`): the
+local-sealed store then serves only a secret stored for that tenant, and a `SecretStore` of your own for `vault://`
+gets the same context to check against. The root tenant is the IAM port's `rootTenantId`; without one, no account is
+the platform's.
 
 ### Create an account
 
@@ -406,7 +430,13 @@ future reservations), plus `roles/iam.serviceAccountTokenCreator` on the target 
   metadata server. That identity is the control plane's, so only an account of the root (platform) tenant may rely on
   it: a tenant's account must name its own key in `credentials` (`impersonate` alone is not enough), or
   `providerAccounts.create` and `update` refuse it with `INVALID_CONFIG`. A `tokenSource` never overrides an account's
-  `credentials`. Tokens are never logged.
+  `credentials`. The key must be the tenant's own (`secret://<tenant>/…`, see
+  [above](#whose-references-an-account-may-name)). Tokens are never logged.
+- **Pinned token endpoint.** The key JSON is the tenant's, and the control plane POSTs the signed JWT to its
+  `token_uri`. So `token_uri` must be absent (the default), `https://oauth2.googleapis.com/token`, or its older alias
+  `https://accounts.google.com/o/oauth2/token`, compared exactly; any other value, such as an address inside the
+  platform's network, is `INVALID_CONFIG` (`details.reason` `tokenUri`) on the first call that needs a token, and
+  nothing is fetched.
 - **Errors** map to `ComputeError` codes (`NOT_FOUND`, `CONFLICT`, `RATE_LIMITED` with `retryAfterMs`,
   `QUOTA_EXCEEDED`, `ACCESS_DENIED`, `INVALID_INPUT`, `UNAVAILABLE`), with `details: { provider: 'gcp', status, reason }`.
 
