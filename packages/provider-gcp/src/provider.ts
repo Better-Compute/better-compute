@@ -8,7 +8,7 @@ import {
   type TokenSource,
 } from './auth.js';
 import { gceClient } from './client.js';
-import { GcpCompute } from './compute.js';
+import { GcpCompute, parseDiscoverLabel } from './compute.js';
 import { gcpConfig, type GcpConfig, type GcpProviderOptions } from './config.js';
 
 const defaultEndpoint = 'https://compute.googleapis.com/compute/v1';
@@ -56,6 +56,7 @@ export function gcpProvider(options: GcpProviderOptions = {}): ProviderDefinitio
     create: (config, context) => {
       if (config.zones.length === 0)
         throw new ComputeError('INVALID_CONFIG', 'A GCP account lists at least one zone');
+      parseDiscoverLabel(config.discoverLabel);
       const client = gceClient({
         fetch: options.fetch ?? globalThis.fetch.bind(globalThis),
         endpoint: options.endpoint ?? defaultEndpoint,

@@ -4,6 +4,7 @@ import {
   isComputeError,
   manualClock,
   type CallContext,
+  type ExternalMachine,
   type Logger,
   type ProviderImpl,
 } from '@better-compute/core';
@@ -392,9 +393,11 @@ describe('compute', () => {
   it('passes every case of the ProviderImpl contract', async () => {
     const report = await runConformance(providerConformanceCases(), () => {
       const emu = new GceEmulator();
+      emu.addInstance('us-central1-a', 'legacy');
       return {
         provider: gcpProvider({ fetch: emu.fetch }),
         config: gcpAccount,
+        attachable: 'us-central1-a/legacy',
         offerId: 'us-central1-a/a3-highgpu-8g',
         image: 'ubuntu-2404-lts',
         context: { secrets },
@@ -869,5 +872,212 @@ describe('compute', () => {
     });
     await host.get('us-central1-a/x', ctx()).catch(() => undefined);
     expect(hostEmu.requests[0]!.headers.get('authorization')).toBe('Bearer host-token');
+  });
+});
+
+describe('attach primitives', () => {
+  const owned = 'better-compute-instance';
+  const managed = 'better-compute-managed';
+
+  it('discover yields unlabeled VMs with shape, networks and consumed reservation', async () => {
+    const emu = new GceEmulator();
+    emu.addInstance('us-central1-a', 'legacy', {
+      machineType: 'a3-highgpu-8g',
+      labels: { team: 'ml' },
+      tags: { items: ['ssh', 'web'] },
+      networkInterfaces: [
+        {
+          network: 'https://compute.googleapis.com/compute/v1/projects/p/global/networks/vpc-1',
+          subnetwork:
+            'https://compute.googleapis.com/compute/v1/projects/p/regions/us-central1/subnetworks/sub-1',
+          accessConfigs: [{}],
+        },
+      ],
+      creationTimestamp: '2026-01-02T03:04:05.000Z',
+      resourceStatus: {
+        reservationConsumptionInfo: {
+          consumedReservation:
+            'https://compute.googleapis.com/compute/v1/projects/p/zones/us-central1-a/reservations/rsv-a',
+        },
+      },
+    });
+    emu.addInstance('us-central1-a', 'shared-vm', {
+      resourceStatus: {
+        reservationConsumptionInfo: {
+          consumedReservation: 'projects/owner/zones/us-central1-a/reservations/shared-rsv',
+        },
+      },
+    });
+    emu.addInstance('us-central1-a', 'claimed', {
+      labels: { [owned]: 'ins_7', [managed]: 'true' },
+    });
+    emu.addInstance('europe-west4-a', 'elsewhere');
+    const impl = await build(emu);
+    const found = new Map<string, ExternalMachine>();
+    for await (const machine of impl.discover!(ctx())) found.set(machine.id, machine);
+    expect([...found.keys()].sort()).toEqual([
+      'us-central1-a/claimed',
+      'us-central1-a/legacy',
+      'us-central1-a/shared-vm',
+    ]);
+    const legacy = found.get('us-central1-a/legacy')!;
+    const suffix = Number(emu.instances.get('us-central1-a/legacy')!.id) % 250;
+    expect(legacy).toMatchObject({
+      state: 'running',
+      zone: 'us-central1-a',
+      region: 'us-central1',
+      machineType: 'a3-highgpu-8g',
+      vcpu: 208,
+      memoryGiB: 1872,
+      gpus: { model: 'H100', count: 8 },
+      labels: { team: 'ml' },
+      networks: [
+        {
+          network: 'vpc-1',
+          subnet: 'sub-1',
+          address: `10.128.0.${suffix}`,
+          publicAddress: `203.0.113.${suffix}`,
+          tags: ['ssh', 'web'],
+        },
+      ],
+      reservation: 'us-central1-a/rsv-a',
+      createdAt: Date.parse('2026-01-02T03:04:05.000Z'),
+    });
+    expect(legacy.claimedBy).toBeUndefined();
+    expect(found.get('us-central1-a/shared-vm')!.reservation).toBe(
+      'projects/owner/zones/us-central1-a/reservations/shared-rsv',
+    );
+    expect(found.get('us-central1-a/claimed')!.claimedBy).toBe('ins_7');
+  });
+
+  it('discover honours discoverLabel', async () => {
+    const emu = new GceEmulator();
+    emu.addInstance('us-central1-a', 'a', { labels: { fleet: 'gpu' } });
+    emu.addInstance('us-central1-a', 'b', { labels: { fleet: 'cpu' } });
+    emu.addInstance('us-central1-a', 'c');
+    emu.addInstance('us-central1-a', 'd', { labels: { fleet: 'gpu' } });
+    const impl = await build(emu, { ...gcpAccount, discoverLabel: 'fleet=gpu' });
+    const ids: string[] = [];
+    for await (const machine of impl.discover!(ctx())) ids.push(machine.id);
+    expect(ids.sort()).toEqual(['us-central1-a/a', 'us-central1-a/d']);
+    expect(
+      emu.requests
+        .find((r) => r.url.pathname.endsWith('/aggregated/instances'))!
+        .url.searchParams.get('filter'),
+    ).toBe('labels.fleet=gpu');
+    await expect(build(emu, { ...gcpAccount, discoverLabel: 'Bad Label' })).rejects.toMatchObject({
+      code: 'INVALID_CONFIG',
+    });
+  });
+
+  it('claim writes the instance label using the fingerprint', async () => {
+    const emu = new GceEmulator();
+    const vm = emu.addInstance('us-central1-a', 'legacy', { labels: { team: 'ml' } });
+    const fingerprint = vm.labelFingerprint;
+    const impl = await build(emu);
+    const claimed = await impl.claim!('us-central1-a/legacy', 'ins_1', ctx());
+    const write = emu.requests.find((r) => r.url.pathname.endsWith('/setLabels'))!;
+    expect(write.body).toEqual({
+      labels: { team: 'ml', [owned]: 'ins_1' },
+      labelFingerprint: fingerprint,
+    });
+    expect(claimed).toMatchObject({ claimedBy: 'ins_1', labels: { team: 'ml', [owned]: 'ins_1' } });
+    expect(vm.labelFingerprint).not.toBe(fingerprint);
+    // Claiming again for the same instance writes nothing.
+    emu.requests.length = 0;
+    await impl.claim!('us-central1-a/legacy', 'ins_1', ctx());
+    expect(emu.requests.some((r) => r.url.pathname.endsWith('/setLabels'))).toBe(false);
+    // Neither managed nor anything else was added.
+    expect(emu.instances.get('us-central1-a/legacy')!.labels[managed]).toBeUndefined();
+  });
+
+  it('claim with managed also hands deletion to better-compute', async () => {
+    const emu = new GceEmulator();
+    emu.addInstance('us-central1-a', 'legacy');
+    const impl = await build(emu);
+    await impl.claim!('us-central1-a/legacy', 'ins_1', ctx(), { managed: true });
+    expect(emu.instances.get('us-central1-a/legacy')!.labels).toEqual({
+      [owned]: 'ins_1',
+      [managed]: 'true',
+    });
+    await impl.delete('us-central1-a/legacy', ctx());
+    expect(emu.instances.has('us-central1-a/legacy')).toBe(false);
+  });
+
+  it('claim refuses a VM claimed by another instance', async () => {
+    const emu = new GceEmulator();
+    emu.addInstance('us-central1-a', 'taken', { labels: { [owned]: 'ins_other' } });
+    emu.addInstance('europe-west4-a', 'far');
+    const impl = await build(emu);
+    await expect(impl.claim!('us-central1-a/taken', 'ins_1', ctx())).rejects.toMatchObject({
+      code: 'CONFLICT',
+    });
+    expect(emu.requests.some((r) => r.url.pathname.endsWith('/setLabels'))).toBe(false);
+    expect(emu.instances.get('us-central1-a/taken')!.labels[owned]).toBe('ins_other');
+    await expect(impl.claim!('us-central1-a/ghost', 'ins_1', ctx())).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+    await expect(impl.claim!('europe-west4-a/far', 'ins_1', ctx())).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+  });
+
+  it('claim retries once on a stale fingerprint, and reports CONFLICT on a second', async () => {
+    const emu = new GceEmulator();
+    const vm = emu.addInstance('us-central1-a', 'legacy', { labels: { team: 'ml' } });
+    const impl = await build(emu);
+    let stale = 1;
+    emu.beforeAction = (action, instance) => {
+      if (action === 'setLabels' && stale-- > 0) {
+        // Somebody else relabels the VM between our read and our write.
+        instance.labels = { ...instance.labels, extra: 'x' };
+        instance.labelFingerprint = `changed-by-someone-${stale}`;
+      }
+    };
+    const claimed = await impl.claim!('us-central1-a/legacy', 'ins_1', ctx());
+    expect(claimed.labels).toEqual({ team: 'ml', extra: 'x', [owned]: 'ins_1' });
+    expect(emu.requests.filter((r) => r.url.pathname.endsWith('/setLabels'))).toHaveLength(2);
+    // Release, then lose the race twice.
+    await impl.release!('us-central1-a/legacy', 'ins_1', ctx());
+    stale = 2;
+    await expect(impl.claim!('us-central1-a/legacy', 'ins_1', ctx())).rejects.toMatchObject({
+      code: 'CONFLICT',
+      details: { status: 412 },
+    });
+    expect(vm.labels[owned]).toBeUndefined();
+  });
+
+  it('release only removes its own label', async () => {
+    const emu = new GceEmulator();
+    const vm = emu.addInstance('us-central1-a', 'legacy', {
+      labels: { team: 'ml', [owned]: 'ins_1' },
+    });
+    const impl = await build(emu);
+    await impl.release!('us-central1-a/legacy', 'ins_other', ctx());
+    expect(vm.labels).toEqual({ team: 'ml', [owned]: 'ins_1' });
+    expect(emu.requests.some((r) => r.url.pathname.endsWith('/setLabels'))).toBe(false);
+    await impl.release!('us-central1-a/legacy', 'ins_1', ctx());
+    expect(vm.labels).toEqual({ team: 'ml' });
+    // Releasing an unclaimed VM is a no-op.
+    emu.requests.length = 0;
+    await impl.release!('us-central1-a/legacy', 'ins_1', ctx());
+    expect(emu.requests.some((r) => r.url.pathname.endsWith('/setLabels'))).toBe(false);
+  });
+
+  it('release keeps the managed label it never wrote', async () => {
+    const emu = new GceEmulator();
+    const vm = emu.addInstance('us-central1-a', 'legacy', {
+      labels: { [owned]: 'ins_1', [managed]: 'true' },
+    });
+    const impl = await build(emu);
+    await impl.release!('us-central1-a/legacy', 'ins_1', ctx());
+    expect(vm.labels).toEqual({ [managed]: 'true' });
+  });
+
+  it('release of a deleted VM succeeds', async () => {
+    const emu = new GceEmulator();
+    const impl = await build(emu);
+    await impl.release!('us-central1-a/gone', 'ins_1', ctx());
+    await impl.release!('nonsense', 'ins_1', ctx());
   });
 });

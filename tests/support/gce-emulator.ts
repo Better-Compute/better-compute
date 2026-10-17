@@ -87,6 +87,8 @@ export class GceEmulator {
   failNext?: { status: number; reason: string; message?: string; headers?: Record<string, string> };
   /** The next operation finishes DONE with this error and its effect is not applied. */
   failNextOperation?: { code: string; message?: string; httpErrorStatusCode?: number };
+  /** Runs before an instance action (`setLabels`, `setTags`, `start`, …) is checked and applied. */
+  beforeAction?: (action: string, instance: Json) => void;
   /** New operations stay RUNNING for this many operation GETs. */
   operationDelayTicks = 0;
   /** Upper bound of a page; a request's `maxResults` can only lower it. */
@@ -447,6 +449,8 @@ export class GceEmulator {
         acceleratorCount: accelerator.guestAcceleratorCount,
       }));
     if (body.reservationAffinity) instance.reservationAffinity = body.reservationAffinity;
+    if (body.resourceStatus) instance.resourceStatus = body.resourceStatus;
+    if (body.creationTimestamp) instance.creationTimestamp = body.creationTimestamp;
     return instance;
   }
 
@@ -506,6 +510,7 @@ export class GceEmulator {
           instance.status = action === 'stop' ? 'TERMINATED' : 'RUNNING';
         });
       }
+      if (method === 'POST' && action) this.beforeAction?.(action, instance);
       if (method === 'POST' && action === 'setLabels') {
         if (body?.labelFingerprint !== instance.labelFingerprint)
           return this.error(

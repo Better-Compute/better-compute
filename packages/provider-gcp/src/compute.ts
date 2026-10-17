@@ -352,18 +352,7 @@ export class GcpCompute implements ProviderImpl {
         return;
       case 'graceful-restart': {
         // A VM cannot be started until it has stopped: wait for the stop (at most 20 s).
-        const stopped = await waitForOperation(this.client, await act('stop'), {
-          signal: context.signal,
-          pollMs: this.options.operationPollMs ?? 2000,
-          maxMs: instanceWaitMs,
-          what: `stop ${id}`,
-        });
-        if (stopped.status !== 'DONE')
-          throw new ComputeError('UNAVAILABLE', `${id} is still stopping`, undefined, {
-            provider: 'gcp',
-            reason: 'stopping',
-            retryAfterMs: 5000,
-          });
+        await this.waitDone(await act('stop'), context.signal, `stop ${id}`);
         await act('start');
         return;
       }
@@ -384,4 +373,138 @@ export class GcpCompute implements ProviderImpl {
       if (this.inConfiguredZone(instance)) yield await this.toMachine(instance, context.signal);
     }
   }
+
+  /** Waits (in-call, at most 20 s) for an operation to finish; UNAVAILABLE if it has not. */
+  protected async waitDone(
+    operation: GceOperation,
+    signal: AbortSignal,
+    what: string,
+  ): Promise<void> {
+    const done = await waitForOperation(this.client, operation, {
+      signal,
+      pollMs: this.options.operationPollMs ?? 2000,
+      maxMs: instanceWaitMs,
+      what,
+    });
+    if (done.status !== 'DONE')
+      throw new ComputeError('UNAVAILABLE', `${what} has not finished yet`, undefined, {
+        provider: 'gcp',
+        reason: 'operationRunning',
+        retryAfterMs: 5000,
+      });
+  }
+
+  // ------------------------------------------------------------------------------- attach
+
+  async *discover(context: CallContext): AsyncIterable<ExternalMachine> {
+    const label = parseDiscoverLabel(this.config.discoverLabel);
+    for await (const instance of this.client.aggregated<GceInstance>(
+      '/aggregated/instances',
+      'instances',
+      {
+        ...(label ? { query: { filter: `labels.${label.key}=${label.value}` } } : {}),
+        signal: context.signal,
+      },
+    )) {
+      if (this.inConfiguredZone(instance)) yield await this.toMachine(instance, context.signal);
+    }
+  }
+
+  /**
+   * Rewrites a VM's labels with `mutate` under its labelFingerprint. `mutate` returns the new
+   * labels, or undefined when nothing needs writing. A stale fingerprint (412) is retried once with
+   * a fresh read; a second one is a CONFLICT.
+   */
+  async #changeLabels(
+    id: string,
+    signal: AbortSignal,
+    mutate: (current: Record<string, string>) => Record<string, string> | undefined,
+  ): Promise<GceInstance> {
+    const { zone, name } = parseMachineId(id);
+    for (let attempt = 0; ; attempt++) {
+      const instance = await this.instance(zone, name, signal);
+      const next = mutate({ ...instance.labels });
+      if (!next) return instance;
+      try {
+        const operation = await this.client.request<GceOperation>(
+          'POST',
+          `/zones/${zone}/instances/${name}/setLabels`,
+          { body: { labels: next, labelFingerprint: instance.labelFingerprint }, signal },
+        );
+        await this.waitDone(operation, signal, `Labelling ${id}`);
+        return await this.instance(zone, name, signal);
+      } catch (error) {
+        if (!isComputeError(error) || error.details?.status !== 412) throw error;
+        if (attempt === 0) continue;
+        throw new ComputeError('CONFLICT', `The labels of ${id} keep changing`, undefined, {
+          provider: 'gcp',
+          status: 412,
+          reason: 'conditionNotMet',
+        });
+      }
+    }
+  }
+
+  async claim(
+    id: string,
+    instanceId: string,
+    context: CallContext,
+    options: { managed?: boolean } = {},
+  ): Promise<ExternalMachine> {
+    const target = parseMachineId(id);
+    if (!this.config.zones.includes(target.zone))
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `Zone ${target.zone} is not one of the account's zones`,
+      );
+    const owner = labelValue(instanceId);
+    const instance = await this.#changeLabels(id, context.signal, (current) => {
+      const claimed = current[labels.instance];
+      if (claimed !== undefined && claimed !== owner)
+        throw new ComputeError(
+          'CONFLICT',
+          `${id} is already claimed by instance ${claimed}`,
+          undefined,
+          {
+            provider: 'gcp',
+            reason: 'claimedByAnother',
+            claimedBy: claimed,
+          },
+        );
+      const next: Record<string, string> = { ...current, [labels.instance]: owner };
+      if (options.managed) next[labels.managed] = 'true';
+      const unchanged = Object.keys(next).every((key) => current[key] === next[key]);
+      return unchanged ? undefined : next;
+    });
+    return this.toMachine(instance, context.signal);
+  }
+
+  async release(id: string, instanceId: string, context: CallContext): Promise<void> {
+    try {
+      const owner = labelValue(instanceId);
+      await this.#changeLabels(id, context.signal, (current) => {
+        if (current[labels.instance] !== owner) return undefined;
+        const { [labels.instance]: _removed, ...rest } = current;
+        return rest;
+      });
+    } catch (error) {
+      // A machine that is gone, or an id that never named one, has nothing left to release.
+      if (isComputeError(error, 'NOT_FOUND') || isComputeError(error, 'INVALID_INPUT')) return;
+      throw error;
+    }
+  }
+}
+
+/** `key=value` as a label filter; undefined when unset. */
+export function parseDiscoverLabel(
+  value: string | undefined,
+): { key: string; value: string } | undefined {
+  if (value === undefined || value === '') return undefined;
+  const match = /^([a-z][a-z0-9_-]{0,62})=([a-z0-9_-]{0,63})$/.exec(value);
+  if (!match)
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'discoverLabel must be "key=value" with GCE label characters (a-z, 0-9, _ and -)',
+    );
+  return { key: match[1]!, value: match[2]! };
 }
