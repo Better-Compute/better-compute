@@ -498,6 +498,10 @@ export interface Instance {
   allocationId?: string;
   /** Provider pools: the provider's machine id. */
   externalId?: string;
+  /** `attached`: a provider machine that existed before (`instances.attach`); default `created`. */
+  origin?: 'created' | 'attached';
+  /** What deleting does to a provider machine: `delete` it, or `detach` (it keeps running). */
+  onDelete?: 'delete' | 'detach';
   addresses: string[];
   ownerIdentityId: string;
   idempotencyKey: string;

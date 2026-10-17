@@ -176,6 +176,13 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     description: 'VPS instance lifecycle',
   },
   {
+    type: 'provider.machine.*',
+    subject: 'provider-account/{id}',
+    module: 'vps',
+    description:
+      'Machines a provider account can see (vps.discovery): discovered { accountId, externalId, machineType, gpus }, changed { accountId, externalId, changes }, gone { accountId, externalId, instanceId? }',
+  },
+  {
     type: 'sandbox.*',
     subject: 'sandbox/{id}',
     module: 'vps',

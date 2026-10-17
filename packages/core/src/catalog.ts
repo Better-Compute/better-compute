@@ -173,7 +173,7 @@ const definitions = {
   instance: {
     description: 'A VPS instance',
     parent: 'pool',
-    actions: a('instances', 'create', 'read', 'update', 'exec', 'delete'),
+    actions: a('instances', 'create', 'read', 'update', 'exec', 'delete', 'attach'),
     attributes: {
       vcpu: 'number',
       memoryGiB: 'number',
@@ -530,6 +530,9 @@ group('instances', 'vps', [
   ['stop', 'mutation', 'instances:update', 'instance', 'v0.3'],
   ['resize', 'mutation', 'instances:update', 'instance', 'v0.3'],
   ['delete', 'mutation', 'instances:delete', 'instance', 'v0.3'],
+  ['attach', 'mutation', 'instances:attach', 'instance', 'v1.0'],
+  ['detach', 'mutation', 'instances:delete', 'instance', 'v1.0'],
+  ['reboot', 'mutation', 'instances:update', 'instance', 'v1.0'],
 ]);
 group('flavors', 'vps', [
   ['list', 'read', 'flavors:read', 'pool', 'v0.3'],
@@ -552,6 +555,8 @@ group('providerAccounts', 'vps', [
   ['update', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
   ['delete', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
   ['bootstrap', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
+  ['machines', 'read', 'providers:read', 'provider-account', 'v1.0'],
+  ['discover', 'mutation', 'providers:manage', 'provider-account', 'v1.0'],
   ['reservations', 'read', 'providers:read', 'provider-account', 'v1.0', list],
   [
     'bindReservation',

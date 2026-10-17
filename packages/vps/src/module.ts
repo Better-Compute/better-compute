@@ -56,6 +56,7 @@ import {
   readInstance,
   resizeInstance,
   setPower,
+  visibleVpsPool,
   type CreateInstanceInput,
   type ImageResolver,
   type CertifyHostKey,
@@ -90,6 +91,33 @@ import {
   type ReservationsOptions,
   type UnbindReservationInput,
 } from './provider-reservations.js';
+import {
+  attachMachine,
+  attachSchemas,
+  detachInstance,
+  parseReboot,
+  rebootInstance,
+  rebootSchema,
+  type RebootInstanceInput,
+  forgetAttach,
+  parseAttach,
+  prepareAttach,
+  type AttachDeps,
+  type AttachInstanceInput,
+} from './attach.js';
+import {
+  discoverPoll,
+  discoveryReconciler,
+  discoverySchemas,
+  listMachines,
+  parseDiscover,
+  parseListMachines,
+  requestDiscovery,
+  type DiscoverInput,
+  type DiscoveryOptions,
+  type ListMachinesInput,
+  type ProviderMachineView,
+} from './discovery.js';
 import { vpsMigrations } from './migrations.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
 import { describeCreateInstance, describeCreateSandbox, describeExtendSandbox } from './describe.js';
@@ -259,6 +287,11 @@ export interface VpsOptions {
    */
   reservations?: ReservationsOptions;
   /**
+   * The `vps.discovery` worker (R5): how often provider accounts whose provider can `discover` are
+   * listed into `provider_machines` (default `5m`), and opt-in label-driven auto-attach.
+   */
+  discovery?: DiscoveryOptions;
+  /**
    * Where sandbox snapshots are stored (§3.7): presigned uploads for `instance.snapshot` and the URL
    * restores fetch. Without it `sandboxes.snapshot` is INVALID_CONFIG.
    */
@@ -297,6 +330,9 @@ export type VpsApi = {
     stop: MethodDefinition<InstanceRef, Instance>;
     resize: MethodDefinition<InstanceRef & { flavor: string }, Instance>;
     delete: MethodDefinition<InstanceRef, Instance>;
+    attach: MethodDefinition<AttachInstanceInput, Instance>;
+    detach: MethodDefinition<InstanceRef, Instance>;
+    reboot: MethodDefinition<RebootInstanceInput, Instance>;
   };
   flavors: {
     list: MethodDefinition<PoolInput, { items: FlavorRecord[] }>;
@@ -315,6 +351,11 @@ export type VpsApi = {
     reservations: MethodDefinition<ReservationsInput, { items: ProviderReservationView[] }>;
     bindReservation: MethodDefinition<BindReservationInput, { poolId: string; flavorId: string }>;
     unbindReservation: MethodDefinition<UnbindReservationInput, { reservationId: string }>;
+    machines: MethodDefinition<
+      ListMachinesInput,
+      { items: ProviderMachineView[]; cursor?: string; discoveredAt?: number }
+    >;
+    discover: MethodDefinition<DiscoverInput, { queued: true; discoveredAt?: number }>;
   };
   sandboxes: {
     create: MethodDefinition<CreateSandboxInput, Sandbox>;
@@ -727,6 +768,17 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     return deps;
   };
 
+  const attachDeps = (context: ModuleContext): AttachDeps => {
+    const deps = depsOf(context);
+    return {
+      events: deps.events,
+      work: deps.work,
+      authz: deps.authz,
+      runtime: deps.runtime,
+      ...(context.iam.rootTenantId !== undefined ? { rootTenantId: context.iam.rootTenantId } : {}),
+    };
+  };
+
   const api = (): VpsApi => ({
     instances: {
       create: defineMethod<CreateInstanceInput, Instance>({
@@ -806,6 +858,43 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         resource: instanceResource,
         validate: describedBy(schemas.instance, parseInstanceRef),
         handler: (context, input) => deleteInstance(depsOf(context), context.sql, input),
+      }),
+      // R1: a provider machine that already runs becomes a tenant's instance (decided on its id).
+      attach: defineMethod<AttachInstanceInput, Instance>({
+        action: 'compute:instances:attach',
+        kind: 'mutation',
+        resource: (input) => ({ type: 'instance', id: `draft:${input.idempotencyKey}` }),
+        validate: describedBy(attachSchemas.attach, parseAttach),
+        admission: {
+          prepare: (context, input, tx) => prepareAttach(context, input, tx),
+          denied: (context, input, tx) => forgetAttach(context, input, tx),
+          abandoned: (context, input, tx) => forgetAttach(context, input, tx),
+        },
+        // The machine is expected in the pool's own provider account.
+        handler: async (context, input) => {
+          const pool = await visibleVpsPool(context.sql, input.tenantId, input.poolId);
+          return attachMachine(context.sql, attachDeps(context), {
+            ...input,
+            caller: context.caller!,
+            accountId: pool.providerAccountId ?? '',
+          });
+        },
+      }),
+      // D6: an attached instance goes, its machine stays (label released, quota refunded).
+      detach: defineMethod({
+        action: 'compute:instances:delete',
+        kind: 'mutation',
+        resource: instanceResource,
+        validate: describedBy(schemas.instance, parseInstanceRef),
+        handler: (context, input) => detachInstance(depsOf(context), context.sql, input),
+      }),
+      // R3: a restart (or reset) of a provider instance's machine, done once by the reconciler.
+      reboot: defineMethod({
+        action: 'compute:instances:update',
+        kind: 'mutation',
+        resource: instanceResource,
+        validate: describedBy(rebootSchema, parseReboot),
+        handler: (context, input) => rebootInstance(depsOf(context), context.sql, input),
       }),
     },
     flavors: {
@@ -989,6 +1078,22 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         resource: accountResource,
         validate: describedBy(schemas.unbindReservation, parseUnbindReservation),
         handler: (context, input) => unbindReservation(context.sql, input),
+      }),
+      // R5: what the vps.discovery worker last saw in the account.
+      machines: defineMethod({
+        action: 'compute:providers:read',
+        kind: 'read',
+        resource: accountResource,
+        validate: describedBy(discoverySchemas.listMachines, parseListMachines),
+        handler: (context, input) => listMachines(context.sql, input),
+      }),
+      discover: defineMethod({
+        action: 'compute:providers:manage',
+        kind: 'mutation',
+        resource: accountResource,
+        validate: describedBy(discoverySchemas.discover, parseDiscover),
+        handler: (context, input) => requestDiscovery(depsOf(context), context.sql, input),
+        poll: discoverPoll,
       }),
     },
     // §3.7 (D24): a sandbox drives one hosted instance; templates are per tenant.
@@ -1342,6 +1447,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       },
       // Provider capacity reservations: provider_reservations per account, provider.reservation.* events.
       providerReservationsReconciler(options.reservations ?? {}, reservationDeps),
+      // R5: provider_machines, listed per provider account (key `all` periodic, then per account).
+      discoveryReconciler(options.discovery ?? {}, depsOf),
       {
         // §3.7: sandbox expiry, sandbox.ready/deleted events, and warm pools per template.
         name: sandboxWork,

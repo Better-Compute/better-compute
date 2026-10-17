@@ -75,7 +75,7 @@ const planActions: Record<string, string[]> = {
     ...a('workflows', 'read', 'manage'),
   ],
   'compute-reservation': a('reservations', 'create', 'read', 'extend', 'release'),
-  'compute-instance': a('instances', 'create', 'read', 'update', 'exec', 'delete'),
+  'compute-instance': a('instances', 'create', 'read', 'update', 'exec', 'delete', 'attach'),
   'compute-image': a('images', 'read', 'publish'),
   'compute-profile': a('profiles', 'read', 'manage'),
   'compute-provider-account': a('providers', 'read', 'manage'),
@@ -444,6 +444,11 @@ describe('apiSurface (§9.2)', () => {
       'providerAccounts.reservations': 'v1.0',
       'providerAccounts.bindReservation': 'v1.0',
       'providerAccounts.unbindReservation': 'v1.0',
+      'providerAccounts.machines': 'v1.0',
+      'providerAccounts.discover': 'v1.0',
+      'instances.attach': 'v1.0',
+      'instances.detach': 'v1.0',
+      'instances.reboot': 'v1.0',
     };
     for (const [path, phase] of Object.entries(later))
       expect(apiMethod(...(path.split('.') as [string, string]))?.phase, path).toBe(phase);
