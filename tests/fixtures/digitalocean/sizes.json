@@ -1,0 +1,271 @@
+{
+  "_provenance": "Shape: OpenAPI sizes/models/size.yml + gpu_info.yml (spec). s-1vcpu-1gb and gpu-h100x1-80gb values are the spec examples; other values are illustrative. GPU model strings other than nvidia_h100 are unverified.",
+  "sizes": [
+    {
+      "slug": "s-1vcpu-512mb-10gb",
+      "memory": 512,
+      "vcpus": 1,
+      "disk": 10,
+      "transfer": 1,
+      "price_monthly": 4,
+      "price_hourly": 0.00595,
+      "regions": [
+        "nyc3",
+        "sfo3",
+        "tor1",
+        "atl1"
+      ],
+      "available": true,
+      "description": "Basic",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 10,
+            "unit": "gib"
+          }
+        }
+      ]
+    },
+    {
+      "slug": "s-1vcpu-1gb",
+      "memory": 1024,
+      "vcpus": 1,
+      "disk": 25,
+      "transfer": 1,
+      "price_monthly": 5,
+      "price_hourly": 0.00743999984115362,
+      "regions": [
+        "nyc3",
+        "sfo3",
+        "tor1",
+        "atl1"
+      ],
+      "available": true,
+      "description": "Basic",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 25,
+            "unit": "gib"
+          }
+        }
+      ]
+    },
+    {
+      "slug": "s-2vcpu-4gb",
+      "memory": 4096,
+      "vcpus": 2,
+      "disk": 80,
+      "transfer": 1,
+      "price_monthly": 24,
+      "price_hourly": 0.03571,
+      "regions": [
+        "nyc3",
+        "sfo3",
+        "tor1",
+        "atl1"
+      ],
+      "available": true,
+      "description": "Basic",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 80,
+            "unit": "gib"
+          }
+        }
+      ]
+    },
+    {
+      "slug": "gpu-h100x1-80gb",
+      "memory": 245760,
+      "vcpus": 20,
+      "disk": 720,
+      "transfer": 15,
+      "price_monthly": 4529.28,
+      "price_hourly": 6.74,
+      "regions": [
+        "tor1",
+        "atl1"
+      ],
+      "available": true,
+      "description": "H100 GPU - 1X",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 720,
+            "unit": "gib"
+          }
+        }
+      ],
+      "gpu_info": {
+        "count": 1,
+        "model": "nvidia_h100",
+        "vram": {
+          "amount": 80,
+          "unit": "gib"
+        }
+      }
+    },
+    {
+      "slug": "gpu-h100x8-640gb",
+      "memory": 1966080,
+      "vcpus": 160,
+      "disk": 2046,
+      "transfer": 15,
+      "price_monthly": 16074.24,
+      "price_hourly": 23.92,
+      "regions": [
+        "tor1"
+      ],
+      "available": true,
+      "description": "H100 GPU - 8X",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 2046,
+            "unit": "gib"
+          }
+        }
+      ],
+      "gpu_info": {
+        "count": 8,
+        "model": "nvidia_h100",
+        "vram": {
+          "amount": 640,
+          "unit": "gib"
+        }
+      }
+    },
+    {
+      "slug": "gpu-mi300x1-192gb",
+      "memory": 245760,
+      "vcpus": 20,
+      "disk": 720,
+      "transfer": 15,
+      "price_monthly": 1337.28,
+      "price_hourly": 1.99,
+      "regions": [
+        "atl1"
+      ],
+      "available": true,
+      "description": "AMD MI300X - 1X",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 720,
+            "unit": "gib"
+          }
+        }
+      ],
+      "gpu_info": {
+        "count": 1,
+        "model": "amd_mi300x",
+        "vram": {
+          "amount": 192,
+          "unit": "gib"
+        }
+      }
+    },
+    {
+      "slug": "gpu-l40sx1-48gb",
+      "memory": 65536,
+      "vcpus": 8,
+      "disk": 500,
+      "transfer": 15,
+      "price_monthly": 1055.04,
+      "price_hourly": 1.57,
+      "regions": [
+        "tor1",
+        "atl1"
+      ],
+      "available": true,
+      "description": "L40S GPU - 1X",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 500,
+            "unit": "gib"
+          }
+        }
+      ],
+      "gpu_info": {
+        "count": 1,
+        "model": "nvidia_l40s",
+        "vram": {
+          "amount": 48,
+          "unit": "gib"
+        }
+      }
+    },
+    {
+      "slug": "gpu-6000adax1-48gb",
+      "memory": 65536,
+      "vcpus": 8,
+      "disk": 500,
+      "transfer": 15,
+      "price_monthly": 1055.04,
+      "price_hourly": 1.57,
+      "regions": [
+        "tor1"
+      ],
+      "available": true,
+      "description": "RTX 6000 Ada - 1X",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 500,
+            "unit": "gib"
+          }
+        }
+      ],
+      "gpu_info": {
+        "count": 1,
+        "model": "nvidia_rtx_6000_ada",
+        "vram": {
+          "amount": 48,
+          "unit": "gib"
+        }
+      }
+    },
+    {
+      "slug": "gpu-4000adax1-20gb",
+      "memory": 32768,
+      "vcpus": 8,
+      "disk": 500,
+      "transfer": 15,
+      "price_monthly": 510.72,
+      "price_hourly": 0.76,
+      "regions": [
+        "tor1"
+      ],
+      "available": true,
+      "description": "RTX 4000 Ada - 1X",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 500,
+            "unit": "gib"
+          }
+        }
+      ],
+      "gpu_info": {
+        "count": 1,
+        "model": "nvidia_rtx_4000_ada",
+        "vram": {
+          "amount": 20,
+          "unit": "gib"
+        }
+      }
+    }
+  ]
+}
