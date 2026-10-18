@@ -15,6 +15,15 @@ Returns the tenant's provider accounts, sorted by name.
 
 Each `config` holds only secret references.
 
+## federationSetup
+
+Returns what a tenant sets up at its cloud to give a provider account keyless sign-in (Google Cloud workload identity federation), for the account it is about to create: `{ issuer, jwksUri, subject, attributeCondition, allowedAudienceHint }`.
+
+- **Input.** `tenantId`, `provider` and `name`: the `provider` and `name` the tenant will give `create`. Nothing is stored and no provider is called.
+- **Output.** `issuer` is the control plane's workload issuer and `jwksUri` its keys (`<issuer>/jwks.json`). `subject` is `compute-account:<tenantId>/<provider>/<name>`, exactly the subject `create` gives the account (vps builds it in one place). `attributeCondition` is the CEL condition `assertion.sub == "<subject>"` to set on the tenant's workload identity pool provider, so it trusts that account and no other. `allowedAudienceHint` is the shape of the pool provider's resource name as an `https://` URL, with `<PROJECT_NUMBER>`, `<POOL>` and `<PROVIDER>` left for the tenant to fill in. See [Keyless GCP accounts](/docs/guides/vps/providers#keyless-gcp-accounts).
+- **IAM.** Decided as `compute:providers:read` on the tenant.
+- **Errors.** `INVALID_INPUT` for an invalid `name` or `provider`, or an unknown provider (`details.known` lists the registered ones), as in `create`. `INVALID_CONFIG` (`details.reason` `noWorkloadIssuer`) when the host runs no workload issuer.
+
 ## get
 
 Returns one provider account of the tenant.

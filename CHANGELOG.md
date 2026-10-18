@@ -17,6 +17,11 @@ All notable changes to the better-compute packages are documented here. The form
   `serviceAccountTokenSource` and `impersonatedTokenSource` take `universeDomain`: another universe pins a key's
   `token_uri` to exactly `https://oauth2.<universe>/token`, and a key's own `universe_domain` must match it. The default
   universe is unchanged. `gcpProvider({ universeDomain })` derives the compute endpoint from it.
+- **`providerAccounts.federationSetup`** (`@better-compute/vps`). A read method (`compute:providers:read`, no provider
+  call) that returns the workload `issuer`, its `jwksUri`, the exact `subject` `providerAccounts.create` will give an
+  account (`compute-account:<tenantId>/<provider>/<name>`), the CEL `attributeCondition` that trusts that subject
+  alone, and an `allowedAudienceHint`. It is the first step of keyless Google Cloud accounts (`federationAudience`);
+  the providers guide has the `gcloud` setup and what each `create` refusal means.
 
 ## 0.2.1 (2026-10-18)
 

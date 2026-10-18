@@ -180,6 +180,65 @@ describe('provider accounts: the workload identity vps fixes', () => {
   });
 });
 
+describe('providerAccounts.federationSetup', () => {
+  it('federationSetup returns the subject create will use, and the exact condition', async () => {
+    const { api, as, tenants, create, built } = await world();
+    const setup = await api.providerAccounts.federationSetup(as('acme'), {
+      tenantId: tenants.acme.id,
+      provider: 'test',
+      name: 'main',
+    });
+    const subject = accountSubject(tenants.acme.id, 'test', 'main');
+    expect(setup).toEqual({
+      issuer: ISSUER,
+      jwksUri: `${ISSUER}/jwks.json`,
+      subject,
+      attributeCondition: `assertion.sub == "${subject}"`,
+      allowedAudienceHint:
+        'https://iam.googleapis.com/projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/<POOL>/providers/<PROVIDER>',
+    });
+    // Nothing was created, no provider client was built.
+    expect(built).toEqual([]);
+
+    // The account created afterwards mints exactly the subject setup returned.
+    await create('acme', 'main', { audience: 'aud-main' });
+    for (const context of built) expect(context.identity?.subject).toBe(setup.subject);
+    expect(built.length).toBeGreaterThan(0);
+  });
+
+  it('federationSetup validates its input like create does, and needs an issuer', async () => {
+    const { api, as, tenants } = await world();
+    const call = (input: Record<string, unknown>) =>
+      failure(
+        api.providerAccounts.federationSetup(as('acme'), { tenantId: tenants.acme.id, ...input }),
+      );
+    expect(await call({ provider: 'test', name: 'Bad Name' })).toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+    expect(await call({ provider: 'Not A Provider', name: 'main' })).toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+    expect(await call({ provider: 'nope', name: 'main' })).toMatchObject({
+      code: 'INVALID_INPUT',
+      details: { known: ['test'] },
+    });
+    expect(await call({ provider: 'test', name: 'main', extra: 1 })).toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+
+    const bare = await world({ issuer: false });
+    expect(
+      await failure(
+        bare.api.providerAccounts.federationSetup(bare.as('acme'), {
+          tenantId: bare.tenants.acme.id,
+          provider: 'test',
+          name: 'main',
+        }),
+      ),
+    ).toMatchObject({ code: 'INVALID_CONFIG', details: { reason: 'noWorkloadIssuer' } });
+  });
+});
+
 describe('provider accounts: checkAccount in admission', () => {
   it('checkAccount runs outside the transaction and its INVALID_CONFIG refuses create', async () => {
     const { fixture, create, list, checkAccount } = await world();

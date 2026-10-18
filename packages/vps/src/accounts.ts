@@ -284,16 +284,49 @@ export function parseCreateAccount(raw: unknown): CreateAccountInput {
       !/^[A-Za-z0-9._~:/+=-]{1,128}$/.test(input.idempotencyKey))
   )
     throw new ComputeError('INVALID_INPUT', 'idempotencyKey is invalid');
-  if (typeof input.provider !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(input.provider))
-    throw new ComputeError('INVALID_INPUT', 'provider must be a provider id');
   return {
     tenantId: tenant(input.tenantId),
-    provider: input.provider,
+    provider: providerId(input.provider),
     name: name(input.name),
     config: input.config ?? {},
     ...(input.idempotencyKey !== undefined
       ? { idempotencyKey: input.idempotencyKey as string }
       : {}),
+  };
+}
+
+function providerId(value: unknown): string {
+  if (typeof value !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(value))
+    throw new ComputeError('INVALID_INPUT', 'provider must be a provider id');
+  return value;
+}
+
+export interface FederationSetupInput {
+  tenantId: string;
+  provider: string;
+  name: string;
+}
+
+/** What `providerAccounts.federationSetup` returns: what a tenant sets up at its cloud (GCP WIF). */
+export interface FederationSetup {
+  /** The control plane's workload issuer, the OIDC provider the cloud is told to trust. */
+  issuer: string;
+  jwksUri: string;
+  /** The one subject `create` gives the account, as `accountSubject` builds it. */
+  subject: string;
+  /** The CEL condition that makes the cloud trust that subject alone: `assertion.sub == "<subject>"`. */
+  attributeCondition: string;
+  /** The shape of the `federationAudience` the tenant passes to `create`, with placeholders. */
+  allowedAudienceHint: string;
+}
+
+/** `providerAccounts.federationSetup`'s input: the tenant and the provider and name `create` will get. */
+export function parseFederationSetup(raw: unknown): FederationSetupInput {
+  const input = object(raw, ['tenantId', 'provider', 'name']);
+  return {
+    tenantId: tenant(input.tenantId),
+    provider: providerId(input.provider),
+    name: name(input.name),
   };
 }
 
