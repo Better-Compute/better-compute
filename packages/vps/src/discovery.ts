@@ -374,6 +374,17 @@ export const autoAttachLabels = {
 
 /** `autoAttachError.code` of a machine labelled for a tenant its account may not serve. */
 export const autoAttachRefused = 'AUTO_ATTACH_REFUSED';
+/**
+ * `autoAttachError.code` of a machine of a tenant's own account whose owner label named someone
+ * other than the configured owner: the label is the tenant's to write, so it is ignored (the
+ * machine is attached for the configured owner).
+ */
+export const autoAttachOwnerIgnored = 'AUTO_ATTACH_OWNER_IGNORED';
+/**
+ * `autoAttachError.code` of a machine of a platform account whose owner label names an identity
+ * that is not an active member of the labelled tenant (`IamPort.isMember`): not attached.
+ */
+export const autoAttachOwnerRefused = 'AUTO_ATTACH_OWNER_REFUSED';
 
 async function recordAutoAttachError(
   context: ReconcileContext,
@@ -449,12 +460,43 @@ async function autoAttach(
       sessionKind: 'role',
       mfa: false,
     };
+    // The owner. A tenant's own account: always the configured owner, since the label is the
+    // tenant's to write (R3). A platform account: the label's, once IAM confirms it is a member of
+    // the labelled tenant when the port can say (R2), outside any transaction.
+    const labelOwner = labels[autoAttachLabels.owner];
+    let ownerIdentityId = settings.ownerIdentityId;
+    let ignoredOwner: string | undefined;
+    if (labelOwner !== undefined && labelOwner !== settings.ownerIdentityId) {
+      if (!platformAccount) ignoredOwner = labelOwner;
+      else {
+        let member = true;
+        if (typeof context.iam.isMember === 'function') {
+          try {
+            member = await context.iam.isMember(tenantId, labelOwner);
+          } catch (error) {
+            await recordAutoAttachError(context, account.id, row.external_id, {
+              code: isComputeError(error) ? error.code : 'INTERNAL_ERROR',
+              message: `Could not check owner ${labelOwner}: ${String((error as Error)?.message ?? error)}`,
+            });
+            continue;
+          }
+        }
+        if (!member) {
+          await recordAutoAttachError(context, account.id, row.external_id, {
+            code: autoAttachOwnerRefused,
+            message: `Owner ${labelOwner} is not an active identity of tenant ${tenantId}`,
+          });
+          continue;
+        }
+        ownerIdentityId = labelOwner;
+      }
+    }
     try {
       const input = parseAttach({
         tenantId,
         poolId,
         externalId: row.external_id,
-        ownerIdentityId: labels[autoAttachLabels.owner] ?? settings.ownerIdentityId,
+        ownerIdentityId,
         onDelete: 'detach',
         // A key the API would refuse ('/' in machine ids) is fine here: it only derives the id.
         idempotencyKey: 'auto-attach',
@@ -478,6 +520,19 @@ async function autoAttach(
           },
         ),
       );
+      if (ignoredOwner !== undefined) {
+        // The record lasts until the next pass rewrites the machine; the event is the durable signal.
+        await context.sql.transaction((tx) =>
+          publishMachine(deps, tx, account, 'provider.machine.changed', {
+            externalId: row.external_id,
+            changes: ['autoAttachOwnerIgnored'],
+          }),
+        );
+        await recordAutoAttachError(context, account.id, row.external_id, {
+          code: autoAttachOwnerIgnored,
+          message: `The owner label named ${ignoredOwner}; machines of tenant ${account.tenantId}'s own account are attached for ${settings.ownerIdentityId}`,
+        });
+      }
     } catch (error) {
       await recordAutoAttachError(context, account.id, row.external_id, {
         code: isComputeError(error) ? error.code : 'INTERNAL_ERROR',
