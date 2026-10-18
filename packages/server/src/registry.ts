@@ -244,6 +244,11 @@ export function createRegistry(input: RegistryInput): Registry {
         if (plugin && definition.action && !definition.action.startsWith(`compute:${plugin}:`))
           throw invalid(`${path}: plugin actions are compute:${plugin}:<verb>`);
         const row = plugin ? undefined : apiMethod(group, name);
+        // A manual read runs without the list recipe's per-item decisions, so a list row may not take it.
+        if (row?.list && definition.kind === 'read' && definition.transaction === 'manual')
+          throw invalid(
+            `${path}: a list method does not run with transaction manual; use defineListMethod, which keeps the list recipe's per-item decisions`,
+          );
         methods.set(
           path,
           Object.freeze({

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   ComputeError,
   defineMethod,
+  defineModule,
   definePlugin,
   draftId,
   manualClock,
@@ -43,6 +44,7 @@ const hooks: {
   script?: (context: MethodContext, input: BundleInput) => Promise<unknown>;
   onNote?: (context: MethodContext) => Promise<void>;
   captured?: MethodContext;
+  decisionsBeforePeek?: number;
 } = {};
 
 const tenantPattern = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -119,6 +121,29 @@ const kit = definePlugin({
             [input.tenantId, input.noteId],
           );
           return { count: Number(rows[0]!.count) };
+        },
+      }),
+      // A read that declares `transaction: 'manual'` (it may call IAM): no wrapping transaction, read-only sql.
+      peek: defineMethod<{ tenantId: string; noteId: string }, { writeCode: string }>({
+        action: 'compute:kit:read',
+        kind: 'read',
+        transaction: 'manual',
+        resource: tenant,
+        validate: (raw) => parse(raw, ['tenantId', 'noteId']),
+        async handler(context, input) {
+          trace.push('peek handler');
+          hooks.decisionsBeforePeek = iam.calls.filter((entry) => entry.method === 'authorize').length;
+          const writeCode = await context.sql
+            .query('INSERT INTO plg_kit_notes (tenant_id, note_id, body) VALUES ($1, $2, $3)', [
+              input.tenantId,
+              input.noteId,
+              'peeked',
+            ])
+            .then(
+              () => 'written',
+              (error: unknown) => (error instanceof ComputeError ? error.code : 'READ_ONLY'),
+            );
+          return { writeCode };
         },
       }),
     },
@@ -255,6 +280,7 @@ beforeEach(async () => {
   delete hooks.script;
   delete hooks.onNote;
   delete hooks.captured;
+  delete hooks.decisionsBeforePeek;
   for (const table of ['plg_kit_notes', 'plg_kit_items', 'audit_events'])
     await store.query(`DELETE FROM ${table}`);
 });
@@ -560,6 +586,39 @@ describe('composite methods: check, then invoke', () => {
   });
 });
 
+describe('a read declared transaction: manual', () => {
+  it('runs with a read-only sql, after its one decision', async () => {
+    iam.allow({ token: USER });
+    const result = await call('notes', 'peek', USER, { tenantId: ACME, noteId: 'p1' });
+    // The INSERT was refused by the read-only executor, so nothing was written.
+    expect(result.writeCode).not.toBe('written');
+    expect(await notes()).toEqual([]);
+    // The decision (a read: authorize) came first, and no IAM call happened inside a transaction.
+    expect(trace).toEqual(['peek handler']);
+    expect(hooks.decisionsBeforePeek).toBe(1);
+    expect(insideTransaction).toEqual([]);
+  });
+
+  it('denies a cross-tenant caller before the handler runs', async () => {
+    iam.allow({ token: OUTSIDER });
+    expect(await codeOf(call('notes', 'peek', OUTSIDER, { tenantId: ACME, noteId: 'p2' }))).toBe(
+      'ACCESS_DENIED',
+    );
+    expect(trace).toEqual([]);
+    // Turned away by the tenant pre-check: no decision was even asked of IAM.
+    expect(iam.calls.filter((entry) => entry.method === 'authorize')).toEqual([]);
+  });
+
+  it('is refused by IAM before the handler runs when the caller lacks the action', async () => {
+    iam.allow({ token: USER });
+    iam.deny({ token: USER, action: 'compute:kit:read' });
+    expect(await codeOf(call('notes', 'peek', USER, { tenantId: ACME, noteId: 'p3' }))).toBe(
+      'ACCESS_DENIED',
+    );
+    expect(trace).toEqual([]);
+  });
+});
+
 describe('transaction contracts', () => {
   const build = (definition: Partial<MethodDefinition>) =>
     betterCompute({
@@ -584,6 +643,35 @@ describe('transaction contracts', () => {
         }),
       ],
     });
+
+  it('refuses manual on a read whose row follows the list recipe', () => {
+    const buildList = (definition: Partial<MethodDefinition>) =>
+      betterCompute({
+        ...options({} as never, fakeIam()),
+        database: { query() {}, transaction() {}, migrate() {} } as never,
+        modules: [
+          defineModule({
+            name: 'fakevps',
+            api: () => ({
+              instances: {
+                list: {
+                  action: 'compute:instances:read',
+                  kind: 'read',
+                  resource: (input: { tenantId: string }) => ({ type: 'tenant', id: input.tenantId }),
+                  validate: (input: unknown) => input as { tenantId: string },
+                  handler: async () => ({ items: [] }),
+                  ...definition,
+                } as MethodDefinition,
+              },
+            }),
+          }),
+        ],
+      });
+    expect(() => buildList({})).not.toThrow();
+    expect(() => buildList({ transaction: 'manual' })).toThrow(
+      /a list method does not run with transaction manual; use defineListMethod/,
+    );
+  });
 
   it('takes manual on reads and mutations, without an admission', () => {
     expect(() => build({ transaction: 'manual' })).not.toThrow();
