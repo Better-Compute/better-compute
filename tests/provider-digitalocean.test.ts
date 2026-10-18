@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { isComputeError, manualClock, type ComputeError } from '@better-compute/core';
@@ -7,6 +8,7 @@ import {
   deploymentTag,
   doConfig,
   dropletName,
+  ensureSshKeys,
   gpuModelOf,
   isManagedTag,
   keyTag,
@@ -14,6 +16,7 @@ import {
   labelsFromTags,
   listOffers,
   machineId,
+  md5Fingerprint,
   mapDoError,
   networkMemberTag,
   offerId,
@@ -26,6 +29,7 @@ import {
   type DoSize,
 } from '@better-compute/provider-digitalocean';
 import { DoEmulator } from './support/do-emulator/index.js';
+import { seedSshKey } from './support/do-emulator/keys.js';
 import { freshBudgets, noopLog, secrets } from './support/do-harness.js';
 
 // provider-digitalocean against an in-memory emulator of the DigitalOcean endpoints it uses,
@@ -726,5 +730,126 @@ describe('offers', () => {
     emu.failNext({ path: /^\/sizes$/ }, 500, { id: 'server_error', message: 'boom' });
     await failure(listOffers(client, config, {}, signal));
     expect(await listOffers(client, config, {}, signal)).not.toHaveLength(0);
+  });
+});
+
+describe('ssh keys', () => {
+  // Generated once with ssh-keygen; the fingerprint is `ssh-keygen -E md5 -lf`'s, not ours.
+  const key =
+    'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICbbzkHhLXTIyRDUgXLAC0pVt8MQajr4BGKVoF5MJ71Z test@bc';
+  const keyFingerprint = 'f8:4e:c2:ad:a9:00:19:a3:f5:45:3d:68:6e:28:0e:3c';
+  const otherKey =
+    'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPb3suug6HUnqYdJ+FX+dcKIL5gAl+WJzl6aZEZZSHDu other@bc';
+
+  const keyPosts = (emu: DoEmulator) =>
+    emu.requests.filter((r) => r.method === 'POST' && r.url.pathname === '/v2/account/keys');
+
+  it('fingerprints a key as the MD5 of its blob in colon-hex', () => {
+    expect(md5Fingerprint(key)).toBe(keyFingerprint);
+    // Independent of the implementation: MD5 over the decoded blob, with the comment ignored.
+    const blob = Buffer.from(key.split(' ')[1]!, 'base64');
+    const expected = createHash('md5')
+      .update(blob)
+      .digest('hex')
+      .replace(/(..)(?!$)/g, '$1:');
+    expect(md5Fingerprint(key)).toBe(expected);
+    expect(
+      md5Fingerprint(`  ${key.split(' ').slice(0, 2).join(' ')}
+`),
+    ).toBe(keyFingerprint);
+  });
+
+  it('registers a missing key once and reuses it by fingerprint', async () => {
+    const { client, emu } = setup();
+    const first = await ensureSshKeys(client, [key], undefined, signal);
+    const second = await ensureSshKeys(client, [key], undefined, signal);
+    expect(first).toHaveLength(1);
+    expect(second).toEqual(first);
+    const posts = keyPosts(emu);
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.body).toEqual({
+      name: 'bc-f84ec2ada90019a3',
+      public_key: key,
+    });
+    expect(emu.state.sshKeys.get(keyFingerprint)?.id).toBe(first[0]);
+    // The lookup is by fingerprint.
+    expect(
+      emu.requests
+        .filter((r) => r.method === 'GET')
+        .map((r) => r.url.pathname.replaceAll('%3A', ':')),
+    ).toEqual(Array(2).fill(`/v2/account/keys/${keyFingerprint}`));
+  });
+
+  it('adds the default key after the instance keys and drops duplicates', async () => {
+    const { client, emu } = setup();
+    const known = seedSshKey(emu.state, 'ops', otherKey);
+    const ids = await ensureSshKeys(client, [key, key, otherKey], known.fingerprint, signal);
+    expect(ids).toHaveLength(2);
+    expect(ids[1]).toBe(known.id);
+    expect(keyPosts(emu)).toHaveLength(1);
+    // No instance keys: just the default.
+    expect(await ensureSshKeys(client, [], known.fingerprint, signal)).toEqual([known.id]);
+    expect(await ensureSshKeys(client, [], undefined, signal)).toEqual([]);
+  });
+
+  it('a default key that is not in the account is INVALID_CONFIG', async () => {
+    const { client } = setup();
+    const error = await failure(ensureSshKeys(client, [], keyFingerprint, signal));
+    expect(error.code).toBe('INVALID_CONFIG');
+    expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'defaultSshKey' });
+  });
+
+  it('a racing registration re-reads instead of failing', async () => {
+    const { emu, client } = setup({
+      // Someone else registers the key between our GET (404) and our POST: the key is in the
+      // account by the time the POST arrives, and the emulator answers it with the in-use 422.
+      fetch: async (input, init) => {
+        if ((init?.method ?? 'GET') === 'POST') seedSshKey(emu.state, 'racer', key);
+        return emu.fetch(input, init);
+      },
+    });
+    const ids = await ensureSshKeys(client, [key], undefined, signal);
+    expect(ids).toEqual([emu.state.sshKeys.get(keyFingerprint)!.id]);
+    expect(emu.state.sshKeys.size).toBe(1);
+    expect(emu.requests.map((r) => r.method)).toEqual(['GET', 'POST', 'GET']);
+  });
+
+  it('an in-use 422 for a key that still cannot be read is an error, not a loop', async () => {
+    const { emu, client } = setup();
+    emu.failNext(
+      { method: 'POST', path: /^\/account\/keys$/ },
+      422,
+      errorFixtures.find((f) => f.name === '422-ssh-key-in-use')!.body,
+    );
+    const error = await failure(ensureSshKeys(client, [key], undefined, signal));
+    expect(error.code).toBe('CONFLICT');
+    expect(emu.requests.map((r) => r.method)).toEqual(['GET', 'POST', 'GET']);
+  });
+
+  it.todo('create without any SSH key is refused before a droplet is posted');
+
+  it('rejects a malformed public key as INVALID_INPUT', async () => {
+    const [type, blob] = key.split(' ') as [string, string];
+    const malformed = [
+      '',
+      'ssh-ed25519',
+      `${type} `,
+      `${type} not*base64!`,
+      `${type} AAAA`,
+      `ssh-rsa ${blob}`,
+    ];
+    for (const bad of malformed) {
+      expect(() => md5Fingerprint(bad), JSON.stringify(bad)).toThrow(
+        expect.objectContaining({
+          code: 'INVALID_INPUT',
+          details: { provider: 'digitalocean', reason: 'sshKey' },
+        }),
+      );
+    }
+    const { client, emu } = setup();
+    const error = await failure(ensureSshKeys(client, [key, 'ssh-rsa AAAA'], undefined, signal));
+    expect(error.code).toBe('INVALID_INPUT');
+    // Nothing is sent for a bad key; the good one before it is not registered either.
+    expect(emu.requests).toHaveLength(0);
   });
 });

@@ -1,4 +1,5 @@
 import { registerCatalog } from './catalog.js';
+import { registerKeys } from './keys.js';
 import { DoState, errorFixtures, type Json } from './state.js';
 
 export { DoState, fixture, errorFixtures, type Json } from './state.js';
@@ -197,6 +198,13 @@ export class DoEmulator {
     };
   }
 
+  /** A route result carrying the error fixture `name`. */
+  error(name: string): RouteResult {
+    const entry = this.#errors.get(name);
+    if (!entry) throw new Error(`no error fixture named ${name}`);
+    return { status: entry.status, body: entry.body };
+  }
+
   #fixtureResponse(name: string): Response {
     const entry = this.#errors.get(name);
     if (!entry) throw new Error(`no error fixture named ${name}`);
@@ -205,5 +213,6 @@ export class DoEmulator {
 
   #registerCore(): void {
     registerCatalog(this);
+    registerKeys(this);
   }
 }
