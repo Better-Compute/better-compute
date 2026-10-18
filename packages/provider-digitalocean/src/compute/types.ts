@@ -11,3 +11,29 @@ export interface DoAction {
   resource_type?: string;
   region_slug?: string | null;
 }
+
+/** A size (`GET /sizes`): a Droplet plan, GPU plans included. */
+export interface DoSize {
+  slug: string;
+  /** MiB. */
+  memory: number;
+  vcpus: number;
+  /** GiB. */
+  disk: number;
+  price_hourly: number;
+  price_monthly?: number;
+  /** The slugs of the regions that offer this size. */
+  regions: string[];
+  available: boolean;
+  description?: string;
+  gpu_info?: { count: number; model: string; vram?: { amount: number; unit: string } };
+}
+
+/** A region (`GET /regions`). `sizes` lists what it can create right now. */
+export interface DoRegion {
+  slug: string;
+  name: string;
+  available: boolean;
+  sizes: string[];
+  features?: string[];
+}

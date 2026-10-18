@@ -1,3 +1,4 @@
+import { registerCatalog } from './catalog.js';
 import { DoState, errorFixtures, type Json } from './state.js';
 
 export { DoState, fixture, errorFixtures, type Json } from './state.js';
@@ -203,8 +204,6 @@ export class DoEmulator {
   }
 
   #registerCore(): void {
-    this.route('GET', /^\/regions$/, (context) =>
-      this.paged(context, 'regions', context.state.regions),
-    );
+    registerCatalog(this);
   }
 }

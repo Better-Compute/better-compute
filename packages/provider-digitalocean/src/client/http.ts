@@ -11,6 +11,8 @@ import { mapDoError } from './errors.js';
 export type { BudgetClass } from './budget.js';
 
 export interface DoClient {
+  /** The clock the client was built with: caches built on the client age by it. */
+  readonly clock: Clock;
   request<T>(
     method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
     path: string,
@@ -180,5 +182,5 @@ export function doClient(options: DoClientOptions): DoClient {
     return reply.action;
   }
 
-  return { request, pages, action };
+  return { clock: options.clock, request, pages, action };
 }

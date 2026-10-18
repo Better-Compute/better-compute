@@ -7,10 +7,12 @@ import {
   deploymentTag,
   doConfig,
   dropletName,
+  gpuModelOf,
   isManagedTag,
   keyTag,
   labels,
   labelsFromTags,
+  listOffers,
   machineId,
   mapDoError,
   networkMemberTag,
@@ -21,6 +23,7 @@ import {
   tagFor,
   unprocessablePatterns,
   type DoClient,
+  type DoSize,
 } from '@better-compute/provider-digitalocean';
 import { DoEmulator } from './support/do-emulator/index.js';
 import { freshBudgets, secrets } from './support/do-harness.js';
@@ -581,5 +584,109 @@ describe('ids', () => {
     expect(labelsFromTags(['better-compute-pool:A', 'BETTER-COMPUTE-POOL:b'])).toEqual({
       'better-compute-pool': 'b',
     });
+  });
+});
+
+describe('offers', () => {
+  const config = { token: 'secret://do/t', regions: ['tor1'] };
+
+  it('lists one offer per size and configured region with price and GPUs', async () => {
+    const { client } = setup();
+    const offers = await listOffers(client, config, {}, signal);
+    // tor1 has eight of the nine fixture sizes (gpu-mi300x1-192gb is atl1 only).
+    expect(offers).toHaveLength(8);
+    expect(offers.every((o) => o.region === 'tor1' && o.kind === 'vps')).toBe(true);
+    const fixtureSize = JSON.parse(
+      readFileSync(new URL('./fixtures/digitalocean/sizes.json', import.meta.url), 'utf8'),
+    ).sizes.find((s: { slug: string }) => s.slug === 'gpu-h100x1-80gb');
+    expect(offers.find((o) => o.id === 'tor1/gpu-h100x1-80gb')).toEqual({
+      id: 'tor1/gpu-h100x1-80gb',
+      kind: 'vps',
+      region: 'tor1',
+      vcpu: 20,
+      memoryGiB: 240,
+      diskGiB: 720,
+      gpus: { model: 'H100', count: 1 },
+      pricePerHour: fixtureSize.price_hourly,
+      currency: 'USD',
+      available: true,
+    });
+    const plain = offers.find((o) => o.id === 'tor1/s-2vcpu-4gb')!;
+    expect(plain.gpus).toBeUndefined();
+    expect(plain.memoryGiB).toBe(4);
+    expect(offers.map((o) => o.id)).not.toContain('tor1/gpu-mi300x1-192gb');
+  });
+
+  it('names GPU models after the inventory, or in an upper-case hyphenated form', () => {
+    const named = (model: string) => gpuModelOf({ gpu_info: { count: 1, model } } as DoSize);
+    expect(named('nvidia_h100')).toBe('H100');
+    expect(named('nvidia_h200')).toBe('H200');
+    expect(named('nvidia_l40s')).toBe('L40S');
+    expect(named('nvidia_rtx_6000_ada')).toBe('RTX-6000-ADA');
+    expect(named('nvidia_rtx_4000_ada')).toBe('RTX-4000-ADA');
+    expect(named('nvidia_b300')).toBe('B300');
+    expect(named('amd_mi300x')).toBe('MI300X');
+    expect(gpuModelOf({ slug: 's-1vcpu-1gb' } as DoSize)).toBeUndefined();
+  });
+
+  it('filters by the query and by configured regions', async () => {
+    const { client, emu } = setup();
+    const wide = { token: 'secret://do/t', regions: ['tor1', 'atl1'] };
+    const eight = await listOffers(client, wide, { gpuModel: 'h100', minGpus: 8 }, signal);
+    expect(eight.map((o) => o.id)).toEqual(['tor1/gpu-h100x8-640gb']);
+
+    const all = await listOffers(client, wide, {}, signal);
+    expect(all.some((o) => o.region === 'atl1')).toBe(true);
+    expect(all.some((o) => o.region === 'nyc3' || o.region === 'sfo3')).toBe(false);
+    expect((await listOffers(client, config, {}, signal)).some((o) => o.region === 'atl1')).toBe(
+      false,
+    );
+
+    expect(
+      (await listOffers(client, wide, { region: 'atl1', gpuModel: 'MI300X' }, signal)).length,
+    ).toBe(1);
+    expect(await listOffers(client, wide, { region: 'nyc3' }, signal)).toEqual([]);
+    expect(await listOffers(client, wide, { kind: 'metal' }, signal)).toEqual([]);
+    const big = await listOffers(client, wide, { minVcpu: 100, minMemoryGiB: 1000 }, signal);
+    expect(big.map((o) => o.id)).toEqual(['tor1/gpu-h100x8-640gb']);
+    expect(emu.requests).toHaveLength(2); // the catalog was cached across all of these
+  });
+
+  it('an unavailable size in a region is offered with available:false', async () => {
+    const { client, emu } = setup();
+    // Not listed by the region, flagged off by the size, and a region that is itself unavailable.
+    const tor1 = emu.state.regions.find((r) => r.slug === 'tor1')!;
+    tor1.sizes = tor1.sizes.filter((s: string) => s !== 'gpu-l40sx1-48gb');
+    emu.state.sizes.find((s) => s.slug === 'gpu-6000adax1-48gb')!.available = false;
+    emu.state.regions.find((r) => r.slug === 'atl1')!.available = false;
+    const wide = { token: 'secret://do/t', regions: ['tor1', 'atl1'] };
+    const offers = await listOffers(client, wide, {}, signal);
+    const byId = new Map(offers.map((o) => [o.id, o]));
+    expect(byId.get('tor1/gpu-l40sx1-48gb')?.available).toBe(false);
+    expect(byId.get('tor1/gpu-6000adax1-48gb')?.available).toBe(false);
+    expect(byId.get('atl1/gpu-l40sx1-48gb')?.available).toBe(false);
+    expect(byId.get('tor1/gpu-h100x1-80gb')?.available).toBe(true);
+  });
+
+  it('caches the catalog for ten minutes', async () => {
+    const { client, emu, clock } = setup();
+    await listOffers(client, config, {}, signal);
+    await listOffers(client, config, { minGpus: 1 }, signal);
+    expect(emu.requests.map((r) => r.url.pathname)).toEqual(['/v2/sizes', '/v2/regions']);
+    clock.advance(10 * 60_000 - 1);
+    await listOffers(client, config, {}, signal);
+    expect(emu.requests).toHaveLength(2);
+    clock.advance(1);
+    await listOffers(client, config, {}, signal);
+    expect(emu.requests).toHaveLength(4);
+    // Another client has its own cache.
+    await listOffers(setup().client, config, {}, signal);
+  });
+
+  it('a failed load is not cached', async () => {
+    const { client, emu } = setup();
+    emu.failNext({ path: /^\/sizes$/ }, 500, { id: 'server_error', message: 'boom' });
+    await failure(listOffers(client, config, {}, signal));
+    expect(await listOffers(client, config, {}, signal)).not.toHaveLength(0);
   });
 });
