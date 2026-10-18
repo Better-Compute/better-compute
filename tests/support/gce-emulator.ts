@@ -426,6 +426,17 @@ export class GceEmulator {
     const segments = path.split('/').filter(Boolean);
     const [first, second, third, fourth, fifth, sixth] = segments;
 
+    // the project itself (`failNext` answers 403/404 instead)
+    if (segments.length === 0 && method === 'GET') {
+      const project = decodeURIComponent(url.pathname.split('/')[4] ?? '');
+      return this.json(200, {
+        kind: 'compute#project',
+        id: '123456789',
+        name: project,
+        selfLink: `${origin}/projects/${project}`,
+      });
+    }
+
     // aggregated lists
     if (first === 'aggregated' && method === 'GET') {
       if (second === 'instances')

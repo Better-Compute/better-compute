@@ -73,4 +73,10 @@ export interface GcpProviderOptions {
   tokenSource?: TokenSource;
   /** Default 2000. Only used by in-call operation waits of at most 20 seconds. */
   operationPollMs?: number;
+  /**
+   * Default 10000. How long each network call of the federated-account check (`checkAccount`: STS,
+   * IAM Credentials, the project read) may take before account creation is refused with a
+   * retryable UNAVAILABLE `timeout`.
+   */
+  checkTimeoutMs?: number;
 }

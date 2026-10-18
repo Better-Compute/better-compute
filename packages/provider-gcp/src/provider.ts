@@ -12,6 +12,7 @@ import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
 import { gceClient } from './client.js';
 import { GcpCompute, parseDiscoverLabel } from './compute.js';
 import { gcpConfig, type GcpConfig, type GcpProviderOptions } from './config.js';
+import { checkGcpAccount, federationOf, subjectTokenAudience } from './federation.js';
 
 /**
  * The token source for one account: the service-account key behind `credentials` when the account
@@ -35,30 +36,14 @@ function accountTokens(
   options: GcpProviderOptions,
 ): TokenSource {
   const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
-  if (config.federationAudience !== undefined) {
-    if (config.credentials)
-      throw new ComputeError(
-        'INVALID_CONFIG',
-        'A GCP account names either credentials (a service-account key) or federationAudience ' +
-          '(keyless sign-in through workload identity federation), not both',
-        undefined,
-        { provider: 'gcp', reason: 'credentialsAndFederation' },
-      );
-    const identity = context.identity;
-    if (!identity)
-      throw new ComputeError(
-        'INVALID_CONFIG',
-        'federationAudience needs the host to run a workload issuer (better-compute has none ' +
-          'configured), so this account cannot sign in',
-        undefined,
-        { provider: 'gcp', reason: 'noWorkloadIssuer' },
-      );
-    const audience = config.federationAudience;
+  const federation = federationOf(config, context);
+  if (federation) {
+    const { audience, identity } = federation;
     // The account's own subject is signed for the pool provider's audience, as an https URL.
     const federated = federatedTokenSource({
       audience,
       subjectToken: async () =>
-        (await identity.mint({ audience: `https://${audience.slice(2)}` })).token,
+        (await identity.mint({ audience: subjectTokenAudience(audience) })).token,
       fetch: fetchImpl,
       universeDomain: options.universeDomain,
     });
@@ -115,6 +100,8 @@ export function gcpProvider(options: GcpProviderOptions = {}): ProviderDefinitio
     capabilities: ['power', 'list', 'discover', 'claim', 'reservations', 'networks'],
     // One pool provider is one account: vps refuses a second account with the same audience.
     accountKey: (config) => config.federationAudience || undefined,
+    // A federated account proves, before it is stored, that its pool trusts exactly its subject.
+    checkAccount: (config, context) => checkGcpAccount(config, context, options),
     create: (config, context) => {
       if (config.zones.length === 0)
         throw new ComputeError('INVALID_CONFIG', 'A GCP account lists at least one zone');
