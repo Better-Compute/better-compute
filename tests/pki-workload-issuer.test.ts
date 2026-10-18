@@ -169,6 +169,12 @@ describe('workloadIssuer', () => {
       'https://compute.example.com/?a=1',
       'https://compute.example.com/#frag',
       'https://compute.example.com?',
+      ' https://compute.example.com',
+      'https://compute.example.com ',
+      'https://compute.example.com	',
+      'https:compute.example.com',
+      'HTTPS://Compute.Example.com',
+      'https://compute.example.com/a b',
       'http://localhost.example.com',
       '',
     ]) {
@@ -186,6 +192,12 @@ describe('workloadIssuer', () => {
     expect(config({ issuer: 'http://127.0.0.1:8080/workload' })().issuer).toBe(
       'http://127.0.0.1:8080/workload',
     );
+    for (const ok of [
+      'https://compute.example.com/api/compute/workload',
+      'http://localhost:3000/api/compute/workload',
+      'https://compute.example.com:8443/x/workload',
+    ])
+      expect(config({ issuer: ok })().issuer).toBe(ok);
     expect(config({ issuer: 'https://compute.example.com' })().issuer).toBe(
       'https://compute.example.com',
     );

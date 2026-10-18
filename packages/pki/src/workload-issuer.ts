@@ -76,6 +76,16 @@ function checkIssuer(issuer: unknown): string {
       'issuerUrl',
       'The workload issuer URL must have no query, fragment, credentials or trailing slash',
     );
+  // The text is used verbatim as `iss` and as the prefix of `jwks_uri`, so it must already be the
+  // canonical form: `new URL` trims whitespace, lowercases scheme and host, adds a missing `//`,
+  // percent-encodes and fills in an empty path with `/`. Accept only what it would print back.
+  const canonical = url.href.endsWith('/') ? url.href.slice(0, -1) : url.href;
+  if (issuer !== canonical)
+    throw invalid(
+      'INVALID_CONFIG',
+      'issuerUrl',
+      'The workload issuer URL must be in canonical form (lowercase scheme and host, no whitespace or characters needing escapes)',
+    );
   return issuer;
 }
 
