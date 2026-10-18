@@ -799,6 +799,24 @@ describe('ssh keys', () => {
     expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'defaultSshKey' });
   });
 
+  it('validates the default fingerprint before it is used in a request path', async () => {
+    const { client, emu } = setup();
+    for (const bad of ['../droplets', 'f8:4e', '', `${keyFingerprint}/x`]) {
+      const error = await failure(ensureSshKeys(client, [], bad, signal));
+      expect(error.code, JSON.stringify(bad)).toBe('INVALID_CONFIG');
+      expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'defaultSshKey' });
+    }
+    expect(emu.requests).toHaveLength(0);
+    // A valid fingerprint in upper case is lower-cased and found.
+    const known = seedSshKey(emu.state, 'ops', key);
+    expect(await ensureSshKeys(client, [], keyFingerprint.toUpperCase(), signal)).toEqual([
+      known.id,
+    ]);
+    expect(emu.requests.map((r) => r.url.pathname.replaceAll('%3A', ':'))).toEqual([
+      `/v2/account/keys/${keyFingerprint}`,
+    ]);
+  });
+
   it('a racing registration re-reads instead of failing', async () => {
     const { emu, client } = setup({
       // Someone else registers the key between our GET (404) and our POST: the key is in the

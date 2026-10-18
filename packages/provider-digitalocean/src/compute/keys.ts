@@ -21,6 +21,16 @@ function invalidKey(message: string): ComputeError {
   });
 }
 
+const fingerprintPattern = /^[0-9a-f]{2}(:[0-9a-f]{2}){15}$/;
+
+/** The default key is account configuration, so a bad one is the account's fault. */
+function invalidDefault(message: string): ComputeError {
+  return new ComputeError('INVALID_CONFIG', message, undefined, {
+    provider: 'digitalocean',
+    reason: 'defaultSshKey',
+  });
+}
+
 const base64 = /^(?:[A-Za-z0-9+/]{4})+(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 /**
@@ -52,7 +62,7 @@ async function find(
   try {
     const reply = await client.request<{ ssh_key: DoSshKey }>(
       'GET',
-      `/account/keys/${fingerprint}`,
+      `/account/keys/${encodeURIComponent(fingerprint)}`,
       { signal, budget: 'observe' },
     );
     return reply.ssh_key;
@@ -104,17 +114,17 @@ export async function ensureSshKeys(
 ): Promise<number[]> {
   // Validate everything before the first request, so a bad key sends nothing.
   const wanted = publicKeys.map((key) => ({ key, fingerprint: md5Fingerprint(key) }));
+  const fallbackFingerprint = defaultFingerprint?.trim().toLowerCase();
+  if (fallbackFingerprint !== undefined && !fingerprintPattern.test(fallbackFingerprint))
+    throw invalidDefault(`${JSON.stringify(defaultFingerprint)} is not an MD5 SSH key fingerprint`);
   const ids: number[] = [];
   for (const { key, fingerprint } of wanted)
     ids.push(await ensureOne(client, key, fingerprint, signal));
-  if (defaultFingerprint !== undefined) {
-    const fallback = await find(client, defaultFingerprint, signal);
+  if (fallbackFingerprint !== undefined) {
+    const fallback = await find(client, fallbackFingerprint, signal);
     if (!fallback)
-      throw new ComputeError(
-        'INVALID_CONFIG',
-        `the account's defaultSshKey ${defaultFingerprint} is not an SSH key in this DigitalOcean account`,
-        undefined,
-        { provider: 'digitalocean', reason: 'defaultSshKey' },
+      throw invalidDefault(
+        `the account's defaultSshKey ${fallbackFingerprint} is not an SSH key in this DigitalOcean account`,
       );
     ids.push(fallback.id);
   }

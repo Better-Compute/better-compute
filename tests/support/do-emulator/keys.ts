@@ -1,10 +1,13 @@
 import { createHash } from 'node:crypto';
 import type { DoEmulator } from './index.js';
-import type { DoState, Json } from './state.js';
+import { fixture, type DoState, type Json } from './state.js';
 
 // The SSH key endpoints under `/v2/account/keys`. A key is addressed by id or by fingerprint
 // (MD5, colon-hex, which this file computes itself rather than borrowing the package's function,
 // so the two can be checked against each other). `state.sshKeys` is keyed by fingerprint.
+
+/** The shape of an `ssh_key` body, from the fixture. */
+const template = fixture('ssh-keys').ssh_key as Json;
 
 /** MD5 colon-hex of an OpenSSH public key's blob, or undefined when it has none. */
 function fingerprintOf(publicKey: string): string | undefined {
@@ -20,7 +23,13 @@ function fingerprintOf(publicKey: string): string | undefined {
 export function seedSshKey(state: DoState, name: string, publicKey: string): Json {
   const fingerprint = fingerprintOf(publicKey);
   if (fingerprint === undefined) throw new Error('seedSshKey: not an OpenSSH public key');
-  const key = { id: state.nextId(), fingerprint, public_key: publicKey.trim(), name };
+  const key = {
+    ...template,
+    id: state.nextId(),
+    fingerprint,
+    public_key: publicKey.trim(),
+    name,
+  };
   state.sshKeys.set(fingerprint, key);
   return key;
 }
