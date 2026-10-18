@@ -7,3 +7,4 @@ export * from './client/http.js';
 export { RateBudget, budgetFor, budgetShares, resetBudgets, tokenHash } from './client/budget.js';
 export * from './compute/types.js';
 export * from './config.js';
+export * from './ids.js';

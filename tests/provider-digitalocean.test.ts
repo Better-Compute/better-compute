@@ -4,9 +4,21 @@ import { isComputeError, manualClock, type ComputeError } from '@better-compute/
 import {
   budgetFor,
   doClient,
+  deploymentTag,
   doConfig,
+  dropletName,
+  isManagedTag,
+  keyTag,
+  labels,
+  labelsFromTags,
+  machineId,
   mapDoError,
+  networkMemberTag,
+  offerId,
+  parseMachineId,
+  parseOfferId,
   RateBudget,
+  tagFor,
   unprocessablePatterns,
   type DoClient,
 } from '@better-compute/provider-digitalocean';
@@ -461,5 +473,113 @@ describe('client: rate budget', () => {
     // resetBudgets (via the harness) gives the next test a clean one.
     freshBudgets();
     expect(budgetFor('aaaa', options)).not.toBe(shared);
+  });
+});
+
+describe('ids', () => {
+  const invalid = expect.objectContaining({ code: 'INVALID_INPUT' });
+
+  it('ids round-trip and refuse malformed input', () => {
+    expect(machineId(123)).toBe('123');
+    expect(parseMachineId('123')).toBe(123);
+    expect(parseMachineId(machineId(417_395_208))).toBe(417_395_208);
+    for (const bad of ['0', '-1', 'abc', '1e3', '', '01', '1.5', ' 1', '9'.repeat(19)])
+      expect(() => parseMachineId(bad)).toThrowError(invalid);
+
+    expect(offerId('nyc3', 's-2vcpu-4gb')).toBe('nyc3/s-2vcpu-4gb');
+    expect(offerId('nyc3', 's-2vcpu-4gb', true)).toBe('nyc3/s-2vcpu-4gb@spot');
+    expect(parseOfferId(offerId('nyc3', 'gpu-h100x1-80gb', true))).toEqual({
+      region: 'nyc3',
+      size: 'gpu-h100x1-80gb',
+      spot: true,
+    });
+    expect(parseOfferId('nyc3/s-2vcpu-4gb')).toEqual({
+      region: 'nyc3',
+      size: 's-2vcpu-4gb',
+      spot: false,
+    });
+    for (const bad of [
+      's-2vcpu-4gb',
+      'nyc3/',
+      '/s-2vcpu-4gb',
+      'NYC3/s-1vcpu-1gb',
+      'a/b/c',
+      'nyc3/x@',
+      'nyc3/x@od',
+      '',
+    ])
+      expect(() => parseOfferId(bad)).toThrowError(invalid);
+    expect(() => parseMachineId('abc')).toThrowError(
+      expect.objectContaining({ details: expect.objectContaining({ provider: 'digitalocean' }) }),
+    );
+  });
+
+  it('droplet names are bc- + a hostname-safe id', () => {
+    expect(dropletName('inst_AB/cd')).toBe('bc-inst-ab-cd');
+    expect(dropletName('x'.repeat(200))).toHaveLength(63);
+    expect(dropletName('a'.repeat(59) + '-b-c')).toMatch(/^bc-[a-z0-9-]*[a-z0-9]$/);
+    expect(dropletName('Ünï__code')).toMatch(/^bc-[a-z0-9-]+$/);
+  });
+
+  it('tags encode labels and decode back', () => {
+    expect(Object.values(labels).slice(0, 5)).toEqual([
+      'better-compute-managed',
+      'better-compute-instance',
+      'better-compute-tenant',
+      'better-compute-pool',
+      'better-compute-owner',
+    ]);
+    expect(
+      labelsFromTags([tagFor(labels.tenant, 'acme'), tagFor(labels.pool, 'pool_1'), 'web']),
+    ).toEqual({ 'better-compute-tenant': 'acme', 'better-compute-pool': 'pool_1' });
+    expect(tagFor(labels.owner, 'Ann@Example.com')).toMatch(/^better-compute-owner:x[a-z2-7]{26}$/);
+    // The same value always hashes to the same tag; different values to different ones.
+    expect(tagFor(labels.owner, 'Ann@Example.com')).toBe(tagFor(labels.owner, 'Ann@Example.com'));
+    expect(tagFor(labels.owner, 'ann@example.com')).not.toBe(
+      tagFor(labels.owner, 'Ann@Example.com'),
+    );
+    // A long value or one with a colon is hashed; a colon would make the tag ambiguous to decode.
+    expect(tagFor(labels.pool, 'a'.repeat(201))).toMatch(/^better-compute-pool:x[a-z2-7]{26}$/);
+    expect(tagFor(labels.pool, 'a'.repeat(200))).toBe(`better-compute-pool:${'a'.repeat(200)}`);
+    expect(tagFor(labels.pool, 'a:b')).toMatch(/^better-compute-pool:x[a-z2-7]{26}$/);
+    expect(tagFor(labels.pool, '')).toMatch(/^better-compute-pool:x[a-z2-7]{26}$/);
+    expect(tagFor(labels.managed, 'true')).toBe('better-compute-managed:true');
+    const produced = [
+      tagFor(labels.tenant, 'Acme Corp'),
+      tagFor(labels.pool, 'p'.repeat(500)),
+      tagFor(labels.owner, 'a:b@c'),
+      deploymentTag('prod-eu'),
+      keyTag('idem-key-1'),
+      networkMemberTag('Default Network'),
+    ];
+    for (const tag of produced) expect(tag).toMatch(/^[a-z0-9:_-]{1,255}$/);
+    expect(deploymentTag('prod-eu')).toMatch(/^better-compute-deployment:[0-9a-f]{12}$/);
+    expect(keyTag('idem-key-1')).toMatch(/^better-compute-key:[0-9a-f]{24}$/);
+    expect(networkMemberTag('n')).toMatch(/^bc-net-[0-9a-f]{16}$/);
+    expect(deploymentTag('a')).not.toBe(deploymentTag('b'));
+    // Only better-compute-* keys decode; the last of a duplicated key wins.
+    expect(
+      labelsFromTags([
+        'bc-net-0123456789abcdef',
+        'env:prod',
+        'better-compute-pool:a',
+        'better-compute-pool:b',
+        'nocolon',
+      ]),
+    ).toEqual({ 'better-compute-pool': 'b' });
+    // The value is whatever follows the first colon.
+    expect(labelsFromTags(['better-compute-pool:a:b'])).toEqual({ 'better-compute-pool': 'a:b' });
+    expect(isManagedTag('better-compute-tenant:acme')).toBe(true);
+    expect(isManagedTag('bc-net-0123456789abcdef')).toBe(true);
+    expect(isManagedTag('web')).toBe(false);
+  });
+
+  it('decoding is case-insensitive, as DO tag matching is', () => {
+    expect(labelsFromTags(['Better-Compute-Tenant:ACME'])).toEqual({
+      'better-compute-tenant': 'acme',
+    });
+    expect(labelsFromTags(['better-compute-pool:A', 'BETTER-COMPUTE-POOL:b'])).toEqual({
+      'better-compute-pool': 'b',
+    });
   });
 });
