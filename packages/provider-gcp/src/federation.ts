@@ -96,6 +96,48 @@ async function bounded<T>(
   }
 }
 
+const refusalStatuses: ReadonlySet<unknown> = new Set([400, 401, 403]);
+
+/**
+ * A token endpoint (STS, IAM Credentials) refusing the request: UNAUTHENTICATED with a 400, 401 or
+ * 403. gcp-common maps every 4xx to UNAUTHENTICATED, and a 200 without a token too: a 429 or a
+ * malformed reply is not a refusal, and must never count as one (a throttled probe would pass a
+ * broad condition).
+ */
+export function isStsRefusal(error: unknown): error is ComputeError {
+  return isComputeError(error, 'UNAUTHENTICATED') && refusalStatuses.has(error.details?.status);
+}
+
+/**
+ * A token endpoint failure that is not a refusal, as a retryable error: a 429 is RATE_LIMITED, any
+ * other UNAUTHENTICATED (a 200 without a token, an unexpected 4xx) is UNAVAILABLE `<service>Malformed`.
+ * Everything else (UNAVAILABLE, RATE_LIMITED, INVALID_CONFIG, an abort) is returned unchanged.
+ */
+function notARefusal(error: unknown, what: string, malformed: string): unknown {
+  if (!isComputeError(error, 'UNAUTHENTICATED')) return error;
+  const status = error.details?.status;
+  const retryAfterMs = error.details?.retryAfterMs;
+  const retry = typeof retryAfterMs === 'number' ? { retryAfterMs } : {};
+  if (status === 429)
+    return new ComputeError(
+      'RATE_LIMITED',
+      `${what} is throttling requests (HTTP 429)`,
+      undefined,
+      {
+        provider: 'gcp',
+        status,
+        reason: error.details?.reason,
+        ...retry,
+      },
+    );
+  return new ComputeError(
+    'UNAVAILABLE',
+    `${what} answered unexpectedly (HTTP ${String(status)})`,
+    undefined,
+    { provider: 'gcp', status, reason: malformed, ...retry },
+  );
+}
+
 /**
  * `ProviderInput.checkAccount` for GCP. An account that does not federate is not checked here (a
  * key account keeps its lazy check on first use) and makes no call. A federated one, in order,
@@ -107,9 +149,10 @@ async function bounded<T>(
  * 4. with `impersonate`, IAM Credentials must let it impersonate (`impersonationRefused`);
  * 5. the resulting token must read the project (`projectAccess` on 403/404).
  *
- * An accepted probe is `federationTrustsAnySubject`. A probe counts as refused only when STS
- * refuses it (UNAUTHENTICATED); anything else (UNAVAILABLE, a timeout) propagates, so the check
- * fails closed and a retry with the same idempotency key runs it again.
+ * An accepted probe is `federationTrustsAnySubject`. A probe counts as refused, and steps 3-4 as
+ * INVALID_CONFIG, only on a 400/401/403 refusal (`isStsRefusal`); anything else (a 429, a malformed
+ * reply, UNAVAILABLE, a timeout) propagates as a retryable error, so the check fails closed and a
+ * retry with the same idempotency key runs it again.
  */
 export async function checkGcpAccount(
   config: GcpConfig,
@@ -149,8 +192,8 @@ export async function checkGcpAccount(
     try {
       await exchange(probe.token);
     } catch (error) {
-      if (isComputeError(error, 'UNAUTHENTICATED')) continue;
-      throw error;
+      if (isStsRefusal(error)) continue;
+      throw notARefusal(error, 'Google STS', 'stsMalformed');
     }
     throw invalid(
       'federationTrustsAnySubject',
@@ -166,7 +209,7 @@ export async function checkGcpAccount(
   try {
     federatedToken = (await exchange(minted.token)).accessToken;
   } catch (error) {
-    if (!isComputeError(error, 'UNAUTHENTICATED')) throw error;
+    if (!isStsRefusal(error)) throw notARefusal(error, 'Google STS', 'stsMalformed');
     const stsError = typeof error.details?.reason === 'string' ? error.details.reason : 'unknown';
     throw invalid(
       'federationRefused',
@@ -185,8 +228,8 @@ export async function checkGcpAccount(
         impersonated.token({ signal, clock: context.clock }),
       );
     } catch (error) {
-      if (!isComputeError(error, 'UNAUTHENTICATED') && !isComputeError(error, 'ACCESS_DENIED'))
-        throw error;
+      if (!isStsRefusal(error) && !isComputeError(error, 'ACCESS_DENIED'))
+        throw notARefusal(error, 'IAM Credentials', 'impersonationMalformed');
       throw invalid(
         'impersonationRefused',
         `The federated identity cannot impersonate ${config.impersonate}: grant ` +

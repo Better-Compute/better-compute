@@ -34,6 +34,11 @@ export class FakeSts {
   readonly exchanges: { sub?: string; accepted: boolean }[] = [];
   /** True: every request is answered 503. */
   down = false;
+  /**
+   * Scripted replies, one per POST to the token endpoint, in order: an entry is answered as given
+   * (and is not recorded in `exchanges`); `undefined` lets that exchange run normally.
+   */
+  scripted: ({ status: number; body: unknown } | undefined)[] = [];
   readonly fetch: typeof fetch;
 
   readonly #options: FakeStsOptions;
@@ -51,6 +56,10 @@ export class FakeSts {
         });
       if ((init?.method ?? 'GET') !== 'POST')
         return json(405, { error: 'invalid_request', error_description: 'POST only.' });
+      if (this.scripted.length > 0) {
+        const reply = this.scripted.shift();
+        if (reply) return json(reply.status, reply.body);
+      }
       return this.#exchange(new URLSearchParams(String(init?.body ?? '')));
     };
   }

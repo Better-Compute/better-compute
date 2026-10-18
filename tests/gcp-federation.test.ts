@@ -487,3 +487,48 @@ describe('federated accounts prove their trust before they are stored (checkAcco
     expect((await w.accounts()).map((stored) => stored.name)).toEqual(['keyed']);
   });
 });
+
+describe('only an STS refusal counts as refused (throttling and malformed replies fail closed)', () => {
+  const throttled = {
+    status: 429,
+    body: { error: 'rate_limit_exceeded', error_description: 'Too many requests.' },
+  };
+
+  it('a throttled stranger probe refuses create, nothing stored', async () => {
+    // A condition that trusts every account subject: a throttled probe must not pass it.
+    const w = await world({ trust: (sub) => sub.startsWith('compute-account:') });
+    w.sts.scripted.push(throttled);
+    const refused = await codeOf(w.createAccount('keyless', { federationAudience: AUDIENCE }));
+    expect(refused).toMatchObject({ code: 'RATE_LIMITED' });
+    expect(w.sts.scripted).toEqual([]);
+    // No later exchange reached STS.
+    expect(w.sts.exchanges).toEqual([]);
+    expect(await w.accounts()).toEqual([]);
+  });
+
+  it('a malformed STS reply to a probe refuses create, nothing stored', async () => {
+    const w = await world({ trust: (sub) => sub.startsWith('compute-account:') });
+    w.sts.scripted.push({ status: 200, body: {} });
+    const refused = await codeOf(w.createAccount('keyless', { federationAudience: AUDIENCE }));
+    expect(refused).toMatchObject({ code: 'UNAVAILABLE', details: { reason: 'stsMalformed' } });
+    expect(w.sts.exchanges).toEqual([]);
+    expect(await w.accounts()).toEqual([]);
+  });
+
+  it('a throttled real-subject exchange is retryable, not federationRefused', async () => {
+    const w = await world();
+    w.sts.scripted.push(undefined, undefined, throttled);
+    const refused = await codeOf(w.createAccount('keyless', { federationAudience: AUDIENCE }));
+    expect(refused).toMatchObject({ code: 'RATE_LIMITED' });
+    expect(w.sts.exchanges.map((exchange) => exchange.accepted)).toEqual([false, false]);
+    expect(await w.accounts()).toEqual([]);
+  });
+
+  it('a malformed real-subject reply is UNAVAILABLE, not federationRefused', async () => {
+    const w = await world();
+    w.sts.scripted.push(undefined, undefined, { status: 200, body: {} });
+    const refused = await codeOf(w.createAccount('keyless', { federationAudience: AUDIENCE }));
+    expect(refused).toMatchObject({ code: 'UNAVAILABLE', details: { reason: 'stsMalformed' } });
+    expect(await w.accounts()).toEqual([]);
+  });
+});
