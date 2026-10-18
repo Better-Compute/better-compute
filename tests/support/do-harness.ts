@@ -1,4 +1,4 @@
-import { manualClock, type CallContext, type Logger } from '@better-compute/core';
+import { manualClock, type CallContext, type Clock, type Logger } from '@better-compute/core';
 import {
   digitaloceanProvider,
   resetBudgets,
@@ -46,18 +46,20 @@ export function freshBudgets(): void {
 
 /**
  * A client for an account over the emulator, built the way vps builds one: the account config is
- * validated by the definition's manifest, then handed to `create`.
+ * validated by the definition's manifest, then handed to `create`. `clock` is the provider's
+ * (its caches age by it).
  */
 export async function build(
   emu: DoEmulator,
   config: Record<string, unknown> = doAccount,
   options: DoProviderOptions = {},
+  clock: Clock = manualClock(1_000_000),
 ): Promise<DoCompute> {
   const provider = digitaloceanProvider({ fetch: emu.fetch, ...options });
   const parsed = await provider.config['~standard'].validate(config);
   if ('issues' in parsed && parsed.issues) throw new Error(parsed.issues[0]!.message);
   return (await provider.create((parsed as { value: DoConfig }).value, {
-    clock: manualClock(1_000_000),
+    clock,
     secrets,
     log: noopLog,
     account: platformAccount,

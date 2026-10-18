@@ -17,11 +17,11 @@ const defaultRetryAfterMs = 60_000;
  * The 422 messages that mean more than "bad input". DO's spec doesn't list them: they are what its
  * clients report in practice (each has a fixture in tests/fixtures/digitalocean/errors.json, marked
  * unverified until the live suite records the real text). Anything else stays `INVALID_INPUT` and
- * is never retried.
+ * is never retried; an `INVALID_INPUT` entry only names the reason.
  */
 export const unprocessablePatterns: readonly {
   pattern: RegExp;
-  code: 'CAPACITY_UNAVAILABLE' | 'QUOTA_EXCEEDED' | 'CONFLICT';
+  code: 'CAPACITY_UNAVAILABLE' | 'QUOTA_EXCEEDED' | 'CONFLICT' | 'INVALID_INPUT';
   reason: string;
 }[] = [
   {
@@ -43,6 +43,8 @@ export const unprocessablePatterns: readonly {
   { pattern: /ssh key is already in use/i, code: 'CONFLICT', reason: 'sshKeyInUse' },
   { pattern: /name is already in use/i, code: 'CONFLICT', reason: 'nameInUse' },
   { pattern: /already exists/i, code: 'CONFLICT', reason: 'alreadyExists' },
+  // Still bad input, but a caller can say why: the range collides with another VPC of the account.
+  { pattern: /overlaps with another network/i, code: 'INVALID_INPUT', reason: 'cidrOverlap' },
 ];
 
 /** The ComputeError for a failed DigitalOcean HTTP response. */

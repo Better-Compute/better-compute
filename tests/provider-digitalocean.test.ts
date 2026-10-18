@@ -1271,7 +1271,7 @@ describe('compute', () => {
     expect(posts(emu)).toHaveLength(0);
   });
 
-  it('a region outside the account, a bad label and a network ref are refused up front', async () => {
+  it('a region outside the account and a bad label are refused up front', async () => {
     const emu = emulator();
     const compute = await build(emu);
     const region = await failure(compute.create(request({ offerId: 'tor1/s-2vcpu-4gb' }), ctx()));
@@ -1282,10 +1282,6 @@ describe('compute', () => {
     );
     expect(label.code).toBe('INVALID_INPUT');
     expect(label.details).toMatchObject({ provider: 'digitalocean', reason: 'label' });
-    // Task 8 attaches a NetworkRef; until then it is refused rather than ignored.
-    const network = await failure(compute.create(request({ network: { network: 'n1' } }), ctx()));
-    expect(network.code).toBe('UNSUPPORTED');
-    expect(network.details).toMatchObject({ provider: 'digitalocean', reason: 'networkRef' });
     expect(emu.requests).toHaveLength(0);
   });
 

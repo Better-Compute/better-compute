@@ -2,6 +2,7 @@ import { registerActions } from './actions.js';
 import { registerAutoscale } from './autoscale.js';
 import { registerCatalog } from './catalog.js';
 import { registerDroplets } from './droplets.js';
+import { registerFirewalls } from './firewalls.js';
 import { registerKeys } from './keys.js';
 import { registerTags } from './tags.js';
 import { registerVpcs } from './vpcs.js';
@@ -79,6 +80,11 @@ export class DoEmulator {
    * completes and the Droplet turns `active`. The read that completes it still sees `new`.
    */
   createReads = 1;
+  /**
+   * How many reads a firewall that was just created or replaced answers `waiting` to before it
+   * turns `succeeded` (list entries count). The create or replace itself always answers `waiting`.
+   */
+  firewallReads = 0;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -261,5 +267,6 @@ export class DoEmulator {
     registerDroplets(this);
     registerActions(this);
     registerVpcs(this);
+    registerFirewalls(this);
   }
 }

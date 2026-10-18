@@ -19,14 +19,18 @@ import {
   labels,
   labelsFromTags,
   machineId,
+  networkMemberTag,
   offerId,
   parseMachineId,
   parseOfferId,
   tagFor,
 } from '../ids.js';
+import { DoNetworks } from '../networks/index.js';
+import { networkNamer, vpcForNetwork } from '../networks/vpcs.js';
 import { poolMembers } from './autoscale.js';
 import { ensureSshKeys } from './keys.js';
 import { cachedSize, gpuModelOf, listOffers } from './offers.js';
+import { assignTag, ensureTag, hasTag, spelled, unassignTag } from './tags.js';
 import type { DoAction, DoDroplet, DoVpc } from './types.js';
 
 // Droplets as machines. DO has no idempotency key, so a create carries its key as a tag
@@ -83,7 +87,10 @@ const states: Readonly<Record<string, ExternalMachine['state']>> = {
   archive: 'deleted',
 };
 
-/** A Droplet as a machine. Pure: the network is the Droplet's VPC uuid (ruling R2). */
+/**
+ * A Droplet as a machine. Pure: the network is the Droplet's VPC uuid; `get`, `list`, `discover`
+ * and `claim` name it (ruling R2, `networkNamer`).
+ */
 export function toMachine(droplet: DoDroplet): ExternalMachine {
   const tags = droplet.tags ?? [];
   const v4 = droplet.networks?.v4 ?? [];
@@ -131,10 +138,6 @@ function byAge(a: DoDroplet, b: DoDroplet): number {
   return Number.isFinite(at) && at !== 0 ? at : a.id - b.id;
 }
 
-function hasTag(droplet: DoDroplet, tag: string): boolean {
-  return (droplet.tags ?? []).some((t) => t.toLowerCase() === tag);
-}
-
 const instanceTagPrefix = `${labels.instance}:`;
 
 /** DO's action type for each power action; `nmi` has none. */
@@ -168,6 +171,8 @@ export class DoCompute implements ProviderImpl {
   protected readonly client: DoClient;
   /** This deployment's tag: what `delete` and the reaper require, with the managed tag. */
   protected readonly deploymentTag: string;
+  /** Tenant networks: VPCs, Cloud Firewalls and Droplet tags. */
+  readonly networks: DoNetworks;
 
   constructor(
     config: DoConfig,
@@ -180,6 +185,7 @@ export class DoCompute implements ProviderImpl {
     this.options = options;
     this.client = client;
     this.deploymentTag = deploymentTag(options.deployment);
+    this.networks = new DoNetworks(client, config, options.deployment);
   }
 
   /** Whether better-compute may delete the Droplet: managed, and in this deployment (R3). */
@@ -302,12 +308,6 @@ export class DoCompute implements ProviderImpl {
         `user data is over DigitalOcean's limit of ${maxUserDataBytes} bytes`,
         'userData',
       );
-    if (request.network)
-      throw fail(
-        'UNSUPPORTED',
-        'creating a Droplet on a network is not supported yet',
-        'networkRef',
-      );
     if (!request.sshKeys?.length && this.config.defaultSshKey === undefined)
       throw fail(
         'INVALID_CONFIG',
@@ -333,6 +333,19 @@ export class DoCompute implements ProviderImpl {
         );
       tags.push(tag);
     }
+    // On a tenant network the Droplet carries the network's member tag and the tags its rules
+    // target from its first boot, so the base firewall covers it before any setTags.
+    const ref = request.network;
+    if (ref) {
+      for (const tag of ref.tags ?? [])
+        if (!tagPattern.test(tag))
+          throw fail(
+            'INVALID_INPUT',
+            `network tag ${JSON.stringify(tag)} is not a DigitalOcean tag`,
+            'tag',
+          );
+      tags.push(networkMemberTag(ref.network), ...(ref.tags ?? []));
+    }
     const image = imageParam(request.image);
     const gpu = this.isGpuSize(size);
 
@@ -349,7 +362,9 @@ export class DoCompute implements ProviderImpl {
     );
     if (sshKeys.length === 0)
       throw fail('INVALID_CONFIG', 'a Droplet needs an SSH key and none was given', 'noSshKey');
-    const vpc = await this.vpcFor(region, signal);
+    const vpc = ref
+      ? (await vpcForNetwork(this.client, ref, region, signal)).id
+      : await this.vpcFor(region, signal);
 
     // 4. The create.
     let created: DoDroplet | undefined;
@@ -449,7 +464,7 @@ export class DoCompute implements ProviderImpl {
           'createActionErrored',
         );
     }
-    return toMachine(droplet);
+    return networkNamer(this.client, ctx.signal)(toMachine(droplet));
   }
 
   async delete(id: string, ctx: CallContext): Promise<void> {
@@ -523,6 +538,7 @@ export class DoCompute implements ProviderImpl {
    * the deployment tag here; a Droplet is yielded once.
    */
   async *list(ctx: CallContext): AsyncIterable<ExternalMachine> {
+    const named = networkNamer(this.client, ctx.signal);
     const seen = new Set<number>();
     const queries: Record<string, string>[] = [{ tag_name: this.deploymentTag }, { type: 'gpus' }];
     for (const query of queries)
@@ -534,7 +550,7 @@ export class DoCompute implements ProviderImpl {
         // The GPU list is everyone's, so both lists are checked for managed and deployment tags.
         if (seen.has(droplet.id) || !this.owned(droplet)) continue;
         seen.add(droplet.id);
-        yield toMachine(droplet);
+        yield await named(toMachine(droplet));
       }
   }
 
@@ -550,6 +566,7 @@ export class DoCompute implements ProviderImpl {
     const regions = new Set(this.config.regions);
     const wanted = this.config.discoverTag;
     const members = await poolMembers(this.client, ctx.signal, { fresh: true });
+    const named = networkNamer(this.client, ctx.signal);
     const seen = new Set<number>();
     const queries: Record<string, string>[] = [
       wanted !== undefined ? { tag_name: wanted } : {},
@@ -565,7 +582,7 @@ export class DoCompute implements ProviderImpl {
         if (query.type === 'gpus' && wanted !== undefined && !hasTag(droplet, wanted.toLowerCase()))
           continue;
         seen.add(droplet.id);
-        const machine = toMachine(droplet);
+        const machine = await named(toMachine(droplet));
         // The label comes from the pool's member list only (toMachine drops a forged tag's).
         const pool = members.get(droplet.id);
         yield pool === undefined
@@ -575,35 +592,18 @@ export class DoCompute implements ProviderImpl {
   }
 
   /** Makes the tag object exist: one that already does is fine. */
-  protected async ensureTag(name: string, signal: AbortSignal): Promise<void> {
-    try {
-      await this.client.request('POST', '/tags', { body: { name }, signal, budget: 'mutate' });
-    } catch (error) {
-      if (!isComputeError(error, 'CONFLICT')) throw error;
-    }
+  protected ensureTag(name: string, signal: AbortSignal): Promise<void> {
+    return ensureTag(this.client, name, signal);
   }
 
   /** Puts a tag on a Droplet; DO answers 204. */
-  protected async assignTag(name: string, dropletId: number, signal: AbortSignal): Promise<void> {
-    await this.ensureTag(name, signal);
-    await this.client.request('POST', `/tags/${encodeURIComponent(name)}/resources`, {
-      body: { resources: [{ resource_id: String(dropletId), resource_type: 'droplet' }] },
-      signal,
-      budget: 'mutate',
-    });
+  protected assignTag(name: string, dropletId: number, signal: AbortSignal): Promise<void> {
+    return assignTag(this.client, name, dropletId, signal);
   }
 
   /** Takes a tag off one Droplet (never a bulk call); a Droplet or tag that is gone counts as done. */
-  protected async unassignTag(name: string, dropletId: number, signal: AbortSignal): Promise<void> {
-    try {
-      await this.client.request('DELETE', `/tags/${encodeURIComponent(name)}/resources`, {
-        body: { resources: [{ resource_id: String(dropletId), resource_type: 'droplet' }] },
-        signal,
-        budget: 'mutate',
-      });
-    } catch (error) {
-      if (!isComputeError(error, 'NOT_FOUND')) throw error;
-    }
+  protected unassignTag(name: string, dropletId: number, signal: AbortSignal): Promise<void> {
+    return unassignTag(this.client, name, dropletId, signal);
   }
 
   async claim(
@@ -658,7 +658,7 @@ export class DoCompute implements ProviderImpl {
       await this.assignTag(managedTag, droplet.id, signal);
       claimed = { ...claimed, tags: [...claimed.tags, managedTag] };
     }
-    return toMachine(claimed);
+    return networkNamer(this.client, signal)(toMachine(claimed));
   }
 
   /** Takes our instance tag off a Droplet we lost; a failure is logged, the claim is lost anyway. */
@@ -692,11 +692,6 @@ export class DoCompute implements ProviderImpl {
 /** The `better-compute-instance:*` tags a Droplet carries. */
 function instanceTagsOf(droplet: DoDroplet): string[] {
   return (droplet.tags ?? []).filter((t) => t.toLowerCase().startsWith(instanceTagPrefix));
-}
-
-/** The tag as the Droplet spells it: DO's URLs want the spelling a tag was made with. */
-function spelled(droplet: DoDroplet, tag: string): string {
-  return (droplet.tags ?? []).find((t) => t.toLowerCase() === tag) ?? tag;
 }
 
 function claimedByAnother(droplet: DoDroplet): ComputeError {
