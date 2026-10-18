@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/gcp-common",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "Shared Google Cloud plumbing for better-compute: token sources, workload identity, REST client, errors, paging, operations",
   "type": "module",
   "license": "Apache-2.0",
