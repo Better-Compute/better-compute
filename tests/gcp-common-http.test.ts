@@ -32,6 +32,9 @@ describe('mapGoogleError', () => {
     ['ABORTED', 409, S(409, 'ABORTED'), none, 'CONFLICT', {}],
     ['FAILED_PRECONDITION', 400, S(400, 'FAILED_PRECONDITION'), none, 'INVALID_STATE', {}],
     ['INVALID_ARGUMENT', 400, S(400, 'INVALID_ARGUMENT'), none, 'INVALID_INPUT', {}],
+    ['OUT_OF_RANGE', 400, S(400, 'OUT_OF_RANGE'), none, 'INVALID_INPUT', {}],
+    ['CANCELLED', 499, S(499, 'CANCELLED'), none, 'UNAVAILABLE', {}],
+    ['UNKNOWN', 500, S(500, 'UNKNOWN'), none, 'PROVIDER_ERROR', {}],
     ['UNAUTHENTICATED', 401, S(401, 'UNAUTHENTICATED'), none, 'UNAUTHENTICATED', {}],
     [
       'RESOURCE_EXHAUSTED rate',

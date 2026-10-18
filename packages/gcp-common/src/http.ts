@@ -137,8 +137,12 @@ export function mapGoogleError(
   } else if (status === 403)
     code = 'ACCESS_DENIED'; // PERMISSION_DENIED, VPC Service Controls
   else if (status === 400)
-    code = rpcStatus === 'FAILED_PRECONDITION' ? 'INVALID_STATE' : 'INVALID_INPUT';
+    code = rpcStatus === 'FAILED_PRECONDITION' ? 'INVALID_STATE' : 'INVALID_INPUT'; // incl. OUT_OF_RANGE
   else if (status === 501) code = 'UNSUPPORTED';
+  // Cancelled by the server (499, or an operation that ended CANCELLED): the same call can succeed later.
+  else if (status === 499 || rpcStatus === 'CANCELLED') code = 'UNAVAILABLE';
+  // An error Google could not classify (and an rpc code outside the table): not worth a retry.
+  else if (rpcStatus === 'UNKNOWN') code = 'PROVIDER_ERROR';
   else if (status >= 500) code = 'UNAVAILABLE';
   else code = 'PROVIDER_ERROR';
   return new ComputeError(code, message, undefined, details);
