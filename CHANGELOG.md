@@ -6,6 +6,13 @@ All notable changes to the better-compute packages are documented here. The form
 
 ## Unreleased
 
+### Added
+
+- **`@better-compute/gcp-common`** (new, outside the umbrella). The Google Cloud token sources
+  (`serviceAccountTokenSource`, `metadataTokenSource`, `impersonatedTokenSource`, `cachedTokenSource`) move out of
+  `@better-compute/provider-gcp` into a package that depends only on `@better-compute/core`, so other Google
+  providers can share them. `provider-gcp` re-exports the same functions; its API and behavior are unchanged.
+
 ### Security
 
 - **A tenant could build a provider pool on another tenant's or the platform's provider account (0.1.x).**
