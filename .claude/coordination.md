@@ -648,6 +648,7 @@ Rules for v0.1:
 - (Claude session, gcp WS0, 2026-10-18, plan 2026-10-18-gcp-ws0-foundation) claims new packages/gcp-common/**,
   tests/support/gcp/**, tests/gcp-common-*.test.ts; edits packages/provider-gcp/src/{auth,config,provider}.ts,
   provider-gcp package.json/tsconfig.json; one-line inserts in tsconfig.json and vitest.config.ts.
+- (Claude session, gcp WS1, 2026-10-18, plan 2026-10-18-gcp-ws1-keyless-federation) claims new packages/pki/src/workload-issuer.ts, packages/gcp-common/src/federation.ts, packages/provider-gcp/src/federation.ts, tests/support/gcp/sts.ts, tests/{pki-workload-issuer,server-workload-issuer,gcp-common-federation,vps-account-federation,gcp-federation}.test.ts, migration vps/0027_account_exclusive_key; additive core members WorkloadIssuerPort, PkiPort.workload, ProviderContext.identity, ProviderInput.checkAccount/accountKey; edits server options/ports/http (workload routes), vps accounts/module (identity, checkAccount admission, exclusive_key), testing fixture (pki passthrough), provider-gcp config/provider, apiSurface row providerAccounts.federationSetup.
 - (orchestrator, P0) Root workspace, scripts/tooling.mjs, scripts/sync-better-iam.mjs, vendor/better-iam,
   package manifests, vitest configs. P0 package work is fanned out by workflow; see the git log.
 - (orchestrator [56cfd7], v0.1 W5a + W5b) core seams landed: 1b8df8f (`MethodDefinition.admission`, `AuthzWriter`,
