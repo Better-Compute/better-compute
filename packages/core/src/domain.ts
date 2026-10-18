@@ -93,6 +93,11 @@ export interface PoolPolicy {
   /** `mig` pools: the MIG layout the `mig-layout` config unit applies (e.g. `all-1g.10gb`, `mixed:3g.40gb+2x2g.20gb`). */
   migLayout?: string;
   /**
+   * (platform compute billing) How provider instances in this pool are billed. Default: `metered`, or
+   * `platform-fee` for a provider account owned by a tenant other than the root.
+   */
+  billing?: { mode: 'metered' | 'platform-fee' | 'none' };
+  /**
    * `dedicated-root` pools (v0.5): reservations may use `binding: 'node'`; nodes are leased whole
    * and deployed by metal with the reservation's profile, then wiped on release.
    */
@@ -476,6 +481,11 @@ export interface Flavor {
   memoryGiB: number;
   diskGiB: number;
   gpus?: number;
+  /**
+   * (platform compute billing) A whole-shape meter (`flavor.<…>.hours`, one unit per hour) that replaces the
+   * composed vCPU, memory and GPU lines.
+   */
+  billing?: { meter?: string };
   /**
    * (v1.1 §3.8) Where the guest lives on the host: `numaAffine` keeps vCPUs and memory on one NUMA node
    * (its GPUs' when it has any), `pinned` gives each vCPU its own host CPU, `hugepages` backs guest
