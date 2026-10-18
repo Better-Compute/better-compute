@@ -1,4 +1,10 @@
-import { ComputeError, type ExternalMachine, type NetworkRef } from '@better-compute/core';
+import {
+  ComputeError,
+  isComputeError,
+  type ExternalMachine,
+  type Logger,
+  type NetworkRef,
+} from '@better-compute/core';
 import type { DoClient } from '../client/http.js';
 import { untilAborted } from '../compute/abort.js';
 import type { DoVpc } from '../compute/types.js';
@@ -149,6 +155,7 @@ export function vpcLookup(
 export function networkNamer(
   client: DoClient,
   signal: AbortSignal,
+  log: Logger,
 ): (machine: ExternalMachine) => Promise<ExternalMachine> {
   const lookup = vpcLookup(client, signal);
   let unreadable = false;
@@ -161,6 +168,9 @@ export function networkNamer(
     } catch (error) {
       if (signal.aborted) throw error;
       unreadable = true;
+      log.warn('digitalocean.vpcListUnreadable', {
+        error: isComputeError(error) ? error.code : 'unknown',
+      });
       return machine;
     }
     if (!vpc) return machine;

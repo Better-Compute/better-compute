@@ -25,6 +25,7 @@ import {
   baseFirewallName,
   compileDoFirewall,
   networkHash,
+  parseFirewallName,
   refusePriorityInversion,
   sameFirewall,
   specOfDoFirewall,
@@ -51,6 +52,8 @@ const state = (id: string, value: ProviderNetworkState['state'], message?: strin
   ({ id, state: value, ...(message !== undefined ? { message } : {}) }) as ProviderNetworkState;
 
 const managedPrefix = 'bc-';
+/** The prefix of every network's member tag (`networkMemberTag`). */
+const memberPrefix = 'bc-net-';
 const setTagPattern = /^bc-[a-z0-9:_-]{1,252}$/;
 const instanceTagPrefix = `${labels.instance}:`;
 
@@ -62,30 +65,46 @@ function fail(
   return new ComputeError(code, message, undefined, { provider: 'digitalocean', reason });
 }
 
+/**
+ * Whether a DO firewall is one of the rule's: a name of exactly the R6 shape, for this rule. A
+ * hand-made `bc-r1.prod` is never one, so it is never replaced or deleted.
+ */
+const ruleFirewall =
+  (rule: string) =>
+  (firewall: DoFirewall): boolean =>
+    parseFirewallName(firewall.name)?.rule === rule;
+
 /** Oldest first: by creation time, then by id. */
 function byAge(a: DoFirewall, b: DoFirewall): number {
   const at = Date.parse(a.created_at ?? '') - Date.parse(b.created_at ?? '');
   return Number.isFinite(at) && at !== 0 ? at : a.id.localeCompare(b.id);
 }
 
-/** A firewall's state: DO applies it in the background (research S3). */
-function firewallState(id: string, firewall: DoFirewall | undefined): ProviderNetworkState {
-  switch (firewall?.status) {
-    case 'succeeded':
-      return state(id, 'ready');
-    case 'failed': {
-      const droplets = (firewall.pending_changes ?? [])
-        .filter((change) => change.status === 'failed')
-        .map((change) => change.droplet_id);
-      return state(
-        id,
-        'error',
-        `DigitalOcean failed to apply firewall ${firewall.name}${droplets.length ? ` to Droplets ${droplets.join(', ')}` : ''}`,
-      );
-    }
-    default:
-      return state(id, 'pending');
-  }
+/** What a DO firewall that `failed` (and is being applied again) is reported as. */
+function failedState(id: string, firewall: DoFirewall): ProviderNetworkState {
+  const droplets = (firewall.pending_changes ?? [])
+    .filter((change) => change.status === 'failed')
+    .map((change) => change.droplet_id);
+  return state(
+    id,
+    'error',
+    `DigitalOcean failed to apply firewall ${firewall.name}${droplets.length ? ` to Droplets ${droplets.join(', ')}` : ''}; it is being applied again`,
+  );
+}
+
+/**
+ * A firewall's state: DO applies it in the background (research S3), `waiting` until it has.
+ * A rule is `pending` until then; a base firewall is `ready` once it exists (`existing`): the
+ * network's subnets and rules need it there, not applied.
+ */
+function firewallState(
+  id: string,
+  firewall: DoFirewall | undefined,
+  existing: boolean,
+): ProviderNetworkState {
+  if (firewall?.status === 'failed') return failedState(id, firewall);
+  if (existing || firewall?.status === 'succeeded') return state(id, 'ready');
+  return state(id, 'pending');
 }
 
 export class DoNetworks implements ProviderNetworks {
@@ -124,18 +143,21 @@ export class DoNetworks implements ProviderNetworks {
 
   /**
    * Makes the firewall `body` describes out of `found`, the DO firewalls that are this one: the
-   * oldest is kept (and `PUT` when it differs), the rest are deleted; none means a create. The tags
-   * it targets are made first, as a Droplet create would make them.
+   * oldest is kept (and `PUT` when it differs, or when DO failed to apply it, so DO tries again),
+   * the rest are deleted; none means a create. The tags it targets are made first, as a Droplet
+   * create would make them. `existing`: the firewall is ready once it exists (a base firewall).
    */
   async #apply(
     id: string,
     found: readonly DoFirewall[],
     body: DoFirewallBody,
+    existing: boolean,
     signal: AbortSignal,
   ): Promise<ProviderNetworkState> {
     const [kept, ...duplicates] = [...found].sort(byAge);
     for (const duplicate of duplicates) await this.#deleteFirewall(duplicate, signal);
-    if (kept && sameFirewall(kept, body)) return firewallState(id, kept);
+    const failed = kept?.status === 'failed';
+    if (kept && !failed && sameFirewall(kept, body)) return firewallState(id, kept, existing);
     for (const tag of body.tags) await ensureTag(this.#client, tag, signal);
     const reply = kept
       ? await this.#client.request<{ firewall?: DoFirewall }>(
@@ -148,7 +170,9 @@ export class DoNetworks implements ProviderNetworks {
           signal,
           budget: 'mutate',
         });
-    return firewallState(id, reply.firewall);
+    // A failure is reported once, by the call that applies the firewall again.
+    if (kept && failed) return failedState(id, kept);
+    return firewallState(id, reply.firewall, existing);
   }
 
   async ensureNetwork(
@@ -164,7 +188,7 @@ export class DoNetworks implements ProviderNetworks {
       );
     const name = baseFirewallName(spec.name);
     const found = (await this.#firewalls(context.signal)).filter((f) => f.name === name);
-    return this.#apply(spec.name, found, baseFirewallBody(spec.name), context.signal);
+    return this.#apply(spec.name, found, baseFirewallBody(spec.name), true, context.signal);
   }
 
   async ensureFirewall(
@@ -178,27 +202,22 @@ export class DoNetworks implements ProviderNetworks {
     }
     const body = compileDoFirewall(spec, spec.network);
     const all = await this.#firewalls(signal);
-    const prefix = `${spec.name}.`;
-    const network = `.n${networkHash(spec.network)}.`;
+    const network = networkHash(spec.network);
     // The network's other rules, read back from DO: this rule must not outrank a deny among them.
     for (const firewall of all) {
-      if (firewall.name.startsWith(prefix) || !firewall.name.includes(network)) continue;
+      const parsed = parseFirewallName(firewall.name);
+      if (!parsed || parsed.rule === spec.name || parsed.net16 !== network) continue;
       const other = specOfDoFirewall(firewall, spec.network);
       if (other) refusePriorityInversion([spec, other]);
     }
-    return this.#apply(
-      spec.name,
-      all.filter((f) => f.name.startsWith(prefix)),
-      body,
-      signal,
-    );
+    return this.#apply(spec.name, all.filter(ruleFirewall(spec.name)), body, false, signal);
   }
 
   /** Deletes every DO firewall of the rule (any network, any priority). Gone is `deleted`. */
   async deleteFirewall(name: string, context: CallContext): Promise<ProviderNetworkState> {
-    const prefix = `${name}.`;
+    const mine = ruleFirewall(name);
     for (const firewall of await this.#firewalls(context.signal))
-      if (firewall.name.startsWith(prefix)) await this.#deleteFirewall(firewall, context.signal);
+      if (mine(firewall)) await this.#deleteFirewall(firewall, context.signal);
     return state(name, 'deleted');
   }
 
@@ -302,9 +321,9 @@ export class DoNetworks implements ProviderNetworks {
     const vpcs = await accountVpcs(this.#client, signal, { fresh: true });
     if (vpcs.some((vpc) => networkOfVpc(vpc) === name)) return state(name, 'deleting');
     const base = baseFirewallName(name);
-    const rules = `.n${networkHash(name)}.`;
+    const rules = networkHash(name);
     for (const firewall of await this.#firewalls(signal))
-      if (firewall.name === base || firewall.name.includes(rules))
+      if (firewall.name === base || parseFirewallName(firewall.name)?.net16 === rules)
         await this.#deleteFirewall(firewall, signal);
     return state(name, 'deleted');
   }
@@ -315,7 +334,9 @@ export class DoNetworks implements ProviderNetworks {
    * Replaces the Droplet's `bc-` tags with `tags`, plus the member tag of the network its VPC
    * belongs to; every other tag stays, `better-compute-*` included. The Droplet must carry this
    * deployment's tag and an instance tag, which with `instanceId` must name it (ruling R3). Tags
-   * are added before old ones go, so a firewall never loses the Droplet in between.
+   * are added before old ones go, so a firewall never loses the Droplet in between. A member tag
+   * (`bc-net-*`) stays unless the Droplet's VPC names another network: a VPC that can't be
+   * resolved, or that names none, never takes a Droplet out from behind its base firewall.
    */
   async setTags(
     machineId: string,
@@ -362,15 +383,20 @@ export class DoNetworks implements ProviderNetworks {
       );
 
     const wanted = new Set(tags);
-    if (droplet.vpc_uuid) {
-      const vpc = await vpcLookup(this.#client, signal)(droplet.vpc_uuid);
-      const network = vpc && networkOfVpc(vpc);
-      if (network !== undefined) wanted.add(networkMemberTag(network));
-    }
+    const vpc = droplet.vpc_uuid
+      ? await vpcLookup(this.#client, signal)(droplet.vpc_uuid)
+      : undefined;
+    const network = vpc && networkOfVpc(vpc);
+    if (network !== undefined) wanted.add(networkMemberTag(network));
     for (const tag of wanted)
       if (!hasTag(droplet, tag)) await assignTag(this.#client, tag, droplet.id, signal);
-    for (const tag of droplet.tags ?? [])
-      if (isManagedTag(tag) && tag.startsWith(managedPrefix) && !wanted.has(tag.toLowerCase()))
-        await unassignTag(this.#client, tag, droplet.id, signal);
+    for (const tag of droplet.tags ?? []) {
+      if (!isManagedTag(tag) || !tag.startsWith(managedPrefix) || wanted.has(tag.toLowerCase()))
+        continue;
+      // A member tag keeps the Droplet behind its network's base firewall, so it fails closed: it
+      // goes only when the Droplet's VPC is known to belong to another network.
+      if (tag.startsWith(memberPrefix) && network === undefined) continue;
+      await unassignTag(this.#client, tag, droplet.id, signal);
+    }
   }
 }

@@ -353,7 +353,10 @@ export class DoCompute implements ProviderImpl {
     const existing = await this.byKey(ctx.idempotencyKey, gpu, signal);
     if (existing.length > 0) return toMachine(await this.converge(existing, signal));
 
-    // 3. Keys and the VPC.
+    // 3. The VPC, then the keys: a create refused for its VPC uploads no key.
+    const vpc = ref
+      ? (await vpcForNetwork(this.client, ref, region, signal)).id
+      : await this.vpcFor(region, signal);
     const sshKeys = await ensureSshKeys(
       this.client,
       request.sshKeys ?? [],
@@ -362,9 +365,6 @@ export class DoCompute implements ProviderImpl {
     );
     if (sshKeys.length === 0)
       throw fail('INVALID_CONFIG', 'a Droplet needs an SSH key and none was given', 'noSshKey');
-    const vpc = ref
-      ? (await vpcForNetwork(this.client, ref, region, signal)).id
-      : await this.vpcFor(region, signal);
 
     // 4. The create.
     let created: DoDroplet | undefined;
@@ -464,7 +464,7 @@ export class DoCompute implements ProviderImpl {
           'createActionErrored',
         );
     }
-    return networkNamer(this.client, ctx.signal)(toMachine(droplet));
+    return networkNamer(this.client, ctx.signal, this.context.log)(toMachine(droplet));
   }
 
   async delete(id: string, ctx: CallContext): Promise<void> {
@@ -538,7 +538,7 @@ export class DoCompute implements ProviderImpl {
    * the deployment tag here; a Droplet is yielded once.
    */
   async *list(ctx: CallContext): AsyncIterable<ExternalMachine> {
-    const named = networkNamer(this.client, ctx.signal);
+    const named = networkNamer(this.client, ctx.signal, this.context.log);
     const seen = new Set<number>();
     const queries: Record<string, string>[] = [{ tag_name: this.deploymentTag }, { type: 'gpus' }];
     for (const query of queries)
@@ -566,7 +566,7 @@ export class DoCompute implements ProviderImpl {
     const regions = new Set(this.config.regions);
     const wanted = this.config.discoverTag;
     const members = await poolMembers(this.client, ctx.signal, { fresh: true });
-    const named = networkNamer(this.client, ctx.signal);
+    const named = networkNamer(this.client, ctx.signal, this.context.log);
     const seen = new Set<number>();
     const queries: Record<string, string>[] = [
       wanted !== undefined ? { tag_name: wanted } : {},
@@ -658,7 +658,7 @@ export class DoCompute implements ProviderImpl {
       await this.assignTag(managedTag, droplet.id, signal);
       claimed = { ...claimed, tags: [...claimed.tags, managedTag] };
     }
-    return networkNamer(this.client, signal)(toMachine(claimed));
+    return networkNamer(this.client, signal, this.context.log)(toMachine(claimed));
   }
 
   /** Takes our instance tag off a Droplet we lost; a failure is logged, the claim is lost anyway. */

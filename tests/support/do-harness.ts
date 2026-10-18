@@ -46,22 +46,22 @@ export function freshBudgets(): void {
 
 /**
  * A client for an account over the emulator, built the way vps builds one: the account config is
- * validated by the definition's manifest, then handed to `create`. `clock` is the provider's
- * (its caches age by it).
+ * validated by the definition's manifest, then handed to `create`. `context` overrides the
+ * provider's clock (its caches age by it) and log.
  */
 export async function build(
   emu: DoEmulator,
   config: Record<string, unknown> = doAccount,
   options: DoProviderOptions = {},
-  clock: Clock = manualClock(1_000_000),
+  context: { clock?: Clock; log?: Logger } = {},
 ): Promise<DoCompute> {
   const provider = digitaloceanProvider({ fetch: emu.fetch, ...options });
   const parsed = await provider.config['~standard'].validate(config);
   if ('issues' in parsed && parsed.issues) throw new Error(parsed.issues[0]!.message);
   return (await provider.create((parsed as { value: DoConfig }).value, {
-    clock,
+    clock: context.clock ?? manualClock(1_000_000),
     secrets,
-    log: noopLog,
+    log: context.log ?? noopLog,
     account: platformAccount,
   })) as DoCompute;
 }

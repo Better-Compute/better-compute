@@ -43,6 +43,8 @@ export const unprocessablePatterns: readonly {
   { pattern: /ssh key is already in use/i, code: 'CONFLICT', reason: 'sshKeyInUse' },
   { pattern: /name is already in use/i, code: 'CONFLICT', reason: 'nameInUse' },
   { pattern: /already exists/i, code: 'CONFLICT', reason: 'alreadyExists' },
+  // A resource that something still uses (a VPC with members): try again once it is free.
+  { pattern: /\bis in use\b/i, code: 'CONFLICT', reason: 'inUse' },
   // Still bad input, but a caller can say why: the range collides with another VPC of the account.
   { pattern: /overlaps with another network/i, code: 'INVALID_INPUT', reason: 'cidrOverlap' },
 ];

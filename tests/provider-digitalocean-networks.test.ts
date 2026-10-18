@@ -22,7 +22,7 @@ import { seedDroplet } from './support/do-emulator/droplets.js';
 import { failFirewall } from './support/do-emulator/firewalls.js';
 import { DoEmulator, type Json, type RecordedRequest } from './support/do-emulator/index.js';
 import { seedVpc } from './support/do-emulator/vpcs.js';
-import { build, ctx, doAccount, freshBudgets } from './support/do-harness.js';
+import { build, ctx, doAccount, freshBudgets, noopLog } from './support/do-harness.js';
 
 // provider-digitalocean tenant networking against the emulator: the base firewall, VPCs as
 // subnets, tenant rules as Cloud Firewalls, Droplet tags, and creates on a network.
@@ -82,9 +82,12 @@ describe('networks', () => {
     const emu = emulator();
     const { networks } = await build(emu);
     expect(baseFirewallName(net)).toBe(`bc-base-${net16(net)}`);
+    // Ready once the base firewall exists, while DO still applies it: the network's subnets and
+    // rules need it there, not applied.
+    emu.firewallReads = 2;
     expect(await networks.ensureNetwork({ name: net, mtu: 1500 }, ctx())).toEqual({
       id: net,
-      state: 'pending',
+      state: 'ready',
     });
     const [base, ...others] = [...emu.state.firewalls.values()];
     expect(others).toHaveLength(0);
@@ -102,7 +105,8 @@ describe('networks', () => {
     // The member tag object exists before the firewall names it.
     expect(emu.state.tags.has(member)).toBe(true);
 
-    // Applied: ready, and nothing is written again.
+    expect(emu.state.firewalls.get(base!.id)!.status).toBe('waiting');
+    // Again: ready, and nothing is written again.
     const writes = firewallWrites(emu).length;
     expect(await networks.ensureNetwork({ name: net }, ctx())).toEqual({ id: net, state: 'ready' });
     expect(firewallWrites(emu)).toHaveLength(writes);
@@ -121,7 +125,7 @@ describe('networks', () => {
     await networks.ensureNetwork({ name: net }, ctx());
     const base = [...emu.state.firewalls.values()][0]!;
     base.inbound_rules = [{ protocol: 'tcp', ports: '22', sources: { addresses: ['0.0.0.0/0'] } }];
-    expect((await networks.ensureNetwork({ name: net }, ctx())).state).toBe('pending');
+    expect((await networks.ensureNetwork({ name: net }, ctx())).state).toBe('ready');
     expect(calls(emu, 'PUT', /^\/v2\/firewalls\//).map((r) => r.url.pathname)).toEqual([
       `/v2/firewalls/${base.id}`,
     ]);
@@ -238,16 +242,94 @@ describe('networks', () => {
 
     const droplet = seedDroplet(emu.state, { tags: [member] });
     expect(failFirewall(emu.state, /^bc-r1\./)).toBe(1);
-    expect(await networks.ensureFirewall(rule, ctx())).toEqual({
+    const failed = await networks.ensureFirewall(rule, ctx());
+    expect(failed).toEqual({
       id: 'bc-r1',
       state: 'error',
       message: expect.stringContaining(`failed to apply firewall bc-r1.n${net16(net)}.p1000`),
     });
-    expect((await networks.ensureFirewall(rule, ctx())).message).toContain(String(droplet.id));
-    // The base firewall is reported the same way.
-    expect((await networks.ensureNetwork({ name: net }, ctx())).state).toBe('pending');
+    expect(failed.message).toContain(String(droplet.id));
+    // A base firewall is ready once it exists, and an error only when DO failed to apply it.
+    expect((await networks.ensureNetwork({ name: net }, ctx())).state).toBe('ready');
     failFirewall(emu.state, baseFirewallName(net));
     expect((await networks.ensureNetwork({ name: net }, ctx())).state).toBe('error');
+  });
+
+  it('a failed firewall with an unchanged spec is re-PUT on the next ensure', async () => {
+    const emu = emulator();
+    const { networks } = await build(emu);
+    await networks.ensureNetwork({ name: net }, ctx());
+    await networks.ensureFirewall(rule, ctx());
+    const puts = () => calls(emu, 'PUT', /^\/v2\/firewalls\//);
+    const [base] = firewallsNamed(emu, 'bc-base-');
+    const [ruleFw] = firewallsNamed(emu, 'bc-r1.');
+
+    // The call that sees the failure reports it and applies the same firewall again.
+    failFirewall(emu.state, /^bc-r1\./);
+    expect((await networks.ensureFirewall(rule, ctx())).state).toBe('error');
+    expect(puts().map((r) => r.url.pathname)).toEqual([`/v2/firewalls/${ruleFw!.id}`]);
+    expect(puts()[0]!.body).toEqual(compileDoFirewall(rule, net));
+    // DO tries again, and the rule heals with no change to it.
+    expect((await networks.ensureFirewall(rule, ctx())).state).toBe('ready');
+    expect(puts()).toHaveLength(1);
+
+    // The same for the base firewall.
+    failFirewall(emu.state, baseFirewallName(net));
+    expect((await networks.ensureNetwork({ name: net }, ctx())).state).toBe('error');
+    expect(puts().map((r) => r.url.pathname)).toEqual([
+      `/v2/firewalls/${ruleFw!.id}`,
+      `/v2/firewalls/${base!.id}`,
+    ]);
+    expect((await networks.ensureNetwork({ name: net }, ctx())).state).toBe('ready');
+    expect(puts()).toHaveLength(2);
+    expect(calls(emu, 'POST', /^\/v2\/firewalls$/)).toHaveLength(2);
+  });
+
+  it('only a firewall named exactly as the rule is the rule: a hand-made look-alike is never touched', async () => {
+    const emu = emulator();
+    const { networks } = await build(emu);
+    // Firewalls a person made, whose names start like a rule's or a network rule's.
+    const lookAlikes = [
+      'bc-r1.prod',
+      `bc-r1.n${net16(net)}.p1000.copy`,
+      `bc-r1.n${net16(net)}.pfirst`,
+      `hand.n${net16(net)}.px`,
+    ];
+    for (const [i, name] of lookAlikes.entries()) {
+      const id = `aaaaaaaa-0000-4000-8000-00000000000${i}`;
+      emu.state.firewalls.set(id, {
+        id,
+        name,
+        status: 'succeeded',
+        created_at: isoSeconds(t0 - 3_600_000),
+        pending_changes: [],
+        inbound_rules: [
+          { protocol: 'tcp', ports: '22', action: 'allow', sources: { addresses: ['0.0.0.0/0'] } },
+        ],
+        outbound_rules: [],
+        droplet_ids: [],
+        tags: [],
+      });
+    }
+    await networks.ensureFirewall(rule, ctx());
+    const [own] = firewallsNamed(emu, `bc-r1.n${net16(net)}.p1000`).filter(
+      (f) => !lookAlikes.includes(f.name),
+    );
+    await networks.ensureFirewall({ ...rule, sources: ['10.1.0.0/16'] }, ctx());
+    expect(calls(emu, 'PUT', /^\/v2\/firewalls\//).map((r) => r.url.pathname)).toEqual([
+      `/v2/firewalls/${own!.id}`,
+    ]);
+    await networks.deleteFirewall('bc-r1', ctx());
+    await networks.deleteNetwork(net, ctx());
+    expect(calls(emu, 'DELETE', /^\/v2\/firewalls\//).map((r) => r.url.pathname)).toEqual([
+      `/v2/firewalls/${own!.id}`,
+    ]);
+    // Every look-alike is still there, as it was.
+    expect([...emu.state.firewalls.values()].map((f) => f.name).sort()).toEqual(
+      [...lookAlikes].sort(),
+    );
+    for (const firewall of emu.state.firewalls.values())
+      expect(firewall.inbound_rules[0].sources.addresses).toEqual(['0.0.0.0/0']);
   });
 
   it('ensureFirewall compiles allow and deny rules, expands all, and targets the network by default', async () => {
@@ -491,6 +573,14 @@ describe('networks', () => {
     expect(busy).toMatchObject({ id: 'nyc3/bc-sub1', state: 'pending' });
     expect(busy.message).toContain('members');
     expect(emu.state.vpcs.has(vpc.id)).toBe(true);
+    // DO may say "in use" with a 422 instead of the 409: pending as well.
+    const inUse = emu.error('422-vpc-in-use');
+    emu.failNext({ method: 'DELETE', path: /^\/vpcs\// }, inUse.status, inUse.body as object);
+    expect(await networks.deleteSubnet('nyc3', 'bc-sub1', ctx())).toEqual({
+      id: 'nyc3/bc-sub1',
+      state: 'pending',
+      message: expect.stringContaining('is in use'),
+    });
 
     emu.state.droplets.delete(droplet.id);
     expect(await networks.deleteSubnet('nyc3', 'bc-sub1', ctx())).toEqual({
@@ -505,7 +595,8 @@ describe('networks', () => {
     const foreign = await failure(networks.deleteSubnet('nyc3', 'bc-hand', ctx()));
     expect(foreign.code).toBe('INVALID_STATE');
     expect(foreign.details).toMatchObject({ reason: 'notManaged' });
-    expect(calls(emu, 'DELETE', /^\/v2\/vpcs\//)).toHaveLength(2);
+    // The in-use 409, the in-use 422 and the delete that took: never the hand-made VPC.
+    expect(calls(emu, 'DELETE', /^\/v2\/vpcs\//)).toHaveLength(3);
   });
 
   it('deleteNetwork waits for its VPCs, then removes the base firewall', async () => {
@@ -571,12 +662,40 @@ describe('networks: tags', () => {
     await compute.networks.setTags(String(droplet.id), ['bc-1111111111111111'], ctx(), 'inst_1');
     expect(tagWrites(emu)).toHaveLength(writes);
 
-    // In a VPC no network owns, the member tag goes.
-    const outside = seedDroplet(emu.state, {
-      tags: [deployment, instanceTag('inst_2'), member, 'bc-2222222222222222'],
+    // A member tag fails closed: it stays when the Droplet's VPC names no network, can't be
+    // found, or there is none, since without it the Droplet leaves its base firewall.
+    for (const where of [
+      {},
+      { vpc_uuid: null },
+      { vpc_uuid: 'ffffffff-ffff-4fff-8fff-ffffffffffff' },
+    ] as const) {
+      const kept = seedDroplet(emu.state, {
+        ...where,
+        tags: [deployment, instanceTag('inst_2'), member, 'bc-2222222222222222'],
+      });
+      await compute.networks.setTags(String(kept.id), [], ctx(), 'inst_2');
+      expect(emu.state.droplets.get(kept.id)!.tags, JSON.stringify(where)).toEqual([
+        deployment,
+        instanceTag('inst_2'),
+        member,
+      ]);
+    }
+    // In a VPC of another network, the old network's member tag goes and the new one's comes.
+    await compute.networks.ensureSubnet(
+      { network: 'bc-net2', name: 'bc-sub-n2', region: 'nyc3', cidr: '10.120.0.0/24' },
+      ctx(),
+    );
+    const n2 = [...emu.state.vpcs.values()].find((v) => v.name === 'bc-sub-n2')!;
+    const moved = seedDroplet(emu.state, {
+      vpc_uuid: n2.id,
+      tags: [deployment, instanceTag('inst_3'), member],
     });
-    await compute.networks.setTags(String(outside.id), [], ctx(), 'inst_2');
-    expect(emu.state.droplets.get(outside.id)!.tags).toEqual([deployment, instanceTag('inst_2')]);
+    await compute.networks.setTags(String(moved.id), [], ctx(), 'inst_3');
+    expect(emu.state.droplets.get(moved.id)!.tags).toEqual([
+      deployment,
+      instanceTag('inst_3'),
+      networkMemberTag('bc-net2'),
+    ]);
 
     // Only bc- tags may be set.
     const bad = await failure(compute.networks.setTags(String(droplet.id), ['web'], ctx()));
@@ -658,11 +777,16 @@ describe('networks: tags', () => {
       [{ network: 'bc-net2' }, 'INVALID_STATE', 'noSubnetInRegion'],
       [{ network: 'bc-net2', subnet: 'bc-sub1' }, 'INVALID_STATE', 'subnetNetwork'],
     ];
+    const keyCalls = () =>
+      emu.requests.filter((r) => r.url.pathname.startsWith('/v2/account/keys'));
+    const keysBefore = keyCalls().length;
     for (const [ref, code, reason] of refusals) {
       const error = await failure(compute.create(request(ref), ctx(`refused-${reason}`)));
       expect(error.code, reason).toBe(code);
       expect(error.details, reason).toMatchObject({ provider: 'digitalocean', reason });
     }
+    // The VPC is resolved before the keys: a refused create touches no SSH key.
+    expect(keyCalls()).toHaveLength(keysBefore);
     // A bad tag is refused before any call.
     const before = emu.requests.length;
     const tag = await failure(
@@ -676,7 +800,12 @@ describe('networks: tags', () => {
   it("get, list and discover name the network of a droplet's vpc (ruling R2)", async () => {
     const emu = emulator();
     const clock = manualClock(1_000_000);
-    const compute = await build(emu, doAccount, {}, clock);
+    const lines: string[] = [];
+    const log = {
+      ...noopLog,
+      warn: (message: string) => void lines.push(`warn ${message}`),
+    };
+    const compute = await build(emu, doAccount, {}, { clock, log });
     const vpc = await onNetwork(emu, compute);
     const ours = seedDroplet(emu.state, {
       vpc_uuid: vpc.id,
@@ -729,5 +858,6 @@ describe('networks: tags', () => {
       message: 'You do not have access for the attempted action.',
     });
     expect(network(await compute.get(String(ours.id), ctx()))).toBe(vpc.id);
+    expect(lines).toEqual(['warn digitalocean.vpcListUnreadable']);
   });
 });
