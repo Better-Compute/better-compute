@@ -96,9 +96,16 @@ const failure = async (promise: Promise<unknown>) => {
 };
 
 describe.each(['embedded', 'remote'] as const)('the IamPort billing members (%s)', (mode) => {
-  it('has all five members', async () => {
+  it('has all six members', async () => {
     const { port } = await setup(mode);
-    for (const member of ['ensureMeters', 'setPrice', 'listPrices', 'quote', 'spend'] as const)
+    for (const member of [
+      'ensureMeters',
+      'listMeters',
+      'setPrice',
+      'listPrices',
+      'quote',
+      'spend',
+    ] as const)
       expect(typeof port[member], member).toBe('function');
   });
 
@@ -127,6 +134,22 @@ describe.each(['embedded', 'remote'] as const)('the IamPort billing members (%s)
       scope: 'platform',
     });
     expect(meters.find((meter) => meter.key === passthrough.key)).toMatchObject({
+      pricing: 'reported',
+    });
+  });
+
+  it('listMeters lists the root tenant’s meters with their pricing', async () => {
+    const { port } = await setup(mode);
+    const before = (await port.listMeters!()).map((meter) => meter.key);
+    expect(before).not.toContain(passthrough.key);
+    await port.ensureMeters!([gpu, passthrough]);
+    const listed = await port.listMeters!();
+    expect(listed.find((meter) => meter.key === gpu.key)).toEqual({
+      key: gpu.key,
+      pricing: 'rate-card',
+    });
+    expect(listed.find((meter) => meter.key === passthrough.key)).toEqual({
+      key: passthrough.key,
       pricing: 'reported',
     });
   });
@@ -400,7 +423,7 @@ describe('the billing members without a service credential', () => {
     const t = await createEmbeddedTestIam({ inbox: 'memory', mode: 'embedded' });
     open.push(t);
     const port = embeddedIam(t.iam as never, { rootTenantId: t.root.tenantId });
-    for (const member of ['ensureMeters', 'setPrice', 'listPrices', 'quote'] as const)
+    for (const member of ['ensureMeters', 'listMeters', 'setPrice', 'listPrices', 'quote'] as const)
       expect(port[member], member).toBeUndefined();
     expect(typeof port.spend).toBe('function');
     // Without the root id the port cannot know whose meters to manage.
@@ -469,6 +492,7 @@ describe('the iam module doctor and the billing members', () => {
 describe('port wrappers keep the billing members', () => {
   const members = () => ({
     ensureMeters: vi.fn(async () => ({ created: [], existing: [] })),
+    listMeters: vi.fn(async () => []),
     setPrice: vi.fn(async () => ({}) as never),
     listPrices: vi.fn(async () => []),
     quote: vi.fn(async () => []),
@@ -510,7 +534,14 @@ describe('port wrappers keep the billing members', () => {
     const guarded = guardIamPort(base(inner), () => true, 'throw', {
       warn: vi.fn(),
     } as never);
-    for (const name of ['ensureMeters', 'setPrice', 'listPrices', 'quote', 'spend'] as const)
+    for (const name of [
+      'ensureMeters',
+      'listMeters',
+      'setPrice',
+      'listPrices',
+      'quote',
+      'spend',
+    ] as const)
       await expect(
         (guarded[name] as (input: unknown) => Promise<unknown>)({}),
         name,

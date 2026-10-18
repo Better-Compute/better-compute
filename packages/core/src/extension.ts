@@ -1255,7 +1255,8 @@ export interface MethodDefinition<I = any, O = any> {
   /**
    * `auto` (default): the envelope runs the handler in a transaction. `manual`: the handler runs with no
    * transaction open and opens its own through `ctx.sql.transaction` (composite methods that use
-   * `ctx.check` then `ctx.invoke`); the envelope still writes the mutation's audit row after success.
+   * `ctx.check` then `ctx.invoke`); the envelope still writes the mutation's audit row after success. A read
+   * declared `manual` runs with no transaction and a read-only `sql` (for handlers that call IAM).
    */
   transaction?: 'auto' | 'manual';
   /**

@@ -9,6 +9,7 @@ export { defineProvider } from './provider.js';
 export { vps, type VpsApi, type VpsOptions, type ProviderAccountView } from './module.js';
 export * from './migrations.js';
 export * from './instances.js';
+export * from './pricing.js';
 export * from './lifecycle.js';
 export * from './status.js';
 export * from './flavors.js';

@@ -43,6 +43,7 @@ import {
   type FlavorRecord,
 } from './flavors.js';
 import { id, int, name, object, optional, tenant } from './input.js';
+import { billingApi, type BillingApi, type BillingOptions } from './pricing.js';
 import {
   completeCreateInstance,
   deleteInstance,
@@ -324,6 +325,8 @@ export interface VpsOptions {
   };
   /** The IAM resource-type prefix (`ComputeOptions.typePrefix`, default `compute-`), for decisions vps adds. */
   typePrefix?: string;
+  /** The meter catalog the root-only `billing` group manages (platform compute billing); see `BillingOptions`. */
+  billing?: BillingOptions;
 }
 
 type PoolInput = { tenantId: string; poolId: string };
@@ -334,6 +337,8 @@ type AccountRef = { tenantId: string; accountId: string };
 export type ProviderAccountView = ProviderAccount;
 
 export type VpsApi = {
+  /** Root-only: the meters and prices on the IAM root tenant (pricing.ts). */
+  billing: BillingApi;
   instances: {
     create: MethodDefinition<CreateInstanceInput, Instance>;
     list: MethodDefinition<ListInstancesInput, { items: Instance[]; cursor?: string }>;
@@ -810,6 +815,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
   };
 
   const api = (): VpsApi => ({
+    billing: billingApi(options.billing),
     instances: {
       create: defineMethod<CreateInstanceInput, Instance>({
         action: 'compute:instances:create',

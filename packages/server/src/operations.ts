@@ -652,7 +652,9 @@ export function createOperations(
         return value;
       }
 
-      if (!mutation && runsOutsideTransaction(definition))
+      // A read that declares `transaction: 'manual'` (one that calls IAM, which never happens inside a compute
+      // transaction) runs like a list handler: no wrapping transaction, a read-only executor.
+      if (!mutation && (runsOutsideTransaction(definition) || definition.transaction === 'manual'))
         return definition.handler(contextFor(readOnlyExecutor(database)), input);
 
       if (entry.row?.list && !mutation) {

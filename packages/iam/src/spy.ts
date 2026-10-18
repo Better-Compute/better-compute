@@ -105,6 +105,7 @@ export function spyIamPort(inner: IamPort, options: { clock?: Clock } = {}): Iam
     capabilities: () => inner.capabilities(),
     // Optional members the inner port has (billing: meters, prices, quotes, spend) are forwarded and recorded too.
     ...(inner.ensureMeters ? { ensureMeters: wrap('ensureMeters') } : {}),
+    ...(inner.listMeters ? { listMeters: wrap('listMeters') } : {}),
     ...(inner.setPrice ? { setPrice: wrap('setPrice') } : {}),
     ...(inner.listPrices ? { listPrices: wrap('listPrices') } : {}),
     ...(inner.quote ? { quote: wrap('quote') } : {}),

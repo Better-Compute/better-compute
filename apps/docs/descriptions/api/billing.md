@@ -1,0 +1,34 @@
+The platform's billing setup for compute: the meters and prices root keeps on the IAM root tenant, so root can bill its sub-tenants for what they use. Every method is decided as a `compute:billing:*` action on `compute-fleet`, which resolves only in the root tenant, so a tenant administrator is turned away before any IAM decision, however broad the tenant's own grants. A root member needs `compute:billing:read` or `compute:billing:manage` on `compute-fleet`.
+
+These methods call the IAM root tenant's billing API as a root service account. The IAM port must be configured with one: `bridge.embedded(iam, { rootTenantId, serviceCredential })` with `iam:billing:manage` and `iam:billing:read` on the root tenant (a remote bridge takes a `serviceToken`). Without it every method answers `UNSUPPORTED` and names that fix. Amounts are micros of the deployment's currency (1,000,000 micros = 1 unit).
+
+The catalog these methods work from is the same one `better-compute iam setup --meters` and the IAM bridge sync: hosted and node GPU, CPU, memory and volume hours, provider VM meters, reservation-grant and managed-VM meters, the ancillary network, address, disk and snapshot meters, and the `flavor.*` meters root sets on flavors. `vps({ billing: { gpuModels, gpuFamilies } })` names the GPU models whose VM meters exist; name the same models as the bridge so the two agree.
+
+## meters
+
+Returns the catalog compute defines, `catalog`, and `missing`: the keys of the catalog the IAM root tenant has no meter for yet. Usage recorded on a missing meter is refused by IAM; `syncMeters` creates the missing ones.
+
+An archived meter still exists on the root tenant, so it is not listed as missing. `UNSUPPORTED` when the IAM port cannot list meters.
+
+## syncMeters
+
+Creates the catalog's meters that the root tenant lacks, and returns `{ created, existing }` (meter keys). A meter that exists is left as it is, whatever its name, unit or pricing mode; calling it again creates nothing.
+
+Decided as `compute:billing:manage` on `compute-fleet`. The IAM call happens outside any compute transaction.
+
+## prices
+
+Returns the rate-card price entries of one meter, or of every rate-card meter, newest first, as `{ meter, targetTenantId, effectiveFrom, spec }`. The list price is the entry whose `targetTenantId` is the root tenant; a negotiated price names the tenant (and its subtree) it applies to. `targetTenantId` filters.
+
+`meter` and `targetTenantId` are optional. `reported` meters carry their cost on each usage event and have no prices.
+
+## setPrices
+
+Sets up to 100 prices on the root tenant's rate card and returns `{ applied, failed }`.
+
+- **Each price** is `{ meter, targetTenantId?, effectiveFrom, spec }`. Without `targetTenantId` it is the list price; with one it is a negotiated price for that tenant's subtree. `effectiveFrom` is a billing period (`YYYY-MM`), and `spec` is a better-iam price (`per-unit`, `graduated`, `volume` or `package`) in micros.
+- **Meters.** Every `meter` must be in the catalog (`meters`) or be a flavor meter; one that is not refuses the whole request with `INVALID_INPUT` before any price is applied.
+- **Tenants.** `targetTenantId` is not checked here: better-iam validates it, and a tenant it refuses lands in `failed`.
+- **Partial failure.** A price better-iam refuses does not stop the others: `applied` lists the prices that took effect, in request order, and `failed` lists `{ index, meter, targetTenantId?, code, message }` for the rest. Setting a price is idempotent, so a retry of the same request is safe.
+
+Decided as `compute:billing:manage` on `compute-fleet`.

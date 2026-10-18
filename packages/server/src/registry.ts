@@ -144,8 +144,10 @@ function checkMethod(path: string, value: unknown): MethodDefinition {
     throw invalid(`${path}: transaction must be auto or manual`);
   if (transaction === 'manual') {
     // Composite methods (`ctx.check` then `ctx.invoke`): a mutation decided once for itself, whose
-    // sub-calls are decided one by one; its audit row follows the handler.
-    if (kind !== 'mutation') throw invalid(`${path}: only mutations run with transaction manual`);
+    // sub-calls are decided one by one; its audit row follows the handler. A read may be manual too: it
+    // runs with no transaction (a read-only `sql`), for handlers that call IAM.
+    if (kind === 'public')
+      throw invalid(`${path}: a public method does not run with transaction manual`);
     if (admission !== undefined)
       throw invalid(`${path}: a method with transaction manual takes no admission`);
   }

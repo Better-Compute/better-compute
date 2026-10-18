@@ -585,14 +585,15 @@ describe('transaction contracts', () => {
       ],
     });
 
-  it('takes manual only on mutations without an admission', () => {
+  it('takes manual on reads and mutations, without an admission', () => {
     expect(() => build({ transaction: 'manual' })).not.toThrow();
     expect(() => build({ transaction: 'auto' })).not.toThrow();
     expect(() => build({ transaction: 'sometimes' as never })).toThrow(
       /transaction must be auto or manual/,
     );
-    expect(() => build({ transaction: 'manual', kind: 'read' })).toThrow(
-      /only mutations run with transaction manual/,
+    expect(() => build({ transaction: 'manual', kind: 'read' })).not.toThrow();
+    expect(() => build({ transaction: 'manual', kind: 'public', action: null } as never)).toThrow(
+      /a public method does not run with transaction manual/,
     );
     expect(() =>
       build({

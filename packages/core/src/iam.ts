@@ -118,6 +118,14 @@ export interface MeterSpec {
   pricing: 'rate-card' | 'reported';
 }
 
+/** A meter as the IAM root tenant lists it (`IamPort.listMeters`). */
+export interface MeterListing {
+  key: string;
+  pricing: 'rate-card' | 'reported';
+  /** An archived meter still exists: `ensureMeters` leaves it alone and takes it for present. */
+  archived?: boolean;
+}
+
 /** better-iam's `PriceSpec`, in micros (1 currency unit = 1,000,000 micros). */
 export interface PriceSpecInput {
   model: 'per-unit' | 'graduated' | 'volume' | 'package';
@@ -241,6 +249,8 @@ export interface IamPort {
    * is reported in `existing` and left as it is. Optional: only ports that hold a root billing credential have it.
    */
   ensureMeters?(meters: readonly MeterSpec[]): Promise<{ created: string[]; existing: string[] }>;
+  /** (billing) The meters the root tenant has, archived ones included. Optional like `ensureMeters`. */
+  listMeters?(): Promise<MeterListing[]>;
   /**
    * (billing) Sets a rate-card price of a root meter: its list price, or with `targetTenantId` a negotiated price for
    * that tenant's subtree. `effectiveFrom` is a billing period (`YYYY-MM`).

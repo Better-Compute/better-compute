@@ -9,6 +9,7 @@
 import {
   ComputeError,
   type IamPort,
+  type MeterListing,
   type MeterSpec,
   type PriceSpecInput,
   type PriceView,
@@ -77,7 +78,7 @@ export interface BillingCalls {
 
 /** The members `billingPort` adds to a port. */
 export type BillingMembers = Required<
-  Pick<IamPort, 'ensureMeters' | 'setPrice' | 'listPrices' | 'quote' | 'spend'>
+  Pick<IamPort, 'ensureMeters' | 'listMeters' | 'setPrice' | 'listPrices' | 'quote' | 'spend'>
 >;
 
 /** The most periods one `spend` call walks (a guard against a range typed in the wrong unit). */
@@ -205,7 +206,7 @@ export async function ensureMetersOn(
 }
 
 /**
- * The five billing members over `calls`, all on `rootTenantId`. `wrap` maps better-iam's errors the way the
+ * The billing members over `calls`, all on `rootTenantId`. `wrap` maps better-iam's errors the way the
  * port's other members do.
  */
 export function billingPort(
@@ -215,6 +216,17 @@ export function billingPort(
 ): BillingMembers {
   const ensureMeters: BillingMembers['ensureMeters'] = (meters) =>
     wrap(() => ensureMetersOn(calls, rootTenantId, meters));
+
+  const listMeters: BillingMembers['listMeters'] = () =>
+    wrap(async () =>
+      (await calls.listMeters({ tenantId: rootTenantId })).map(
+        (meter): MeterListing => ({
+          key: meter.key,
+          pricing: meter.pricing === 'reported' ? 'reported' : 'rate-card',
+          ...(meter.archived === true ? { archived: true } : {}),
+        }),
+      ),
+    );
 
   const setPrice: BillingMembers['setPrice'] = (input) =>
     wrap(async () => {
@@ -338,5 +350,5 @@ export function billingPort(
       return { rows: [...merged.values()], coveredFrom, coveredTo: report.periodEnd };
     });
 
-  return { ensureMeters, setPrice, listPrices, quote, spend };
+  return { ensureMeters, listMeters, setPrice, listPrices, quote, spend };
 }

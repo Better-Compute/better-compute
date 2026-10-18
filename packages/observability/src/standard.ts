@@ -142,6 +142,7 @@ export function meteredIamPort(inner: IamPort, metrics: StandardMetrics): IamPor
     ...(inner.ensureMeters
       ? { ensureMeters: wrap('ensureMeters', inner.ensureMeters.bind(inner)) }
       : {}),
+    ...(inner.listMeters ? { listMeters: wrap('listMeters', inner.listMeters.bind(inner)) } : {}),
     ...(inner.setPrice ? { setPrice: wrap('setPrice', inner.setPrice.bind(inner)) } : {}),
     ...(inner.listPrices ? { listPrices: wrap('listPrices', inner.listPrices.bind(inner)) } : {}),
     ...(inner.quote ? { quote: wrap('quote', inner.quote.bind(inner)) } : {}),

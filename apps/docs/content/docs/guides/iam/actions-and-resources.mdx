@@ -139,6 +139,7 @@ and the item form gates calls on one resource:
 | `compute:events:read`, `compute:webhooks:manage` | `compute-tenant` |
 | `compute:secrets:manage` | `compute-fleet`, `compute-tenant` |
 | `compute:drivers:read` | `compute-fleet`, `compute-tenant` |
+| `compute:billing:read`, `compute:billing:manage` | `compute-fleet` (the platform's meters and prices; root tenant only) |
 | `compute:profiles:read`, `compute:profiles:manage` | `compute-tenant`, `compute-profile` |
 | `compute:images:read` | `compute-tenant`, `compute-image` |
 | `compute:images:publish` | `compute-fleet`, `compute-tenant`, `compute-image` |

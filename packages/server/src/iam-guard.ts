@@ -24,6 +24,7 @@ const guarded: ReadonlySet<PropertyKey> = new Set([
   'recordUsage',
   // Billing members (meters, prices, quotes, spend) are IAM round trips too.
   'ensureMeters',
+  'listMeters',
   'setPrice',
   'listPrices',
   'quote',
