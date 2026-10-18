@@ -50,6 +50,7 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
         ...action('images', 'publish'),
         ...action('providers', 'manage'),
         ...action('drivers', 'read'),
+        ...action('billing', 'read', 'manage'),
       ],
     },
     [`${p}tenant`]: {
