@@ -22,6 +22,12 @@ const guarded: ReadonlySet<PropertyKey> = new Set([
   'requestConfirmation',
   'billingCheck',
   'recordUsage',
+  // Billing members (meters, prices, quotes, spend) are IAM round trips too.
+  'ensureMeters',
+  'setPrice',
+  'listPrices',
+  'quote',
+  'spend',
 ]);
 
 export function guardIamPort(

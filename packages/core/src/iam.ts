@@ -106,6 +106,71 @@ export interface IamCapabilities {
   readOnlyDecisions: boolean;
 }
 
+/**
+ * A billing meter compute keeps on the IAM root tenant. `key` matches `/^[a-z][a-z0-9_.-]{0,63}$/`; `pricing` is
+ * better-iam's: `rate-card` meters are priced by the platform's prices, `reported` meters carry their cost on each
+ * usage event.
+ */
+export interface MeterSpec {
+  key: string;
+  name: string;
+  unit: string;
+  pricing: 'rate-card' | 'reported';
+}
+
+/** better-iam's `PriceSpec`, in micros (1 currency unit = 1,000,000 micros). */
+export interface PriceSpecInput {
+  model: 'per-unit' | 'graduated' | 'volume' | 'package';
+  unitAmountMicros?: number;
+  tiers?: { upTo: number | null; unitAmountMicros: number; flatAmountMicros?: number }[];
+  packageSize?: number;
+  packageAmountMicros?: number;
+  includedQuantity?: number;
+  minimumAmountMicros?: number;
+  maximumAmountMicros?: number;
+}
+
+/** One price entry of a meter's rate card. */
+export interface PriceView {
+  meter: string;
+  /** The tenant (and subtree) the price applies to; the root tenant itself for the list price. */
+  targetTenantId?: string;
+  /** `YYYY-MM`: the first billing period the price applies to. */
+  effectiveFrom: string;
+  spec: PriceSpecInput;
+}
+
+/** What a quantity of one meter costs a tenant. */
+export interface QuoteLine {
+  meter: string;
+  quantity: number;
+  /** Micros of the deployment currency; `null` when the tenant's account has no price for the meter. */
+  amountMicros: number | null;
+}
+
+/**
+ * A spend report over `[from, to)` (epoch ms) for `tenantId` and the tenants below it. better-iam bills by calendar
+ * period, so the report covers every billing period the range touches.
+ */
+export interface SpendQuery {
+  tenantId: string;
+  from: number;
+  to: number;
+  groupBy: 'tenant' | 'meter' | 'tag';
+  /** The tag to group by when `groupBy` is `tag`. */
+  tag?: string;
+}
+
+export interface SpendRow {
+  /** The tenant id, meter key or tag value of the group. */
+  key: string;
+  meter?: string;
+  tenantId?: string;
+  amountMicros: number;
+  /** Units of the meter for a `meter` group; the sum over the group's meters otherwise. */
+  quantity: number;
+}
+
 export interface IamPort {
   /**
    * The IAM root tenant (platform). When set, `betterCompute({ rootTenantId })` may be omitted;
@@ -162,4 +227,31 @@ export interface IamPort {
   /** From the flag cache; never one `isEnabled` call per admission. */
   featureEnabled(tenantId: string, key: string): Promise<boolean>;
   capabilities(): IamCapabilities;
+  /**
+   * (billing) Defines the meters on the root tenant that do not exist yet; a meter that already reaches the root
+   * is reported in `existing` and left as it is. Optional: only ports that hold a root billing credential have it.
+   */
+  ensureMeters?(meters: readonly MeterSpec[]): Promise<{ created: string[]; existing: string[] }>;
+  /**
+   * (billing) Sets a rate-card price of a root meter: its list price, or with `targetTenantId` a negotiated price for
+   * that tenant's subtree. `effectiveFrom` is a billing period (`YYYY-MM`).
+   */
+  setPrice?(input: {
+    meter: string;
+    targetTenantId?: string;
+    effectiveFrom: string;
+    spec: PriceSpecInput;
+  }): Promise<PriceView>;
+  /** (billing) Price entries of one meter, or of every rate-card meter, newest first; `targetTenantId` filters. */
+  listPrices?(input: { meter?: string; targetTenantId?: string }): Promise<PriceView[]>;
+  /**
+   * (billing) What each line would cost `tenantId` this billing period under its effective price, one line per input
+   * line, in order. Quantities are priced as period totals (tiers and included units apply to each line alone).
+   */
+  quote?(input: {
+    tenantId: string;
+    lines: readonly { meter: string; quantity: number }[];
+  }): Promise<QuoteLine[]>;
+  /** (billing) Billed spend of a tenant's subtree. */
+  spend?(query: SpendQuery): Promise<SpendRow[]>;
 }

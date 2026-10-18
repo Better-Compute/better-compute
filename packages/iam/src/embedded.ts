@@ -23,6 +23,7 @@ import { confirmationValidSeconds } from './confirmation.js';
 import { sessionAuthorization, type ListedSession } from './sessions.js';
 import { createFlagCache, type FlagCache } from './flags.js';
 import { recordUsageIsolated, type UsageBilling } from './usage.js';
+import { billingPort, type BillingCalls } from './billing-port.js';
 
 type Headers = Credential['headers'];
 interface CredentialInput {
@@ -69,9 +70,21 @@ export interface EmbeddedIamHost {
       budgets: { budgetId: string; name: string; spent: number; amount: number }[];
       blockedBy?: { budgetId: string; name: string; spent: number; amount: number };
     }>;
+    /** The trusted spend report (better-iam 0.2+): no credential. */
+    spend?: BillingCalls['spend'];
   };
   features: { isEnabled(tenantId: string, key: string): Promise<boolean> };
   api: {
+    /**
+     * Meters, prices, quotes and spend for the IamPort's billing members (with `serviceCredential`). Each call takes
+     * the credential first, as better-iam's API does.
+     */
+    billing?: {
+      [Name in keyof BillingCalls]: (
+        credential: CredentialInput,
+        input: Parameters<BillingCalls[Name]>[0],
+      ) => ReturnType<BillingCalls[Name]>;
+    };
     /** Administrator reads for `authorizeSession` (with `sessionReviewer`). */
     identities?: {
       listSessions(
@@ -142,6 +155,13 @@ export interface EmbeddedIamOptions {
    * Without it the port has no `authorizeSession`.
    */
   sessionReviewer?: Credential | (() => Credential | Promise<Credential>);
+  /**
+   * The credential of compute's root service account for the billing members (`ensureMeters`, `setPrice`,
+   * `listPrices`, `quote`, `spend`): it needs `iam:billing:manage` and `iam:billing:read` on the root tenant.
+   * Defaults to `sessionReviewer`. Without a credential the port has no `ensureMeters`, `setPrice`, `listPrices`
+   * or `quote`, and `spend` only where better-iam's trusted `iam.billing.spend` exists.
+   */
+  serviceCredential?: Credential | (() => Credential | Promise<Credential>);
   /**
    * better-iam's `authentication.sessionIdleTimeoutMs`: with it, `Caller.sessionExpiresAt` is the earlier of the
    * session's expiry and its idle deadline (`lastSeenAt` + this); without it, the expiry alone.
@@ -370,6 +390,7 @@ export function embeddedIam(iam: EmbeddedIamHost, options: EmbeddedIamOptions = 
     featureEnabled: (tenantId, key) => mapped(() => flags.get(tenantId, key)),
     capabilities: () => capabilities,
   };
+  attachBillingMembers(port, iam, options);
   const { identities, policies } = iam.api;
   const reviewer = options.sessionReviewer;
   if (reviewer && identities && policies) {
@@ -385,4 +406,47 @@ export function embeddedIam(iam: EmbeddedIamHost, options: EmbeddedIamOptions = 
     port.authorizeSession = (session, decision) => mapped(() => decide(session, decision));
   }
   return port;
+}
+
+/** The billing members (meters, prices, quotes, spend) on the root tenant, where the host and credential allow. */
+function attachBillingMembers(
+  port: EmbeddedIam,
+  iam: EmbeddedIamHost,
+  options: EmbeddedIamOptions,
+): void {
+  const { rootTenantId } = options;
+  const source = options.serviceCredential ?? options.sessionReviewer;
+  const api = iam.api.billing;
+  if (rootTenantId === undefined) return;
+  const credential = async (): Promise<CredentialInput> =>
+    credentialInput(typeof source === 'function' ? await source() : source!);
+  const unavailable = (name: string) => () =>
+    Promise.reject(
+      new ComputeError('INVALID_CONFIG', `The embedded port has no billing credential for ${name}`),
+    );
+  const withApi = api && source !== undefined;
+  const calls: BillingCalls = {
+    listMeters: withApi
+      ? async (input) => api.listMeters(await credential(), input)
+      : unavailable('listMeters'),
+    createMeter: withApi
+      ? async (input) => api.createMeter(await credential(), input)
+      : unavailable('createMeter'),
+    setPrice: withApi
+      ? async (input) => api.setPrice(await credential(), input)
+      : unavailable('setPrice'),
+    listPrices: withApi
+      ? async (input) => api.listPrices(await credential(), input)
+      : unavailable('listPrices'),
+    quote: withApi ? async (input) => api.quote(await credential(), input) : unavailable('quote'),
+    // The trusted runtime needs no credential and writes no audit event.
+    spend: iam.billing.spend
+      ? (input) => iam.billing.spend!(input)
+      : withApi
+        ? async (input) => api.spend(await credential(), input)
+        : unavailable('spend'),
+  };
+  const members = billingPort(rootTenantId, calls, mapped);
+  if (withApi) Object.assign(port, members);
+  else if (iam.billing.spend) port.spend = members.spend;
 }

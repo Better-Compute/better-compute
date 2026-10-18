@@ -23,11 +23,17 @@ import { sessionAuthorization, type ListedSession } from './sessions.js';
 import { authorizeManyLimit, fromIamError } from './embedded.js';
 import { createFlagCache, type FlagCache } from './flags.js';
 import { recordUsageIsolated, type UsageBilling, type UsageInputLike } from './usage.js';
+import { billingPort, type BillingCalls } from './billing-port.js';
 
 interface CallOptions {
   headers?: HeadersInit;
   signal?: AbortSignal;
 }
+
+type RemoteBillingCall<Name extends keyof BillingCalls> = (
+  input: Parameters<BillingCalls[Name]>[0],
+  options?: CallOptions,
+) => ReturnType<BillingCalls[Name]>;
 
 /**
  * The part of `createIamClient<BetterIam>()` the remote port uses; tests may pass their own. Methods take
@@ -97,6 +103,17 @@ export interface RemoteIamClient {
       input: { tenantId: string; events: Omit<UsageInputLike, 'tenantId'>[] | UsageInputLike[] },
       options?: CallOptions,
     ): Promise<{ receipts: { duplicate: boolean }[] }>;
+    /**
+     * Meters, prices, quotes and spend for the IamPort's billing members, as the root service account
+     * (`iam:billing:manage` and `iam:billing:read`). A client without them leaves the members failing with
+     * `INVALID_CONFIG`.
+     */
+    listMeters?: RemoteBillingCall<'listMeters'>;
+    createMeter?: RemoteBillingCall<'createMeter'>;
+    setPrice?: RemoteBillingCall<'setPrice'>;
+    listPrices?: RemoteBillingCall<'listPrices'>;
+    quote?: RemoteBillingCall<'quote'>;
+    spend?: RemoteBillingCall<'spend'>;
   };
   /** Administrator reads for `authorizeSession` (with `authorizeSessions`). */
   identities?: {
@@ -454,6 +471,31 @@ export function remoteIam(options: RemoteIamOptions): RemoteIam {
       evaluate: false,
       readOnlyDecisions: false,
     }),
+    // HTTP `POST {base}/billing/{listMeters|createMeter|setPrice|listPrices|quote|spend}` as the root service account.
+    ...billingPort(
+      options.rootTenantId,
+      Object.fromEntries(
+        (['listMeters', 'createMeter', 'setPrice', 'listPrices', 'quote', 'spend'] as const).map(
+          (name) => [
+            name,
+            async (input: never) => {
+              const { billing: group } = await client();
+              const call = group[name] as
+                | ((input: never, o?: CallOptions) => Promise<never>)
+                | undefined;
+              if (!call)
+                throw new ComputeError(
+                  'INVALID_CONFIG',
+                  `This better-iam client has no billing.${name}`,
+                );
+              // A method of the client's proxy needs its receiver.
+              return call.call(group, input, await service());
+            },
+          ],
+        ),
+      ) as unknown as BillingCalls,
+      mapped,
+    ),
   };
   if (options.authorizeSessions) {
     // better-iam's HTTP API exposes the same administrator reads as embedded mode: with the service credential.

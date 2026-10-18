@@ -138,5 +138,13 @@ export function meteredIamPort(inner: IamPort, metrics: StandardMetrics): IamPor
     // (tunnels without a re-authorizer refuse to mount; admissions would decide on stale rows).
     ...(inner.authorizeSession ? { authorizeSession: inner.authorizeSession.bind(inner) } : {}),
     ...(inner.refreshResource ? { refreshResource: inner.refreshResource.bind(inner) } : {}),
+    // Billing members (meters, prices, quotes, spend): metered when the inner port has them.
+    ...(inner.ensureMeters
+      ? { ensureMeters: wrap('ensureMeters', inner.ensureMeters.bind(inner)) }
+      : {}),
+    ...(inner.setPrice ? { setPrice: wrap('setPrice', inner.setPrice.bind(inner)) } : {}),
+    ...(inner.listPrices ? { listPrices: wrap('listPrices', inner.listPrices.bind(inner)) } : {}),
+    ...(inner.quote ? { quote: wrap('quote', inner.quote.bind(inner)) } : {}),
+    ...(inner.spend ? { spend: wrap('spend', inner.spend.bind(inner)) } : {}),
   };
 }

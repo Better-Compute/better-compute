@@ -233,6 +233,8 @@ export async function createEmbeddedTestIam(
   } else
     port = bridge.embedded(iam, {
       rootTenantId,
+      // The root administrator doubles as compute's service account for the billing members.
+      serviceCredential: root.credential,
       ...(options.runIamJobs ? { runIamJobs: true } : {}),
     });
 

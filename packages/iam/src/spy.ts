@@ -64,6 +64,8 @@ export function spyIamPort(inner: IamPort, options: { clock?: Clock } = {}): Iam
       case 'featureEnabled':
         return { tenantId: args[0] as string, action: `feature:${String(second)}` };
       case 'billingCheck':
+      case 'quote':
+      case 'spend':
         return { tenantId: (args[0] as { tenantId: string }).tenantId };
       default:
         return {};
@@ -101,6 +103,12 @@ export function spyIamPort(inner: IamPort, options: { clock?: Clock } = {}): Iam
     recordUsage: wrap('recordUsage'),
     featureEnabled: wrap('featureEnabled'),
     capabilities: () => inner.capabilities(),
+    // Optional members the inner port has (billing: meters, prices, quotes, spend) are forwarded and recorded too.
+    ...(inner.ensureMeters ? { ensureMeters: wrap('ensureMeters') } : {}),
+    ...(inner.setPrice ? { setPrice: wrap('setPrice') } : {}),
+    ...(inner.listPrices ? { listPrices: wrap('listPrices') } : {}),
+    ...(inner.quote ? { quote: wrap('quote') } : {}),
+    ...(inner.spend ? { spend: wrap('spend') } : {}),
     get calls() {
       return calls;
     },
