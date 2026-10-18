@@ -48,9 +48,11 @@ function gpuSlug(model: string, known: readonly string[]): string {
 }
 
 /**
- * The billing mode of a pool: an explicit `policy.billing.mode` wins; otherwise a `provider` pool on an account
- * owned by a tenant other than the root is a BYO cloud account and pays a platform fee; everything else is
- * metered. `account` is the pool's provider account (`undefined` for hosted pools or an unknown account).
+ * The billing mode of a pool: an explicit `policy.billing.mode` wins; otherwise a `provider` pool whose owner is a
+ * tenant other than the root is a BYO cloud account and pays a platform fee (B8: it is never charged `vm.*`
+ * compute); everything else is metered. The owner is the pool's provider account's tenant, which by ruling R1 is
+ * the pool's own owner, so a pool whose account did not resolve (`undefined`) falls back to `ownerTenantId`
+ * and fails closed rather than open.
  */
 export function billingModeOf(
   pool: { ownerTenantId: string; class: string; policy: PoolPolicy },
@@ -59,9 +61,9 @@ export function billingModeOf(
 ): BillingMode {
   const explicit = pool.policy.billing?.mode;
   if (explicit) return explicit;
-  if (pool.class === 'provider' && account && account.tenantId !== rootTenantId)
-    return 'platform-fee';
-  return 'metered';
+  if (pool.class !== 'provider') return 'metered';
+  const owner = account?.tenantId ?? pool.ownerTenantId;
+  return owner === rootTenantId ? 'metered' : 'platform-fee';
 }
 
 /**
@@ -75,6 +77,8 @@ export function meterLinesFor(
   phase: 'running' | 'stopped',
   options: MeterLinesOptions = {},
 ): MeterLine[] {
+  // Precedence: none/stopped, then platform-fee (granted+platform-fee -> managed line), then granted, then the flavor
+  // meter (flavor+reserved -> flavor line), then composition.
   if (mode === 'none' || phase === 'stopped') return [];
   if (mode === 'platform-fee') return [{ meter: 'vm.managed.hours', perHour: 1 }];
   if (shape.granted) return [{ meter: 'vm.grant.usage.hours', perHour: 1 }];

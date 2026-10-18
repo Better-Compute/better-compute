@@ -181,13 +181,34 @@ describe('billingModeOf', () => {
     ).toBe('metered');
   });
 
-  it('BYO pool: a provider account owned by a sub-tenant gets platform-fee', () => {
-    expect(billingModeOf(pool(), { tenantId: 'sub' }, root)).toBe('platform-fee');
+  it('BYO pool owned by a sub-tenant is platform-fee even when its account did not resolve (fail closed)', () => {
+    expect(billingModeOf(pool({ ownerTenantId: 'sub' }), undefined, root)).toBe('platform-fee');
   });
 
-  it('root-owned account, no account, or a non-provider pool is metered', () => {
+  it('BYO pool owned by a sub-tenant with its own account is platform-fee', () => {
+    expect(billingModeOf(pool({ ownerTenantId: 'sub' }), { tenantId: 'sub' }, root)).toBe(
+      'platform-fee',
+    );
+  });
+
+  it('a root-owned provider pool is metered, with or without a resolved account (root pays itself)', () => {
     expect(billingModeOf(pool(), { tenantId: root }, root)).toBe('metered');
     expect(billingModeOf(pool(), undefined, root)).toBe('metered');
-    expect(billingModeOf(pool({ class: 'vps-host' }), { tenantId: 'sub' }, root)).toBe('metered');
+  });
+
+  it('a non-provider pool is metered whoever owns it', () => {
+    expect(billingModeOf(pool({ class: 'vps-host', ownerTenantId: 'sub' }), undefined, root)).toBe(
+      'metered',
+    );
+  });
+
+  it('an explicit mode wins over the BYO default', () => {
+    expect(
+      billingModeOf(
+        pool({ ownerTenantId: 'sub', policy: { billing: { mode: 'metered' } } }),
+        undefined,
+        root,
+      ),
+    ).toBe('metered');
   });
 });
