@@ -101,12 +101,23 @@ export function doClient(options: DoClientOptions): DoClient {
     options.log.debug('digitalocean.request', { method, path, status: response.status });
     const text = await response.text();
     let payload: unknown;
+    let parsed = true;
     try {
       payload = text ? JSON.parse(text) : {};
     } catch {
       payload = undefined;
+      parsed = false;
     }
-    if (response.ok) return (payload ?? {}) as T;
+    if (response.ok) {
+      // Only an empty body (a 202 or 204) means "nothing": a page of HTML must not read as an empty list.
+      if (!parsed)
+        throw providerError(
+          `DigitalOcean answered ${what} with a body that is not JSON`,
+          'badBody',
+          response.status,
+        );
+      return (payload ?? {}) as T;
+    }
     throw mapDoError(response.status, payload, response.headers, options.clock.now(), what);
   }
 

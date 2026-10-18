@@ -80,9 +80,10 @@ export function mapDoError(
     code = 'RATE_LIMITED';
     details.reason = 'rateLimit';
     // ratelimit-reset is when the oldest request leaves the window, in epoch seconds.
-    const resetAt = Number(headers.get('ratelimit-reset'));
+    const rawReset = headers.get('ratelimit-reset');
+    const resetAt = Number(rawReset);
     details.retryAfterMs =
-      headers.get('ratelimit-reset') !== null && Number.isFinite(resetAt)
+      rawReset !== null && rawReset.trim() !== '' && Number.isFinite(resetAt)
         ? Math.max(0, resetAt * 1000 - nowMs)
         : defaultRetryAfterMs;
   } else if (status >= 500) code = 'UNAVAILABLE';

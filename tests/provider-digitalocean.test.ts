@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { isComputeError, manualClock, type ComputeError } from '@better-compute/core';
 import {
   budgetFor,
@@ -11,7 +11,7 @@ import {
   type DoClient,
 } from '@better-compute/provider-digitalocean';
 import { DoEmulator } from './support/do-emulator/index.js';
-import { secrets } from './support/do-harness.js';
+import { freshBudgets, secrets } from './support/do-harness.js';
 
 // provider-digitalocean against an in-memory emulator of the DigitalOcean endpoints it uses,
 // plugged in through the `fetch` option.
@@ -204,6 +204,42 @@ describe('client', () => {
     expect(
       mapDoError(429, body, new Headers({ 'ratelimit-reset': '5' }), 10_000).retryAfterMs,
     ).toBe(0);
+    expect(mapDoError(429, body, new Headers({ 'ratelimit-reset': '' }), 10_000).retryAfterMs).toBe(
+      60_000,
+    );
+  });
+
+  it('refuses a 2xx body that is not JSON, and takes an empty one as nothing', async () => {
+    const html = setup({
+      fetch: async () => new Response('<html>maintenance, token do-token</html>', { status: 200 }),
+    });
+    const error = await failure(
+      html.client.request('GET', '/droplets', { signal, budget: 'sweep' }),
+    );
+    expect(error.code).toBe('PROVIDER_ERROR');
+    expect(error.details).toMatchObject({
+      provider: 'digitalocean',
+      reason: 'badBody',
+      status: 200,
+    });
+    expect(error.message + JSON.stringify(error.details)).not.toMatch(/maintenance|do-token/);
+    // The same page while listing must not read as an empty list either.
+    const listing = failure(
+      (async () => {
+        for await (const _ of html.client.pages('/droplets', 'droplets', {
+          signal,
+          budget: 'sweep',
+        })) {
+          // drain
+        }
+      })(),
+    );
+    expect((await listing).details?.reason).toBe('badBody');
+
+    const empty = setup({ fetch: async () => new Response(null, { status: 204 }) });
+    await expect(
+      empty.client.request('DELETE', '/droplets/1', { signal, budget: 'mutate' }),
+    ).resolves.toEqual({});
   });
 
   it('maps a network failure to UNAVAILABLE', async () => {
@@ -283,6 +319,47 @@ describe('client', () => {
 });
 
 describe('client: rate budget', () => {
+  beforeEach(freshBudgets);
+
+  it('keeps the mutate reserve when the API reports a low positive remainder', () => {
+    const clock = manualClock(1_000_000);
+    const budget = new RateBudget({ perMinute: 250, perHour: 5000, clock });
+    // Another process sharing the token has used 4990 of 5000; the window frees in a minute.
+    budget.observe(
+      new Headers({
+        'ratelimit-limit': '5000',
+        'ratelimit-remaining': '10',
+        'ratelimit-reset': String(Math.floor(clock.now() / 1000) + 60),
+      }),
+    );
+    for (const cls of ['sweep', 'observe'] as const) {
+      let refused: ComputeError | undefined;
+      try {
+        budget.take(cls);
+      } catch (error) {
+        refused = error as ComputeError;
+      }
+      expect(refused?.code, cls).toBe('RATE_LIMITED');
+      expect(refused?.retryAfterMs, cls).toBe(60_000);
+    }
+    budget.take('mutate');
+    // Once the reported window is over, sweeps run again.
+    clock.advance(61_000);
+    budget.take('sweep');
+  });
+
+  it('uses the limit the API reports, not the configured one', () => {
+    const clock = manualClock(1_000_000);
+    // A token with a limit of 1000 an hour and 400 left is below half: sweeps wait, mutate runs.
+    const low = new RateBudget({ perMinute: 250, perHour: 5000, clock });
+    low.observe(new Headers({ 'ratelimit-limit': '1000', 'ratelimit-remaining': '400' }));
+    expect(() => low.take('sweep')).toThrow();
+    low.take('mutate');
+    // 600 left of 1000 is above the reserve: sweeps pass.
+    const high = new RateBudget({ perMinute: 250, perHour: 5000, clock });
+    high.observe(new Headers({ 'ratelimit-limit': '1000', 'ratelimit-remaining': '600' }));
+    high.take('sweep');
+  });
   it('sweep calls defer before mutate calls are refused', () => {
     const budget = new RateBudget({ perMinute: 10, perHour: 1000, clock: manualClock(1_000_000) });
     budget.take('sweep');
@@ -378,7 +455,11 @@ describe('client: rate budget', () => {
 
   it('shares one budget per token', () => {
     const options = { perMinute: 10, perHour: 100, clock: manualClock(1_000_000) };
-    expect(budgetFor('aaaa', options)).toBe(budgetFor('aaaa', options));
-    expect(budgetFor('aaaa', options)).not.toBe(budgetFor('bbbb', options));
+    const shared = budgetFor('aaaa', options);
+    expect(budgetFor('aaaa', options)).toBe(shared);
+    expect(budgetFor('bbbb', options)).not.toBe(shared);
+    // resetBudgets (via the harness) gives the next test a clean one.
+    freshBudgets();
+    expect(budgetFor('aaaa', options)).not.toBe(shared);
   });
 });

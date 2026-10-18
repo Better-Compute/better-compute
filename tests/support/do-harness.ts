@@ -1,4 +1,5 @@
 import { manualClock, type CallContext, type Logger } from '@better-compute/core';
+import { resetBudgets } from '@better-compute/provider-digitalocean';
 
 // Shared setup for the provider-digitalocean tests: secrets, accounts and a call context.
 
@@ -26,3 +27,11 @@ export function ctx(key = 'k1'): CallContext {
 }
 
 export const doAccount = { token: 'secret://do/t', regions: ['nyc3'] };
+
+/**
+ * Every test starts from clean shared state: the per-token request budgets are process-wide, and
+ * all tests use the same token. Call it from `beforeEach`.
+ */
+export function freshBudgets(): void {
+  resetBudgets();
+}

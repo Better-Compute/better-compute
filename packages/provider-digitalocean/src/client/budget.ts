@@ -29,6 +29,9 @@ interface Window {
   spends: Spend[];
 }
 
+/** The share of a window that sweep and observe leave to mutate. */
+const mutateReserve = 1 - budgetShares.sweep - budgetShares.observe;
+
 /** How long a re-seed without a usable `ratelimit-reset` holds. */
 const defaultSeedMs = 1000;
 
@@ -36,8 +39,8 @@ export class RateBudget {
   readonly #clock: Clock;
   readonly #minute: Window;
   readonly #hour: Window;
-  /** What the API last said was used this hour, until its `ratelimit-reset`. */
-  #seeded: { used: number; until: number } | undefined;
+  /** What the API last said was left this hour (of its own limit), until its `ratelimit-reset`. */
+  #seeded: { remaining: number; limit: number; until: number } | undefined;
 
   constructor(options: { perMinute: number; perHour: number; clock: Clock }) {
     this.#clock = options.clock;
@@ -60,10 +63,14 @@ export class RateBudget {
       if (cls !== 'mutate' && own.length >= cap)
         wait = Math.max(wait, own[0]!.at + window.ms - now);
     }
-    // The API's own count of this hour, when it is higher than ours.
+    // The API's own count of this hour, when it is higher than ours. Nothing may spend what is
+    // not left, and sweep and observe leave the mutate reserve alone.
     const seeded = this.#seeded;
-    if (seeded && seeded.until > now && seeded.used >= this.#hour.capacity)
-      wait = Math.max(wait, seeded.until - now);
+    if (seeded && seeded.until > now) {
+      const reserve = Math.ceil(seeded.limit * mutateReserve);
+      if (seeded.remaining <= 0 || (cls !== 'mutate' && seeded.remaining < reserve))
+        wait = Math.max(wait, seeded.until - now);
+    }
     if (wait > 0)
       throw new ComputeError(
         'RATE_LIMITED',
@@ -81,16 +88,19 @@ export class RateBudget {
     const remaining = rawRemaining === null ? NaN : Number(rawRemaining);
     if (!Number.isFinite(remaining)) return;
     const now = this.#clock.now();
-    const used = this.#hour.capacity - remaining;
+    const rawLimit = headers.get('ratelimit-limit');
+    const reported = rawLimit === null || rawLimit === '' ? NaN : Number(rawLimit);
+    const limit = Number.isFinite(reported) && reported > 0 ? reported : this.#hour.capacity;
     // The count is shared by every process using the token, so it can only add to ours.
-    if (used <= this.#hour.spends.length) {
+    if (limit - remaining <= this.#hour.spends.length) {
       this.#seeded = undefined;
       return;
     }
     const rawReset = headers.get('ratelimit-reset');
-    const reset = rawReset === null ? NaN : Number(rawReset) * 1000;
+    const reset = rawReset === null || rawReset === '' ? NaN : Number(rawReset) * 1000;
     this.#seeded = {
-      used,
+      remaining,
+      limit,
       until: Number.isFinite(reset) && reset > now ? reset : now + defaultSeedMs,
     };
   }
@@ -102,6 +112,11 @@ export function tokenHash(token: string): string {
 }
 
 const budgets = new Map<string, RateBudget>();
+
+/** Forgets every shared budget. For tests, which would otherwise carry spends from one test into the next. */
+export function resetBudgets(): void {
+  budgets.clear();
+}
 
 /** The process-wide budget of a token (keyed by `tokenHash`): every client of one token shares it. */
 export function budgetFor(
