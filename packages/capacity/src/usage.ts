@@ -163,9 +163,14 @@ export interface SourceMeterInput {
 
 /**
  * Writes the windows of one typed source over `[from, to)` whose hour has ended by `now`, and answers how many
- * were new. A window is written once (`ON CONFLICT DO NOTHING`), so a caller may repeat a span; it advances its
- * watermark to `min(to, the start of the hour holding now)`. Every line's key carries its meter, so keys never
- * depend on line order. Lines with no quantity are skipped.
+ * were new. A window is written once (`ON CONFLICT` on `usage_windows_source`, the source, hour and meter), so a
+ * caller may repeat a span it has not passed yet. Every line's key carries its meter, so keys never depend on line
+ * order. Lines with no quantity are skipped.
+ *
+ * Retention contract: a source reconciler keeps a watermark, advances it to `min(to, the start of the hour holding
+ * now)` in the same transaction, and never re-derives hours it already wrote. Retention prunes recorded and voided
+ * source windows once they ended `usageOlderThanDays` ago, so re-metering such an hour would write and send it again
+ * (a duplicate key to better-iam at best, a dead letter in a closed period at worst).
  */
 export async function meterSource(
   tx: SqlTx,
@@ -189,7 +194,7 @@ export async function meterSource(
         `INSERT INTO usage_windows (idempotency_key, source_kind, source_id, tenant_id, identity_id, meter, quantity,
                                     window_start, window_end, tags)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::timestamptz, $10::jsonb)
-         ON CONFLICT DO NOTHING`,
+         ON CONFLICT (source_kind, source_id, window_start, meter) WHERE source_id IS NOT NULL DO NOTHING`,
         [
           sourceUsageKey(input.sourceKind, input.sourceId, window.start, line.meter),
           input.sourceKind,

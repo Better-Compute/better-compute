@@ -452,7 +452,26 @@ describe('meterSource', () => {
          VALUES ('cmp:address:x:1', 'address', 'x', 'acme', 'm', 1, $1, $2)`,
         [iso(T0), iso(T0 + HOUR)],
       ),
-    ).rejects.toThrow(/check constraint/);
+    ).rejects.toThrow(/usage_windows_source_kind_ck/);
+    // NOT VALID constraints still check updates.
+    await db.transaction((tx) =>
+      meterSource(
+        tx,
+        {
+          sourceKind: 'instance',
+          sourceId: 'vm_9',
+          tenantId: 'acme',
+          lines: [{ meter: 'vm.instance.hours', perHour: 1 }],
+          from: T0,
+          to: T0 + HOUR,
+          tags: {},
+        },
+        T0 + HOUR,
+      ),
+    );
+    await expect(
+      db.query(`UPDATE usage_windows SET source_id = NULL WHERE source_id = 'vm_9'`),
+    ).rejects.toThrow(/usage_windows_source_ck/);
   });
 });
 
@@ -695,13 +714,37 @@ describe('the migration runs on a populated partitioned table', () => {
         count: 400,
       },
     ]);
-    // Every partition (the three seeded months, the months core/0018 made, the default) has the new unique index.
+    // Both CHECKs were added NOT VALID: the existing rows were not scanned.
+    expect(
+      (
+        await raw.query(
+          `SELECT conname, convalidated FROM pg_constraint
+            WHERE conrelid = 'usage_windows'::regclass AND contype = 'c' AND conname LIKE 'usage_windows_source%'
+            ORDER BY 1`,
+        )
+      ).rows,
+    ).toEqual([
+      { conname: 'usage_windows_source_ck', convalidated: false },
+      { conname: 'usage_windows_source_kind_ck', convalidated: false },
+    ]);
+    // The unique index is partial (legacy rows are not in it), and every partition (the three seeded months, the
+    // months core/0018 made, the default) has it.
+    expect(
+      (
+        await raw.query<{ def: string }>(
+          `SELECT pg_get_indexdef('usage_windows_source'::regclass) AS def`,
+        )
+      ).rows[0]!.def,
+    ).toBe(
+      'CREATE UNIQUE INDEX usage_windows_source ON ONLY public.usage_windows USING btree (source_kind, source_id, window_start, meter) WHERE (source_id IS NOT NULL)',
+    );
     expect(filesBefore.length).toBeGreaterThanOrEqual(4);
     expect(
       (
         await raw.query<{ count: number }>(
           `SELECT count(*)::int AS count FROM pg_inherits i JOIN pg_index x ON x.indexrelid = i.inhrelid
-            WHERE i.inhparent = 'usage_windows_source'::regclass AND x.indisunique`,
+            WHERE i.inhparent = 'usage_windows_source'::regclass AND x.indisunique
+              AND pg_get_expr(x.indpred, x.indrelid) = '(source_id IS NOT NULL)'`,
         )
       ).rows,
     ).toEqual([{ count: filesBefore.length }]);
@@ -735,5 +778,20 @@ describe('the migration runs on a populated partitioned table', () => {
          VALUES ('cmp:cost:c1:2', 'cost', 'c1', 't', 'provider.cost', 1, '2031-03-01T05:00Z', '2031-03-01T06:00Z')`,
       ),
     ).rejects.toThrow(/duplicate key/); // keys differ: the source index refused it
+    // meterSource's conflict target (with the index predicate) makes the same window a no-op, in a new partition too.
+    const again = await raw.query(
+      `INSERT INTO usage_windows (idempotency_key, source_kind, source_id, tenant_id, meter, quantity, window_start,
+                                  window_end)
+       VALUES ('cmp:cost:c1:3', 'cost', 'c1', 't', 'provider.cost', 1, '2031-03-01T05:00Z', '2031-03-01T06:00Z')
+       ON CONFLICT (source_kind, source_id, window_start, meter) WHERE source_id IS NOT NULL DO NOTHING`,
+    );
+    expect(again.affectedRows).toBe(0);
+    // The new month's partition carries the constraints too.
+    await expect(
+      raw.query(
+        `INSERT INTO usage_windows (idempotency_key, source_kind, tenant_id, meter, quantity, window_start, window_end)
+         VALUES ('cmp:cost:c2:1', 'cost', 't', 'provider.cost', 1, '2031-03-01T07:00Z', '2031-03-01T08:00Z')`,
+      ),
+    ).rejects.toThrow(/usage_windows_source_ck/);
   });
 });
