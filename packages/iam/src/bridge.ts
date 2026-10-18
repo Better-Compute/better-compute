@@ -192,6 +192,20 @@ export function createComputeIamBridge(options: ComputeIamBridgeOptions = {}): C
           count: stats.pending + stats.dropped,
         });
     }
+    // The billing members (meters, prices, quotes) need a root billing credential on an embedded port; a remote one
+    // always has them. Without them, platform billing (ensureMeters, quotes, estimates) is unavailable.
+    if (
+      port !== undefined &&
+      rootTenantId !== undefined &&
+      (port.ensureMeters === undefined || port.quote === undefined)
+    )
+      findings.push({
+        check: 'iam.billing-port',
+        severity: 'warning',
+        message:
+          'The IAM port cannot manage meters or quote prices: it has a root tenant but no billing credential, so ensureMeters, setPrice, listPrices and quote are missing (platform compute billing and estimates need them)',
+        fix: 'bridge.embedded(iam, { rootTenantId, serviceCredential }) with a root service account holding iam:billing:manage and iam:billing:read',
+      });
     if (sql) {
       const { rows } = await sql.query<{ backlog: string }>(
         'SELECT count(*)::text AS backlog FROM iam_inbox WHERE processed_at IS NULL',

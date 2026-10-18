@@ -155,8 +155,9 @@ export interface RemoteIamOptions {
   /** A prebuilt client (tests); otherwise `createIamClient` from `@better-iam/client` is loaded on first use. */
   client?: RemoteIamClient;
   /**
-   * The root service account's credential (hourly `sts.getSessionToken`, or a key), used for usage and flags.
-   * It needs `iam:billing:record` and the flag reads (§12.2).
+   * The root service account's credential (hourly `sts.getSessionToken`, or a key), used for usage, flags and the
+   * billing members (`ensureMeters`, `setPrice`, `listPrices`, `quote`, `spend`). It needs `iam:billing:record`,
+   * the flag reads (§12.2), and for the billing members `iam:billing:manage` and `iam:billing:read` on the root tenant.
    */
   serviceToken: string | (() => string | Promise<string>);
   rootTenantId: string;

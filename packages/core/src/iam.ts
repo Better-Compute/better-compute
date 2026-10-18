@@ -150,7 +150,7 @@ export interface QuoteLine {
 
 /**
  * A spend report over `[from, to)` (epoch ms) for `tenantId` and the tenants below it. better-iam bills by calendar
- * period, so the report covers every billing period the range touches.
+ * period, so the answer covers every whole billing period the range touches (`SpendResult.coveredFrom/coveredTo`).
  */
 export interface SpendQuery {
   tenantId: string;
@@ -169,6 +169,15 @@ export interface SpendRow {
   amountMicros: number;
   /** Units of the meter for a `meter` group; the sum over the group's meters otherwise. */
   quantity: number;
+}
+
+/** The answer to a `SpendQuery`: the rows, and the exact time range they cover. */
+export interface SpendResult {
+  rows: SpendRow[];
+  /** Start of the first billing period summed, epoch ms. */
+  coveredFrom: number;
+  /** End (exclusive) of the last billing period summed, epoch ms. */
+  coveredTo: number;
 }
 
 export interface IamPort {
@@ -252,6 +261,10 @@ export interface IamPort {
     tenantId: string;
     lines: readonly { meter: string; quantity: number }[];
   }): Promise<QuoteLine[]>;
-  /** (billing) Billed spend of a tenant's subtree. */
-  spend?(query: SpendQuery): Promise<SpendRow[]>;
+  /**
+   * (billing) Billed spend of a tenant's subtree. `rows` sum whole billing periods, so `[coveredFrom, coveredTo)` is the
+   * exact union of the periods summed (in the deployment's time zone), which may be wider than the query's range.
+   * Callers compare it with other figures only over that range.
+   */
+  spend?(query: SpendQuery): Promise<SpendResult>;
 }

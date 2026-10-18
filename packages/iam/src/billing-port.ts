@@ -49,7 +49,9 @@ type SpendGroup = 'meter' | 'tenant' | `tag:${string}`;
 
 /** The `billing` calls this module needs, each already authorized as compute's root service account. */
 export interface BillingCalls {
-  listMeters(input: { tenantId: string }): Promise<{ key: string; pricing: string }[]>;
+  listMeters(input: {
+    tenantId: string;
+  }): Promise<{ key: string; pricing: string; archived?: boolean }[]>;
   createMeter(input: {
     tenantId: string;
     key: string;
@@ -240,9 +242,25 @@ export function billingPort(
 
   const quote: BillingMembers['quote'] = (input) =>
     wrap(async () => {
+      for (const line of input.lines)
+        if (!Number.isFinite(line.quantity) || line.quantity < 0)
+          throw new ComputeError('INVALID_INPUT', 'quote quantities must be numbers of at least 0');
+      // Lines are priced independently: a meter that cannot be priced (unknown to the tenant, archived, or
+      // `reported`, whose cost rides on each event) is a null line, never a failed quote.
+      const priceable = new Set(
+        input.lines.length === 0
+          ? []
+          : (await calls.listMeters({ tenantId: input.tenantId }))
+              .filter((meter) => meter.pricing === 'rate-card' && meter.archived !== true)
+              .map((meter) => meter.key),
+      );
       const lines: QuoteLine[] = [];
       // better-iam quotes one meter per call.
       for (const line of input.lines) {
+        if (!priceable.has(line.meter)) {
+          lines.push({ meter: line.meter, quantity: line.quantity, amountMicros: null });
+          continue;
+        }
         const answer = await calls.quote({
           tenantId: input.tenantId,
           meter: line.meter,
@@ -276,6 +294,7 @@ export function billingPort(
         report = await read(period);
       }
 
+      const coveredFrom = report.periodStart;
       const merged = new Map<string, SpendRow>();
       for (let walked = 1; ; walked++) {
         for (const row of report.rows) {
@@ -305,7 +324,7 @@ export function billingPort(
         period = shiftPeriod(period, 1);
         report = await read(period);
       }
-      return [...merged.values()];
+      return { rows: [...merged.values()], coveredFrom, coveredTo: report.periodEnd };
     });
 
   return { ensureMeters, setPrice, listPrices, quote, spend };

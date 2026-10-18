@@ -416,7 +416,10 @@ describe('the bridge on better-iam', () => {
     const bridge = createComputeIamBridge();
     const plugin = bridge.plugin();
     const f = await iamFixture({ plugins: [plugin], resolveResource: bridge.resolveResource() });
-    const port = bridge.embedded(f.iam, { rootTenantId: f.rootTenantId });
+    const port = bridge.embedded(f.iam, {
+      rootTenantId: f.rootTenantId,
+      serviceCredential: f.rootCredential,
+    });
     const [module] = bridge.modules;
     expect(module.name).toBe('iam');
     expect(module.migrations?.map((migration) => migration.name)).toEqual(['iam/0001_successors']);

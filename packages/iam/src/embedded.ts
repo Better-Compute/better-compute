@@ -158,8 +158,9 @@ export interface EmbeddedIamOptions {
   /**
    * The credential of compute's root service account for the billing members (`ensureMeters`, `setPrice`,
    * `listPrices`, `quote`, `spend`): it needs `iam:billing:manage` and `iam:billing:read` on the root tenant.
-   * Defaults to `sessionReviewer`. Without a credential the port has no `ensureMeters`, `setPrice`, `listPrices`
-   * or `quote`, and `spend` only where better-iam's trusted `iam.billing.spend` exists.
+   * This is an explicit opt-in (`sessionReviewer` is not borrowed: it holds other permissions). Without it the port
+   * has no `ensureMeters`, `setPrice`, `listPrices` or `quote` (the IAM bridge's doctor warns about it), and
+   * `spend` only where better-iam's trusted `iam.billing.spend` exists.
    */
   serviceCredential?: Credential | (() => Credential | Promise<Credential>);
   /**
@@ -415,7 +416,7 @@ function attachBillingMembers(
   options: EmbeddedIamOptions,
 ): void {
   const { rootTenantId } = options;
-  const source = options.serviceCredential ?? options.sessionReviewer;
+  const source = options.serviceCredential;
   const api = iam.api.billing;
   if (rootTenantId === undefined) return;
   const credential = async (): Promise<CredentialInput> =>

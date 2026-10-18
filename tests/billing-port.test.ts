@@ -6,9 +6,15 @@ import {
   type PriceSpecInput,
   type UsageEvent,
 } from '@better-compute/core';
-import { embeddedIam, spyIamPort } from '@better-compute/iam';
+import {
+  createComputeIamBridge,
+  embeddedIam,
+  spyIamPort,
+  type ComputeIamBridge,
+} from '@better-compute/iam';
 import { createEmbeddedTestIam, type EmbeddedTestIam } from '@better-compute/iam/testing';
 import { createMetrics, meteredIamPort, standardMetrics } from '@better-compute/observability';
+import { ORIGIN, closeIamFixtures, iamFixture, type IamFixture } from './support/iam.js';
 import { guardIamPort } from '../packages/server/src/iam-guard.js';
 
 // The billing members of the IamPort (platform compute billing, D13): compute manages meters, prices, quotes and
@@ -18,6 +24,7 @@ import { guardIamPort } from '../packages/server/src/iam-guard.js';
 const open: EmbeddedTestIam[] = [];
 afterEach(async () => {
   for (const item of open.splice(0)) await item.close();
+  await closeIamFixtures();
 });
 
 const gpu: MeterSpec = {
@@ -210,14 +217,45 @@ describe.each(['embedded', 'remote'] as const)('the IamPort billing members (%s)
     expect(await port.quote!({ tenantId: t.acme.tenantId, lines: [] })).toEqual([]);
   });
 
-  it('quote refuses an unknown meter', async () => {
+  it('quote prices each line alone: unknown, reported and archived meters are null lines', async () => {
+    const { t, port, period } = await setup(mode);
+    const archived: MeterSpec = { ...vcpu, key: 'vps.old.hours', name: 'Retired meter' };
+    await port.ensureMeters!([gpu, passthrough, archived]);
+    await port.setPrice!({ meter: gpu.key, effectiveFrom: period, spec: perUnit(4_000_000) });
+    await port.setPrice!({ meter: archived.key, effectiveFrom: period, spec: perUnit(1_000_000) });
+    await t.iam.api.billing.updateMeter(t.root.credential, {
+      tenantId: t.root.tenantId,
+      key: archived.key,
+      archived: true,
+    });
+
+    const lines = [
+      { meter: 'no.such.meter', quantity: 1 },
+      { meter: gpu.key, quantity: 2 },
+      { meter: passthrough.key, quantity: 5 },
+      { meter: archived.key, quantity: 5 },
+      { meter: 'Not A Key', quantity: 1 },
+    ];
+    expect(await port.quote!({ tenantId: t.acme.tenantId, lines })).toEqual([
+      { meter: 'no.such.meter', quantity: 1, amountMicros: null },
+      { meter: gpu.key, quantity: 2, amountMicros: 8_000_000 },
+      { meter: passthrough.key, quantity: 5, amountMicros: null },
+      { meter: archived.key, quantity: 5, amountMicros: null },
+      { meter: 'Not A Key', quantity: 1, amountMicros: null },
+    ]);
+  });
+
+  it('quote refuses a negative or non-finite quantity, and an unknown tenant', async () => {
     const { t, port } = await setup(mode);
+    for (const quantity of [-1, Number.NaN])
+      expect(
+        await failure(
+          port.quote!({ tenantId: t.acme.tenantId, lines: [{ meter: gpu.key, quantity }] }),
+        ),
+      ).toMatchObject({ code: 'INVALID_INPUT' });
     expect(
       await failure(
-        port.quote!({
-          tenantId: t.acme.tenantId,
-          lines: [{ meter: 'no.such.meter', quantity: 1 }],
-        }),
+        port.quote!({ tenantId: 'ten_nope', lines: [{ meter: gpu.key, quantity: 1 }] }),
       ),
     ).toMatchObject({ code: 'NOT_FOUND' });
   });
@@ -237,7 +275,11 @@ describe.each(['embedded', 'remote'] as const)('the IamPort billing members (%s)
     const from = Date.UTC(Number(period.slice(0, 4)), Number(period.slice(5)) - 1, 1);
     const to = t.now() + 3_600_000;
 
-    const byMeter = await port.spend!({
+    const {
+      rows: byMeter,
+      coveredFrom,
+      coveredTo,
+    } = await port.spend!({
       tenantId: t.acme.tenantId,
       from,
       to,
@@ -251,8 +293,13 @@ describe.each(['embedded', 'remote'] as const)('the IamPort billing members (%s)
       ]),
     );
 
+    expect([coveredFrom, coveredTo]).toEqual([
+      Date.UTC(Number(period.slice(0, 4)), Number(period.slice(5)) - 1, 1),
+      Date.UTC(Number(period.slice(0, 4)), Number(period.slice(5)), 1),
+    ]);
+
     // The root sees the whole subtree, by tenant and by tag.
-    const byTenant = await port.spend!({
+    const { rows: byTenant } = await port.spend!({
       tenantId: t.root.tenantId,
       from,
       to,
@@ -264,7 +311,7 @@ describe.each(['embedded', 'remote'] as const)('the IamPort billing members (%s)
         { key: t.other.tenantId, tenantId: t.other.tenantId, amountMicros: 2_000_000, quantity: 1 },
       ]),
     );
-    const byRegion = await port.spend!({
+    const { rows: byRegion } = await port.spend!({
       tenantId: t.root.tenantId,
       from,
       to,
@@ -279,21 +326,37 @@ describe.each(['embedded', 'remote'] as const)('the IamPort billing members (%s)
     );
   });
 
-  it('spend covers every billing period of the range and merges them', async () => {
+  it('spend covers whole billing periods and says which', async () => {
     const { t, port, period, usage } = await setup(mode);
     await port.ensureMeters!([gpu]);
     await port.setPrice!({ meter: gpu.key, effectiveFrom: period, spec: perUnit(1_000_000) });
     await port.recordUsage([usage(t.acme.tenantId, gpu.key, 3, 'm1')]);
     const year = Number(period.slice(0, 4));
     const month = Number(period.slice(5)) - 1;
-    const rows = await port.spend!({
-      tenantId: t.acme.tenantId,
-      from: Date.UTC(year, month - 2, 15),
-      to: t.now() + 1,
-      groupBy: 'meter',
-    });
-    expect(rows).toEqual([{ key: gpu.key, meter: gpu.key, amountMicros: 3_000_000, quantity: 3 }]);
-    // An empty range, and one that ends before the usage's period, report nothing.
+    const end = Date.UTC(year, month + 1, 1);
+    const row = { key: gpu.key, meter: gpu.key, amountMicros: 3_000_000, quantity: 3 };
+
+    // A range inside the month is widened to the whole month.
+    expect(
+      await port.spend!({
+        tenantId: t.acme.tenantId,
+        from: t.now() - 1_000,
+        to: t.now() + 1,
+        groupBy: 'meter',
+      }),
+    ).toEqual({ rows: [row], coveredFrom: Date.UTC(year, month, 1), coveredTo: end });
+
+    // A range crossing months merges them and covers all of them.
+    expect(
+      await port.spend!({
+        tenantId: t.acme.tenantId,
+        from: Date.UTC(year, month - 2, 15),
+        to: t.now() + 1,
+        groupBy: 'meter',
+      }),
+    ).toEqual({ rows: [row], coveredFrom: Date.UTC(year, month - 2, 1), coveredTo: end });
+
+    // A range that ends before the usage's period reports nothing, over its own periods.
     expect(
       await port.spend!({
         tenantId: t.acme.tenantId,
@@ -301,7 +364,11 @@ describe.each(['embedded', 'remote'] as const)('the IamPort billing members (%s)
         to: Date.UTC(year, month - 1, 1),
         groupBy: 'meter',
       }),
-    ).toEqual([]);
+    ).toEqual({
+      rows: [],
+      coveredFrom: Date.UTC(year, month - 3, 1),
+      coveredTo: Date.UTC(year, month - 1, 1),
+    });
   });
 
   it('spend refuses an empty range and a tag grouping without a tag', async () => {
@@ -326,6 +393,64 @@ describe('the billing members without a service credential', () => {
     expect(typeof port.spend).toBe('function');
     // Without the root id the port cannot know whose meters to manage.
     expect(embeddedIam(t.iam as never, {}).spend).toBeUndefined();
+  });
+  it('a session reviewer is not a billing credential', async () => {
+    const t = await createEmbeddedTestIam({ inbox: 'memory', mode: 'embedded' });
+    open.push(t);
+    const port = embeddedIam(t.iam as never, {
+      rootTenantId: t.root.tenantId,
+      sessionReviewer: t.root.credential,
+    });
+    expect(typeof port.authorizeSession).toBe('function');
+    for (const member of ['ensureMeters', 'setPrice', 'listPrices', 'quote'] as const)
+      expect(port[member], member).toBeUndefined();
+  });
+});
+
+describe('the iam module doctor and the billing members', () => {
+  const doctor = async (configure: (bridge: ComputeIamBridge, f: IamFixture) => unknown) => {
+    const bridge = createComputeIamBridge();
+    const f = await iamFixture({
+      plugins: [bridge.plugin()],
+      resolveResource: bridge.resolveResource(),
+    });
+    configure(bridge, f);
+    const findings = await bridge.modules[0].selfCheck!({} as never);
+    return findings.filter((item) => item.check === 'iam.billing-port');
+  };
+
+  it('warns when an embedded port has a root tenant but no billing credential', async () => {
+    const findings = await doctor((bridge, f) =>
+      bridge.embedded(f.iam, { rootTenantId: f.rootTenantId }),
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ severity: 'warning' });
+    expect(findings[0]!.fix).toContain('bridge.embedded(iam, { rootTenantId, serviceCredential })');
+    expect(findings[0]!.fix).toContain('iam:billing:manage');
+    expect(findings[0]!.fix).toContain('iam:billing:read');
+  });
+
+  it('is quiet with a service credential, with a remote port, and with no port or root tenant', async () => {
+    expect(
+      await doctor((bridge, f) =>
+        bridge.embedded(f.iam, {
+          rootTenantId: f.rootTenantId,
+          serviceCredential: f.rootCredential,
+        }),
+      ),
+    ).toEqual([]);
+    expect(
+      await doctor((bridge, f) =>
+        bridge.remote({
+          baseURL: ORIGIN,
+          fetch: async (input, init) => f.iam.handler(new Request(input, init)),
+          serviceToken: f.rootCredential.token,
+          rootTenantId: f.rootTenantId,
+        }),
+      ),
+    ).toEqual([]);
+    expect(await doctor(() => undefined)).toEqual([]);
+    expect(await doctor((bridge, f) => bridge.embedded(f.iam))).toEqual([]);
   });
 });
 
