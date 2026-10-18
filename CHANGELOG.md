@@ -6,6 +6,14 @@ All notable changes to the better-compute packages are documented here. The form
 
 ## Unreleased
 
+## 0.2.0 (2026-10-18)
+
+A Google Compute Engine provider (`@better-compute/provider-gcp`, new), discovery and attach of existing provider
+machines, provider capacity reservations, tenant networks and firewall rules, `instances.reboot`, platform-issued
+compute (`instances.create` with `ownerIdentityId`) with owner membership, and security fixes for provider accounts
+and their secrets that apply to every 0.1.x deployment. Every package, `@better-compute/provider-gcp` included, is at
+0.2.0.
+
 ### Security
 
 - **A tenant could build a provider pool on another tenant's or the platform's provider account (0.1.x).**

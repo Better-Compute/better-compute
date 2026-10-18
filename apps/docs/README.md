@@ -230,8 +230,8 @@ transitions, limits and defaults, failure behavior. Prefer 400 to 1,500 words pe
 **Accuracy over coverage.** The sources of truth are `packages/*/src`, the package READMEs (some status lines are
 stale; trust the code), PLAN.md, `generated/*.json`, the examples, the tests, and `CHANGELOG.md`. Every identifier
 must exist in the source. When something is only designed in PLAN.md, say it is planned and for which phase; a
-method whose status is `planned` is planned for the phase shown. The packages are on npm at 0.1.0 (with Better IAM
-`^0.2.0`), and the Go daemon `bcd` is built and tested in `daemon/` but not released; the TypeScript FakeDaemon in `@better-compute/testing` speaks the
+method whose status is `planned` is planned for the phase shown. The packages are on npm at 0.2.0 (with Better IAM
+`>=0.2.0 <0.4.0`), and the Go daemon `bcd` is built and tested in `daemon/` but not released; the TypeScript FakeDaemon in `@better-compute/testing` speaks the
 real protocol for tests, the simulator, and `better-compute dev --sim N`.
 
 **MDX safety.** Outside code, `{`, `}`, `<`, and `>` start JSX or expressions. Put identifiers and anything with

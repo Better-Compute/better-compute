@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/postgres",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "PostgreSQL and PGlite storage for better-compute: executor, migrations and store conformance.",
   "type": "module",
   "license": "Apache-2.0",

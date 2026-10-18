@@ -30,7 +30,7 @@ The upgrade order is proven in the fleet simulator: `tests/sim/upgrade.test.ts` 
 three gateways and simulated daemons through expand migrations, workers, gateways one at a time and a signed bcd
 rollout, under load, and checks that no allocation moves, no VM reboots and invariants I1, I2, I5 and I8 hold
 (80195df). Both "releases" in that test are the same build plus one extra migration and a FakeDaemon that reports a
-new version; it is not an upgrade between two published releases. Every package is at 0.1.0 and no bcd release has
+new version; it is not an upgrade between two published releases. Every package is at 0.2.0 and no bcd release has
 been cut, so no deployment has been upgraded from one real release to the next yet.
 </Callout>
 

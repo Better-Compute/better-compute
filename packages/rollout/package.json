@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/rollout",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Signed bcd releases and wave rollouts (A/B self-update) for better-compute, within each pool's disruption budget.",
   "type": "module",
   "license": "Apache-2.0",
