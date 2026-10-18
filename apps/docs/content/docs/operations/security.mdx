@@ -559,6 +559,17 @@ See [sandboxes](/docs/guides/vps/sandboxes#run-code-inside).
 - **Attributes from the projection.** IAM decides on attributes from compute's own
   <Term id="authz-projection">authorization projection</Term>, never from the request.
 - **Idempotency keys** are scoped to `(tenant, identity)`, so one tenant cannot replay another's request.
+- **Provider accounts are their tenant's.** A provider pool runs only on an account of its owner tenant
+  (`pools.create` refuses another's as `NOT_FOUND`, and vps never uses one, deletion included), an account's
+  secret references are its tenant's (see [Sealed secrets](#sealed-secrets)), and only root accounts may use the
+  host's ambient cloud credentials. Tenants a pool is offered to do not see its account. In 0.1.x a tenant could
+  point a pool of its own at another tenant's account: see the CHANGELOG's upgrade note.
+- **Platform-issued compute.** Only a root caller acting in another tenant makes someone other than itself the
+  owner of an instance (`instances.create` and `attach` with `ownerIdentityId`), the owner must be a member of
+  that tenant when the IAM port can say (`IamPort.isMember`), and label-driven auto-attach takes an owner label
+  only on platform accounts, for members. A tenant's own account attaches only for itself, and
+  `providerAccounts.machines` there does not name another tenant's instances. See
+  [platform-issued compute](/docs/guides/vps/providers#platform-issued-compute).
 - **Tenant-controlled machines.** Under a dedicated-root lease the node's identity is reissued as `node-tenant`,
   and its inventory becomes advisory.
 - **Suspended and deleted tenants.** Once the IAM bridge's `tenant` reaction (`tenantStateHandler`) mirrors a

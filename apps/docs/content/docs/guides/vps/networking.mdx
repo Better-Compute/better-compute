@@ -184,6 +184,12 @@ await compute.api.firewallRules.create(
 );
 ```
 
+- **Whose it is.** A network is its tenant's (`compute-network`, a child of `compute-tenant`, decided on
+  `compute:networks:*`), on a provider pool the tenant owns or is offered. Another tenant's network is `NOT_FOUND`
+  in your tenant, and naming another tenant is `ACCESS_DENIED` before any decision. A rule targets only the tenant's
+  own instances on that network, and `instances.create` takes only the tenant's own `networkId`: another tenant's
+  is `INVALID_INPUT`, worded as for one that does not exist. The platform (root callers) may act on any tenant's
+  networks. See [platform-issued compute](/docs/guides/vps/providers#platform-issued-compute).
 - **Names.** A network's name is unique among the tenant's networks that are not deleted; a deleted network's name
   is free again. A retried create with the same `idempotencyKey` returns the same network for the same caller.
   At the provider every resource is named `bc-` and its lower-cased id, and each instance's machine carries the tag

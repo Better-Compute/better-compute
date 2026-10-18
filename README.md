@@ -7,9 +7,10 @@
 An embeddable TypeScript control plane for GPU, CPU and bare-metal capacity. better-compute tracks what hardware
 exists, what is free and who holds it, and the database referees every booking, so double-booking is impossible by
 construction. It also makes machines useful: adopt a running server, deploy an image over PXE, run a VPS or a sandbox
-on your own hosts or a provider's, and reserve whole GPUs, MIG slices or gangs of nodes through one typed API, a CLI
-or MCP tools. [Better IAM](https://github.com/Better-IAM/better-iam) is the identity provider, policy decision point
-and billing ledger; better-compute owns only its machine PKI.
+on your own hosts or a provider's (Hetzner Cloud, Proxmox VE, Google Compute Engine), hand cloud VMs and reservations
+the platform holds to customer tenants with their own networks and firewall rules, and reserve whole GPUs, MIG slices
+or gangs of nodes through one typed API, a CLI or MCP tools. [Better IAM](https://github.com/Better-IAM/better-iam) is
+the identity provider, policy decision point and billing ledger; better-compute owns only its machine PKI.
 
 **Documentation: [better-compute.com/docs](https://better-compute.com/docs/guides)**
 
@@ -97,7 +98,9 @@ your own configuration file (`better-compute init`).
 - [Capacity](https://better-compute.com/docs/guides/capacity): pools, reservations, quotas, fractional GPUs, gangs and
   spot
 - [Nodes](https://better-compute.com/docs/guides/nodes), [bare metal](https://better-compute.com/docs/guides/bare-metal)
-  and [VPS and sandboxes](https://better-compute.com/docs/guides/vps)
+  and [VPS and sandboxes](https://better-compute.com/docs/guides/vps), including
+  [platform-issued compute](https://better-compute.com/docs/guides/vps/providers#platform-issued-compute) from provider
+  accounts to customer tenants
 - [IAM](https://better-compute.com/docs/guides/iam): how better-compute uses Better IAM for identity, policy and billing
 - [The daemon](https://better-compute.com/docs/daemon): `bcd`, its sessions, protocol and host configuration
 - [Extending](https://better-compute.com/docs/extending): modules, drivers, providers, scheduler plugins and sinks
@@ -154,7 +157,7 @@ application passes them in.
 | `@better-compute/inventory`           | `/inventory`                          | Hardware inventory: section hashing and diffs, GPU model mapping, labels and health conditions        |
 | `@better-compute/provision`           | `/provision`                          | The workflow engine, steps and profiles, images, and host configuration for nodes                     |
 | `@better-compute/metal`               | `/metal`                              | Bare-metal lifecycle: power, BMC management, PXE boot, deploy and inspect drivers; `metal()`          |
-| `@better-compute/vps`                 | `/vps`                                | VPS instances and sandboxes: runtimes, flavors, templates, snapshots and providers; `vps()`           |
+| `@better-compute/vps`                 | `/vps`                                | VPS instances, sandboxes, flavors, templates, snapshots, providers, attach, tenant networks; `vps()`  |
 | `@better-compute/iam`                 | `/iam`, `/iam/plugin`, `/iam/testing` | The Better IAM bridge: IamPort, catalog and plugin, authz projection, inbox, usage and flags          |
 | `@better-compute/gateway`             | `/gateway`                            | Daemon sessions over gRPC on HTTP/2 mTLS, liveness, command dispatch and join forwarding              |
 | `@better-compute/pki`                 | `/pki`                                | Machine PKI: local CAs, SPIFFE node certificates, sealed join tokens, attestors, signed checkpoints   |
@@ -170,6 +173,7 @@ application passes them in.
 | `@better-compute/testing`             | `/testing`                            | Fixtures, the `FakeDaemon`, the fleet simulator, a sim clock and conformance runners                  |
 | `@better-compute/provider-hetzner`    | —                                     | Hetzner Cloud servers as VPS instances and offers, and Hetzner Robot bootstrap                        |
 | `@better-compute/provider-proxmox`    | —                                     | Proxmox VE QEMU VMs cloned from templates as VPS instances                                            |
+| `@better-compute/provider-gcp`        | —                                     | Google Compute Engine VMs as VPS instances: discovery, attach, reservations, VPCs and firewalls       |
 | `@better-compute/provider-kubernetes` | —                                     | Manifests that run `bcd` as a DaemonSet to adopt a Kubernetes cluster's nodes and GPUs into a pool    |
 | `@better-compute/driver-sdk`          | —                                     | bcx, the out-of-process driver protocol (draft): `serveDriver` and `externalDriver` over mTLS gRPC    |
 | `@better-compute/console-kit`         | —                                     | Framework-free view models for consoles over the typed client, with optional React bindings           |

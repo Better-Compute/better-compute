@@ -1389,10 +1389,36 @@ needs these changes:
      `apps/cloud/lib/compute/service/api.ts`
    - replace the JSON-file firewall store (`apps/cloud/lib/firewall-store.ts`) with `networks.*` and
      `firewallRules.*`; the `FirewallRule` shape maps 1:1 except `target` (label selector) → `targets.instanceIds`
-5. **IAM role templates.** Add `compute:instances:attach` to `compute-admin` (not `compute-operator`), and
-   `compute:networks:*` to `compute-admin` and `compute-operator`. Add `compute-network` to the bridge plugin's
-   resource types.
-6. **Per-tenant projects.** `12-gcp-hosted-compute.md` (one GCP project per tenant) needs the `resolveTarget` hook
+5. **IAM role templates.** New actions and the resource type they act on:
+   - `compute:instances:attach` on `compute-instance`: platform roles (root tenant). In a customer tenant only
+     `compute-admin` needs it, and only to attach from the tenant's own (BYO) accounts: attaching from a root account
+     is the platform's alone whatever the grant.
+   - `compute:instances:update` and `compute:instances:delete` now also cover `reboot` and `detach` (no new
+     action); `compute-operator` keeps them, ideally conditioned on `resource.ownerId == ${principal.id}` so
+     operators control what was issued to them.
+   - `compute:networks:create`, `read`, `update`, `delete` on `compute-network` (a child of `compute-tenant`;
+     attributes `providerAccountId`, `poolId`, `projectId`), and `compute:networks:read` on `compute-tenant`
+     (`networks.list`): `compute-admin` and `compute-operator`. `firewallRules.*` decide on the network.
+   - `compute:providers:read` / `manage` on `compute-provider-account` now also gate `machines`, `discover`,
+     `reservations`, `bindReservation` and `unbindReservation`: platform roles for root accounts; a tenant's
+     `compute-admin` for its own accounts only.
+   The bridge plugin's resource types come from core's catalog (`computeResourceTypes()`), so `compute-network` is
+   there once legionedge upgrades; check any hand-kept list.
+6. **API changes to adopt.**
+   - `instances.create` takes `ownerIdentityId` (root callers creating in another tenant only); `instances.attach`
+     takes it on the same terms now (a tenant attaching from its own account owns what it attaches). With the embedded
+     bridge the owner must be an active member of the tenant (`IamPort.isMember`; `INVALID_INPUT` otherwise).
+   - Auto-attach owner labels (`better-compute-owner`) count only on platform accounts, for members of the labelled
+     tenant; on a tenant's own account they are ignored (`AUTO_ATTACH_OWNER_IGNORED`).
+   - `pools.create` refuses a provider account of another tenant (`NOT_FOUND`); `pools.get`/`list` omit
+     `providerAccountId` for tenants a pool is offered to, so the customer console must not rely on it.
+   - Provider-account configs of customer tenants may name only `secret://<tenant>/…` (and allow-listed
+     `vault://` paths, `vps({ tenantVaultPaths })`); a customer GCP account must bring its own key.
+   - `providerAccounts.machines` on a customer's own account omits other tenants' `instanceId`/`tenantId`.
+   - New error and event details to surface: `ProvisionFailed`, `OwnershipLost`, `AttachConflict`,
+     `QUOTA_EXCEEDED` with `details.limit` for network caps (10 networks per tenant, 16 subnets, 100 rules).
+   - Before upgrading, run the CHANGELOG's query for pools on another tenant's account (0.1.x allowed them).
+7. **Per-tenant projects.** `12-gcp-hosted-compute.md` (one GCP project per tenant) needs the `resolveTarget` hook
    (P-28). Until then, one root GCP account serves all tenants, and per-tenant VPCs isolate their traffic.
 
 ## Follow-ups (separate plans)

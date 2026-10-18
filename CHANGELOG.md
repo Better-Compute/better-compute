@@ -6,28 +6,72 @@ All notable changes to the better-compute packages are documented here. The form
 
 ## Unreleased
 
+### Security
+
+- **A tenant could build a provider pool on another tenant's or the platform's provider account (0.1.x).**
+  `pools.create` is tenant-callable (`compute:pools:create` on the tenant) and checked that the site was the
+  caller's, but not who owns `providerAccountId`. A tenant that learned an account id (an offered pool's
+  `pools.get` showed it) could create a pool on it, set its own `ownerQuota` and flavors, and have vps create
+  machines with that account's credentials in its owner's cloud project: no offer, quota or flavor of the owner
+  applied. This affects every provider, not only the new Google Compute Engine one. Now `pools.create` refuses an
+  account that is not the pool owner's with `NOT_FOUND`, worded as for an unknown account; vps uses a pool's account
+  only when the pool's owner owns it (instance creates and the provider reconciler, flavors, networks, attach,
+  reservation bindings); and `pools.get`/`list` no longer show `providerAccountId` to tenants a pool is offered to.
+
+  **Upgrading from 0.1.x.** Find pools that point at another tenant's account:
+
+  ```sql
+  SELECT p.id AS pool_id, p.owner_tenant_id, a.id AS account_id, a.tenant_id AS account_tenant_id
+    FROM pools p JOIN provider_accounts a ON a.id = p.provider_account_id
+   WHERE a.tenant_id <> p.owner_tenant_id;
+  ```
+
+  Instances of those pools stop reconciling after the upgrade: the provider reconciler never uses the account, so
+  they are neither created, polled nor powered (it retries with an `INVALID_STATE` "has no provider account").
+  To clean up, delete each instance (`instances.delete`, or `instances.detach` for an attached one): deletion now
+  finishes without a provider call and refunds the tenant's quota. Then archive the pools (`pools.archive`, by their
+  owner or a root caller). Finally, check the account owner's cloud project for the machines those instances
+  created and remove them there: they are named after the instance id (Hetzner Cloud: the id as host name, with
+  `-` for `_`; Google Compute Engine: `bc-` and the same, labelled `better-compute-instance=<instance id>`).
+- **Provider-account secret references were not scoped to the account's tenant (0.1.x, every provider).** A
+  tenant's account could name `env://` (the control plane's own environment), any `vault://` path, or the
+  platform's or another tenant's `secret://` references, and its client resolved them. Now an account of a tenant
+  other than the root may name only `secret://<its tenant>/…` and the `vault://` paths `vps({ tenantVaultPaths })`
+  allows it: `providerAccounts.create` and `update` refuse anything else with `INVALID_CONFIG`
+  (`details.reason: 'secretRefScope'`), the client refuses such a reference again when it resolves it
+  (`ACCESS_DENIED`, for rows stored before the upgrade or around the API), and a tenant's references are resolved
+  with its tenant as the context, so the sealed store refuses a row of another tenant. Platform accounts are
+  unchanged. Check existing tenant accounts before upgrading: one that names such a reference stops working.
+- **The Google Cloud key's `token_uri` is pinned.** The key JSON of a tenant's account is the tenant's, and the
+  control plane POSTs the signed JWT to its `token_uri`. It must be absent, `https://oauth2.googleapis.com/token`
+  or `https://accounts.google.com/o/oauth2/token` (exact match); anything else is `INVALID_CONFIG`
+  (`details.reason: 'tokenUri'`) before anything is fetched. (`provider-gcp` is new in this release and never
+  shipped without it.)
+- **Tenant Google Cloud accounts cannot use the platform's ambient credentials.** Only an account of the root tenant
+  may leave out `credentials` and run on the host's identity (the host `tokenSource` or the metadata server); a
+  tenant's account without its own key, or with `impersonate` but no key, is `INVALID_CONFIG` at create and update
+  and on every use. (Also new with `provider-gcp`.)
+
 ### Added
 
 - **Google Compute Engine provider** (`@better-compute/provider-gcp`, new, outside the umbrella). Compute Engine VMs
   as VPS instances and offers, GPU machine types included, over plain `fetch` against the REST v1 API. Accounts take
   `{ projectId, zones, credentials?, impersonate?, … }`; credentials are a service-account key reference, or for
-  root-tenant (platform) accounts only, the host's own `tokenSource` or the metadata server: a tenant's account
-  without its own key is `INVALID_CONFIG` (`ProviderContext.account`, new and optional, tells the provider whose it is). Create is idempotent through GCE's `requestId`, and the VMs it
-  owns carry `better-compute-managed` and `better-compute-instance` labels; it never deletes or powers a VM without
-  them. It implements discovery, ownership labels, reservations and networks.
+  root-tenant (platform) accounts only, the host's own `tokenSource` or the metadata server (see Security). Create
+  is idempotent through GCE's `requestId`, and the VMs it owns carry `better-compute-managed` and
+  `better-compute-instance` labels; it never deletes or powers a VM without them. It implements discovery,
+  ownership labels, reservations and networks.
 - **Discovery and attach** (`@better-compute/vps`). The `vps.discovery` worker lists every machine of accounts whose
   provider can `discover` (`vps({ discovery: { every } })`, default 5 minutes) and publishes `provider.machine.*`.
-  `providerAccounts.machines` reads what it saw and `providerAccounts.discover` runs a pass now (`wait` holds the
-  answer for at most 30 s). `instances.attach` turns a running VM into an instance of a customer tenant without
+  `providerAccounts.machines` reads what it saw (another tenant's instance on a tenant's own account is shown
+  without its id and tenant, except to the platform) and `providerAccounts.discover` runs a pass now (`wait` holds
+  the answer for at most 30 s). `instances.attach` turns a running VM into an instance of a customer tenant without
   recreating it, with `onDelete: 'detach'` (default) or `'delete'`; `instances.detach` releases one, and
   `instances.reboot` restarts a provider instance (graceful, or `hard`). Ownership is re-checked on every read: a
   VM whose label is lost or foreign fails its instance (`OwnershipLost`, `AttachConflict`) and is never acted on
-  again. Opt-in label-driven auto-attach (`discovery.autoAttach`). `instances.create` takes `ownerIdentityId` from
-  the platform (a root caller creating in another tenant), so a VM it issues to a customer is the customer's;
-  `attach` takes another owner on the same terms, and with `IamPort.isMember` (new, optional; the embedded bridge
-  implements it) the owner must be an active member of the tenant. A provider pool runs only on an account of its
-  own tenant (`pools.create` refuses another's as `NOT_FOUND`), and offered tenants no longer see its
-  `providerAccountId`.
+  again. Opt-in label-driven auto-attach (`discovery.autoAttach`): on a tenant's own account the
+  `better-compute-owner` label is ignored (`AUTO_ATTACH_OWNER_IGNORED`, the configured owner gets the instance); on a
+  platform account a label owner must be a member of the labelled tenant (`AUTO_ATTACH_OWNER_REFUSED` otherwise).
 - **Provider reservations.** The `vps.reservations` worker detects provider capacity reservations, on-demand and
   future (`vps({ reservations: { every } })`, default 5 minutes), and publishes `provider.reservation.*`.
   `providerAccounts.reservations` lists them with `free` and `pending`; `bindReservation` turns a `ready` one into
@@ -37,15 +81,38 @@ All notable changes to the better-compute packages are documented here. The form
   on a provider account that supports them; the `vps.networks` reconciler converges the provider and publishes
   `network.*`. `instances.create` takes `networkId` and `subnetId` (the network must have been provisioned, the
   subnet `ready`; `INVALID_STATE` until then), rules target instances by a per-instance network tag, and attached VMs
-  are linked to the tenant network their NIC is on. Network names are unique among live networks.
+  are linked to the tenant network their NIC is on. Network names are unique among live networks. Every tenant's
+  networks on one account share its provider project, so a tenant has at most 10 live networks, and a network at
+  most 16 subnets and 100 firewall rules (`QUOTA_EXCEEDED` with `details.limit`).
+- **Platform-issued compute.** The root (platform) tenant adds a provider account, offers a provider pool on it to
+  customer tenants, and issues machines to them: `instances.attach` of a running VM, or `instances.create` with
+  `ownerIdentityId` (new) for a new one. Only a root caller acting in another tenant names an owner other than
+  itself, on `create` and `attach` alike (`ACCESS_DENIED` otherwise, before any decision), so the instance is the
+  customer's: in its owner's `scope: 'mine'` list, under owner-conditioned policies, on the customer's quota. See
+  the providers guide, "Platform-issued compute", for what each side can and cannot do.
+- **Owner membership** (`@better-compute/core`, additive). Optional `IamPort.isMember(tenantId, identityId)`; the
+  embedded better-iam bridge implements it from IAM's store (an active identity of that tenant). `instances.create`
+  and `attach` ask it for an owner other than the caller, outside any transaction, and refuse a non-member with
+  `INVALID_INPUT` (a refused create leaves no draft). Ports without it, the remote bridge included, check the
+  identity's shape only.
+- **Tenant vault paths.** `vps({ tenantVaultPaths: { [tenantId]: paths } })` lists the `vault://` paths a tenant's
+  provider accounts may name (an entry ending in `/` allows every path under it).
 - **Provider contract** (`@better-compute/core`, additive). Optional `ProviderImpl` members `discover`, `claim`,
   `release`, `listReservations` and `networks`; optional `ExternalMachine` detail (`zone`, shape, `labels`,
-  `networks`, `reservation`, `claimedBy`, …); `create` takes an optional `network` and `labels`; `Instance`
-  gains `origin`, `onDelete`, `networkId` and `subnetId`; the `network` resource kind and IAM actions
-  `compute:instances:attach` and `compute:networks:*`.
+  `networks`, `reservation`, `claimedBy`, …); `create` takes an optional `network` and `labels`;
+  `ProviderContext.account` (`{ id, tenantId, platform }`) tells a provider whose account it builds a client for;
+  `SecretResolver.resolve` takes an optional `{ tenantId }` context; `Instance` gains `origin`, `onDelete`,
+  `networkId` and `subnetId`; the `network` resource kind (a child of `compute-tenant`, with `providerAccountId`,
+  `poolId` and `projectId` attributes) and IAM actions `compute:instances:attach` and `compute:networks:*`.
 
 ### Changed
 
+- **Modules see the resolved root tenant.** `betterCompute()` resolves the root tenant from its own `rootTenantId`
+  or the port's, and now hands modules a port whose `context.iam.rootTenantId` is that root, even when only
+  `betterCompute({ rootTenantId })` names it. Before, such a host's root accounts were treated as a tenant's by vps
+  (secret-reference scope, GCP host identity, discovery).
+- **Pools hide their provider account from tenants they are offered to** (`pools.get`, `pools.list` and the view
+  `pools.offer` returns). The owner still sees `providerAccountId`.
 - **A provider create refused for capacity or quota ends the instance.** `CAPACITY_UNAVAILABLE` or `QUOTA_EXCEEDED`
   from `create`, or from `get` while the instance is `scheduling` or `provisioning`, now moves it to `error` with a
   `ProvisionFailed` condition and publishes `instance.failed` with that `reason`, instead of retrying forever. The

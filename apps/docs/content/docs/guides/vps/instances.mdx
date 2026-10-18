@@ -40,6 +40,26 @@ const instance = await compute.api.instances.create(
 // Provider pool: { id: 'inst_…', state: 'scheduling', … }
 ```
 
+The instance is the caller's: `ownerIdentityId` is the caller, and it shows in their `scope: 'mine'` list. The
+platform issues an instance to a person of a customer tenant by naming them:
+
+```ts title="issue.ts"
+await compute.api.instances.create(rootOperator, {
+  tenantId: 'acme', // the customer, not the root tenant
+  poolId, // a provider pool of the platform, offered to acme
+  flavor: 'n2.standard.4',
+  imageId: 'debian-12',
+  sshKeys: [],
+  ownerIdentityId: 'idn_…', // a person of acme
+  idempotencyKey: 'issue-acme-1',
+});
+```
+
+Only a root caller creating in another tenant may name someone other than itself (`ACCESS_DENIED` otherwise, before
+any decision), and when the IAM port can say (`IamPort.isMember`, the embedded bridge) the owner must be an active
+identity of that tenant (`INVALID_INPUT`, and no draft is left). `instances.attach` takes `ownerIdentityId` on the
+same terms. See [platform-issued compute](/docs/guides/vps/providers#platform-issued-compute).
+
 From a browser or another service, the typed client strips the credential, and every method is also a plain HTTP
 route:
 
@@ -444,7 +464,9 @@ the host, the growing host list and the cap, a refused restart that waits) and `
 There is no node. Each round is three steps, so no network call ever runs inside a database transaction:
 
 1. **Plan** in a short transaction: lock the instance, start deletion if `desiredState` is `deleted`, and read the
-   provider account.
+   provider account, only if it is the pool owner's. A pool row naming another tenant's account (possible in
+   0.1.x) never drives it: such an instance is not created, polled or powered (`INVALID_STATE`, retried), and
+   deleting it finishes without a provider call, leaving any machine it made for the account's owner to remove.
 2. **Call** the account's `ProviderImpl` with the instance id as the idempotency key.
 3. **Apply** the answer in a second transaction, only if the instance's `version` has not moved; otherwise try again
    at once.

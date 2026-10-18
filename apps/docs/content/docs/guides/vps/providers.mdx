@@ -173,7 +173,7 @@ already runs to a customer tenant without recreating it.
 - **Networks.** An attached machine keeps its network. When its NIC is on one of the tenant's
   [networks](/docs/guides/vps/networking#tenant-networks) on the same account, the instance is linked to it; a
   network being deleted refuses the attach with `INVALID_STATE`.
-- **Auto-attach** is opt-in. With `vps({ discovery: { autoAttach: { ownerIdentityId } } })`, a free machine labelled
+- **Auto-attach** is opt-in (owners: see below). With `vps({ discovery: { autoAttach: { ownerIdentityId } } })`, a free machine labelled
   `better-compute-tenant=<tenant>` and `better-compute-pool=<pool>` is attached to that pool after each pass
   (`onDelete: 'detach'`), owned by the identity in its `better-compute-owner` label or else `ownerIdentityId`.
 
@@ -244,6 +244,14 @@ root-level resources or another tenant's:
   `INVALID_INPUT`, worded as for ones that do not exist.
 - `providerAccounts.machines` on a tenant's own account does not name the instance or tenant holding a machine
   when that is another tenant (its pool was offered to it); the platform sees both.
+- Label-driven auto-attach takes the `better-compute-owner` label only on a platform account, and only for an active
+  member of the labelled tenant when the IAM port can say (else `autoAttachError` `AUTO_ATTACH_OWNER_REFUSED`, not
+  attached). On a tenant's own account the label is the tenant's to write, so it is ignored: the configured
+  `ownerIdentityId` gets the instance and `AUTO_ATTACH_OWNER_IGNORED` is recorded (with a
+  `provider.machine.changed` event).
+- A tenant's account names only its own secret references and never the host's ambient cloud credentials (see
+  [Whose references an account may name](#whose-references-an-account-may-name) and the
+  [Google Compute Engine](#google-compute-engine) section).
 
 Not covered here: what a tenant may do in its own GCP project through its own key, and the platform's own operators,
 who act with `ROOT_OVERRIDE` everywhere.

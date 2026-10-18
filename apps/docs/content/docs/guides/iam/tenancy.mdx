@@ -115,6 +115,24 @@ await compute.api.pools.offer(rootOperator, {
 Organizations then share the pools they were offered with their own teams through Better IAM relationships. See
 [Pool relations](/docs/guides/iam/policies) and [Pools](/docs/guides/capacity/pools).
 
+## Issuing compute to organizations
+
+A platform pool can be a provider pool on a root provider account. The platform then issues machines on it to an
+organization: `instances.attach` hands over a VM that already runs, and `instances.create` with `ownerIdentityId`
+creates one, both with the organization's `tenantId` and an identity of the organization as owner. Only a root caller
+acting in another tenant names an owner other than itself, and the owner must be an active member of the tenant when
+the IAM port can tell (`IamPort.isMember`, implemented by the embedded bridge). The instance is then the
+organization's like any other: in its owner's `scope: 'mine'` list, under the organization's policies (an owner
+condition on `resource.ownerId` matches the person it was issued to), on its quota.
+
+The organization never sees or touches what stays the platform's: the root account (a tenant reading it gets
+`NOT_FOUND`), its machines and reservations, the pool's management and flavors, quotas (`quotas.set` is decided
+on the fleet), and the pool's `providerAccountId`. A pool of the organization's own runs only on the organization's own
+provider accounts, whose secret references are the organization's. Modules learn the root from
+`context.iam.rootTenantId`, which `betterCompute()` sets to the resolved root whether the port or
+`betterCompute({ rootTenantId })` names it. See
+[platform-issued compute](/docs/guides/vps/providers#platform-issued-compute) for the full split.
+
 ## Visibility is the projection
 
 What a tenant can see is exactly what compute's <Term id="authz-projection">authz projection</Term> holds in its
@@ -128,6 +146,7 @@ only from them.
 | Node | Its owner tenant |
 | Site | Its owner tenant |
 | Reservation, instance, project | Its owner tenant |
+| Provider account, network | Its owner tenant (a network on an offered platform pool is the organization's) |
 | Image | Its owner tenant. `images.promote` writes a row under the wildcard tenant `*`, PLAN.md's public row; the resolver in this release matches a row's tenant exactly. |
 
 Inside your own tenant, an id that is not in your view resolves to `NOT_FOUND`. An id in another tenant never gets
