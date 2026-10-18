@@ -1,7 +1,8 @@
+import { sign } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { ComputeError, manualClock } from '@better-compute/core';
+import { ComputeError, manualClock, type Clock } from '@better-compute/core';
 import { cachedTokenSource, federatedTokenSource, stsExchange } from '@better-compute/gcp-common';
-import { generateP256KeyPair, workloadIssuer } from '@better-compute/pki';
+import { base64url, generateP256KeyPair, workloadIssuer } from '@better-compute/pki';
 import { FakeSts } from './support/gcp/sts.js';
 
 const issuerUrl = 'https://compute.example.com/workload';
@@ -10,21 +11,20 @@ const audience =
 const subjectAudience = `https://iam.googleapis.com/${audience.slice('//iam.googleapis.com/'.length)}`;
 const subject = 'tenant:org_acme:account:acct_1';
 
-function setup(condition: (sub: string) => boolean = () => true) {
-  const issuer = workloadIssuer({
-    issuer: issuerUrl,
-    signingKey: generateP256KeyPair().privateKey,
-  });
+function setup(condition: (sub: string) => boolean = () => true, stsClock?: Clock) {
+  const signingKey = generateP256KeyPair().privateKey;
+  const issuer = workloadIssuer({ issuer: issuerUrl, signingKey });
   const sts = new FakeSts({
     jwks: () => issuer.jwks(),
     issuer: issuerUrl,
     audience,
     condition,
     grant: (sub) => `ya29.federated-for-${sub}`,
+    clock: stsClock,
   });
   const subjectToken = async (): Promise<string> =>
     (await issuer.mint({ subject, audience: subjectAudience })).token;
-  return { issuer, sts, subjectToken };
+  return { issuer, signingKey, sts, subjectToken };
 }
 
 const context = (clock = manualClock(1_000_000)) => ({
@@ -327,5 +327,154 @@ describe('stsExchange', () => {
     expect(error.code).toBe('UNAUTHENTICATED');
     expect(error.details).toMatchObject({ reason: 'invalid_grant' });
     expect(sts.exchanges).toEqual([{ accepted: false }]);
+  });
+});
+
+// The fake's own refusals, reached by tokens that are correctly signed by the trusted issuer's key and
+// wrong in exactly one claim (so each test pins the branch it targets, not the signature check).
+describe('FakeSts refusals', () => {
+  const nowSeconds = (): number => Math.floor(Date.now() / 1000);
+
+  async function handBuilt(
+    harness: ReturnType<typeof setup>,
+    claims: Record<string, unknown>,
+  ): Promise<string> {
+    const kid = ((await harness.issuer.jwks()) as { keys: { kid: string }[] }).keys[0]!.kid;
+    const encode = (value: unknown): string =>
+      base64url(Buffer.from(JSON.stringify(value), 'utf8'));
+    const input = `${encode({ alg: 'ES256', typ: 'JWT', kid })}.${encode(claims)}`;
+    const signature = sign('sha256', Buffer.from(input), {
+      key: harness.signingKey,
+      dsaEncoding: 'ieee-p1363',
+    });
+    return `${input}.${base64url(signature)}`;
+  }
+
+  const good = (iat = nowSeconds()): Record<string, unknown> => ({
+    iss: issuerUrl,
+    sub: subject,
+    aud: subjectAudience,
+    iat,
+    exp: iat + 300,
+  });
+
+  async function post(
+    sts: FakeSts,
+    subjectToken: string,
+    overrides: Record<string, string | undefined> = {},
+  ): Promise<{ status: number; body: { error?: string; error_description?: string } }> {
+    const form: Record<string, string | undefined> = {
+      grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+      audience,
+      scope: 'https://www.googleapis.com/auth/cloud-platform',
+      requested_token_type: 'urn:ietf:params:oauth:token-type:access_token',
+      subject_token: subjectToken,
+      subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+      ...overrides,
+    };
+    const body = new URLSearchParams();
+    for (const [key, value] of Object.entries(form)) if (value !== undefined) body.set(key, value);
+    const response = await sts.fetch('https://sts.googleapis.com/v1/token', {
+      method: 'POST',
+      body: body.toString(),
+    });
+    return { status: response.status, body: await response.json() };
+  }
+
+  const refusedGrant = (description: RegExp) => ({
+    status: 400,
+    body: { error: 'invalid_grant', error_description: expect.stringMatching(description) },
+  });
+
+  it('accepts a hand-built token that is right in every claim (the control)', async () => {
+    const harness = setup();
+    const reply = await post(harness.sts, await handBuilt(harness, good()));
+    expect(reply.status).toBe(200);
+  });
+
+  it('refuses a wrong issuer', async () => {
+    const harness = setup();
+    const token = await handBuilt(harness, { ...good(), iss: 'https://other.example.com' });
+    expect(await post(harness.sts, token)).toMatchObject(refusedGrant(/issuer/));
+  });
+
+  it('refuses the audience in resource form (//iam.googleapis.com/...)', async () => {
+    const harness = setup();
+    const token = await handBuilt(harness, { ...good(), aud: audience });
+    expect(await post(harness.sts, token)).toMatchObject(refusedGrant(/audience/));
+  });
+
+  it("refuses another provider's audience (https://iam.googleapis.com/...)", async () => {
+    const harness = setup();
+    const { token } = await harness.issuer.mint({
+      subject,
+      audience: subjectAudience.replace('/providers/control-plane', '/providers/other-provider'),
+    });
+    expect(await post(harness.sts, token)).toMatchObject(refusedGrant(/audience/));
+  });
+
+  it('refuses an expired token (the fake clock passes exp)', async () => {
+    const clock = manualClock(Date.now());
+    const harness = setup(undefined, clock);
+    const token = await harness.subjectToken();
+    expect((await post(harness.sts, token)).status).toBe(200);
+    clock.advance(6 * 60_000);
+    expect(await post(harness.sts, token)).toMatchObject(refusedGrant(/expired/));
+  });
+
+  it('refuses a token without iat, or with a non-numeric iat', async () => {
+    const harness = setup();
+    const withoutIat: Record<string, unknown> = good();
+    delete withoutIat.iat;
+    expect(await post(harness.sts, await handBuilt(harness, withoutIat))).toMatchObject(
+      refusedGrant(/iat/),
+    );
+    expect(
+      await post(harness.sts, await handBuilt(harness, { ...good(), iat: String(nowSeconds()) })),
+    ).toMatchObject(refusedGrant(/iat/));
+  });
+
+  it('refuses an iat more than 60 s in the future, and accepts one 30 s ahead', async () => {
+    const harness = setup();
+    const late = await handBuilt(harness, good(nowSeconds() + 120));
+    expect(await post(harness.sts, late)).toMatchObject(refusedGrant(/iat/));
+    const slightly = await handBuilt(harness, good(nowSeconds() + 30));
+    expect((await post(harness.sts, slightly)).status).toBe(200);
+  });
+
+  it('refuses an nbf more than 60 s in the future', async () => {
+    const harness = setup();
+    const token = await handBuilt(harness, { ...good(), nbf: nowSeconds() + 120 });
+    expect(await post(harness.sts, token)).toMatchObject(refusedGrant(/not valid yet/));
+    const ok = await handBuilt(harness, { ...good(), nbf: nowSeconds() - 10 });
+    expect((await post(harness.sts, ok)).status).toBe(200);
+  });
+
+  it('refuses a lifetime over 24 h, and accepts exactly 24 h', async () => {
+    const harness = setup();
+    const iat = nowSeconds();
+    const long = await handBuilt(harness, { ...good(iat), exp: iat + 86_401 });
+    expect(await post(harness.sts, long)).toMatchObject(refusedGrant(/24 hours/));
+    const day = await handBuilt(harness, { ...good(iat), exp: iat + 86_400 });
+    expect((await post(harness.sts, day)).status).toBe(200);
+  });
+
+  it('refuses a request without scope as invalid_request', async () => {
+    const harness = setup();
+    const reply = await post(harness.sts, await harness.subjectToken(), { scope: undefined });
+    expect(reply).toMatchObject({ status: 400, body: { error: 'invalid_request' } });
+    expect(harness.sts.exchanges).toEqual([{ accepted: false }]);
+  });
+
+  it('refuses a requested_token_type other than an access token as invalid_request', async () => {
+    const harness = setup();
+    const reply = await post(harness.sts, await harness.subjectToken(), {
+      requested_token_type: 'urn:ietf:params:oauth:token-type:id_token',
+    });
+    expect(reply).toMatchObject({ status: 400, body: { error: 'invalid_request' } });
+    const missing = await post(harness.sts, await harness.subjectToken(), {
+      requested_token_type: undefined,
+    });
+    expect(missing).toMatchObject({ status: 400, body: { error: 'invalid_request' } });
   });
 });

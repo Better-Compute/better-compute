@@ -24,6 +24,9 @@ export interface FakeStsOptions {
 
 const tokenExchange = 'urn:ietf:params:oauth:grant-type:token-exchange';
 const jwtType = 'urn:ietf:params:oauth:token-type:jwt';
+const accessTokenType = 'urn:ietf:params:oauth:token-type:access_token';
+const skewMs = 60_000;
+const maxLifetimeSeconds = 86_400;
 const resourcePrefix = '//iam.googleapis.com/';
 
 export class FakeSts {
@@ -63,6 +66,9 @@ export class FakeSts {
       return refuse(undefined, 'invalid_request', 'Unsupported subject token type.');
     if (form.get('audience') !== this.#options.audience)
       return refuse(undefined, 'invalid_target', 'The audience is not this provider.');
+    if (!form.get('scope')) return refuse(undefined, 'invalid_request', 'The scope is required.');
+    if (form.get('requested_token_type') !== accessTokenType)
+      return refuse(undefined, 'invalid_request', 'Unsupported requested token type.');
     const rejected = 'The given credential is rejected by the attribute condition.';
     let claims: Record<string, unknown>;
     try {
@@ -82,12 +88,27 @@ export class FakeSts {
       return refuse(undefined, 'invalid_grant', 'The token audience does not match.');
     if (typeof claims.exp !== 'number' || claims.exp * 1000 <= now)
       return refuse(undefined, 'invalid_grant', 'The token has expired.');
+    // Google refuses a token issued in the future (a minute of skew allowed), one not yet valid, and
+    // one that lives longer than a day.
+    if (typeof claims.iat !== 'number' || claims.iat * 1000 > now + skewMs)
+      return refuse(
+        undefined,
+        'invalid_grant',
+        'The token was issued in the future or has no iat.',
+      );
+    if (
+      claims.nbf !== undefined &&
+      (typeof claims.nbf !== 'number' || claims.nbf * 1000 > now + skewMs)
+    )
+      return refuse(undefined, 'invalid_grant', 'The token is not valid yet.');
+    if (claims.exp - claims.iat > maxLifetimeSeconds)
+      return refuse(undefined, 'invalid_grant', 'The token lives longer than 24 hours.');
     if (sub === undefined || !this.#options.condition(sub))
       return refuse(sub, 'invalid_grant', rejected);
     this.exchanges.push({ sub, accepted: true });
     return json(200, {
       access_token: this.#options.grant(sub),
-      issued_token_type: 'urn:ietf:params:oauth:token-type:access_token',
+      issued_token_type: accessTokenType,
       token_type: 'Bearer',
       expires_in: 3600,
     });
