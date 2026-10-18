@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/provider-gcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Google Compute Engine provider for better-compute: VMs as VPS instances and offers, attach, reservations and tenant networks.",
   "type": "module",
   "license": "Apache-2.0",

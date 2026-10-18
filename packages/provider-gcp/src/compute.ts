@@ -22,6 +22,14 @@ import {
 } from './client.js';
 import type { GcpConfig, GcpProviderOptions } from './config.js';
 import {
+  bootDiskTypes,
+  diskSizeRange,
+  hyperdiskBootType,
+  isDiskTypeRefusal,
+  needsGvnic,
+  type GceDiskType,
+} from './disks.js';
+import {
   instanceName,
   labels,
   labelValue,
@@ -70,6 +78,10 @@ export class GcpCompute implements ProviderImpl {
   protected readonly context: ProviderContext;
   protected readonly options: GcpProviderOptions;
   readonly #types = new Map<string, GceMachineType | undefined>();
+  /** Keyed `zone/diskType`: undefined when the zone does not offer it. */
+  readonly #diskTypes = new Map<string, GceDiskType | undefined>();
+  /** Machine types GCE refused a Persistent Disk for although the family table allowed one. */
+  readonly #hyperdiskOnly = new Set<string>();
   readonly networks: ProviderNetworks;
 
   constructor(
@@ -113,6 +125,72 @@ export class GcpCompute implements ProviderImpl {
       this.context.log.debug('gcp.machine_type_unreadable', { zone, machineType: name });
       return undefined;
     }
+  }
+
+  /**
+   * A zone's disk type, cached; undefined when the zone does not offer it, 'unknown' when it cannot
+   * be read (the create then goes ahead and GCE decides).
+   */
+  protected async diskType(
+    zone: string,
+    name: string,
+    signal: AbortSignal,
+  ): Promise<GceDiskType | undefined | 'unknown'> {
+    const key = `${zone}/${name}`;
+    if (this.#diskTypes.has(key)) return this.#diskTypes.get(key);
+    try {
+      const type = await this.client.request<GceDiskType>(
+        'GET',
+        `/zones/${zone}/diskTypes/${name}`,
+        { signal },
+      );
+      this.#diskTypes.set(key, type);
+      return type;
+    } catch (error) {
+      if (isComputeError(error, 'NOT_FOUND')) {
+        this.#diskTypes.set(key, undefined);
+        return undefined;
+      }
+      if (signal.aborted) throw error;
+      this.context.log.debug('gcp.disk_type_unreadable', { zone, diskType: name });
+      return 'unknown';
+    }
+  }
+
+  /**
+   * The boot disk type for `machineType` in `zone`: the first it takes that the zone offers. A zone
+   * that offers none, or a size the type does not take, is INVALID_INPUT before anything is created.
+   */
+  protected async bootDiskType(
+    zone: string,
+    machineType: string,
+    sizeGiB: number,
+    signal: AbortSignal,
+  ): Promise<string> {
+    const candidates = this.#hyperdiskOnly.has(machineType)
+      ? [hyperdiskBootType]
+      : bootDiskTypes(machineType);
+    for (const candidate of candidates) {
+      const type = await this.diskType(zone, candidate, signal);
+      if (type === undefined) continue;
+      if (type === 'unknown') return candidate;
+      if (type.deprecated?.state && type.deprecated.state !== 'ACTIVE') continue;
+      const range = diskSizeRange(type);
+      if (range && (sizeGiB < range.min || sizeGiB > range.max))
+        throw new ComputeError(
+          'INVALID_INPUT',
+          `A ${candidate} boot disk in ${zone} is ${range.min}-${range.max} GiB, not ${sizeGiB} GiB`,
+          undefined,
+          { provider: 'gcp', reason: 'diskSizeOutOfRange', diskType: candidate, zone, ...range },
+        );
+      return candidate;
+    }
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `${machineType} needs a ${candidates.join(' or ')} boot disk, which ${zone} does not offer`,
+      undefined,
+      { provider: 'gcp', reason: 'diskTypeUnavailable', machineType, zone, diskTypes: candidates },
+    );
   }
 
   /** An instance as a machine, with the shape of its machine type. */
@@ -211,6 +289,7 @@ export class GcpCompute implements ProviderImpl {
       name: string;
       network?: NetworkRef;
       labels?: Readonly<Record<string, string>>;
+      sshKeys?: readonly string[];
     },
     context: CallContext,
   ): Promise<ExternalMachine> {
@@ -222,6 +301,18 @@ export class GcpCompute implements ProviderImpl {
       ? (type.accelerators?.length ?? 0) > 0
       : acceleratorFamily.test(machineType);
     const name = instanceName(request.name);
+    const diskGiB = this.config.diskGiB ?? 100;
+    const diskType = await this.bootDiskType(zone, machineType, diskGiB, context.signal);
+    // The guest agent of every Compute Engine image installs `ssh-keys`; cloud-init (which reads
+    // user-data) only runs on some images, so the keys go in both.
+    const metadata = [{ key: 'user-data', value: request.userData }];
+    if (request.sshKeys?.length)
+      metadata.push({
+        key: 'ssh-keys',
+        value: request.sshKeys
+          .map((key) => `${sshUserOf(request.image)}:${key.trim()}`)
+          .join('\n'),
+      });
     const body: Record<string, unknown> = {
       name,
       machineType: `zones/${zone}/machineTypes/${machineType}`,
@@ -241,13 +332,18 @@ export class GcpCompute implements ProviderImpl {
           autoDelete: true,
           initializeParams: {
             sourceImage: this.sourceImage(request.image),
-            diskSizeGb: String(this.config.diskGiB ?? 100),
-            diskType: `zones/${zone}/diskTypes/pd-balanced`,
+            diskSizeGb: String(diskGiB),
+            diskType: `zones/${zone}/diskTypes/${diskType}`,
           },
         },
       ],
-      networkInterfaces: [this.networkInterface(zone, request.network)],
-      metadata: { items: [{ key: 'user-data', value: request.userData }] },
+      networkInterfaces: [
+        {
+          ...this.networkInterface(zone, request.network),
+          ...(needsGvnic(machineType) ? { nicType: 'GVNIC' } : {}),
+        },
+      ],
+      metadata: { items: metadata },
       // GPU machines cannot live-migrate.
       scheduling: accelerated
         ? { onHostMaintenance: 'TERMINATE', automaticRestart: true }
@@ -260,14 +356,29 @@ export class GcpCompute implements ProviderImpl {
         key: 'compute.googleapis.com/reservation-name',
         values: [reservation],
       };
-    let operation: GceOperation;
+    const insert = async (key: string) =>
+      settled(
+        await this.client.request<GceOperation>('POST', `/zones/${zone}/instances`, {
+          body,
+          query: { requestId: requestIdFor(key) },
+          signal: context.signal,
+        }),
+        `Creating ${machineId(zone, name)}`,
+      );
     try {
-      operation = await this.client.request<GceOperation>('POST', `/zones/${zone}/instances`, {
-        body,
-        query: { requestId: requestIdFor(context.idempotencyKey) },
-        signal: context.signal,
-      });
-      settled(operation, `Creating ${machineId(zone, name)}`);
+      try {
+        await insert(context.idempotencyKey);
+      } catch (error) {
+        // The family table allowed a Persistent Disk this machine type refuses (a 400, so nothing
+        // was created): once more with Hyperdisk Balanced, under its own requestId.
+        if (diskType === hyperdiskBootType || !isDiskTypeRefusal(error)) throw error;
+        this.context.log.warn('gcp.disk_type_fallback', { zone, machineType, diskType });
+        this.#hyperdiskOnly.add(machineType);
+        const fallback = await this.bootDiskType(zone, machineType, diskGiB, context.signal);
+        const [boot] = body.disks as { initializeParams: Record<string, unknown> }[];
+        boot!.initializeParams.diskType = `zones/${zone}/diskTypes/${fallback}`;
+        await insert(`${context.idempotencyKey}:${fallback}`);
+      }
     } catch (error) {
       // The VM exists under another requestId (the 60-minute dedupe window passed): it is ours if
       // it carries this instance's label.
@@ -629,4 +740,13 @@ export function parseDiscoverLabel(
       'discoverLabel must be "key=value" with GCE label characters (a-z, 0-9, _ and -)',
     );
   return { key: match[1]!, value: match[2]! };
+}
+
+/** The login `ssh-keys` names for an image (the distribution's default user). */
+export function sshUserOf(image: ImageRef): string {
+  const name = image.toLowerCase();
+  if (name.includes('debian')) return 'debian';
+  if (name.includes('rocky')) return 'rocky';
+  if (name.includes('centos')) return 'centos';
+  return 'ubuntu';
 }

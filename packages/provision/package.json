@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/provision",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Provisioning for better-compute: profiles, steps and the workflow engine.",
   "type": "module",
   "license": "Apache-2.0",

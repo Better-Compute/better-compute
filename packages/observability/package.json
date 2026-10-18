@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/observability",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Metrics for better-compute: a bounded Prometheus registry, the standard better_compute_* series, a metered IamPort and backlog gauges.",
   "type": "module",
   "license": "Apache-2.0",

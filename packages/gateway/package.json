@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/gateway",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "The better-compute gateway: daemon sessions over gRPC/HTTP/2 mTLS, liveness, command dispatch and Join/Renew/Secret forwarding.",
   "type": "module",
   "license": "Apache-2.0",

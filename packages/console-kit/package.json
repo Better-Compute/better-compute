@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/console-kit",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Framework-free view models for better-compute consoles: resource stores with pagination, live event refresh and permission-aware actions.",
   "type": "module",
   "license": "Apache-2.0",
