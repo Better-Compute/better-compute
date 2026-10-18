@@ -1,0 +1,54 @@
+{
+  "name": "@better-compute/provider-digitalocean",
+  "version": "0.1.0",
+  "description": "DigitalOcean provider for better-compute: Droplets as VPS instances and offers, VPC networks, power, reinstall and discovery.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "better-compute contributors",
+  "homepage": "https://github.com/better-compute/better-compute/tree/main/packages/provider-digitalocean#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/better-compute/better-compute.git",
+    "directory": "packages/provider-digitalocean"
+  },
+  "bugs": {
+    "url": "https://github.com/better-compute/better-compute/issues"
+  },
+  "keywords": [
+    "better-compute",
+    "digitalocean",
+    "droplet",
+    "vps",
+    "cloud-provider",
+    "gpu",
+    "provider"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-compute/core": "workspace:*",
+    "@better-compute/vps": "workspace:*"
+  }
+}
