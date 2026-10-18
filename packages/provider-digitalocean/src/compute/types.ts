@@ -37,3 +37,42 @@ export interface DoRegion {
   sizes: string[];
   features?: string[];
 }
+
+/** An address of a Droplet. Private v4 addresses may carry the gateway `"nil"`, which is ignored. */
+export interface DoNetworkAddress {
+  ip_address: string;
+  type: 'public' | 'private';
+  netmask?: string | number;
+  gateway?: string;
+}
+
+/** A Droplet (`GET /droplets/{id}`). `status` is `new`, `active`, `off` or `archive`. */
+export interface DoDroplet {
+  id: number;
+  name: string;
+  /** MiB. */
+  memory: number;
+  vcpus: number;
+  /** GiB. */
+  disk: number;
+  status: string;
+  created_at: string;
+  size_slug: string;
+  size?: DoSize;
+  region: { slug: string; name?: string };
+  image?: { id?: number; slug?: string | null; name?: string };
+  tags: string[];
+  vpc_uuid?: string;
+  networks: { v4: DoNetworkAddress[]; v6: DoNetworkAddress[] };
+  gpu_info?: DoSize['gpu_info'];
+}
+
+/** A VPC (`GET /vpcs`). */
+export interface DoVpc {
+  id: string;
+  name: string;
+  region: string;
+  ip_range?: string;
+  default?: boolean;
+  description?: string;
+}

@@ -30,6 +30,9 @@ export function errorFixtures(): Map<string, { status: number; code: string; bod
 export class DoState {
   #id = 100_000;
 
+  /** The emulator's clock (epoch ms): Droplet `created_at` and action times come from it. */
+  now: () => number = Date.now;
+
   /** Keyed by id. DO Droplet resources. */
   droplets = new Map<number, Json>();
   /** Keyed by uuid. DO VPC resources. */

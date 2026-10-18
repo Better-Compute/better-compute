@@ -1,5 +1,9 @@
+import { registerActions } from './actions.js';
 import { registerCatalog } from './catalog.js';
+import { registerDroplets } from './droplets.js';
 import { registerKeys } from './keys.js';
+import { registerTags } from './tags.js';
+import { registerVpcs } from './vpcs.js';
 import { DoState, errorFixtures, type Json } from './state.js';
 
 export { DoState, fixture, errorFixtures, type Json } from './state.js';
@@ -38,6 +42,12 @@ export interface RouteResult {
 
 export type RouteHandler = (context: RouteContext) => RouteResult;
 
+interface Hook {
+  method: string;
+  path: RegExp;
+  fn: (context: RouteContext) => void;
+}
+
 interface Failure {
   method?: string;
   path: RegExp;
@@ -63,13 +73,20 @@ export class DoEmulator {
   maxPerPage = 200;
   /** Rewrites the origin of `links.pages.*` (a hostile or misconfigured server). */
   linkOrigin?: string;
+  /**
+   * How many reads (`GET /droplets/{id}`) a new Droplet's create action takes: after that many it
+   * completes and the Droplet turns `active`. The read that completes it still sees `new`.
+   */
+  createReads = 1;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
+  readonly #hooks: Hook[] = [];
   readonly #errors = errorFixtures();
 
   constructor(options: { now?: () => number } = {}) {
     const now = options.now ?? Date.now;
+    this.state.now = now;
     this.rate = { limit: 5000, remaining: 5000, resetAt: Math.floor(now() / 1000) + 3600 };
     this.#registerCore();
   }
@@ -98,6 +115,23 @@ export class DoEmulator {
     });
   }
 
+  /**
+   * Runs `fn` once, just before the next request matching `match` is handled: a test's way to
+   * change the world between a provider's lookup and its write (a racing create, a racing claim).
+   * `match` is `'<METHOD> <path>'`, the path `/v2`-relative and without the query, where `*`
+   * stands for one path segment: `'DELETE /droplets/*'` matches `DELETE /droplets/42`.
+   */
+  beforeAction(match: string, fn: (context: RouteContext) => void): void {
+    const [method, path] = match.trim().split(/\s+/);
+    if (!method || !path)
+      throw new Error(`beforeAction: ${JSON.stringify(match)} is not '<METHOD> <path>'`);
+    const pattern = path
+      .split('*')
+      .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&'))
+      .join('[^/]+');
+    this.#hooks.push({ method: method.toUpperCase(), path: new RegExp(`^${pattern}$`), fn });
+  }
+
   fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = new URL(typeof input === 'object' && 'url' in input ? input.url : String(input));
     const method = (init?.method ?? 'GET').toUpperCase();
@@ -121,6 +155,22 @@ export class DoEmulator {
     if (this.rate.remaining <= 0) return this.#fixtureResponse('rate-limited');
     this.rate.remaining -= 1;
 
+    const context = (match: RegExpExecArray): RouteContext => ({
+      method,
+      url,
+      path,
+      match,
+      headers,
+      body,
+      state: this.state,
+      emulator: this,
+    });
+    const hook = this.#hooks.findIndex((h) => h.method === method && h.path.test(path));
+    if (hook >= 0) {
+      const [h] = this.#hooks.splice(hook, 1);
+      h!.fn(context(h!.path.exec(path)!));
+    }
+
     const failure = this.#failures.findIndex(
       (f) => (f.method === undefined || f.method === method) && f.path.test(path),
     );
@@ -132,16 +182,7 @@ export class DoEmulator {
       if (route.method !== method) continue;
       const match = route.pattern.exec(path);
       if (!match) continue;
-      const result = route.handler({
-        method,
-        url,
-        path,
-        match,
-        headers,
-        body,
-        state: this.state,
-        emulator: this,
-      });
+      const result = route.handler(context(match));
       return this.respond(result.status, result.body, result.headers);
     }
     return this.#fixtureResponse('not-found');
@@ -214,5 +255,9 @@ export class DoEmulator {
   #registerCore(): void {
     registerCatalog(this);
     registerKeys(this);
+    registerTags(this);
+    registerDroplets(this);
+    registerActions(this);
+    registerVpcs(this);
   }
 }

@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { isComputeError, manualClock, type ComputeError } from '@better-compute/core';
 import {
   budgetFor,
+  digitalocean,
+  digitaloceanProvider,
   doClient,
   deploymentTag,
   doConfig,
@@ -24,19 +26,42 @@ import {
   parseOfferId,
   RateBudget,
   tagFor,
+  toMachine,
   unprocessablePatterns,
   type DoClient,
+  type DoConfig,
+  type DoDroplet,
   type DoSize,
 } from '@better-compute/provider-digitalocean';
-import { DoEmulator } from './support/do-emulator/index.js';
+import {
+  failAction,
+  isoSeconds,
+  settleAction,
+  startAction,
+} from './support/do-emulator/actions.js';
+import { seedDroplet } from './support/do-emulator/droplets.js';
+import { DoEmulator, type RecordedRequest } from './support/do-emulator/index.js';
 import { seedSshKey } from './support/do-emulator/keys.js';
-import { freshBudgets, noopLog, secrets } from './support/do-harness.js';
+import { seedVpc } from './support/do-emulator/vpcs.js';
+import {
+  build,
+  ctx,
+  doAccount,
+  freshBudgets,
+  noopLog,
+  platformAccount,
+  secrets,
+} from './support/do-harness.js';
 
 // provider-digitalocean against an in-memory emulator of the DigitalOcean endpoints it uses,
 // plugged in through the `fetch` option.
 
 const endpoint = 'https://api.digitalocean.com/v2';
 const signal = new AbortController().signal;
+
+// Generated once with ssh-keygen; the fingerprint is `ssh-keygen -E md5 -lf`'s, not ours.
+const testKey =
+  'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICbbzkHhLXTIyRDUgXLAC0pVt8MQajr4BGKVoF5MJ71Z test@bc';
 
 interface FixtureError {
   name: string;
@@ -307,24 +332,20 @@ describe('client', () => {
 
   it('reads an action', async () => {
     const { emu, client } = setup();
-    emu.route('GET', /^\/actions\/(\d+)$/, (context) => ({
-      status: 200,
-      body: {
-        action: {
-          id: Number(context.match[1]),
-          status: 'completed',
-          type: 'create',
-          started_at: '2026-10-18T10:00:00Z',
-          completed_at: '2026-10-18T10:00:30Z',
-          resource_id: 3164444,
-          resource_type: 'droplet',
-          region_slug: 'nyc3',
-        },
-      },
-    }));
-    const action = await client.action(77, signal);
-    expect(action).toMatchObject({ id: 77, status: 'completed', type: 'create' });
-    expect(emu.requests[0]!.url.pathname).toBe('/v2/actions/77');
+    const droplet = seedDroplet(emu.state);
+    const started = startAction(emu.state, 'create', droplet);
+    settleAction(emu.state, started, 'completed');
+    const action = await client.action(started.id, signal);
+    expect(action).toMatchObject({
+      id: started.id,
+      status: 'completed',
+      type: 'create',
+      resource_id: droplet.id,
+      resource_type: 'droplet',
+      region_slug: 'nyc3',
+    });
+    expect(emu.requests[0]!.url.pathname).toBe(`/v2/actions/${started.id}`);
+    expect((await failure(client.action(1, signal))).code).toBe('NOT_FOUND');
   });
 
   it('spends the budget before each request, and not at all when it refuses', async () => {
@@ -734,9 +755,7 @@ describe('offers', () => {
 });
 
 describe('ssh keys', () => {
-  // Generated once with ssh-keygen; the fingerprint is `ssh-keygen -E md5 -lf`'s, not ours.
-  const key =
-    'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICbbzkHhLXTIyRDUgXLAC0pVt8MQajr4BGKVoF5MJ71Z test@bc';
+  const key = testKey;
   const keyFingerprint = 'f8:4e:c2:ad:a9:00:19:a3:f5:45:3d:68:6e:28:0e:3c';
   const otherKey =
     'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPb3suug6HUnqYdJ+FX+dcKIL5gAl+WJzl6aZEZZSHDu other@bc';
@@ -844,7 +863,20 @@ describe('ssh keys', () => {
     expect(emu.requests.map((r) => r.method)).toEqual(['GET', 'POST', 'GET']);
   });
 
-  it.todo('create without any SSH key is refused before a droplet is posted');
+  it('create without any SSH key is refused before a droplet is posted', async () => {
+    freshBudgets();
+    const emu = new DoEmulator();
+    const compute = await build(emu);
+    const error = await failure(
+      compute.create(
+        { offerId: 'nyc3/s-1vcpu-1gb', image: 'ubuntu-24-04-x64', userData: '', name: 'i1' },
+        ctx('i1'),
+      ),
+    );
+    expect(error.code).toBe('INVALID_CONFIG');
+    expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'noSshKey' });
+    expect(emu.requests.filter((r) => r.method === 'POST')).toHaveLength(0);
+  });
 
   it('rejects a malformed public key as INVALID_INPUT', async () => {
     const [type, blob] = key.split(' ') as [string, string];
@@ -869,5 +901,482 @@ describe('ssh keys', () => {
     expect(error.code).toBe('INVALID_INPUT');
     // Nothing is sent for a bad key; the good one before it is not registered either.
     expect(emu.requests).toHaveLength(0);
+  });
+});
+
+describe('compute', () => {
+  beforeEach(freshBudgets);
+
+  /** Every emulator the section built, for the last test's sweep over all their requests. */
+  const emulators: DoEmulator[] = [];
+  const t0 = Date.parse('2026-10-18T10:00:00Z');
+  function emulator(): DoEmulator {
+    const emu = new DoEmulator({ now: () => t0 });
+    emulators.push(emu);
+    return emu;
+  }
+
+  const ours = (key: string) => [
+    'better-compute-managed:true',
+    deploymentTag('default'),
+    keyTag(key),
+  ];
+  const request = (over: Record<string, unknown> = {}) => ({
+    offerId: 'nyc3/s-2vcpu-4gb',
+    image: 'ubuntu-24-04-x64',
+    userData: '#cloud-config\n',
+    name: 'inst_1',
+    sshKeys: [testKey],
+    labels: { [labels.tenant]: 'acme' },
+    ...over,
+  });
+  const posts = (emu: DoEmulator) =>
+    emu.requests.filter((r) => r.method === 'POST' && r.url.pathname === '/v2/droplets');
+  const deletes = (emu: DoEmulator) =>
+    emu.requests.filter((r) => r.method === 'DELETE').map((r) => r.url.pathname);
+  const withKey = (emu: DoEmulator, key: string) =>
+    [...emu.state.droplets.values()].filter((d) => d.tags.includes(keyTag(key)));
+
+  it('create posts the droplet with tags, keys, vpc and user data', async () => {
+    const emu = emulator();
+    const vpc = seedVpc(emu.state, { name: 'prod', region: 'nyc3' });
+    const compute = await build(emu, { ...doAccount, vpc: 'prod' });
+    // A label can't override a tag only the provider writes.
+    const machine = await compute.create(
+      request({ labels: { [labels.tenant]: 'acme', [labels.managed]: 'false' } }),
+      ctx('inst_1'),
+    );
+
+    expect(posts(emu)).toHaveLength(1);
+    const body = posts(emu)[0]!.body as Record<string, unknown>;
+    const keyId = emu.state.sshKeys.get(md5Fingerprint(testKey))!.id;
+    expect(body).toEqual({
+      name: 'bc-inst-1',
+      region: 'nyc3',
+      size: 's-2vcpu-4gb',
+      image: 'ubuntu-24-04-x64',
+      ssh_keys: [keyId],
+      user_data: '#cloud-config\n',
+      vpc_uuid: vpc.id,
+      monitoring: true,
+      ipv6: false,
+      tags: expect.arrayContaining([
+        'better-compute-managed:true',
+        deploymentTag('default'),
+        keyTag('inst_1'),
+        'better-compute-instance:inst_1',
+        'better-compute-tenant:acme',
+      ]),
+    });
+    expect(body.tags).toHaveLength(5);
+    const droplet = withKey(emu, 'inst_1')[0]!;
+    expect(machine).toMatchObject({
+      id: String(droplet.id),
+      name: 'bc-inst-1',
+      state: 'pending',
+      offerId: 'nyc3/s-2vcpu-4gb',
+      region: 'nyc3',
+      labels: { [labels.tenant]: 'acme', [labels.managed]: 'true', [labels.instance]: 'inst_1' },
+      claimedBy: 'inst_1',
+    });
+    // A new Droplet has no addresses yet.
+    expect(machine.addresses).toEqual([]);
+    // The tags of the create exist as account tags now (DO creates them implicitly).
+    expect(emu.state.tags.has(keyTag('inst_1'))).toBe(true);
+  });
+
+  it('create resolves the vpc by uuid or by name, and sends none without one', async () => {
+    const emu = emulator();
+    const vpc = seedVpc(emu.state, { name: 'prod', region: 'nyc3' });
+    const byUuid = await build(emu, { ...doAccount, vpc: vpc.id });
+    await byUuid.create(request({ image: '12345' }), ctx('a'));
+    expect(posts(emu)[0]!.body).toMatchObject({ vpc_uuid: vpc.id, image: 12345 });
+    // A uuid is used as it is: no lookup.
+    expect(emu.requests.some((r) => r.url.pathname === '/v2/vpcs')).toBe(false);
+
+    const none = await build(emu, { ...doAccount, monitoring: false, ipv6: true });
+    await none.create(request(), ctx('b'));
+    const body = posts(emu)[1]!.body as Record<string, unknown>;
+    expect(body).not.toHaveProperty('vpc_uuid');
+    expect(body).toMatchObject({ monitoring: false, ipv6: true });
+
+    const missing = await build(emu, { ...doAccount, vpc: 'nope' });
+    const error = await failure(missing.create(request(), ctx('c')));
+    expect(error.code).toBe('INVALID_CONFIG');
+    expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'vpc' });
+    expect(posts(emu)).toHaveLength(2);
+  });
+
+  it('create retries with one key return the same droplet without a second POST', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const first = await compute.create(request(), ctx('inst_1'));
+    const second = await compute.create(request(), ctx('inst_1'));
+    expect(second.id).toBe(first.id);
+    expect(posts(emu)).toHaveLength(1);
+    // Another key is another machine.
+    const other = await compute.create(request({ name: 'inst_2' }), ctx('inst_2'));
+    expect(other.id).not.toBe(first.id);
+    expect(posts(emu)).toHaveLength(2);
+    // The lookup is by the key tag.
+    const lookup = emu.requests.find(
+      (r) => r.method === 'GET' && r.url.pathname === '/v2/droplets',
+    );
+    expect(lookup!.url.searchParams.get('tag_name')).toBe(keyTag('inst_1'));
+    expect(lookup!.url.searchParams.get('per_page')).toBe('200');
+  });
+
+  it('a retried GPU create finds its droplet through the gpus list, not only by tag', async () => {
+    const emu = emulator();
+    const compute = await build(emu, { ...doAccount, regions: ['tor1'] });
+    const gpu = request({ offerId: 'tor1/gpu-h100x1-80gb', image: 'gpu-h100x1-base' });
+    const first = await compute.create(gpu, ctx('inst_1'));
+    expect(first.gpus).toEqual({ model: 'H100', count: 1 });
+    // The emulator follows the spec's pessimistic reading: a tag_name list omits GPU Droplets.
+    const byTag = await emu.fetch(`${endpoint}/droplets?tag_name=${keyTag('inst_1')}`, {
+      headers: { authorization: 'Bearer do-token' },
+    });
+    expect(((await byTag.json()) as { droplets: unknown[] }).droplets).toHaveLength(0);
+
+    const second = await compute.create(gpu, ctx('inst_1'));
+    expect(second.id).toBe(first.id);
+    expect(posts(emu)).toHaveLength(1);
+    const gpuLists = emu.requests.filter((r) => r.url.searchParams.get('type') === 'gpus');
+    expect(gpuLists.length).toBeGreaterThan(0);
+    for (const list of gpuLists) expect(list.url.searchParams.has('tag_name')).toBe(false);
+    // A plain offer never scans the GPU list.
+    const before = emu.requests.length;
+    await compute.create(request({ offerId: 'tor1/s-2vcpu-4gb', name: 'p' }), ctx('plain'));
+    expect(emu.requests.slice(before).some((r) => r.url.searchParams.get('type') === 'gpus')).toBe(
+      false,
+    );
+  });
+
+  it('two racing creates with one key converge on the oldest droplet', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    // A droplet of another deployment with the same key is not ours: never returned, never reaped.
+    const foreign = seedDroplet(emu.state, {
+      tags: ['better-compute-managed:true', deploymentTag('other'), keyTag('inst_1')],
+    });
+    // A racing create with the same key lands between our lookup and our POST, a second later.
+    let racer: Record<string, any> | undefined;
+    emu.beforeAction('POST /droplets', () => {
+      racer = seedDroplet(emu.state, {
+        tags: ours('inst_1'),
+        size_slug: 's-2vcpu-4gb',
+        created_at: isoSeconds(t0 + 1000),
+      });
+    });
+    const first = await compute.create(request(), ctx('inst_1'));
+    const second = await compute.create(request(), ctx('inst_1'));
+    expect(racer).toBeDefined();
+    expect(second.id).toBe(first.id);
+    expect(first.id).not.toBe(String(racer!.id));
+    expect(withKey(emu, 'inst_1').map((d) => d.id)).toEqual([foreign.id, Number(first.id)]);
+    expect(deletes(emu)).toEqual([`/v2/droplets/${racer!.id}`]);
+
+    // When the racer is the older one, ours is the one reaped.
+    const older = emulator();
+    const other = await build(older);
+    let early: Record<string, any> | undefined;
+    older.beforeAction('POST /droplets', () => {
+      early = seedDroplet(older.state, {
+        tags: ours('inst_1'),
+        size_slug: 's-2vcpu-4gb',
+        created_at: isoSeconds(t0 - 1000),
+      });
+    });
+    const winner = await other.create(request(), ctx('inst_1'));
+    expect(winner.id).toBe(String(early!.id));
+    expect(withKey(older, 'inst_1').map((d) => d.id)).toEqual([early!.id]);
+    expect(deletes(older)).toHaveLength(1);
+    expect(deletes(older)[0]).not.toBe(`/v2/droplets/${early!.id}`);
+
+    // Two calls in flight at once: both post, both reap the newer one (one DELETE finds it gone).
+    const both = emulator();
+    const twin = await build(both);
+    const [a, b] = await Promise.all([
+      twin.create(request(), ctx('inst_1')),
+      twin.create(request(), ctx('inst_1')),
+    ]);
+    expect(posts(both)).toHaveLength(2);
+    expect(a.id).toBe(b.id);
+    expect(withKey(both, 'inst_1').map((d) => String(d.id))).toEqual([a.id]);
+  });
+
+  it('create maps capacity, quota and invalid-size 422s', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const cases: [string, string][] = [
+      ['422-size-unavailable-in-region', 'CAPACITY_UNAVAILABLE'],
+      ['422-insufficient-capacity', 'CAPACITY_UNAVAILABLE'],
+      ['422-region-unavailable', 'CAPACITY_UNAVAILABLE'],
+      ['422-droplet-limit', 'QUOTA_EXCEEDED'],
+      ['422-invalid-size', 'INVALID_INPUT'],
+      ['422-invalid-image', 'INVALID_INPUT'],
+    ];
+    for (const [name, code] of cases) {
+      const fixture = errorFixtures.find((f) => f.name === name)!;
+      emu.failNext({ method: 'POST', path: /^\/droplets$/ }, fixture.status, fixture.body);
+      const error = await failure(compute.create(request(), ctx(name)));
+      expect(error.code, name).toBe(code);
+      expect(error.details, name).toMatchObject({
+        provider: 'digitalocean',
+        status: 422,
+        requestId: fixture.body.request_id,
+      });
+    }
+    // The emulator's own checks: a size DO doesn't know, and one the region doesn't sell.
+    const unknown = await failure(compute.create(request({ offerId: 'nyc3/s-99vcpu' }), ctx('u')));
+    expect(unknown.code).toBe('INVALID_INPUT');
+    const elsewhere = await failure(
+      compute.create(request({ offerId: 'nyc3/gpu-h100x1-80gb' }), ctx('e')),
+    );
+    expect(elsewhere.code).toBe('CAPACITY_UNAVAILABLE');
+    expect(emu.state.droplets.size).toBe(0);
+  });
+
+  it('a create action that errors surfaces from get as CAPACITY_UNAVAILABLE', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    failAction(emu.state, { type: 'create' });
+    const machine = await compute.create(request(), ctx('inst_1'));
+    expect(machine.state).toBe('pending');
+    const error = await failure(compute.get(machine.id, ctx()));
+    expect(error.code).toBe('CAPACITY_UNAVAILABLE');
+    expect(error.details).toMatchObject({
+      provider: 'digitalocean',
+      reason: 'createActionErrored',
+    });
+    expect(error.message).toMatch(/create action errored/);
+    // The action is read from the Droplet's own action list.
+    expect(emu.requests.some((r) => r.url.pathname === `/v2/droplets/${machine.id}/actions`)).toBe(
+      true,
+    );
+
+    // A create that goes well is pending while its action runs, then running.
+    const ok = await compute.create(request({ name: 'inst_2' }), ctx('inst_2'));
+    expect((await compute.get(ok.id, ctx()))?.state).toBe('pending');
+    const running = await compute.get(ok.id, ctx());
+    expect(running?.state).toBe('running');
+    expect(running?.addresses).toHaveLength(2);
+  });
+
+  it('get maps states and answers undefined for a missing or malformed id', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const states = { new: 'pending', active: 'running', off: 'stopped', archive: 'deleted' };
+    for (const [status, state] of Object.entries(states)) {
+      const droplet = seedDroplet(emu.state, { status: status as 'new' });
+      expect((await compute.get(String(droplet.id), ctx()))?.state, status).toBe(state);
+    }
+    const weird = seedDroplet(emu.state);
+    weird.status = 'something-new';
+    expect((await compute.get(String(weird.id), ctx()))?.state).toBe('unknown');
+
+    expect(await compute.get('999', ctx())).toBeUndefined();
+    const sent = emu.requests.length;
+    expect(await compute.get('abc', ctx())).toBeUndefined();
+    expect(emu.requests).toHaveLength(sent);
+  });
+
+  it('toMachine reads addresses, labels, the claim and the network', () => {
+    const emu = emulator();
+    const droplet = seedDroplet(emu.state, {
+      region: 'tor1',
+      size_slug: 'gpu-h100x1-80gb',
+      ipv6: true,
+      tags: [
+        'web',
+        tagFor(labels.instance, 'inst_7'),
+        tagFor(labels.tenant, 'acme'),
+        networkMemberTag('n1'),
+      ],
+    }) as unknown as DoDroplet;
+    const machine = toMachine(droplet);
+    const v4 = (type: string) => droplet.networks.v4.find((n) => n.type === type)!.ip_address;
+    expect(machine).toEqual({
+      id: String(droplet.id),
+      name: droplet.name,
+      state: 'running',
+      offerId: 'tor1/gpu-h100x1-80gb',
+      region: 'tor1',
+      addresses: [v4('public'), v4('private'), droplet.networks.v6[0]!.ip_address],
+      machineType: 'gpu-h100x1-80gb',
+      vcpu: 20,
+      memoryGiB: 240,
+      gpus: { model: 'H100', count: 1 },
+      labels: { [labels.instance]: 'inst_7', [labels.tenant]: 'acme' },
+      claimedBy: 'inst_7',
+      createdAt: t0,
+      networks: [
+        {
+          network: droplet.vpc_uuid,
+          address: v4('private'),
+          publicAddress: v4('public'),
+          tags: [
+            tagFor(labels.instance, 'inst_7'),
+            tagFor(labels.tenant, 'acme'),
+            networkMemberTag('n1'),
+          ],
+        },
+      ],
+    });
+    // Without a VPC there is no network entry; without an instance tag no claim.
+    const bare = seedDroplet(emu.state, { vpc_uuid: null }) as unknown as DoDroplet;
+    expect(toMachine(bare).networks).toBeUndefined();
+    expect(toMachine(bare).claimedBy).toBeUndefined();
+  });
+
+  it('oversized user data is refused before anything is posted', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    // DO's limit is 64 KiB of bytes, not characters.
+    for (const userData of ['x'.repeat(65_537), 'é'.repeat(32_769)]) {
+      const error = await failure(compute.create(request({ userData }), ctx('big')));
+      expect(error.code).toBe('INVALID_INPUT');
+      expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'userData' });
+    }
+    expect(emu.requests).toHaveLength(0);
+    await compute.create(request({ userData: 'x'.repeat(65_536) }), ctx('edge'));
+    expect(posts(emu)).toHaveLength(1);
+  });
+
+  it('a catalog image ref is UNSUPPORTED until P3', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const error = await failure(compute.create(request({ image: 'ubuntu@24.04' }), ctx()));
+    expect(error.code).toBe('UNSUPPORTED');
+    expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'catalogImage' });
+    expect(emu.requests).toHaveLength(0);
+  });
+
+  it('a spot offer is UNSUPPORTED until P3, even with allowSpot', async () => {
+    const emu = emulator();
+    const compute = await build(emu, { ...doAccount, allowSpot: true });
+    const error = await failure(
+      compute.create(request({ offerId: 'nyc3/s-2vcpu-4gb@spot' }), ctx()),
+    );
+    expect(error.code).toBe('UNSUPPORTED');
+    expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'spot' });
+    expect(posts(emu)).toHaveLength(0);
+  });
+
+  it('a region outside the account, a bad label and a network ref are refused up front', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const region = await failure(compute.create(request({ offerId: 'tor1/s-2vcpu-4gb' }), ctx()));
+    expect(region.code).toBe('INVALID_INPUT');
+    expect(region.details).toMatchObject({ provider: 'digitalocean', reason: 'region' });
+    const label = await failure(
+      compute.create(request({ labels: { 'example.com/team': 'a' } }), ctx()),
+    );
+    expect(label.code).toBe('INVALID_INPUT');
+    expect(label.details).toMatchObject({ provider: 'digitalocean', reason: 'label' });
+    // Task 8 attaches a NetworkRef; until then it is refused rather than ignored.
+    const network = await failure(compute.create(request({ network: { network: 'n1' } }), ctx()));
+    expect(network.code).toBe('UNSUPPORTED');
+    expect(network.details).toMatchObject({ provider: 'digitalocean', reason: 'networkRef' });
+    expect(emu.requests).toHaveLength(0);
+  });
+
+  it('delete refuses an unmanaged or foreign-deployment droplet; no DELETE is sent', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const unmanaged = seedDroplet(emu.state, { tags: [] });
+    const foreign = seedDroplet(emu.state, {
+      tags: ['better-compute-managed:true', deploymentTag('other')],
+    });
+    // Claimed into this deployment but not handed over (no managed tag).
+    const attached = seedDroplet(emu.state, {
+      tags: [deploymentTag('default'), tagFor(labels.instance, 'inst_9')],
+    });
+    const mine = seedDroplet(emu.state, {
+      tags: ['better-compute-managed:true', deploymentTag('default')],
+    });
+    for (const droplet of [unmanaged, foreign, attached]) {
+      const error = await failure(compute.delete(String(droplet.id), ctx()));
+      expect(error.code).toBe('INVALID_STATE');
+      expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'notManaged' });
+    }
+    expect(deletes(emu)).toEqual([]);
+    await compute.delete(String(mine.id), ctx());
+    expect(deletes(emu)).toEqual([`/v2/droplets/${mine.id}`]);
+    expect([...emu.state.droplets.keys()]).toEqual([unmanaged.id, foreign.id, attached.id]);
+  });
+
+  it('delete of a droplet that is already gone succeeds', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    await compute.delete('999', ctx());
+    await compute.delete('abc', ctx());
+    expect(deletes(emu)).toEqual([]);
+    // Gone between our read and our DELETE.
+    const mine = seedDroplet(emu.state, { tags: ours('x') });
+    emu.failNext({ method: 'DELETE', path: /^\/droplets\/\d+$/ }, 404, {
+      id: 'not_found',
+      message: 'The resource you were accessing could not be found.',
+    });
+    await compute.delete(String(mine.id), ctx());
+    expect(deletes(emu)).toEqual([`/v2/droplets/${mine.id}`]);
+  });
+
+  it('the definition builds a client without any request or secret, and checks its options', async () => {
+    expect(digitalocean).toMatchObject({
+      extension: 'provider',
+      id: 'digitalocean',
+      version: '0.1.0',
+      provides: ['vps'],
+      capabilities: ['power', 'reinstall', 'list', 'discover', 'claim', 'networks'],
+    });
+    const emu = emulator();
+    let resolved = 0;
+    const context = {
+      clock: manualClock(1_000_000),
+      secrets: {
+        resolve: async (ref: string) => {
+          resolved += 1;
+          return secrets.resolve(ref);
+        },
+      },
+      log: noopLog,
+      account: platformAccount,
+    };
+    const config = { token: 'secret://do/t', regions: ['nyc3'] } as DoConfig;
+    const compute = await digitaloceanProvider({ fetch: emu.fetch }).create(config, context);
+    expect(emu.requests).toHaveLength(0);
+    expect(resolved).toBe(0);
+    // The token is resolved on first use, once.
+    expect((await compute.listOffers({})).length).toBeGreaterThan(0);
+    expect(await compute.get('999', ctx())).toBeUndefined();
+    expect(resolved).toBe(1);
+
+    const refused = async (options: object, account: object) =>
+      failure(
+        (async () =>
+          digitaloceanProvider({ fetch: emu.fetch, ...options }).create(
+            account as typeof config,
+            context,
+          ))(),
+      );
+    expect((await refused({}, { ...config, regions: [] })).code).toBe('INVALID_CONFIG');
+    for (const inCallWaitMs of [-1, 20_001, 1.5, Number.NaN])
+      expect((await refused({ inCallWaitMs }, config)).code, String(inCallWaitMs)).toBe(
+        'INVALID_CONFIG',
+      );
+    await digitaloceanProvider({ fetch: emu.fetch, inCallWaitMs: 20_000 }).create(config, context);
+  });
+
+  it('never calls a tag-scoped bulk endpoint', () => {
+    const all: RecordedRequest[] = emulators.flatMap((emu) => emu.requests);
+    expect(all.length).toBeGreaterThan(50);
+    const bulk = all.filter(
+      (r) =>
+        (r.method === 'DELETE' || r.method === 'POST') &&
+        ['/v2/droplets', '/v2/droplets/actions'].includes(r.url.pathname) &&
+        r.url.searchParams.has('tag_name'),
+    );
+    expect(bulk).toEqual([]);
   });
 });

@@ -1,12 +1,12 @@
 import { ComputeError, type Clock, type Logger } from '@better-compute/core';
 import type { DoAction } from '../compute/types.js';
-import type { BudgetClass, RateBudget } from './budget.js';
+import { tokenHash, type BudgetClass, type RateBudget } from './budget.js';
 import { mapDoError } from './errors.js';
 
 // A DigitalOcean API v2 client over plain fetch. Paths are relative to the endpoint
-// (`/droplets/1`). Every request spends from the token's budget first and reports the response's
-// rate-limit headers back to it. The token lives only in this closure: it is resolved on first
-// use and never reaches a log line, an error message or an error's details.
+// (`/droplets/1`). Every request spends from the token's budget before it is sent and reports the
+// response's rate-limit headers back to it. The token lives only in this closure: it is resolved
+// on first use and never reaches a log line, an error message or an error's details.
 
 export type { BudgetClass } from './budget.js';
 
@@ -38,7 +38,11 @@ export interface DoClientOptions {
   endpoint: string;
   /** Resolves the API token; called once, on first use. */
   token: () => Promise<string>;
-  budget: RateBudget;
+  /**
+   * The token's budget, or a function that picks it by `tokenHash(token)` once the token is
+   * resolved (the token itself never leaves the client).
+   */
+  budget: RateBudget | ((tokenHash: string) => RateBudget);
   clock: Clock;
   log: Logger;
 }
@@ -66,6 +70,10 @@ export function doClient(options: DoClientOptions): DoClient {
     });
     return pending;
   }
+  let budget: RateBudget | undefined =
+    typeof options.budget === 'function' ? undefined : options.budget;
+  const budgetOf = (bearer: string): RateBudget =>
+    (budget ??= (options.budget as (hash: string) => RateBudget)(tokenHash(bearer)));
 
   async function send<T>(
     method: string,
@@ -76,8 +84,9 @@ export function doClient(options: DoClientOptions): DoClient {
       ? url.pathname.slice(basePath.length) || '/'
       : url.pathname;
     const what = `${method} ${path}`;
-    options.budget.take(opts.budget);
     const bearer = await token();
+    const spend = budgetOf(bearer);
+    spend.take(opts.budget);
     let response: Response;
     try {
       response = await options.fetch(url.toString(), {
@@ -99,7 +108,7 @@ export function doClient(options: DoClientOptions): DoClient {
         reason: 'network',
       });
     }
-    options.budget.observe(response.headers);
+    spend.observe(response.headers);
     options.log.debug('digitalocean.request', { method, path, status: response.status });
     const text = await response.text();
     let payload: unknown;

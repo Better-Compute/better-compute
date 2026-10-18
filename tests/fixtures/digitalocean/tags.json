@@ -1,0 +1,15 @@
+{
+  "_provenance": "Shape: OpenAPI tags/models/tags.yml (spec): name plus resources { count, last_tagged_uri, droplets, images, volumes, volume_snapshots, databases }, each { count, last_tagged_uri }. Values are illustrative. The emulator spreads this template, sets the name and counts the Droplets.",
+  "tag": {
+    "name": "extra-awesome",
+    "resources": {
+      "count": 0,
+      "last_tagged_uri": "",
+      "droplets": { "count": 0, "last_tagged_uri": "" },
+      "images": { "count": 0 },
+      "volumes": { "count": 0 },
+      "volume_snapshots": { "count": 0 },
+      "databases": { "count": 0 }
+    }
+  }
+}

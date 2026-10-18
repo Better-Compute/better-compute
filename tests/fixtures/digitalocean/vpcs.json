@@ -1,0 +1,13 @@
+{
+  "_provenance": "Shape: OpenAPI vpcs/models/vpc.yml (spec): id (uuid), urn, name, description, region, ip_range, default, created_at. Values are illustrative. The emulator spreads this template and overrides id, urn, name, region, ip_range and default.",
+  "vpc": {
+    "id": "5a4981aa-9653-4bd1-bef5-d6bff52042e4",
+    "urn": "do:vpc:5a4981aa-9653-4bd1-bef5-d6bff52042e4",
+    "name": "env.prod-vpc",
+    "description": "VPC for production environment",
+    "region": "nyc3",
+    "ip_range": "10.10.10.0/24",
+    "default": false,
+    "created_at": "2020-03-13T19:20:47.442049222Z"
+  }
+}

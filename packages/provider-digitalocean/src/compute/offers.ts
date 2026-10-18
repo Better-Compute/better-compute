@@ -19,6 +19,8 @@ interface Catalog {
 interface CacheEntry {
   loadedAt: number;
   catalog: Promise<Catalog>;
+  /** The catalog once it has loaded. */
+  loaded?: Catalog;
 }
 
 /** Per client, so a test (or a second account) never sees another's catalog. */
@@ -60,17 +62,32 @@ function catalogOf(client: DoClient, signal: AbortSignal): Promise<Catalog> {
     catalog: loadCatalog(client, AbortSignal.timeout(loadTimeoutMs)),
   };
   caches.set(client, entry);
-  entry.catalog.catch(() => {
-    if (caches.get(client) === entry) caches.delete(client);
-  });
+  entry.catalog.then(
+    (catalog) => {
+      entry.loaded = catalog;
+    },
+    () => {
+      if (caches.get(client) === entry) caches.delete(client);
+    },
+  );
   return untilAborted(entry.catalog, signal);
+}
+
+/**
+ * The size `slug` from a catalog this client has already loaded, without a request or a wait:
+ * undefined when it holds no fresh loaded catalog or the size isn't in it.
+ */
+export function cachedSize(client: DoClient, slug: string): DoSize | undefined {
+  const cached = caches.get(client);
+  if (!cached?.loaded || client.clock.now() - cached.loadedAt >= catalogTtlMs) return undefined;
+  return cached.loaded.sizes.find((size) => size.slug === slug);
 }
 
 /**
  * The inventory's name for a size's GPU: a leading `nvidia_` or `amd_` is dropped, the rest is
  * upper-cased with `_` as `-` (`nvidia_h100` is `H100`, `nvidia_rtx_6000_ada` is `RTX-6000-ADA`).
  */
-export function gpuModelOf(size: DoSize): string | undefined {
+export function gpuModelOf(size: Pick<DoSize, 'gpu_info'>): string | undefined {
   const model = size.gpu_info?.model;
   if (!model) return undefined;
   return model

@@ -1,7 +1,15 @@
 import { manualClock, type CallContext, type Logger } from '@better-compute/core';
-import { resetBudgets } from '@better-compute/provider-digitalocean';
+import {
+  digitaloceanProvider,
+  resetBudgets,
+  type DoCompute,
+  type DoConfig,
+  type DoProviderOptions,
+} from '@better-compute/provider-digitalocean';
+import type { DoEmulator } from './do-emulator/index.js';
 
-// Shared setup for the provider-digitalocean tests: secrets, accounts and a call context.
+// Shared setup for the provider-digitalocean tests: secrets, accounts, a call context and a
+// provider client over the emulator.
 
 /** Resolves `secret://do/t` to the emulator's default token. */
 export const secrets = {
@@ -34,4 +42,24 @@ export const doAccount = { token: 'secret://do/t', regions: ['nyc3'] };
  */
 export function freshBudgets(): void {
   resetBudgets();
+}
+
+/**
+ * A client for an account over the emulator, built the way vps builds one: the account config is
+ * validated by the definition's manifest, then handed to `create`.
+ */
+export async function build(
+  emu: DoEmulator,
+  config: Record<string, unknown> = doAccount,
+  options: DoProviderOptions = {},
+): Promise<DoCompute> {
+  const provider = digitaloceanProvider({ fetch: emu.fetch, ...options });
+  const parsed = await provider.config['~standard'].validate(config);
+  if ('issues' in parsed && parsed.issues) throw new Error(parsed.issues[0]!.message);
+  return (await provider.create((parsed as { value: DoConfig }).value, {
+    clock: manualClock(1_000_000),
+    secrets,
+    log: noopLog,
+    account: platformAccount,
+  })) as DoCompute;
 }
