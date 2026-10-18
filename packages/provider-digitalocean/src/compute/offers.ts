@@ -2,6 +2,7 @@ import type { Offer, OfferQuery } from '@better-compute/core';
 import type { DoClient } from '../client/http.js';
 import type { DoConfig } from '../config.js';
 import { offerId } from '../ids.js';
+import { untilAborted } from './abort.js';
 import type { DoRegion, DoSize } from './types.js';
 
 // Offers: one per (size, region) the account is configured for. The size and region lists change
@@ -37,16 +38,6 @@ async function loadCatalog(client: DoClient, signal: AbortSignal): Promise<Catal
   }))
     regions.set(region.slug, region);
   return { sizes, regions };
-}
-
-/** Rejects with the signal's reason as soon as it aborts, leaving the promise itself running. */
-function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason);
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = (): void => reject(signal.reason);
-    signal.addEventListener('abort', onAbort, { once: true });
-    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
-  });
 }
 
 /**

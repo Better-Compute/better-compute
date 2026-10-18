@@ -14,6 +14,8 @@ export const labels = {
   owner: 'better-compute-owner',
   deployment: 'better-compute-deployment',
   key: 'better-compute-key',
+  /** Not a tag: discovery sets it on a Droplet that belongs to a DO autoscale pool. */
+  autoscalePool: 'better-compute-autoscale-pool',
 } as const;
 
 function invalid(message: string, reason: string): ComputeError {

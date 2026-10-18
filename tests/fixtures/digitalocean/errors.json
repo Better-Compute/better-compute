@@ -165,6 +165,17 @@
       }
     },
     {
+      "name": "422-tag-exists",
+      "status": 422,
+      "verified": false,
+      "code": "INVALID_INPUT",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "tag already exists",
+        "request_id": "f2a6c8e4-0021-4b7b-9a51-1c0e7f6c0021"
+      }
+    },
+    {
       "name": "422-unknown",
       "status": 422,
       "verified": true,

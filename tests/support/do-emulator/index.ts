@@ -1,4 +1,5 @@
 import { registerActions } from './actions.js';
+import { registerAutoscale } from './autoscale.js';
 import { registerCatalog } from './catalog.js';
 import { registerDroplets } from './droplets.js';
 import { registerKeys } from './keys.js';
@@ -256,6 +257,7 @@ export class DoEmulator {
     registerCatalog(this);
     registerKeys(this);
     registerTags(this);
+    registerAutoscale(this);
     registerDroplets(this);
     registerActions(this);
     registerVpcs(this);

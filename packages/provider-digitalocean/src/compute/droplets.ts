@@ -24,6 +24,7 @@ import {
   parseOfferId,
   tagFor,
 } from '../ids.js';
+import { poolMembers } from './autoscale.js';
 import { ensureSshKeys } from './keys.js';
 import { cachedSize, gpuModelOf, listOffers } from './offers.js';
 import type { DoAction, DoDroplet, DoVpc } from './types.js';
@@ -35,7 +36,10 @@ import type { DoAction, DoDroplet, DoVpc } from './types.js';
 // managed tag and this deployment's tag (DO-D16, ruling R3), one Droplet at a time: the
 // tag-scoped bulk endpoints are never called. Power acts on a Droplet that carries this
 // deployment's tag and an instance tag (a claimed VM is powerable without being deletable); a
-// rebuild wipes the disk, so it needs the same ownership as a delete.
+// rebuild wipes the disk, so it needs the same ownership as a delete. Attaching (claim) is the
+// other direction: DO has no atomic compare-and-set on tags, so a claim writes its tags and then
+// reads the Droplet again; if another instance tag appeared in between, it takes its own back
+// (tag-then-verify, DO-D6).
 
 /** DO's limit on `user_data`, in bytes. */
 const maxUserDataBytes = 65_536;
@@ -62,6 +66,13 @@ function fail(
   reason: string,
 ): ComputeError {
   return new ComputeError(code, message, undefined, { provider: 'digitalocean', reason });
+}
+
+function notFound(id: string): ComputeError {
+  return new ComputeError('NOT_FOUND', `Droplet ${id} does not exist`, undefined, {
+    provider: 'digitalocean',
+    id,
+  });
 }
 
 const states: Readonly<Record<string, ExternalMachine['state']>> = {
@@ -461,11 +472,7 @@ export class DoCompute implements ProviderImpl {
     refusal: { reason: string; message: (droplet: DoDroplet) => string },
   ): Promise<DoDroplet> {
     const droplet = await this.droplet(id, signal);
-    if (!droplet)
-      throw new ComputeError('NOT_FOUND', `Droplet ${id} does not exist`, undefined, {
-        provider: 'digitalocean',
-        id,
-      });
+    if (!droplet) throw notFound(id);
     if (!allowed(droplet)) throw fail('INVALID_STATE', refusal.message(droplet), refusal.reason);
     return droplet;
   }
@@ -528,4 +535,169 @@ export class DoCompute implements ProviderImpl {
         yield toMachine(droplet);
       }
   }
+
+  // ------------------------------------------------------------------- discover, claim, release
+
+  /**
+   * Every Droplet in the account's regions, claimed or not. The default list omits GPU Droplets,
+   * so the `type=gpus` list is read too (research S2). `discoverTag` narrows the first query; the
+   * GPU list can't be combined with `tag_name`, so it is filtered by the tag here. Droplets that
+   * belong to a DO autoscale pool carry the pool's id in `labels['better-compute-autoscale-pool']`.
+   */
+  async *discover(ctx: CallContext): AsyncIterable<ExternalMachine> {
+    const regions = new Set(this.config.regions);
+    const wanted = this.config.discoverTag;
+    const members = await poolMembers(this.client, ctx.signal, { fresh: true });
+    const seen = new Set<number>();
+    const queries: Record<string, string>[] = [
+      wanted !== undefined ? { tag_name: wanted } : {},
+      { type: 'gpus' },
+    ];
+    for (const query of queries)
+      for await (const droplet of this.client.pages<DoDroplet>('/droplets', 'droplets', {
+        query,
+        signal: ctx.signal,
+        budget: 'sweep',
+      })) {
+        if (seen.has(droplet.id) || !regions.has(droplet.region.slug)) continue;
+        if (query.type === 'gpus' && wanted !== undefined && !hasTag(droplet, wanted.toLowerCase()))
+          continue;
+        seen.add(droplet.id);
+        const machine = toMachine(droplet);
+        // The label comes from the pool's member list only: a tag of that name proves nothing.
+        const { [labels.autoscalePool]: _forged, ...decoded } = machine.labels ?? {};
+        const pool = members.get(droplet.id);
+        yield {
+          ...machine,
+          labels: pool === undefined ? decoded : { ...decoded, [labels.autoscalePool]: pool },
+        };
+      }
+  }
+
+  /** Makes the tag object exist: one that already does is fine. */
+  protected async ensureTag(name: string, signal: AbortSignal): Promise<void> {
+    try {
+      await this.client.request('POST', '/tags', { body: { name }, signal, budget: 'mutate' });
+    } catch (error) {
+      if (isComputeError(error, 'CONFLICT')) return;
+      // DO answers a name it already has with a 422 whose text is not in its spec.
+      if (
+        isComputeError(error, 'INVALID_INPUT') &&
+        error.details?.status === 422 &&
+        /already|exists|duplicate/i.test(error.message)
+      )
+        return;
+      throw error;
+    }
+  }
+
+  /** Puts a tag on a Droplet; DO answers 204. */
+  protected async assignTag(name: string, dropletId: number, signal: AbortSignal): Promise<void> {
+    await this.ensureTag(name, signal);
+    await this.client.request('POST', `/tags/${encodeURIComponent(name)}/resources`, {
+      body: { resources: [{ resource_id: String(dropletId), resource_type: 'droplet' }] },
+      signal,
+      budget: 'mutate',
+    });
+  }
+
+  /** Takes a tag off one Droplet (never a bulk call); a Droplet or tag that is gone counts as done. */
+  protected async unassignTag(name: string, dropletId: number, signal: AbortSignal): Promise<void> {
+    try {
+      await this.client.request('DELETE', `/tags/${encodeURIComponent(name)}/resources`, {
+        body: { resources: [{ resource_id: String(dropletId), resource_type: 'droplet' }] },
+        signal,
+        budget: 'mutate',
+      });
+    } catch (error) {
+      if (!isComputeError(error, 'NOT_FOUND')) throw error;
+    }
+  }
+
+  async claim(
+    id: string,
+    instanceId: string,
+    ctx: CallContext,
+    options: { managed?: boolean } = {},
+  ): Promise<ExternalMachine> {
+    const { signal } = ctx;
+    const droplet = await this.droplet(id, signal);
+    if (!droplet) throw notFound(id);
+    if (!this.config.regions.includes(droplet.region.slug))
+      throw fail(
+        'INVALID_INPUT',
+        `Droplet ${droplet.id} is in ${droplet.region.slug}, which this account does not use`,
+        'region',
+      );
+    const ours = tagFor(labels.instance, instanceId);
+    if (instanceTagsOf(droplet).some((t) => t.toLowerCase() !== ours))
+      throw claimedByAnother(droplet);
+    if ((await poolMembers(this.client, signal)).has(droplet.id))
+      throw fail(
+        'INVALID_STATE',
+        `Droplet ${droplet.id} belongs to a DigitalOcean autoscale pool, which scales it itself`,
+        'autoscalePool',
+      );
+
+    // Our instance tag first: it is the one a rival claim contends for.
+    const wanted = [ours, this.deploymentTag, ...(options.managed ? [managedTag] : [])];
+    const missing = wanted.filter((tag) => !hasTag(droplet, tag));
+    if (missing.length === 0) return toMachine(droplet);
+    for (const tag of missing) await this.assignTag(tag, droplet.id, signal);
+
+    // Verify: another claim that wrote between our read and our write shows up now.
+    const after = await this.droplet(id, signal);
+    if (!after) throw notFound(id);
+    if (instanceTagsOf(after).some((t) => t.toLowerCase() !== ours)) {
+      this.context.log.warn('digitalocean.claimLost', { droplet: droplet.id });
+      // Back out what only we added. The deployment tag stays: it names no instance.
+      try {
+        for (const tag of [ours, managedTag])
+          if (missing.includes(tag))
+            await this.unassignTag(spelled(after, tag), droplet.id, signal);
+      } catch (error) {
+        // The claim is lost either way: say so, and leave a trace of what remains.
+        this.context.log.error('digitalocean.claimBackoutFailed', {
+          droplet: droplet.id,
+          error: isComputeError(error) ? error.code : 'unknown',
+        });
+      }
+      throw claimedByAnother(after);
+    }
+    return toMachine(after);
+  }
+
+  async release(id: string, instanceId: string, ctx: CallContext): Promise<void> {
+    const { signal } = ctx;
+    const droplet = await this.droplet(id, signal);
+    if (!droplet) return;
+    const ours = tagFor(labels.instance, instanceId);
+    if (!hasTag(droplet, ours)) return;
+    // The managed tag goes first: if the second call fails, the Droplet is still the instance's
+    // and a retry finishes the job, whereas the other order would leave a deletable Droplet that
+    // no instance claims. It stays while another instance tag is on the Droplet.
+    const rivals = instanceTagsOf(droplet).some((t) => t.toLowerCase() !== ours);
+    if (!rivals && hasTag(droplet, managedTag))
+      await this.unassignTag(spelled(droplet, managedTag), droplet.id, signal);
+    await this.unassignTag(spelled(droplet, ours), droplet.id, signal);
+  }
+}
+
+/** The `better-compute-instance:*` tags a Droplet carries. */
+function instanceTagsOf(droplet: DoDroplet): string[] {
+  return (droplet.tags ?? []).filter((t) => t.toLowerCase().startsWith(instanceTagPrefix));
+}
+
+/** The tag as the Droplet spells it: DO's URLs want the spelling a tag was made with. */
+function spelled(droplet: DoDroplet, tag: string): string {
+  return (droplet.tags ?? []).find((t) => t.toLowerCase() === tag) ?? tag;
+}
+
+function claimedByAnother(droplet: DoDroplet): ComputeError {
+  return new ComputeError(
+    'CONFLICT',
+    `Droplet ${droplet.id} is already claimed by another instance`,
+    undefined,
+    { provider: 'digitalocean', id: String(droplet.id), reason: 'claimedByAnother' },
+  );
 }

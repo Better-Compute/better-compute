@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { autoAttachLabels } from '@better-compute/vps';
 import {
   isComputeError,
   manualClock,
@@ -34,7 +35,7 @@ import {
   toMachine,
   unprocessablePatterns,
   type DoClient,
-  type DoCompute,
+  DoCompute,
   type DoConfig,
   type DoDroplet,
   type DoSize,
@@ -45,6 +46,7 @@ import {
   settleAction,
   startAction,
 } from './support/do-emulator/actions.js';
+import { seedAutoscalePool } from './support/do-emulator/autoscale.js';
 import { seedDroplet } from './support/do-emulator/droplets.js';
 import { DoEmulator, type RecordedRequest } from './support/do-emulator/index.js';
 import { seedSshKey } from './support/do-emulator/keys.js';
@@ -1645,5 +1647,308 @@ describe('compute', () => {
         r.url.searchParams.has('tag_name'),
     );
     expect(bulk).toEqual([]);
+  });
+});
+
+describe('attach', () => {
+  beforeEach(freshBudgets);
+
+  const t0 = Date.parse('2026-10-18T10:00:00Z');
+  const emulator = () => new DoEmulator({ now: () => t0 });
+  const instanceTag = (instance: string) => tagFor(labels.instance, instance);
+  const managed = 'better-compute-managed:true';
+
+  async function discovered(compute: DoCompute): Promise<ExternalMachine[]> {
+    const out: ExternalMachine[] = [];
+    for await (const machine of compute.discover!(ctx())) out.push(machine);
+    return out;
+  }
+  const dropletLists = (emu: DoEmulator) =>
+    emu.requests.filter((r) => r.method === 'GET' && r.url.pathname === '/v2/droplets');
+  const tagWrites = (emu: DoEmulator) =>
+    emu.requests.filter((r) => r.url.pathname.startsWith('/v2/tags') && r.method !== 'GET');
+  const unassigned = (emu: DoEmulator) =>
+    emu.requests
+      .filter((r) => r.method === 'DELETE')
+      .map((r) => decodeURIComponent(r.url.pathname));
+  const autoscaleLists = (emu: DoEmulator) =>
+    emu.requests.filter((r) => r.url.pathname === '/v2/droplets/autoscale');
+
+  it('discover yields unmanaged droplets with labels decoded from tags', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const hand = seedDroplet(emu.state, {
+      tags: ['better-compute-tenant:acme', 'better-compute-pool:pool_1', 'web', 'Env:Prod'],
+    });
+    const bare = seedDroplet(emu.state, { tags: [] });
+
+    const machines = await discovered(compute);
+    expect(machines.map((m) => m.id)).toEqual([String(hand.id), String(bare.id)]);
+    // The labels vps auto-attach reads, by the keys it reads them with.
+    expect(machines[0]!.labels).toEqual({
+      [autoAttachLabels.tenant]: 'acme',
+      [autoAttachLabels.pool]: 'pool_1',
+    });
+    expect(machines[0]!.claimedBy).toBeUndefined();
+    expect(machines[1]!.labels).toEqual({});
+    for (const r of dropletLists(emu)) expect(r.url.searchParams.get('per_page')).toBe('200');
+  });
+
+  it('discover honours discoverTag and configured regions', async () => {
+    const emu = emulator();
+    const compute = await build(emu, { ...doAccount, discoverTag: 'Fleet' });
+    const wanted = seedDroplet(emu.state, { tags: ['fleet'], name: 'wanted' });
+    seedDroplet(emu.state, { tags: ['other'] });
+    seedDroplet(emu.state, { tags: ['fleet'], region: 'tor1' });
+    // A tagged GPU droplet in a configured region, and one without the tag.
+    const gpu = seedDroplet(emu.state, {
+      size_slug: 'gpu-h100x1-80gb',
+      region: 'nyc3',
+      tags: ['FLEET'],
+    });
+    seedDroplet(emu.state, { size_slug: 'gpu-h100x1-80gb', region: 'nyc3', tags: ['other'] });
+
+    const machines = await discovered(compute);
+    expect(machines.map((m) => m.id).sort()).toEqual([String(wanted.id), String(gpu.id)].sort());
+    const lists = dropletLists(emu);
+    expect(lists.map((r) => r.url.searchParams.get('tag_name'))).toEqual(['Fleet', null]);
+    // The GPU list can't be combined with tag_name (research S2): the tag is applied here.
+    expect(lists[1]!.url.searchParams.get('type')).toBe('gpus');
+  });
+
+  it('discover includes GPU droplets, which the default list omits', async () => {
+    const emu = emulator();
+    const compute = await build(emu, { ...doAccount, regions: ['nyc3', 'tor1'] });
+    const plain = seedDroplet(emu.state, { tags: [] });
+    const gpu = seedDroplet(emu.state, { size_slug: 'gpu-h100x1-80gb', region: 'tor1', tags: [] });
+
+    const machines = await discovered(compute);
+    expect(machines.map((m) => m.id)).toEqual([String(plain.id), String(gpu.id)]);
+    expect(machines[1]!.gpus).toEqual({ model: 'H100', count: 1 });
+    expect(dropletLists(emu).filter((r) => r.url.searchParams.get('type') === 'gpus')).toHaveLength(
+      1,
+    );
+  });
+
+  it('claim tags the droplet; managed also hands deletion over', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const a = seedDroplet(emu.state, { tags: ['better-compute-tenant:acme'] });
+    const b = seedDroplet(emu.state, { tags: [] });
+
+    const machine = await compute.claim!(String(a.id), 'inst_1', ctx());
+    expect(machine).toMatchObject({ id: String(a.id), claimedBy: 'inst_1' });
+    expect(machine.labels).toMatchObject({ [labels.instance]: 'inst_1', [labels.tenant]: 'acme' });
+    expect(a.tags).toEqual(
+      expect.arrayContaining([instanceTag('inst_1'), deploymentTag('default')]),
+    );
+    expect(a.tags).not.toContain(managed);
+    // An attached droplet is powerable but never deletable: better-compute did not create it.
+    await compute.power(String(a.id), 'off', ctx());
+    expect((await failure(compute.delete(String(a.id), ctx()))).details?.reason).toBe('notManaged');
+    expect(emu.state.droplets.has(a.id)).toBe(true);
+
+    // With managed, the droplet is deletable as well.
+    await compute.claim!(String(b.id), 'inst_2', ctx(), { managed: true });
+    expect(b.tags).toEqual(expect.arrayContaining([instanceTag('inst_2'), managed]));
+    await compute.delete(String(b.id), ctx());
+    expect(emu.state.droplets.has(b.id)).toBe(false);
+  });
+
+  it('a claim is idempotent and a later managed claim only adds the managed tag', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const d = seedDroplet(emu.state, { tags: [] });
+    const id = String(d.id);
+    await compute.claim!(id, 'inst_1', ctx());
+    const first = tagWrites(emu).length;
+    expect(first).toBeGreaterThan(0);
+
+    await compute.claim!(id, 'inst_1', ctx());
+    expect(tagWrites(emu)).toHaveLength(first);
+
+    await compute.claim!(id, 'inst_1', ctx(), { managed: true });
+    const added = tagWrites(emu).slice(first);
+    expect(added.map((r) => `${r.method} ${decodeURIComponent(r.url.pathname)}`)).toEqual([
+      'POST /v2/tags',
+      `POST /v2/tags/${managed}/resources`,
+    ]);
+    expect(added[1]!.body).toEqual({ resources: [{ resource_id: id, resource_type: 'droplet' }] });
+    expect(d.tags.filter((t: string) => t === instanceTag('inst_1'))).toHaveLength(1);
+    expect(d.tags).toContain(managed);
+  });
+
+  it('a droplet claimed by another instance is CONFLICT', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const d = seedDroplet(emu.state, { tags: [instanceTag('other')] });
+    const error = await failure(compute.claim!(String(d.id), 'inst_1', ctx(), { managed: true }));
+    expect(error.code).toBe('CONFLICT');
+    expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'claimedByAnother' });
+    expect(tagWrites(emu)).toEqual([]);
+    expect(d.tags).toEqual([instanceTag('other')]);
+  });
+
+  it('a claim that races another claim backs out its own tag', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const d = seedDroplet(emu.state, { tags: ['better-compute-tenant:acme'] });
+    // While our claim writes its tags, another instance claims the droplet.
+    emu.beforeAction('POST /tags/*/resources', () => {
+      (d.tags as string[]).push(instanceTag('other'));
+    });
+
+    const error = await failure(compute.claim!(String(d.id), 'inst_1', ctx(), { managed: true }));
+    expect(error.code).toBe('CONFLICT');
+    expect(error.details).toMatchObject({ reason: 'claimedByAnother' });
+    // Our instance tag and the managed tag we added are gone; the other claim is untouched and
+    // the deployment tag stays.
+    expect(d.tags).toContain(instanceTag('other'));
+    expect(d.tags).not.toContain(instanceTag('inst_1'));
+    expect(d.tags).not.toContain(managed);
+    expect(d.tags).toContain('better-compute-tenant:acme');
+    expect(d.tags).toContain(deploymentTag('default'));
+    expect(unassigned(emu)).toEqual([
+      `/v2/tags/${instanceTag('inst_1')}/resources`,
+      `/v2/tags/${managed}/resources`,
+    ]);
+  });
+
+  it('a claim that races keeps a managed tag it did not add', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const d = seedDroplet(emu.state, { tags: [managed] });
+    emu.beforeAction('POST /tags/*/resources', () => {
+      (d.tags as string[]).push(instanceTag('other'));
+    });
+    await failure(compute.claim!(String(d.id), 'inst_1', ctx(), { managed: true }));
+    expect(d.tags).toContain(managed);
+    expect(d.tags).not.toContain(instanceTag('inst_1'));
+  });
+
+  it('a claim of a droplet that is missing or outside the account regions is refused', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    expect((await failure(compute.claim!('999', 'inst_1', ctx()))).code).toBe('NOT_FOUND');
+    expect((await failure(compute.claim!('not-an-id', 'inst_1', ctx()))).code).toBe('NOT_FOUND');
+    const far = seedDroplet(emu.state, { region: 'tor1', tags: [] });
+    const error = await failure(compute.claim!(String(far.id), 'inst_1', ctx()));
+    expect(error.code).toBe('INVALID_INPUT');
+    expect(error.details?.reason).toBe('region');
+    expect(tagWrites(emu)).toEqual([]);
+  });
+
+  it('autoscale pool members are discovered but refused for claim', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const member = seedDroplet(emu.state, { tags: ['better-compute-autoscale-pool:forged'] });
+    const free = seedDroplet(emu.state, { tags: ['better-compute-autoscale-pool:forged'] });
+    const pool = seedAutoscalePool(emu.state, { name: 'web', members: [member.id] });
+
+    const machines = await discovered(compute);
+    // A forged tag is not membership: only the pool's own member list is.
+    expect(machines.find((m) => m.id === String(member.id))!.labels).toEqual({
+      'better-compute-autoscale-pool': pool.id,
+    });
+    expect(machines.find((m) => m.id === String(free.id))!.labels).toEqual({});
+    expect(autoscaleLists(emu)).toHaveLength(1);
+    expect(autoscaleLists(emu)[0]!.url.searchParams.get('per_page')).toBe('200');
+    expect(
+      emu.requests.some((r) => r.url.pathname === `/v2/droplets/autoscale/${pool.id}/members`),
+    ).toBe(true);
+
+    const error = await failure(compute.claim!(String(member.id), 'inst_1', ctx()));
+    expect(error.code).toBe('INVALID_STATE');
+    expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'autoscalePool' });
+    expect(tagWrites(emu)).toEqual([]);
+    // Another droplet is free to claim.
+    await compute.claim!(String(free.id), 'inst_1', ctx());
+  });
+
+  it('pool membership is looked up once a minute for claims, and anew for each discover', async () => {
+    const emu = emulator();
+    const clock = manualClock(1_000_000);
+    const client = doClient({
+      fetch: emu.fetch,
+      endpoint,
+      token: async () => 'do-token',
+      budget: new RateBudget({ perMinute: 250, perHour: 5000, clock }),
+      clock,
+      log: noopLog,
+    });
+    const compute = new DoCompute(
+      doAccount as DoConfig,
+      { clock, secrets, log: noopLog, account: platformAccount },
+      { deployment: 'default', inCallWaitMs: 0 },
+      client,
+    );
+    const [a, b, c, d] = [1, 2, 3, 4].map(() => seedDroplet(emu.state, { tags: [] }));
+    await compute.claim!(String(a!.id), 'inst_1', ctx());
+    await compute.claim!(String(b!.id), 'inst_2', ctx());
+    expect(autoscaleLists(emu)).toHaveLength(1);
+
+    // A pool takes a droplet; a claim within the minute still goes by the membership it holds.
+    seedAutoscalePool(emu.state, { name: 'web', members: [c!.id, d!.id] });
+    clock.advance(59_000);
+    await compute.claim!(String(c!.id), 'inst_3', ctx());
+    expect(autoscaleLists(emu)).toHaveLength(1);
+
+    // After the minute it looks again.
+    clock.advance(2_000);
+    const error = await failure(compute.claim!(String(d!.id), 'inst_4', ctx()));
+    expect(error.details?.reason).toBe('autoscalePool');
+    expect(autoscaleLists(emu)).toHaveLength(2);
+
+    // A discover always looks, and what it finds is what the next claim sees.
+    await discovered(compute);
+    expect(autoscaleLists(emu)).toHaveLength(3);
+    await failure(compute.claim!(String(d!.id), 'inst_4', ctx()));
+    expect(autoscaleLists(emu)).toHaveLength(3);
+  });
+
+  it("release removes only this instance's tags", async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const d = seedDroplet(emu.state, { tags: ['better-compute-tenant:acme'] });
+    const id = String(d.id);
+    await compute.claim!(id, 'inst_1', ctx(), { managed: true });
+    const before = emu.requests.length;
+
+    // Another instance's release changes nothing, and neither does a droplet that is gone.
+    await compute.release!(id, 'inst_2', ctx());
+    await compute.release!('999', 'inst_1', ctx());
+    await compute.release!('not-an-id', 'inst_1', ctx());
+    expect(emu.requests.slice(before).filter((r) => r.method !== 'GET')).toEqual([]);
+    expect(d.tags).toContain(instanceTag('inst_1'));
+
+    await compute.release!(id, 'inst_1', ctx());
+    expect(d.tags).not.toContain(instanceTag('inst_1'));
+    expect(d.tags).not.toContain(managed);
+    expect(d.tags).toEqual(
+      expect.arrayContaining([deploymentTag('default'), 'better-compute-tenant:acme']),
+    );
+    // The managed tag goes first: a half-done release is still a claim, never a deletable droplet.
+    expect(unassigned(emu)).toEqual([
+      `/v2/tags/${managed}/resources`,
+      `/v2/tags/${instanceTag('inst_1')}/resources`,
+    ]);
+
+    // Released twice is released once.
+    await compute.release!(id, 'inst_1', ctx());
+    expect(unassigned(emu)).toHaveLength(2);
+    // Released, it can be claimed by someone else.
+    await compute.claim!(id, 'inst_2', ctx());
+    expect(d.tags).toContain(instanceTag('inst_2'));
+  });
+
+  it('release keeps the managed tag while another instance tag is on the droplet', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const d = seedDroplet(emu.state, {
+      tags: [managed, deploymentTag('default'), instanceTag('inst_1'), instanceTag('other')],
+    });
+    await compute.release!(String(d.id), 'inst_1', ctx());
+    expect(d.tags).toEqual(expect.arrayContaining([managed, instanceTag('other')]));
+    expect(d.tags).not.toContain(instanceTag('inst_1'));
   });
 });

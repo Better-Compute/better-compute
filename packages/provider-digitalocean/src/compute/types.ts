@@ -76,3 +76,17 @@ export interface DoVpc {
   default?: boolean;
   description?: string;
 }
+
+/** An autoscale pool (`GET /droplets/autoscale`). Only discovery's lookup reads it. */
+export interface DoAutoscalePool {
+  id: string;
+  name: string;
+  status?: string;
+}
+
+/** A member of an autoscale pool (`GET /droplets/autoscale/{id}/members`). */
+export interface DoAutoscaleMember {
+  droplet_id: number;
+  status?: string;
+  health_status?: string;
+}
