@@ -49,4 +49,5 @@ export * from './ssh.js';
 export * from './tickets.js';
 export * from './workload.js';
 export * from './workload-request.js';
+export * from './workload-issuer.js';
 export * from './x509.js';

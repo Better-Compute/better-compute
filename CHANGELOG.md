@@ -6,6 +6,40 @@ All notable changes to the better-compute packages are documented here. The form
 
 ## Unreleased
 
+### Added
+
+- **`@better-compute/gcp-common`** (new, outside the umbrella). The Google Cloud token sources
+  (`serviceAccountTokenSource`, `metadataTokenSource`, `impersonatedTokenSource`, `cachedTokenSource`) move out of
+  `@better-compute/provider-gcp` into a package that depends only on `@better-compute/core`, so other Google
+  providers can share them. `provider-gcp` re-exports the same functions; its API and behavior are unchanged.
+- **Universe domains** (`@better-compute/gcp-common`, `@better-compute/provider-gcp`). `googleEndpoint(service, { universeDomain })`
+  and `tokenEndpoint(universeDomain)` build Google endpoints for a host-configured universe (default `googleapis.com`).
+  `serviceAccountTokenSource` and `impersonatedTokenSource` take `universeDomain`: another universe pins a key's
+  `token_uri` to exactly `https://oauth2.<universe>/token`, and a key's own `universe_domain` must match it. The default
+  universe is unchanged. `gcpProvider({ universeDomain })` derives the compute endpoint from it.
+
+## 0.2.1 (2026-10-18)
+
+Compute Engine creates that 0.2.0 sent with a boot disk or network interface the machine type refuses, and SSH keys
+on images without cloud-init. Every package is at 0.2.1.
+
+### Fixed
+
+- **provider-gcp: newer machine types failed to create.** 0.2.0 always gave the boot disk `pd-balanced`, which the
+  Hyperdisk-only families refuse (`pd-balanced disk type cannot be used by a3-ultragpu-8g machine type`). The boot
+  disk type now follows the machine family: Hyperdisk Balanced for A3 Ultra, A4, A4X, C4, C4A, C4D, G4, H4D, M4, N4,
+  N4A, N4D and X4, `pd-balanced` for the rest as before. Create reads the zone's disk type first: a zone that does
+  not offer it, or a `diskGiB` outside the sizes it takes, is `INVALID_INPUT` (`details.reason` `diskTypeUnavailable`
+  or `diskSizeOutOfRange`) before anything is created. A family GCE refuses Persistent Disk for although the table
+  allows it is retried once with Hyperdisk Balanced under its own requestId, logged as `gcp.disk_type_fallback`, and
+  remembered.
+- **provider-gcp: gVNIC-only machine types.** A3, A4, A4X, C3, C3D, C4, C4A, C4D, G4, H3, H4D, M4, N4, N4A, N4D, X4
+  and Z3 VMs get `nicType: GVNIC`; they do not take VirtIO-Net.
+- **SSH keys on images without cloud-init.** Instance SSH keys only reached the VM through cloud-init user data,
+  which Compute Engine's Debian and Rocky Linux images do not run. `ProviderImpl.create` takes `sshKeys` (vps passes
+  the instance's), and provider-gcp also writes them as `ssh-keys` metadata for the image's default user (`debian`,
+  `rocky`, `centos`, else `ubuntu`), which the guest agent of every Compute Engine image installs.
+
 ## 0.2.0 (2026-10-18)
 
 A Google Compute Engine provider (`@better-compute/provider-gcp`, new), discovery and attach of existing provider

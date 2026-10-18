@@ -16,7 +16,7 @@ import {
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
-import { readAccount, type ProviderClients } from './accounts.js';
+import { readAccount, type ClientDeps, type ProviderClients } from './accounts.js';
 import { canonical, id, key, object, sha256Hex, tenant } from './input.js';
 
 // Platform-owned provider machines (PLAN.md §3.6): a server rented from a provider (Hetzner Robot)
@@ -214,6 +214,8 @@ export interface BootstrapDeps {
   clients: ProviderClients;
   /** The IAM root tenant: its provider accounts are the platform's (ruling F1). */
   rootTenantId?: string;
+  /** The host's workload issuer: provider accounts' identity (`ClientDeps.workload`). */
+  workload?: ClientDeps['workload'];
   pki?: PkiPort;
   options?: BootstrapOptions;
 }

@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/provider-proxmox",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Proxmox VE provider for better-compute: QEMU VMs cloned from templates as VPS instances.",
   "type": "module",
   "license": "Apache-2.0",

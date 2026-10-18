@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/pki",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Machine PKI for better-compute: local CAs, SPIFFE node certificates, sealed join tokens, signed join responses and renew proofs.",
   "type": "module",
   "license": "Apache-2.0",

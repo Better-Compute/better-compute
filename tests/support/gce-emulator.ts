@@ -69,6 +69,33 @@ export function defaultMachineTypes(): EmulatedMachineType[] {
   return zones.flatMap((zone) => shapes.map((shape) => ({ ...shape, zone })));
 }
 
+/** Machine types that only take Hyperdisk, for tests to add: an A3 Ultra (8 H200s) and a C4. */
+export function hyperdiskMachineTypes(): EmulatedMachineType[] {
+  const shapes: Omit<EmulatedMachineType, 'zone'>[] = [
+    {
+      name: 'a3-ultragpu-8g',
+      guestCpus: 224,
+      memoryMb: 2952 * 1024,
+      accelerators: [{ guestAcceleratorType: 'nvidia-h200-141gb', guestAcceleratorCount: 8 }],
+    },
+    { name: 'c4-standard-8', guestCpus: 8, memoryMb: 30 * 1024 },
+  ];
+  return zones.flatMap((zone) => shapes.map((shape) => ({ ...shape, zone })));
+}
+
+/** The boot disk types every zone offers, with the sizes GCE takes. */
+export function defaultDiskTypes(): Record<string, { validDiskSize: string }> {
+  return {
+    'pd-standard': { validDiskSize: '10GB-65536GB' },
+    'pd-balanced': { validDiskSize: '10GB-65536GB' },
+    'pd-ssd': { validDiskSize: '10GB-65536GB' },
+    'hyperdisk-balanced': { validDiskSize: '4GB-65536GB' },
+  };
+}
+
+/** Machine families that refuse Persistent Disk, as GCE does (`a3-ultragpu-8g`, `c4-…`). */
+const hyperdiskOnlyFamily = /^(a3-ultragpu|a4|a4x|c4|c4a|c4d|n4|x4)-/;
+
 /** A list filter GCE would refuse (HTTP 400 `invalid`). */
 class InvalidFilter extends Error {}
 
@@ -76,6 +103,12 @@ export class GceEmulator {
   /** Keyed `zone/name`. Values are GCE `Instance` resources. */
   instances = new Map<string, Json>();
   machineTypes: EmulatedMachineType[] = defaultMachineTypes();
+  /** Keyed `zone/diskType`; a zone without an entry does not offer that type. */
+  diskTypes = new Map<string, { validDiskSize: string }>(
+    zones.flatMap((zone) =>
+      Object.entries(defaultDiskTypes()).map(([type, body]) => [`${zone}/${type}`, body] as const),
+    ),
+  );
   /** GCE `Reservation` resources, each with its `zone` URL. */
   reservations: Json[] = [];
   /** GCE `FutureReservation` resources. */
@@ -393,6 +426,17 @@ export class GceEmulator {
     const segments = path.split('/').filter(Boolean);
     const [first, second, third, fourth, fifth, sixth] = segments;
 
+    // the project itself (`failNext` answers 403/404 instead)
+    if (segments.length === 0 && method === 'GET') {
+      const project = decodeURIComponent(url.pathname.split('/')[4] ?? '');
+      return this.json(200, {
+        kind: 'compute#project',
+        id: '123456789',
+        name: project,
+        selfLink: `${origin}/projects/${project}`,
+      });
+    }
+
     // aggregated lists
     if (first === 'aggregated' && method === 'GET') {
       if (second === 'instances')
@@ -567,6 +611,20 @@ export class GceEmulator {
         const typeName = String(body?.machineType).split('/').pop();
         if (!this.machineTypes.some((t) => t.zone === zone && t.name === typeName))
           return this.error(400, 'invalid', `Invalid value for field 'machineType': ${typeName}`);
+        const bootType = String(
+          (body?.disks as Json[] | undefined)?.find((disk) => disk.boot)?.initializeParams
+            ?.diskType ?? 'pd-standard',
+        )
+          .split('/')
+          .pop()!;
+        if (!this.diskTypes.has(`${zone}/${bootType}`))
+          return this.error(400, 'invalid', `Invalid value for field 'diskType': ${bootType}`);
+        if (bootType.startsWith('pd-') && hyperdiskOnlyFamily.test(String(typeName)))
+          return this.error(
+            400,
+            'invalid',
+            `[${bootType}] disk type cannot be used by [${typeName}] machine type.`,
+          );
         const key = `${zone}/${instanceName}`;
         const delay = Math.max(this.operationDelayTicks, this.insertDelayTicks);
         const make = (status: string) => {
@@ -649,6 +707,18 @@ export class GceEmulator {
           };
         });
       }
+    }
+    if (collection === 'diskTypes' && method === 'GET' && name) {
+      const type = this.diskTypes.get(`${zone}/${name}`);
+      return type
+        ? this.json(200, {
+            kind: 'compute#diskType',
+            name,
+            zone: `${origin}/projects/p/zones/${zone}`,
+            ...type,
+            selfLink: `${origin}/projects/p/zones/${zone}/diskTypes/${name}`,
+          })
+        : this.error(404, 'notFound', `The resource 'projects/p/zones/${zone}/diskTypes/${name}' was not found`);
     }
     if (collection === 'machineTypes' && method === 'GET' && !name)
       return this.#list(

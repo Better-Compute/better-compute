@@ -2,7 +2,7 @@ import { PROTOCOL_VERSION } from '@better-compute/protocol';
 import type { JoinPublicKeys } from './join/crypto.js';
 
 /** This release of `@better-compute/server`; equal to its package.json version (a test checks). */
-export const serverVersion = '0.2.0';
+export const serverVersion = '0.2.1';
 
 /** What `system.version` and `GET {basePath}/.well-known/better-compute` report. */
 export interface ServerInfo {
@@ -23,6 +23,11 @@ export interface ServerInfo {
    * they pin, so `bcd join --server <control plane>` writes its own config (PLAN.md §6 Install).
    */
   gateway?: WellKnownGateway;
+  /**
+   * The well-known document only, when `pki.workloadIssuer` is set: the OIDC issuer URL whose
+   * discovery document and JWKS this server serves below `{basePath}/workload`.
+   */
+  workload?: { issuer: string };
 }
 
 /** The gateway section of the well-known document. */

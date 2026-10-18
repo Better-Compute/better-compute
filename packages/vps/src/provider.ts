@@ -1,6 +1,15 @@
 import { ComputeError, type ProviderDefinition, type ProviderInput } from '@better-compute/core';
 
-const providerKeys = ['id', 'version', 'provides', 'config', 'capabilities', 'create'];
+const providerKeys = [
+  'id',
+  'version',
+  'provides',
+  'config',
+  'capabilities',
+  'create',
+  'checkAccount',
+  'accountKey',
+];
 const idPattern = /^[a-z][a-z0-9-]{0,63}$/;
 const versionPattern = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
 const kinds = ['metal', 'vps'];
@@ -62,5 +71,8 @@ export function defineProvider<C>(provider: ProviderInput<C>): ProviderDefinitio
   )
     fail('capabilities', 'must be a list of non-empty strings');
   if (typeof candidate.create !== 'function') fail('create', 'must be a function');
+  for (const hook of ['checkAccount', 'accountKey'])
+    if (candidate[hook] !== undefined && typeof candidate[hook] !== 'function')
+      fail(hook, 'must be a function');
   return Object.freeze({ ...provider, extension: 'provider' as const });
 }

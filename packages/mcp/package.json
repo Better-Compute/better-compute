@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Model Context Protocol tools for better-compute: pools, capacity, GPU reservations and node status for AI agents, gated by better-iam.",
   "type": "module",
   "license": "Apache-2.0",
