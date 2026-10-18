@@ -1,3 +1,4 @@
+import { registerAccount } from './account.js';
 import { registerActions } from './actions.js';
 import { registerAutoscale } from './autoscale.js';
 import { registerCatalog } from './catalog.js';
@@ -62,6 +63,8 @@ const apiPrefix = '/v2';
 
 export class DoEmulator {
   readonly state = new DoState();
+  /** The `account` body `GET /account` answers with. */
+  account: Json = {};
   /** The bearer tokens it accepts. */
   validTokens = new Set<string>(['do-token']);
   requests: RecordedRequest[] = [];
@@ -260,6 +263,7 @@ export class DoEmulator {
   }
 
   #registerCore(): void {
+    registerAccount(this);
     registerCatalog(this);
     registerKeys(this);
     registerTags(this);

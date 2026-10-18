@@ -63,6 +63,14 @@ function namedDroplets(context: RouteContext): Json[] | undefined {
 }
 
 export function registerTags(emulator: DoEmulator): void {
+  emulator.route('GET', /^\/tags$/, (context) =>
+    emulator.paged(
+      context,
+      'tags',
+      [...context.state.tags.values()].map((tag) => tagBody(context.state, tag.name)),
+    ),
+  );
+
   emulator.route('GET', /^\/tags\/([^/]+)$/, (context) => {
     const tag = context.state.tags.get(decodeURIComponent(context.match[1]!).toLowerCase());
     if (!tag) return emulator.error('not-found');

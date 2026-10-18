@@ -35,6 +35,10 @@ export function seedSshKey(state: DoState, name: string, publicKey: string): Jso
 }
 
 export function registerKeys(emulator: DoEmulator): void {
+  emulator.route('GET', /^\/account\/keys$/, (context) =>
+    emulator.paged(context, 'ssh_keys', [...context.state.sshKeys.values()]),
+  );
+
   emulator.route('GET', /^\/account\/keys\/([^/]+)$/, (context) => {
     const ref = decodeURIComponent(context.match[1]!);
     const key = [...context.state.sshKeys.values()].find(

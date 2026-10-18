@@ -1,11 +1,9 @@
 import { ComputeError, type ProviderContext } from '@better-compute/core';
 import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
-import { budgetFor } from './client/budget.js';
-import { doClient } from './client/http.js';
+import { clientFor } from './client/build.js';
 import { DoCompute } from './compute/droplets.js';
 import { doConfig, type DoConfig, type DoProviderOptions } from './config.js';
 
-const defaultEndpoint = 'https://api.digitalocean.com/v2';
 const maxInCallWaitMs = 20_000;
 
 function invalidConfig(message: string, reason: string): ComputeError {
@@ -41,24 +39,11 @@ export function digitaloceanProvider(
           `inCallWaitMs must be a whole number of milliseconds from 0 to ${maxInCallWaitMs}`,
           'inCallWaitMs',
         );
-      const client = doClient({
-        fetch: options.fetch ?? globalThis.fetch.bind(globalThis),
-        endpoint: options.endpoint ?? defaultEndpoint,
-        token: () => context.secrets.resolve(config.token),
-        budget: (hash) =>
-          budgetFor(hash, {
-            perMinute: options.budget?.perMinute ?? 250,
-            perHour: options.budget?.perHour ?? 5000,
-            clock: context.clock,
-          }),
-        clock: context.clock,
-        log: context.log,
-      });
       return new DoCompute(
         config,
         context,
         { deployment: options.deployment ?? 'default', inCallWaitMs },
-        client,
+        clientFor(config, context, options),
       );
     },
   });

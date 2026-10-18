@@ -12,4 +12,5 @@ export * from './compute/types.js';
 export * from './config.js';
 export * from './ids.js';
 export * from './networks/index.js';
+export * from './probe.js';
 export * from './provider.js';

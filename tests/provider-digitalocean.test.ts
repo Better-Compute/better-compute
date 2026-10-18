@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { beforeEach, describe, expect, it } from 'vitest';
-import { autoAttachLabels } from '@better-compute/vps';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { runConformance } from '@better-compute/core/conformance';
+import { autoAttachLabels, providerConformanceCases } from '@better-compute/vps';
 import {
   isComputeError,
   manualClock,
@@ -30,6 +31,7 @@ import {
   offerId,
   parseMachineId,
   parseOfferId,
+  probeAccount,
   RateBudget,
   tagFor,
   toMachine,
@@ -2064,5 +2066,172 @@ describe('attach', () => {
     await compute.release!(String(d.id), 'inst_1', ctx());
     expect(d.tags).toEqual(expect.arrayContaining([managed, instanceTag('other')]));
     expect(d.tags).not.toContain(instanceTag('inst_1'));
+  });
+});
+
+describe('definition', () => {
+  beforeEach(freshBudgets);
+
+  const emulator = () => new DoEmulator({ now: () => Date.parse('2026-10-18T10:00:00Z') });
+  const reads = (emu: DoEmulator) => emu.requests.map((r) => `${r.method} ${r.url.pathname}`);
+  const probeContext = {
+    clock: manualClock(1_000_000),
+    secrets,
+    log: noopLog,
+    account: platformAccount,
+  };
+  const forbidden = (emu: DoEmulator, path: RegExp) =>
+    emu.failNext({ method: 'GET', path }, 403, emu.error('forbidden').body as object);
+
+  it('passes every case of the ProviderImpl contract', async () => {
+    const report = await runConformance(providerConformanceCases(), () => {
+      const emu = emulator();
+      // A create needs an SSH key: the account's default one.
+      const key = seedSshKey(emu.state, 'ops', testKey);
+      const hand = seedDroplet(emu.state, { name: 'legacy', tags: [] });
+      return {
+        provider: digitaloceanProvider({ fetch: emu.fetch }),
+        config: { ...doAccount, defaultSshKey: key.fingerprint },
+        attachable: String(hand.id),
+        offerId: 'nyc3/s-1vcpu-1gb',
+        image: 'ubuntu-24-04-x64',
+        context: { secrets, account: platformAccount },
+      };
+    });
+    expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
+    expect(report.passed).toHaveLength(providerConformanceCases().length);
+  });
+
+  it('is a well-formed definition with the documented capabilities', async () => {
+    expect(digitalocean).toMatchObject({
+      id: 'digitalocean',
+      version: '0.1.0',
+      provides: ['vps'],
+      extension: 'provider',
+    });
+    expect(digitalocean.capabilities).toEqual([
+      'power',
+      'reinstall',
+      'list',
+      'discover',
+      'claim',
+      'networks',
+    ]);
+    const parsed = await digitalocean.config['~standard'].validate(doAccount);
+    expect(parsed).toMatchObject({
+      value: { monitoring: true, ipv6: false, allowSpot: false, previews: false },
+    });
+    const none = await digitalocean.config['~standard'].validate({ ...doAccount, regions: [] });
+    expect('issues' in none && none.issues?.length).toBeTruthy();
+  });
+
+  it('building a client makes no request', async () => {
+    const emu = emulator();
+    const resolve = vi.fn(secrets.resolve);
+    const impl = await digitaloceanProvider({ fetch: emu.fetch }).create(doAccount as DoConfig, {
+      ...probeContext,
+      secrets: { resolve },
+    });
+    expect(emu.requests).toHaveLength(0);
+    expect(resolve).not.toHaveBeenCalled();
+    // The first request resolves the token, once; later ones reuse it.
+    await impl.get('123', ctx());
+    await impl.get('124', ctx());
+    expect(emu.requests.length).toBeGreaterThan(0);
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(resolve).toHaveBeenCalledWith('secret://do/t');
+  });
+
+  it('an inline token is refused; a SecretRef resolves on first use', async () => {
+    // The manifest accepts only a secret reference, so a raw token never reaches `create`.
+    for (const token of ['dop_v1_abc', '']) {
+      const parsed = await digitalocean.config['~standard'].validate({ ...doAccount, token });
+      expect('issues' in parsed && parsed.issues?.length, JSON.stringify(token)).toBeTruthy();
+    }
+    const ok = await digitalocean.config['~standard'].validate({
+      ...doAccount,
+      token: 'env://DO_TOKEN',
+    });
+    expect('issues' in ok && ok.issues).toBeFalsy();
+
+    // The reference resolves on the first request, and its value is the bearer.
+    const emu = emulator();
+    const resolve = vi.fn(async () => 'do-token');
+    const impl = await digitaloceanProvider({ fetch: emu.fetch }).create(doAccount as DoConfig, {
+      ...probeContext,
+      secrets: { resolve },
+    });
+    expect(resolve).not.toHaveBeenCalled();
+    await impl.listOffers({});
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(emu.requests[0]!.headers.authorization).toBe('Bearer do-token');
+  });
+
+  it('probeAccount reports the account and a fully scoped token', async () => {
+    const emu = emulator();
+    emu.account.droplet_limit = 40;
+    const report = await probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch });
+    expect(report).toEqual({
+      account: { uuid: emu.account.uuid, status: 'active', dropletLimit: 40 },
+      families: { compute: 'ok', networks: 'ok', keys: 'ok', tags: 'ok' },
+      missing: [],
+    });
+    // Single, read-only requests: one page of each, nothing that changes anything.
+    expect(reads(emu).sort()).toEqual(
+      [
+        'GET /v2/account',
+        'GET /v2/account/keys',
+        'GET /v2/droplets',
+        'GET /v2/firewalls',
+        'GET /v2/regions',
+        'GET /v2/sizes',
+        'GET /v2/tags',
+        'GET /v2/vpcs',
+      ].sort(),
+    );
+    for (const r of emu.requests.filter((r) => r.url.pathname !== '/v2/account'))
+      expect(r.url.searchParams.get('per_page')).toBe('1');
+  });
+
+  it('probeAccount reports denied families from 403s and lists the missing scopes', async () => {
+    const emu = emulator();
+    forbidden(emu, /^\/firewalls$/);
+    forbidden(emu, /^\/sizes$/);
+    forbidden(emu, /^\/tags$/);
+    const report = await probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch });
+    expect(report.families).toEqual({
+      compute: 'denied',
+      networks: 'denied',
+      keys: 'ok',
+      tags: 'denied',
+    });
+    expect(report.missing).toEqual(['sizes:read', 'firewall:read', 'tag:read']);
+    expect(report.account.status).toBe('active');
+  });
+
+  it('probeAccount fails on a token the account refuses, and on other errors', async () => {
+    const refused = emulator();
+    refused.validTokens.clear();
+    const bad = await failure(
+      probeAccount(doAccount as DoConfig, probeContext, { fetch: refused.fetch }),
+    );
+    expect(bad.code).toBe('INVALID_CONFIG');
+    expect(bad.details).toMatchObject({ provider: 'digitalocean', status: 401 });
+
+    // Without account:read nothing else can be told.
+    const scoped = emulator();
+    forbidden(scoped, /^\/account$/);
+    const denied = await failure(
+      probeAccount(doAccount as DoConfig, probeContext, { fetch: scoped.fetch }),
+    );
+    expect(denied.code).toBe('ACCESS_DENIED');
+
+    // Anything but a 403 on a family's probe is not a verdict about the scope.
+    const broken = emulator();
+    broken.failNext({ method: 'GET', path: /^\/vpcs$/ }, 500, broken.error('server-error').body);
+    const unavailable = await failure(
+      probeAccount(doAccount as DoConfig, probeContext, { fetch: broken.fetch }),
+    );
+    expect(unavailable.details).toMatchObject({ provider: 'digitalocean', status: 500 });
   });
 });
