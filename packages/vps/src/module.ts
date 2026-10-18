@@ -17,8 +17,10 @@ import {
   type OfferQuery,
   type ProviderDefinition,
   type SecretResolver,
+  type WorkloadIssuerPort,
 } from '@better-compute/core';
 import {
+  checkAccountConfig,
   createAccount,
   deleteAccount,
   listAccounts,
@@ -554,6 +556,11 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     const rootTenantId = (context.iam as ModuleContext['iam'] | undefined)?.rootTenantId;
     return rootTenantId !== undefined ? { rootTenantId } : {};
   };
+  /** The host's workload issuer, from which provider accounts get their identity (GCP WS1). */
+  const workloadOf = (context: ModuleContext): { workload?: WorkloadIssuerPort } => {
+    const workload = context.pki?.workload;
+    return workload ? { workload } : {};
+  };
   const bootstrapDeps = (context: ModuleContext): BootstrapDeps => ({
     clock: context.clock,
     events: context.events,
@@ -562,6 +569,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     secrets: options.secrets ?? context.secrets ?? noSecrets,
     clients,
     ...rootOf(context),
+    ...workloadOf(context),
     ...(context.pki ? { pki: context.pki } : {}),
     ...(options.bootstrap ? { options: options.bootstrap } : {}),
   });
@@ -573,6 +581,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     secrets: options.secrets ?? context.secrets ?? noSecrets,
     clients,
     ...rootOf(context),
+    ...workloadOf(context),
   });
   if (options.hostNetwork !== undefined && !/^[A-Za-z0-9_.-]{1,15}$/.test(options.hostNetwork))
     throw new ComputeError('INVALID_CONFIG', 'vps({ hostNetwork }) must be an interface name');
@@ -597,6 +606,35 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     ...depsOf(context),
     ...(tenantVaultPaths ? { tenantVaultPaths } : {}),
   });
+  /**
+   * The id of a `providerAccounts.create` request, drawn once per request (its parsed input), so the
+   * admission check and the handler see the same account id also when no key derives it.
+   */
+  const requestAccountIds = new WeakMap<CreateAccountInput, string>();
+  const createAccountId = async (
+    context: ModuleContext & { caller?: { identityId: string } },
+    input: CreateAccountInput,
+  ): Promise<string> => {
+    let accountId = requestAccountIds.get(input);
+    if (accountId === undefined) {
+      accountId = await accountIdOf(context, input);
+      requestAccountIds.set(input, accountId);
+    }
+    return accountId;
+  };
+  /** `providerAccounts.create/update` admission `check`: the provider's network checks, no transaction open. */
+  const accountAdmissionCheck = (
+    context: MethodContext,
+    input: { provider: string; config: unknown },
+    account: Pick<ProviderAccount, 'id' | 'tenantId' | 'name'>,
+  ): Promise<void> =>
+    checkAccountConfig(
+      providers,
+      input,
+      account,
+      accountCheck(context),
+      context.signal ?? new AbortController().signal,
+    );
   const typePrefix = options.typePrefix ?? 'compute-';
   /**
    * A template that names secrets hands them to every sandbox's guest, which can read them: the
@@ -775,6 +813,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     secrets: options.secrets ?? context.secrets ?? noSecrets,
     clients,
     ...rootOf(context),
+    ...workloadOf(context),
   });
 
   const depsOf = (context: ModuleContext): InstanceDeps => {
@@ -789,6 +828,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       secrets: options.secrets ?? context.secrets ?? noSecrets,
       clients,
       ...rootOf(context),
+      ...workloadOf(context),
       runtime: runtimes[0]!,
       runtimes: runtimeTable,
     };
@@ -996,7 +1036,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
             if (input.idempotencyKey === undefined) return decide;
             const existing = await readAccount(
               tx,
-              await accountIdOf(context, input),
+              await createAccountId(context, input),
               input.tenantId,
             );
             if (!existing) return decide;
@@ -1007,13 +1047,21 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
               );
             return { status: 'replay', result: existing };
           },
+          // The provider's network checks, before the account exists and with no transaction
+          // open; a refusal stores nothing, so a retry with the same key decides again.
+          check: async (context, input) =>
+            accountAdmissionCheck(context, input, {
+              id: await createAccountId(context, input),
+              tenantId: input.tenantId,
+              name: input.name,
+            }),
         },
         handler: async (context, input) => {
           const account = await createAccount(
             context.sql,
             providers,
             input,
-            await accountIdOf(context, input),
+            await createAccountId(context, input),
             accountCheck(context),
           );
           await context.authz.upsert(context.sql, {
@@ -1076,6 +1124,24 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           const input = parseAccountRef(raw, ['config']);
           return { tenantId: input.tenantId, accountId: input.accountId, config: input.config };
         }),
+        admission: {
+          prepare: async (_context, input) => ({
+            status: 'decide' as const,
+            resource: accountResource(input),
+          }),
+          // As create's: the new config, checked by the provider for the stored account (its
+          // name and provider come from the row), with no transaction open.
+          check: async (context, input) => {
+            const account = await readAccount(context.sql, input.accountId, input.tenantId);
+            if (!account)
+              throw new ComputeError('NOT_FOUND', `Provider account ${input.accountId} not found`);
+            await accountAdmissionCheck(
+              context,
+              { provider: account.provider, config: input.config },
+              account,
+            );
+          },
+        },
         handler: (context, input) =>
           updateAccount(context.sql, providers, input, accountCheck(context)),
       }),

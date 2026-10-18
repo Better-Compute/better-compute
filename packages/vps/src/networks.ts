@@ -24,7 +24,12 @@ import {
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
-import { readAccount, type ProviderAccount, type ProviderClients } from './accounts.js';
+import {
+  readAccount,
+  type ClientDeps,
+  type ProviderAccount,
+  type ProviderClients,
+} from './accounts.js';
 import {
   attachConflictCondition,
   duplicateMachineCondition,
@@ -835,6 +840,8 @@ export interface NetworkDeps {
   clients: ProviderClients;
   /** The IAM root tenant: its provider accounts are the platform's (ruling F1). */
   rootTenantId?: string;
+  /** The host's workload issuer: provider accounts' identity (`ClientDeps.workload`). */
+  workload?: ClientDeps['workload'];
 }
 
 async function publish(

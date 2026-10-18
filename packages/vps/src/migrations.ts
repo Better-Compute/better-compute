@@ -147,6 +147,16 @@ export const vpsIpPoolDnsMigration: Migration = {
   sql: `ALTER TABLE ip_pools ADD COLUMN dns inet[] NOT NULL DEFAULT '{}';`,
 };
 
+/**
+ * (GCP WS1) A key no two accounts of one provider may share, across all tenants
+ * (`ProviderInput.accountKey`, e.g. a federation audience): NULL when the provider declares none.
+ */
+export const vpsAccountExclusiveKeyMigration: Migration = {
+  name: 'vps/0027_account_exclusive_key',
+  sql: `ALTER TABLE provider_accounts ADD COLUMN exclusive_key text;
+CREATE UNIQUE INDEX provider_accounts_exclusive_key ON provider_accounts (provider, exclusive_key) WHERE exclusive_key IS NOT NULL;`,
+};
+
 /** The VPS module's migrations, in ledger order. */
 export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsBaseMigration,
@@ -175,4 +185,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   instanceAttachMigration,
   providerReservationsMigration,
   vpsNetworksMigration,
+  vpsAccountExclusiveKeyMigration,
 ]);

@@ -25,7 +25,7 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { chargeQuota, refundQuota, resizeAllocation } from '@better-compute/capacity';
-import type { ProviderClients } from './accounts.js';
+import type { ClientDeps, ProviderClients } from './accounts.js';
 import { readFlavorByName, type FlavorRecord } from './flavors.js';
 import { claimReservationSlot } from './provider-reservations.js';
 import {
@@ -92,6 +92,8 @@ export interface InstanceDeps {
   clients: ProviderClients;
   /** The IAM root tenant: its provider accounts are the platform's (ruling F1). */
   rootTenantId?: string;
+  /** The host's workload issuer: provider accounts' identity (`ClientDeps.workload`). */
+  workload?: ClientDeps['workload'];
   images?: ImageResolver;
   /** The default runtime of hosted pools (`vps({ runtimes })[0]`); a pool picks another with `policy.runtime`. */
   runtime: string;
