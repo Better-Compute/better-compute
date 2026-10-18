@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { isComputeError, manualClock, type ComputeError } from '@better-compute/core';
+import {
+  isComputeError,
+  manualClock,
+  type ComputeError,
+  type ExternalMachine,
+} from '@better-compute/core';
 import {
   budgetFor,
   digitalocean,
@@ -29,6 +34,7 @@ import {
   toMachine,
   unprocessablePatterns,
   type DoClient,
+  type DoCompute,
   type DoConfig,
   type DoDroplet,
   type DoSize,
@@ -613,7 +619,7 @@ describe('ids', () => {
 });
 
 describe('offers', () => {
-  const config = { token: 'secret://do/t', regions: ['tor1'] };
+  const config: DoConfig = { token: 'secret://do/t', regions: ['tor1'] };
 
   it('lists one offer per size and configured region with price and GPUs', async () => {
     const { client } = setup();
@@ -656,7 +662,7 @@ describe('offers', () => {
 
   it('filters by the query and by configured regions', async () => {
     const { client, emu } = setup();
-    const wide = { token: 'secret://do/t', regions: ['tor1', 'atl1'] };
+    const wide: DoConfig = { token: 'secret://do/t', regions: ['tor1', 'atl1'] };
     const eight = await listOffers(client, wide, { gpuModel: 'h100', minGpus: 8 }, signal);
     expect(eight.map((o) => o.id)).toEqual(['tor1/gpu-h100x8-640gb']);
 
@@ -684,7 +690,7 @@ describe('offers', () => {
     tor1.sizes = tor1.sizes.filter((s: string) => s !== 'gpu-l40sx1-48gb');
     emu.state.sizes.find((s) => s.slug === 'gpu-6000adax1-48gb')!.available = false;
     emu.state.regions.find((r) => r.slug === 'atl1')!.available = false;
-    const wide = { token: 'secret://do/t', regions: ['tor1', 'atl1'] };
+    const wide: DoConfig = { token: 'secret://do/t', regions: ['tor1', 'atl1'] };
     const offers = await listOffers(client, wide, {}, signal);
     const byId = new Map(offers.map((o) => [o.id, o]));
     expect(byId.get('tor1/gpu-l40sx1-48gb')?.available).toBe(false);
@@ -1320,6 +1326,267 @@ describe('compute', () => {
     });
     await compute.delete(String(mine.id), ctx());
     expect(deletes(emu)).toEqual([`/v2/droplets/${mine.id}`]);
+  });
+
+  // -------------------------------------------------------------------- reap and retry paths
+
+  it('a retried create with two owned droplets under one key keeps the oldest and reaps only the other', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const old = seedDroplet(emu.state, {
+      tags: ours('inst_1'),
+      created_at: isoSeconds(t0 - 2000),
+    });
+    const newer = seedDroplet(emu.state, {
+      tags: ours('inst_1'),
+      created_at: isoSeconds(t0 - 1000),
+    });
+    // Same key tag, but not ours to delete: another deployment's, and one that is not managed.
+    const foreign = seedDroplet(emu.state, {
+      tags: ['better-compute-managed:true', deploymentTag('other'), keyTag('inst_1')],
+      created_at: isoSeconds(t0 - 3000),
+    });
+    const unmanaged = seedDroplet(emu.state, {
+      tags: [deploymentTag('default'), keyTag('inst_1')],
+      created_at: isoSeconds(t0 - 4000),
+    });
+    const machine = await compute.create(request(), ctx('inst_1'));
+    expect(machine.id).toBe(String(old.id));
+    expect(posts(emu)).toHaveLength(0);
+    expect(deletes(emu)).toEqual([`/v2/droplets/${newer.id}`]);
+    expect([...emu.state.droplets.keys()]).toEqual([old.id, foreign.id, unmanaged.id]);
+  });
+
+  it('a create whose POST fails UNAVAILABLE returns the droplet if it landed', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const serverError = errorFixtures.find((e) => e.name === 'server-error')!;
+    // The Droplet is created, then the answer is lost to a 500.
+    let landed: Record<string, any> | undefined;
+    emu.beforeAction('POST /droplets', () => {
+      landed = seedDroplet(emu.state, {
+        name: 'bc-inst-1',
+        size_slug: 's-2vcpu-4gb',
+        status: 'new',
+        tags: [...ours('inst_1'), tagFor(labels.instance, 'inst_1')],
+      });
+    });
+    emu.failNext({ method: 'POST', path: /^\/droplets$/ }, serverError.status, serverError.body);
+    const machine = await compute.create(request(), ctx('inst_1'));
+    expect(landed).toBeDefined();
+    expect(machine.id).toBe(String(landed!.id));
+    expect(posts(emu)).toHaveLength(1);
+    expect(deletes(emu)).toEqual([]);
+  });
+
+  it('a create whose POST fails UNAVAILABLE with nothing landed rethrows that error', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const serverError = errorFixtures.find((e) => e.name === 'server-error')!;
+    emu.failNext({ method: 'POST', path: /^\/droplets$/ }, serverError.status, serverError.body);
+    const error = await failure(compute.create(request(), ctx('inst_1')));
+    expect(error.code).toBe('UNAVAILABLE');
+    expect(error.details).toMatchObject({ provider: 'digitalocean', status: 500 });
+    expect(posts(emu)).toHaveLength(1);
+    expect(emu.state.droplets.size).toBe(0);
+    // The key lookup ran again after the failed POST.
+    const lookups = emu.requests.filter(
+      (r) => r.method === 'GET' && r.url.searchParams.get('tag_name') === keyTag('inst_1'),
+    );
+    expect(lookups).toHaveLength(2);
+  });
+
+  it('get answers undefined when the droplet vanishes while its create action is read', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const fresh = seedDroplet(emu.state, { status: 'new', tags: ours('inst_1') });
+    emu.failNext({ method: 'GET', path: /^\/droplets\/\d+\/actions$/ }, 404, {
+      id: 'not_found',
+      message: 'The resource you were accessing could not be found.',
+    });
+    expect(await compute.get(String(fresh.id), ctx())).toBeUndefined();
+    // Other failures of that read still surface.
+    const serverError = errorFixtures.find((e) => e.name === 'server-error')!;
+    emu.failNext({ method: 'GET', path: /^\/droplets\/\d+\/actions$/ }, 500, serverError.body);
+    expect((await failure(compute.get(String(fresh.id), ctx()))).code).toBe('UNAVAILABLE');
+  });
+
+  // ---------------------------------------------------------------- power, reinstall, list
+
+  const instanceTags = (instance: string) => [
+    'better-compute-managed:true',
+    deploymentTag('default'),
+    tagFor(labels.instance, instance),
+  ];
+  const actionPosts = (emu: DoEmulator) =>
+    emu.requests.filter(
+      (r) => r.method === 'POST' && /^\/v2\/droplets\/\d+\/actions$/.test(r.url.pathname),
+    );
+
+  it('power maps actions; nmi is UNSUPPORTED', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const droplet = seedDroplet(emu.state, { tags: instanceTags('inst_1') });
+    const id = String(droplet.id);
+    const mapping = [
+      ['on', 'power_on'],
+      ['off', 'power_off'],
+      ['graceful-off', 'shutdown'],
+      ['graceful-restart', 'reboot'],
+      ['cycle', 'power_cycle'],
+      ['reset', 'power_cycle'],
+    ] as const;
+    for (const [action] of mapping) expect(await compute.power(id, action, ctx())).toBeUndefined();
+    expect(actionPosts(emu).map((r) => r.body)).toEqual(mapping.map(([, type]) => ({ type })));
+    for (const r of actionPosts(emu)) expect(r.url.pathname).toBe(`/v2/droplets/${id}/actions`);
+    // The actions are recorded, and an off/on pair is observable through get.
+    expect([...emu.state.actions.values()].map((a) => a.type)).toEqual(mapping.map(([, t]) => t));
+    await compute.power(id, 'off', ctx());
+    expect((await compute.get(id, ctx()))?.state).toBe('stopped');
+    await compute.power(id, 'on', ctx());
+    expect((await compute.get(id, ctx()))?.state).toBe('running');
+
+    // nmi has no DigitalOcean equivalent: refused before any request.
+    const sent = emu.requests.length;
+    const error = await failure(compute.power(id, 'nmi', ctx()));
+    expect(error.code).toBe('UNSUPPORTED');
+    expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'nmi' });
+    expect(emu.requests).toHaveLength(sent);
+
+    // An attached droplet (claimed, not handed over: no managed tag) can still be powered.
+    const attached = seedDroplet(emu.state, {
+      tags: [deploymentTag('default'), tagFor(labels.instance, 'inst_9')],
+    });
+    await compute.power(String(attached.id), 'graceful-off', ctx());
+    expect(emu.state.droplets.get(attached.id)!.status).toBe('off');
+    // A missing droplet is NOT_FOUND.
+    expect((await failure(compute.power('999', 'on', ctx()))).code).toBe('NOT_FOUND');
+    expect((await failure(compute.power('abc', 'on', ctx()))).code).toBe('NOT_FOUND');
+  });
+
+  it("power and reinstall refuse a droplet that is not this instance's", async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const unmanaged = seedDroplet(emu.state, { tags: [] });
+    const foreign = seedDroplet(emu.state, {
+      tags: ['better-compute-managed:true', deploymentTag('other'), tagFor(labels.instance, 'i')],
+    });
+    // In this deployment but never claimed by an instance.
+    const unclaimed = seedDroplet(emu.state, {
+      tags: ['better-compute-managed:true', deploymentTag('default')],
+    });
+    // Claimed in this deployment without the managed tag: powerable, never rebuilt.
+    const attached = seedDroplet(emu.state, {
+      tags: [deploymentTag('default'), tagFor(labels.instance, 'inst_9')],
+    });
+    // An instance tag without this deployment's tag.
+    const stray = seedDroplet(emu.state, { tags: [tagFor(labels.instance, 'inst_9')] });
+
+    for (const droplet of [unmanaged, foreign, unclaimed, stray]) {
+      const error = await failure(compute.power(String(droplet.id), 'off', ctx()));
+      expect(error.code).toBe('INVALID_STATE');
+      expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'notInstance' });
+    }
+    for (const droplet of [unmanaged, foreign, attached, stray]) {
+      const error = await failure(compute.reinstall(String(droplet.id), 'ubuntu-24-04-x64', ctx()));
+      expect(error.code).toBe('INVALID_STATE');
+      expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'notManaged' });
+    }
+    expect(actionPosts(emu)).toEqual([]);
+    expect([...emu.state.actions.values()]).toEqual([]);
+  });
+
+  it('reinstall rebuilds with the image', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const droplet = seedDroplet(emu.state, { tags: instanceTags('inst_1') });
+    const id = String(droplet.id);
+    expect(await compute.reinstall(id, 'debian-12-x64', ctx())).toBeUndefined();
+    await compute.reinstall(id, '12345', ctx());
+    expect(actionPosts(emu).map((r) => r.body)).toEqual([
+      { type: 'rebuild', image: 'debian-12-x64' },
+      { type: 'rebuild', image: 12345 },
+    ]);
+    // A rebuild keeps the droplet's status.
+    expect(emu.state.droplets.get(droplet.id)!.status).toBe('active');
+    expect([...emu.state.actions.values()].map((a) => a.type)).toEqual(['rebuild', 'rebuild']);
+
+    // Catalog images are not supported yet, as in create; refused before any request.
+    const sent = emu.requests.length;
+    const error = await failure(compute.reinstall(id, 'my-image@1', ctx()));
+    expect(error.code).toBe('UNSUPPORTED');
+    expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'catalogImage' });
+    expect(emu.requests).toHaveLength(sent);
+    expect((await failure(compute.reinstall('999', 'debian-12-x64', ctx()))).code).toBe(
+      'NOT_FOUND',
+    );
+  });
+
+  async function listed(compute: DoCompute): Promise<ExternalMachine[]> {
+    const out: ExternalMachine[] = [];
+    for await (const machine of compute.list(ctx())) out.push(machine);
+    return out;
+  }
+
+  it("list yields only this deployment's managed droplets, across pages", async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const mine: number[] = [];
+    for (let i = 0; i < 450; i += 1)
+      mine.push(seedDroplet(emu.state, { tags: instanceTags(`i${i}`) }).id);
+    // None of these are ours to manage.
+    seedDroplet(emu.state, { tags: [] });
+    seedDroplet(emu.state, { tags: ['better-compute-managed:true', deploymentTag('other')] });
+    seedDroplet(emu.state, { tags: [deploymentTag('default'), tagFor(labels.instance, 'att')] });
+
+    const machines = await listed(compute);
+    expect(machines.map((m) => m.id)).toEqual(mine.map(String));
+    expect(machines[0]).toMatchObject({ state: 'running', claimedBy: 'i0' });
+
+    const lists = emu.requests.filter(
+      (r) =>
+        r.method === 'GET' &&
+        r.url.pathname === '/v2/droplets' &&
+        r.url.searchParams.has('tag_name'),
+    );
+    expect(lists.map((r) => r.url.searchParams.get('page') ?? '1')).toEqual(['1', '2', '3']);
+    for (const r of lists) {
+      expect(r.url.searchParams.get('tag_name')).toBe(deploymentTag('default'));
+      expect(r.url.searchParams.get('per_page')).toBe('200');
+    }
+  });
+
+  it('list includes managed GPU droplets', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const plain = seedDroplet(emu.state, { tags: instanceTags('plain') });
+    const gpu = seedDroplet(emu.state, {
+      size_slug: 'gpu-h100x1-80gb',
+      region: 'tor1',
+      tags: instanceTags('gpu'),
+    });
+    // GPU droplets that are not ours: another deployment's, and one that is not managed.
+    seedDroplet(emu.state, {
+      size_slug: 'gpu-h100x1-80gb',
+      region: 'tor1',
+      tags: ['better-compute-managed:true', deploymentTag('other')],
+    });
+    seedDroplet(emu.state, {
+      size_slug: 'gpu-h100x1-80gb',
+      region: 'tor1',
+      tags: [deploymentTag('default'), tagFor(labels.instance, 'att')],
+    });
+
+    const machines = await listed(compute);
+    expect(machines.map((m) => m.id).sort()).toEqual([String(plain.id), String(gpu.id)].sort());
+    expect(machines.find((m) => m.id === String(gpu.id))?.gpus).toEqual({
+      model: 'H100',
+      count: 1,
+    });
+    // The GPU list is its own request and never carries tag_name (research S2).
+    const gpuLists = emu.requests.filter((r) => r.url.searchParams.get('type') === 'gpus');
+    expect(gpuLists).toHaveLength(1);
+    expect(gpuLists[0]!.url.searchParams.has('tag_name')).toBe(false);
   });
 
   it('the definition builds a client without any request or secret, and checks its options', async () => {

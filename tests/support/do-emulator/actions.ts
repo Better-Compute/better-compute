@@ -5,6 +5,9 @@ import { fixture, type DoState, type Json } from './state.js';
 // and `GET /v2/droplets/{id}/actions` read them from `state.actions`. An action starts
 // `in-progress`; the service that started it settles it (a create completes after some reads of
 // its Droplet). `failAction` makes one end `errored`, which DO reports without any message.
+// `POST /v2/droplets/{id}/actions` starts a Droplet action: a power action completes at once and
+// turns the Droplet's status (`power_off` and `shutdown` to off, the rest to active), a rebuild
+// completes and leaves the status alone. The tag-scoped `POST /v2/droplets/actions` is not routed.
 
 /** The shape of an `action` body, from the fixture. */
 const template = fixture('actions').action as Json;
@@ -79,7 +82,36 @@ export function failAction(state: DoState, match: ActionMatch): void {
   armed.set(state, pending);
 }
 
+/** The Droplet status a completed power action leaves; absent for actions that keep it. */
+const powerStatus: Readonly<Record<string, 'active' | 'off'>> = {
+  power_on: 'active',
+  power_off: 'off',
+  shutdown: 'off',
+  reboot: 'active',
+  power_cycle: 'active',
+};
+
 export function registerActions(emulator: DoEmulator): void {
+  emulator.route('POST', /^\/droplets\/(\d+)\/actions$/, (context) => {
+    const droplet = context.state.droplets.get(Number(context.match[1]));
+    if (!droplet) return emulator.error('not-found');
+    const type = context.body?.type;
+    if (typeof type !== 'string' || !(Object.hasOwn(powerStatus, type) || type === 'rebuild'))
+      return emulator.error('422-unknown');
+    if (type === 'rebuild') {
+      const image = context.body?.image;
+      if (!(typeof image === 'string' && image !== '') && !Number.isInteger(image))
+        return emulator.error('422-invalid-image');
+    }
+    const action = startAction(context.state, type, droplet);
+    if (action.status === 'in-progress') {
+      settleAction(context.state, action, 'completed');
+      const status = powerStatus[type];
+      if (status !== undefined) droplet.status = status;
+    }
+    return { status: 201, body: { action: structuredClone(action) } };
+  });
+
   emulator.route('GET', /^\/actions\/(\d+)$/, (context) => {
     const action = context.state.actions.get(Number(context.match[1]));
     if (!action) return emulator.error('not-found');

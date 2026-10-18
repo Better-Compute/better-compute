@@ -5,6 +5,7 @@ import {
   type ExternalMachine,
   type Offer,
   type OfferQuery,
+  type PowerAction,
   type ProviderContext,
   type ProviderImpl,
 } from '@better-compute/core';
@@ -32,7 +33,9 @@ import type { DoAction, DoDroplet, DoVpc } from './types.js';
 // post; the second lookup sees both Droplets, keeps the oldest and deletes the rest, so every
 // caller converges on one Droplet (DO-D4). Deletion only ever touches a Droplet that carries the
 // managed tag and this deployment's tag (DO-D16, ruling R3), one Droplet at a time: the
-// tag-scoped bulk endpoints are never called.
+// tag-scoped bulk endpoints are never called. Power acts on a Droplet that carries this
+// deployment's tag and an instance tag (a claimed VM is powerable without being deletable); a
+// rebuild wipes the disk, so it needs the same ownership as a delete.
 
 /** DO's limit on `user_data`, in bytes. */
 const maxUserDataBytes = 65_536;
@@ -119,6 +122,32 @@ function hasTag(droplet: DoDroplet, tag: string): boolean {
   return (droplet.tags ?? []).some((t) => t.toLowerCase() === tag);
 }
 
+const instanceTagPrefix = `${labels.instance}:`;
+
+/** DO's action type for each power action; `nmi` has none. */
+const powerTypes: Readonly<Record<Exclude<PowerAction, 'nmi'>, string>> = {
+  on: 'power_on',
+  off: 'power_off',
+  'graceful-off': 'shutdown',
+  'graceful-restart': 'reboot',
+  cycle: 'power_cycle',
+  reset: 'power_cycle',
+};
+
+/** The `image` of a create or a rebuild: a numeric id as a number, a slug as it is. */
+function imageParam(image: string): string | number {
+  return /^[1-9][0-9]*$/.test(image) ? Number(image) : image;
+}
+
+function refuseCatalogImage(image: string): void {
+  if (image.includes('@'))
+    throw fail(
+      'UNSUPPORTED',
+      `catalog image ${image} is not supported on DigitalOcean yet`,
+      'catalogImage',
+    );
+}
+
 export class DoCompute implements ProviderImpl {
   protected readonly config: DoConfig;
   protected readonly context: ProviderContext;
@@ -143,6 +172,17 @@ export class DoCompute implements ProviderImpl {
   /** Whether better-compute may delete the Droplet: managed, and in this deployment (R3). */
   protected owned(droplet: DoDroplet): boolean {
     return hasTag(droplet, managedTag) && hasTag(droplet, this.deploymentTag);
+  }
+
+  /**
+   * Whether better-compute may power the Droplet: in this deployment and claimed by an instance
+   * (R3). Unlike `owned` it does not need the managed tag: tenants control the VMs they attach.
+   */
+  protected instanceOwned(droplet: DoDroplet): boolean {
+    return (
+      hasTag(droplet, this.deploymentTag) &&
+      (droplet.tags ?? []).some((t) => t.toLowerCase().startsWith(instanceTagPrefix))
+    );
   }
 
   // ------------------------------------------------------------------------------- offers
@@ -242,12 +282,7 @@ export class DoCompute implements ProviderImpl {
         'region',
       );
     if (spot) throw fail('UNSUPPORTED', 'DigitalOcean Spot capacity is not supported yet', 'spot');
-    if (request.image.includes('@'))
-      throw fail(
-        'UNSUPPORTED',
-        `catalog image ${request.image} is not supported on DigitalOcean yet`,
-        'catalogImage',
-      );
+    refuseCatalogImage(request.image);
     if (Buffer.byteLength(request.userData, 'utf8') > maxUserDataBytes)
       throw fail(
         'INVALID_INPUT',
@@ -285,7 +320,7 @@ export class DoCompute implements ProviderImpl {
         );
       tags.push(tag);
     }
-    const image = /^[1-9][0-9]*$/.test(request.image) ? Number(request.image) : request.image;
+    const image = imageParam(request.image);
     const gpu = this.isGpuSize(size);
 
     // 2. A retry finds the Droplet its first attempt made.
@@ -382,12 +417,18 @@ export class DoCompute implements ProviderImpl {
     if (!droplet) return undefined;
     if (droplet.status === 'new') {
       let create: DoAction | undefined;
-      for await (const action of this.client.pages<DoAction>(
-        `/droplets/${droplet.id}/actions`,
-        'actions',
-        { signal: ctx.signal, budget: 'observe' },
-      ))
-        if (action.type === 'create') create = action;
+      try {
+        for await (const action of this.client.pages<DoAction>(
+          `/droplets/${droplet.id}/actions`,
+          'actions',
+          { signal: ctx.signal, budget: 'observe' },
+        ))
+          if (action.type === 'create') create = action;
+      } catch (error) {
+        // Deleted between the read and the action list.
+        if (isComputeError(error, 'NOT_FOUND')) return undefined;
+        throw error;
+      }
       if (create?.status === 'errored')
         throw fail(
           'CAPACITY_UNAVAILABLE',
@@ -408,5 +449,83 @@ export class DoCompute implements ProviderImpl {
         'notManaged',
       );
     await this.destroy(droplet.id, ctx.signal);
+  }
+
+  // ------------------------------------------------------------------- power, reinstall, list
+
+  /** The Droplet to act on: it must exist and pass `allowed`, else the refusal's `reason`. */
+  protected async target(
+    id: string,
+    signal: AbortSignal,
+    allowed: (droplet: DoDroplet) => boolean,
+    refusal: { reason: string; message: (droplet: DoDroplet) => string },
+  ): Promise<DoDroplet> {
+    const droplet = await this.droplet(id, signal);
+    if (!droplet)
+      throw new ComputeError('NOT_FOUND', `Droplet ${id} does not exist`, undefined, {
+        provider: 'digitalocean',
+        id,
+      });
+    if (!allowed(droplet)) throw fail('INVALID_STATE', refusal.message(droplet), refusal.reason);
+    return droplet;
+  }
+
+  /** Starts a Droplet action. It is not awaited: a later `get` shows its effect. */
+  protected async act(
+    droplet: DoDroplet,
+    body: { type: string; image?: string | number },
+    signal: AbortSignal,
+  ): Promise<void> {
+    const reply = await this.client.request<{ action?: DoAction }>(
+      'POST',
+      `/droplets/${droplet.id}/actions`,
+      { body, signal, budget: 'mutate' },
+    );
+    this.context.log.info('digitalocean.action', {
+      droplet: droplet.id,
+      type: body.type,
+      action: reply.action?.id,
+    });
+  }
+
+  async power(id: string, action: PowerAction, ctx: CallContext): Promise<void> {
+    if (action === 'nmi') throw fail('UNSUPPORTED', 'DigitalOcean has no NMI power action', 'nmi');
+    const droplet = await this.target(id, ctx.signal, (d) => this.instanceOwned(d), {
+      reason: 'notInstance',
+      message: (d) =>
+        `Droplet ${d.id} does not belong to an instance of this better-compute deployment and is never powered by it`,
+    });
+    await this.act(droplet, { type: powerTypes[action] }, ctx.signal);
+  }
+
+  async reinstall(id: string, image: string, ctx: CallContext): Promise<void> {
+    refuseCatalogImage(image);
+    const droplet = await this.target(id, ctx.signal, (d) => this.owned(d), {
+      reason: 'notManaged',
+      message: (d) =>
+        `Droplet ${d.id} is not managed by this better-compute deployment and is never rebuilt by it`,
+    });
+    await this.act(droplet, { type: 'rebuild', image: imageParam(image) }, ctx.signal);
+  }
+
+  /**
+   * This deployment's managed Droplets. The `tag_name` list omits GPU Droplets and can't be
+   * combined with `type=gpus` (research S2), so the GPU list is paged on its own and filtered by
+   * the deployment tag here; a Droplet is yielded once.
+   */
+  async *list(ctx: CallContext): AsyncIterable<ExternalMachine> {
+    const seen = new Set<number>();
+    const queries: Record<string, string>[] = [{ tag_name: this.deploymentTag }, { type: 'gpus' }];
+    for (const query of queries)
+      for await (const droplet of this.client.pages<DoDroplet>('/droplets', 'droplets', {
+        query,
+        signal: ctx.signal,
+        budget: 'sweep',
+      })) {
+        // The GPU list is everyone's, so both lists are checked for managed and deployment tags.
+        if (seen.has(droplet.id) || !this.owned(droplet)) continue;
+        seen.add(droplet.id);
+        yield toMachine(droplet);
+      }
   }
 }
