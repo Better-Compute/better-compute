@@ -164,6 +164,47 @@ function shiftPeriod(period: string, by: number): string {
 }
 
 /**
+ * Defines the meters the tenant lacks, once each and in order; the ones it has are left alone (a meter another
+ * process defined between the listing and the create counts as existing). One listing, then one create per missing
+ * meter. Shared by the port's `ensureMeters` and `better-compute iam setup --meters`.
+ */
+export async function ensureMetersOn(
+  calls: Pick<BillingCalls, 'createMeter'> & {
+    listMeters(input: { tenantId: string }): Promise<{ key: string }[]>;
+  },
+  tenantId: string,
+  meters: readonly MeterSpec[],
+): Promise<{ created: string[]; existing: string[] }> {
+  const present = new Set((await calls.listMeters({ tenantId })).map((meter) => meter.key));
+  const created: string[] = [];
+  const existing: string[] = [];
+  const seen = new Set<string>();
+  for (const meter of meters) {
+    if (seen.has(meter.key)) continue;
+    seen.add(meter.key);
+    if (present.has(meter.key)) {
+      existing.push(meter.key);
+      continue;
+    }
+    try {
+      await calls.createMeter({
+        tenantId,
+        key: meter.key,
+        name: meter.name,
+        unit: meter.unit,
+        pricing: meter.pricing,
+      });
+      created.push(meter.key);
+    } catch (error) {
+      // Another process defined it between the listing and the create.
+      if (iamCode(error) !== 'CONFLICT') throw error;
+      existing.push(meter.key);
+    }
+  }
+  return { created, existing };
+}
+
+/**
  * The five billing members over `calls`, all on `rootTenantId`. `wrap` maps better-iam's errors the way the
  * port's other members do.
  */
@@ -173,37 +214,7 @@ export function billingPort(
   wrap: <T>(work: () => Promise<T>) => Promise<T>,
 ): BillingMembers {
   const ensureMeters: BillingMembers['ensureMeters'] = (meters) =>
-    wrap(async () => {
-      const present = new Set(
-        (await calls.listMeters({ tenantId: rootTenantId })).map((m) => m.key),
-      );
-      const created: string[] = [];
-      const existing: string[] = [];
-      const seen = new Set<string>();
-      for (const meter of meters) {
-        if (seen.has(meter.key)) continue;
-        seen.add(meter.key);
-        if (present.has(meter.key)) {
-          existing.push(meter.key);
-          continue;
-        }
-        try {
-          await calls.createMeter({
-            tenantId: rootTenantId,
-            key: meter.key,
-            name: meter.name,
-            unit: meter.unit,
-            pricing: meter.pricing,
-          });
-          created.push(meter.key);
-        } catch (error) {
-          // Another process defined it between the listing and the create.
-          if (iamCode(error) !== 'CONFLICT') throw error;
-          existing.push(meter.key);
-        }
-      }
-      return { created, existing };
-    });
+    wrap(() => ensureMetersOn(calls, rootTenantId, meters));
 
   const setPrice: BillingMembers['setPrice'] = (input) =>
     wrap(async () => {

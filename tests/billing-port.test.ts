@@ -1,18 +1,28 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  ComputeError,
   isComputeError,
   type IamPort,
   type MeterSpec,
   type PriceSpecInput,
+  type SqlExecutor,
   type UsageEvent,
 } from '@better-compute/core';
 import {
   createComputeIamBridge,
+  defaultMeterGpuModels,
   embeddedIam,
+  flushUsageWindows,
+  meterCatalog,
+  computeMeters,
   spyIamPort,
+  successorsMigration,
   type ComputeIamBridge,
 } from '@better-compute/iam';
 import { createEmbeddedTestIam, type EmbeddedTestIam } from '@better-compute/iam/testing';
+import { billableLines, gpuMeter, hourMs, meterAllocation } from '@better-compute/capacity';
+import { pglite } from '@better-compute/postgres/pglite';
+import { volumeMeter, warmMeter } from '@better-compute/vps';
 import { createMetrics, meteredIamPort, standardMetrics } from '@better-compute/observability';
 import { ORIGIN, closeIamFixtures, iamFixture, type IamFixture } from './support/iam.js';
 import { guardIamPort } from '../packages/server/src/iam-guard.js';
@@ -504,5 +514,282 @@ describe('port wrappers keep the billing members', () => {
         name,
       ).rejects.toMatchObject({ code: 'INVALID_STATE' });
     expect(inner.spend).not.toHaveBeenCalled();
+  });
+});
+
+describe('catalog', () => {
+  // The meters the existing reconcilers emit (capacity's billableLines, vps instance usage, volumes), plus the
+  // D4/D7/D8/D9 meters later tasks emit. Spelled out by hand: Task 5 adds the cross-check against meterLinesFor.
+  const models = ['H100', 'H200', 'B200', 'A100', 'L4', 'L40S', 'other'];
+  const slug = (model: string) => model.toLowerCase();
+  const existingEmitters = (): string[] => {
+    const emitted: string[] = ['vps.vcpu.hours', 'vps.memory.gib.hours', warmMeter, volumeMeter];
+    for (const model of models)
+      for (const spot of [false, true])
+        for (const nodeLease of [false, true])
+          for (const line of billableLines({
+            gpuModel: model === 'other' ? undefined : model,
+            gpus: 1,
+            healthyGpus: 1,
+            spot,
+            nodeLease,
+          }))
+            emitted.push(line.meter);
+    for (const model of models) emitted.push(gpuMeter(model === 'other' ? undefined : model));
+    return emitted;
+  };
+  const plannedEmitters = (): string[] => {
+    const planned = [
+      // D4
+      'vm.vcpu.hours',
+      'vm.memory.gib.hours',
+      'vm.instance.hours',
+      // D8
+      'vm.reserved.vcpu.hours',
+      'vm.reserved.memory.gib.hours',
+      // D7
+      'vm.grant.slot.hours',
+      'vm.grant.usage.hours',
+      'vm.managed.hours',
+      // D9
+      'network.vpc.hours',
+      'ip.public.hours',
+      'snapshot.gib.hours',
+      ...['pd-standard', 'pd-balanced', 'pd-ssd', 'hyperdisk-balanced', 'local-ssd'].map(
+        (type) => `disk.${type}.gib.hours`,
+      ),
+    ];
+    for (const model of models)
+      planned.push(
+        `vm.gpu.${slug(model)}.hours`,
+        `vm.gpu.${slug(model)}.spot.hours`,
+        `vm.reserved.gpu.${slug(model)}.hours`,
+      );
+    return planned;
+  };
+
+  it('meterCatalog covers every meter the existing reconcilers emit and the planned D4/D7/D8/D9 meters', () => {
+    const keys = new Set(meterCatalog({ gpuModels: models }).map((meter) => meter.key));
+    expect([...existingEmitters(), ...plannedEmitters()].filter((key) => !keys.has(key))).toEqual(
+      [],
+    );
+    // Every old root meter stays.
+    for (const meter of computeMeters(models)) expect(keys.has(meter.key), meter.key).toBe(true);
+  });
+
+  it('meterCatalog entries are valid, unique, rate-card meters with the documented units', () => {
+    const catalog = meterCatalog({
+      gpuModels: models,
+      flavorMeters: ['flavor.a3-highgpu-8g.hours'],
+    });
+    expect(new Set(catalog.map((meter) => meter.key)).size).toBe(catalog.length);
+    for (const meter of catalog) {
+      expect(meter.key, meter.key).toMatch(/^[a-z][a-z0-9_.-]{0,63}$/);
+      expect(meter.pricing, meter.key).toBe('rate-card');
+      expect(['hour', 'vcpu-hour', 'gib-hour', 'gpu-hour', 'slot-hour'], meter.key).toContain(
+        meter.unit,
+      );
+      expect(meter.name.length, meter.key).toBeGreaterThan(0);
+    }
+    const unit = (key: string) => catalog.find((meter) => meter.key === key)?.unit;
+    expect(unit('vm.vcpu.hours')).toBe('vcpu-hour');
+    expect(unit('vm.memory.gib.hours')).toBe('gib-hour');
+    expect(unit('vm.gpu.h100.spot.hours')).toBe('gpu-hour');
+    expect(unit('vm.grant.slot.hours')).toBe('slot-hour');
+    expect(unit('vm.instance.hours')).toBe('hour');
+    expect(unit('flavor.a3-highgpu-8g.hours')).toBe('hour');
+    expect(unit('disk.pd-ssd.gib.hours')).toBe('gib-hour');
+  });
+
+  it('meterCatalog stays under 90 meters for the default models', () => {
+    expect(meterCatalog({ gpuModels: defaultMeterGpuModels }).length).toBeLessThanOrEqual(90);
+    expect(defaultMeterGpuModels).toEqual(['H100', 'H200', 'B200', 'A100', 'L4', 'L40S', 'other']);
+  });
+
+  it('meterCatalog refuses a catalog past better-iam’s 100 meters', () => {
+    const many = Array.from({ length: 30 }, (_, index) => `GPU${index}`);
+    expect(() => meterCatalog({ gpuModels: many })).toThrow(/100/);
+  });
+
+  it('meterCatalog treats model names case-insensitively and always includes other', () => {
+    const keys = meterCatalog({ gpuModels: ['h100', 'H100'] }).map((meter) => meter.key);
+    expect(keys.filter((key) => key === 'gpu.h100.hours')).toHaveLength(1);
+    expect(keys).toContain('gpu.other.hours');
+    expect(keys).toContain('gpu.other.spot.hours');
+    expect(keys).toContain('vm.gpu.other.hours');
+    expect(keys).not.toContain('gpu.h200.hours');
+  });
+
+  it('flavorMeters adds flavor.* keys and refuses other keys', () => {
+    const keys = meterCatalog({
+      gpuModels: ['H100'],
+      flavorMeters: ['flavor.n2-standard-4.us-central1.hours'],
+    }).map((meter) => meter.key);
+    expect(keys).toContain('flavor.n2-standard-4.us-central1.hours');
+    expect(() => meterCatalog({ gpuModels: ['H100'], flavorMeters: ['vm.vcpu.hours'] })).toThrow(
+      /flavor\./,
+    );
+  });
+
+  describe('against a real better-iam', () => {
+    let db: SqlExecutor;
+    beforeAll(async () => {
+      db = pglite();
+      await db.migrate([successorsMigration]);
+      await db.query(
+        `INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ('site-1', 'ten_root', 'shared', 'eu-west-1', 1)`,
+      );
+      await db.query(
+        `INSERT INTO pools (id, owner_tenant_id, site_id, class, gpu_model, sharing, agent, policy, version)
+         VALUES ('pool-1', 'ten_root', 'site-1', 'metal-host', 'H100', 'exclusive', 'bcd', '{}', 1)`,
+      );
+      await db.query(
+        `INSERT INTO nodes (id, site_id, pool_id, owner_tenant_id, role, provision_state, maintenance, cordoned,
+                            connectivity, trust, generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
+         VALUES ('node-1', 'site-1', 'pool-1', 'ten_root', 'host', 'adopted', false, false, 'connected', 'platform',
+                 1, 1, 1, 1, 0, 1)`,
+      );
+    });
+    afterAll(async () => {
+      await db.close();
+    });
+    beforeEach(async () => {
+      await db.query('DELETE FROM usage_windows');
+      await db.query('DELETE FROM allocations');
+    });
+
+    // A volume and a spot GPU, metered by the existing reconcilers' own helpers into usage_windows.
+    const meterVolumeAndSpotGpu = async (tenantId: string) => {
+      await db.query(
+        `INSERT INTO allocations (id, tenant_id, pool_id, node_id, owner_kind, owner_id, during, version)
+         VALUES ('alloc-1', $1, 'pool-1', 'node-1', 'reservation', 'rsv-1',
+                 tstzrange(compute_now() - interval '6 hours', compute_now() - interval '1 hour'), 1)`,
+        [tenantId],
+      );
+      const from = Math.floor(Date.now() / hourMs) * hourMs - 5 * hourMs;
+      const lines = [
+        ...billableLines({
+          gpuModel: 'H100',
+          gpus: 2,
+          healthyGpus: 2,
+          spot: true,
+          nodeLease: false,
+        }),
+        { meter: volumeMeter, perHour: 10 },
+      ];
+      await db.transaction((tx) =>
+        meterAllocation(
+          tx,
+          {
+            allocationId: 'alloc-1',
+            tenantId,
+            lines,
+            tags: { pool: 'pool-1' },
+            from,
+            to: from + 2 * hourMs,
+          },
+          Date.now(),
+        ),
+      );
+    };
+    const outcomes = async () =>
+      (
+        await db.query<{ meter: string; outcome: string | null }>(
+          'SELECT meter, outcome FROM usage_windows ORDER BY meter, idempotency_key',
+        )
+      ).rows;
+
+    it('setup creates the catalog so no window dead-letters on NOT_FOUND', async () => {
+      const bridge = createComputeIamBridge();
+      const f = await iamFixture({
+        plugins: [bridge.plugin()],
+        resolveResource: bridge.resolveResource(),
+      });
+      const port = bridge.embedded(f.iam, {
+        rootTenantId: f.rootTenantId,
+        serviceCredential: f.rootCredential,
+      });
+      const [module] = bridge.modules;
+      await meterVolumeAndSpotGpu(f.tenantId);
+
+      // Without the meters in better-iam, the windows dead-letter.
+      expect(await flushUsageWindows(db, port)).toMatchObject({ deadLettered: 4 });
+      expect((await outcomes()).every((row) => row.outcome === 'dead-lettered')).toBe(true);
+      await db.query('UPDATE usage_windows SET recorded_at = NULL, outcome = NULL');
+      await db.query('DELETE FROM usage_dead_letters');
+
+      // Starting the iam module defines the catalog on the root tenant.
+      await module.start!({ sql: db } as never);
+      try {
+        const keys = (
+          await f.iam.api.billing.listMeters(f.rootCredential, { tenantId: f.rootTenantId })
+        ).map((meter) => meter.key);
+        expect(keys).toEqual(
+          expect.arrayContaining([
+            'vps.volume.gib.hours',
+            'gpu.h100.spot.hours',
+            'gpu.other.hours',
+          ]),
+        );
+        expect(await flushUsageWindows(db, port)).toMatchObject({ sent: 4, deadLettered: 0 });
+        const rows = await outcomes();
+        expect(rows).toHaveLength(4);
+        expect(rows.every((row) => row.outcome === 'recorded')).toBe(true);
+        expect(new Set(rows.map((row) => row.meter))).toEqual(
+          new Set(['gpu.h100.spot.hours', 'vps.volume.gib.hours']),
+        );
+      } finally {
+        await module.stop!();
+      }
+    }, 60_000);
+
+    it('setup uses the gpuModels option, and syncing is best effort', async () => {
+      const bridge = createComputeIamBridge({ meterCatalog: { gpuModels: ['H100'] } });
+      const f = await iamFixture({
+        plugins: [bridge.plugin()],
+        resolveResource: bridge.resolveResource(),
+      });
+      const port = bridge.embedded(f.iam, {
+        rootTenantId: f.rootTenantId,
+        serviceCredential: f.rootCredential,
+      });
+      const ensure = vi.spyOn(port, 'ensureMeters' as never);
+      const warnings: string[] = [];
+      const log = { warn: (message: string) => warnings.push(message) };
+      const [module] = bridge.modules;
+      await module.start!({ sql: db, log } as never);
+      await module.stop!();
+      expect(ensure).toHaveBeenCalledTimes(1);
+      const keys = (
+        await f.iam.api.billing.listMeters(f.rootCredential, { tenantId: f.rootTenantId })
+      ).map((meter) => meter.key);
+      expect(keys).toContain('gpu.h100.spot.hours');
+      expect(keys).not.toContain('gpu.h200.hours');
+      expect(warnings).toEqual([]);
+
+      // An ACCESS_DENIED (or any error) is a warning; the module still starts.
+      const denied = createComputeIamBridge();
+      const g = await iamFixture({
+        plugins: [denied.plugin()],
+        resolveResource: denied.resolveResource(),
+      });
+      const deniedPort = denied.embedded(g.iam, { rootTenantId: g.rootTenantId });
+      deniedPort.ensureMeters = async () => {
+        throw new ComputeError('ACCESS_DENIED', 'no iam:billing:manage');
+      };
+      const seen: string[] = [];
+      await denied.modules[0].start!({
+        sql: db,
+        log: { warn: (message: string) => seen.push(message) },
+      } as never);
+      await denied.modules[0].stop!();
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toContain('meter');
+      // No port with the member: nothing to do, nothing logged.
+      const bare = createComputeIamBridge();
+      await bare.modules[0].start!({ sql: db, log } as never);
+      await bare.modules[0].stop!();
+      expect(warnings).toEqual([]);
+    }, 60_000);
   });
 });

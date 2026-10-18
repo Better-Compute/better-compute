@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createCli, type CliIO } from '@better-compute/cli';
-import { gpuModelFamilies } from '@better-compute/inventory';
+import { defaultMeterGpuModels, meterCatalog } from '@better-compute/iam';
 import { closeIamFixtures, iamFixture, ORIGIN } from './support/iam.js';
 
 // `better-compute iam setup` (PLAN.md §12.6, §12.7): the example policies, and the root meters
@@ -90,22 +90,33 @@ describe('iam setup', () => {
     ];
     const env = { BETTER_IAM_TOKEN: f.rootCredential.token };
     const first = await run(argv, env, fetch);
+    const catalog = meterCatalog({ gpuModels: ['H100', 'B200'] }).map((meter) => meter.key);
     expect(first).toMatchObject({
       ok: true,
-      value: {
-        meters: {
-          created: [
-            'gpu.h100.hours',
-            'gpu.b200.hours',
-            'node.metal.hours',
-            'vps.vcpu.hours',
-            'vps.memory.gib.hours',
-            'vps.sandbox.warm',
-          ],
-          existing: [],
-        },
-      },
+      value: { meters: { created: catalog, existing: [] } },
     });
+    expect(catalog.slice(0, 6)).toEqual([
+      'gpu.h100.hours',
+      'gpu.b200.hours',
+      'node.metal.hours',
+      'vps.vcpu.hours',
+      'vps.memory.gib.hours',
+      'vps.sandbox.warm',
+    ]);
+    // The whole catalog: volumes, spot, provider-VM, grant, network and disk meters too.
+    expect(catalog).toEqual(
+      expect.arrayContaining([
+        'vps.volume.gib.hours',
+        'gpu.h100.spot.hours',
+        'gpu.other.hours',
+        'vm.vcpu.hours',
+        'vm.gpu.b200.spot.hours',
+        'vm.grant.slot.hours',
+        'network.vpc.hours',
+        'disk.pd-ssd.gib.hours',
+        'snapshot.gib.hours',
+      ]),
+    );
     const second = await run(argv, env, fetch);
     expect(second.ok && second.value.meters.created).toEqual([]);
     const keys = (
@@ -113,10 +124,10 @@ describe('iam setup', () => {
     ).map((meter) => meter.key);
     expect(keys).toEqual(expect.arrayContaining(['gpu.h100.hours', 'vps.memory.gib.hours']));
 
-    // Without --gpu-models every known family gets a meter.
+    // Without --gpu-models the default models get the whole catalog.
     const all = await run(argv.slice(0, -2), env, fetch);
     expect(all.ok && all.value.meters.created.length + all.value.meters.existing.length).toBe(
-      gpuModelFamilies.filter((model) => model !== 'other').length + 4,
+      meterCatalog({ gpuModels: defaultMeterGpuModels }).length,
     );
 
     // A tenant owner is not root: better-iam refuses.

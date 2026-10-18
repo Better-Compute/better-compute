@@ -36,6 +36,7 @@ import {
   type AuthzProjectionOptions,
 } from './projection.js';
 import { pullRemoteInbox } from './host.js';
+import { defaultMeterGpuModels, meterCatalog, type MeterCatalogOptions } from './setup.js';
 import { remoteIam, type RemoteIam, type RemoteIamOptions } from './remote.js';
 import { computeResolver, type ComputeResolverOptions, type ResourceResolver } from './resolver.js';
 import {
@@ -66,6 +67,12 @@ export interface ComputeIamBridgeOptions extends ComputeCatalogOptions {
    * delegations, e.g. vps's `sandboxHolders`.
    */
   identityHolders?: readonly IdentityHolders[];
+  /**
+   * The root meters the iam module defines when it starts, if the port can (`ensureMeters`): `gpuModels` defaults to
+   * `defaultMeterGpuModels`; `flavorMeters` adds `flavor.*` keys. `false` leaves meters to
+   * `better-compute iam setup --meters`. Best effort: a refusal is logged as a warning and never fails the start.
+   */
+  meterCatalog?: Partial<MeterCatalogOptions> | false;
 }
 
 /** An IAM host as the bridge's embedded mode reads it: the port's surface plus its store. */
@@ -86,7 +93,7 @@ export interface BridgeRemoteOptions extends Omit<RemoteIamOptions, 'flags'> {
 
 /** The `iam` module: projection and inbox lifecycle, IamInbox, IamReconcile and the usage sink. */
 export type IamModule = ComputeModule<'iam'> & {
-  start(context: Pick<ModuleContext, 'sql'>): Promise<void>;
+  start(context: Pick<ModuleContext, 'sql'> & Partial<Pick<ModuleContext, 'log'>>): Promise<void>;
   stop(): Promise<void>;
 };
 
@@ -291,11 +298,35 @@ export function createComputeIamBridge(options: ComputeIamBridgeOptions = {}): C
       ],
       selfCheck,
     }),
-    start: (context) => bridge.bind(context),
+    start: async (context) => {
+      await bridge.bind(context);
+      await syncMeters(context.log);
+    },
     stop: () => bridge.stop(),
   };
 
   let port: EmbeddedIam | RemoteIam | undefined;
+  // Defines the catalog on the root tenant when the port can. A missing billing permission (ACCESS_DENIED) or any other
+  // failure is a warning: meters can still be created with `better-compute iam setup --meters`.
+  const syncMeters = async (log: Partial<Pick<ModuleContext, 'log'>>['log']): Promise<void> => {
+    if (options.meterCatalog === false || !port?.ensureMeters) return;
+    try {
+      const catalog = meterCatalog({
+        gpuModels: defaultMeterGpuModels,
+        ...options.meterCatalog,
+      });
+      const { created } = await port.ensureMeters(catalog);
+      log?.debug?.('IAM meters synced', { created: created.length });
+    } catch (error) {
+      log?.warn?.(
+        'Could not define the compute meters in IAM billing; run `better-compute iam setup --meters`',
+        {
+          error: error instanceof Error ? error.message : String(error),
+          code: (error as { code?: unknown }).code,
+        },
+      );
+    }
+  };
   const portTaken = () => {
     if (port)
       throw new ComputeError(

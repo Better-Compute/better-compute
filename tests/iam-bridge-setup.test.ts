@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   checkIamHost,
   computeMeters,
+  meterCatalog,
   createComputeIamBridge,
   examplePolicies,
   gpuMeterKey,
@@ -135,6 +136,33 @@ describe('iam setup', () => {
       existing: ['gpu.h100.hours'],
     });
     expect((await setupIamMeters(f.iam.api, root, meters)).created).toEqual([]);
+  });
+
+  it('creates the whole catalog with each meter’s pricing, once', async () => {
+    const f = await iamFixture();
+    const root = { credential: f.rootCredential, tenantId: f.rootTenantId };
+    const catalog = meterCatalog({ gpuModels: ['H100'] });
+    const reported = {
+      key: 'vps.passthrough',
+      name: 'Pass-through',
+      unit: 'currency',
+      pricing: 'reported' as const,
+    };
+    const first = await setupIamMeters(f.iam.api, root, [...catalog, reported]);
+    expect(first.created).toEqual([...catalog.map((meter) => meter.key), 'vps.passthrough']);
+    const listed = await f.iam.api.billing.listMeters(f.rootCredential, {
+      tenantId: f.rootTenantId,
+    });
+    expect(listed.find((meter) => meter.key === 'vm.vcpu.hours')).toMatchObject({
+      pricing: 'rate-card',
+    });
+    expect(listed.find((meter) => meter.key === 'vps.passthrough')).toMatchObject({
+      pricing: 'reported',
+    });
+    expect(await setupIamMeters(f.iam.api, root, catalog)).toEqual({
+      created: [],
+      existing: catalog.map((meter) => meter.key),
+    });
   });
 
   it('prints §12.6 policies that validate only on a host with compute’s catalog', async () => {

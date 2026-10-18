@@ -41,8 +41,8 @@ await compute.api.reservations.create(credential, {
 - It bills `gpu.<model>.spot.hours` instead of `gpu.<model>.hours`.
 - `binding: 'node'` leases cannot be spot (`INVALID_INPUT`).
 
-`better-compute iam setup --meters` does not create the spot meters. Create
-`gpu.<model>.spot.hours` in Better IAM billing before you sell spot capacity; otherwise its usage
+`better-compute iam setup --meters` creates `gpu.<model>.spot.hours` for each model it covers. Run it (or let the
+IAM module define the catalog when it starts) before you sell spot capacity; otherwise its usage
 windows are dead-lettered (see [quotas and usage](/docs/guides/capacity/quotas-and-usage)).
 
 ## When preemption happens

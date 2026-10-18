@@ -142,10 +142,11 @@ batch is bisected down to the event, so one bad window never blocks the others.
 - Each window stores `recordedAt` and its `outcome`: `recorded`, `duplicate`, `reattributed` or
   `dead-lettered`.
 
-The meters must exist in Better IAM billing. `better-compute iam setup --meters` creates
-`gpu.<model>.hours` for each model in `--gpu-models` (every known GPU family by default),
-`node.metal.hours`, `vps.vcpu.hours`, `vps.memory.gib.hours` and `vps.sandbox.warm`. It does not create spot
-meters: create `gpu.<model>.spot.hours` yourself before you sell spot capacity, or those windows are dead-lettered. Prices, invoices and spend reports are
+The meters must exist in Better IAM billing. `better-compute iam setup --meters` creates the whole catalog:
+`gpu.<model>.hours`, `gpu.<model>.spot.hours` and the provider-VM and reserved GPU meters for each model in
+`--gpu-models` (default `H100`, `H200`, `B200`, `A100`, `L4`, `L40S`, plus `other`), `node.metal.hours`,
+`vps.vcpu.hours`, `vps.memory.gib.hours`, `vps.sandbox.warm`, `vps.volume.gib.hours` and the other billable units.
+Windows for a meter that does not exist are dead-lettered. Prices, invoices and spend reports are
 Better IAM's; see [billing and usage](/docs/guides/iam/billing-and-usage).
 
 ## Read usage
