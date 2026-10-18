@@ -720,6 +720,36 @@ describe('api', () => {
     expect(await codeOf(addSubnet(fresh.id, { region: 'asia-east1' }))).toBe('INVALID_INPUT');
   });
 
+  it('takes subnet regions from an account that configures regions, not zones', async () => {
+    // A provider without zones (DigitalOcean) lists regions in its account config.
+    const account = (await run(
+      (api as unknown as Record<string, Record<string, Definition>>).providerAccounts!.create!,
+      {
+        tenantId: 'root',
+        provider: 'fake-gce',
+        name: 'regions-only',
+        config: { regions: ['nyc3'] },
+      },
+      alice,
+    )) as { id: string };
+    const pools = capacityModule().api!({} as ModuleContext) as unknown as Record<
+      string,
+      Record<string, Definition>
+    >;
+    const pool = (await run(
+      pools.pools!.create!,
+      { tenantId: 'root', siteId: SITE, class: 'provider', providerAccountId: account.id },
+      alice,
+    )) as { id: string };
+    const network = await createNetwork({ poolId: pool.id });
+    expect(
+      (await addSubnet(network.id, { name: 'a', region: 'nyc3', cidr: '10.0.0.0/24' })).subnets,
+    ).toEqual([expect.objectContaining({ name: 'a', region: 'nyc3' })]);
+    expect(
+      await codeOf(addSubnet(network.id, { name: 'b', region: 'sfo3', cidr: '10.1.0.0/24' })),
+    ).toBe('INVALID_INPUT');
+  });
+
   it('refuses deleting a network with instances on it', async () => {
     const network = await createNetwork();
     const withSubnet = await addSubnet(network.id, { name: 'a', cidr: '10.0.0.0/24' });
