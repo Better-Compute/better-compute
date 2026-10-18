@@ -17,6 +17,12 @@ export const gcpConfig = manifest({
     .string()
     .optional()
     .describe('Service-account email to impersonate with the base credentials'),
+  federationAudience: field
+    .string()
+    .optional()
+    .describe(
+      'Workload identity pool provider (//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>): better-compute signs in as this account with no key',
+    ),
   network: field
     .string()
     .default('default')
@@ -39,6 +45,7 @@ export interface GcpConfig {
   zones: string[];
   credentials?: SecretRef;
   impersonate?: string;
+  federationAudience?: string;
   network?: string;
   subnet?: string;
   imageProject?: string;
