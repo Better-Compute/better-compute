@@ -339,6 +339,12 @@ importers:
         specifier: workspace:*
         version: link:../pki
 
+  packages/aws-core:
+    dependencies:
+      '@better-compute/core':
+        specifier: workspace:*
+        version: link:../core
+
   packages/better-compute:
     dependencies:
       '@better-compute/audit':
@@ -569,6 +575,12 @@ importers:
         specifier: ^2.15.0
         version: 2.15.0
 
+  packages/gcp-common:
+    dependencies:
+      '@better-compute/core':
+        specifier: workspace:*
+        version: link:../core
+
   packages/iam:
     dependencies:
       '@better-compute/core':
@@ -673,6 +685,9 @@ importers:
       '@better-compute/core':
         specifier: workspace:*
         version: link:../core
+      '@better-compute/gcp-common':
+        specifier: workspace:*
+        version: link:../gcp-common
       '@better-compute/vps':
         specifier: workspace:*
         version: link:../vps
