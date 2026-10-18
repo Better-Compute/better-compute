@@ -1,0 +1,325 @@
+{
+  "written": [0, 4, 4, 1, 6, 1, 0, 5],
+  "rows": [
+    {
+      "key": "cmp:alloc_rsv_a:1790251200000",
+      "allocationId": "alloc_rsv_a",
+      "tenantId": "acme",
+      "identityId": "usr_alice",
+      "meter": "gpu.h100.hours",
+      "quantity": "1.666667",
+      "start": 1790251200000,
+      "end": 1790254800000,
+      "tags": {
+        "pool": "pool_u",
+        "region": "eu-central",
+        "project": "prj_1",
+        "gpuModel": "H100"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_a:1790254800000",
+      "allocationId": "alloc_rsv_a",
+      "tenantId": "acme",
+      "identityId": "usr_alice",
+      "meter": "gpu.h100.hours",
+      "quantity": "2",
+      "start": 1790254800000,
+      "end": 1790258400000,
+      "tags": {
+        "pool": "pool_u",
+        "region": "eu-central",
+        "project": "prj_1",
+        "gpuModel": "H100"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_a:1790258400000",
+      "allocationId": "alloc_rsv_a",
+      "tenantId": "acme",
+      "identityId": "usr_alice",
+      "meter": "gpu.h100.hours",
+      "quantity": "1.333333",
+      "start": 1790258400000,
+      "end": 1790262000000,
+      "tags": {
+        "pool": "pool_u",
+        "region": "eu-central",
+        "project": "prj_1",
+        "gpuModel": "H100"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_d:1790265600000",
+      "allocationId": "alloc_rsv_d",
+      "tenantId": "acme",
+      "identityId": "usr_alice",
+      "meter": "gpu.h100.hours",
+      "quantity": "1",
+      "start": 1790265600000,
+      "end": 1790269200000,
+      "tags": {
+        "pool": "pool_u",
+        "agent": "agt_7",
+        "region": "eu-central",
+        "gpuModel": "H100"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_d:1790269200000",
+      "allocationId": "alloc_rsv_d",
+      "tenantId": "acme",
+      "identityId": "usr_alice",
+      "meter": "gpu.h100.hours",
+      "quantity": "0.333333",
+      "start": 1790269200000,
+      "end": 1790272800000,
+      "tags": {
+        "pool": "pool_u",
+        "agent": "agt_7",
+        "region": "eu-central",
+        "gpuModel": "H100"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_n:1790251200000",
+      "allocationId": "alloc_rsv_n",
+      "tenantId": "acme",
+      "identityId": "usr_alice",
+      "meter": "node.metal.hours",
+      "quantity": "1",
+      "start": 1790251200000,
+      "end": 1790254800000,
+      "tags": {
+        "pool": "pool_u",
+        "region": "eu-central",
+        "gpuModel": "H100"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_n:1790251200000:gpu.h100.hours",
+      "allocationId": "alloc_rsv_n",
+      "tenantId": "acme",
+      "identityId": "usr_alice",
+      "meter": "gpu.h100.hours",
+      "quantity": "1",
+      "start": 1790251200000,
+      "end": 1790254800000,
+      "tags": {
+        "pool": "pool_u",
+        "region": "eu-central",
+        "gpuModel": "H100"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_n:1790254800000",
+      "allocationId": "alloc_rsv_n",
+      "tenantId": "acme",
+      "identityId": "usr_alice",
+      "meter": "node.metal.hours",
+      "quantity": "1",
+      "start": 1790254800000,
+      "end": 1790258400000,
+      "tags": {
+        "pool": "pool_u",
+        "region": "eu-central",
+        "gpuModel": "H100"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_n:1790254800000:gpu.h100.hours",
+      "allocationId": "alloc_rsv_n",
+      "tenantId": "acme",
+      "identityId": "usr_alice",
+      "meter": "gpu.h100.hours",
+      "quantity": "1",
+      "start": 1790254800000,
+      "end": 1790258400000,
+      "tags": {
+        "pool": "pool_u",
+        "region": "eu-central",
+        "gpuModel": "H100"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_n:1790258400000",
+      "allocationId": "alloc_rsv_n",
+      "tenantId": "acme",
+      "identityId": "usr_alice",
+      "meter": "node.metal.hours",
+      "quantity": "1",
+      "start": 1790258400000,
+      "end": 1790262000000,
+      "tags": {
+        "pool": "pool_u",
+        "region": "eu-central",
+        "gpuModel": "H100"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_n:1790258400000:gpu.h100.hours",
+      "allocationId": "alloc_rsv_n",
+      "tenantId": "acme",
+      "identityId": "usr_alice",
+      "meter": "gpu.h100.hours",
+      "quantity": "2",
+      "start": 1790258400000,
+      "end": 1790262000000,
+      "tags": {
+        "pool": "pool_u",
+        "region": "eu-central",
+        "gpuModel": "H100"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_n:1790262000000",
+      "allocationId": "alloc_rsv_n",
+      "tenantId": "acme",
+      "identityId": "usr_alice",
+      "meter": "node.metal.hours",
+      "quantity": "1",
+      "start": 1790262000000,
+      "end": 1790265600000,
+      "tags": {
+        "pool": "pool_u",
+        "region": "eu-central",
+        "gpuModel": "H100"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_n:1790262000000:gpu.h100.hours",
+      "allocationId": "alloc_rsv_n",
+      "tenantId": "acme",
+      "identityId": "usr_alice",
+      "meter": "gpu.h100.hours",
+      "quantity": "2",
+      "start": 1790262000000,
+      "end": 1790265600000,
+      "tags": {
+        "pool": "pool_u",
+        "region": "eu-central",
+        "gpuModel": "H100"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_s:1790251200000",
+      "allocationId": "alloc_rsv_s",
+      "tenantId": "acme",
+      "identityId": "usr_alice",
+      "meter": "gpu.h100.spot.hours",
+      "quantity": "0.85119",
+      "start": 1790251200000,
+      "end": 1790254800000,
+      "tags": {
+        "pool": "pool_u",
+        "region": "eu-central",
+        "gpuModel": "H100"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_s:1790254800000",
+      "allocationId": "alloc_rsv_s",
+      "tenantId": "acme",
+      "identityId": "usr_alice",
+      "meter": "gpu.h100.spot.hours",
+      "quantity": "0.928571",
+      "start": 1790254800000,
+      "end": 1790258400000,
+      "tags": {
+        "pool": "pool_u",
+        "region": "eu-central",
+        "gpuModel": "H100"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_s:1790258400000",
+      "allocationId": "alloc_rsv_s",
+      "tenantId": "acme",
+      "identityId": "usr_alice",
+      "meter": "gpu.h100.spot.hours",
+      "quantity": "0.928571",
+      "start": 1790258400000,
+      "end": 1790262000000,
+      "tags": {
+        "pool": "pool_u",
+        "region": "eu-central",
+        "gpuModel": "H100"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_v:1790251200000",
+      "allocationId": "alloc_rsv_v",
+      "tenantId": "acme",
+      "identityId": "usr_bob",
+      "meter": "vps.vcpu.hours",
+      "quantity": "2.666667",
+      "start": 1790251200000,
+      "end": 1790254800000,
+      "tags": {
+        "pool": "pool_u",
+        "agent": "agt_9",
+        "region": "eu-central"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_v:1790251200000:vps.memory.gib.hours",
+      "allocationId": "alloc_rsv_v",
+      "tenantId": "acme",
+      "identityId": "usr_bob",
+      "meter": "vps.memory.gib.hours",
+      "quantity": "10.666667",
+      "start": 1790251200000,
+      "end": 1790254800000,
+      "tags": {
+        "pool": "pool_u",
+        "agent": "agt_9",
+        "region": "eu-central"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_v:1790254800000",
+      "allocationId": "alloc_rsv_v",
+      "tenantId": "acme",
+      "identityId": "usr_bob",
+      "meter": "vps.vcpu.hours",
+      "quantity": "2",
+      "start": 1790254800000,
+      "end": 1790258400000,
+      "tags": {
+        "pool": "pool_u",
+        "agent": "agt_9",
+        "region": "eu-central"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_v:1790254800000:gpu.l40s.hours",
+      "allocationId": "alloc_rsv_v",
+      "tenantId": "acme",
+      "identityId": "usr_bob",
+      "meter": "gpu.l40s.hours",
+      "quantity": "1",
+      "start": 1790254800000,
+      "end": 1790258400000,
+      "tags": {
+        "pool": "pool_u",
+        "agent": "agt_9",
+        "region": "eu-central"
+      }
+    },
+    {
+      "key": "cmp:alloc_rsv_v:1790254800000:vps.memory.gib.hours",
+      "allocationId": "alloc_rsv_v",
+      "tenantId": "acme",
+      "identityId": "usr_bob",
+      "meter": "vps.memory.gib.hours",
+      "quantity": "16",
+      "start": 1790254800000,
+      "end": 1790258400000,
+      "tags": {
+        "pool": "pool_u",
+        "agent": "agt_9",
+        "region": "eu-central"
+      }
+    }
+  ]
+}
