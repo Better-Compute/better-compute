@@ -66,7 +66,10 @@ interface Platform {
 
 /** The platform: a root GCP account backing a provider pool offered to A and to B. */
 async function platform(
-  options: { secrets?: { resolve(ref: string): Promise<string> } } = {},
+  options: {
+    secrets?: { resolve(ref: string): Promise<string> };
+    autoAttach?: { ownerIdentityId: string };
+  } = {},
 ): Promise<Platform> {
   const emu = new GceEmulator();
   emu.validTokens.add('host-token');
@@ -76,7 +79,10 @@ async function platform(
     modules: [
       vps({
         providers: [gcp],
-        discovery: { every: '1m' },
+        discovery: {
+          every: '1m',
+          ...(options.autoAttach ? { autoAttach: options.autoAttach } : {}),
+        },
         reservations: { every: '1m' },
         ...(options.secrets ? { secrets: options.secrets as never } : {}),
       }),
@@ -987,6 +993,18 @@ describe('isolation between tenants, and between tenants and the root tenant', (
           (item: { ownerIdentityId: string }) => item.ownerIdentityId === 'identity-other',
         ),
       ).toEqual([]);
+      // Not even a draft or its authz row (round 2, N2).
+      const drafts = await w.fixture.database.query(
+        `SELECT id FROM instances WHERE tenant_id = $1 AND owner_identity_id = 'identity-other'`,
+        [A],
+      );
+      expect(drafts.rows).toEqual([]);
+      const rows = await w.fixture.database.query(
+        `SELECT id FROM authz_projection
+          WHERE type = 'instance' AND tenant_id = $1 AND owner_id = 'identity-other'`,
+        [A],
+      );
+      expect(rows.rows).toEqual([]);
     } finally {
       delete iam.isMember;
     }
@@ -1562,5 +1580,228 @@ describe('a pool never drives another tenant’s provider account (R1)', () => {
     expect(seen.items.map((machine: { tenantId?: string }) => machine.tenantId).sort()).toEqual(
       [A, B].sort(),
     );
+  });
+});
+
+/** A service-account key for a tenant's own GCP account (the emulator accepts any signed one). */
+async function tenantKey(): Promise<string> {
+  const { generateKeyPairSync } = await import('node:crypto');
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  return JSON.stringify({
+    type: 'service_account',
+    client_email: 'sa@a-project.iam.gserviceaccount.com',
+    private_key: privateKey.export({ type: 'pkcs8', format: 'pem' }),
+    token_uri: 'https://oauth2.googleapis.com/token',
+  });
+}
+
+/** The stored discovery record of one machine (`autoAttachError` is not in the API view). */
+async function storedMachine(p: Platform, accountId: string, externalId: string) {
+  const { rows } = await p.fixture.database.query<{
+    instance_id: string | null;
+    machine: { autoAttachError?: { code: string; message: string } } | string;
+  }>(
+    `SELECT instance_id, machine FROM provider_machines WHERE account_id = $1 AND external_id = $2`,
+    [accountId, externalId],
+  );
+  const row = rows[0]!;
+  return {
+    instanceId: row.instance_id,
+    machine: typeof row.machine === 'string' ? JSON.parse(row.machine) : row.machine,
+  };
+}
+
+describe('round 2: auto-attach owners, account secrets', () => {
+  afterEach(closeFixtures);
+
+  it('auto-attach ignores the owner label on a tenant’s own account (round 2, fix 1)', async () => {
+    const keyJson = await tenantKey();
+    const p = await platform({
+      secrets: { resolve: async () => keyJson },
+      autoAttach: { ownerIdentityId: 'svc-platform' },
+    });
+    const { api, aAdmin, A } = p;
+    const asked: string[] = [];
+    (p.fixture.iam as { isMember?: unknown }).isMember = async (tenantId: string, id: string) => {
+      asked.push(`${tenantId}/${id}`);
+      // Even an identity IAM vouches for: the label of a tenant's own account is not taken.
+      return true;
+    };
+    const account = await api.providerAccounts.create(aAdmin, {
+      tenantId: A,
+      provider: 'gcp',
+      name: 'a-gcp',
+      config: {
+        projectId: 'a-project',
+        zones: [ZONE],
+        credentials: 'secret://tenant-acme/gcp-key',
+      },
+    });
+    const site = await api.sites.create(aAdmin, {
+      tenantId: A,
+      kind: 'custom',
+      region: REGION,
+      idempotencyKey: 'a-site',
+    });
+    const pool = await api.pools.create(aAdmin, {
+      tenantId: A,
+      siteId: site.id,
+      class: 'provider',
+      providerAccountId: account.id,
+      idempotencyKey: 'a-pool',
+      ownerQuota: { vcpu: 100, memoryGiB: 1000, diskGiB: 1000, gpu: 0 },
+    });
+    // The tenant labels a VM of its own project for someone of another tenant.
+    p.emu.addInstance(ZONE, 'labelled', {
+      labels: {
+        'better-compute-tenant': A,
+        'better-compute-pool': pool.id,
+        'better-compute-owner': 'identity-other',
+      },
+    });
+    await api.providerAccounts.discover(aAdmin, { tenantId: A, accountId: account.id });
+    // The pass that attaches it.
+    await p.tick('vps.discovery', 1_000);
+    const listed = await api.instances.list(aAdmin, { tenantId: A, scope: 'all' });
+    expect(listed.items).toEqual([
+      expect.objectContaining({
+        origin: 'attached',
+        externalId: `${ZONE}/labelled`,
+        ownerIdentityId: 'svc-platform',
+      }),
+    ]);
+    const stored = await storedMachine(p, account.id, `${ZONE}/labelled`);
+    expect(stored.instanceId).toBe(listed.items[0].id);
+    expect(stored.machine.autoAttachError).toMatchObject({ code: 'AUTO_ATTACH_OWNER_IGNORED' });
+    const events = await p.fixture.database.query<{ changes: string }>(
+      `SELECT payload->'data'->>'changes' AS changes FROM outbox WHERE topic = 'provider.machine.changed'`,
+    );
+    expect(events.rows.map((row) => row.changes)).toContain('["autoAttachOwnerIgnored"]');
+    // Later passes keep it attached for the configured owner.
+    for (let round = 0; round < 2; round++) await p.tick('vps.discovery', 60_000);
+    expect(
+      (await api.instances.list(aAdmin, { tenantId: A, scope: 'all' })).items.map(
+        (item: { ownerIdentityId: string }) => item.ownerIdentityId,
+      ),
+    ).toEqual(['svc-platform']);
+    // (The emulator lists the VM to the root account too, whose pass may ask about the label.)
+    expect(asked.every((entry) => entry === `${A}/identity-other`)).toBe(true);
+  });
+
+  it('auto-attach on a platform account takes a label owner only if IAM says it is a member', async () => {
+    const p = await platform({ autoAttach: { ownerIdentityId: 'svc-platform' } });
+    const { api, root, A, R } = p;
+    const asked: string[] = [];
+    (p.fixture.iam as { isMember?: unknown }).isMember = async (tenantId: string, id: string) => {
+      asked.push(`${tenantId}/${id}`);
+      return tenantId === A && id === p.aOpId;
+    };
+    const labels = (owner: string) => ({
+      'better-compute-tenant': A,
+      'better-compute-pool': p.poolId,
+      'better-compute-owner': owner,
+    });
+    p.emu.addInstance(ZONE, 'for-outsider', { labels: labels('identity-other') });
+    p.emu.addInstance(ZONE, 'for-operator', { labels: labels(p.aOpId) });
+    await api.providerAccounts.discover(root, { tenantId: R, accountId: p.accountId });
+    for (let round = 0; round < 3; round++) await p.tick('vps.discovery', 60_000);
+    const outsider = await storedMachine(p, p.accountId, `${ZONE}/for-outsider`);
+    expect(outsider.instanceId).toBeNull();
+    expect(outsider.machine.autoAttachError).toMatchObject({ code: 'AUTO_ATTACH_OWNER_REFUSED' });
+    const operator = await storedMachine(p, p.accountId, `${ZONE}/for-operator`);
+    expect(operator.instanceId).not.toBeNull();
+    expect(
+      await api.instances.get(p.aOp, { tenantId: A, instanceId: operator.instanceId }),
+    ).toMatchObject({ ownerIdentityId: p.aOpId, origin: 'attached' });
+    expect(asked).toEqual(expect.arrayContaining([`${A}/identity-other`, `${A}/${p.aOpId}`]));
+  });
+
+  it('a tenant’s account never uses the root’s or another tenant’s secrets (round 2, N1)', async () => {
+    const resolved: { ref: string; tenantId?: string }[] = [];
+    const keyJson = await tenantKey();
+    const p = await platform({
+      secrets: {
+        resolve: async (ref: string, context?: { tenantId?: string }) => {
+          resolved.push({ ref, ...(context?.tenantId ? { tenantId: context.tenantId } : {}) });
+          return keyJson;
+        },
+      } as never,
+    });
+    const { api, aAdmin, aOp, A } = p;
+    const rootRef = 'secret://tenant-root/sec_00000000000000000000000001';
+    const otherRef = 'secret://tenant-other/sec_00000000000000000000000002';
+    const ownRef = 'secret://tenant-acme/sec_00000000000000000000000003';
+    const create = (name: string, credentials: string) =>
+      refusal(
+        api.providerAccounts.create(aAdmin, {
+          tenantId: A,
+          provider: 'gcp',
+          name,
+          config: { projectId: 'root-project', zones: [ZONE], credentials },
+        }),
+      );
+    for (const ref of [
+      rootRef,
+      otherRef,
+      'env://GOOGLE_APPLICATION_CREDENTIALS',
+      'vault://kv/gcp',
+    ]) {
+      const refused = await create('stolen', ref);
+      expect(refused.code, ref).toBe('INVALID_CONFIG');
+    }
+    // Its own secret is fine, and changing the account to the root's is refused too.
+    const account = await api.providerAccounts.create(aAdmin, {
+      tenantId: A,
+      provider: 'gcp',
+      name: 'mine',
+      config: { projectId: 'a-project', zones: [ZONE], credentials: ownRef },
+    });
+    expect(
+      await outcome(
+        api.providerAccounts.update(aAdmin, {
+          tenantId: A,
+          accountId: account.id,
+          config: { projectId: 'root-project', zones: [ZONE], credentials: rootRef },
+        }),
+      ),
+    ).toBe('INVALID_CONFIG');
+    // A row written around the API: the client refuses the ref when it would resolve it.
+    const site = await api.sites.create(aAdmin, {
+      tenantId: A,
+      kind: 'custom',
+      region: REGION,
+      idempotencyKey: 'a-site',
+    });
+    const pool = await api.pools.create(aAdmin, {
+      tenantId: A,
+      siteId: site.id,
+      class: 'provider',
+      providerAccountId: account.id,
+      idempotencyKey: 'a-pool',
+      ownerQuota: { vcpu: 100, memoryGiB: 1000, diskGiB: 1000, gpu: 0 },
+    });
+    await api.flavors.create(aAdmin, {
+      tenantId: A,
+      poolId: pool.id,
+      name: 'n2.standard.4',
+      vcpu: 4,
+      memoryGiB: 16,
+      diskGiB: 100,
+      offerId: `${ZONE}/n2-standard-4`,
+    });
+    await p.fixture.database.query(
+      `UPDATE provider_accounts SET config = jsonb_set(config, '{credentials}', to_jsonb($2::text)),
+              version = version + 1 WHERE id = $1`,
+      [account.id, rootRef],
+    );
+    const created = await api.instances.create(
+      aOp,
+      createInput(p, A, { poolId: pool.id, idempotencyKey: 'on-root-key' }),
+    );
+    await drive(p, 6);
+    expect(vmOf(p, created.id)).toBeUndefined();
+    expect(resolved.filter((call) => call.ref !== ownRef)).toEqual([]);
+    // What was resolved for A's account was resolved as A's.
+    expect(resolved.every((call) => call.tenantId === A)).toBe(true);
   });
 });
