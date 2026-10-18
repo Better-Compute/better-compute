@@ -172,6 +172,8 @@ function moduleContext(sql: SqlExecutor): ModuleContext {
     sql,
     clock,
     log: { debug() {}, info() {}, warn() {}, error() {} },
+    // Root's provider accounts are the platform's (they may name env:// and vault:// refs).
+    iam: { rootTenantId: 'root' },
     secrets: { resolve: async (ref: string) => `resolved:${ref}` },
     capacity: createCapacityPort({ clock }, { random: () => 0, topN: 1 }),
     authz: {

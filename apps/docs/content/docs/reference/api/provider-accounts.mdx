@@ -32,7 +32,8 @@ Stores a provider account for the tenant after validating its `config` with the 
 
 - **Idempotency.** `idempotencyKey` is optional. With a key, the account id derives from the tenant, the caller and the key, and a repeat returns the stored account without a second IAM decision; a different `provider` or `name` under the same key is `CONFLICT`. A name the tenant already uses for another account is also `CONFLICT`.
 - **IAM.** Decided as `compute:providers:manage` on the tenant.
-- **Errors.** `INVALID_INPUT` for an unknown provider (`details.known` lists the registered ones), a config the manifest rejects (`details.issues`), or a field ending in `token`, `secret`, `password` or `key` whose value is not a `secret://`, `vault://` or `env://` reference. `INVALID_CONFIG` when the provider refuses to build a client for the account: a Google Cloud account of a tenant other than the root (platform) tenant must name its own service-account key in `credentials`, because without one it would run on the control plane's own identity (the metadata server or the host's token source).
+- **Secret references.** An account of the root (platform) tenant may name any `secret://`, `vault://` or `env://` reference. An account of any other tenant, for every provider, may name only `secret://<its tenant>/…` references (secrets it put with `secrets.put`), plus the `vault://` paths the host allows that tenant with `vps({ tenantVaultPaths })` (an entry ending in `/` allows every path under it). It may never name `env://`, which reads the control plane's own environment, nor another tenant's or the platform's secrets: the account would run on the platform's credentials. The same rule holds when the provider resolves the account's credentials: a stored account that names a reference it may not use (written before this rule, or around the API) fails that call with `ACCESS_DENIED` and the value is never read, and a tenant's `secret://` reference is resolved for that tenant, so the store refuses a secret whose stored tenant is another.
+- **Errors.** `INVALID_INPUT` for an unknown provider (`details.known` lists the registered ones), a config the manifest rejects (`details.issues`), or a field ending in `token`, `secret`, `password` or `key` whose value is not a `secret://`, `vault://` or `env://` reference. `INVALID_CONFIG` for a secret reference the account may not use (see above; `details.path` names the field, `details.reason` is `secretRefScope`), or when the provider refuses to build a client for the account: a Google Cloud account of a tenant other than the root (platform) tenant must name its own service-account key in `credentials`, because without one it would run on the control plane's own identity (the metadata server or the host's token source).
 
 - **Kind:** mutation
 - **Authorization:** `compute:providers:manage` @ `compute-fleet` or `compute:providers:manage` @ `compute-tenant`
@@ -94,7 +95,7 @@ An account of another tenant, or none, is `NOT_FOUND`.
 
 Asks the provider, through the account, for the machine types it offers; returns them as `items`.
 
-The optional `query` filters by `kind` (`metal` or `vps`), `region`, `gpuModel`, `minGpus`, `minVcpu` and `minMemoryGiB`. The call reaches the provider live. A missing account is `NOT_FOUND`.
+The optional `query` filters by `kind` (`metal` or `vps`), `region`, `gpuModel`, `minGpus`, `minVcpu` and `minMemoryGiB`. The call reaches the provider live. A missing account is `NOT_FOUND`; a stored account naming a secret reference its tenant may not use is `ACCESS_DENIED` (see `create`).
 
 - **Kind:** read
 - **Authorization:** `compute:providers:read` @ `compute-provider-account`
@@ -121,7 +122,7 @@ The optional `query` filters by `kind` (`metal` or `vps`), `region`, `gpuModel`,
 
 Replaces the account's `config`, validated as in `create`, and increments its version; returns the account.
 
-The provider and the name cannot change. The next provider call builds a new client from the new config. A missing account is `NOT_FOUND`; an invalid config is `INVALID_INPUT`, and one the provider refuses to build a client for is `INVALID_CONFIG`, as in `create`.
+The provider and the name cannot change. The next provider call builds a new client from the new config. A missing account is `NOT_FOUND`; an invalid config is `INVALID_INPUT`, and a secret reference the account may not use, or a config the provider refuses to build a client for, is `INVALID_CONFIG`, as in `create`.
 
 - **Kind:** mutation
 - **Authorization:** `compute:providers:manage` @ `compute-provider-account`

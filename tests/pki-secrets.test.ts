@@ -85,6 +85,29 @@ describe('the local sealed store on PGlite', () => {
     });
   });
 
+  it('with a resolve context, serves only that tenant’s secrets', async () => {
+    const store = localSealedSecretStore({ sql: db, keys: KEY });
+    const acme = await store.put('org_acme', 'acme-key');
+    const platform = await store.put('org_root', 'platform-key');
+    expect(await store.resolve(acme, { tenantId: 'org_acme' })).toBe('acme-key');
+    // Another tenant's ref, before any row is read (so not even NOT_FOUND tells it apart).
+    await expect(store.resolve(platform, { tenantId: 'org_acme' })).rejects.toMatchObject({
+      code: 'ACCESS_DENIED',
+    });
+    await expect(
+      store.resolve('secret://org_root/missing', { tenantId: 'org_acme' }),
+    ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    // A row whose tenant is not the ref's (written around put) does not open for the ref's tenant.
+    await db.query(`UPDATE sealed_secrets SET tenant_id = 'org_root' WHERE ref = $1`, [acme]);
+    await expect(store.resolve(acme, { tenantId: 'org_acme' })).rejects.toMatchObject({
+      code: 'ACCESS_DENIED',
+    });
+    // Without a context the store serves refs as before (the platform's own callers).
+    expect(await store.resolve(platform)).toBe('platform-key');
+    // The moved row would show up as unreadable in the reseal test below (one database).
+    await store.delete(acme);
+  });
+
   it('rotates keys: old values open, reseal moves them to the current key', async () => {
     const old = localSealedSecretStore({ sql: db, keys: { current: 'k1', keys: { k1: KEY } } });
     const ref = await old.put('org_acme', 'rotate-me');

@@ -130,6 +130,138 @@ export function assertNoInlineSecrets(config: Record<string, Json>, path = 'conf
   }
 }
 
+/**
+ * `vps({ tenantVaultPaths })`: the `vault://` paths each tenant's provider accounts may name, by
+ * tenant id. An entry ending in `/` allows every path under it; any other entry allows that path.
+ */
+export type TenantVaultPaths = Readonly<Record<string, readonly string[]>>;
+
+/** Validates `vps({ tenantVaultPaths })`; `INVALID_CONFIG` names the bad entry. */
+export function parseTenantVaultPaths(raw: unknown): TenantVaultPaths {
+  const bad = (message: string) =>
+    new ComputeError('INVALID_CONFIG', `vps({ tenantVaultPaths }): ${message}`);
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
+    throw bad('expected { [tenantId]: paths[] }');
+  const out: Record<string, readonly string[]> = {};
+  for (const [tenantId, paths] of Object.entries(raw)) {
+    if (!Array.isArray(paths)) throw bad(`${tenantId} must list vault paths`);
+    for (const path of paths)
+      if (typeof path !== 'string' || !cleanVaultPath(path.replace(/\/$/, '')))
+        throw bad(`${tenantId} lists ${JSON.stringify(path)}, not a vault path`);
+    out[tenantId] = Object.freeze([...(paths as string[])]);
+  }
+  return Object.freeze(out);
+}
+
+/**
+ * A path of plain segments: no empty, `.` or `..` segment, and no `%` (an encoded `..` a store might
+ * decode), `?`, backslash or space; nothing that could leave a prefix.
+ */
+function cleanVaultPath(path: string): boolean {
+  return (
+    path.length > 0 &&
+    !/[\s\\?%]/.test(path) &&
+    path.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..')
+  );
+}
+
+/** What decides which refs an account may name: the root tenant and the vault allow-list. */
+export interface AccountSecretScope {
+  rootTenantId?: string;
+  tenantVaultPaths?: TenantVaultPaths;
+}
+
+/**
+ * Why `account` may not name `ref`, or undefined when it may. A platform (root-tenant) account may
+ * name any ref. A tenant's account may name only `secret://<its tenant>/…`, and `vault://` paths
+ * `tenantVaultPaths` allows that tenant; never `env://` (the control plane's own environment) nor
+ * another tenant's or the platform's secrets, which the account would otherwise run as.
+ */
+export function accountRefRefusal(
+  ref: string,
+  account: Pick<ProviderAccount, 'tenantId'>,
+  scope: AccountSecretScope,
+): string | undefined {
+  if (scope.rootTenantId !== undefined && account.tenantId === scope.rootTenantId) return undefined;
+  if (ref.startsWith('secret://'))
+    return parseSecretRefTenant(ref) === account.tenantId
+      ? undefined
+      : `a tenant's account may only use secret://${account.tenantId}/… refs`;
+  if (ref.startsWith('vault://')) {
+    const path = ref.slice('vault://'.length);
+    const allowed = scope.tenantVaultPaths?.[account.tenantId] ?? [];
+    const match =
+      cleanVaultPath(path) &&
+      allowed.some((entry) => (entry.endsWith('/') ? path.startsWith(entry) : path === entry));
+    return match ? undefined : `vault://${path} is not allowed for tenant ${account.tenantId}`;
+  }
+  const scheme = /^([a-z]+):\/\//.exec(ref)?.[1];
+  return scheme
+    ? `a tenant's account may not use ${scheme}:// refs`
+    : `a tenant's account may only use secret references`;
+}
+
+/** The tenant of a `secret://<tenant>/<id>` ref (undefined when it is not one); as pki's `parseSecretRef`. */
+function parseSecretRefTenant(ref: string): string | undefined {
+  return /^secret:\/\/([A-Za-z0-9._:-]{1,128})\/[A-Za-z0-9._-]{1,128}$/.exec(ref)?.[1];
+}
+
+/** Every SecretRef in `config` with where it is (objects and arrays, at any depth). */
+function secretRefsOf(value: Json, path: string, out: Array<[string, string]> = []) {
+  if (typeof value === 'string') {
+    if (isSecretRef(value)) out.push([path, value]);
+  } else if (Array.isArray(value))
+    value.forEach((item, index) => secretRefsOf(item, `${path}[${index}]`, out));
+  else if (value && typeof value === 'object')
+    for (const [field, item] of Object.entries(value)) secretRefsOf(item, `${path}.${field}`, out);
+  return out;
+}
+
+/**
+ * Refuses (`INVALID_CONFIG`) an account config naming a ref its tenant may not use
+ * (`accountRefRefusal`), so a tenant's account never runs on the platform's credentials.
+ */
+export function assertAccountSecretRefs(
+  config: Record<string, Json>,
+  account: Pick<ProviderAccount, 'tenantId'>,
+  scope: AccountSecretScope,
+): void {
+  for (const [path, ref] of secretRefsOf(config, 'config')) {
+    const refusal = accountRefRefusal(ref, account, scope);
+    if (refusal)
+      throw new ComputeError('INVALID_CONFIG', `${path}: ${refusal}`, undefined, {
+        path,
+        reason: 'secretRefScope',
+      });
+  }
+}
+
+/**
+ * The resolver a provider client gets: refs the account may not name are refused at resolve time
+ * too (an account stored before the check, or written around the API), and a tenant's refs are
+ * resolved with its tenant as the context, so the store checks the secret is that tenant's.
+ */
+export function accountSecrets(
+  secrets: SecretResolver,
+  account: Pick<ProviderAccount, 'id' | 'tenantId'>,
+  scope: AccountSecretScope,
+): SecretResolver {
+  const platform = scope.rootTenantId !== undefined && account.tenantId === scope.rootTenantId;
+  return {
+    resolve: async (ref) => {
+      const refusal = accountRefRefusal(ref, account, scope);
+      if (refusal)
+        throw new ComputeError(
+          'ACCESS_DENIED',
+          `Provider account ${account.id} may not use this secret: ${refusal}`,
+          undefined,
+          { reason: 'secretRefScope' },
+        );
+      return platform ? secrets.resolve(ref) : secrets.resolve(ref, { tenantId: account.tenantId });
+    },
+  };
+}
+
 export interface CreateAccountInput {
   tenantId: string;
   provider: string;
@@ -202,6 +334,7 @@ export async function createAccount(
   const provider = providerOf(providers, input.provider);
   const config = await validateConfig(provider, input.config);
   assertNoInlineSecrets(config);
+  assertAccountSecretRefs(config, input, check ?? {});
   if (check)
     await checkClient(provider, config, { id: accountId, tenantId: input.tenantId }, check);
   const { rowCount } = await tx.query(
@@ -232,6 +365,7 @@ export async function updateAccount(
   const provider = providerOf(providers, account.provider);
   const config = await validateConfig(provider, input.config);
   assertNoInlineSecrets(config);
+  assertAccountSecretRefs(config, account, check ?? {});
   if (check) await checkClient(provider, config, account, check);
   await tx.query(
     `UPDATE provider_accounts SET config = $2::jsonb, version = version + 1 WHERE id = $1`,
@@ -299,6 +433,8 @@ export interface ClientDeps {
   log: Logger;
   /** The IAM root tenant (`iam.rootTenantId`): its accounts are the platform's (`ProviderContext.account`). */
   rootTenantId?: string;
+  /** `vps({ tenantVaultPaths })`, for the ref check of an account about to be stored. */
+  tenantVaultPaths?: TenantVaultPaths;
 }
 
 /**
@@ -331,7 +467,7 @@ async function checkClient(
   try {
     await provider.create(config, {
       clock: deps.clock,
-      secrets: deps.secrets,
+      secrets: accountSecrets(deps.secrets, account, deps),
       log: deps.log,
       account: accountContext(account, deps.rootTenantId),
     });
@@ -345,9 +481,15 @@ async function checkClient(
 export class ProviderClients {
   readonly #providers: ReadonlyMap<string, ProviderDefinition>;
   readonly #cache = new Map<string, Promise<ProviderImpl>>();
+  readonly #tenantVaultPaths: TenantVaultPaths | undefined;
 
-  constructor(providers: ReadonlyMap<string, ProviderDefinition>) {
+  constructor(
+    providers: ReadonlyMap<string, ProviderDefinition>,
+    /** `vps({ tenantVaultPaths })`: which `vault://` refs tenants' accounts resolve. */
+    tenantVaultPaths?: TenantVaultPaths,
+  ) {
     this.#providers = providers;
+    this.#tenantVaultPaths = tenantVaultPaths;
   }
 
   client(account: ProviderAccount, deps: ClientDeps): Promise<ProviderImpl> {
@@ -358,7 +500,11 @@ export class ProviderClients {
       client = validateConfig(provider, account.config).then((config) =>
         provider.create(config, {
           clock: deps.clock,
-          secrets: deps.secrets,
+          // Scoped to what the account may name, whatever its stored config says.
+          secrets: accountSecrets(deps.secrets, account, {
+            ...(deps.rootTenantId !== undefined ? { rootTenantId: deps.rootTenantId } : {}),
+            ...(this.#tenantVaultPaths ? { tenantVaultPaths: this.#tenantVaultPaths } : {}),
+          }),
           log: deps.log,
           account: accountContext(account, deps.rootTenantId),
         }),

@@ -23,7 +23,6 @@ async function world() {
     modules: [vps({ providers: [gcp], discovery: { every: '1m' } })],
   });
   const { compute, tenants, iam } = fixture;
-  (iam as { rootTenantId?: string }).rootTenantId = tenants.root.id;
   iam.allow({ token: tenants.root.token });
   iam.allow({ token: tenants.acme.token });
   // The platform's own VM in the platform's project.
@@ -58,7 +57,7 @@ describe('tenant-owned GCP accounts (ruling F1)', () => {
       [],
     );
     // With its own key the account is accepted, and taking the key away again is refused.
-    const keyed = await create('keyed', { credentials: 'secret://acme/gcp-key' });
+    const keyed = await create('keyed', { credentials: `secret://${tenants.acme.id}/gcp-key` });
     expect(keyed).toMatchObject({ tenantId: tenants.acme.id, provider: 'gcp' });
     expect(
       await codeOf(

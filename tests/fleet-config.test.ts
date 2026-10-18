@@ -67,6 +67,8 @@ function moduleContext(sql: SqlExecutor): ModuleContext {
     sql,
     clock,
     log: { debug() {}, info() {}, warn() {}, error() {} },
+    // Root's provider accounts are the platform's (they may name env:// refs).
+    iam: { rootTenantId: 'root' },
     capacity: createCapacityPort({ clock }, { random: () => 0, topN: 1 }),
     authz: { async upsert() {}, async remove() {}, async setPending() {} },
     events: {

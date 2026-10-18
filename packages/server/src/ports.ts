@@ -6,6 +6,7 @@ import {
   type PkiPort,
   type SecretBroker,
   type SecretRef,
+  type SecretResolveContext,
   type SecretStore,
   type SqlTx,
   type WorkflowEngine,
@@ -19,6 +20,7 @@ import { defaultJoinTokenMinter, type JoinTokenMinter } from './api/join-tokens.
 /**
  * The secret broker over the configured stores: `put` writes to the first store serving `secret://`
  * (or the first store), `resolve` and `delete` route by the ref's scheme. Values never reach logs.
+ * A resolve context (the tenant a value is resolved for) reaches the store, which scopes by it.
  */
 export function secretBroker(stores: readonly SecretStore[]): SecretBroker {
   if (!stores.length) throw new ComputeError('INVALID_CONFIG', 'The secret broker needs a store');
@@ -33,7 +35,8 @@ export function secretBroker(stores: readonly SecretStore[]): SecretBroker {
   };
   return Object.freeze({
     put: (tenantId: string, value: string) => writer.put(tenantId, value),
-    resolve: (ref: SecretRef) => storeFor(ref).resolve(ref),
+    resolve: (ref: SecretRef, context?: SecretResolveContext) =>
+      context ? storeFor(ref).resolve(ref, context) : storeFor(ref).resolve(ref),
     delete: (ref: SecretRef) => storeFor(ref).delete(ref),
   });
 }

@@ -404,6 +404,13 @@ gateway's report handlers also ignore reports about allocations placed on anothe
   `fleet`, such as a shared site's BMC credentials in the root tenant) is never user data: `instances.create` refuses
   it with `INVALID_INPUT` even for a holder of fleet `compute:secrets:manage` (aac73a1). Sandbox templates follow the
   same rule.
+- A provider account's references are its tenant's. An account of a tenant other than the root may name only
+  `secret://<its tenant>/…` and the `vault://` paths `vps({ tenantVaultPaths })` allows it, never `env://` (the control
+  plane's environment) nor the platform's or another tenant's secrets; `providerAccounts.create` and `update` refuse
+  anything else with `INVALID_CONFIG`. The client checks again on every resolve (`ACCESS_DENIED` for a row stored
+  around the API) and resolves a tenant's references with the tenant as the context, so the sealed store refuses a
+  row stored for another tenant. A Google Cloud key's `token_uri` must be Google's token endpoint: the control plane
+  POSTs to it, and the key is the tenant's.
 - `secrets.put` records the scope it was decided on (`secret_refs.scope`, `tenant` or `fleet`), and a tenant-scoped
   put or delete never changes a fleet secret (`INVALID_STATE`).
 - Nothing is released for a tenant that is suspended or deleted: after the signature and binding checks, a reference

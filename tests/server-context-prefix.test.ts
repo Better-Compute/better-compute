@@ -12,3 +12,15 @@ describe('ModuleContext.typePrefix', () => {
     expect(fixture.compute.context.typePrefix).toBe('compute-');
   });
 });
+
+describe('ModuleContext.iam.rootTenantId', () => {
+  // The fixture names the root only on betterCompute({ rootTenantId }); its fake IAM port does not.
+  it.each(['throw', 'off'] as const)(
+    'names the resolved root tenant (iamGuard %s)',
+    async (iamGuard) => {
+      const fixture = await computeFixture({ iamGuard });
+      expect((fixture.iam as { rootTenantId?: string }).rootTenantId).toBeUndefined();
+      expect(fixture.compute.context.iam.rootTenantId).toBe(fixture.tenants.root.id);
+    },
+  );
+});

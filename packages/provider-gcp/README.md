@@ -40,7 +40,12 @@ await client.providerAccounts.create({
   tenantId,
   provider: 'gcp',
   name: 'main',
-  config: { projectId: 'my-project', zones: ['us-central1-a'], credentials: 'secret://gcp/sa-key' },
+  // A tenant's account names its own key: secret://<tenantId>/… (see Authentication).
+  config: {
+    projectId: 'my-project',
+    zones: ['us-central1-a'],
+    credentials: `secret://${tenantId}/gcp-sa-key`,
+  },
 });
 ```
 
@@ -118,6 +123,10 @@ How vps uses them:
 `serviceAccountTokenSource(keyJson)` signs a JWT with the key and exchanges it at the OAuth token endpoint. `metadataTokenSource()` reads the metadata server. `impersonatedTokenSource(base, email)` exchanges a base token through IAM Credentials. Each caches its token until a minute before expiry. A host that has its own workload-identity client passes `tokenSource` in the provider options. Tokens are never logged.
 
 **Tenant accounts bring their own key.** An account without `credentials` runs on the host's own identity (`tokenSource`, else the metadata server), which is the control plane's. vps tells the provider whose account it builds a client for (`ProviderContext.account`), and only an account of the root (platform) tenant may do that: a tenant's account without `credentials`, or with `impersonate` but no `credentials`, is `INVALID_CONFIG` at `providerAccounts.create` and `update` (and on every use, for a row stored before). Otherwise a tenant naming the platform's project would list, attach and delete the platform's VMs. `tokenSource` never overrides an account's `credentials`.
+
+**The key must be the tenant's own.** `credentials` on a tenant's account is a `secret://<its tenant>/…` reference (or a `vault://` path `vps({ tenantVaultPaths })` allows it); `env://`, another tenant's and the platform's secrets are `INVALID_CONFIG`, as for every provider (see `providerAccounts.create` in the API reference).
+
+**The key's `token_uri` is pinned.** The key JSON comes from the tenant, and the control plane POSTs the signed JWT to its `token_uri`. So `token_uri` must be absent (the default, `https://oauth2.googleapis.com/token`), that URL, or its older alias `https://accounts.google.com/o/oauth2/token`, compared exactly. Anything else, such as an address inside the platform's network, is `INVALID_CONFIG` (`details.reason` `tokenUri`) on the first call that needs a token, and nothing is fetched.
 
 ## Errors
 

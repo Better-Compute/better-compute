@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ComputeError, type IamPort, type Logger } from '@better-compute/core';
-import { guardIamPort } from '../packages/server/src/iam-guard.js';
+import { guardIamPort, withRootTenant } from '../packages/server/src/iam-guard.js';
 
 // PLAN.md §8.1: no IamPort call is awaited inside a compute transaction. The guard reports (`warn`)
 // or refuses (`throw`) one made while the executor's transaction is open.
@@ -80,5 +80,54 @@ describe('iamGuard (§8.1)', () => {
       guarded.authorize('c' as never, 't', 'a', { type: 'x', id: '1' } as never),
     ).resolves.toBe(false);
     expect('authorizeMany' in guarded).toBe(true);
+  });
+});
+
+// Modules read the platform tenant from `context.iam.rootTenantId`; the server resolves it from
+// betterCompute({ rootTenantId }) too, so the port modules get names it either way.
+describe('withRootTenant', () => {
+  it('is the port itself when it already names the root', () => {
+    const inner = Object.assign(port(), { rootTenantId: 'root' });
+    expect(withRootTenant(inner, 'root')).toBe(inner);
+  });
+
+  it('names the resolved root over a frozen port and forwards the rest', async () => {
+    const frozen = Object.freeze(port());
+    const iam = withRootTenant(frozen, 'root');
+    expect(iam.rootTenantId).toBe('root');
+    expect('rootTenantId' in iam).toBe(true);
+    expect({ ...iam }.rootTenantId).toBe('root');
+    expect(Object.getOwnPropertyDescriptor(iam, 'rootTenantId')?.value).toBe('root');
+    await expect(
+      iam.authorize('c' as never, 't', 'a', { type: 'x', id: '1' } as never),
+    ).resolves.toBe(true);
+    expect(frozen.authorize).toHaveBeenCalledTimes(1);
+    expect((frozen as { rootTenantId?: string }).rootTenantId).toBeUndefined();
+    // A write never moves the deployment's root.
+    expect(Reflect.set(iam, 'rootTenantId', 'acme')).toBe(false);
+    expect(iam.rootTenantId).toBe('root');
+  });
+
+  it("calls a class port's methods on the port itself, and sees methods swapped later", async () => {
+    class Port {
+      #allowed = true;
+      async authorize() {
+        return this.#allowed;
+      }
+    }
+    const inner = Object.assign(new Port(), port(), {
+      authorize: Port.prototype.authorize,
+    }) as unknown as IamPort;
+    const rooted = withRootTenant(inner, 'root');
+    const iam = guardIamPort(rooted, () => false, 'throw', logger());
+    await expect(
+      iam.authorize('c' as never, 't', 'a', { type: 'x', id: '1' } as never),
+    ).resolves.toBe(true);
+    expect(rooted.authorize).toBe(rooted.authorize);
+
+    inner.authorize = vi.fn(async () => false);
+    await expect(
+      iam.authorize('c' as never, 't', 'a', { type: 'x', id: '1' } as never),
+    ).resolves.toBe(false);
   });
 });

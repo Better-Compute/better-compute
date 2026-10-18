@@ -26,6 +26,15 @@ interface ExpiringTokenSource extends TokenSource {
 
 const cloudPlatform = 'https://www.googleapis.com/auth/cloud-platform';
 const defaultTokenUri = 'https://oauth2.googleapis.com/token';
+/**
+ * The token endpoints a key may name: Google's, and the older alias keys still carry. A tenant
+ * supplies the key, and the control plane POSTs to its `token_uri`, so any other URL is refused
+ * rather than fetched (SSRF into the platform's network).
+ */
+const allowedTokenUris: ReadonlySet<string> = new Set([
+  defaultTokenUri,
+  'https://accounts.google.com/o/oauth2/token',
+]);
 const metadataTokenUrl =
   'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token';
 /** How long a token of unknown lifetime (a custom source) is trusted. */
@@ -100,6 +109,13 @@ function parseKey(keyJson: string): ServiceAccountKey {
     throw new ComputeError(
       'INVALID_CONFIG',
       'The service-account key needs client_email and private_key',
+    );
+  if (key.token_uri !== undefined && !allowedTokenUris.has(key.token_uri))
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      `The service-account key's token_uri must be ${defaultTokenUri}`,
+      undefined,
+      { provider: 'gcp', reason: 'tokenUri' },
     );
   return key as ServiceAccountKey;
 }
