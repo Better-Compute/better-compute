@@ -9,6 +9,7 @@ import {
   type ComputePlugin,
   type Logger,
   type SqlExecutor,
+  type WorkloadIssuerPort,
 } from '@better-compute/core';
 import { setSimClock, useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
@@ -44,6 +45,8 @@ export interface ComputeFixtureOptions<
    * inside a compute transaction fails.
    */
   iamGuard?: 'off' | 'warn' | 'throw';
+  /** As `betterCompute({ pki: { workloadIssuer } })` (its issuer: `https://compute.example.test/api/compute/workload`). */
+  pki?: { workloadIssuer?: WorkloadIssuerPort & { discovery(): object } };
 }
 
 /** One tenant of the fixture and the one signed-in person the fake IAM knows in it. */
@@ -283,6 +286,9 @@ export async function computeFixture<
       ...(options.modules ? { modules: options.modules } : {}),
       ...(options.plugins ? { plugins: options.plugins } : {}),
       ...(options.log ? { log: options.log } : {}),
+      ...(options.pki?.workloadIssuer
+        ? { pki: { workloadIssuer: options.pki.workloadIssuer } }
+        : {}),
     });
     await compute.initialize();
     if (mode === 'sim') await useSimClock(database, start);
