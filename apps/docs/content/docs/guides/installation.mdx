@@ -11,8 +11,8 @@ Better Compute is split into `@better-compute/*` packages. Most applications ins
 import it, and the server never imports the injected modules (`provision`, `metal`, `vps`): your application imports
 them and passes them in, so what you do not use costs nothing at run time.
 
-<Callout title="Version 0.1.1">
-  `better-compute` and every `@better-compute/*` package are published to npm at 0.1.1, on the `latest` dist-tag,
+<Callout title="Version 0.2.0">
+  `better-compute` and every `@better-compute/*` package are published to npm at 0.2.0, on the `latest` dist-tag,
   and accept Better IAM `>=0.2.0 <0.4.0` (`better-iam` and `@better-iam/*`; 0.3 is current), which is on npm too. The Go daemon `bcd` is
   not an npm package and has no released binary yet; see [the daemon](#the-daemon).
 </Callout>
@@ -188,6 +188,7 @@ These are installed directly, not through `better-compute`:
 | Package | What it is |
 | --- | --- |
 | `@better-compute/provider-hetzner` | Hetzner Cloud servers as VPS instances and offers, and Hetzner Robot bootstrap |
+| `@better-compute/provider-gcp` | Google Compute Engine VMs as VPS instances: discovery, attach, reservations, VPCs and firewalls (new in 0.2.0) |
 | `@better-compute/provider-proxmox` | Proxmox VE QEMU VMs cloned from templates |
 | `@better-compute/provider-kubernetes` | Not a VPS provider: the manifests that run bcd as a DaemonSet on an existing cluster's nodes (`bcdDaemonSetManifests`, `renderKubernetesManifests`; 2c9f953). See [bcd on Kubernetes](/docs/daemon/kubernetes) |
 | `@better-compute/driver-sdk` | bcx, the out-of-process driver protocol (a v0.5 draft; the protocol is unstable until v0.5 ships) |

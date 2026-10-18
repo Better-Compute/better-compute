@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/iam",
-  "version": "0.1.1",
+  "version": "0.2.1",
   "description": "The better-iam bridge for better-compute: IAM plugin and catalog, event inbox, authz projection and resolver, the embedded IamPort, usage sink and flag cache.",
   "type": "module",
   "license": "Apache-2.0",
