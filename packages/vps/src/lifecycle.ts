@@ -475,6 +475,16 @@ async function reconcileProvider(
       });
     return row.state === 'deleting' ? undefined : now + pollSteadyMs;
   }
+  if (!account && row.providerAccountId !== undefined && row.state === 'deleting') {
+    // R1: a pool's account that is not its owner's is never used, deletion included. The instance
+    // goes without a provider call; a machine it made stays for the account's owner to remove.
+    await sql.transaction(async (tx) => {
+      const current = await readInstance(tx, instanceId, { lock: true });
+      if (current && current.version === row.version)
+        await finishDeletion(deps, tx, current, { detached: true });
+    });
+    return undefined;
+  }
   if (!account)
     throw new ComputeError('INVALID_STATE', `Instance ${row.id} has no provider account`);
 
