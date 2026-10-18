@@ -8,7 +8,8 @@ import type { ComputeRequester } from './resources.js';
 /** One window as `usage.list` returns it. */
 export interface UsageWindowInput {
   idempotencyKey: string;
-  allocationId: string;
+  /** Absent for windows of other sources (provider instances, grants, …). */
+  allocationId?: string;
   identityId?: string;
   meter: string;
   quantity: number;

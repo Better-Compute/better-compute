@@ -229,9 +229,9 @@ export function createComputeIamBridge(options: ComputeIamBridgeOptions = {}): C
       // §14 usage: dead letters, and unrecorded windows against IAM's period close.
       const { rows: usage } = await sql.query<{ dead: string; stale: string; closing: string }>(
         `SELECT (SELECT count(*) FROM usage_dead_letters WHERE resolved_at IS NULL)::text AS dead,
-                (SELECT count(*) FROM usage_windows WHERE recorded_at IS NULL
+                (SELECT count(*) FROM usage_windows WHERE recorded_at IS NULL AND voided_at IS NULL
                    AND window_end < compute_now() - interval '2 hours')::text AS stale,
-                (SELECT count(*) FROM usage_windows WHERE recorded_at IS NULL
+                (SELECT count(*) FROM usage_windows WHERE recorded_at IS NULL AND voided_at IS NULL
                    AND window_end <= date_trunc('month', compute_now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')::text AS closing`,
       );
       const dead = Number(usage[0]?.dead ?? 0);

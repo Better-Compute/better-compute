@@ -4,7 +4,7 @@ The hourly usage windows compute meters per allocation and hands to Better IAM b
 
 Lists the tenant's usage windows ordered by window start, optionally for one project, one meter and a time range; returns a page with a cursor.
 
-- Each window carries its billing idempotency key (`cmp:<allocationId>:<windowStartMs>`), meter, quantity, bounds and tags, and, once the usage sink has handed it to IAM billing, `recordedAt` and the `outcome` (`recorded`, `duplicate`, `reattributed` or `dead-lettered`).
+- Each window carries its billing idempotency key (`cmp:<allocationId>:<windowStartMs>` for an allocation, which it also names as `allocationId`; `cmp:<kind>:<sourceId>:<windowStartMs>:<meter>` for another source), meter, quantity, bounds and tags, and, once the usage sink has handed it to IAM billing, `recordedAt` and the `outcome` (`recorded`, `duplicate`, `reattributed` or `dead-lettered`).
 - `from` and `to` (epoch milliseconds) select windows that end after `from` and start before `to`; `to` not after `from` is `INVALID_INPUT`.
 - `limit` is at most 500 (100 by default). A cursor this method did not return is `INVALID_INPUT`.
 

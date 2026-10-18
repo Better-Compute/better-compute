@@ -361,12 +361,15 @@ interface WindowRow {
   quantity: string | number;
   window_start: Date | string;
   tags: unknown;
+  cost_micros: string | number | null;
 }
 
 /**
- * One usage-sink pass (§12.7): sends closed, unrecorded `usage_windows` through `iam.recordUsage`
- * (poison-isolating), stores each outcome, and upserts dead letters. Retries are safe: every window keeps
- * its idempotency key, and a transient failure leaves the windows unrecorded for the next pass.
+ * One usage-sink pass (§12.7): sends closed, unrecorded `usage_windows` of every source (D2) through
+ * `iam.recordUsage` (poison-isolating), stores each outcome, and upserts dead letters. Voided windows are
+ * never sent; a window with `cost_micros` (pass-through) carries its cost in currency units. Retries are
+ * safe: every window keeps its idempotency key, and a transient failure leaves the windows unrecorded for
+ * the next pass.
  */
 export async function flushUsageWindows(
   sql: SqlExecutor,
@@ -375,9 +378,9 @@ export async function flushUsageWindows(
 ): Promise<FlushUsageResult> {
   const limit = options.limit ?? 1000;
   const { rows } = await sql.query<WindowRow>(
-    `SELECT idempotency_key, tenant_id, identity_id, meter, quantity, window_start, tags
+    `SELECT idempotency_key, tenant_id, identity_id, meter, quantity, window_start, tags, cost_micros
        FROM usage_windows
-      WHERE recorded_at IS NULL AND window_end <= compute_now()
+      WHERE recorded_at IS NULL AND voided_at IS NULL AND window_end <= compute_now()
       ORDER BY window_end, idempotency_key LIMIT $1`,
     [limit],
   );
@@ -393,6 +396,7 @@ export async function flushUsageWindows(
       idempotencyKey: row.idempotency_key,
     };
     if (row.identity_id !== null) event.identityId = row.identity_id;
+    if (row.cost_micros !== null) event.cost = Number(row.cost_micros) / 1e6;
     return event;
   });
   const results = await iam.recordUsage(events);

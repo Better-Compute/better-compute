@@ -7,6 +7,8 @@ import type { Json, SqlTx } from '@better-compute/core';
 // `ON CONFLICT DO NOTHING` on the idempotency key makes every pass safe to repeat. Spot reservations
 // bill `gpu.<model>.spot.hours`; a preempted one is cut back to its notice deadline, and one that is
 // re-queued never bound its first allocation, so a preempt + re-place bills each hour once.
+// Typed sources (D2: provider instances, grants, networks, snapshots) write their windows with `meterSource`;
+// the same flush records them. Allocation windows keep their keys and amounts.
 
 export const hourMs = 3_600_000;
 
@@ -17,9 +19,15 @@ export interface MeterLine {
   perHour: number;
 }
 
-/** Bounded-cardinality tags only (§12.7): region, pool, gpuModel, project, agent. */
+/**
+ * Bounded-cardinality tags only (§12.7): region, pool, gpuModel, project, agent; and for typed sources (D19)
+ * provider, flavor and source. Never instance, network or grant ids.
+ */
 export type UsageTags = Partial<
-  Record<'region' | 'pool' | 'gpuModel' | 'project' | 'agent', string>
+  Record<
+    'region' | 'pool' | 'gpuModel' | 'project' | 'agent' | 'provider' | 'flavor' | 'source',
+    string
+  >
 >;
 
 /** The GPU meter of a model: `gpu.<gpuModel>.hours`, lower-cased; spot: `gpu.<gpuModel>.spot.hours`. */
@@ -94,6 +102,98 @@ export async function meterAllocation(
         [
           usageKey(input.allocationId, window.start, index === 0 ? undefined : line.meter),
           input.allocationId,
+          input.tenantId,
+          input.identityId ?? null,
+          line.meter,
+          quantity,
+          new Date(window.start).toISOString(),
+          new Date(window.end).toISOString(),
+          JSON.stringify(tags),
+        ],
+      );
+      written += rowCount;
+    }
+  }
+  return written;
+}
+
+/**
+ * What a usage window is for (D2, core/0031): an allocation (`allocation_id`, keys from `usageKey`), or a typed
+ * source (`source_kind` + `source_id`, keys from `sourceUsageKey`). `cost` windows (pass-through) are written by
+ * the provider-cost reconciler with their `cost_micros`, not by `meterSource`.
+ */
+export type UsageSourceKind = 'allocation' | 'instance' | 'grant' | 'network' | 'snapshot' | 'cost';
+
+/** The idempotency key of one source window (D2): `cmp:<kind>:<id>:<windowStartMs>[:<meter>]`. */
+export function sourceUsageKey(
+  kind: UsageSourceKind,
+  id: string,
+  windowStartMs: number,
+  meter?: string,
+): string {
+  return `cmp:${kind}:${id}:${windowStartMs}${meter ? `:${meter}` : ''}`;
+}
+
+/** The tag keys a source window keeps (D19); any other key is dropped. */
+const sourceTagKeys: ReadonlySet<string> = new Set([
+  'region',
+  'pool',
+  'project',
+  'provider',
+  'gpuModel',
+  'flavor',
+  'source',
+]);
+
+export interface SourceMeterInput {
+  sourceKind: Exclude<UsageSourceKind, 'allocation' | 'cost'>;
+  /** The instance, grant, network or snapshot id: in the window and its key, never in its tags. */
+  sourceId: string;
+  tenantId: string;
+  /** The person or agent billed; absent bills the tenant. */
+  identityId?: string;
+  lines: readonly MeterLine[];
+  /** Billing starts here (ms). */
+  from: number;
+  /** Billing ends here (ms): the source's end, or now while it lasts. */
+  to: number;
+  /** D19 keys only (region, pool, project, provider, gpuModel, flavor, source); others are dropped. */
+  tags: UsageTags;
+}
+
+/**
+ * Writes the windows of one typed source over `[from, to)` whose hour has ended by `now`, and answers how many
+ * were new. A window is written once (`ON CONFLICT DO NOTHING`), so a caller may repeat a span; it advances its
+ * watermark to `min(to, the start of the hour holding now)`. Every line's key carries its meter, so keys never
+ * depend on line order. Lines with no quantity are skipped.
+ */
+export async function meterSource(
+  tx: SqlTx,
+  input: SourceMeterInput,
+  now: number,
+): Promise<number> {
+  const until = Math.min(input.to, Math.floor(now / hourMs) * hourMs);
+  if (!(until > input.from)) return 0;
+  const tags = Object.fromEntries(
+    Object.entries(input.tags).filter(
+      ([key, value]) => sourceTagKeys.has(key) && typeof value === 'string' && value !== '',
+    ),
+  ) as Record<string, Json>;
+  let written = 0;
+  for (const window of hourlyWindows(input.from, until)) {
+    for (const line of input.lines) {
+      if (!(line.perHour > 0)) continue;
+      const quantity = Math.round(line.perHour * window.fraction * 1e6) / 1e6;
+      if (quantity <= 0) continue;
+      const { rowCount } = await tx.query(
+        `INSERT INTO usage_windows (idempotency_key, source_kind, source_id, tenant_id, identity_id, meter, quantity,
+                                    window_start, window_end, tags)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::timestamptz, $10::jsonb)
+         ON CONFLICT DO NOTHING`,
+        [
+          sourceUsageKey(input.sourceKind, input.sourceId, window.start, line.meter),
+          input.sourceKind,
+          input.sourceId,
           input.tenantId,
           input.identityId ?? null,
           line.meter,

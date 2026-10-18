@@ -83,6 +83,11 @@ export interface UsageEvent {
   tags: Record<string, string>;
   /** `cmp:<allocId>:<windowStartMs>`. */
   idempotencyKey: string;
+  /**
+   * (billing) A reported cost in currency units (pass-through, better-iam `cost`), for meters with
+   * `pricing: 'reported'`. Absent for priced meters.
+   */
+  cost?: number;
 }
 
 /** What happened to one usage event after poison isolation. */

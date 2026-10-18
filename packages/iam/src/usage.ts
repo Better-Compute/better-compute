@@ -10,6 +10,8 @@ export interface UsageInputLike {
   tenantId: string;
   meter: string;
   quantity?: number;
+  /** Reported meters only: the event's cost in currency units. */
+  cost?: number;
   identityId?: string;
   tags?: Record<string, string>;
   occurredAt?: number;
@@ -74,6 +76,7 @@ function toInput(event: UsageEvent): UsageInputLike {
     idempotencyKey: event.idempotencyKey,
   };
   if (event.identityId !== undefined) input.identityId = event.identityId;
+  if (event.cost !== undefined) input.cost = event.cost;
   return input;
 }
 

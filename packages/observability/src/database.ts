@@ -198,7 +198,7 @@ export function databaseCollector(
     };
     await count('commands', 'commands', `state = 'pending'`);
     await count('iam_inbox', 'iam_inbox', 'processed_at IS NULL');
-    await count('usage', 'usage_windows', 'recorded_at IS NULL');
+    await count('usage', 'usage_windows', 'recorded_at IS NULL AND voided_at IS NULL');
     await count('webhooks', 'webhook_deliveries', `state = 'pending'`);
     // Events a sink gave up on (poison isolation, core/0019): they wait for an operator.
     await count('outbox_dead_letters', 'outbox_dead_letters', 'true');

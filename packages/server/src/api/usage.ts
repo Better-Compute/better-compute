@@ -23,9 +23,13 @@ export interface ListUsageInput {
 
 /** One hourly usage window (`usage_windows`). */
 export interface UsageWindow {
-  /** `cmp:<allocationId>:<windowStartMs>`: the billing idempotency key. */
+  /**
+   * The billing idempotency key: `cmp:<allocationId>:<windowStartMs>` for an allocation, or
+   * `cmp:<kind>:<sourceId>:<windowStartMs>:<meter>` for another source (a provider instance, a grant, …).
+   */
   idempotencyKey: string;
-  allocationId: string;
+  /** The allocation metered; absent for windows of other sources. */
+  allocationId?: string;
   tenantId: string;
   /** Absent once the identity is gone (tenant-attributed). */
   identityId?: string;
@@ -157,7 +161,7 @@ function decodeCursor(cursor: string): [number, string] {
 
 interface WindowRow {
   idempotency_key: string;
-  allocation_id: string;
+  allocation_id: string | null;
   tenant_id: string;
   identity_id: string | null;
   meter: string;
@@ -172,7 +176,8 @@ interface WindowRow {
 function toWindow(row: WindowRow): UsageWindow {
   const window: UsageWindow = {
     idempotencyKey: row.idempotency_key,
-    allocationId: row.allocation_id,
+    // Allocation windows keep their field order (JSON Lines exports).
+    ...(row.allocation_id === null ? {} : { allocationId: row.allocation_id }),
     tenantId: row.tenant_id,
     meter: row.meter,
     quantity: Number(row.quantity),

@@ -148,9 +148,11 @@ export async function pruneInventorySnapshots(
 }
 
 /**
- * Deletes up to `batch` usage windows the sink recorded, of allocations that ended more than
- * `olderThanDays` ago (at least 7: the metering pass re-derives the windows of allocations live or
- * ended within its 48 h lookback, and must find them still there). Unrecorded windows always stay.
+ * Deletes up to `batch` usage windows the sink recorded (or that were voided), of allocations that ended more
+ * than `olderThanDays` ago (at least 7: the metering pass re-derives the windows of allocations live or
+ * ended within its 48 h lookback, and must find them still there). Windows of other sources (core/0031) go
+ * once they ended that long ago: their reconcilers keep a watermark and never re-derive old hours.
+ * Unrecorded, unvoided windows always stay.
  */
 export async function pruneUsageWindows(
   tx: SqlTx,
@@ -160,10 +162,11 @@ export async function pruneUsageWindows(
   const { rowCount } = await tx.query(
     `DELETE FROM usage_windows d USING (
        SELECT u.idempotency_key, u.window_start FROM usage_windows u
-         JOIN allocations a ON a.id = u.allocation_id
-        WHERE u.recorded_at IS NOT NULL
+         LEFT JOIN allocations a ON a.id = u.allocation_id
+        WHERE (u.recorded_at IS NOT NULL OR u.voided_at IS NOT NULL)
           AND u.window_end < compute_now() - $1::float8 * interval '1 day'
-          AND COALESCE(a.released_at, upper(a.during)) < compute_now() - $1::float8 * interval '1 day'
+          AND (u.allocation_id IS NULL
+               OR COALESCE(a.released_at, upper(a.during)) < compute_now() - $1::float8 * interval '1 day')
         ORDER BY u.window_start, u.idempotency_key LIMIT $2) doomed
       WHERE d.idempotency_key = doomed.idempotency_key AND d.window_start = doomed.window_start`,
     [olderThan, batchOf(options.batch)],

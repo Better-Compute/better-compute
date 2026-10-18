@@ -110,7 +110,8 @@ const operationsQuery = `SELECT
     WHERE c.state = 'pending' AND c.not_after < compute_now() - interval '2 minutes')::int AS sweeper_lag,
   (SELECT count(*) FROM usage_dead_letters d WHERE d.resolved_at IS NULL)::int AS usage_dead,
   (SELECT count(*) FROM usage_windows u
-    WHERE u.recorded_at IS NULL AND u.window_end < compute_now() - interval '2 hours')::int AS usage_backlog,
+    WHERE u.recorded_at IS NULL AND u.voided_at IS NULL
+      AND u.window_end < compute_now() - interval '2 hours')::int AS usage_backlog,
   (SELECT count(*) FROM gateways g
     WHERE g.heartbeat_at > compute_now() - interval '1 minute' AND NOT g.draining
       AND g.sessions >= g.max_streams * 0.8)::int AS gateways_full,

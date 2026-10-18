@@ -139,6 +139,7 @@ describe('a fresh schema', () => {
       'inventory_snapshots_sha',
       'usage_windows_allocation_id_window_start_meter_key',
       'usage_windows_pkey',
+      'usage_windows_source',
       'usage_windows_tenant',
       'usage_windows_unrecorded',
     ]);
