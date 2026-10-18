@@ -1470,8 +1470,15 @@ describe('a pool never drives another tenant’s provider account (R1)', () => {
     expect(p.emu.requests.slice(requests).some((request) => request.method === 'POST')).toBe(false);
     expect(await free()).toBe(2);
     expect(p.emu.networks.size).toBe(0);
-    // The upgrade path for such rows: deleting the instance finishes without a provider call
-    // (the account's owner removes any machine it made), and refunds A's quota.
+    // The upgrade path for such rows (made in 0.1.x, with a machine at the provider): deleting the
+    // instance finishes without a provider call (the account's owner removes the machine), and
+    // refunds A's quota.
+    await p.fixture.database.query(
+      `UPDATE instances SET external_id = $2, state = 'running', desired_state = 'running',
+                            version = version + 1
+        WHERE id = $1`,
+      [moved.id, `${ZONE}/bc-made-in-0-1`],
+    );
     await api.instances.delete(aOp, { tenantId: A, instanceId: moved.id });
     await drive(p);
     expect(await api.instances.get(aOp, { tenantId: A, instanceId: moved.id })).toMatchObject({
