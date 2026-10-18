@@ -78,8 +78,32 @@ const call = (key: string): CallContext => ({
 let requests = 0;
 let lowestRemaining: number | undefined;
 
+/**
+ * The tags of every Droplet create this run sent. The conformance cases delete their own Droplets,
+ * but the per-create tags (instance, idempotency key) stay behind in the account: this is how the
+ * sweeper knows their names, exactly, without guessing the provider's hashing.
+ */
+const createdTags = new Set<string>();
+
+function noteCreate(input: Parameters<typeof fetch>[0], init: RequestInit | undefined): void {
+  try {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    const method = (
+      init?.method ?? (input instanceof Request ? input.method : 'GET')
+    ).toUpperCase();
+    if (method !== 'POST' || url.pathname !== '/v2/droplets' || typeof init?.body !== 'string')
+      return;
+    const body = JSON.parse(init.body) as { tags?: unknown };
+    if (Array.isArray(body.tags))
+      for (const tag of body.tags) if (typeof tag === 'string') createdTags.add(tag.toLowerCase());
+  } catch {
+    // Not a create we can read: the sweep then relies on the tags it finds on the Droplets.
+  }
+}
+
 /** Every request this suite makes (the provider's and the sweeper's) goes through here. */
 const observedFetch: typeof fetch = async (input, init) => {
+  noteCreate(input, init);
   const response = await fetch(input, init);
   requests += 1;
   const remaining = Number(response.headers.get('ratelimit-remaining'));
@@ -122,7 +146,7 @@ async function api<T = Record<string, unknown>>(
   method: 'GET' | 'DELETE',
   path: string,
   okStatuses: readonly number[] = [200, 204],
-): Promise<{ status: number; body: T | undefined }> {
+): Promise<{ status: number; body: T | undefined; text: string }> {
   const response = await observedFetch(`${endpoint}${path}`, {
     method,
     headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
@@ -130,7 +154,7 @@ async function api<T = Record<string, unknown>>(
   const text = await response.text();
   if (!okStatuses.includes(response.status))
     throw new Error(`${method} ${path} answered ${response.status}: ${text.slice(0, 300)}`);
-  return { status: response.status, body: text ? (JSON.parse(text) as T) : undefined };
+  return { status: response.status, body: text ? (JSON.parse(text) as T) : undefined, text };
 }
 
 /** Every item of a list, 200 a page, by page number (the endpoint is fixed: no link is followed). */
@@ -173,17 +197,17 @@ async function runDroplets(): Promise<Droplet[]> {
     `/droplets?tag_name=${encodeURIComponent(deployTag)}`,
     'droplets',
   );
-  const gpus = (await listAll<Droplet>('/droplets?type=gpus', 'droplets')).filter((d) =>
-    lower(d.tags).includes(deployTag),
-  );
+  const gpus = await listAll<Droplet>('/droplets?type=gpus', 'droplets');
+  // The server-side filter is not trusted: a Droplet is the run's only if its own tags say so.
   const byId = new Map<number, Droplet>();
-  for (const droplet of [...tagged, ...gpus]) byId.set(droplet.id, droplet);
+  for (const droplet of [...tagged, ...gpus])
+    if (lower(droplet.tags).includes(deployTag)) byId.set(droplet.id, droplet);
   return [...byId.values()];
 }
 
 /** The rule firewalls and the base firewall of this run's network, by name. */
 const isRunFirewall = (firewall: Firewall): boolean =>
-  firewall.name.startsWith(prefix) ||
+  firewall.name.startsWith(`${prefix}-`) ||
   firewall.name === baseFirewallName(networkName) ||
   firewall.name.includes(`.n${networkHash(networkName)}.`);
 
@@ -221,53 +245,81 @@ async function deleteIfEmpty(name: string): Promise<void> {
 
 /**
  * Deletes everything that carries the run's identity: Droplets first (a VPC with members won't
- * go), then firewalls, VPCs and empty tags. Returns what is still there afterwards.
+ * go), then firewalls, VPCs and empty tags. Best effort: a step that fails is recorded and the
+ * rest still runs. Returns what is still there afterwards, and every error met.
  */
-async function sweep(): Promise<Record<'droplets' | 'firewalls' | 'vpcs' | 'tags', string[]>> {
-  const ownTags = new Set<string>();
-  for (const droplet of await runDroplets()) {
+async function sweep(): Promise<{
+  left: Record<'droplets' | 'firewalls' | 'vpcs' | 'tags', string[]>;
+  errors: string[];
+}> {
+  const errors: string[] = [];
+  const attempt = async <T>(what: string, step: () => Promise<T>): Promise<T | undefined> => {
+    try {
+      return await step();
+    } catch (error) {
+      errors.push(`${what}: ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    }
+  };
+  // Per-create tags the run sent, plus those found on the Droplets it is about to delete.
+  const ownTags = new Set<string>([...createdTags].filter(dropletOwnTag));
+
+  for (const droplet of (await attempt('list the run Droplets', runDroplets)) ?? []) {
     // The attachable Droplet is the user's, and the claim case tags it with this deployment: if its
     // release failed it stays, and the final check reports it so the user can clean it up.
     if (String(droplet.id) === attachable) continue;
     if (!lower(droplet.tags).includes(managedTag)) continue;
     for (const tag of droplet.tags ?? []) if (dropletOwnTag(tag)) ownTags.add(tag.toLowerCase());
-    await api('DELETE', `/droplets/${droplet.id}`, [204, 404]);
-  }
-  await until(
-    'the run Droplets to disappear',
-    async () => (await runDroplets()).filter((d) => String(d.id) !== attachable).length,
-    (count) => count === 0,
-    120_000,
-  );
-
-  for (const firewall of await runFirewalls())
-    await api('DELETE', `/firewalls/${encodeURIComponent(firewall.id)}`, [204, 404]);
-
-  // DO refuses a VPC while a Droplet is still in it, so a refusal is retried for a while.
-  for (const vpc of await runVpcs()) {
-    await until(
-      `VPC ${vpc.name} to be deleted`,
-      async () => {
-        try {
-          return (await api('DELETE', `/vpcs/${encodeURIComponent(vpc.id)}`, [204, 404])).status;
-        } catch {
-          return 0;
-        }
-      },
-      (status) => status === 204 || status === 404,
-      120_000,
-      5_000,
+    await attempt(`delete Droplet ${droplet.id}`, () =>
+      api('DELETE', `/droplets/${droplet.id}`, [204, 404]),
     );
   }
+  await attempt('wait for the run Droplets to disappear', () =>
+    until(
+      'the run Droplets to disappear',
+      async () => (await runDroplets()).filter((d) => String(d.id) !== attachable).length,
+      (count) => count === 0,
+      120_000,
+    ),
+  );
 
-  for (const name of await runTags(ownTags)) await deleteIfEmpty(name);
+  for (const firewall of (await attempt('list the run firewalls', runFirewalls)) ?? [])
+    await attempt(`delete firewall ${firewall.name}`, () =>
+      api('DELETE', `/firewalls/${encodeURIComponent(firewall.id)}`, [204, 404]),
+    );
 
-  return {
-    droplets: (await runDroplets()).map((d) => `${d.id} ${d.name}`),
-    firewalls: (await runFirewalls()).map((f) => f.name),
-    vpcs: (await runVpcs()).map((v) => v.name),
-    tags: await runTags(ownTags),
+  // DO refuses a VPC while a Droplet is still in it, so a refusal is retried for a while, and the
+  // last status and message are reported if it never goes.
+  for (const vpc of (await attempt('list the run VPCs', runVpcs)) ?? [])
+    await attempt(`delete VPC ${vpc.name}`, () =>
+      until(
+        `VPC ${vpc.name} to be deleted`,
+        async () => {
+          const { status, text } = await api(
+            'DELETE',
+            `/vpcs/${encodeURIComponent(vpc.id)}`,
+            [204, 404, 403, 409, 422],
+          );
+          return { status, detail: status === 204 || status === 404 ? '' : text.slice(0, 200) };
+        },
+        ({ status }) => status === 204 || status === 404,
+        120_000,
+        5_000,
+      ),
+    );
+
+  for (const name of (await attempt('list the run tags', () => runTags(ownTags))) ?? [])
+    await attempt(`delete tag ${name}`, () => deleteIfEmpty(name));
+
+  const left = {
+    droplets: ((await attempt('re-list Droplets', runDroplets)) ?? []).map(
+      (d) => `${d.id} ${d.name}`,
+    ),
+    firewalls: ((await attempt('re-list firewalls', runFirewalls)) ?? []).map((f) => f.name),
+    vpcs: ((await attempt('re-list VPCs', runVpcs)) ?? []).map((v) => v.name),
+    tags: (await attempt('re-list tags', () => runTags(ownTags))) ?? [],
   };
+  return { left, errors };
 }
 
 // ---------------------------------------------------------------------------------- the suite
@@ -286,17 +338,26 @@ describe.skipIf(!enabled)('provider-digitalocean live', () => {
   });
 
   afterAll(async () => {
+    const stats = () =>
+      `${requests} requests, lowest ratelimit-remaining ${lowestRemaining ?? 'not seen'}`;
+    let outcome: Awaited<ReturnType<typeof sweep>>;
     try {
-      const left = await sweep();
-      console.info(
-        `DigitalOcean live run ${run}: ${requests} requests, lowest ratelimit-remaining ${lowestRemaining ?? 'not seen'}`,
-      );
-      expect(left).toEqual({ droplets: [], firewalls: [], vpcs: [], tags: [] });
+      outcome = await sweep();
     } catch (error) {
+      outcome = {
+        left: { droplets: [], firewalls: [], vpcs: [], tags: [] },
+        errors: [`sweep: ${String(error)}`],
+      };
+    }
+    console.info(`DigitalOcean live run ${run}: ${stats()}`);
+    const { left, errors } = outcome;
+    if (errors.length > 0 || Object.values(left).some((list) => list.length > 0)) {
       console.error(
-        `DigitalOcean live run ${run}: SWEEP FAILED. Find what is left by the tag ${deployTag} and the names ${prefix}-*. ${String(error)}`,
+        `DigitalOcean live run ${run}: SWEEP INCOMPLETE (${stats()}). Find what is left by the tag ${deployTag} and the names ${prefix}-*.`,
       );
-      throw error;
+      throw new Error(
+        `the sweep of live run ${run} did not finish clean (${stats()}):\n${errors.join('\n')}\nleft: ${JSON.stringify(left)}`,
+      );
     }
   }, 600_000);
 
