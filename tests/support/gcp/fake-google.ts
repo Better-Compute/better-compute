@@ -39,7 +39,10 @@ interface Failure {
 
 const bodyless = new Set([101, 204, 205, 304]);
 
-/** `{name}` matches one path segment, `{name=**}` the rest of the path. */
+/**
+ * `{name}` matches one path segment up to a `:verb` (Google's `{name}` stops at `:`, so
+ * `/x/{id}:cancel` is a route of its own), `{name=**}` the rest of the path.
+ */
 function compile(template: string): RegExp {
   let source = '';
   let rest = template;
@@ -49,7 +52,7 @@ function compile(template: string): RegExp {
     const close = rest.indexOf('}', open);
     source += escape(rest.slice(0, open));
     const [name, glob] = rest.slice(open + 1, close).split('=');
-    source += glob === '**' ? `(?<${name}>.+)` : `(?<${name}>[^/]+)`;
+    source += glob === '**' ? `(?<${name}>.+)` : `(?<${name}>[^/:]+)`;
     rest = rest.slice(close + 1);
   }
   return new RegExp(`^${source}${escape(rest)}$`);

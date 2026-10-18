@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { isComputeError, type Logger } from '@better-compute/core';
+import { isComputeError, type ErrorCode, type Logger } from '@better-compute/core';
 import { defaultRetryAfterMs, googleClient, mapGoogleError } from '@better-compute/gcp-common';
 import { mapGceError } from '@better-compute/provider-gcp';
 import { FakeGoogle } from './support/gcp/fake-google.js';
@@ -134,38 +134,177 @@ describe('mapGoogleError', () => {
     expect(defaultRetryAfterMs).toBe(10_000);
   });
 
-  describe('agrees with mapGceError on every legacy GCE case', () => {
-    const slow = { error: { code: 429, message: 'slow' } };
-    const cases: [string, number, unknown, Headers][] = [
-      ['404', 404, LEGACY(404, 'notFound'), none],
-      ['409 alreadyExists', 409, LEGACY(409, 'alreadyExists'), none],
-      [
-        '409 resourceInUseByAnotherResource',
-        409,
-        LEGACY(409, 'resourceInUseByAnotherResource'),
-        none,
-      ],
-      [
-        '400 resourceInUseByAnotherResource',
-        400,
-        LEGACY(400, 'resourceInUseByAnotherResource'),
-        none,
-      ],
-      ['429', 429, slow, none],
-      ['429 with Retry-After', 429, slow, new Headers({ 'retry-after': '3' })],
-      ['403 rateLimitExceeded', 403, LEGACY(403, 'rateLimitExceeded'), none],
-      ['403 userRateLimitExceeded', 403, LEGACY(403, 'userRateLimitExceeded'), none],
-      ['400 resourceNotReady', 400, LEGACY(400, 'resourceNotReady'), none],
-      ['403 quotaExceeded', 403, LEGACY(403, 'quotaExceeded'), none],
-      ['403 forbidden', 403, LEGACY(403, 'forbidden'), none],
-      ['400 invalid', 400, LEGACY(400, 'invalid'), none],
-      ['500', 500, { error: { code: 500, message: 'oops' } }, none],
+  // mapGoogleError reads Compute Engine's legacy error bodies the way provider-gcp's mapGceError
+  // does, so a GCE failure maps the same through either. The sweep below crosses every status, every
+  // legacy reason and the body shapes a proxy can produce, and requires an identical ComputeError
+  // (code, details and message: both take the same `what` and build the message the same way)
+  // everywhere except the cases listed in intendedDivergences, where mapGoogleError deliberately
+  // differs. Each of those asserts both sides, so neither can drift unnoticed.
+  describe('agrees with mapGceError on the legacy GCE shapes, except where it is meant to differ', () => {
+    const statuses = [400, 401, 403, 404, 409, 418, 429, 499, 500, 501, 502, 503, 504];
+    const legacyReasons = [
+      'none',
+      'alreadyExists',
+      'resourceInUseByAnotherResource',
+      'rateLimitExceeded',
+      'userRateLimitExceeded',
+      'resourceNotReady',
+      'quotaExceeded',
+      'forbidden',
+      'invalid',
+      'notFound',
     ];
-    it.each(cases)('%s', (_name, status, body, headers) => {
+    const shapes = [...legacyReasons, 'undefined', '{}'];
+    const bodyOf = (shape: string, status: number): unknown => {
+      if (shape === 'undefined') return undefined;
+      if (shape === '{}') return {};
+      if (shape === 'none') return { error: { code: status, message: 'legacy boom' } };
+      return LEGACY(status, shape);
+    };
+
+    interface SweepDivergence {
+      status: number;
+      /** The sweep shapes (a legacy reason, `none`, `undefined` or `{}`) this row covers. */
+      shapes: string[];
+      google: ErrorCode;
+      gce: ErrorCode;
+      why: string;
+    }
+    interface BodyDivergence {
+      name: string;
+      status: number;
+      body: unknown;
+      google: { code: ErrorCode; details: Record<string, unknown> };
+      gce: { code: ErrorCode; details: Record<string, unknown> };
+      why: string;
+    }
+    const except = (...reasons: string[]) => shapes.filter((shape) => !reasons.includes(shape));
+
+    const intendedDivergences: { sweep: SweepDivergence[]; bodies: BodyDivergence[] } = {
+      sweep: [
+        {
+          status: 401,
+          shapes,
+          google: 'UNAUTHENTICATED',
+          gce: 'PROVIDER_ERROR',
+          why: 'A rejected credential is UNAUTHENTICATED for every Google API; mapGceError has no 401 branch.',
+        },
+        {
+          status: 409,
+          // Only alreadyExists (CONFLICT) and resourceInUseByAnotherResource (INVALID_STATE) agree.
+          shapes: except('alreadyExists', 'resourceInUseByAnotherResource'),
+          google: 'CONFLICT',
+          gce: 'PROVIDER_ERROR',
+          why: 'Any other 409 (ALREADY_EXISTS, ABORTED, a bare 409) is a conflict the caller can re-read and retry; mapGceError names only alreadyExists.',
+        },
+        {
+          status: 499,
+          shapes,
+          google: 'UNAVAILABLE',
+          gce: 'PROVIDER_ERROR',
+          why: 'A 499 is the server cancelling the call (or a proxy giving up): the same call can succeed later.',
+        },
+        {
+          status: 501,
+          shapes,
+          google: 'UNSUPPORTED',
+          gce: 'UNAVAILABLE',
+          why: 'UNIMPLEMENTED is permanent for this endpoint, so it is UNSUPPORTED, not a retryable 5xx.',
+        },
+      ],
+      bodies: [
+        {
+          name: 'a 403 whose legacy reason is the rpc-era RATE_LIMIT_EXCEEDED',
+          status: 403,
+          body: LEGACY(403, 'RATE_LIMIT_EXCEEDED'),
+          google: {
+            code: 'RATE_LIMITED',
+            details: { reason: 'RATE_LIMIT_EXCEEDED', retryAfterMs: defaultRetryAfterMs },
+          },
+          gce: { code: 'ACCESS_DENIED', details: { reason: 'RATE_LIMIT_EXCEEDED' } },
+          why: 'RATE_LIMIT_EXCEEDED is the same rate limit as rateLimitExceeded, spelled the cross-API way; mapGceError knows only the camelCase spellings.',
+        },
+        {
+          name: 'a 400 FAILED_PRECONDITION with a legacy invalid reason (mixed rpc and legacy shape)',
+          status: 400,
+          body: {
+            error: {
+              code: 400,
+              status: 'FAILED_PRECONDITION',
+              message: 'legacy boom',
+              errors: [{ reason: 'invalid' }],
+            },
+          },
+          google: { code: 'INVALID_STATE', details: { reason: 'invalid' } },
+          gce: { code: 'INVALID_INPUT', details: { reason: 'invalid' } },
+          why: 'The rpc status says the resource is in the wrong state, which the legacy reason alone cannot; mapGceError never reads error.status.',
+        },
+        {
+          name: 'a 403 with legacy quotaExceeded and an ErrorInfo RATE_LIMIT_EXCEEDED (mixed shape)',
+          status: 403,
+          body: {
+            error: {
+              code: 403,
+              message: 'legacy boom',
+              errors: [{ reason: 'quotaExceeded' }],
+              details: [EI('RATE_LIMIT_EXCEEDED')],
+            },
+          },
+          google: {
+            code: 'RATE_LIMITED',
+            details: { reason: 'RATE_LIMIT_EXCEEDED', retryAfterMs: defaultRetryAfterMs },
+          },
+          gce: { code: 'QUOTA_EXCEEDED', details: { reason: 'quotaExceeded' } },
+          why: 'ErrorInfo is the more precise reason and wins over errors[0]; mapGceError reads only the legacy list.',
+        },
+      ],
+    };
+
+    const sweep = statuses.flatMap((status) =>
+      shapes.flatMap((shape) => [false, true].map((retryAfter) => ({ status, shape, retryAfter }))),
+    );
+    const divergenceOf = (status: number, shape: string) =>
+      intendedDivergences.sweep.find((row) => row.status === status && row.shapes.includes(shape));
+
+    it.each(sweep)('$status $shape retry-after=$retryAfter', ({ status, shape, retryAfter }) => {
+      const body = bodyOf(shape, status);
+      const headers = new Headers(retryAfter ? { 'retry-after': '7' } : {});
       const google = mapGoogleError(status, body, headers, 'GET /x');
       const gce = mapGceError(status, body, headers, 'GET /x');
-      expect(google.code).toBe(gce.code);
-      expect(google.details?.retryAfterMs).toBe(gce.details?.retryAfterMs);
+      const row = divergenceOf(status, shape);
+      if (row) {
+        expect(google.code, row.why).toBe(row.google);
+        expect(gce.code, row.why).toBe(row.gce);
+      } else {
+        expect(google.code).toBe(gce.code);
+      }
+      // Divergent rows included, everything but the code agrees: the same details and message.
+      expect(google.details).toEqual(gce.details);
+      expect(google.message).toBe(gce.message);
+    });
+
+    it('a rate-limited sweep case honours Retry-After (the sweep ran the header both ways)', () => {
+      const google = mapGoogleError(
+        429,
+        bodyOf('none', 429),
+        new Headers({ 'retry-after': '7' }),
+        'x',
+      );
+      expect(google.details?.retryAfterMs).toBe(7000);
+    });
+
+    it.each(intendedDivergences.bodies)('intended divergence: $name', (row) => {
+      const google = mapGoogleError(row.status, row.body, none, 'GET /x');
+      const gce = mapGceError(row.status, row.body, none, 'GET /x');
+      expect(google.code, row.why).toBe(row.google.code);
+      expect(google.details).toEqual({
+        provider: 'gcp',
+        status: row.status,
+        ...row.google.details,
+      });
+      expect(gce.code, row.why).toBe(row.gce.code);
+      expect(gce.details).toEqual({ provider: 'gcp', status: row.status, ...row.gce.details });
+      expect(google.message).toBe(gce.message);
     });
   });
 });

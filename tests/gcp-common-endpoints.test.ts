@@ -186,21 +186,25 @@ describe('endpoints', () => {
   it("impersonation uses the configured universe's IAM Credentials host", async () => {
     const universe = 'example-tpc.goog';
     const fake = new FakeGoogle({ token: 'base' });
-    fake.route('POST', '/v1/projects/-/serviceAccounts/{email}', (_request, params) => ({
-      body: { accessToken: `imp-${params.email}` },
-    }));
+    fake.route(
+      'POST',
+      '/v1/projects/-/serviceAccounts/{email}:generateAccessToken',
+      (_request, params) => ({
+        body: { accessToken: `imp-${params.email}` },
+      }),
+    );
     const target = 'target@p.iam.gserviceaccount.com';
     const tokens = impersonatedTokenSource(fake.tokens(), target, {
       fetch: fake.fetch,
       universeDomain: universe,
     });
-    expect(await tokens.token(context())).toBe(`imp-${target}:generateAccessToken`);
+    expect(await tokens.token(context())).toBe(`imp-${target}`);
     expect(fake.requests).toHaveLength(1);
     expect(fake.requests[0]!.url.hostname).toBe('iamcredentials.example-tpc.goog');
     expect(fake.requests[0]!.headers.get('authorization')).toBe('Bearer base');
     // The default stays on googleapis.com.
     const plain = new FakeGoogle({ token: 'base' });
-    plain.route('POST', '/v1/projects/-/serviceAccounts/{email}', () => ({
+    plain.route('POST', '/v1/projects/-/serviceAccounts/{email}:generateAccessToken', () => ({
       body: { accessToken: 'x' },
     }));
     await impersonatedTokenSource(plain.tokens(), target, { fetch: plain.fetch }).token(context());
