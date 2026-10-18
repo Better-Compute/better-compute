@@ -5,6 +5,7 @@ import {
   setupIamMeters,
   type IamSetupApi,
 } from '@better-compute/iam';
+import { gpuModelFamilies } from '@better-compute/inventory';
 import { importOptional } from '../config.js';
 import { CliError, usageError } from '../errors.js';
 import { defineCommand } from '../framework.js';
@@ -41,7 +42,7 @@ export const iamSetupCommands = [
     group: 'IAM',
     summary: 'Print the example compute policies and create the root billing meters in better-iam',
     description:
-      "iam setup prints the PLAN.md §12.6 example policies, gpu-user and agent-guardrails, for an organization administrator to apply: compute cannot write organization policies. The policies are parameterized by the session JWT audience (the compute API's URL), the GPU model, regions and limits of the bounded-reservation statement. With --meters it also creates the root meter catalog in better-iam: for each GPU model (--gpu-models; default H100,H200,B200,A100,L4,L40S and other) the hosted, spot, provider-VM (vm.gpu.*) and reserved GPU hours, plus node.metal.hours, the hosted and provider vCPU, memory and volume hours, reservation-grant and managed-VM hours, and the network, public-IP, disk and snapshot hours (at most 100 meters, which better-iam allows per tenant). Meters that already exist are left alone, so re-running is safe. Creating meters calls better-iam at --iam-url as BETTER_IAM_TOKEN, which must be a root credential, through the optional peer @better-iam/client. It sets no prices: pricing is an operator decision (billing.setPrice).",
+      "iam setup prints the PLAN.md §12.6 example policies, gpu-user and agent-guardrails, for an organization administrator to apply: compute cannot write organization policies. The policies are parameterized by the session JWT audience (the compute API's URL), the GPU model, regions and limits of the bounded-reservation statement. With --meters it also creates the root meter catalog in better-iam: gpu.<family>.hours and gpu.<family>.spot.hours for every known GPU family, the provider-VM (vm.gpu.*) and reserved GPU hours for each model in --gpu-models (default H100,H200,B200,A100,L4,L40S and other), plus node.metal.hours, the hosted and provider vCPU, memory and volume hours, reservation-grant and managed-VM hours, and the network, public-IP, disk and snapshot hours (at most 100 meters, which better-iam allows per tenant). Meters that already exist are left alone, so re-running is safe. Creating meters calls better-iam at --iam-url as BETTER_IAM_TOKEN, which must be a root credential, through the optional peer @better-iam/client. It sets no prices: pricing is an operator decision (billing.setPrice).",
     flags: {
       audience: {
         type: 'string',
@@ -103,7 +104,7 @@ export const iamSetupCommands = [
         type: 'string',
         value: 'LIST',
         description:
-          'GPU model families to meter, comma-separated (default: H100,H200,B200,A100,L4,L40S; other is always added; at most 100 meters in all)',
+          'GPU models to price on provider VMs (vm.gpu.*), comma-separated (default: H100,H200,B200,A100,L4,L40S; other is always added). Hosted gpu.<family>.hours and .spot meters exist for every known family. At most 100 meters in all',
       },
     },
     examples: [
@@ -143,6 +144,7 @@ export const iamSetupCommands = [
       const models = list(flags['gpu-models']);
       const meters = meterCatalog({
         gpuModels: models.length ? models : defaultMeterGpuModels,
+        gpuFamilies: gpuModelFamilies,
       });
       const { createIamClient } = await importOptional<IamClientModule>(
         '@better-iam/client',

@@ -13,6 +13,7 @@ import {
   defaultMeterGpuModels,
   embeddedIam,
   flushUsageWindows,
+  knownGpuFamilies,
   meterCatalog,
   computeMeters,
   spyIamPort,
@@ -20,6 +21,7 @@ import {
   type ComputeIamBridge,
 } from '@better-compute/iam';
 import { createEmbeddedTestIam, type EmbeddedTestIam } from '@better-compute/iam/testing';
+import { gpuModelFamilies } from '@better-compute/inventory';
 import { billableLines, gpuMeter, hourMs, meterAllocation } from '@better-compute/capacity';
 import { pglite } from '@better-compute/postgres/pglite';
 import { volumeMeter, warmMeter } from '@better-compute/vps';
@@ -536,6 +538,8 @@ describe('catalog', () => {
           }))
             emitted.push(line.meter);
     for (const model of models) emitted.push(gpuMeter(model === 'other' ? undefined : model));
+    for (const family of gpuModelFamilies)
+      emitted.push(gpuMeter(family), gpuMeter(family, { spot: true }));
     return emitted;
   };
   const plannedEmitters = (): string[] => {
@@ -601,8 +605,22 @@ describe('catalog', () => {
     expect(unit('disk.pd-ssd.gib.hours')).toBe('gib-hour');
   });
 
+  it('meterCatalog has an on-demand and a spot meter for every GPU family', () => {
+    // Hosted usage emits gpu.<family>[.spot].hours for any family the fleet reports (gpuMeter), whatever
+    // gpuModels the operator chose for provider VMs.
+    expect(knownGpuFamilies).toEqual([...gpuModelFamilies]);
+    for (const gpuModels of [defaultMeterGpuModels, ['H100'], []]) {
+      const keys = new Set(meterCatalog({ gpuModels }).map((meter) => meter.key));
+      for (const family of gpuModelFamilies)
+        for (const spot of [false, true])
+          expect(keys.has(gpuMeter(family, { spot })), gpuMeter(family, { spot })).toBe(true);
+    }
+  });
+
   it('meterCatalog stays under 90 meters for the default models', () => {
-    expect(meterCatalog({ gpuModels: defaultMeterGpuModels }).length).toBeLessThanOrEqual(90);
+    const catalog = meterCatalog({ gpuModels: defaultMeterGpuModels });
+    expect(catalog.length).toBe(80);
+    expect(catalog.length).toBeLessThanOrEqual(90);
     expect(defaultMeterGpuModels).toEqual(['H100', 'H200', 'B200', 'A100', 'L4', 'L40S', 'other']);
   });
 
@@ -617,7 +635,10 @@ describe('catalog', () => {
     expect(keys).toContain('gpu.other.hours');
     expect(keys).toContain('gpu.other.spot.hours');
     expect(keys).toContain('vm.gpu.other.hours');
-    expect(keys).not.toContain('gpu.h200.hours');
+    // Hosted meters exist for every family; provider-VM variants only for the chosen models.
+    expect(keys).toContain('gpu.h200.hours');
+    expect(keys).not.toContain('vm.gpu.h200.hours');
+    expect(keys).not.toContain('vm.reserved.gpu.h200.hours');
   });
 
   it('flavorMeters adds flavor.* keys and refuses other keys', () => {
@@ -764,7 +785,8 @@ describe('catalog', () => {
         await f.iam.api.billing.listMeters(f.rootCredential, { tenantId: f.rootTenantId })
       ).map((meter) => meter.key);
       expect(keys).toContain('gpu.h100.spot.hours');
-      expect(keys).not.toContain('gpu.h200.hours');
+      expect(keys).toContain('gpu.h200.hours');
+      expect(keys).not.toContain('vm.gpu.h200.hours');
       expect(warnings).toEqual([]);
 
       // An ACCESS_DENIED (or any error) is a warning; the module still starts.

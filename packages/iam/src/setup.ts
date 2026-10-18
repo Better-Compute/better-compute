@@ -63,6 +63,32 @@ export const defaultMeterGpuModels: readonly string[] = [
   'other',
 ];
 
+/**
+ * The GPU families compute names (`gpuModelFamilies` of @better-compute/inventory, which iam must not depend on:
+ * tests pin the two lists together). Hosted and node-lease usage emits `gpu.<family>.hours` (and `.spot`) for any of
+ * them, so the catalog always defines those meters.
+ */
+export const knownGpuFamilies: readonly string[] = [
+  'H100',
+  'H200',
+  'B200',
+  'GB200',
+  'A100',
+  'L40S',
+  'L4',
+  'RTX-PRO-6000',
+  'GH200',
+  'L40',
+  'A40',
+  'A30',
+  'A10',
+  'RTX-6000-ADA',
+  'RTX-A6000',
+  'RTX-5090',
+  'RTX-5080',
+  'RTX-4090',
+];
+
 /** The disk types provider instances meter (`disk.<type>.gib.hours`). */
 const diskTypes = [
   'pd-standard',
@@ -81,20 +107,30 @@ const rootMeterUnits: Record<string, string> = {
 };
 
 export interface MeterCatalogOptions {
-  /** GPU models to price (`other` is always added); each gets on-demand, spot, VM and reserved meters. */
+  /**
+   * GPU models to price on provider VMs (`other` is always added): each gets `vm.gpu.<model>.hours`, its spot
+   * variant and `vm.reserved.gpu.<model>.hours`, besides the hosted `gpu.<model>.hours` and spot meters.
+   */
   gpuModels: readonly string[];
+  /**
+   * Families whose hosted `gpu.<family>.hours` and `gpu.<family>.spot.hours` always exist, whatever `gpuModels` says
+   * (default `knownGpuFamilies`), so no hosted window dead-letters for a GPU the fleet reports.
+   */
+  gpuFamilies?: readonly string[];
   /** Whole-shape meters root set on flavors (`billing.meter`), e.g. `flavor.a3-highgpu-8g.us-central1.hours`. */
   flavorMeters?: readonly string[];
 }
 
 /**
  * Every meter any compute reconciler can emit (platform compute billing), as better-iam rate-card meters:
- * hosted and node-lease GPU, CPU, memory and volume hours (the old root meters stay, first and in order), provider
+ * hosted and node-lease GPU (every known family, on-demand and spot), CPU, memory and volume hours (the old root
+ * meters stay, first and in order), provider
  * VM compute (`vm.*`, D4), reserved variants (D8), reservation grants and managed VMs (D7), and the ancillary
  * network, address, disk and snapshot meters (D9). Throws when the list would pass better-iam's 100 meters.
  */
 export function meterCatalog(options: MeterCatalogOptions): MeterSpec[] {
   const models = [...new Set([...options.gpuModels.map((model) => model.toLowerCase()), 'other'])];
+  const families = (options.gpuFamilies ?? knownGpuFamilies).map((family) => family.toLowerCase());
   const label = (slug: string) => (slug === 'other' ? 'other-GPU' : slug.toUpperCase());
   const catalog: MeterSpec[] = [];
   const add = (key: string, name: string, unit: string) => {
@@ -107,7 +143,9 @@ export function meterCatalog(options: MeterCatalogOptions): MeterSpec[] {
     add(meter.key, meter.name, rootMeterUnits[meter.key] ?? 'gpu-hour');
   add('vps.volume.gib.hours', 'Volume GiB hours', 'gib-hour');
   add('gpu.other.hours', 'Other GPU hours', 'gpu-hour');
-  for (const slug of models)
+  for (const slug of new Set(families))
+    add(`gpu.${slug}.hours`, `${label(slug)} GPU hours`, 'gpu-hour');
+  for (const slug of new Set([...families, ...models]))
     add(`gpu.${slug}.spot.hours`, `${label(slug)} spot GPU hours`, 'gpu-hour');
 
   add('vm.vcpu.hours', 'VM vCPU hours', 'vcpu-hour');

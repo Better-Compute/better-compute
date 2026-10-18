@@ -69,9 +69,12 @@ BETTER_IAM_TOKEN=biam_... better-compute iam setup --audience https://compute.ex
 - `--meters` needs `--iam-url` (or `BETTER_IAM_URL`) and `--root-tenant` (or `BETTER_COMPUTE_ROOT_TENANT`), and
   `BETTER_IAM_TOKEN` must hold a root session token or API key. It calls Better IAM through the optional peer
   `@better-iam/client`.
-- Without `--gpu-models` it covers `H100`, `H200`, `B200`, `A100`, `L4` and `L40S`, plus `other` (always added).
-  Each model gets `gpu.<model>.hours`, `gpu.<model>.spot.hours` and the provider-VM and reserved GPU meters
-  (`vm.gpu.<model>.hours`, `vm.gpu.<model>.spot.hours`, `vm.reserved.gpu.<model>.hours`). The catalog also holds
+- Every known GPU family (`H100`, `H200`, `B200`, `GB200`, `A100`, `L40S`, `L4`, `RTX-PRO-6000`, `GH200`, `L40`,
+  `A40`, `A30`, `A10`, `RTX-6000-ADA`, `RTX-A6000`, `RTX-5090`, `RTX-5080` and `RTX-4090`) always gets
+  `gpu.<family>.hours` and `gpu.<family>.spot.hours`, and `gpu.other.hours` covers a pool without a known model.
+  `--gpu-models` (default `H100`, `H200`, `B200`, `A100`, `L4` and `L40S`, plus `other`, always added) picks the
+  models that also get the provider-VM and reserved GPU meters (`vm.gpu.<model>.hours`,
+  `vm.gpu.<model>.spot.hours`, `vm.reserved.gpu.<model>.hours`). The catalog also holds
   `node.metal.hours`, `vps.vcpu.hours`, `vps.memory.gib.hours`, `vps.sandbox.warm` (warm sandbox vCPU hours),
   `vps.volume.gib.hours`, the `vm.*` CPU, memory, instance, grant and managed meters, and `network.vpc.hours`,
   `ip.public.hours`, `disk.<type>.gib.hours` and `snapshot.gib.hours`. Better IAM allows 100 meters per tenant, so a
@@ -92,10 +95,14 @@ const { created, existing } = await setupIamMeters(
 );
 ```
 
-<Callout type="warn" title="Spot meters are not created for you">
-  `computeMeters` creates neither `gpu.<model>.spot.hours` nor `gpu.other.hours`, the meter of GPUs in a pool
-  without a known model. Better IAM refuses usage on an unknown meter with `NOT_FOUND`, so those windows end up
-  dead-lettered. Create these meters yourself before you enable spot reservations.
+<Callout type="info" title="meterCatalog, not computeMeters">
+  `meterCatalog` is the full list and what `iam setup --meters` and the iam module create. `computeMeters` is the
+  older, smaller list (one `gpu.<model>.hours` per model, `node.metal.hours`, `vps.vcpu.hours`,
+  `vps.memory.gib.hours` and `vps.sandbox.warm`); it stays exported, and creates no spot, `other`, volume or
+  `vm.*` meter. Better IAM refuses usage on an unknown meter with `NOT_FOUND`, so windows for a meter you never
+  created are dead-lettered. Use `meterCatalog`. Both lists stay within Better IAM's 100 meters per tenant (the
+  catalog refuses a longer one). Meters that already exist are never changed: they keep their unit and the prices
+  you set, and only missing ones are created.
 </Callout>
 
 ## Usage windows
