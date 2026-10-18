@@ -1136,6 +1136,18 @@ export interface PkiPort {
   ): Promise<{ id: string; token: string }>;
 }
 
+/** The control plane as an OIDC issuer for workload identity federation (GCP WIF, AWS web identity, …). */
+export interface WorkloadIssuerPort {
+  readonly issuer: string;
+  mint(input: {
+    subject: string;
+    audience: string;
+    ttlSeconds?: number;
+  }): Promise<{ token: string; expiresAt: number }>;
+  /** Public keys only: { keys: [{ kty:'EC', crv:'P-256', x, y, kid, alg:'ES256', use:'sig' }, …] }. */
+  jwks(): Promise<{ keys: readonly Record<string, unknown>[] }>;
+}
+
 /** What modules get from the host. Modules never import each other's internals. */
 export interface ModuleContext {
   sql: SqlExecutor;
