@@ -1470,6 +1470,16 @@ describe('a pool never drives another tenant’s provider account (R1)', () => {
     expect(p.emu.requests.slice(requests).some((request) => request.method === 'POST')).toBe(false);
     expect(await free()).toBe(2);
     expect(p.emu.networks.size).toBe(0);
+    // The upgrade path for such rows: deleting the instance finishes without a provider call
+    // (the account's owner removes any machine it made), and refunds A's quota.
+    await api.instances.delete(aOp, { tenantId: A, instanceId: moved.id });
+    await drive(p);
+    expect(await api.instances.get(aOp, { tenantId: A, instanceId: moved.id })).toMatchObject({
+      state: 'deleted',
+    });
+    expect(p.emu.requests.slice(requests).some((request) => request.method === 'DELETE')).toBe(
+      false,
+    );
 
     // The offered root pool still works for A.
     const offered = await api.instances.create(aOp, createInput(p, A, { idempotencyKey: 'ok' }));
