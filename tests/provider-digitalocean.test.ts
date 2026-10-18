@@ -2235,3 +2235,61 @@ describe('definition', () => {
     expect(unavailable.details).toMatchObject({ provider: 'digitalocean', status: 500 });
   });
 });
+
+describe('definition: scoped account bodies and timeouts', () => {
+  beforeEach(freshBudgets);
+
+  const emulator = () => new DoEmulator({ now: () => Date.parse('2026-10-18T10:00:00Z') });
+  const probeContext = {
+    clock: manualClock(1_000_000),
+    secrets,
+    log: noopLog,
+    account: platformAccount,
+  };
+
+  it('probeAccount reports compute denied when droplet:read is missing and the body has no droplet_limit', async () => {
+    const emu = emulator();
+    delete emu.account.droplet_limit;
+    emu.failNext({ method: 'GET', path: /^\/droplets$/ }, 403, emu.error('forbidden').body);
+    const report = await probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch });
+    expect(report.families).toEqual({
+      compute: 'denied',
+      networks: 'ok',
+      keys: 'ok',
+      tags: 'ok',
+    });
+    expect(report.missing).toEqual(['droplet:read']);
+    expect(report.account.dropletLimit).toBeUndefined();
+    expect(report.account).toEqual({ uuid: emu.account.uuid, status: 'active' });
+  });
+
+  it('probeAccount refuses an account body without a uuid', async () => {
+    const emu = emulator();
+    delete emu.account.uuid;
+    const error = await failure(
+      probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch }),
+    );
+    expect(error.code).toBe('PROVIDER_ERROR');
+    expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'badBody' });
+  });
+
+  it('probeAccount turns its own timeout into UNAVAILABLE', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      // A server that never answers: the request ends only when the probe aborts it.
+      const hang = (_url: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) =>
+          init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason)),
+        );
+      const pending = failure(
+        probeAccount(doAccount as DoConfig, probeContext, { fetch: hang as typeof fetch }),
+      );
+      await vi.advanceTimersByTimeAsync(30_000);
+      const error = await pending;
+      expect(error.code).toBe('UNAVAILABLE');
+      expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'timeout' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

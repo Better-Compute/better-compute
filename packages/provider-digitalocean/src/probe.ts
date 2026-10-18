@@ -12,7 +12,8 @@ export type DoFamilyState = 'ok' | 'denied';
 
 /** What `probeAccount` found. */
 export interface DoAccountReport {
-  account: { uuid: string; status: string; dropletLimit: number };
+  /** `dropletLimit` is absent when the token lacks `droplet:read`: DigitalOcean then leaves it out. */
+  account: { uuid: string; status: string; dropletLimit?: number };
   families: Record<'compute' | 'networks' | 'keys' | 'tags', DoFamilyState>;
   /** The read scopes the token lacks, in probe order. */
   missing: string[];
@@ -56,17 +57,35 @@ export async function probeAccount(
   options: DoProviderOptions = {},
 ): Promise<DoAccountReport> {
   const client: DoClient = clientFor(config, context, options);
-  const signal = AbortSignal.timeout(probeTimeoutMs);
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, probeTimeoutMs);
+  try {
+    return await probe(client, controller.signal);
+  } catch (error) {
+    // The client rethrows an abort as it is; a caller should see a ComputeError.
+    if (timedOut)
+      throw new ComputeError(
+        'UNAVAILABLE',
+        `The DigitalOcean account probe took longer than ${probeTimeoutMs / 1000} seconds`,
+        undefined,
+        { provider: 'digitalocean', reason: 'timeout' },
+      );
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
+async function probe(client: DoClient, signal: AbortSignal): Promise<DoAccountReport> {
   const { account } = await client.request<{
     account?: { uuid?: unknown; status?: unknown; droplet_limit?: unknown };
   }>('GET', '/account', { signal, budget: 'observe' });
-  if (
-    typeof account?.uuid !== 'string' ||
-    typeof account.status !== 'string' ||
-    typeof account.droplet_limit !== 'number'
-  )
-    throw badBody();
+  // droplet_limit needs droplet:read in DigitalOcean's model: without it the body omits the field.
+  if (typeof account?.uuid !== 'string' || typeof account.status !== 'string') throw badBody();
 
   const denied = await Promise.all(
     probes.map(async ({ path }) => {
@@ -97,7 +116,11 @@ export async function probeAccount(
     missing.push(scope);
   });
   return {
-    account: { uuid: account.uuid, status: account.status, dropletLimit: account.droplet_limit },
+    account: {
+      uuid: account.uuid,
+      status: account.status,
+      ...(typeof account.droplet_limit === 'number' ? { dropletLimit: account.droplet_limit } : {}),
+    },
     families,
     missing,
   };
