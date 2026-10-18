@@ -825,7 +825,7 @@ describe('ssh keys', () => {
     const { client } = setup();
     const error = await failure(ensureSshKeys(client, [], keyFingerprint, signal));
     expect(error.code).toBe('INVALID_CONFIG');
-    expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'defaultSshKey' });
+    expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'sshKeyFingerprint' });
   });
 
   it('validates the default fingerprint before it is used in a request path', async () => {
@@ -833,7 +833,10 @@ describe('ssh keys', () => {
     for (const bad of ['../droplets', 'f8:4e', '', `${keyFingerprint}/x`]) {
       const error = await failure(ensureSshKeys(client, [], bad, signal));
       expect(error.code, JSON.stringify(bad)).toBe('INVALID_CONFIG');
-      expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'defaultSshKey' });
+      expect(error.details).toMatchObject({
+        provider: 'digitalocean',
+        reason: 'sshKeyFingerprint',
+      });
     }
     expect(emu.requests).toHaveLength(0);
     // A valid fingerprint in upper case is lower-cased and found.
@@ -2091,7 +2094,7 @@ describe('definition', () => {
       const hand = seedDroplet(emu.state, { name: 'legacy', tags: [] });
       return {
         provider: digitaloceanProvider({ fetch: emu.fetch }),
-        config: { ...doAccount, defaultSshKey: key.fingerprint },
+        config: { ...doAccount, sshKeyFingerprint: key.fingerprint },
         attachable: String(hand.id),
         offerId: 'nyc3/s-1vcpu-1gb',
         image: 'ubuntu-24-04-x64',

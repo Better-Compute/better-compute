@@ -308,10 +308,10 @@ export class DoCompute implements ProviderImpl {
         `user data is over DigitalOcean's limit of ${maxUserDataBytes} bytes`,
         'userData',
       );
-    if (!request.sshKeys?.length && this.config.defaultSshKey === undefined)
+    if (!request.sshKeys?.length && this.config.sshKeyFingerprint === undefined)
       throw fail(
         'INVALID_CONFIG',
-        'a Droplet needs an SSH key: the instance has none and the account sets no defaultSshKey',
+        'a Droplet needs an SSH key: the instance has none and the account sets no sshKeyFingerprint',
         'noSshKey',
       );
     // The instance tag names the instance, as provider-gcp's instance label does: power and
@@ -360,7 +360,7 @@ export class DoCompute implements ProviderImpl {
     const sshKeys = await ensureSshKeys(
       this.client,
       request.sshKeys ?? [],
-      this.config.defaultSshKey,
+      this.config.sshKeyFingerprint,
       signal,
     );
     if (sshKeys.length === 0)

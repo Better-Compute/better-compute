@@ -27,7 +27,7 @@ const fingerprintPattern = /^[0-9a-f]{2}(:[0-9a-f]{2}){15}$/;
 function invalidDefault(message: string): ComputeError {
   return new ComputeError('INVALID_CONFIG', message, undefined, {
     provider: 'digitalocean',
-    reason: 'defaultSshKey',
+    reason: 'sshKeyFingerprint',
   });
 }
 
@@ -124,7 +124,7 @@ export async function ensureSshKeys(
     const fallback = await find(client, fallbackFingerprint, signal);
     if (!fallback)
       throw invalidDefault(
-        `the account's defaultSshKey ${fallbackFingerprint} is not an SSH key in this DigitalOcean account`,
+        `the account's sshKeyFingerprint ${fallbackFingerprint} is not an SSH key in this DigitalOcean account`,
       );
     ids.push(fallback.id);
   }

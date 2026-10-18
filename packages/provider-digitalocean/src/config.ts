@@ -14,10 +14,12 @@ export const doConfig = manifest({
     .describe(
       "VPC name or uuid that create uses when it gets no network; absent means the region's default VPC",
     ),
-  defaultSshKey: field
+  sshKeyFingerprint: field
     .string()
     .optional()
-    .describe('Fingerprint of an account SSH key that is added to every Droplet'),
+    .describe(
+      'MD5 fingerprint of an account SSH key that is added to every Droplet (a fingerprint, not a secret)',
+    ),
   monitoring: field
     .boolean()
     .default(true)
@@ -42,7 +44,7 @@ export interface DoConfig {
   token: SecretRef;
   regions: string[];
   vpc?: string;
-  defaultSshKey?: string;
+  sshKeyFingerprint?: string;
   monitoring?: boolean;
   ipv6?: boolean;
   allowSpot?: boolean;
