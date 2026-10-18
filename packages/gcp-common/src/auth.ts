@@ -1,28 +1,24 @@
 import { createSign } from 'node:crypto';
 import { ComputeError, type Clock } from '@better-compute/core';
 import { defaultUniverse, googleEndpoint, resolveUniverse, tokenEndpoint } from './endpoints.js';
+import {
+  authError,
+  cacheMinted,
+  call,
+  expiring,
+  lifetimeMs,
+  unknownLifetimeMs,
+  type ExpiringTokenSource,
+} from './internal/token.js';
 
 // Google access tokens, three ways: a service-account key (a signed JWT exchanged at the OAuth
 // token endpoint), the metadata server (on GCE/GKE), and impersonation of another service account.
-// Every source below caches its token until shortly before it expires. A token is only ever
-// returned to the caller; it is never logged, and never put in an error message.
+// Every source below caches its token until shortly before it expires (the machinery is in
+// internal/token.ts). A token is only ever returned to the caller; it is never logged, and never
+// put in an error message.
 
 export interface TokenSource {
   token(context: { signal: AbortSignal; clock: Clock }): Promise<string>;
-}
-
-type TokenContext = Parameters<TokenSource['token']>[0];
-
-/** A token with its expiry (epoch ms on the context clock). */
-interface Minted {
-  token: string;
-  expiresAt: number;
-}
-
-const expiring = Symbol('bc.gcp.expiring');
-/** A source that knows when its tokens expire (the ones this module builds). */
-interface ExpiringTokenSource extends TokenSource {
-  [expiring](context: TokenContext): Promise<Minted>;
 }
 
 const cloudPlatform = 'https://www.googleapis.com/auth/cloud-platform';
@@ -40,56 +36,6 @@ const allowedTokenUris: ReadonlySet<string> = new Set([
 ]);
 const metadataTokenUrl =
   'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token';
-/** How long a token of unknown lifetime (a custom source) is trusted. */
-const unknownLifetimeMs = 300_000;
-
-function authError(message: string, status: number, reason: string): ComputeError {
-  return new ComputeError('UNAUTHENTICATED', message, undefined, {
-    provider: 'gcp',
-    status,
-    reason,
-  });
-}
-
-async function call(
-  fetchImpl: typeof fetch,
-  url: string,
-  init: RequestInit,
-): Promise<Record<string, unknown>> {
-  let response: Response;
-  try {
-    response = await fetchImpl(url, init);
-  } catch (error) {
-    if (init.signal?.aborted) throw error;
-    throw new ComputeError('UNAVAILABLE', 'Google token endpoint unreachable', undefined, {
-      provider: 'gcp',
-      status: 0,
-      reason: 'network',
-    });
-  }
-  const text = await response.text();
-  let payload: Record<string, unknown> = {};
-  try {
-    payload = text ? (JSON.parse(text) as Record<string, unknown>) : {};
-  } catch {
-    // A non-JSON body is reported by status below.
-  }
-  if (response.ok) return payload;
-  const error = payload.error;
-  const reason = typeof error === 'string' ? error : 'token_request_failed';
-  if (response.status >= 500)
-    throw new ComputeError(
-      'UNAVAILABLE',
-      `Google token endpoint answered ${response.status}`,
-      undefined,
-      { provider: 'gcp', status: response.status, reason },
-    );
-  throw authError(
-    `Google refused the token request (${response.status} ${reason})`,
-    response.status,
-    reason,
-  );
-}
 
 function base64url(input: Buffer | string): string {
   return Buffer.from(input).toString('base64url');
@@ -111,12 +57,19 @@ function parseKey(keyJson: string, universe: string): ServiceAccountKey {
   try {
     key = JSON.parse(keyJson) as Partial<ServiceAccountKey>;
   } catch {
-    throw new ComputeError('INVALID_CONFIG', 'The service-account key is not valid JSON');
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'The service-account key is not valid JSON',
+      undefined,
+      { provider: 'gcp', reason: 'keyJson' },
+    );
   }
   if (typeof key.client_email !== 'string' || typeof key.private_key !== 'string')
     throw new ComputeError(
       'INVALID_CONFIG',
       'The service-account key needs client_email and private_key',
+      undefined,
+      { provider: 'gcp', reason: 'keyFields' },
     );
   // A key without universe_domain is a default-universe key. Present, it must be the configured one.
   const keyUniverse = key.universe_domain === undefined ? defaultUniverse : key.universe_domain;
@@ -137,35 +90,6 @@ function parseKey(keyJson: string, universe: string): ServiceAccountKey {
       { provider: 'gcp', reason: 'tokenUri' },
     );
   return key as ServiceAccountKey;
-}
-
-function lifetimeMs(payload: Record<string, unknown>, now: number): number {
-  const seconds = Number(payload.expires_in);
-  return now + (Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : unknownLifetimeMs);
-}
-
-/** Wraps a minting function with a cache that refreshes `skewMs` before expiry (one flight at a time). */
-function cacheMinted(
-  mint: (context: TokenContext) => Promise<Minted>,
-  skewMs: number,
-): ExpiringTokenSource {
-  let current: Minted | undefined;
-  let inflight: Promise<Minted> | undefined;
-  const fresh = async (context: TokenContext): Promise<Minted> => {
-    if (current && context.clock.now() < current.expiresAt - skewMs) return current;
-    inflight ??= mint(context)
-      .then((minted) => (current = minted))
-      .finally(() => {
-        inflight = undefined;
-      });
-    return inflight;
-  };
-  return {
-    async token(context) {
-      return (await fresh(context)).token;
-    },
-    [expiring]: fresh,
-  };
 }
 
 /**
@@ -197,7 +121,12 @@ export function serviceAccountTokenSource(
     try {
       signature = createSign('RSA-SHA256').update(unsigned).sign(key.private_key);
     } catch {
-      throw new ComputeError('INVALID_CONFIG', 'The service-account private key cannot sign');
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'The service-account private key cannot sign',
+        undefined,
+        { provider: 'gcp', reason: 'keySign' },
+      );
     }
     const payload = await call(fetchImpl, tokenUri, {
       method: 'POST',
@@ -238,7 +167,12 @@ export function impersonatedTokenSource(
   const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
   const iamEndpoint = googleEndpoint('iamcredentials', { universeDomain: options.universeDomain });
   if (!/^[^/:?#\s]+$/.test(targetEmail))
-    throw new ComputeError('INVALID_CONFIG', 'The impersonated service account is not an email');
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'The impersonated service account is not an email',
+      undefined,
+      { provider: 'gcp', reason: 'impersonateEmail' },
+    );
   const url = `${iamEndpoint}/v1/projects/-/serviceAccounts/${targetEmail}:generateAccessToken`;
   return cacheMinted(async (context) => {
     const baseToken = await base.token(context);

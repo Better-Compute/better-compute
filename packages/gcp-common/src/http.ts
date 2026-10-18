@@ -6,6 +6,7 @@ import {
   type Logger,
 } from '@better-compute/core';
 import type { TokenSource } from './auth.js';
+import { detail, isRecord } from './internal/rpc.js';
 
 // The REST client every Google Cloud integration shares: plain fetch, a bearer token from a
 // TokenSource, and failures mapped to ComputeError codes. Every error carries
@@ -14,7 +15,10 @@ import type { TokenSource } from './auth.js';
 
 export interface GoogleRequest {
   method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
-  /** Absolute. */
+  /**
+   * Absolute. The bearer token is sent to this URL, whatever host it names, so build it with
+   * `googleEndpoint` and never take it from a response (`selfLink`, `nextPageLink`).
+   */
   url: string;
   /** Appended to the URL; an array value repeats the key (`fields=a&fields=b`). */
   query?: Record<string, string | readonly string[]>;
@@ -41,21 +45,6 @@ export interface GoogleClient {
 
 /** How long a rate-limited or not-ready caller is told to wait when Google gives no hint. */
 export const defaultRetryAfterMs = 10_000;
-
-type Json = Record<string, unknown>;
-
-function isRecord(value: unknown): value is Json {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/** The first `google.rpc.<type>` entry of an error's `details`. */
-function detail(details: unknown, type: 'ErrorInfo' | 'RetryInfo'): Json | undefined {
-  if (!Array.isArray(details)) return undefined;
-  return details.find(
-    (entry): entry is Json =>
-      isRecord(entry) && typeof entry['@type'] === 'string' && entry['@type'].endsWith(`.${type}`),
-  );
-}
 
 /** A protobuf Duration string (`"12s"`, `"0.5s"`) in milliseconds, rounded up. */
 function durationMs(value: unknown): number | undefined {
