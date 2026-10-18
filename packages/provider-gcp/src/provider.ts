@@ -1,17 +1,16 @@
 import { ComputeError, type ProviderContext } from '@better-compute/core';
-import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
 import {
   cachedTokenSource,
+  googleEndpoint,
   impersonatedTokenSource,
   metadataTokenSource,
   serviceAccountTokenSource,
   type TokenSource,
-} from './auth.js';
+} from '@better-compute/gcp-common';
+import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
 import { gceClient } from './client.js';
 import { GcpCompute, parseDiscoverLabel } from './compute.js';
 import { gcpConfig, type GcpConfig, type GcpProviderOptions } from './config.js';
-
-const defaultEndpoint = 'https://compute.googleapis.com/compute/v1';
 
 /**
  * The token source for one account: the service-account key behind `credentials` when the account
@@ -44,7 +43,10 @@ function accountTokens(
     if (base) return base;
     if (config.credentials) {
       const key = await context.secrets.resolve(config.credentials);
-      base = serviceAccountTokenSource(key, { fetch: fetchImpl });
+      base = serviceAccountTokenSource(key, {
+        fetch: fetchImpl,
+        universeDomain: options.universeDomain,
+      });
     } else if (options.tokenSource) base = cachedTokenSource(options.tokenSource);
     else base = metadataTokenSource({ fetch: fetchImpl });
     return base;
@@ -53,7 +55,10 @@ function accountTokens(
     token: async (call) => (await resolveBase()).token(call),
   };
   if (!config.impersonate) return lazyBase;
-  return impersonatedTokenSource(lazyBase, config.impersonate, { fetch: fetchImpl });
+  return impersonatedTokenSource(lazyBase, config.impersonate, {
+    fetch: fetchImpl,
+    universeDomain: options.universeDomain,
+  });
 }
 
 /**
@@ -61,6 +66,8 @@ function accountTokens(
  * to supply the host's own credentials (workload identity) to platform accounts that name no key.
  */
 export function gcpProvider(options: GcpProviderOptions = {}): ProviderDefinition<GcpConfig> {
+  // Validated now, so a malformed universe fails when the host builds the provider.
+  const universeEndpoint = `${googleEndpoint('compute', { universeDomain: options.universeDomain })}/compute/v1`;
   return defineProvider<GcpConfig>({
     id: 'gcp',
     version: '0.1.0',
@@ -73,7 +80,7 @@ export function gcpProvider(options: GcpProviderOptions = {}): ProviderDefinitio
       parseDiscoverLabel(config.discoverLabel);
       const client = gceClient({
         fetch: options.fetch ?? globalThis.fetch.bind(globalThis),
-        endpoint: options.endpoint ?? defaultEndpoint,
+        endpoint: options.endpoint ?? universeEndpoint,
         projectId: config.projectId,
         tokens: accountTokens(config, context, options),
         clock: context.clock,

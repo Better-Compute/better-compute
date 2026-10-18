@@ -51,6 +51,8 @@ await client.providerAccounts.create({
 
 `gcpProvider({ fetch, endpoint, tokenSource, operationPollMs })` swaps the transport, the API endpoint, the token source (a host's workload-identity client, used only by platform accounts that name no key) and the in-call operation poll interval (default 2 s, used only for waits of at most 20 s).
 
+**Universe domains.** `gcpProvider({ universeDomain: 'example-tpc.goog' })` runs the provider in another Google Cloud universe (a Trusted Partner Cloud or sovereign deployment; default `googleapis.com`). The compute endpoint becomes `https://compute.<universe>/compute/v1` (an explicit `endpoint` still wins), impersonation calls `iamcredentials.<universe>`, and a service-account key may name only `https://oauth2.<universe>/token` as its `token_uri`. The universe is host configuration and never comes from a key: a key's own `universe_domain` must equal it (absent means `googleapis.com`), or the key is `INVALID_CONFIG` (`details.reason` `universeDomain`). A malformed universe is `INVALID_CONFIG` (`details.reason` `endpoint`) when the provider is built.
+
 ## IAM roles
 
 The account's service account (the key's, the metadata server's, or the impersonated one) needs:

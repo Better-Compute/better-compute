@@ -12,6 +12,11 @@ All notable changes to the better-compute packages are documented here. The form
   (`serviceAccountTokenSource`, `metadataTokenSource`, `impersonatedTokenSource`, `cachedTokenSource`) move out of
   `@better-compute/provider-gcp` into a package that depends only on `@better-compute/core`, so other Google
   providers can share them. `provider-gcp` re-exports the same functions; its API and behavior are unchanged.
+- **Universe domains** (`@better-compute/gcp-common`, `@better-compute/provider-gcp`). `googleEndpoint(service, { universeDomain })`
+  and `tokenEndpoint(universeDomain)` build Google endpoints for a host-configured universe (default `googleapis.com`).
+  `serviceAccountTokenSource` and `impersonatedTokenSource` take `universeDomain`: another universe pins a key's
+  `token_uri` to exactly `https://oauth2.<universe>/token`, and a key's own `universe_domain` must match it. The default
+  universe is unchanged. `gcpProvider({ universeDomain })` derives the compute endpoint from it.
 
 ### Security
 

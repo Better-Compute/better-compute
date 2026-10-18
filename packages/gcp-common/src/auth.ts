@@ -1,5 +1,6 @@
 import { createSign } from 'node:crypto';
 import { ComputeError, type Clock } from '@better-compute/core';
+import { defaultUniverse, googleEndpoint, resolveUniverse, tokenEndpoint } from './endpoints.js';
 
 // Google access tokens, three ways: a service-account key (a signed JWT exchanged at the OAuth
 // token endpoint), the metadata server (on GCE/GKE), and impersonation of another service account.
@@ -25,11 +26,13 @@ interface ExpiringTokenSource extends TokenSource {
 }
 
 const cloudPlatform = 'https://www.googleapis.com/auth/cloud-platform';
-const defaultTokenUri = 'https://oauth2.googleapis.com/token';
+const defaultTokenUri = tokenEndpoint();
 /**
- * The token endpoints a key may name: Google's, and the older alias keys still carry. A tenant
- * supplies the key, and the control plane POSTs to its `token_uri`, so any other URL is refused
- * rather than fetched (SSRF into the platform's network).
+ * The token endpoints a key may name in the default universe: Google's, and the older alias keys
+ * still carry. A tenant supplies the key, and the control plane POSTs to its `token_uri`, so any
+ * other URL is refused rather than fetched (SSRF into the platform's network). Another universe
+ * allows exactly its own `tokenEndpoint(universe)`; the universe comes from the host's options and
+ * never from the key.
  */
 const allowedTokenUris: ReadonlySet<string> = new Set([
   defaultTokenUri,
@@ -96,9 +99,14 @@ interface ServiceAccountKey {
   client_email: string;
   private_key: string;
   token_uri?: string;
+  universe_domain?: unknown;
 }
 
-function parseKey(keyJson: string): ServiceAccountKey {
+/**
+ * Parses a tenant-supplied key and pins what it may steer. `universe` is the host's configured
+ * universe (already validated): the key's own universe_domain must equal it, and never selects it.
+ */
+function parseKey(keyJson: string, universe: string): ServiceAccountKey {
   let key: Partial<ServiceAccountKey>;
   try {
     key = JSON.parse(keyJson) as Partial<ServiceAccountKey>;
@@ -110,10 +118,21 @@ function parseKey(keyJson: string): ServiceAccountKey {
       'INVALID_CONFIG',
       'The service-account key needs client_email and private_key',
     );
-  if (key.token_uri !== undefined && !allowedTokenUris.has(key.token_uri))
+  // A key without universe_domain is a default-universe key. Present, it must be the configured one.
+  const keyUniverse = key.universe_domain === undefined ? defaultUniverse : key.universe_domain;
+  if (keyUniverse !== universe)
     throw new ComputeError(
       'INVALID_CONFIG',
-      `The service-account key's token_uri must be ${defaultTokenUri}`,
+      `The service-account key belongs to another universe than the configured ${universe}`,
+      undefined,
+      { provider: 'gcp', reason: 'universeDomain' },
+    );
+  const pinned = tokenEndpoint(universe);
+  const allowed = universe === defaultUniverse ? allowedTokenUris : new Set([pinned]);
+  if (key.token_uri !== undefined && !allowed.has(key.token_uri))
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      `The service-account key's token_uri must be ${pinned}`,
       undefined,
       { provider: 'gcp', reason: 'tokenUri' },
     );
@@ -149,15 +168,20 @@ function cacheMinted(
   };
 }
 
-/** Mints tokens from a service-account key (a JWT bearer grant); cached until a minute before expiry. */
+/**
+ * Mints tokens from a service-account key (a JWT bearer grant); cached until a minute before expiry.
+ * `universeDomain` is the host's universe (default googleapis.com): the key must belong to it and
+ * may name only its token endpoint.
+ */
 export function serviceAccountTokenSource(
   keyJson: string,
-  options: { fetch?: typeof fetch; scopes?: string[] } = {},
+  options: { fetch?: typeof fetch; scopes?: string[]; universeDomain?: string } = {},
 ): TokenSource {
-  const key = parseKey(keyJson);
+  const universe = resolveUniverse(options.universeDomain);
+  const key = parseKey(keyJson, universe);
   const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
   const scope = (options.scopes ?? [cloudPlatform]).join(' ');
-  const tokenUri = key.token_uri ?? defaultTokenUri;
+  const tokenUri = key.token_uri ?? tokenEndpoint(universe);
   return cacheMinted(async (context) => {
     const issuedAt = Math.floor(context.clock.now() / 1000);
     const unsigned = `${base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))}.${base64url(
@@ -209,12 +233,13 @@ export function metadataTokenSource(options: { fetch?: typeof fetch } = {}): Tok
 export function impersonatedTokenSource(
   base: TokenSource,
   targetEmail: string,
-  options: { fetch?: typeof fetch } = {},
+  options: { fetch?: typeof fetch; universeDomain?: string } = {},
 ): TokenSource {
   const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+  const iamEndpoint = googleEndpoint('iamcredentials', { universeDomain: options.universeDomain });
   if (!/^[^/:?#\s]+$/.test(targetEmail))
     throw new ComputeError('INVALID_CONFIG', 'The impersonated service account is not an email');
-  const url = `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${targetEmail}:generateAccessToken`;
+  const url = `${iamEndpoint}/v1/projects/-/serviceAccounts/${targetEmail}:generateAccessToken`;
   return cacheMinted(async (context) => {
     const baseToken = await base.token(context);
     const payload = await call(fetchImpl, url, {
