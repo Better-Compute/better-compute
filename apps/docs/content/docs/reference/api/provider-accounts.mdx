@@ -7,12 +7,13 @@ description: "Provider accounts connect a tenant to an external provider registe
 
 Provider accounts connect a tenant to an external provider registered with `vps({ providers })`, such as a cloud or a dedicated-server host. Each account's `config` is validated by its provider's manifest and holds secret references, never secret values. Provider pools create instances through an account, and `bootstrap` turns one of its machines into a bcd host. See [Providers](/docs/guides/vps/providers).
 
-All 12 methods are served by this release.
+All 13 methods are served by this release.
 
 | Method                                    | Kind     | Authorization                                                                                        | Phase | Status     |
 | ----------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------- | ----- | ---------- |
 | [`create`](#create)                       | mutation | `compute:providers:manage` @ `compute-fleet` or `compute:providers:manage` @ `compute-tenant`        | v0.3  | registered |
 | [`list`](#list)                           | read     | `compute:providers:read` @ `compute-tenant` + items                                                  | v0.3  | registered |
+| [`federationSetup`](#federationsetup)     | read     | `compute:providers:read` @ `compute-tenant`                                                          | v1.0  | registered |
 | [`get`](#get)                             | read     | `compute:providers:read` @ `compute-provider-account`                                                | v0.3  | registered |
 | [`offers`](#offers)                       | read     | `compute:providers:read` @ `compute-provider-account`                                                | v0.3  | registered |
 | [`update`](#update)                       | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v0.3  | registered |
@@ -68,6 +69,30 @@ Each `config` holds only secret references.
 | Field      | Type   | Required | Constraints                                                |
 | ---------- | ------ | -------- | ---------------------------------------------------------- |
 | `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+
+## federationSetup
+
+`POST /api/compute/providerAccounts/federationSetup`
+
+Returns what a tenant sets up at its cloud to give a provider account keyless sign-in (Google Cloud workload identity federation), for the account it is about to create: `{ issuer, jwksUri, subject, attributeCondition, allowedAudienceHint }`.
+
+- **Input.** `tenantId`, `provider` and `name`: the `provider` and `name` the tenant will give `create`. Nothing is stored and no provider is called.
+- **Output.** `issuer` is the control plane's workload issuer and `jwksUri` its keys (`<issuer>/jwks.json`). `subject` is `compute-account:<tenantId>/<provider>/<name>`, exactly the subject `create` gives the account (vps builds it in one place). `attributeCondition` is the CEL condition `assertion.sub == "<subject>"` to set on the tenant's workload identity pool provider, so it trusts that account and no other. `allowedAudienceHint` is the shape of the pool provider's resource name as an `https://` URL, with `<PROJECT_NUMBER>`, `<POOL>` and `<PROVIDER>` left for the tenant to fill in. See [Keyless GCP accounts](/docs/guides/vps/providers#keyless-gcp-accounts).
+- **IAM.** Decided as `compute:providers:read` on the tenant.
+- **Errors.** `INVALID_INPUT` for an invalid `name` or `provider`, or an unknown provider (`details.known` lists the registered ones), as in `create`. `INVALID_CONFIG` (`details.reason` `noWorkloadIssuer`) when the host runs no workload issuer.
+
+- **Kind:** read
+- **Authorization:** `compute:providers:read` @ `compute-tenant`
+- **Module:** `vps`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                  |
+| ---------- | ------ | -------- | ------------------------------------------------------------ |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`   |
+| `provider` | string | yes      | at most 64 characters; matches `^[a-z][a-z0-9-]{0,63}$`      |
+| `name`     | string | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$` |
 
 ## get
 

@@ -5190,6 +5190,45 @@
         "description": "Returns the tenant's provider accounts, sorted by name.\n\nEach `config` holds only secret references."
       },
       {
+        "method": "federationSetup",
+        "route": "POST /api/compute/providerAccounts/federationSetup",
+        "kind": "read",
+        "action": "compute:providers:read",
+        "resource": "compute-tenant",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "provider": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]{0,63}$",
+              "maxLength": 64,
+              "description": "The provider id, e.g. provider-hetzner"
+            },
+            "name": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+              "maxLength": 63,
+              "description": "The account name the tenant will give create, e.g. gcp-main"
+            }
+          },
+          "required": ["tenantId", "provider", "name"],
+          "additionalProperties": false
+        },
+        "summary": "Returns what a tenant sets up at its cloud to give a provider account keyless sign-in (Google Cloud workload identity federation), for the account it is about to create: `{ issuer, jwksUri, subject, attributeCondition, allowedAudienceHint }`.",
+        "description": "Returns what a tenant sets up at its cloud to give a provider account keyless sign-in (Google Cloud workload identity federation), for the account it is about to create: `{ issuer, jwksUri, subject, attributeCondition, allowedAudienceHint }`.\n\n- **Input.** `tenantId`, `provider` and `name`: the `provider` and `name` the tenant will give `create`. Nothing is stored and no provider is called.\n- **Output.** `issuer` is the control plane's workload issuer and `jwksUri` its keys (`<issuer>/jwks.json`). `subject` is `compute-account:<tenantId>/<provider>/<name>`, exactly the subject `create` gives the account (vps builds it in one place). `attributeCondition` is the CEL condition `assertion.sub == \"<subject>\"` to set on the tenant's workload identity pool provider, so it trusts that account and no other. `allowedAudienceHint` is the shape of the pool provider's resource name as an `https://` URL, with `<PROJECT_NUMBER>`, `<POOL>` and `<PROVIDER>` left for the tenant to fill in. See [Keyless GCP accounts](/docs/guides/vps/providers#keyless-gcp-accounts).\n- **IAM.** Decided as `compute:providers:read` on the tenant.\n- **Errors.** `INVALID_INPUT` for an invalid `name` or `provider`, or an unknown provider (`details.known` lists the registered ones), as in `create`. `INVALID_CONFIG` (`details.reason` `noWorkloadIssuer`) when the host runs no workload issuer."
+      },
+      {
         "method": "get",
         "route": "POST /api/compute/providerAccounts/get",
         "kind": "read",
