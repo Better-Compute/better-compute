@@ -1801,17 +1801,14 @@ describe('attach', () => {
     const error = await failure(compute.claim!(String(d.id), 'inst_1', ctx(), { managed: true }));
     expect(error.code).toBe('CONFLICT');
     expect(error.details).toMatchObject({ reason: 'claimedByAnother' });
-    // Our instance tag and the managed tag we added are gone; the other claim is untouched and
-    // the deployment tag stays.
+    // Our instance tag is gone and the managed tag was never written; the other claim is
+    // untouched and the deployment tag stays.
     expect(d.tags).toContain(instanceTag('other'));
     expect(d.tags).not.toContain(instanceTag('inst_1'));
     expect(d.tags).not.toContain(managed);
     expect(d.tags).toContain('better-compute-tenant:acme');
     expect(d.tags).toContain(deploymentTag('default'));
-    expect(unassigned(emu)).toEqual([
-      `/v2/tags/${instanceTag('inst_1')}/resources`,
-      `/v2/tags/${managed}/resources`,
-    ]);
+    expect(unassigned(emu)).toEqual([`/v2/tags/${instanceTag('inst_1')}/resources`]);
   });
 
   it('a claim that races keeps a managed tag it did not add', async () => {
@@ -1824,6 +1821,127 @@ describe('attach', () => {
     await failure(compute.claim!(String(d.id), 'inst_1', ctx(), { managed: true }));
     expect(d.tags).toContain(managed);
     expect(d.tags).not.toContain(instanceTag('inst_1'));
+  });
+
+  it("a claim that loses never wrote the managed tag, so it cannot take the winner's", async () => {
+    const emu = emulator();
+    const winner = await build(emu);
+    const d = seedDroplet(emu.state, { tags: [] });
+    const id = String(d.id);
+    // The loser has read the untagged droplet; before it writes, the winner claims it whole.
+    let raced = false;
+    const racing: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === 'object' && 'url' in input ? input.url : String(input));
+      if (!raced && init?.method === 'POST' && url.pathname === '/v2/tags') {
+        raced = true;
+        await winner.claim!(id, 'inst_a', ctx(), { managed: true });
+      }
+      return emu.fetch(input, init);
+    };
+    const loser = await build(emu, doAccount, { fetch: racing });
+
+    const error = await failure(loser.claim!(id, 'inst_b', ctx(), { managed: true }));
+    expect(raced).toBe(true);
+    expect(error.code).toBe('CONFLICT');
+    expect(error.details).toMatchObject({ reason: 'claimedByAnother' });
+    // The winner's claim is whole, and still deletable.
+    expect(d.tags).toEqual(
+      expect.arrayContaining([instanceTag('inst_a'), deploymentTag('default'), managed]),
+    );
+    expect(d.tags).not.toContain(instanceTag('inst_b'));
+    expect(unassigned(emu)).toEqual([`/v2/tags/${instanceTag('inst_b')}/resources`]);
+    // The managed tag is assigned once: by the winner.
+    const managedWrites = emu.requests.filter(
+      (r) =>
+        r.method === 'POST' &&
+        decodeURIComponent(r.url.pathname) === `/v2/tags/${managed}/resources`,
+    );
+    expect(managedWrites).toHaveLength(1);
+    await winner.delete(id, ctx());
+    expect(emu.state.droplets.has(d.id)).toBe(false);
+  });
+
+  it('a managed write that fails leaves a plain claim that a repeated claim completes', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const d = seedDroplet(emu.state, { tags: [] });
+    const id = String(d.id);
+    const serverError = errorFixtures.find((e) => e.name === 'server-error')!;
+    emu.failNext(
+      { method: 'POST', path: /^\/tags\/better-compute-managed[^/]*\/resources$/ },
+      serverError.status,
+      serverError.body,
+    );
+
+    expect((await failure(compute.claim!(id, 'inst_1', ctx(), { managed: true }))).code).toBe(
+      'UNAVAILABLE',
+    );
+    expect(d.tags).toEqual(
+      expect.arrayContaining([instanceTag('inst_1'), deploymentTag('default')]),
+    );
+    expect(d.tags).not.toContain(managed);
+
+    const machine = await compute.claim!(id, 'inst_1', ctx(), { managed: true });
+    expect(machine.claimedBy).toBe('inst_1');
+    expect(d.tags).toContain(managed);
+    await compute.delete(id, ctx());
+    expect(emu.state.droplets.has(d.id)).toBe(false);
+  });
+
+  it("a failed back-out leaves a state that the loser's next claim heals", async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const d = seedDroplet(emu.state, { tags: [] });
+    const id = String(d.id);
+    emu.beforeAction('POST /tags/*/resources', () => {
+      (d.tags as string[]).push(instanceTag('other'));
+    });
+    const serverError = errorFixtures.find((e) => e.name === 'server-error')!;
+    emu.failNext(
+      { method: 'DELETE', path: /^\/tags\/[^/]+\/resources$/ },
+      serverError.status,
+      serverError.body,
+    );
+
+    // The back-out fails, but the caller still learns the claim is lost.
+    const lost = await failure(compute.claim!(id, 'inst_1', ctx()));
+    expect(lost.details).toMatchObject({ reason: 'claimedByAnother' });
+    expect(d.tags).toEqual(expect.arrayContaining([instanceTag('inst_1'), instanceTag('other')]));
+
+    // The retry finds its own tag next to the rival's, drops it and is still refused.
+    const retry = await failure(compute.claim!(id, 'inst_1', ctx()));
+    expect(retry.details).toMatchObject({ reason: 'claimedByAnother' });
+    expect(d.tags).toContain(instanceTag('other'));
+    expect(d.tags).not.toContain(instanceTag('inst_1'));
+    expect(unassigned(emu)).toEqual([
+      `/v2/tags/${instanceTag('inst_1')}/resources`,
+      `/v2/tags/${instanceTag('inst_1')}/resources`,
+    ]);
+  });
+
+  it("only a pool's member list makes a pool label: a tag or a create label cannot", async () => {
+    const forged = 'better-compute-autoscale-pool:pool_x';
+    const droplet = seedDroplet(emulator().state, { tags: [forged, 'better-compute-tenant:acme'] });
+    expect(toMachine(droplet as unknown as DoDroplet).labels).toEqual({
+      'better-compute-tenant': 'acme',
+    });
+
+    const emu = emulator();
+    const compute = await build(emu);
+    await compute.create(
+      {
+        offerId: 'nyc3/s-2vcpu-4gb',
+        image: 'ubuntu-24-04-x64',
+        userData: '',
+        name: 'inst_1',
+        sshKeys: [testKey],
+        labels: { [labels.autoscalePool]: 'pool_x', [labels.tenant]: 'acme' },
+      },
+      ctx('inst_1'),
+    );
+    const made = [...emu.state.droplets.values()][0]!;
+    expect(made.tags).not.toContain(forged);
+    expect(made.tags).toContain('better-compute-tenant:acme');
   });
 
   it('a claim of a droplet that is missing or outside the account regions is refused', async () => {

@@ -51,6 +51,7 @@ const reservedKeys: ReadonlySet<string> = new Set([
   labels.instance,
   labels.deployment,
   labels.key,
+  labels.autoscalePool,
 ]);
 const tagPattern = /^[a-z0-9:_-]{1,255}$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -89,7 +90,8 @@ export function toMachine(droplet: DoDroplet): ExternalMachine {
   const v6 = droplet.networks?.v6 ?? [];
   const publicV4 = v4.filter((n) => n.type === 'public').map((n) => n.ip_address);
   const privateV4 = v4.filter((n) => n.type === 'private').map((n) => n.ip_address);
-  const decoded = labelsFromTags(tags);
+  // The pool label is discovery's, from a pool's member list: a tag of that name proves nothing.
+  const { [labels.autoscalePool]: _forged, ...decoded } = labelsFromTags(tags);
   const gpuInfo = droplet.gpu_info ?? droplet.size?.gpu_info;
   const model = gpuModelOf({ gpu_info: gpuInfo });
   const createdAt = Date.parse(droplet.created_at);
@@ -564,13 +566,11 @@ export class DoCompute implements ProviderImpl {
           continue;
         seen.add(droplet.id);
         const machine = toMachine(droplet);
-        // The label comes from the pool's member list only: a tag of that name proves nothing.
-        const { [labels.autoscalePool]: _forged, ...decoded } = machine.labels ?? {};
+        // The label comes from the pool's member list only (toMachine drops a forged tag's).
         const pool = members.get(droplet.id);
-        yield {
-          ...machine,
-          labels: pool === undefined ? decoded : { ...decoded, [labels.autoscalePool]: pool },
-        };
+        yield pool === undefined
+          ? machine
+          : { ...machine, labels: { ...machine.labels, [labels.autoscalePool]: pool } };
       }
   }
 
@@ -579,15 +579,7 @@ export class DoCompute implements ProviderImpl {
     try {
       await this.client.request('POST', '/tags', { body: { name }, signal, budget: 'mutate' });
     } catch (error) {
-      if (isComputeError(error, 'CONFLICT')) return;
-      // DO answers a name it already has with a 422 whose text is not in its spec.
-      if (
-        isComputeError(error, 'INVALID_INPUT') &&
-        error.details?.status === 422 &&
-        /already|exists|duplicate/i.test(error.message)
-      )
-        return;
-      throw error;
+      if (!isComputeError(error, 'CONFLICT')) throw error;
     }
   }
 
@@ -630,8 +622,12 @@ export class DoCompute implements ProviderImpl {
         'region',
       );
     const ours = tagFor(labels.instance, instanceId);
-    if (instanceTagsOf(droplet).some((t) => t.toLowerCase() !== ours))
+    if (instanceTagsOf(droplet).some((t) => t.toLowerCase() !== ours)) {
+      // Our tag next to a rival's is what a failed back-out leaves, and neither claimer can tell
+      // who won: each drops its own tag when it next looks, so the Droplet ends up with one.
+      if (hasTag(droplet, ours)) await this.backOut(droplet, ours, signal);
       throw claimedByAnother(droplet);
+    }
     if ((await poolMembers(this.client, signal)).has(droplet.id))
       throw fail(
         'INVALID_STATE',
@@ -639,32 +635,42 @@ export class DoCompute implements ProviderImpl {
         'autoscalePool',
       );
 
-    // Our instance tag first: it is the one a rival claim contends for.
-    const wanted = [ours, this.deploymentTag, ...(options.managed ? [managedTag] : [])];
-    const missing = wanted.filter((tag) => !hasTag(droplet, tag));
-    if (missing.length === 0) return toMachine(droplet);
-    for (const tag of missing) await this.assignTag(tag, droplet.id, signal);
-
-    // Verify: another claim that wrote between our read and our write shows up now.
-    const after = await this.droplet(id, signal);
-    if (!after) throw notFound(id);
-    if (instanceTagsOf(after).some((t) => t.toLowerCase() !== ours)) {
-      this.context.log.warn('digitalocean.claimLost', { droplet: droplet.id });
-      // Back out what only we added. The deployment tag stays: it names no instance.
-      try {
-        for (const tag of [ours, managedTag])
-          if (missing.includes(tag))
-            await this.unassignTag(spelled(after, tag), droplet.id, signal);
-      } catch (error) {
-        // The claim is lost either way: say so, and leave a trace of what remains.
-        this.context.log.error('digitalocean.claimBackoutFailed', {
-          droplet: droplet.id,
-          error: isComputeError(error) ? error.code : 'unknown',
-        });
+    // The instance and deployment tags first, then a verify; the managed tag, which hands
+    // deletion over, only once the claim has held. A claim that loses never wrote it, so its
+    // back-out can't take it from the winner.
+    const missing = [ours, this.deploymentTag].filter((tag) => !hasTag(droplet, tag));
+    let claimed = droplet;
+    if (missing.length > 0) {
+      for (const tag of missing) await this.assignTag(tag, droplet.id, signal);
+      // Verify: another claim that wrote between our read and our write shows up now.
+      const after = await this.droplet(id, signal);
+      if (!after) throw notFound(id);
+      if (instanceTagsOf(after).some((t) => t.toLowerCase() !== ours)) {
+        this.context.log.warn('digitalocean.claimLost', { droplet: droplet.id });
+        // Only what we added; the deployment tag stays, it names no instance.
+        if (missing.includes(ours)) await this.backOut(after, ours, signal);
+        throw claimedByAnother(after);
       }
-      throw claimedByAnother(after);
+      claimed = after;
     }
-    return toMachine(after);
+    // A managed write that fails leaves a plain claim, which a repeated claim completes.
+    if (options.managed && !hasTag(claimed, managedTag)) {
+      await this.assignTag(managedTag, droplet.id, signal);
+      claimed = { ...claimed, tags: [...claimed.tags, managedTag] };
+    }
+    return toMachine(claimed);
+  }
+
+  /** Takes our instance tag off a Droplet we lost; a failure is logged, the claim is lost anyway. */
+  protected async backOut(droplet: DoDroplet, ours: string, signal: AbortSignal): Promise<void> {
+    try {
+      await this.unassignTag(spelled(droplet, ours), droplet.id, signal);
+    } catch (error) {
+      this.context.log.error('digitalocean.claimBackoutFailed', {
+        droplet: droplet.id,
+        error: isComputeError(error) ? error.code : 'unknown',
+      });
+    }
   }
 
   async release(id: string, instanceId: string, ctx: CallContext): Promise<void> {

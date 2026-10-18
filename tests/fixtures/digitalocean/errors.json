@@ -168,7 +168,7 @@
       "name": "422-tag-exists",
       "status": 422,
       "verified": false,
-      "code": "INVALID_INPUT",
+      "code": "CONFLICT",
       "body": {
         "id": "unprocessable_entity",
         "message": "tag already exists",

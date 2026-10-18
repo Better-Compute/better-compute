@@ -42,6 +42,7 @@ export const unprocessablePatterns: readonly {
   { pattern: /exceed your droplet limit/i, code: 'QUOTA_EXCEEDED', reason: 'dropletLimit' },
   { pattern: /ssh key is already in use/i, code: 'CONFLICT', reason: 'sshKeyInUse' },
   { pattern: /name is already in use/i, code: 'CONFLICT', reason: 'nameInUse' },
+  { pattern: /already exists/i, code: 'CONFLICT', reason: 'alreadyExists' },
 ];
 
 /** The ComputeError for a failed DigitalOcean HTTP response. */
