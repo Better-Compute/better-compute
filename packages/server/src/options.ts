@@ -24,6 +24,7 @@ import {
   type SecretStore,
   type SinkOptions,
   type SqlExecutor,
+  type WorkloadIssuerPort,
 } from '@better-compute/core';
 import type { CapacityModuleOptions } from '@better-compute/capacity';
 import { localSealedSecretStore, type CommandSigningAuthority } from '@better-compute/pki';
@@ -156,6 +157,16 @@ export interface ComputeOptions<
      * Their public halves (`publicKeys()`) are served in `/.well-known/better-compute` as `join`.
      */
     join?: JoinCrypto;
+    /**
+     * The control plane as an OIDC issuer for workload identity federation (pki `workloadIssuer`).
+     * The host serves its discovery document and JWKS, unauthenticated, at
+     * `GET {basePath}/workload/.well-known/openid-configuration` and `GET {basePath}/workload/jwks.json`
+     * (cacheable for 5 minutes), names the issuer in `/.well-known/better-compute` as `workload`, and
+     * hands it to modules as `context.pki.workload`. Its `issuer` URL must be
+     * `<public origin>{basePath}/workload`: Google fetches discovery from `<issuer>/.well-known/…`.
+     * The host checks the path and scheme; the origin is the deployment's own to get right.
+     */
+    workloadIssuer?: WorkloadIssuerPort & { discovery(): object };
     /**
      * Signed intent (v0.2, §13): the command-signing root (pki `createCommandSigningAuthority`, or
      * the PKI bundle's `commandSigning`). Every command is then signed by a 24 h worker key it
@@ -298,6 +309,8 @@ export interface ResolvedOptions {
   capacity: CapacityModuleOptions;
   /** JoinService's keys and node CA, when configured. */
   join?: JoinCrypto;
+  /** `pki.workloadIssuer`: served below `{basePath}/workload` and exposed as `context.pki.workload`. */
+  workloadIssuer?: WorkloadIssuerPort & { discovery(): object };
   /** The well-known document's `gateway` section: `gateway.url` plus the serving CA to pin. */
   wellKnownGateway?: { url: string; serverName?: string; servingCa?: CertificateAuthority };
   /** Signs every command (`pki.commandSigning`); absent: commands go unsigned (v0.1). */
@@ -331,6 +344,31 @@ function requireMethods(value: unknown, name: string, methods: readonly string[]
   for (const method of methods)
     if (typeof (value as Record<string, unknown>)[method] !== 'function')
       throw invalid(`${name} must implement ${method}()`);
+}
+
+/**
+ * `pki.workloadIssuer` must be reachable where Google looks for it: `<issuer>/.well-known/openid-configuration`
+ * is served below `{basePath}/workload`, so the issuer's path is exactly that. The server knows no
+ * public URL of the control plane, so the origin is not compared; the scheme must be https (http
+ * only for localhost and 127.0.0.1).
+ */
+function checkWorkloadIssuer(issuer: unknown, basePath: string): void {
+  requireMethods(issuer, 'pki.workloadIssuer', ['mint', 'jwks', 'discovery']);
+  const url = (issuer as Partial<WorkloadIssuerPort>).issuer;
+  const bad = (message: string) =>
+    new ComputeError('INVALID_CONFIG', message, undefined, { reason: 'workloadIssuerUrl' });
+  let parsed: URL | undefined;
+  try {
+    parsed = typeof url === 'string' ? new URL(url) : undefined;
+  } catch {
+    parsed = undefined;
+  }
+  if (!parsed) throw bad('pki.workloadIssuer.issuer must be an absolute URL');
+  const local = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && local))
+    throw bad('pki.workloadIssuer.issuer must be an https URL (http only for localhost)');
+  if (parsed.pathname !== `${basePath}/workload`)
+    throw bad(`pki.workloadIssuer.issuer must be served at ${basePath}/workload`);
 }
 
 /** Writes warnings and errors as JSON lines on stderr; debug and info are dropped. */
@@ -485,6 +523,8 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
     if (join.publicKeys !== undefined && typeof join.publicKeys !== 'function')
       throw invalid('pki.join.publicKeys must be a function');
   }
+  const workloadIssuer = options.pki?.workloadIssuer;
+  if (workloadIssuer !== undefined) checkWorkloadIssuer(workloadIssuer, basePath);
   const log = options.log ?? defaultLogger;
   const hooks = withCommitHooks(options.database, log);
   const configuredStores = options.secrets ?? [];
@@ -536,6 +576,7 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
     ports,
     capacity,
     ...(join ? { join } : {}),
+    ...(workloadIssuer ? { workloadIssuer } : {}),
     ...(wellKnownGateway ? { wellKnownGateway } : {}),
     ...signing,
     secretStores,

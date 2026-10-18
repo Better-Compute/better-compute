@@ -23,6 +23,11 @@ export interface ServerInfo {
    * they pin, so `bcd join --server <control plane>` writes its own config (PLAN.md §6 Install).
    */
   gateway?: WellKnownGateway;
+  /**
+   * The well-known document only, when `pki.workloadIssuer` is set: the OIDC issuer URL whose
+   * discovery document and JWKS this server serves below `{basePath}/workload`.
+   */
+  workload?: { issuer: string };
 }
 
 /** The gateway section of the well-known document. */

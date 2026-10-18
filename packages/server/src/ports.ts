@@ -10,6 +10,7 @@ import {
   type SecretStore,
   type SqlTx,
   type WorkflowEngine,
+  type WorkloadIssuerPort,
 } from '@better-compute/core';
 import { defaultJoinTokenMinter, type JoinTokenMinter } from './api/join-tokens.js';
 
@@ -47,10 +48,15 @@ const macPattern = /^[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}$/;
 
 /**
  * `ctx.pki`: single-purpose join tokens minted in the caller's transaction (same bearer format and
- * `secret_hash` as `joinTokens.create`), optionally bound to one machine through `expect`.
+ * `secret_hash` as `joinTokens.create`), optionally bound to one machine through `expect`; and, when
+ * the host configures `pki.workloadIssuer`, that issuer as `workload`.
  */
-export function pkiPort(minter: JoinTokenMinter = defaultJoinTokenMinter): PkiPort {
+export function pkiPort(
+  minter: JoinTokenMinter = defaultJoinTokenMinter,
+  workload?: WorkloadIssuerPort,
+): PkiPort {
   return Object.freeze({
+    ...(workload ? { workload } : {}),
     async issueJoinToken(tx: SqlTx, input: IssueInput) {
       if (!roles.has(input.role))
         throw new ComputeError(

@@ -47,7 +47,7 @@ export function createModuleContext(
     caches,
     typePrefix: options.typePrefix,
     secrets: secretBroker(options.secretStores),
-    pki: pkiPort(),
+    pki: pkiPort(undefined, options.workloadIssuer),
     ...(workflows ? { workflows } : {}),
   });
 }
