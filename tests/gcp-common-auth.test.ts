@@ -41,6 +41,7 @@ describe('gcp-common public surface', () => {
       'cachedTokenSource',
       'defaultRetryAfterMs',
       'defaultUniverse',
+      'federatedTokenSource',
       'googleClient',
       'googleEndpoint',
       'impersonatedTokenSource',
@@ -51,6 +52,7 @@ describe('gcp-common public surface', () => {
       'rpcCodeToHttp',
       'serviceAccountTokenSource',
       'settledOperation',
+      'stsExchange',
       'tokenEndpoint',
     ]);
   });

@@ -9,6 +9,7 @@ export {
   type TokenSource,
 } from './auth.js';
 export { defaultUniverse, googleEndpoint, resolveUniverse, tokenEndpoint } from './endpoints.js';
+export { federatedTokenSource, stsExchange } from './federation.js';
 export {
   defaultRetryAfterMs,
   googleClient,
