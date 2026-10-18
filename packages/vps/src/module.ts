@@ -5,6 +5,7 @@ import {
   describedBy,
   draftId,
   fleetResourceId,
+  isComputeError,
   newId,
   type ComputeModule,
   type Duration,
@@ -47,6 +48,7 @@ import {
   deleteInstance,
   denyCreateInstance,
   assertOwnerMember,
+  ownerNotMember,
   instanceSettled,
   instanceView,
   isSecretRef,
@@ -820,6 +822,12 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
             prepareCreateInstance(depsOf(context), context, input, tx),
           describe: (input) => describeCreateInstance(input),
           denied: (context, input, tx) => denyCreateInstance(context, input, tx),
+          // An owner refused as no member of the tenant (R2) leaves no draft of theirs; other
+          // refusals of the check (budgets) keep the draft, so the same key can succeed later.
+          abandoned: async (context, input, tx, error) => {
+            if (isComputeError(error) && error.details?.reason === ownerNotMember)
+              await denyCreateInstance(context, input, tx);
+          },
           // A pool's budget policy (stop-new/drain offers, `budgetCheck: 'meter'`) covers
           // instances as it covers reservations: SPEND_LIMIT_REACHED, with the draft kept.
           check: async (context, input) => {

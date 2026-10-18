@@ -215,9 +215,12 @@ export async function assertOwnerMember(
       'INVALID_INPUT',
       `ownerIdentityId ${owner} is not an active identity of tenant ${input.tenantId}`,
       undefined,
-      { field: 'ownerIdentityId' },
+      { field: 'ownerIdentityId', reason: ownerNotMember },
     );
 }
+
+/** `details.reason` of `assertOwnerMember`'s refusal. */
+export const ownerNotMember = 'owner-not-member';
 
 /** Whether `userData` is a `secret://` ref (sealed by vps, or brought by the tenant). */
 export const isSecretRef = (userData: string | undefined): userData is `secret://${string}` =>
