@@ -8,6 +8,8 @@ import type { DoRegion, DoSize } from './types.js';
 // rarely, so each client keeps them for ten minutes; a query is then answered without a request.
 
 const catalogTtlMs = 10 * 60_000;
+/** A load that no caller waits for any more still ends. */
+const loadTimeoutMs = 60_000;
 
 interface Catalog {
   sizes: DoSize[];
@@ -35,17 +37,33 @@ async function loadCatalog(client: DoClient, signal: AbortSignal): Promise<Catal
   return { sizes, regions };
 }
 
-/** Concurrent callers share one load; a failed load is dropped so the next call retries. */
+/** Rejects with the signal's reason as soon as it aborts, leaving the promise itself running. */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
+/**
+ * Concurrent callers share one load, which runs on its own signal: one caller's abort cancels only
+ * that caller's wait. A failed load is dropped so the next call retries.
+ */
 function catalogOf(client: DoClient, signal: AbortSignal): Promise<Catalog> {
   const now = client.clock.now();
   const cached = caches.get(client);
-  if (cached && now - cached.loadedAt < catalogTtlMs) return cached.catalog;
-  const entry: CacheEntry = { loadedAt: now, catalog: loadCatalog(client, signal) };
+  if (cached && now - cached.loadedAt < catalogTtlMs) return untilAborted(cached.catalog, signal);
+  const entry: CacheEntry = {
+    loadedAt: now,
+    catalog: loadCatalog(client, AbortSignal.timeout(loadTimeoutMs)),
+  };
   caches.set(client, entry);
   entry.catalog.catch(() => {
     if (caches.get(client) === entry) caches.delete(client);
   });
-  return entry.catalog;
+  return untilAborted(entry.catalog, signal);
 }
 
 /**

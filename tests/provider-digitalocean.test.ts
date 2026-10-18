@@ -26,7 +26,7 @@ import {
   type DoSize,
 } from '@better-compute/provider-digitalocean';
 import { DoEmulator } from './support/do-emulator/index.js';
-import { freshBudgets, secrets } from './support/do-harness.js';
+import { freshBudgets, noopLog, secrets } from './support/do-harness.js';
 
 // provider-digitalocean against an in-memory emulator of the DigitalOcean endpoints it uses,
 // plugged in through the `fetch` option.
@@ -679,8 +679,46 @@ describe('offers', () => {
     clock.advance(1);
     await listOffers(client, config, {}, signal);
     expect(emu.requests).toHaveLength(4);
-    // Another client has its own cache.
-    await listOffers(setup().client, config, {}, signal);
+    // Another client has its own cache: it asks for the catalog again.
+    const other = doClient({
+      fetch: emu.fetch,
+      endpoint,
+      token: async () => 'do-token',
+      budget: new RateBudget({ perMinute: 250, perHour: 5000, clock }),
+      clock,
+      log: noopLog,
+    });
+    await listOffers(other, config, {}, signal);
+    expect(emu.requests).toHaveLength(6);
+  });
+
+  it('one caller aborting does not fail a caller sharing its load', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let held = false;
+    const emu = new DoEmulator();
+    const { client } = setup({
+      fetch: async (input, init) => {
+        if (!held) {
+          held = true;
+          await gate;
+        }
+        init?.signal?.throwIfAborted();
+        return emu.fetch(input, init);
+      },
+    });
+    const first = new AbortController();
+    const a = listOffers(client, config, {}, first.signal).then(
+      () => undefined,
+      (error: Error) => error,
+    );
+    const b = listOffers(client, config, {}, signal);
+    await Promise.resolve();
+    first.abort();
+    release();
+    expect((await a)?.name).toBe('AbortError');
+    expect(await b).not.toHaveLength(0);
+    expect(emu.requests.map((r) => r.url.pathname)).toEqual(['/v2/sizes', '/v2/regions']);
   });
 
   it('a failed load is not cached', async () => {
