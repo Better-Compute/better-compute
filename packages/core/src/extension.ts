@@ -790,6 +790,11 @@ export interface ProviderImpl {
       name: string;
       network?: NetworkRef;
       labels?: Readonly<Record<string, string>>;
+      /**
+       * The instance's OpenSSH public keys, also rendered into `userData` when it has none. A
+       * provider that can install keys without cloud-init (Compute Engine's `ssh-keys`) does.
+       */
+      sshKeys?: readonly string[];
     },
     context: CallContext,
   ): Promise<ExternalMachine>;

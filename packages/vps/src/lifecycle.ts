@@ -513,6 +513,7 @@ async function reconcileProvider(
             ? await deps.secrets.resolve(row.userData)
             : renderUserData(row),
           name: row.id,
+          ...(row.sshKeys.length ? { sshKeys: row.sshKeys } : {}),
           // (v1.0) On a tenant network: its subnet, and the tag the firewall rules target.
           ...(row.networkId !== undefined && row.subnetId !== undefined
             ? {

@@ -31,7 +31,7 @@ import {
   serviceAccountTokenSource,
   type TokenSource,
 } from '@better-compute/provider-gcp';
-import { GceEmulator } from './support/gce-emulator.js';
+import { GceEmulator, hyperdiskMachineTypes } from './support/gce-emulator.js';
 
 // provider-gcp against an in-memory emulator of the Compute Engine endpoints it uses, plugged in
 // through the `fetch` option.
@@ -675,6 +675,147 @@ describe('compute', () => {
       code: 'INVALID_INPUT',
     });
     expect(emu.instances.size).toBe(0);
+  });
+
+  describe('boot disk type and NIC by machine family', () => {
+    const request = (offerId: string, name = 'ins_x') => ({
+      offerId,
+      image: 'ubuntu-2404-lts',
+      userData: '',
+      name,
+    });
+    const inserted = (emu: GceEmulator) =>
+      emu.requests.filter((r) => r.method === 'POST' && r.body?.name).map((r) => r.body!);
+    const hyperdiskEmulator = () => {
+      const emu = new GceEmulator();
+      emu.machineTypes.push(...hyperdiskMachineTypes());
+      return emu;
+    };
+
+    it('an A3 Ultra or a C4 boots from Hyperdisk Balanced on a gVNIC', async () => {
+      const emu = hyperdiskEmulator();
+      const impl = await build(emu);
+      await impl.create(request('us-central1-a/a3-ultragpu-8g', 'ins_a'), ctx('a'));
+      await impl.create(request('us-central1-a/c4-standard-8', 'ins_c'), ctx('c'));
+      const [a3, c4] = inserted(emu);
+      for (const body of [a3!, c4!]) {
+        expect(body.disks[0].initializeParams.diskType).toBe(
+          'zones/us-central1-a/diskTypes/hyperdisk-balanced',
+        );
+        expect(body.networkInterfaces[0].nicType).toBe('GVNIC');
+      }
+      expect(emu.instances.size).toBe(2);
+    });
+
+    it('older families keep pd-balanced; only gVNIC-only families get a gVNIC', async () => {
+      const emu = new GceEmulator();
+      const impl = await build(emu);
+      await impl.create(request('us-central1-a/n2-standard-4', 'ins_n'), ctx('n'));
+      await impl.create(request('us-central1-a/a3-highgpu-8g', 'ins_h'), ctx('h'));
+      const [n2, a3] = inserted(emu);
+      expect(n2!.disks[0].initializeParams.diskType).toBe(
+        'zones/us-central1-a/diskTypes/pd-balanced',
+      );
+      expect(n2!.networkInterfaces[0].nicType).toBeUndefined();
+      expect(a3!.disks[0].initializeParams.diskType).toBe(
+        'zones/us-central1-a/diskTypes/pd-balanced',
+      );
+      expect(a3!.networkInterfaces[0].nicType).toBe('GVNIC');
+    });
+
+    it('a zone without Hyperdisk refuses an A3 Ultra before anything is created', async () => {
+      const emu = hyperdiskEmulator();
+      emu.diskTypes.delete('us-central1-a/hyperdisk-balanced');
+      const impl = await build(emu);
+      await expect(
+        impl.create(request('us-central1-a/a3-ultragpu-8g'), ctx('k')),
+      ).rejects.toMatchObject({
+        code: 'INVALID_INPUT',
+        message: expect.stringContaining(
+          'a3-ultragpu-8g needs a hyperdisk-balanced boot disk, which us-central1-a does not offer',
+        ),
+        details: { reason: 'diskTypeUnavailable' },
+      });
+      expect(inserted(emu)).toHaveLength(0);
+    });
+
+    it('a boot disk size outside what the type takes is INVALID_INPUT', async () => {
+      const emu = hyperdiskEmulator();
+      const impl = await build(emu, { ...gcpAccount, diskGiB: 70_000 });
+      await expect(
+        impl.create(request('us-central1-a/a3-ultragpu-8g'), ctx('k')),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'diskSizeOutOfRange' } });
+      expect(inserted(emu)).toHaveLength(0);
+    });
+
+    it('a family the table gets wrong is retried once with Hyperdisk Balanced, then remembered', async () => {
+      const emu = new GceEmulator();
+      // A machine type the table thinks takes Persistent Disk, but GCE refuses it.
+      emu.machineTypes.push({ name: 'z9-standard-4', zone: 'us-central1-a', guestCpus: 4, memoryMb: 16384 });
+      const refuse = emu.fetch;
+      emu.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        const disk = body?.disks?.[0]?.initializeParams?.diskType as string | undefined;
+        if (init?.method === 'POST' && disk?.endsWith('/pd-balanced') && /z9-/.test(body.machineType))
+          return new Response(
+            JSON.stringify({
+              error: {
+                code: 400,
+                message: '[pd-balanced] disk type cannot be used by [z9-standard-4] machine type.',
+                errors: [{ reason: 'invalid' }],
+              },
+            }),
+            { status: 400, headers: { 'content-type': 'application/json' } },
+          );
+        return refuse(input, init);
+      }) as typeof fetch;
+      const warn = vi.fn();
+      const provider = gcpProvider({ fetch: emu.fetch });
+      const parsed = await provider.config['~standard'].validate(gcpAccount);
+      const impl = await provider.create((parsed as { value: GcpConfig }).value, {
+        clock: manualClock(1_000_000),
+        secrets,
+        log: { debug() {}, info() {}, warn, error() {} },
+        account: platformAccount,
+      });
+      await impl.create(request('us-central1-a/z9-standard-4', 'ins_1'), ctx('k1'));
+      expect(warn).toHaveBeenCalledWith('gcp.disk_type_fallback', {
+        zone: 'us-central1-a',
+        machineType: 'z9-standard-4',
+        diskType: 'pd-balanced',
+      });
+      const posts = emu.requests.filter(
+        (r) => r.method === 'POST' && r.url.pathname.endsWith('/instances'),
+      );
+      expect(posts.map((r) => r.url.searchParams.get('requestId'))).toEqual([
+        requestIdFor('k1:hyperdisk-balanced'),
+      ]);
+      expect(emu.instances.get('us-central1-a/bc-ins-1')).toBeDefined();
+      // The next create of that type goes straight to Hyperdisk.
+      await impl.create(request('us-central1-a/z9-standard-4', 'ins_2'), ctx('k2'));
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    it('SSH keys also go into ssh-keys metadata for the image distribution user', async () => {
+      const emu = new GceEmulator();
+      const impl = await build(emu);
+      const key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample alice@laptop';
+      await impl.create(
+        {
+          ...request('us-central1-a/n2-standard-4', 'ins_d'),
+          image: 'projects/debian-cloud/global/images/family/debian-12',
+          sshKeys: [key],
+        },
+        ctx('d'),
+      );
+      await impl.create(request('us-central1-a/n2-standard-4', 'ins_u'), ctx('u'));
+      const [debian, plain] = inserted(emu);
+      expect(debian!.metadata.items).toEqual([
+        { key: 'user-data', value: '' },
+        { key: 'ssh-keys', value: `debian:${key}` },
+      ]);
+      expect(plain!.metadata.items).toEqual([{ key: 'user-data', value: '' }]);
+    });
   });
 
   it('an asynchronous stockout surfaces from get as CAPACITY_UNAVAILABLE', async () => {
