@@ -1134,6 +1134,11 @@ export interface PkiPort {
       expect?: { mac?: string; productUuid?: string; serial?: string; gpuUuid?: string };
     },
   ): Promise<{ id: string; token: string }>;
+  /**
+   * The control plane as an OIDC issuer (`ComputeOptions.pki.workloadIssuer`), for modules that mint
+   * workload-identity-federation tokens. Absent when the host configures none.
+   */
+  workload?: WorkloadIssuerPort;
 }
 
 /** The control plane as an OIDC issuer for workload identity federation (GCP WIF, AWS web identity, …). */
