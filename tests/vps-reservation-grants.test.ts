@@ -491,11 +491,16 @@ describe('grants', () => {
 
   it('a project grant serves only that project', async () => {
     const world = await grantWorld();
+    const project = await world.api.projects.create(world.acme, {
+      tenantId: world.acmeTenant,
+      name: 'ml',
+      idempotencyKey: 'project-ml',
+    });
     await grant(world, {
       to: 'acme',
       slots: 1,
       key: 'g',
-      projectId: 'prj_01jz0000000000000000000000',
+      projectId: project.id,
     });
     // An instance with no project is not in the project's grant, and the slot stays the project's.
     const created = await createIn(world, 'acme', 'a-1');
@@ -1301,5 +1306,48 @@ describe('grant settling and reopened shapes (FW-7, FW-8)', () => {
       (row) => row.sourceId === created.id && row.start === h0 + HOUR,
     );
     expect(sum(granted, 'disk.pd-balanced.gib.hours')).toBe(300);
+  });
+});
+
+describe('grant projects (FW-9)', () => {
+  it("a grant's project must be the grantee's", async () => {
+    const world = await grantWorld();
+    const { other } = world.fixture.tenants;
+    const theirs = await world.api.projects.create(
+      { token: other.token },
+      { tenantId: other.id, name: 'theirs', idempotencyKey: 'project-theirs' },
+    );
+    const ours = await world.api.projects.create(world.acme, {
+      tenantId: world.acmeTenant,
+      name: 'ours',
+      idempotencyKey: 'project-ours',
+    });
+    const refused = world.api.reservationGrants.create(world.root, {
+      tenantId: world.rootTenant,
+      accountId: world.accountId,
+      reservationId: RSV,
+      grantTenantId: world.acmeTenant,
+      projectId: theirs.id,
+      slots: 1,
+      startsAt: world.fixture.clock.now(),
+      endsAt: world.fixture.clock.now() + DAY,
+      idempotencyKey: 'g-theirs',
+    });
+    await expect(refused).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(
+      await codeOf(
+        grant(world, {
+          to: 'acme',
+          slots: 1,
+          key: 'g-unknown',
+          projectId: 'prj_01jz0000000000000000000000',
+        }),
+      ),
+    ).toBe('INVALID_INPUT');
+    expect(
+      await grant(world, { to: 'acme', slots: 1, key: 'g-ours', projectId: ours.id }),
+    ).toMatchObject({
+      projectId: ours.id,
+    });
   });
 });

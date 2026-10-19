@@ -19,6 +19,7 @@ Root only. Commits `slots` of a reservation to `grantTenantId` (optionally one o
 - **Who.** Decided as `compute:providers:manage` on the provider account. `tenantId` must be the root tenant and the caller a member of it; anyone else is `ACCESS_DENIED`.
 - **The reservation** must be on that account, `ready`, and bound to a pool that is offered to the grantee: otherwise `NOT_FOUND`, `INVALID_STATE` (not ready, gone or unbound) or `INVALID_INPUT` (the pool is not offered to the grantee).
 - **Capacity.** The slots of every grant (other than cancelled ones) whose term overlaps, plus these, must fit the reservation's `total`: otherwise `CAPACITY_UNAVAILABLE` with `details { total, granted }`. Concurrent grants are decided one at a time under the reservation's row lock, so they never over-commit it.
+- **Project.** A `projectId` must be a project of the grantee (`INVALID_INPUT`, `details.reason` `project-not-grantee`).
 - **Term.** `startsAt` may be at most 5 minutes in the past; `endsAt` must be after it (`INVALID_INPUT`).
 - **Idempotency.** A retry with the same `idempotencyKey` returns the grant; a different request under the key is `CONFLICT`.
 

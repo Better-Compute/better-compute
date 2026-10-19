@@ -656,6 +656,20 @@ export async function createGrant(
       undefined,
       { reason: 'pool-not-offered', poolId: reservation.pool_id },
     );
+  // A project grant serves the grantee's own project only (FW-9).
+  if (input.projectId !== undefined) {
+    const project = await tx.query(`SELECT 1 FROM projects WHERE id = $1 AND tenant_id = $2`, [
+      input.projectId,
+      input.grantTenantId,
+    ]);
+    if (project.rows.length === 0)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `Project ${input.projectId} is not a project of ${input.grantTenantId}`,
+        undefined,
+        { reason: 'project-not-grantee', projectId: input.projectId },
+      );
+  }
   // Every grant that is not cancelled counts while its term overlaps, an ended one included (its end is real).
   const { rows: sums } = await tx.query<{ granted: number | string }>(
     `SELECT coalesce(sum(slots), 0) AS granted FROM reservation_grants
