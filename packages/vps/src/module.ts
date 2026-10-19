@@ -49,8 +49,11 @@ import {
 import {
   EstimateCache,
   flavorEstimates,
+  parseEstimateInstance,
   type EstimateDeps,
+  type EstimateInstanceInput,
   type FlavorEstimate,
+  type InstanceEstimate,
 } from './estimates.js';
 import { id, int, name, object, optional, tenant } from './input.js';
 import { isRootCaller } from './billing.js';
@@ -86,7 +89,6 @@ import {
   type ImageResolver,
   type CertifyHostKey,
   type InstanceDeps,
-  type InstanceDryRun,
   type InstanceRef,
   type ListInstancesInput,
 } from './instances.js';
@@ -360,7 +362,9 @@ export type VpsApi = {
   /** Root-only: the meters and prices on the IAM root tenant (pricing.ts). */
   billing: BillingApi;
   instances: {
-    create: MethodDefinition<CreateInstanceInput, Instance | InstanceDryRun>;
+    create: MethodDefinition<CreateInstanceInput, Instance>;
+    /** The hourly price of a flavor for the tenant, decided as reading the pool's flavors (estimates.ts). */
+    estimate: MethodDefinition<EstimateInstanceInput, InstanceEstimate>;
     list: MethodDefinition<ListInstancesInput, { items: Instance[]; cursor?: string }>;
     get: MethodDefinition<InstanceRef, Instance>;
     start: MethodDefinition<InstanceRef, Instance>;
@@ -708,26 +712,6 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     currency: options.billing?.currency ?? defaultCurrency,
     gpuModels: options.billing?.gpuModels,
   });
-  /** What a `dryRun` create's `check` priced, for its handler (the same parsed input object). */
-  const dryRuns = new WeakMap<CreateInstanceInput, InstanceDryRun>();
-  const dryRunCheck = async (context: MethodContext, input: CreateInstanceInput): Promise<void> => {
-    await visibleVpsPool(context.sql, input.tenantId, input.poolId);
-    const flavor = await readFlavorByName(context.sql, input.poolId, input.flavor);
-    if (!flavor || flavor.archived)
-      throw new ComputeError(
-        'NOT_FOUND',
-        `Flavor ${input.flavor} not found in pool ${input.poolId}`,
-      );
-    const estimates = await flavorEstimates(
-      estimateDeps(context),
-      context.sql,
-      input.tenantId,
-      input.poolId,
-      [flavor],
-    );
-    const estimate = estimates.get(flavor.id);
-    dryRuns.set(input, estimate ? { estimate } : {});
-  };
   /** The list prices of a platform provider account, read through its cached client. */
   const billingProviders: BillingProviders = {
     async listPrices(context, accountId, query) {
@@ -974,60 +958,68 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
   const api = (): VpsApi => ({
     billing: billingApi(options.billing, billingProviders),
     instances: {
-      create: defineMethod<CreateInstanceInput, Instance | InstanceDryRun>({
+      create: defineMethod<CreateInstanceInput, Instance>({
         action: 'compute:instances:create',
         kind: 'mutation',
         // The envelope decides on the draft `prepare` returns.
         resource: (input) => ({ type: 'instance', id: `draft:${input.idempotencyKey}` }),
         validate: describedBy(schemas.createInstance, parseCreateInstance),
         admission: {
-          // A dry run writes no draft: it is decided as reading the pool's flavors (their estimates).
-          prepare: async (context, input, tx) =>
-            input.dryRun
-              ? {
-                  status: 'decide' as const,
-                  resource: {
-                    type: 'pool',
-                    id: input.poolId,
-                    action: 'compute:flavors:read' as const,
-                  },
-                }
-              : prepareCreateInstance(depsOf(context), context, input, tx),
+          prepare: (context, input, tx) =>
+            prepareCreateInstance(depsOf(context), context, input, tx),
           describe: (input) => describeCreateInstance(input),
-          denied: async (context, input, tx) => {
-            if (!input.dryRun) await denyCreateInstance(context, input, tx);
-          },
+          denied: (context, input, tx) => denyCreateInstance(context, input, tx),
           // An owner refused as no member of the tenant (R2) leaves no draft of theirs; other
           // refusals of the check (budgets) keep the draft, so the same key can succeed later.
           abandoned: async (context, input, tx, error) => {
-            if (input.dryRun) return;
             if (isComputeError(error) && error.details?.reason === ownerNotMember)
               await denyCreateInstance(context, input, tx);
           },
           // A pool's budget policy (stop-new/drain offers, `budgetCheck: 'meter'`) covers
           // instances as it covers reservations: SPEND_LIMIT_REACHED, with the draft kept.
           check: async (context, input) => {
-            if (input.dryRun) return dryRunCheck(context, input);
             await assertOwnerMember(context, input);
             if (isSecretRef(input.userData)) await userDataSecretCheck(context, input.tenantId);
             await budgetAdmissionCheck(context, input.tenantId, input.poolId);
           },
         },
-        handler: async (context, input) => {
-          if (!input.dryRun) return completeCreateInstance(depsOf(context), context, input);
-          const result = dryRuns.get(input);
-          if (!result) throw new ComputeError('INTERNAL_ERROR', 'A dry run was not priced');
-          return result;
-        },
+        handler: (context, input) => completeCreateInstance(depsOf(context), context, input),
         // §9.1 async-with-wait: `wait` holds the answer until the instance is placed and started
         // (or failed), refreshed from its row.
         poll: {
           done: instanceSettled,
           refresh: async (context, input, output) => {
-            if (!('id' in output)) return output;
             const row = await readInstance(context.sql, output.id, { tenantId: input.tenantId });
             return row && !row.draft ? instanceView(row) : output;
           },
+        },
+      }),
+      // (D15) What one hour of a flavor would cost the tenant: decided as reading the pool's flavors, so a principal
+      // that may only see flavors can ask. Nothing is created, drafted, charged or projected for authz.
+      estimate: defineMethod<EstimateInstanceInput, InstanceEstimate>({
+        action: 'compute:flavors:read',
+        kind: 'read',
+        // The estimate asks IAM to quote, which never happens inside a compute transaction.
+        transaction: 'manual',
+        resource: poolResource,
+        validate: describedBy(schemas.estimateInstance, parseEstimateInstance),
+        handler: async (context, input) => {
+          await visibleVpsPool(context.sql, input.tenantId, input.poolId);
+          const flavor = await readFlavorByName(context.sql, input.poolId, input.flavor);
+          if (!flavor || flavor.archived)
+            throw new ComputeError(
+              'NOT_FOUND',
+              `Flavor ${input.flavor} not found in pool ${input.poolId}`,
+            );
+          const estimates = await flavorEstimates(
+            estimateDeps(context),
+            context.sql,
+            input.tenantId,
+            input.poolId,
+            [flavor],
+          );
+          const estimate = estimates.get(flavor.id);
+          return estimate ? { estimate } : {};
         },
       }),
       list: defineMethod({

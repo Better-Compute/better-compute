@@ -528,7 +528,11 @@ export function billingApi(
         return proposePrices({
           catalog: await catalogOf(context, options),
           prices,
-          flavors: await accountFlavors(context.sql, input.accountId),
+          flavors: await accountFlavors(
+            context.sql,
+            input.accountId,
+            options.gpuModels ?? defaultMeterGpuModels,
+          ),
           marginPct: input.marginPct,
           ...(input.region === undefined ? {} : { region: input.region }),
           currency: options.currency ?? defaultCurrency,
@@ -542,7 +546,11 @@ export function billingApi(
 export const defaultCurrency = 'USD';
 
 /** The flavors of the account's pools that carry a whole-shape meter, with what composing their price needs. */
-async function accountFlavors(sql: SqlExecutor, accountId: string): Promise<FlavorMeterBasis[]> {
+async function accountFlavors(
+  sql: SqlExecutor,
+  accountId: string,
+  gpuModels: readonly string[],
+): Promise<FlavorMeterBasis[]> {
   const { rows } = await sql.query<{
     meter: string;
     vcpu: number | string;
@@ -553,7 +561,7 @@ async function accountFlavors(sql: SqlExecutor, accountId: string): Promise<Flav
   }>(
     `SELECT f.billing->>'meter' AS meter, f.vcpu, f.memory_gib, f.gpus, f.offer_id, p.gpu_model
        FROM flavors f JOIN pools p ON p.id = f.pool_id
-      WHERE p.provider_account_id = $1 AND f.billing->>'meter' IS NOT NULL
+      WHERE p.provider_account_id = $1 AND f.billing->>'meter' IS NOT NULL AND NOT f.archived
       ORDER BY f.pool_id, f.name`,
     [accountId],
   );
@@ -562,7 +570,7 @@ async function accountFlavors(sql: SqlExecutor, accountId: string): Promise<Flav
     vcpu: Number(row.vcpu),
     memoryGiB: Number(row.memory_gib),
     gpus: Number(row.gpus),
-    ...(Number(row.gpus) > 0 && row.gpu_model ? { gpuModel: canonicalGpuModel(row.gpu_model) } : {}),
+    ...(Number(row.gpus) > 0 && row.gpu_model ? { gpuModel: canonicalGpuModel(row.gpu_model, gpuModels) } : {}),
     ...(row.offer_id !== null ? { offerId: row.offer_id } : {}),
   }));
 }

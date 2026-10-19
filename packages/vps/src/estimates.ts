@@ -10,6 +10,7 @@ import {
 } from '@better-compute/core';
 import { billingModeOf, meterLinesFor, type BillableShape } from './billing.js';
 import type { FlavorRecord } from './flavors.js';
+import { id, name, object, tenant } from './input.js';
 
 // Tenant price estimates (platform compute billing, D15): what one hour of a flavor costs the caller's tenant,
 // priced with `IamPort.quote` (so a negotiated price shows) on the meter lines the flavor would be metered on. Only
@@ -23,6 +24,27 @@ export interface FlavorEstimate {
   currency: string;
   /** One line per meter, with the tenant's price or `amountMicros: null`. */
   lines: QuoteLine[];
+}
+
+/** `instances.estimate`: the shape fields of a create that decide its price. */
+export interface EstimateInstanceInput {
+  tenantId: string;
+  poolId: string;
+  flavor: string;
+}
+
+/** What `instances.estimate` answers: the estimate, absent when the pool or the IAM port has none. */
+export interface InstanceEstimate {
+  estimate?: FlavorEstimate;
+}
+
+export function parseEstimateInstance(raw: unknown): EstimateInstanceInput {
+  const input = object(raw, ['tenantId', 'poolId', 'flavor']);
+  return {
+    tenantId: tenant(input.tenantId),
+    poolId: id(input.poolId, 'pool', 'poolId'),
+    flavor: name(input.flavor, 'flavor'),
+  };
 }
 
 /** How long an estimate is kept, per (tenant, pool). */

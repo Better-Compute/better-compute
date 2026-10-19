@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  canonicalGpuModel,
   defaultMeterGpuModels,
   manualClock,
   meterCatalog,
@@ -413,6 +414,8 @@ describe('proposals', () => {
   const N2_METER = 'flavor.n2-standard-4.us-central1.hours';
   const A3_METER = 'flavor.a3-highgpu-8g.us-central1.hours';
   const WEIRD_METER = 'flavor.weird.hours';
+  const GB_METER = 'flavor.a4-highgpu-4g.us-central1.hours';
+  const OLD_METER = 'flavor.n2-standard-8.us-central1.hours';
 
   const propose = (extra: Record<string, unknown> = {}, who: Credential = root) =>
     api.billing.proposePrices(who, {
@@ -467,6 +470,16 @@ describe('proposals', () => {
         nanos: 170_000_000,
       }),
       cpu('cpu-n2-1y', 'N2', 10_000_000, { usageType: 'Commit1Yr' }),
+      // A GPU this deployment's models do not name (see the gpuModels test), with its machine family.
+      sku({
+        id: 'gpu-gb200',
+        description: 'Nvidia GB200 GPU running in Americas',
+        group: 'GPU',
+        units: '9',
+        nanos: 0,
+      }),
+      cpu('cpu-a4', 'A4', 40_000_000),
+      ram('ram-a4', 'A4', 5_000_000),
     ];
     const account = await api.providerAccounts.create(root, {
       tenantId: R,
@@ -519,6 +532,27 @@ describe('proposals', () => {
       memoryGiB: 8,
       offerId: `${ZONE}/zz9-standard-2`,
       billing: { meter: WEIRD_METER },
+    });
+    const gbPool = await api.pools.create(root, {
+      tenantId: R,
+      siteId: site.id,
+      class: 'provider',
+      gpuModel: 'GB200',
+      providerAccountId: accountId,
+      idempotencyKey: 'prices-gb200-pool',
+    });
+    await flavor(gbPool.id, 'a4.4g', {
+      vcpu: 8,
+      memoryGiB: 64,
+      gpus: 4,
+      offerId: `${ZONE}/a4-highgpu-4g`,
+      billing: { meter: GB_METER },
+    });
+    await flavor(poolId, 'old.8', {
+      vcpu: 8,
+      memoryGiB: 32,
+      offerId: `${ZONE}/n2-standard-8`,
+      billing: { meter: OLD_METER },
     });
     await flavor(gpuPoolId, 'a3.8g', {
       vcpu: 208,
@@ -645,6 +679,23 @@ describe('proposals', () => {
     }
   });
 
+  it('proposals name their currency, use the deployment gpuModels and skip archived flavors (F19-2)', async () => {
+    expect((await propose()).currency).toBe('USD');
+    // A GB200 pool: the provider lists a GB200 SKU, but this deployment's models (the default ones and zz9) name
+    // no GB200, so the flavor's GPU is other here, exactly as metering names it, and it has no price.
+    expect(canonicalGpuModel('GB200')).toBe('gb200');
+    expect(canonicalGpuModel('GB200', [...defaultMeterGpuModels, MODEL])).toBe('other');
+    const result = await propose();
+    expect(byMeter(result)[GB_METER]).toBeUndefined();
+    expect(result.unpriced).toContain(GB_METER);
+    // Archived flavors are not proposed from.
+    expect(byMeter(result)[OLD_METER]).toBeDefined();
+    await database.query("UPDATE flavors SET archived = true WHERE name = 'old.8'");
+    const after = await propose();
+    expect(byMeter(after)[OLD_METER]).toBeUndefined();
+    expect(after.unpriced).toContain(OLD_METER);
+  });
+
   describe('estimates', () => {
     const flavorsOf = async (who: Credential, tenantId: string): Promise<Record<string, any>> => {
       const { items } = await api.flavors.list(who, { tenantId, poolId });
@@ -692,33 +743,81 @@ describe('proposals', () => {
       });
     });
 
-    it('dryRun creates nothing and returns the estimate', async () => {
-      const count = async () =>
-        Number(
-          (await database.query<{ n: string }>(`SELECT count(*) AS n FROM instances`)).rows[0]!.n,
-        );
-      const before = await count();
+    it('instances.estimate prices a flavor for a principal that may only read flavors, and creates nothing', async () => {
+      // Tenant A's viewer holds flavors:read and nothing else.
+      const member = await t.acme.member('viewer');
+      await t.acme.grant(member.identityId, {
+        version: 1,
+        statements: [{ effect: 'allow', actions: ['compute:flavors:read'], resources: ['*'] }],
+      });
+      const viewer = await t.acme.signIn('viewer');
+      const scalar = async (text: string) =>
+        Number((await database.query<{ n: string }>(text)).rows[0]!.n);
+      const footprint = async () => ({
+        instances: await scalar(`SELECT count(*) AS n FROM instances`),
+        quota: await scalar(`SELECT coalesce(sum(used), 0) AS n FROM quota_usage`),
+        projection: await scalar(`SELECT count(*) AS n FROM authz_projection`),
+        changes: await scalar(`SELECT count(*) AS n FROM authz_changes`),
+        audit: await scalar(`SELECT count(*) AS n FROM audit_events`),
+      });
+      const input = { tenantId: A, poolId, flavor: 'plain.4' };
+      const before = await footprint();
       const requests = emu.requests.length;
-      const dry = (who: Credential, extra: Record<string, unknown> = {}) =>
-        api.instances.create(who, {
-          tenantId: A,
-          poolId,
-          flavor: 'plain.4',
-          imageId: 'debian-12',
-          idempotencyKey: 'dry-run-1',
-          dryRun: true,
-          ...extra,
-        });
-      const answer = await dry(acmeAdmin);
+
+      const answer = await api.instances.estimate(viewer, input);
       expect(Object.keys(answer)).toEqual(['estimate']);
-      expect(answer.estimate).toMatchObject({ perHourMicros: 161_000, currency: 'USD' });
-      expect(await count()).toBe(before);
+      expect(answer.estimate).toEqual({
+        perHourMicros: 161_000,
+        currency: 'USD',
+        lines: [
+          { meter: 'vm.vcpu.hours', quantity: 4, amountMicros: 80_000 },
+          { meter: 'vm.memory.gib.hours', quantity: 16, amountMicros: 80_000 },
+          { meter: 'vm.instance.hours', quantity: 1, amountMicros: 1_000 },
+        ],
+      });
+      // The same figure flavors.list shows.
+      expect((await flavorsOf(viewer, A))['plain.4'].estimate).toEqual(answer.estimate);
+      // A member without flavors:read may not estimate; the flavor and the input are checked.
+      expect(await outcome(api.instances.estimate(reader, input))).toBe('ACCESS_DENIED');
+      expect(await outcome(api.instances.estimate(viewer, { ...input, flavor: 'nope.1' }))).toBe(
+        'NOT_FOUND',
+      );
+      expect(await outcome(api.instances.estimate(viewer, { ...input, extra: 1 }))).toBe(
+        'INVALID_INPUT',
+      );
+      // No instance, draft, quota charge, authz projection (or its change feed) or mutation audit row; no provider call.
+      expect(await footprint()).toEqual(before);
       expect(emu.requests.length).toBe(requests);
-      // Decided like a read of the pool's flavors, and a refusal leaves nothing behind.
-      expect(await outcome(dry(reader))).toBe('ACCESS_DENIED');
-      expect(await outcome(dry(acmeAdmin, { flavor: 'nope.1' }))).toBe('NOT_FOUND');
-      expect(await outcome(dry(acmeAdmin, { dryRun: 'yes' }))).toBe('INVALID_INPUT');
-      expect(await count()).toBe(before);
+      // The viewer may not create: refused, and still no instance, draft, quota charge or projection row left.
+      expect(
+        await outcome(
+          api.instances.create(viewer, {
+            ...input,
+            imageId: 'debian-12',
+            idempotencyKey: 'view-1',
+          }),
+        ),
+      ).toBe('ACCESS_DENIED');
+      expect(await footprint()).toMatchObject({
+        instances: before.instances,
+        quota: before.quota,
+        projection: before.projection,
+      });
+    });
+
+    it('instances.create no longer takes dryRun', async () => {
+      expect(
+        await outcome(
+          api.instances.create(acmeAdmin, {
+            tenantId: A,
+            poolId,
+            flavor: 'plain.4',
+            imageId: 'debian-12',
+            idempotencyKey: 'no-dry-run',
+            dryRun: true,
+          }),
+        ),
+      ).toBe('INVALID_INPUT');
     });
 
     it('no quote port → no estimate field', async () => {
@@ -727,15 +826,9 @@ describe('proposals', () => {
         const acme = await flavorsOf(acmeAdmin, A);
         expect(Object.keys(acme).length).toBeGreaterThan(2);
         for (const flavor of Object.values(acme)) expect(flavor).not.toHaveProperty('estimate');
-        const answer = await api.instances.create(acmeAdmin, {
-          tenantId: A,
-          poolId,
-          flavor: 'plain.4',
-          imageId: 'debian-12',
-          idempotencyKey: 'dry-run-2',
-          dryRun: true,
-        });
-        expect(answer).toEqual({});
+        expect(
+          await api.instances.estimate(acmeAdmin, { tenantId: A, poolId, flavor: 'plain.4' }),
+        ).toEqual({});
       } finally {
         hidden = false;
       }

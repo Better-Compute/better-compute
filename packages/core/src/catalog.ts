@@ -525,15 +525,7 @@ group('workflows', 'provision', [
   ['resume', 'mutation', 'workflows:manage', 'node', 'v0.2'],
 ]);
 group('instances', 'vps', [
-  // `dryRun: true` creates nothing and is decided as reading the pool's flavors (their estimates).
-  [
-    'create',
-    'mutation',
-    'instances:create',
-    'instance',
-    'v0.3',
-    { or: [['flavors:read', 'pool']] },
-  ],
+  ['create', 'mutation', 'instances:create', 'instance', 'v0.3'],
   ['list', 'read', 'instances:read', 'tenant', 'v0.3', list],
   ['get', 'read', 'instances:read', 'instance', 'v0.3'],
   ['start', 'mutation', 'instances:update', 'instance', 'v0.3'],
@@ -543,6 +535,8 @@ group('instances', 'vps', [
   ['attach', 'mutation', 'instances:attach', 'instance', 'v1.0'],
   ['detach', 'mutation', 'instances:delete', 'instance', 'v1.0'],
   ['reboot', 'mutation', 'instances:update', 'instance', 'v1.0'],
+  // The hourly price of a flavor for the caller's tenant (billing estimates); acts on the pool, like flavors.list.
+  ['estimate', 'read', 'flavors:read', 'pool', 'v1.0'],
 ]);
 group('flavors', 'vps', [
   ['list', 'read', 'flavors:read', 'pool', 'v0.3'],

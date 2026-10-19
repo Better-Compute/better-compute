@@ -15,6 +15,8 @@ export interface PriceProposals {
   proposals: PriceProposal[];
   /** Provider meters the list prices give no basis for. */
   unpriced: string[];
+  /** The currency of every proposal: the deployment currency the provider prices were matched to. */
+  currency: string;
 }
 
 /** A flavor that carries a whole-shape meter, as far as proposals need it. */
@@ -181,7 +183,7 @@ export function proposePrices(input: ProposeInput): PriceProposals {
     if (proposal) proposals.push(proposal);
     else unpriced.push(key);
   }
-  return { proposals, unpriced };
+  return { proposals, unpriced, currency: input.currency };
 }
 
 /**
