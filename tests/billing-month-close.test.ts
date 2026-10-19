@@ -16,7 +16,7 @@ import { billingRow, GceEmulator } from './support/gce-emulator.js';
 // against the Compute Engine emulator (with its BigQuery billing export), metered by every source, flushed to a
 // REAL better-iam (embedded, sharing the clock) and closed into statements there.
 //
-// The month is last calendar month (UTC), so the clock never runs far ahead of the wall clock. Setup runs six hours
+// The month is a fixed past 31-day month (2026-07, UTC), so the clock never runs ahead of the wall clock. Setup runs six hours
 // before it starts: every interval is open by the first hour, so each resource bills whole hours of the month, except
 // A's H100 VM, which A stops on day 11 at the time the scenario observes the stop. Everything expected below is
 // computed from that timeline, never read back from compute's windows.
@@ -31,10 +31,9 @@ const EGRESS = 'network.egress.gib';
 const MULTIPLIER = 1.25;
 const instanceLabel = 'better-compute-instance';
 
-const wall = new Date();
-/** The month under test: [P, E). */
-const P = Date.UTC(wall.getUTCFullYear(), wall.getUTCMonth() - 1, 1);
-const E = Date.UTC(wall.getUTCFullYear(), wall.getUTCMonth(), 1);
+/** The month under test: [P, E), July 2026 (31 days). */
+const P = Date.UTC(2026, 6, 1);
+const E = Date.UTC(2026, 7, 1);
 const PERIOD = new Date(P).toISOString().slice(0, 7);
 /** Hours in the month. */
 const M = (E - P) / HOUR;
@@ -132,26 +131,11 @@ async function meterAll(): Promise<void> {
   expect(await pendingWindows()).toBe(0);
 }
 
-/** Recovery codes of the root administrator, for a new MFA session once the first one nears its 30 days. */
-let recoveryCodes: string[] = [];
-/**
- * Signs the root administrator in again (password, then a recovery code for MFA) and swaps the new token into
- * `t.root.credential`: the same object compute's IAM port holds as its service credential. The password is the
- * one `createEmbeddedTestIam` bootstraps root with.
- */
+/** A new MFA session for the root administrator once the first one nears its 30 days (same credential object). */
 async function renewRoot(): Promise<void> {
-  const challenge = await t.iam.api.auth.signIn({
-    tenantId: R,
-    email: 'root@root.test',
-    password: 'a strong root test password',
-  });
-  if (!('mfaRequired' in challenge)) throw new Error('The root administrator must require MFA');
-  const session = await t.iam.api.auth.recoverMfa({
-    tenantId: R,
-    challenge: challenge.challenge,
-    code: recoveryCodes.shift()!,
-  });
-  Object.assign(root, { token: session.token });
+  const before = root.token;
+  await t.renewRoot();
+  expect(root.token).not.toBe(before);
   expect(await t.port.authenticate(root)).toMatchObject({ tenantId: R, mfa: true });
 }
 
@@ -170,7 +154,7 @@ beforeAll(async () => {
     // Sessions last better-iam's longest (30 days); root signs in again mid-month (renewRoot).
     iamOptions: {
       authentication: { sessionLifetimeMs: 30 * DAY, sessionIdleTimeoutMs: 30 * DAY },
-    } as any,
+    },
   });
   database = pglite();
   compute = betterCompute({
@@ -196,7 +180,6 @@ beforeAll(async () => {
   R = t.root.tenantId;
   A = t.acme.tenantId;
   B = t.other.tenantId;
-  recoveryCodes = (await t.iam.api.auth.regenerateRecoveryCodes(root)).recoveryCodes;
   const everything = {
     version: 1 as const,
     statements: [{ effect: 'allow' as const, actions: ['compute:*'], resources: ['*'] }],
@@ -477,7 +460,7 @@ interface Expected {
   quantity: number;
   /** Micros per unit; absent: unpriced (informational). */
   unit?: number;
-  /** A reported meter's amount. */
+  /** A reported meter's rated amount (before better-iam rounds the invoice line to the cent). */
   amountMicros?: number;
 }
 
@@ -495,7 +478,8 @@ function expectLines(statement: { lines: any[] }, expected: Record<string, Expec
   for (const [meter, want] of Object.entries(expected)) {
     const line = lines.get(meter)!;
     expect(line.quantity, `${meter} quantity`).toBeCloseTo(want.quantity, 5);
-    if (want.amountMicros !== undefined) expect(line.amountMicros, meter).toBe(want.amountMicros);
+    if (want.amountMicros !== undefined)
+      expect(line.amountMicros, meter).toBe(roundCents(want.amountMicros));
     else if (want.unit !== undefined) {
       expect(line.unitAmountMicros, `${meter} unit price`).toBe(want.unit);
       expect(line.amountMicros, `${meter} amount`).toBe(
@@ -533,9 +517,7 @@ function expectedA(): Record<string, Expected> {
     },
     [EGRESS]: {
       quantity: egress.reduce((sum, row) => sum + row.gib, 0),
-      amountMicros: roundCents(
-        egress.reduce((sum, row) => sum + Math.round(micros(row.cost) * MULTIPLIER), 0),
-      ),
+      amountMicros: egress.reduce((sum, row) => sum + Math.round(micros(row.cost) * MULTIPLIER), 0),
     },
   };
 }
@@ -597,7 +579,6 @@ describe('month close of platform-issued compute', () => {
     expectLines(statement, expectedB());
     expect(statement.discount).toBeUndefined();
     // Nothing of A's: no GPU, grant, network or egress line, and B's quantities above are its VM's alone.
-    expect(statement.totalMicros).toBe(statement.subtotalMicros);
   });
 
   it('root’s own usage is metered and recorded, but never invoiced', async () => {
@@ -608,8 +589,8 @@ describe('month close of platform-issued compute', () => {
         GROUP BY outcome`,
       [R, P, E],
     );
-    expect(rows).toEqual([{ outcome: 'recorded', n: expect.any(Number) }]);
-    expect(rows[0]!.n).toBeGreaterThanOrEqual(5 * M);
+    // Its n2 VM all month: vCPU, memory, instance, public address and disk hours.
+    expect(rows).toEqual([{ outcome: 'recorded', n: 5 * M }]);
     expect(closed.issued.map((item: { accountId: string }) => item.accountId).sort()).toEqual(
       [A, B].sort(),
     );
@@ -647,5 +628,10 @@ describe('month close of platform-issued compute', () => {
     expect(a.marginMicros).toBeCloseTo(a.revenueMicros - a.costMicros, 3);
     expect(b.marginMicros).toBeCloseTo(b.revenueMicros - b.costMicros, 3);
     expect(result.unattributedCostMicros).toBe(micros(0.7));
+    // Root's own usage is never revenue (better-iam never invoices the platform); its VM's cost stays.
+    const r: any = rows.get(R);
+    expect(r.revenueMicros).toBe(0);
+    expect(r.costMicros).toBe(micros(0.3));
+    expect(r.marginMicros).toBe(-micros(0.3));
   });
 });

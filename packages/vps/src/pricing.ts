@@ -523,6 +523,11 @@ export function billingApi(options: BillingOptions = {}, providers?: BillingProv
             revenue = new Map();
             for (const row of result.rows)
               revenue.set(row.key, (revenue.get(row.key) ?? 0) + row.amountMicros);
+            // Root's own usage is never revenue: better-iam never invoices the platform (ruling MC-1). By tenant,
+            // root's row keeps its cost and earns nothing. By pool or meter the port cannot scope spend to root
+            // without its subtree, so those groups include root's internal usage at its rated price (billing.md).
+            if (input.groupBy === 'tenant' && revenue.has(rootTenantId))
+              revenue.set(rootTenantId, 0);
           }
         }
         const { groups, unattributedMicros } = await providerCostTotals(context.sql, {

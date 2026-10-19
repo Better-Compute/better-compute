@@ -95,8 +95,13 @@ export interface EmbeddedTestIamOptions
    * that tests can read without a compute database.
    */
   inbox?: 'store' | 'memory';
-  /** Extra betterIam() options (merged last; `plugins` are appended after compute's). */
-  iamOptions?: Partial<BetterIamOptions>;
+  /**
+   * Extra betterIam() options (merged last; `plugins` are appended after compute's, `authentication` is merged
+   * over the kit's own).
+   */
+  iamOptions?: Partial<Omit<BetterIamOptions, 'authentication'>> & {
+    authentication?: Partial<NonNullable<BetterIamOptions['authentication']>>;
+  };
   /**
    * How compute reaches IAM (PLAN.md §12.1): `embedded` (in process, `bridge.embedded`) or `remote`
    * (`bridge.remote` over better-iam's HTTP API, with the admission refresh), both on the same better-iam, whose
@@ -116,6 +121,12 @@ export interface EmbeddedTestIam {
   /** Set with `inbox: 'memory'`. */
   inbox: MemoryInbox | undefined;
   root: { tenantId: string; identityId: string; credential: Credential };
+  /**
+   * Signs the root administrator in again (password, then TOTP from its enrollment secret) and swaps the new
+   * token into `root.credential` in place: the object compute's port holds as its service credential. For
+   * scenarios that outlive a session.
+   */
+  renewRoot(): Promise<void>;
   acme: TestTenant;
   other: TestTenant;
   /** Creates and activates another organization. */
@@ -202,6 +213,7 @@ export async function createEmbeddedTestIam(
     credential: { tenantId: rootTenantId, challenge: challenge.challenge },
     code: totpCode(enrollment.secret, now()),
   });
+  const rootMfaSecret = enrollment.secret;
   const root = {
     tenantId: rootTenantId,
     identityId: bootstrapped.identity.id,
@@ -339,6 +351,20 @@ export async function createEmbeddedTestIam(
     mode,
     inbox,
     root,
+    async renewRoot() {
+      const again = await iam.api.auth.signIn({
+        tenantId: rootTenantId,
+        email: rootEmail,
+        password: passwordOf('root'),
+      });
+      if (!('mfaRequired' in again)) throw new Error('The root administrator must require MFA');
+      const session = await iam.api.auth.verifyMfa({
+        tenantId: rootTenantId,
+        challenge: again.challenge,
+        code: totpCode(rootMfaSecret, now()),
+      });
+      root.credential.token = session.token;
+    },
     acme,
     other,
     tenant,
