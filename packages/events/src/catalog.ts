@@ -218,6 +218,13 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
       'Provider costs read by the vps.costs worker (D10): cost-ingested once per pass per account { accountId, from, to, currency, rows, inserted, corrected, unchanged, stale, costMicros, creditsMicros, unattributedRows, currencyMismatchRows, passedThroughRows, passedThroughMicros, leaks }; unattributed once per stored row with no tenant { accountId, sourceRowId, service, sku, resourceName?, usageStart, costMicros, creditsMicros, currency }; cost-corrected when a re-exported row changed its cost or credits { accountId, sourceRowId, previousMicros, costMicros, previousCreditsMicros, creditsMicros, currency, passedThrough }; leak at most once per instance and UTC day of a platform account when the distinct hour slots the provider billed compute for exceed those a running interval of the instance covers by more than leakToleranceHours (slots, not summed quantities; instances billed none are not checked) { accountId, instanceId, tenantId, day, providerHours, meteredHours }',
   },
   {
+    type: 'reservation-grant.*',
+    subject: 'reservation-grant/{id}',
+    module: 'vps',
+    description:
+      'Reservation grants (root commits reservation slots to a tenant), published in the grantee tenant: created (+ accountId, reservationId), active, ended, cancelled; data { grantId, poolId, projectId?, slots, startsAt, endsAt }',
+  },
+  {
     type: 'network.*',
     subject: 'network/{id}',
     module: 'vps',

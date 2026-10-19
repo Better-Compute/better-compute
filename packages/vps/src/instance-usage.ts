@@ -135,6 +135,7 @@ interface Billing {
 async function billingOf(
   tx: SqlTx,
   instanceId: string,
+  at: number,
   deps: IntervalDeps,
   observed: ObservedMachine | undefined,
   phase: IntervalPhase,
@@ -148,6 +149,7 @@ async function billingOf(
     origin: string;
     billing: string | null;
     reserved: boolean;
+    granted: boolean;
     pool_class: string;
     pool_owner: string;
     policy: PoolPolicy | string;
@@ -166,6 +168,9 @@ async function billingOf(
     // rows whose snapshot predates `billing` (ruling F6-3).
     `SELECT i.tenant_id, i.project_id, i.owner_identity_id, i.pool_id, i.flavor, i.origin, i.billing,
             i.provider_reservation IS NOT NULL AS reserved,
+            EXISTS (SELECT 1 FROM reservation_grants g
+                     WHERE g.id = i.reservation_grant_id AND g.state <> 'cancelled'
+                       AND g.starts_at <= ${at$(2)} AND g.ends_at > ${at$(2)}) AS granted,
             p.class AS pool_class, p.owner_tenant_id AS pool_owner, p.policy, s.region AS site_region,
             a.provider, CASE WHEN a.tenant_id = p.owner_tenant_id THEN a.tenant_id END AS account_tenant,
             m.machine->>'region' AS machine_region, p.gpu_model AS pool_gpu_model,
@@ -179,7 +184,7 @@ async function billingOf(
        LEFT JOIN provider_machines m ON m.account_id = i.provider_account_id AND m.external_id = i.external_id
        LEFT JOIN flavors f ON f.id = i.flavor_id
       WHERE i.id = $1`,
-    [instanceId],
+    [instanceId, at],
   );
   const row = rows[0];
   if (!row || row.pool_class !== 'provider') return undefined;
@@ -211,9 +216,14 @@ async function billingOf(
     ...(count > 0 ? { gpus: { model, count } } : {}),
     // No offer reports spot yet: a flavor (or a later offer field) that says so is read here.
     spot: flavor.spot === true,
+    // D8: admitted against a provider reservation (`instances.provider_reservation`, set once by
+    // `claimReservationSlot`), so `vm.reserved.*`. Captured here at open: binding, unbinding or losing the
+    // reservation later changes no running interval.
     reserved: row.reserved,
-    // Task 10: reservation grants.
-    granted: false,
+    // D7: admitted into a reservation grant whose term covers `at`; the grant's slot-hours bill it, so its
+    // lines are the informational `vm.grant.usage.hours` only. When the grant ends, its instances reopen
+    // (`reopenGrantIntervals`) as ordinary reserved ones.
+    granted: row.granted,
     ...(flavorMeter !== undefined ? { flavorMeter } : {}),
     // D9: a public address the provider reports now (else the addresses the row holds). Only a running instance bills
     // it, so only a running interval carries it, and a change of address closes and reopens the interval.
@@ -298,9 +308,20 @@ export async function openInterval(
   observed?: ObservedMachine,
 ): Promise<void> {
   if (row.poolClass !== 'provider') return;
-  const billing = await billingOf(tx, row.id, deps, observed, phase);
+  await openIntervalOf(tx, row.id, phase, at, deps, observed);
+}
+
+async function openIntervalOf(
+  tx: SqlTx,
+  instanceId: string,
+  phase: IntervalPhase,
+  at: number,
+  deps: IntervalDeps,
+  observed?: ObservedMachine,
+): Promise<void> {
+  const billing = await billingOf(tx, instanceId, at, deps, observed, phase);
   if (!billing) {
-    await closeOpenInterval(tx, row.id, at);
+    await closeOpenInterval(tx, instanceId, at);
     return;
   }
   await syncDiskCondition(tx, row, billing.unknownDiskTypes, at);
@@ -308,10 +329,10 @@ export async function openInterval(
   const { rows: open } = await tx.query<{ same: boolean }>(
     `SELECT (phase = $2 AND mode = $3 AND shape = $4::jsonb) AS same FROM instance_usage_intervals
       WHERE instance_id = $1 AND ended_at IS NULL`,
-    [row.id, phase, billing.mode, shape],
+    [instanceId, phase, billing.mode, shape],
   );
   if (open[0]?.same) return;
-  if (open.length > 0) await closeOpenInterval(tx, row.id, at);
+  if (open.length > 0) await closeOpenInterval(tx, instanceId, at);
   await tx.query(
     `WITH start AS (
        SELECT GREATEST(${at$(12)},
@@ -323,7 +344,7 @@ export async function openInterval(
      SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, t, t FROM start`,
     [
       newId('ivl'),
-      row.id,
+      instanceId,
       billing.tenantId,
       billing.projectId,
       billing.identityId,
@@ -336,6 +357,50 @@ export async function openInterval(
       at,
     ],
   );
+}
+
+/**
+ * Recomputes the instance's open interval at `at` (a grant it joined or left): an unchanged shape keeps it; any
+ * other closes it at `at` (never before what was billed, F7-1) and opens one of the same phase. Nothing for an
+ * instance with no open interval (not observed yet): its first interval reads the grant itself. Returns whether one
+ * was open.
+ */
+export async function reopenInterval(
+  tx: SqlTx,
+  instanceId: string,
+  at: number,
+  deps: IntervalDeps,
+): Promise<boolean> {
+  const { rows } = await tx.query<{ phase: IntervalPhase }>(
+    `SELECT phase FROM instance_usage_intervals WHERE instance_id = $1 AND ended_at IS NULL`,
+    [instanceId],
+  );
+  if (!rows[0]) return false;
+  await openIntervalOf(tx, instanceId, rows[0].phase, at, deps);
+  return true;
+}
+
+/**
+ * A reservation grant ended at `at` (Task 11): every instance of it with an open interval closes that interval at
+ * `at` and opens one of the same phase whose shape is no longer `granted` (D7), so the hours after the grant's end
+ * are billed at the reservation's rate rather than as part of a commitment nobody pays for any more. An interval
+ * that already changed (a lifecycle poll got there first) is left as it is. Returns how many instances it reopened.
+ */
+export async function reopenGrantIntervals(
+  tx: SqlTx,
+  grantId: string,
+  at: number,
+  deps: IntervalDeps,
+): Promise<number> {
+  const { rows } = await tx.query<{ instance_id: string; phase: IntervalPhase }>(
+    `SELECT u.instance_id, u.phase FROM instance_usage_intervals u
+       JOIN instances i ON i.id = u.instance_id
+      WHERE i.reservation_grant_id = $1 AND u.ended_at IS NULL AND (u.shape->>'granted')::boolean
+      ORDER BY u.instance_id`,
+    [grantId],
+  );
+  for (const row of rows) await openIntervalOf(tx, row.instance_id, row.phase, at, deps);
+  return rows.length;
 }
 
 // --- The vps.provider-usage reconciler (Task 7) ----------------------------------------------------

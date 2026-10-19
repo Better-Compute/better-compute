@@ -633,6 +633,32 @@ export async function deleteAccount(
   );
   if (pools.rows.length > 0 || live.rows.length > 0)
     throw new ComputeError('INVALID_STATE', `Provider account ${account.name} is in use`);
+  // Reservation grants (F10-4): live ones are commitments still billed; ended ones go with the account.
+  const grants = await tx.query<{ id: string }>(
+    `SELECT id FROM reservation_grants WHERE account_id = $1 AND state IN ('scheduled', 'active')
+      ORDER BY id LIMIT 50`,
+    [account.id],
+  );
+  if (grants.rows.length > 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Provider account ${account.name} has live reservation grants: end them first`,
+      undefined,
+      { grantIds: grants.rows.map((row) => row.id) },
+    );
+  // An ended grant whose committed slot-hours are not all written would lose them with the account (F10-7).
+  const unmetered = await tx.query<{ id: string }>(
+    `SELECT id FROM reservation_grants WHERE account_id = $1 AND state = 'ended' AND metered_until < ends_at
+      ORDER BY id LIMIT 50`,
+    [account.id],
+  );
+  if (unmetered.rows.length > 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Provider account ${account.name} has ended reservation grants whose slot-hours are not metered yet: retry after the vps.grants reconciler meters them (within an hour of their end)`,
+      undefined,
+      { grantIds: unmetered.rows.map((row) => row.id) },
+    );
   const networks = await tx.query<{ id: string; name: string }>(
     `SELECT id, name FROM networks WHERE provider_account_id = $1 AND state <> 'deleted'
       ORDER BY name LIMIT 50`,

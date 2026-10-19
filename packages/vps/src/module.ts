@@ -69,6 +69,12 @@ import {
   type BillingProviders,
 } from './pricing.js';
 import {
+  grantsReconciler,
+  reservationGrantsApi,
+  type GrantDeps,
+  type ReservationGrantsApi,
+} from './reservation-grants.js';
+import {
   completeCreateInstance,
   deleteInstance,
   denyCreateInstance,
@@ -378,6 +384,8 @@ export type ProviderAccountView = ProviderAccount;
 export type VpsApi = {
   /** Root-only: the meters and prices on the IAM root tenant (pricing.ts). */
   billing: BillingApi;
+  /** Reservation grants (D7): root commits reservation slots to a tenant for a term. */
+  reservationGrants: ReservationGrantsApi;
   instances: {
     create: MethodDefinition<CreateInstanceInput, Instance>;
     /** The hourly price of a flavor for the tenant, decided as reading the pool's flavors (estimates.ts). */
@@ -673,6 +681,12 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     clients,
     ...rootOf(context),
     ...workloadOf(context),
+  });
+  /** Reservation grants (D7): the API and the `vps.grants` reconciler, which also reopens a grant's instances. */
+  const grantDeps = (context: ModuleContext): GrantDeps => ({
+    events: context.events,
+    ...rootOf(context),
+    ...(options.billing?.gpuModels ? { meterGpuModels: options.billing.gpuModels } : {}),
   });
   if (options.hostNetwork !== undefined && !/^[A-Za-z0-9_.-]{1,15}$/.test(options.hostNetwork))
     throw new ComputeError('INVALID_CONFIG', 'vps({ hostNetwork }) must be an interface name');
@@ -988,6 +1002,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
 
   const api = (): VpsApi => ({
     billing: billingApi({ ...options.billing, currency }, billingProviders),
+    reservationGrants: reservationGrantsApi(grantDeps),
     instances: {
       create: defineMethod<CreateInstanceInput, Instance>({
         action: 'compute:instances:create',
@@ -1832,6 +1847,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           return 'DONE';
         },
       },
+      // Reservation grants (D7): grant states, and every committed slot-hour as `grant` usage windows.
+      grantsReconciler(grantDeps),
       {
         // Platform compute billing (D9): tenant networks' hours (and snapshots' GiB-hours) as `network` and
         // `snapshot` sources. A public address and a disk are lines of the instance's own intervals instead.

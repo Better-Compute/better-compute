@@ -453,6 +453,7 @@ describe('vps() API surface', () => {
       'vps/0026_networks',
       'vps/0027_account_exclusive_key',
       'vps/0030_instance_usage',
+      'vps/0031_reservation_grants',
       'vps/0032_network_metering',
       'vps/0033_provider_costs',
     ]);
