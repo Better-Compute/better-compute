@@ -1,5 +1,5 @@
 import type { ComputeError, ProviderCostRecord, ProviderImpl } from '@better-compute/core';
-import { gcp, type GcpProviderOptions } from '@better-compute/provider-gcp';
+import { billingExportOf, gcp, type GcpProviderOptions } from '@better-compute/provider-gcp';
 import { describe, expect, it } from 'vitest';
 import { billingRow, GceEmulator } from './support/gce-emulator.js';
 import { build, ctx, gcpAccount } from './support/gcp-harness.js';
@@ -134,6 +134,8 @@ describe('provider costs from the BigQuery billing export', () => {
       'labels',
       'export_time',
       'credits',
+      'location.location',
+      'price.tier_start_amount',
     ])
       expect(sql).toContain(column);
   });
@@ -287,5 +289,91 @@ describe('gcp billing matchers (D11, D12)', () => {
     expect(meteredSku!(sku('Network Internet Egress from Americas to EMEA'))).toBe(false);
     // a rule's probe has no service: it may be Compute Engine's
     expect(computeSku!({ service: '', sku: 'Core', skuDescription: 'Core' })).toBe(true);
+  });
+});
+
+describe('export row identity (fix round 1, F14-1/F14-2)', () => {
+  it('rows sharing an identity in one read are summed, not dropped', async () => {
+    const emu = new GceEmulator();
+    emu.bigquery.pageRows = 1; // the two parts land on different pages
+    const part = (cost: number, quantity: number, credit: number) =>
+      billingRow({
+        resource: null,
+        cost,
+        usage: {
+          amount: quantity,
+          unit: 'hour',
+          amount_in_pricing_units: quantity,
+          pricing_unit: 'hour',
+        },
+        credits: [{ name: 'SUD', amount: credit, type: 'SUSTAINED_USAGE_DISCOUNT' }],
+      });
+    emu.bigquery.rows.push(part(0.1, 1, -0.01), part(0.25, 2, -0.02));
+    const first = await costsOf(emu);
+    expect(first).toHaveLength(1);
+    expect(first[0]).toMatchObject({ costMicros: 350_000, creditsMicros: -30_000, quantity: 3 });
+    // the same export read again gives the same record
+    expect(await costsOf(emu)).toEqual(first);
+  });
+
+  it('distinct tiers, zones, locations, units and labels get distinct ids', async () => {
+    const emu = new GceEmulator();
+    const base = { resource: null };
+    const location = (zone: string, where = 'us-central1') => ({
+      location: where,
+      country: 'US',
+      region: 'us-central1',
+      zone,
+    });
+    emu.bigquery.rows.push(
+      billingRow({ ...base }),
+      billingRow({ ...base, price: { tier_start_amount: 1024, unit: 'gibibyte' } }),
+      billingRow({ ...base, location: location('us-central1-b') }),
+      billingRow({ ...base, location: location('us-central1-a', 'us') }),
+      billingRow({
+        ...base,
+        usage: { amount: 1, unit: 'byte', amount_in_pricing_units: 1, pricing_unit: 'gibibyte' },
+      }),
+      billingRow({ ...base, labels: [{ key: 'team', value: 'a' }] }),
+    );
+    const records = await costsOf(emu);
+    expect(new Set(records.map((record) => record.sourceRowId)).size).toBe(6);
+    // label order is not identity
+    emu.bigquery.rows = [
+      billingRow({
+        labels: [
+          { key: 'a', value: '1' },
+          { key: 'b', value: '2' },
+        ],
+      }),
+      billingRow({
+        labels: [
+          { key: 'b', value: '2' },
+          { key: 'a', value: '1' },
+        ],
+      }),
+    ];
+    expect(await costsOf(emu)).toHaveLength(1);
+  });
+
+  it('billingExportOf re-checks the table id where it is used; micros are never -0', async () => {
+    const config = { projectId: 'p', zones: ['us-central1-a'] };
+    expect(billingExportOf({ ...config, billingExport: 'pp.d.t' })).toEqual({
+      project: 'pp',
+      dataset: 'd',
+      table: 't',
+    });
+    for (const bad of ['p.d.t`x', 'p.d.t x', 'p.d'])
+      expect(() => billingExportOf({ ...config, billingExport: bad })).toThrow(
+        expect.objectContaining({ code: 'INVALID_CONFIG' }),
+      );
+    expect(() =>
+      billingExportOf({ ...config, billingExport: 'pp.d.t', billingExportLocation: 'US;' }),
+    ).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG' }));
+    const emu = new GceEmulator();
+    emu.bigquery.rows.push(billingRow({ cost: -0.0000001, credits: [{ amount: -0.0000001 }] }));
+    const [record] = await costsOf(emu);
+    expect(Object.is(record!.costMicros, -0)).toBe(false);
+    expect(Object.is(record!.creditsMicros, -0)).toBe(false);
   });
 });
