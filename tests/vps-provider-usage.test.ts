@@ -7,6 +7,7 @@ import {
   type PoolPolicy,
 } from '@better-compute/core';
 import { betterCompute } from '@better-compute/server';
+import { createComputeIamBridge, flushUsageWindows } from '@better-compute/iam';
 import { closeFixtures } from '@better-compute/testing';
 import {
   billingModeOf,
@@ -15,6 +16,7 @@ import {
   type BillableShape,
   type BillingMode,
 } from '@better-compute/vps';
+import { closeIamFixtures, iamFixture } from './support/iam.js';
 import {
   fakeGceProvider,
   gceVm,
@@ -742,4 +744,384 @@ describe('intervals', () => {
       { phase: 'running', started: t2, ended: null },
     ]);
   });
+});
+
+// --- Task 7: the vps.provider-usage reconciler (metering) ------------------------------------------
+// Intervals become hourly `instance` usage windows: whole ended hours only, the watermark
+// (`metered_until`) advancing in the same transaction, and every interval of one instance that touches an
+// hour summed into that hour's single window (the window key has no interval in it).
+
+describe('metering', () => {
+  afterEach(async () => {
+    await closeFixtures();
+    await closeIamFixtures();
+  });
+
+  const HOUR = 3_600_000;
+  const usageJob = 'vps.provider-usage';
+
+  interface WindowView {
+    key: string;
+    instanceId: string;
+    tenantId: string;
+    identityId: string | null;
+    meter: string;
+    quantity: number;
+    start: number;
+    end: number;
+    tags: Record<string, string>;
+    outcome: string | null;
+  }
+
+  async function windows(world: GceWorld): Promise<WindowView[]> {
+    const { rows } = await world.fixture.database.query<{
+      idempotency_key: string;
+      source_id: string;
+      tenant_id: string;
+      identity_id: string | null;
+      meter: string;
+      quantity: string;
+      start_ms: number;
+      end_ms: number;
+      tags: Record<string, string> | string;
+      outcome: string | null;
+    }>(
+      `SELECT idempotency_key, source_id, tenant_id, identity_id, meter, quantity::text,
+              (extract(epoch FROM window_start) * 1000)::float8 AS start_ms,
+              (extract(epoch FROM window_end) * 1000)::float8 AS end_ms, tags, outcome
+         FROM usage_windows WHERE source_kind = 'instance' ORDER BY window_start, meter, source_id`,
+    );
+    return rows.map((row) => ({
+      key: row.idempotency_key,
+      instanceId: row.source_id,
+      tenantId: row.tenant_id,
+      identityId: row.identity_id,
+      meter: row.meter,
+      quantity: Number(row.quantity),
+      start: Number(row.start_ms),
+      end: Number(row.end_ms),
+      tags: typeof row.tags === 'string' ? JSON.parse(row.tags) : row.tags,
+      outcome: row.outcome,
+    }));
+  }
+
+  const sum = (list: readonly WindowView[], meter: string) =>
+    Math.round(
+      list
+        .filter((item) => item.meter === meter)
+        .reduce((total, item) => total + item.quantity, 0) * 1e6,
+    ) / 1e6;
+
+  const hoursOf = (list: readonly WindowView[]) =>
+    list.filter((row) => row.meter === 'vm.instance.hours').map((row) => [row.start, row.quantity]);
+
+  /** Moves the sim clock by `advanceMs` and runs the reconciler (its periodic key is due again by then). */
+  async function meter(world: GceWorld, advanceMs = 5 * 60_000): Promise<void> {
+    if (advanceMs > 0) await world.fixture.advance(advanceMs);
+    await world.tick(usageJob, 2);
+  }
+
+  /** Moves the sim clock to `at` (never backwards). */
+  async function moveTo(world: GceWorld, at: number): Promise<void> {
+    const now = world.fixture.clock.now();
+    if (at > now) await world.fixture.advance(at - now);
+  }
+
+  /** The next top of the hour after the clock. */
+  const nextHour = (world: GceWorld) => (Math.floor(world.fixture.clock.now() / HOUR) + 1) * HOUR;
+
+  /** A created VM observed running exactly at a top of the hour; returns that hour. */
+  async function runningAtHour(world: GceWorld, key = 'vm-1') {
+    const created = await createVm(world, key);
+    const h0 = nextHour(world);
+    await moveTo(world, h0 - 1_000);
+    await step(world, 1_000);
+    expect((await viewOf(world, created.id)).state).toBe('running');
+    expect((await intervals(world, created.id))[0]!.started).toBe(h0);
+    return { created, h0 };
+  }
+
+  const meteredUntil = async (world: GceWorld, instanceId: string) =>
+    (await intervals(world, instanceId)).map((item) => item.meteredUntil);
+
+  it('a 2h30m run writes 2 whole hours now and the half hour when it closes', async () => {
+    const world = await gceWorld();
+    const { created, h0 } = await runningAtHour(world);
+    await moveTo(world, h0 + 150 * 60_000 - 5_000);
+    await meter(world, 0);
+    // 2h30m in: the two ended hours are written, the third is still open.
+    let rows = await windows(world);
+    expect(hoursOf(rows)).toEqual([
+      [h0, 1],
+      [h0 + HOUR, 1],
+    ]);
+    expect(await meteredUntil(world, created.id)).toEqual([h0 + 2 * HOUR]);
+
+    // The run closes at exactly 2h30m. Its last half hour is still inside an open hour.
+    await world.api.instances.stop(world.acme, {
+      tenantId: world.acmeTenant,
+      instanceId: created.id,
+    });
+    const closed = await step(world, 5_000);
+    expect(closed).toBe(h0 + 150 * 60_000);
+    await meter(world, 0);
+    expect(hoursOf(await windows(world))).toHaveLength(2);
+
+    // Once that hour has ended, the half hour is written and the interval is fully metered.
+    await moveTo(world, h0 + 3 * HOUR + 60_000);
+    await meter(world, 0);
+    rows = await windows(world);
+    expect(hoursOf(rows)).toEqual([
+      [h0, 1],
+      [h0 + HOUR, 1],
+      [h0 + 2 * HOUR, 0.5],
+    ]);
+    const [running] = await intervals(world, created.id);
+    expect(running).toMatchObject({ phase: 'running', ended: closed, meteredUntil: closed });
+
+    // A later pass re-derives nothing: the windows and the watermark stay as they are.
+    const before = JSON.stringify(rows);
+    await meter(world, HOUR);
+    expect(JSON.stringify(await windows(world))).toBe(before);
+    expect((await intervals(world, created.id))[0]!.meteredUntil).toBe(closed);
+  });
+
+  it('vcpu/memory/gpu/instance lines match the shape', async () => {
+    // An 8×H100 a3-highgpu-8g: 208 vCPU, 1872 GiB, billed per whole hour.
+    const world = await legacyAttachWorld();
+    const { acme } = world.fixture.tenants;
+    const a = await attachLegacy(world, acme.id, acme.caller.identityId, 'attach-a3');
+    const h0 = nextHour(world);
+    await moveTo(world, h0 - 1_000);
+    await step(world, 1_000);
+    expect((await intervals(world, a.id))[0]).toMatchObject({ started: h0, phase: 'running' });
+    await moveTo(world, h0 + 3 * HOUR + 60_000);
+    await meter(world, 0);
+    const rows = await windows(world);
+    expect(rows).toHaveLength(12);
+    for (const hour of [0, 1, 2]) {
+      const start = h0 + hour * HOUR;
+      const at = rows.filter((row) => row.start === start);
+      expect(at.map((row) => [row.meter, row.quantity])).toEqual([
+        ['vm.gpu.h100.hours', 8],
+        ['vm.instance.hours', 1],
+        ['vm.memory.gib.hours', 1872],
+        ['vm.vcpu.hours', 208],
+      ]);
+      expect(at.every((row) => row.end === start + HOUR)).toBe(true);
+    }
+    // Every key is the instance, the hour and the meter (ruling M5).
+    for (const row of rows) expect(row.key).toBe(`cmp:instance:${a.id}:${row.start}:${row.meter}`);
+  });
+
+  it('usage is attributed to the issued tenant and owner', async () => {
+    const world = await gceWorld();
+    const { created, h0 } = await runningAtHour(world);
+    // An instance with a project carries it as a tag.
+    await world.fixture.database.query(
+      `UPDATE instance_usage_intervals SET project_id = 'proj_blue' WHERE instance_id = $1`,
+      [created.id],
+    );
+    await moveTo(world, h0 + HOUR + 60_000);
+    await meter(world, 0);
+    const rows = await windows(world);
+    expect(rows.length).toBeGreaterThan(0);
+    const { acme } = world.fixture.tenants;
+    for (const row of rows) {
+      expect(row.tenantId).toBe(world.acmeTenant);
+      expect(row.identityId).toBe(acme.caller.identityId);
+      expect(row.instanceId).toBe(created.id);
+      expect(row.tags).toEqual({
+        region: 'us-central1',
+        pool: world.poolId,
+        project: 'proj_blue',
+        provider: 'fake-gce',
+        gpuModel: 'a100',
+        flavor: 'a2.highgpu.1g',
+        source: 'instance',
+      });
+      // The tags never name the instance.
+      expect(JSON.stringify(row.tags)).not.toContain(created.id);
+    }
+    expect(new Set(rows.map((row) => row.meter))).toEqual(
+      new Set(['vm.vcpu.hours', 'vm.memory.gib.hours', 'vm.gpu.a100.hours', 'vm.instance.hours']),
+    );
+  });
+
+  it('I8 conservation: the instance hours written equal the hours the intervals ran, restarts inside one hour included', async () => {
+    const world = await gceWorld();
+    const { created, h0 } = await runningAtHour(world);
+    const toggle = async (action: 'stop' | 'start', at: number) => {
+      await moveTo(world, at - 1_000);
+      await world.api.instances[action](world.acme, {
+        tenantId: world.acmeTenant,
+        instanceId: created.id,
+      });
+      await step(world, 1_000);
+    };
+    // Hour 0: running 0-20m, stopped 20-40m, running 40-50m, stopped from 50m: two intervals share the hour.
+    await toggle('stop', h0 + 20 * 60_000);
+    await toggle('start', h0 + 40 * 60_000);
+    await toggle('stop', h0 + 50 * 60_000);
+    // Running 2h10m to 3h40m: both its ends are partial hours.
+    await toggle('start', h0 + 130 * 60_000);
+    // Metering mid-way (some hours ended, an interval open) must not matter.
+    await moveTo(world, h0 + 160 * 60_000);
+    await meter(world, 0);
+    await toggle('stop', h0 + 220 * 60_000);
+    await moveTo(world, h0 + 5 * HOUR + 60_000);
+    await meter(world, 0);
+    const list = await intervals(world, created.id);
+    assertNoOverlap(list);
+    const ranHours = list
+      .filter((item) => item.phase === 'running')
+      .reduce((total, item) => total + (item.ended! - item.started) / HOUR, 0);
+    expect(ranHours).toBeCloseTo(30 / 60 + 90 / 60, 9);
+    const rows = await windows(world);
+    expect(sum(rows, 'vm.instance.hours')).toBeCloseTo(ranHours, 9);
+    expect(sum(rows, 'vm.vcpu.hours')).toBeCloseTo(12 * ranHours, 6);
+    expect(sum(rows, 'vm.memory.gib.hours')).toBeCloseTo(85 * ranHours, 6);
+    expect(sum(rows, 'vm.gpu.a100.hours')).toBeCloseTo(ranHours, 6);
+    // Both running intervals of hour 0 landed in its one window.
+    expect(
+      rows.find((row) => row.start === h0 && row.meter === 'vm.instance.hours')!.quantity,
+    ).toBeCloseTo(0.5, 9);
+    // One window per instance, hour and meter: the unique keys held.
+    expect(new Set(rows.map((row) => row.key)).size).toBe(rows.length);
+  });
+
+  it('a stopped interval stays unmetered, for Task 13 to bill; the running one is metered', async () => {
+    const world = await legacyAttachWorld({ state: 'stopped' });
+    const { acme } = world.fixture.tenants;
+    const a = await attachLegacy(world, acme.id, acme.caller.identityId, 'attach-stopped-meter');
+    const t1 = await step(world);
+    expect((await intervals(world, a.id))[0]).toMatchObject({ phase: 'stopped', started: t1 });
+    await moveTo(world, t1 + 4 * HOUR);
+    await meter(world, 0);
+    expect(await windows(world)).toEqual([]);
+    expect((await intervals(world, a.id))[0]!.meteredUntil).toBe(t1);
+    // Starting it closes the stopped interval (still unmetered) and opens a metered running one.
+    await world.api.instances.start(world.acme, { tenantId: acme.id, instanceId: a.id });
+    const t2 = await step(world, 5_000);
+    const settled = (Math.floor(t2 / HOUR) + 2) * HOUR;
+    await moveTo(world, settled);
+    await meter(world, 0);
+    const list = await intervals(world, a.id);
+    expect(list.map((item) => [item.phase, item.meteredUntil])).toEqual([
+      ['stopped', t1],
+      ['running', settled],
+    ]);
+    expect((await windows(world)).length).toBeGreaterThan(0);
+  });
+
+  it('a zero-length interval writes nothing and is metered; the others still run', async () => {
+    const world = await gceWorld();
+    const { created, h0 } = await runningAtHour(world);
+    // A second VM whose interval opened and closed at the same instant.
+    const other = await createVm(world, 'vm-2');
+    await step(world, 1_000);
+    const [zero] = await intervals(world, other.id);
+    await world.fixture.database.query(
+      `UPDATE instance_usage_intervals SET ended_at = started_at WHERE instance_id = $1`,
+      [other.id],
+    );
+    await moveTo(world, h0 + 2 * HOUR + 60_000);
+    await meter(world, 0);
+    const rows = await windows(world);
+    expect(rows.filter((row) => row.instanceId === other.id)).toEqual([]);
+    expect(rows.filter((row) => row.instanceId === created.id).length).toBeGreaterThan(0);
+    const [done] = await intervals(world, other.id);
+    expect(done).toMatchObject({ ended: zero!.started, meteredUntil: zero!.started });
+  });
+
+  it('a mode none interval writes nothing and is metered', async () => {
+    const world = await gceWorld();
+    const { created, h0 } = await runningAtHour(world);
+    await world.fixture.database.query(
+      `UPDATE instance_usage_intervals SET mode = 'none' WHERE instance_id = $1`,
+      [created.id],
+    );
+    await moveTo(world, h0 + 3 * HOUR + 60_000);
+    await meter(world, 0);
+    expect(await windows(world)).toEqual([]);
+    expect(await meteredUntil(world, created.id)).toEqual([h0 + 3 * HOUR]);
+  });
+
+  it('a platform-fee interval is one managed line per hour', async () => {
+    const world = await gceWorld();
+    const { created, h0 } = await runningAtHour(world);
+    await world.fixture.database.query(
+      `UPDATE instance_usage_intervals SET mode = 'platform-fee' WHERE instance_id = $1`,
+      [created.id],
+    );
+    await moveTo(world, h0 + 2 * HOUR + 60_000);
+    await meter(world, 0);
+    expect((await windows(world)).map((row) => [row.meter, row.quantity])).toEqual([
+      ['vm.managed.hours', 1],
+      ['vm.managed.hours', 1],
+    ]);
+  });
+
+  it('the operator catalog names the GPU model: a non-default model meters on a meter the catalog has', async () => {
+    const gpuModels = ['H100', 'MI300X'];
+    const world = await gceWorld({ discovery: { every: '1m' }, billing: { gpuModels } });
+    world.cloud.machines.set(
+      LEGACY_VM,
+      gceVm('legacy', { gpus: { model: 'amd-mi300x', count: 8 } }),
+    );
+    await world.discover(0);
+    const { acme } = world.fixture.tenants;
+    const a = await attachLegacy(world, acme.id, acme.caller.identityId, 'attach-mi300x');
+    await step(world);
+    expect((await intervals(world, a.id))[0]!.shape.gpus).toEqual({ model: 'mi300x', count: 8 });
+    await moveTo(world, nextHour(world) + 2 * HOUR);
+    await meter(world, 0);
+    const rows = await windows(world);
+    expect(rows.length).toBeGreaterThan(0);
+    const catalog = new Set(meterCatalog({ gpuModels }).map((item) => item.key));
+    expect(rows.some((row) => row.meter === 'vm.gpu.mi300x.hours')).toBe(true);
+    expect(rows.some((row) => row.meter === 'vm.gpu.other.hours')).toBe(false);
+    for (const row of rows) expect(catalog.has(row.meter), row.meter).toBe(true);
+    expect(rows[0]!.tags.gpuModel).toBe('mi300x');
+  });
+
+  it('is a singleton periodic reconciler', () => {
+    const reconciler = vps({ providers: [] }).reconcilers!.find((item) => item.name === usageJob)!;
+    expect(reconciler).toMatchObject({
+      shardBy: 'none',
+      periodic: [{ key: 'all', every: '5m' }],
+    });
+  });
+
+  it('flushed through iam.usage as recorded', async () => {
+    const world = await gceWorld();
+    const { h0 } = await runningAtHour(world);
+    await moveTo(world, h0 + 2 * HOUR + 60_000);
+    await meter(world, 0);
+    expect((await windows(world)).length).toBe(8);
+
+    // An embedded better-iam with the compute catalog, defined by a service credential (as setup does).
+    const bridge = createComputeIamBridge();
+    const f = await iamFixture({
+      plugins: [bridge.plugin()],
+      resolveResource: bridge.resolveResource(),
+    });
+    const port = bridge.embedded(f.iam, {
+      rootTenantId: f.rootTenantId,
+      serviceCredential: f.rootCredential,
+    });
+    await port.ensureMeters!(meterCatalog({ gpuModels: defaultMeterGpuModels }));
+    // The windows belong to compute's fixture tenant; better-iam knows its own organization.
+    await world.fixture.database.query(
+      `UPDATE usage_windows SET tenant_id = $1, identity_id = $2 WHERE source_kind = 'instance'`,
+      [f.tenantId, f.ownerId],
+    );
+    expect(await flushUsageWindows(world.fixture.database, port)).toMatchObject({
+      sent: 8,
+      deadLettered: 0,
+    });
+    expect((await windows(world)).every((row) => row.outcome === 'recorded')).toBe(true);
+    // A second flush has nothing left to send.
+    expect(await flushUsageWindows(world.fixture.database, port)).toMatchObject({ sent: 0 });
+  }, 60_000);
 });

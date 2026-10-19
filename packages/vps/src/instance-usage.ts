@@ -8,7 +8,14 @@ import {
   type PoolPolicy,
   type SqlTx,
 } from '@better-compute/core';
-import { billingModeOf, type BillableShape, type BillingMode } from './billing.js';
+import { meterSource, type UsageTags } from '@better-compute/capacity';
+import {
+  billingModeOf,
+  meterLinesFor,
+  type BillableShape,
+  type BillingMode,
+  type MeterLine,
+} from './billing.js';
 import type { InstanceRow } from './instances.js';
 
 // Lifecycle usage intervals (platform compute billing, D3): a provider instance's exact running and
@@ -251,4 +258,169 @@ export async function openInterval(
       at,
     ],
   );
+}
+
+// --- The vps.provider-usage reconciler (Task 7) ----------------------------------------------------
+
+/** What metering the intervals needs beyond its transaction. */
+export type MeteringDeps = Pick<IntervalDeps, 'meterGpuModels'>;
+
+interface DueInterval {
+  id: string;
+  instance_id: string;
+  tenant_id: string;
+  project_id: string | null;
+  identity_id: string | null;
+  pool_id: string;
+  region: string | null;
+  provider: string;
+  phase: IntervalPhase;
+  mode: BillingMode;
+  shape: BillableShape | string;
+  started: number;
+  ended: number | null;
+  metered: number;
+  flavor: string | null;
+}
+
+/** The part of an interval one pass bills: `[from, until)` with the lines and tags to bill it by. */
+interface Segment {
+  from: number;
+  until: number;
+  startedAt: number;
+  tenantId: string;
+  identityId: string | null;
+  lines: readonly MeterLine[];
+  tags: UsageTags;
+}
+
+const hourMs = 3_600_000;
+
+/**
+ * One metering pass over the intervals with unbilled whole hours (`vps.provider-usage`): at most `limit` intervals,
+ * oldest first, running ones before stopped ones. For each instance the pass writes `instance` windows (`meterSource`,
+ * key `cmp:instance:<id>:<windowStartMs>:<meter>`) for every hour that has ended, then advances each interval's
+ * `metered_until` to what it covered, in the same transaction (the retention contract of `meterSource`: an hour
+ * already written is never derived again). The rows are locked, so a lifecycle change closing one waits for the pass.
+ *
+ * The window key names the instance, hour and meter, not the interval, so every interval of an instance that touches
+ * an hour is summed into that hour's one window: a VM stopped and started again inside one hour, or a resize that
+ * splits it, would otherwise lose all but the first interval's share to `ON CONFLICT DO NOTHING`.
+ *
+ * - `running`: the lines of `meterLinesFor(shape, mode, 'running', { gpuModels })`, `perHour` x the part of the hour
+ *   the interval covered. A mode with no lines (`none`) is marked metered without windows.
+ * - `stopped`: through `meterLinesFor(shape, mode, 'stopped')`, which has no lines until Task 13 (disks). With none,
+ *   `metered_until` stays put so Task 13 bills the backlog.
+ * - An interval that ended where it started (nothing to bill) never qualifies: its `metered_until` is its end.
+ */
+export async function meterIntervals(
+  tx: SqlTx,
+  now: number,
+  deps: MeteringDeps = {},
+  options: { limit?: number } = {},
+): Promise<{ intervals: number; windows: number }> {
+  const floorNow = Math.floor(now / hourMs) * hourMs;
+  // Whole hours only: what is unbilled lies before the last top of the hour (or before the interval's end).
+  const due = (alias: string) =>
+    `${alias}.metered_until < LEAST(coalesce(${alias}.ended_at, ${at$(1)}), ${at$(2)})`;
+  const { rows } = await tx.query<DueInterval>(
+    `SELECT u.id, u.instance_id, u.tenant_id, u.project_id, u.identity_id, u.pool_id, u.region, u.provider,
+            u.phase, u.mode, u.shape,
+            (extract(epoch FROM u.started_at) * 1000)::float8 AS started,
+            (extract(epoch FROM u.ended_at) * 1000)::float8 AS ended,
+            (extract(epoch FROM u.metered_until) * 1000)::float8 AS metered,
+            i.flavor->>'name' AS flavor
+       FROM instance_usage_intervals u
+       JOIN instances i ON i.id = u.instance_id
+      WHERE ${due('u')}
+        AND u.instance_id IN (
+              SELECT d.instance_id FROM instance_usage_intervals d
+               WHERE ${due('d')}
+               ORDER BY (d.phase = 'stopped'), d.metered_until, d.id LIMIT $3)
+      ORDER BY u.instance_id, u.started_at
+        FOR UPDATE OF u`,
+    [now, floorNow, options.limit ?? 5000],
+  );
+  if (rows.length === 0) return { intervals: 0, windows: 0 };
+
+  const meterOptions = deps.meterGpuModels ? { gpuModels: deps.meterGpuModels } : {};
+  const byInstance = new Map<string, DueInterval[]>();
+  for (const row of rows)
+    byInstance.set(row.instance_id, [...(byInstance.get(row.instance_id) ?? []), row]);
+
+  const advance: { id: string; until: number; done: boolean }[] = [];
+  let windows = 0;
+  for (const [instanceId, list] of byInstance) {
+    const segments: Segment[] = [];
+    for (const row of list) {
+      const from = Math.round(Number(row.metered));
+      const ended = row.ended === null ? null : Math.round(Number(row.ended));
+      const until = Math.min(ended ?? floorNow, floorNow);
+      const shape = json<BillableShape>(row.shape);
+      const lines = meterLinesFor(shape, row.mode, row.phase, meterOptions);
+      // A stopped interval with no lines yet is Task 13's to bill: its watermark stays.
+      if (row.phase === 'stopped' && lines.length === 0) continue;
+      advance.push({ id: row.id, until, done: ended !== null && until === ended });
+      if (lines.length === 0 || !(until > from)) continue;
+      const tags: UsageTags = { pool: row.pool_id, provider: row.provider, source: 'instance' };
+      if (row.region) tags.region = row.region;
+      if (row.project_id) tags.project = row.project_id;
+      if (shape.gpus && shape.gpus.count > 0) tags.gpuModel = shape.gpus.model;
+      if (row.flavor) tags.flavor = row.flavor;
+      segments.push({
+        from,
+        until,
+        startedAt: Math.round(Number(row.started)),
+        tenantId: row.tenant_id,
+        identityId: row.identity_id,
+        lines,
+        tags,
+      });
+    }
+    if (segments.length === 0) continue;
+
+    const first =
+      Math.floor(Math.min(...segments.map((segment) => segment.from)) / hourMs) * hourMs;
+    const last = Math.max(...segments.map((segment) => segment.until));
+    for (let hour = first; hour < last; hour += hourMs) {
+      const quantities = new Map<string, number>();
+      let latest: Segment | undefined;
+      for (const segment of segments) {
+        const used = Math.min(segment.until, hour + hourMs) - Math.max(segment.from, hour);
+        if (used <= 0) continue;
+        for (const line of segment.lines)
+          quantities.set(
+            line.meter,
+            (quantities.get(line.meter) ?? 0) + (line.perHour * used) / hourMs,
+          );
+        if (!latest || segment.startedAt > latest.startedAt) latest = segment;
+      }
+      if (!latest) continue;
+      // The window is the whole hour (fraction 1): the quantities already hold each interval's share of it.
+      windows += await meterSource(
+        tx,
+        {
+          sourceKind: 'instance',
+          sourceId: instanceId,
+          tenantId: latest.tenantId,
+          ...(latest.identityId !== null ? { identityId: latest.identityId } : {}),
+          lines: [...quantities].map(([meter, perHour]) => ({ meter, perHour })),
+          from: hour,
+          to: hour + hourMs,
+          tags: latest.tags,
+        },
+        now,
+      );
+    }
+  }
+
+  if (advance.length > 0)
+    await tx.query(
+      `UPDATE instance_usage_intervals u
+          SET metered_until = CASE WHEN v.done THEN u.ended_at ELSE to_timestamp(v.until / 1000) END
+         FROM unnest($1::text[], $2::float8[], $3::bool[]) AS v(id, until, done)
+        WHERE u.id = v.id`,
+      [advance.map((a) => a.id), advance.map((a) => a.until), advance.map((a) => a.done)],
+    );
+  return { intervals: rows.length, windows };
 }

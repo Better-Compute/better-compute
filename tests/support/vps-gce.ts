@@ -188,7 +188,7 @@ export interface GceWorld {
   close(): Promise<void>;
 }
 
-export interface GceWorldOptions extends Pick<VpsOptions, 'discovery'> {
+export interface GceWorldOptions extends Pick<VpsOptions, 'discovery' | 'billing'> {
   /** acme's quota on the pool (default: room for one 8-GPU VM and a small one). */
   quota?: Record<string, number>;
   /** Whether iam.rootTenantId names the root tenant, as the IAM bridge sets it (default true). */
@@ -205,6 +205,7 @@ export async function gceWorld(options: GceWorldOptions = {}): Promise<GceWorld>
       vps({
         providers: [fakeGceProvider(cloud), plainProvider, ...(options.providers ?? [])],
         ...(options.discovery !== undefined ? { discovery: options.discovery } : {}),
+        ...(options.billing !== undefined ? { billing: options.billing } : {}),
       }),
     ],
   });

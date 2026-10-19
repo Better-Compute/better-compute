@@ -139,6 +139,7 @@ import {
   type HostReserve,
 } from './hosts.js';
 import { meterInstances } from './usage.js';
+import { meterIntervals } from './instance-usage.js';
 import { schemas } from './schemas.js';
 import {
   completeCreateSandbox,
@@ -1597,6 +1598,22 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           await context.sql.transaction((tx) => meterInstances(tx, context.clock.now()));
           // Agent memory: vps.volume.gib.hours while a volume's disk is booked.
           await context.sql.transaction((tx) => meterVolumes(tx, context.clock.now()));
+          return 'DONE';
+        },
+      },
+      {
+        // Platform compute billing (D3): provider instances' lifecycle intervals become hourly `instance`
+        // usage windows, which `iam.usage` flushes to better-iam like every other window.
+        name: 'vps.provider-usage',
+        shardBy: 'none',
+        periodic: [{ key: 'all', every: '5m' }],
+        async run(context) {
+          const deps = depsOf(context);
+          await context.sql.transaction((tx) =>
+            meterIntervals(tx, context.clock.now(), {
+              ...(deps.meterGpuModels ? { meterGpuModels: deps.meterGpuModels } : {}),
+            }),
+          );
           return 'DONE';
         },
       },
