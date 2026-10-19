@@ -628,11 +628,19 @@ export async function passThroughCosts(
   const computeSku = billing?.computeSku;
   if (typeof computeSku !== 'function') return none;
   const { rows } = await tx.query<PendingCost>(
-    `SELECT source_row_id, record, tenant_id FROM provider_costs
-      WHERE account_id = $1 AND passed_through_at IS NULL AND tenant_id IS NOT NULL AND tenant_id <> $2
-        AND attribution IN ('instance', 'tenant-label') AND NOT ($3 = ANY(conditions))
-        AND usage_start >= to_timestamp($4::float8 / 1000)
-      ORDER BY usage_start, source_row_id FOR UPDATE`,
+    `SELECT c.source_row_id, c.record, c.tenant_id FROM provider_costs c
+      WHERE c.account_id = $1 AND c.passed_through_at IS NULL AND c.tenant_id IS NOT NULL AND c.tenant_id <> $2
+        AND c.attribution IN ('instance', 'tenant-label') AND NOT ($3 = ANY(c.conditions))
+        AND c.usage_start >= to_timestamp($4::float8 / 1000)
+        -- An instance root bills nothing for (billing 'none'), or whose pool is not metered (none, platform-fee,
+        -- or another tenant's pool, which defaults to platform-fee), passes nothing through either.
+        AND NOT EXISTS (
+          SELECT 1 FROM instances i JOIN pools p ON p.id = i.pool_id
+           WHERE i.id = c.instance_id
+             AND (i.billing = 'none'
+                  OR p.policy->'billing'->>'mode' IN ('none', 'platform-fee')
+                  OR (p.policy->'billing'->>'mode' IS NULL AND p.class = 'provider' AND p.owner_tenant_id <> $2)))
+      ORDER BY c.usage_start, c.source_row_id FOR UPDATE OF c`,
     [account.id, deps.rootTenantId, currencyMismatch, window.from],
   );
   let passed = 0;

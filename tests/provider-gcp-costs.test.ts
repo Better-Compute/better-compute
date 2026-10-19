@@ -283,7 +283,10 @@ describe('gcp billing matchers (D11, D12)', () => {
       'Storage PD Capacity',
       'SSD backed PD Capacity',
       'Hyperdisk Balanced Capacity',
+      'SSD backed Local Storage',
+      'SSD backed Local Storage attached to Spot Preemptible VMs',
       'External IP Charge on a Standard VM',
+      'External IP Charge on a Spot Preemptible VM',
     ])
       expect(meteredSku!(sku(description))).toBe(true);
     expect(meteredSku!(sku('Network Internet Egress from Americas to EMEA'))).toBe(false);

@@ -69,7 +69,7 @@ const fakeBilling = {
   computeSku: (r: { service: string; sku: string; skuDescription?: string }) =>
     computeEngine(r) && /core|ram|gpu|instance/i.test(skuText(r)),
   meteredSku: (r: { service: string; sku: string; skuDescription?: string }) =>
-    computeEngine(r) && /pd capacity|hyperdisk|local ssd|ip charge/i.test(skuText(r)),
+    computeEngine(r) && /pd capacity|hyperdisk|local storage|local ssd|ip charge/i.test(skuText(r)),
 };
 
 let seq = 0;
@@ -1342,5 +1342,74 @@ describe('ingestion fix round 1 (F15-1, F15-2)', () => {
     world.ledger.failNext = new ComputeError('ACCESS_DENIED', 'no dataViewer');
     await world.scan();
     expect(await nextIn()).toBe(6 * HOUR);
+  });
+});
+
+describe('pass-through fix round 1 (F16-1, F16-2)', () => {
+  const egressMeter = 'network.egress.gib';
+  function meters(world: CostWorld) {
+    Object.assign(world.fixture.iam, {
+      listMeters: async () => [{ key: egressMeter, pricing: 'reported' }],
+    });
+  }
+  const setRules = (world: CostWorld, passThrough: unknown[]) =>
+    world.api.providerAccounts.update(world.root, {
+      tenantId: world.rootTenant,
+      accountId: world.accountId,
+      config: {},
+      billing: { passThrough },
+    });
+  const passed = async (world: CostWorld) =>
+    (await world.costs()).filter((cost) => cost.passedThrough).map((cost) => cost.sourceRowId);
+
+  it('a broad pattern never passes a disk or local SSD row through', async () => {
+    const world = await costWorld();
+    meters(world);
+    const vm = await createVm(world);
+    await setRules(world, [{ skuPattern: 'Storage', meter: egressMeter, multiplier: 1 }]);
+    const at = world.now() - DAY;
+    const row = (id: string, skuDescription: string, service = 'Compute Engine') =>
+      costRow({
+        sourceRowId: id,
+        service,
+        skuDescription,
+        usageStart: at,
+        labels: { [instanceLabel]: vm.id },
+      });
+    world.ledger.rows.push(
+      row('pd', 'Storage PD Capacity'),
+      row('local-ssd', 'SSD backed Local Storage'),
+      row('local-ssd-spot', 'SSD backed Local Storage attached to Spot Preemptible VMs'),
+      row('gcs', 'Standard Storage US Multi-region', 'Cloud Storage'),
+    );
+    await world.scan();
+    expect(await passed(world)).toEqual(['gcs']);
+  });
+
+  it('nothing passes through for an instance billed none or a pool that is not metered', async () => {
+    const world = await costWorld();
+    meters(world);
+    await setRules(world, [{ skuPattern: 'egress', meter: egressMeter, multiplier: 1 }]);
+    const free = await createVm(world, 'vm-free');
+    const billed = await createVm(world, 'vm-billed');
+    await world.fixture.database.query(`UPDATE instances SET billing = 'none' WHERE id = $1`, [
+      free.id,
+    ]);
+    const at = world.now() - DAY;
+    const egress = (id: string, instanceId: string) =>
+      costRow({ sourceRowId: id, usageStart: at, labels: { [instanceLabel]: instanceId } });
+    world.ledger.rows.push(egress('free-1', free.id), egress('billed-1', billed.id));
+    await world.scan();
+    expect(await passed(world)).toEqual(['billed-1']);
+    for (const mode of ['platform-fee', 'none']) {
+      await world.fixture.database.query(
+        `UPDATE pools SET policy = jsonb_set(policy, '{billing}', $2::jsonb) WHERE id = $1`,
+        [world.poolId, JSON.stringify({ mode })],
+      );
+      world.ledger.rows.push(egress(`billed-${mode}`, billed.id));
+      await world.fixture.advance(6 * HOUR);
+      await world.scan();
+      expect(await passed(world)).toEqual(['billed-1']);
+    }
   });
 });

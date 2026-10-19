@@ -353,8 +353,11 @@ const computeEngine = (record: SkuRecord): boolean =>
 const skuText = (record: SkuRecord): string => `${record.sku} ${record.skuDescription ?? ''}`;
 /** D4's SKU families: vCPU cores, memory, GPUs and whole instances. */
 const computeFamilies = /core|ram|gpu|instance/i;
-/** What D9 meters on provider instances: persistent and local disks, and external addresses. */
-const meteredFamilies = /pd capacity|hyperdisk|local ssd|ip charge/i;
+/**
+ * What D9 meters on provider instances: persistent disks (`Storage PD Capacity`, `SSD backed PD Capacity`,
+ * Hyperdisk), local SSDs (`SSD backed Local Storage`, and its Spot variant) and external addresses.
+ */
+const meteredFamilies = /pd capacity|hyperdisk|local storage|local ssd|ip charge/i;
 
 /**
  * How Compute Engine cost rows relate to compute's own meters (`ProviderDefinition.billing`): its compute SKUs
