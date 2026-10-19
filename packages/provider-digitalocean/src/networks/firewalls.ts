@@ -8,7 +8,8 @@ import { networkMemberTag } from '../ids.js';
 // SHA-256. A rule is found by the prefix `bc-r1.`, a network's rules by `.n<net16>.`; that keeps
 // the priority check and the network teardown stateless. DO applies every firewall that matches a
 // Droplet and a deny always wins, so a ruleset in which an allow outranks an overlapping deny
-// can't be expressed and is refused (`refusePriorityInversion`, ruling R7).
+// can't be expressed and is refused (`refusePriorityInversion`, ruling R7). The refusal falls on
+// the allow: a deny always applies, so the inversion fails closed.
 
 /** A rule of a DO firewall (`firewall_rule.yml`). `ports` is `"n"`, `"a-b"` or `"0"` (all). */
 export interface DoFirewallRule {

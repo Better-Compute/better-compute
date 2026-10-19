@@ -238,11 +238,12 @@ tags. The tenant-facing behaviour above holds; these are the differences.
   applied, and `error` (applied again on the next run) if it failed.
 - **Priorities are refused when they can't be kept.** DigitalOcean applies every firewall that matches an instance, and
   a deny always wins, so a ruleset in which an allow has a lower priority number than an overlapping deny of the same
-  network and direction can't be expressed. The provider checks the rule it is applying against the rules DigitalOcean
-  already holds, and vps reconciles rules by name, not by priority. So whichever rule of the pair is reconciled
-  second ends in `error` with `UNSUPPORTED` (reason `firewallPriority`), and the first stays applied. If the allow
-  came first, the allow is applied and the deny is not, so the deny's non-overlapping traffic is open until you act:
-  read the rule's error message, then fix or remove the inversion. Addresses on the wrong side of a rule
+  network and direction can't be expressed. The provider checks each allow it applies against the denies DigitalOcean
+  already holds; a deny is never checked and always applies. So in whichever order vps reconciles the pair, the deny
+  is applied and the allow ends in `error` with `UNSUPPORTED` (reason `firewallPriority`) on its own reconcile: the
+  ruleset is enforced more strictly than written, never more loosely. An allow that was applied before the deny
+  arrived stays applied but is no longer updated; the deny wins at DigitalOcean for the traffic they share, so it
+  opens nothing. Read the allow's error message, then fix or remove the inversion. Addresses on the wrong side of a rule
   (destinations on an ingress rule) and an `mtu` other than 1500 are `UNSUPPORTED` too.
 - **An attached instance outside the network's VPCs.** DigitalOcean denies what no firewall allows. An attached
   Droplet that a rule targets, but that sits outside the network's VPCs, is covered by that rule's firewall alone,

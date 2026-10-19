@@ -475,12 +475,37 @@ describe('networks', () => {
     expect(refused.details).toMatchObject({ provider: 'digitalocean', reason: 'firewallPriority' });
     expect(firewallsNamed(emu, 'bc-allow.')).toHaveLength(0);
 
-    // Either order: a deny that an existing allow outranks is refused as well.
+    // The other order ends the same way: the deny applies (DO's deny-wins over-restricts, which
+    // fails closed) and the allow is in error on its next reconcile. The allow that was already
+    // applied stays as it is: the deny wins at DO for the traffic they share.
     const emu2 = emulator();
     const second = (await build(emu2)).networks;
     await second.ensureFirewall(allow, ctx());
-    const reversed = await failure(second.ensureFirewall(deny, ctx()));
-    expect(reversed.details).toMatchObject({ reason: 'firewallPriority' });
+    const [applied] = firewallsNamed(emu2, 'bc-allow.');
+    expect((await second.ensureFirewall(deny, ctx())).id).toBe('bc-deny');
+    expect(firewallsNamed(emu2, 'bc-deny.')).toHaveLength(1);
+    const writes = firewallWrites(emu2).length;
+    const reversed = await failure(second.ensureFirewall(allow, ctx()));
+    expect(reversed.code).toBe('UNSUPPORTED');
+    expect(reversed.details).toMatchObject({
+      provider: 'digitalocean',
+      reason: 'firewallPriority',
+    });
+    // A changed allow is refused too, and the applied one is neither updated nor deleted.
+    const changed = await failure(
+      second.ensureFirewall({ ...allow, sources: ['10.0.0.0/8'] }, ctx()),
+    );
+    expect(changed.details).toMatchObject({ reason: 'firewallPriority' });
+    expect(firewallWrites(emu2)).toHaveLength(writes);
+    expect(firewallsNamed(emu2, 'bc-allow.')).toEqual([applied]);
+    // The deny keeps applying on every pass, in both worlds.
+    for (const [emu_, networks_] of [
+      [emu, networks],
+      [emu2, second],
+    ] as const) {
+      expect((await networks_.ensureFirewall(deny, ctx())).id).toBe('bc-deny');
+      expect(firewallsNamed(emu_, 'bc-deny.')).toHaveLength(1);
+    }
 
     // What doesn't overlap, or ranks below the deny, or sits in another network, is fine.
     for (const ok of [

@@ -203,13 +203,19 @@ export class DoNetworks implements ProviderNetworks {
     const body = compileDoFirewall(spec, spec.network);
     const all = await this.#firewalls(signal);
     const network = networkHash(spec.network);
-    // The network's other rules, read back from DO: this rule must not outrank a deny among them.
-    for (const firewall of all) {
-      const parsed = parseFirewallName(firewall.name);
-      if (!parsed || parsed.rule === spec.name || parsed.net16 !== network) continue;
-      const other = specOfDoFirewall(firewall, spec.network);
-      if (other) refusePriorityInversion([spec, other]);
-    }
+    // Only an allow is checked against the network's other rules, read back from DO: it must not
+    // outrank a deny among them (ruling R7). A deny always applies, whichever order the two are
+    // reconciled in: DO's deny-wins then over-restricts, which fails closed, and the inverting
+    // allow is refused on its own reconcile (vps re-ensures every rule each pass). An allow that
+    // is already applied and is now found inverted stays as it is (neither updated nor deleted):
+    // the deny wins at DO for the traffic they share, so it opens nothing; the refusal reports it.
+    if (spec.action === 'allow')
+      for (const firewall of all) {
+        const parsed = parseFirewallName(firewall.name);
+        if (!parsed || parsed.rule === spec.name || parsed.net16 !== network) continue;
+        const other = specOfDoFirewall(firewall, spec.network);
+        if (other?.action === 'deny') refusePriorityInversion([spec, other]);
+      }
     return this.#apply(spec.name, all.filter(ruleFirewall(spec.name)), body, false, signal);
   }
 

@@ -71,9 +71,10 @@ All notable changes to the better-compute packages are documented here. The form
   an instance tag, and the tag-scoped bulk endpoints are never called. A create always sends an SSH key.
   It implements discovery and attach (autoscale-pool members are listed and never claimed), and tenant networks: a VPC
   per subnet, a base firewall that denies ingress and allows egress, and a Cloud Firewall per rule. DigitalOcean has no
-  firewall priorities, so a ruleset it would read differently is refused (`UNSUPPORTED`, `firewallPriority`). Requests
-  stay under DigitalOcean's per-token limits, and discovery defers before writes do. Reservations, Spot capacity,
-  volumes and snapshots are not part of this release; the opt-in live suite (`BC_DO_LIVE`) has not been run yet.
+  firewall priorities, so an allow that outranks an overlapping deny is refused (`UNSUPPORTED`, `firewallPriority`)
+  while the deny always applies. Requests stay under DigitalOcean's per-token limits, and discovery defers before
+  writes do. Reservations, Spot capacity, volumes and snapshots are not part of this release; the opt-in live suite
+  (`BC_DO_LIVE`) has not been run yet.
 - **Discovery and attach** (`@better-compute/vps`). The `vps.discovery` worker lists every machine of accounts whose
   provider can `discover` (`vps({ discovery: { every } })`, default 5 minutes) and publishes `provider.machine.*`.
   `providerAccounts.machines` reads what it saw (another tenant's instance on a tenant's own account is shown
