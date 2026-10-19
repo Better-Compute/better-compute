@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   defaultMeterGpuModels,
   meterCatalog,
+  canonicalGpuModel,
   type ExternalMachine,
   type PoolPolicy,
 } from '@better-compute/core';
@@ -173,6 +174,70 @@ describe('rules', () => {
                     }
                   }
     expect(checked).toBeGreaterThan(100);
+  });
+});
+
+describe('canonicalGpuModel', () => {
+  it('maps provider GPU strings to the catalog family', () => {
+    const cases: Record<string, string> = {
+      'nvidia-h100-80gb': 'h100',
+      'nvidia-h100-mega-80gb': 'h100',
+      'nvidia-tesla-a100': 'a100',
+      'nvidia-a100-80gb': 'a100',
+      'nvidia-l4': 'l4',
+      'nvidia-l40s': 'l40s',
+      'nvidia-b200': 'b200',
+      'nvidia-h200-141gb': 'h200',
+      'NVIDIA H100 80GB HBM3': 'h100',
+      H100: 'h100',
+      l40s: 'l40s',
+      'RTX-PRO-6000': 'rtx-pro-6000',
+    };
+    for (const [raw, family] of Object.entries(cases))
+      expect(canonicalGpuModel(raw), raw).toBe(family);
+  });
+
+  it('an unknown or empty model is other', () => {
+    for (const raw of ['amd-mi300x', 'nvidia-tesla-k80', '', '   ', 'weird model!', 'other'])
+      expect(canonicalGpuModel(raw), raw).toBe('other');
+  });
+
+  it('matches the longest family token: l40s is not l4 or l40, gb200 is not b200', () => {
+    expect(canonicalGpuModel('nvidia-l40s')).toBe('l40s');
+    expect(canonicalGpuModel('nvidia-l40')).toBe('l40');
+    expect(canonicalGpuModel('nvidia-l4')).toBe('l4');
+    expect(canonicalGpuModel('nvidia-gb200')).toBe('gb200');
+    expect(canonicalGpuModel('nvidia-b200')).toBe('b200');
+    expect(canonicalGpuModel('nvidia-gh200-96gb')).toBe('gh200');
+    // A token, never a substring: "h1000" is no H100.
+    expect(canonicalGpuModel('acme-h1000')).toBe('other');
+  });
+
+  it('an operator catalog widens the families it knows', () => {
+    expect(canonicalGpuModel('amd-mi300x', ['MI300X'])).toBe('mi300x');
+    expect(canonicalGpuModel('nvidia-h100-80gb', ['MI300X'])).toBe('other');
+  });
+
+  it('meterLinesFor meters a provider GPU string on its catalog meter, which the catalog defines', () => {
+    const out = lines({ gpus: { model: 'nvidia-h100-80gb', count: 8 }, spot: true });
+    expect(out).toContainEqual({ meter: 'vm.gpu.h100.spot.hours', perHour: 8 });
+    const known = new Set(
+      meterCatalog({ gpuModels: defaultMeterGpuModels }).map((meter) => meter.key),
+    );
+    for (const raw of [
+      'nvidia-tesla-a100',
+      'nvidia-l40s',
+      'nvidia-l4',
+      'nvidia-b200',
+      'nvidia-gb200',
+    ])
+      for (const line of lines({ gpus: { model: raw, count: 1 } }))
+        expect(known.has(line.meter), `${raw}: ${line.meter}`).toBe(true);
+    // GB200 is no default provider-VM model: it is metered as other, never as B200.
+    expect(lines({ gpus: { model: 'nvidia-gb200', count: 1 } })).toContainEqual({
+      meter: 'vm.gpu.other.hours',
+      perHour: 1,
+    });
   });
 });
 
@@ -388,7 +453,7 @@ describe('intervals', () => {
       shape: {
         vcpu: 12,
         memoryGiB: 85,
-        gpus: { model: 'nvidia-a100-40gb', count: 1 },
+        gpus: { model: 'a100', count: 1 },
         spot: false,
         reserved: false,
         granted: false,
@@ -580,7 +645,7 @@ describe('intervals', () => {
       expect(list[0]!.shape).toEqual({
         vcpu: 208,
         memoryGiB: 1872,
-        gpus: { model: 'nvidia-h100-80gb', count: 8 },
+        gpus: { model: 'h100', count: 8 },
         spot: false,
         reserved: false,
         granted: false,
@@ -608,6 +673,54 @@ describe('intervals', () => {
     await step(world, 5_000);
     expect((await viewOf(world, a.id)).state).toBe('stopped');
     expect(await intervals(world)).toEqual([]);
+  });
+
+  describe('GPU model (ruling F6-4)', () => {
+    it('an observation without gpus keeps the open interval and its model (no split)', async () => {
+      const world = await gceWorld();
+      const created = await createVm(world);
+      const t1 = await step(world);
+      const externalId = (await viewOf(world, created.id)).externalId as string;
+      delete world.cloud.machines.get(externalId)!.gpus;
+      await step(world, 60_000);
+      await step(world, 60_000);
+      const list = await intervals(world, created.id);
+      expect(list).toHaveLength(1);
+      expect(list[0]).toMatchObject({ phase: 'running', started: t1, ended: null });
+      expect(list[0]!.shape.gpus).toEqual({ model: 'a100', count: 1 });
+      // A stop and start keep the model too, though the machine still reports no GPUs.
+      await world.api.instances.stop(world.acme, {
+        tenantId: world.acmeTenant,
+        instanceId: created.id,
+      });
+      await step(world, 5_000);
+      await world.api.instances.start(world.acme, {
+        tenantId: world.acmeTenant,
+        instanceId: created.id,
+      });
+      await step(world, 5_000);
+      const after = await intervals(world, created.id);
+      expect(after.map((item) => item.phase)).toEqual(['running', 'stopped', 'running']);
+      expect(after.map((item) => item.shape.gpus?.model)).toEqual(['a100', 'a100', 'a100']);
+    });
+
+    it("without a reported model the pool's gpu_model names it, normalised", async () => {
+      const world = await gceWorld();
+      await world.fixture.database.query(
+        `UPDATE pools SET gpu_model = 'nvidia-l40s' WHERE id = $1`,
+        [world.poolId],
+      );
+      const created = await createVm(world);
+      // The provider's machine reports no GPUs.
+      const name = created.id.replaceAll('_', '-');
+      world.cloud.machines.set(`us-central1-a/${name}`, {
+        ...gceVm(name, { vcpu: 12, memoryGiB: 85 }),
+        gpus: undefined,
+      });
+      await step(world);
+      const [open] = await intervals(world, created.id);
+      expect(open!.shape.gpus).toEqual({ model: 'l40s', count: 1 });
+    });
   });
 
   it('stopped phase opens for disks only', async () => {

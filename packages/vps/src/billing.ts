@@ -4,7 +4,7 @@
  * key is built from the lower-case shapes `meterCatalog` (@better-compute/core) defines, and the tests cross-check
  * that, so a rule cannot name a meter the rate card lacks.
  */
-import { defaultMeterGpuModels, type PoolPolicy } from '@better-compute/core';
+import { canonicalGpuModel, defaultMeterGpuModels, type PoolPolicy } from '@better-compute/core';
 
 /** `metered`: priced per resource; `platform-fee`: one managed-VM line (BYO cloud account); `none`: not billed. */
 export type BillingMode = 'metered' | 'platform-fee' | 'none';
@@ -38,13 +38,12 @@ export interface MeterLinesOptions {
   gpuModels?: readonly string[];
 }
 
-const slugPattern = /^[a-z][a-z0-9_-]{0,31}$/;
-
-/** The catalog slug of a GPU model: its lower-case name when the catalog covers it, else `other`. */
+/**
+ * The catalog slug of a GPU model: the family `canonicalGpuModel` finds among the catalog's models (a provider
+ * string such as `nvidia-h100-80gb` included), else `other`. `meterCatalog` names its models the same way.
+ */
 function gpuSlug(model: string, known: readonly string[]): string {
-  const slug = model.trim().toLowerCase();
-  if (!slugPattern.test(slug)) return 'other';
-  return known.some((name) => name.toLowerCase() === slug) ? slug : 'other';
+  return canonicalGpuModel(model, known);
 }
 
 /**

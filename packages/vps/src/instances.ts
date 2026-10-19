@@ -92,6 +92,11 @@ export interface InstanceDeps {
   clients: ProviderClients;
   /** The IAM root tenant: its provider accounts are the platform's (ruling F1). */
   rootTenantId?: string;
+  /**
+   * The GPU models the meter catalog names (`vps({ billing: { gpuModels } })`): provider usage intervals name an
+   * instance's GPU model among them and the known families (`canonicalGpuModel`).
+   */
+  meterGpuModels?: readonly string[];
   /** The host's workload issuer: provider accounts' identity (`ClientDeps.workload`). */
   workload?: ClientDeps['workload'];
   images?: ImageResolver;

@@ -840,6 +840,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     if (typeof context.secrets?.put === 'function') deps.broker = context.secrets;
     if (options.images) deps.images = options.images;
     if (sandboxExec) deps.sandboxExec = sandboxExec;
+    if (options.billing?.gpuModels) deps.meterGpuModels = options.billing.gpuModels;
     return deps;
   };
 

@@ -1,4 +1,7 @@
 import {
+  canonicalGpuModel,
+  defaultMeterGpuModels,
+  knownGpuFamilies,
   newId,
   type ExternalMachine,
   type Migration,
@@ -62,6 +65,35 @@ export async function closeOpenInterval(tx: SqlTx, instanceId: string, at: numbe
   );
 }
 
+/** What opening an interval needs beyond its transaction. */
+export interface IntervalDeps {
+  /** The IAM root tenant: a provider pool it owns is the platform's (metered); unknown fails closed. */
+  rootTenantId?: string | undefined;
+  /** The GPU models the deployment's meter catalog names (`vps({ billing: { gpuModels } })`), beside the known families. */
+  meterGpuModels?: readonly string[] | undefined;
+}
+
+/**
+ * The interval's GPU model (ruling F6-4), always as `canonicalGpuModel` names it, from the most stable source: the
+ * instance's latest interval (unless it could only say `other`), then what the provider reported now, then the
+ * pool's `gpu_model`. A provider read that omits the GPUs therefore never flaps an interval between a model and
+ * `other`; one that names a model upgrades an `other` once.
+ */
+function gpuModelOf(
+  stored: string | null,
+  observed: ObservedMachine | undefined,
+  poolModel: string | null,
+  deps: IntervalDeps,
+): string {
+  const families = [...knownGpuFamilies, ...defaultMeterGpuModels, ...(deps.meterGpuModels ?? [])];
+  for (const raw of [stored, observed?.gpus?.model, poolModel]) {
+    if (typeof raw !== 'string' || raw.trim() === '') continue;
+    const model = canonicalGpuModel(raw, families);
+    if (model !== 'other') return model;
+  }
+  return 'other';
+}
+
 interface Billing {
   tenantId: string;
   projectId: string | null;
@@ -81,7 +113,7 @@ interface Billing {
 async function billingOf(
   tx: SqlTx,
   instanceId: string,
-  rootTenantId: string | undefined,
+  deps: IntervalDeps,
   observed: ObservedMachine | undefined,
 ): Promise<Billing | undefined> {
   const { rows } = await tx.query<{
@@ -99,7 +131,8 @@ async function billingOf(
     site_region: string | null;
     provider: string | null;
     account_tenant: string | null;
-    machine_gpus: { model?: string; count?: number } | string | null;
+    last_model: string | null;
+    pool_gpu_model: string | null;
     machine_region: string | null;
     flavor_meter: string | null;
   }>(
@@ -110,7 +143,9 @@ async function billingOf(
             i.provider_reservation IS NOT NULL AS reserved,
             p.class AS pool_class, p.owner_tenant_id AS pool_owner, p.policy, s.region AS site_region,
             a.provider, CASE WHEN a.tenant_id = p.owner_tenant_id THEN a.tenant_id END AS account_tenant,
-            m.machine->'gpus' AS machine_gpus, m.machine->>'region' AS machine_region,
+            m.machine->>'region' AS machine_region, p.gpu_model AS pool_gpu_model,
+            (SELECT u.shape->'gpus'->>'model' FROM instance_usage_intervals u
+              WHERE u.instance_id = i.id ORDER BY u.started_at DESC LIMIT 1) AS last_model,
             to_jsonb(f)->'billing'->>'meter' AS flavor_meter
        FROM instances i
        JOIN pools p ON p.id = i.pool_id
@@ -125,16 +160,16 @@ async function billingOf(
   if (!row || row.pool_class !== 'provider') return undefined;
   if (row.origin === 'attached' && row.billing === 'none') return undefined;
   const flavor = json(row.flavor) ?? {};
-  const machineGpus = json(row.machine_gpus);
   const count = Number(flavor.gpus ?? 0);
-  const model = observed?.gpus?.model ?? machineGpus?.model;
+  const model =
+    count > 0 ? gpuModelOf(row.last_model, observed, row.pool_gpu_model, deps) : 'other';
   const billingMeter = (flavor.billing as { meter?: unknown } | undefined)?.meter;
   const flavorMeter =
     typeof billingMeter === 'string' ? billingMeter : (row.flavor_meter ?? undefined);
   const shape: BillableShape = {
     vcpu: Number(flavor.vcpu ?? 0),
     memoryGiB: Number(flavor.memoryGiB ?? 0),
-    ...(count > 0 ? { gpus: { model: model ?? 'other', count } } : {}),
+    ...(count > 0 ? { gpus: { model, count } } : {}),
     // No offer reports spot yet: a flavor (or a later offer field) that says so is read here.
     spot: flavor.spot === true,
     reserved: row.reserved,
@@ -147,7 +182,7 @@ async function billingOf(
   const mode = billingModeOf(
     { ownerTenantId: row.pool_owner, class: row.pool_class, policy: json(row.policy) ?? {} },
     row.account_tenant !== null ? { tenantId: row.account_tenant } : undefined,
-    rootTenantId ?? '',
+    deps.rootTenantId ?? '',
   );
   return {
     tenantId: row.tenant_id,
@@ -175,11 +210,11 @@ export async function openInterval(
   row: InstanceRow,
   phase: IntervalPhase,
   at: number,
-  deps: { rootTenantId?: string | undefined },
+  deps: IntervalDeps,
   observed?: ObservedMachine,
 ): Promise<void> {
   if (row.poolClass !== 'provider') return;
-  const billing = await billingOf(tx, row.id, deps.rootTenantId, observed);
+  const billing = await billingOf(tx, row.id, deps, observed);
   if (!billing) {
     await closeOpenInterval(tx, row.id, at);
     return;
