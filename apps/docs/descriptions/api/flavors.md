@@ -18,6 +18,7 @@ Adds a flavor to a `vps-host` or `provider` pool the tenant owns and returns it 
   - A host that cannot honour `numaAffine` or `pinned` still runs the guest, floating, and the instance carries a `PlacementDegraded` condition with the reason (`NoNumaTopology`, `NoNumaNodeFits`, `GpuNumaUnknown`, `NumaMemoryTooSmall` or `NotEnoughFreeCpus`).
   - Resizing to a flavor with a different `placement` is `UNSUPPORTED`.
 - In a pool that overcommits memory (`policy.overcommit.memoryGiB` > 1), every guest gets a virtio balloon so the host can reclaim its free memory. The exceptions are hugepage-backed guests and guests with GPUs, whose memory is pinned. This needs no flavor field.
+- `billing.meter` (root only) bills instances of the flavor as one line, `flavor.<name>.hours` at one unit per hour, instead of the composed `vm.vcpu`, `vm.memory`, `vm.gpu` and `vm.instance` lines. It must match `^flavor.[a-z0-9.-]{1,56}.hours$` and be at most 64 characters (a meter key's limit), else `INVALID_INPUT`; any other caller gets `ACCESS_DENIED` before the decision, because the meter is defined on the platform's billing tenant. When the IAM port can define meters (`ensureMeters`), the meter is created on the root tenant once IAM has allowed the call, and `billing.syncMeters` and `billing.meters` include every flavor's meter; a port that cannot accepts the flavor and `billing.meters` reports the meter as `missing`. An instance copies the meter into its own flavor snapshot when it is created, so changing the flavor's meter later never changes how a running or stopped instance is billed; a granted or platform-fee instance ignores it.
 - `NOT_FOUND` when the tenant does not own the pool; `INVALID_STATE` when the pool is of another class.
 - `CONFLICT` when the pool already has a flavor with that name, archived ones included.
 
@@ -25,7 +26,7 @@ Adds a flavor to a `vps-host` or `provider` pool the tenant owns and returns it 
 
 Replaces the shape of the named flavor and increments its version; an archived flavor becomes active again.
 
-The input is the full shape, as for `create`. An omitted `offerId` keeps the stored one. Instances already admitted keep their old shape; only new instances and resizes use the new one. The call is `NOT_FOUND` when the tenant does not own the pool or the flavor does not exist.
+The input is the full shape, as for `create`. An omitted `offerId` keeps the stored one, and so does an omitted `billing`; `billing: {}` clears the meter (a new meter is root only, as on `create`). Instances already admitted keep their old shape; only new instances and resizes use the new one. The call is `NOT_FOUND` when the tenant does not own the pool or the flavor does not exist.
 
 ## delete
 

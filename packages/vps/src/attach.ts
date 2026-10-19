@@ -82,8 +82,15 @@ export interface AttachInstanceInput {
    * move a running VM. Omitted: the machine is linked to the tenant network its NIC is on, if any.
    */
   networkId?: string;
+  /**
+   * (platform compute billing) `none`: nothing of this machine is metered (root only: `ACCESS_DENIED` otherwise);
+   * `metered` (and omitted): the pool's billing mode decides.
+   */
+  billing?: AttachBilling;
   idempotencyKey: string;
 }
+
+export type AttachBilling = 'metered' | 'none';
 
 /** What attaching needs beyond its transaction. */
 export type AttachDeps = Pick<InstanceDeps, 'events' | 'work' | 'authz' | 'runtime'> & {
@@ -132,6 +139,11 @@ export const attachSchemas = {
         '^net_[0-9a-hjkmnp-tv-z]{26,52}$',
         57,
       ),
+      billing: {
+        enum: ['metered', 'none'],
+        description:
+          'none: nothing of this machine is metered (root only); metered, or omitted: the pool’s billing mode decides',
+      },
       idempotencyKey: field(
         'Scoped to (tenant, caller identity): a retry with the same key replays',
         '^[A-Za-z0-9._:-]{1,128}$',
@@ -152,6 +164,7 @@ export function parseAttach(raw: unknown): AttachInstanceInput {
     'onDelete',
     'name',
     'networkId',
+    'billing',
     'idempotencyKey',
   ]);
   if (typeof input.externalId !== 'string' || !externalIdPattern.test(input.externalId))
@@ -163,6 +176,8 @@ export function parseAttach(raw: unknown): AttachInstanceInput {
     fail('ownerIdentityId is invalid');
   if (input.onDelete !== undefined && input.onDelete !== 'detach' && input.onDelete !== 'delete')
     fail('onDelete must be detach or delete');
+  if (input.billing !== undefined && input.billing !== 'metered' && input.billing !== 'none')
+    fail('billing must be metered or none');
   const result: AttachInstanceInput = {
     tenantId: tenant(input.tenantId),
     poolId: id(input.poolId, 'pool', 'poolId'),
@@ -177,7 +192,26 @@ export function parseAttach(raw: unknown): AttachInstanceInput {
   if (label !== undefined) result.name = label;
   const networkId = optional(input.networkId, (value) => id(value, 'net', 'networkId'));
   if (networkId !== undefined) result.networkId = networkId;
+  if (input.billing !== undefined) result.billing = input.billing as AttachBilling;
   return result;
+}
+
+/**
+ * `billing: 'none'` writes off what the platform would bill a tenant, so only the platform (a root caller) sets it:
+ * `ACCESS_DENIED` for anyone else, before any decision and before anything is written.
+ */
+function assertBillingAllowed(
+  caller: Pick<Caller, 'tenantId'>,
+  input: Pick<AttachInstanceInput, 'tenantId' | 'billing'>,
+  rootTenantId: string | undefined,
+): void {
+  if (input.billing === 'none' && !platformCaller(caller, input.tenantId, rootTenantId))
+    throw new ComputeError(
+      'ACCESS_DENIED',
+      "Only the platform attaches an instance with billing 'none'",
+      undefined,
+      { reason: 'billing-not-platform' },
+    );
 }
 
 /** The instance id, request hash and resolved defaults of one attach. */
@@ -191,6 +225,7 @@ async function attachRequest(input: AttachInstanceInput, caller: Caller) {
     onDelete: input.onDelete ?? 'detach',
     name: input.name,
     networkId: input.networkId,
+    billing: input.billing,
   };
   return {
     request,
@@ -259,6 +294,7 @@ export async function prepareAttach(
   // R3: as for instances.create, only the platform (a root caller attaching into another tenant)
   // makes someone other than the caller the owner; before any decision.
   instanceOwner(caller, input, rootTenantId);
+  assertBillingAllowed(caller, input, rootTenantId);
   const { request, hash, instanceId } = await attachRequest(input, caller);
   const existing = await readInstance(tx, instanceId, { tenantId: input.tenantId, lock: true });
   if (existing) {
@@ -307,6 +343,7 @@ export async function attachMachine(
   input: AttachInstanceInput & { caller: Caller; accountId: string },
 ): Promise<Instance> {
   const { caller } = input;
+  assertBillingAllowed(caller, input, deps.rootTenantId);
   const { request, hash, instanceId } = await attachRequest(input, caller);
   const existing = await readInstance(tx, instanceId, { tenantId: input.tenantId, lock: true });
   if (existing) {
@@ -399,10 +436,10 @@ export async function attachMachine(
                               provider_account_id, external_id, addresses, quota_charged,
                               owner_identity_id, agent_id, delegation_id, idempotency_key,
                               request_hash, version, origin, on_delete, attached_at,
-                              network_id, subnet_id)
+                              network_id, subnet_id, billing)
        VALUES ($1, $2, $3, $4, NULL, $5::jsonb, NULL, NULL, '{}', NULL, $6, false, 'scheduling', $7,
                $8, $9, $10::text[], $11::jsonb, $12, $13, $14, $15, decode($16, 'hex'), 1,
-               'attached', $17, compute_now(), $18, $19)`,
+               'attached', $17, compute_now(), $18, $19, $20)`,
       [
         instanceId,
         input.tenantId,
@@ -423,6 +460,7 @@ export async function attachMachine(
         request.onDelete,
         link.networkId ?? null,
         link.subnetId ?? null,
+        input.billing ?? null,
       ],
     );
     await tx.query('RELEASE SAVEPOINT vps_attach');

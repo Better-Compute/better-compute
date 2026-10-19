@@ -386,6 +386,11 @@ export interface InstanceShape {
   offerId?: string;
   /** (v1.1 §3.8) The flavor's placement, as admitted. */
   placement?: FlavorPlacement;
+  /**
+   * (platform compute billing) The flavor's `billing` as admitted, written for provider pools (ruling F6-3): its
+   * meter, if it had one. Absent only on rows admitted before this field existed, which read the live flavor.
+   */
+  billing?: { meter?: string };
 }
 
 interface RawInstance {
@@ -1248,6 +1253,9 @@ export async function prepareCreateInstance(
   }
 
   const shape = shapeOf(flavor);
+  // Ruling F6-3: a provider instance bills the meter its flavor had when it was admitted, even if root changes the
+  // flavor later; `{}` says "no meter" (a snapshot without the key is a row from before, which reads the live flavor).
+  if (pool.class === 'provider') shape.billing = { ...flavor.billing };
   const runtime =
     pool.class === 'vps-host'
       ? await hostedRuntime(deps, tx, pool, {

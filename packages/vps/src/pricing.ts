@@ -90,11 +90,19 @@ export const setPricesLimit = 100;
 // --- Meters --------------------------------------------------------------------------------------
 
 /**
- * The flavor meters root set (`billing.meter` of a flavor, `flavor.<name>.<region>.hours`): the part of the catalog
- * that depends on compute's own data. Read outside any IAM call; none are defined until flavors carry a meter.
+ * The flavor meters root set (`billing.meter` of a flavor, `flavor.<name>.hours`): the part of the catalog that
+ * depends on compute's own data, archived flavors included (their instances may still run). Read outside any IAM call.
  */
-export async function flavorMeterKeys(_sql: SqlExecutor): Promise<string[]> {
-  return [];
+export async function flavorMeterKeys(sql: SqlExecutor): Promise<string[]> {
+  const { rows } = await sql.query<{ meter: string }>(
+    `SELECT DISTINCT billing->>'meter' AS meter FROM flavors WHERE billing->>'meter' IS NOT NULL ORDER BY 1`,
+  );
+  return rows.map((row) => row.meter);
+}
+
+/** The catalog entry of one flavor meter, as `ensureMeters` takes it. */
+export function flavorMeterSpec(key: string): MeterSpec {
+  return meterCatalog({ gpuModels: [], flavorMeters: [key] }).find((meter) => meter.key === key)!;
 }
 
 /** Every meter this deployment can emit: the shared catalog for the configured models, plus the flavor meters. */

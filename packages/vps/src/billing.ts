@@ -47,6 +47,17 @@ function gpuSlug(model: string, known: readonly string[]): string {
 }
 
 /**
+ * Whether `caller` belongs to the IAM root tenant. Without the root tenant's id nobody is known to, so it fails
+ * closed: what only the platform may set (flavor meters, pool billing modes) is refused.
+ */
+export function isRootCaller(
+  caller: { tenantId: string } | undefined,
+  rootTenantId: string | undefined,
+): boolean {
+  return caller !== undefined && rootTenantId !== undefined && caller.tenantId === rootTenantId;
+}
+
+/**
  * The billing mode of a pool: an explicit `policy.billing.mode` wins; otherwise a `provider` pool whose owner is a
  * tenant other than the root is a BYO cloud account and pays a platform fee (B8: it is never charged `vm.*`
  * compute); everything else is metered. The owner is the pool's provider account's tenant, which by ruling R1 is

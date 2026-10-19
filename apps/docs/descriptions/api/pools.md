@@ -22,6 +22,7 @@ Creates a pool on a site the tenant owns, with the owner's quota rows and an emp
 - The policy is checked as the nodes will get it (v1.1). Each module's `pool-policy` validator runs, e.g. provision's host units: hugepages, kernel modules, a `kubernetes` join set given all together or not at all, and sharing replicas up to 48. A policy nodes can't take is `INVALID_INPUT`.
 - On a platform (non-`custom`) site, a `kubernetes` join set also needs `platformOperated: true`: the cluster's admins get root on the machines, which keep their platform trust.
 - With `idempotencyKey`, the pool id is derived from the tenant, the caller and the key. A retry returns the stored pool without a second IAM decision; the same key with a different site, class, sharing mode, agent or provider account is `CONFLICT`.
+- `policy.billing: { mode }` sets how provider instances in the pool are billed: `metered` (priced per resource), `platform-fee` (one managed-VM line, as a tenant's own cloud account pays) or `none`. Without it a provider pool owned by a tenant other than the root pays the platform fee and every other pool is metered. The explicit mode outranks that default, so only the platform (a caller of the IAM root tenant) sets it: any other caller gets `ACCESS_DENIED`, and a mode other than those three is `INVALID_INPUT`. The mode is read when an instance's usage interval opens.
 - A site the tenant does not own is `NOT_FOUND`.
 
 Emits `pool.created`.
@@ -54,6 +55,7 @@ That tenant's quota rows on the pool drop to what is in use, so live reservation
 Replaces the policy, the GPU model, or both, of a pool the tenant owns, and returns the pool with its version incremented.
 
 - The new `policy` replaces the old one as a whole, and is checked as on `create`: the `pool-policy` validators, and `platformOperated` for a platform site's Kubernetes join. A request with neither field is `INVALID_INPUT`. Class, site, sharing mode and agent cannot change.
+- `policy.billing` is root's, as on `create`: a non-root caller may resend the pool's stored `billing` but not add, change or remove it (`ACCESS_DENIED`).
 - Turning `policy.singleTenant` on is `INVALID_STATE` while more than one tenant, or any tenant with `includeDescendants`, holds an offer.
 - A new `migLayout` in a `mig` pool never repartitions booked GPUs; each node takes the new layout once its GPUs are idle. A change to `prewarmImages` refreshes the desired state of the site's agents.
 - The pool's authz rows are refreshed for the owner and every offered tenant.

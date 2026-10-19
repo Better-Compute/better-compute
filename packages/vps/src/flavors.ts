@@ -5,6 +5,24 @@ import { parseFlavorPlacement, type FlavorPlacement } from './placement.js';
 // Flavors (§3.6, §11.4): named instance shapes per pool. Hosted pools place them as scalar claims
 // (and GPU atoms); provider pools map each to a provider offer.
 
+/** What root sets on a flavor to bill it (`billing.meter`). */
+export interface FlavorBilling {
+  /** `flavor.<...>.hours`: one unit per instance hour. */
+  meter?: string;
+}
+
+/**
+ * A flavor meter key: `flavor.` and a lower-case name, ending in `.hours`. A meter key is at most 64 characters, so
+ * the name is at most 51 of the 56 the pattern allows (checked by `isFlavorMeter`, which the IAM meter limit needs).
+ */
+export const flavorMeterPattern = /^flavor\.[a-z0-9.-]{1,56}\.hours$/;
+export const flavorMeterMaxLength = 64;
+
+export const isFlavorMeter = (value: unknown): value is string =>
+  typeof value === 'string' &&
+  value.length <= flavorMeterMaxLength &&
+  flavorMeterPattern.test(value);
+
 /** A stored flavor. */
 export interface FlavorRecord {
   id: string;
@@ -18,6 +36,8 @@ export interface FlavorRecord {
   placement?: FlavorPlacement;
   /** Provider pools: the offer this flavor creates. */
   offerId?: string;
+  /** (platform compute billing) A whole-shape meter root set: instances created from the flavor bill it instead of the composed lines. */
+  billing?: FlavorBilling;
   archived: boolean;
   version: number;
 }
@@ -32,6 +52,7 @@ interface RawFlavor {
   gpus: number;
   offer_id: string | null;
   placement: FlavorPlacement | string | null;
+  billing: FlavorBilling | string | null;
   archived: boolean;
   version: string | number;
 }
@@ -49,13 +70,16 @@ function toFlavor(row: RawFlavor): FlavorRecord {
     version: Number(row.version),
   };
   if (row.offer_id !== null) flavor.offerId = row.offer_id;
+  const billing =
+    typeof row.billing === 'string' ? (JSON.parse(row.billing) as FlavorBilling) : row.billing;
+  if (billing?.meter !== undefined) flavor.billing = { meter: billing.meter };
   if (row.placement !== null && row.placement !== undefined)
     flavor.placement =
       typeof row.placement === 'string' ? (JSON.parse(row.placement) as FlavorPlacement) : row.placement;
   return flavor;
 }
 
-const columns = `id, pool_id, name, vcpu, memory_gib, disk_gib, gpus, offer_id, placement, archived, version`;
+const columns = `id, pool_id, name, vcpu, memory_gib, disk_gib, gpus, offer_id, placement, billing, archived, version`;
 
 export async function readFlavors(
   tx: SqlTx,
@@ -120,6 +144,20 @@ export interface FlavorInput {
   gpus: number;
   offerId?: string;
   placement?: FlavorPlacement;
+  /** Root only. `{}` on an update clears the meter; omitted keeps it. */
+  billing?: FlavorBilling;
+}
+
+/** `billing` of a flavor input: `{ meter? }`, the meter matching `flavorMeterPattern`. */
+function parseFlavorBilling(value: unknown): FlavorBilling {
+  const input = object(value, ['meter']);
+  if (input.meter === undefined) return {};
+  if (!isFlavorMeter(input.meter))
+    throw new ComputeError(
+      'INVALID_INPUT',
+      'billing.meter must look like flavor.<name>.hours (lower-case letters, digits, dots and dashes; at most 64 characters in all)',
+    );
+  return { meter: input.meter };
 }
 
 export function parseFlavorInput(raw: unknown): FlavorInput {
@@ -133,6 +171,7 @@ export function parseFlavorInput(raw: unknown): FlavorInput {
     'gpus',
     'offerId',
     'placement',
+    'billing',
   ]);
   const result: FlavorInput = {
     tenantId: tenant(input.tenantId),
@@ -151,6 +190,7 @@ export function parseFlavorInput(raw: unknown): FlavorInput {
   if (offerId !== undefined) result.offerId = offerId;
   const placement = parseFlavorPlacement(input.placement);
   if (placement !== undefined) result.placement = placement;
+  if (input.billing !== undefined) result.billing = parseFlavorBilling(input.billing);
   return result;
 }
 
@@ -173,8 +213,8 @@ export async function createFlavor(tx: SqlTx, input: FlavorInput): Promise<Flavo
     throw new ComputeError('INVALID_INPUT', 'A provider pool flavor has no host placement');
   const flavorId = newId('flv');
   const { rowCount } = await tx.query(
-    `INSERT INTO flavors (id, pool_id, name, vcpu, memory_gib, disk_gib, gpus, offer_id, placement, version)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, 1) ON CONFLICT (pool_id, name) DO NOTHING`,
+    `INSERT INTO flavors (id, pool_id, name, vcpu, memory_gib, disk_gib, gpus, offer_id, placement, billing, version)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, 1) ON CONFLICT (pool_id, name) DO NOTHING`,
     [
       flavorId,
       input.poolId,
@@ -185,6 +225,7 @@ export async function createFlavor(tx: SqlTx, input: FlavorInput): Promise<Flavo
       input.gpus,
       input.offerId ?? null,
       input.placement ? JSON.stringify(input.placement) : null,
+      input.billing?.meter !== undefined ? JSON.stringify(input.billing) : null,
     ],
   );
   if (rowCount === 0)
@@ -201,7 +242,8 @@ export async function updateFlavor(tx: SqlTx, input: FlavorInput): Promise<Flavo
   if (pool.class === 'provider' && !pool.ownAccount) throw noAccount(input.poolId);
   const { rowCount } = await tx.query(
     `UPDATE flavors SET vcpu = $3, memory_gib = $4, disk_gib = $5, gpus = $6, offer_id = COALESCE($7, offer_id),
-                        placement = $8::jsonb, archived = false, version = version + 1
+                        placement = $8::jsonb, archived = false, version = version + 1,
+                        billing = CASE WHEN $9::boolean THEN $10::jsonb ELSE billing END
       WHERE pool_id = $1 AND name = $2`,
     [
       input.poolId,
@@ -212,6 +254,8 @@ export async function updateFlavor(tx: SqlTx, input: FlavorInput): Promise<Flavo
       input.gpus,
       input.offerId ?? null,
       input.placement ? JSON.stringify(input.placement) : null,
+      input.billing !== undefined,
+      input.billing?.meter !== undefined ? JSON.stringify(input.billing) : null,
     ],
   );
   if (rowCount === 0) throw new ComputeError('NOT_FOUND', `Flavor ${input.name} not found`);

@@ -10,6 +10,7 @@ import {
   type ComputeModule,
   type Duration,
   type Instance,
+  type MethodAdmission,
   type MethodContext,
   type MethodDefinition,
   type ModuleContext,
@@ -45,7 +46,8 @@ import {
   type FlavorRecord,
 } from './flavors.js';
 import { id, int, name, object, optional, tenant } from './input.js';
-import { billingApi, type BillingApi, type BillingOptions } from './pricing.js';
+import { isRootCaller } from './billing.js';
+import { billingApi, flavorMeterSpec, type BillingApi, type BillingOptions } from './pricing.js';
 import {
   completeCreateInstance,
   deleteInstance,
@@ -429,6 +431,29 @@ function tenantResource<I extends { tenantId: string }>(input: I) {
 function poolResource<I extends { poolId: string }>(input: I) {
   return { type: 'pool', id: input.poolId };
 }
+/**
+ * `flavors.create/update` with a `billing.meter` (platform compute billing): only the platform sets one, because
+ * the meter is defined on the IAM root tenant; `ACCESS_DENIED` otherwise, before the decision. Once IAM allowed the
+ * call, and with no transaction open, the meter is created when the port can (`ensureMeters`); a port that cannot
+ * accepts the flavor and `billing.meters` reports the meter missing.
+ */
+const flavorBillingAdmission: MethodAdmission<FlavorInput, FlavorRecord> = {
+  async prepare(context, input) {
+    if (
+      input.billing?.meter !== undefined &&
+      !isRootCaller(context.caller, (context.iam as MethodContext['iam']).rootTenantId)
+    )
+      throw new ComputeError('ACCESS_DENIED', 'Only the platform sets a flavor meter', undefined, {
+        reason: 'flavor-meter-not-platform',
+      });
+    return { status: 'decide', resource: poolResource(input) };
+  },
+  async check(context, input) {
+    const key = input.billing?.meter;
+    if (key === undefined || typeof context.iam.ensureMeters !== 'function') return;
+    await context.iam.ensureMeters([flavorMeterSpec(key)]);
+  },
+};
 function instanceResource<I extends { instanceId: string }>(input: I) {
   return { type: 'instance', id: input.instanceId };
 }
@@ -1002,18 +1027,20 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           return { items: await readFlavors(context.sql, input.poolId) };
         },
       }),
-      create: defineMethod({
+      create: defineMethod<FlavorInput, FlavorRecord>({
         action: 'compute:flavors:manage',
         kind: 'mutation',
         resource: poolResource,
         validate: describedBy(schemas.flavor, parseFlavorInput),
+        admission: flavorBillingAdmission,
         handler: (context, input) => createFlavor(context.sql, input),
       }),
-      update: defineMethod({
+      update: defineMethod<FlavorInput, FlavorRecord>({
         action: 'compute:flavors:manage',
         kind: 'mutation',
         resource: poolResource,
         validate: describedBy(schemas.flavor, parseFlavorInput),
+        admission: flavorBillingAdmission,
         handler: (context, input) => updateFlavor(context.sql, input),
       }),
       delete: defineMethod({

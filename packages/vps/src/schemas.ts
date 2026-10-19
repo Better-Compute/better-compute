@@ -151,6 +151,22 @@ const flavorShape = strictObject(
       ),
       description: 'Hosted pools (v1.1): where the guest lives on its host; sandbox templates inherit it',
     },
+    billing: {
+      ...strictObject(
+        {
+          meter: {
+            type: 'string',
+            pattern: '^flavor\\.[a-z0-9.-]{1,56}\\.hours$',
+            maxLength: 64,
+            description:
+              'A whole-shape meter (flavor.<name>.hours, one unit per hour) that replaces the composed vm.* lines; created on the billing tenant when the IAM port can',
+          },
+        },
+        [],
+      ),
+      description:
+        'Root only: how instances of this flavor are billed. On update, omitted keeps the meter and {} clears it',
+    },
   },
   ['tenantId', 'poolId', 'name', 'vcpu', 'memoryGiB', 'diskGiB'],
 );

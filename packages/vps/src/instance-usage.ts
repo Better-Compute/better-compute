@@ -46,6 +46,8 @@ CREATE TABLE instance_usage_intervals (
 CREATE INDEX instance_usage_open ON instance_usage_intervals (metered_until) WHERE ended_at IS NULL OR metered_until < ended_at;
 -- D6: an attached instance's billing; NULL = the pool's default.
 ALTER TABLE instances ADD COLUMN billing text CHECK (billing IN ('metered', 'none'));
+-- A flavor's whole-shape meter ({ "meter": "flavor.<...>.hours" }), set by root; instances snapshot it when created.
+ALTER TABLE flavors ADD COLUMN billing jsonb;
 `,
 };
 
@@ -146,8 +148,8 @@ async function billingOf(
     flavor_meter: string | null;
   }>(
     // The account resolves only when it is the pool owner's (ruling R1, as readPoolAccount); its
-    // provider names the interval either way. The flavor row is read whole (to_jsonb), so its
-    // `billing.meter` (Task 8) is picked up without naming a column that may not exist yet.
+    // provider names the interval either way. `flavor_meter` is the live flavor's meter, read only for
+    // rows whose snapshot predates `billing` (ruling F6-3).
     `SELECT i.tenant_id, i.project_id, i.owner_identity_id, i.pool_id, i.flavor, i.origin, i.billing,
             i.provider_reservation IS NOT NULL AS reserved,
             p.class AS pool_class, p.owner_tenant_id AS pool_owner, p.policy, s.region AS site_region,
@@ -155,7 +157,7 @@ async function billingOf(
             m.machine->>'region' AS machine_region, p.gpu_model AS pool_gpu_model,
             (SELECT u.shape->'gpus'->>'model' FROM instance_usage_intervals u
               WHERE u.instance_id = i.id ORDER BY u.started_at DESC LIMIT 1) AS last_model,
-            to_jsonb(f)->'billing'->>'meter' AS flavor_meter
+            f.billing->>'meter' AS flavor_meter
        FROM instances i
        JOIN pools p ON p.id = i.pool_id
        LEFT JOIN sites s ON s.id = p.site_id
@@ -172,9 +174,16 @@ async function billingOf(
   const count = Number(flavor.gpus ?? 0);
   const model =
     count > 0 ? gpuModelOf(row.last_model, observed, row.pool_gpu_model, deps) : 'other';
-  const billingMeter = (flavor.billing as { meter?: unknown } | undefined)?.meter;
+  // Ruling F6-3: the meter the instance was admitted with, from its flavor snapshot. Only a snapshot with no
+  // `billing` key at all (a row created before snapshots carried it) falls back to the live flavor; a snapshot
+  // that says `billing: {}` has no meter, whatever the flavor was given since.
+  const snapshotMeter = (flavor.billing as { meter?: unknown } | undefined)?.meter;
   const flavorMeter =
-    typeof billingMeter === 'string' ? billingMeter : (row.flavor_meter ?? undefined);
+    'billing' in flavor
+      ? typeof snapshotMeter === 'string'
+        ? snapshotMeter
+        : undefined
+      : (row.flavor_meter ?? undefined);
   const shape: BillableShape = {
     vcpu: Number(flavor.vcpu ?? 0),
     memoryGiB: Number(flavor.memoryGiB ?? 0),

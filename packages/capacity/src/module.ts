@@ -583,7 +583,40 @@ function checkPolicy(policy: unknown): PoolPolicy {
   const singleTenant = (policy as Record<string, unknown>).singleTenant;
   if (singleTenant !== undefined && typeof singleTenant !== 'boolean')
     fail('policy.singleTenant must be true or false');
+  const billing = (policy as Record<string, unknown>).billing;
+  if (billing !== undefined) {
+    if (typeof billing !== 'object' || billing === null || Array.isArray(billing))
+      fail('policy.billing must be an object');
+    const keys = Object.keys(billing);
+    const mode = (billing as Record<string, unknown>).mode;
+    if (keys.some((key) => key !== 'mode') || !poolBillingModes.includes(mode as never))
+      fail(
+        `policy.billing must be { mode: ${poolBillingModes.map((item) => `"${item}"`).join(' | ')} }`,
+      );
+  }
   return policy as PoolPolicy;
+}
+
+const poolBillingModes = ['metered', 'platform-fee', 'none'] as const;
+
+/**
+ * `policy.billing` decides what the platform bills a pool's instances, and outranks the BYO default, so only the
+ * platform (a caller of the IAM root tenant) sets it: a tenant that could write `none` on its own pool would bill
+ * itself nothing. `ACCESS_DENIED` when a non-root caller adds, changes or removes it (`current` is the stored policy;
+ * resending what is stored is not a change). Without the root tenant's id nobody is known to be root.
+ */
+function assertBillingPolicyAllowed(
+  context: Pick<MethodContext, 'caller' | 'iam'>,
+  next: PoolPolicy,
+  current?: PoolPolicy,
+): void {
+  const changed = JSON.stringify(next.billing ?? null) !== JSON.stringify(current?.billing ?? null);
+  if (!changed) return;
+  const rootTenantId = (context.iam as MethodContext['iam'] | undefined)?.rootTenantId;
+  if (rootTenantId !== undefined && context.caller?.tenantId === rootTenantId) return;
+  throw new ComputeError('ACCESS_DENIED', 'Only the platform sets policy.billing', undefined, {
+    reason: 'pool-billing-not-platform',
+  });
 }
 
 function parseUpdatePool(raw: unknown): UpdatePoolInput {
@@ -861,6 +894,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
           throw new ComputeError('NOT_FOUND', `Site ${input.siteId} not found`);
         if (input.providerAccountId !== undefined)
           await assertOwnAccount(tx, input.tenantId, input.providerAccountId);
+        assertBillingPolicyAllowed(context, input.policy);
         await validatePolicy(options, input.policy, input);
         await assertKubernetesJoin(tx, input.siteId, input.policy);
         const pool: Pool = {
@@ -999,6 +1033,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
         const pool = await ownedPool(tx, input.tenantId, input.poolId, true);
         const next: Pool = { ...pool, version: pool.version + 1 };
         if (input.policy !== undefined) {
+          assertBillingPolicyAllowed(context, input.policy, pool.policy);
           await validatePolicy(options, input.policy, pool);
           await assertKubernetesJoin(tx, pool.siteId, input.policy);
           next.policy = input.policy;

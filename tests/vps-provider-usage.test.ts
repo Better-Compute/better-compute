@@ -23,6 +23,7 @@ import {
   gceVm,
   gceWorld,
   plainProvider,
+  type FakeGce,
   type GceWorld,
 } from './support/vps-gce.js';
 
@@ -1194,4 +1195,548 @@ describe('metering', () => {
     // A second flush has nothing left to send.
     expect(await flushUsageWindows(world.fixture.database, port)).toMatchObject({ sent: 0 });
   }, 60_000);
+
+  // --- Task 8: pool billing modes, attach billing, flavor meters (D5, D6) -------------------------------
+  // The API knobs the metering above already honours: `policy.billing.mode` on a pool, `billing: 'none'` on
+  // attach, and `billing.meter` on a flavor. All three are root's: a tenant must not choose what it pays.
+
+  describe('modes', () => {
+    const OFFER = 'us-central1-a/a2-highgpu-1g';
+    const codeOf = (promise: Promise<unknown>) =>
+      promise.then(
+        () => 'allowed',
+        (error: { code?: string }) => error?.code ?? String(error),
+      );
+
+    /** Acme with its own provider account, site, pool and flavor, in a cloud of its own (BYO). */
+    async function byoWorld(options: { discovery?: { every: string } } = {}) {
+      const byo: FakeGce = { machines: new Map(), requests: [] };
+      const world = await gceWorld({
+        ...options,
+        providers: [fakeGceProvider(byo, 'fake-gce-byo')],
+      });
+      const tenantId = world.acmeTenant;
+      const account = await world.api.providerAccounts.create(world.acme, {
+        tenantId,
+        provider: 'fake-gce-byo',
+        name: 'acme-gcp',
+        config: {},
+      });
+      const site = await world.api.sites.create(world.acme, {
+        tenantId,
+        kind: 'custom',
+        region: 'us-central1',
+        idempotencyKey: 'acme-site',
+      });
+      const pool = await world.api.pools.create(world.acme, {
+        tenantId,
+        siteId: site.id,
+        class: 'provider',
+        providerAccountId: account.id,
+        ownerQuota: { vcpu: 100, memoryGiB: 1000, diskGiB: 10_000, gpu: 8 },
+        idempotencyKey: 'acme-pool',
+      });
+      await world.api.flavors.create(world.acme, {
+        tenantId,
+        poolId: pool.id,
+        name: 'a2.byo',
+        vcpu: 12,
+        memoryGiB: 85,
+        diskGiB: 100,
+        gpus: 1,
+        offerId: OFFER,
+      });
+      return { world, byo, account, site, pool };
+    }
+
+    /** A root-created flavor on the shared pool, optionally with a whole-shape meter. */
+    const rootFlavor = (world: GceWorld, name: string, meterKey?: string) =>
+      world.api.flavors.create(world.root, {
+        tenantId: world.rootTenant,
+        poolId: world.poolId,
+        name,
+        vcpu: 12,
+        memoryGiB: 85,
+        diskGiB: 100,
+        gpus: 1,
+        offerId: OFFER,
+        ...(meterKey === undefined ? {} : { billing: { meter: meterKey } }),
+      });
+
+    const createFrom = (world: GceWorld, flavor: string, key: string) =>
+      world.api.instances.create(world.acme, {
+        tenantId: world.acmeTenant,
+        poolId: world.poolId,
+        flavor,
+        imageId: 'debian-12',
+        idempotencyKey: key,
+      });
+
+    /** A VM running from a top of the hour, with three whole hours metered. */
+    async function meterThreeHours(world: GceWorld, created: { id: string }, h0: number) {
+      await moveTo(world, h0 + 3 * HOUR + settle);
+      await meter(world, 0);
+      return windows(world).then((rows) => rows.filter((row) => row.instanceId === created.id));
+    }
+
+    /** An IAM port that can define meters: records what it is asked to ensure. */
+    function ensuring(world: GceWorld) {
+      const asked: string[][] = [];
+      Object.assign(world.fixture.iam, {
+        ensureMeters: async (meters: readonly { key: string }[]) => {
+          asked.push(meters.map((item) => item.key));
+          return { created: meters.map((item) => item.key), existing: [] as string[] };
+        },
+      });
+      return asked;
+    }
+
+    it('BYO pools bill a platform fee only', async () => {
+      const { world, byo, pool } = await byoWorld();
+      expect(pool.policy).toEqual({});
+      const created = await world.api.instances.create(world.acme, {
+        tenantId: world.acmeTenant,
+        poolId: pool.id,
+        flavor: 'a2.byo',
+        imageId: 'debian-12',
+        idempotencyKey: 'byo-vm',
+      });
+      const h0 = nextHour(world);
+      await moveTo(world, h0 - 1_000);
+      await step(world, 1_000);
+      expect((await viewOf(world, created.id)).state).toBe('running');
+      expect(byo.requests.some((request) => request.startsWith('create'))).toBe(true);
+      expect((await intervals(world, created.id))[0]).toMatchObject({ mode: 'platform-fee' });
+      const rows = await meterThreeHours(world, created, h0);
+      expect(rows.map((row) => [row.meter, row.quantity])).toEqual([
+        ['vm.managed.hours', 1],
+        ['vm.managed.hours', 1],
+        ['vm.managed.hours', 1],
+      ]);
+      expect(
+        rows.some((row) => row.meter.startsWith('vm.') && row.meter !== 'vm.managed.hours'),
+      ).toBe(false);
+    });
+
+    it('policy.billing none bills nothing', async () => {
+      const world = await gceWorld();
+      const updated = await world.api.pools.update(world.root, {
+        tenantId: world.rootTenant,
+        poolId: world.poolId,
+        policy: { billing: { mode: 'none' } },
+      });
+      expect(updated.policy).toEqual({ billing: { mode: 'none' } });
+      const { created, h0 } = await runningAtHour(world);
+      expect((await intervals(world, created.id))[0]).toMatchObject({ mode: 'none' });
+      expect(await meterThreeHours(world, created, h0)).toEqual([]);
+      expect(await meteredUntil(world, created.id)).toEqual([h0 + 3 * HOUR]);
+    });
+
+    it('policy.billing platform-fee on a root pool bills the managed line', async () => {
+      const world = await gceWorld();
+      await world.api.pools.update(world.root, {
+        tenantId: world.rootTenant,
+        poolId: world.poolId,
+        policy: { billing: { mode: 'platform-fee' } },
+      });
+      const { created, h0 } = await runningAtHour(world);
+      const rows = await meterThreeHours(world, created, h0);
+      expect(new Set(rows.map((row) => row.meter))).toEqual(new Set(['vm.managed.hours']));
+    });
+
+    it('a pool policy takes only a known billing mode', async () => {
+      const world = await gceWorld();
+      for (const policy of [
+        { billing: { mode: 'free' } },
+        { billing: 'none' },
+        { billing: {} },
+        { billing: { mode: 'none', extra: 1 } },
+      ])
+        expect(
+          await codeOf(
+            world.api.pools.update(world.root, {
+              tenantId: world.rootTenant,
+              poolId: world.poolId,
+              policy,
+            }),
+          ),
+        ).toBe('INVALID_INPUT');
+    });
+
+    it('a tenant cannot set policy.billing on a pool it creates or updates', async () => {
+      const { world, site, account, pool } = await byoWorld();
+      const create = (billing: unknown, key: string) =>
+        world.api.pools.create(world.acme, {
+          tenantId: world.acmeTenant,
+          siteId: site.id,
+          class: 'provider',
+          providerAccountId: account.id,
+          policy: { billing },
+          idempotencyKey: key,
+        });
+      expect(await codeOf(create({ mode: 'none' }, 'p-none'))).toBe('ACCESS_DENIED');
+      expect(await codeOf(create({ mode: 'metered' }, 'p-metered'))).toBe('ACCESS_DENIED');
+      const update = (policy: PoolPolicy) =>
+        world.api.pools.update(world.acme, {
+          tenantId: world.acmeTenant,
+          poolId: pool.id,
+          policy,
+        });
+      expect(await codeOf(update({ billing: { mode: 'none' } }))).toBe('ACCESS_DENIED');
+      // A policy without billing is still the tenant's to change, and nothing was written by the refusals.
+      expect(await codeOf(update({ singleTenant: false }))).toBe('allowed');
+      const { rows } = await world.fixture.database.query<{ policy: PoolPolicy }>(
+        `SELECT policy FROM pools WHERE owner_tenant_id = $1 AND id = $2`,
+        [world.acmeTenant, pool.id],
+      );
+      expect(rows[0]!.policy).toEqual({ singleTenant: false });
+    });
+
+    it('a tenant cannot drop or change a billing mode the platform set on its pool', async () => {
+      const { world, pool } = await byoWorld();
+      // The platform configures the tenant's pool (a root caller acting in the tenant).
+      await world.api.pools.update(world.root, {
+        tenantId: world.acmeTenant,
+        poolId: pool.id,
+        policy: { billing: { mode: 'none' } },
+      });
+      const update = (policy: PoolPolicy) =>
+        world.api.pools.update(world.acme, { tenantId: world.acmeTenant, poolId: pool.id, policy });
+      expect(await codeOf(update({}))).toBe('ACCESS_DENIED');
+      expect(await codeOf(update({ billing: { mode: 'metered' } }))).toBe('ACCESS_DENIED');
+      // Resending what is there changes nothing, so it is allowed.
+      expect(await codeOf(update({ billing: { mode: 'none' }, singleTenant: false }))).toBe(
+        'allowed',
+      );
+    });
+
+    it('root attaches with billing none and nothing is metered', async () => {
+      const world = await legacyAttachWorld();
+      const { acme } = world.fixture.tenants;
+      const a = await world.api.instances.attach(world.root, {
+        tenantId: acme.id,
+        poolId: world.poolId,
+        externalId: LEGACY_VM,
+        ownerIdentityId: acme.caller.identityId,
+        billing: 'none',
+        idempotencyKey: 'attach-root-none',
+      });
+      const { rows } = await world.fixture.database.query<{ billing: string | null }>(
+        `SELECT billing FROM instances WHERE id = $1`,
+        [a.id],
+      );
+      expect(rows[0]!.billing).toBe('none');
+      const h0 = nextHour(world);
+      await moveTo(world, h0 - 1_000);
+      await step(world, 1_000);
+      expect((await viewOf(world, a.id)).state).toBe('running');
+      expect(await intervals(world)).toEqual([]);
+      await moveTo(world, h0 + 3 * HOUR + settle);
+      await meter(world, 0);
+      expect(await windows(world)).toEqual([]);
+    });
+
+    it('attach without billing is metered by the pool; billing metered is stored as given', async () => {
+      const world = await legacyAttachWorld();
+      const { acme } = world.fixture.tenants;
+      const a = await world.api.instances.attach(world.root, {
+        tenantId: acme.id,
+        poolId: world.poolId,
+        externalId: LEGACY_VM,
+        ownerIdentityId: acme.caller.identityId,
+        billing: 'metered',
+        idempotencyKey: 'attach-root-metered',
+      });
+      const { rows } = await world.fixture.database.query<{ billing: string | null }>(
+        `SELECT billing FROM instances WHERE id = $1`,
+        [a.id],
+      );
+      expect(rows[0]!.billing).toBe('metered');
+      await step(world);
+      expect((await intervals(world, a.id))[0]).toMatchObject({
+        mode: 'metered',
+        phase: 'running',
+      });
+      // The same key with another billing is a different request.
+      expect(
+        await codeOf(
+          world.api.instances.attach(world.root, {
+            tenantId: acme.id,
+            poolId: world.poolId,
+            externalId: LEGACY_VM,
+            ownerIdentityId: acme.caller.identityId,
+            billing: 'none',
+            idempotencyKey: 'attach-root-metered',
+          }),
+        ),
+      ).toBe('CONFLICT');
+    });
+
+    it('a tenant cannot attach with billing none', async () => {
+      const { world, byo, pool } = await byoWorld({ discovery: { every: '1m' } });
+      byo.machines.set(
+        LEGACY_VM,
+        gceVm('legacy', { vcpu: 12, memoryGiB: 85, gpus: { model: 'nvidia-a100-40gb', count: 1 } }),
+      );
+      await world.discover(0);
+      const attach = (billing: 'none' | 'metered' | undefined, key: string) =>
+        world.api.instances.attach(world.acme, {
+          tenantId: world.acmeTenant,
+          poolId: pool.id,
+          externalId: LEGACY_VM,
+          ...(billing === undefined ? {} : { billing }),
+          idempotencyKey: key,
+        });
+      const denied = await attach('none', 'tenant-none').then(
+        () => undefined,
+        (error: { code?: string; message?: string }) => error,
+      );
+      expect(denied?.code).toBe('ACCESS_DENIED');
+      expect(denied?.message).toMatch(/billing/);
+      // Nothing was written: the machine is still free, and the tenant may attach it metered.
+      const { rows } = await world.fixture.database.query(
+        `SELECT 1 FROM instances WHERE origin = 'attached'`,
+      );
+      expect(rows).toHaveLength(0);
+      expect(await codeOf(attach('metered', 'tenant-metered'))).toBe('allowed');
+    });
+
+    it('attach takes only metered or none', async () => {
+      const world = await legacyAttachWorld();
+      const { acme } = world.fixture.tenants;
+      expect(
+        await codeOf(
+          world.api.instances.attach(world.root, {
+            tenantId: acme.id,
+            poolId: world.poolId,
+            externalId: LEGACY_VM,
+            billing: 'platform-fee',
+            idempotencyKey: 'attach-bad-billing',
+          }),
+        ),
+      ).toBe('INVALID_INPUT');
+    });
+
+    it('a flavor meter replaces composed lines', async () => {
+      const world = await gceWorld();
+      const asked = ensuring(world);
+      const key = 'flavor.a2-1g.us-central1.hours';
+      const flavor = await rootFlavor(world, 'a2.metered', key);
+      expect(flavor.billing).toEqual({ meter: key });
+      expect(asked).toEqual([[key]]);
+      const created = await createFrom(world, 'a2.metered', 'metered-vm');
+      const h0 = nextHour(world);
+      await moveTo(world, h0 - 1_000);
+      await step(world, 1_000);
+      expect((await viewOf(world, created.id)).state).toBe('running');
+      // The meter is in the instance's flavor snapshot (ruling F6-3).
+      const snapshot = await world.fixture.database.query<{ billing: unknown }>(
+        `SELECT flavor->'billing' AS billing FROM instances WHERE id = $1`,
+        [created.id],
+      );
+      expect(snapshot.rows[0]!.billing).toEqual({ meter: key });
+      const rows = await meterThreeHours(world, created, h0);
+      expect(rows.map((row) => [row.meter, row.quantity])).toEqual([
+        [key, 1],
+        [key, 1],
+        [key, 1],
+      ]);
+      expect(rows.some((row) => row.meter.startsWith('vm.'))).toBe(false);
+    });
+
+    it('flavors accept only well-formed flavor meters, and only from root', async () => {
+      const world = await gceWorld();
+      ensuring(world);
+      for (const bad of [
+        'vm.vcpu.hours',
+        'flavor.hours',
+        'flavor..hours',
+        'flavor.A2.hours',
+        'flavor.a2.minutes',
+        `flavor.${'a'.repeat(52)}.hours`,
+      ])
+        expect(await codeOf(rootFlavor(world, 'bad', bad)), bad).toBe('INVALID_INPUT');
+      expect(await codeOf(rootFlavor(world, 'longest', `flavor.${'a'.repeat(51)}.hours`))).toBe(
+        'allowed',
+      );
+      // A tenant would otherwise define meters on the platform's billing tenant.
+      const { world: byo, pool } = await byoWorld();
+      ensuring(byo);
+      expect(
+        await codeOf(
+          byo.api.flavors.create(byo.acme, {
+            tenantId: byo.acmeTenant,
+            poolId: pool.id,
+            name: 'sneaky',
+            vcpu: 1,
+            memoryGiB: 1,
+            diskGiB: 1,
+            offerId: OFFER,
+            billing: { meter: 'flavor.sneaky.hours' },
+          }),
+        ),
+      ).toBe('ACCESS_DENIED');
+    });
+
+    it('a flavor meter is accepted when the port cannot define meters (billing.meters.missing reports it)', async () => {
+      const world = await gceWorld();
+      const flavor = await rootFlavor(world, 'a2.noport', 'flavor.noport.hours');
+      expect(flavor.billing).toEqual({ meter: 'flavor.noport.hours' });
+    });
+
+    it('flavors.update sets, keeps and clears the meter', async () => {
+      const world = await gceWorld();
+      const asked = ensuring(world);
+      const shape = {
+        tenantId: world.rootTenant,
+        poolId: world.poolId,
+        name: 'a2.update',
+        vcpu: 12,
+        memoryGiB: 85,
+        diskGiB: 100,
+        gpus: 1,
+        offerId: OFFER,
+      };
+      await world.api.flavors.create(world.root, shape);
+      const set = await world.api.flavors.update(world.root, {
+        ...shape,
+        billing: { meter: 'flavor.u1.hours' },
+      });
+      expect(set.billing).toEqual({ meter: 'flavor.u1.hours' });
+      expect(asked).toEqual([['flavor.u1.hours']]);
+      // Omitted: kept.
+      expect((await world.api.flavors.update(world.root, shape)).billing).toEqual({
+        meter: 'flavor.u1.hours',
+      });
+      // An empty billing object clears it.
+      const cleared = await world.api.flavors.update(world.root, { ...shape, billing: {} });
+      expect(cleared.billing).toBeUndefined();
+      const listed = await world.api.flavors.list(world.root, {
+        tenantId: world.rootTenant,
+        poolId: world.poolId,
+      });
+      expect(
+        listed.items.find((item: { name: string }) => item.name === 'a2.update').billing,
+      ).toBeUndefined();
+    });
+
+    it('billing.syncMeters includes the flavor meters', async () => {
+      const world = await gceWorld();
+      const asked = ensuring(world);
+      await rootFlavor(world, 'a2.sync', 'flavor.sync.hours');
+      asked.length = 0;
+      await world.api.billing.syncMeters(world.root, {});
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toContain('flavor.sync.hours');
+      expect(asked[0]).toContain('vm.instance.hours');
+    });
+
+    it('an instance keeps the meter of the flavor it was admitted with (snapshot wins over the live flavor)', async () => {
+      const world = await gceWorld();
+      ensuring(world);
+      await rootFlavor(world, 'a2.snap', 'flavor.first.hours');
+      const created = await createFrom(world, 'a2.snap', 'snap-vm');
+      const t1 = await step(world);
+      // Root re-prices the flavor and then removes its meter; the running VM is unaffected.
+      const shape = {
+        tenantId: world.rootTenant,
+        poolId: world.poolId,
+        name: 'a2.snap',
+        vcpu: 12,
+        memoryGiB: 85,
+        diskGiB: 100,
+        gpus: 1,
+        offerId: OFFER,
+      };
+      await world.api.flavors.update(world.root, {
+        ...shape,
+        billing: { meter: 'flavor.second.hours' },
+      });
+      await world.api.instances.stop(world.acme, {
+        tenantId: world.acmeTenant,
+        instanceId: created.id,
+      });
+      await step(world, 5_000);
+      await world.api.instances.start(world.acme, {
+        tenantId: world.acmeTenant,
+        instanceId: created.id,
+      });
+      await step(world, 5_000);
+      const list = await intervals(world, created.id);
+      expect(
+        list.filter((item) => item.phase === 'running').map((item) => item.shape.flavorMeter),
+      ).toEqual(['flavor.first.hours', 'flavor.first.hours']);
+      expect(list[0]!.started).toBe(t1);
+    });
+
+    it('a flavor given a meter later does not change instances admitted without one', async () => {
+      const world = await gceWorld();
+      ensuring(world);
+      const created = await createFrom(world, 'a2.highgpu.1g', 'plain-vm');
+      await step(world);
+      const { rows } = await world.fixture.database.query<{ has: boolean }>(
+        `SELECT flavor ? 'billing' AS has FROM instances WHERE id = $1`,
+        [created.id],
+      );
+      expect(rows[0]!.has).toBe(true);
+      await world.api.flavors.update(world.root, {
+        tenantId: world.rootTenant,
+        poolId: world.poolId,
+        name: 'a2.highgpu.1g',
+        vcpu: 12,
+        memoryGiB: 85,
+        diskGiB: 100,
+        gpus: 1,
+        offerId: OFFER,
+        billing: { meter: 'flavor.late.hours' },
+      });
+      await world.api.instances.stop(world.acme, {
+        tenantId: world.acmeTenant,
+        instanceId: created.id,
+      });
+      await step(world, 5_000);
+      await world.api.instances.start(world.acme, {
+        tenantId: world.acmeTenant,
+        instanceId: created.id,
+      });
+      await step(world, 5_000);
+      const running = (await intervals(world, created.id)).filter(
+        (item) => item.phase === 'running',
+      );
+      expect(running).toHaveLength(2);
+      for (const item of running) expect(item.shape.flavorMeter).toBeUndefined();
+    });
+
+    it('a row admitted before snapshots carried billing still reads the live flavor meter', async () => {
+      const world = await gceWorld();
+      ensuring(world);
+      const shape = {
+        tenantId: world.rootTenant,
+        poolId: world.poolId,
+        name: 'a2.legacy',
+        vcpu: 12,
+        memoryGiB: 85,
+        diskGiB: 100,
+        gpus: 1,
+        offerId: OFFER,
+      };
+      await world.api.flavors.create(world.root, {
+        ...shape,
+        billing: { meter: 'flavor.admitted.hours' },
+      });
+      const created = await createFrom(world, 'a2.legacy', 'legacy-vm');
+      // As if admitted by the code before Task 8: the snapshot has no billing key at all.
+      await world.fixture.database.query(
+        `UPDATE instances SET flavor = flavor - 'billing' WHERE id = $1`,
+        [created.id],
+      );
+      await world.api.flavors.update(world.root, {
+        ...shape,
+        billing: { meter: 'flavor.live.hours' },
+      });
+      await step(world);
+      const [open] = await intervals(world, created.id);
+      expect(open!.shape.flavorMeter).toBe('flavor.live.hours');
+    });
+  });
 });
