@@ -207,7 +207,8 @@ export class GcpCompute implements ProviderImpl {
   /**
    * The type (`pd-ssd`, `hyperdisk-balanced`, …) of the persistent disk at `source`, from `disks.get`, cached per
    * disk resource URL for a day (a failed read for five minutes, so a denied permission is not asked again at every
-   * poll). Undefined when it cannot be read: the platform then meters the disk as `pd-balanced` and says so.
+   * poll). A failed refresh keeps the last known type. Undefined when it was never read: the platform then meters
+   * the disk as `pd-balanced` and says so.
    */
   protected async persistentDiskType(
     source: string | undefined,
@@ -236,10 +237,14 @@ export class GcpCompute implements ProviderImpl {
         this.context.log.debug('gcp.disk_unreadable', { source });
       }
     }
+    // A failed refresh keeps the last known type (a disk does not change type because a read failed), and is
+    // retried after five minutes until one succeeds.
+    const failed = type === undefined;
+    if (failed && known?.type !== undefined) type = known.type;
     if (this.#diskKinds.size >= 10_000)
       for (const [key, entry] of this.#diskKinds)
         if (entry.until <= now) this.#diskKinds.delete(key);
-    this.#diskKinds.set(source, { type, until: now + (type ? 86_400_000 : 300_000) });
+    this.#diskKinds.set(source, { type, until: now + (failed ? 300_000 : 86_400_000) });
     return type;
   }
 

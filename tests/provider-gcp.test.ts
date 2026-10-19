@@ -751,12 +751,21 @@ describe('compute', () => {
     it('a family the table gets wrong is retried once with Hyperdisk Balanced, then remembered', async () => {
       const emu = new GceEmulator();
       // A machine type the table thinks takes Persistent Disk, but GCE refuses it.
-      emu.machineTypes.push({ name: 'z9-standard-4', zone: 'us-central1-a', guestCpus: 4, memoryMb: 16384 });
+      emu.machineTypes.push({
+        name: 'z9-standard-4',
+        zone: 'us-central1-a',
+        guestCpus: 4,
+        memoryMb: 16384,
+      });
       const refuse = emu.fetch;
       emu.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
         const body = init?.body ? JSON.parse(String(init.body)) : undefined;
         const disk = body?.disks?.[0]?.initializeParams?.diskType as string | undefined;
-        if (init?.method === 'POST' && disk?.endsWith('/pd-balanced') && /z9-/.test(body.machineType))
+        if (
+          init?.method === 'POST' &&
+          disk?.endsWith('/pd-balanced') &&
+          /z9-/.test(body.machineType)
+        )
           return new Response(
             JSON.stringify({
               error: {
@@ -1181,6 +1190,31 @@ describe('compute', () => {
       clock.advance(301_000);
       expect((await discovered(impl))[0]!.disks).toEqual([
         { type: 'pd-standard', sizeGiB: 200, boot: true },
+      ]);
+    });
+
+    it('a failed refresh keeps the last known type until a refresh succeeds (FW-12)', async () => {
+      const emu = new GceEmulator();
+      emu.persistentDisks.set(`${zone}/boot`, { type: 'pd-ssd', sizeGb: '200' });
+      emu.addInstance(zone, 'vm1', { disks: [attached('boot', { boot: true })] });
+      const { clock, impl } = await withClock(emu);
+      expect((await discovered(impl))[0]!.disks).toEqual([
+        { type: 'pd-ssd', sizeGiB: 200, boot: true },
+      ]);
+      // A day later the refresh fails (the disk cannot be read for now): the type it had stays.
+      emu.persistentDisks.delete(`${zone}/boot`);
+      clock.advance(25 * 3_600_000);
+      expect((await discovered(impl))[0]!.disks).toEqual([
+        { type: 'pd-ssd', sizeGiB: 200, boot: true },
+      ]);
+      expect(diskGets(emu)).toHaveLength(2);
+      // Retried after five minutes, not at every poll; a refresh that succeeds takes over.
+      await discovered(impl);
+      expect(diskGets(emu)).toHaveLength(2);
+      emu.persistentDisks.set(`${zone}/boot`, { type: 'pd-extreme', sizeGb: '200' });
+      clock.advance(301_000);
+      expect((await discovered(impl))[0]!.disks).toEqual([
+        { type: 'pd-extreme', sizeGiB: 200, boot: true },
       ]);
     });
 
