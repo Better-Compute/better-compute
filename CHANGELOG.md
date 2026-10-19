@@ -14,6 +14,8 @@ All notable changes to the better-compute packages are documented here. The form
   publishes `quota.budget-suspended`, stops the tenant's running instances in the pool (`BudgetSuspended`; the host needs
   `sandboxIamReactions` in `iamReactions`) and refuses its new work with `SPEND_LIMIT_REACHED` until lifted, which restarts
   nothing. A budget check for a caller from another tenant (root issuing into a customer) names the target tenant only.
+  `instances.attach` (when billed) and `networks.create` (on a metered pool) now run the same budget check as
+  `instances.create`.
 - **`@better-compute/gcp-common`** (new, outside the umbrella). The Google Cloud token sources
   (`serviceAccountTokenSource`, `metadataTokenSource`, `impersonatedTokenSource`, `cachedTokenSource`) move out of
   `@better-compute/provider-gcp` into a package that depends only on `@better-compute/core`, so other Google

@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { ComputeError, manifest, type SpendCheckInput } from '@better-compute/core';
 import { applyBudgetPolicy } from '@better-compute/capacity';
 import { closeFixtures } from '@better-compute/testing';
-import { sandboxIamReactions } from '@better-compute/vps';
-import { gceWorld, type GceWorld } from './support/vps-gce.js';
+import { defineProvider, sandboxIamReactions } from '@better-compute/vps';
+import { gceVm, gceWorld, type GceWorld } from './support/vps-gce.js';
 
 // Offer budget policies over the API (D16): `pools.offer` stores `onBudgetExceeded` (now with `suspend`) and
 // `allowedRegions`; `pools.updateOffer` changes them and lifts a suspension; a spent budget with `suspend` stops the
@@ -340,5 +341,242 @@ describe('regions', () => {
     expect(await code(createVm(world, 'vm-1'))).toBe('ACCESS_DENIED');
     await updateOffer(world, { allowedRegions: ['eu-west1'] });
     expect((await createVm(world, 'vm-2')).poolId).toBe(world.poolId);
+  });
+});
+
+// --- paths: budget checks on the billable paths a tenant or the platform can start (Task 21) ---------------------
+
+const LEGACY = 'us-central1-a/legacy';
+
+/** A provider with tenant networks, so `networks.create` gets past the pool and provider checks. */
+const networkProvider = defineProvider({
+  id: 'fake-net',
+  version: '1.0.0',
+  provides: ['vps'],
+  config: manifest({}) as never,
+  create: () => ({
+    async listOffers() {
+      return [];
+    },
+    async create() {
+      throw new ComputeError('UNSUPPORTED', 'unused');
+    },
+    async get() {
+      return undefined;
+    },
+    async delete() {},
+    networks: {} as never,
+  }),
+});
+
+interface Budget {
+  /** Every `billingCheck` the control plane made, in order. */
+  checks: SpendCheckInput[];
+  /** Whether the next checks are allowed. */
+  allowed: boolean;
+}
+
+/** Replaces the fixture IAM's `billingCheck` with one that records its inputs and can refuse. */
+function watchBudget(world: GceWorld): Budget {
+  const budget: Budget = { checks: [], allowed: true };
+  (world.fixture.iam as unknown as { billingCheck: unknown }).billingCheck = async (
+    input: SpendCheckInput,
+  ) => {
+    budget.checks.push(input);
+    return budget.allowed
+      ? { allowed: true, budgets: [] }
+      : { allowed: false, budgets: [], blockedBy: { budgetId: 'bud_1', name: 'monthly' } };
+  };
+  return budget;
+}
+
+/** acme's offer reacts to a spent budget by stopping new work, so its admissions check the budget. */
+const stopNew = (world: GceWorld, poolId = world.poolId) =>
+  world.api.pools.updateOffer(world.root, {
+    tenantId: world.rootTenant,
+    poolId,
+    toTenantId: world.acmeTenant,
+    onBudgetExceeded: 'stop-new',
+  });
+
+async function legacyWorld(): Promise<GceWorld> {
+  const world = await gceWorld({
+    discovery: { every: '1m' },
+    quota: { vcpu: 1024, memoryGiB: 8192, diskGiB: 2000, gpu: 64 },
+    providers: [networkProvider],
+  });
+  world.cloud.machines.set(LEGACY, gceVm('legacy'));
+  await world.discover(0);
+  return world;
+}
+
+const attach = (world: GceWorld, extra: Record<string, unknown> = {}) =>
+  world.api.instances.attach(world.root, {
+    tenantId: world.acmeTenant,
+    poolId: world.poolId,
+    externalId: LEGACY,
+    ownerIdentityId: world.fixture.tenants.acme.caller.identityId,
+    idempotencyKey: 'attach-legacy',
+    ...extra,
+  });
+
+/** A root-owned pool on a provider account that has networks, offered to acme. */
+async function networkPool(world: GceWorld): Promise<string> {
+  const account = await world.api.providerAccounts.create(world.root, {
+    tenantId: world.rootTenant,
+    provider: 'fake-net',
+    name: 'net-main',
+    config: {},
+  });
+  const { rows } = await world.fixture.database.query<{ site_id: string }>(
+    `SELECT site_id FROM pools WHERE id = $1`,
+    [world.poolId],
+  );
+  const pool = await world.api.pools.create(world.root, {
+    tenantId: world.rootTenant,
+    siteId: rows[0]!.site_id,
+    class: 'provider',
+    providerAccountId: account.id,
+    idempotencyKey: 'net-pool',
+  });
+  await world.api.pools.offer(world.root, {
+    tenantId: world.rootTenant,
+    poolId: pool.id,
+    toTenantId: world.acmeTenant,
+    quota: { vcpu: 8 },
+  });
+  return pool.id;
+}
+
+const createNetwork = (
+  world: GceWorld,
+  poolId: string,
+  key: string,
+  who = world.acme,
+  tenantId = world.acmeTenant,
+) =>
+  world.api.networks.create(who, {
+    tenantId,
+    poolId,
+    name: `net-${key}`,
+    idempotencyKey: key,
+  });
+
+/** The platform sets a pool's billing mode (root-only policy knob). */
+const billingMode = async (world: GceWorld, poolId: string, mode: string) => {
+  const { rows } = await world.fixture.database.query<{ policy: object }>(
+    `SELECT policy FROM pools WHERE id = $1`,
+    [poolId],
+  );
+  await world.api.pools.update(world.root, {
+    tenantId: world.rootTenant,
+    poolId,
+    policy: { ...rows[0]!.policy, billing: { mode } },
+  });
+};
+
+describe('paths', () => {
+  it('attach is refused over budget', async () => {
+    const world = await legacyWorld();
+    await stopNew(world);
+    const budget = watchBudget(world);
+    budget.allowed = false;
+    await expect(attach(world)).rejects.toMatchObject({
+      code: 'SPEND_LIMIT_REACHED',
+      details: { budgetId: 'bud_1', name: 'monthly' },
+    });
+    // Nothing was attached, and the machine is still free.
+    const { rows } = await world.fixture.database.query(
+      `SELECT 1 FROM instances WHERE origin = 'attached'`,
+    );
+    expect(rows).toEqual([]);
+    // Once the budget's window resets the same key goes through.
+    budget.allowed = true;
+    expect((await attach(world)).origin).toBe('attached');
+    expect(budget.checks).toHaveLength(2);
+  });
+
+  it('attach with billing none is not budget-checked', async () => {
+    const world = await legacyWorld();
+    await stopNew(world);
+    const budget = watchBudget(world);
+    budget.allowed = false;
+    // The platform's own write-off, and a pool whose explicit mode is none.
+    expect((await attach(world, { billing: 'none' })).origin).toBe('attached');
+    expect(budget.checks).toEqual([]);
+    world.cloud.machines.set('us-central1-a/second', gceVm('second'));
+    await world.discover();
+    await billingMode(world, world.poolId, 'none');
+    expect(
+      (await attach(world, { externalId: 'us-central1-a/second', idempotencyKey: 'attach-2' }))
+        .origin,
+    ).toBe('attached');
+    expect(budget.checks).toEqual([]);
+    // platform-fee is billed too.
+    world.cloud.machines.set('us-central1-a/third', gceVm('third'));
+    await world.discover();
+    await billingMode(world, world.poolId, 'platform-fee');
+    await expect(
+      attach(world, { externalId: 'us-central1-a/third', idempotencyKey: 'attach-3' }),
+    ).rejects.toMatchObject({ code: 'SPEND_LIMIT_REACHED' });
+    expect(budget.checks).toHaveLength(1);
+  });
+
+  it('networks.create is refused over budget', async () => {
+    const world = await legacyWorld();
+    const poolId = await networkPool(world);
+    await stopNew(world, poolId);
+    const budget = watchBudget(world);
+    budget.allowed = false;
+    await expect(createNetwork(world, poolId, 'n1')).rejects.toMatchObject({
+      code: 'SPEND_LIMIT_REACHED',
+      details: { budgetId: 'bud_1' },
+    });
+    expect(budget.checks).toEqual([
+      { tenantId: world.acmeTenant, identityId: world.fixture.tenants.acme.caller.identityId },
+    ]);
+    // Only a metered pool is checked: an unbilled pool creates its networks.
+    await billingMode(world, poolId, 'none');
+    budget.checks.length = 0;
+    expect((await createNetwork(world, poolId, 'n1')).name).toBe('net-n1');
+    expect(budget.checks).toEqual([]);
+  });
+
+  it("a root-issued create checks the target tenant's budget", async () => {
+    const world = await legacyWorld();
+    const poolId = await networkPool(world);
+    await stopNew(world, poolId);
+    await stopNew(world);
+    const budget = watchBudget(world);
+    budget.allowed = false;
+
+    // The platform issues into acme: acme's budget is asked, with no identity (root's is not acme's).
+    await expect(
+      createNetwork(world, poolId, 'n-root', world.root, world.acmeTenant),
+    ).rejects.toMatchObject({ code: 'SPEND_LIMIT_REACHED' });
+    await expect(attach(world)).rejects.toMatchObject({ code: 'SPEND_LIMIT_REACHED' });
+    await expect(
+      world.api.instances.create(world.root, {
+        tenantId: world.acmeTenant,
+        poolId: world.poolId,
+        flavor: 'a2.highgpu.1g',
+        imageId: 'debian-12',
+        ownerIdentityId: world.fixture.tenants.acme.caller.identityId,
+        idempotencyKey: 'root-vm',
+      }),
+    ).rejects.toMatchObject({ code: 'SPEND_LIMIT_REACHED' });
+    expect(budget.checks).toEqual([
+      { tenantId: world.acmeTenant },
+      { tenantId: world.acmeTenant },
+      { tenantId: world.acmeTenant },
+    ]);
+
+    // Root's own budget is never what gates it: acme in budget, the platform's create goes through.
+    budget.allowed = true;
+    budget.checks.length = 0;
+    expect((await createNetwork(world, poolId, 'n-root', world.root, world.acmeTenant)).name).toBe(
+      'net-n-root',
+    );
+    expect(budget.checks).toEqual([{ tenantId: world.acmeTenant }]);
   });
 });
