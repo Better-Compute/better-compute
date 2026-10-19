@@ -836,6 +836,61 @@ export interface ProviderListPrice {
   sku: string;
 }
 
+/**
+ * (U-03) One image family as a provider resolves it: the newest image in the family that is not deprecated.
+ */
+export interface ProviderImage {
+  /** The family as it was asked for. */
+  family: string;
+  /** What `create` boots to get exactly this image (`projects/<project>/global/images/<name>` on GCE). */
+  image: ImageRef;
+  /** The image's own name. */
+  name: string;
+  /** The project (or namespace) the image belongs to. */
+  project?: string;
+  /** `x86_64` or `arm64`, when the provider says. */
+  architecture?: string;
+  /** The smallest boot disk, in GiB, the image fits on. */
+  minimumDiskGiB?: number;
+  /** Guest OS features the image declares (`UEFI_COMPATIBLE`, `GVNIC`, `SEV_CAPABLE`, …). */
+  guestOsFeatures: string[];
+  /** The user the instance's SSH keys log in as on this image. */
+  loginUser: string;
+  /**
+   * The image's deprecation schedule, when one is set. Only images still `ACTIVE`, with no deprecation time
+   * passed, are ever returned; the times are RFC 3339.
+   */
+  deprecation?: {
+    state: 'ACTIVE';
+    replacement?: string;
+    deprecated?: string;
+    obsolete?: string;
+    deleted?: string;
+  };
+  /** RFC 3339. */
+  createdAt?: string;
+  description?: string;
+}
+
+/** (U-03) A family `resolve` returned no image for. */
+export interface ProviderImageMiss {
+  family: string;
+  /** `notFound`: the family has no image; `deprecated`: its newest image is deprecated, obsolete or deleted. */
+  reason: 'notFound' | 'deprecated';
+}
+
+/** (U-03) A provider's images: image families resolved to bootable images, cached by the provider. */
+export interface ProviderImages {
+  /**
+   * Resolves each family to its newest image that is not deprecated. A family outside what the account allows
+   * is `INVALID_INPUT` for the whole call; one with no usable image is listed in `missing`.
+   */
+  resolve(
+    families: readonly string[],
+    context: CallContext,
+  ): Promise<{ items: ProviderImage[]; missing: ProviderImageMiss[] }>;
+}
+
 /** Per-call context of a provider operation. */
 export interface CallContext {
   /** Creates use the instance id, so a retried create never makes a second machine. */
@@ -920,6 +975,8 @@ export interface ProviderImpl {
     context: CallContext,
   ): Promise<ProviderListPrice[]>;
   networks?: ProviderNetworks;
+  /** (U-03) Image families resolved to images (`images.resolve` on a pool). */
+  images?: ProviderImages;
   /**
    * (v1.0, D10) The account's billed cost rows whose usage started in `[window.from, window.to)`.
    * Read outside any transaction. A provider whose export is not configured leaves it absent.

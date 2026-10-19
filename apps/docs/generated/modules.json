@@ -92,6 +92,7 @@
         "billing",
         "firewallRules",
         "flavors",
+        "images",
         "instances",
         "networks",
         "pools",

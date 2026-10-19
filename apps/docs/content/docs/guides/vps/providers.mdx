@@ -485,7 +485,7 @@ only for providers that declare them.
 
 Throw `ComputeError`s. The reconciler records any failure as a `ProviderError` condition; `UNSUPPORTED`,
 `INVALID_STATE` and `INVALID_CONFIG` fail the instance, and `CAPACITY_UNAVAILABLE` or `QUOTA_EXCEEDED` from `create`, or
-from `get` before the machine has run, fail it with a `ProvisionFailed` condition instead; everything else (use
+from `get` before the machine has run, and `INVALID_INPUT` from `create`, fail it with a `ProvisionFailed` condition instead; everything else (use
 `PROVIDER_ERROR` and `RATE_LIMITED`) is retried. User data from vps carries only the tenant's SSH keys or the tenant's own cloud-init, so a provider never has
 to filter secrets out of it. [Providers](/docs/extending/providers) walks through writing one end to end.
 
@@ -715,6 +715,16 @@ await compute.api.providerAccounts.create(
       description: 'Where image families resolve.',
       default: "'ubuntu-os-cloud'",
     },
+    imageProjects: {
+      type: 'string[]',
+      description:
+        "The projects whose images VMs may boot, besides imageProject and the account's own project (at most 64). Absent: the public OS image projects (defaultImageProjects).",
+    },
+    ownProjectImages: {
+      type: 'boolean',
+      description: "Whether VMs may boot images from the account's own project.",
+      default: 'true',
+    },
     diskGiB: { type: 'number', description: 'Boot disk size.', default: '100' },
     discoverLabel: {
       type: 'string',
@@ -753,6 +763,16 @@ future reservations), plus `roles/iam.serviceAccountTokenCreator` on the target 
 - **Failed creates end.** A stockout (`ZONE_RESOURCE_POOL_EXHAUSTED`, mapped to `CAPACITY_UNAVAILABLE`) or a quota
   error, at once or after GCE accepted the insert, moves the instance to `error` with `ProvisionFailed` and publishes
   `instance.failed`. It is not retried, keeps its quota until it is deleted, and deletes without a VM.
+- **Images.** Every image a VM boots comes from a project the account allows: `imageProjects` (default
+  `defaultImageProjects`, the public OS projects such as `ubuntu-os-cloud`, `debian-cloud`, `rocky-linux-cloud`,
+  `ubuntu-os-accelerator-images` and `deeplearning-platform-release`), `imageProject`, and the account's own project
+  unless `ownProjectImages` is `false`. An `imageId` is a family name (in `imageProject`),
+  `projects/<project>/global/images/[family/]<name>`, `global/images/[family/]<name>` (the own project) or a compute
+  URL of the provider's own universe. Anything else, or another project, is `INVALID_INPUT` (`details.reason`
+  `imageRef` or `imageProjectNotAllowed`) before anything is read, and the instance fails with `ProvisionFailed`. A
+  platform account whose project holds private images sets `ownProjectImages: false`. `images.resolve` resolves
+  families through `images.getFromFamily`, with a day's cache per account that never offers a deprecated image, and
+  reports each image's architecture, minimum disk, guest OS features and login user.
 - **Ownership labels.** create labels the VM `better-compute-managed=true` and `better-compute-instance=<id>`. Attach
   writes `better-compute-instance` only, and `better-compute-managed` just before an `onDelete: 'delete'` deletion.
   `delete` acts only on managed VMs and `power` only on VMs carrying the instance label.

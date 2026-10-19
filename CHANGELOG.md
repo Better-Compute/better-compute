@@ -151,9 +151,30 @@ All notable changes to the better-compute packages are documented here. The form
   `targets.instanceIds` and always compile to instance network tags. `default` needs `sharedTagScoped: true`, which
   the network records. `providerResourceName(id, externalName?)` prefers the VPC's own name; migration
   `vps/0044_network_adopt` (`networks.external_name`, `networks.shared_tag_scoped`); event `network.adopted`.
+- **Image safety and resolution** (U-03; `@better-compute/provider-gcp`, `@better-compute/vps`, `@better-compute/core`).
+  - **Image allowlist.** A Compute Engine account allows images only from `imageProjects` (new; default
+    `defaultImageProjects`, the public OS image projects including `ubuntu-os-accelerator-images` and
+    `deeplearning-platform-release`), its `imageProject`, and its own project unless `ownProjectImages` (new) is
+    `false`. `create` refuses any other project's image, and any malformed image reference, with `INVALID_INPUT`
+    (`details.reason` `imageProjectNotAllowed` with `details.allowed`, or `imageRef`) before it reads or creates
+    anything. A compute image URL must name the provider's own universe host.
+  - **`images.resolve`** (new; `compute:flavors:read` on the pool, served by vps): `{ tenantId, poolId, families }`
+    (1 to 50) returns `{ poolId, provider, items, missing }`. Each item is a family's newest image that is not deprecated,
+    from `images.getFromFamily`, with `image` (the exact `projects/<p>/global/images/<name>` to pass as `imageId`),
+    `architecture`, `minimumDiskGiB`, `guestOsFeatures`, `loginUser`, a scheduled `deprecation`, `createdAt` and
+    `description`; `missing` names families with no image (`notFound`) or a deprecated one (`deprecated`). The
+    provider caches each answer a day per account (a missing family an hour) and hides an image whose deprecation time
+    passes while cached.
+  - `@better-compute/core` (additive, optional): `ProviderImpl.images` (`ProviderImages.resolve`), `ProviderImage`,
+    `ProviderImageMiss`. provider-gcp exports `GcpImages`, `sourceImageOf`, `parseImageRef`, `allowedImageProjects`,
+    `defaultImageProjects`; `sshUserOf` moved to its images module and is still exported. The GCE test emulator
+    serves images and families.
 
 ### Changed
 
+- **A provider create refused as `INVALID_INPUT` fails the instance** (`@better-compute/vps`). Like a capacity or
+  quota refusal, it moves the instance to `error` with a `ProvisionFailed` condition (reason `INVALID_INPUT`) and
+  publishes `instance.failed`, instead of being retried every 30 seconds: the same request would be refused again.
 - **One deployment currency: `vps({ billing: { currency } })`** (ISO 4217, default `USD`). Price proposals, tenant
   estimates, provider cost ingestion and margins all use it; name Better IAM's deployment currency there. It is the
   only currency option.

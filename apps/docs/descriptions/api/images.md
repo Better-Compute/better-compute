@@ -28,3 +28,14 @@ Returns a page of the tenant's own images and public ones, ordered by `ref`, opt
 Makes a verified image the tenant owns public, so every tenant can read and deploy it.
 
 Decided as `compute:images:publish` on the image. An unsigned image is `INVALID_STATE`; an image the tenant does not own is `NOT_FOUND`. Promoting an image that is already public returns it unchanged. Site agents whose pools pre-warm this ref get their desired state refreshed.
+
+## resolve
+
+Resolves image families on a `provider` pool for a launch picker: each family's newest image that is not deprecated, as the pool's provider account sees it. Returns `poolId`, `provider`, `items` (one per family that resolved, in the order asked) and `missing` (each with `family` and `reason`: `notFound` when the family has no image, `deprecated` when its newest image is deprecated, obsolete or deleted). vps serves this method; the rest of the group is the bare-metal catalog.
+
+- **Input.** `families` lists 1 to 50 families; duplicates count once. On Compute Engine a family is a bare name, which resolves in the account's `imageProject` (`ubuntu-2404-lts-amd64`), `<project>/<family>` (`debian-cloud/debian-12`), or `projects/<project>/global/images/family/<family>`.
+- **Output.** Each item has `family` as asked; `image`, the reference `instances.create` takes as `imageId` to boot exactly that image (`projects/<project>/global/images/<name>`); `name` and `project`; `architecture` (`x86_64` or `arm64`); `minimumDiskGiB`, the smallest boot disk the image fits on; `guestOsFeatures` (`UEFI_COMPATIBLE`, `GVNIC`, `SEV_CAPABLE`, …, sorted); `loginUser`, the user the instance's `sshKeys` log in as; `deprecation` when a deprecation is scheduled (`replacement` and the `deprecated`, `obsolete` and `deleted` times); `createdAt` and `description`.
+- **Caching.** The provider keeps each answer a day per account (a family with no image an hour) and never returns an image whose deprecation time has passed, also from its cache. A failed read is not kept.
+- **Allowlist.** A family in a project the account does not allow (the Compute Engine account's `imageProjects`) refuses the whole call with `INVALID_INPUT` (`details.reason` `imageProjectNotAllowed`, with `details.allowed`), and nothing is read. `instances.create` applies the same allowlist to `imageId`.
+- **IAM.** Decided as `compute:flavors:read` on the pool: its owner and the tenants it is offered to, who see its flavors. Any other tenant gets `NOT_FOUND`. The pool's provider account is not shown.
+- **Errors.** `INVALID_INPUT` for a pool that is not a `provider` pool, `INVALID_STATE` for a provider pool without an account, `UNSUPPORTED` (`details.provider`) when its provider does not resolve image families. Provider failures (`ACCESS_DENIED`, `UNAVAILABLE`, `RATE_LIMITED`) are passed on.

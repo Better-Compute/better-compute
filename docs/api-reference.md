@@ -231,6 +231,7 @@ Every call is authenticated (except public methods), refused before any database
 | `images.get`      | read     | `compute:images:read` @ `compute-image`                                                   | v0.2  | registered |
 | `images.list`     | read     | `compute:images:read` @ `compute-tenant` + items                                          | v0.2  | registered |
 | `images.promote`  | mutation | `compute:images:publish` @ `compute-image`                                                | v0.2  | registered |
+| `images.resolve`  | read     | `compute:flavors:read` @ `compute-pool`                                                   | v1.0  | registered |
 
 ### `workflows` (provision)
 

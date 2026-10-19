@@ -11,6 +11,7 @@ import {
   type PowerAction,
   type ProviderListPrice,
   type ProviderContext,
+  type ProviderImages,
   type ProviderImpl,
   type ProviderNetworks,
 } from '@better-compute/core';
@@ -40,6 +41,7 @@ import {
   parseOfferId,
   requestIdFor,
 } from './ids.js';
+import { GcpImages, sourceImageOf, sshUserOf } from './images.js';
 import { GcpNetworks } from './networks.js';
 import type { catalogReader } from './prices.js';
 import { readReservations } from './reservations.js';
@@ -89,6 +91,8 @@ export class GcpCompute implements ProviderImpl {
   /** Persistent disks' types by disk resource URL, with when each answer stops being used. */
   readonly #diskKinds = new Map<string, { type: string | undefined; until: number }>();
   readonly networks: ProviderNetworks;
+  /** (U-03) Image families resolved through `getFromFamily`, cached a day (images.ts). */
+  readonly images: ProviderImages;
   readonly #prices: ReturnType<typeof catalogReader> | undefined;
   /** Provider costs from the BigQuery billing export (D10); set only when the account names one. */
   costs?: ProviderImpl['costs'];
@@ -106,6 +110,7 @@ export class GcpCompute implements ProviderImpl {
     this.options = options;
     this.client = client;
     this.networks = new GcpNetworks(client, options);
+    this.images = new GcpImages(client, config, context, options);
   }
 
   // ------------------------------------------------------------------------------- shared
@@ -401,6 +406,8 @@ export class GcpCompute implements ProviderImpl {
     const { zone, machineType, reservation } = parseOfferId(request.offerId);
     if (!this.config.zones.includes(zone))
       throw new ComputeError('INVALID_INPUT', `Zone ${zone} is not one of the account's zones`);
+    // An image from a project the account does not allow is refused before anything is read.
+    const sourceImage = this.sourceImage(request.image);
     const type = await this.machineType(zone, machineType, context.signal);
     const accelerated = type
       ? (type.accelerators?.length ?? 0) > 0
@@ -434,7 +441,7 @@ export class GcpCompute implements ProviderImpl {
           boot: true,
           autoDelete: true,
           initializeParams: {
-            sourceImage: this.sourceImage(request.image),
+            sourceImage,
             diskSizeGb: String(diskGiB),
             diskType: `zones/${zone}/diskTypes/${diskType}`,
           },
@@ -510,11 +517,12 @@ export class GcpCompute implements ProviderImpl {
     return this.toMachine(pending, context.signal);
   }
 
-  /** An image family (or `projects/…`, `global/…` or URL reference) as a `sourceImage`. */
+  /**
+   * An image family (or `projects/…`, `global/…` or URL reference) as a `sourceImage`; INVALID_INPUT unless its
+   * project is one the account allows (`imageProjects`, images.ts).
+   */
   protected sourceImage(image: ImageRef): string {
-    if (/^https:\/\//.test(image) || image.startsWith('projects/') || image.startsWith('global/'))
-      return image;
-    return `projects/${this.config.imageProject ?? 'ubuntu-os-cloud'}/global/images/family/${image}`;
+    return sourceImageOf(this.config, image, this.options);
   }
 
   protected networkInterface(zone: string, network?: NetworkRef): Record<string, unknown> {
@@ -843,13 +851,4 @@ export function parseDiscoverLabel(
       'discoverLabel must be "key=value" with GCE label characters (a-z, 0-9, _ and -)',
     );
   return { key: match[1]!, value: match[2]! };
-}
-
-/** The login `ssh-keys` names for an image (the distribution's default user). */
-export function sshUserOf(image: ImageRef): string {
-  const name = image.toLowerCase();
-  if (name.includes('debian')) return 'debian';
-  if (name.includes('rocky')) return 'rocky';
-  if (name.includes('centos')) return 'centos';
-  return 'ubuntu';
 }
