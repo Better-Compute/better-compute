@@ -67,7 +67,8 @@ export interface HostIamReaction {
   ): Promise<unknown>;
   /**
    * An offer was suspended by a spent budget (`onBudgetExceeded: 'suspend'`): stop what the tenant runs in those
-   * pools. vps's `sandboxIamReactions.budget` stops its instances. Run on every alert for a suspended offer, in the
+   * pools. vps's `sandboxIamReactions.budget` stops its instances at once. It is an accelerator: vps's `vps.suspension`
+   * reconciler stops them within a minute without it. Run on every alert for a suspended offer, in the
    * alert's transaction; unlike the other reactions a failure fails the alert (it is retried), because a
    * suspension that did not stop the spend must not be reported done.
    */

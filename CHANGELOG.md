@@ -11,8 +11,9 @@ All notable changes to the better-compute packages are documented here. The form
 - **Offer budget policies over the API** (platform compute billing, D16). `pools.offer` takes `onBudgetExceeded` (`notify`,
   `stop-new`, `drain` and the new `suspend`) and `allowedRegions`; the new `pools.updateOffer` changes them and lifts a
   suspension. A spent budget on a `suspend` offer sets `pool_offers.suspended_at` (migration `core/0032_offer_suspension`),
-  publishes `quota.budget-suspended`, stops the tenant's running instances in the pool (`BudgetSuspended`; the host needs
-  `sandboxIamReactions` in `iamReactions`) and refuses its new work with `SPEND_LIMIT_REACHED` until lifted, which restarts
+  publishes `quota.budget-suspended`, stops the tenant's running instances in the pool (`BudgetSuspended`; the
+  `vps.suspension` reconciler does it every minute, `sandboxIamReactions` in `iamReactions` makes it immediate), empties
+  the offer's sandbox warm pools and refuses its new work with `SPEND_LIMIT_REACHED` until lifted, which restarts
   nothing. A budget check for a caller from another tenant (root issuing into a customer) names the target tenant only.
   `instances.attach` (when billed) and `networks.create` (on a metered pool) now run the same budget check as
   `instances.create`.

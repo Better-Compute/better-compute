@@ -2684,12 +2684,15 @@ export async function reconcileSandboxes(
       stale: string | number;
       budget_check: string | null;
       on_budget_exceeded: string | null;
+      suspended: boolean | null;
     }
   >(
     `SELECT ${templateColumnsOf('t.')},
             (SELECT p.policy->'admission'->>'budgetCheck' FROM pools p WHERE p.id = t.pool_id) AS budget_check,
             (SELECT o.on_budget_exceeded FROM pool_offers o
               WHERE o.pool_id = t.pool_id AND o.tenant_id = t.tenant_id) AS on_budget_exceeded,
+            (SELECT o.suspended_at IS NOT NULL FROM pool_offers o
+              WHERE o.pool_id = t.pool_id AND o.tenant_id = t.tenant_id) AS suspended,
             count(i.id) FILTER (WHERE i.desired_state <> 'deleted' AND i.state NOT IN ('deleting', 'deleted')
                                   AND NOT ${warmStale('i.', 't.instance_version', '$1', 'least(t.default_ttl_seconds, $2)')}) AS live,
             count(i.id) FILTER (WHERE i.desired_state <> 'deleted' AND i.state NOT IN ('deleting', 'deleted')
@@ -2731,14 +2734,18 @@ export async function reconcileSandboxes(
       !template.deleted &&
       (raw.budget_check === 'meter' ||
         raw.on_budget_exceeded === 'stop-new' ||
-        raw.on_budget_exceeded === 'drain');
+        raw.on_budget_exceeded === 'drain' ||
+        raw.on_budget_exceeded === 'suspend');
     const draining = raw.on_budget_exceeded === 'drain' && live > 0;
     const overBudget =
       budgeted && (live < template.warm.min || draining)
         ? await budgetSpent(template.tenantId)
         : false;
+    // A suspended offer (D16) refuses new work, so its warm pool is emptied and not refilled, whatever the budget
+    // says now: only lifting the suspension lets it refill (and then only where the budget has room).
+    const suspended = raw.suspended === true;
     const keep =
-      template.deleted || (overBudget && raw.on_budget_exceeded === 'drain')
+      template.deleted || suspended || (overBudget && raw.on_budget_exceeded === 'drain')
         ? 0
         : template.warm.max;
     if (!template.deleted && live > 0) {
@@ -2750,7 +2757,9 @@ export async function reconcileSandboxes(
       pass.warmDrained += await drainWarm(deps, sql, template, Number(raw.stale), true);
     if (live > keep) pass.warmDrained += await drainWarm(deps, sql, template, live - keep, false);
     const want =
-      template.deleted || overBudget ? 0 : Math.min(template.warm.min - live, warmRefillPerPass);
+      template.deleted || suspended || overBudget
+        ? 0
+        : Math.min(template.warm.min - live, warmRefillPerPass);
     for (let index = 0; index < want; index++) {
       try {
         await sql.transaction((tx) =>

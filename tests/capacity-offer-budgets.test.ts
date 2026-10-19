@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { ComputeError, manifest, type SpendCheckInput } from '@better-compute/core';
 import { applyBudgetPolicy } from '@better-compute/capacity';
+import { installIamHandlers } from '@better-compute/cli';
+import type { IamEventHandlers, IamInboxEvent } from '@better-compute/iam';
 import { closeFixtures } from '@better-compute/testing';
 import { defineProvider, sandboxIamReactions } from '@better-compute/vps';
 import { gceVm, gceWorld, type GceWorld } from './support/vps-gce.js';
@@ -578,5 +580,126 @@ describe('paths', () => {
       'net-n-root',
     );
     expect(budget.checks).toEqual([{ tenantId: world.acmeTenant }]);
+  });
+});
+
+// --- sweep: suspension stops spend with no host reaction wired (fix round 1, ruling F20-1) -----------------------
+
+/** The budget alert of better-iam's inbox, as the bridge delivers it. */
+const budgetEvent = (tenantId: string): IamInboxEvent => ({
+  eventId: 'e-budget',
+  tenantId,
+  sequence: 1,
+  occurredAt: 0,
+  action: 'billing:budget-alert',
+  subjectId: 'billing/budgets/bud_1',
+  metadata: { kind: 'actual', threshold: 100, name: 'monthly', spentMicros: 21, amountMicros: 20 },
+  reactions: ['budget'],
+});
+
+/** capacity's policy alone: what a deployment without vps's `iamReactions` runs on a spent budget. */
+async function overspendBare(world: GceWorld) {
+  const context = world.fixture.compute.context;
+  return context.sql.transaction(async (tx) =>
+    applyBudgetPolicy(tx as never, context, alertFor(world)),
+  );
+}
+
+/** One `vps.suspension` pass a minute on. */
+async function sweep(world: GceWorld) {
+  await world.fixture.advance(60_000);
+  await world.tick('vps.suspension', 1);
+}
+
+describe('sweep', () => {
+  it('with no host reactions wired, a suspended offer stops its running instances on the next sweep tick', async () => {
+    const world = await gceWorld();
+    await updateOffer(world, { onBudgetExceeded: 'suspend' });
+    const vm = await runningVm(world);
+    await overspendBare(world);
+    // Suspended at once, but nothing stopped yet: no reaction, no sweep.
+    expect((await offerRow(world)).suspended_at).not.toBeNull();
+    expect((await viewOf(world, vm.id)).desiredState).toBe('running');
+
+    await sweep(world);
+    const after = await viewOf(world, vm.id);
+    expect(after.desiredState).toBe('stopped');
+    expect(after.conditions).toContainEqual(
+      expect.objectContaining({ type: 'BudgetSuspended', status: 'true' }),
+    );
+    await settle(world, 4, 30_000);
+    expect((await viewOf(world, vm.id)).state).toBe('stopped');
+    expect([...world.cloud.machines.values()].some((machine) => machine.state === 'running')).toBe(
+      false,
+    );
+
+    // A hand suspension is swept too; lifting restarts nothing, and later passes leave it stopped.
+    const second = await runningVm(world, 'vm-2').catch(() => undefined);
+    expect(second).toBeUndefined(); // creates are refused while suspended
+    await updateOffer(world, { suspended: false });
+    await sweep(world);
+    expect((await viewOf(world, vm.id)).desiredState).toBe('stopped');
+    const third = await runningVm(world, 'vm-3');
+    await updateOffer(world, { suspended: true });
+    await sweep(world);
+    expect((await viewOf(world, third.id)).desiredState).toBe('stopped');
+    await updateOffer(world, { suspended: false });
+    await sweep(world);
+    await settle(world, 3, 30_000);
+    expect((await viewOf(world, third.id)).state).toBe('stopped');
+    expect([...world.cloud.machines.values()].some((machine) => machine.state === 'running')).toBe(
+      false,
+    );
+  });
+
+  it('a stop that failed is retried on the next tick', async () => {
+    const world = await legacyWorld();
+    const instance = await attach(world);
+    await updateOffer(world, { suspended: true });
+    // An attached instance that lost its machine cannot be stopped: the pass skips it.
+    await world.fixture.database.query(
+      `UPDATE instances SET conditions = '[{"type":"OwnershipLost","status":"true","since":0}]'::jsonb WHERE id = $1`,
+      [instance.id],
+    );
+    await sweep(world);
+    expect(
+      (
+        await world.fixture.database.query(`SELECT desired_state FROM instances WHERE id = $1`, [
+          instance.id,
+        ])
+      ).rows,
+    ).toEqual([{ desired_state: 'running' }]);
+    // Fixed: the next tick stops it.
+    await world.fixture.database.query(
+      `UPDATE instances SET conditions = '[]'::jsonb WHERE id = $1`,
+      [instance.id],
+    );
+    await sweep(world);
+    const { rows } = await world.fixture.database.query<{
+      desired_state: string;
+      conditions: { type: string }[];
+    }>(`SELECT desired_state, conditions FROM instances WHERE id = $1`, [instance.id]);
+    expect(rows[0]!.desired_state).toBe('stopped');
+    expect(rows[0]!.conditions.map((condition) => condition.type)).toContain('BudgetSuspended');
+  });
+
+  it('a budget inbox event through the host handlers stops them at once (the accelerator)', async () => {
+    const world = await gceWorld();
+    await updateOffer(world, { onBudgetExceeded: 'suspend' });
+    const vm = await runningVm(world);
+    let installed: IamEventHandlers = {};
+    installIamHandlers(world.fixture.compute as never, {
+      bridge: { setHandlers: (handlers) => (installed = handlers) },
+      reactions: [sandboxIamReactions],
+    });
+    const context = world.fixture.compute.context;
+    await context.sql.transaction((tx) =>
+      installed.budget!(tx as never, budgetEvent(world.acmeTenant)),
+    );
+    expect((await offerRow(world)).suspended_at).not.toBeNull();
+    const after = await viewOf(world, vm.id);
+    expect(after.desiredState).toBe('stopped');
+    expect(after.conditions).toContainEqual(expect.objectContaining({ type: 'BudgetSuspended' }));
+    expect(await world.events('quota.budget-suspended')).toHaveLength(1);
   });
 });

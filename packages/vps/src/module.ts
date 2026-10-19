@@ -77,6 +77,7 @@ import {
 } from './instances.js';
 import { budgetAdmissionCheck } from '@better-compute/capacity';
 import { attachBudgetCheck, networkBudgetCheck } from './budget-admission.js';
+import { sweepSuspendedOffers } from './budget-suspend.js';
 import { instanceSpecs, reconcileInstance } from './lifecycle.js';
 import {
   bootstrapWork,
@@ -1634,6 +1635,17 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
               // service account, an ancestor of every tenant; [31c64a] c7a5312).
               budget: (tenantId) => warmBudget(context, tenantId),
             });
+          return 'DONE';
+        },
+      },
+      {
+        // Budget `suspend` (D16), level-triggered: a suspended offer's running instances are set to stopped, whether
+        // or not the host wired the budget reaction (which only makes it immediate).
+        name: 'vps.suspension',
+        shardBy: 'none',
+        periodic: [{ key: 'all', every: '1m' }],
+        async run(context) {
+          await context.sql.transaction((tx) => sweepSuspendedOffers(tx, depsOf(context)));
           return 'DONE';
         },
       },

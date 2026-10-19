@@ -292,8 +292,8 @@ holds.
   `applyBudgetPolicy` handles the alert itself: notify, and for `drain` it cancels the tenant's
   unstarted reservations.
   `pools.offer` and `pools.updateOffer` set the policy and `allowedRegions` per offer. `suspend` marks the
-  offer `suspended_at`, publishes `quota.budget-suspended` and has the host's `budget` reaction (vps's
-  `sandboxIamReactions.budget`) stop the tenant's running instances in the pool; while it is set every
+  offer `suspended_at`, publishes `quota.budget-suspended`; vps's `vps.suspension` sweep (every minute, no host
+  wiring needed; `sandboxIamReactions.budget` makes it immediate) stops the tenant's running instances in the pool; while it is set every
   admission (`budgetAdmissionCheck`, `offerAdmissionCheck`) refuses with `SPEND_LIMIT_REACHED`, until
   `pools.updateOffer({ suspended: false })`, which restarts nothing.
 - **IAM reactions.** `withdrawAgentReservations` (an agent suspended, a delegation revoked) and
