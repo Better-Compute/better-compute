@@ -97,6 +97,8 @@ CREATE TABLE provider_costs (
   passed_through_at timestamptz, pass_through_key text,
   -- The reported meter the row was passed through on (margins by meter).
   pass_through_meter text,
+  -- Decided at ingest (and again when the account's rules change): the pass-through may pass this row (FW-13).
+  passable boolean NOT NULL DEFAULT false,
   ingested_at timestamptz NOT NULL DEFAULT compute_now(), updated_at timestamptz NOT NULL DEFAULT compute_now(),
   PRIMARY KEY (account_id, source_row_id)
 );
@@ -104,6 +106,8 @@ CREATE INDEX provider_costs_tenant_day ON provider_costs (tenant_id, usage_start
 -- A pass's own rows (pass-through, leak check) and the margins range.
 CREATE INDEX provider_costs_account_day ON provider_costs (account_id, usage_start);
 CREATE INDEX provider_costs_day ON provider_costs (usage_start);
+-- The pass-through's queue: the rows it may still pass.
+CREATE INDEX provider_costs_passable ON provider_costs (account_id) WHERE passable AND passed_through_at IS NULL;
 CREATE TABLE provider_cost_scans (account_id text PRIMARY KEY REFERENCES provider_accounts ON DELETE CASCADE,
   next_at timestamptz NOT NULL, scanned_to timestamptz, last_error text);
 -- billing.leak raised (D12): at most once per instance and UTC day.
@@ -275,7 +279,8 @@ async function publish(
   });
 }
 
-const rowJson = (cost: AttributedCost) => ({
+const rowJson = (cost: AttributedCost, passable: boolean) => ({
+  passable,
   id: cost.record.sourceRowId,
   record: cost.record,
   usageStart: cost.record.usageStart,
@@ -302,6 +307,9 @@ async function writeBatch(
   batch: readonly AttributedCost[],
   totals: PassTotals,
 ): Promise<boolean> {
+  // Whether the pass-through may pass each row (FW-13), decided here and again when the account's rules change.
+  const judge = passableJudge(deps, account);
+  const asJson = (cost: AttributedCost) => rowJson(cost, judge(cost));
   const { rows } = await tx.query<StoredCost>(
     `SELECT source_row_id, record, cost_micros, credits_micros, passed_through_at IS NOT NULL AS passed
        FROM provider_costs WHERE account_id = $1 AND source_row_id = ANY($2::text[]) FOR UPDATE`,
@@ -326,15 +334,16 @@ async function writeBatch(
   if (inserts.length > 0) {
     const { rows: written } = await tx.query<{ source_row_id: string }>(
       `INSERT INTO provider_costs (account_id, source_row_id, record, usage_start, usage_end, cost_micros,
-                                   credits_micros, currency, instance_id, tenant_id, attribution, conditions)
+                                   credits_micros, currency, instance_id, tenant_id, attribution, conditions,
+                                   passable)
        SELECT $1, r->>'id', r->'record', to_timestamp((r->>'usageStart')::float8 / 1000),
               to_timestamp((r->>'usageEnd')::float8 / 1000), (r->>'cost')::bigint, (r->>'credits')::bigint,
               r->>'currency', r->>'instanceId', r->>'tenantId', r->>'attribution',
-              ARRAY(SELECT jsonb_array_elements_text(r->'conditions'))
+              ARRAY(SELECT jsonb_array_elements_text(r->'conditions')), (r->>'passable')::boolean
          FROM ${columns}
        ON CONFLICT (account_id, source_row_id) DO NOTHING
        RETURNING source_row_id`,
-      [account.id, JSON.stringify(inserts.map(rowJson))],
+      [account.id, JSON.stringify(inserts.map(asJson))],
     );
     for (const row of written) inserted.add(row.source_row_id);
   }
@@ -345,10 +354,11 @@ async function writeBatch(
               usage_end = to_timestamp((r->>'usageEnd')::float8 / 1000), cost_micros = (r->>'cost')::bigint,
               credits_micros = (r->>'credits')::bigint, currency = r->>'currency', instance_id = r->>'instanceId',
               tenant_id = r->>'tenantId', attribution = r->>'attribution',
-              conditions = ARRAY(SELECT jsonb_array_elements_text(r->'conditions')), updated_at = compute_now()
+              conditions = ARRAY(SELECT jsonb_array_elements_text(r->'conditions')),
+              passable = (r->>'passable')::boolean, updated_at = compute_now()
          FROM ${columns}
         WHERE c.account_id = $1 AND c.source_row_id = r->>'id'`,
-      [account.id, JSON.stringify(updates.map(({ cost }) => rowJson(cost)))],
+      [account.id, JSON.stringify(updates.map(({ cost }) => asJson(cost)))],
     );
   totals.inserted += inserted.size;
   totals.unchanged += inserts.length - inserted.size;
@@ -454,6 +464,8 @@ export type AfterCostPass = (
   tx: SqlTx,
   account: ProviderAccount,
   window: { from: number; to: number },
+  /** Milliseconds left of the run's budget (negative once it has passed). */
+  left: () => number,
 ) => Promise<Record<string, Json> | void>;
 
 /** Key `<accountId>`: one cost pass of one account. */
@@ -572,7 +584,7 @@ async function scanAccount(
     }
   }
   await context.sql.transaction(async (tx) => {
-    const extra = (await after?.(tx, account, window)) ?? {};
+    const extra = (await after?.(tx, account, window, left)) ?? {};
     await tx.query(
       `UPDATE provider_cost_scans
           SET next_at = $3::timestamptz + make_interval(secs => $2::float8),
@@ -615,8 +627,104 @@ export function passThroughRule(
 interface PendingCost {
   source_row_id: string;
   record: ProviderCostRecord | string;
-  tenant_id: string;
+  tenant_id: string | null;
+  attribution: string;
+  conditions: string[];
   pool_id: string | null;
+}
+
+/** What decides whether a stored cost row may be passed through (its instance's billing aside, read by the pass). */
+export interface PassableFacts {
+  record: ProviderCostRecord;
+  tenantId: string | null;
+  attribution: string;
+  conditions: readonly string[];
+}
+
+/**
+ * Whether a row of `account` may be passed through (FW-13), from what does not change until the row or the account's
+ * rules do: the account is the platform's with rules (and its provider says which SKUs compute meters), the row is
+ * attributed to a tenant other than the platform, in the deployment currency, regular usage, no SKU compute meters
+ * itself, matched by a rule, with a positive net cost. Stored as `provider_costs.passable` at ingest.
+ */
+export function passableJudge(
+  deps: Pick<CostsDeps, 'providers' | 'rootTenantId'>,
+  account: Pick<ProviderAccount, 'tenantId' | 'provider' | 'billing'>,
+): (facts: PassableFacts) => boolean {
+  const rules = account.billing?.passThrough ?? [];
+  const billing = deps.providers.get(account.provider)?.billing;
+  const computeSku = billing?.computeSku;
+  // Without a compute matcher nothing can be told apart from compute: pass nothing (never bill twice).
+  if (
+    rules.length === 0 ||
+    !isPlatformAccount(account, deps.rootTenantId) ||
+    typeof computeSku !== 'function'
+  )
+    return () => false;
+  return ({ record, tenantId, attribution, conditions }) =>
+    tenantId !== null &&
+    tenantId !== deps.rootTenantId &&
+    (attribution === 'instance' || attribution === 'tenant-label') &&
+    !conditions.includes(currencyMismatch) &&
+    (record.costType === undefined || record.costType === 'regular') &&
+    !computeSku(record) &&
+    billing?.meteredSku?.(record) !== true &&
+    passThroughRule(rules, record) !== undefined &&
+    record.costMicros + record.creditsMicros > 0 &&
+    record.quantity >= 0;
+}
+
+/**
+ * Decides `passable` again for an account's rows not passed through yet whose usage started within `lookbackMs`
+ * (`providerAccounts.update` changed its rules), in keyset batches of 1000. Returns how many rows changed.
+ */
+export async function recomputePassable(
+  tx: SqlTx,
+  deps: Pick<CostsDeps, 'providers' | 'rootTenantId'>,
+  account: ProviderAccount,
+  lookbackMs: number,
+): Promise<number> {
+  const judge = passableJudge(deps, account);
+  let after = '';
+  let changed = 0;
+  for (;;) {
+    const { rows } = await tx.query<{
+      source_row_id: string;
+      record: ProviderCostRecord | string;
+      tenant_id: string | null;
+      attribution: string;
+      conditions: string[];
+      passable: boolean;
+    }>(
+      `SELECT source_row_id, record, tenant_id, attribution, conditions, passable FROM provider_costs
+        WHERE account_id = $1 AND passed_through_at IS NULL AND source_row_id > $3
+          AND usage_start >= compute_now() - make_interval(secs => $2::float8 / 1000)
+        ORDER BY source_row_id LIMIT 1000`,
+      [account.id, lookbackMs, after],
+    );
+    if (rows.length === 0) break;
+    const flipped = rows
+      .filter(
+        (row) =>
+          judge({
+            record: json(row.record),
+            tenantId: row.tenant_id,
+            attribution: row.attribution,
+            conditions: row.conditions,
+          }) !== row.passable,
+      )
+      .map((row) => row.source_row_id);
+    if (flipped.length > 0)
+      await tx.query(
+        `UPDATE provider_costs SET passable = NOT passable
+          WHERE account_id = $1 AND source_row_id = ANY($2::text[])`,
+        [account.id, flipped],
+      );
+    changed += flipped.length;
+    after = rows[rows.length - 1]!.source_row_id;
+    if (rows.length < 1000) break;
+  }
+  return changed;
 }
 
 /**
@@ -629,28 +737,45 @@ interface PendingCost {
  * once: a later correction is reported as `billing.cost-corrected`, never re-emitted. A row whose usage month has
  * already closed (`closeGraceHours` after its end, D18) is a late charge: its window is the first hour of the
  * current UTC month (same key; `provider_costs.usage_start` unchanged), so it is invoiced next month instead of
- * being refused by a closed period.
+ * being refused by a closed period. The pass reads only rows stored `passable` (`passableJudge`, the partial index
+ * `provider_costs_passable`), in batches of `batchSize`, and stops between batches once `left()` says the run is
+ * out of time (`more: true`: another run goes on).
  */
 export async function passThroughCosts(
   deps: Pick<CostsDeps, 'providers' | 'rootTenantId'> & { clock?: CostsDeps['clock'] },
   tx: SqlTx,
   account: ProviderAccount,
   window: { from: number; to: number },
-  closeGraceHours: number = defaultCloseGraceHours,
-): Promise<{ passedThroughRows: number; passedThroughMicros: number }> {
-  const none = { passedThroughRows: 0, passedThroughMicros: 0 };
+  options: {
+    /** D18's grace: when a month counts as closed (default 6). */
+    closeGraceHours?: number;
+    /** Milliseconds left of the run; the pass stops between batches once none are. */
+    left?: () => number;
+    /** Rows per batch (default 500). */
+    batchSize?: number;
+  } = {},
+): Promise<{ passedThroughRows: number; passedThroughMicros: number; more: boolean }> {
+  const closeGraceHours = options.closeGraceHours ?? defaultCloseGraceHours;
+  const judge = passableJudge(deps, account);
   const rules = account.billing?.passThrough ?? [];
-  if (rules.length === 0 || !isPlatformAccount(account, deps.rootTenantId)) return none;
-  const billing = deps.providers.get(account.provider)?.billing;
-  // Without a compute matcher nothing can be told apart from compute: pass nothing (never bill twice).
-  const computeSku = billing?.computeSku;
-  if (typeof computeSku !== 'function') return none;
-  const { rows } = await tx.query<PendingCost>(
-    `SELECT c.source_row_id, c.record, c.tenant_id,
+  const limit = Math.max(1, options.batchSize ?? batchSize);
+  let passed = 0;
+  let micros = 0;
+  const now = deps.clock?.now() ?? window.to;
+  for (;;) {
+    const more = await passBatch();
+    if (!more) return { passedThroughRows: passed, passedThroughMicros: micros, more: false };
+    if (options.left && options.left() <= 0)
+      return { passedThroughRows: passed, passedThroughMicros: micros, more: true };
+  }
+
+  /** One batch of the account's passable rows (the partial index); true when it was full. */
+  async function passBatch(): Promise<boolean> {
+    const { rows } = await tx.query<PendingCost>(
+      `SELECT c.source_row_id, c.record, c.tenant_id, c.attribution, c.conditions,
             (SELECT i.pool_id FROM instances i WHERE i.id = c.instance_id) AS pool_id
        FROM provider_costs c
-      WHERE c.account_id = $1 AND c.passed_through_at IS NULL AND c.tenant_id IS NOT NULL AND c.tenant_id <> $2
-        AND c.attribution IN ('instance', 'tenant-label') AND NOT ($3 = ANY(c.conditions))
+      WHERE c.account_id = $1 AND c.passable AND c.passed_through_at IS NULL
         AND c.usage_start >= to_timestamp($4::float8 / 1000)
         -- An instance root bills nothing for (billing 'none'), or whose pool is not metered (none, platform-fee,
         -- or another tenant's pool, which defaults to platform-fee), passes nothing through either.
@@ -660,59 +785,75 @@ export async function passThroughCosts(
              AND (i.billing = 'none'
                   OR p.policy->'billing'->>'mode' IN ('none', 'platform-fee')
                   OR (p.policy->'billing'->>'mode' IS NULL AND p.class = 'provider' AND p.owner_tenant_id <> $2)))
-      ORDER BY c.usage_start, c.source_row_id FOR UPDATE OF c`,
-    [account.id, deps.rootTenantId, currencyMismatch, window.from],
-  );
-  let passed = 0;
-  let micros = 0;
-  const now = deps.clock?.now() ?? window.to;
-  for (const row of rows) {
-    const record = json(row.record);
-    if (record.costType !== undefined && record.costType !== 'regular') continue;
-    if (computeSku(record) || billing?.meteredSku?.(record) === true) continue;
-    const rule = passThroughRule(rules, record);
-    if (!rule) continue;
-    const net = record.costMicros + record.creditsMicros;
-    if (!(net > 0) || !(record.quantity >= 0)) continue;
-    const costMicros = Math.round(net * rule.multiplier);
-    const key = passThroughKey(account.id, record.sourceRowId);
-    const tags: Record<string, string> = { provider: account.provider, source: 'cost' };
-    if (record.region) tags.region = record.region;
-    // The instance's pool, so revenue by pool (spend by the `pool` tag) includes pass-through.
-    if (row.pool_id) tags.pool = row.pool_id;
-    // A closed month takes no more usage: the charge lands in the current month's first hour (occurredAt is the
-    // window start, as always).
-    const late = monthClosed(record.usageStart, now, closeGraceHours);
-    const windowStart = late ? monthStartOf(now) : record.usageStart;
-    const windowEnd = late ? windowStart + HOUR : Math.max(record.usageEnd, record.usageStart + 1);
-    await tx.query(
-      `INSERT INTO usage_windows (idempotency_key, source_kind, source_id, tenant_id, identity_id, meter, quantity,
+      ORDER BY c.usage_start, c.source_row_id LIMIT $3 FOR UPDATE OF c`,
+      [account.id, deps.rootTenantId, limit, window.from],
+    );
+    // Checked again: a row whose facts no longer hold (rules written behind the API's back) leaves the queue.
+    const stale: string[] = [];
+    for (const row of rows) {
+      const record = json(row.record);
+      const rule = passThroughRule(rules, record);
+      if (
+        !rule ||
+        row.tenant_id === null ||
+        !judge({
+          record,
+          tenantId: row.tenant_id,
+          attribution: row.attribution,
+          conditions: row.conditions,
+        })
+      ) {
+        stale.push(row.source_row_id);
+        continue;
+      }
+      const net = record.costMicros + record.creditsMicros;
+      const costMicros = Math.round(net * rule.multiplier);
+      const key = passThroughKey(account.id, record.sourceRowId);
+      const tags: Record<string, string> = { provider: account.provider, source: 'cost' };
+      if (record.region) tags.region = record.region;
+      // The instance's pool, so revenue by pool (spend by the `pool` tag) includes pass-through.
+      if (row.pool_id) tags.pool = row.pool_id;
+      // A closed month takes no more usage: the charge lands in the current month's first hour (occurredAt is the
+      // window start, as always).
+      const late = monthClosed(record.usageStart, now, closeGraceHours);
+      const windowStart = late ? monthStartOf(now) : record.usageStart;
+      const windowEnd = late
+        ? windowStart + HOUR
+        : Math.max(record.usageEnd, record.usageStart + 1);
+      await tx.query(
+        `INSERT INTO usage_windows (idempotency_key, source_kind, source_id, tenant_id, identity_id, meter, quantity,
                                   window_start, window_end, tags, cost_micros)
        VALUES ($1, 'cost', $2, $3, NULL, $4, $5, to_timestamp($6::float8 / 1000), to_timestamp($7::float8 / 1000),
                $8::jsonb, $9)
        ON CONFLICT DO NOTHING`,
-      [
-        key,
-        costSourceId(account.id, record.sourceRowId),
-        row.tenant_id,
-        rule.meter,
-        record.quantity,
-        windowStart,
-        windowEnd,
-        JSON.stringify(tags),
-        costMicros,
-      ],
-    );
-    await tx.query(
-      `UPDATE provider_costs SET passed_through_at = compute_now(), pass_through_key = $3,
+        [
+          key,
+          costSourceId(account.id, record.sourceRowId),
+          row.tenant_id,
+          rule.meter,
+          record.quantity,
+          windowStart,
+          windowEnd,
+          JSON.stringify(tags),
+          costMicros,
+        ],
+      );
+      await tx.query(
+        `UPDATE provider_costs SET passed_through_at = compute_now(), pass_through_key = $3,
               pass_through_meter = $4
         WHERE account_id = $1 AND source_row_id = $2`,
-      [account.id, record.sourceRowId, key, rule.meter],
-    );
-    passed++;
-    micros += costMicros;
+        [account.id, record.sourceRowId, key, rule.meter],
+      );
+      passed++;
+      micros += costMicros;
+    }
+    if (stale.length > 0)
+      await tx.query(
+        `UPDATE provider_costs SET passable = false WHERE account_id = $1 AND source_row_id = ANY($2::text[])`,
+        [account.id, stale],
+      );
+    return rows.length === limit;
   }
-  return { passedThroughRows: passed, passedThroughMicros: micros };
 }
 
 // --- Leak detection (D12) -----------------------------------------------------------------------------------
@@ -952,10 +1093,21 @@ export function costsReconciler(
       const resolved = deps(context);
       if (key === 'all') await seedAccounts(resolved, context, settings.everyMs);
       else
-        await scanAccount(resolved, context, key, settings, async (tx, account, window) => ({
-          ...(await passThroughCosts(resolved, tx, account, window, closeGraceHours)),
-          ...(await detectLeaks(resolved, tx, account, window, settings.leakToleranceHours)),
-        }));
+        await scanAccount(resolved, context, key, settings, async (tx, account, window, left) => {
+          const { more, ...passed } = await passThroughCosts(resolved, tx, account, window, {
+            closeGraceHours,
+            left,
+          });
+          // Out of time with passable rows left: another run goes on at once.
+          if (more)
+            await context.work.enqueue(tx, costsWork, account.id, {
+              notBefore: resolved.clock.now(),
+            });
+          return {
+            ...passed,
+            ...(await detectLeaks(resolved, tx, account, window, settings.leakToleranceHours)),
+          };
+        });
       return 'DONE';
     },
   };

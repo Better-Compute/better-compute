@@ -7,7 +7,13 @@ import {
 import { flushUsageWindows } from '@better-compute/iam';
 import { createEmbeddedTestIam, type EmbeddedTestIam } from '@better-compute/iam/testing';
 import { closeFixtures, computeFixture, type ComputeFixture } from '@better-compute/testing';
-import { defineProvider, vps, type VpsOptions } from '@better-compute/vps';
+import {
+  defineProvider,
+  passThroughCosts,
+  readAccount,
+  vps,
+  type VpsOptions,
+} from '@better-compute/vps';
 import { fakeGceProvider, type FakeGce } from './support/vps-gce.js';
 
 // Provider costs (platform compute billing, Phase 5): the vps.costs worker ingests and attributes
@@ -1576,5 +1582,151 @@ describe('final fix wave: late pass-through charges (FW-4)', () => {
     ]);
     for (const closeGraceHours of [-1, 73, Number.NaN, Number.POSITIVE_INFINITY])
       expect(() => vps({ billing: { closeGraceHours } })).toThrow(/closeGraceHours/);
+  });
+});
+
+describe('passable rows (FW-13)', () => {
+  const egressMeter = 'network.egress.gib';
+  const egressRule = { skuPattern: 'egress', meter: egressMeter, multiplier: 1 };
+  async function setup() {
+    const world = await costWorld();
+    Object.assign(world.fixture.iam, {
+      listMeters: async () => [{ key: egressMeter, pricing: 'reported' }],
+    });
+    const vm = await createVm(world);
+    return { world, vm };
+  }
+  const setRules = (world: CostWorld, passThrough: unknown[]) =>
+    world.api.providerAccounts.update(world.root, {
+      tenantId: world.rootTenant,
+      accountId: world.accountId,
+      config: {},
+      billing: { passThrough },
+    });
+  async function passable(world: CostWorld): Promise<Record<string, boolean>> {
+    const { rows } = await world.fixture.database.query<{
+      source_row_id: string;
+      passable: boolean;
+    }>(`SELECT source_row_id, passable FROM provider_costs ORDER BY source_row_id`);
+    return Object.fromEntries(rows.map((row) => [row.source_row_id, row.passable]));
+  }
+
+  it('is decided at ingest: a regular row, not a metered SKU, matching a rule of a platform account', async () => {
+    const { world, vm } = await setup();
+    await setRules(world, [egressRule]);
+    const at = world.now() - DAY;
+    const row = (id: string, extra: Partial<ProviderCostRecord> = {}) =>
+      costRow({ sourceRowId: id, usageStart: at, labels: { [instanceLabel]: vm.id }, ...extra });
+    world.ledger.rows.push(
+      row('egress'),
+      row('cores', { sku: 'BB77', skuDescription: 'N2 Instance Core running in Americas' }),
+      row('pd', { skuDescription: 'Storage PD Capacity' }),
+      row('adjustment', { costType: 'adjustment' }),
+      row('gcs', { service: 'Cloud Storage', skuDescription: 'Standard Storage' }),
+      row('unattributed', { labels: {} }),
+    );
+    world.byoLedger.rows.push(row('byo-egress', { labels: {} }));
+    await world.scan();
+    expect(await passable(world)).toEqual({
+      adjustment: false,
+      'byo-egress': false,
+      cores: false,
+      egress: true,
+      gcs: false,
+      pd: false,
+      unattributed: false,
+    });
+    // Passed through, it leaves the partial index.
+    const { rows } = await world.fixture.database.query<{ indexdef: string }>(
+      `SELECT indexdef FROM pg_indexes WHERE indexname = 'provider_costs_passable'`,
+    );
+    expect(rows[0]!.indexdef).toMatch(
+      /\(account_id\) WHERE \(passable AND \(passed_through_at IS NULL\)\)/,
+    );
+  });
+
+  it('the pass reads only passable rows', async () => {
+    const { world, vm } = await setup();
+    await setRules(world, [egressRule]);
+    const at = world.now() - DAY;
+    world.ledger.rows.push(
+      costRow({ sourceRowId: 'egress', usageStart: at, labels: { [instanceLabel]: vm.id } }),
+    );
+    await world.scan();
+    // Ingested passable and passed; a row someone marked not passable is never read by the pass.
+    await world.fixture.database.query(
+      `UPDATE provider_costs SET passed_through_at = NULL, passable = false WHERE source_row_id = 'egress'`,
+    );
+    await world.fixture.database.query(`DELETE FROM usage_windows WHERE source_kind = 'cost'`);
+    await world.fixture.advance(6 * HOUR);
+    await world.scan();
+    const { rows } = await world.fixture.database.query(
+      `SELECT 1 FROM usage_windows WHERE source_kind = 'cost'`,
+    );
+    expect(rows).toEqual([]);
+  });
+
+  it('passes in bounded batches and stops between them once the run is out of time', async () => {
+    const { world, vm } = await setup();
+    await setRules(world, [egressRule]);
+    // Stored passable, not passed yet (as if the run that stored them ran out of time first).
+    const at = world.now() - DAY;
+    for (const id of ['a', 'b', 'c'])
+      world.ledger.rows.push(
+        costRow({ sourceRowId: id, usageStart: at, labels: { [instanceLabel]: vm.id } }),
+      );
+    await world.scan();
+    await world.fixture.database.query(
+      `UPDATE provider_costs SET passed_through_at = NULL, pass_through_key = NULL, pass_through_meter = NULL`,
+    );
+    await world.fixture.database.query(`DELETE FROM usage_windows WHERE source_kind = 'cost'`);
+    const account = await world.fixture.database.transaction((tx) =>
+      readAccount(tx, world.accountId),
+    );
+    const deps = {
+      providers: new Map([['fake-gce', { billing: fakeBilling } as unknown as ProviderDefinition]]),
+      rootTenantId: world.rootTenant,
+    };
+    const pass = (left: number) =>
+      world.fixture.database.transaction((tx) =>
+        passThroughCosts(
+          deps,
+          tx,
+          account!,
+          { from: at - DAY, to: world.now() },
+          {
+            batchSize: 2,
+            left: () => left,
+          },
+        ),
+      );
+    expect(await pass(-1)).toMatchObject({ passedThroughRows: 2, more: true });
+    expect(await pass(1_000)).toMatchObject({ passedThroughRows: 1, more: false });
+    expect(await pass(1_000)).toMatchObject({ passedThroughRows: 0, more: false });
+  });
+
+  it("a rule change recomputes the account's rows within the lookback", async () => {
+    const { world, vm } = await setup();
+    const at = world.now() - DAY;
+    const old = world.now() - 3 * DAY - HOUR;
+    world.ledger.rows.push(
+      costRow({ sourceRowId: 'recent', usageStart: at, labels: { [instanceLabel]: vm.id } }),
+    );
+    await world.scan();
+    // Stored before any rule: not passable.
+    await world.fixture.database.query(
+      `INSERT INTO provider_costs (account_id, source_row_id, record, usage_start, usage_end, cost_micros,
+                                   credits_micros, currency, instance_id, tenant_id, attribution)
+       SELECT account_id, 'old', jsonb_set(record, '{sourceRowId}', '"old"'), to_timestamp($2::float8 / 1000),
+              to_timestamp($2::float8 / 1000) + interval '1 hour', cost_micros, credits_micros, currency,
+              instance_id, tenant_id, attribution
+         FROM provider_costs WHERE source_row_id = 'recent' AND account_id = $1`,
+      [world.accountId, old],
+    );
+    expect(await passable(world)).toEqual({ old: false, recent: false });
+    await setRules(world, [egressRule]);
+    expect(await passable(world)).toEqual({ old: false, recent: true });
+    await setRules(world, [{ ...egressRule, skuPattern: 'nothing-matches' }]);
+    expect(await passable(world)).toEqual({ old: false, recent: false });
   });
 });

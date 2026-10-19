@@ -30,7 +30,7 @@ The optional `query` filters by `kind` (`metal` or `vps`), `region`, `gpuModel`,
 
 ## update
 
-Replaces the account's `config`, validated as in `create`, and increments its version; returns the account. `billing` replaces the pass-through rules (see `create`); absent keeps them, `{}` clears them. Rows already passed through are never passed through again, whatever the new rules say.
+Replaces the account's `config`, validated as in `create`, and increments its version; returns the account. `billing` replaces the pass-through rules (see `create`); absent keeps them, `{}` clears them. Rows already passed through are never passed through again, whatever the new rules say. New rules apply to the account's rows not passed through yet whose usage started within the cost lookback (`vps({ costs: { lookbackDays } })`, default 3): whether each may be passed through is decided again in the same transaction.
 
 The provider and the name cannot change. The next provider call builds a new client from the new config. A missing account is `NOT_FOUND`; an invalid config is `INVALID_INPUT`, and a secret reference the account may not use, or a config the provider refuses to build a client for, is `INVALID_CONFIG`, as in `create`.
 

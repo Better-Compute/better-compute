@@ -158,7 +158,13 @@ import {
   type ListMachinesInput,
   type ProviderMachineView,
 } from './discovery.js';
-import { costsReconciler, defaultCloseGraceHours, type CostsOptions } from './costs.js';
+import {
+  costSettings,
+  costsReconciler,
+  defaultCloseGraceHours,
+  recomputePassable,
+  type CostsOptions,
+} from './costs.js';
 import { vpsMigrations } from './migrations.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
 import {
@@ -629,6 +635,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       'INVALID_CONFIG',
       'vps({ billing: { closeGraceHours } }) must be a number of hours from 0 to 72',
     );
+  // vps.costs' settings (validated again by its reconciler): the lookback a rule change recomputes over.
+  const costConfig = costSettings(options.costs ?? {}, currency);
   const runtimes = options.runtimes ?? ['libvirt-kvm'];
   if (runtimes.length === 0 || !runtimes.every((runtime) => /^[a-z][a-z0-9-]{0,63}$/.test(runtime)))
     throw new ComputeError('INVALID_CONFIG', 'vps({ runtimes }) must list runtime driver ids');
@@ -1370,8 +1378,18 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
             await passThroughMeterCheck(context.iam, input.billing);
           },
         },
-        handler: (context, input) =>
-          updateAccount(context.sql, providers, input, accountCheck(context)),
+        handler: async (context, input) => {
+          const account = await updateAccount(context.sql, providers, input, accountCheck(context));
+          // New rules: which of the account's recent rows the pass-through may pass is decided again (FW-13).
+          if (input.billing !== undefined)
+            await recomputePassable(
+              context.sql,
+              { providers, ...rootOf(context) },
+              account,
+              costConfig.lookbackMs,
+            );
+          return account;
+        },
       }),
       delete: defineMethod({
         action: 'compute:providers:manage',

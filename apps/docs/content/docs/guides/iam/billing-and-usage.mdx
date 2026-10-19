@@ -445,6 +445,9 @@ await compute.api.providerAccounts.update(rootCredential, {
   (`details.reason: 'meteredSku'`), and a row of such a SKU never passes, whatever the rules. For Compute Engine
   that is core, RAM, GPU and instance SKUs, persistent disk and Hyperdisk capacity, local SSD and external IP
   charges. A row of an instance billed `none`, or in a `none` or `platform-fee` pool, never passes either.
+- **Decided at ingest.** Whether a row may pass is stored with it when it is read (`provider_costs.passable`), and
+  each pass reads only those rows not passed yet, in batches, stopping between batches once the run is out of
+  time. Changing an account's rules decides it again for its rows within the cost lookback.
 
 ### Margins and leak detection
 
