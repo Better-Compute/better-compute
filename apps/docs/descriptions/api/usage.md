@@ -43,13 +43,15 @@ Root only. Clears the outcome of dead-lettered windows so the next usage flush s
 
 - Give `idempotencyKeys` (1 to 1000 open dead letters) or a `reason`, not both. A key without an open dead letter is `NOT_FOUND` and nothing is retried.
 - `period-closed` letters are refused with `INVALID_STATE`: retrying would only fail again, and the usage needs a root invoice item in Better IAM (`billing.createInvoiceItem`).
-- Answers `retried`, the windows put back to pending. A voided window stays voided. The letter stays open until a flush records the window.
+- A key whose window retention already pruned is `NOT_FOUND` ("window pruned; record it in Better IAM by hand").
+- Answers `retried`, the windows put back to pending (their claim is released too). A voided window stays voided. The letter stays open until a flush records the window.
 
 ## void
 
-Root only. Voids pending usage windows, so no flush ever sends them: sets `voided_at` and `void_reason`. Decides `compute:usage:manage` on `compute-fleet/global`.
+Root only. Voids usage windows no flush has sent, and dead-lettered ones, so no flush ever sends them: sets `voided_at` and `void_reason`. Decides `compute:usage:manage` on `compute-fleet/global`.
 
 - `idempotencyKeys` (1 to 1000) and a `reason` are required.
-- Only windows no flush has handled can be voided. A window with an outcome (recorded, duplicate, reattributed or dead-lettered) gives `INVALID_STATE` with the hint to issue a credit note in Better IAM; an unknown key is `NOT_FOUND`. The call is all or nothing.
+- Voidable: a pending window, and a dead-lettered one (Better IAM refused it; nothing was billed). Voiding any window resolves its open dead letters.
+- A window Better IAM recorded (outcome `recorded`, `duplicate` or `reattributed`) gives `INVALID_STATE` with the hint to issue a credit note in Better IAM. A window a usage flush claimed within the last 10 minutes is being sent and gives `INVALID_STATE` ("being sent; retry shortly"); a claim older than that belongs to a dead sender and does not block. An unknown key is `NOT_FOUND`. The call is all or nothing.
 - A window voided before is left as it is and counted in `alreadyVoided`.
 - Voided windows are left out of the tenants' `usage.list` and `usage.export`, and of `usage.platform` rows (which counts them apart).

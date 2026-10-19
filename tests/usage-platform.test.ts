@@ -37,7 +37,16 @@ let reader: Credential;
 let otherOwner: Credential;
 
 const HOUR = 3_600_000;
-const clock = manualClock(Math.floor(Date.now() / 1000) * 1000);
+// Pinned to the 15th, noon UTC, of this month (or last month, before the 15th): the test hours and "last month" never
+// straddle a month boundary, whenever CI runs. The embedded better-iam shares the clock.
+const midMonth = (() => {
+  const now = new Date();
+  const thisMonth = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 15, 12);
+  return thisMonth <= now.getTime()
+    ? thisMonth
+    : Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15, 12);
+})();
+const clock = manualClock(midMonth);
 /** The first of the test's hours, five hours before the (frozen) clock: all of them have ended. */
 const H0 = Math.floor(clock.now() / HOUR) * HOUR - 5 * HOUR;
 /** Rows in a fixed order, whatever the tenant ids sort like. */
@@ -101,7 +110,7 @@ async function seed(window: Seed): Promise<string> {
 }
 
 beforeAll(async () => {
-  t = await createEmbeddedTestIam({ now: () => Date.now() });
+  t = await createEmbeddedTestIam({ now: () => clock.now() });
   database = pglite();
   compute = betterCompute({
     database,
@@ -726,29 +735,19 @@ describe('corrections', () => {
     expect(listed.items.map((window: any) => window.idempotencyKey)).toEqual([kept]);
   });
 
-  it('void of a flushed window is refused, and refuses the whole call', async () => {
+  it('void of a recorded window is refused with the credit-note hint, and refuses the whole call', async () => {
     const sent = await pending('vm_sent');
-    const letter = await pending('vm_letter', { hour: 1 });
-    await database.query(
-      "UPDATE usage_windows SET recorded_at = compute_now(), outcome = 'dead-lettered' WHERE idempotency_key = $1",
-      [letter],
-    );
     const open = await pending('vm_open', { hour: 2 });
-    // `sent` and `open` are pending; flush `sent` only by recording it by hand, as the flush does.
+    // `sent` is recorded by hand, as the flush does.
     await database.query(
       "UPDATE usage_windows SET recorded_at = compute_now(), outcome = 'recorded' WHERE idempotency_key = $1",
       [sent],
     );
-
     const refusal = await failure(
       api.usage.void(root, { idempotencyKeys: [open, sent], reason: 'oops' }),
     );
     expect(refusal.code).toBe('INVALID_STATE');
     expect(refusal.message).toMatch(/credit note in Better IAM/);
-    // A dead-lettered window was handed to the sink as well.
-    expect(
-      (await failure(api.usage.void(root, { idempotencyKeys: [letter], reason: 'x' }))).code,
-    ).toBe('INVALID_STATE');
     const unknown = await failure(
       api.usage.void(root, {
         idempotencyKeys: ['cmp:instance:nope:1:gpu.h100.hours'],
@@ -757,13 +756,223 @@ describe('corrections', () => {
     );
     expect(unknown.code).toBe('NOT_FOUND');
     // Atomic: the pending window of the refused call was not voided.
-    for (const key of [open, sent, letter]) expect((await windowOf(key)).voided_at).toBeNull();
+    for (const key of [open, sent]) expect((await windowOf(key)).voided_at).toBeNull();
     expect(await outcome(api.usage.void(root, { idempotencyKeys: [], reason: 'x' }))).toBe(
       'INVALID_INPUT',
     );
     expect(await outcome(api.usage.void(root, { idempotencyKeys: [open] }))).toBe('INVALID_INPUT');
   });
 
+  /** A dead-lettered window with its open letter, as the flush leaves them. */
+  async function deadLettered(id: string, extra: Partial<Seed> = {}, code = 'NOT_FOUND') {
+    const key = await pending(id, extra);
+    await database.query(
+      "UPDATE usage_windows SET recorded_at = compute_now(), outcome = 'dead-lettered' WHERE idempotency_key = $1",
+      [key],
+    );
+    await database.query(
+      `INSERT INTO usage_dead_letters (idempotency_key, tenant_id, event, error_code, error_message)
+       VALUES ($1, $2, $3::jsonb, $4, 'refused')`,
+      [key, A, JSON.stringify({ meter: 'gpu.h100.hours', quantity: 1, occurredAt: H0 }), code],
+    );
+    return key;
+  }
+  const letterOf = async (key: string) =>
+    (
+      await database.query<{ resolved_at: unknown }>(
+        'SELECT resolved_at FROM usage_dead_letters WHERE idempotency_key = $1',
+        [key],
+      )
+    ).rows[0]!;
+
+  it('void accepts a dead-lettered window (IAM refused it) and resolves its open letter', async () => {
+    const letter = await deadLettered('vm_dl', { hour: 1 }, 'BILLING_PERIOD_CLOSED');
+    expect((await api.usage.deadLetters(root, {})).items).toHaveLength(1);
+    expect(
+      await api.usage.void(root, { idempotencyKeys: [letter], reason: 'invoiced by hand' }),
+    ).toEqual({
+      voided: 1,
+      alreadyVoided: 0,
+    });
+    expect(await windowOf(letter)).toMatchObject({ outcome: 'dead-lettered' });
+    expect((await windowOf(letter)).voided_at).not.toBeNull();
+    expect((await letterOf(letter)).resolved_at).not.toBeNull();
+    expect((await api.usage.deadLetters(root, {})).items).toEqual([]);
+    // Voided: no longer a letter to retry, and the doctor's dead-letter count drops.
+    expect(await outcome(api.usage.retry(root, { idempotencyKeys: [letter] }))).toBe('NOT_FOUND');
+    // The refusal for a dead-lettered window never carries the credit-note hint (nothing was billed).
+    const again = await api.usage.void(root, { idempotencyKeys: [letter], reason: 'again' });
+    expect(again).toEqual({ voided: 0, alreadyVoided: 1 });
+  });
+
+  it('voiding any window resolves its open letters, a retried pending window included', async () => {
+    const key = await deadLettered('vm_retried');
+    expect(await api.usage.retry(root, { idempotencyKeys: [key] })).toEqual({ retried: 1 });
+    expect((await letterOf(key)).resolved_at).toBeNull();
+    expect(await api.usage.void(root, { idempotencyKeys: [key], reason: 'not wanted' })).toEqual({
+      voided: 1,
+      alreadyVoided: 0,
+    });
+    expect((await letterOf(key)).resolved_at).not.toBeNull();
+    expect((await api.usage.deadLetters(root, {})).items).toEqual([]);
+    // A refused call resolves nothing.
+    const other = await deadLettered('vm_other', { hour: 1 });
+    const sent = await pending('vm_rec', { hour: 2 });
+    await database.query(
+      "UPDATE usage_windows SET recorded_at = compute_now(), outcome = 'recorded' WHERE idempotency_key = $1",
+      [sent],
+    );
+    expect(
+      await outcome(api.usage.void(root, { idempotencyKeys: [other, sent], reason: 'x' })),
+    ).toBe('INVALID_STATE');
+    expect((await letterOf(other)).resolved_at).toBeNull();
+    expect((await windowOf(other)).voided_at).toBeNull();
+  });
+
+  it('retry of a key whose window was pruned is NOT_FOUND and says to record it by hand', async () => {
+    const key = await deadLettered('vm_pruned');
+    await database.query('DELETE FROM usage_windows WHERE idempotency_key = $1', [key]);
+    const error = await failure(api.usage.retry(root, { idempotencyKeys: [key] }));
+    expect(error.code).toBe('NOT_FOUND');
+    expect(error.message).toMatch(/window pruned; record it in Better IAM by hand/);
+    // By reason, a pruned window is simply not retried.
+    expect(await api.usage.retry(root, { reason: 'meter-missing' })).toEqual({ retried: 0 });
+  });
+
+  it('the doctor names usage.deadLetters and usage.retry', async () => {
+    await deadLettered('vm_doctor');
+    const report = await compute.selfCheck();
+    for (const check of ['usage.dead-letters', 'iam.usage-dead-letters']) {
+      const finding = report.findings.find((entry: any) => entry.check === check);
+      expect(finding?.fix, check).toMatch(/usage\.deadLetters/);
+      expect(finding?.fix, check).toMatch(/usage\.retry/);
+    }
+  });
+
+  describe('claims (the flush and usage.void do not race)', () => {
+    /** An IAM that holds the flush mid-send until released. */
+    function gatedIam() {
+      let release!: () => void;
+      let entered!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const started = new Promise<void>((resolve) => (entered = resolve));
+      return {
+        release,
+        started,
+        iam: {
+          async recordUsage(events: Parameters<typeof t.port.recordUsage>[0]) {
+            entered();
+            await gate;
+            return t.port.recordUsage(events);
+          },
+        },
+      };
+    }
+    const claimedAt = async (key: string) =>
+      (
+        await database.query<{ claimed_at: unknown }>(
+          'SELECT claimed_at FROM usage_windows WHERE idempotency_key = $1',
+          [key],
+        )
+      ).rows[0]!.claimed_at;
+
+    it('a window claimed by a flush cannot be voided', async () => {
+      const key = await pending('vm_claim');
+      const gated = gatedIam();
+      const flushing = flushUsageWindows(database, gated.iam);
+      await gated.started;
+      expect(await claimedAt(key)).not.toBeNull();
+
+      const refusal = await failure(
+        api.usage.void(root, { idempotencyKeys: [key], reason: 'late' }),
+      );
+      expect(refusal.code).toBe('INVALID_STATE');
+      expect(refusal.message).toMatch(/being sent; retry shortly/);
+      expect((await windowOf(key)).voided_at).toBeNull();
+
+      gated.release();
+      expect(await flushing).toEqual({ sent: 1, deadLettered: 0, more: false });
+      expect(await windowOf(key)).toMatchObject({ outcome: 'recorded' });
+      // Recorded now: the refusal is the credit-note one.
+      expect(
+        (await failure(api.usage.void(root, { idempotencyKeys: [key], reason: 'x' }))).message,
+      ).toMatch(/credit note/);
+    });
+
+    it('a second flush leaves a fresh claim alone, and takes over a stale one (duplicate-safe)', async () => {
+      const key = await pending('vm_stale_claim');
+      expect(await flush()).toEqual({ sent: 1, deadLettered: 0, more: false });
+      // Back to pending, claimed a minute ago by a flush that is still sending: not taken.
+      const reopen = (age: string) =>
+        database.query(
+          `UPDATE usage_windows SET recorded_at = NULL, outcome = NULL,
+                  claimed_at = compute_now() - $1::interval WHERE idempotency_key = $2`,
+          [age, key],
+        );
+      await reopen('1 minute');
+      expect(await flush()).toEqual({ sent: 0, deadLettered: 0, more: false });
+      // Claimed 11 minutes ago (the sender died): taken over and sent again; IAM knows the key.
+      await reopen('11 minutes');
+      expect(await flush()).toEqual({ sent: 1, deadLettered: 0, more: false });
+      expect(await windowOf(key)).toMatchObject({ outcome: 'duplicate' });
+    });
+
+    it('a stale claim can be voided, a fresh one cannot', async () => {
+      const key = await pending('vm_void_claim');
+      await database.query(
+        "UPDATE usage_windows SET claimed_at = compute_now() - interval '2 minutes' WHERE idempotency_key = $1",
+        [key],
+      );
+      expect(await outcome(api.usage.void(root, { idempotencyKeys: [key], reason: 'x' }))).toBe(
+        'INVALID_STATE',
+      );
+      await database.query(
+        "UPDATE usage_windows SET claimed_at = compute_now() - interval '11 minutes' WHERE idempotency_key = $1",
+        [key],
+      );
+      expect(await api.usage.void(root, { idempotencyKeys: [key], reason: 'x' })).toEqual({
+        voided: 1,
+        alreadyVoided: 0,
+      });
+    });
+
+    it('a failed send gives the claims back, so the next pass sends again', async () => {
+      const key = await pending('vm_failed_send');
+      await expect(
+        flushUsageWindows(database, { recordUsage: () => Promise.reject(new Error('IAM down')) }),
+      ).rejects.toThrow('IAM down');
+      expect(await claimedAt(key)).toBeNull();
+      expect(await flush()).toEqual({ sent: 1, deadLettered: 0, more: false });
+    });
+
+    it('retry gives a window back to the flush at once', async () => {
+      const key = await deadLettered('vm_retry_claim');
+      await database.query(
+        'UPDATE usage_windows SET claimed_at = compute_now() WHERE idempotency_key = $1',
+        [key],
+      );
+      expect(await api.usage.retry(root, { idempotencyKeys: [key] })).toEqual({ retried: 1 });
+      expect(await claimedAt(key)).toBeNull();
+    });
+
+    it('backlog counters still see claimed, unsent windows', async () => {
+      const key = await pending('vm_claimed_backlog');
+      const gated = gatedIam();
+      const flushing = flushUsageWindows(database, gated.iam);
+      await gated.started;
+      const report = await compute.selfCheck();
+      expect(report.findings.some((entry: any) => entry.check === 'usage.backlog')).toBe(true);
+      const registry = createMetrics();
+      await databaseCollector(standardMetrics(registry), {
+        sql: database,
+        now: () => clock.now(),
+      }).refresh();
+      expect(registry.value('backlog', { queue: 'usage' })).toBe(1);
+      gated.release();
+      await flushing;
+      expect(await claimedAt(key)).toBeNull();
+    });
+  });
   it('void checks the outcome in the statement that writes the void', async () => {
     // The check and the write are one statement: a window with an outcome is never voided.
     const key = await pending('vm_race');

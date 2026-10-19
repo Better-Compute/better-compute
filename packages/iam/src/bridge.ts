@@ -242,7 +242,7 @@ export function createComputeIamBridge(options: ComputeIamBridgeOptions = {}): C
           check: 'iam.usage-dead-letters',
           severity: 'warning',
           message: `${dead} usage events could not be recorded in IAM billing`,
-          fix: 'Inspect usage_dead_letters; a closed period needs a root billing.createInvoiceItem (§12.7)',
+          fix: 'List them with usage.deadLetters; fix the cause and usage.retry them. A closed period needs a root billing.createInvoiceItem (§12.7); usage.void drops a window',
           count: dead,
         });
       if (closing > 0)

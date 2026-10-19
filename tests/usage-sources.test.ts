@@ -794,4 +794,41 @@ describe('the migration runs on a populated partitioned table', () => {
       ),
     ).rejects.toThrow(/usage_windows_source_ck/);
   });
+
+  it('core/0033 adds the flush claim without rewriting a partition', async () => {
+    const claims = baseMigrations.find(
+      (migration) => migration.name === 'core/0033_usage_window_claims',
+    )!;
+    expect(claims).toBeDefined();
+    const files = async () =>
+      (
+        await raw.query<{ relname: string; relfilenode: number }>(
+          `SELECT c.relname, c.relfilenode FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+            WHERE i.inhparent = 'usage_windows'::regclass ORDER BY 1`,
+        )
+      ).rows;
+    const before = await files();
+    const rows = async () =>
+      (await raw.query<{ count: number }>('SELECT count(*)::int AS count FROM usage_windows')).rows;
+    const count = await rows();
+    await raw.exec(claims.sql as string);
+    expect(await files()).toEqual(before);
+    expect(await rows()).toEqual(count);
+    expect(
+      (
+        await raw.query(
+          `SELECT count(*)::int AS claimed FROM usage_windows WHERE claimed_at IS NOT NULL`,
+        )
+      ).rows,
+    ).toEqual([{ claimed: 0 }]);
+    // Nullable, no default: a catalog-only change.
+    expect(
+      (
+        await raw.query(
+          `SELECT attnotnull, atthasdef FROM pg_attribute
+            WHERE attrelid = 'usage_windows'::regclass AND attname = 'claimed_at'`,
+        )
+      ).rows,
+    ).toEqual([{ attnotnull: false, atthasdef: false }]);
+  });
 });

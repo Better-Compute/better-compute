@@ -226,10 +226,14 @@ tenant administrator is refused):
   with `INVALID_STATE`, because retrying would only fail again: the usage needs a root invoice item in Better IAM
   (`billing.createInvoiceItem`).
 - `usage.void({ idempotencyKeys, reason })` (`compute:usage:manage`) sets `voided_at` and `void_reason` on windows
-  not yet flushed (outcome `NULL`), so no pass ever sends them. A window the sink already handled, a dead-lettered
-  one included, gives `INVALID_STATE` ("issue a credit note in Better IAM"), and the call voids nothing. A voided
-  window leaves the backlog counters and the tenants' `usage.list` and `usage.export`, and retention prunes it like
-  a recorded one.
+  no pass has sent (outcome `NULL`), so no pass ever sends them, and on dead-lettered windows (Better IAM refused
+  them, so nothing was billed). Voiding any window resolves its open dead letters. A window Better IAM recorded
+  (`recorded`, `duplicate`, `reattributed`) gives `INVALID_STATE` ("issue a credit note in Better IAM"), and the call
+  voids nothing. A window a pass has claimed within the last 10 minutes is being sent: `INVALID_STATE` ("being sent;
+  retry shortly"). A claim exists only while a pass sends; a pass that died leaves one the next pass takes over
+  after the 10 minutes (Better IAM knows the idempotency keys, so a resend is a duplicate). A voided window leaves
+  the backlog counters and the tenants' `usage.list` and `usage.export`, and retention prunes it like a recorded one.
+- `usage.retry` of a key whose window retention already pruned is `NOT_FOUND`: record that usage in Better IAM by hand.
 
 ## Read usage
 

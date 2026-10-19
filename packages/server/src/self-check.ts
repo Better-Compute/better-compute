@@ -160,7 +160,7 @@ async function operationsFindings(tx: SqlTx): Promise<Finding[]> {
     row.usage_dead,
     'usage.dead-letters',
     `${row.usage_dead} usage events are dead-lettered`,
-    'Inspect usage_dead_letters; re-record them (a closed period needs a root invoice item)',
+    'List them with usage.deadLetters; fix the cause and usage.retry them (a closed period needs a root invoice item in Better IAM; usage.void drops a window)',
   );
   warn(
     row.usage_backlog,

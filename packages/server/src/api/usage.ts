@@ -346,6 +346,8 @@ const groupExpressions: Record<PlatformUsageKey, string> = {
   provider: "COALESCE(tags->>'provider', '')",
 };
 
+/** How long a flush's claim on a window holds (core/0033, packages/iam/src/worker.ts): voiding waits for it. */
+const claimTtl = "interval '10 minutes'";
 const maxCorrectionKeys = 1000;
 const keyList = v.list(fields.idempotencyKey, { min: 1, max: maxCorrectionKeys, unique: true });
 const reasonOption = v.option(deadLetterReasons);
@@ -666,11 +668,23 @@ export function usageApi(): UsageApi {
               (key) => known.get(key) === 'period-closed',
             );
             if (refused.length > 0) throw closed(some(refused));
+            // Retention may have pruned the window of a letter that is still open.
+            const { rows: windows } = await context.sql.query<{ idempotency_key: string }>(
+              'SELECT idempotency_key FROM usage_windows WHERE idempotency_key = ANY($1::text[])',
+              [input.idempotencyKeys],
+            );
+            const present = new Set(windows.map((row) => row.idempotency_key));
+            const pruned = input.idempotencyKeys.filter((key) => !present.has(key));
+            if (pruned.length > 0)
+              throw new ComputeError(
+                'NOT_FOUND',
+                `${some(pruned)}: window pruned; record it in Better IAM by hand`,
+              );
           }
           // The windows go back to pending; the letters stay open until a pass records them (attempts then
           // counts the next failure). A voided window stays voided.
           const { rows } = await context.sql.query<{ idempotency_key: string }>(
-            `UPDATE usage_windows w SET recorded_at = NULL, outcome = NULL
+            `UPDATE usage_windows w SET recorded_at = NULL, outcome = NULL, claimed_at = NULL
                FROM usage_dead_letters d
               WHERE d.idempotency_key = w.idempotency_key AND d.resolved_at IS NULL
                 AND w.outcome = 'dead-lettered' AND w.voided_at IS NULL
@@ -688,40 +702,65 @@ export function usageApi(): UsageApi {
         resource: fleetResource,
         validate: Object.assign(parseVoid, { jsonSchema: parseVoid.jsonSchema }),
         async handler(context, input) {
-          // One statement checks the outcome and writes the void, so a window the sink has handed to IAM
-          // billing (or that a pass records meanwhile) is never voided. The call is all or nothing: a refusal
-          // below rolls the voids of this call back.
+          // One statement checks the state and writes the void, so a window the sink has handed to IAM billing
+          // (or that a pass records or claims meanwhile) is never voided. Voidable: a window no flush has
+          // touched, one whose claim is older than the claim TTL (its sender died), and a dead-lettered one
+          // (IAM refused it; nothing was billed). The call is all or nothing: a refusal below rolls this
+          // call's voids back.
           const { rows: done } = await context.sql.query<{ idempotency_key: string }>(
             `UPDATE usage_windows SET voided_at = compute_now(), void_reason = $2
-              WHERE idempotency_key = ANY($1::text[])
-                AND outcome IS NULL AND recorded_at IS NULL AND voided_at IS NULL
+              WHERE idempotency_key = ANY($1::text[]) AND voided_at IS NULL
+                AND ((outcome IS NULL AND recorded_at IS NULL
+                      AND (claimed_at IS NULL OR claimed_at < compute_now() - ${claimTtl}))
+                     OR outcome = 'dead-lettered')
               RETURNING idempotency_key`,
             [input.idempotencyKeys, input.reason],
           );
-          if (done.length === input.idempotencyKeys.length)
-            return { voided: done.length, alreadyVoided: 0 };
           const voided = new Set(done.map((row) => row.idempotency_key));
           const rest = input.idempotencyKeys.filter((key) => !voided.has(key));
-          const { rows } = await context.sql.query<{
-            idempotency_key: string;
-            voided_at: Date | null;
-          }>(
-            'SELECT idempotency_key, voided_at FROM usage_windows WHERE idempotency_key = ANY($1::text[])',
-            [rest],
-          );
-          const found = new Map(rows.map((row) => [row.idempotency_key, row.voided_at]));
-          const missing = rest.filter((key) => !found.has(key));
-          const flushed = rest.filter((key) => found.has(key) && found.get(key) === null);
-          if (flushed.length > 0)
-            throw new ComputeError(
-              'INVALID_STATE',
-              `${some(flushed)} already went to IAM billing and cannot be voided: issue a credit note in Better IAM`,
-              undefined,
-              { hint: 'issue a credit note in Better IAM' },
+          let alreadyVoided = 0;
+          if (rest.length > 0) {
+            const { rows } = await context.sql.query<{
+              idempotency_key: string;
+              voided: boolean;
+              sending: boolean;
+            }>(
+              `SELECT idempotency_key, voided_at IS NOT NULL AS voided,
+                      (outcome IS NULL AND recorded_at IS NULL AND claimed_at >= compute_now() - ${claimTtl}) AS sending
+                 FROM usage_windows WHERE idempotency_key = ANY($1::text[])`,
+              [rest],
             );
-          if (missing.length > 0)
-            throw new ComputeError('NOT_FOUND', `No usage window ${some(missing)}`);
-          return { voided: done.length, alreadyVoided: rest.length };
+            const found = new Map(rows.map((row) => [row.idempotency_key, row]));
+            const missing = rest.filter((key) => !found.has(key));
+            const sending = rest.filter((key) => found.get(key)?.sending === true);
+            const recorded = rest.filter((key) => {
+              const row = found.get(key);
+              return row !== undefined && !row.voided && !row.sending;
+            });
+            // Only a window IAM billing recorded gets the credit-note hint.
+            if (recorded.length > 0)
+              throw new ComputeError(
+                'INVALID_STATE',
+                `${some(recorded)} already went to IAM billing and cannot be voided: issue a credit note in Better IAM`,
+                undefined,
+                { hint: 'issue a credit note in Better IAM' },
+              );
+            if (sending.length > 0)
+              throw new ComputeError(
+                'INVALID_STATE',
+                `${some(sending)} is being sent; retry shortly`,
+              );
+            if (missing.length > 0)
+              throw new ComputeError('NOT_FOUND', `No usage window ${some(missing)}`);
+            alreadyVoided = rest.length;
+          }
+          // A voided window has nothing left to retry or record by hand: its open letters are resolved.
+          await context.sql.query(
+            `UPDATE usage_dead_letters SET resolved_at = compute_now()
+              WHERE resolved_at IS NULL AND idempotency_key = ANY($1::text[])`,
+            [input.idempotencyKeys],
+          );
+          return { voided: done.length, alreadyVoided };
         },
       }),
     },
