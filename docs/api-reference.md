@@ -282,6 +282,7 @@ Every call is authenticated (except public methods), refused before any database
 | ------------------------------------ | -------- | ---------------------------------------------------------------------------------------------------- | ----- | ------- |
 | `providerAccounts.create`            | mutation | `compute:providers:manage` @ `compute-fleet` or `compute:providers:manage` @ `compute-tenant`        | v0.3  | planned |
 | `providerAccounts.list`              | read     | `compute:providers:read` @ `compute-tenant` + items                                                  | v0.3  | planned |
+| `providerAccounts.federationSetup`   | read     | `compute:providers:read` @ `compute-tenant`                                                          | v1.0  | planned |
 | `providerAccounts.get`               | read     | `compute:providers:read` @ `compute-provider-account`                                                | v0.3  | planned |
 | `providerAccounts.offers`            | read     | `compute:providers:read` @ `compute-provider-account`                                                | v0.3  | planned |
 | `providerAccounts.update`            | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v0.3  | planned |

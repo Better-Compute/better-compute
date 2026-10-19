@@ -15,6 +15,8 @@ While a grant is `scheduled` or `active`, `providerAccounts.unbindReservation` a
 
 A grant's stopped instances keep their slots for the grantee: others never get a slot the grant pays for.
 
+When the provider stops reporting the reservation (the `vps.reservations` scan marks it gone), its active grants end at that moment and its scheduled ones are cancelled, as `end` would, with `reason: 'reservation-gone'` on their `reservation-grant.ended` / `.cancelled` events. Its instances are no longer reserved: they are billed on-demand from then on. When a scan sees the reservation's `total` drop below the slots its live grants hold (at their peak overlap), it publishes `reservation-grant.capacity-short` `{ accountId, reservationId, total, grantedSlots, grantIds }` in the platform's tenant, once per change of `total`. The grants keep billing: root decides which to end.
+
 States: `scheduled` until `startsAt`, `active` during the term, then `ended`; `cancelled` when ended before it started. Each change publishes a `reservation-grant.*` event (`created`, `active`, `ended`, `cancelled`) in the grantee's tenant, with `{ grantId, poolId, projectId?, slots, startsAt, endsAt }`.
 
 All 4 methods are served by this release.
@@ -35,6 +37,7 @@ Root only. Commits `slots` of a reservation to `grantTenantId` (optionally one o
 - **Who.** Decided as `compute:providers:manage` on the provider account. `tenantId` must be the root tenant and the caller a member of it; anyone else is `ACCESS_DENIED`.
 - **The reservation** must be on that account, `ready`, and bound to a pool that is offered to the grantee: otherwise `NOT_FOUND`, `INVALID_STATE` (not ready, gone or unbound) or `INVALID_INPUT` (the pool is not offered to the grantee).
 - **Capacity.** The slots of every grant (other than cancelled ones) whose term overlaps, plus these, must fit the reservation's `total`: otherwise `CAPACITY_UNAVAILABLE` with `details { total, granted }`. Concurrent grants are decided one at a time under the reservation's row lock, so they never over-commit it.
+- **Project.** A `projectId` must be a project of the grantee (`INVALID_INPUT`, `details.reason` `project-not-grantee`).
 - **Term.** `startsAt` may be at most 5 minutes in the past; `endsAt` must be after it (`INVALID_INPUT`).
 - **Idempotency.** A retry with the same `idempotencyKey` returns the grant; a different request under the key is `CONFLICT`.
 
