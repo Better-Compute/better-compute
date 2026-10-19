@@ -92,6 +92,9 @@ CREATE TABLE provider_costs (
   PRIMARY KEY (account_id, source_row_id)
 );
 CREATE INDEX provider_costs_tenant_day ON provider_costs (tenant_id, usage_start);
+-- A pass's own rows (pass-through, leak check) and the margins range.
+CREATE INDEX provider_costs_account_day ON provider_costs (account_id, usage_start);
+CREATE INDEX provider_costs_day ON provider_costs (usage_start);
 CREATE TABLE provider_cost_scans (account_id text PRIMARY KEY REFERENCES provider_accounts ON DELETE CASCADE,
   next_at timestamptz NOT NULL, scanned_to timestamptz, last_error text);
 -- billing.leak raised (D12): at most once per instance and UTC day.
@@ -603,6 +606,7 @@ interface PendingCost {
   source_row_id: string;
   record: ProviderCostRecord | string;
   tenant_id: string;
+  pool_id: string | null;
 }
 
 /**
@@ -628,7 +632,9 @@ export async function passThroughCosts(
   const computeSku = billing?.computeSku;
   if (typeof computeSku !== 'function') return none;
   const { rows } = await tx.query<PendingCost>(
-    `SELECT c.source_row_id, c.record, c.tenant_id FROM provider_costs c
+    `SELECT c.source_row_id, c.record, c.tenant_id,
+            (SELECT i.pool_id FROM instances i WHERE i.id = c.instance_id) AS pool_id
+       FROM provider_costs c
       WHERE c.account_id = $1 AND c.passed_through_at IS NULL AND c.tenant_id IS NOT NULL AND c.tenant_id <> $2
         AND c.attribution IN ('instance', 'tenant-label') AND NOT ($3 = ANY(c.conditions))
         AND c.usage_start >= to_timestamp($4::float8 / 1000)
@@ -657,6 +663,8 @@ export async function passThroughCosts(
     const key = passThroughKey(account.id, record.sourceRowId);
     const tags: Record<string, string> = { provider: account.provider, source: 'cost' };
     if (record.region) tags.region = record.region;
+    // The instance's pool, so revenue by pool (spend by the `pool` tag) includes pass-through.
+    if (row.pool_id) tags.pool = row.pool_id;
     await tx.query(
       `INSERT INTO usage_windows (idempotency_key, source_kind, source_id, tenant_id, identity_id, meter, quantity,
                                   window_start, window_end, tags, cost_micros)
@@ -692,7 +700,11 @@ export async function passThroughCosts(
 interface LeakRow {
   instance_id: string;
   tenant_id: string | null;
-  record: ProviderCostRecord | string;
+  service: string | null;
+  sku: string | null;
+  sku_description: string | null;
+  start_ms: number;
+  end_ms: number;
 }
 
 /** The UTC day (`YYYY-MM-DD`) of a time. */
@@ -706,30 +718,46 @@ const dayOf = (ms: number) => new Date(ms).toISOString().slice(0, 10);
  * instance-day (`provider_cost_leaks`). Providers without `computeSku` are not checked.
  */
 export async function detectLeaks(
-  deps: Pick<CostsDeps, 'providers' | 'events' | 'clock'>,
+  deps: Pick<CostsDeps, 'providers' | 'events' | 'clock' | 'rootTenantId'>,
   tx: SqlTx,
   account: ProviderAccount,
   window: { from: number; to: number },
   toleranceHours: number,
 ): Promise<{ leaks: number }> {
+  // Platform accounts only: a tenant's own account is the tenant's cost, not the platform's.
+  if (!isPlatformAccount(account, deps.rootTenantId)) return { leaks: 0 };
   const computeSku = deps.providers.get(account.provider)?.billing?.computeSku;
   if (typeof computeSku !== 'function') return { leaks: 0 };
+  // Only the columns the check reads, of regular usage rows attributed to an instance root bills (an instance
+  // with billing 'none' has no intervals by design).
   const { rows } = await tx.query<LeakRow>(
-    `SELECT instance_id, tenant_id, record FROM provider_costs
-      WHERE account_id = $1 AND instance_id IS NOT NULL
-        AND usage_start >= to_timestamp($2::float8 / 1000) AND usage_start < to_timestamp($3::float8 / 1000)`,
+    `SELECT c.instance_id, c.tenant_id, c.record->>'service' AS service, c.record->>'sku' AS sku,
+            c.record->>'skuDescription' AS sku_description,
+            (extract(epoch FROM c.usage_start) * 1000)::float8 AS start_ms,
+            (extract(epoch FROM c.usage_end) * 1000)::float8 AS end_ms
+       FROM provider_costs c JOIN instances i ON i.id = c.instance_id
+      WHERE c.account_id = $1 AND c.instance_id IS NOT NULL
+        AND c.usage_start >= to_timestamp($2::float8 / 1000) AND c.usage_start < to_timestamp($3::float8 / 1000)
+        AND COALESCE(c.record->>'costType', 'regular') = 'regular'
+        AND (c.record->>'quantity')::float8 > 0
+        AND i.billing IS DISTINCT FROM 'none'`,
     [account.id, window.from, window.to],
   );
   // instance → day → billed hour slots (slot start ms)
   const billed = new Map<string, { tenantId: string | null; days: Map<string, Set<number>> }>();
   for (const row of rows) {
-    const record = json(row.record);
-    if (record.costType !== undefined && record.costType !== 'regular') continue;
-    if (!(record.quantity > 0) || !computeSku(record)) continue;
+    const sku = {
+      service: row.service ?? '',
+      sku: row.sku ?? '',
+      ...(row.sku_description !== null ? { skuDescription: row.sku_description } : {}),
+    };
+    if (!computeSku(sku)) continue;
     const entry = billed.get(row.instance_id) ?? { tenantId: row.tenant_id, days: new Map() };
     billed.set(row.instance_id, entry);
-    const first = Math.floor(record.usageStart / HOUR) * HOUR;
-    for (let slot = first; slot < record.usageEnd; slot += HOUR) {
+    const usageStart = Number(row.start_ms);
+    const usageEnd = Number(row.end_ms);
+    const first = Math.floor(usageStart / HOUR) * HOUR;
+    for (let slot = first; slot < usageEnd; slot += HOUR) {
       const day = dayOf(slot);
       const slots = entry.days.get(day) ?? new Set<number>();
       entry.days.set(day, slots);
@@ -805,8 +833,16 @@ export const noGroupKey = '(none)';
  */
 export async function providerCostTotals(
   sql: { query: SqlTx['query'] },
-  input: { from: number; to: number; groupBy: MarginGroup; currency: string },
+  input: {
+    from: number;
+    to: number;
+    groupBy: MarginGroup;
+    currency: string;
+    /** Only the platform's (this tenant's) accounts count: a tenant's own account is not platform cost. */
+    rootTenantId: string | undefined;
+  },
 ): Promise<{ groups: Map<string, number>; unattributedMicros: number }> {
+  if (input.rootTenantId === undefined) return { groups: new Map(), unattributedMicros: 0 };
   const groupExpr = {
     tenant: 'c.tenant_id',
     account: 'c.account_id',
@@ -817,11 +853,11 @@ export async function providerCostTotals(
   const { rows } = await sql.query<{ key: string | null; micros: string | number }>(
     `SELECT CASE WHEN c.tenant_id IS NULL THEN NULL ELSE ${groupExpr} END AS key,
             SUM(c.cost_micros + c.credits_micros)::text AS micros
-       FROM provider_costs c ${join}
+       FROM provider_costs c JOIN provider_accounts a ON a.id = c.account_id AND a.tenant_id = $5 ${join}
       WHERE c.usage_start >= to_timestamp($1::float8 / 1000) AND c.usage_start < to_timestamp($2::float8 / 1000)
         AND upper(c.currency) = $3 AND NOT ($4 = ANY(c.conditions))
       GROUP BY 1`,
-    [input.from, input.to, input.currency.toUpperCase(), currencyMismatch],
+    [input.from, input.to, input.currency.toUpperCase(), currencyMismatch, input.rootTenantId],
   );
   const groups = new Map<string, number>();
   let unattributedMicros = 0;

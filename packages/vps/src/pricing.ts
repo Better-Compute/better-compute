@@ -447,6 +447,7 @@ export function billingApi(
           ...range,
           groupBy: input.groupBy,
           currency,
+          rootTenantId,
         });
         const keys = [...new Set([...(revenue?.keys() ?? []), ...groups.keys()])].sort((a, b) =>
           a === noGroupKey ? 1 : b === noGroupKey ? -1 : a.localeCompare(b),

@@ -609,7 +609,7 @@ describe('pass-through', () => {
         quantity: 3,
         // (360 000 − 10 000) × 1.2
         costMicros: 420_000,
-        tags: { provider: 'fake-gce', region: 'us-central1', source: 'cost' },
+        tags: { provider: 'fake-gce', region: 'us-central1', source: 'cost', pool: world.poolId },
         start: at,
       },
     ]);
@@ -638,7 +638,7 @@ describe('pass-through', () => {
         meter: egressMeter,
         quantity: 3,
         occurredAt: at,
-        tags: { provider: 'fake-gce', region: 'us-central1', source: 'cost' },
+        tags: { provider: 'fake-gce', region: 'us-central1', source: 'cost', pool: world.poolId },
         idempotencyKey: key,
         cost: 0.42,
       },
@@ -1037,7 +1037,7 @@ describe('margins', () => {
         {
           key: world.acmeTenant,
           revenueMicros: null,
-          costMicros: 1_250_000,
+          costMicros: 1_200_000,
           marginMicros: null,
           marginPct: null,
         },
@@ -1053,11 +1053,11 @@ describe('margins', () => {
       return Object.fromEntries(result.rows.map((row: any) => [row.key, row.costMicros]));
     };
     expect(await keys('account')).toEqual({
+      // a tenant's own account is not platform cost (F17-1)
       [world.accountId]: 1_200_000,
-      [world.byoAccountId]: 50_000,
     });
-    expect(await keys('pool')).toEqual({ [world.poolId]: 1_000_000, '(none)': 250_000 });
-    expect(await keys('meter')).toEqual({ 'network.egress.gib': 1_000_000, '(none)': 250_000 });
+    expect(await keys('pool')).toEqual({ [world.poolId]: 1_000_000, '(none)': 200_000 });
+    expect(await keys('meter')).toEqual({ 'network.egress.gib': 1_000_000, '(none)': 200_000 });
 
     // input is checked
     for (const input of [
@@ -1411,5 +1411,83 @@ describe('pass-through fix round 1 (F16-1, F16-2)', () => {
       await world.scan();
       expect(await passed(world)).toEqual(['billed-1']);
     }
+  });
+});
+
+describe('margins and leaks fix round 1 (F17-1..F17-3)', () => {
+  /** `hours` hours of N2 cores of `instanceId` from `start`, on a ledger. */
+  function cores(ledger: Ledger, instanceId: string, start: number, hours: number, prefix: string) {
+    for (let hour = 0; hour < hours; hour++)
+      ledger.rows.push(
+        costRow({
+          sourceRowId: `${prefix}-${hour}`,
+          skuDescription: 'N2 Instance Core running in Americas',
+          usageStart: start + hour * HOUR,
+          usageEnd: start + (hour + 1) * HOUR,
+          quantity: 12,
+          labels: { [instanceLabel]: instanceId },
+        }),
+      );
+  }
+
+  it("leaks are not looked for on a tenant's own account, nor for an instance billed none", async () => {
+    const world = await costWorld();
+    const free = await createVm(world, 'vm-free');
+    await world.fixture.database.query(`UPDATE instances SET billing = 'none' WHERE id = $1`, [
+      free.id,
+    ]);
+    const day = Math.floor((world.now() - 2 * DAY) / DAY) * DAY;
+    cores(world.ledger, free.id, day + 2 * HOUR, 5, 'free');
+    // a BYO account's rows: the account tenant's cost, never a platform leak (its own instance id is kept)
+    const site = await world.api.sites.create(world.acme, {
+      tenantId: world.acmeTenant,
+      kind: 'custom',
+      region: 'us-central1',
+      idempotencyKey: 'acme-site',
+    });
+    const pool = await world.api.pools.create(world.acme, {
+      tenantId: world.acmeTenant,
+      siteId: site.id,
+      class: 'provider',
+      providerAccountId: world.byoAccountId,
+      ownerQuota: { vcpu: 100, memoryGiB: 1000, diskGiB: 10_000, gpu: 8 },
+      idempotencyKey: 'acme-pool',
+    });
+    await world.api.flavors.create(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: pool.id,
+      name: 'a2.byo',
+      vcpu: 12,
+      memoryGiB: 85,
+      diskGiB: 100,
+      gpus: 1,
+      offerId: 'us-central1-a/a2-highgpu-1g',
+    });
+    const own = await world.api.instances.create(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: pool.id,
+      flavor: 'a2.byo',
+      imageId: 'debian-12',
+      idempotencyKey: 'acme-vm',
+    });
+    cores(world.byoLedger, own.id, day + 2 * HOUR, 5, 'byo');
+    await world.scan();
+    expect((await world.costs()).filter((cost) => cost.instanceId === own.id)).toHaveLength(5);
+    expect(await world.events('billing.leak')).toEqual([]);
+  });
+
+  it('provider_costs is indexed by account and day, and by day', async () => {
+    const world = await costWorld();
+    const { rows } = await world.fixture.database.query<{ indexdef: string }>(
+      `SELECT indexdef FROM pg_indexes WHERE tablename = 'provider_costs' ORDER BY indexname`,
+    );
+    const defs = rows.map((row) => row.indexdef.replace(/^.* USING btree /, ''));
+    expect(defs).toEqual(
+      expect.arrayContaining([
+        '(account_id, usage_start)',
+        '(usage_start)',
+        '(tenant_id, usage_start)',
+      ]),
+    );
   });
 });
