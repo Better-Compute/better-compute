@@ -12,6 +12,7 @@ import { meterSource, type UsageTags } from '@better-compute/capacity';
 import {
   billingModeOf,
   disksOf,
+  poolAccountTenantSql,
   hasPublicAddress,
   meterLinesFor,
   type DiskRecord,
@@ -172,7 +173,7 @@ async function billingOf(
                      WHERE g.id = i.reservation_grant_id AND g.state <> 'cancelled'
                        AND g.starts_at <= ${at$(2)} AND g.ends_at > ${at$(2)}) AS granted,
             p.class AS pool_class, p.owner_tenant_id AS pool_owner, p.policy, s.region AS site_region,
-            a.provider, CASE WHEN a.tenant_id = p.owner_tenant_id THEN a.tenant_id END AS account_tenant,
+            a.provider, ${poolAccountTenantSql} AS account_tenant,
             m.machine->>'region' AS machine_region, p.gpu_model AS pool_gpu_model,
             (SELECT u.shape->'gpus'->>'model' FROM instance_usage_intervals u
               WHERE u.instance_id = i.id ORDER BY u.started_at DESC LIMIT 1) AS last_model,

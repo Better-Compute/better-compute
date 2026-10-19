@@ -8,7 +8,12 @@ import {
   type QuoteLine,
   type SqlTx,
 } from '@better-compute/core';
-import { billingModeOf, meterLinesFor, type BillableShape } from './billing.js';
+import {
+  billingModeOf,
+  meterLinesFor,
+  poolAccountTenantSql,
+  type BillableShape,
+} from './billing.js';
 import type { FlavorRecord } from './flavors.js';
 import { id, name, object, tenant } from './input.js';
 
@@ -111,7 +116,7 @@ async function readPool(tx: SqlTx, poolId: string): Promise<PoolBilling | undefi
   }>(
     // The account counts only when it is the pool owner's (ruling R1), as billing resolves the pool's mode.
     `SELECT p.class, p.owner_tenant_id, p.policy, p.gpu_model,
-            CASE WHEN a.tenant_id = p.owner_tenant_id THEN a.tenant_id END AS account_tenant
+            ${poolAccountTenantSql} AS account_tenant
        FROM pools p LEFT JOIN provider_accounts a ON a.id = p.provider_account_id
       WHERE p.id = $1`,
     [poolId],

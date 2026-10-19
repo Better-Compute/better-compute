@@ -72,6 +72,14 @@ export function isRootCaller(
 }
 
 /**
+ * SQL for the account `billingModeOf` takes: the pool's provider account tenant when it is the pool owner's (ruling
+ * R1), else NULL, over a `pools p` row joined to its `provider_accounts a`. Metering, estimates and admission all
+ * resolve the pool's mode through it, so they never disagree.
+ */
+export const poolAccountTenantSql =
+  'CASE WHEN a.tenant_id = p.owner_tenant_id THEN a.tenant_id END';
+
+/**
  * The billing mode of a pool: an explicit `policy.billing.mode` wins; otherwise a `provider` pool whose owner is a
  * tenant other than the root is a BYO cloud account and pays a platform fee (B8: it is never charged `vm.*`
  * compute); everything else is metered. The owner is the pool's provider account's tenant, which by ruling R1 is

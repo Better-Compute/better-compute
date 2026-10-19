@@ -13,6 +13,7 @@ import {
   billingModeOf,
   closeOpenInterval,
   meterLinesFor,
+  poolBillingMode,
   vps,
   type BillableShape,
   type BillingMode,
@@ -1857,5 +1858,28 @@ describe('metering', () => {
       const [open] = await intervals(world, created.id);
       expect(open!.shape.flavorMeter).toBe('flavor.live.hours');
     });
+  });
+});
+
+describe('admission resolves the billing mode as metering does (FW-15)', () => {
+  it("a pool's account counts only when it is the pool owner's", async () => {
+    const world = await gceWorld();
+    // A root pool whose account row names another tenant (never through the API): metering ignores that account
+    // (ruling R1), so the pool is root's and metered; admission must say the same.
+    const byo = await world.api.providerAccounts.create(world.acme, {
+      tenantId: world.acmeTenant,
+      provider: 'fake-gce',
+      name: 'acme-own',
+      config: {},
+    });
+    await world.fixture.database.query(`UPDATE pools SET provider_account_id = $2 WHERE id = $1`, [
+      world.poolId,
+      byo.id,
+    ]);
+    const context = {
+      sql: world.fixture.database,
+      iam: { rootTenantId: world.rootTenant },
+    } as unknown as Parameters<typeof poolBillingMode>[0];
+    expect(await poolBillingMode(context, world.poolId)).toBe('metered');
   });
 });

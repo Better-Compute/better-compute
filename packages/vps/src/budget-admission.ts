@@ -5,12 +5,12 @@
 
 import { budgetAdmissionCheck, offerAdmissionCheck } from '@better-compute/capacity';
 import type { MethodContext, PoolPolicy } from '@better-compute/core';
-import { billingModeOf, type BillingMode } from './billing.js';
+import { billingModeOf, poolAccountTenantSql, type BillingMode } from './billing.js';
 
 /**
  * The billing mode of a provider pool (`billingModeOf` over its owner and provider account), or `undefined` when
  * the pool does not exist. Without a known root tenant every provider pool reads as a tenant's own (BYO), as
- * where usage is metered: it fails closed.
+ * where usage is metered: it fails closed. The account counts only when it is the pool owner's, as metering reads it.
  */
 export async function poolBillingMode(
   context: Pick<MethodContext, 'sql' | 'iam'>,
@@ -22,7 +22,7 @@ export async function poolBillingMode(
     policy: PoolPolicy | string;
     account_tenant: string | null;
   }>(
-    `SELECT p.owner_tenant_id, p.class, p.policy, a.tenant_id AS account_tenant
+    `SELECT p.owner_tenant_id, p.class, p.policy, ${poolAccountTenantSql} AS account_tenant
        FROM pools p LEFT JOIN provider_accounts a ON a.id = p.provider_account_id
       WHERE p.id = $1`,
     [poolId],

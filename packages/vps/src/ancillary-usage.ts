@@ -1,6 +1,6 @@
 import type { Migration, PoolPolicy, SqlTx } from '@better-compute/core';
 import { meterSource, type UsageTags } from '@better-compute/capacity';
-import { billingModeOf } from './billing.js';
+import { billingModeOf, poolAccountTenantSql } from './billing.js';
 
 // Ancillary metering (platform compute billing, D9): what a tenant holds beside its VMs. A provisioned tenant
 // network bills `network.vpc.hours` from its first `ready` (`provisioned_at`) until it is deleted. These are
@@ -97,7 +97,7 @@ export async function meterNetworks(
   const floorNow = Math.floor((now - grace) / hourMs) * hourMs;
   const { rows } = await tx.query<DueNetwork>(
     `SELECT n.id, n.tenant_id, n.project_id, n.pool_id, p.class AS pool_class, p.owner_tenant_id AS pool_owner,
-            p.policy, CASE WHEN a.tenant_id = p.owner_tenant_id THEN a.tenant_id END AS account_tenant,
+            p.policy, ${poolAccountTenantSql} AS account_tenant,
             a.provider, s.region,
             (extract(epoch FROM coalesce(n.metered_until, n.provisioned_at)) * 1000)::float8 AS metered,
             (extract(epoch FROM n.deleted_at) * 1000)::float8 AS ended
@@ -191,7 +191,7 @@ export async function meterSnapshots(
   const { rows } = await tx.query<DueSnapshot>(
     `SELECT s.id, s.tenant_id, s.size_bytes::text AS size_bytes, p.id AS pool_id, p.class AS pool_class,
             p.owner_tenant_id AS pool_owner, p.policy,
-            CASE WHEN a.tenant_id = p.owner_tenant_id THEN a.tenant_id END AS account_tenant,
+            ${poolAccountTenantSql} AS account_tenant,
             a.provider, st.region,
             (extract(epoch FROM coalesce(s.metered_until, s.ready_at)) * 1000)::float8 AS metered,
             (extract(epoch FROM s.deleted_at) * 1000)::float8 AS ended
