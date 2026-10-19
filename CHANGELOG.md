@@ -32,7 +32,11 @@ All notable changes to the better-compute packages are documented here. The form
     committed slot, used or not; VMs inside the grant record only the informational `vm.grant.usage.hours`, never
     compute meters. Admission serves the grantee from its slots first and keeps them from everyone else. A grant
     that starts, or renews another, takes in the tenant's VMs already running on the reservation. Events
-    `reservation-grant.*` (`created`, `active`, `ended`, `cancelled`).
+    `reservation-grant.*` (`created`, `active`, `ended`, `cancelled`). When the provider stops reporting the
+    reservation, its active grants end and its scheduled ones are cancelled then (`reason: 'reservation-gone'` on
+    the events), and its VMs bill on-demand from then on. A reservation whose `total` drops below its live grants'
+    slots publishes the new event `reservation-grant.capacity-short` `{ accountId, reservationId, total,
+    grantedSlots, grantIds }` once per change; the grants keep billing.
   - **Ancillary meters.** The `vps.ancillary-usage` reconciler bills `network.vpc.hours` per provisioned tenant
     network and `snapshot.gib.hours` per sandbox snapshot; a VM's intervals add `ip.public.hours` while it runs
     with a public address and `disk.<type>.gib.hours` per disk, running or stopped (`DiskTypeUnknown` for a type
@@ -49,7 +53,12 @@ All notable changes to the better-compute packages are documented here. The form
   - **Pass-through.** `providerAccounts.create`/`update` take `billing.passThrough` (root accounts only): rules of
     `{ skuPattern, meter, multiplier }` bill costs compute does not meter, such as egress, on a `reported` meter at
     net cost times the multiplier (1 to 10), once per row. A pattern that matches a SKU compute meters itself is
-    `INVALID_CONFIG` (`meteredSku`), and such rows never pass through.
+    `INVALID_CONFIG` (`meteredSku`), and such rows never pass through. Whether a row may pass is decided when it
+    is ingested (`provider_costs.passable`, with a partial index) and again for an account's rows within the
+    lookback when its rules change; the pass reads only those rows, in batches within the run's budget. A row whose
+    usage month has already closed (`vps({ billing: { closeGraceHours } })`, default 6, after the month ends) is a
+    late charge in the first hour of the current month, with the same key; `usage.deadLetters` items carry the
+    `cost` of a pass-through window.
   - **Leak detection.** After each pass over a platform account, an instance whose provider-billed compute hour
     slots exceed its metered running hours in a UTC day by more than `leakToleranceHours` (default 1) raises
     `billing.leak`.
@@ -120,7 +129,13 @@ All notable changes to the better-compute packages are documented here. The form
 - **The usage flush claims windows.** `iam.usage` marks its batch `claimed_at` (migration
   `core/0033_usage_window_claims`) before sending it; `usage.void` refuses a window claimed in the last 10 minutes
   ("being sent; retry shortly"), and a dead sender's claims are taken over after 10 minutes (a resend is a
-  `duplicate`). A `BILLING_PERIOD_CLOSED` refusal is dead-lettered once and never retried automatically.
+  `duplicate`). A `BILLING_PERIOD_CLOSED` refusal is dead-lettered once and never retried automatically. A send
+  that throws keeps its claims (Better IAM may have recorded the batch), so its windows are sent again once the
+  claims expire, and a pass only clears its own claim.
+- **`iam.jobs.close-period` waits for the month's last windows** (`runIamJobs`). It runs hourly instead of daily
+  and calls `billing.closePeriod()` only once the current UTC month is `closeGraceHours` old (an
+  `iamJobReconcilers`/`runIamJobs` option, default 6, from 0 to 72); set `vps({ billing: { closeGraceHours } })`
+  to the same value.
 - **`iam setup --meters` and the iam module create the full `meterCatalog`.** `computeMeters` stays exported but is
   no longer what setup creates. The iam module also syncs the catalog when it starts if its port holds a root
   billing credential (`serviceCredential`); the doctor warns `iam.billing-port` when it does not.
