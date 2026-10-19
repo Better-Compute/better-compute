@@ -2158,7 +2158,30 @@
                 "pattern": "^[a-z0-9_-]{0,63}$",
                 "maxLength": 63
               },
-              "description": "Provider labels for the machine (provider pools): GCE label rules, at most 62; keys starting with better-compute- are reserved"
+              "description": "Labels: GCE label rules, at most 62; keys starting with better-compute- or bc- are reserved. In provider pools also written on the machine and its boot disk"
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 128,
+              "description": "A display name: 1-128 characters, no control characters or surrounding whitespace"
+            },
+            "metadata": {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "description": "Free-form string metadata kept by better-compute only (at most 64 entries, 16 KiB); keys starting with better-compute- or bc- are reserved"
+            },
+            "issuedBy": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$",
+              "maxLength": 128,
+              "description": "Who issued the instance (root callers only): the platform’s provenance"
             },
             "ownerIdentityId": {
               "type": "string",
@@ -2190,7 +2213,7 @@
           "additionalProperties": false
         },
         "summary": "Admits a VM from a pool, flavor and image after one IAM decision on the draft; returns the instance in `scheduling`, or in `provisioning` with a `nodeId` when a hosted pool placed it at once.",
-        "description": "Admits a VM from a pool, flavor and image after one IAM decision on the draft; returns the instance in `scheduling`, or in `provisioning` with a `nodeId` when a hosted pool placed it at once.\n\n- **Idempotency.** `idempotencyKey` is required. The instance id derives from the tenant, the caller and the key: a retry of a finished request returns the same instance without a second decision, and a different request under the same key is `CONFLICT` with `details.instanceId`.\n- **IAM.** `compute:instances:create` is decided on `compute-instance/` plus the draft id, whose attributes (`vcpu`, `memoryGiB`, `gpus`, `imageId`, `imageVerified`, `projectId`) policies can test. A refusal deletes the draft; a delegated session can get `CONFIRMATION_REQUIRED`.\n- **Networks.** In a provider pool, `networkId` places the VM on a tenant network (`networks.create`) and `subnetId` in one of its subnets; the instance shows both. The network must be the tenant's and on the pool's provider account, must have been provisioned (it reached `ready` once; a network that went back to `pending` because a subnet or rule was added still takes instances) and must not be being deleted, and the subnet must be on it, in the offer's region and `ready`. A network not provisioned yet, being deleted, or a subnet not ready yet is `INVALID_STATE` with a retry hint. Without `subnetId` the network's only subnet in the offer's region is used; none, or several (the error names them), is `INVALID_INPUT`, as is an unknown network or subnet, one of another tenant or provider account, or a `subnetId` without a `networkId`. The VM is created in the subnet with a per-instance network tag, which the network's firewall rules target. The network and subnet stay until the instance is deleted: `networks.delete` and `networks.removeSubnet` are `INVALID_STATE` while it is on them.\n- **Labels.** In a provider pool, `labels` (at most 62, so the VM stays within Compute Engine's 64 with better-compute's own two) are passed to the provider's create and shown on the instance. Keys are a lower-case letter followed by lower-case letters, digits, `_` or `-`, at most 63 characters; values take the same characters, at most 63, and may be empty. Keys starting with `better-compute-` are reserved, and the provider's own ownership labels win over the tenant's. Anything else, or labels on a hosted pool, is `INVALID_INPUT`. Labels are part of the request: the same key with other labels is `CONFLICT`.\n- **Owner.** The instance is owned by the caller, or by `ownerIdentityId`: the platform (a root caller creating in another tenant) issues an instance to a person of that tenant this way, as `attach` does, so it shows in their `scope: 'mine'` list and owner-conditioned policies (`resource.ownerId`) apply to them. Anyone else naming an identity other than their own, and a root caller in its own tenant, is `ACCESS_DENIED` before any decision; a malformed one is `INVALID_INPUT`. When the IAM port can say (`IamPort.isMember`, the embedded better-iam bridge), the owner must also be an active identity of the tenant, else `INVALID_INPUT` and the draft is dropped; other ports check the id's shape only.\n- **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, an archived pool, a missing or archived flavor, or an image a hosted pool cannot resolve. `INVALID_INPUT` for a pool that is not `vps-host` or `provider`. `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota; `CAPACITY_UNAVAILABLE` when a hosted pool has no free IP address. `INVALID_STATE` for a provider pool without an account, `INVALID_CONFIG` for a hosted pool when `vps()` has no `images`.\n- **Events.** `instance.created`, and `instance.scheduled` with the `nodeId` when a hosted instance is placed. When no host fits, the instance stays in `scheduling` with an `Unschedulable` condition and is retried every 30 seconds. In a provider pool, a create the provider refuses for capacity or quota (at once, or after accepting it, as GCE reports a stockout) moves the instance to `error` with a `ProvisionFailed` condition (reason `CAPACITY_UNAVAILABLE` or `QUOTA_EXCEEDED`) and publishes `instance.failed`; it is not retried, and deleting it refunds the quota."
+        "description": "Admits a VM from a pool, flavor and image after one IAM decision on the draft; returns the instance in `scheduling`, or in `provisioning` with a `nodeId` when a hosted pool placed it at once.\n\n- **Idempotency.** `idempotencyKey` is required. The instance id derives from the tenant, the caller and the key: a retry of a finished request returns the same instance without a second decision, and a different request under the same key is `CONFLICT` with `details.instanceId`.\n- **IAM.** `compute:instances:create` is decided on `compute-instance/` plus the draft id, whose attributes (`vcpu`, `memoryGiB`, `gpus`, `imageId`, `imageVerified`, `projectId`) policies can test. A refusal deletes the draft; a delegated session can get `CONFIRMATION_REQUIRED`.\n- **Networks.** In a provider pool, `networkId` places the VM on a tenant network (`networks.create`) and `subnetId` in one of its subnets; the instance shows both. The network must be the tenant's and on the pool's provider account, must have been provisioned (it reached `ready` once; a network that went back to `pending` because a subnet or rule was added still takes instances) and must not be being deleted, and the subnet must be on it, in the offer's region and `ready`. A network not provisioned yet, being deleted, or a subnet not ready yet is `INVALID_STATE` with a retry hint. Without `subnetId` the network's only subnet in the offer's region is used; none, or several (the error names them), is `INVALID_INPUT`, as is an unknown network or subnet, one of another tenant or provider account, or a `subnetId` without a `networkId`. The VM is created in the subnet with a per-instance network tag, which the network's firewall rules target. The network and subnet stay until the instance is deleted: `networks.delete` and `networks.removeSubnet` are `INVALID_STATE` while it is on them.\n- **Labels.** `labels` (at most 62, so a VM stays within Compute Engine's 64 with better-compute's own two) are kept on the instance in any pool, where `list`'s `labelSelector` matches them. In a provider pool they are also passed to the provider's create, which writes them on the VM and on its boot disk. Keys are a lower-case letter followed by lower-case letters, digits, `_` or `-`, at most 63 characters; values take the same characters, at most 63, and may be empty. Keys starting with `better-compute-` or `bc-` are better-compute's own and `INVALID_INPUT`; the provider also drops any such key and writes its ownership labels last, so they always win. Labels are part of the request: the same key with other labels is `CONFLICT`. `update` changes them later.\n- **Name and metadata.** `name` is a display name (1 to 128 characters, no control characters, no surrounding whitespace), not unique. `metadata` is up to 64 string entries (keys a letter or digit, then letters, digits, `.`, `_`, `/` or `-`, at most 128; values at most 1024 characters; 16 KiB in all; `better-compute-` and `bc-` keys reserved). Both are kept by better-compute only, never sent to a provider or host, and both are part of the request. `update` changes them later.\n- **Provenance.** `issuedBy` records who issued the instance (`legionedge:admin`: up to 128 letters, digits, `.`, `_`, `:`, `@`, `/`, `+` or `-`). Only the platform (a root caller) sets it: anyone else is `ACCESS_DENIED` with `details.reason: 'issued-by-platform-only'`, before any decision. The instance shows it to everyone who can read it, and `issued` filters on it.\n- **Owner.** The instance is owned by the caller, or by `ownerIdentityId`: the platform (a root caller creating in another tenant) issues an instance to a person of that tenant this way, as `attach` does, so it shows in their `scope: 'mine'` list and owner-conditioned policies (`resource.ownerId`) apply to them. Anyone else naming an identity other than their own, and a root caller in its own tenant, is `ACCESS_DENIED` before any decision; a malformed one is `INVALID_INPUT`. When the IAM port can say (`IamPort.isMember`, the embedded better-iam bridge), the owner must also be an active identity of the tenant, else `INVALID_INPUT` and the draft is dropped; other ports check the id's shape only.\n- **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, an archived pool, a missing or archived flavor, or an image a hosted pool cannot resolve. `INVALID_INPUT` for a pool that is not `vps-host` or `provider`. `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota; `CAPACITY_UNAVAILABLE` when a hosted pool has no free IP address. `INVALID_STATE` for a provider pool without an account, `INVALID_CONFIG` for a hosted pool when `vps()` has no `images`.\n- **Events.** `instance.created`, and `instance.scheduled` with the `nodeId` when a hosted instance is placed. When no host fits, the instance stays in `scheduling` with an `Unschedulable` condition and is retried every 30 seconds. In a provider pool, a create the provider refuses for capacity or quota (at once, or after accepting it, as GCE reports a stockout) moves the instance to `error` with a `ProvisionFailed` condition (reason `CAPACITY_UNAVAILABLE` or `QUOTA_EXCEEDED`) and publishes `instance.failed`; it is not retried, and deleting it refunds the quota."
       },
       {
         "method": "list",
@@ -2231,13 +2254,25 @@
                 "error",
                 "lost",
                 "paused"
-              ]
+              ],
+              "description": "Only instances in this state; without it deleted instances are left out (deleted needs scope 'mine')"
             },
             "poolId": {
               "type": "string",
               "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
               "maxLength": 57,
               "description": "The pool"
+            },
+            "projectId": {
+              "type": "string",
+              "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 56,
+              "description": "Only instances of this project"
+            },
+            "labelSelector": {
+              "type": "string",
+              "maxLength": 1024,
+              "description": "Label requirements that must all hold, comma-separated: key=value, key!=value, key, !key, key in (a,b), key notin (a,b)"
             },
             "limit": {
               "type": "integer",
@@ -2255,7 +2290,7 @@
           "additionalProperties": false
         },
         "summary": "Returns a page of the tenant's instances, newest first, with a `cursor` when more remain.",
-        "description": "Returns a page of the tenant's instances, newest first, with a `cursor` when more remain.\n\n`scope` defaults to `mine`, the caller's own instances; `all` returns every instance of the tenant that the caller may read. `state` and `poolId` filter the list, and `limit` is 1 to 200 (default 50). Drafts are never listed."
+        "description": "Returns a page of the tenant's instances, newest first, with a `cursor` when more remain.\n\n`scope` defaults to `mine`, the caller's own instances; `all` returns every instance of the tenant that the caller may read, each one checked for `compute:instances:read` after the page is read, so a page can hold fewer than `limit` items. `limit` is 1 to 200 (default 50); `cursor` is the last instance id of the previous page. Drafts and warm sandbox instances are never listed.\n\n- **Deleted instances.** Left out unless `state: 'deleted'` asks for them, in SQL, before the per-item checks: a deleted instance's access is gone, so it could never pass one. `state: 'deleted'` therefore needs `scope: 'mine'` (the owner's own, with no per-item check); with `scope: 'all'` it is `INVALID_INPUT`.\n- **Filters.** `state`, `poolId`, `projectId` and `labelSelector` all filter in SQL. A label selector is comma-separated requirements that must all hold: `key=value` (or `==`), `key!=value` (also true without the key), `key` (has it), `!key` (lacks it), `key in (a,b)` and `key notin (a,b)` (also true without the key); at most 20 requirements and 1024 characters, keys and values as the label rules allow, else `INVALID_INPUT`.\n\nEach instance shows its `name`, `metadata`, `labels`, `issuedBy` and `createdAt` (epoch ms), and, for a provider machine, the `disks` the provider last reported (boot disk first: `type`, `sizeGiB`, `boot`), which is what `disk.<type>.gib.hours` meters."
       },
       {
         "method": "get",
@@ -2479,9 +2514,39 @@
             },
             "name": {
               "type": "string",
-              "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
-              "maxLength": 63,
-              "description": "A display name"
+              "maxLength": 128,
+              "description": "A display name: 1-128 characters, no control characters or surrounding whitespace"
+            },
+            "metadata": {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "description": "Free-form string metadata kept by better-compute only (at most 64 entries, 16 KiB); keys starting with better-compute- or bc- are reserved"
+            },
+            "labels": {
+              "type": "object",
+              "maxProperties": 62,
+              "propertyNames": {
+                "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^[a-z0-9_-]{0,63}$",
+                "maxLength": 63
+              },
+              "description": "Labels: GCE label rules, at most 62; keys starting with better-compute- or bc- are reserved. In provider pools also written on the machine and its boot disk"
+            },
+            "issuedBy": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$",
+              "maxLength": 128,
+              "description": "Who issued the instance (root callers only): the platform’s provenance"
             },
             "networkId": {
               "type": "string",
@@ -2504,7 +2569,7 @@
           "additionalProperties": false
         },
         "summary": "Makes a provider machine that already runs an instance of a tenant, without recreating it; returns the instance in `scheduling` with `origin: 'attached'`. The `vps.instances` reconciler then writes the provider's ownership label (`claim`) and follows the machine like any provider instance.",
-        "description": "Makes a provider machine that already runs an instance of a tenant, without recreating it; returns the instance in `scheduling` with `origin: 'attached'`. The `vps.instances` reconciler then writes the provider's ownership label (`claim`) and follows the machine like any provider instance.\n\n- **Input.** `poolId` is a `provider` pool owned by or offered to `tenantId` and backed by the machine's provider account. `externalId` is the machine as `providerAccounts.machines` lists it, which discovery must have seen and which must be free. `ownerIdentityId` defaults to the caller, so an operator can hand the instance to a person of the tenant (it then shows in their `scope: 'mine'` list). As for `create`, only a root caller attaching into another tenant names someone else (`ACCESS_DENIED` otherwise, before any decision), and the owner must be an active identity of the tenant when the IAM port can say (`INVALID_INPUT`). `onDelete` is `detach` (the default: deleting releases the machine, which keeps running) or `delete` (deleting deletes the machine).\n- **Networks.** An attached machine keeps the network it is on. If its NIC is on one of the tenant's networks of the same provider account that is not deleted, whatever state it is in (`pending` included), the instance is linked to it (`networkId`, and `subnetId` when the NIC names one of its subnets), so its firewall rules apply and the network cannot be deleted from under it. `networkId` asserts that: the machine must already be on that network, otherwise `INVALID_STATE` with `details.hint: 'attached VMs keep their existing network'` (GCE cannot move a NIC to another VPC without a stop). A network that does not exist, is not the tenant's or is on another account is `INVALID_INPUT`; one being deleted is `INVALID_STATE` (`details.networkId`), also when the machine's NIC is on it and no `networkId` was given: attach neither links nor ignores a network being torn down.\n- **Billing.** `billing: 'none'` writes off the machine: it opens no usage interval, so nothing of it is metered, stopped or running. Only the platform (a root caller) may pass it; any other caller gets `ACCESS_DENIED` before any decision and nothing is written. `billing: 'metered'`, or omitting it, leaves the decision to the pool's billing mode (`policy.billing.mode`, else metered, or a platform fee for a tenant's own cloud account). It is part of the request, so a retry with the same key but another `billing` is `CONFLICT`.\n- **Budgets.** A billed attach (the resulting mode is `metered` or `platform-fee`, so not `billing: 'none'` and not a pool whose mode is `none`) is checked against the tenant's budgets after the IAM decision, as `create` is: when the pool asks for it (`policy.admission.budgetCheck: 'meter'`) or the tenant's offer is `stop-new`, `drain` or `suspend`, a spent budget is `SPEND_LIMIT_REACHED` and nothing is written. A root caller attaching into a tenant is checked against that tenant's budgets, not root's. A suspended offer, or an offer whose `allowedRegions` leave out the pool's region, refuses every attach (`SPEND_LIMIT_REACHED`, `ACCESS_DENIED`), billed or not.\n- **Shape.** The flavor is the machine's own: its machine type, vCPU, memory and GPU count, with no disk. It is charged to the tenant's quota on the pool, as a create on a provider pool is.\n- **Idempotency.** `idempotencyKey` is required. The instance id derives from the tenant, the caller and the key: a retry returns the same instance, and a different request under the same key is `CONFLICT` with `details.instanceId`.\n- **IAM.** `compute:instances:attach` is decided on `compute-instance/` plus the instance id, whose attributes (`vcpu`, `memoryGiB`, `gpus`) policies can test. Only the platform (root callers) attaches machines of an account its own tenant does not own; a tenant attaches from its own accounts, and a tenant the pool is offered to attaches, into itself, a machine bound to the pool (`pools.bindMachines`). Anything else is `ACCESS_DENIED`, whether or not the machine exists.\n- **Pools.** A machine bound to a pool is attached into that pool only: another pool is `CONFLICT` with `details.poolId`. Detaching or deleting the instance leaves the binding, so the machine returns to its pool. For Compute Engine accounts (`gcp`), a machine whose region (or its zone's) is not the region of the pool's site is `INVALID_INPUT` with `details.machineRegion` and `details.poolRegion`; other providers, and machines without a region or zone, are not compared.\n- **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, or a machine discovery has not seen or marked gone (run `providerAccounts.discover`). `CONFLICT` with `details.instanceId` when another instance holds the machine, with `details.claimedBy` when discovery saw its ownership label name another instance, and when the pool is backed by a different provider account than the machine's. `INVALID_INPUT` for a pool that is not a provider pool, `QUOTA_EXCEEDED` when the machine does not fit the quota; nothing is written then.\n- **Events.** `instance.attached` with `instanceId`, `accountId`, `externalId`, `poolId` and `onDelete`.\n- **Ownership.** Once claimed, every read of the machine must show this instance's label. A machine whose label is gone or names another instance is never adopted, recovered or acted on again: the instance gets an `OwnershipLost` condition (an `AttachConflict` one when the first claim was refused), `start`, `stop` and `reboot` are `INVALID_STATE`, and deleting it finishes as a detach without any provider call."
+        "description": "Makes a provider machine that already runs an instance of a tenant, without recreating it; returns the instance in `scheduling` with `origin: 'attached'`. The `vps.instances` reconciler then writes the provider's ownership label (`claim`) and follows the machine like any provider instance.\n\n- **Input.** `poolId` is a `provider` pool owned by or offered to `tenantId` and backed by the machine's provider account. `externalId` is the machine as `providerAccounts.machines` lists it, which discovery must have seen and which must be free. `ownerIdentityId` defaults to the caller, so an operator can hand the instance to a person of the tenant (it then shows in their `scope: 'mine'` list). As for `create`, only a root caller attaching into another tenant names someone else (`ACCESS_DENIED` otherwise, before any decision), and the owner must be an active identity of the tenant when the IAM port can say (`INVALID_INPUT`). `onDelete` is `detach` (the default: deleting releases the machine, which keeps running) or `delete` (deleting deletes the machine).\n- **Networks.** An attached machine keeps the network it is on. If its NIC is on one of the tenant's networks of the same provider account that is not deleted, whatever state it is in (`pending` included), the instance is linked to it (`networkId`, and `subnetId` when the NIC names one of its subnets), so its firewall rules apply and the network cannot be deleted from under it. `networkId` asserts that: the machine must already be on that network, otherwise `INVALID_STATE` with `details.hint: 'attached VMs keep their existing network'` (GCE cannot move a NIC to another VPC without a stop). A network that does not exist, is not the tenant's or is on another account is `INVALID_INPUT`; one being deleted is `INVALID_STATE` (`details.networkId`), also when the machine's NIC is on it and no `networkId` was given: attach neither links nor ignores a network being torn down.\n- **Identity.** `name`, `metadata` and `labels` follow the rules of `create` and are part of the request; the labels are written on the machine (`ProviderImpl.setLabels`) once it is claimed, next to the labels it already carries. `issuedBy` is the platform's only, as for `create` (`ACCESS_DENIED` otherwise, before any decision).\n- **Billing.** `billing: 'none'` writes off the machine: it opens no usage interval, so nothing of it is metered, stopped or running. Only the platform (a root caller) may pass it; any other caller gets `ACCESS_DENIED` before any decision and nothing is written. `billing: 'metered'`, or omitting it, leaves the decision to the pool's billing mode (`policy.billing.mode`, else metered, or a platform fee for a tenant's own cloud account). It is part of the request, so a retry with the same key but another `billing` is `CONFLICT`.\n- **Budgets.** A billed attach (the resulting mode is `metered` or `platform-fee`, so not `billing: 'none'` and not a pool whose mode is `none`) is checked against the tenant's budgets after the IAM decision, as `create` is: when the pool asks for it (`policy.admission.budgetCheck: 'meter'`) or the tenant's offer is `stop-new`, `drain` or `suspend`, a spent budget is `SPEND_LIMIT_REACHED` and nothing is written. A root caller attaching into a tenant is checked against that tenant's budgets, not root's. A suspended offer, or an offer whose `allowedRegions` leave out the pool's region, refuses every attach (`SPEND_LIMIT_REACHED`, `ACCESS_DENIED`), billed or not.\n- **Shape.** The flavor is the machine's own: its machine type, vCPU, memory and GPU count, with no disk. It is charged to the tenant's quota on the pool, as a create on a provider pool is.\n- **Idempotency.** `idempotencyKey` is required. The instance id derives from the tenant, the caller and the key: a retry returns the same instance, and a different request under the same key is `CONFLICT` with `details.instanceId`.\n- **IAM.** `compute:instances:attach` is decided on `compute-instance/` plus the instance id, whose attributes (`vcpu`, `memoryGiB`, `gpus`) policies can test. Only the platform (root callers) attaches machines of an account its own tenant does not own; a tenant attaches from its own accounts, and a tenant the pool is offered to attaches, into itself, a machine bound to the pool (`pools.bindMachines`). Anything else is `ACCESS_DENIED`, whether or not the machine exists.\n- **Pools.** A machine bound to a pool is attached into that pool only: another pool is `CONFLICT` with `details.poolId`. Detaching or deleting the instance leaves the binding, so the machine returns to its pool. For Compute Engine accounts (`gcp`), a machine whose region (or its zone's) is not the region of the pool's site is `INVALID_INPUT` with `details.machineRegion` and `details.poolRegion`; other providers, and machines without a region or zone, are not compared.\n- **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, or a machine discovery has not seen or marked gone (run `providerAccounts.discover`). `CONFLICT` with `details.instanceId` when another instance holds the machine, with `details.claimedBy` when discovery saw its ownership label name another instance, and when the pool is backed by a different provider account than the machine's. `INVALID_INPUT` for a pool that is not a provider pool, `QUOTA_EXCEEDED` when the machine does not fit the quota; nothing is written then.\n- **Events.** `instance.attached` with `instanceId`, `accountId`, `externalId`, `poolId` and `onDelete`.\n- **Ownership.** Once claimed, every read of the machine must show this instance's label. A machine whose label is gone or names another instance is never adopted, recovered or acted on again: the instance gets an `OwnershipLost` condition (an `AttachConflict` one when the first claim was refused), `start`, `stop` and `reboot` are `INVALID_STATE`, and deleting it finishes as a detach without any provider call."
       },
       {
         "method": "detach",
@@ -2576,6 +2641,153 @@
         },
         "summary": "Asks for a restart of a running provider instance's machine; returns the instance, still `running`. The `vps.instances` reconciler restarts the machine once, gracefully (`graceful-restart`) or, with `hard: true`, by a reset, and publishes `instance.rebooted` with `hard`.",
         "description": "Asks for a restart of a running provider instance's machine; returns the instance, still `running`. The `vps.instances` reconciler restarts the machine once, gracefully (`graceful-restart`) or, with `hard: true`, by a reset, and publishes `instance.rebooted` with `hard`.\n\n- **Semantics.** A second reboot asked for while the first is pending is one restart; one asked for after it restarts the machine again. A provider without power control drops the request and records a `ProviderError` condition.\n- **Errors.** `INVALID_STATE` when the instance is not running, or is being stopped or deleted. `UNSUPPORTED` for instances of hosted pools, for now. Instances of other tenants, or none, are `NOT_FOUND`.\n- **IAM.** Decided as `compute:instances:update` on the instance."
+      },
+      {
+        "method": "update",
+        "route": "POST /api/compute/instances/update",
+        "kind": "mutation",
+        "action": "compute:instances:update",
+        "resource": "compute-instance",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "instanceId": {
+              "type": "string",
+              "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The instance"
+            },
+            "name": {
+              "type": ["string", "null"],
+              "maxLength": 128,
+              "description": "The new display name; null clears it"
+            },
+            "metadata": {
+              "type": ["object", "null"],
+              "maxProperties": 64,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "description": "The new metadata, replacing the old; null or {} clears it"
+            },
+            "labels": {
+              "type": ["object", "null"],
+              "maxProperties": 62,
+              "propertyNames": {
+                "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^[a-z0-9_-]{0,63}$",
+                "maxLength": 63
+              },
+              "description": "The new labels, replacing the old; null or {} clears them. Provider pools write them on the machine and its boot disk"
+            },
+            "issuedBy": {
+              "type": ["string", "null"],
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$",
+              "maxLength": 128,
+              "description": "Who issued the instance (root callers only); null clears it"
+            },
+            "expectedVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991,
+              "description": "The version the caller read: CONFLICT when it moved on"
+            }
+          },
+          "required": ["tenantId", "instanceId"],
+          "additionalProperties": false
+        },
+        "summary": "Renames an instance and replaces its metadata and labels; the platform records or corrects its provenance. Returns the instance.",
+        "description": "Renames an instance and replaces its metadata and labels; the platform records or corrects its provenance. Returns the instance.\n\n- **Input.** At least one of `name`, `metadata`, `labels` and `issuedBy`, with the rules of `create`; `null` clears a field, and `{}` clears metadata or labels. Metadata and labels are replaced as a whole, not merged. `expectedVersion` makes the update conditional: an instance at another `version` is `CONFLICT` with `details.version`.\n- **IAM.** `compute:instances:update` on the instance. `issuedBy` is the platform's: from anyone but a root caller it is `ACCESS_DENIED` (`details.reason: 'issued-by-platform-only'`) before any decision.\n- **Labels on the machine.** In a provider pool, new labels are written on the VM and its boot disk by the `vps.instances` reconciler (`ProviderImpl.setLabels`), which the update wakes: every wanted key is set, every key the provider last got that is no longer wanted is removed, labels someone else put on the machine stay, and better-compute's own (`better-compute-*`) are never touched. An attached machine gets them once claimed. A write the provider refuses leaves a `LabelsNotApplied` condition (the error's code as `reason`) and is tried again at the next poll; the instance keeps running. Hosted instances have nothing to write.\n- **Semantics.** An update that changes nothing returns the instance as it is, with no new version and no event. Otherwise the version moves on and `instance.updated` is published with `changed` (the fields that changed). Nothing else about the instance changes.\n- **Errors.** `NOT_FOUND` for an instance of another tenant, or none; `INVALID_STATE` for an instance being deleted or deleted, a sandbox's instance (use `sandboxes.update`) or a warm one; `INVALID_INPUT` for an empty update, an unknown field or a value the rules refuse."
+      },
+      {
+        "method": "issued",
+        "route": "POST /api/compute/instances/issued",
+        "kind": "read",
+        "action": "compute:instances:read",
+        "resource": "compute-fleet",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "Only this tenant’s instances"
+            },
+            "poolId": {
+              "type": "string",
+              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The pool"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "scheduling",
+                "provisioning",
+                "starting",
+                "running",
+                "stopped",
+                "rebooting",
+                "resizing",
+                "deleting",
+                "deleted",
+                "error",
+                "lost",
+                "paused"
+              ],
+              "description": "Only instances in this state; without it deleted instances are left out"
+            },
+            "issuedBy": {
+              "type": "string",
+              "maxLength": 128,
+              "description": "Only instances whose issuedBy is this; * for any recorded provenance"
+            },
+            "labelSelector": {
+              "type": "string",
+              "maxLength": 1024,
+              "description": "Label requirements that must all hold, comma-separated: key=value, key!=value, key, !key, key in (a,b), key notin (a,b)"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            },
+            "cursor": {
+              "type": "string",
+              "pattern": "^inst_[0-9a-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The last instance id of the previous page"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "summary": "The platform's view of the instances it issued: a page of instances in tenants other than the root tenant, on pools the root tenant owns (created there, or attached into them), newest first, with a `cursor` when more remain.",
+        "description": "The platform's view of the instances it issued: a page of instances in tenants other than the root tenant, on pools the root tenant owns (created there, or attached into them), newest first, with a `cursor` when more remain.\n\n- **IAM.** `compute:instances:read` on `compute-fleet/global`, which resolves only in the root tenant: any other caller is `ACCESS_DENIED`. `INVALID_CONFIG` when the IAM port names no root tenant.\n- **Filters.** `tenantId` keeps one tenant's instances (here it is a filter, not the scope), `poolId` one pool's, `state` one state (without it, deleted instances are left out), `issuedBy` the instances whose recorded provenance is that value (`*`: any recorded provenance), and `labelSelector` as `list` takes it. `limit` is 1 to 500 (default 100); `cursor` is the last instance id of the previous page.\n- **Answer.** Instances as `get` shows them, with their `tenantId` and `ownerIdentityId`. It only reads."
       },
       {
         "method": "estimate",
@@ -8172,6 +8384,36 @@
               "maxLength": 57,
               "description": "Restore this snapshot of the tenant (taken on the same runtime)"
             },
+            "name": {
+              "type": "string",
+              "maxLength": 128,
+              "description": "A display name: 1-128 characters, no control characters or surrounding whitespace"
+            },
+            "metadata": {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "description": "Free-form string metadata kept by better-compute only (at most 64 entries, 16 KiB); keys starting with better-compute- or bc- are reserved"
+            },
+            "labels": {
+              "type": "object",
+              "maxProperties": 62,
+              "propertyNames": {
+                "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^[a-z0-9_-]{0,63}$",
+                "maxLength": 63
+              },
+              "description": "Labels for label selectors: GCE label rules, at most 62; keys starting with better-compute- or bc- are reserved"
+            },
             "idempotencyKey": {
               "type": "string",
               "pattern": "^[A-Za-z0-9._:-]{1,128}$",
@@ -8196,7 +8438,7 @@
           "additionalProperties": false
         },
         "summary": "Starts a sandbox from a template after one IAM decision on the draft, claiming a warm instance when the template holds one and creating a new instance otherwise; the lifetime starts at once.",
-        "description": "Starts a sandbox from a template after one IAM decision on the draft, claiming a warm instance when the template holds one and creating a new instance otherwise; the lifetime starts at once.\n\n- **Idempotency.** `idempotencyKey` is required. The sandbox id derives from the tenant, the caller's identity and the key: a retry of an admitted request returns the stored sandbox without a second decision, and a different request under the same key is `CONFLICT` with `details.sandboxId`, as is the key replayed by another agent or person. `wait` is not part of the compared request.\n- **IAM.** `compute:sandboxes:create` is decided on `compute-sandbox/` plus the draft id, whose parent is the template's pool. Policies can test `templateId`, `vcpu`, `memoryGiB`, `gpus`, `ttlSeconds` and `warm` (true when the template keeps a warm pool). A refusal deletes the draft; a delegated session can get `CONFIRMATION_REQUIRED`. After an allow, the pool's budget check can answer `SPEND_LIMIT_REACHED` and keep the draft for a retry with the same key.\n- **Start.** The oldest stopped or paused warm instance of the template is claimed: it changes owner to the caller, is set to run, and publishes `instance.starting`; the claim places nothing new. Without one, a new instance is created and placed as `instances.create` would, publishing `instance.created` and, once placed, `instance.scheduled`; when no host fits it waits in scheduling and the sandbox stays `starting`. `warm` in the answer tells which path was taken.\n- **Restore.** `fromSnapshot` starts the sandbox from one of the tenant's own `ready` snapshots of this template, taken on its runtime (another tenant's is `NOT_FOUND`, one not ready is `INVALID_STATE`, one of another template is `INVALID_INPUT`). An agent restores only snapshots of sandboxes it created itself; any other is `NOT_FOUND` to it. A restore never claims a warm instance, and a snapshot that includes memory places only on nodes with the same `cpu.model`. Policies see it as the `fromSnapshot` attribute.\n- **Lifetime.** `ttlSeconds` defaults to the template's `defaultTtlSeconds` and may not exceed its `maxTtlSeconds` (`INVALID_INPUT`). `expiresAt` is set when the sandbox is admitted.\n- **Errors.** `NOT_FOUND` for a template missing or deleted in the tenant. `INVALID_STATE` when the template's flavor has been archived or removed. On the new-instance path the template's pool, flavor and image are checked again, with the errors of `sandboxTemplates.create`; `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota and `CAPACITY_UNAVAILABLE` when the pool has no free IP address, both keeping the draft.\n- **Waiting.** `wait.timeoutMs` (at most 30 seconds) holds the answer until the sandbox leaves `starting`; a timeout returns it still `starting`, not an error.\n\nPublishes `sandbox.created` with `warm` and `expiresAt`. `sandbox.ready` follows from the reconciler once the instance first runs."
+        "description": "Starts a sandbox from a template after one IAM decision on the draft, claiming a warm instance when the template holds one and creating a new instance otherwise; the lifetime starts at once.\n\n- **Idempotency.** `idempotencyKey` is required. The sandbox id derives from the tenant, the caller's identity and the key: a retry of an admitted request returns the stored sandbox without a second decision, and a different request under the same key is `CONFLICT` with `details.sandboxId`, as is the key replayed by another agent or person. `wait` is not part of the compared request.\n- **IAM.** `compute:sandboxes:create` is decided on `compute-sandbox/` plus the draft id, whose parent is the template's pool. Policies can test `templateId`, `vcpu`, `memoryGiB`, `gpus`, `ttlSeconds` and `warm` (true when the template keeps a warm pool). A refusal deletes the draft; a delegated session can get `CONFIRMATION_REQUIRED`. After an allow, the pool's budget check can answer `SPEND_LIMIT_REACHED` and keep the draft for a retry with the same key.\n- **Start.** The oldest stopped or paused warm instance of the template is claimed: it changes owner to the caller, is set to run, and publishes `instance.starting`; the claim places nothing new. Without one, a new instance is created and placed as `instances.create` would, publishing `instance.created` and, once placed, `instance.scheduled`; when no host fits it waits in scheduling and the sandbox stays `starting`. `warm` in the answer tells which path was taken.\n- **Restore.** `fromSnapshot` starts the sandbox from one of the tenant's own `ready` snapshots of this template, taken on its runtime (another tenant's is `NOT_FOUND`, one not ready is `INVALID_STATE`, one of another template is `INVALID_INPUT`). An agent restores only snapshots of sandboxes it created itself; any other is `NOT_FOUND` to it. A restore never claims a warm instance, and a snapshot that includes memory places only on nodes with the same `cpu.model`. Policies see it as the `fromSnapshot` attribute.\n- **Lifetime.** `ttlSeconds` defaults to the template's `defaultTtlSeconds` and may not exceed its `maxTtlSeconds` (`INVALID_INPUT`). `expiresAt` is set when the sandbox is admitted.\n- **Errors.** `NOT_FOUND` for a template missing or deleted in the tenant. `INVALID_STATE` when the template's flavor has been archived or removed. On the new-instance path the template's pool, flavor and image are checked again, with the errors of `sandboxTemplates.create`; `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota and `CAPACITY_UNAVAILABLE` when the pool has no free IP address, both keeping the draft.\n- **Waiting.** `wait.timeoutMs` (at most 30 seconds) holds the answer until the sandbox leaves `starting`; a timeout returns it still `starting`, not an error.\n- **Identity.** `name`, `metadata` and `labels` take the rules of `instances.create` (`better-compute-` and `bc-` keys reserved) and are part of the request. They stay on the sandbox, never reach its host, and `update` changes them later.\n\nPublishes `sandbox.created` with `warm` and `expiresAt`. `sandbox.ready` follows from the reconciler once the instance first runs."
       },
       {
         "method": "list",
@@ -8233,6 +8475,11 @@
               "maxLength": 57,
               "description": "The sandbox template"
             },
+            "labelSelector": {
+              "type": "string",
+              "maxLength": 1024,
+              "description": "Label requirements that must all hold, comma-separated: key=value, key!=value, key, !key, key in (a,b), key notin (a,b)"
+            },
             "limit": {
               "type": "integer",
               "minimum": 1,
@@ -8249,7 +8496,7 @@
           "additionalProperties": false
         },
         "summary": "Returns a page of the tenant's sandboxes, newest first, with a `cursor` when more remain.",
-        "description": "Returns a page of the tenant's sandboxes, newest first, with a `cursor` when more remain.\n\n`scope` defaults to `mine`, the caller's own sandboxes, which needs no per-item check. `all` lists every sandbox of the tenant, each one checked for `compute:sandboxes:read`; those the caller may not read are left out, so a page can hold fewer than `limit` items. Deleted sandboxes are left out unless `deleted` is true, and `templateId` keeps one template's sandboxes. `limit` is 1 to 200 (default 50); `cursor` is the last sandbox id of the previous page. Drafts are never listed. Each item carries `identityRebound` as `get` describes."
+        "description": "Returns a page of the tenant's sandboxes, newest first, with a `cursor` when more remain.\n\n`scope` defaults to `mine`, the caller's own sandboxes, which needs no per-item check. `all` lists every sandbox of the tenant, each one checked for `compute:sandboxes:read`; those the caller may not read are left out, so a page can hold fewer than `limit` items. Deleted sandboxes are left out unless `deleted` is true, `templateId` keeps one template's sandboxes, and `labelSelector` (as `instances.list` takes it) keeps those whose labels match. `limit` is 1 to 200 (default 50); `cursor` is the last sandbox id of the previous page. Drafts are never listed. Each item carries `identityRebound` as `get` describes."
       },
       {
         "method": "get",
@@ -8452,6 +8699,69 @@
         },
         "summary": "Asks for the sandbox's instance to be deleted and marks the sandbox `deleting`; returns the sandbox at once.",
         "description": "Asks for the sandbox's instance to be deleted and marks the sandbox `deleting`; returns the sandbox at once.\n\nThe instance's `desiredState` becomes `deleted` and the `vps.instances` reconciler releases its allocation, IP lease and quota as for any instance, publishing `instance.deleting` with the `sandboxId`. The call is idempotent: a sandbox already deleting is returned in its current state. Drafts and missing sandboxes are `NOT_FOUND`.\n\nWhen the instance is gone, the `vps.sandboxes` reconciler marks the sandbox deleted, removes it from the authorization projection and publishes `sandbox.deleted` with `expired: false`. Expiry takes the same path after publishing `sandbox.expired`, and its `sandbox.deleted` carries `expired: true`."
+      },
+      {
+        "method": "update",
+        "route": "POST /api/compute/sandboxes/update",
+        "kind": "mutation",
+        "action": "compute:sandboxes:update",
+        "resource": "compute-sandbox",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "sandboxId": {
+              "type": "string",
+              "pattern": "^sbx_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 56,
+              "description": "The sandbox"
+            },
+            "name": {
+              "type": ["string", "null"],
+              "maxLength": 128,
+              "description": "The new display name; null clears it"
+            },
+            "metadata": {
+              "type": ["object", "null"],
+              "maxProperties": 64,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "description": "The new metadata, replacing the old; null or {} clears it"
+            },
+            "labels": {
+              "type": ["object", "null"],
+              "maxProperties": 62,
+              "propertyNames": {
+                "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^[a-z0-9_-]{0,63}$",
+                "maxLength": 63
+              },
+              "description": "The new labels, replacing the old; null or {} clears them"
+            }
+          },
+          "required": ["tenantId", "sandboxId"],
+          "additionalProperties": false
+        },
+        "summary": "Renames a sandbox and replaces its metadata and labels; returns the sandbox.",
+        "description": "Renames a sandbox and replaces its metadata and labels; returns the sandbox.\n\nAt least one of `name`, `metadata` and `labels`, with the rules of `create`; `null` clears a field and `{}` clears metadata or labels, which are replaced as a whole. Decided as `compute:sandboxes:update` on the sandbox. Nothing reaches the host. An update that changes nothing returns the sandbox as it is, with no event; otherwise `sandbox.updated` is published with `changed`. A sandbox being deleted, or deleted, is `INVALID_STATE`; one of another tenant, or none, is `NOT_FOUND`."
       }
     ]
   },
@@ -8869,7 +9179,7 @@
     "group": "system",
     "slug": "system",
     "module": "server",
-    "overview": "The `system` group answers questions about the deployment itself. `whoami` and `version` are public and answer without a credential, which makes them a quick connectivity and credential check; `selfCheck` is a fleet administrator's health report. See [Observability](/docs/operations/observability).",
+    "overview": "The `system` group answers questions about the deployment itself. `whoami` and `version` are public and answer without a credential, which makes them a quick connectivity and credential check; `selfCheck` is a fleet administrator's health report and `workQueue` the work queue's backlog. See [Observability](/docs/operations/observability).",
     "methods": [
       {
         "method": "whoami",
@@ -8933,6 +9243,45 @@
         },
         "summary": "Runs the deployment's read-only health checks and returns the findings, with `ok` false when any finding is an `error`.",
         "description": "Runs the deployment's read-only health checks and returns the findings, with `ok` false when any finding is an `error`.\n\nDecided as `compute:fleet:admin` on `compute-fleet/global`, which resolves only in the root tenant. The report covers the method catalog, applied migrations, the `btree_gist` extension, `compute_now()` against the database clock, the operations checks (overdue work, command sweeper lag, usage dead letters and backlog, gateway headroom, stale heartbeats, daemon protocol skew, expiring node certificates) and every module's own `selfCheck`. A failing check becomes an `error` finding rather than a failed call."
+      },
+      {
+        "method": "workQueue",
+        "route": "POST /api/compute/system/workQueue",
+        "kind": "read",
+        "action": "compute:fleet:admin",
+        "resource": "compute-fleet",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "server",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [],
+          "properties": {
+            "kinds": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 100,
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                "maxLength": 128
+              },
+              "description": "Only these kinds, in this order (a kind with no rows reports zeros); omitted: every kind queued"
+            },
+            "overdueAfterMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 604800000,
+              "default": 300000,
+              "description": "How long past due an unclaimed row counts as overdue"
+            }
+          }
+        },
+        "summary": "Returns the work queue's backlog per kind: how many rows are queued, due, overdue and held by a worker, how many are backing off after failures, and when the next one is due, with how many workers are alive.",
+        "description": "Returns the work queue's backlog per kind: how many rows are queued, due, overdue and held by a worker, how many are backing off after failures, and when the next one is due, with how many workers are alive.\n\nDecided as `compute:fleet:admin` on `compute-fleet/global`, which resolves only in the root tenant. `kinds` (1 to 100) answers those kinds in that order, a kind with no rows as zeros; without it, every kind with rows, sorted. A row is due once its `not_before` passed and no worker holds it, and overdue when that was more than `overdueAfterMs` ago (default 5 minutes, as `selfCheck`'s `workers.queue` check counts it). `nextDueAt` (epoch ms) is the earliest `not_before` of the rows no worker holds, absent when there is none; `at` is the database clock (`compute_now()`) the counts were taken at. It only reads, in one statement."
       }
     ]
   },

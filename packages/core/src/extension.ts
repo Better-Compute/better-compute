@@ -910,6 +910,22 @@ export interface ProviderImpl {
   ): Promise<ExternalMachine>;
   /** Removes the ownership label if it names `instanceId`. */
   release?(id: string, instanceId: string, context: CallContext): Promise<void>;
+  /**
+   * (U-04) Writes the tenant's labels on a machine (and, where the provider labels disks, its boot disk): every key of
+   * `labels` is set, every key of `previous` (what the last call wrote) that `labels` lacks is removed, and every other
+   * label is kept. The provider's own labels (`better-compute-*`) are never set, changed or removed by it: keys with
+   * that prefix (or `bc-`) in either map are ignored. With `instanceId`, a machine whose ownership label names another
+   * instance is `INVALID_STATE`. A machine that is gone is `NOT_FOUND`.
+   */
+  setLabels?(
+    id: string,
+    change: {
+      labels: Readonly<Record<string, string>>;
+      previous?: Readonly<Record<string, string>>;
+    },
+    context: CallContext,
+    instanceId?: string,
+  ): Promise<void>;
   listReservations?(context: CallContext): Promise<ExternalReservation[]>;
   /**
    * (platform compute billing) The provider's list prices, for the regions asked (all when absent). A provider

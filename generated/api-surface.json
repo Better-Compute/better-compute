@@ -2122,9 +2122,39 @@
           },
           "name": {
             "type": "string",
-            "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
-            "maxLength": 63,
-            "description": "A display name"
+            "maxLength": 128,
+            "description": "A display name: 1-128 characters, no control characters or surrounding whitespace"
+          },
+          "metadata": {
+            "type": "object",
+            "maxProperties": 64,
+            "propertyNames": {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "description": "Free-form string metadata kept by better-compute only (at most 64 entries, 16 KiB); keys starting with better-compute- or bc- are reserved"
+          },
+          "labels": {
+            "type": "object",
+            "maxProperties": 62,
+            "propertyNames": {
+              "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^[a-z0-9_-]{0,63}$",
+              "maxLength": 63
+            },
+            "description": "Labels: GCE label rules, at most 62; keys starting with better-compute- or bc- are reserved. In provider pools also written on the machine and its boot disk"
+          },
+          "issuedBy": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$",
+            "maxLength": 128,
+            "description": "Who issued the instance (root callers only): the platform’s provenance"
           },
           "networkId": {
             "type": "string",
@@ -2242,7 +2272,30 @@
               "pattern": "^[a-z0-9_-]{0,63}$",
               "maxLength": 63
             },
-            "description": "Provider labels for the machine (provider pools): GCE label rules, at most 62; keys starting with better-compute- are reserved"
+            "description": "Labels: GCE label rules, at most 62; keys starting with better-compute- or bc- are reserved. In provider pools also written on the machine and its boot disk"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "A display name: 1-128 characters, no control characters or surrounding whitespace"
+          },
+          "metadata": {
+            "type": "object",
+            "maxProperties": 64,
+            "propertyNames": {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "description": "Free-form string metadata kept by better-compute only (at most 64 entries, 16 KiB); keys starting with better-compute- or bc- are reserved"
+          },
+          "issuedBy": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$",
+            "maxLength": 128,
+            "description": "Who issued the instance (root callers only): the platform’s provenance"
           },
           "ownerIdentityId": {
             "type": "string",
@@ -2417,6 +2470,74 @@
         "additionalProperties": false
       }
     },
+    "instances.issued": {
+      "route": "POST /api/compute/instances/issued",
+      "kind": "read",
+      "action": "compute:instances:read",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Only this tenant’s instances"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "scheduling",
+              "provisioning",
+              "starting",
+              "running",
+              "stopped",
+              "rebooting",
+              "resizing",
+              "deleting",
+              "deleted",
+              "error",
+              "lost",
+              "paused"
+            ],
+            "description": "Only instances in this state; without it deleted instances are left out"
+          },
+          "issuedBy": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "Only instances whose issuedBy is this; * for any recorded provenance"
+          },
+          "labelSelector": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "Label requirements that must all hold, comma-separated: key=value, key!=value, key, !key, key in (a,b), key notin (a,b)"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "cursor": {
+            "type": "string",
+            "pattern": "^inst_[0-9a-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The last instance id of the previous page"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
     "instances.list": {
       "route": "POST /api/compute/instances/list",
       "kind": "read",
@@ -2457,13 +2578,25 @@
               "error",
               "lost",
               "paused"
-            ]
+            ],
+            "description": "Only instances in this state; without it deleted instances are left out (deleted needs scope 'mine')"
           },
           "poolId": {
             "type": "string",
             "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
             "maxLength": 57,
             "description": "The pool"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "Only instances of this project"
+          },
+          "labelSelector": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "Label requirements that must all hold, comma-separated: key=value, key!=value, key, !key, key in (a,b), key notin (a,b)"
           },
           "limit": {
             "type": "integer",
@@ -2614,6 +2747,92 @@
             "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
             "maxLength": 57,
             "description": "The instance"
+          }
+        },
+        "required": [
+          "tenantId",
+          "instanceId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "instances.update": {
+      "route": "POST /api/compute/instances/update",
+      "kind": "mutation",
+      "action": "compute:instances:update",
+      "resource": "compute-instance",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "instanceId": {
+            "type": "string",
+            "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The instance"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128,
+            "description": "The new display name; null clears it"
+          },
+          "metadata": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "maxProperties": 64,
+            "propertyNames": {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "description": "The new metadata, replacing the old; null or {} clears it"
+          },
+          "labels": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "maxProperties": 62,
+            "propertyNames": {
+              "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^[a-z0-9_-]{0,63}$",
+              "maxLength": 63
+            },
+            "description": "The new labels, replacing the old; null or {} clears them. Provider pools write them on the machine and its boot disk"
+          },
+          "issuedBy": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$",
+            "maxLength": 128,
+            "description": "Who issued the instance (root callers only); null clears it"
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "The version the caller read: CONFLICT when it moved on"
           }
         },
         "required": [
@@ -8103,6 +8322,36 @@
             "maxLength": 57,
             "description": "Restore this snapshot of the tenant (taken on the same runtime)"
           },
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "A display name: 1-128 characters, no control characters or surrounding whitespace"
+          },
+          "metadata": {
+            "type": "object",
+            "maxProperties": 64,
+            "propertyNames": {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "description": "Free-form string metadata kept by better-compute only (at most 64 entries, 16 KiB); keys starting with better-compute- or bc- are reserved"
+          },
+          "labels": {
+            "type": "object",
+            "maxProperties": 62,
+            "propertyNames": {
+              "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^[a-z0-9_-]{0,63}$",
+              "maxLength": 63
+            },
+            "description": "Labels for label selectors: GCE label rules, at most 62; keys starting with better-compute- or bc- are reserved"
+          },
           "idempotencyKey": {
             "type": "string",
             "pattern": "^[A-Za-z0-9._:-]{1,128}$",
@@ -8322,6 +8571,11 @@
             "maxLength": 57,
             "description": "The sandbox template"
           },
+          "labelSelector": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "Label requirements that must all hold, comma-separated: key=value, key!=value, key, !key, key in (a,b), key notin (a,b)"
+          },
           "limit": {
             "type": "integer",
             "minimum": 1,
@@ -8379,6 +8633,77 @@
             "pattern": "^[A-Za-z0-9._:-]{1,128}$",
             "maxLength": 128,
             "description": "Makes the snapshot id deterministic; a retry returns the same snapshot"
+          }
+        },
+        "required": [
+          "tenantId",
+          "sandboxId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sandboxes.update": {
+      "route": "POST /api/compute/sandboxes/update",
+      "kind": "mutation",
+      "action": "compute:sandboxes:update",
+      "resource": "compute-sandbox",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "sandboxId": {
+            "type": "string",
+            "pattern": "^sbx_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The sandbox"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128,
+            "description": "The new display name; null clears it"
+          },
+          "metadata": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "maxProperties": 64,
+            "propertyNames": {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "description": "The new metadata, replacing the old; null or {} clears it"
+          },
+          "labels": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "maxProperties": 62,
+            "propertyNames": {
+              "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^[a-z0-9_-]{0,63}$",
+              "maxLength": 63
+            },
+            "description": "The new labels, replacing the old; null or {} clears them"
           }
         },
         "required": [
@@ -8825,6 +9150,41 @@
         "properties": {},
         "required": [],
         "additionalProperties": false
+      }
+    },
+    "system.workQueue": {
+      "route": "POST /api/compute/system/workQueue",
+      "kind": "read",
+      "action": "compute:fleet:admin",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "properties": {
+          "kinds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+              "maxLength": 128
+            },
+            "description": "Only these kinds, in this order (a kind with no rows reports zeros); omitted: every kind queued"
+          },
+          "overdueAfterMs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 604800000,
+            "default": 300000,
+            "description": "How long past due an unclaimed row counts as overdue"
+          }
+        }
       }
     },
     "tunnels.open": {

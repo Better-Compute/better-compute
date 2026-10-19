@@ -111,7 +111,11 @@ export class GceEmulator {
   );
   // --- [P4 disks] persistent disks (platform compute billing): what `disks.get` answers for an instance's
   // `disks[].source`. Keyed `zone/name`; an instance disk with no entry here answers 404.
-  persistentDisks = new Map<string, { type: string; sizeGb: string }>();
+  persistentDisks = new Map<
+    string,
+    // (U-04) Labels and their fingerprint, as `disks.get` answers them and `disks.setLabels` changes them.
+    { type: string; sizeGb: string; labels?: Record<string, string>; labelFingerprint?: string }
+  >();
   // --- [/P4 disks]
   /** GCE `Reservation` resources, each with its `zone` URL. */
   reservations: Json[] = [];
@@ -729,8 +733,26 @@ export class GceEmulator {
             sizeGb: disk.sizeGb,
             type: `${origin}/projects/p/zones/${zone}/diskTypes/${disk.type}`,
             selfLink: `${origin}/projects/p/zones/${zone}/disks/${name}`,
+            ...(disk.labels ? { labels: { ...disk.labels } } : {}),
+            ...(disk.labelFingerprint ? { labelFingerprint: disk.labelFingerprint } : {}),
           })
         : this.error(404, 'notFound', `The resource 'projects/p/zones/${zone}/disks/${name}' was not found`);
+    }
+    // (U-04) disks.setLabels under the disk's labelFingerprint.
+    if (collection === 'disks' && method === 'POST' && name && action === 'setLabels') {
+      const disk = this.persistentDisks.get(`${zone}/${name}`);
+      const target = `${origin}/projects/p/zones/${zone}/disks/${name}`;
+      if (!disk) return this.error(404, 'notFound', `The resource '${target}' was not found`);
+      if ((body?.labelFingerprint ?? undefined) !== disk.labelFingerprint)
+        return this.error(
+          412,
+          'conditionNotMet',
+          'Labels fingerprint either invalid or resource labels have changed',
+        );
+      return this.#operation('zones', zone, 'setLabels', target, () => {
+        disk.labels = { ...(body!.labels ?? {}) };
+        disk.labelFingerprint = randomUUID().slice(0, 8);
+      });
     }
     // [/P4 disks]
     if (collection === 'diskTypes' && method === 'GET' && name) {

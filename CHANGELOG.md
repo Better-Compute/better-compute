@@ -141,8 +141,8 @@ All notable changes to the better-compute packages are documented here. The form
   pool as `CONFLICT`, refuses a Compute Engine machine outside the pool's region (`INVALID_INPUT`), and lets a tenant
   the pool is offered to attach a machine bound to it; detach and delete keep the binding, so the machine returns to its
   pool. `providerAccounts.machines` shows `poolId`. Migration `vps/0042_pool_machines`.
-- **Instance labels** (`@better-compute/vps`, `@better-compute/core`). `instances.create` takes `labels` in provider
-  pools (Compute Engine label rules, at most 62, keys starting with `better-compute-` reserved), stores them
+- **Instance labels** (`@better-compute/vps`, `@better-compute/core`). `instances.create` takes `labels`
+  (Compute Engine label rules, at most 62, keys starting with `better-compute-` or `bc-` reserved), stores them
   (`vps/0043_instance_labels`), shows them on `Instance.labels` (optional, additive) and passes them to
   `ProviderImpl.create`; the provider's own ownership labels still win.
 - **`networks.adopt`** (`@better-compute/vps`). The platform (`compute:providers:manage` on the fleet) registers a
@@ -151,6 +151,38 @@ All notable changes to the better-compute packages are documented here. The form
   `targets.instanceIds` and always compile to instance network tags. `default` needs `sharedTagScoped: true`, which
   the network records. `providerResourceName(id, externalName?)` prefers the VPC's own name; migration
   `vps/0044_network_adopt` (`networks.external_name`, `networks.shared_tag_scoped`); event `network.adopted`.
+
+- **Instance identity and listing (U-04)** (`@better-compute/vps`, `core`, `server`, `provider-gcp`).
+  - **Name, metadata and labels.** `instances.create`, `instances.attach` and `sandboxes.create` take `name` (a
+    display name, 1 to 128 characters), `metadata` (up to 64 string entries, 16 KiB, kept by better-compute only)
+    and `labels` (Compute Engine rules); hosted instances and sandboxes now take labels too. Keys starting with
+    `better-compute-` or `bc-` are refused in labels and metadata. `Instance` and `Sandbox` show them, and
+    `Instance.createdAt` (epoch ms). Migration `vps/0046_instance_identity`.
+  - **`instances.update`** (`compute:instances:update`) and **`sandboxes.update`** (`compute:sandboxes:update`)
+    rename and replace metadata and labels (`null` or `{}` clears; `expectedVersion` for instances), publishing
+    `instance.updated` / `sandbox.updated` with `changed`. In provider pools the reconciler writes new labels on the
+    VM and its boot disk through the new optional `ProviderImpl.setLabels(id, { labels, previous }, context,
+    instanceId?)`; a refused write leaves a `LabelsNotApplied` condition and is retried.
+  - **`issuedBy`**, the platform's provenance: `instances.create`, `instances.attach` and `instances.update` take
+    it from root callers only (`ACCESS_DENIED`, `details.reason: 'issued-by-platform-only'` otherwise).
+  - **`instances.list`** leaves deleted instances out in SQL, before the per-item checks (`state: 'deleted'` with
+    `scope: 'mine'` lists them; with `scope: 'all'` it is `INVALID_INPUT`), and filters by `projectId` and
+    `labelSelector` (`key=value`, `key!=value`, `key`, `!key`, `key in (a,b)`, `key notin (a,b)`) besides
+    `state` and `poolId`, with its cursor. `sandboxes.list` takes `labelSelector` too.
+  - **`instances.issued`** (root only: `compute:instances:read` on `compute-fleet`, a new fleet action): the
+    instances on the root tenant's pools in other tenants, newest first and paged, filtered by `tenantId`,
+    `poolId`, `state`, `issuedBy` and `labelSelector`.
+  - **`system.workQueue`** (`compute:fleet:admin`): the work queue's backlog per kind (queued, due, overdue,
+    claimed, retrying, `nextDueAt`) and the live workers. `workQueueStats` is exported by `@better-compute/server`.
+  - **Disks.** `Instance.disks` shows the disks the provider last reported for a provider machine
+    (`ExternalMachine.disks`: type, size, boot), what `disk.<type>.gib.hours` meters. provider-gcp exports its disk
+    helpers (`bootDiskTypes`, `defaultBootDiskType`, `hyperdiskBootType`, `diskSizeRange`, `needsGvnic`,
+    `isDiskTypeRefusal`) and the label helpers (`machineLabels`, `tenantLabels`, `changedLabels`,
+    `isReservedLabelKey`, `labelBootDisk`, `diskPath`).
+  - **provider-gcp labels.** A created VM's boot disk carries the VM's labels. Tenant label keys that are, or become
+    once lower-cased, `better-compute-*` or `bc-*` are dropped, and the ownership labels are merged last.
+    `GcpCompute.setLabels` changes a VM's and its boot disk's tenant labels under their label fingerprints, keeping
+    every other label, and refuses a VM labelled for another instance (`INVALID_STATE`, `reason: 'notOwner'`).
 
 ### Changed
 

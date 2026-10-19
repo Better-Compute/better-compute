@@ -23,6 +23,13 @@ import {
 } from './budget-suspend.js';
 import { readFlavorByName, type FlavorRecord } from './flavors.js';
 import {
+  displayName,
+  instanceLabels,
+  instanceMetadata,
+  labelSelectorSql,
+  parseLabelSelector,
+} from './instance-identity.js';
+import {
   canonical,
   fail,
   id,
@@ -943,6 +950,10 @@ export interface Sandbox {
   identityRebound?: boolean;
   /** Its snapshots, newest first (`sandboxes.get` only). */
   snapshots?: SandboxSnapshot[];
+  /** (U-04) A display name, metadata and labels (`sandboxes.create`, `sandboxes.update`); never sent to a host. */
+  name?: string;
+  metadata?: Record<string, string>;
+  labels?: Record<string, string>;
 }
 
 export interface CreateSandboxInput {
@@ -952,6 +963,10 @@ export interface CreateSandboxInput {
   ttlSeconds?: number;
   /** Restore this snapshot (the tenant's own, same runtime) instead of booting the image. */
   fromSnapshot?: string;
+  /** (U-04) A display name, metadata and labels, as `instances.create` takes them. */
+  name?: string;
+  metadata?: Record<string, string>;
+  labels?: Record<string, string>;
   idempotencyKey: string;
   /** §9.1 async-with-wait: hold the answer up to `timeoutMs` (≤ 30 s) until the sandbox leaves `starting`. */
   wait?: { timeoutMs: number };
@@ -978,6 +993,8 @@ export interface ListSandboxesInput {
   /** Include deleted sandboxes (default: open ones only). */
   deleted?: boolean;
   templateId?: string;
+  /** (U-04) Only sandboxes whose labels match (`parseLabelSelector`). */
+  labelSelector?: string;
   limit?: number;
   cursor?: string;
 }
@@ -988,6 +1005,9 @@ export function parseCreateSandbox(raw: unknown): CreateSandboxInput {
     'templateId',
     'ttlSeconds',
     'fromSnapshot',
+    'name',
+    'metadata',
+    'labels',
     'idempotencyKey',
     'wait',
   ]);
@@ -1000,6 +1020,15 @@ export function parseCreateSandbox(raw: unknown): CreateSandboxInput {
   if (ttlSeconds !== undefined) result.ttlSeconds = ttlSeconds;
   const fromSnapshot = optional(input.fromSnapshot, (value) => id(value, 'snap', 'fromSnapshot'));
   if (fromSnapshot !== undefined) result.fromSnapshot = fromSnapshot;
+  if (input.name !== undefined) result.name = displayName(input.name);
+  if (input.metadata !== undefined) {
+    const metadata = instanceMetadata(input.metadata);
+    if (Object.keys(metadata).length > 0) result.metadata = metadata;
+  }
+  if (input.labels !== undefined) {
+    const labels = instanceLabels(input.labels);
+    if (Object.keys(labels).length > 0) result.labels = labels;
+  }
   if (input.wait !== undefined) {
     const wait = object(input.wait, ['timeoutMs']);
     result.wait = { timeoutMs: int(wait.timeoutMs, 'wait.timeoutMs', 0, 30_000) };
@@ -1035,7 +1064,15 @@ export function parseExtendSandbox(raw: unknown): ExtendSandboxInput {
 }
 
 export function parseListSandboxes(raw: unknown): ListSandboxesInput {
-  const input = object(raw, ['tenantId', 'scope', 'deleted', 'templateId', 'limit', 'cursor']);
+  const input = object(raw, [
+    'tenantId',
+    'scope',
+    'deleted',
+    'templateId',
+    'labelSelector',
+    'limit',
+    'cursor',
+  ]);
   if (input.scope !== undefined && input.scope !== 'mine' && input.scope !== 'all')
     fail('scope must be mine or all');
   if (input.deleted !== undefined && typeof input.deleted !== 'boolean')
@@ -1047,6 +1084,11 @@ export function parseListSandboxes(raw: unknown): ListSandboxesInput {
   if (input.deleted === true) result.deleted = true;
   const templateId = optional(input.templateId, (value) => id(value, 'sbxt', 'templateId'));
   if (templateId !== undefined) result.templateId = templateId;
+  if (input.labelSelector !== undefined) {
+    parseLabelSelector(input.labelSelector);
+    if ((input.labelSelector as string).trim() !== '')
+      result.labelSelector = input.labelSelector as string;
+  }
   const limit = optional(input.limit, (value) => int(value, 'limit', 1, 200));
   if (limit !== undefined) result.limit = limit;
   const cursor = optional(input.cursor, (value) => id(value, 'sbx', 'cursor'));
@@ -1082,6 +1124,9 @@ interface RawSandbox {
   extending_request: string | null;
   /** NULL: no own identity to install (not a memory restore, or no exec); else whether it is in. */
   identity_rebound: boolean | null;
+  name: string | null;
+  metadata: Record<string, string> | string | null;
+  labels: Record<string, string> | string | null;
 }
 
 const ms = (column: string) => `(extract(epoch FROM ${column}) * 1000)::float8`;
@@ -1093,7 +1138,8 @@ const sandboxColumns = `s.id, s.tenant_id, s.template_id, s.pool_id, s.instance_
   i.state AS instance_state, i.addresses, i.node_id, s.from_snapshot, s.agent_id, s.delegation_id,
   s.extending_request,
   CASE WHEN i.identity_rebind_ref IS NULL THEN NULL
-       ELSE i.identity_rebound_ref IS NOT DISTINCT FROM i.identity_rebind_ref END AS identity_rebound`;
+       ELSE i.identity_rebound_ref IS NOT DISTINCT FROM i.identity_rebind_ref END AS identity_rebound,
+  s.name, s.metadata, s.labels`;
 const sandboxFrom = `sandboxes s LEFT JOIN instances i ON i.id = s.instance_id`;
 
 async function readSandbox(
@@ -1142,6 +1188,11 @@ export function sandboxView(raw: RawSandbox): Sandbox {
   if (raw.from_snapshot !== null) view.fromSnapshot = raw.from_snapshot;
   if (raw.identity_rebound !== null && raw.identity_rebound !== undefined)
     view.identityRebound = raw.identity_rebound;
+  const jsonMap = (value: Record<string, string> | string): Record<string, string> =>
+    typeof value === 'string' ? JSON.parse(value) : { ...value };
+  if (raw.name !== null && raw.name !== undefined) view.name = raw.name;
+  if (raw.metadata !== null && raw.metadata !== undefined) view.metadata = jsonMap(raw.metadata);
+  if (raw.labels !== null && raw.labels !== undefined) view.labels = jsonMap(raw.labels);
   return view;
 }
 
@@ -1294,8 +1345,9 @@ export async function prepareCreateSandbox(
   if (!existing)
     await tx.query(
       `INSERT INTO sandboxes (id, tenant_id, template_id, pool_id, instance_id, ttl_seconds, from_snapshot,
-                              owner_identity_id, agent_id, delegation_id, idempotency_key, request_hash, version)
-       VALUES ($1, $2, $3, $4, $5, $6, $12, $7, $8, $9, $10, decode($11, 'hex'), 1)`,
+                              owner_identity_id, agent_id, delegation_id, idempotency_key, request_hash, version,
+                              name, metadata, labels)
+       VALUES ($1, $2, $3, $4, $5, $6, $12, $7, $8, $9, $10, decode($11, 'hex'), 1, $13, $14::jsonb, $15::jsonb)`,
       [
         sandboxId,
         input.tenantId,
@@ -1309,6 +1361,9 @@ export async function prepareCreateSandbox(
         input.idempotencyKey,
         hash,
         input.fromSnapshot ?? null,
+        input.name ?? null,
+        input.metadata ? JSON.stringify(input.metadata) : null,
+        input.labels ? JSON.stringify(input.labels) : null,
       ],
     );
   await deps.authz.upsert(tx, {
@@ -2041,22 +2096,29 @@ export async function listSandboxes(
 ): Promise<{ items: Sandbox[]; cursor?: string }> {
   const limit = input.limit ?? 50;
   const owner = input.scope === 'mine' ? (callerIdentityId ?? '') : null;
+  const params: unknown[] = [
+    input.tenantId,
+    owner,
+    input.deleted === true,
+    input.templateId ?? null,
+    input.cursor ?? null,
+    limit + 1,
+  ];
+  const selector = labelSelectorSql(
+    input.labelSelector !== undefined ? parseLabelSelector(input.labelSelector) : [],
+    's.labels',
+    params,
+  );
   const { rows } = await tx.query<RawSandbox>(
     `SELECT ${sandboxColumns} FROM ${sandboxFrom}
       WHERE s.tenant_id = $1 AND NOT s.draft
         AND ($2::text IS NULL OR s.owner_identity_id = $2)
         AND ($3::bool OR s.deleted_at IS NULL) AND ($4::text IS NULL OR s.template_id = $4)
+        AND (${selector})
         AND ($5::text IS NULL OR (s.created_at, s.id) <
              (SELECT created_at, id FROM sandboxes WHERE id = $5 AND tenant_id = $1))
       ORDER BY s.created_at DESC, s.id DESC LIMIT $6`,
-    [
-      input.tenantId,
-      owner,
-      input.deleted === true,
-      input.templateId ?? null,
-      input.cursor ?? null,
-      limit + 1,
-    ],
+    params,
   );
   const page = rows.slice(0, limit);
   const result: { items: Sandbox[]; cursor?: string } = { items: page.map(sandboxView) };
@@ -2092,6 +2154,77 @@ export async function deleteSandbox(
     );
   await deleteSandboxInstance(deps, tx, raw);
   await deps.work.enqueue(tx, sandboxWork, 'all');
+  return sandboxView((await readSandbox(tx, raw.id))!);
+}
+
+export interface UpdateSandboxInput extends SandboxRef {
+  /** The new display name; null clears it. */
+  name?: string | null;
+  /** The new metadata, replacing the old; null (or `{}`) clears it. */
+  metadata?: Record<string, string> | null;
+  /** The new labels, replacing the old; null (or `{}`) clears them. */
+  labels?: Record<string, string> | null;
+}
+
+/** Empty maps clear, as null does. */
+const mapOrNull = (value: Record<string, string> | null): Record<string, string> | null =>
+  value === null || Object.keys(value).length === 0 ? null : value;
+
+export function parseUpdateSandbox(raw: unknown): UpdateSandboxInput {
+  const input = object(raw, ['tenantId', 'sandboxId', 'name', 'metadata', 'labels']);
+  const result: UpdateSandboxInput = {
+    tenantId: tenant(input.tenantId),
+    sandboxId: id(input.sandboxId, 'sbx', 'sandboxId'),
+  };
+  if (input.name !== undefined) result.name = input.name === null ? null : displayName(input.name);
+  if (input.metadata !== undefined)
+    result.metadata = mapOrNull(input.metadata === null ? null : instanceMetadata(input.metadata));
+  if (input.labels !== undefined)
+    result.labels = mapOrNull(input.labels === null ? null : instanceLabels(input.labels));
+  if (result.name === undefined && result.metadata === undefined && result.labels === undefined)
+    fail('Give at least one of name, metadata or labels');
+  return result;
+}
+
+const sameMap = (a: Record<string, string> | null, b: Record<string, string> | null): boolean =>
+  JSON.stringify(Object.entries(a ?? {}).sort()) === JSON.stringify(Object.entries(b ?? {}).sort()) &&
+  (a === null) === (b === null);
+
+/**
+ * (U-04) `sandboxes.update`: renames a sandbox and replaces its metadata and labels. Nothing reaches its host. A
+ * deleted (or deleting) sandbox is INVALID_STATE; an update that changes nothing returns the sandbox as it is.
+ */
+export async function updateSandbox(
+  deps: Pick<InstanceDeps, 'events'>,
+  tx: SqlTx,
+  input: UpdateSandboxInput,
+): Promise<Sandbox> {
+  const raw = await lockOpenSandbox(tx, input);
+  if (raw.deleting_ms !== null || raw.deleted_ms !== null)
+    throw new ComputeError('INVALID_STATE', `Sandbox ${raw.id} is being deleted`);
+  const current = sandboxView(raw);
+  const changed: string[] = [];
+  const sets: string[] = [];
+  const params: unknown[] = [raw.id];
+  const set = (column: string, value: unknown, cast = '') => {
+    params.push(value);
+    sets.push(`${column} = $${params.length}${cast}`);
+  };
+  if (input.name !== undefined && (input.name ?? undefined) !== current.name) {
+    changed.push('name');
+    set('name', input.name);
+  }
+  if (input.metadata !== undefined && !sameMap(input.metadata, current.metadata ?? null)) {
+    changed.push('metadata');
+    set('metadata', input.metadata === null ? null : JSON.stringify(input.metadata), '::jsonb');
+  }
+  if (input.labels !== undefined && !sameMap(input.labels, current.labels ?? null)) {
+    changed.push('labels');
+    set('labels', input.labels === null ? null : JSON.stringify(input.labels), '::jsonb');
+  }
+  if (changed.length === 0) return current;
+  await tx.query(`UPDATE sandboxes SET ${sets.join(', ')}, version = version + 1 WHERE id = $1`, params);
+  await publishSandbox(deps, tx, raw, 'sandbox.updated', { changed });
   return sandboxView((await readSandbox(tx, raw.id))!);
 }
 

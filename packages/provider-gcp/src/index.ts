@@ -7,6 +7,8 @@ export * from './client.js';
 export * from './compute.js';
 export * from './config.js';
 export * from './costs.js';
+export * from './disk-labels.js';
+export * from './disks.js';
 export { checkGcpAccount } from './federation.js';
 export * from './ids.js';
 export * from './prices.js';

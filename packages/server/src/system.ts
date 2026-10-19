@@ -6,6 +6,13 @@ import {
   type MethodDefinition,
 } from '@better-compute/core';
 import type { SelfCheckReport } from './self-check.js';
+import {
+  parseWorkQueueStats,
+  workQueueStats,
+  workQueueStatsSchema,
+  type WorkQueueStats,
+  type WorkQueueStatsInput,
+} from './work-queue-stats.js';
 import type { ServerInfo } from './version.js';
 
 /** The input of a method that takes none: `{}`, or nothing at all. */
@@ -17,12 +24,16 @@ export type CallerIdentity = Omit<Caller, 'sessionId'>;
 /** Who is calling: the authenticated identity, or anonymous when the call carried no credential. */
 export type WhoAmI = { authenticated: false } | ({ authenticated: true } & CallerIdentity);
 
-/** The `system` group (§9.2): `whoami` and `version` are public; `selfCheck` needs `compute:fleet:admin`. */
+/**
+ * The `system` group (§9.2): `whoami` and `version` are public; `selfCheck` and `workQueue` (U-04) need
+ * `compute:fleet:admin`.
+ */
 export type SystemApi = {
   system: {
     whoami: MethodDefinition<NoInput, WhoAmI>;
     version: MethodDefinition<NoInput, ServerInfo>;
     selfCheck: MethodDefinition<NoInput, SelfCheckReport>;
+    workQueue: MethodDefinition<WorkQueueStatsInput, WorkQueueStats>;
   };
 };
 
@@ -81,6 +92,14 @@ export function systemApi(host: {
         resource: () => ({ type: 'fleet', id: fleetResourceId }),
         validate: validateNoInput,
         handler: () => host.selfCheck(),
+      }),
+      // (U-04) The work queue's backlog per kind; it only reads.
+      workQueue: defineMethod<WorkQueueStatsInput, WorkQueueStats>({
+        action: 'compute:fleet:admin',
+        kind: 'read',
+        resource: () => ({ type: 'fleet', id: fleetResourceId }),
+        validate: Object.assign(parseWorkQueueStats, { jsonSchema: workQueueStatsSchema }),
+        handler: (context, input) => workQueueStats(context.sql, input),
       }),
     },
   };

@@ -647,6 +647,7 @@ describe('instances.create labels', () => {
     expect(await refused({ team: 'v'.repeat(64) })).toBe('INVALID_INPUT');
     expect(await refused({ team: 7 })).toBe('INVALID_INPUT');
     expect(await refused({ 'better-compute-instance': 'inst_x' })).toBe('INVALID_INPUT');
+    expect(await refused({ 'bc-tag': 'x' })).toBe('INVALID_INPUT');
     expect(
       await refused(
         Object.fromEntries(Array.from({ length: maxInstanceLabels + 1 }, (_, i) => [`k${i}`, 'v'])),
@@ -658,47 +659,5 @@ describe('instances.create labels', () => {
       Array.from({ length: maxInstanceLabels }, (_, i) => [`k${i}`, i === 0 ? '' : 'v']),
     );
     expect((await create({ labels: many }, 'many')).labels).toEqual(many);
-  });
-
-  it('refuses labels on a hosted pool', async () => {
-    const { w } = await labelWorld();
-    const site = await w.api.sites.create(w.root, {
-      tenantId: w.rootTenant,
-      kind: 'shared',
-      region: 'eu',
-      idempotencyKey: 'hosted-site',
-    });
-    const hosted = await w.api.pools.create(w.root, {
-      tenantId: w.rootTenant,
-      siteId: site.id,
-      class: 'vps-host',
-      idempotencyKey: 'hosted',
-    });
-    await w.api.pools.offer(w.root, {
-      tenantId: w.rootTenant,
-      poolId: hosted.id,
-      toTenantId: w.acmeTenant,
-      quota: { vcpu: 8 },
-    });
-    await w.api.flavors.create(w.root, {
-      tenantId: w.rootTenant,
-      poolId: hosted.id,
-      name: 'small',
-      vcpu: 1,
-      memoryGiB: 1,
-      diskGiB: 10,
-    });
-    expect(
-      await code(
-        w.api.instances.create(w.acme, {
-          tenantId: w.acmeTenant,
-          poolId: hosted.id,
-          flavor: 'small',
-          imageId: 'debian-12',
-          labels: { team: 'ml' },
-          idempotencyKey: 'hosted-vm',
-        }),
-      ),
-    ).toBe('INVALID_INPUT');
   });
 });
