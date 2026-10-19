@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { ExternalReservation } from '@better-compute/core';
 import { closeFixtures } from '@better-compute/testing';
 import { vps, type BillableShape } from '@better-compute/vps';
-import { gceWorld, type GceWorld } from './support/vps-gce.js';
+import { gceWorld, type GceWorld, type GceWorldOptions } from './support/vps-gce.js';
 
 // Platform compute billing, phase 3 (commitments): reserved-rate meters for instances admitted against a provider
 // reservation (D8, Task 9), reservation grants with grant-aware admission (D7, Task 10) and grant billing by committed
@@ -266,8 +266,8 @@ const codeOf = (promise: Promise<unknown>) =>
   );
 
 /** A world whose reservation (4 slots by default) is bound, offered to acme and to other. */
-async function grantWorld(extra: Partial<ExternalReservation> = {}) {
-  const world = await gceWorld();
+async function grantWorld(extra: Partial<ExternalReservation> = {}, options: GceWorldOptions = {}) {
+  const world = await gceWorld(options);
   const { other } = world.fixture.tenants;
   world.fixture.iam.allow({ token: other.token });
   await world.api.pools.offer(world.root, {
@@ -646,12 +646,29 @@ describe('grants', () => {
     expect(refused).toMatchObject({ code: 'INVALID_STATE', details: { grantIds: [g.id] } });
 
     await world.fixture.advance(HOUR);
-    await endGrant(world, g.id);
+    const ended = await endGrant(world, g.id);
     await unbind();
+    // Ended, but its committed slot-hours are not all metered yet: the account stays (F10-7).
+    const unmetered = await deleteAccount().catch((error: unknown) => error);
+    expect(unmetered).toMatchObject({ code: 'INVALID_STATE', details: { grantIds: [g.id] } });
+    expect((unmetered as Error).message).toMatch(/vps\.grants/);
+    await world.fixture.advance(2 * HOUR);
+    await world.tick('vps.grants', 2);
+    const metered = await windows(world, 'grant');
+    expect(metered.length).toBeGreaterThan(0);
+    expect(
+      metered.every((row) => row.meter === 'vm.grant.slot.hours' && row.sourceId === g.id),
+    ).toBe(true);
+    expect(sum(metered, 'vm.grant.slot.hours')).toBeCloseTo(
+      (ended.endsAt - ended.startsAt) / HOUR,
+      5,
+    );
     await deleteAccount();
     expect((await world.fixture.database.query(`SELECT 1 FROM reservation_grants`)).rows).toEqual(
       [],
     );
+    // The usage it wrote stays.
+    expect(await windows(world, 'grant')).toEqual(metered);
     expect((await grantOf(world, created.id)).reservation_grant_id).toBeNull();
   });
 
