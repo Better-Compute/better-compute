@@ -34,6 +34,7 @@ export const costsBudgetMs = 45_000;
 /** Rows written per transaction. */
 const batchSize = 500;
 const dayMs = 86_400_000;
+const HOUR = 3_600_000;
 
 /** The labels better-compute writes on provider resources, read back from cost rows. */
 export const costLabels = {
@@ -54,6 +55,11 @@ export interface CostsOptions {
    * flagged `CurrencyMismatch`, and excluded from pass-through and margins.
    */
   currency?: string;
+  /**
+   * Leak detection (D12): an instance whose provider-billed compute hours in a UTC day exceed its metered running
+   * hours by more than this raises `billing.leak` (default 1).
+   */
+  leakToleranceHours?: number;
 }
 
 export const providerCostsMigration: Migration = {
@@ -71,12 +77,22 @@ CREATE TABLE provider_costs (
   -- CurrencyMismatch: stored as received, excluded from pass-through and margins.
   conditions text[] NOT NULL DEFAULT '{}',
   passed_through_at timestamptz, pass_through_key text,
+  -- The reported meter the row was passed through on (margins by meter).
+  pass_through_meter text,
   ingested_at timestamptz NOT NULL DEFAULT compute_now(), updated_at timestamptz NOT NULL DEFAULT compute_now(),
   PRIMARY KEY (account_id, source_row_id)
 );
 CREATE INDEX provider_costs_tenant_day ON provider_costs (tenant_id, usage_start);
 CREATE TABLE provider_cost_scans (account_id text PRIMARY KEY REFERENCES provider_accounts ON DELETE CASCADE,
   next_at timestamptz NOT NULL, scanned_to timestamptz, last_error text);
+-- billing.leak raised (D12): at most once per instance and UTC day.
+CREATE TABLE provider_cost_leaks (
+  instance_id text NOT NULL, day date NOT NULL,
+  account_id text NOT NULL REFERENCES provider_accounts ON DELETE CASCADE,
+  provider_hours numeric NOT NULL, metered_hours numeric NOT NULL,
+  raised_at timestamptz NOT NULL DEFAULT compute_now(),
+  PRIMARY KEY (instance_id, day)
+);
 -- Pass-through rules (Task 16), validated by vps.
 ALTER TABLE provider_accounts ADD COLUMN billing jsonb NOT NULL DEFAULT '{}';
 `,
@@ -580,14 +596,160 @@ export async function passThroughCosts(
       ],
     );
     await tx.query(
-      `UPDATE provider_costs SET passed_through_at = compute_now(), pass_through_key = $3
+      `UPDATE provider_costs SET passed_through_at = compute_now(), pass_through_key = $3,
+              pass_through_meter = $4
         WHERE account_id = $1 AND source_row_id = $2`,
-      [account.id, record.sourceRowId, key],
+      [account.id, record.sourceRowId, key, rule.meter],
     );
     passed++;
     micros += costMicros;
   }
   return { passedThroughRows: passed, passedThroughMicros: micros };
+}
+
+// --- Leak detection (D12) -----------------------------------------------------------------------------------
+
+interface LeakRow {
+  instance_id: string;
+  tenant_id: string | null;
+  record: ProviderCostRecord | string;
+}
+
+/** The UTC day (`YYYY-MM-DD`) of a time. */
+const dayOf = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+
+/**
+ * The leak check (D12), in the pass's last transaction: per instance and UTC day of the window, the hours the
+ * provider billed compute for (hour slots covered by regular rows of its `computeSku`, attributed to the
+ * instance) against the hours of those slots a `running` usage interval of the instance overlaps. When the
+ * provider's exceed the metered by more than `toleranceHours`, `billing.leak` is published, at most once per
+ * instance-day (`provider_cost_leaks`). Providers without `computeSku` are not checked.
+ */
+export async function detectLeaks(
+  deps: Pick<CostsDeps, 'providers' | 'events' | 'clock'>,
+  tx: SqlTx,
+  account: ProviderAccount,
+  window: { from: number; to: number },
+  toleranceHours: number,
+): Promise<{ leaks: number }> {
+  const computeSku = deps.providers.get(account.provider)?.billing?.computeSku;
+  if (typeof computeSku !== 'function') return { leaks: 0 };
+  const { rows } = await tx.query<LeakRow>(
+    `SELECT instance_id, tenant_id, record FROM provider_costs
+      WHERE account_id = $1 AND instance_id IS NOT NULL
+        AND usage_start >= to_timestamp($2::float8 / 1000) AND usage_start < to_timestamp($3::float8 / 1000)`,
+    [account.id, window.from, window.to],
+  );
+  // instance → day → billed hour slots (slot start ms)
+  const billed = new Map<string, { tenantId: string | null; days: Map<string, Set<number>> }>();
+  for (const row of rows) {
+    const record = json(row.record);
+    if (record.costType !== undefined && record.costType !== 'regular') continue;
+    if (!(record.quantity > 0) || !computeSku(record)) continue;
+    const entry = billed.get(row.instance_id) ?? { tenantId: row.tenant_id, days: new Map() };
+    billed.set(row.instance_id, entry);
+    const first = Math.floor(record.usageStart / HOUR) * HOUR;
+    for (let slot = first; slot < record.usageEnd; slot += HOUR) {
+      const day = dayOf(slot);
+      const slots = entry.days.get(day) ?? new Set<number>();
+      entry.days.set(day, slots);
+      slots.add(slot);
+    }
+  }
+  if (billed.size === 0) return { leaks: 0 };
+  const { rows: intervals } = await tx.query<{
+    instance_id: string;
+    started_ms: number;
+    ended_ms: number | null;
+  }>(
+    `SELECT instance_id, (extract(epoch FROM started_at) * 1000)::float8 AS started_ms,
+            (extract(epoch FROM ended_at) * 1000)::float8 AS ended_ms
+       FROM instance_usage_intervals
+      WHERE instance_id = ANY($1::text[]) AND phase = 'running'
+        AND started_at < to_timestamp($3::float8 / 1000)
+        AND (ended_at IS NULL OR ended_at > to_timestamp($2::float8 / 1000) - interval '1 day')`,
+    [[...billed.keys()], window.from, window.to + dayMs],
+  );
+  const now = deps.clock.now();
+  let leaks = 0;
+  for (const [instanceId, { tenantId, days }] of billed) {
+    const running = intervals
+      .filter((interval) => interval.instance_id === instanceId)
+      .map((interval) => ({
+        start: Number(interval.started_ms),
+        end: interval.ended_ms === null ? now : Number(interval.ended_ms),
+      }));
+    for (const [day, slots] of [...days].sort(([a], [b]) => a.localeCompare(b))) {
+      const providerHours = slots.size;
+      let meteredHours = 0;
+      for (const slot of slots)
+        if (running.some((span) => span.start < slot + HOUR && span.end > slot)) meteredHours++;
+      if (providerHours - meteredHours <= toleranceHours) continue;
+      const { rows: raised } = await tx.query(
+        `INSERT INTO provider_cost_leaks (instance_id, day, account_id, provider_hours, metered_hours)
+         VALUES ($1, $2::date, $3, $4, $5) ON CONFLICT DO NOTHING RETURNING instance_id`,
+        [instanceId, day, account.id, providerHours, meteredHours],
+      );
+      if (raised.length === 0) continue;
+      leaks++;
+      await deps.events.publish(tx, {
+        type: 'billing.leak',
+        tenantId: account.tenantId,
+        subject: `provider-account/${account.id}`,
+        data: {
+          accountId: account.id,
+          instanceId,
+          tenantId,
+          day,
+          providerHours,
+          meteredHours,
+        },
+      });
+    }
+  }
+  return { leaks };
+}
+
+// --- Margins (D12) -------------------------------------------------------------------------------------------
+
+/** What `billing.margins` groups by. */
+export type MarginGroup = 'tenant' | 'pool' | 'account' | 'meter';
+
+/** The key of attributed cost that has no value for the grouping (a tenant-label row has no pool, say). */
+export const noGroupKey = '(none)';
+
+/**
+ * Provider cost (cost + credits, micros) over `[from, to)` of usage start, in the deployment currency only
+ * (`CurrencyMismatch` rows excluded): attributed cost by group, and the unattributed total. Pools come from the
+ * row's instance; meters are the reported meters rows were passed through on.
+ */
+export async function providerCostTotals(
+  sql: { query: SqlTx['query'] },
+  input: { from: number; to: number; groupBy: MarginGroup; currency: string },
+): Promise<{ groups: Map<string, number>; unattributedMicros: number }> {
+  const groupExpr = {
+    tenant: 'c.tenant_id',
+    account: 'c.account_id',
+    pool: `COALESCE(i.pool_id, '${noGroupKey}')`,
+    meter: `COALESCE(c.pass_through_meter, '${noGroupKey}')`,
+  }[input.groupBy];
+  const join = input.groupBy === 'pool' ? 'LEFT JOIN instances i ON i.id = c.instance_id' : '';
+  const { rows } = await sql.query<{ key: string | null; micros: string | number }>(
+    `SELECT CASE WHEN c.tenant_id IS NULL THEN NULL ELSE ${groupExpr} END AS key,
+            SUM(c.cost_micros + c.credits_micros)::text AS micros
+       FROM provider_costs c ${join}
+      WHERE c.usage_start >= to_timestamp($1::float8 / 1000) AND c.usage_start < to_timestamp($2::float8 / 1000)
+        AND upper(c.currency) = $3 AND NOT ($4 = ANY(c.conditions))
+      GROUP BY 1`,
+    [input.from, input.to, input.currency.toUpperCase(), currencyMismatch],
+  );
+  const groups = new Map<string, number>();
+  let unattributedMicros = 0;
+  for (const row of rows) {
+    if (row.key === null) unattributedMicros += Number(row.micros);
+    else groups.set(row.key, Number(row.micros));
+  }
+  return { groups, unattributedMicros };
 }
 
 /** The validated settings of `vps({ costs })`. */
@@ -596,6 +758,7 @@ export function costSettings(options: CostsOptions): {
   everyMs: number;
   lookbackMs: number;
   currency: string;
+  leakToleranceHours: number;
 } {
   const every = options.every ?? '6h';
   const everyMs = parseDuration(every);
@@ -611,7 +774,19 @@ export function costSettings(options: CostsOptions): {
       'INVALID_CONFIG',
       'vps({ costs: { currency } }) must be an ISO 4217 code such as USD',
     );
-  return { every, everyMs, lookbackMs: lookbackDays * dayMs, currency: currency.toUpperCase() };
+  const leakToleranceHours = options.leakToleranceHours ?? 1;
+  if (!Number.isFinite(leakToleranceHours) || leakToleranceHours < 0)
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'vps({ costs: { leakToleranceHours } }) must be a number of hours of at least 0',
+    );
+  return {
+    every,
+    everyMs,
+    lookbackMs: lookbackDays * dayMs,
+    currency: currency.toUpperCase(),
+    leakToleranceHours,
+  };
 }
 
 /**
@@ -631,9 +806,10 @@ export function costsReconciler(
       const resolved = deps(context);
       if (key === 'all') await seedAccounts(resolved, context, settings.everyMs);
       else
-        await scanAccount(resolved, context, key, settings, (tx, account, window) =>
-          passThroughCosts(resolved, tx, account, window),
-        );
+        await scanAccount(resolved, context, key, settings, async (tx, account, window) => ({
+          ...(await passThroughCosts(resolved, tx, account, window)),
+          ...(await detectLeaks(resolved, tx, account, window, settings.leakToleranceHours)),
+        }));
       return 'DONE';
     },
   };

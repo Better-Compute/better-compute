@@ -453,6 +453,7 @@ describe('vps() API surface', () => {
       'vps/0026_networks',
       'vps/0027_account_exclusive_key',
       'vps/0030_instance_usage',
+      'vps/0033_provider_costs',
     ]);
     expect(module.requires).toEqual(['capacity']);
     expect(() => vps({ runtimes: [] })).toThrow(ComputeError);

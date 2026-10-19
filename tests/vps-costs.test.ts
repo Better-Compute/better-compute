@@ -5,6 +5,7 @@ import {
   type ProviderDefinition,
 } from '@better-compute/core';
 import { flushUsageWindows } from '@better-compute/iam';
+import { createEmbeddedTestIam, type EmbeddedTestIam } from '@better-compute/iam/testing';
 import { closeFixtures, computeFixture, type ComputeFixture } from '@better-compute/testing';
 import { defineProvider, vps, type VpsOptions } from '@better-compute/vps';
 import { fakeGceProvider, type FakeGce } from './support/vps-gce.js';
@@ -819,5 +820,379 @@ describe('provider billing hooks', () => {
     expect(() => define({ computeSku: 'core' })).toThrow(/billing.computeSku/);
     expect(() => define({ otherSku: () => true })).toThrow(/billing.otherSku/);
     expect(() => define([])).toThrow(/billing/);
+  });
+});
+
+describe('margins', () => {
+  /** A cost row written as the worker would have stored it. */
+  async function storeCost(
+    world: CostWorld,
+    row: {
+      id: string;
+      start: number;
+      cost: number;
+      credits?: number;
+      tenantId?: string | null;
+      instanceId?: string | null;
+      attribution?: string;
+      currency?: string;
+      conditions?: string[];
+      passThroughMeter?: string;
+      accountId?: string;
+    },
+  ) {
+    await world.fixture.database.query(
+      `INSERT INTO provider_costs (account_id, source_row_id, record, usage_start, usage_end, cost_micros,
+                                   credits_micros, currency, instance_id, tenant_id, attribution, conditions,
+                                   pass_through_meter)
+       VALUES ($1, $2, '{}'::jsonb, to_timestamp($3::float8 / 1000), to_timestamp($3::float8 / 1000 + 3600),
+               $4, $5, $6, $7, $8, $9, $10::text[], $11)`,
+      [
+        row.accountId ?? world.accountId,
+        row.id,
+        row.start,
+        row.cost,
+        row.credits ?? 0,
+        row.currency ?? 'USD',
+        row.instanceId ?? null,
+        row.tenantId === undefined ? null : row.tenantId,
+        row.attribution ?? (row.tenantId ? 'tenant-label' : 'unattributed'),
+        row.conditions ?? [],
+        row.passThroughMeter ?? null,
+      ],
+    );
+  }
+
+  const outcome = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'allowed',
+      (error: { code?: string }) => error?.code ?? String(error),
+    );
+
+  let t: EmbeddedTestIam | undefined;
+  afterEach(async () => {
+    await t?.close();
+    t = undefined;
+  });
+
+  it('margins per tenant equal revenue minus cost', async () => {
+    // A real better-iam on its own clock: prices, recorded usage, and its spend report.
+    t = await createEmbeddedTestIam({ inbox: 'memory', mode: 'embedded' });
+    const port = t.port;
+    const vcpu = 'vm.vcpu.hours';
+    await port.ensureMeters!([
+      { key: vcpu, name: 'vCPU hours', unit: 'vcpu-hour', pricing: 'rate-card' },
+    ]);
+    const period = new Date(t.now()).toISOString().slice(0, 7);
+    await port.setPrice!({
+      meter: vcpu,
+      effectiveFrom: period,
+      spec: { model: 'per-unit', unitAmountMicros: 1_000_000 },
+    });
+    const usage = (tenantId: string, quantity: number, key: string) => ({
+      tenantId,
+      meter: vcpu,
+      quantity,
+      occurredAt: t!.now(),
+      tags: {},
+      idempotencyKey: `cmp:test:${key}`,
+    });
+    await port.recordUsage([usage(t.acme.tenantId, 10, 'a'), usage(t.other.tenantId, 2, 'o')]);
+
+    const world = await costWorld();
+    const root = t.root.tenantId;
+    const spends: unknown[] = [];
+    Object.assign(world.fixture.iam, {
+      spend: (query: any) => {
+        spends.push(query);
+        // compute's fixture root stands for better-iam's root
+        return port.spend!({ ...query, tenantId: root });
+      },
+    });
+    const year = Number(period.slice(0, 4));
+    const month = Number(period.slice(5)) - 1;
+    const periodStart = Date.UTC(year, month, 1);
+    const periodEnd = Date.UTC(year, month + 1, 1);
+    const acme = t.acme.tenantId;
+    // inside the billing period, though outside the query's range: counted (ruling F1-3)
+    await storeCost(world, {
+      id: 'a1',
+      start: periodStart + HOUR,
+      cost: 4_000_000,
+      credits: -500_000,
+      tenantId: acme,
+    });
+    await storeCost(world, {
+      id: 'a2',
+      start: periodStart + 2 * DAY + HOUR,
+      cost: 1_000_000,
+      tenantId: acme,
+    });
+    await storeCost(world, {
+      id: 'c1',
+      start: periodStart + 3 * DAY,
+      cost: 300_000,
+      tenantId: 'ten_costonly',
+    });
+    await storeCost(world, { id: 'u1', start: periodStart + 3 * DAY, cost: 700_000 });
+    // another currency, and other periods: never counted
+    await storeCost(world, {
+      id: 'eur',
+      start: periodStart + 3 * DAY,
+      cost: 9_000_000,
+      tenantId: acme,
+      currency: 'EUR',
+      conditions: ['CurrencyMismatch'],
+    });
+    await storeCost(world, {
+      id: 'next',
+      start: periodEnd + HOUR,
+      cost: 5_000_000,
+      tenantId: acme,
+    });
+    await storeCost(world, {
+      id: 'prev',
+      start: periodStart - HOUR,
+      cost: 5_000_000,
+      tenantId: acme,
+    });
+
+    const from = periodStart + 2 * DAY;
+    const result = await world.api.billing.margins(world.root, {
+      from,
+      to: from + DAY,
+      groupBy: 'tenant',
+    });
+    expect(spends).toEqual([
+      { tenantId: world.rootTenant, from, to: from + DAY, groupBy: 'tenant' },
+    ]);
+    expect(result).toEqual({
+      rows: [
+        {
+          key: acme,
+          revenueMicros: 10_000_000,
+          costMicros: 4_500_000,
+          marginMicros: 5_500_000,
+          marginPct: 55,
+        },
+        {
+          key: t.other.tenantId,
+          revenueMicros: 2_000_000,
+          costMicros: 0,
+          marginMicros: 2_000_000,
+          marginPct: 100,
+        },
+        {
+          key: 'ten_costonly',
+          revenueMicros: 0,
+          costMicros: 300_000,
+          marginMicros: -300_000,
+          marginPct: null,
+        },
+      ].sort((a, b) => a.key.localeCompare(b.key)),
+      unattributedCostMicros: 700_000,
+      currency: 'USD',
+      from: periodStart,
+      to: periodEnd,
+    });
+  }, 60_000);
+
+  it('unattributed cost is reported separately', async () => {
+    const world = await costWorld({ costs: { currency: 'usd' } });
+    const vm = await createVm(world);
+    const at = Date.UTC(2025, 11, 30);
+    await storeCost(world, {
+      id: 'inst',
+      start: at,
+      cost: 1_000_000,
+      tenantId: world.acmeTenant,
+      instanceId: vm.id,
+      attribution: 'instance',
+      passThroughMeter: 'network.egress.gib',
+    });
+    await storeCost(world, { id: 'label', start: at, cost: 200_000, tenantId: world.acmeTenant });
+    await storeCost(world, {
+      id: 'byo',
+      start: at,
+      cost: 50_000,
+      tenantId: world.acmeTenant,
+      attribution: 'account',
+      accountId: world.byoAccountId,
+    });
+    await storeCost(world, { id: 'none-1', start: at, cost: 300_000, credits: -100_000 });
+    await storeCost(world, { id: 'none-2', start: at + HOUR, cost: 400_000 });
+    const margins = (groupBy: string) =>
+      world.api.billing.margins(world.root, { from: at, to: at + DAY, groupBy });
+
+    // without IamPort.spend: no revenue, and the query's own range
+    const byTenant = await margins('tenant');
+    expect(byTenant).toEqual({
+      rows: [
+        {
+          key: world.acmeTenant,
+          revenueMicros: null,
+          costMicros: 1_250_000,
+          marginMicros: null,
+          marginPct: null,
+        },
+      ],
+      unattributedCostMicros: 600_000,
+      currency: 'USD',
+      from: at,
+      to: at + DAY,
+    });
+    const keys = async (groupBy: string) => {
+      const result = await margins(groupBy);
+      expect(result.unattributedCostMicros).toBe(600_000);
+      return Object.fromEntries(result.rows.map((row: any) => [row.key, row.costMicros]));
+    };
+    expect(await keys('account')).toEqual({
+      [world.accountId]: 1_200_000,
+      [world.byoAccountId]: 50_000,
+    });
+    expect(await keys('pool')).toEqual({ [world.poolId]: 1_000_000, '(none)': 250_000 });
+    expect(await keys('meter')).toEqual({ 'network.egress.gib': 1_000_000, '(none)': 250_000 });
+
+    // input is checked
+    for (const input of [
+      { from: at, to: at, groupBy: 'tenant' },
+      { from: at, to: at + 500 * DAY, groupBy: 'tenant' },
+      { from: at, to: at + DAY, groupBy: 'region' },
+      { from: at, to: at + DAY },
+      { from: 'yesterday', to: at, groupBy: 'tenant' },
+    ])
+      expect(await outcome(world.api.billing.margins(world.root, input))).toBe('INVALID_INPUT');
+  });
+
+  it('a tenant cannot read margins', async () => {
+    const world = await costWorld();
+    const at = Date.UTC(2025, 11, 30);
+    expect(
+      await outcome(
+        world.api.billing.margins(world.acme, { from: at, to: at + DAY, groupBy: 'tenant' }),
+      ),
+    ).toBe('ACCESS_DENIED');
+    expect(
+      await outcome(
+        world.api.billing.margins(world.root, { from: at, to: at + DAY, groupBy: 'tenant' }),
+      ),
+    ).toBe('allowed');
+  });
+});
+
+describe('leak detection', () => {
+  /** A running interval of the instance over `[start, end)`. */
+  async function running(world: CostWorld, instanceId: string, start: number, end: number) {
+    await world.fixture.database.query(
+      `INSERT INTO instance_usage_intervals (id, instance_id, tenant_id, pool_id, provider, phase, mode, shape,
+                                             started_at, ended_at, metered_until)
+       VALUES ($1, $2, $3, $4, 'fake-gce', 'running', 'metered', '{}'::jsonb, to_timestamp($5::float8 / 1000),
+               to_timestamp($6::float8 / 1000), to_timestamp($6::float8 / 1000))`,
+      [`iui_${start}`, instanceId, world.acmeTenant, world.poolId, start, end],
+    );
+  }
+
+  /** `hours` hours of N2 cores and RAM of the instance from `start`, plus an hour of egress. */
+  function computeHours(world: CostWorld, instanceId: string, start: number, hours: number) {
+    for (let hour = 0; hour < hours; hour++)
+      for (const [kind, description] of [
+        ['core', 'N2 Instance Core running in Americas'],
+        ['ram', 'N2 Instance Ram running in Americas'],
+      ])
+        world.ledger.rows.push(
+          costRow({
+            sourceRowId: `${kind}-${start + hour * HOUR}`,
+            skuDescription: description,
+            usageStart: start + hour * HOUR,
+            usageEnd: start + (hour + 1) * HOUR,
+            quantity: kind === 'core' ? 12 : 85,
+            labels: { [instanceLabel]: instanceId },
+          }),
+        );
+    world.ledger.rows.push(
+      costRow({
+        sourceRowId: `egress-${start}`,
+        usageStart: start + hours * HOUR,
+        usageEnd: start + (hours + 1) * HOUR,
+        labels: { [instanceLabel]: instanceId },
+      }),
+    );
+  }
+
+  async function freshVm(world: CostWorld) {
+    const vm = await createVm(world);
+    await world.fixture.database.query(
+      `DELETE FROM instance_usage_intervals WHERE instance_id = $1`,
+      [vm.id],
+    );
+    return vm;
+  }
+
+  it('a VM running in the provider with no interval raises billing.leak', async () => {
+    const world = await costWorld();
+    const vm = await freshVm(world);
+    const day = Math.floor((world.now() - 2 * DAY) / DAY) * DAY;
+    computeHours(world, vm.id, day + 2 * HOUR, 5);
+    await world.scan();
+    const leaks = await world.events('billing.leak');
+    expect(leaks).toEqual([
+      {
+        type: 'billing.leak',
+        tenantId: world.rootTenant,
+        data: {
+          accountId: world.accountId,
+          instanceId: vm.id,
+          tenantId: world.acmeTenant,
+          day: new Date(day).toISOString().slice(0, 10),
+          providerHours: 5,
+          meteredHours: 0,
+        },
+      },
+    ]);
+    const [pass] = (await world.events('billing.cost-ingested')).filter(
+      (event) => event.data.accountId === world.accountId,
+    );
+    expect(pass!.data.leaks).toBe(1);
+    // at most once per instance-day, whatever later passes see
+    for (let again = 0; again < 2; again++) {
+      await world.fixture.advance(6 * HOUR);
+      await world.scan();
+    }
+    expect(await world.events('billing.leak')).toHaveLength(1);
+  });
+
+  it('within tolerance raises nothing', async () => {
+    const world = await costWorld();
+    const vm = await freshVm(world);
+    const day1 = Math.floor((world.now() - 2 * DAY) / DAY) * DAY;
+    const day2 = day1 + DAY;
+    // day 1: 5 billed hours, 4 metered (a start or stop inside an hour): within the default 1 hour
+    computeHours(world, vm.id, day1 + 2 * HOUR, 5);
+    await running(world, vm.id, day1 + 2 * HOUR + 30 * 60_000, day1 + 6 * HOUR);
+    // day 2: 5 billed, 3 metered: over it
+    computeHours(world, vm.id, day2 + 2 * HOUR, 5);
+    await running(world, vm.id, day2 + 2 * HOUR, day2 + 5 * HOUR);
+    await world.scan();
+    expect((await world.events('billing.leak')).map((event) => event.data)).toEqual([
+      expect.objectContaining({
+        instanceId: vm.id,
+        day: new Date(day2).toISOString().slice(0, 10),
+        providerHours: 5,
+        meteredHours: 3,
+      }),
+    ]);
+  });
+
+  it('a zero tolerance raises a one-hour gap', async () => {
+    const world = await costWorld({ costs: { leakToleranceHours: 0 } });
+    const vm = await freshVm(world);
+    const day = Math.floor((world.now() - 2 * DAY) / DAY) * DAY;
+    computeHours(world, vm.id, day + 2 * HOUR, 2);
+    await running(world, vm.id, day + 2 * HOUR, day + 3 * HOUR);
+    await world.scan();
+    expect((await world.events('billing.leak')).map((event) => event.data.meteredHours)).toEqual([
+      1,
+    ]);
+    expect(() => vps({ costs: { leakToleranceHours: -1 } })).toThrow(/leakToleranceHours/);
   });
 });

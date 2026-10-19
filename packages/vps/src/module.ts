@@ -909,7 +909,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
   };
 
   const api = (): VpsApi => ({
-    billing: billingApi(options.billing),
+    billing: billingApi(options.billing, options.costs),
     instances: {
       create: defineMethod<CreateInstanceInput, Instance>({
         action: 'compute:instances:create',

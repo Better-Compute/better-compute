@@ -208,7 +208,7 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     subject: 'provider-account/{id}',
     module: 'vps',
     description:
-      'Provider costs read by the vps.costs worker (D10): cost-ingested once per pass per account { accountId, from, to, currency, rows, inserted, corrected, unchanged, stale, costMicros, creditsMicros, unattributedRows, currencyMismatchRows }; unattributed once per stored row with no tenant { accountId, sourceRowId, service, sku, resourceName?, usageStart, costMicros, creditsMicros, currency }; cost-corrected when a re-exported row changed its cost or credits { accountId, sourceRowId, previousMicros, costMicros, previousCreditsMicros, creditsMicros, currency, passedThrough }',
+      'Provider costs read by the vps.costs worker (D10): cost-ingested once per pass per account { accountId, from, to, currency, rows, inserted, corrected, unchanged, stale, costMicros, creditsMicros, unattributedRows, currencyMismatchRows, passedThroughRows, passedThroughMicros, leaks }; unattributed once per stored row with no tenant { accountId, sourceRowId, service, sku, resourceName?, usageStart, costMicros, creditsMicros, currency }; cost-corrected when a re-exported row changed its cost or credits { accountId, sourceRowId, previousMicros, costMicros, previousCreditsMicros, creditsMicros, currency, passedThrough }; leak at most once per instance and UTC day when the provider billed more compute hours than the running intervals of the instance metered, beyond leakToleranceHours { accountId, instanceId, tenantId, day, providerHours, meteredHours }',
   },
   {
     type: 'network.*',
