@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/provider-digitalocean",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "DigitalOcean provider for better-compute: Droplets as VPS instances and offers, VPC networks, power, reinstall and discovery.",
   "type": "module",
   "license": "Apache-2.0",

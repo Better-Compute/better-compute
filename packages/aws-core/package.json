@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/aws-core",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "Zero-dependency AWS plumbing for better-compute: SigV4 signing, endpoints, query and JSON protocol clients, a hardened XML reader and credential sources.",
   "type": "module",
   "license": "Apache-2.0",
