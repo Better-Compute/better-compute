@@ -680,6 +680,15 @@ importers:
         specifier: ^2.15.0
         version: 2.15.0
 
+  packages/provider-digitalocean:
+    dependencies:
+      '@better-compute/core':
+        specifier: workspace:*
+        version: link:../core
+      '@better-compute/vps':
+        specifier: workspace:*
+        version: link:../vps
+
   packages/provider-gcp:
     dependencies:
       '@better-compute/core':
