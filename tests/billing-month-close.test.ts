@@ -77,7 +77,10 @@ const vm = { attached: '', h100: '', granted: '', b: '', root: '' };
 /** When the poll that saw A's H100 VM stopped ran: its running interval ends there. */
 let h100StoppedAt = 0;
 
-/** Egress export rows (all on A's instances): one in the previous month, four in the month, the last in its last hour. */
+/**
+ * Egress export rows (all on A's instances): one in the previous month, which the export delivers after that month
+ * closed (a late charge, in this month's first hour), and four in the month, the last in its last hour.
+ */
 const egressRows: { at: number; gib: number; cost: number; vm: 'h100' | 'granted' }[] = [
   { at: P - 2 * HOUR, gib: 4, cost: 0.48, vm: 'h100' },
   { at: P + DAY + 3 * HOUR, gib: 3, cost: 0.36, vm: 'h100' },
@@ -439,9 +442,11 @@ beforeAll(async () => {
     await moveTo(day + 10 * MINUTE);
     await meterAll();
   }
-  // Past closeGraceHours (6) after the month: the last windows have landed; then better-iam closes the month.
-  await moveTo(E + 7 * HOUR);
+  // Inside closeGraceHours (6) after the month, the last windows land (the export's last egress row among them,
+  // still in its own month); past it, better-iam closes the month.
+  await moveTo(E + 5 * HOUR);
   await meterAll();
+  await moveTo(E + 7 * HOUR);
   closed = await t.iam.api.billing.closePeriod(root, { tenantId: R, period: PERIOD, draft: false });
   statementOf = async (tenantId: string) => {
     const issued = closed.issued.find((item: { accountId: string }) => item.accountId === tenantId);
@@ -498,10 +503,10 @@ const h100Hours = () => (h100StoppedAt - P) / HOUR;
 /** A's month, from the timeline: the attached n2 (4 vCPU, 16 GiB, 50 GiB disk, no public address) all month, the
  * H100 VM (208 vCPU, 1872 GiB, 8 H100, 100 GiB disk, public address) running until its stop and keeping its disk
  * after it, the granted VM (100 GiB disk, public address) all month inside the 2-slot grant, the network all month,
- * and the egress rows of the month at cost x multiplier. */
+ * and the egress rows at cost x multiplier: the month's, and the previous month's late one. */
 function expectedA(): Record<string, Expected> {
   const h = h100Hours();
-  const egress = egressRows.filter((row) => row.at >= P && row.at < E);
+  const egress = egressRows.filter((row) => row.at < E);
   return {
     'vm.vcpu.hours': { quantity: 4 * M + 208 * h, unit: LIST['vm.vcpu.hours'] },
     'vm.memory.gib.hours': { quantity: 16 * M + 1872 * h, unit: LIST['vm.memory.gib.hours'] },
@@ -566,12 +571,21 @@ describe('month close of platform-issued compute', () => {
     expect(statement.totalMicros).toBe(subtotal - discount);
   });
 
-  it('egress is the provider’s cost times the multiplier, and only the month’s rows', async () => {
+  it('egress is the provider’s cost times the multiplier, with the previous month’s late row', async () => {
     const egress = linesOf(await statementOf(A)).get(EGRESS)!;
     expect(egress.pricing).toBe('reported');
-    // 0.36 + 0.84 + 0.12 + 0.24 (the last hour of the month) = 1.56 × 1.25; the previous month's 0.48 is not here.
-    expect(egress.amountMicros).toBe(1_950_000);
-    expect(egress.quantity).toBe(13);
+    // 0.36 + 0.84 + 0.12 + 0.24 (the last hour of the month) = 1.56, plus the previous month's 0.48, exported
+    // after that month closed (FW-4): 2.04 × 1.25.
+    expect(egress.amountMicros).toBe(2_550_000);
+    expect(egress.quantity).toBe(17);
+    // The late row's window is this month's first hour; its stored usage start is its own hour.
+    const { rows } = await database.query<{ start: number; usage: number }>(
+      `SELECT (extract(epoch FROM w.window_start) * 1000)::float8 AS start,
+              (extract(epoch FROM c.usage_start) * 1000)::float8 AS usage
+         FROM usage_windows w JOIN provider_costs c ON c.pass_through_key = w.idempotency_key
+        WHERE w.source_kind = 'cost' AND w.quantity = 4`,
+    );
+    expect(rows.map((row) => [Number(row.start), Number(row.usage)])).toEqual([[P, P - 2 * HOUR]]);
   });
 
   it('B’s statement has only its own VM, at list prices, with no discount', async () => {
