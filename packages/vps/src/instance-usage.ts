@@ -190,6 +190,9 @@ async function billingOf(
     ...(count > 0 ? { gpus: { model, count } } : {}),
     // No offer reports spot yet: a flavor (or a later offer field) that says so is read here.
     spot: flavor.spot === true,
+    // D8: admitted against a provider reservation (`instances.provider_reservation`, set once by
+    // `claimReservationSlot`), so `vm.reserved.*`. Captured here at open: binding, unbinding or losing the
+    // reservation later changes no running interval.
     reserved: row.reserved,
     // Task 10: reservation grants.
     granted: false,
