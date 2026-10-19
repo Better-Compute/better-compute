@@ -286,11 +286,16 @@ holds.
   operation is `running`. An inline create is done at once, so swapping placers changes no client.
 
 - **Budgets.** With `policy.admission.budgetCheck: 'meter'`, or an offer whose
-  `onBudgetExceeded` is `stop-new` / `drain`, `reservations.create` and `extend` call
+  `onBudgetExceeded` is `stop-new` / `drain` / `suspend`, `reservations.create` and `extend` call
   `iam.billingCheck` for the caller after the IAM decision, outside any transaction. A spent budget
   refuses with `SPEND_LIMIT_REACHED`, and the draft stays for a retry once the window resets.
   `applyBudgetPolicy` handles the alert itself: notify, and for `drain` it cancels the tenant's
   unstarted reservations.
+  `pools.offer` and `pools.updateOffer` set the policy and `allowedRegions` per offer. `suspend` marks the
+  offer `suspended_at`, publishes `quota.budget-suspended` and has the host's `budget` reaction (vps's
+  `sandboxIamReactions.budget`) stop the tenant's running instances in the pool; while it is set every
+  admission (`budgetAdmissionCheck`, `offerAdmissionCheck`) refuses with `SPEND_LIMIT_REACHED`, until
+  `pools.updateOffer({ suspended: false })`, which restarts nothing.
 - **IAM reactions.** `withdrawAgentReservations` (an agent suspended, a delegation revoked) and
   `reassignReservations` (an owner offboarded) cancel unstarted reservations, or move them to the
   successor along with their authz row. Building blocks: `cancelPendingReservation`,

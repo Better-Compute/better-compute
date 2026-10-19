@@ -8,6 +8,12 @@ All notable changes to the better-compute packages are documented here. The form
 
 ### Added
 
+- **Offer budget policies over the API** (platform compute billing, D16). `pools.offer` takes `onBudgetExceeded` (`notify`,
+  `stop-new`, `drain` and the new `suspend`) and `allowedRegions`; the new `pools.updateOffer` changes them and lifts a
+  suspension. A spent budget on a `suspend` offer sets `pool_offers.suspended_at` (migration `core/0032_offer_suspension`),
+  publishes `quota.budget-suspended`, stops the tenant's running instances in the pool (`BudgetSuspended`; the host needs
+  `sandboxIamReactions` in `iamReactions`) and refuses its new work with `SPEND_LIMIT_REACHED` until lifted, which restarts
+  nothing. A budget check for a caller from another tenant (root issuing into a customer) names the target tenant only.
 - **`@better-compute/gcp-common`** (new, outside the umbrella). The Google Cloud token sources
   (`serviceAccountTokenSource`, `metadataTokenSource`, `impersonatedTokenSource`, `cachedTokenSource`) move out of
   `@better-compute/provider-gcp` into a package that depends only on `@better-compute/core`, so other Google

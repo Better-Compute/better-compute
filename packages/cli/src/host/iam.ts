@@ -65,6 +65,17 @@ export interface HostIamReaction {
     context: ModuleContext,
     end: { tenantId: string; identityId: string; successorId?: string; reason: string },
   ): Promise<unknown>;
+  /**
+   * An offer was suspended by a spent budget (`onBudgetExceeded: 'suspend'`): stop what the tenant runs in those
+   * pools. vps's `sandboxIamReactions.budget` stops its instances. Run on every alert for a suspended offer, in the
+   * alert's transaction; unlike the other reactions a failure fails the alert (it is retried), because a
+   * suspension that did not stop the spend must not be reported done.
+   */
+  budget?(
+    tx: SqlTx,
+    context: ModuleContext,
+    suspended: { tenantId: string; poolIds: string[]; reason: string },
+  ): Promise<unknown>;
 }
 
 /** `host.iam`: the IAM bridge whose inbox this deployment drains. */
@@ -347,11 +358,17 @@ export function installIamHandlers(
         await revokeSshFor(tx, holder, event);
         closeFor({ ...event, subjectId: holder }, 'sessions');
       }),
-    // A budget spent: the offerings' onBudgetExceeded (stop-new, drain) for the alert's tenant.
+    // A budget spent: the offerings' onBudgetExceeded (stop-new, drain, suspend) for the alert's tenant. A suspension
+    // is carried out by the modules' `budget` reactions in the same transaction.
     budget:
       own.budget ??
       budgetAlertHandler(async (tx, alert) => {
-        await applyBudgetPolicy(tx as never, compute.context, alert);
+        await applyBudgetPolicy(tx as never, compute.context, alert, {
+          suspend: async (suspendTx, suspended) => {
+            for (const reaction of reactions)
+              if (reaction.budget) await reaction.budget(suspendTx, compute.context, suspended);
+          },
+        });
       }),
     // Session revocations name an identity, a role or a tenant; dropping every cached authentication is exact
     // for all of them and costs one IAM call per caller. An identity's own revocations close or re-check its

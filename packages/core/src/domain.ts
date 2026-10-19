@@ -203,7 +203,10 @@ export interface Offering {
   priority?: number;
   /** IAM regions the tenant's data may live in, until better-iam has `tenant.region`. */
   allowedRegions?: string[];
-  onBudgetExceeded?: 'notify' | 'stop-new' | 'drain';
+  /** What a spent budget does to this offer (`suspend`: stop its running instances and refuse new work). */
+  onBudgetExceeded?: 'notify' | 'stop-new' | 'drain' | 'suspend';
+  /** Set while the offer is suspended: new work is refused with `SPEND_LIMIT_REACHED`. */
+  suspendedAt?: number;
 }
 
 // --- Nodes and devices --------------------------------------------------------------------------

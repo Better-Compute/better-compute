@@ -39,6 +39,7 @@ Offers a pool the tenant owns to another tenant with a quota, or updates an exis
 
 - `quota` creates or resizes the offered tenant's quota rows. A new maximum below what is in use is raised to the amount in use.
 - `includeDescendants` and `priority` (default 0) are stored with the offer.
+- `onBudgetExceeded` (`notify`, `stop-new`, `drain` or `suspend`) and `allowedRegions` (1 to 16 region names) are stored with the offer; leaving one out keeps what the offer already has, so re-offering to change the quota does not clear them. See `updateOffer` for what the policies do. Anything else is `INVALID_INPUT`.
 - `INVALID_STATE` when the pool is archived, when a `timeslice` or `mps` pool or a pool holding `tenant-owned` nodes is offered to anyone but its owner, or when a `policy.singleTenant` pool is offered with `includeDescendants` or is already offered to another tenant.
 - The pool's IAM authz row is written for the offered tenant, with the attributes `gpuModel`, `class`, `sharing`, `region` and `owned`.
 
@@ -49,6 +50,17 @@ Emits `pool.offered`.
 Withdraws a pool's offer from a tenant and returns whether an offer was removed.
 
 That tenant's quota rows on the pool drop to what is in use, so live reservations keep their bookings while nothing new fits, and its authz row for the pool is removed. A pool cannot be unoffered from its owner (`INVALID_INPUT`). Calling it again answers `removed: false`. Emits `pool.unoffered` only when an offer was removed.
+
+## updateOffer
+
+Changes the budget policy and regions of an existing offer, or suspends or lifts it, and returns the pool as the offered tenant sees it. It is the owner's call, decided as `compute:pools:share` on the pool like `offer`; a tenant that is only offered the pool gets `NOT_FOUND`.
+
+- **Fields.** `onBudgetExceeded`, `allowedRegions` and `suspended` are each optional, and a request naming none is `INVALID_INPUT`. `NOT_FOUND` when the pool is not offered to `toTenantId`; a pool has no offer to its owner (`INVALID_INPUT`).
+- **Budget policies.** When a budget of the tenant is spent, better-iam's alert applies the policy of each offer to that tenant. `notify` only publishes `quota.budget-exceeded`. `stop-new` and `drain` also make admissions check the tenant's budget, and `drain` cancels the tenant's reservations on the pool that have not started. `suspend` stops spend on the pool: it marks the offer suspended, publishes `quota.budget-suspended`, sets the tenant's running instances in the pool to `desiredState: 'stopped'` with the condition `BudgetSuspended` (the reconciler then stops the machines), and refuses the tenant's new work on the pool with `SPEND_LIMIT_REACHED` (`details.reason: 'offer-suspended'`): creating or attaching an instance, creating a network or reservation, and starting an instance. Stopping the instances needs the host's budget reaction (vps's `sandboxIamReactions`, in `iamReactions`); without it the offer is still suspended and refuses new work. Sandbox-managed instances follow their sandbox and are not stopped directly.
+- **Suspension.** `suspended: true` suspends the offer by hand (it refuses new work; it stops nothing). `suspended: false` lifts it and restarts nothing: stopped instances stay stopped until the tenant starts them, and `BudgetSuspended` clears on that start. A new alert that finds the budget still spent suspends the offer again.
+- **Regions.** With `allowedRegions`, new work on a pool whose site is in another region is `ACCESS_DENIED` (`details.reason: 'region-not-allowed'`). The site's `iamRegion` is compared, else its `region`; a site with neither match is refused. It applies to instances, reservations, networks and sandboxes created on the pool.
+
+Emits `pool.offer-updated`.
 
 ## update
 

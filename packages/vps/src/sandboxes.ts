@@ -16,6 +16,11 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { budgetAdmissionCheck } from '@better-compute/capacity';
+import {
+  suspendBudgetInstances,
+  type BudgetReactionDeps,
+  type BudgetSuspendedOffers,
+} from './budget-suspend.js';
 import { readFlavorByName, type FlavorRecord } from './flavors.js';
 import {
   canonical,
@@ -2323,10 +2328,15 @@ export async function sandboxHolders(
   return rows.map((row) => ({ tenantId: row.tenant_id, identityId: row.identity_id }));
 }
 
-/** Both reactions, for the host's `iamReactions` (after capacity's, in the inbox transaction). */
+/**
+ * The reactions of vps, for the host's `iamReactions` (after capacity's, in the inbox transaction): the sandboxes
+ * an agent created or an owner leaves, and `budget`, which stops a suspended offer's running instances (D16).
+ */
 export const sandboxIamReactions = {
   agent: withdrawAgentSandboxes,
   identity: reassignSandboxes,
+  budget: (tx: SqlTx, deps: BudgetReactionDeps, suspended: BudgetSuspendedOffers) =>
+    suspendBudgetInstances(tx, deps, suspended),
 } as const;
 
 function extendedExpiry(raw: RawSandbox, input: ExtendSandboxInput): number {

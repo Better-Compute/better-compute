@@ -163,6 +163,7 @@ describe.skipIf(!url)('postgres() on PostgreSQL', () => {
       'core/0027_join_token_hosted',
       'core/0028_volume_allocations',
       'core/0031_usage_sources',
+      'core/0032_offer_suspension',
     ]);
     expect((await db.migrate()).applied).toEqual([]);
   });

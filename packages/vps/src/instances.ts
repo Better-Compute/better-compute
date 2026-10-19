@@ -1516,12 +1516,22 @@ export async function wake(
   await deps.work.enqueue(tx, instanceWork, row.id);
 }
 
-/** `instances.start` / `instances.stop`: sets `desiredState`; the reconciler converges. */
+/** The condition a suspended offer's instances carry until the tenant starts them again (D16). */
+export const budgetSuspendedCondition = 'BudgetSuspended';
+
+/**
+ * `instances.start` / `instances.stop`: sets `desiredState`; the reconciler converges.
+ *
+ * A start is new spend, so a suspended offer (`pool_offers.suspended_at`, D16) refuses it with
+ * `SPEND_LIMIT_REACHED`; a start that is allowed clears `BudgetSuspended`. `options.condition` stamps a condition on
+ * the instance in the same update: the budget suspension stops with `BudgetSuspended`.
+ */
 export async function setPower(
-  deps: InstanceDeps,
+  deps: Pick<InstanceDeps, 'clock' | 'events' | 'work' | 'desired'>,
   tx: SqlTx,
   ref: InstanceRef,
   desiredState: 'running' | 'stopped',
+  options: { condition?: Omit<Condition, 'since'> } = {},
 ): Promise<Instance> {
   let row = await lockOwned(tx, ref);
   if (row.desiredState === 'deleted' || row.state === 'deleting' || row.state === 'deleted')
@@ -1547,7 +1557,36 @@ export async function setPower(
       undefined,
       { condition: provisionFailedCondition, reason: failedCreate.reason ?? null },
     );
-  if (row.desiredState !== desiredState) row = await updateInstance(tx, row, { desiredState });
+  if (desiredState === 'running') {
+    const { rows: offers } = await tx.query(
+      `SELECT 1 FROM pool_offers WHERE pool_id = $1 AND tenant_id = $2 AND suspended_at IS NOT NULL`,
+      [row.poolId, row.tenantId],
+    );
+    if (offers.length > 0)
+      throw new ComputeError(
+        'SPEND_LIMIT_REACHED',
+        `The offer of pool ${row.poolId} is suspended: its budget was spent`,
+        undefined,
+        { reason: 'offer-suspended', poolId: row.poolId },
+      );
+  }
+  const hadCondition = row.conditions.some(
+    (condition) => condition.type === budgetSuspendedCondition,
+  );
+  const conditions = options.condition
+    ? withCondition(row.conditions, options.condition, deps.clock.now())
+    : desiredState === 'running'
+      ? withoutCondition(row.conditions, budgetSuspendedCondition)
+      : row.conditions;
+  const conditionChanged = options.condition
+    ? !row.conditions.some(
+        (condition) =>
+          condition.type === options.condition!.type &&
+          condition.status === options.condition!.status,
+      )
+    : desiredState === 'running' && hadCondition;
+  if (row.desiredState !== desiredState || conditionChanged)
+    row = await updateInstance(tx, row, { desiredState, conditions });
   // An instance in error retries when started again, unless a live instance holds its machine id.
   if (desiredState === 'running' && row.state === 'error' && (row.nodeId || row.externalId)) {
     const holder = await liveHolderOf(tx, row);

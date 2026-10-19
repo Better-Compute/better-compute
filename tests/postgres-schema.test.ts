@@ -89,6 +89,7 @@ describe('migrate', () => {
       'core/0027_join_token_hosted',
       'core/0028_volume_allocations',
       'core/0031_usage_sources',
+      'core/0032_offer_suspension',
     ]);
     expect(await db.migrate()).toEqual({ applied: names, skipped: [] });
     expect(await db.migrate()).toEqual({ applied: [], skipped: names });

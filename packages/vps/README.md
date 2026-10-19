@@ -238,7 +238,10 @@ show it.
 
 - **IAM reactions (§12.8).** The host calls these from the iam bridge's inbox handlers, in the
   inbox transaction, next to capacity's reservation reactions. Both are level-triggered, and
-  `sandboxIamReactions` is `{ agent, identity }` for the host's `iamReactions`.
+  `sandboxIamReactions` is `{ agent, identity, budget }` for the host's `iamReactions`. `budget` (`suspendBudgetInstances`)
+  stops a suspended offer's running instances: it sets the tenant's instances in those pools to `stopped` with
+  the `BudgetSuspended` condition when a budget with `onBudgetExceeded: 'suspend'` is spent; `instances.start` is
+  refused (`SPEND_LIMIT_REACHED`) while the offer is suspended.
   - `withdrawAgentSandboxes(tx, context, { tenantId, agentId | delegationId | allAgents, reason })`
     handles an agent suspended or a delegation revoked. It deletes the open sandboxes they created,
     after `sandbox.withdrawn { reason }`. A sandbox is the agent's own workspace, so unlike a started
