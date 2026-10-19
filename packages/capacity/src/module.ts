@@ -49,8 +49,15 @@ import {
   readQuotas,
   refundQuota,
   setQuota,
+  tenantQuotaScope,
   type QuotaRow,
 } from './quota.js';
+import {
+  listTenantOffers,
+  parseFlavorAllowlist,
+  type TenantAncestors,
+  type TenantOffer,
+} from './admission.js';
 import {
   cancelReservation,
   completeCreate,
@@ -180,12 +187,15 @@ export interface TenantPool extends Pool {
   /** Archived pools take no new work; only their owner still sees them. */
   archived: boolean;
   quotas: QuotaRow[];
+  /** (U-02) The flavors the tenant's offer of the pool allows; absent: every flavor. */
+  flavors?: string[];
 }
 
 async function tenantPools(tx: SqlTx, tenantId: string, poolId?: string): Promise<TenantPool[]> {
-  const { rows } = await tx.query<RawPoolRow>(
+  const { rows } = await tx.query<RawPoolRow & { offer_flavors: string[] | null }>(
     `SELECT p.id, p.owner_tenant_id, p.site_id, p.class, p.gpu_model, p.sharing, p.agent, p.policy,
-            p.provider_account_id, p.version, p.archived_at IS NOT NULL AS archived
+            p.provider_account_id, p.version, p.archived_at IS NOT NULL AS archived,
+            (SELECT o.flavors FROM pool_offers o WHERE o.pool_id = p.id AND o.tenant_id = $1) AS offer_flavors
        FROM pools p WHERE ${visibleWhere} AND (p.archived_at IS NULL OR p.owner_tenant_id = $1) AND ($2::text IS NULL OR p.id = $2) ORDER BY p.id`,
     [tenantId, poolId ?? null],
   );
@@ -197,6 +207,8 @@ async function tenantPools(tx: SqlTx, tenantId: string, poolId?: string): Promis
       archived: row.archived === true,
       quotas: quotas.filter((quota) => quota.poolId === row.id),
     };
+    if (row.offer_flavors !== null && row.offer_flavors !== undefined)
+      pool.flavors = [...row.offer_flavors];
     // R1: the provider account behind a pool is its owner's business; a tenant it is offered to
     // creates on the pool without knowing it.
     if (!pool.owned) delete pool.providerAccountId;
@@ -412,6 +424,8 @@ export interface OfferPoolInput {
   onBudgetExceeded?: OfferBudgetPolicy;
   /** The regions the tenant's work may run in; omitted keeps the stored list. */
   allowedRegions?: string[];
+  /** (U-02) The flavors the tenant may create and attach on the pool; omitted keeps the stored list. */
+  flavors?: string[];
 }
 
 export function parseOfferPool(raw: unknown): OfferPoolInput {
@@ -424,6 +438,7 @@ export function parseOfferPool(raw: unknown): OfferPoolInput {
     'priority',
     'onBudgetExceeded',
     'allowedRegions',
+    'flavors',
   ]);
   if (input.includeDescendants !== undefined && typeof input.includeDescendants !== 'boolean')
     fail('includeDescendants must be true or false');
@@ -440,6 +455,8 @@ export function parseOfferPool(raw: unknown): OfferPoolInput {
   if (policy !== undefined) result.onBudgetExceeded = policy;
   const regions = optionalRegions(input.allowedRegions);
   if (regions !== undefined) result.allowedRegions = regions;
+  const flavors = parseFlavorAllowlist(input.flavors, 'flavors');
+  if (flavors) result.flavors = flavors;
   return result;
 }
 
@@ -451,6 +468,8 @@ export interface UpdateOfferInput {
   allowedRegions?: string[];
   /** true suspends the offer (new work is refused); false lifts the suspension and restarts nothing. */
   suspended?: boolean;
+  /** (U-02) The flavor allowlist; null allows every flavor again. */
+  flavors?: string[] | null;
 }
 
 export function parseUpdateOffer(raw: unknown): UpdateOfferInput {
@@ -461,6 +480,7 @@ export function parseUpdateOffer(raw: unknown): UpdateOfferInput {
     'onBudgetExceeded',
     'allowedRegions',
     'suspended',
+    'flavors',
   ]);
   if (input.suspended !== undefined && typeof input.suspended !== 'boolean')
     fail('suspended must be true or false');
@@ -474,12 +494,15 @@ export function parseUpdateOffer(raw: unknown): UpdateOfferInput {
   const regions = optionalRegions(input.allowedRegions);
   if (regions !== undefined) result.allowedRegions = regions;
   if (input.suspended !== undefined) result.suspended = input.suspended;
+  const flavors = parseFlavorAllowlist(input.flavors, 'flavors', { nullable: true });
+  if (flavors !== undefined) result.flavors = flavors;
   if (
     result.onBudgetExceeded === undefined &&
     result.allowedRegions === undefined &&
-    result.suspended === undefined
+    result.suspended === undefined &&
+    result.flavors === undefined
   )
-    fail('Name at least one of onBudgetExceeded, allowedRegions or suspended');
+    fail('Name at least one of onBudgetExceeded, allowedRegions, suspended or flavors');
   return result;
 }
 
@@ -594,6 +617,8 @@ export type CapacityApi = {
     offer: MethodDefinition<OfferPoolInput, TenantPool>;
     unoffer: MethodDefinition<PoolInput & { toTenantId: string }, { removed: boolean }>;
     updateOffer: MethodDefinition<UpdateOfferInput, TenantPool>;
+    /** (U-02) The offers the tenant holds or inherits (`includeDescendants`), by priority. */
+    offers: MethodDefinition<TenantInput, { items: TenantOffer[] }>;
     update: MethodDefinition<UpdatePoolInput, Pool>;
     archive: MethodDefinition<PoolInput, Pool>;
   };
@@ -646,9 +671,17 @@ export interface CapacityTimeline {
 
 export interface SetQuotaInput {
   tenantId: string;
+  /** A pool, or `*` for a tenant-level (cross-pool) row. */
   poolId: string;
   resource: string;
   max: number;
+  /** (U-02) The flavors that may consume the row; null allows every flavor, omitted keeps the row's list. */
+  flavors?: string[] | null;
+}
+
+/** A pool id, or `*` (the tenant-level quota scope) where `tenantScope` allows it. */
+function quotaPoolId(value: unknown): string {
+  return value === tenantQuotaScope ? tenantQuotaScope : id(value, 'pool', 'poolId');
 }
 
 /** A pool policy object; the fields capacity enforces are type-checked. */
@@ -728,17 +761,20 @@ function parseTimeline(raw: unknown): TimelineInput {
 }
 
 function parseSetQuota(raw: unknown): SetQuotaInput {
-  const input = object(raw, ['tenantId', 'poolId', 'resource', 'max']);
+  const input = object(raw, ['tenantId', 'poolId', 'resource', 'max', 'flavors']);
   if (typeof input.resource !== 'string' || !/^[A-Za-z][A-Za-z0-9._-]{0,63}$/.test(input.resource))
     fail('resource is invalid');
   const max = optionalInt(input.max, 'max', 0, Number.MAX_SAFE_INTEGER);
   if (max === undefined) fail('max is required');
-  return {
+  const result: SetQuotaInput = {
     tenantId: tenant(input.tenantId),
-    poolId: id(input.poolId, 'pool', 'poolId'),
+    poolId: quotaPoolId(input.poolId),
     resource: input.resource,
     max,
   };
+  const flavors = parseFlavorAllowlist(input.flavors, 'flavors', { nullable: true });
+  if (flavors !== undefined) result.flavors = flavors;
+  return result;
 }
 
 function parseTenant(raw: unknown): TenantInput {
@@ -823,6 +859,33 @@ export interface CapacityModuleOptions extends PlacementOptions {
    * host units), run by `pools.create` and `pools.update` before writing a policy.
    */
   policyValidators?: readonly PoolPolicyValidator[];
+  /**
+   * (U-02) A tenant's ancestors, nearest first, for `pools.offers` (offers inherited through `includeDescendants`):
+   * `iamTenantAncestors` from `@better-compute/iam`. Without it `pools.offers` lists the tenant's own offers only.
+   */
+  tenantAncestors?: TenantAncestors;
+}
+
+/**
+ * A pool's GPU model is part of its tenants' `gpu.<model>` totals (tenant-level quota rows): it may change only
+ * while no tenant holding such a row has GPUs charged on the pool, so every refund meets the row its charge took.
+ */
+async function assertGpuModelChangeable(tx: SqlTx, poolId: string): Promise<void> {
+  const { rows } = await tx.query<{ tenant_id: string }>(
+    `SELECT q.tenant_id FROM quota_usage q
+      WHERE q.pool_id = $1 AND q.resource = 'gpu' AND q.used > 0
+        AND EXISTS (SELECT 1 FROM quota_usage t
+                     WHERE t.tenant_id = q.tenant_id AND t.pool_id = $2 AND t.resource LIKE 'gpu.%')
+      ORDER BY q.tenant_id LIMIT 1`,
+    [poolId, tenantQuotaScope],
+  );
+  if (rows[0])
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Pool ${poolId} has GPUs charged to tenant ${rows[0].tenant_id}, which has per-model GPU quota; change gpuModel once they are released`,
+      undefined,
+      { tenantId: rows[0].tenant_id },
+    );
 }
 
 /**
@@ -1047,12 +1110,13 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
         // the tenant's budget policy); `suspended_at` is never touched here.
         await tx.query(
           `INSERT INTO pool_offers (pool_id, tenant_id, include_descendants, priority,
-                                    on_budget_exceeded, allowed_regions)
-           VALUES ($1, $2, $3, $4, $5, $6::text[])
+                                    on_budget_exceeded, allowed_regions, flavors)
+           VALUES ($1, $2, $3, $4, $5, $6::text[], $7::text[])
            ON CONFLICT (pool_id, tenant_id) DO UPDATE
              SET include_descendants = EXCLUDED.include_descendants, priority = EXCLUDED.priority,
                  on_budget_exceeded = COALESCE(EXCLUDED.on_budget_exceeded, pool_offers.on_budget_exceeded),
-                 allowed_regions = COALESCE(EXCLUDED.allowed_regions, pool_offers.allowed_regions)`,
+                 allowed_regions = COALESCE(EXCLUDED.allowed_regions, pool_offers.allowed_regions),
+                 flavors = COALESCE(EXCLUDED.flavors, pool_offers.flavors)`,
           [
             pool.id,
             input.toTenantId,
@@ -1060,6 +1124,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
             input.priority ?? 0,
             input.onBudgetExceeded ?? null,
             input.allowedRegions ?? null,
+            input.flavors ?? null,
           ],
         );
         for (const [resource, max] of Object.entries(input.quota))
@@ -1069,7 +1134,11 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
           type: 'pool.offered',
           tenantId: input.tenantId,
           subject: `pool/${pool.id}`,
-          data: { toTenantId: input.toTenantId, quota: input.quota as Json },
+          data: {
+            toTenantId: input.toTenantId,
+            quota: input.quota as Json,
+            ...(input.flavors !== undefined ? { flavors: input.flavors } : {}),
+          },
         });
         const [view] = await tenantPools(tx, input.toTenantId, pool.id);
         return view!;
@@ -1130,6 +1199,10 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
           params.push(input.allowedRegions);
           sets.push(`allowed_regions = $${params.length}::text[]`);
         }
+        if (input.flavors !== undefined) {
+          params.push(input.flavors);
+          sets.push(`flavors = $${params.length}::text[]`);
+        }
         // Suspending keeps the first moment; lifting clears it. Nothing restarts either way.
         if (input.suspended === true)
           sets.push('suspended_at = COALESCE(suspended_at, compute_now())');
@@ -1154,10 +1227,26 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
               : {}),
             ...(input.allowedRegions !== undefined ? { allowedRegions: input.allowedRegions } : {}),
             ...(input.suspended !== undefined ? { suspended: input.suspended } : {}),
+            ...(input.flavors !== undefined ? { flavors: input.flavors } : {}),
           },
         });
         const [view] = await tenantPools(tx, input.toTenantId, pool.id);
         return view!;
+      },
+    }),
+    // (U-02) The offers that reach the tenant: its own, and its ancestors' made with includeDescendants. A read
+    // with no transaction open: the ancestry comes from the host's IAM (`capacity({ tenantAncestors })`).
+    offers: defineMethod({
+      action: 'compute:pools:read',
+      kind: 'read',
+      resource: tenantResource,
+      transaction: 'manual',
+      validate: describedBy(schemas.tenant, parseTenant),
+      handler: async (context, input) => {
+        const ancestors = options.tenantAncestors
+          ? await options.tenantAncestors(input.tenantId)
+          : [];
+        return { items: await listTenantOffers(context.sql, input.tenantId, ancestors) };
       },
     }),
     update: defineMethod({
@@ -1178,6 +1267,8 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
         if (next.policy.singleTenant === true && pool.policy.singleTenant !== true)
           await assertSingleTenantable(tx, pool);
         if (input.gpuModel !== undefined) next.gpuModel = input.gpuModel;
+        if ((next.gpuModel ?? null) !== (pool.gpuModel ?? null))
+          await assertGpuModelChangeable(tx, pool.id);
         await tx.query(
           `UPDATE pools SET policy = $2::jsonb, gpu_model = $3, version = version + 1 WHERE id = $1`,
           [pool.id, JSON.stringify(next.policy), next.gpuModel ?? null],
@@ -1555,7 +1646,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       validate: describedBy(schemas.quotasGet, (raw) => {
         const input = object(raw, ['tenantId', 'poolId']);
         const result: TenantInput & { poolId?: string } = { tenantId: tenant(input.tenantId) };
-        if (input.poolId !== undefined) result.poolId = id(input.poolId, 'pool', 'poolId');
+        if (input.poolId !== undefined) result.poolId = quotaPoolId(input.poolId);
         return result;
       }),
       handler: async (context, input) => ({
@@ -1570,14 +1661,23 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       validate: describedBy(schemas.setQuota, parseSetQuota),
       handler: async (context, input) => {
         const tx = context.sql;
-        const pool = await readPool(tx, input.poolId);
-        if (!pool) throw new ComputeError('NOT_FOUND', `Pool ${input.poolId} not found`);
-        await setQuota(tx, input.tenantId, input.poolId, input.resource, input.max);
+        if (input.poolId !== tenantQuotaScope) {
+          const pool = await readPool(tx, input.poolId);
+          if (!pool) throw new ComputeError('NOT_FOUND', `Pool ${input.poolId} not found`);
+        }
+        await setQuota(tx, input.tenantId, input.poolId, input.resource, input.max, {
+          ...(input.flavors !== undefined ? { flavors: input.flavors } : {}),
+        });
         await context.events.publish(tx, {
           type: 'quota.updated',
           tenantId: input.tenantId,
-          subject: `pool/${input.poolId}`,
-          data: { resource: input.resource, max: input.max },
+          subject: input.poolId === tenantQuotaScope ? `tenant/${input.tenantId}` : `pool/${input.poolId}`,
+          data: {
+            resource: input.resource,
+            max: input.max,
+            ...(input.poolId === tenantQuotaScope ? { scope: 'tenant' } : {}),
+            ...(input.flavors !== undefined ? { flavors: input.flavors } : {}),
+          },
         });
         const rows = await readQuotas(tx, input.tenantId, input.poolId);
         return rows.find((row) => row.resource === input.resource)!;

@@ -145,6 +145,11 @@ describe('resource types (§12.3)', () => {
       imageId: 'string',
       imageVerified: 'boolean',
       projectId: 'string',
+      poolId: 'string',
+      flavor: 'string',
+      region: 'string',
+      provider: 'string',
+      labelsTruncated: 'boolean',
     });
     expect(types['compute-sandbox']?.attributes).toEqual({
       templateId: 'string',

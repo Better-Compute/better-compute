@@ -130,6 +130,9 @@ async function finishDeletion(
   /** Finish as a detach whatever `onDelete` says (the machine is not ours to delete any more). */
   options: { detached?: boolean } = {},
 ): Promise<InstanceRow> {
+  // What the instance's admission recorded (a provider instance's whole charge; a hosted one's count) goes back
+  // before the allocation's scalars: counted quota rows lock before scalar ones (U-02 lock order).
+  if (row.quotaCharged) await refundQuota(tx, row.tenantId, row.poolId, row.quotaCharged);
   if (row.allocationId) {
     try {
       await deps.capacity.release(tx, row.allocationId);
@@ -138,7 +141,6 @@ async function finishDeletion(
     }
   }
   await releaseAddress(tx, row.id);
-  if (row.quotaCharged) await refundQuota(tx, row.tenantId, row.poolId, row.quotaCharged);
   const deleted = await moveInstance(tx, row, 'complete', 'deleted', {
     quotaCharged: null,
     conditions: withoutCondition(row.conditions, 'Unschedulable'),

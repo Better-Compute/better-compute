@@ -13,7 +13,7 @@ import {
 } from '@better-compute/core';
 import { setSimClock, useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
-import { betterCompute, type BetterCompute } from '@better-compute/server';
+import { betterCompute, type BetterCompute, type ComputeOptions } from '@better-compute/server';
 import { fakeIam, type FakeIam, type FakeIamOptions } from './fake-iam.js';
 
 /** Where the sim clock starts unless `start` says otherwise: 2026-01-01T00:00:00.000Z. */
@@ -47,6 +47,8 @@ export interface ComputeFixtureOptions<
   iamGuard?: 'off' | 'warn' | 'throw';
   /** As `betterCompute({ pki: { workloadIssuer } })` (its issuer: `https://compute.example.test/api/compute/workload`). */
   pki?: { workloadIssuer?: WorkloadIssuerPort & { discovery(): object } };
+  /** The built-in capacity module's options, as for `betterCompute({ capacity })`. */
+  capacity?: ComputeOptions['capacity'];
 }
 
 /** One tenant of the fixture and the one signed-in person the fake IAM knows in it. */
@@ -286,6 +288,7 @@ export async function computeFixture<
       ...(options.modules ? { modules: options.modules } : {}),
       ...(options.plugins ? { plugins: options.plugins } : {}),
       ...(options.log ? { log: options.log } : {}),
+      ...(options.capacity ? { capacity: options.capacity } : {}),
       ...(options.pki?.workloadIssuer
         ? { pki: { workloadIssuer: options.pki.workloadIssuer } }
         : {}),

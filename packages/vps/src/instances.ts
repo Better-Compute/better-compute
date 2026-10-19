@@ -5,6 +5,8 @@ import {
   transition,
   type AdmissionContext,
   type AdmissionPlan,
+  type AdmissionPolicy,
+  type AdmissionPolicyRequest,
   type AuthzAttributes,
   type Caller,
   type CapacityPort,
@@ -26,6 +28,13 @@ import {
 } from '@better-compute/core';
 import { chargeQuota, refundQuota, resizeAllocation } from '@better-compute/capacity';
 import type { ClientDeps, ProviderClients } from './accounts.js';
+import {
+  admitInstance,
+  instancePlacement,
+  placementAttributes,
+  poolPlacement,
+  type InstancePlacementAttributes,
+} from './admission.js';
 import { readFlavorByName, type FlavorRecord } from './flavors.js';
 import { claimReservationSlot } from './provider-reservations.js';
 import {
@@ -99,6 +108,10 @@ export interface InstanceDeps {
   meterGpuModels?: readonly string[];
   /** The host's workload issuer: provider accounts' identity (`ClientDeps.workload`). */
   workload?: ClientDeps['workload'];
+  /** (U-02) `vps({ addressPolicy })`: provider endpoints (`ClientDeps.addressPolicy`). */
+  addressPolicy?: ClientDeps['addressPolicy'];
+  /** (U-02) `vps({ admissionPolicy })`: the host's rules, run in every instance and sandbox admission. */
+  admissionPolicy?: AdmissionPolicy;
   images?: ImageResolver;
   /** The default runtime of hosted pools (`vps({ runtimes })[0]`); a pool picks another with `policy.runtime`. */
   runtime: string;
@@ -981,15 +994,45 @@ export async function publishInstance(
   });
 }
 
-/** What an instance counts against quota. */
+/**
+ * What an instance counts against quota: its scalars, its GPUs, and one `instances` (a counted resource: a missing
+ * row limits nothing, U-02). Hosted pools charge the scalars through the CapacityPort and the count on its own.
+ */
 export function instanceDemand(shape: InstanceShape): Record<string, number> {
   const demand: Record<string, number> = {
+    instances: 1,
     vcpu: shape.vcpu,
     memoryGiB: shape.memoryGiB,
     diskGiB: shape.diskGiB,
   };
   if (shape.gpus > 0) demand.gpu = shape.gpus;
   return demand;
+}
+
+/** The shape fields an admission policy sees. */
+export function shapeFields(shape: InstanceShape): AdmissionPolicyRequest['shape'] {
+  return { vcpu: shape.vcpu, memoryGiB: shape.memoryGiB, diskGiB: shape.diskGiB, gpus: shape.gpus };
+}
+
+/**
+ * A resize keeps consuming every row it did (not only those it grows): the target flavor must pass the
+ * allowlists of all of them (`assertFlavorEntitled` with the whole new demand).
+ */
+async function assertFlavorEntitledFor(
+  tx: SqlTx,
+  row: Pick<InstanceRow, 'tenantId' | 'poolId'>,
+  flavor: string,
+  demand: Readonly<Record<string, number>>,
+): Promise<void> {
+  await admitInstance(tx, undefined, {
+    method: 'instances.resize',
+    tenantId: row.tenantId,
+    poolId: row.poolId,
+    poolClass: 'vps-host',
+    flavor,
+    shape: { vcpu: 0, memoryGiB: 0, diskGiB: 0, gpus: 0 },
+    demand,
+  });
 }
 
 export function shapeOf(flavor: FlavorRecord): InstanceShape {
@@ -1065,6 +1108,10 @@ export interface PoolForInstance {
   /** `policy.runtime`, when the pool names one. */
   runtime?: string;
   singleTenant: boolean;
+  /** (U-02) The region of the pool's site. */
+  region?: string;
+  /** (U-02) The provider of the pool's account (provider pools whose account is the owner's). */
+  provider?: string;
 }
 
 export async function visibleVpsPool(
@@ -1080,6 +1127,8 @@ export async function visibleVpsPool(
     provider_account_id: string | null;
     runtime: string | null;
     single_tenant: boolean | null;
+    region: string | null;
+    provider: string | null;
   }>(
     // R1: a provider pool's account counts only when the pool's owner tenant owns it; otherwise the
     // pool has no account (INVALID_STATE downstream), whoever the caller is.
@@ -1087,8 +1136,10 @@ export async function visibleVpsPool(
             CASE WHEN a.tenant_id = p.owner_tenant_id THEN p.provider_account_id END AS provider_account_id,
             p.policy->>'runtime' AS runtime,
             CASE WHEN jsonb_typeof(p.policy->'singleTenant') = 'boolean'
-                 THEN (p.policy->>'singleTenant')::boolean END AS single_tenant
+                 THEN (p.policy->>'singleTenant')::boolean END AS single_tenant,
+            s.region, CASE WHEN a.tenant_id = p.owner_tenant_id THEN a.provider END AS provider
        FROM pools p LEFT JOIN provider_accounts a ON a.id = p.provider_account_id
+       LEFT JOIN sites s ON s.id = p.site_id
       WHERE p.id = $1 AND (p.owner_tenant_id = $2
             OR EXISTS (SELECT 1 FROM pool_offers o WHERE o.pool_id = p.id AND o.tenant_id = $2))
         AND p.archived_at IS NULL`,
@@ -1107,6 +1158,8 @@ export async function visibleVpsPool(
   };
   if (row.provider_account_id !== null) pool.providerAccountId = row.provider_account_id;
   if (row.runtime !== null) pool.runtime = row.runtime;
+  if (row.region !== null) pool.region = row.region;
+  if (row.provider !== null) pool.provider = row.provider;
   return pool;
 }
 
@@ -1197,6 +1250,8 @@ export function instanceAttributes(
   imageId: string,
   imageVerified: boolean,
   projectId?: string,
+  /** (U-02) poolId, flavor, region, provider and `labels.<key>`. */
+  placement?: InstancePlacementAttributes,
 ): AuthzAttributes {
   const attributes: AuthzAttributes = {
     vcpu: shape.vcpu,
@@ -1206,7 +1261,7 @@ export function instanceAttributes(
     imageVerified,
   };
   if (projectId !== undefined) attributes.projectId = projectId;
-  return attributes;
+  return placement ? placementAttributes(placement, attributes) : attributes;
 }
 
 /**
@@ -1363,7 +1418,13 @@ export async function prepareCreateInstance(
     type: 'instance',
     id: instanceId,
     tenantId: input.tenantId,
-    attributes: instanceAttributes(shape, input.imageId, image?.verified ?? false, input.projectId),
+    attributes: instanceAttributes(shape, input.imageId, image?.verified ?? false, input.projectId, {
+      poolId: input.poolId,
+      flavor: input.flavor,
+      ...(pool.region !== undefined ? { region: pool.region } : {}),
+      ...(pool.provider !== undefined ? { provider: pool.provider } : {}),
+      ...(input.labels !== undefined ? { labels: input.labels } : {}),
+    }),
     parentType: 'pool',
     parentId: input.poolId,
     ownerId: owner,
@@ -1526,6 +1587,24 @@ export async function completeCreateInstance(
   const row = await readInstance(tx, instanceId, { tenantId: input.tenantId, lock: true });
   if (!row) throw new ComputeError('NOT_FOUND', `Instance ${instanceId} not found`);
   if (!row.draft) return instanceView(row);
+  // (U-02) The flavor allowlists and the host's rules, for every caller, before anything is charged.
+  const placement = await poolPlacement(tx, row.poolId);
+  await admitInstance(tx, deps.admissionPolicy, {
+    method: 'instances.create',
+    tenantId: row.tenantId,
+    poolId: row.poolId,
+    poolClass: row.poolClass,
+    flavor: row.shape.name,
+    shape: shapeFields(row.shape),
+    demand: instanceDemand(row.shape),
+    ...placement,
+    ...(row.labels !== undefined ? { labels: row.labels } : {}),
+    ...(row.projectId !== undefined ? { projectId: row.projectId } : {}),
+    imageId: row.imageId,
+    instanceId: row.id,
+    ownerIdentityId: row.ownerIdentityId,
+    ...(context.admission ? { admission: context.admission } : {}),
+  });
   let next = await moveInstance(tx, row, 'schedule', 'scheduling', { draft: false });
   if (next.poolClass === 'vps-host') next = await sealUserData(deps, tx, next);
   if (next.poolClass === 'provider') {
@@ -1545,11 +1624,16 @@ export async function completeCreateInstance(
           [next.id, claim.reservationId, claim.grantId ?? null],
         );
     }
-    const demand = instanceDemand(next.shape);
-    await chargeQuota(tx, next.tenantId, next.poolId, demand);
-    next = await updateInstance(tx, next, { quotaCharged: demand });
+    const charged = await chargeQuota(tx, next.tenantId, next.poolId, instanceDemand(next.shape));
+    next = await updateInstance(tx, next, { quotaCharged: charged });
     await deps.work.enqueue(tx, instanceWork, next.id);
-  } else next = await scheduleHosted(deps, tx, next, context.admission);
+  } else {
+    // The count first (lock order: counted rows before scalars), then the scalars through the CapacityPort.
+    const counted = await chargeQuota(tx, next.tenantId, next.poolId, { instances: 1 });
+    if (Object.keys(counted).length > 0)
+      next = await updateInstance(tx, next, { quotaCharged: counted });
+    next = await scheduleHosted(deps, tx, next, context.admission);
+  }
   await publishInstance(deps, tx, next, 'instance.created');
   return instanceView(next);
 }
@@ -1738,6 +1822,25 @@ export async function resizeInstance(
     if (delta > 0) grow[resource] = delta;
     if (delta < 0) shrink[resource] = -delta;
   }
+  // (U-02) The target flavor passes the allowlists of every row the instance consumes (not only those it
+  // grows), then the host's rules see the growth.
+  await assertFlavorEntitledFor(tx, row, shape.name, after);
+  if (deps.admissionPolicy)
+    await deps.admissionPolicy(tx, {
+    method: 'instances.resize',
+    tenantId: row.tenantId,
+    poolId: row.poolId,
+    poolClass: row.poolClass,
+    flavor: shape.name,
+    shape: shapeFields(shape),
+    demand: grow,
+    ...(await poolPlacement(tx, row.poolId)),
+    ...(row.labels !== undefined ? { labels: row.labels } : {}),
+    ...(row.projectId !== undefined ? { projectId: row.projectId } : {}),
+    imageId: row.imageId,
+    instanceId: row.id,
+    ownerIdentityId: row.ownerIdentityId,
+  });
   await chargeQuota(tx, row.tenantId, row.poolId, grow);
   const outcome = await resizeAllocation(tx, row.allocationId, placementResources(shape));
   if (outcome.status === 'conflict') {
@@ -1788,6 +1891,11 @@ async function upsertInstanceAuthz(deps: InstanceDeps, tx: SqlTx, row: InstanceR
       row.imageId,
       row.image?.verified ?? false,
       row.projectId,
+      await instancePlacement(tx, {
+        poolId: row.poolId,
+        flavor: row.shape.name,
+        ...(row.labels !== undefined ? { labels: row.labels } : {}),
+      }),
     ),
     parentType: 'pool',
     parentId: row.poolId,

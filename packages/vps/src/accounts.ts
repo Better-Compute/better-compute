@@ -15,6 +15,7 @@ import {
   type WorkloadIssuerPort,
 } from '@better-compute/core';
 import { name, object, tenant } from './input.js';
+import { accountFetch, checkEndpoints, type AddressPolicy } from './address-policy.js';
 
 // Provider accounts (§5.1 "code registers kinds; data configures instances"): a row per account,
 // validated by its provider's manifest. Secrets are stored as SecretRefs, never as values, and
@@ -739,6 +740,8 @@ export interface ClientDeps {
   tenantVaultPaths?: TenantVaultPaths;
   /** The host's workload issuer (`context.pki.workload`): with it, accounts get `ProviderContext.identity`. */
   workload?: WorkloadIssuerPort;
+  /** (U-02) `vps({ addressPolicy })`: account validation checks `ProviderInput.endpoints`; clients get `fetch`. */
+  addressPolicy?: AddressPolicy;
 }
 
 /**
@@ -864,11 +867,14 @@ function providerContext(
   deps: ClientDeps,
   scope: AccountSecretScope,
 ): ProviderContext {
+  const context = accountContext(account, deps.rootTenantId);
+  const fetch = accountFetch(deps.addressPolicy, context.platform);
   return {
     clock: deps.clock,
     secrets: accountSecrets(deps.secrets, account, scope),
     log: deps.log,
-    account: accountContext(account, deps.rootTenantId),
+    account: context,
+    ...(fetch ? { fetch } : {}),
     ...(deps.workload
       ? {
           identity: accountIdentity(deps.workload, {
@@ -921,6 +927,13 @@ export async function checkAccountConfig(
   assertNoInlineSecrets(config);
   assertAccountSecretRefs(config, account, deps);
   exclusiveKeyOf(provider, config);
+  // (U-02) The endpoints the config chooses must be public addresses (the address policy), before any call.
+  if (provider.endpoints)
+    await checkEndpoints(
+      deps.addressPolicy,
+      provider.endpoints(config),
+      accountContext(account, deps.rootTenantId).platform,
+    );
   if (!provider.checkAccount) return;
   await provider.checkAccount(config, {
     ...providerContext(provider, account, deps, deps),

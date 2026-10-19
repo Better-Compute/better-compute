@@ -30,6 +30,7 @@ import { volumeAllocationsMigration } from './0028_volume_allocations.js';
 import { usageSourcesMigration } from './0029_usage_sources.js';
 import { offerSuspensionMigration } from './0030_offer_suspension.js';
 import { usageWindowClaimsMigration } from './0031_usage_window_claims.js';
+import { admissionFlavorsMigration } from './0032_admission_flavors.js';
 
 /**
  * Every table the base schema creates, in creation order. Partitions of the history tables
@@ -73,6 +74,7 @@ export const baseMigrations: readonly Migration[] = Object.freeze([
   usageSourcesMigration,
   offerSuspensionMigration,
   usageWindowClaimsMigration,
+  admissionFlavorsMigration,
 ]);
 
 /** `compute_schema_version.version` after the base schema is applied: one per base migration. */

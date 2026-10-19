@@ -290,7 +290,10 @@ class HetznerRobotClient implements ProviderImpl {
     this.#config = config;
     this.#context = context;
     this.#options = options;
-    this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.#fetch =
+      options.fetch ??
+      (options.endpoint !== undefined ? context.fetch : undefined) ??
+      globalThis.fetch.bind(globalThis);
     this.#endpoint = (options.endpoint ?? 'https://robot-ws.your-server.de').replace(/\/+$/, '');
   }
 
@@ -652,6 +655,8 @@ export function hetznerRobotProvider(
     provides: ['metal'],
     config: hetznerRobotConfig as unknown as ProviderDefinition<HetznerRobotConfig>['config'],
     capabilities: ['power', 'rescue', 'identify', 'bootstrap', 'list'],
+    // (U-02) An API URL override is held to vps's address policy.
+    ...(options.endpoint !== undefined ? { endpoints: () => [options.endpoint!] } : {}),
     create: (config, context) => new HetznerRobotClient(config, context, options),
   });
 }

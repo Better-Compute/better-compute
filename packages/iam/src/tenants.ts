@@ -161,3 +161,42 @@ export function iamTenantReader(
     return out;
   };
 }
+
+/**
+ * (U-02) `capacity({ tenantAncestors })` for `pools.offers`: a tenant's ancestors, nearest first, up to the root,
+ * read from IAM with a root credential (`parentId` links). A tenant IAM does not know has none. At most
+ * `maxDepth` (default 32) levels are followed; a cycle stops the walk.
+ */
+export function iamTenantAncestors(
+  iam: TenantReaderHost | TenantReaderClient,
+  options: Pick<TenantReaderOptions, 'credential'> & { maxDepth?: number },
+): (tenantId: string) => Promise<string[]> {
+  const maxDepth = options.maxDepth ?? 32;
+  return async (tenantId) => {
+    const value =
+      typeof options.credential === 'function' ? await options.credential() : options.credential;
+    const input: CredentialInput = {
+      ...(value.headers === undefined ? {} : { headers: value.headers }),
+      ...(value.token === undefined ? {} : { token: value.token }),
+    };
+    const get = async (id: string): Promise<IamTenant | undefined> => {
+      try {
+        return 'api' in iam
+          ? await iam.api.tenants.get(input, { tenantId: id })
+          : await iam.tenants.get({ tenantId: id }, { headers: credentialHeaders(input) });
+      } catch (error) {
+        if (notFound(error)) return undefined;
+        throw fromIamError(error);
+      }
+    };
+    const ancestors: string[] = [];
+    const seen = new Set([tenantId]);
+    let parentId = (await get(tenantId))?.parentId;
+    while (parentId && !seen.has(parentId) && ancestors.length < maxDepth) {
+      seen.add(parentId);
+      ancestors.push(parentId);
+      parentId = (await get(parentId))?.parentId;
+    }
+    return ancestors;
+  };
+}

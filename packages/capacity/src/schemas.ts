@@ -52,6 +52,32 @@ const allowedRegions: JsonSchema = {
   description:
     "The regions the tenant's work may run in; a pool whose site (iamRegion, else region) is elsewhere refuses the tenant's new work",
 };
+const flavorName: JsonSchema = {
+  type: 'string',
+  pattern: '^[a-z0-9][a-z0-9._-]{0,62}$',
+  maxLength: 63,
+};
+const flavors: JsonSchema = {
+  type: 'array',
+  minItems: 1,
+  maxItems: 64,
+  items: flavorName,
+  description:
+    'The flavors the tenant may create, and attach machines of, on the pool; others are refused with QUOTA_EXCEEDED (flavor-not-offered). Omitted keeps the stored list',
+};
+const nullableFlavors = (description: string): JsonSchema => ({
+  type: ['array', 'null'],
+  minItems: 1,
+  maxItems: 64,
+  items: flavorName,
+  description,
+});
+const quotaPoolId: JsonSchema = {
+  type: 'string',
+  pattern: '^(\\*|pool_[0-9a-hjkmnp-tv-z]{26,52})$',
+  maxLength: 57,
+  description: "The pool, or * for the tenant-level row (the tenant's total over every pool)",
+};
 const strict = (properties: Record<string, JsonSchema>, required: string[]): JsonSchema =>
   strictObject(properties, required);
 const durationField = (description: string): JsonSchema => ({
@@ -112,6 +138,7 @@ export const schemas = {
       priority: { type: 'integer', minimum: -1000, maximum: 1000 },
       onBudgetExceeded,
       allowedRegions,
+      flavors,
     },
     ['tenantId', 'poolId', 'toTenantId', 'quota'],
   ),
@@ -127,6 +154,9 @@ export const schemas = {
         description:
           'true suspends the offer (new work is refused); false lifts a suspension and restarts nothing',
       },
+      flavors: nullableFlavors(
+        'The flavors the tenant may create and attach on the pool; null allows every flavor again',
+      ),
     },
     ['tenantId', 'poolId', 'toTenantId'],
   ),
@@ -153,13 +183,22 @@ export const schemas = {
     },
     ['tenantId', 'poolId'],
   ),
-  quotasGet: strict({ tenantId, poolId }, ['tenantId']),
+  quotasGet: strict({ tenantId, poolId: quotaPoolId }, ['tenantId']),
   setQuota: strict(
     {
       tenantId,
-      poolId,
-      resource: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9._-]{0,63}$', maxLength: 64 },
+      poolId: quotaPoolId,
+      resource: {
+        type: 'string',
+        pattern: '^[A-Za-z][A-Za-z0-9._-]{0,63}$',
+        maxLength: 64,
+        description:
+          'gpu, vcpu, memoryGiB, diskGiB (a missing pool row grants 0); instances and sandboxes (counted; a missing row limits nothing); on *, also gpu.<gpuModel>',
+      },
       max: { type: 'integer', minimum: 0 },
+      flavors: nullableFlavors(
+        'The flavors that may consume this row (QUOTA_EXCEEDED flavor-not-allowed otherwise); null allows every flavor, omitted keeps the list',
+      ),
     },
     ['tenantId', 'poolId', 'resource', 'max'],
   ),

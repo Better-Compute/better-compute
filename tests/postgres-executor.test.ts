@@ -165,6 +165,7 @@ describe.skipIf(!url)('postgres() on PostgreSQL', () => {
       'core/0029_usage_sources',
       'core/0030_offer_suspension',
       'core/0031_usage_window_claims',
+      'core/0032_admission_flavors',
     ]);
     expect((await db.migrate()).applied).toEqual([]);
   });

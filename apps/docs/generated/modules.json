@@ -136,7 +136,8 @@
         "vps/0033_provider_costs",
         "vps/0042_pool_machines",
         "vps/0043_instance_labels",
-        "vps/0044_network_adopt"
+        "vps/0044_network_adopt",
+        "vps/0048_quota_counts"
       ]
     },
     {

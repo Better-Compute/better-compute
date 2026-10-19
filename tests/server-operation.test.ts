@@ -179,6 +179,7 @@ const capacityPaths = [
   'pools/offer',
   'pools/unoffer',
   'pools/updateOffer',
+  'pools/offers',
   'pools/update',
   'pools/archive',
   'capacity/summary',

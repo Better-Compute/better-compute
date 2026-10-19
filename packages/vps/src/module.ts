@@ -7,6 +7,7 @@ import {
   fleetResourceId,
   isComputeError,
   newId,
+  type AdmissionPolicy,
   type ComputeModule,
   type Duration,
   type Instance,
@@ -182,6 +183,7 @@ import {
   type CostsOptions,
 } from './costs.js';
 import { vpsMigrations } from './migrations.js';
+import { createAddressPolicy, type AddressPolicyOptions } from './address-policy.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
 import {
   describeCreateInstance,
@@ -398,6 +400,19 @@ export interface VpsOptions {
   typePrefix?: string;
   /** The meter catalog the root-only `billing` group manages (platform compute billing); see `BillingOptions`. */
   billing?: BillingOptions;
+  /**
+   * (U-02) The host's own admission rules, run inside the admission transaction of every `instances.create`,
+   * `instances.attach`, `instances.resize` and `sandboxes.create`, after the flavor allowlists and before quota is
+   * charged. Throw a `ComputeError` to refuse.
+   */
+  admissionPolicy?: AdmissionPolicy;
+  /**
+   * (U-02) The address policy for provider endpoints that accounts (or API URL overrides) choose
+   * (`ProviderInput.endpoints`): private, link-local, loopback, CGNAT, metadata, multicast, reserved and the
+   * cluster ranges named here are refused at account validation, and clients connect through a DNS-pinned fetch.
+   * Always on; these options only add ranges or exemptions.
+   */
+  addressPolicy?: AddressPolicyOptions;
 }
 
 type PoolInput = { tenantId: string; poolId: string };
@@ -756,6 +771,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       throw new ComputeError('INVALID_CONFIG', `Provider ${provider.id} is listed twice`);
     providers.set(provider.id, provider);
   }
+  const addressPolicy = createAddressPolicy(options.addressPolicy);
   const tenantVaultPaths =
     options.tenantVaultPaths !== undefined
       ? parseTenantVaultPaths(options.tenantVaultPaths)
@@ -1036,7 +1052,9 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       ...workloadOf(context),
       runtime: runtimes[0]!,
       runtimes: runtimeTable,
+      addressPolicy,
     };
+    if (options.admissionPolicy) deps.admissionPolicy = options.admissionPolicy;
     if (typeof context.secrets?.put === 'function') deps.broker = context.secrets;
     if (options.images) deps.images = options.images;
     if (sandboxExec) deps.sandboxExec = sandboxExec;
@@ -1052,6 +1070,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       authz: deps.authz,
       runtime: deps.runtime,
       ...(context.iam.rootTenantId !== undefined ? { rootTenantId: context.iam.rootTenantId } : {}),
+      ...(deps.admissionPolicy ? { admissionPolicy: deps.admissionPolicy } : {}),
     };
   };
 
@@ -1197,6 +1216,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
             ...input,
             caller: context.caller!,
             accountId: pool.providerAccountId ?? '',
+            ...(context.admission ? { admission: context.admission } : {}),
           });
         },
       }),
