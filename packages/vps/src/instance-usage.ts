@@ -327,6 +327,25 @@ async function openIntervalOf(
     return;
   }
   if (row) await syncDiskCondition(tx, row, billing.unknownDiskTypes, at);
+  // A grant move or a gone reservation (no observation, no lifecycle row) changes only how the instance is billed,
+  // never what it has: its disks, public address and GPUs carry over from the interval it closes (FW-8), rather
+  // than being derived again from the last listing or the flavor (which would drop a data disk the poll reported).
+  if (!row && !observed) {
+    const { rows: closing } = await tx.query<{ shape: BillableShape | string }>(
+      `SELECT shape FROM instance_usage_intervals
+        WHERE instance_id = $1 AND ended_at IS NULL AND phase = $2`,
+      [instanceId, phase],
+    );
+    const before = json(closing[0]?.shape);
+    if (before) {
+      const shape = billing.shape;
+      if (before.disks !== undefined) shape.disks = before.disks;
+      if (before.publicIp) shape.publicIp = true;
+      else delete shape.publicIp;
+      if (before.gpus) shape.gpus = before.gpus;
+      else delete shape.gpus;
+    }
+  }
   const shape = JSON.stringify(billing.shape);
   const { rows: open } = await tx.query<{ same: boolean }>(
     `SELECT (phase = $2 AND mode = $3 AND shape = $4::jsonb) AS same FROM instance_usage_intervals

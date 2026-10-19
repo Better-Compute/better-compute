@@ -1233,3 +1233,73 @@ describe('reservation gone or shrunk (FW-5)', () => {
     ).toEqual([2, 1]);
   });
 });
+
+// --- Final fix wave (FW-7, FW-8) -------------------------------------------------------------------
+
+describe('grant settling and reopened shapes (FW-7, FW-8)', () => {
+  const USAGE = 'vm.grant.usage.hours';
+
+  it('provider-usage settles grants first: the hour after a grant starts meters granted without vps.grants (FW-7)', async () => {
+    const world = await grantWorld();
+    const h0 = nextHour(world);
+    await grant(world, {
+      to: 'acme',
+      slots: 1,
+      key: 'g',
+      startsAt: h0 + HOUR,
+      endsAt: h0 + 30 * DAY,
+    });
+    const created = await createIn(world, 'acme', 'a-1');
+    await moveTo(world, h0 - 1_000);
+    await step(world, 1_000);
+    // vps.grants never runs: only the metering reconciler.
+    await moveTo(world, h0 + 2 * HOUR + settle);
+    await meterInstances(world);
+    const rows = (await computeWindows(world)).filter((row) => row.sourceId === created.id);
+    expect(rows.filter((row) => row.start === h0 + HOUR).map((row) => row.meter)).toEqual([USAGE]);
+    expect(
+      rows.filter((row) => row.start === h0).some((row) => row.meter === 'vm.reserved.vcpu.hours'),
+    ).toBe(true);
+  });
+
+  it('a VM adopted into a grant keeps the disks the provider reported (FW-8)', async () => {
+    const world = await grantWorld();
+    const h0 = nextHour(world);
+    await grant(world, {
+      to: 'acme',
+      slots: 1,
+      key: 'g',
+      startsAt: h0 + HOUR,
+      endsAt: h0 + 30 * DAY,
+    });
+    const created = await createIn(world, 'acme', 'a-1');
+    await step(world);
+    // The provider reports a 200 GiB data disk beside the flavor's 100 GiB boot disk.
+    const disks = [
+      { type: 'pd-balanced', sizeGiB: 100 },
+      { type: 'pd-balanced', sizeGiB: 200 },
+    ];
+    for (const machine of world.cloud.machines.values())
+      Object.assign(machine, {
+        disks: [
+          { type: 'pd-balanced', sizeGiB: 100, boot: true },
+          { type: 'pd-balanced', sizeGiB: 200 },
+        ],
+      });
+    await moveTo(world, h0 - 1_000);
+    await step(world, 1_000);
+    expect((await intervals(world, created.id)).at(-1)!.shape.disks).toEqual(disks);
+    await moveTo(world, h0 + HOUR + 3 * MINUTE);
+    await world.tick('vps.grants', 2);
+    expect((await intervals(world, created.id)).at(-1)).toMatchObject({
+      started: h0 + HOUR,
+      shape: { granted: true, disks },
+    });
+    await moveTo(world, h0 + 2 * HOUR + settle);
+    await meterInstances(world);
+    const granted = (await windows(world, 'instance')).filter(
+      (row) => row.sourceId === created.id && row.start === h0 + HOUR,
+    );
+    expect(sum(granted, 'disk.pd-balanced.gib.hours')).toBe(300);
+  });
+});
