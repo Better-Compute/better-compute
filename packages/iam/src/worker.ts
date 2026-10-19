@@ -363,6 +363,7 @@ interface WindowRow {
   tags: unknown;
   cost_micros: string | number | null;
   window_end: Date | string;
+  claim: string;
 }
 
 /** How long a flush's claim on a window holds (core/0033); `usage.void` refuses a window claimed within it. */
@@ -372,8 +373,8 @@ const claimTtl = "interval '10 minutes'";
  * One usage-sink pass (§12.7): sends closed, unrecorded `usage_windows` of every source (D2) through
  * `iam.recordUsage` (poison-isolating), stores each outcome, and upserts dead letters. Voided windows are
  * never sent; a window with `cost_micros` (pass-through) carries its cost in currency units. Retries are
- * safe: every window keeps its idempotency key, and a transient failure leaves the windows unrecorded for
- * the next pass. A dead-lettered window (a closed period included) is marked sent with outcome `dead-lettered`, so
+ * safe: every window keeps its idempotency key, and a failed send leaves the windows unrecorded and claimed
+ * until the claim's TTL, when a later pass takes them over and resends. A dead-lettered window (a closed period included) is marked sent with outcome `dead-lettered`, so
  * no later pass picks it up again; only `usage.retry` clears that. A dead letter whose event IAM accepts later
  * (after a retry) is resolved.
  */
@@ -395,10 +396,13 @@ export async function flushUsageWindows(
               ORDER BY window_end, idempotency_key LIMIT $1 FOR UPDATE SKIP LOCKED) c
       WHERE u.idempotency_key = c.idempotency_key AND u.window_start = c.window_start
       RETURNING u.idempotency_key, u.tenant_id, u.identity_id, u.meter, u.quantity, u.window_start, u.window_end,
-                u.tags, u.cost_micros`,
+                u.tags, u.cost_micros, u.claimed_at::text AS claim`,
     [limit],
   );
   if (claimed.length === 0) return { sent: 0, deadLettered: 0, more: false };
+  // This pass's claim (one statement, one compute_now()), as text so it compares exactly: a pass only ever clears
+  // its own claim, never a newer takeover's.
+  const claim = claimed[0]!.claim;
   const rows = claimed.sort(
     (a, b) =>
       toMillis(a.window_end) - toMillis(b.window_end) ||
@@ -418,20 +422,11 @@ export async function flushUsageWindows(
     if (row.cost_micros !== null) event.cost = Number(row.cost_micros) / 1e6;
     return event;
   });
-  let results: Awaited<ReturnType<IamPort['recordUsage']>>;
-  try {
-    results = await iam.recordUsage(events);
-  } catch (error) {
-    // A transient failure: give the claims back so the next pass sends at once, not after the TTL.
-    await sql
-      .query(
-        `UPDATE usage_windows SET claimed_at = NULL
-          WHERE idempotency_key = ANY($1::text[]) AND recorded_at IS NULL`,
-        [events.map((event) => event.idempotencyKey)],
-      )
-      .catch(() => undefined);
-    throw error;
-  }
+  // A throw keeps the claims (ruling FW-6): IAM may have recorded some or all of the events before the failure
+  // reached us (a timeout, a dropped connection), and the port cannot tell, so releasing them would let
+  // `usage.void` void a window IAM billed. They expire after the TTL; the takeover resends, and IAM answers
+  // duplicates by idempotency key.
+  const results = await iam.recordUsage(events);
   let deadLettered = 0;
   await sql.transaction(async (tx) => {
     for (const [index, result] of results.entries()) {
@@ -457,11 +452,12 @@ export async function flushUsageWindows(
       const orphaned = result.status === 'reattributed' && result.identityId === undefined;
       await tx.query(
         `UPDATE usage_windows
-            SET recorded_at = compute_now(), outcome = $2, claimed_at = NULL,
+            SET recorded_at = compute_now(), outcome = $2,
+                claimed_at = CASE WHEN claimed_at = $5::timestamptz THEN NULL ELSE claimed_at END,
                 identity_id = CASE WHEN $3::bool THEN NULL
                                    WHEN $2 = 'reattributed' THEN $4 ELSE identity_id END
           WHERE idempotency_key = $1`,
-        [event.idempotencyKey, result.status, orphaned, result.identityId ?? null],
+        [event.idempotencyKey, result.status, orphaned, result.identityId ?? null, claim],
       );
     }
     // A retried window that IAM now accepted closes its dead letter (usage.retry clears the window's outcome and

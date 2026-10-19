@@ -569,8 +569,12 @@ unvoided windows of every source (it sets `claimed_at` in a short statement of i
 | `dead-lettered` | The event still failed on its own; it is stored in `usage_dead_letters` |
 
 A claim lasts 10 minutes: a pass that died leaves claims the next pass takes over, and a resend is a `duplicate`
-because Better IAM knows the keys. Embedded mode sends batches of 200 events per `billing.recordMany`
-(`usageBatchSize` on `bridge.embedded()` takes 1 to 1000), which bounds how long one call holds Better IAM's lock.
+because Better IAM knows the keys. A pass whose send fails keeps its claims too (Better IAM may have recorded part
+of it before the error arrived), so `usage.void` cannot void a window that may be billed; the windows are sent
+again once the claims expire. A pass only ever clears its own claim, never a newer one.
+
+Embedded mode sends batches of 200 events per `billing.recordMany` (`usageBatchSize` on `bridge.embedded()` takes 1
+to 1000), which bounds how long one call holds Better IAM's lock.
 Remote mode sends at most 100 per HTTP call, as the root service account.
 
 ### Poison isolation
@@ -582,7 +586,7 @@ every retry. The sink isolates it:
 flowchart TD
   Batch["recordMany(batch)"] --> Ok{"Succeeded?"}
   Ok -- yes --> Stored["recorded or duplicate"]
-  Ok -- "transient error" --> Retry["Rethrow: the next pass retries"]
+  Ok -- "transient error" --> Retry["Rethrow: claims kept, resent after 10 minutes"]
   Ok -- "event-specific error" --> Size{"One event left?"}
   Size -- no --> Split["Split in half, record each half"]
   Size -- yes --> Identity{"Identity not found?"}
@@ -592,9 +596,10 @@ flowchart TD
 
 - Event-specific errors are `NOT_FOUND`, `CONFLICT`, `BILLING_PERIOD_CLOSED`, `INVALID_INPUT`,
   `INVALID_TRANSITION` and `METER_ARCHIVED`. Anything else, such as Better IAM being down or a lock timeout, is
-  transient: the whole call rejects, the windows stay unrecorded, and the next pass sends them again with the same
-  keys. So is Better IAM's `NOT_FOUND` "Endpoint not found": it means the route is wrong (a misconfigured base path, a
-  proxy), every event would fail alike, and dead-lettering them all would lose the usage.
+  transient: the whole call rejects, the windows stay unrecorded and claimed, and the first pass after the claim
+  expires (10 minutes) sends them again with the same keys. So is Better IAM's `NOT_FOUND` "Endpoint not found": it
+  means the route is wrong (a misconfigured base path, a proxy), every event would fail alike, and dead-lettering
+  them all would lose the usage.
 - An identity deleted or moved before the flush (`NOT_FOUND` "Identity not found") is re-recorded under the
   successor named by Better IAM's `identity:offboard` event, which the IAM inbox stores in `iam_successors` and
   follows for up to 8 hops. Without a successor, the event is recorded with no identity and the tag

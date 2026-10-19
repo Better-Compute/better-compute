@@ -103,6 +103,10 @@ describe('usage into better-iam billing', () => {
       await expect(flushUsageWindows(db, dying)).rejects.toThrow('worker killed');
       const unrecorded = await db.query('SELECT 1 FROM usage_windows WHERE recorded_at IS NULL');
       expect(unrecorded.rows).toHaveLength(5);
+      // The failed pass keeps its claims (IAM may have recorded the batch, as here): nothing is resent until the
+      // claims expire after 10 minutes.
+      expect(await flushUsageWindows(db, port)).toEqual({ sent: 0, deadLettered: 0, more: false });
+      await db.query(`UPDATE usage_windows SET claimed_at = claimed_at - interval '11 minutes'`);
 
       // The restarted worker sends the same windows again: IAM keeps one of each.
       expect(await flushUsageWindows(db, port)).toEqual({ sent: 5, deadLettered: 0, more: false });

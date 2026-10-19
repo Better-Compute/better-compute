@@ -945,13 +945,47 @@ describe('corrections', () => {
       });
     });
 
-    it('a failed send gives the claims back, so the next pass sends again', async () => {
+    it('a failed send keeps its claims (it may have been delivered); the takeover after the TTL resends', async () => {
       const key = await pending('vm_failed_send');
       await expect(
         flushUsageWindows(database, { recordUsage: () => Promise.reject(new Error('IAM down')) }),
       ).rejects.toThrow('IAM down');
+      // Kept: void refuses it and the next pass leaves it alone until the claim is 10 minutes old.
+      expect(await claimedAt(key)).not.toBeNull();
+      expect(await outcome(api.usage.void(root, { idempotencyKeys: [key], reason: 'x' }))).toBe(
+        'INVALID_STATE',
+      );
+      expect(await flush()).toEqual({ sent: 0, deadLettered: 0, more: false });
+      try {
+        await setSimClock(database, clock.now() + 11 * 60_000);
+        expect(await flush()).toEqual({ sent: 1, deadLettered: 0, more: false });
+      } finally {
+        await useSimClock(database, clock.now());
+      }
+      expect(await windowOf(key)).toMatchObject({ outcome: 'recorded' });
       expect(await claimedAt(key)).toBeNull();
-      expect(await flush()).toEqual({ sent: 1, deadLettered: 0, more: false });
+    });
+
+    it("a pass never clears a newer takeover's claim", async () => {
+      const key = await pending('vm_taken_over');
+      let newer: unknown;
+      const report = await flushUsageWindows(database, {
+        recordUsage: async (events) => {
+          // While this pass sends, its claim expires and another pass takes the window over.
+          await database.query(
+            "UPDATE usage_windows SET claimed_at = compute_now() + interval '1 second' WHERE idempotency_key = $1",
+            [key],
+          );
+          newer = await claimedAt(key);
+          return events.map((event) => ({
+            idempotencyKey: event.idempotencyKey,
+            status: 'recorded' as const,
+          }));
+        },
+      });
+      expect(report).toEqual({ sent: 1, deadLettered: 0, more: false });
+      expect(newer).not.toBeNull();
+      expect(await claimedAt(key)).toEqual(newer);
     });
 
     it('retry gives a window back to the flush at once', async () => {
