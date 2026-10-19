@@ -116,7 +116,7 @@ vps, and nothing imports a provider. Hosts register it with `vps({ providers: [.
 **Node identity:** `pki/src/attestors/cloud-iid.ts` verifies AWS and GCP identity documents. DigitalOcean's metadata
 service has **no signed instance identity**, so DO nodes join with tokens (DO-D12).
 
-**Migrations:** the newest vps migration is `vps/0026_networks`.
+**Migrations:** the newest vps migration on main is `vps/0027_account_exclusive_key` (2026-10-18). Billing reserves `vps/0030`–`0033`. This program holds `vps/0034`–`vps/0041` (claimed in coordination.md, d4a60ba8).
 
 **Phases:** `ApiPhase` is the closed union `'v0.1'…'v1.0'` (`core/src/catalog.ts:288`).
 
@@ -486,7 +486,7 @@ These are recommendations. Each is the default unless the user overrides it. PLA
   `package.json` change only by one-line inserts.
 - **Migrations.**
   - Additive only, named `<module>/<nnnn>_<slug>`.
-  - vps starts at `vps/0027`; the phase plan reconfirms the next free number at Task 0.
+  - DO phases use `vps/0034`–`vps/0041` (claimed); the phase plan reconfirms the next free number at Task 0.
   - The `cloud-resources` module owns `cloud-resources/0001…`.
   - SQL uses `compute_now()`.
 - **No provider call inside a transaction.** A reconciler run stays under `claimTtlMs` (60 s). Long DO actions are
@@ -618,7 +618,7 @@ Spending stays under the test account's cap; the sweeper leaves no `better-compu
 - **Core contract.** Core gains `ProviderResourceState`, `ProviderImpl.volumes?` and `ProviderImpl.addresses?`, plus
   their conformance cases.
 - **Tables and reconciler.** vps gains `provider_volumes`, `provider_volume_attachments`, `provider_snapshots` and
-  `provider_addresses` (`vps/0027…0030`), and one `vps.providerResources` reconciler that converges desired against
+  `provider_addresses` (`vps/0034…0037`), and one `vps.providerResources` reconciler that converges desired against
   observed state, with non-blocking actions.
 - **API groups.**
   - `providerVolumes`: `create`, `get`, `list`, `attach`, `detach`, `resize` (grow only), `snapshot`, `delete`.
@@ -665,7 +665,7 @@ Spending stays under the test account's cap; the sweeper leaves no `better-compu
   2. A numeric image id (a snapshot or custom image).
   3. A catalog `name@version` (`provision/src/images.ts`), imported as a DO custom image from a short-lived
      presigned BlobStore URL. DO requires a URL it can fetch. The import is recorded in a per-region table
-     `provider_images` (`vps/00NN_provider_images`) and transferred to other regions on demand (Image Actions
+     `provider_images` (`vps/0038_provider_images`) and transferred to other regions on demand (Image Actions
      `transfer`).
   - GPU sizes refuse non-GPU images with `INVALID_INPUT` before the create.
 - **Spot.** Spot offers exist only with `allowSpot: true` (DO-D14). The vps `Preempted` condition is added to the
