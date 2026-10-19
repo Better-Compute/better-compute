@@ -45,6 +45,7 @@ import {
   type InstanceDeps,
   type InstanceRow,
 } from './instances.js';
+import { closeOpenInterval, openInterval } from './instance-usage.js';
 import { releaseAddress } from './ipam.js';
 import { networkTag, providerResourceName } from './networks.js';
 import { specPlacement, type HostPlacement } from './placement.js';
@@ -99,6 +100,29 @@ async function advance(tx: SqlTx, row: InstanceRow, target: Settled): Promise<In
   return current;
 }
 
+/**
+ * A provider instance's lifecycle usage interval (platform compute billing, D3) follows what the
+ * provider reports, written in the transaction that applies it: closed when the instance is lost,
+ * fails, is deleted or detached; opened (or kept) for the observed phase otherwise.
+ */
+async function closeUsage(
+  deps: Pick<InstanceDeps, 'clock'>,
+  tx: SqlTx,
+  row: InstanceRow,
+): Promise<void> {
+  if (row.poolClass === 'provider') await closeOpenInterval(tx, row.id, deps.clock.now());
+}
+
+/** States in which an observed machine is not billed: not placed yet, lost, failed, or going. */
+const unbilledStates: ReadonlySet<InstanceState> = new Set<InstanceState>([
+  'pending',
+  'scheduling',
+  'error',
+  'lost',
+  'deleting',
+  'deleted',
+]);
+
 async function finishDeletion(
   deps: InstanceDeps,
   tx: SqlTx,
@@ -119,6 +143,8 @@ async function finishDeletion(
     quotaCharged: null,
     conditions: withoutCondition(row.conditions, 'Unschedulable'),
   });
+  // Deleted or detached: its usage interval ends here (a provider machine runs until then).
+  await closeUsage(deps, tx, row);
   await deps.authz.remove(tx, { type: 'instance', id: row.id, tenantId: row.tenantId });
   if (row.nodeId) await deps.desired.invalidate(tx, row.nodeId);
   // Its provider machine is free again (discovery's link); a detached one keeps running.
@@ -360,6 +386,7 @@ async function failWith(
     row.state === 'error' || row.state === 'lost'
       ? await updateInstance(tx, row, { conditions })
       : await moveInstance(tx, row, 'fail', 'error', { conditions });
+  await closeUsage(deps, tx, failed);
   await publishInstance(deps, tx, failed, 'instance.failed', { reason: condition.type });
   return failed;
 }
@@ -624,6 +651,7 @@ async function reconcileProvider(
             now,
           ),
         });
+        await closeUsage(deps, tx, failed);
         await publishInstance(deps, tx, failed, 'instance.failed', { reason: code });
         return undefined;
       }
@@ -641,6 +669,7 @@ async function reconcileProvider(
       });
       if (code === 'UNSUPPORTED' || code === 'INVALID_STATE' || code === 'INVALID_CONFIG') {
         const failed = await moveInstance(tx, current, 'fail', 'error');
+        await closeUsage(deps, tx, failed);
         await publishInstance(deps, tx, failed, 'instance.failed', { reason: code });
         return undefined;
       }
@@ -694,6 +723,8 @@ async function reconcileProvider(
         conditions,
         reportedState: 'absent',
       });
+      // The lost span is not billed: a recovery opens a new interval.
+      await closeUsage(deps, tx, lost);
       await publishInstance(deps, tx, lost, 'instance.lost');
       return undefined;
     }
@@ -751,11 +782,13 @@ async function reconcileProvider(
       }
       if (reported === 'error') {
         const failed = await moveInstance(tx, current, 'fail', 'error');
+        await closeUsage(deps, tx, failed);
         await publishInstance(deps, tx, failed, 'instance.failed', { reason: 'provider' });
         return undefined;
       }
       if (reported === 'absent' && current.state !== 'deleting') {
         const lost = await moveInstance(tx, current, 'lose', 'lost');
+        await closeUsage(deps, tx, lost);
         await publishInstance(deps, tx, lost, 'instance.lost');
         return undefined;
       }
@@ -772,6 +805,10 @@ async function reconcileProvider(
         if (next.state !== current.state)
           await publishInstance(deps, tx, next, `instance.${next.state}`);
         current = next;
+        // Billed as observed: a requested stop bills on until the provider reports it stopped, and
+        // a recovered instance opens a new interval at its recovery (the lost span is not billed).
+        if (!unbilledStates.has(current.state))
+          await openInterval(tx, current, reported, deps.clock.now(), deps, machine);
         if (current.state === current.desiredState) return now + pollSteadyMs;
       }
       return now + pollTransitionalMs;

@@ -310,6 +310,7 @@ const tables = [
   'usage_windows',
   'ip_leases',
   'ip_pools',
+  'instance_usage_intervals',
   'instances',
   'flavors',
   'provider_accounts',
@@ -451,6 +452,7 @@ describe('vps() API surface', () => {
       'vps/0025_provider_reservations',
       'vps/0026_networks',
       'vps/0027_account_exclusive_key',
+      'vps/0030_instance_usage',
     ]);
     expect(module.requires).toEqual(['capacity']);
     expect(() => vps({ runtimes: [] })).toThrow(ComputeError);

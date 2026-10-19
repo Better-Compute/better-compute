@@ -535,6 +535,7 @@ afterAll(async () => {
 beforeEach(async () => {
   // Every test starts with no networks, rules or instances: a periodic pass would pick up the last test's.
   await db.query(`DELETE FROM provider_machines`);
+  await db.query(`DELETE FROM instance_usage_intervals`);
   await db.query(`DELETE FROM instances`);
   await db.query(`DELETE FROM network_firewall_rules`);
   await db.query(`DELETE FROM network_subnets`);

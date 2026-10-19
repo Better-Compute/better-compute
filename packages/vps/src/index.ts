@@ -11,6 +11,7 @@ export * from './migrations.js';
 export * from './instances.js';
 export * from './pricing.js';
 export * from './billing.js';
+export * from './instance-usage.js';
 export * from './lifecycle.js';
 export * from './status.js';
 export * from './flavors.js';

@@ -2,6 +2,7 @@ import type { Migration } from '@better-compute/core';
 import { vpsProviderBootstrapsMigration } from './bootstraps.js';
 import { providerMachinesMigration } from './discovery.js';
 import { instanceAttachMigration } from './attach.js';
+import { instanceUsageMigration } from './instance-usage.js';
 import { vpsVolumeResizeHoldMigration, vpsVolumesMigration } from './volumes.js';
 import { vpsVolumeStorageMigration } from './volume-storage.js';
 import { providerReservationsMigration } from './provider-reservations.js';
@@ -186,4 +187,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   providerReservationsMigration,
   vpsNetworksMigration,
   vpsAccountExclusiveKeyMigration,
+  instanceUsageMigration,
 ]);
