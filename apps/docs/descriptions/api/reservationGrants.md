@@ -2,6 +2,8 @@ Reservation grants commit slots of a provider capacity reservation to one tenant
 
 While a grant is in its term, its slots are the grantee's. `instances.create` on the reservation's flavor puts the grantee's instance into its grant while the grant has a slot its instances do not hold; once the grant is full, the instance takes an ordinary slot of the reservation if one is free. Nobody else can take a granted slot, even while the grantee leaves it idle: others share `total - in use - unused granted slots`. A grant that names a `projectId` serves only that project's instances. A reservation that is physically full refuses everyone, the grantee included, with `CAPACITY_UNAVAILABLE`.
 
+Billing: the grantee is billed `vm.grant.slot.hours` for every committed slot, every hour of the term, used or not, once each hour has ended (the `vps.grants` reconciler writes them as usage, tagged with the reservation's region, the pool and the provider). Its instances inside the grant record only the informational `vm.grant.usage.hours`, never compute meters, so nothing is billed twice; an instance beyond its grant is billed at the reservation rate (`vm.reserved.*`). When a grant ends, its billing stops at `endsAt` and its running instances are billed at the reservation rate from then on.
+
 States: `scheduled` until `startsAt`, `active` during the term, then `ended`; `cancelled` when ended before it started. Each change publishes a `reservation-grant.*` event (`created`, `active`, `ended`, `cancelled`) in the grantee's tenant, with `{ grantId, poolId, projectId?, slots, startsAt, endsAt }`.
 
 ## create

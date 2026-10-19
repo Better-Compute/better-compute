@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ExternalReservation } from '@better-compute/core';
 import { closeFixtures } from '@better-compute/testing';
-import type { BillableShape } from '@better-compute/vps';
+import { vps, type BillableShape } from '@better-compute/vps';
 import { gceWorld, type GceWorld } from './support/vps-gce.js';
 
 // Platform compute billing, phase 3 (commitments): reserved-rate meters for instances admitted against a provider
@@ -584,5 +584,194 @@ describe('grants', () => {
     expect(await endGrant(world, g.id)).toMatchObject({ state: 'cancelled', ...term });
     // Its term can be granted again.
     await grant(world, { to: 'other', slots: 4, key: 'g-2', ...term });
+  });
+});
+
+// --- Task 11: grant billing -------------------------------------------------------------------------
+
+describe('billing', () => {
+  const SLOT = 'vm.grant.slot.hours';
+  const USAGE = 'vm.grant.usage.hours';
+
+  /** Runs `vps.grants` (its periodic key is due after any move of 5 minutes or more). */
+  const settleGrants = (world: GceWorld) => world.tick('vps.grants', 2);
+
+  const stateOf = async (world: GceWorld, grantId: string) =>
+    (
+      (await world.api.reservationGrants.get(world.root, {
+        tenantId: world.rootTenant,
+        grantId,
+      })) as GrantView
+    ).state;
+
+  /** Creates an instance and observes it running at `at` (never before the clock). */
+  async function runningAt(world: GceWorld, key: string, at: number) {
+    const created = await createIn(world, 'acme', key);
+    await moveTo(world, at - 1_000);
+    await step(world, 1_000);
+    return created;
+  }
+
+  it('is a singleton periodic reconciler', () => {
+    expect(
+      vps({ providers: [] }).reconcilers!.find((item) => item.name === 'vps.grants'),
+    ).toMatchObject({ shardBy: 'none', periodic: [{ key: 'all', every: '5m' }] });
+  });
+
+  it('a 2-slot grant bills 2 slot-hours every hour, used or not', async () => {
+    const world = await grantWorld();
+    const h0 = nextHour(world);
+    // Granted ahead of its term: scheduled until h0.
+    const g = await grant(world, {
+      to: 'acme',
+      slots: 2,
+      key: 'g',
+      startsAt: h0,
+      endsAt: h0 + 30 * DAY,
+    });
+    expect(g.state).toBe('scheduled');
+    await moveTo(world, h0 + MINUTE);
+    await settleGrants(world);
+    expect(await stateOf(world, g.id)).toBe('active');
+    // Hour 1: idle. Hour 2: one instance. Hour 3: two.
+    await runningAt(world, 'a-1', h0 + HOUR);
+    await runningAt(world, 'a-2', h0 + 2 * HOUR);
+    await moveTo(world, h0 + 3 * HOUR + MINUTE);
+    await settleGrants(world);
+    const rows = await windows(world, 'grant');
+    expect(rows.map((row) => [row.start, row.meter, row.quantity])).toEqual([
+      [h0, SLOT, 2],
+      [h0 + HOUR, SLOT, 2],
+      [h0 + 2 * HOUR, SLOT, 2],
+    ]);
+    expect(sum(rows, SLOT)).toBe(6);
+    for (const row of rows) {
+      expect(row.key).toBe(`cmp:grant:${g.id}:${row.start}:${SLOT}`);
+      expect(row.sourceId).toBe(g.id);
+      expect(row.tenantId).toBe(world.acmeTenant);
+      expect(row.tags).toEqual({
+        region: 'us-central1',
+        pool: world.poolId,
+        provider: 'fake-gce',
+        source: 'grant',
+      });
+    }
+    // The watermark moved with what was written; another pass adds nothing.
+    const after = (await world.api.reservationGrants.get(world.root, {
+      tenantId: world.rootTenant,
+      grantId: g.id,
+    })) as GrantView;
+    expect(after.meteredUntil).toBe(h0 + 3 * HOUR);
+    await world.fixture.advance(10 * MINUTE);
+    await settleGrants(world);
+    expect(await windows(world, 'grant')).toHaveLength(3);
+    expect((await world.events('reservation-grant.')).map((event) => event.type)).toEqual([
+      'reservation-grant.created',
+      'reservation-grant.active',
+    ]);
+  });
+
+  it('instances inside a grant record no compute meters', async () => {
+    const world = await grantWorld();
+    const h0 = nextHour(world);
+    await grant(world, { to: 'acme', slots: 2, key: 'g' });
+    const created = await runningAt(world, 'a-1', h0);
+    expect((await intervals(world, created.id))[0]!.shape).toMatchObject({
+      reserved: true,
+      granted: true,
+    });
+    await moveTo(world, h0 + 2 * HOUR + settle);
+    await meterInstances(world);
+    const rows = (await windows(world, 'instance')).filter((row) => row.sourceId === created.id);
+    expect(rows.map((row) => [row.start, row.meter, row.quantity])).toEqual([
+      [h0, USAGE, 1],
+      [h0 + HOUR, USAGE, 1],
+    ]);
+  });
+
+  it('an instance outside the grant (overflow) meters vm.reserved.*', async () => {
+    const world = await grantWorld();
+    const h0 = nextHour(world);
+    await grant(world, { to: 'acme', slots: 1, key: 'g' });
+    const inside = await createIn(world, 'acme', 'a-1');
+    const overflow = await createIn(world, 'acme', 'a-2');
+    expect((await grantOf(world, overflow.id)).reservation_grant_id).toBeNull();
+    await moveTo(world, h0 - 1_000);
+    await step(world, 1_000);
+    await moveTo(world, h0 + HOUR + settle);
+    await meterInstances(world);
+    const rows = await windows(world, 'instance');
+    expect(
+      rows.filter((row) => row.sourceId === inside.id).map((row) => [row.meter, row.quantity]),
+    ).toEqual([[USAGE, 1]]);
+    expect(
+      rows.filter((row) => row.sourceId === overflow.id).map((row) => [row.meter, row.quantity]),
+    ).toEqual([
+      ['vm.instance.hours', 1],
+      ['vm.reserved.gpu.a100.hours', 1],
+      ['vm.reserved.memory.gib.hours', 85],
+      ['vm.reserved.vcpu.hours', 12],
+    ]);
+  });
+
+  it('an ended grant stops billing at ends_at', async () => {
+    const world = await grantWorld();
+    const h0 = nextHour(world);
+    await moveTo(world, h0);
+    const g = await grant(world, { to: 'acme', slots: 2, key: 'g' });
+    expect(g.startsAt).toBe(h0);
+    const created = await runningAt(world, 'a-1', h0 + 2_000);
+    await moveTo(world, h0 + 90 * MINUTE);
+    const ended = await endGrant(world, g.id);
+    expect(ended).toMatchObject({ state: 'ended', endsAt: h0 + 90 * MINUTE });
+    // The instance leaves the grant at its end: the grant's usage line before, compute meters after.
+    const list = await intervals(world, created.id);
+    expect(list.map((item) => [item.shape.granted, item.started, item.ended])).toEqual([
+      [true, h0 + 2_000, h0 + 90 * MINUTE],
+      [false, h0 + 90 * MINUTE, null],
+    ]);
+
+    await moveTo(world, h0 + 4 * HOUR + settle);
+    await settleGrants(world);
+    await meterInstances(world);
+    const slots = await windows(world, 'grant');
+    expect(slots.map((row) => [row.start, row.quantity])).toEqual([
+      [h0, 2],
+      [h0 + HOUR, 1],
+    ]);
+    const used = (await windows(world, 'instance')).filter((row) => row.sourceId === created.id);
+    expect(sum(used, USAGE)).toBeCloseTo(1.5 - 2_000 / HOUR, 5);
+    // From 1:30 on the instance is billed at the reserved rate, and never also as granted.
+    expect(sum(used, 'vm.reserved.vcpu.hours')).toBe(12 * 2.5);
+    expect(
+      used.filter((row) => row.start >= h0 + 2 * HOUR).every((row) => row.meter !== USAGE),
+    ).toBe(true);
+    // Nothing more is ever billed for the grant.
+    await world.fixture.advance(DAY);
+    await settleGrants(world);
+    expect(await windows(world, 'grant')).toHaveLength(2);
+  });
+
+  it('a grant whose term passes is ended by the reconciler, and its instances leave it', async () => {
+    const world = await grantWorld();
+    const h0 = nextHour(world);
+    await moveTo(world, h0);
+    const g = await grant(world, { to: 'acme', slots: 1, key: 'g', endsAt: h0 + 2 * HOUR });
+    const created = await runningAt(world, 'a-1', h0 + 2_000);
+    await moveTo(world, h0 + 2 * HOUR + 3 * MINUTE);
+    await settleGrants(world);
+    expect(await stateOf(world, g.id)).toBe('ended');
+    expect(
+      (await intervals(world, created.id)).map((item) => [item.shape.granted, item.started]),
+    ).toEqual([
+      [true, h0 + 2_000],
+      [false, h0 + 2 * HOUR],
+    ]);
+    expect(sum(await windows(world, 'grant'), SLOT)).toBe(2);
+    expect((await world.events('reservation-grant.')).map((event) => event.type)).toEqual([
+      'reservation-grant.created',
+      'reservation-grant.active',
+      'reservation-grant.ended',
+    ]);
   });
 });

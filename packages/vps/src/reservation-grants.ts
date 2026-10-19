@@ -10,9 +10,12 @@ import {
   type MethodContext,
   type MethodDefinition,
   type Migration,
+  type Reconciler,
   type SqlTx,
 } from '@better-compute/core';
+import { meterSource, type UsageTags } from '@better-compute/capacity';
 import { readAccount } from './accounts.js';
+import { reopenGrantIntervals, type IntervalDeps } from './instance-usage.js';
 import { isRootCaller } from './billing.js';
 import {
   canonical,
@@ -305,9 +308,9 @@ async function dbNow(tx: SqlTx): Promise<number> {
 // --- Dependencies and events -------------------------------------------------------------------
 
 /** What the grant API and the `vps.grants` reconciler need beyond a transaction. */
-export interface GrantDeps {
+export interface GrantDeps extends IntervalDeps {
   events: EventPublisher;
-  /** The IAM root tenant: only it grants; unknown fails closed. */
+  /** The IAM root tenant: only it grants; unknown fails closed (also how a grant's instances reopen). */
   rootTenantId?: string | undefined;
 }
 
@@ -351,11 +354,12 @@ function requireRoot(context: MethodContext, deps: GrantDeps, tenantIdValue: str
 /**
  * Moves grants to the state their term says at `now`: `scheduled` → `active` at `starts_at`, `active` → `ended` at
  * `ends_at` (a grant whose whole term passed unseen goes through both). Publishes `reservation-grant.active` and
- * `reservation-grant.ended`. `onlyIds` limits it to those grants (the API's own); the reconciler passes none.
- * Returns the grants that ended.
+ * `reservation-grant.ended`. An ended grant's instances leave it at `ends_at` (`reopenGrantIntervals`): from then on
+ * they are billed as reserved instances. `onlyIds` limits it to those grants (the API's own); the reconciler passes
+ * none. Returns the grants that ended.
  */
 export async function settleGrantStates(
-  deps: Pick<GrantDeps, 'events'>,
+  deps: GrantDeps,
   tx: SqlTx,
   now: number,
   onlyIds?: readonly string[],
@@ -377,9 +381,99 @@ export async function settleGrantStates(
     if (done) {
       await publish(deps, tx, row, 'reservation-grant.ended');
       ended.push({ ...row, state });
+      await reopenGrantIntervals(tx, row.id, Math.round(Number(row.ends)), deps);
     }
   }
   return ended;
+}
+
+// --- Billing (Task 11) ------------------------------------------------------------------------
+
+/** The work kind of the grants reconciler. */
+export const grantsWork = 'vps.grants';
+
+/** The meter a grant is billed on: every committed slot, every hour of its term, used or not (D7). */
+export const grantSlotMeter = 'vm.grant.slot.hours';
+
+const hourMs = 3_600_000;
+
+/**
+ * Writes the slot-hours of every `active` or `ended` grant that ended hours have not covered yet: `grant` windows
+ * (`meterSource`, key `cmp:grant:<id>:<windowStartMs>:vm.grant.slot.hours`) of `slots` per hour over
+ * `[max(metered_until, starts_at), min(ends_at, now))`, whole hours only (the part of the term inside an hour that has
+ * not ended waits for it), and advances `metered_until` in the same transaction (an hour written is never derived
+ * again). Billed to the grantee, with the reservation's region, the grant's pool and the account's provider as tags.
+ */
+export async function meterGrants(
+  tx: SqlTx,
+  now: number,
+  options: { limit?: number } = {},
+): Promise<{ grants: number; windows: number }> {
+  const floorNow = Math.floor(now / hourMs) * hourMs;
+  const { rows } = await tx.query<GrantRow & { region: string | null; provider: string | null }>(
+    `SELECT ${grantColumns}, r.reservation->>'region' AS region, a.provider
+       FROM reservation_grants g
+       JOIN provider_reservations r ON r.account_id = g.account_id AND r.reservation_id = g.reservation_id
+       LEFT JOIN provider_accounts a ON a.id = g.account_id
+      WHERE g.state IN ('active', 'ended') AND g.metered_until < LEAST(g.ends_at, ${at$(1)})
+      ORDER BY g.metered_until, g.id LIMIT $2
+        FOR UPDATE OF g`,
+    [floorNow, options.limit ?? 5000],
+  );
+  let windows = 0;
+  for (const row of rows) {
+    const from = Math.max(Math.round(Number(row.metered)), Math.round(Number(row.starts)));
+    const to = Math.min(Math.round(Number(row.ends)), floorNow);
+    if (!(to > from)) continue;
+    const tags: UsageTags = {
+      pool: row.pool_id,
+      provider: row.provider ?? 'unknown',
+      source: 'grant',
+    };
+    if (row.region) tags.region = row.region;
+    if (row.project_id !== null) tags.project = row.project_id;
+    windows += await meterSource(
+      tx,
+      {
+        sourceKind: 'grant',
+        sourceId: row.id,
+        tenantId: row.tenant_id,
+        lines: [{ meter: grantSlotMeter, perHour: Number(row.slots) }],
+        from,
+        to,
+        tags,
+      },
+      now,
+    );
+    await tx.query(`UPDATE reservation_grants SET metered_until = ${at$(2)} WHERE id = $1`, [
+      row.id,
+      to,
+    ]);
+  }
+  return { grants: rows.length, windows };
+}
+
+/**
+ * The `vps.grants` reconciler (`shardBy: 'none'`, periodic `all` every 5 minutes): settles grant states (and moves
+ * an ended grant's instances out of it), then writes the slot-hours due, in one transaction.
+ */
+export function grantsReconciler(
+  deps: (context: Parameters<Reconciler['run']>[0]) => GrantDeps,
+): Reconciler {
+  return {
+    name: grantsWork,
+    shardBy: 'none',
+    periodic: [{ key: 'all', every: '5m' }],
+    async run(context) {
+      const working = deps(context);
+      const now = context.clock.now();
+      await context.sql.transaction(async (tx) => {
+        await settleGrantStates(working, tx, now);
+        await meterGrants(tx, now);
+      });
+      return 'DONE';
+    },
+  };
 }
 
 // --- The API ---------------------------------------------------------------------------------

@@ -48,7 +48,12 @@ import {
 import { id, int, name, object, optional, tenant } from './input.js';
 import { isRootCaller } from './billing.js';
 import { billingApi, flavorMeterSpec, type BillingApi, type BillingOptions } from './pricing.js';
-import { reservationGrantsApi, type ReservationGrantsApi } from './reservation-grants.js';
+import {
+  grantsReconciler,
+  reservationGrantsApi,
+  type GrantDeps,
+  type ReservationGrantsApi,
+} from './reservation-grants.js';
 import {
   completeCreateInstance,
   deleteInstance,
@@ -631,6 +636,12 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     ...rootOf(context),
     ...workloadOf(context),
   });
+  /** Reservation grants (D7): the API and the `vps.grants` reconciler, which also reopens a grant's instances. */
+  const grantDeps = (context: ModuleContext): GrantDeps => ({
+    events: context.events,
+    ...rootOf(context),
+    ...(options.billing?.gpuModels ? { meterGpuModels: options.billing.gpuModels } : {}),
+  });
   if (options.hostNetwork !== undefined && !/^[A-Za-z0-9_.-]{1,15}$/.test(options.hostNetwork))
     throw new ComputeError('INVALID_CONFIG', 'vps({ hostNetwork }) must be an interface name');
   const providers = new Map<string, ProviderDefinition>();
@@ -900,10 +911,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
 
   const api = (): VpsApi => ({
     billing: billingApi(options.billing),
-    reservationGrants: reservationGrantsApi((context) => ({
-      events: context.events,
-      ...rootOf(context),
-    })),
+    reservationGrants: reservationGrantsApi(grantDeps),
     instances: {
       create: defineMethod<CreateInstanceInput, Instance>({
         action: 'compute:instances:create',
@@ -1666,6 +1674,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           return 'DONE';
         },
       },
+      // Reservation grants (D7): grant states, and every committed slot-hour as `grant` usage windows.
+      grantsReconciler(grantDeps),
       {
         // Agent memory: a deleted volume is gone (its disk booking released) once its host applied a
         // spec without it; a delete wakes it with the volume id, the periodic pass catches the rest.
