@@ -11569,7 +11569,7 @@
       "aliases": [],
       "group": "IAM",
       "summary": "Print the example compute policies and create the root billing meters in better-iam",
-      "description": "iam setup prints the PLAN.md §12.6 example policies, gpu-user and agent-guardrails, for an organization administrator to apply: compute cannot write organization policies. The policies are parameterized by the session JWT audience (the compute API's URL), the GPU model, regions and limits of the bounded-reservation statement. With --meters it also creates the §12.7 root meters in better-iam: one gpu.<model>.hours per GPU model family, plus node.metal.hours, vps.vcpu.hours and vps.memory.gib.hours. Meters that already exist are left alone, so re-running is safe. Creating meters calls better-iam at --iam-url as BETTER_IAM_TOKEN, which must be a root credential, through the optional peer @better-iam/client. It sets no prices: pricing is an operator decision (billing.setPrice).",
+      "description": "iam setup prints the PLAN.md §12.6 example policies, gpu-user and agent-guardrails, for an organization administrator to apply: compute cannot write organization policies. The policies are parameterized by the session JWT audience (the compute API's URL), the GPU model, regions and limits of the bounded-reservation statement. With --meters it also creates the root meter catalog in better-iam: gpu.<family>.hours and gpu.<family>.spot.hours for every known GPU family, the provider-VM (vm.gpu.*) and reserved GPU hours for each model in --gpu-models (default H100,H200,B200,A100,L4,L40S and other), plus node.metal.hours, the hosted and provider vCPU, memory and volume hours, reservation-grant and managed-VM hours, and the network, public-IP, disk and snapshot hours (at most 100 meters, which better-iam allows per tenant). Meters that already exist are left alone, so re-running is safe. Creating meters calls better-iam at --iam-url as BETTER_IAM_TOKEN, which must be a root credential, through the optional peer @better-iam/client. It sets no prices: pricing is an operator decision (billing.setPrice).",
       "usage": "better-compute iam setup --audience URL [--gpu-model MODEL] [--regions LIST] [--max-gpus N] [--max-hours N] [--feature FLAG] [--meters] [--iam-url URL] [--iam-base-path PATH] [--root-tenant ID] [--gpu-models LIST]",
       "target": "none",
       "args": [],
@@ -11644,7 +11644,7 @@
           "flag": "--gpu-models",
           "value": "LIST",
           "optional": true,
-          "description": "GPU model families to meter, comma-separated (default: every known family)"
+          "description": "GPU models to price on provider VMs (vm.gpu.*), comma-separated (default: H100,H200,B200,A100,L4,L40S; other is always added). Hosted gpu.<family>.hours and .spot meters exist for every known family. At most 100 meters in all"
         },
         {
           "flag": "--format",

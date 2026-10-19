@@ -35,6 +35,7 @@ Records a network on the pool's provider account and returns it `pending`, with 
 - `name` is 1 to 42 characters, `[a-z]([-a-z0-9]*[a-z0-9])?`, unique among the tenant's networks that are not deleted (`CONFLICT` otherwise; the name of a deleted network is free again).
 - A tenant that already has 10 networks that are not deleted (one being deleted still counts) is `QUOTA_EXCEEDED`.
 - Decided as `compute:networks:create` on the network it would create (`compute-network`, under the tenant), whose attributes are `providerAccountId`, `poolId` and `projectId`. A refusal leaves nothing behind.
+- On a pool whose billing mode is `metered`, the tenant's budgets are checked after the decision, as for `instances.create`: when the pool asks for it or the tenant's offer is `stop-new`, `drain` or `suspend`, a spent budget is `SPEND_LIMIT_REACHED`. A root caller creating a network for a tenant is checked against that tenant's budgets. A suspended offer or a region its `allowedRegions` exclude refuses the create on any pool.
 
 The network id derives from the tenant, the caller and `idempotencyKey`. A retry with the same key returns the same network; the same key with another pool, name, project or description is `CONFLICT`. The caller owns the network. Publishes `network.created`.
 

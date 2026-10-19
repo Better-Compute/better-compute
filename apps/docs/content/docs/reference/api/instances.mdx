@@ -7,20 +7,21 @@ description: "Instances are VMs in a VPS pool: hosted pools place them on a host
 
 Instances are VMs in a VPS pool: hosted pools place them on a host through capacity, and provider pools create them through the pool's provider account. After `create`, every call only changes `desiredState`; the `vps.instances` reconciler converges the instance and publishes `instance.*` events as its `state` moves. Instances are also the sandbox primitive today. See [Instances](/docs/guides/vps/instances).
 
-All 10 methods are served by this release.
+All 11 methods are served by this release.
 
-| Method              | Kind     | Authorization                                       | Phase | Status     |
-| ------------------- | -------- | --------------------------------------------------- | ----- | ---------- |
-| [`create`](#create) | mutation | `compute:instances:create` @ `compute-instance`     | v0.3  | registered |
-| [`list`](#list)     | read     | `compute:instances:read` @ `compute-tenant` + items | v0.3  | registered |
-| [`get`](#get)       | read     | `compute:instances:read` @ `compute-instance`       | v0.3  | registered |
-| [`start`](#start)   | mutation | `compute:instances:update` @ `compute-instance`     | v0.3  | registered |
-| [`stop`](#stop)     | mutation | `compute:instances:update` @ `compute-instance`     | v0.3  | registered |
-| [`resize`](#resize) | mutation | `compute:instances:update` @ `compute-instance`     | v0.3  | registered |
-| [`delete`](#delete) | mutation | `compute:instances:delete` @ `compute-instance`     | v0.3  | registered |
-| [`attach`](#attach) | mutation | `compute:instances:attach` @ `compute-instance`     | v1.0  | registered |
-| [`detach`](#detach) | mutation | `compute:instances:delete` @ `compute-instance`     | v1.0  | registered |
-| [`reboot`](#reboot) | mutation | `compute:instances:update` @ `compute-instance`     | v1.0  | registered |
+| Method                  | Kind     | Authorization                                       | Phase | Status     |
+| ----------------------- | -------- | --------------------------------------------------- | ----- | ---------- |
+| [`create`](#create)     | mutation | `compute:instances:create` @ `compute-instance`     | v0.3  | registered |
+| [`list`](#list)         | read     | `compute:instances:read` @ `compute-tenant` + items | v0.3  | registered |
+| [`get`](#get)           | read     | `compute:instances:read` @ `compute-instance`       | v0.3  | registered |
+| [`start`](#start)       | mutation | `compute:instances:update` @ `compute-instance`     | v0.3  | registered |
+| [`stop`](#stop)         | mutation | `compute:instances:update` @ `compute-instance`     | v0.3  | registered |
+| [`resize`](#resize)     | mutation | `compute:instances:update` @ `compute-instance`     | v0.3  | registered |
+| [`delete`](#delete)     | mutation | `compute:instances:delete` @ `compute-instance`     | v0.3  | registered |
+| [`attach`](#attach)     | mutation | `compute:instances:attach` @ `compute-instance`     | v1.0  | registered |
+| [`detach`](#detach)     | mutation | `compute:instances:delete` @ `compute-instance`     | v1.0  | registered |
+| [`reboot`](#reboot)     | mutation | `compute:instances:update` @ `compute-instance`     | v1.0  | registered |
+| [`estimate`](#estimate) | read     | `compute:flavors:read` @ `compute-pool`             | v1.0  | registered |
 
 ## create
 
@@ -192,6 +193,8 @@ Makes a provider machine that already runs an instance of a tenant, without recr
 
 - **Input.** `poolId` is a `provider` pool owned by or offered to `tenantId` and backed by the machine's provider account. `externalId` is the machine as `providerAccounts.machines` lists it, which discovery must have seen and which must be free. `ownerIdentityId` defaults to the caller, so an operator can hand the instance to a person of the tenant (it then shows in their `scope: 'mine'` list). As for `create`, only a root caller attaching into another tenant names someone else (`ACCESS_DENIED` otherwise, before any decision), and the owner must be an active identity of the tenant when the IAM port can say (`INVALID_INPUT`). `onDelete` is `detach` (the default: deleting releases the machine, which keeps running) or `delete` (deleting deletes the machine).
 - **Networks.** An attached machine keeps the network it is on. If its NIC is on one of the tenant's networks of the same provider account that is not deleted, whatever state it is in (`pending` included), the instance is linked to it (`networkId`, and `subnetId` when the NIC names one of its subnets), so its firewall rules apply and the network cannot be deleted from under it. `networkId` asserts that: the machine must already be on that network, otherwise `INVALID_STATE` with `details.hint: 'attached VMs keep their existing network'` (GCE cannot move a NIC to another VPC without a stop). A network that does not exist, is not the tenant's or is on another account is `INVALID_INPUT`; one being deleted is `INVALID_STATE` (`details.networkId`), also when the machine's NIC is on it and no `networkId` was given: attach neither links nor ignores a network being torn down.
+- **Billing.** `billing: 'none'` writes off the machine: it opens no usage interval, so nothing of it is metered, stopped or running. Only the platform (a root caller) may pass it; any other caller gets `ACCESS_DENIED` before any decision and nothing is written. `billing: 'metered'`, or omitting it, leaves the decision to the pool's billing mode (`policy.billing.mode`, else metered, or a platform fee for a tenant's own cloud account). It is part of the request, so a retry with the same key but another `billing` is `CONFLICT`.
+- **Budgets.** A billed attach (the resulting mode is `metered` or `platform-fee`, so not `billing: 'none'` and not a pool whose mode is `none`) is checked against the tenant's budgets after the IAM decision, as `create` is: when the pool asks for it (`policy.admission.budgetCheck: 'meter'`) or the tenant's offer is `stop-new`, `drain` or `suspend`, a spent budget is `SPEND_LIMIT_REACHED` and nothing is written. A root caller attaching into a tenant is checked against that tenant's budgets, not root's. A suspended offer, or an offer whose `allowedRegions` leave out the pool's region, refuses every attach (`SPEND_LIMIT_REACHED`, `ACCESS_DENIED`), billed or not.
 - **Shape.** The flavor is the machine's own: its machine type, vCPU, memory and GPU count, with no disk. It is charged to the tenant's quota on the pool, as a create on a provider pool is.
 - **Idempotency.** `idempotencyKey` is required. The instance id derives from the tenant, the caller and the key: a retry returns the same instance, and a different request under the same key is `CONFLICT` with `details.instanceId`.
 - **IAM.** `compute:instances:attach` is decided on `compute-instance/` plus the instance id, whose attributes (`vcpu`, `memoryGiB`, `gpus`) policies can test. Only the platform (root callers) attaches machines of an account its own tenant does not own; a tenant attaches only from its own accounts (`ACCESS_DENIED` otherwise).
@@ -216,6 +219,7 @@ Makes a provider machine that already runs an instance of a tenant, without recr
 | `onDelete`        | one of `detach`, `delete` |          | default `"detach"`                                                      |
 | `name`            | string                    |          | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`            |
 | `networkId`       | string                    |          | at most 57 characters; matches `^net_[0-9a-hjkmnp-tv-z]{26,52}$`        |
+| `billing`         | one of `metered`, `none`  |          |                                                                         |
 | `idempotencyKey`  | string                    | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`              |
 
 ## detach
@@ -263,3 +267,26 @@ Asks for a restart of a running provider instance's machine; returns the instanc
 | `tenantId`   | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
 | `instanceId` | string  | yes      | at most 57 characters; matches `^inst_[0-9a-hjkmnp-tv-z]{26,52}$` |
 | `hard`       | boolean |          | default `false`                                                   |
+
+## estimate
+
+`POST /api/compute/instances/estimate`
+
+Returns what one hour of a flavor would cost the tenant, before it creates anything: `{ estimate }` with `{ perHourMicros, currency, lines }` as `flavors.list` shows it, or `{}` when the IAM port cannot quote, the pool is not a provider pool or IAM cannot answer.
+
+- **Input.** `tenantId`, `poolId` and `flavor`: the fields of a create that decide its price. `NOT_FOUND` for a pool the tenant neither owns nor is offered, or a missing or archived flavor; `INVALID_INPUT` for a pool that is not a VPS pool.
+- **Decided as a read of the pool's flavors** (`compute:flavors:read` on the pool), not as a create: whoever can list the pool's flavors can ask, and holding only that action is not enough to create (`create` is still `compute:instances:create`). It is a read: no instance or draft, no quota, no authz projection row, no provider call and no audit row.
+- **Same figures as `flavors.list`**: the lines are the meters an instance of the flavor would record per hour, priced for the tenant with its negotiated prices, and cached five minutes per tenant and pool. It does not check quota, budgets, the image or the network.
+
+- **Kind:** read
+- **Authorization:** `compute:flavors:read` @ `compute-pool`
+- **Module:** `vps`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`   | string | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `flavor`   | string | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`      |

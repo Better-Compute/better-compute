@@ -2,6 +2,7 @@
   "title": "API",
   "pages": [
     "index",
+    "billing",
     "capacity",
     "command-batches",
     "commands",
@@ -24,6 +25,7 @@
     "provider-accounts",
     "quotas",
     "releases",
+    "reservation-grants",
     "reservations",
     "rollouts",
     "sandbox-snapshots",

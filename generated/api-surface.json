@@ -1,6 +1,284 @@
 {
   "$comment": "The frozen compute API surface (PLAN.md §16 v1.0). Written by `node scripts/api-surface.mjs --update`; do not edit.",
   "methods": {
+    "billing.margins": {
+      "route": "POST /api/compute/billing/margins",
+      "kind": "read",
+      "action": "compute:billing:read",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Start of the range, epoch ms"
+          },
+          "to": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "End of the range (exclusive), epoch ms"
+          },
+          "groupBy": {
+            "enum": [
+              "tenant",
+              "pool",
+              "account",
+              "meter"
+            ],
+            "description": "Group revenue and cost by tenant, pool, provider account or meter"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "groupBy"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "billing.meters": {
+      "route": "POST /api/compute/billing/meters",
+      "kind": "read",
+      "action": "compute:billing:read",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    "billing.prices": {
+      "route": "POST /api/compute/billing/prices",
+      "kind": "read",
+      "action": "compute:billing:read",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "meter": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+            "maxLength": 64,
+            "description": "A meter key, e.g. gpu.h100.hours"
+          },
+          "targetTenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant (and its subtree) a negotiated price applies to; absent: the list price. better-iam validates it"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    "billing.proposePrices": {
+      "route": "POST /api/compute/billing/proposePrices",
+      "kind": "read",
+      "action": "compute:billing:read",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "A provider account of the platform (root tenant) whose list prices are read"
+          },
+          "marginPct": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1000,
+            "description": "Percent added to each provider price, e.g. 20"
+          },
+          "region": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+            "maxLength": 63,
+            "description": "Only this region’s prices; omitted: the cheapest across the regions listed"
+          },
+          "effectiveFrom": {
+            "type": "string",
+            "pattern": "^\\d{4}-(0[1-9]|1[0-2])$",
+            "description": "The billing period root intends to publish the proposals from, YYYY-MM"
+          }
+        },
+        "required": [
+          "accountId",
+          "marginPct",
+          "effectiveFrom"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "billing.setPrices": {
+      "route": "POST /api/compute/billing/setPrices",
+      "kind": "mutation",
+      "action": "compute:billing:manage",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "prices": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "description": "At most 100 prices; each is applied on its own",
+            "items": {
+              "type": "object",
+              "properties": {
+                "meter": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+                  "maxLength": 64,
+                  "description": "A meter key, e.g. gpu.h100.hours"
+                },
+                "targetTenantId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+                  "maxLength": 128,
+                  "description": "The tenant (and its subtree) a negotiated price applies to; absent: the list price. better-iam validates it"
+                },
+                "effectiveFrom": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-(0[1-9]|1[0-2])$",
+                  "description": "The first billing period the price applies to, YYYY-MM"
+                },
+                "spec": {
+                  "type": "object",
+                  "properties": {
+                    "model": {
+                      "enum": [
+                        "per-unit",
+                        "graduated",
+                        "volume",
+                        "package"
+                      ],
+                      "description": "better-iam’s price model"
+                    },
+                    "unitAmountMicros": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Per-unit price, in micros of the deployment currency"
+                    },
+                    "tiers": {
+                      "type": "array",
+                      "maxItems": 50,
+                      "description": "Graduated and volume tiers; the last has upTo null",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "upTo": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ],
+                            "minimum": 1
+                          },
+                          "unitAmountMicros": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Price per unit in the tier"
+                          },
+                          "flatAmountMicros": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Flat amount of the tier"
+                          }
+                        },
+                        "required": [
+                          "upTo",
+                          "unitAmountMicros"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "packageSize": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "description": "Units per package (package model)"
+                    },
+                    "packageAmountMicros": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Price of one package (package model)"
+                    },
+                    "includedQuantity": {
+                      "type": "number",
+                      "minimum": 0,
+                      "description": "Units included at no charge"
+                    },
+                    "minimumAmountMicros": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "The least a period costs"
+                    },
+                    "maximumAmountMicros": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "The most a period costs"
+                    }
+                  },
+                  "required": [
+                    "model"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "meter",
+                "effectiveFrom",
+                "spec"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "prices"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "billing.syncMeters": {
+      "route": "POST /api/compute/billing/syncMeters",
+      "kind": "mutation",
+      "action": "compute:billing:manage",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
     "capacity.byPool": {
       "route": "POST /api/compute/capacity/byPool",
       "kind": "read",
@@ -1264,6 +1542,20 @@
             "required": [],
             "additionalProperties": false,
             "description": "Hosted pools (v1.1): where the guest lives on its host; sandbox templates inherit it"
+          },
+          "billing": {
+            "type": "object",
+            "properties": {
+              "meter": {
+                "type": "string",
+                "pattern": "^flavor\\.[a-z0-9.-]{1,56}\\.hours$",
+                "maxLength": 64,
+                "description": "A whole-shape meter (flavor.<name>.hours, one unit per hour) that replaces the composed vm.* lines; created on the billing tenant when the IAM port can"
+              }
+            },
+            "required": [],
+            "additionalProperties": false,
+            "description": "Root only: how instances of this flavor are billed. On update, omitted keeps the meter and {} clears it"
           }
         },
         "required": [
@@ -1427,6 +1719,20 @@
             "required": [],
             "additionalProperties": false,
             "description": "Hosted pools (v1.1): where the guest lives on its host; sandbox templates inherit it"
+          },
+          "billing": {
+            "type": "object",
+            "properties": {
+              "meter": {
+                "type": "string",
+                "pattern": "^flavor\\.[a-z0-9.-]{1,56}\\.hours$",
+                "maxLength": 64,
+                "description": "A whole-shape meter (flavor.<name>.hours, one unit per hour) that replaces the composed vm.* lines; created on the billing tenant when the IAM port can"
+              }
+            },
+            "required": [],
+            "additionalProperties": false,
+            "description": "Root only: how instances of this flavor are billed. On update, omitted keeps the meter and {} clears it"
           }
         },
         "required": [
@@ -1826,6 +2132,13 @@
             "maxLength": 57,
             "description": "A ready tenant network the machine is already on (attach keeps its network); omitted: the tenant network its NIC is on, if any"
           },
+          "billing": {
+            "enum": [
+              "metered",
+              "none"
+            ],
+            "description": "none: nothing of this machine is metered (root only); metered, or omitted: the pool’s billing mode decides"
+          },
           "idempotencyKey": {
             "type": "string",
             "pattern": "^[A-Za-z0-9._:-]{1,128}$",
@@ -2016,6 +2329,45 @@
         "required": [
           "tenantId",
           "instanceId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "instances.estimate": {
+      "route": "POST /api/compute/instances/estimate",
+      "kind": "read",
+      "action": "compute:flavors:read",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          },
+          "flavor": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+            "maxLength": 63,
+            "description": "The flavor name, e.g. g1.small"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "flavor"
         ],
         "additionalProperties": false
       }
@@ -4548,6 +4900,26 @@
             "type": "integer",
             "minimum": -1000,
             "maximum": 1000
+          },
+          "onBudgetExceeded": {
+            "enum": [
+              "notify",
+              "stop-new",
+              "drain",
+              "suspend"
+            ],
+            "description": "What a spent budget does to this offer: notify, stop-new (admissions check the budget), drain (also cancels unstarted reservations), or suspend (stops the tenant's running instances in the pool and refuses new work until the offer is lifted)"
+          },
+          "allowedRegions": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9-]{1,64}$",
+              "maxLength": 64
+            },
+            "description": "The regions the tenant's work may run in; a pool whose site (iamRegion, else region) is elsewhere refuses the tenant's new work"
           }
         },
         "required": [
@@ -4635,6 +5007,69 @@
         "required": [
           "tenantId",
           "poolId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "pools.updateOffer": {
+      "route": "POST /api/compute/pools/updateOffer",
+      "kind": "mutation",
+      "action": "compute:pools:share",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          },
+          "toTenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the pool is offered to"
+          },
+          "onBudgetExceeded": {
+            "enum": [
+              "notify",
+              "stop-new",
+              "drain",
+              "suspend"
+            ],
+            "description": "What a spent budget does to this offer: notify, stop-new (admissions check the budget), drain (also cancels unstarted reservations), or suspend (stops the tenant's running instances in the pool and refuses new work until the offer is lifted)"
+          },
+          "allowedRegions": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9-]{1,64}$",
+              "maxLength": 64
+            },
+            "description": "The regions the tenant's work may run in; a pool whose site (iamRegion, else region) is elsewhere refuses the tenant's new work"
+          },
+          "suspended": {
+            "type": "boolean",
+            "description": "true suspends the offer (new work is refused); false lifts a suspension and restarts nothing"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "toTenantId"
         ],
         "additionalProperties": false
       }
@@ -5218,6 +5653,44 @@
             "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$",
             "maxLength": 128,
             "description": "Makes the account id deterministic; a retry returns the account"
+          },
+          "billing": {
+            "type": "object",
+            "properties": {
+              "passThrough": {
+                "type": "array",
+                "maxItems": 50,
+                "description": "Pass-through rules: cost rows whose SKU id or description contains skuPattern (case-insensitive) bill the reported meter at (cost + credits) × multiplier. Root (platform) accounts only; a pattern that matches compute, disk or address SKUs is INVALID_CONFIG.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "skuPattern": {
+                      "type": "string",
+                      "minLength": 2,
+                      "maxLength": 128
+                    },
+                    "meter": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+                      "maxLength": 64
+                    },
+                    "multiplier": {
+                      "type": "number",
+                      "minimum": 1,
+                      "maximum": 10
+                    }
+                  },
+                  "required": [
+                    "skuPattern",
+                    "meter",
+                    "multiplier"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -5584,6 +6057,45 @@
           },
           "config": {
             "description": "The new account config (replaces the old one); credentials as secret references only"
+          },
+          "billing": {
+            "type": "object",
+            "properties": {
+              "passThrough": {
+                "type": "array",
+                "maxItems": 50,
+                "description": "Pass-through rules: cost rows whose SKU id or description contains skuPattern (case-insensitive) bill the reported meter at (cost + credits) × multiplier. Root (platform) accounts only; a pattern that matches compute, disk or address SKUs is INVALID_CONFIG.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "skuPattern": {
+                      "type": "string",
+                      "minLength": 2,
+                      "maxLength": 128
+                    },
+                    "meter": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+                      "maxLength": 64
+                    },
+                    "multiplier": {
+                      "type": "number",
+                      "minimum": 1,
+                      "maximum": 10
+                    }
+                  },
+                  "required": [
+                    "skuPattern",
+                    "meter",
+                    "multiplier"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [],
+            "additionalProperties": false,
+            "description": "Replaces the pass-through rules; absent keeps them, {} clears them"
           }
         },
         "required": [
@@ -5718,6 +6230,185 @@
         "required": [
           "tenantId",
           "manifest"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "reservationGrants.create": {
+      "route": "POST /api/compute/reservationGrants/create",
+      "kind": "mutation",
+      "action": "compute:providers:manage",
+      "resource": "compute-provider-account",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The root tenant: only the platform grants"
+          },
+          "accountId": {
+            "type": "string",
+            "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The provider account (root’s) that holds the reservation"
+          },
+          "reservationId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._/-]{1,300}$",
+            "maxLength": 300,
+            "description": "The reservation, as providerAccounts.reservations lists it"
+          },
+          "grantTenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the slots are committed to"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "Commit the slots to this project of the tenant only"
+          },
+          "slots": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100000,
+            "description": "Slots committed"
+          },
+          "startsAt": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Start of the term, epoch ms; at most 5 minutes in the past"
+          },
+          "endsAt": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "End of the term (exclusive), epoch ms"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to the caller identity: a retry with the same key replays"
+          }
+        },
+        "required": [
+          "tenantId",
+          "accountId",
+          "reservationId",
+          "grantTenantId",
+          "slots",
+          "startsAt",
+          "endsAt",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "reservationGrants.end": {
+      "route": "POST /api/compute/reservationGrants/end",
+      "kind": "mutation",
+      "action": "compute:providers:manage",
+      "resource": "compute-provider-account",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "accountId": {
+            "type": "string",
+            "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The provider account (root’s) that holds the reservation"
+          },
+          "grantId": {
+            "type": "string",
+            "pattern": "^rgrant_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 59,
+            "description": "The grant"
+          }
+        },
+        "required": [
+          "tenantId",
+          "accountId",
+          "grantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "reservationGrants.get": {
+      "route": "POST /api/compute/reservationGrants/get",
+      "kind": "read",
+      "action": "compute:quotas:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "grantId": {
+            "type": "string",
+            "pattern": "^rgrant_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 59,
+            "description": "The grant"
+          }
+        },
+        "required": [
+          "tenantId",
+          "grantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "reservationGrants.list": {
+      "route": "POST /api/compute/reservationGrants/list",
+      "kind": "read",
+      "action": "compute:quotas:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "all": {
+            "type": "boolean",
+            "default": false,
+            "description": "Root only (tenantId the root tenant): every tenant’s grants"
+          }
+        },
+        "required": [
+          "tenantId"
         ],
         "additionalProperties": false
       }
@@ -7940,6 +8631,44 @@
         "additionalProperties": false
       }
     },
+    "usage.deadLetters": {
+      "route": "POST /api/compute/usage/deadLetters",
+      "kind": "read",
+      "action": "compute:usage:read",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "enum": [
+              "meter-missing",
+              "period-closed",
+              "identity",
+              "invalid",
+              "other"
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
+            "default": 100
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9_-]{1,256}$"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
     "usage.export": {
       "route": "POST /api/compute/usage/export",
       "kind": "read",
@@ -8040,10 +8769,144 @@
             "type": "string",
             "maxLength": 256,
             "pattern": "^[A-Za-z0-9_-]{1,256}$"
+          },
+          "includeVoided": {
+            "type": "boolean"
           }
         },
         "required": [
           "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "usage.platform": {
+      "route": "POST /api/compute/usage/platform",
+      "kind": "read",
+      "action": "compute:usage:read",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "to": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "groupBy": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "tenant",
+                "pool",
+                "meter",
+                "source",
+                "provider"
+              ]
+            },
+            "maxItems": 5,
+            "uniqueItems": true
+          },
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "json",
+              "csv"
+            ]
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "groupBy"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "usage.retry": {
+      "route": "POST /api/compute/usage/retry",
+      "kind": "mutation",
+      "action": "compute:usage:manage",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "idempotencyKeys": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$"
+            },
+            "minItems": 1,
+            "maxItems": 1000,
+            "uniqueItems": true
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "meter-missing",
+              "period-closed",
+              "identity",
+              "invalid",
+              "other"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    "usage.void": {
+      "route": "POST /api/compute/usage/void",
+      "kind": "mutation",
+      "action": "compute:usage:manage",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "idempotencyKeys": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$"
+            },
+            "minItems": 1,
+            "maxItems": 1000,
+            "uniqueItems": true
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+          }
+        },
+        "required": [
+          "idempotencyKeys",
+          "reason"
         ],
         "additionalProperties": false
       }

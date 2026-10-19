@@ -89,11 +89,13 @@
     {
       "name": "vps",
       "groups": [
+        "billing",
         "firewallRules",
         "flavors",
         "instances",
         "networks",
         "providerAccounts",
+        "reservationGrants",
         "sandboxSnapshots",
         "sandboxTemplates",
         "sandboxVolumes",
@@ -125,7 +127,12 @@
         "vps/0023_provider_machines",
         "vps/0024_instance_attach",
         "vps/0025_provider_reservations",
-        "vps/0026_networks"
+        "vps/0026_networks",
+        "vps/0027_account_exclusive_key",
+        "vps/0030_instance_usage",
+        "vps/0031_reservation_grants",
+        "vps/0032_network_metering",
+        "vps/0033_provider_costs"
       ]
     },
     {
@@ -183,13 +190,18 @@
     "tenancy.resync",
     "tunnels.ssh-certificates-gc",
     "tunnels.ssh-certificates-reauthorize",
+    "vps.ancillary-usage",
     "vps.bootstraps",
+    "vps.costs",
     "vps.discovery",
+    "vps.grants",
     "vps.hosts",
     "vps.instances",
     "vps.networks",
+    "vps.provider-usage",
     "vps.reservations",
     "vps.sandboxes",
+    "vps.suspension",
     "vps.usage",
     "vps.volumes",
     "workflow"
