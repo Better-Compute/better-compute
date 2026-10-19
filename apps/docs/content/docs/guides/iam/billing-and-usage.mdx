@@ -462,6 +462,11 @@ const margins = await compute.api.billing.margins(rootCredential, {
 - **Revenue** is what Better IAM billed (`IamPort.spend`, by whole billing periods); without it, revenue and
   margins are `null`. **Cost** is cost plus credits of the platform's own accounts only: a tenant's own account is
   its cost, not the platform's.
+- Revenue is rated usage **before contract terms**: list or negotiated prices, before the `setTerms` discount
+  Better IAM applies when it closes the period. A discounted tenant's margin is overstated by its discount.
+- The root tenant's own usage is never revenue (Better IAM never invoices the platform). By tenant, root's row keeps
+  its cost with `revenueMicros: 0`. By pool or meter, spend cannot be scoped to root alone, so those groups include
+  root's internal usage at its rated price.
 - Provider compute cost has no meter dimension, so with `groupBy: 'meter'` it shows under `(none)`. Read the meter
   view for pass-through margins and the tenant or pool view for compute.
 
