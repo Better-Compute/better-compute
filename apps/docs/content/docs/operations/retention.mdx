@@ -81,7 +81,7 @@ betterCompute({ database, modules: [retentionModule({ every: '10m' }), ...module
 | `commandsOlderThanDays` | 30 | Settled commands last updated this long ago go (at least 1); `false` keeps them |
 | `history.monthsAhead` | 2 | Month partitions kept created ahead of the current month |
 | `history.inventoryOlderThanDays` | 180 | Superseded inventory snapshots older than this go; `false` keeps them all |
-| `history.usageOlderThanDays` | unset | Recorded usage windows of allocations that ended this long ago go (at least 7); unset keeps them |
+| `history.usageOlderThanDays` | unset | Recorded or voided usage windows that ended this long ago go (an allocation's once the allocation ended that long ago too; at least 7); a window with an open dead letter stays; unset keeps them |
 
 A pass runs these jobs in order and returns how many rows each touched:
 

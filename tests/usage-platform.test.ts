@@ -1101,5 +1101,26 @@ describe('corrections', () => {
       );
       expect(left.rows).toEqual([{ idempotency_key: live }]);
     });
+
+    it('a window with an open dead letter is not pruned (FW-14)', async () => {
+      const open = await deadLettered('vm_open_letter');
+      const resolved = await deadLettered('vm_resolved_letter', { hour: 1 });
+      await database.query(
+        'UPDATE usage_dead_letters SET resolved_at = compute_now() WHERE idempotency_key = $1',
+        [resolved],
+      );
+      try {
+        await setSimClock(database, clock.now() + 30 * 86_400_000);
+        expect(
+          await database.transaction((tx) => pruneUsageWindows(tx, { olderThanDays: 14 })),
+        ).toBe(1);
+      } finally {
+        await useSimClock(database, clock.now());
+      }
+      const left = await database.query<{ idempotency_key: string }>(
+        'SELECT idempotency_key FROM usage_windows',
+      );
+      expect(left.rows).toEqual([{ idempotency_key: open }]);
+    });
   });
 });

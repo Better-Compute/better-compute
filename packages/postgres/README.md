@@ -113,7 +113,7 @@ The base schema holds the control plane's core tables and the indexes behind the
 - it keeps the next 2 months' partitions created ahead (`history.monthsAhead`);
 - it prunes `outbox` and `authz_changes` behind every durable cursor (`saveCursor`/`loadCursor`), and `authz_changes` older than a day while no reader keeps a cursor;
 - it prunes settled commands older than 30 days, expired attestation uses, and superseded inventory snapshots older than 180 days. A node's newest snapshot and the one it is applied from always stay;
-- it prunes recorded usage windows only when `history.usageOlderThanDays` is set, and only for allocations that ended that long ago;
+- it prunes recorded usage windows only when `history.usageOlderThanDays` is set, and only for allocations that ended that long ago, never one with an open dead letter;
 - it drops emptied past months.
 
 Audit rows are never pruned by a timer. `detachHistoryPartition(tx, 'audit_events', 'audit_events_pYYYYMM')` archives a month; run `markAuditArchived` from `@better-compute/audit` first. `retentionModule().selfCheck` (doctor) reports missing month partitions, recent rows stranded in a default partition, and cursors that stopped moving.

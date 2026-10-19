@@ -48,7 +48,10 @@ export interface RetentionModuleOptions {
     monthsAhead?: number;
     /** Superseded inventory snapshots older than this go (default 180 days); `false` keeps them all. */
     inventoryOlderThanDays?: number | false;
-    /** Recorded usage windows of allocations that ended this long ago go (at least 7; default: kept). */
+    /**
+     * Usage windows the sink recorded (or that were voided) that ended this long ago go, an allocation's once the
+     * allocation ended that long ago too; a window with an open dead letter stays (at least 7; default: kept).
+     */
     usageOlderThanDays?: number;
   };
 }
@@ -113,7 +116,10 @@ export async function runRetention(
         ? 0
         : await drain(() =>
             sql.transaction((tx) =>
-              pruneSettledCommands(tx, { olderThanDays: options.commandsOlderThanDays || 30, batch }),
+              pruneSettledCommands(tx, {
+                olderThanDays: options.commandsOlderThanDays || 30,
+                batch,
+              }),
             ),
           ),
     attestationUses: await drain(() =>
@@ -160,7 +166,10 @@ export async function runRetention(
  * next month (the pass is not running), recent rows stranded in a default partition, and durable
  * cursors that stopped moving (their stream can no longer be pruned behind them).
  */
-export async function retentionFindings(sql: ReconcileContext['sql'], options: { staleCursorSeconds?: number } = {}): Promise<Finding[]> {
+export async function retentionFindings(
+  sql: ReconcileContext['sql'],
+  options: { staleCursorSeconds?: number } = {},
+): Promise<Finding[]> {
   const findings: Finding[] = [];
   const { rows: missing } = await sql.query<{ name: string }>(
     `SELECT t.parent || '_p' || to_char(m AT TIME ZONE 'UTC', 'YYYYMM') AS name
