@@ -154,6 +154,7 @@ const serverPaths = [
   'commands/cancel',
   'usage/list',
   'usage/export',
+  'usage/platform',
   'events/list',
   // v0.2 (tests/server-groups-*).
   'joinRequests/list',

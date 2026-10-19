@@ -72,6 +72,8 @@ const definitions = {
       ...a('drivers', 'read'),
       // Platform compute billing (root only): the meters and prices on the IAM root tenant.
       ...a('billing', 'read', 'manage'),
+      // Platform usage view and corrections (root only): the cross-tenant totals.
+      ...a('usage', 'read'),
     ],
   },
   tenant: {
@@ -456,6 +458,7 @@ group('commands', 'server', [
 group('usage', 'server', [
   ['list', 'read', 'usage:read', 'tenant', 'v0.1', { or: [['usage:read', 'project']] }],
   ['export', 'read', 'usage:read', 'tenant', 'v0.2', { or: [['usage:read', 'project']] }],
+  ['platform', 'read', 'usage:read', 'fleet', 'v1.0'],
 ]);
 group('events', 'server', [['list', 'read', 'events:read', 'tenant', 'v0.1']]);
 group('webhooks', 'events', [

@@ -27,6 +27,7 @@ const planActions: Record<string, string[]> = {
     ...a('providers', 'manage'),
     ...a('drivers', 'read'),
     ...a('billing', 'read', 'manage'),
+    ...a('usage', 'read'),
   ],
   'compute-tenant': [
     ...a('sites', 'read', 'manage'),
