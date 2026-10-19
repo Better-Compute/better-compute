@@ -130,17 +130,20 @@ describe('rules', () => {
     ]);
   });
 
-  it('stopped returns no lines yet', () => {
+  it('stopped returns no lines without disks', () => {
     for (const mode of ['metered', 'platform-fee', 'none'] as const)
       expect(meterLinesFor(base, mode, 'stopped')).toEqual([]);
   });
 
-  it('a public address adds one ip.public.hours line; disks add none yet', () => {
+  it('a public address adds one ip.public.hours line, a disk one disk line (Tasks 12, 13)', () => {
     expect(lines({ publicIp: true })).toEqual([
       ...lines({}),
       { meter: 'ip.public.hours', perHour: 1 },
     ]);
-    expect(lines({ disks: [{ type: 'pd-ssd', sizeGiB: 100 }] })).toEqual(lines({}));
+    expect(lines({ disks: [{ type: 'pd-ssd', sizeGiB: 100 }] })).toEqual([
+      ...lines({}),
+      { meter: 'disk.pd-ssd.gib.hours', perHour: 100 },
+    ]);
   });
 
   it('every meterLinesFor output is in meterCatalog', () => {
@@ -157,6 +160,19 @@ describe('rules', () => {
       { model: 'MI300X', count: 2 },
       { model: 'other', count: 1 },
     ];
+    // Task 13: every priced disk type, an unheard-of one (metered as pd-balanced) and a zero-size one.
+    const diskChoices = [
+      undefined,
+      [{ type: 'pd-balanced', sizeGiB: 100 }],
+      [
+        { type: 'hyperdisk-balanced', sizeGiB: 100 },
+        { type: 'pd-standard', sizeGiB: 20 },
+        { type: 'pd-ssd', sizeGiB: 20 },
+        { type: 'local-ssd', sizeGiB: 375 },
+        { type: 'pd-extreme', sizeGiB: 10 },
+        { type: 'pd-balanced', sizeGiB: 0 },
+      ],
+    ];
     let checked = 0;
     for (const mode of ['metered', 'platform-fee', 'none'] as const)
       for (const phase of ['running', 'stopped'] as const)
@@ -165,22 +181,24 @@ describe('rules', () => {
             for (const reserved of [false, true])
               for (const granted of [false, true])
                 for (const meter of [undefined, flavorMeter])
-                  for (const publicIp of [false, true]) {
-                    const shape: BillableShape = {
-                      ...base,
-                      gpus,
-                      spot,
-                      reserved,
-                      granted,
-                      flavorMeter: meter,
-                      publicIp,
-                    };
-                    for (const line of meterLinesFor(shape, mode, phase)) {
-                      checked += 1;
-                      expect(known.has(line.meter), line.meter).toBe(true);
-                      expect(line.perHour).toBeGreaterThan(0);
+                  for (const publicIp of [false, true])
+                    for (const disks of diskChoices) {
+                      const shape: BillableShape = {
+                        ...base,
+                        gpus,
+                        spot,
+                        reserved,
+                        granted,
+                        flavorMeter: meter,
+                        publicIp,
+                        disks,
+                      };
+                      for (const line of meterLinesFor(shape, mode, phase)) {
+                        checked += 1;
+                        expect(known.has(line.meter), line.meter).toBe(true);
+                        expect(line.perHour).toBeGreaterThan(0);
+                      }
                     }
-                  }
     expect(checked).toBeGreaterThan(100);
   });
 });
@@ -465,6 +483,8 @@ describe('intervals', () => {
         spot: false,
         reserved: false,
         granted: false,
+        // The flavor's 100 GiB boot disk (D9).
+        disks: [{ type: 'pd-balanced', sizeGiB: 100 }],
       },
       started: t1,
       ended: null,
@@ -657,6 +677,8 @@ describe('intervals', () => {
         spot: false,
         reserved: false,
         granted: false,
+        // An attached machine reports no disks and has no flavor disk: nothing to bill yet.
+        disks: [],
       });
       // No interval starts before its instance was attached.
       const { rows } = await world.fixture.database.query<{ early: number }>(
@@ -888,10 +910,13 @@ describe('metering', () => {
     const [running] = await intervals(world, created.id);
     expect(running).toMatchObject({ phase: 'running', ended: closed, meteredUntil: closed });
 
-    // A later pass re-derives nothing: the windows and the watermark stay as they are.
-    const before = JSON.stringify(rows);
+    // A later pass re-derives nothing: the running interval's windows and watermark stay as they are. (The stopped
+    // interval that followed now bills its disk, which is new work, not a re-derivation.)
+    const compute = (list: readonly WindowView[]) =>
+      JSON.stringify(list.filter((row) => !row.meter.startsWith('disk.') || row.start < closed));
+    const before = compute(rows);
     await meter(world, HOUR);
-    expect(JSON.stringify(await windows(world))).toBe(before);
+    expect(compute(await windows(world))).toBe(before);
     expect((await intervals(world, created.id))[0]!.meteredUntil).toBe(closed);
   });
 
@@ -953,7 +978,13 @@ describe('metering', () => {
       expect(JSON.stringify(row.tags)).not.toContain(created.id);
     }
     expect(new Set(rows.map((row) => row.meter))).toEqual(
-      new Set(['vm.vcpu.hours', 'vm.memory.gib.hours', 'vm.gpu.a100.hours', 'vm.instance.hours']),
+      new Set([
+        'vm.vcpu.hours',
+        'vm.memory.gib.hours',
+        'vm.gpu.a100.hours',
+        'vm.instance.hours',
+        'disk.pd-balanced.gib.hours',
+      ]),
     );
   });
 
@@ -999,7 +1030,7 @@ describe('metering', () => {
     expect(new Set(rows.map((row) => row.key)).size).toBe(rows.length);
   });
 
-  it('a stopped interval stays unmetered, for Task 13 to bill; the running one is metered', async () => {
+  it('a stopped interval with no known disk is advanced without windows; the running one is metered', async () => {
     const world = await legacyAttachWorld({ state: 'stopped' });
     const { acme } = world.fixture.tenants;
     const a = await attachLegacy(world, acme.id, acme.caller.identityId, 'attach-stopped-meter');
@@ -1007,9 +1038,10 @@ describe('metering', () => {
     expect((await intervals(world, a.id))[0]).toMatchObject({ phase: 'stopped', started: t1 });
     await moveTo(world, t1 + 4 * HOUR);
     await meter(world, 0);
+    // An attached machine reports no disk and has no flavor disk (D9): a stopped VM has nothing else to bill.
     expect(await windows(world)).toEqual([]);
-    expect((await intervals(world, a.id))[0]!.meteredUntil).toBe(t1);
-    // Starting it closes the stopped interval (still unmetered) and opens a metered running one.
+    expect((await intervals(world, a.id))[0]!.meteredUntil).toBeGreaterThan(t1);
+    // Starting it closes the stopped interval and opens a metered running one.
     await world.api.instances.start(world.acme, { tenantId: acme.id, instanceId: a.id });
     const t2 = await step(world, 5_000);
     const settled = (Math.floor(t2 / HOUR) + 2) * HOUR;
@@ -1017,10 +1049,36 @@ describe('metering', () => {
     await meter(world, 0);
     const list = await intervals(world, a.id);
     expect(list.map((item) => [item.phase, item.meteredUntil])).toEqual([
-      ['stopped', t1],
+      ['stopped', t2],
       ['running', settled],
     ]);
     expect((await windows(world)).length).toBeGreaterThan(0);
+  });
+
+  it('a stopped interval whose machine reports disks bills them', async () => {
+    const world = await legacyAttachWorld({
+      state: 'stopped',
+      disks: [{ type: 'pd-ssd', sizeGiB: 200, boot: true }],
+    });
+    const { acme } = world.fixture.tenants;
+    const a = await attachLegacy(world, acme.id, acme.caller.identityId, 'attach-stopped-disks');
+    const t1 = await step(world);
+    expect((await intervals(world, a.id))[0]).toMatchObject({
+      phase: 'stopped',
+      shape: { disks: [{ type: 'pd-ssd', sizeGiB: 200 }] },
+    });
+    const h1 = (Math.floor(t1 / HOUR) + 1) * HOUR;
+    await moveTo(world, h1 + 2 * HOUR + settle);
+    await meter(world, 0);
+    const rows = await windows(world);
+    // The part hour the interval opened in, then two whole hours.
+    expect(rows.map((row) => [row.meter, row.start])).toEqual([
+      ['disk.pd-ssd.gib.hours', h1 - HOUR],
+      ['disk.pd-ssd.gib.hours', h1],
+      ['disk.pd-ssd.gib.hours', h1 + HOUR],
+    ]);
+    expect(rows[0]!.quantity).toBeCloseTo((200 * (h1 - t1)) / HOUR, 4);
+    expect(rows.slice(1).map((row) => row.quantity)).toEqual([200, 200]);
   });
 
   it('a zero-length interval writes nothing and is metered; the others still run', async () => {
@@ -1173,7 +1231,8 @@ describe('metering', () => {
     const { h0 } = await runningAtHour(world);
     await moveTo(world, h0 + 2 * HOUR + settle);
     await meter(world, 0);
-    expect((await windows(world)).length).toBe(8);
+    // Two hours of vcpu, memory, gpu, instance and the 100 GiB boot disk.
+    expect((await windows(world)).length).toBe(10);
 
     // An embedded better-iam with the compute catalog, defined by a service credential (as setup does).
     const bridge = createComputeIamBridge();
@@ -1192,7 +1251,7 @@ describe('metering', () => {
       [f.tenantId, f.ownerId],
     );
     expect(await flushUsageWindows(world.fixture.database, port)).toMatchObject({
-      sent: 8,
+      sent: 10,
       deadLettered: 0,
     });
     expect((await windows(world)).every((row) => row.outcome === 'recorded')).toBe(true);
@@ -1540,9 +1599,13 @@ describe('metering', () => {
       );
       expect(snapshot.rows[0]!.billing).toEqual({ meter: key });
       const rows = await meterThreeHours(world, created, h0);
+      // A flavor meter replaces the composed compute lines only: the boot disk is still its own line (D9).
       expect(rows.map((row) => [row.meter, row.quantity])).toEqual([
+        ['disk.pd-balanced.gib.hours', 100],
         [key, 1],
+        ['disk.pd-balanced.gib.hours', 100],
         [key, 1],
+        ['disk.pd-balanced.gib.hours', 100],
         [key, 1],
       ]);
       expect(rows.some((row) => row.meter.startsWith('vm.'))).toBe(false);

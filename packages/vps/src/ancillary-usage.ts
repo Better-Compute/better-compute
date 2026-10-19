@@ -4,7 +4,7 @@ import { billingModeOf } from './billing.js';
 
 // Ancillary metering (platform compute billing, D9): what a tenant holds beside its VMs. A provisioned tenant
 // network bills `network.vpc.hours` from its first `ready` (`provisioned_at`) until it is deleted. These are
-// `network` (and, with Task 13, `snapshot`) sources of their own, metered by the `vps.ancillary-usage` reconciler
+// `network` and `snapshot` sources of their own, metered by the `vps.ancillary-usage` reconciler
 // with the retention contract of `meterSource`: a watermark (`metered_until`) advances in the same transaction as
 // the windows it covers, and an hour already written is never derived again. A public address and a disk are not
 // here: they are lines of the instance's own interval (`meterLinesFor`) under the instance source.
@@ -30,6 +30,18 @@ UPDATE networks SET metered_until = to_timestamp(floor(extract(epoch FROM comput
  WHERE provisioned_at IS NOT NULL;
 CREATE TRIGGER networks_stamp_deleted BEFORE UPDATE ON networks
   FOR EACH ROW EXECUTE FUNCTION vps_stamp_deleted_at();
+
+-- Sandbox snapshots bill from ready_at (set when the upload settles) until they are deleted, the same way; the
+-- ones that are ready when this runs bill from the top of this hour.
+ALTER TABLE sandbox_snapshots ADD COLUMN metered_until timestamptz;
+ALTER TABLE sandbox_snapshots ADD COLUMN deleted_at timestamptz;
+UPDATE sandbox_snapshots SET metered_until = to_timestamp(floor(extract(epoch FROM compute_now()) / 3600) * 3600)
+ WHERE state = 'ready';
+CREATE TRIGGER sandbox_snapshots_stamp_deleted BEFORE UPDATE ON sandbox_snapshots
+  FOR EACH ROW EXECUTE FUNCTION vps_stamp_deleted_at();
+-- What the reconciler scans: snapshots that bill (or billed until a deletion it has not yet covered).
+CREATE INDEX sandbox_snapshots_unmetered ON sandbox_snapshots ((coalesce(metered_until, ready_at)))
+ WHERE ready_at IS NOT NULL AND (state <> 'deleted' OR (deleted_at IS NOT NULL AND metered_until IS DISTINCT FROM deleted_at));
 `,
 };
 
@@ -144,11 +156,117 @@ export async function meterNetworks(
   return { networks: rows.length, windows };
 }
 
-/** The `vps.ancillary-usage` pass: networks (Task 12). */
+interface DueSnapshot {
+  id: string;
+  tenant_id: string;
+  size_bytes: string | null;
+  pool_id: string | null;
+  pool_class: string | null;
+  pool_owner: string | null;
+  policy: PoolPolicy | string | null;
+  account_tenant: string | null;
+  provider: string | null;
+  region: string | null;
+  metered: number;
+  ended: number | null;
+}
+
+const bytesPerGiB = 2 ** 30;
+
+/**
+ * One pass over the sandbox snapshots with unbilled whole hours (Task 13): at most `limit`, oldest first. A snapshot
+ * bills `snapshot.gib.hours` x `size_bytes / 2^30` from the moment it was `ready` (`ready_at`) until it is deleted
+ * (`deleted_at`); one that failed or was deleted before it was ready never bills. The mode is that of the pool the
+ * snapshot's instance runs in (a hosted pool is metered unless its policy says otherwise); `none` and
+ * `platform-fee` advance the watermark and bill nothing. The bill goes to the snapshot's tenant.
+ */
+export async function meterSnapshots(
+  tx: SqlTx,
+  now: number,
+  deps: AncillaryDeps = {},
+  options: { limit?: number } = {},
+): Promise<{ snapshots: number; windows: number }> {
+  const grace = Math.max(0, deps.meterGraceMs ?? defaultAncillaryGraceMs);
+  const floorNow = Math.floor((now - grace) / hourMs) * hourMs;
+  const { rows } = await tx.query<DueSnapshot>(
+    `SELECT s.id, s.tenant_id, s.size_bytes::text AS size_bytes, p.id AS pool_id, p.class AS pool_class,
+            p.owner_tenant_id AS pool_owner, p.policy,
+            CASE WHEN a.tenant_id = p.owner_tenant_id THEN a.tenant_id END AS account_tenant,
+            a.provider, st.region,
+            (extract(epoch FROM coalesce(s.metered_until, s.ready_at)) * 1000)::float8 AS metered,
+            (extract(epoch FROM s.deleted_at) * 1000)::float8 AS ended
+       FROM sandbox_snapshots s
+       LEFT JOIN instances i ON i.id = s.instance_id
+       LEFT JOIN pools p ON p.id = i.pool_id
+       LEFT JOIN sites st ON st.id = p.site_id
+       LEFT JOIN provider_accounts a ON a.id = i.provider_account_id
+      WHERE s.ready_at IS NOT NULL
+        AND (s.state <> 'deleted' OR (s.deleted_at IS NOT NULL AND s.metered_until IS DISTINCT FROM s.deleted_at))
+        AND coalesce(s.metered_until, s.ready_at) < to_timestamp($1::float8 / 1000)
+        AND (s.deleted_at IS NULL OR coalesce(s.metered_until, s.ready_at) < s.deleted_at)
+      ORDER BY coalesce(s.metered_until, s.ready_at), s.id
+      LIMIT $2
+        FOR UPDATE OF s`,
+    [floorNow, options.limit ?? 5000],
+  );
+  const advance: { id: string; until: number }[] = [];
+  let windows = 0;
+  for (const row of rows) {
+    const from = Math.round(Number(row.metered));
+    const ended = row.ended === null ? null : Math.round(Number(row.ended));
+    const until = Math.min(ended ?? floorNow, floorNow);
+    advance.push({ id: row.id, until });
+    const gib = row.size_bytes === null ? 0 : Number(row.size_bytes) / bytesPerGiB;
+    if (!(until > from) || !(gib > 0)) continue;
+    // A snapshot whose instance or pool is gone has no pool to say otherwise: a hosted pool's default, metered.
+    if (
+      row.pool_id !== null &&
+      billingModeOf(
+        { ownerTenantId: row.pool_owner!, class: row.pool_class!, policy: json(row.policy) ?? {} },
+        row.account_tenant !== null ? { tenantId: row.account_tenant } : undefined,
+        deps.rootTenantId ?? '',
+      ) !== 'metered'
+    )
+      continue;
+    const tags: UsageTags = { source: 'snapshot' };
+    if (row.pool_id) tags.pool = row.pool_id;
+    if (row.provider) tags.provider = row.provider;
+    if (row.region) tags.region = row.region;
+    windows += await meterSource(
+      tx,
+      {
+        sourceKind: 'snapshot',
+        sourceId: row.id,
+        tenantId: row.tenant_id,
+        lines: [{ meter: 'snapshot.gib.hours', perHour: gib }],
+        from,
+        to: until,
+        tags,
+      },
+      now,
+    );
+  }
+  if (advance.length > 0)
+    await tx.query(
+      `UPDATE sandbox_snapshots s SET metered_until = to_timestamp(v.until / 1000)
+         FROM unnest($1::text[], $2::float8[]) AS v(id, until)
+        WHERE s.id = v.id`,
+      [advance.map((a) => a.id), advance.map((a) => a.until)],
+    );
+  return { snapshots: rows.length, windows };
+}
+
+/** The `vps.ancillary-usage` pass: networks (Task 12) and sandbox snapshots (Task 13). */
 export async function meterAncillaries(
   tx: SqlTx,
   now: number,
   deps: AncillaryDeps = {},
-): Promise<{ networks: number; windows: number }> {
-  return meterNetworks(tx, now, deps);
+): Promise<{ networks: number; snapshots: number; windows: number }> {
+  const networks = await meterNetworks(tx, now, deps);
+  const snapshots = await meterSnapshots(tx, now, deps);
+  return {
+    networks: networks.networks,
+    snapshots: snapshots.snapshots,
+    windows: networks.windows + snapshots.windows,
+  };
 }

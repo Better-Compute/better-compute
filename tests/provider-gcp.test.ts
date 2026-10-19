@@ -1076,6 +1076,16 @@ describe('compute', () => {
     });
   });
 
+  it('toMachine marks the boot disk type the machine family takes (what the platform meters it as)', () => {
+    const on = (type: string) =>
+      toMachine({ name: 'v', zone: 'zones/z-a', machineType: `zones/z-a/machineTypes/${type}` });
+    expect(on('a3-highgpu-8g').bootDiskType).toBe('pd-balanced');
+    expect(on('n2-standard-4').bootDiskType).toBe('pd-balanced');
+    // Families that only take Hyperdisk.
+    expect(on('a3-ultragpu-8g').bootDiskType).toBe('hyperdisk-balanced');
+    expect(on('c4-standard-8').bootDiskType).toBe('hyperdisk-balanced');
+  });
+
   it('maps statuses and accelerator models', () => {
     const base = {
       name: 'v',

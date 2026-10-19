@@ -1,4 +1,5 @@
 import type { ExternalMachine } from '@better-compute/core';
+import { bootDiskTypes } from './disks.js';
 import { labels, machineId, offerId } from './ids.js';
 
 // Compute Engine resources as the REST API returns them (only the members this provider reads), and
@@ -164,6 +165,8 @@ export function toMachine(instance: GceInstance, options: ToMachineOptions = {})
     addresses,
     zone,
     machineType: type,
+    // The boot disk type this family takes (Hyperdisk only for some): what the platform meters the boot disk as.
+    bootDiskType: bootDiskTypes(type)[0]!,
   };
   const shape = options.shape ?? shapeFromName(type);
   if (shape) {

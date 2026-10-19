@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { meterCatalog, defaultMeterGpuModels, type ExternalMachine } from '@better-compute/core';
+import {
+  defaultMeterGpuModels,
+  meterCatalog,
+  meterDiskTypes,
+  type ExternalMachine,
+} from '@better-compute/core';
 import { closeFixtures } from '@better-compute/testing';
 import {
+  disksOf as disksOfRecord,
   meterLinesFor,
   meterNetworks,
   type BillableShape,
@@ -487,5 +493,464 @@ describe('public IPs (D9)', () => {
               phase,
             ))
               expect(known.has(line.meter), line.meter).toBe(true);
+  });
+});
+
+// --- Task 13: disks and snapshots (D9) -------------------------------------------------------------
+
+describe('disks', () => {
+  afterEach(closeFixtures);
+
+  const intervalsOfVm = async (world: GceWorld, instanceId: string) => {
+    const { rows } = await world.fixture.database.query<{
+      phase: string;
+      shape: BillableShape | string;
+      started: number;
+      ended: number | null;
+    }>(
+      `SELECT phase, shape, (extract(epoch FROM started_at) * 1000)::float8 AS started,
+              (extract(epoch FROM ended_at) * 1000)::float8 AS ended
+         FROM instance_usage_intervals WHERE instance_id = $1 ORDER BY started_at`,
+      [instanceId],
+    );
+    return rows.map((row) => ({
+      phase: row.phase,
+      shape: (typeof row.shape === 'string' ? JSON.parse(row.shape) : row.shape) as BillableShape,
+      started: Number(row.started),
+      ended: row.ended === null ? null : Number(row.ended),
+    }));
+  };
+
+  const hours = (rows: readonly WindowView[], meterKey: string) =>
+    rows.filter((row) => row.meter === meterKey).map((row) => [row.start, row.quantity]);
+
+  const stopAt = async (world: GceWorld, instanceId: string, at: number) => {
+    await moveTo(world, at - 1_000);
+    await world.api.instances.stop(world.acme, { tenantId: world.acmeTenant, instanceId });
+    await step(world, 1_000);
+    expect((await viewOf(world, instanceId)).state).toBe('stopped');
+  };
+
+  it('a 100 GiB boot disk bills 100 GiB-hours per hour running and stopped', async () => {
+    const world = await gceWorld();
+    const { created, h0 } = await runningAtHour(world);
+    // The flavor's 100 GiB disk, as pd-balanced, is on the interval from the start.
+    expect((await intervalsOfVm(world, created.id))[0]!.shape.disks).toEqual([
+      { type: 'pd-balanced', sizeGiB: 100 },
+    ]);
+    await stopAt(world, created.id, h0 + 2 * HOUR);
+    expect((await intervalsOfVm(world, created.id)).map((item) => item.phase)).toEqual([
+      'running',
+      'stopped',
+    ]);
+
+    await moveTo(world, h0 + 5 * HOUR + settle);
+    await meter(world, usageJob);
+    const rows = await windowsOf(world, 'instance', created.id);
+    // Two running hours, then three stopped: the disk bills in all five; compute only in the running two.
+    expect(hours(rows, 'disk.pd-balanced.gib.hours')).toEqual([
+      [h0, 100],
+      [h0 + HOUR, 100],
+      [h0 + 2 * HOUR, 100],
+      [h0 + 3 * HOUR, 100],
+      [h0 + 4 * HOUR, 100],
+    ]);
+    expect(hours(rows, 'vm.instance.hours')).toEqual([
+      [h0, 1],
+      [h0 + HOUR, 1],
+    ]);
+    // Under the instance source, with the instance's key shape.
+    expect(rows.find((row) => row.meter === 'disk.pd-balanced.gib.hours')!.key).toBe(
+      `cmp:instance:${created.id}:${h0}:disk.pd-balanced.gib.hours`,
+    );
+  });
+
+  it('the hour holding a stop is one window: the running and stopped parts sum', async () => {
+    const world = await gceWorld();
+    const { created, h0 } = await runningAtHour(world);
+    await stopAt(world, created.id, h0 + 90 * 60_000);
+    await moveTo(world, h0 + 4 * HOUR + settle);
+    await meter(world, usageJob);
+    await meter(world, usageJob, HOUR);
+    const rows = await windowsOf(world, 'instance', created.id);
+    expect(hours(rows, 'disk.pd-balanced.gib.hours').slice(0, 3)).toEqual([
+      [h0, 100],
+      [h0 + HOUR, 100],
+      [h0 + 2 * HOUR, 100],
+    ]);
+    expect(hours(rows, 'vm.instance.hours')).toEqual([
+      [h0, 1],
+      [h0 + HOUR, 0.5],
+    ]);
+  });
+
+  it('hyperdisk machine family bills hyperdisk-balanced', async () => {
+    const world = await gceWorld();
+    const { created, h0, machine } = await runningAtHour(world);
+    // The provider marks the machine's family as Hyperdisk-only (a4, c4, ...): its boot disk meters as hyperdisk.
+    machine.bootDiskType = 'hyperdisk-balanced';
+    await moveTo(world, h0 + HOUR - 1_000);
+    await step(world, 1_000);
+    expect((await intervalsOfVm(world, created.id)).map((item) => item.shape.disks)).toEqual([
+      [{ type: 'pd-balanced', sizeGiB: 100 }],
+      [{ type: 'hyperdisk-balanced', sizeGiB: 100 }],
+    ]);
+    await moveTo(world, h0 + 3 * HOUR + settle);
+    await meter(world, usageJob);
+    const rows = await windowsOf(world, 'instance', created.id);
+    expect(hours(rows, 'disk.pd-balanced.gib.hours')).toEqual([[h0, 100]]);
+    expect(hours(rows, 'disk.hyperdisk-balanced.gib.hours')).toEqual([
+      [h0 + HOUR, 100],
+      [h0 + 2 * HOUR, 100],
+    ]);
+  });
+
+  it('disks the provider reports replace the flavor boot disk, one line per type', async () => {
+    const world = await gceWorld();
+    const { created, h0, machine } = await runningAtHour(world);
+    machine.disks = [
+      { type: 'pd-ssd', sizeGiB: 50, boot: true },
+      { type: 'pd-ssd', sizeGiB: 150 },
+      { type: 'local-ssd', sizeGiB: 375 },
+    ];
+    await moveTo(world, h0 + HOUR - 1_000);
+    await step(world, 1_000);
+    await moveTo(world, h0 + 2 * HOUR + settle);
+    await meter(world, usageJob);
+    const rows = await windowsOf(world, 'instance', created.id);
+    expect(hours(rows, 'disk.pd-ssd.gib.hours')).toEqual([[h0 + HOUR, 200]]);
+    expect(hours(rows, 'disk.local-ssd.gib.hours')).toEqual([[h0 + HOUR, 375]]);
+    expect(hours(rows, 'disk.pd-balanced.gib.hours')).toEqual([[h0, 100]]);
+  });
+
+  it('an unknown disk type meters as pd-balanced and raises DiskTypeUnknown until it is gone', async () => {
+    const world = await gceWorld();
+    const { created, h0, machine } = await runningAtHour(world);
+    const conditions = async () => {
+      const { rows } = await world.fixture.database.query<{
+        conditions: { type: string; status: string; message?: string }[] | string;
+      }>(`SELECT conditions FROM instances WHERE id = $1`, [created.id]);
+      const raw = rows[0]!.conditions;
+      return (typeof raw === 'string' ? JSON.parse(raw) : raw).filter(
+        (entry: { type: string }) => entry.type === 'DiskTypeUnknown',
+      );
+    };
+    expect(await conditions()).toEqual([]);
+
+    machine.disks = [{ type: 'pd-extreme', sizeGiB: 80, boot: true }];
+    await moveTo(world, h0 + HOUR - 1_000);
+    await step(world, 1_000);
+    expect(await conditions()).toMatchObject([
+      { type: 'DiskTypeUnknown', status: 'true', message: expect.stringContaining('pd-extreme') },
+    ]);
+    expect((await intervalsOfVm(world, created.id)).at(-1)!.shape.disks).toEqual([
+      { type: 'pd-balanced', sizeGiB: 80 },
+    ]);
+
+    // The provider reports a priced type again: the condition clears.
+    machine.disks = [{ type: 'pd-standard', sizeGiB: 80, boot: true }];
+    await moveTo(world, h0 + 2 * HOUR - 1_000);
+    await step(world, 1_000);
+    expect(await conditions()).toEqual([]);
+
+    await moveTo(world, h0 + 3 * HOUR + settle);
+    await meter(world, usageJob);
+    const rows = await windowsOf(world, 'instance', created.id);
+    expect(hours(rows, 'disk.pd-balanced.gib.hours')).toEqual([
+      [h0, 100],
+      [h0 + HOUR, 80],
+    ]);
+    expect(hours(rows, 'disk.pd-standard.gib.hours')).toEqual([[h0 + 2 * HOUR, 80]]);
+  });
+
+  it('a deleted VM stops disk billing', async () => {
+    const world = await gceWorld();
+    const { created, h0 } = await runningAtHour(world);
+    await stopAt(world, created.id, h0 + HOUR);
+    await moveTo(world, h0 + 3 * HOUR - 1_000);
+    await world.api.instances.delete(world.acme, {
+      tenantId: world.acmeTenant,
+      instanceId: created.id,
+    });
+    await step(world, 1_000);
+    expect((await viewOf(world, created.id)).state).toBe('deleted');
+    const list = await intervalsOfVm(world, created.id);
+    expect(list.every((item) => item.ended !== null)).toBe(true);
+    expect(list.at(-1)!.ended).toBe(h0 + 3 * HOUR);
+
+    await moveTo(world, h0 + 10 * HOUR);
+    await meter(world, usageJob);
+    const rows = await windowsOf(world, 'instance', created.id);
+    expect(hours(rows, 'disk.pd-balanced.gib.hours')).toEqual([
+      [h0, 100],
+      [h0 + HOUR, 100],
+      [h0 + 2 * HOUR, 100],
+    ]);
+  });
+
+  it('a stopped interval from before disks were captured is billed with derived disks (F7-3)', async () => {
+    const world = await gceWorld();
+    const { created, h0 } = await runningAtHour(world);
+    await stopAt(world, created.id, h0 + HOUR);
+    // Strip the disks, as an interval opened before this task would have them.
+    await world.fixture.database.query(
+      `UPDATE instance_usage_intervals SET shape = shape - 'disks' WHERE instance_id = $1`,
+      [created.id],
+    );
+    await moveTo(world, h0 + 4 * HOUR + settle);
+    await meter(world, usageJob);
+    const rows = await windowsOf(world, 'instance', created.id);
+    // Derived as at open: the flavor's 100 GiB boot disk, for the stripped running hour and the stopped backlog.
+    expect(hours(rows, 'disk.pd-balanced.gib.hours')).toEqual([
+      [h0, 100],
+      [h0 + HOUR, 100],
+      [h0 + 2 * HOUR, 100],
+      [h0 + 3 * HOUR, 100],
+    ]);
+    // The watermark moved: the backlog is not derived again.
+    const { rows: marks } = await world.fixture.database.query<{ behind: boolean }>(
+      `SELECT metered_until < to_timestamp($2::float8 / 1000) AS behind
+         FROM instance_usage_intervals WHERE instance_id = $1 AND phase = 'stopped'`,
+      [created.id, h0 + 4 * HOUR],
+    );
+    expect(marks).toEqual([{ behind: false }]);
+  });
+
+  it('modes: platform-fee and none bill no disks; a grant or flavor meter does not cover them', () => {
+    const disks = [
+      { type: 'pd-balanced', sizeGiB: 100 },
+      { type: 'pd-balanced', sizeGiB: 20 },
+      { type: 'hyperdisk-balanced', sizeGiB: 500 },
+      { type: 'mystery', sizeGiB: 10 },
+      { type: 'pd-ssd', sizeGiB: 0 },
+    ];
+    const shape: BillableShape = { ...base, disks };
+    const diskLines = [
+      { meter: 'disk.pd-balanced.gib.hours', perHour: 130 },
+      { meter: 'disk.hyperdisk-balanced.gib.hours', perHour: 500 },
+    ];
+    expect(meterLinesFor(shape, 'metered', 'stopped')).toEqual(diskLines);
+    expect(meterLinesFor(shape, 'metered', 'running').slice(-2)).toEqual(diskLines);
+    expect(meterLinesFor(shape, 'platform-fee', 'stopped')).toEqual([]);
+    expect(meterLinesFor(shape, 'none', 'stopped')).toEqual([]);
+    expect(meterLinesFor(shape, 'platform-fee', 'running')).toEqual([
+      { meter: 'vm.managed.hours', perHour: 1 },
+    ]);
+    expect(meterLinesFor({ ...shape, granted: true }, 'metered', 'running')).toEqual([
+      { meter: 'vm.grant.usage.hours', perHour: 1 },
+      ...diskLines,
+    ]);
+    expect(
+      meterLinesFor({ ...shape, flavorMeter: 'flavor.x.hours' }, 'metered', 'stopped'),
+    ).toEqual(diskLines);
+    expect(meterLinesFor(base, 'metered', 'stopped')).toEqual([]);
+  });
+
+  it('disksOf: the machine record wins; else the flavor disk by family type', () => {
+    expect(disksOfRecord(undefined, 100)).toEqual({
+      disks: [{ type: 'pd-balanced', sizeGiB: 100 }],
+      unknownTypes: [],
+    });
+    expect(disksOfRecord({ bootDiskType: 'hyperdisk-balanced' }, 100).disks).toEqual([
+      { type: 'hyperdisk-balanced', sizeGiB: 100 },
+    ]);
+    expect(disksOfRecord({ bootDiskType: 'weird' }, 100)).toEqual({
+      disks: [{ type: 'pd-balanced', sizeGiB: 100 }],
+      unknownTypes: ['weird'],
+    });
+    expect(
+      disksOfRecord({ disks: [{ type: 'pd-ssd', sizeGiB: 30 }], bootDiskType: 'x' }, 100),
+    ).toEqual({ disks: [{ type: 'pd-ssd', sizeGiB: 30 }], unknownTypes: [] });
+    // No flavor disk (an attached VM) and nothing reported: nothing to bill.
+    expect(disksOfRecord(undefined, 0).disks).toEqual([]);
+    expect(disksOfRecord({ disks: [{ type: 'pd-ssd', sizeGiB: 0 }] }, 0).disks).toEqual([]);
+  });
+
+  it('every disk meter is in meterCatalog', () => {
+    const known = new Set(
+      meterCatalog({ gpuModels: defaultMeterGpuModels }).map((item) => item.key),
+    );
+    for (const type of meterDiskTypes) expect(known.has(`disk.${type}.gib.hours`), type).toBe(true);
+    for (const type of [...meterDiskTypes, 'unheard-of'])
+      for (const mode of ['metered', 'platform-fee', 'none'] as BillingMode[])
+        for (const phase of ['running', 'stopped'] as const)
+          for (const line of meterLinesFor(
+            { ...base, disks: [{ type, sizeGiB: 10 }] },
+            mode,
+            phase,
+          ))
+            expect(known.has(line.meter), line.meter).toBe(true);
+  });
+});
+
+describe('snapshots', () => {
+  afterEach(closeFixtures);
+
+  const GiB = 2 ** 30;
+
+  /** A sandbox snapshot row, as the settle pass leaves it (the sandbox itself is out of this test's way). */
+  async function insertSnapshot(
+    world: GceWorld,
+    fields: {
+      id: string;
+      instanceId: string;
+      state: 'pending' | 'ready' | 'failed' | 'deleted';
+      readyAt: number | null;
+      sizeBytes: number | null;
+      tenantId?: string;
+    },
+  ): Promise<void> {
+    await world.fixture.database.transaction(async (tx) => {
+      // The sandbox row it names is not what is under test.
+      await tx.query(`SET LOCAL session_replication_role = replica`);
+      await tx.query(
+        `INSERT INTO sandbox_snapshots (id, tenant_id, sandbox_id, template_id, instance_id, node_id, runtime,
+                                        include_memory, state, command_id, url, size_bytes, owner_identity_id,
+                                        ready_at, version)
+         VALUES ($1, $2, 'sbx_x', 'tpl_x', $3, 'node_x', 'qemu', false, $4, 'cmd_x', 'https://objects/x', $5,
+                 'usr_x', CASE WHEN $6::float8 IS NULL THEN NULL ELSE to_timestamp($6::float8 / 1000) END, 1)`,
+        [
+          fields.id,
+          fields.tenantId ?? world.acmeTenant,
+          fields.instanceId,
+          fields.state,
+          fields.sizeBytes,
+          fields.readyAt,
+        ],
+      );
+    });
+  }
+
+  const quantities = (rows: readonly WindowView[], sourceId: string) =>
+    rows.filter((row) => row.sourceId === sourceId).map((row) => [row.start, row.quantity]);
+
+  it('snapshots bill by size', async () => {
+    const world = await gceWorld();
+    const created = await createVm(world);
+    const h0 = nextHour(world);
+    await moveTo(world, h0);
+    await insertSnapshot(world, {
+      id: 'snap_a',
+      instanceId: created.id,
+      state: 'ready',
+      readyAt: h0,
+      sizeBytes: 3 * GiB,
+    });
+    await insertSnapshot(world, {
+      id: 'snap_b',
+      instanceId: created.id,
+      state: 'ready',
+      readyAt: h0,
+      sizeBytes: 1.5 * GiB,
+    });
+    await moveTo(world, h0 + 2 * HOUR + settle);
+    await meter(world, ancillaryJob);
+    const rows = await windowsOf(world, 'snapshot');
+    expect(quantities(rows, 'snap_a')).toEqual([
+      [h0, 3],
+      [h0 + HOUR, 3],
+    ]);
+    expect(quantities(rows, 'snap_b')).toEqual([
+      [h0, 1.5],
+      [h0 + HOUR, 1.5],
+    ]);
+    expect(rows[0]).toMatchObject({
+      kind: 'snapshot',
+      tenantId: world.acmeTenant,
+      identityId: null,
+      meter: 'snapshot.gib.hours',
+      tags: { pool: world.poolId, source: 'snapshot' },
+    });
+    expect(rows.find((row) => row.sourceId === 'snap_a')!.key).toBe(
+      `cmp:snapshot:snap_a:${h0}:snapshot.gib.hours`,
+    );
+    // A repeated pass writes nothing more.
+    const before = JSON.stringify(rows);
+    await meter(world, ancillaryJob, 60_000);
+    expect(JSON.stringify(await windowsOf(world, 'snapshot'))).toBe(before);
+  });
+
+  it('a snapshot bills from ready until it is deleted, not before, and never when it failed', async () => {
+    const world = await gceWorld();
+    const created = await createVm(world);
+    const h0 = nextHour(world);
+    await moveTo(world, h0);
+    // Pending (upload not settled) and failed ones never bill, whatever their size.
+    await insertSnapshot(world, {
+      id: 'snap_pending',
+      instanceId: created.id,
+      state: 'pending',
+      readyAt: null,
+      sizeBytes: null,
+    });
+    await insertSnapshot(world, {
+      id: 'snap_failed',
+      instanceId: created.id,
+      state: 'failed',
+      readyAt: null,
+      sizeBytes: GiB,
+    });
+    await insertSnapshot(world, {
+      id: 'snap_c',
+      instanceId: created.id,
+      state: 'ready',
+      readyAt: h0 + 30 * 60_000,
+      sizeBytes: 2 * GiB,
+    });
+    // Deleted at 2h15m: the half hour it was ready in, one whole hour and a quarter hour are all it owes.
+    await moveTo(world, h0 + 2 * HOUR + 15 * 60_000);
+    await world.fixture.database.query(
+      `UPDATE sandbox_snapshots SET state = 'deleted' WHERE id IN ('snap_c', 'snap_pending')`,
+    );
+    await moveTo(world, h0 + 6 * HOUR);
+    await meter(world, ancillaryJob);
+    await meter(world, ancillaryJob, HOUR);
+    const rows = await windowsOf(world, 'snapshot');
+    expect(new Set(rows.map((row) => row.sourceId))).toEqual(new Set(['snap_c']));
+    expect(rows.map((row) => [row.start, row.quantity])).toEqual([
+      [h0, 1],
+      [h0 + HOUR, 2],
+      [h0 + 2 * HOUR, 0.5],
+    ]);
+  });
+
+  it('a snapshot with no size bills nothing; a pool in mode none bills none', async () => {
+    const world = await gceWorld();
+    const created = await createVm(world);
+    const h0 = nextHour(world);
+    await moveTo(world, h0);
+    await insertSnapshot(world, {
+      id: 'snap_empty',
+      instanceId: created.id,
+      state: 'ready',
+      readyAt: h0,
+      sizeBytes: 0,
+    });
+    await moveTo(world, h0 + 2 * HOUR + settle);
+    await meter(world, ancillaryJob);
+    expect(await windowsOf(world, 'snapshot')).toEqual([]);
+
+    await insertSnapshot(world, {
+      id: 'snap_free',
+      instanceId: created.id,
+      state: 'ready',
+      readyAt: h0 + 2 * HOUR,
+      sizeBytes: GiB,
+    });
+    await world.fixture.database.query(
+      `UPDATE pools SET policy = policy || '{"billing":{"mode":"none"}}'::jsonb WHERE id = $1`,
+      [world.poolId],
+    );
+    await moveTo(world, h0 + 4 * HOUR + settle);
+    await meter(world, ancillaryJob);
+    expect(await windowsOf(world, 'snapshot')).toEqual([]);
+  });
+
+  it('every snapshot and network meter is in meterCatalog', () => {
+    const known = new Set(
+      meterCatalog({ gpuModels: defaultMeterGpuModels }).map((item) => item.key),
+    );
+    for (const key of ['snapshot.gib.hours', 'network.vpc.hours'])
+      expect(known.has(key), key).toBe(true);
   });
 });

@@ -658,6 +658,17 @@ export interface ExternalMachine {
   memoryGiB?: number;
   gpus?: { model: string; count: number };
   labels?: Readonly<Record<string, string>>;
+  /**
+   * (platform compute billing) The disks the machine holds, boot disk first, when the provider reports them: the
+   * type as the provider names it (`pd-balanced`, `hyperdisk-balanced`, `local-ssd`, …) and the size in GiB.
+   * Metered as `disk.<type>.gib.hours`, running or stopped.
+   */
+  disks?: readonly { type: string; sizeGiB: number; boot?: boolean }[];
+  /**
+   * (platform compute billing) The type of the boot disk a machine of this family takes, when the provider knows
+   * it but reports no `disks` (`hyperdisk-balanced` for the families that only take Hyperdisk). Absent: `pd-balanced`.
+   */
+  bootDiskType?: string;
   networks?: readonly {
     network: string;
     subnet?: string;

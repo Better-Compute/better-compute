@@ -4,7 +4,12 @@
  * key is built from the lower-case shapes `meterCatalog` (@better-compute/core) defines, and the tests cross-check
  * that, so a rule cannot name a meter the rate card lacks.
  */
-import { canonicalGpuModel, defaultMeterGpuModels, type PoolPolicy } from '@better-compute/core';
+import {
+  canonicalGpuModel,
+  defaultMeterGpuModels,
+  meterDiskTypes,
+  type PoolPolicy,
+} from '@better-compute/core';
 
 /** `metered`: priced per resource; `platform-fee`: one managed-VM line (BYO cloud account); `none`: not billed. */
 export type BillingMode = 'metered' | 'platform-fee' | 'none';
@@ -21,8 +26,17 @@ export interface BillableShape {
   flavorMeter?: string;
   /** An attached public address (set on `running` intervals only): one `ip.public.hours` line. */
   publicIp?: boolean;
-  /** Task 13: attached disks. No lines yet. */
-  disks?: readonly { type: string; sizeGiB: number }[];
+  /**
+   * Attached disks, each as `disk.<type>.gib.hours` x `sizeGiB` (D9), running or stopped. Absent on intervals opened
+   * before disks were captured: the usage reconciler derives them (`disksOf`) when it meters one.
+   */
+  disks?: readonly BillableDisk[];
+}
+
+/** One disk of a provider instance: a priced type (`disk.<type>.gib.hours`) and its size. */
+export interface BillableDisk {
+  type: string;
+  sizeGiB: number;
 }
 
 export interface MeterLine {
@@ -81,8 +95,8 @@ export function billingModeOf(
  * granted instances record the informational `vm.grant.usage.hours` line only (D7); a flavor meter replaces the
  * composed compute lines. A `metered` instance adds the lines of what it holds beside its compute: an
  * `ip.public.hours` line while it runs with a public address (D9), granted and flavor-meter instances included
- * (a grant covers the VM, not its address). `phase: 'stopped'` carries only the disk lines (Task 13), so it is
- * empty for now. `platform-fee` and `none` never add them.
+ * (a grant covers the VM, not its address or disks), then a `disk.<type>.gib.hours` line per disk type, in both
+ * phases (a stopped VM keeps its disks). `platform-fee` and `none` never add them.
  */
 export function meterLinesFor(
   shape: BillableShape,
@@ -98,7 +112,66 @@ export function meterLinesFor(
   const out: MeterLine[] = phase === 'running' ? computeLines(shape, options) : [];
   if (phase === 'running' && shape.publicIp === true)
     out.push({ meter: 'ip.public.hours', perHour: 1 });
+  out.push(...diskLines(shape.disks ?? []));
   return out;
+}
+
+/** The disk type a boot disk is metered as when its type is unknown or absent. */
+export const defaultDiskType = 'pd-balanced';
+
+/** The priced disk types (`disk.<type>.gib.hours`). */
+const pricedDiskTypes: ReadonlySet<string> = new Set(meterDiskTypes);
+
+/** The meter key of a disk type, and `pd-balanced`'s for a type with no meter of its own. */
+export function diskMeterOf(type: string): string {
+  return `disk.${pricedDiskTypes.has(type) ? type : defaultDiskType}.gib.hours`;
+}
+
+/** One line per disk type: the sizes of its disks summed. */
+function diskLines(disks: readonly BillableDisk[]): MeterLine[] {
+  const sizes = new Map<string, number>();
+  for (const disk of disks) {
+    if (!(disk.sizeGiB > 0)) continue;
+    const meter = diskMeterOf(disk.type);
+    sizes.set(meter, (sizes.get(meter) ?? 0) + disk.sizeGiB);
+  }
+  return [...sizes].map(([meter, perHour]) => ({ meter, perHour }));
+}
+
+/** What a provider says about a machine's disks (`ExternalMachine.disks`, `bootDiskType`). */
+export interface DiskRecord {
+  disks?: readonly { type: string; sizeGiB: number }[] | undefined;
+  bootDiskType?: string | undefined;
+}
+
+/**
+ * The disks an instance is billed for, and the provider types that have no meter (they are metered as
+ * `pd-balanced`, and the caller raises the `DiskTypeUnknown` condition). The machine record's own disks when the
+ * provider reports any; otherwise one boot disk of the flavor's `diskGiB`, of the type the record marks for the
+ * machine family (`bootDiskType`, `hyperdisk-balanced` for the families that only take Hyperdisk) or `pd-balanced`.
+ * The same rule at interval open and when the reconciler meters an interval that predates disks (ruling F7-3).
+ */
+export function disksOf(
+  machine: DiskRecord | undefined,
+  flavorDiskGiB: number,
+): { disks: BillableDisk[]; unknownTypes: string[] } {
+  const unknownTypes: string[] = [];
+  const typed = (raw: string | undefined): string => {
+    if (raw === undefined || raw === '') return defaultDiskType;
+    if (pricedDiskTypes.has(raw)) return raw;
+    if (!unknownTypes.includes(raw)) unknownTypes.push(raw);
+    return defaultDiskType;
+  };
+  const reported = (machine?.disks ?? []).filter(
+    (disk) => Number.isFinite(disk.sizeGiB) && disk.sizeGiB > 0,
+  );
+  if (reported.length > 0)
+    return {
+      disks: reported.map((disk) => ({ type: typed(disk.type), sizeGiB: disk.sizeGiB })),
+      unknownTypes,
+    };
+  if (!(flavorDiskGiB > 0)) return { disks: [], unknownTypes };
+  return { disks: [{ type: typed(machine?.bootDiskType), sizeGiB: flavorDiskGiB }], unknownTypes };
 }
 
 function computeLines(shape: BillableShape, options: MeterLinesOptions): MeterLine[] {

@@ -11,13 +11,15 @@ import {
 import { meterSource, type UsageTags } from '@better-compute/capacity';
 import {
   billingModeOf,
+  disksOf,
   hasPublicAddress,
   meterLinesFor,
+  type DiskRecord,
   type BillableShape,
   type BillingMode,
   type MeterLine,
 } from './billing.js';
-import type { InstanceRow } from './instances.js';
+import { withCondition, withoutCondition, type InstanceRow } from './instances.js';
 
 // Lifecycle usage intervals (platform compute billing, D3): a provider instance's exact running and
 // stopped spans, written in the same transactions as the lifecycle changes that start and end them.
@@ -55,10 +57,13 @@ ALTER TABLE flavors ADD COLUMN billing jsonb;
 export type IntervalPhase = 'running' | 'stopped';
 
 /**
- * What the provider reported about the machine when the interval opens: its GPU model, region and addresses (a
- * public one is an `ip.public.hours` line).
+ * What the provider reported about the machine when the interval opens: its GPU model, region, addresses (a public
+ * one is an `ip.public.hours` line) and disks (`disk.<type>.gib.hours`).
  */
-export type ObservedMachine = Pick<ExternalMachine, 'gpus' | 'region' | 'addresses' | 'networks'>;
+export type ObservedMachine = Pick<
+  ExternalMachine,
+  'gpus' | 'region' | 'addresses' | 'networks' | 'disks' | 'bootDiskType'
+>;
 
 const json = <T>(value: T | string): T =>
   typeof value === 'string' ? (JSON.parse(value) as T) : value;
@@ -118,6 +123,8 @@ interface Billing {
   provider: string;
   mode: BillingMode;
   shape: BillableShape;
+  /** Provider disk types with no meter, metered as `pd-balanced` (the `DiskTypeUnknown` condition). */
+  unknownDiskTypes: string[];
 }
 
 /**
@@ -152,6 +159,7 @@ async function billingOf(
     machine_region: string | null;
     flavor_meter: string | null;
     addresses: string[] | null;
+    machine_record: (DiskRecord & Record<string, unknown>) | string | null;
   }>(
     // The account resolves only when it is the pool owner's (ruling R1, as readPoolAccount); its
     // provider names the interval either way. `flavor_meter` is the live flavor's meter, read only for
@@ -163,7 +171,7 @@ async function billingOf(
             m.machine->>'region' AS machine_region, p.gpu_model AS pool_gpu_model,
             (SELECT u.shape->'gpus'->>'model' FROM instance_usage_intervals u
               WHERE u.instance_id = i.id ORDER BY u.started_at DESC LIMIT 1) AS last_model,
-            f.billing->>'meter' AS flavor_meter, i.addresses
+            f.billing->>'meter' AS flavor_meter, i.addresses, m.machine AS machine_record
        FROM instances i
        JOIN pools p ON p.id = i.pool_id
        LEFT JOIN sites s ON s.id = p.site_id
@@ -190,6 +198,13 @@ async function billingOf(
         ? snapshotMeter
         : undefined
       : (row.flavor_meter ?? undefined);
+  // D9: the disks the provider reports for the machine now (else the last listing), else the flavor's boot disk.
+  const { disks, unknownTypes } = disksOf(
+    observed?.disks !== undefined || observed?.bootDiskType !== undefined
+      ? observed
+      : (json(row.machine_record) ?? undefined),
+    Number(flavor.diskGiB ?? 0),
+  );
   const shape: BillableShape = {
     vcpu: Number(flavor.vcpu ?? 0),
     memoryGiB: Number(flavor.memoryGiB ?? 0),
@@ -209,6 +224,7 @@ async function billingOf(
     })
       ? { publicIp: true }
       : {}),
+    disks,
   };
   // Without a known root tenant every provider pool reads as a tenant's own (BYO): fail closed (B8),
   // never charging compute for a pool not known to be the platform's.
@@ -226,7 +242,42 @@ async function billingOf(
     provider: row.provider ?? 'unknown',
     mode,
     shape,
+    unknownDiskTypes: unknownTypes,
   };
+}
+
+/** The condition an instance carries while a disk of a type the rate card lacks is metered as `pd-balanced`. */
+export const diskTypeUnknownCondition = 'DiskTypeUnknown';
+
+/**
+ * Keeps the `DiskTypeUnknown` condition in step with the disks the provider reports: set (with the type names) while
+ * a disk's type has no `disk.<type>.gib.hours` meter, cleared once none is left. Written without a version bump:
+ * the caller's row is mid-transaction and nothing a tenant can edit changes.
+ */
+async function syncDiskCondition(
+  tx: SqlTx,
+  row: InstanceRow,
+  unknownTypes: readonly string[],
+  at: number,
+): Promise<void> {
+  const present = row.conditions.find((entry) => entry.type === diskTypeUnknownCondition);
+  let conditions;
+  if (unknownTypes.length === 0) {
+    if (!present) return;
+    conditions = withoutCondition(row.conditions, diskTypeUnknownCondition);
+  } else {
+    const message = `Disk type ${unknownTypes.map((type) => `"${type}"`).join(', ')} has no disk meter; metered as pd-balanced`;
+    if (present?.message === message && present.status === 'true') return;
+    conditions = withCondition(
+      row.conditions,
+      { type: diskTypeUnknownCondition, status: 'true', reason: 'UnknownDiskType', message },
+      at,
+    );
+  }
+  await tx.query(`UPDATE instances SET conditions = $2::jsonb WHERE id = $1`, [
+    row.id,
+    JSON.stringify(conditions),
+  ]);
 }
 
 /**
@@ -252,6 +303,7 @@ export async function openInterval(
     await closeOpenInterval(tx, row.id, at);
     return;
   }
+  await syncDiskCondition(tx, row, billing.unknownDiskTypes, at);
   const shape = JSON.stringify(billing.shape);
   const { rows: open } = await tx.query<{ same: boolean }>(
     `SELECT (phase = $2 AND mode = $3 AND shape = $4::jsonb) AS same FROM instance_usage_intervals
@@ -313,6 +365,8 @@ interface DueInterval {
   ended: number | null;
   metered: number;
   flavor: string | null;
+  flavor_disk: string | null;
+  machine_record: DiskRecord | string | null;
 }
 
 /** The part of an interval one pass bills: `[from, until)` with the lines and tags to bill it by. */
@@ -340,9 +394,9 @@ const hourMs = 3_600_000;
  * splits it, would otherwise lose all but the first interval's share to `ON CONFLICT DO NOTHING`.
  *
  * - `running`: the lines of `meterLinesFor(shape, mode, 'running', { gpuModels })`, `perHour` x the part of the hour
- *   the interval covered. A mode with no lines (`none`) is marked metered without windows.
- * - `stopped`: through `meterLinesFor(shape, mode, 'stopped')`, which has no lines until Task 13 (disks). With none,
- *   `metered_until` stays put so Task 13 bills the backlog.
+ *   the interval covered. An interval with no lines is marked metered without windows.
+ * - `stopped`: through `meterLinesFor(shape, mode, 'stopped')`: the disk lines only (D9, a stopped VM keeps its disks).
+ *   An interval opened before disks were captured has them derived here (ruling F7-3), so its backlog is billed.
  * - An interval that ended where it started (nothing to bill) never qualifies: its `metered_until` is its end.
  */
 export async function meterIntervals(
@@ -366,9 +420,10 @@ export async function meterIntervals(
             (extract(epoch FROM u.started_at) * 1000)::float8 AS started,
             (extract(epoch FROM u.ended_at) * 1000)::float8 AS ended,
             (extract(epoch FROM u.metered_until) * 1000)::float8 AS metered,
-            i.flavor->>'name' AS flavor
+            i.flavor->>'name' AS flavor, i.flavor->>'diskGiB' AS flavor_disk, m.machine AS machine_record
        FROM instance_usage_intervals u
        JOIN instances i ON i.id = u.instance_id
+       LEFT JOIN provider_machines m ON m.account_id = i.provider_account_id AND m.external_id = i.external_id
       WHERE ${due('u')}
         AND u.instance_id IN (
               SELECT d.instance_id FROM instance_usage_intervals d
@@ -393,11 +448,17 @@ export async function meterIntervals(
       const from = Math.round(Number(row.metered));
       const ended = row.ended === null ? null : Math.round(Number(row.ended));
       const until = Math.min(ended ?? floorNow, floorNow);
-      const shape = json<BillableShape>(row.shape);
+      let shape = json<BillableShape>(row.shape);
+      // An interval opened before disks were captured (F7-3) gets them derived now, as at open: the machine record,
+      // else the flavor's boot disk. Disks do not change while a VM is stopped, so its backlog is billed, not dropped.
+      if (shape.disks === undefined)
+        shape = {
+          ...shape,
+          disks: disksOf(json(row.machine_record) ?? undefined, Number(row.flavor_disk ?? 0)).disks,
+        };
       const lines = meterLinesFor(shape, row.mode, row.phase, meterOptions);
-      // A stopped interval with no lines yet is Task 13's to bill (disks): its watermark stays. A `none` interval
-      // has none in any phase and never will, so it is advanced (F7-2).
-      if (row.phase === 'stopped' && row.mode !== 'none' && lines.length === 0) continue;
+      // An interval with no lines (a `none` or `platform-fee` stopped one, a stopped VM with no disk) has nothing to
+      // bill and never will: it is advanced, not left due forever (F7-2).
       advance.push({ id: row.id, until, done: ended !== null && until === ended });
       if (lines.length === 0 || !(until > from)) continue;
       const tags: UsageTags = { pool: row.pool_id, provider: row.provider, source: 'instance' };
