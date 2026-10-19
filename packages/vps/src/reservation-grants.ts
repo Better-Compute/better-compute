@@ -368,6 +368,17 @@ export async function settleGrantStates(
   now: number,
   onlyIds?: readonly string[],
 ): Promise<GrantRow[]> {
+  // Lock order reservation → grant, as admission and the API take them (F10-6); reservations sorted, so two runs
+  // never wait on each other in a cycle. Adoption counts and moves instances under these locks.
+  const { rows: reservations } = await tx.query<{ account_id: string; reservation_id: string }>(
+    `SELECT DISTINCT g.account_id, g.reservation_id FROM reservation_grants g
+      WHERE g.state IN ('scheduled', 'active') AND g.starts_at <= ${at$(1)}
+        ${onlyIds ? 'AND g.id = ANY($2::text[])' : ''}
+      ORDER BY g.account_id, g.reservation_id`,
+    onlyIds ? [now, onlyIds] : [now],
+  );
+  for (const reservation of reservations)
+    await lockReservationRow(tx, reservation.account_id, reservation.reservation_id);
   const { rows } = await tx.query<GrantRow>(
     `SELECT ${grantColumns} FROM reservation_grants g
       WHERE g.state IN ('scheduled', 'active') AND g.starts_at <= ${at$(1)}
@@ -417,6 +428,9 @@ async function adoptIntoGrant(
   grant: GrantRow,
   at: number,
 ): Promise<number> {
+  // Admission's lock (F10-6): no create can take a grant slot between the count and the move. Already held when
+  // called from settleGrantStates (re-entrant in this transaction).
+  await lockReservationRow(tx, grant.account_id, grant.reservation_id);
   const { rows: held } = await tx.query<{ count: number | string }>(
     `SELECT count(*) AS count FROM instances i WHERE i.reservation_grant_id = $1 AND ${holdingCondition}`,
     [grant.id],
@@ -427,6 +441,8 @@ async function adoptIntoGrant(
     `SELECT i.id FROM instances i
       WHERE i.tenant_id = $1 AND i.provider_account_id = $2 AND i.provider_reservation = $3 AND NOT i.draft
         AND ${holdingCondition} AND i.state <> 'stopped'
+        -- An instance billed nothing (attached with billing none) never takes a billed VM's grant slot (F10-8).
+        AND i.billing IS DISTINCT FROM 'none'
         AND ($4::text IS NULL OR i.project_id = $4)
         AND NOT EXISTS (SELECT 1 FROM reservation_grants l
                          WHERE l.id = i.reservation_grant_id AND l.state <> 'cancelled'
@@ -750,8 +766,16 @@ export async function endTenantGrants(
   );
   if (rows.length === 0) return 0;
   const now = await dbNow(tx);
+  // Reservations first, sorted (the rows are), then each grant (F10-6).
+  for (const [index, grant] of rows.entries()) {
+    const previous = rows[index - 1];
+    if (
+      previous?.account_id !== grant.account_id ||
+      previous.reservation_id !== grant.reservation_id
+    )
+      await lockReservationRow(tx, grant.account_id, grant.reservation_id);
+  }
   for (const grant of rows) {
-    await lockReservationRow(tx, grant.account_id, grant.reservation_id);
     const row = await readGrant(tx, grant.id, { lock: true });
     if (row) await finishGrant(deps, tx, row, now);
   }

@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ExternalReservation } from '@better-compute/core';
 import { closeFixtures } from '@better-compute/testing';
-import { vps, type BillableShape } from '@better-compute/vps';
-import { gceWorld, type GceWorld, type GceWorldOptions } from './support/vps-gce.js';
+import type { SqlTx } from '@better-compute/core';
+import { settleGrantStates, vps, type BillableShape } from '@better-compute/vps';
+import { gceVm, gceWorld, type GceWorld, type GceWorldOptions } from './support/vps-gce.js';
 
 // Platform compute billing, phase 3 (commitments): reserved-rate meters for instances admitted against a provider
 // reservation (D8, Task 9), reservation grants with grant-aware admission (D7, Task 10) and grant billing by committed
@@ -982,5 +983,127 @@ describe('billing', () => {
       ),
     ).toBeCloseTo(24 - (12 * 1_000) / HOUR, 5);
     expect(sum(await windows(world, 'grant'), SLOT)).toBe(1);
+  });
+
+  it('adoption skips instances that are not billed (F10-8)', async () => {
+    const world = await grantWorld({}, { discovery: { every: '1m' } });
+    const h0 = nextHour(world);
+    // An attached VM that root bills nothing, on the reservation, older than the billed one.
+    world.cloud.machines.set('us-central1-a/legacy', gceVm('legacy'));
+    await world.discover(0);
+    const { acme } = world.fixture.tenants;
+    const unbilled = await world.api.instances.attach(world.root, {
+      tenantId: acme.id,
+      poolId: world.poolId,
+      externalId: 'us-central1-a/legacy',
+      ownerIdentityId: acme.caller.identityId,
+      billing: 'none',
+      idempotencyKey: 'attach-none',
+    });
+    await world.fixture.database.query(
+      `UPDATE instances SET provider_reservation = $2 WHERE id = $1`,
+      [unbilled.id, RSV],
+    );
+    const g = await grant(world, {
+      to: 'acme',
+      slots: 1,
+      key: 'g',
+      startsAt: h0 + HOUR,
+      endsAt: h0 + 30 * DAY,
+    });
+    const billed = await runningAt(world, 'a-1', h0);
+    await moveTo(world, h0 + HOUR + 3 * MINUTE);
+    await settleGrants(world);
+    expect(await stateOf(world, g.id)).toBe('active');
+    expect((await grantOf(world, unbilled.id)).reservation_grant_id).toBeNull();
+    expect((await grantOf(world, billed.id)).reservation_grant_id).toBe(g.id);
+  });
+
+  it('settling locks reservations (sorted) before grants, and adoption under its reservation lock (F10-6)', async () => {
+    const world = await grantWorld();
+    const RSV_B = 'us-central1-a/rsv-b';
+    const second = reservation({
+      id: RSV_B,
+      name: 'rsv-b',
+      offerId: 'us-central1-a/a2-highgpu-1g@rsv-b',
+    });
+    await world.fixture.database.query(
+      `INSERT INTO provider_reservations (account_id, reservation_id, reservation, total, in_use, observed_at)
+       VALUES ($1, $2, $3::jsonb, 4, 0, compute_now())`,
+      [world.accountId, RSV_B, JSON.stringify(second)],
+    );
+    await world.api.providerAccounts.bindReservation(world.root, {
+      tenantId: world.rootTenant,
+      accountId: world.accountId,
+      reservationId: RSV_B,
+      poolId: world.poolId,
+      flavorName: 'rsv-b',
+      idempotencyKey: 'bind-rsv-b',
+    });
+    const h0 = nextHour(world);
+    // rsv-b's grant starts first, so grant order is not reservation order.
+    const onB = await world.api.reservationGrants.create(world.root, {
+      tenantId: world.rootTenant,
+      accountId: world.accountId,
+      reservationId: RSV_B,
+      grantTenantId: world.acmeTenant,
+      slots: 1,
+      startsAt: h0 + HOUR,
+      endsAt: h0 + DAY,
+      idempotencyKey: 'g-b',
+    });
+    await grant(world, {
+      to: 'acme',
+      slots: 1,
+      key: 'g-a',
+      startsAt: h0 + 2 * HOUR,
+      endsAt: h0 + DAY,
+    });
+    // An overflow VM on rsv-a for the grant to adopt.
+    await runningAt(world, 'a-1', h0);
+    await moveTo(world, h0 + 2 * HOUR + MINUTE);
+
+    const trace: { text: string; params: unknown[] }[] = [];
+    await world.fixture.database.transaction(async (tx) => {
+      const recording = {
+        ...tx,
+        query: (text: string, params: unknown[] = []) => {
+          trace.push({ text, params });
+          return tx.query(text, params);
+        },
+      } as unknown as SqlTx;
+      await settleGrantStates(
+        { events: { publish: async () => {} }, rootTenantId: world.rootTenant },
+        recording,
+        world.fixture.clock.now(),
+      );
+    });
+    const isReservationLock = (entry: { text: string }) =>
+      /FROM provider_reservations[\s\S]*FOR UPDATE/.test(entry.text);
+    const firstGrantLock = trace.findIndex((entry) =>
+      /FROM reservation_grants g[\s\S]*FOR UPDATE/.test(entry.text),
+    );
+    expect(firstGrantLock).toBeGreaterThan(0);
+    expect(
+      trace
+        .slice(0, firstGrantLock)
+        .filter(isReservationLock)
+        .map((entry) => entry.params[1]),
+    ).toEqual([RSV, RSV_B]);
+    // Adoption counts and moves under the reservation lock admission takes: each grant's count of its held slots
+    // comes right after the lock of that grant's reservation (rsv-b's grant starts first).
+    const held = trace
+      .map((entry, index) => ({ entry, index }))
+      .filter(({ entry }) =>
+        /count\(\*\) AS count FROM instances i WHERE i\.reservation_grant_id/.test(entry.text),
+      );
+    expect(held).toHaveLength(2);
+    for (const { index } of held) expect(index).toBeGreaterThan(firstGrantLock);
+    expect(held.map(({ index }) => trace[index - 1]!).every(isReservationLock)).toBe(true);
+    expect(held.map(({ index }) => trace[index - 1]!.params)).toEqual([
+      [world.accountId, RSV_B],
+      [world.accountId, RSV],
+    ]);
+    expect(await stateOf(world, onB.id)).toBe('active');
   });
 });
