@@ -65,3 +65,29 @@ Emits `pool.updated`.
 Retires a pool the tenant owns: it removes every offer and stops new work, while live reservations keep their bookings until they end.
 
 Each offered tenant's quota rows drop to what is in use and its authz row for the pool is removed. After archiving, only the owner sees the pool, with `archived: true`. Archiving an archived pool returns it unchanged. Emits `pool.archived` with the list of tenants whose offers were removed.
+
+## bindMachines
+
+Binds machines that the `vps.discovery` worker saw in a `provider` pool's account to the pool; returns `bound`, the machines bound to the pool now, and `skipped`, each with `externalId` and `reason`. Tenants the pool is offered to can then list them (`machines`) and attach them (`instances.attach`).
+
+- **Input.** `externalIds` lists 1 to 100 machine ids as `providerAccounts.machines` shows them; duplicates count once.
+- **Skips.** `not-found`: discovery has not seen the machine in the pool's account (run `providerAccounts.discover`). `bound-elsewhere`: it is bound to another pool; unbind it there first. `gone`: discovery marked it gone. `deleting`: the provider is deleting it. `held`: an instance of another pool holds it (one of this pool may). `other-region`: for Compute Engine accounts (`gcp`), the machine's region (or its zone's) is not the region of the pool's site; other providers' sites name regions freely and are not compared.
+- **Idempotency.** The machine rows are locked while the call runs. A machine already bound to the pool is listed in `bound` again and changes nothing. Discovery passes, detaching and deleting never clear a binding, so a machine whose instance goes returns to its pool. A binding to a pool archived since counts as none: the machine can be bound and attached elsewhere.
+- **IAM.** Decided as `compute:pools:manage` on the pool. Only the platform (root callers) and the tenant that owns the pool's provider account bind; a tenant the pool is offered to is `ACCESS_DENIED`.
+- **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, `INVALID_INPUT` for one that is not a `provider` pool, `INVALID_STATE` for a provider pool without an account.
+- **Events.** `pool.machines.bound` with `poolId`, `accountId` and the `externalIds` this call bound (none is published when it bound nothing new).
+
+## unbindMachines
+
+Takes machines out of the pool; returns `unbound` and `skipped`, with the input of `bindMachines`. An instance that holds an unbound machine keeps it.
+
+- A machine discovery has not seen is skipped as `not-found`, one bound to another pool as `bound-elsewhere`. A machine that is not bound is listed as unbound and changes nothing.
+- Decided as `compute:pools:manage` on the pool; only the platform and the account's tenant unbind (`ACCESS_DENIED` otherwise). Publishes `pool.machines.unbound` with the `externalIds` this call unbound.
+
+## machines
+
+Lists the machines bound to the pool that the provider still reports, ordered by zone and machine id; returns `items`, a `cursor` when more remain, and `discoveredAt`, the time of the account's last successful discovery pass.
+
+- **Input.** `filter` is `free` (the default: no instance holds the machine), `attached` (one does) or `all`. `limit` is 1 to 500 (default 100).
+- **Output.** Each machine is shown as `providerAccounts.machines` shows it, with `poolId`. A machine held by an instance of another tenant is listed without that instance's `instanceId` and `tenantId`, except to the platform. Tenants the pool is offered to are not shown `accountId`, as `get` does not show them `providerAccountId`.
+- **IAM.** Decided as `compute:pools:read` on the pool: its owner and the tenants it is offered to read it. Any other tenant gets `NOT_FOUND`.

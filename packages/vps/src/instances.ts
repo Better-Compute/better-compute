@@ -142,6 +142,11 @@ export interface CreateInstanceInput {
   /** (v1.0) A ready subnet of `networkId`; omitted: its only subnet in the offer's region. */
   subnetId?: string;
   /**
+   * Provider labels for the machine (provider pools; GCE label rules, see `instanceLabels`). The
+   * provider's own ownership labels are written over them.
+   */
+  labels?: Record<string, string>;
+  /**
    * (v1.0) Who owns the instance in the tenant (default: the caller), so it shows in their
    * `scope: 'mine'` list and owner policies apply to them. Only the platform (a root caller
    * creating in another tenant) names someone else, as `instances.attach` does (D7).
@@ -224,6 +229,42 @@ export async function assertOwnerMember(
 /** `details.reason` of `assertOwnerMember`'s refusal. */
 export const ownerNotMember = 'owner-not-member';
 
+/**
+ * At most this many labels per instance: Compute Engine allows 64 per VM, and better-compute writes
+ * two of its own (`better-compute-managed`, `better-compute-instance`).
+ */
+export const maxInstanceLabels = 62;
+/** A GCE label key: a lower-case letter, then lower-case letters, digits, `_` and `-`; at most 63. */
+export const labelKeyPattern = /^[a-z][a-z0-9_-]{0,62}$/;
+/** A GCE label value: lower-case letters, digits, `_` and `-`; at most 63, possibly empty. */
+export const labelValuePattern = /^[a-z0-9_-]{0,63}$/;
+/** Label keys better-compute reserves (ownership, auto-attach): a tenant never sets them. */
+const reservedLabelPrefix = 'better-compute-';
+
+/** `instances.create` labels, checked against Compute Engine's label rules. */
+export function instanceLabels(value: unknown): Record<string, string> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value))
+    return fail('labels must be an object of label keys to values');
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > maxInstanceLabels)
+    return fail(`labels may hold at most ${maxInstanceLabels} labels`);
+  const labels: Record<string, string> = {};
+  for (const [labelKey, labelValue] of entries) {
+    if (!labelKeyPattern.test(labelKey))
+      return fail(
+        `labels: ${JSON.stringify(labelKey)} is not a label key (a lower-case letter, then lower-case letters, digits, _ or -; at most 63)`,
+      );
+    if (labelKey.startsWith(reservedLabelPrefix))
+      return fail(`labels: keys starting with ${reservedLabelPrefix} are better-compute's own`);
+    if (typeof labelValue !== 'string' || !labelValuePattern.test(labelValue))
+      return fail(
+        `labels.${labelKey} must be lower-case letters, digits, _ or - (at most 63 characters)`,
+      );
+    labels[labelKey] = labelValue;
+  }
+  return labels;
+}
+
 /** Whether `userData` is a `secret://` ref (sealed by vps, or brought by the tenant). */
 export const isSecretRef = (userData: string | undefined): userData is `secret://${string}` =>
   userData !== undefined && secretRefPattern.test(userData);
@@ -240,6 +281,7 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
     'desiredState',
     'networkId',
     'subnetId',
+    'labels',
     'ownerIdentityId',
     'idempotencyKey',
     'wait',
@@ -285,6 +327,10 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
   if (subnetId !== undefined) {
     if (networkId === undefined) fail('subnetId needs a networkId');
     result.subnetId = subnetId;
+  }
+  if (input.labels !== undefined) {
+    const labels = instanceLabels(input.labels);
+    if (Object.keys(labels).length > 0) result.labels = labels;
   }
   if (input.ownerIdentityId !== undefined) {
     if (
@@ -429,6 +475,8 @@ interface RawInstance {
   reboot_hard: boolean;
   network_id: string | null;
   subnet_id: string | null;
+  labels: Record<string, string> | string | null;
+  network_external_name: string | null;
 }
 
 /** How an instance came to be (vps/0024): created by better-compute, or an attached provider machine. */
@@ -554,6 +602,10 @@ export interface InstanceRow {
   /** (v1.0) The tenant network and subnet its machine is on (vps/0026). */
   networkId?: string;
   subnetId?: string;
+  /** The provider-side name of that network when it was adopted (`networks.adopt`, vps/0044). */
+  networkExternalName?: string;
+  /** The tenant's provider labels (`instances.create`, vps/0043). */
+  labels?: Record<string, string>;
 }
 
 const json = <T>(value: T | string): T =>
@@ -610,6 +662,9 @@ function toRow(raw: RawInstance): InstanceRow {
     row.identityRebindRef = raw.identity_rebind_ref;
   if (raw.network_id !== null && raw.network_id !== undefined) row.networkId = raw.network_id;
   if (raw.subnet_id !== null && raw.subnet_id !== undefined) row.subnetId = raw.subnet_id;
+  if (raw.network_external_name !== null && raw.network_external_name !== undefined)
+    row.networkExternalName = raw.network_external_name;
+  if (raw.labels !== null && raw.labels !== undefined) row.labels = json(raw.labels);
   return row;
 }
 
@@ -622,7 +677,8 @@ const columns = `i.id, i.tenant_id, i.pool_id, i.project_id, i.flavor_id, i.flav
   (extract(epoch FROM i.host_cert_valid_before) * 1000)::float8 AS host_cert_valid_ms, i.network_policy,
   i.identity_rebind_ref, i.origin, i.on_delete, i.provider_claimed_at IS NOT NULL AS claimed,
   coalesce(i.reboot_requested_at > coalesce(i.rebooted_at, '-infinity'), false) AS reboot_pending,
-  i.reboot_hard, i.network_id, i.subnet_id`;
+  i.reboot_hard, i.network_id, i.subnet_id, i.labels,
+  (SELECT n.external_name FROM networks n WHERE n.id = i.network_id) AS network_external_name`;
 
 export async function readInstance(
   tx: SqlTx,
@@ -662,6 +718,7 @@ export function instanceView(row: InstanceRow): Instance {
   if (row.externalId !== undefined) view.externalId = row.externalId;
   if (row.networkId !== undefined) view.networkId = row.networkId;
   if (row.subnetId !== undefined) view.subnetId = row.subnetId;
+  if (row.labels !== undefined) view.labels = { ...row.labels };
   return view;
 }
 
@@ -1208,6 +1265,12 @@ export async function prepareCreateInstance(
 
   if (isSecretRef(input.userData)) await assertTenantPutSecret(tx, input.tenantId, input.userData);
   const pool = await visibleVpsPool(tx, input.tenantId, input.poolId);
+  // Labels are the provider's: hosted machines have none to carry them.
+  if (input.labels !== undefined && pool.class !== 'provider')
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `Pool ${pool.id} is not a provider pool; labels are written on provider machines only`,
+    );
   const flavor = await readFlavorByName(tx, input.poolId, input.flavor);
   if (!flavor || flavor.archived)
     throw new ComputeError('NOT_FOUND', `Flavor ${input.flavor} not found in pool ${input.poolId}`);
@@ -1256,9 +1319,9 @@ export async function prepareCreateInstance(
       `INSERT INTO instances (id, tenant_id, pool_id, project_id, flavor_id, flavor, image_id, image,
                               ssh_keys, user_data, runtime, draft, state, desired_state,
                               provider_account_id, owner_identity_id, agent_id, delegation_id,
-                              idempotency_key, request_hash, version, network_id, subnet_id)
+                              idempotency_key, request_hash, version, network_id, subnet_id, labels)
        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::text[], $10, $11, true, 'pending', $12,
-               $13, $14, $15, $16, $17, decode($18, 'hex'), 1, $19, $20)`,
+               $13, $14, $15, $16, $17, decode($18, 'hex'), 1, $19, $20, $21::jsonb)`,
       [
         instanceId,
         input.tenantId,
@@ -1280,6 +1343,7 @@ export async function prepareCreateInstance(
         hash,
         placement?.networkId ?? null,
         placement?.subnetId ?? null,
+        input.labels ? JSON.stringify(input.labels) : null,
       ],
     );
   await context.authz.upsert(tx, {

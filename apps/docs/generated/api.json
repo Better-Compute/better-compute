@@ -973,7 +973,7 @@
           "additionalProperties": false
         },
         "summary": "Adds a rule to the network and returns it `pending`.",
-        "description": "Adds a rule to the network and returns it `pending`.\n\n- `direction` is `ingress` or `egress`. `action` defaults to `allow`, `priority` to 1000 (0 to 65535, lower wins) and `enabled` to `true`; a disabled rule exists at the provider but matches nothing.\n- `rules` lists 1 to 20 entries `{ protocol, ports? }` with `protocol` one of `tcp`, `udp`, `icmp` and `all`. `ports` (tcp and udp only) are ports (`\"22\"`) or ranges (`\"8000-8100\"`); without them every port is covered.\n- An ingress rule must name its `sources`, IPv4 CIDRs, and takes no `destinations`; the whole internet is `0.0.0.0/0`, written out, never implied. An egress rule takes `destinations` (without them, everywhere) and no `sources`. Violations are `INVALID_INPUT`.\n- `targets.instanceIds` names instances of the tenant that are on this network and not deleted; any other is `INVALID_INPUT`. Empty targets cover the whole network.\n- The name is unique in the network (`CONFLICT`); the name of a deleted rule is free again. A hundred live rules already is `QUOTA_EXCEEDED`. A network being deleted is `INVALID_STATE`.\n\nPublishes `network.rule.ready` once the provider has the rule, or `network.rule.error` with the reason. Decided as `compute:networks:update` on the network."
+        "description": "Adds a rule to the network and returns it `pending`.\n\n- `direction` is `ingress` or `egress`. `action` defaults to `allow`, `priority` to 1000 (0 to 65535, lower wins) and `enabled` to `true`; a disabled rule exists at the provider but matches nothing.\n- `rules` lists 1 to 20 entries `{ protocol, ports? }` with `protocol` one of `tcp`, `udp`, `icmp` and `all`. `ports` (tcp and udp only) are ports (`\"22\"`) or ranges (`\"8000-8100\"`); without them every port is covered.\n- An ingress rule must name its `sources`, IPv4 CIDRs, and takes no `destinations`; the whole internet is `0.0.0.0/0`, written out, never implied. An egress rule takes `destinations` (without them, everywhere) and no `sources`. Violations are `INVALID_INPUT`.\n- `targets.instanceIds` names instances of the tenant that are on this network and not deleted; any other is `INVALID_INPUT`. Empty targets cover the whole network, except on an adopted network (`networks.adopt`), where a rule must name its instances (`INVALID_INPUT` otherwise, on `update` too): it never covers machines of the VPC that are not the tenant's.\n- The name is unique in the network (`CONFLICT`); the name of a deleted rule is free again. A hundred live rules already is `QUOTA_EXCEEDED`. A network being deleted is `INVALID_STATE`.\n\nPublishes `network.rule.ready` once the provider has the rule, or `network.rule.error` with the reason. Decided as `compute:networks:update` on the network."
       },
       {
         "method": "list",
@@ -1841,6 +1841,19 @@
               "maxLength": 57,
               "description": "A ready subnet of that network; omitted: the network’s only subnet in the offer’s region"
             },
+            "labels": {
+              "type": "object",
+              "maxProperties": 62,
+              "propertyNames": {
+                "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^[a-z0-9_-]{0,63}$",
+                "maxLength": 63
+              },
+              "description": "Provider labels for the machine (provider pools): GCE label rules, at most 62; keys starting with better-compute- are reserved"
+            },
             "ownerIdentityId": {
               "type": "string",
               "pattern": "^[A-Za-z0-9._:@-]{1,128}$",
@@ -1871,7 +1884,7 @@
           "additionalProperties": false
         },
         "summary": "Admits a VM from a pool, flavor and image after one IAM decision on the draft; returns the instance in `scheduling`, or in `provisioning` with a `nodeId` when a hosted pool placed it at once.",
-        "description": "Admits a VM from a pool, flavor and image after one IAM decision on the draft; returns the instance in `scheduling`, or in `provisioning` with a `nodeId` when a hosted pool placed it at once.\n\n- **Idempotency.** `idempotencyKey` is required. The instance id derives from the tenant, the caller and the key: a retry of a finished request returns the same instance without a second decision, and a different request under the same key is `CONFLICT` with `details.instanceId`.\n- **IAM.** `compute:instances:create` is decided on `compute-instance/` plus the draft id, whose attributes (`vcpu`, `memoryGiB`, `gpus`, `imageId`, `imageVerified`, `projectId`) policies can test. A refusal deletes the draft; a delegated session can get `CONFIRMATION_REQUIRED`.\n- **Networks.** In a provider pool, `networkId` places the VM on a tenant network (`networks.create`) and `subnetId` in one of its subnets; the instance shows both. The network must be the tenant's and on the pool's provider account, must have been provisioned (it reached `ready` once; a network that went back to `pending` because a subnet or rule was added still takes instances) and must not be being deleted, and the subnet must be on it, in the offer's region and `ready`. A network not provisioned yet, being deleted, or a subnet not ready yet is `INVALID_STATE` with a retry hint. Without `subnetId` the network's only subnet in the offer's region is used; none, or several (the error names them), is `INVALID_INPUT`, as is an unknown network or subnet, one of another tenant or provider account, or a `subnetId` without a `networkId`. The VM is created in the subnet with a per-instance network tag, which the network's firewall rules target. The network and subnet stay until the instance is deleted: `networks.delete` and `networks.removeSubnet` are `INVALID_STATE` while it is on them.\n- **Owner.** The instance is owned by the caller, or by `ownerIdentityId`: the platform (a root caller creating in another tenant) issues an instance to a person of that tenant this way, as `attach` does, so it shows in their `scope: 'mine'` list and owner-conditioned policies (`resource.ownerId`) apply to them. Anyone else naming an identity other than their own, and a root caller in its own tenant, is `ACCESS_DENIED` before any decision; a malformed one is `INVALID_INPUT`. When the IAM port can say (`IamPort.isMember`, the embedded better-iam bridge), the owner must also be an active identity of the tenant, else `INVALID_INPUT` and the draft is dropped; other ports check the id's shape only.\n- **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, an archived pool, a missing or archived flavor, or an image a hosted pool cannot resolve. `INVALID_INPUT` for a pool that is not `vps-host` or `provider`. `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota; `CAPACITY_UNAVAILABLE` when a hosted pool has no free IP address. `INVALID_STATE` for a provider pool without an account, `INVALID_CONFIG` for a hosted pool when `vps()` has no `images`.\n- **Events.** `instance.created`, and `instance.scheduled` with the `nodeId` when a hosted instance is placed. When no host fits, the instance stays in `scheduling` with an `Unschedulable` condition and is retried every 30 seconds. In a provider pool, a create the provider refuses for capacity or quota (at once, or after accepting it, as GCE reports a stockout) moves the instance to `error` with a `ProvisionFailed` condition (reason `CAPACITY_UNAVAILABLE` or `QUOTA_EXCEEDED`) and publishes `instance.failed`; it is not retried, and deleting it refunds the quota."
+        "description": "Admits a VM from a pool, flavor and image after one IAM decision on the draft; returns the instance in `scheduling`, or in `provisioning` with a `nodeId` when a hosted pool placed it at once.\n\n- **Idempotency.** `idempotencyKey` is required. The instance id derives from the tenant, the caller and the key: a retry of a finished request returns the same instance without a second decision, and a different request under the same key is `CONFLICT` with `details.instanceId`.\n- **IAM.** `compute:instances:create` is decided on `compute-instance/` plus the draft id, whose attributes (`vcpu`, `memoryGiB`, `gpus`, `imageId`, `imageVerified`, `projectId`) policies can test. A refusal deletes the draft; a delegated session can get `CONFIRMATION_REQUIRED`.\n- **Networks.** In a provider pool, `networkId` places the VM on a tenant network (`networks.create`) and `subnetId` in one of its subnets; the instance shows both. The network must be the tenant's and on the pool's provider account, must have been provisioned (it reached `ready` once; a network that went back to `pending` because a subnet or rule was added still takes instances) and must not be being deleted, and the subnet must be on it, in the offer's region and `ready`. A network not provisioned yet, being deleted, or a subnet not ready yet is `INVALID_STATE` with a retry hint. Without `subnetId` the network's only subnet in the offer's region is used; none, or several (the error names them), is `INVALID_INPUT`, as is an unknown network or subnet, one of another tenant or provider account, or a `subnetId` without a `networkId`. The VM is created in the subnet with a per-instance network tag, which the network's firewall rules target. The network and subnet stay until the instance is deleted: `networks.delete` and `networks.removeSubnet` are `INVALID_STATE` while it is on them.\n- **Labels.** In a provider pool, `labels` (at most 62, so the VM stays within Compute Engine's 64 with better-compute's own two) are passed to the provider's create and shown on the instance. Keys are a lower-case letter followed by lower-case letters, digits, `_` or `-`, at most 63 characters; values take the same characters, at most 63, and may be empty. Keys starting with `better-compute-` are reserved, and the provider's own ownership labels win over the tenant's. Anything else, or labels on a hosted pool, is `INVALID_INPUT`. Labels are part of the request: the same key with other labels is `CONFLICT`.\n- **Owner.** The instance is owned by the caller, or by `ownerIdentityId`: the platform (a root caller creating in another tenant) issues an instance to a person of that tenant this way, as `attach` does, so it shows in their `scope: 'mine'` list and owner-conditioned policies (`resource.ownerId`) apply to them. Anyone else naming an identity other than their own, and a root caller in its own tenant, is `ACCESS_DENIED` before any decision; a malformed one is `INVALID_INPUT`. When the IAM port can say (`IamPort.isMember`, the embedded better-iam bridge), the owner must also be an active identity of the tenant, else `INVALID_INPUT` and the draft is dropped; other ports check the id's shape only.\n- **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, an archived pool, a missing or archived flavor, or an image a hosted pool cannot resolve. `INVALID_INPUT` for a pool that is not `vps-host` or `provider`. `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota; `CAPACITY_UNAVAILABLE` when a hosted pool has no free IP address. `INVALID_STATE` for a provider pool without an account, `INVALID_CONFIG` for a hosted pool when `vps()` has no `images`.\n- **Events.** `instance.created`, and `instance.scheduled` with the `nodeId` when a hosted instance is placed. When no host fits, the instance stays in `scheduling` with an `Unschedulable` condition and is retried every 30 seconds. In a provider pool, a create the provider refuses for capacity or quota (at once, or after accepting it, as GCE reports a stockout) moves the instance to `error` with a `ProvisionFailed` condition (reason `CAPACITY_UNAVAILABLE` or `QUOTA_EXCEEDED`) and publishes `instance.failed`; it is not retried, and deleting it refunds the quota."
       },
       {
         "method": "list",
@@ -2181,7 +2194,7 @@
           "additionalProperties": false
         },
         "summary": "Makes a provider machine that already runs an instance of a tenant, without recreating it; returns the instance in `scheduling` with `origin: 'attached'`. The `vps.instances` reconciler then writes the provider's ownership label (`claim`) and follows the machine like any provider instance.",
-        "description": "Makes a provider machine that already runs an instance of a tenant, without recreating it; returns the instance in `scheduling` with `origin: 'attached'`. The `vps.instances` reconciler then writes the provider's ownership label (`claim`) and follows the machine like any provider instance.\n\n- **Input.** `poolId` is a `provider` pool owned by or offered to `tenantId` and backed by the machine's provider account. `externalId` is the machine as `providerAccounts.machines` lists it, which discovery must have seen and which must be free. `ownerIdentityId` defaults to the caller, so an operator can hand the instance to a person of the tenant (it then shows in their `scope: 'mine'` list). As for `create`, only a root caller attaching into another tenant names someone else (`ACCESS_DENIED` otherwise, before any decision), and the owner must be an active identity of the tenant when the IAM port can say (`INVALID_INPUT`). `onDelete` is `detach` (the default: deleting releases the machine, which keeps running) or `delete` (deleting deletes the machine).\n- **Networks.** An attached machine keeps the network it is on. If its NIC is on one of the tenant's networks of the same provider account that is not deleted, whatever state it is in (`pending` included), the instance is linked to it (`networkId`, and `subnetId` when the NIC names one of its subnets), so its firewall rules apply and the network cannot be deleted from under it. `networkId` asserts that: the machine must already be on that network, otherwise `INVALID_STATE` with `details.hint: 'attached VMs keep their existing network'` (GCE cannot move a NIC to another VPC without a stop). A network that does not exist, is not the tenant's or is on another account is `INVALID_INPUT`; one being deleted is `INVALID_STATE` (`details.networkId`), also when the machine's NIC is on it and no `networkId` was given: attach neither links nor ignores a network being torn down.\n- **Shape.** The flavor is the machine's own: its machine type, vCPU, memory and GPU count, with no disk. It is charged to the tenant's quota on the pool, as a create on a provider pool is.\n- **Idempotency.** `idempotencyKey` is required. The instance id derives from the tenant, the caller and the key: a retry returns the same instance, and a different request under the same key is `CONFLICT` with `details.instanceId`.\n- **IAM.** `compute:instances:attach` is decided on `compute-instance/` plus the instance id, whose attributes (`vcpu`, `memoryGiB`, `gpus`) policies can test. Only the platform (root callers) attaches machines of an account its own tenant does not own; a tenant attaches only from its own accounts (`ACCESS_DENIED` otherwise).\n- **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, or a machine discovery has not seen or marked gone (run `providerAccounts.discover`). `CONFLICT` with `details.instanceId` when another instance holds the machine, with `details.claimedBy` when discovery saw its ownership label name another instance, and when the pool is backed by a different provider account than the machine's. `INVALID_INPUT` for a pool that is not a provider pool, `QUOTA_EXCEEDED` when the machine does not fit the quota; nothing is written then.\n- **Events.** `instance.attached` with `instanceId`, `accountId`, `externalId`, `poolId` and `onDelete`.\n- **Ownership.** Once claimed, every read of the machine must show this instance's label. A machine whose label is gone or names another instance is never adopted, recovered or acted on again: the instance gets an `OwnershipLost` condition (an `AttachConflict` one when the first claim was refused), `start`, `stop` and `reboot` are `INVALID_STATE`, and deleting it finishes as a detach without any provider call."
+        "description": "Makes a provider machine that already runs an instance of a tenant, without recreating it; returns the instance in `scheduling` with `origin: 'attached'`. The `vps.instances` reconciler then writes the provider's ownership label (`claim`) and follows the machine like any provider instance.\n\n- **Input.** `poolId` is a `provider` pool owned by or offered to `tenantId` and backed by the machine's provider account. `externalId` is the machine as `providerAccounts.machines` lists it, which discovery must have seen and which must be free. `ownerIdentityId` defaults to the caller, so an operator can hand the instance to a person of the tenant (it then shows in their `scope: 'mine'` list). As for `create`, only a root caller attaching into another tenant names someone else (`ACCESS_DENIED` otherwise, before any decision), and the owner must be an active identity of the tenant when the IAM port can say (`INVALID_INPUT`). `onDelete` is `detach` (the default: deleting releases the machine, which keeps running) or `delete` (deleting deletes the machine).\n- **Networks.** An attached machine keeps the network it is on. If its NIC is on one of the tenant's networks of the same provider account that is not deleted, whatever state it is in (`pending` included), the instance is linked to it (`networkId`, and `subnetId` when the NIC names one of its subnets), so its firewall rules apply and the network cannot be deleted from under it. `networkId` asserts that: the machine must already be on that network, otherwise `INVALID_STATE` with `details.hint: 'attached VMs keep their existing network'` (GCE cannot move a NIC to another VPC without a stop). A network that does not exist, is not the tenant's or is on another account is `INVALID_INPUT`; one being deleted is `INVALID_STATE` (`details.networkId`), also when the machine's NIC is on it and no `networkId` was given: attach neither links nor ignores a network being torn down.\n- **Shape.** The flavor is the machine's own: its machine type, vCPU, memory and GPU count, with no disk. It is charged to the tenant's quota on the pool, as a create on a provider pool is.\n- **Idempotency.** `idempotencyKey` is required. The instance id derives from the tenant, the caller and the key: a retry returns the same instance, and a different request under the same key is `CONFLICT` with `details.instanceId`.\n- **IAM.** `compute:instances:attach` is decided on `compute-instance/` plus the instance id, whose attributes (`vcpu`, `memoryGiB`, `gpus`) policies can test. Only the platform (root callers) attaches machines of an account its own tenant does not own; a tenant attaches from its own accounts, and a tenant the pool is offered to attaches, into itself, a machine bound to the pool (`pools.bindMachines`). Anything else is `ACCESS_DENIED`, whether or not the machine exists.\n- **Pools.** A machine bound to a pool is attached into that pool only: another pool is `CONFLICT` with `details.poolId`. Detaching or deleting the instance leaves the binding, so the machine returns to its pool. For Compute Engine accounts (`gcp`), a machine whose region (or its zone's) is not the region of the pool's site is `INVALID_INPUT` with `details.machineRegion` and `details.poolRegion`; other providers, and machines without a region or zone, are not compared.\n- **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, or a machine discovery has not seen or marked gone (run `providerAccounts.discover`). `CONFLICT` with `details.instanceId` when another instance holds the machine, with `details.claimedBy` when discovery saw its ownership label name another instance, and when the pool is backed by a different provider account than the machine's. `INVALID_INPUT` for a pool that is not a provider pool, `QUOTA_EXCEEDED` when the machine does not fit the quota; nothing is written then.\n- **Events.** `instance.attached` with `instanceId`, `accountId`, `externalId`, `poolId` and `onDelete`.\n- **Ownership.** Once claimed, every read of the machine must show this instance's label. A machine whose label is gone or names another instance is never adopted, recovered or acted on again: the instance gets an `OwnershipLost` condition (an `AttachConflict` one when the first claim was refused), `start`, `stop` and `reboot` are `INVALID_STATE`, and deleting it finishes as a detach without any provider call."
       },
       {
         "method": "detach",
@@ -3666,6 +3679,61 @@
         },
         "summary": "Marks a subnet for deletion and returns the network with the subnet `deleting`. `INVALID_STATE` while instances that are not deleted use the subnet, with their ids in `details.instanceIds`. Its range is free for a new subnet at once. Decided as `compute:networks:update` on the network.",
         "description": "Marks a subnet for deletion and returns the network with the subnet `deleting`. `INVALID_STATE` while instances that are not deleted use the subnet, with their ids in `details.instanceIds`. Its range is free for a new subnet at once. Decided as `compute:networks:update` on the network."
+      },
+      {
+        "method": "adopt",
+        "route": "POST /api/compute/networks/adopt",
+        "kind": "mutation",
+        "action": "compute:providers:manage",
+        "resource": "compute-fleet",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "poolId": {
+              "type": "string",
+              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "A provider pool owned by or offered to the tenant, whose account holds the VPC"
+            },
+            "externalNetwork": {
+              "type": "string",
+              "pattern": "^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$",
+              "maxLength": 63,
+              "description": "The existing VPC’s provider-side name (not a bc- network); default needs sharedTagScoped"
+            },
+            "name": {
+              "type": "string",
+              "pattern": "^[a-z]([-a-z0-9]{0,40}[a-z0-9])?$",
+              "maxLength": 42,
+              "description": "The tenant network name, unique in the tenant"
+            },
+            "sharedTagScoped": {
+              "type": "boolean",
+              "default": false,
+              "description": "The VPC is shared with machines that are not the tenant’s: required to adopt default, recorded on the network"
+            },
+            "description": {
+              "type": "string",
+              "maxLength": 256,
+              "description": "What the network is for"
+            }
+          },
+          "required": ["tenantId", "poolId", "externalNetwork", "name"],
+          "additionalProperties": false
+        },
+        "summary": "Registers a VPC that already exists in the pool's provider account as a network of the tenant, so attached VMs whose NIC is on it are linked to it and get its firewall rules; returns the network `pending`, with `externalNetwork` set. Only the platform (root callers) adopts.",
+        "description": "Registers a VPC that already exists in the pool's provider account as a network of the tenant, so attached VMs whose NIC is on it are linked to it and get its firewall rules; returns the network `pending`, with `externalNetwork` set. Only the platform (root callers) adopts.\n\n- **Input.** `externalNetwork` is the VPC's provider-side name, 1 to 63 characters `[a-z]([-a-z0-9]*[a-z0-9])?`; a `bc-` name (a network better-compute made) is `INVALID_INPUT`. `default` is shared with every VM of the project: adopting it needs `sharedTagScoped: true` (`INVALID_INPUT` with `details.field: 'sharedTagScoped'` otherwise), which the network records and shows. `name` and `description` are as for `create`, and the 10-network cap applies.\n- **The VPC.** better-compute never creates, changes or deletes an adopted VPC: the reconciler skips it, provisions only the subnets and rules added to the network, and `delete` removes those and leaves the VPC. Its provider-side name is `externalNetwork`, not `bc-` and the id, also for instances created on it.\n- **Firewall rules.** A rule on an adopted network must name `targets.instanceIds` (`INVALID_INPUT` on `firewallRules.create` and `update` otherwise), so it always targets instance network tags and never the whole VPC. A rule without targets that reaches the reconciler anyway goes to `error` instead of being applied.\n- **Attach.** `instances.attach` links a machine whose NIC is on the VPC (by its name, or a reference ending in it) to the network, as it does for networks better-compute made.\n- **Idempotency.** The same adoption again (same pool, VPC, name, flag and description) returns the network. A VPC already adopted in the tenant under another request is `CONFLICT` with `details.networkId`; one adopted by another tenant is `CONFLICT` unless both adoptions are `sharedTagScoped`.\n- **IAM.** Decided as `compute:providers:manage` on the fleet (`compute-fleet`, in the root tenant); anyone but the platform is `ACCESS_DENIED`. The adopting identity owns the network.\n- **Events.** `network.adopted` with `poolId`, `providerAccountId`, `name`, `externalNetwork` and `sharedTagScoped`."
       }
     ]
   },
@@ -4662,6 +4730,145 @@
         },
         "summary": "Retires a pool the tenant owns: it removes every offer and stops new work, while live reservations keep their bookings until they end.",
         "description": "Retires a pool the tenant owns: it removes every offer and stops new work, while live reservations keep their bookings until they end.\n\nEach offered tenant's quota rows drop to what is in use and its authz row for the pool is removed. After archiving, only the owner sees the pool, with `archived: true`. Archiving an archived pool returns it unchanged. Emits `pool.archived` with the list of tenants whose offers were removed."
+      },
+      {
+        "method": "bindMachines",
+        "route": "POST /api/compute/pools/bindMachines",
+        "kind": "mutation",
+        "action": "compute:pools:manage",
+        "resource": "compute-pool",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "poolId": {
+              "type": "string",
+              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "A provider pool"
+            },
+            "externalIds": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 100,
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$",
+                "maxLength": 256,
+                "description": "A provider machine id, as providerAccounts.machines lists it (us-central1-a/legacy)"
+              },
+              "description": "The machines, at most 100"
+            }
+          },
+          "required": ["tenantId", "poolId", "externalIds"],
+          "additionalProperties": false
+        },
+        "summary": "Binds machines that the `vps.discovery` worker saw in a `provider` pool's account to the pool; returns `bound`, the machines bound to the pool now, and `skipped`, each with `externalId` and `reason`. Tenants the pool is offered to can then list them (`machines`) and attach them (`instances.attach`).",
+        "description": "Binds machines that the `vps.discovery` worker saw in a `provider` pool's account to the pool; returns `bound`, the machines bound to the pool now, and `skipped`, each with `externalId` and `reason`. Tenants the pool is offered to can then list them (`machines`) and attach them (`instances.attach`).\n\n- **Input.** `externalIds` lists 1 to 100 machine ids as `providerAccounts.machines` shows them; duplicates count once.\n- **Skips.** `not-found`: discovery has not seen the machine in the pool's account (run `providerAccounts.discover`). `bound-elsewhere`: it is bound to another pool; unbind it there first. `gone`: discovery marked it gone. `deleting`: the provider is deleting it. `held`: an instance of another pool holds it (one of this pool may). `other-region`: for Compute Engine accounts (`gcp`), the machine's region (or its zone's) is not the region of the pool's site; other providers' sites name regions freely and are not compared.\n- **Idempotency.** The machine rows are locked while the call runs. A machine already bound to the pool is listed in `bound` again and changes nothing. Discovery passes, detaching and deleting never clear a binding, so a machine whose instance goes returns to its pool. A binding to a pool archived since counts as none: the machine can be bound and attached elsewhere.\n- **IAM.** Decided as `compute:pools:manage` on the pool. Only the platform (root callers) and the tenant that owns the pool's provider account bind; a tenant the pool is offered to is `ACCESS_DENIED`.\n- **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, `INVALID_INPUT` for one that is not a `provider` pool, `INVALID_STATE` for a provider pool without an account.\n- **Events.** `pool.machines.bound` with `poolId`, `accountId` and the `externalIds` this call bound (none is published when it bound nothing new)."
+      },
+      {
+        "method": "unbindMachines",
+        "route": "POST /api/compute/pools/unbindMachines",
+        "kind": "mutation",
+        "action": "compute:pools:manage",
+        "resource": "compute-pool",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "poolId": {
+              "type": "string",
+              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "A provider pool"
+            },
+            "externalIds": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 100,
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$",
+                "maxLength": 256,
+                "description": "A provider machine id, as providerAccounts.machines lists it (us-central1-a/legacy)"
+              },
+              "description": "The machines, at most 100"
+            }
+          },
+          "required": ["tenantId", "poolId", "externalIds"],
+          "additionalProperties": false
+        },
+        "summary": "Takes machines out of the pool; returns `unbound` and `skipped`, with the input of `bindMachines`. An instance that holds an unbound machine keeps it.",
+        "description": "Takes machines out of the pool; returns `unbound` and `skipped`, with the input of `bindMachines`. An instance that holds an unbound machine keeps it.\n\n- A machine discovery has not seen is skipped as `not-found`, one bound to another pool as `bound-elsewhere`. A machine that is not bound is listed as unbound and changes nothing.\n- Decided as `compute:pools:manage` on the pool; only the platform and the account's tenant unbind (`ACCESS_DENIED` otherwise). Publishes `pool.machines.unbound` with the `externalIds` this call unbound."
+      },
+      {
+        "method": "machines",
+        "route": "POST /api/compute/pools/machines",
+        "kind": "read",
+        "action": "compute:pools:read",
+        "resource": "compute-pool",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "poolId": {
+              "type": "string",
+              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "A provider pool"
+            },
+            "filter": {
+              "enum": ["free", "attached", "all"],
+              "default": "free",
+              "description": "free: no instance holds it; attached: attached to or created as an instance; all"
+            },
+            "cursor": {
+              "type": "string",
+              "maxLength": 1024,
+              "description": "From the previous page"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          "required": ["tenantId", "poolId"],
+          "additionalProperties": false
+        },
+        "summary": "Lists the machines bound to the pool that the provider still reports, ordered by zone and machine id; returns `items`, a `cursor` when more remain, and `discoveredAt`, the time of the account's last successful discovery pass.",
+        "description": "Lists the machines bound to the pool that the provider still reports, ordered by zone and machine id; returns `items`, a `cursor` when more remain, and `discoveredAt`, the time of the account's last successful discovery pass.\n\n- **Input.** `filter` is `free` (the default: no instance holds the machine), `attached` (one does) or `all`. `limit` is 1 to 500 (default 100).\n- **Output.** Each machine is shown as `providerAccounts.machines` shows it, with `poolId`. A machine held by an instance of another tenant is listed without that instance's `instanceId` and `tenantId`, except to the platform. Tenants the pool is offered to are not shown `accountId`, as `get` does not show them `providerAccountId`.\n- **IAM.** Decided as `compute:pools:read` on the pool: its owner and the tenants it is offered to read it. Any other tenant gets `NOT_FOUND`."
       }
     ]
   },
@@ -5508,7 +5715,7 @@
           "additionalProperties": false
         },
         "summary": "Lists the machines the `vps.discovery` worker last saw in the account, ordered by zone and machine id; returns `items`, a `cursor` when more remain, and `discoveredAt`, the time of the account's last successful pass.",
-        "description": "Lists the machines the `vps.discovery` worker last saw in the account, ordered by zone and machine id; returns `items`, a `cursor` when more remain, and `discoveredAt`, the time of the account's last successful pass.\n\n- **Input.** `filter` is `free` (the default: machines no instance holds), `attached` (machines attached to, or created as, an instance) or `all`. `includeGone` also lists machines the provider stopped reporting, with `goneAt`. `limit` is 1 to 500 (default 100).\n- **Output.** Each machine has its state, zone, region, machine type, vCPU, memory, GPUs, labels, networks, addresses and any reservation it consumes. An attached or created machine has `instanceId` and the instance's `tenantId`, unless that instance is another tenant's (the account's pool is offered to it): then both are left out, except for the platform (root callers).\n- **Errors.** An account of another tenant, or none, is `NOT_FOUND`. The worker lists accounts every 5 minutes by default (`vps({ discovery: { every } })`) and never changes a machine."
+        "description": "Lists the machines the `vps.discovery` worker last saw in the account, ordered by zone and machine id; returns `items`, a `cursor` when more remain, and `discoveredAt`, the time of the account's last successful pass.\n\n- **Input.** `filter` is `free` (the default: machines no instance holds), `attached` (machines attached to, or created as, an instance) or `all`. `includeGone` also lists machines the provider stopped reporting, with `goneAt`. `limit` is 1 to 500 (default 100).\n- **Output.** Each machine has its state, zone, region, machine type, vCPU, memory, GPUs, labels, networks, addresses and any reservation it consumes. An attached or created machine has `instanceId` and the instance's `tenantId`, unless that instance is another tenant's (the account's pool is offered to it): then both are left out, except for the platform (root callers). A machine bound to a pool (`pools.bindMachines`) has `poolId`.\n- **Errors.** An account of another tenant, or none, is `NOT_FOUND`. The worker lists accounts every 5 minutes by default (`vps({ discovery: { every } })`) and never changes a machine."
       },
       {
         "method": "discover",

@@ -43,6 +43,13 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     description: 'Pools created, updated, offered, unoffered and archived',
   },
   {
+    type: 'pool.machines.*',
+    subject: 'pool/{id}',
+    module: 'vps',
+    description:
+      'Discovered provider machines bound to or unbound from a provider pool (pools.bindMachines, pools.unbindMachines): bound and unbound { poolId, accountId, externalIds }',
+  },
+  {
     type: 'quota.updated',
     subject: 'pool/{id}',
     module: 'capacity',
@@ -208,7 +215,7 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     subject: 'network/{id}',
     module: 'vps',
     description:
-      'Tenant networks (VPCs): created, ready, error, deleting, deleted; network.subnet.ready and network.rule.ready/error when a subnet or firewall rule converges; data { networkId, ... }',
+      'Tenant networks (VPCs): created, adopted (an existing provider VPC, networks.adopt: { externalNetwork, sharedTagScoped }), ready, error, deleting, deleted; network.subnet.ready and network.rule.ready/error when a subnet or firewall rule converges; data { networkId, ... }',
   },
   {
     type: 'fleet.*',

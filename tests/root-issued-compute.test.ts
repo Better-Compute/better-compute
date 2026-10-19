@@ -1261,6 +1261,18 @@ describe('isolation between tenants, and between tenants and the root tenant', (
               idempotencyKey: 'root-ops',
             }),
         },
+        // The platform registers an existing VPC as a network of A: decided on the fleet, in R.
+        {
+          path: 'networks.adopt',
+          tenant: R,
+          call: () =>
+            api.networks.adopt(root, {
+              tenantId: A,
+              poolId: w.poolId,
+              externalNetwork: 'legacy-vpc',
+              name: 'legacy',
+            }),
+        },
         {
           path: 'networks.delete',
           tenant: A,

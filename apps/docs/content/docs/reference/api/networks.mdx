@@ -13,7 +13,7 @@ The provider-side name of a network, a subnet and a rule is `bc-` and the resour
 
 Every tenant's networks on an account live in that account's one provider project, so they share its quotas (VPC networks, subnetworks and firewall rules per project): one tenant's networks use up what the others on the account can get. To bound that, a tenant has at most 10 networks that are not deleted, and a network at most 16 subnets and 100 firewall rules (`QUOTA_EXCEEDED`, with the cap in `details.limit`). The project's own quotas still apply on top, and a refusal of the provider shows as `error` with its message.
 
-All 7 methods are served by this release.
+All 8 methods are served by this release.
 
 | Method                          | Kind     | Authorization                                      | Phase | Status     |
 | ------------------------------- | -------- | -------------------------------------------------- | ----- | ---------- |
@@ -24,6 +24,7 @@ All 7 methods are served by this release.
 | [`delete`](#delete)             | mutation | `compute:networks:delete` @ `compute-network`      | v1.0  | registered |
 | [`addSubnet`](#addsubnet)       | mutation | `compute:networks:update` @ `compute-network`      | v1.0  | registered |
 | [`removeSubnet`](#removesubnet) | mutation | `compute:networks:update` @ `compute-network`      | v1.0  | registered |
+| [`adopt`](#adopt)               | mutation | `compute:providers:manage` @ `compute-fleet`       | v1.0  | registered |
 
 ## create
 
@@ -182,3 +183,33 @@ Marks a subnet for deletion and returns the network with the subnet `deleting`. 
 | `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
 | `networkId` | string | yes      | at most 56 characters; matches `^net_[0-9a-hjkmnp-tv-z]{26,52}$`  |
 | `subnetId`  | string | yes      | at most 57 characters; matches `^snet_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
+## adopt
+
+`POST /api/compute/networks/adopt`
+
+Registers a VPC that already exists in the pool's provider account as a network of the tenant, so attached VMs whose NIC is on it are linked to it and get its firewall rules; returns the network `pending`, with `externalNetwork` set. Only the platform (root callers) adopts.
+
+- **Input.** `externalNetwork` is the VPC's provider-side name, 1 to 63 characters `[a-z]([-a-z0-9]*[a-z0-9])?`; a `bc-` name (a network better-compute made) is `INVALID_INPUT`. `default` is shared with every VM of the project: adopting it needs `sharedTagScoped: true` (`INVALID_INPUT` with `details.field: 'sharedTagScoped'` otherwise), which the network records and shows. `name` and `description` are as for `create`, and the 10-network cap applies.
+- **The VPC.** better-compute never creates, changes or deletes an adopted VPC: the reconciler skips it, provisions only the subnets and rules added to the network, and `delete` removes those and leaves the VPC. Its provider-side name is `externalNetwork`, not `bc-` and the id, also for instances created on it.
+- **Firewall rules.** A rule on an adopted network must name `targets.instanceIds` (`INVALID_INPUT` on `firewallRules.create` and `update` otherwise), so it always targets instance network tags and never the whole VPC. A rule without targets that reaches the reconciler anyway goes to `error` instead of being applied.
+- **Attach.** `instances.attach` links a machine whose NIC is on the VPC (by its name, or a reference ending in it) to the network, as it does for networks better-compute made.
+- **Idempotency.** The same adoption again (same pool, VPC, name, flag and description) returns the network. A VPC already adopted in the tenant under another request is `CONFLICT` with `details.networkId`; one adopted by another tenant is `CONFLICT` unless both adoptions are `sharedTagScoped`.
+- **IAM.** Decided as `compute:providers:manage` on the fleet (`compute-fleet`, in the root tenant); anyone but the platform is `ACCESS_DENIED`. The adopting identity owns the network.
+- **Events.** `network.adopted` with `poolId`, `providerAccountId`, `name`, `externalNetwork` and `sharedTagScoped`.
+
+- **Kind:** mutation
+- **Authorization:** `compute:providers:manage` @ `compute-fleet`
+- **Module:** `vps`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field             | Type    | Required | Constraints                                                        |
+| ----------------- | ------- | -------- | ------------------------------------------------------------------ |
+| `tenantId`        | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `poolId`          | string  | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$`  |
+| `externalNetwork` | string  | yes      | at most 63 characters; matches `^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$` |
+| `name`            | string  | yes      | at most 42 characters; matches `^[a-z]([-a-z0-9]{0,40}[a-z0-9])?$` |
+| `sharedTagScoped` | boolean |          | default `false`                                                    |
+| `description`     | string  |          | at most 256 characters                                             |

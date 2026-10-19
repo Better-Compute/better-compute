@@ -39,6 +39,7 @@ describe('network kind and rows', () => {
         'networks.delete',
         'networks.addSubnet',
         'networks.removeSubnet',
+        'networks.adopt',
         'firewallRules.create',
         'firewallRules.list',
         'firewallRules.update',

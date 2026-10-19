@@ -119,17 +119,28 @@ import {
   type AttachInstanceInput,
 } from './attach.js';
 import {
+  bindMachines,
   discoverPoll,
   discoveryReconciler,
   discoverySchemas,
   listMachines,
+  listPoolMachines,
+  parseBindMachines,
   parseDiscover,
   parseListMachines,
+  parsePoolMachines,
+  poolMachineSchemas,
   requestDiscovery,
+  unbindMachines,
+  type BindMachinesInput,
+  type BindMachinesOutput,
   type DiscoverInput,
   type DiscoveryOptions,
   type ListMachinesInput,
+  type ListPoolMachinesInput,
+  type PoolMachineView,
   type ProviderMachineView,
+  type UnbindMachinesOutput,
 } from './discovery.js';
 import { vpsMigrations } from './migrations.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
@@ -214,6 +225,7 @@ import {
 import { volumeStorageSelfCheck, volumeStorageStatusHandler } from './volume-storage.js';
 import {
   addSubnet,
+  adoptNetwork,
   clearStagedNetwork,
   createNetwork,
   createRule,
@@ -225,6 +237,7 @@ import {
   networkSchemas,
   networksReconciler,
   parseAddSubnet,
+  parseAdoptNetwork,
   parseCreateNetwork,
   parseCreateRule,
   parseListNetworks,
@@ -238,6 +251,7 @@ import {
   updateNetwork,
   updateRule,
   type AddSubnetInput,
+  type AdoptNetworkInput,
   type CreateNetworkInput,
   type CreateRuleInput,
   type FirewallRuleView,
@@ -377,6 +391,15 @@ export type VpsApi = {
     >;
     discover: MethodDefinition<DiscoverInput, { queued: true; discoveredAt?: number }>;
   };
+  /** Discovered provider machines bound to provider pools (discovery.ts); the rest of the group is capacity's. */
+  pools: {
+    bindMachines: MethodDefinition<BindMachinesInput, BindMachinesOutput>;
+    unbindMachines: MethodDefinition<BindMachinesInput, UnbindMachinesOutput>;
+    machines: MethodDefinition<
+      ListPoolMachinesInput,
+      { items: PoolMachineView[]; cursor?: string; discoveredAt?: number }
+    >;
+  };
   sandboxes: {
     create: MethodDefinition<CreateSandboxInput, Sandbox>;
     list: MethodDefinition<ListSandboxesInput, { items: Sandbox[]; cursor?: string }>;
@@ -414,6 +437,7 @@ export type VpsApi = {
     delete: MethodDefinition<NetworkRef, NetworkView>;
     addSubnet: MethodDefinition<AddSubnetInput, NetworkView>;
     removeSubnet: MethodDefinition<RemoveSubnetInput, NetworkView>;
+    adopt: MethodDefinition<AdoptNetworkInput, NetworkView>;
   };
   firewallRules: {
     create: MethodDefinition<CreateRuleInput, FirewallRuleView>;
@@ -1249,6 +1273,38 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         poll: discoverPoll,
       }),
     },
+    // Pool membership: the platform or the account's tenant binds discovered machines to a provider
+    // pool; tenants the pool is offered to list them (pools.machines) and attach them.
+    pools: {
+      bindMachines: defineMethod({
+        action: 'compute:pools:manage',
+        kind: 'mutation',
+        resource: poolResource,
+        validate: describedBy(poolMachineSchemas.bindMachines, parseBindMachines),
+        handler: (context, input) =>
+          bindMachines(depsOf(context), context.sql, input, context.caller),
+      }),
+      unbindMachines: defineMethod({
+        action: 'compute:pools:manage',
+        kind: 'mutation',
+        resource: poolResource,
+        validate: describedBy(poolMachineSchemas.bindMachines, parseBindMachines),
+        handler: (context, input) =>
+          unbindMachines(depsOf(context), context.sql, input, context.caller),
+      }),
+      machines: defineMethod({
+        action: 'compute:pools:read',
+        kind: 'read',
+        resource: poolResource,
+        validate: describedBy(poolMachineSchemas.machines, parsePoolMachines),
+        handler: (context, input) =>
+          listPoolMachines(context.sql, input, {
+            platform:
+              context.iam.rootTenantId !== undefined &&
+              context.caller?.tenantId === context.iam.rootTenantId,
+          }),
+      }),
+    },
     // §3.7 (D24): a sandbox drives one hosted instance; templates are per tenant.
     sandboxes: {
       create: defineMethod<CreateSandboxInput, Sandbox>({
@@ -1510,6 +1566,14 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         resource: networkResource,
         validate: describedBy(networkSchemas.removeSubnet, parseRemoveSubnet),
         handler: (context, input) => removeSubnet(networkDeps(context), context.sql, input),
+      }),
+      // Root only: an existing provider VPC as a tenant network, for attached VMs already on it.
+      adopt: defineMethod({
+        action: 'compute:providers:manage',
+        kind: 'mutation',
+        resource: () => ({ type: 'fleet', id: fleetResourceId }),
+        validate: describedBy(networkSchemas.adoptNetwork, parseAdoptNetwork),
+        handler: (context, input) => adoptNetwork(networkDeps(context), context, input),
       }),
     },
     firewallRules: {

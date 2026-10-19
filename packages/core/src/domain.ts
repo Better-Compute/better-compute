@@ -506,6 +506,8 @@ export interface Instance {
   networkId?: string;
   /** The subnet of that network it is in. */
   subnetId?: string;
+  /** Provider labels the tenant asked for at create (provider pools; better-compute's own are not shown). */
+  labels?: Record<string, string>;
   addresses: string[];
   ownerIdentityId: string;
   idempotencyKey: string;

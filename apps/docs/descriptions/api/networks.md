@@ -54,3 +54,15 @@ Publishes `network.subnet.ready` once the provider has the subnet. Decided as `c
 ## removeSubnet
 
 Marks a subnet for deletion and returns the network with the subnet `deleting`. `INVALID_STATE` while instances that are not deleted use the subnet, with their ids in `details.instanceIds`. Its range is free for a new subnet at once. Decided as `compute:networks:update` on the network.
+
+## adopt
+
+Registers a VPC that already exists in the pool's provider account as a network of the tenant, so attached VMs whose NIC is on it are linked to it and get its firewall rules; returns the network `pending`, with `externalNetwork` set. Only the platform (root callers) adopts.
+
+- **Input.** `externalNetwork` is the VPC's provider-side name, 1 to 63 characters `[a-z]([-a-z0-9]*[a-z0-9])?`; a `bc-` name (a network better-compute made) is `INVALID_INPUT`. `default` is shared with every VM of the project: adopting it needs `sharedTagScoped: true` (`INVALID_INPUT` with `details.field: 'sharedTagScoped'` otherwise), which the network records and shows. `name` and `description` are as for `create`, and the 10-network cap applies.
+- **The VPC.** better-compute never creates, changes or deletes an adopted VPC: the reconciler skips it, provisions only the subnets and rules added to the network, and `delete` removes those and leaves the VPC. Its provider-side name is `externalNetwork`, not `bc-` and the id, also for instances created on it.
+- **Firewall rules.** A rule on an adopted network must name `targets.instanceIds` (`INVALID_INPUT` on `firewallRules.create` and `update` otherwise), so it always targets instance network tags and never the whole VPC. A rule without targets that reaches the reconciler anyway goes to `error` instead of being applied.
+- **Attach.** `instances.attach` links a machine whose NIC is on the VPC (by its name, or a reference ending in it) to the network, as it does for networks better-compute made.
+- **Idempotency.** The same adoption again (same pool, VPC, name, flag and description) returns the network. A VPC already adopted in the tenant under another request is `CONFLICT` with `details.networkId`; one adopted by another tenant is `CONFLICT` unless both adoptions are `sharedTagScoped`.
+- **IAM.** Decided as `compute:providers:manage` on the fleet (`compute-fleet`, in the root tenant); anyone but the platform is `ACCESS_DENIED`. The adopting identity owns the network.
+- **Events.** `network.adopted` with `poolId`, `providerAccountId`, `name`, `externalNetwork` and `sharedTagScoped`.

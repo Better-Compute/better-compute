@@ -2007,3 +2007,188 @@ describe('instances', () => {
     expect(unlinked.networkId).toBeUndefined();
   });
 });
+
+// --- Adopted networks (networks.adopt) ---------------------------------------------------------
+
+describe('networks.adopt', () => {
+  beforeEach(() => giveQuota());
+
+  const adopt = (raw: Record<string, unknown> = {}, who: Caller = alice) =>
+    call(
+      'networks',
+      'adopt',
+      {
+        tenantId: who.tenantId,
+        poolId: gcePool,
+        externalNetwork: 'legacy-vpc',
+        name: `adopted-${++keyCounter}`,
+        ...raw,
+      },
+      who,
+    );
+  /** A machine discovery saw, its NIC on `network` (a provider-side name or reference). */
+  async function seeMachine(externalId: string, network: string) {
+    await db.query(
+      `INSERT INTO provider_machines (account_id, external_id, machine, last_seen_at)
+       VALUES ($1, $2, $3::jsonb, compute_now())
+       ON CONFLICT (account_id, external_id) DO UPDATE SET machine = $3::jsonb, instance_id = NULL, gone_at = NULL`,
+      [
+        gceAccount,
+        externalId,
+        JSON.stringify({
+          id: externalId,
+          name: externalId.split('/')[1],
+          state: 'running',
+          region: 'us-central1',
+          zone: 'us-central1-a',
+          machineType: 'n2-standard-2',
+          vcpu: 2,
+          memoryGiB: 8,
+          networks: [{ network, address: '10.128.0.9' }],
+          addresses: [],
+        }),
+      ],
+    );
+  }
+  const attach = (externalId: string) =>
+    run(
+      instanceMethod('attach'),
+      {
+        tenantId: 'root',
+        poolId: gcePool,
+        externalId,
+        idempotencyKey: `attach-${++instanceCounter}`,
+      },
+      alice,
+    );
+
+  it('refuses default unless sharedTagScoped, and records the flag', async () => {
+    await expect(adopt({ externalNetwork: 'default' })).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      details: { field: 'sharedTagScoped' },
+    });
+    expect(await codeOf(adopt({ externalNetwork: 'default', sharedTagScoped: false }))).toBe(
+      'INVALID_INPUT',
+    );
+    const shared = await adopt({
+      externalNetwork: 'default',
+      sharedTagScoped: true,
+      name: 'shared',
+    });
+    expect(shared).toMatchObject({
+      name: 'shared',
+      externalNetwork: 'default',
+      sharedTagScoped: true,
+      state: 'pending',
+      providerAccountId: gceAccount,
+    });
+    const { rows } = await db.query<{ external_name: string; shared_tag_scoped: boolean }>(
+      `SELECT external_name, shared_tag_scoped FROM networks WHERE id = $1`,
+      [shared.id],
+    );
+    expect(rows[0]).toEqual({ external_name: 'default', shared_tag_scoped: true });
+    expect(events.map((event) => event.type)).toContain('network.adopted');
+    // A network better-compute made is never adopted.
+    expect(await codeOf(adopt({ externalNetwork: providerResourceName('net_x') }))).toBe(
+      'INVALID_INPUT',
+    );
+  });
+
+  it('is root only, and idempotent for the same VPC', async () => {
+    expect(await codeOf(adopt({}, mallory))).toBe('ACCESS_DENIED');
+    const first = await adopt({ name: 'legacy' });
+    expect(first.externalNetwork).toBe('legacy-vpc');
+    expect((await adopt({ name: 'legacy' })).id).toBe(first.id);
+    // The VPC is adopted once per tenant: another name for it is CONFLICT.
+    await expect(adopt({ name: 'again' })).rejects.toMatchObject({
+      code: 'CONFLICT',
+      details: { networkId: first.id },
+    });
+    // And by one tenant unless shared: another tenant's adoption of it is CONFLICT.
+    await db.query(`UPDATE networks SET tenant_id = 'other' WHERE id = $1`, [first.id]);
+    expect(await codeOf(adopt({ name: 'mine' }))).toBe('CONFLICT');
+  });
+
+  it('never creates or deletes the VPC, and its firewall rules always target instance tags', async () => {
+    const network = await adopt({ name: 'legacy' });
+    await seeMachine('us-central1-a/legacy', 'projects/p/global/networks/legacy-vpc');
+    const attached = await attach('us-central1-a/legacy');
+    // networkOfMachine links the VM by the VPC's own name.
+    expect(attached).toMatchObject({ origin: 'attached', networkId: network.id });
+    expect(attached.subnetId).toBeUndefined();
+
+    // A rule that names no instances would cover the whole VPC: refused, on create and on update.
+    await expect(createRule(network.id, { name: 'wide' })).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      details: { field: 'targets.instanceIds' },
+    });
+    const rule = await createRule(network.id, {
+      name: 'ssh',
+      targets: { instanceIds: [attached.id] },
+    });
+    expect(
+      await codeOf(
+        call('firewallRules', 'update', {
+          tenantId: 'root',
+          networkId: network.id,
+          ruleId: rule.id,
+          targets: {},
+        }),
+      ),
+    ).toBe('INVALID_INPUT');
+
+    await db.query(`UPDATE instances SET provider_claimed_at = compute_now() WHERE id = $1`, [
+      attached.id,
+    ]);
+    await until(() => settled(network.id));
+    expect(gce.calls.some((entry) => entry.startsWith('ensureNetwork'))).toBe(false);
+    const compiled = gce.firewalls.get(providerResourceName(rule.id))!;
+    expect(compiled).toMatchObject({
+      network: 'legacy-vpc',
+      targetTags: [networkTag(attached.id)],
+    });
+    expect(gce.tags.get('us-central1-a/legacy')).toEqual([networkTag(attached.id)]);
+
+    // Even a rule that reached the table without targets is never applied network-wide.
+    await db.query(
+      `UPDATE network_firewall_rules SET spec = jsonb_set(spec, '{targets}', '{}'::jsonb),
+              state = 'pending', version = version + 1 WHERE id = $1`,
+      [rule.id],
+    );
+    await runKey(network.id);
+    const [stored] = await listRules(network.id);
+    expect(stored).toMatchObject({ state: 'error' });
+    expect(stored!.message).toMatch(/adopted network/);
+    expect(gce.firewalls.get(providerResourceName(rule.id))!.targetTags).toEqual([
+      networkTag(attached.id),
+    ]);
+
+    // Deleting the network removes its rules, never the VPC.
+    await db.query(`UPDATE instances SET state = 'deleted', network_id = NULL WHERE id = $1`, [
+      attached.id,
+    ]);
+    await call('networks', 'delete', { tenantId: 'root', networkId: network.id });
+    await until(async () => (await getNetwork(network.id)).state === 'deleted');
+    expect(gce.firewalls.has(providerResourceName(rule.id))).toBe(false);
+    expect(gce.calls.some((entry) => entry.startsWith('deleteNetwork'))).toBe(false);
+  });
+
+  it('names the adopted VPC on created instances placed on it', async () => {
+    const network = await adopt({ name: 'legacy' });
+    const view = await addSubnet(network.id, { name: 'ours', cidr: '10.9.0.0/24' });
+    await db.query(`UPDATE network_subnets SET state = 'ready' WHERE network_id = $1`, [
+      network.id,
+    ]);
+    await db.query(
+      `UPDATE networks SET state = 'ready', provisioned_at = compute_now() WHERE id = $1`,
+      [network.id],
+    );
+    const created = await createInstance({ networkId: network.id });
+    await runInstance(created.id);
+    expect(gce.creates[0]!.network).toEqual({
+      network: 'legacy-vpc',
+      subnet: providerResourceName(view.subnets[0]!.id),
+      tags: [networkTag(created.id)],
+    });
+  });
+});
