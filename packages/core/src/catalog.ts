@@ -397,6 +397,7 @@ group('pools', 'capacity', [
   ['capacity', 'read', 'capacity:read', 'pool', 'v0.1'],
   ['offer', 'mutation', 'pools:share', 'pool', 'v0.1'],
   ['unoffer', 'mutation', 'pools:share', 'pool', 'v0.1'],
+  ['updateOffer', 'mutation', 'pools:share', 'pool', 'v1.0'],
   ['update', 'mutation', 'pools:manage', 'pool', 'v0.2'],
   ['archive', 'mutation', 'pools:manage', 'pool', 'v0.2'],
 ]);

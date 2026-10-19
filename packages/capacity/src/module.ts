@@ -377,6 +377,30 @@ function samePoolRequest(pool: Pool, input: CreatePoolInput): boolean {
 const keyReused = () =>
   new ComputeError('CONFLICT', 'This idempotency key was used for a different request');
 
+/** What a spent budget does to an offer (`pool_offers.on_budget_exceeded`). */
+export type OfferBudgetPolicy = 'notify' | 'stop-new' | 'drain' | 'suspend';
+const budgetPolicies: readonly OfferBudgetPolicy[] = ['notify', 'stop-new', 'drain', 'suspend'];
+const regionPattern = /^[a-z0-9-]{1,64}$/;
+
+function optionalBudgetPolicy(value: unknown): OfferBudgetPolicy | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !budgetPolicies.includes(value as OfferBudgetPolicy))
+    fail(`onBudgetExceeded must be one of ${budgetPolicies.join(', ')}`);
+  return value as OfferBudgetPolicy;
+}
+function optionalRegions(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length < 1 || value.length > 16)
+    fail('allowedRegions must list 1 to 16 regions');
+  const regions: string[] = [];
+  for (const region of value) {
+    if (typeof region !== 'string' || !regionPattern.test(region))
+      fail(`allowedRegions: ${JSON.stringify(region)} is not a region name`);
+    if (!regions.includes(region)) regions.push(region);
+  }
+  return regions;
+}
+
 export interface OfferPoolInput {
   tenantId: string;
   poolId: string;
@@ -384,6 +408,10 @@ export interface OfferPoolInput {
   quota: Record<string, number>;
   includeDescendants: boolean;
   priority?: number;
+  /** What a spent budget does to the offer; omitted keeps the stored policy. */
+  onBudgetExceeded?: OfferBudgetPolicy;
+  /** The regions the tenant's work may run in; omitted keeps the stored list. */
+  allowedRegions?: string[];
 }
 
 export function parseOfferPool(raw: unknown): OfferPoolInput {
@@ -394,6 +422,8 @@ export function parseOfferPool(raw: unknown): OfferPoolInput {
     'quota',
     'includeDescendants',
     'priority',
+    'onBudgetExceeded',
+    'allowedRegions',
   ]);
   if (input.includeDescendants !== undefined && typeof input.includeDescendants !== 'boolean')
     fail('includeDescendants must be true or false');
@@ -406,6 +436,50 @@ export function parseOfferPool(raw: unknown): OfferPoolInput {
   };
   const priority = optionalInt(input.priority, 'priority', -1000, 1000);
   if (priority !== undefined) result.priority = priority;
+  const policy = optionalBudgetPolicy(input.onBudgetExceeded);
+  if (policy !== undefined) result.onBudgetExceeded = policy;
+  const regions = optionalRegions(input.allowedRegions);
+  if (regions !== undefined) result.allowedRegions = regions;
+  return result;
+}
+
+export interface UpdateOfferInput {
+  tenantId: string;
+  poolId: string;
+  toTenantId: string;
+  onBudgetExceeded?: OfferBudgetPolicy;
+  allowedRegions?: string[];
+  /** true suspends the offer (new work is refused); false lifts the suspension and restarts nothing. */
+  suspended?: boolean;
+}
+
+export function parseUpdateOffer(raw: unknown): UpdateOfferInput {
+  const input = object(raw, [
+    'tenantId',
+    'poolId',
+    'toTenantId',
+    'onBudgetExceeded',
+    'allowedRegions',
+    'suspended',
+  ]);
+  if (input.suspended !== undefined && typeof input.suspended !== 'boolean')
+    fail('suspended must be true or false');
+  const result: UpdateOfferInput = {
+    tenantId: tenant(input.tenantId),
+    poolId: id(input.poolId, 'pool', 'poolId'),
+    toTenantId: tenant(input.toTenantId, 'toTenantId'),
+  };
+  const policy = optionalBudgetPolicy(input.onBudgetExceeded);
+  if (policy !== undefined) result.onBudgetExceeded = policy;
+  const regions = optionalRegions(input.allowedRegions);
+  if (regions !== undefined) result.allowedRegions = regions;
+  if (input.suspended !== undefined) result.suspended = input.suspended;
+  if (
+    result.onBudgetExceeded === undefined &&
+    result.allowedRegions === undefined &&
+    result.suspended === undefined
+  )
+    fail('Name at least one of onBudgetExceeded, allowedRegions or suspended');
   return result;
 }
 
@@ -519,6 +593,7 @@ export type CapacityApi = {
     capacity: MethodDefinition<PoolInput, PoolCapacity[]>;
     offer: MethodDefinition<OfferPoolInput, TenantPool>;
     unoffer: MethodDefinition<PoolInput & { toTenantId: string }, { removed: boolean }>;
+    updateOffer: MethodDefinition<UpdateOfferInput, TenantPool>;
     update: MethodDefinition<UpdatePoolInput, Pool>;
     archive: MethodDefinition<PoolInput, Pool>;
   };
@@ -968,12 +1043,24 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
         await assertOfferable(tx, pool, input.toTenantId, {
           includeDescendants: input.includeDescendants,
         });
+        // Omitted policy and regions keep what the offer has (a re-offer to change the quota must not clear
+        // the tenant's budget policy); `suspended_at` is never touched here.
         await tx.query(
-          `INSERT INTO pool_offers (pool_id, tenant_id, include_descendants, priority)
-           VALUES ($1, $2, $3, $4)
+          `INSERT INTO pool_offers (pool_id, tenant_id, include_descendants, priority,
+                                    on_budget_exceeded, allowed_regions)
+           VALUES ($1, $2, $3, $4, $5, $6::text[])
            ON CONFLICT (pool_id, tenant_id) DO UPDATE
-             SET include_descendants = EXCLUDED.include_descendants, priority = EXCLUDED.priority`,
-          [pool.id, input.toTenantId, input.includeDescendants, input.priority ?? 0],
+             SET include_descendants = EXCLUDED.include_descendants, priority = EXCLUDED.priority,
+                 on_budget_exceeded = COALESCE(EXCLUDED.on_budget_exceeded, pool_offers.on_budget_exceeded),
+                 allowed_regions = COALESCE(EXCLUDED.allowed_regions, pool_offers.allowed_regions)`,
+          [
+            pool.id,
+            input.toTenantId,
+            input.includeDescendants,
+            input.priority ?? 0,
+            input.onBudgetExceeded ?? null,
+            input.allowedRegions ?? null,
+          ],
         );
         for (const [resource, max] of Object.entries(input.quota))
           await setQuota(tx, input.toTenantId, pool.id, resource, max);
@@ -1021,6 +1108,56 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
             data: { toTenantId: input.toTenantId },
           });
         return { removed: rowCount > 0 };
+      },
+    }),
+    updateOffer: defineMethod({
+      action: 'compute:pools:share',
+      kind: 'mutation',
+      resource: poolResource,
+      validate: describedBy(schemas.updateOffer, parseUpdateOffer),
+      handler: async (context, input) => {
+        const tx = context.sql;
+        const pool = await ownedPool(tx, input.tenantId, input.poolId, true);
+        if (input.toTenantId === pool.ownerTenantId)
+          throw new ComputeError('INVALID_INPUT', 'A pool has no offer to its owner');
+        const sets: string[] = [];
+        const params: unknown[] = [pool.id, input.toTenantId];
+        if (input.onBudgetExceeded !== undefined) {
+          params.push(input.onBudgetExceeded);
+          sets.push(`on_budget_exceeded = $${params.length}`);
+        }
+        if (input.allowedRegions !== undefined) {
+          params.push(input.allowedRegions);
+          sets.push(`allowed_regions = $${params.length}::text[]`);
+        }
+        // Suspending keeps the first moment; lifting clears it. Nothing restarts either way.
+        if (input.suspended === true)
+          sets.push('suspended_at = COALESCE(suspended_at, compute_now())');
+        if (input.suspended === false) sets.push('suspended_at = NULL');
+        const { rowCount } = await tx.query(
+          `UPDATE pool_offers SET ${sets.join(', ')} WHERE pool_id = $1 AND tenant_id = $2`,
+          params,
+        );
+        if (rowCount === 0)
+          throw new ComputeError(
+            'NOT_FOUND',
+            `Pool ${pool.id} is not offered to tenant ${input.toTenantId}`,
+          );
+        await context.events.publish(tx, {
+          type: 'pool.offer-updated',
+          tenantId: input.tenantId,
+          subject: `pool/${pool.id}`,
+          data: {
+            toTenantId: input.toTenantId,
+            ...(input.onBudgetExceeded !== undefined
+              ? { onBudgetExceeded: input.onBudgetExceeded }
+              : {}),
+            ...(input.allowedRegions !== undefined ? { allowedRegions: input.allowedRegions } : {}),
+            ...(input.suspended !== undefined ? { suspended: input.suspended } : {}),
+          },
+        });
+        const [view] = await tenantPools(tx, input.toTenantId, pool.id);
+        return view!;
       },
     }),
     update: defineMethod({

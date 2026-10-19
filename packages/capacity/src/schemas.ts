@@ -39,6 +39,19 @@ const quotaMap = (description: string): JsonSchema => ({
   propertyNames: { pattern: '^[A-Za-z][A-Za-z0-9._-]{0,63}$' },
   additionalProperties: { type: 'integer', minimum: 0 },
 });
+const onBudgetExceeded: JsonSchema = {
+  enum: ['notify', 'stop-new', 'drain', 'suspend'],
+  description:
+    "What a spent budget does to this offer: notify, stop-new (admissions check the budget), drain (also cancels unstarted reservations), or suspend (stops the tenant's running instances in the pool and refuses new work until the offer is lifted)",
+};
+const allowedRegions: JsonSchema = {
+  type: 'array',
+  minItems: 1,
+  maxItems: 16,
+  items: { type: 'string', pattern: '^[a-z0-9-]{1,64}$', maxLength: 64 },
+  description:
+    "The regions the tenant's work may run in; a pool whose site (iamRegion, else region) is elsewhere refuses the tenant's new work",
+};
 const strict = (properties: Record<string, JsonSchema>, required: string[]): JsonSchema =>
   strictObject(properties, required);
 const durationField = (description: string): JsonSchema => ({
@@ -97,8 +110,25 @@ export const schemas = {
       quota: quotaMap("That tenant's limits per resource"),
       includeDescendants: { type: 'boolean', default: false },
       priority: { type: 'integer', minimum: -1000, maximum: 1000 },
+      onBudgetExceeded,
+      allowedRegions,
     },
     ['tenantId', 'poolId', 'toTenantId', 'quota'],
+  ),
+  updateOffer: strict(
+    {
+      tenantId,
+      poolId,
+      toTenantId: { ...tenantId, description: 'The tenant the pool is offered to' },
+      onBudgetExceeded,
+      allowedRegions,
+      suspended: {
+        type: 'boolean',
+        description:
+          'true suspends the offer (new work is refused); false lifts a suspension and restarts nothing',
+      },
+    },
+    ['tenantId', 'poolId', 'toTenantId'],
   ),
   unofferPool: strict(
     { tenantId, poolId, toTenantId: { ...tenantId, description: 'The tenant to withdraw from' } },

@@ -5,7 +5,8 @@
 // - an owner offboarded: their reservations move to the successor (the authz row follows, so the successor can
 //   manage them), or, without one, the unstarted ones are cancelled;
 // - a budget spent: each offer to the tenant applies its `onBudgetExceeded` (`notify` publishes; `stop-new`
-//   also has admissions check the budget; `drain` also cancels the tenant's unstarted reservations there).
+//   also has admissions check the budget; `drain` also cancels the tenant's unstarted reservations there; `suspend`
+//   suspends the offer and stops the tenant's running instances in the pool).
 // Handlers are level-triggered (§12.8): every reaction re-reads current rows, so a replayed event does nothing new.
 
 import type { Json, ModuleContext, SqlTx } from '@better-compute/core';
@@ -138,19 +139,45 @@ export interface BudgetAlertLike {
   amountMicros?: number;
 }
 
+/** What `applyBudgetPolicy` hands to `options.suspend`: the pools whose offers to the tenant are suspended. */
+export interface BudgetSuspension {
+  tenantId: string;
+  budgetId: string;
+  /** The pools whose offer to the tenant is suspended (`suspended_at` set), now or by an earlier alert. */
+  poolIds: string[];
+  reason: string;
+}
+
+export interface BudgetPolicyOptions {
+  /**
+   * Stops what the suspended offers' pools still run. Capacity owns no workload that spends money on a provider:
+   * vps's `sandboxIamReactions.budget` sets the tenant's running instances there to `stopped`. It runs in the same
+   * transaction on every alert (not only the first), so a replay stops an instance started in between.
+   */
+  suspend?(tx: SqlTx, suspension: BudgetSuspension): Promise<unknown>;
+}
+
 /**
  * A tenant's budget is spent: every pool offered to it with an `onBudgetExceeded` publishes
  * `quota.budget-exceeded` (subject the pool); `drain` also cancels the tenant's reservations there that have
- * not started. `stop-new` and `drain` refuse new admissions through the admission's budget check (a pool offer
- * with either policy checks the caller's budget on create and extend), which clears itself when the budget's
- * window resets. Offers inherited through `include_descendants` are not covered: compute does not know the tenant
- * tree; offer the budgeted tenant directly for the policy to apply.
+ * not started. `stop-new`, `drain` and `suspend` refuse new admissions through the admission's budget check (a
+ * pool offer with any of them checks the caller's budget on create and extend), which clears itself when the
+ * budget's window resets.
+ *
+ * `suspend` goes further (D16): it sets the offer's `suspended_at` (once; a replay keeps the first moment) and
+ * publishes `quota.budget-suspended` for each newly suspended pool. From then on admission refuses the tenant's new
+ * work on the pool with `SPEND_LIMIT_REACHED` whatever the budget says, until
+ * `pools.updateOffer({ suspended: false })`. `options.suspend` stops the instances the tenant already runs there.
+ *
+ * Offers inherited through `include_descendants` are not covered: compute does not know the tenant tree; offer the
+ * budgeted tenant directly for the policy to apply.
  */
 export async function applyBudgetPolicy(
   tx: SqlTx,
   deps: IamReactionDeps,
   alert: BudgetAlertLike,
-): Promise<ReactionResult & { pools: { poolId: string; policy: string }[] }> {
+  options: BudgetPolicyOptions = {},
+): Promise<ReactionResult & { pools: { poolId: string; policy: string }[]; suspended?: string[] }> {
   if (!alert.exceeded) return { cancelled: [], reassigned: [], pools: [] };
   const { rows: offers } = await tx.query<{ pool_id: string; on_budget_exceeded: string }>(
     `SELECT pool_id, on_budget_exceeded FROM pool_offers
@@ -182,9 +209,35 @@ export async function applyBudgetPolicy(
       data,
     });
   }
+  const suspendedPools = offers
+    .filter((offer) => offer.on_budget_exceeded === 'suspend')
+    .map((offer) => offer.pool_id);
+  if (suspendedPools.length > 0) {
+    // Only the offers that were not suspended already publish; the instances are stopped on every alert.
+    const { rows: fresh } = await tx.query<{ pool_id: string }>(
+      `UPDATE pool_offers SET suspended_at = compute_now()
+        WHERE tenant_id = $1 AND pool_id = ANY($2::text[]) AND suspended_at IS NULL
+        RETURNING pool_id`,
+      [alert.tenantId, suspendedPools],
+    );
+    for (const { pool_id: poolId } of fresh.sort((a, b) => (a.pool_id < b.pool_id ? -1 : 1)))
+      await deps.events.publish(tx, {
+        type: 'quota.budget-suspended',
+        tenantId: alert.tenantId,
+        subject: `pool/${poolId}`,
+        data: { poolId, budgetId: alert.budgetId },
+      });
+    await options.suspend?.(tx, {
+      tenantId: alert.tenantId,
+      budgetId: alert.budgetId,
+      poolIds: suspendedPools,
+      reason,
+    });
+  }
   return {
     cancelled,
     reassigned: [],
     pools: offers.map((offer) => ({ poolId: offer.pool_id, policy: offer.on_budget_exceeded })),
+    ...(suspendedPools.length > 0 ? { suspended: suspendedPools } : {}),
   };
 }

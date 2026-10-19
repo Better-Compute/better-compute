@@ -961,18 +961,74 @@ export async function prepareCreate(
 }
 
 /**
+ * What the tenant's offer of a pool says about new work, whatever the budget: a suspended offer refuses it with
+ * `SPEND_LIMIT_REACHED` until `pools.updateOffer({ suspended: false })`, and `allowedRegions` refuses a pool whose
+ * site (`iam_region`, else `region`) is not listed with `ACCESS_DENIED`. No offer row (the pool's owner, or a
+ * tenant that reaches the pool through `include_descendants`) means nothing to check. `budgetAdmissionCheck` runs
+ * it first; paths that are not budget-checked (an unbilled attach or network) call it alone.
+ */
+export async function offerAdmissionCheck(
+  context: MethodContext,
+  tenantId: string,
+  poolId: string,
+): Promise<void> {
+  const { rows } = await context.sql.query<{
+    suspended: boolean;
+    allowed_regions: string[] | null;
+    region: string | null;
+  }>(
+    `SELECT o.suspended_at IS NOT NULL AS suspended, o.allowed_regions,
+            COALESCE(s.iam_region, s.region) AS region
+       FROM pool_offers o
+       JOIN pools p ON p.id = o.pool_id
+       LEFT JOIN sites s ON s.id = p.site_id
+      WHERE o.pool_id = $1 AND o.tenant_id = $2`,
+    [poolId, tenantId],
+  );
+  const offer = rows[0];
+  if (!offer) return;
+  if (offer.suspended)
+    throw new ComputeError(
+      'SPEND_LIMIT_REACHED',
+      `The offer of pool ${poolId} is suspended: its budget was spent`,
+      undefined,
+      { reason: 'offer-suspended', poolId },
+    );
+  // A restricted offer whose pool has no known region cannot be shown to be in one: refused.
+  if (
+    offer.allowed_regions &&
+    (offer.region === null || !offer.allowed_regions.includes(offer.region))
+  )
+    throw new ComputeError(
+      'ACCESS_DENIED',
+      `Pool ${poolId} is in ${offer.region ?? 'an unknown region'}, which this tenant's offer does not allow`,
+      undefined,
+      {
+        reason: 'region-not-allowed',
+        poolId,
+        region: offer.region,
+        allowedRegions: offer.allowed_regions,
+      },
+    );
+}
+
+/**
  * The admission's budget check (`MethodAdmission.check`: after the IAM decision, no transaction
- * open). It runs when the pool asks for it (`policy.admission.budgetCheck: 'meter'`) or when the
- * tenant's offer reacts to a spent budget by stopping new work (`onBudgetExceeded: 'stop-new' |
- * 'drain'`, §12.8), and calls `iam.billingCheck` for the caller. A spent budget refuses with
- * `SPEND_LIMIT_REACHED`; the draft stays, so the same key re-decides once the budget's window
- * resets.
+ * open). First the offer's own refusals (`offerAdmissionCheck`: suspended, region). Then, when the pool
+ * asks for it (`policy.admission.budgetCheck: 'meter'`) or the tenant's offer reacts to a spent budget by
+ * stopping new work (`onBudgetExceeded: 'stop-new' | 'drain' | 'suspend'`, §12.8), `iam.billingCheck`
+ * for the tenant. A spent budget refuses with `SPEND_LIMIT_REACHED`; the draft stays, so the same key
+ * re-decides once the budget's window resets.
+ *
+ * A caller from another tenant (the platform issuing into a customer) is checked against the TARGET tenant's
+ * budgets only: the check names `tenantId` and no identity, since the caller's identity is not a member there.
  */
 export async function budgetAdmissionCheck(
   context: MethodContext,
   tenantId: string,
   poolId: string,
 ): Promise<void> {
+  await offerAdmissionCheck(context, tenantId, poolId);
   const { rows } = await context.sql.query<{
     budget_check: string | null;
     on_budget_exceeded: string | null;
@@ -988,10 +1044,16 @@ export async function budgetAdmissionCheck(
   const wanted =
     row.budget_check === 'meter' ||
     row.on_budget_exceeded === 'stop-new' ||
-    row.on_budget_exceeded === 'drain';
+    row.on_budget_exceeded === 'drain' ||
+    row.on_budget_exceeded === 'suspend';
   if (!wanted) return;
   const check = await context.iam.billingCheck(
-    { tenantId, ...(context.caller ? { identityId: context.caller.identityId } : {}) },
+    {
+      tenantId,
+      ...(context.caller && context.caller.tenantId === tenantId
+        ? { identityId: context.caller.identityId }
+        : {}),
+    },
     context.credential,
   );
   if (check.allowed) return;

@@ -93,6 +93,8 @@ import {
   type ListInstancesInput,
 } from './instances.js';
 import { budgetAdmissionCheck } from '@better-compute/capacity';
+import { attachBudgetCheck, networkBudgetCheck } from './budget-admission.js';
+import { sweepSuspendedOffers } from './budget-suspend.js';
 import { instanceSpecs, reconcileInstance } from './lifecycle.js';
 import {
   bootstrapWork,
@@ -1081,8 +1083,12 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         admission: {
           prepare: (context, input, tx) =>
             prepareAttach(context, input, tx, context.iam.rootTenantId),
-          // R2: another owner must be an active identity of the tenant (outside transactions).
-          check: (context, input) => assertOwnerMember(context, input),
+          // R2: another owner must be an active identity of the tenant (outside transactions). Then the budget:
+          // the offer's refusals, and the tenant's budget when the attached machine is billed (D16).
+          check: async (context, input) => {
+            await assertOwnerMember(context, input);
+            await attachBudgetCheck(context, input);
+          },
           denied: (context, input, tx) => forgetAttach(context, input, tx),
           abandoned: (context, input, tx) => forgetAttach(context, input, tx),
         },
@@ -1579,6 +1585,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           denied: (context, input, tx) => clearStagedNetwork(context, input, tx),
           // Transaction 2 threw (CONFLICT on the name, UNSUPPORTED): the staged projection row goes.
           abandoned: (context, input, tx) => clearStagedNetwork(context, input, tx),
+          // A metered pool's networks are billed: the tenant's budget (D16). A refusal leaves nothing staged (`abandoned` clears the projection row).
+          check: (context, input) => networkBudgetCheck(context, input),
         },
         handler: (context, input) => createNetwork(networkDeps(context), context, input),
       }),
@@ -1731,6 +1739,17 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
               // service account, an ancestor of every tenant; [31c64a] c7a5312).
               budget: (tenantId) => warmBudget(context, tenantId),
             });
+          return 'DONE';
+        },
+      },
+      {
+        // Budget `suspend` (D16), level-triggered: a suspended offer's running instances are set to stopped, whether
+        // or not the host wired the budget reaction (which only makes it immediate).
+        name: 'vps.suspension',
+        shardBy: 'none',
+        periodic: [{ key: 'all', every: '1m' }],
+        async run(context) {
+          await context.sql.transaction((tx) => sweepSuspendedOffers(tx, depsOf(context)));
           return 'DONE';
         },
       },

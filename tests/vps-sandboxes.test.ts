@@ -1031,6 +1031,49 @@ describe('warm pools', () => {
     expect(await warm()).toBe(2);
   });
 
+  it('drain a suspended offer and do not refill it, whatever the budget says', async () => {
+    const template = await createTemplate({ warm: { min: 2 } });
+    const warm = async () =>
+      (
+        await db.query<{ id: string }>(
+          `SELECT id FROM instances WHERE warm_template_id = $1 AND desired_state <> 'deleted'`,
+          [template.id],
+        )
+      ).rows.length;
+    const minute = () => advance(61_000);
+    // The budget answer is cached a minute across tests that share the module; start past any earlier stamp.
+    await advance(20 * 60_000);
+    await reconcileSandboxes();
+    expect(await warm()).toBe(2);
+    // Suspended (budget spent, or by hand): the pool is emptied and stays empty.
+    await db.query(
+      `UPDATE pool_offers SET on_budget_exceeded = 'suspend', suspended_at = compute_now() WHERE pool_id = $1 AND tenant_id = 'acme'`,
+      [pool],
+    );
+    await reconcileSandboxes();
+    expect(await warm()).toBe(0);
+    await minute();
+    await reconcileSandboxes();
+    expect(await warm()).toBe(0);
+    // Lifted while the budget is still spent: a suspend offer checks the budget, so it does not refill.
+    await db.query(
+      `UPDATE pool_offers SET suspended_at = NULL WHERE pool_id = $1 AND tenant_id = 'acme'`,
+      [pool],
+    );
+    budgetSpent = true;
+    try {
+      await minute();
+      await reconcileSandboxes();
+      expect(await warm()).toBe(0);
+    } finally {
+      budgetSpent = false;
+    }
+    // The budget has room again: refilled.
+    await minute();
+    await reconcileSandboxes();
+    expect(await warm()).toBe(2);
+  });
+
   it('keep instances stopped on a runtime that cannot pause', async () => {
     const template = await createTemplate({ warm: { min: 1 } });
     const noPause = vps({
