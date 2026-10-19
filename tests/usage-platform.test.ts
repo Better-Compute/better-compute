@@ -5,6 +5,7 @@ import {
   type Credential,
   type SqlExecutor,
 } from '@better-compute/core';
+import { usageCsv } from '@better-compute/console-kit';
 import { flushUsageWindows } from '@better-compute/iam';
 import { createEmbeddedTestIam, type EmbeddedTestIam } from '@better-compute/iam/testing';
 import { createMetrics, databaseCollector, standardMetrics } from '@better-compute/observability';
@@ -12,6 +13,7 @@ import { pruneUsageWindows, setSimClock, useSimClock } from '@better-compute/pos
 import { pglite } from '@better-compute/postgres/pglite';
 import { betterCompute, type BetterCompute } from '@better-compute/server';
 import { vps } from '@better-compute/vps';
+import { csvField } from '../packages/server/src/api/usage.js';
 
 // Root's cross-tenant usage view (Task 22, D17) and the corrections root makes to it (Task 23, D17/D18): dead
 // letters, retry and void. Everything runs against a REAL better-iam (embedded, with compute's plugin and resolver,
@@ -433,9 +435,63 @@ describe('usage.platform', () => {
     // Asking for them marks them.
     const withVoided = await api.usage.list(otherOwner, { tenantId: B, includeVoided: true });
     expect(withVoided.items).toHaveLength(3);
-    const marked = withVoided.items.filter((window: any) => window.voidedAt !== undefined);
+    const marked = withVoided.items.filter((window: any) => window.voided === true);
     expect(marked).toHaveLength(1);
-    expect(marked[0]).toMatchObject({ quantity: 100, voidReason: 'seeded' });
+    expect(marked[0]).toMatchObject({ quantity: 100, voided: true, voidedAt: expect.any(Number) });
+    // Root's free-text reason is root's: a tenant never sees it.
+    expect(JSON.stringify(withVoided)).not.toContain('seeded');
+    expect(marked[0]).not.toHaveProperty('voidReason');
+    expect(withVoided.items.filter((window: any) => window.voided !== true)).toHaveLength(2);
+  });
+
+  it('neutralises formula cells in every CSV, as console-kit does', async () => {
+    await seed({
+      tenant: A,
+      kind: 'instance',
+      id: 'vm_csv',
+      meter: 'vm.vcpu.hours',
+      quantity: 1,
+      hour: 0,
+      identityId: '=cmd|calc',
+      tags: { pool: '=cmd', provider: '@x', project: '@x' },
+    });
+    // The platform CSV: group keys come from tags.
+    const platform = await api.usage.platform(root, {
+      ...range,
+      groupBy: ['pool', 'provider'],
+      format: 'csv',
+    });
+    expect(platform.data.split('\r\n')[1]).toBe(`'=cmd,'@x,1,1,"{""pending"":1}"`);
+    // The tenant export: the identity cell is data, not a formula; a tag value is inside the tags JSON.
+    const exported = await api.usage.export(acmeAdmin, { tenantId: A, ...range, format: 'csv' });
+    const row = exported.data.split('\r\n')[1];
+    expect(row).toContain(",'=cmd|calc,");
+    expect(row).toContain('"{""pool"":""=cmd"",""project"":""@x"",""provider"":""@x""}"');
+    for (const cell of row.split(',')) expect(cell).not.toMatch(/^[=+\-@\t\r]/);
+  });
+
+  it("shares console-kit's CSV cell rule", () => {
+    const start = Date.UTC(2026, 8, 1);
+    for (const value of ['=cmd', '+1', '-1', '@x', '\tx', '\rx', 'a,b', 'say "hi"', 'plain', '']) {
+      const csv = usageCsv([
+        {
+          idempotencyKey: 'k',
+          allocationId: 'a',
+          tenantId: 't',
+          identityId: 'i',
+          meter: 'm',
+          quantity: 1,
+          windowStart: start,
+          windowEnd: start + HOUR,
+          tags: { project: value },
+          outcome: 'recorded',
+        },
+      ]);
+      const row = csv.split('\r\n')[1]!;
+      const prefix = `${new Date(start).toISOString()},${new Date(start + HOUR).toISOString()},m,1,`;
+      const cell = row.slice(prefix.length, row.length - ',i,a,recorded,k'.length);
+      expect(csvField(value)).toBe(cell);
+    }
   });
 });
 

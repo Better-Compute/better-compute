@@ -26,7 +26,7 @@ export interface ListUsageInput {
   /** At most 500 (100 by default). */
   limit?: number;
   cursor?: string;
-  /** Also list voided windows, marked with `voidedAt` and `voidReason`. Default: leave them out. */
+  /** Also list voided windows, marked `voided: true` with `voidedAt`. Default: leave them out. */
   includeVoided?: boolean;
 }
 
@@ -51,8 +51,8 @@ export interface UsageWindow {
   recordedAt?: number;
   outcome?: 'recorded' | 'duplicate' | 'reattributed' | 'dead-lettered';
   /** Present only on a voided window (`includeVoided`): compute will never send it to IAM billing. */
+  voided?: true;
   voidedAt?: number;
-  voidReason?: string;
 }
 
 export interface ExportUsageInput {
@@ -223,10 +223,16 @@ const csvColumns = [
   'recordedAt',
   'outcome',
 ] as const;
-/** RFC 4180: quote fields holding a comma, quote or line break; double inner quotes. */
-const csvField = (value: unknown): string => {
+/**
+ * One CSV cell. RFC 4180: quote fields holding a comma, quote or line break; double inner quotes. A cell that a
+ * spreadsheet would read as a formula (it starts with `=`, `+`, `-`, `@`, a tab or a carriage return) gets a
+ * leading `'`. This is the rule of `usageCsv` in console-kit (tests/usage-platform.test.ts pins the two together):
+ * every CSV this module writes goes through it.
+ */
+export const csvField = (value: unknown): string => {
   const text = value === undefined ? '' : typeof value === 'string' ? value : JSON.stringify(value);
-  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  const safe = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
+  return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 };
 function csvRow(window: UsageWindow): string {
   return csvColumns
@@ -289,7 +295,6 @@ interface WindowRow {
   recorded_at: Date | null;
   outcome: UsageWindow['outcome'] | null;
   voided_at: Date | null;
-  void_reason: string | null;
 }
 
 function toWindow(row: WindowRow): UsageWindow {
@@ -309,8 +314,11 @@ function toWindow(row: WindowRow): UsageWindow {
   if (recordedAt !== undefined) window.recordedAt = recordedAt;
   if (row.outcome !== null) window.outcome = row.outcome;
   const voidedAt = ms(row.voided_at);
-  if (voidedAt !== undefined) window.voidedAt = voidedAt;
-  if (row.void_reason !== null) window.voidReason = row.void_reason;
+  if (voidedAt !== undefined) {
+    // Root's free-text void reason is root's: a tenant sees that the window is void, and when.
+    window.voided = true;
+    window.voidedAt = voidedAt;
+  }
   return window;
 }
 
@@ -449,7 +457,7 @@ export function usageApi(): UsageApi {
             input.cursor === undefined ? [null, null] : decodeCursor(input.cursor);
           const { rows } = await context.sql.query<WindowRow>(
             `SELECT idempotency_key, allocation_id, tenant_id, identity_id, meter, quantity,
-               window_start, window_end, tags, recorded_at, outcome, voided_at, void_reason
+               window_start, window_end, tags, recorded_at, outcome, voided_at
              FROM usage_windows
              WHERE tenant_id = $1 AND ($2::text IS NULL OR tags->>'project' = $2)
                AND ($3::text IS NULL OR meter = $3)
@@ -486,7 +494,7 @@ export function usageApi(): UsageApi {
         async handler(context, input) {
           const { rows } = await context.sql.query<WindowRow>(
             `SELECT idempotency_key, allocation_id, tenant_id, identity_id, meter, quantity,
-               window_start, window_end, tags, recorded_at, outcome, voided_at, void_reason
+               window_start, window_end, tags, recorded_at, outcome, voided_at
              FROM usage_windows
              WHERE tenant_id = $1 AND ($2::text IS NULL OR tags->>'project' = $2)
                AND ($3::text IS NULL OR meter = $3)

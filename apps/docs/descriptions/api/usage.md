@@ -7,7 +7,7 @@ Lists the tenant's usage windows ordered by window start, optionally for one pro
 - Each window carries its billing idempotency key (`cmp:<allocationId>:<windowStartMs>` for an allocation, which it also names as `allocationId`; `cmp:<kind>:<sourceId>:<windowStartMs>:<meter>` for another source), meter, quantity, bounds and tags, and, once the usage sink has handed it to IAM billing, `recordedAt` and the `outcome` (`recorded`, `duplicate`, `reattributed` or `dead-lettered`).
 - `from` and `to` (epoch milliseconds) select windows that end after `from` and start before `to`; `to` not after `from` is `INVALID_INPUT`.
 - `limit` is at most 500 (100 by default). A cursor this method did not return is `INVALID_INPUT`.
-- Windows of every source appear, including the provider instance, grant, network and snapshot windows of the tenant's cloud VMs. Voided windows are left out; `includeVoided: true` lists them with `voidedAt` and `voidReason`.
+- Windows of every source appear, including the provider instance, grant, network and snapshot windows of the tenant's cloud VMs. Voided windows are left out; `includeVoided: true` lists them with `voided: true` and `voidedAt`. The reason root gave when voiding is root's and is never shown to tenants.
 
 ## export
 
@@ -17,6 +17,7 @@ Exports every usage window of a time range as CSV (the default) or JSON Lines, w
 - One export returns at most 50,000 windows; when more match, `truncated` is `true` and the range or meter should be narrowed.
 - CSV has a header row and ISO 8601 timestamps; JSON Lines has one window object per line.
 - Voided windows are in neither `data`, `count` nor `totals`; `voided` counts them.
+- Cells a spreadsheet would read as a formula (starting with `=`, `+`, `-`, `@`, a tab or a carriage return) are prefixed with `'`; the same holds for the CSV of `platform`.
 
 ## platform
 
