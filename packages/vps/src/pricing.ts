@@ -492,10 +492,7 @@ const noInput = (raw: unknown): Record<string, never> => {
 };
 
 /** The `billing` group's methods. Each is decided on the fleet, so only root (or a root member the policy allows) calls them. */
-export function billingApi(
-  options: BillingOptions = {},
-  providers?: BillingProviders,
-): BillingApi {
+export function billingApi(options: BillingOptions = {}, providers?: BillingProviders): BillingApi {
   // One deployment currency (better-iam's): proposals, estimates and margins all name it.
   const currency = (options.currency ?? defaultCurrency).toUpperCase();
   return {
@@ -695,7 +692,9 @@ async function accountFlavors(
     vcpu: Number(row.vcpu),
     memoryGiB: Number(row.memory_gib),
     gpus: Number(row.gpus),
-    ...(Number(row.gpus) > 0 && row.gpu_model ? { gpuModel: canonicalGpuModel(row.gpu_model, gpuModels) } : {}),
+    ...(Number(row.gpus) > 0 && row.gpu_model
+      ? { gpuModel: canonicalGpuModel(row.gpu_model, gpuModels) }
+      : {}),
     ...(row.offer_id !== null ? { offerId: row.offer_id } : {}),
   }));
 }

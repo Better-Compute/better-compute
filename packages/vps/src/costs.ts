@@ -55,11 +55,6 @@ export interface CostsOptions {
   /** How far back each pass reads, in days (default 3, at most 31): late and corrected rows land within it. */
   lookbackDays?: number;
   /**
-   * The better-iam deployment currency (default `USD`). A cost row in another currency is stored as received,
-   * flagged `CurrencyMismatch`, and excluded from pass-through and margins.
-   */
-  currency?: string;
-  /**
    * Leak detection (D12): an instance whose provider-billed compute hours in a UTC day exceed its metered running
    * hours by more than this raises `billing.leak` (default 1).
    */
@@ -869,7 +864,11 @@ export async function providerCostTotals(
 }
 
 /** The validated settings of `vps({ costs })`. */
-export function costSettings(options: CostsOptions): {
+export function costSettings(
+  options: CostsOptions,
+  /** The deployment currency, validated by `vps()` (`vps({ billing: { currency } })`). */
+  currency: string = 'USD',
+): {
   every: Duration;
   everyMs: number;
   lookbackMs: number;
@@ -884,12 +883,6 @@ export function costSettings(options: CostsOptions): {
     throw new ComputeError(
       'INVALID_CONFIG',
       'vps({ costs: { lookbackDays } }) must be more than 0 and at most 31',
-    );
-  const currency = options.currency ?? 'USD';
-  if (!/^[A-Za-z]{3}$/.test(currency))
-    throw new ComputeError(
-      'INVALID_CONFIG',
-      'vps({ costs: { currency } }) must be an ISO 4217 code such as USD',
     );
   const leakToleranceHours = options.leakToleranceHours ?? 1;
   if (!Number.isFinite(leakToleranceHours) || leakToleranceHours < 0)
@@ -920,8 +913,10 @@ export function costSettings(options: CostsOptions): {
 export function costsReconciler(
   options: CostsOptions,
   deps: (context: ModuleContext) => CostsDeps,
+  /** The deployment currency: a cost row in another one is stored as received, flagged `CurrencyMismatch`, and excluded from pass-through and margins. */
+  currency?: string,
 ): Reconciler {
-  const settings = costSettings(options);
+  const settings = costSettings(options, currency);
   return {
     name: costsWork,
     shardBy: 'none',

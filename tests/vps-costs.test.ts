@@ -472,7 +472,7 @@ describe('ingestion and attribution', () => {
   });
 
   it('currency mismatch is stored but flagged', async () => {
-    const world = await costWorld({ costs: { currency: 'usd' } });
+    const world = await costWorld({ billing: { currency: 'usd' } });
     const at = world.now() - DAY;
     world.ledger.rows.push(
       costRow({ sourceRowId: 'eur', usageStart: at, currency: 'EUR', costMicros: 900_000 }),
@@ -500,7 +500,7 @@ describe('ingestion and attribution', () => {
   it('refuses bad cost options', async () => {
     expect(() => vps({ costs: { lookbackDays: 0 } })).toThrow(/lookbackDays/);
     expect(() => vps({ costs: { lookbackDays: 40 } })).toThrow(/lookbackDays/);
-    expect(() => vps({ costs: { currency: 'dollars' } })).toThrow(/currency/);
+    expect(() => vps({ billing: { currency: 'dollars' } })).toThrow(/currency/);
   });
 });
 
@@ -1004,7 +1004,7 @@ describe('margins', () => {
   }, 60_000);
 
   it('unattributed cost is reported separately', async () => {
-    const world = await costWorld({ costs: { currency: 'usd' } });
+    const world = await costWorld({ billing: { currency: 'usd' } });
     const vm = await createVm(world);
     const at = Date.UTC(2025, 11, 30);
     await storeCost(world, {

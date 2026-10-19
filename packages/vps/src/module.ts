@@ -154,7 +154,11 @@ import {
 import { costsReconciler, type CostsOptions } from './costs.js';
 import { vpsMigrations } from './migrations.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
-import { describeCreateInstance, describeCreateSandbox, describeExtendSandbox } from './describe.js';
+import {
+  describeCreateInstance,
+  describeCreateSandbox,
+  describeExtendSandbox,
+} from './describe.js';
 import {
   hostReserve,
   hostResourcesWork,
@@ -336,7 +340,7 @@ export interface VpsOptions {
   /**
    * The `vps.costs` worker (platform compute billing, D10): how often provider accounts whose client reads costs
    * (`ProviderImpl.costs`, e.g. GCP's billing export) are read into `provider_costs` (default `6h`), how many days
-   * back (default 3), and the deployment currency (default `USD`, better-iam's).
+   * back (default 3); costs are counted in the deployment currency (`billing.currency`).
    */
   costs?: CostsOptions;
   /**
@@ -594,6 +598,13 @@ const noSecrets: SecretResolver = {
  * ```
  */
 export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
+  // One deployment currency (better-iam's) for proposals, estimates, provider costs and margins.
+  const currency = (options.billing?.currency ?? defaultCurrency).toUpperCase();
+  if (!/^[A-Z]{3}$/.test(currency))
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'vps({ billing: { currency } }) must be an ISO 4217 code such as USD',
+    );
   const runtimes = options.runtimes ?? ['libvirt-kvm'];
   if (runtimes.length === 0 || !runtimes.every((runtime) => /^[a-z][a-z0-9-]{0,63}$/.test(runtime)))
     throw new ComputeError('INVALID_CONFIG', 'vps({ runtimes }) must list runtime driver ids');
@@ -725,7 +736,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     clock: context.clock,
     log: context.log,
     cache: estimateCache,
-    currency: options.billing?.currency ?? defaultCurrency,
+    currency,
     gpuModels: options.billing?.gpuModels,
   });
   /** The list prices of a platform provider account, read through its cached client. */
@@ -874,7 +885,11 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     ]);
     const current = rows[0];
     if (!current) return;
-    input.decidedVolumes = await volumesCheck(context, input.tenantId, input.volumes ?? templateVolumesOf(current.volumes));
+    input.decidedVolumes = await volumesCheck(
+      context,
+      input.tenantId,
+      input.volumes ?? templateVolumesOf(current.volumes),
+    );
     if (!reshapes) return;
     const env = typeof current.env === 'string' ? JSON.parse(current.env) : current.env;
     const resulting = {
@@ -972,7 +987,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
   };
 
   const api = (): VpsApi => ({
-    billing: billingApi(options.billing, billingProviders),
+    billing: billingApi({ ...options.billing, currency }, billingProviders),
     instances: {
       create: defineMethod<CreateInstanceInput, Instance>({
         action: 'compute:instances:create',
@@ -1546,7 +1561,10 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         action: 'compute:sandboxes:manage',
         kind: 'mutation',
         // The envelope decides on the volume `prepare` returns.
-        resource: (input: CreateVolumeInput) => ({ type: 'sandbox-volume', id: `draft:${input.idempotencyKey}` }),
+        resource: (input: CreateVolumeInput) => ({
+          type: 'sandbox-volume',
+          id: `draft:${input.idempotencyKey}`,
+        }),
         validate: describedBy(schemas.createVolume, parseCreateVolume),
         // Decided on the volume, whose projection row carries the requested size (review 2, LOW 3).
         admission: {
@@ -1600,10 +1618,14 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         action: 'compute:networks:create',
         kind: 'mutation',
         // The envelope decides on the network `prepare` returns.
-        resource: (input: CreateNetworkInput) => ({ type: 'network', id: `draft:${input.idempotencyKey}` }),
+        resource: (input: CreateNetworkInput) => ({
+          type: 'network',
+          id: `draft:${input.idempotencyKey}`,
+        }),
         validate: describedBy(networkSchemas.createNetwork, parseCreateNetwork),
         admission: {
-          prepare: (context, input, tx) => prepareCreateNetwork(networkDeps(context), context, input, tx),
+          prepare: (context, input, tx) =>
+            prepareCreateNetwork(networkDeps(context), context, input, tx),
           denied: (context, input, tx) => clearStagedNetwork(context, input, tx),
           // Transaction 2 threw (CONFLICT on the name, UNSUPPORTED): the staged projection row goes.
           abandoned: (context, input, tx) => clearStagedNetwork(context, input, tx),
@@ -1746,7 +1768,11 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       // R5: provider_machines, listed per provider account (key `all` periodic, then per account).
       discoveryReconciler(options.discovery ?? {}, depsOf),
       // D10: provider_costs per provider account whose client reads costs (key `all` periodic, then per account).
-      costsReconciler({ currency: options.billing?.currency, ...options.costs }, (context) => ({ ...depsOf(context), providers })),
+      costsReconciler(
+        options.costs ?? {},
+        (context) => ({ ...depsOf(context), providers }),
+        currency,
+      ),
       {
         // §3.7: sandbox expiry, sandbox.ready/deleted events, and warm pools per template.
         name: sandboxWork,
@@ -1831,7 +1857,11 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         periodic: [{ key: 'all', every: '30s' }],
         async run(context, key) {
           await context.sql.transaction((tx) =>
-            finishVolumeDeletions(depsOf(context), tx, key.startsWith('vol_') ? { onlyId: key } : {}),
+            finishVolumeDeletions(
+              depsOf(context),
+              tx,
+              key.startsWith('vol_') ? { onlyId: key } : {},
+            ),
           );
           return 'DONE';
         },
