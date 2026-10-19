@@ -8,7 +8,13 @@ import {
 } from '@better-compute/core';
 import { generateP256KeyPair, workloadIssuer } from '@better-compute/pki';
 import { closeFixtures, computeFixture } from '@better-compute/testing';
-import { accountSubject, defineProvider, vps } from '@better-compute/vps';
+import {
+  accountSubject,
+  createAccount,
+  defineProvider,
+  parseCreateAccount,
+  vps,
+} from '@better-compute/vps';
 
 // GCP WS1 (keyless tenant accounts): each provider account has a workload identity whose subject vps
 // alone fixes, `compute-account:<tenantId>/<provider>/<name>`, because a tenant's workload identity
@@ -43,6 +49,8 @@ type CheckContext = ProviderContext & { signal: AbortSignal };
 async function world(options: { issuer?: boolean } = {}) {
   /** Every context a client was built with (account create/update checks and real clients). */
   const built: ProviderContext[] = [];
+  /** The config of every client built, in order. */
+  const configs: unknown[] = [];
   const checkAccount = vi.fn(async (_config: { audience?: string }, _context: CheckContext) => {});
   const accountKey = vi.fn((config: { audience?: string }) => config.audience);
   const provider = defineProvider({
@@ -52,8 +60,9 @@ async function world(options: { issuer?: boolean } = {}) {
     config: manifest({ audience: field.string().optional() }),
     checkAccount,
     accountKey,
-    create: async (_config, context) => {
+    create: async (config, context) => {
       built.push(context);
+      configs.push(config);
       return {
         async listOffers() {
           return [];
@@ -102,7 +111,20 @@ async function world(options: { issuer?: boolean } = {}) {
     api.providerAccounts.update(as(who), { tenantId: tenants[who].id, accountId, config });
   const list = async (who: 'acme' | 'other') =>
     (await api.providerAccounts.list(as(who), { tenantId: tenants[who].id })).items as unknown[];
-  return { fixture, api, tenants, as, create, update, list, built, checkAccount, accountKey };
+  return {
+    fixture,
+    api,
+    tenants,
+    as,
+    create,
+    update,
+    list,
+    built,
+    configs,
+    checkAccount,
+    accountKey,
+    providers: new Map([[provider.id, provider]]),
+  };
 }
 
 const failure = (promise: Promise<unknown>) =>
@@ -177,6 +199,33 @@ describe('provider accounts: the workload identity vps fixes', () => {
     expect(siblings.size).toBe(5);
     expect(strangers.size).toBe(5);
     await expect(identity.mintProbe('self' as never, { audience: 'aud-main' })).rejects.toThrow();
+  });
+
+  it('a probe token lives as long as a real one', async () => {
+    const { create, built } = await world();
+    await create('acme', 'main', { audience: 'aud-main' });
+    const identity = built.at(-1)!.identity!;
+    const lifetime = (token: string) => {
+      const { exp, iat } = claims(token) as { exp: number; iat: number };
+      return exp - iat;
+    };
+    const real = lifetime((await identity.mint({ audience: 'aud-main' })).token);
+    expect(real).toBe(300);
+    for (const kind of ['sibling', 'stranger'] as const)
+      expect(lifetime((await identity.mintProbe(kind, { audience: 'aud-main' })).token), kind).toBe(
+        real,
+      );
+  });
+});
+
+describe('providerAccounts.create input', () => {
+  it('a request invalid in provider and tenant alike is refused for its provider first', () => {
+    expect(() =>
+      parseCreateAccount({ tenantId: 'not a tenant', provider: 'Not A Provider', name: 'main' }),
+    ).toThrow('provider must be a provider id');
+    expect(() =>
+      parseCreateAccount({ tenantId: 'not a tenant', provider: 'test', name: 'main' }),
+    ).toThrow('tenantId is invalid');
   });
 });
 
@@ -338,6 +387,85 @@ describe('provider accounts: exclusive keys', () => {
     await create('acme', 'keyless-a');
     await create('other', 'keyless-b');
     expect(await list('other')).toHaveLength(1);
+  });
+
+  // Two creates with one idempotency key can both miss the account in admission and both INSERT;
+  // the loser's INSERT then inserts nothing (ON CONFLICT DO NOTHING, untargeted) and must replay the
+  // winner rather than fail on the name or exclusive key index. PGlite is a single connection, so the
+  // overlap cannot be reproduced here: `createAccount` is called with the winner's id and no key,
+  // which skips the up-front read exactly as a loser that read before the winner committed.
+  it('a create whose INSERT meets a committed winner tells replay, key reuse, identity and name apart', async () => {
+    const { fixture, create, tenants, providers } = await world();
+    const winner = await create('acme', 'main', { audience: 'aud-main' }, 'k-race');
+    const loser = (input: { name: string; audience: string }, id: string) =>
+      failure(
+        fixture.database.transaction((tx) =>
+          createAccount(
+            tx,
+            providers,
+            {
+              tenantId: tenants.acme.id,
+              provider: 'test',
+              name: input.name,
+              config: { audience: input.audience },
+            },
+            id,
+          ),
+        ),
+      );
+    // The same request under the same key (the same id): the winner is returned.
+    expect(
+      await fixture.database.transaction((tx) =>
+        createAccount(
+          tx,
+          providers,
+          {
+            tenantId: tenants.acme.id,
+            provider: 'test',
+            name: 'main',
+            config: { audience: 'aud-main' },
+          },
+          winner.id,
+        ),
+      ),
+    ).toEqual(winner);
+    // The same key for another request.
+    expect(await loser({ name: 'other', audience: 'aud-other' }, winner.id)).toMatchObject({
+      code: 'CONFLICT',
+      message: 'This idempotency key was used for a different request',
+    });
+    // Another id, the winner's identity: the identity is taken, and the message names no account.
+    expect(await loser({ name: 'second', audience: 'aud-main' }, 'pacct_race2')).toEqual({
+      code: 'CONFLICT',
+      message: 'Another provider account already uses this test identity',
+      details: undefined,
+    });
+    // Another id, the winner's name: the name exists.
+    expect(await loser({ name: 'main', audience: 'aud-free' }, 'pacct_race3')).toMatchObject({
+      code: 'CONFLICT',
+      message: 'Provider account main already exists',
+    });
+  });
+
+  it('a deleted account leaves no cached client for a same-key re-create', async () => {
+    const { create, api, as, tenants, configs } = await world();
+    const offers = (accountId: string) =>
+      api.providerAccounts.offers(as('acme'), { tenantId: tenants.acme.id, accountId });
+    const first = await create('acme', 'main', { audience: 'aud-1' }, 'k-again');
+    await offers(first.id);
+    await api.providerAccounts.delete(as('acme'), {
+      tenantId: tenants.acme.id,
+      accountId: first.id,
+    });
+
+    const second = await create('acme', 'main', { audience: 'aud-2' }, 'k-again');
+    // The same id and version as the deleted account.
+    expect(second).toMatchObject({ id: first.id, version: 1, config: { audience: 'aud-2' } });
+    const before = configs.length;
+    await offers(second.id);
+    // A client was built again, from the new config.
+    expect(configs.length).toBe(before + 1);
+    expect(configs.at(-1)).toEqual({ audience: 'aud-2' });
   });
 
   it('no issuer configured → identity is undefined', async () => {

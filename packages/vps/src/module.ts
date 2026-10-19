@@ -1191,6 +1191,11 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
             type: 'provider-account',
             id: input.accountId,
           });
+          // A re-create with the same key gets this id and version 1 again: it must not find the
+          // deleted account's client. Evicting is always safe; after the commit as well, so a
+          // client built meanwhile from the still-visible row is dropped too.
+          clients.evict(input.accountId);
+          context.afterCommit?.(() => clients.evict(input.accountId));
           return { deleted: true as const };
         },
       }),
