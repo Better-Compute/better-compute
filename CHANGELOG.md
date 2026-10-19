@@ -188,6 +188,17 @@ All notable changes to the better-compute packages are documented here. The form
 - **Upgrading.** `core/0029_usage_sources` builds a unique index over every `usage_windows` partition, which locks
   `usage_windows` (reads included) while it builds: let retention prune old windows before upgrading a large
   deployment. Its two `CHECK`s are added `NOT VALID`, so no partition is scanned.
+- **Releases publish an explicit allowlist** (`scripts/release-publish.mjs`, [RELEASING.md](RELEASING.md)). CI
+  and manual releases publish only the packages on the release allowlist, in dependency order, never
+  `pnpm publish -r`: every package of 0.2.1 plus `@better-compute/gcp-common`, which provider-gcp depends on.
+  `@better-compute/aws-core` and `@better-compute/provider-digitalocean` are not released yet. A new package must
+  be put on the allowlist or in `notReleased` before anything publishes. `--dry-run` runs everything but the
+  upload.
+- **The API references name their version and read the full registry.** `docs/api-reference.md` (`pnpm docs:api`)
+  is generated from a control plane with every module registered, as the docs site's reference is, so methods a
+  module serves (`instances.create`, `networks.*`, …) are no longer listed as planned; both references name
+  `@better-compute/server`'s package version, and the packages page shows each package's version and whether a
+  release publishes it. `pnpm lint:repo` checks `docs/api-reference.md` and the release allowlist.
 
 ### Fixed
 

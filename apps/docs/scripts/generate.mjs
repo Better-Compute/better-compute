@@ -6,9 +6,10 @@
 //   node apps/docs/scripts/generate.mjs --check   fails when anything it would write differs (CI)
 //
 // Inputs: the built packages (run `tsc -b` first). A control plane is built with EVERY module registered
-// (provision + metal, vps, events, fleet, rollout, audit, beside the built-in node controllers, inventory and
-// capacity) on a PGlite executor that is never opened and an IamPort that refuses everything, so the method
-// registry, command kinds, migrations and jobs are the ones a full deployment serves. Beside it: PLAN.md §9.2
+// (./control-plane.mjs, shared with scripts/api-reference.mjs) on a PGlite executor that is never opened and
+// an IamPort that refuses everything, so the method registry, command kinds, migrations and jobs are the
+// ones a full deployment serves. Pages name the server's package version, and the packages page says which
+// packages a release publishes (scripts/release-publish.mjs). Beside it: PLAN.md §9.2
 // (core's `apiSurface`) for planned methods, core's error codes, the CLI manifest, every package.json.
 // Hand-written text comes from apps/docs/descriptions/: `api/<group>.md` (an overview paragraph, then
 // `## method` sections whose first paragraph is the summary) and `errors.md` (`## CODE` sections).
@@ -18,6 +19,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import prettier from 'prettier';
 import { checkDescriptions, firstParagraph, sections } from './descriptions.mjs';
+import { fullControlPlane, missingBuilds, packageVersion } from './control-plane.mjs';
 import { readProtocol } from './protocol.mjs';
 
 const docs = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -25,24 +27,10 @@ const root = join(docs, '..', '..');
 const check = process.argv.includes('--check');
 
 const dist = (pkg, entry = 'index.js') => join(root, 'packages', pkg, 'dist', entry);
-const needed = [
-  'core',
-  'server',
-  'postgres',
-  'pki',
-  'provision',
-  'metal',
-  'vps',
-  'events',
-  'fleet',
-  'rollout',
-  'audit',
-  'cli',
-  'observability',
+const missing = [
+  ...missingBuilds(root),
+  ...['cli', 'observability'].filter((pkg) => !existsSync(dist(pkg))),
 ];
-const missing = needed.filter(
-  (pkg) => !existsSync(dist(pkg, pkg === 'postgres' ? 'pglite.js' : 'index.js')),
-);
 if (missing.length) {
   console.error(`Missing builds: ${missing.join(', ')}. Run: node node_modules/typescript/bin/tsc -b`);
   process.exit(1);
@@ -50,62 +38,25 @@ if (missing.length) {
 const load = (pkg, entry) => import(pathToFileURL(dist(pkg, entry)).href);
 
 const core = await load('core');
-const server = await load('server');
-const { pglite } = await load('postgres', 'pglite.js');
-const pki = await load('pki');
-const { provisionModule, builtinConfigUnits } = await load('provision');
-const { metal } = await load('metal');
-const { vps } = await load('vps');
-const { eventsModule, eventCatalog } = await load('events');
-const { fleetModule } = await load('fleet');
-const { rolloutModule } = await load('rollout');
-const { auditModule } = await load('audit');
+const { builtinConfigUnits } = await load('provision');
+const { eventCatalog } = await load('events');
 const { cliManifest } = await load('cli');
 const { metricCatalog } = await load('observability');
+// The release a page documents: the server's package version, and whether a package is published
+// (scripts/release-publish.mjs's allowlist) or left out.
+const serverVersion = packageVersion(root, 'server');
+const { releaseAllowlist, notReleased } = await import(
+  pathToFileURL(join(root, 'scripts', 'release-publish.mjs')).href
+);
 
 // ---- The live registry, with every module --------------------------------------------------------
 
-const refuse = () => Promise.reject(new Error('the docs generator never calls IAM'));
-const database = pglite();
-const metalModule = metal();
-const compute = server.betterCompute({
-  database,
-  iam: {
-    authenticate: refuse,
-    require: refuse,
-    authorize: refuse,
-    authorizeMany: refuse,
-    requestConfirmation: refuse,
-    billingCheck: refuse,
-    recordUsage: refuse,
-    featureEnabled: refuse,
-    capabilities: () => ({
-      pluginResolver: false,
-      eventDetail: false,
-      evaluate: false,
-      readOnlyDecisions: false,
-    }),
-  },
+const { compute, database, server } = await fullControlPlane(root, {
+  who: 'the docs generator',
   secret: 'docs-generator-placeholder-secret-0123456789',
   baseURL: 'https://compute.example.com',
-  rootTenantId: 'root',
-  // Tunnels (tunnels.open, nodes.issueSshCert/revokeSshCert) register only with an exec-ticket issuer.
-  tunnels: { issuer: pki.createExecTicketIssuer({ issuer: 'https://docs.invalid' }) },
-  modules: [
-    provisionModule({ modules: [metalModule] }),
-    metalModule,
-    vps(),
-    eventsModule({ secret: 'docs-generator-placeholder-secret-0123456789' }),
-    fleetModule(),
-    rolloutModule({
-      release: { pins: [pki.spkiPin(pki.generateP256KeyPair().publicKey)] },
-      downloadsUrl: 'https://downloads.example.com',
-    }),
-    auditModule({ signer: pki.createSigningKey() }),
-  ],
 });
 const { registry, endpoint } = compute;
-
 
 // ---- Data -----------------------------------------------------------------------------------------
 
@@ -216,6 +167,15 @@ for (const entry of (await readdir(join(root, 'packages'), { withFileTypes: true
     directory: `packages/${entry}`,
     description: manifest.description ?? '',
     private: manifest.private === true,
+    version: manifest.version,
+    // Published by a release (scripts/release-publish.mjs) or deliberately left out, and why.
+    release: releaseAllowlist.includes(manifest.name)
+      ? 'released'
+      : Object.hasOwn(notReleased, manifest.name)
+        ? `not released: ${notReleased[manifest.name]}`
+        : manifest.private === true
+          ? 'private'
+          : 'not released',
     exports: Object.keys(manifest.exports ?? {}),
   });
 }
@@ -326,8 +286,8 @@ for (const entry of api) {
       `Methods of the ${code(entry.group)} group, contributed by ${code(entry.module)}.`,
     '',
     registered === entry.methods.length
-      ? `All ${registered} methods are served by this release.`
-      : `${registered} of ${entry.methods.length} methods are served by this release; the others are planned for the phase shown.`,
+      ? `All ${registered} methods are served by @better-compute/server ${serverVersion}.`
+      : `${registered} of ${entry.methods.length} methods are served by @better-compute/server ${serverVersion}; the others are planned for the phase shown.`,
     '',
     '| Method | Kind | Authorization | Phase | Status |',
     '| --- | --- | --- | --- | --- |',
@@ -363,6 +323,8 @@ files.set(
     `Every method is ${code(`POST ${endpoint.basePath}/{group}/{method}`)} with a JSON object body, ${code('content-type: application/json')} and ${code('X-Better-Compute: 1')} (else ${code('CSRF_REJECTED')}), at most ${server.maxBodyBytes / 1024} KiB. Answers are ${code('{ "data": … }')} or ${code('{ "error": { "code", "message", "details"? } }')}; see [errors](/docs/reference/errors). Plugins are served under ${code(`${endpoint.basePath}/plugins/{id}/{group}/{method}`)}.`,
     '',
     'A call is authenticated (except public methods), refused before any database access when the caller is outside the input tenant and the root tenant, and decided once on `action @ resource`. *+ items* marks list methods, which also filter items one by one.',
+    '',
+    `This reference is generated from @better-compute/server ${serverVersion} with every module registered. *Served* counts the methods that release routes; the others are planned (PLAN.md §9.2).`,
     '',
     '| Group | Module | Methods | Served |',
     '| --- | --- | --- | --- |',
@@ -563,15 +525,18 @@ files.set(
   [
     frontmatter({
       title: 'Packages',
-      description: 'Every package of the repository, what it is for and its entry points.',
+      description:
+        'Every package of the repository, its version, whether a release publishes it, what it is for and its entry points.',
     }),
-    generatedNote('packages/*/package.json'),
+    generatedNote('packages/*/package.json and the release allowlist in scripts/release-publish.mjs'),
     '',
-    '| Package | Description | Entry points |',
-    '| --- | --- | --- |',
+    `A release publishes ${packages.filter((entry) => entry.release === 'released').length} of these ${packages.length} packages to npm, all at one version; the release allowlist in ${code('scripts/release-publish.mjs')} decides which.`,
+    '',
+    '| Package | Version | Release | Description | Entry points |',
+    '| --- | --- | --- | --- | --- |',
     ...packages.map(
       (entry) =>
-        `| ${code(entry.name)} | ${cell(entry.description)} | ${entry.exports.map(code).join(', ')} |`,
+        `| ${code(entry.name)} | ${entry.version} | ${cell(entry.release)} | ${cell(entry.description)} | ${entry.exports.map(code).join(', ')} |`,
     ),
   ].join('\n'),
 );

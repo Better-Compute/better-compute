@@ -65,7 +65,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm test:postgres
-  # Publishes every packages/* package to npm after a green push to main when any of them is not on npm
+  # Publishes the release allowlist (scripts/release-publish.mjs; never `pnpm publish -r`, which would also
+  # publish aws-core and provider-digitalocean) to npm after a green push to main when any of them is not on npm
   # at the current version yet, then tags v<version> and creates the GitHub release with the version's
   # CHANGELOG.md section as its notes. Cut a release with `node scripts/release-version.mjs X.Y.Z` and a
   # `## X.Y.Z (YYYY-MM-DD)` section in CHANGELOG.md (RELEASING.md). A prerelease version (X.Y.Z-rc.N)
@@ -116,11 +117,8 @@ jobs:
           unpublished=""
           while IFS= read -r name; do
             if ! npm view "$name@$version" version >/dev/null 2>&1; then unpublished="$unpublished $name"; fi
-          done < <(node -e 'const fs = require("fs");
-            for (const d of fs.readdirSync("packages")) {
-              const p = `packages/${d}/package.json`;
-              if (fs.existsSync(p)) console.log(JSON.parse(fs.readFileSync(p, "utf8")).name);
-            }')
+          # Only the release allowlist; --list fails when it disagrees with packages/*.
+          done < <(node scripts/release-publish.mjs --list)
           publish=false
           if [ -z "$unpublished" ]; then
             echo "Every package is on npm at $version; nothing to publish."
@@ -172,8 +170,9 @@ jobs:
         run: pnpm check:packed-types
       - name: Publish to npm
         if: steps.version.outputs.publish == 'true'
-        # pnpm skips packages whose version is already published, so a rerun finishes a partial release.
-        run: pnpm publish -r --access public --provenance --no-git-checks --tag "$DIST_TAG"
+        # The release allowlist only, in dependency order. Versions already on npm are skipped, so a rerun
+        # finishes a partial release.
+        run: node scripts/release-publish.mjs --skip-build --provenance --tag "$DIST_TAG"
         env:
           DIST_TAG: ${{ steps.version.outputs.tag }}
           # Empty when the secret is not set; pnpm then relies on trusted publishing alone.

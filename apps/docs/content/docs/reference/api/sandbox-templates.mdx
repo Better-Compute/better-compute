@@ -7,7 +7,7 @@ description: "A sandbox template belongs to one tenant and fixes what its sandbo
 
 A sandbox template belongs to one tenant and fixes what its sandboxes run: a hosted pool, a flavor, an image, the pool's runtime, optional user data, TTL bounds and a warm pool. For each live template the `vps.sandboxes` reconciler keeps `warm.min` instances with `desiredState` `paused`, or `stopped` when the runtime cannot pause, creating at most 4 per template in one pass and deleting those beyond `warm.max`, newest first. Warm instances are owned by the template's author, placed and charged to quota when they are created, and a refill that fails is logged and tried again on a later pass. See [Sandboxes](/docs/guides/vps/sandboxes).
 
-All 5 methods are served by this release.
+All 5 methods are served by @better-compute/server 0.2.1.
 
 | Method              | Kind     | Authorization                                           | Phase | Status     |
 | ------------------- | -------- | ------------------------------------------------------- | ----- | ---------- |

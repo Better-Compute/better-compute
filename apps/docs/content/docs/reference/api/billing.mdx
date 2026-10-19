@@ -11,7 +11,7 @@ These methods call the IAM root tenant's billing API as a root service account. 
 
 The catalog these methods work from is the same one `better-compute iam setup --meters` and the IAM bridge sync: hosted and node GPU, CPU, memory and volume hours, provider VM meters, reservation-grant and managed-VM meters, the ancillary network, address, disk and snapshot meters, and the `flavor.*` meters root sets on flavors. `vps({ billing: { gpuModels, gpuFamilies } })` names the GPU models whose VM meters exist; name the same models as the bridge so the two agree.
 
-All 6 methods are served by this release.
+All 6 methods are served by @better-compute/server 0.2.1.
 
 | Method                            | Kind     | Authorization                              | Phase | Status     |
 | --------------------------------- | -------- | ------------------------------------------ | ----- | ---------- |

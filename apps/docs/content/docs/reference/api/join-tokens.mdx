@@ -7,7 +7,7 @@ description: 'Join tokens are single-purpose credentials that let a limited numb
 
 Join tokens are single-purpose credentials that let a limited number of daemons join one pool for a limited time. The bearer form `bcjt_<id>.<secret>` is returned once, when the token is created; the control plane stores only the SHA-256 of the secret. Every method is decided on `compute-pool/{poolId}`. See [Joining nodes](/docs/guides/nodes/joining).
 
-All 3 methods are served by this release.
+All 3 methods are served by @better-compute/server 0.2.1.
 
 | Method              | Kind     | Authorization                                 | Phase | Status     |
 | ------------------- | -------- | --------------------------------------------- | ----- | ---------- |

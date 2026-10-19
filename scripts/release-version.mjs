@@ -29,5 +29,5 @@ if (updatedSource === versionSource && !versionSource.includes(`export const ser
 await writeFile(versionFile, updatedSource);
 const date = new Date().toISOString().slice(0, 10);
 console.log(
-  `Updated package metadata to ${version}. Next (RELEASING.md): move CHANGELOG.md's Unreleased notes under "## ${version} (${date})" and leave "## Unreleased" empty above it (\`node scripts/release-notes.mjs ${version}\` prints the release notes), then run pnpm install, pnpm check, pnpm pack:all, pnpm check:packed-types and pnpm test:packed.`,
+  `Updated package metadata to ${version}. Next (RELEASING.md): move CHANGELOG.md's Unreleased notes under "## ${version} (${date})" and leave "## Unreleased" empty above it (\`node scripts/release-notes.mjs ${version}\` prints the release notes), regenerate the references that name the version (tsc -b, node apps/docs/scripts/generate.mjs, pnpm docs:api), then run pnpm install, pnpm check, pnpm pack:all, pnpm check:packed-types, pnpm test:packed and node scripts/release-publish.mjs --dry-run.`,
 );

@@ -7,7 +7,7 @@ description: "Site tokens are join tokens with the role `site`: they enroll `bcd
 
 Site tokens are join tokens with the role `site`: they enroll `bcd site` agents on one site, which then contend for the site's boot lease. They share the join-token bearer format `bcjt_<id>.<secret>` and storage, so the secret is shown once and only its hash is kept. Both methods are decided as `compute:sites:manage` on `compute-site/{siteId}`. See [Sites](/docs/guides/bare-metal/sites).
 
-All 2 methods are served by this release.
+All 2 methods are served by @better-compute/server 0.2.1.
 
 | Method              | Kind     | Authorization                           | Phase | Status     |
 | ------------------- | -------- | --------------------------------------- | ----- | ---------- |

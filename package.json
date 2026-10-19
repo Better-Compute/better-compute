@@ -15,7 +15,7 @@
     "test:iam-remote": "vitest run --config vitest.iam-remote.config.ts",
     "check": "pnpm typecheck && pnpm test && pnpm test:iam-remote && pnpm lint:repo && pnpm validate:packages",
     "check:head": "node scripts/head-check.mjs",
-    "lint:repo": "node scripts/check-deps.mjs && node scripts/check-sql-now.mjs && node scripts/umbrella.mjs --check && node scripts/proto-gen.mjs --check && node scripts/proto-gen.mjs --breaking && node apps/docs/scripts/generate.mjs --check && node scripts/api-surface.mjs",
+    "lint:repo": "node scripts/check-deps.mjs && node scripts/check-sql-now.mjs && node scripts/umbrella.mjs --check && node scripts/proto-gen.mjs --check && node scripts/proto-gen.mjs --breaking && node apps/docs/scripts/generate.mjs --check && node scripts/api-reference.mjs --check && node scripts/release-publish.mjs --check && node scripts/api-surface.mjs",
     "api:surface": "node scripts/api-surface.mjs --update",
     "validate:packages": "node scripts/validate-packages.mjs",
     "pack:all": "node scripts/pack.mjs",

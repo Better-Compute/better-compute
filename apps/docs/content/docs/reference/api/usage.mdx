@@ -7,7 +7,7 @@ description: "The hourly usage windows compute meters and hands to Better IAM bi
 
 The hourly usage windows compute meters and hands to Better IAM billing, as the tenant can read them: one per hour and meter of every source (allocations of hosted capacity, provider instances, reservation grants, networks, snapshots, and pass-through provider costs). `list` and `export` decide `compute:usage:read` on `compute-tenant/{tenantId}`, or on `compute-project/{projectId}` when the call names a project, since windows carry their project as a tag. `platform`, `deadLetters`, `retry` and `void` are the root tenant's: the cross-tenant view and the corrections to what the usage sink sent. They decide `compute:usage:read` (`compute:usage:manage` for `retry` and `void`) on `compute-fleet/global`, so only root can call them. A voided window is not usage: `list` and `export` leave it out of rows and totals, and `platform` counts it apart. See [Billing and usage](/docs/guides/iam/billing-and-usage).
 
-All 6 methods are served by this release.
+All 6 methods are served by @better-compute/server 0.2.1.
 
 | Method                        | Kind     | Authorization                                                                       | Phase | Status     |
 | ----------------------------- | -------- | ----------------------------------------------------------------------------------- | ----- | ---------- |

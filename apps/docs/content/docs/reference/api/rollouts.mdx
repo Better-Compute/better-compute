@@ -7,7 +7,7 @@ description: "Rollouts take a registered bcd release to the nodes of the tenant'
 
 Rollouts take a registered bcd release to the nodes of the tenant's pools in waves, within each pool's disruption budget. A controller settles nodes as they report the new version, pauses the rollout when a wave's failure ratio exceeds its limit, and soaks between waves. Every method decides `compute:fleet:admin` on the fleet scope. See [Rollouts](/docs/guides/rollouts).
 
-All 6 methods are served by this release.
+All 6 methods are served by @better-compute/server 0.2.1.
 
 | Method              | Kind     | Authorization                           | Phase | Status     |
 | ------------------- | -------- | --------------------------------------- | ----- | ---------- |

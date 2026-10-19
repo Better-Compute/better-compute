@@ -7,7 +7,7 @@ description: "Sandbox volumes are persistent disks on one host that a tenant's s
 
 Sandbox volumes are persistent disks on one host that a tenant's sandboxes attach across runs, so an agent keeps its memory, caches and checkouts. A volume is placed when it is created: its size is booked as `diskGiB` on one host of the pool, charged to the tenant's quota, and the host keeps it as a sparse raw file. A sandbox template names volumes with a mount path. Sandboxes of that template then run on the volume's host only, attach it as an extra virtio disk, and mount it by serial (`/dev/disk/by-id/virtio-<serial>`) from their user data. The first mount formats it as ext4, and no later one ever does. A volume takes any number of read-only attachments or one read-write attachment, never both. Volumes are metered as `vps.volume.gib.hours` from creation until the disk is released. See [Sandboxes](/docs/guides/vps/sandboxes).
 
-All 5 methods are served by this release.
+All 5 methods are served by @better-compute/server 0.2.1.
 
 | Method              | Kind     | Authorization                                         | Phase | Status     |
 | ------------------- | -------- | ----------------------------------------------------- | ----- | ---------- |

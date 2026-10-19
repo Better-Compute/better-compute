@@ -5,9 +5,10 @@
 //
 // head-check builds a worktree at HEAD and runs this inside it while holding the tree, so other
 // sessions' uncommitted work (their dist output) never reaches the generated reference. Here it runs
-// `generate.mjs`, then `scripts/api-surface.mjs --update` (additions are frozen; a break is refused,
-// and this exits non-zero), and copies every file those changed in the tree to the same path in
-// <checkout root>. Review and commit there.
+// `generate.mjs` and `scripts/api-reference.mjs` (docs/api-reference.md), then
+// `scripts/api-surface.mjs --update` (additions are frozen; a break is refused, and this exits
+// non-zero), and copies every file those changed in the tree to the same path in <checkout root>.
+// Review and commit there.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
@@ -27,6 +28,7 @@ if (target === tree) {
 const node = (script, args = []) =>
   spawnSync(process.execPath, [join(tree, script), ...args], { cwd: tree, stdio: 'inherit' }).status ?? 1;
 if (node('apps/docs/scripts/generate.mjs') !== 0) process.exit(1);
+if (node('scripts/api-reference.mjs') !== 0) process.exit(1);
 // `--accept-breaking` after the checkout root records a deliberate break (e.g. a security fix that moves
 // a method's decision to another resource); nothing else is passed on.
 const surface = node('scripts/api-surface.mjs', ['--update', ...process.argv.slice(3).filter((arg) => arg === '--accept-breaking')]);
@@ -34,7 +36,7 @@ const surface = node('scripts/api-surface.mjs', ['--update', ...process.argv.sli
 const defaultGit = join(process.env.LOCALAPPDATA ?? '', 'GitHubDesktop', 'app-3.6.5', 'resources', 'app', 'git', 'cmd', 'git.exe');
 const git = process.env.GIT ?? (existsSync(defaultGit) ? defaultGit : 'git');
 // Untracked files one by one (a new group's page may sit in a new directory).
-const changed = execFileSync(git, ['status', '--porcelain', '--untracked-files=all', '--', 'apps/docs', 'generated'], {
+const changed = execFileSync(git, ['status', '--porcelain', '--untracked-files=all', '--', 'apps/docs', 'generated', 'docs/api-reference.md'], {
   cwd: tree,
   encoding: 'utf8',
 })

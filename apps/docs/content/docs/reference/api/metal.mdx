@@ -7,7 +7,7 @@ description: "The metal group enrolls machines by their BMCs and moves them thro
 
 The metal group enrolls machines by their BMCs and moves them through the provision state machine: inspect, commission, deploy, rescue, release and retire. Each verb checks the move against the provision state table, records it in one transaction and queues the metal reconciler, which runs the workflow of the new state; no verb touches the machine itself. Every method returns the node's metal view, which reports whether BMC credentials are set but never returns them. See [Bare metal](/docs/guides/bare-metal) and [BMC drivers and credentials](/docs/guides/bare-metal/bmc).
 
-All 15 methods are served by this release.
+All 15 methods are served by @better-compute/server 0.2.1.
 
 | Method                      | Kind     | Authorization                              | Phase | Status     |
 | --------------------------- | -------- | ------------------------------------------ | ----- | ---------- |

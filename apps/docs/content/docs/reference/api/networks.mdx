@@ -13,7 +13,7 @@ The provider-side name of a network, a subnet and a rule is `bc-` and the resour
 
 Every tenant's networks on an account live in that account's one provider project, so they share its quotas (VPC networks, subnetworks and firewall rules per project): one tenant's networks use up what the others on the account can get. To bound that, a tenant has at most 10 networks that are not deleted, and a network at most 16 subnets and 100 firewall rules (`QUOTA_EXCEEDED`, with the cap in `details.limit`). The project's own quotas still apply on top, and a refusal of the provider shows as `error` with its message.
 
-All 8 methods are served by this release.
+All 8 methods are served by @better-compute/server 0.2.1.
 
 | Method                          | Kind     | Authorization                                      | Phase | Status     |
 | ------------------------------- | -------- | -------------------------------------------------- | ----- | ---------- |

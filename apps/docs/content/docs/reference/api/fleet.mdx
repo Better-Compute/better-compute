@@ -7,7 +7,7 @@ description: "The fleet group manages a tenant's platform objects as one FleetCo
 
 The fleet group manages a tenant's platform objects as one FleetConfig document: sites, provider accounts, pools, owner quotas, offers and flavors. `plan` diffs a document against what exists, `apply` runs the plan through the owning modules' own methods, and the applied document is kept so that drift from it is reported. Every method decides `compute:fleet:admin` on the fleet scope. See [Fleet configuration](/docs/guides/fleet-config).
 
-All 4 methods are served by this release.
+All 4 methods are served by @better-compute/server 0.2.1.
 
 | Method              | Kind     | Authorization                           | Phase | Status     |
 | ------------------- | -------- | --------------------------------------- | ----- | ---------- |

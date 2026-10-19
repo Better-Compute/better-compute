@@ -200,6 +200,12 @@ run when `BETTER_COMPUTE_POSTGRES_URL` is set (`pnpm test:postgres`). Inside `da
 covers the scripts and the repository rules CI enforces, and
 [local development](https://better-compute.com/docs/operations/local-development) covers the dev server and simulator.
 
+## Releasing
+
+Releases publish an explicit allowlist of packages with `node scripts/release-publish.mjs` (`--dry-run` first), never
+`pnpm publish -r`; `aws-core` and `provider-digitalocean` are not released yet. [RELEASING.md](RELEASING.md) is the
+checklist.
+
 ## Contributing
 
 Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the build and test commands, the commit style

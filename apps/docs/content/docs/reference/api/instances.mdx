@@ -7,7 +7,7 @@ description: "Instances are VMs in a VPS pool: hosted pools place them on a host
 
 Instances are VMs in a VPS pool: hosted pools place them on a host through capacity, and provider pools create them through the pool's provider account. After `create`, every call only changes `desiredState`; the `vps.instances` reconciler converges the instance and publishes `instance.*` events as its `state` moves. Instances are also the sandbox primitive today. See [Instances](/docs/guides/vps/instances).
 
-All 11 methods are served by this release.
+All 11 methods are served by @better-compute/server 0.2.1.
 
 | Method                  | Kind     | Authorization                                       | Phase | Status     |
 | ----------------------- | -------- | --------------------------------------------------- | ----- | ---------- |
