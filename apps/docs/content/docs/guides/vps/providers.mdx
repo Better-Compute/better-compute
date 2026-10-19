@@ -631,4 +631,6 @@ The token needs the custom scopes `account:read`, `regions:read`, `sizes:read`, 
 the DigitalOcean specifics against an in-memory emulator passed as `fetch`, and `tests/do-end-to-end.test.ts` runs the
 provider and the emulator through vps. A few DigitalOcean behaviours are not in its specification (whether a tag
 filter lists GPU Droplets, the text of some 422 messages); an opt-in live suite, `tests/live/digitalocean.live.test.ts`
-(`BC_DO_LIVE`, `BC_DO_TOKEN`, `BC_DO_SSH_KEY_FINGERPRINT`), covers them and has not been run yet.
+(`BC_DO_LIVE`, `BC_DO_TOKEN`, `BC_DO_SSH_KEY_FINGERPRINT`), covers them and has not been run yet. Neither it nor
+the emulator checks yet that DigitalOcean honours a rule's `deny`, that a firewall on a tag covers a new Droplet before
+it serves traffic, or that a `PUT` renames a firewall; see the package README.

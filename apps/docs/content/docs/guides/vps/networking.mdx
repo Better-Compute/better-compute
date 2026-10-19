@@ -231,7 +231,9 @@ tags. The tenant-facing behaviour above holds; these are the differences.
 - **The base firewall.** A network is its base firewall `bc-base-<net16>` (`net16` is 16 hex digits of the sha256 of
   the network's provider-side name). It targets the tag `bc-net-<net16>`, which every instance created on the network carries from its
   first boot, and has no inbound rule and an allow-all outbound rule: the "deny ingress, allow egress" of any other
-  provider. The network is `ready` once that firewall exists.
+  provider. The network is `ready` once that firewall exists, not once DigitalOcean has applied it. That a firewall
+  on a tag covers a new instance before it serves traffic, and that DigitalOcean honours a rule's `deny`, are not
+  verified against a real account yet.
 - **A rule is a Cloud Firewall** named `<rule>.n<net16>.p<priority>`. DigitalOcean firewalls carry neither a network
   nor a priority, so the name does. A rule with no targets applies to the network's member tag; the tags a rule
   targets replace that. A firewall is applied in the background: the rule is `pending` until DigitalOcean reports it
