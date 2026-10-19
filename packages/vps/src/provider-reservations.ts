@@ -18,6 +18,7 @@ import {
 } from '@better-compute/core';
 import { readAccount, type ClientDeps, type ProviderClients } from './accounts.js';
 import { createFlavor, deleteFlavor } from './flavors.js';
+import { checkGrantCapacity, reservationGone } from './reservation-grants.js';
 import { key as keyOf, name, object, optional, tenant, id } from './input.js';
 
 // Provider capacity reservations (GCE reservations and the like): the `vps.reservations` worker
@@ -156,6 +157,8 @@ export interface ReservationDeps {
   rootTenantId?: string;
   /** The host's workload issuer: provider accounts' identity (`ClientDeps.workload`). */
   workload?: ClientDeps['workload'];
+  /** The deployment's GPU meter models (`vps({ billing: { gpuModels } })`): intervals reopened when a reservation goes. */
+  meterGpuModels?: readonly string[];
 }
 
 /** A pass over one account must stay well inside the reconciler's claim. */
@@ -374,12 +377,16 @@ async function applyScan(
   }
   const seenIds = new Set(seen.map((reservation) => reservation.id));
   const gone = rows.filter((row) => row.gone_at === null && !seenIds.has(row.reservation_id));
-  if (gone.length > 0)
-    await tx.query(
+  let goneAt = 0;
+  if (gone.length > 0) {
+    const { rows: marked } = await tx.query<{ at: number }>(
       `UPDATE provider_reservations SET gone_at = compute_now()
-        WHERE account_id = $1 AND reservation_id = ANY($2::text[])`,
+        WHERE account_id = $1 AND reservation_id = ANY($2::text[])
+        RETURNING (extract(epoch FROM gone_at) * 1000)::float8 AS at`,
       [accountId, gone.map((row) => row.reservation_id)],
     );
+    goneAt = Math.round(Number(marked[0]?.at ?? deps.clock.now()));
+  }
   const pending = await pendingByReservation(tx, accountId);
   const publish = (type: string, data: Record<string, Json>) =>
     deps.events.publish(tx, {
@@ -417,11 +424,21 @@ async function applyScan(
         'provider.reservation.changed',
         dataOf(reservation, accountId, { free, inUse: reservation.inUse, changes }),
       );
+    // Fewer slots than its grants hold (FW-5): root is told once per change; the grants keep billing.
+    if (old.total !== reservation.total)
+      await checkGrantCapacity(deps, tx, {
+        tenantId,
+        accountId,
+        reservationId: reservation.id,
+        total: reservation.total,
+      });
     if ((old.state === 'scheduled' || old.state === 'creating') && reservation.state === 'ready')
       await publish('provider.reservation.ready', dataOf(reservation, accountId, { free }));
   }
   for (const row of gone) {
     const reservation = reservationOf(row);
+    // Its grants end (or are cancelled) and its instances bill on-demand from now (FW-5).
+    await reservationGone(deps, tx, accountId, row.reservation_id, goneAt);
     const extra: Record<string, Json> = {};
     if (row.pool_id !== null) extra.poolId = row.pool_id;
     if (row.flavor_id !== null) extra.flavorId = row.flavor_id;

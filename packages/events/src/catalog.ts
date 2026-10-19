@@ -223,7 +223,14 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     subject: 'reservation-grant/{id}',
     module: 'vps',
     description:
-      'Reservation grants (root commits reservation slots to a tenant), published in the grantee tenant: created (+ accountId, reservationId), active, ended, cancelled; data { grantId, poolId, projectId?, slots, startsAt, endsAt }',
+      'Reservation grants (root commits reservation slots to a tenant), published in the grantee tenant: created (+ accountId, reservationId), active, ended, cancelled (+ reason: reservation-gone when the provider stopped reporting the reservation); data { grantId, poolId, projectId?, slots, startsAt, endsAt }',
+  },
+  {
+    type: 'reservation-grant.capacity-short',
+    subject: 'provider-account/{id}',
+    module: 'vps',
+    description:
+      "A reservations scan saw a reservation's total drop below the slots its live grants hold (at their peak overlap), published in the account's (platform) tenant once per change; the grants keep billing { accountId, reservationId, total, grantedSlots, grantIds }",
   },
   {
     type: 'network.*',

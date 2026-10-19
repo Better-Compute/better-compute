@@ -367,6 +367,8 @@ export async function settleGrantStates(
   tx: SqlTx,
   now: number,
   onlyIds?: readonly string[],
+  /** Why the grants end, on their `reservation-grant.ended` events (`reservation-gone`, FW-5). */
+  reason?: string,
 ): Promise<GrantRow[]> {
   // Lock order reservation → grant, as admission and the API take them (F10-6); reservations sorted, so two runs
   // never wait on each other in a cycle. Adoption counts and moves instances under these locks.
@@ -398,7 +400,7 @@ export async function settleGrantStates(
       await adoptIntoGrant(deps, tx, row, Math.round(Number(row.starts)));
     }
     if (done) {
-      await publish(deps, tx, row, 'reservation-grant.ended');
+      await publish(deps, tx, row, 'reservation-grant.ended', reason ? { reason } : {});
       ended.push({ ...row, state });
       const end = Math.round(Number(row.ends));
       // A renewal: another grant of the tenant on the reservation, live at the end, carries its VMs on (F10-3).
@@ -736,18 +738,100 @@ export async function endGrant(
  * then settled (`ended`, its instances reopened); a grant that has not started is `cancelled`. A no-op for an ended or
  * cancelled grant.
  */
-async function finishGrant(deps: GrantDeps, tx: SqlTx, row: GrantRow, now: number): Promise<void> {
+async function finishGrant(
+  deps: GrantDeps,
+  tx: SqlTx,
+  row: GrantRow,
+  now: number,
+  reason?: string,
+): Promise<void> {
   if (row.state === 'ended' || row.state === 'cancelled') return;
   if (Number(row.starts) >= now) {
     await tx.query(`UPDATE reservation_grants SET state = 'cancelled' WHERE id = $1`, [row.id]);
-    await publish(deps, tx, row, 'reservation-grant.cancelled');
+    await publish(deps, tx, row, 'reservation-grant.cancelled', reason ? { reason } : {});
     return;
   }
   await tx.query(
     `UPDATE reservation_grants SET ends_at = LEAST(ends_at, GREATEST(metered_until, ${at$(2)})) WHERE id = $1`,
     [row.id, now],
   );
-  await settleGrantStates(deps, tx, now, [row.id]);
+  await settleGrantStates(deps, tx, now, [row.id], reason);
+}
+
+/**
+ * A reservation the provider stopped reporting (FW-5, from the reservations scan, which holds its row lock: lock
+ * order reservation → grant). Its instances are no longer reserved: `instances.provider_reservation` is cleared and
+ * their open intervals reopen at `goneAt`, on-demand. Its scheduled grants are cancelled and its active ones end at
+ * `goneAt` (`finishGrant`, events with `reason: 'reservation-gone'`). Returns how many grants it ended or cancelled.
+ */
+export async function reservationGone(
+  deps: GrantDeps,
+  tx: SqlTx,
+  accountIdValue: string,
+  reservationIdValue: string,
+  goneAt: number,
+): Promise<number> {
+  await lockReservationRow(tx, accountIdValue, reservationIdValue);
+  // First, so every interval reopened below (the grants' included) reads the instance as no longer reserved.
+  const { rows: admitted } = await tx.query<{ id: string }>(
+    `UPDATE instances SET provider_reservation = NULL, provider_reservation_at = NULL
+      WHERE provider_account_id = $1 AND provider_reservation = $2 RETURNING id`,
+    [accountIdValue, reservationIdValue],
+  );
+  const { rows: grants } = await tx.query<GrantRow>(
+    `SELECT ${grantColumns} FROM reservation_grants g
+      WHERE g.account_id = $1 AND g.reservation_id = $2 AND g.state IN ('scheduled', 'active')
+      ORDER BY g.id FOR UPDATE`,
+    [accountIdValue, reservationIdValue],
+  );
+  for (const row of grants) await finishGrant(deps, tx, row, goneAt, 'reservation-gone');
+  for (const id of admitted.map((row) => row.id).sort()) await reopenInterval(tx, id, goneAt, deps);
+  return grants.length;
+}
+
+/**
+ * The reservations scan saw a reservation's `total` change (FW-5): when it is now below the slots its live grants
+ * hold at their peak overlap, publishes `reservation-grant.capacity-short` `{ accountId, reservationId, total,
+ * grantedSlots, grantIds }` in the account's tenant. Grants keep billing: root decides what to end.
+ */
+export async function checkGrantCapacity(
+  deps: Pick<GrantDeps, 'events'>,
+  tx: SqlTx,
+  input: { tenantId: string; accountId: string; reservationId: string; total: number },
+): Promise<boolean> {
+  const { rows } = await tx.query<{ id: string; slots: number; starts: number; ends: number }>(
+    `SELECT g.id, g.slots, ${ms('g.starts_at')} AS starts, ${ms('g.ends_at')} AS ends
+       FROM reservation_grants g
+      WHERE g.account_id = $1 AND g.reservation_id = $2 AND g.state IN ('scheduled', 'active')
+        AND g.ends_at > compute_now()
+      ORDER BY g.id`,
+    [input.accountId, input.reservationId],
+  );
+  if (rows.length === 0) return false;
+  const now = await dbNow(tx);
+  // The slots held at each moment a grant starts (or now), and the grants over the total at any of them.
+  let peak = 0;
+  const short = new Set<string>();
+  for (const at of new Set(rows.map((row) => Math.max(now, Math.round(Number(row.starts)))))) {
+    const live = rows.filter((row) => Number(row.starts) <= at && Number(row.ends) > at);
+    const held = live.reduce((total, row) => total + Number(row.slots), 0);
+    peak = Math.max(peak, held);
+    if (held > input.total) for (const row of live) short.add(row.id);
+  }
+  if (peak <= input.total) return false;
+  await deps.events.publish(tx, {
+    type: 'reservation-grant.capacity-short',
+    tenantId: input.tenantId,
+    subject: `provider-account/${input.accountId}`,
+    data: {
+      accountId: input.accountId,
+      reservationId: input.reservationId,
+      total: input.total,
+      grantedSlots: peak,
+      grantIds: [...short].sort(),
+    },
+  });
+  return true;
 }
 
 /**

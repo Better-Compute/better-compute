@@ -8,6 +8,8 @@ While a grant is `scheduled` or `active`, `providerAccounts.unbindReservation` a
 
 A grant's stopped instances keep their slots for the grantee: others never get a slot the grant pays for.
 
+When the provider stops reporting the reservation (the `vps.reservations` scan marks it gone), its active grants end at that moment and its scheduled ones are cancelled, as `end` would, with `reason: 'reservation-gone'` on their `reservation-grant.ended` / `.cancelled` events. Its instances are no longer reserved: they are billed on-demand from then on. When a scan sees the reservation's `total` drop below the slots its live grants hold (at their peak overlap), it publishes `reservation-grant.capacity-short` `{ accountId, reservationId, total, grantedSlots, grantIds }` in the platform's tenant, once per change of `total`. The grants keep billing: root decides which to end.
+
 States: `scheduled` until `startsAt`, `active` during the term, then `ended`; `cancelled` when ended before it started. Each change publishes a `reservation-grant.*` event (`created`, `active`, `ended`, `cancelled`) in the grantee's tenant, with `{ grantId, poolId, projectId?, slots, startsAt, endsAt }`.
 
 ## create

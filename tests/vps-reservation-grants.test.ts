@@ -1112,3 +1112,124 @@ describe('billing', () => {
     expect(await stateOf(world, onB.id)).toBe('active');
   });
 });
+
+// --- Final fix wave (FW-5): a reservation that is gone or shrinks ---------------------------------
+
+describe('reservation gone or shrunk (FW-5)', () => {
+  /** One `vps.reservations` scan of what the fake reports. */
+  const scan = (world: GceWorld) => world.tick('vps.reservations', 2);
+
+  it('a gone reservation ends its active grants, cancels scheduled ones and bills its instances on-demand', async () => {
+    const world = await grantWorld();
+    const h0 = nextHour(world);
+    await moveTo(world, h0);
+    const active = await grant(world, { to: 'acme', slots: 1, key: 'g-active' });
+    const later = await grant(world, {
+      to: 'other',
+      slots: 1,
+      key: 'g-later',
+      startsAt: h0 + DAY,
+      endsAt: h0 + 2 * DAY,
+    });
+    const inside = await createIn(world, 'acme', 'a-1');
+    const overflow = await createIn(world, 'acme', 'a-2');
+    await step(world, 2_000);
+    expect((await grantOf(world, inside.id)).reservation_grant_id).toBe(active.id);
+    expect((await grantOf(world, overflow.id)).reservation_grant_id).toBeNull();
+    world.cloud.reservations = [reservation()];
+    await moveTo(world, h0 + 30 * MINUTE);
+    await scan(world);
+    expect(await world.events('reservation-grant.ended')).toEqual([]);
+
+    // The provider no longer reports it.
+    world.cloud.reservations = [];
+    await moveTo(world, h0 + 90 * MINUTE);
+    const goneAt = world.fixture.clock.now();
+    await scan(world);
+    const get = (grantId: string) =>
+      world.api.reservationGrants.get(world.root, {
+        tenantId: world.rootTenant,
+        grantId,
+      }) as Promise<GrantView>;
+    expect(await get(active.id)).toMatchObject({ state: 'ended', endsAt: goneAt });
+    expect(await get(later.id)).toMatchObject({ state: 'cancelled' });
+    const events = await world.events('reservation-grant.');
+    expect(
+      events
+        .filter((event) => /ended|cancelled/.test(event.type))
+        .map((event) => [event.type, event.data.grantId, event.data.reason])
+        .sort(),
+    ).toEqual([
+      ['reservation-grant.cancelled', later.id, 'reservation-gone'],
+      ['reservation-grant.ended', active.id, 'reservation-gone'],
+    ]);
+    // Its instances are no longer reserved: their intervals reopen at gone_at, on-demand.
+    for (const created of [inside, overflow]) {
+      expect((await grantOf(world, created.id)).provider_reservation).toBeNull();
+      const list = await intervals(world, created.id);
+      expect(list.at(-2)).toMatchObject({ shape: { reserved: true }, ended: goneAt });
+      expect(list.at(-1)).toMatchObject({
+        started: goneAt,
+        ended: null,
+        shape: { reserved: false, granted: false },
+      });
+    }
+    await moveTo(world, h0 + 3 * HOUR + settle);
+    await meterInstances(world);
+    const late = (await computeWindows(world)).filter((row) => row.start >= h0 + 2 * HOUR);
+    expect(late.length).toBeGreaterThan(0);
+    expect(
+      late.some((row) => row.meter.startsWith('vm.reserved.') || row.meter.startsWith('vm.grant.')),
+    ).toBe(false);
+    expect(sum(late, 'vm.vcpu.hours')).toBe(2 * 12);
+  });
+
+  it('a reservation that shrinks below its granted slots publishes capacity-short once; grants keep billing', async () => {
+    const world = await grantWorld();
+    const a = await grant(world, { to: 'acme', slots: 2, key: 'g-a' });
+    const b = await grant(world, { to: 'other', slots: 1, key: 'g-b' });
+    world.cloud.reservations = [reservation()];
+    await world.fixture.advance(MINUTE);
+    await scan(world);
+    expect(await world.events('reservation-grant.capacity-short')).toEqual([]);
+    // 4 → 2 slots, with 3 granted.
+    world.cloud.reservations = [reservation({ total: 2 })];
+    await world.fixture.advance(10 * MINUTE);
+    await scan(world);
+    await world.fixture.advance(10 * MINUTE);
+    await scan(world);
+    const short = await world.events('reservation-grant.capacity-short');
+    expect(short).toEqual([
+      {
+        type: 'reservation-grant.capacity-short',
+        tenantId: world.rootTenant,
+        data: {
+          accountId: world.accountId,
+          reservationId: RSV,
+          total: 2,
+          grantedSlots: 3,
+          grantIds: [a.id, b.id].sort(),
+        },
+      },
+    ]);
+    for (const grantId of [a.id, b.id])
+      expect(
+        (
+          (await world.api.reservationGrants.get(world.root, {
+            tenantId: world.rootTenant,
+            grantId,
+          })) as GrantView
+        ).state,
+      ).toBe('active');
+    // Another change that is still short says so again; one back within the granted slots does not.
+    world.cloud.reservations = [reservation({ total: 1 })];
+    await world.fixture.advance(10 * MINUTE);
+    await scan(world);
+    world.cloud.reservations = [reservation({ total: 3 })];
+    await world.fixture.advance(10 * MINUTE);
+    await scan(world);
+    expect(
+      (await world.events('reservation-grant.capacity-short')).map((event) => event.data.total),
+    ).toEqual([2, 1]);
+  });
+});

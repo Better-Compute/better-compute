@@ -362,6 +362,10 @@ const grant = await compute.api.reservationGrants.create(rootCredential, {
   `vm.reserved.*` from then on. VMs attached with `billing: 'none'` are never taken in.
 - **Ending.** `reservationGrants.end` sets `endsAt` to now: the hours already in the term stay billed. A grant that
   has not started is `cancelled`. Deleting a tenant ends its active grants and cancels its scheduled ones.
+- **A reservation that goes or shrinks.** When the provider stops reporting the reservation, its active grants end
+  then and its scheduled ones are cancelled (`reason: 'reservation-gone'` on the events), and its VMs bill on-demand
+  from then on. When its `total` drops below the slots its live grants hold, `reservation-grant.capacity-short`
+  tells root once per change; the grants keep billing until root ends one.
 - **Accounts.** `providerAccounts.unbindReservation` and `providerAccounts.delete` refuse with `INVALID_STATE`
   (`details.grantIds`) while a grant on the account is scheduled or active, and `delete` also until `vps.grants`
   has metered every committed slot-hour of the ended ones.

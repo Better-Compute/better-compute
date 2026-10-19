@@ -687,6 +687,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     clients,
     ...rootOf(context),
     ...workloadOf(context),
+    ...(options.billing?.gpuModels ? { meterGpuModels: options.billing.gpuModels } : {}),
   });
   /** Reservation grants (D7): the API and the `vps.grants` reconciler, which also reopens a grant's instances. */
   const grantDeps = (context: ModuleContext): GrantDeps => ({

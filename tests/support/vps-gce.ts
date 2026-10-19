@@ -2,6 +2,7 @@ import {
   ComputeError,
   manifest,
   type ExternalMachine,
+  type ExternalReservation,
   type ProviderDefinition,
 } from '@better-compute/core';
 import { closeFixtures, computeFixture, type ComputeFixture } from '@better-compute/testing';
@@ -25,6 +26,8 @@ export interface FakeGce {
   onDiscover?: () => Promise<void>;
   /** The machine id the next `create`s return (a provider reusing an id). */
   createId?: string;
+  /** What `listReservations` reports; unset, it fails (a test that never scans reservations seeds rows itself). */
+  reservations?: ExternalReservation[];
 }
 
 const copy = (machine: ExternalMachine): ExternalMachine =>
@@ -66,6 +69,11 @@ export function fakeGceProvider(cloud: FakeGce, id = 'fake-gce'): ProviderDefini
     create: () => ({
       async listOffers() {
         return [];
+      },
+      async listReservations() {
+        if (!cloud.reservations)
+          throw new ComputeError('UNAVAILABLE', 'This fake reports no reservations');
+        return structuredClone(cloud.reservations);
       },
       async create(request, call) {
         const [zone, machineType] = request.offerId.split('/');
