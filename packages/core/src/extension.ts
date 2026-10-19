@@ -773,6 +773,39 @@ export interface ProviderNetworks {
   ): Promise<void>;
 }
 
+/**
+ * (v1.0, D10) One row of a provider's cost export, as the provider billed it. Amounts are integer
+ * micros of `currency` (the export's own; never converted). A re-export of the same row keeps its
+ * `sourceRowId`, so ingestion is idempotent and a corrected amount replaces the stored one.
+ */
+export interface ProviderCostRecord {
+  /** A stable hash of the export row's identity; the export time is not part of it. */
+  sourceRowId: string;
+  service: string;
+  sku: string;
+  skuDescription?: string;
+  region?: string;
+  zone?: string;
+  project?: string;
+  resourceName?: string;
+  usageStart: number;
+  usageEnd: number;
+  /** Usage in the pricing unit (`unit`). */
+  quantity: number;
+  unit: string;
+  costMicros: number;
+  /** The sum of the row's credits; never positive. */
+  creditsMicros: number;
+  currency: string;
+  labels: Readonly<Record<string, string>>;
+  exportTime: number;
+  /**
+   * The provider's cost type (GCP `cost_type`: `regular`, `adjustment`, `tax`, …). Absent means
+   * regular usage. Only regular rows are passed through to tenants.
+   */
+  costType?: string;
+}
+
 /** Rescue-system access; the credential is stored as a secret, never returned as a value. */
 export interface RescueAccess {
   address: string;
@@ -887,6 +920,14 @@ export interface ProviderImpl {
     context: CallContext,
   ): Promise<ProviderListPrice[]>;
   networks?: ProviderNetworks;
+  /**
+   * (v1.0, D10) The account's billed cost rows whose usage started in `[window.from, window.to)`.
+   * Read outside any transaction. A provider whose export is not configured leaves it absent.
+   */
+  costs?(
+    window: { from: number; to: number },
+    context: CallContext,
+  ): AsyncIterable<ProviderCostRecord>;
 }
 
 export interface ProviderContext {
@@ -933,6 +974,17 @@ export interface ProviderInput<C> {
   checkAccount?(config: C, context: ProviderContext & { signal: AbortSignal }): Promise<void>;
   /** A key no two accounts of this provider may share (e.g. a federation audience). Pure; no I/O. */
   accountKey?(config: C): string | undefined;
+  /**
+   * (v1.0, D11/D12) How this provider's cost rows relate to what compute meters. Pure; no I/O. A record may
+   * be a probe built from a pass-through rule's pattern (`sku` and `skuDescription` = the pattern, `service`
+   * empty): a matcher treats an empty service as possibly its compute service.
+   */
+  billing?: {
+    /** The compute SKUs D4 meters (vCPU, memory, GPU, instance): never passed through; leak detection's hours. */
+    computeSku?(record: Pick<ProviderCostRecord, 'service' | 'sku' | 'skuDescription'>): boolean;
+    /** Other SKUs compute meters itself (disks, public addresses): never passed through either. */
+    meteredSku?(record: Pick<ProviderCostRecord, 'service' | 'sku' | 'skuDescription'>): boolean;
+  };
 }
 export interface ProviderDefinition<C = any> extends ProviderInput<C>, Extension {
   readonly extension: 'provider';

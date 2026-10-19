@@ -557,6 +557,7 @@ group('billing', 'vps', [
   ['prices', 'read', 'billing:read', 'fleet', 'v1.0'],
   ['setPrices', 'mutation', 'billing:manage', 'fleet', 'v1.0'],
   ['proposePrices', 'read', 'billing:read', 'fleet', 'v1.0'],
+  ['margins', 'read', 'billing:read', 'fleet', 'v1.0'],
 ]);
 group('providerAccounts', 'vps', [
   [

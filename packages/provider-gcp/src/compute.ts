@@ -90,6 +90,8 @@ export class GcpCompute implements ProviderImpl {
   readonly #diskKinds = new Map<string, { type: string | undefined; until: number }>();
   readonly networks: ProviderNetworks;
   readonly #prices: ReturnType<typeof catalogReader> | undefined;
+  /** Provider costs from the BigQuery billing export (D10); set only when the account names one. */
+  costs?: ProviderImpl['costs'];
 
   constructor(
     config: GcpConfig,

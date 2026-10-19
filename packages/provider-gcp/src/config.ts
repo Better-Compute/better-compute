@@ -1,6 +1,14 @@
 import { field, manifest, type SecretRef } from '@better-compute/core';
 import type { TokenSource } from './auth.js';
 
+/**
+ * A BigQuery table id, `project.dataset.table`. A table name cannot be a query parameter, so the
+ * reader puts it in the SQL between backticks: this pattern is what keeps that safe (no backtick,
+ * whitespace or quote can pass). The project may be domain-scoped (`example.com:proj`).
+ */
+export const billingExportPattern =
+  '^[a-z][a-z0-9.:-]{0,126}[a-z0-9]\\.[A-Za-z0-9_]{1,1024}\\.[A-Za-z0-9_-]{1,1024}$';
+
 /** A Google Cloud account's configuration: credentials are a SecretRef, never a value. */
 export const gcpConfig = manifest({
   projectId: field.string().describe('The Google Cloud project id'),
@@ -37,6 +45,16 @@ export const gcpConfig = manifest({
     .string()
     .optional()
     .describe('"key=value": discovery yields only VMs carrying this label'),
+  billingExport: field
+    .string({ pattern: billingExportPattern, maxLength: 1024 })
+    .optional()
+    .describe(
+      'The Cloud Billing detailed (resource-level) export table, "project.dataset.table": vps reads provider costs from it',
+    ),
+  billingExportLocation: field
+    .string({ pattern: '^[A-Za-z][A-Za-z0-9-]{0,62}$' })
+    .optional()
+    .describe('The BigQuery location of the export dataset (US, EU, us-central1, …)'),
 });
 
 /** The validated account configuration. */
@@ -51,6 +69,9 @@ export interface GcpConfig {
   imageProject?: string;
   diskGiB?: number;
   discoverLabel?: string;
+  /** `project.dataset.table` of the detailed billing export (provider costs, D10). */
+  billingExport?: string;
+  billingExportLocation?: string;
 }
 
 export interface GcpProviderOptions {
@@ -81,4 +102,11 @@ export interface GcpProviderOptions {
    * retryable UNAVAILABLE `timeout`.
    */
   checkTimeoutMs?: number;
+  /**
+   * Default 30000. How long a provider-cost query (the BigQuery billing export) may wait for its job
+   * to finish within one call; past it the read fails with a retryable UNAVAILABLE `jobTimeout`.
+   */
+  costQueryBudgetMs?: number;
+  /** Default 1000. The pause between reads of an unfinished cost query. */
+  costQueryPollMs?: number;
 }

@@ -9,6 +9,7 @@ const providerKeys = [
   'create',
   'checkAccount',
   'accountKey',
+  'billing',
 ];
 const idPattern = /^[a-z][a-z0-9-]{0,63}$/;
 const versionPattern = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
@@ -74,5 +75,16 @@ export function defineProvider<C>(provider: ProviderInput<C>): ProviderDefinitio
   for (const hook of ['checkAccount', 'accountKey'])
     if (candidate[hook] !== undefined && typeof candidate[hook] !== 'function')
       fail(hook, 'must be a function');
+  const billing = candidate.billing as Record<string, unknown> | undefined;
+  if (billing !== undefined) {
+    if (typeof billing !== 'object' || billing === null || Array.isArray(billing))
+      fail('billing', 'must be an object');
+    for (const key of Object.keys(billing))
+      if (key !== 'computeSku' && key !== 'meteredSku')
+        fail(`billing.${key}`, 'is not a known field');
+    for (const hook of ['computeSku', 'meteredSku'])
+      if (billing[hook] !== undefined && typeof billing[hook] !== 'function')
+        fail(`billing.${hook}`, 'must be a function');
+  }
   return Object.freeze({ ...provider, extension: 'provider' as const });
 }

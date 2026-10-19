@@ -15,6 +15,7 @@ export * from './pricing.js';
 export * from './ancillary-usage.js';
 export * from './billing.js';
 export * from './instance-usage.js';
+export * from './costs.js';
 export * from './lifecycle.js';
 export * from './status.js';
 export * from './flavors.js';

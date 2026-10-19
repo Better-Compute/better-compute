@@ -2,6 +2,7 @@ import { ComputeError, type ProviderContext } from '@better-compute/core';
 import {
   cachedTokenSource,
   federatedTokenSource,
+  googleClient,
   googleEndpoint,
   impersonatedTokenSource,
   metadataTokenSource,
@@ -12,6 +13,7 @@ import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
 import { gceClient } from './client.js';
 import { GcpCompute, parseDiscoverLabel } from './compute.js';
 import { gcpConfig, type GcpConfig, type GcpProviderOptions } from './config.js';
+import { billingExportOf, gcpBilling, readBillingExport } from './costs.js';
 import { checkGcpAccount, federationOf, subjectTokenAudience } from './federation.js';
 import { catalogReader } from './prices.js';
 
@@ -96,6 +98,7 @@ export function gcpProvider(options: GcpProviderOptions = {}): ProviderDefinitio
   const catalogEndpoint = googleEndpoint('cloudbilling', {
     universeDomain: options.universeDomain,
   });
+  const bigqueryEndpoint = googleEndpoint('bigquery', { universeDomain: options.universeDomain });
   return defineProvider<GcpConfig>({
     id: 'gcp',
     version: '0.1.0',
@@ -104,6 +107,8 @@ export function gcpProvider(options: GcpProviderOptions = {}): ProviderDefinitio
     capabilities: ['power', 'list', 'discover', 'claim', 'reservations', 'networks'],
     // One pool provider is one account: vps refuses a second account with the same audience.
     accountKey: (config) => config.federationAudience || undefined,
+    // Compute and disk/address SKUs are metered by compute: never passed through (D11), leak hours (D12).
+    billing: gcpBilling,
     // A federated account proves, before it is stored, that its pool trusts exactly its subject.
     checkAccount: (config, context) => checkGcpAccount(config, context, options),
     create: (config, context) => {
@@ -128,7 +133,24 @@ export function gcpProvider(options: GcpProviderOptions = {}): ProviderDefinitio
         clock: context.clock,
         log: context.log,
       });
-      return new GcpCompute(config, context, options, client, prices);
+      const compute = new GcpCompute(config, context, options, client, prices);
+      const table = billingExportOf(config);
+      if (table) {
+        // The same account token: its cloud-platform scope covers BigQuery reads.
+        const bigquery = googleClient({
+          fetch: fetchImpl,
+          tokens,
+          clock: context.clock,
+          log: context.log,
+        });
+        compute.costs = (window, call) =>
+          readBillingExport(bigquery, table, window, call, {
+            endpoint: bigqueryEndpoint,
+            budgetMs: options.costQueryBudgetMs,
+            pollMs: options.costQueryPollMs,
+          });
+      }
+      return compute;
     },
   });
 }

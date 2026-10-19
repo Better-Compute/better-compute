@@ -4,6 +4,7 @@ import { providerMachinesMigration } from './discovery.js';
 import { instanceAttachMigration } from './attach.js';
 import { networkMeteringMigration } from './ancillary-usage.js';
 import { instanceUsageMigration } from './instance-usage.js';
+import { providerCostsMigration } from './costs.js';
 import { vpsVolumeResizeHoldMigration, vpsVolumesMigration } from './volumes.js';
 import { vpsVolumeStorageMigration } from './volume-storage.js';
 import { providerReservationsMigration } from './provider-reservations.js';
@@ -190,4 +191,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsAccountExclusiveKeyMigration,
   instanceUsageMigration,
   networkMeteringMigration,
+  providerCostsMigration,
 ]);

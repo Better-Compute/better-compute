@@ -18,6 +18,7 @@ import {
   type ProviderListPrice,
   type SqlExecutor,
 } from '@better-compute/core';
+import { noGroupKey, providerCostTotals, type MarginGroup } from './costs.js';
 import { fail, id as idOf, object, optional, tenant } from './input.js';
 import { proposePrices, type FlavorMeterBasis, type PriceProposals } from './proposals.js';
 
@@ -94,6 +95,34 @@ export interface ProposePricesInput {
   effectiveFrom: string;
 }
 
+export interface MarginsInput {
+  /** Epoch ms; with `spend`, widened to the whole billing periods it touches (`coveredFrom`/`coveredTo`). */
+  from: number;
+  to: number;
+  groupBy: MarginGroup;
+}
+
+export interface MarginRow {
+  key: string;
+  /** Billed spend from better-iam (`IamPort.spend`); null without it, or for a grouping better-iam does not have. */
+  revenueMicros: number | null;
+  /** Provider cost (cost + credits) in the deployment currency. */
+  costMicros: number;
+  marginMicros: number | null;
+  /** Margin over revenue, in percent (2 decimals); null without revenue. */
+  marginPct: number | null;
+}
+
+export interface MarginsResult {
+  rows: MarginRow[];
+  /** Provider cost no tenant was attributed (D10), over the same range. */
+  unattributedCostMicros: number;
+  currency: string;
+  /** The range costs (and revenue) cover: the query's, or the whole billing periods `spend` summed. */
+  from: number;
+  to: number;
+}
+
 export type BillingApi = {
   /** The meters compute defines, and which of them the IAM root tenant still lacks. */
   meters: MethodDefinition<Record<string, never>, { catalog: MeterSpec[]; missing: string[] }>;
@@ -103,6 +132,8 @@ export type BillingApi = {
   setPrices: MethodDefinition<SetPricesInput, SetPricesResult>;
   /** List prices of a platform provider account plus a margin, as prices root can publish with `setPrices`. */
   proposePrices: MethodDefinition<ProposePricesInput, PriceProposals>;
+  /** Revenue (better-iam spend) minus provider cost, by tenant, pool, account or meter (D12). */
+  margins: MethodDefinition<MarginsInput, MarginsResult>;
 };
 
 /** What `billing.proposePrices` needs from the module: the account's provider list prices. */
@@ -261,9 +292,24 @@ const proposeSchema = strictObject(
   ['accountId', 'marginPct', 'effectiveFrom'],
 );
 
+/** The longest range `billing.margins` takes (about a year and a month). */
+export const marginsMaxRangeMs = 400 * 86_400_000;
+const marginGroups = ['tenant', 'pool', 'account', 'meter'] as const;
+
 export const billingSchemas = {
   none: strictObject({}),
   proposePrices: proposeSchema,
+  margins: strictObject(
+    {
+      from: { type: 'integer', minimum: 0, description: 'Start of the range, epoch ms' },
+      to: { type: 'integer', minimum: 1, description: 'End of the range (exclusive), epoch ms' },
+      groupBy: {
+        enum: [...marginGroups],
+        description: 'Group revenue and cost by tenant, pool, provider account or meter',
+      },
+    },
+    ['from', 'to', 'groupBy'],
+  ),
   prices: strictObject({ meter: meterKey, targetTenantId }),
   setPrices: strictObject(
     {
@@ -355,6 +401,30 @@ function parsePriceSpec(raw: unknown, what: string): PriceSpecInput {
   return spec;
 }
 
+export function parseMargins(raw: unknown): MarginsInput {
+  const input = object(raw, ['from', 'to', 'groupBy']);
+  for (const field of ['from', 'to'] as const)
+    if (typeof input[field] !== 'number' || !Number.isSafeInteger(input[field]) || input[field] < 0)
+      fail(`${field} must be a time in epoch milliseconds`);
+  const from = input.from as number;
+  const to = input.to as number;
+  if (!(to > from)) fail('to must be after from');
+  if (to - from > marginsMaxRangeMs) fail('The range is at most 400 days');
+  if (!(marginGroups as readonly unknown[]).includes(input.groupBy))
+    fail(`groupBy must be one of ${marginGroups.join(', ')}`);
+  return { from, to, groupBy: input.groupBy as MarginGroup };
+}
+
+/** better-iam's grouping for a margins grouping; undefined when better-iam has no such dimension (accounts). */
+function spendGrouping(
+  groupBy: MarginGroup,
+): { groupBy: 'tenant' | 'meter' | 'tag'; tag?: string } | undefined {
+  if (groupBy === 'tenant') return { groupBy: 'tenant' };
+  if (groupBy === 'meter') return { groupBy: 'meter' };
+  if (groupBy === 'pool') return { groupBy: 'tag', tag: 'pool' };
+  return undefined;
+}
+
 export function parsePricesQuery(raw: unknown): PricesQuery {
   const input = object(raw ?? {}, ['meter', 'targetTenantId']);
   return {
@@ -426,7 +496,62 @@ export function billingApi(
   options: BillingOptions = {},
   providers?: BillingProviders,
 ): BillingApi {
+  // One deployment currency (better-iam's): proposals, estimates and margins all name it.
+  const currency = (options.currency ?? defaultCurrency).toUpperCase();
   return {
+    margins: defineMethod({
+      action: 'compute:billing:read',
+      kind: 'read',
+      transaction: 'manual',
+      resource: fleetResource,
+      validate: describedBy(billingSchemas.margins, parseMargins),
+      handler: async (context, input): Promise<MarginsResult> => {
+        // Revenue first (an IAM call, outside any transaction); it fixes the range costs are summed over
+        // (ruling F1-3): better-iam sums whole billing periods.
+        const grouping = spendGrouping(input.groupBy);
+        const spend = context.iam.spend;
+        const rootTenantId = context.iam.rootTenantId;
+        let revenue: Map<string, number> | undefined;
+        let range = { from: input.from, to: input.to };
+        if (typeof spend === 'function' && rootTenantId !== undefined) {
+          const result = await spend.call(context.iam, {
+            tenantId: rootTenantId,
+            from: input.from,
+            to: input.to,
+            groupBy: grouping?.groupBy ?? 'tenant',
+            ...(grouping?.tag ? { tag: grouping.tag } : {}),
+          });
+          range = { from: result.coveredFrom, to: result.coveredTo };
+          if (grouping) {
+            revenue = new Map();
+            for (const row of result.rows)
+              revenue.set(row.key, (revenue.get(row.key) ?? 0) + row.amountMicros);
+          }
+        }
+        const { groups, unattributedMicros } = await providerCostTotals(context.sql, {
+          ...range,
+          groupBy: input.groupBy,
+          currency,
+          rootTenantId,
+        });
+        const keys = [...new Set([...(revenue?.keys() ?? []), ...groups.keys()])].sort((a, b) =>
+          a === noGroupKey ? 1 : b === noGroupKey ? -1 : a.localeCompare(b),
+        );
+        const rows = keys.map((key): MarginRow => {
+          const costMicros = groups.get(key) ?? 0;
+          // A group better-iam has no revenue for has none (0), unless revenue is unknown altogether.
+          const revenueMicros =
+            revenue === undefined || key === noGroupKey ? null : (revenue.get(key) ?? 0);
+          const marginMicros = revenueMicros === null ? null : revenueMicros - costMicros;
+          const marginPct =
+            revenueMicros === null || marginMicros === null || revenueMicros <= 0
+              ? null
+              : Math.round((marginMicros / revenueMicros) * 10_000) / 100;
+          return { key, revenueMicros, costMicros, marginMicros, marginPct };
+        });
+        return { rows, unattributedCostMicros: unattributedMicros, currency, ...range };
+      },
+    }),
     meters: defineMethod({
       action: 'compute:billing:read',
       kind: 'read',
