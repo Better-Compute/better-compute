@@ -772,10 +772,10 @@ export interface RescueAccess {
 /**
  * (platform compute billing) One provider list price, in micros of `currency` per `unit`: what the provider charges
  * for a resource in a region. `hour` is per vCPU, GPU or address hour; `gib-hour` per GiB of memory or disk hour;
- * `gib` per GiB transferred. Commitment prices are not listed.
+ * Commitment prices are not listed, and neither is egress (billed by pass-through at its real cost).
  */
 export interface ProviderListPrice {
-  resource: 'vcpu' | 'memory' | 'gpu' | 'disk' | 'ip' | 'egress';
+  resource: 'vcpu' | 'memory' | 'gpu' | 'disk' | 'ip';
   region: string;
   /** The catalog GPU family slug (`h100`), for `resource: 'gpu'`. */
   gpuModel?: string;
@@ -785,7 +785,7 @@ export interface ProviderListPrice {
   machineFamily?: string;
   spot: boolean;
   unitPriceMicros: number;
-  unit: 'hour' | 'gib-hour' | 'gib';
+  unit: 'hour' | 'gib-hour';
   currency: string;
   /** The provider's id of the price (a GCP SKU id). */
   sku: string;

@@ -25,6 +25,8 @@ export const catalogTtlMs = 24 * 3_600_000;
 const hoursPerMonth = 730;
 const catalogReadMs = 50_000;
 
+type Price = { currencyCode?: string; units?: string | number; nanos?: number };
+
 interface CatalogSku {
   skuId?: string;
   description?: string;
@@ -33,9 +35,7 @@ interface CatalogSku {
   pricingInfo?: {
     pricingExpression?: {
       usageUnit?: string;
-      tieredRates?: {
-        unitPrice?: { currencyCode?: string; units?: string | number; nanos?: number };
-      }[];
+      tieredRates?: { startUsageAmount?: number | string; unitPrice?: Price }[];
     };
   }[];
 }
@@ -54,11 +54,32 @@ export interface CatalogOptions {
 const unpriceable =
   /\b(custom|extended|sole tenancy|sole tenant|commitment|licen[cs]e|licensing|confidential|windows|sql server|rhel|suse|premium image)\b/i;
 
-/** `Spot Preemptible N2 Instance Core running in Americas` → `n2`: the first token, after the spot prefix. */
+/**
+ * `Spot Preemptible N2 Instance Core running in Americas` → `n2`: the first token, after the spot prefix, and only
+ * when it looks like a machine family (a letter, a digit, then more: `n2`, `c3d`, `a3`). `Compute optimized Core`,
+ * `Memory-optimized Instance Core` or `Micro Instance Core` name no family and map to nothing.
+ */
 function familyOf(description: string): string | undefined {
   const rest = description.replace(/^(?:spot preemptible|preemptible|spot)\s+/i, '');
-  const first = /^([A-Za-z][A-Za-z0-9-]*)\s/.exec(rest)?.[1];
-  return first?.toLowerCase();
+  const first = /^([A-Za-z][A-Za-z0-9-]*)\s/.exec(rest)?.[1]?.toLowerCase();
+  return first !== undefined && /^[a-z]\d[a-z0-9-]*$/.test(first) ? first : undefined;
+}
+
+/** GPU variants that are not the plain model (`H100 Mega` is not an H100; a virtual workstation is not a compute GPU). */
+const gpuVariant = /\b(mega|edge|workstation|vws|grid)\b/i;
+
+/**
+ * The tier a price starts at: the one starting at 0 after sorting by `startUsageAmount` (the catalog does not promise
+ * an order). A price with no tier at 0 has no list price to read.
+ */
+function firstTier(
+  rates: readonly { startUsageAmount?: number | string; unitPrice?: Price }[] | undefined,
+): Price | undefined {
+  const sorted = [...(rates ?? [])].sort(
+    (a, b) => Number(a.startUsageAmount ?? 0) - Number(b.startUsageAmount ?? 0),
+  );
+  const first = sorted[0];
+  return first && Number(first.startUsageAmount ?? 0) === 0 ? first.unitPrice : undefined;
 }
 
 /** The catalog's `{ units, nanos }` as micros of the currency. */
@@ -69,19 +90,23 @@ function microsOf(price: { units?: string | number; nanos?: number }): number | 
   return Number.isSafeInteger(micros) && micros >= 0 ? micros : undefined;
 }
 
-const diskGroup = /^(ssd|pdstandard|localssd|pdbalanced|hyperdisk\w*)$/i;
-const diskExcluded =
-  /\b(regional|iops|throughput|snapshot|image|archive|replication|storage pool)\b/i;
+/**
+ * Capacity SKUs by what their description starts with, never by the resource group alone (`Extreme PD Capacity` shares
+ * the `SSD` group with `SSD backed PD Capacity` and must not become `pd-ssd`). Regional, IOPS, throughput,
+ * snapshot and every other disk SKU match none and are skipped.
+ */
+const diskCapacity: readonly (readonly [RegExp, string])[] = [
+  [/^SSD backed PD Capacity\b/i, 'pd-ssd'],
+  [/^Storage PD Capacity\b/i, 'pd-standard'],
+  [/^Balanced PD Capacity\b/i, 'pd-balanced'],
+  [/^Extreme PD Capacity\b/i, 'pd-extreme'],
+  [/^Hyperdisk Balanced Capacity\b/i, 'hyperdisk-balanced'],
+  [/^Hyperdisk Extreme Capacity\b/i, 'hyperdisk-extreme'],
+  [/^SSD backed Local Storage\b/i, 'local-ssd'],
+];
 
-function diskTypeOf(group: string, description: string): string | undefined {
-  if (!diskGroup.test(group) || diskExcluded.test(description)) return undefined;
-  if (/local ssd|ssd backed local/i.test(description)) return 'local-ssd';
-  if (/hyperdisk balanced/i.test(description)) return 'hyperdisk-balanced';
-  if (/hyperdisk/i.test(description)) return undefined;
-  if (/balanced/i.test(description)) return 'pd-balanced';
-  if (/^pdstandard$/i.test(group)) return 'pd-standard';
-  if (/^ssd$/i.test(group)) return 'pd-ssd';
-  return undefined;
+function diskTypeOf(description: string): string | undefined {
+  return diskCapacity.find(([pattern]) => pattern.test(description))?.[1];
 }
 
 /** Maps one SKU to its prices, one per region; none when the SKU is not one this mapping prices. */
@@ -92,11 +117,12 @@ export function pricesOfSku(sku: CatalogSku): ProviderListPrice[] {
   const group = sku.category?.resourceGroup ?? '';
   const description = sku.description ?? '';
   const expression = sku.pricingInfo?.[0]?.pricingExpression;
-  const rate = expression?.tieredRates?.[0]?.unitPrice;
+  const rate = firstTier(expression?.tieredRates);
   const unitOfUsage = expression?.usageUnit;
   if (!sku.skuId || !rate || !unitOfUsage) return [];
   const raw = microsOf(rate);
-  if (raw === undefined) return [];
+  // A free first tier is no list price to propose from.
+  if (raw === undefined || raw === 0) return [];
   const currency = rate.currencyCode ?? 'USD';
 
   const base = { spot, currency, sku: sku.skuId };
@@ -114,7 +140,12 @@ export function pricesOfSku(sku: CatalogSku): ProviderListPrice[] {
         unitPriceMicros: raw,
         unit: 'gib-hour',
       };
-  } else if (group === 'GPU' && unitOfUsage === 'h' && !unpriceable.test(description)) {
+  } else if (
+    group === 'GPU' &&
+    unitOfUsage === 'h' &&
+    !unpriceable.test(description) &&
+    !gpuVariant.test(description)
+  ) {
     // Only models the meter catalog names: a T4 would be priced as `other` and proposed for every unknown GPU.
     const gpuModel = canonicalGpuModel(description.replace(/\s+running in .*$/i, ''));
     if (gpuModel !== 'other')
@@ -122,11 +153,8 @@ export function pricesOfSku(sku: CatalogSku): ProviderListPrice[] {
   } else if (/^ipaddress$/i.test(group)) {
     if (unitOfUsage === 'h' && /external ip/i.test(description))
       price = { ...base, resource: 'ip', unitPriceMicros: raw, unit: 'hour' };
-  } else if (/^premiuminternetegress$/i.test(group)) {
-    if (unitOfUsage === 'GiBy')
-      price = { ...base, resource: 'egress', unitPriceMicros: raw, unit: 'gib' };
   } else {
-    const diskType = diskTypeOf(group, description);
+    const diskType = diskTypeOf(description);
     if (diskType) {
       if (unitOfUsage === 'GiBy.mo')
         price = {
@@ -143,6 +171,34 @@ export function pricesOfSku(sku: CatalogSku): ProviderListPrice[] {
   if (!price) return [];
   const regions = sku.serviceRegions?.length ? sku.serviceRegions : ['global'];
   return regions.map((region) => ({ region, ...price! }));
+}
+
+/**
+ * Only rows with one answer: SKUs that map to the same (resource, family, GPU model or disk type, region, spot,
+ * currency) and disagree on the price are dropped altogether (the catalog has variants this mapping cannot tell
+ * apart), and agreeing duplicates collapse to the first SKU id. Fail closed: a missing price beats a wrong one.
+ */
+export function unambiguous(prices: readonly ProviderListPrice[]): ProviderListPrice[] {
+  const keyOf = (price: ProviderListPrice) =>
+    [
+      price.resource,
+      price.machineFamily ?? price.gpuModel ?? price.diskType ?? '',
+      price.region,
+      price.spot,
+      price.currency,
+    ].join('|');
+  const groups = new Map<string, ProviderListPrice[]>();
+  for (const price of prices) {
+    const group = groups.get(keyOf(price));
+    if (group) group.push(price);
+    else groups.set(keyOf(price), [price]);
+  }
+  const kept = new Set<ProviderListPrice>();
+  for (const group of groups.values())
+    if (group.every((price) => price.unitPriceMicros === group[0]!.unitPriceMicros))
+      kept.add([...group].sort((a, b) => a.sku.localeCompare(b.sku))[0]!);
+  // The rows that remain keep the catalog's own order.
+  return prices.filter((price) => kept.has(price));
 }
 
 /** Resolves when `promise` does, or rejects with the signal's reason once the caller gives up. */
@@ -207,10 +263,25 @@ export function catalogReader(options: CatalogOptions) {
           response.headers,
           'GET Cloud Billing Catalog skus',
         );
-      for (const sku of payload?.skus ?? []) prices.push(...pricesOfSku(sku));
+      // A 200 that is not a SKU list (a proxy page, a truncated body) is an outage, not an empty catalog.
+      if (
+        typeof payload !== 'object' ||
+        payload === null ||
+        Array.isArray(payload) ||
+        (payload.skus !== undefined && !Array.isArray(payload.skus))
+      ) {
+        options.log?.warn('gcp.catalog_unreadable', {});
+        throw new ComputeError(
+          'UNAVAILABLE',
+          'Cloud Billing Catalog answered a body that is not a SKU list',
+          undefined,
+          { provider: 'gcp', status: response.status, reason: 'unparseable' },
+        );
+      }
+      for (const sku of payload.skus ?? []) prices.push(...pricesOfSku(sku));
       pageToken = payload?.nextPageToken || undefined;
     } while (pageToken);
-    return prices;
+    return unambiguous(prices);
   }
 
   return {
@@ -222,9 +293,11 @@ export function catalogReader(options: CatalogOptions) {
       if (!cached || now - cached.at >= catalogTtlMs || now < cached.at) {
         // One read serves every caller until it fails or the TTL passes; no caller's signal cancels it.
         const entry = { at: now, prices: read() };
-        entry.prices.catch(() => {
+        // A failed read, and an empty one (a catalog that lists nothing is not trusted for a day), are not kept.
+        const forget = () => {
           if (cached === entry) cached = undefined;
-        });
+        };
+        entry.prices.then((prices) => prices.length === 0 && forget(), forget);
         cached = entry;
       }
       const all = await raceAbort(cached.prices, context.signal);

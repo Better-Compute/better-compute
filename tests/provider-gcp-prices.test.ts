@@ -18,6 +18,8 @@ interface SkuInput {
   usageUnit?: string;
   currency?: string;
   family?: string;
+  /** Replaces the tiers: the catalog does not promise an order. */
+  tiers?: { start: number; units: string; nanos: number }[];
 }
 
 function sku(input: SkuInput): Json {
@@ -36,14 +38,26 @@ function sku(input: SkuInput): Json {
       {
         pricingExpression: {
           usageUnit: input.usageUnit ?? 'h',
-          tieredRates: [
-            {
-              startUsageAmount: 0,
-              unitPrice: { currencyCode: input.currency ?? 'USD', ...input.price },
-            },
-            // A later tier the reader must not use.
-            { startUsageAmount: 1000, unitPrice: { currencyCode: 'USD', units: '9', nanos: 0 } },
-          ],
+          tieredRates: input.tiers
+            ? input.tiers.map((tier) => ({
+                startUsageAmount: tier.start,
+                unitPrice: {
+                  currencyCode: input.currency ?? 'USD',
+                  units: tier.units,
+                  nanos: tier.nanos,
+                },
+              }))
+            : [
+                {
+                  startUsageAmount: 0,
+                  unitPrice: { currencyCode: input.currency ?? 'USD', ...input.price },
+                },
+                // A later tier the reader must not use.
+                {
+                  startUsageAmount: 1000,
+                  unitPrice: { currencyCode: 'USD', units: '9', nanos: 0 },
+                },
+              ],
         },
       },
     ],
@@ -139,7 +153,7 @@ describe('listPrices', () => {
     ]);
   });
 
-  it('maps disks, addresses and egress, converting monthly storage to GiB-hours', async () => {
+  it('maps disks and addresses, converting monthly storage to GiB-hours', async () => {
     const emu = new GceEmulator();
     emu.skus = [
       sku({
@@ -176,6 +190,7 @@ describe('listPrices', () => {
         group: 'IpAddress',
         price: { units: '0', nanos: 5_000_000 },
       }),
+      // Egress is billed by pass-through at its real cost: never listed (ruling F18-2).
       sku({
         id: 'egress',
         description: 'Network Internet Egress from Americas to Americas',
@@ -184,9 +199,21 @@ describe('listPrices', () => {
         regions: ['us-central1'],
         price: { units: '0', nanos: 120_000_000 },
       }),
+      // Same resource group as the SSD PD, and not a pd-ssd (ruling F18-1e).
+      sku({
+        id: 'extreme',
+        description: 'Extreme PD Capacity in Iowa',
+        group: 'SSD',
+        usageUnit: 'GiBy.mo',
+        price: { units: '0', nanos: 125_000_000 },
+      }),
     ];
     const byResource = Object.fromEntries((await pricesOf(emu)).map((price) => [price.sku, price]));
-    expect(Object.keys(byResource).sort()).toEqual(['bal', 'egress', 'ip', 'ssd', 'std']);
+    expect(Object.keys(byResource).sort()).toEqual(['bal', 'extreme', 'ip', 'ssd', 'std']);
+    expect(byResource.extreme).toMatchObject({ diskType: 'pd-extreme' });
+    expect(Object.values(byResource).filter((price) => price.diskType === 'pd-ssd')).toHaveLength(
+      1,
+    );
     expect(byResource.ssd).toMatchObject({
       resource: 'disk',
       diskType: 'pd-ssd',
@@ -196,11 +223,6 @@ describe('listPrices', () => {
     expect(byResource.std).toMatchObject({ diskType: 'pd-standard', unitPriceMicros: 55 });
     expect(byResource.bal).toMatchObject({ diskType: 'pd-balanced' });
     expect(byResource.ip).toMatchObject({ resource: 'ip', unit: 'hour', unitPriceMicros: 5_000 });
-    expect(byResource.egress).toMatchObject({
-      resource: 'egress',
-      unit: 'gib',
-      unitPriceMicros: 120_000,
-    });
   });
 
   it('spot SKUs are flagged', async () => {
@@ -268,6 +290,142 @@ describe('listPrices', () => {
     ];
     emu.skus[4]!.description = 'N2 Custom Instance Core running in Americas';
     expect((await pricesOf(emu)).map((price) => price.sku)).toEqual(['cpu-od']);
+  });
+
+  it('skips GPU variants: an H100 Mega is not an H100 (F18-1a)', async () => {
+    const emu = new GceEmulator();
+    emu.skus = [
+      sku({
+        id: 'h100',
+        description: 'Nvidia H100 80GB GPU running in Americas',
+        group: 'GPU',
+        price: { units: '6', nanos: 880_000_000 },
+      }),
+      sku({
+        id: 'h100-mega',
+        description: 'Nvidia H100 80GB Mega GPU running in Americas',
+        group: 'GPU',
+        price: { units: '11', nanos: 0 },
+      }),
+      sku({
+        id: 'l4-vws',
+        description: 'Nvidia L4 Virtual Workstation GPU running in Americas',
+        group: 'GPU',
+        price: { units: '1', nanos: 0 },
+      }),
+    ];
+    expect((await pricesOf(emu)).map((price) => price.sku)).toEqual(['h100']);
+    // Alone, the variant leaves nothing (an H100 price that is not one is no price).
+    emu.skus = [emu.skus[1]!];
+    const alone = await build(emu);
+    // An empty result is also not cached: the next call reads again.
+    const reads = () =>
+      emu.requests.filter((request) => request.url.hostname === 'cloudbilling.googleapis.com');
+    expect(await alone.listPrices!({}, ctx())).toEqual([]);
+    const first = reads().length;
+    expect(await alone.listPrices!({}, ctx())).toEqual([]);
+    expect(reads().length).toBeGreaterThan(first);
+  });
+
+  it('drops rows whose duplicates disagree on the price, keeps agreeing ones once (F18-1b)', async () => {
+    const emu = new GceEmulator();
+    emu.skus = [
+      cpu('n2-a', 'N2', 31_611_000),
+      cpu('n2-b', 'N2', 99_000_000),
+      cpu('e2-a', 'E2', 21_811_000),
+      cpu('e2-b', 'E2', 21_811_000),
+      // Another region or another currency is another key.
+      cpu('n2-eu', 'N2', 35_000_000, { regions: ['europe-west4'] }),
+      cpu('n2-eur', 'N2', 99_000_000, { currency: 'EUR' }),
+    ];
+    const prices = await pricesOf(emu);
+    expect(prices.map((price) => price.sku).sort()).toEqual(['e2-a', 'n2-eu', 'n2-eur']);
+  });
+
+  it('a machine family looks like one: compute, memory-optimized and micro are none (F18-1c)', async () => {
+    const emu = new GceEmulator();
+    emu.skus = [
+      sku({
+        id: 'a',
+        description: 'Compute optimized Core running in Americas',
+        group: 'CPU',
+        price: { units: '0', nanos: 31_000_000 },
+      }),
+      sku({
+        id: 'b',
+        description: 'Memory-optimized Instance Core running in Americas',
+        group: 'CPU',
+        price: { units: '0', nanos: 31_000_000 },
+      }),
+      sku({
+        id: 'c',
+        description: 'Micro Instance with burstable CPU running in Americas',
+        group: 'CPU',
+        price: { units: '0', nanos: 5_000_000 },
+      }),
+      cpu('d', 'C3D', 30_000_000),
+      cpu('e', 'N2', 31_611_000),
+    ];
+    const prices = await pricesOf(emu);
+    expect(prices.map((price) => [price.sku, price.machineFamily])).toEqual([
+      ['d', 'c3d'],
+      ['e', 'n2'],
+    ]);
+  });
+
+  it('reads the tier that starts at 0 whatever the order, and skips a free one (F18-1d)', async () => {
+    const emu = new GceEmulator();
+    emu.skus = [
+      sku({
+        id: 'unordered',
+        description: 'N2 Instance Core running in Americas',
+        group: 'CPU',
+        price: { units: '0', nanos: 0 },
+        tiers: [
+          { start: 1000, units: '9', nanos: 0 },
+          { start: 0, units: '0', nanos: 31_611_000 },
+          { start: 500, units: '8', nanos: 0 },
+        ],
+      }),
+      sku({
+        id: 'free-first',
+        description: 'E2 Instance Core running in Americas',
+        group: 'CPU',
+        price: { units: '0', nanos: 0 },
+        tiers: [
+          { start: 0, units: '0', nanos: 0 },
+          { start: 100, units: '0', nanos: 21_811_000 },
+        ],
+      }),
+      sku({
+        id: 'no-zero-tier',
+        description: 'N1 Instance Core running in Americas',
+        group: 'CPU',
+        price: { units: '0', nanos: 0 },
+        tiers: [{ start: 100, units: '0', nanos: 24_000_000 }],
+      }),
+    ];
+    const prices = await pricesOf(emu);
+    expect(prices.map((price) => [price.sku, price.unitPriceMicros])).toEqual([
+      ['unordered', 31_611],
+    ]);
+  });
+
+  it('a 200 that is not a SKU list is UNAVAILABLE, never an empty catalog (F18-1f)', async () => {
+    const emu = new GceEmulator();
+    emu.skus = [cpu('c1', 'N2', 31_611_000)];
+    const garbled = (body: string) => async (input: any, init?: RequestInit) => {
+      const url = new URL(typeof input === 'object' && 'url' in input ? input.url : String(input));
+      if (url.hostname === 'cloudbilling.googleapis.com')
+        return new Response(body, { status: 200, headers: { 'content-type': 'text/html' } });
+      return emu.fetch(input, init);
+    };
+    for (const body of ['<html>maintenance</html>', '[1,2]', '{"skus":"none"}']) {
+      const impl = await build(emu, undefined, { fetch: garbled(body) as typeof fetch });
+      await expect(impl.listPrices!({}, ctx()), body).rejects.toMatchObject({
+        code: 'UNAVAILABLE',
+      });
+    }
   });
 
   it('pages and caches', async () => {
