@@ -70,6 +70,18 @@ const rule: ProviderFirewallSpec = {
 };
 const subnet = { network: net, name: 'bc-sub1', region: 'nyc3', cidr: '10.100.0.0/24' };
 
+/** How long network reconciles reuse the account's firewall list (by the client's clock). */
+const firewallTtlMs = 10_000;
+/**
+ * Networks whose client clock the test moves: what DO changes on its own (a firewall applied, or
+ * failed) shows once the cached firewall list has aged, as on the next reconcile pass.
+ */
+async function aging(emu: DoEmulator) {
+  const clock = manualClock(1_000_000);
+  const { networks } = await build(emu, doAccount, {}, { clock });
+  return { networks, later: () => clock.advance(firewallTtlMs) };
+}
+
 describe('networks', () => {
   beforeEach(freshBudgets);
 
@@ -233,10 +245,13 @@ describe('networks', () => {
 
   it('ensureFirewall is pending while DO applies it and error when it fails', async () => {
     const emu = emulator();
-    const { networks } = await build(emu);
+    const { networks, later } = await aging(emu);
     emu.firewallReads = 2;
     const states: string[] = [];
-    for (let i = 0; i < 4; i++) states.push((await networks.ensureFirewall(rule, ctx())).state);
+    for (let i = 0; i < 4; i++) {
+      states.push((await networks.ensureFirewall(rule, ctx())).state);
+      later();
+    }
     expect(states).toEqual(['pending', 'pending', 'pending', 'ready']);
     expect(calls(emu, 'POST', /^\/v2\/firewalls$/)).toHaveLength(1);
 
@@ -252,12 +267,13 @@ describe('networks', () => {
     // A base firewall is ready once it exists, and an error only when DO failed to apply it.
     expect((await networks.ensureNetwork({ name: net }, ctx())).state).toBe('ready');
     failFirewall(emu.state, baseFirewallName(net));
+    later();
     expect((await networks.ensureNetwork({ name: net }, ctx())).state).toBe('error');
   });
 
   it('a failed firewall with an unchanged spec is re-PUT on the next ensure', async () => {
     const emu = emulator();
-    const { networks } = await build(emu);
+    const { networks, later } = await aging(emu);
     await networks.ensureNetwork({ name: net }, ctx());
     await networks.ensureFirewall(rule, ctx());
     const puts = () => calls(emu, 'PUT', /^\/v2\/firewalls\//);
@@ -266,6 +282,7 @@ describe('networks', () => {
 
     // The call that sees the failure reports it and applies the same firewall again.
     failFirewall(emu.state, /^bc-r1\./);
+    later();
     expect((await networks.ensureFirewall(rule, ctx())).state).toBe('error');
     expect(puts().map((r) => r.url.pathname)).toEqual([`/v2/firewalls/${ruleFw!.id}`]);
     expect(puts()[0]!.body).toEqual(compileDoFirewall(rule, net));
@@ -275,6 +292,7 @@ describe('networks', () => {
 
     // The same for the base firewall.
     failFirewall(emu.state, baseFirewallName(net));
+    later();
     expect((await networks.ensureNetwork({ name: net }, ctx())).state).toBe('error');
     expect(puts().map((r) => r.url.pathname)).toEqual([
       `/v2/firewalls/${ruleFw!.id}`,
@@ -283,6 +301,44 @@ describe('networks', () => {
     expect((await networks.ensureNetwork({ name: net }, ctx())).state).toBe('ready');
     expect(puts()).toHaveLength(2);
     expect(calls(emu, 'POST', /^\/v2\/firewalls$/)).toHaveLength(2);
+  });
+
+  it('network reconciles reuse the firewall list for ten seconds; our writes drop it and deletes read afresh', async () => {
+    const emu = emulator();
+    const { networks, later } = await aging(emu);
+    const lists = () => calls(emu, 'GET', /^\/v2\/firewalls$/).length;
+    await networks.ensureNetwork({ name: net }, ctx());
+    await networks.ensureFirewall(rule, ctx());
+    // Each of those wrote, which drops the list: the next ensure reads it again, and the ensures
+    // after it, within ten seconds and with nothing to write, share that one read.
+    const before = lists();
+    await networks.ensureNetwork({ name: net }, ctx());
+    await networks.ensureFirewall(rule, ctx());
+    await networks.ensureNetwork({ name: net }, ctx());
+    expect(lists()).toBe(before + 1);
+    // A write drops it: the rule changes, and the next ensure reads afresh.
+    await networks.ensureFirewall({ ...rule, sources: ['10.1.0.0/16'] }, ctx());
+    expect(lists()).toBe(before + 1);
+    await networks.ensureNetwork({ name: net }, ctx());
+    expect(lists()).toBe(before + 2);
+    // Ten seconds on, it is read again.
+    later();
+    await networks.ensureNetwork({ name: net }, ctx());
+    expect(lists()).toBe(before + 3);
+
+    // A firewall another process made in the meantime is not in the cached list, but a delete
+    // never trusts that list: it reads afresh, so no rule stays applied after vps is told it is
+    // deleted.
+    const made: Json = {
+      ...structuredClone(firewallsNamed(emu, 'bc-r1.')[0]!),
+      id: 'f0000000-0000-4000-8000-0000000000aa',
+      name: `bc-r2.n${net16(net)}.p1000`,
+      created_at: isoSeconds(t0 + 1_000),
+    };
+    emu.state.firewalls.set(made.id, made);
+    expect((await networks.deleteFirewall('bc-r2', ctx())).state).toBe('deleted');
+    expect(emu.state.firewalls.has(made.id)).toBe(false);
+    expect(lists()).toBe(before + 4);
   });
 
   it('only a firewall named exactly as the rule is the rule: a hand-made look-alike is never touched', async () => {

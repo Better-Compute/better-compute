@@ -9,6 +9,7 @@ import {
   type ProviderSubnetSpec,
 } from '@better-compute/core';
 import type { DoClient } from '../client/http.js';
+import { untilAborted } from '../compute/abort.js';
 import { assignTag, ensureTag, hasTag, unassignTag } from '../compute/tags.js';
 import type { DoDroplet } from '../compute/types.js';
 import type { DoConfig } from '../config.js';
@@ -40,6 +41,11 @@ export * from './vpcs.js';
 // the background: its `status` is `waiting` until it is, so ensureNetwork and ensureFirewall
 // report `pending` and the reconciler asks again. DO firewall names are not unique, so two
 // racing creates both land; the next call keeps the oldest and deletes the others.
+//
+// The account's firewall list is reused for ten seconds by the client's clock: vps re-ensures the
+// base firewall and every rule of every network each pass, and a list per call spent the
+// `observe` share that `get` polls need. Each firewall write of ours drops it. A delete reads
+// afresh: one that misses a firewall made meanwhile would leave a rule applied that vps forgets.
 
 const state = (id: string, value: ProviderNetworkState['state'], message?: string) =>
   ({ id, state: value, ...(message !== undefined ? { message } : {}) }) as ProviderNetworkState;
@@ -49,6 +55,10 @@ const instanceTagShape = /^bc-[0-9a-f]{16}$/;
 const memberTagShape = /^bc-net-[0-9a-f]{16}$/;
 const setTagPattern = /^bc-[a-z0-9:_-]{1,252}$/;
 const instanceTagPrefix = `${labels.instance}:`;
+/** How long network reconciles reuse the firewall list. */
+const firewallTtlMs = 10_000;
+/** A load that no caller waits for any more still ends. */
+const loadTimeoutMs = 60_000;
 
 function fail(
   code: 'INVALID_INPUT' | 'INVALID_STATE' | 'UNSUPPORTED',
@@ -104,6 +114,8 @@ export class DoNetworks implements ProviderNetworks {
   readonly #client: DoClient;
   readonly #config: DoConfig;
   readonly #deploymentTag: string;
+  /** The firewall list, per client (one DoNetworks per client); undefined until read. */
+  #firewallCache: { loadedAt: number; firewalls: Promise<readonly DoFirewall[]> } | undefined;
 
   constructor(client: DoClient, config: DoConfig, deployment: string) {
     this.#client = client;
@@ -113,7 +125,7 @@ export class DoNetworks implements ProviderNetworks {
 
   // ------------------------------------------------------------------------------ firewalls
 
-  async #firewalls(signal: AbortSignal): Promise<DoFirewall[]> {
+  async #loadFirewalls(signal: AbortSignal): Promise<readonly DoFirewall[]> {
     const out: DoFirewall[] = [];
     for await (const firewall of this.#client.pages<DoFirewall>('/firewalls', 'firewalls', {
       signal,
@@ -123,12 +135,52 @@ export class DoNetworks implements ProviderNetworks {
     return out;
   }
 
-  async #deleteFirewall(firewall: DoFirewall, signal: AbortSignal): Promise<void> {
+  /**
+   * The account's firewalls. With `fresh` they are read now; otherwise a read from the last ten
+   * seconds is reused. Concurrent callers share one load, which runs on its own signal: one
+   * caller's abort cancels only that caller's wait. A failed load is dropped so the next call
+   * retries.
+   */
+  #firewalls(
+    signal: AbortSignal,
+    options: { fresh?: boolean } = {},
+  ): Promise<readonly DoFirewall[]> {
+    const now = this.#client.clock.now();
+    const cached = this.#firewallCache;
+    if (!options.fresh && cached && now - cached.loadedAt < firewallTtlMs)
+      return untilAborted(cached.firewalls, signal);
+    const entry = {
+      loadedAt: now,
+      firewalls: this.#loadFirewalls(AbortSignal.timeout(loadTimeoutMs)),
+    };
+    this.#firewallCache = entry;
+    entry.firewalls.catch(() => {
+      if (this.#firewallCache === entry) this.#firewallCache = undefined;
+    });
+    return untilAborted(entry.firewalls, signal);
+  }
+
+  /** A firewall write; whatever its outcome, the cached list may be stale, so it is dropped. */
+  async #write<T>(
+    method: 'POST' | 'PUT' | 'DELETE',
+    path: string,
+    signal: AbortSignal,
+    body?: DoFirewallBody,
+  ): Promise<T> {
     try {
-      await this.#client.request('DELETE', `/firewalls/${encodeURIComponent(firewall.id)}`, {
+      return await this.#client.request<T>(method, path, {
+        ...(body !== undefined ? { body } : {}),
         signal,
         budget: 'mutate',
       });
+    } finally {
+      this.#firewallCache = undefined;
+    }
+  }
+
+  async #deleteFirewall(firewall: DoFirewall, signal: AbortSignal): Promise<void> {
+    try {
+      await this.#write('DELETE', `/firewalls/${encodeURIComponent(firewall.id)}`, signal);
     } catch (error) {
       if (!isComputeError(error, 'NOT_FOUND')) throw error;
     }
@@ -153,16 +205,13 @@ export class DoNetworks implements ProviderNetworks {
     if (kept && !failed && sameFirewall(kept, body)) return firewallState(id, kept, existing);
     for (const tag of body.tags) await ensureTag(this.#client, tag, signal);
     const reply = kept
-      ? await this.#client.request<{ firewall?: DoFirewall }>(
+      ? await this.#write<{ firewall?: DoFirewall }>(
           'PUT',
           `/firewalls/${encodeURIComponent(kept.id)}`,
-          { body, signal, budget: 'mutate' },
-        )
-      : await this.#client.request<{ firewall?: DoFirewall }>('POST', '/firewalls', {
-          body,
           signal,
-          budget: 'mutate',
-        });
+          body,
+        )
+      : await this.#write<{ firewall?: DoFirewall }>('POST', '/firewalls', signal, body);
     // A failure is reported once, by the call that applies the firewall again.
     if (kept && failed) return failedState(id, kept);
     return firewallState(id, reply.firewall, existing);
@@ -215,7 +264,7 @@ export class DoNetworks implements ProviderNetworks {
   /** Deletes every DO firewall of the rule (any network, any priority). Gone is `deleted`. */
   async deleteFirewall(name: string, context: CallContext): Promise<ProviderNetworkState> {
     const mine = ruleFirewall(name);
-    for (const firewall of await this.#firewalls(context.signal))
+    for (const firewall of await this.#firewalls(context.signal, { fresh: true }))
       if (mine(firewall)) await this.#deleteFirewall(firewall, context.signal);
     return state(name, 'deleted');
   }
@@ -321,7 +370,7 @@ export class DoNetworks implements ProviderNetworks {
     if (vpcs.some((vpc) => networkOfVpc(vpc) === name)) return state(name, 'deleting');
     const base = baseFirewallName(name);
     const rules = networkHash(name);
-    for (const firewall of await this.#firewalls(signal))
+    for (const firewall of await this.#firewalls(signal, { fresh: true }))
       if (firewall.name === base || parseFirewallName(firewall.name)?.net16 === rules)
         await this.#deleteFirewall(firewall, signal);
     return state(name, 'deleted');
