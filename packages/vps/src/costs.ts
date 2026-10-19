@@ -558,7 +558,9 @@ async function scanAccount(
   for (let start = 0; start < all.length; start += batchSize) {
     const slice = all.slice(start, start + batchSize);
     const wrote = await context.sql.transaction(async (tx) => {
-      const batch = await attribute(tx, account, platform, slice, settings.currency);
+      // The rules as committed now (a providerAccounts.update during the read is seen; one after waits on the lock).
+      const current = (await lockedAccount(tx, account.id)) ?? account;
+      const batch = await attribute(tx, current, platform, slice, settings.currency);
       for (const cost of batch) {
         if (cost.attribution === 'unattributed') totals.unattributedRows++;
         if (cost.conditions.includes(currencyMismatch)) totals.currencyMismatchRows++;
@@ -567,7 +569,7 @@ async function scanAccount(
           totals.creditsMicros += cost.record.creditsMicros;
         }
       }
-      return writeBatch(deps, tx, account, batch, totals);
+      return writeBatch(deps, tx, current, batch, totals);
     });
     // Out of time with rows left: stop here and let a run enqueued now go on (it finds the rows written so far
     // unchanged). Only a batch that wrote something stops the run, so every run makes progress.
@@ -584,7 +586,8 @@ async function scanAccount(
     }
   }
   await context.sql.transaction(async (tx) => {
-    const extra = (await after?.(tx, account, window, left)) ?? {};
+    const current = (await lockedAccount(tx, account.id)) ?? account;
+    const extra = (await after?.(tx, current, window, left)) ?? {};
     await tx.query(
       `UPDATE provider_cost_scans
           SET next_at = $3::timestamptz + make_interval(secs => $2::float8),
@@ -678,6 +681,16 @@ export function passableJudge(
  * Decides `passable` again for an account's rows not passed through yet whose usage started within `lookbackMs`
  * (`providerAccounts.update` changed its rules), in keyset batches of 1000. Returns how many rows changed.
  */
+/**
+ * The account as committed, share-locked for the rest of the transaction, so a concurrent `providerAccounts.update`
+ * (which recomputes `passable` under the new rules) either committed first and is read here, or waits and recomputes
+ * after this transaction's writes.
+ */
+async function lockedAccount(tx: SqlTx, accountId: string): Promise<ProviderAccount | undefined> {
+  await tx.query(`SELECT 1 FROM provider_accounts WHERE id = $1 FOR SHARE`, [accountId]);
+  return readAccount(tx, accountId);
+}
+
 export async function recomputePassable(
   tx: SqlTx,
   deps: Pick<CostsDeps, 'providers' | 'rootTenantId'>,
@@ -704,22 +717,27 @@ export async function recomputePassable(
     );
     if (rows.length === 0) break;
     const flipped = rows
-      .filter(
-        (row) =>
-          judge({
-            record: json(row.record),
-            tenantId: row.tenant_id,
-            attribution: row.attribution,
-            conditions: row.conditions,
-          }) !== row.passable,
-      )
-      .map((row) => row.source_row_id);
-    if (flipped.length > 0)
-      await tx.query(
-        `UPDATE provider_costs SET passable = NOT passable
-          WHERE account_id = $1 AND source_row_id = ANY($2::text[])`,
-        [account.id, flipped],
-      );
+      .map((row) => ({
+        id: row.source_row_id,
+        was: row.passable,
+        now: judge({
+          record: json(row.record),
+          tenantId: row.tenant_id,
+          attribution: row.attribution,
+          conditions: row.conditions,
+        }),
+      }))
+      .filter((row) => row.now !== row.was);
+    // The judged value, not a flip: a row changed since the SELECT still ends up as these rules decide.
+    for (const value of [true, false]) {
+      const ids = flipped.filter((row) => row.now === value).map((row) => row.id);
+      if (ids.length > 0)
+        await tx.query(
+          `UPDATE provider_costs SET passable = $3
+            WHERE account_id = $1 AND source_row_id = ANY($2::text[])`,
+          [account.id, ids, value],
+        );
+    }
     changed += flipped.length;
     after = rows[rows.length - 1]!.source_row_id;
     if (rows.length < 1000) break;

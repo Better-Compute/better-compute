@@ -1729,4 +1729,25 @@ describe('passable rows (FW-13)', () => {
     await setRules(world, [{ ...egressRule, skuPattern: 'nothing-matches' }]);
     expect(await passable(world)).toEqual({ old: false, recent: false });
   });
+
+  it('rules set while a run reads the export are the rules that run writes and passes with', async () => {
+    const { world, vm } = await setup();
+    world.ledger.rows.push(
+      costRow({
+        sourceRowId: 'egress',
+        usageStart: world.now() - DAY,
+        labels: { [instanceLabel]: vm.id },
+      }),
+    );
+    // The run read the account (no rules) before this update commits; its writes and its pass must not undo it.
+    world.ledger.onRead = async () => {
+      delete world.ledger.onRead;
+      await setRules(world, [egressRule]);
+    };
+    await world.scan();
+    const { rows } = await world.fixture.database.query<{ passable: boolean; passed: boolean }>(
+      `SELECT passable, passed_through_at IS NOT NULL AS passed FROM provider_costs WHERE source_row_id = 'egress'`,
+    );
+    expect(rows).toEqual([{ passable: true, passed: true }]);
+  });
 });
