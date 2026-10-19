@@ -211,25 +211,36 @@ When the API keeps nothing unique, as on DigitalOcean (tags, not labels, and no 
 than one Droplet carrying the key's tag converges on the oldest, so every caller of one key ends with one machine:
 
 ```ts
-async create(request, call, signal) {
-  const tag = keyTag(call.idempotencyKey);            // `better-compute-key:<24 hex of sha256(key)>`
-  const before = await this.listByTag(tag, signal);   // a retry finds what its first attempt made
-  if (before.length > 0) return toMachine(await this.keepOldest(before, signal));
+// Simplified from packages/provider-digitalocean/src/compute/droplets.ts
+async create(request, ctx) {
+  // … validate the offer, image and region …
+  const existing = await this.byKey(ctx.idempotencyKey, gpu, signal); // a retry finds what its first attempt made
+  if (existing.length > 0) return toMachine(await this.converge(existing, signal));
+  // … the VPC and the SSH keys …
+  let created;
   try {
-    await this.post('/droplets', { name: dropletName(request.name), tags: [tag, managed, instance, deployment], … });
+    created = (await this.client.request('POST', '/droplets', { body: { …, tags: [keyTag(ctx.idempotencyKey), …] }, signal, budget: 'mutate' })).droplet;
   } catch (error) {
-    if (!isUnavailable(error)) throw error;           // an answer that never arrived may still have created one
+    if (!isComputeError(error, 'UNAVAILABLE')) throw error;
+    const landed = await this.byKey(ctx.idempotencyKey, gpu, signal); // an answer that never arrived may still have created one
+    if (landed.length === 0) throw error;
+    return toMachine(await this.converge(landed, signal));
   }
-  const after = await this.listByTag(tag, signal);    // a racing create may have posted too
-  if (after.length === 0) throw new Error('create landed nowhere');
-  return toMachine(await this.keepOldest(after, signal));
+  const found = new Map((await this.byKey(ctx.idempotencyKey, gpu, signal)).map((d) => [d.id, d]));
+  if (created && !found.has(created.id)) found.set(created.id, created);
+  if (found.size === 0)
+    throw new ComputeError('PROVIDER_ERROR', 'DigitalOcean accepted a create but returned no Droplet', undefined, { provider: 'digitalocean', reason: 'badBody' });
+  return toMachine(await this.converge([...found.values()], signal)); // a racing create may have posted too
 }
 ```
 
-`keepOldest` deletes the others one by one, and only those that carry the managed tag and this deployment's tag. A
-tag-scoped bulk delete would be one call, but it also removes whatever else carries the tag, so `digitalocean` never
-calls the bulk endpoints. Everything the adapter lists is scoped by tag too, and its GPU Droplets, which DigitalOcean
-lists separately, are scanned through the GPU list and filtered by tag in code.
+`byKey` lists by the key's tag (`better-compute-key:<24 hex of sha256(key)>`) and keeps only Droplets this deployment
+owns: the managed tag and its deployment tag. So ownership is settled by the lookup, and `converge` keeps the oldest
+of what it is given and deletes the others by id, one request each. A tag-scoped bulk delete would be one call, but it
+also removes whatever else carries the tag, so `digitalocean` never calls the bulk endpoints. `list` and the
+idempotency lookup are scoped by tag; `discover` is the exception: it yields every Droplet in the configured regions
+unless `discoverTag` is set. DigitalOcean lists GPU Droplets separately and not with a tag filter, so for a GPU size
+`byKey` also pages the GPU list and filters it by tag in code.
 
 Mark every machine you create, and act only on marked machines. On a shared account or cluster that is the only thing
 that keeps `delete` away from someone else's server: `proxmox` refuses to delete or power a VM not tagged
