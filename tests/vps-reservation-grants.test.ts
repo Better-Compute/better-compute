@@ -872,4 +872,98 @@ describe('billing', () => {
       'reservation-grant.ended',
     ]);
   });
+
+  // --- Fix round 1 ---------------------------------------------------------------------------------
+
+  it('a renewal carries the instances on: only slot-hours and grant usage, no vm.reserved.* (F10-3)', async () => {
+    const world = await grantWorld();
+    const h0 = nextHour(world);
+    await moveTo(world, h0);
+    // "October" then "November": back to back, the second granted ahead of its term.
+    const first = await grant(world, { to: 'acme', slots: 1, key: 'oct', endsAt: h0 + 2 * HOUR });
+    const second = await grant(world, {
+      to: 'acme',
+      slots: 1,
+      key: 'nov',
+      startsAt: h0 + 2 * HOUR,
+      endsAt: h0 + 4 * HOUR,
+    });
+    const created = await runningAt(world, 'a-1', h0 + 2_000);
+    expect((await grantOf(world, created.id)).reservation_grant_id).toBe(first.id);
+    await moveTo(world, h0 + 2 * HOUR + 3 * MINUTE);
+    await settleGrants(world);
+    expect(await stateOf(world, first.id)).toBe('ended');
+    expect(await stateOf(world, second.id)).toBe('active');
+    expect((await grantOf(world, created.id)).reservation_grant_id).toBe(second.id);
+    expect((await intervals(world, created.id)).every((item) => item.shape.granted)).toBe(true);
+
+    await moveTo(world, h0 + 4 * HOUR + settle);
+    await settleGrants(world);
+    await meterInstances(world);
+    const used = (await windows(world, 'instance')).filter((row) => row.sourceId === created.id);
+    expect(new Set(used.map((row) => row.meter))).toEqual(new Set([USAGE]));
+    expect(sum(used, USAGE)).toBeCloseTo(4 - 2_000 / HOUR, 5);
+    const slots = await windows(world, 'grant');
+    expect(
+      sum(
+        slots.filter((row) => row.sourceId === first.id),
+        SLOT,
+      ),
+    ).toBe(2);
+    expect(
+      sum(
+        slots.filter((row) => row.sourceId === second.id),
+        SLOT,
+      ),
+    ).toBe(2);
+  });
+
+  it('a grant starting while the tenant runs overflow VMs adopts them (F10-3)', async () => {
+    const world = await grantWorld();
+    const h0 = nextHour(world);
+    const g = await grant(world, {
+      to: 'acme',
+      slots: 1,
+      key: 'g',
+      startsAt: h0 + HOUR,
+      endsAt: h0 + 30 * DAY,
+    });
+    const oldest = await runningAt(world, 'a-1', h0);
+    const other = await runningAt(world, 'a-2', h0 + 1_000);
+    for (const created of [oldest, other])
+      expect((await grantOf(world, created.id)).reservation_grant_id).toBeNull();
+    await moveTo(world, h0 + HOUR + 3 * MINUTE);
+    await settleGrants(world);
+    expect(await stateOf(world, g.id)).toBe('active');
+    // The grant's one slot takes the oldest; the other stays outside.
+    expect((await grantOf(world, oldest.id)).reservation_grant_id).toBe(g.id);
+    expect((await grantOf(world, other.id)).reservation_grant_id).toBeNull();
+    expect(
+      (await intervals(world, oldest.id)).map((item) => [
+        item.shape.granted,
+        item.started,
+        item.ended,
+      ]),
+    ).toEqual([
+      [false, h0, h0 + HOUR],
+      [true, h0 + HOUR, null],
+    ]);
+
+    await moveTo(world, h0 + 2 * HOUR + settle);
+    await settleGrants(world);
+    await meterInstances(world);
+    const rows = await windows(world, 'instance');
+    const adopted = rows.filter((row) => row.sourceId === oldest.id);
+    expect(adopted.filter((row) => row.start === h0 + HOUR).map((row) => row.meter)).toEqual([
+      USAGE,
+    ]);
+    expect(sum(adopted, 'vm.reserved.vcpu.hours')).toBe(12);
+    expect(
+      sum(
+        rows.filter((row) => row.sourceId === other.id),
+        'vm.reserved.vcpu.hours',
+      ),
+    ).toBeCloseTo(24 - (12 * 1_000) / HOUR, 5);
+    expect(sum(await windows(world, 'grant'), SLOT)).toBe(1);
+  });
 });

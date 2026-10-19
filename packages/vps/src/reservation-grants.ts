@@ -15,7 +15,8 @@ import {
 } from '@better-compute/core';
 import { meterSource, type UsageTags } from '@better-compute/capacity';
 import { readAccount } from './accounts.js';
-import { reopenGrantIntervals, type IntervalDeps } from './instance-usage.js';
+import { reopenGrantIntervals, reopenInterval, type IntervalDeps } from './instance-usage.js';
+import { holdingCondition } from './provider-reservations.js';
 import { isRootCaller } from './billing.js';
 import {
   canonical,
@@ -380,14 +381,67 @@ export async function settleGrantStates(
     const state: GrantState = done ? 'ended' : 'active';
     if (state === row.state) continue;
     await tx.query(`UPDATE reservation_grants SET state = $2 WHERE id = $1`, [row.id, state]);
-    if (row.state === 'scheduled') await publish(deps, tx, row, 'reservation-grant.active');
+    if (row.state === 'scheduled') {
+      await publish(deps, tx, row, 'reservation-grant.active');
+      // Its tenant's VMs already on the reservation join it from its start (F10-3).
+      await adoptIntoGrant(deps, tx, row, Math.round(Number(row.starts)));
+    }
     if (done) {
       await publish(deps, tx, row, 'reservation-grant.ended');
       ended.push({ ...row, state });
-      await reopenGrantIntervals(tx, row.id, Math.round(Number(row.ends)), deps);
+      const end = Math.round(Number(row.ends));
+      // A renewal: another grant of the tenant on the reservation, live at the end, carries its VMs on (F10-3).
+      const { rows: next } = await tx.query<GrantRow>(
+        `SELECT ${grantColumns} FROM reservation_grants g
+          WHERE g.tenant_id = $1 AND g.account_id = $2 AND g.reservation_id = $3 AND g.id <> $4
+            AND g.state IN ('scheduled', 'active') AND g.starts_at <= ${at$(5)} AND g.ends_at > ${at$(5)}
+          ORDER BY (g.project_id IS NULL), g.ends_at, g.id`,
+        [row.tenant_id, row.account_id, row.reservation_id, row.id, end],
+      );
+      for (const renewal of next) await adoptIntoGrant(deps, tx, renewal, end);
+      await reopenGrantIntervals(tx, row.id, end, deps);
     }
   }
   return ended;
+}
+
+/**
+ * Moves the grant's tenant's VMs on its reservation that consume a slot (not stopped) and are in no grant live at
+ * `at` into it, oldest first, up to its free slots (only the grant's project's, when it names one), and reopens their
+ * intervals at `at` as granted (F10-3): a renewal or a grant that starts while the tenant runs reserved VMs bills
+ * them through the grant's slot-hours, never also at the reservation rate. Returns how many moved.
+ */
+async function adoptIntoGrant(
+  deps: GrantDeps,
+  tx: SqlTx,
+  grant: GrantRow,
+  at: number,
+): Promise<number> {
+  const { rows: held } = await tx.query<{ count: number | string }>(
+    `SELECT count(*) AS count FROM instances i WHERE i.reservation_grant_id = $1 AND ${holdingCondition}`,
+    [grant.id],
+  );
+  const free = Number(grant.slots) - Number(held[0]?.count ?? 0);
+  if (free < 1) return 0;
+  const { rows } = await tx.query<{ id: string }>(
+    `SELECT i.id FROM instances i
+      WHERE i.tenant_id = $1 AND i.provider_account_id = $2 AND i.provider_reservation = $3 AND NOT i.draft
+        AND ${holdingCondition} AND i.state <> 'stopped'
+        AND ($4::text IS NULL OR i.project_id = $4)
+        AND NOT EXISTS (SELECT 1 FROM reservation_grants l
+                         WHERE l.id = i.reservation_grant_id AND l.state <> 'cancelled'
+                           AND l.starts_at <= ${at$(5)} AND l.ends_at > ${at$(5)})
+      ORDER BY i.created_at, i.id LIMIT $6 FOR UPDATE OF i`,
+    [grant.tenant_id, grant.account_id, grant.reservation_id, grant.project_id, at, free],
+  );
+  for (const { id: instanceId } of rows) {
+    await tx.query(`UPDATE instances SET reservation_grant_id = $2 WHERE id = $1`, [
+      instanceId,
+      grant.id,
+    ]);
+    await reopenInterval(tx, instanceId, at, deps);
+  }
+  return rows.length;
 }
 
 // --- Billing (Task 11) ------------------------------------------------------------------------

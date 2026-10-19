@@ -683,8 +683,8 @@ export async function unbindReservation(
 
 // --- Admission ----------------------------------------------------------------------------------------
 
-/** Instances that hold a slot of their reservation (the pending ones, counted or not by a scan). */
-const holdingCondition = `i.state NOT IN ('deleted', 'failed', 'lost')
+/** Instances (alias `i`) that hold a slot of their reservation (the pending ones, counted or not by a scan). */
+export const holdingCondition = `i.state NOT IN ('deleted', 'failed', 'lost')
   AND NOT (i.state = 'error' AND i.external_id IS NULL)
   AND NOT (i.state = 'error' AND i.conditions @> '[{"type":"ProvisionFailed","status":"true"}]'::jsonb)`;
 

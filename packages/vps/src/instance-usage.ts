@@ -293,6 +293,27 @@ async function openIntervalOf(
 }
 
 /**
+ * Recomputes the instance's open interval at `at` (a grant it joined or left): an unchanged shape keeps it; any
+ * other closes it at `at` (never before what was billed, F7-1) and opens one of the same phase. Nothing for an
+ * instance with no open interval (not observed yet): its first interval reads the grant itself. Returns whether one
+ * was open.
+ */
+export async function reopenInterval(
+  tx: SqlTx,
+  instanceId: string,
+  at: number,
+  deps: IntervalDeps,
+): Promise<boolean> {
+  const { rows } = await tx.query<{ phase: IntervalPhase }>(
+    `SELECT phase FROM instance_usage_intervals WHERE instance_id = $1 AND ended_at IS NULL`,
+    [instanceId],
+  );
+  if (!rows[0]) return false;
+  await openIntervalOf(tx, instanceId, rows[0].phase, at, deps);
+  return true;
+}
+
+/**
  * A reservation grant ended at `at` (Task 11): every instance of it with an open interval closes that interval at
  * `at` and opens one of the same phase whose shape is no longer `granted` (D7), so the hours after the grant's end
  * are billed at the reservation's rate rather than as part of a commitment nobody pays for any more. An interval
