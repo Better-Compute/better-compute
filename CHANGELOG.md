@@ -8,15 +8,85 @@ All notable changes to the better-compute packages are documented here. The form
 
 ### Added
 
-- **Offer budget policies over the API** (platform compute billing, D16). `pools.offer` takes `onBudgetExceeded` (`notify`,
-  `stop-new`, `drain` and the new `suspend`) and `allowedRegions`; the new `pools.updateOffer` changes them and lifts a
-  suspension. A spent budget on a `suspend` offer sets `pool_offers.suspended_at` (migration `core/0032_offer_suspension`),
-  publishes `quota.budget-suspended`, stops the tenant's running instances in the pool (`BudgetSuspended`; the
-  `vps.suspension` reconciler does it every minute, `sandboxIamReactions` in `iamReactions` makes it immediate), empties
-  the offer's sandbox warm pools and refuses its new work with `SPEND_LIMIT_REACHED` until lifted, which restarts
-  nothing. A budget check for a caller from another tenant (root issuing into a customer) names the target tenant only.
-  `instances.attach` (when billed) and `networks.create` (on a metered pool) now run the same budget check as
-  `instances.create`.
+- **Platform compute billing** (`@better-compute/vps`, `capacity`, `iam`, `server`, `provider-gcp`; plan
+  `docs/superpowers/plans/2026-10-18-platform-compute-billing.md`). The root tenant can bill its sub-tenants for the
+  compute it issues to them. Compute meters and Better IAM rates and invoices, as before; what is new is what compute
+  meters. See the docs guide "Billing and usage".
+  - **Usage from typed sources.** `usage_windows` gains `source_kind` (`allocation`, `instance`, `grant`,
+    `network`, `snapshot`, `cost`) and `source_id`; new sources are keyed `cmp:<kind>:<id>:<windowStartMs>:<meter>`,
+    pass-through costs `costx:<accountId>:<rowId>`. Allocation windows keep their keys, rows and amounts. The one
+    `iam.usage` flush records every source.
+  - **Provider VMs are metered.** Created and attached cloud VMs bill from lifecycle intervals written with each
+    observed state change (`instance_usage_intervals`; the `vps.provider-usage` reconciler, every 5 minutes, writes
+    each hour `billing.meterGraceMs`, default 5 minutes, after it ends): `vm.vcpu.hours`, `vm.memory.gib.hours`,
+    `vm.gpu.<model>[.spot].hours` and `vm.instance.hours`; `vm.reserved.*` for a VM admitted against a provider
+    reservation; or one `flavor.<name>.hours` line for a flavor whose root-set `billing.meter` prices the whole
+    shape. A stopped VM bills its disks only; a `lost` span bills nothing.
+  - **Billing modes.** `PoolPolicy.billing.mode` (`metered`, `platform-fee`, `none`; root only) decides what a
+    pool's VMs record. A provider pool on a tenant's own cloud account defaults to `platform-fee`
+    (`vm.managed.hours` only), so a tenant is never charged compute it pays its provider for. `instances.attach`
+    takes `billing: 'metered' | 'none'` (`none` is root only) and bills from the first observed `running` after the
+    attach.
+  - **Reservation grants** (new `reservationGrants` group: `create`, `get`, `list`, `end`). Root commits slots of a
+    provider reservation to a tenant for a term. The `vps.grants` reconciler bills `vm.grant.slot.hours` for every
+    committed slot, used or not; VMs inside the grant record only the informational `vm.grant.usage.hours`, never
+    compute meters. Admission serves the grantee from its slots first and keeps them from everyone else. A grant
+    that starts, or renews another, takes in the tenant's VMs already running on the reservation. Events
+    `reservation-grant.*` (`created`, `active`, `ended`, `cancelled`).
+  - **Ancillary meters.** The `vps.ancillary-usage` reconciler bills `network.vpc.hours` per provisioned tenant
+    network and `snapshot.gib.hours` per sandbox snapshot; a VM's intervals add `ip.public.hours` while it runs
+    with a public address and `disk.<type>.gib.hours` per disk, running or stopped (`DiskTypeUnknown` for a type
+    with no meter). provider-gcp reports each VM's disks and their types.
+  - **The `billing` API group** (root only: `compute:billing:read`/`manage` on `compute-fleet`). `meters` and
+    `syncMeters` (the catalog on the IAM root tenant), `prices` and `setPrices` (list and negotiated prices,
+    `targetTenantId`), `proposePrices` (provider list prices plus a margin, never applied) and `margins` (Better
+    IAM revenue minus provider cost by tenant, pool, account or meter, platform accounts only).
+  - **Provider costs.** The `vps.costs` worker (`vps({ costs })`: `every`, default `6h`; `lookbackDays`, default 3;
+    `leakToleranceHours`; `passBudgetMs`) reads the accounts whose provider implements `costs` into
+    `provider_costs`, attributes each row by its `better-compute-instance` and `better-compute-tenant` labels (or
+    to the tenant of a BYO account), and publishes `billing.cost-ingested`, `billing.unattributed` and
+    `billing.cost-corrected`. A row in another currency is stored with `CurrencyMismatch` and left out.
+  - **Pass-through.** `providerAccounts.create`/`update` take `billing.passThrough` (root accounts only): rules of
+    `{ skuPattern, meter, multiplier }` bill costs compute does not meter, such as egress, on a `reported` meter at
+    net cost times the multiplier (1 to 10), once per row. A pattern that matches a SKU compute meters itself is
+    `INVALID_CONFIG` (`meteredSku`), and such rows never pass through.
+  - **Leak detection.** After each pass over a platform account, an instance whose provider-billed compute hour
+    slots exceed its metered running hours in a UTC day by more than `leakToleranceHours` (default 1) raises
+    `billing.leak`.
+  - **Estimates.** `flavors.list` items on provider pools carry `estimate` (`{ perHourMicros, currency, lines }`,
+    priced with the tenant's negotiated prices through `IamPort.quote`), and the new `instances.estimate` answers it
+    for one flavor before a create (a read of the pool's flavors: no draft, quota or audit row).
+  - **Root usage views and corrections** (`compute:usage:read`/`manage` on `compute-fleet`, root only).
+    `usage.platform` totals every tenant's windows by tenant, pool, meter, source and provider (JSON or CSV).
+    `usage.deadLetters` lists what Better IAM refused, with a `reason` (`meter-missing`, `period-closed`,
+    `identity`, `invalid`, `other`); `usage.retry` sends windows again (`period-closed` is refused: it needs a
+    root invoice item); `usage.void` drops unsent or dead-lettered windows with a reason (a recorded window needs a
+    credit note in Better IAM). `usage.list` takes `includeVoided`.
+  - **Contract** (`@better-compute/core`, additive). `IamPort.ensureMeters?`, `listMeters?`, `setPrice?`,
+    `listPrices?`, `quote?` and `spend?` (embedded with `bridge.embedded(iam, { serviceCredential })`, remote over
+    HTTP); `UsageEvent.cost?`; `ProviderImpl.costs?` and `listPrices?` with `ProviderCostRecord` and
+    `ProviderListPrice`; `ProviderDefinition.billing?` (`computeSku`, `meteredSku`); `ExternalMachine.disks` and
+    `bootDiskType`; `PoolPolicy.billing?`, `Flavor.billing?`, `Offering.allowedRegions?` and `suspendedAt?`;
+    `canonicalGpuModel`, `meterCatalog` and the meter helpers in `core/meters.ts`. The fleet kind gains the actions
+    `billing:read`, `billing:manage`, `usage:read` and `usage:manage`.
+  - **provider-gcp.** `billingExport` (`project.dataset.table` of the Cloud Billing detailed BigQuery export) and
+    `billingExportLocation` on the account config; `costs` reads the export with parameterized queries;
+    `listPrices` reads the Cloud Billing Catalog. Turning the export on is a manual Cloud Console step; the package
+    README lists the IAM roles and the Cloud Billing API it needs.
+  - **Migrations:** core `0031_usage_sources`, `0032_offer_suspension`, `0033_usage_window_claims`; vps
+    `0030_instance_usage`, `0031_reservation_grants`, `0032_network_metering`, `0033_provider_costs`. All are
+    additive and rewrite no `usage_windows` partition.
+- **Offer budget policies over the API** (platform compute billing, D16). `pools.offer` takes `onBudgetExceeded`
+  (`notify`, `stop-new`, `drain` and the new `suspend`) and `allowedRegions`; the new `pools.updateOffer` changes
+  them, suspends an offer by hand and lifts a suspension. A spent budget on a `suspend` offer sets
+  `pool_offers.suspended_at` (migration `core/0032_offer_suspension`), publishes `quota.budget-suspended`, stops the
+  tenant's running instances in the pool (`BudgetSuspended`; the `vps.suspension` reconciler does it within a minute
+  for every suspended offer, a hand suspension included, and `sandboxIamReactions` in `iamReactions` makes it
+  immediate), drains the offer's sandbox warm pools and refuses all its new work with `SPEND_LIMIT_REACHED`
+  (`details.reason: 'offer-suspended'`) until lifted, which restarts nothing. A budget check for a caller from
+  another tenant (root issuing into a customer) names the target tenant only. `instances.attach` (when billed) and
+  `networks.create` (on a metered pool) now run the same budget check as `instances.create`; reservation grants are
+  not budget-checked.
 - **`@better-compute/gcp-common`** (new, outside the umbrella). The Google Cloud token sources
   (`serviceAccountTokenSource`, `metadataTokenSource`, `impersonatedTokenSource`, `cachedTokenSource`) move out of
   `@better-compute/provider-gcp` into a package that depends only on `@better-compute/core`, so other Google
@@ -26,6 +96,44 @@ All notable changes to the better-compute packages are documented here. The form
   `serviceAccountTokenSource` and `impersonatedTokenSource` take `universeDomain`: another universe pins a key's
   `token_uri` to exactly `https://oauth2.<universe>/token`, and a key's own `universe_domain` must match it. The default
   universe is unchanged. `gcpProvider({ universeDomain })` derives the compute endpoint from it.
+
+### Changed
+
+- **One deployment currency: `vps({ billing: { currency } })`** (ISO 4217, default `USD`). Price proposals, tenant
+  estimates, provider cost ingestion and margins all use it; name Better IAM's deployment currency there. It is the
+  only currency option.
+- **`Offering.onBudgetExceeded` is `'notify' | 'stop-new' | 'drain' | 'suspend'`** (`@better-compute/core`). The
+  union is wider, so a consumer with an exhaustive `switch` over it needs a `suspend` case. The database `CHECK`
+  accepts `suspend`.
+- **Estimates are a separate read, `instances.estimate`.** The planned `instances.create({ dryRun: true })` was not
+  built: `create`'s input and return type are unchanged, and its catalog row has no `flavors:read` alternative.
+- **`reservationGrants.list` is a plain tenant read** (`compute:quotas:read` on the tenant; the SQL filters to the
+  tenant's grants), like `webhooks.list`, not a per-item `list` recipe. Root lists every tenant's with `all: true`.
+- **Provider accounts with live grants.** `providerAccounts.delete` and `unbindReservation` refuse with
+  `INVALID_STATE` (`details.grantIds`) while a grant on the account is scheduled or active, and `delete` also until
+  every committed slot-hour of its ended grants is metered. Deleting a tenant ends its active grants and cancels its
+  scheduled ones.
+- **Usage CSV and voided windows.** `usage.export` (and `usage.platform`'s CSV) prefix a cell a spreadsheet would
+  read as a formula (`=`, `+`, `-`, `@`, a tab or a carriage return) with `'`. Voided windows are left out of
+  `usage.list` and of `usage.export` rows and totals (`voided` counts them); tenants never see root's void reason.
+- **`UsageWindow.allocationId` is optional** (`usage.list`/`export`): windows of other sources have none.
+- **The usage flush claims windows.** `iam.usage` marks its batch `claimed_at` (migration
+  `core/0033_usage_window_claims`) before sending it; `usage.void` refuses a window claimed in the last 10 minutes
+  ("being sent; retry shortly"), and a dead sender's claims are taken over after 10 minutes (a resend is a
+  `duplicate`). A `BILLING_PERIOD_CLOSED` refusal is dead-lettered once and never retried automatically.
+- **`iam setup --meters` and the iam module create the full `meterCatalog`.** `computeMeters` stays exported but is
+  no longer what setup creates. The iam module also syncs the catalog when it starts if its port holds a root
+  billing credential (`serviceCredential`); the doctor warns `iam.billing-port` when it does not.
+- **Upgrading.** `core/0031_usage_sources` builds a unique index over every `usage_windows` partition, which locks
+  `usage_windows` (reads included) while it builds: let retention prune old windows before upgrading a large
+  deployment. Its two `CHECK`s are added `NOT VALID`, so no partition is scanned.
+
+### Fixed
+
+- **Hosted volume, spot GPU and `gpu.other.hours` windows were dead-lettered.** `computeMeters` never created
+  `vps.volume.gib.hours`, the `.spot` meters or `gpu.other.hours`, so Better IAM refused their usage with
+  `NOT_FOUND`. The catalog now holds them: run `billing.syncMeters` (or `iam setup --meters`) after upgrading, then
+  `usage.retry({ reason: 'meter-missing' })`.
 
 ## 0.2.1 (2026-10-18)
 
