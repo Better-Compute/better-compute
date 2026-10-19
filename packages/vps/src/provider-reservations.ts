@@ -348,7 +348,8 @@ async function applyScan(
   observedAt: Date,
 ): Promise<void> {
   const { rows } = await tx.query<ReservationRow>(
-    `SELECT ${rowColumns} FROM provider_reservations WHERE account_id = $1 FOR UPDATE`,
+    // Sorted, as settleGrantStates locks them (account, reservation): two lockers never deadlock.
+    `SELECT ${rowColumns} FROM provider_reservations WHERE account_id = $1 ORDER BY reservation_id FOR UPDATE`,
     [accountId],
   );
   const known = new Map(rows.map((row) => [row.reservation_id, row]));
