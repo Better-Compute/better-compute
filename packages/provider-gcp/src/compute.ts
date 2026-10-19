@@ -83,6 +83,8 @@ export class GcpCompute implements ProviderImpl {
   /** Machine types GCE refused a Persistent Disk for although the family table allowed one. */
   readonly #hyperdiskOnly = new Set<string>();
   readonly networks: ProviderNetworks;
+  /** Provider costs from the BigQuery billing export (D10); set only when the account names one. */
+  costs?: ProviderImpl['costs'];
 
   constructor(
     config: GcpConfig,

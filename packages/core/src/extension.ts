@@ -761,6 +761,39 @@ export interface ProviderNetworks {
   ): Promise<void>;
 }
 
+/**
+ * (v1.0, D10) One row of a provider's cost export, as the provider billed it. Amounts are integer
+ * micros of `currency` (the export's own; never converted). A re-export of the same row keeps its
+ * `sourceRowId`, so ingestion is idempotent and a corrected amount replaces the stored one.
+ */
+export interface ProviderCostRecord {
+  /** A stable hash of the export row's identity; the export time is not part of it. */
+  sourceRowId: string;
+  service: string;
+  sku: string;
+  skuDescription?: string;
+  region?: string;
+  zone?: string;
+  project?: string;
+  resourceName?: string;
+  usageStart: number;
+  usageEnd: number;
+  /** Usage in the pricing unit (`unit`). */
+  quantity: number;
+  unit: string;
+  costMicros: number;
+  /** The sum of the row's credits; never positive. */
+  creditsMicros: number;
+  currency: string;
+  labels: Readonly<Record<string, string>>;
+  exportTime: number;
+  /**
+   * The provider's cost type (GCP `cost_type`: `regular`, `adjustment`, `tax`, …). Absent means
+   * regular usage. Only regular rows are passed through to tenants.
+   */
+  costType?: string;
+}
+
 /** Rescue-system access; the credential is stored as a secret, never returned as a value. */
 export interface RescueAccess {
   address: string;
@@ -845,6 +878,14 @@ export interface ProviderImpl {
   release?(id: string, instanceId: string, context: CallContext): Promise<void>;
   listReservations?(context: CallContext): Promise<ExternalReservation[]>;
   networks?: ProviderNetworks;
+  /**
+   * (v1.0, D10) The account's billed cost rows whose usage started in `[window.from, window.to)`.
+   * Read outside any transaction. A provider whose export is not configured leaves it absent.
+   */
+  costs?(
+    window: { from: number; to: number },
+    context: CallContext,
+  ): AsyncIterable<ProviderCostRecord>;
 }
 
 export interface ProviderContext {

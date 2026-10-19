@@ -2,6 +2,7 @@ import { ComputeError, type ProviderContext } from '@better-compute/core';
 import {
   cachedTokenSource,
   federatedTokenSource,
+  googleClient,
   googleEndpoint,
   impersonatedTokenSource,
   metadataTokenSource,
@@ -12,6 +13,7 @@ import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
 import { gceClient } from './client.js';
 import { GcpCompute, parseDiscoverLabel } from './compute.js';
 import { gcpConfig, type GcpConfig, type GcpProviderOptions } from './config.js';
+import { billingExportOf, readBillingExport } from './costs.js';
 import { checkGcpAccount, federationOf, subjectTokenAudience } from './federation.js';
 
 /**
@@ -92,6 +94,7 @@ function accountTokens(
 export function gcpProvider(options: GcpProviderOptions = {}): ProviderDefinition<GcpConfig> {
   // Validated now, so a malformed universe fails when the host builds the provider.
   const universeEndpoint = `${googleEndpoint('compute', { universeDomain: options.universeDomain })}/compute/v1`;
+  const bigqueryEndpoint = googleEndpoint('bigquery', { universeDomain: options.universeDomain });
   return defineProvider<GcpConfig>({
     id: 'gcp',
     version: '0.1.0',
@@ -106,15 +109,34 @@ export function gcpProvider(options: GcpProviderOptions = {}): ProviderDefinitio
       if (config.zones.length === 0)
         throw new ComputeError('INVALID_CONFIG', 'A GCP account lists at least one zone');
       parseDiscoverLabel(config.discoverLabel);
+      const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+      const tokens = accountTokens(config, context, options);
       const client = gceClient({
-        fetch: options.fetch ?? globalThis.fetch.bind(globalThis),
+        fetch: fetchImpl,
         endpoint: options.endpoint ?? universeEndpoint,
         projectId: config.projectId,
-        tokens: accountTokens(config, context, options),
+        tokens,
         clock: context.clock,
         log: context.log,
       });
-      return new GcpCompute(config, context, options, client);
+      const compute = new GcpCompute(config, context, options, client);
+      const table = billingExportOf(config);
+      if (table) {
+        // The same account token: its cloud-platform scope covers BigQuery reads.
+        const bigquery = googleClient({
+          fetch: fetchImpl,
+          tokens,
+          clock: context.clock,
+          log: context.log,
+        });
+        compute.costs = (window, call) =>
+          readBillingExport(bigquery, table, window, call, {
+            endpoint: bigqueryEndpoint,
+            budgetMs: options.costQueryBudgetMs,
+            pollMs: options.costQueryPollMs,
+          });
+      }
+      return compute;
     },
   });
 }

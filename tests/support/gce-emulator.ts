@@ -121,6 +121,8 @@ export class GceEmulator {
   firewalls = new Map<string, Json>();
   operations = new Map<string, Operation>();
   requests: RecordedRequest[] = [];
+  /** BigQuery (`bigquery.googleapis.com`): the billing export for provider costs (P5). */
+  readonly bigquery: BigQueryEmulator = new BigQueryEmulator(this);
 
   /** Fails the next compute request (not token requests) with this GCE error. */
   failNext?: { status: number; reason: string; message?: string; headers?: Record<string, string> };
@@ -174,6 +176,8 @@ export class GceEmulator {
     if (url.hostname === 'metadata.google.internal') return this.#metadataToken(url, headers);
     if (url.hostname === 'iamcredentials.googleapis.com')
       return this.#generateAccessToken(url, headers, body);
+    if (url.hostname === 'bigquery.googleapis.com')
+      return this.bigquery.fetch(method, url, headers, body);
     if (url.hostname !== 'compute.googleapis.com')
       return this.error(404, 'notFound', `No emulated host ${url.hostname}`);
 
@@ -871,4 +875,275 @@ export class GceEmulator {
       });
     return this.error(404, 'notFound', 'unsupported');
   }
+}
+
+// ============================================================================================
+// BigQuery — the Cloud Billing detailed (resource-level) export, for provider costs (P5, Task 14).
+// `POST /bigquery/v2/projects/{p}/queries` and `GET …/queries/{jobId}` with `pageToken`. It runs no
+// SQL: it checks the query is standard SQL against one backticked table, takes `@from`/`@to` only
+// from `queryParameters` (TIMESTAMP), filters `usage_start_time` to `[from, to)`, and projects the
+// SELECT list (`a.b AS c` paths) through the export's schema into BigQuery's `f`/`v` rows.
+// ============================================================================================
+
+export interface BqField {
+  name: string;
+  type: 'STRING' | 'FLOAT' | 'INTEGER' | 'TIMESTAMP' | 'RECORD';
+  mode?: 'NULLABLE' | 'REPEATED';
+  fields?: BqField[];
+}
+
+const bqString = (name: string): BqField => ({ name, type: 'STRING' });
+const bqFloat = (name: string): BqField => ({ name, type: 'FLOAT' });
+const bqTime = (name: string): BqField => ({ name, type: 'TIMESTAMP' });
+
+/** The columns of the detailed export the reader may select (a subset of the real schema). */
+export const billingExportSchema: BqField[] = [
+  bqString('billing_account_id'),
+  { name: 'service', type: 'RECORD', fields: [bqString('id'), bqString('description')] },
+  { name: 'sku', type: 'RECORD', fields: [bqString('id'), bqString('description')] },
+  bqTime('usage_start_time'),
+  bqTime('usage_end_time'),
+  { name: 'project', type: 'RECORD', fields: [bqString('id'), bqString('name')] },
+  {
+    name: 'labels',
+    type: 'RECORD',
+    mode: 'REPEATED',
+    fields: [bqString('key'), bqString('value')],
+  },
+  {
+    name: 'location',
+    type: 'RECORD',
+    fields: [bqString('location'), bqString('country'), bqString('region'), bqString('zone')],
+  },
+  { name: 'resource', type: 'RECORD', fields: [bqString('name'), bqString('global_name')] },
+  bqTime('export_time'),
+  bqFloat('cost'),
+  bqString('currency'),
+  bqFloat('currency_conversion_rate'),
+  {
+    name: 'usage',
+    type: 'RECORD',
+    fields: [
+      bqFloat('amount'),
+      bqString('unit'),
+      bqFloat('amount_in_pricing_units'),
+      bqString('pricing_unit'),
+    ],
+  },
+  {
+    name: 'credits',
+    type: 'RECORD',
+    mode: 'REPEATED',
+    fields: [
+      bqString('name'),
+      bqFloat('amount'),
+      bqString('full_name'),
+      bqString('id'),
+      bqString('type'),
+    ],
+  },
+  bqString('cost_type'),
+];
+
+interface BqJob {
+  jobId: string;
+  location?: string;
+  schema: BqField[];
+  rows: Json[];
+  /** Result reads that still answer `jobComplete: false`. */
+  remaining: number;
+  int64Timestamps: boolean;
+}
+
+export class BigQueryEmulator {
+  /** Rows of the export table, in the export's nested shape (timestamps as ISO strings). */
+  rows: Json[] = [];
+  /** The table queries must name, `project.dataset.table`. */
+  table = 'billing-proj.billing.gcp_billing_export_resource_v1_0000';
+  /** New jobs stay incomplete for this many result reads (`Infinity`: never complete). */
+  pendingReads = 0;
+  /** Upper bound of rows per result page; a request's `maxResults` can only lower it. */
+  pageRows = 1000;
+  /** Every query request body, in order. */
+  queries: Json[] = [];
+  readonly jobs = new Map<string, BqJob>();
+  readonly #emu: GceEmulator;
+  #jobSeq = 0;
+
+  constructor(emu: GceEmulator) {
+    this.#emu = emu;
+  }
+
+  fetch(method: string, url: URL, headers: Headers, body?: Json): Response {
+    const emu = this.#emu;
+    const bearer = /^Bearer (.+)$/.exec(headers.get('authorization') ?? '')?.[1];
+    if (!bearer || !emu.validTokens.has(bearer))
+      return emu.error(401, 'authError', 'Invalid Credentials');
+    if (emu.failNext) {
+      const failure = emu.failNext;
+      delete emu.failNext;
+      return emu.error(failure.status, failure.reason, failure.message, failure.headers);
+    }
+    const match = /^\/bigquery\/v2\/projects\/([^/]+)\/queries(?:\/([^/]+))?$/.exec(url.pathname);
+    if (!match) return emu.error(404, 'notFound', `Not found: ${url.pathname}`);
+    const jobId = match[2] ? decodeURIComponent(match[2]) : undefined;
+    if (method === 'POST' && !jobId) return this.#query(url, body ?? {});
+    if (method === 'GET' && jobId) return this.#results(url, jobId);
+    return emu.error(404, 'notFound', 'unsupported');
+  }
+
+  #query(url: URL, body: Json): Response {
+    const emu = this.#emu;
+    this.queries.push(body);
+    const sql = String(body.query ?? '');
+    if (body.useLegacySql !== false)
+      return emu.error(400, 'invalidQuery', 'Only standard SQL is emulated');
+    const from = /\bFROM\s+`([^`]+)`/i.exec(sql);
+    if (!from || from[1] !== this.table)
+      return emu.error(404, 'notFound', `Not found: Table ${from?.[1] ?? '(none)'}`);
+    const params = new Map<string, Json>();
+    for (const p of (body.queryParameters as Json[] | undefined) ?? [])
+      params.set(String(p.name), p);
+    const timestamp = (name: string): number | Response => {
+      const p = params.get(name);
+      if (!p) return emu.error(400, 'invalidQuery', `Query parameter '${name}' not found`);
+      if (p.parameterType?.type !== 'TIMESTAMP')
+        return emu.error(400, 'invalidQuery', `Parameter ${name} must be a TIMESTAMP`);
+      const ms = Date.parse(String(p.parameterValue?.value));
+      return Number.isFinite(ms) ? ms : emu.error(400, 'invalidQuery', `Bad timestamp ${name}`);
+    };
+    if (!/usage_start_time\s*>=\s*@from\b/.test(sql) || !/usage_start_time\s*<\s*@to\b/.test(sql))
+      return emu.error(400, 'invalidQuery', 'The emulator expects a usage_start_time window');
+    const lo = timestamp('from');
+    if (lo instanceof Response) return lo;
+    const hi = timestamp('to');
+    if (hi instanceof Response) return hi;
+    const select = /^\s*SELECT\s+([\s\S]+?)\s+FROM\s/i.exec(sql);
+    if (!select) return emu.error(400, 'invalidQuery', 'No SELECT list');
+    const columns: { path: string[]; field: BqField }[] = [];
+    for (const item of select[1]!.split(',')) {
+      const parts = /^\s*([a-z_][\w.]*)(?:\s+AS\s+([a-z_]\w*))?\s*$/i.exec(item);
+      if (!parts) return emu.error(400, 'invalidQuery', `Unsupported select item ${item}`);
+      const path = parts[1]!.split('.');
+      let field: BqField | undefined;
+      let scope: BqField[] | undefined = billingExportSchema;
+      for (const name of path) {
+        field = scope?.find((candidate) => candidate.name === name);
+        scope = field?.fields;
+      }
+      if (!field) return emu.error(400, 'invalidQuery', `Unrecognized name: ${parts[1]}`);
+      columns.push({ path, field: { ...field, name: parts[2] ?? path[path.length - 1]! } });
+    }
+    const rows = this.rows
+      .filter((row) => {
+        const start = Date.parse(String(row.usage_start_time));
+        return start >= lo && start < hi;
+      })
+      .map((row) =>
+        Object.fromEntries(
+          columns.map(({ path, field }) => [
+            field.name,
+            path.reduce<unknown>((value, key) => (value as Json | undefined)?.[key], row),
+          ]),
+        ),
+      );
+    const job: BqJob = {
+      jobId: `job_${++this.#jobSeq}`,
+      location: body.location,
+      schema: columns.map((c) => c.field),
+      rows,
+      remaining: this.pendingReads,
+      int64Timestamps: body.formatOptions?.useInt64Timestamp === true,
+    };
+    this.jobs.set(job.jobId, job);
+    return this.#page(url, job, body.maxResults);
+  }
+
+  #results(url: URL, jobId: string): Response {
+    const job = this.jobs.get(jobId);
+    if (!job) return this.#emu.error(404, 'notFound', `Not found: Job ${jobId}`);
+    if (url.searchParams.get('location') !== (job.location ?? null))
+      return this.#emu.error(404, 'notFound', `Not found: Job ${jobId} in that location`);
+    const int64 = url.searchParams.get('formatOptions.useInt64Timestamp');
+    if (int64 !== null) job.int64Timestamps = int64 === 'true';
+    return this.#page(url, job, url.searchParams.get('maxResults') ?? undefined);
+  }
+
+  #page(url: URL, job: BqJob, maxResults?: unknown): Response {
+    const jobReference = {
+      projectId: this.table.split('.')[0],
+      jobId: job.jobId,
+      ...(job.location ? { location: job.location } : {}),
+    };
+    if (job.remaining > 0) {
+      job.remaining--;
+      return this.#emu.json(200, {
+        kind: 'bigquery#queryResponse',
+        jobReference,
+        jobComplete: false,
+      });
+    }
+    const requested = Number(maxResults ?? this.pageRows);
+    const size = Math.max(1, Math.min(requested, this.pageRows));
+    const start = Number(url.searchParams.get('pageToken') ?? 0);
+    const slice = job.rows.slice(start, start + size);
+    const encode = (field: BqField, value: unknown): unknown => {
+      if (value === undefined || value === null) return field.mode === 'REPEATED' ? [] : null;
+      if (field.mode === 'REPEATED')
+        return (value as unknown[]).map((item) => ({
+          v: encode({ ...field, mode: 'NULLABLE' }, item),
+        }));
+      if (field.type === 'RECORD')
+        return {
+          f: field.fields!.map((child) => ({ v: encode(child, (value as Json)[child.name]) })),
+        };
+      if (field.type === 'TIMESTAMP') {
+        const ms = Date.parse(String(value));
+        return job.int64Timestamps ? String(ms * 1000) : (ms / 1000).toExponential();
+      }
+      return String(value);
+    };
+    return this.#emu.json(200, {
+      kind: 'bigquery#getQueryResultsResponse',
+      jobReference,
+      jobComplete: true,
+      schema: { fields: job.schema },
+      totalRows: String(job.rows.length),
+      rows: slice.map((row) => ({
+        f: job.schema.map((field) => ({ v: encode(field, row[field.name]) })),
+      })),
+      ...(start + size < job.rows.length ? { pageToken: String(start + size) } : {}),
+    });
+  }
+}
+
+/** One export row in the export's nested shape: a Compute Engine N2 core-hour row, with overrides. */
+export function billingRow(overrides: Json = {}): Json {
+  return {
+    billing_account_id: '012345-6789AB-CDEF01',
+    service: { id: '6F81-5844-456A', description: 'Compute Engine' },
+    sku: { id: 'BB77-5FDA-1D73', description: 'N2 Instance Core running in Americas' },
+    usage_start_time: '2026-10-01T00:00:00.000Z',
+    usage_end_time: '2026-10-01T01:00:00.000Z',
+    project: { id: 'p', name: 'p' },
+    labels: [],
+    location: {
+      location: 'us-central1',
+      country: 'US',
+      region: 'us-central1',
+      zone: 'us-central1-a',
+    },
+    resource: {
+      name: 'vm-1',
+      global_name: '//compute.googleapis.com/projects/p/zones/us-central1-a/instances/1',
+    },
+    export_time: '2026-10-01T06:00:00.000Z',
+    cost: 0.123456,
+    currency: 'USD',
+    currency_conversion_rate: 1,
+    usage: { amount: 14400, unit: 'seconds', amount_in_pricing_units: 4, pricing_unit: 'hour' },
+    credits: [],
+    cost_type: 'regular',
+    ...overrides,
+  };
 }

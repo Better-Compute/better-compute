@@ -12,16 +12,18 @@ npm install @better-compute/provider-gcp
 
 An account is data, validated by the provider's manifest:
 
-| Field               | Meaning                                                                                               |
-| ------------------- | ----------------------------------------------------------------------------------------------------- |
-| `projectId`         | The Google Cloud project id.                                                                          |
-| `zones`             | At least one zone. Offers, discovery and reservations are limited to these.                           |
-| `credentials`       | A secret reference to a service-account key JSON. Absent: the host identity (platform accounts only). |
-| `impersonate`       | A service-account email to impersonate with the base credentials.                                     |
-| `network`, `subnet` | Used by `create` when no tenant network is given (default network `default`).                         |
-| `imageProject`      | Where image families resolve (default `ubuntu-os-cloud`).                                             |
-| `diskGiB`           | Boot disk size (default 100).                                                                         |
-| `discoverLabel`     | `key=value`: discovery yields only VMs carrying this label.                                           |
+| Field                   | Meaning                                                                                               |
+| ----------------------- | ----------------------------------------------------------------------------------------------------- |
+| `projectId`             | The Google Cloud project id.                                                                          |
+| `zones`                 | At least one zone. Offers, discovery and reservations are limited to these.                           |
+| `credentials`           | A secret reference to a service-account key JSON. Absent: the host identity (platform accounts only). |
+| `impersonate`           | A service-account email to impersonate with the base credentials.                                     |
+| `network`, `subnet`     | Used by `create` when no tenant network is given (default network `default`).                         |
+| `imageProject`          | Where image families resolve (default `ubuntu-os-cloud`).                                             |
+| `diskGiB`               | Boot disk size (default 100).                                                                         |
+| `discoverLabel`         | `key=value`: discovery yields only VMs carrying this label.                                           |
+| `billingExport`         | `project.dataset.table` of the Cloud Billing detailed export: provider costs (see Provider costs).    |
+| `billingExportLocation` | The export dataset's BigQuery location (`US`, `EU`, `us-central1`, …).                                |
 
 ## Usage
 
@@ -70,10 +72,10 @@ With `impersonate` set, the base credentials also need `roles/iam.serviceAccount
 
 better-compute marks the VMs it owns with labels, and acts only on VMs that carry them:
 
-| Label                                      | Written by                                                        | Means                                           |
-| ------------------------------------------ | ----------------------------------------------------------------- | ----------------------------------------------- |
-| `better-compute-instance=<id>`             | `create`, and `claim` when an instance is attached                | The instance this VM belongs to.                |
-| `better-compute-managed=true`              | `create`, and `claim` with `managed` (an `onDelete: 'delete'`)    | better-compute may delete the VM.               |
+| Label                                      | Written by                                                        | Means                                                                                                                                                                                                                                                    |
+| ------------------------------------------ | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `better-compute-instance=<id>`             | `create`, and `claim` when an instance is attached                | The instance this VM belongs to.                                                                                                                                                                                                                         |
+| `better-compute-managed=true`              | `create`, and `claim` with `managed` (an `onDelete: 'delete'`)    | better-compute may delete the VM.                                                                                                                                                                                                                        |
 | `better-compute-tenant`, `-pool`, `-owner` | you, on VMs to auto-attach (`vps({ discovery: { autoAttach } })`) | The tenant, pool and owner an auto-attach uses. `-owner` counts only on a platform account, and only for an active member of the tenant (when the IAM port can say); on a tenant's own account it is ignored and the configured owner gets the instance. |
 
 - **`delete`** deletes only VMs labelled `better-compute-managed=true`; any other is `INVALID_STATE`. **`power`** acts only on VMs carrying `better-compute-instance`.
@@ -119,6 +121,17 @@ How vps uses them:
 - A firewall that exists with a different body is patched. A subnet that exists with another range, or a firewall with the opposite action, is reported as `error`.
 - A network or subnet that is still in use reports `pending` with a message, never an error.
 - `setTags` replaces the tags starting with `bc-` and keeps every other tag. It refuses VMs without the instance label.
+
+## Provider costs
+
+With `billingExport` set, the account's client implements `costs(window)` (D10): every row of the Cloud Billing **detailed (resource-level)** BigQuery export whose `usage_start_time` is in the window, every cost type (adjustments, taxes and corrections are rows of their own), as a `ProviderCostRecord` in integer micros of the export's currency. vps's `vps.costs` worker ingests them (attribution, pass-through, margins and leak detection).
+
+- The query is standard SQL with named `TIMESTAMP` parameters for the window; no value is ever put in the SQL text. The table id is the only text in it, and the manifest accepts only a BigQuery table id there (letters, digits, `_`, `-`, `.` and `:`; no quote, backtick or space).
+- The job runs in the export's project (and `billingExportLocation`), is polled with `jobs.getQueryResults` for at most 30 s per call (`gcpProvider({ costQueryBudgetMs })`), then paged by `pageToken`. A job still running after that is `UNAVAILABLE` (`details.reason` `jobTimeout`), and the worker retries later.
+- `sourceRowId` is the sha256 of the row's identity (billing account, SKU id, project, resource name, usage start and end, cost type) without its export time, so a re-exported or corrected row keeps its id. `creditsMicros` is the sum of the row's credits, never positive.
+- Authentication is the account's own token (key, impersonation or federation), whose `cloud-platform` scope covers BigQuery; an account on the metadata server needs a VM whose access scopes include BigQuery (`bigquery.readonly` or `cloud-platform`).
+
+The account's service account also needs `roles/bigquery.dataViewer` on the export dataset and `roles/bigquery.jobUser` on the export's project.
 
 ## Authentication
 
