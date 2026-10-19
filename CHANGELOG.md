@@ -22,6 +22,26 @@ All notable changes to the better-compute packages are documented here. The form
   account (`compute-account:<tenantId>/<provider>/<name>`), the CEL `attributeCondition` that trusts that subject
   alone, and an `allowedAudienceHint`. It is the first step of keyless Google Cloud accounts (`federationAudience`);
   the providers guide has the `gcloud` setup and what each `create` refusal means.
+- **Keyless Google Cloud accounts** (workload identity federation, GCP WS1).
+  - `@better-compute/pki` `workloadIssuer({ issuer, signingKey, nextKey?, previousKeys? })`: the control plane as an
+    OIDC issuer (ES256, 60 to 600 s tokens, `nextKey` published before it signs). `pki.workloadIssuer` in
+    `betterCompute()` serves it, unauthenticated and cached 5 minutes, at
+    `GET {basePath}/workload/.well-known/openid-configuration` and `GET {basePath}/workload/jwks.json`, names it in
+    `/.well-known/better-compute` as `workload`, and hands it to modules as `context.pki.workload`. The issuer must be
+    `<baseURL's origin>{basePath}/workload`, or on the origin named by the new `pki.workloadIssuerOrigin`, and differ
+    from `workloadIdentity.issuer`'s; anything else is `INVALID_CONFIG` (`reason: 'workloadIssuerUrl'`). The PKI
+    operations page covers persistent keys and rollover.
+  - `@better-compute/provider-gcp`: a tenant account may name `federationAudience` (its workload identity pool
+    provider) instead of `credentials`. `providerAccounts.create`/`update` prove before storing it that the pool trusts
+    exactly the account's subject and that the token reads the project, and refuse it with `INVALID_CONFIG` reasons
+    `credentialsAndFederation`, `noWorkloadIssuer`, `federationAudience`, `federationTrustsAnySubject`,
+    `federationRefused`, `impersonationRefused` or `projectAccess`; Google failures are retryable `UNAVAILABLE` or
+    `RATE_LIMITED`. An audience already in use by any account is `CONFLICT`.
+  - `@better-compute/gcp-common`: `federatedTokenSource` and `stsExchange` (Google STS token exchange).
+  - `@better-compute/vps`: migration `vps/0027_account_exclusive_key` (a provider-declared key, the federation
+    audience, unique per provider across tenants); provider checks run in admission with no transaction open.
+  - `@better-compute/core` (additive, optional): `WorkloadIssuerPort`, `PkiPort.workload`, `ProviderContext.identity`,
+    `ProviderInput.checkAccount` and `ProviderInput.accountKey`.
 
 ## 0.2.1 (2026-10-18)
 

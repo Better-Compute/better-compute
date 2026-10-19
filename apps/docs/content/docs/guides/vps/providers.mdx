@@ -604,8 +604,12 @@ and `update` check this before the account is stored (see the errors below).
 
    Google fetches the issuer's discovery document and keys itself, so the issuer URL must be reachable from the
    internet. For an issuer Google cannot reach, download the keys from `jwksUri` (`curl -o jwks.json <jwksUri>`) and
-   add `--jwk-json-path=jwks.json` to the command. Uploaded keys are a copy: upload them again after the issuer
-   rotates its signing key. The provider's default allowed audience is its resource name as an `https://` URL, the
+   add `--jwk-json-path=jwks.json` to the command. Uploaded keys are a copy, and Google accepts no token signed by a
+   key it was not given. The operator announces a rotation ahead of time and publishes the next key in `jwks.json`
+   beside the current one before it signs anything: as soon as `jwks.json` lists a key your upload lacks, download
+   it again and update the provider (`gcloud iam workload-identity-pools providers update-oidc` with
+   `--jwk-json-path=jwks.json`) within the announced window. Uploading only after the issuer has switched keys leaves the account unable to
+   authenticate until you do. The provider's default allowed audience is its resource name as an `https://` URL, the
    `allowedAudienceHint` with your project number, pool and provider filled in, and the control plane signs for it.
 
 4. **Grant access to the account's principal**, which is the subject in the pool:
