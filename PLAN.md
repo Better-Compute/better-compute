@@ -1499,27 +1499,49 @@ MFA on join tokens is an example per-pool policy, not a default, because CI can'
 
 ### 12.7 Billing and usage
 
-**Meters.** `better-compute iam setup` creates the root meters once, with a root session, via `billing.createMeter` + `billing.setPrice`:
-- `gpu.<gpuModel>.hours`, lower-cased (`gpu.h100.hours`). Pricing is per meter, so there is one meter per model;
-- `node.metal.hours`, `vps.vcpu.hours`, `vps.memory.gib.hours`.
+compute **meters**, better-iam **rates and invoices** (G7: compute never prices anything itself, except the reported cost of a pass-through charge). The root (platform) tenant owns the meters and prices; each organization directly under root is a better-iam billing account, whose statements, credits, terms and budgets are the ledger. Platform compute billing (plan `docs/superpowers/plans/2026-10-18-platform-compute-billing.md`; its decisions are cited here as **BD1–BD19**, not to be confused with §17's D-numbers) extends this to every resource root issues to a tenant. Docs: `guides/iam/billing-and-usage.mdx`.
 
-The basis is reserved time from `active` to `released` (D14).
+**Meters (BD4, BD8, BD9).** One catalog, `meterCatalog` (`core/meters.ts`), all `rate-card`, on the root tenant; better-iam resolves them for every tenant below. `billing.syncMeters`, `better-compute iam setup --meters` and the iam module (when its port has a root billing credential) create the missing ones; existing meters are never changed. Prices cannot vary by tag, so a distinct price needs a distinct meter:
+- hosted and node: `gpu.<family>.hours` and `.spot` for every known family, `gpu.other.hours`, `node.metal.hours`, `vps.vcpu.hours`, `vps.memory.gib.hours`, `vps.volume.gib.hours`, `vps.sandbox.warm`;
+- provider VMs: `vm.vcpu.hours`, `vm.memory.gib.hours`, `vm.gpu.<model>[.spot].hours`, `vm.instance.hours`; reserved variants `vm.reserved.*`; `vm.grant.slot.hours`, `vm.grant.usage.hours` (informational), `vm.managed.hours`; `flavor.<name>.hours` for whole-shape prices;
+- ancillaries: `network.vpc.hours`, `ip.public.hours`, `disk.<type>.gib.hours` (`pd-standard`, `pd-balanced`, `pd-ssd`, `hyperdisk-balanced`, `local-ssd`), `snapshot.gib.hours`.
+The `vm.*` GPU meters exist for the configured `gpuModels` (default H100, H200, B200, A100, L4, L40S, other); the catalog stays under better-iam's 100 meters per tenant and refuses more. `reported` meters for pass-through are root's own (better-iam `createMeter`), not in the catalog.
 
-**Events.** Hourly windows per allocation go to the `UsageSink` as `{ tenantId, meter, quantity, identityId, occurredAt, tags:{region, pool, gpuModel, project, agent?}, idempotencyKey:'cmp:<allocId>:<windowStartMs>' }`.
-- **Tags:** no per-reservation, per-allocation or per-node ids in tags. Pool, project and agent ids are allowed, because their cardinality is bounded [EXT §2].
-- **Attribution:** `identityId` is the person for delegated work, or the agent for agent keys. `UsageInput` has no `agentId` (`billing.ts:697-714`); `agentId` is set only when `identityId` is itself an agent (`billing.ts:803-804`). So agent-key usage appears under `groupBy 'agent'`, while delegated usage carries tag `agent=<agentId>` and appears only under `groupBy 'tag:agent'`. U9 (optional upstream) would close the gap.
+**Prices (BD13, BD14).** Root manages better-iam `PriceSpec`s (micros) through compute's root-only `billing` group (`compute:billing:read|manage` on `compute-fleet`): `meters`, `syncMeters`, `prices`, `setPrices` (list prices, and negotiated ones with `targetTenantId`), `proposePrices` (provider list prices + margin; returned, never applied) and `margins`. The IAM port gains optional `ensureMeters`, `listMeters`, `setPrice`, `listPrices`, `quote` and `spend`, embedded through an explicit root `serviceCredential` (better-iam has no trusted-runtime equivalent), remote over HTTP as the root service account. Terms, credits, invoice items and credit notes stay in better-iam (root admin user session with MFA); compute never calls them. One deployment currency, `vps({ billing: { currency } })` (ISO 4217, default `USD`), for proposals, estimates, provider costs and margins.
 
-**Poison isolation.** `recordMany` records the whole batch in one transaction (`api/billing.ts:3580-3588`), so one bad event fails the batch on every retry. On a batch error the sink bisects the batch, then falls back to per-event `iam.billing.record`:
+**Sources (BD2).** `usage_windows` rows come from typed sources: `source_kind` ∈ `allocation`, `instance`, `grant`, `network`, `snapshot`, `cost`, plus `source_id`; `allocation_id` is nullable (core `0031_usage_sources`). Every source reconciler keeps a watermark advanced in the same transaction as its windows and never re-derives an hour (retention prunes recorded windows).
+- `allocation`: reservations (`capacity.usage`) and hosted instances and volumes (`vps.usage`), unchanged. Basis: reserved time from `active` to `released` (D14).
+- `instance` (BD3–BD6): provider VMs, from `instance_usage_intervals` (vps `0030_instance_usage`) written in the lifecycle transaction that observed the state, with a non-overlap `EXCLUDE`; phases `running`/`stopped`; `lost` is unbilled. `vps.provider-usage` (5 min) meters each hour `meterGraceMs` (5 min) after it ends. Lines from `meterLinesFor(shape, mode, phase)`: pool mode `metered` (composed, reserved, granted or flavor-meter compute lines, plus address and disk lines), `platform-fee` (`vm.managed.hours`; default for a tenant's own cloud account, BYO: never `vm.*` compute) or `none`; `instances.attach({ billing: 'none' })` (root only) writes a VM off.
+- `grant` (BD7): reservation grants (vps `0031_reservation_grants`).
+- `network`, `snapshot` (BD9): `vps.ancillary-usage` (vps `0032_network_metering`).
+- `cost` (BD11): pass-through charges.
+
+**Grants (BD7).** `reservationGrants.create` (root, `compute:providers:manage` on the provider account) commits `slots` of a ready `provider_reservations` row on a root account to a tenant for `[startsAt, endsAt)`; grants over a term never exceed `total` (decided under the reservation row lock). `vps.grants` bills `vm.grant.slot.hours` × slots every hour of the term, used or not; the grantee's VMs inside it record only `vm.grant.usage.hours` (no double billing); beyond it they take outside slots at `vm.reserved.*`. Admission serves the grantee first; others share `total − in use − unused granted slots` (a stopped grant VM keeps its slot). A starting or renewing grant adopts the tenant's VMs already on the reservation (never `billing: 'none'` ones). `reservationGrants.list` is a tenant read; `providerAccounts.delete`/`unbindReservation` refuse while grants are live or not fully metered. Grants are root contracts, not budget-checked.
+
+**Provider costs and pass-through (BD10–BD12).** Optional `ProviderImpl.costs` (GCP: the BigQuery detailed billing export, `billingExport`; enabling it is a manual Console step) feeds `provider_costs` (vps `0033_provider_costs`) through `vps.costs` (`6h`, 3-day lookback), idempotent by a stable source row id; attribution: `better-compute-instance` label → `better-compute-tenant` label → the tenant of a BYO account → unattributed (`billing.unattributed`). A corrected row publishes `billing.cost-corrected` and is never billed again (root issues a credit note). Another currency → `CurrencyMismatch`, excluded. `billing.passThrough` rules on root accounts (`{ skuPattern, meter, multiplier }`, `reported` meter, multiplier 1–10) turn attributed rows into `cost` windows (`costx:<accountId>:<rowId>`, cost = net × multiplier, recorded by the normal flush); patterns matching SKUs compute meters itself (`ProviderDefinition.billing.computeSku`/`meteredSku`) are refused and such rows never pass. `billing.margins` = better-iam spend − cost of platform accounts only. `billing.leak` when an instance's distinct provider-billed compute hour slots in a UTC day exceed its metered running hours by more than `leakToleranceHours` (1).
+
+**Events.** Hourly windows go to the `UsageSink` as `{ tenantId, meter, quantity, identityId?, occurredAt, cost?, tags, idempotencyKey }`.
+- **Keys (B8):** allocation windows keep `cmp:<allocId>:<windowStartMs>` (`:<meter>` for a second meter); other sources `cmp:<kind>:<sourceId>:<windowStartMs>:<meter>`; pass-through `costx:<accountId>:<rowId>`.
+- **Tags (BD19):** `region`, `pool`, `project`, `provider`, `gpuModel`, `flavor`, `source`, and `agent` for delegated work. No per-reservation, per-allocation, per-node, per-instance, per-network or per-grant ids in tags: they stay in `usage_windows.source_id` and `usage.platform` [EXT §2].
+- **Attribution:** `identityId` is the person for delegated work, or the agent for agent keys (instances: the owner; grants, networks, snapshots and costs bill the tenant alone). `UsageInput` has no `agentId` (`billing.ts:697-714`); `agentId` is set only when `identityId` is itself an agent (`billing.ts:803-804`). So agent-key usage appears under `groupBy 'agent'`, while delegated usage carries tag `agent=<agentId>` and appears only under `groupBy 'tag:agent'`. U9 (optional upstream) would close the gap.
+
+**Poison isolation.** `recordMany` records the whole batch in one transaction (`api/billing.ts:3580-3588`), so one bad event fails the batch on every retry. The flush claims its batch first (`claimed_at`, core `0033_usage_window_claims`, 10-minute takeover), and on a batch error bisects it, then falls back to per-event `iam.billing.record`:
 - `NOT_FOUND 'Identity not found'`, for an identity deleted or moved before the flush (`billing.ts:795-801`; the §12.8 offboarding case): re-record with the offboard `successorId` if the inbox saw one, else without `identityId` (tenant-attributed, tag `attribution=orphaned`);
 - `CONFLICT`, for a key reused on another meter (`billing-service.ts:494-497`): dead-letter it, since it indicates a compute bug;
-- `BILLING_PERIOD_CLOSED` (`billing-service.ts:503-508`): dead-letter it and alert; the fix is a root `billing.createInvoiceItem`.
+- `BILLING_PERIOD_CLOSED` (`billing-service.ts:503-508`): dead-letter it once, never retried; the fix is a root `billing.createInvoiceItem`.
 
-Only the event that still fails goes to `usage_dead_letters`. Retries are safe because of the idempotency keys. The sink flushes hourly, before the daily `closePeriod`.
+Only the event that still fails goes to `usage_dead_letters`. Retries are safe because of the idempotency keys.
 
-**Budgets:**
+**Corrections (BD17).** Root only (`compute:usage:read|manage` on `compute-fleet`): `usage.platform` (cross-tenant totals), `usage.deadLetters` (reason `meter-missing`, `period-closed`, `identity`, `invalid`, `other`), `usage.retry` (refuses `period-closed`), `usage.void` (unsent or dead-lettered windows only, refuses claimed ones; recorded usage is corrected by a better-iam credit note, never by rewriting compute history). Tenants see their own provider windows in `usage.list`/`export`, never root's void reason.
+
+**Period close (BD18).** Reconcilers write only ended hours; `iam.usage` flushes hourly. better-iam's `closePeriod()` closes the previous month whenever it runs, so hosts close each month at least 6 h after it ends (`runIamJobs`'s daily `iam.jobs.close-period` has no fixed time: leave it out of `only` and schedule the close). A late window is a `period-closed` dead letter for a root invoice item.
+
+**Budgets (BD16):**
 - the in-decision `principal.spendExceeded` deny (tenant policy);
-- per-pool `iam.billing.check`;
-- `billing:budget-alert` → the offering's `onBudgetExceeded: notify | stop-new | drain`.
+- per-pool `iam.billing.check` on every billable path: reservations, instance creates, billed attaches, networks on metered pools, sandboxes; a root caller issuing into a tenant is checked against the tenant's budgets;
+- `billing:budget-alert` → the offering's `onBudgetExceeded: notify | stop-new | drain | suspend`, set through `pools.offer`/`pools.updateOffer`. `suspend` marks the offer suspended (core `0032_offer_suspension`), refuses all new work (`SPEND_LIMIT_REACHED`, `offer-suspended`), and the `vps.suspension` sweep (1 min) stops the tenant's running instances in the pool and drains its warm pools; lifting it restarts nothing.
+
+**Estimates (BD15).** `flavors.list` items and `instances.estimate` (a read of the pool's flavors) carry `{ perHourMicros, currency, lines }` priced by `IamPort.quote` with the tenant's negotiated prices.
 
 ### 12.8 Event intake
 

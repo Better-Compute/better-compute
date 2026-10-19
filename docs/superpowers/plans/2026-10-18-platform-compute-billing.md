@@ -1326,3 +1326,106 @@ Assertions:
   rounded down, which is documented).
 - **better-iam upstream asks.** Tag-dimensioned prices, which would remove the need for per-flavor meters;
   `recordMany` with `enforceBudgets`; and a push event on budget exhaustion.
+
+---
+
+## Legionedge integration notes
+
+Written at Task 25 against the merged branch (`feat/platform-compute-billing`, every billing phase in). Copy this
+section to legionedge `docs/redesign/10-billing.md` through a legionedge session; nothing here changes a legionedge
+file by itself. Names are the code's, which differ from the plan text above in places (see the SDD ledger's
+rulings): for example estimates are `instances.estimate`, not `instances.create({ dryRun })`, and the deployment
+currency is `vps({ billing: { currency } })`.
+
+### What upstream now does
+
+- better-compute meters every compute resource the platform issues to a tenant: provider VMs created or attached
+  (lifecycle intervals, `vps.provider-usage`), reservation grants (`vps.grants`), tenant networks and sandbox
+  snapshots (`vps.ancillary-usage`), public addresses and disks (lines of the VM's intervals), and provider
+  pass-through costs (`vps.costs`). All of it lands in `usage_windows` and reaches better-iam through the one
+  `iam.usage` flush, attributed to the tenant (and owner) the resource was issued to.
+- better-iam stays the only place prices, statements, terms, credits and budgets live. Root manages compute's
+  prices through the root-only `billing` API group (`meters`, `syncMeters`, `prices`, `setPrices`,
+  `proposePrices`, `margins`).
+- BYO cloud accounts (a tenant's own GCP project) default to `platform-fee`: at most `vm.managed.hours`, never
+  `vm.*` compute, and their costs are never passed through or counted in margins.
+
+### Replace
+
+- **Drop the planned LegionEdge VM metering:** `compute_vm_intervals`, `compute_vm_charges` and the
+  `vm.instance.hours` events keyed `vmc:`. Upstream already records `vm.instance.hours` (and the vCPU, memory, GPU,
+  address and disk meters) for the same VMs under `cmp:instance:<id>:<windowStartMs>:<meter>`; a second,
+  `vmc:`-keyed writer on the same meter would bill every VM twice. If any `vmc:` usage was already recorded, cut
+  over at a month boundary: stop the LegionEdge writer, let its last month close, and run upstream metering from the
+  next month. Upstream meters hours from each VM's intervals as they are observed; it does not backfill hours before
+  the upgrade.
+- **`compute_rates` → `billing.setPrices`.** A list rate is `{ meter, effectiveFrom: 'YYYY-MM', spec }`; a
+  negotiated rate for an organization adds `targetTenantId` (the org's tenant; it applies to its subtree). Specs
+  are better-iam `PriceSpec`s in micros (`per-unit`, `graduated`, `volume`, `package`). At most 100 prices per
+  call; partial failures come back in `failed`.
+- **Per-VM-shape rates → flavor meters.** better-iam prices cannot vary by tag, so a price per machine shape (or per
+  shape and region) is a flavor meter: `flavors.update` with `billing: { meter: 'flavor.a3-highgpu-8g.us-central1.hours' }`
+  (root only; created on the root tenant when the IAM port can define meters), then `setPrices` on that meter. It
+  replaces the composed vCPU, memory, GPU and instance lines for that flavor's VMs; disks and addresses still bill.
+  Mind better-iam's 100 meters per tenant (the default catalog stays under 90).
+- **Free or written-off VMs:** `instances.attach({ billing: 'none' })` (root only) instead of a zero rate.
+- **Committed capacity:** `reservationGrants.create` (root) instead of LegionEdge-side commitment charges. The
+  grantee pays `vm.grant.slot.hours` per committed slot, used or not; price `vm.grant.usage.hours` at 0.
+
+### Keep (LegionEdge-side)
+
+- **Stripe collection and tax.** better-iam closes the month into statements; LegionEdge collects them through
+  Stripe and applies tax as today.
+- **The admin price-book UI,** built on `billing.meters` (catalog and `missing`), `billing.prices`,
+  `billing.proposePrices` (provider list price plus a margin, never applied) and `billing.setPrices`. All are
+  `compute:billing:*` on `compute-fleet`, so only root members holding those actions can call them.
+- **The margins UI,** on `billing.margins({ from, to, groupBy: 'tenant' | 'pool' | 'account' | 'meter' })`.
+  Revenue comes from better-iam spend (whole billing periods; the answer's `from`/`to` are the range both cover),
+  cost from the platform's own provider accounts. Compute cost has no meter dimension: use the tenant or pool view
+  for compute margins and the meter view for pass-through.
+- **The cost ledger UI.** Upstream has no row-level cost read API yet: read `provider_costs` aggregates through
+  `billing.margins`, or wait for the planned `billing.costs` read API (Follow-ups). Drive alerts from the events
+  `billing.cost-corrected` (`passedThrough: true` means issue a credit note in better-iam), `billing.leak` (a
+  metering gap) and `billing.unattributed` (cost with no tenant: label the resource `better-compute-tenant=<tenant>`).
+- **Credits, credit notes and invoice items** stay manual root actions in better-iam (root admin user session with
+  MFA). Upstream points to them: `usage.void` refuses recorded usage with "issue a credit note in Better IAM", and
+  `period-closed` dead letters need a `billing.createInvoiceItem`.
+
+### Configure
+
+```ts
+bridge.embedded(iam, {
+  rootTenantId,
+  serviceCredential: { token: rootBillingServiceAccountKey }, // iam:billing:manage + iam:billing:read on root
+  runIamJobs: { only: ['iam.jobs.audit-hooks', 'iam.jobs.auth-outbox', 'iam.jobs.budgets', 'iam.jobs.sweep'] },
+});
+vps({
+  providers: [gcp],
+  billing: { currency: 'USD', gpuModels: ['H100', 'H200', 'B200', 'A100', 'L4', 'L40S'] }, // as in the bridge
+  costs: { every: '6h' }, // lookbackDays 3 and leakToleranceHours 1 by default
+});
+```
+
+- **Currency:** `vps({ billing: { currency } })` is the one knob; set it to better-iam's deployment currency.
+- **Meters:** run `billing.syncMeters` once, and again after adding GPU models or flavor meters. Create the
+  `reported` pass-through meters on the root tenant yourself (better-iam `billing.createMeter` with
+  `pricing: 'reported'`, or the port's `ensureMeters`), for example `network.egress.gib` and `storage.snapshot.gib`.
+- **`billingExport` on the managed (root) GCP account:** turn on the **detailed** usage cost export in the Cloud
+  Console (a manual step), grant the account's service account `roles/bigquery.dataViewer` on the export dataset
+  and `roles/bigquery.jobUser` on the export's project, then set `billingExport` to
+  `<project>.<dataset>.gcp_billing_export_resource_v1_<BILLING_ACCOUNT_ID>` (and `billingExportLocation`) with
+  `providerAccounts.update`. Enable the Cloud Billing API in the credential's project for `proposePrices`. Check the
+  first jobs' bytes processed: the query filters on `usage_start_time`, which may not prune the export's partitions
+  (see the provider-gcp README).
+- **Pass-through rules for egress and snapshots** on the same account, for example
+  `billing: { passThrough: [{ skuPattern: 'egress', meter: 'network.egress.gib', multiplier: 1.2 }, { skuPattern: 'Storage PD Snapshot', meter: 'storage.snapshot.gib', multiplier: 1.1 }] }`.
+  Patterns that match SKUs compute meters itself (core, RAM, GPU, instance, persistent disk and Hyperdisk capacity,
+  local SSD, external IP) are refused. Check the SKU descriptions against a few days of the real export before
+  choosing patterns.
+- **Budgets:** set each organization's offer policy with `pools.updateOffer` (`onBudgetExceeded: 'suspend'`, or
+  `stop-new`, `drain`, `notify`) instead of SQL; `suspend` stops the org's running VMs in that pool within a minute.
+- **Month close:** schedule better-iam `closePeriod()` at least 6 hours after each month ends (the `only` list above
+  leaves the daily job out), check the iam doctor's `iam.usage-backlog` before it, and watch `usage.deadLetters`
+  after it.
+- **Tenant estimates:** consoles show the `estimate` of `flavors.list` items and call `instances.estimate` before a
+  create.

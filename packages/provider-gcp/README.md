@@ -1,6 +1,6 @@
 # @better-compute/provider-gcp
 
-A Google Compute Engine provider for better-compute: VMs as VPS instances and offers (including GPU machine types), with attach, reservations and tenant networks. It talks to the Compute Engine REST v1 API over plain `fetch` and has no npm dependencies beyond `@better-compute/core` and `@better-compute/vps`.
+A Google Compute Engine provider for better-compute: VMs as VPS instances and offers (including GPU machine types), with attach, reservations and tenant networks, and for platform compute billing the provider costs of the Cloud Billing BigQuery export and the list prices of the Cloud Billing Catalog. It talks to the Compute Engine REST v1 API (and BigQuery v2 and the Catalog v1 for billing) over plain `fetch` and has no npm dependencies beyond `@better-compute/core` and `@better-compute/vps`.
 
 It is not part of the `better-compute` umbrella: install it next to `better-compute`.
 
@@ -115,7 +115,9 @@ How vps uses them:
 
 ## List prices
 
-`listPrices({ regions? })` reads the Compute Engine SKUs of the Cloud Billing Catalog (`services/6F81-5844-456A/skus`, host `cloudbilling.<universe>`, or `catalogEndpoint`) with the account's own token, and returns `ProviderListPrice` rows in micros of the catalog currency: vCPU and memory per machine family (`n2`), GPUs per catalog family (`h100`), persistent and local disks per GiB-hour (monthly prices divided by 730), and external addresses (egress is not listed: it is billed by pass-through at its real cost). On-demand and Spot prices are returned (`spot`); commitment prices, custom or extended shapes, licences, regional disks, GPU variants (Mega, Edge, virtual workstations), free first tiers and GPUs outside the meter catalog's families are skipped. Only unambiguous rows are returned: SKUs that map to the same resource, family or model or disk type, region, spot and currency but disagree on the price are all dropped, and a machine family must look like one (`n2`, `c3d`), not `compute` or `micro`. A catalog answer that is not a SKU list is `UNAVAILABLE`, and an empty list is not cached. The list is cached per account for 24 hours, whatever the regions asked. The account needs the Cloud Billing API enabled in its project.
+`listPrices({ regions? })` reads the Compute Engine SKUs of the Cloud Billing Catalog (`services/6F81-5844-456A/skus`, host `cloudbilling.<universe>`, or `catalogEndpoint`) with the account's own token, and returns `ProviderListPrice` rows in micros of the catalog currency: vCPU and memory per machine family (`n2`), GPUs per catalog family (`h100`), persistent and local disks per GiB-hour (monthly prices divided by 730), and external addresses (egress is not listed: it is billed by pass-through at its real cost). On-demand and Spot prices are returned (`spot`); commitment prices, custom or extended shapes, licences, regional disks, GPU variants (Mega, Edge, virtual workstations), free first tiers and GPUs outside the meter catalog's families are skipped. Only unambiguous rows are returned: SKUs that map to the same resource, family or model or disk type, region, spot and currency but disagree on the price are all dropped, and a machine family must look like one (`n2`, `c3d`), not `compute` or `micro`. A catalog answer that is not a SKU list is `UNAVAILABLE`, and an empty list is not cached. The list is cached per account for 24 hours, whatever the regions asked.
+
+**Enable the Cloud Billing API** (`cloudbilling.googleapis.com`, which serves the Catalog) before `billing.proposePrices` reads an account: `gcloud services enable cloudbilling.googleapis.com --project <project>`. The provider sends no quota project, so Google checks the API against the project that owns the account's credential (the service account's project; usually `projectId`). The Catalog is public pricing: no IAM role is needed beyond an authenticated identity.
 
 ## Networks
 
@@ -128,14 +130,28 @@ How vps uses them:
 
 ## Provider costs
 
-With `billingExport` set, the account's client implements `costs(window)` (D10): every row of the Cloud Billing **detailed (resource-level)** BigQuery export whose `usage_start_time` is in the window, every cost type (adjustments, taxes and corrections are rows of their own), as a `ProviderCostRecord` in integer micros of the export's currency. vps's `vps.costs` worker ingests them (attribution, pass-through, margins and leak detection).
+With `billingExport` set, the account's client implements `costs(window)` (platform compute billing, D10): every row of the Cloud Billing **detailed (resource-level)** BigQuery export whose `usage_start_time` is in the window, every cost type (adjustments, taxes and corrections are rows of their own), as a `ProviderCostRecord` in integer micros of the export's currency. vps's `vps.costs` worker ingests them (attribution, pass-through, margins and leak detection).
 
 - The query is standard SQL with named `TIMESTAMP` parameters for the window; no value is ever put in the SQL text. The table id is the only text in it, and the manifest accepts only a BigQuery table id there (letters, digits, `_`, `-`, `.` and `:`; no quote, backtick or space).
 - The job runs in the export's project (and `billingExportLocation`), is polled with `jobs.getQueryResults` for at most 30 s per call (`gcpProvider({ costQueryBudgetMs })`), then paged by `pageToken`. A job still running after that is `UNAVAILABLE` (`details.reason` `jobTimeout`), and the worker retries later.
 - `sourceRowId` is the sha256 of the row's identity (billing account, SKU id, project, resource name, usage start and end, cost type, location and zone, pricing unit, price tier start, and a digest of its sorted labels) without its export time or amounts, so a re-exported or corrected row keeps its id. Rows that still share an identity in one result are parts of one row: their cost, credits and usage are summed into one record, the same on every read. `creditsMicros` is the sum of the row's credits, never positive.
 - Authentication is the account's own token (key, impersonation or federation), whose `cloud-platform` scope covers BigQuery; an account on the metadata server needs a VM whose access scopes include BigQuery (`bigquery.readonly` or `cloud-platform`).
 
-The account's service account also needs `roles/bigquery.dataViewer` on the export dataset and `roles/bigquery.jobUser` on the export's project.
+### Set up the billing export
+
+1. **Turn on the detailed export, by hand.** In the Cloud Console, open **Billing**, pick the Cloud Billing account that pays for the account's project, then **Billing export**, **BigQuery export**, and under **Detailed usage cost** choose a project and dataset and save. There is no API for this step, so better-compute cannot do it for you. Google creates the table `gcp_billing_export_resource_v1_<BILLING_ACCOUNT_ID>` in that dataset and starts filling it some hours later. Only the **detailed** (resource-level) export works: the standard export has no `resource.name` or resource labels, so its rows cannot be attributed to instances.
+2. **Grant the account's identity** (the key's service account, the impersonated one, or the metadata server's):
+   - `roles/bigquery.dataViewer` on the export **dataset** (reading the table);
+   - `roles/bigquery.jobUser` on the export's **project** (the query job runs and is billed there; the BigQuery API must be enabled in it).
+
+   The export often lives in another project than the account's VMs: grant both roles there.
+
+3. **Name the table on the root account:** `billingExport: '<project>.<dataset>.gcp_billing_export_resource_v1_<BILLING_ACCOUNT_ID>'`, and `billingExportLocation` when the dataset is not in the `US` multi-region (`EU`, `us-central1`, …). An account on the metadata server needs a VM whose access scopes include BigQuery.
+4. **Run the worker.** `vps({ costs: { every: '6h', lookbackDays: 3 } })` reads each such account every 6 hours over the last 3 days (late and corrected rows land within it). Add `billing.passThrough` rules to the account for the costs to bill on (egress, snapshots); see `providerAccounts.create` in the API reference.
+
+What lands where: rows labelled `better-compute-instance` (every VM better-compute creates or attaches) are the instance's tenant's; rows labelled `better-compute-tenant` are that tenant's; anything else on a platform account is unattributed and published as `billing.unattributed`. Label the other resources you issue to a tenant (buckets, snapshots you take by hand) with `better-compute-tenant=<tenant id>` to attribute them.
+
+**Partition caveat (unverified on a live export).** The query filters on `usage_start_time`. Google documents the export tables as partitioned by `_PARTITIONTIME` (daily), not by `usage_start_time`, so BigQuery may not prune partitions for this filter and each read can scan, and bill, the whole table, every `costs.every`. Check the bytes processed of the first jobs in the export project's job history. If they grow with the table, point `billingExport` at a view, in the export dataset, over recent partitions, for example `SELECT * FROM <table> WHERE _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 40 DAY)` (keep the window wider than `lookbackDays` plus the export's delay).
 
 ## Authentication
 

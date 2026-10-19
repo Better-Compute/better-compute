@@ -1,11 +1,11 @@
 ---
 title: Providers
-description: Provider accounts, the defineProvider contract, the Hetzner Cloud, Proxmox VE and Google Compute Engine providers, discovery and attach, provider reservations, platform-issued compute and its tenant isolation, conformance cases, and secret references for credentials.
+description: Provider accounts, the defineProvider contract, the Hetzner Cloud, Proxmox VE and Google Compute Engine providers, discovery and attach, provider reservations, platform-issued compute and its tenant isolation, billing (modes, attach billing, reservation grants, provider costs and pass-through), conformance cases, and secret references for credentials.
 metaTitle: VPS providers and provider accounts
 icon: Cloud
 status: beta
 packages: ['@better-compute/vps', '@better-compute/provider-hetzner', '@better-compute/provider-proxmox', '@better-compute/provider-gcp']
-sources: ['packages/vps/src/accounts.ts', 'packages/vps/src/provider.ts', 'packages/vps/src/conformance.ts', 'packages/vps/src/module.ts', 'packages/vps/src/lifecycle.ts', 'packages/core/src/extension.ts', 'packages/core/src/manifest.ts', 'packages/provider-hetzner/README.md', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-hetzner/src/robot.ts', 'packages/provider-proxmox/README.md', 'packages/provider-proxmox/src/proxmox.ts', 'packages/provider-gcp/README.md', 'packages/provider-gcp/src/compute.ts', 'packages/provider-gcp/src/reservations.ts', 'packages/vps/src/discovery.ts', 'packages/vps/src/attach.ts', 'packages/vps/src/provider-reservations.ts', 'packages/server/src/api/secrets.ts', 'packages/server/src/ports.ts', 'packages/pki/src/secrets.ts', 'tests/vps-instances.test.ts', 'tests/vps-provider.test.ts', 'tests/provider-hetzner.test.ts', 'tests/provider-proxmox.test.ts', 'tests/provider-gcp.test.ts', 'tests/gcp-end-to-end.test.ts', 'tests/root-issued-compute.test.ts', 'tests/root-issued-compute-iam.test.ts', 'tests/vps-account-secret-scope.test.ts']
+sources: ['packages/vps/src/accounts.ts', 'packages/vps/src/provider.ts', 'packages/vps/src/conformance.ts', 'packages/vps/src/module.ts', 'packages/vps/src/lifecycle.ts', 'packages/core/src/extension.ts', 'packages/core/src/manifest.ts', 'packages/provider-hetzner/README.md', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-hetzner/src/robot.ts', 'packages/provider-proxmox/README.md', 'packages/provider-proxmox/src/proxmox.ts', 'packages/provider-gcp/README.md', 'packages/provider-gcp/src/compute.ts', 'packages/provider-gcp/src/reservations.ts', 'packages/vps/src/discovery.ts', 'packages/vps/src/attach.ts', 'packages/vps/src/provider-reservations.ts', 'packages/vps/src/billing.ts', 'packages/vps/src/instance-usage.ts', 'packages/vps/src/reservation-grants.ts', 'packages/vps/src/costs.ts', 'packages/provider-gcp/src/costs.ts', 'packages/provider-gcp/src/prices.ts', 'packages/server/src/api/secrets.ts', 'packages/server/src/ports.ts', 'packages/pki/src/secrets.ts', 'tests/vps-instances.test.ts', 'tests/vps-provider.test.ts', 'tests/provider-hetzner.test.ts', 'tests/provider-proxmox.test.ts', 'tests/provider-gcp.test.ts', 'tests/gcp-end-to-end.test.ts', 'tests/root-issued-compute.test.ts', 'tests/root-issued-compute-iam.test.ts', 'tests/vps-account-secret-scope.test.ts']
 ---
 
 A provider pool runs its instances on someone else's infrastructure: a public cloud, or a hypervisor cluster you
@@ -298,6 +298,43 @@ that controls what it was issued:
 }
 ```
 
+## Billing
+
+The root tenant bills its customers for what it issues to them on its provider accounts: compute meters the VMs,
+reservation slots, networks, disks and addresses, and Better IAM prices and invoices them. The whole model, prices
+and budgets are in [Billing and usage](/docs/guides/iam/billing-and-usage); this is what a provider pool adds.
+
+- **Billing modes.** A provider pool's `policy.billing.mode` is `metered` (vCPU, memory, GPU and per-VM lines, plus
+  disks and public addresses), `platform-fee` (one `vm.managed.hours` line per running VM) or `none`. Root-owned
+  pools default to `metered`; a pool on a tenant's own cloud account defaults to `platform-fee`, so a tenant is never
+  charged compute it already pays its provider for. Only the platform sets the mode
+  ([`pools.create`](/docs/reference/api/pools#create), `pools.update`).
+- **What a VM records.** Usage comes from the instance's observed `running` and `stopped` spans, written with the
+  lifecycle change: billing starts at the first observed `running` and ends at the observed stop, detach or delete,
+  and a `lost` span is not billed. A stopped VM still bills its disks. A flavor with a root-set `billing.meter`
+  (`flavor.<name>.hours`) bills one whole-shape line instead of the composed ones.
+- **Attach.** [`instances.attach`](/docs/reference/api/instances#attach) takes `billing: 'metered' | 'none'`. Only
+  the platform may write a VM off with `none`; a lent VM bills its tenant from its first observed `running` after
+  the attach, never before.
+- **Reservations.** A VM admitted against a bound reservation bills the `vm.reserved.*` meters. Root can commit
+  slots of a reservation to one tenant for a term with
+  [`reservationGrants.create`](/docs/reference/api/reservation-grants#create): the tenant pays
+  `vm.grant.slot.hours` for every committed slot, used or not, gets priority on them, and its VMs inside the grant
+  record no compute meters. While a grant is live, `unbindReservation` and `delete` on the account are
+  `INVALID_STATE`.
+- **Provider costs.** The `vps.costs` worker reads what the provider billed (Compute Engine: the BigQuery billing
+  export named by `billingExport`) and attributes each row to a tenant by the `better-compute-instance` and
+  `better-compute-tenant` labels. `billing.passThrough` rules on a root account bill costs compute does not meter
+  itself, such as egress, at cost times a multiplier on a `reported` meter; the SKUs compute meters are refused as
+  patterns and never passed through. Root reads its margin per tenant, pool, account or meter with
+  `billing.margins`, and `billing.leak` flags a VM the provider billed for more hours than compute metered.
+- **Budgets.** `instances.attach` (when billed) and `networks.create` (on a `metered` pool) are budget-checked like
+  `instances.create`, against the target tenant's budgets when root issues into it. An offer with
+  `onBudgetExceeded: 'suspend'` stops the tenant's running VMs in the pool and refuses its new work once its budget
+  is spent.
+- **Estimates.** Each item of `flavors.list` on a provider pool carries the hourly `estimate` for the caller's
+  tenant, and `instances.estimate` answers it before a create.
+
 ## The provider contract
 
 `defineProvider` checks a definition's shape up front and returns it frozen with `extension: 'provider'`. Every
@@ -334,10 +371,18 @@ The client is a `ProviderImpl`:
 | `delete(id, call)`                                      | A machine that is already gone counts as deleted: `NOT_FOUND` is success.                                                                 |
 | `power?(id, action, call)`                              | `on`, `off`, `graceful-off`, `reset`, `graceful-restart`, `cycle`, `nmi`. vps uses `on` and `graceful-off`; without `power`, a stop or start is `UNSUPPORTED` and fails the instance. |
 | `reinstall?`, `rescue?`, `list?`, `bootstrap?`          | Optional. `bootstrap` delivers a single-use join token to machines that will run bcd, and never through user data.                        |
+| `costs?(window, call)`                                  | Optional ([billing](#billing)). The account's billed cost rows whose usage started in `[from, to)`, as `ProviderCostRecord`s in integer micros, each with a `sourceRowId` that stays the same when the provider re-exports the row. Read outside any transaction. |
+| `listPrices?(query, call)`                              | Optional. The provider's list prices for `billing.proposePrices`, before any margin.                                                      |
 
 A machine is an `ExternalMachine`: `{ id, name?, state, offerId?, region?, addresses }`, with `state` one of
 `pending`, `running`, `stopped`, `rescue`, `deleting`, `deleted`, `error` or `unknown`. Each call gets a
 `CallContext` with `idempotencyKey`, an abort `signal`, `clock`, `secrets` and `log`.
+
+A provider whose clients read costs also declares, on its definition, which of its SKUs compute meters itself:
+`billing: { computeSku?, meteredSku? }`, two pure matchers over a cost row's `service`, `sku` and
+`skuDescription`. `computeSku` (vCPU, memory, GPU, instance) is what leak detection counts; neither kind is ever
+passed through, and a pass-through rule whose pattern either matches is refused. Pass-through rules are accepted
+only for providers that declare them.
 
 Throw `ComputeError`s. The reconciler records any failure as a `ProviderError` condition; `UNSUPPORTED`,
 `INVALID_STATE` and `INVALID_CONFIG` fail the instance, and `CAPACITY_UNAVAILABLE` or `QUOTA_EXCEEDED` from `create`, or
@@ -505,6 +550,8 @@ await compute.api.providerAccounts.create(
     imageProject: { type: 'string', description: 'Where image families resolve.', default: "'ubuntu-os-cloud'" },
     diskGiB: { type: 'number', description: 'Boot disk size.', default: '100' },
     discoverLabel: { type: 'string', description: 'key=value: discovery yields only VMs carrying this label.' },
+    billingExport: { type: 'string', description: 'project.dataset.table of the Cloud Billing detailed (resource-level) BigQuery export: the vps.costs worker reads provider costs from it.' },
+    billingExportLocation: { type: 'string', description: "The export dataset's BigQuery location (US, EU, us-central1, …)." },
   }}
 />
 
@@ -512,6 +559,14 @@ The account's service account needs `roles/compute.instanceAdmin.v1` (instances,
 reservations; on the owner and consumer projects for shared reservations), `roles/compute.networkAdmin` (networks
 and subnets), `roles/compute.securityAdmin` (firewalls) and `roles/compute.viewer` (discovery, reservations and
 future reservations), plus `roles/iam.serviceAccountTokenCreator` on the target when `impersonate` is set.
+
+- **Billing.** Disks are reported with their types, so attached VMs bill their real disks. With `billingExport`,
+  the account's client reads costs (`costs`) from the detailed BigQuery export, and `listPrices` reads the Cloud
+  Billing Catalog for `billing.proposePrices`. The export has to be turned on by hand in the Cloud Console, and the
+  service account needs `roles/bigquery.dataViewer` on the export dataset and `roles/bigquery.jobUser` on its
+  project; the account's project needs the Cloud Billing API for list prices. The provider-gcp README has the setup.
+  Compute Engine's core, RAM, GPU and instance SKUs, persistent disk and Hyperdisk capacity, local SSD and external
+  IP charges are the ones compute meters itself, so they are never passed through.
 
 - **Ids.** A VM is `zone/name`, named `bc-` and the lower-cased instance id. An offer is `zone/machineType`, or
   `zone/machineType@reservation` for capacity a reservation holds, which create consumes by name.
