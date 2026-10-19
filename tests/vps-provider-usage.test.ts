@@ -1620,6 +1620,54 @@ describe('metering', () => {
       ).toBeUndefined();
     });
 
+    it('a tenant cannot add, change or clear the meter root set on its flavor; resending it is fine (F8-1)', async () => {
+      const { world, pool } = await byoWorld();
+      ensuring(world);
+      const shape = {
+        tenantId: world.acmeTenant,
+        poolId: pool.id,
+        name: 'a2.byo',
+        vcpu: 12,
+        memoryGiB: 85,
+        diskGiB: 100,
+        gpus: 1,
+        offerId: OFFER,
+      };
+      const meterOf = async () => {
+        const { rows } = await world.fixture.database.query<{ meter: string | null }>(
+          `SELECT billing->>'meter' AS meter FROM flavors WHERE pool_id = $1 AND name = 'a2.byo'`,
+          [pool.id],
+        );
+        return rows[0]!.meter;
+      };
+      const asTenant = (billing?: { meter?: string }) =>
+        codeOf(
+          world.api.flavors.update(world.acme, {
+            ...shape,
+            ...(billing === undefined ? {} : { billing }),
+          }),
+        );
+      // Before root sets anything, an empty billing is no change.
+      expect(await asTenant({})).toBe('allowed');
+      // Root (acting in the tenant) sets the meter.
+      await world.api.flavors.update(world.root, {
+        ...shape,
+        billing: { meter: 'flavor.byo.hours' },
+      });
+      expect(await meterOf()).toBe('flavor.byo.hours');
+      // The tenant may not clear or change it, and nothing is written.
+      expect(await asTenant({})).toBe('ACCESS_DENIED');
+      expect(await asTenant({ meter: 'flavor.other.hours' })).toBe('ACCESS_DENIED');
+      expect(await meterOf()).toBe('flavor.byo.hours');
+      // Resending it unchanged, or omitting billing, is allowed and keeps it.
+      expect(await asTenant({ meter: 'flavor.byo.hours' })).toBe('allowed');
+      expect(await asTenant()).toBe('allowed');
+      expect(await meterOf()).toBe('flavor.byo.hours');
+      // Root may clear it.
+      await world.api.flavors.update(world.root, { ...shape, billing: {} });
+      expect(await meterOf()).toBeNull();
+    });
+
     it('billing.syncMeters includes the flavor meters', async () => {
       const world = await gceWorld();
       const asked = ensuring(world);

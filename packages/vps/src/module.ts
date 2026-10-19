@@ -432,20 +432,34 @@ function poolResource<I extends { poolId: string }>(input: I) {
   return { type: 'pool', id: input.poolId };
 }
 /**
- * `flavors.create/update` with a `billing.meter` (platform compute billing): only the platform sets one, because
- * the meter is defined on the IAM root tenant; `ACCESS_DENIED` otherwise, before the decision. Once IAM allowed the
- * call, and with no transaction open, the meter is created when the port can (`ensureMeters`); a port that cannot
- * accepts the flavor and `billing.meters` reports the meter missing.
+ * `flavors.create/update` and a flavor's `billing.meter` (platform compute billing, ruling F8-1): only the platform
+ * adds, changes or clears one, because the meter is defined on the IAM root tenant and decides what the flavor's
+ * instances are billed. The request is compared with the stored flavor, as `policy.billing` is for pools: anyone
+ * may resend the stored meter or omit `billing`; any other difference from a non-root caller is `ACCESS_DENIED`,
+ * before the decision. Once IAM allowed the call, and with no transaction open, the meter is created when the port
+ * can (`ensureMeters`); a port that cannot accepts the flavor and `billing.meters` reports the meter missing.
  */
 const flavorBillingAdmission: MethodAdmission<FlavorInput, FlavorRecord> = {
-  async prepare(context, input) {
-    if (
-      input.billing?.meter !== undefined &&
-      !isRootCaller(context.caller, (context.iam as MethodContext['iam']).rootTenantId)
-    )
-      throw new ComputeError('ACCESS_DENIED', 'Only the platform sets a flavor meter', undefined, {
-        reason: 'flavor-meter-not-platform',
-      });
+  async prepare(context, input, tx) {
+    if (input.billing !== undefined) {
+      // The stored meter, of a flavor in a pool this tenant owns (anything else is not compared).
+      const { rows } = await tx.query<{ meter: string | null }>(
+        `SELECT f.billing->>'meter' AS meter FROM flavors f JOIN pools p ON p.id = f.pool_id
+          WHERE f.pool_id = $1 AND f.name = $2 AND p.owner_tenant_id = $3`,
+        [input.poolId, input.name, input.tenantId],
+      );
+      const stored = rows[0]?.meter ?? undefined;
+      if (
+        input.billing.meter !== stored &&
+        !isRootCaller(context.caller, (context.iam as MethodContext['iam']).rootTenantId)
+      )
+        throw new ComputeError(
+          'ACCESS_DENIED',
+          'Only the platform adds, changes or clears a flavor meter',
+          undefined,
+          { reason: 'flavor-meter-not-platform' },
+        );
+    }
     return { status: 'decide', resource: poolResource(input) };
   },
   async check(context, input) {
