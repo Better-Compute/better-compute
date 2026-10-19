@@ -1,6 +1,6 @@
 import type { Migration } from '@better-compute/core';
 import { vpsProviderBootstrapsMigration } from './bootstraps.js';
-import { providerMachinesMigration } from './discovery.js';
+import { poolMachinesMigration, providerMachinesMigration } from './discovery.js';
 import { instanceAttachMigration } from './attach.js';
 import { networkMeteringMigration } from './ancillary-usage.js';
 import { instanceUsageMigration } from './instance-usage.js';
@@ -9,7 +9,7 @@ import { reservationGrantsMigration } from './reservation-grants.js';
 import { vpsVolumeResizeHoldMigration, vpsVolumesMigration } from './volumes.js';
 import { vpsVolumeStorageMigration } from './volume-storage.js';
 import { providerReservationsMigration } from './provider-reservations.js';
-import { vpsNetworksMigration } from './networks.js';
+import { vpsNetworkAdoptMigration, vpsNetworksMigration } from './networks.js';
 import {
   vpsIdentityRebindMigration,
   vpsSandboxExpiringMigration,
@@ -161,6 +161,15 @@ export const vpsAccountExclusiveKeyMigration: Migration = {
 CREATE UNIQUE INDEX provider_accounts_exclusive_key ON provider_accounts (provider, exclusive_key) WHERE exclusive_key IS NOT NULL;`,
 };
 
+/**
+ * The provider labels a tenant asked for at `instances.create` (`{"key": "value"}`, GCE label
+ * rules), passed to `ProviderImpl.create`; NULL when none were given.
+ */
+export const vpsInstanceLabelsMigration: Migration = {
+  name: 'vps/0043_instance_labels',
+  sql: `ALTER TABLE instances ADD COLUMN labels jsonb;`,
+};
+
 /** The VPS module's migrations, in ledger order. */
 export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsBaseMigration,
@@ -194,4 +203,7 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   reservationGrantsMigration,
   networkMeteringMigration,
   providerCostsMigration,
+  poolMachinesMigration,
+  vpsInstanceLabelsMigration,
+  vpsNetworkAdoptMigration,
 ]);

@@ -240,6 +240,14 @@ export const schemas = {
         'snet',
         'A ready subnet of that network; omitted: the network’s only subnet in the offer’s region',
       ),
+      labels: {
+        type: 'object',
+        maxProperties: 62,
+        propertyNames: { pattern: '^[a-z][a-z0-9_-]{0,62}$' },
+        additionalProperties: { type: 'string', pattern: '^[a-z0-9_-]{0,63}$', maxLength: 63 },
+        description:
+          'Provider labels for the machine (provider pools): GCE label rules, at most 62; keys starting with better-compute- are reserved',
+      },
       ownerIdentityId: {
         type: 'string',
         pattern: '^[A-Za-z0-9._:@-]{1,128}$',

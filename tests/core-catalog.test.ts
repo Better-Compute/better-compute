@@ -406,12 +406,16 @@ describe('apiSurface (§9.2)', () => {
 
   it('assigns each group to the module and phase the plan names', () => {
     const modules: Record<string, string> = {};
-    // Methods another module contributes to a group: break-glass SSH certificates, and sandbox exec
-    // (tickets and the sandbox SSH CA live in tunnels).
+    // Methods another module contributes to a group: break-glass SSH certificates, sandbox exec
+    // (tickets and the sandbox SSH CA live in tunnels), and the provider machines bound to pools
+    // (provider_machines is vps').
     const contributed: Record<string, string> = {
       'nodes.issueSshCert': 'tunnels',
       'nodes.revokeSshCert': 'tunnels',
       'sandboxes.exec': 'tunnels',
+      'pools.bindMachines': 'vps',
+      'pools.unbindMachines': 'vps',
+      'pools.machines': 'vps',
     };
     for (const row of apiSurface) {
       const path = `${row.group}.${row.method}`;

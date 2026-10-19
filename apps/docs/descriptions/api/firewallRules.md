@@ -7,7 +7,7 @@ Adds a rule to the network and returns it `pending`.
 - `direction` is `ingress` or `egress`. `action` defaults to `allow`, `priority` to 1000 (0 to 65535, lower wins) and `enabled` to `true`; a disabled rule exists at the provider but matches nothing.
 - `rules` lists 1 to 20 entries `{ protocol, ports? }` with `protocol` one of `tcp`, `udp`, `icmp` and `all`. `ports` (tcp and udp only) are ports (`"22"`) or ranges (`"8000-8100"`); without them every port is covered.
 - An ingress rule must name its `sources`, IPv4 CIDRs, and takes no `destinations`; the whole internet is `0.0.0.0/0`, written out, never implied. An egress rule takes `destinations` (without them, everywhere) and no `sources`. Violations are `INVALID_INPUT`.
-- `targets.instanceIds` names instances of the tenant that are on this network and not deleted; any other is `INVALID_INPUT`. Empty targets cover the whole network.
+- `targets.instanceIds` names instances of the tenant that are on this network and not deleted; any other is `INVALID_INPUT`. Empty targets cover the whole network, except on an adopted network (`networks.adopt`), where a rule must name its instances (`INVALID_INPUT` otherwise, on `update` too): it never covers machines of the VPC that are not the tenant's.
 - The name is unique in the network (`CONFLICT`); the name of a deleted rule is free again. A hundred live rules already is `QUOTA_EXCEEDED`. A network being deleted is `INVALID_STATE`.
 
 Publishes `network.rule.ready` once the provider has the rule, or `network.rule.error` with the reason. Decided as `compute:networks:update` on the network.

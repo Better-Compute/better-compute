@@ -147,7 +147,8 @@ async function finishDeletion(
   await closeUsage(deps, tx, row);
   await deps.authz.remove(tx, { type: 'instance', id: row.id, tenantId: row.tenantId });
   if (row.nodeId) await deps.desired.invalidate(tx, row.nodeId);
-  // Its provider machine is free again (discovery's link); a detached one keeps running.
+  // Its provider machine is free again (discovery's link); a detached one keeps running. Its
+  // `pool_id` stays: a machine bound to a pool (pools.bindMachines) goes back to that pool.
   await tx.query(`UPDATE provider_machines SET instance_id = NULL WHERE instance_id = $1`, [row.id]);
   const detached =
     row.origin === 'attached' && (row.onDelete === 'detach' || options.detached === true);
@@ -541,11 +542,13 @@ async function reconcileProvider(
             : renderUserData(row),
           name: row.id,
           ...(row.sshKeys.length ? { sshKeys: row.sshKeys } : {}),
+          // The tenant's labels; the provider's own ownership labels win over them.
+          ...(row.labels !== undefined ? { labels: row.labels } : {}),
           // (v1.0) On a tenant network: its subnet, and the tag the firewall rules target.
           ...(row.networkId !== undefined && row.subnetId !== undefined
             ? {
                 network: {
-                  network: providerResourceName(row.networkId),
+                  network: providerResourceName(row.networkId, row.networkExternalName),
                   subnet: providerResourceName(row.subnetId),
                   tags: [networkTag(row.id)],
                 },

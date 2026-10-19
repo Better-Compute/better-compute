@@ -2231,6 +2231,19 @@
             "maxLength": 57,
             "description": "A ready subnet of that network; omitted: the network’s only subnet in the offer’s region"
           },
+          "labels": {
+            "type": "object",
+            "maxProperties": 62,
+            "propertyNames": {
+              "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^[a-z0-9_-]{0,63}$",
+              "maxLength": 63
+            },
+            "description": "Provider labels for the machine (provider pools): GCE label rules, at most 62; keys starting with better-compute- are reserved"
+          },
           "ownerIdentityId": {
             "type": "string",
             "pattern": "^[A-Za-z0-9._:@-]{1,128}$",
@@ -3779,6 +3792,62 @@
         "additionalProperties": false
       }
     },
+    "networks.adopt": {
+      "route": "POST /api/compute/networks/adopt",
+      "kind": "mutation",
+      "action": "compute:providers:manage",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A provider pool owned by or offered to the tenant, whose account holds the VPC"
+          },
+          "externalNetwork": {
+            "type": "string",
+            "pattern": "^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$",
+            "maxLength": 63,
+            "description": "The existing VPC’s provider-side name (not a bc- network); default needs sharedTagScoped"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z]([-a-z0-9]{0,40}[a-z0-9])?$",
+            "maxLength": 42,
+            "description": "The tenant network name, unique in the tenant"
+          },
+          "sharedTagScoped": {
+            "type": "boolean",
+            "default": false,
+            "description": "The VPC is shared with machines that are not the tenant’s: required to adopt default, recorded on the network"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "What the network is for"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "externalNetwork",
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
     "networks.create": {
       "route": "POST /api/compute/networks/create",
       "kind": "mutation",
@@ -4671,6 +4740,51 @@
         "additionalProperties": false
       }
     },
+    "pools.bindMachines": {
+      "route": "POST /api/compute/pools/bindMachines",
+      "kind": "mutation",
+      "action": "compute:pools:manage",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A provider pool"
+          },
+          "externalIds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$",
+              "maxLength": 256,
+              "description": "A provider machine id, as providerAccounts.machines lists it (us-central1-a/legacy)"
+            },
+            "description": "The machines, at most 100"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "externalIds"
+        ],
+        "additionalProperties": false
+      }
+    },
     "pools.capacity": {
       "route": "POST /api/compute/pools/capacity",
       "kind": "read",
@@ -4851,6 +4965,58 @@
         "additionalProperties": false
       }
     },
+    "pools.machines": {
+      "route": "POST /api/compute/pools/machines",
+      "kind": "read",
+      "action": "compute:pools:read",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A provider pool"
+          },
+          "filter": {
+            "enum": [
+              "free",
+              "attached",
+              "all"
+            ],
+            "default": "free",
+            "description": "free: no instance holds it; attached: attached to or created as an instance; all"
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "From the previous page"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
+            "default": 100
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId"
+        ],
+        "additionalProperties": false
+      }
+    },
     "pools.offer": {
       "route": "POST /api/compute/pools/offer",
       "kind": "mutation",
@@ -4927,6 +5093,51 @@
           "poolId",
           "toTenantId",
           "quota"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "pools.unbindMachines": {
+      "route": "POST /api/compute/pools/unbindMachines",
+      "kind": "mutation",
+      "action": "compute:pools:manage",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A provider pool"
+          },
+          "externalIds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$",
+              "maxLength": 256,
+              "description": "A provider machine id, as providerAccounts.machines lists it (us-central1-a/legacy)"
+            },
+            "description": "The machines, at most 100"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "externalIds"
         ],
         "additionalProperties": false
       }

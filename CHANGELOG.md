@@ -130,6 +130,27 @@ All notable changes to the better-compute packages are documented here. The form
     audience, unique per provider across tenants); provider checks run in admission with no transaction open.
   - `@better-compute/core` (additive, optional): `WorkloadIssuerPort`, `PkiPort.workload`, `ProviderContext.identity`,
     `ProviderInput.checkAccount` and `ProviderInput.accountKey`.
+- **Pool membership of discovered provider machines** (`@better-compute/vps`). `pools.bindMachines` and
+  `pools.unbindMachines` (`compute:pools:manage` on the pool; only the platform or the provider account's own tenant)
+  bind up to 100 machines the `vps.discovery` worker saw to a `provider` pool, row-locked and idempotent, and return
+  `{ bound | unbound, skipped: [{ externalId, reason }] }` with reasons `held`, `gone`, `deleting`, `other-region`
+  (Compute Engine accounts, against the region of the pool's site), `bound-elsewhere` and `not-found`; they publish
+  `pool.machines.bound` and `pool.machines.unbound`. `pools.machines` (`compute:pools:read`) lists a pool's bound
+  machines (`filter`, `limit`, `cursor`) to its owner and the tenants it is offered to, without other tenants'
+  instances and, for offered tenants, without the account id. `instances.attach` attaches a machine bound to another
+  pool as `CONFLICT`, refuses a Compute Engine machine outside the pool's region (`INVALID_INPUT`), and lets a tenant
+  the pool is offered to attach a machine bound to it; detach and delete keep the binding, so the machine returns to its
+  pool. `providerAccounts.machines` shows `poolId`. Migration `vps/0042_pool_machines`.
+- **Instance labels** (`@better-compute/vps`, `@better-compute/core`). `instances.create` takes `labels` in provider
+  pools (Compute Engine label rules, at most 62, keys starting with `better-compute-` reserved), stores them
+  (`vps/0043_instance_labels`), shows them on `Instance.labels` (optional, additive) and passes them to
+  `ProviderImpl.create`; the provider's own ownership labels still win.
+- **`networks.adopt`** (`@better-compute/vps`). The platform (`compute:providers:manage` on the fleet) registers a
+  VPC that already exists in a provider pool's account as a tenant network, so attached VMs whose NIC is on it are
+  linked to it. better-compute never creates, changes or deletes the VPC; its firewall rules must name
+  `targets.instanceIds` and always compile to instance network tags. `default` needs `sharedTagScoped: true`, which
+  the network records. `providerResourceName(id, externalName?)` prefers the VPC's own name; migration
+  `vps/0044_network_adopt` (`networks.external_name`, `networks.shared_tag_scoped`); event `network.adopted`.
 
 ### Changed
 

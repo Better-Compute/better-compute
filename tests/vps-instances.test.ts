@@ -456,6 +456,9 @@ describe('vps() API surface', () => {
       'vps/0031_reservation_grants',
       'vps/0032_network_metering',
       'vps/0033_provider_costs',
+      'vps/0042_pool_machines',
+      'vps/0043_instance_labels',
+      'vps/0044_network_adopt',
     ]);
     expect(module.requires).toEqual(['capacity']);
     expect(() => vps({ runtimes: [] })).toThrow(ComputeError);

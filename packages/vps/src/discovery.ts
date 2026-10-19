@@ -17,9 +17,9 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { readAccount, type ProviderAccount } from './accounts.js';
-import { attachMachine, parseAttach } from './attach.js';
+import { attachMachine, externalIdPattern, otherRegion, parseAttach } from './attach.js';
 import { canonical, fail, id, int, object, optional, tenant } from './input.js';
-import { instanceWork, type InstanceDeps } from './instances.js';
+import { instanceWork, platformCaller, visibleVpsPool, type InstanceDeps } from './instances.js';
 
 // Provider machines (R5, D8): the `vps.discovery` worker lists every machine each provider account
 // can see (`ProviderImpl.discover`) into `provider_machines`, links the ones better-compute created
@@ -74,6 +74,20 @@ CREATE TABLE provider_discovery (
 `,
 };
 
+/**
+ * (Pool membership) The provider pool a discovered machine belongs to: `pools.bindMachines` sets it,
+ * attach then takes the machine into that pool only, and tenants the pool is offered to may attach
+ * it. Discovery passes never touch it, and detach and delete leave it set, so the machine returns to
+ * its pool. The index serves the pool's free machines.
+ */
+export const poolMachinesMigration: Migration = {
+  name: 'vps/0042_pool_machines',
+  sql: `
+ALTER TABLE provider_machines ADD COLUMN pool_id text REFERENCES pools;
+CREATE INDEX provider_machines_pool_free ON provider_machines (pool_id) WHERE instance_id IS NULL AND gone_at IS NULL;
+`,
+};
+
 /** A machine as `providerAccounts.machines` shows it. */
 export interface ProviderMachineView {
   accountId: string;
@@ -93,6 +107,8 @@ export interface ProviderMachineView {
   /** Set when attached or created by better-compute. */
   instanceId?: string;
   tenantId?: string;
+  /** The provider pool it is bound to (`pools.bindMachines`). */
+  poolId?: string;
   firstSeenAt: number;
   lastSeenAt: number;
   goneAt?: number;
@@ -711,6 +727,7 @@ interface ListedMachine {
   machine: StoredMachine | string;
   instance_id: string | null;
   instance_tenant_id: string | null;
+  pool_id: string | null;
   zone: string;
   first_seen_ms: number;
   last_seen_ms: number;
@@ -744,6 +761,7 @@ function machineView(
   if (machine.reservation !== undefined) view.reservation = machine.reservation;
   if (showHolder && row.instance_id !== null) view.instanceId = row.instance_id;
   if (showHolder && row.instance_tenant_id !== null) view.tenantId = row.instance_tenant_id;
+  if (row.pool_id !== null) view.poolId = row.pool_id;
   if (row.gone_ms !== null) view.goneAt = Math.round(Number(row.gone_ms));
   return view;
 }
@@ -783,7 +801,7 @@ export async function listMachines(
   await ownAccount(tx, input);
   const after = input.cursor !== undefined ? parseCursor(input.cursor) : undefined;
   const { rows } = await tx.query<ListedMachine>(
-    `SELECT m.external_id, m.machine, m.instance_id, i.tenant_id AS instance_tenant_id,
+    `SELECT m.external_id, m.machine, m.instance_id, i.tenant_id AS instance_tenant_id, m.pool_id,
             coalesce(m.machine->>'zone', '') AS zone,
             (extract(epoch FROM m.first_seen_at) * 1000)::float8 AS first_seen_ms,
             (extract(epoch FROM m.last_seen_at) * 1000)::float8 AS last_seen_ms,
@@ -868,3 +886,399 @@ export const discoverPoll = {
     return discovered >= input.requestedAt ? { queued: true, discoveredAt: discovered } : output;
   },
 };
+
+// --- API: pools.bindMachines, pools.unbindMachines and pools.machines -----------------------------
+
+/** Why `pools.bindMachines` or `pools.unbindMachines` left a machine alone. */
+export type MachineSkipReason =
+  /** An instance of another pool holds it (attached to, or created as, that instance). */
+  | 'held'
+  /** Discovery marked it gone: the provider no longer reports it. */
+  | 'gone'
+  /** The provider is deleting it, or has. */
+  | 'deleting'
+  /** A Compute Engine machine in another region than the pool's site. */
+  | 'other-region'
+  /** Bound to another pool: unbind it there first. */
+  | 'bound-elsewhere'
+  /** Discovery has not seen it in the pool's provider account (run providerAccounts.discover). */
+  | 'not-found';
+
+export interface BindMachinesInput {
+  tenantId: string;
+  /** A `class: 'provider'` pool; the machines are in its provider account. */
+  poolId: string;
+  /** Machine ids as `providerAccounts.machines` lists them, without duplicates (at most 100). */
+  externalIds: string[];
+}
+
+export interface BindMachinesOutput {
+  /** Bound to the pool now, including the ones that already were. */
+  bound: string[];
+  skipped: { externalId: string; reason: MachineSkipReason }[];
+}
+
+export interface UnbindMachinesOutput {
+  /** Not bound to the pool any more, including the ones that were not. */
+  unbound: string[];
+  skipped: { externalId: string; reason: MachineSkipReason }[];
+}
+
+export interface ListPoolMachinesInput {
+  tenantId: string;
+  poolId: string;
+  /** `free` (default): no instance holds it; `attached`: one does; `all`. */
+  filter: 'free' | 'attached' | 'all';
+  cursor?: string;
+  limit: number;
+}
+
+/**
+ * A machine as `pools.machines` shows it: `providerAccounts.machines`' view, whose `accountId` only
+ * the pool's owner and the platform see (as `pools.get` shows `providerAccountId`).
+ */
+export type PoolMachineView = Omit<ProviderMachineView, 'accountId'> & {
+  accountId?: string;
+  poolId: string;
+};
+
+/** At most this many machines per `pools.bindMachines` or `pools.unbindMachines` call. */
+export const maxMachinesPerBind = 100;
+
+const poolField: InputSchema = {
+  type: 'string',
+  pattern: '^pool_[0-9a-hjkmnp-tv-z]{26,52}$',
+  maxLength: 57,
+  description: 'A provider pool',
+};
+const callTenantField: InputSchema = { ...tenantField, description: 'The tenant the call acts in' };
+
+export const poolMachineSchemas = {
+  bindMachines: strictObject(
+    {
+      tenantId: callTenantField,
+      poolId: poolField,
+      externalIds: {
+        type: 'array',
+        minItems: 1,
+        maxItems: maxMachinesPerBind,
+        items: {
+          type: 'string',
+          pattern: externalIdPattern.source,
+          maxLength: 256,
+          description:
+            'A provider machine id, as providerAccounts.machines lists it (us-central1-a/legacy)',
+        },
+        description: `The machines, at most ${maxMachinesPerBind}`,
+      },
+    },
+    ['tenantId', 'poolId', 'externalIds'],
+  ),
+  machines: strictObject(
+    {
+      tenantId: callTenantField,
+      poolId: poolField,
+      filter: {
+        enum: ['free', 'attached', 'all'],
+        default: 'free',
+        description:
+          'free: no instance holds it; attached: attached to or created as an instance; all',
+      },
+      cursor: { type: 'string', maxLength: 1024, description: 'From the previous page' },
+      limit: { type: 'integer', minimum: 1, maximum: 500, default: 100 },
+    },
+    ['tenantId', 'poolId'],
+  ),
+};
+
+export function parseBindMachines(raw: unknown): BindMachinesInput {
+  const input = object(raw, ['tenantId', 'poolId', 'externalIds']);
+  if (
+    !Array.isArray(input.externalIds) ||
+    input.externalIds.length === 0 ||
+    input.externalIds.length > maxMachinesPerBind
+  )
+    fail(`externalIds must list 1 to ${maxMachinesPerBind} machines`);
+  const externalIds = (input.externalIds as unknown[]).map((entry, index) => {
+    if (typeof entry !== 'string' || !externalIdPattern.test(entry))
+      return fail(`externalIds[${index}] is invalid`);
+    return entry;
+  });
+  return {
+    tenantId: tenant(input.tenantId),
+    poolId: id(input.poolId, 'pool', 'poolId'),
+    externalIds: [...new Set(externalIds)],
+  };
+}
+
+export function parsePoolMachines(raw: unknown): ListPoolMachinesInput {
+  const input = object(raw, ['tenantId', 'poolId', 'filter', 'cursor', 'limit']);
+  if (
+    input.filter !== undefined &&
+    input.filter !== 'free' &&
+    input.filter !== 'attached' &&
+    input.filter !== 'all'
+  )
+    fail('filter must be free, attached or all');
+  const result: ListPoolMachinesInput = {
+    tenantId: tenant(input.tenantId),
+    poolId: id(input.poolId, 'pool', 'poolId'),
+    filter: (input.filter as ListPoolMachinesInput['filter'] | undefined) ?? 'free',
+    limit: optional(input.limit, (value) => int(value, 'limit', 1, 500)) ?? 100,
+  };
+  if (input.cursor !== undefined) {
+    if (typeof input.cursor !== 'string' || input.cursor.length > 1024) fail('cursor is invalid');
+    parseCursor(input.cursor);
+    result.cursor = input.cursor;
+  }
+  return result;
+}
+
+/** A provider pool the tenant owns or is offered, with its account and the region of its site. */
+interface MembershipPool {
+  id: string;
+  ownerTenantId: string;
+  accountId: string;
+  accountTenantId: string;
+  provider: string;
+  siteRegion: string;
+}
+
+async function membershipPool(
+  tx: SqlTx,
+  tenantId: string,
+  poolId: string,
+): Promise<MembershipPool> {
+  const pool = await visibleVpsPool(tx, tenantId, poolId);
+  if (pool.class !== 'provider')
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `Pool ${pool.id} is ${pool.class}, not a provider pool`,
+    );
+  // R1: only an account of the pool's owner tenant counts (visibleVpsPool leaves any other out).
+  if (!pool.providerAccountId)
+    throw new ComputeError('INVALID_STATE', `Provider pool ${pool.id} has no provider account`);
+  const { rows } = await tx.query<{ tenant_id: string; provider: string; region: string }>(
+    `SELECT a.tenant_id, a.provider, s.region
+       FROM pools p JOIN sites s ON s.id = p.site_id JOIN provider_accounts a ON a.id = $2
+      WHERE p.id = $1`,
+    [pool.id, pool.providerAccountId],
+  );
+  const row = rows[0];
+  if (!row)
+    throw new ComputeError('INVALID_STATE', `Provider pool ${pool.id} has no provider account`);
+  return {
+    id: pool.id,
+    ownerTenantId: pool.ownerTenantId,
+    accountId: pool.providerAccountId,
+    accountTenantId: row.tenant_id,
+    provider: row.provider,
+    siteRegion: row.region,
+  };
+}
+
+/** Only the platform, or the provider account's own tenant, binds the account's machines to its pools. */
+function assertBinds(
+  caller: Caller | undefined,
+  input: { tenantId: string },
+  pool: MembershipPool,
+  rootTenantId: string | undefined,
+): void {
+  if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
+  if (
+    caller.tenantId !== pool.accountTenantId &&
+    !platformCaller(caller, input.tenantId, rootTenantId)
+  )
+    throw new ComputeError(
+      'ACCESS_DENIED',
+      `Only the platform or the tenant of provider account ${pool.accountId} binds its machines to pool ${pool.id}`,
+    );
+}
+
+interface LockedMachine {
+  external_id: string;
+  machine: StoredMachine | string;
+  instance_id: string | null;
+  instance_pool_id: string | null;
+  pool_id: string | null;
+  gone: boolean;
+}
+
+/** The account's machines among `externalIds`, locked in id order (no deadlock with a concurrent bind). */
+async function lockMachines(
+  tx: SqlTx,
+  accountId: string,
+  externalIds: readonly string[],
+): Promise<Map<string, LockedMachine>> {
+  const { rows } = await tx.query<LockedMachine>(
+    // A binding to an archived pool binds nothing (that pool can no longer unbind it).
+    `SELECT m.external_id, m.machine, m.instance_id, i.pool_id AS instance_pool_id,
+            CASE WHEN p.archived_at IS NULL THEN m.pool_id END AS pool_id,
+            m.gone_at IS NOT NULL AS gone
+       FROM provider_machines m LEFT JOIN instances i ON i.id = m.instance_id
+            LEFT JOIN pools p ON p.id = m.pool_id
+      WHERE m.account_id = $1 AND m.external_id = ANY($2::text[])
+      ORDER BY m.external_id
+        FOR UPDATE OF m`,
+    [accountId, [...externalIds]],
+  );
+  return new Map(rows.map((row) => [row.external_id, row]));
+}
+
+async function publishPool(
+  deps: Pick<DiscoveryDeps, 'events'>,
+  tx: SqlTx,
+  pool: MembershipPool,
+  type: string,
+  externalIds: readonly string[],
+): Promise<void> {
+  await deps.events.publish(tx, {
+    type,
+    tenantId: pool.ownerTenantId,
+    subject: `pool/${pool.id}`,
+    data: { poolId: pool.id, accountId: pool.accountId, externalIds: [...externalIds] },
+  });
+}
+
+/**
+ * `pools.bindMachines`: binds discovered machines of the pool's provider account to the pool, so
+ * tenants the pool is offered to can attach them. Each machine must be seen, there, not being
+ * deleted, held by no instance of another pool, bound to no other pool, and (Compute Engine) in the
+ * region of the pool's site; any other is skipped with its reason. The rows are locked; binding
+ * again is a no-op (the machine is listed as bound). Publishes `pool.machines.bound` with the
+ * machines this call bound.
+ */
+export async function bindMachines(
+  deps: Pick<DiscoveryDeps, 'events' | 'rootTenantId'>,
+  tx: SqlTx,
+  input: BindMachinesInput,
+  caller: Caller | undefined,
+): Promise<BindMachinesOutput> {
+  const pool = await membershipPool(tx, input.tenantId, input.poolId);
+  assertBinds(caller, input, pool, deps.rootTenantId);
+  const rows = await lockMachines(tx, pool.accountId, input.externalIds);
+  const result: BindMachinesOutput = { bound: [], skipped: [] };
+  const fresh: string[] = [];
+  for (const externalId of input.externalIds) {
+    const row = rows.get(externalId);
+    const skip = (reason: MachineSkipReason) => result.skipped.push({ externalId, reason });
+    if (!row) skip('not-found');
+    else if (row.pool_id !== null && row.pool_id !== pool.id) skip('bound-elsewhere');
+    else if (row.pool_id === pool.id) result.bound.push(externalId);
+    else {
+      const machine = json(row.machine);
+      if (row.gone) skip('gone');
+      else if (machine.state === 'deleting' || machine.state === 'deleted') skip('deleting');
+      else if (row.instance_id !== null && row.instance_pool_id !== pool.id) skip('held');
+      else if (otherRegion(pool.provider, machine, pool.siteRegion) !== undefined)
+        skip('other-region');
+      else {
+        result.bound.push(externalId);
+        fresh.push(externalId);
+      }
+    }
+  }
+  if (fresh.length > 0) {
+    await tx.query(
+      `UPDATE provider_machines SET pool_id = $2 WHERE account_id = $1 AND external_id = ANY($3::text[])`,
+      [pool.accountId, pool.id, fresh],
+    );
+    await publishPool(deps, tx, pool, 'pool.machines.bound', fresh);
+  }
+  return result;
+}
+
+/**
+ * `pools.unbindMachines`: the machines leave the pool (an instance holding one keeps it). A machine
+ * discovery has not seen is skipped as `not-found`, one bound to another pool as `bound-elsewhere`;
+ * one that is not bound is listed as unbound. Publishes `pool.machines.unbound` with the machines
+ * this call unbound.
+ */
+export async function unbindMachines(
+  deps: Pick<DiscoveryDeps, 'events' | 'rootTenantId'>,
+  tx: SqlTx,
+  input: BindMachinesInput,
+  caller: Caller | undefined,
+): Promise<UnbindMachinesOutput> {
+  const pool = await membershipPool(tx, input.tenantId, input.poolId);
+  assertBinds(caller, input, pool, deps.rootTenantId);
+  const rows = await lockMachines(tx, pool.accountId, input.externalIds);
+  const result: UnbindMachinesOutput = { unbound: [], skipped: [] };
+  const fresh: string[] = [];
+  for (const externalId of input.externalIds) {
+    const row = rows.get(externalId);
+    if (!row) result.skipped.push({ externalId, reason: 'not-found' });
+    else if (row.pool_id !== null && row.pool_id !== pool.id)
+      result.skipped.push({ externalId, reason: 'bound-elsewhere' });
+    else {
+      result.unbound.push(externalId);
+      if (row.pool_id === pool.id) fresh.push(externalId);
+    }
+  }
+  if (fresh.length > 0) {
+    await tx.query(
+      `UPDATE provider_machines SET pool_id = NULL
+        WHERE account_id = $1 AND external_id = ANY($3::text[]) AND pool_id = $2`,
+      [pool.accountId, pool.id, fresh],
+    );
+    await publishPool(deps, tx, pool, 'pool.machines.unbound', fresh);
+  }
+  return result;
+}
+
+/**
+ * `pools.machines`: a page of the machines bound to the pool that the provider still reports,
+ * ordered by (zone, externalId). The pool's owner and the tenants it is offered to read it. As in
+ * `providerAccounts.machines`, a machine held by another tenant's instance is listed without that
+ * instance's id and tenant, except to the platform; tenants the pool is offered to are not shown
+ * the account id either.
+ */
+export async function listPoolMachines(
+  tx: SqlTx,
+  input: ListPoolMachinesInput,
+  options: { platform?: boolean } = {},
+): Promise<{ items: PoolMachineView[]; cursor?: string; discoveredAt?: number }> {
+  const platform = options.platform === true;
+  const pool = await membershipPool(tx, input.tenantId, input.poolId);
+  const owner = platform || input.tenantId === pool.ownerTenantId;
+  const after = input.cursor !== undefined ? parseCursor(input.cursor) : undefined;
+  const { rows } = await tx.query<ListedMachine>(
+    `SELECT m.external_id, m.machine, m.instance_id, i.tenant_id AS instance_tenant_id, m.pool_id,
+            coalesce(m.machine->>'zone', '') AS zone,
+            (extract(epoch FROM m.first_seen_at) * 1000)::float8 AS first_seen_ms,
+            (extract(epoch FROM m.last_seen_at) * 1000)::float8 AS last_seen_ms,
+            (extract(epoch FROM m.gone_at) * 1000)::float8 AS gone_ms
+       FROM provider_machines m LEFT JOIN instances i ON i.id = m.instance_id
+      WHERE m.account_id = $1 AND m.pool_id = $2 AND m.gone_at IS NULL
+        AND ($3::text = 'all' OR ($3::text = 'free') = (m.instance_id IS NULL))
+        AND ($4::text IS NULL OR (coalesce(m.machine->>'zone', ''), m.external_id) > ($4::text, $5::text))
+      ORDER BY coalesce(m.machine->>'zone', ''), m.external_id
+      LIMIT $6`,
+    [
+      pool.accountId,
+      pool.id,
+      input.filter,
+      after?.[0] ?? null,
+      after?.[1] ?? null,
+      input.limit + 1,
+    ],
+  );
+  const page = rows.slice(0, input.limit);
+  const result: { items: PoolMachineView[]; cursor?: string; discoveredAt?: number } = {
+    items: page.map((row) => {
+      const { accountId, ...view } = machineView(
+        pool.accountId,
+        row,
+        platform || row.instance_tenant_id === null || row.instance_tenant_id === input.tenantId,
+      );
+      return { ...view, ...(owner ? { accountId } : {}), poolId: pool.id };
+    }),
+  };
+  if (rows.length > input.limit) {
+    const last = page[page.length - 1]!;
+    result.cursor = cursorOf(last.zone, last.external_id);
+  }
+  const discovered = await lastPass(tx, pool.accountId);
+  if (discovered !== undefined) result.discoveredAt = discovered;
+  return result;
+}

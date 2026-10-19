@@ -34,6 +34,7 @@ import {
   attachConflictCondition,
   duplicateMachineCondition,
   ownershipLostCondition,
+  platformCaller,
   visibleVpsPool,
 } from './instances.js';
 import { canonical, fail, id, key, object, optional, sha256Hex, tenant } from './input.js';
@@ -124,6 +125,23 @@ CREATE INDEX instances_network ON instances (network_id) WHERE network_id IS NOT
 `,
 };
 
+/**
+ * (networks.adopt) A network adopted from the provider: `external_name` is the VPC's provider-side
+ * name, which better-compute neither creates nor deletes; its firewall rules always target instance
+ * tags. `shared_tag_scoped` records that the VPC is shared with machines that are not the tenant's
+ * (the project's `default`), so only tag-scoped rules may touch it, and other tenants may adopt it
+ * too; any other VPC is adopted by one live network at a time.
+ */
+export const vpsNetworkAdoptMigration: Migration = {
+  name: 'vps/0044_network_adopt',
+  sql: `
+ALTER TABLE networks ADD COLUMN external_name text;
+ALTER TABLE networks ADD COLUMN shared_tag_scoped bool NOT NULL DEFAULT false;
+CREATE UNIQUE INDEX networks_adopted ON networks (provider_account_id, external_name)
+  WHERE external_name IS NOT NULL AND NOT shared_tag_scoped AND state <> 'deleted';
+`,
+};
+
 // --- Provider names ----------------------------------------------------------------------------
 
 /**
@@ -138,8 +156,10 @@ export function networkTag(instanceId: string): string {
 /**
  * The provider-side name of a network, subnet or firewall rule: `bc-` and the id, lower-cased with
  * anything outside `[a-z0-9-]` replaced by `-`, at most 63 characters. Ids are unique, so names are.
+ * An adopted network (`networks.adopt`) passes its `external_name`, which is used as it is.
  */
-export function providerResourceName(resourceId: string): string {
+export function providerResourceName(resourceId: string, externalName?: string | null): string {
+  if (externalName) return externalName;
   return `bc-${resourceId
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, '-')
@@ -161,6 +181,10 @@ export interface NetworkView {
   state: NetworkState;
   message?: string;
   subnets: { id: string; name: string; region: string; cidr: string; state: NetworkState }[];
+  /** Adopted (`networks.adopt`): the provider VPC's own name, which better-compute never deletes. */
+  externalNetwork?: string;
+  /** Adopted with `sharedTagScoped`: a VPC shared with other machines (`default`). */
+  sharedTagScoped?: true;
   version: number;
   createdAt: number;
 }
@@ -184,6 +208,20 @@ export interface FirewallRuleView {
   state: NetworkState;
   message?: string;
   version: number;
+}
+
+/** `networks.adopt` (root only): an existing provider VPC as a tenant network. */
+export interface AdoptNetworkInput {
+  tenantId: string;
+  /** A provider pool owned by or offered to the tenant; the VPC is in its provider account. */
+  poolId: string;
+  /** The VPC's provider-side name (`legacy-vpc`, or `default` with `sharedTagScoped`). */
+  externalNetwork: string;
+  /** The tenant network's name, unique in the tenant. */
+  name: string;
+  /** Required to adopt `default`: the VPC is shared, and only tag-scoped rules may touch it. */
+  sharedTagScoped?: boolean;
+  description?: string;
 }
 
 export interface CreateNetworkInput {
@@ -228,6 +266,10 @@ export interface RuleRef extends NetworkRef {
 }
 
 const resourceName = /^[a-z]([-a-z0-9]{0,40}[a-z0-9])?$/;
+/** A GCE network name (RFC 1035, at most 63 characters). */
+const externalNetworkName = /^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$/;
+/** The VPC every GCE project starts with: shared with every VM not put elsewhere. */
+export const defaultNetworkName = 'default';
 const regionName = /^[a-z][a-z0-9-]{1,38}[a-z0-9]$/;
 const protocols = ['tcp', 'udp', 'icmp', 'all'] as const;
 const maxTargets = 64;
@@ -357,6 +399,36 @@ export function parseCreateNetwork(raw: unknown): CreateNetworkInput {
   };
   const projectId = optional(input.projectId, (value) => id(value, 'prj', 'projectId'));
   if (projectId !== undefined) out.projectId = projectId;
+  const description = optional(input.description, description_);
+  if (description !== undefined) out.description = description;
+  return out;
+}
+
+export function parseAdoptNetwork(raw: unknown): AdoptNetworkInput {
+  const input = object(raw, [
+    'tenantId',
+    'poolId',
+    'externalNetwork',
+    'name',
+    'sharedTagScoped',
+    'description',
+  ]);
+  if (typeof input.externalNetwork !== 'string' || !externalNetworkName.test(input.externalNetwork))
+    fail('externalNetwork must be a provider network name (lower-case letters, digits and -)');
+  // A name better-compute gives its own networks is never someone else's VPC.
+  if (input.externalNetwork.startsWith('bc-'))
+    fail(
+      'externalNetwork names a network better-compute made (bc-…); networks.create manages those',
+    );
+  if (input.sharedTagScoped !== undefined && typeof input.sharedTagScoped !== 'boolean')
+    fail('sharedTagScoped must be true or false');
+  const out: AdoptNetworkInput = {
+    tenantId: tenant(input.tenantId),
+    poolId: id(input.poolId, 'pool', 'poolId'),
+    externalNetwork: input.externalNetwork,
+    name: networkName(input.name),
+  };
+  if (input.sharedTagScoped === true) out.sharedTagScoped = true;
   const description = optional(input.description, description_);
   if (description !== undefined) out.description = description;
   return out;
@@ -620,6 +692,31 @@ export const networkSchemas = {
     },
     ['tenantId', 'poolId', 'name', 'idempotencyKey'],
   ),
+  adoptNetwork: strictObject(
+    {
+      tenantId: tenantIdSchema,
+      poolId: idOf(
+        'pool',
+        'A provider pool owned by or offered to the tenant, whose account holds the VPC',
+      ),
+      externalNetwork: {
+        type: 'string',
+        pattern: externalNetworkName.source,
+        maxLength: 63,
+        description:
+          'The existing VPC’s provider-side name (not a bc- network); default needs sharedTagScoped',
+      },
+      name: nameSchema('The tenant network name, unique in the tenant'),
+      sharedTagScoped: {
+        type: 'boolean',
+        default: false,
+        description:
+          'The VPC is shared with machines that are not the tenant’s: required to adopt default, recorded on the network',
+      },
+      description: { type: 'string', maxLength: 256, description: 'What the network is for' },
+    },
+    ['tenantId', 'poolId', 'externalNetwork', 'name'],
+  ),
   listNetworks: strictObject(
     {
       tenantId: tenantIdSchema,
@@ -708,6 +805,8 @@ interface NetworkRow {
   version: string | number;
   created_at: Date | string;
   provisioned_at: Date | string | null;
+  external_name: string | null;
+  shared_tag_scoped: boolean;
 }
 interface SubnetRow {
   id: string;
@@ -735,7 +834,7 @@ type RuleSpec = Omit<RuleFields, 'enabled'>;
 
 const networkColumns = `id, tenant_id, project_id, pool_id, provider_account_id, name, description, state,
   desired_state, message, encode(request_hash, 'hex') AS request_hash, version, created_at,
-  provisioned_at`;
+  provisioned_at, external_name, shared_tag_scoped`;
 const subnetColumns = `id, network_id, name, region, cidr::text AS cidr, state, desired_state, message`;
 const ruleColumns = `id, network_id, name, spec, enabled, state, desired_state, message, version`;
 
@@ -759,6 +858,8 @@ export function networkView(row: NetworkRow, subnets: readonly SubnetRow[]): Net
         cidr: subnet.cidr,
         state: subnet.state,
       })),
+    ...(row.external_name !== null ? { externalNetwork: row.external_name } : {}),
+    ...(row.shared_tag_scoped === true ? { sharedTagScoped: true as const } : {}),
     version: Number(row.version),
     createdAt: new Date(row.created_at).getTime(),
   };
@@ -1066,6 +1167,141 @@ export async function createNetwork(
     name: input.name,
   });
   return viewOf(tx, networkId);
+}
+
+const adoptHash = (input: AdoptNetworkInput) =>
+  sha256Hex(
+    canonical({
+      adopt: true,
+      poolId: input.poolId,
+      externalNetwork: input.externalNetwork,
+      name: input.name,
+      sharedTagScoped: input.sharedTagScoped === true,
+      description: input.description,
+    }),
+  );
+
+/**
+ * `networks.adopt` (root only, in the method's transaction): records a VPC that already exists in the
+ * pool's provider account as a tenant network, so attached VMs whose NIC is on it are linked to it
+ * (`networkOfMachine`) and get its firewall rules. better-compute never creates, changes or deletes
+ * the VPC itself (deleting the network removes only its own subnets and rules), and every firewall
+ * rule on it targets instance tags. `default` is shared with every VM of the project, so it is
+ * adopted only with `sharedTagScoped`, which other tenants' adoptions of it must also set; any other
+ * VPC is adopted by one live network. The same adoption again returns the network; another one of
+ * the VPC in the tenant is CONFLICT.
+ */
+export async function adoptNetwork(
+  deps: NetworkDeps,
+  context: MethodContext,
+  input: AdoptNetworkInput,
+): Promise<NetworkView> {
+  const tx = context.sql;
+  const caller = context.caller;
+  if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
+  if (!platformCaller(caller, input.tenantId, deps.rootTenantId))
+    throw new ComputeError('ACCESS_DENIED', 'Only the platform adopts provider networks');
+  if (input.externalNetwork === defaultNetworkName && input.sharedTagScoped !== true)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `${defaultNetworkName} is shared with every VM of the project; adopt it with sharedTagScoped: true`,
+      undefined,
+      { field: 'sharedTagScoped', hint: 'set sharedTagScoped: true' },
+    );
+  const { accountId } = await networkProvider(deps, tx, input.tenantId, input.poolId);
+  const hash = await adoptHash(input);
+  // Adoptions of one VPC count one after the other, across tenants.
+  await tx.query(`SELECT pg_advisory_xact_lock(hashtext('better-compute:networks:adopt:' || $1))`, [
+    `${accountId}/${input.externalNetwork}`,
+  ]);
+  const { rows: adopted } = await tx.query<NetworkRow>(
+    `SELECT ${networkColumns} FROM networks
+      WHERE provider_account_id = $1 AND external_name = $2 AND state <> 'deleted' ORDER BY id`,
+    [accountId, input.externalNetwork],
+  );
+  const mine = adopted.find((row) => row.tenant_id === input.tenantId);
+  if (mine) {
+    if (mine.request_hash === hash) return viewOf(tx, mine.id);
+    throw new ComputeError(
+      'CONFLICT',
+      `${input.externalNetwork} is already adopted as network ${mine.id}`,
+      undefined,
+      { networkId: mine.id },
+    );
+  }
+  if (
+    adopted.length > 0 &&
+    (input.sharedTagScoped !== true || adopted.some((row) => !row.shared_tag_scoped))
+  )
+    throw new ComputeError(
+      'CONFLICT',
+      `${input.externalNetwork} is adopted by another tenant; only sharedTagScoped adoptions share a network`,
+    );
+  await assertNameFree(tx, input.tenantId, input.name);
+  // Concurrent creates and adoptions of one tenant count one after the other.
+  await tx.query(`SELECT pg_advisory_xact_lock(hashtext('better-compute:networks:' || $1))`, [
+    input.tenantId,
+  ]);
+  await assertNetworkAllowance(tx, input.tenantId);
+  const networkId = newId('net');
+  try {
+    await tx.query(
+      `INSERT INTO networks (id, tenant_id, pool_id, provider_account_id, name, description, state,
+                             desired_state, created_by, idempotency_key, request_hash, version,
+                             external_name, shared_tag_scoped)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', 'present', $7, $8, decode($9, 'hex'), 1, $10, $11)`,
+      [
+        networkId,
+        input.tenantId,
+        input.poolId,
+        accountId,
+        input.name,
+        input.description ?? null,
+        caller.identityId,
+        `adopt:${networkId}`,
+        hash,
+        input.externalNetwork,
+        input.sharedTagScoped === true,
+      ],
+    );
+  } catch (error) {
+    if (uniqueViolation(error)) {
+      const constraint = (error as { constraint?: string }).constraint ?? '';
+      if (constraint.includes('adopted'))
+        throw new ComputeError('CONFLICT', `${input.externalNetwork} is already adopted`);
+      throw new ComputeError('CONFLICT', `Network ${input.name} already exists`);
+    }
+    throw error;
+  }
+  await deps.authz.upsert(tx, {
+    type: 'network',
+    id: networkId,
+    tenantId: input.tenantId,
+    attributes: { providerAccountId: accountId, poolId: input.poolId },
+    parentType: 'tenant',
+    parentId: input.tenantId,
+    ownerId: caller.identityId,
+  });
+  await deps.work.enqueue(tx, networksWork, networkId);
+  await publish(deps, tx, { id: networkId, tenant_id: input.tenantId }, 'network.adopted', {
+    poolId: input.poolId,
+    providerAccountId: accountId,
+    name: input.name,
+    externalNetwork: input.externalNetwork,
+    sharedTagScoped: input.sharedTagScoped === true,
+  });
+  return viewOf(tx, networkId);
+}
+
+/** An adopted network's rules must name the instances they apply to: never the whole VPC. */
+function assertTagScoped(network: NetworkRow, targets: RuleFields['targets']): void {
+  if (network.external_name === null || (targets.instanceIds?.length ?? 0) > 0) return;
+  throw new ComputeError(
+    'INVALID_INPUT',
+    `Network ${network.id} is adopted (${network.external_name}): its firewall rules must name targets.instanceIds`,
+    undefined,
+    { field: 'targets.instanceIds', hint: 'rules on an adopted network target instances' },
+  );
 }
 
 export async function getNetwork(tx: SqlTx, ref: NetworkRef): Promise<NetworkView> {
@@ -1455,21 +1691,20 @@ export async function networkOfMachine(
     networkId?: string;
   },
 ): Promise<{ networkId?: string; subnetId?: string }> {
-  let candidates: string[];
-  if (input.networkId !== undefined) candidates = [input.networkId];
-  else {
-    const { rows } = await tx.query<{ id: string }>(
-      `SELECT id FROM networks
-        WHERE tenant_id = $1 AND provider_account_id = $2 AND state <> 'deleted'
-        ORDER BY id`,
-      [input.tenantId, input.accountId],
-    );
-    candidates = rows.map((row) => row.id);
-  }
+  // The tenant's networks on the account (or the one asked for), by provider-side name: an adopted
+  // one (networks.adopt) by its VPC's own name. One of another tenant or account is never named.
+  const { rows: candidates } = await tx.query<{ id: string; external_name: string | null }>(
+    `SELECT id, external_name FROM networks
+      WHERE tenant_id = $1 AND provider_account_id = $2 AND state <> 'deleted'
+        AND ($3::text IS NULL OR id = $3)
+      ORDER BY id`,
+    [input.tenantId, input.accountId, input.networkId ?? null],
+  );
   for (const nic of input.nics) {
     const found = candidates.find(
-      (candidate) => providerResourceName(candidate) === shortName(nic.network),
-    );
+      (candidate) =>
+        providerResourceName(candidate.id, candidate.external_name) === shortName(nic.network),
+    )?.id;
     if (found === undefined) continue;
     const locked = await lockNetwork(
       tx,
@@ -1563,6 +1798,7 @@ export async function createRule(
       undefined,
       { limit: maxRulesPerNetwork },
     );
+  assertTagScoped(network, input.targets);
   await assertTargets(tx, network, input.targets);
   const spec = JSON.stringify(ruleSpecOf(input));
   const previous = (
@@ -1654,6 +1890,7 @@ export async function updateRule(
       );
     throw error;
   }
+  assertTagScoped(network, merged.targets);
   if (patched.targets !== undefined) await assertTargets(tx, network, merged.targets);
   await tx.query(
     `UPDATE network_firewall_rules SET spec = $2::jsonb, enabled = $3, state = 'pending', message = NULL, version = version + 1
@@ -1746,10 +1983,23 @@ async function loadSnapshot(tx: SqlTx, networkId: string): Promise<Snapshot | un
   };
 }
 
-/** The provider firewall a rule compiles to: a rule that names instances targets their network tags. */
-export function compileFirewall(networkName: string, rule: RuleRow): ProviderFirewallSpec {
+/**
+ * The provider firewall a rule compiles to: a rule that names instances targets their network tags.
+ * On an adopted network (`tagScoped`) a rule without targets would cover the whole VPC, machines that
+ * are not the tenant's included: it is refused (INVALID_STATE) instead of compiled.
+ */
+export function compileFirewall(
+  networkName: string,
+  rule: RuleRow,
+  options: { tagScoped?: boolean } = {},
+): ProviderFirewallSpec {
   const spec = specOf(rule);
   const instanceIds = spec.targets?.instanceIds ?? [];
+  if (options.tagScoped === true && instanceIds.length === 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Rule ${rule.name} is on an adopted network and names no instances; it is never applied network-wide`,
+    );
   return {
     network: networkName,
     name: providerResourceName(rule.id),
@@ -1818,7 +2068,7 @@ class NetworkWorker {
     private readonly snapshot: Snapshot,
     private readonly signal: AbortSignal,
   ) {
-    this.#networkName = providerResourceName(snapshot.network.id);
+    this.#networkName = providerResourceName(snapshot.network.id, snapshot.network.external_name);
     this.#started = deps.clock.now();
   }
 
@@ -1990,15 +2240,19 @@ class NetworkWorker {
   async converge(networks: ProviderNetworks): Promise<number | undefined> {
     const { snapshot } = this;
     const network = this.#network;
-    const ensured = await this.#attempt(() =>
-      networks.ensureNetwork(
-        {
-          name: this.#networkName,
-          ...(network.description !== null ? { description: network.description } : {}),
-        },
-        this.#call(network.id),
-      ),
-    );
+    // An adopted VPC is the provider's: it is never created or changed here, only used.
+    const ensured =
+      network.external_name !== null
+        ? ({ state: 'ready' } as const)
+        : await this.#attempt(() =>
+            networks.ensureNetwork(
+              {
+                name: this.#networkName,
+                ...(network.description !== null ? { description: network.description } : {}),
+              },
+              this.#call(network.id),
+            ),
+          );
     if (!ensured) return this.#next();
     const vpc = this.#presentState(ensured);
     if (vpc.state === 'error') {
@@ -2082,7 +2336,10 @@ class NetworkWorker {
         continue;
       }
       const result = await this.#attempt(() =>
-        networks.ensureFirewall(compileFirewall(this.#networkName, rule), this.#call(rule.id)),
+        networks.ensureFirewall(
+          compileFirewall(this.#networkName, rule, { tagScoped: network.external_name !== null }),
+          this.#call(rule.id),
+        ),
       );
       if (!result) continue;
       const state = this.#presentState(result);
@@ -2188,9 +2445,13 @@ class NetworkWorker {
     }
     if (subnetsLeft) return this.#waitOnTeardown(problems);
 
-    const gone = await this.#attempt(() =>
-      networks.deleteNetwork(this.#networkName, this.#call(network.id)),
-    );
+    // An adopted VPC stays: only what better-compute made in it (subnets, rules) is removed.
+    const gone =
+      network.external_name !== null
+        ? ({ state: 'deleted' } as const)
+        : await this.#attempt(() =>
+            networks.deleteNetwork(this.#networkName, this.#call(network.id)),
+          );
     if (!gone) return this.#waitOnTeardown(problems);
     if (gone.state === 'error') {
       await this.#setNetwork('error', gone.message ?? 'The provider refused to delete the network');

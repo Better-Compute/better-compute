@@ -400,6 +400,11 @@ group('pools', 'capacity', [
   ['updateOffer', 'mutation', 'pools:share', 'pool', 'v1.0'],
   ['update', 'mutation', 'pools:manage', 'pool', 'v0.2'],
   ['archive', 'mutation', 'pools:manage', 'pool', 'v0.2'],
+  // Discovered provider machines that belong to a provider pool (vps): bound by the platform or the
+  // account's own tenant, listed to the tenants the pool is offered to.
+  ['bindMachines', 'mutation', 'pools:manage', 'pool', 'v1.0', { module: 'vps' }],
+  ['unbindMachines', 'mutation', 'pools:manage', 'pool', 'v1.0', { module: 'vps' }],
+  ['machines', 'read', 'pools:read', 'pool', 'v1.0', { module: 'vps' }],
 ]);
 group('joinTokens', 'server', [
   ['create', 'mutation', 'join-tokens:create', 'pool', 'v0.1'],
@@ -635,6 +640,8 @@ group('networks', 'vps', [
   ['delete', 'mutation', 'networks:delete', 'network', 'v1.0'],
   ['addSubnet', 'mutation', 'networks:update', 'network', 'v1.0'],
   ['removeSubnet', 'mutation', 'networks:update', 'network', 'v1.0'],
+  // The platform registers a provider VPC that already exists as a tenant network (root only).
+  ['adopt', 'mutation', 'providers:manage', 'fleet', 'v1.0'],
 ]);
 group('firewallRules', 'vps', [
   ['create', 'mutation', 'networks:update', 'network', 'v1.0'],

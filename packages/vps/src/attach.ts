@@ -14,7 +14,7 @@ import {
 import { chargeQuota } from '@better-compute/capacity';
 import type { StoredMachine } from './discovery.js';
 import { canonical, fail, id, key, name, object, optional, sha256Hex, tenant } from './input.js';
-import { networkOfMachine } from './networks.js';
+import { networkOfMachine, zoneRegion } from './networks.js';
 import {
   instanceAttributes,
   instanceDemand,
@@ -98,7 +98,8 @@ export type AttachDeps = Pick<InstanceDeps, 'events' | 'work' | 'authz' | 'runti
   rootTenantId?: string;
 };
 
-const externalIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/;
+/** A provider machine id as `provider_machines` holds it (`us-central1-a/legacy`). */
+export const externalIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/;
 
 const field = (description: string, pattern: string, maxLength: number): InputSchema => ({
   type: 'string',
@@ -250,19 +251,46 @@ export function machineShape(
 const json = <T>(value: T | string): T =>
   typeof value === 'string' ? (JSON.parse(value) as T) : value;
 
+/** The region a machine is in: its own, else its zone's (`us-central1-a` is in `us-central1`). */
+export function machineRegion(machine: Pick<StoredMachine, 'region' | 'zone'>): string | undefined {
+  if (machine.region) return machine.region;
+  return machine.zone ? zoneRegion(machine.zone) : undefined;
+}
+
+/**
+ * The machine's region when it is not the region of its pool's site, else undefined. Only Compute
+ * Engine accounts (`gcp`) are compared, and only when both regions are known: their sites name GCE
+ * regions, while other providers' sites use free-form region names (`eu`, `fsn1`).
+ */
+export function otherRegion(
+  provider: string,
+  machine: Pick<StoredMachine, 'region' | 'zone'>,
+  siteRegion: string | undefined,
+): string | undefined {
+  if (provider !== 'gcp' || !siteRegion) return undefined;
+  const region = machineRegion(machine);
+  return region !== undefined && region !== siteRegion ? region : undefined;
+}
+
 async function readMachine(
   tx: SqlTx,
   accountId: string,
   externalId: string,
   lock: boolean,
-): Promise<{ machine: StoredMachine; instanceId?: string; gone: boolean } | undefined> {
+): Promise<
+  { machine: StoredMachine; instanceId?: string; poolId?: string; gone: boolean } | undefined
+> {
   const { rows } = await tx.query<{
     machine: StoredMachine | string;
     instance_id: string | null;
+    pool_id: string | null;
     gone: boolean;
   }>(
-    `SELECT machine, instance_id, gone_at IS NOT NULL AS gone FROM provider_machines
-      WHERE account_id = $1 AND external_id = $2${lock ? ' FOR UPDATE' : ''}`,
+    // A binding to an archived pool binds nothing: the pool can no longer unbind it.
+    `SELECT m.machine, m.instance_id, CASE WHEN p.archived_at IS NULL THEN m.pool_id END AS pool_id,
+            m.gone_at IS NOT NULL AS gone
+       FROM provider_machines m LEFT JOIN pools p ON p.id = m.pool_id
+      WHERE m.account_id = $1 AND m.external_id = $2${lock ? ' FOR UPDATE OF m' : ''}`,
     [accountId, externalId],
   );
   const row = rows[0];
@@ -271,6 +299,7 @@ async function readMachine(
     machine: json(row.machine),
     gone: row.gone,
     ...(row.instance_id !== null ? { instanceId: row.instance_id } : {}),
+    ...(row.pool_id !== null ? { poolId: row.pool_id } : {}),
   };
 }
 
@@ -369,30 +398,39 @@ export async function attachMachine(
       { poolAccountId: accountId, accountId: input.accountId },
     );
 
-  // 2. Only the account's own tenant, or the platform, hands its machines out. Checked before the
-  // machine, so a tenant learns nothing about machines of accounts it may not use.
-  const { rows: accounts } = await tx.query<{ tenant_id: string }>(
-    `SELECT tenant_id FROM provider_accounts WHERE id = $1`,
+  // 2. Only the account's own tenant, or the platform, hands its machines out; a tenant the pool is
+  // offered to takes, into itself, only a machine bound to the pool (pools.bindMachines). Every other
+  // caller is refused alike, whatever the machine is, so a tenant learns nothing about machines of
+  // accounts it may not use.
+  const { rows: accounts } = await tx.query<{ tenant_id: string; provider: string }>(
+    `SELECT tenant_id, provider FROM provider_accounts WHERE id = $1`,
     [accountId],
   );
   const accountTenant = accounts[0]?.tenant_id;
-  if (
-    accountTenant !== caller.tenantId &&
-    !platformCaller(caller, input.tenantId, deps.rootTenantId)
-  )
+  const handsOut =
+    accountTenant === caller.tenantId || platformCaller(caller, input.tenantId, deps.rootTenantId);
+  const found = await readMachine(tx, accountId, input.externalId, true);
+  if (!handsOut && (caller.tenantId !== input.tenantId || found?.poolId !== pool.id))
     throw new ComputeError(
       'ACCESS_DENIED',
       `Only the platform attaches machines of provider account ${accountId}`,
     );
 
   // 3. The machine: seen by discovery, still there, and free (locked until this commits).
-  const found = await readMachine(tx, accountId, input.externalId, true);
   if (!found || found.gone)
     throw new ComputeError(
       'NOT_FOUND',
       `Machine ${input.externalId} is not in provider account ${accountId}; run providerAccounts.discover`,
       undefined,
       { externalId: input.externalId, hint: 'run providerAccounts.discover' },
+    );
+  // A machine bound to a pool (pools.bindMachines) is attached into that pool only.
+  if (found.poolId !== undefined && found.poolId !== pool.id)
+    throw new ComputeError(
+      'CONFLICT',
+      `Machine ${input.externalId} is bound to pool ${found.poolId}, not ${pool.id}`,
+      undefined,
+      { poolId: found.poolId },
     );
   if (found.instanceId !== undefined)
     throw new ComputeError(
@@ -412,6 +450,20 @@ export async function attachMachine(
     );
   if (machine.state === 'deleting' || machine.state === 'deleted')
     throw new ComputeError('INVALID_STATE', `Machine ${input.externalId} is ${machine.state}`);
+  // 3a. In the region of the pool's site (Compute Engine accounts, when both are known).
+  const { rows: sites } = await tx.query<{ region: string }>(
+    `SELECT s.region FROM pools p JOIN sites s ON s.id = p.site_id WHERE p.id = $1`,
+    [pool.id],
+  );
+  const poolRegion = sites[0]?.region;
+  const elsewhere = otherRegion(accounts[0]?.provider ?? '', machine, poolRegion);
+  if (elsewhere !== undefined)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `Machine ${input.externalId} is in ${elsewhere}, but pool ${pool.id}'s site is in ${poolRegion}`,
+      undefined,
+      { machineRegion: elsewhere, poolRegion: poolRegion ?? null },
+    );
 
   // 3b. (v1.0) The tenant network its NIC is on. A running VM is not moved to another one.
   const link = await networkOfMachine(tx, {
