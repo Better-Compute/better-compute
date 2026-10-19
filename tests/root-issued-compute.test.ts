@@ -1308,6 +1308,19 @@ describe('isolation between tenants, and between tenants and the root tenant', (
           tenant: A,
           call: () => api.instances.delete(root, { tenantId: A, instanceId: w.issued }),
         },
+        // Allowed (main's keyless setup read, decided on the tenant), then refused when the host runs no
+        // workload issuer.
+        {
+          path: 'providerAccounts.federationSetup',
+          tenant: R,
+          call: () =>
+            api.providerAccounts.federationSetup(root, {
+              tenantId: R,
+              provider: 'gcp',
+              name: 'keyless',
+            }),
+          expect: 'INVALID_CONFIG',
+        },
         // Allowed, and then refused by state: the account still backs a pool.
         {
           path: 'providerAccounts.delete',
