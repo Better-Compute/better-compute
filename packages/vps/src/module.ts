@@ -1612,6 +1612,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           await context.sql.transaction((tx) =>
             meterIntervals(tx, context.clock.now(), {
               ...(deps.meterGpuModels ? { meterGpuModels: deps.meterGpuModels } : {}),
+              meterGraceMs: options.billing?.meterGraceMs,
             }),
           );
           return 'DONE';

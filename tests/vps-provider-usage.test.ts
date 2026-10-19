@@ -11,6 +11,7 @@ import { createComputeIamBridge, flushUsageWindows } from '@better-compute/iam';
 import { closeFixtures } from '@better-compute/testing';
 import {
   billingModeOf,
+  closeOpenInterval,
   meterLinesFor,
   vps,
   type BillableShape,
@@ -759,6 +760,9 @@ describe('metering', () => {
 
   const HOUR = 3_600_000;
   const usageJob = 'vps.provider-usage';
+  /** The default meter grace (5 minutes) and a moment past it: an ended hour is written only then. */
+  const grace = 5 * 60_000;
+  const settle = grace + 60_000;
 
   interface WindowView {
     key: string;
@@ -868,7 +872,7 @@ describe('metering', () => {
     expect(hoursOf(await windows(world))).toHaveLength(2);
 
     // Once that hour has ended, the half hour is written and the interval is fully metered.
-    await moveTo(world, h0 + 3 * HOUR + 60_000);
+    await moveTo(world, h0 + 3 * HOUR + settle);
     await meter(world, 0);
     rows = await windows(world);
     expect(hoursOf(rows)).toEqual([
@@ -895,7 +899,7 @@ describe('metering', () => {
     await moveTo(world, h0 - 1_000);
     await step(world, 1_000);
     expect((await intervals(world, a.id))[0]).toMatchObject({ started: h0, phase: 'running' });
-    await moveTo(world, h0 + 3 * HOUR + 60_000);
+    await moveTo(world, h0 + 3 * HOUR + settle);
     await meter(world, 0);
     const rows = await windows(world);
     expect(rows).toHaveLength(12);
@@ -922,7 +926,7 @@ describe('metering', () => {
       `UPDATE instance_usage_intervals SET project_id = 'proj_blue' WHERE instance_id = $1`,
       [created.id],
     );
-    await moveTo(world, h0 + HOUR + 60_000);
+    await moveTo(world, h0 + HOUR + settle);
     await meter(world, 0);
     const rows = await windows(world);
     expect(rows.length).toBeGreaterThan(0);
@@ -969,7 +973,7 @@ describe('metering', () => {
     await moveTo(world, h0 + 160 * 60_000);
     await meter(world, 0);
     await toggle('stop', h0 + 220 * 60_000);
-    await moveTo(world, h0 + 5 * HOUR + 60_000);
+    await moveTo(world, h0 + 5 * HOUR + settle);
     await meter(world, 0);
     const list = await intervals(world, created.id);
     assertNoOverlap(list);
@@ -1004,7 +1008,7 @@ describe('metering', () => {
     await world.api.instances.start(world.acme, { tenantId: acme.id, instanceId: a.id });
     const t2 = await step(world, 5_000);
     const settled = (Math.floor(t2 / HOUR) + 2) * HOUR;
-    await moveTo(world, settled);
+    await moveTo(world, settled + settle);
     await meter(world, 0);
     const list = await intervals(world, a.id);
     expect(list.map((item) => [item.phase, item.meteredUntil])).toEqual([
@@ -1025,7 +1029,7 @@ describe('metering', () => {
       `UPDATE instance_usage_intervals SET ended_at = started_at WHERE instance_id = $1`,
       [other.id],
     );
-    await moveTo(world, h0 + 2 * HOUR + 60_000);
+    await moveTo(world, h0 + 2 * HOUR + settle);
     await meter(world, 0);
     const rows = await windows(world);
     expect(rows.filter((row) => row.instanceId === other.id)).toEqual([]);
@@ -1041,10 +1045,76 @@ describe('metering', () => {
       `UPDATE instance_usage_intervals SET mode = 'none' WHERE instance_id = $1`,
       [created.id],
     );
-    await moveTo(world, h0 + 3 * HOUR + 60_000);
+    await moveTo(world, h0 + 3 * HOUR + settle);
     await meter(world, 0);
     expect(await windows(world)).toEqual([]);
     expect(await meteredUntil(world, created.id)).toEqual([h0 + 3 * HOUR]);
+  });
+
+  it('a stopped mode none interval is advanced too: nothing of it is ever billed', async () => {
+    const world = await legacyAttachWorld({ state: 'stopped' });
+    const { acme } = world.fixture.tenants;
+    const a = await attachLegacy(world, acme.id, acme.caller.identityId, 'attach-stopped-none');
+    const t1 = await step(world);
+    await world.fixture.database.query(
+      `UPDATE instance_usage_intervals SET mode = 'none' WHERE instance_id = $1`,
+      [a.id],
+    );
+    await moveTo(world, t1 + 3 * HOUR + settle);
+    await meter(world, 0);
+    expect(await windows(world)).toEqual([]);
+    const cutoff = Math.floor((world.fixture.clock.now() - grace) / HOUR) * HOUR;
+    expect(await meteredUntil(world, a.id)).toEqual([cutoff]);
+    // Due no more: the next pass selects nothing and changes nothing.
+    await meter(world, 10 * 60_000);
+    expect(await meteredUntil(world, a.id)).toEqual([cutoff]);
+  });
+
+  it('an hour younger than the grace is not written yet (F7-1)', async () => {
+    const world = await gceWorld();
+    const { created, h0 } = await runningAtHour(world);
+    await moveTo(world, h0 + HOUR + 2 * 60_000);
+    await meter(world, 0);
+    expect(await windows(world)).toEqual([]);
+    expect(await meteredUntil(world, created.id)).toEqual([h0]);
+    // Once the grace has passed (the periodic key is due again in 5 minutes), the hour is written.
+    await meter(world);
+    expect(world.fixture.clock.now()).toBeGreaterThanOrEqual(h0 + HOUR + grace);
+    expect(hoursOf(await windows(world))).toEqual([[h0, 1]]);
+    expect(await meteredUntil(world, created.id)).toEqual([h0 + HOUR]);
+  });
+
+  it('the grace is configurable: billing.meterGraceMs', async () => {
+    const world = await gceWorld({ billing: { meterGraceMs: 0 } });
+    const { h0 } = await runningAtHour(world);
+    await moveTo(world, h0 + HOUR + 1_000);
+    await meter(world, 0);
+    expect(hoursOf(await windows(world))).toEqual([[h0, 1]]);
+  });
+
+  it('a close stamped inside an hour the pass already wrote leaves interval and windows consistent (F7-1, I8)', async () => {
+    const world = await gceWorld();
+    const { created, h0 } = await runningAtHour(world);
+    await moveTo(world, h0 + 2 * HOUR + settle);
+    await meter(world, 0);
+    expect(hoursOf(await windows(world))).toEqual([
+      [h0, 1],
+      [h0 + HOUR, 1],
+    ]);
+    expect(await meteredUntil(world, created.id)).toEqual([h0 + 2 * HOUR]);
+    // A lifecycle close whose timestamp is inside hour 1, committed after that hour was written.
+    await world.fixture.database.transaction((tx) =>
+      closeOpenInterval(tx, created.id, h0 + 2 * HOUR - 1_000),
+    );
+    const [closed] = await intervals(world, created.id);
+    expect(closed).toMatchObject({ ended: h0 + 2 * HOUR, meteredUntil: h0 + 2 * HOUR });
+    // Later passes add nothing: the interval is fully metered and not billed beyond what was written.
+    await moveTo(world, h0 + 4 * HOUR);
+    await meter(world, 0);
+    const rows = await windows(world);
+    expect(hoursOf(rows)).toHaveLength(2);
+    const ran = (closed!.ended! - closed!.started) / HOUR;
+    expect(sum(rows, 'vm.instance.hours')).toBeCloseTo(ran, 9);
   });
 
   it('a platform-fee interval is one managed line per hour', async () => {
@@ -1054,7 +1124,7 @@ describe('metering', () => {
       `UPDATE instance_usage_intervals SET mode = 'platform-fee' WHERE instance_id = $1`,
       [created.id],
     );
-    await moveTo(world, h0 + 2 * HOUR + 60_000);
+    await moveTo(world, h0 + 2 * HOUR + settle);
     await meter(world, 0);
     expect((await windows(world)).map((row) => [row.meter, row.quantity])).toEqual([
       ['vm.managed.hours', 1],
@@ -1074,7 +1144,7 @@ describe('metering', () => {
     const a = await attachLegacy(world, acme.id, acme.caller.identityId, 'attach-mi300x');
     await step(world);
     expect((await intervals(world, a.id))[0]!.shape.gpus).toEqual({ model: 'mi300x', count: 8 });
-    await moveTo(world, nextHour(world) + 2 * HOUR);
+    await moveTo(world, nextHour(world) + 2 * HOUR + settle);
     await meter(world, 0);
     const rows = await windows(world);
     expect(rows.length).toBeGreaterThan(0);
@@ -1096,7 +1166,7 @@ describe('metering', () => {
   it('flushed through iam.usage as recorded', async () => {
     const world = await gceWorld();
     const { h0 } = await runningAtHour(world);
-    await moveTo(world, h0 + 2 * HOUR + 60_000);
+    await moveTo(world, h0 + 2 * HOUR + settle);
     await meter(world, 0);
     expect((await windows(world)).length).toBe(8);
 

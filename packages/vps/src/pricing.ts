@@ -35,6 +35,11 @@ export interface BillingOptions {
   gpuModels?: readonly string[];
   /** Families whose hosted GPU meters always exist (default `knownGpuFamilies`). */
   gpuFamilies?: readonly string[];
+  /**
+   * How long after an hour ends `vps.provider-usage` waits before writing its windows (default 5 minutes), so a
+   * lifecycle change stamped inside that hour has committed. `0` writes at the top of the hour.
+   */
+  meterGraceMs?: number;
 }
 
 export interface PriceInput {

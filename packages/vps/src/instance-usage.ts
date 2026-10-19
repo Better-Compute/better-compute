@@ -61,12 +61,14 @@ const json = <T>(value: T | string): T =>
 const at$ = (index: number) => `to_timestamp($${index}::float8 / 1000)`;
 
 /**
- * Closes the instance's open interval at `at` (never before it started). A no-op when none is open.
+ * Closes the instance's open interval at `at`, never before it started and never before what the usage reconciler
+ * already wrote for it (`metered_until`, F7-1): a close stamped inside an hour that pass has written ends the interval
+ * at the watermark, so no span is billed that the interval did not cover. A no-op when none is open.
  * Called inside the lifecycle transaction that loses, fails, deletes or detaches the instance.
  */
 export async function closeOpenInterval(tx: SqlTx, instanceId: string, at: number): Promise<void> {
   await tx.query(
-    `UPDATE instance_usage_intervals SET ended_at = GREATEST(started_at, ${at$(2)})
+    `UPDATE instance_usage_intervals SET ended_at = GREATEST(started_at, metered_until, ${at$(2)})
       WHERE instance_id = $1 AND ended_at IS NULL`,
     [instanceId, at],
   );
@@ -263,7 +265,13 @@ export async function openInterval(
 // --- The vps.provider-usage reconciler (Task 7) ----------------------------------------------------
 
 /** What metering the intervals needs beyond its transaction. */
-export type MeteringDeps = Pick<IntervalDeps, 'meterGpuModels'>;
+export interface MeteringDeps extends Pick<IntervalDeps, 'meterGpuModels'> {
+  /** An ended hour is written only this long after it ended (default 5 minutes, F7-1). */
+  meterGraceMs?: number | undefined;
+}
+
+/** The default `MeteringDeps.meterGraceMs`: lifecycle transactions stamped inside an hour commit within it. */
+export const defaultMeterGraceMs = 5 * 60_000;
 
 interface DueInterval {
   id: string;
@@ -319,10 +327,15 @@ export async function meterIntervals(
   deps: MeteringDeps = {},
   options: { limit?: number } = {},
 ): Promise<{ intervals: number; windows: number }> {
-  const floorNow = Math.floor(now / hourMs) * hourMs;
-  // Whole hours only: what is unbilled lies before the last top of the hour (or before the interval's end).
+  // Whole hours only, and only once they are `meterGraceMs` old (F7-1): a lifecycle change stamped inside an hour
+  // may commit a little after it, and the window key leaves no room for a late share.
+  const grace = Math.max(0, deps.meterGraceMs ?? defaultMeterGraceMs);
+  const floorNow = Math.floor((now - grace) / hourMs) * hourMs;
+  // What is unbilled lies before the cutoff (or the interval's end). The two plain comparisons repeat it so the
+  // `instance_usage_open` index applies (F7-2).
   const due = (alias: string) =>
-    `${alias}.metered_until < LEAST(coalesce(${alias}.ended_at, ${at$(1)}), ${at$(2)})`;
+    `${alias}.metered_until < ${at$(2)} AND (${alias}.ended_at IS NULL OR ${alias}.metered_until < ${alias}.ended_at)
+     AND ${alias}.metered_until < LEAST(coalesce(${alias}.ended_at, ${at$(1)}), ${at$(2)})`;
   const { rows } = await tx.query<DueInterval>(
     `SELECT u.id, u.instance_id, u.tenant_id, u.project_id, u.identity_id, u.pool_id, u.region, u.provider,
             u.phase, u.mode, u.shape,
@@ -358,8 +371,9 @@ export async function meterIntervals(
       const until = Math.min(ended ?? floorNow, floorNow);
       const shape = json<BillableShape>(row.shape);
       const lines = meterLinesFor(shape, row.mode, row.phase, meterOptions);
-      // A stopped interval with no lines yet is Task 13's to bill: its watermark stays.
-      if (row.phase === 'stopped' && lines.length === 0) continue;
+      // A stopped interval with no lines yet is Task 13's to bill (disks): its watermark stays. A `none` interval
+      // has none in any phase and never will, so it is advanced (F7-2).
+      if (row.phase === 'stopped' && row.mode !== 'none' && lines.length === 0) continue;
       advance.push({ id: row.id, until, done: ended !== null && until === ended });
       if (lines.length === 0 || !(until > from)) continue;
       const tags: UsageTags = { pool: row.pool_id, provider: row.provider, source: 'instance' };
