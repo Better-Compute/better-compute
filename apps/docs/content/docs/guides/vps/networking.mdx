@@ -4,8 +4,8 @@ description: How VPS instances get addresses, from one IPv4 range per hosted poo
 metaTitle: VPS networking and pool IPAM
 icon: Network
 status: beta
-packages: ['@better-compute/vps']
-sources: ['packages/vps/src/ipam.ts', 'packages/vps/src/networks.ts', 'packages/provider-gcp/src/networks.ts', 'daemon/internal/runtime/netconfig.go', 'packages/vps/src/migrations.ts', 'packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/server/src/controllers/nodespec.ts', 'proto/bettercompute/agent/v1/session.proto', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-proxmox/src/proxmox.ts', 'packages/provision/src/profile.ts', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts', 'daemon/internal/agent/netpolicy.go', 'daemon/internal/runtime/cloudhypervisor.go', 'daemon/internal/helper/helper.go', 'PLAN.md']
+packages: ['@better-compute/vps', '@better-compute/provider-gcp', '@better-compute/provider-digitalocean']
+sources: ['packages/vps/src/ipam.ts', 'packages/vps/src/networks.ts', 'packages/provider-gcp/src/networks.ts', 'packages/provider-digitalocean/src/networks/index.ts', 'packages/provider-digitalocean/src/networks/firewalls.ts', 'packages/provider-digitalocean/src/networks/vpcs.ts', 'daemon/internal/runtime/netconfig.go', 'packages/vps/src/migrations.ts', 'packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/server/src/controllers/nodespec.ts', 'proto/bettercompute/agent/v1/session.proto', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-proxmox/src/proxmox.ts', 'packages/provision/src/profile.ts', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts', 'daemon/internal/agent/netpolicy.go', 'daemon/internal/runtime/cloudhypervisor.go', 'daemon/internal/helper/helper.go', 'PLAN.md']
 ---
 
 A VM is not much use until you know its address. Better Compute keeps networking deliberately small: an address
@@ -151,7 +151,7 @@ and no other.
 
 ## Tenant networks
 
-On a provider pool whose provider supports networks (Google Compute Engine), a tenant builds its own private networks
+On a provider pool whose provider supports networks (Google Compute Engine and DigitalOcean), a tenant builds its own private networks
 through [networks](/docs/reference/api/networks) and [firewallRules](/docs/reference/api/firewall-rules), and the
 provider runs them: a VPC per network, subnets in it, and firewall rules. The calls record what the tenant wants and
 return at once; the `vps.networks` reconciler converges the provider.
@@ -207,11 +207,51 @@ await compute.api.firewallRules.create(
   the tenant network their NIC is on.
 - **Deletion.** `networks.delete` and `removeSubnet` are `INVALID_STATE` while instances are on them. The reconciler
   deletes rules, then subnets, then the VPC. A provider account with a network that is not deleted cannot be deleted.
-- **Shared project quotas.** All tenants' networks on one provider account live in that account's single project, so
+- **Shared project quotas (Google Compute Engine).** All tenants' networks on one provider account live in that account's single project, so
   they share its quotas for VPC networks, subnetworks and firewall rules: what one tenant creates, the others on the
   account cannot. vps caps each tenant at 10 networks that are not deleted, and each network at 16 subnets and 100
   firewall rules (`QUOTA_EXCEEDED`, the cap in `details.limit`). Size the project's quotas for the tenants you offer
   the pool to, or give a tenant that needs more its own account (with its own key) and project.
+
+### On DigitalOcean
+
+DigitalOcean has no network object and no firewall priorities, so the
+[DigitalOcean provider](/docs/guides/vps/providers#digitalocean) maps the same calls onto its VPCs, Cloud Firewalls and
+tags. The tenant-facing behaviour above holds; these are the differences.
+
+- **Subnet regions.** A DigitalOcean account has no zones, so a subnet's region must be one of the account's `regions`
+  (vps reads `regions` as well as the zones of Google Compute Engine accounts). Any other region is `INVALID_INPUT`.
+- **Provider-side names.** The provider names things by the provider-side names vps hands it (`bc-` and the lower-cased id of the
+  network, subnet or rule), not by the tenant's display names. Below, "the network" and "the subnet" are those names.
+- **A VPC per subnet.** DigitalOcean VPCs are regional, so each subnet is a VPC of its own, named by its provider-side
+  name (`bc-<id>`), with the subnet's range and the description `bc:network=<network>` (the network's provider-side
+  name). The range is an RFC 1918 IPv4 CIDR from /16 to /28 and
+  may not overlap another VPC of the account. A VPC of that name that exists with another range, region or network is
+  `INVALID_STATE` (`subnetDrift`). Deleting a subnet whose VPC still has members stays `pending` until they are gone.
+- **The base firewall.** A network is its base firewall `bc-base-<net16>` (`net16` is 16 hex digits of the sha256 of
+  the network's provider-side name). It targets the tag `bc-net-<net16>`, which every instance created on the network carries from its
+  first boot, and has no inbound rule and an allow-all outbound rule: the "deny ingress, allow egress" of any other
+  provider. The network is `ready` once that firewall exists, not once DigitalOcean has applied it. That a firewall
+  on a tag covers a new instance before it serves traffic, and that DigitalOcean honours a rule's `deny`, are not
+  verified against a real account yet.
+- **A rule is a Cloud Firewall** named `<rule>.n<net16>.p<priority>`. DigitalOcean firewalls carry neither a network
+  nor a priority, so the name does. A rule with no targets applies to the network's member tag; the tags a rule
+  targets replace that. A firewall is applied in the background: the rule is `pending` until DigitalOcean reports it
+  applied, and `error` (applied again on the next run) if it failed.
+- **Priorities are refused when they can't be kept.** DigitalOcean applies every firewall that matches an instance, and
+  a deny always wins, so a ruleset in which an allow has a lower priority number than an overlapping deny of the same
+  network and direction can't be expressed. The provider checks each allow it applies against the denies DigitalOcean
+  already holds; a deny is never checked and always applies. So in whichever order vps reconciles the pair, the deny
+  is applied and the allow ends in `error` with `UNSUPPORTED` (reason `firewallPriority`) on its own reconcile: the
+  ruleset is enforced more strictly than written, never more loosely. An allow that was applied before the deny
+  arrived stays applied but is no longer updated; the deny wins at DigitalOcean for the traffic they share, so it
+  opens nothing. Read the allow's error message, then fix or remove the inversion. Addresses on the wrong side of a rule
+  (destinations on an ingress rule) and an `mtu` other than 1500 are `UNSUPPORTED` too.
+- **An attached instance outside the network's VPCs.** DigitalOcean denies what no firewall allows. An attached
+  Droplet that a rule targets, but that sits outside the network's VPCs, is covered by that rule's firewall alone,
+  which allows only what the rule says, so it loses egress.
+- **Only its own names are touched.** The provider replaces and deletes only firewalls whose names have exactly the
+  shape above and VPCs whose description names a network. A `bc-r1.prod` firewall or a VPC made by hand is left alone.
 
 What is not there at all: IPv6 ranges, more than one range or lease per instance, and an API to manage ranges. Tunnels
 give you exec, SSH and single-port TCP access without routing to the instance network; see [tunnels](/docs/guides/access/tunnels).

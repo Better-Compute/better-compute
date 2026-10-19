@@ -1,6 +1,6 @@
 ---
 title: Providers
-description: Provider accounts, the defineProvider contract, the Hetzner Cloud, Proxmox VE and Google Compute Engine providers, discovery and attach, provider reservations, platform-issued compute and its tenant isolation, billing (modes, attach billing, reservation grants, provider costs and pass-through), conformance cases, and secret references for credentials.
+description: Provider accounts, the defineProvider contract, the Hetzner Cloud, Proxmox VE, Google Compute Engine and DigitalOcean providers, discovery and attach, provider reservations, platform-issued compute and its tenant isolation, billing (modes, attach billing, reservation grants, provider costs and pass-through), conformance cases, and secret references for credentials.
 metaTitle: VPS providers and provider accounts
 icon: Cloud
 status: beta
@@ -10,6 +10,7 @@ packages:
     '@better-compute/provider-hetzner',
     '@better-compute/provider-proxmox',
     '@better-compute/provider-gcp',
+    '@better-compute/provider-digitalocean',
   ]
 sources:
   [
@@ -53,6 +54,14 @@ sources:
     'packages/provider-gcp/src/config.ts',
     'tests/gcp-federation.test.ts',
     'tests/vps-account-federation.test.ts',
+    'packages/provider-digitalocean/README.md',
+    'packages/provider-digitalocean/src/config.ts',
+    'packages/provider-digitalocean/src/compute/droplets.ts',
+    'packages/provider-digitalocean/src/networks/index.ts',
+    'packages/provider-digitalocean/src/client/budget.ts',
+    'tests/provider-digitalocean.test.ts',
+    'tests/provider-digitalocean-networks.test.ts',
+    'tests/do-end-to-end.test.ts',
   ]
 ---
 
@@ -72,12 +81,13 @@ import { vps } from 'better-compute/vps';
 import { hetznerCloud } from '@better-compute/provider-hetzner';
 import { proxmoxProvider } from '@better-compute/provider-proxmox';
 import { gcp } from '@better-compute/provider-gcp';
+import { digitalocean } from '@better-compute/provider-digitalocean';
 
-vps({ providers: [hetznerCloud, proxmoxProvider({ writeSnippet }), gcp] });
+vps({ providers: [hetznerCloud, proxmoxProvider({ writeSnippet }), gcp, digitalocean] });
 ```
 
 The provider packages are on npm like the rest of Better Compute, but sit outside the `better-compute` umbrella:
-install them by their own names (`npm install @better-compute/provider-hetzner @better-compute/provider-proxmox @better-compute/provider-gcp`).
+install them by their own names (`npm install @better-compute/provider-hetzner @better-compute/provider-proxmox @better-compute/provider-gcp @better-compute/provider-digitalocean`).
 
 ## Provider accounts
 
@@ -235,7 +245,7 @@ A provider pool needs `providerAccountId`, and its `agent` must be `none`. Only 
 
 ## Discovery and attach
 
-A provider that can list every machine of an account (`discover`, Google Compute Engine today) lets you hand a VM that
+A provider that can list every machine of an account (`discover`: Google Compute Engine and DigitalOcean today) lets you hand a VM that
 already runs to a customer tenant without recreating it.
 
 - **The `vps.discovery` worker** lists each such account every `vps({ discovery: { every } })` (default `5m`) into
@@ -887,3 +897,127 @@ pass as "refused". No token is logged. Check the gcloud commands above against y
 
 `tests/provider-gcp.test.ts` runs the conformance cases and the GCE specifics against an in-memory emulator passed as
 `fetch`, and `tests/gcp-end-to-end.test.ts` runs the provider and the emulator through vps.
+
+## DigitalOcean
+
+`@better-compute/provider-digitalocean` exports `digitalocean` and `digitaloceanProvider(options)` (id `digitalocean`,
+`provides: ['vps']`, capabilities `power`, `reinstall`, `list`, `discover`, `claim`, `networks`). Droplets, GPU
+Droplets included, become the instances of provider pools. It also serves [discovery and attach](#discovery-and-attach)
+and [tenant networks](/docs/guides/vps/networking#tenant-networks), and calls the DigitalOcean API v2 over plain
+`fetch`. It reads no capacity reservations (`listReservations` is absent).
+
+```ts
+await compute.api.providerAccounts.create(
+  { token },
+  {
+    tenantId: 'root',
+    provider: 'digitalocean',
+    name: 'main',
+    config: {
+      token: 'secret://root/do-token',
+      regions: ['nyc3'],
+      sshKeyFingerprint: '3b:16:e4:bf:8b:00:8b:b8:59:8c:a9:d9:f4:61:21:ec',
+    },
+  },
+);
+```
+
+<TypeTable
+  type={{
+    token: {
+      type: 'SecretRef',
+      description:
+        'A personal access token with the scopes below. Resolved on the first request of a client.',
+      required: true,
+    },
+    regions: {
+      type: 'string[]',
+      description:
+        'At least one region slug. Offers, discovery, creates, claims and subnets are limited to these.',
+      required: true,
+    },
+    vpc: {
+      type: 'string',
+      description:
+        "A VPC name or uuid that create uses for an instance on no tenant network. Absent: the region's default VPC.",
+    },
+    sshKeyFingerprint: {
+      type: 'string',
+      description:
+        'The MD5 fingerprint of an account SSH key that is added to every Droplet. A fingerprint, not a secret.',
+    },
+    monitoring: {
+      type: 'boolean',
+      description: "Install DigitalOcean's metrics agent on new Droplets.",
+      default: 'true',
+    },
+    ipv6: { type: 'boolean', description: 'Give new Droplets an IPv6 address.', default: 'false' },
+    allowSpot: {
+      type: 'boolean',
+      description: 'Accepted and reserved for Spot capacity, which is not created yet.',
+      default: 'false',
+    },
+    discoverTag: {
+      type: 'string',
+      description:
+        'Discovery yields only Droplets carrying this tag. Lower-case [a-z0-9:_-], at most 255 characters; anything else is INVALID_CONFIG (discoverTag).',
+    },
+    previews: {
+      type: 'boolean',
+      description: 'Accepted and reserved for products DigitalOcean still marks as previews.',
+      default: 'false',
+    },
+  }}
+/>
+
+The token needs the custom scopes `account:read`, `regions:read`, `sizes:read`, `image:read`, `actions:read`,
+`droplet:read,create,update,delete` (the read also covers autoscale pool membership, which discovery reads),
+`ssh_key:read,create`, `tag:read,create,delete`, `vpc:read,create,update,delete` and
+`firewall:read,create,update,delete`. A missing scope is `ACCESS_DENIED` with `details.reason` `scope`.
+
+- **Ids.** A Droplet is its decimal id, named `bc-` and the lower-cased instance id (at most 63 characters). An offer is
+  `region/size`, one per size and configured region, with its hourly price in USD. GPU Droplets are listed separately
+  by DigitalOcean (`type=gpus`, which can't be combined with a tag filter); the provider reads both lists for `list`
+  and `discover` and for the idempotency lookup of a GPU size. A GPU size's `gpu_info.model` becomes the pool's
+  `gpuModel` string (`nvidia_h100` is `H100`).
+- **Idempotent create by tag.** DigitalOcean has no idempotency key, so the Droplet carries a hashed
+  `better-compute-key` tag; create looks for it before the POST and again after, and when two creates raced on one key, keeps the
+  oldest Droplet and deletes the rest. See
+  [Idempotent create without idempotency keys](/docs/extending/providers#idempotent-create-without-idempotency-keys).
+- **Ownership tags.** A Droplet is marked with flat tags `better-compute-managed:true`, `better-compute-instance:<id>`
+  and `better-compute-deployment:<hash>` (the `digitaloceanProvider({ deployment })` name). `delete`, `reinstall` and
+  the duplicate reaper need the managed tag and this deployment's; `power` needs the deployment's tag and an instance
+  tag. The tag-scoped bulk endpoints of DigitalOcean are never called: every delete, action and tag write names one
+  Droplet. A create label whose key has a colon is `INVALID_INPUT` (`label`): it could forge a reserved tag.
+- **An SSH key is always sent.** A Droplet created without one may make DigitalOcean email a root password, so create
+  registers the instance's keys in the account (`bc-<fingerprint prefix>`, never deleted) and adds the key named by
+  `sshKeyFingerprint`. An instance with no key and an account without that field is `INVALID_CONFIG` (`noSshKey`).
+- **Failed creates end.** DigitalOcean accepts a create with a 202 and runs it as an action. While the Droplet is
+  `new`, `get` reads that action: an `errored` one is `CAPACITY_UNAVAILABLE`, and a size, region or capacity refusal at
+  the POST is the same, so the instance ends in `error` with `ProvisionFailed`. The Droplet limit is
+  `QUOTA_EXCEEDED`.
+- **Attach.** `discover` yields every Droplet of the configured regions, GPU Droplets and members of a DigitalOcean
+  autoscale pool included (these carry the label `better-compute-autoscale-pool` and are never claimed). `claim`
+  writes the instance and deployment tags and verifies them, giving them back with `CONFLICT` when another instance's
+  tag appeared. A managed claim of a Droplet that carries another deployment's tag is `INVALID_STATE`
+  (`otherDeployment`). `release` removes the managed tag (unless another instance tag is on the Droplet), its own
+  instance tag and, once no instance tag is left, the deployment tag. It keeps no record of what its claim wrote, so a
+  managed tag that was on the Droplet before the claim goes too.
+- **Power:** `on` is `power_on`, `off` is `power_off`, `graceful-off` is `shutdown`, `graceful-restart` is `reboot`,
+  `cycle` and `reset` are `power_cycle`; `nmi` is `UNSUPPORTED`. `reinstall` is `rebuild`. Actions are started, not
+  awaited. Spot offers are not created yet: an offer ending in `@spot` is `UNSUPPORTED` (`reason` `spot`).
+- **Rate budget.** DigitalOcean allows 250 requests a minute and 5,000 an hour per token, shared by every reconciler
+  that uses it. The provider keeps each token under both limits: discovery and listing may spend at most 20% of a
+  window, single reads 30%, and writes whatever is left, so discovery defers first. Over its share a call is
+  `RATE_LIMITED` with `retryAfterMs`.
+- **Errors** map to `ComputeError` codes (`INVALID_CONFIG` for a refused token, `ACCESS_DENIED`, `NOT_FOUND`,
+  `CONFLICT`, `RATE_LIMITED`, `CAPACITY_UNAVAILABLE`, `QUOTA_EXCEEDED`, `INVALID_INPUT`, `UNAVAILABLE`), with
+  `details: { provider: 'digitalocean', status, reason }`. Never the token.
+
+`tests/provider-digitalocean.test.ts` and `tests/provider-digitalocean-networks.test.ts` run the conformance cases and
+the DigitalOcean specifics against an in-memory emulator passed as `fetch`, and `tests/do-end-to-end.test.ts` runs the
+provider and the emulator through vps. A few DigitalOcean behaviours are not in its specification (whether a tag
+filter lists GPU Droplets, the text of some 422 messages); an opt-in live suite, `tests/live/digitalocean.live.test.ts`
+(`BC_DO_LIVE`, `BC_DO_TOKEN`, `BC_DO_SSH_KEY_FINGERPRINT`), covers them and has not been run yet. Neither it nor
+the emulator checks yet that DigitalOcean honours a rule's `deny`, that a firewall on a tag covers a new Droplet before
+it serves traffic, or that a `PUT` renames a firewall; see the package README.

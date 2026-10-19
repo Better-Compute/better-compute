@@ -1,0 +1,201 @@
+{
+  "_provenance": "Body shape {id,message,request_id}: OpenAPI shared/models/error.yml (spec). 401/403/404/429 ids, the 429 message and 422-unknown are spec examples. The other 422/409 messages are NOT in the spec: they are what DO clients report in practice and stay verified:false until the live suite records the real ones.",
+  "errors": [
+    {
+      "name": "unauthorized",
+      "status": 401,
+      "verified": true,
+      "code": "INVALID_CONFIG",
+      "body": {
+        "id": "unauthorized",
+        "message": "Unable to authenticate you",
+        "request_id": "f2a6c8e4-0001-4b7b-9a51-1c0e7f6c0001"
+      }
+    },
+    {
+      "name": "forbidden",
+      "status": 403,
+      "verified": true,
+      "code": "ACCESS_DENIED",
+      "body": {
+        "id": "forbidden",
+        "message": "You do not have access for the attempted action.",
+        "request_id": "f2a6c8e4-0002-4b7b-9a51-1c0e7f6c0002"
+      }
+    },
+    {
+      "name": "not-found",
+      "status": 404,
+      "verified": true,
+      "code": "NOT_FOUND",
+      "body": {
+        "id": "not_found",
+        "message": "The resource you were accessing could not be found.",
+        "request_id": "f2a6c8e4-0003-4b7b-9a51-1c0e7f6c0003"
+      }
+    },
+    {
+      "name": "rate-limited",
+      "status": 429,
+      "verified": true,
+      "code": "RATE_LIMITED",
+      "body": {
+        "id": "too_many_requests",
+        "message": "API rate limit exceeded."
+      }
+    },
+    {
+      "name": "server-error",
+      "status": 500,
+      "verified": true,
+      "code": "UNAVAILABLE",
+      "body": {
+        "id": "server_error",
+        "message": "Unexpected server-side error"
+      }
+    },
+    {
+      "name": "422-size-unavailable-in-region",
+      "status": 422,
+      "verified": false,
+      "code": "CAPACITY_UNAVAILABLE",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "Size is not available in this region.",
+        "request_id": "f2a6c8e4-0010-4b7b-9a51-1c0e7f6c0010"
+      }
+    },
+    {
+      "name": "422-region-unavailable",
+      "status": 422,
+      "verified": false,
+      "code": "CAPACITY_UNAVAILABLE",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "Region is not available",
+        "request_id": "f2a6c8e4-0011-4b7b-9a51-1c0e7f6c0011"
+      }
+    },
+    {
+      "name": "422-insufficient-capacity",
+      "status": 422,
+      "verified": false,
+      "code": "CAPACITY_UNAVAILABLE",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "There is currently insufficient capacity for this size in this region.",
+        "request_id": "f2a6c8e4-0012-4b7b-9a51-1c0e7f6c0012"
+      }
+    },
+    {
+      "name": "422-droplet-limit",
+      "status": 422,
+      "verified": false,
+      "code": "QUOTA_EXCEEDED",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "creating this/these droplet(s) will exceed your droplet limit",
+        "request_id": "f2a6c8e4-0013-4b7b-9a51-1c0e7f6c0013"
+      }
+    },
+    {
+      "name": "422-invalid-size",
+      "status": 422,
+      "verified": false,
+      "code": "INVALID_INPUT",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "You specified an invalid size for Droplet creation.",
+        "request_id": "f2a6c8e4-0014-4b7b-9a51-1c0e7f6c0014"
+      }
+    },
+    {
+      "name": "422-invalid-image",
+      "status": 422,
+      "verified": false,
+      "code": "INVALID_INPUT",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "You specified an invalid image for Droplet creation.",
+        "request_id": "f2a6c8e4-0015-4b7b-9a51-1c0e7f6c0015"
+      }
+    },
+    {
+      "name": "422-ssh-key-in-use",
+      "status": 422,
+      "verified": false,
+      "code": "CONFLICT",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "SSH Key is already in use on your account",
+        "request_id": "f2a6c8e4-0016-4b7b-9a51-1c0e7f6c0016"
+      }
+    },
+    {
+      "name": "422-name-in-use",
+      "status": 422,
+      "verified": false,
+      "code": "CONFLICT",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "name is already in use",
+        "request_id": "f2a6c8e4-0017-4b7b-9a51-1c0e7f6c0017"
+      }
+    },
+    {
+      "name": "422-vpc-range-overlap",
+      "status": 422,
+      "verified": false,
+      "code": "INVALID_INPUT",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "ip_range overlaps with another network in your account",
+        "request_id": "f2a6c8e4-0018-4b7b-9a51-1c0e7f6c0018"
+      }
+    },
+    {
+      "name": "409-vpc-in-use",
+      "status": 409,
+      "verified": false,
+      "code": "CONFLICT",
+      "body": {
+        "id": "conflict",
+        "message": "The VPC cannot be deleted because it has members",
+        "request_id": "f2a6c8e4-0019-4b7b-9a51-1c0e7f6c0019"
+      }
+    },
+    {
+      "name": "422-vpc-in-use",
+      "status": 422,
+      "verified": false,
+      "code": "CONFLICT",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "This VPC is in use and cannot be deleted",
+        "request_id": "f2a6c8e4-0022-4b7b-9a51-1c0e7f6c0022"
+      }
+    },
+    {
+      "name": "422-tag-exists",
+      "status": 422,
+      "verified": false,
+      "code": "CONFLICT",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "tag already exists",
+        "request_id": "f2a6c8e4-0021-4b7b-9a51-1c0e7f6c0021"
+      }
+    },
+    {
+      "name": "422-unknown",
+      "status": 422,
+      "verified": true,
+      "code": "INVALID_INPUT",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "request payload validation failed",
+        "request_id": "f2a6c8e4-0020-4b7b-9a51-1c0e7f6c0020"
+      }
+    }
+  ]
+}

@@ -1,0 +1,97 @@
+{
+  "_provenance": "Shape: OpenAPI regions/models/region.yml (spec). Size lists are illustrative.",
+  "regions": [
+    {
+      "name": "New York 3",
+      "slug": "nyc3",
+      "features": [
+        "backups",
+        "ipv6",
+        "metadata",
+        "install_agent",
+        "storage",
+        "image_transfer"
+      ],
+      "available": true,
+      "sizes": [
+        "s-1vcpu-512mb-10gb",
+        "s-1vcpu-1gb",
+        "s-2vcpu-4gb"
+      ]
+    },
+    {
+      "name": "San Francisco 3",
+      "slug": "sfo3",
+      "features": [
+        "backups",
+        "ipv6",
+        "metadata",
+        "install_agent",
+        "storage",
+        "image_transfer"
+      ],
+      "available": true,
+      "sizes": [
+        "s-1vcpu-512mb-10gb",
+        "s-1vcpu-1gb"
+      ]
+    },
+    {
+      "name": "Toronto 1",
+      "slug": "tor1",
+      "features": [
+        "backups",
+        "ipv6",
+        "metadata",
+        "install_agent",
+        "storage",
+        "image_transfer"
+      ],
+      "available": true,
+      "sizes": [
+        "s-1vcpu-512mb-10gb",
+        "s-1vcpu-1gb",
+        "s-2vcpu-4gb",
+        "gpu-h100x1-80gb",
+        "gpu-h100x8-640gb",
+        "gpu-l40sx1-48gb",
+        "gpu-6000adax1-48gb",
+        "gpu-4000adax1-20gb"
+      ]
+    },
+    {
+      "name": "Atlanta 1",
+      "slug": "atl1",
+      "features": [
+        "backups",
+        "ipv6",
+        "metadata",
+        "install_agent",
+        "storage",
+        "image_transfer"
+      ],
+      "available": true,
+      "sizes": [
+        "s-1vcpu-512mb-10gb",
+        "s-1vcpu-1gb",
+        "s-2vcpu-4gb",
+        "gpu-h100x1-80gb",
+        "gpu-mi300x1-192gb"
+      ]
+    },
+    {
+      "name": "Amsterdam 2",
+      "slug": "ams2",
+      "features": [
+        "backups",
+        "ipv6",
+        "metadata",
+        "install_agent",
+        "storage",
+        "image_transfer"
+      ],
+      "available": false,
+      "sizes": []
+    }
+  ]
+}

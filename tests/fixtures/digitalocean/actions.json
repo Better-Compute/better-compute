@@ -1,0 +1,20 @@
+{
+  "_provenance": "Shape: OpenAPI actions/models/action.yml (spec): id, status (in-progress/completed/errored), type, started_at, completed_at, resource_id, resource_type, region, region_slug. The model has no error message. Values are illustrative. The emulator spreads this template and overrides id, status, type, the times and the resource.",
+  "action": {
+    "id": 36804636,
+    "status": "completed",
+    "type": "create",
+    "started_at": "2020-11-14T16:29:21Z",
+    "completed_at": "2020-11-14T16:30:06Z",
+    "resource_id": 3164444,
+    "resource_type": "droplet",
+    "region": {
+      "name": "New York 3",
+      "slug": "nyc3",
+      "features": ["private_networking", "backups", "ipv6", "metadata"],
+      "available": true,
+      "sizes": ["s-1vcpu-1gb", "s-2vcpu-4gb"]
+    },
+    "region_slug": "nyc3"
+  }
+}

@@ -260,6 +260,20 @@ and their secrets that apply to every 0.1.x deployment. Every package, `@better-
   is idempotent through GCE's `requestId`, and the VMs it owns carry `better-compute-managed` and
   `better-compute-instance` labels; it never deletes or powers a VM without them. It implements discovery,
   ownership labels, reservations and networks.
+- **DigitalOcean provider** (`@better-compute/provider-digitalocean`, new, outside the umbrella). Droplets, GPU
+  Droplets included, as VPS instances and offers over plain `fetch` against the v2 API. Accounts take
+  `{ token, regions, vpc?, sshKeyFingerprint?, … }` with a personal access token as a secret reference (custom scopes
+  are listed in the package README). DigitalOcean has no idempotency key, so a create carries a hashed
+  `better-compute-key` tag, looks for it before and after the POST, and converges racing creates on the oldest Droplet.
+  Droplets it owns carry `better-compute-managed`, `better-compute-instance` and `better-compute-deployment` tags;
+  `delete`, `reinstall` and the duplicate reaper act only on managed Droplets of their own deployment, `power` needs
+  an instance tag, and the tag-scoped bulk endpoints are never called. A create always sends an SSH key.
+  It implements discovery and attach (autoscale-pool members are listed and never claimed), and tenant networks: a VPC
+  per subnet, a base firewall that denies ingress and allows egress, and a Cloud Firewall per rule. DigitalOcean has no
+  firewall priorities, so an allow that outranks an overlapping deny is refused (`UNSUPPORTED`, `firewallPriority`)
+  while the deny always applies. Requests stay under DigitalOcean's per-token limits, and discovery defers before
+  writes do. Reservations, Spot capacity, volumes and snapshots are not part of this release; the opt-in live suite
+  (`BC_DO_LIVE`) has not been run yet.
 - **Discovery and attach** (`@better-compute/vps`). The `vps.discovery` worker lists every machine of accounts whose
   provider can `discover` (`vps({ discovery: { every } })`, default 5 minutes) and publishes `provider.machine.*`.
   `providerAccounts.machines` reads what it saw (another tenant's instance on a tenant's own account is shown
@@ -306,6 +320,9 @@ and their secrets that apply to every 0.1.x deployment. Every package, `@better-
 
 ### Changed
 
+- **Tenant network subnets also accept an account's `regions`** (`@better-compute/vps`). `networks.addSubnet` took a
+  subnet region only from the zones of a Google Compute Engine account; it now also accepts the `regions` of an
+  account whose provider has no zones (DigitalOcean). Accounts with `zones` behave as before.
 - **Modules see the resolved root tenant.** `betterCompute()` resolves the root tenant from its own `rootTenantId`
   or the port's, and now hands modules a port whose `context.iam.rootTenantId` is that root, even when only
   `betterCompute({ rootTenantId })` names it. Before, such a host's root accounts were treated as a tenant's by vps

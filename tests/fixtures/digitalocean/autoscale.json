@@ -1,0 +1,38 @@
+{
+  "_provenance": "Shape: OpenAPI autoscale_pools/models/{autoscale_pool,autoscale_pool_dynamic_config,autoscale_pool_droplet_template,current_utilization,member,member_current_utilization}.yml (spec, read 2026-10-18); list responses autoscale_pools/responses/{all_autoscale_pools,all_members}.yml: GET /v2/droplets/autoscale answers { autoscale_pools: [...] } and GET /v2/droplets/autoscale/{id}/members answers { droplets: [...] }, both with links and meta. Values are the spec examples. The emulator spreads these templates and overrides the identifying fields.",
+  "pool": {
+    "id": "0d3db13e-a604-4944-9827-7ec2642d32ac",
+    "name": "my-autoscale-pool",
+    "config": {
+      "min_instances": 1,
+      "max_instances": 5,
+      "target_cpu_utilization": 0.5,
+      "cooldown_minutes": 10
+    },
+    "droplet_template": {
+      "name": "example.com",
+      "region": "nyc3",
+      "size": "s-1vcpu-1gb",
+      "image": "ubuntu-20-04-x64",
+      "ssh_keys": ["3b:16:e4:bf:8b:00:8b:b8:59:8c:a9:d3:f0:19:fa:45"],
+      "tags": ["env:prod", "web"],
+      "vpc_uuid": "760e09ef-dc84-11e8-981e-3cfdfeaae000",
+      "with_droplet_agent": true,
+      "ipv6": true,
+      "user_data": "#cloud-config\nruncmd:\n  - touch /test.txt\n"
+    },
+    "current_utilization": { "memory": 0.3588531587713522, "cpu": 0.0007338008770232183 },
+    "created_at": "2020-07-28T18:00:00Z",
+    "updated_at": "2020-07-28T18:00:00Z",
+    "status": "active",
+    "active_resources_count": 1
+  },
+  "member": {
+    "droplet_id": 459903570,
+    "created_at": "2020-07-28T18:00:00Z",
+    "updated_at": "2020-07-28T18:00:00Z",
+    "health_status": "healthy",
+    "status": "active",
+    "current_utilization": { "memory": 0.3588531587713522, "cpu": 0.0007338008770232183 }
+  }
+}

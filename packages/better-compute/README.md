@@ -122,7 +122,8 @@ The `define*` helpers of the root entry are `defineModule`, `definePlugin`, `def
 
 Some packages stay outside the umbrella and are installed directly: `@better-compute/provider-hetzner`,
 `@better-compute/provider-gcp`,
-`@better-compute/provider-proxmox`, `@better-compute/provider-kubernetes`, `@better-compute/driver-sdk` and
+`@better-compute/provider-proxmox`, `@better-compute/provider-digitalocean`,
+`@better-compute/provider-kubernetes`, `@better-compute/driver-sdk` and
 `@better-compute/console-kit`.
 
 ## Documentation

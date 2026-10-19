@@ -166,6 +166,13 @@
     "exports": ["."]
   },
   {
+    "name": "@better-compute/provider-digitalocean",
+    "directory": "packages/provider-digitalocean",
+    "description": "DigitalOcean provider for better-compute: Droplets as VPS instances and offers, VPC networks, power, reinstall and discovery.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
     "name": "@better-compute/provider-gcp",
     "directory": "packages/provider-gcp",
     "description": "Google Compute Engine provider for better-compute: VMs as VPS instances and offers, attach, reservations and tenant networks.",

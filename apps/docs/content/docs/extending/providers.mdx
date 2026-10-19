@@ -4,7 +4,7 @@ metaTitle: Writing a VPS or cloud provider adapter
 description: Build a provider adapter with defineProvider, make create idempotent against an API that has no idempotency keys, map errors, and test it against an emulator.
 icon: Cloud
 status: beta
-packages: ['@better-compute/core', '@better-compute/vps', '@better-compute/provider-hetzner', '@better-compute/provider-proxmox', '@better-compute/provider-gcp']
+packages: ['@better-compute/core', '@better-compute/vps', '@better-compute/provider-hetzner', '@better-compute/provider-proxmox', '@better-compute/provider-gcp', '@better-compute/provider-digitalocean']
 sources:
   - packages/core/src/extension.ts
   - packages/core/src/conformance.ts
@@ -22,6 +22,9 @@ sources:
   - packages/provider-gcp/README.md
   - packages/provider-gcp/src/compute.ts
   - packages/provider-gcp/src/networks.ts
+  - packages/provider-digitalocean/README.md
+  - packages/provider-digitalocean/src/compute/droplets.ts
+  - packages/provider-digitalocean/src/ids.ts
   - packages/vps/src/discovery.ts
   - packages/vps/src/attach.ts
   - packages/vps/src/provider-reservations.ts
@@ -35,6 +38,7 @@ sources:
   - tests/provider-proxmox.test.ts
   - tests/provider-gcp.test.ts
   - tests/gcp-end-to-end.test.ts
+  - tests/provider-digitalocean.test.ts
   - PLAN.md
 ---
 
@@ -50,10 +54,11 @@ This page is for adapter authors. How operators create accounts and provider poo
 
 <Callout title="Status">
 Provider pools run today: the `vps.instances` reconciler drives an account's client for every instance of a
-`class: 'provider'` pool (`agent: 'none'`). Four adapters ship: `hetzner-cloud` and `hetzner-robot` in
-`@better-compute/provider-hetzner`, `proxmox` in `@better-compute/provider-proxmox`, and `gcp` in
+`class: 'provider'` pool (`agent: 'none'`). Five adapters ship: `hetzner-cloud` and `hetzner-robot` in
+`@better-compute/provider-hetzner`, `proxmox` in `@better-compute/provider-proxmox`, `gcp` in
 `@better-compute/provider-gcp`, which also implements every optional member below (discovery, ownership labels,
-reservations and networks). Platform-owned provider
+reservations and networks), and `digitalocean` in `@better-compute/provider-digitalocean` (the same, except
+reservations). Platform-owned provider
 machines run too: `providerAccounts.bootstrap` and the `vps.bootstraps` reconciler call `ProviderImpl.identify` and
 `bootstrap` to turn a rented server (Hetzner Robot) into a bcd host; see [bootstrapping machines](#bootstrapping-machines).
 The provider packages are on npm but sit outside the `better-compute` umbrella, so you install them by name.
@@ -183,6 +188,7 @@ before creating, and resolves races with something the API keeps unique:
 | `hetzner-cloud` | label `better-compute.io/idempotency-key=<key>`, plus `better-compute.io/managed=true` | the server name | a create that loses on the name looks the key up again and returns the winner |
 | `proxmox` | the VM's description, in a VMID slot hashed from the key within `[vmidMin, vmidMax]` | the VMID | concurrent creates target the same VMID and PVE lets one clone through; a slot held by another key probes the next one; an interrupted clone is finished by the next create |
 | `hetzner-robot` | the server's name, `bc-<key>` | the name | it claims an existing server instead of ordering one; a server someone named for another use is never claimed (`CONFLICT`) |
+| `digitalocean` | the tag `better-compute-key:<hash of the key>`, plus `better-compute-managed:true` | nothing the API promises (names may repeat) | it looks the tag up before and after the POST; creates that raced on one key both land, and each keeps the oldest Droplet and deletes the rest |
 
 The general shape, from `hetzner-cloud`:
 
@@ -199,6 +205,42 @@ async create(request, call) {
   }
 }
 ```
+
+When the API keeps nothing unique, as on DigitalOcean (tags, not labels, and no name is promised unique), a worked example is
+`digitalocean`: the key is hashed into a tag, and the create is a lookup, a POST and a second lookup. Whoever sees more
+than one Droplet carrying the key's tag converges on the oldest, so every caller of one key ends with one machine:
+
+```ts
+// Simplified from packages/provider-digitalocean/src/compute/droplets.ts
+async create(request, ctx) {
+  // … validate the offer, image and region …
+  const existing = await this.byKey(ctx.idempotencyKey, gpu, signal); // a retry finds what its first attempt made
+  if (existing.length > 0) return toMachine(await this.converge(existing, signal));
+  // … the VPC and the SSH keys …
+  let created;
+  try {
+    created = (await this.client.request('POST', '/droplets', { body: { …, tags: [keyTag(ctx.idempotencyKey), …] }, signal, budget: 'mutate' })).droplet;
+  } catch (error) {
+    if (!isComputeError(error, 'UNAVAILABLE')) throw error;
+    const landed = await this.byKey(ctx.idempotencyKey, gpu, signal); // an answer that never arrived may still have created one
+    if (landed.length === 0) throw error;
+    return toMachine(await this.converge(landed, signal));
+  }
+  const found = new Map((await this.byKey(ctx.idempotencyKey, gpu, signal)).map((d) => [d.id, d]));
+  if (created && !found.has(created.id)) found.set(created.id, created);
+  if (found.size === 0)
+    throw new ComputeError('PROVIDER_ERROR', 'DigitalOcean accepted a create but returned no Droplet', undefined, { provider: 'digitalocean', reason: 'badBody' });
+  return toMachine(await this.converge([...found.values()], signal)); // a racing create may have posted too
+}
+```
+
+`byKey` lists by the key's tag (`better-compute-key:<24 hex of sha256(key)>`) and keeps only Droplets this deployment
+owns: the managed tag and its deployment tag. So ownership is settled by the lookup, and `converge` keeps the oldest
+of what it is given and deletes the others by id, one request each. A tag-scoped bulk delete would be one call, but it
+also removes whatever else carries the tag, so `digitalocean` never calls the bulk endpoints. `list` and the
+idempotency lookup are scoped by tag; `discover` is the exception: it yields every Droplet in the configured regions
+unless `discoverTag` is set. DigitalOcean lists GPU Droplets separately and not with a tag filter, so for a GPU size
+`byKey` also pages the GPU list and filters it by tag in code.
 
 Mark every machine you create, and act only on marked machines. On a shared account or cluster that is the only thing
 that keeps `delete` away from someone else's server: `proxmox` refuses to delete or power a VM not tagged
@@ -377,6 +419,7 @@ and replay it later. After the generic cases, test what is specific to your API.
 | --- | --- |
 | `tests/provider-hetzner.test.ts` | labels and names, a concurrent create losing on the name, 401, 422 and 429 mapping, paginated offers with prices, power and rebuild |
 | `tests/provider-proxmox.test.ts` | VMID slots, concurrent and interrupted clones, disk growth, `writeSnippet`, refusing untagged VMs, tasks and their timeouts, reinstall into the same VMID |
+| `tests/provider-digitalocean.test.ts` | the tag scheme, a create racing on one key and converging on the oldest Droplet, the ownership rules of `delete` and `power`, 422 message mapping, SSH keys, GPU Droplets, claim races, the request budget, 401, 403 and 429 mapping |
 | `tests/provider-hetzner-robot.test.ts` | idempotent claims and claim races, power through resets, the rescue bootstrap over a fake SSH executor, the script quoting (set `BC_SH` to a POSIX shell to syntax-check it) |
 
 Inject time as well as transport: `proxmoxProvider` takes `sleep`, `taskPollMs` and `taskTimeoutMs`, and

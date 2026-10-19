@@ -1,0 +1,41 @@
+{
+  "_provenance": "Shape: OpenAPI firewalls/models/firewall.yml and firewall_rule.yml (spec): id (uuid), status (waiting|succeeded|failed), created_at, pending_changes [{droplet_id, removing, status}], name, inbound_rules [{protocol, ports, action, sources}], outbound_rules [{protocol, ports, action, destinations}], droplet_ids, tags. A rule's targets are {addresses, droplet_ids, load_balancer_uids, kubernetes_ids, tags}; ports is \"n\", \"a-b\" or \"0\" (all; ICMP always \"0\"); action is allow (default) or deny (research S3). Values are illustrative. The emulator spreads this template and overrides id, name, status, created_at, rules, droplet_ids, tags and pending_changes.",
+  "firewall": {
+    "id": "bb4b2611-3d72-467b-8602-280330ecd65c",
+    "status": "succeeded",
+    "created_at": "2017-05-23T21:24:00Z",
+    "pending_changes": [],
+    "name": "firewall",
+    "inbound_rules": [
+      {
+        "protocol": "tcp",
+        "ports": "22",
+        "action": "allow",
+        "sources": {
+          "addresses": ["18.0.0.0/8"],
+          "tags": ["gateway"]
+        }
+      },
+      {
+        "protocol": "icmp",
+        "ports": "0",
+        "action": "deny",
+        "sources": {
+          "addresses": ["0.0.0.0/0", "::/0"]
+        }
+      }
+    ],
+    "outbound_rules": [
+      {
+        "protocol": "tcp",
+        "ports": "8000-9000",
+        "action": "allow",
+        "destinations": {
+          "addresses": ["0.0.0.0/0", "::/0"]
+        }
+      }
+    ],
+    "droplet_ids": [8043964],
+    "tags": ["frontend"]
+  }
+}

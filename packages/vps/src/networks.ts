@@ -865,7 +865,7 @@ async function networkProvider(
   tx: SqlTx,
   tenantId: string,
   poolId: string,
-): Promise<{ accountId: string; zones: string[]; client: ProviderImpl }> {
+): Promise<{ accountId: string; zones: string[]; regions: string[]; client: ProviderImpl }> {
   const pool = await visibleVpsPool(tx, tenantId, poolId);
   if (pool.class !== 'provider' || pool.providerAccountId === undefined)
     throw new ComputeError(
@@ -884,7 +884,11 @@ async function networkProvider(
   const zones = Array.isArray(account.config.zones)
     ? account.config.zones.filter((zone): zone is string => typeof zone === 'string')
     : [];
-  return { accountId: account.id, zones, client };
+  // Providers without zones (DigitalOcean) configure regions.
+  const regions = Array.isArray(account.config.regions)
+    ? account.config.regions.filter((region): region is string => typeof region === 'string')
+    : [];
+  return { accountId: account.id, zones, regions, client };
 }
 
 /** A GCE zone's region: `us-central1-a` is in `us-central1`. */
@@ -1131,7 +1135,8 @@ async function reopen(
 
 /**
  * `networks.addSubnet`: the range must be private (RFC 1918, /8 to /29), in a region of the account's
- * zones, and overlap no other subnet of the network (CONFLICT: also enforced by the database).
+ * zones or regions, and overlap no other subnet of the network (CONFLICT: also enforced by the
+ * database).
  */
 export async function addSubnet(
   deps: NetworkDeps,
@@ -1139,12 +1144,12 @@ export async function addSubnet(
   input: AddSubnetInput,
 ): Promise<NetworkView> {
   const network = await openNetwork(tx, input);
-  const { zones } = await networkProvider(deps, tx, network.tenant_id, network.pool_id);
-  const regions = [...new Set(zones.map(zoneRegion))];
+  const provider = await networkProvider(deps, tx, network.tenant_id, network.pool_id);
+  const regions = [...new Set([...provider.zones.map(zoneRegion), ...provider.regions])];
   if (regions.length === 0)
     throw new ComputeError(
       'INVALID_STATE',
-      `Provider account ${network.provider_account_id} configures no zones, so no subnet region is allowed`,
+      `Provider account ${network.provider_account_id} configures no zones or regions, so no subnet region is allowed`,
     );
   if (!regions.includes(input.region))
     throw new ComputeError(
