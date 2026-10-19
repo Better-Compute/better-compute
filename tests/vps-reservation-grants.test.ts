@@ -128,6 +128,11 @@ interface WindowView {
   tags: Record<string, string>;
 }
 
+/** Instance windows without disk lines: a reservation (and so a grant) covers compute, never persistent disk (Task 13). */
+async function computeWindows(world: GceWorld): Promise<WindowView[]> {
+  return (await windows(world, 'instance')).filter((row) => !row.meter.startsWith('disk.'));
+}
+
 async function windows(world: GceWorld, sourceKind?: string): Promise<WindowView[]> {
   const { rows } = await world.fixture.database.query<{
     source_kind: string;
@@ -186,7 +191,7 @@ describe('reserved', () => {
 
     await moveTo(world, h0 + 2 * HOUR + settle);
     await meterInstances(world);
-    const rows = await windows(world, 'instance');
+    const rows = await computeWindows(world);
     const reserved = rows.filter((row) => row.sourceId === created.id);
     expect(new Set(reserved.map((row) => row.meter))).toEqual(
       new Set([
@@ -798,7 +803,7 @@ describe('billing', () => {
     });
     await moveTo(world, h0 + 2 * HOUR + settle);
     await meterInstances(world);
-    const rows = (await windows(world, 'instance')).filter((row) => row.sourceId === created.id);
+    const rows = (await computeWindows(world)).filter((row) => row.sourceId === created.id);
     expect(rows.map((row) => [row.start, row.meter, row.quantity])).toEqual([
       [h0, USAGE, 1],
       [h0 + HOUR, USAGE, 1],
@@ -816,7 +821,7 @@ describe('billing', () => {
     await step(world, 1_000);
     await moveTo(world, h0 + HOUR + settle);
     await meterInstances(world);
-    const rows = await windows(world, 'instance');
+    const rows = await computeWindows(world);
     expect(
       rows.filter((row) => row.sourceId === inside.id).map((row) => [row.meter, row.quantity]),
     ).toEqual([[USAGE, 1]]);
@@ -855,7 +860,7 @@ describe('billing', () => {
       [h0, 2],
       [h0 + HOUR, 1],
     ]);
-    const used = (await windows(world, 'instance')).filter((row) => row.sourceId === created.id);
+    const used = (await computeWindows(world)).filter((row) => row.sourceId === created.id);
     expect(sum(used, USAGE)).toBeCloseTo(1.5 - 2_000 / HOUR, 5);
     // From 1:30 on the instance is billed at the reserved rate, and never also as granted.
     expect(sum(used, 'vm.reserved.vcpu.hours')).toBe(12 * 2.5);
@@ -918,7 +923,7 @@ describe('billing', () => {
     await moveTo(world, h0 + 4 * HOUR + settle);
     await settleGrants(world);
     await meterInstances(world);
-    const used = (await windows(world, 'instance')).filter((row) => row.sourceId === created.id);
+    const used = (await computeWindows(world)).filter((row) => row.sourceId === created.id);
     expect(new Set(used.map((row) => row.meter))).toEqual(new Set([USAGE]));
     expect(sum(used, USAGE)).toBeCloseTo(4 - 2_000 / HOUR, 5);
     const slots = await windows(world, 'grant');
@@ -970,7 +975,7 @@ describe('billing', () => {
     await moveTo(world, h0 + 2 * HOUR + settle);
     await settleGrants(world);
     await meterInstances(world);
-    const rows = await windows(world, 'instance');
+    const rows = await computeWindows(world);
     const adopted = rows.filter((row) => row.sourceId === oldest.id);
     expect(adopted.filter((row) => row.start === h0 + HOUR).map((row) => row.meter)).toEqual([
       USAGE,
