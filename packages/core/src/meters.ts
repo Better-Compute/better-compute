@@ -81,6 +81,35 @@ export const knownGpuFamilies: readonly string[] = [
   'RTX-4090',
 ];
 
+/** A GPU model name as a meter slug: lower case, each run outside [a-z0-9] one '-', none at either end. */
+function gpuModelSlug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+const gpuSlugPattern = /^[a-z][a-z0-9-]{0,31}$/;
+
+/**
+ * The catalog GPU family a provider's GPU model string names, as its lower-case meter slug: `nvidia-h100-80gb`,
+ * `nvidia-h100-mega-80gb` and `NVIDIA H100 80GB HBM3` are `h100`, `nvidia-tesla-a100` is `a100`. A family matches
+ * as whole '-'-separated tokens (`acme-h1000` is no H100), longest family first, so `l40s` wins over `l40` and
+ * `l4`, and `gb200` or `gh200` never read as `b200`. Anything else is `other`. `families` are the names the caller's
+ * catalog covers (default: `knownGpuFamilies` and `defaultMeterGpuModels`). Provider usage capture and the meter
+ * lines both use it, so a model is named the same way where it is recorded and where it is priced.
+ */
+export function canonicalGpuModel(
+  raw: string,
+  families: readonly string[] = [...knownGpuFamilies, ...defaultMeterGpuModels],
+): string {
+  const tokens = `-${gpuModelSlug(raw)}-`;
+  const slugs = [...new Set(families.map(gpuModelSlug))]
+    .filter((slug) => slug !== 'other' && gpuSlugPattern.test(slug))
+    .sort((a, b) => b.length - a.length || a.localeCompare(b));
+  return slugs.find((slug) => tokens.includes(`-${slug}-`)) ?? 'other';
+}
+
 /** The disk types provider instances meter (`disk.<type>.gib.hours`). */
 const diskTypes = [
   'pd-standard',
@@ -121,8 +150,15 @@ export interface MeterCatalogOptions {
  * network, address, disk and snapshot meters (D9). Throws when the list would pass better-iam's 100 meters.
  */
 export function meterCatalog(options: MeterCatalogOptions): MeterSpec[] {
-  const models = [...new Set([...options.gpuModels.map((model) => model.toLowerCase()), 'other'])];
-  const families = (options.gpuFamilies ?? knownGpuFamilies).map((family) => family.toLowerCase());
+  // Slugs as canonicalGpuModel names them, so the meters priced are the ones provider usage records.
+  const models = [
+    ...new Set([
+      ...options.gpuModels.map((model) => canonicalGpuModel(model, options.gpuModels)),
+      'other',
+    ]),
+  ];
+  const familyNames = options.gpuFamilies ?? knownGpuFamilies;
+  const families = familyNames.map((family) => canonicalGpuModel(family, familyNames));
   const label = (slug: string) => (slug === 'other' ? 'other-GPU' : slug.toUpperCase());
   const catalog: MeterSpec[] = [];
   const add = (key: string, name: string, unit: string) => {
