@@ -10,6 +10,7 @@ import {
   type ExternalMachine,
 } from '@better-compute/core';
 import {
+  baseFirewallName,
   budgetFor,
   digitalocean,
   digitaloceanProvider,
@@ -18,6 +19,7 @@ import {
   doConfig,
   dropletName,
   ensureSshKeys,
+  firewallName,
   gpuModelOf,
   isManagedTag,
   keyTag,
@@ -619,6 +621,25 @@ describe('ids', () => {
     expect(labelsFromTags(['better-compute-pool:A', 'BETTER-COMPUTE-POOL:b'])).toEqual({
       'better-compute-pool': 'b',
     });
+  });
+
+  it('persisted names match their known answers', () => {
+    // These names live on real Droplets and firewalls: ownership, deletion and the network
+    // teardown find resources by them, so a change to any hash or encoding orphans what exists.
+    // The literals were computed apart from the provider (node:crypto sha256, and an RFC 4648
+    // base32 of its own); they are never to be regenerated from the code.
+    expect(tagFor(labels.owner, 'Ann@Example.com')).toBe(
+      'better-compute-owner:xavj4zs4mddqeohoyfabiktbffq',
+    );
+    expect(tagFor(labels.owner, 'ann@example.com')).toBe(
+      'better-compute-owner:xohkpkx3s7iji362grindsakqps',
+    );
+    expect(tagFor(labels.instance, 'Inst_1')).toBe('better-compute-instance:inst_1');
+    expect(deploymentTag('default')).toBe('better-compute-deployment:37a8eec1ce19');
+    expect(keyTag('inst_1')).toBe('better-compute-key:f4a0cf320b1d3887654815e5');
+    expect(networkMemberTag('bc-net1')).toBe('bc-net-f0a912060f31f36a');
+    expect(baseFirewallName('bc-net1')).toBe('bc-base-f0a912060f31f36a');
+    expect(firewallName('bc-r1', 'bc-net1', 1000)).toBe('bc-r1.nf0a912060f31f36a.p1000');
   });
 });
 
