@@ -83,7 +83,7 @@ Read both before starting.
    Expected: discovery defers with `RATE_LIMITED` (`retryAfterMs` > 0) once the sweep share is spent, while a
    following `create` still goes out. *Test: Task 1, `sweep calls defer before mutate calls are refused`.*
 5. **Create without SSH keys.** DO emails a root password, and password SSH stays on until cloud-init runs. Expected:
-   create always sends at least one `ssh_keys` id. With no instance keys and no `defaultSshKey`, create fails
+   create always sends at least one `ssh_keys` id. With no instance keys and no `sshKeyFingerprint`, create fails
    `INVALID_CONFIG` (`reason 'noSshKey'`) before anything is posted. *Test: Task 4, `create without any SSH key is
    refused before a droplet is posted`.*
 
@@ -147,13 +147,15 @@ Read both before starting.
 
 **Interfaces — Produces:**
 
+vps reads every config field whose name ends in `key` as a secret reference, so the default SSH key's field is named `sshKeyFingerprint` (a fingerprint is not a secret), not `defaultSshKey`.
+
 ```ts
 // config.ts
 export interface DoConfig {
   token: SecretRef;                 // field.secret() — a PAT with the scopes in the README
   regions: string[];                // field.list(field.string(), { min: 1 }) — offers and discovery are limited to these
   vpc?: string;                     // field.string().optional() — VPC name or uuid used when create gets no NetworkRef; absent ⇒ the region's default VPC
-  defaultSshKey?: string;           // field.string().optional() — fingerprint of an account key added to every Droplet
+  sshKeyFingerprint?: string;       // field.string().optional() — fingerprint of an account key added to every Droplet
   monitoring?: boolean;             // field.bool().default(true) — DO metrics agent (needed by P9)
   ipv6?: boolean;                   // field.bool().default(false)
   allowSpot?: boolean;              // field.bool().default(false) — P3 consumes it; P1 only validates it
@@ -365,7 +367,7 @@ it('registers a missing key once and reuses it by fingerprint', ...)
   // two creates with the same key → one POST /account/keys; both droplets carry the same ssh_keys id
 it('a racing registration re-reads instead of failing', ...)   // emulator failNext POST /account/keys 422 "SSH Key is already in use"
 it('create without any SSH key is refused before a droplet is posted', ...)
-  // no sshKeys, no defaultSshKey → INVALID_CONFIG reason 'noSshKey'; emulator.requests has no POST /droplets
+  // no sshKeys, no sshKeyFingerprint → INVALID_CONFIG reason 'noSshKey'; emulator.requests has no POST /droplets
 it('rejects a malformed public key as INVALID_INPUT', ...)
 ```
 
@@ -706,7 +708,7 @@ it('probeAccount reports denied families from 403s and lists the missing scopes'
 These copy the world setup of `tests/gcp-end-to-end.test.ts`:
 
 - `computeFixture({ clock: 'sim', modules: [vps({ providers: [digitaloceanProvider({ fetch: emu.fetch })], discovery: { every: '1m', autoAttach: { ownerIdentityId } } })] })`
-- A root DO account `{ token: 'secret://<root>/do', regions: ['nyc3'], defaultSshKey }` with the secret stored in
+- A root DO account `{ token: 'secret://<root>/do', regions: ['nyc3'], sshKeyFingerprint }` with the secret stored in
   the fixture's secret store.
 - A provider pool offered to acme.
 
@@ -782,12 +784,12 @@ The README must state:
   - `firewall:read,create,update,delete`
 - **The tag scheme:** the managed, instance, deployment and key tags, plus `bc-*`.
 - **Never call bulk endpoints:** the provider never calls DO's tag-scoped bulk endpoints.
-- **SSH key behavior:** the provider always sends a key, which is why `defaultSshKey` exists.
+- **SSH key behavior:** the provider always sends a key, which is why `sshKeyFingerprint` exists.
 - **Rate budget:** DO's per-token limits are shared by every reconciler of an account; discovery defers first.
 - **Firewall mapping:** the base firewall reproduces "deny ingress, allow egress", and priority inversions are
   refused.
 - **Example config:**
-  `{ provider: 'digitalocean', config: { token: 'secret://<tenant>/do-token', regions: ['nyc3'], defaultSshKey: '<fp>' } }`
+  `{ provider: 'digitalocean', config: { token: 'secret://<tenant>/do-token', regions: ['nyc3'], sshKeyFingerprint: '<fp>' } }`
 
 - [ ] **Step 1:** Write the docs.
 - [ ] **Step 2:** Run `node node_modules/pnpm/bin/pnpm.mjs lint:repo`. Expected: exit 0.
