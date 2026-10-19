@@ -19,7 +19,7 @@ import {
 } from '@better-compute/capacity';
 import { flushUsageWindows, recordUsageIsolated, type UsageInputLike } from '@better-compute/iam';
 
-// Generalized usage sources (D2, core/0031): every source writes `usage_windows` that the one `iam.usage` flush
+// Generalized usage sources (D2, core/0029): every source writes `usage_windows` that the one `iam.usage` flush
 // records, and allocation windows keep their keys and amounts (B8).
 
 const T0 = Date.UTC(2026, 8, 24, 12);
@@ -248,7 +248,7 @@ async function runAllocationScenario(): Promise<{ written: number[] }> {
 }
 
 describe('allocation windows keep their keys and amounts', () => {
-  // The fixture was written by this scenario on f37b1e97, before core/0031 and meterSource existed.
+  // The fixture was written by this scenario on f37b1e97, before core/0029 and meterSource existed.
   it('matches the golden fixture captured before usage sources', async () => {
     const { written } = await runAllocationScenario();
     const rows = await allocationRows();
@@ -262,7 +262,7 @@ describe('allocation windows keep their keys and amounts', () => {
   });
 });
 
-describe('allocation windows after core/0031', () => {
+describe('allocation windows after core/0029', () => {
   it('are source_kind allocation with no source_id, and their unique key still holds', async () => {
     await runAllocationScenario();
     const { rows } = await db.query<{
@@ -630,7 +630,7 @@ describe('retention over sources', () => {
 
 describe('the migration runs on a populated partitioned table', () => {
   const sources = baseMigrations.findIndex(
-    (migration) => migration.name === 'core/0031_usage_sources',
+    (migration) => migration.name === 'core/0029_usage_sources',
   );
   let raw: PGlite;
   beforeAll(async () => {
@@ -795,9 +795,9 @@ describe('the migration runs on a populated partitioned table', () => {
     ).rejects.toThrow(/usage_windows_source_ck/);
   });
 
-  it('core/0033 adds the flush claim without rewriting a partition', async () => {
+  it('core/0031 adds the flush claim without rewriting a partition', async () => {
     const claims = baseMigrations.find(
-      (migration) => migration.name === 'core/0033_usage_window_claims',
+      (migration) => migration.name === 'core/0031_usage_window_claims',
     )!;
     expect(claims).toBeDefined();
     const files = async () =>

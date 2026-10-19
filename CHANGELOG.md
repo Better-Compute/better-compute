@@ -82,13 +82,13 @@ All notable changes to the better-compute packages are documented here. The form
     `billingExportLocation` on the account config; `costs` reads the export with parameterized queries;
     `listPrices` reads the Cloud Billing Catalog. Turning the export on is a manual Cloud Console step; the package
     README lists the IAM roles and the Cloud Billing API it needs.
-  - **Migrations:** core `0031_usage_sources`, `0032_offer_suspension`, `0033_usage_window_claims`; vps
+  - **Migrations:** core `0029_usage_sources`, `0030_offer_suspension`, `0031_usage_window_claims`; vps
     `0030_instance_usage`, `0031_reservation_grants`, `0032_network_metering`, `0033_provider_costs`. All are
     additive and rewrite no `usage_windows` partition.
 - **Offer budget policies over the API** (platform compute billing, D16). `pools.offer` takes `onBudgetExceeded`
   (`notify`, `stop-new`, `drain` and the new `suspend`) and `allowedRegions`; the new `pools.updateOffer` changes
   them, suspends an offer by hand and lifts a suspension. A spent budget on a `suspend` offer sets
-  `pool_offers.suspended_at` (migration `core/0032_offer_suspension`), publishes `quota.budget-suspended`, stops the
+  `pool_offers.suspended_at` (migration `core/0030_offer_suspension`), publishes `quota.budget-suspended`, stops the
   tenant's running instances in the pool (`BudgetSuspended`; the `vps.suspension` reconciler does it within a minute
   for every suspended offer, a hand suspension included, and `sandboxIamReactions` in `iamReactions` makes it
   immediate), drains the offer's sandbox warm pools and refuses all its new work with `SPEND_LIMIT_REACHED`
@@ -152,7 +152,7 @@ All notable changes to the better-compute packages are documented here. The form
   `usage.list` and of `usage.export` rows and totals (`voided` counts them); tenants never see root's void reason.
 - **`UsageWindow.allocationId` is optional** (`usage.list`/`export`): windows of other sources have none.
 - **The usage flush claims windows.** `iam.usage` marks its batch `claimed_at` (migration
-  `core/0033_usage_window_claims`) before sending it; `usage.void` refuses a window claimed in the last 10 minutes
+  `core/0031_usage_window_claims`) before sending it; `usage.void` refuses a window claimed in the last 10 minutes
   ("being sent; retry shortly"), and a dead sender's claims are taken over after 10 minutes (a resend is a
   `duplicate`). A `BILLING_PERIOD_CLOSED` refusal is dead-lettered once and never retried automatically. A send
   that throws keeps its claims (Better IAM may have recorded the batch), so its windows are sent again once the
@@ -164,7 +164,7 @@ All notable changes to the better-compute packages are documented here. The form
 - **`iam setup --meters` and the iam module create the full `meterCatalog`.** `computeMeters` stays exported but is
   no longer what setup creates. The iam module also syncs the catalog when it starts if its port holds a root
   billing credential (`serviceCredential`); the doctor warns `iam.billing-port` when it does not.
-- **Upgrading.** `core/0031_usage_sources` builds a unique index over every `usage_windows` partition, which locks
+- **Upgrading.** `core/0029_usage_sources` builds a unique index over every `usage_windows` partition, which locks
   `usage_windows` (reads included) while it builds: let retention prune old windows before upgrading a large
   deployment. Its two `CHECK`s are added `NOT VALID`, so no partition is scanned.
 

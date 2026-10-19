@@ -19,7 +19,7 @@ import type { Migration } from '@better-compute/core';
  * migration's lock, while every new or updated row is checked. The partial index holds no legacy row.
  */
 export const usageSourcesMigration: Migration = {
-  name: 'core/0031_usage_sources',
+  name: 'core/0029_usage_sources',
   sql: `
 ALTER TABLE usage_windows ALTER COLUMN allocation_id DROP NOT NULL;
 ALTER TABLE usage_windows ADD COLUMN source_kind text NOT NULL DEFAULT 'allocation';

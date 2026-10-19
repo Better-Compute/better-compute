@@ -351,7 +351,7 @@ const groupExpressions: Record<PlatformUsageKey, string> = {
   provider: "COALESCE(tags->>'provider', '')",
 };
 
-/** How long a flush's claim on a window holds (core/0033, packages/iam/src/worker.ts): voiding waits for it. */
+/** How long a flush's claim on a window holds (core/0031, packages/iam/src/worker.ts): voiding waits for it. */
 const claimTtl = "interval '10 minutes'";
 const maxCorrectionKeys = 1000;
 const keyList = v.list(fields.idempotencyKey, { min: 1, max: maxCorrectionKeys, unique: true });

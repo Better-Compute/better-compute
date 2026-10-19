@@ -366,7 +366,7 @@ interface WindowRow {
   claim: string;
 }
 
-/** How long a flush's claim on a window holds (core/0033); `usage.void` refuses a window claimed within it. */
+/** How long a flush's claim on a window holds (core/0031); `usage.void` refuses a window claimed within it. */
 const claimTtl = "interval '10 minutes'";
 
 /**

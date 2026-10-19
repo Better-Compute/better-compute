@@ -118,7 +118,7 @@ export async function meterAllocation(
 }
 
 /**
- * What a usage window is for (D2, core/0031): an allocation (`allocation_id`, keys from `usageKey`), or a typed
+ * What a usage window is for (D2, core/0029): an allocation (`allocation_id`, keys from `usageKey`), or a typed
  * source (`source_kind` + `source_id`, keys from `sourceUsageKey`). `cost` windows (pass-through) are written by
  * the provider-cost reconciler with their `cost_micros`, not by `meterSource`.
  */

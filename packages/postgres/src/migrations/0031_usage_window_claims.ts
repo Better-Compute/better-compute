@@ -12,7 +12,7 @@ import type { Migration } from '@better-compute/core';
  * rewritten and nothing is scanned.
  */
 export const usageWindowClaimsMigration: Migration = {
-  name: 'core/0033_usage_window_claims',
+  name: 'core/0031_usage_window_claims',
   sql: `
 ALTER TABLE usage_windows ADD COLUMN claimed_at timestamptz;
 `,

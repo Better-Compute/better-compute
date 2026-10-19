@@ -150,7 +150,7 @@ export async function pruneInventorySnapshots(
 /**
  * Deletes up to `batch` usage windows the sink recorded (or that were voided), of allocations that ended more
  * than `olderThanDays` ago (at least 7: the metering pass re-derives the windows of allocations live or
- * ended within its 48 h lookback, and must find them still there). Windows of other sources (core/0031) go
+ * ended within its 48 h lookback, and must find them still there). Windows of other sources (core/0029) go
  * once they ended that long ago: their reconcilers keep a watermark and never re-derive old hours.
  * Unrecorded, unvoided windows always stay, and so does a window with an open dead letter (FW-14).
  */
