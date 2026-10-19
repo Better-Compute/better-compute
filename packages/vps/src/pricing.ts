@@ -41,7 +41,8 @@ export interface BillingOptions {
   gpuFamilies?: readonly string[];
   /**
    * How long after an hour ends `vps.provider-usage` waits before writing its windows (default 5 minutes), so a
-   * lifecycle change stamped inside that hour has committed. `0` writes at the top of the hour.
+   * lifecycle change stamped inside that hour has committed. `0` writes at the top of the hour; at most an hour
+   * (`3_600_000`).
    */
   meterGraceMs?: number;
   /**

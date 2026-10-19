@@ -266,8 +266,8 @@ A cloud VM in a provider pool, created or attached, is metered from **lifecycle 
 `stopped` spans of the instance, written in the same transaction as the state change that compute observed (the
 reconciler's poll, at most a minute behind while steady, or the API action that made it). The database refuses two
 open intervals for one instance. Every 5 minutes, `vps.provider-usage` turns the ended hours of every interval into
-`instance` windows, once each hour is `vps({ billing: { meterGraceMs } })` old (default 5 minutes), so a change
-stamped inside the hour has committed.
+`instance` windows, once each hour is `vps({ billing: { meterGraceMs } })` old (default 5 minutes, from 0 to an hour,
+else `INVALID_CONFIG`), so a change stamped inside the hour has committed.
 
 - **Edges.** Billing starts at the first observed `running` and ends at the observed stop, delete or detach. A
   requested stop keeps billing until the provider reports the VM stopped. A VM that is `lost` stops billing and

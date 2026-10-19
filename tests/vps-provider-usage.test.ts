@@ -1153,6 +1153,10 @@ describe('metering', () => {
     await moveTo(world, h0 + HOUR + 1_000);
     await meter(world, 0);
     expect(hoursOf(await windows(world))).toEqual([[h0, 1]]);
+    // From 0 to an hour, finite (FW-10).
+    for (const meterGraceMs of [-1, 3_600_001, Number.NaN, Number.POSITIVE_INFINITY])
+      expect(() => vps({ billing: { meterGraceMs } })).toThrow(/meterGraceMs/);
+    expect(() => vps({ billing: { meterGraceMs: 3_600_000 } })).not.toThrow();
   });
 
   it('a close stamped inside an hour the pass already wrote leaves interval and windows consistent (F7-1, I8)', async () => {

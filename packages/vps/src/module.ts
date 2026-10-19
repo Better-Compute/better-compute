@@ -614,6 +614,15 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       'INVALID_CONFIG',
       'vps({ billing: { currency } }) must be an ISO 4217 code such as USD',
     );
+  const meterGraceMs = options.billing?.meterGraceMs;
+  if (
+    meterGraceMs !== undefined &&
+    (!Number.isFinite(meterGraceMs) || meterGraceMs < 0 || meterGraceMs > 3_600_000)
+  )
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'vps({ billing: { meterGraceMs } }) must be from 0 to 3600000 (an hour)',
+    );
   const closeGraceHours = options.billing?.closeGraceHours ?? defaultCloseGraceHours;
   if (!Number.isFinite(closeGraceHours) || closeGraceHours < 0 || closeGraceHours > 72)
     throw new ComputeError(
