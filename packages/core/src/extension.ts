@@ -887,7 +887,11 @@ export interface ProviderInput<C> {
   capabilities?: readonly string[];
   /** Builds the client for one account's validated config. */
   create(config: C, context: ProviderContext): ProviderImpl | Promise<ProviderImpl>;
-  /** Network checks of an account about to be stored; runs with no transaction open. Throw INVALID_CONFIG to refuse. */
+  /**
+   * Network checks of an account about to be stored; runs with no transaction open. `INVALID_CONFIG`
+   * refuses the account. `UNAVAILABLE`, `RATE_LIMITED` and any other error propagate as they are and
+   * store nothing, so a retry with the same idempotency key runs the check again.
+   */
   checkAccount?(config: C, context: ProviderContext & { signal: AbortSignal }): Promise<void>;
   /** A key no two accounts of this provider may share (e.g. a federation audience). Pure; no I/O. */
   accountKey?(config: C): string | undefined;
