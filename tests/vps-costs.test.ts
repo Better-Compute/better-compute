@@ -109,6 +109,9 @@ interface CostWorld {
   byoLedger: Ledger;
   root: { token: string };
   acme: { token: string };
+  /** A third tenant (fixture `other`). */
+  other: { token: string };
+  otherTenant: string;
   rootTenant: string;
   acmeTenant: string;
   accountId: string;
@@ -159,6 +162,7 @@ async function costWorld(options: Pick<VpsOptions, 'costs' | 'billing'> = {}): P
   (iam as { rootTenantId?: string }).rootTenantId = tenants.root.id;
   iam.allow({ token: tenants.root.token });
   iam.allow({ token: tenants.acme.token });
+  iam.allow({ token: tenants.other.token });
   const api = compute.api as Api;
   const root = { token: tenants.root.token };
   const acme = { token: tenants.acme.token };
@@ -217,6 +221,8 @@ async function costWorld(options: Pick<VpsOptions, 'costs' | 'billing'> = {}): P
     byoLedger,
     root,
     acme,
+    other: { token: tenants.other.token },
+    otherTenant: tenants.other.id,
     rootTenant: tenants.root.id,
     acmeTenant: tenants.acme.id,
     accountId: account.id,
@@ -1194,5 +1200,147 @@ describe('leak detection', () => {
       1,
     ]);
     expect(() => vps({ costs: { leakToleranceHours: -1 } })).toThrow(/leakToleranceHours/);
+  });
+});
+
+describe('ingestion fix round 1 (F15-1, F15-2)', () => {
+  /** Acme's own pool on its own account, offered to `other`, with a flavor. */
+  async function byoPool(world: CostWorld) {
+    const site = await world.api.sites.create(world.acme, {
+      tenantId: world.acmeTenant,
+      kind: 'custom',
+      region: 'us-central1',
+      idempotencyKey: 'acme-site',
+    });
+    const pool = await world.api.pools.create(world.acme, {
+      tenantId: world.acmeTenant,
+      siteId: site.id,
+      class: 'provider',
+      providerAccountId: world.byoAccountId,
+      ownerQuota: { vcpu: 100, memoryGiB: 1000, diskGiB: 10_000, gpu: 8 },
+      idempotencyKey: 'acme-pool',
+    });
+    await world.api.pools.offer(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: pool.id,
+      toTenantId: world.otherTenant,
+      quota: { vcpu: 100, memoryGiB: 1000, diskGiB: 1000, gpu: 8 },
+    });
+    await world.api.flavors.create(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: pool.id,
+      name: 'a2.byo',
+      vcpu: 12,
+      memoryGiB: 85,
+      diskGiB: 100,
+      gpus: 1,
+      offerId: 'us-central1-a/a2-highgpu-1g',
+    });
+    return pool;
+  }
+
+  it("a BYO account's rows are its tenant's, whoever runs on its pool", async () => {
+    const world = await costWorld();
+    const pool = await byoPool(world);
+    const create = (who: { token: string }, tenantId: string, key: string) =>
+      world.api.instances.create(who, {
+        tenantId,
+        poolId: pool.id,
+        flavor: 'a2.byo',
+        imageId: 'debian-12',
+        idempotencyKey: key,
+      });
+    const theirs = await create(world.other, world.otherTenant, 'other-vm');
+    const own = await create(world.acme, world.acmeTenant, 'acme-vm');
+    const at = world.now() - DAY;
+    world.byoLedger.rows.push(
+      costRow({ sourceRowId: 'theirs', usageStart: at, labels: { [instanceLabel]: theirs.id } }),
+      costRow({ sourceRowId: 'own', usageStart: at, labels: { [instanceLabel]: own.id } }),
+    );
+    await world.scan();
+    const byId = new Map((await world.costs()).map((cost) => [cost.sourceRowId, cost]));
+    expect(byId.get('theirs')).toMatchObject({
+      accountId: world.byoAccountId,
+      attribution: 'account',
+      tenantId: world.acmeTenant,
+      instanceId: null,
+    });
+    expect(byId.get('own')).toMatchObject({
+      attribution: 'account',
+      tenantId: world.acmeTenant,
+      instanceId: own.id,
+    });
+  });
+
+  it('a platform tenant label naming a tenant compute does not know is unattributed', async () => {
+    const world = await costWorld();
+    const at = world.now() - DAY;
+    world.ledger.rows.push(
+      costRow({
+        sourceRowId: 'known',
+        usageStart: at,
+        labels: { [tenantLabel]: world.acmeTenant },
+      }),
+      costRow({ sourceRowId: 'unknown', usageStart: at, labels: { [tenantLabel]: 'ten_nobody' } }),
+    );
+    await world.scan();
+    const byId = new Map((await world.costs()).map((cost) => [cost.sourceRowId, cost]));
+    expect(byId.get('known')).toMatchObject({
+      attribution: 'tenant-label',
+      tenantId: world.acmeTenant,
+    });
+    expect(byId.get('unknown')).toMatchObject({ attribution: 'unattributed', tenantId: null });
+  });
+
+  it('a pass out of time stops between batches and continues in another run', async () => {
+    const world = await costWorld({ costs: { passBudgetMs: 0 } });
+    const at = world.now() - DAY;
+    for (let index = 0; index < 501; index++)
+      world.ledger.rows.push(
+        costRow({ sourceRowId: `row-${String(index).padStart(4, '0')}`, usageStart: at }),
+      );
+    await world.scan();
+    const ours = async () =>
+      (await world.costs()).filter((cost) => cost.accountId === world.accountId).length;
+    const ingested = async () =>
+      (await world.events('billing.cost-ingested')).filter(
+        (event) => event.data.accountId === world.accountId,
+      );
+    expect(await ours()).toBe(500);
+    expect(await ingested()).toEqual([]);
+    const { rows: queued } = await world.fixture.database.query<{ key: string }>(
+      `SELECT key FROM work_queue WHERE kind = 'vps.costs' AND key = $1`,
+      [world.accountId],
+    );
+    expect(queued).toHaveLength(1);
+    // the next run finds the first batch unchanged and finishes the pass
+    await world.fixture.compute.jobs['vps.costs']!.tick();
+    expect(await ours()).toBe(501);
+    const [pass] = await ingested();
+    expect(pass!.data).toMatchObject({ rows: 501, inserted: 1, unchanged: 500 });
+    expect(() => vps({ costs: { passBudgetMs: 60_000 } })).toThrow(/passBudgetMs/);
+  });
+
+  it('transient failures without a hint back off 5 minutes; others wait a period', async () => {
+    const world = await costWorld();
+    const nextIn = async () => {
+      const { rows } = await world.fixture.database.query<{ next_ms: number }>(
+        `SELECT (extract(epoch FROM next_at) * 1000)::float8 AS next_ms
+           FROM provider_cost_scans WHERE account_id = $1`,
+        [world.accountId],
+      );
+      return Number(rows[0]!.next_ms) - world.now();
+    };
+    world.ledger.failNext = new ComputeError('UNAVAILABLE', 'BigQuery is down');
+    await world.scan();
+    expect(await nextIn()).toBe(5 * 60_000);
+    await world.fixture.advance(5 * 60_000);
+    world.ledger.failNext = new ComputeError('RATE_LIMITED', 'slow down');
+    await world.scan();
+    expect(await nextIn()).toBe(5 * 60_000);
+    await world.fixture.advance(5 * 60_000);
+    world.ledger.failNext = new ComputeError('ACCESS_DENIED', 'no dataViewer');
+    await world.scan();
+    expect(await nextIn()).toBe(6 * HOUR);
   });
 });

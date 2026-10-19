@@ -31,6 +31,10 @@ export const costsWork = 'vps.costs';
 
 /** How long one account's `costs` read may run (a reconciler run stays under claimTtlMs, 60 s). */
 export const costsBudgetMs = 45_000;
+/** How long a run of one account may take before it stops between write batches (default 50 s). */
+export const costsPassBudgetMs = 50_000;
+/** The back-off after a rate limit or an outage the provider gave no retry hint for. */
+const transientBackoffMs = 5 * 60_000;
 /** Rows written per transaction. */
 const batchSize = 500;
 const dayMs = 86_400_000;
@@ -60,6 +64,11 @@ export interface CostsOptions {
    * hours by more than this raises `billing.leak` (default 1).
    */
   leakToleranceHours?: number;
+  /**
+   * How long one account's run may take (default 50 s, under the 60 s claim): the read gets what is left of it (at
+   * most 45 s), and writing stops between batches once it has passed, continuing in a run enqueued at once.
+   */
+  passBudgetMs?: number;
 }
 
 export const providerCostsMigration: Migration = {
@@ -168,28 +177,57 @@ async function attribute(
     );
     for (const row of rows) instances.set(row.id, row.tenant_id);
   }
+  // A tenant label names a tenant compute knows (it owns or is offered a pool, or holds instances, accounts or
+  // projects); any other is unattributed, never billed to a name nobody checked.
+  const known = new Set<string>();
+  const tenantLabels = platform
+    ? [
+        ...new Set(
+          records
+            .map((record) => record.labels[costLabels.tenant])
+            .filter(
+              (value): value is string => typeof value === 'string' && tenantPattern.test(value),
+            ),
+        ),
+      ]
+    : [];
+  if (tenantLabels.length > 0) {
+    const { rows } = await tx.query<{ tenant: string }>(
+      `SELECT t AS tenant FROM unnest($1::text[]) AS t
+        WHERE EXISTS (SELECT 1 FROM pool_offers o WHERE o.tenant_id = t)
+           OR EXISTS (SELECT 1 FROM pools p WHERE p.owner_tenant_id = t)
+           OR EXISTS (SELECT 1 FROM instances i WHERE i.tenant_id = t)
+           OR EXISTS (SELECT 1 FROM provider_accounts a WHERE a.tenant_id = t)
+           OR EXISTS (SELECT 1 FROM projects j WHERE j.tenant_id = t)`,
+      [tenantLabels],
+    );
+    for (const row of rows) known.add(row.tenant);
+  }
   return records.map((record) => {
     const conditions =
       record.currency.toUpperCase() === currency.toUpperCase() ? [] : [currencyMismatch];
     const instanceId = record.labels[costLabels.instance];
     const instanceTenant = instanceId !== undefined ? instances.get(instanceId) : undefined;
+    if (!platform)
+      // A tenant's own account: the tenant pays the provider for every row, whoever runs on it (its pool may be
+      // offered to another tenant); the instance is kept only when it is the account tenant's own.
+      return {
+        record,
+        instanceId:
+          instanceId !== undefined && instanceTenant === account.tenantId ? instanceId : null,
+        tenantId: account.tenantId,
+        attribution: 'account',
+        conditions,
+      };
     if (instanceId !== undefined && instanceTenant !== undefined)
       return { record, instanceId, tenantId: instanceTenant, attribution: 'instance', conditions };
     const tenantLabel = record.labels[costLabels.tenant];
-    if (platform && tenantLabel !== undefined && tenantPattern.test(tenantLabel))
+    if (tenantLabel !== undefined && known.has(tenantLabel))
       return {
         record,
         instanceId: null,
         tenantId: tenantLabel,
         attribution: 'tenant-label',
-        conditions,
-      };
-    if (!platform)
-      return {
-        record,
-        instanceId: null,
-        tenantId: account.tenantId,
-        attribution: 'account',
         conditions,
       };
     return { record, instanceId: null, tenantId: null, attribution: 'unattributed', conditions };
@@ -251,7 +289,7 @@ async function writeBatch(
   account: ProviderAccount,
   batch: readonly AttributedCost[],
   totals: PassTotals,
-): Promise<void> {
+): Promise<boolean> {
   const { rows } = await tx.query<StoredCost>(
     `SELECT source_row_id, record, cost_micros, credits_micros, passed_through_at IS NOT NULL AS passed
        FROM provider_costs WHERE account_id = $1 AND source_row_id = ANY($2::text[]) FOR UPDATE`,
@@ -271,17 +309,23 @@ async function writeBatch(
     }
   }
   const columns = `jsonb_array_elements($2::jsonb) AS r`;
-  if (inserts.length > 0)
-    await tx.query(
+  // Rows a concurrent pass stored first are not inserted twice, and not announced twice.
+  const inserted = new Set<string>();
+  if (inserts.length > 0) {
+    const { rows: written } = await tx.query<{ source_row_id: string }>(
       `INSERT INTO provider_costs (account_id, source_row_id, record, usage_start, usage_end, cost_micros,
                                    credits_micros, currency, instance_id, tenant_id, attribution, conditions)
        SELECT $1, r->>'id', r->'record', to_timestamp((r->>'usageStart')::float8 / 1000),
               to_timestamp((r->>'usageEnd')::float8 / 1000), (r->>'cost')::bigint, (r->>'credits')::bigint,
               r->>'currency', r->>'instanceId', r->>'tenantId', r->>'attribution',
               ARRAY(SELECT jsonb_array_elements_text(r->'conditions'))
-         FROM ${columns}`,
+         FROM ${columns}
+       ON CONFLICT (account_id, source_row_id) DO NOTHING
+       RETURNING source_row_id`,
       [account.id, JSON.stringify(inserts.map(rowJson))],
     );
+    for (const row of written) inserted.add(row.source_row_id);
+  }
   if (updates.length > 0)
     await tx.query(
       `UPDATE provider_costs c
@@ -294,10 +338,11 @@ async function writeBatch(
         WHERE c.account_id = $1 AND c.source_row_id = r->>'id'`,
       [account.id, JSON.stringify(updates.map(({ cost }) => rowJson(cost)))],
     );
-  totals.inserted += inserts.length;
+  totals.inserted += inserted.size;
+  totals.unchanged += inserts.length - inserted.size;
   totals.corrected += updates.length;
   for (const cost of inserts)
-    if (cost.attribution === 'unattributed')
+    if (cost.attribution === 'unattributed' && inserted.has(cost.record.sourceRowId))
       await publish(deps, tx, account, 'billing.unattributed', {
         sourceRowId: cost.record.sourceRowId,
         service: cost.record.service,
@@ -325,6 +370,7 @@ async function writeBatch(
       passedThrough: before.passed,
     });
   }
+  return inserted.size > 0 || updates.length > 0;
 }
 
 /** Whether a client reads the account's costs. */
@@ -403,9 +449,13 @@ async function scanAccount(
   deps: CostsDeps,
   context: ReconcileContext,
   accountId: string,
-  settings: { everyMs: number; lookbackMs: number; currency: string },
+  settings: { everyMs: number; lookbackMs: number; currency: string; passBudgetMs: number },
   after?: AfterCostPass,
 ): Promise<void> {
+  // One deadline for the run (it stays under claimTtlMs, 60 s): the read gets what is left of it, at most 45 s,
+  // and writing stops between batches once it has passed, leaving the rest to a run enqueued at once.
+  const deadline = performance.now() + settings.passBudgetMs;
+  const left = () => deadline - performance.now();
   const account = await context.sql.transaction((tx) => readAccount(tx, accountId));
   if (!account) return;
   const client = await deps.clients.client(account, deps);
@@ -416,7 +466,8 @@ async function scanAccount(
   const startedAt = started[0]!.at;
   const now = deps.clock.now();
   const window = { from: now - settings.lookbackMs, to: now };
-  const signal = AbortSignal.any([context.signal, AbortSignal.timeout(costsBudgetMs)]);
+  const readBudgetMs = Math.max(1, Math.min(costsBudgetMs, left()));
+  const signal = AbortSignal.any([context.signal, AbortSignal.timeout(readBudgetMs)]);
   const call: CallContext = {
     idempotencyKey: `costs:${account.id}`,
     signal,
@@ -437,12 +488,20 @@ async function scanAccount(
       if (!seen || record.exportTime >= seen.exportTime) records.set(record.sourceRowId, record);
     }
   } catch (failure) {
+    // The worker is stopping (not our budget): nothing to record, the run is retried as it is.
+    if (context.signal.aborted) throw failure;
     const error =
       signal.aborted && !isComputeError(failure)
         ? new ComputeError('UNAVAILABLE', `Reading the costs of ${account.name} took over 45 s`)
         : failure;
-    // Rate limited (or a provider job still running): this account again after the provider's back-off.
-    const retryAfterMs = isComputeError(error) ? error.retryAfterMs : undefined;
+    // Rate limited (or a provider job still running): this account again after the provider's back-off; a
+    // transient failure without a hint backs off 5 minutes, anything else waits for the next period.
+    const retryAfterMs = isComputeError(error)
+      ? (error.retryAfterMs ??
+        (isComputeError(error, 'RATE_LIMITED') || isComputeError(error, 'UNAVAILABLE')
+          ? transientBackoffMs
+          : undefined))
+      : undefined;
     await context.sql.transaction(async (tx) => {
       if (retryAfterMs !== undefined) {
         await recordFailure(tx, account.id, error, retryAfterMs);
@@ -473,7 +532,7 @@ async function scanAccount(
   const all = [...records.values()];
   for (let start = 0; start < all.length; start += batchSize) {
     const slice = all.slice(start, start + batchSize);
-    await context.sql.transaction(async (tx) => {
+    const wrote = await context.sql.transaction(async (tx) => {
       const batch = await attribute(tx, account, platform, slice, settings.currency);
       for (const cost of batch) {
         if (cost.attribution === 'unattributed') totals.unattributedRows++;
@@ -483,8 +542,21 @@ async function scanAccount(
           totals.creditsMicros += cost.record.creditsMicros;
         }
       }
-      await writeBatch(deps, tx, account, batch, totals);
+      return writeBatch(deps, tx, account, batch, totals);
     });
+    // Out of time with rows left: stop here and let a run enqueued now go on (it finds the rows written so far
+    // unchanged). Only a batch that wrote something stops the run, so every run makes progress.
+    if (wrote && left() <= 0 && start + batchSize < all.length) {
+      await context.sql.transaction((tx) =>
+        context.work.enqueue(tx, costsWork, account.id, { notBefore: deps.clock.now() }),
+      );
+      deps.log.info('vps.costs: pass out of time, continuing in another run', {
+        accountId: account.id,
+        written: start + batchSize,
+        rows: all.length,
+      });
+      return;
+    }
   }
   await context.sql.transaction(async (tx) => {
     const extra = (await after?.(tx, account, window)) ?? {};
@@ -759,6 +831,7 @@ export function costSettings(options: CostsOptions): {
   lookbackMs: number;
   currency: string;
   leakToleranceHours: number;
+  passBudgetMs: number;
 } {
   const every = options.every ?? '6h';
   const everyMs = parseDuration(every);
@@ -780,12 +853,19 @@ export function costSettings(options: CostsOptions): {
       'INVALID_CONFIG',
       'vps({ costs: { leakToleranceHours } }) must be a number of hours of at least 0',
     );
+  const passBudgetMs = options.passBudgetMs ?? costsPassBudgetMs;
+  if (!Number.isFinite(passBudgetMs) || passBudgetMs < 0 || passBudgetMs > 55_000)
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'vps({ costs: { passBudgetMs } }) must be from 0 to 55000 (a run stays under the 60 s claim)',
+    );
   return {
     every,
     everyMs,
     lookbackMs: lookbackDays * dayMs,
     currency: currency.toUpperCase(),
     leakToleranceHours,
+    passBudgetMs,
   };
 }
 
