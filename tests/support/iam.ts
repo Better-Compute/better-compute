@@ -51,7 +51,7 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
         ...action('providers', 'manage'),
         ...action('drivers', 'read'),
         ...action('billing', 'read', 'manage'),
-        ...action('usage', 'read'),
+        ...action('usage', 'read', 'manage'),
       ],
     },
     [`${p}tenant`]: {

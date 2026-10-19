@@ -369,7 +369,9 @@ interface WindowRow {
  * `iam.recordUsage` (poison-isolating), stores each outcome, and upserts dead letters. Voided windows are
  * never sent; a window with `cost_micros` (pass-through) carries its cost in currency units. Retries are
  * safe: every window keeps its idempotency key, and a transient failure leaves the windows unrecorded for
- * the next pass.
+ * the next pass. A dead-lettered window (a closed period included) is marked sent with outcome `dead-lettered`, so
+ * no later pass picks it up again; only `usage.retry` clears that. A dead letter whose event IAM accepts later
+ * (after a retry) is resolved.
  */
 export async function flushUsageWindows(
   sql: SqlExecutor,
@@ -432,6 +434,17 @@ export async function flushUsageWindows(
         [event.idempotencyKey, result.status, orphaned, result.identityId ?? null],
       );
     }
+    // A retried window that IAM now accepted closes its dead letter (usage.retry clears the window's outcome and
+    // leaves the letter open until this pass records it).
+    const accepted = results.flatMap((result, index) =>
+      result.status === 'dead-lettered' ? [] : [events[index]!.idempotencyKey],
+    );
+    if (accepted.length > 0)
+      await tx.query(
+        `UPDATE usage_dead_letters SET resolved_at = compute_now()
+          WHERE resolved_at IS NULL AND idempotency_key = ANY($1::text[])`,
+        [accepted],
+      );
   });
   return { sent: rows.length, deadLettered, more: rows.length === limit };
 }

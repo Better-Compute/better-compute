@@ -124,6 +124,60 @@ export interface PlatformUsage {
 /** The most groups one platform view returns. */
 export const maxPlatformRows = 50_000;
 
+export const deadLetterReasons = [
+  'meter-missing',
+  'period-closed',
+  'identity',
+  'invalid',
+  'other',
+] as const;
+export type DeadLetterReason = (typeof deadLetterReasons)[number];
+
+export interface DeadLettersInput {
+  reason?: DeadLetterReason;
+  /** At most 500 (100 by default). */
+  limit?: number;
+  cursor?: string;
+}
+
+/** A usage event better-iam refused for good (`usage_dead_letters`), still waiting for an operator. */
+export interface DeadLetter {
+  idempotencyKey: string;
+  tenantId: string;
+  meter: string;
+  quantity: number;
+  /** When the usage window began (epoch ms). */
+  windowStart: number;
+  reason: DeadLetterReason;
+  /** better-iam's error message. */
+  error: string;
+}
+
+export interface RetryUsageInput {
+  /** Exactly one of the two: these dead letters (1 to 1000)… */
+  idempotencyKeys?: string[];
+  /** …or every dead letter with this reason. */
+  reason?: DeadLetterReason;
+}
+
+export interface RetryUsageResult {
+  /** Windows whose outcome was cleared, so the next usage flush sends them again. */
+  retried: number;
+}
+
+export interface VoidUsageInput {
+  /** Pending windows to void (1 to 1000). */
+  idempotencyKeys: string[];
+  /** Why; recorded with the windows. */
+  reason: string;
+}
+
+export interface VoidUsageResult {
+  voided: number;
+  /** Windows that were voided before: left as they are. */
+  alreadyVoided: number;
+}
+
 /** The most windows one export returns. */
 export const maxExportWindows = 50_000;
 const maxExportRangeMs = 93 * 86_400_000;
@@ -134,6 +188,9 @@ export type UsageApi = {
     list: MethodDefinition<ListUsageInput, Page<UsageWindow>>;
     export: MethodDefinition<ExportUsageInput, UsageExport>;
     platform: MethodDefinition<PlatformUsageInput, PlatformUsage>;
+    deadLetters: MethodDefinition<DeadLettersInput, Page<DeadLetter>>;
+    retry: MethodDefinition<RetryUsageInput, RetryUsageResult>;
+    void: MethodDefinition<VoidUsageInput, VoidUsageResult>;
   };
 };
 
@@ -280,6 +337,93 @@ const groupExpressions: Record<PlatformUsageKey, string> = {
   source: 'source_kind',
   provider: "COALESCE(tags->>'provider', '')",
 };
+
+const maxCorrectionKeys = 1000;
+const keyList = v.list(fields.idempotencyKey, { min: 1, max: maxCorrectionKeys, unique: true });
+const reasonOption = v.option(deadLetterReasons);
+
+const parseDeadLetters = parser({
+  reason: v.optional(reasonOption),
+  limit: limit(500, 100),
+  cursor: v.optional(v.string({ pattern: /^[A-Za-z0-9_-]{1,256}$/, max: 256 })),
+});
+function deadLettersInput(input: unknown): DeadLettersInput {
+  const parsed = parseDeadLetters(input);
+  if (parsed.cursor !== undefined) decodeKeyCursor(parsed.cursor);
+  return parsed;
+}
+const parseRetry = parser({
+  idempotencyKeys: v.optional(keyList),
+  reason: v.optional(reasonOption),
+});
+function retryInput(input: unknown): RetryUsageInput {
+  const parsed = parseRetry(input);
+  if ((parsed.idempotencyKeys === undefined) === (parsed.reason === undefined))
+    throw new ComputeError(
+      'INVALID_INPUT',
+      'Give idempotencyKeys or reason, not both and not neither',
+    );
+  return parsed;
+}
+const parseVoid = parser({
+  idempotencyKeys: keyList,
+  reason: v.string({ pattern: /^[^\u0000-\u001f\u007f]+$/, min: 1, max: 256 }),
+});
+
+/** Dead letters sort by key; the cursor is the last one's key. */
+const encodeKeyCursor = (key: string) =>
+  Buffer.from(JSON.stringify([key]), 'utf8').toString('base64url');
+function decodeKeyCursor(cursor: string): string {
+  try {
+    const value: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    if (Array.isArray(value) && value.length === 1 && typeof value[0] === 'string') return value[0];
+  } catch {
+    // Reported below.
+  }
+  throw new ComputeError('INVALID_INPUT', 'cursor: not a cursor this method returned');
+}
+
+/**
+ * A dead letter's reason, from better-iam's error: `BILLING_PERIOD_CLOSED`; `NOT_FOUND` naming a meter, or an
+ * identity or tenant; an input refusal; anything else (a key reused on another meter, an archived meter, …).
+ */
+const reasonSql = `CASE
+  WHEN d.error_code = 'BILLING_PERIOD_CLOSED' THEN 'period-closed'
+  WHEN d.error_code = 'NOT_FOUND' AND d.error_message ~* 'meter' THEN 'meter-missing'
+  WHEN d.error_code = 'NOT_FOUND' AND d.error_message ~* '(identity|tenant)' THEN 'identity'
+  WHEN d.error_code IN ('INVALID_INPUT', 'INVALID_TRANSITION') THEN 'invalid'
+  ELSE 'other' END`;
+
+interface DeadLetterEvent {
+  meter?: unknown;
+  quantity?: unknown;
+  occurredAt?: unknown;
+}
+interface DeadLetterRow {
+  idempotency_key: string;
+  tenant_id: string;
+  event: DeadLetterEvent | string | null;
+  error_message: string;
+  reason: DeadLetterReason;
+}
+function toDeadLetter(row: DeadLetterRow): DeadLetter {
+  const event = (
+    typeof row.event === 'string' ? JSON.parse(row.event) : (row.event ?? {})
+  ) as DeadLetterEvent;
+  return {
+    idempotencyKey: row.idempotency_key,
+    tenantId: row.tenant_id,
+    meter: typeof event.meter === 'string' ? event.meter : '',
+    quantity: Number(event.quantity ?? 0),
+    windowStart: Number(event.occurredAt ?? 0),
+    reason: row.reason,
+    error: row.error_message,
+  };
+}
+
+/** Up to five keys of a longer list, for a message. */
+const some = (keys: readonly string[]) =>
+  `${keys.slice(0, 5).join(', ')}${keys.length > 5 ? ` and ${keys.length - 5} more` : ''}`;
 
 interface PlatformRow {
   quantity: unknown;
@@ -458,6 +602,118 @@ export function usageApi(): UsageApi {
             result.data = [header, ...lines].join('\r\n') + '\r\n';
           }
           return result;
+        },
+      }),
+      deadLetters: defineMethod<DeadLettersInput, Page<DeadLetter>>({
+        action: 'compute:usage:read',
+        kind: 'read',
+        resource: fleetResource,
+        validate: Object.assign(deadLettersInput, { jsonSchema: parseDeadLetters.jsonSchema }),
+        async handler(context, input) {
+          const size = input.limit ?? 100;
+          const { rows } = await context.sql.query<DeadLetterRow>(
+            `SELECT d.idempotency_key, d.tenant_id, d.event, d.error_message, ${reasonSql} AS reason
+               FROM usage_dead_letters d
+              WHERE d.resolved_at IS NULL AND ($1::text IS NULL OR ${reasonSql} = $1)
+                AND ($2::text IS NULL OR d.idempotency_key > $2)
+              ORDER BY d.idempotency_key LIMIT $3`,
+            [
+              input.reason ?? null,
+              input.cursor === undefined ? null : decodeKeyCursor(input.cursor),
+              size + 1,
+            ],
+          );
+          return page(rows, size, toDeadLetter, (row) => encodeKeyCursor(row.idempotency_key));
+        },
+      }),
+      retry: defineMethod<RetryUsageInput, RetryUsageResult>({
+        action: 'compute:usage:manage',
+        kind: 'mutation',
+        resource: fleetResource,
+        validate: Object.assign(retryInput, { jsonSchema: parseRetry.jsonSchema }),
+        async handler(context, input) {
+          const closed = (what: string) =>
+            new ComputeError(
+              'INVALID_STATE',
+              `${what}: the billing period is closed, so retrying would only fail again. ` +
+                'Add a root invoice item in Better IAM (billing.createInvoiceItem) for the amount instead.',
+              undefined,
+              { hint: 'issue a root invoice item in Better IAM' },
+            );
+          if (input.reason === 'period-closed') throw closed('Period-closed dead letters');
+          if (input.idempotencyKeys !== undefined) {
+            const { rows } = await context.sql.query<{
+              idempotency_key: string;
+              reason: DeadLetterReason;
+            }>(
+              `SELECT d.idempotency_key, ${reasonSql} AS reason FROM usage_dead_letters d
+                WHERE d.resolved_at IS NULL AND d.idempotency_key = ANY($1::text[])`,
+              [input.idempotencyKeys],
+            );
+            const known = new Map(rows.map((row) => [row.idempotency_key, row.reason]));
+            const missing = input.idempotencyKeys.filter((key) => !known.has(key));
+            if (missing.length > 0)
+              throw new ComputeError('NOT_FOUND', `No open dead letter for ${some(missing)}`);
+            const refused = input.idempotencyKeys.filter(
+              (key) => known.get(key) === 'period-closed',
+            );
+            if (refused.length > 0) throw closed(some(refused));
+          }
+          // The windows go back to pending; the letters stay open until a pass records them (attempts then
+          // counts the next failure). A voided window stays voided.
+          const { rows } = await context.sql.query<{ idempotency_key: string }>(
+            `UPDATE usage_windows w SET recorded_at = NULL, outcome = NULL
+               FROM usage_dead_letters d
+              WHERE d.idempotency_key = w.idempotency_key AND d.resolved_at IS NULL
+                AND w.outcome = 'dead-lettered' AND w.voided_at IS NULL
+                AND ($1::text[] IS NULL OR d.idempotency_key = ANY($1::text[]))
+                AND ($2::text IS NULL OR ${reasonSql} = $2)
+              RETURNING w.idempotency_key`,
+            [input.idempotencyKeys ?? null, input.reason ?? null],
+          );
+          return { retried: rows.length };
+        },
+      }),
+      void: defineMethod<VoidUsageInput, VoidUsageResult>({
+        action: 'compute:usage:manage',
+        kind: 'mutation',
+        resource: fleetResource,
+        validate: Object.assign(parseVoid, { jsonSchema: parseVoid.jsonSchema }),
+        async handler(context, input) {
+          // One statement checks the outcome and writes the void, so a window the sink has handed to IAM
+          // billing (or that a pass records meanwhile) is never voided. The call is all or nothing: a refusal
+          // below rolls the voids of this call back.
+          const { rows: done } = await context.sql.query<{ idempotency_key: string }>(
+            `UPDATE usage_windows SET voided_at = compute_now(), void_reason = $2
+              WHERE idempotency_key = ANY($1::text[])
+                AND outcome IS NULL AND recorded_at IS NULL AND voided_at IS NULL
+              RETURNING idempotency_key`,
+            [input.idempotencyKeys, input.reason],
+          );
+          if (done.length === input.idempotencyKeys.length)
+            return { voided: done.length, alreadyVoided: 0 };
+          const voided = new Set(done.map((row) => row.idempotency_key));
+          const rest = input.idempotencyKeys.filter((key) => !voided.has(key));
+          const { rows } = await context.sql.query<{
+            idempotency_key: string;
+            voided_at: Date | null;
+          }>(
+            'SELECT idempotency_key, voided_at FROM usage_windows WHERE idempotency_key = ANY($1::text[])',
+            [rest],
+          );
+          const found = new Map(rows.map((row) => [row.idempotency_key, row.voided_at]));
+          const missing = rest.filter((key) => !found.has(key));
+          const flushed = rest.filter((key) => found.has(key) && found.get(key) === null);
+          if (flushed.length > 0)
+            throw new ComputeError(
+              'INVALID_STATE',
+              `${some(flushed)} already went to IAM billing and cannot be voided: issue a credit note in Better IAM`,
+              undefined,
+              { hint: 'issue a credit note in Better IAM' },
+            );
+          if (missing.length > 0)
+            throw new ComputeError('NOT_FOUND', `No usage window ${some(missing)}`);
+          return { voided: done.length, alreadyVoided: rest.length };
         },
       }),
     },

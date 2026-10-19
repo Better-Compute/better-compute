@@ -1,7 +1,14 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { manualClock, type Credential, type SqlExecutor } from '@better-compute/core';
+import {
+  defaultMeterGpuModels,
+  manualClock,
+  type Credential,
+  type SqlExecutor,
+} from '@better-compute/core';
+import { flushUsageWindows } from '@better-compute/iam';
 import { createEmbeddedTestIam, type EmbeddedTestIam } from '@better-compute/iam/testing';
-import { useSimClock } from '@better-compute/postgres';
+import { createMetrics, databaseCollector, standardMetrics } from '@better-compute/observability';
+import { pruneUsageWindows, setSimClock, useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 import { betterCompute, type BetterCompute } from '@better-compute/server';
 import { vps } from '@better-compute/vps';
@@ -11,6 +18,9 @@ import { vps } from '@better-compute/vps';
 // as tests/vps-pricing.test.ts does): the root administrator is let through by ROOT_OVERRIDE, a tenant
 // administrator is turned away before any IAM decision, and a root-tenant member holds only what its policy grants
 // on the fleet.
+
+// A model the bridge's own catalog does not name, so its VM meters are missing until syncMeters creates them.
+const MODEL = 'zz9';
 
 let t: EmbeddedTestIam;
 let compute: BetterCompute<any, any>;
@@ -97,7 +107,10 @@ beforeAll(async () => {
     secret: 'better-compute-usage-platform-secret-0123456789',
     baseURL: 'http://127.0.0.1:3000',
     clock,
-    modules: [...t.bridge.modules, vps()],
+    modules: [
+      ...t.bridge.modules,
+      vps({ billing: { gpuModels: [...defaultMeterGpuModels, MODEL] } }),
+    ],
   } as any);
   await compute.initialize();
   await useSimClock(database, clock.now());
@@ -423,5 +436,362 @@ describe('usage.platform', () => {
     const marked = withVoided.items.filter((window: any) => window.voidedAt !== undefined);
     expect(marked).toHaveLength(1);
     expect(marked[0]).toMatchObject({ quantity: 100, voidReason: 'seeded' });
+  });
+});
+
+describe('corrections', () => {
+  beforeEach(async () => {
+    await database.query('DELETE FROM usage_windows');
+    await database.query('DELETE FROM usage_dead_letters');
+  });
+
+  const flush = () => flushUsageWindows(database, t.port);
+  /** A pending hourly window of a provider instance, billed on a meter better-iam knows. */
+  const pending = (id: string, extra: Partial<Seed> = {}) =>
+    seed({
+      tenant: A,
+      kind: 'instance',
+      id,
+      meter: 'gpu.h100.hours',
+      quantity: 1,
+      hour: 0,
+      ...extra,
+    });
+  const windowOf = async (key: string) =>
+    (
+      await database.query<{ outcome: string | null; recorded_at: unknown; voided_at: unknown }>(
+        'SELECT outcome, recorded_at, voided_at FROM usage_windows WHERE idempotency_key = $1',
+        [key],
+      )
+    ).rows[0]!;
+  const range = { from: H0 - HOUR, to: H0 + 6 * HOUR };
+
+  it('period-closed dead letter: listed once, never retried by later flushes, and retry refuses it', async () => {
+    // Last month, in better-iam: a priced meter, one recorded hour, and the month closed.
+    const now = new Date(clock.now());
+    const lastMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+    const period = lastMonth.toISOString().slice(0, 7);
+    const early = lastMonth.getTime() + 2 * HOUR;
+    await api.billing.setPrices(root, {
+      prices: [
+        {
+          meter: 'gpu.h100.hours',
+          effectiveFrom: period,
+          spec: { model: 'per-unit', unitAmountMicros: 4_000_000 },
+        },
+      ],
+    });
+    await pending('vm_early', { at: early });
+    expect(await flush()).toEqual({ sent: 1, deadLettered: 0, more: false });
+    await t.iam.api.billing.closePeriod(root, { tenantId: R, period, draft: false });
+
+    // A late window of the closed month.
+    const late = await pending('vm_late', { at: early + HOUR });
+    expect(await flush()).toEqual({ sent: 1, deadLettered: 1, more: false });
+    expect(await windowOf(late)).toMatchObject({ outcome: 'dead-lettered' });
+
+    const listed = await api.usage.deadLetters(root, {});
+    expect(listed.items).toEqual([
+      {
+        idempotencyKey: late,
+        tenantId: A,
+        meter: 'gpu.h100.hours',
+        quantity: 1,
+        windowStart: early + HOUR,
+        reason: 'period-closed',
+        error: expect.stringMatching(/invoiced|period|closed/i),
+      },
+    ]);
+    expect(listed.cursor).toBeUndefined();
+    expect((await api.usage.deadLetters(root, { reason: 'period-closed' })).items).toHaveLength(1);
+    expect((await api.usage.deadLetters(root, { reason: 'meter-missing' })).items).toEqual([]);
+
+    // Never retried automatically: the window stays dead-lettered and later passes send nothing.
+    expect(await flush()).toEqual({ sent: 0, deadLettered: 0, more: false });
+    expect(await flush()).toEqual({ sent: 0, deadLettered: 0, more: false });
+    const letters = await database.query<{ attempts: number }>(
+      'SELECT attempts FROM usage_dead_letters',
+    );
+    expect(letters.rows).toEqual([{ attempts: 1 }]);
+
+    // Retrying would only fail again: refused, by key and by reason, and it says what to do.
+    const byKey = await failure(api.usage.retry(root, { idempotencyKeys: [late] }));
+    expect(byKey.code).toBe('INVALID_STATE');
+    expect(byKey.message).toMatch(/invoice item/i);
+    const byReason = await failure(api.usage.retry(root, { reason: 'period-closed' }));
+    expect(byReason.code).toBe('INVALID_STATE');
+    expect(byReason.message).toMatch(/invoice item/i);
+    expect(await windowOf(late)).toMatchObject({ outcome: 'dead-lettered' });
+  });
+
+  it('meter-missing then retry after syncMeters succeeds', async () => {
+    const key = await pending('vm_zz9', { meter: `vm.gpu.${MODEL}.hours` });
+    expect(await flush()).toEqual({ sent: 1, deadLettered: 1, more: false });
+
+    const listed = await api.usage.deadLetters(root, { reason: 'meter-missing' });
+    expect(listed.items).toEqual([
+      expect.objectContaining({
+        idempotencyKey: key,
+        tenantId: A,
+        meter: `vm.gpu.${MODEL}.hours`,
+        reason: 'meter-missing',
+      }),
+    ]);
+
+    // Still missing: the retry is sent again and fails again (attempts counts it).
+    expect(await api.usage.retry(root, { idempotencyKeys: [key] })).toEqual({ retried: 1 });
+    expect(await windowOf(key)).toMatchObject({ outcome: null, recorded_at: null });
+    expect(await flush()).toEqual({ sent: 1, deadLettered: 1, more: false });
+    expect(
+      (
+        await database.query('SELECT attempts FROM usage_dead_letters WHERE idempotency_key = $1', [
+          key,
+        ])
+      ).rows,
+    ).toEqual([{ attempts: 2 }]);
+
+    await api.billing.syncMeters(root, {});
+    expect(await api.usage.retry(root, { reason: 'meter-missing' })).toEqual({ retried: 1 });
+    expect(await flush()).toEqual({ sent: 1, deadLettered: 0, more: false });
+    expect(await windowOf(key)).toMatchObject({ outcome: 'recorded' });
+    // Resolved: no longer a dead letter, and a retry of it finds nothing to retry.
+    expect((await api.usage.deadLetters(root, {})).items).toEqual([]);
+    expect(await api.usage.retry(root, { reason: 'meter-missing' })).toEqual({ retried: 0 });
+    expect(await outcome(api.usage.retry(root, { idempotencyKeys: [key] }))).toBe('NOT_FOUND');
+  });
+
+  it('deadLetters pages, filters by reason and derives the reason from the error', async () => {
+    const letters: [string, string][] = [
+      ['NOT_FOUND', 'Meter not found'],
+      ['BILLING_PERIOD_CLOSED', '2026-08 has already been invoiced'],
+      ['NOT_FOUND', 'Identity not found'],
+      ['INVALID_INPUT', 'quantity must be a number'],
+      ['CONFLICT', 'This idempotency key was used for another meter'],
+      ['METER_ARCHIVED', 'Meter is archived'],
+    ];
+    for (const [index, [code, message]] of letters.entries()) {
+      const key = await pending(`vm_${index}`, { hour: index });
+      await database.query(
+        `UPDATE usage_windows SET recorded_at = compute_now(), outcome = 'dead-lettered' WHERE idempotency_key = $1`,
+        [key],
+      );
+      await database.query(
+        `INSERT INTO usage_dead_letters (idempotency_key, tenant_id, event, error_code, error_message)
+         VALUES ($1, $2, $3::jsonb, $4, $5)`,
+        [
+          key,
+          A,
+          JSON.stringify({ meter: 'gpu.h100.hours', quantity: 1, occurredAt: H0 + index * HOUR }),
+          code,
+          message,
+        ],
+      );
+    }
+    const all: any[] = [];
+    let cursor: string | undefined;
+    do {
+      const page: any = await api.usage.deadLetters(root, {
+        limit: 4,
+        ...(cursor ? { cursor } : {}),
+      });
+      expect(page.items.length).toBeLessThanOrEqual(4);
+      all.push(...page.items);
+      cursor = page.cursor;
+    } while (cursor);
+    expect(all).toHaveLength(6);
+    expect(new Set(all.map((letter) => letter.idempotencyKey)).size).toBe(6);
+    expect(Object.fromEntries(all.map((letter) => [letter.error, letter.reason]))).toEqual({
+      'Meter not found': 'meter-missing',
+      '2026-08 has already been invoiced': 'period-closed',
+      'Identity not found': 'identity',
+      'quantity must be a number': 'invalid',
+      'This idempotency key was used for another meter': 'other',
+      'Meter is archived': 'other',
+    });
+    for (const reason of ['meter-missing', 'period-closed', 'identity', 'invalid', 'other']) {
+      const some = await api.usage.deadLetters(root, { reason });
+      expect(some.items.every((letter: any) => letter.reason === reason)).toBe(true);
+    }
+    expect((await api.usage.deadLetters(root, { reason: 'other' })).items).toHaveLength(2);
+    expect(await outcome(api.usage.deadLetters(root, { reason: 'nope' }))).toBe('INVALID_INPUT');
+    expect(await outcome(api.usage.deadLetters(root, { cursor: '!' }))).toBe('INVALID_INPUT');
+    expect(await outcome(api.usage.deadLetters(root, { limit: 501 }))).toBe('INVALID_INPUT');
+    // retry takes keys or a reason, not both and not neither; a reason retries all of its letters.
+    expect(await outcome(api.usage.retry(root, {}))).toBe('INVALID_INPUT');
+    expect(
+      await outcome(api.usage.retry(root, { idempotencyKeys: ['cmp:x'], reason: 'other' })),
+    ).toBe('INVALID_INPUT');
+    expect(await api.usage.retry(root, { reason: 'other' })).toEqual({ retried: 2 });
+    expect(
+      (await database.query('SELECT 1 FROM usage_windows WHERE outcome IS NULL')).rows,
+    ).toHaveLength(2);
+  });
+
+  it('void excludes a pending window from the flush', async () => {
+    const voided = await pending('vm_void');
+    const kept = await pending('vm_kept', { hour: 1 });
+    expect(
+      await api.usage.void(root, { idempotencyKeys: [voided], reason: 'bad meter data' }),
+    ).toEqual({ voided: 1, alreadyVoided: 0 });
+    expect(await windowOf(voided)).toMatchObject({ outcome: null, recorded_at: null });
+    expect(
+      (
+        await database.query<{ void_reason: string; voided_at: unknown }>(
+          'SELECT void_reason, voided_at FROM usage_windows WHERE idempotency_key = $1',
+          [voided],
+        )
+      ).rows[0],
+    ).toEqual({ void_reason: 'bad meter data', voided_at: expect.anything() });
+
+    // Only the other window is sent, now and ever.
+    expect(await flush()).toEqual({ sent: 1, deadLettered: 0, more: false });
+    expect(await flush()).toEqual({ sent: 0, deadLettered: 0, more: false });
+    expect(await windowOf(kept)).toMatchObject({ outcome: 'recorded' });
+    expect(await windowOf(voided)).toMatchObject({ outcome: null, recorded_at: null });
+
+    // Voiding it again changes nothing; the first reason stays.
+    expect(await api.usage.void(root, { idempotencyKeys: [voided], reason: 'again' })).toEqual({
+      voided: 0,
+      alreadyVoided: 1,
+    });
+    expect(
+      (
+        await database.query('SELECT void_reason FROM usage_windows WHERE idempotency_key = $1', [
+          voided,
+        ])
+      ).rows,
+    ).toEqual([{ void_reason: 'bad meter data' }]);
+
+    // The views leave it out and count it.
+    const view = await api.usage.platform(root, { ...range, groupBy: [] });
+    expect(view.rows[0]).toMatchObject({ quantity: 1, windows: 1 });
+    expect(view.voided).toBe(1);
+    const listed = await api.usage.list(acmeAdmin, { tenantId: A });
+    expect(listed.items.map((window: any) => window.idempotencyKey)).toEqual([kept]);
+  });
+
+  it('void of a flushed window is refused, and refuses the whole call', async () => {
+    const sent = await pending('vm_sent');
+    const letter = await pending('vm_letter', { hour: 1 });
+    await database.query(
+      "UPDATE usage_windows SET recorded_at = compute_now(), outcome = 'dead-lettered' WHERE idempotency_key = $1",
+      [letter],
+    );
+    const open = await pending('vm_open', { hour: 2 });
+    // `sent` and `open` are pending; flush `sent` only by recording it by hand, as the flush does.
+    await database.query(
+      "UPDATE usage_windows SET recorded_at = compute_now(), outcome = 'recorded' WHERE idempotency_key = $1",
+      [sent],
+    );
+
+    const refusal = await failure(
+      api.usage.void(root, { idempotencyKeys: [open, sent], reason: 'oops' }),
+    );
+    expect(refusal.code).toBe('INVALID_STATE');
+    expect(refusal.message).toMatch(/credit note in Better IAM/);
+    // A dead-lettered window was handed to the sink as well.
+    expect(
+      (await failure(api.usage.void(root, { idempotencyKeys: [letter], reason: 'x' }))).code,
+    ).toBe('INVALID_STATE');
+    const unknown = await failure(
+      api.usage.void(root, {
+        idempotencyKeys: ['cmp:instance:nope:1:gpu.h100.hours'],
+        reason: 'x',
+      }),
+    );
+    expect(unknown.code).toBe('NOT_FOUND');
+    // Atomic: the pending window of the refused call was not voided.
+    for (const key of [open, sent, letter]) expect((await windowOf(key)).voided_at).toBeNull();
+    expect(await outcome(api.usage.void(root, { idempotencyKeys: [], reason: 'x' }))).toBe(
+      'INVALID_INPUT',
+    );
+    expect(await outcome(api.usage.void(root, { idempotencyKeys: [open] }))).toBe('INVALID_INPUT');
+  });
+
+  it('void checks the outcome in the statement that writes the void', async () => {
+    // The check and the write are one statement: a window with an outcome is never voided.
+    const key = await pending('vm_race');
+    await database.query(
+      "UPDATE usage_windows SET recorded_at = compute_now(), outcome = 'duplicate' WHERE idempotency_key = $1",
+      [key],
+    );
+    expect(await outcome(api.usage.void(root, { idempotencyKeys: [key], reason: 'race' }))).toBe(
+      'INVALID_STATE',
+    );
+    const after = await windowOf(key);
+    expect(after.voided_at).toBeNull();
+    expect(after.outcome).toBe('duplicate');
+  });
+
+  it('tenants cannot read dead letters, retry or void', async () => {
+    const key = await pending('vm_guard');
+    await database.query(
+      `INSERT INTO usage_dead_letters (idempotency_key, tenant_id, event, error_code, error_message)
+       VALUES ($1, $2, '{}'::jsonb, 'NOT_FOUND', 'Meter not found')`,
+      [key, A],
+    );
+    for (const credential of [acmeAdmin, otherOwner, reader]) {
+      expect(await outcome(api.usage.deadLetters(credential, {}))).toBe('ACCESS_DENIED');
+      expect(await outcome(api.usage.retry(credential, { reason: 'meter-missing' }))).toBe(
+        'ACCESS_DENIED',
+      );
+      expect(
+        await outcome(api.usage.void(credential, { idempotencyKeys: [key], reason: 'x' })),
+      ).toBe('ACCESS_DENIED');
+    }
+    expect((await windowOf(key)).voided_at).toBeNull();
+  });
+
+  describe('voided windows are final', () => {
+    it('are not backlog: the doctor, the self-check and the backlog gauge skip them', async () => {
+      // Pending for 4 h (stale), and one of last month (IAM's closePeriod would refuse it).
+      const now = new Date(clock.now());
+      const lastMonth = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 3);
+      const stale = await pending('vm_stale');
+      const old = await pending('vm_old', { at: lastMonth });
+      const backlog = async () => {
+        const report = await compute.selfCheck();
+        const checks = (report.findings ?? report) as { check: string; severity: string }[];
+        const registry = createMetrics();
+        await databaseCollector(standardMetrics(registry), {
+          sql: database,
+          now: () => clock.now(),
+        }).refresh();
+        return {
+          server: checks.some((finding) => finding.check === 'usage.backlog'),
+          iamClosing: checks.some(
+            (finding) => finding.check === 'iam.usage-backlog' && finding.severity === 'error',
+          ),
+          iamAny: checks.some((finding) => finding.check === 'iam.usage-backlog'),
+          gauge: registry.value('backlog', { queue: 'usage' }),
+        };
+      };
+      expect(await backlog()).toMatchObject({ server: true, iamClosing: true, gauge: 2 });
+      await api.usage.void(root, { idempotencyKeys: [stale, old], reason: 'remove' });
+      expect(await backlog()).toMatchObject({
+        server: false,
+        iamClosing: false,
+        iamAny: false,
+        gauge: 0,
+      });
+    });
+
+    it('are pruned like recorded ones, and pending ones are not', async () => {
+      const voided = await pending('vm_pv');
+      const live = await pending('vm_pl', { hour: 1 });
+      await api.usage.void(root, { idempotencyKeys: [voided], reason: 'gone' });
+      try {
+        await setSimClock(database, clock.now() + 30 * 86_400_000);
+        expect(
+          await database.transaction((tx) => pruneUsageWindows(tx, { olderThanDays: 14 })),
+        ).toBe(1);
+      } finally {
+        await useSimClock(database, clock.now());
+      }
+      const left = await database.query<{ idempotency_key: string }>(
+        'SELECT idempotency_key FROM usage_windows',
+      );
+      expect(left.rows).toEqual([{ idempotency_key: live }]);
+    });
   });
 });

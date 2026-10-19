@@ -1,4 +1,4 @@
-The hourly usage windows compute meters per allocation and hands to Better IAM billing, as the tenant can read them. `list` and `export` decide `compute:usage:read` on `compute-tenant/{tenantId}`, or on `compute-project/{projectId}` when the call names a project, since windows carry their project as a tag. `platform` is the root tenant's cross-tenant view and decides `compute:usage:read` on `compute-fleet/global`, so only root can call it. A voided window is not usage: `list` and `export` leave it out of rows and totals, and `platform` counts it apart. See [Billing and usage](/docs/guides/iam/billing-and-usage).
+The hourly usage windows compute meters per allocation and hands to Better IAM billing, as the tenant can read them. `list` and `export` decide `compute:usage:read` on `compute-tenant/{tenantId}`, or on `compute-project/{projectId}` when the call names a project, since windows carry their project as a tag. `platform`, `deadLetters`, `retry` and `void` are the root tenant's: the cross-tenant view and the corrections to what the usage sink sent. They decide `compute:usage:read` (`compute:usage:manage` for `retry` and `void`) on `compute-fleet/global`, so only root can call them. A voided window is not usage: `list` and `export` leave it out of rows and totals, and `platform` counts it apart. See [Billing and usage](/docs/guides/iam/billing-and-usage).
 
 ## list
 
@@ -28,3 +28,27 @@ Totals the usage windows of every tenant over a time range, grouped by any of `t
 - Voided windows are in no row; `voided` counts them for the same range and tenant.
 - One call returns at most 50,000 groups; when more match, `truncated` is `true` and the grouping or range should be narrowed.
 - `format: 'csv'` answers the same groups as `data` (a header row, the keys, `quantity`, `windows`, and `outcomes` as JSON) with `rows` empty; `count` is the number of groups either way.
+
+## deadLetters
+
+Root only. Lists the open dead letters of the usage sink (events Better IAM refused for good), ordered by idempotency key; returns a page with a cursor. Decides `compute:usage:read` on `compute-fleet/global`.
+
+- Each item has `idempotencyKey`, `tenantId`, `meter`, `quantity`, `windowStart`, the better-iam `error` message and a `reason`: `meter-missing`, `period-closed`, `identity`, `invalid` or `other`. A letter disappears once a retry is recorded.
+- `reason` filters the list. `limit` is at most 500 (100 by default); a cursor this method did not return is `INVALID_INPUT`.
+
+## retry
+
+Root only. Clears the outcome of dead-lettered windows so the next usage flush sends them again. Decides `compute:usage:manage` on `compute-fleet/global`.
+
+- Give `idempotencyKeys` (1 to 1000 open dead letters) or a `reason`, not both. A key without an open dead letter is `NOT_FOUND` and nothing is retried.
+- `period-closed` letters are refused with `INVALID_STATE`: retrying would only fail again, and the usage needs a root invoice item in Better IAM (`billing.createInvoiceItem`).
+- Answers `retried`, the windows put back to pending. A voided window stays voided. The letter stays open until a flush records the window.
+
+## void
+
+Root only. Voids pending usage windows, so no flush ever sends them: sets `voided_at` and `void_reason`. Decides `compute:usage:manage` on `compute-fleet/global`.
+
+- `idempotencyKeys` (1 to 1000) and a `reason` are required.
+- Only windows no flush has handled can be voided. A window with an outcome (recorded, duplicate, reattributed or dead-lettered) gives `INVALID_STATE` with the hint to issue a credit note in Better IAM; an unknown key is `NOT_FOUND`. The call is all or nothing.
+- A window voided before is left as it is and counted in `alreadyVoided`.
+- Voided windows are left out of the tenants' `usage.list` and `usage.export`, and of `usage.platform` rows (which counts them apart).
