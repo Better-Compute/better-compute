@@ -1322,8 +1322,8 @@ Assertions:
 - **Committed-use discounts.** Ingest GCP CUD credits per reservation into grant margins.
 - **Instance-level cost read API.** `billing.costs` for consoles.
 - **Other providers.** Hetzner and Proxmox `costs`/`listPrices` implementations.
-- **Proration.** Proration of grant fees for partial first hours (today grants bill whole hours from `starts_at`
-  rounded down, which is documented).
+- **Proration.** Done as built: a grant bills the covered fraction of a partial hour (its first or last hour when
+  `starts_at` or `ends_at` falls inside one), not whole hours. No follow-up remains.
 - **better-iam upstream asks.** Tag-dimensioned prices, which would remove the need for per-flavor meters;
   `recordMany` with `enforceBudgets`; and a push event on budget exhaustion.
 

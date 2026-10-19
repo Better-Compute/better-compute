@@ -7,9 +7,10 @@ import {
   type UsageTags,
 } from '@better-compute/capacity';
 
-// Instance metering (PLAN.md §12.7): hosted instances accrue `vps.vcpu.hours`,
+// Hosted instance metering (PLAN.md §12.7): hosted instances accrue `vps.vcpu.hours`,
 // `vps.memory.gib.hours` and, for GPU flavors, `gpu.<model>.hours`, from placement until their
-// allocation is released. Provider instances have no allocation and are billed by their provider.
+// allocation is released. Provider instances have no allocation: their lifecycle intervals are metered as
+// `instance` usage windows by `vps.provider-usage` (instance-usage.ts, platform compute billing D3).
 // Warm sandbox instances accrue `vps.sandbox.warm` to the tenant until a sandbox claims them.
 
 /**

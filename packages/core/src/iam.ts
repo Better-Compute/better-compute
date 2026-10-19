@@ -73,15 +73,26 @@ export interface SpendCheck {
 /** One hourly usage window (§12.7). */
 export interface UsageEvent {
   tenantId: string;
-  /** `gpu.<model>.hours`, `node.metal.hours`, `vps.vcpu.hours`, `vps.memory.gib.hours`. */
+  /**
+   * A meter key of compute's catalog (`/^[a-z][a-z0-9_.-]{0,63}$/`): hosted (`gpu.<model>.hours`,
+   * `node.metal.hours`, `vps.vcpu.hours`, …), provider VMs (`vm.*`, `disk.<type>.gib.hours`, `ip.public.hours`),
+   * grants (`vm.grant.*`), networks and snapshots, or a `reported` meter for pass-through.
+   */
   meter: string;
   quantity: number;
   /** The person for delegated work, or the agent for agent keys; absent once orphaned. */
   identityId?: string;
   occurredAt: number;
-  /** Bounded-cardinality tags only: region, pool, gpuModel, project, agent. Never per-allocation ids. */
+  /**
+   * Bounded-cardinality tags only: region, pool, gpuModel, project, agent, provider, flavor, source. Never instance,
+   * allocation, network or grant ids.
+   */
   tags: Record<string, string>;
-  /** `cmp:<allocId>:<windowStartMs>`. */
+  /**
+   * `cmp:<allocationId>:<windowStartMs>` for an allocation window, `cmp:<kind>:<sourceId>:<windowStartMs>:<meter>`
+   * for another source (instance, grant, network, snapshot), and `costx:<accountId>:<sourceRowId>` for a
+   * pass-through cost row.
+   */
   idempotencyKey: string;
   /**
    * (billing) A reported cost in currency units (pass-through, better-iam `cost`), for meters with
