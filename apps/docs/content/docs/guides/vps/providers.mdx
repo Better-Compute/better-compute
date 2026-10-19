@@ -578,7 +578,7 @@ await compute.api.providerAccounts.create(
     monitoring: { type: 'boolean', description: "Install DigitalOcean's metrics agent on new Droplets.", default: 'true' },
     ipv6: { type: 'boolean', description: 'Give new Droplets an IPv6 address.', default: 'false' },
     allowSpot: { type: 'boolean', description: 'Accepted and reserved for Spot capacity, which is not created yet.', default: 'false' },
-    discoverTag: { type: 'string', description: 'Discovery yields only Droplets carrying this tag.' },
+    discoverTag: { type: 'string', description: 'Discovery yields only Droplets carrying this tag. Lower-case [a-z0-9:_-], at most 255 characters; anything else is INVALID_CONFIG (discoverTag).' },
     previews: { type: 'boolean', description: 'Accepted and reserved for products DigitalOcean still marks as previews.', default: 'false' },
   }}
 />
@@ -601,7 +601,7 @@ The token needs the custom scopes `account:read`, `regions:read`, `sizes:read`, 
   and `better-compute-deployment:<hash>` (the `digitaloceanProvider({ deployment })` name). `delete`, `reinstall` and
   the duplicate reaper need the managed tag and this deployment's; `power` needs the deployment's tag and an instance
   tag. The tag-scoped bulk endpoints of DigitalOcean are never called: every delete, action and tag write names one
-  Droplet.
+  Droplet. A create label whose key has a colon is `INVALID_INPUT` (`label`): it could forge a reserved tag.
 - **An SSH key is always sent.** A Droplet created without one may make DigitalOcean email a root password, so create
   registers the instance's keys in the account (`bc-<fingerprint prefix>`, never deleted) and adds the key named by
   `sshKeyFingerprint`. An instance with no key and an account without that field is `INVALID_CONFIG` (`noSshKey`).
@@ -612,7 +612,10 @@ The token needs the custom scopes `account:read`, `regions:read`, `sizes:read`, 
 - **Attach.** `discover` yields every Droplet of the configured regions, GPU Droplets and members of a DigitalOcean
   autoscale pool included (these carry the label `better-compute-autoscale-pool` and are never claimed). `claim`
   writes the instance and deployment tags and verifies them, giving them back with `CONFLICT` when another instance's
-  tag appeared; `release` removes only its own.
+  tag appeared. A managed claim of a Droplet that carries another deployment's tag is `INVALID_STATE`
+  (`otherDeployment`). `release` removes the managed tag (unless another instance tag is on the Droplet), its own
+  instance tag and, once no instance tag is left, the deployment tag. It keeps no record of what its claim wrote, so a
+  managed tag that was on the Droplet before the claim goes too.
 - **Power:** `on` is `power_on`, `off` is `power_off`, `graceful-off` is `shutdown`, `graceful-restart` is `reboot`,
   `cycle` and `reset` are `power_cycle`; `nmi` is `UNSUPPORTED`. `reinstall` is `rebuild`. Actions are started, not
   awaited. Spot offers are not created yet: an offer ending in `@spot` is `UNSUPPORTED` (`reason` `spot`).

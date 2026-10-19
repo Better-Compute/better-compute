@@ -139,6 +139,7 @@ function byAge(a: DoDroplet, b: DoDroplet): number {
 }
 
 const instanceTagPrefix = `${labels.instance}:`;
+const deploymentTagPrefix = `${labels.deployment}:`;
 
 /** DO's action type for each power action; `nmi` has none. */
 const powerTypes: Readonly<Record<Exclude<PowerAction, 'nmi'>, string>> = {
@@ -323,6 +324,14 @@ export class DoCompute implements ProviderImpl {
       tagFor(labels.instance, request.name),
     ];
     for (const [key, value] of Object.entries(request.labels ?? {})) {
+      // A tag is `<key>:<value>` split at its first colon, so a key with a colon could forge a
+      // reserved prefix (`better-compute-instance:x` reads as a second instance tag).
+      if (key.includes(':'))
+        throw fail(
+          'INVALID_INPUT',
+          `label ${JSON.stringify(key)} can't be a DigitalOcean tag key: it has a colon`,
+          'label',
+        );
       if (reservedKeys.has(key.toLowerCase())) continue;
       const tag = tagFor(key, value);
       if (!tagPattern.test(tag))
@@ -579,8 +588,7 @@ export class DoCompute implements ProviderImpl {
         budget: 'sweep',
       })) {
         if (seen.has(droplet.id) || !regions.has(droplet.region.slug)) continue;
-        if (query.type === 'gpus' && wanted !== undefined && !hasTag(droplet, wanted.toLowerCase()))
-          continue;
+        if (query.type === 'gpus' && wanted !== undefined && !hasTag(droplet, wanted)) continue;
         seen.add(droplet.id);
         const machine = await named(toMachine(droplet));
         // The label comes from the pool's member list only (toMachine drops a forged tag's).
@@ -634,6 +642,10 @@ export class DoCompute implements ProviderImpl {
         `Droplet ${droplet.id} belongs to a DigitalOcean autoscale pool, which scales it itself`,
         'autoscalePool',
       );
+    // The managed tag is not scoped to a deployment: next to another deployment's tag it would
+    // let that deployment delete the Droplet too. Checked before any write, and again on the
+    // read the managed write follows.
+    if (options.managed) this.refuseOtherDeployment(droplet);
 
     // The instance and deployment tags first, then a verify; the managed tag, which hands
     // deletion over, only once the claim has held. A claim that loses never wrote it, so its
@@ -655,10 +667,25 @@ export class DoCompute implements ProviderImpl {
     }
     // A managed write that fails leaves a plain claim, which a repeated claim completes.
     if (options.managed && !hasTag(claimed, managedTag)) {
+      this.refuseOtherDeployment(claimed);
       await this.assignTag(managedTag, droplet.id, signal);
       claimed = { ...claimed, tags: [...claimed.tags, managedTag] };
     }
     return networkNamer(this.client, signal, this.context.log)(toMachine(claimed));
+  }
+
+  /** `INVALID_STATE` (`otherDeployment`) for a Droplet that carries another deployment's tag. */
+  protected refuseOtherDeployment(droplet: DoDroplet): void {
+    const other = (droplet.tags ?? []).some((t) => {
+      const tag = t.toLowerCase();
+      return tag.startsWith(deploymentTagPrefix) && tag !== this.deploymentTag;
+    });
+    if (other)
+      throw fail(
+        'INVALID_STATE',
+        `Droplet ${droplet.id} carries another better-compute deployment's tag, so it is never handed to this one for deletion`,
+        'otherDeployment',
+      );
   }
 
   /** Takes our instance tag off a Droplet we lost; a failure is logged, the claim is lost anyway. */
@@ -678,14 +705,23 @@ export class DoCompute implements ProviderImpl {
     const droplet = await this.droplet(id, signal);
     if (!droplet) return;
     const ours = tagFor(labels.instance, instanceId);
-    if (!hasTag(droplet, ours)) return;
-    // The managed tag goes first: if the second call fails, the Droplet is still the instance's
-    // and a retry finishes the job, whereas the other order would leave a deletable Droplet that
-    // no instance claims. It stays while another instance tag is on the Droplet.
+    const claimed = hasTag(droplet, ours);
     const rivals = instanceTagsOf(droplet).some((t) => t.toLowerCase() !== ours);
-    if (!rivals && hasTag(droplet, managedTag))
-      await this.unassignTag(spelled(droplet, managedTag), droplet.id, signal);
-    await this.unassignTag(spelled(droplet, ours), droplet.id, signal);
+    if (claimed) {
+      // The managed tag goes first: if a later call fails, the Droplet is still the instance's
+      // and a retry finishes the job, whereas the other order would leave a deletable Droplet
+      // that no instance claims. It stays while another instance tag is on the Droplet.
+      if (!rivals && hasTag(droplet, managedTag))
+        await this.unassignTag(spelled(droplet, managedTag), droplet.id, signal);
+      await this.unassignTag(spelled(droplet, ours), droplet.id, signal);
+    }
+    // Once no instance tag is left, nothing of this deployment claims the Droplet, so its
+    // deployment tag goes last: left behind, it would make the Droplet this deployment's again
+    // when another deployment claims it. A retry of a release that failed before this finishes
+    // it (no instance tag, no managed tag). A managed tag that this call did not remove (a rival
+    // kept it, or the instance tag was already gone) keeps the deployment tag next to it.
+    if (!rivals && (claimed || !hasTag(droplet, managedTag)) && hasTag(droplet, this.deploymentTag))
+      await this.unassignTag(spelled(droplet, this.deploymentTag), droplet.id, signal);
   }
 }
 

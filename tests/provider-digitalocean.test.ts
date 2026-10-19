@@ -1308,6 +1308,13 @@ describe('compute', () => {
     );
     expect(label.code).toBe('INVALID_INPUT');
     expect(label.details).toMatchObject({ provider: 'digitalocean', reason: 'label' });
+    // A key with a colon could forge a reserved prefix: `better-compute-instance:x:v` would read
+    // as a second instance tag. Any colon in a key is refused.
+    for (const key of [`${labels.instance}:x`, 'team:a', ':'] as const) {
+      const colon = await failure(compute.create(request({ labels: { [key]: 'v' } }), ctx()));
+      expect(colon.code, key).toBe('INVALID_INPUT');
+      expect(colon.details, key).toMatchObject({ provider: 'digitalocean', reason: 'label' });
+    }
     expect(emu.requests).toHaveLength(0);
   });
 
@@ -1642,6 +1649,7 @@ describe('compute', () => {
     expect((await compute.listOffers({})).length).toBeGreaterThan(0);
     expect(await compute.get('999', ctx())).toBeUndefined();
     expect(resolved).toBe(1);
+    const requests = emu.requests.length;
 
     const refused = async (options: object, account: object) =>
       failure(
@@ -1657,6 +1665,18 @@ describe('compute', () => {
         'INVALID_CONFIG',
       );
     await digitaloceanProvider({ fetch: emu.fetch, inCallWaitMs: 20_000 }).create(config, context);
+    // discoverTag is a tag as DO stores it: refused, never lower-cased, when it is not one.
+    for (const discoverTag of ['Fleet', '', 'a b', 'fleet/x', 'x'.repeat(256)]) {
+      const error = await refused({}, { ...config, discoverTag });
+      expect(error.code, discoverTag).toBe('INVALID_CONFIG');
+      expect(error.details, discoverTag).toMatchObject({
+        provider: 'digitalocean',
+        reason: 'discoverTag',
+      });
+    }
+    for (const discoverTag of ['fleet', 'env:prod', 'k8s_pool-1', 'x'.repeat(255)])
+      await digitaloceanProvider({ fetch: emu.fetch }).create({ ...config, discoverTag }, context);
+    expect(emu.requests).toHaveLength(requests);
   });
 
   it('never calls a tag-scoped bulk endpoint', () => {
@@ -1718,7 +1738,7 @@ describe('attach', () => {
 
   it('discover honours discoverTag and configured regions', async () => {
     const emu = emulator();
-    const compute = await build(emu, { ...doAccount, discoverTag: 'Fleet' });
+    const compute = await build(emu, { ...doAccount, discoverTag: 'fleet' });
     const wanted = seedDroplet(emu.state, { tags: ['fleet'], name: 'wanted' });
     seedDroplet(emu.state, { tags: ['other'] });
     seedDroplet(emu.state, { tags: ['fleet'], region: 'tor1' });
@@ -1733,7 +1753,7 @@ describe('attach', () => {
     const machines = await discovered(compute);
     expect(machines.map((m) => m.id).sort()).toEqual([String(wanted.id), String(gpu.id)].sort());
     const lists = dropletLists(emu);
-    expect(lists.map((r) => r.url.searchParams.get('tag_name'))).toEqual(['Fleet', null]);
+    expect(lists.map((r) => r.url.searchParams.get('tag_name'))).toEqual(['fleet', null]);
     // The GPU list can't be combined with tag_name (research S2): the tag is applied here.
     expect(lists[1]!.url.searchParams.get('type')).toBe('gpus');
   });
@@ -2062,20 +2082,19 @@ describe('attach', () => {
     expect(d.tags).toContain(instanceTag('inst_1'));
 
     await compute.release!(id, 'inst_1', ctx());
-    expect(d.tags).not.toContain(instanceTag('inst_1'));
-    expect(d.tags).not.toContain(managed);
-    expect(d.tags).toEqual(
-      expect.arrayContaining([deploymentTag('default'), 'better-compute-tenant:acme']),
-    );
-    // The managed tag goes first: a half-done release is still a claim, never a deletable droplet.
+    // Nothing of this deployment claims it any more, so the deployment tag goes too.
+    expect(d.tags).toEqual(['better-compute-tenant:acme']);
+    // The managed tag goes first: a half-done release is still a claim, never a deletable
+    // droplet. The deployment tag goes last, once no instance tag is left.
     expect(unassigned(emu)).toEqual([
       `/v2/tags/${managed}/resources`,
       `/v2/tags/${instanceTag('inst_1')}/resources`,
+      `/v2/tags/${deploymentTag('default')}/resources`,
     ]);
 
     // Released twice is released once.
     await compute.release!(id, 'inst_1', ctx());
-    expect(unassigned(emu)).toHaveLength(2);
+    expect(unassigned(emu)).toHaveLength(3);
     // Released, it can be claimed by someone else.
     await compute.claim!(id, 'inst_2', ctx());
     expect(d.tags).toContain(instanceTag('inst_2'));
@@ -2088,8 +2107,79 @@ describe('attach', () => {
       tags: [managed, deploymentTag('default'), instanceTag('inst_1'), instanceTag('other')],
     });
     await compute.release!(String(d.id), 'inst_1', ctx());
-    expect(d.tags).toEqual(expect.arrayContaining([managed, instanceTag('other')]));
-    expect(d.tags).not.toContain(instanceTag('inst_1'));
+    // The deployment tag stays too: the other instance tag may be this deployment's.
+    expect(d.tags).toEqual([managed, deploymentTag('default'), instanceTag('other')]);
+  });
+
+  it('a release that failed before the deployment tag finishes on a retry', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const d = seedDroplet(emu.state, { tags: [] });
+    const id = String(d.id);
+    await compute.claim!(id, 'inst_1', ctx(), { managed: true });
+    const serverError = errorFixtures.find((e) => e.name === 'server-error')!;
+    emu.failNext(
+      { method: 'DELETE', path: /^\/tags\/better-compute-deployment[^/]*\/resources$/ },
+      serverError.status,
+      serverError.body,
+    );
+    expect((await failure(compute.release!(id, 'inst_1', ctx()))).code).toBe('UNAVAILABLE');
+    expect(d.tags).toEqual([deploymentTag('default')]);
+    // No instance tag and no managed tag: the retry takes the deployment tag off.
+    await compute.release!(id, 'inst_1', ctx());
+    expect(d.tags).toEqual([]);
+
+    // A managed droplet with no instance tag keeps its deployment tag: this release removed
+    // nothing, and without the deployment tag the managed one could never be deleted.
+    const orphan = seedDroplet(emu.state, { tags: [managed, deploymentTag('default')] });
+    await compute.release!(String(orphan.id), 'inst_1', ctx());
+    expect(orphan.tags).toEqual([managed, deploymentTag('default')]);
+  });
+
+  it("released by one deployment, a droplet is never that deployment's again", async () => {
+    const emu = emulator();
+    const a = await build(emu, doAccount, { deployment: 'a' });
+    const b = await build(emu, doAccount, { deployment: 'b' });
+    const d = seedDroplet(emu.state, { tags: [] });
+    const id = String(d.id);
+    await a.claim!(id, 'inst_a', ctx());
+    await a.release!(id, 'inst_a', ctx());
+    expect(d.tags).toEqual([]);
+    await b.claim!(id, 'inst_b', ctx(), { managed: true });
+    expect([...d.tags].sort()).toEqual([deploymentTag('b'), instanceTag('inst_b'), managed].sort());
+    // Deployment a can neither power nor delete what b claimed.
+    expect((await failure(a.power(id, 'off', ctx()))).details?.reason).toBe('notInstance');
+    expect((await failure(a.delete(id, ctx()))).details?.reason).toBe('notManaged');
+  });
+
+  it("a managed claim refuses a droplet that carries another deployment's tag", async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    // A deployment tag another control plane left (a claim it lost, or a release from before).
+    const d = seedDroplet(emu.state, { tags: [deploymentTag('other')] });
+    const id = String(d.id);
+    const error = await failure(compute.claim!(id, 'inst_1', ctx(), { managed: true }));
+    expect(error.code).toBe('INVALID_STATE');
+    expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'otherDeployment' });
+    // Refused before any write.
+    expect(tagWrites(emu)).toEqual([]);
+    expect(d.tags).toEqual([deploymentTag('other')]);
+
+    // A tag that appears between the claim's writes and the managed write is refused as well:
+    // the plain claim stays and the managed tag is never written.
+    const e = seedDroplet(emu.state, { tags: [] });
+    emu.beforeAction('POST /tags/*/resources', () => {
+      if (!(e.tags as string[]).includes(deploymentTag('other')))
+        (e.tags as string[]).push(deploymentTag('other'));
+    });
+    const raced = await failure(compute.claim!(String(e.id), 'inst_2', ctx(), { managed: true }));
+    expect(raced.details).toMatchObject({ reason: 'otherDeployment' });
+    expect(e.tags).not.toContain(managed);
+    expect(e.tags).toContain(instanceTag('inst_2'));
+
+    // A plain claim is not refused: it hands no deletion over.
+    const f = seedDroplet(emu.state, { tags: [deploymentTag('other')] });
+    expect((await compute.claim!(String(f.id), 'inst_3', ctx())).claimedBy).toBe('inst_3');
   });
 });
 

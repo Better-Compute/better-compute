@@ -12,14 +12,7 @@ import type { DoClient } from '../client/http.js';
 import { assignTag, ensureTag, hasTag, unassignTag } from '../compute/tags.js';
 import type { DoDroplet } from '../compute/types.js';
 import type { DoConfig } from '../config.js';
-import {
-  deploymentTag,
-  isManagedTag,
-  labels,
-  networkMemberTag,
-  parseMachineId,
-  tagFor,
-} from '../ids.js';
+import { deploymentTag, labels, networkMemberTag, parseMachineId, tagFor } from '../ids.js';
 import {
   baseFirewallBody,
   baseFirewallName,
@@ -51,9 +44,9 @@ export * from './vpcs.js';
 const state = (id: string, value: ProviderNetworkState['state'], message?: string) =>
   ({ id, state: value, ...(message !== undefined ? { message } : {}) }) as ProviderNetworkState;
 
-const managedPrefix = 'bc-';
-/** The prefix of every network's member tag (`networkMemberTag`). */
-const memberPrefix = 'bc-net-';
+/** The tags setTags replaces: vps's per-instance tag (`networkTag`) and a network's member tag. */
+const instanceTagShape = /^bc-[0-9a-f]{16}$/;
+const memberTagShape = /^bc-net-[0-9a-f]{16}$/;
 const setTagPattern = /^bc-[a-z0-9:_-]{1,252}$/;
 const instanceTagPrefix = `${labels.instance}:`;
 
@@ -337,8 +330,9 @@ export class DoNetworks implements ProviderNetworks {
   // ------------------------------------------------------------------------------ tags
 
   /**
-   * Replaces the Droplet's `bc-` tags with `tags`, plus the member tag of the network its VPC
-   * belongs to; every other tag stays, `better-compute-*` included. The Droplet must carry this
+   * Replaces the Droplet's better-compute network tags (`bc-<16 hex>`, vps's per-instance tag, and
+   * `bc-net-<16 hex>`) with `tags`, plus the member tag of the network its VPC belongs to; every
+   * other tag stays, a user's own `bc-web` and `better-compute-*` included. The Droplet must carry this
    * deployment's tag and an instance tag, which with `instanceId` must name it (ruling R3). Tags
    * are added before old ones go, so a firewall never loses the Droplet in between. A member tag
    * (`bc-net-*`) stays unless the Droplet's VPC names another network: a VPC that can't be
@@ -397,11 +391,14 @@ export class DoNetworks implements ProviderNetworks {
     for (const tag of wanted)
       if (!hasTag(droplet, tag)) await assignTag(this.#client, tag, droplet.id, signal);
     for (const tag of droplet.tags ?? []) {
-      if (!isManagedTag(tag) || !tag.startsWith(managedPrefix) || wanted.has(tag.toLowerCase()))
-        continue;
+      const lower = tag.toLowerCase();
+      // Only the shapes better-compute writes go: a user's own `bc-web` stays.
+      const instanceShape = instanceTagShape.test(lower);
+      const memberShape = memberTagShape.test(lower);
+      if ((!instanceShape && !memberShape) || wanted.has(lower)) continue;
       // A member tag keeps the Droplet behind its network's base firewall, so it fails closed: it
       // goes only when the Droplet's VPC is known to belong to another network.
-      if (tag.startsWith(memberPrefix) && network === undefined) continue;
+      if (memberShape && network === undefined) continue;
       await unassignTag(this.#client, tag, droplet.id, signal);
     }
   }

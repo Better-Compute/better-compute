@@ -5,6 +5,7 @@ import { DoCompute } from './compute/droplets.js';
 import { doConfig, type DoConfig, type DoProviderOptions } from './config.js';
 
 const maxInCallWaitMs = 20_000;
+const discoverTagPattern = /^[a-z0-9:_-]{1,255}$/;
 
 function invalidConfig(message: string, reason: string): ComputeError {
   return new ComputeError('INVALID_CONFIG', message, undefined, {
@@ -33,6 +34,13 @@ export function digitaloceanProvider(
     create: (config: DoConfig, context: ProviderContext) => {
       if (config.regions.length === 0)
         throw invalidConfig('A DigitalOcean account lists at least one region', 'regions');
+      // A tag as DO stores it: discovery filters by it as given (`tag_name`) and matches the GPU
+      // list against it, so a spelling DO would read differently is refused, not lower-cased.
+      if (config.discoverTag !== undefined && !discoverTagPattern.test(config.discoverTag))
+        throw invalidConfig(
+          `discoverTag ${JSON.stringify(config.discoverTag)} is not a DigitalOcean tag: lower-case [a-z0-9:_-], at most 255 characters`,
+          'discoverTag',
+        );
       const inCallWaitMs = options.inCallWaitMs ?? 0;
       if (!Number.isInteger(inCallWaitMs) || inCallWaitMs < 0 || inCallWaitMs > maxInCallWaitMs)
         throw invalidConfig(

@@ -32,7 +32,9 @@ export const doConfig = manifest({
   discoverTag: field
     .string()
     .optional()
-    .describe('Discovery yields only Droplets that carry this tag'),
+    .describe(
+      'Discovery yields only Droplets that carry this tag (lower-case [a-z0-9:_-], at most 255)',
+    ),
   previews: field
     .boolean()
     .default(false)
@@ -59,7 +61,10 @@ export interface DoProviderOptions {
   endpoint?: string;
   /** Trust-domain string, hashed into the deployment tag. Default `default`. */
   deployment?: string;
-  /** How long a call may wait for a DigitalOcean action. Default 0, at most 20 000. */
+  /**
+   * How long a call may wait for a DigitalOcean action. Default 0, at most 20 000. Accepted and
+   * checked, but it has no effect yet: every call starts its action and returns.
+   */
   inCallWaitMs?: number;
   /** Request budget per token. Defaults 250 per minute and 5000 per hour (DigitalOcean's limits). */
   budget?: { perMinute?: number; perHour?: number };

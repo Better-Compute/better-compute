@@ -655,7 +655,7 @@ describe('networks: tags', () => {
     return [...emu.state.vpcs.values()].find((v) => v.name === 'bc-sub1')!;
   }
 
-  it('setTags keeps foreign tags, replaces bc- tags and adds the network member tag', async () => {
+  it('setTags keeps foreign tags, replaces the bc- tags better-compute writes and adds the network member tag', async () => {
     const emu = emulator();
     const compute = await build(emu);
     const vpc = await onNetwork(emu, compute);
@@ -666,6 +666,12 @@ describe('networks: tags', () => {
       'better-compute-tenant:acme',
       'web',
       'BC-Hand',
+      // A user's own bc- tags are not shapes better-compute writes: a hand-made firewall may
+      // target them, so they stay.
+      'bc-web',
+      'bc-net-web',
+      'bc-0123',
+      'bc-0123456789abcdef0',
     ];
     const droplet = seedDroplet(emu.state, {
       vpc_uuid: vpc.id,
