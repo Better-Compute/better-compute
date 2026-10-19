@@ -116,6 +116,9 @@ export function meterLinesFor(
   return out;
 }
 
+/** What the `DiskTypeUnknown` condition names for a disk whose type the provider could not read. */
+export const unreadableDiskType = 'unreadable';
+
 /** The disk type a boot disk is metered as when its type is unknown or absent. */
 export const defaultDiskType = 'pd-balanced';
 
@@ -140,7 +143,7 @@ function diskLines(disks: readonly BillableDisk[]): MeterLine[] {
 
 /** What a provider says about a machine's disks (`ExternalMachine.disks`, `bootDiskType`). */
 export interface DiskRecord {
-  disks?: readonly { type: string; sizeGiB: number }[] | undefined;
+  disks?: readonly { type?: string | undefined; sizeGiB: number }[] | undefined;
   bootDiskType?: string | undefined;
 }
 
@@ -156,8 +159,13 @@ export function disksOf(
   flavorDiskGiB: number,
 ): { disks: BillableDisk[]; unknownTypes: string[] } {
   const unknownTypes: string[] = [];
-  const typed = (raw: string | undefined): string => {
-    if (raw === undefined || raw === '') return defaultDiskType;
+  // A fallback boot disk with no marked type is pd-balanced; a reported disk with no type, or one with no meter, is
+  // metered as pd-balanced and named (the `DiskTypeUnknown` condition).
+  const typed = (raw: string | undefined, reported: boolean): string => {
+    if (raw === undefined || raw === '') {
+      if (!reported) return defaultDiskType;
+      raw = unreadableDiskType;
+    }
     if (pricedDiskTypes.has(raw)) return raw;
     if (!unknownTypes.includes(raw)) unknownTypes.push(raw);
     return defaultDiskType;
@@ -167,11 +175,17 @@ export function disksOf(
   );
   if (reported.length > 0)
     return {
-      disks: reported.map((disk) => ({ type: typed(disk.type), sizeGiB: disk.sizeGiB })),
+      // Sorted, so the order a provider lists disks in never splits an interval (the shape is compared as JSON).
+      disks: reported
+        .map((disk) => ({ type: typed(disk.type, true), sizeGiB: disk.sizeGiB }))
+        .sort((a, b) => a.type.localeCompare(b.type) || a.sizeGiB - b.sizeGiB),
       unknownTypes,
     };
   if (!(flavorDiskGiB > 0)) return { disks: [], unknownTypes };
-  return { disks: [{ type: typed(machine?.bootDiskType), sizeGiB: flavorDiskGiB }], unknownTypes };
+  return {
+    disks: [{ type: typed(machine?.bootDiskType, false), sizeGiB: flavorDiskGiB }],
+    unknownTypes,
+  };
 }
 
 function computeLines(shape: BillableShape, options: MeterLinesOptions): MeterLine[] {

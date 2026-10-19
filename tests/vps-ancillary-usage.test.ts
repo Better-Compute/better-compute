@@ -716,6 +716,84 @@ describe('disks', () => {
     expect(marks).toEqual([{ behind: false }]);
   });
 
+  it('a disk whose type the provider could not read meters pd-balanced and raises DiskTypeUnknown', async () => {
+    const world = await gceWorld();
+    const { created, h0, machine } = await runningAtHour(world);
+    // provider-gcp omits the type of a persistent disk it could not look up.
+    machine.disks = [{ sizeGiB: 80, boot: true }];
+    await moveTo(world, h0 + HOUR - 1_000);
+    await step(world, 1_000);
+    const { rows } = await world.fixture.database.query<{
+      conditions: { type: string; message?: string }[] | string;
+    }>(`SELECT conditions FROM instances WHERE id = $1`, [created.id]);
+    const raw = rows[0]!.conditions;
+    const found = (typeof raw === 'string' ? JSON.parse(raw) : raw).filter(
+      (entry: { type: string }) => entry.type === 'DiskTypeUnknown',
+    );
+    expect(found).toMatchObject([{ message: expect.stringContaining('unreadable') }]);
+    await moveTo(world, h0 + 2 * HOUR + settle);
+    await meter(world, usageJob);
+    expect(
+      hours(await windowsOf(world, 'instance', created.id), 'disk.pd-balanced.gib.hours'),
+    ).toEqual([
+      [h0, 100],
+      [h0 + HOUR, 80],
+    ]);
+  });
+
+  it('disks reported in a different order do not split the interval', async () => {
+    const world = await gceWorld();
+    const { created, h0, machine } = await runningAtHour(world);
+    const one = { type: 'pd-ssd', sizeGiB: 50 };
+    const two = { type: 'local-ssd', sizeGiB: 375 };
+    const three = { type: 'pd-ssd', sizeGiB: 20 };
+    machine.disks = [one, two, three];
+    await moveTo(world, h0 + HOUR - 1_000);
+    await step(world, 1_000);
+    const before = await intervalsOfVm(world, created.id);
+    expect(before).toHaveLength(2);
+    // The same disks, listed differently at every poll.
+    machine.disks = [three, one, two];
+    await moveTo(world, h0 + 2 * HOUR - 1_000);
+    await step(world, 1_000);
+    machine.disks = [two, three, one];
+    await moveTo(world, h0 + 3 * HOUR - 1_000);
+    await step(world, 1_000);
+    expect(await intervalsOfVm(world, created.id)).toEqual(before);
+    expect(before[1]!.shape.disks).toEqual([
+      { type: 'local-ssd', sizeGiB: 375 },
+      { type: 'pd-ssd', sizeGiB: 20 },
+      { type: 'pd-ssd', sizeGiB: 50 },
+    ]);
+  });
+
+  it('the stored machine record drives the backlog of an interval without disks (F7-3)', async () => {
+    const world = await gceWorld({ discovery: { every: '1m' } });
+    const { created, h0 } = await runningAtHour(world);
+    await world.discover(1_000);
+    // The listing the provider gave (discovery's record) says the family takes Hyperdisk only.
+    const { rowCount } = await world.fixture.database.query(
+      `UPDATE provider_machines SET machine = machine || '{"bootDiskType":"hyperdisk-balanced"}'::jsonb
+        WHERE instance_id = $1`,
+      [created.id],
+    );
+    expect(rowCount).toBe(1);
+    await stopAt(world, created.id, h0 + HOUR);
+    await world.fixture.database.query(
+      `UPDATE instance_usage_intervals SET shape = shape - 'disks' WHERE instance_id = $1`,
+      [created.id],
+    );
+    await moveTo(world, h0 + 3 * HOUR + settle);
+    await meter(world, usageJob);
+    const rows = await windowsOf(world, 'instance', created.id);
+    expect(hours(rows, 'disk.hyperdisk-balanced.gib.hours')).toEqual([
+      [h0, 100],
+      [h0 + HOUR, 100],
+      [h0 + 2 * HOUR, 100],
+    ]);
+    expect(hours(rows, 'disk.pd-balanced.gib.hours')).toEqual([]);
+  });
+
   it('modes: platform-fee and none bill no disks; a grant or flavor meter does not cover them', () => {
     const disks = [
       { type: 'pd-balanced', sizeGiB: 100 },
@@ -763,6 +841,28 @@ describe('disks', () => {
     ).toEqual({ disks: [{ type: 'pd-ssd', sizeGiB: 30 }], unknownTypes: [] });
     // No flavor disk (an attached VM) and nothing reported: nothing to bill.
     expect(disksOfRecord(undefined, 0).disks).toEqual([]);
+    // A reported disk with no readable type is named, and metered as pd-balanced.
+    expect(disksOfRecord({ disks: [{ sizeGiB: 10, boot: true } as never] }, 0)).toEqual({
+      disks: [{ type: 'pd-balanced', sizeGiB: 10 }],
+      unknownTypes: ['unreadable'],
+    });
+    // Reported disks are sorted by (type, size).
+    expect(
+      disksOfRecord(
+        {
+          disks: [
+            { type: 'pd-ssd', sizeGiB: 50 },
+            { type: 'local-ssd', sizeGiB: 375 },
+            { type: 'pd-ssd', sizeGiB: 20 },
+          ],
+        },
+        0,
+      ).disks,
+    ).toEqual([
+      { type: 'local-ssd', sizeGiB: 375 },
+      { type: 'pd-ssd', sizeGiB: 20 },
+      { type: 'pd-ssd', sizeGiB: 50 },
+    ]);
     expect(disksOfRecord({ disks: [{ type: 'pd-ssd', sizeGiB: 0 }] }, 0).disks).toEqual([]);
   });
 
