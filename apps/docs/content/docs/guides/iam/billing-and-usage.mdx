@@ -401,7 +401,7 @@ an account with `billingExport` set (see [Google Compute Engine](/docs/guides/vp
 
 - **Reads.** Every `vps({ costs: { every } })` (default `6h`), each account's last `lookbackDays` (default 3, at
   most 31) are read outside any transaction and stored in `provider_costs` in batches of 500, keyed by the
-  provider's stable row id. A run stays within `passBudgetMs` (default 50 s) and continues in a follow-up run. A
+  provider's stable row id. A run stays within `passBudgetMs` (default 50 s, from 5 s to 55 s) and continues in a follow-up run. A
   rate limit or an outage backs the account off (5 minutes without a retry hint).
 - **Attribution,** in order: the row's `better-compute-instance` label (the instance's tenant), its
   `better-compute-tenant` label, then, on a tenant's own (BYO) account, that tenant. Anything else is

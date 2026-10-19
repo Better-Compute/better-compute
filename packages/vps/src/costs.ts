@@ -74,7 +74,8 @@ export interface CostsOptions {
   leakToleranceHours?: number;
   /**
    * How long one account's run may take (default 50 s, under the 60 s claim): the read gets what is left of it (at
-   * most 45 s), and writing stops between batches once it has passed, continuing in a run enqueued at once.
+   * most 45 s), and writing stops between batches once it has passed, continuing in a run enqueued at once. From
+   * 5 s to 55 s.
    */
   passBudgetMs?: number;
 }
@@ -464,9 +465,10 @@ async function scanAccount(
   after?: AfterCostPass,
 ): Promise<void> {
   // One deadline for the run (it stays under claimTtlMs, 60 s): the read gets what is left of it, at most 45 s,
-  // and writing stops between batches once it has passed, leaving the rest to a run enqueued at once.
-  const deadline = performance.now() + settings.passBudgetMs;
-  const left = () => deadline - performance.now();
+  // and writing stops between batches once it has passed, leaving the rest to a run enqueued at once. Measured on
+  // the run's clock.
+  const deadline = deps.clock.now() + settings.passBudgetMs;
+  const left = () => deadline - deps.clock.now();
   const account = await context.sql.transaction((tx) => readAccount(tx, accountId));
   if (!account) return;
   const client = await deps.clients.client(account, deps);
@@ -477,7 +479,7 @@ async function scanAccount(
   const startedAt = started[0]!.at;
   const now = deps.clock.now();
   const window = { from: now - settings.lookbackMs, to: now };
-  const readBudgetMs = Math.max(1, Math.min(costsBudgetMs, left()));
+  const readBudgetMs = Math.max(1, Math.floor(Math.min(costsBudgetMs, left())));
   const signal = AbortSignal.any([context.signal, AbortSignal.timeout(readBudgetMs)]);
   const call: CallContext = {
     idempotencyKey: `costs:${account.id}`,
@@ -914,10 +916,10 @@ export function costSettings(
       'vps({ costs: { leakToleranceHours } }) must be a number of hours of at least 0',
     );
   const passBudgetMs = options.passBudgetMs ?? costsPassBudgetMs;
-  if (!Number.isFinite(passBudgetMs) || passBudgetMs < 0 || passBudgetMs > 55_000)
+  if (!Number.isFinite(passBudgetMs) || passBudgetMs < 5_000 || passBudgetMs > 55_000)
     throw new ComputeError(
       'INVALID_CONFIG',
-      'vps({ costs: { passBudgetMs } }) must be from 0 to 55000 (a run stays under the 60 s claim)',
+      'vps({ costs: { passBudgetMs } }) must be from 5000 to 55000 (a run stays under the 60 s claim)',
     );
   return {
     every,

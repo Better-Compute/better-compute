@@ -26,6 +26,8 @@ interface Ledger {
   failNext?: Error;
   /** Every window read, in order. */
   windows: { from: number; to: number }[];
+  /** Runs inside every read before it yields (e.g. moving the clock: a slow export). */
+  onRead?: () => Promise<void>;
 }
 
 /** fake-gce with a cost ledger: the same VMs and calls, plus `costs`. */
@@ -47,6 +49,7 @@ function costingGce(
       return Object.assign(impl, {
         async *costs(window: { from: number; to: number }) {
           ledger.windows.push(window);
+          await ledger.onRead?.();
           const failure = ledger.failNext;
           if (failure) {
             delete ledger.failNext;
@@ -1293,8 +1296,13 @@ describe('ingestion fix round 1 (F15-1, F15-2)', () => {
   });
 
   it('a pass out of time stops between batches and continues in another run', async () => {
-    const world = await costWorld({ costs: { passBudgetMs: 0 } });
+    const world = await costWorld({ costs: { passBudgetMs: 5_000 } });
     const at = world.now() - DAY;
+    // The read takes 6 s of the run's clock: the 5 s budget is gone before the first batch is written.
+    world.ledger.onRead = async () => {
+      await world.fixture.advance(6_000);
+      delete world.ledger.onRead;
+    };
     for (let index = 0; index < 501; index++)
       world.ledger.rows.push(
         costRow({ sourceRowId: `row-${String(index).padStart(4, '0')}`, usageStart: at }),
@@ -1318,7 +1326,9 @@ describe('ingestion fix round 1 (F15-1, F15-2)', () => {
     expect(await ours()).toBe(501);
     const [pass] = await ingested();
     expect(pass!.data).toMatchObject({ rows: 501, inserted: 1, unchanged: 500 });
-    expect(() => vps({ costs: { passBudgetMs: 60_000 } })).toThrow(/passBudgetMs/);
+    for (const passBudgetMs of [0, 4_999, 60_000, Number.NaN])
+      expect(() => vps({ costs: { passBudgetMs } })).toThrow(/passBudgetMs/);
+    expect(() => vps({ costs: { passBudgetMs: 5_000 } })).not.toThrow();
   });
 
   it('transient failures without a hint back off 5 minutes; others wait a period', async () => {
