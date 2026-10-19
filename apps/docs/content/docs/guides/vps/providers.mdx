@@ -4,8 +4,56 @@ description: Provider accounts, the defineProvider contract, the Hetzner Cloud, 
 metaTitle: VPS providers and provider accounts
 icon: Cloud
 status: beta
-packages: ['@better-compute/vps', '@better-compute/provider-hetzner', '@better-compute/provider-proxmox', '@better-compute/provider-gcp']
-sources: ['packages/vps/src/accounts.ts', 'packages/vps/src/provider.ts', 'packages/vps/src/conformance.ts', 'packages/vps/src/module.ts', 'packages/vps/src/lifecycle.ts', 'packages/core/src/extension.ts', 'packages/core/src/manifest.ts', 'packages/provider-hetzner/README.md', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-hetzner/src/robot.ts', 'packages/provider-proxmox/README.md', 'packages/provider-proxmox/src/proxmox.ts', 'packages/provider-gcp/README.md', 'packages/provider-gcp/src/compute.ts', 'packages/provider-gcp/src/reservations.ts', 'packages/vps/src/discovery.ts', 'packages/vps/src/attach.ts', 'packages/vps/src/provider-reservations.ts', 'packages/vps/src/billing.ts', 'packages/vps/src/instance-usage.ts', 'packages/vps/src/reservation-grants.ts', 'packages/vps/src/costs.ts', 'packages/provider-gcp/src/costs.ts', 'packages/provider-gcp/src/prices.ts', 'packages/server/src/api/secrets.ts', 'packages/server/src/ports.ts', 'packages/pki/src/secrets.ts', 'tests/vps-instances.test.ts', 'tests/vps-provider.test.ts', 'tests/provider-hetzner.test.ts', 'tests/provider-proxmox.test.ts', 'tests/provider-gcp.test.ts', 'tests/gcp-end-to-end.test.ts', 'tests/root-issued-compute.test.ts', 'tests/root-issued-compute-iam.test.ts', 'tests/vps-account-secret-scope.test.ts']
+packages:
+  [
+    '@better-compute/vps',
+    '@better-compute/provider-hetzner',
+    '@better-compute/provider-proxmox',
+    '@better-compute/provider-gcp',
+  ]
+sources:
+  [
+    'packages/vps/src/accounts.ts',
+    'packages/vps/src/provider.ts',
+    'packages/vps/src/conformance.ts',
+    'packages/vps/src/module.ts',
+    'packages/vps/src/lifecycle.ts',
+    'packages/core/src/extension.ts',
+    'packages/core/src/manifest.ts',
+    'packages/provider-hetzner/README.md',
+    'packages/provider-hetzner/src/cloud.ts',
+    'packages/provider-hetzner/src/robot.ts',
+    'packages/provider-proxmox/README.md',
+    'packages/provider-proxmox/src/proxmox.ts',
+    'packages/provider-gcp/README.md',
+    'packages/provider-gcp/src/compute.ts',
+    'packages/provider-gcp/src/reservations.ts',
+    'packages/vps/src/discovery.ts',
+    'packages/vps/src/attach.ts',
+    'packages/vps/src/provider-reservations.ts',
+    'packages/vps/src/billing.ts',
+    'packages/vps/src/instance-usage.ts',
+    'packages/vps/src/reservation-grants.ts',
+    'packages/vps/src/costs.ts',
+    'packages/provider-gcp/src/costs.ts',
+    'packages/provider-gcp/src/prices.ts',
+    'packages/server/src/api/secrets.ts',
+    'packages/server/src/ports.ts',
+    'packages/pki/src/secrets.ts',
+    'tests/vps-instances.test.ts',
+    'tests/vps-provider.test.ts',
+    'tests/provider-hetzner.test.ts',
+    'tests/provider-proxmox.test.ts',
+    'tests/provider-gcp.test.ts',
+    'tests/gcp-end-to-end.test.ts',
+    'tests/root-issued-compute.test.ts',
+    'tests/root-issued-compute-iam.test.ts',
+    'tests/vps-account-secret-scope.test.ts',
+    'packages/provider-gcp/src/federation.ts',
+    'packages/provider-gcp/src/config.ts',
+    'tests/gcp-federation.test.ts',
+    'tests/vps-account-federation.test.ts',
+  ]
 ---
 
 A provider pool runs its instances on someone else's infrastructure: a public cloud, or a hypervisor cluster you
@@ -45,7 +93,12 @@ configured secret store and answers with its reference; nothing ever reads it ba
 ```ts
 const { ref } = await compute.api.secrets.put(
   { token },
-  { tenantId: 'root', name: 'hcloud-token', value: process.env.HCLOUD_TOKEN!, idempotencyKey: 'hcloud-token-1' },
+  {
+    tenantId: 'root',
+    name: 'hcloud-token',
+    value: process.env.HCLOUD_TOKEN!,
+    idempotencyKey: 'hcloud-token-1',
+  },
 );
 // ref: 'secret://root/sec_…'
 ```
@@ -66,7 +119,7 @@ name any `secret://`, `vault://` or `env://` reference. An account of any other 
 vps({
   providers: [hetznerCloud, gcp],
   // An entry ending in / allows every path under it; any other entry allows that one path.
-  tenantVaultPaths: { 'org_acme': ['kv/tenants/acme/'] },
+  tenantVaultPaths: { org_acme: ['kv/tenants/acme/'] },
 });
 ```
 
@@ -85,7 +138,12 @@ gets the same context to check against. The root tenant is the deployment's `roo
 ```ts
 const account = await compute.api.providerAccounts.create(
   { token },
-  { tenantId: 'root', provider: 'hetzner-cloud', name: 'main', config: { token: ref, location: 'fsn1' } },
+  {
+    tenantId: 'root',
+    provider: 'hetzner-cloud',
+    name: 'main',
+    config: { token: ref, location: 'fsn1' },
+  },
 );
 // → { id: 'pacct_…', tenantId: 'root', provider: 'hetzner-cloud', name: 'main',
 //     config: { token: 'secret://root/sec_…', location: 'fsn1' }, version: 1 }
@@ -93,29 +151,53 @@ const account = await compute.api.providerAccounts.create(
 
 <TypeTable
   type={{
-    tenantId: { type: 'string', description: 'The tenant that owns the account, usually the root (platform) tenant.', required: true },
-    provider: { type: 'string', description: 'The id of a provider passed to vps({ providers }). An unknown id is INVALID_INPUT, with details.known listing the registered ones.', required: true },
-    name: { type: 'string', description: '1 to 63 lower-case letters, digits, dots, underscores or hyphens. Unique in the tenant (CONFLICT otherwise).', required: true },
-    config: { type: 'object', description: "Validated by the provider's manifest; defaults are filled in. Issues come back as INVALID_INPUT with details.issues [{ message, path }].", default: '{}' },
-    idempotencyKey: { type: 'string', description: 'Makes the account id deterministic from the tenant, the caller and the key, as FleetConfig needs. A retry with the same provider and name returns the account; anything else under the key is CONFLICT.' },
+    tenantId: {
+      type: 'string',
+      description: 'The tenant that owns the account, usually the root (platform) tenant.',
+      required: true,
+    },
+    provider: {
+      type: 'string',
+      description:
+        'The id of a provider passed to vps({ providers }). An unknown id is INVALID_INPUT, with details.known listing the registered ones.',
+      required: true,
+    },
+    name: {
+      type: 'string',
+      description:
+        '1 to 63 lower-case letters, digits, dots, underscores or hyphens. Unique in the tenant (CONFLICT otherwise).',
+      required: true,
+    },
+    config: {
+      type: 'object',
+      description:
+        "Validated by the provider's manifest; defaults are filled in. Issues come back as INVALID_INPUT with details.issues [{ message, path }].",
+      default: '{}',
+    },
+    idempotencyKey: {
+      type: 'string',
+      description:
+        'Makes the account id deterministic from the tenant, the caller and the key, as FleetConfig needs. A retry with the same provider and name returns the account; anything else under the key is CONFLICT.',
+    },
   }}
 />
 
 The rest of the group:
 
-| Method                                                        | Action                     | What it does                                                                                             |
-| ------------------------------------------------------------- | -------------------------- | -------------------------------------------------------------------------------------------------------- |
-| [list](/docs/reference/api/provider-accounts#list)            | `compute:providers:read`   | The tenant's accounts, by name.                                                                          |
-| [get](/docs/reference/api/provider-accounts#get)              | `compute:providers:read`   | One account; another tenant's is `NOT_FOUND`.                                                            |
-| [offers](/docs/reference/api/provider-accounts#offers)        | `compute:providers:read`   | The provider's catalog through this account.                                                             |
-| [update](/docs/reference/api/provider-accounts#update)        | `compute:providers:manage` | Replaces `config` (validated again) and bumps `version`; the next call builds a fresh client.            |
-| [delete](/docs/reference/api/provider-accounts#delete)        | `compute:providers:manage` | Deletes the account, or `INVALID_STATE` while a non-archived pool or a non-deleted instance uses it.     |
-| [bootstrap](/docs/reference/api/provider-accounts#bootstrap)  | `compute:providers:manage` | Turns one of the account's machines into a bcd host of a pool; see [bootstrapping machines](/docs/extending/providers#bootstrapping-machines). |
-| [machines](/docs/reference/api/provider-accounts#machines)    | `compute:providers:read`   | The machines discovery last saw in the account, free, attached or all; see [discovery and attach](#discovery-and-attach). |
-| [discover](/docs/reference/api/provider-accounts#discover)    | `compute:providers:manage` | Runs the account's next discovery pass now; `wait: true` holds the answer for at most 30 s.               |
-| [reservations](/docs/reference/api/provider-accounts#reservations) | `compute:providers:read` | The provider's capacity reservations with `free` and `pending`; see [provider reservations](#provider-reservations). |
-| [bindReservation](/docs/reference/api/provider-accounts#bindreservation) | `compute:providers:manage` | Makes a `ready` reservation a flavor of a provider pool.                                           |
-| [unbindReservation](/docs/reference/api/provider-accounts#unbindreservation) | `compute:providers:manage` | Removes the binding; the flavor is deleted, or archived while instances use it.                 |
+| Method                                                                       | Action                     | What it does                                                                                                                                      |
+| ---------------------------------------------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [list](/docs/reference/api/provider-accounts#list)                           | `compute:providers:read`   | The tenant's accounts, by name.                                                                                                                   |
+| [federationSetup](/docs/reference/api/provider-accounts#federationsetup)     | `compute:providers:read`   | The issuer and the exact subject to trust at the cloud for an account you are about to create; see [keyless GCP accounts](#keyless-gcp-accounts). |
+| [get](/docs/reference/api/provider-accounts#get)                             | `compute:providers:read`   | One account; another tenant's is `NOT_FOUND`.                                                                                                     |
+| [offers](/docs/reference/api/provider-accounts#offers)                       | `compute:providers:read`   | The provider's catalog through this account.                                                                                                      |
+| [update](/docs/reference/api/provider-accounts#update)                       | `compute:providers:manage` | Replaces `config` (validated again) and bumps `version`; the next call builds a fresh client.                                                     |
+| [delete](/docs/reference/api/provider-accounts#delete)                       | `compute:providers:manage` | Deletes the account, or `INVALID_STATE` while a non-archived pool or a non-deleted instance uses it.                                              |
+| [bootstrap](/docs/reference/api/provider-accounts#bootstrap)                 | `compute:providers:manage` | Turns one of the account's machines into a bcd host of a pool; see [bootstrapping machines](/docs/extending/providers#bootstrapping-machines).    |
+| [machines](/docs/reference/api/provider-accounts#machines)                   | `compute:providers:read`   | The machines discovery last saw in the account, free, attached or all; see [discovery and attach](#discovery-and-attach).                         |
+| [discover](/docs/reference/api/provider-accounts#discover)                   | `compute:providers:manage` | Runs the account's next discovery pass now; `wait: true` holds the answer for at most 30 s.                                                       |
+| [reservations](/docs/reference/api/provider-accounts#reservations)           | `compute:providers:read`   | The provider's capacity reservations with `free` and `pending`; see [provider reservations](#provider-reservations).                              |
+| [bindReservation](/docs/reference/api/provider-accounts#bindreservation)     | `compute:providers:manage` | Makes a `ready` reservation a flavor of a provider pool.                                                                                          |
+| [unbindReservation](/docs/reference/api/provider-accounts#unbindreservation) | `compute:providers:manage` | Removes the binding; the flavor is deleted, or archived while instances use it.                                                                   |
 
 Clients are built on demand from the validated config and cached per account id and version. A failed build is not
 cached.
@@ -125,7 +207,10 @@ cached.
 <TypeTable
   type={{
     kind: { type: "'metal' | 'vps'", description: 'Only offers of this kind.' },
-    region: { type: 'string', description: "A provider region, such as fsn1. Providers default to the account's own." },
+    region: {
+      type: 'string',
+      description: "A provider region, such as fsn1. Providers default to the account's own.",
+    },
     gpuModel: { type: 'string', description: 'Only offers with this GPU model.' },
     minGpus: { type: 'number', description: '0 to 64.' },
     minVcpu: { type: 'number', description: '0 to 1024.' },
@@ -217,11 +302,11 @@ were given. The account, its credentials, the pool and its quotas stay the platf
    offered pool (a reservation-backed flavor included), and builds
    [networks](/docs/guides/vps/networking#tenant-networks), subnets and firewall rules on it.
 
-| Who | Can | Cannot |
-|---|---|---|
-| Root (root realm, root administrator, user session with MFA: `ROOT_OVERRIDE`) | Everything above, in any tenant, decided in the tenant that holds the resource | Bypass state rules (an account still in use is `INVALID_STATE`) |
-| A customer tenant, with grants in its own tenant | `instances:*` on its instances, `networks:*` on its networks, its own provider accounts (with their own key), pools on those, attach and reservations on them | Read or change a root account (`get`, `offers`, `machines`, `discover`, `reservations`, `bindReservation`, `unbindReservation`, `bootstrap`, `update`, `delete`); build a pool on an account that is not its own; attach from a root account; change the root pool, its offers or flavors; set quotas; make anyone but itself the owner of an instance (`ownerIdentityId` on `create` or `attach`) |
-| Another customer tenant | The same, for its own resources | See or act on the first tenant's instances, networks and rules; target them in its rules; put instances on its networks |
+| Who                                                                           | Can                                                                                                                                                           | Cannot                                                                                                                                                                                                                                                                                                                                                                                             |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Root (root realm, root administrator, user session with MFA: `ROOT_OVERRIDE`) | Everything above, in any tenant, decided in the tenant that holds the resource                                                                                | Bypass state rules (an account still in use is `INVALID_STATE`)                                                                                                                                                                                                                                                                                                                                    |
+| A customer tenant, with grants in its own tenant                              | `instances:*` on its instances, `networks:*` on its networks, its own provider accounts (with their own key), pools on those, attach and reservations on them | Read or change a root account (`get`, `offers`, `machines`, `discover`, `reservations`, `bindReservation`, `unbindReservation`, `bootstrap`, `update`, `delete`); build a pool on an account that is not its own; attach from a root account; change the root pool, its offers or flavors; set quotas; make anyone but itself the owner of an instance (`ownerIdentityId` on `create` or `attach`) |
+| Another customer tenant                                                       | The same, for its own resources                                                                                                                               | See or act on the first tenant's instances, networks and rules; target them in its rules; put instances on its networks                                                                                                                                                                                                                                                                            |
 
 IAM is the first gate: a tenant's grants are decided in its own tenant, on resources compute projects there. Compute
 then holds these rules itself, so a tenant holding `compute:*` in its own tenant still cannot use them to reach
@@ -277,7 +362,11 @@ that controls what it was issued:
       "actions": ["compute:pools:read", "compute:flavors:read"],
       "resources": ["compute-pool/*"]
     },
-    { "effect": "allow", "actions": ["compute:instances:create"], "resources": ["compute-instance/*"] },
+    {
+      "effect": "allow",
+      "actions": ["compute:instances:create"],
+      "resources": ["compute-instance/*"]
+    },
     {
       "effect": "allow",
       "actions": ["compute:instances:read", "compute:instances:update", "compute:instances:delete"],
@@ -363,16 +452,16 @@ you call the API, not once up front.
 
 The client is a `ProviderImpl`:
 
-| Method                                                  | Contract                                                                                                                                  |
-| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `listOffers(query)`                                     | Offers matching the query; an impossible query returns `[]`.                                                                              |
-| `create({ offerId, image, userData, name }, call)`      | Idempotent by `call.idempotencyKey` (vps passes the instance id): a retried create returns the same machine.                              |
-| `get(id, call)`                                         | The machine, or `undefined` when it does not exist.                                                                                       |
-| `delete(id, call)`                                      | A machine that is already gone counts as deleted: `NOT_FOUND` is success.                                                                 |
-| `power?(id, action, call)`                              | `on`, `off`, `graceful-off`, `reset`, `graceful-restart`, `cycle`, `nmi`. vps uses `on` and `graceful-off`; without `power`, a stop or start is `UNSUPPORTED` and fails the instance. |
-| `reinstall?`, `rescue?`, `list?`, `bootstrap?`          | Optional. `bootstrap` delivers a single-use join token to machines that will run bcd, and never through user data.                        |
-| `costs?(window, call)`                                  | Optional ([billing](#billing)). The account's billed cost rows whose usage started in `[from, to)`, as `ProviderCostRecord`s in integer micros, each with a `sourceRowId` that stays the same when the provider re-exports the row. Read outside any transaction. |
-| `listPrices?(query, call)`                              | Optional. The provider's list prices for `billing.proposePrices`, before any margin.                                                      |
+| Method                                             | Contract                                                                                                                                                                                                                                                          |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `listOffers(query)`                                | Offers matching the query; an impossible query returns `[]`.                                                                                                                                                                                                      |
+| `create({ offerId, image, userData, name }, call)` | Idempotent by `call.idempotencyKey` (vps passes the instance id): a retried create returns the same machine.                                                                                                                                                      |
+| `get(id, call)`                                    | The machine, or `undefined` when it does not exist.                                                                                                                                                                                                               |
+| `delete(id, call)`                                 | A machine that is already gone counts as deleted: `NOT_FOUND` is success.                                                                                                                                                                                         |
+| `power?(id, action, call)`                         | `on`, `off`, `graceful-off`, `reset`, `graceful-restart`, `cycle`, `nmi`. vps uses `on` and `graceful-off`; without `power`, a stop or start is `UNSUPPORTED` and fails the instance.                                                                             |
+| `reinstall?`, `rescue?`, `list?`, `bootstrap?`     | Optional. `bootstrap` delivers a single-use join token to machines that will run bcd, and never through user data.                                                                                                                                                |
+| `costs?(window, call)`                             | Optional ([billing](#billing)). The account's billed cost rows whose usage started in `[from, to)`, as `ProviderCostRecord`s in integer micros, each with a `sourceRowId` that stays the same when the provider re-exports the row. Read outside any transaction. |
+| `listPrices?(query, call)`                         | Optional. The provider's list prices for `billing.proposePrices`, before any margin.                                                                                                                                                                              |
 
 A machine is an `ExternalMachine`: `{ id, name?, state, offerId?, region?, addresses }`, with `state` one of
 `pending`, `running`, `stopped`, `rescue`, `deleting`, `deleted`, `error` or `unknown`. Each call gets a
@@ -423,8 +512,17 @@ report it. Every case cleans up the machines it made.
 
 <TypeTable
   type={{
-    token: { type: 'SecretRef', description: 'A Hetzner Cloud API token with read and write access. Resolved on every request.', required: true },
-    location: { type: "'fsn1' | 'nbg1' | 'hel1' | 'ash' | 'hil' | 'sin'", description: 'Where servers are created.', default: "'fsn1'" },
+    token: {
+      type: 'SecretRef',
+      description:
+        'A Hetzner Cloud API token with read and write access. Resolved on every request.',
+      required: true,
+    },
+    location: {
+      type: "'fsn1' | 'nbg1' | 'hel1' | 'ash' | 'hil' | 'sin'",
+      description: 'Where servers are created.',
+      default: "'fsn1'",
+    },
   }}
 />
 
@@ -460,17 +558,47 @@ cluster.
 
 <TypeTable
   type={{
-    url: { type: 'string', description: 'The API endpoint, such as https://pve.example.com:8006.', required: true },
-    token: { type: 'SecretRef', description: 'A reference to a PVE API token user@realm!tokenid=secret.', required: true },
-    region: { type: 'string', description: 'The region offers and machines report.', default: "'pve'" },
+    url: {
+      type: 'string',
+      description: 'The API endpoint, such as https://pve.example.com:8006.',
+      required: true,
+    },
+    token: {
+      type: 'SecretRef',
+      description: 'A reference to a PVE API token user@realm!tokenid=secret.',
+      required: true,
+    },
+    region: {
+      type: 'string',
+      description: 'The region offers and machines report.',
+      default: "'pve'",
+    },
     node: { type: 'string', description: "The node to clone onto; default the template's node." },
     pool: { type: 'string', description: 'A resource pool for new VMs.' },
     storage: { type: 'string', description: 'Target storage for full clones.' },
-    fullClone: { type: 'boolean', description: 'false for linked clones, which need the template on the same node and storage that supports them.', default: 'true' },
-    disk: { type: 'string', description: "The boot disk an offer's size grows.", default: "'scsi0'" },
+    fullClone: {
+      type: 'boolean',
+      description:
+        'false for linked clones, which need the template on the same node and storage that supports them.',
+      default: 'true',
+    },
+    disk: {
+      type: 'string',
+      description: "The boot disk an offer's size grows.",
+      default: "'scsi0'",
+    },
     vmidMin: { type: 'number', description: 'Lowest VMID the account uses.', default: '100000000' },
-    vmidMax: { type: 'number', description: 'Highest VMID the account uses.', default: '999999999' },
-    offers: { type: 'string[]', description: 'The sizes offered, such as 2c-4g (vCPUs and GiB of memory) or 4c-16g-100d (plus GiB of boot disk). Each is an offer id.', default: "['1c-2g', '2c-4g', '4c-8g', '8c-32g']" },
+    vmidMax: {
+      type: 'number',
+      description: 'Highest VMID the account uses.',
+      default: '999999999',
+    },
+    offers: {
+      type: 'string[]',
+      description:
+        'The sizes offered, such as 2c-4g (vCPUs and GiB of memory) or 4c-16g-100d (plus GiB of boot disk). Each is an offer id.',
+      default: "['1c-2g', '2c-4g', '4c-8g', '8c-32g']",
+    },
   }}
 />
 
@@ -497,9 +625,10 @@ node headroom that offers report.
   size, disk size and cloud-init volume.
 
 <Callout type="warn" title="Proxmox needs writeSnippet under vps">
-The PVE API cannot upload cloud-init snippets, so without `proxmoxProvider({ writeSnippet })` a create refuses any
-user data beyond an empty `#cloud-config` with `UNSUPPORTED`. vps always renders at least a hostname into user data,
-so an account used by vps needs `writeSnippet`; otherwise every instance ends in `error`.
+  The PVE API cannot upload cloud-init snippets, so without `proxmoxProvider({writeSnippet})` a
+  create refuses any user data beyond an empty `#cloud-config` with `UNSUPPORTED`. vps always
+  renders at least a hostname into user data, so an account used by vps needs `writeSnippet`;
+  otherwise every instance ends in `error`.
 </Callout>
 
 ```ts
@@ -534,7 +663,11 @@ await compute.api.providerAccounts.create(
     tenantId: 'root',
     provider: 'gcp',
     name: 'main',
-    config: { projectId: 'my-project', zones: ['us-central1-a'], credentials: 'secret://gcp/sa-key' },
+    config: {
+      projectId: 'my-project',
+      zones: ['us-central1-a'],
+      credentials: 'secret://gcp/sa-key',
+    },
   },
 );
 ```
@@ -542,16 +675,50 @@ await compute.api.providerAccounts.create(
 <TypeTable
   type={{
     projectId: { type: 'string', description: 'The Google Cloud project id.', required: true },
-    zones: { type: 'string[]', description: 'At least one zone. Offers, discovery and reservations are limited to these.', required: true },
-    credentials: { type: 'SecretRef', description: 'A service-account key JSON. Absent: the host identity (the tokenSource option, else the metadata server), which only a root-tenant account may use.' },
-    impersonate: { type: 'string', description: 'A service-account email to impersonate with the base credentials.' },
-    network: { type: 'string', description: 'The VPC that create uses for an instance on no tenant network.', default: "'default'" },
+    zones: {
+      type: 'string[]',
+      description: 'At least one zone. Offers, discovery and reservations are limited to these.',
+      required: true,
+    },
+    credentials: {
+      type: 'SecretRef',
+      description:
+        'A service-account key JSON. Absent: the host identity (the tokenSource option, else the metadata server), which only a root-tenant account may use.',
+    },
+    impersonate: {
+      type: 'string',
+      description: 'A service-account email to impersonate with the base credentials.',
+    },
+    federationAudience: {
+      type: 'string',
+      description:
+        "Keyless sign-in: the tenant's workload identity pool provider, //iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>. Never together with credentials; may be combined with impersonate. See keyless GCP accounts.",
+    },
+    network: {
+      type: 'string',
+      description: 'The VPC that create uses for an instance on no tenant network.',
+      default: "'default'",
+    },
     subnet: { type: 'string', description: 'The subnetwork that create uses with that network.' },
-    imageProject: { type: 'string', description: 'Where image families resolve.', default: "'ubuntu-os-cloud'" },
+    imageProject: {
+      type: 'string',
+      description: 'Where image families resolve.',
+      default: "'ubuntu-os-cloud'",
+    },
     diskGiB: { type: 'number', description: 'Boot disk size.', default: '100' },
-    discoverLabel: { type: 'string', description: 'key=value: discovery yields only VMs carrying this label.' },
-    billingExport: { type: 'string', description: 'project.dataset.table of the Cloud Billing detailed (resource-level) BigQuery export: the vps.costs worker reads provider costs from it.' },
-    billingExportLocation: { type: 'string', description: "The export dataset's BigQuery location (US, EU, us-central1, …)." },
+    discoverLabel: {
+      type: 'string',
+      description: 'key=value: discovery yields only VMs carrying this label.',
+    },
+    billingExport: {
+      type: 'string',
+      description:
+        'project.dataset.table of the Cloud Billing detailed (resource-level) BigQuery export: the vps.costs worker reads provider costs from it.',
+    },
+    billingExportLocation: {
+      type: 'string',
+      description: "The export dataset's BigQuery location (US, EU, us-central1, …).",
+    },
   }}
 />
 
@@ -584,8 +751,9 @@ future reservations), plus `roles/iam.serviceAccountTokenCreator` on the target 
 - **Credentials.** A key is exchanged for tokens at the OAuth endpoint and cached until a minute before expiry;
   without one the host's own identity is used: `gcpProvider({ tokenSource })` (a workload-identity client), else the
   metadata server. That identity is the control plane's, so only an account of the root (platform) tenant may rely on
-  it: a tenant's account must name its own key in `credentials` (`impersonate` alone is not enough), or
-  `providerAccounts.create` and `update` refuse it with `INVALID_CONFIG`. A `tokenSource` never overrides an account's
+  it: a tenant's account must name its own key in `credentials` or sign in keyless with `federationAudience` (see
+  [keyless GCP accounts](#keyless-gcp-accounts)); `impersonate` alone is not enough, and without either
+  `providerAccounts.create` and `update` refuse the account with `INVALID_CONFIG`. A `tokenSource` never overrides an account's
   `credentials`. The key must be the tenant's own (`secret://<tenant>/…`, see
   [above](#whose-references-an-account-may-name)). Tokens are never logged.
 - **Pinned token endpoint.** The key JSON is the tenant's, and the control plane POSTs the signed JWT to its
@@ -595,6 +763,127 @@ future reservations), plus `roles/iam.serviceAccountTokenCreator` on the target 
   nothing is fetched.
 - **Errors** map to `ComputeError` codes (`NOT_FOUND`, `CONFLICT`, `RATE_LIMITED` with `retryAfterMs`,
   `QUOTA_EXCEEDED`, `ACCESS_DENIED`, `INVALID_INPUT`, `UNAVAILABLE`), with `details: { provider: 'gcp', status, reason }`.
+
+### Keyless GCP accounts
+
+A tenant need not hand over a service-account key. With `federationAudience`, the control plane signs in to the
+tenant's own project through [workload identity federation](https://cloud.google.com/iam/docs/workload-identity-federation):
+Better Compute is the OIDC issuer (`pki.workloadIssuer`, served at `{basePath}/workload/.well-known/openid-configuration`
+and `{basePath}/workload/jwks.json`), and the tenant's workload identity pool provider trusts it. The host must run a
+workload issuer; without one an account naming `federationAudience` is `INVALID_CONFIG` (`details.reason`
+`noWorkloadIssuer`). An account names either `credentials` or `federationAudience`, never both
+(`credentialsAndFederation`).
+
+Every account has exactly one subject, `compute-account:<tenantId>/<provider>/<name>`, which vps alone builds. The
+tenant's pool provider must trust that subject and no other: a broader condition, such as one matching every subject
+that starts with `compute-account:`, would let one account, or one tenant, act as another. `providerAccounts.create`
+and `update` check this before the account is stored (see the errors below).
+
+1. **Ask for the setup.** Call `providerAccounts.federationSetup` with the `provider` and the `name` you will give
+   `create`. It calls no provider and stores nothing, and answers with the exact values to use:
+
+   ```ts
+   const setup = await compute.api.providerAccounts.federationSetup(
+     { token },
+     { tenantId: 'org_acme', provider: 'gcp', name: 'gcp-main' },
+   );
+   // → {
+   //   issuer: 'https://compute.example.com/api/compute/workload',
+   //   jwksUri: 'https://compute.example.com/api/compute/workload/jwks.json',
+   //   subject: 'compute-account:org_acme/gcp/gcp-main',
+   //   attributeCondition: 'assertion.sub == "compute-account:org_acme/gcp/gcp-main"',
+   //   allowedAudienceHint: 'https://iam.googleapis.com/projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/<POOL>/providers/<PROVIDER>',
+   // }
+   ```
+
+   An unknown `provider` is `INVALID_INPUT`, as in `create`; a host with no workload issuer is `INVALID_CONFIG`
+   (`details.reason` `noWorkloadIssuer`). Give `create` the same `provider` and `name`: the subject is derived from
+   them, so another name is another subject.
+
+2. **Create a workload identity pool** in the tenant's project:
+
+   ```sh
+   gcloud iam workload-identity-pools create my-pool \
+     --project=my-project \
+     --location=global \
+     --display-name="Better Compute"
+   ```
+
+3. **Create an OIDC provider** in the pool that trusts the `issuer`, maps the subject, and admits exactly the
+   `attributeCondition` from step 1:
+
+   ```sh
+   gcloud iam workload-identity-pools providers create-oidc my-provider \
+     --project=my-project \
+     --location=global \
+     --workload-identity-pool=my-pool \
+     --issuer-uri=https://compute.example.com/api/compute/workload \
+     --attribute-mapping=google.subject=assertion.sub \
+     --attribute-condition='assertion.sub == "compute-account:org_acme/gcp/gcp-main"'
+   ```
+
+   Google fetches the issuer's discovery document and keys itself, so the issuer URL must be reachable from the
+   internet. For an issuer Google cannot reach, download the keys from `jwksUri` (`curl -o jwks.json <jwksUri>`) and
+   add `--jwk-json-path=jwks.json` to the command. Uploaded keys are a copy, and Google accepts no token signed by a
+   key it was not given. The operator announces a rotation ahead of time and publishes the next key in `jwks.json`
+   beside the current one before it signs anything: as soon as `jwks.json` lists a key your upload lacks, download
+   it again and update the provider (`gcloud iam workload-identity-pools providers update-oidc` with
+   `--jwk-json-path=jwks.json`) within the announced window. Uploading only after the issuer has switched keys leaves the account unable to
+   authenticate until you do. The provider's default allowed audience is its resource name as an `https://` URL, the
+   `allowedAudienceHint` with your project number, pool and provider filled in, and the control plane signs for it.
+
+4. **Grant access to the account's principal**, which is the subject in the pool:
+   `principal://iam.googleapis.com/projects/<n>/locations/global/workloadIdentityPools/<pool>/subject/<subject>`.
+   Either let it impersonate a service account that holds the compute roles listed above:
+
+   ```sh
+   gcloud iam service-accounts add-iam-policy-binding vms@my-project.iam.gserviceaccount.com \
+     --project=my-project \
+     --role=roles/iam.workloadIdentityUser \
+     --member="principal://iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/my-pool/subject/compute-account:org_acme/gcp/gcp-main"
+   ```
+
+   or grant the compute roles to that principal directly (`gcloud projects add-iam-policy-binding` with the same
+   `--member`).
+
+5. **Create the account** with `federationAudience` (and `impersonate`, for the service account of step 4):
+
+   ```ts
+   await compute.api.providerAccounts.create(
+     { token },
+     {
+       tenantId: 'org_acme',
+       provider: 'gcp',
+       name: 'gcp-main',
+       config: {
+         projectId: 'my-project',
+         zones: ['us-central1-a'],
+         federationAudience:
+           '//iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/my-pool/providers/my-provider',
+         impersonate: 'vms@my-project.iam.gserviceaccount.com',
+       },
+     },
+   );
+   ```
+
+   The audience here starts with `//`, not `https://`. Two accounts cannot name the same `federationAudience`
+   (`CONFLICT`): a pool provider belongs to one account, in any tenant.
+
+`create` and `update` check the account before storing it, with no transaction open and a 10 second limit on each
+call. They sign probe tokens for a subject of another tenant and for another account of the same tenant, and the
+pool provider must refuse both; then they exchange the account's own token, impersonate if asked, and read the
+project. Each `INVALID_CONFIG` below carries `details.reason`, and nothing is stored:
+
+| `details.reason`             | Meaning                                                                                                                                | What the tenant does                                                                                                                                                                                                                            |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `federationTrustsAnySubject` | The pool provider accepted a probe (`details.probe` is `stranger` or `sibling`): its condition is broader than this account's subject. | Set the provider's `--attribute-condition` to exactly the `attributeCondition` from `federationSetup` (`gcloud iam workload-identity-pools providers update-oidc`).                                                                             |
+| `federationRefused`          | Google STS refused the account's own token (`details.stsError`). The message quotes the condition, `assertion.sub == "<subject>"`.     | Check that the provider's `--issuer-uri` is the `issuer`, that the attribute mapping is `google.subject=assertion.sub`, that the condition matches the subject exactly (so the same `name`), and that `federationAudience` names that provider. |
+| `impersonationRefused`       | The federated identity may not impersonate `impersonate`. The message names the principal.                                             | Grant that principal `roles/iam.workloadIdentityUser` on the service account.                                                                                                                                                                   |
+| `projectAccess`              | The final identity cannot read the project (`compute.projects.get`), or the project id is wrong, or the Compute Engine API is off.     | Grant it `roles/compute.viewer` and the roles above, check `projectId`, and enable the API (`details.activationUrl` when Google gave one).                                                                                                      |
+
+A throttled or unreachable Google (`RATE_LIMITED`, `UNAVAILABLE`) also stores nothing: retry with the same
+`idempotencyKey`. Only a 400, 401 or 403 from Google counts as a refusal, so a malformed or throttled reply can never
+pass as "refused". No token is logged. Check the gcloud commands above against your gcloud version.
 
 `tests/provider-gcp.test.ts` runs the conformance cases and the GCE specifics against an in-memory emulator passed as
 `fetch`, and `tests/gcp-end-to-end.test.ts` runs the provider and the emulator through vps.

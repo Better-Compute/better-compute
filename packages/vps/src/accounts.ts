@@ -441,17 +441,51 @@ export function parseCreateAccount(raw: unknown): CreateAccountInput {
       !/^[A-Za-z0-9._~:/+=-]{1,128}$/.test(input.idempotencyKey))
   )
     throw new ComputeError('INVALID_INPUT', 'idempotencyKey is invalid');
-  if (typeof input.provider !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(input.provider))
-    throw new ComputeError('INVALID_INPUT', 'provider must be a provider id');
+  const provider = providerId(input.provider);
   return {
     tenantId: tenant(input.tenantId),
-    provider: input.provider,
+    provider,
     name: name(input.name),
     config: input.config ?? {},
     ...(input.idempotencyKey !== undefined
       ? { idempotencyKey: input.idempotencyKey as string }
       : {}),
     ...(input.billing !== undefined ? { billing: parseAccountBilling(input.billing) } : {}),
+  };
+}
+
+function providerId(value: unknown): string {
+  if (typeof value !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(value))
+    throw new ComputeError('INVALID_INPUT', 'provider must be a provider id');
+  return value;
+}
+
+export interface FederationSetupInput {
+  tenantId: string;
+  provider: string;
+  name: string;
+}
+
+/** What `providerAccounts.federationSetup` returns: what a tenant sets up at its cloud (GCP WIF). */
+export interface FederationSetup {
+  /** The control plane's workload issuer, the OIDC provider the cloud is told to trust. */
+  issuer: string;
+  jwksUri: string;
+  /** The one subject `create` gives the account, as `accountSubject` builds it. */
+  subject: string;
+  /** The CEL condition that makes the cloud trust that subject alone: `assertion.sub == "<subject>"`. */
+  attributeCondition: string;
+  /** The shape of the `federationAudience` the tenant passes to `create`, with placeholders. */
+  allowedAudienceHint: string;
+}
+
+/** `providerAccounts.federationSetup`'s input: the tenant and the provider and name `create` will get. */
+export function parseFederationSetup(raw: unknown): FederationSetupInput {
+  const input = object(raw, ['tenantId', 'provider', 'name']);
+  return {
+    tenantId: tenant(input.tenantId),
+    provider: providerId(input.provider),
+    name: name(input.name),
   };
 }
 
@@ -503,36 +537,41 @@ export async function createAccount(
       { id: accountId, tenantId: input.tenantId, name: input.name },
       check,
     );
-  let rowCount: number;
-  try {
-    // Only a concurrent request with the same key (the id) is no error; the name and the
-    // exclusive key indexes raise theirs.
-    ({ rowCount } = await tx.query(
-      `INSERT INTO provider_accounts (id, tenant_id, provider, name, config, version, exclusive_key, billing)
-       VALUES ($1, $2, $3, $4, $5::jsonb, 1, $6, $7::jsonb) ON CONFLICT (id) DO NOTHING`,
-      [
-        accountId,
-        input.tenantId,
-        provider.id,
-        input.name,
-        JSON.stringify(config),
-        exclusiveKeyOf(provider, config),
-        JSON.stringify(input.billing ?? {}),
-      ],
-    ));
-  } catch (error) {
-    if (exclusiveKeyTaken(error)) throw identityTaken(provider);
-    if (sqlState(error) === '23505')
-      throw new ComputeError('CONFLICT', `Provider account ${input.name} already exists`);
-    throw error;
-  }
-  if (rowCount === 0 && input.idempotencyKey !== undefined) {
-    // A concurrent request with the same key committed first.
+  const exclusiveKey = exclusiveKeyOf(provider, config);
+  // Untargeted: a conflict on any unique index (the id, (tenant_id, name), the exclusive key)
+  // inserts nothing rather than raising, and is told apart below. A conflict target would make the
+  // other indexes hard errors, so two overlapping creates with one key would fail as a CONFLICT
+  // instead of replaying.
+  const { rowCount } = await tx.query(
+    `INSERT INTO provider_accounts (id, tenant_id, provider, name, config, version, exclusive_key, billing)
+     VALUES ($1, $2, $3, $4, $5::jsonb, 1, $6, $7::jsonb) ON CONFLICT DO NOTHING`,
+    [
+      accountId,
+      input.tenantId,
+      provider.id,
+      input.name,
+      JSON.stringify(config),
+      exclusiveKey,
+      JSON.stringify(input.billing ?? {}),
+    ],
+  );
+  if (rowCount === 0) {
+    // The row that won committed first; under READ COMMITTED each statement below sees it.
     const winner = await readAccount(tx, accountId, input.tenantId);
-    if (winner && sameAccountRequest(winner, input)) return winner;
-  }
-  if (rowCount === 0)
+    if (winner) {
+      // A concurrent request with the same key: a replay when it was this request.
+      if (sameAccountRequest(winner, input)) return winner;
+      throw keyReused();
+    }
+    if (exclusiveKey !== null) {
+      const holder = await tx.query(
+        `SELECT 1 FROM provider_accounts WHERE provider = $1 AND exclusive_key = $2`,
+        [provider.id, exclusiveKey],
+      );
+      if (holder.rows.length > 0) throw identityTaken(provider);
+    }
     throw new ComputeError('CONFLICT', `Provider account ${input.name} already exists`);
+  }
   return (await readAccount(tx, accountId))!;
 }
 
@@ -732,8 +771,11 @@ const upperAlnum = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 const mixedAlnum = `${lowerAlnum}ABCDEFGHIJKLMNOPQRSTUVWXYZ`;
 /** The fewest random characters in a probe's name or tenant (36^8, about 2.8e12 values). */
 const probeRandomMin = 8;
-/** Probe tokens are exchanged at once: the issuer's shortest lifetime. */
-const probeTtlSeconds = 60;
+/**
+ * The lifetime of every token an account mints unless its provider asks for another (the issuer's
+ * default), probes included: a probe token then cannot be told from a real one by `exp - iat`.
+ */
+const accountTokenTtlSeconds = 300;
 
 /** `length` characters of `alphabet`, drawn with the CSPRNG (`randomInt` is unbiased). */
 function randomText(alphabet: string, length: number): string {
@@ -792,7 +834,7 @@ export function accountIdentity(
       return workload.mint({
         subject,
         audience: audience as string,
-        ...(ttlSeconds !== undefined ? { ttlSeconds } : {}),
+        ttlSeconds: ttlSeconds ?? accountTokenTtlSeconds,
       });
     },
     async mintProbe(kind: 'sibling' | 'stranger', input: { audience: string }) {
@@ -805,7 +847,7 @@ export function accountIdentity(
       const { token } = await workload.mint({
         subject: probe,
         audience: input?.audience as string,
-        ttlSeconds: probeTtlSeconds,
+        ttlSeconds: accountTokenTtlSeconds,
       });
       return { token, subject: probe };
     },
@@ -901,6 +943,16 @@ export class ProviderClients {
     this.#tenantVaultPaths = tenantVaultPaths;
   }
 
+  /**
+   * Drops every cached client of the account, whatever its version. A deleted account must not
+   * leave one behind: a same-tenant re-create with the same idempotency key gets the same id and
+   * version 1 again, and would otherwise reuse the old client (its config and cached tokens).
+   */
+  evict(accountId: string): void {
+    for (const key of this.#cache.keys())
+      if (key.startsWith(`${accountId}@`)) this.#cache.delete(key);
+  }
+
   client(account: ProviderAccount, deps: ClientDeps): Promise<ProviderImpl> {
     const cacheKey = `${account.id}@${account.version}`;
     let client = this.#cache.get(cacheKey);
@@ -917,8 +969,7 @@ export class ProviderClients {
         ),
       );
       client.catch(() => this.#cache.delete(cacheKey));
-      for (const existing of this.#cache.keys())
-        if (existing.startsWith(`${account.id}@`)) this.#cache.delete(existing);
+      this.evict(account.id);
       this.#cache.set(cacheKey, client);
     }
     return client;

@@ -21,6 +21,7 @@ import {
   type WorkloadIssuerPort,
 } from '@better-compute/core';
 import {
+  accountSubject,
   checkAccountConfig,
   createAccount,
   deleteAccount,
@@ -28,7 +29,9 @@ import {
   parseAccountBilling,
   parseCreateAccount,
   passThroughMeterCheck,
+  parseFederationSetup,
   parseTenantVaultPaths,
+  providerOf,
   ProviderClients,
   readAccount,
   sameAccountRequest,
@@ -36,6 +39,8 @@ import {
   type AccountBilling,
   type ClientDeps,
   type CreateAccountInput,
+  type FederationSetup,
+  type FederationSetupInput,
   type ProviderAccount,
   type TenantVaultPaths,
 } from './accounts.js';
@@ -416,6 +421,7 @@ export type VpsApi = {
   providerAccounts: {
     create: MethodDefinition<CreateAccountInput, ProviderAccountView>;
     list: MethodDefinition<{ tenantId: string }, { items: ProviderAccountView[] }>;
+    federationSetup: MethodDefinition<FederationSetupInput, FederationSetup>;
     get: MethodDefinition<AccountRef, ProviderAccountView>;
     offers: MethodDefinition<AccountRef & { query: OfferQuery }, { items: Offer[] }>;
     update: MethodDefinition<
@@ -1314,6 +1320,35 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           items: await listAccounts(context.sql, input.tenantId),
         }),
       }),
+      // What a tenant needs to set up a keyless account at its cloud (GCP workload identity
+      // federation): the issuer and the one subject `create` will give the account. A pure read: no
+      // provider call, and the subject comes from `accountSubject`, the only place it is built.
+      federationSetup: defineMethod({
+        action: 'compute:providers:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(schemas.federationSetup, parseFederationSetup),
+        handler: async (context, input) => {
+          providerOf(providers, input.provider);
+          const workload = context.pki?.workload;
+          if (!workload)
+            throw new ComputeError(
+              'INVALID_CONFIG',
+              'This deployment has no workload identity issuer, so provider accounts cannot be keyless',
+              undefined,
+              { reason: 'noWorkloadIssuer' },
+            );
+          const subject = accountSubject(input.tenantId, input.provider, input.name);
+          return {
+            issuer: workload.issuer,
+            jwksUri: `${workload.issuer}/jwks.json`,
+            subject,
+            attributeCondition: `assertion.sub == "${subject}"`,
+            allowedAudienceHint:
+              'https://iam.googleapis.com/projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/<POOL>/providers/<PROVIDER>',
+          };
+        },
+      }),
       get: defineMethod({
         action: 'compute:providers:read',
         kind: 'read',
@@ -1402,6 +1437,11 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
             type: 'provider-account',
             id: input.accountId,
           });
+          // A re-create with the same key gets this id and version 1 again: it must not find the
+          // deleted account's client. Evicting is always safe; after the commit as well, so a
+          // client built meanwhile from the still-visible row is dropped too.
+          clients.evict(input.accountId);
+          context.afterCommit?.(() => clients.evict(input.accountId));
           return { deleted: true as const };
         },
       }),

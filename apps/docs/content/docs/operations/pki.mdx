@@ -29,6 +29,7 @@ sources:
   - packages/pki/src/revocation-feed.ts
   - packages/pki/src/secrets.ts
   - packages/pki/src/workload.ts
+  - packages/pki/src/workload-issuer.ts
   - packages/pki/src/workload-request.ts
   - packages/cli/src/host/workload.ts
   - packages/cli/src/commands/pki.ts
@@ -1050,6 +1051,69 @@ instances of whichever runtime bcd runs; neither runtime of host builds (`libvir
 so only fakehw builds' instances have been served end to end. What the broker checks is in
 [VPS instances](/docs/guides/vps/instances#workload-identity).
 
+## The workload issuer for provider accounts
+
+A second, separate issuer makes the control plane itself an OIDC identity provider, so a tenant's GCP account can
+be keyless: the tenant's workload identity pool trusts the control plane, and each provider account mints tokens for
+one subject, `compute-account:<tenantId>/<provider>/<name>`, which vps derives from the account row (see
+[keyless GCP accounts](/docs/guides/vps/providers#keyless-gcp-accounts)). Without it,
+`providerAccounts.create` with `federationAudience` and `providerAccounts.federationSetup` are `INVALID_CONFIG`
+(`reason: 'noWorkloadIssuer'`).
+
+```ts
+import { createPrivateKey } from 'node:crypto';
+import { workloadIssuer } from '@better-compute/pki';
+
+// PEM keys from the secret store, the same on every replica: never generated at startup.
+const key = (pem: string) => createPrivateKey(pem);
+
+betterCompute({
+  baseURL: 'https://compute.example.com',
+  // basePath defaults to /api/compute
+  pki: {
+    workloadIssuer: workloadIssuer({
+      issuer: 'https://compute.example.com/api/compute/workload',
+      signingKey: key(secrets.workloadSigningKey),
+      // During a rollover only (see below):
+      // nextKey: key(secrets.workloadNextKey),
+      // previousKeys: [key(secrets.workloadPreviousKey)],
+    }),
+  },
+  // …
+});
+```
+
+- **The issuer URL** must be exactly `<public origin>{basePath}/workload`: the host serves the discovery document at
+  `{basePath}/workload/.well-known/openid-configuration` and the keys at `{basePath}/workload/jwks.json`, public,
+  unauthenticated and cached for 5 minutes (`cache-control: public, max-age=300`), and Google fetches both from the
+  issuer URL itself. The origin must be `baseURL`'s. When the issuer is reached at another public origin (a tunnel,
+  an API host split from the one browsers use), name it with `pki.workloadIssuerOrigin`, e.g.
+  `'https://compute-public.example.com'`; the issuer's origin must then equal that instead. https is required (http
+  only for `localhost` and `127.0.0.1`). `betterCompute()` refuses anything else with `INVALID_CONFIG`
+  (`reason: 'workloadIssuerUrl'`), as it refuses an issuer URL equal to the v0.5 `workloadIdentity.issuer`'s, whose
+  discovery document would be served at the same place.
+- **The keys** are EC P-256 private keys. They must be persistent and identical on every replica: load them from the
+  secret store at start. A key generated at startup changes on every restart and differs between replicas, so tokens
+  one replica signs fail verification against the keys another replica published, and every tenant that uploaded
+  keys is cut off at the next restart. Handle the PEMs as secrets; only public keys ever appear in `jwks.json`.
+- **Tokens** are ES256 JWTs living 60 to 600 seconds (300 by default), with `iss`, `sub`, `aud`, `iat`, `exp` and
+  `jti`. They are exchanged at Google STS at once and never logged.
+
+### Rolling the issuer's key over
+
+Tenants whose pool fetches the keys from `jwks.json` follow a rollover on their own, but tenants whose control plane
+Google cannot reach uploaded a copy of the keys, and Google accepts no token signed by a key it was not given. So
+the next key is published beside the current one well before it signs, and the rotation is announced:
+
+1. **Publish the next key.** Add the new key as `nextKey` and roll that configuration out to every replica.
+   `jwks.json` now lists both keys; the new one never signs. Announce the rotation to tenants with uploaded keys:
+   they download `jwks.json` again and update their provider as soon as it lists the new key.
+2. **Wait.** At least 30 days, so every tenant with uploaded keys has re-uploaded them, and in any case longer than
+   the 5-minute `Cache-Control` of `jwks.json` plus Google's own JWKS caching.
+3. **Promote.** Make the new key `signingKey` and move the old one to `previousKeys`, on every replica. Keep it there
+   for at least the 600-second maximum token lifetime, so tokens signed just before the switch still verify.
+4. **Drop the old key** from `previousKeys`. Tenants with uploaded keys may remove it from their provider too.
+
 ## Rotation and expiry
 
 | What | How it is replaced today |
@@ -1062,6 +1126,7 @@ so only fakehw builds' instances have been served end to end. What the broker ch
 | SSH CA, sandbox SSH CA | Not automated. A new sandbox CA reaches only instances created after it, since the key is in their user data |
 | A bundle sealed in the former format | Once: `pki reseal` prints its pins, then `pki reseal --accept-unauthenticated` after comparing them (see [pki reseal](#pki-reseal)) |
 | Workload issuer keys | `addKey()`, `promote(kid)`, then `retire(kid)` once the old key's tokens expired |
+| Provider-account issuer keys (`pki.workloadIssuer`) | Not automated: `nextKey`, at least 30 days, then `signingKey` with the old key in `previousKeys` (see [rolling the issuer's key over](#rolling-the-issuers-key-over)) |
 | Sealed secrets | `localSealedSecretStore` with several keys, then `reseal()` (see [configuration](/docs/operations/configuration#the-deployment-secret)) |
 | Node, serving and internal CAs (1 year) | `pki renew-ca --ca node` (or `serving`, `internal`) before they expire (`doctor` warns 30 days ahead); see [pki renew-ca](#pki-renew-ca) |
 | JoinService keys | Not automated. Daemons pin them, so new keys mean new pins in every machine's configuration. |

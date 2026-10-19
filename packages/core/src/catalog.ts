@@ -569,6 +569,7 @@ group('providerAccounts', 'vps', [
     { or: [['providers:manage', 'tenant']] },
   ],
   ['list', 'read', 'providers:read', 'tenant', 'v0.3', list],
+  ['federationSetup', 'read', 'providers:read', 'tenant', 'v1.0'],
   ['get', 'read', 'providers:read', 'provider-account', 'v0.3'],
   ['offers', 'read', 'providers:read', 'provider-account', 'v0.3'],
   ['update', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],

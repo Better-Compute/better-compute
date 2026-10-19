@@ -5,7 +5,7 @@ import {
   type ModuleContext,
   type SqlExecutor,
 } from '@better-compute/core';
-import { generateP256KeyPair, workloadIssuer } from '@better-compute/pki';
+import { createWorkloadIssuer, generateP256KeyPair, workloadIssuer } from '@better-compute/pki';
 import { betterCompute } from '@better-compute/server';
 import { fakeIam } from './support/fake-iam.js';
 import { BASE_URL, options } from './support/server.js';
@@ -33,15 +33,42 @@ function issuer(url = ISSUER) {
 
 function server(
   workload: ReturnType<typeof issuer> | undefined,
-  extra: { modules?: ComputeModule[]; basePath?: string } = {},
+  extra: {
+    modules?: ComputeModule[];
+    basePath?: string;
+    workloadIssuerOrigin?: string;
+    workloadIdentity?: Parameters<typeof betterCompute>[0]['workloadIdentity'];
+  } = {},
 ) {
   return betterCompute({
     ...options(noStore, fakeIam()),
     ...(extra.basePath ? { basePath: extra.basePath } : {}),
     ...(extra.modules ? { modules: extra.modules } : {}),
-    ...(workload ? { pki: { workloadIssuer: workload } } : {}),
+    ...(extra.workloadIdentity ? { workloadIdentity: extra.workloadIdentity } : {}),
+    ...(workload
+      ? {
+          pki: {
+            workloadIssuer: workload,
+            ...(extra.workloadIssuerOrigin !== undefined
+              ? { workloadIssuerOrigin: extra.workloadIssuerOrigin }
+              : {}),
+          },
+        }
+      : {}),
   });
 }
+
+/** What constructing throws (undefined when it does not). */
+function thrownBy(build: () => unknown): unknown {
+  try {
+    build();
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+}
+
+const issuerUrlRefusal = { code: 'INVALID_CONFIG', details: { reason: 'workloadIssuerUrl' } };
 
 async function get(compute: ReturnType<typeof server>, path: string, method = 'GET') {
   const response = await compute.handler(
@@ -104,6 +131,60 @@ describe('the workload issuer routes', () => {
         details: { reason: 'workloadIssuerUrl' },
       });
     }
+  });
+
+  it('an issuer on another origin than baseURL fails construction (W1b)', () => {
+    for (const url of [
+      'https://elsewhere.example.test/api/compute/workload',
+      'https://compute.example.test:8443/api/compute/workload',
+      'http://localhost/api/compute/workload',
+    ]) {
+      const thrown = thrownBy(() => server(issuer(url)));
+      expect(isComputeError(thrown), url).toBe(true);
+      expect(thrown, url).toMatchObject(issuerUrlRefusal);
+    }
+  });
+
+  it('pki.workloadIssuerOrigin moves the origin the issuer must be on', async () => {
+    const url = 'https://public.example.test/api/compute/workload';
+    // The issuer's host, named as the override: constructed, and served as usual.
+    const compute = server(issuer(url), { workloadIssuerOrigin: 'https://public.example.test' });
+    const discovery = await get(compute, 'workload/.well-known/openid-configuration');
+    expect(discovery.json.issuer).toBe(url);
+    // A trailing slash still names an origin; http is allowed for localhost only.
+    server(issuer(url), { workloadIssuerOrigin: 'https://public.example.test/' });
+    server(issuer('http://localhost:3000/api/compute/workload'), {
+      workloadIssuerOrigin: 'http://localhost:3000',
+    });
+
+    // An override naming another host than the issuer's, or baseURL's while the issuer is elsewhere.
+    for (const origin of ['https://other.example.test', 'https://compute.example.test']) {
+      const thrown = thrownBy(() => server(issuer(url), { workloadIssuerOrigin: origin }));
+      expect(thrown, origin).toMatchObject(issuerUrlRefusal);
+    }
+    // The override must be an origin alone, https (http only for localhost).
+    for (const origin of [
+      'https://public.example.test/api',
+      'https://public.example.test?x=1',
+      'http://public.example.test',
+      'not a url',
+    ]) {
+      const thrown = thrownBy(() => server(issuer(url), { workloadIssuerOrigin: origin }));
+      expect(thrown, origin).toMatchObject(issuerUrlRefusal);
+    }
+  });
+
+  it('the v0.5 workload identity issuer may not share the issuer URL', () => {
+    const v05 = (url: string) =>
+      createWorkloadIssuer({ issuer: url, defaultAudience: 'test-audience' });
+    const thrown = thrownBy(() =>
+      server(issuer(), { workloadIdentity: { issuer: v05(ISSUER) as never } }),
+    );
+    expect(thrown).toMatchObject(issuerUrlRefusal);
+    // Its own URL is fine.
+    server(issuer(), {
+      workloadIdentity: { issuer: v05(`${BASE_URL}/identity`) as never },
+    });
   });
 
   it('an issuer that is not a workload issuer fails construction', () => {

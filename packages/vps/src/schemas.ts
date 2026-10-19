@@ -193,6 +193,13 @@ const flavorShape = strictObject(
 
 // --- Methods -----------------------------------------------------------------------------------
 
+const providerId = {
+  type: 'string',
+  pattern: '^[a-z][a-z0-9-]{0,63}$',
+  maxLength: 64,
+  description: 'The provider id, e.g. provider-hetzner',
+};
+
 export const schemas = {
   tenant: strictObject({ tenantId }, ['tenantId']),
   pool: strictObject({ tenantId, poolId }, ['tenantId', 'poolId']),
@@ -282,12 +289,7 @@ export const schemas = {
   createAccount: strictObject(
     {
       tenantId,
-      provider: {
-        type: 'string',
-        pattern: '^[a-z][a-z0-9-]{0,63}$',
-        maxLength: 64,
-        description: 'The provider id, e.g. provider-hetzner',
-      },
+      provider: providerId,
       name: nameOf('The account name, e.g. hetzner-main'),
       config: {
         ...config("The provider's account config; credentials as secret references only"),
@@ -300,6 +302,14 @@ export const schemas = {
         description: 'Makes the account id deterministic; a retry returns the account',
       },
       billing: accountBilling,
+    },
+    ['tenantId', 'provider', 'name'],
+  ),
+  federationSetup: strictObject(
+    {
+      tenantId,
+      provider: providerId,
+      name: nameOf('The account name the tenant will give create, e.g. gcp-main'),
     },
     ['tenantId', 'provider', 'name'],
   ),
