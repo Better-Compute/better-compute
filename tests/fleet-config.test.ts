@@ -220,7 +220,12 @@ function methodContext(sql: SqlExecutor): MethodContext {
           caller: root,
           credential: { kind: 'test' },
           // Root is allowed everything here; the per-volume decisions are what the check records.
-          iam: { require: async () => undefined, authorize: async () => true },
+          // It names the root tenant, as the server's port does (vps scopes account refs by it).
+          iam: {
+            rootTenantId: 'root',
+            require: async () => undefined,
+            authorize: async () => true,
+          },
           requestId: 'req',
         } as unknown as MethodContext;
         await definition.admission.check(outside, parsed, { type: 'compute-tenant', id: 'root' });

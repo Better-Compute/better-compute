@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/provider-kubernetes",
-  "version": "0.1.1",
+  "version": "0.2.1",
   "description": "Kubernetes as a capacity source for better-compute: bcd as a DaemonSet adopts a cluster's nodes and GPUs into a pool.",
   "type": "module",
   "license": "Apache-2.0",

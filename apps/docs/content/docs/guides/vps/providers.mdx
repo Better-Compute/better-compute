@@ -5,7 +5,7 @@ metaTitle: VPS providers and provider accounts
 icon: Cloud
 status: beta
 packages: ['@better-compute/vps', '@better-compute/provider-hetzner', '@better-compute/provider-proxmox', '@better-compute/provider-gcp', '@better-compute/provider-digitalocean']
-sources: ['packages/vps/src/accounts.ts', 'packages/vps/src/provider.ts', 'packages/vps/src/conformance.ts', 'packages/vps/src/module.ts', 'packages/vps/src/lifecycle.ts', 'packages/core/src/extension.ts', 'packages/core/src/manifest.ts', 'packages/provider-hetzner/README.md', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-hetzner/src/robot.ts', 'packages/provider-proxmox/README.md', 'packages/provider-proxmox/src/proxmox.ts', 'packages/provider-gcp/README.md', 'packages/provider-gcp/src/compute.ts', 'packages/provider-gcp/src/reservations.ts', 'packages/provider-digitalocean/README.md', 'packages/provider-digitalocean/src/config.ts', 'packages/provider-digitalocean/src/compute/droplets.ts', 'packages/provider-digitalocean/src/networks/index.ts', 'packages/provider-digitalocean/src/client/budget.ts', 'packages/vps/src/discovery.ts', 'packages/vps/src/attach.ts', 'packages/vps/src/provider-reservations.ts', 'packages/server/src/api/secrets.ts', 'packages/server/src/ports.ts', 'packages/pki/src/secrets.ts', 'tests/vps-instances.test.ts', 'tests/vps-provider.test.ts', 'tests/provider-hetzner.test.ts', 'tests/provider-proxmox.test.ts', 'tests/provider-gcp.test.ts', 'tests/gcp-end-to-end.test.ts', 'tests/provider-digitalocean.test.ts', 'tests/provider-digitalocean-networks.test.ts', 'tests/do-end-to-end.test.ts', 'tests/root-issued-compute.test.ts', 'tests/root-issued-compute-iam.test.ts', 'tests/vps-account-secret-scope.test.ts']
+sources: ['packages/vps/src/accounts.ts', 'packages/vps/src/provider.ts', 'packages/vps/src/conformance.ts', 'packages/vps/src/module.ts', 'packages/vps/src/lifecycle.ts', 'packages/core/src/extension.ts', 'packages/core/src/manifest.ts', 'packages/provider-hetzner/README.md', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-hetzner/src/robot.ts', 'packages/provider-proxmox/README.md', 'packages/provider-proxmox/src/proxmox.ts', 'packages/provider-gcp/README.md', 'packages/provider-gcp/src/compute.ts', 'packages/provider-gcp/src/reservations.ts', 'packages/provider-gcp/src/federation.ts', 'packages/provider-gcp/src/config.ts', 'packages/provider-digitalocean/README.md', 'packages/provider-digitalocean/src/config.ts', 'packages/provider-digitalocean/src/compute/droplets.ts', 'packages/provider-digitalocean/src/networks/index.ts', 'packages/provider-digitalocean/src/client/budget.ts', 'packages/vps/src/discovery.ts', 'packages/vps/src/attach.ts', 'packages/vps/src/provider-reservations.ts', 'packages/server/src/api/secrets.ts', 'packages/server/src/ports.ts', 'packages/pki/src/secrets.ts', 'tests/vps-instances.test.ts', 'tests/vps-provider.test.ts', 'tests/provider-hetzner.test.ts', 'tests/provider-proxmox.test.ts', 'tests/provider-gcp.test.ts', 'tests/gcp-end-to-end.test.ts', 'tests/gcp-federation.test.ts', 'tests/vps-account-federation.test.ts', 'tests/provider-digitalocean.test.ts', 'tests/provider-digitalocean-networks.test.ts', 'tests/do-end-to-end.test.ts', 'tests/root-issued-compute.test.ts', 'tests/root-issued-compute-iam.test.ts', 'tests/vps-account-secret-scope.test.ts']
 ---
 
 A provider pool runs its instances on someone else's infrastructure: a public cloud, or a hypervisor cluster you
@@ -107,6 +107,7 @@ The rest of the group:
 | Method                                                        | Action                     | What it does                                                                                             |
 | ------------------------------------------------------------- | -------------------------- | -------------------------------------------------------------------------------------------------------- |
 | [list](/docs/reference/api/provider-accounts#list)            | `compute:providers:read`   | The tenant's accounts, by name.                                                                          |
+| [federationSetup](/docs/reference/api/provider-accounts#federationsetup) | `compute:providers:read` | The issuer and the exact subject to trust at the cloud for an account you are about to create; see [keyless GCP accounts](#keyless-gcp-accounts). |
 | [get](/docs/reference/api/provider-accounts#get)              | `compute:providers:read`   | One account; another tenant's is `NOT_FOUND`.                                                            |
 | [offers](/docs/reference/api/provider-accounts#offers)        | `compute:providers:read`   | The provider's catalog through this account.                                                             |
 | [update](/docs/reference/api/provider-accounts#update)        | `compute:providers:manage` | Replaces `config` (validated again) and bumps `version`; the next call builds a fresh client.            |
@@ -501,6 +502,7 @@ await compute.api.providerAccounts.create(
     zones: { type: 'string[]', description: 'At least one zone. Offers, discovery and reservations are limited to these.', required: true },
     credentials: { type: 'SecretRef', description: 'A service-account key JSON. Absent: the host identity (the tokenSource option, else the metadata server), which only a root-tenant account may use.' },
     impersonate: { type: 'string', description: 'A service-account email to impersonate with the base credentials.' },
+    federationAudience: { type: 'string', description: "Keyless sign-in: the tenant's workload identity pool provider, //iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>. Never together with credentials; may be combined with impersonate. See keyless GCP accounts." },
     network: { type: 'string', description: 'The VPC that create uses for an instance on no tenant network.', default: "'default'" },
     subnet: { type: 'string', description: 'The subnetwork that create uses with that network.' },
     imageProject: { type: 'string', description: 'Where image families resolve.', default: "'ubuntu-os-cloud'" },
@@ -530,8 +532,9 @@ future reservations), plus `roles/iam.serviceAccountTokenCreator` on the target 
 - **Credentials.** A key is exchanged for tokens at the OAuth endpoint and cached until a minute before expiry;
   without one the host's own identity is used: `gcpProvider({ tokenSource })` (a workload-identity client), else the
   metadata server. That identity is the control plane's, so only an account of the root (platform) tenant may rely on
-  it: a tenant's account must name its own key in `credentials` (`impersonate` alone is not enough), or
-  `providerAccounts.create` and `update` refuse it with `INVALID_CONFIG`. A `tokenSource` never overrides an account's
+  it: a tenant's account must name its own key in `credentials` or sign in keyless with `federationAudience` (see
+  [keyless GCP accounts](#keyless-gcp-accounts)); `impersonate` alone is not enough, and without either
+  `providerAccounts.create` and `update` refuse the account with `INVALID_CONFIG`. A `tokenSource` never overrides an account's
   `credentials`. The key must be the tenant's own (`secret://<tenant>/…`, see
   [above](#whose-references-an-account-may-name)). Tokens are never logged.
 - **Pinned token endpoint.** The key JSON is the tenant's, and the control plane POSTs the signed JWT to its
@@ -541,6 +544,127 @@ future reservations), plus `roles/iam.serviceAccountTokenCreator` on the target 
   nothing is fetched.
 - **Errors** map to `ComputeError` codes (`NOT_FOUND`, `CONFLICT`, `RATE_LIMITED` with `retryAfterMs`,
   `QUOTA_EXCEEDED`, `ACCESS_DENIED`, `INVALID_INPUT`, `UNAVAILABLE`), with `details: { provider: 'gcp', status, reason }`.
+
+### Keyless GCP accounts
+
+A tenant need not hand over a service-account key. With `federationAudience`, the control plane signs in to the
+tenant's own project through [workload identity federation](https://cloud.google.com/iam/docs/workload-identity-federation):
+Better Compute is the OIDC issuer (`pki.workloadIssuer`, served at `{basePath}/workload/.well-known/openid-configuration`
+and `{basePath}/workload/jwks.json`), and the tenant's workload identity pool provider trusts it. The host must run a
+workload issuer; without one an account naming `federationAudience` is `INVALID_CONFIG` (`details.reason`
+`noWorkloadIssuer`). An account names either `credentials` or `federationAudience`, never both
+(`credentialsAndFederation`).
+
+Every account has exactly one subject, `compute-account:<tenantId>/<provider>/<name>`, which vps alone builds. The
+tenant's pool provider must trust that subject and no other: a broader condition, such as one matching every subject
+that starts with `compute-account:`, would let one account, or one tenant, act as another. `providerAccounts.create`
+and `update` check this before the account is stored (see the errors below).
+
+1. **Ask for the setup.** Call `providerAccounts.federationSetup` with the `provider` and the `name` you will give
+   `create`. It calls no provider and stores nothing, and answers with the exact values to use:
+
+   ```ts
+   const setup = await compute.api.providerAccounts.federationSetup(
+     { token },
+     { tenantId: 'org_acme', provider: 'gcp', name: 'gcp-main' },
+   );
+   // → {
+   //   issuer: 'https://compute.example.com/api/compute/workload',
+   //   jwksUri: 'https://compute.example.com/api/compute/workload/jwks.json',
+   //   subject: 'compute-account:org_acme/gcp/gcp-main',
+   //   attributeCondition: 'assertion.sub == "compute-account:org_acme/gcp/gcp-main"',
+   //   allowedAudienceHint: 'https://iam.googleapis.com/projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/<POOL>/providers/<PROVIDER>',
+   // }
+   ```
+
+   An unknown `provider` is `INVALID_INPUT`, as in `create`; a host with no workload issuer is `INVALID_CONFIG`
+   (`details.reason` `noWorkloadIssuer`). Give `create` the same `provider` and `name`: the subject is derived from
+   them, so another name is another subject.
+
+2. **Create a workload identity pool** in the tenant's project:
+
+   ```sh
+   gcloud iam workload-identity-pools create my-pool \
+     --project=my-project \
+     --location=global \
+     --display-name="Better Compute"
+   ```
+
+3. **Create an OIDC provider** in the pool that trusts the `issuer`, maps the subject, and admits exactly the
+   `attributeCondition` from step 1:
+
+   ```sh
+   gcloud iam workload-identity-pools providers create-oidc my-provider \
+     --project=my-project \
+     --location=global \
+     --workload-identity-pool=my-pool \
+     --issuer-uri=https://compute.example.com/api/compute/workload \
+     --attribute-mapping=google.subject=assertion.sub \
+     --attribute-condition='assertion.sub == "compute-account:org_acme/gcp/gcp-main"'
+   ```
+
+   Google fetches the issuer's discovery document and keys itself, so the issuer URL must be reachable from the
+   internet. For an issuer Google cannot reach, download the keys from `jwksUri` (`curl -o jwks.json <jwksUri>`) and
+   add `--jwk-json-path=jwks.json` to the command. Uploaded keys are a copy, and Google accepts no token signed by a
+   key it was not given. The operator announces a rotation ahead of time and publishes the next key in `jwks.json`
+   beside the current one before it signs anything: as soon as `jwks.json` lists a key your upload lacks, download
+   it again and update the provider (`gcloud iam workload-identity-pools providers update-oidc` with
+   `--jwk-json-path=jwks.json`) within the announced window. Uploading only after the issuer has switched keys leaves the account unable to
+   authenticate until you do. The provider's default allowed audience is its resource name as an `https://` URL, the
+   `allowedAudienceHint` with your project number, pool and provider filled in, and the control plane signs for it.
+
+4. **Grant access to the account's principal**, which is the subject in the pool:
+   `principal://iam.googleapis.com/projects/<n>/locations/global/workloadIdentityPools/<pool>/subject/<subject>`.
+   Either let it impersonate a service account that holds the compute roles listed above:
+
+   ```sh
+   gcloud iam service-accounts add-iam-policy-binding vms@my-project.iam.gserviceaccount.com \
+     --project=my-project \
+     --role=roles/iam.workloadIdentityUser \
+     --member="principal://iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/my-pool/subject/compute-account:org_acme/gcp/gcp-main"
+   ```
+
+   or grant the compute roles to that principal directly (`gcloud projects add-iam-policy-binding` with the same
+   `--member`).
+
+5. **Create the account** with `federationAudience` (and `impersonate`, for the service account of step 4):
+
+   ```ts
+   await compute.api.providerAccounts.create(
+     { token },
+     {
+       tenantId: 'org_acme',
+       provider: 'gcp',
+       name: 'gcp-main',
+       config: {
+         projectId: 'my-project',
+         zones: ['us-central1-a'],
+         federationAudience:
+           '//iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/my-pool/providers/my-provider',
+         impersonate: 'vms@my-project.iam.gserviceaccount.com',
+       },
+     },
+   );
+   ```
+
+   The audience here starts with `//`, not `https://`. Two accounts cannot name the same `federationAudience`
+   (`CONFLICT`): a pool provider belongs to one account, in any tenant.
+
+`create` and `update` check the account before storing it, with no transaction open and a 10 second limit on each
+call. They sign probe tokens for a subject of another tenant and for another account of the same tenant, and the
+pool provider must refuse both; then they exchange the account's own token, impersonate if asked, and read the
+project. Each `INVALID_CONFIG` below carries `details.reason`, and nothing is stored:
+
+| `details.reason` | Meaning | What the tenant does |
+| --- | --- | --- |
+| `federationTrustsAnySubject` | The pool provider accepted a probe (`details.probe` is `stranger` or `sibling`): its condition is broader than this account's subject. | Set the provider's `--attribute-condition` to exactly the `attributeCondition` from `federationSetup` (`gcloud iam workload-identity-pools providers update-oidc`). |
+| `federationRefused` | Google STS refused the account's own token (`details.stsError`). The message quotes the condition, `assertion.sub == "<subject>"`. | Check that the provider's `--issuer-uri` is the `issuer`, that the attribute mapping is `google.subject=assertion.sub`, that the condition matches the subject exactly (so the same `name`), and that `federationAudience` names that provider. |
+| `impersonationRefused` | The federated identity may not impersonate `impersonate`. The message names the principal. | Grant that principal `roles/iam.workloadIdentityUser` on the service account. |
+| `projectAccess` | The final identity cannot read the project (`compute.projects.get`), or the project id is wrong, or the Compute Engine API is off. | Grant it `roles/compute.viewer` and the roles above, check `projectId`, and enable the API (`details.activationUrl` when Google gave one). |
+
+A throttled or unreachable Google (`RATE_LIMITED`, `UNAVAILABLE`) also stores nothing: retry with the same
+`idempotencyKey`. Only a 400, 401 or 403 from Google counts as a refusal, so a malformed or throttled reply can never
+pass as "refused". No token is logged. Check the gcloud commands above against your gcloud version.
 
 `tests/provider-gcp.test.ts` runs the conformance cases and the GCE specifics against an in-memory emulator passed as
 `fetch`, and `tests/gcp-end-to-end.test.ts` runs the provider and the emulator through vps.

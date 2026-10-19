@@ -5297,6 +5297,45 @@
         "additionalProperties": false
       }
     },
+    "providerAccounts.federationSetup": {
+      "route": "POST /api/compute/providerAccounts/federationSetup",
+      "kind": "read",
+      "action": "compute:providers:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "provider": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,63}$",
+            "maxLength": 64,
+            "description": "The provider id, e.g. provider-hetzner"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+            "maxLength": 63,
+            "description": "The account name the tenant will give create, e.g. gcp-main"
+          }
+        },
+        "required": [
+          "tenantId",
+          "provider",
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
     "providerAccounts.get": {
       "route": "POST /api/compute/providerAccounts/get",
       "kind": "read",

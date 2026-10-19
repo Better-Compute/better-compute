@@ -16,7 +16,7 @@ import {
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
-import { readAccount, type ProviderClients } from './accounts.js';
+import { readAccount, type ClientDeps, type ProviderClients } from './accounts.js';
 import { createFlavor, deleteFlavor } from './flavors.js';
 import { key as keyOf, name, object, optional, tenant, id } from './input.js';
 
@@ -154,6 +154,8 @@ export interface ReservationDeps {
   clients: ProviderClients;
   /** The IAM root tenant: its provider accounts are the platform's (ruling F1). */
   rootTenantId?: string;
+  /** The host's workload issuer: provider accounts' identity (`ClientDeps.workload`). */
+  workload?: ClientDeps['workload'];
 }
 
 /** A pass over one account must stay well inside the reconciler's claim. */

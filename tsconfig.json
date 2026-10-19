@@ -25,6 +25,7 @@
     {
       "path": "./packages/provider-hetzner"
     },
+    { "path": "./packages/gcp-common" },
     { "path": "./packages/provider-gcp" },
     { "path": "./packages/provider-digitalocean" },
     {

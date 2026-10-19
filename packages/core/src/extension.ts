@@ -858,6 +858,24 @@ export interface ProviderContext {
    * token source) allows that only for platform accounts. Absent: unknown, treated as not platform.
    */
   account?: { id: string; tenantId: string; platform: boolean };
+  /**
+   * (GCP WS1) The account's workload identity, for workload identity federation: tokens from the
+   * host's issuer (`PkiPort.workload`) for one subject the module fixes from the account row. A
+   * provider never chooses the subject. Absent when the host configures no issuer.
+   */
+  identity?: {
+    /** compute-account:<tenantId>/<provider>/<name> — fixed by vps. */
+    readonly subject: string;
+    mint(input: {
+      audience: string;
+      ttlSeconds?: number;
+    }): Promise<{ token: string; expiresAt: number }>;
+    /** Mints for a subject this account is not: 'sibling' = same tenant, random name; 'stranger' = random tenant, same name. */
+    mintProbe(
+      kind: 'sibling' | 'stranger',
+      input: { audience: string },
+    ): Promise<{ token: string; subject: string }>;
+  };
 }
 
 /** A provider as written for `defineProvider` (vps). Accounts are data validated by `config`. */
@@ -869,6 +887,14 @@ export interface ProviderInput<C> {
   capabilities?: readonly string[];
   /** Builds the client for one account's validated config. */
   create(config: C, context: ProviderContext): ProviderImpl | Promise<ProviderImpl>;
+  /**
+   * Network checks of an account about to be stored; runs with no transaction open. `INVALID_CONFIG`
+   * refuses the account. `UNAVAILABLE`, `RATE_LIMITED` and any other error propagate as they are and
+   * store nothing, so a retry with the same idempotency key runs the check again.
+   */
+  checkAccount?(config: C, context: ProviderContext & { signal: AbortSignal }): Promise<void>;
+  /** A key no two accounts of this provider may share (e.g. a federation audience). Pure; no I/O. */
+  accountKey?(config: C): string | undefined;
 }
 export interface ProviderDefinition<C = any> extends ProviderInput<C>, Extension {
   readonly extension: 'provider';
@@ -1134,6 +1160,23 @@ export interface PkiPort {
       expect?: { mac?: string; productUuid?: string; serial?: string; gpuUuid?: string };
     },
   ): Promise<{ id: string; token: string }>;
+  /**
+   * The control plane as an OIDC issuer (`ComputeOptions.pki.workloadIssuer`), for modules that mint
+   * workload-identity-federation tokens. Absent when the host configures none.
+   */
+  workload?: WorkloadIssuerPort;
+}
+
+/** The control plane as an OIDC issuer for workload identity federation (GCP WIF, AWS web identity, …). */
+export interface WorkloadIssuerPort {
+  readonly issuer: string;
+  mint(input: {
+    subject: string;
+    audience: string;
+    ttlSeconds?: number;
+  }): Promise<{ token: string; expiresAt: number }>;
+  /** Public keys only: { keys: [{ kty:'EC', crv:'P-256', x, y, kid, alg:'ES256', use:'sig' }, …] }. */
+  jwks(): Promise<{ keys: readonly Record<string, unknown>[] }>;
 }
 
 /** What modules get from the host. Modules never import each other's internals. */

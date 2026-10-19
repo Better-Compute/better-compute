@@ -23,6 +23,8 @@ const hardened = {
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'no-referrer',
 };
+/** The hardened headers, except that a public key set or discovery document may be cached for 5 minutes. */
+const publicDocument = { ...hardened, 'cache-control': 'public, max-age=300' };
 const requestIdPattern = /^[A-Za-z0-9._:-]{1,128}$/;
 const segmentPattern = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 
@@ -139,10 +141,11 @@ const joinKeysRetryMs = 60_000;
 /**
  * The fetch and Node transports (PLAN.md §9.1). `POST {basePath}/{group}/{method}` and
  * `POST {basePath}/plugins/{id}/{group}/{method}` take JSON objects with `X-Better-Compute: 1`;
- * `GET` serves only `/health`, `/.well-known/better-compute` and `/downloads/{bcd|bcx-ipmi}/{version}/{os}-{arch}`.
+ * `GET` serves only `/health`, `/.well-known/better-compute`, `/downloads/{bcd|bcx-ipmi}/{version}/{os}-{arch}`
+ * and, with `pki.workloadIssuer`, `/workload/.well-known/openid-configuration` and `/workload/jwks.json`.
  */
 export function createHttp({ options, registry, operations }: HttpHost) {
-  const { basePath, database, log } = options;
+  const { basePath, database, log, workloadIssuer: workload } = options;
 
   // The well-known `join` section (PLAN.md §6 Install): JoinService's public keys, read once; the
   // keys live as long as the process. A failing port is logged and retried a minute later.
@@ -223,10 +226,21 @@ export function createHttp({ options, registry, operations }: HttpHost) {
     if (path === '.well-known/better-compute') {
       const [join, gateway] = await Promise.all([wellKnownJoin(), wellKnownGateway()]);
       return Response.json(
-        { ...serverInfo(basePath), ...(join ? { join } : {}), ...(gateway ? { gateway } : {}) },
+        {
+          ...serverInfo(basePath),
+          ...(join ? { join } : {}),
+          ...(gateway ? { gateway } : {}),
+          ...(workload ? { workload: { issuer: workload.issuer } } : {}),
+        },
         { headers: hardened },
       );
     }
+    // The workload issuer's OIDC documents (Google's workload identity federation fetches them with
+    // no credentials). Public keys and metadata only, cacheable; they touch no store.
+    if (workload && path === 'workload/.well-known/openid-configuration')
+      return Response.json(workload.discovery(), { headers: publicDocument });
+    if (workload && path === 'workload/jwks.json')
+      return Response.json(await workload.jwks(), { headers: publicDocument });
     if (path.startsWith('downloads/')) {
       const download = await serveDownload(options.downloads, path, hardened);
       if (download) return download;

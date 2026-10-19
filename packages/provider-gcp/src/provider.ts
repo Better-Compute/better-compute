@@ -1,17 +1,18 @@
 import { ComputeError, type ProviderContext } from '@better-compute/core';
-import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
 import {
   cachedTokenSource,
+  federatedTokenSource,
+  googleEndpoint,
   impersonatedTokenSource,
   metadataTokenSource,
   serviceAccountTokenSource,
   type TokenSource,
-} from './auth.js';
+} from '@better-compute/gcp-common';
+import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
 import { gceClient } from './client.js';
 import { GcpCompute, parseDiscoverLabel } from './compute.js';
 import { gcpConfig, type GcpConfig, type GcpProviderOptions } from './config.js';
-
-const defaultEndpoint = 'https://compute.googleapis.com/compute/v1';
+import { checkGcpAccount, federationOf, subjectTokenAudience } from './federation.js';
 
 /**
  * The token source for one account: the service-account key behind `credentials` when the account
@@ -23,6 +24,11 @@ const defaultEndpoint = 'https://compute.googleapis.com/compute/v1';
  * platform's project would act there as the platform. `impersonate` without `credentials` would
  * impersonate through that same identity, so it is refused too. The key is resolved on the first
  * request, not when the client is built.
+ *
+ * `federationAudience` is the keyless path: the account's workload identity (`context.identity`,
+ * which vps fixes to the account) is exchanged at STS for an access token, with `impersonate` on
+ * top if set. It excludes `credentials`, needs a workload issuer, and is never ambient, so a
+ * tenant's federated account satisfies the rule above and a platform account may use it too.
  */
 function accountTokens(
   config: GcpConfig,
@@ -30,6 +36,23 @@ function accountTokens(
   options: GcpProviderOptions,
 ): TokenSource {
   const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+  const federation = federationOf(config, context);
+  if (federation) {
+    const { audience, identity } = federation;
+    // The account's own subject is signed for the pool provider's audience, as an https URL.
+    const federated = federatedTokenSource({
+      audience,
+      subjectToken: async () =>
+        (await identity.mint({ audience: subjectTokenAudience(audience) })).token,
+      fetch: fetchImpl,
+      universeDomain: options.universeDomain,
+    });
+    if (!config.impersonate) return federated;
+    return impersonatedTokenSource(federated, config.impersonate, {
+      fetch: fetchImpl,
+      universeDomain: options.universeDomain,
+    });
+  }
   if (!config.credentials && context.account?.platform !== true)
     throw new ComputeError(
       'INVALID_CONFIG',
@@ -44,7 +67,10 @@ function accountTokens(
     if (base) return base;
     if (config.credentials) {
       const key = await context.secrets.resolve(config.credentials);
-      base = serviceAccountTokenSource(key, { fetch: fetchImpl });
+      base = serviceAccountTokenSource(key, {
+        fetch: fetchImpl,
+        universeDomain: options.universeDomain,
+      });
     } else if (options.tokenSource) base = cachedTokenSource(options.tokenSource);
     else base = metadataTokenSource({ fetch: fetchImpl });
     return base;
@@ -53,7 +79,10 @@ function accountTokens(
     token: async (call) => (await resolveBase()).token(call),
   };
   if (!config.impersonate) return lazyBase;
-  return impersonatedTokenSource(lazyBase, config.impersonate, { fetch: fetchImpl });
+  return impersonatedTokenSource(lazyBase, config.impersonate, {
+    fetch: fetchImpl,
+    universeDomain: options.universeDomain,
+  });
 }
 
 /**
@@ -61,19 +90,25 @@ function accountTokens(
  * to supply the host's own credentials (workload identity) to platform accounts that name no key.
  */
 export function gcpProvider(options: GcpProviderOptions = {}): ProviderDefinition<GcpConfig> {
+  // Validated now, so a malformed universe fails when the host builds the provider.
+  const universeEndpoint = `${googleEndpoint('compute', { universeDomain: options.universeDomain })}/compute/v1`;
   return defineProvider<GcpConfig>({
     id: 'gcp',
     version: '0.1.0',
     provides: ['vps'],
     config: gcpConfig as unknown as ProviderDefinition<GcpConfig>['config'],
     capabilities: ['power', 'list', 'discover', 'claim', 'reservations', 'networks'],
+    // One pool provider is one account: vps refuses a second account with the same audience.
+    accountKey: (config) => config.federationAudience || undefined,
+    // A federated account proves, before it is stored, that its pool trusts exactly its subject.
+    checkAccount: (config, context) => checkGcpAccount(config, context, options),
     create: (config, context) => {
       if (config.zones.length === 0)
         throw new ComputeError('INVALID_CONFIG', 'A GCP account lists at least one zone');
       parseDiscoverLabel(config.discoverLabel);
       const client = gceClient({
         fetch: options.fetch ?? globalThis.fetch.bind(globalThis),
-        endpoint: options.endpoint ?? defaultEndpoint,
+        endpoint: options.endpoint ?? universeEndpoint,
         projectId: config.projectId,
         tokens: accountTokens(config, context, options),
         clock: context.clock,

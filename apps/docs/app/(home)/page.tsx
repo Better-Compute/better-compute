@@ -234,7 +234,7 @@ function Closing() {
             Run your own GPU, CPU and sandbox capacity, with the guarantees of a database
           </h2>
           <p className="relative max-w-md text-body-regular leading-6 text-text-secondary">
-            Version 0.1.0 is on npm: install better-compute and better-iam, and the control plane runs on
+            Version 0.2.0 is on npm: install better-compute and better-iam, and the control plane runs on
             PGlite or PostgreSQL. bcd&rsquo;s node agent is built and tested but not released yet, and
             nothing has run on real GPU hardware, so machines join as simulated daemons for now.
           </p>

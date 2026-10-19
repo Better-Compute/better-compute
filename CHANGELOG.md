@@ -6,6 +6,73 @@ All notable changes to the better-compute packages are documented here. The form
 
 ## Unreleased
 
+### Added
+
+- **`@better-compute/gcp-common`** (new, outside the umbrella). The Google Cloud token sources
+  (`serviceAccountTokenSource`, `metadataTokenSource`, `impersonatedTokenSource`, `cachedTokenSource`) move out of
+  `@better-compute/provider-gcp` into a package that depends only on `@better-compute/core`, so other Google
+  providers can share them. `provider-gcp` re-exports the same functions; its API and behavior are unchanged.
+- **Universe domains** (`@better-compute/gcp-common`, `@better-compute/provider-gcp`). `googleEndpoint(service, { universeDomain })`
+  and `tokenEndpoint(universeDomain)` build Google endpoints for a host-configured universe (default `googleapis.com`).
+  `serviceAccountTokenSource` and `impersonatedTokenSource` take `universeDomain`: another universe pins a key's
+  `token_uri` to exactly `https://oauth2.<universe>/token`, and a key's own `universe_domain` must match it. The default
+  universe is unchanged. `gcpProvider({ universeDomain })` derives the compute endpoint from it.
+- **`providerAccounts.federationSetup`** (`@better-compute/vps`). A read method (`compute:providers:read`, no provider
+  call) that returns the workload `issuer`, its `jwksUri`, the exact `subject` `providerAccounts.create` will give an
+  account (`compute-account:<tenantId>/<provider>/<name>`), the CEL `attributeCondition` that trusts that subject
+  alone, and an `allowedAudienceHint`. It is the first step of keyless Google Cloud accounts (`federationAudience`);
+  the providers guide has the `gcloud` setup and what each `create` refusal means.
+- **Keyless Google Cloud accounts** (workload identity federation, GCP WS1).
+  - `@better-compute/pki` `workloadIssuer({ issuer, signingKey, nextKey?, previousKeys? })`: the control plane as an
+    OIDC issuer (ES256, 60 to 600 s tokens, `nextKey` published before it signs). `pki.workloadIssuer` in
+    `betterCompute()` serves it, unauthenticated and cached 5 minutes, at
+    `GET {basePath}/workload/.well-known/openid-configuration` and `GET {basePath}/workload/jwks.json`, names it in
+    `/.well-known/better-compute` as `workload`, and hands it to modules as `context.pki.workload`. The issuer must be
+    `<baseURL's origin>{basePath}/workload`, or on the origin named by the new `pki.workloadIssuerOrigin`, and differ
+    from `workloadIdentity.issuer`'s; anything else is `INVALID_CONFIG` (`reason: 'workloadIssuerUrl'`). The PKI
+    operations page covers persistent keys and rollover.
+  - `@better-compute/provider-gcp`: a tenant account may name `federationAudience` (its workload identity pool
+    provider) instead of `credentials`. `providerAccounts.create`/`update` prove before storing it that the pool trusts
+    exactly the account's subject and that the token reads the project, and refuse it with `INVALID_CONFIG` reasons
+    `credentialsAndFederation`, `noWorkloadIssuer`, `federationAudience`, `federationTrustsAnySubject`,
+    `federationRefused`, `impersonationRefused` or `projectAccess`; Google failures are retryable `UNAVAILABLE` or
+    `RATE_LIMITED`. An audience already in use by any account is `CONFLICT`.
+  - `@better-compute/gcp-common`: `federatedTokenSource` and `stsExchange` (Google STS token exchange).
+  - `@better-compute/vps`: migration `vps/0027_account_exclusive_key` (a provider-declared key, the federation
+    audience, unique per provider across tenants); provider checks run in admission with no transaction open.
+  - `@better-compute/core` (additive, optional): `WorkloadIssuerPort`, `PkiPort.workload`, `ProviderContext.identity`,
+    `ProviderInput.checkAccount` and `ProviderInput.accountKey`.
+
+## 0.2.1 (2026-10-18)
+
+Compute Engine creates that 0.2.0 sent with a boot disk or network interface the machine type refuses, and SSH keys
+on images without cloud-init. Every package is at 0.2.1.
+
+### Fixed
+
+- **provider-gcp: newer machine types failed to create.** 0.2.0 always gave the boot disk `pd-balanced`, which the
+  Hyperdisk-only families refuse (`pd-balanced disk type cannot be used by a3-ultragpu-8g machine type`). The boot
+  disk type now follows the machine family: Hyperdisk Balanced for A3 Ultra, A4, A4X, C4, C4A, C4D, G4, H4D, M4, N4,
+  N4A, N4D and X4, `pd-balanced` for the rest as before. Create reads the zone's disk type first: a zone that does
+  not offer it, or a `diskGiB` outside the sizes it takes, is `INVALID_INPUT` (`details.reason` `diskTypeUnavailable`
+  or `diskSizeOutOfRange`) before anything is created. A family GCE refuses Persistent Disk for although the table
+  allows it is retried once with Hyperdisk Balanced under its own requestId, logged as `gcp.disk_type_fallback`, and
+  remembered.
+- **provider-gcp: gVNIC-only machine types.** A3, A4, A4X, C3, C3D, C4, C4A, C4D, G4, H3, H4D, M4, N4, N4A, N4D, X4
+  and Z3 VMs get `nicType: GVNIC`; they do not take VirtIO-Net.
+- **SSH keys on images without cloud-init.** Instance SSH keys only reached the VM through cloud-init user data,
+  which Compute Engine's Debian and Rocky Linux images do not run. `ProviderImpl.create` takes `sshKeys` (vps passes
+  the instance's), and provider-gcp also writes them as `ssh-keys` metadata for the image's default user (`debian`,
+  `rocky`, `centos`, else `ubuntu`), which the guest agent of every Compute Engine image installs.
+
+## 0.2.0 (2026-10-18)
+
+A Google Compute Engine provider (`@better-compute/provider-gcp`, new), discovery and attach of existing provider
+machines, provider capacity reservations, tenant networks and firewall rules, `instances.reboot`, platform-issued
+compute (`instances.create` with `ownerIdentityId`) with owner membership, and security fixes for provider accounts
+and their secrets that apply to every 0.1.x deployment. Every package, `@better-compute/provider-gcp` included, is at
+0.2.0.
+
 ### Security
 
 - **A tenant could build a provider pool on another tenant's or the platform's provider account (0.1.x).**

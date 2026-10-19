@@ -18,6 +18,7 @@ An account is data, validated by the provider's manifest:
 | `zones`             | At least one zone. Offers, discovery and reservations are limited to these.                           |
 | `credentials`       | A secret reference to a service-account key JSON. Absent: the host identity (platform accounts only). |
 | `impersonate`       | A service-account email to impersonate with the base credentials.                                     |
+| `federationAudience` | Keyless sign-in: a workload identity pool provider, `//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`. Never with `credentials`; may be combined with `impersonate`. |
 | `network`, `subnet` | Used by `create` when no tenant network is given (default network `default`).                         |
 | `imageProject`      | Where image families resolve (default `ubuntu-os-cloud`).                                             |
 | `diskGiB`           | Boot disk size (default 100).                                                                         |
@@ -51,6 +52,8 @@ await client.providerAccounts.create({
 
 `gcpProvider({ fetch, endpoint, tokenSource, operationPollMs })` swaps the transport, the API endpoint, the token source (a host's workload-identity client, used only by platform accounts that name no key) and the in-call operation poll interval (default 2 s, used only for waits of at most 20 s).
 
+**Universe domains.** `gcpProvider({ universeDomain: 'example-tpc.goog' })` runs the provider in another Google Cloud universe (a Trusted Partner Cloud or sovereign deployment; default `googleapis.com`). The compute endpoint becomes `https://compute.<universe>/compute/v1` (an explicit `endpoint` still wins), impersonation calls `iamcredentials.<universe>`, and a service-account key may name only `https://oauth2.<universe>/token` as its `token_uri`. The universe is host configuration and never comes from a key: a key's own `universe_domain` must equal it (absent means `googleapis.com`), or the key is `INVALID_CONFIG` (`details.reason` `universeDomain`). A malformed universe is `INVALID_CONFIG` (`details.reason` `endpoint`) when the provider is built.
+
 ## IAM roles
 
 The account's service account (the key's, the metadata server's, or the impersonated one) needs:
@@ -62,7 +65,9 @@ The account's service account (the key's, the metadata server's, or the imperson
 | `roles/compute.securityAdmin`    | Firewall rules.                                                                                                                                                                |
 | `roles/compute.viewer`           | Discovery, reservations and future reservations, machine types and operations.                                                                                                 |
 
-With `impersonate` set, the base credentials also need `roles/iam.serviceAccountTokenCreator` on the impersonated service account.
+| `roles/iam.workloadIdentityUser` | Keyless accounts (`federationAudience`) with `impersonate`: granted to the account's principal on the impersonated service account. |
+
+With `impersonate` set, the base credentials also need `roles/iam.serviceAccountTokenCreator` on the impersonated service account. A keyless account (`federationAudience`) has no base credentials: its principal needs `roles/iam.workloadIdentityUser` on the impersonated service account instead, or the compute roles above directly.
 
 ## Ownership labels
 
@@ -122,7 +127,9 @@ How vps uses them:
 
 `serviceAccountTokenSource(keyJson)` signs a JWT with the key and exchanges it at the OAuth token endpoint. `metadataTokenSource()` reads the metadata server. `impersonatedTokenSource(base, email)` exchanges a base token through IAM Credentials. Each caches its token until a minute before expiry. A host that has its own workload-identity client passes `tokenSource` in the provider options. Tokens are never logged.
 
-**Tenant accounts bring their own key.** An account without `credentials` runs on the host's own identity (`tokenSource`, else the metadata server), which is the control plane's. vps tells the provider whose account it builds a client for (`ProviderContext.account`), and only an account of the root (platform) tenant may do that: a tenant's account without `credentials`, or with `impersonate` but no `credentials`, is `INVALID_CONFIG` at `providerAccounts.create` and `update` (and on every use, for a row stored before). Otherwise a tenant naming the platform's project would list, attach and delete the platform's VMs. `tokenSource` never overrides an account's `credentials`.
+**Tenant accounts bring their own key.** An account without `credentials` runs on the host's own identity (`tokenSource`, else the metadata server), which is the control plane's. vps tells the provider whose account it builds a client for (`ProviderContext.account`), and only an account of the root (platform) tenant may do that: a tenant's account without `credentials` or `federationAudience`, or with `impersonate` but neither, is `INVALID_CONFIG` at `providerAccounts.create` and `update` (and on every use, for a row stored before). Otherwise a tenant naming the platform's project would list, attach and delete the platform's VMs. `tokenSource` never overrides an account's `credentials`.
+
+**Keyless accounts (workload identity federation).** A tenant account may name `federationAudience` instead of `credentials`: better-compute is the OIDC issuer (`pki.workloadIssuer`), and the account signs in to the tenant's project with a short-lived identity token that Google STS exchanges, no service-account key stored. vps fixes the account's subject (`compute-account:<tenantId>/gcp/<name>`; `providerAccounts.federationSetup` returns it with the exact condition), and the tenant's pool provider must trust that subject only. `providerAccounts.create` and `update` run `checkAccount` first, with probe tokens for another tenant's and a sibling's subject, and refuse with `INVALID_CONFIG` and `details.reason`: `federationTrustsAnySubject` (the provider accepted a probe: its condition is too broad), `federationRefused` (STS refused the account's own token; the message quotes `assertion.sub == "<subject>"`), `impersonationRefused` (grant the principal `roles/iam.workloadIdentityUser` on the service account), `projectAccess` (the identity cannot read the project), `noWorkloadIssuer` (the host has no issuer) or `credentialsAndFederation` (both were named). Only a 400, 401 or 403 from Google counts as a refusal; throttling and malformed replies are retryable `RATE_LIMITED` / `UNAVAILABLE`. See the providers guide, "Keyless GCP accounts", for the `gcloud` setup.
 
 **The key must be the tenant's own.** `credentials` on a tenant's account is a `secret://<its tenant>/…` reference (or a `vault://` path `vps({ tenantVaultPaths })` allows it); `env://`, another tenant's and the platform's secrets are `INVALID_CONFIG`, as for every provider (see `providerAccounts.create` in the API reference).
 

@@ -125,7 +125,8 @@
         "vps/0023_provider_machines",
         "vps/0024_instance_attach",
         "vps/0025_provider_reservations",
-        "vps/0026_networks"
+        "vps/0026_networks",
+        "vps/0027_account_exclusive_key"
       ]
     },
     {

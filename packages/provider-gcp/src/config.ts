@@ -17,6 +17,12 @@ export const gcpConfig = manifest({
     .string()
     .optional()
     .describe('Service-account email to impersonate with the base credentials'),
+  federationAudience: field
+    .string()
+    .optional()
+    .describe(
+      'Workload identity pool provider (//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>): better-compute signs in as this account with no key',
+    ),
   network: field
     .string()
     .default('default')
@@ -39,6 +45,7 @@ export interface GcpConfig {
   zones: string[];
   credentials?: SecretRef;
   impersonate?: string;
+  federationAudience?: string;
   network?: string;
   subnet?: string;
   imageProject?: string;
@@ -49,8 +56,15 @@ export interface GcpConfig {
 export interface GcpProviderOptions {
   /** The fetch implementation (tests pass an emulating one). */
   fetch?: typeof fetch;
-  /** Default `https://compute.googleapis.com/compute/v1`. */
+  /** Default `https://compute.<universeDomain>/compute/v1` (`https://compute.googleapis.com/compute/v1`). */
   endpoint?: string;
+  /**
+   * The Google Cloud universe this host runs in (default `googleapis.com`; a Trusted Partner Cloud
+   * has its own domain). It sets the default compute endpoint, the IAM Credentials host, and the
+   * only token endpoint a service-account key may name; a key's own `universe_domain` must match it
+   * and never selects it. Malformed values are INVALID_CONFIG when the provider is built.
+   */
+  universeDomain?: string;
   /**
    * The host's own identity (a workload-identity client), used instead of the metadata server by
    * platform (root-tenant) accounts that name no `credentials`. Never overrides an account's
@@ -59,4 +73,10 @@ export interface GcpProviderOptions {
   tokenSource?: TokenSource;
   /** Default 2000. Only used by in-call operation waits of at most 20 seconds. */
   operationPollMs?: number;
+  /**
+   * Default 10000. How long each network call of the federated-account check (`checkAccount`: STS,
+   * IAM Credentials, the project read) may take before account creation is refused with a
+   * retryable UNAVAILABLE `timeout`.
+   */
+  checkTimeoutMs?: number;
 }

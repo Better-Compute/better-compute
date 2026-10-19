@@ -103,6 +103,13 @@
     "exports": ["."]
   },
   {
+    "name": "@better-compute/gcp-common",
+    "directory": "packages/gcp-common",
+    "description": "Shared Google Cloud plumbing for better-compute: token sources, workload identity, REST client, errors, paging, operations",
+    "private": false,
+    "exports": ["."]
+  },
+  {
     "name": "@better-compute/iam",
     "directory": "packages/iam",
     "description": "The better-iam bridge for better-compute: IAM plugin and catalog, event inbox, authz projection and resolver, the embedded IamPort, usage sink and flag cache.",
