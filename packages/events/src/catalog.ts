@@ -156,7 +156,8 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     type: 'node.pxe-mac.confirmed',
     subject: 'node/{id}',
     module: 'metal',
-    description: "An operator bound a machine's PXE MAC with metal.confirmMac ({ nodeId, mac, discovered, requestId })",
+    description:
+      "An operator bound a machine's PXE MAC with metal.confirmMac ({ nodeId, mac, discovered, requestId })",
   },
   {
     type: 'node.provision.*',

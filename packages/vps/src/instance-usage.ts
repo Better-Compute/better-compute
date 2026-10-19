@@ -308,7 +308,7 @@ export async function openInterval(
   observed?: ObservedMachine,
 ): Promise<void> {
   if (row.poolClass !== 'provider') return;
-  await openIntervalOf(tx, row.id, phase, at, deps, observed);
+  await openIntervalOf(tx, row.id, phase, at, deps, observed, row);
 }
 
 async function openIntervalOf(
@@ -318,13 +318,15 @@ async function openIntervalOf(
   at: number,
   deps: IntervalDeps,
   observed?: ObservedMachine,
+  /** The lifecycle row, when a poll opens the interval: its disk condition is kept in step. Grant moves (no row) change no disks. */
+  row?: InstanceRow,
 ): Promise<void> {
   const billing = await billingOf(tx, instanceId, at, deps, observed, phase);
   if (!billing) {
     await closeOpenInterval(tx, instanceId, at);
     return;
   }
-  await syncDiskCondition(tx, row, billing.unknownDiskTypes, at);
+  if (row) await syncDiskCondition(tx, row, billing.unknownDiskTypes, at);
   const shape = JSON.stringify(billing.shape);
   const { rows: open } = await tx.query<{ same: boolean }>(
     `SELECT (phase = $2 AND mode = $3 AND shape = $4::jsonb) AS same FROM instance_usage_intervals
