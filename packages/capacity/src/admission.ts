@@ -156,7 +156,11 @@ export interface TenantOffer {
   suspended: boolean;
   /** The pool as the offer shows it. */
   pool: { ownerTenantId: string; siteId: string; class: string; gpuModel?: string };
-  /** The offered tenant's quota rows on the pool (an inherited offer's quota is its ancestor's). */
+  /**
+   * The viewing tenant's own quota rows on the pool. An inherited offer shows the tenant's rows, never its
+   * ancestor's: the ancestor's limits and usage are the ancestor's business, and admission charges only the
+   * tenant's own rows (usually none until it holds a direct offer).
+   */
   quotas: QuotaRow[];
 }
 
@@ -201,13 +205,9 @@ export async function listTenantOffers(
     if (!held || depth < held.depth) nearest.set(row.pool_id, { ...row, depth });
   }
   const offers: TenantOffer[] = [];
-  const quotaCache = new Map<string, QuotaRow[]>();
+  // The tenant's own rows only: an ancestor's quota is not the tenant's to read.
+  const quotas: QuotaRow[] = nearest.size > 0 ? await readQuotas(sql, tenantId) : [];
   for (const row of nearest.values()) {
-    let quotas = quotaCache.get(row.tenant_id);
-    if (!quotas) {
-      quotas = await readQuotas(sql, row.tenant_id);
-      quotaCache.set(row.tenant_id, quotas);
-    }
     const offer: TenantOffer = {
       poolId: row.pool_id,
       offeredTo: row.tenant_id,

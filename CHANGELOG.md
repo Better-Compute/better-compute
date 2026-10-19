@@ -31,7 +31,8 @@ All notable changes to the better-compute packages are documented here. The form
   - **Admission policy hook.** `vps({ admissionPolicy })` (core `AdmissionPolicy`, `AdmissionPolicyRequest`)
     runs the host's rules in the admission transaction, after the flavor allowlists and before quota is charged.
   - **Inherited offers.** New read `pools.offers` lists the offers that reach a tenant: its own and its
-    ancestors' made with `includeDescendants`, nearest first, by priority. The tenant tree comes from
+    ancestors' made with `includeDescendants`, nearest first, by priority, each with the tenant's own
+    quota rows on the pool (never an ancestor's). The tenant tree comes from
     `capacity({ tenantAncestors })` (`betterCompute({ capacity })`); `iamTenantAncestors` in
     `@better-compute/iam` reads it from better-iam.
   - **Address policy.** `ProviderInput.endpoints` declares the endpoints an account's config (or an API URL
@@ -43,8 +44,10 @@ All notable changes to the better-compute packages are documented here. The form
     `endpoint` override. Compute Engine declares none: its hosts stay pinned by host options.
   - **Migrations:** core `0032_admission_flavors` (`pool_offers.flavors`, `quota_usage.flavors`); vps
     `0048_quota_counts` (existing `instances`/`sandboxes` rows start at what is live).
-  - **Lock order.** Among quota rows, counted resources lock first, the tenant row before the pool's; a deleted
-    instance refunds its recorded charge before its allocation is released.
+  - **Lock order.** Among quota rows, counted resources lock first, then the pool's row before the tenant's
+    (`*`), so a tenant row created while a charge is in flight still counts it; a tenant's `gpu.<model>` row
+    takes the pool's model once the pool's `gpu` row is locked, and `pools.update` locks those rows before
+    changing `gpuModel`. A deleted instance refunds its recorded charge before its allocation is released.
   - `@better-compute/testing`: `computeFixture({ capacity })`.
 
 - **Platform compute billing** (`@better-compute/vps`, `capacity`, `iam`, `server`, `provider-gcp`; plan

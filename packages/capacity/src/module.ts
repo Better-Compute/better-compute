@@ -866,6 +866,14 @@ export interface CapacityModuleOptions extends PlacementOptions {
   tenantAncestors?: TenantAncestors;
 }
 
+/** Locks every tenant's `gpu` quota row on the pool (quota rows lock before the pool row). */
+async function lockPoolGpuQuota(tx: SqlTx, poolId: string): Promise<void> {
+  await tx.query(
+    `SELECT 1 FROM quota_usage WHERE pool_id = $1 AND resource = 'gpu' ORDER BY tenant_id FOR UPDATE`,
+    [poolId],
+  );
+}
+
 /**
  * A pool's GPU model is part of its tenants' `gpu.<model>` totals (tenant-level quota rows): it may change only
  * while no tenant holding such a row has GPUs charged on the pool, so every refund meets the row its charge took.
@@ -1256,6 +1264,10 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       validate: describedBy(schemas.updatePool, parseUpdatePool),
       handler: async (context, input) => {
         const tx = context.sql;
+        // A model change waits for GPU charges in flight on the pool (their `gpu` rows, locked before the pool as
+        // quota rows always are), so `assertGpuModelChangeable` sees them and their `gpu.<model>` rows see the
+        // model they were charged under.
+        if (input.gpuModel !== undefined) await lockPoolGpuQuota(tx, input.poolId);
         const pool = await ownedPool(tx, input.tenantId, input.poolId, true);
         const next: Pool = { ...pool, version: pool.version + 1 };
         if (input.policy !== undefined) {

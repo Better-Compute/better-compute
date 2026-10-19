@@ -295,8 +295,15 @@ describe('offers a tenant holds or inherits', () => {
       flavors: ['gpu.1x'],
       suspended: false,
       pool: { ownerTenantId: 'root', siteId: SITE, class: 'vps-host', gpuModel: 'H100' },
-      quotas: [{ tenantId: 'org', poolId: H100, resource: 'gpu', max: 4, used: 0, available: 4 }],
+      // org's own quota on the pool (gpu, max 4) is org's business: proj sees none of it.
+      quotas: [],
     });
+    // The tenant's own rows on a pool are shown, inherited offer or not.
+    await tx((t) => setQuota(t, 'proj', H100, 'vcpu', 16));
+    const again = await tx((t) => listTenantOffers(t, 'proj', ['org', 'root-parent']));
+    expect(again.find((offer) => offer.poolId === H100)!.quotas).toEqual([
+      { tenantId: 'proj', poolId: H100, resource: 'vcpu', max: 16, used: 0, available: 16 },
+    ]);
   });
 
   it('without ancestors, lists only its own offers; archived pools and owned pools are left out', async () => {
@@ -382,7 +389,98 @@ describe('pools.offers over the API', () => {
     expect(items[0]).toMatchObject({
       flavors: ['gpu.1x'],
       priority: 5,
-      quotas: [{ resource: 'gpu', max: 8 }],
+      // The parent's quota on the pool (gpu, max 8) is not shown to acme.
+      quotas: [],
     });
+    expect(items[1].quotas).toMatchObject([{ tenantId: tenants.acme.id, resource: 'gpu', max: 2 }]);
+  });
+});
+
+describe('quota lock order', () => {
+  it("locks the pool's rows before the tenant's, and reads the GPU model once the pool's gpu row is locked", async () => {
+    for (const resource of ['instances', 'vcpu', 'gpu', 'gpu.H100'])
+      await tx((t) => setQuota(t, 'acme', '*', resource, 100));
+    await tx((t) => setQuota(t, 'acme', H100, 'instances', 10));
+    const statements: string[] = [];
+    await tx((t) => {
+      const spy = {
+        query: (text: string, params?: readonly unknown[]) => {
+          if (/^\s*UPDATE quota_usage/.test(text))
+            statements.push(`update ${String(params![1])} ${String(params![2])}`);
+          else if (/SELECT gpu_model FROM pools/.test(text)) statements.push('read gpu_model');
+          return t.query(text, params as unknown[]);
+        },
+      } as unknown as SqlTx;
+      return chargeQuota(spy, 'acme', H100, { instances: 1, vcpu: 2, gpu: 1 });
+    });
+    expect(statements).toEqual([
+      `update ${H100} instances`,
+      'update * instances',
+      `update ${H100} gpu`,
+      `update ${H100} vcpu`,
+      'update * gpu',
+      // The model is read after the pool's gpu row is locked, for the gpu.<model> row only.
+      'read gpu_model',
+      'update * gpu.H100',
+      'update * vcpu',
+    ]);
+    expect(await used('acme', '*', 'gpu.H100')).toBe(1);
+  });
+});
+
+describe('pools.update and per-model GPU quota', () => {
+  afterEach(closeFixtures);
+
+  it('refuses a gpuModel change while a tenant with a gpu.<model> row has GPUs charged on the pool', async () => {
+    const fixture = await computeFixture();
+    const { tenants, iam } = fixture;
+    iam.allow({ token: tenants.root.token });
+    const api = fixture.compute.api as any;
+    const root = { token: tenants.root.token };
+    const site = await api.sites.create(root, {
+      tenantId: tenants.root.id,
+      kind: 'shared',
+      region: 'eu',
+      idempotencyKey: 'site',
+    });
+    const pool = await api.pools.create(root, {
+      tenantId: tenants.root.id,
+      siteId: site.id,
+      class: 'metal-host',
+      gpuModel: 'H100',
+      idempotencyKey: 'pool',
+    });
+    await api.pools.offer(root, {
+      tenantId: tenants.root.id,
+      poolId: pool.id,
+      toTenantId: tenants.acme.id,
+      quota: { gpu: 4 },
+    });
+    const update = (gpuModel: string) =>
+      api.pools.update(root, { tenantId: tenants.root.id, poolId: pool.id, gpuModel });
+    const charge = (fn: typeof chargeQuota | typeof refundQuota) =>
+      fixture.database.transaction((t) => fn(t, tenants.acme.id, pool.id, { gpu: 2 }));
+
+    // GPUs charged, but no per-model row: the model may change.
+    await charge(chargeQuota);
+    await update('B200');
+    await api.quotas.set(root, {
+      tenantId: tenants.acme.id,
+      poolId: '*',
+      resource: 'gpu.B200',
+      max: 8,
+    });
+    // The new per-model row starts at what acme has charged on B200 pools.
+    const { items } = await api.quotas.get(root, { tenantId: tenants.acme.id, poolId: '*' });
+    expect(items).toMatchObject([{ resource: 'gpu.B200', max: 8, used: 2 }]);
+    await expect(update('H200')).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      details: { tenantId: tenants.acme.id },
+    });
+    await charge(refundQuota);
+    await update('H200');
+    expect(
+      (await api.pools.get(root, { tenantId: tenants.root.id, poolId: pool.id })).gpuModel,
+    ).toBe('H200');
   });
 });

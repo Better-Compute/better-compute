@@ -12,7 +12,12 @@ import { ComputeError, type DeviceRequest, type SqlTx } from '@better-compute/co
 // Lock order, everywhere in capacity: quota_usage → pools → nodes → devices → node_resources →
 // pool_capacity_rollup. Charges precede placement and refunds precede releases, so concurrent
 // reserve and release transactions never wait on each other in a cycle. Among quota rows: counted
-// resources first, the tenant row before the pool's, then by resource (`lockRank`).
+// resources first, then the pool's rows before the tenant's (`*`), then by resource (`lockRank`).
+// The pool row comes first so that a tenant row being created (`setQuota` sums the pool rows under
+// lock) and a charge in flight serialize on the pool row: the charge either lands before the sum
+// reads it, or sees the committed tenant row and charges it too. A tenant's `gpu.<model>` row takes
+// the pool's model as it is once the pool's `gpu` row is locked, which `pools.update` also locks
+// before it changes a model.
 
 /**
  * What a scalar counts against quota as (§3.8): hugepages are memory, so hugepage-backed memory
@@ -82,37 +87,43 @@ interface QuotaTarget {
   optional: boolean;
   /** The key the holder records a counted charge under; scalars are not recorded (refunds recompute them). */
   record?: string;
+  /**
+   * The tenant's `gpu.<model>` row for this pool's model: `resource` is the placeholder `gpu.` (it sorts where
+   * any `gpu.<model>` does) until the model is read, after the pool's `gpu` row is locked (`resolveTarget`).
+   */
+  gpuModelOf?: string;
 }
 
 function compareTargets(a: QuotaTarget, b: QuotaTarget): number {
   const rank = lockRank(a.resource) - lockRank(b.resource);
   if (rank !== 0) return rank;
   if (a.poolId !== b.poolId) {
-    if (a.poolId === tenantQuotaScope) return -1;
-    if (b.poolId === tenantQuotaScope) return 1;
+    // The pool's row before the tenant's (see the lock order above).
+    if (a.poolId === tenantQuotaScope) return 1;
+    if (b.poolId === tenantQuotaScope) return -1;
     return a.poolId < b.poolId ? -1 : 1;
   }
   return a.resource < b.resource ? -1 : a.resource > b.resource ? 1 : 0;
 }
 
-/** The pool's GPU model, for the tenant's `gpu.<model>` row (an unlocked read). */
-async function poolGpuModel(tx: SqlTx, poolId: string): Promise<string | undefined> {
-  if (poolId === tenantQuotaScope) return undefined;
+/**
+ * The row a target names. A `gpu.<model>` placeholder becomes the pool's model as it is now: a fresh read made
+ * after the pool's `gpu` row is locked by an earlier target, so a concurrent `pools.update` of the model is
+ * either seen or refused. Undefined: the pool has no model, so there is no such row.
+ */
+async function resolveTarget(tx: SqlTx, target: QuotaTarget): Promise<string | undefined> {
+  if (target.gpuModelOf === undefined) return target.resource;
   const { rows } = await tx.query<{ gpu_model: string | null }>(
     `SELECT gpu_model FROM pools WHERE id = $1`,
-    [poolId],
+    [target.gpuModelOf],
   );
-  return rows[0]?.gpu_model ?? undefined;
+  const model = rows[0]?.gpu_model ?? undefined;
+  return model === undefined ? undefined : `gpu.${model}`;
 }
 
 /** The rows a charge (or the refund of a recorded charge) touches, in lock order. */
-async function quotaTargets(
-  tx: SqlTx,
-  poolId: string,
-  demand: Readonly<Record<string, number>>,
-): Promise<QuotaTarget[]> {
+function quotaTargets(poolId: string, demand: Readonly<Record<string, number>>): QuotaTarget[] {
   const targets: QuotaTarget[] = [];
-  let model: string | undefined | null = null;
   for (const [resource, amount] of Object.entries(demand)) {
     if (!(amount > 0)) continue;
     if (resource.startsWith(`${tenantQuotaScope}:`)) {
@@ -138,16 +149,14 @@ async function quotaTargets(
     }
     targets.push({ poolId, resource, amount, optional: false });
     targets.push({ poolId: tenantQuotaScope, resource, amount, optional: true });
-    if (resource === 'gpu') {
-      if (model === null) model = await poolGpuModel(tx, poolId);
-      if (model !== undefined)
-        targets.push({
-          poolId: tenantQuotaScope,
-          resource: `gpu.${model}`,
-          amount,
-          optional: true,
-        });
-    }
+    if (resource === 'gpu' && poolId !== tenantQuotaScope)
+      targets.push({
+        poolId: tenantQuotaScope,
+        resource: 'gpu.',
+        amount,
+        optional: true,
+        gpuModelOf: poolId,
+      });
   }
   return targets.sort(compareTargets);
 }
@@ -172,21 +181,23 @@ export async function chargeQuota(
   const fresh = Object.fromEntries(
     Object.entries(demand).filter(([resource]) => !resource.startsWith(`${tenantQuotaScope}:`)),
   );
-  const targets = await quotaTargets(tx, poolId, fresh);
+  const targets = quotaTargets(poolId, fresh);
   if (targets.length === 0) return charged;
   const savepoint = `capacity_quota_${++savepoints}`;
   await tx.query(`SAVEPOINT ${savepoint}`);
   try {
     for (const target of targets) {
+      const resource = await resolveTarget(tx, target);
+      if (resource === undefined) continue;
       const { rowCount } = await tx.query(
         `UPDATE quota_usage SET used = used + $4
           WHERE tenant_id = $1 AND pool_id = $2 AND resource = $3 AND used + $4 <= max`,
-        [tenantId, target.poolId, target.resource, target.amount],
+        [tenantId, target.poolId, resource, target.amount],
       );
       if (rowCount === 0) {
         const { rows } = await tx.query<{ max: string | number; used: string | number }>(
           `SELECT max, used FROM quota_usage WHERE tenant_id = $1 AND pool_id = $2 AND resource = $3`,
-          [tenantId, target.poolId, target.resource],
+          [tenantId, target.poolId, resource],
         );
         if (!rows[0] && target.optional) continue;
         const max = rows[0] ? Number(rows[0].max) : 0;
@@ -194,10 +205,10 @@ export async function chargeQuota(
         const tenantWide = target.poolId === tenantQuotaScope;
         throw new ComputeError(
           'QUOTA_EXCEEDED',
-          `Quota exceeded for ${target.resource} ${tenantWide ? 'across the tenant' : `in pool ${target.poolId}`}: ${target.amount} requested, ${Math.max(0, max - used)} of ${max} left`,
+          `Quota exceeded for ${resource} ${tenantWide ? 'across the tenant' : `in pool ${target.poolId}`}: ${target.amount} requested, ${Math.max(0, max - used)} of ${max} left`,
           undefined,
           {
-            resource: target.resource,
+            resource,
             poolId: target.poolId,
             scope: tenantWide ? 'tenant' : 'pool',
             requested: target.amount,
@@ -230,13 +241,15 @@ export async function refundQuota(
   poolId: string,
   demand: Readonly<Record<string, number>>,
 ): Promise<void> {
-  for (const target of await quotaTargets(tx, poolId, demand)) {
+  for (const target of quotaTargets(poolId, demand)) {
     // A recorded pool count says nothing about the tenant row: that has its own `*:` key when charged.
     if (target.record !== undefined && target.poolId === tenantQuotaScope) continue;
+    const resource = await resolveTarget(tx, target);
+    if (resource === undefined) continue;
     await tx.query(
       `UPDATE quota_usage SET used = GREATEST(0, used - $4)
         WHERE tenant_id = $1 AND pool_id = $2 AND resource = $3`,
-      [tenantId, target.poolId, target.resource, target.amount],
+      [tenantId, target.poolId, resource, target.amount],
     );
   }
 }

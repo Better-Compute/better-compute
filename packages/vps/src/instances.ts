@@ -1827,20 +1827,20 @@ export async function resizeInstance(
   await assertFlavorEntitledFor(tx, row, shape.name, after);
   if (deps.admissionPolicy)
     await deps.admissionPolicy(tx, {
-    method: 'instances.resize',
-    tenantId: row.tenantId,
-    poolId: row.poolId,
-    poolClass: row.poolClass,
-    flavor: shape.name,
-    shape: shapeFields(shape),
-    demand: grow,
-    ...(await poolPlacement(tx, row.poolId)),
-    ...(row.labels !== undefined ? { labels: row.labels } : {}),
-    ...(row.projectId !== undefined ? { projectId: row.projectId } : {}),
-    imageId: row.imageId,
-    instanceId: row.id,
-    ownerIdentityId: row.ownerIdentityId,
-  });
+      method: 'instances.resize',
+      tenantId: row.tenantId,
+      poolId: row.poolId,
+      poolClass: row.poolClass,
+      flavor: shape.name,
+      shape: shapeFields(shape),
+      demand: grow,
+      ...(await poolPlacement(tx, row.poolId)),
+      ...(row.labels !== undefined ? { labels: row.labels } : {}),
+      ...(row.projectId !== undefined ? { projectId: row.projectId } : {}),
+      imageId: row.imageId,
+      instanceId: row.id,
+      ownerIdentityId: row.ownerIdentityId,
+    });
   await chargeQuota(tx, row.tenantId, row.poolId, grow);
   const outcome = await resizeAllocation(tx, row.allocationId, placementResources(shape));
   if (outcome.status === 'conflict') {

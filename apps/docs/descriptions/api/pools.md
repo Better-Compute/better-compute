@@ -66,7 +66,7 @@ Emits `pool.offer-updated`.
 
 ## offers
 
-Returns the offers that reach the tenant, as `items`: its own, and those of its ancestors made with `includeDescendants`. Each item names the pool (`poolId`, and `pool` with its owner, site, class and GPU model), `offeredTo` (the tenant the offer was made to), `inherited` and `depth` (0 for the tenant's own offer, 1 for its parent's, and so on), `includeDescendants`, `priority`, the offer's `flavors`, `allowedRegions`, `onBudgetExceeded` and `suspended`, and the quota rows of `offeredTo` on the pool.
+Returns the offers that reach the tenant, as `items`: its own, and those of its ancestors made with `includeDescendants`. Each item names the pool (`poolId`, and `pool` with its owner, site, class and GPU model), `offeredTo` (the tenant the offer was made to), `inherited` and `depth` (0 for the tenant's own offer, 1 for its parent's, and so on), `includeDescendants`, `priority`, the offer's `flavors`, `allowedRegions`, `onBudgetExceeded` and `suspended`, and the tenant's own quota rows on the pool (never an ancestor's: an inherited offer's limits and usage stay with the tenant it was made to, so an inherited item usually has none).
 
 - **Order.** By `priority`, highest first, then nearest first, then pool id. One item per pool: the tenant's own offer shadows an inherited one, and a nearer ancestor's a farther one's. Archived pools and pools the tenant owns are left out.
 - **Ancestry.** The tenant tree is IAM's: compute asks the host's `capacity({ tenantAncestors })` (`iamTenantAncestors` from `@better-compute/iam`, with a root credential), with no transaction open. Without it, only the tenant's own offers are listed.

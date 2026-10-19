@@ -359,6 +359,38 @@ describe('address policy: provider accounts', () => {
     expect(contexts.at(-1)!.fetch).not.toBe(globalThis.fetch);
   });
 
+  it('the Proxmox client calls through ProviderContext.fetch: a name that rebinds to loopback reaches nothing', async () => {
+    let answers = 0;
+    const policy = createAddressPolicy({
+      resolve: table({
+        'pve.rebind.example.com': () => (answers++ === 0 ? ['198.51.101.10'] : ['127.0.0.1']),
+      }),
+    });
+    const config = { url: 'https://pve.rebind.example.com:8006', token: 'env://PVE_TOKEN' };
+    // Account validation passes: the name resolves to a public address.
+    expect(await policy.check(config.url)).toEqual(['198.51.101.10']);
+    const urls: string[] = [];
+    const definition = proxmoxProvider();
+    const client = await definition.create(
+      config as never,
+      {
+        clock: { now: () => 0 },
+        secrets: { resolve: async () => 'root@pam!t=x' },
+        log: { debug() {}, info() {}, warn() {}, error() {} },
+        fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+          urls.push(String(input));
+          return policy.fetch(input, init);
+        }) as typeof fetch,
+      } as unknown as ProviderContext,
+    );
+    const refused = await failure(client.listOffers({ kind: 'vps' } as never));
+    // The client used the context's fetch (no fetch option of its own), which re-resolved and refused.
+    expect(urls[0]).toMatch(/^https:\/\/pve\.rebind\.example\.com:8006\/api2\/json\//);
+    expect(answers).toBe(2);
+    expect(refused).toMatchObject({ code: 'PROVIDER_ERROR' });
+    expect(refused!.message).toContain('loopback');
+  });
+
   it('checks a Hetzner API URL override, and only an override', async () => {
     expect(hetznerCloud.endpoints).toBeUndefined();
     const overridden = hetznerCloudProvider({ endpoint: 'https://10.9.8.7/v1' });
