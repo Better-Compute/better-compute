@@ -116,7 +116,7 @@ vps, and nothing imports a provider. Hosts register it with `vps({ providers: [.
 **Node identity:** `pki/src/attestors/cloud-iid.ts` verifies AWS and GCP identity documents. DigitalOcean's metadata
 service has **no signed instance identity**, so DO nodes join with tokens (DO-D12).
 
-**Migrations:** the newest vps migration on main is `vps/0027_account_exclusive_key` (2026-10-18). Billing reserves `vps/0030`–`0033`. This program holds `vps/0034`–`vps/0041` (claimed in coordination.md, d4a60ba8).
+**Migrations:** the newest vps migration on main is `vps/0027_account_exclusive_key` (2026-10-18). Billing owns `vps/0030`–`0033` (and core up to `0031`); `vps/0028`–`0029` are never to be used; `vps/0042`–`0045` are claimed by another session. This program holds `vps/0034`–`vps/0041` (claimed in coordination.md, d4a60ba8).
 
 **Phases:** `ApiPhase` is the closed union `'v0.1'…'v1.0'` (`core/src/catalog.ts:288`).
 
@@ -904,6 +904,7 @@ Spending stays under the test account's cap; the sweeper leaves no `better-compu
   Prometheus registry with an `instance` label. Alert policies and Insights alert rules are `cloudResources` kinds;
   notification channels can target better-compute webhooks.
 - **Uptime.** A `do.uptime-check` kind. The operator's own gateway health checks are an optional platform resource.
+- **Provider prices and costs.** Implement the optional `ProviderImpl.costs` / `listPrices` and the `billing` SKU-family declaration that platform compute billing added on main (2026-10-19; reference implementation: `packages/provider-gcp/src/costs.ts`, `prices.ts`), from DO size prices and billing history.
 - **Billing.** A sweep of balance, billing history and invoices into `iam` usage reconciliation. A per-account drift
   report compares metered better-compute usage with DO's invoice line items, surfaced as an admin attention item when
   drift is over a threshold. Budget alerts can include DO spend.
