@@ -129,6 +129,7 @@ import {
   type ListMachinesInput,
   type ProviderMachineView,
 } from './discovery.js';
+import { costsReconciler, type CostsOptions } from './costs.js';
 import { vpsMigrations } from './migrations.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
 import { describeCreateInstance, describeCreateSandbox, describeExtendSandbox } from './describe.js';
@@ -309,6 +310,12 @@ export interface VpsOptions {
    * listed into `provider_machines` (default `5m`), and opt-in label-driven auto-attach.
    */
   discovery?: DiscoveryOptions;
+  /**
+   * The `vps.costs` worker (platform compute billing, D10): how often provider accounts whose client reads costs
+   * (`ProviderImpl.costs`, e.g. GCP's billing export) are read into `provider_costs` (default `6h`), how many days
+   * back (default 3), and the deployment currency (default `USD`, better-iam's).
+   */
+  costs?: CostsOptions;
   /**
    * Where sandbox snapshots are stored (§3.7): presigned uploads for `instance.snapshot` and the URL
    * restores fetch. Without it `sandboxes.snapshot` is INVALID_CONFIG.
@@ -1611,6 +1618,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       providerReservationsReconciler(options.reservations ?? {}, reservationDeps),
       // R5: provider_machines, listed per provider account (key `all` periodic, then per account).
       discoveryReconciler(options.discovery ?? {}, depsOf),
+      // D10: provider_costs per provider account whose client reads costs (key `all` periodic, then per account).
+      costsReconciler(options.costs ?? {}, (context) => ({ ...depsOf(context), providers })),
       {
         // §3.7: sandbox expiry, sandbox.ready/deleted events, and warm pools per template.
         name: sandboxWork,
