@@ -13,7 +13,7 @@ import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
 import { gceClient } from './client.js';
 import { GcpCompute, parseDiscoverLabel } from './compute.js';
 import { gcpConfig, type GcpConfig, type GcpProviderOptions } from './config.js';
-import { billingExportOf, readBillingExport } from './costs.js';
+import { billingExportOf, gcpBilling, readBillingExport } from './costs.js';
 import { checkGcpAccount, federationOf, subjectTokenAudience } from './federation.js';
 
 /**
@@ -103,6 +103,8 @@ export function gcpProvider(options: GcpProviderOptions = {}): ProviderDefinitio
     capabilities: ['power', 'list', 'discover', 'claim', 'reservations', 'networks'],
     // One pool provider is one account: vps refuses a second account with the same audience.
     accountKey: (config) => config.federationAudience || undefined,
+    // Compute and disk/address SKUs are metered by compute: never passed through (D11), leak hours (D12).
+    billing: gcpBilling,
     // A federated account proves, before it is stored, that its pool trusts exactly its subject.
     checkAccount: (config, context) => checkGcpAccount(config, context, options),
     create: (config, context) => {

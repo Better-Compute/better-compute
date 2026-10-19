@@ -289,3 +289,27 @@ export async function* readBillingExport(
     response = await results(response.pageToken);
   }
 }
+
+/** A cost row, or a pass-through rule's probe (`service` empty, `sku`/`skuDescription` the pattern). */
+type SkuRecord = Pick<ProviderCostRecord, 'service' | 'sku' | 'skuDescription'>;
+
+/** Compute Engine as the billing export names it; an empty service is a probe and may be it. */
+const computeEngine = (record: SkuRecord): boolean =>
+  !record.service || record.service === 'Compute Engine';
+const skuText = (record: SkuRecord): string => `${record.sku} ${record.skuDescription ?? ''}`;
+/** D4's SKU families: vCPU cores, memory, GPUs and whole instances. */
+const computeFamilies = /core|ram|gpu|instance/i;
+/** What D9 meters on provider instances: persistent and local disks, and external addresses. */
+const meteredFamilies = /pd capacity|hyperdisk|local ssd|ip charge/i;
+
+/**
+ * How Compute Engine cost rows relate to compute's own meters (`ProviderDefinition.billing`): its compute SKUs
+ * (D4: core, RAM, GPU, instance) and the other SKUs compute meters (D9: disks, external IPs). Neither is ever
+ * passed through to a tenant; the compute SKUs are also the hours leak detection compares.
+ */
+export const gcpBilling = Object.freeze({
+  computeSku: (record: SkuRecord): boolean =>
+    computeEngine(record) && computeFamilies.test(skuText(record)),
+  meteredSku: (record: SkuRecord): boolean =>
+    computeEngine(record) && meteredFamilies.test(skuText(record)),
+});

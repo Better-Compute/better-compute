@@ -13,7 +13,7 @@ import {
   type Reconciler,
   type SqlTx,
 } from '@better-compute/core';
-import { readAccount, type ProviderAccount } from './accounts.js';
+import { readAccount, type PassThroughRule, type ProviderAccount } from './accounts.js';
 import { canonical } from './input.js';
 import type { InstanceDeps } from './instances.js';
 
@@ -380,7 +380,7 @@ export type AfterCostPass = (
   tx: SqlTx,
   account: ProviderAccount,
   window: { from: number; to: number },
-) => Promise<void>;
+) => Promise<Record<string, Json> | void>;
 
 /** Key `<accountId>`: one cost pass of one account. */
 async function scanAccount(
@@ -471,7 +471,7 @@ async function scanAccount(
     });
   }
   await context.sql.transaction(async (tx) => {
-    await after?.(tx, account, window);
+    const extra = (await after?.(tx, account, window)) ?? {};
     await tx.query(
       `UPDATE provider_cost_scans
           SET next_at = $3::timestamptz + make_interval(secs => $2::float8),
@@ -484,8 +484,110 @@ async function scanAccount(
       to: window.to,
       currency: settings.currency.toUpperCase(),
       ...totals,
+      ...extra,
     });
   });
+}
+
+// --- Pass-through (D11) ----------------------------------------------------------------------------------------
+
+/** The usage source id of a passed-through row: unique per account and row. */
+const costSourceId = (accountId: string, sourceRowId: string) => `${accountId}:${sourceRowId}`;
+
+/** The idempotency key of a passed-through row (D11): `costx:<accountId>:<sourceRowId>`. */
+export const passThroughKey = (accountId: string, sourceRowId: string) =>
+  `costx:${accountId}:${sourceRowId}`;
+
+/** The first rule whose pattern is a case-insensitive substring of the row's SKU id or description. */
+export function passThroughRule(
+  rules: readonly PassThroughRule[],
+  record: Pick<ProviderCostRecord, 'sku' | 'skuDescription'>,
+): PassThroughRule | undefined {
+  const sku = record.sku.toLowerCase();
+  const description = (record.skuDescription ?? '').toLowerCase();
+  return rules.find((rule) => {
+    const pattern = rule.skuPattern.toLowerCase();
+    return sku.includes(pattern) || description.includes(pattern);
+  });
+}
+
+interface PendingCost {
+  source_row_id: string;
+  record: ProviderCostRecord | string;
+  tenant_id: string;
+}
+
+/**
+ * Passes an account's attributed cost rows through to their tenants (D11), in the pass's last transaction: each
+ * row of the lookback window that is not yet passed through, belongs to a platform account with rules, is
+ * attributed to a tenant other than the platform (by instance or tenant label), is in the deployment currency, is
+ * regular usage, is no SKU compute meters itself (the provider's `computeSku`/`meteredSku`), matches a rule and
+ * has a positive net cost becomes one `cost` usage window (`cost_micros` = (cost + credits) × multiplier) that
+ * the normal `iam.usage` flush records (ruling M3), and is marked passed through. A row is passed through at most
+ * once: a later correction is reported as `billing.cost-corrected`, never re-emitted.
+ */
+export async function passThroughCosts(
+  deps: Pick<CostsDeps, 'providers' | 'rootTenantId'>,
+  tx: SqlTx,
+  account: ProviderAccount,
+  window: { from: number; to: number },
+): Promise<{ passedThroughRows: number; passedThroughMicros: number }> {
+  const none = { passedThroughRows: 0, passedThroughMicros: 0 };
+  const rules = account.billing?.passThrough ?? [];
+  if (rules.length === 0 || !isPlatformAccount(account, deps.rootTenantId)) return none;
+  const billing = deps.providers.get(account.provider)?.billing;
+  // Without a compute matcher nothing can be told apart from compute: pass nothing (never bill twice).
+  const computeSku = billing?.computeSku;
+  if (typeof computeSku !== 'function') return none;
+  const { rows } = await tx.query<PendingCost>(
+    `SELECT source_row_id, record, tenant_id FROM provider_costs
+      WHERE account_id = $1 AND passed_through_at IS NULL AND tenant_id IS NOT NULL AND tenant_id <> $2
+        AND attribution IN ('instance', 'tenant-label') AND NOT ($3 = ANY(conditions))
+        AND usage_start >= to_timestamp($4::float8 / 1000)
+      ORDER BY usage_start, source_row_id FOR UPDATE`,
+    [account.id, deps.rootTenantId, currencyMismatch, window.from],
+  );
+  let passed = 0;
+  let micros = 0;
+  for (const row of rows) {
+    const record = json(row.record);
+    if (record.costType !== undefined && record.costType !== 'regular') continue;
+    if (computeSku(record) || billing?.meteredSku?.(record) === true) continue;
+    const rule = passThroughRule(rules, record);
+    if (!rule) continue;
+    const net = record.costMicros + record.creditsMicros;
+    if (!(net > 0) || !(record.quantity >= 0)) continue;
+    const costMicros = Math.round(net * rule.multiplier);
+    const key = passThroughKey(account.id, record.sourceRowId);
+    const tags: Record<string, string> = { provider: account.provider, source: 'cost' };
+    if (record.region) tags.region = record.region;
+    await tx.query(
+      `INSERT INTO usage_windows (idempotency_key, source_kind, source_id, tenant_id, identity_id, meter, quantity,
+                                  window_start, window_end, tags, cost_micros)
+       VALUES ($1, 'cost', $2, $3, NULL, $4, $5, to_timestamp($6::float8 / 1000), to_timestamp($7::float8 / 1000),
+               $8::jsonb, $9)
+       ON CONFLICT DO NOTHING`,
+      [
+        key,
+        costSourceId(account.id, record.sourceRowId),
+        row.tenant_id,
+        rule.meter,
+        record.quantity,
+        record.usageStart,
+        Math.max(record.usageEnd, record.usageStart + 1),
+        JSON.stringify(tags),
+        costMicros,
+      ],
+    );
+    await tx.query(
+      `UPDATE provider_costs SET passed_through_at = compute_now(), pass_through_key = $3
+        WHERE account_id = $1 AND source_row_id = $2`,
+      [account.id, record.sourceRowId, key],
+    );
+    passed++;
+    micros += costMicros;
+  }
+  return { passedThroughRows: passed, passedThroughMicros: micros };
 }
 
 /** The validated settings of `vps({ costs })`. */
@@ -528,7 +630,10 @@ export function costsReconciler(
     async run(context, key) {
       const resolved = deps(context);
       if (key === 'all') await seedAccounts(resolved, context, settings.everyMs);
-      else await scanAccount(resolved, context, key, settings);
+      else
+        await scanAccount(resolved, context, key, settings, (tx, account, window) =>
+          passThroughCosts(resolved, tx, account, window),
+        );
       return 'DONE';
     },
   };

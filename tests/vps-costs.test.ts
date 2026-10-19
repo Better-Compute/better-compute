@@ -4,6 +4,7 @@ import {
   type ProviderCostRecord,
   type ProviderDefinition,
 } from '@better-compute/core';
+import { flushUsageWindows } from '@better-compute/iam';
 import { closeFixtures, computeFixture, type ComputeFixture } from '@better-compute/testing';
 import { defineProvider, vps, type VpsOptions } from '@better-compute/vps';
 import { fakeGceProvider, type FakeGce } from './support/vps-gce.js';
@@ -58,6 +59,17 @@ function costingGce(
     },
   });
 }
+
+/** Compute Engine's metered SKU families, as provider-gcp's `gcpBilling` says them. */
+const skuText = (r: { sku: string; skuDescription?: string }) =>
+  `${r.sku} ${r.skuDescription ?? ''}`;
+const computeEngine = (r: { service: string }) => !r.service || r.service === 'Compute Engine';
+const fakeBilling = {
+  computeSku: (r: { service: string; sku: string; skuDescription?: string }) =>
+    computeEngine(r) && /core|ram|gpu|instance/i.test(skuText(r)),
+  meteredSku: (r: { service: string; sku: string; skuDescription?: string }) =>
+    computeEngine(r) && /pd capacity|hyperdisk|local ssd|ip charge/i.test(skuText(r)),
+};
 
 let seq = 0;
 /** A cost row: an hour of Compute Engine egress in USD by default. */
@@ -134,8 +146,8 @@ async function costWorld(options: Pick<VpsOptions, 'costs' | 'billing'> = {}): P
     modules: [
       vps({
         providers: [
-          costingGce(cloud, ledger),
-          costingGce(byo, byoLedger, 'fake-gce-byo'),
+          costingGce(cloud, ledger, 'fake-gce', { billing: fakeBilling }),
+          costingGce(byo, byoLedger, 'fake-gce-byo', { billing: fakeBilling }),
           fakeGceProvider({ machines: new Map(), requests: [] }, 'fake-gce-plain'),
         ],
         ...options,
@@ -482,5 +494,330 @@ describe('ingestion and attribution', () => {
     expect(() => vps({ costs: { lookbackDays: 0 } })).toThrow(/lookbackDays/);
     expect(() => vps({ costs: { lookbackDays: 40 } })).toThrow(/lookbackDays/);
     expect(() => vps({ costs: { currency: 'dollars' } })).toThrow(/currency/);
+  });
+});
+
+describe('pass-through', () => {
+  const egressMeter = 'network.egress.gib';
+  const egressRule = { skuPattern: 'egress', meter: egressMeter, multiplier: 1.2 };
+
+  /** The IAM root tenant's meters, as `listMeters` answers. */
+  function meters(world: CostWorld) {
+    Object.assign(world.fixture.iam, {
+      listMeters: async () => [
+        { key: egressMeter, pricing: 'reported' },
+        { key: 'network.archived.gib', pricing: 'reported', archived: true },
+        { key: 'vm.vcpu.hours', pricing: 'rate-card' },
+      ],
+    });
+  }
+
+  const setRules = (world: CostWorld, passThrough: unknown[], accountId = world.accountId) =>
+    world.api.providerAccounts.update(world.root, {
+      tenantId: world.rootTenant,
+      accountId,
+      config: {},
+      billing: { passThrough },
+    });
+
+  const codeOf = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'allowed',
+      (error: { code?: string }) => error?.code ?? String(error),
+    );
+
+  async function costWindows(world: CostWorld) {
+    const { rows } = await world.fixture.database.query<any>(
+      `SELECT idempotency_key, source_id, tenant_id, identity_id, meter, quantity, cost_micros, tags,
+              (extract(epoch FROM window_start) * 1000)::float8 AS start_ms
+         FROM usage_windows WHERE source_kind = 'cost' ORDER BY idempotency_key`,
+    );
+    return rows.map((row) => ({
+      key: row.idempotency_key,
+      sourceId: row.source_id,
+      tenantId: row.tenant_id,
+      identityId: row.identity_id,
+      meter: row.meter,
+      quantity: Number(row.quantity),
+      costMicros: Number(row.cost_micros),
+      tags: typeof row.tags === 'string' ? JSON.parse(row.tags) : row.tags,
+      start: Number(row.start_ms),
+    }));
+  }
+
+  /** An hour of egress (and of N2 cores) of `instanceId`, a day ago. */
+  function instanceRows(world: CostWorld, instanceId: string) {
+    const at = Math.floor((world.now() - DAY) / HOUR) * HOUR;
+    return {
+      at,
+      egress: costRow({
+        sourceRowId: 'egress-1',
+        usageStart: at,
+        usageEnd: at + HOUR,
+        labels: { [instanceLabel]: instanceId },
+        costMicros: 360_000,
+        creditsMicros: -10_000,
+        exportTime: at + 2 * HOUR,
+      }),
+      cores: costRow({
+        sourceRowId: 'cores-1',
+        sku: 'BB77-5FDA-1D73',
+        skuDescription: 'N2 Instance Core running in Americas',
+        usageStart: at,
+        usageEnd: at + HOUR,
+        quantity: 12,
+        unit: 'hour',
+        labels: { [instanceLabel]: instanceId },
+        costMicros: 380_000,
+      }),
+    };
+  }
+
+  it('egress rows pass through at cost × 1.2 on the egress meter', async () => {
+    const world = await costWorld();
+    meters(world);
+    const vm = await createVm(world);
+    const updated = await setRules(world, [egressRule]);
+    expect(updated.billing).toEqual({ passThrough: [egressRule] });
+    expect(
+      (
+        await world.api.providerAccounts.get(world.root, {
+          tenantId: world.rootTenant,
+          accountId: world.accountId,
+        })
+      ).billing,
+    ).toEqual({ passThrough: [egressRule] });
+    const { at, egress, cores } = instanceRows(world, vm.id);
+    world.ledger.rows.push(egress, cores);
+    await world.scan();
+
+    const key = `costx:${world.accountId}:egress-1`;
+    expect(await costWindows(world)).toEqual([
+      {
+        key,
+        sourceId: `${world.accountId}:egress-1`,
+        tenantId: world.acmeTenant,
+        identityId: null,
+        meter: egressMeter,
+        quantity: 3,
+        // (360 000 − 10 000) × 1.2
+        costMicros: 420_000,
+        tags: { provider: 'fake-gce', region: 'us-central1', source: 'cost' },
+        start: at,
+      },
+    ]);
+    const byId = new Map((await world.costs()).map((cost) => [cost.sourceRowId, cost]));
+    expect(byId.get('egress-1')).toMatchObject({ passedThrough: true, passThroughKey: key });
+    expect(byId.get('cores-1')).toMatchObject({ passedThrough: false, passThroughKey: null });
+    const [pass] = (await world.events('billing.cost-ingested')).filter(
+      (event) => event.data.accountId === world.accountId,
+    );
+    expect(pass!.data).toMatchObject({ passedThroughRows: 1, passedThroughMicros: 420_000 });
+
+    // the normal iam.usage flush records it, with its reported cost in currency units (ruling M3)
+    const sent: any[] = [];
+    await flushUsageWindows(world.fixture.database, {
+      recordUsage: async (events) => {
+        sent.push(...events);
+        return events.map((event) => ({
+          idempotencyKey: event.idempotencyKey,
+          status: 'recorded',
+        }));
+      },
+    });
+    expect(sent.filter((event) => event.idempotencyKey === key)).toEqual([
+      {
+        tenantId: world.acmeTenant,
+        meter: egressMeter,
+        quantity: 3,
+        occurredAt: at,
+        tags: { provider: 'fake-gce', region: 'us-central1', source: 'cost' },
+        idempotencyKey: key,
+        cost: 0.42,
+      },
+    ]);
+  });
+
+  it('pass-through is idempotent across rescans', async () => {
+    const world = await costWorld();
+    meters(world);
+    const vm = await createVm(world);
+    const { egress } = instanceRows(world, vm.id);
+    world.ledger.rows.push(egress);
+    // ingested before any rule: nothing passes
+    await world.scan();
+    expect(await costWindows(world)).toEqual([]);
+    // a rule set later passes the rows still in the lookback, once
+    await setRules(world, [egressRule]);
+    for (let pass = 0; pass < 3; pass++) {
+      await world.fixture.advance(6 * HOUR);
+      await world.scan();
+    }
+    const windows = await costWindows(world);
+    expect(windows).toHaveLength(1);
+    expect(windows[0]!.costMicros).toBe(420_000);
+    const passes = (await world.events('billing.cost-ingested')).filter(
+      (event) => event.data.accountId === world.accountId,
+    );
+    expect(passes.map((event) => event.data.passedThroughRows)).toEqual([0, 1, 0, 0]);
+    // a rule change does not re-emit what was passed through
+    await setRules(world, [{ ...egressRule, multiplier: 2 }]);
+    await world.fixture.advance(6 * HOUR);
+    await world.scan();
+    expect(await costWindows(world)).toEqual(windows);
+  });
+
+  it('compute SKUs cannot be pass-through targets', async () => {
+    const world = await costWorld();
+    meters(world);
+    for (const skuPattern of [
+      'Core',
+      'n2 instance',
+      'GPU',
+      'Ram running',
+      'Storage PD Capacity',
+      'Hyperdisk',
+      'External IP Charge',
+    ])
+      expect(
+        await codeOf(setRules(world, [{ skuPattern, meter: egressMeter, multiplier: 1 }])),
+      ).toBe('INVALID_CONFIG');
+    // also when the account is created with them
+    expect(
+      await codeOf(
+        world.api.providerAccounts.create(world.root, {
+          tenantId: world.rootTenant,
+          provider: 'fake-gce',
+          name: 'gce-two',
+          config: {},
+          billing: { passThrough: [{ skuPattern: 'core', meter: egressMeter, multiplier: 1 }] },
+        }),
+      ),
+    ).toBe('INVALID_CONFIG');
+    // a provider that does not say which SKUs compute meters cannot pass anything through
+    expect(await codeOf(setRules(world, [egressRule], world.plainAccountId))).toBe(
+      'INVALID_CONFIG',
+    );
+    // the meter must be a reported meter that exists; the multiplier 1 to 10
+    for (const meter of ['vm.vcpu.hours', 'network.unknown.gib', 'network.archived.gib'])
+      expect(await codeOf(setRules(world, [{ ...egressRule, meter }]))).toBe('INVALID_INPUT');
+    for (const multiplier of [0.5, 11, Number.NaN])
+      expect(await codeOf(setRules(world, [{ ...egressRule, multiplier }]))).toBe('INVALID_INPUT');
+    expect(await codeOf(setRules(world, [{ ...egressRule, skuPattern: 'e' }]))).toBe(
+      'INVALID_INPUT',
+    );
+    expect((await world.costs()).length).toBe(0);
+
+    // a broad pattern is allowed, but a compute row it happens to match is never passed through
+    await setRules(world, [{ skuPattern: 'Americas', meter: egressMeter, multiplier: 1 }]);
+    const vm = await createVm(world);
+    const { egress, cores } = instanceRows(world, vm.id);
+    world.ledger.rows.push(egress, cores);
+    await world.scan();
+    expect((await costWindows(world)).map((window) => window.key)).toEqual([
+      `costx:${world.accountId}:egress-1`,
+    ]);
+
+    // without listMeters the rules cannot be checked
+    delete (world.fixture.iam as { listMeters?: unknown }).listMeters;
+    expect(await codeOf(setRules(world, [egressRule]))).toBe('UNSUPPORTED');
+  });
+
+  it('BYO and unattributed rows never pass through', async () => {
+    const world = await costWorld();
+    meters(world);
+    const vm = await createVm(world);
+    // a tenant's own account cannot hold rules
+    expect(
+      await codeOf(
+        world.api.providerAccounts.update(world.acme, {
+          tenantId: world.acmeTenant,
+          accountId: world.byoAccountId,
+          config: {},
+          billing: { passThrough: [egressRule] },
+        }),
+      ),
+    ).toBe('INVALID_INPUT');
+    // ... and its rows never pass, even with rules written behind the API's back
+    await world.fixture.database.query(`UPDATE provider_accounts SET billing = $2 WHERE id = $1`, [
+      world.byoAccountId,
+      JSON.stringify({ passThrough: [egressRule] }),
+    ]);
+    await setRules(world, [egressRule]);
+    const at = Math.floor((world.now() - DAY) / HOUR) * HOUR;
+    const egress = (id: string, extra: Partial<ProviderCostRecord> = {}) =>
+      costRow({ sourceRowId: id, usageStart: at, usageEnd: at + HOUR, ...extra });
+    world.byoLedger.rows.push(egress('byo-egress'));
+    world.ledger.rows.push(
+      egress('unattributed'),
+      egress('to-root', { labels: { [tenantLabel]: world.rootTenant } }),
+      egress('eur', { labels: { [instanceLabel]: vm.id }, currency: 'EUR' }),
+      egress('adjustment', { labels: { [instanceLabel]: vm.id }, costType: 'adjustment' }),
+      egress('credited', {
+        labels: { [instanceLabel]: vm.id },
+        costMicros: 100_000,
+        creditsMicros: -100_000,
+      }),
+      egress('negative', { labels: { [instanceLabel]: vm.id }, costMicros: -5_000 }),
+      egress('by-tenant-label', { labels: { [tenantLabel]: world.acmeTenant } }),
+    );
+    await world.scan();
+    expect((await costWindows(world)).map((window) => window.key)).toEqual([
+      `costx:${world.accountId}:by-tenant-label`,
+    ]);
+    const passed = (await world.costs()).filter((cost) => cost.passedThrough);
+    expect(passed.map((cost) => cost.sourceRowId)).toEqual(['by-tenant-label']);
+  });
+
+  it('a corrected row after pass-through emits cost-corrected only', async () => {
+    const world = await costWorld();
+    meters(world);
+    const vm = await createVm(world);
+    await setRules(world, [egressRule]);
+    const { egress } = instanceRows(world, vm.id);
+    world.ledger.rows.push(egress);
+    await world.scan();
+    const before = await costWindows(world);
+    expect(before).toHaveLength(1);
+    await world.fixture.advance(6 * HOUR);
+    world.ledger.rows = [
+      { ...egress, costMicros: 500_000, exportTime: egress.exportTime + 10 * HOUR },
+    ];
+    await world.scan();
+    expect(await costWindows(world)).toEqual(before);
+    const [stored] = await world.costs();
+    expect(stored).toMatchObject({
+      costMicros: 500_000,
+      passedThrough: true,
+      passThroughKey: `costx:${world.accountId}:egress-1`,
+    });
+    const corrected = await world.events('billing.cost-corrected');
+    expect(corrected.map((event) => event.data)).toEqual([
+      expect.objectContaining({
+        sourceRowId: 'egress-1',
+        previousMicros: 360_000,
+        costMicros: 500_000,
+        passedThrough: true,
+      }),
+    ]);
+  });
+});
+
+describe('provider billing hooks', () => {
+  it('defineProvider takes billing.computeSku and billing.meteredSku, and nothing else there', () => {
+    const base = fakeGceProvider({ machines: new Map(), requests: [] });
+    const define = (billing: unknown) =>
+      defineProvider({
+        id: 'hooks',
+        version: '1.0.0',
+        provides: ['vps'],
+        config: base.config,
+        create: base.create,
+        billing: billing as never,
+      });
+    expect(define({ computeSku: () => false, meteredSku: () => false }).billing).toBeDefined();
+    expect(() => define({ computeSku: 'core' })).toThrow(/billing.computeSku/);
+    expect(() => define({ otherSku: () => true })).toThrow(/billing.otherSku/);
+    expect(() => define([])).toThrow(/billing/);
   });
 });

@@ -28,6 +28,23 @@ export interface ProviderAccount {
   name: string;
   config: Record<string, Json>;
   version: number;
+  /** (D11) Pass-through rules; present only when the account has some (platform accounts only). */
+  billing?: AccountBilling;
+}
+
+/** One pass-through rule (D11): cost rows whose SKU contains `skuPattern` bill `meter` at cost × `multiplier`. */
+export interface PassThroughRule {
+  /** A case-insensitive substring of the row's SKU id or description. */
+  skuPattern: string;
+  /** A better-iam `reported` meter on the root tenant. */
+  meter: string;
+  /** 1 to 10. */
+  multiplier: number;
+}
+
+/** `providerAccounts.create/update` `billing` (D11): root accounts only. */
+export interface AccountBilling {
+  passThrough?: PassThroughRule[];
 }
 
 interface RawAccount {
@@ -37,6 +54,7 @@ interface RawAccount {
   name: string;
   config: Record<string, Json> | string;
   version: string | number;
+  billing?: AccountBilling | string | null;
 }
 
 function toAccount(row: RawAccount): ProviderAccount {
@@ -50,7 +68,14 @@ function toAccount(row: RawAccount): ProviderAccount {
         ? (JSON.parse(row.config) as Record<string, Json>)
         : row.config,
     version: Number(row.version),
+    ...billingOf(row.billing),
   };
+}
+
+/** The stored billing column as the account shows it: absent unless it holds rules. */
+function billingOf(raw: AccountBilling | string | null | undefined): { billing?: AccountBilling } {
+  const billing = typeof raw === 'string' ? (JSON.parse(raw) as AccountBilling) : raw;
+  return billing?.passThrough?.length ? { billing: { passThrough: billing.passThrough } } : {};
 }
 
 export async function readAccount(
@@ -59,7 +84,7 @@ export async function readAccount(
   tenantId?: string,
 ): Promise<ProviderAccount | undefined> {
   const { rows } = await tx.query<RawAccount>(
-    `SELECT id, tenant_id, provider, name, config, version FROM provider_accounts
+    `SELECT id, tenant_id, provider, name, config, version, billing FROM provider_accounts
       WHERE id = $1 AND ($2::text IS NULL OR tenant_id = $2)`,
     [accountId, tenantId ?? null],
   );
@@ -76,7 +101,7 @@ export async function readPoolAccount(
   poolId: string,
 ): Promise<ProviderAccount | undefined> {
   const { rows } = await tx.query<RawAccount>(
-    `SELECT a.id, a.tenant_id, a.provider, a.name, a.config, a.version
+    `SELECT a.id, a.tenant_id, a.provider, a.name, a.config, a.version, a.billing
        FROM provider_accounts a JOIN pools p ON p.id = $2 AND p.owner_tenant_id = a.tenant_id
       WHERE a.id = $1`,
     [accountId, poolId],
@@ -86,7 +111,7 @@ export async function readPoolAccount(
 
 export async function listAccounts(tx: SqlTx, tenantId: string): Promise<ProviderAccount[]> {
   const { rows } = await tx.query<RawAccount>(
-    `SELECT id, tenant_id, provider, name, config, version FROM provider_accounts
+    `SELECT id, tenant_id, provider, name, config, version, billing FROM provider_accounts
       WHERE tenant_id = $1 ORDER BY name`,
     [tenantId],
   );
@@ -274,10 +299,142 @@ export interface CreateAccountInput {
    * the account, a different request under the key is `CONFLICT` (FleetConfig computes ids up front).
    */
   idempotencyKey?: string;
+  /** (D11) Pass-through rules; root (platform) accounts only. */
+  billing?: AccountBilling;
+}
+
+/** The most pass-through rules one account holds. */
+export const passThroughLimit = 50;
+const meterKeyPattern = /^[a-z][a-z0-9_.-]{0,63}$/;
+
+/**
+ * The shape of `billing` (D11). The platform-only rule and the SKU check are `assertPassThrough`, the meter
+ * check `passThroughMeterCheck`.
+ */
+export function parseAccountBilling(raw: unknown): AccountBilling {
+  const input = object(raw, ['passThrough']);
+  if (input.passThrough === undefined) return {};
+  if (!Array.isArray(input.passThrough) || input.passThrough.length > passThroughLimit)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `billing.passThrough must list at most ${passThroughLimit} rules`,
+    );
+  return {
+    passThrough: input.passThrough.map((entry: unknown, index: number) => {
+      const rule = object(entry, ['skuPattern', 'meter', 'multiplier']);
+      const at = `billing.passThrough[${index}]`;
+      if (
+        typeof rule.skuPattern !== 'string' ||
+        rule.skuPattern.trim().length < 2 ||
+        rule.skuPattern.length > 128
+      )
+        throw new ComputeError('INVALID_INPUT', `${at}.skuPattern must be 2 to 128 characters`);
+      if (typeof rule.meter !== 'string' || !meterKeyPattern.test(rule.meter))
+        throw new ComputeError('INVALID_INPUT', `${at}.meter must be a meter key`);
+      if (
+        typeof rule.multiplier !== 'number' ||
+        !Number.isFinite(rule.multiplier) ||
+        rule.multiplier < 1 ||
+        rule.multiplier > 10
+      )
+        throw new ComputeError('INVALID_INPUT', `${at}.multiplier must be from 1 to 10`);
+      return { skuPattern: rule.skuPattern, meter: rule.meter, multiplier: rule.multiplier };
+    }),
+  };
+}
+
+/**
+ * Whether `pattern` would pass through a SKU compute meters itself (D11): the provider's matchers are asked
+ * about a probe whose SKU id and description are the pattern and whose service is unknown.
+ */
+function meteredPattern(provider: ProviderDefinition, pattern: string): boolean {
+  const probe = { service: '', sku: pattern, skuDescription: pattern };
+  return (
+    provider.billing?.computeSku?.(probe) === true || provider.billing?.meteredSku?.(probe) === true
+  );
+}
+
+/**
+ * The checks of `billing` that need no I/O: rules only on the platform's own accounts (a tenant's account is the
+ * tenant's cost, never passed through), only for providers that say which SKUs compute meters, and never a pattern
+ * that matches one of those SKU families (`INVALID_CONFIG`: billed twice).
+ */
+export function assertPassThrough(
+  provider: ProviderDefinition,
+  account: Pick<ProviderAccount, 'tenantId'>,
+  billing: AccountBilling | undefined,
+  rootTenantId: string | undefined,
+): void {
+  const rules = billing?.passThrough ?? [];
+  if (rules.length === 0) return;
+  if (rootTenantId === undefined || account.tenantId !== rootTenantId)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      "billing.passThrough is for the platform's own provider accounts only",
+      undefined,
+      { reason: 'notPlatformAccount' },
+    );
+  if (typeof provider.billing?.computeSku !== 'function')
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      `Provider ${provider.id} does not say which of its SKUs compute meters (billing.computeSku), so nothing ` +
+        'can be passed through without risking billing it twice',
+      undefined,
+      { reason: 'computeSkuUnknown' },
+    );
+  rules.forEach((rule, index) => {
+    if (meteredPattern(provider, rule.skuPattern))
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        `billing.passThrough[${index}].skuPattern ${JSON.stringify(rule.skuPattern)} matches SKUs compute ` +
+          'already meters (compute, disks or addresses): they would be billed twice',
+        undefined,
+        { reason: 'meteredSku', index },
+      );
+  });
+}
+
+/**
+ * Every rule's meter is a `reported` meter on the IAM root tenant (D11). Asks IAM, so it runs with no transaction
+ * open (the admission check); without `listMeters` the rules cannot be checked and are refused.
+ */
+export async function passThroughMeterCheck(
+  iam: { listMeters?: () => Promise<{ key: string; pricing: string; archived?: boolean }[]> },
+  billing: AccountBilling | undefined,
+): Promise<void> {
+  const rules = billing?.passThrough ?? [];
+  if (rules.length === 0) return;
+  if (typeof iam.listMeters !== 'function')
+    throw new ComputeError(
+      'UNSUPPORTED',
+      'The IAM port has no listMeters, so pass-through meters cannot be checked. Configure it with ' +
+        'bridge.embedded(iam, { rootTenantId, serviceCredential }) (remote: bridge.remote with a serviceToken).',
+      undefined,
+      { reason: 'billing-port-missing', member: 'listMeters' },
+    );
+  const meters = new Map((await iam.listMeters()).map((meter) => [meter.key, meter]));
+  rules.forEach((rule, index) => {
+    const meter = meters.get(rule.meter);
+    if (!meter || meter.pricing !== 'reported' || meter.archived === true)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `billing.passThrough[${index}].meter ${rule.meter} is not a reported meter on the root tenant: ` +
+          "create it with ensureMeters and pricing: 'reported'",
+        undefined,
+        { reason: 'meterNotReported', index },
+      );
+  });
 }
 
 export function parseCreateAccount(raw: unknown): CreateAccountInput {
-  const input = object(raw, ['tenantId', 'provider', 'name', 'config', 'idempotencyKey']);
+  const input = object(raw, [
+    'tenantId',
+    'provider',
+    'name',
+    'config',
+    'idempotencyKey',
+    'billing',
+  ]);
   if (
     input.idempotencyKey !== undefined &&
     (typeof input.idempotencyKey !== 'string' ||
@@ -294,6 +451,7 @@ export function parseCreateAccount(raw: unknown): CreateAccountInput {
     ...(input.idempotencyKey !== undefined
       ? { idempotencyKey: input.idempotencyKey as string }
       : {}),
+    ...(input.billing !== undefined ? { billing: parseAccountBilling(input.billing) } : {}),
   };
 }
 
@@ -337,6 +495,7 @@ export async function createAccount(
   const config = await validateConfig(provider, input.config);
   assertNoInlineSecrets(config);
   assertAccountSecretRefs(config, input, check ?? {});
+  assertPassThrough(provider, input, input.billing, check?.rootTenantId);
   if (check)
     await checkClient(
       provider,
@@ -349,8 +508,8 @@ export async function createAccount(
     // Only a concurrent request with the same key (the id) is no error; the name and the
     // exclusive key indexes raise theirs.
     ({ rowCount } = await tx.query(
-      `INSERT INTO provider_accounts (id, tenant_id, provider, name, config, version, exclusive_key)
-       VALUES ($1, $2, $3, $4, $5::jsonb, 1, $6) ON CONFLICT (id) DO NOTHING`,
+      `INSERT INTO provider_accounts (id, tenant_id, provider, name, config, version, exclusive_key, billing)
+       VALUES ($1, $2, $3, $4, $5::jsonb, 1, $6, $7::jsonb) ON CONFLICT (id) DO NOTHING`,
       [
         accountId,
         input.tenantId,
@@ -358,6 +517,7 @@ export async function createAccount(
         input.name,
         JSON.stringify(config),
         exclusiveKeyOf(provider, config),
+        JSON.stringify(input.billing ?? {}),
       ],
     ));
   } catch (error) {
@@ -379,7 +539,8 @@ export async function createAccount(
 export async function updateAccount(
   tx: SqlTx,
   providers: ReadonlyMap<string, ProviderDefinition>,
-  input: { tenantId: string; accountId: string; config: unknown },
+  /** `billing` absent keeps the stored rules; `{}` or `{ passThrough: [] }` clears them. */
+  input: { tenantId: string; accountId: string; config: unknown; billing?: AccountBilling },
   /** When given, the provider builds a client for the new config first (see `createAccount`). */
   check?: ClientDeps,
 ): Promise<ProviderAccount> {
@@ -390,12 +551,19 @@ export async function updateAccount(
   const config = await validateConfig(provider, input.config);
   assertNoInlineSecrets(config);
   assertAccountSecretRefs(config, account, check ?? {});
+  assertPassThrough(provider, account, input.billing, check?.rootTenantId);
   if (check) await checkClient(provider, config, account, check);
   try {
     await tx.query(
-      `UPDATE provider_accounts SET config = $2::jsonb, version = version + 1, exclusive_key = $3
+      `UPDATE provider_accounts SET config = $2::jsonb, version = version + 1, exclusive_key = $3,
+              billing = COALESCE($4::jsonb, billing)
         WHERE id = $1`,
-      [account.id, JSON.stringify(config), exclusiveKeyOf(provider, config)],
+      [
+        account.id,
+        JSON.stringify(config),
+        exclusiveKeyOf(provider, config),
+        input.billing === undefined ? null : JSON.stringify(input.billing),
+      ],
     );
   } catch (error) {
     if (exclusiveKeyTaken(error)) throw identityTaken(provider);

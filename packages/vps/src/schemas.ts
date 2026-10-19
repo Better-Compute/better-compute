@@ -119,6 +119,26 @@ const warmPool = strictObject(
 // Not typed: any JSON value reaches the provider's config manifest, which validates it.
 const config = (description: string): InputSchema => ({ description });
 
+/** `providerAccounts.create/update` `billing` (D11): pass-through rules, root accounts only. */
+const accountBilling = strictObject({
+  passThrough: {
+    type: 'array',
+    maxItems: 50,
+    description:
+      'Pass-through rules: cost rows whose SKU id or description contains skuPattern (case-insensitive) bill the ' +
+      'reported meter at (cost + credits) × multiplier. Root (platform) accounts only; a pattern that matches ' +
+      'compute, disk or address SKUs is INVALID_CONFIG.',
+    items: strictObject(
+      {
+        skuPattern: { type: 'string', minLength: 2, maxLength: 128 },
+        meter: { type: 'string', pattern: '^[a-z][a-z0-9_.-]{0,63}$', maxLength: 64 },
+        multiplier: { type: 'number', minimum: 1, maximum: 10 },
+      },
+      ['skuPattern', 'meter', 'multiplier'],
+    ),
+  },
+});
+
 const flavorShape = strictObject(
   {
     tenantId,
@@ -278,6 +298,7 @@ export const schemas = {
         maxLength: 128,
         description: 'Makes the account id deterministic; a retry returns the account',
       },
+      billing: accountBilling,
     },
     ['tenantId', 'provider', 'name'],
   ),
@@ -303,6 +324,10 @@ export const schemas = {
       config: config(
         'The new account config (replaces the old one); credentials as secret references only',
       ),
+      billing: {
+        ...accountBilling,
+        description: 'Replaces the pass-through rules; absent keeps them, {} clears them',
+      },
     },
     ['tenantId', 'accountId'],
   ),

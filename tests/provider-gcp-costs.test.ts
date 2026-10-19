@@ -1,5 +1,5 @@
 import type { ComputeError, ProviderCostRecord, ProviderImpl } from '@better-compute/core';
-import type { GcpProviderOptions } from '@better-compute/provider-gcp';
+import { gcp, type GcpProviderOptions } from '@better-compute/provider-gcp';
 import { describe, expect, it } from 'vitest';
 import { billingRow, GceEmulator } from './support/gce-emulator.js';
 import { build, ctx, gcpAccount } from './support/gcp-harness.js';
@@ -252,5 +252,40 @@ describe('provider costs from the BigQuery billing export', () => {
     );
     expect(failure?.code).toBe('RATE_LIMITED');
     expect(failure?.details).toMatchObject({ retryAfterMs: 7000 });
+  });
+});
+
+describe('gcp billing matchers (D11, D12)', () => {
+  const sku = (skuDescription: string, service = 'Compute Engine') => ({
+    service,
+    sku: 'ABCD-1234-EF56',
+    skuDescription,
+  });
+
+  it('compute SKUs are core, RAM, GPU and instance SKUs of Compute Engine', () => {
+    const { computeSku, meteredSku } = gcp.billing!;
+    for (const description of [
+      'N2 Instance Core running in Americas',
+      'N2 Instance Ram running in Americas',
+      'Nvidia H100 80GB GPU running in Americas',
+      'Spot Preemptible E2 Instance Core running in EMEA',
+      'Micro Instance with burstable CPU running in Americas',
+    ])
+      expect(computeSku!(sku(description))).toBe(true);
+    expect(computeSku!(sku('Network Internet Egress from Americas to EMEA'))).toBe(false);
+    // the same words in another service are not compute's
+    expect(
+      computeSku!(sku('Memorystore Redis Capacity Basic M1 instance', 'Cloud Memorystore')),
+    ).toBe(false);
+    for (const description of [
+      'Storage PD Capacity',
+      'SSD backed PD Capacity',
+      'Hyperdisk Balanced Capacity',
+      'External IP Charge on a Standard VM',
+    ])
+      expect(meteredSku!(sku(description))).toBe(true);
+    expect(meteredSku!(sku('Network Internet Egress from Americas to EMEA'))).toBe(false);
+    // a rule's probe has no service: it may be Compute Engine's
+    expect(computeSku!({ service: '', sku: 'Core', skuDescription: 'Core' })).toBe(true);
   });
 });

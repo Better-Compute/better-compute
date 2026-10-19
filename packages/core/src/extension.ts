@@ -932,6 +932,17 @@ export interface ProviderInput<C> {
   checkAccount?(config: C, context: ProviderContext & { signal: AbortSignal }): Promise<void>;
   /** A key no two accounts of this provider may share (e.g. a federation audience). Pure; no I/O. */
   accountKey?(config: C): string | undefined;
+  /**
+   * (v1.0, D11/D12) How this provider's cost rows relate to what compute meters. Pure; no I/O. A record may
+   * be a probe built from a pass-through rule's pattern (`sku` and `skuDescription` = the pattern, `service`
+   * empty): a matcher treats an empty service as possibly its compute service.
+   */
+  billing?: {
+    /** The compute SKUs D4 meters (vCPU, memory, GPU, instance): never passed through; leak detection's hours. */
+    computeSku?(record: Pick<ProviderCostRecord, 'service' | 'sku' | 'skuDescription'>): boolean;
+    /** Other SKUs compute meters itself (disks, public addresses): never passed through either. */
+    meteredSku?(record: Pick<ProviderCostRecord, 'service' | 'sku' | 'skuDescription'>): boolean;
+  };
 }
 export interface ProviderDefinition<C = any> extends ProviderInput<C>, Extension {
   readonly extension: 'provider';

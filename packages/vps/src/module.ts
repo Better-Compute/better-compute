@@ -25,12 +25,15 @@ import {
   createAccount,
   deleteAccount,
   listAccounts,
+  parseAccountBilling,
   parseCreateAccount,
+  passThroughMeterCheck,
   parseTenantVaultPaths,
   ProviderClients,
   readAccount,
   sameAccountRequest,
   updateAccount,
+  type AccountBilling,
   type ClientDeps,
   type CreateAccountInput,
   type ProviderAccount,
@@ -374,7 +377,10 @@ export type VpsApi = {
     list: MethodDefinition<{ tenantId: string }, { items: ProviderAccountView[] }>;
     get: MethodDefinition<AccountRef, ProviderAccountView>;
     offers: MethodDefinition<AccountRef & { query: OfferQuery }, { items: Offer[] }>;
-    update: MethodDefinition<AccountRef & { config: unknown }, ProviderAccountView>;
+    update: MethodDefinition<
+      AccountRef & { config: unknown; billing?: AccountBilling },
+      ProviderAccountView
+    >;
     delete: MethodDefinition<AccountRef, { deleted: true }>;
     bootstrap: MethodDefinition<BootstrapInput, ProviderBootstrap>;
     reservations: MethodDefinition<ReservationsInput, { items: ProviderReservationView[] }>;
@@ -1105,12 +1111,15 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           },
           // The provider's network checks, before the account exists and with no transaction
           // open; a refusal stores nothing, so a retry with the same key decides again.
-          check: async (context, input) =>
-            accountAdmissionCheck(context, input, {
+          check: async (context, input) => {
+            await accountAdmissionCheck(context, input, {
               id: await createAccountId(context, input),
               tenantId: input.tenantId,
               name: input.name,
-            }),
+            });
+            // D11: each pass-through meter is a reported meter on the root tenant (an IAM read).
+            await passThroughMeterCheck(context.iam, input.billing);
+          },
         },
         handler: async (context, input) => {
           const account = await createAccount(
@@ -1177,8 +1186,13 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         kind: 'mutation',
         resource: accountResource,
         validate: describedBy(schemas.updateAccount, (raw) => {
-          const input = parseAccountRef(raw, ['config']);
-          return { tenantId: input.tenantId, accountId: input.accountId, config: input.config };
+          const input = parseAccountRef(raw, ['config', 'billing']);
+          return {
+            tenantId: input.tenantId,
+            accountId: input.accountId,
+            config: input.config,
+            ...(input.billing !== undefined ? { billing: parseAccountBilling(input.billing) } : {}),
+          };
         }),
         admission: {
           prepare: async (_context, input) => ({
@@ -1196,6 +1210,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
               { provider: account.provider, config: input.config },
               account,
             );
+            await passThroughMeterCheck(context.iam, input.billing);
           },
         },
         handler: (context, input) =>
