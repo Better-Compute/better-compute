@@ -71,6 +71,7 @@ import {
 import {
   grantsReconciler,
   reservationGrantsApi,
+  settleGrantStates,
   type GrantDeps,
   type ReservationGrantsApi,
 } from './reservation-grants.js';
@@ -1846,12 +1847,16 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         periodic: [{ key: 'all', every: '5m' }],
         async run(context) {
           const deps = depsOf(context);
-          await context.sql.transaction((tx) =>
-            meterIntervals(tx, context.clock.now(), {
+          const now = context.clock.now();
+          await context.sql.transaction(async (tx) => {
+            // Grants first (FW-7; reservation → grant lock order, as vps.grants takes them): a grant that started
+            // or ended since vps.grants last ran moves its instances before their hours are metered.
+            await settleGrantStates(grantDeps(context), tx, now);
+            await meterIntervals(tx, now, {
               ...(deps.meterGpuModels ? { meterGpuModels: deps.meterGpuModels } : {}),
               meterGraceMs: options.billing?.meterGraceMs,
-            }),
-          );
+            });
+          });
           return 'DONE';
         },
       },
