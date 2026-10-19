@@ -141,6 +141,7 @@ import {
   type HostReserve,
 } from './hosts.js';
 import { meterInstances } from './usage.js';
+import { meterAncillaries } from './ancillary-usage.js';
 import { meterIntervals } from './instance-usage.js';
 import { schemas } from './schemas.js';
 import {
@@ -1653,6 +1654,23 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           await context.sql.transaction((tx) =>
             meterIntervals(tx, context.clock.now(), {
               ...(deps.meterGpuModels ? { meterGpuModels: deps.meterGpuModels } : {}),
+              meterGraceMs: options.billing?.meterGraceMs,
+            }),
+          );
+          return 'DONE';
+        },
+      },
+      {
+        // Platform compute billing (D9): tenant networks' hours (and snapshots' GiB-hours) as `network` and
+        // `snapshot` sources. A public address and a disk are lines of the instance's own intervals instead.
+        name: 'vps.ancillary-usage',
+        shardBy: 'none',
+        periodic: [{ key: 'all', every: '5m' }],
+        async run(context) {
+          const deps = depsOf(context);
+          await context.sql.transaction((tx) =>
+            meterAncillaries(tx, context.clock.now(), {
+              ...(deps.rootTenantId !== undefined ? { rootTenantId: deps.rootTenantId } : {}),
               meterGraceMs: options.billing?.meterGraceMs,
             }),
           );

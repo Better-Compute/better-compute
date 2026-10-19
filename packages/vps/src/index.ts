@@ -10,6 +10,7 @@ export { vps, type VpsApi, type VpsOptions, type ProviderAccountView } from './m
 export * from './migrations.js';
 export * from './instances.js';
 export * from './pricing.js';
+export * from './ancillary-usage.js';
 export * from './billing.js';
 export * from './instance-usage.js';
 export * from './lifecycle.js';

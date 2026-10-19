@@ -46,9 +46,11 @@ import {
   regionOf,
   shapeOf,
   toMachine,
+  type GceDisk,
   type GceInstance,
   type GceMachineType,
   type MachineShape,
+  type ToMachineOptions,
 } from './shapes.js';
 
 // Compute Engine VMs as VPS instances: offers from machine types, create (idempotent by requestId),
@@ -82,6 +84,8 @@ export class GcpCompute implements ProviderImpl {
   readonly #diskTypes = new Map<string, GceDiskType | undefined>();
   /** Machine types GCE refused a Persistent Disk for although the family table allowed one. */
   readonly #hyperdiskOnly = new Set<string>();
+  /** Persistent disks' types by disk resource URL, with when each answer stops being used. */
+  readonly #diskKinds = new Map<string, { type: string | undefined; until: number }>();
   readonly networks: ProviderNetworks;
 
   constructor(
@@ -193,12 +197,88 @@ export class GcpCompute implements ProviderImpl {
     );
   }
 
-  /** An instance as a machine, with the shape of its machine type. */
+  /**
+   * The type (`pd-ssd`, `hyperdisk-balanced`, …) of the persistent disk at `source`, from `disks.get`, cached per
+   * disk resource URL for a day (a failed read for five minutes, so a denied permission is not asked again at every
+   * poll). Undefined when it cannot be read: the platform then meters the disk as `pd-balanced` and says so.
+   */
+  protected async persistentDiskType(
+    source: string | undefined,
+    signal: AbortSignal,
+  ): Promise<string | undefined> {
+    if (!source) return undefined;
+    const now = this.context.clock.now();
+    const known = this.#diskKinds.get(source);
+    if (known && known.until > now) return known.type;
+    const path = /(?:\/projects\/([^/]+))?\/(zones|regions)\/([^/]+)\/disks\/([^/?#]+)$/.exec(
+      source,
+    );
+    // A disk of another project is not this account's to read.
+    const readable = path && (path[1] === undefined || path[1] === this.config.projectId);
+    let type: string | undefined;
+    if (readable) {
+      try {
+        const disk = await this.client.request<GceDisk>(
+          'GET',
+          `/${path[2]}/${path[3]}/disks/${path[4]}`,
+          { signal },
+        );
+        type = disk.type ? disk.type.split('/').pop() : undefined;
+      } catch (error) {
+        if (signal.aborted) throw error;
+        this.context.log.debug('gcp.disk_unreadable', { source });
+      }
+    }
+    if (this.#diskKinds.size >= 10_000)
+      for (const [key, entry] of this.#diskKinds)
+        if (entry.until <= now) this.#diskKinds.delete(key);
+    this.#diskKinds.set(source, { type, until: now + (type ? 86_400_000 : 300_000) });
+    return type;
+  }
+
+  /**
+   * The instance's disks for metering (D9): a SCRATCH disk is a `local-ssd`, a PERSISTENT one has the type its
+   * resource says (boot disk first). The boot disk's type also names `bootDiskType`, falling back on the family table,
+   * or Hyperdisk for a machine type create learned takes nothing else.
+   */
+  protected async instanceDisks(
+    instance: GceInstance,
+    machineType: string,
+    signal: AbortSignal,
+  ): Promise<Pick<ToMachineOptions, 'disks' | 'bootDiskType'>> {
+    const disks: NonNullable<ExternalMachine['disks']>[number][] = [];
+    let bootType: string | undefined;
+    for (const attached of instance.disks ?? []) {
+      const sizeGiB = Number(attached.diskSizeGb);
+      if (!(sizeGiB > 0)) continue;
+      const boot = attached.boot === true;
+      const type =
+        attached.type === 'SCRATCH'
+          ? 'local-ssd'
+          : await this.persistentDiskType(attached.source, signal);
+      if (boot && type) bootType = type;
+      disks.push({ ...(type ? { type } : {}), sizeGiB, ...(boot ? { boot } : {}) });
+    }
+    disks.sort((a, b) => Number(b.boot === true) - Number(a.boot === true));
+    const bootDiskType =
+      bootType ?? (this.#hyperdiskOnly.has(machineType) ? hyperdiskBootType : undefined);
+    return {
+      ...(disks.length > 0 ? { disks } : {}),
+      ...(bootDiskType ? { bootDiskType } : {}),
+    };
+  }
+
+  /** An instance as a machine, with the shape of its machine type and its disks. */
   protected async toMachine(instance: GceInstance, signal: AbortSignal): Promise<ExternalMachine> {
     const zone = instance.zone.split('/').pop()!;
-    const type = await this.machineType(zone, instance.machineType.split('/').pop()!, signal);
+    const typeName = instance.machineType.split('/').pop()!;
+    const type = await this.machineType(zone, typeName, signal);
     const shape: MachineShape | undefined = type ? shapeOf(type) : undefined;
-    return toMachine(instance, { projectId: this.config.projectId, ...(shape ? { shape } : {}) });
+    return toMachine(instance, {
+      projectId: this.config.projectId,
+      ...(shape ? { shape } : {}),
+      ...(await this.instanceDisks(instance, typeName, signal)),
+    });
   }
 
   protected instance(zone: string, name: string, signal: AbortSignal): Promise<GceInstance> {
@@ -309,9 +389,7 @@ export class GcpCompute implements ProviderImpl {
     if (request.sshKeys?.length)
       metadata.push({
         key: 'ssh-keys',
-        value: request.sshKeys
-          .map((key) => `${sshUserOf(request.image)}:${key.trim()}`)
-          .join('\n'),
+        value: request.sshKeys.map((key) => `${sshUserOf(request.image)}:${key.trim()}`).join('\n'),
       });
     const body: Record<string, unknown> = {
       name,

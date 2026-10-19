@@ -381,3 +381,51 @@ describe('provider-gcp through vps, end to end', () => {
     expect(await settle(w, created.id, 'deleted')).toMatchObject({ state: 'deleted' });
   });
 });
+
+describe('disks metered through provider-gcp and vps (platform compute billing)', () => {
+  const HOUR = 3_600_000;
+
+  it('an attached VM with a pd-ssd boot disk and a SCRATCH local SSD bills both disks', async () => {
+    const w = await world();
+    w.emu.persistentDisks.set(`${ZONE}/legacy-boot`, { type: 'pd-ssd', sizeGb: '200' });
+    w.emu.addInstance(ZONE, 'legacy', {
+      disks: [
+        {
+          boot: true,
+          type: 'PERSISTENT',
+          diskSizeGb: '200',
+          source: `${base}/projects/p/zones/${ZONE}/disks/legacy-boot`,
+        },
+        { type: 'SCRATCH', diskSizeGb: '375', interface: 'NVME' },
+      ],
+    });
+    await w.tick('vps.discovery', 60_000);
+    const instance = await w.api.instances.attach(w.root, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      externalId: `${ZONE}/legacy`,
+      ownerIdentityId: w.fixture.tenants.acme.caller.identityId,
+      idempotencyKey: 'attach-disks',
+    });
+    expect(await settle(w, instance.id, 'running')).toMatchObject({ state: 'running' });
+    const start = w.fixture.clock.now();
+    const h1 = (Math.floor(start / HOUR) + 1) * HOUR;
+    await w.fixture.advance(h1 + 2 * HOUR + 6 * 60_000 - start);
+    await w.tick('vps.provider-usage', 0);
+    const { rows } = await w.fixture.database.query<{ meter: string; quantity: string; start_ms: number }>(
+      `SELECT meter, quantity::text, (extract(epoch FROM window_start) * 1000)::float8 AS start_ms
+         FROM usage_windows WHERE source_kind = 'instance' AND source_id = $1 AND meter LIKE 'disk.%'
+          AND window_start >= to_timestamp($2::float8 / 1000)
+        ORDER BY window_start, meter`,
+      [instance.id, h1],
+    );
+    expect(rows.map((row) => [row.meter, Number(row.start_ms), Number(row.quantity)])).toEqual([
+      ['disk.local-ssd.gib.hours', h1, 375],
+      ['disk.pd-ssd.gib.hours', h1, 200],
+      ['disk.local-ssd.gib.hours', h1 + HOUR, 375],
+      ['disk.pd-ssd.gib.hours', h1 + HOUR, 200],
+    ]);
+    // One lookup, however many polls.
+    expect(w.emu.requests.filter((request) => request.path.includes('/disks/'))).toHaveLength(1);
+  });
+});

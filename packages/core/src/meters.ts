@@ -119,6 +119,9 @@ const diskTypes = [
   'local-ssd',
 ] as const;
 
+/** The disk types provider instances meter, as `disk.<type>.gib.hours` keys name them. */
+export const meterDiskTypes: readonly string[] = diskTypes;
+
 /** Units of the old root meters, by key (they were all `hour` before the catalog named the quantity). */
 const rootMeterUnits: Record<string, string> = {
   'node.metal.hours': 'hour',

@@ -1076,6 +1076,140 @@ describe('compute', () => {
     });
   });
 
+  it('toMachine marks the boot disk type the machine family takes (what the platform meters it as)', () => {
+    const on = (type: string) =>
+      toMachine({ name: 'v', zone: 'zones/z-a', machineType: `zones/z-a/machineTypes/${type}` });
+    expect(on('a3-highgpu-8g').bootDiskType).toBe('pd-balanced');
+    expect(on('n2-standard-4').bootDiskType).toBe('pd-balanced');
+    // Families that only take Hyperdisk.
+    expect(on('a3-ultragpu-8g').bootDiskType).toBe('hyperdisk-balanced');
+    expect(on('c4-standard-8').bootDiskType).toBe('hyperdisk-balanced');
+  });
+
+  describe('disks (platform compute billing)', () => {
+    const zone = 'us-central1-a';
+    const disk = (name: string) =>
+      `https://compute.googleapis.com/compute/v1/projects/p/zones/${zone}/disks/${name}`;
+    const attached = (name: string, extra: Record<string, unknown> = {}) => ({
+      type: 'PERSISTENT',
+      source: disk(name),
+      diskSizeGb: '200',
+      ...extra,
+    });
+    const scratch = { type: 'SCRATCH', diskSizeGb: '375', interface: 'NVME' };
+    const diskGets = (emu: GceEmulator) => emu.requests.filter((r) => r.path.includes('/disks/'));
+
+    /** A provider whose clock the test moves. */
+    async function withClock(emu: GceEmulator) {
+      const clock = manualClock(1_000_000);
+      const provider = gcpProvider({ fetch: emu.fetch });
+      const parsed = await provider.config['~standard'].validate(gcpAccount);
+      const impl = provider.create((parsed as { value: GcpConfig }).value, {
+        clock,
+        secrets,
+        log: { debug() {}, info() {}, warn() {}, error() {} },
+        account: platformAccount,
+      });
+      return { clock, impl };
+    }
+    const discovered = async (impl: ProviderImpl) => {
+      const out: ExternalMachine[] = [];
+      for await (const machine of impl.discover!(ctx())) out.push(machine);
+      return out;
+    };
+
+    it('maps a persistent boot disk (type resolved from the disk) and a SCRATCH local SSD', async () => {
+      const emu = new GceEmulator();
+      emu.persistentDisks.set(`${zone}/boot`, { type: 'pd-ssd', sizeGb: '200' });
+      emu.persistentDisks.set(`${zone}/data`, { type: 'hyperdisk-balanced', sizeGb: '500' });
+      emu.addInstance(zone, 'vm1', {
+        // Listed out of order: the boot disk comes first in the machine anyway.
+        disks: [scratch, attached('data', { diskSizeGb: '500' }), attached('boot', { boot: true })],
+      });
+      const { impl } = await withClock(emu);
+      const [machine] = await discovered(impl);
+      expect(machine).toMatchObject({
+        bootDiskType: 'pd-ssd',
+        disks: [
+          { type: 'pd-ssd', sizeGiB: 200, boot: true },
+          { type: 'local-ssd', sizeGiB: 375 },
+          { type: 'hyperdisk-balanced', sizeGiB: 500 },
+        ],
+      });
+    });
+
+    it('a boot disk that is Hyperdisk names it, whatever the family table says', async () => {
+      const emu = new GceEmulator();
+      emu.persistentDisks.set(`${zone}/boot`, { type: 'hyperdisk-balanced', sizeGb: '100' });
+      emu.addInstance(zone, 'vm1', {
+        machineType: 'n2-standard-4',
+        disks: [attached('boot', { boot: true, diskSizeGb: '100' })],
+      });
+      const { impl } = await withClock(emu);
+      expect((await discovered(impl))[0]).toMatchObject({ bootDiskType: 'hyperdisk-balanced' });
+    });
+
+    it('the type lookup is cached per disk for 24 hours', async () => {
+      const emu = new GceEmulator();
+      emu.persistentDisks.set(`${zone}/boot`, { type: 'pd-ssd', sizeGb: '200' });
+      emu.addInstance(zone, 'vm1', { disks: [attached('boot', { boot: true })] });
+      emu.addInstance(zone, 'vm2', { disks: [attached('boot', { boot: true })] });
+      const { clock, impl } = await withClock(emu);
+      await discovered(impl);
+      await discovered(impl);
+      // Two VMs naming one disk URL and two passes: one disks.get.
+      expect(diskGets(emu)).toHaveLength(1);
+      clock.advance(23 * 3_600_000);
+      await discovered(impl);
+      expect(diskGets(emu)).toHaveLength(1);
+      clock.advance(2 * 3_600_000);
+      await discovered(impl);
+      expect(diskGets(emu)).toHaveLength(2);
+    });
+
+    it('a failed lookup omits the disk type (the platform meters pd-balanced) and is retried after five minutes', async () => {
+      const emu = new GceEmulator();
+      emu.addInstance(zone, 'vm1', { disks: [attached('gone', { boot: true })] });
+      const { clock, impl } = await withClock(emu);
+      const [machine] = await discovered(impl);
+      expect(machine!.disks).toEqual([{ sizeGiB: 200, boot: true }]);
+      // The family table still names the boot disk type.
+      expect(machine!.bootDiskType).toBe('pd-balanced');
+      await discovered(impl);
+      expect(diskGets(emu)).toHaveLength(1);
+      emu.persistentDisks.set(`${zone}/gone`, { type: 'pd-standard', sizeGb: '200' });
+      clock.advance(301_000);
+      expect((await discovered(impl))[0]!.disks).toEqual([
+        { type: 'pd-standard', sizeGiB: 200, boot: true },
+      ]);
+    });
+
+    it('a disk of another project is not read', async () => {
+      const emu = new GceEmulator();
+      emu.addInstance(zone, 'vm1', {
+        disks: [
+          {
+            type: 'PERSISTENT',
+            boot: true,
+            diskSizeGb: '50',
+            source: `https://compute.googleapis.com/compute/v1/projects/other/zones/${zone}/disks/x`,
+          },
+        ],
+      });
+      const { impl } = await withClock(emu);
+      expect((await discovered(impl))[0]!.disks).toEqual([{ sizeGiB: 50, boot: true }]);
+      expect(diskGets(emu)).toHaveLength(0);
+    });
+
+    it('an instance with no disks[] reports none', async () => {
+      const emu = new GceEmulator();
+      emu.addInstance(zone, 'vm1');
+      const { impl } = await withClock(emu);
+      const [machine] = await discovered(impl);
+      expect(machine!.disks).toBeUndefined();
+    });
+  });
+
   it('maps statuses and accelerator models', () => {
     const base = {
       name: 'v',
