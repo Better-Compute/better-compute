@@ -40,14 +40,28 @@ import {
   createFlavor,
   deleteFlavor,
   parseFlavorInput,
+  readFlavorByName,
   readFlavors,
   updateFlavor,
   type FlavorInput,
   type FlavorRecord,
 } from './flavors.js';
+import {
+  EstimateCache,
+  flavorEstimates,
+  type EstimateDeps,
+  type FlavorEstimate,
+} from './estimates.js';
 import { id, int, name, object, optional, tenant } from './input.js';
 import { isRootCaller } from './billing.js';
-import { billingApi, flavorMeterSpec, type BillingApi, type BillingOptions } from './pricing.js';
+import {
+  billingApi,
+  defaultCurrency,
+  flavorMeterSpec,
+  type BillingApi,
+  type BillingOptions,
+  type BillingProviders,
+} from './pricing.js';
 import {
   completeCreateInstance,
   deleteInstance,
@@ -72,6 +86,7 @@ import {
   type ImageResolver,
   type CertifyHostKey,
   type InstanceDeps,
+  type InstanceDryRun,
   type InstanceRef,
   type ListInstancesInput,
 } from './instances.js';
@@ -345,7 +360,7 @@ export type VpsApi = {
   /** Root-only: the meters and prices on the IAM root tenant (pricing.ts). */
   billing: BillingApi;
   instances: {
-    create: MethodDefinition<CreateInstanceInput, Instance>;
+    create: MethodDefinition<CreateInstanceInput, Instance | InstanceDryRun>;
     list: MethodDefinition<ListInstancesInput, { items: Instance[]; cursor?: string }>;
     get: MethodDefinition<InstanceRef, Instance>;
     start: MethodDefinition<InstanceRef, Instance>;
@@ -357,7 +372,7 @@ export type VpsApi = {
     reboot: MethodDefinition<RebootInstanceInput, Instance>;
   };
   flavors: {
-    list: MethodDefinition<PoolInput, { items: FlavorRecord[] }>;
+    list: MethodDefinition<PoolInput, { items: (FlavorRecord & { estimate?: FlavorEstimate })[] }>;
     create: MethodDefinition<FlavorInput, FlavorRecord>;
     update: MethodDefinition<FlavorInput, FlavorRecord>;
     delete: MethodDefinition<FlavorRef, { deleted: boolean; archived: boolean }>;
@@ -681,6 +696,67 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       context.signal ?? new AbortController().signal,
     );
   const typePrefix = options.typePrefix ?? 'compute-';
+
+  // --- Platform compute billing: price proposals and tenant estimates (D14, D15) ---
+  /** Estimates are kept five minutes per (tenant, pool). */
+  const estimateCache = new EstimateCache();
+  const estimateDeps = (context: MethodContext): EstimateDeps => ({
+    iam: context.iam,
+    clock: context.clock,
+    log: context.log,
+    cache: estimateCache,
+    currency: options.billing?.currency ?? defaultCurrency,
+    gpuModels: options.billing?.gpuModels,
+  });
+  /** What a `dryRun` create's `check` priced, for its handler (the same parsed input object). */
+  const dryRuns = new WeakMap<CreateInstanceInput, InstanceDryRun>();
+  const dryRunCheck = async (context: MethodContext, input: CreateInstanceInput): Promise<void> => {
+    await visibleVpsPool(context.sql, input.tenantId, input.poolId);
+    const flavor = await readFlavorByName(context.sql, input.poolId, input.flavor);
+    if (!flavor || flavor.archived)
+      throw new ComputeError(
+        'NOT_FOUND',
+        `Flavor ${input.flavor} not found in pool ${input.poolId}`,
+      );
+    const estimates = await flavorEstimates(
+      estimateDeps(context),
+      context.sql,
+      input.tenantId,
+      input.poolId,
+      [flavor],
+    );
+    const estimate = estimates.get(flavor.id);
+    dryRuns.set(input, estimate ? { estimate } : {});
+  };
+  /** The list prices of a platform provider account, read through its cached client. */
+  const billingProviders: BillingProviders = {
+    async listPrices(context, accountId, query) {
+      const account = await readAccount(context.sql, accountId);
+      const root = context.iam.rootTenantId;
+      // Proposals act as the platform: a tenant's account is never read with its own credentials for root.
+      if (!account || root === undefined || account.tenantId !== root)
+        throw new ComputeError(
+          'NOT_FOUND',
+          `Provider account ${accountId} not found among the platform's accounts`,
+        );
+      const client = await clients.client(account, depsOf(context));
+      if (typeof client.listPrices !== 'function')
+        throw new ComputeError(
+          'UNSUPPORTED',
+          `Provider ${account.provider} does not list prices`,
+          undefined,
+          { provider: account.provider },
+        );
+      const timeout = AbortSignal.timeout(55_000);
+      return client.listPrices(query, {
+        idempotencyKey: `prices:${accountId}`,
+        signal: context.signal ? AbortSignal.any([context.signal, timeout]) : timeout,
+        clock: context.clock,
+        secrets: options.secrets ?? context.secrets ?? noSecrets,
+        log: context.log,
+      });
+    },
+  };
   /**
    * A template that names secrets hands them to every sandbox's guest, which can read them: the
    * caller must also hold `compute:secrets:manage` on the tenant (secrets are write-only, §6).
@@ -896,39 +972,59 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
   };
 
   const api = (): VpsApi => ({
-    billing: billingApi(options.billing),
+    billing: billingApi(options.billing, billingProviders),
     instances: {
-      create: defineMethod<CreateInstanceInput, Instance>({
+      create: defineMethod<CreateInstanceInput, Instance | InstanceDryRun>({
         action: 'compute:instances:create',
         kind: 'mutation',
         // The envelope decides on the draft `prepare` returns.
         resource: (input) => ({ type: 'instance', id: `draft:${input.idempotencyKey}` }),
         validate: describedBy(schemas.createInstance, parseCreateInstance),
         admission: {
-          prepare: (context, input, tx) =>
-            prepareCreateInstance(depsOf(context), context, input, tx),
+          // A dry run writes no draft: it is decided as reading the pool's flavors (their estimates).
+          prepare: async (context, input, tx) =>
+            input.dryRun
+              ? {
+                  status: 'decide' as const,
+                  resource: {
+                    type: 'pool',
+                    id: input.poolId,
+                    action: 'compute:flavors:read' as const,
+                  },
+                }
+              : prepareCreateInstance(depsOf(context), context, input, tx),
           describe: (input) => describeCreateInstance(input),
-          denied: (context, input, tx) => denyCreateInstance(context, input, tx),
+          denied: async (context, input, tx) => {
+            if (!input.dryRun) await denyCreateInstance(context, input, tx);
+          },
           // An owner refused as no member of the tenant (R2) leaves no draft of theirs; other
           // refusals of the check (budgets) keep the draft, so the same key can succeed later.
           abandoned: async (context, input, tx, error) => {
+            if (input.dryRun) return;
             if (isComputeError(error) && error.details?.reason === ownerNotMember)
               await denyCreateInstance(context, input, tx);
           },
           // A pool's budget policy (stop-new/drain offers, `budgetCheck: 'meter'`) covers
           // instances as it covers reservations: SPEND_LIMIT_REACHED, with the draft kept.
           check: async (context, input) => {
+            if (input.dryRun) return dryRunCheck(context, input);
             await assertOwnerMember(context, input);
             if (isSecretRef(input.userData)) await userDataSecretCheck(context, input.tenantId);
             await budgetAdmissionCheck(context, input.tenantId, input.poolId);
           },
         },
-        handler: (context, input) => completeCreateInstance(depsOf(context), context, input),
+        handler: async (context, input) => {
+          if (!input.dryRun) return completeCreateInstance(depsOf(context), context, input);
+          const result = dryRuns.get(input);
+          if (!result) throw new ComputeError('INTERNAL_ERROR', 'A dry run was not priced');
+          return result;
+        },
         // §9.1 async-with-wait: `wait` holds the answer until the instance is placed and started
         // (or failed), refreshed from its row.
         poll: {
           done: instanceSettled,
           refresh: async (context, input, output) => {
+            if (!('id' in output)) return output;
             const row = await readInstance(context.sql, output.id, { tenantId: input.tenantId });
             return row && !row.draft ? instanceView(row) : output;
           },
@@ -1028,6 +1124,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       list: defineMethod({
         action: 'compute:flavors:read',
         kind: 'read',
+        // Estimates ask IAM to quote, which never happens inside a compute transaction.
+        transaction: 'manual',
         resource: poolResource,
         validate: describedBy(schemas.pool, parsePool),
         handler: async (context, input) => {
@@ -1038,7 +1136,20 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           );
           if (visible.rows.length === 0)
             throw new ComputeError('NOT_FOUND', `Pool ${input.poolId} not found`);
-          return { items: await readFlavors(context.sql, input.poolId) };
+          const flavors = await readFlavors(context.sql, input.poolId);
+          const estimates = await flavorEstimates(
+            estimateDeps(context),
+            context.sql,
+            input.tenantId,
+            input.poolId,
+            flavors,
+          );
+          return {
+            items: flavors.map((flavor) => {
+              const estimate = estimates.get(flavor.id);
+              return estimate ? { ...flavor, estimate } : flavor;
+            }),
+          };
         },
       }),
       create: defineMethod<FlavorInput, FlavorRecord>({

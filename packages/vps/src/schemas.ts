@@ -227,6 +227,12 @@ export const schemas = {
         },
         ['timeoutMs'],
       ),
+      dryRun: {
+        type: 'boolean',
+        default: false,
+        description:
+          'Create nothing and answer { estimate }: the flavor’s hourly price for the tenant (absent when the IAM port cannot quote). Decided as reading the pool’s flavors',
+      },
     },
     ['tenantId', 'poolId', 'flavor', 'imageId', 'idempotencyKey'],
   ),

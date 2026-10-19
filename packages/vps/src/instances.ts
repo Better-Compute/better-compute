@@ -26,6 +26,7 @@ import {
 } from '@better-compute/core';
 import { chargeQuota, refundQuota, resizeAllocation } from '@better-compute/capacity';
 import type { ClientDeps, ProviderClients } from './accounts.js';
+import type { FlavorEstimate } from './estimates.js';
 import { readFlavorByName, type FlavorRecord } from './flavors.js';
 import { claimReservationSlot } from './provider-reservations.js';
 import {
@@ -158,6 +159,16 @@ export interface CreateInstanceInput {
    * `pending`/`scheduling`/`provisioning`/`starting`. Not part of the request: a retry may differ.
    */
   wait?: { timeoutMs: number };
+  /**
+   * (platform compute billing, D15) Creates nothing: answers `{ estimate }`, the hourly price of the flavor for the
+   * caller's tenant, when the IAM port can quote. Decided as reading the pool's flavors.
+   */
+  dryRun?: boolean;
+}
+
+/** What `instances.create` answers to a `dryRun`: the estimate, absent when the pool or the IAM port has none. */
+export interface InstanceDryRun {
+  estimate?: FlavorEstimate;
 }
 
 /** User data that starts like a URI (`secret://…`, `vault://…`, `env://…`) is a reference, not content. */
@@ -248,7 +259,10 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
     'ownerIdentityId',
     'idempotencyKey',
     'wait',
+    'dryRun',
   ]);
+  if (input.dryRun !== undefined && typeof input.dryRun !== 'boolean')
+    fail('dryRun must be a boolean');
   if (
     typeof input.imageId !== 'string' ||
     !/^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$/.test(input.imageId)
@@ -281,6 +295,7 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
     desiredState: (input.desiredState as 'running' | 'stopped' | undefined) ?? 'running',
     idempotencyKey: key(input.idempotencyKey),
   };
+  if (input.dryRun !== undefined) result.dryRun = input.dryRun;
   const projectId = optional(input.projectId, (value) => id(value, 'prj', 'projectId'));
   if (projectId !== undefined) result.projectId = projectId;
   if (input.userData !== undefined) result.userData = input.userData as string;
@@ -317,7 +332,8 @@ const inFlight: ReadonlySet<string> = new Set([
 ]);
 
 /** Whether a created instance is past the states a `wait` holds on. */
-export const instanceSettled = (instance: Instance): boolean => !inFlight.has(instance.state);
+export const instanceSettled = (instance: Instance | InstanceDryRun): boolean =>
+  !('state' in instance) || !inFlight.has(instance.state);
 
 export type InstanceRef = { tenantId: string; instanceId: string };
 
@@ -1201,7 +1217,7 @@ export async function prepareCreateInstance(
   const caller = context.caller;
   if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
   const owner = instanceOwner(caller, input, deps.rootTenantId);
-  const { idempotencyKey: _key, wait: _wait, ...request } = input;
+  const { idempotencyKey: _key, wait: _wait, dryRun: _dryRun, ...request } = input;
   const hash = await sha256Hex(canonical(request));
   const instanceId = await draftId('inst', input.tenantId, caller.identityId, input.idempotencyKey);
   const existing = await readInstance(tx, instanceId, { tenantId: input.tenantId, lock: true });

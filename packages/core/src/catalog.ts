@@ -525,7 +525,15 @@ group('workflows', 'provision', [
   ['resume', 'mutation', 'workflows:manage', 'node', 'v0.2'],
 ]);
 group('instances', 'vps', [
-  ['create', 'mutation', 'instances:create', 'instance', 'v0.3'],
+  // `dryRun: true` creates nothing and is decided as reading the pool's flavors (their estimates).
+  [
+    'create',
+    'mutation',
+    'instances:create',
+    'instance',
+    'v0.3',
+    { or: [['flavors:read', 'pool']] },
+  ],
   ['list', 'read', 'instances:read', 'tenant', 'v0.3', list],
   ['get', 'read', 'instances:read', 'instance', 'v0.3'],
   ['start', 'mutation', 'instances:update', 'instance', 'v0.3'],
@@ -547,6 +555,7 @@ group('billing', 'vps', [
   ['syncMeters', 'mutation', 'billing:manage', 'fleet', 'v1.0'],
   ['prices', 'read', 'billing:read', 'fleet', 'v1.0'],
   ['setPrices', 'mutation', 'billing:manage', 'fleet', 'v1.0'],
+  ['proposePrices', 'read', 'billing:read', 'fleet', 'v1.0'],
 ]);
 group('providerAccounts', 'vps', [
   [

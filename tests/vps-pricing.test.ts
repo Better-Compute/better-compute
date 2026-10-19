@@ -10,8 +10,10 @@ import {
 import { createEmbeddedTestIam, type EmbeddedTestIam } from '@better-compute/iam/testing';
 import { useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
+import { gcpProvider } from '@better-compute/provider-gcp';
 import { betterCompute, type BetterCompute } from '@better-compute/server';
 import { vps } from '@better-compute/vps';
+import { GceEmulator } from './support/gce-emulator.js';
 
 // The root-only `billing` API group (platform compute billing, D13): meters and prices on the IAM root tenant,
 // decided on `compute:billing:*` @ fleet. Everything runs against a REAL better-iam (embedded, with compute's
@@ -34,6 +36,11 @@ let acmeAdmin: Credential;
 let reader: Credential;
 // Hides the billing members from the port while set: the "port without the member" case.
 let hidden = false;
+// The provider behind the proposals and estimates: Compute Engine over the emulator (SKUs in its catalog section).
+const emu = new GceEmulator();
+emu.validTokens.add('host-token');
+// How many times the port was asked to quote.
+let quoted = 0;
 const billingMembers = new Set<PropertyKey>([
   'ensureMeters',
   'listMeters',
@@ -66,8 +73,15 @@ beforeAll(async () => {
   t = await createEmbeddedTestIam({ now: () => Date.now() });
   database = pglite();
   const port = new Proxy(t.port, {
-    get: (target, key) =>
-      hidden && billingMembers.has(key) ? undefined : Reflect.get(target, key),
+    get: (target, key) => {
+      if (hidden && billingMembers.has(key)) return undefined;
+      if (key === 'quote' && typeof target.quote === 'function')
+        return (...args: Parameters<NonNullable<typeof target.quote>>) => {
+          quoted += 1;
+          return target.quote!(...args);
+        };
+      return Reflect.get(target, key);
+    },
   });
   compute = betterCompute({
     database,
@@ -77,7 +91,12 @@ beforeAll(async () => {
     clock,
     modules: [
       ...t.bridge.modules,
-      vps({ billing: { gpuModels: [...defaultMeterGpuModels, MODEL] } }),
+      vps({
+        billing: { gpuModels: [...defaultMeterGpuModels, MODEL] },
+        providers: [
+          gcpProvider({ fetch: emu.fetch, tokenSource: { token: async () => 'host-token' } }),
+        ],
+      }),
     ],
   } as any);
   await compute.initialize();
@@ -320,5 +339,428 @@ describe('billing: meters and prices', () => {
     } finally {
       hidden = false;
     }
+  });
+});
+
+// --- Price proposals and tenant estimates (platform compute billing, D14, D15) -----------------------------
+// Proposals: provider list prices (here Compute Engine's catalog through the emulator) plus a margin, as prices root
+// can publish with `setPrices`; they apply nothing. Estimates: the flavor's hourly price for the caller's tenant,
+// priced by the real better-iam `quote` (so a negotiated price shows) on `meterLinesFor` of the flavor's shape.
+
+describe('proposals', () => {
+  const ZONE = 'us-central1-a';
+  const REGION = 'us-central1';
+  const ID_NONE = `pacct_${'0'.repeat(26)}`;
+
+  interface Sku {
+    id: string;
+    description: string;
+    group: string;
+    nanos: number;
+    units?: string;
+    usageUnit?: string;
+    usageType?: string;
+    regions?: string[];
+    currency?: string;
+  }
+  const sku = (input: Sku) => ({
+    skuId: input.id,
+    description: input.description,
+    category: {
+      resourceGroup: input.group,
+      usageType: input.usageType ?? 'OnDemand',
+    },
+    serviceRegions: input.regions ?? [REGION],
+    pricingInfo: [
+      {
+        pricingExpression: {
+          usageUnit: input.usageUnit ?? 'h',
+          tieredRates: [
+            {
+              startUsageAmount: 0,
+              unitPrice: {
+                currencyCode: input.currency ?? 'USD',
+                units: input.units ?? '0',
+                nanos: input.nanos,
+              },
+            },
+          ],
+        },
+      },
+    ],
+  });
+  const cpu = (id: string, family: string, nanos: number, extra: Partial<Sku> = {}) =>
+    sku({
+      id,
+      description: `${family} Instance Core running in Americas`,
+      group: 'CPU',
+      nanos,
+      ...extra,
+    });
+  const ram = (id: string, family: string, nanos: number, extra: Partial<Sku> = {}) =>
+    sku({
+      id,
+      description: `${family} Instance Ram running in Americas`,
+      group: 'RAM',
+      nanos,
+      usageUnit: 'GiBy.h',
+      ...extra,
+    });
+
+  let accountId: string;
+  let poolId: string;
+  let gpuPoolId: string;
+  const N2_METER = 'flavor.n2-standard-4.us-central1.hours';
+  const A3_METER = 'flavor.a3-highgpu-8g.us-central1.hours';
+  const WEIRD_METER = 'flavor.weird.hours';
+
+  const propose = (extra: Record<string, unknown> = {}, who: Credential = root) =>
+    api.billing.proposePrices(who, {
+      accountId,
+      marginPct: 20,
+      region: REGION,
+      effectiveFrom: period,
+      ...extra,
+    });
+  const byMeter = (result: { proposals: { meter: string }[] }): Record<string, any> =>
+    Object.fromEntries(result.proposals.map((proposal) => [proposal.meter, proposal]));
+
+  beforeAll(async () => {
+    emu.skus = [
+      cpu('cpu-e2', 'E2', 21_811_000),
+      ram('ram-e2', 'E2', 2_923_000),
+      cpu('cpu-n2', 'N2', 31_611_000),
+      ram('ram-n2', 'N2', 4_237_000),
+      cpu('cpu-a3', 'A3', 33_000_000),
+      ram('ram-a3', 'A3', 4_400_000),
+      // The cheapest family overall, but in another region.
+      cpu('cpu-e2-asia', 'E2', 19_000_000, { regions: ['asia-east1'] }),
+      ram('ram-e2-asia', 'E2', 2_500_000, { regions: ['asia-east1'] }),
+      // Another currency is never mixed in.
+      cpu('cpu-e2-eur', 'E2', 1_000_000, { currency: 'EUR' }),
+      sku({
+        id: 'gpu-h100',
+        description: 'Nvidia H100 80GB GPU running in Americas',
+        group: 'GPU',
+        units: '6',
+        nanos: 880_000_000,
+      }),
+      sku({
+        id: 'gpu-h100-spot',
+        description: 'Spot Preemptible Nvidia H100 80GB GPU running in Americas',
+        group: 'GPU',
+        usageType: 'Preemptible',
+        units: '2',
+        nanos: 250_000_000,
+      }),
+      sku({
+        id: 'ip',
+        description: 'External IP Charge on a Standard VM',
+        group: 'IpAddress',
+        nanos: 5_000_000,
+      }),
+      sku({
+        id: 'ssd',
+        description: 'SSD backed PD Capacity in Iowa',
+        group: 'SSD',
+        usageUnit: 'GiBy.mo',
+        nanos: 170_000_000,
+      }),
+      cpu('cpu-n2-1y', 'N2', 10_000_000, { usageType: 'Commit1Yr' }),
+    ];
+    const account = await api.providerAccounts.create(root, {
+      tenantId: R,
+      provider: 'gcp',
+      name: 'gcp-prices',
+      config: { projectId: 'p', zones: [ZONE] },
+    });
+    accountId = account.id;
+    const site = await api.sites.create(root, {
+      tenantId: R,
+      kind: 'shared',
+      region: REGION,
+      idempotencyKey: 'prices-site',
+    });
+    const pool = await api.pools.create(root, {
+      tenantId: R,
+      siteId: site.id,
+      class: 'provider',
+      providerAccountId: accountId,
+      idempotencyKey: 'prices-pool',
+    });
+    poolId = pool.id;
+    const gpuPool = await api.pools.create(root, {
+      tenantId: R,
+      siteId: site.id,
+      class: 'provider',
+      gpuModel: 'H100',
+      providerAccountId: accountId,
+      idempotencyKey: 'prices-gpu-pool',
+    });
+    gpuPoolId = gpuPool.id;
+    for (const id of [poolId, gpuPoolId])
+      await api.pools.offer(root, {
+        tenantId: R,
+        poolId: id,
+        toTenantId: A,
+        quota: { vcpu: 500, memoryGiB: 4_000, diskGiB: 2_000, gpu: 16 },
+      });
+    const flavor = (pool: string, name: string, shape: Record<string, unknown>) =>
+      api.flavors.create(root, { tenantId: R, poolId: pool, name, diskGiB: 100, ...shape });
+    await flavor(poolId, 'plain.4', { vcpu: 4, memoryGiB: 16, offerId: `${ZONE}/n2-standard-4` });
+    await flavor(poolId, 'n2.metered', {
+      vcpu: 4,
+      memoryGiB: 16,
+      offerId: `${ZONE}/n2-standard-4`,
+      billing: { meter: N2_METER },
+    });
+    await flavor(poolId, 'weird.1', {
+      vcpu: 2,
+      memoryGiB: 8,
+      offerId: `${ZONE}/zz9-standard-2`,
+      billing: { meter: WEIRD_METER },
+    });
+    await flavor(gpuPoolId, 'a3.8g', {
+      vcpu: 208,
+      memoryGiB: 1_872,
+      gpus: 8,
+      offerId: `${ZONE}/a3-highgpu-8g`,
+      billing: { meter: A3_METER },
+    });
+  }, 60_000);
+
+  it('proposals apply the margin to provider list prices', async () => {
+    const result = await propose();
+    const proposals = byMeter(result);
+    // The region's cheapest general-purpose family (E2: 21,811 + 4 x 2,923 beats N2's), plus 20%.
+    expect(proposals['vm.vcpu.hours']).toEqual({
+      meter: 'vm.vcpu.hours',
+      spec: perUnit(26_173),
+      basis: [{ sku: 'cpu-e2', unitPriceMicros: 21_811 }],
+    });
+    expect(proposals['vm.memory.gib.hours']).toEqual({
+      meter: 'vm.memory.gib.hours',
+      spec: perUnit(3_508),
+      basis: [{ sku: 'ram-e2', unitPriceMicros: 2_923 }],
+    });
+    // GPUs use the GPU SKU, on demand and Spot apart.
+    expect(proposals['vm.gpu.h100.hours']).toEqual({
+      meter: 'vm.gpu.h100.hours',
+      spec: perUnit(8_256_000),
+      basis: [{ sku: 'gpu-h100', unitPriceMicros: 6_880_000 }],
+    });
+    expect(proposals['vm.gpu.h100.spot.hours'].spec).toEqual(perUnit(2_700_000));
+    // Ancillaries take the matching SKU (monthly storage as GiB-hours).
+    expect(proposals['ip.public.hours'].spec).toEqual(perUnit(6_000));
+    expect(proposals['disk.pd-ssd.gib.hours']).toEqual({
+      meter: 'disk.pd-ssd.gib.hours',
+      spec: perUnit(280),
+      basis: [{ sku: 'ssd', unitPriceMicros: 233 }],
+    });
+    // Nothing a provider list cannot price, and nothing that is not a provider meter.
+    for (const meter of [
+      'vm.instance.hours',
+      'vm.reserved.vcpu.hours',
+      'vm.managed.hours',
+      'vm.grant.slot.hours',
+      'network.vpc.hours',
+      'snapshot.gib.hours',
+      'vm.gpu.a100.hours',
+      'vm.gpu.other.hours',
+      'disk.pd-standard.gib.hours',
+      WEIRD_METER,
+    ])
+      expect(result.unpriced, meter).toContain(meter);
+    expect(result.unpriced).not.toContain('vm.vcpu.hours');
+    for (const meter of result.unpriced as string[])
+      expect(meter).toMatch(/^(vm|disk|ip|network|snapshot|flavor)\./);
+    expect(proposals['gpu.h100.hours']).toBeUndefined();
+  });
+
+  it('proposals compose a flavor meter from its family, and take the cheapest region without one', async () => {
+    const proposals = byMeter(await propose());
+    // 4 vCPU and 16 GiB at N2's SKUs, plus 20%.
+    expect(proposals[N2_METER]).toEqual({
+      meter: N2_METER,
+      spec: perUnit(233_083),
+      basis: [
+        { sku: 'cpu-n2', unitPriceMicros: 31_611 },
+        { sku: 'ram-n2', unitPriceMicros: 4_237 },
+      ],
+    });
+    // 208 vCPU, 1,872 GiB and 8 H100s of the GPU pool at A3's SKUs, plus 20%.
+    expect(proposals[A3_METER].spec).toEqual(perUnit(84_168_960));
+    expect(proposals[A3_METER].basis.map((item: { sku: string }) => item.sku)).toEqual([
+      'cpu-a3',
+      'ram-a3',
+      'gpu-h100',
+    ]);
+
+    // No region: the cheapest family of any region (E2 in asia-east1), the EUR price still ignored.
+    const anywhere = byMeter(await propose({ region: undefined, marginPct: 0 }));
+    expect(anywhere['vm.vcpu.hours']).toMatchObject({
+      spec: perUnit(19_000),
+      basis: [{ sku: 'cpu-e2-asia', unitPriceMicros: 19_000 }],
+    });
+    // The flavor meter is the offer's own region whatever the call names.
+    expect(anywhere[N2_METER].spec).toEqual(perUnit(194_236));
+  });
+
+  it('proposals never set prices', async () => {
+    const before = await api.billing.prices(root, {});
+    const result = await propose({ marginPct: 35.5 });
+    expect(result.proposals.length).toBeGreaterThan(5);
+    expect(await api.billing.prices(root, {})).toEqual(before);
+    // Publishing is root's separate step.
+    const vcpu = byMeter(result)['ip.public.hours'];
+    const applied = await api.billing.setPrices(root, {
+      prices: [{ meter: vcpu.meter, effectiveFrom: period, spec: vcpu.spec }],
+    });
+    expect(applied.failed).toEqual([]);
+    expect((await api.billing.prices(root, { meter: 'ip.public.hours' }))[0].spec).toEqual(
+      vcpu.spec,
+    );
+  });
+
+  it('proposals are root-only, validated, and read the platform’s accounts only', async () => {
+    expect(await outcome(propose({}, acmeAdmin))).toBe('ACCESS_DENIED');
+    expect(await outcome(propose({}, reader))).toBe('allowed');
+    expect(await outcome(propose({ accountId: ID_NONE }))).toBe('NOT_FOUND');
+    for (const bad of [
+      { marginPct: -1 },
+      { marginPct: 1001 },
+      { marginPct: 'lots' },
+      { effectiveFrom: '2026-13' },
+      { region: 'Not A Region' },
+      { accountId: 'acct_1' },
+      { extra: true },
+    ])
+      expect(await outcome(propose(bad)), JSON.stringify(bad)).toBe('INVALID_INPUT');
+    // No port member is needed: proposals read the provider and compute's own flavors.
+    hidden = true;
+    try {
+      expect(await outcome(propose())).toBe('allowed');
+    } finally {
+      hidden = false;
+    }
+  });
+
+  describe('estimates', () => {
+    const flavorsOf = async (who: Credential, tenantId: string): Promise<Record<string, any>> => {
+      const { items } = await api.flavors.list(who, { tenantId, poolId });
+      return Object.fromEntries(items.map((item: { name: string }) => [item.name, item]));
+    };
+
+    beforeAll(async () => {
+      // The list prices, and a negotiated vCPU price for tenant A.
+      const result = await api.billing.setPrices(root, {
+        prices: [
+          { meter: 'vm.vcpu.hours', effectiveFrom: period, spec: perUnit(30_000) },
+          {
+            meter: 'vm.vcpu.hours',
+            targetTenantId: A,
+            effectiveFrom: period,
+            spec: perUnit(20_000),
+          },
+          { meter: 'vm.memory.gib.hours', effectiveFrom: period, spec: perUnit(5_000) },
+          { meter: 'vm.instance.hours', effectiveFrom: period, spec: perUnit(1_000) },
+        ],
+      });
+      expect(result.failed).toEqual([]);
+    });
+
+    it('a tenant sees its negotiated estimate on flavors.list', async () => {
+      const acme = await flavorsOf(acmeAdmin, A);
+      // 4 vCPU at A's 20,000, 16 GiB at the list 5,000 and the instance line at 1,000.
+      expect(acme['plain.4'].estimate).toEqual({
+        perHourMicros: 161_000,
+        currency: 'USD',
+        lines: [
+          { meter: 'vm.vcpu.hours', quantity: 4, amountMicros: 80_000 },
+          { meter: 'vm.memory.gib.hours', quantity: 16, amountMicros: 80_000 },
+          { meter: 'vm.instance.hours', quantity: 1, amountMicros: 1_000 },
+        ],
+      });
+      // Root pays the list price on its own pool.
+      const rootView = await flavorsOf(root, R);
+      expect(rootView['plain.4'].estimate.perHourMicros).toBe(4 * 30_000 + 80_000 + 1_000);
+      // A flavor billed on a whole-shape meter with no price: its line, and no total.
+      expect(acme['n2.metered'].estimate).toEqual({
+        perHourMicros: null,
+        currency: 'USD',
+        lines: [{ meter: N2_METER, quantity: 1, amountMicros: null }],
+      });
+    });
+
+    it('dryRun creates nothing and returns the estimate', async () => {
+      const count = async () =>
+        Number(
+          (await database.query<{ n: string }>(`SELECT count(*) AS n FROM instances`)).rows[0]!.n,
+        );
+      const before = await count();
+      const requests = emu.requests.length;
+      const dry = (who: Credential, extra: Record<string, unknown> = {}) =>
+        api.instances.create(who, {
+          tenantId: A,
+          poolId,
+          flavor: 'plain.4',
+          imageId: 'debian-12',
+          idempotencyKey: 'dry-run-1',
+          dryRun: true,
+          ...extra,
+        });
+      const answer = await dry(acmeAdmin);
+      expect(Object.keys(answer)).toEqual(['estimate']);
+      expect(answer.estimate).toMatchObject({ perHourMicros: 161_000, currency: 'USD' });
+      expect(await count()).toBe(before);
+      expect(emu.requests.length).toBe(requests);
+      // Decided like a read of the pool's flavors, and a refusal leaves nothing behind.
+      expect(await outcome(dry(reader))).toBe('ACCESS_DENIED');
+      expect(await outcome(dry(acmeAdmin, { flavor: 'nope.1' }))).toBe('NOT_FOUND');
+      expect(await outcome(dry(acmeAdmin, { dryRun: 'yes' }))).toBe('INVALID_INPUT');
+      expect(await count()).toBe(before);
+    });
+
+    it('no quote port → no estimate field', async () => {
+      hidden = true;
+      try {
+        const acme = await flavorsOf(acmeAdmin, A);
+        expect(Object.keys(acme).length).toBeGreaterThan(2);
+        for (const flavor of Object.values(acme)) expect(flavor).not.toHaveProperty('estimate');
+        const answer = await api.instances.create(acmeAdmin, {
+          tenantId: A,
+          poolId,
+          flavor: 'plain.4',
+          imageId: 'debian-12',
+          idempotencyKey: 'dry-run-2',
+          dryRun: true,
+        });
+        expect(answer).toEqual({});
+      } finally {
+        hidden = false;
+      }
+    });
+
+    it('estimates are cached five minutes per tenant and pool', async () => {
+      const asked = quoted;
+      await flavorsOf(acmeAdmin, A);
+      expect(quoted).toBe(asked);
+      // A new negotiated price shows only after the cache expires.
+      await api.billing.setPrices(root, {
+        prices: [
+          {
+            meter: 'vm.vcpu.hours',
+            targetTenantId: A,
+            effectiveFrom: period,
+            spec: perUnit(10_000),
+          },
+        ],
+      });
+      expect((await flavorsOf(acmeAdmin, A))['plain.4'].estimate.perHourMicros).toBe(161_000);
+      expect(quoted).toBe(asked);
+      clock.set(clock.now() + 5 * 60_000 + 1_000);
+      expect((await flavorsOf(acmeAdmin, A))['plain.4'].estimate.perHourMicros).toBe(121_000);
+      expect(quoted).toBeGreaterThan(asked);
+    });
   });
 });
