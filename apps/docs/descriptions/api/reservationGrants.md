@@ -1,0 +1,27 @@
+Reservation grants commit slots of a provider capacity reservation to one tenant for a term. Root makes them: the reservation is the platform's (a GCE reservation on a root provider account, bound to a pool with `providerAccounts.bindReservation`), and a grant hands some of its slots to a tenant the pool is offered to, from `startsAt` to `endsAt`. Times are epoch milliseconds.
+
+While a grant is in its term, its slots are the grantee's. `instances.create` on the reservation's flavor puts the grantee's instance into its grant while the grant has a slot its instances do not hold; once the grant is full, the instance takes an ordinary slot of the reservation if one is free. Nobody else can take a granted slot, even while the grantee leaves it idle: others share `total - in use - unused granted slots`. A grant that names a `projectId` serves only that project's instances. A reservation that is physically full refuses everyone, the grantee included, with `CAPACITY_UNAVAILABLE`.
+
+States: `scheduled` until `startsAt`, `active` during the term, then `ended`; `cancelled` when ended before it started. Each change publishes a `reservation-grant.*` event (`created`, `active`, `ended`, `cancelled`) in the grantee's tenant, with `{ grantId, poolId, projectId?, slots, startsAt, endsAt }`.
+
+## create
+
+Root only. Commits `slots` of a reservation to `grantTenantId` (optionally one of its projects) for `[startsAt, endsAt)` and returns the grant.
+
+- **Who.** Decided as `compute:providers:manage` on the provider account. `tenantId` must be the root tenant and the caller a member of it; anyone else is `ACCESS_DENIED`.
+- **The reservation** must be on that account, `ready`, and bound to a pool that is offered to the grantee: otherwise `NOT_FOUND`, `INVALID_STATE` (not ready, gone or unbound) or `INVALID_INPUT` (the pool is not offered to the grantee).
+- **Capacity.** The slots of every grant (other than cancelled ones) whose term overlaps, plus these, must fit the reservation's `total`: otherwise `CAPACITY_UNAVAILABLE` with `details { total, granted }`. Concurrent grants are decided one at a time under the reservation's row lock, so they never over-commit it.
+- **Term.** `startsAt` may be at most 5 minutes in the past; `endsAt` must be after it (`INVALID_INPUT`).
+- **Idempotency.** A retry with the same `idempotencyKey` returns the grant; a different request under the key is `CONFLICT`.
+
+## get
+
+Returns one grant of the tenant. Root, acting in the root tenant, can read any grant. Decided as `compute:quotas:read` on the tenant. A grant of another tenant is `NOT_FOUND`.
+
+## list
+
+Returns the tenant's grants as `items`, newest first (at most 1000). With `all: true`, root (acting in the root tenant) lists every tenant's grants; anyone else asking for `all` is `ACCESS_DENIED`. Decided as `compute:quotas:read` on the tenant.
+
+## end
+
+Root only, decided as `compute:providers:manage` on the provider account. Ends the grant now: `endsAt` becomes the current time (never later than it was), so the hours already in the term stay committed and the rest are released. A grant that has not started yet is `cancelled` instead. Ending a grant that is already `ended` or `cancelled` returns it unchanged. A grant of another account is `NOT_FOUND`.

@@ -670,16 +670,35 @@ export async function unbindReservation(
 
 // --- Admission ----------------------------------------------------------------------------------------
 
+/** Instances that hold a slot of their reservation (the pending ones, counted or not by a scan). */
+const holdingCondition = `i.state NOT IN ('deleted', 'failed', 'lost')
+  AND NOT (i.state = 'error' AND i.external_id IS NULL)
+  AND NOT (i.state = 'error' AND i.conditions @> '[{"type":"ProvisionFailed","status":"true"}]'::jsonb)`;
+
+/** Where an admitted instance goes: the reservation, and the grant whose slot it takes (if any). */
+export interface ReservationClaim {
+  reservationId: string;
+  grantId?: string;
+}
+
 /**
  * Admission against a reservation-backed offer (`<zone>/<machineType>@<reservation>`): locks the
- * reservation's row (so concurrent creates are serialized by the database), refuses unless it is
- * ready and has a slot the scan has not counted, and returns the reservation id to store in
- * `instances.provider_reservation`. `undefined` for an offer that is not a reservation's.
+ * reservation's row (so concurrent creates and grants are serialized by the database), refuses
+ * unless it is ready and has a slot for this tenant, and returns the reservation id to store in
+ * `instances.provider_reservation` (with the grant to store in `reservation_grant_id`). `undefined`
+ * for an offer that is not a reservation's.
+ *
+ * Reservation grants (D7): a grant in its term holds its slots for its tenant (and project, when
+ * it names one). The tenant is admitted into its grant while the grant has a slot its instances do
+ * not hold; otherwise, as everyone else, only into what neither the scan (`in_use`), the instances
+ * it has not counted yet (`pending`) nor the unused slots of grants take:
+ * `total - in_use - pending - unused grant slots`. A grant slot is also refused when the reservation
+ * is physically full (`total - in_use - pending < 1`): VMs outside better-compute count too.
  */
 export async function claimReservationSlot(
   tx: SqlTx,
-  input: { accountId: string; offerId: string },
-): Promise<string | undefined> {
+  input: { accountId: string; offerId: string; tenantId: string; projectId?: string },
+): Promise<ReservationClaim | undefined> {
   if (input.offerId.indexOf('@') < 0) return undefined;
   // An offer id names the reservation by its own spelling (a name, or a shared-in path); the stored
   // reservation says which offer id it answers to.
@@ -720,12 +739,45 @@ export async function claimReservationSlot(
   const pending = Number(counted[0]?.pending ?? 0);
   const total = Number(row.total);
   const inUse = Number(row.in_use);
-  if (total - inUse - pending < 1)
-    return refuse(`Reservation ${row.reservation_id} has no free slot`, {
-      reservationId: row.reservation_id,
-      total,
-      inUse,
-      pending,
-    });
-  return row.reservation_id;
+  // The grants in their term now, with the slots their instances hold.
+  const { rows: grants } = await tx.query<{
+    id: string;
+    tenant_id: string;
+    project_id: string | null;
+    slots: number;
+    used: number | string;
+  }>(
+    `SELECT g.id, g.tenant_id, g.project_id, g.slots,
+            (SELECT count(*) FROM instances i WHERE i.reservation_grant_id = g.id AND ${holdingCondition}) AS used
+       FROM reservation_grants g
+      WHERE g.account_id = $1 AND g.reservation_id = $2 AND g.state IN ('scheduled', 'active')
+        AND g.starts_at <= compute_now() AND g.ends_at > compute_now()
+      ORDER BY (g.project_id IS NULL), g.ends_at, g.id`,
+    [input.accountId, row.reservation_id],
+  );
+  const unused = grants.reduce(
+    (sum, grant) => sum + Math.max(0, Number(grant.slots) - Number(grant.used)),
+    0,
+  );
+  const physical = total - inUse - pending;
+  const details = {
+    reservationId: row.reservation_id,
+    total,
+    inUse,
+    pending,
+    ...(unused > 0 ? { granted: unused } : {}),
+  };
+  const own = grants.find(
+    (grant) =>
+      grant.tenant_id === input.tenantId &&
+      (grant.project_id === null || grant.project_id === input.projectId) &&
+      Number(grant.used) < Number(grant.slots),
+  );
+  if (own) {
+    if (physical < 1) return refuse(`Reservation ${row.reservation_id} has no free slot`, details);
+    return { reservationId: row.reservation_id, grantId: own.id };
+  }
+  if (physical - unused < 1)
+    return refuse(`Reservation ${row.reservation_id} has no free slot`, details);
+  return { reservationId: row.reservation_id };
 }

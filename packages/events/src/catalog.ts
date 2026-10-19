@@ -204,6 +204,13 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
       'Provider capacity reservations seen by the vps.reservations worker: detected { accountId, reservationId, machineType, gpus?, total, state, startsAt? }, changed (+ free, inUse, changes), ready (a scheduled or creating reservation became ready), gone (+ poolId, flavorId when it was bound)',
   },
   {
+    type: 'reservation-grant.*',
+    subject: 'reservation-grant/{id}',
+    module: 'vps',
+    description:
+      'Reservation grants (root commits reservation slots to a tenant), published in the grantee tenant: created (+ accountId, reservationId), active, ended, cancelled; data { grantId, poolId, projectId?, slots, startsAt, endsAt }',
+  },
+  {
     type: 'network.*',
     subject: 'network/{id}',
     module: 'vps',

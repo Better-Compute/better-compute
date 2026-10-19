@@ -48,6 +48,7 @@ import {
 import { id, int, name, object, optional, tenant } from './input.js';
 import { isRootCaller } from './billing.js';
 import { billingApi, flavorMeterSpec, type BillingApi, type BillingOptions } from './pricing.js';
+import { reservationGrantsApi, type ReservationGrantsApi } from './reservation-grants.js';
 import {
   completeCreateInstance,
   deleteInstance,
@@ -344,6 +345,8 @@ export type ProviderAccountView = ProviderAccount;
 export type VpsApi = {
   /** Root-only: the meters and prices on the IAM root tenant (pricing.ts). */
   billing: BillingApi;
+  /** Reservation grants (D7): root commits reservation slots to a tenant for a term. */
+  reservationGrants: ReservationGrantsApi;
   instances: {
     create: MethodDefinition<CreateInstanceInput, Instance>;
     list: MethodDefinition<ListInstancesInput, { items: Instance[]; cursor?: string }>;
@@ -897,6 +900,10 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
 
   const api = (): VpsApi => ({
     billing: billingApi(options.billing),
+    reservationGrants: reservationGrantsApi((context) => ({
+      events: context.events,
+      ...rootOf(context),
+    })),
     instances: {
       create: defineMethod<CreateInstanceInput, Instance>({
         action: 'compute:instances:create',

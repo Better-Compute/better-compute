@@ -240,3 +240,349 @@ describe('reserved', () => {
     expect((await intervals(world, plain.id))[0]!.shape).toMatchObject({ reserved: false });
   });
 });
+
+// --- Task 10: reservation grants, API and admission (D7) --------------------------------------------
+
+interface GrantView {
+  id: string;
+  accountId: string;
+  reservationId: string;
+  tenantId: string;
+  projectId?: string;
+  poolId?: string;
+  slots: number;
+  startsAt: number;
+  endsAt: number;
+  state: string;
+  meteredUntil: number;
+  createdAt: number;
+}
+
+const DAY = 24 * HOUR;
+const codeOf = (promise: Promise<unknown>) =>
+  promise.then(
+    () => 'allowed',
+    (error: { code?: string }) => error?.code ?? String(error),
+  );
+
+/** A world whose reservation (4 slots by default) is bound, offered to acme and to other. */
+async function grantWorld(extra: Partial<ExternalReservation> = {}) {
+  const world = await gceWorld();
+  const { other } = world.fixture.tenants;
+  world.fixture.iam.allow({ token: other.token });
+  await world.api.pools.offer(world.root, {
+    tenantId: world.rootTenant,
+    poolId: world.poolId,
+    toTenantId: other.id,
+    quota: { vcpu: 512, memoryGiB: 4096, diskGiB: 1000, gpu: 16 },
+  });
+  await seedReservation(world, extra);
+  return world;
+}
+
+function grant(
+  world: GceWorld,
+  input: { to: 'acme' | 'other'; slots: number; key: string } & Partial<{
+    startsAt: number;
+    endsAt: number;
+    projectId: string;
+  }>,
+): Promise<GrantView> {
+  const now = world.fixture.clock.now();
+  return world.api.reservationGrants.create(world.root, {
+    tenantId: world.rootTenant,
+    accountId: world.accountId,
+    reservationId: RSV,
+    grantTenantId: world.fixture.tenants[input.to].id,
+    slots: input.slots,
+    startsAt: input.startsAt ?? now,
+    endsAt: input.endsAt ?? now + 30 * DAY,
+    ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+    idempotencyKey: input.key,
+  });
+}
+
+const endGrant = (world: GceWorld, grantId: string): Promise<GrantView> =>
+  world.api.reservationGrants.end(world.root, {
+    tenantId: world.rootTenant,
+    accountId: world.accountId,
+    grantId,
+  });
+
+const grantOf = async (world: GceWorld, instanceId: string) =>
+  (
+    await world.fixture.database.query<{
+      reservation_grant_id: string | null;
+      provider_reservation: string | null;
+    }>(`SELECT reservation_grant_id, provider_reservation FROM instances WHERE id = $1`, [
+      instanceId,
+    ])
+  ).rows[0]!;
+
+describe('grants', () => {
+  it('root grants 2 of 4 slots to A for a month', async () => {
+    const world = await grantWorld();
+    const now = world.fixture.clock.now();
+    const created = await grant(world, { to: 'acme', slots: 2, key: 'g-1' });
+    expect(created).toMatchObject({
+      accountId: world.accountId,
+      reservationId: RSV,
+      tenantId: world.acmeTenant,
+      poolId: world.poolId,
+      slots: 2,
+      startsAt: now,
+      endsAt: now + 30 * DAY,
+      state: 'active',
+      meteredUntil: now,
+    });
+    expect(created.id).toMatch(/^rgrant_/);
+    // A retry replays; another request under the key is a CONFLICT.
+    expect(await grant(world, { to: 'acme', slots: 2, key: 'g-1' })).toEqual(created);
+    expect(await codeOf(grant(world, { to: 'acme', slots: 1, key: 'g-1' }))).toBe('CONFLICT');
+    // Root reads it; A reads it in its own tenant.
+    expect(
+      await world.api.reservationGrants.get(world.root, {
+        tenantId: world.rootTenant,
+        grantId: created.id,
+      }),
+    ).toEqual(created);
+    expect(
+      await world.api.reservationGrants.get(world.acme, {
+        tenantId: world.acmeTenant,
+        grantId: created.id,
+      }),
+    ).toEqual(created);
+    // The 2 left are all that can still be granted over that term.
+    const refused = await grant(world, { to: 'other', slots: 3, key: 'g-2' }).catch(
+      (error: unknown) => error,
+    );
+    expect(refused).toMatchObject({
+      code: 'CAPACITY_UNAVAILABLE',
+      details: { total: 4, granted: 2 },
+    });
+    await grant(world, { to: 'other', slots: 2, key: 'g-3' });
+    // A term that does not overlap is free again.
+    await grant(world, {
+      to: 'other',
+      slots: 4,
+      key: 'g-4',
+      startsAt: now + 31 * DAY,
+      endsAt: now + 40 * DAY,
+    });
+    const events = await world.events('reservation-grant.created');
+    expect(events).toHaveLength(3);
+    expect(events[0]).toMatchObject({
+      type: 'reservation-grant.created',
+      tenantId: world.acmeTenant,
+      data: { grantId: created.id, slots: 2, startsAt: now, endsAt: now + 30 * DAY },
+    });
+  });
+
+  it('refuses grants the reservation or the pool cannot carry', async () => {
+    const world = await grantWorld();
+    const now = world.fixture.clock.now();
+    // More than 5 minutes in the past, an empty term, no slots.
+    expect(
+      await codeOf(grant(world, { to: 'acme', slots: 1, key: 'p', startsAt: now - 6 * MINUTE })),
+    ).toBe('INVALID_INPUT');
+    expect(
+      await codeOf(grant(world, { to: 'acme', slots: 1, key: 'q', startsAt: now - 4 * MINUTE })),
+    ).toBe('allowed');
+    expect(await codeOf(grant(world, { to: 'acme', slots: 1, key: 'e', endsAt: now }))).toBe(
+      'INVALID_INPUT',
+    );
+    expect(await codeOf(grant(world, { to: 'acme', slots: 0, key: 'z' }))).toBe('INVALID_INPUT');
+    // A pool not offered to the grantee.
+    await world.api.pools.unoffer(world.root, {
+      tenantId: world.rootTenant,
+      poolId: world.poolId,
+      toTenantId: world.fixture.tenants.other.id,
+    });
+    expect(await codeOf(grant(world, { to: 'other', slots: 1, key: 'o' }))).toBe('INVALID_INPUT');
+    // An unbound reservation.
+    await world.api.providerAccounts.unbindReservation(world.root, {
+      tenantId: world.rootTenant,
+      accountId: world.accountId,
+      reservationId: RSV,
+    });
+    expect(await codeOf(grant(world, { to: 'acme', slots: 1, key: 'u' }))).toBe('INVALID_STATE');
+  });
+
+  it('over-granting is refused by the database', async () => {
+    const world = await grantWorld();
+    const outcomes = await Promise.allSettled([
+      grant(world, { to: 'acme', slots: 3, key: 'race-a' }),
+      grant(world, { to: 'other', slots: 2, key: 'race-b' }),
+    ]);
+    expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
+    const refused = outcomes.filter(
+      (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected',
+    );
+    expect(refused).toHaveLength(1);
+    expect(refused[0]!.reason).toMatchObject({ code: 'CAPACITY_UNAVAILABLE' });
+    const { rows } = await world.fixture.database.query<{ granted: string }>(
+      `SELECT coalesce(sum(slots), 0)::text AS granted FROM reservation_grants`,
+    );
+    expect(Number(rows[0]!.granted)).toBeLessThanOrEqual(4);
+  });
+
+  it('A is admitted into its grant first', async () => {
+    const world = await grantWorld();
+    const g = await grant(world, { to: 'acme', slots: 2, key: 'g' });
+    const first = await createIn(world, 'acme', 'a-1');
+    const second = await createIn(world, 'acme', 'a-2');
+    expect(await grantOf(world, first.id)).toEqual({
+      reservation_grant_id: g.id,
+      provider_reservation: RSV,
+    });
+    expect((await grantOf(world, second.id)).reservation_grant_id).toBe(g.id);
+  });
+
+  it("B cannot take A's granted slots", async () => {
+    const world = await grantWorld();
+    await grant(world, { to: 'acme', slots: 2, key: 'g' });
+    // A is idle: its 2 slots stay reserved for it.
+    const b1 = await createIn(world, 'other', 'b-1');
+    await createIn(world, 'other', 'b-2');
+    expect(await grantOf(world, b1.id)).toEqual({
+      reservation_grant_id: null,
+      provider_reservation: RSV,
+    });
+    const refused = await createIn(world, 'other', 'b-3').catch((error: unknown) => error);
+    expect(refused).toMatchObject({ code: 'CAPACITY_UNAVAILABLE' });
+    // A still gets both of its slots.
+    await createIn(world, 'acme', 'a-1');
+    await createIn(world, 'acme', 'a-2');
+  });
+
+  it('A beyond its grant falls back to outside slots', async () => {
+    const world = await grantWorld();
+    const g = await grant(world, { to: 'acme', slots: 2, key: 'g' });
+    const inside = [await createIn(world, 'acme', 'a-1'), await createIn(world, 'acme', 'a-2')];
+    const outside = [await createIn(world, 'acme', 'a-3'), await createIn(world, 'acme', 'a-4')];
+    for (const created of inside)
+      expect((await grantOf(world, created.id)).reservation_grant_id).toBe(g.id);
+    for (const created of outside)
+      expect(await grantOf(world, created.id)).toEqual({
+        reservation_grant_id: null,
+        provider_reservation: RSV,
+      });
+    // All 4 slots are taken: a fifth is refused, for A as for B.
+    expect(await codeOf(createIn(world, 'acme', 'a-5'))).toBe('CAPACITY_UNAVAILABLE');
+    expect(await codeOf(createIn(world, 'other', 'b-1'))).toBe('CAPACITY_UNAVAILABLE');
+    // A grant slot freed by a delete goes back to the grant, not to outsiders.
+    await world.api.instances.delete(world.acme, {
+      tenantId: world.acmeTenant,
+      instanceId: inside[0]!.id,
+    });
+    await step(world);
+    expect(await codeOf(createIn(world, 'other', 'b-2'))).toBe('CAPACITY_UNAVAILABLE');
+    const back = await createIn(world, 'acme', 'a-6');
+    expect((await grantOf(world, back.id)).reservation_grant_id).toBe(g.id);
+  });
+
+  it('a project grant serves only that project', async () => {
+    const world = await grantWorld();
+    await grant(world, {
+      to: 'acme',
+      slots: 1,
+      key: 'g',
+      projectId: 'prj_01jz0000000000000000000000',
+    });
+    // An instance with no project is not in the project's grant, and the slot stays the project's.
+    const created = await createIn(world, 'acme', 'a-1');
+    expect((await grantOf(world, created.id)).reservation_grant_id).toBeNull();
+    await createIn(world, 'acme', 'a-2');
+    await createIn(world, 'acme', 'a-3');
+    expect(await codeOf(createIn(world, 'acme', 'a-4'))).toBe('CAPACITY_UNAVAILABLE');
+  });
+
+  it('a tenant cannot create a grant and sees only its own', async () => {
+    const world = await grantWorld();
+    const { acme, other } = world.fixture.tenants;
+    const now = world.fixture.clock.now();
+    const attempt = (tenantId: string) =>
+      world.api.reservationGrants.create(world.acme, {
+        tenantId,
+        accountId: world.accountId,
+        reservationId: RSV,
+        grantTenantId: acme.id,
+        slots: 1,
+        startsAt: now,
+        endsAt: now + DAY,
+        idempotencyKey: `self-${tenantId}`,
+      });
+    expect(await codeOf(attempt(acme.id))).toBe('ACCESS_DENIED');
+    expect(await codeOf(attempt(world.rootTenant))).toBe('ACCESS_DENIED');
+    expect((await world.fixture.database.query(`SELECT 1 FROM reservation_grants`)).rows).toEqual(
+      [],
+    );
+
+    const mine = await grant(world, { to: 'acme', slots: 1, key: 'g-a' });
+    const theirs = await grant(world, { to: 'other', slots: 1, key: 'g-b' });
+    const listed = (await world.api.reservationGrants.list(world.acme, {
+      tenantId: acme.id,
+    })) as { items: GrantView[] };
+    expect(listed.items.map((item) => item.id)).toEqual([mine.id]);
+    expect(
+      await codeOf(world.api.reservationGrants.list(world.acme, { tenantId: acme.id, all: true })),
+    ).toBe('ACCESS_DENIED');
+    expect(
+      await codeOf(
+        world.api.reservationGrants.get(world.acme, { tenantId: acme.id, grantId: theirs.id }),
+      ),
+    ).toBe('NOT_FOUND');
+    // Root sees every grant with all; without it, its own tenant's (none).
+    const all = (await world.api.reservationGrants.list(world.root, {
+      tenantId: world.rootTenant,
+      all: true,
+    })) as { items: GrantView[] };
+    expect(new Set(all.items.map((item) => item.id))).toEqual(new Set([mine.id, theirs.id]));
+    const own = (await world.api.reservationGrants.list(world.root, {
+      tenantId: world.rootTenant,
+    })) as { items: GrantView[] };
+    expect(own.items).toEqual([]);
+    // Nor can a tenant end a grant, its own included.
+    for (const grantId of [mine.id, theirs.id])
+      expect(
+        await codeOf(
+          world.api.reservationGrants.end(
+            { token: other.token },
+            { tenantId: world.rootTenant, accountId: world.accountId, grantId },
+          ),
+        ),
+      ).toBe('ACCESS_DENIED');
+  });
+
+  it('ending a grant mid-term', async () => {
+    const world = await grantWorld();
+    const g = await grant(world, { to: 'acme', slots: 2, key: 'g' });
+    await world.fixture.advance(3 * HOUR);
+    const now = world.fixture.clock.now();
+    const ended = await endGrant(world, g.id);
+    expect(ended).toMatchObject({ id: g.id, startsAt: g.startsAt, endsAt: now, state: 'ended' });
+    // Ending again changes nothing, later too: an end never moves.
+    await world.fixture.advance(HOUR);
+    expect(await endGrant(world, g.id)).toEqual(ended);
+    // A's slots are free for anyone again.
+    for (const key of ['b-1', 'b-2', 'b-3', 'b-4']) await createIn(world, 'other', key);
+    expect((await world.events('reservation-grant.')).map((event) => event.type)).toEqual([
+      'reservation-grant.created',
+      'reservation-grant.active',
+      'reservation-grant.ended',
+    ]);
+  });
+
+  it('ending a grant before it starts cancels it', async () => {
+    const world = await grantWorld();
+    const now = world.fixture.clock.now();
+    const term = { startsAt: now + DAY, endsAt: now + 2 * DAY };
+    const g = await grant(world, { to: 'acme', slots: 4, key: 'g', ...term });
+    expect(g.state).toBe('scheduled');
+    // Until it starts, its slots are anyone's.
+    await createIn(world, 'other', 'b-1');
+    expect(await endGrant(world, g.id)).toMatchObject({ state: 'cancelled', ...term });
+    // Its term can be granted again.
+    await grant(world, { to: 'other', slots: 4, key: 'g-2', ...term });
+  });
+});

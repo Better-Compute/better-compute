@@ -1468,15 +1468,18 @@ export async function completeCreateInstance(
     // A reservation-backed offer is admitted by the database: the reservation row is locked, so two
     // creates between two provider polls cannot both take the last slot (CAPACITY_UNAVAILABLE).
     if (next.providerAccountId !== undefined && next.shape.offerId !== undefined) {
-      const reservation = await claimReservationSlot(tx, {
+      // A reservation grant of the tenant takes it first (D7).
+      const claim = await claimReservationSlot(tx, {
         accountId: next.providerAccountId,
         offerId: next.shape.offerId,
+        tenantId: next.tenantId,
+        ...(next.projectId !== undefined ? { projectId: next.projectId } : {}),
       });
-      if (reservation !== undefined)
-        await tx.query(`UPDATE instances SET provider_reservation = $2 WHERE id = $1`, [
-          next.id,
-          reservation,
-        ]);
+      if (claim !== undefined)
+        await tx.query(
+          `UPDATE instances SET provider_reservation = $2, reservation_grant_id = $3 WHERE id = $1`,
+          [next.id, claim.reservationId, claim.grantId ?? null],
+        );
     }
     const demand = instanceDemand(next.shape);
     await chargeQuota(tx, next.tenantId, next.poolId, demand);

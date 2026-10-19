@@ -20,6 +20,7 @@ export * from './ipam.js';
 export * from './hosts.js';
 export * from './bootstraps.js';
 export * from './provider-reservations.js';
+export * from './reservation-grants.js';
 export * from './discovery.js';
 export * from './attach.js';
 export * from './sandboxes.js';

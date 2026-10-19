@@ -576,6 +576,12 @@ group('providerAccounts', 'vps', [
   ],
   ['unbindReservation', 'mutation', 'providers:manage', 'provider-account', 'v1.0'],
 ]);
+group('reservationGrants', 'vps', [
+  ['create', 'mutation', 'providers:manage', 'provider-account', 'v1.0'],
+  ['get', 'read', 'quotas:read', 'tenant', 'v1.0'],
+  ['list', 'read', 'quotas:read', 'tenant', 'v1.0', list],
+  ['end', 'mutation', 'providers:manage', 'provider-account', 'v1.0'],
+]);
 group('sandboxes', 'vps', [
   ['create', 'mutation', 'sandboxes:create', 'sandbox', 'v0.5'],
   ['list', 'read', 'sandboxes:read', 'tenant', 'v0.5', list],
