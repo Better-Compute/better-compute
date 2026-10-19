@@ -4,6 +4,10 @@ While a grant is in its term, its slots are the grantee's. `instances.create` on
 
 Billing: the grantee is billed `vm.grant.slot.hours` for every committed slot, every hour of the term, used or not, once each hour has ended (the `vps.grants` reconciler writes them as usage, tagged with the reservation's region, the pool and the provider). Its instances inside the grant record only the informational `vm.grant.usage.hours`, never compute meters, so nothing is billed twice; an instance beyond its grant is billed at the reservation rate (`vm.reserved.*`). When a grant ends, its billing stops at `endsAt` and its running instances are billed at the reservation rate from then on.
 
+While a grant is `scheduled` or `active`, `providerAccounts.unbindReservation` and `providerAccounts.delete` refuse with `INVALID_STATE` (`details.grantIds`); deleting the account removes its ended and cancelled grants. When a tenant is deleted, its active grants end and its scheduled ones are cancelled.
+
+A grant's stopped instances keep their slots for the grantee: others never get a slot the grant pays for.
+
 States: `scheduled` until `startsAt`, `active` during the term, then `ended`; `cancelled` when ended before it started. Each change publishes a `reservation-grant.*` event (`created`, `active`, `ended`, `cancelled`) in the grantee's tenant, with `{ grantId, poolId, projectId?, slots, startsAt, endsAt }`.
 
 ## create
@@ -22,7 +26,7 @@ Returns one grant of the tenant. Root, acting in the root tenant, can read any g
 
 ## list
 
-Returns the tenant's grants as `items`, newest first (at most 1000). With `all: true`, root (acting in the root tenant) lists every tenant's grants; anyone else asking for `all` is `ACCESS_DENIED`. Decided as `compute:quotas:read` on the tenant.
+Returns the tenant's grants as `items`, newest first (at most 1000). With `all: true`, root (acting in the root tenant) lists every tenant's grants; anyone else asking for `all` is `ACCESS_DENIED`. A plain read decided as `compute:quotas:read` on the tenant (the grants are filtered to the tenant, not checked one by one).
 
 ## end
 

@@ -399,7 +399,9 @@ describe('grants', () => {
       toTenantId: world.fixture.tenants.other.id,
     });
     expect(await codeOf(grant(world, { to: 'other', slots: 1, key: 'o' }))).toBe('INVALID_INPUT');
-    // An unbound reservation.
+    // An unbound reservation (its live grant ended first: a live grant keeps it bound, F10-4).
+    const live = await grant(world, { to: 'acme', slots: 1, key: 'q', startsAt: now - 4 * MINUTE });
+    await endGrant(world, live.id);
     await world.api.providerAccounts.unbindReservation(world.root, {
       tenantId: world.rootTenant,
       accountId: world.accountId,
@@ -584,6 +586,102 @@ describe('grants', () => {
     expect(await endGrant(world, g.id)).toMatchObject({ state: 'cancelled', ...term });
     // Its term can be granted again.
     await grant(world, { to: 'other', slots: 4, key: 'g-2', ...term });
+  });
+
+  // --- Fix round 1 ---------------------------------------------------------------------------------
+
+  it("a grant's stopped instances keep its slots from outsiders (F10-2)", async () => {
+    const world = await grantWorld();
+    await grant(world, { to: 'acme', slots: 2, key: 'g' });
+    const mine = [await createIn(world, 'acme', 'a-1'), await createIn(world, 'acme', 'a-2')];
+    await step(world);
+    for (const created of mine)
+      await world.api.instances.stop(world.acme, {
+        tenantId: world.acmeTenant,
+        instanceId: created.id,
+      });
+    await step(world, 5_000);
+    const { rows: states } = await world.fixture.database.query<{ state: string }>(
+      `SELECT state FROM instances WHERE id = ANY($1::text[])`,
+      [mine.map((created) => created.id)],
+    );
+    expect(states.map((row) => row.state)).toEqual(['stopped', 'stopped']);
+    // A scan after the stop: the provider counts no stopped VM against the reservation.
+    await world.fixture.advance(MINUTE);
+    await world.fixture.database.query(
+      `UPDATE provider_reservations SET in_use = 0, observed_at = compute_now() WHERE reservation_id = $1`,
+      [RSV],
+    );
+    // A's two paid-for slots stay A's: B gets the other two only.
+    await createIn(world, 'other', 'b-1');
+    await createIn(world, 'other', 'b-2');
+    expect(await codeOf(createIn(world, 'other', 'b-3'))).toBe('CAPACITY_UNAVAILABLE');
+  });
+
+  it('live grants keep their reservation bound and their account; ended ones go with the account (F10-4)', async () => {
+    const world = await grantWorld();
+    const g = await grant(world, { to: 'acme', slots: 1, key: 'g' });
+    const created = await createIn(world, 'acme', 'a-1');
+    expect((await grantOf(world, created.id)).reservation_grant_id).toBe(g.id);
+    await world.api.instances.delete(world.acme, {
+      tenantId: world.acmeTenant,
+      instanceId: created.id,
+    });
+    await step(world);
+    await step(world);
+    const unbind = () =>
+      world.api.providerAccounts.unbindReservation(world.root, {
+        tenantId: world.rootTenant,
+        accountId: world.accountId,
+        reservationId: RSV,
+      });
+    const deleteAccount = () =>
+      world.api.providerAccounts.delete(world.root, {
+        tenantId: world.rootTenant,
+        accountId: world.accountId,
+      });
+    expect(await codeOf(unbind())).toBe('INVALID_STATE');
+    await world.api.pools.archive(world.root, { tenantId: world.rootTenant, poolId: world.poolId });
+    const refused = await deleteAccount().catch((error: unknown) => error);
+    expect(refused).toMatchObject({ code: 'INVALID_STATE', details: { grantIds: [g.id] } });
+
+    await world.fixture.advance(HOUR);
+    await endGrant(world, g.id);
+    await unbind();
+    await deleteAccount();
+    expect((await world.fixture.database.query(`SELECT 1 FROM reservation_grants`)).rows).toEqual(
+      [],
+    );
+    expect((await grantOf(world, created.id)).reservation_grant_id).toBeNull();
+  });
+
+  it("a deleted tenant's grants end, or are cancelled before they start (F10-5)", async () => {
+    const world = await grantWorld();
+    const now = world.fixture.clock.now();
+    const active = await grant(world, { to: 'acme', slots: 1, key: 'a' });
+    const later = await grant(world, {
+      to: 'acme',
+      slots: 1,
+      key: 'b',
+      startsAt: now + DAY,
+      endsAt: now + 2 * DAY,
+    });
+    const theirs = await grant(world, { to: 'other', slots: 1, key: 'c' });
+    await world.fixture.advance(HOUR);
+    await world.fixture.database.query(
+      `INSERT INTO compute_tenant_states (tenant_id, state, reason) VALUES ($1, 'deleted', 'test')`,
+      [world.acmeTenant],
+    );
+    const at = await world.fixture.advance(31_000);
+    await world.tick('tenancy', 2);
+    const read = async (grantId: string) =>
+      (await world.api.reservationGrants.get(world.root, {
+        tenantId: world.rootTenant,
+        grantId,
+      })) as GrantView;
+    expect(await read(active.id)).toMatchObject({ state: 'ended', endsAt: at });
+    expect(await read(later.id)).toMatchObject({ state: 'cancelled', endsAt: now + 2 * DAY });
+    expect(await read(theirs.id)).toMatchObject({ state: 'active', endsAt: theirs.endsAt });
   });
 });
 

@@ -50,13 +50,16 @@ CREATE TABLE reservation_grants (
   metered_until timestamptz NOT NULL,
   created_by text NOT NULL, idempotency_key text NOT NULL, request_hash bytea NOT NULL,
   created_at timestamptz NOT NULL DEFAULT compute_now(),
-  FOREIGN KEY (account_id, reservation_id) REFERENCES provider_reservations (account_id, reservation_id),
+  -- Deleting the account (which deletes its reservations) takes ended grants with it; deleteAccount and
+  -- unbindReservation refuse while a grant is live (F10-4).
+  FOREIGN KEY (account_id, reservation_id) REFERENCES provider_reservations (account_id, reservation_id)
+    ON DELETE CASCADE,
   UNIQUE (created_by, idempotency_key)
 );
 CREATE INDEX reservation_grants_reservation ON reservation_grants (account_id, reservation_id, starts_at);
 CREATE INDEX reservation_grants_tenant ON reservation_grants (tenant_id, created_at);
 CREATE INDEX reservation_grants_live ON reservation_grants (starts_at) WHERE state IN ('scheduled', 'active');
-ALTER TABLE instances ADD COLUMN reservation_grant_id text REFERENCES reservation_grants;
+ALTER TABLE instances ADD COLUMN reservation_grant_id text REFERENCES reservation_grants ON DELETE SET NULL;
 CREATE INDEX instances_reservation_grant ON instances (reservation_grant_id) WHERE reservation_grant_id IS NOT NULL;
 `,
 };
@@ -654,19 +657,51 @@ export async function endGrant(
   // The reservation row first, as create and admission take it, then the grant.
   await lockReservationRow(tx, first.account_id, first.reservation_id);
   const row = (await readGrant(tx, input.grantId, { lock: true }))!;
-  if (row.state === 'ended' || row.state === 'cancelled') return viewOf(row);
-  const now = await dbNow(tx);
+  await finishGrant(deps, tx, row, await dbNow(tx));
+  return viewOf((await readGrant(tx, row.id))!);
+}
+
+/**
+ * Ends a grant now (its row locked, after its reservation's): `ends_at = LEAST(ends_at, GREATEST(metered_until, now))`
+ * then settled (`ended`, its instances reopened); a grant that has not started is `cancelled`. A no-op for an ended or
+ * cancelled grant.
+ */
+async function finishGrant(deps: GrantDeps, tx: SqlTx, row: GrantRow, now: number): Promise<void> {
+  if (row.state === 'ended' || row.state === 'cancelled') return;
   if (Number(row.starts) >= now) {
     await tx.query(`UPDATE reservation_grants SET state = 'cancelled' WHERE id = $1`, [row.id]);
     await publish(deps, tx, row, 'reservation-grant.cancelled');
-    return viewOf((await readGrant(tx, row.id))!);
+    return;
   }
   await tx.query(
     `UPDATE reservation_grants SET ends_at = LEAST(ends_at, GREATEST(metered_until, ${at$(2)})) WHERE id = $1`,
     [row.id, now],
   );
   await settleGrantStates(deps, tx, now, [row.id]);
-  return viewOf((await readGrant(tx, row.id))!);
+}
+
+/**
+ * A deleted tenant's grants (F10-5, from vps `tenantDeleted`): scheduled ones are cancelled, active ones end now, as
+ * `reservationGrants.end` would. Idempotent. Returns how many it ended or cancelled.
+ */
+export async function endTenantGrants(
+  deps: GrantDeps,
+  tx: SqlTx,
+  tenantIdValue: string,
+): Promise<number> {
+  const { rows } = await tx.query<{ id: string; account_id: string; reservation_id: string }>(
+    `SELECT id, account_id, reservation_id FROM reservation_grants
+      WHERE tenant_id = $1 AND state IN ('scheduled', 'active') ORDER BY account_id, reservation_id, id`,
+    [tenantIdValue],
+  );
+  if (rows.length === 0) return 0;
+  const now = await dbNow(tx);
+  for (const grant of rows) {
+    await lockReservationRow(tx, grant.account_id, grant.reservation_id);
+    const row = await readGrant(tx, grant.id, { lock: true });
+    if (row) await finishGrant(deps, tx, row, now);
+  }
+  return rows.length;
 }
 
 /** `reservationGrants.get`: a grant of the tenant, or (root, in root's tenant) any grant. */

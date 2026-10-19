@@ -657,6 +657,19 @@ export async function unbindReservation(
 ): Promise<{ reservationId: string }> {
   await requireAccount(tx, input.tenantId, input.accountId);
   const row = await lockReservation(tx, input.accountId, input.reservationId);
+  // A grant's instances are created through the bound flavor: a live grant keeps the reservation bound (F10-4).
+  const { rows: live } = await tx.query<{ id: string }>(
+    `SELECT id FROM reservation_grants
+      WHERE account_id = $1 AND reservation_id = $2 AND state IN ('scheduled', 'active') ORDER BY id`,
+    [input.accountId, input.reservationId],
+  );
+  if (live.length > 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Reservation ${input.reservationId} has live grants; end them first`,
+      undefined,
+      { reservationId: input.reservationId, grantIds: live.map((grant) => grant.id) },
+    );
   if (row.pool_id !== null) {
     await tx.query(
       `UPDATE provider_reservations SET pool_id = NULL, flavor_id = NULL
@@ -746,17 +759,22 @@ export async function claimReservationSlot(
     project_id: string | null;
     slots: number;
     used: number | string;
+    consuming: number | string;
   }>(
     `SELECT g.id, g.tenant_id, g.project_id, g.slots,
-            (SELECT count(*) FROM instances i WHERE i.reservation_grant_id = g.id AND ${holdingCondition}) AS used
+            (SELECT count(*) FROM instances i WHERE i.reservation_grant_id = g.id AND ${holdingCondition}) AS used,
+            (SELECT count(*) FROM instances i
+              WHERE i.reservation_grant_id = g.id AND ${holdingCondition} AND i.state <> 'stopped') AS consuming
        FROM reservation_grants g
       WHERE g.account_id = $1 AND g.reservation_id = $2 AND g.state IN ('scheduled', 'active')
         AND g.starts_at <= compute_now() AND g.ends_at > compute_now()
       ORDER BY (g.project_id IS NULL), g.ends_at, g.id`,
     [input.accountId, row.reservation_id],
   );
+  // A grant's stopped instances hold their grant slot for the grantee, but the provider counts no stopped VM in
+  // `in_use`: the slots they do not consume stay unused for everyone else (F10-2).
   const unused = grants.reduce(
-    (sum, grant) => sum + Math.max(0, Number(grant.slots) - Number(grant.used)),
+    (sum, grant) => sum + Math.max(0, Number(grant.slots) - Number(grant.consuming)),
     0,
   );
   const physical = total - inUse - pending;

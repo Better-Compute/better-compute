@@ -14,6 +14,7 @@ import {
   type SnapshotStore,
 } from './snapshots.js';
 import { deleteTenantVolumes } from './volumes.js';
+import { endTenantGrants } from './reservation-grants.js';
 
 // VPS's part of a tenant teardown (PLAN.md §12.8: the IAM tenant was deleted; the built-in `tenancy`
 // reconciler calls `ComputeModule.tenantDeleted` until every module answers DONE). Hosted instances
@@ -39,6 +40,16 @@ export async function vpsTenantDeleted(
   const outcome = await context.sql.transaction(async (tx) => {
     // Its snapshots, kept ones included (tenant data with memory state).
     await dropSnapshots(tx, { tenantId });
+    // Its reservation grants: nobody is billed for slots after the tenant is gone (F10-5).
+    await endTenantGrants(
+      {
+        events: deps.events,
+        ...(deps.rootTenantId !== undefined ? { rootTenantId: deps.rootTenantId } : {}),
+        ...(deps.meterGpuModels ? { meterGpuModels: deps.meterGpuModels } : {}),
+      },
+      tx,
+      tenantId,
+    );
     const templates = await tx.query<{ id: string }>(
       `UPDATE sandbox_templates SET deleted = true, version = version + 1
         WHERE tenant_id = $1 AND NOT deleted RETURNING id`,

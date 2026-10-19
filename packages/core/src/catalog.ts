@@ -579,7 +579,8 @@ group('providerAccounts', 'vps', [
 group('reservationGrants', 'vps', [
   ['create', 'mutation', 'providers:manage', 'provider-account', 'v1.0'],
   ['get', 'read', 'quotas:read', 'tenant', 'v1.0'],
-  ['list', 'read', 'quotas:read', 'tenant', 'v1.0', list],
+  // A plain read on the tenant (F10-1): its SQL filters to the tenant's grants (root's `all` is checked in the handler).
+  ['list', 'read', 'quotas:read', 'tenant', 'v1.0'],
   ['end', 'mutation', 'providers:manage', 'provider-account', 'v1.0'],
 ]);
 group('sandboxes', 'vps', [

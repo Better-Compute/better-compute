@@ -390,7 +390,6 @@ describe('apiSurface (§9.2)', () => {
         'images.list',
         'instances.list',
         'providerAccounts.list',
-        'reservationGrants.list',
         'sandboxes.list',
         'sandboxTemplates.list',
         'sandboxSnapshots.list',
