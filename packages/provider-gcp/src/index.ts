@@ -8,5 +8,6 @@ export * from './compute.js';
 export * from './config.js';
 export { checkGcpAccount } from './federation.js';
 export * from './ids.js';
+export * from './prices.js';
 export * from './provider.js';
 export * from './shapes.js';

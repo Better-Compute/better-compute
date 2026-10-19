@@ -13,6 +13,7 @@ import { gceClient } from './client.js';
 import { GcpCompute, parseDiscoverLabel } from './compute.js';
 import { gcpConfig, type GcpConfig, type GcpProviderOptions } from './config.js';
 import { checkGcpAccount, federationOf, subjectTokenAudience } from './federation.js';
+import { catalogReader } from './prices.js';
 
 /**
  * The token source for one account: the service-account key behind `credentials` when the account
@@ -92,6 +93,9 @@ function accountTokens(
 export function gcpProvider(options: GcpProviderOptions = {}): ProviderDefinition<GcpConfig> {
   // Validated now, so a malformed universe fails when the host builds the provider.
   const universeEndpoint = `${googleEndpoint('compute', { universeDomain: options.universeDomain })}/compute/v1`;
+  const catalogEndpoint = googleEndpoint('cloudbilling', {
+    universeDomain: options.universeDomain,
+  });
   return defineProvider<GcpConfig>({
     id: 'gcp',
     version: '0.1.0',
@@ -106,15 +110,25 @@ export function gcpProvider(options: GcpProviderOptions = {}): ProviderDefinitio
       if (config.zones.length === 0)
         throw new ComputeError('INVALID_CONFIG', 'A GCP account lists at least one zone');
       parseDiscoverLabel(config.discoverLabel);
+      const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+      const tokens = accountTokens(config, context, options);
       const client = gceClient({
-        fetch: options.fetch ?? globalThis.fetch.bind(globalThis),
+        fetch: fetchImpl,
         endpoint: options.endpoint ?? universeEndpoint,
         projectId: config.projectId,
-        tokens: accountTokens(config, context, options),
+        tokens,
         clock: context.clock,
         log: context.log,
       });
-      return new GcpCompute(config, context, options, client);
+      // The Cloud Billing Catalog (list prices), read with the account's own identity.
+      const prices = catalogReader({
+        fetch: fetchImpl,
+        endpoint: options.catalogEndpoint ?? catalogEndpoint,
+        tokens,
+        clock: context.clock,
+        log: context.log,
+      });
+      return new GcpCompute(config, context, options, client, prices);
     },
   });
 }

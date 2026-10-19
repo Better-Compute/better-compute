@@ -111,6 +111,10 @@ How vps uses them:
 - **Binding.** `providerAccounts.bindReservation` turns a `ready` reservation into a flavor of a provider pool. A future reservation is listed but can be bound only once it is ready, because GCP fulfils it as a new reservation.
 - **Admission.** `instances.create` on a bound flavor takes a free slot under a database lock and counts the creates admitted since the last scan, so concurrent creates never over-commit what the scan saw. GCP remains the final referee: a create GCP refuses fails the instance with `ProvisionFailed`/`CAPACITY_UNAVAILABLE` (see above), and its slot is free again at once.
 
+## List prices
+
+`listPrices({ regions? })` reads the Compute Engine SKUs of the Cloud Billing Catalog (`services/6F81-5844-456A/skus`, host `cloudbilling.<universe>`, or `catalogEndpoint`) with the account's own token, and returns `ProviderListPrice` rows in micros of the catalog currency: vCPU and memory per machine family (`n2`), GPUs per catalog family (`h100`), persistent and local disks per GiB-hour (monthly prices divided by 730), external addresses and egress. On-demand and Spot prices are returned (`spot`); commitment prices, custom or extended shapes, licences, regional disks and GPUs outside the meter catalog's families are skipped. The list is cached per account for 24 hours, whatever the regions asked. The account needs the Cloud Billing API enabled in its project.
+
 ## Networks
 
 `networks` creates custom-mode VPC networks, subnets and firewall rules, and sets managed network tags. The names and tags come from the caller (vps names each resource `bc-` plus its id, and tags each VM `bc-` plus 16 hex digits of the sha256 of its instance id) and are used as given.

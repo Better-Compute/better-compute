@@ -769,6 +769,28 @@ export interface RescueAccess {
   expiresAt?: number;
 }
 
+/**
+ * (platform compute billing) One provider list price, in micros of `currency` per `unit`: what the provider charges
+ * for a resource in a region. `hour` is per vCPU, GPU or address hour; `gib-hour` per GiB of memory or disk hour;
+ * `gib` per GiB transferred. Commitment prices are not listed.
+ */
+export interface ProviderListPrice {
+  resource: 'vcpu' | 'memory' | 'gpu' | 'disk' | 'ip' | 'egress';
+  region: string;
+  /** The catalog GPU family slug (`h100`), for `resource: 'gpu'`. */
+  gpuModel?: string;
+  /** The disk type (`pd-ssd`), for `resource: 'disk'`. */
+  diskType?: string;
+  /** The machine family (`n2`), for `vcpu` and `memory`. */
+  machineFamily?: string;
+  spot: boolean;
+  unitPriceMicros: number;
+  unit: 'hour' | 'gib-hour' | 'gib';
+  currency: string;
+  /** The provider's id of the price (a GCP SKU id). */
+  sku: string;
+}
+
 /** Per-call context of a provider operation. */
 export interface CallContext {
   /** Creates use the instance id, so a retried create never makes a second machine. */
@@ -844,6 +866,14 @@ export interface ProviderImpl {
   /** Removes the ownership label if it names `instanceId`. */
   release?(id: string, instanceId: string, context: CallContext): Promise<void>;
   listReservations?(context: CallContext): Promise<ExternalReservation[]>;
+  /**
+   * (platform compute billing) The provider's list prices, for the regions asked (all when absent). A provider
+   * caches what it reads; the prices are the provider's, before any margin.
+   */
+  listPrices?(
+    query: { regions?: readonly string[] },
+    context: CallContext,
+  ): Promise<ProviderListPrice[]>;
   networks?: ProviderNetworks;
 }
 

@@ -9,6 +9,7 @@ import {
   type Offer,
   type OfferQuery,
   type PowerAction,
+  type ProviderListPrice,
   type ProviderContext,
   type ProviderImpl,
   type ProviderNetworks,
@@ -40,6 +41,7 @@ import {
   requestIdFor,
 } from './ids.js';
 import { GcpNetworks } from './networks.js';
+import type { catalogReader } from './prices.js';
 import { readReservations } from './reservations.js';
 import {
   gpusOfType,
@@ -83,13 +85,16 @@ export class GcpCompute implements ProviderImpl {
   /** Machine types GCE refused a Persistent Disk for although the family table allowed one. */
   readonly #hyperdiskOnly = new Set<string>();
   readonly networks: ProviderNetworks;
+  readonly #prices: ReturnType<typeof catalogReader> | undefined;
 
   constructor(
     config: GcpConfig,
     context: ProviderContext,
     options: GcpProviderOptions,
     client: GceClient,
+    prices?: ReturnType<typeof catalogReader>,
   ) {
+    this.#prices = prices;
     this.config = config;
     this.context = context;
     this.options = options;
@@ -279,6 +284,19 @@ export class GcpCompute implements ProviderImpl {
     );
   }
 
+  /** (platform compute billing) Compute Engine list prices from the Cloud Billing Catalog, cached 24 h. */
+  async listPrices(
+    query: { regions?: readonly string[] },
+    context: CallContext,
+  ): Promise<ProviderListPrice[]> {
+    if (!this.#prices)
+      throw new ComputeError(
+        'UNSUPPORTED',
+        'This client was built without the Cloud Billing Catalog',
+      );
+    return this.#prices.listPrices(query, context);
+  }
+
   // ------------------------------------------------------------------------------- create
 
   async create(
@@ -309,9 +327,7 @@ export class GcpCompute implements ProviderImpl {
     if (request.sshKeys?.length)
       metadata.push({
         key: 'ssh-keys',
-        value: request.sshKeys
-          .map((key) => `${sshUserOf(request.image)}:${key.trim()}`)
-          .join('\n'),
+        value: request.sshKeys.map((key) => `${sshUserOf(request.image)}:${key.trim()}`).join('\n'),
       });
     const body: Record<string, unknown> = {
       name,
