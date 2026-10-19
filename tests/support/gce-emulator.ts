@@ -109,6 +109,10 @@ export class GceEmulator {
       Object.entries(defaultDiskTypes()).map(([type, body]) => [`${zone}/${type}`, body] as const),
     ),
   );
+  // --- [P4 disks] persistent disks (platform compute billing): what `disks.get` answers for an instance's
+  // `disks[].source`. Keyed `zone/name`; an instance disk with no entry here answers 404.
+  persistentDisks = new Map<string, { type: string; sizeGb: string }>();
+  // --- [/P4 disks]
   /** GCE `Reservation` resources, each with its `zone` URL. */
   reservations: Json[] = [];
   /** GCE `FutureReservation` resources. */
@@ -708,6 +712,21 @@ export class GceEmulator {
         });
       }
     }
+    // [P4 disks]
+    if (collection === 'disks' && method === 'GET' && name) {
+      const disk = this.persistentDisks.get(`${zone}/${name}`);
+      return disk
+        ? this.json(200, {
+            kind: 'compute#disk',
+            name,
+            zone: `${origin}/projects/p/zones/${zone}`,
+            sizeGb: disk.sizeGb,
+            type: `${origin}/projects/p/zones/${zone}/diskTypes/${disk.type}`,
+            selfLink: `${origin}/projects/p/zones/${zone}/disks/${name}`,
+          })
+        : this.error(404, 'notFound', `The resource 'projects/p/zones/${zone}/disks/${name}' was not found`);
+    }
+    // [/P4 disks]
     if (collection === 'diskTypes' && method === 'GET' && name) {
       const type = this.diskTypes.get(`${zone}/${name}`);
       return type

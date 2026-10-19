@@ -10,6 +10,23 @@ export interface GceAccelerator {
   acceleratorCount?: number;
 }
 
+/** One entry of an instance's `disks[]` (only the members read here). */
+export interface GceAttachedDisk {
+  boot?: boolean;
+  /** `PERSISTENT` or `SCRATCH` (a local SSD). */
+  type?: string;
+  /** The persistent disk's resource URL; its type is one `disks.get` away. */
+  source?: string;
+  diskSizeGb?: string | number;
+}
+
+/** A persistent disk as `disks.get` returns it (only the members read here). */
+export interface GceDisk {
+  /** `https://…/zones/<zone>/diskTypes/<type>`. */
+  type?: string;
+  sizeGb?: string;
+}
+
 export interface GceInstance {
   id?: string;
   name: string;
@@ -23,6 +40,7 @@ export interface GceInstance {
   labelFingerprint?: string;
   tags?: { items?: string[]; fingerprint?: string };
   guestAccelerators?: GceAccelerator[];
+  disks?: GceAttachedDisk[];
   networkInterfaces?: {
     network?: string;
     subnetwork?: string;
@@ -146,6 +164,10 @@ export interface ToMachineOptions {
   projectId?: string;
   /** Overrides the shape derived from the machine type's name. */
   shape?: MachineShape;
+  /** The instance's disks with their types resolved (platform compute billing). */
+  disks?: ExternalMachine['disks'];
+  /** The boot disk's type when known; else the machine family's table (Hyperdisk only for some). */
+  bootDiskType?: string;
 }
 
 /** A Compute Engine instance as the contract's ExternalMachine. */
@@ -165,9 +187,10 @@ export function toMachine(instance: GceInstance, options: ToMachineOptions = {})
     addresses,
     zone,
     machineType: type,
-    // The boot disk type this family takes (Hyperdisk only for some): what the platform meters the boot disk as.
-    bootDiskType: bootDiskTypes(type)[0]!,
+    // The boot disk's own type when it was resolved; else the type this family takes (Hyperdisk only for some).
+    bootDiskType: options.bootDiskType ?? bootDiskTypes(type)[0]!,
   };
+  if (options.disks && options.disks.length > 0) machine.disks = options.disks;
   const shape = options.shape ?? shapeFromName(type);
   if (shape) {
     machine.vcpu = shape.vcpu;
