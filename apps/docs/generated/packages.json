@@ -7,6 +7,13 @@
     "exports": ["."]
   },
   {
+    "name": "@better-compute/aws-core",
+    "directory": "packages/aws-core",
+    "description": "Zero-dependency AWS plumbing for better-compute: SigV4 signing, endpoints, query and JSON protocol clients, a hardened XML reader and credential sources.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
     "name": "better-compute",
     "directory": "packages/better-compute",
     "description": "Manage GPU and bare-metal capacity and provision nodes in many ways: one package with every better-compute subpath.",
