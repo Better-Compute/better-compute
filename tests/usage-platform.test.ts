@@ -646,7 +646,13 @@ describe('corrections', () => {
         [
           key,
           A,
-          JSON.stringify({ meter: 'gpu.h100.hours', quantity: 1, occurredAt: H0 + index * HOUR }),
+          JSON.stringify({
+            meter: 'gpu.h100.hours',
+            quantity: 1,
+            occurredAt: H0 + index * HOUR,
+            // A pass-through window carries its cost (currency units) for root's invoice item.
+            ...(code === 'BILLING_PERIOD_CLOSED' ? { cost: 0.42 } : {}),
+          }),
           code,
           message,
         ],
@@ -673,6 +679,9 @@ describe('corrections', () => {
       'This idempotency key was used for another meter': 'other',
       'Meter is archived': 'other',
     });
+    expect(all.filter((letter) => 'cost' in letter)).toEqual([
+      expect.objectContaining({ reason: 'period-closed', cost: 0.42 }),
+    ]);
     for (const reason of ['meter-missing', 'period-closed', 'identity', 'invalid', 'other']) {
       const some = await api.usage.deadLetters(root, { reason });
       expect(some.items.every((letter: any) => letter.reason === reason)).toBe(true);

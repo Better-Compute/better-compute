@@ -1491,3 +1491,80 @@ describe('margins and leaks fix round 1 (F17-1..F17-3)', () => {
     );
   });
 });
+
+describe('final fix wave: late pass-through charges (FW-4)', () => {
+  const egressMeter = 'network.egress.gib';
+  const egressRule = { skuPattern: 'egress', meter: egressMeter, multiplier: 1 };
+  async function setup(options: Pick<VpsOptions, 'costs' | 'billing'> = {}) {
+    const world = await costWorld(options);
+    Object.assign(world.fixture.iam, {
+      listMeters: async () => [{ key: egressMeter, pricing: 'reported' }],
+    });
+    const vm = await createVm(world);
+    await world.api.providerAccounts.update(world.root, {
+      tenantId: world.rootTenant,
+      accountId: world.accountId,
+      config: {},
+      billing: { passThrough: [egressRule] },
+    });
+    // Seven hours into the next UTC month: the month before has closed (default grace 6 h).
+    const now = new Date(world.now());
+    const month = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
+    await world.fixture.advance(month + 7 * HOUR - world.now());
+    const egress = (id: string, at: number) =>
+      costRow({
+        sourceRowId: id,
+        usageStart: at,
+        usageEnd: at + HOUR,
+        labels: { [instanceLabel]: vm.id },
+      });
+    world.ledger.rows.push(egress('late', month - HOUR), egress('open', month + HOUR));
+    await world.scan();
+    const { rows } = await world.fixture.database.query<any>(
+      `SELECT idempotency_key AS key, (extract(epoch FROM window_start) * 1000)::float8 AS start_ms,
+              (extract(epoch FROM window_end) * 1000)::float8 AS end_ms
+         FROM usage_windows WHERE source_kind = 'cost' ORDER BY idempotency_key`,
+    );
+    const { rows: stored } = await world.fixture.database.query<any>(
+      `SELECT source_row_id, (extract(epoch FROM usage_start) * 1000)::float8 AS start_ms
+         FROM provider_costs WHERE account_id = $1 ORDER BY source_row_id`,
+      [world.accountId],
+    );
+    return {
+      world,
+      month,
+      windows: rows.map((row) => ({
+        key: row.key,
+        start: Number(row.start_ms),
+        end: Number(row.end_ms),
+      })),
+      stored: stored.map((row) => [row.source_row_id, Number(row.start_ms)]),
+    };
+  }
+
+  it('a row whose month has closed lands at the first hour of the current month', async () => {
+    const { world, month, windows, stored } = await setup();
+    expect(windows).toEqual([
+      // the late charge: key unchanged, window at the current month's first hour
+      { key: `costx:${world.accountId}:late`, start: month, end: month + HOUR },
+      // a row of the open month is unchanged
+      { key: `costx:${world.accountId}:open`, start: month + HOUR, end: month + 2 * HOUR },
+    ]);
+    // the stored row keeps its usage start
+    expect(stored).toEqual([
+      ['late', month - HOUR],
+      ['open', month + HOUR],
+    ]);
+  });
+
+  it('billing.closeGraceHours moves the close; it is validated', async () => {
+    const { world, month, windows } = await setup({ billing: { closeGraceHours: 12 } });
+    // 7 h into the month with a 12 h grace: the previous month is still open.
+    expect(windows).toEqual([
+      { key: `costx:${world.accountId}:late`, start: month - HOUR, end: month },
+      { key: `costx:${world.accountId}:open`, start: month + HOUR, end: month + 2 * HOUR },
+    ]);
+    for (const closeGraceHours of [-1, 73, Number.NaN, Number.POSITIVE_INFINITY])
+      expect(() => vps({ billing: { closeGraceHours } })).toThrow(/closeGraceHours/);
+  });
+});

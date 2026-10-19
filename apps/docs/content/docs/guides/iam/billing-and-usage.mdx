@@ -656,6 +656,12 @@ Better IAM closes calendar months. Compute makes sure the last hour of a month l
   iam module runs `iam.jobs.close-period` every hour, and it calls `closePeriod()` only once the current UTC month
   is at least `runIamJobs: { closeGraceHours }` old (default 6, from 0 to 72). Closing a closed month again is
   harmless. A host that closes months itself leaves the job out of `runIamJobs.only` and waits as long.
+- **Late pass-through rows.** A provider's billing export can land a cost row days after its hour. When the row's
+  usage month has already closed (now is at least `vps({ billing: { closeGraceHours } })` hours, default 6, after the
+  month ends), its pass-through window is written at the first hour of the current UTC month instead: a late charge
+  on the next statement, with the same `costx:` key, while `provider_costs.usage_start` keeps the real hour. Set
+  vps's `closeGraceHours` to the IAM jobs' value. A pass-through window that is still refused as `period-closed` has
+  its amount as `cost` in `usage.deadLetters`, for a root invoice item.
 - Before closing, check the iam module's doctor: `iam.usage-backlog` is an error while windows of a past month are
   still unrecorded. After closing, `usage.deadLetters({ reason: 'period-closed' })` lists what missed the month, for
   a root invoice item in the next one.

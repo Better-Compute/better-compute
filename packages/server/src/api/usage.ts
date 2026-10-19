@@ -151,6 +151,11 @@ export interface DeadLetter {
   reason: DeadLetterReason;
   /** better-iam's error message. */
   error: string;
+  /**
+   * The reported cost of a pass-through window (currency units, from its `cost_micros`), so root can raise an
+   * invoice item for a `period-closed` one. Absent for rated usage.
+   */
+  cost?: number;
 }
 
 export interface RetryUsageInput {
@@ -408,6 +413,7 @@ interface DeadLetterEvent {
   meter?: unknown;
   quantity?: unknown;
   occurredAt?: unknown;
+  cost?: unknown;
 }
 interface DeadLetterRow {
   idempotency_key: string;
@@ -428,6 +434,7 @@ function toDeadLetter(row: DeadLetterRow): DeadLetter {
     windowStart: Number(event.occurredAt ?? 0),
     reason: row.reason,
     error: row.error_message,
+    ...(typeof event.cost === 'number' && Number.isFinite(event.cost) ? { cost: event.cost } : {}),
   };
 }
 

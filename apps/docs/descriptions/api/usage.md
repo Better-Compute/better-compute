@@ -35,6 +35,7 @@ Totals the usage windows of every tenant over a time range, grouped by any of `t
 Root only. Lists the open dead letters of the usage sink (events Better IAM refused for good), ordered by idempotency key; returns a page with a cursor. Decides `compute:usage:read` on `compute-fleet/global`.
 
 - Each item has `idempotencyKey`, `tenantId`, `meter`, `quantity`, `windowStart`, the better-iam `error` message and a `reason`: `meter-missing`, `period-closed`, `identity`, `invalid` or `other`. A letter disappears once a retry is recorded.
+- A pass-through (`cost`) window's letter also has `cost`, its reported amount in currency units (the window's `cost_micros` / 10^6), so root can raise a Better IAM invoice item for a `period-closed` one. Rated usage has no `cost`.
 - `reason` filters the list. `limit` is at most 500 (100 by default); a cursor this method did not return is `INVALID_INPUT`.
 
 ## retry

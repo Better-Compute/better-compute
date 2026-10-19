@@ -39,6 +39,19 @@ const transientBackoffMs = 5 * 60_000;
 const batchSize = 500;
 const dayMs = 86_400_000;
 const HOUR = 3_600_000;
+/** D18: a month counts as closed once the next one is this many hours old (`vps({ billing: { closeGraceHours } })`). */
+export const defaultCloseGraceHours = 6;
+
+/** The first hour of the UTC month holding `at`. */
+const monthStartOf = (at: number): number => {
+  const date = new Date(at);
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1);
+};
+/** Whether the UTC month holding `at` has closed at `now` (its end plus the grace has passed). */
+const monthClosed = (at: number, now: number, closeGraceHours: number): boolean => {
+  const date = new Date(at);
+  return now >= Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1) + closeGraceHours * HOUR;
+};
 
 /** The labels better-compute writes on provider resources, read back from cost rows. */
 export const costLabels = {
@@ -611,13 +624,17 @@ interface PendingCost {
  * regular usage, is no SKU compute meters itself (the provider's `computeSku`/`meteredSku`), matches a rule and
  * has a positive net cost becomes one `cost` usage window (`cost_micros` = (cost + credits) × multiplier) that
  * the normal `iam.usage` flush records (ruling M3), and is marked passed through. A row is passed through at most
- * once: a later correction is reported as `billing.cost-corrected`, never re-emitted.
+ * once: a later correction is reported as `billing.cost-corrected`, never re-emitted. A row whose usage month has
+ * already closed (`closeGraceHours` after its end, D18) is a late charge: its window is the first hour of the
+ * current UTC month (same key; `provider_costs.usage_start` unchanged), so it is invoiced next month instead of
+ * being refused by a closed period.
  */
 export async function passThroughCosts(
-  deps: Pick<CostsDeps, 'providers' | 'rootTenantId'>,
+  deps: Pick<CostsDeps, 'providers' | 'rootTenantId'> & { clock?: CostsDeps['clock'] },
   tx: SqlTx,
   account: ProviderAccount,
   window: { from: number; to: number },
+  closeGraceHours: number = defaultCloseGraceHours,
 ): Promise<{ passedThroughRows: number; passedThroughMicros: number }> {
   const none = { passedThroughRows: 0, passedThroughMicros: 0 };
   const rules = account.billing?.passThrough ?? [];
@@ -646,6 +663,7 @@ export async function passThroughCosts(
   );
   let passed = 0;
   let micros = 0;
+  const now = deps.clock?.now() ?? window.to;
   for (const row of rows) {
     const record = json(row.record);
     if (record.costType !== undefined && record.costType !== 'regular') continue;
@@ -660,6 +678,11 @@ export async function passThroughCosts(
     if (record.region) tags.region = record.region;
     // The instance's pool, so revenue by pool (spend by the `pool` tag) includes pass-through.
     if (row.pool_id) tags.pool = row.pool_id;
+    // A closed month takes no more usage: the charge lands in the current month's first hour (occurredAt is the
+    // window start, as always).
+    const late = monthClosed(record.usageStart, now, closeGraceHours);
+    const windowStart = late ? monthStartOf(now) : record.usageStart;
+    const windowEnd = late ? windowStart + HOUR : Math.max(record.usageEnd, record.usageStart + 1);
     await tx.query(
       `INSERT INTO usage_windows (idempotency_key, source_kind, source_id, tenant_id, identity_id, meter, quantity,
                                   window_start, window_end, tags, cost_micros)
@@ -672,8 +695,8 @@ export async function passThroughCosts(
         row.tenant_id,
         rule.meter,
         record.quantity,
-        record.usageStart,
-        Math.max(record.usageEnd, record.usageStart + 1),
+        windowStart,
+        windowEnd,
         JSON.stringify(tags),
         costMicros,
       ],
@@ -915,6 +938,8 @@ export function costsReconciler(
   deps: (context: ModuleContext) => CostsDeps,
   /** The deployment currency: a cost row in another one is stored as received, flagged `CurrencyMismatch`, and excluded from pass-through and margins. */
   currency?: string,
+  /** D18's grace (`vps({ billing: { closeGraceHours } })`, validated by `vps()`): when a month counts as closed. */
+  closeGraceHours: number = defaultCloseGraceHours,
 ): Reconciler {
   const settings = costSettings(options, currency);
   return {
@@ -926,7 +951,7 @@ export function costsReconciler(
       if (key === 'all') await seedAccounts(resolved, context, settings.everyMs);
       else
         await scanAccount(resolved, context, key, settings, async (tx, account, window) => ({
-          ...(await passThroughCosts(resolved, tx, account, window)),
+          ...(await passThroughCosts(resolved, tx, account, window, closeGraceHours)),
           ...(await detectLeaks(resolved, tx, account, window, settings.leakToleranceHours)),
         }));
       return 'DONE';

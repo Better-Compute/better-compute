@@ -157,7 +157,7 @@ import {
   type ListMachinesInput,
   type ProviderMachineView,
 } from './discovery.js';
-import { costsReconciler, type CostsOptions } from './costs.js';
+import { costsReconciler, defaultCloseGraceHours, type CostsOptions } from './costs.js';
 import { vpsMigrations } from './migrations.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
 import {
@@ -612,6 +612,12 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     throw new ComputeError(
       'INVALID_CONFIG',
       'vps({ billing: { currency } }) must be an ISO 4217 code such as USD',
+    );
+  const closeGraceHours = options.billing?.closeGraceHours ?? defaultCloseGraceHours;
+  if (!Number.isFinite(closeGraceHours) || closeGraceHours < 0 || closeGraceHours > 72)
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'vps({ billing: { closeGraceHours } }) must be a number of hours from 0 to 72',
     );
   const runtimes = options.runtimes ?? ['libvirt-kvm'];
   if (runtimes.length === 0 || !runtimes.every((runtime) => /^[a-z][a-z0-9-]{0,63}$/.test(runtime)))
@@ -1787,6 +1793,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         options.costs ?? {},
         (context) => ({ ...depsOf(context), providers }),
         currency,
+        closeGraceHours,
       ),
       {
         // §3.7: sandbox expiry, sandbox.ready/deleted events, and warm pools per template.

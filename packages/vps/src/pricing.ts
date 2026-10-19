@@ -45,6 +45,12 @@ export interface BillingOptions {
    */
   meterGraceMs?: number;
   /**
+   * Hours a UTC month must have run before the previous one counts as closed (D18; default 6, from 0 to 72). A
+   * pass-through cost row of a closed month is written as a late charge at the first hour of the current month.
+   * Set the IAM jobs' `runIamJobs: { closeGraceHours }` to the same value.
+   */
+  closeGraceHours?: number;
+  /**
    * The better-iam deployment currency as ISO 4217 (default `USD`). Provider list prices in another currency are
    * not proposed from, and tenant estimates name it.
    */
