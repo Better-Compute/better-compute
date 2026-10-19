@@ -14,6 +14,9 @@
 //    differ from its tsconfig.json references. Optional peers are loaded with import() and need none.
 // 4. any package imports or depends on a `@better-compute/provider-*` package other than itself.
 //    Applications install providers directly; examples/ and tests/ are not checked.
+// 5. a package other than provider-aws and aws depends on or imports @better-compute/aws-core, or any
+//    package under packages/ depends on or imports @better-compute/aws or @better-compute/provider-aws
+//    (each may name itself).
 //
 // Imports are read with scripts/source-scan.mjs, so comments and strings never count; type-only
 // imports do. Packages that do not exist yet are absent: the rules about them hold trivially.
@@ -32,7 +35,7 @@ import { importSpecifiers, packageName, sourceFiles } from './source-scan.mjs';
  * @property {Record<string, string>} sources  Package-relative POSIX path (`src/index.ts`) → source text.
  */
 
-/** @typedef {{ rule: 'server-boundary' | 'core-browser-safe' | 'references' | 'providers', message: string }} Violation */
+/** @typedef {{ rule: 'server-boundary' | 'core-browser-safe' | 'references' | 'providers' | 'aws', message: string }} Violation */
 
 const dependencyFields = [
   'dependencies',
@@ -197,6 +200,41 @@ function checkProviders(packages, violations) {
   }
 }
 
+/** The only packages that may use aws-core; nothing else in packages/ may depend on them. */
+const awsApplications = new Set(['@better-compute/provider-aws', '@better-compute/aws']);
+
+/**
+ * Rule 5: only provider-aws and aws may depend on or import aws-core, and nothing in packages/
+ * depends on or imports aws or provider-aws (except each on itself), so neither reaches the umbrella.
+ * @param {WorkspacePackage[]} packages
+ * @returns {Violation[]}
+ */
+export function checkAwsDeps(packages) {
+  /** @type {Violation[]} */
+  const violations = [];
+  for (const pkg of packages) {
+    const self = pkg.manifest.name;
+    const refuses = (name) =>
+      (name === '@better-compute/aws-core' && !awsApplications.has(self)) ||
+      (awsApplications.has(name) && name !== self);
+    for (const { name, field } of manifestDependencies(pkg))
+      if (refuses(name))
+        violations.push({
+          rule: 'aws',
+          message: `${pkg.dir}/package.json ${field} names ${name}; only provider-aws and aws use aws-core, and nothing in packages/ depends on them`,
+        });
+    for (const { specifier, file } of sourceImports(pkg)) {
+      const name = packageName(specifier);
+      if (name && refuses(name))
+        violations.push({
+          rule: 'aws',
+          message: `${file} imports ${specifier}; only provider-aws and aws use aws-core, and nothing in packages/ imports them`,
+        });
+    }
+  }
+  return violations;
+}
+
 /**
  * Checks the §4.3 rules over a workspace model. Pure: tests pass in-memory packages.
  * @param {WorkspacePackage[]} packages
@@ -209,6 +247,7 @@ export function checkDeps(packages) {
   checkCore(packages, violations);
   checkReferences(packages, violations);
   checkProviders(packages, violations);
+  violations.push(...checkAwsDeps(packages));
   return violations;
 }
 

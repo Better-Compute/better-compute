@@ -28,6 +28,7 @@
     { "path": "./packages/gcp-common" },
     { "path": "./packages/provider-gcp" },
     { "path": "./packages/provider-digitalocean" },
+    { "path": "./packages/aws-core" },
     {
       "path": "./packages/provider-proxmox"
     },

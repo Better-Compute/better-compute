@@ -16,6 +16,7 @@ const scoped: Record<string, string> = {
   '@better-compute/gcp-common': 'gcp-common/src/index.ts',
   '@better-compute/provider-gcp': 'provider-gcp/src/index.ts',
   '@better-compute/provider-digitalocean': 'provider-digitalocean/src/index.ts',
+  '@better-compute/aws-core': 'aws-core/src/index.ts',
   '@better-compute/provider-proxmox': 'provider-proxmox/src/index.ts',
   '@better-compute/provider-kubernetes': 'provider-kubernetes/src/index.ts',
   '@better-compute/pki': 'pki/src/index.ts',
