@@ -14,7 +14,7 @@ import { createComputeIamBridge, type ComputeIamBridge } from './bridge.js';
 import type { ComputeCatalogOptions } from './catalog.js';
 import type { EmbeddedIam } from './embedded.js';
 import { createRefreshHandler } from './host.js';
-import { iamJobReconcilers, type IamJobsHost } from './jobs.js';
+import { iamJobReconcilers, type IamJobReconcilerOptions, type IamJobsHost } from './jobs.js';
 import type { ComputeIamPlugin } from './iam-plugin.js';
 import { memoryInbox, type MemoryInbox } from './inbox.js';
 
@@ -88,8 +88,8 @@ export interface EmbeddedTestIamOptions
   sql?: SqlExecutor;
   /** Enables session JWTs with compute's audience (§12.2). */
   sessionJwts?: boolean;
-  /** Adds better-iam's scheduler jobs to the iam module. */
-  runIamJobs?: boolean;
+  /** Adds better-iam's scheduler jobs to the iam module (options as `iamJobReconcilers` takes them). */
+  runIamJobs?: boolean | IamJobReconcilerOptions;
   /**
    * Where the plugin writes: the bound store (default; events spill until `bind`) or an in-memory inbox
    * that tests can read without a compute database.
@@ -241,13 +241,18 @@ export async function createEmbeddedTestIam(
     });
     // The IAM host's own scheduler (audit hook dispatch, outbox, budgets), run here as the host would run it.
     if (options.runIamJobs)
-      bridge.modules[0].reconcilers!.push(...iamJobReconcilers(iam as unknown as IamJobsHost));
+      bridge.modules[0].reconcilers!.push(
+        ...iamJobReconcilers(
+          iam as unknown as IamJobsHost,
+          options.runIamJobs === true ? {} : options.runIamJobs,
+        ),
+      );
   } else
     port = bridge.embedded(iam, {
       rootTenantId,
       // The root administrator doubles as compute's service account for the billing members.
       serviceCredential: root.credential,
-      ...(options.runIamJobs ? { runIamJobs: true } : {}),
+      ...(options.runIamJobs ? { runIamJobs: options.runIamJobs } : {}),
     });
 
   let names = 0;

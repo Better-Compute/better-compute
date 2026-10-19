@@ -156,7 +156,9 @@ await compute.initialize(); // catalog check, migrations, then the iam module lo
 - Until the `iam` module has loaded the projection, every compute decision is denied and inbox writes spill into
   memory. A host that constructs Better IAM outside compute calls `bridge.bind({ sql })` to do the same.
 - `runIamJobs: true` makes the `iam` module run Better IAM's scheduler jobs (below). It needs a real `betterIam()`
-  instance, or it throws `INVALID_CONFIG`.
+  instance, or it throws `INVALID_CONFIG`. Pass an object instead to choose jobs (`only`), report failures
+  (`onError`) or set `closeGraceHours` (default 6, from 0 to 72): the hours a month must have run before the previous
+  one closes.
 
 For local development without configured IAM, `better-compute dev --sim N` starts an in-memory Better IAM with
 compute's plugin and resolver installed and prints its root administrator's token. Plain `better-compute dev`
@@ -304,7 +306,7 @@ role runs each one at a time, under its own lease.
 | `iam.jobs.audit-hooks` | 1 s | With `runIamJobs`: Better IAM's `events.dispatch()`, which delivers audit events to plugins, compute's inbox included |
 | `iam.jobs.auth-outbox` | 5 s | With `runIamJobs`: `auth.dispatchOutbox()` |
 | `iam.jobs.budgets` | 1 h | With `runIamJobs`: `billing.checkBudgets()` |
-| `iam.jobs.close-period` | 1 d | With `runIamJobs`: `billing.closePeriod()` |
+| `iam.jobs.close-period` | 1 h | With `runIamJobs`: `billing.closePeriod()`, once the current UTC month is `closeGraceHours` old (default 6) |
 | `iam.jobs.sweep` | 1 h | With `runIamJobs`: `sweepExpired()` |
 
 `betterCompute({ iamJobs })` is an alternative for hosts that bring their own job functions: those run under the

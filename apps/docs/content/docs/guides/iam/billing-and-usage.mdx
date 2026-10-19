@@ -90,20 +90,18 @@ import { gcp } from '@better-compute/provider-gcp';
 const iamPort = bridge.embedded(iam, {
   rootTenantId,
   serviceCredential: { token: rootBillingKey }, // iam:billing:manage + iam:billing:read on the root tenant
-  runIamJobs: {
-    only: ['iam.jobs.audit-hooks', 'iam.jobs.auth-outbox', 'iam.jobs.budgets', 'iam.jobs.sweep'],
-  },
+  runIamJobs: { closeGraceHours: 6 }, // the default; the same value as vps's below
 });
 
 vps({
   providers: [gcp],
-  billing: { currency: 'USD', gpuModels: ['H100', 'A100', 'L4'] },
+  billing: { currency: 'USD', gpuModels: ['H100', 'A100', 'L4'], closeGraceHours: 6 },
   costs: { every: '6h', lookbackDays: 3 },
 });
 ```
 
-The `only` list above leaves the daily period close out so the host can close each month itself, at least six
-hours after it ends (see [Period close](#period-close)).
+`iam.jobs.close-period` closes each month only once the next one is `closeGraceHours` old (see
+[Period close](#period-close)). Set the IAM jobs' and vps's `closeGraceHours` to the same value.
 
 ## Meters
 
@@ -654,10 +652,10 @@ Better IAM closes calendar months. Compute makes sure the last hour of a month l
   usage waits `meterGraceMs` (5 minutes) after each hour. A window that straddles midnight on the last day is split
   at the hour, so it is in the right month.
 - **Close at least 6 hours after the month ends.** Better IAM's `billing.closePeriod()` closes the previous month
-  whenever it runs, and a window that arrives after it is refused (`BILLING_PERIOD_CLOSED`). With
-  `runIamJobs: true`, the iam module runs `iam.jobs.close-period` once a day, at no fixed time, so its first run of
-  a month can be minutes after midnight. Leave it out of `runIamJobs.only` and schedule the close yourself, or accept
-  that late windows become `period-closed` dead letters.
+  whenever it runs, and a window that arrives after it is refused (`BILLING_PERIOD_CLOSED`). With `runIamJobs`, the
+  iam module runs `iam.jobs.close-period` every hour, and it calls `closePeriod()` only once the current UTC month
+  is at least `runIamJobs: { closeGraceHours }` old (default 6, from 0 to 72). Closing a closed month again is
+  harmless. A host that closes months itself leaves the job out of `runIamJobs.only` and waits as long.
 - Before closing, check the iam module's doctor: `iam.usage-backlog` is an error while windows of a past month are
   still unrecorded. After closing, `usage.deadLetters({ reason: 'period-closed' })` lists what missed the month, for
   a root invoice item in the next one.

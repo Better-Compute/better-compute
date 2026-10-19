@@ -18,6 +18,7 @@ import {
   iamFixture,
   sessionSigningKey,
 } from './support/iam.js';
+import { createEmbeddedTestIam } from '@better-compute/iam/testing';
 
 // better-iam's scheduler jobs under worker role `iam`, `iam setup` (meters and example policies) and the
 // per-host doctor checks (PLAN.md §12.1, §12.6, §12.7).
@@ -30,7 +31,7 @@ describe('IAM jobs', () => {
       ['iam.jobs.audit-hooks', '1s'],
       ['iam.jobs.auth-outbox', '5s'],
       ['iam.jobs.budgets', '1h'],
-      ['iam.jobs.close-period', '1d'],
+      ['iam.jobs.close-period', '1h'],
       ['iam.jobs.sweep', '1h'],
     ]);
     const inbox = memoryInbox();
@@ -79,6 +80,71 @@ describe('IAM jobs', () => {
     expect(
       iamJobReconcilers(failing, { only: ['iam.jobs.sweep'] }).map((item) => item.name),
     ).toEqual(['iam.jobs.sweep']);
+  });
+
+  it('closes the period hourly, only once the month is closeGraceHours old (D18)', async () => {
+    const closes: number[] = [];
+    let now = Date.UTC(2026, 10, 1, 0, 3);
+    const host: IamJobsHost = {
+      events: { dispatch: async () => ({ dispatched: 0 }) },
+      auth: { dispatchOutbox: async () => ({}) },
+      billing: {
+        checkBudgets: async () => ({}),
+        closePeriod: async () => {
+          closes.push(now);
+          return {};
+        },
+      },
+      sweepExpired: async () => ({}),
+    };
+    const close = () =>
+      iamJobReconcilers(host, { only: ['iam.jobs.close-period'], now: () => now })[0]!.run(
+        {} as never,
+        'run',
+      );
+    // 00:03 on the 1st: the month that just ended may still have windows to flush.
+    expect(await close()).toBe('DONE');
+    now = Date.UTC(2026, 10, 1, 5, 59, 59);
+    await close();
+    expect(closes).toEqual([]);
+    // 06:00: the grace has passed, the previous month closes; closing again is harmless.
+    now = Date.UTC(2026, 10, 1, 6);
+    await close();
+    now = Date.UTC(2026, 10, 1, 7);
+    await close();
+    expect(closes).toEqual([Date.UTC(2026, 10, 1, 6), Date.UTC(2026, 10, 1, 7)]);
+    // The run's context clock when no `now` is injected; a grace of 0 closes at once.
+    const viaContext = iamJobReconcilers(host, {
+      only: ['iam.jobs.close-period'],
+      closeGraceHours: 0,
+    })[0]!;
+    now = Date.UTC(2026, 11, 1, 0, 0, 1);
+    await viaContext.run({ clock: { now: () => Date.UTC(2026, 11, 1) } } as never, 'run');
+    expect(closes).toHaveLength(3);
+    for (const closeGraceHours of [-1, 73, Number.NaN])
+      expect(() => iamJobReconcilers(host, { closeGraceHours })).toThrow(/closeGraceHours/);
+  });
+
+  it('closing a period twice on a real better-iam is harmless', async () => {
+    const at = Date.UTC(2026, 10, 1, 7);
+    const t = await createEmbeddedTestIam({ now: () => at });
+    try {
+      const job = iamJobReconcilers(t.iam as unknown as IamJobsHost, {
+        only: ['iam.jobs.close-period'],
+        now: () => at,
+      })[0]!;
+      const errors: unknown[] = [];
+      const twice = iamJobReconcilers(t.iam as unknown as IamJobsHost, {
+        only: ['iam.jobs.close-period'],
+        now: () => at,
+        onError: (error) => errors.push(error),
+      })[0]!;
+      expect(await job.run({} as never, 'run')).toBe('DONE');
+      expect(await twice.run({} as never, 'run')).toBe('DONE');
+      expect(errors).toEqual([]);
+    } finally {
+      await t.close();
+    }
   });
 
   it('adds the jobs to the iam module with runIamJobs, and refuses hosts that cannot run them', async () => {

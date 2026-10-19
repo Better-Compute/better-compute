@@ -1534,7 +1534,7 @@ Only the event that still fails goes to `usage_dead_letters`. Retries are safe b
 
 **Corrections (BD17).** Root only (`compute:usage:read|manage` on `compute-fleet`): `usage.platform` (cross-tenant totals), `usage.deadLetters` (reason `meter-missing`, `period-closed`, `identity`, `invalid`, `other`), `usage.retry` (refuses `period-closed`), `usage.void` (unsent or dead-lettered windows only, refuses claimed ones; recorded usage is corrected by a better-iam credit note, never by rewriting compute history). Tenants see their own provider windows in `usage.list`/`export`, never root's void reason.
 
-**Period close (BD18).** Reconcilers write only ended hours; `iam.usage` flushes hourly. better-iam's `closePeriod()` closes the previous month whenever it runs, so hosts close each month at least 6 h after it ends (`runIamJobs`'s daily `iam.jobs.close-period` has no fixed time: leave it out of `only` and schedule the close). A late window is a `period-closed` dead letter for a root invoice item.
+**Period close (BD18).** Reconcilers write only ended hours; `iam.usage` flushes hourly. better-iam's `closePeriod()` closes the previous month whenever it runs, so hosts close each month at least 6 h after it ends (`runIamJobs`'s hourly `iam.jobs.close-period` waits until the current UTC month is `closeGraceHours`, default 6, old). A late window is a `period-closed` dead letter for a root invoice item.
 
 **Budgets (BD16):**
 - the in-decision `principal.spendExceeded` deny (tenant policy);
