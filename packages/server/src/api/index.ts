@@ -54,6 +54,10 @@ export type { CreateSiteInput, GetSiteInput, ListSitesInput, SitesApi } from './
 export type {
   ExportUsageInput,
   ListUsageInput,
+  PlatformUsage,
+  PlatformUsageInput,
+  PlatformUsageKey,
+  PlatformUsageRow,
   UsageApi,
   UsageExport,
   UsageWindow,

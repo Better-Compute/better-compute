@@ -362,14 +362,20 @@ interface WindowRow {
   window_start: Date | string;
   tags: unknown;
   cost_micros: string | number | null;
+  window_end: Date | string;
 }
+
+/** How long a flush's claim on a window holds (core/0033); `usage.void` refuses a window claimed within it. */
+const claimTtl = "interval '10 minutes'";
 
 /**
  * One usage-sink pass (§12.7): sends closed, unrecorded `usage_windows` of every source (D2) through
  * `iam.recordUsage` (poison-isolating), stores each outcome, and upserts dead letters. Voided windows are
  * never sent; a window with `cost_micros` (pass-through) carries its cost in currency units. Retries are
  * safe: every window keeps its idempotency key, and a transient failure leaves the windows unrecorded for
- * the next pass.
+ * the next pass. A dead-lettered window (a closed period included) is marked sent with outcome `dead-lettered`, so
+ * no later pass picks it up again; only `usage.retry` clears that. A dead letter whose event IAM accepts later
+ * (after a retry) is resolved.
  */
 export async function flushUsageWindows(
   sql: SqlExecutor,
@@ -377,14 +383,27 @@ export async function flushUsageWindows(
   options: FlushUsageOptions = {},
 ): Promise<FlushUsageResult> {
   const limit = options.limit ?? 1000;
-  const { rows } = await sql.query<WindowRow>(
-    `SELECT idempotency_key, tenant_id, identity_id, meter, quantity, window_start, tags, cost_micros
-       FROM usage_windows
-      WHERE recorded_at IS NULL AND voided_at IS NULL AND window_end <= compute_now()
-      ORDER BY window_end, idempotency_key LIMIT $1`,
+  // Claim the batch first, in a short committed statement: `usage.void` refuses a claimed window, so it can never
+  // void one this pass is about to bill. A claim older than the TTL is a dead sender's and is taken over (IAM
+  // knows the idempotency keys, so a resend is a duplicate). The claim is not `recorded_at`: retention prunes
+  // recorded rows.
+  const { rows: claimed } = await sql.query<WindowRow>(
+    `UPDATE usage_windows u SET claimed_at = compute_now()
+       FROM (SELECT idempotency_key, window_start FROM usage_windows
+              WHERE recorded_at IS NULL AND voided_at IS NULL AND window_end <= compute_now()
+                AND (claimed_at IS NULL OR claimed_at < compute_now() - ${claimTtl})
+              ORDER BY window_end, idempotency_key LIMIT $1 FOR UPDATE SKIP LOCKED) c
+      WHERE u.idempotency_key = c.idempotency_key AND u.window_start = c.window_start
+      RETURNING u.idempotency_key, u.tenant_id, u.identity_id, u.meter, u.quantity, u.window_start, u.window_end,
+                u.tags, u.cost_micros`,
     [limit],
   );
-  if (rows.length === 0) return { sent: 0, deadLettered: 0, more: false };
+  if (claimed.length === 0) return { sent: 0, deadLettered: 0, more: false };
+  const rows = claimed.sort(
+    (a, b) =>
+      toMillis(a.window_end) - toMillis(b.window_end) ||
+      (a.idempotency_key < b.idempotency_key ? -1 : 1),
+  );
   const events: UsageEvent[] = rows.map((row) => {
     const parsed = typeof row.tags === 'string' ? JSON.parse(row.tags) : row.tags;
     const event: UsageEvent = {
@@ -399,7 +418,20 @@ export async function flushUsageWindows(
     if (row.cost_micros !== null) event.cost = Number(row.cost_micros) / 1e6;
     return event;
   });
-  const results = await iam.recordUsage(events);
+  let results: Awaited<ReturnType<IamPort['recordUsage']>>;
+  try {
+    results = await iam.recordUsage(events);
+  } catch (error) {
+    // A transient failure: give the claims back so the next pass sends at once, not after the TTL.
+    await sql
+      .query(
+        `UPDATE usage_windows SET claimed_at = NULL
+          WHERE idempotency_key = ANY($1::text[]) AND recorded_at IS NULL`,
+        [events.map((event) => event.idempotencyKey)],
+      )
+      .catch(() => undefined);
+    throw error;
+  }
   let deadLettered = 0;
   await sql.transaction(async (tx) => {
     for (const [index, result] of results.entries()) {
@@ -425,13 +457,24 @@ export async function flushUsageWindows(
       const orphaned = result.status === 'reattributed' && result.identityId === undefined;
       await tx.query(
         `UPDATE usage_windows
-            SET recorded_at = compute_now(), outcome = $2,
+            SET recorded_at = compute_now(), outcome = $2, claimed_at = NULL,
                 identity_id = CASE WHEN $3::bool THEN NULL
                                    WHEN $2 = 'reattributed' THEN $4 ELSE identity_id END
           WHERE idempotency_key = $1`,
         [event.idempotencyKey, result.status, orphaned, result.identityId ?? null],
       );
     }
+    // A retried window that IAM now accepted closes its dead letter (usage.retry clears the window's outcome and
+    // leaves the letter open until this pass records it).
+    const accepted = results.flatMap((result, index) =>
+      result.status === 'dead-lettered' ? [] : [events[index]!.idempotencyKey],
+    );
+    if (accepted.length > 0)
+      await tx.query(
+        `UPDATE usage_dead_letters SET resolved_at = compute_now()
+          WHERE resolved_at IS NULL AND idempotency_key = ANY($1::text[])`,
+        [accepted],
+      );
   });
   return { sent: rows.length, deadLettered, more: rows.length === limit };
 }

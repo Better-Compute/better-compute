@@ -28,6 +28,7 @@ import { sessionApproverSetMigration } from './0026_session_approver_set.js';
 import { joinTokenHostedMigration } from './0027_join_token_hosted.js';
 import { volumeAllocationsMigration } from './0028_volume_allocations.js';
 import { usageSourcesMigration } from './0031_usage_sources.js';
+import { usageWindowClaimsMigration } from './0033_usage_window_claims.js';
 
 /**
  * Every table the base schema creates, in creation order. Partitions of the history tables
@@ -69,6 +70,7 @@ export const baseMigrations: readonly Migration[] = Object.freeze([
   joinTokenHostedMigration,
   volumeAllocationsMigration,
   usageSourcesMigration,
+  usageWindowClaimsMigration,
 ]);
 
 /** `compute_schema_version.version` after the base schema is applied: one per base migration. */

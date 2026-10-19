@@ -135,7 +135,8 @@ and the item form gates calls on one resource:
 | `compute:instances:read` | `compute-tenant`, `compute-instance` |
 | `compute:instances:create`, `compute:instances:update`, `compute:instances:exec`, `compute:instances:delete` | `compute-instance` |
 | `compute:projects:read`, `compute:projects:manage` | `compute-tenant`, `compute-project` |
-| `compute:usage:read` | `compute-tenant`, `compute-project` |
+| `compute:usage:read` | `compute-tenant`, `compute-project`, `compute-fleet` (the cross-tenant platform view and dead letters; root tenant only) |
+| `compute:usage:manage` | `compute-fleet` (retry dead letters and void pending windows; root tenant only) |
 | `compute:events:read`, `compute:webhooks:manage` | `compute-tenant` |
 | `compute:secrets:manage` | `compute-fleet`, `compute-tenant` |
 | `compute:drivers:read` | `compute-fleet`, `compute-tenant` |

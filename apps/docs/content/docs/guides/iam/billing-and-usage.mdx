@@ -211,9 +211,29 @@ CREATE TABLE usage_dead_letters (
 );
 ```
 
-Nothing re-sends a dead letter automatically: its window is marked `dead-lettered` and the sink moves on. Fix the
-cause (create the missing meter, for example) and record the event yourself with its stored idempotency key. For
-a closed period, PLAN.md suggests a root `billing.createInvoiceItem` instead.
+Nothing re-sends a dead letter automatically: its window is marked `dead-lettered` and the sink moves on. This
+holds for a closed period too (`BILLING_PERIOD_CLOSED`): it is dead-lettered once and never retried by a later
+pass. The root tenant works the letters through the `usage` methods (all decided on `compute-fleet/global`, so a
+tenant administrator is refused):
+
+- `usage.deadLetters({ reason?, cursor?, limit? })` (`compute:usage:read`) lists the open dead letters with
+  `{ idempotencyKey, tenantId, meter, quantity, windowStart, reason, error }`. The `reason` comes from Better IAM's
+  error: `meter-missing` (`NOT_FOUND` naming a meter), `period-closed` (`BILLING_PERIOD_CLOSED`), `identity`
+  (`NOT_FOUND` for an identity or tenant), `invalid` (`INVALID_INPUT`, `INVALID_TRANSITION`) or `other`.
+- `usage.retry({ idempotencyKeys | reason })` (`compute:usage:manage`) clears the outcome of those windows, so the
+  next flush sends them again. A pass that records one resolves its letter; a pass that fails again counts another
+  attempt. Fix the cause first (`billing.syncMeters` for `meter-missing`). `period-closed` letters are refused
+  with `INVALID_STATE`, because retrying would only fail again: the usage needs a root invoice item in Better IAM
+  (`billing.createInvoiceItem`).
+- `usage.void({ idempotencyKeys, reason })` (`compute:usage:manage`) sets `voided_at` and `void_reason` on windows
+  no pass has sent (outcome `NULL`), so no pass ever sends them, and on dead-lettered windows (Better IAM refused
+  them, so nothing was billed). Voiding any window resolves its open dead letters. A window Better IAM recorded
+  (`recorded`, `duplicate`, `reattributed`) gives `INVALID_STATE` ("issue a credit note in Better IAM"), and the call
+  voids nothing. A window a pass has claimed within the last 10 minutes is being sent: `INVALID_STATE` ("being sent;
+  retry shortly"). A claim exists only while a pass sends; a pass that died leaves one the next pass takes over
+  after the 10 minutes (Better IAM knows the idempotency keys, so a resend is a duplicate). A voided window leaves
+  the backlog counters and the tenants' `usage.list` and `usage.export`, and retention prunes it like a recorded one.
+- `usage.retry` of a key whose window retention already pruned is `NOT_FOUND`: record that usage in Better IAM by hand.
 
 ## Read usage
 
@@ -234,6 +254,22 @@ const page = await compute.api.usage.list(credential, {
 
 It decides `compute:usage:read` on `compute-tenant/{t}`, or on `compute-project/{id}` when the input names a
 project. Prices and invoices come from Better IAM's own billing API.
+
+### Platform view
+
+`usage.platform` is root's cross-tenant view: the windows of every tenant totalled by any of `tenant`, `pool`,
+`meter`, `source` and `provider`, with the windows per outcome. It decides `compute:usage:read` on
+`compute-fleet/global`. See [`usage.platform`](/docs/reference/api/usage#platform).
+
+```ts title="platform.ts"
+const view = await compute.api.usage.platform(rootCredential, {
+  from: Date.parse('2026-09-01T00:00:00Z'),
+  to: Date.parse('2026-10-01T00:00:00Z'), // at most 93 days after from
+  groupBy: ['tenant', 'meter'],
+});
+// { format: 'json', rows: [{ keys: { tenant, meter }, quantity, windows, outcomes: { recorded: 3, pending: 1 } }],
+//   count, voided, truncated }
+```
 
 ### Export usage
 
