@@ -1,5 +1,6 @@
 import {
   ComputeError,
+  canonicalGpuModel,
   defaultMeterGpuModels,
   defineMethod,
   describedBy,
@@ -14,9 +15,11 @@ import {
   type MethodDefinition,
   type PriceSpecInput,
   type PriceView,
+  type ProviderListPrice,
   type SqlExecutor,
 } from '@better-compute/core';
-import { fail, object, optional, tenant } from './input.js';
+import { fail, id as idOf, object, optional, tenant } from './input.js';
+import { proposePrices, type FlavorMeterBasis, type PriceProposals } from './proposals.js';
 
 // The root-only `billing` API group (platform compute billing, D13): the meters and prices root keeps on the IAM
 // root tenant, so it can bill sub-tenants for compute. Every method is decided on `compute:billing:*` @ fleet, which
@@ -40,6 +43,11 @@ export interface BillingOptions {
    * lifecycle change stamped inside that hour has committed. `0` writes at the top of the hour.
    */
   meterGraceMs?: number;
+  /**
+   * The better-iam deployment currency as ISO 4217 (default `USD`). Provider list prices in another currency are
+   * not proposed from, and tenant estimates name it.
+   */
+  currency?: string;
 }
 
 export interface PriceInput {
@@ -75,6 +83,17 @@ export interface SetPricesResult {
   failed: FailedPrice[];
 }
 
+/** `billing.proposePrices`: margin on a provider account's list prices; nothing is applied. */
+export interface ProposePricesInput {
+  accountId: string;
+  /** Percent added to each provider price (0 to 1000). */
+  marginPct: number;
+  /** Only this region's prices; absent: the cheapest across the regions the provider lists. */
+  region?: string;
+  /** `YYYY-MM`: the billing period root intends to publish the proposals from (checked, then left to `setPrices`). */
+  effectiveFrom: string;
+}
+
 export type BillingApi = {
   /** The meters compute defines, and which of them the IAM root tenant still lacks. */
   meters: MethodDefinition<Record<string, never>, { catalog: MeterSpec[]; missing: string[] }>;
@@ -82,7 +101,19 @@ export type BillingApi = {
   syncMeters: MethodDefinition<Record<string, never>, { created: string[]; existing: string[] }>;
   prices: MethodDefinition<PricesQuery, PriceView[]>;
   setPrices: MethodDefinition<SetPricesInput, SetPricesResult>;
+  /** List prices of a platform provider account plus a margin, as prices root can publish with `setPrices`. */
+  proposePrices: MethodDefinition<ProposePricesInput, PriceProposals>;
 };
+
+/** What `billing.proposePrices` needs from the module: the account's provider list prices. */
+export interface BillingProviders {
+  /** Reads the list prices of a platform provider account; `NOT_FOUND`, `UNSUPPORTED` or the provider's error. */
+  listPrices(
+    context: MethodContext,
+    accountId: string,
+    query: { regions?: readonly string[] },
+  ): Promise<ProviderListPrice[]>;
+}
 
 /** The most prices one `setPrices` call takes. */
 export const setPricesLimit = 100;
@@ -201,8 +232,38 @@ const priceEntry = strictObject(
   ['meter', 'effectiveFrom', 'spec'],
 );
 
+const proposeSchema = strictObject(
+  {
+    accountId: {
+      type: 'string',
+      pattern: '^pacct_[0-9a-hjkmnp-tv-z]{26,52}$',
+      maxLength: 58,
+      description: 'A provider account of the platform (root tenant) whose list prices are read',
+    },
+    marginPct: {
+      type: 'number',
+      minimum: 0,
+      maximum: 1000,
+      description: 'Percent added to each provider price, e.g. 20',
+    },
+    region: {
+      type: 'string',
+      pattern: '^[a-z0-9][a-z0-9._-]{0,62}$',
+      maxLength: 63,
+      description: 'Only this region’s prices; omitted: the cheapest across the regions listed',
+    },
+    effectiveFrom: {
+      type: 'string',
+      pattern: '^\\d{4}-(0[1-9]|1[0-2])$',
+      description: 'The billing period root intends to publish the proposals from, YYYY-MM',
+    },
+  },
+  ['accountId', 'marginPct', 'effectiveFrom'],
+);
+
 export const billingSchemas = {
   none: strictObject({}),
+  proposePrices: proposeSchema,
   prices: strictObject({ meter: meterKey, targetTenantId }),
   setPrices: strictObject(
     {
@@ -328,6 +389,30 @@ export function parseSetPrices(raw: unknown): SetPricesInput {
   };
 }
 
+export function parseProposePrices(raw: unknown): ProposePricesInput {
+  const input = object(raw, ['accountId', 'marginPct', 'region', 'effectiveFrom']);
+  if (
+    typeof input.marginPct !== 'number' ||
+    !Number.isFinite(input.marginPct) ||
+    input.marginPct < 0 ||
+    input.marginPct > 1000
+  )
+    fail('marginPct must be a number from 0 to 1000');
+  if (typeof input.effectiveFrom !== 'string' || !periodPattern.test(input.effectiveFrom))
+    fail('effectiveFrom must be a billing period like 2026-11');
+  const region = optional(input.region, (value) => {
+    if (typeof value !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,62}$/.test(value))
+      fail('region is invalid');
+    return value;
+  });
+  return {
+    accountId: idOf(input.accountId, 'pacct', 'accountId'),
+    marginPct: input.marginPct,
+    ...(region === undefined ? {} : { region }),
+    effectiveFrom: input.effectiveFrom,
+  };
+}
+
 // --- Methods -------------------------------------------------------------------------------------
 
 const fleetResource = () => ({ type: 'fleet' as const, id: fleetResourceId });
@@ -337,7 +422,10 @@ const noInput = (raw: unknown): Record<string, never> => {
 };
 
 /** The `billing` group's methods. Each is decided on the fleet, so only root (or a root member the policy allows) calls them. */
-export function billingApi(options: BillingOptions = {}): BillingApi {
+export function billingApi(
+  options: BillingOptions = {},
+  providers?: BillingProviders,
+): BillingApi {
   return {
     meters: defineMethod({
       action: 'compute:billing:read',
@@ -425,5 +513,64 @@ export function billingApi(options: BillingOptions = {}): BillingApi {
         return result;
       },
     }),
+    proposePrices: defineMethod({
+      action: 'compute:billing:read',
+      kind: 'read',
+      transaction: 'manual',
+      resource: fleetResource,
+      validate: describedBy(billingSchemas.proposePrices, parseProposePrices),
+      handler: async (context, input) => {
+        if (!providers)
+          throw new ComputeError('UNSUPPORTED', 'This module reads no provider list prices');
+        const prices = await providers.listPrices(context, input.accountId, {
+          ...(input.region === undefined ? {} : { regions: [input.region] }),
+        });
+        return proposePrices({
+          catalog: await catalogOf(context, options),
+          prices,
+          flavors: await accountFlavors(
+            context.sql,
+            input.accountId,
+            options.gpuModels ?? defaultMeterGpuModels,
+          ),
+          marginPct: input.marginPct,
+          ...(input.region === undefined ? {} : { region: input.region }),
+          currency: options.currency ?? defaultCurrency,
+        });
+      },
+    }),
   };
+}
+
+/** The currency of a deployment that does not name one. */
+export const defaultCurrency = 'USD';
+
+/** The flavors of the account's pools that carry a whole-shape meter, with what composing their price needs. */
+async function accountFlavors(
+  sql: SqlExecutor,
+  accountId: string,
+  gpuModels: readonly string[],
+): Promise<FlavorMeterBasis[]> {
+  const { rows } = await sql.query<{
+    meter: string;
+    vcpu: number | string;
+    memory_gib: number | string;
+    gpus: number | string;
+    offer_id: string | null;
+    gpu_model: string | null;
+  }>(
+    `SELECT f.billing->>'meter' AS meter, f.vcpu, f.memory_gib, f.gpus, f.offer_id, p.gpu_model
+       FROM flavors f JOIN pools p ON p.id = f.pool_id
+      WHERE p.provider_account_id = $1 AND f.billing->>'meter' IS NOT NULL AND NOT f.archived
+      ORDER BY f.pool_id, f.name`,
+    [accountId],
+  );
+  return rows.map((row) => ({
+    meter: row.meter,
+    vcpu: Number(row.vcpu),
+    memoryGiB: Number(row.memory_gib),
+    gpus: Number(row.gpus),
+    ...(Number(row.gpus) > 0 && row.gpu_model ? { gpuModel: canonicalGpuModel(row.gpu_model, gpuModels) } : {}),
+    ...(row.offer_id !== null ? { offerId: row.offer_id } : {}),
+  }));
 }

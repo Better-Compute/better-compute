@@ -541,6 +541,8 @@ group('instances', 'vps', [
   ['attach', 'mutation', 'instances:attach', 'instance', 'v1.0'],
   ['detach', 'mutation', 'instances:delete', 'instance', 'v1.0'],
   ['reboot', 'mutation', 'instances:update', 'instance', 'v1.0'],
+  // The hourly price of a flavor for the caller's tenant (billing estimates); acts on the pool, like flavors.list.
+  ['estimate', 'read', 'flavors:read', 'pool', 'v1.0'],
 ]);
 group('flavors', 'vps', [
   ['list', 'read', 'flavors:read', 'pool', 'v0.3'],
@@ -553,6 +555,7 @@ group('billing', 'vps', [
   ['syncMeters', 'mutation', 'billing:manage', 'fleet', 'v1.0'],
   ['prices', 'read', 'billing:read', 'fleet', 'v1.0'],
   ['setPrices', 'mutation', 'billing:manage', 'fleet', 'v1.0'],
+  ['proposePrices', 'read', 'billing:read', 'fleet', 'v1.0'],
 ]);
 group('providerAccounts', 'vps', [
   [

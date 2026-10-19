@@ -40,14 +40,31 @@ import {
   createFlavor,
   deleteFlavor,
   parseFlavorInput,
+  readFlavorByName,
   readFlavors,
   updateFlavor,
   type FlavorInput,
   type FlavorRecord,
 } from './flavors.js';
+import {
+  EstimateCache,
+  flavorEstimates,
+  parseEstimateInstance,
+  type EstimateDeps,
+  type EstimateInstanceInput,
+  type FlavorEstimate,
+  type InstanceEstimate,
+} from './estimates.js';
 import { id, int, name, object, optional, tenant } from './input.js';
 import { isRootCaller } from './billing.js';
-import { billingApi, flavorMeterSpec, type BillingApi, type BillingOptions } from './pricing.js';
+import {
+  billingApi,
+  defaultCurrency,
+  flavorMeterSpec,
+  type BillingApi,
+  type BillingOptions,
+  type BillingProviders,
+} from './pricing.js';
 import {
   completeCreateInstance,
   deleteInstance,
@@ -347,6 +364,8 @@ export type VpsApi = {
   billing: BillingApi;
   instances: {
     create: MethodDefinition<CreateInstanceInput, Instance>;
+    /** The hourly price of a flavor for the tenant, decided as reading the pool's flavors (estimates.ts). */
+    estimate: MethodDefinition<EstimateInstanceInput, InstanceEstimate>;
     list: MethodDefinition<ListInstancesInput, { items: Instance[]; cursor?: string }>;
     get: MethodDefinition<InstanceRef, Instance>;
     start: MethodDefinition<InstanceRef, Instance>;
@@ -358,7 +377,7 @@ export type VpsApi = {
     reboot: MethodDefinition<RebootInstanceInput, Instance>;
   };
   flavors: {
-    list: MethodDefinition<PoolInput, { items: FlavorRecord[] }>;
+    list: MethodDefinition<PoolInput, { items: (FlavorRecord & { estimate?: FlavorEstimate })[] }>;
     create: MethodDefinition<FlavorInput, FlavorRecord>;
     update: MethodDefinition<FlavorInput, FlavorRecord>;
     delete: MethodDefinition<FlavorRef, { deleted: boolean; archived: boolean }>;
@@ -682,6 +701,47 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       context.signal ?? new AbortController().signal,
     );
   const typePrefix = options.typePrefix ?? 'compute-';
+
+  // --- Platform compute billing: price proposals and tenant estimates (D14, D15) ---
+  /** Estimates are kept five minutes per (tenant, pool). */
+  const estimateCache = new EstimateCache();
+  const estimateDeps = (context: MethodContext): EstimateDeps => ({
+    iam: context.iam,
+    clock: context.clock,
+    log: context.log,
+    cache: estimateCache,
+    currency: options.billing?.currency ?? defaultCurrency,
+    gpuModels: options.billing?.gpuModels,
+  });
+  /** The list prices of a platform provider account, read through its cached client. */
+  const billingProviders: BillingProviders = {
+    async listPrices(context, accountId, query) {
+      const account = await readAccount(context.sql, accountId);
+      const root = context.iam.rootTenantId;
+      // Proposals act as the platform: a tenant's account is never read with its own credentials for root.
+      if (!account || root === undefined || account.tenantId !== root)
+        throw new ComputeError(
+          'NOT_FOUND',
+          `Provider account ${accountId} not found among the platform's accounts`,
+        );
+      const client = await clients.client(account, depsOf(context));
+      if (typeof client.listPrices !== 'function')
+        throw new ComputeError(
+          'UNSUPPORTED',
+          `Provider ${account.provider} does not list prices`,
+          undefined,
+          { provider: account.provider },
+        );
+      const timeout = AbortSignal.timeout(55_000);
+      return client.listPrices(query, {
+        idempotencyKey: `prices:${accountId}`,
+        signal: context.signal ? AbortSignal.any([context.signal, timeout]) : timeout,
+        clock: context.clock,
+        secrets: options.secrets ?? context.secrets ?? noSecrets,
+        log: context.log,
+      });
+    },
+  };
   /**
    * A template that names secrets hands them to every sandbox's guest, which can read them: the
    * caller must also hold `compute:secrets:manage` on the tenant (secrets are write-only, §6).
@@ -897,7 +957,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
   };
 
   const api = (): VpsApi => ({
-    billing: billingApi(options.billing),
+    billing: billingApi(options.billing, billingProviders),
     instances: {
       create: defineMethod<CreateInstanceInput, Instance>({
         action: 'compute:instances:create',
@@ -933,6 +993,34 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
             const row = await readInstance(context.sql, output.id, { tenantId: input.tenantId });
             return row && !row.draft ? instanceView(row) : output;
           },
+        },
+      }),
+      // (D15) What one hour of a flavor would cost the tenant: decided as reading the pool's flavors, so a principal
+      // that may only see flavors can ask. Nothing is created, drafted, charged or projected for authz.
+      estimate: defineMethod<EstimateInstanceInput, InstanceEstimate>({
+        action: 'compute:flavors:read',
+        kind: 'read',
+        // The estimate asks IAM to quote, which never happens inside a compute transaction.
+        transaction: 'manual',
+        resource: poolResource,
+        validate: describedBy(schemas.estimateInstance, parseEstimateInstance),
+        handler: async (context, input) => {
+          await visibleVpsPool(context.sql, input.tenantId, input.poolId);
+          const flavor = await readFlavorByName(context.sql, input.poolId, input.flavor);
+          if (!flavor || flavor.archived)
+            throw new ComputeError(
+              'NOT_FOUND',
+              `Flavor ${input.flavor} not found in pool ${input.poolId}`,
+            );
+          const estimates = await flavorEstimates(
+            estimateDeps(context),
+            context.sql,
+            input.tenantId,
+            input.poolId,
+            [flavor],
+          );
+          const estimate = estimates.get(flavor.id);
+          return estimate ? { estimate } : {};
         },
       }),
       list: defineMethod({
@@ -1029,6 +1117,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       list: defineMethod({
         action: 'compute:flavors:read',
         kind: 'read',
+        // Estimates ask IAM to quote, which never happens inside a compute transaction.
+        transaction: 'manual',
         resource: poolResource,
         validate: describedBy(schemas.pool, parsePool),
         handler: async (context, input) => {
@@ -1039,7 +1129,20 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           );
           if (visible.rows.length === 0)
             throw new ComputeError('NOT_FOUND', `Pool ${input.poolId} not found`);
-          return { items: await readFlavors(context.sql, input.poolId) };
+          const flavors = await readFlavors(context.sql, input.poolId);
+          const estimates = await flavorEstimates(
+            estimateDeps(context),
+            context.sql,
+            input.tenantId,
+            input.poolId,
+            flavors,
+          );
+          return {
+            items: flavors.map((flavor) => {
+              const estimate = estimates.get(flavor.id);
+              return estimate ? { ...flavor, estimate } : flavor;
+            }),
+          };
         },
       }),
       create: defineMethod<FlavorInput, FlavorRecord>({

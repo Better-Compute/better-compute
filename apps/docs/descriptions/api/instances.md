@@ -11,6 +11,14 @@ Admits a VM from a pool, flavor and image after one IAM decision on the draft; r
 - **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, an archived pool, a missing or archived flavor, or an image a hosted pool cannot resolve. `INVALID_INPUT` for a pool that is not `vps-host` or `provider`. `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota; `CAPACITY_UNAVAILABLE` when a hosted pool has no free IP address. `INVALID_STATE` for a provider pool without an account, `INVALID_CONFIG` for a hosted pool when `vps()` has no `images`.
 - **Events.** `instance.created`, and `instance.scheduled` with the `nodeId` when a hosted instance is placed. When no host fits, the instance stays in `scheduling` with an `Unschedulable` condition and is retried every 30 seconds. In a provider pool, a create the provider refuses for capacity or quota (at once, or after accepting it, as GCE reports a stockout) moves the instance to `error` with a `ProvisionFailed` condition (reason `CAPACITY_UNAVAILABLE` or `QUOTA_EXCEEDED`) and publishes `instance.failed`; it is not retried, and deleting it refunds the quota.
 
+## estimate
+
+Returns what one hour of a flavor would cost the tenant, before it creates anything: `{ estimate }` with `{ perHourMicros, currency, lines }` as `flavors.list` shows it, or `{}` when the IAM port cannot quote, the pool is not a provider pool or IAM cannot answer.
+
+- **Input.** `tenantId`, `poolId` and `flavor`: the fields of a create that decide its price. `NOT_FOUND` for a pool the tenant neither owns nor is offered, or a missing or archived flavor; `INVALID_INPUT` for a pool that is not a VPS pool.
+- **Decided as a read of the pool's flavors** (`compute:flavors:read` on the pool), not as a create: whoever can list the pool's flavors can ask, and holding only that action is not enough to create (`create` is still `compute:instances:create`). It is a read: no instance or draft, no quota, no authz projection row, no provider call and no audit row.
+- **Same figures as `flavors.list`**: the lines are the meters an instance of the flavor would record per hour, priced for the tenant with its negotiated prices, and cached five minutes per tenant and pool. It does not check quota, budgets, the image or the network.
+
 ## list
 
 Returns a page of the tenant's instances, newest first, with a `cursor` when more remain.

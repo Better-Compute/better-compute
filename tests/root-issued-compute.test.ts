@@ -1065,6 +1065,16 @@ describe('isolation between tenants, and between tenants and the root tenant', (
           call: () => api.instances.list(root, { tenantId: A, scope: 'all' }),
         },
         {
+          path: 'instances.estimate',
+          tenant: A,
+          call: () =>
+            api.instances.estimate(root, {
+              tenantId: A,
+              poolId: w.poolId,
+              flavor: 'n2.standard.4',
+            }),
+        },
+        {
           path: 'instances.reboot',
           tenant: A,
           call: () => api.instances.reboot(root, { tenantId: A, instanceId: w.legacy }),

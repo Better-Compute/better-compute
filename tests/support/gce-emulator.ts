@@ -178,6 +178,8 @@ export class GceEmulator {
     if (url.hostname === 'metadata.google.internal') return this.#metadataToken(url, headers);
     if (url.hostname === 'iamcredentials.googleapis.com')
       return this.#generateAccessToken(url, headers, body);
+    // [P6 catalog] the Cloud Billing Catalog host (see the section at the end of the class)
+    if (url.hostname === 'cloudbilling.googleapis.com') return this.#cloudBilling(method, url, headers);
     if (url.hostname !== 'compute.googleapis.com')
       return this.error(404, 'notFound', `No emulated host ${url.hostname}`);
 
@@ -890,4 +892,40 @@ export class GceEmulator {
       });
     return this.error(404, 'notFound', 'unsupported');
   }
+
+  // ======================================================================================================
+  // [P6 catalog] Cloud Billing Catalog: GET /v1/services/6F81-5844-456A/skus (Compute Engine), paged by
+  // `pageToken`. Tests set `skus` to `cloudbilling.googleapis.com` Sku resources.
+  // ======================================================================================================
+
+  /** Sku resources the Compute Engine service lists. */
+  skus: Json[] = [];
+  /** SKUs per page (a request's `pageSize` can only lower it). */
+  skuPageSize = 2;
+  /** Fails every catalog request with this GCE-shaped error. */
+  catalogFailure?: { status: number; reason: string; message?: string };
+
+  #cloudBilling(method: string, url: URL, headers: Headers): Response {
+    const bearer = /^Bearer (.+)$/.exec(headers.get('authorization') ?? '')?.[1];
+    if (!bearer || !this.validTokens.has(bearer))
+      return this.error(401, 'authError', 'Invalid Credentials');
+    if (this.catalogFailure)
+      return this.error(
+        this.catalogFailure.status,
+        this.catalogFailure.reason,
+        this.catalogFailure.message,
+      );
+    if (method !== 'GET' || url.pathname !== '/v1/services/6F81-5844-456A/skus')
+      return this.error(404, 'notFound', 'unsupported catalog request');
+    const requested = Number(url.searchParams.get('pageSize') ?? this.skuPageSize);
+    const size = Math.max(1, Math.min(requested, this.skuPageSize));
+    const start = Number(url.searchParams.get('pageToken') ?? 0);
+    const page = this.skus.slice(start, start + size);
+    const next = start + size;
+    return this.json(200, {
+      skus: page,
+      ...(next < this.skus.length ? { nextPageToken: String(next) } : {}),
+    });
+  }
+  // ====================================================================================== [/P6 catalog]
 }

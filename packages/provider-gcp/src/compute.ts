@@ -9,6 +9,7 @@ import {
   type Offer,
   type OfferQuery,
   type PowerAction,
+  type ProviderListPrice,
   type ProviderContext,
   type ProviderImpl,
   type ProviderNetworks,
@@ -40,6 +41,7 @@ import {
   requestIdFor,
 } from './ids.js';
 import { GcpNetworks } from './networks.js';
+import type { catalogReader } from './prices.js';
 import { readReservations } from './reservations.js';
 import {
   gpusOfType,
@@ -87,13 +89,16 @@ export class GcpCompute implements ProviderImpl {
   /** Persistent disks' types by disk resource URL, with when each answer stops being used. */
   readonly #diskKinds = new Map<string, { type: string | undefined; until: number }>();
   readonly networks: ProviderNetworks;
+  readonly #prices: ReturnType<typeof catalogReader> | undefined;
 
   constructor(
     config: GcpConfig,
     context: ProviderContext,
     options: GcpProviderOptions,
     client: GceClient,
+    prices?: ReturnType<typeof catalogReader>,
   ) {
+    this.#prices = prices;
     this.config = config;
     this.context = context;
     this.options = options;
@@ -357,6 +362,19 @@ export class GcpCompute implements ProviderImpl {
       },
       context?.signal ?? new AbortController().signal,
     );
+  }
+
+  /** (platform compute billing) Compute Engine list prices from the Cloud Billing Catalog, cached 24 h. */
+  async listPrices(
+    query: { regions?: readonly string[] },
+    context: CallContext,
+  ): Promise<ProviderListPrice[]> {
+    if (!this.#prices)
+      throw new ComputeError(
+        'UNSUPPORTED',
+        'This client was built without the Cloud Billing Catalog',
+      );
+    return this.#prices.listPrices(query, context);
   }
 
   // ------------------------------------------------------------------------------- create

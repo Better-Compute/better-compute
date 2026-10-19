@@ -230,6 +230,7 @@ export const schemas = {
     },
     ['tenantId', 'poolId', 'flavor', 'imageId', 'idempotencyKey'],
   ),
+  estimateInstance: strictObject({ tenantId, poolId, flavor }, ['tenantId', 'poolId', 'flavor']),
   listInstances: strictObject(
     {
       tenantId,

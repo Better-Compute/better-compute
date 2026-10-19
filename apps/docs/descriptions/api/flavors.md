@@ -6,6 +6,15 @@ Returns the pool's flavors that are not archived, sorted by name.
 
 The pool must be owned by or offered to the tenant; otherwise the call is `NOT_FOUND`.
 
+**Estimates.** Each item of a provider pool carries `estimate` when the IAM port can quote (`IamPort.quote`): `{ perHourMicros, currency, lines }`, what one hour of the flavor costs the tenant named in the call.
+
+- **How.** The lines are the meters an instance of the flavor would record per hour (the pool's billing mode, the flavor's meter and the shape's vCPUs, memory and GPUs, as `meterLinesFor` computes them), each priced by IAM with the tenant's effective price, so a negotiated price shows. `lines` are `{ meter, quantity, amountMicros }`; a line IAM has no price for has `amountMicros: null`, and then `perHourMicros` is `null` rather than a partial sum. A pool whose billing mode is `none` has no lines and costs `0`.
+- **Absent** when the IAM port has no `quote` (see `billing`), when the pool is not a provider pool (hosted pools record usage differently), or when IAM cannot answer: an estimate never fails the list.
+- **Currency** is the deployment currency (`vps({ billing: { currency } })`, default `USD`).
+- **Before a create:** `instances.estimate` answers the same estimate for one flavor.
+- **Freshness.** Estimates are kept five minutes per tenant and pool, so a changed price shows within five minutes.
+- **Assumptions.** The estimate is for an on-demand instance of the flavor: Spot, reservation grants and the instance's disks and addresses are not in it. A flavor whose offer is held by a reservation is priced on the `vm.reserved.*` meters.
+
 ## create
 
 Adds a flavor to a `vps-host` or `provider` pool the tenant owns and returns it at version 1.

@@ -71,6 +71,8 @@ export interface GcpProviderOptions {
    * `credentials`, and never serves a tenant's account.
    */
   tokenSource?: TokenSource;
+  /** Default `https://cloudbilling.<universeDomain>`: the Cloud Billing Catalog that `listPrices` reads. */
+  catalogEndpoint?: string;
   /** Default 2000. Only used by in-call operation waits of at most 20 seconds. */
   operationPollMs?: number;
   /**

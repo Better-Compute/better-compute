@@ -274,6 +274,28 @@ describe('permission-aware actions', () => {
     expect(() => describeAction('nodes', 'nope', 'x')).toThrow();
   });
 
+  it('a user who may only read flavors is offered no enabled instances/create on a pool', async () => {
+    // `instances.estimate` is a read on the pool (flavors:read): it is no pool button, and create is not one either.
+    const buttons = actionsFor('pool', 'pool_1');
+    expect(buttons.map((action) => action.path)).not.toContain('instances/create');
+    expect(buttons.map((action) => action.path)).not.toContain('instances/estimate');
+    expect(buttons.every((action) => action.kind === 'mutation')).toBe(true);
+    const permissions = createPermissions({
+      authorize: async (checks) => checks.map((check) => check.action === 'compute:flavors:read'),
+    });
+    const enabled: string[] = [];
+    for (const action of buttons)
+      if (await permissions.can({ action: action.action, resource: action.resource }))
+        enabled.push(action.path);
+    expect(enabled).toEqual([]);
+    // The estimate itself is decided as a flavors read on the pool.
+    expect(describeAction('instances', 'estimate', 'pool_1')).toMatchObject({
+      action: 'compute:flavors:read',
+      resource: { type: 'compute-pool', id: 'pool_1' },
+      kind: 'read',
+    });
+  });
+
   it('batches checks, caches answers and never turns a failure into "denied"', async () => {
     const batches: number[] = [];
     let now = 0;

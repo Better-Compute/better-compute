@@ -267,6 +267,8 @@ which capacity's teardown never reaches.
 - **Flavors** are per pool. The pool's owner manages them, and offered tenants can list them.
   - A provider pool's flavor names its provider `offerId`.
   - Deleting a flavor still in use archives it instead.
+  - With an IAM port that can quote (`IamPort.quote`), `flavors.list` of a provider pool carries each flavor's hourly `estimate` for the tenant (its negotiated prices, kept five minutes), and `instances.estimate({ tenantId, poolId, flavor })` answers the same before a create. Both are reads decided as `compute:flavors:read` on the pool; nothing is created.
+  - `billing.proposePrices` (root only) turns a platform provider account's list prices plus a margin into `per-unit` prices root can publish with `billing.setPrices`; it never applies them, and reports the `currency` it used.
 - **Provider accounts** are rows validated by their provider's manifest.
   - Credentials must be `SecretRef`s (`secret://`, `vault://` or `env://`), never raw values.
   - Clients are built on demand and cached per account version.
