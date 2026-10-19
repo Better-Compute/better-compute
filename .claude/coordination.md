@@ -1014,3 +1014,12 @@ agreed between the three sessions:
 - [561b07] FLEET/OPS: `app/(admin)/{nodes,devices,sandboxes,instances,volumes,metal,rollouts,drift,batches,activity}/**`,
   `components/fleet/**`, `lib/data/fleet.ts`.
 Shared files (`lib/modules.ts`, `lib/data/index.ts`) take one-line inserts. apps/console is not part of this.
+
+## AWS integration A0/A1 (2026-10-18, plan docs/superpowers/plans/2026-10-18-aws-a0-a1-foundation-ec2.md)
+
+Built in worktree `.worktrees/aws`, branch `feat/aws-a0-a1` (off main d11ce836), so nothing lands on main until the
+user merges. Claimed: new packages `packages/aws-core/**` and `packages/provider-aws/**`;
+`tests/support/aws-emulator/**`, `tests/fixtures/aws-sigv4/**`, `tests/aws-*.test.ts`, `tests/provider-aws*.test.ts`,
+`tests/check-deps-aws.test.ts`; check-deps rule 5 (`scripts/check-deps.mjs`: only `provider-aws`/`aws` may depend on
+`aws-core`, nothing depends on `aws`/`provider-aws`); one-line inserts in root `tsconfig.json` and `vitest.config.ts`
+`scoped` on that branch. No core/vps/server changes. Program plan: `2026-10-18-aws-integration-program.md`.
