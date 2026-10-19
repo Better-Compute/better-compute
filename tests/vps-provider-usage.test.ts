@@ -135,8 +135,12 @@ describe('rules', () => {
       expect(meterLinesFor(base, mode, 'stopped')).toEqual([]);
   });
 
-  it('publicIp and disks produce no lines yet', () => {
-    expect(lines({ publicIp: true, disks: [{ type: 'pd-ssd', sizeGiB: 100 }] })).toEqual(lines({}));
+  it('a public address adds one ip.public.hours line; disks add none yet', () => {
+    expect(lines({ publicIp: true })).toEqual([
+      ...lines({}),
+      { meter: 'ip.public.hours', perHour: 1 },
+    ]);
+    expect(lines({ disks: [{ type: 'pd-ssd', sizeGiB: 100 }] })).toEqual(lines({}));
   });
 
   it('every meterLinesFor output is in meterCatalog', () => {

@@ -19,7 +19,7 @@ export interface BillableShape {
   granted: boolean;
   /** The flavor's `billing.meter` (`flavor.<...>.hours`): one line that replaces the composed ones. */
   flavorMeter?: string;
-  /** Task 12: an attached public address. No lines yet. */
+  /** An attached public address (set on `running` intervals only): one `ip.public.hours` line. */
   publicIp?: boolean;
   /** Task 13: attached disks. No lines yet. */
   disks?: readonly { type: string; sizeGiB: number }[];
@@ -77,9 +77,12 @@ export function billingModeOf(
 }
 
 /**
- * The meter lines one instance records per hour. `phase: 'stopped'` carries only disk lines (Task 13), so it is
- * empty for now. Reserved instances use `vm.reserved.*` and never the spot variant; granted instances record the
- * informational `vm.grant.usage.hours` line only (D7); a flavor meter replaces the composed lines.
+ * The meter lines one instance records per hour. Reserved instances use `vm.reserved.*` and never the spot variant;
+ * granted instances record the informational `vm.grant.usage.hours` line only (D7); a flavor meter replaces the
+ * composed compute lines. A `metered` instance adds the lines of what it holds beside its compute: an
+ * `ip.public.hours` line while it runs with a public address (D9), granted and flavor-meter instances included
+ * (a grant covers the VM, not its address). `phase: 'stopped'` carries only the disk lines (Task 13), so it is
+ * empty for now. `platform-fee` and `none` never add them.
  */
 export function meterLinesFor(
   shape: BillableShape,
@@ -87,10 +90,18 @@ export function meterLinesFor(
   phase: 'running' | 'stopped',
   options: MeterLinesOptions = {},
 ): MeterLine[] {
-  // Precedence: none/stopped, then platform-fee (granted+platform-fee -> managed line), then granted, then the flavor
-  // meter (flavor+reserved -> flavor line), then composition.
-  if (mode === 'none' || phase === 'stopped') return [];
-  if (mode === 'platform-fee') return [{ meter: 'vm.managed.hours', perHour: 1 }];
+  // Precedence: none, then platform-fee (granted+platform-fee -> managed line), then (metered) the compute lines of
+  // a running instance - granted, else the flavor meter, else composition - and the ancillary lines after them.
+  if (mode === 'none') return [];
+  if (mode === 'platform-fee')
+    return phase === 'stopped' ? [] : [{ meter: 'vm.managed.hours', perHour: 1 }];
+  const out: MeterLine[] = phase === 'running' ? computeLines(shape, options) : [];
+  if (phase === 'running' && shape.publicIp === true)
+    out.push({ meter: 'ip.public.hours', perHour: 1 });
+  return out;
+}
+
+function computeLines(shape: BillableShape, options: MeterLinesOptions): MeterLine[] {
   if (shape.granted) return [{ meter: 'vm.grant.usage.hours', perHour: 1 }];
   if (shape.flavorMeter) return [{ meter: shape.flavorMeter, perHour: 1 }];
 
@@ -106,4 +117,37 @@ export function meterLinesFor(
   }
   out.push({ meter: 'vm.instance.hours', perHour: 1 });
   return out;
+}
+
+/**
+ * Whether `address` is a public IPv4 address: not private (RFC 1918), loopback, link-local, carrier-grade NAT
+ * (100.64/10), "this network", multicast or reserved. IPv6 is never counted: the priced address is the IPv4 one, and
+ * a provider with per-interface detail says so through `publicAddress`.
+ */
+export function isPublicIpv4(address: string): boolean {
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(address.trim());
+  if (!match) return false;
+  const [a, b, c, d] = match.slice(1).map(Number) as [number, number, number, number];
+  if (c > 255 || d > 255 || a > 255 || b > 255) return false;
+  if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
+  if (a === 100 && b >= 64 && b <= 127) return false;
+  if (a === 169 && b === 254) return false;
+  if (a === 172 && b >= 16 && b <= 31) return false;
+  if (a === 192 && b === 168) return false;
+  return true;
+}
+
+/**
+ * Whether the machine holds a public address now: an interface that reports one (`publicAddress`), or a public IPv4
+ * among its flat `addresses` (a provider that reports no interface detail).
+ */
+export function hasPublicAddress(machine: {
+  addresses?: readonly string[] | undefined;
+  networks?: readonly { publicAddress?: string | undefined }[] | undefined;
+}): boolean {
+  return (
+    (machine.networks ?? []).some(
+      (nic) => typeof nic.publicAddress === 'string' && nic.publicAddress !== '',
+    ) || (machine.addresses ?? []).some(isPublicIpv4)
+  );
 }

@@ -11,6 +11,7 @@ import {
 import { meterSource, type UsageTags } from '@better-compute/capacity';
 import {
   billingModeOf,
+  hasPublicAddress,
   meterLinesFor,
   type BillableShape,
   type BillingMode,
@@ -53,8 +54,11 @@ ALTER TABLE flavors ADD COLUMN billing jsonb;
 
 export type IntervalPhase = 'running' | 'stopped';
 
-/** What the provider reported about the machine when the interval opens (its GPU model and region). */
-export type ObservedMachine = Pick<ExternalMachine, 'gpus' | 'region'>;
+/**
+ * What the provider reported about the machine when the interval opens: its GPU model, region and addresses (a
+ * public one is an `ip.public.hours` line).
+ */
+export type ObservedMachine = Pick<ExternalMachine, 'gpus' | 'region' | 'addresses' | 'networks'>;
 
 const json = <T>(value: T | string): T =>
   typeof value === 'string' ? (JSON.parse(value) as T) : value;
@@ -126,6 +130,7 @@ async function billingOf(
   instanceId: string,
   deps: IntervalDeps,
   observed: ObservedMachine | undefined,
+  phase: IntervalPhase,
 ): Promise<Billing | undefined> {
   const { rows } = await tx.query<{
     tenant_id: string;
@@ -146,6 +151,7 @@ async function billingOf(
     pool_gpu_model: string | null;
     machine_region: string | null;
     flavor_meter: string | null;
+    addresses: string[] | null;
   }>(
     // The account resolves only when it is the pool owner's (ruling R1, as readPoolAccount); its
     // provider names the interval either way. `flavor_meter` is the live flavor's meter, read only for
@@ -157,7 +163,7 @@ async function billingOf(
             m.machine->>'region' AS machine_region, p.gpu_model AS pool_gpu_model,
             (SELECT u.shape->'gpus'->>'model' FROM instance_usage_intervals u
               WHERE u.instance_id = i.id ORDER BY u.started_at DESC LIMIT 1) AS last_model,
-            f.billing->>'meter' AS flavor_meter
+            f.billing->>'meter' AS flavor_meter, i.addresses
        FROM instances i
        JOIN pools p ON p.id = i.pool_id
        LEFT JOIN sites s ON s.id = p.site_id
@@ -194,6 +200,15 @@ async function billingOf(
     // Task 10: reservation grants.
     granted: false,
     ...(flavorMeter !== undefined ? { flavorMeter } : {}),
+    // D9: a public address the provider reports now (else the addresses the row holds). Only a running instance bills
+    // it, so only a running interval carries it, and a change of address closes and reopens the interval.
+    ...(phase === 'running' &&
+    hasPublicAddress({
+      addresses: observed?.addresses ?? row.addresses ?? [],
+      networks: observed?.networks,
+    })
+      ? { publicIp: true }
+      : {}),
   };
   // Without a known root tenant every provider pool reads as a tenant's own (BYO): fail closed (B8),
   // never charging compute for a pool not known to be the platform's.
@@ -232,7 +247,7 @@ export async function openInterval(
   observed?: ObservedMachine,
 ): Promise<void> {
   if (row.poolClass !== 'provider') return;
-  const billing = await billingOf(tx, row.id, deps, observed);
+  const billing = await billingOf(tx, row.id, deps, observed, phase);
   if (!billing) {
     await closeOpenInterval(tx, row.id, at);
     return;
