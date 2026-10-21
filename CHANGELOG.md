@@ -6,6 +6,21 @@ All notable changes to the better-compute packages are documented here. The form
 
 ## Unreleased
 
+### Fixed
+
+- **Scripts on images without cloud-init** (`@better-compute/provider-gcp`). Compute Engine's Debian, Rocky,
+  CentOS, RHEL, AlmaLinux and SUSE images do not run cloud-init, so a shell-script `userData` (`#!…`) never ran on
+  them. Create now also writes it as `startup-script` metadata, wrapped to run once on the first boot as cloud-init
+  would (`/var/lib/better-compute/user-data.done`). A `#cloud-config` user data, and every other image, is
+  unchanged.
+- **Bare metal and families that cannot live-migrate** (`@better-compute/provider-gcp`). `*-metal` machine types
+  boot from Hyperdisk Balanced on an `IDPF` interface; they and the H3, H4D and X4 families are created with
+  `onHostMaintenance: TERMINATE`, which Compute Engine requires of them.
+- **A4X and G4 when the machine type cannot be read** (`@better-compute/provider-gcp`). The fallback that decides a
+  GPU machine type (and so `TERMINATE`) when `machineTypes.get` fails now knows the `a4x-` and `g4-` families.
+- **GB200 and RTX PRO 6000 GPUs** (`@better-compute/provider-gcp`). `nvidia-gb200` and `nvidia-rtx-pro-6000`
+  accelerators report the `GB200` and `RTX-PRO-6000` GPU families (and meters) instead of `other`.
+
 ## 0.3.0 (2026-10-20)
 
 ### Added

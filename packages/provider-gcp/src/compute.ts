@@ -24,10 +24,11 @@ import {
 import type { GcpConfig, GcpProviderOptions } from './config.js';
 import {
   bootDiskTypes,
+  cannotLiveMigrate,
   diskSizeRange,
   hyperdiskBootType,
   isDiskTypeRefusal,
-  needsGvnic,
+  nicTypeOf,
   type GceDiskType,
 } from './disks.js';
 import {
@@ -73,7 +74,7 @@ function matches(query: OfferQuery, offer: Offer): boolean {
   );
 }
 
-const acceleratorFamily = /^(a2|a3|a4|g2)-/;
+const acceleratorFamily = /^(a2|a3|a4|a4x|g2|g4)-/;
 const instanceWaitMs = 20_000;
 
 export class GcpCompute implements ProviderImpl {
@@ -408,6 +409,7 @@ export class GcpCompute implements ProviderImpl {
     const name = instanceName(request.name);
     const diskGiB = this.config.diskGiB ?? 100;
     const diskType = await this.bootDiskType(zone, machineType, diskGiB, context.signal);
+    const nicType = nicTypeOf(machineType);
     // The guest agent of every Compute Engine image installs `ssh-keys`; cloud-init (which reads
     // user-data) only runs on some images, so the keys go in both.
     const metadata = [{ key: 'user-data', value: request.userData }];
@@ -416,6 +418,10 @@ export class GcpCompute implements ProviderImpl {
         key: 'ssh-keys',
         value: request.sshKeys.map((key) => `${sshUserOf(request.image)}:${key.trim()}`).join('\n'),
       });
+    // A shell script on an image without cloud-init would never run: the guest agent runs it
+    // instead, once, as cloud-init would have.
+    if (request.userData.startsWith('#!') && !runsCloudInit(request.image))
+      metadata.push({ key: 'startup-script', value: firstBootScript(request.userData) });
     const body: Record<string, unknown> = {
       name,
       machineType: `zones/${zone}/machineTypes/${machineType}`,
@@ -443,14 +449,15 @@ export class GcpCompute implements ProviderImpl {
       networkInterfaces: [
         {
           ...this.networkInterface(zone, request.network),
-          ...(needsGvnic(machineType) ? { nicType: 'GVNIC' } : {}),
+          ...(nicType ? { nicType } : {}),
         },
       ],
       metadata: { items: metadata },
-      // GPU machines cannot live-migrate.
-      scheduling: accelerated
-        ? { onHostMaintenance: 'TERMINATE', automaticRestart: true }
-        : { onHostMaintenance: 'MIGRATE', automaticRestart: true },
+      // GPU machines, bare metal and some families cannot live-migrate.
+      scheduling:
+        accelerated || cannotLiveMigrate(machineType)
+          ? { onHostMaintenance: 'TERMINATE', automaticRestart: true }
+          : { onHostMaintenance: 'MIGRATE', automaticRestart: true },
     };
     if (request.network?.tags?.length) body.tags = { items: [...request.network.tags] };
     if (reservation)
@@ -843,6 +850,38 @@ export function parseDiscoverLabel(
       'discoverLabel must be "key=value" with GCE label characters (a-z, 0-9, _ and -)',
     );
   return { key: match[1]!, value: match[2]! };
+}
+
+/**
+ * Whether an image runs cloud-init, which reads `user-data`. Compute Engine's Debian and
+ * Enterprise Linux (Rocky, CentOS, RHEL, AlmaLinux) and SUSE images do not; their guest agent
+ * runs `startup-script` instead.
+ */
+export function runsCloudInit(image: ImageRef): boolean {
+  return !/debian|rocky|centos|rhel|almalinux|sles|suse/.test(image.toLowerCase());
+}
+
+/**
+ * A shell-script user data as a `startup-script`. The guest agent runs a startup script on every
+ * boot; the wrapper runs the user data on the first boot only, like cloud-init, and keeps its exit
+ * status. The script travels base64-encoded so no heredoc delimiter in it can end it early.
+ */
+export function firstBootScript(userData: string): string {
+  const encoded = Buffer.from(userData, 'utf8').toString('base64');
+  return [
+    '#!/bin/sh',
+    '# better-compute: the instance user data, run once (this image has no cloud-init).',
+    'dir=/var/lib/better-compute',
+    '[ -e "$dir/user-data.done" ] && exit 0',
+    'mkdir -p "$dir" && chmod 0700 "$dir"',
+    `echo '${encoded}' | base64 -d > "$dir/user-data"`,
+    'chmod 0700 "$dir/user-data"',
+    '"$dir/user-data"',
+    'status=$?',
+    'touch "$dir/user-data.done"',
+    'exit $status',
+    '',
+  ].join('\n');
 }
 
 /** The login `ssh-keys` names for an image (the distribution's default user). */

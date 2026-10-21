@@ -825,6 +825,89 @@ describe('compute', () => {
       ]);
       expect(plain!.metadata.items).toEqual([{ key: 'user-data', value: '' }]);
     });
+
+    it('bare metal boots from Hyperdisk on an IDPF interface and never live-migrates', async () => {
+      const emu = new GceEmulator();
+      emu.machineTypes.push(
+        ...['us-central1-a', 'us-central1-b'].map((zone) => ({
+          zone,
+          name: 'c3-standard-192-metal',
+          guestCpus: 192,
+          memoryMb: 768 * 1024,
+        })),
+      );
+      const impl = await build(emu);
+      await impl.create(request('us-central1-a/c3-standard-192-metal', 'ins_m'), ctx('m'));
+      const [metal] = inserted(emu);
+      expect(metal!.disks[0].initializeParams.diskType).toBe(
+        'zones/us-central1-a/diskTypes/hyperdisk-balanced',
+      );
+      expect(metal!.networkInterfaces[0].nicType).toBe('IDPF');
+      expect(metal!.scheduling.onHostMaintenance).toBe('TERMINATE');
+    });
+
+    it('families that cannot live-migrate get TERMINATE without accelerators', async () => {
+      const emu = hyperdiskEmulator();
+      emu.machineTypes.push(
+        ...['us-central1-a', 'us-central1-b'].map((zone) => ({
+          zone,
+          name: 'h4d-highmem-192',
+          guestCpus: 192,
+          memoryMb: 1488 * 1024,
+        })),
+      );
+      const impl = await build(emu);
+      await impl.create(request('us-central1-a/h4d-highmem-192', 'ins_h'), ctx('h'));
+      await impl.create(request('us-central1-a/c4-standard-8', 'ins_c'), ctx('c'));
+      const [h4d, c4] = inserted(emu);
+      expect(h4d!.scheduling.onHostMaintenance).toBe('TERMINATE');
+      expect(c4!.scheduling.onHostMaintenance).toBe('MIGRATE');
+    });
+
+    it('a shell script on an image without cloud-init also runs once as the startup-script', async () => {
+      const emu = new GceEmulator();
+      const impl = await build(emu);
+      const script = "#!/bin/bash\necho 'EOF' > /tmp/ran\n";
+      await impl.create(
+        {
+          ...request('us-central1-a/n2-standard-4', 'ins_r'),
+          image: 'projects/rocky-linux-cloud/global/images/family/rocky-linux-9',
+          userData: script,
+        },
+        ctx('r'),
+      );
+      await impl.create(
+        { ...request('us-central1-a/n2-standard-4', 'ins_u'), userData: script },
+        ctx('u'),
+      );
+      await impl.create(
+        {
+          ...request('us-central1-a/n2-standard-4', 'ins_c'),
+          image: 'projects/debian-cloud/global/images/family/debian-12',
+          userData: '#cloud-config\nruncmd: [true]\n',
+        },
+        ctx('c'),
+      );
+      const [rocky, ubuntu, cloudConfig] = inserted(emu);
+      const items = (body: { metadata: { items: { key: string; value: string }[] } }) =>
+        Object.fromEntries(body.metadata.items.map((item) => [item.key, item.value]));
+      const startup = items(rocky!)['startup-script']!;
+      expect(items(rocky!)['user-data']).toBe(script);
+      expect(startup.startsWith('#!/bin/sh\n')).toBe(true);
+      expect(startup).toContain(Buffer.from(script, 'utf8').toString('base64'));
+      expect(startup).toContain('[ -e "$dir/user-data.done" ] && exit 0');
+      // Ubuntu runs cloud-init, which already runs the script; a cloud-config is never a script.
+      expect(items(ubuntu!)['startup-script']).toBeUndefined();
+      expect(items(cloudConfig!)['startup-script']).toBeUndefined();
+    });
+
+    it('GB200 and RTX PRO 6000 accelerators name their GPU families', () => {
+      expect(gpuModel('nvidia-gb200')).toBe('GB200');
+      expect(gpuModel('zones/us-central1-a/acceleratorTypes/nvidia-rtx-pro-6000')).toBe(
+        'RTX-PRO-6000',
+      );
+      expect(gpuModel('nvidia-tesla-t4')).toBe('other');
+    });
   });
 
   it('an asynchronous stockout surfaces from get as CAPACITY_UNAVAILABLE', async () => {
