@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/inventory",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Hardware inventory for better-compute: section hashing, diffs, GPU model mapping, labels and health conditions.",
   "type": "module",
   "license": "Apache-2.0",

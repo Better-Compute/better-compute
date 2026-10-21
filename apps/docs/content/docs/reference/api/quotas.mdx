@@ -7,7 +7,7 @@ description: 'A quota caps how much of one resource a tenant may hold in one poo
 
 A quota caps how much of one resource a tenant may hold in one pool at the same time, as a `max` and a `used` counter per tenant, pool and resource. A missing row grants 0; `pools.create` and `pools.offer` create the rows, and admissions charge them with `QUOTA_EXCEEDED` when a request does not fit. See [Quotas and usage](/docs/guides/capacity/quotas-and-usage).
 
-All 2 methods are served by @better-compute/server 0.2.1.
+All 2 methods are served by @better-compute/server 0.3.0.
 
 | Method        | Kind     | Authorization                             | Phase | Status     |
 | ------------- | -------- | ----------------------------------------- | ----- | ---------- |

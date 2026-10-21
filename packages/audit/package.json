@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/audit",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Tamper-evident audit for better-compute: signed hourly per-tenant Merkle checkpoints over audit_events, inclusion proofs and verification.",
   "type": "module",
   "license": "Apache-2.0",

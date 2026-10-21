@@ -7,7 +7,7 @@ description: 'The capacity methods report what the pools a tenant can see hold, 
 
 The capacity methods report what the pools a tenant can see hold, book and have free, without booking anything. `summary` and `byPool` read the per-pool rollup, which the booking transactions update and a periodic rebuild corrects. `preview` asks the placer whether a request fits, and `timeline` counts booked GPUs over time. All four are decided as `compute:capacity:read`. See [Capacity](/docs/guides/capacity).
 
-All 4 methods are served by @better-compute/server 0.2.1.
+All 4 methods are served by @better-compute/server 0.3.0.
 
 | Method                  | Kind | Authorization                              | Phase | Status     |
 | ----------------------- | ---- | ------------------------------------------ | ----- | ---------- |

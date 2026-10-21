@@ -7,7 +7,7 @@ description: 'Per-tenant subscriptions that POST every matching committed event 
 
 Per-tenant subscriptions that POST every matching committed event to an HTTPS endpoint, signed with a secret only the tenant and Better Compute know, with at-least-once delivery, retries with backoff, dead letters and redelivery. The events module hosts this group, and every method decides `compute:webhooks:manage` on `compute-tenant/{tenantId}`. See [Webhooks](/docs/guides/events/webhooks).
 
-All 10 methods are served by @better-compute/server 0.2.1.
+All 10 methods are served by @better-compute/server 0.3.0.
 
 | Method                          | Kind     | Authorization                                | Phase | Status     |
 | ------------------------------- | -------- | -------------------------------------------- | ----- | ---------- |

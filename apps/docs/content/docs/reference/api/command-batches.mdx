@@ -7,7 +7,7 @@ description: "Destructive-command batches (v1.0 quorum). A batch fixes a set of 
 
 Destructive-command batches (v1.0 quorum). A batch fixes a set of (subject, kind) leaves, optionally bound to exact payloads, under one Merkle root when it is created (modules create them through `commands.createBatch`). When the deployment publishes approver keys (`pki.approvers`), the batch's commands wait until enough approvers, holding keys off the control plane, have signed its root for the trust domain. The gateway then sends each command with the approval and its leaf's proof, and the daemon verifies both. Without approver keys a batch is recorded for audit and its commands go out at once. See [Security](/docs/operations/security).
 
-All 7 methods are served by @better-compute/server 0.2.1.
+All 7 methods are served by @better-compute/server 0.3.0.
 
 | Method                | Kind     | Authorization                                | Phase | Status     |
 | --------------------- | -------- | -------------------------------------------- | ----- | ---------- |

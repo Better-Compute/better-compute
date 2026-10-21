@@ -7,7 +7,7 @@ description: "A sandbox is a hosted VPS instance with a template and a lifetime:
 
 A sandbox is a hosted VPS instance with a template and a lifetime: `create` admits it after one IAM decision, then claims a warm instance of its template or creates one through the instance lifecycle, and the `vps.sandboxes` reconciler, which runs every 15 seconds, deletes it once `expiresAt` passes. A sandbox's `state` follows its instance: `starting`, `ready` while the instance runs, `failed` when it is in `error` or `lost`, `deleting` once deletion was asked, and `deleted` when the instance is gone. The instance belongs to the sandbox: `instances.start`, `stop`, `resize` and `delete` refuse it with `INVALID_STATE`, and `instances.get` still returns it. See [Sandboxes](/docs/guides/vps/sandboxes).
 
-All 7 methods are served by @better-compute/server 0.2.1.
+All 7 methods are served by @better-compute/server 0.3.0.
 
 | Method                  | Kind     | Authorization                                       | Phase | Status     |
 | ----------------------- | -------- | --------------------------------------------------- | ----- | ---------- |

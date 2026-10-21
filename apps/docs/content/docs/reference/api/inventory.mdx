@@ -7,7 +7,7 @@ description: "A node's hardware and software inventory as the daemon reports it,
 
 A node's hardware and software inventory as the daemon reports it, kept as an append-only history of snapshots: a new snapshot is stored each time the node's reported section set changes. Every method decides `compute:nodes:read` on `compute-node/{nodeId}` and only answers for nodes the calling tenant owns. See [Inventory and health](/docs/guides/nodes/inventory-and-health).
 
-All 3 methods are served by @better-compute/server 0.2.1.
+All 3 methods are served by @better-compute/server 0.3.0.
 
 | Method                | Kind | Authorization                         | Phase | Status     |
 | --------------------- | ---- | ------------------------------------- | ----- | ---------- |

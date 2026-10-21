@@ -19,7 +19,7 @@ When the provider stops reporting the reservation (the `vps.reservations` scan m
 
 States: `scheduled` until `startsAt`, `active` during the term, then `ended`; `cancelled` when ended before it started. Each change publishes a `reservation-grant.*` event (`created`, `active`, `ended`, `cancelled`) in the grantee's tenant, with `{ grantId, poolId, projectId?, slots, startsAt, endsAt }`.
 
-All 4 methods are served by @better-compute/server 0.2.1.
+All 4 methods are served by @better-compute/server 0.3.0.
 
 | Method              | Kind     | Authorization                                           | Phase | Status     |
 | ------------------- | -------- | ------------------------------------------------------- | ----- | ---------- |

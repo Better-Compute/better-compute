@@ -7,7 +7,7 @@ description: "A reservation is a tenant's claim on devices of one pool for a tim
 
 A reservation is a tenant's claim on devices of one pool for a time window. `create` first writes the request as a draft, Better IAM decides once on that draft with the request as attributes, and only an allowed draft is charged against quota and placed. A reservation holds its quota charge until it reaches a terminal state, and the `capacity.reservations` reconciler drives it through `placed`, `binding` and `active` to `released`. See [Reservations](/docs/guides/capacity/reservations).
 
-All 7 methods are served by @better-compute/server 0.2.1.
+All 7 methods are served by @better-compute/server 0.3.0.
 
 | Method                | Kind     | Authorization                                          | Phase | Status     |
 | --------------------- | -------- | ------------------------------------------------------ | ----- | ---------- |

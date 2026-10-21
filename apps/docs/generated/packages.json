@@ -4,7 +4,7 @@
     "directory": "packages/audit",
     "description": "Tamper-evident audit for better-compute: signed hourly per-tenant Merkle checkpoints over audit_events, inclusion proofs and verification.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -13,7 +13,7 @@
     "directory": "packages/aws-core",
     "description": "Zero-dependency AWS plumbing for better-compute: SigV4 signing, endpoints, query and JSON protocol clients, a hardened XML reader and credential sources.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "not released: not ready: only the unreleased AWS provider uses it",
     "exports": ["."]
   },
@@ -22,7 +22,7 @@
     "directory": "packages/better-compute",
     "description": "Manage GPU and bare-metal capacity and provision nodes in many ways: one package with every better-compute subpath.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": [
       ".",
@@ -57,7 +57,7 @@
     "directory": "packages/capacity",
     "description": "Capacity for better-compute: atoms, bookings, quotas, rollups and the placement pipeline.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -66,7 +66,7 @@
     "directory": "packages/cli",
     "description": "The better-compute command line.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -75,7 +75,7 @@
     "directory": "packages/client",
     "description": "Typed, browser-safe client for the better-compute API.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -84,7 +84,7 @@
     "directory": "packages/console-kit",
     "description": "Framework-free view models for better-compute consoles: resource stores with pagination, live event refresh and permission-aware actions.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": [".", "./react"]
   },
@@ -93,7 +93,7 @@
     "directory": "packages/core",
     "description": "Browser-safe contracts for better-compute: domain types, errors, state tables, extension contracts and the IAM catalog.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": [".", "./conformance"]
   },
@@ -102,7 +102,7 @@
     "directory": "packages/driver-sdk",
     "description": "bcx, the better-compute out-of-process driver protocol: serveDriver runs a defineDriver object as a plugin, externalDriver hosts one over auto-mTLS gRPC.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -111,7 +111,7 @@
     "directory": "packages/events",
     "description": "Event delivery for better-compute: per-tenant signed webhooks with retries and dead letters, and the SSE /watch stream, read from the outbox.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -120,7 +120,7 @@
     "directory": "packages/fleet",
     "description": "FleetConfig as code for better-compute: export, plan and apply sites, pools, offers, quotas, flavors and provider accounts.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -129,7 +129,7 @@
     "directory": "packages/gateway",
     "description": "The better-compute gateway: daemon sessions over gRPC/HTTP/2 mTLS, liveness, command dispatch and Join/Renew/Secret forwarding.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -138,7 +138,7 @@
     "directory": "packages/gcp-common",
     "description": "Shared Google Cloud plumbing for better-compute: token sources, workload identity, REST client, errors, paging, operations",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -147,7 +147,7 @@
     "directory": "packages/iam",
     "description": "The better-iam bridge for better-compute: IAM plugin and catalog, event inbox, authz projection and resolver, the embedded IamPort, usage sink and flag cache.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": [".", "./plugin", "./testing"]
   },
@@ -156,7 +156,7 @@
     "directory": "packages/inventory",
     "description": "Hardware inventory for better-compute: section hashing, diffs, GPU model mapping, labels and health conditions.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -165,7 +165,7 @@
     "directory": "packages/mcp",
     "description": "Model Context Protocol tools for better-compute: pools, capacity, GPU reservations and node status for AI agents, gated by better-iam.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -174,7 +174,7 @@
     "directory": "packages/metal",
     "description": "Bare-metal lifecycle for better-compute: power, management, boot, deploy and inspect drivers.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -183,7 +183,7 @@
     "directory": "packages/observability",
     "description": "Metrics for better-compute: a bounded Prometheus registry, the standard better_compute_* series, a metered IamPort and backlog gauges.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -192,7 +192,7 @@
     "directory": "packages/pki",
     "description": "Machine PKI for better-compute: local CAs, SPIFFE node certificates, sealed join tokens, signed join responses and renew proofs.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -201,7 +201,7 @@
     "directory": "packages/postgres",
     "description": "PostgreSQL and PGlite storage for better-compute: executor, migrations and store conformance.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": [".", "./pglite", "./conformance"]
   },
@@ -210,7 +210,7 @@
     "directory": "packages/protocol",
     "description": "Wire contracts between the bcd daemon and the better-compute control plane (protobuf-es generated).",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -219,7 +219,7 @@
     "directory": "packages/provider-digitalocean",
     "description": "DigitalOcean provider for better-compute: Droplets as VPS instances and offers, VPC networks, power, reinstall and discovery.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "not released: not ready: the DigitalOcean program is still in progress",
     "exports": ["."]
   },
@@ -228,7 +228,7 @@
     "directory": "packages/provider-gcp",
     "description": "Google Compute Engine provider for better-compute: VMs as VPS instances and offers, attach, reservations and tenant networks.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -237,7 +237,7 @@
     "directory": "packages/provider-hetzner",
     "description": "Hetzner providers for better-compute: Hetzner Cloud servers as VPS instances and offers.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -246,7 +246,7 @@
     "directory": "packages/provider-kubernetes",
     "description": "Kubernetes as a capacity source for better-compute: bcd as a DaemonSet adopts a cluster's nodes and GPUs into a pool.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -255,7 +255,7 @@
     "directory": "packages/provider-proxmox",
     "description": "Proxmox VE provider for better-compute: QEMU VMs cloned from templates as VPS instances.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -264,7 +264,7 @@
     "directory": "packages/provision",
     "description": "Provisioning for better-compute: profiles, steps and the workflow engine.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -273,7 +273,7 @@
     "directory": "packages/rollout",
     "description": "Signed bcd releases and wave rollouts (A/B self-update) for better-compute, within each pool's disruption budget.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -282,7 +282,7 @@
     "directory": "packages/server",
     "description": "The better-compute control plane: betterCompute(), the operation envelope, router and runtimes.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -291,7 +291,7 @@
     "directory": "packages/testing",
     "description": "Testing kit for better-compute: fixtures, simulated daemons, sim clock and conformance runners.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   },
@@ -300,7 +300,7 @@
     "directory": "packages/vps",
     "description": "VPS instances for better-compute: runtimes, flavors and external providers.",
     "private": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release": "released",
     "exports": ["."]
   }

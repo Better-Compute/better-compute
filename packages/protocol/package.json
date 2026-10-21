@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/protocol",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Wire contracts between the bcd daemon and the better-compute control plane (protobuf-es generated).",
   "type": "module",
   "license": "Apache-2.0",

@@ -6,6 +6,8 @@ All notable changes to the better-compute packages are documented here. The form
 
 ## Unreleased
 
+## 0.3.0 (2026-10-20)
+
 ### Added
 
 - **Platform compute billing** (`@better-compute/vps`, `capacity`, `iam`, `server`, `provider-gcp`; plan

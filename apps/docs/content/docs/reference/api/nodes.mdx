@@ -7,7 +7,7 @@ description: 'Nodes are machines that joined the control plane, as their tenant 
 
 Nodes are machines that joined the control plane, as their tenant sees them: a tenant sees the nodes the authorization projection holds for it. Every method except `list` is decided on `compute-node/{nodeId}`. Mutations take an optional `version`; when the node has moved past it, the call is `CONFLICT`. See [Operating nodes](/docs/guides/nodes/operating-nodes).
 
-All 14 methods are served by @better-compute/server 0.2.1.
+All 14 methods are served by @better-compute/server 0.3.0.
 
 | Method                              | Kind     | Authorization                                    | Phase | Status     |
 | ----------------------------------- | -------- | ------------------------------------------------ | ----- | ---------- |

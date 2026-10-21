@@ -7,7 +7,7 @@ description: 'The workflows group reads the provisioning workflows of a node and
 
 The workflows group reads the provisioning workflows of a node and lets an operator abort, retry, pause or resume one. Workflows are started by other modules, such as metal for each workflow-driven provision state, not through this group. Every method is decided on the node (`compute-node`): reads as `compute:workflows:read`, the others as `compute:workflows:manage`. See [Provisioning workflows](/docs/guides/bare-metal/workflows).
 
-All 6 methods are served by @better-compute/server 0.2.1.
+All 6 methods are served by @better-compute/server 0.3.0.
 
 | Method              | Kind     | Authorization                               | Phase | Status     |
 | ------------------- | -------- | ------------------------------------------- | ----- | ---------- |

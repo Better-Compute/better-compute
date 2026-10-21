@@ -7,7 +7,7 @@ description: 'Sandbox snapshots are their own resource, so a snapshot kept with 
 
 Sandbox snapshots are their own resource, so a snapshot kept with `keep: true` outlives the sandbox it came from. `sandboxes.snapshot` takes them and `sandboxes.create` restores from them with `fromSnapshot`. These methods list, read and delete them. Snapshots stay private to their tenant and are never promoted to shared images. See [Sandboxes](/docs/guides/vps/sandboxes).
 
-All 3 methods are served by @better-compute/server 0.2.1.
+All 3 methods are served by @better-compute/server 0.3.0.
 
 | Method              | Kind     | Authorization                                           | Phase | Status     |
 | ------------------- | -------- | ------------------------------------------------------- | ----- | ---------- |

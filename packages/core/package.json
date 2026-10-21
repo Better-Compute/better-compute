@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/core",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Browser-safe contracts for better-compute: domain types, errors, state tables, extension contracts and the IAM catalog.",
   "type": "module",
   "license": "Apache-2.0",
