@@ -15,6 +15,7 @@ import { GcpCompute, parseDiscoverLabel } from './compute.js';
 import { gcpConfig, type GcpConfig, type GcpProviderOptions } from './config.js';
 import { billingExportOf, gcpBilling, readBillingExport } from './costs.js';
 import { checkGcpAccount, federationOf, subjectTokenAudience } from './federation.js';
+import { GcpKubernetes, GkeClient } from './gke/index.js';
 import { catalogReader } from './prices.js';
 
 /**
@@ -99,12 +100,13 @@ export function gcpProvider(options: GcpProviderOptions = {}): ProviderDefinitio
     universeDomain: options.universeDomain,
   });
   const bigqueryEndpoint = googleEndpoint('bigquery', { universeDomain: options.universeDomain });
+  const containerEndpoint = `${googleEndpoint('container', { universeDomain: options.universeDomain })}/v1`;
   return defineProvider<GcpConfig>({
     id: 'gcp',
     version: '0.1.0',
     provides: ['vps'],
     config: gcpConfig as unknown as ProviderDefinition<GcpConfig>['config'],
-    capabilities: ['power', 'list', 'discover', 'claim', 'reservations', 'networks'],
+    capabilities: ['power', 'list', 'discover', 'claim', 'reservations', 'networks', 'kubernetes'],
     // One pool provider is one account: vps refuses a second account with the same audience.
     accountKey: (config) => config.federationAudience || undefined,
     // Compute and disk/address SKUs are metered by compute: never passed through (D11), leak hours (D12).
@@ -134,6 +136,25 @@ export function gcpProvider(options: GcpProviderOptions = {}): ProviderDefinitio
         log: context.log,
       });
       const compute = new GcpCompute(config, context, options, client, prices);
+      // Managed Kubernetes (GKE) with the same account identity.
+      const container = googleClient({
+        fetch: fetchImpl,
+        tokens,
+        clock: context.clock,
+        log: context.log,
+      });
+      compute.kubernetes = new GcpKubernetes({
+        client: new GkeClient(
+          container,
+          options.containerEndpoint ?? containerEndpoint,
+          config.projectId,
+        ),
+        compute: client,
+        config,
+        tokens,
+        clock: context.clock,
+        ...(options.kubeTransport ? { kubeTransport: options.kubeTransport } : {}),
+      });
       const table = billingExportOf(config);
       if (table) {
         // The same account token: its cloud-platform scope covers BigQuery reads.

@@ -12,6 +12,7 @@ import {
   type ProviderListPrice,
   type ProviderContext,
   type ProviderImpl,
+  type ProviderKubernetes,
   type ProviderNetworks,
 } from '@better-compute/core';
 import {
@@ -92,6 +93,8 @@ export class GcpCompute implements ProviderImpl {
   readonly #prices: ReturnType<typeof catalogReader> | undefined;
   /** Provider costs from the BigQuery billing export (D10); set only when the account names one. */
   costs?: ProviderImpl['costs'];
+  /** Managed Kubernetes (GKE clusters and node pools); the provider sets it. */
+  kubernetes?: ProviderKubernetes;
 
   constructor(
     config: GcpConfig,

@@ -490,6 +490,7 @@ describe('compute', () => {
       'claim',
       'reservations',
       'networks',
+      'kubernetes',
     ]);
     const parsed = await gcp.config['~standard'].validate({
       projectId: 'p',

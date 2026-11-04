@@ -774,6 +774,134 @@ export interface ProviderNetworks {
 }
 
 /**
+ * The state of a provider-side resource that a reconciler drives (Kubernetes clusters and node pools). Same shape as
+ * `ProviderNetworkState`, plus `updating` and the resource's plain `outputs` (never secrets).
+ */
+export interface ProviderResourceState {
+  id: string;
+  state: 'pending' | 'ready' | 'updating' | 'deleting' | 'deleted' | 'error';
+  outputs?: Readonly<Record<string, string>>;
+  message?: string;
+}
+
+/**
+ * (kubernetes) A managed Kubernetes cluster as the kubernetes module asks for it. The provider runs the control plane
+ * (GKE, DOKS); better-compute never does. `name` is the provider-side name the module derives (`bc-k-…`).
+ */
+export interface KubernetesClusterSpec {
+  name: string;
+  /** A region (a regional cluster) or a zone (a zonal one). */
+  location: string;
+  /** `standard`: node pools the module manages. `autopilot`: the provider runs the nodes; no node pools. */
+  mode: 'standard' | 'autopilot';
+  /** The provider's release channel; it upgrades the cluster on its own within the channel. */
+  releaseChannel: 'rapid' | 'regular' | 'stable' | 'extended';
+  /** A minor (`1.33`) or full control-plane version; absent: the channel's default. Raising it upgrades in place. */
+  version?: string;
+  /** The provider network and subnet the nodes live on; absent: the account's own network config. */
+  network?: { network: string; subnet?: string };
+  /** CIDRs that may reach the public control-plane endpoint; empty: everyone (still authenticated). */
+  authorizedNetworks: readonly string[];
+  /** Nodes get no public addresses (their egress then needs a NAT on the network). */
+  privateNodes: boolean;
+  /**
+   * `standard` only, used only when the cluster is created (GKE creates a Standard cluster with its node pools):
+   * at least one. Later pools go through `ensureNodePool`.
+   */
+  initialNodePools?: readonly KubernetesNodePoolSpec[];
+  labels?: Readonly<Record<string, string>>;
+  description?: string;
+}
+
+/** (kubernetes) A node pool of a `standard` cluster. */
+export interface KubernetesNodePoolSpec {
+  name: string;
+  machineType: string;
+  /** Nodes per zone of the pool. With `autoscaling`, the initial count. */
+  nodeCount: number;
+  autoscaling?: { minNodes: number; maxNodes: number };
+  diskGiB?: number;
+  diskType?: string;
+  spot?: boolean;
+  /** GPUs per node, by the provider's accelerator type (`nvidia-l4`). */
+  accelerators?: { type: string; count: number };
+  /** Zones of the cluster's region; absent: the provider's default. */
+  zones?: readonly string[];
+  labels?: Readonly<Record<string, string>>;
+  taints?: readonly {
+    key: string;
+    value?: string;
+    effect: 'NoSchedule' | 'PreferNoSchedule' | 'NoExecute';
+  }[];
+}
+
+/**
+ * (kubernetes) A credential for one principal: the module never stores one, and never holds a cluster-admin kubeconfig.
+ * The provider creates (or reuses) a Kubernetes service account named `subject`, binds it to the built-in role for
+ * `role` (`view`, `edit`, `cluster-admin`) and mints a bound token through the TokenRequest API.
+ */
+export interface KubernetesCredentialRequest {
+  /** A DNS-1123 label the module derives from the IAM identity (`bc-u-…`). */
+  subject: string;
+  role: 'view' | 'edit' | 'admin';
+  /** At least 600 (the API's floor), at most 86400. */
+  ttlSeconds: number;
+}
+export interface KubernetesCredentials {
+  /** `https://<address>` of the control plane. */
+  server: string;
+  /** PEM, base64 as the kubeconfig `certificate-authority-data` takes it. */
+  certificateAuthorityData: string;
+  token: string;
+  expiresAt: number;
+}
+
+/** (kubernetes) The provider's Kubernetes versions in a location. */
+export interface KubernetesVersions {
+  defaultVersion: string;
+  validVersions: readonly string[];
+  channels: Readonly<
+    Partial<
+      Record<
+        KubernetesClusterSpec['releaseChannel'],
+        { defaultVersion: string; validVersions: readonly string[] }
+      >
+    >
+  >;
+}
+
+/**
+ * (kubernetes) Managed Kubernetes on a provider account. `ensure*` and `delete*` are idempotent and non-blocking, like
+ * `ProviderNetworks`: they return `pending`, `updating` or `deleting` while a provider operation runs, and the
+ * reconciler calls again. `cluster` is the `id` `ensureCluster` returned. `ensureCluster` outputs `endpoint`,
+ * `version`, `location` and `nodeVersion` once ready; it changes `version`, `releaseChannel` and `authorizedNetworks`
+ * in place and refuses any other difference with `INVALID_STATE`.
+ */
+export interface ProviderKubernetes {
+  ensureCluster(spec: KubernetesClusterSpec, context: CallContext): Promise<ProviderResourceState>;
+  /** The cluster as it is; undefined when it does not exist. */
+  getCluster(cluster: string, context: CallContext): Promise<ProviderResourceState | undefined>;
+  deleteCluster(cluster: string, context: CallContext): Promise<ProviderResourceState>;
+  /** Changes `nodeCount` and `autoscaling` in place; any other difference is `INVALID_STATE`. */
+  ensureNodePool(
+    cluster: string,
+    spec: KubernetesNodePoolSpec,
+    context: CallContext,
+  ): Promise<ProviderResourceState>;
+  deleteNodePool(
+    cluster: string,
+    name: string,
+    context: CallContext,
+  ): Promise<ProviderResourceState>;
+  credentials(
+    cluster: string,
+    request: KubernetesCredentialRequest,
+    context: CallContext,
+  ): Promise<KubernetesCredentials>;
+  versions(location: string, context: CallContext): Promise<KubernetesVersions>;
+}
+
+/**
  * (v1.0, D10) One row of a provider's cost export, as the provider billed it. Amounts are integer
  * micros of `currency` (the export's own; never converted). A re-export of the same row keeps its
  * `sourceRowId`, so ingestion is idempotent and a corrected amount replaces the stored one.
@@ -920,6 +1048,8 @@ export interface ProviderImpl {
     context: CallContext,
   ): Promise<ProviderListPrice[]>;
   networks?: ProviderNetworks;
+  /** (kubernetes) Managed Kubernetes clusters and node pools on this account. */
+  kubernetes?: ProviderKubernetes;
   /**
    * (v1.0, D10) The account's billed cost rows whose usage started in `[window.from, window.to)`.
    * Read outside any transaction. A provider whose export is not configured leaves it absent.

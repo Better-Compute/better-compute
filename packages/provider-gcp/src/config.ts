@@ -1,5 +1,6 @@
 import { field, manifest, type SecretRef } from '@better-compute/core';
 import type { TokenSource } from './auth.js';
+import type { KubeTransport } from './gke/transport.js';
 
 /**
  * A BigQuery table id, `project.dataset.table`. A table name cannot be a query parameter, so the
@@ -109,4 +110,14 @@ export interface GcpProviderOptions {
   costQueryBudgetMs?: number;
   /** Default 1000. The pause between reads of an unfinished cost query. */
   costQueryPollMs?: number;
+  /**
+   * Default `https://container.<universeDomain>/v1`: the GKE REST API that managed Kubernetes
+   * (`kubernetes`) calls.
+   */
+  containerEndpoint?: string;
+  /**
+   * The transport to a GKE cluster's own Kubernetes API (`kubernetes.credentials`). Default:
+   * `node:https` trusting only the cluster's CA. Tests pass a fake.
+   */
+  kubeTransport?: KubeTransport;
 }

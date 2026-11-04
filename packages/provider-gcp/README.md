@@ -1,6 +1,6 @@
 # @better-compute/provider-gcp
 
-A Google Compute Engine provider for better-compute: VMs as VPS instances and offers (including GPU machine types), with attach, reservations and tenant networks, and for platform compute billing the provider costs of the Cloud Billing BigQuery export and the list prices of the Cloud Billing Catalog. It talks to the Compute Engine REST v1 API (and BigQuery v2 and the Catalog v1 for billing) over plain `fetch` and has no npm dependencies beyond `@better-compute/core` and `@better-compute/vps`.
+A Google Compute Engine provider for better-compute: VMs as VPS instances and offers (including GPU machine types), with attach, reservations, tenant networks and managed Kubernetes (GKE), and for platform compute billing the provider costs of the Cloud Billing BigQuery export and the list prices of the Cloud Billing Catalog. It talks to the Compute Engine REST v1 API (and the GKE v1 API for Kubernetes, BigQuery v2 and the Catalog v1 for billing) over plain `fetch` and has no npm dependencies beyond `@better-compute/core` and `@better-compute/vps`.
 
 It is not part of the `better-compute` umbrella: install it next to `better-compute`.
 
@@ -130,6 +130,28 @@ How vps uses them:
 - A firewall that exists with a different body is patched. A subnet that exists with another range, or a firewall with the opposite action, is reported as `error`.
 - A network or subnet that is still in use reports `pending` with a message, never an error.
 - `setTags` replaces the tags starting with `bc-` and keeps every other tag. It refuses VMs without the instance label.
+
+## Managed Kubernetes (GKE)
+
+The account's client implements `kubernetes` (capability `kubernetes`): GKE clusters, Standard and Autopilot, in the account's project (a tenant's own project or a platform one), over the GKE REST v1 API (`https://container.<universe>/v1`, or `gcpProvider({ containerEndpoint })`). GKE runs the control plane; better-compute never does.
+
+- A cluster's id is `<location>/<name>` (a region or a zone). Like the networks, every `ensure*`/`delete*` call returns at once: it polls the GKE operation it started (remembered in memory only), re-reads the resource and answers `pending`, `updating` or `deleting` while an operation runs. A failed operation is `error` with GKE's message. GKE runs one operation per cluster at a time: a call refused for that answers the in-progress state, never an error.
+- Clusters are created with the managed label `better-compute-managed=true` plus the spec's labels, VPC-native (IP aliases), Shielded Nodes, legacy ABAC off, private nodes and authorized networks as asked, and Workload Identity (`<project>.svc.id.goog`) on Standard. The network is the spec's, else the account's `network`/`subnet`. A Standard cluster is created with its `initialNodePools` (at least one); an Autopilot cluster has no node pools (`ensureNodePool` is `UNSUPPORTED`).
+- In place, one `clusters.update` per call: the release channel, then the control-plane version (a minor such as `1.33` is satisfied by any `1.33.x-gke.y`; an older version is `INVALID_STATE`, GKE never downgrades), then the authorized networks. A different mode, location, network or private-nodes setting is `INVALID_STATE`.
+- Node pools are created with Shielded VM (secure boot, integrity monitoring), the GKE metadata server, the `cloud-platform` scope, auto-upgrade and auto-repair, and GPU drivers installed by GKE. Only the size (`setSize`, read back from the pool's managed instance groups) and the autoscaling bounds (`setAutoscaling`) change in place; with autoscaling the autoscaler owns the size.
+- `credentials(cluster, { subject, role, ttlSeconds })` calls the cluster's own Kubernetes API (trusting only the cluster CA, authenticated with the account's Google access token): it creates or reuses the service account `subject` in the namespace `bc-access`, binds it with the ClusterRoleBinding `bc-access:<subject>` to the ClusterRole `view`, `edit` or `cluster-admin` (a binding to another role is replaced: `roleRef` is immutable), and returns a bound token from the TokenRequest API (600 s to 24 h). No credential is stored and no token is logged. `gcpProvider({ kubeTransport })` replaces the HTTPS transport (tests).
+- `versions(location)` reads GKE's `serverConfig`: the default and valid versions, and per release channel.
+
+The account's identity needs, in the project:
+
+| Role                           | For                                                                                                                                                                  |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `roles/container.admin`        | Creating, updating and deleting clusters and node pools, and `cluster-admin` on the clusters' Kubernetes API (service accounts, bindings, tokens for `credentials`). |
+| `roles/iam.serviceAccountUser` | On the node service account (by default the project's Compute Engine default service account): GKE runs the nodes as it.                                             |
+| `roles/compute.networkUser`    | Using the cluster's network and subnet; on the host project for a Shared VPC.                                                                                        |
+| `roles/compute.viewer`         | Reading node pool sizes from their managed instance groups (without it, a pool's size is taken as its initial count).                                                |
+
+Enable the Kubernetes Engine API (`container.googleapis.com`) in the project first; a disabled API is `INVALID_CONFIG` with the activation link.
 
 ## Provider costs
 
