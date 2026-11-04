@@ -40,6 +40,7 @@ export const computeResourceKinds = [
   'sandbox-snapshot',
   'sandbox-volume',
   'network',
+  'kubernetes-cluster',
 ] as const;
 export type ComputeResourceKind = (typeof computeResourceKinds)[number];
 
@@ -98,6 +99,8 @@ const definitions = {
       ...a('sandboxes', 'read', 'manage'),
       // v1.0 tenant networks: `networks.list` is gated on the tenant.
       ...a('networks', 'read'),
+      // Managed Kubernetes: `kubernetesClusters.list` and `versions` are gated on the tenant.
+      ...a('kubernetes', 'read'),
       // v1.0 destructive-batch quorum (§13): on top of the approvers' signatures, never instead.
       ...a('batches', 'read', 'create', 'approve'),
     ],
@@ -239,6 +242,19 @@ const definitions = {
     actions: a('networks', 'create', 'read', 'update', 'delete'),
     attributes: { providerAccountId: 'string', poolId: 'string', projectId: 'string' },
   },
+  'kubernetes-cluster': {
+    description:
+      'A managed Kubernetes cluster (GKE and the like) on a provider account, with its node pools; the provider runs the control plane',
+    parent: 'tenant',
+    actions: a('kubernetes', 'create', 'read', 'update', 'delete', 'connect'),
+    attributes: {
+      providerAccountId: 'string',
+      poolId: 'string',
+      projectId: 'string',
+      mode: 'string',
+      location: 'string',
+    },
+  },
 } as const satisfies Record<ComputeResourceKind, KindDefinition>;
 
 /** Every compute action. */
@@ -305,6 +321,8 @@ export type ApiModule =
   | 'rollout'
   /** The server's tunnels module (`tunnels.open`, `nodes.issueSshCert`), hosted when `tunnels` is configured. */
   | 'tunnels'
+  /** `@better-compute/kubernetes` (managed Kubernetes clusters on provider accounts); an injected module. */
+  | 'kubernetes'
   /** The server's quorum module (`commandBatches`, v1.0 §13), always hosted. */
   | 'quorum';
 
@@ -648,6 +666,23 @@ group('firewallRules', 'vps', [
   ['list', 'read', 'networks:read', 'network', 'v1.0'],
   ['update', 'mutation', 'networks:update', 'network', 'v1.0'],
   ['delete', 'mutation', 'networks:update', 'network', 'v1.0'],
+]);
+// Managed Kubernetes (GKE, …) on a provider account; the provider runs the control plane (kubernetes module).
+group('kubernetesClusters', 'kubernetes', [
+  ['create', 'mutation', 'kubernetes:create', 'kubernetes-cluster', 'v1.0'],
+  ['list', 'read', 'kubernetes:read', 'tenant', 'v1.0', list],
+  ['get', 'read', 'kubernetes:read', 'kubernetes-cluster', 'v1.0'],
+  ['update', 'mutation', 'kubernetes:update', 'kubernetes-cluster', 'v1.0'],
+  ['delete', 'mutation', 'kubernetes:delete', 'kubernetes-cluster', 'v1.0'],
+  // A short-lived kubeconfig for the caller, its Kubernetes role from the action it holds.
+  ['credentials', 'mutation', 'kubernetes:connect', 'kubernetes-cluster', 'v1.0'],
+  ['versions', 'read', 'kubernetes:read', 'tenant', 'v1.0'],
+]);
+group('kubernetesNodePools', 'kubernetes', [
+  ['create', 'mutation', 'kubernetes:update', 'kubernetes-cluster', 'v1.0'],
+  ['list', 'read', 'kubernetes:read', 'kubernetes-cluster', 'v1.0'],
+  ['update', 'mutation', 'kubernetes:update', 'kubernetes-cluster', 'v1.0'],
+  ['delete', 'mutation', 'kubernetes:update', 'kubernetes-cluster', 'v1.0'],
 ]);
 group('commandBatches', 'quorum', [
   ['create', 'mutation', 'batches:create', 'tenant', 'v1.0'],

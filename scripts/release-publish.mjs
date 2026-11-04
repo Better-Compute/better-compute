@@ -29,7 +29,7 @@ import { runPnpm } from './tooling.mjs';
 
 /**
  * The packages a release publishes: every package of 0.2.1 plus `@better-compute/gcp-common` (new in
- * 0.3, a dependency of provider-gcp). Publish order is computed from the dependencies, not this order.
+ * 0.3, a dependency of provider-gcp) and `@better-compute/kubernetes` (managed Kubernetes clusters). Publish order is computed from the dependencies, not this order.
  */
 export const releaseAllowlist = Object.freeze([
   '@better-compute/audit',
@@ -46,6 +46,7 @@ export const releaseAllowlist = Object.freeze([
   '@better-compute/gcp-common',
   '@better-compute/iam',
   '@better-compute/inventory',
+  '@better-compute/kubernetes',
   '@better-compute/mcp',
   '@better-compute/metal',
   '@better-compute/observability',

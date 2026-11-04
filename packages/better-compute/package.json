@@ -100,6 +100,10 @@
       "types": "./dist/rollout.d.ts",
       "import": "./dist/rollout.js"
     },
+    "./kubernetes": {
+      "types": "./dist/kubernetes.d.ts",
+      "import": "./dist/kubernetes.js"
+    },
     "./audit": {
       "types": "./dist/audit.d.ts",
       "import": "./dist/audit.js"
@@ -160,6 +164,7 @@
     "@better-compute/gateway": "workspace:*",
     "@better-compute/iam": "workspace:*",
     "@better-compute/inventory": "workspace:*",
+    "@better-compute/kubernetes": "workspace:*",
     "@better-compute/mcp": "workspace:*",
     "@better-compute/metal": "workspace:*",
     "@better-compute/observability": "workspace:*",

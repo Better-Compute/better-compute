@@ -377,6 +377,9 @@ importers:
       '@better-compute/inventory':
         specifier: workspace:*
         version: link:../inventory
+      '@better-compute/kubernetes':
+        specifier: workspace:*
+        version: link:../kubernetes
       '@better-compute/mcp':
         specifier: workspace:*
         version: link:../mcp
@@ -608,6 +611,18 @@ importers:
       '@better-compute/protocol':
         specifier: workspace:*
         version: link:../protocol
+
+  packages/kubernetes:
+    dependencies:
+      '@better-compute/capacity':
+        specifier: workspace:*
+        version: link:../capacity
+      '@better-compute/core':
+        specifier: workspace:*
+        version: link:../core
+      '@better-compute/vps':
+        specifier: workspace:*
+        version: link:../vps
 
   packages/mcp:
     dependencies:

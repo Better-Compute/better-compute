@@ -140,6 +140,11 @@
       ]
     },
     {
+      "name": "kubernetes",
+      "groups": ["kubernetesClusters", "kubernetesNodePools"],
+      "migrations": ["kubernetes/0001_clusters"]
+    },
+    {
       "name": "events",
       "groups": ["webhooks"],
       "migrations": [
@@ -181,6 +186,8 @@
     "health",
     "inventory",
     "inventory.hygiene",
+    "kubernetes.clusters",
+    "kubernetes.usage",
     "liveness",
     "metal",
     "node",

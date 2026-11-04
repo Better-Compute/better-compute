@@ -196,6 +196,7 @@ export function meterCatalog(options: MeterCatalogOptions): MeterSpec[] {
   add('vm.managed.hours', 'Managed VM hours', 'hour');
 
   add('network.vpc.hours', 'Tenant network hours', 'hour');
+  add('kubernetes.cluster.hours', 'Managed Kubernetes cluster hours', 'hour');
   add('ip.public.hours', 'Public IP hours', 'hour');
   for (const type of diskTypes) add(`disk.${type}.gib.hours`, `${type} disk GiB hours`, 'gib-hour');
   add('snapshot.gib.hours', 'Snapshot GiB hours', 'gib-hour');

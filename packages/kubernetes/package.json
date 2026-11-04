@@ -1,0 +1,55 @@
+{
+  "name": "@better-compute/kubernetes",
+  "version": "0.3.0",
+  "description": "Managed Kubernetes clusters (GKE and the like) on provider accounts for better-compute: the provider runs the control plane.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "better-compute contributors",
+  "homepage": "https://github.com/better-compute/better-compute/tree/main/packages/kubernetes#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/better-compute/better-compute.git",
+    "directory": "packages/kubernetes"
+  },
+  "bugs": {
+    "url": "https://github.com/better-compute/better-compute/issues"
+  },
+  "keywords": [
+    "better-compute",
+    "kubernetes",
+    "gke",
+    "managed-kubernetes",
+    "kubeconfig",
+    "node-pools",
+    "multi-tenant"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-compute/capacity": "workspace:*",
+    "@better-compute/core": "workspace:*",
+    "@better-compute/vps": "workspace:*"
+  }
+}

@@ -16,6 +16,8 @@
     "inventory",
     "join-requests",
     "join-tokens",
+    "kubernetes-clusters",
+    "kubernetes-node-pools",
     "metal",
     "networks",
     "nodes",

@@ -6,6 +6,29 @@ All notable changes to the better-compute packages are documented here. The form
 
 ## Unreleased
 
+### Added
+
+- **Managed Kubernetes clusters** (new package `@better-compute/kubernetes`; `core`, `capacity`, `events`).
+  `kubernetes({ providers })` adds the groups `kubernetesClusters` (`create`, `list`, `get`, `update`, `delete`,
+  `credentials`, `versions`) and `kubernetesNodePools` (`create`, `list`, `update`, `delete`) on the resource kind
+  `kubernetes-cluster` (`compute:kubernetes:create|read|update|delete|connect`; tenant `compute:kubernetes:read`).
+  Clusters (Standard with node pools, or Autopilot) live on a provider pool visible to the tenant, platform-hosted
+  (a root pool offered to the tenant) or on the tenant's own account; the provider runs the control plane. The
+  `kubernetes.clusters` reconciler converges them through `ProviderImpl.kubernetes` (a 30 s sweep, a 5 min refresh).
+  `credentials` returns a kubeconfig whose token the provider mints for a per-identity, per-role subject (`edit`
+  also needs `compute:kubernetes:update`, `admin` `compute:kubernetes:delete`); the token is never stored, logged or
+  published. Events `kubernetes.cluster.*` and `kubernetes.nodepool.*`; meter `kubernetes.cluster.hours` (new in the
+  meter catalog) as the new usage source kind `kubernetes` (migration `kubernetes/0001_clusters` extends the
+  `usage_windows` source CHECK); `tenantDeleted` deletes a deleted tenant's clusters.
+- **Managed Kubernetes on GKE** (`@better-compute/provider-gcp`). The GCP provider implements the optional
+  `ProviderImpl.kubernetes` contract (capability `kubernetes`): Standard and Autopilot GKE clusters in the account's
+  project, non-blocking `ensureCluster`/`deleteCluster` over GKE operations, in-place release channel, version and
+  authorized-network changes (one update per call; downgrades and mode, location, network or private-node changes are
+  `INVALID_STATE`), node pools (size and autoscaling in place), `versions` from `serverConfig`, and `credentials`: a
+  service account per subject in `bc-access`, bound to `view`/`edit`/`cluster-admin`, with a bound TokenRequest
+  token, minted over the cluster's Kubernetes API trusting only the cluster CA. New options `containerEndpoint` and
+  `kubeTransport`. See the provider-gcp README, "Managed Kubernetes (GKE)", for the IAM roles.
+
 ## 0.3.0 (2026-10-20)
 
 ### Added

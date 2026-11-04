@@ -29,6 +29,7 @@ import {
   type ClientDeps,
   type ProviderAccount,
   type ProviderClients,
+  liveKubernetesClusters,
 } from './accounts.js';
 import {
   attachConflictCondition,
@@ -1512,6 +1513,14 @@ export async function deleteNetwork(
       `Network ${row.name} has ${instanceIds.length} instance(s) on it`,
       undefined,
       { instanceIds },
+    );
+  const clusterIds = await liveKubernetesClusters(tx, 'network_id', row.id);
+  if (clusterIds.length > 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Network ${row.name} has ${clusterIds.length} Kubernetes cluster(s) on it`,
+      undefined,
+      { clusterIds },
     );
   await tx.query(
     `UPDATE network_firewall_rules SET desired_state = 'deleted', state = CASE WHEN state = 'deleted' THEN state ELSE 'deleting' END,

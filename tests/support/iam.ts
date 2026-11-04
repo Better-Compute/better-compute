@@ -75,6 +75,8 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
         ...action('sandboxes', 'read', 'manage'),
         // v1.0 tenant networks: `networks.list` is gated on the tenant.
         ...action('networks', 'read'),
+        // Managed Kubernetes: `kubernetesClusters.list` and `versions` are gated on the tenant.
+        ...action('kubernetes', 'read'),
         // §13 destructive-batch quorum (v1.0).
         ...action('batches', 'read', 'create', 'approve'),
       ],
@@ -191,6 +193,17 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
       parent: `${p}tenant`,
       actions: action('networks', 'create', 'read', 'update', 'delete'),
       attributes: { providerAccountId: 'string', poolId: 'string', projectId: 'string' },
+    },
+    [`${p}kubernetes-cluster`]: {
+      parent: `${p}tenant`,
+      actions: action('kubernetes', 'create', 'read', 'update', 'delete', 'connect'),
+      attributes: {
+        providerAccountId: 'string',
+        poolId: 'string',
+        projectId: 'string',
+        mode: 'string',
+        location: 'string',
+      },
     },
   };
 }

@@ -247,6 +247,20 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
       'Tenant networks (VPCs): created, adopted (an existing provider VPC, networks.adopt: { externalNetwork, sharedTagScoped }), ready, error, deleting, deleted; network.subnet.ready and network.rule.ready/error when a subnet or firewall rule converges; data { networkId, ... }',
   },
   {
+    type: 'kubernetes.cluster.*',
+    subject: 'kubernetes-cluster/{id}',
+    module: 'kubernetes',
+    description:
+      'Managed Kubernetes clusters: created { poolId, providerAccountId, name, mode, location }, ready the first time { endpoint?, version? }, updated when ready again after a change or on another version { version?, previousVersion? }, error { message }, deleting (+ reason: tenant-deleted), deleted; credentials-issued when a kubeconfig is minted { role, subject, identityId, ttlSeconds, expiresAt } (never the token); data { clusterId, ... }',
+  },
+  {
+    type: 'kubernetes.nodepool.*',
+    subject: 'kubernetes-cluster/{id}',
+    module: 'kubernetes',
+    description:
+      'Node pools of managed Kubernetes clusters, published on their cluster: created, ready, error { message }, deleted; data { clusterId, nodePoolId, name, ... }',
+  },
+  {
     type: 'fleet.*',
     subject: 'fleet/{id}',
     module: 'fleet',

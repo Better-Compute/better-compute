@@ -39,6 +39,7 @@
       "./events",
       "./fleet",
       "./rollout",
+      "./kubernetes",
       "./audit",
       "./observability",
       "./server",
@@ -155,6 +156,15 @@
     "name": "@better-compute/inventory",
     "directory": "packages/inventory",
     "description": "Hardware inventory for better-compute: section hashing, diffs, GPU model mapping, labels and health conditions.",
+    "private": false,
+    "version": "0.3.0",
+    "release": "released",
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/kubernetes",
+    "directory": "packages/kubernetes",
+    "description": "Managed Kubernetes clusters (GKE and the like) on provider accounts for better-compute: the provider runs the control plane.",
     "private": false,
     "version": "0.3.0",
     "release": "released",

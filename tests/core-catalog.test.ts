@@ -48,6 +48,7 @@ const planActions: Record<string, string[]> = {
     ...a('providers', 'read', 'manage'),
     ...a('sandboxes', 'read', 'manage'),
     ...a('networks', 'read'),
+    ...a('kubernetes', 'read'),
     ...a('batches', 'read', 'create', 'approve'),
   ],
   'compute-project': [...a('projects', 'read', 'manage'), ...a('usage', 'read')],
@@ -86,6 +87,7 @@ const planActions: Record<string, string[]> = {
   'compute-sandbox-snapshot': a('sandboxes', 'read', 'delete'),
   'compute-sandbox-volume': a('sandboxes', 'read', 'manage'),
   'compute-network': a('networks', 'create', 'read', 'update', 'delete'),
+  'compute-kubernetes-cluster': a('kubernetes', 'create', 'read', 'update', 'delete', 'connect'),
 };
 
 describe('resource types (§12.3)', () => {
@@ -105,6 +107,7 @@ describe('resource types (§12.3)', () => {
       'compute-sandbox': 'compute-pool',
       'compute-sandbox-volume': 'compute-pool',
       'compute-network': 'compute-tenant',
+      'compute-kubernetes-cluster': 'compute-tenant',
     });
     expect(types['compute-project']?.relations).toEqual(['member', 'admin']);
     expect(types['compute-pool']?.relations).toEqual(['viewer', 'user', 'operator', 'admin']);
@@ -395,6 +398,7 @@ describe('apiSurface (§9.2)', () => {
         'sandboxTemplates.list',
         'sandboxSnapshots.list',
         'networks.list',
+        'kubernetesClusters.list',
       ],
     );
     // The list recipe checks every item as the group's kind, one by one: only lists of

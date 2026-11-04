@@ -651,7 +651,28 @@ function exclusiveKeyOf(provider: ProviderDefinition, config: Record<string, Jso
 }
 
 /**
- * Deletes an account that no live pool, no live instance and no network that is not deleted uses.
+ * The live Kubernetes clusters (`@better-compute/kubernetes`) whose `column` is `id`. vps does not depend
+ * on that module, so its table is read only where it exists; without it there are none.
+ */
+export async function liveKubernetesClusters(
+  tx: SqlTx,
+  column: 'provider_account_id' | 'network_id',
+  id: string,
+): Promise<string[]> {
+  const table = await tx.query<{ present: boolean }>(
+    `SELECT to_regclass('kubernetes_clusters') IS NOT NULL AS present`,
+  );
+  if (!table.rows[0]?.present) return [];
+  const { rows } = await tx.query<{ id: string }>(
+    `SELECT id FROM kubernetes_clusters WHERE ${column} = $1 AND state <> 'deleted' ORDER BY id LIMIT 100`,
+    [id],
+  );
+  return rows.map((row) => row.id);
+}
+
+/**
+ * Deletes an account that no live pool, no live instance, no live Kubernetes cluster and no network that is
+ * not deleted uses.
  * Archived pools do not pin it, deleted instances keep their history but drop the reference, and
  * deleted networks (with their subnets and rules, all gone at the provider) are removed with it.
  */
@@ -670,7 +691,8 @@ export async function deleteAccount(
     `SELECT id FROM instances WHERE provider_account_id = $1 AND state <> 'deleted' LIMIT 1`,
     [account.id],
   );
-  if (pools.rows.length > 0 || live.rows.length > 0)
+  const clusters = await liveKubernetesClusters(tx, 'provider_account_id', account.id);
+  if (pools.rows.length > 0 || live.rows.length > 0 || clusters.length > 0)
     throw new ComputeError('INVALID_STATE', `Provider account ${account.name} is in use`);
   // Reservation grants (F10-4): live ones are commitments still billed; ended ones go with the account.
   const grants = await tx.query<{ id: string }>(

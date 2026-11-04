@@ -1,5 +1,5 @@
 // The control plane both reference generators read (apps/docs/scripts/generate.mjs and
-// scripts/api-reference.mjs): EVERY module registered (provision + metal, vps, events, fleet, rollout,
+// scripts/api-reference.mjs): EVERY module registered (provision + metal, vps, kubernetes, events, fleet, rollout,
 // audit, beside the built-in node controllers, inventory and capacity) on a PGlite executor that is never
 // opened and an IamPort that refuses everything, so the method registry, command kinds, migrations and
 // jobs are the ones a full deployment serves. A method's status ("registered" or "planned") is read from
@@ -19,6 +19,7 @@ export const controlPlanePackages = Object.freeze({
   provision: 'index.js',
   metal: 'index.js',
   vps: 'index.js',
+  kubernetes: 'index.js',
   events: 'index.js',
   fleet: 'index.js',
   rollout: 'index.js',
@@ -49,6 +50,7 @@ export async function fullControlPlane(root, { who, secret, baseURL }) {
   const { provisionModule } = await load('provision');
   const { metal } = await load('metal');
   const { vps } = await load('vps');
+  const { kubernetes } = await load('kubernetes');
   const { eventsModule } = await load('events');
   const { fleetModule } = await load('fleet');
   const { rolloutModule } = await load('rollout');
@@ -84,6 +86,7 @@ export async function fullControlPlane(root, { who, secret, baseURL }) {
       provisionModule({ modules: [metalModule] }),
       metalModule,
       vps(),
+      kubernetes(),
       eventsModule({ secret }),
       fleetModule(),
       rolloutModule({

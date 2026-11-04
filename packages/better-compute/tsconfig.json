@@ -39,6 +39,9 @@
       "path": "../inventory"
     },
     {
+      "path": "../kubernetes"
+    },
+    {
       "path": "../mcp"
     },
     {

@@ -368,6 +368,27 @@ Every call is authenticated (except public methods), refused before any database
 | `firewallRules.update` | mutation | `compute:networks:update` @ `compute-network` | v1.0  | registered |
 | `firewallRules.delete` | mutation | `compute:networks:update` @ `compute-network` | v1.0  | registered |
 
+### `kubernetesClusters` (kubernetes)
+
+| Method                           | Kind     | Authorization                                               | Phase | Status     |
+| -------------------------------- | -------- | ----------------------------------------------------------- | ----- | ---------- |
+| `kubernetesClusters.create`      | mutation | `compute:kubernetes:create` @ `compute-kubernetes-cluster`  | v1.0  | registered |
+| `kubernetesClusters.list`        | read     | `compute:kubernetes:read` @ `compute-tenant` + items        | v1.0  | registered |
+| `kubernetesClusters.get`         | read     | `compute:kubernetes:read` @ `compute-kubernetes-cluster`    | v1.0  | registered |
+| `kubernetesClusters.update`      | mutation | `compute:kubernetes:update` @ `compute-kubernetes-cluster`  | v1.0  | registered |
+| `kubernetesClusters.delete`      | mutation | `compute:kubernetes:delete` @ `compute-kubernetes-cluster`  | v1.0  | registered |
+| `kubernetesClusters.credentials` | mutation | `compute:kubernetes:connect` @ `compute-kubernetes-cluster` | v1.0  | registered |
+| `kubernetesClusters.versions`    | read     | `compute:kubernetes:read` @ `compute-tenant`                | v1.0  | registered |
+
+### `kubernetesNodePools` (kubernetes)
+
+| Method                       | Kind     | Authorization                                              | Phase | Status     |
+| ---------------------------- | -------- | ---------------------------------------------------------- | ----- | ---------- |
+| `kubernetesNodePools.create` | mutation | `compute:kubernetes:update` @ `compute-kubernetes-cluster` | v1.0  | registered |
+| `kubernetesNodePools.list`   | read     | `compute:kubernetes:read` @ `compute-kubernetes-cluster`   | v1.0  | registered |
+| `kubernetesNodePools.update` | mutation | `compute:kubernetes:update` @ `compute-kubernetes-cluster` | v1.0  | registered |
+| `kubernetesNodePools.delete` | mutation | `compute:kubernetes:update` @ `compute-kubernetes-cluster` | v1.0  | registered |
+
 ### `commandBatches` (quorum)
 
 | Method                   | Kind     | Authorization                                | Phase | Status     |

@@ -650,7 +650,7 @@ describe('catalog', () => {
 
   it('meterCatalog stays under 90 meters for the default models', () => {
     const catalog = meterCatalog({ gpuModels: defaultMeterGpuModels });
-    expect(catalog.length).toBe(80);
+    expect(catalog.length).toBe(81);
     expect(catalog.length).toBeLessThanOrEqual(90);
     expect(defaultMeterGpuModels).toEqual(['H100', 'H200', 'B200', 'A100', 'L4', 'L40S', 'other']);
   });

@@ -122,7 +122,15 @@ export async function meterAllocation(
  * source (`source_kind` + `source_id`, keys from `sourceUsageKey`). `cost` windows (pass-through) are written by
  * the provider-cost reconciler with their `cost_micros`, not by `meterSource`.
  */
-export type UsageSourceKind = 'allocation' | 'instance' | 'grant' | 'network' | 'snapshot' | 'cost';
+export type UsageSourceKind =
+  | 'allocation'
+  | 'instance'
+  | 'grant'
+  | 'network'
+  | 'snapshot'
+  | 'cost'
+  /** A managed Kubernetes cluster (`@better-compute/kubernetes`, whose migration adds it to the CHECK). */
+  | 'kubernetes';
 
 /** The idempotency key of one source window (D2): `cmp:<kind>:<id>:<windowStartMs>[:<meter>]`. */
 export function sourceUsageKey(

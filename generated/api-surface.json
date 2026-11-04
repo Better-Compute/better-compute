@@ -3064,6 +3064,820 @@
         "additionalProperties": false
       }
     },
+    "kubernetesClusters.create": {
+      "route": "POST /api/compute/kubernetesClusters/create",
+      "kind": "mutation",
+      "action": "compute:kubernetes:create",
+      "resource": "compute-kubernetes-cluster",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The project the cluster belongs to"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A provider pool owned by or offered to the tenant, whose account provides managed Kubernetes"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$",
+            "maxLength": 40,
+            "description": "The cluster name, unique in the tenant, e.g. training"
+          },
+          "mode": {
+            "enum": [
+              "standard",
+              "autopilot"
+            ],
+            "description": "standard: node pools you manage; autopilot: the provider runs the nodes (no node pools)"
+          },
+          "location": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{1,38}[a-z0-9]$",
+            "maxLength": 40,
+            "description": "A region (regional cluster) or a zone (zonal cluster) of the account’s configured zones"
+          },
+          "releaseChannel": {
+            "enum": [
+              "rapid",
+              "regular",
+              "stable",
+              "extended"
+            ],
+            "default": "regular",
+            "description": "The provider release channel; it upgrades the cluster within the channel"
+          },
+          "version": {
+            "type": "string",
+            "pattern": "^[0-9]{1,3}\\.[0-9]{1,3}(\\.[0-9]{1,3})?(-[a-z0-9.]{1,40})?$",
+            "maxLength": 64,
+            "description": "A Kubernetes minor (1.33) or full version; the provider must offer it"
+          },
+          "networkId": {
+            "type": "string",
+            "pattern": "^net_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "A tenant network on the same pool’s account, with a subnet in the cluster’s region"
+          },
+          "authorizedNetworks": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "string",
+              "description": "An IPv4 CIDR, e.g. 203.0.113.0/24"
+            },
+            "description": "CIDRs that may reach the control-plane endpoint; empty: any address (requests are still authenticated)"
+          },
+          "privateNodes": {
+            "type": "boolean",
+            "default": false,
+            "description": "Nodes get no public addresses (egress then needs a NAT on the network)"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "What the cluster is for"
+          },
+          "nodePools": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$",
+                  "maxLength": 40,
+                  "description": "The node pool name, unique in the cluster, e.g. gpu"
+                },
+                "machineType": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+                  "maxLength": 63,
+                  "description": "The provider machine type, e.g. e2-standard-4 or g2-standard-8"
+                },
+                "nodeCount": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000,
+                  "description": "Nodes per zone of the pool; with autoscaling, the initial count"
+                },
+                "autoscaling": {
+                  "type": "object",
+                  "properties": {
+                    "minNodes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000,
+                      "description": "Fewest nodes per zone"
+                    },
+                    "maxNodes": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 1000,
+                      "description": "Most nodes per zone"
+                    }
+                  },
+                  "required": [
+                    "minNodes",
+                    "maxNodes"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Autoscaling bounds per zone; nodeCount is then the initial count"
+                },
+                "diskGiB": {
+                  "type": "integer",
+                  "minimum": 10,
+                  "maximum": 65536,
+                  "description": "Boot disk size per node"
+                },
+                "diskType": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9-]{1,40}$",
+                  "description": "The provider boot disk type, e.g. pd-balanced"
+                },
+                "spot": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Spot (preemptible) nodes"
+                },
+                "accelerators": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+                      "description": "The provider accelerator type, e.g. nvidia-l4"
+                    },
+                    "count": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 16,
+                      "description": "GPUs per node"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "count"
+                  ],
+                  "additionalProperties": false
+                },
+                "zones": {
+                  "type": "array",
+                  "maxItems": 10,
+                  "items": {
+                    "type": "string",
+                    "description": "A zone of the cluster’s region"
+                  },
+                  "description": "Zones of the cluster’s region the pool runs in; absent: the provider’s default"
+                },
+                "labels": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string",
+                    "maxLength": 63
+                  },
+                  "description": "Kubernetes labels of the pool’s nodes (at most 32)"
+                },
+                "taints": {
+                  "type": "array",
+                  "maxItems": 32,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string",
+                        "description": "A Kubernetes label key"
+                      },
+                      "value": {
+                        "type": "string",
+                        "maxLength": 63,
+                        "description": "A Kubernetes label value"
+                      },
+                      "effect": {
+                        "enum": [
+                          "NoSchedule",
+                          "PreferNoSchedule",
+                          "NoExecute"
+                        ],
+                        "description": "The taint effect"
+                      }
+                    },
+                    "required": [
+                      "key",
+                      "effect"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "description": "Kubernetes taints of the pool’s nodes"
+                }
+              },
+              "required": [
+                "name",
+                "machineType",
+                "nodeCount"
+              ],
+              "additionalProperties": false
+            },
+            "description": "standard: 1 to 10 node pools created with the cluster; autopilot: none"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "name",
+          "mode",
+          "location",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "kubernetesClusters.credentials": {
+      "route": "POST /api/compute/kubernetesClusters/credentials",
+      "kind": "mutation",
+      "action": "compute:kubernetes:connect",
+      "resource": "compute-kubernetes-cluster",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "clusterId": {
+            "type": "string",
+            "pattern": "^kcl_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The cluster"
+          },
+          "role": {
+            "enum": [
+              "view",
+              "edit",
+              "admin"
+            ],
+            "default": "view",
+            "description": "The Kubernetes role of the credential: view (kubernetes:connect), edit (also kubernetes:update), admin (also kubernetes:delete)"
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 600,
+            "maximum": 86400,
+            "description": "How long the token lasts; default 3600 (the module option)"
+          }
+        },
+        "required": [
+          "tenantId",
+          "clusterId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "kubernetesClusters.delete": {
+      "route": "POST /api/compute/kubernetesClusters/delete",
+      "kind": "mutation",
+      "action": "compute:kubernetes:delete",
+      "resource": "compute-kubernetes-cluster",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "clusterId": {
+            "type": "string",
+            "pattern": "^kcl_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The cluster"
+          }
+        },
+        "required": [
+          "tenantId",
+          "clusterId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "kubernetesClusters.get": {
+      "route": "POST /api/compute/kubernetesClusters/get",
+      "kind": "read",
+      "action": "compute:kubernetes:read",
+      "resource": "compute-kubernetes-cluster",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "clusterId": {
+            "type": "string",
+            "pattern": "^kcl_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The cluster"
+          }
+        },
+        "required": [
+          "tenantId",
+          "clusterId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "kubernetesClusters.list": {
+      "route": "POST /api/compute/kubernetesClusters/list",
+      "kind": "read",
+      "action": "compute:kubernetes:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "Only this pool’s clusters"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "Only this project’s clusters"
+          },
+          "includeDeleted": {
+            "type": "boolean",
+            "default": false,
+            "description": "Include deleted clusters"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "kubernetesClusters.update": {
+      "route": "POST /api/compute/kubernetesClusters/update",
+      "kind": "mutation",
+      "action": "compute:kubernetes:update",
+      "resource": "compute-kubernetes-cluster",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "clusterId": {
+            "type": "string",
+            "pattern": "^kcl_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The cluster"
+          },
+          "version": {
+            "type": "string",
+            "pattern": "^[0-9]{1,3}\\.[0-9]{1,3}(\\.[0-9]{1,3})?(-[a-z0-9.]{1,40})?$",
+            "maxLength": 64,
+            "description": "A Kubernetes minor (1.33) or full version; the provider must offer it"
+          },
+          "releaseChannel": {
+            "enum": [
+              "rapid",
+              "regular",
+              "stable",
+              "extended"
+            ],
+            "description": "The new release channel"
+          },
+          "authorizedNetworks": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "string",
+              "description": "An IPv4 CIDR, e.g. 203.0.113.0/24"
+            },
+            "description": "CIDRs that may reach the control-plane endpoint; empty: any address (requests are still authenticated)"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "The new description"
+          }
+        },
+        "required": [
+          "tenantId",
+          "clusterId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "kubernetesClusters.versions": {
+      "route": "POST /api/compute/kubernetesClusters/versions",
+      "kind": "read",
+      "action": "compute:kubernetes:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A provider pool visible to the tenant"
+          },
+          "location": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{1,38}[a-z0-9]$",
+            "maxLength": 40,
+            "description": "A region or zone of the pool account’s configured zones"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "location"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "kubernetesNodePools.create": {
+      "route": "POST /api/compute/kubernetesNodePools/create",
+      "kind": "mutation",
+      "action": "compute:kubernetes:update",
+      "resource": "compute-kubernetes-cluster",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "clusterId": {
+            "type": "string",
+            "pattern": "^kcl_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The cluster"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$",
+            "maxLength": 40,
+            "description": "The node pool name, unique in the cluster, e.g. gpu"
+          },
+          "machineType": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "maxLength": 63,
+            "description": "The provider machine type, e.g. e2-standard-4 or g2-standard-8"
+          },
+          "nodeCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000,
+            "description": "Nodes per zone of the pool; with autoscaling, the initial count"
+          },
+          "autoscaling": {
+            "type": "object",
+            "properties": {
+              "minNodes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000,
+                "description": "Fewest nodes per zone"
+              },
+              "maxNodes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000,
+                "description": "Most nodes per zone"
+              }
+            },
+            "required": [
+              "minNodes",
+              "maxNodes"
+            ],
+            "additionalProperties": false,
+            "description": "Autoscaling bounds per zone; nodeCount is then the initial count"
+          },
+          "diskGiB": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 65536,
+            "description": "Boot disk size per node"
+          },
+          "diskType": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{1,40}$",
+            "description": "The provider boot disk type, e.g. pd-balanced"
+          },
+          "spot": {
+            "type": "boolean",
+            "default": false,
+            "description": "Spot (preemptible) nodes"
+          },
+          "accelerators": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+                "description": "The provider accelerator type, e.g. nvidia-l4"
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16,
+                "description": "GPUs per node"
+              }
+            },
+            "required": [
+              "type",
+              "count"
+            ],
+            "additionalProperties": false
+          },
+          "zones": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "type": "string",
+              "description": "A zone of the cluster’s region"
+            },
+            "description": "Zones of the cluster’s region the pool runs in; absent: the provider’s default"
+          },
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 63
+            },
+            "description": "Kubernetes labels of the pool’s nodes (at most 32)"
+          },
+          "taints": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "description": "A Kubernetes label key"
+                },
+                "value": {
+                  "type": "string",
+                  "maxLength": 63,
+                  "description": "A Kubernetes label value"
+                },
+                "effect": {
+                  "enum": [
+                    "NoSchedule",
+                    "PreferNoSchedule",
+                    "NoExecute"
+                  ],
+                  "description": "The taint effect"
+                }
+              },
+              "required": [
+                "key",
+                "effect"
+              ],
+              "additionalProperties": false
+            },
+            "description": "Kubernetes taints of the pool’s nodes"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Optional, scoped to (tenant, caller identity, cluster): a retry with the same key replays"
+          }
+        },
+        "required": [
+          "tenantId",
+          "clusterId",
+          "name",
+          "machineType",
+          "nodeCount"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "kubernetesNodePools.delete": {
+      "route": "POST /api/compute/kubernetesNodePools/delete",
+      "kind": "mutation",
+      "action": "compute:kubernetes:update",
+      "resource": "compute-kubernetes-cluster",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "clusterId": {
+            "type": "string",
+            "pattern": "^kcl_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The cluster"
+          },
+          "nodePoolId": {
+            "type": "string",
+            "pattern": "^knp_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The node pool"
+          }
+        },
+        "required": [
+          "tenantId",
+          "clusterId",
+          "nodePoolId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "kubernetesNodePools.list": {
+      "route": "POST /api/compute/kubernetesNodePools/list",
+      "kind": "read",
+      "action": "compute:kubernetes:read",
+      "resource": "compute-kubernetes-cluster",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "clusterId": {
+            "type": "string",
+            "pattern": "^kcl_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The cluster"
+          }
+        },
+        "required": [
+          "tenantId",
+          "clusterId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "kubernetesNodePools.update": {
+      "route": "POST /api/compute/kubernetesNodePools/update",
+      "kind": "mutation",
+      "action": "compute:kubernetes:update",
+      "resource": "compute-kubernetes-cluster",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "clusterId": {
+            "type": "string",
+            "pattern": "^kcl_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The cluster"
+          },
+          "nodePoolId": {
+            "type": "string",
+            "pattern": "^knp_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The node pool"
+          },
+          "nodeCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000,
+            "description": "Nodes per zone (with autoscaling: within its bounds)"
+          },
+          "autoscaling": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "minNodes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000,
+                "description": "Fewest nodes per zone"
+              },
+              "maxNodes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000,
+                "description": "Most nodes per zone"
+              }
+            },
+            "required": [
+              "minNodes",
+              "maxNodes"
+            ],
+            "additionalProperties": false,
+            "description": "Autoscaling bounds per zone; null turns autoscaling off"
+          }
+        },
+        "required": [
+          "tenantId",
+          "clusterId",
+          "nodePoolId"
+        ],
+        "additionalProperties": false
+      }
+    },
     "metal.abort": {
       "route": "POST /api/compute/metal/abort",
       "kind": "mutation",
