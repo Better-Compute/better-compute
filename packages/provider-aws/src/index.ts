@@ -12,3 +12,4 @@ export * from './finops.js';
 export * from './prices.js';
 export * from './finops-cli.js';
 export * from './governance.js';
+export * from './spend.js';
