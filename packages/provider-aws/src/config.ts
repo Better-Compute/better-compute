@@ -158,7 +158,9 @@ export interface AwsConfig {
 export interface AwsProviderOptions {
   fetch?: typeof fetch;
   /** Tests and VPC endpoints; host options, never account config. */
-  endpoints?: Partial<Record<'ec2' | 'sts' | 'servicequotas' | 'pricing' | 'sqs', string>>;
+  endpoints?: Partial<
+    Record<'ec2' | 'sts' | 'servicequotas' | 'pricing' | 'sqs' | 'elasticfilesystem' | 'fsx', string>
+  >;
   /** Ambient identity for platform accounts (default `ambientCredentials()`). */
   credentials?: CredentialSource;
   /** ExternalId prefix: `${externalIdPrefix}:${providerAccountId}` (default 'better-compute'). */

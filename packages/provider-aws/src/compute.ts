@@ -11,13 +11,20 @@ import {
   type Offer,
   type OfferQuery,
   type PowerAction,
+  type ProviderMount,
   type ProviderPlacement,
   type ProviderContext,
   type ProviderEventBatch,
   type ProviderImpl,
   type PurchaseAttempt,
 } from '@better-compute/core';
-import type { JsonClient, QueryClient, QueryParams, XmlElement } from '@better-compute/aws-core';
+import type {
+  JsonClient,
+  QueryClient,
+  QueryParams,
+  RestClient,
+  XmlElement,
+} from '@better-compute/aws-core';
 import type { AccountCredentials } from './account.js';
 import { parseDiscoverTag, type AwsConfig, type AwsProviderOptions } from './config.js';
 import { clientToken, offerId, parseInstanceId, parseOfferId, tags, tagValue } from './ids.js';
@@ -28,6 +35,7 @@ import {
   scheduledEventScanMs,
 } from './events.js';
 import { aliasRootDeviceOf, resolveImage, ssmImagePrefixes } from './images.js';
+import { AwsFilesystems } from './filesystems.js';
 import { AwsNetworks } from './networks.js';
 import { checkPlacement, PlacementGroups, placementParams } from './placement.js';
 import { InstanceTopology } from './topology.js';
@@ -68,6 +76,9 @@ export interface AwsComputeDeps {
   pricing?: JsonClient;
   /** (A4) The event-intake queue's client, when the account names `eventQueueUrl`. */
   sqs?: JsonClient;
+  /** (A10) Amazon EFS (rest-json) and FSx (JSON 1.1); absent: no `filesystems`. */
+  efs?: RestClient;
+  fsx?: JsonClient;
   account: AccountCredentials;
   types: InstanceTypeCache;
   zones: ZoneCache;
@@ -81,6 +92,8 @@ export interface AwsCreateRequest {
   network?: NetworkRef;
   /** (A10) The placement group to launch into, made on first use. */
   placement?: ProviderPlacement;
+  /** (A10) Filesystems mounted at boot, through a cloud-config part of the user data. */
+  mounts?: readonly ProviderMount[];
   labels?: Readonly<Record<string, string>>;
   sshKeys?: readonly string[];
 }
@@ -203,6 +216,8 @@ export class AwsCompute implements ProviderImpl {
   readonly #ssmPrefixes: readonly string[];
   /** Tenant networks on this account's VPCs (AWS A2). */
   readonly networks: AwsNetworks;
+  /** (A10) Shared filesystems (EFS, FSx for Lustre) on those networks. */
+  readonly filesystems?: AwsFilesystems;
   readonly #quotas: QuotaReader | undefined;
   readonly #prices: PriceReader;
   /** (A10) Placement groups made on first use. */
@@ -253,6 +268,14 @@ export class AwsCompute implements ProviderImpl {
       call: (action, params, signal) => this.call(action, params, signal),
       consistencyWindowMs: () => this.consistencyWindowMs,
     });
+    if (deps.efs && deps.fsx)
+      this.filesystems = new AwsFilesystems({
+        config,
+        context,
+        efs: deps.efs,
+        fsx: deps.fsx,
+        networks: this.networks,
+      });
   }
 
   /** `us-east-1a` and the Local Zone `us-west-2-lax-1a` are in `us-east-1` and `us-west-2`. */
@@ -1146,7 +1169,7 @@ export class AwsCompute implements ProviderImpl {
         undefined,
         { provider: 'aws', reason: 'image-arch' },
       );
-    const userData = packUserData(request.userData, request.sshKeys);
+    const userData = packUserData(request.userData, request.sshKeys, request.mounts);
     // On a tenant network: its subnet in the offer's zone and the groups of its firewall rules.
     const placement = request.network
       ? await this.networks.placement(request.network, offer.zone, signal)

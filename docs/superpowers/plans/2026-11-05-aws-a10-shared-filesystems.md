@@ -43,10 +43,13 @@ filesystems … This is its own sub-plan") and the service table rows for EFS an
   `FileSystemAlreadyExists` carries the id). FSx: `ClientRequestToken = <name>` and the tag
   `better-compute:filesystem=<name>`; `DescribeFileSystems` is read and filtered by that tag. A filesystem without
   `better-compute:managed=true` is never adopted or deleted (`INVALID_STATE`, reason `filesystem-foreign`).
-- **FD8 Mounts through a cloud-config part.** `ProviderImpl.create` takes an additive `mounts?: ProviderMount[]`
-  (`fstype`, `source`, `path`, `options`). provider-aws packs them into its own `text/cloud-config` part of the MIME
-  user data (`mounts:` plus `mkdir`; `lustre` also installs the Lustre client from the distribution's
-  `lustre-client` packages). The tenant's own user data stays a separate part, unchanged.
+- **FD8 Mounts through a user-data part.** `ProviderImpl.create` takes an additive `mounts?: ProviderMount[]`
+  (`fstype`, `source`, `path`, `options`). provider-aws packs them into its own part of the MIME user data: a
+  `text/x-shellscript` part (install the client with whichever package manager the image has, `mkdir`, an fstab line
+  with `nofail`, `mount`), placed before the tenant's part. Not a `text/cloud-config` part as first sketched:
+  cloud-config parts merge with replace by default, so a tenant's own `runcmd` or `mounts` would silently drop ours.
+  The tenant's own user data stays a separate part, unchanged. (verify) The Ubuntu Lustre client needs the FSx apt
+  repository; Amazon Linux 2023 has `lustre-client`.
 - **FD9 Deletion.** `deleteFilesystem` deletes the mount targets, then the filesystem (`FileSystemInUse` while they
   go → `deleting`), then the group (`DependencyViolation` while ENIs linger → `deleting`). FSx scratch deletes skip
   the final backup; persistent ones skip it too (D: the tenant snapshots its own data; no backup bills behind its back).

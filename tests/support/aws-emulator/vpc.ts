@@ -202,6 +202,12 @@ export class VpcEmulator {
   /** Tag-filtered DescribeVpcs reads a new VPC is missing from. */
   tagLagReads = 0;
   ruleLimit = 60;
+  /**
+   * Network interfaces other services keep in the account's subnets (EFS mount targets, FSx file
+   * servers): their subnets and groups cannot be deleted while these report them.
+   */
+  readonly serviceInterfaces: (() => readonly { subnetId: string; groupIds: readonly string[] }[])[] =
+    [];
   naclEntryLimit = 20;
   groupsPerInterface = 5;
   /** Page size of DescribeSecurityGroupRules (small, so tests page). */
@@ -713,7 +719,10 @@ export class VpcEmulator {
         const id = p.get('SubnetId') ?? '';
         if (!this.subnets.has(id))
           return ec2Error('InvalidSubnetID.NotFound', `The subnet ID '${id}' does not exist`);
-        if (this.#liveInstances().some((instance) => instance.subnetId === id))
+        if (
+          this.#liveInstances().some((instance) => instance.subnetId === id) ||
+          this.serviceInterfaces.some((list) => list().some((eni) => eni.subnetId === id))
+        )
           return ec2Error(
             'DependencyViolation',
             `The subnet '${id}' has dependencies and cannot be deleted.`,
@@ -782,7 +791,10 @@ export class VpcEmulator {
           return ec2Error('InvalidGroup.NotFound', `The security group '${id}' does not exist`);
         if (group.name === 'default')
           return ec2Error('CannotDelete', 'the default security group cannot be deleted');
-        if (this.#liveInstances().some((instance) => instance.groups.some((g) => g.id === id)))
+        if (
+          this.#liveInstances().some((instance) => instance.groups.some((g) => g.id === id)) ||
+          this.serviceInterfaces.some((list) => list().some((eni) => eni.groupIds.includes(id)))
+        )
           return ec2Error('DependencyViolation', `resource ${id} has a dependent object`);
         // Another group's rule naming this one blocks the delete; a rule naming its own group does not.
         if ([...this.rules.values()].some((r) => r.referencedGroupId === id && r.groupId !== id))

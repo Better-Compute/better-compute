@@ -1,4 +1,4 @@
-import { ec2Client, jsonClient } from '@better-compute/aws-core';
+import { ec2Client, jsonClient, restClient } from '@better-compute/aws-core';
 import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
 import { accountCredentials } from './account.js';
 import { AwsCompute } from './compute.js';
@@ -78,9 +78,37 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
               ...(options.endpoints?.sqs !== undefined ? { endpoint: options.endpoints.sqs } : {}),
               ...(options.rateLimit ? { rateLimit: options.rateLimit } : {}),
             });
+      // A10: shared filesystems (EFS rest-json; FSx for Lustre JSON 1.1). Clients only: no call
+      // is made until a filesystem is ensured.
+      const efs = restClient({
+        service: 'elasticfilesystem',
+        region: config.region,
+        credentials: account.source,
+        fetch: options.fetch,
+        clock: context.clock,
+        log: context.log,
+        ...(options.endpoints?.elasticfilesystem !== undefined
+          ? { endpoint: options.endpoints.elasticfilesystem }
+          : {}),
+        ...(options.rateLimit ? { rateLimit: options.rateLimit } : {}),
+      });
+      const fsx = jsonClient({
+        service: 'fsx',
+        region: config.region,
+        credentials: account.source,
+        fetch: options.fetch,
+        clock: context.clock,
+        log: context.log,
+        jsonVersion: '1.1',
+        targetPrefix: 'AWSSimbaAPIService_v20180301',
+        ...(options.endpoints?.fsx !== undefined ? { endpoint: options.endpoints.fsx } : {}),
+        ...(options.rateLimit ? { rateLimit: options.rateLimit } : {}),
+      });
       const compute = new AwsCompute(config, context, options, {
         ec2,
         quotas,
+        efs,
+        fsx,
         ...(sqs ? { sqs } : {}),
         ...(pricing ? { pricing } : {}),
         account,

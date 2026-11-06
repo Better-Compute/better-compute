@@ -42,7 +42,26 @@ export const networkTags = {
    * `efa: 'auto'`). It carries no firewall key, so firewall diffing never sees or revokes it.
    */
   efa: 'better-compute:efa',
+  /** (A10) On a filesystem's group and its rules: the filesystem (`ProviderFilesystemSpec.name`) they serve. */
+  filesystem: 'better-compute:filesystem',
 } as const;
+
+/** (A10) A filesystem's way into its network: the VPC, its own group, and one subnet per zone. */
+export interface FilesystemAccess {
+  state: 'ready';
+  vpcId: string;
+  groupId: string;
+  subnets: readonly { id: string; zone: string }[];
+}
+
+/** (A10) The tcp ports a filesystem's group opens: NFS, or Lustre's 988 and 1018-1023. */
+const filesystemPorts: Readonly<Record<'nfs' | 'lustre', readonly [number, number][]>> = {
+  nfs: [[2049, 2049]],
+  lustre: [
+    [988, 988],
+    [1018, 1023],
+  ],
+};
 
 /** The VPC CIDR a network gets when its spec names none. */
 export const defaultNetworkCidr = '10.64.0.0/16';
@@ -1030,7 +1049,13 @@ export class AwsNetworks implements ProviderNetworks {
    */
   async #ensureGroups(
     vpcId: string,
-    wanted: readonly { name: string; tag?: string }[],
+    wanted: readonly {
+      name: string;
+      tag?: string;
+      /** Extra tags and the description of a group that is no tag group (a filesystem's). */
+      extra?: Readonly<Record<string, string>>;
+      description?: string;
+    }[],
     network: string | undefined,
     signal: AbortSignal,
   ): Promise<Map<string, string>> {
@@ -1043,15 +1068,19 @@ export class AwsNetworks implements ProviderNetworks {
       ids.set(group.name, group.id);
     for (const want of wanted) {
       if (ids.has(want.name)) continue;
-      const extra: Record<string, string> = want.tag ? { [networkTags.tag]: want.tag } : {};
+      const extra: Record<string, string> = want.tag
+        ? { [networkTags.tag]: want.tag }
+        : { ...want.extra };
       try {
         const doc = await this.#call(
           'CreateSecurityGroup',
           {
             GroupName: want.name,
-            GroupDescription: want.tag
-              ? `better-compute network tag ${want.tag}`
-              : `better-compute network ${network ?? vpcId}`,
+            GroupDescription:
+              want.description ??
+              (want.tag
+                ? `better-compute network tag ${want.tag}`
+                : `better-compute network ${network ?? vpcId}`),
             VpcId: vpcId,
             TagSpecification: [
               {
@@ -1084,6 +1113,160 @@ export class AwsNetworks implements ProviderNetworks {
       }
     }
     return ids;
+  }
+
+  // --- Filesystems (A10) ----------------------------------------------------------------------------
+
+  /** A filesystem's group: a colon never appears in a network or tag name, so it collides with neither. */
+  static filesystemGroupName(name: string): string {
+    return `bc-fs:${name}`;
+  }
+
+  /**
+   * The way a filesystem reaches its network (AWS A10): the network's VPC (one better-compute
+   * made; an adopted VPC is `error`), the filesystem's own group `bc-fs:<name>` that allows the
+   * filesystem's ports from the network's group only (Lustre also from itself), and the network's
+   * subnets, one per zone of the account (the first by subnet name). The group's rules carry
+   * `better-compute:filesystem` and no firewall key, so firewall diffing never touches them.
+   */
+  async filesystemAccess(
+    network: string,
+    name: string,
+    kind: 'nfs' | 'lustre',
+    signal: AbortSignal,
+  ): Promise<FilesystemAccess | ProviderNetworkState> {
+    const vpc = await this.#vpc(network, signal);
+    if (!vpc || vpc.state !== 'available')
+      return state(name, 'pending', `Waiting for network ${network}`);
+    const own = vpc.ours ? vpc.tags.get(networkTags.network) : undefined;
+    if (!own)
+      return state(
+        name,
+        'error',
+        `A filesystem needs a network better-compute made; ${vpc.id} is adopted`,
+      );
+    const netName = AwsNetworks.groupName('network', own);
+    const fsName = AwsNetworks.filesystemGroupName(name);
+    const ids = await this.#ensureGroups(
+      vpc.id,
+      [
+        { name: netName },
+        {
+          name: fsName,
+          extra: { [networkTags.filesystem]: name },
+          description: `better-compute filesystem ${name}`,
+        },
+      ],
+      own,
+      signal,
+    );
+    const netGroup = ids.get(netName)!;
+    const fsGroup = ids.get(fsName)!;
+    const peers = kind === 'lustre' ? [netGroup, fsGroup] : [netGroup];
+    const desired: Permission[] = filesystemPorts[kind].flatMap(([from, to]) =>
+      peers.map((peer) => ({
+        groupId: fsGroup,
+        egress: false,
+        protocol: 'tcp',
+        from,
+        to,
+        cidr: `sg:${peer}`,
+      })),
+    );
+    const wanted = new Set(desired.map(permissionKey));
+    const have = await this.#rulesWhere(
+      [{ Name: `tag:${networkTags.filesystem}`, Value: [name] }],
+      signal,
+    );
+    const present = new Set<string>();
+    for (const rule of have) {
+      const key = permissionKey(rule);
+      if (wanted.has(key) && !present.has(key)) present.add(key);
+      else
+        await this.#tolerate(['*NotFound'], () =>
+          this.#call(
+            rule.egress ? 'RevokeSecurityGroupEgress' : 'RevokeSecurityGroupIngress',
+            { GroupId: rule.groupId, SecurityGroupRuleId: [rule.id] },
+            signal,
+          ),
+        );
+    }
+    for (const p of desired) {
+      if (present.has(permissionKey(p))) continue;
+      await this.#tolerate(['InvalidPermission.Duplicate'], () =>
+        this.#call(
+          'AuthorizeSecurityGroupIngress',
+          {
+            GroupId: fsGroup,
+            IpPermissions: [
+              {
+                IpProtocol: 'tcp',
+                FromPort: p.from,
+                ToPort: p.to,
+                Groups: [{ GroupId: p.cidr.slice('sg:'.length) }],
+              },
+            ],
+            TagSpecification: [
+              {
+                ResourceType: 'security-group-rule',
+                Tag: [
+                  { Key: networkTags.filesystem, Value: name },
+                  { Key: networkTags.network, Value: own },
+                ],
+              },
+            ],
+          },
+          signal,
+        ),
+      );
+    }
+    const byZone = new Map<string, Subnet>();
+    const subnets = (await this.#subnetsBy([{ Name: 'vpc-id', Value: [vpc.id] }], signal))
+      .filter(
+        (s) =>
+          s.tags.get(networkTags.network) === own &&
+          s.tags.has(networkTags.subnet) &&
+          this.#config.zones.includes(s.zone),
+      )
+      .sort((a, b) => (a.tags.get(networkTags.subnet)! < b.tags.get(networkTags.subnet)! ? -1 : 1));
+    for (const subnet of subnets) if (!byZone.has(subnet.zone)) byZone.set(subnet.zone, subnet);
+    return {
+      state: 'ready',
+      vpcId: vpc.id,
+      groupId: fsGroup,
+      subnets: [...byZone.values()].map((s) => ({ id: s.id, zone: s.zone })),
+    };
+  }
+
+  /**
+   * Deletes a filesystem's group once nothing uses it: `deleted`, or `deleting` while the
+   * filesystem's interfaces still hold it. A group better-compute did not make is never touched.
+   */
+  async releaseFilesystemAccess(name: string, signal: AbortSignal): Promise<ProviderNetworkState> {
+    const doc = await this.#call(
+      'DescribeSecurityGroups',
+      {
+        Filter: [
+          { Name: 'group-name', Value: [AwsNetworks.filesystemGroupName(name)] },
+          { Name: `tag:${networkTags.filesystem}`, Value: [name] },
+          { Name: `tag:${tags.managed}`, Value: ['true'] },
+        ],
+      },
+      signal,
+    );
+    for (const item of doc.items('securityGroupInfo')) {
+      const id = item.textOf('groupId') ?? '';
+      try {
+        await this.#tolerate(['*NotFound'], () =>
+          this.#call('DeleteSecurityGroup', { GroupId: id }, signal),
+        );
+      } catch (error) {
+        if (awsCode(error) === 'DependencyViolation' || isComputeError(error, 'INVALID_STATE'))
+          return state(name, 'deleting', `security group ${id} is still in use`);
+        throw error;
+      }
+    }
+    return state(name, 'deleted');
   }
 
   // --- Firewalls -------------------------------------------------------------------------------------

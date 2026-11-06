@@ -29,7 +29,9 @@ export type AwsService =
   | 'rds'
   | 'eks'
   | 'logs'
-  | 'monitoring';
+  | 'monitoring'
+  | 'elasticfilesystem'
+  | 'fsx';
 
 const regionPattern =
   /^(us|eu|ap|sa|ca|me|af|il|mx|cn)(-gov)?-(north|south|east|west|central|northeast|northwest|southeast|southwest)-\d{1,2}$/;

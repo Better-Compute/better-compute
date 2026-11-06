@@ -4,6 +4,7 @@ export * from './account.js';
 export * from './shapes.js';
 export * from './compute.js';
 export * from './networks.js';
+export * from './filesystems.js';
 export * from './placement.js';
 export * from './topology.js';
 export * from './images.js';
