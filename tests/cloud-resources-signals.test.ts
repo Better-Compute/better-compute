@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { closeFixtures } from '@better-compute/testing';
-import type { ProviderResourceSignal } from '@better-compute/core';
+import { apiMethod, type ProviderResourceSignal } from '@better-compute/core';
 import { cloudResourcesWorld, type CloudResourcesWorld } from './support/cloud-resources-world.js';
 import { memorySecrets } from './support/memory-secrets.js';
 
@@ -74,6 +74,18 @@ beforeAll(async () => {
 afterAll(closeFixtures);
 
 describe('cloudResources.signals', () => {
+  it('has its apiSurface row: a tenant read, as the method decides it', () => {
+    expect(apiMethod('cloudResources', 'signals')).toMatchObject({
+      kind: 'read',
+      action: 'compute:cloud-resources:read',
+      resource: 'tenant',
+      phase: 'v1.0',
+    });
+    // Every method the module serves is declared.
+    for (const method of Object.keys(world.api.cloudResources))
+      expect(apiMethod('cloudResources', method), method).toBeDefined();
+  });
+
   it('shows a tenant of a shared pool the signals about its own resources, newest first', async () => {
     world.cloud.calls.length = 0;
     const { items } = await world.api.cloudResources.signals(world.acme, {
