@@ -29,6 +29,7 @@ import { DoNetworks } from '../networks/index.js';
 import { networkNamer, vpcForNetwork } from '../networks/vpcs.js';
 import { poolMembers } from './autoscale.js';
 import { ensureSshKeys } from './keys.js';
+import { classifyImage, imageParam, type ImageChoice } from './images.js';
 import { cachedSize, gpuModelOf, listOffers } from './offers.js';
 import { assignTag, ensureTag, hasTag, spelled, unassignTag } from './tags.js';
 import type { DoAction, DoDroplet, DoVpc } from './types.js';
@@ -151,19 +152,6 @@ const powerTypes: Readonly<Record<Exclude<PowerAction, 'nmi'>, string>> = {
   reset: 'power_cycle',
 };
 
-/** The `image` of a create or a rebuild: a numeric id as a number, a slug as it is. */
-function imageParam(image: string): string | number {
-  return /^[1-9][0-9]*$/.test(image) ? Number(image) : image;
-}
-
-function refuseCatalogImage(image: string): void {
-  if (image.includes('@'))
-    throw fail(
-      'UNSUPPORTED',
-      `catalog image ${image} is not supported on DigitalOcean yet`,
-      'catalogImage',
-    );
-}
 
 export class DoCompute implements ProviderImpl {
   protected readonly config: DoConfig;
@@ -302,7 +290,7 @@ export class DoCompute implements ProviderImpl {
         'region',
       );
     if (spot) throw fail('UNSUPPORTED', 'DigitalOcean Spot capacity is not supported yet', 'spot');
-    refuseCatalogImage(request.image);
+    const imageChoice = this.checkImage(classifyImage(request.image));
     if (Buffer.byteLength(request.userData, 'utf8') > maxUserDataBytes)
       throw fail(
         'INVALID_INPUT',
@@ -355,14 +343,16 @@ export class DoCompute implements ProviderImpl {
           );
       tags.push(networkMemberTag(ref.network), ...(ref.tags ?? []));
     }
-    const image = imageParam(request.image);
     const gpu = this.isGpuSize(size);
 
     // 2. A retry finds the Droplet its first attempt made.
     const existing = await this.byKey(ctx.idempotencyKey, gpu, signal);
     if (existing.length > 0) return toMachine(await this.converge(existing, signal));
 
-    // 3. The VPC, then the keys: a create refused for its VPC uploads no key.
+    // 3. The image, which for a catalog image may still be on its way into the region.
+    const image = await this.imageFor(imageChoice, region, signal);
+
+    // 4. The VPC, then the keys: a create refused for its VPC uploads no key.
     const vpc = ref
       ? (await vpcForNetwork(this.client, ref, region, signal)).id
       : await this.vpcFor(region, signal);
@@ -375,7 +365,7 @@ export class DoCompute implements ProviderImpl {
     if (sshKeys.length === 0)
       throw fail('INVALID_CONFIG', 'a Droplet needs an SSH key and none was given', 'noSshKey');
 
-    // 4. The create.
+    // 5. The create.
     let created: DoDroplet | undefined;
     try {
       const reply = await this.client.request<{ droplet?: DoDroplet }>('POST', '/droplets', {
@@ -403,7 +393,7 @@ export class DoCompute implements ProviderImpl {
       return toMachine(await this.converge(landed, signal));
     }
 
-    // 5. A create racing on the same key may have posted too: keep the oldest, reap the rest.
+    // 6. A create racing on the same key may have posted too: keep the oldest, reap the rest.
     const found = new Map(
       (await this.byKey(ctx.idempotencyKey, gpu, signal)).map((d) => [d.id, d] as const),
     );
@@ -532,13 +522,32 @@ export class DoCompute implements ProviderImpl {
   }
 
   async reinstall(id: string, image: string, ctx: CallContext): Promise<void> {
-    refuseCatalogImage(image);
+    const choice = this.checkImage(classifyImage(image));
     const droplet = await this.target(id, ctx.signal, (d) => this.owned(d), {
       reason: 'notManaged',
       message: (d) =>
         `Droplet ${d.id} is not managed by this better-compute deployment and is never rebuilt by it`,
     });
-    await this.act(droplet, { type: 'rebuild', image: imageParam(image) }, ctx.signal);
+    const param = await this.imageFor(choice, droplet.region.slug, ctx.signal);
+    await this.act(droplet, { type: 'rebuild', image: param }, ctx.signal);
+  }
+
+  // ------------------------------------------------------------------------------- images
+
+  /** Refuses, before any request, an image this provider can't boot: a catalog image needs a source. */
+  protected checkImage(choice: ImageChoice): ImageChoice {
+    if (choice.kind === 'catalog') throw noCatalog(choice.ref);
+    return choice;
+  }
+
+  /** The `image` member of a create or rebuild in `region`. */
+  protected async imageFor(
+    choice: ImageChoice,
+    _region: string,
+    _signal: AbortSignal,
+  ): Promise<string | number> {
+    if (choice.kind === 'catalog') throw noCatalog(choice.ref);
+    return imageParam(choice);
   }
 
   /**
@@ -723,6 +732,14 @@ export class DoCompute implements ProviderImpl {
     if (!rivals && (claimed || !hasTag(droplet, managedTag)) && hasTag(droplet, this.deploymentTag))
       await this.unassignTag(spelled(droplet, this.deploymentTag), droplet.id, signal);
   }
+}
+
+function noCatalog(ref: string): ComputeError {
+  return fail(
+    'UNSUPPORTED',
+    `catalog image ${ref} needs the provider's catalogImages option`,
+    'catalogImage',
+  );
 }
 
 /** The `better-compute-instance:*` tags a Droplet carries. */
