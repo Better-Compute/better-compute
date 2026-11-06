@@ -1,4 +1,4 @@
-import type { Logger } from '@better-compute/core';
+import type { ComputeModule, Logger } from '@better-compute/core';
 import { kubernetes, type KubernetesOptions } from '@better-compute/kubernetes';
 import { computeFixture, type ComputeFixture } from '@better-compute/testing';
 import { vps } from '@better-compute/vps';
@@ -44,6 +44,8 @@ export interface KubernetesWorld {
 
 export async function kubernetesWorld(
   options: Omit<KubernetesOptions, 'providers'> = {},
+  /** More modules the control plane runs (e.g. fleet). */
+  extra: { modules?: readonly ComputeModule[] } = {},
 ): Promise<KubernetesWorld> {
   const cloud = fakeKubernetes();
   const providers = [fakeKubernetesProvider(cloud), noKubernetesProvider];
@@ -58,7 +60,7 @@ export async function kubernetesWorld(
   const fixture = await computeFixture({
     clock: 'sim',
     log,
-    modules: [vps({ providers }), module],
+    modules: [vps({ providers }), module, ...(extra.modules ?? [])],
   });
   const { compute, tenants, iam } = fixture;
   (iam as { rootTenantId?: string }).rootTenantId = tenants.root.id;
