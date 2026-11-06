@@ -93,6 +93,17 @@ describe('provider-digitalocean NFS shares: ensure and get', () => {
     expect(deployment).toContain(provName.slice(-12));
   });
 
+  it('shortens a vps name too long for a share name, keeping it distinct and stable', () => {
+    // vps names a volume bc-<its id>: 60 characters, more than the 51 a share name leaves for it.
+    const long = `bc-pvol-${'a'.repeat(52)}`;
+    const named = shareName(long, 'default');
+    expect(named).toHaveLength(64);
+    expect(named).toMatch(/^bc-pvol-a+-[0-9a-f]{12}-[0-9a-f]{12}$/);
+    expect(shareName(long, 'default')).toBe(named);
+    expect(shareName(`bc-pvol-${'a'.repeat(51)}b`, 'default')).not.toBe(named);
+    expect(named.slice(-12)).toBe(provName.slice(-12));
+  });
+
   it("creates a share in the network's VPC, and a second ensure finds it", async () => {
     const { emu, impl, vpc } = await setup();
     const made = await impl.volumes.ensureVolume(spec, ctx());
@@ -152,7 +163,7 @@ describe('provider-digitalocean NFS shares: ensure and get', () => {
       [{ ...spec, network: undefined }, 'INVALID_INPUT', 'network'],
       [{ ...spec, region: 'sfo3' }, 'INVALID_INPUT', 'region'],
       [{ ...spec, name: 'Bad_Name' }, 'INVALID_INPUT', 'name'],
-      [{ ...spec, name: `v${'a'.repeat(55)}` }, 'INVALID_INPUT', 'name'],
+      [{ ...spec, name: `v${'a'.repeat(64)}` }, 'INVALID_INPUT', 'name'],
       [{ ...spec, sizeGiB: 49 }, 'INVALID_INPUT', 'size'],
       [{ ...spec, sizeGiB: 16_385 }, 'INVALID_INPUT', 'size'],
       [{ ...spec, sizeGiB: 50.5 }, 'INVALID_INPUT', 'size'],

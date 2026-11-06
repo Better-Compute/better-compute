@@ -71,9 +71,20 @@ function deploymentHash(deployment: string): string {
   return createHash('sha256').update(deployment).digest('hex').slice(0, 12);
 }
 
-/** The provider name of the share vps names `name`, for this deployment. */
+/** What a share name leaves for the vps name: all but `-<12 hex>` of the deployment. */
+const vpsNameRoom = 64 - 13;
+
+/**
+ * The provider name of the share vps names `name`, for this deployment. A vps name longer than a share name leaves
+ * room for (vps names a volume `bc-<id>`, 60 characters) keeps its first 38 characters and gains 12 hex of its own
+ * hash, so it stays distinct, and the same on every call.
+ */
 export function shareName(name: string, deployment: string): string {
-  return `${name}-${deploymentHash(deployment)}`;
+  const fitted =
+    name.length <= vpsNameRoom
+      ? name
+      : `${name.slice(0, vpsNameRoom - 13)}-${createHash('sha256').update(name).digest('hex').slice(0, 12)}`;
+  return `${fitted}-${deploymentHash(deployment)}`;
 }
 
 /** The Droplet tag that records a Droplet has the share attached: `bc-nfs-<16 hex>`. */
@@ -330,7 +341,7 @@ export class DoShares {
     if (name === '' || name.length > maxShareName)
       throw fail(
         'INVALID_INPUT',
-        `${JSON.stringify(spec.name)} is not a share name: a lower-case letter, then [a-z0-9-], at most ${maxShareName - this.suffix.length} characters`,
+        `${JSON.stringify(spec.name)} is not a share name: a lower-case letter, then [a-z0-9-], at most 64 characters`,
         'name',
       );
     if (!Number.isInteger(spec.sizeGiB) || spec.sizeGiB < minShareGiB || spec.sizeGiB > maxShareGiB)
