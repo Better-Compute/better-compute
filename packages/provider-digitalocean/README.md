@@ -20,7 +20,7 @@ An account is data, validated by the provider's manifest:
 | `sshKeyFingerprint` | The MD5 fingerprint of an account SSH key that is added to every Droplet (a fingerprint, not a secret; see below).                            |
 | `monitoring`        | Install DigitalOcean's metrics agent on new Droplets (default `true`).                                                                        |
 | `ipv6`              | Give new Droplets an IPv6 address (default `false`).                                                                                          |
-| `allowSpot`         | Accepted, default `false`; reserved for Spot capacity, which P1 does not create (see [Machines](#machines)).                                  |
+| `allowSpot`         | Offer and create Spot GPU capacity where DigitalOcean reports a Spot price (default `false`; see [Spot](#spot)).                              |
 | `discoverTag`       | A tag: discovery yields only Droplets that carry it. Lower-case `[a-z0-9:_-]`, at most 255 characters (else `INVALID_CONFIG`, `discoverTag`). |
 | `previews`          | Accepted, default `false`; reserved for products that DigitalOcean still marks as previews. It has no effect yet.                             |
 
@@ -91,13 +91,53 @@ A Droplet's id is its decimal Droplet id. An offer's id is `region/size` (`nyc3/
 
 - **Offers** come from `/sizes` and `/regions`, one per size and configured region, with the hourly price in USD and `available` from both catalogs. The catalogs are kept for ten minutes per client. A `gpuModel`/`minGpus` query keeps GPU sizes; their `gpu_info.model` maps to the pool strings (`nvidia_h100` is `H100`, `nvidia_rtx_6000_ada` is `RTX-6000-ADA`). A `metal` query returns nothing.
 - **GPU Droplets are listed separately.** DigitalOcean's default `GET /droplets` omits them, and `type=gpus` lists only them and can't be combined with `tag_name`. The provider handles that: `list` and `discover` page both lists and yield each Droplet once, and the idempotency lookup of a GPU size scans the GPU list and filters by tag itself.
-- **Spot offers are not created in P1.** `listOffers` offers no Spot capacity, and a create for an offer id ending in `@spot` is `UNSUPPORTED` (`details.reason` `spot`). `allowSpot` has no effect yet.
+- **Spot offers** are `region/size@spot`, only with `allowSpot` (see [Spot](#spot)); without it a create for one is `UNSUPPORTED` (`spot`).
 - **`create` is idempotent through a tag.** DigitalOcean has no idempotency key, so the create carries `better-compute-key:<hash of the key>`, looks for it before it posts, and looks again after. Two creates that race on one key both post; each then sees both Droplets, keeps the oldest and deletes the others (only managed Droplets of this deployment, one by one), so every caller converges on one Droplet. An answer that never arrived (`UNAVAILABLE`) is followed by the same lookup.
 - **It always sends an SSH key.** A Droplet created without a key may make DigitalOcean email a root password, which better-compute must never cause. So a create sends the instance's keys, each registered in the account as `bc-<fingerprint prefix>` if the account lacks it, and the account's `sshKeyFingerprint`. That is why `sshKeyFingerprint` exists: an instance with no key of its own still gets one. With neither, the create is `INVALID_CONFIG` (`details.reason` `noSshKey`); a fingerprint that is not in the account is `INVALID_CONFIG` too. Keys are shared by the whole account, so the provider never deletes one. (vps reads config fields that end in `key` as secrets, which a fingerprint is not, hence the name.)
-- **Other create rules.** User data is at most 64 KiB. An image is a slug or a numeric id; a catalog image (`…@…`) is `UNSUPPORTED` (`catalogImage`). An offer in a region outside `regions` is `INVALID_INPUT`.
+- **Other create rules.** User data is at most 64 KiB. An image is a slug, a numeric id or a catalog image (see [Images](#images)); anything else is `INVALID_INPUT` (`image`) before a request. An offer in a region outside `regions` is `INVALID_INPUT`.
 - **`get` of a Droplet that is still `new`** reads its create action: an action that ended `errored` throws `CAPACITY_UNAVAILABLE` (`createActionErrored`), which vps turns into `ProvisionFailed`. Nothing is kept between calls.
 - **`power`:** `on` is `power_on`, `off` is `power_off`, `graceful-off` is `shutdown`, `graceful-restart` is `reboot`, `cycle` and `reset` are `power_cycle`; `nmi` is `UNSUPPORTED`. The action is started, not awaited: a later `get` shows it. `reinstall` is `rebuild` and, like a delete, needs a managed Droplet.
 - **`list`** yields this deployment's managed Droplets (the deployment-tag list plus the GPU list).
+
+## Images
+
+An `ImageRef` is tried in this order:
+
+1. **A DigitalOcean slug** (`ubuntu-24-04-x64`, the AI/ML image `gpu-h100x1-base`): passed through. A slug has a letter in it.
+2. **A numeric image id** (a snapshot or custom image): passed through as a number.
+3. **A catalog image** `name@version`: imported as a DigitalOcean custom image. This needs `digitaloceanProvider({ catalogImages })`, a host-side source whose `locate(ref, { expiresInSeconds })` returns the image's digest, format and a short-lived HTTPS URL DigitalOcean can fetch (provision's catalog plus a BlobStore that presigns a GET). Without it a catalog image is `UNSUPPORTED` (`catalogImage`).
+
+How an import works:
+
+- **The image is its own record.** An import carries `better-compute-managed:true`, the deployment tag and `better-compute-image:<24 hex of the digest>`, is named `bc-img-<ref>-<12 hex>`, and is found by that tag. Like a Droplet create, two racing imports converge on the oldest; the others are deleted one by one. An image with the tag but without the managed and deployment tags is never used or deleted.
+- **Nothing blocks.** While the import (or a copy into another region, a `transfer` image action) runs, `create` and `reinstall` throw `UNAVAILABLE` (`imageImporting` / `imageTransferring`, `retryAfterMs` 30 s), and vps calls the create again. A retry never starts a second import or a second transfer to the same region.
+- **A failed import** (DO reports it `deleted` with an `error_message`) is deleted and fails the create `INVALID_STATE` (`imageImportFailed`); the next create imports afresh.
+- **What DigitalOcean can't import is refused before any request:** `iso` images, `zstd` compression (`UNSUPPORTED`, `imageFormat`), an unknown ref, a digest that is not SHA-256 and a URL that is not HTTPS (`INVALID_CONFIG`).
+- **The presigned URL is a credential.** It goes into the import body only; it never reaches a log line or an error, even when DigitalOcean quotes it back in a 422.
+
+**GPU images.** An AI/ML image (`gpu-…`) on a size without GPUs, or one built for the other vendor (an NVIDIA image on an MI300X size), is `INVALID_INPUT` (`gpuImage`) before any request, in `create` and `reinstall`. Plain OS images boot GPU sizes: DigitalOcean's docs say GPU Droplets work with them once drivers are installed.
+
+Imports need `image:create` (and `image:update` for transfers, `image:delete` for reaping) on top of `image:read`.
+
+## Spot
+
+With `allowSpot`, a size whose catalog entry reports a Spot price gets a second offer `region/size@spot` at that price (DigitalOcean changes it daily). A create for it sends the Spot request member and tags the Droplet `better-compute-capacity:spot`, so it reads back with its `@spot` offer id; a tenant label can't forge that tag. A Spot create for a size the cached catalog shows without Spot is `INVALID_INPUT` (`spot`).
+
+**The wire shape is not verified.** DigitalOcean's public OpenAPI has no Spot member on sizes or on the Droplet create (checked 2026-11-05). The provider's assumptions are data in one place, `spotShape` in `compute/spot.ts` (`verified: false`): the size member `spot_price_hourly` and the create member `capacity_type: 'spot'`. A catalog without the size member yields no Spot offer at all, so a wrong guess offers nothing rather than something else. The live suite settles it.
+
+**Preemption.** DigitalOcean warns of a reclaim, at least two hours ahead, by email only. vps treats a Spot instance whose machine vanishes as preempted: it is `lost` with a `Preempted` condition and `instance.preempted`, and a pool whose policy sets `replacePreempted: true` recreates it on a new machine.
+
+## Bare Metal GPUs
+
+DigitalOcean's API has no Bare Metal resource, so `digitaloceanMetalProvider({ machines, ssh, deployment })` (provider id `digitalocean-metal`, `provides: ['metal']`) works over SSH with machines the operator lists in code, never in tenant config. Its accounts belong to the platform tenant only (`INVALID_CONFIG`, `platformOnly` otherwise); the account config is `sshKey` (a secret reference to the private key), `sshUser` (default `root`) and `regions`.
+
+- **Claims are compare-and-set.** A claim is the file `/var/lib/better-compute/claim`, created with O_EXCL, naming the deployment and the idempotency key: a retried create finds its own claim, any other gets `CONFLICT`. Offers are the unclaimed machines (one that can't be reached is offered unavailable); `get` and `list` see only this deployment's claims.
+- **`delete`** stops bcd and removes this deployment's claim; the machine stays. Another claim is `INVALID_STATE` (`notManaged`).
+- **`bootstrap`** writes the single-use `provisioned` join token over SSH stdin into a root-only file, installs bcd pinned by sha256, and starts `bcd-join.service` and `bcd.service`. `identify` reads the SMBIOS UUID.
+- **Power** is a reboot over SSH only (`graceful-restart`); with no API or BMC, every other action is `UNSUPPORTED` (`noBmc`).
+- A machine may pin its host key (`hostKeySha256`, passed to the executor). An SSH failure is `UNAVAILABLE` and carries neither the key nor the executor's message.
+
+MicroVMs (preview) are not supported: vps sandboxes run on hosted pools through bcd, and a provider-backed sandbox backend is a follow-up (see `docs/research/digitalocean.md`).
 
 ## Attach
 
