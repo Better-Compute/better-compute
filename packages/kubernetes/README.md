@@ -91,6 +91,65 @@ Windows are `kubernetes` usage sources, tagged with the pool, provider, region, 
 account. On a platform-hosted cluster they reach the tenant through the account's provider cost pass-through rules
 (`providerAccounts` `billing.passThrough`); on a tenant's own account the tenant pays its provider directly.
 
+## Pool substrates
+
+A pool can be backed by a managed cluster on any provider whose `ProviderImpl.kubernetes` exists (GKE today; EKS
+and DOKS plug in the same way). The pool declares it in its policy; the `kubernetes.substrates` reconciler does the
+rest:
+
+```ts
+import { kubernetesSubstrateAgent } from '@better-compute/provider-kubernetes';
+
+kubernetes({
+  providers,
+  // What runs bcd on the cluster: the DaemonSet options except what the pool decides.
+  substrate: { agent: kubernetesSubstrateAgent({ image, gatewayUrl, pins, controlPlaneUrl }) },
+});
+
+await compute.api.pools.create(credential, {
+  tenantId,
+  siteId,
+  class: 'metal-host',
+  gpuModel: 'L4',
+  policy: {
+    kubernetes: { platformOperated: true }, // DaemonSet mode: no k8s-join settings; device plugin only
+    substrate: {
+      kind: 'kubernetes',
+      account: providerAccountId, // one of the pool owner's accounts
+      cluster: { create: { location: 'us-central1', version: '1.34' } }, // or { adopt: '<provider cluster id>' }
+      flavors: [
+        { name: 'gpu', machineType: 'g2-standard-8', nodes: 2, gpus: { type: 'nvidia-l4', count: 1 } },
+        { name: 'gpu-spot', machineType: 'g2-standard-8', nodes: 4, gpus: { type: 'nvidia-l4', count: 1 }, spot: true },
+      ],
+      allowSpot: true,
+    },
+  },
+  idempotencyKey: 'l4-pool',
+});
+```
+
+- **Cluster.** `create`: an ordinary `kubernetesClusters` cluster (`substratePoolId` set) with one node pool per
+  flavor, labelled `better-compute.dev/substrate-pool=<pool id>` (Spot ones also `better-compute.dev/capacity=spot`).
+  Changing `version`, `releaseChannel` or `authorizedNetworks` in the policy upgrades it in place; an operator's
+  `kubernetesClusters.update` does too. `adopt`: an existing cluster, read with `getCluster` and never created,
+  changed or deleted; only the node pools its flavors add are. One substrate per cluster. Account, mode, location
+  and private nodes never change in place (the substrate goes `error`); a flavor's shape never does either (give
+  the new shape another name). Direct `kubernetesClusters.delete` and `kubernetesNodePools` changes are refused.
+- **bcd.** Once the cluster is ready, each run mints a 600 s `admin` credential (`ProviderKubernetes.credentials`,
+  service account `bc-substrate`), held in memory for that run only, lists the substrate's Nodes and server-side
+  applies bcd (Namespace, ConfigMap, DaemonSet with the substrate node selector, device plugin only).
+- **Join token.** A hosted `kubernetes` join token, with one use per Node whose bcd is not connected, and its
+  Secret exist only while nodes are still to join; then the token is revoked and the Secret deleted. A Node
+  replaced by an upgrade, a scale-down or a Spot reclaim gets a new one. Compute books the nodes' GPUs like any
+  `binding: 'kubernetes'` pool's.
+- **Teardown.** Archiving the pool or removing `policy.substrate` revokes the token, cordons the pool's nodes
+  (`substrate-teardown`), waits for their bookings to end (nothing is force-released), removes bcd from the
+  cluster, then deletes a created cluster (an adopted one stays).
+- **Secrets.** No credential or join token is stored, logged or published; rows keep the token's id only.
+- **Events** `kubernetes.substrate.*` (`created`, `ready`, `error`, `token-issued`, `token-revoked`, `deleting`,
+  `deleted`), subject `pool/{id}`. Migration `kubernetes/0002_substrates`. Adopted clusters bill no
+  `kubernetes.cluster.hours`.
+
 ## License
 
 Apache-2.0
