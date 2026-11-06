@@ -81,6 +81,13 @@ describe('data template', () => {
     });
   });
 
+  it('keeps the RDS Data API off unless the DataApi parameter turns it on (for the one-time bootstrap)', () => {
+    const template = dataTemplate();
+    expect(template.Parameters!.DataApi).toMatchObject({ Default: 'Disabled', AllowedValues: ['Disabled', 'Enabled'] });
+    expect(template.Resources.Cluster!.Properties!.EnableHttpEndpoint).toEqual({ 'Fn::If': ['DataApiEnabled', true, false] });
+    expect(template.Conditions!.DataApiEnabled).toEqual({ 'Fn::Equals': [{ Ref: 'DataApi' }, 'Enabled'] });
+  });
+
   it('runs a writer plus the configured readers', () => {
     expect(ofType(dataTemplate(), 'AWS::RDS::DBInstance')).toHaveLength(2);
     expect(ofType(dataTemplate({ readers: 0 }), 'AWS::RDS::DBInstance')).toHaveLength(1);
@@ -89,7 +96,7 @@ describe('data template', () => {
 
   it('exports what the control plane needs for rds-db:connect and its pool', () => {
     const outputs = dataTemplate().Outputs!;
-    for (const name of ['ClusterEndpoint', 'ReaderEndpoint', 'Port', 'DatabaseName', 'ClusterResourceId', 'ClusterIdentifier', 'DatabaseClientSecurityGroupId', 'MasterUserSecretArn'])
+    for (const name of ['ClusterEndpoint', 'ReaderEndpoint', 'Port', 'DatabaseName', 'ClusterResourceId', 'ClusterIdentifier', 'ClusterArn', 'DatabaseClientSecurityGroupId', 'MasterUserSecretArn'])
       expect(outputs[name]!.Export!.Name, name).toEqual({ 'Fn::Sub': `\${AWS::StackName}-${name}` });
     expect(outputs.ClusterResourceId!.Value).toEqual({ 'Fn::GetAtt': ['Cluster', 'DBClusterResourceId'] });
   });
