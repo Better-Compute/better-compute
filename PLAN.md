@@ -1986,6 +1986,7 @@ Implementation notes (2026-09-24), recorded where the code settled a question th
 - **Per-input actions.** A method may name an alternative's own action on its resource (`MethodResource.action`, e.g. `tunnels.open` on a node decides `compute:nodes:console`). The envelope refuses any `(action, resource)` pair its §9.2 row does not list.
 - **Default secret store.** Without `ComputeOptions.secrets`, `ctx.secrets`, the `secrets` group and the secret broker use `sealed_secrets` in the compute database, sealed under the deployment secret (pki `localSealedSecretStore`).
 - **Revocation push.** Each gateway runs pki's `createRevocationFeed`, which polls `node_certs.revoked_at` with a look-back window; every revocation path is covered without events, and a revoked node disconnects in about 1 s.
+- **Pool substrate credentials (D25, 2026-11-05).** The DigitalOcean program's P5 says the substrate's kubeconfig is "sealed". The `kubernetes.substrates` reconciler instead mints a fresh 600 s credential each run and holds it in memory for that run only: never sealed through `SecretStore`, stored, logged or published. On an adopted cluster it owns only objects labelled `better-compute.dev/substrate-pool=<pool id>`, and its node pools are named `bc-<pool>-<flavor>`.
 
 ## 18. Risks & mitigations
 

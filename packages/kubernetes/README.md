@@ -134,7 +134,9 @@ await compute.api.pools.create(credential, {
   flavor, labelled `better-compute.dev/substrate-pool=<pool id>` (Spot ones also `better-compute.dev/capacity=spot`).
   Changing `version`, `releaseChannel` or `authorizedNetworks` in the policy upgrades it in place; an operator's
   `kubernetesClusters.update` does too. `adopt`: an existing cluster, read with `getCluster` and never created,
-  changed or deleted; only the node pools its flavors add are. One substrate per cluster. Account, mode, location
+  changed or deleted; only the node pools its flavors add are, named `bc-<last 6 of the pool id>-<flavor>`
+  (`substrateNodePoolName`; flavor names of at most 30 characters) so a flavor can never resize or delete one of the
+  tenant's own pools of the same name (ProviderKubernetes cannot list pools). One substrate per cluster. Account, mode, location
   and private nodes never change in place (the substrate goes `error`); a flavor's shape never does either (give
   the new shape another name). Direct `kubernetesClusters.delete` and `kubernetesNodePools` changes are refused.
 - **Isolated workers.** `create.networkId` puts the nodes on a network of the pool owner (same account, a ready
@@ -143,7 +145,11 @@ await compute.api.pools.create(credential, {
   has no NAT resource). Both are part of the substrate's identity (never changed in place).
 - **bcd.** Once the cluster is ready, each run mints a 600 s `admin` credential (`ProviderKubernetes.credentials`,
   service account `bc-substrate`), held in memory for that run only, lists the substrate's Nodes and server-side
-  applies bcd (Namespace, ConfigMap, DaemonSet with the substrate node selector, device plugin only).
+  applies bcd (Namespace, ConfigMap, DaemonSet with the substrate node selector, device plugin only). The
+  credential is never sealed or stored, not even through `SecretStore`: a fresh one each run is cheaper than a
+  stored one is safe. Every applied object carries `better-compute.dev/substrate-pool=<pool id>`. On an adopted
+  cluster each object is read first, and one of the same name without that label (a `bcd-system` the tenant made)
+  makes the substrate `error`: nothing is applied over it. The Node list is paged (100 per answer).
 - **Join token.** A hosted `kubernetes` join token, with one use per Node whose bcd is not connected, and its
   Secret exist only while nodes are still to join; then the token is revoked and the Secret deleted. A Node
   replaced by an upgrade, a scale-down or a Spot reclaim gets a new one. Compute books the nodes' GPUs like any
@@ -155,14 +161,21 @@ await compute.api.pools.create(credential, {
   (`releaseChannel`, `authorizedNetworks`) are pushed at once. The reason goes once the cluster runs the version.
   Events `draining { version, bookings }` and `upgrading { version, drained }`. The provider, not better-compute,
   picks which Node it replaces next, so `disruptionBudget` does not apply.
-- **Removed Nodes.** A pool node maps to its Kubernetes Node by the OS hostname bcd reports. One that is not
-  connected and whose Node is gone from the cluster's full Node list (a scale-down, a Spot reclaim, a repair) gets
-  NoSchedule `substrate-node-removed`, and its reservations end through capacity's `endNodeReservations`: bound ones
-  are released with their quota refunded once (Spot ones as `preempted`), unbound ones go back to `pending` and are
-  placed elsewhere. It stops counting as joined. If the Node comes back and bcd reconnects, the reason goes.
+- **Removed Nodes.** A connected pool node is matched once to its Kubernetes Node by the Node name bcd reports
+  (inventory `kubernetes.nodeName`, else `os.hostname`), only when that is exactly a listed Node's name; its uid is
+  recorded too (`kubernetes_substrate_nodes`). A node that matches no Node (an EKS hostname that is not the Node
+  name) is never taken for gone. A matched node that is not connected and whose Node is gone from the cluster's full
+  Node list, or listed under its name with another uid (EKS reuses IP-based names), is removed: its reservations end
+  through capacity's `endNodeReservations` (bound ones released with their quota refunded once, Spot ones as
+  `preempted`; unbound ones back to `pending` and placed elsewhere), and it is retired (`retired`, certificates
+  revoked, NoSchedule `substrate-node-removed`). Its replacement joins as a new node.
 - **Teardown.** Archiving the pool or removing `policy.substrate` revokes the token, cordons the pool's nodes
   (`substrate-teardown`), waits for their bookings to end (nothing is force-released), removes bcd from the
-  cluster, then deletes a created cluster (an adopted one stays).
+  cluster (only objects carrying its label), then deletes a created cluster (an adopted one stays, with only the
+  substrate's node pools deleted), and retires the pool's nodes. On an adopted cluster a refused credential or a
+  failed delete keeps the substrate `deleting` with the message (retried every 2 minutes) until bcd is really gone;
+  only a cluster the provider no longer has counts as nothing to remove. Bookings are waited for however long they
+  run, future ones included (no timeout applies to teardown).
 - **Secrets.** No credential or join token is stored, logged or published; rows keep the token's id only.
 - **Read.** `kubernetesSubstrates.get({ tenantId, poolId })` (`compute:kubernetes:read`, the pool owner's tenant):
   mode, cluster id, state and message, Nodes listed and joined, and a drain's `upgrade { version, since }`. Never a
@@ -172,7 +185,7 @@ await compute.api.pools.create(credential, {
 - **Doctor.** `selfCheck` reports `kubernetes.substrate-agent-missing` (pools declare `policy.substrate` but
   `kubernetes({ substrate })` is not configured) and `kubernetes.substrate-error` (substrates in error, by pool).
 - **Events** `kubernetes.substrate.*` (`created`, `ready`, `error`, `token-issued`, `token-revoked`, `node-removed`,
-  `draining`, `upgrading`, `deleting`, `deleted`), subject `pool/{id}`. Migration `kubernetes/0002_substrates`. Adopted clusters bill no
+  `draining`, `upgrading`, `deleting`, `deleted`), subject `pool/{id}`. Migrations `kubernetes/0002_substrates` and `kubernetes/0003_substrate_nodes`. Adopted clusters bill no
   `kubernetes.cluster.hours`.
 
 ## License
