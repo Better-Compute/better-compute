@@ -8,8 +8,14 @@ import {
   type ProviderContext,
   type ProviderDefinition,
   type ProviderImpl,
+  type ProviderResourceState,
 } from '@better-compute/core';
-import { check, checkEqual, type ConformanceCase } from '@better-compute/core/conformance';
+import {
+  check,
+  checkEqual,
+  checkRejects,
+  type ConformanceCase,
+} from '@better-compute/core/conformance';
 
 // providerConformance (PLAN.md §5.6 walkthrough 2): behavioural cases every ProviderImpl must pass,
 // run from any test runner against a live account, a record/replay transport or an emulator.
@@ -37,6 +43,15 @@ export interface ProviderConformanceSubject {
    * The claim and discover cases are skipped without it.
    */
   attachable?: string;
+  /** The size of the volumes the volume cases make (default 10 GiB: the floor of some providers). */
+  volumeGiB?: number;
+  /** The region volumes and addresses live in; absent: the region of the machine the case creates. */
+  region?: string;
+  /**
+   * How the volume and address cases wait for a non-blocking call to settle: they call again up to
+   * `attempts` times (default 30), `intervalMs` apart (default 0; a live run sets a few seconds).
+   */
+  settle?: { attempts?: number; intervalMs?: number };
 }
 
 const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -117,6 +132,57 @@ async function cleanUp(
   } catch (error) {
     if (!isComputeError(error, 'NOT_FOUND')) throw error;
   }
+}
+
+const resourceStates: readonly ProviderResourceState['state'][] = [
+  'pending',
+  'ready',
+  'updating',
+  'deleting',
+  'deleted',
+  'error',
+];
+
+function checkResource(state: ProviderResourceState | undefined, what: string): void {
+  check(state !== undefined, `${what}: expected a state`);
+  check(typeof state.id === 'string' && state.id !== '', `${what}: id must be a non-empty string`);
+  check(
+    resourceStates.includes(state.state),
+    `${what}: state ${String(state.state)} is not in the contract`,
+  );
+}
+
+/**
+ * Calls `step` until its state is one of `until` (a non-blocking provider call settles on a later
+ * call), at most `settle.attempts` times, and returns that state.
+ */
+async function settle(
+  subject: ProviderConformanceSubject,
+  step: () => Promise<ProviderResourceState>,
+  until: readonly ProviderResourceState['state'][],
+  what: string,
+): Promise<ProviderResourceState> {
+  const attempts = subject.settle?.attempts ?? 30;
+  const intervalMs = subject.settle?.intervalMs ?? 0;
+  let last: ProviderResourceState | undefined;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    last = await step();
+    checkResource(last, what);
+    check(last.state !== 'error', `${what}: the provider reports an error: ${last.message ?? ''}`);
+    if (until.includes(last.state)) return last;
+    if (intervalMs > 0) await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new ComputeError(
+    'INVALID_STATE',
+    `${what}: still ${String(last?.state)} after ${attempts} calls, expected ${until.join(' or ')}`,
+  );
+}
+
+/** The region the volume and address cases use: the subject's, else the created machine's. */
+function regionOf(subject: ProviderConformanceSubject, machine: ExternalMachine): string {
+  const region = subject.region ?? machine.region;
+  check(region !== undefined, 'the subject names no region and the created machine reports none');
+  return region;
 }
 
 /** The ProviderImpl contract (§5.4) as conformance cases. */
@@ -268,6 +334,222 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
           if (machine.id === id) found = machine;
         }
         check(found !== undefined, `discover yields machine ${id}`);
+      },
+    },
+    {
+      name: 'volumes (when offered): ensure by name, attach, grow-only resize, delete',
+      async run(subject) {
+        const probe = await client(subject);
+        if (!probe.impl.volumes) return;
+        const { impl, call, machine } = await create(subject, key(subject, 'volume-host'));
+        const volumes = impl.volumes!;
+        let volumeId: string | undefined;
+        try {
+          const region = regionOf(subject, machine);
+          const sizeGiB = subject.volumeGiB ?? 10;
+          const spec = { name: key(subject, 'vol'), region, sizeGiB, kind: 'block' as const };
+          const first = await settle(
+            subject,
+            () => volumes.ensureVolume(spec, call('vol-ensure')),
+            ['ready'],
+            'ensureVolume',
+          );
+          const id = first.id;
+          volumeId = id;
+          const again = await volumes.ensureVolume(spec, call('vol-ensure-again'));
+          checkEqual(again.id, id, 'a second ensure of the same name returns the same volume');
+          checkEqual(first.outputs?.region, region, 'the volume reports its region');
+          checkEqual(first.outputs?.sizeGiB, String(sizeGiB), 'the volume reports its size');
+          await checkRejects(
+            () => volumes.resizeVolume(id, sizeGiB - 1, call('vol-shrink')),
+            'INVALID_INPUT',
+            'resizing to a smaller size',
+          );
+          await settle(
+            subject,
+            () => volumes.attachVolume(id, machine.id, call('vol-attach')),
+            ['ready'],
+            'attachVolume',
+          );
+          const attached = await volumes.getVolume(id, call('vol-get-attached'));
+          checkResource(attached, 'getVolume after attach');
+          checkEqual(attached?.outputs?.attachedTo, machine.id, 'the volume names its machine');
+          await checkRejects(
+            () => volumes.deleteVolume(id, call('vol-delete-attached')),
+            'INVALID_STATE',
+            'deleting an attached volume',
+          );
+          await settle(
+            subject,
+            () => volumes.resizeVolume(id, sizeGiB + 1, call('vol-grow')),
+            ['ready'],
+            'resizeVolume',
+          );
+          checkEqual(
+            (await volumes.getVolume(id, call('vol-get-grown')))?.outputs?.sizeGiB,
+            String(sizeGiB + 1),
+            'the volume reports its new size',
+          );
+          await settle(
+            subject,
+            () => volumes.detachVolume(id, machine.id, call('vol-detach')),
+            ['deleted'],
+            'detachVolume',
+          );
+          const detached = await volumes.getVolume(id, call('vol-get-detached'));
+          check(detached?.outputs?.attachedTo === undefined, 'a detached volume names no machine');
+          await settle(
+            subject,
+            () => volumes.deleteVolume(id, call('vol-delete')),
+            ['deleted'],
+            'deleteVolume',
+          );
+          volumeId = undefined;
+          checkEqual(
+            (await volumes.deleteVolume(id, call('vol-delete-again'))).state,
+            'deleted',
+            'deleting a deleted volume counts as deleted',
+          );
+          const gone = await volumes.getVolume(id, call('vol-get-deleted'));
+          check(
+            gone === undefined || gone.state === 'deleting' || gone.state === 'deleted',
+            'getVolume after delete finds nothing live',
+          );
+        } finally {
+          if (volumeId !== undefined) {
+            await volumes
+              .detachVolume(volumeId, machine.id, call('vol-cleanup-detach'))
+              .catch(() => {});
+            await volumes.deleteVolume(volumeId, call('vol-cleanup')).catch(() => {});
+          }
+          await cleanUp(impl, call, machine.id);
+        }
+      },
+    },
+    {
+      name: 'volume snapshots (when offered): snapshot by name, delete idempotently',
+      async run(subject) {
+        const probe = await client(subject);
+        if (!probe.impl.volumes) return;
+        const { impl, call, machine } = await create(subject, key(subject, 'snapshot-host'));
+        const volumes = impl.volumes!;
+        let volumeId: string | undefined;
+        try {
+          const volume = await settle(
+            subject,
+            () =>
+              volumes.ensureVolume(
+                {
+                  name: key(subject, 'snapvol'),
+                  region: regionOf(subject, machine),
+                  sizeGiB: subject.volumeGiB ?? 10,
+                  kind: 'block',
+                },
+                call('snapvol-ensure'),
+              ),
+            ['ready'],
+            'ensureVolume',
+          );
+          volumeId = volume.id;
+          const name = key(subject, 'snap');
+          const snapshot = await settle(
+            subject,
+            () => volumes.snapshotVolume(volume.id, name, call('snap')),
+            ['ready'],
+            'snapshotVolume',
+          );
+          const again = await volumes.snapshotVolume(volume.id, name, call('snap-again'));
+          checkEqual(again.id, snapshot.id, 'a second snapshot of the same name is the same one');
+          checkResource(await volumes.getSnapshot(snapshot.id, call('snap-get')), 'getSnapshot');
+          await settle(
+            subject,
+            () => volumes.deleteSnapshot(snapshot.id, call('snap-delete')),
+            ['deleted'],
+            'deleteSnapshot',
+          );
+          checkEqual(
+            (await volumes.deleteSnapshot(snapshot.id, call('snap-delete-again'))).state,
+            'deleted',
+            'deleting a deleted snapshot counts as deleted',
+          );
+        } finally {
+          if (volumeId !== undefined)
+            await volumes.deleteVolume(volumeId, call('snapvol-cleanup')).catch(() => {});
+          await cleanUp(impl, call, machine.id);
+        }
+      },
+    },
+    {
+      name: 'addresses (when offered): reserve, assign, unassign, delete',
+      async run(subject) {
+        const probe = await client(subject);
+        if (!probe.impl.addresses) return;
+        const { impl, call, machine } = await create(subject, key(subject, 'address-host'));
+        const addresses = impl.addresses!;
+        let addressId: string | undefined;
+        try {
+          const spec = {
+            name: key(subject, 'addr'),
+            region: regionOf(subject, machine),
+            family: 'ipv4' as const,
+          };
+          const reserved = await settle(
+            subject,
+            () => addresses.ensureAddress(spec, call('addr-ensure')),
+            ['ready'],
+            'ensureAddress',
+          );
+          const id = reserved.id;
+          addressId = id;
+          check(
+            typeof reserved.outputs?.address === 'string' && reserved.outputs.address !== '',
+            'a reserved address reports its address',
+          );
+          const again = await addresses.ensureAddress({ ...spec, id }, call('addr-ensure-again'));
+          checkEqual(again.id, id, 'ensuring with the returned id returns the same address');
+          await settle(
+            subject,
+            () => addresses.assignAddress(id, machine.id, call('addr-assign')),
+            ['ready'],
+            'assignAddress',
+          );
+          checkEqual(
+            (await addresses.getAddress(id, call('addr-get')))?.outputs?.assignedTo,
+            machine.id,
+            'the address names its machine',
+          );
+          await checkRejects(
+            () => addresses.deleteAddress(id, call('addr-delete-assigned')),
+            'INVALID_STATE',
+            'deleting an assigned address',
+          );
+          await settle(
+            subject,
+            () => addresses.unassignAddress(id, call('addr-unassign')),
+            ['deleted'],
+            'unassignAddress',
+          );
+          await settle(
+            subject,
+            () => addresses.deleteAddress(id, call('addr-delete')),
+            ['deleted'],
+            'deleteAddress',
+          );
+          addressId = undefined;
+          checkEqual(
+            (await addresses.deleteAddress(id, call('addr-delete-again'))).state,
+            'deleted',
+            'deleting a deleted address counts as deleted',
+          );
+        } finally {
+          if (addressId !== undefined) {
+            await addresses
+              .unassignAddress(addressId, call('addr-cleanup-unassign'))
+              .catch(() => {});
+            await addresses.deleteAddress(addressId, call('addr-cleanup')).catch(() => {});
+          }
+          await cleanUp(impl, call, machine.id);
+        }
       },
     },
   ];
