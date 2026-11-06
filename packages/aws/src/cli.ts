@@ -1,6 +1,8 @@
 import { writeFile } from 'node:fs/promises';
 import { ComputeError, type Clock } from '@better-compute/core';
 import type { AwsCommandContext, CredentialSource } from './common.js';
+import { toPem } from '@better-compute/pki';
+import { kmsCaCsr } from './kms-ca.js';
 import { generateKmsSealingKey } from './kms-sealing.js';
 
 /** Host hooks for the `aws …` commands (tests pass an emulator). */
@@ -87,6 +89,45 @@ export function awsKmsSealingKeyCommand(options: AwsCommandOptions = {}) {
         context.note(`Wrote the wrapped sealing key to ${out}.`);
       } else context.io.out(wrapped);
       context.note('Pass it to kmsSealingKeys({ wrapped: { <id>: … }, current: <id> }) at host start.');
+    },
+  };
+}
+
+/** `better-compute aws kms-ca-csr --key-id <arn> --common-name <cn>`: a CSR for a KMS-held CA key, signed by KMS. */
+export function awsKmsCaCsrCommand(options: AwsCommandOptions = {}) {
+  return {
+    name: 'aws kms-ca-csr' as const,
+    group: 'Security' as const,
+    summary: 'Create a certificate request for a CA key held in KMS',
+    description:
+      'aws kms-ca-csr reads the public key of --key-id (an ECC_NIST_P256 SIGN_VERIFY KMS key), builds a PKCS#10 request for it with subject CN=--common-name (O=--organization, default better-compute), has KMS sign it, and prints it as PEM or writes it to --out (a new file). Certify it as a CA with the operator root (pki), then pass the certificate to kmsCertificateAuthority. The private key never leaves KMS.',
+    flags: {
+      'key-id': { type: 'string' as const, value: 'ARN', required: true, description: 'The KMS signing key (id, ARN or alias)' },
+      'common-name': { type: 'string' as const, value: 'NAME', required: true, description: "The CA certificate's common name" },
+      organization: { type: 'string' as const, value: 'NAME', description: 'The subject organization (default better-compute)' },
+      region: regionFlagSpec,
+      out: { type: 'string' as const, value: 'PATH', description: 'Write the PEM request to this new file instead of the output' },
+    },
+    async run(context: AwsCommandContext): Promise<void> {
+      const keyId = stringFlag(context, 'key-id');
+      const commonName = stringFlag(context, 'common-name');
+      if (!keyId || !commonName) throw new ComputeError('INVALID_INPUT', '--key-id and --common-name are required');
+      const organization = stringFlag(context, 'organization');
+      const csr = await kmsCaCsr({
+        region: regionFlag(context, options),
+        credentials: options.credentials ?? envCredentialSource(options.env),
+        ...(options.fetch ? { fetch: options.fetch } : {}),
+        ...(options.endpoint ? { endpoint: options.endpoint } : {}),
+        ...(options.clock ? { clock: options.clock } : {}),
+        keyId,
+        subject: { commonName, ...(organization ? { organization } : {}) },
+      });
+      const pem = toPem(csr, 'CERTIFICATE REQUEST');
+      const out = stringFlag(context, 'out');
+      if (out) {
+        await writeNewFile(context.path(out), pem);
+        context.note(`Wrote the certificate request to ${out}.`);
+      } else context.io.out(pem.trimEnd());
     },
   };
 }

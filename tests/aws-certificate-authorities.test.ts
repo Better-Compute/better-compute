@@ -1,14 +1,27 @@
+import { createPrivateKey } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { ComputeError, type CertificateProfile } from '@better-compute/core';
 import {
+  buildCertificate,
   createCsr,
   createNodeCa,
+  distinguishedName,
+  fromPem,
+  parseCsr,
+  spkiDer,
   createRootCa,
   generateP256KeyPair,
   parseCertificate,
   verifyCertificateChain,
 } from '@better-compute/pki';
-import { acmPcaCertificateAuthority, colonSerial } from '@better-compute/aws';
+import {
+  acmPcaCertificateAuthority,
+  awsKmsCaCsrCommand,
+  colonSerial,
+  kmsCaCsr,
+  kmsCertificateAuthority,
+} from '@better-compute/aws';
+import { kmsFake } from './support/aws-platform-emulator/kms.js';
 import { AwsEmulator } from './support/aws-platform-emulator/index.js';
 import { acmPcaFake } from './support/aws-platform-emulator/acmpca.js';
 
@@ -120,3 +133,89 @@ describe('ACM Private CA', () => {
     ).toThrow(ComputeError);
   });
 });
+
+describe('KMS CA', () => {
+  async function kmsWorld(kind: 'node' | 'internal' = 'node') {
+    const emu = new AwsEmulator();
+    const kms = kmsFake(emu);
+    kms.addEccKey('ca-key');
+    kms.addEccKey('other-key');
+    const base = { region: 'us-east-1', credentials: emu.credentials, fetch: emu.fetch, endpoint: 'http://emu.local', clock: emu.clock };
+    const root = createRootCa({ clock: emu.clock });
+    // The operator's root certifies the KMS key over kmsCaCsr (as `pki` would).
+    const csr = await kmsCaCsr({ ...base, keyId: 'ca-key', subject: { commonName: 'better-compute kms node CA' } });
+    const caCertificate = buildCertificate(
+      {
+        serial: new Uint8Array([0x11]),
+        issuer: parseCertificate(root.certificate).subject,
+        subject: parseCsr(csr).subject,
+        notBefore: emu.clock.now() - 60_000,
+        notAfter: emu.clock.now() + 365 * 24 * 3600_000,
+        publicKey: parseCsr(csr).publicKey,
+        ca: { pathLength: 0 },
+        authorityKeyId: root.subjectKeyId,
+      },
+      createPrivateKey(root.export().privateKeyPem),
+    );
+    return { emu, kms, base, root, csr, caCertificate, kind };
+  }
+
+  it('kmsCaCsr produces a CSR whose signature verifies', async () => {
+    const { csr, kms, emu } = await kmsWorld();
+    const parsed = parseCsr(csr);
+    expect(Buffer.compare(Buffer.from(spkiDer(parsed.publicKey)), kms.ecc.get('ca-key')!.publicDer)).toBe(0);
+    expect(kms.signs).toEqual([{ keyId: 'ca-key', messageType: 'DIGEST', algorithm: 'ECDSA_SHA_256' }]);
+    expect(emu.calls('GetPublicKey')).toHaveLength(1);
+  });
+
+  it('KMS CA issues certificates that verify against its certificate', async () => {
+    const { base, caCertificate, root, emu } = await kmsWorld();
+    const ca = kmsCertificateAuthority({ ...base, id: 'node', keyId: 'ca-key', kind: 'node', certificate: caCertificate, chain: [root.certificate] });
+    const issued = await ca.sign(createCsr(generateP256KeyPair().privateKey), nodeProfile);
+    const parsed = parseCertificate(issued.certificate);
+    expect(parsed.role).toBe('node');
+    expect(parsed.uriSans).toEqual(nodeProfile.uriSans);
+    expect(parsed.subjectCommonName).toBe('node_1');
+    const path = verifyCertificateChain([issued.certificate, ...issued.chain.slice(0, 1)], [root.certificate], { now: emu.clock.now(), usage: 'client' });
+    expect(path).toHaveLength(3);
+    expect(await ca.certificates()).toHaveLength(2);
+    await expect(ca.sign(createCsr(generateP256KeyPair().privateKey), { ...nodeProfile, ttlSeconds: 2 * 24 * 3600 })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(ca.sign(createCsr(generateP256KeyPair().privateKey), { ...nodeProfile, usage: 'server' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    // The key check runs once.
+    await ca.sign(createCsr(generateP256KeyPair().privateKey), nodeProfile);
+    expect(emu.calls('GetPublicKey')).toHaveLength(2);
+  });
+
+  it('refuses a CA certificate for a different key', async () => {
+    const { base, caCertificate, kms } = await kmsWorld();
+    const ca = kmsCertificateAuthority({ ...base, id: 'node', keyId: 'other-key', kind: 'node', certificate: caCertificate });
+    await expect(ca.sign(createCsr(generateP256KeyPair().privateKey), nodeProfile)).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
+    expect(kms.signs.filter((s) => s.keyId === 'other-key')).toHaveLength(0);
+    expect(() => kmsCertificateAuthority({ ...base, id: 'node', keyId: 'ca-key', certificate: parseCertificateLeaf() })).toThrow(ComputeError);
+  });
+
+  it('the kms-ca-csr command prints a PEM request', async () => {
+    const { emu } = await kmsWorld();
+    const out: string[] = [];
+    const command = awsKmsCaCsrCommand({ credentials: emu.credentials, fetch: emu.fetch, endpoint: 'http://emu.local', clock: emu.clock });
+    await command.run({ flags: { 'key-id': 'ca-key', 'common-name': 'kms CA', region: 'us-east-1' }, io: { out: (m) => out.push(m) }, note: () => {}, path: (p) => p });
+    const [pem] = fromPem(out[0]!, 'CERTIFICATE REQUEST');
+    expect(parseCsr(pem!).publicKey).toBeDefined();
+  });
+});
+
+/** A leaf (not a CA) certificate, for the refusal check. */
+function parseCertificateLeaf(): Uint8Array {
+  const issuer = generateP256KeyPair();
+  return buildCertificate(
+    {
+      serial: new Uint8Array([1]),
+      issuer: distinguishedName({ commonName: 'x' }),
+      subject: distinguishedName({ commonName: 'leaf' }),
+      notBefore: 0,
+      notAfter: 1e13,
+      publicKey: generateP256KeyPair().publicKey,
+    },
+    issuer.privateKey,
+  );
+}
