@@ -258,6 +258,11 @@ export interface AwsPlacement {
 export class AwsNetworks implements ProviderNetworks {
   readonly subnetScope = 'zone' as const;
   readonly denyRules = 'network-wide' as const;
+  /** A VPC range and a subnet are /16 to /28 (vps refuses others at the API). */
+  readonly cidrPrefix = {
+    network: [16, 28] as const,
+    subnet: [16, 28] as const,
+  };
   /** Network name → the VPC this client just created and when (DescribeVpcs by tag lags). */
   readonly #created = new Map<string, { id: string; at: number }>();
   /** VPCs whose DNS attributes this client has set. */

@@ -1043,6 +1043,23 @@ async function networkProvider(
   return { accountId: account.id, zones, regions, client };
 }
 
+/**
+ * (AWS A2) Refuses a range whose prefix length the provider does not take (`ProviderNetworks.cidrPrefix`),
+ * so the tenant hears it from the API rather than from a network or subnet in `error`.
+ */
+function assertCidrPrefix(client: ProviderImpl, kind: 'network' | 'subnet', cidr: string): void {
+  const range = client.networks?.cidrPrefix?.[kind];
+  if (range === undefined) return;
+  const prefix = Number(cidr.slice(cidr.indexOf('/') + 1));
+  if (prefix < range[0] || prefix > range[1])
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `${kind === 'network' ? 'The network' : 'A subnet'} cidr ${cidr} must be /${range[0]} to /${range[1]} on this provider`,
+      undefined,
+      { cidr, minPrefix: range[0], maxPrefix: range[1] },
+    );
+}
+
 /** A GCE zone's region: `us-central1-a` is in `us-central1`. */
 export function zoneRegion(zone: string): string {
   return zone.replace(/-[a-z]$/, '');
@@ -1082,7 +1099,8 @@ export async function prepareCreateNetwork(
     return { status: 'replay', result: await viewOf(tx, networkId) };
   }
   // Refusals come before anything is staged, so a refused request leaves no projection row behind.
-  const { accountId } = await networkProvider(deps, tx, input.tenantId, input.poolId);
+  const { accountId, client } = await networkProvider(deps, tx, input.tenantId, input.poolId);
+  if (input.cidr !== undefined) assertCidrPrefix(client, 'network', input.cidr);
   await assertNameFree(tx, input.tenantId, input.name);
   await assertNetworkAllowance(tx, input.tenantId);
   await context.authz.upsert(tx, {
@@ -1161,7 +1179,8 @@ export async function createNetwork(
       throw new ComputeError('CONFLICT', 'This idempotency key was used for a different request');
     return viewOf(tx, networkId);
   }
-  const { accountId } = await networkProvider(deps, tx, input.tenantId, input.poolId);
+  const { accountId, client } = await networkProvider(deps, tx, input.tenantId, input.poolId);
+  if (input.cidr !== undefined) assertCidrPrefix(client, 'network', input.cidr);
   await assertNameFree(tx, input.tenantId, input.name);
   // Concurrent creates of one tenant count one after the other.
   await tx.query(`SELECT pg_advisory_xact_lock(hashtext('better-compute:networks:' || $1))`, [
@@ -1435,6 +1454,7 @@ export async function addSubnet(
   const network = await openNetwork(tx, input);
   const provider = await networkProvider(deps, tx, network.tenant_id, network.pool_id);
   const regionOf = (zone: string) => provider.client.zoneRegion?.(zone) ?? zoneRegion(zone);
+  assertCidrPrefix(provider.client, 'subnet', input.cidr);
   const regions = [...new Set([...provider.zones.map(regionOf), ...provider.regions])];
   if (regions.length === 0)
     throw new ComputeError(
@@ -1719,8 +1739,16 @@ export async function placeOnNetwork(
   },
 ): Promise<{ networkId: string; subnetId: string }> {
   const { row, subnets } = await lockNetwork(tx, input, 'provisioned');
-  const region = offerRegion(input.offerId);
   const zone = offerZone(input.offerId);
+  // A zone-scoped network (AWS A2) matches by zone, and its subnets carry the region the provider
+  // mapped their zone to (`us-west-2-lax-1a` is in `us-west-2`): a GCE-style guess from the zone
+  // (`us-east-1a` would stay `us-east-1a`) never names the place.
+  const zoneScoped = subnets.some((subnet) => subnet.zone !== null && subnet.zone !== undefined);
+  const region = zoneScoped
+    ? zone !== undefined
+      ? subnets.find((subnet) => subnet.zone === zone)?.region
+      : undefined
+    : offerRegion(input.offerId);
   // A zone-scoped subnet (AWS A2) takes machines of its own zone; a regional one, of its region.
   const misfit = (subnet: SubnetRow): string | undefined =>
     subnet.zone !== null && subnet.zone !== undefined
@@ -1746,13 +1774,18 @@ export async function placeOnNetwork(
   const candidates = subnets.filter(
     (subnet) => subnet.desired_state === 'present' && misfit(subnet) === undefined,
   );
-  const where = region === undefined ? '' : ` in ${region}`;
+  const place = zoneScoped ? zone : region;
+  const where = place === undefined ? '' : ` in ${place}`;
   if (candidates.length === 0)
     throw new ComputeError(
       'INVALID_INPUT',
       `Network ${row.id} has no subnet${where}; add one (networks.addSubnet) or name another network`,
       undefined,
-      { networkId: row.id, ...(region !== undefined ? { region } : {}) },
+      {
+        networkId: row.id,
+        ...(region !== undefined ? { region } : {}),
+        ...(zoneScoped && zone !== undefined ? { zone } : {}),
+      },
     );
   if (candidates.length > 1)
     throw new ComputeError(

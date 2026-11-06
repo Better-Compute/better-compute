@@ -765,6 +765,15 @@ export interface ProviderNetworks {
    * network ACLs), so a targeted deny is refused; or not at all. Default 'native'.
    */
   readonly denyRules?: 'native' | 'network-wide' | 'none';
+  /**
+   * (AWS A2) The CIDR prefix lengths the provider takes, `[shortest, longest]`, for a network's own range
+   * and for a subnet (AWS: /16 to /28 for both). vps refuses others at the API (`INVALID_INPUT`) instead
+   * of the network or subnet ending in `error`. Absent: whatever vps itself allows.
+   */
+  readonly cidrPrefix?: {
+    readonly network?: readonly [number, number];
+    readonly subnet?: readonly [number, number];
+  };
   ensureNetwork(spec: ProviderNetworkSpec, context: CallContext): Promise<ProviderNetworkState>;
   ensureSubnet(spec: ProviderSubnetSpec, context: CallContext): Promise<ProviderNetworkState>;
   ensureFirewall(spec: ProviderFirewallSpec, context: CallContext): Promise<ProviderNetworkState>;

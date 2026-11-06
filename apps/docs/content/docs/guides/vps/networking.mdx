@@ -260,12 +260,12 @@ tagged (`better-compute:network`, `better-compute:subnet`, `better-compute:manag
 nothing depends on remembered ids. The tenant-facing behaviour above holds; these are the differences.
 
 - **A network is a VPC** with DNS support and hostnames, an internet gateway and a `0.0.0.0/0` route on its main
-  route table. `networks.create` takes an optional `cidr`, the VPC's range: a private /16 to /28, default
+  route table. `networks.create` takes an optional `cidr`, the VPC's range: a private /16 to /28 (others are `INVALID_INPUT` at the API), default
   `10.64.0.0/16` (or a block from the account's `ipamPoolId`). Providers whose networks have no range ignore it.
 - **Subnets are zone-scoped.** `networks.addSubnet` needs `zone`, one of the account's zones, in `region`
-  (`us-east-1a` is in `us-east-1`); a subnet without one is `INVALID_INPUT`, and so is a zone on a region-scoped
+  (`us-east-1a` and the Local Zone `us-west-2-lax-1a` are in their region by AWS's own mapping); a subnet without one is `INVALID_INPUT`, and so is a zone on a region-scoped
   provider. A range outside the VPC's ranges first gets the subnet's /16 (or the range itself, when that /16 would
-  overlap one) associated as a secondary range; AWS takes at most five per VPC. A subnet is /16 to /28. Instances go
+  overlap one) associated as a secondary range; AWS takes at most five per VPC. A subnet is /16 to /28, checked at the API. Instances go
   on a subnet in their offer's zone: naming one in another zone is `INVALID_INPUT`, and without `subnetId` the
   network's only subnet in that zone is used. Public IPs on launch follow the account's `associatePublicIp`.
 - **Allow rules are security group rules.** A rule with no targets goes to the network's group `bc-net-<network>`; a
