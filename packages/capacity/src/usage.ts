@@ -130,7 +130,9 @@ export type UsageSourceKind =
   | 'snapshot'
   | 'cost'
   /** A managed Kubernetes cluster (`@better-compute/kubernetes`, whose migration adds it to the CHECK). */
-  | 'kubernetes';
+  | 'kubernetes'
+  /** A managed cloud resource (`@better-compute/cloud-resources`, whose migration adds it to the CHECK). */
+  | 'cloud-resource';
 
 /** The idempotency key of one source window (D2): `cmp:<kind>:<id>:<windowStartMs>[:<meter>]`. */
 export function sourceUsageKey(

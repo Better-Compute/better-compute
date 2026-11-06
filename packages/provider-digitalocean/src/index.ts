@@ -17,3 +17,6 @@ export * from './provider.js';
 export * from './resources/kind.js';
 export * from './resources/registry.js';
 export * from './resources/kinds/databases.js';
+export { appInstanceHoursMeter, appInstances } from './resources/kinds/apps.js';
+export { addonHoursMeter } from './resources/kinds/addons.js';
+export { partnerHoursMeter } from './resources/kinds/partner.js';

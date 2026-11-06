@@ -175,6 +175,8 @@ describe('Managed Database clusters', () => {
       engine: 'pg',
     });
     expect(JSON.stringify(state.outputs)).not.toContain(cluster._admin.password);
+    // It bills by its nodes: the module samples this rate for do.database.pg.node.hours.
+    expect(state.usage).toEqual({ 'do.database.pg.node.hours': 1 });
     // Neither the password nor the token is ever logged.
     expect(logs.join('\n')).not.toContain(cluster._admin.password);
     expect(logs.join('\n')).not.toContain('do-token');
@@ -469,6 +471,7 @@ describe('what lives in a cluster', () => {
     expect(first.state).toBe('updating');
     const online = await ready(resources, request);
     expect(online.state).toBe('ready');
+    expect(online.usage).toEqual({ 'do.database.pg.node.hours': 1 });
     const error = await failure(
       resources.ensure(
         { ...request, id: online.id, spec: { ...request.spec, region: 'sfo3' } },

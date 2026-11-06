@@ -159,6 +159,13 @@ DigitalOcean has no network object, so a tenant network is built from a VPC per 
   service key and the BGP auth key are secret outputs, a BGP key the tenant chooses is a SecretRef; only the attached
   VPCs change in place.
 
+Meters (`ProviderResourceState.usage`, the rate per hour the module samples): a cluster and each read-only replica
+report `do.database.<engine>.node.hours` (its node count; a replica is one node); an app reports
+`do.app.instance.hours` (its services' and workers' instances, an autoscaled one at its minimum; static sites and
+jobs none); an add-on `do.addon.hours` and a Partner Network Connect attachment `do.partner-attachment.hours` (one
+while it exists). A Functions namespace declares `do.functions.gib.seconds` but reports no rate: it bills by use,
+which only DigitalOcean's billing knows (P9 reconciles it).
+
 Token scopes: `database:read`, `database:create`, `database:update` and `database:delete`, plus `tag:create` for
 adopt and release; the App Platform, Functions and Add-Ons scopes for those kinds. The App, Functions and Add-Ons
 bodies follow the API reference and are not yet checked against recorded responses. A cluster's `vpc` (a VPC uuid)

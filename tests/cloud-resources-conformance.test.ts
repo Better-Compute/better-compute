@@ -43,4 +43,20 @@ describe('ProviderResources conformance (fake provider)', () => {
     expect(report.passed).toEqual([]);
     expect(report.failed.length).toBe(providerResourcesConformanceCases().length);
   });
+
+  it('usage reported for a meter the kind does not declare fails the cases', async () => {
+    const bad = await runConformance(
+      providerResourcesConformanceCases().filter((test) =>
+        test.name.startsWith('ensure is idempotent'),
+      ),
+      () => {
+        const cloud = fakeResourcesCloud();
+        cloud.usageExtra = { 'fake.undeclared': 1 };
+        return { ...subject(), provider: fakeResourcesProvider(cloud) };
+      },
+    );
+    expect(bad.failed.map((entry) => String(entry.error))).toEqual([
+      expect.stringContaining('usage fake.undeclared is not a meter fake.database declares'),
+    ]);
+  });
 });

@@ -129,6 +129,9 @@ function status(value: string | undefined): ProviderResourceState['state'] {
   }
 }
 
+/** One per add-on per hour while it exists. */
+export const addonHoursMeter = 'do.addon.hours';
+
 function addonState(addon: DoAddon): ProviderResourceState {
   const state = status(addon.state);
   const metadata = metadataOf(addon);
@@ -137,6 +140,7 @@ function addonState(addon: DoAddon): ProviderResourceState {
     state,
     ...(state === 'error' ? { message: `The add-on is ${addon.state}` } : {}),
     outputs: strings({ app: addon.app_slug, plan: addon.plan_slug, status: addon.state }),
+    ...(state !== 'deleted' ? { usage: { [addonHoursMeter]: 1 } } : {}),
     spec: {
       app: addon.app_slug,
       plan: addon.plan_slug,
@@ -175,7 +179,8 @@ export function addonKind(): DoKind {
       outputs: ['app', 'plan', 'status'],
       regional: false,
       updatable: ['plan'],
-      meters: [{ meter: 'do.addon.months', unit: 'month' }],
+      // DigitalOcean bills an add-on by its plan; better-compute meters the hours it exists (the plan prices them).
+      meters: [{ meter: addonHoursMeter, unit: 'hour' }],
     },
 
     async ensure(env, request, context) {

@@ -26,6 +26,8 @@ import {
 // recording: the live suite captures real bodies before release.
 
 export const partnerKindName = 'do.partner-attachment';
+/** One per attachment per hour while it exists (DigitalOcean bills it by its bandwidth). */
+export const partnerHoursMeter = 'do.partner-attachment.hours';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ipv4Cidr = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/;
@@ -161,6 +163,7 @@ async function state(
       bandwidthMbps: attachment.connection_bandwidth_in_mbps,
     }),
     ...(Object.keys(secrets).length > 0 ? { secretOutputs: secrets } : {}),
+    usage: { [partnerHoursMeter]: 1 },
     spec: specOf(attachment),
   };
 }
@@ -212,7 +215,7 @@ export function partnerKind(): DoKind {
       secretOutputs: ['serviceKey', 'bgpAuthKey'],
       regional: true,
       updatable: ['vpcs'],
-      meters: [{ meter: 'do.partner-attachment.hours', unit: 'hour' }],
+      meters: [{ meter: partnerHoursMeter, unit: 'hour' }],
     },
 
     async ensure(env, request, context) {

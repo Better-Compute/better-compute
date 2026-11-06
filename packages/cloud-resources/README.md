@@ -35,7 +35,12 @@ import { digitalocean } from '@better-compute/provider-digitalocean';
 import { vps } from '@better-compute/vps';
 
 const providers = [digitalocean];
-betterCompute({ modules: [vps({ providers }), cloudResources({ providers, maxPerKind: 20 })] });
+betterCompute({
+  modules: [
+    vps({ providers }),
+    cloudResources({ providers, maxPerKind: 20, kindMeters: ['do.database.pg.node.hours'] }),
+  ],
+});
 ```
 
 - **API:** `cloudResources.kinds`, `create`, `list`, `get`, `update`, `delete`, `discover`, `adopt` and
@@ -53,7 +58,17 @@ betterCompute({ modules: [vps({ providers }), cloudResources({ providers, maxPer
 - **Quota** per tenant and kind: `maxPerKind` (default 20) and `quotas: { 'do.database.pg': 5 }`.
 - **Events** `cloud.resource.*` (`created`, `ready`, `updating`, `updated`, `failed`, `deleting`, `deleted`,
   `adopted`, `releasing`, `released`), never carrying a secret value.
-- **Migration** `cloud-resources/0001_resources` (one `cloud_resources` table).
+- **Metering** (`cloud.resources.usage`, every 5 minutes): `cloud.resource.hours`, one per resource per hour from
+  the provider's first acceptance until it is deleted or released, billed to the resource's tenant as
+  `cloud-resource` usage windows (tags `pool`, `provider`, `region`, `project` and `source` = the kind). It is
+  the managed-resource fee, recorded on hosted and BYO pools alike; a pool whose billing mode is `none` records
+  none. A kind's own meters (`do.database.pg.node.hours`, …) bill at the rate the provider last reported
+  (`ProviderResourceState.usage`, kept in `meter_rates`), but only those named in `kindMeters`: better-iam prices
+  only meters it defines (100 per tenant), so define them there first. What the provider charges reaches a hosted
+  tenant through the account's cost pass-through rules.
+- **Migrations** `cloud-resources/0001_resources` (one `cloud_resources` table) and `0002_metering` (the
+  watermark, the rates, and `cloud-resource` appended to the usage source CHECK; selfCheck
+  `cloud-resources.usage-source` reports a later migration that dropped it).
 
 ## Conformance
 

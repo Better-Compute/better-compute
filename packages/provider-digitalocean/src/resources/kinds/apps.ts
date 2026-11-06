@@ -477,6 +477,25 @@ async function latestDeployment(
   return (reply.deployments ?? [])[0];
 }
 
+/** An app's instance hours: one per running service or worker instance per hour (static sites run none). */
+export const appInstanceHoursMeter = 'do.app.instance.hours';
+
+/** The instances an app runs: its services' and workers' counts (an autoscaled one: its minimum). */
+export function appInstances(spec: Json): number {
+  let count = 0;
+  const record = spec as Record<string, unknown>;
+  for (const group of ['services', 'workers'])
+    for (const component of Array.isArray(record[group]) ? (record[group] as unknown[]) : []) {
+      const entry = (component ?? {}) as {
+        instance_count?: unknown;
+        autoscaling?: { min_instance_count?: unknown } | null;
+      };
+      const value = entry.autoscaling?.min_instance_count ?? entry.instance_count ?? 1;
+      count += typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+    }
+  return count;
+}
+
 async function appState(
   env: DoKindEnv,
   app: DoApp,
@@ -505,6 +524,7 @@ async function appState(
       deploymentPhase: latest?.phase,
       urn: `do:app:${app.id}`,
     }),
+    usage: { [appInstanceHoursMeter]: appInstances(app.spec) },
     spec: observedSpec(app),
   };
 }
@@ -561,7 +581,7 @@ export function appKind(): DoKind {
       // App Platform regions (nyc, ams) are not the account's datacenter regions (nyc3): not regional.
       regional: false,
       updatable: updatableFields,
-      meters: [{ meter: 'do.app.instance.hours', unit: 'hour' }],
+      meters: [{ meter: appInstanceHoursMeter, unit: 'hour' }],
     },
 
     async ensure(env, request, context) {

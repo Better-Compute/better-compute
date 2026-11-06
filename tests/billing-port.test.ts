@@ -650,7 +650,8 @@ describe('catalog', () => {
 
   it('meterCatalog stays under 90 meters for the default models', () => {
     const catalog = meterCatalog({ gpuModels: defaultMeterGpuModels });
-    expect(catalog.length).toBe(81);
+    // 81 + cloud.resource.hours (cloud-resources).
+    expect(catalog.length).toBe(82);
     expect(catalog.length).toBeLessThanOrEqual(90);
     expect(defaultMeterGpuModels).toEqual(['H100', 'H200', 'B200', 'A100', 'L4', 'L40S', 'other']);
   });

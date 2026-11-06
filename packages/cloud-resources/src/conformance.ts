@@ -52,6 +52,8 @@ export interface ProviderResourcesConformanceSubject {
 
 const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 const kindPattern = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
+/** A meter key as better-iam takes it (core's meter catalog pattern). */
+const meterPattern = /^[a-z][a-z0-9._-]{0,63}$/;
 const families = ['storage', 'network', 'edge', 'data', 'platform', 'ai', 'observability'];
 const states: readonly ProviderResourceState['state'][] = [
   'pending',
@@ -117,6 +119,16 @@ function checkState(
       (kind.secretOutputs ?? []).includes(name),
       `${what}: secret output ${name} is not declared by ${kind.kind}`,
     );
+  for (const [meter, rate] of Object.entries(state.usage ?? {})) {
+    check(
+      (kind.meters ?? []).some((entry) => entry.meter === meter),
+      `${what}: usage ${meter} is not a meter ${kind.kind} declares`,
+    );
+    check(
+      typeof rate === 'number' && Number.isFinite(rate) && rate >= 0,
+      `${what}: usage ${meter} is a finite, non-negative rate per hour`,
+    );
+  }
 }
 
 async function validSpec(kind: ProviderResourceKind, spec: unknown): Promise<unknown> {
@@ -240,6 +252,15 @@ export function providerResourcesConformanceCases(): ConformanceCase<ProviderRes
               kinds.some((entry) => entry.kind === kind.parent),
               `${kind.kind}: parent ${kind.parent} is listed`,
             );
+          const meters = new Set<string>();
+          for (const entry of kind.meters ?? []) {
+            check(
+              meterPattern.test(entry.meter) && typeof entry.unit === 'string' && entry.unit !== '',
+              `${kind.kind}: meter ${entry.meter} is a meter key [a-z0-9._-] with a unit`,
+            );
+            check(!meters.has(entry.meter), `${kind.kind}: meter ${entry.meter} is declared once`);
+            meters.add(entry.meter);
+          }
         }
         kindOf(resources, subject.kind);
       },

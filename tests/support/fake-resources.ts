@@ -50,6 +50,8 @@ export interface FakeResourcesCloud {
   resolved: Map<string, string>;
   /** The `accountScope` of the last ensure, by provider-side name. */
   scopes: Map<string, string | undefined>;
+  /** Extra `usage` entries every fake.database reports (to check the module drops what it should). */
+  usageExtra?: Record<string, number>;
   reset(): void;
   /** A resource made outside better-compute (or by another deployment). */
   seed(
@@ -78,6 +80,7 @@ export function fakeResourcesCloud(): FakeResourcesCloud {
       this.passwords.length = 0;
       this.scopes.clear();
       this.resolved.clear();
+      delete this.usageExtra;
     },
     seed(resource) {
       const id = `f-${++next}`;
@@ -178,11 +181,20 @@ function kindOf(kind: string): ProviderResourceKind {
   return found;
 }
 
-function outputs(resource: FakeResource): ProviderResourceState {
+function outputs(resource: FakeResource, cloud: FakeResourcesCloud): ProviderResourceState {
   const state: ProviderResourceState = {
     id: resource.id,
     state: resource.ready ? 'ready' : 'pending',
     spec: { ...resource.spec },
+    // A database bills one fake.database.hours per node per hour.
+    ...(resource.kind === 'fake.database'
+      ? {
+          usage: {
+            'fake.database.hours': Number(resource.spec.nodes ?? 1),
+            ...cloud.usageExtra,
+          },
+        }
+      : {}),
   };
   if (!resource.ready) return state;
   if (resource.kind === 'fake.database')
@@ -297,12 +309,12 @@ export function fakeProviderResources(
         if (inFlight(cloud, op)) return { id: resource.id, state: 'pending' };
         resource.ready = true;
       }
-      return outputs(resource);
+      return outputs(resource, cloud);
     },
     async get(kind, id) {
       call(`get ${kind} ${id}`);
       const resource = live(kind, id);
-      return resource ? outputs(resource) : undefined;
+      return resource ? outputs(resource, cloud) : undefined;
     },
     async delete(kind, id) {
       call(`delete ${kind} ${id}`);
@@ -348,7 +360,7 @@ export function fakeProviderResources(
         );
       resource.owner = 'this';
       resource.labels = { ...resource.labels, ...labels };
-      return outputs(resource);
+      return outputs(resource, cloud);
     },
     async release(kind, id) {
       call(`release ${kind} ${id}`);

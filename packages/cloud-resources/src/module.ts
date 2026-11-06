@@ -37,6 +37,10 @@ import {
   parseUpdate,
 } from './parse.js';
 import { resourcesReconciler } from './reconciler.js';
+import { meterResources, resourceHoursMeter, usageSourceAccepted } from './usage.js';
+
+/** A meter key as better-iam takes it (core's meter catalog pattern). */
+const meterKeyPattern = /^[a-z][a-z0-9._-]{0,63}$/;
 import {
   clearStaged,
   createResource,
@@ -79,6 +83,14 @@ export interface CloudResourcesOptions {
   maxPerKind?: number;
   /** Per-kind overrides of `maxPerKind` (`{ 'do.database.pg': 5 }`). */
   quotas?: Readonly<Record<string, number>>;
+  /**
+   * The kinds' own meters to write usage for (`['do.database.pg.node.hours']`), at the rates providers report.
+   * Each must be defined in IAM billing first: the default catalog has only `cloud.resource.hours`, which every
+   * resource bills. Default: none.
+   */
+  kindMeters?: readonly string[];
+  /** An ended hour is written only this long after it ended (default 5 minutes). */
+  meterGraceMs?: number;
 }
 
 /** The API group of the cloud-resources module. */
@@ -162,6 +174,23 @@ export function cloudResources(
       throw new ComputeError('INVALID_CONFIG', `cloudResources({ quotas }): ${kind} is not a kind`);
     quotas.set(kind, positiveInteger(limit, `quotas['${kind}']`));
   }
+  const kindMeters = new Set<string>();
+  for (const meter of options.kindMeters ?? []) {
+    if (typeof meter !== 'string' || !meterKeyPattern.test(meter) || meter === resourceHoursMeter)
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        `cloudResources({ kindMeters }): ${JSON.stringify(meter)} is not a kind meter key`,
+      );
+    kindMeters.add(meter);
+  }
+  if (
+    options.meterGraceMs !== undefined &&
+    !(Number.isSafeInteger(options.meterGraceMs) && options.meterGraceMs >= 0)
+  )
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'cloudResources({ meterGraceMs }) must be a non-negative integer',
+    );
   const clients = new ProviderClients(providers, tenantVaultPaths);
 
   const depsOf = (context: ModuleContext): CloudResourcesDeps => {
@@ -278,22 +307,52 @@ export function cloudResources(
     requires: ['vps'],
     migrations: [...cloudResourcesMigrations],
     api,
-    reconcilers: [resourcesReconciler(depsOf)],
+    reconcilers: [
+      resourcesReconciler(depsOf),
+      {
+        // cloud.resource.hours (and the kind meters named in kindMeters) for resources that exist at the provider.
+        name: 'cloud.resources.usage',
+        shardBy: 'none',
+        periodic: [{ key: 'all', every: '5m' }],
+        async run(context) {
+          const rootTenantId = (context.iam as ModuleContext['iam'] | undefined)?.rootTenantId;
+          await context.sql.transaction((tx) =>
+            meterResources(tx, context.clock.now(), {
+              rootTenantId,
+              meterGraceMs: options.meterGraceMs,
+              kindMeters,
+            }),
+          );
+          return 'DONE';
+        },
+      },
+    ],
     selfCheck: async (context) => {
       // Resources whose provider account has no provider this module knows: the reconciler cannot reach them.
       const { rows } = await context.sql.query<{ provider: string; resources: string }>(
         `SELECT provider, count(*)::text AS resources FROM cloud_resources
           WHERE state NOT IN ('deleted', 'released') GROUP BY provider ORDER BY provider`,
       );
-      return rows
-        .filter((row) => !providers.has(row.provider))
-        .map((row) => ({
-          check: 'cloud-resources.provider-missing',
+      const findings = [];
+      if (!(await usageSourceAccepted(context.sql)))
+        findings.push({
+          check: 'cloud-resources.usage-source',
           severity: 'error' as const,
-          message: `${row.resources} cloud resource(s) are on ${row.provider} accounts, but cloudResources({ providers }) does not list ${row.provider}`,
-          fix: `Pass the ${row.provider} provider definition to cloudResources({ providers }), as to vps({ providers })`,
-          count: Number(row.resources),
-        }));
+          message:
+            "usage_windows refuses 'cloud-resource' windows: a migration that ran after cloud-resources/0002 replaced the source kind CHECK without it, so cloud.resources.usage fails",
+          fix: "Add 'cloud-resource' back to usage_windows_source_kind_ck (NOT VALID), and have that migration append to the CHECK instead of replacing it",
+        });
+      return findings.concat(
+        rows
+          .filter((row) => !providers.has(row.provider))
+          .map((row) => ({
+            check: 'cloud-resources.provider-missing',
+            severity: 'error' as const,
+            message: `${row.resources} cloud resource(s) are on ${row.provider} accounts, but cloudResources({ providers }) does not list ${row.provider}`,
+            fix: `Pass the ${row.provider} provider definition to cloudResources({ providers }), as to vps({ providers })`,
+            count: Number(row.resources),
+          })),
+      );
     },
     // §12.8: a deleted tenant's resources are deleted at the provider; DONE once all are gone.
     async tenantDeleted(context, tenantId) {

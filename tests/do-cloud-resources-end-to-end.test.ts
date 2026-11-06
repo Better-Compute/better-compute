@@ -122,6 +122,12 @@ describe('DigitalOcean Managed Databases through cloudResources', () => {
     expect(await secrets.resolve(ready.secretOutputs.password, { tenantId: w.acmeTenant })).toBe(
       cluster._admin.password,
     );
+    // Its node count is the rate the usage pass bills do.database.pg.node.hours at (when kindMeters names it).
+    const rates = await w.fixture.database.query<{ meter_rates: Record<string, number> }>(
+      `SELECT meter_rates FROM cloud_resources WHERE id = $1`,
+      [database.id],
+    );
+    expect(rates.rows[0]!.meter_rates).toEqual({ 'do.database.pg.node.hours': cluster.num_nodes });
 
     const user = await w.api.cloudResources.create(w.acme, {
       tenantId: w.acmeTenant,

@@ -127,7 +127,8 @@ export async function scrubbing<T>(secrets: readonly string[], call: () => Promi
       return value;
     };
     const details = error instanceof ComputeError ? error.details : undefined;
-    const detailsLeak = details !== undefined && JSON.stringify(scrub(details)) !== JSON.stringify(details);
+    const detailsLeak =
+      details !== undefined && JSON.stringify(scrub(details)) !== JSON.stringify(details);
     if (!leaks(error.message) && !detailsLeak) throw error;
     if (error instanceof ComputeError)
       throw new ComputeError(

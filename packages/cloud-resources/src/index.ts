@@ -20,3 +20,9 @@ export {
   resourcePollMs,
   resourceRetryMs,
 } from './reconciler.js';
+export {
+  defaultResourceMeterGraceMs,
+  meterRates,
+  meterResources,
+  resourceHoursMeter,
+} from './usage.js';

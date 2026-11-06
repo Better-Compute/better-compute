@@ -180,6 +180,9 @@ function connectionOutputs(connection: DoConnection | undefined, privateConnecti
   };
 }
 
+/** A cluster's (and its replicas') node hours meter: `do.database.<engine>.node.hours`. */
+export const nodeHoursMeter = (engine: string) => `do.database.${engine}.node.hours`;
+
 function clusterState(database: DoDatabase): ProviderResourceState {
   const { outputs, secretOutputs } = connectionOutputs(
     database.connection,
@@ -197,6 +200,8 @@ function clusterState(database: DoDatabase): ProviderResourceState {
       }),
     },
     ...(Object.keys(secretOutputs).length > 0 ? { secretOutputs } : {}),
+    // DigitalOcean bills a cluster by its nodes (the standby nodes included).
+    usage: { [nodeHoursMeter(database.engine)]: database.num_nodes },
     spec: {
       region: database.region,
       version: database.version,
@@ -340,7 +345,7 @@ function clusterKind(info: EngineInfo): DoKind {
       secretOutputs,
       regional: true,
       updatable: ['size', 'nodes', 'storageMiB', ...(info.upgradable ? ['version'] : [])],
-      meters: [{ meter: `do.database.${info.engine}.node.hours`, unit: 'hour' }],
+      meters: [{ meter: nodeHoursMeter(info.engine), unit: 'hour' }],
     },
 
     async ensure(env, request: ProviderResourceRequest, context) {
@@ -752,6 +757,8 @@ function replicaKind(info: EngineInfo): DoKind {
       state: status(replica.status),
       outputs,
       ...(Object.keys(secretOutputs).length > 0 ? { secretOutputs } : {}),
+      // A read-only replica is one more node.
+      usage: { [nodeHoursMeter(info.engine)]: 1 },
       spec: { name: replica.name, region: replica.region, size: replica.size },
     };
   };
@@ -778,6 +785,7 @@ function replicaKind(info: EngineInfo): DoKind {
       regional: true,
       updatable: [],
       parent: databaseKind(info.engine),
+      meters: [{ meter: nodeHoursMeter(info.engine), unit: 'hour' }],
     },
     async ensure(env, request, context) {
       const wanted = request.spec as { name: string; region: string; size: string };

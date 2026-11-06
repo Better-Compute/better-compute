@@ -25,6 +25,7 @@ import {
   type ResourcesProvider,
 } from './store.js';
 import type { CloudResourceState } from './types.js';
+import { meterRates } from './usage.js';
 
 // The `cloud.resources` reconciler: converges each resource at the provider through `ProviderImpl.resources`. Rows
 // are read in one transaction, the provider is called with none open, and each result is written in its own short
@@ -257,6 +258,8 @@ class ResourceWorker {
     secretRefs?: Record<string, SecretRef>;
     /** An adopted resource's spec, as the provider reports it. */
     spec?: Readonly<Record<string, unknown>>;
+    /** The rate of each of the kind's meters, when the provider reported its usage. */
+    rates?: Readonly<Record<string, number>>;
   }): Promise<boolean> {
     const row = this.#row;
     const written = await this.sql.transaction(async (tx) => {
@@ -266,6 +269,7 @@ class ResourceWorker {
                 outputs = coalesce($5::jsonb, outputs),
                 secret_outputs = coalesce($6::jsonb, secret_outputs),
                 spec = coalesce($7::jsonb, spec),
+                meter_rates = coalesce($8::jsonb, meter_rates),
                 updated_at = compute_now(),
                 ready_at = CASE WHEN $3 = 'ready' THEN coalesce(ready_at, compute_now()) ELSE ready_at END
           WHERE id = $1 AND version = $2
@@ -278,6 +282,7 @@ class ResourceWorker {
           update.outputs ? JSON.stringify(update.outputs) : null,
           update.secretRefs ? JSON.stringify(update.secretRefs) : null,
           update.spec ? JSON.stringify(update.spec) : null,
+          update.rates ? JSON.stringify(update.rates) : null,
         ],
       );
       if (rows.length === 0) return false;
@@ -397,6 +402,8 @@ class ResourceWorker {
       ...(Object.keys(outputs).length > 0 ? { outputs } : {}),
       ...(sealed.created.length > 0 ? { secretRefs: sealed.refs } : {}),
       ...(adoptedSpec ? { spec: adoptedSpec } : {}),
+      // What it bills per hour from here (usage.ts); undeclared meters and bad rates are dropped.
+      ...(result.usage !== undefined ? { rates: meterRates(kind.meters, result.usage) } : {}),
     });
     await this.#destroy(written ? sealed.superseded : sealed.created);
     return this.#next();

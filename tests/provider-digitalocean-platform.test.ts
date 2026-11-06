@@ -4,7 +4,11 @@ import {
   providerResourcesConformanceCases,
   type ProviderResourcesConformanceSubject,
 } from '@better-compute/cloud-resources';
-import { deploymentTag, digitaloceanProvider } from '@better-compute/provider-digitalocean';
+import {
+  appInstances,
+  deploymentTag,
+  digitaloceanProvider,
+} from '@better-compute/provider-digitalocean';
 import { seedAddon } from './support/do-emulator/addons.js';
 import { seedApp } from './support/do-emulator/apps.js';
 import { seedAttachment } from './support/do-emulator/partner.js';
@@ -257,6 +261,23 @@ describe('do.app: lifecycle', () => {
     expect(JSON.stringify(ready)).not.toContain(dbPassword);
     expect(JSON.stringify(ready)).not.toContain('EV[');
     expect(ready.secretOutputs).toBeUndefined();
+    expect(ready.usage).toEqual({ 'do.app.instance.hours': 1 });
+  });
+
+  it('instance hours count the services and workers an app runs (an autoscaled one at its minimum)', () => {
+    expect(appInstances(web(3) as any)).toBe(3);
+    expect(
+      appInstances({
+        services: [
+          { name: 'web', instance_count: 2 },
+          { name: 'api', autoscaling: { min_instance_count: 3, max_instance_count: 9 } },
+        ],
+        workers: [{ name: 'queue' }],
+        static_sites: [{ name: 'docs' }],
+        jobs: [{ name: 'migrate', instance_count: 4 }],
+      } as any),
+    ).toBe(6);
+    expect(appInstances({ static_sites: [{ name: 'docs' }] } as any)).toBe(0);
   });
 
   it('a DigitalOcean error echoing a resolved secret is scrubbed before it goes anywhere', async () => {
@@ -667,6 +688,7 @@ describe('do.addon', () => {
       spec,
     });
     expect(JSON.stringify(ready)).not.toContain('sso');
+    expect(ready.usage).toEqual({ 'do.addon.hours': 1 });
     const upgraded = await resources.ensure(
       request({ ...spec, plan: 'pro' }, { id: first.id }),
       call('crs_mail'),
@@ -822,6 +844,7 @@ describe('do.partner-attachment', () => {
       ready = await resources.ensure(request({ id: first.id }), keyed());
     const attachment = emu.state.partnerAttachments.get(first.id)!;
     expect(ready.state).toBe('ready');
+    expect(ready.usage).toEqual({ 'do.partner-attachment.hours': 1 });
     expect(ready.secretOutputs).toEqual({ serviceKey: attachment._serviceKey, bgpAuthKey: bgpKey });
     const { bgpAuthKey: _ref, ...plain } = spec;
     expect(ready.spec).toEqual(plain);

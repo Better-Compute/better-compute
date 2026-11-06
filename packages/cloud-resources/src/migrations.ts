@@ -69,6 +69,53 @@ CREATE INDEX cloud_resources_settled ON cloud_resources (id) WHERE state IN ('re
 `,
 };
 
+/** The usage source kind of a cloud resource's windows (`cmp:cloud-resource:<id>:<windowStartMs>:<meter>`). */
+export const cloudResourceSourceKind = 'cloud-resource';
+
+/**
+ * Metering (see usage.ts). `metered_until` is how far `cloud.resources.usage` has written windows (NULL until it
+ * first meters the resource, from `provisioned_at`, or `ready_at` for an adopted one); `meter_rates` is the rate
+ * of each of the kind's meters the provider last reported (`ProviderResourceState.usage`).
+ *
+ * `usage_windows` gains the `cloud-resource` source kind. The CHECK is not replaced by a fixed list (another
+ * module's migration may have added its own kind already): its current values are read back and this one is
+ * appended, `NOT VALID` as in core/0029, so no partition is scanned. A migration that later replaces the CHECK
+ * with a list without `cloud-resource` is reported by the module's selfCheck (`cloud-resources.usage-source`).
+ */
+export const cloudResourcesMeteringMigration: Migration = {
+  name: 'cloud-resources/0002_metering',
+  sql: `
+ALTER TABLE cloud_resources ADD COLUMN metered_until timestamptz;
+ALTER TABLE cloud_resources ADD COLUMN meter_rates jsonb NOT NULL DEFAULT '{}';
+-- What cloud.resources.usage scans: resources that bill, or billed until an end it has not covered yet.
+CREATE INDEX cloud_resources_unmetered ON cloud_resources ((coalesce(metered_until, provisioned_at, ready_at)))
+  WHERE coalesce(provisioned_at, ready_at) IS NOT NULL
+    AND (deleted_at IS NULL OR metered_until IS DISTINCT FROM deleted_at);
+
+DO $$
+DECLARE
+  kinds text[];
+BEGIN
+  SELECT array_agg(DISTINCT m.value[1]) INTO kinds
+    FROM pg_constraint c
+    -- Each value, as PostgreSQL renders it: ARRAY['a'::text, …] or '{a,b}'::text[].
+    CROSS JOIN LATERAL regexp_matches(pg_get_constraintdef(c.oid), '[''{,]([a-z0-9_-]+)(?=[''},])', 'g') AS m(value)
+   WHERE c.conname = 'usage_windows_source_kind_ck' AND c.conrelid = 'usage_windows'::regclass;
+  IF kinds IS NULL THEN
+    kinds := ARRAY['allocation', 'instance', 'grant', 'network', 'snapshot', 'cost'];
+  END IF;
+  IF NOT ('${cloudResourceSourceKind}' = ANY (kinds)) THEN
+    ALTER TABLE usage_windows DROP CONSTRAINT IF EXISTS usage_windows_source_kind_ck;
+    kinds := kinds || '${cloudResourceSourceKind}'::text;
+    EXECUTE 'ALTER TABLE usage_windows ADD CONSTRAINT usage_windows_source_kind_ck CHECK (source_kind IN ('
+      || (SELECT string_agg(quote_literal(k), ', ' ORDER BY k) FROM unnest(kinds) AS k)
+      || ')) NOT VALID';
+  END IF;
+END $$;
+`,
+};
+
 export const cloudResourcesMigrations: readonly Migration[] = Object.freeze([
   cloudResourcesMigration,
+  cloudResourcesMeteringMigration,
 ]);

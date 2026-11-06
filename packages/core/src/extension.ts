@@ -792,6 +792,13 @@ export interface ProviderResourceState {
    * adopted resource's spec is recorded from it.
    */
   spec?: Readonly<Record<string, unknown>>;
+  /**
+   * (cloud-resources) What the resource accrues per hour right now, by the kind's `meters` names: a database
+   * cluster's node count for its node-hours meter. The caller samples it and bills the hours that follow at that
+   * rate. A meter that is not reported accrues nothing with time (one billed by use, such as GiB-seconds, is left to
+   * the provider's billing). Finite and not negative; any other entry is ignored.
+   */
+  usage?: Readonly<Record<string, number>>;
   message?: string;
 }
 
