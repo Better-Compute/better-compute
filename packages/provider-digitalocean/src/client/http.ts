@@ -38,9 +38,10 @@ export interface DoClientOptions {
   endpoint: string;
   /**
    * Resolves the API token; called once, on first use. A token with an expiry (an OAuth access token) is resolved
-   * again a minute before it expires, and after a 401.
+   * again a minute before it expires, and after a 401, when the call names the token DigitalOcean refused (so a
+   * source that shares one access token between clients does not answer it again).
    */
-  token: () => Promise<string | { token: string; expiresAt: number }>;
+  token: (hint?: { refused?: string }) => Promise<string | { token: string; expiresAt: number }>;
   /**
    * The token's budget, or a function that picks it by `tokenHash(token)` once the token is
    * resolved (the token itself never leaves the client).
@@ -68,11 +69,14 @@ export function doClient(options: DoClientOptions): DoClient {
   // expires is dropped a minute before it does.
   let pending: Promise<string> | undefined;
   let expiresAt: number | undefined;
+  let refused: string | undefined;
   function token(): Promise<string> {
     if (pending && expiresAt !== undefined && options.clock.now() >= expiresAt - 60_000)
       pending = undefined;
     if (!pending) {
-      const started: Promise<string> = options.token().then(
+      const hint = refused !== undefined ? { refused } : undefined;
+      refused = undefined;
+      const started: Promise<string> = options.token(hint).then(
         (value) => {
           if (typeof value === 'string') {
             expiresAt = undefined;
@@ -150,7 +154,10 @@ export function doClient(options: DoClientOptions): DoClient {
       return (payload ?? {}) as T;
     }
     // An expiring token DigitalOcean refuses is resolved again on the next call (it may have been revoked early).
-    if (response.status === 401 && expiresAt !== undefined) pending = undefined;
+    if (response.status === 401 && expiresAt !== undefined) {
+      pending = undefined;
+      refused = bearer;
+    }
     throw mapDoError(response.status, payload, response.headers, options.clock.now(), what);
   }
 

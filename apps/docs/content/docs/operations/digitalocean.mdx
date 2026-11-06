@@ -76,8 +76,13 @@ needs an OAuth app registered by the platform:
    is `INVALID_INPUT`. The scope asked for is `read write` unless `oauth.scope` says otherwise: whether DigitalOcean's
    OAuth apps accept the granular scopes above is not verified yet.
 
-DigitalOcean rotates the refresh token on every exchange, so a lost write-back strands the account: a refresh token
-DigitalOcean no longer accepts is `INVALID_CONFIG` (`oauthGrant`), and the fix is to connect the account again.
+DigitalOcean rotates the refresh token on every exchange, so a lost write-back strands the account. Every client of an
+account in one process shares one access token until a minute before it expires (or until DigitalOcean refuses it),
+so the refresh token rotates about once a month per process, not on every check or findings read. A refusal while the
+store still holds the refused token waits about two seconds for another process's write-back (`oauth.raceWaitMs`),
+then is `UNAVAILABLE` (`oauthRace`, retryable) the first time; refused again, it is `INVALID_CONFIG`
+(`oauthGrant`), and the fix is to connect the account again. The token endpoint's parameters go in a form-encoded
+body, never in the URL; `oauth.tokenParams: 'query'` is the fallback for DigitalOcean's documented query form.
 The app's client secret is the platform's, held by the provider definition, never stored in an account.
 
 ## Costs and leaks

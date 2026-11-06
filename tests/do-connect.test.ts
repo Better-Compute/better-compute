@@ -126,7 +126,7 @@ describe('providerAccounts.connect (DigitalOcean OAuth)', () => {
       idempotencyKey: 'connect-1',
     });
     expect(again.id).toBe(account.id);
-    expect(oauth.requests.filter((r) => r.url.searchParams.get('grant_type') === 'authorization_code')).toHaveLength(1);
+    expect(oauth.requests.filter((r) => r.params.get('grant_type') === 'authorization_code')).toHaveLength(1);
 
     // The account works: its first request exchanges the refresh token, and the rotation is written over the same
     // ref, for the account's tenant.

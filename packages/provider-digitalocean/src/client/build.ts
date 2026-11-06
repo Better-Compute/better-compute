@@ -25,7 +25,9 @@ export function clientFor(
       'A DigitalOcean account holds exactly one of token and refreshToken',
       'credential',
     );
-  let token: () => Promise<string | { token: string; expiresAt: number }>;
+  let token: (hint?: {
+    refused?: string;
+  }) => Promise<string | { token: string; expiresAt: number }>;
   if (config.refreshToken !== undefined) {
     if (!options.oauth)
       throw refuse(

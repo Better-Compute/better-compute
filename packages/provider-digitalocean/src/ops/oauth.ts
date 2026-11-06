@@ -15,9 +15,18 @@ import {
 //   store) before anything else uses it: three attempts, then `digitalocean.oauthRotateFailed` is logged and the
 //   rotated token is kept in memory for the next exchange (the stored one is dead by then).
 // - Every exchange reads the refresh token from the store, so a token another process rotated is the one used; an
-//   `invalid_grant` re-reads the store once, in case another process rotated it between the read and the exchange.
-// - One exchange at a time per secret in this process.
-// - A dead grant is `INVALID_CONFIG` (`reason 'oauthGrant'`): the account must be connected again.
+//   `invalid_grant` re-reads the store a few times over about two seconds (`raceWaitMs`), in case another process
+//   rotated it between the read and the exchange and has not written it back yet.
+// - One exchange at a time per secret in this process, and one access token per secret: every client of the account
+//   (compute, metrics, the probe, findings) shares it until a minute before it expires, or until DigitalOcean
+//   refuses it (a 401), so the refresh token rotates about once a month, not once per client.
+// - An `invalid_grant` while the store still holds the refused token is `UNAVAILABLE` (`reason 'oauthRace'`,
+//   retryable) the first time: another process may still be writing the rotated token back. The same token refused
+//   on a later exchange is a dead grant, `INVALID_CONFIG` (`reason 'oauthGrant'`): the account must be connected
+//   again. So is a grant refused for the token the store changed to.
+// The token endpoint's parameters go in an `application/x-www-form-urlencoded` body (RFC 6749 §4.1.3, §6), never in
+// the URL, which proxies and fetch wrappers log; `tokenParams: 'query'` is the fallback for DigitalOcean's documented
+// query form, should the live suite find the body form refused (unverified).
 // The OAuth app's client id and secret are the platform's (a code-level option), never a tenant's. No token, code
 // or client secret ever reaches a log line, an error message or its details. The endpoint is https only.
 
@@ -45,6 +54,16 @@ export interface DoOAuthOptions {
   scope?: string;
   /** Default `https://cloud.digitalocean.com/v1/oauth/authorize`; https only. */
   authorizeEndpoint?: string;
+  /**
+   * Where the token endpoint's parameters go: `body` (default, form-encoded) or `query` (DigitalOcean's documented
+   * form, which puts the client secret and tokens in the URL; a fallback only).
+   */
+  tokenParams?: 'body' | 'query';
+  /**
+   * The waits (ms) between re-reads of the store after an `invalid_grant`, for a rotation another process has not
+   * written back yet. Default `[250, 750, 1500]`.
+   */
+  raceWaitMs?: readonly number[];
 }
 
 export interface DoOAuthTokens {
@@ -94,19 +113,30 @@ function endpointOf(endpoint: string | undefined): URL {
   return url;
 }
 
-/** One POST to the token endpoint; parameters in the query, as DigitalOcean documents them. */
+/** One POST to the token endpoint; parameters form-encoded in the body (or in the query, the fallback). */
 async function tokenRequest(
   params: Record<string, string>,
-  options: { fetch: typeof fetch; endpoint?: string; clock: Clock; signal: AbortSignal },
+  options: {
+    fetch: typeof fetch;
+    endpoint?: string;
+    clock: Clock;
+    signal: AbortSignal;
+    tokenParams?: 'body' | 'query';
+  },
   invalidGrant: 'INVALID_CONFIG' | 'INVALID_INPUT',
 ): Promise<DoOAuthTokens> {
   const url = endpointOf(options.endpoint);
-  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  const form = new URLSearchParams(params);
+  const inQuery = options.tokenParams === 'query';
+  if (inQuery) for (const [key, value] of form) url.searchParams.set(key, value);
   let response: Response;
   try {
     response = await options.fetch(url.toString(), {
       method: 'POST',
-      headers: { accept: 'application/json' },
+      headers: inQuery
+        ? { accept: 'application/json' }
+        : { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' },
+      ...(inQuery ? {} : { body: form.toString() }),
       signal: options.signal,
     });
   } catch (error) {
@@ -188,6 +218,7 @@ export async function exchangeAuthorizationCode(input: {
   clientSecret: string;
   fetch?: typeof fetch;
   endpoint?: string;
+  tokenParams?: 'body' | 'query';
   clock: Clock;
   signal: AbortSignal;
 }): Promise<DoOAuthTokens> {
@@ -202,6 +233,7 @@ export async function exchangeAuthorizationCode(input: {
     {
       fetch: input.fetch ?? globalThis.fetch.bind(globalThis),
       ...(input.endpoint !== undefined ? { endpoint: input.endpoint } : {}),
+      ...(input.tokenParams !== undefined ? { tokenParams: input.tokenParams } : {}),
       clock: input.clock,
       signal: input.signal,
     },
@@ -211,21 +243,33 @@ export async function exchangeAuthorizationCode(input: {
 
 /** Exchanges in flight, by secret ref: one at a time per secret in this process. */
 const inFlight = new Map<SecretRef, Promise<{ token: string; expiresAt: number }>>();
+/** The account's current access token, by secret ref (memory only), shared by every client of the account. */
+const accessTokens = new Map<SecretRef, { token: string; expiresAt: number }>();
 /** Rotated refresh tokens the store did not take yet, by secret ref (memory only). */
 const unwritten = new Map<SecretRef, string>();
+/** A refresh token refused once while the store still held it, by secret ref: refused again, the grant is dead. */
+const suspect = new Map<SecretRef, string>();
+
+/** A cached access token is answered while it has more than this left (the same margin as the client's). */
+const freshMarginMs = 60_000;
+const defaultRaceWaitMs = [250, 750, 1500];
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const isGrantRefused = (error: unknown) =>
+  error instanceof ComputeError && error.details?.reason === 'oauthGrant';
+
 /**
- * The access-token source of an OAuth account, for the API client: each call exchanges the stored (or the unwritten
- * rotated) refresh token and answers the access token with its expiry; the client keeps it until then.
+ * The access-token source of an OAuth account, for the API client: answers the account's shared access token while
+ * it has more than a minute left and the client did not just see it refused; otherwise exchanges the stored (or the
+ * unwritten rotated) refresh token and answers the new access token with its expiry.
  */
 export function oauthTokenSource(
   ref: SecretRef,
   context: Pick<ProviderContext, 'secrets' | 'clock' | 'log' | 'account'>,
   options: DoOAuthOptions,
   fetchImpl: typeof fetch,
-): () => Promise<{ token: string; expiresAt: number }> {
+): (hint?: { refused?: string }) => Promise<{ token: string; expiresAt: number }> {
   const tenantId = context.account?.tenantId;
   const log: Logger = context.log;
 
@@ -257,6 +301,7 @@ export function oauthTokenSource(
         {
           fetch: fetchImpl,
           ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
+          ...(options.tokenParams !== undefined ? { tokenParams: options.tokenParams } : {}),
           clock: context.clock,
           signal,
         },
@@ -268,18 +313,40 @@ export function oauthTokenSource(
     try {
       tokens = await grant(first);
     } catch (error) {
-      if (!(error instanceof ComputeError) || error.details?.reason !== 'oauthGrant') throw error;
-      // Another process may have rotated it between the read and the exchange.
-      const again = await context.secrets.resolve(ref);
-      if (again === first) throw error;
+      if (!isGrantRefused(error)) throw error;
+      // Another process may have rotated it between the read and the exchange, and still be writing it back.
+      let again = await context.secrets.resolve(ref);
+      for (const wait of options.raceWaitMs ?? defaultRaceWaitMs) {
+        if (again !== first) break;
+        await sleep(wait);
+        again = await context.secrets.resolve(ref);
+      }
+      if (again === first) {
+        // Refused before, with nothing rotated since: the grant is dead.
+        if (suspect.get(ref) === first) throw error;
+        suspect.set(ref, first);
+        log.warn('digitalocean.oauthRace', { account: context.account?.id });
+        throw oauthError(
+          'UNAVAILABLE',
+          'DigitalOcean refused the account’s refresh token while it may be rotating: try again',
+          'oauthRace',
+        );
+      }
       tokens = await grant(again);
     }
+    suspect.delete(ref);
     await persist(tokens.refreshToken);
     log.info('digitalocean.oauthExchanged', { account: context.account?.id });
-    return { token: tokens.accessToken, expiresAt: tokens.expiresAt };
+    const access = { token: tokens.accessToken, expiresAt: tokens.expiresAt };
+    accessTokens.set(ref, access);
+    return { ...access };
   }
 
-  return () => {
+  return (hint) => {
+    const cached = accessTokens.get(ref);
+    if (cached && hint?.refused === cached.token) accessTokens.delete(ref);
+    else if (cached && cached.expiresAt - context.clock.now() > freshMarginMs)
+      return Promise.resolve({ ...cached });
     const pending = inFlight.get(ref);
     if (pending) return pending;
     const started = exchange().finally(() => {
@@ -293,7 +360,9 @@ export function oauthTokenSource(
 /** Forgets the in-process OAuth state (tests). */
 export function resetOAuthState(): void {
   inFlight.clear();
+  accessTokens.clear();
   unwritten.clear();
+  suspect.clear();
 }
 
 /**
@@ -347,6 +416,7 @@ export function doConnect(
         clientSecret: await options.clientSecret(),
         fetch: fetchImpl,
         ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
+        ...(options.tokenParams !== undefined ? { tokenParams: options.tokenParams } : {}),
         clock,
         signal,
       });
