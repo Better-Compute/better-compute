@@ -6,8 +6,9 @@ import {
   type CertificateProfile,
   type IssuedCertificate,
 } from '@better-compute/core';
-import { fromPem, parseCertificate, parseCsr, rolePrefix, toPem } from '@better-compute/pki';
+import { fromPem, normalizeSerial, parseCertificate, parseCsr, rolePrefix, toPem, type RevocationSet } from '@better-compute/pki';
 import { transportFor, type AwsServiceOptions } from './common.js';
+import { caKinds, caMaxTtl, checkCaKind, checkCaProfile, type CaKind } from './internal/ca-profile.js';
 import { jsonClient } from './internal/transport.js';
 
 export interface AcmPcaCertificateAuthorityOptions extends AwsServiceOptions {
@@ -18,6 +19,15 @@ export interface AcmPcaCertificateAuthorityOptions extends AwsServiceOptions {
   issueWaitMs?: number;
   /** Subject organization (default 'better-compute', as the local CAs). */
   organization?: string;
+  /**
+   * The job's profile rules, applied before any AWS call (default: `id` when it is node, serving
+   * or internal, else internal): node = client, one SPIFFE node URI SAN, an agent role, at most 1 d.
+   */
+  kind?: CaKind;
+  /** Lowers the kind's lifetime cap (node 1 d, serving 30 d, internal 7 d). */
+  maxTtlSeconds?: number;
+  /** When given, `revoke` also records the serial here for verifiers (the gateway) to read. */
+  revocations?: RevocationSet;
 }
 
 const pollMs = 250;
@@ -67,18 +77,14 @@ export function acmPcaCertificateAuthority(options: AcmPcaCertificateAuthorityOp
   const waitMs = options.issueWaitMs ?? 10_000;
   const clock = options.clock ?? systemClock;
   const organization = options.organization ?? 'better-compute';
+  const kind = checkCaKind(options.kind ?? ((caKinds as readonly string[]).includes(options.id) ? options.id : 'internal'));
+  const maxTtl = caMaxTtl(kind, options.maxTtlSeconds);
   const client = jsonClient(transportFor(options), { hostPrefix: 'acm-pca', jsonVersion: '1.1', targetPrefix: 'ACMPrivateCA' });
   let cached: { at: number; certificates: Uint8Array[] } | undefined;
 
-  function passthrough(profile: CertificateProfile) {
+  function passthrough(profile: CertificateProfile, commonName: string, role: string | undefined) {
     const uriSans = profile.uriSans ?? [];
     const dnsSans = profile.dnsSans ?? [];
-    if (uriSans.length + dnsSans.length === 0) throw new ComputeError('INVALID_INPUT', 'a certificate needs a SAN');
-    if (profile.usage !== 'client' && profile.usage !== 'server')
-      throw new ComputeError('INVALID_INPUT', 'usage is client or server');
-    const commonName = (dnsSans[0] ?? uriSans[0]!.split('/').filter(Boolean).pop() ?? 'better-compute').slice(0, 64);
-    const role = profile.role;
-    if (role !== undefined && !/^[a-z][a-z0-9-]{0,31}$/.test(role)) throw new ComputeError('INVALID_INPUT', 'not a role');
     return {
       Subject: {
         // CustomAttributes keep the local CAs' RDN order: O, then OU=bc-role:<role>, then CN.
@@ -134,8 +140,8 @@ export function acmPcaCertificateAuthority(options: AcmPcaCertificateAuthorityOp
 
     async sign(csr, profile): Promise<IssuedCertificate> {
       parseCsr(csr); // P-256 and a valid self-signature, before anything is sent
-      if (!Number.isInteger(profile.ttlSeconds) || profile.ttlSeconds <= 0)
-        throw new ComputeError('INVALID_INPUT', 'ttlSeconds must be a positive integer');
+      // The local CAs' rules for this job, so a wrong profile never reaches IssueCertificate.
+      const { commonName, role } = checkCaProfile(kind, maxTtl, profile);
       const notAfter = Math.floor(clock.now() / 1000) + profile.ttlSeconds;
       const issued = await client.call<{ CertificateArn?: string }>('IssueCertificate', {
         CertificateAuthorityArn: caArn,
@@ -143,7 +149,7 @@ export function acmPcaCertificateAuthority(options: AcmPcaCertificateAuthorityOp
         SigningAlgorithm: 'SHA256WITHECDSA',
         TemplateArn: `arn:${partition}:acm-pca:::template/BlankEndEntityCertificate_APIPassthrough/V1`,
         Validity: { Type: 'ABSOLUTE', Value: notAfter },
-        ApiPassthrough: passthrough(profile),
+        ApiPassthrough: passthrough(profile, commonName, role),
         // Same request, same certificate (a retried sign does not issue twice).
         IdempotencyToken: createHash('sha256').update(csr).update(JSON.stringify(profile)).digest('hex').slice(0, 36),
       });
@@ -162,11 +168,13 @@ export function acmPcaCertificateAuthority(options: AcmPcaCertificateAuthorityOp
     },
 
     async revoke(serial, reason) {
+      const key = normalizeSerial(serial);
       await client.call('RevokeCertificate', {
         CertificateAuthorityArn: caArn,
         CertificateSerial: colonSerial(serial),
         RevocationReason: (reason && revocationReasons[reason.toLowerCase().replace(/[\s-]/g, '')]) ?? 'UNSPECIFIED',
       });
+      options.revocations?.add(key, { at: clock.now(), ...(reason !== undefined ? { reason } : {}) });
     },
   };
 }

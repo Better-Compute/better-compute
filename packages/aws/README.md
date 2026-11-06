@@ -151,7 +151,7 @@ IAM: `events:PutEvents` on the bus, `sns:Publish` on the topic, `sqs:SendMessage
 
 ### `acmPcaCertificateAuthority(options)`
 
-AWS Private CA as a `CertificateAuthority`, one CA per job (`id` `node`, `serving` or `internal`). It issues from the API-passthrough blank end-entity template with the same subject (`O`, `OU=bc-role:<role>`, `CN`), SANs and EKU the local CAs build, waits up to `issueWaitMs` for issuance (then `UNAVAILABLE`, reason `pca-pending`), caches the CA certificates for an hour, and revokes by serial.
+AWS Private CA as a `CertificateAuthority`, one CA per job (`id` `node`, `serving` or `internal`). It issues from the API-passthrough blank end-entity template with the same subject (`O`, `OU=bc-role:<role>`, `CN`), SANs and EKU the local CAs build, waits up to `issueWaitMs` for issuance (then `UNAVAILABLE`, reason `pca-pending`), caches the CA certificates for an hour, and revokes by serial. Before any AWS call, `sign` applies the local CAs' profile rules for `kind` (default: `id` when it is `node`, `serving` or `internal`). A node certificate is client-only, has one SPIFFE node URI SAN, no DNS SANs and an agent role, and lives at most 1 day. A serving certificate is server-only with DNS SANs. `maxTtlSeconds` can lower the cap. With `revocations`, `revoke` also records the serial there for the gateway to read. AWS Private CA itself publishes revocations only through its CRL or OCSP.
 
 ```json
 { "Effect": "Allow",
@@ -162,7 +162,7 @@ AWS Private CA as a `CertificateAuthority`, one CA per job (`id` `node`, `servin
 
 ### `kmsCertificateAuthority(options)` and `kmsCaCsr(options)`
 
-A CA whose key never leaves KMS (an `ECC_NIST_P256` `SIGN_VERIFY` key). `better-compute aws kms-ca-csr --key-id <arn> --common-name <cn>` (`awsKmsCaCsrCommand`) prints a CSR signed by KMS; certify it as a CA with the operator root, then pass the certificate. `sign` applies the local CAs' profile rules for `kind` and has KMS sign the certificate's digest. On first use it checks that the certificate certifies the KMS key. IAM: `kms:Sign` and `kms:GetPublicKey` on the key. `pki`'s `buildCertificateWithSigner` is the seam.
+A CA whose key never leaves KMS (an `ECC_NIST_P256` `SIGN_VERIFY` key). `better-compute aws kms-ca-csr --key-id <arn> --common-name <cn>` (`awsKmsCaCsrCommand`) prints a CSR signed by KMS; certify it as a CA with the operator root, then pass the certificate. `sign` applies the local CAs' profile rules for `kind` and has KMS sign the certificate's digest. On first use it checks that the certificate certifies the KMS key. `revoke` writes to `revocations`, which the CA also exposes, with `isRevoked`, as the local CAs do. Verifiers only see a revocation if they read that same set: pass it to the gateway (`createGateway({ revocations })`, `certificateAuthenticate`) and persist it if revocations must survive a restart. A `node` KMS CA must be given `revocations` (`INVALID_CONFIG` otherwise), so a revoke cannot fail open. IAM: `kms:Sign` and `kms:GetPublicKey` on the key. `pki`'s `buildCertificateWithSigner` is the seam.
 
 ## RDS IAM authentication
 

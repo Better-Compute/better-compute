@@ -10,6 +10,8 @@ import {
   parseCsr,
   spkiDer,
   createRootCa,
+  createRevocationSet,
+  agentIdentityFromChain,
   generateP256KeyPair,
   parseCertificate,
   verifyCertificateChain,
@@ -124,6 +126,37 @@ describe('ACM Private CA', () => {
     expect(() => colonSerial('')).toThrow(ComputeError);
   });
 
+  it('a node PCA applies the local node profile before any AWS call (review)', async () => {
+    const { ca, emu } = pcaWorld();
+    const csr = createCsr(generateP256KeyPair().privateKey);
+    for (const profile of [
+      { ...nodeProfile, usage: 'server' as const },
+      { ...nodeProfile, ttlSeconds: 2 * 24 * 3600 },
+      { ...nodeProfile, dnsSans: ['node.example'] },
+      { ...nodeProfile, role: 'gateway' },
+      { ...nodeProfile, uriSans: ['spiffe://bc.example/not-a-node'] },
+    ])
+      await expect(ca.sign(csr, profile)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(emu.requests).toHaveLength(0);
+    // A serving PCA issues server certificates with DNS SANs only; maxTtlSeconds caps lower.
+    const serving = acmPcaCertificateAuthority({ region: 'us-east-1', credentials: emu.credentials, fetch: emu.fetch, endpoint: 'http://emu.local', clock: emu.clock, id: 'serving', certificateAuthorityArn: caArn, maxTtlSeconds: 3600 });
+    await expect(serving.sign(csr, nodeProfile)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(serving.sign(csr, { dnsSans: ['api.example'], usage: 'server', ttlSeconds: 7200 })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(emu.requests).toHaveLength(0);
+    expect(() =>
+      acmPcaCertificateAuthority({ region: 'us-east-1', credentials: emu.credentials, id: 'node', kind: 'bogus' as never, certificateAuthorityArn: caArn }),
+    ).toThrow(ComputeError);
+  });
+
+  it('a revoke also lands in the shared revocation set when one is given', async () => {
+    const revocations = createRevocationSet();
+    const { emu } = pcaWorld();
+    acmPcaFake(emu, { arn: caArn, ca: createNodeCa({ issuer: createRootCa({ clock: emu.clock }), clock: emu.clock }) });
+    const ca = acmPcaCertificateAuthority({ region: 'us-east-1', credentials: emu.credentials, fetch: emu.fetch, endpoint: 'http://emu.local', clock: emu.clock, id: 'node', certificateAuthorityArn: caArn, revocations });
+    await ca.revoke!('A1B2C3', 'superseded');
+    expect(revocations.has('a1b2c3')).toBe(true);
+  });
+
   it('refuses a bad CSR or ARN before calling AWS', async () => {
     const { ca, emu } = pcaWorld();
     await expect(ca.sign(new Uint8Array([1, 2, 3]), nodeProfile)).rejects.toBeInstanceOf(ComputeError);
@@ -170,7 +203,7 @@ describe('KMS CA', () => {
 
   it('KMS CA issues certificates that verify against its certificate', async () => {
     const { base, caCertificate, root, emu } = await kmsWorld();
-    const ca = kmsCertificateAuthority({ ...base, id: 'node', keyId: 'ca-key', kind: 'node', certificate: caCertificate, chain: [root.certificate] });
+    const ca = kmsCertificateAuthority({ ...base, id: 'node', keyId: 'ca-key', kind: 'node', certificate: caCertificate, chain: [root.certificate], revocations: createRevocationSet() });
     const issued = await ca.sign(createCsr(generateP256KeyPair().privateKey), nodeProfile);
     const parsed = parseCertificate(issued.certificate);
     expect(parsed.role).toBe('node');
@@ -188,10 +221,29 @@ describe('KMS CA', () => {
 
   it('refuses a CA certificate for a different key', async () => {
     const { base, caCertificate, kms } = await kmsWorld();
-    const ca = kmsCertificateAuthority({ ...base, id: 'node', keyId: 'other-key', kind: 'node', certificate: caCertificate });
+    const ca = kmsCertificateAuthority({ ...base, id: 'node', keyId: 'other-key', kind: 'node', certificate: caCertificate, revocations: createRevocationSet() });
     await expect(ca.sign(createCsr(generateP256KeyPair().privateKey), nodeProfile)).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
     expect(kms.signs.filter((s) => s.keyId === 'other-key')).toHaveLength(0);
     expect(() => kmsCertificateAuthority({ ...base, id: 'node', keyId: 'ca-key', certificate: parseCertificateLeaf() })).toThrow(ComputeError);
+  });
+
+  it('a revoked serial is refused by the verifier the host wires with the same set (review)', async () => {
+    const { base, caCertificate, root, emu } = await kmsWorld();
+    // A node CA without a shared set would revoke into a set no verifier reads: refused.
+    expect(() => kmsCertificateAuthority({ ...base, id: 'node', keyId: 'ca-key', kind: 'node', certificate: caCertificate })).toThrow(/revocations/);
+    const revocations = createRevocationSet();
+    const ca = kmsCertificateAuthority({ ...base, id: 'node', keyId: 'ca-key', kind: 'node', certificate: caCertificate, chain: [root.certificate], revocations });
+    expect(ca.revocations).toBe(revocations);
+    const issued = await ca.sign(createCsr(generateP256KeyPair().privateKey), nodeProfile);
+    const verify = () => agentIdentityFromChain([issued.certificate, caCertificate], { roots: [root.certificate], now: emu.clock.now(), revocations });
+    expect(verify().nodeId).toBe('node_1');
+    await ca.revoke!(issued.serial, 'reclaimed');
+    expect(ca.isRevoked(issued.serial)).toBe(true);
+    expect(verify).toThrow();
+    // Other kinds default to a set of their own, still readable through the CA.
+    const internal = kmsCertificateAuthority({ ...base, id: 'internal', keyId: 'ca-key', kind: 'internal', certificate: caCertificate });
+    await internal.revoke!('0a', undefined);
+    expect(internal.isRevoked('0a')).toBe(true);
   });
 
   it('the kms-ca-csr command prints a PEM request', async () => {

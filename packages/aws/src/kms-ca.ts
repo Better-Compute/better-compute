@@ -3,25 +3,22 @@ import {
   ComputeError,
   systemClock,
   type CertificateAuthority,
-  type CertificateProfile,
   type IssuedCertificate,
 } from '@better-compute/core';
 import {
-  agentCertificateRoles,
   buildCertificateWithSigner,
   createRevocationSet,
   der,
   distinguishedName,
   ecdsaWithSha256,
-  isNodeKeyStatement,
   normalizeSerial,
   parseCertificate,
   parseCsr,
-  parseNodeSpiffeId,
   type CertificateSigner,
   type RevocationSet,
 } from '@better-compute/pki';
 import { transportFor, type AwsServiceOptions } from './common.js';
+import { caMaxTtl, checkCaKind, checkCaProfile } from './internal/ca-profile.js';
 import { jsonClient, type JsonClient } from './internal/transport.js';
 
 export interface KmsCertificateAuthorityOptions extends AwsServiceOptions {
@@ -36,14 +33,21 @@ export interface KmsCertificateAuthorityOptions extends AwsServiceOptions {
   kind?: 'node' | 'serving' | 'internal';
   /** Caps every leaf's lifetime (default: the kind's local-CA maximum: node 1 d, serving 30 d, internal 7 d). */
   maxTtlSeconds?: number;
-  /** Shared with verifiers (default: a new set). */
+  /**
+   * The set `revoke` writes, which the host must also hand its verifiers (the gateway's
+   * `revocations`, `certificateAuthenticate`), and persist if revocations must survive a restart.
+   * Required for kind 'node' (a node revoke must reach the gateway); other kinds default to a new set.
+   */
   revocations?: RevocationSet;
   organization?: string;
 }
 
-const day = 24 * 3600;
-const kindMaxTtl = { node: day, serving: 30 * day, internal: 7 * day } as const;
-const dnsPattern = /^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+/** `kmsCertificateAuthority`: the CA and, as the local CAs expose them, its revocations. */
+export interface KmsCertificateAuthority extends CertificateAuthority {
+  readonly kind: 'node' | 'serving' | 'internal';
+  readonly revocations: RevocationSet;
+  isRevoked(serial: string): boolean;
+}
 
 function kms(options: AwsServiceOptions): JsonClient {
   return jsonClient(transportFor(options), { hostPrefix: 'kms', jsonVersion: '1.1', targetPrefix: 'TrentService' });
@@ -90,14 +94,17 @@ function randomSerial(): Uint8Array {
  * for the profile and has KMS sign the TBSCertificate's digest. The CA certificate must certify the
  * KMS key's public key (checked on first use; a mismatch is INVALID_CONFIG).
  */
-export function kmsCertificateAuthority(options: KmsCertificateAuthorityOptions): CertificateAuthority {
+export function kmsCertificateAuthority(options: KmsCertificateAuthorityOptions): KmsCertificateAuthority {
   const keyId = checkKeyId(options.keyId);
   if (!/^[a-z][a-z0-9-]{0,63}$/.test(options.id)) throw new ComputeError('INVALID_CONFIG', 'a CA id is [a-z][a-z0-9-]*');
   const own = parseCertificate(options.certificate);
   if (!own.isCa) throw new ComputeError('INVALID_CONFIG', 'the KMS CA certificate is not marked as a CA');
-  const kind = options.kind ?? 'internal';
-  const maxTtl = Math.min(options.maxTtlSeconds ?? Number.POSITIVE_INFINITY, kindMaxTtl[kind]);
+  const kind = checkCaKind(options.kind ?? 'internal');
+  const maxTtl = caMaxTtl(kind, options.maxTtlSeconds);
   const clock = options.clock ?? systemClock;
+  // Fail closed: a node revoke into a set no verifier reads would leave the certificate working.
+  if (kind === 'node' && !options.revocations)
+    throw new ComputeError('INVALID_CONFIG', 'a node KMS CA needs the revocations set its verifiers read (options.revocations)');
   const revocations = options.revocations ?? createRevocationSet();
   const organization = options.organization ?? 'better-compute';
   const client = kms(options);
@@ -114,48 +121,16 @@ export function kmsCertificateAuthority(options: KmsCertificateAuthorityOptions)
       throw error;
     });
 
-  function checkProfile(profile: CertificateProfile): { commonName: string; role?: string } {
-    const uriSans = profile.uriSans ?? [];
-    const dnsSans = profile.dnsSans ?? [];
-    const invalid = (message: string) => new ComputeError('INVALID_INPUT', message);
-    if (!Number.isInteger(profile.ttlSeconds) || profile.ttlSeconds <= 0) throw invalid('ttlSeconds must be a positive integer');
-    if (profile.ttlSeconds > maxTtl) throw invalid(`${kind} certificates live at most ${maxTtl} s`);
-    for (const name of dnsSans) if (name.length > 253 || !dnsPattern.test(name)) throw invalid('invalid DNS SAN');
-    for (const uri of uriSans) if (!/^[a-z][a-z0-9+.-]*:[\x21-\x7e]+$/.test(uri)) throw invalid('invalid URI SAN');
-    const role = profile.role;
-    switch (kind) {
-      case 'node': {
-        if (profile.usage !== 'client') throw invalid('A node CA issues client certificates only');
-        if (dnsSans.length || uriSans.length === 0 || uriSans.length > 4 || !uriSans.slice(1).every(isNodeKeyStatement))
-          throw invalid('A node certificate has exactly one SPIFFE URI SAN (then only urn:bc: statements) and no DNS SANs');
-        const spiffe = parseNodeSpiffeId(uriSans[0]!);
-        if (!spiffe) throw invalid('The URI SAN must be spiffe://<td>/site/<site>/node/<node>');
-        if (!role || !(agentCertificateRoles as readonly string[]).includes(role))
-          throw invalid(`A node certificate's role is one of ${agentCertificateRoles.join(', ')}`);
-        return { commonName: spiffe.nodeId, role };
-      }
-      case 'serving':
-        if (profile.usage !== 'server') throw invalid('A serving CA issues server certificates only');
-        if (dnsSans.length === 0 || uriSans.length) throw invalid('A serving certificate has DNS SANs and no URI SANs');
-        if (role !== undefined && role !== 'gateway') throw invalid("A serving certificate's role is gateway");
-        return { commonName: dnsSans[0]!, ...(role ? { role } : {}) };
-      case 'internal': {
-        if (dnsSans.length + uriSans.length === 0) throw invalid('An internal certificate needs a SAN');
-        if (role !== undefined && role !== 'internal' && role !== 'gateway')
-          throw invalid("An internal certificate's role is internal or gateway");
-        const commonName = dnsSans[0] ?? uriSans[0]!.split('/').filter(Boolean).pop() ?? 'internal';
-        return { commonName: commonName.slice(0, 64), ...(role ? { role } : {}) };
-      }
-    }
-  }
-
   return {
     id: options.id,
+    kind,
+    revocations,
+    isRevoked: (serial) => revocations.has(serial),
     certificates: async () => chain.map((item) => item.slice()),
 
     async sign(csr, profile): Promise<IssuedCertificate> {
       const request = parseCsr(csr);
-      const { commonName, role } = checkProfile(profile);
+      const { commonName, role } = checkCaProfile(kind, maxTtl, profile);
       await ensureKey();
       const now = clock.now();
       if (now > own.notAfter) throw new ComputeError('INVALID_STATE', `CA ${options.id} has expired`);
