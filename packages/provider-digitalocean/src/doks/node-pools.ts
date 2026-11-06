@@ -1,4 +1,5 @@
 import type { KubernetesNodePoolSpec, ProviderResourceState } from '@better-compute/core';
+import { tagFor } from '../ids.js';
 import { checkName, fail, invalid, resourceState } from './common.js';
 import type { DoksNodePool } from './types.js';
 
@@ -9,6 +10,22 @@ const sizePattern = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 /** DOKS caps a node pool well below this; it only keeps a typo from reaching the API. */
 const maxNodes = 512;
 const taintEffects = ['NoSchedule', 'PreferNoSchedule', 'NoExecute'] as const;
+
+/**
+ * The tag a node pool asked for as Spot carries from its create on. DigitalOcean may not honour
+ * the (preview) `spot` field; when the create's answer was lost, or another creator got there
+ * first, the pool is only checked later, and this tag tells a pool made on-demand for Spot (to be
+ * deleted) from an on-demand pool a spec later asks to be Spot (immutable, never deleted). Tenant
+ * labels cannot forge it: vps reserves the `better-compute-` keys.
+ */
+export const spotRequestedTag = tagFor('better-compute-spot', 'true');
+
+/** Whether the pool was asked for as Spot (it carries the tag) and DigitalOcean made it on-demand. */
+export function spotUnhonoured(pool: DoksNodePool): boolean {
+  return (
+    pool.spot !== true && (pool.tags ?? []).some((tag) => tag.toLowerCase() === spotRequestedTag)
+  );
+}
 
 const isCount = (value: unknown, min: number): value is number =>
   typeof value === 'number' && Number.isInteger(value) && value >= min && value <= maxNodes;
@@ -72,7 +89,7 @@ export function nodePoolBody(
     name: spec.name,
     size: spec.machineType,
     count: initialCount(spec),
-    tags: [...tags],
+    tags: spec.spot ? [...tags, spotRequestedTag] : [...tags],
     ...(spec.labels ? { labels: { ...spec.labels } } : {}),
     ...(spec.taints?.length
       ? {

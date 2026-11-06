@@ -47,6 +47,7 @@ import {
   nodePoolBody,
   nodePoolState,
   nodePoolUpdate,
+  spotUnhonoured,
 } from './node-pools.js';
 import { checkCredentialRequest, mintCredentials } from './credentials.js';
 import { httpsKubeTransport, type KubeTransport } from './transport.js';
@@ -207,6 +208,32 @@ export class DoKubernetes implements ProviderKubernetes {
   }
 
   /**
+   * A cluster of ours found after its create (the answer was lost, or another creator raced) is
+   * checked as the create's answer would have been: an initial pool asked for as Spot that
+   * DigitalOcean made on-demand (`spotUnhonoured`: it carries the Spot request tag) means the
+   * cluster goes again, so an on-demand GPU pool is never left billing.
+   */
+  async #checkInitialSpot(
+    spec: KubernetesClusterSpec,
+    cluster: DoksCluster,
+    context: CallContext,
+  ): Promise<void> {
+    if (cluster.status?.state === 'deleting') return;
+    const dropped = (spec.initialNodePools ?? []).some((wanted) => {
+      if (wanted.spot !== true) return false;
+      const made = cluster.node_pools?.find((pool) => pool.name === wanted.name);
+      return made !== undefined && this.#owned(made) && spotUnhonoured(made);
+    });
+    if (dropped)
+      throw await this.#dropUnverified(
+        cluster.id,
+        `/kubernetes/clusters/${cluster.id}`,
+        'cluster',
+        context,
+      );
+  }
+
+  /**
    * This deployment's cluster named `name`, or undefined when there is none. One of that name
    * that is not this deployment's is CONFLICT (never adopted, never touched). Duplicates of ours
    * (DO-D4: two creates raced) keep the oldest; the others are deleted one by one.
@@ -294,6 +321,7 @@ export class DoKubernetes implements ProviderKubernetes {
     if (state === 'deleting') return clusterState(id, found);
     if (this.#unverifiedSpot.has(id))
       throw await this.#dropUnverified(id, `/kubernetes/clusters/${id}`, 'cluster', context);
+    await this.#checkInitialSpot(spec, found, context);
     await this.#checkImmutable(spec, found, signal);
     if (state !== 'running' && state !== 'degraded') return clusterState(id, found);
     // A newer patch of the pinned minor (DOKS auto-upgraded it) satisfies the pin.
@@ -407,6 +435,7 @@ export class DoKubernetes implements ProviderKubernetes {
       if (!isComputeError(error, 'CONFLICT')) throw error;
       const found = await this.#find(spec.name, signal, log);
       if (!found) throw error;
+      await this.#checkInitialSpot(spec, found, context);
       return clusterState(found.id, found);
     }
     if (!created?.id)
@@ -664,6 +693,7 @@ export class DoKubernetes implements ProviderKubernetes {
         const again = (await this.#pool(clusterId, spec.name, signal)).pool;
         if (!again) throw error;
         if (!this.#owned(again)) throw this.#notOwnedPool(id);
+        await this.#checkPoolSpot(clusterId, spec, again, context);
         return nodePoolState(id, again);
       }
     }
@@ -675,6 +705,7 @@ export class DoKubernetes implements ProviderKubernetes {
         'nodePool',
         context,
       );
+    await this.#checkPoolSpot(clusterId, spec, pool, context);
     checkNodePoolImmutable(id, spec, pool);
     if (!serving) return nodePoolState(id, pool);
     const update = nodePoolUpdate(spec, pool);
@@ -686,6 +717,27 @@ export class DoKubernetes implements ProviderKubernetes {
       budget: 'mutate',
     });
     return resourceState(id, 'updating');
+  }
+
+  /**
+   * A pool of ours found after its create (the answer was lost, or another creator raced) is
+   * checked as the create's answer would have been: asked for as Spot and made on-demand, it is
+   * deleted (UNSUPPORTED `spotUnverified`). An on-demand pool made as one (no Spot request tag)
+   * that a spec now wants Spot is left alone: that is immutable `spot`.
+   */
+  async #checkPoolSpot(
+    clusterId: string,
+    spec: KubernetesNodePoolSpec,
+    pool: DoksNodePool,
+    context: CallContext,
+  ): Promise<void> {
+    if (spec.spot === true && spotUnhonoured(pool))
+      throw await this.#dropUnverified(
+        pool.id,
+        `/kubernetes/clusters/${clusterId}/node_pools/${pool.id}`,
+        'nodePool',
+        context,
+      );
   }
 
   /** Deletes one of this deployment's node pools (a pool that is not ours is INVALID_STATE). */

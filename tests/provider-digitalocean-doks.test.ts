@@ -132,6 +132,34 @@ const standard: KubernetesClusterSpec = {
   description: 'tenant cluster',
 };
 
+/**
+ * A fetch over the emulator that loses DigitalOcean's answer to the next request matching (path
+ * `/v2`-relative): the change is made, the caller gets `status` instead (503: the answer never
+ * came; 409: another creator got there first).
+ */
+function losing(
+  doks: DoksEmulator,
+  method: string,
+  path: RegExp,
+  status = 503,
+): NonNullable<DoProviderOptions['fetch']> {
+  let armed = true;
+  return async (input, init) => {
+    const response = await doks.fetch(input, init);
+    const url = new URL(typeof input === 'object' && 'url' in input ? input.url : String(input));
+    const hit =
+      (init?.method ?? 'GET').toUpperCase() === method &&
+      path.test(url.pathname.replace(/^\/v2/, ''));
+    if (!armed || !hit) return response;
+    armed = false;
+    const id = status === 409 ? 'conflict' : 'service_unavailable';
+    return new Response(JSON.stringify({ id, message: 'answer lost' }), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+}
+
 async function readyCluster(s: Setup, spec: KubernetesClusterSpec = standard): Promise<string> {
   const { last } = await settle(() => s.k8s.ensureCluster(spec, s.ctx()), 'ready');
   return last.id;
@@ -699,6 +727,63 @@ describe('doks node pools', () => {
     expect(posted(s, '/kubernetes/clusters')).toHaveLength(1);
   });
 
+  it('deletes a pool made on-demand for Spot whose create answer was lost, or that raced', async () => {
+    for (const status of [503, 409]) {
+      freshBudgets();
+      const doks = new DoksEmulator(new DoEmulator({ now: () => t0 }));
+      const lossy = losing(doks, 'POST', /^\/kubernetes\/clusters\/[^/]+\/node_pools$/, status);
+      const s = await setup(spotAccount, { fetch: lossy }, doks);
+      const cluster = await readyCluster(s, torCluster);
+      s.doks.ignoresSpot = true;
+      const spot = { ...gpuPool, name: 'spot', spot: true };
+      const lost = await failure(s.k8s.ensureNodePool(cluster, spot, s.ctx()));
+      const made = s.doks.clusters.get(cluster)!.node_pools.find((p: Json) => p.name === 'spot');
+      expect(made.spot).toBeUndefined();
+      // A lost answer is UNAVAILABLE; a race finds the pool and checks it there and then.
+      if (status === 503) {
+        expect(lost.code).toBe('UNAVAILABLE');
+        expect(mutations(s).filter((m) => m.startsWith('DELETE'))).toEqual([]);
+        const retried = await failure(s.k8s.ensureNodePool(cluster, spot, s.ctx()));
+        expect([retried.code, retried.details?.reason]).toEqual(['UNSUPPORTED', 'spotUnverified']);
+      } else expect([lost.code, lost.details?.reason]).toEqual(['UNSUPPORTED', 'spotUnverified']);
+      expect(mutations(s).filter((m) => m.startsWith('DELETE'))).toEqual([
+        `DELETE ${poolPath(s, cluster, 'spot')}`,
+      ]);
+      expect(posted(s, `/kubernetes/clusters/${cluster}/node_pools`)).toHaveLength(1);
+    }
+  });
+
+  it('never deletes an on-demand pool it made as one when the spec later asks for Spot', async () => {
+    const s = await setup(spotAccount);
+    const cluster = await readyCluster(s, torCluster);
+    await settle(() => s.k8s.ensureNodePool(cluster, gpuPool, s.ctx()), 'ready');
+    const error = await failure(s.k8s.ensureNodePool(cluster, { ...gpuPool, spot: true }, s.ctx()));
+    expect(error.details).toMatchObject({ reason: 'immutable', field: 'spot' });
+    expect(mutations(s).filter((m) => m.startsWith('DELETE'))).toEqual([]);
+  });
+
+  it('deletes a new cluster made with an on-demand pool for Spot when its create answer was lost', async () => {
+    const doks = new DoksEmulator(new DoEmulator({ now: () => t0 }));
+    const s = await setup(
+      spotAccount,
+      { fetch: losing(doks, 'POST', /^\/kubernetes\/clusters$/) },
+      doks,
+    );
+    s.doks.ignoresSpot = true;
+    const spec: KubernetesClusterSpec = {
+      ...torCluster,
+      initialNodePools: [cpuPool, { ...gpuPool, name: 'spot', spot: true }],
+    };
+    expect((await failure(s.k8s.ensureCluster(spec, s.ctx()))).code).toBe('UNAVAILABLE');
+    const [made] = s.doks.byName('bc-k-tor');
+    const retried = await failure(s.k8s.ensureCluster(spec, s.ctx()));
+    expect([retried.code, retried.details?.reason]).toEqual(['UNSUPPORTED', 'spotUnverified']);
+    expect(mutations(s)).toEqual([
+      'POST /kubernetes/clusters',
+      `DELETE /kubernetes/clusters/${made!.id}`,
+    ]);
+  });
+
   it('keeps the worker Droplets of its pools out of discovery, claims and deletes', async () => {
     const s = await setup();
     const cluster = await readyCluster(s);
@@ -745,9 +830,7 @@ describe('doks node pools', () => {
     const drops = (): number => posted(s, '/droplets').length;
     // DOKS's own tag keys are refused as labels, in any case, before anything is sent.
     for (const key of ['k8s', 'K8S', 'k8s-worker']) {
-      const error = await failure(
-        s.impl.create({ ...request, labels: { [key]: 'yes' } }, s.ctx()),
-      );
+      const error = await failure(s.impl.create({ ...request, labels: { [key]: 'yes' } }, s.ctx()));
       expect([error.code, error.details?.reason]).toEqual(['INVALID_INPUT', 'label']);
     }
     expect(drops()).toBe(0);
