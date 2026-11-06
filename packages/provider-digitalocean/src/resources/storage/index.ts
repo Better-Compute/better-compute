@@ -5,7 +5,13 @@ import { deploymentTag } from '../../ids.js';
 import { spacesClient, type SpacesClient } from '../../spaces/s3.js';
 import { cdnEndpointKind } from './cdn-endpoint.js';
 import { containerRegistryKind, registryGcKind } from './container-registry.js';
-import { doResources, type DoResources } from './kind.js';
+import {
+  asDoKind,
+  storageDispatcher,
+  type DoResourceKind,
+  type DoStorageKindEntry,
+  type DoStorageResources,
+} from './kind.js';
 import { spacesBucketKind } from './spaces-bucket.js';
 import { spacesKeyKind } from './spaces-key.js';
 
@@ -61,15 +67,15 @@ function spacesFor(
 }
 
 /**
- * The storage kinds of one DigitalOcean account (Spaces keys and buckets, CDN endpoints, the
- * Container Registry), served as one `DoResources`. Like the provider's `create`, it makes no
- * request and resolves no secret until the first call.
+ * The storage kind handlers of one DigitalOcean account (Spaces keys and buckets, CDN endpoints,
+ * the Container Registry). Like the provider's `create`, they make no request and resolve no
+ * secret until the first call.
  */
-export function doStorageResources(
+export function storageKindHandlers(
   config: DoConfig,
   context: ProviderContext,
   options: DoStorageOptions = {},
-): DoResources {
+): DoResourceKind[] {
   if (!config.spacesAccessKey !== !config.spacesSecretKey)
     throw new ComputeError(
       'INVALID_CONFIG',
@@ -80,11 +86,33 @@ export function doStorageResources(
   const client = clientFor(config, context, options);
   const tag = deploymentTag(options.deployment ?? 'default');
   const spaces = spacesFor(config, context, options);
-  return doResources([
+  return [
     spacesKeyKind(client),
     spacesBucketKind({ spaces, deploymentTag: tag }),
     cdnEndpointKind({ client, spaces, deploymentTag: tag }),
     containerRegistryKind(client),
     registryGcKind(client),
-  ]);
+  ];
+}
+
+/** The account's storage kinds served on their own, as core's `ProviderResources`. */
+export function doStorageResources(
+  config: DoConfig,
+  context: ProviderContext,
+  options: DoStorageOptions = {},
+): DoStorageResources {
+  return storageDispatcher(storageKindHandlers(config, context, options));
+}
+
+/**
+ * The account's storage kinds as entries of the provider-wide DigitalOcean dispatcher
+ * (`new DoResources(client, config, deployment, [...doResourceKinds(), ...doStorageKinds(...)])`
+ * once lane do-cloud-resources is merged), so one `resources` serves databases and storage alike.
+ */
+export function doStorageKinds(
+  config: DoConfig,
+  context: ProviderContext,
+  options: DoStorageOptions = {},
+): DoStorageKindEntry[] {
+  return storageKindHandlers(config, context, options).map(asDoKind);
 }

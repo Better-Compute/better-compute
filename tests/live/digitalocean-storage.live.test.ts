@@ -16,7 +16,7 @@ import {
   spacesClient,
   xmlValues,
   type DoConfig,
-  type DoResources,
+  type DoStorageResources,
   type SpacesClient,
 } from '@better-compute/provider-digitalocean';
 
@@ -211,7 +211,7 @@ async function sweep(): Promise<string[]> {
 // ---------------------------------------------------------------------------------- the suite
 
 describe.skipIf(!enabled)('provider-digitalocean storage live', () => {
-  let resources: DoResources;
+  let resources: DoStorageResources;
 
   beforeAll(async () => {
     const parsed = await digitalocean.config['~standard'].validate({

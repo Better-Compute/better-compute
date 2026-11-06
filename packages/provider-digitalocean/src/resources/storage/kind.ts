@@ -105,8 +105,11 @@ export interface DoResourceKind<Spec = any> {
   release?(id: string, context: CallContext): Promise<void>;
 }
 
-/** Core's `ProviderResources`, served from a list of kinds. */
-export interface DoResources {
+/**
+ * Core's `ProviderResources`, served from a list of storage kinds. (Not `DoResources`: that name
+ * is the provider-wide dispatcher of the cloud-resources lane, which `doStorageKinds` feeds.)
+ */
+export interface DoStorageResources {
   kinds(): readonly DoResourceKind[];
   ensure(request: DoResourceRequest, context: CallContext): Promise<DoResourceState>;
   get(kind: string, id: string, context: CallContext): Promise<DoResourceState | undefined>;
@@ -148,7 +151,106 @@ export function notManaged(message: string): ComputeError {
   return storageError('INVALID_STATE', message, 'notManaged');
 }
 
-export function doResources(kinds: readonly DoResourceKind[]): DoResources {
+/** Validates (and defaults) the request's spec with the kind's manifest, then ensures. */
+async function ensureValidated(
+  handler: DoResourceKind,
+  request: DoResourceRequest,
+  context: CallContext,
+): Promise<DoResourceState> {
+  const spec: unknown = await validateManifest(handler.spec, request.spec);
+  return handler.ensure(
+    {
+      name: request.name,
+      spec,
+      ...(request.id !== undefined ? { id: request.id } : {}),
+      ...(request.parent !== undefined ? { parent: request.parent } : {}),
+      ...(request.labels !== undefined ? { labels: request.labels } : {}),
+    },
+    context,
+  );
+}
+
+/** A kind's definition: core's `ProviderResourceKind` (the metadata, without the calls). */
+export interface DoStorageKindDefinition {
+  kind: string;
+  family: DoResourceFamily;
+  description?: string;
+  spec: Manifest<unknown>;
+  outputs: readonly string[];
+  secretOutputs?: readonly string[];
+  regional: boolean;
+  updatable: readonly string[];
+  meters?: readonly { meter: string; unit: string }[];
+  preview?: boolean;
+  parent?: string;
+}
+
+/**
+ * A storage kind in the shape of the provider-wide DigitalOcean kind (`DoKind`, served by the
+ * provider's `DoResources` dispatcher from lane do-cloud-resources): its definition, and calls
+ * that take the dispatcher's env first. Storage kinds carry their own clients (the API and the
+ * account's Spaces keys), so they ignore the env.
+ */
+export interface DoStorageKindEntry {
+  readonly definition: DoStorageKindDefinition;
+  ensure(env: unknown, request: DoResourceRequest, context: CallContext): Promise<DoResourceState>;
+  get(env: unknown, id: string, context: CallContext): Promise<DoResourceState | undefined>;
+  delete(env: unknown, id: string, context: CallContext): Promise<DoResourceState>;
+  discover?(env: unknown, context: CallContext): AsyncIterable<DoDiscoveredResource>;
+  adopt?(
+    env: unknown,
+    id: string,
+    labels: Readonly<Record<string, string>>,
+    context: CallContext,
+  ): Promise<DoResourceState>;
+  release?(env: unknown, id: string, context: CallContext): Promise<void>;
+}
+
+/** The definition of a kind: its metadata, without its calls or extra helpers. */
+export function kindDefinition(handler: DoResourceKind): DoStorageKindDefinition {
+  return {
+    kind: handler.kind,
+    family: handler.family,
+    description: handler.description,
+    spec: handler.spec as Manifest<unknown>,
+    outputs: handler.outputs,
+    ...(handler.secretOutputs ? { secretOutputs: handler.secretOutputs } : {}),
+    regional: handler.regional,
+    updatable: handler.updatable,
+    ...(handler.meters ? { meters: handler.meters } : {}),
+    ...(handler.preview !== undefined ? { preview: handler.preview } : {}),
+    ...(handler.parent ? { parent: handler.parent } : {}),
+  };
+}
+
+/** A storage kind as a provider-wide `DoKind` entry (see `DoStorageKindEntry`). */
+export function asDoKind(handler: DoResourceKind): DoStorageKindEntry {
+  const handlerAdopt = handler.adopt?.bind(handler);
+  const handlerRelease = handler.release?.bind(handler);
+  const handlerDiscover = handler.discover?.bind(handler);
+  return {
+    definition: kindDefinition(handler),
+    ensure: (_env, request, context) => ensureValidated(handler, request, context),
+    get: (_env, id, context) => handler.get(id, context),
+    delete: (_env, id, context) => handler.delete(id, context),
+    ...(handlerDiscover ? { discover: (_env: unknown, context: CallContext) => handlerDiscover(context) } : {}),
+    ...(handlerAdopt
+      ? {
+          adopt: (
+            _env: unknown,
+            id: string,
+            labels: Readonly<Record<string, string>>,
+            context: CallContext,
+          ) => handlerAdopt(id, labels, context),
+        }
+      : {}),
+    ...(handlerRelease
+      ? { release: (_env: unknown, id: string, context: CallContext) => handlerRelease(id, context) }
+      : {}),
+  };
+}
+
+export function storageDispatcher(kinds: readonly DoResourceKind[]): DoStorageResources {
   const byKind = new Map(kinds.map((kind) => [kind.kind, kind]));
   const find = (kind: string): DoResourceKind => {
     const found = byKind.get(kind);
@@ -158,20 +260,7 @@ export function doResources(kinds: readonly DoResourceKind[]): DoResources {
   };
   return {
     kinds: () => kinds,
-    async ensure(request, context) {
-      const handler = find(request.kind);
-      const spec: unknown = await validateManifest(handler.spec, request.spec);
-      return handler.ensure(
-        {
-          name: request.name,
-          spec,
-          ...(request.id !== undefined ? { id: request.id } : {}),
-          ...(request.parent !== undefined ? { parent: request.parent } : {}),
-          ...(request.labels !== undefined ? { labels: request.labels } : {}),
-        },
-        context,
-      );
-    },
+    ensure: async (request, context) => ensureValidated(find(request.kind), request, context),
     get: async (kind, id, context) => find(kind).get(id, context),
     delete: async (kind, id, context) => find(kind).delete(id, context),
     discover(kind, context) {

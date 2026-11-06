@@ -138,6 +138,81 @@ describe('the ProviderResources contract', () => {
   });
 });
 
+// A copy of the provider-wide DigitalOcean kind (lane do-cloud-resources' `DoKind`): the storage
+// kinds join its `DoResources` dispatcher as entries of this shape.
+interface LaneKindEnv {
+  client: unknown;
+  deploymentTag: string;
+  previews: boolean;
+}
+interface LaneDoKind {
+  readonly definition: ContractKind;
+  ensure(
+    env: LaneKindEnv,
+    request: Parameters<ContractResources['ensure']>[0],
+    context: CallContext,
+  ): Promise<ContractState>;
+  get(env: LaneKindEnv, id: string, context: CallContext): Promise<ContractState | undefined>;
+  delete(env: LaneKindEnv, id: string, context: CallContext): Promise<ContractState>;
+  discover?(
+    env: LaneKindEnv,
+    context: CallContext,
+  ): ReturnType<NonNullable<ContractResources['discover']>>;
+  adopt?(
+    env: LaneKindEnv,
+    id: string,
+    labels: Readonly<Record<string, string>>,
+    context: CallContext,
+  ): Promise<ContractState>;
+  release?(env: LaneKindEnv, id: string, context: CallContext): Promise<void>;
+}
+
+describe('doStorageKinds, for the provider-wide dispatcher', () => {
+  it('serves the same kinds as plain definitions plus env-first calls', async () => {
+    const w = await world();
+    const kinds: readonly LaneDoKind[] = w.kinds;
+    expect(kinds.map((k) => k.definition)).toEqual(
+      w.resources.kinds().map((k) => ({
+        kind: k.kind,
+        family: k.family,
+        description: k.description,
+        spec: k.spec,
+        outputs: k.outputs,
+        ...(k.secretOutputs ? { secretOutputs: k.secretOutputs } : {}),
+        regional: k.regional,
+        updatable: k.updatable,
+        ...(k.parent ? { parent: k.parent } : {}),
+      })),
+    );
+    // Only metadata in a definition: no calls, no kind-specific helpers (purge, repositories).
+    for (const { definition } of kinds)
+      for (const value of Object.values(definition)) expect(typeof value).not.toBe('function');
+
+    const env: LaneKindEnv = { client: {}, deploymentTag: 'ignored', previews: false };
+    const bucketKind = kinds.find((k) => k.definition.kind === 'do.spaces-bucket')!;
+    // The spec is validated and defaulted here too (acl, versioning).
+    const created = await bucketKind.ensure(
+      env,
+      { kind: 'do.spaces-bucket', name: 'tenant-a-assets', spec: { region: 'nyc3' }, labels },
+      w.ctx(),
+    );
+    expect(created.outputs).toMatchObject({ acl: 'private', versioning: 'off' });
+    expect((await bucketKind.get(env, created.id, w.ctx()))?.spec).toEqual({
+      region: 'nyc3',
+      acl: 'private',
+      versioning: false,
+    });
+    await bucketKind.release!(env, created.id, w.ctx());
+    expect((await bucketKind.adopt!(env, created.id, labels, w.ctx())).state).toBe('ready');
+    expect((await bucketKind.delete(env, created.id, w.ctx())).state).toBe('deleted');
+    expect(
+      (await failure(bucketKind.ensure(env, { kind: 'do.spaces-bucket', name: 'x', spec: {} }, w.ctx())))
+        .code,
+    ).toBe('INVALID_INPUT');
+    expect(kinds.find((k) => k.definition.kind === 'do.spaces-key')!.adopt).toBeUndefined();
+  });
+});
+
 describe('do.spaces-bucket adopt and release', () => {
   it('adopts a bucket by writing the marker, then manages it by its id', async () => {
     const w = await world();

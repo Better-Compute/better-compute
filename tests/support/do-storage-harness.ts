@@ -1,11 +1,13 @@
 import { manualClock, type CallContext, type ManualClock } from '@better-compute/core';
 import {
   digitalocean,
+  doStorageKinds,
   doStorageResources,
   type DoConfig,
   type DoResourceRequest,
   type DoResourceState,
-  type DoResources,
+  type DoStorageKindEntry,
+  type DoStorageResources,
   type DoStorageOptions,
 } from '@better-compute/provider-digitalocean';
 import { DoEmulator } from './do-emulator/index.js';
@@ -46,7 +48,9 @@ export interface StorageWorld {
   emu: DoEmulator;
   spaces: SpacesEmulator;
   clock: ManualClock;
-  resources: DoResources;
+  resources: DoStorageResources;
+  /** The same kinds as entries of the provider-wide DigitalOcean dispatcher. */
+  kinds: DoStorageKindEntry[];
   ctx: (key?: string) => CallContext;
   /** `resources.ensure` with the request spelled out: kind, name, spec, then the context. */
   ensure: (
@@ -70,16 +74,18 @@ export async function storageWorld(
   register({ emu, spaces });
   const parsed = await digitalocean.config['~standard'].validate(config);
   if ('issues' in parsed && parsed.issues) throw new Error(parsed.issues[0]!.message);
-  const resources = doStorageResources(
+  const args = [
     (parsed as { value: DoConfig }).value,
     { clock, secrets: storageSecrets, log: noopLog, account: platformAccount },
     { fetch: emu.fetch, spacesFetch: spaces.fetch, ...options },
-  );
+  ] as const;
+  const resources = doStorageResources(...args);
   return {
     emu,
     spaces,
     clock,
     resources,
+    kinds: doStorageKinds(...args),
     ctx: (key) => storageCtx(clock, key),
     ensure: (kind, name, spec, context, extra = {}) =>
       resources.ensure({ kind, name, spec, ...extra }, context),
