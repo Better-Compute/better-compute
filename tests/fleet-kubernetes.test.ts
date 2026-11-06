@@ -611,6 +611,79 @@ describe('fleet.plan for Kubernetes clusters', () => {
   });
 });
 
+describe("provider accounts other tenants' clusters run on", () => {
+  it('keeps an account while a cluster of another tenant on an offered pool runs on it', async () => {
+    const db = world.fixture.database;
+    const base = await exported();
+    const quota = { vcpu: 64, memoryGiB: 256, diskGiB: 1000, gpu: 0 };
+    const shared: FleetConfig = {
+      ...base,
+      providerAccounts: [
+        ...(base.providerAccounts ?? []),
+        { name: 'gke-shared', provider: 'fake-gke', config: { zones: ['us-central1-a'] } },
+      ],
+      pools: [
+        ...(base.pools ?? []),
+        {
+          name: 'gke-shared',
+          site: world.siteId,
+          class: 'provider',
+          providerAccount: 'gke-shared',
+          offers: [{ tenant: world.acmeTenant, quota }],
+        },
+      ],
+    };
+    await apply(shared);
+    const { rows } = await db.query<{ object_id: string }>(
+      `SELECT object_id FROM fleet_names WHERE tenant_id = $1 AND kind = 'pool' AND name = 'gke-shared'`,
+      [world.rootTenant],
+    );
+    const poolId = rows[0]!.object_id;
+    // Tenant B (acme) creates a cluster on it: the cluster runs on the owner's account.
+    const foreign: KubernetesClusterView = await world.api.kubernetesClusters.create(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId,
+      name: 'tenant-b',
+      mode: 'standard',
+      location: 'us-central1',
+      nodePools: [system],
+      idempotencyKey: 'acme-on-shared',
+    });
+
+    // The owner prunes the pool and the account: the pool is archived, the account kept.
+    const pruned = await plan(base, true);
+    expect(changeOf(pruned, 'pool', 'gke-shared')?.action).toBe('delete');
+    expect(changeOf(pruned, 'providerAccount', 'gke-shared')).toEqual({
+      kind: 'providerAccount',
+      name: 'gke-shared',
+      action: 'unchanged',
+      note: 'kept: a Kubernetes cluster still runs on it',
+    });
+    expect(pruned.calls.map((call) => call.path)).not.toContain('providerAccounts/delete');
+    // Nothing of the other tenant's cluster shows.
+    expect(JSON.stringify(pruned)).not.toContain('tenant-b');
+    expect(JSON.stringify(pruned)).not.toContain(foreign.id);
+    await apply(base, { prune: true, planHash: pruned.planHash });
+    expect((await exported()).providerAccounts?.map((account) => account.name)).toContain(
+      'gke-shared',
+    );
+    // Drift says the same: nothing to do while the cluster runs.
+    expect((await plan(await exported(), true)).calls).toEqual([]);
+
+    // Once the cluster is gone, the next apply deletes the account.
+    await db.query(
+      `UPDATE kubernetes_clusters SET state = 'deleted', desired_state = 'deleted' WHERE id = $1`,
+      [foreign.id],
+    );
+    const again = await plan(base, true);
+    expect(changeOf(again, 'providerAccount', 'gke-shared')?.action).toBe('delete');
+    await apply(base, { prune: true });
+    expect((await exported()).providerAccounts?.map((account) => account.name)).not.toContain(
+      'gke-shared',
+    );
+  });
+});
+
 describe('pool substrates in the document', () => {
   const substratePool = (extra: Record<string, unknown> = {}): FleetPool => ({
     name: 'gpu-substrate',

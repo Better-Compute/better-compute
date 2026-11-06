@@ -610,6 +610,17 @@ export async function planFleet(
           });
           continue;
         }
+        // Another tenant's cluster on a pool offered to it runs on this account too; which one is
+        // not this tenant's to know, so the note names none.
+        if (state.pinnedAccounts.includes(account.id)) {
+          add({
+            kind: 'providerAccount',
+            name: account.name,
+            action: 'unchanged',
+            note: 'kept: a Kubernetes cluster still runs on it',
+          });
+          continue;
+        }
         add({ kind: 'providerAccount', name: account.name, action: 'delete' });
         deletes.push({
           path: 'providerAccounts/delete',

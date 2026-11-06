@@ -52,6 +52,11 @@ export interface FleetState {
   substrateClusters: { name: string; poolId: string; providerAccountId: string }[];
   /** How many clusters of each name the tenant ever had (deleted ones too): fleet's create keys count them. */
   clusterIncarnations: Record<string, number>;
+  /**
+   * The tenant's provider accounts a live cluster of any tenant runs on (a cluster on an offered pool
+   * runs on the owner's account): they stay until it is deleted. Ids of the tenant's own accounts only.
+   */
+  pinnedAccounts: string[];
   /** Tables of modules this deployment does not run (vps: flavors, provider accounts, sandbox templates; kubernetes). */
   missing: string[];
 }
@@ -314,12 +319,15 @@ export async function readFleetState(tx: SqlTx, tenantId: string): Promise<Fleet
   let kubernetesClusters: FleetState['kubernetesClusters'] = [];
   let substrateClusters: FleetState['substrateClusters'] = [];
   let clusterIncarnations: FleetState['clusterIncarnations'] = {};
+  let pinnedAccounts: FleetState['pinnedAccounts'] = [];
   if (await tableExists(tx, 'kubernetes_clusters'))
-    ({ kubernetesClusters, substrateClusters, clusterIncarnations } = await readClusters(
-      tx,
-      tenantId,
-      poolName,
-    ));
+    ({ kubernetesClusters, substrateClusters, clusterIncarnations, pinnedAccounts } =
+      await readClusters(
+        tx,
+        tenantId,
+        poolName,
+        providerAccounts.map((account) => account.id),
+      ));
   else missing.push('kubernetes_clusters');
 
   return {
@@ -332,6 +340,7 @@ export async function readFleetState(tx: SqlTx, tenantId: string): Promise<Fleet
     kubernetesClusters,
     substrateClusters,
     clusterIncarnations,
+    pinnedAccounts,
     missing,
   };
 }
@@ -380,7 +389,13 @@ async function readClusters(
   tx: SqlTx,
   tenantId: string,
   poolName: Map<string, string>,
-): Promise<Pick<FleetState, 'kubernetesClusters' | 'substrateClusters' | 'clusterIncarnations'>> {
+  accountIds: string[],
+): Promise<
+  Pick<
+    FleetState,
+    'kubernetesClusters' | 'substrateClusters' | 'clusterIncarnations' | 'pinnedAccounts'
+  >
+> {
   // substrate_pool_id and adopted through to_jsonb: absent before kubernetes/0002.
   const rows = (
     await tx.query<ClusterRow>(
@@ -459,7 +474,17 @@ async function readClusters(
       deleting: row.desired_state === 'deleted',
     };
   });
-  return { kubernetesClusters, substrateClusters, clusterIncarnations };
+  // Any tenant's live clusters on this tenant's accounts (vps refuses to delete such an account).
+  // Only the account ids come back: never another tenant's cluster ids or names.
+  const pinnedAccounts = (
+    await tx.query<{ provider_account_id: string }>(
+      `SELECT DISTINCT provider_account_id FROM kubernetes_clusters
+        WHERE provider_account_id = ANY($1::text[]) AND state <> 'deleted'
+        ORDER BY provider_account_id`,
+      [accountIds],
+    )
+  ).rows.map((row) => row.provider_account_id);
+  return { kubernetesClusters, substrateClusters, clusterIncarnations, pinnedAccounts };
 }
 
 function nodePoolOf(pool: NodePoolRow, incarnations: number): FleetStateNodePool {
