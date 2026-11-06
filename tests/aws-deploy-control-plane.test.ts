@@ -69,6 +69,20 @@ describe('control-plane template', () => {
     expect(pattern.test(`better-compute:1.0@sha256:${'a'.repeat(63)}`)).toBe(false);
   });
 
+  it('migrates with the next image before the services roll to it', () => {
+    // An upgrade sets MigrateImage first (only the migrate task changes), runs it, then sets Image.
+    expect((props('MigrateTask').ContainerDefinitions as { Image: unknown }[])[0]!.Image).toEqual({
+      'Fn::If': ['HasMigrateImage', { Ref: 'MigrateImage' }, { Ref: 'Image' }],
+    });
+    for (const task of ['ApiTask', 'WorkerTask', 'GatewayTask'])
+      expect((props(task).ContainerDefinitions as { Image: unknown }[])[0]!.Image).toEqual({ Ref: 'Image' });
+    const pattern = new RegExp(template.Parameters!.MigrateImage!.AllowedPattern!);
+    expect(template.Parameters!.MigrateImage!.Default).toBe('');
+    expect(pattern.test('')).toBe(true);
+    expect(pattern.test(`r/bc@sha256:${'b'.repeat(64)}`)).toBe(true);
+    expect(pattern.test('r/bc:next')).toBe(false);
+  });
+
   it('hardens every container and passes secrets only as ECS secrets', () => {
     for (const task of ['ApiTask', 'WorkerTask', 'GatewayTask', 'MigrateTask']) {
       const definition = props(task);

@@ -9,6 +9,7 @@ import {
   assertTemplate,
   cfnEquals,
   cfnGetAtt,
+  cfnIf,
   cfnImport,
   cfnJoin,
   cfnRef,
@@ -62,6 +63,13 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
       Description: 'The control-plane image (the better-compute CLI as entrypoint, your configuration inside), pinned by digest',
       AllowedPattern: pinnedImagePattern,
       ConstraintDescription: 'an image reference pinned by digest: <repository>@sha256:<64 hex>',
+    },
+    MigrateImage: {
+      Type: 'String',
+      Description: 'Upgrades: the next image, for the migrate task only, run before Image moves to it (empty: Image)',
+      Default: '',
+      AllowedPattern: `^$|${pinnedImagePattern}`,
+      ConstraintDescription: 'empty, or an image reference pinned by digest',
     },
     CpuArchitecture: { Type: 'String', Description: 'The image architecture', Default: 'X86_64', AllowedValues: ['X86_64', 'ARM64'] },
     ApiDomainName: {
@@ -576,7 +584,7 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
         ContainerDefinitions: [
           {
             Name: role,
-            Image: cfnRef('Image'),
+            Image: role === 'migrate' ? cfnIf('HasMigrateImage', cfnRef('MigrateImage'), cfnRef('Image')) : cfnRef('Image'),
             Essential: true,
             Command: [...controlPlaneCommands[role]],
             ...(port !== undefined
@@ -749,6 +757,7 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
     Conditions: {
       HasHostedZone: { 'Fn::Not': [cfnEquals(cfnRef('HostedZoneId'), '')] },
       HasAlarmEmail: { 'Fn::Not': [cfnEquals(cfnRef('AlarmEmail'), '')] },
+      HasMigrateImage: { 'Fn::Not': [cfnEquals(cfnRef('MigrateImage'), '')] },
     },
     Resources: resources,
     Outputs: {
