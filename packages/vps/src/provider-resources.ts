@@ -166,6 +166,9 @@ CREATE TABLE provider_addresses (
   family text NOT NULL CHECK (family IN ('ipv4', 'ipv6')),
   external_id text,
   address text,
+  -- The provider's fingerprint output at reserve time (DO: the reserved IP's project or reservation time): an address
+  -- at external_id that does not show it is another reservation, never released or taken over.
+  fingerprint text,
   -- The instance the tenant wants the address on (NULL: unassigned), and the machine the provider last reported.
   instance_id text REFERENCES instances,
   assigned_machine text,
@@ -740,6 +743,7 @@ interface AddressRow {
   family: 'ipv4' | 'ipv6';
   external_id: string | null;
   address: string | null;
+  fingerprint: string | null;
   instance_id: string | null;
   assigned_machine: string | null;
   assignment_state: ProviderAddressView['assignmentState'];
@@ -761,7 +765,7 @@ const volumeColumns = `id, tenant_id, project_id, pool_id, provider_account_id, 
 const snapshotColumns = `id, tenant_id, project_id, pool_id, provider_account_id, volume_id, name, region, size_gib,
   external_id, ${common}`;
 const addressColumns = `id, tenant_id, project_id, pool_id, provider_account_id, name, description, region, family,
-  external_id, address, instance_id, assigned_machine, assignment_state, assignment_message, charged, ${common}`;
+  external_id, address, fingerprint, instance_id, assigned_machine, assignment_state, assignment_message, charged, ${common}`;
 const attachmentColumns = `id, volume_id, instance_id, machine_id, state, desired_state, message`;
 
 const iso = (value: Date | string) => new Date(value).toISOString();
@@ -1994,6 +1998,8 @@ class Run {
   again = false;
   /** The code of the last provider error `attempt` caught (a transient one, or the one behind an `error` state). */
   lastCode: string | undefined;
+  /** That error's `details.reason`, when it had one. */
+  lastReason: string | undefined;
   readonly #started: number;
 
   constructor(
@@ -2034,6 +2040,7 @@ class Run {
       return undefined;
     }
     this.lastCode = undefined;
+    this.lastReason = undefined;
     try {
       return (await op()) ?? 'missing';
     } catch (error) {
@@ -2047,6 +2054,8 @@ class Run {
         return undefined;
       }
       this.lastCode = isComputeError(error) ? error.code : undefined;
+      const reason = isComputeError(error) ? error.details?.reason : undefined;
+      this.lastReason = typeof reason === 'string' ? reason : undefined;
       return { id: '', state: 'error', message: text(error) };
     }
   }
@@ -2776,6 +2785,7 @@ async function convergeAddress(
     region: address.region,
     family: address.family,
     ...(address.external_id ? { id: address.external_id } : {}),
+    ...(address.external_id && address.fingerprint ? { fingerprint: address.fingerprint } : {}),
   };
   const ensured = await run.attempt(`ensure ${address.id}`, () =>
     addresses.ensureAddress(spec, run.call(`ensure:${address.id}`)),
@@ -2801,6 +2811,10 @@ async function convergeAddress(
   const fields: Fields = {
     external_id: externalId,
     ...(output(ensured, 'address') ? { address: output(ensured, 'address')! } : {}),
+    // Recorded once, from the reserve's answer: what later reads are held to.
+    ...(!address.fingerprint && output(ensured, 'fingerprint')
+      ? { fingerprint: output(ensured, 'fingerprint')! }
+      : {}),
   };
   if (ensured.state !== 'ready') {
     run.inFlight = true;
@@ -2932,6 +2946,23 @@ async function teardownAddress(
     await finish();
     return;
   }
+  // Another reservation at our address (ours was released out of band, and the provider handed the IP out again):
+  // ours is gone, and the other one is never unassigned or released.
+  const stranger = () => {
+    run.deps.log.warn('providerResources: the address at this id is another reservation; not released', {
+      addressId: address.id,
+      providerAccountId: address.provider_account_id,
+    });
+    return finish();
+  };
+  const observedFingerprint = output(observed, 'fingerprint');
+  if (
+    (address.fingerprint && observedFingerprint !== address.fingerprint) ||
+    (output(observed, 'region') !== undefined && output(observed, 'region') !== address.region)
+  ) {
+    await stranger();
+    return;
+  }
   if (output(observed, 'assignedTo') !== undefined) {
     const released = await unassign(run, addresses, address, externalId);
     if (released.assignment_state !== 'none') {
@@ -2940,11 +2971,18 @@ async function teardownAddress(
     }
   }
   const deleted = await run.attempt(`delete ${address.id}`, () =>
-    addresses.deleteAddress(externalId, run.call(`delete:${address.id}`)),
+    addresses.deleteAddress(externalId, run.call(`delete:${address.id}`), {
+      region: address.region,
+      ...(address.fingerprint ? { fingerprint: address.fingerprint } : {}),
+    }),
   );
   if (deleted === undefined) return;
   if (deleted === 'missing' || deleted.state === 'deleted') {
     await finish();
+    return;
+  }
+  if (deleted.state === 'error' && run.lastCode === 'INVALID_STATE' && run.lastReason === 'notManaged') {
+    await stranger();
     return;
   }
   if (deleted.state === 'error') {

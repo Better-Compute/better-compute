@@ -5,6 +5,7 @@ import {
   type CallContext,
   type Logger,
   type ProviderAddresses,
+  type ProviderAddressExpectation,
   type ProviderAddressSpec,
   type ProviderResourceState,
 } from '@better-compute/core';
@@ -71,6 +72,15 @@ interface Address {
   region: string;
   droplet: DoDroplet | undefined;
   locked: boolean;
+  /** What tells this reservation apart from a later one at the same IP (reserved IPs carry no tags). */
+  fingerprint: string | undefined;
+}
+
+/** A reserved IPv6's reservation time, else a reserved IPv4's project: undefined when DO did not say. */
+function fingerprintOf(found: { project_id?: string; reserved_at?: string }): string | undefined {
+  if (typeof found.reserved_at === 'string' && found.reserved_at !== '') return `reserved:${found.reserved_at}`;
+  if (typeof found.project_id === 'string' && found.project_id !== '') return `project:${found.project_id}`;
+  return undefined;
 }
 
 const state = (
@@ -85,6 +95,7 @@ function outputs(address: Address): Record<string, string> {
     family: address.family,
     region: address.region,
     ...(address.droplet ? { assignedTo: String(address.droplet.id) } : {}),
+    ...(address.fingerprint ? { fingerprint: address.fingerprint } : {}),
   };
 }
 
@@ -126,6 +137,7 @@ export class DoAddresses implements ProviderAddresses {
           region: found.region.slug,
           droplet: found.droplet ?? undefined,
           locked: found.locked === true,
+          fingerprint: fingerprintOf(found),
         };
       }
       const { reserved_ipv6: found } = await this.client.request<{
@@ -137,6 +149,7 @@ export class DoAddresses implements ProviderAddresses {
         region: found.region_slug,
         droplet: found.droplet ?? undefined,
         locked: false,
+        fingerprint: fingerprintOf(found),
       };
     } catch (error) {
       if (isComputeError(error, 'NOT_FOUND')) return undefined;
@@ -153,6 +166,23 @@ export class DoAddresses implements ProviderAddresses {
         reason: 'addressGone',
       });
     return address;
+  }
+
+  /**
+   * Refuses an address that is not the one vps recorded (reserved IPs carry no tags, DO-D16): another region, or
+   * another reservation at the same IP (its fingerprint differs, or DO no longer shows one).
+   */
+  protected refuseStranger(address: Address, expected: ProviderAddressExpectation | undefined): void {
+    if (!expected) return;
+    const region = expected.region !== undefined && expected.region !== address.region;
+    const fingerprint =
+      expected.fingerprint !== undefined && expected.fingerprint !== address.fingerprint;
+    if (region || fingerprint)
+      throw fail(
+        'INVALID_STATE',
+        `reserved IP ${address.ip} is not the address this better-compute deployment reserved (${region ? 'another region' : 'another reservation'}); it is never changed by it`,
+        'notManaged',
+      );
   }
 
   /** Whether a Droplet belongs to an instance of this deployment (with `instanceId`, that one). */
@@ -215,6 +245,7 @@ export class DoAddresses implements ProviderAddresses {
       if (family !== spec.family)
         throw fail('INVALID_INPUT', `${spec.id} is not an ${spec.family} address`, 'family');
       const address = await this.existing(spec.id, signal);
+      if (spec.fingerprint !== undefined) this.refuseStranger(address, { fingerprint: spec.fingerprint });
       if (address.region !== spec.region)
         throw fail(
           'INVALID_STATE',
@@ -224,6 +255,7 @@ export class DoAddresses implements ProviderAddresses {
       return state(address.ip, 'ready', outputs(address));
     }
     let ip: string | undefined;
+    let fingerprint: string | undefined;
     try {
       if (spec.family === 'ipv4') {
         const reply = await this.client.request<{ reserved_ip?: DoReservedIp }>(
@@ -232,6 +264,7 @@ export class DoAddresses implements ProviderAddresses {
           { body: { region: spec.region }, signal, budget: 'mutate' },
         );
         ip = reply.reserved_ip?.ip;
+        fingerprint = reply.reserved_ip ? fingerprintOf(reply.reserved_ip) : undefined;
       } else {
         const reply = await this.client.request<{ reserved_ipv6?: DoReservedIpv6 }>(
           'POST',
@@ -239,6 +272,7 @@ export class DoAddresses implements ProviderAddresses {
           { body: { region_slug: spec.region }, signal, budget: 'mutate' },
         );
         ip = reply.reserved_ipv6?.ip.toLowerCase();
+        fingerprint = reply.reserved_ipv6 ? fingerprintOf(reply.reserved_ipv6) : undefined;
       }
     } catch (error) {
       if (isComputeError(error, 'UNAVAILABLE'))
@@ -257,7 +291,12 @@ export class DoAddresses implements ProviderAddresses {
         { provider: 'digitalocean', reason: 'badBody' },
       );
     this.log.info('digitalocean.addressReserved', { address: ip, name: spec.name });
-    return state(ip, 'ready', { address: ip, family: spec.family, region: spec.region });
+    return state(ip, 'ready', {
+      address: ip,
+      family: spec.family,
+      region: spec.region,
+      ...(fingerprint ? { fingerprint } : {}),
+    });
   }
 
   async getAddress(id: string, ctx: CallContext): Promise<ProviderResourceState | undefined> {
@@ -355,11 +394,16 @@ export class DoAddresses implements ProviderAddresses {
     return state(address.ip, 'deleting', outputs(address));
   }
 
-  async deleteAddress(addressId: string, ctx: CallContext): Promise<ProviderResourceState> {
+  async deleteAddress(
+    addressId: string,
+    ctx: CallContext,
+    expected?: ProviderAddressExpectation,
+  ): Promise<ProviderResourceState> {
     const { ip, family } = parseAddressId(addressId);
     const { signal } = ctx;
     const address = await this.address(ip, signal);
     if (!address) return state(ip, 'deleted');
+    this.refuseStranger(address, expected);
     if (address.droplet)
       throw fail(
         'INVALID_STATE',

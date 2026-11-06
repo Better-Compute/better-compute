@@ -58,11 +58,19 @@ describe('provider-digitalocean addresses: reserve', () => {
     expect(a).toEqual({
       id: expect.stringMatching(/^198\.51\.100\.\d+$/),
       state: 'ready',
-      outputs: { address: a.id, family: 'ipv4', region: 'nyc3' },
+      outputs: {
+        address: a.id,
+        family: 'ipv4',
+        region: 'nyc3',
+        fingerprint: expect.stringMatching(/^project:/),
+      },
     });
     expect(calls(emu, 'POST', /^\/v2\/reserved_ips$/)[0]!.body).toEqual({ region: 'nyc3' });
     const b = await impl.addresses.ensureAddress(v6, ctx());
-    expect(b).toMatchObject({ state: 'ready', outputs: { family: 'ipv6', region: 'nyc3' } });
+    expect(b).toMatchObject({
+      state: 'ready',
+      outputs: { family: 'ipv6', region: 'nyc3', fingerprint: expect.stringMatching(/^reserved:/) },
+    });
     expect(parseAddressId(b.id).family).toBe('ipv6');
     expect(calls(emu, 'POST', /^\/v2\/reserved_ipv6$/)[0]!.body).toEqual({ region_slug: 'nyc3' });
 
@@ -70,6 +78,28 @@ describe('provider-digitalocean addresses: reserve', () => {
     expect((await impl.addresses.ensureAddress({ ...v6, id: b.id }, ctx())).id).toBe(b.id);
     expect(writes(emu)).toHaveLength(2);
     expect(await impl.addresses.getAddress(a.id, ctx())).toEqual(a);
+  });
+
+  it('never releases or takes over an address that is not the reservation it recorded', async () => {
+    const { emu, impl } = await setup();
+    const a = await impl.addresses.ensureAddress(v4, ctx());
+    const fingerprint = a.outputs!.fingerprint!;
+    // The address was released out of band and DO handed the IP to a reservation of the account owner.
+    emu.state.reservedIps.get(a.id)!.project_id = 'owner-project';
+    const takeOver = await failure(
+      impl.addresses.ensureAddress({ ...v4, id: a.id, fingerprint }, ctx()),
+    );
+    expect([takeOver.code, takeOver.details?.reason]).toEqual(['INVALID_STATE', 'notManaged']);
+    const release = await failure(impl.addresses.deleteAddress(a.id, ctx(), { region: 'nyc3', fingerprint }));
+    expect([release.code, release.details?.reason]).toEqual(['INVALID_STATE', 'notManaged']);
+    const elsewhere = await failure(impl.addresses.deleteAddress(a.id, ctx(), { region: 'sfo3' }));
+    expect(elsewhere.details?.reason).toBe('notManaged');
+    expect(calls(emu, 'DELETE', /reserved_ips/)).toHaveLength(0);
+    // What was recorded, matched: released.
+    const owner = emu.state.reservedIps.get(a.id)!.project_id as string;
+    expect(
+      await impl.addresses.deleteAddress(a.id, ctx(), { region: 'nyc3', fingerprint: `project:${owner}` }),
+    ).toEqual({ id: a.id, state: 'deleted' });
   });
 
   it('refuses what it can before any request', async () => {

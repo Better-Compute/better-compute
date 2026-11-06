@@ -65,6 +65,8 @@ interface FakeAddress {
   spec: ProviderAddressSpec;
   address: string;
   assignedTo?: string;
+  /** Like DO's reserved IP project or reservation time: differs for a later reservation at the same IP. */
+  fingerprint: string;
 }
 
 const cloud = {
@@ -142,6 +144,7 @@ const cloud = {
         family: address.spec.family,
         region: address.spec.region,
         ...(address.assignedTo ? { assignedTo: address.assignedTo } : {}),
+        fingerprint: address.fingerprint,
       },
     };
   },
@@ -266,6 +269,8 @@ const doLike = defineProvider({
         cloud.call(`ensureAddress ${spec.id ?? 'new'}`);
         if (spec.id) {
           const known = cloud.addresses.get(spec.id);
+          if (known && spec.fingerprint !== undefined && spec.fingerprint !== known.fingerprint)
+            throw new ComputeError('INVALID_STATE', 'another reservation', undefined, { reason: 'notManaged' });
           if (known) return cloud.addressState(known);
           throw new ComputeError('NOT_FOUND', 'no such address');
         }
@@ -274,6 +279,7 @@ const doLike = defineProvider({
           id: `203.0.113.${++cloud.counter}`,
           spec,
           address: `203.0.113.${cloud.counter}`,
+          fingerprint: `fp-${cloud.counter}`,
         };
         cloud.addresses.set(address.id, address);
         return cloud.addressState(address);
@@ -297,9 +303,11 @@ const doLike = defineProvider({
         if (address) delete address.assignedTo;
         return { id: addressId, state: 'deleted' };
       },
-      async deleteAddress(addressId) {
+      async deleteAddress(addressId, _context, expected) {
         cloud.call(`deleteAddress ${addressId}`);
         const address = cloud.addresses.get(addressId);
+        if (address && expected?.fingerprint !== undefined && expected.fingerprint !== address.fingerprint)
+          throw new ComputeError('INVALID_STATE', 'another reservation', undefined, { reason: 'notManaged' });
         if (address?.assignedTo) throw new ComputeError('INVALID_STATE', 'assigned');
         cloud.addresses.delete(addressId);
         return { id: addressId, state: 'deleted' };
@@ -1079,6 +1087,26 @@ describe('providerAddresses', () => {
     queue.set(other.id, clock.now());
     await tick();
     expect((await getAddress(other.id)).state).toBe('ready');
+  });
+
+  it('a delete never releases another reservation at the address it recorded; its row is finished', async () => {
+    const address = await createAddress();
+    await drain();
+    const ip = (await getAddress(address.id)).address!;
+    const { rows } = await db.query<{ fingerprint: string | null }>(
+      `SELECT fingerprint FROM provider_addresses WHERE id = $1`,
+      [address.id],
+    );
+    expect(rows[0]!.fingerprint).toMatch(/^fp-/);
+    // Released out of band; the provider handed the IP to the account owner's own reservation.
+    cloud.addresses.set(ip, { ...cloud.addresses.get(ip)!, fingerprint: 'owner', assignedTo: 'droplet-owner' });
+    cloud.calls.length = 0;
+    await call('providerAddresses', 'delete', { tenantId: 'root', addressId: address.id });
+    await drain();
+    expect((await getAddress(address.id)).state).toBe('deleted');
+    expect(await quotaUsed('addresses')).toBe(0);
+    expect(cloud.addresses.get(ip)).toMatchObject({ fingerprint: 'owner', assignedTo: 'droplet-owner' });
+    expect(cloud.calls.filter((label) => !label.startsWith('getAddress'))).toEqual([]);
   });
 
   it('an address quota of 0 refuses the reserve', async () => {

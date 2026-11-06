@@ -873,12 +873,28 @@ export interface ProviderAddressSpec {
    * (DigitalOcean) finds the address by it; without it, it reserves a new one.
    */
   id?: string;
+  /**
+   * With `id`: the `fingerprint` output the reserve returned. An address at that id whose fingerprint differs (the
+   * address was released and handed out again) is `INVALID_STATE` (reason `notManaged`), never taken over.
+   */
+  fingerprint?: string;
+}
+
+/**
+ * (provider addresses) What vps recorded about an address it reserved, for a provider whose addresses carry no tag:
+ * an address that does not match is `INVALID_STATE` (reason `notManaged`) and is never released.
+ */
+export interface ProviderAddressExpectation {
+  region?: string;
+  /** The `fingerprint` output the reserve returned. */
+  fingerprint?: string;
 }
 
 /**
  * (provider addresses) Reserved public addresses on a provider account, idempotent and non-blocking like
- * `ProviderVolumes`. Outputs: `address`, `family`, `region` and `assignedTo` (the machine id; absent while
- * unassigned). `assignAddress` and `unassignAddress` return the assignment's state (`pending`/`ready`,
+ * `ProviderVolumes`. Outputs: `address`, `family`, `region`, `assignedTo` (the machine id; absent while
+ * unassigned) and, where the provider has one, `fingerprint`: what tells this reservation apart from a later one at
+ * the same address (DigitalOcean: its project or reservation time). `assignAddress` and `unassignAddress` return the assignment's state (`pending`/`ready`,
  * `deleting`/`deleted`). An address assigned to another machine is `CONFLICT` (never moved silently); an assigned
  * address is not deleted (`INVALID_STATE`); a machine in another region is `INVALID_INPUT`.
  */
@@ -893,7 +909,12 @@ export interface ProviderAddresses {
     instanceId?: string,
   ): Promise<ProviderResourceState>;
   unassignAddress(addressId: string, context: CallContext): Promise<ProviderResourceState>;
-  deleteAddress(addressId: string, context: CallContext): Promise<ProviderResourceState>;
+  /** With `expected`, an address that does not match what was recorded is refused (`notManaged`). */
+  deleteAddress(
+    addressId: string,
+    context: CallContext,
+    expected?: ProviderAddressExpectation,
+  ): Promise<ProviderResourceState>;
 }
 
 /**

@@ -30,7 +30,9 @@ transaction and returns at once, usually with `state: 'pending'`. The reconciler
 transaction and writes back what it saw:
 
 - States are `pending`, `ready`, `updating` (a resize running), `deleting`, `deleted` and `error`. An `error` carries
-  the provider's `message` and is retried by the next change or the periodic pass (every 5 minutes).
+  the provider's `message` and is retried by the next change or the periodic pass (every 5 minutes). A settled
+  resource is read once an hour for drift, those reads spread across the hour so they leave the token's request
+  budget to instance polling.
 - Provider actions (attach, detach, resize, snapshot) never block a run. A running action is looked at again 5 seconds
   later; a rate-limited or unavailable provider 30 seconds later.
 - A create sends the provider a name derived from the resource id, so a create whose answer was lost finds what it
@@ -125,6 +127,13 @@ while it is assigned.
 
 The reconciler never takes an address over from a machine it did not put it on: if the provider reports it on another
 machine, the assignment goes to `error` and nothing is moved.
+
+Since a reserved IP carries no tag, the row is the ownership record. It also keeps the provider's `fingerprint` from the
+reserve (on DigitalOcean the reserved IPv6's reservation time, or the reserved IPv4's project). If the address was
+released out of band and the provider later handed the same IP to a reservation of the account owner, the fingerprint
+or region no longer matches: the reconciler then neither unassigns nor releases that address, and a delete finishes the
+row (refunding its quota) with a warning in the log. The provider refuses such an address too (`INVALID_STATE`, reason
+`notManaged`).
 
 ### Lost reserves
 
