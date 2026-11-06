@@ -260,6 +260,29 @@ describe('launches into reservations', () => {
     ).rejects.toMatchObject({ code: 'CAPACITY_UNAVAILABLE' });
   });
 
+  it('a retried create answers with its launch after the reservation stopped being active', async () => {
+    const w = world();
+    const reservation = w.capacity.add({
+      id: 'cr-0bbbbbbbbbbbbbbb2',
+      type: 'p5.48xlarge',
+      reservationType: 'capacity-block',
+      total: 1,
+      end: w.emu.now() + 24 * HOUR,
+    });
+    const offer = 'us-east-1a/p5.48xlarge@cr-0bbbbbbbbbbbbbbb2';
+    const first = await w.compute.create(createRequest(offer), w.call('ins_1'));
+    // The block ended (or an ODCR was cancelled) before the retry: the retry is the same launch.
+    reservation.state = 'expired';
+    const again = await w.compute.create(createRequest(offer), w.call('ins_1'));
+    expect(again.id).toBe(first.id);
+    expect(w.emu.calls('RunInstances')).toHaveLength(1);
+    // A create that never launched is still refused.
+    await expect(w.compute.create(createRequest(offer), w.call('ins_2'))).rejects.toMatchObject({
+      code: 'CAPACITY_UNAVAILABLE',
+      details: { reason: 'reservation-not-active' },
+    });
+  });
+
   it('capacity block launches set the market type', async () => {
     const w = world();
     w.capacity.add({

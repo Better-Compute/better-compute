@@ -1042,10 +1042,18 @@ export class AwsCompute implements ProviderImpl {
         },
       );
     const { signal } = context;
-    const target =
-      offer.reservation === undefined
-        ? undefined
-        : await this.#launchTarget(offer.reservation, offer, signal);
+    let target: CapacityReservationInfo | undefined;
+    if (offer.reservation !== undefined)
+      try {
+        target = await this.#launchTarget(offer.reservation, offer, signal);
+      } catch (error) {
+        // A retried create whose RunInstances went through answers with that instance (the
+        // ClientToken's), whatever became of the reservation since (a block ended, an ODCR was
+        // cancelled). A create that never launched keeps the refusal.
+        const launched = await this.#launchedBefore(context).catch(() => undefined);
+        if (launched) return this.machine(launched, signal);
+        throw error;
+      }
     const info = (await this.#types([offer.instanceType], signal)).get(offer.instanceType);
     if (!info)
       throw new ComputeError(
@@ -1197,6 +1205,18 @@ export class AwsCompute implements ProviderImpl {
       if (isComputeError(error, 'NOT_FOUND')) return undefined;
       throw error;
     }
+  }
+
+  /** The instance an earlier RunInstances with this create's ClientToken launched, if any. */
+  async #launchedBefore(context: CallContext): Promise<XmlElement | undefined> {
+    const doc = await this.call(
+      'DescribeInstances',
+      { Filter: [{ Name: 'client-token', Value: [clientToken(context.idempotencyKey)] }] },
+      context.signal,
+    );
+    return doc
+      .items('reservationSet')
+      .flatMap((reservation) => reservation.items('instancesSet'))[0];
   }
 
   async #byClientToken(id: string, context: CallContext): Promise<XmlElement | undefined> {
