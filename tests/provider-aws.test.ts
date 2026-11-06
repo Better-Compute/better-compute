@@ -33,6 +33,7 @@ import {
 } from '@better-compute/provider-aws';
 import { AwsEmulator } from './support/aws-emulator/index.js';
 import { Ec2Emulator } from './support/aws-emulator/ec2.js';
+import { EbsEmulator } from './support/aws-emulator/ebs.js';
 
 const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 const signal = new AbortController().signal;
@@ -883,6 +884,8 @@ describe('conformance', () => {
       const ec2emu = new Ec2Emulator(emu);
       // EC2 refuses a stop while pending; time passes between the contract's calls on real EC2.
       ec2emu.settleOnRead = true;
+      // (A5) The volume cases: EBS settles as the contract reads it again.
+      new EbsEmulator(emu, ec2emu).settleOnRead = true;
       const attachable = ec2emu.addInstance({ tags: { Name: 'legacy' } });
       return {
         provider: awsProvider({ fetch: emu.fetch, credentials: emu.ambient }),

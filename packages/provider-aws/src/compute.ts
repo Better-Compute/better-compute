@@ -23,6 +23,7 @@ import {
   type ZoneCache,
 } from './shapes.js';
 import { packUserData } from './userdata.js';
+import { AwsVolumes } from './volumes.js';
 
 export interface AwsComputeDeps {
   ec2: QueryClient;
@@ -136,6 +137,8 @@ export class AwsCompute implements ProviderImpl {
   readonly #rootDevices = new Map<string, { device: string | undefined; at: number }>();
   readonly #loggedSsm = new Set<string>();
   readonly #ssmPrefixes: readonly string[];
+  /** (A5) EBS volumes and snapshots on this account. */
+  readonly volumes: AwsVolumes;
 
   constructor(
     readonly config: AwsConfig,
@@ -144,6 +147,12 @@ export class AwsCompute implements ProviderImpl {
     readonly deps: AwsComputeDeps,
   ) {
     this.#ssmPrefixes = ssmImagePrefixes(options.ssmImagePrefixes);
+    this.volumes = new AwsVolumes(
+      config,
+      context,
+      { call: (action, params, signal) => this.call(action, params, signal) },
+      options.consistencyWindowMs ?? 120_000,
+    );
   }
 
   /** How long EC2 may not yet show what this client just launched or tagged. */

@@ -3,6 +3,7 @@ export * from './ids.js';
 export * from './account.js';
 export * from './shapes.js';
 export * from './compute.js';
+export * from './volumes.js';
 export * from './images.js';
 export * from './userdata.js';
 export * from './provider.js';

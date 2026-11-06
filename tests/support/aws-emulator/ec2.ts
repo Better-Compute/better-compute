@@ -127,6 +127,10 @@ export class Ec2Emulator {
   settleOnRead = false;
   /** After CreateTags/DeleteTags, this many by-id reads still show the tags from before the write. */
   staleTagReads = 0;
+  /** Other EC2 actions (EBS, …): the first handler that answers wins; undefined passes on. */
+  readonly extensions: ((request: EmulatorRequest) => Response | undefined)[] = [];
+  /** Extra `blockDeviceMapping` items of an instance (attached EBS volumes). */
+  blockDevices: (instance: EmuInstance) => string[] = () => [];
   #next = 0;
 
   constructor(private readonly emu: AwsEmulator) {
@@ -243,6 +247,7 @@ export class Ec2Emulator {
       el('instanceLifecycle', instance.lifecycle),
       el('architecture', this.types.get(instance.type)?.arch[0] ?? 'x86_64'),
       el('rootDeviceName', instance.rootDevice),
+      items('blockDeviceMapping', this.blockDevices(instance)),
       el('subnetId', instance.subnetId),
       el('vpcId', instance.vpcId),
       tagSet,
@@ -499,6 +504,10 @@ export class Ec2Emulator {
         return ec2Response(action, el('return', true));
       }
       default:
+        for (const extension of this.extensions) {
+          const answer = extension(request);
+          if (answer) return answer;
+        }
         return ec2Error('InvalidAction', `The action ${action} is not valid for this web service.`);
     }
   }
