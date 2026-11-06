@@ -47,6 +47,30 @@ export interface ProviderParts {
   findings: Record<string, { readAt: number; items: FindingRow[] }>;
 }
 
+/** A credential's request rate limit at its provider, as `providerAccounts/check` answers it. */
+export interface RateLimitRow {
+  limit: number;
+  remaining: number;
+  /** Epoch ms. */
+  resetAt?: number;
+}
+
+/**
+ * A rate-budget gauge from an account check: requests used of the provider's limit (every process using the
+ * credential counts), or undefined without one or once its reset has passed (the count started again).
+ */
+export function rateGauge(
+  check: { checkedAt: number; rateLimit?: RateLimitRow },
+  now: number,
+): { used: number; limit: number; detail: string } | undefined {
+  const rate = check.rateLimit;
+  if (!rate || (rate.resetAt !== undefined && rate.resetAt <= now)) return undefined;
+  const resets = rate.resetAt !== undefined ? ` · resets in ${fmtSpan(rate.resetAt - now)}` : '';
+  return { used: rate.limit - rate.remaining, limit: rate.limit, detail: `${rate.remaining} of ${rate.limit} left${resets}` };
+}
+
+const fmtSpan = (ms: number) => (ms < 120_000 ? `${Math.ceil(ms / 1000)} s` : `${Math.ceil(ms / 60_000)} min`);
+
 /** The provider accounts page; an account opens at its anchor. */
 export const providersHref = '/providers';
 export const accountHref = (accountId: string) => `${providersHref}#${encodeURIComponent(accountId)}`;

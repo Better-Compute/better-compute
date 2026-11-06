@@ -996,7 +996,19 @@ export async function probeStoredAccount(
     missing: [...(probe.missing ?? [])],
     ...(probe.optional !== undefined ? { optional: [...probe.optional] } : {}),
     ...(probe.details !== undefined ? { details: probe.details } : {}),
+    ...rateLimitOf(probe.rateLimit),
   };
+}
+
+/** A probe's rate limit when it is one (a positive limit, 0 <= remaining <= limit); otherwise no gauge at all. */
+function rateLimitOf(raw: ProviderAccountProbe['rateLimit']): Pick<ProviderAccountCheck, 'rateLimit'> {
+  if (!raw || typeof raw !== 'object') return {};
+  const { limit, remaining, resetAt } = raw;
+  if (typeof limit !== 'number' || !Number.isFinite(limit) || limit <= 0) return {};
+  if (typeof remaining !== 'number' || !Number.isFinite(remaining) || remaining < 0 || remaining > limit)
+    return {};
+  const reset = typeof resetAt === 'number' && Number.isFinite(resetAt) && resetAt > 0 ? { resetAt } : {};
+  return { rateLimit: { limit, remaining, ...reset } };
 }
 
 /**

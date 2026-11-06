@@ -116,6 +116,28 @@ describe('providerAccounts.check', () => {
     expect(JSON.stringify(result)).not.toContain('the-key-value');
   });
 
+  it("passes the provider's request rate limit through, well-formed only", async () => {
+    const answers: ProviderAccountProbe['rateLimit'][] = [
+      { limit: 5000, remaining: 4990, resetAt: 1_800_000_000_000 },
+      { limit: 5000, remaining: 12 },
+      { limit: 0, remaining: 3 },
+      { limit: 100, remaining: 200 },
+      { limit: Number.NaN, remaining: 1 },
+      { limit: 10, remaining: -1 },
+      { limit: 10, remaining: 2, resetAt: Number.POSITIVE_INFINITY },
+    ];
+    let next = 0;
+    const { check } = await fakeWorld({
+      probe: async () => ({ ok: true, missing: [], rateLimit: answers[next++] }),
+    });
+    expect((await check()).rateLimit).toEqual({ limit: 5000, remaining: 4990, resetAt: 1_800_000_000_000 });
+    expect((await check()).rateLimit).toEqual({ limit: 5000, remaining: 12 });
+    // Not a limit, more left than the limit, not a number, negative: no gauge rather than a wrong one.
+    for (let n = 0; n < 4; n++) expect(await check()).not.toHaveProperty('rateLimit');
+    // A reset time that is not one is dropped, the count kept.
+    expect((await check()).rateLimit).toEqual({ limit: 10, remaining: 2 });
+  });
+
   it('a provider with only checkAccount answers ok when it passes; with neither, UNSUPPORTED', async () => {
     const checked = await fakeWorld({ check: true });
     expect(await checked.check()).toMatchObject({ ok: true, missing: [] });
@@ -190,6 +212,12 @@ describe('providerAccounts.check on DigitalOcean', () => {
         },
         families: { compute: 'ok', networks: 'ok', keys: 'ok', tags: 'ok' },
         operations: { billing: 'ok', projects: 'ok', monitoring: 'ok', security: 'ok' },
+      },
+      // The token's hourly request budget, as DigitalOcean's last answer to the probe counted it.
+      rateLimit: {
+        limit: 5000,
+        remaining: emu.rate.remaining,
+        resetAt: emu.rate.resetAt * 1000,
       },
     });
 

@@ -5,17 +5,20 @@ import { RiCloudLine, RiMoneyDollarCircleLine, RiRefreshLine, RiShieldCheckLine 
 import { Button } from '@/components/base/buttons/button';
 import { useConnection } from '@/components/shell/connection';
 import { useNow } from '@/components/shell/workspace';
+import { Meter } from '@/components/ui/charts';
 import { EmptyState, PageHeader, Panel } from '@/components/ui/panel';
 import { Led, Mono, SeverityIcon, Tag } from '@/components/ui/signal';
 import { api, ApiError } from '@/lib/api';
 import { fmtRelative } from '@/lib/data/format';
-import { findingItem, leakItem, type ProviderAccountRow } from './attention';
+import { findingItem, leakItem, rateGauge, type ProviderAccountRow, type RateLimitRow } from './attention';
 import { refreshProviders } from './live';
 import { useProviders } from './use-providers';
 
 // Provider accounts (DigitalOcean P9): every account the operator's tenant can see, what its credential may do
 // (providerAccounts.check, on demand: a read at the provider), what the provider says needs an operator
-// (providerAccounts.findings) and the hours providers billed that compute did not meter (billing.leaks).
+// (providerAccounts.findings) and the hours providers billed that compute did not meter (billing.leaks). A check
+// also gauges the credential's request rate limit at the provider (every replica and process using the token counts
+// against it); DigitalOcean's client holds back sweeps and polls once half of it is spent, hence the 50% mark.
 // Live only: the simulation has no provider accounts.
 
 /** What `providerAccounts/check` answers. */
@@ -24,6 +27,8 @@ interface AccountCheck {
   missing: string[];
   optional?: string[];
   checkedAt: number;
+  /** The credential's request rate limit, as the provider's answers to the check counted it. */
+  rateLimit?: RateLimitRow;
 }
 
 type CheckState = { running: true } | { running: false; result?: AccountCheck; error?: ApiError };
@@ -122,6 +127,21 @@ export function ProvidersPage() {
                         <span className="font-mono text-[11px] text-text-tertiary">checked {fmtRelative(result.checkedAt, now)}</span>
                       </span>
                     )}
+                    {result &&
+                      (() => {
+                        const gauge = rateGauge(result, now);
+                        return gauge ? (
+                          <Meter
+                            className="mt-1.5 max-w-xs"
+                            compact
+                            value={gauge.used}
+                            max={gauge.limit}
+                            warnAt={0.5}
+                            label="API requests this hour"
+                            detail={gauge.detail}
+                          />
+                        ) : null;
+                      })()}
                     {error && (
                       <span className="mt-1 block font-mono text-[11px] text-text-error-primary">
                         {error.code}: {error.message}

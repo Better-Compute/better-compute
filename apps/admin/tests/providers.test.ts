@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { modules, navForPath } from '@/lib/modules';
-import { accountHref, providerAttention, type ProviderParts } from '@/components/providers/attention';
+import { accountHref, providerAttention, rateGauge, type ProviderParts } from '@/components/providers/attention';
 import { providersModule } from '@/components/providers/module';
 
 // The provider accounts module (DigitalOcean P9): billing leaks and provider findings as attention items, from the
@@ -68,6 +68,19 @@ describe('provider attention', () => {
   it('has nothing before the poller answered, nor without leaks or findings', () => {
     expect(providerAttention(undefined, 5_000)).toEqual([]);
     expect(providerAttention({ accounts: [account], findings: {} }, 5_000)).toEqual([]);
+  });
+
+  it("gauges the credential's rate limit from a check, until its reset", () => {
+    const check = { checkedAt: 1_000, rateLimit: { limit: 5000, remaining: 1000, resetAt: 61_000 } };
+    expect(rateGauge(check, 2_000)).toEqual({ used: 4000, limit: 5000, detail: '1000 of 5000 left · resets in 59 s' });
+    // Past its reset the provider's count started again: no gauge rather than a stale one.
+    expect(rateGauge(check, 61_000)).toBeUndefined();
+    expect(rateGauge({ checkedAt: 1_000, rateLimit: { limit: 250, remaining: 250 } }, 2_000)).toEqual({
+      used: 0,
+      limit: 250,
+      detail: '250 of 250 left',
+    });
+    expect(rateGauge({ checkedAt: 1_000 }, 2_000)).toBeUndefined();
   });
 
   it('is installed, live only, under Operations', () => {

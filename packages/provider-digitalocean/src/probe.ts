@@ -7,6 +7,7 @@ import {
 import { clientFor } from './client/build.js';
 import { readDeadline } from './client/deadline.js';
 import type { DoClient } from './client/http.js';
+import type { ReportedRateLimit } from './client/budget.js';
 import type { DoConfig, DoProviderOptions } from './config.js';
 
 // A read-only look at what a token may do, for the CLI's account check: GET /account, then one
@@ -33,6 +34,11 @@ export interface DoAccountReport {
   missing: string[];
   /** (P9) The operations families, only when the probe is asked for them (`{ operations: true }`). */
   operations?: Partial<Record<DoOperationsFamily, DoFamilyState>>;
+  /**
+   * (P9) What DigitalOcean's answers to the probe left of the token's hourly request limit (every process using
+   * the token counts against it), for the admin panel's rate-budget gauge. Absent when no answer carried it.
+   */
+  rateLimit?: ReportedRateLimit;
 }
 
 /** (P9) Read scopes the operations surfaces need: none of them is needed to run Droplets. */
@@ -87,7 +93,9 @@ export async function probeAccount(
   const client: DoClient = clientFor(config, context, options);
   const deadline = readDeadline(context, probeTimeoutMs);
   try {
-    return await probe(client, deadline.signal, scope.operations === true);
+    const report = await probe(client, deadline.signal, scope.operations === true);
+    const rateLimit = client.rateLimit?.();
+    return rateLimit ? { ...report, rateLimit } : report;
   } catch (error) {
     // The client rethrows an abort as it is; a caller should see a ComputeError.
     if (deadline.timedOut())
@@ -197,5 +205,6 @@ export function checkReport(report: DoAccountReport): ProviderAccountProbe {
       families: { ...report.families },
       ...(report.operations ? { operations: { ...report.operations } } : {}),
     },
+    ...(report.rateLimit ? { rateLimit: { ...report.rateLimit } } : {}),
   };
 }

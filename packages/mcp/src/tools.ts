@@ -1068,7 +1068,7 @@ export function computeTools(
         name: 'check_provider_account',
         title: 'Check a provider account',
         description:
-          "Asks the provider what the account's credential may do, without changing anything: the account's state there, the permissions instances need that it lacks (missing) and the ones only optional features need (optional). ok is false when instances cannot be created.",
+          "Asks the provider what the account's credential may do, without changing anything: the account's state there, the permissions instances need that it lacks (missing) and the ones only optional features need (optional), and the credential's request rate limit there (rateLimit: remaining of limit until resetAt) when the provider reports it. ok is false when instances cannot be created.",
         inputSchema: {
           type: 'object',
           required: ['accountId'],

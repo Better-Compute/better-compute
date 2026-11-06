@@ -1128,6 +1128,11 @@ export interface ProviderAccountProbe {
   optional?: string[];
   /** The provider's own detail (its account id and state, per-family results). JSON, never a secret. */
   details?: { [key: string]: Json };
+  /**
+   * (Additive) The credential's request rate limit at the provider, as its last answer counted it, for a rate-budget
+   * gauge: `remaining` of `limit` requests until `resetAt` (epoch ms). Absent when the provider does not say.
+   */
+  rateLimit?: { limit: number; remaining: number; resetAt?: number };
 }
 
 /** (P9) One thing on a provider account an operator should look at (`ProviderInput.findings`). Never a secret. */

@@ -1,6 +1,6 @@
 import { ComputeError, type Clock, type Logger } from '@better-compute/core';
 import type { DoAction } from '../compute/types.js';
-import { tokenHash, type BudgetClass, type RateBudget } from './budget.js';
+import { tokenHash, type BudgetClass, type RateBudget, type ReportedRateLimit } from './budget.js';
 import { mapDoError } from './errors.js';
 
 // A DigitalOcean API v2 client over plain fetch. Paths are relative to the endpoint
@@ -31,6 +31,8 @@ export interface DoClient {
   ): AsyncIterable<T>;
   /** `GET /actions/{id}` (budget `observe`). */
   action(id: number, signal: AbortSignal): Promise<DoAction>;
+  /** (P9) What DigitalOcean's last answers said was left of the token's hourly limit; undefined before any. */
+  rateLimit?(): ReportedRateLimit | undefined;
 }
 
 export interface DoClientOptions {
@@ -220,5 +222,7 @@ export function doClient(options: DoClientOptions): DoClient {
     return reply.action;
   }
 
-  return { clock: options.clock, request, pages, action };
+  // The budget is picked when the token first resolves: before any request there is nothing to report.
+  const rateLimit = () => budget?.reported();
+  return { clock: options.clock, request, pages, action, rateLimit };
 }

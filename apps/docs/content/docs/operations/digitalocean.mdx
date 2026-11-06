@@ -51,6 +51,12 @@ single reads 30%, and writes whatever is left, so a busy cost or metrics pass de
 over its share is `RATE_LIMITED` with `retryAfterMs`, and the reconcilers retry. Two deployments sharing one token
 each keep their own budget, so give each deployment its own token.
 
+The token's own count, as DigitalOcean's `ratelimit-*` headers report it, is the account-wide gauge:
+`providerAccounts.check` (and `better-compute digitalocean check`) answers it as `rateLimit`, `{ limit, remaining,
+resetAt }`, and the admin panel's **Provider accounts** page draws it under each checked account. When that count is
+lower than the deployment's own (another process is using the token), the budget follows it, and sweeps and single
+reads wait once less than half of the hour is left, keeping that half for writes.
+
 ## An OAuth app
 
 Connecting an account through DigitalOcean's consent screen (the console's **Connect a DigitalOcean account**)
