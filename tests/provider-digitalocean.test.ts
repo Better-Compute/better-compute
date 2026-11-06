@@ -2207,11 +2207,13 @@ describe('definition', () => {
     emu.failNext({ method: 'GET', path }, 403, emu.error('forbidden').body as object);
 
   it('passes every case of the ProviderImpl contract', async () => {
+    const emulators: DoEmulator[] = [];
     const report = await runConformance(providerConformanceCases(), () => {
       // Each case gets the token's whole budget: the volume and address cases alone make a
       // few dozen requests on one manual clock.
       freshBudgets();
       const emu = emulator();
+      emulators.push(emu);
       // A create needs an SSH key: the account's default one.
       const key = seedSshKey(emu.state, 'ops', testKey);
       const hand = seedDroplet(emu.state, { name: 'legacy', tags: [] });
@@ -2222,12 +2224,23 @@ describe('definition', () => {
         offerId: 'nyc3/s-1vcpu-1gb',
         // The volume and address cases attach and assign across regions too (INVALID_INPUT).
         otherRegionOfferId: 'sfo3/s-1vcpu-1gb',
+        // (P6) The opt-in shared-volume case: a tenant network, two Droplets on it and an NFS share.
+        sharedVolumes: true,
         image: 'ubuntu-24-04-x64',
         context: { secrets, account: platformAccount },
       };
     });
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
     expect(report.passed).toHaveLength(providerConformanceCases().length);
+    // The shared-volume case ran: one share made, attached to two Droplets (by tag), and deleted.
+    const shared = emulators.filter((emu) =>
+      emu.requests.some((r) => r.method === 'POST' && r.url.pathname === '/v2/nfs'),
+    );
+    expect(shared).toHaveLength(1);
+    expect(shared[0]!.state.nfsShares.size).toBe(0);
+    expect(
+      shared[0]!.requests.filter((r) => r.method === 'DELETE' && /^\/v2\/nfs\/[^/]+$/.test(r.url.pathname)),
+    ).toHaveLength(1);
   });
 
   it('is a well-formed definition with the documented capabilities', async () => {

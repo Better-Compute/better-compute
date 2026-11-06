@@ -57,6 +57,16 @@ export interface ProviderConformanceSubject {
    * `attempts` times (default 30), `intervalMs` apart (default 0; a live run sets a few seconds).
    */
   settle?: { attempts?: number; intervalMs?: number };
+  /**
+   * (DO P6) Run the shared-volume case: on a provider whose `volumes.kinds` lists `shared` and that has
+   * `networks`, it makes a tenant network and subnet in the offer's region, two machines on it, and a shared volume
+   * of `sharedVolumeGiB` (default 50 GiB: DigitalOcean's smallest share) reached over it. Opt-in: it makes a
+   * network, two machines and a share.
+   */
+  sharedVolumes?: boolean;
+  sharedVolumeGiB?: number;
+  /** The subnet range the shared-volume case makes (default `10.200.0.0/24`). */
+  sharedVolumeCidr?: string;
 }
 
 const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -481,6 +491,121 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
           if (volumeId !== undefined)
             await volumes.deleteVolume(volumeId, call('snapvol-cleanup')).catch(() => {});
           await cleanUp(impl, call, machine.id);
+        }
+      },
+    },
+    {
+      name: 'shared volumes (when offered, opt-in): many machines of a network attach one, delete waits for all',
+      async run(subject) {
+        const probe = await client(subject);
+        const offered =
+          subject.sharedVolumes === true &&
+          probe.impl.networks !== undefined &&
+          (probe.impl.volumes?.kinds ?? []).includes('shared');
+        if (!offered) return;
+        const { impl, call } = probe;
+        const volumes = impl.volumes!;
+        const networks = impl.networks!;
+        const slash = subject.offerId.indexOf('/');
+        const region = subject.region ?? (slash > 0 ? subject.offerId.slice(0, slash) : undefined);
+        check(region !== undefined, 'the subject names no region and its offer id none');
+        const network = key(subject, 'share-net');
+        const subnet = key(subject, 'share-subnet');
+        const networkSettle = (step: () => Promise<{ id: string; state: string; message?: string }>, what: string) =>
+          settle(subject, step as () => Promise<ProviderResourceState>, ['ready'], what);
+        const machines: ExternalMachine[] = [];
+        let volumeId: string | undefined;
+        try {
+          await networkSettle(() => networks.ensureNetwork({ name: network }, call('share-net')), 'ensureNetwork');
+          await networkSettle(
+            () =>
+              networks.ensureSubnet(
+                { network, name: subnet, region, cidr: subject.sharedVolumeCidr ?? '10.200.0.0/24' },
+                call('share-subnet'),
+              ),
+            'ensureSubnet',
+          );
+          for (const which of ['a', 'b']) {
+            const name = key(subject, `share-host-${which}`);
+            machines.push(
+              await impl.create(
+                {
+                  offerId: subject.offerId,
+                  image: subject.image,
+                  userData: '#cloud-config\n',
+                  name,
+                  network: { network, subnet },
+                },
+                call(name),
+              ),
+            );
+          }
+          const spec = {
+            name: key(subject, 'share'),
+            region,
+            sizeGiB: subject.sharedVolumeGiB ?? 50,
+            kind: 'shared' as const,
+            network: { network },
+          };
+          const ensured = await settle(
+            subject,
+            () => volumes.ensureVolume(spec, call('share-ensure')),
+            ['ready'],
+            'ensureVolume (shared)',
+          );
+          volumeId = ensured.id;
+          const id = ensured.id;
+          checkEqual(ensured.outputs?.kind, 'shared', 'a shared volume reports its kind');
+          checkEqual(
+            (await volumes.ensureVolume(spec, call('share-ensure-again'))).id,
+            id,
+            'a second ensure of the same shared volume returns it',
+          );
+          if (volumes.findVolume)
+            checkEqual(
+              (await volumes.findVolume(spec.name, region, call('share-find'), 'shared'))?.id,
+              id,
+              'findVolume with kind shared finds the share',
+            );
+          for (const machine of machines) {
+            const attached = await settle(
+              subject,
+              () => volumes.attachVolume(id, machine.id, call(`share-attach-${machine.id}`)),
+              ['ready'],
+              'attachVolume (shared)',
+            );
+            checkEqual(attached.outputs?.attachedTo, machine.id, 'a shared attach names the machine it made it reachable from');
+          }
+          const both = await volumes.getVolume(id, call('share-get'));
+          checkResource(both, 'getVolume (shared)');
+          check(both?.outputs?.attachedTo === undefined, 'a shared volume on many machines names none of them');
+          check(
+            typeof both?.outputs?.device === 'string' && both.outputs.device.includes(':/'),
+            'a shared volume reports its NFS source as device (<host>:<path>)',
+          );
+          await checkRejects(
+            () => volumes.deleteVolume(id, call('share-delete-attached')),
+            'INVALID_STATE',
+            'deleting a shared volume a machine still has attached',
+          );
+          for (const machine of machines)
+            await settle(
+              subject,
+              () => volumes.detachVolume(id, machine.id, call(`share-detach-${machine.id}`)),
+              ['deleted'],
+              'detachVolume (shared)',
+            );
+          await settle(subject, () => volumes.deleteVolume(id, call('share-delete')), ['deleted'], 'deleteVolume (shared)');
+          volumeId = undefined;
+        } finally {
+          if (volumeId !== undefined) {
+            for (const machine of machines)
+              await volumes.detachVolume(volumeId, machine.id, call(`share-cleanup-detach-${machine.id}`)).catch(() => {});
+            await volumes.deleteVolume(volumeId, call('share-cleanup')).catch(() => {});
+          }
+          for (const machine of machines) await cleanUp(impl, call, machine.id);
+          await networks.deleteSubnet(region, subnet, call('share-subnet-cleanup')).catch(() => {});
+          await networks.deleteNetwork(network, call('share-net-cleanup')).catch(() => {});
         }
       },
     },
