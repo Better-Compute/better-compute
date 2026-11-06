@@ -2320,6 +2320,7 @@ describe('definition', () => {
         'GET /v2/account/keys',
         'GET /v2/droplets',
         'GET /v2/firewalls',
+        'GET /v2/nfs',
         'GET /v2/regions',
         'GET /v2/reserved_ips',
         'GET /v2/sizes',
@@ -2330,6 +2331,17 @@ describe('definition', () => {
     );
     for (const r of emu.requests.filter((r) => r.url.pathname !== '/v2/account'))
       expect(r.url.searchParams.get('per_page')).toBe('1');
+    // NFS lists per region: the probe names the account's first.
+    const nfs = emu.requests.find((r) => r.url.pathname === '/v2/nfs');
+    expect(nfs?.url.searchParams.get('region')).toBe('nyc3');
+  });
+
+  it('probeAccount reports storage denied when the token may not read NFS shares', async () => {
+    const emu = emulator();
+    forbidden(emu, /^\/nfs$/);
+    const report = await probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch });
+    expect(report.families.storage).toBe('denied');
+    expect(report.missing).toEqual(['nfs:read']);
   });
 
   it('probeAccount reports denied families from 403s and lists the missing scopes', async () => {

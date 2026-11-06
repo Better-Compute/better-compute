@@ -24,8 +24,11 @@ export interface DoAccountReport {
 
 type Family = keyof DoAccountReport['families'];
 
-/** One list per read scope. A family is denied when any of its probes is. */
-const probes: readonly { family: Family; path: string; scope: string }[] = [
+/**
+ * One list per read scope. A family is denied when any of its probes is. `regional` lists need a
+ * region (the account's first). NFS (P6) answers per region, and its scope name is unverified.
+ */
+const probes: readonly { family: Family; path: string; scope: string; regional?: boolean }[] = [
   { family: 'compute', path: '/droplets', scope: 'droplet:read' },
   { family: 'compute', path: '/regions', scope: 'regions:read' },
   { family: 'compute', path: '/sizes', scope: 'sizes:read' },
@@ -34,6 +37,7 @@ const probes: readonly { family: Family; path: string; scope: string }[] = [
   { family: 'keys', path: '/account/keys', scope: 'ssh_key:read' },
   { family: 'tags', path: '/tags', scope: 'tag:read' },
   { family: 'storage', path: '/volumes', scope: 'block_storage:read' },
+  { family: 'storage', path: '/nfs', scope: 'nfs:read', regional: true },
   { family: 'addresses', path: '/reserved_ips', scope: 'reserved_ip:read' },
 ];
 
@@ -52,7 +56,7 @@ function badBody(): ComputeError {
 /**
  * Read-only probe (GET account, regions, sizes, droplets?per_page=1, vpcs?per_page=1,
  * firewalls?per_page=1, account/keys?per_page=1, tags?per_page=1, volumes?per_page=1,
- * reserved_ips?per_page=1). Built the way the provider
+ * reserved_ips?per_page=1, nfs?region=<first region>&per_page=1). Built the way the provider
  * builds its client, so the token resolves, and is budgeted, exactly as it does for a create.
  * Throws when the token is refused or cannot read the account; any other failure of a list
  * propagates too, since it says nothing about a scope.
@@ -70,7 +74,7 @@ export async function probeAccount(
     controller.abort();
   }, probeTimeoutMs);
   try {
-    return await probe(client, controller.signal);
+    return await probe(client, config, controller.signal);
   } catch (error) {
     // The client rethrows an abort as it is; a caller should see a ComputeError.
     if (timedOut)
@@ -86,7 +90,11 @@ export async function probeAccount(
   }
 }
 
-async function probe(client: DoClient, signal: AbortSignal): Promise<DoAccountReport> {
+async function probe(
+  client: DoClient,
+  config: DoConfig,
+  signal: AbortSignal,
+): Promise<DoAccountReport> {
   const { account } = await client.request<{
     account?: { uuid?: unknown; status?: unknown; droplet_limit?: unknown };
   }>('GET', '/account', { signal, budget: 'observe' });
@@ -94,10 +102,13 @@ async function probe(client: DoClient, signal: AbortSignal): Promise<DoAccountRe
   if (typeof account?.uuid !== 'string' || typeof account.status !== 'string') throw badBody();
 
   const denied = await Promise.all(
-    probes.map(async ({ path }) => {
+    probes.map(async ({ path, regional }) => {
       try {
         await client.request('GET', path, {
-          query: { per_page: '1' },
+          query: {
+            per_page: '1',
+            ...(regional && config.regions[0] !== undefined ? { region: config.regions[0] } : {}),
+          },
           signal,
           budget: 'observe',
         });
