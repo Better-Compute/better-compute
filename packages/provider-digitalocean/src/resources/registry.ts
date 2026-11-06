@@ -16,6 +16,7 @@ import { appKind } from './kinds/apps.js';
 import { databaseKinds } from './kinds/databases.js';
 import { functionsKinds } from './kinds/functions.js';
 import { dedicatedInferenceKind } from './kinds/inference.js';
+import { inferenceKeyKind } from './kinds/inference-keys.js';
 import { partnerKind } from './kinds/partner.js';
 import { oneClickCatalog } from './one-clicks.js';
 import type { DoKind, DoKindEnv } from './kind.js';
@@ -33,6 +34,7 @@ export function doResourceKinds(): DoKind[] {
     addonKind(),
     partnerKind(),
     dedicatedInferenceKind(),
+    inferenceKeyKind(),
   ];
 }
 

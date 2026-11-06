@@ -11,6 +11,7 @@ export * from './compute/offers.js';
 export * from './compute/types.js';
 export * from './config.js';
 export * from './ids.js';
+export * from './inference/proxy.js';
 export * from './networks/index.js';
 export * from './probe.js';
 export * from './provider.js';
@@ -25,3 +26,8 @@ export {
   inferenceGpuSizes,
   type DedicatedInferenceSpec,
 } from './resources/kinds/inference.js';
+export {
+  defaultInferenceEndpoint,
+  inferenceKeyKindName,
+  inferenceTokensMeter,
+} from './resources/kinds/inference-keys.js';

@@ -11,6 +11,7 @@ import {
   managedTag,
   tagFor,
 } from '@better-compute/provider-digitalocean';
+import { seedModelKey } from './support/do-emulator/genai.js';
 import { seedEndpoint } from './support/do-emulator/inference.js';
 import { DoEmulator, type RecordedRequest } from './support/do-emulator/index.js';
 import {
@@ -280,5 +281,126 @@ describe('do.dedicated-inference', () => {
       discovered.push(found);
     expect(discovered.find((entry) => entry.id === byHand.id)?.managedBy).toBeUndefined();
     expect(discovered.find((entry) => entry.id === foreign.id)?.managedBy).toBe('other');
+  });
+});
+
+describe('ProviderResources conformance: do.inference-key', () => {
+  const subject = (): ProviderResourcesConformanceSubject => {
+    const emu = emulator();
+    const unmanaged = seedModelKey(emu.state);
+    return {
+      provider: digitaloceanProvider({ fetch: emu.fetch }),
+      config: doAccount,
+      context: { secrets, account: platformAccount },
+      kind: 'do.inference-key',
+      spec: { rotation: 0 },
+      updatedSpec: { rotation: 1 },
+      unmanaged: unmanaged.uuid,
+    };
+  };
+  for (const test of providerResourcesConformanceCases())
+    it(test.name, async () => {
+      freshBudgets();
+      await test.run(subject());
+    });
+});
+
+describe('do.inference-key (a model access key)', () => {
+  const hash = deploymentTag('default').split(':')[1]!;
+  const request = (extra: Record<string, unknown> = {}) => ({
+    kind: 'do.inference-key',
+    name: 'bc-r-key',
+    spec: { rotation: 0 },
+    labels,
+    ...extra,
+  });
+  const call = (key = 'crs_key'): CallContext => ctx(key);
+  const secretOf = (emu: DoEmulator, uuid: string) => emu.state.modelKeys.get(uuid)!._secret;
+
+  it('is an ai kind whose only secret output is the key; rotation is the one updatable field', async () => {
+    const { resources } = await build(emulator());
+    const kind = resources.kinds().find((entry) => entry.kind === 'do.inference-key')!;
+    expect(kind).toMatchObject({
+      family: 'ai',
+      regional: false,
+      outputs: ['endpoint'],
+      secretOutputs: ['key'],
+      updatable: ['rotation'],
+      meters: [{ meter: 'ai.inference.tokens', unit: 'token' }],
+    });
+    expect(kind.quota).toBeUndefined();
+  });
+
+  it('creates a key named for this deployment; its secret comes back once, as a secret output only', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const created = await resources.ensure(request(), call());
+    expect(created.state).toBe('ready');
+    const key = emu.state.modelKeys.get(created.id)!;
+    expect(key.name).toBe(`bc-r-key-r0-bc${hash}`);
+    expect(created.secretOutputs).toEqual({ key: key._secret });
+    expect(created.outputs).toEqual({ endpoint: 'https://inference.do-ai.run/v1' });
+    expect(JSON.stringify([created.outputs, created.spec, created.message])).not.toContain(
+      key._secret,
+    );
+    // With its id, the key is as it was: no secret, nothing regenerated.
+    const again = await resources.ensure(request({ id: created.id }), call());
+    expect(again).toMatchObject({ id: created.id, state: 'ready' });
+    expect(again.secretOutputs).toBeUndefined();
+    expect(mutations(emu, 'PUT', /api_keys/)).toEqual([]);
+    expect((await resources.get('do.inference-key', created.id, call()))?.managedBy).toBe('this');
+  });
+
+  it('a create whose answer was lost regenerates the key it finds: the unseen secret is never live', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const lost = await resources.ensure(request(), call());
+    const unseen = secretOf(emu, lost.id);
+    const retried = await resources.ensure(request(), call());
+    expect(retried.id).toBe(lost.id);
+    expect(emu.state.modelKeys.size).toBe(1);
+    expect(retried.secretOutputs?.key).toBe(secretOf(emu, lost.id));
+    expect(retried.secretOutputs?.key).not.toBe(unseen);
+  });
+
+  it('a rotation regenerates the secret and records the rotation in the name', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const created = await resources.ensure(request(), call());
+    const first = created.secretOutputs!.key;
+    const rotated = await resources.ensure(
+      request({ id: created.id, spec: { rotation: 1 } }),
+      call(),
+    );
+    expect(rotated.state).toBe('ready');
+    expect(rotated.secretOutputs?.key).toBe(secretOf(emu, created.id));
+    expect(rotated.secretOutputs?.key).not.toBe(first);
+    expect(emu.state.modelKeys.get(created.id)!.name).toBe(`bc-r-key-r1-bc${hash}`);
+    // Settled: the next ensure regenerates nothing.
+    const puts = mutations(emu, 'PUT', /api_keys/).length;
+    await resources.ensure(request({ id: created.id, spec: { rotation: 1 } }), call());
+    expect(mutations(emu, 'PUT', /api_keys/)).toHaveLength(puts);
+  });
+
+  it('delete and discover leave a key made by hand or by another deployment alone', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const byHand = seedModelKey(emu.state);
+    const foreign = seedModelKey(emu.state, { name: 'bc-r-x-r0-bc0123456789ab' });
+    for (const uuid of [byHand.uuid, foreign.uuid])
+      expect(
+        (await failure(resources.delete('do.inference-key', uuid, call()))).details?.reason,
+      ).toBe('notManaged');
+    expect(mutations(emu, 'DELETE', /api_keys/)).toEqual([]);
+    const mine = await resources.ensure(request(), call());
+    const discovered: any[] = [];
+    for await (const found of resources.discover!('do.inference-key', call()))
+      discovered.push(found);
+    expect(
+      Object.fromEntries(discovered.map((entry) => [entry.id, entry.managedBy ?? 'none'])),
+    ).toEqual({ [byHand.uuid]: 'none', [foreign.uuid]: 'other', [mine.id]: 'this' });
+    expect((await resources.delete('do.inference-key', mine.id, call())).state).toBe('deleted');
+    expect((await resources.delete('do.inference-key', mine.id, call())).state).toBe('deleted');
+    expect(emu.state.modelKeys.has(mine.id)).toBe(false);
   });
 });

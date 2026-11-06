@@ -160,4 +160,49 @@ describe('DigitalOcean Dedicated Inference through cloudResources', () => {
     expect(await w.gpusUsed()).toBe(0);
     expect(JSON.stringify(w.logs)).not.toContain('root-do-token');
   });
+
+  it('a model access key is sealed in the run that received it; a rotation seals the new one and destroys the old', async () => {
+    const w = await world(0);
+    const created = await w.api.cloudResources.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      kind: 'do.inference-key',
+      name: 'app-key',
+      spec: {},
+      idempotencyKey: 'app-key',
+    });
+    await w.until(created.id, 'ready');
+    const ready = await w.get(created.id);
+    const atDo = w.emu.state.modelKeys.get(ready.providerId)!;
+    const secrets = w.fixture.compute.context.secrets!;
+    expect(ready.outputs).toEqual({ endpoint: 'https://inference.do-ai.run/v1' });
+    expect(await secrets.resolve(ready.secretOutputs.key, { tenantId: w.acmeTenant })).toBe(
+      atDo._secret,
+    );
+    const first = atDo._secret;
+
+    await w.api.cloudResources.update(w.acme, {
+      tenantId: w.acmeTenant,
+      resourceId: created.id,
+      spec: { rotation: 1 },
+    });
+    await w.until(created.id, 'ready');
+    const rotated = await w.get(created.id);
+    expect(rotated.secretOutputs.key).not.toBe(ready.secretOutputs.key);
+    expect(await secrets.resolve(rotated.secretOutputs.key, { tenantId: w.acmeTenant })).toBe(
+      atDo._secret,
+    );
+    expect(atDo._secret).not.toBe(first);
+    await expect(secrets.resolve(ready.secretOutputs.key)).rejects.toBeDefined();
+
+    // No key DigitalOcean handed out is in a row, an event or a log line.
+    const rows = await w.fixture.database.query(`SELECT * FROM cloud_resources`);
+    const outbox = await w.fixture.database.query(`SELECT payload FROM outbox`);
+    const stored = JSON.stringify([rows.rows, outbox.rows, w.logs]);
+    for (const secret of [first, atDo._secret]) expect(stored).not.toContain(secret);
+
+    await w.api.cloudResources.delete(w.acme, { tenantId: w.acmeTenant, resourceId: created.id });
+    await w.until(created.id, 'deleted');
+    expect(w.emu.state.modelKeys.size).toBe(0);
+  });
 });

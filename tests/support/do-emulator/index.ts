@@ -9,6 +9,7 @@ import { registerDatabases } from './databases.js';
 import { registerDroplets } from './droplets.js';
 import { registerFirewalls } from './firewalls.js';
 import { registerFunctions } from './functions.js';
+import { registerGenai } from './genai.js';
 import { registerInference } from './inference.js';
 import { registerKeys } from './keys.js';
 import { registerPartner } from './partner.js';
@@ -300,5 +301,6 @@ export class DoEmulator {
     registerPartner(this);
     registerOneClicks(this);
     registerInference(this);
+    registerGenai(this);
   }
 }
