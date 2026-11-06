@@ -165,6 +165,15 @@ export class CeEmulator {
       }
       all.push(...groups.values());
     }
+    const metricsOf = (group: (typeof all)[number]) =>
+      Object.fromEntries(
+        metrics.map((metric) => [
+          metric,
+          metric === 'UsageQuantity'
+            ? { Amount: group.quantity.toFixed(10), Unit: group.line.unit ?? 'N/A' }
+            : { Amount: group.cost.toFixed(10), Unit: group.line.currency ?? 'USD' },
+        ]),
+      );
     const start = Number(body.NextPageToken ?? '0');
     const page = all.slice(start, start + this.pageSize);
     const next = start + this.pageSize < all.length ? String(start + this.pageSize) : undefined;
@@ -175,21 +184,19 @@ export class CeEmulator {
           Start: day,
           End: new Date(Date.parse(`${day}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10),
         },
-        Total: {},
         Estimated: true,
-        Groups: page
-          .filter((group) => group.day === day)
-          .map((group) => ({
-            Keys: group.keys,
-            Metrics: Object.fromEntries(
-              metrics.map((metric) => [
-                metric,
-                metric === 'UsageQuantity'
-                  ? { Amount: group.quantity.toFixed(10), Unit: group.line.unit ?? 'N/A' }
-                  : { Amount: group.cost.toFixed(10), Unit: group.line.currency ?? 'USD' },
-              ]),
-            ),
-          })),
+        // Without GroupBy, AWS answers the day's Total and no groups.
+        ...(groupBy.length === 0
+          ? {
+              Total: metricsOf(page.find((group) => group.day === day)!),
+              Groups: [],
+            }
+          : {
+              Total: {},
+              Groups: page
+                .filter((group) => group.day === day)
+                .map((group) => ({ Keys: group.keys, Metrics: metricsOf(group) })),
+            }),
       }));
     return json({
       ResultsByTime: results,
