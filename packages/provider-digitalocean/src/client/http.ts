@@ -36,8 +36,11 @@ export interface DoClient {
 export interface DoClientOptions {
   fetch: typeof fetch;
   endpoint: string;
-  /** Resolves the API token; called once, on first use. */
-  token: () => Promise<string>;
+  /**
+   * Resolves the API token; called once, on first use. A token with an expiry (an OAuth access token) is resolved
+   * again a minute before it expires, and after a 401.
+   */
+  token: () => Promise<string | { token: string; expiresAt: number }>;
   /**
    * The token's budget, or a function that picks it by `tokenHash(token)` once the token is
    * resolved (the token itself never leaves the client).
@@ -61,13 +64,30 @@ export function doClient(options: DoClientOptions): DoClient {
   const endpoint = options.endpoint.replace(/\/+$/, '');
   const { origin, pathname: basePath } = new URL(endpoint);
 
-  // One shared in-flight promise; a failed resolution is not remembered, so a later call retries.
+  // One shared in-flight promise; a failed resolution is not remembered, so a later call retries. A token that
+  // expires is dropped a minute before it does.
   let pending: Promise<string> | undefined;
+  let expiresAt: number | undefined;
   function token(): Promise<string> {
-    pending ??= options.token().catch((error: unknown) => {
+    if (pending && expiresAt !== undefined && options.clock.now() >= expiresAt - 60_000)
       pending = undefined;
-      throw error;
-    });
+    if (!pending) {
+      const started: Promise<string> = options.token().then(
+        (value) => {
+          if (typeof value === 'string') {
+            expiresAt = undefined;
+            return value;
+          }
+          expiresAt = value.expiresAt;
+          return value.token;
+        },
+        (error: unknown) => {
+          if (pending === started) pending = undefined;
+          throw error;
+        },
+      );
+      pending = started;
+    }
     return pending;
   }
   let budget: RateBudget | undefined =
@@ -129,6 +149,8 @@ export function doClient(options: DoClientOptions): DoClient {
         );
       return (payload ?? {}) as T;
     }
+    // An expiring token DigitalOcean refuses is resolved again on the next call (it may have been revoked early).
+    if (response.status === 401 && expiresAt !== undefined) pending = undefined;
     throw mapDoError(response.status, payload, response.headers, options.clock.now(), what);
   }
 

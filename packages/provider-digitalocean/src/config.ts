@@ -1,10 +1,21 @@
 import { field, manifest, type SecretRef } from '@better-compute/core';
+import type { DoOAuthOptions } from './ops/oauth.js';
 
-/** A DigitalOcean account's configuration: the token is a SecretRef, never a value. */
+/**
+ * A DigitalOcean account's configuration: the credential is a SecretRef, never a value. An account holds exactly one
+ * of `token` (a personal access token) and `refreshToken` (an OAuth connection, P9).
+ */
 export const doConfig = manifest({
   token: field
     .secret()
+    .optional()
     .describe('A personal access token, as a secret reference, with the scopes in the README'),
+  refreshToken: field
+    .secret()
+    .optional()
+    .describe(
+      'An OAuth refresh token from "Connect a DigitalOcean account", as a secret reference; rotated on every exchange',
+    ),
   regions: field
     .list(field.string(), { min: 1 })
     .describe('Region slugs the provider works in: offers and discovery are limited to these'),
@@ -55,7 +66,8 @@ export const doConfig = manifest({
 
 /** The validated account configuration. */
 export interface DoConfig {
-  token: SecretRef;
+  token?: SecretRef;
+  refreshToken?: SecretRef;
   regions: string[];
   vpc?: string;
   sshKeyFingerprint?: string;
@@ -80,6 +92,8 @@ export interface DoProviderOptions {
    * checked, but it has no effect yet: every call starts its action and returns.
    */
   inCallWaitMs?: number;
+  /** (P9) OAuth accounts: the platform OAuth app and the hook that writes rotated refresh tokens back. */
+  oauth?: DoOAuthOptions;
   /** Request budget per token. Defaults 250 per minute and 5000 per hour (DigitalOcean's limits). */
   budget?: { perMinute?: number; perHour?: number };
 }
