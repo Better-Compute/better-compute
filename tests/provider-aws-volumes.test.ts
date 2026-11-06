@@ -289,6 +289,30 @@ describe('provider-aws volumes: ensure, get, delete', () => {
     expect(await volumes.getVolume(free.id, call())).toBeUndefined();
     await rejects(volumes.deleteVolume('not-a-volume', call()), 'INVALID_INPUT');
   });
+
+  it('a deleting or deleted volume is not attached, resized or snapshotted', async () => {
+    const { volumes, call, ebs, emu, managed, ec2 } = world();
+    const instance = ec2.addInstance({ tags: { 'better-compute:instance': 'ins_1' } });
+    const deleting = ebs.addVolume({ tags: managed, state: 'deleting' });
+    const deleted = ebs.addVolume({ tags: managed, state: 'deleted' });
+    await rejects(
+      volumes.attachVolume(deleting.id, instance.id, call()),
+      'INVALID_STATE',
+      'deleting',
+    );
+    await rejects(volumes.resizeVolume(deleting.id, 20, call()), 'INVALID_STATE', 'deleting');
+    await rejects(
+      volumes.snapshotVolume(deleting.id, 'bc-s-0009', call()),
+      'INVALID_STATE',
+      'deleting',
+    );
+    await rejects(volumes.attachVolume(deleted.id, instance.id, call()), 'NOT_FOUND', 'volume');
+    await rejects(volumes.resizeVolume(deleted.id, 20, call()), 'NOT_FOUND', 'volume');
+    await rejects(volumes.snapshotVolume(deleted.id, 'bc-s-0009', call()), 'NOT_FOUND', 'volume');
+    expect(emu.calls('AttachVolume')).toHaveLength(0);
+    expect(emu.calls('ModifyVolume')).toHaveLength(0);
+    expect(emu.calls('CreateSnapshot')).toHaveLength(0);
+  });
 });
 
 describe('provider-aws volumes: attach, detach', () => {

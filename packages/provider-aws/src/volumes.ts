@@ -368,12 +368,18 @@ export class AwsVolumes implements ProviderVolumes {
     return found.find((v) => v.status !== 'deleted' && v.status !== 'deleting') ?? found[0];
   }
 
-  /** The volume, or NOT_FOUND; INVALID_STATE unless this deployment made it. */
+  /**
+   * The volume to change, or NOT_FOUND (also a deleted one EBS still lists); INVALID_STATE unless this
+   * deployment made it, and while it is being deleted (never attached, resized or snapshotted then).
+   */
   protected async owned(volumeId: string, signal: AbortSignal): Promise<EbsVolume> {
     const id = parseVolume_(volumeId);
     const volume = await this.volume(id, signal);
-    if (!volume) throw fail('NOT_FOUND', `volume ${id} does not exist`, 'volume');
+    if (!volume || volume.status === 'deleted')
+      throw fail('NOT_FOUND', `volume ${id} does not exist`, 'volume');
     this.refuseForeign(volume);
+    if (volume.status === 'deleting')
+      throw fail('INVALID_STATE', `volume ${id} is being deleted`, 'deleting');
     return volume;
   }
 
