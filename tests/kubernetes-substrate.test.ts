@@ -256,3 +256,23 @@ describe('substrate: refusals', () => {
     expect(world.cloud.calls.some((call) => call.startsWith('deleteNodePool'))).toBe(false);
   });
 });
+
+describe('substrate: replaced nodes', () => {
+  it('a node replaced in an upgrade (its bcd disconnected) gets a token for its replacement', async () => {
+    world = await substrateWorld();
+    const pool = await world.createPool(createSpec());
+    await world.converge(pool.id, 6);
+    const joined = await world.joinNodes(pool.id, 3);
+    await world.converge(pool.id, 3);
+    expect(await world.substrate(pool.id)).toMatchObject({ join_token_id: null, nodes_joined: 3 });
+    // A surge upgrade replaced one Node: its old bcd node is disconnected, a new Node is listed in its place.
+    await world.fixture.database.query(`UPDATE nodes SET connectivity = 'disconnected' WHERE id = $1`, [joined[0]]);
+    await world.converge(pool.id, 8);
+    const row = await world.substrate(pool.id);
+    expect(row).toMatchObject({ nodes_listed: 3, nodes_joined: 2, token_applied: true });
+    const { rows } = await world.fixture.database.query<any>(`SELECT uses_left FROM join_tokens WHERE id = $1`, [
+      row.join_token_id,
+    ]);
+    expect(rows[0].uses_left).toBe(1);
+  });
+});

@@ -788,11 +788,16 @@ async function prepare(
   });
 }
 
-/** The pool's nodes whose bcd joined, not retired and not left over from a substrate torn down. */
+/**
+ * The pool's nodes whose bcd joined and is connected now: not retired and not left over from a substrate torn down.
+ * Only connected ones count, so a Node replaced by a surge upgrade, a scale-down or a Spot reclaim (its old bcd node
+ * goes disconnected) leaves room for the replacement's token; a bcd pod that only restarted joins again without
+ * spending a use.
+ */
 async function joinedNodes(sql: SqlExecutor, poolId: string): Promise<number> {
   const { rows } = await sql.query<{ count: string }>(
     `SELECT count(*)::text AS count FROM nodes
-      WHERE pool_id = $1 AND provision_state NOT IN ('retiring', 'retired')
+      WHERE pool_id = $1 AND provision_state NOT IN ('retiring', 'retired') AND connectivity = 'connected'
         AND NOT ('substrate-teardown' = ANY(no_schedule_reasons))`,
     [poolId],
   );
