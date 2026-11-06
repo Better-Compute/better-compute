@@ -19,6 +19,8 @@ export interface SpacesBucket {
   acl: 'private' | 'public-read';
   versioning?: 'Enabled' | 'Suspended';
   objects: Map<string, SpacesObject>;
+  /** Noncurrent versions and delete markers of a versioned bucket: version id → key. */
+  noncurrent: Map<string, { key: string; deleteMarker: boolean }>;
 }
 
 export interface SpacesRecorded {
@@ -64,7 +66,10 @@ export class SpacesEmulator {
     this.now = options.now ?? Date.now;
   }
 
-  /** The next request whose `METHOD /bucket/key` starts with `match` fails with this S3 error. */
+  /**
+   * The next request whose `METHOD /bucket/key` starts with `match` (or equals it, when `match`
+   * ends with a dollar sign) fails with this S3 error.
+   */
   failNext(match: string, status: number, code: string): void {
     this.#failures.push({ match, status, code });
   }
@@ -78,6 +83,7 @@ export class SpacesEmulator {
       acl: options.acl ?? 'private',
       ...(options.versioning ? { versioning: options.versioning } : {}),
       objects: new Map(),
+      noncurrent: new Map(),
     };
     this.buckets.set(name, bucket);
     return bucket;
@@ -203,8 +209,9 @@ export class SpacesEmulator {
 
     const [, bucketName = '', ...rest] = url.pathname.split('/');
     const key = rest.length ? rest.map(decodeURIComponent).join('/') : undefined;
+    const line = `${method} ${decodeURIComponent(url.pathname)}`;
     const failure = this.#failures.findIndex((f) =>
-      `${method} ${decodeURIComponent(url.pathname)}`.startsWith(f.match),
+      f.match.endsWith('$') ? line === f.match.slice(0, -1) : line.startsWith(f.match),
     );
     if (failure >= 0) {
       const [f] = this.#failures.splice(failure, 1);
@@ -232,7 +239,8 @@ export class SpacesEmulator {
         return this.#error(301, 'PermanentRedirect', 'bucket is in another region');
       if (method === 'HEAD') return new Response(null, { status: 200 });
       if (method === 'DELETE') {
-        if (bucket.objects.size) return this.#error(409, 'BucketNotEmpty');
+        if (bucket.objects.size || bucket.noncurrent.size)
+          return this.#error(409, 'BucketNotEmpty');
         this.buckets.delete(bucketName);
         return new Response(null, { status: 204 });
       }
@@ -262,6 +270,27 @@ export class SpacesEmulator {
           ),
           { status: 200 },
         );
+      if (method === 'GET' && q.has('versions')) {
+        const prefix = q.get('prefix') ?? '';
+        const entries = [
+          ...[...bucket.objects.keys()]
+            .filter((k) => k.startsWith(prefix))
+            .map(
+              (k) =>
+                `<Version><Key>${esc(k)}</Key><VersionId>cur-${esc(k)}</VersionId><IsLatest>true</IsLatest></Version>`,
+            ),
+          ...[...bucket.noncurrent]
+            .filter(([, v]) => v.key.startsWith(prefix))
+            .map(([id, v]) =>
+              v.deleteMarker
+                ? `<DeleteMarker><Key>${esc(v.key)}</Key><VersionId>${id}</VersionId></DeleteMarker>`
+                : `<Version><Key>${esc(v.key)}</Key><VersionId>${id}</VersionId></Version>`,
+            ),
+        ];
+        return new Response(xml(`<ListVersionsResult>${entries.join('')}</ListVersionsResult>`), {
+          status: 200,
+        });
+      }
       if (method === 'GET' && q.get('list-type') === '2') {
         const prefix = q.get('prefix') ?? '';
         const max = Math.min(1000, Number(q.get('max-keys') ?? 1000));
@@ -338,6 +367,8 @@ export class SpacesEmulator {
       }
     }
     if (method === 'PUT') {
+      if (bucket.versioning && bucket.objects.has(key))
+        bucket.noncurrent.set(`v-${++this.#uploadId}`, { key, deleteMarker: false });
       bucket.objects.set(key, {
         body,
         ...(headers.get('content-type') ? { contentType: headers.get('content-type')! } : {}),
@@ -356,6 +387,16 @@ export class SpacesEmulator {
       });
     }
     if (method === 'DELETE') {
+      const versionId = q.get('versionId');
+      if (versionId) {
+        if (versionId === `cur-${key}`) bucket.objects.delete(key);
+        else bucket.noncurrent.delete(versionId);
+        return new Response(null, { status: 204 });
+      }
+      if (bucket.versioning && bucket.objects.has(key)) {
+        bucket.noncurrent.set(`v-${++this.#uploadId}`, { key, deleteMarker: false });
+        bucket.noncurrent.set(`dm-${++this.#uploadId}`, { key, deleteMarker: true });
+      }
       bucket.objects.delete(key);
       return new Response(null, { status: 204 });
     }
