@@ -9,7 +9,9 @@ import {
   networkDescription,
   networkMemberTag,
   resetBudgets,
+  imageTag,
   tagFor,
+  type CatalogImageSource,
 } from '@better-compute/provider-digitalocean';
 import { closeFixtures, computeFixture, type ComputeFixture } from '@better-compute/testing';
 import { networkTag, providerResourceName, vps } from '@better-compute/vps';
@@ -22,7 +24,8 @@ import { seedSshKey } from './support/do-emulator/keys.js';
 // tests use inline fakes, this one proves the two packages agree). One root DO account, its token
 // in the fixture's sealed secret store, backs a provider pool offered to acme; discovery runs every
 // minute and auto-attaches machines tagged for a tenant and its pool. Covers create/stop/delete,
-// attach/detach, auto-attach, a tenant network, and a create DO accepts and then fails.
+// attach/detach, auto-attach, a tenant network, a create DO accepts and then fails, and a create from a catalog
+// image (imported as a DO custom image while vps retries).
 
 afterEach(closeFixtures);
 // The provider's request budgets are per token and process-wide.
@@ -57,7 +60,7 @@ interface World {
   view(instanceId: string): Promise<any>;
 }
 
-async function world(): Promise<World> {
+async function world(provider: { catalogImages?: CatalogImageSource } = {}): Promise<World> {
   const emu = new DoEmulator();
   emu.validTokens = new Set(['root-do-token']);
   const fingerprint = seedSshKey(emu.state, 'platform', testKey).fingerprint as string;
@@ -65,7 +68,7 @@ async function world(): Promise<World> {
     clock: 'sim',
     modules: [
       vps({
-        providers: [digitaloceanProvider({ fetch: emu.fetch })],
+        providers: [digitaloceanProvider({ fetch: emu.fetch, ...provider })],
         discovery: { every: '1m', autoAttach: { ownerIdentityId: PLATFORM } },
       }),
     ],
@@ -428,5 +431,59 @@ describe('provider-digitalocean through vps, end to end', () => {
     await w.api.instances.delete(w.acme, { tenantId: w.acmeTenant, instanceId: created.id });
     expect(await settle(w, created.id, 'deleted')).toMatchObject({ state: 'deleted' });
     expect(w.emu.state.droplets.has(droplet.id)).toBe(false);
+  });
+
+  it('creates from a catalog image: DO imports it while vps retries, and the URL stays out of every row', async () => {
+    const digest = 'cd'.repeat(32);
+    const presigned = 'https://blobs.example.test/images/ubuntu.qcow2?X-Amz-Signature=E2ESECRET&X-Amz-Expires=21600';
+    const asked: string[] = [];
+    const w = await world({
+      catalogImages: {
+        async locate(ref) {
+          asked.push(ref);
+          return { url: presigned, sha256: digest, format: 'qcow2' };
+        },
+      },
+    });
+    w.emu.importReads = 2;
+    const catalogRef = 'ubuntu-24.04-server@2026.09';
+    const created = await w.api.instances.create(
+      w.acme,
+      createInput(w, { imageId: catalogRef, idempotencyKey: 'vm-catalog' }),
+    );
+    // The first pass starts the import and waits (UNAVAILABLE, retryAfterMs 30 s); a later one creates.
+    await w.tick('vps.instances', 1_000);
+    expect(requests(w, 'POST', /^\/v2\/images$/)).toHaveLength(1);
+    expect(requests(w, 'POST', /^\/v2\/droplets$/)).toHaveLength(0);
+    expect((await w.view(created.id)).state).not.toBe('error');
+    const running = await settle(w, created.id, 'running', 20);
+    expect(running).toMatchObject({ state: 'running' });
+
+    const imports = requests(w, 'POST', /^\/v2\/images$/);
+    expect(imports).toHaveLength(1);
+    expect(imports[0]!.body).toMatchObject({ url: presigned, region: REGION });
+    expect(imports[0]!.body).toMatchObject({ tags: expect.arrayContaining([managed, deployment, imageTag(digest)]) });
+    const image = [...w.emu.state.images.values()].find((i) => (i.tags as string[]).includes(imageTag(digest)))!;
+    expect(image.status).toBe('available');
+    const posts = requests(w, 'POST', /^\/v2\/droplets$/);
+    expect(posts).toHaveLength(1);
+    expect((posts[0]!.body as Json).image).toBe(image.id);
+    expect(asked.every((ref) => ref === catalogRef)).toBe(true);
+
+    // A second instance of the image reuses the import.
+    const second = await w.api.instances.create(
+      w.acme,
+      createInput(w, { imageId: catalogRef, idempotencyKey: 'vm-catalog-2' }),
+    );
+    expect(await settle(w, second.id, 'running', 20)).toMatchObject({ state: 'running' });
+    expect(requests(w, 'POST', /^\/v2\/images$/)).toHaveLength(1);
+
+    // The presigned URL went to DO only: not into the instance, its conditions or its events.
+    for (const id of [created.id, second.id])
+      expect(JSON.stringify(await w.view(id))).not.toContain('E2ESECRET');
+    const { rows } = await w.fixture.database.query(
+      'SELECT row_to_json(i)::text AS row FROM instances i',
+    );
+    for (const row of rows as { row: string }[]) expect(row.row).not.toContain('E2ESECRET');
   });
 });
