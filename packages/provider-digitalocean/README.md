@@ -139,6 +139,10 @@ DigitalOcean's API has no Bare Metal resource, so `digitaloceanMetalProvider({ m
 
 MicroVMs (preview) are not supported: vps sandboxes run on hosted pools through bcd, and a provider-backed sandbox backend is a follow-up (see `docs/research/digitalocean.md`).
 
+## Droplet metadata in inventory
+
+On a Droplet (DMI system vendor `DigitalOcean`), bcd reads the metadata service (`169.254.169.254/metadata/v1.json`) into the inventory system section's `cloud`: the Droplet id, region, tags and interfaces. It never keeps user data, vendor data, SSH keys or the auth key, and nothing uses the value as an identity: the service is unsigned, so Droplets join with tokens. The control plane reads it with `cloudInstanceOf` from `@better-compute/inventory`.
+
 ## Attach
 
 `discover` yields every Droplet of the configured regions (optionally only those with `discoverTag`), GPU Droplets too, with shape, GPUs, labels, networks and creation time. A Droplet that belongs to a DigitalOcean autoscale pool carries the pool's id in the label `better-compute-autoscale-pool`: autoscale pool membership is read for discovery, and a `claim` of such a Droplet is `INVALID_STATE` (`autoscalePool`), since DigitalOcean scales it itself.

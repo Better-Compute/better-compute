@@ -56,6 +56,29 @@ for (const raw of source.split(/\r?\n/)) {
   }
 }
 
+// Only the P0 sections and what they reach are mirrored; later sections ("images") are encoded
+// with the generated daemon/gen messages (agent/kinds.go), so NodeInventory drops their fields.
+{
+  const sections = ['SystemSection', 'CpuSection', 'MemorySection', 'DisksSection', 'NicsSection', 'GpusSection', 'BmcSection', 'OsSection'];
+  const byName = new Map(messages.map((m) => [m.name, m]));
+  const allEnums = new Set(enums.map((e) => e.name));
+  const keep = new Set(['NodeInventory']);
+  const keepEnums = new Set();
+  const visit = (name) => {
+    if (keep.has(name)) return;
+    keep.add(name);
+    for (const f of byName.get(name).fields) {
+      if (byName.has(f.type)) visit(f.type);
+      else if (allEnums.has(f.type)) keepEnums.add(f.type);
+    }
+  };
+  sections.forEach(visit);
+  const inventory = byName.get('NodeInventory');
+  inventory.fields = inventory.fields.filter((f) => !byName.has(f.type) || keep.has(f.type));
+  messages.splice(0, messages.length, ...messages.filter((m) => keep.has(m.name)));
+  enums.splice(0, enums.length, ...enums.filter((e) => keepEnums.has(e.name)));
+}
+
 const enumNames = new Set(enums.map((e) => e.name));
 const messageNames = new Set(messages.map((m) => m.name));
 

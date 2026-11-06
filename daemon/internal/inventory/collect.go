@@ -56,6 +56,10 @@ type Collector struct {
 	// BMC, when set, asks the BMC in-band (IPMIBMC on Linux, root) for its vendor, firmware, MAC and
 	// address; without it the section says only which interfaces sysfs shows.
 	BMC func() *BmcSection
+	// Cloud, when set, is asked with the DMI system vendor and product for the cloud instance this
+	// system is (DigitalOceanMetadata.Instance): the system section's Cloud. Inventory only, never an
+	// identity. A fixture replay (Root set) leaves it unset, so tests never reach the network.
+	Cloud func(vendor, product string) *CloudInstance
 }
 
 // Collect gathers every section and canonicalizes the result.
@@ -191,6 +195,9 @@ func (c Collector) system() *SystemSection {
 			version = "2.0"
 		}
 		s.Tpm = &Tpm{Version: version}
+	}
+	if c.Cloud != nil {
+		s.Cloud = c.Cloud(s.Vendor, s.Product)
 	}
 	if *s == (SystemSection{BootMode: s.BootMode}) {
 		return nil

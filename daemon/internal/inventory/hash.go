@@ -78,13 +78,18 @@ func SectionHashes(inv *NodeInventory) (map[string][]byte, error) {
 }
 
 // Canonicalize sorts every repeated field of inv by its stable key, as inventory.proto requires
-// before encoding: CPU flags and OS runtimes by value; NUMA nodes by id; hugepage pools (the host's
+// before encoding: cloud tags, CPU flags and OS runtimes by value; cloud interfaces by (network, MAC);
+// NUMA nodes by id; hugepage pools (the host's
 // and each NUMA node's) by page size; DIMMs by slot; disks by name; NICs by MAC; GPUs by index; MIG profiles by id and instances
 // by (gi_id, ci_id); NVLinks by link number; topology by peer UUID. Keys are expected to be unique;
 // ties keep their order, and nil elements sort first.
 func Canonicalize(inv *NodeInventory) {
 	if inv == nil {
 		return
+	}
+	if s := inv.System; s != nil && s.Cloud != nil {
+		sort.Strings(s.Cloud.Tags)
+		sortBy(s.Cloud.Interfaces, func(i *CloudInterface) string { return i.Network + "/" + i.Mac })
 	}
 	if c := inv.Cpu; c != nil {
 		sort.Strings(c.Flags)

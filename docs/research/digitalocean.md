@@ -102,6 +102,8 @@ of the two labels it carries.
 | Bare Metal GPU API visibility | **unverified** (no `bare_metal` resource in the spec; rechecked 2026-11-05) | Program Q1. P3 ships DO-D17's fallback: `digitaloceanMetal` over SSH, with operator-listed machines |
 | MicroVMs API (preview): `specification/resources/microvms` | spec, preview | P3 design gate: see below |
 | GPU Droplets boot plain OS images | docs ("GPU Droplets also work with existing Droplet images, but you need to manually install GPU drivers") | P3 refuses only AI/ML images on non-GPU or other-vendor sizes (D-P3-4) |
+| Droplet metadata service: `http://169.254.169.254/metadata/v1.json` (`droplet_id`, `region`, `tags`, `interfaces.{public,private}[]`, and also `user_data`, `vendor_data`, `public_keys`, `auth_key`) | docs; unauthenticated, unsigned; response headers undocumented | P3: bcd reads it into `SystemSection.cloud`, see below |
+| The spec's resource folders match the 60 API groups in the program map | spec | `specification/resources/*` |
 
 ### P3 MicroVM design gate (2026-11-05)
 
@@ -120,7 +122,22 @@ What the spec says (`specification/resources/microvms`, read 2026-11-05):
 boot a catalog VM image. A DO MicroVM is neither: the control plane would drive it through DO's API, and it boots an
 OCI image or a checkpoint, not a VM image. Taking it needs a provider-backed sandbox backend contract in vps
 (create, pause and resume, exec, files, and checkpoints as snapshots), which is a design of its own.
-| The spec's resource folders match the 60 API groups in the program map | spec | `specification/resources/*` |
+
+### P3 bcd metadata capture (2026-11-05)
+
+bcd reads the metadata document into the system section's `cloud` (`CloudInstance`: provider, Droplet id, region,
+tags, interfaces), for inventory only. The service is unauthenticated and unsigned, so the value is never an identity:
+DO nodes still join with tokens (DO-D12).
+
+- **When:** only when DMI `sys_vendor` is `DigitalOcean` (world-readable), so no other machine ever asks
+  169.254.169.254. DO does not document its metadata response headers, so they do not decide it (D-P3-7).
+- **What is kept:** the Droplet id, region, tags and interfaces; `user_data` (it can hold a join token), `vendor_data`, `public_keys`,
+  `auth_key` and the rest are skipped by the decoder. The document is capped at 1 MiB; the client has no proxy,
+  follows no redirect and times out after 2 s; a malformed id or region drops the whole value, malformed tags,
+  MACs and addresses are dropped one by one, and tags (128) and interfaces (16) are capped.
+- **Where:** a field of the `system` section, not a new section: a new section name would need a core migration
+  (`node_inventory_sections` CHECK in postgres `0015`), outside this program's block. The control plane decodes it
+  with `cloudInstanceOf` (`@better-compute/inventory`), normalizing again, and uses it for no label or placement.
 
 ## Consequences for the plans (applied 2026-10-18)
 

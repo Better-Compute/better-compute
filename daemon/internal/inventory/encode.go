@@ -21,6 +21,36 @@ func (m *SystemSection) encode(w *protoWriter) {
 	if m.Tpm != nil {
 		w.message(13, m.Tpm.encode)
 	}
+	if m.Cloud != nil {
+		w.message(14, m.Cloud.encode)
+	}
+}
+
+func (m *CloudInstance) encode(w *protoWriter) {
+	if m == nil {
+		return
+	}
+	w.str(1, m.Provider)
+	w.str(2, m.InstanceId)
+	w.str(3, m.Region)
+	w.strs(4, m.Tags)
+	for _, v := range m.Interfaces {
+		w.message(5, v.encode)
+	}
+}
+
+func (m *CloudInterface) encode(w *protoWriter) {
+	if m == nil {
+		return
+	}
+	w.str(1, m.Network)
+	w.str(2, m.Mac)
+	w.str(3, m.Ipv4Address)
+	w.str(4, m.Ipv4Netmask)
+	w.str(5, m.Ipv4Gateway)
+	w.str(6, m.Ipv6Address)
+	w.u32(7, m.Ipv6PrefixLength)
+	w.str(8, m.Ipv6Gateway)
 }
 
 func (m *Tpm) encode(w *protoWriter) {

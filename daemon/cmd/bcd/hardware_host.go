@@ -25,9 +25,15 @@ const hardwareBackend = "host"
 const devBuild = false
 
 // collectInventory reads the host's inventory from procfs and sysfs (inventory.Collector), the GPUs
-// completed by nvidia-smi (MIG, NVLink, topology, ECC, row remapping) when the driver is installed.
+// completed by nvidia-smi (MIG, NVLink, topology, ECC, row remapping) when the driver is installed,
+// and the system section's cloud instance from DigitalOcean's metadata service on a Droplet.
 func collectInventory() (*inventory.NodeInventory, error) {
-	collector := inventory.Collector{DMI: dmiSource, PassedThrough: passedThrough(), NICFirmware: inventory.EthtoolFirmware, NVMeHealth: inventory.NVMeHealth, DiskHealth: inventory.SmartctlHealth, BMC: inventory.IPMIBMC}
+	collector := inventory.Collector{
+		DMI: dmiSource, PassedThrough: passedThrough(), NICFirmware: inventory.EthtoolFirmware,
+		NVMeHealth: inventory.NVMeHealth, DiskHealth: inventory.SmartctlHealth, BMC: inventory.IPMIBMC,
+		// On a Droplet: its id, region, tags and interfaces (inventory only, never identity).
+		Cloud: inventory.DigitalOceanMetadata{}.Instance,
+	}
 	inv, err := withHelperHW(collector, hwSource).Collect()
 	if err != nil {
 		return nil, err
