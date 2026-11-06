@@ -369,6 +369,40 @@ export and the last error (ad8791f). It is tested against a fake collector, and 
 fakehw bcd in `tests/e2e/bcd.test.ts` posts its GPU metrics to a local OTLP receiver the test runs, named in
 `NodeSpec.telemetry` (see [testing](/docs/operations/testing)). No collector product has received it yet.
 
+## Host metrics of machines without bcd
+
+An attached VM runs no bcd, so it exports nothing of its own. A provider whose cloud measures its machines offers a
+pull source instead (`ExternalMetricsSource`: DigitalOcean's is `doMetricsSource`, over its Monitoring API), and
+`externalMetricsCollector(registry, bindings)` turns the samples into gauges:
+
+```ts title="external-metrics.ts"
+import { externalMetricsCollector } from '@better-compute/observability';
+import { doMetricsSource } from '@better-compute/provider-digitalocean';
+
+const collector = externalMetricsCollector(metrics.registry, [
+  {
+    source: doMetricsSource(config, context), // cpu, memory and load; filesystem and bandwidth opt in
+    machines: () => attached, // [{ instance: 'ins_…', machineId: '<droplet id>' }]
+  },
+]);
+setInterval(() => void collector.pull(), 5 * 60_000);
+```
+
+- **Series.** One gauge per metric, `better_compute_external_host_<metric>{source, instance}`: `cpu_utilization_ratio`,
+  `memory_used_bytes`, `memory_total_bytes`, `load1`, `filesystem_used_bytes`, `filesystem_size_bytes`,
+  `network_receive_bytes_per_second`, `network_transmit_bytes_per_second`, plus
+  `external_metrics_last_pull_timestamp_seconds{source}` and `external_metrics_pull_failures_total{source, code}`.
+- **Bounded.** A source cannot add series: only the machines asked for, known metrics and finite values are kept.
+  A sample older than 15 minutes (`staleAfterMs`) reads NaN, so a machine that stopped reporting never shows a frozen
+  value, and a machine no longer listed is dropped.
+- **Failures.** A failing source is counted by error code and keeps its samples until they go stale; one source
+  never stops another. Each pull has 60 seconds (`pullTimeoutMs`).
+- **DigitalOcean.** The Droplet needs DigitalOcean's metrics agent (`monitoring: true` on the account installs it on
+  new Droplets) and the token `monitoring:read`. Reads spend the account's `sweep` budget; when it runs out the pull
+  answers what it read and the next one starts where it stopped.
+
+The host owns the schedule and the machine list: vps does not yet pull these for its attached instances on its own.
+
 ## Health and readiness
 
 The CLI host answers two routes beside the API on every `api` listener:

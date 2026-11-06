@@ -5,12 +5,15 @@ import { providerConformanceCases } from '@better-compute/vps';
 import { systemClock, type CallContext, type ProviderContext } from '@better-compute/core';
 import {
   baseFirewallName,
+  billingSummary,
   deploymentTag,
   digitaloceanProvider,
+  doMetricsSource,
   labels,
   networkHash,
   networkMemberTag,
   probeAccount,
+  readFindings,
   type DoCompute,
   type DoConfig,
 } from '@better-compute/provider-digitalocean';
@@ -462,5 +465,56 @@ describe.skipIf(!enabled)('provider-digitalocean live', () => {
     );
     expect(await runFirewalls()).toEqual([]);
     expect(await runVpcs()).toEqual([]);
+  });
+});
+
+// The operations reads (P9), read-only and on by themselves: BC_DO_LIVE, BC_DO_TOKEN and BC_DO_OPERATIONS. They
+// create nothing, so they need no SSH key and no sweep, but the token needs the operations read scopes
+// (billing:read, project:read, monitoring:read, security:read). BC_DO_METRICS_DROPLET (a Droplet id with the
+// metrics agent) also reads its monitoring metrics.
+const operations = enabled && flag(env.BC_DO_OPERATIONS);
+const metricsDroplet = env.BC_DO_METRICS_DROPLET || undefined;
+
+describe.skipIf(!operations)('provider-digitalocean live operations', () => {
+  const options = { fetch: observedFetch, deployment };
+  const config = { token: secretRef, regions: [region], costs: true } as unknown as DoConfig;
+
+  it('the probe sees every operations family', { timeout: 60_000 }, async () => {
+    const report = await probeAccount(config, providerContext, options, { operations: true });
+    expect(report.operations).toEqual({ billing: 'ok', projects: 'ok', monitoring: 'ok', security: 'ok' });
+  });
+
+  it('reads the billing summary and this month’s invoice items as cost rows', { timeout: 120_000 }, async () => {
+    const summary = await billingSummary(config, providerContext, options);
+    expect(summary.currency).toBe('USD');
+    expect(Number.isSafeInteger(summary.balance.monthToDateUsageMicros ?? 0)).toBe(true);
+    const provider = digitaloceanProvider(options);
+    const impl = await provider.create(config, providerContext);
+    const now = Date.now();
+    const rows = [];
+    for await (const row of impl.costs!({ from: now - 3 * 86_400_000, to: now }, call('live-costs')))
+      rows.push(row);
+    for (const row of rows) {
+      expect(row.currency).toBe('USD');
+      expect(row.usageEnd).toBeLessThanOrEqual(now + 60_000);
+      expect(JSON.stringify(row)).not.toContain(token);
+    }
+    console.info(`DigitalOcean live run ${run}: ${rows.length} cost rows this month`);
+  });
+
+  it('reads the security findings', { timeout: 60_000 }, async () => {
+    const findings = await readFindings(config, providerContext, options);
+    expect(findings.every((finding) => finding.kind === 'security')).toBe(true);
+    // a token with security:read reads the scan itself
+    expect(findings.some((finding) => finding.id === 'security:unreadable')).toBe(false);
+  });
+
+  it.skipIf(!metricsDroplet)('reads a Droplet’s monitoring metrics', { timeout: 120_000 }, async () => {
+    const source = doMetricsSource(config, providerContext, options);
+    const samples = await source.read([{ instance: 'live', machineId: metricsDroplet! }], {
+      signal: AbortSignal.timeout(110_000),
+    });
+    expect(samples.length).toBeGreaterThan(0);
+    for (const sample of samples) expect(Number.isFinite(sample.value)).toBe(true);
   });
 });
