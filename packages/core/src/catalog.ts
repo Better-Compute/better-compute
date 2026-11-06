@@ -684,6 +684,8 @@ group('kubernetesNodePools', 'kubernetes', [
   ['update', 'mutation', 'kubernetes:update', 'kubernetes-cluster', 'v1.0'],
   ['delete', 'mutation', 'kubernetes:update', 'kubernetes-cluster', 'v1.0'],
 ]);
+// Pool substrates (policy.substrate): the managed cluster behind a pool, for the pool owner.
+group('kubernetesSubstrates', 'kubernetes', [['get', 'read', 'kubernetes:read', 'tenant', 'v1.0']]);
 group('commandBatches', 'quorum', [
   ['create', 'mutation', 'batches:create', 'tenant', 'v1.0'],
   ['get', 'read', 'batches:read', 'tenant', 'v1.0'],
