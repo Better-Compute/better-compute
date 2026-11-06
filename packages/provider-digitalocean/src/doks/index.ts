@@ -78,8 +78,9 @@ export type * from './types.js';
 // Like the networks, every ensure*/delete* call is non-blocking: it reads the resource, starts at
 // most one change, and answers `pending`, `updating` or `deleting` while DOKS works. DOKS has no
 // operations: the cluster's and its nodes' own states say when a change is done. A cluster is
-// found by its name (unique in an account); only clusters carrying this deployment's ownership
-// tags are ever changed or deleted. Nothing is persisted beyond a name → uuid cache: after a
+// found by its name in its region (whether DOKS names are unique per account or per region is not
+// verified live, so neither is assumed); only clusters carrying this deployment's ownership tags
+// are ever changed or deleted. Nothing is persisted beyond a name → uuid cache: after a
 // restart a call re-reads the resources.
 
 export interface DoKubernetesOptions {
@@ -234,15 +235,24 @@ export class DoKubernetes implements ProviderKubernetes {
   }
 
   /**
-   * This deployment's cluster named `name`, or undefined when there is none. One of that name
-   * that is not this deployment's is CONFLICT (never adopted, never touched). Duplicates of ours
-   * (DO-D4: two creates raced) keep the oldest; the others are deleted one by one.
+   * This deployment's cluster named `name` in `location`, or undefined when there is none. One of
+   * that name that is not this deployment's is CONFLICT (never adopted, never touched); one of ours
+   * only in another region is INVALID_STATE (`immutable` location), and is never deleted.
+   * Duplicates of ours in the region (DO-D4: two creates raced) keep the oldest, and the others are
+   * deleted one by one, unless one of them has running nodes: a cluster with workloads is never
+   * reaped (logged, and CONFLICT `duplicate` until an operator decides).
    */
-  async #find(name: string, signal: AbortSignal, log: Logger): Promise<DoksCluster | undefined> {
+  async #find(
+    name: string,
+    location: string,
+    signal: AbortSignal,
+    log: Logger,
+  ): Promise<DoksCluster | undefined> {
     const cached = this.#names.get(name);
     if (cached) {
       const found = await this.#read(cached, signal);
-      if (found && found.name === name && this.#owned(found)) return found;
+      if (found && found.name === name && found.region === location && this.#owned(found))
+        return found;
       this.#names.delete(name);
     }
     const named = await this.#named(name, signal);
@@ -254,8 +264,30 @@ export class DoKubernetes implements ProviderKubernetes {
         `A DOKS cluster named ${name} exists that this deployment does not own`,
         'notOwned',
       );
-    const live = owned.filter((cluster) => cluster.status?.state !== 'deleting');
-    const [keep, ...extra] = live.length > 0 ? live : owned;
+    const here = owned.filter((cluster) => cluster.region === location);
+    if (here.length === 0) {
+      const elsewhere = owned.find((cluster) => cluster.status?.state !== 'deleting') ?? owned[0]!;
+      throw immutable(elsewhere.id, 'location', elsewhere.region, location);
+    }
+    const live = here.filter((cluster) => cluster.status?.state !== 'deleting');
+    const [keep, ...extra] = live.length > 0 ? live : here;
+    const busy = extra.filter((cluster) =>
+      (cluster.node_pools ?? []).some((pool) =>
+        (pool.nodes ?? []).some((node) => node.status?.state === 'running'),
+      ),
+    );
+    if (busy.length > 0) {
+      log.error('doks.cluster.reapRefused', {
+        name,
+        kept: keep!.id,
+        clusters: busy.map((cluster) => cluster.id),
+      });
+      throw fail(
+        'CONFLICT',
+        `This deployment has more than one DOKS cluster named ${name} in ${location}, and ${busy.map((cluster) => cluster.id).join(', ')} runs nodes: none is deleted until an operator removes the extra ones`,
+        'duplicate',
+      );
+    }
     for (const duplicate of extra) {
       log.warn('doks.cluster.reap', { cluster: duplicate.id, kept: keep!.id, name });
       await this.#deleteOwned(duplicate, signal);
@@ -314,7 +346,7 @@ export class DoKubernetes implements ProviderKubernetes {
   ): Promise<ProviderResourceState> {
     checkClusterSpec(spec, this.#config.regions, false);
     const { signal, log } = context;
-    const found = await this.#find(spec.name, signal, log);
+    const found = await this.#find(spec.name, spec.location, signal, log);
     if (!found) return this.#createCluster(spec, context);
     const { id } = found;
     const state = found.status?.state;
@@ -433,7 +465,7 @@ export class DoKubernetes implements ProviderKubernetes {
     } catch (error) {
       // Created meanwhile (a retry, or another creator): what is there is the answer.
       if (!isComputeError(error, 'CONFLICT')) throw error;
-      const found = await this.#find(spec.name, signal, log);
+      const found = await this.#find(spec.name, spec.location, signal, log);
       if (!found) throw error;
       await this.#checkInitialSpot(spec, found, context);
       return clusterState(found.id, found);

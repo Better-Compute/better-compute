@@ -444,12 +444,17 @@ describe('doks clusters', () => {
       tags: ours,
       created_at: '2026-10-01T00:00:00Z',
     });
+    // A racing create's duplicate: its nodes are still coming up.
+    s.doks.transitionReads = 100;
     const newer = s.doks.seedCluster({
       name: 'bc-k-one',
       region: 'nyc3',
       tags: ours,
       created_at: '2026-10-02T00:00:00Z',
     });
+    s.doks.transitionReads = 1;
+    for (const pool of newer.node_pools as Json[])
+      for (const node of pool.nodes as Json[]) node.status = { state: 'provisioning' };
     const state = await s.k8s.ensureCluster(standard, s.ctx());
     expect(state.id).toBe(older.id);
     // The survivor is then brought to the spec (a PUT); only the duplicate is deleted.
@@ -457,6 +462,46 @@ describe('doks clusters', () => {
       `DELETE /kubernetes/clusters/${newer.id}`,
     ]);
     expect(s.logs.some((entry) => entry.message === 'doks.cluster.reap')).toBe(true);
+  });
+
+  it('never reaps a duplicate whose nodes run, nor a cluster of that name in another region', async () => {
+    const s = await setup();
+    s.doks.uniqueNames = false;
+    // Ours in tor1 only: the spec's nyc3 finds it immutable, and nothing is deleted.
+    const tor = s.doks.seedCluster({
+      name: 'bc-k-one',
+      region: 'tor1',
+      tags: ours,
+      created_at: '2026-10-01T00:00:00Z',
+    });
+    const moved = await failure(s.k8s.ensureCluster(standard, s.ctx()));
+    expect([moved.code, moved.details?.reason, moved.details?.field]).toEqual([
+      'INVALID_STATE',
+      'immutable',
+      'location',
+    ]);
+    // With one in nyc3 too (newer than the tor1 one), each region keeps its own: no reaping.
+    const nyc = s.doks.seedCluster({
+      name: 'bc-k-one',
+      region: 'nyc3',
+      tags: ours,
+      created_at: '2026-10-02T00:00:00Z',
+    });
+    expect((await s.k8s.ensureCluster(standard, s.ctx())).id).toBe(nyc.id);
+    expect((await s.k8s.ensureCluster({ ...standard, location: 'tor1' }, s.ctx())).id).toBe(tor.id);
+    expect(mutations(s).filter((m) => m.startsWith('DELETE'))).toEqual([]);
+    // A same-region duplicate whose nodes run has workloads: CONFLICT and a log, never a delete.
+    s.doks.seedCluster({
+      name: 'bc-k-one',
+      region: 'nyc3',
+      tags: ours,
+      created_at: '2026-10-03T00:00:00Z',
+    });
+    const fresh = await setup(undefined, {}, s.doks);
+    const busy = await failure(fresh.k8s.ensureCluster(standard, fresh.ctx()));
+    expect([busy.code, busy.details?.reason]).toEqual(['CONFLICT', 'duplicate']);
+    expect(mutations(s).filter((m) => m.startsWith('DELETE'))).toEqual([]);
+    expect(fresh.logs.some((entry) => entry.message === 'doks.cluster.reapRefused')).toBe(true);
   });
 
   it('maps the cluster states', async () => {
