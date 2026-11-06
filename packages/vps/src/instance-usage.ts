@@ -63,7 +63,7 @@ export type IntervalPhase = 'running' | 'stopped';
  */
 export type ObservedMachine = Pick<
   ExternalMachine,
-  'gpus' | 'region' | 'addresses' | 'networks' | 'disks' | 'bootDiskType'
+  'gpus' | 'region' | 'addresses' | 'networks' | 'disks' | 'bootDiskType' | 'market'
 >;
 
 const json = <T>(value: T | string): T =>
@@ -215,8 +215,12 @@ async function billingOf(
     vcpu: Number(flavor.vcpu ?? 0),
     memoryGiB: Number(flavor.memoryGiB ?? 0),
     ...(count > 0 ? { gpus: { model, count } } : {}),
-    // No offer reports spot yet: a flavor (or a later offer field) that says so is read here.
-    spot: flavor.spot === true,
+    // A flavor that says so, or (AWS A3) a machine the provider reports on the Spot market, now or at the
+    // last listing.
+    spot:
+      flavor.spot === true ||
+      observed?.market === 'spot' ||
+      (row.machine_record !== null && json(row.machine_record).market === 'spot'),
     // D8: admitted against a provider reservation (`instances.provider_reservation`, set once by
     // `claimReservationSlot`), so `vm.reserved.*`. Captured here at open: binding, unbinding or losing the
     // reservation later changes no running interval.
