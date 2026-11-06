@@ -74,6 +74,26 @@ describe('do.spaces-key', () => {
     ]);
   });
 
+  it('never changes the grants of a key it does not manage, even when named by id', async () => {
+    const w = await world();
+    const foreign = seedSpacesKey(w.emu, {
+      name: 'ci-deploy',
+      access_key: 'DOFOREIGN0001',
+      grants: [{ bucket: 'ci-cache', permission: 'read' }],
+    });
+    const refused = await failure(
+      w.ensure('do.spaces-key', 'bc-key1', { grants: ['*:fullaccess'] }, w.ctx(), {
+        id: foreign.access_key,
+      }),
+    );
+    expect(refused.code).toBe('INVALID_STATE');
+    expect(refused.details?.reason).toBe('notManaged');
+    expect(spacesKeys(w.emu).get('DOFOREIGN0001')!.grants).toEqual([
+      { bucket: 'ci-cache', permission: 'read' },
+    ]);
+    expect(w.emu.requests.some((r) => r.method === 'PUT' || r.method === 'POST')).toBe(false);
+  });
+
   it('picks the oldest of two keys with one name', async () => {
     const w = await world();
     seedSpacesKey(w.emu, {

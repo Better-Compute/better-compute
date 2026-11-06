@@ -129,6 +129,9 @@ export function spacesKeyKind(client: DoClient): DoResourceKind<SpacesKeySpec> {
       const grants = toGrants(spec.grants);
       // The key an earlier ensure answered wins over the name; one gone is created again.
       const existing = (id !== undefined ? await read(id, ctx.signal) : undefined) ?? (await byName(name, ctx.signal));
+      // Keys are owned by their bc- names: an id naming another key changes nothing.
+      if (existing && !managedResourceName.test(existing.name))
+        throw notManaged(`Spaces key ${existing.access_key} is not one better-compute manages; it was left alone`);
       if (!existing) {
         const created = await client.request<{ key: DoSpacesKey }>('POST', '/spaces/keys', {
           body: { name, grants },
