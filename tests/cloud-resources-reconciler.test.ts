@@ -404,3 +404,51 @@ describe('cloud.resources: a child the parent’s delete did not see', () => {
     expect(world.cloud.calls).toContain(`delete fake.database-user ${providerId}`);
   });
 });
+
+describe('cloud-resources tenantDeleted', () => {
+  it('marks at most 100 of a deleted tenant’s resources per call, SYNC_AGAIN until all are gone', async () => {
+    const seed = await world.api.cloudResources.create(world.other, {
+      tenantId: world.otherTenant,
+      poolId: world.poolId,
+      kind: 'fake.app',
+      name: 'batch-seed',
+      spec: { image: 'nginx' },
+      idempotencyKey: 'batch-seed',
+    });
+    const db = world.fixture.database;
+    // Rows the provider never accepted (no provider id): the reconciler finishes them without a call.
+    await db.query(
+      `INSERT INTO cloud_resources (id, tenant_id, project_id, pool_id, provider_account_id, provider, kind, family,
+                                    name, spec, provider_name, state, desired_state, created_by, idempotency_key,
+                                    request_hash, version)
+       SELECT 'crs_batch' || lpad(n::text, 4, '0'), tenant_id, project_id, pool_id, provider_account_id, provider,
+              kind, family, 'batch-' || n, spec, 'bc-r-batch' || n, 'pending', 'present', created_by,
+              'batch-' || n, request_hash, 1
+         FROM cloud_resources, generate_series(1, 150) AS n WHERE id = $1`,
+      [seed.id],
+    );
+    const marked = async () =>
+      Number(
+        (
+          await db.query<{ count: string }>(
+            `SELECT count(*)::text AS count FROM cloud_resources
+              WHERE tenant_id = $1 AND desired_state = 'deleted'`,
+            [world.otherTenant],
+          )
+        ).rows[0]!.count,
+      );
+    const before = await marked();
+    const hook = world.module.tenantDeleted!;
+    const context = world.fixture.compute.context;
+    expect(await hook(context, world.otherTenant)).toBe('SYNC_AGAIN');
+    expect((await marked()) - before).toBe(100);
+    expect(await hook(context, world.otherTenant)).toBe('SYNC_AGAIN');
+    expect((await marked()) - before).toBe(151);
+    let answer = 'SYNC_AGAIN';
+    for (let round = 0; round < 10 && answer !== 'DONE'; round++) {
+      await world.tick();
+      answer = await hook(context, world.otherTenant);
+    }
+    expect(answer).toBe('DONE');
+  });
+});

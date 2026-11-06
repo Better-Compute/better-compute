@@ -203,15 +203,34 @@ export async function checkAdopt(
   const provider = await context.sql.transaction((tx) =>
     ownAccountResources(deps, tx, input.tenantId, input.poolId),
   );
-  const item = (await discovered(deps, provider, input.tenantId, input.kind, context.signal)).find(
-    (entry) => entry.id === input.providerId,
-  );
-  if (!item)
-    throw new ComputeError(
-      'NOT_FOUND',
-      `${input.kind} ${input.providerId} not found on the provider account`,
-    );
-  if (item.managedBy === 'other')
+  const notFound = () =>
+    new ComputeError('NOT_FOUND', `${input.kind} ${input.providerId} not found on the provider account`);
+  const callContext = call(deps, input.tenantId, `adopt-check:${input.providerId}`, context.signal);
+  // The one resource, not a listing of the kind (which a large account would have to page, past any cap).
+  const state = await provider.resources
+    .get(input.kind, input.providerId, callContext)
+    .catch((error: unknown) => {
+      if ((error as { code?: string } | undefined)?.code === 'NOT_FOUND') return undefined;
+      throw error;
+    });
+  if (!state || state.state === 'deleted' || state.state === 'deleting') throw notFound();
+  let owner: 'this' | 'other' | 'none' | undefined = state.managedBy;
+  if (owner === undefined) {
+    // get cannot tell who manages it: the listing does, read until the resource (with no cap).
+    kindOf(provider, input.kind);
+    if (typeof provider.resources.discover !== 'function')
+      throw new ComputeError(
+        'UNSUPPORTED',
+        `Provider ${provider.account.provider} cannot discover ${input.kind}`,
+      );
+    for await (const entry of provider.resources.discover(input.kind, callContext))
+      if (entry.id === input.providerId) {
+        owner = entry.managedBy ?? 'none';
+        break;
+      }
+    if (owner === undefined) throw notFound();
+  }
+  if (owner === 'other')
     throw new ComputeError(
       'INVALID_STATE',
       `${input.kind} ${input.providerId} is managed by another better-compute deployment`,

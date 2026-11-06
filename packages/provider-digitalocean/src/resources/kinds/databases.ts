@@ -406,7 +406,9 @@ function clusterKind(info: EngineInfo): DoKind {
 
     async get(env, id, context) {
       const database = await readCluster(env, id, context.signal);
-      return database ? clusterState(database) : undefined;
+      if (!database || database.engine !== info.engine) return undefined;
+      // Its tags say who manages it: an adopt's pre-check needs no listing of the account.
+      return { ...clusterState(database), managedBy: managedBy(env, database.tags) ?? 'none' };
     },
 
     async delete(env, id, context) {

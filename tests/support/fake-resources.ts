@@ -338,7 +338,14 @@ export function fakeProviderResources(
     async get(kind, id) {
       call(`get ${kind} ${id}`);
       const resource = live(kind, id);
-      return resource ? outputs(resource, cloud) : undefined;
+      if (!resource) return undefined;
+      // A database says who manages it (as discover does); the other kinds cannot tell on get.
+      if (kind !== 'fake.database') return outputs(resource, cloud);
+      const managed = resource.owner !== 'none' && resource.labels['better-compute-managed'] === 'true';
+      return {
+        ...outputs(resource, cloud),
+        managedBy: managed ? (resource.owner === 'this' ? 'this' : 'other') : 'none',
+      };
     },
     async delete(kind, id) {
       call(`delete ${kind} ${id}`);

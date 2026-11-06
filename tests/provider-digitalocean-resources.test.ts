@@ -593,6 +593,10 @@ describe('discover, adopt and release', () => {
     expect(found.map((item) => item.name).sort()).toEqual(['legacy', 'theirs']);
     expect(found.find((item) => item.name === 'theirs')!.managedBy).toBe('other');
     expect(found.find((item) => item.name === 'legacy')!.managedBy).toBeUndefined();
+    // get says who manages a cluster, so an adopt's pre-check needs no listing.
+    expect((await resources.get('do.database.pg', byHand.id, ctx()))!.managedBy).toBe('none');
+    expect((await resources.get('do.database.pg', foreign.id, ctx()))!.managedBy).toBe('other');
+    expect(await resources.get('do.database.mysql', byHand.id, ctx())).toBeUndefined();
     const refused = await failure(
       resources.adopt('do.database.pg', foreign.id, labels, ctx('crs_x')),
     );

@@ -799,6 +799,11 @@ export interface ProviderResourceState {
    * the provider's billing). Finite and not negative; any other entry is ignored.
    */
   usage?: Readonly<Record<string, number>>;
+  /**
+   * (cloud-resources) Who manages it, when `get` can tell from the resource itself: `this` deployment, an `other`
+   * one, or `none`. Absent: `get` cannot tell, and the caller looks it up through `discover` (an adopt pre-check).
+   */
+  managedBy?: 'this' | 'other' | 'none';
   message?: string;
 }
 

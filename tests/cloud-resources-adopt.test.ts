@@ -269,3 +269,57 @@ describe('an adoption whose takeover has not completed', () => {
     }
   });
 });
+
+describe('cloudResources.adopt: finding the resource', () => {
+  it('asks the provider for the one resource: one past the discover cap is found, and nothing is listed', async () => {
+    for (let index = 0; index < 501; index++)
+      world.cloud.seed({ kind: 'fake.database', name: `filler-${index}`, spec, owner: 'none' });
+    const last = world.cloud.seed({ kind: 'fake.database', name: 'past-cap', spec, owner: 'none' });
+    const before = world.cloud.calls.length;
+    const adopted = await adopt(last.id, { name: 'past-cap', idempotencyKey: 'past-cap' });
+    expect(adopted.state).toBe('pending');
+    expect(world.cloud.calls.slice(before)).toEqual([`get fake.database ${last.id}`]);
+    const foreign = world.cloud.seed({
+      kind: 'fake.database',
+      name: 'foreign-get',
+      spec,
+      owner: 'other',
+      labels: { 'better-compute-managed': 'true' },
+    });
+    expect(await failure(adopt(foreign.id, { idempotencyKey: 'foreign-get' }))).toMatchObject({
+      code: 'INVALID_STATE',
+      details: { reason: 'managedByAnother' },
+    });
+  });
+
+  it('a kind whose get cannot say who manages it is looked up through discover', async () => {
+    const foreign = world.cloud.seed({
+      kind: 'fake.app',
+      name: 'foreign-app',
+      spec: { image: 'nginx', instances: 1 },
+      owner: 'other',
+      labels: { 'better-compute-managed': 'true' },
+    });
+    const app = (providerId: string, key: string) =>
+      world.api.cloudResources.adopt(world.acme, {
+        tenantId: world.acmeTenant,
+        poolId: world.acmePoolId,
+        kind: 'fake.app',
+        providerId,
+        name: key,
+        idempotencyKey: key,
+      });
+    expect(await failure(app(foreign.id, 'foreign-app'))).toMatchObject({
+      code: 'INVALID_STATE',
+      details: { reason: 'managedByAnother' },
+    });
+    expect(world.cloud.calls).toContain('discover fake.app');
+    const mine = world.cloud.seed({
+      kind: 'fake.app',
+      name: 'legacy-app',
+      spec: { image: 'nginx', instances: 1 },
+      owner: 'none',
+    });
+    expect((await app(mine.id, 'legacy-app')).state).toBe('pending');
+  });
+});

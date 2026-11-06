@@ -52,7 +52,7 @@ import {
   prepareCreate,
   updateResource,
 } from './resources.js';
-import { resourcesWork, type CloudResourcesDeps } from './store.js';
+import type { CloudResourcesDeps } from './store.js';
 import type {
   AdoptResourceInput,
   CatalogEntryView,
@@ -67,6 +67,9 @@ import type {
   ResourceRef,
   UpdateResourceInput,
 } from './types.js';
+
+/** At most this many of a deleted tenant's resources are marked for deletion per `tenantDeleted` call. */
+const tenantTeardownBatch = 100;
 
 /** A meter key as better-iam takes it (core's meter catalog pattern). */
 const meterKeyPattern = /^[a-z][a-z0-9._-]{0,63}$/;
@@ -370,25 +373,25 @@ export function cloudResources(
           })),
       );
     },
-    // §12.8: a deleted tenant's resources are deleted at the provider; DONE once all are gone.
+    // §12.8: a deleted tenant's resources are deleted at the provider; DONE once all are gone. At most
+    // `tenantTeardownBatch` are marked per call (a short transaction against the reconciler), SYNC_AGAIN meanwhile;
+    // the reconciler's 30 s sweep already wakes the ones being deleted.
     async tenantDeleted(context, tenantId) {
       const deps = depsOf(context);
       return context.sql.transaction(async (tx) => {
-        const { rows } = await tx.query<{
-          id: string;
-          tenant_id: string;
-          kind: string;
-          desired_state: string;
-        }>(
-          `SELECT id, tenant_id, kind, desired_state FROM cloud_resources
-            WHERE tenant_id = $1 AND state NOT IN ('deleted', 'released') ORDER BY id FOR UPDATE`,
+        const { rows } = await tx.query<{ id: string; tenant_id: string; kind: string }>(
+          `SELECT id, tenant_id, kind FROM cloud_resources
+            WHERE tenant_id = $1 AND desired_state = 'present' AND state NOT IN ('deleted', 'released')
+            ORDER BY id LIMIT $2 FOR UPDATE`,
+          [tenantId, tenantTeardownBatch],
+        );
+        for (const row of rows) await markDeleted(deps, tx, row, 'tenant-deleted');
+        const live = await tx.query(
+          `SELECT 1 FROM cloud_resources
+            WHERE tenant_id = $1 AND state NOT IN ('deleted', 'released') LIMIT 1`,
           [tenantId],
         );
-        for (const row of rows) {
-          if (row.desired_state === 'present') await markDeleted(deps, tx, row, 'tenant-deleted');
-          await deps.work.enqueue(tx, resourcesWork, row.id);
-        }
-        return rows.length > 0 ? 'SYNC_AGAIN' : 'DONE';
+        return live.rows.length > 0 ? 'SYNC_AGAIN' : 'DONE';
       });
     },
   });
