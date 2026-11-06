@@ -7,6 +7,10 @@ export const tags = {
   instance: 'better-compute:instance',
   tenant: 'better-compute:tenant',
   pool: 'better-compute:pool',
+  /** (A5) The vps-derived name of an EBS volume this deployment made: how ensure finds it again. */
+  volume: 'better-compute:volume',
+  /** (A5) The name of an EBS snapshot this deployment made. */
+  snapshot: 'better-compute:snapshot',
   name: 'Name',
 } as const;
 

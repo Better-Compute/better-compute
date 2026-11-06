@@ -50,6 +50,8 @@ export function iamPolicy(
     kmsKeyArn?: string;
     /** (A2) Adds what tenant networks need: VPCs, subnets, gateways, security groups, ACL entries. */
     networks?: boolean;
+    /** (A5) The EBS volume and snapshot statements (default true). */
+    volumes?: boolean;
   } = {},
 ): IamPolicyDocument {
   const partition = options.partition ?? 'aws';
@@ -80,6 +82,9 @@ export function iamPolicy(
         'ec2:DescribeInstanceTypeOfferings',
         'ec2:DescribeAvailabilityZones',
         'ec2:DescribeImages',
+        ...(options.volumes === false
+          ? []
+          : ['ec2:DescribeVolumes', 'ec2:DescribeSnapshots', 'ec2:DescribeVolumesModifications']),
       ],
       Resource: '*',
     },
@@ -154,6 +159,7 @@ export function iamPolicy(
         ...(discover ? { StringEquals: { [`ec2:ResourceTag/${discover[0]}`]: discover[1] } } : {}),
       },
     },
+    ...(options.volumes === false ? [] : ebsStatements(ec2, instances, options.account)),
     {
       Sid: 'PublicImages',
       Effect: 'Allow',
@@ -221,6 +227,96 @@ export function iamPolicy(
     });
   }
   return { Version: '2012-10-17', Statement: statements };
+}
+
+/**
+ * (A5) EBS volumes and snapshots, ABAC like the instances: CreateVolume and CreateSnapshot must tag
+ * what they create `better-compute:managed=true` (and may tag only on those creates), a restore
+ * reads only managed snapshots carrying `better-compute:snapshot` (with an account: only its own),
+ * every change to a volume needs it managed and carrying `better-compute:volume` (never a root
+ * volume, which RunInstances tags managed too), attach and detach need an instance carrying
+ * `better-compute:instance`, and DeleteSnapshot needs a snapshot a restore could use.
+ */
+function ebsStatements(
+  ec2: (resource: string, owned?: boolean) => string,
+  instances: string,
+  account: string | undefined,
+): IamStatement[] {
+  const volumes = ec2('volume/*');
+  const snapshots = ec2('snapshot/*', false);
+  const requestManaged = { StringEquals: { [`aws:RequestTag/${tags.managed}`]: 'true' } };
+  // managed=true alone is also every root volume RunInstances tags: a data volume this deployment
+  // made carries its name too (better-compute:volume), and a snapshot its own (…:snapshot).
+  const managedVolume = {
+    StringEquals: { [`ec2:ResourceTag/${tags.managed}`]: 'true' },
+    Null: { [`ec2:ResourceTag/${tags.volume}`]: 'false' },
+  };
+  // A snapshot ARN names no account: with --account, only this account's (never a public or
+  // shared snapshot that happens to carry the tags).
+  const managedSnapshot = {
+    StringEquals: {
+      [`ec2:ResourceTag/${tags.managed}`]: 'true',
+      ...(account !== undefined ? { 'ec2:Owner': account } : {}),
+    },
+    Null: { [`ec2:ResourceTag/${tags.snapshot}`]: 'false' },
+  };
+  return [
+    {
+      Sid: 'EbsCreateTagged',
+      Effect: 'Allow',
+      Action: 'ec2:CreateVolume',
+      Resource: volumes,
+      Condition: requestManaged,
+    },
+    {
+      Sid: 'EbsRestoreOwned',
+      Effect: 'Allow',
+      Action: 'ec2:CreateVolume',
+      Resource: snapshots,
+      Condition: managedSnapshot,
+    },
+    {
+      Sid: 'EbsSnapshotTagged',
+      Effect: 'Allow',
+      Action: 'ec2:CreateSnapshot',
+      Resource: snapshots,
+      Condition: requestManaged,
+    },
+    {
+      Sid: 'EbsTagOnCreate',
+      Effect: 'Allow',
+      Action: 'ec2:CreateTags',
+      Resource: [volumes, snapshots],
+      Condition: { StringEquals: { 'ec2:CreateAction': ['CreateVolume', 'CreateSnapshot'] } },
+    },
+    {
+      Sid: 'EbsManageOwned',
+      Effect: 'Allow',
+      Action: [
+        'ec2:AttachVolume',
+        'ec2:DetachVolume',
+        'ec2:ModifyVolume',
+        'ec2:DeleteVolume',
+        'ec2:CreateSnapshot',
+      ],
+      Resource: volumes,
+      Condition: managedVolume,
+    },
+    {
+      Sid: 'EbsAttachClaimed',
+      Effect: 'Allow',
+      Action: ['ec2:AttachVolume', 'ec2:DetachVolume'],
+      Resource: instances,
+      Condition: { Null: { [`ec2:ResourceTag/${tags.instance}`]: 'false' } },
+    },
+    {
+      Sid: 'EbsDeleteOwnedSnapshot',
+      Effect: 'Allow',
+      Action: 'ec2:DeleteSnapshot',
+      Resource: snapshots,
+      Condition: managedSnapshot,
+    },
+  ];
 }
 
 /**
@@ -300,7 +396,7 @@ export function awsIamPolicyCommand() {
     group: 'Providers' as const,
     summary: 'Print the IAM permissions policy an AWS provider account needs',
     description:
-      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId; --phases A1,A2 adds tenant networks (VPC, subnet, gateway, security group and endpoint creates tagged better-compute:managed=true, changes and deletes only on resources so tagged, route and network ACL entry edits, and security group swaps on claimed instances).',
+      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; EBS volumes and snapshots created only tagged better-compute:managed=true and changed, attached, snapshotted or deleted only when they carry it and their better-compute:volume or better-compute:snapshot name, so never a root volume (attach and detach only on instances carrying better-compute:instance); public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId; --phases A1,A2 adds tenant networks (VPC, subnet, gateway, security group and endpoint creates tagged better-compute:managed=true, changes and deletes only on resources so tagged, route and network ACL entry edits, and security group swaps on claimed instances).',
     target: 'none' as const,
     output: 'text' as const,
     flags: {

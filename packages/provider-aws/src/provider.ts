@@ -16,7 +16,7 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
     version: '0.1.0',
     provides: ['vps'],
     config: awsConfig as unknown as ProviderDefinition<AwsConfig>['config'],
-    capabilities: ['power', 'reinstall', 'list', 'discover', 'claim'],
+    capabilities: ['power', 'reinstall', 'list', 'discover', 'claim', 'volumes'],
     create: (config, context) => {
       validateAwsConfig(config);
       const account = accountCredentials(config, context, options);

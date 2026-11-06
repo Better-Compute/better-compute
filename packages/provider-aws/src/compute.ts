@@ -24,6 +24,7 @@ import {
   type ZoneCache,
 } from './shapes.js';
 import { packUserData } from './userdata.js';
+import { AwsVolumes } from './volumes.js';
 
 export interface AwsComputeDeps {
   ec2: QueryClient;
@@ -147,6 +148,8 @@ export class AwsCompute implements ProviderImpl {
   readonly #ssmPrefixes: readonly string[];
   /** Tenant networks on this account's VPCs (AWS A2). */
   readonly networks: AwsNetworks;
+  /** (A5) EBS volumes and snapshots on this account. */
+  readonly volumes: AwsVolumes;
 
   constructor(
     readonly config: AwsConfig,
@@ -161,6 +164,12 @@ export class AwsCompute implements ProviderImpl {
       call: (action, params, signal) => this.call(action, params, signal),
       consistencyWindowMs: () => this.consistencyWindowMs,
     });
+    this.volumes = new AwsVolumes(
+      config,
+      context,
+      { call: (action, params, signal) => this.call(action, params, signal) },
+      options.consistencyWindowMs ?? 120_000,
+    );
   }
 
   /** `us-east-1a` and the Local Zone `us-west-2-lax-1a` are in `us-east-1` and `us-west-2`. */
