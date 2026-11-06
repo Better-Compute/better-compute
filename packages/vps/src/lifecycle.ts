@@ -8,6 +8,7 @@ import {
   type InstanceNicSpec,
   type InstanceSpec,
   type InstanceState,
+  type Logger,
   type ModuleContext,
   type ProviderImpl,
   type SqlExecutor,
@@ -993,7 +994,7 @@ export const defaultHostNetwork = 'br0';
 export async function instanceSpecs(
   tx: SqlTx,
   nodeId: string,
-  options: { network?: string; snapshots?: SnapshotStore } = {},
+  options: { network?: string; snapshots?: SnapshotStore; log?: Logger } = {},
 ): Promise<InstanceSpec[]> {
   const { rows } = await tx.query<{
     id: string;
@@ -1085,26 +1086,57 @@ export async function instanceSpecs(
     spec.nics = [nic];
     return [spec];
   });
-  return freshRestoreUrls(specs, new Map(rows.map((row) => [row.id, row.tenant_id])), options.snapshots);
+  return freshRestoreUrls(
+    specs,
+    new Map(rows.map((row) => [row.id, { tenantId: row.tenant_id, state: row.state }])),
+    options.snapshots,
+    options.log,
+  );
 }
 
 /**
+ * The states in which the host has not restored the instance yet (it fetches `restoreFrom.url`
+ * only while it has no domain for it). Placed anew (recreate), an instance passes through
+ * `provisioning` again.
+ */
+const restorePendingStates: ReadonlySet<InstanceState> = new Set<InstanceState>(['provisioning', 'starting']);
+
+/**
  * A restore's stored URL may be a presigned link that has expired by now: when the snapshot store
- * mints download URLs (`SnapshotStore.downloadUrl`), each restore gets a fresh one.
+ * mints download URLs (`SnapshotStore.downloadUrl`), a restore the host has not done yet gets a
+ * fresh one. Once it has (any later state), the spec keeps the stored URL (for S3, the stable
+ * `s3://` identifier): the spec stops changing with each signing window, and no live presigned
+ * link stays in `nodes.spec` for the instance's life (the host keeps the snapshot file by digest).
+ *
+ * Never throws: a store that cannot mint one (credentials loading, ACCESS_DENIED, a URL from
+ * another store) leaves that restore on its stored URL and is logged by code only, so the rest of
+ * the node's spec still converges. This runs inside NodeSpec's transaction: stores must not make
+ * network calls here (`s3SnapshotStore` signs with cached credentials only).
  */
 export async function freshRestoreUrls(
   specs: InstanceSpec[],
-  tenantOf: ReadonlyMap<string, string>,
+  instances: ReadonlyMap<string, { tenantId: string; state: InstanceState }>,
   store?: Pick<SnapshotStore, 'downloadUrl'>,
+  log?: Logger,
 ): Promise<InstanceSpec[]> {
   if (!store?.downloadUrl) return specs;
   for (const spec of specs) {
-    const tenantId = tenantOf.get(spec.id);
-    if (!spec.restoreFrom || tenantId === undefined) continue;
-    spec.restoreFrom = {
-      ...spec.restoreFrom,
-      url: await store.downloadUrl({ tenantId, snapshotId: spec.restoreFrom.imageId, url: spec.restoreFrom.url }),
-    };
+    const instance = instances.get(spec.id);
+    if (!spec.restoreFrom || instance === undefined || !restorePendingStates.has(instance.state)) continue;
+    try {
+      const url = await store.downloadUrl({
+        tenantId: instance.tenantId,
+        snapshotId: spec.restoreFrom.imageId,
+        url: spec.restoreFrom.url,
+      });
+      if (typeof url === 'string' && url !== '') spec.restoreFrom = { ...spec.restoreFrom, url };
+    } catch (error) {
+      log?.warn('snapshot download url unavailable; the restore keeps its stored url', {
+        instanceId: spec.id,
+        snapshotId: spec.restoreFrom.imageId,
+        code: isComputeError(error) ? error.code : 'INTERNAL',
+      });
+    }
   }
   return specs;
 }

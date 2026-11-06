@@ -12,7 +12,9 @@ import {
   routeSecretStores,
   s3AuditSink,
   s3BlobStore,
+  s3SnapshotStore,
 } from '@better-compute/aws';
+import { vps } from '@better-compute/vps';
 import { AwsEmulator } from './support/aws-platform-emulator/index.js';
 import { kmsFake } from './support/aws-platform-emulator/kms.js';
 import { eventBridgeFake } from './support/aws-platform-emulator/messaging.js';
@@ -64,7 +66,12 @@ async function awsHost() {
   s3.createBucket('bc-blobs');
   const aws = { region: 'us-east-1', credentials: emu.credentials, fetch: emu.fetch, endpoint: 'http://emu.local', clock: emu.clock };
 
-  const fixture = await computeFixture();
+  // Sandbox snapshots in S3: restores get presigned GETs through NodeSpec (vps's nodeSpec hook).
+  const snapshots = s3SnapshotStore({ ...aws, bucket: 'bc-blobs', prefix: 'snapshots' });
+  await snapshots.warm();
+  const vpsModule = vps({ snapshots });
+
+  const fixture = await computeFixture({ modules: [vpsModule] });
   await seedNode(fixture);
   fixture.iam.allow({ token: fixture.tenants.root.token });
   const wrapped = await generateKmsSealingKey({ ...aws, keyId: 'sealing' });
@@ -76,12 +83,100 @@ async function awsHost() {
     sinks: { events: [eventBridgeSink({ ...aws, id: 'eventbridge' })], audit: [s3AuditSink({ ...aws, bucket: 'bc-audit', prefix: 'audit' })] },
     downloads: { blob },
     supportBundles: { blob },
+    modules: [vpsModule],
     log: { debug() {}, info() {}, warn() {}, error() {} },
   });
-  return { emu, sm, events, s3, fixture, compute, local };
+  return { emu, sm, events, s3, fixture, compute, local, snapshots };
+}
+
+const SHA = 'cd'.repeat(32);
+
+/** A sandbox instance on NODE restored from `snapshot` (the sandbox API is not under test here). */
+async function seedRestoredInstance(
+  fixture: ComputeFixture,
+  options: { id: string; tenantId: string; snapshot: { snapshotId: string; url: string }; state?: string },
+) {
+  await fixture.database.query(
+    `INSERT INTO flavors (id, pool_id, name, vcpu, memory_gib, disk_gib, version)
+     VALUES ('flv_aws', 'pool_aws', 'small', 2, 4, 20, 1) ON CONFLICT (id) DO NOTHING`,
+  );
+  await fixture.database.query(
+    `INSERT INTO instances (id, tenant_id, pool_id, flavor_id, flavor, image_id, image, runtime, draft, state,
+       desired_state, node_id, owner_identity_id, idempotency_key, request_hash, restore_from, version)
+     VALUES ($1, $2, 'pool_aws', 'flv_aws', '{"name":"small","vcpu":2,"memoryGiB":4,"diskGiB":20,"gpus":0}', 'img_base',
+       $3::jsonb, 'cloud-hypervisor', false, $4, 'running', $5, 'usr_owner', $1, decode('00', 'hex'), $6::jsonb, 1)`,
+    [
+      options.id,
+      options.tenantId,
+      JSON.stringify({ url: 'https://images.example/base.raw', sha256: 'ab'.repeat(32), format: 'raw' }),
+      options.state ?? 'provisioning',
+      NODE,
+      JSON.stringify({ ...options.snapshot, sha256: SHA }),
+    ],
+  );
+}
+
+type Compute = Awaited<ReturnType<typeof awsHost>>['compute'];
+
+/** One NodeSpec pass over NODE; the stored generation and the restore URLs by instance. */
+async function nodeSpecPass(compute: Compute, fixture: ComputeFixture) {
+  await fixture.database.transaction((tx) => compute.context.desired.invalidate(tx, NODE));
+  await compute.jobs.nodespec!.tick();
+  const { rows } = await fixture.database.query<{ generation: string | number; spec: Record<string, any>; spec_body: Uint8Array | null }>(
+    'SELECT generation, spec, spec_body FROM nodes WHERE id = $1',
+    [NODE],
+  );
+  const spec = typeof rows[0]!.spec === 'string' ? JSON.parse(rows[0]!.spec as unknown as string) : rows[0]!.spec;
+  const instances = (spec?.instances?.instances ?? []) as { instanceId: string; restoreFrom?: { url: string; ref: string } }[];
+  return {
+    generation: Number(rows[0]!.generation),
+    stored: JSON.stringify(spec) + Buffer.from(rows[0]!.spec_body ?? new Uint8Array()).toString('latin1'),
+    restoreUrl: (id: string) => instances.find((instance) => instance.instanceId === id)?.restoreFrom?.url,
+  };
 }
 
 describe('a host on AWS', () => {
+  it('a sandbox restore gets a presigned S3 GET through NodeSpec, only while the restore is pending', async () => {
+    const { compute, fixture, emu, snapshots } = await awsHost();
+    const acme = fixture.tenants.acme.id;
+    // A snapshot the host uploaded through the presigned PUT.
+    const upload = await snapshots.presign({ tenantId: acme, sandboxId: 'sbx_1', snapshotId: 'snap_1' });
+    expect((await emu.fetch(upload.uploadUrl, { method: 'PUT', body: new TextEncoder().encode('disk+memory') })).status).toBe(200);
+    await seedRestoredInstance(fixture, { id: 'inst_restore_1', tenantId: acme, snapshot: { snapshotId: 'snap_1', url: upload.url } });
+    // A second restore whose url names another tenant's snapshot: refused, and it must not stop the first.
+    await seedRestoredInstance(fixture, {
+      id: 'inst_restore_2',
+      tenantId: acme,
+      snapshot: { snapshotId: 'snap_9', url: `s3://bc-blobs/snapshots/${fixture.tenants.root.id}/sbx_9/snap_9` },
+    });
+
+    const first = await nodeSpecPass(compute, fixture);
+    const presigned = first.restoreUrl('inst_restore_1')!;
+    expect(new URL(presigned).searchParams.get('X-Amz-Signature')).toMatch(/^[0-9a-f]{64}$/);
+    const fetched = await emu.fetch(presigned);
+    expect(fetched.status).toBe(200);
+    expect(await fetched.text()).toBe('disk+memory');
+    expect(first.restoreUrl('inst_restore_2')).toBe(`s3://bc-blobs/snapshots/${fixture.tenants.root.id}/sbx_9/snap_9`);
+
+    // Same signing window: the same spec, no new generation.
+    emu.clock.advance(60_000);
+    const second = await nodeSpecPass(compute, fixture);
+    expect(second.generation).toBe(first.generation);
+    expect(second.restoreUrl('inst_restore_1')).toBe(presigned);
+
+    // Restored and running: the stable s3:// identifier; no presigned link stays in nodes.spec.
+    await fixture.database.query("UPDATE instances SET state = 'running' WHERE id LIKE 'inst_restore_%'");
+    const running = await nodeSpecPass(compute, fixture);
+    expect(running.restoreUrl('inst_restore_1')).toBe(upload.url);
+    expect(running.stored).not.toMatch(/X-Amz-(Signature|Credential|Security-Token)/);
+    // Across window boundaries the running instance's spec stays the same.
+    for (let window = 0; window < 3; window++) {
+      emu.clock.advance(31 * 60_000);
+      expect((await nodeSpecPass(compute, fixture)).generation).toBe(running.generation);
+    }
+    await compute.stop();
+  });
+
   it('a provider account secret round-trips through Secrets Manager', async () => {
     const { compute, fixture, sm, local } = await awsHost();
     const root = { token: fixture.tenants.root.token };

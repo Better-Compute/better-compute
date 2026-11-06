@@ -2045,6 +2045,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       const instances = await instanceSpecs(context.sql, node.id, {
         ...(options.hostNetwork ? { network: options.hostNetwork } : {}),
         ...(options.snapshots ? { snapshots: options.snapshots } : {}),
+        log: context.log,
       });
       // Agent memory: the volumes this host keeps (a deleted one is absent, so bcd destroys it).
       const volumes = await hostVolumeSpecs(context.sql, node.id);

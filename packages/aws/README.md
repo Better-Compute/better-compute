@@ -96,7 +96,7 @@ The operator who runs `kms-sealing-key` needs `kms:GenerateDataKeyWithoutPlainte
 
 ### `s3BlobStore(options)`
 
-`get` streams (a missing key is `undefined`); `put` sends one signed PUT up to `singlePutBytes` (64 MiB) and otherwise a multipart upload in `partBytes` parts (16 MiB, at least 5 MiB), aborted on any failure so no parts are orphaned; `delete` treats a missing key as success; `presign` lasts at most 7 days. Keys with `..`, `.` or empty segments, a leading `/` or control characters are refused. `sse` adds SSE-KMS or SSE-S3 headers. Virtual-hosted URLs unless the bucket has a dot or `pathStyle` is set. A presigned PUT carries no SSE headers, so the bucket's default encryption applies to support bundle uploads.
+`get` streams (a missing key is `undefined`); `put` sends one signed PUT up to `singlePutBytes` (64 MiB) and otherwise a multipart upload in `partBytes` parts (16 MiB, at least 5 MiB), aborted on any failure so no parts are orphaned; `delete` treats a missing key as success; `presign` lasts at most 7 days. Keys with `..`, `.` or empty segments, a leading `/` or control characters are refused. `sse` adds SSE-KMS or SSE-S3 headers. Virtual-hosted URLs unless the bucket has a dot or `pathStyle` is set. `timeoutMs` (default 20 s, every factory takes it) bounds only the time to response headers: a download streams for as long as it takes. Requests that send a body get `timeoutMs` plus the body at 256 KiB/s. A presigned PUT carries no SSE headers, so the bucket's default encryption applies to support bundle uploads.
 
 ```json
 { "Effect": "Allow",
@@ -106,7 +106,11 @@ The operator who runs `kms-sealing-key` needs `kms:GenerateDataKeyWithoutPlainte
 
 ### `s3SnapshotStore(options)`
 
-Sandbox snapshots at `<prefix>/<tenantId>/<sandboxId>/<snapshotId>`. The stored url is the stable `s3://bucket/key`, an identifier rather than a link. Uploads are presigned PUTs with the SSE headers signed (returned as `uploadHeaders`). Restores call `downloadUrl` for a fresh presigned GET, only for the snapshot's own tenant, so a snapshot can be restored long after its upload URL expired. A download URL is signed at the start of its half-lifetime window, so the host's desired spec does not change on every render. Same IAM as the blob store.
+Sandbox snapshots at `<prefix>/<tenantId>/<sandboxId>/<snapshotId>`. The stored url is the stable `s3://bucket/key`, an identifier rather than a link. Uploads are presigned PUTs with the SSE headers signed (returned as `uploadHeaders`). Restores call `downloadUrl` for a fresh presigned GET, only for the snapshot's own tenant, so a snapshot can be restored long after its upload URL expired. A download URL is signed at the start of its half-lifetime window, so the host's desired spec does not change on every render.
+
+vps asks for a download URL only while a restore is pending (instance `provisioning` or `starting`). Once the host has restored the instance, its spec carries the stable `s3://` identifier, so the spec stops changing and no live presigned link stays in `nodes.spec`. bcd keeps the snapshot file by digest and fetches only for an instance it does not have yet. A presigned GET is in `nodes.spec` only while its restore is pending, and it expires after `downloadExpiresSeconds`.
+
+`downloadUrl` runs inside NodeSpec's transaction, so it makes no network call. It signs with credentials held in memory: they load when the store is made (`await store.warm()` at startup to be sure), refresh in the background once less than one URL lifetime is left, and are never used within a minute of expiry. While no credentials are loaded, `downloadUrl` is `UNAVAILABLE`. vps then logs the code, keeps that restore on its stored url for this pass, and still renders the rest of the node. A stored url that is not `s3://` (written before the host switched to this store) passes through unchanged. Same IAM as the blob store.
 
 ### `s3AuditSink(options)`
 

@@ -204,6 +204,74 @@ describe('S3 SnapshotStore', () => {
   });
 });
 
+describe('S3 SnapshotStore downloadUrl inside NodeSpec (review)', () => {
+  function counted(emu: AwsEmulator, extra: { expiresAt?: () => number; hold?: Promise<void> } = {}) {
+    let calls = 0;
+    const credentials = {
+      kind: 'counted',
+      async credentials() {
+        calls += 1;
+        await extra.hold;
+        return { accessKeyId: 'AKIATESTKEY0000000001', secretAccessKey: 'testsecret', ...(extra.expiresAt ? { expiresAt: extra.expiresAt() } : {}) };
+      },
+    };
+    return { credentials, calls: () => calls };
+  }
+  const url = 's3://bc-blobs/snapshots/acme/sbx_1/snap_1';
+
+  it('passes a legacy (non-s3://) stored url through unchanged, with no AWS call', async () => {
+    const world = s3World();
+    const source = counted(world.emu);
+    const snapshots = s3SnapshotStore({ ...world.base, credentials: source.credentials, bucket: 'bc-blobs', prefix: 'snapshots' });
+    await snapshots.warm();
+    const legacy = 'https://objects.example/presigned?X-Amz-Signature=abc';
+    expect(await snapshots.downloadUrl!({ tenantId: 'acme', snapshotId: 'snap_1', url: legacy })).toBe(legacy);
+    expect(world.emu.requests).toHaveLength(0);
+  });
+
+  it('signs with cached credentials only: no credential call per download url', async () => {
+    const world = s3World();
+    const source = counted(world.emu);
+    const snapshots = s3SnapshotStore({ ...world.base, credentials: source.credentials, bucket: 'bc-blobs', prefix: 'snapshots' });
+    await snapshots.warm();
+    expect(source.calls()).toBe(1);
+    for (let i = 0; i < 5; i++) await snapshots.downloadUrl!({ tenantId: 'acme', snapshotId: 'snap_1', url });
+    expect(source.calls()).toBe(1);
+  });
+
+  it('before credentials are loaded it fails fast (UNAVAILABLE) instead of waiting on the source', async () => {
+    const world = s3World();
+    let release!: () => void;
+    const source = counted(world.emu, { hold: new Promise<void>((resolve) => (release = resolve)) });
+    const snapshots = s3SnapshotStore({ ...world.base, credentials: source.credentials, bucket: 'bc-blobs', prefix: 'snapshots' });
+    await expect(snapshots.downloadUrl!({ tenantId: 'acme', snapshotId: 'snap_1', url })).rejects.toMatchObject({ code: 'UNAVAILABLE' });
+    expect(source.calls()).toBe(1); // the warm-up started at construction; no second fetch
+    release();
+    await snapshots.warm();
+    await expect(snapshots.downloadUrl!({ tenantId: 'acme', snapshotId: 'snap_1', url })).resolves.toMatch(/^http:\/\//);
+  });
+
+  it('refreshes expiring credentials in the background and refuses expired ones', async () => {
+    const world = s3World();
+    let expiresAt = world.emu.clock.now() + 2 * 3600_000;
+    const source = counted(world.emu, { expiresAt: () => expiresAt });
+    const snapshots = s3SnapshotStore({ ...world.base, credentials: source.credentials, bucket: 'bc-blobs', prefix: 'snapshots' });
+    await snapshots.warm();
+    await snapshots.downloadUrl!({ tenantId: 'acme', snapshotId: 'snap_1', url });
+    expect(source.calls()).toBe(1);
+    // Within the URL lifetime of expiry: still signs, and starts one refresh.
+    world.emu.clock.advance(90 * 60_000);
+    await snapshots.downloadUrl!({ tenantId: 'acme', snapshotId: 'snap_1', url });
+    expect(source.calls()).toBe(2);
+    await snapshots.warm();
+    // The source keeps answering with an expired key: refused, never signed with it.
+    expiresAt = world.emu.clock.now() - 1;
+    snapshots.invalidateCredentials();
+    await snapshots.warm();
+    await expect(snapshots.downloadUrl!({ tenantId: 'acme', snapshotId: 'snap_1', url })).rejects.toMatchObject({ code: 'UNAVAILABLE' });
+  });
+});
+
 describe('S3 audit sink', () => {
   const records = (n: number, time = Date.UTC(2026, 9, 3, 23, 59)): AuditRecord[] =>
     Array.from({ length: n }, (_, i) => ({
