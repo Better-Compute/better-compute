@@ -4,11 +4,13 @@ import type { DoConfig, DoProviderOptions } from '../../config.js';
 import { deploymentTag } from '../../ids.js';
 import { spacesClient, type SpacesClient } from '../../spaces/s3.js';
 import { cdnEndpointKind } from './cdn-endpoint.js';
+import { containerRegistryKind, registryGcKind } from './container-registry.js';
 import { doResources, type DoResources } from './kind.js';
 import { spacesBucketKind } from './spaces-bucket.js';
 import { spacesKeyKind } from './spaces-key.js';
 
 export * from './cdn-endpoint.js';
+export * from './container-registry.js';
 export * from './kind.js';
 export * from './spaces-bucket.js';
 export * from './spaces-key.js';
@@ -82,5 +84,7 @@ export function doStorageResources(
     spacesKeyKind(client),
     spacesBucketKind({ spaces, deploymentTag: tag }),
     cdnEndpointKind({ client, spaces, deploymentTag: tag }),
+    containerRegistryKind(client),
+    registryGcKind(client),
   ]);
 }
