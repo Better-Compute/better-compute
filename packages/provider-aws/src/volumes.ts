@@ -4,6 +4,7 @@ import {
   type CallContext,
   type ErrorCode,
   type ProviderContext,
+  type ProviderDetachOptions,
   type ProviderResourceState,
   type ProviderVolumes,
   type ProviderVolumeSpec,
@@ -274,6 +275,8 @@ export class AwsVolumes implements ProviderVolumes {
   /** name → snapshot id this client created (CreateSnapshot has no ClientToken). */
   readonly #createdSnapshots = new Map<string, { id: string; at: number }>();
   readonly #createdSnapshotIds = new Map<string, number>();
+  /** Attachments (`volumeId:instanceId`) this process force-detached: forced once, then waited on. */
+  readonly #forced = new Set<string>();
 
   constructor(
     readonly config: AwsConfig,
@@ -751,18 +754,30 @@ export class AwsVolumes implements ProviderVolumes {
     volumeId: string,
     machineId: string,
     context: CallContext,
+    options: ProviderDetachOptions = {},
   ): Promise<ProviderResourceState> {
     const id = parseVolume_(volumeId);
     const { signal } = context;
+    const force = options.force === true;
     const volume = await this.volume(id, signal);
     // Not attached to that machine (or gone): nothing to detach; another machine's is never touched.
-    if (!volume || volume.attachment?.instanceId !== machineId) return state(id, 'deleted');
+    const key = `${id}:${machineId}`;
+    if (!volume || volume.attachment?.instanceId !== machineId) {
+      this.#forced.delete(key);
+      return state(id, 'deleted');
+    }
     this.refuseForeign(volume);
     const region = this.config.region;
-    if (volume.attachment.status === 'detaching')
+    // A detach under way is waited on; forced, it is forced once (a stuck guest), then waited on.
+    if (volume.attachment.status === 'detaching' && (!force || this.#forced.has(key)))
       return state(id, 'deleting', volumeOutputs(volume, region));
     try {
-      await this.deps.call('DetachVolume', { VolumeId: id, InstanceId: machineId }, signal);
+      await this.deps.call(
+        'DetachVolume',
+        { VolumeId: id, InstanceId: machineId, ...(force ? { Force: 'true' } : {}) },
+        signal,
+      );
+      if (force) this.#forced.add(key);
     } catch (error) {
       // Detached between the read and the call: the next call reads it detached.
       if (

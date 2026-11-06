@@ -814,6 +814,12 @@ export interface ProviderVolumeSpec {
   throughputMiBps?: number;
 }
 
+/** (provider volumes) Options of `ProviderVolumes.detachVolume`. */
+export interface ProviderDetachOptions {
+  /** Detach without waiting for the guest to release the volume (unflushed writes may be lost). */
+  force?: boolean;
+}
+
 /**
  * (provider volumes) Block volumes and their snapshots on a provider account. Every call is idempotent and
  * non-blocking, like `ProviderNetworks`: it returns `pending`, `updating` or `deleting` while a provider operation
@@ -838,10 +844,16 @@ export interface ProviderVolumes {
     context: CallContext,
     instanceId?: string,
   ): Promise<ProviderResourceState>;
+  /**
+   * With `force`, the provider detaches even though the guest has not released the volume (EBS `Force`), also a
+   * detach already under way that is stuck; writes the guest has not flushed may be lost. A provider without a
+   * forced detach ignores it. Optional: absent is a plain detach.
+   */
   detachVolume(
     volumeId: string,
     machineId: string,
     context: CallContext,
+    options?: ProviderDetachOptions,
   ): Promise<ProviderResourceState>;
   resizeVolume(
     volumeId: string,

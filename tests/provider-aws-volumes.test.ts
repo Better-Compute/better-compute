@@ -456,6 +456,59 @@ describe('provider-aws volumes: attach, detach', () => {
     });
     await rejects(volumes.detachVolume(theirs.id, a.id, call()), 'INVALID_STATE', 'not-managed');
   });
+
+  it('force: a detach stuck in detaching is forced (DetachVolume Force=true), once', async () => {
+    const { volumes, call, ebs, ec2, emu, managed } = world();
+    const a = owned(ec2, 'ins_a');
+    const b = owned(ec2, 'ins_b');
+    const volume = ebs.addVolume({
+      tags: managed,
+      attachedTo: { instanceId: a.id, device: '/dev/sdf' },
+    });
+    ebs.stuckDetach.add(volume.id);
+    expect((await volumes.detachVolume(volume.id, a.id, call())).state).toBe('deleting');
+    ebs.tick();
+    ebs.tick();
+    // The guest never let go: still detaching, and a plain retry does not call again.
+    expect((await volumes.detachVolume(volume.id, a.id, call())).state).toBe('deleting');
+    expect(emu.calls('DetachVolume')).toHaveLength(1);
+    // Forced: another machine's attachment is still never touched.
+    expect((await volumes.detachVolume(volume.id, b.id, call(), { force: true })).state).toBe(
+      'deleted',
+    );
+    expect((await volumes.detachVolume(volume.id, a.id, call(), { force: true })).state).toBe(
+      'deleting',
+    );
+    const calls = emu.calls('DetachVolume');
+    expect(calls).toHaveLength(2);
+    expect([calls[1]!.params.get('InstanceId'), calls[1]!.params.get('Force')]).toEqual([
+      a.id,
+      'true',
+    ]);
+    ebs.tick();
+    expect((await volumes.detachVolume(volume.id, a.id, call(), { force: true })).state).toBe(
+      'deleted',
+    );
+    expect(emu.calls('DetachVolume')).toHaveLength(2);
+    // An attached (not yet detaching) volume is forced straight away; foreign ones are refused.
+    const other = ebs.addVolume({
+      tags: { ...managed, 'better-compute:volume': 'bc-v-other' },
+      attachedTo: { instanceId: a.id, device: '/dev/sdg' },
+    });
+    expect((await volumes.detachVolume(other.id, a.id, call(), { force: true })).state).toBe(
+      'deleting',
+    );
+    expect(emu.calls('DetachVolume')[2]!.params.get('Force')).toBe('true');
+    const theirs = ebs.addVolume({
+      tags: { Name: 'x' },
+      attachedTo: { instanceId: a.id, device: '/dev/sdh' },
+    });
+    await rejects(
+      volumes.detachVolume(theirs.id, a.id, call(), { force: true }),
+      'INVALID_STATE',
+      'not-managed',
+    );
+  });
 });
 
 describe('provider-aws volumes: resize', () => {

@@ -9,7 +9,8 @@ import { ec2Error, ec2Response, el, items } from './xml.js';
 // DescribeSnapshots / DeleteSnapshot. Like EBS: a volume attaches only in its own zone and to one
 // instance, a device name is used once per instance, an attached volume is not deleted, and a
 // volume only grows. Knobs: settleOnRead (every Describe* moves transitional states one step),
-// newVolumeNotFound (eventual consistency right after CreateVolume), cooldownCode, addVolume and
+// newVolumeNotFound (eventual consistency right after CreateVolume), cooldownCode, stuckDetach (a
+// guest that never releases the volume: only DetachVolume Force=true lets it go), addVolume and
 // addSnapshot (foreign resources), and tick.
 
 export interface EmuAttachment {
@@ -121,6 +122,8 @@ export class EbsEmulator {
   cooldownCode = 'VolumeModificationRateExceeded';
   /** Volumes filtered (not by-id) DescribeVolumes reads leave out: tag reads that lag behind. */
   hideFromFilters = new Set<string>();
+  /** Volumes whose detach stays `detaching` until a DetachVolume with Force=true. */
+  stuckDetach = new Set<string>();
   #next = 0;
 
   constructor(
@@ -186,7 +189,7 @@ export class EbsEmulator {
       else if (volume.state === 'deleted') this.volumes.delete(volume.id);
       const attachment = volume.attachment;
       if (attachment?.state === 'attaching') attachment.state = 'attached';
-      else if (attachment?.state === 'detaching') {
+      else if (attachment?.state === 'detaching' && !this.stuckDetach.has(volume.id)) {
         delete volume.attachment;
         volume.state = 'available';
       }
@@ -367,6 +370,7 @@ export class EbsEmulator {
             'InvalidAttachment.NotFound',
             `Volume '${volume.id}' is not attached to '${instanceId}'.`,
           );
+        if (p.get('Force') === 'true') this.stuckDetach.delete(volume.id);
         volume.attachment.state = 'detaching';
         return ec2Response(action, this.#attachmentXml(volume));
       }
