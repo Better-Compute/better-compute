@@ -319,3 +319,84 @@ describe('instance topology', () => {
     expect(machine?.labels).not.toHaveProperty('topology.aws/network-node-1');
   });
 });
+
+describe('EFA', () => {
+  const subnet = 'subnet-0123456789abcdef0';
+  const interfaces = (params: URLSearchParams) => {
+    const out: Record<string, string>[] = [];
+    for (let n = 1; params.has(`NetworkInterface.${n}.DeviceIndex`); n++) {
+      const entry: Record<string, string> = {};
+      for (const [key, value] of params)
+        if (key.startsWith(`NetworkInterface.${n}.`))
+          entry[key.slice(`NetworkInterface.${n}.`.length)] = value;
+      out.push(entry);
+    }
+    return out;
+  };
+
+  it('auto launches an EFA type with one EFA interface per network card', async () => {
+    const w = world({ efa: 'auto', subnetId: subnet, securityGroupIds: ['sg-0123456789abcdef0'] });
+    await w.compute.create(request('us-east-1a/p5.48xlarge'), w.call());
+    const sent = interfaces(w.runs()[0]!.params);
+    expect(sent).toHaveLength(32);
+    expect(sent[0]).toMatchObject({
+      DeviceIndex: '0',
+      NetworkCardIndex: '0',
+      InterfaceType: 'efa',
+      SubnetId: subnet,
+      'SecurityGroupId.1': 'sg-0123456789abcdef0',
+      DeleteOnTermination: 'true',
+    });
+    expect(sent[31]).toMatchObject({
+      DeviceIndex: '1',
+      NetworkCardIndex: '31',
+      InterfaceType: 'efa',
+    });
+    // EC2 refuses a public address with more than one interface.
+    expect(sent.some((entry) => entry.AssociatePublicIpAddress === 'true')).toBe(false);
+  });
+
+  it('a single-card EFA type keeps its public address', async () => {
+    const w = world({ efa: 'auto', subnetId: subnet });
+    w.ec2emu.types.set('hpc7g.16xlarge', {
+      type: 'hpc7g.16xlarge',
+      vcpu: 64,
+      memoryMiB: 131_072,
+      arch: ['arm64'],
+      efa: 1,
+      networkCards: 1,
+    });
+    w.ec2emu.offerings.get('us-east-1a')!.add('hpc7g.16xlarge');
+    await w.compute.create(request('us-east-1a/hpc7g.16xlarge'), w.call());
+    expect(interfaces(w.runs()[0]!.params)).toEqual([
+      expect.objectContaining({ InterfaceType: 'efa', AssociatePublicIpAddress: 'true' }),
+    ]);
+  });
+
+  it('off (the default) and types without EFA launch as before', async () => {
+    const off = world({ subnetId: subnet });
+    expect(off.config.efa).toBe('off');
+    await off.compute.create(request('us-east-1a/p5.48xlarge'), off.call());
+    expect(interfaces(off.runs()[0]!.params)).toEqual([
+      expect.not.objectContaining({ InterfaceType: 'efa' }),
+    ]);
+    const plain = world({ efa: 'auto', subnetId: subnet });
+    await plain.compute.create(request('us-east-1a/m7i.large'), plain.call());
+    expect(interfaces(plain.runs()[0]!.params)).toHaveLength(1);
+    expect(interfaces(plain.runs()[0]!.params)[0]).not.toHaveProperty('InterfaceType');
+  });
+
+  it('auto refuses an EFA launch without a subnet rather than launching without EFA', async () => {
+    const w = world({ efa: 'auto' });
+    await expect(
+      w.compute.create(request('us-east-1a/p5.48xlarge'), w.call()),
+    ).rejects.toMatchObject({ code: 'INVALID_CONFIG', details: { reason: 'efa-subnet' } });
+    expect(w.runs()).toHaveLength(0);
+  });
+
+  it('the config takes off or auto only', () => {
+    expect(() =>
+      awsConfig.parse({ region: 'us-east-1', zones: ['us-east-1a'], efa: 'always' }),
+    ).toThrow();
+  });
+});

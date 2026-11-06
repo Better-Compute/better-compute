@@ -64,6 +64,12 @@ export const awsConfig = manifest({
     .boolean()
     .default(true)
     .describe('Give instances a public IPv4 address (needs a subnet)'),
+  efa: field
+    .option(['off', 'auto'])
+    .default('off')
+    .describe(
+      'EFA (Elastic Fabric Adapter): auto launches an EFA-capable type with one EFA interface per network card (needs subnetId or a network)',
+    ),
   discoverTag: field
     .string({ maxLength: 512 })
     .optional()
@@ -113,7 +119,9 @@ export const awsConfig = manifest({
   eventSources: field
     .list(field.option(['aws.ec2', 'aws.health', 'aws.guardduty']), { min: 1 })
     .optional()
-    .describe('EventBridge sources taken from the queue (default aws.ec2 and aws.health); anything else is dropped'),
+    .describe(
+      'EventBridge sources taken from the queue (default aws.ec2 and aws.health); anything else is dropped',
+    ),
 });
 
 /** The validated account configuration. */
@@ -131,6 +139,8 @@ export interface AwsConfig {
   metadataHopLimit: number;
   associatePublicIp: boolean;
   discoverTag?: string;
+  /** (A10) EFA interfaces on EFA-capable types. */
+  efa: 'off' | 'auto';
   ipamPoolId?: string;
   securityGroupsPerInterface?: number;
   /** (A3) Offer and launch Spot capacity. */

@@ -218,6 +218,7 @@ describe('offers', () => {
       instanceStorageGiB: 30_400,
       efa: true,
       maxEfaInterfaces: 32,
+      networkCards: 32,
     });
     const doc2 = await ec2.call(
       'DescribeInstanceTypes',

@@ -17,6 +17,8 @@ export interface EmuType {
   bareMetal?: boolean;
   instanceStorageGB?: number;
   efa?: number;
+  /** (A10) NetworkInfo.MaximumNetworkCards (absent: 1). */
+  networkCards?: number;
 }
 
 export interface EmuInstance {
@@ -73,6 +75,7 @@ const defaultTypes: EmuType[] = [
     gpus: { name: 'H100', manufacturer: 'NVIDIA', count: 8 },
     instanceStorageGB: 30_400,
     efa: 32,
+    networkCards: 32,
   },
   { type: 'm7g.large', vcpu: 2, memoryMiB: 8192, arch: ['arm64'] },
   { type: 'c7i.metal-24xl', vcpu: 96, memoryMiB: 196_608, arch: ['x86_64'], bareMetal: true },
@@ -349,7 +352,7 @@ export class Ec2Emulator {
                 `${el('instanceType', t.type)}${el('bareMetal', t.bareMetal ?? false)}<processorInfo>${items(
                   'supportedArchitectures',
                   t.arch.map((a) => a),
-                )}</processorInfo><vCpuInfo>${el('defaultVCpus', t.vcpu)}</vCpuInfo><memoryInfo>${el('sizeInMiB', t.memoryMiB)}</memoryInfo>${t.instanceStorageGB ? `<instanceStorageInfo>${el('totalSizeInGB', t.instanceStorageGB)}</instanceStorageInfo>` : ''}${t.gpus ? `<gpuInfo>${items('gpus', [`${el('name', t.gpus.name)}${el('manufacturer', t.gpus.manufacturer)}${el('count', t.gpus.count)}`])}</gpuInfo>` : ''}<networkInfo>${el('efaSupported', t.efa !== undefined)}${t.efa ? `<efaInfo>${el('maximumEfaInterfaces', t.efa)}</efaInfo>` : ''}</networkInfo>`,
+                )}</processorInfo><vCpuInfo>${el('defaultVCpus', t.vcpu)}</vCpuInfo><memoryInfo>${el('sizeInMiB', t.memoryMiB)}</memoryInfo>${t.instanceStorageGB ? `<instanceStorageInfo>${el('totalSizeInGB', t.instanceStorageGB)}</instanceStorageInfo>` : ''}${t.gpus ? `<gpuInfo>${items('gpus', [`${el('name', t.gpus.name)}${el('manufacturer', t.gpus.manufacturer)}${el('count', t.gpus.count)}`])}</gpuInfo>` : ''}<networkInfo>${el('efaSupported', t.efa !== undefined)}${el('maximumNetworkCards', t.networkCards)}${t.efa ? `<efaInfo>${el('maximumEfaInterfaces', t.efa)}</efaInfo>` : ''}</networkInfo>`,
             ),
           ) + el('nextToken', next),
         );

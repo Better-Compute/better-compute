@@ -78,6 +78,26 @@ export class PlacementEmulator {
       });
     ec2.runHooks.push({
       check: (params) => {
+        // EFA (A10): EC2 takes a public address only with one interface, and EFA only on EFA types.
+        let interfaces = 0;
+        for (let n = 1; params.has(`NetworkInterface.${n}.DeviceIndex`); n++) {
+          interfaces = n;
+          if (
+            params.get(`NetworkInterface.${n}.InterfaceType`) === 'efa' &&
+            this.ec2.types.get(params.get('InstanceType') ?? '')?.efa === undefined
+          )
+            return ec2Error('InvalidParameterCombination', 'EFA is not supported on this type');
+        }
+        if (
+          interfaces > 1 &&
+          [...params].some(
+            ([key, value]) => key.endsWith('.AssociatePublicIpAddress') && value === 'true',
+          )
+        )
+          return ec2Error(
+            'InvalidParameterCombination',
+            'The associatePublicIPAddress parameter cannot be specified when launching with multiple network interfaces.',
+          );
         const name = params.get('Placement.GroupName');
         if (name === null) return undefined;
         const group = this.groups.get(name);

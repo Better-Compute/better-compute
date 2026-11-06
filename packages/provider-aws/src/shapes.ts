@@ -13,6 +13,8 @@ export interface InstanceTypeInfo {
   instanceStorageGiB?: number;
   efa: boolean;
   maxEfaInterfaces?: number;
+  /** (A10) Network cards (EFA interfaces go one per card); absent: 1. */
+  networkCards?: number;
 }
 
 const gpuNames: Readonly<Record<string, string>> = {
@@ -61,6 +63,7 @@ export function parseInstanceTypes(items: readonly XmlElement[]): InstanceTypeIn
     const network = item.child('networkInfo');
     const efa = network?.textOf('efaSupported') === 'true';
     const maxEfa = network?.child('efaInfo')?.textOf('maximumEfaInterfaces');
+    const cards = network?.textOf('maximumNetworkCards');
     out.push({
       type,
       vcpu: number(item.child('vCpuInfo')?.textOf('defaultVCpus')),
@@ -71,6 +74,7 @@ export function parseInstanceTypes(items: readonly XmlElement[]): InstanceTypeIn
       ...(storage !== undefined ? { instanceStorageGiB: number(storage) } : {}),
       efa,
       ...(maxEfa !== undefined ? { maxEfaInterfaces: number(maxEfa) } : {}),
+      ...(cards !== undefined ? { networkCards: number(cards) } : {}),
     });
   }
   return out;
@@ -198,7 +202,6 @@ const spotReclaims: Readonly<Record<string, 'terminate' | 'stop' | 'hibernate'>>
   'Server.SpotInstanceShutdown': 'stop',
   'Server.SpotInstanceHibernate': 'hibernate',
 };
-
 
 /** An EC2 instance (a `DescribeInstances`/`RunInstances` item) as an `ExternalMachine`. */
 export function toMachine(

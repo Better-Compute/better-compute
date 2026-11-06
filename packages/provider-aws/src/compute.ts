@@ -1141,6 +1141,19 @@ export class AwsCompute implements ProviderImpl {
     if (request.placement) await this.#placementGroups.ensure(request.placement, signal);
     const subnet = placement?.subnetId ?? this.config.subnetId;
     const groups = placement?.groupIds ?? this.config.securityGroupIds ?? [];
+    // (A10) EFA: one EFA interface per network card, up to the type's EFA maximum. EFA needs
+    // explicit interfaces, so a subnet; launching an EFA type without EFA would hide a slow fabric.
+    const efaInterfaces =
+      this.config.efa === 'auto' && info.efa
+        ? Math.max(1, Math.min(info.maxEfaInterfaces ?? 1, info.networkCards ?? 1))
+        : 0;
+    if (efaInterfaces > 0 && !subnet)
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        `${offer.instanceType} launches with EFA (config efa: auto), which needs subnetId or a network`,
+        undefined,
+        { provider: 'aws', reason: 'efa-subnet' },
+      );
     const params: QueryParams = {
       ClientToken: clientToken(context.idempotencyKey),
       MinCount: 1,
@@ -1173,15 +1186,28 @@ export class AwsCompute implements ProviderImpl {
           ]
         : undefined,
       NetworkInterface: subnet
-        ? [
-            {
-              DeviceIndex: 0,
+        ? efaInterfaces > 0
+          ? Array.from({ length: efaInterfaces }, (_, card) => ({
+              // The primary interface is device 0 on card 0; each other card's is device 1.
+              NetworkCardIndex: card,
+              DeviceIndex: card === 0 ? 0 : 1,
+              InterfaceType: 'efa',
               SubnetId: subnet,
               SecurityGroupId: groups.length ? groups : undefined,
-              AssociatePublicIpAddress: this.config.associatePublicIp,
+              // EC2 takes a public address only on a launch with one interface.
+              AssociatePublicIpAddress:
+                efaInterfaces === 1 ? this.config.associatePublicIp : undefined,
               DeleteOnTermination: true,
-            },
-          ]
+            }))
+          : [
+              {
+                DeviceIndex: 0,
+                SubnetId: subnet,
+                SecurityGroupId: groups.length ? groups : undefined,
+                AssociatePublicIpAddress: this.config.associatePublicIp,
+                DeleteOnTermination: true,
+              },
+            ]
         : undefined,
       SecurityGroupId: !subnet && groups.length ? groups : undefined,
       IamInstanceProfile: this.config.instanceProfile
