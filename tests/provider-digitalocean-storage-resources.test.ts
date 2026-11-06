@@ -324,13 +324,16 @@ describe('refusals and discovery', () => {
 
   it('a known key id wins over the name', async () => {
     const w = await world();
-    const created = await w.ensure('do.spaces-key', 'bc-key1', { grants: ['b-one:read'] }, w.ctx());
+    await w.ensure('do.spaces-bucket', 'b-one', { region: 'nyc3' }, w.ctx(), { labels });
+    const created = await w.ensure('do.spaces-key', 'bc-key1', { grants: ['nyc3/b-one:read'] }, w.ctx(), {
+      labels,
+    });
     const again = await w.ensure(
       'do.spaces-key',
       'bc-key-renamed-row',
-      { grants: ['b-one:readwrite'] },
+      { grants: ['nyc3/b-one:readwrite'] },
       w.ctx(),
-      { id: created.id },
+      { id: created.id, labels },
     );
     expect(again.id).toBe(created.id);
     expect(again.outputs?.grants).toBe('b-one:readwrite');
@@ -355,8 +358,8 @@ describe('refusals and discovery', () => {
         id: 'DOMINE000001',
         name: `${own}mine`,
         managedBy: 'this',
+        // A key records bucket names but not their regions: its spec cannot be read back.
         outputs: { accessKeyId: 'DOMINE000001', name: `${own}mine`, grants: 'b-one:read' },
-        spec: { grants: ['b-one:read'] },
       },
     ]);
 

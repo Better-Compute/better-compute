@@ -281,7 +281,7 @@ describe.skipIf(!enabled)('provider-digitalocean storage live', () => {
 
   it('issues a Spaces key whose grant reaches the bucket', { timeout: 180_000 }, async () => {
     const created = await resources.ensure(
-      { kind: 'do.spaces-key', name: keyName, spec: { grants: [`${bucket}:readwrite`] } },
+      { kind: 'do.spaces-key', name: keyName, spec: { grants: [`${region}/${bucket}:readwrite`] } },
       call('k1'),
     );
     expect(created.outputs?.grants).toBe(`${bucket}:readwrite`);

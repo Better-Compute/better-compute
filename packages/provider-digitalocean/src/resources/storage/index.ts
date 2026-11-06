@@ -27,6 +27,11 @@ export interface DoStorageOptions extends DoProviderOptions {
   spacesFetch?: typeof fetch;
   /** The Spaces endpoint of a region; default `https://<region>.digitaloceanspaces.com`. */
   spacesEndpoint?: (region: string) => string;
+  /**
+   * Allows `do.spaces-key` grants of `*:fullaccess` (every bucket of the account). Off by
+   * default: tenant keys are granted bucket by bucket. An operator-only code option.
+   */
+  spacesKeyFullAccess?: boolean;
 }
 
 /**
@@ -90,7 +95,13 @@ export function storageKindHandlers(
   const names = managedNames(managedNamePrefix(deployment));
   const spaces = spacesFor(config, context, options);
   return [
-    spacesKeyKind({ client, names }),
+    spacesKeyKind({
+      client,
+      names,
+      spaces,
+      deploymentTag: tag,
+      ...(options.spacesKeyFullAccess ? { allowFullAccess: true } : {}),
+    }),
     spacesBucketKind({ spaces, deploymentTag: tag, client }),
     cdnEndpointKind({ client, spaces, deploymentTag: tag }),
     containerRegistryKind(client, names),

@@ -1,5 +1,6 @@
-import { field, manifest, type CallContext } from '@better-compute/core';
+import { field, isComputeError, manifest, type CallContext } from '@better-compute/core';
 import type { DoClient } from '../../client/http.js';
+import type { SpacesClient } from '../../spaces/s3.js';
 import {
   hasCode,
   storageError,
@@ -7,6 +8,7 @@ import {
   type DoResourceState,
   type ManagedNames,
 } from './kind.js';
+import { otherTenant, readMarker, sameTenant } from './spaces-bucket.js';
 
 // `do.spaces-key`: a Spaces access key with per-bucket grants (`/v2/spaces/keys`). The access key
 // id is the resource id and a plain output (an identifier, as AWS treats key ids); the secret key
@@ -15,16 +17,30 @@ import {
 // deployment (`bc-<deployment hash>-…`, DO-D4, DO-D16): `ensure` and `delete` refuse a key named
 // for another deployment (`managedByAnother`) or for none (`notManaged`), and discovery reports
 // another deployment's keys as `managedBy: 'other'`.
+//
+// Grants are tenant isolation. A grant names a bucket by its do.spaces-bucket id
+// (`<region>/<bucket>:read|readwrite`), and before any create or regrant every granted bucket's
+// marker must name this deployment and the request's own tenant (`better-compute-tenant`), so a
+// tenant never mints a key for another tenant's bucket or the operator's. `*:fullaccess` (every
+// bucket in the account) is refused unless the operator turns it on in code
+// (`spacesKeyFullAccess`).
+//
+// A key is created only when the caller holds no id for it: one found by name alone is a create
+// whose answer (and secret) was lost, so a fresh key is created, and every other key with the name
+// is deleted, so the secret always comes back and no orphaned credential stays live.
 
-/** `<bucket>:read`, `<bucket>:readwrite`, or `*:fullaccess` (every bucket of the account). */
+/**
+ * `<region>/<bucket>:read`, `<region>/<bucket>:readwrite`, or `*:fullaccess` (every bucket of the
+ * account; operator-only).
+ */
 export const spacesGrantPattern =
-  /^(?:[a-z0-9][a-z0-9-]{1,61}[a-z0-9]:(?:read|readwrite)|\*:fullaccess)$/;
+  /^(?:[a-z]{3}[0-9]\/[a-z0-9][a-z0-9-]{1,61}[a-z0-9]:(?:read|readwrite)|\*:fullaccess)$/;
 
 export const spacesKeySpec = manifest({
   grants: field
     .list(field.string({ pattern: spacesGrantPattern }), { min: 1, max: 50 })
     .describe(
-      'What the key may do: <bucket>:read, <bucket>:readwrite, or *:fullaccess for every bucket',
+      'What the key may do: <region>/<bucket>:read or :readwrite on a bucket of the same tenant',
     ),
 });
 
@@ -45,14 +61,27 @@ interface DoSpacesKey {
   created_at?: string;
 }
 
-function toGrants(grants: readonly string[]): DoGrant[] {
+interface Grant extends DoGrant {
+  /** The bucket's region; absent for `*:fullaccess`. */
+  region?: string;
+}
+
+function parseGrants(grants: readonly string[]): Grant[] {
   const unique = [...new Set(grants)].sort();
   return unique.map((grant) => {
-    const [bucket, permission] = grant.split(':') as [string, DoGrant['permission']];
-    return { bucket: bucket === '*' ? '' : bucket, permission };
+    const colon = grant.lastIndexOf(':');
+    const target = grant.slice(0, colon);
+    const permission = grant.slice(colon + 1) as DoGrant['permission'];
+    if (target === '*') return { bucket: '', permission };
+    const [region, bucket] = target.split('/') as [string, string];
+    return { region, bucket, permission };
   });
 }
 
+const toDoGrants = (grants: readonly Grant[]): DoGrant[] =>
+  grants.map(({ bucket, permission }) => ({ bucket, permission }));
+
+/** DigitalOcean's view of the grants (bucket names only: a key does not record regions). */
 const grantKey = (grants: readonly DoGrant[] | undefined): string =>
   (grants ?? [])
     .map((g) => `${g.bucket || '*'}:${g.permission}`)
@@ -64,12 +93,6 @@ const outputsOf = (key: DoSpacesKey) => ({
   name: key.name,
   grants: grantKey(key.grants),
 });
-
-/** The key's grants in the spec's shape; undefined for a key without any (not a valid spec). */
-function specOf(key: DoSpacesKey): { grants: string[] } | undefined {
-  const grants = grantKey(key.grants);
-  return grants ? { grants: grants.split(',') } : undefined;
-}
 
 function state(key: DoSpacesKey, secret?: string): DoResourceState {
   return {
@@ -90,17 +113,21 @@ function checkAccessKey(id: string): void {
 export function spacesKeyKind(deps: {
   client: DoClient;
   names: ManagedNames;
+  /** The account's S3 client for a region: grants are checked against the buckets' markers. */
+  spaces: (region: string) => SpacesClient;
+  deploymentTag: string;
+  /** Allows `*:fullaccess` grants (every bucket of the account). Operator code only; default off. */
+  allowFullAccess?: boolean;
 }): DoResourceKind<SpacesKeySpec> {
   const { client, names } = deps;
-  async function byName(name: string, signal: AbortSignal): Promise<DoSpacesKey | undefined> {
-    let found: DoSpacesKey | undefined;
+
+  async function namedKeys(name: string, signal: AbortSignal): Promise<DoSpacesKey[]> {
+    const found: DoSpacesKey[] = [];
     for await (const key of client.pages<DoSpacesKey>('/spaces/keys', 'keys', {
       signal,
       budget: 'sweep',
     }))
-      // Two keys with one name (a create retried after its answer was lost): the oldest wins.
-      if (key.name === name && (!found || (key.created_at ?? '') < (found.created_at ?? '')))
-        found = key;
+      if (key.name === name) found.push(key);
     return found;
   }
 
@@ -118,10 +145,70 @@ export function spacesKeyKind(deps: {
     }
   }
 
+  /**
+   * Refuses (before any key is created or changed) a grant the caller may not hold: full access
+   * without the operator option, or a bucket that is not this deployment's and the caller's tenant's.
+   */
+  async function authorize(
+    grants: readonly Grant[],
+    labels: Readonly<Record<string, string>> | undefined,
+    signal: AbortSignal,
+  ): Promise<void> {
+    for (const grant of grants) {
+      if (grant.permission === 'fullaccess') {
+        if (!deps.allowFullAccess)
+          throw storageError(
+            'ACCESS_DENIED',
+            'A Spaces key with full access to every bucket is not allowed; grant buckets one by one',
+            'fullAccess',
+          );
+        continue;
+      }
+      const marker = await readMarker(
+        deps.spaces(grant.region!),
+        grant.bucket,
+        deps.deploymentTag,
+        signal,
+      );
+      if (marker.owner !== 'mine')
+        throw storageError(
+          'ACCESS_DENIED',
+          `Bucket ${grant.bucket} in ${grant.region} is not a bucket this deployment manages; no key may grant it`,
+          'grantBucket',
+        );
+      if (!sameTenant(marker, labels)) otherTenant(`Bucket ${grant.bucket}`);
+    }
+  }
+
+  /** Deletes every key with the name except the survivor (a create retried after a lost answer). */
+  async function reap(name: string, survivor: string, ctx: CallContext): Promise<void> {
+    try {
+      for (const key of await namedKeys(name, ctx.signal)) {
+        if (key.access_key === survivor) continue;
+        try {
+          await client.request('DELETE', `/spaces/keys/${key.access_key}`, {
+            signal: ctx.signal,
+            budget: 'mutate',
+          });
+          ctx.log.info('digitalocean.spaces-key.duplicate-deleted', { name });
+        } catch (error) {
+          if (!hasCode(error, 'NOT_FOUND')) throw error;
+        }
+      }
+    } catch (error) {
+      // The new key's secret must still reach the caller; the next create of the name reaps again.
+      ctx.log.warn('digitalocean.spaces-key.reap-failed', {
+        name,
+        code: isComputeError(error) ? error.code : 'UNKNOWN',
+      });
+    }
+  }
+
   return {
     kind: 'do.spaces-key',
     family: 'storage',
-    description: 'A Spaces access key with per-bucket read or read-write grants (its secret is a secret output)',
+    description:
+      "A Spaces access key with read or read-write grants on the tenant's own buckets (its secret is a secret output)",
     spec: spacesKeySpec as unknown as DoResourceKind<SpacesKeySpec>['spec'],
     outputs: ['accessKeyId', 'name', 'grants'],
     secretOutputs: ['secretKey'],
@@ -129,16 +216,18 @@ export function spacesKeyKind(deps: {
     updatable: ['grants'],
 
     async ensure(request, ctx: CallContext) {
-      const { spec, id } = request;
+      const { spec, id, labels } = request;
       const name = names.provider(request.name, 'A Spaces key');
-      const grants = toGrants(spec.grants);
-      // The key an earlier ensure answered wins over the name; one gone is created again.
-      const existing = (id !== undefined ? await read(id, ctx.signal) : undefined) ?? (await byName(name, ctx.signal));
+      const grants = parseGrants(spec.grants);
+      await authorize(grants, labels, ctx.signal);
+      // The key an earlier ensure answered (whose secret the caller sealed) is the one to keep.
+      const existing = id !== undefined ? await read(id, ctx.signal) : undefined;
       // Keys are owned by their names: an id naming another key changes nothing.
       if (existing) names.requireOwn(existing.name, 'Spaces key');
+      const wanted = toDoGrants(grants);
       if (!existing) {
         const created = await client.request<{ key: DoSpacesKey }>('POST', '/spaces/keys', {
-          body: { name, grants },
+          body: { name, grants: wanted },
           signal: ctx.signal,
           budget: 'mutate',
         });
@@ -149,22 +238,22 @@ export function spacesKeyKind(deps: {
             'badBody',
           );
         ctx.log.info('digitalocean.spaces-key.created', { name });
+        await reap(name, created.key.access_key, ctx);
         return state(created.key, created.key.secret_key);
       }
-      if (grantKey(existing.grants) === grantKey(grants)) return state(existing);
+      if (grantKey(existing.grants) === grantKey(wanted)) return state(existing);
       const updated = await client.request<{ key: DoSpacesKey }>(
         'PUT',
         `/spaces/keys/${existing.access_key}`,
-        { body: { name: existing.name, grants }, signal: ctx.signal, budget: 'mutate' },
+        { body: { name: existing.name, grants: wanted }, signal: ctx.signal, budget: 'mutate' },
       );
       return state(updated.key);
     },
 
+    // A key records bucket names but not their regions, so its spec cannot be read back.
     async get(id, ctx) {
       const key = await read(id, ctx.signal);
-      if (!key) return undefined;
-      const spec = specOf(key);
-      return { ...state(key), ...(spec ? { spec } : {}) };
+      return key ? state(key) : undefined;
     },
 
     async delete(id, ctx) {
@@ -187,14 +276,13 @@ export function spacesKeyKind(deps: {
         signal: ctx.signal,
         budget: 'sweep',
       })) {
-        const spec = specOf(key);
+        const owner = names.owner(key.name);
         yield {
           id: key.access_key,
           name: key.name,
           // Keys carry no tags: the name says which deployment manages one.
-          ...(names.owner(key.name) ? { managedBy: names.owner(key.name)! } : {}),
+          ...(owner ? { managedBy: owner } : {}),
           outputs: outputsOf(key),
-          ...(spec ? { spec } : {}),
         };
       }
     },
