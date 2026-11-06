@@ -507,7 +507,7 @@ export class AwsCompute implements ProviderImpl {
     const state = before.instance.child('instanceState')?.textOf('name');
     if (state === 'terminated' || state === 'shutting-down')
       throw new ComputeError('INVALID_STATE', `instance ${id} is ${state}`, undefined, { provider: 'aws', reason: state });
-    const wanted = [{ Key: tags.instance, Value: instanceId }];
+    const wanted: { Key: string; Value: string }[] = [{ Key: tags.instance, Value: instanceId }];
     if (options.managed) wanted.push({ Key: tags.managed, Value: 'true' });
     if (holder !== instanceId || (options.managed && before.tags.get(tags.managed) !== 'true'))
       await this.call('CreateTags', { ResourceId: [id], Tag: wanted }, context.signal);
