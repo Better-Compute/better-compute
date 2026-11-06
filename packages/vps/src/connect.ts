@@ -1,8 +1,5 @@
-import {
-  ComputeError,
-  type ProviderConnect,
-  type ProviderDefinition,
-} from '@better-compute/core';
+import { createHash } from 'node:crypto';
+import { ComputeError, type ProviderConnect, type ProviderDefinition } from '@better-compute/core';
 import { providerOf, type CreateAccountInput } from './accounts.js';
 import { name, object, tenant } from './input.js';
 
@@ -101,7 +98,9 @@ export function parseConnectAccount(raw: unknown): ConnectAccountInput {
     code: input.code,
     redirectUri: redirectUriOf(input.redirectUri),
     config: { ...(config as Record<string, unknown>) },
-    ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey as string } : {}),
+    ...(input.idempotencyKey !== undefined
+      ? { idempotencyKey: input.idempotencyKey as string }
+      : {}),
   };
 }
 
@@ -140,5 +139,66 @@ export function connectedCreate(
     name: input.name,
     config: { ...input.config, [field]: ref },
     ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+  };
+}
+
+/** A connect request whose admission check sealed its credential, waiting for the handler to store the account. */
+export interface StagedConnect {
+  request: CreateAccountInput;
+  accountId: string;
+  /** The sealed credential's ref. */
+  ref: string;
+  /** Deletes the sealed credential (the secret broker of the request that sealed it). */
+  discard: () => Promise<void>;
+  at: number;
+}
+
+/** How long a staged connect waits for its handler before its sealed credential is deleted. */
+export const connectStageMs = 15 * 60_000;
+
+/**
+ * The connect requests between their admission check and their handler, by what the request is (tenant, provider,
+ * name, the single-use code and the redirect URI), not by the parsed input object: a composite call re-validates
+ * the raw input into a new object between `check` and `invoke`. A request that never reaches its handler (a
+ * cancelled request, a replay) is discarded, sealed credential and all, once it is older than `connectStageMs`.
+ */
+export function connectStaging(now: () => number) {
+  const staged = new Map<string, StagedConnect>();
+  const keyOf = (input: ConnectAccountInput): string =>
+    createHash('sha256')
+      .update(
+        JSON.stringify([input.tenantId, input.provider, input.name, input.code, input.redirectUri]),
+      )
+      .digest('hex');
+  const discard = async (entry: StagedConnect) => {
+    await entry.discard().catch(() => {});
+  };
+  return {
+    async put(input: ConnectAccountInput, entry: Omit<StagedConnect, 'at'>): Promise<void> {
+      const at = now();
+      for (const [key, old] of staged)
+        if (at - old.at > connectStageMs) {
+          staged.delete(key);
+          await discard(old);
+        }
+      const key = keyOf(input);
+      const previous = staged.get(key);
+      staged.set(key, { ...entry, at });
+      if (previous && previous.ref !== entry.ref) await discard(previous);
+    },
+    get: (input: ConnectAccountInput): StagedConnect | undefined => staged.get(keyOf(input)),
+    /** The account is stored: forget the request, keeping its credential. */
+    done(input: ConnectAccountInput): void {
+      staged.delete(keyOf(input));
+    },
+    /** The request failed: forget it and delete its sealed credential. */
+    async abandon(input: ConnectAccountInput): Promise<void> {
+      const key = keyOf(input);
+      const entry = staged.get(key);
+      if (!entry) return;
+      staged.delete(key);
+      await discard(entry);
+    },
+    size: () => staged.size,
   };
 }

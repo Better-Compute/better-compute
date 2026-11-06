@@ -8,7 +8,7 @@ import {
   rotateInto,
 } from '@better-compute/provider-digitalocean';
 import { closeFixtures, computeFixture } from '@better-compute/testing';
-import { vps } from '@better-compute/vps';
+import { connectStageMs, connectStaging, vps } from '@better-compute/vps';
 import { DoEmulator } from './support/do-emulator/index.js';
 import { OAuthEmulator } from './support/do-emulator/oauth.js';
 
@@ -126,7 +126,9 @@ describe('providerAccounts.connect (DigitalOcean OAuth)', () => {
       idempotencyKey: 'connect-1',
     });
     expect(again.id).toBe(account.id);
-    expect(oauth.requests.filter((r) => r.params.get('grant_type') === 'authorization_code')).toHaveLength(1);
+    expect(
+      oauth.requests.filter((r) => r.params.get('grant_type') === 'authorization_code'),
+    ).toHaveLength(1);
 
     // The account works: its first request exchanges the refresh token, and the rotation is written over the same
     // ref, for the account's tenant.
@@ -138,7 +140,14 @@ describe('providerAccounts.connect (DigitalOcean OAuth)', () => {
     expect(rotated.get(ref)).toEqual({ tenantId: tenants.acme.id, value: 'refresh-2' });
 
     const visible = JSON.stringify([account, again, check, lines]);
-    for (const secret of ['refresh-1', 'refresh-2', 'access-1', 'access-2', 'client-secret-1', 'code-1'])
+    for (const secret of [
+      'refresh-1',
+      'refresh-2',
+      'access-1',
+      'access-2',
+      'client-secret-1',
+      'code-1',
+    ])
       expect(visible).not.toContain(secret);
   });
 
@@ -171,7 +180,24 @@ describe('providerAccounts.connect (DigitalOcean OAuth)', () => {
       [tenants.acme.id],
     );
     expect(sealed.rows[0]!.n).toBe(0);
-    expect((await call.providerAccounts.list(acme, { tenantId: tenants.acme.id })).items).toEqual([]);
+    expect((await call.providerAccounts.list(acme, { tenantId: tenants.acme.id })).items).toEqual(
+      [],
+    );
+
+    // The exchange and the account check pass, then storing fails (the name is taken): the sealed refresh token is
+    // deleted again, and only the stored account's credential stays sealed.
+    oauth.codes.set('code-3', REDIRECT);
+    const first = await connect({ code: 'code-3', name: 'do-taken' });
+    oauth.codes.set('code-4', REDIRECT);
+    await expect(connect({ code: 'code-4', name: 'do-taken' })).rejects.toMatchObject({
+      code: 'CONFLICT',
+    });
+    expect(oauth.requests.filter((r) => r.params.get('code') === 'code-4')).toHaveLength(1);
+    const left = await fixture.database.query<{ ref: string }>(
+      'SELECT ref FROM sealed_secrets WHERE tenant_id = $1',
+      [tenants.acme.id],
+    );
+    expect(left.rows.map((row) => row.ref)).toEqual([first.config.refreshToken]);
 
     const bare = await world({ redirectUris: [] });
     await expect(
@@ -182,6 +208,46 @@ describe('providerAccounts.connect (DigitalOcean OAuth)', () => {
         state: 'state-0123456789abcdef',
       }),
     ).rejects.toMatchObject({ code: 'UNSUPPORTED' });
+  });
+});
+
+describe('connectStaging', () => {
+  const input = {
+    tenantId: 't1',
+    provider: 'digitalocean',
+    name: 'do-main',
+    code: 'code-1',
+    redirectUri: REDIRECT,
+    config: {},
+  };
+  it('finds a request by what it is, so a re-validated input (a composite) reaches it', async () => {
+    let now = 0;
+    const discarded: string[] = [];
+    const staging = connectStaging(() => now);
+    const stage = (ref: string, of = input) =>
+      staging.put(of, {
+        request: { tenantId: 't1', provider: 'digitalocean', name: 'do-main', config: {} },
+        accountId: 'pacct_1',
+        ref,
+        discard: async () => void discarded.push(ref),
+      });
+    await stage('secret://t1/a');
+    expect(staging.get({ ...input, config: {} })?.ref).toBe('secret://t1/a');
+    expect(staging.get({ ...input, code: 'code-2' })).toBeUndefined();
+    // The handler failed: the request's sealed credential is deleted.
+    await staging.abandon({ ...input });
+    expect(discarded).toEqual(['secret://t1/a']);
+    expect(staging.size()).toBe(0);
+
+    // A stored account keeps its credential.
+    await stage('secret://t1/b');
+    staging.done({ ...input });
+    // A request that never reached its handler is discarded once it goes stale.
+    await stage('secret://t1/c', { ...input, code: 'code-3' });
+    now += connectStageMs + 1;
+    await stage('secret://t1/d', { ...input, code: 'code-4' });
+    expect(discarded).toEqual(['secret://t1/a', 'secret://t1/c']);
+    expect(staging.size()).toBe(1);
   });
 });
 

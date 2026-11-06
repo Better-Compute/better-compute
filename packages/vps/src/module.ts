@@ -53,6 +53,7 @@ import {
   assertConnectConfig,
   connectedCreate,
   connectOf,
+  connectStaging,
   parseConnectAccount,
   parseConnectSetup,
   type ConnectAccountInput,
@@ -818,9 +819,11 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
   };
   /**
    * `providerAccounts.connect` (P9): the create request each connect becomes once its admission check sealed the
-   * credential (by its parsed input), and the account id it gets, drawn once per request as create's is.
+   * credential (staged by what the request is, so a composite's re-validated input finds it, and discarded with
+   * its sealed credential when the request fails or never reaches its handler), and the account id it gets, drawn
+   * once per request as create's is.
    */
-  const connectedRequests = new WeakMap<ConnectAccountInput, CreateAccountInput>();
+  const connectStaged = connectStaging(() => Date.now());
   const connectIds = new WeakMap<ConnectAccountInput, string>();
   const connectAccountId = async (
     context: ModuleContext & { caller?: { identityId: string } },
@@ -1485,9 +1488,10 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
             });
             const ref = await secrets.put(input.tenantId, connection.secret);
             const request = connectedCreate(input, connect.field, ref);
+            const accountId = await connectAccountId(context, input);
             try {
               await accountAdmissionCheck(context, request, {
-                id: await connectAccountId(context, input),
+                id: accountId,
                 tenantId: input.tenantId,
                 name: input.name,
               });
@@ -1495,35 +1499,41 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
               await secrets.delete?.(ref).catch(() => {});
               throw error;
             }
-            connectedRequests.set(input, request);
+            await connectStaged.put(input, {
+              request,
+              accountId,
+              ref,
+              discard: async () => {
+                await secrets.delete?.(ref);
+              },
+            });
+          },
+          // Transaction 2 failed (the handler threw, e.g. the name is taken): the sealed credential goes too.
+          async abandoned(_context, input) {
+            await connectStaged.abandon(input);
           },
         },
         handler: async (context, input) => {
-          const request = connectedRequests.get(input);
-          if (!request)
+          const staged = connectStaged.get(input);
+          if (!staged)
             throw new ComputeError('INTERNAL_ERROR', 'The connect request was not checked');
-          const ref = (request.config as Record<string, SecretRef>)[
-            connectOf(providers, input.provider).field
-          ]!;
-          let account: ProviderAccount;
-          try {
-            account = await createAccount(
-              context.sql,
-              providers,
-              request,
-              await connectAccountId(context, input),
-              accountCheck(context),
-            );
-          } catch (error) {
-            await context.secrets?.delete?.(ref).catch(() => {});
-            throw error;
-          }
+          // A throw here leaves the request staged: `abandoned` deletes the sealed credential once this transaction
+          // has rolled back (a delete inside it could roll back with it), and a composite's failed call is
+          // discarded when it goes stale.
+          const account: ProviderAccount = await createAccount(
+            context.sql,
+            providers,
+            staged.request,
+            staged.accountId,
+            accountCheck(context),
+          );
           await context.authz.upsert(context.sql, {
             type: 'provider-account',
             id: account.id,
             tenantId: account.tenantId,
             attributes: { provider: account.provider },
           });
+          connectStaged.done(input);
           return account;
         },
       }),
