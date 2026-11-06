@@ -1070,8 +1070,12 @@ export class AwsNetworks implements ProviderNetworks {
           'error',
           `A deny rule needs a network better-compute made; ${vpc.id} is adopted`,
         );
+      // A rule that was an allow before keeps no security group rules.
+      await this.#applyRules(spec.name, network, [], signal);
       return this.#ensureDeny(spec, vpc.id, signal);
     }
+    // A rule that was a deny before keeps no ACL entries.
+    if (network) await this.#releaseDenyEntries(spec.name, vpc.id, signal);
     if (!targeted && !network)
       return state(
         spec.name,
@@ -1333,6 +1337,22 @@ export class AwsNetworks implements ProviderNetworks {
       }
     }
     return state(spec.name, 'ready');
+  }
+
+  /** Removes every ACL entry of the VPC's network ACL that `firewall` owns. */
+  async #releaseDenyEntries(firewall: string, vpcId: string, signal: AbortSignal): Promise<void> {
+    const acl = await this.#defaultAcl(vpcId, signal);
+    const aclId = acl?.textOf('networkAclId');
+    if (!acl || !aclId) return;
+    const entries = parseAclEntries(acl);
+    for (const owned of ownedEntries(acl).filter((entry) => entry.firewall === firewall))
+      await this.#removeDenyEntry(
+        aclId,
+        owned.number,
+        owned.egress,
+        signal,
+        entries.some((e) => e.number === owned.number && e.egress === owned.egress),
+      );
   }
 
   /** Deletes an owned entry, then its owner tag. */

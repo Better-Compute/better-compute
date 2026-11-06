@@ -877,3 +877,30 @@ describe('networks: aws iam-policy --phases', () => {
     await expect(run('A9')).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
 });
+
+describe('networks: a rule that changes action', () => {
+  it('moves between security group rules and ACL entries without leaving the old ones', async () => {
+    const w = await world();
+    await w.settle(() => w.networks.ensureNetwork({ name: 'bc-net-1' }, w.call()));
+    const acl = w.vpc.defaultNacl(w.vpc.vpcByName('bc-net-1')!.id);
+    const spec: ProviderFirewallSpec = {
+      network: 'bc-net-1',
+      name: 'bc-fw-1',
+      direction: 'ingress',
+      action: 'allow',
+      priority: 1000,
+      rules: [{ protocol: 'tcp', ports: ['22'] }],
+      sources: ['0.0.0.0/0'],
+    };
+    const ruleCount = () =>
+      [...w.vpc.rules.values()].filter((r) => r.tags.has('better-compute:firewall:bc-fw-1')).length;
+    const denies = () => acl.entries.filter((e) => e.action === 'deny').length;
+    await w.networks.ensureFirewall(spec, w.call());
+    expect([ruleCount(), denies()]).toEqual([1, 0]);
+    await w.networks.ensureFirewall({ ...spec, action: 'deny' }, w.call());
+    expect([ruleCount(), denies()]).toEqual([0, 1]);
+    await w.networks.ensureFirewall(spec, w.call());
+    expect([ruleCount(), denies()]).toEqual([1, 0]);
+    expect([...acl.tags.keys()].some((k) => k.startsWith('better-compute:deny:'))).toBe(false);
+  });
+});
