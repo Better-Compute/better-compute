@@ -172,6 +172,50 @@ func TestNoNetworkCallOffEC2(t *testing.T) {
 	}
 }
 
+// writeDMI writes one more /sys file under a dmiRoot.
+func writeDMI(t *testing.T, root, rel, value string) {
+	t.Helper()
+	p := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(value+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Previous-generation (Xen) instance types (t2, m4, c4, r4, non-metal i3) report sys_vendor "Xen";
+// EC2 marks them in the BIOS version ("4.11.amazon") and the hypervisor and product UUIDs ("ec2…").
+// Local files only, still before any network call; a Xen host without those marks is not EC2.
+func TestOnEC2RecognisesXenInstances(t *testing.T) {
+	bios := dmiRoot(t, "Xen")
+	writeDMI(t, bios, "sys/class/dmi/id/bios_version", "4.11.amazon")
+	hyper := dmiRoot(t, "Xen")
+	writeDMI(t, hyper, "sys/hypervisor/uuid", "ec2e1916-9099-7caf-fd21-012345678901")
+	product := dmiRoot(t, "Xen")
+	writeDMI(t, product, "sys/class/dmi/id/product_uuid", "EC2E1916-9099-7CAF-FD21-012345678901")
+	for name, root := range map[string]string{"bios_version": bios, "hypervisor uuid": hyper, "product_uuid": product} {
+		if !OnEC2(root) {
+			t.Errorf("Xen EC2 by %s: not recognised", name)
+		}
+	}
+	plain := dmiRoot(t, "Xen")
+	writeDMI(t, plain, "sys/class/dmi/id/bios_version", "4.2.5")
+	writeDMI(t, plain, "sys/hypervisor/uuid", "3fa1e5b2-0000-0000-0000-000000000000")
+	notXen := dmiRoot(t, "QEMU")
+	writeDMI(t, notXen, "sys/class/dmi/id/bios_version", "1.amazon")
+	for name, root := range map[string]string{"plain Xen": plain, "QEMU with an amazon BIOS": notXen} {
+		f, srv := newFakeIMDS(t)
+		c := &Client{Root: root, Endpoint: srv.URL}
+		if OnEC2(root) {
+			t.Errorf("%s: taken for EC2", name)
+		}
+		if _, err := c.Get(context.Background(), "/latest/meta-data/instance-id"); !errors.Is(err, ErrNotEC2) || len(f.log()) != 0 {
+			t.Errorf("%s: err %v, %d requests", name, err, len(f.log()))
+		}
+	}
+}
+
 func TestExpiredTokenIsRenewedOnce(t *testing.T) {
 	f, srv := newFakeIMDS(t)
 	f.paths["/latest/meta-data/instance-id"] = "i-0123456789abcdef0"

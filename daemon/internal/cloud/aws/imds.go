@@ -3,8 +3,9 @@
 // interruption notice.
 //
 // Nothing here talks to the network before the DMI says the machine is EC2 (sys_vendor
-// "Amazon EC2", which every Nitro instance and every *.metal reports): bcd on any other host never
-// probes 169.254.169.254. The endpoint is fixed; Client.Endpoint is a Go option for tests, never
+// "Amazon EC2", which every Nitro instance and every *.metal reports, or "Xen" with EC2's BIOS
+// version or UUID on previous-generation types): bcd on any other host never probes
+// 169.254.169.254. The endpoint is fixed; Client.Endpoint is a Go option for tests, never
 // configuration or an environment variable, so no config text points the daemon elsewhere.
 package aws
 
@@ -52,19 +53,40 @@ const maxAnswer = 32 << 10
 // EC2SysVendor is /sys/class/dmi/id/sys_vendor on an EC2 instance.
 const EC2SysVendor = "Amazon EC2"
 
+// XenSysVendor is /sys/class/dmi/id/sys_vendor on a previous-generation (Xen) EC2 instance (t2,
+// m4, c4, r4, non-metal i3), and on any other Xen guest.
+const XenSysVendor = "Xen"
+
 // ErrNotEC2 is returned, before any network call, on a host whose DMI is not EC2's.
-var ErrNotEC2 = errors.New("aws: this host is not an EC2 instance (DMI sys_vendor is not \"Amazon EC2\")")
+var ErrNotEC2 = errors.New("aws: this host is not an EC2 instance (DMI sys_vendor is not \"Amazon EC2\", nor \"Xen\" with EC2's BIOS version or UUID)")
 
 // ErrNotFound is a metadata path the instance does not have (404), e.g. no spot notice.
 var ErrNotFound = errors.New("aws: metadata path not found")
 
-// OnEC2 reports whether the DMI under root names EC2. It reads only the local file.
+// OnEC2 reports whether the DMI under root names EC2: sys_vendor "Amazon EC2" (every Nitro instance
+// and every *.metal), or "Xen" with EC2's marks (bios_version containing "amazon", or the
+// hypervisor or product UUID starting with "ec2"). It reads only local files.
 func OnEC2(root string) bool {
 	if root == "" {
 		root = "/"
 	}
-	raw, err := os.ReadFile(filepath.Join(root, "sys", "class", "dmi", "id", "sys_vendor"))
-	return err == nil && strings.TrimSpace(string(raw)) == EC2SysVendor
+	read := func(parts ...string) string {
+		raw, err := os.ReadFile(filepath.Join(append([]string{root}, parts...)...))
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(raw))
+	}
+	dmi := func(name string) string { return strings.ToLower(read("sys", "class", "dmi", "id", name)) }
+	switch read("sys", "class", "dmi", "id", "sys_vendor") {
+	case EC2SysVendor:
+		return true
+	case XenSysVendor:
+		return strings.Contains(dmi("bios_version"), "amazon") ||
+			strings.HasPrefix(strings.ToLower(read("sys", "hypervisor", "uuid")), "ec2") ||
+			strings.HasPrefix(dmi("product_uuid"), "ec2")
+	}
+	return false
 }
 
 // Client is an IMDSv2 client. The zero value works on an EC2 host.

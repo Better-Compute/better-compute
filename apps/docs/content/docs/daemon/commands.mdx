@@ -240,7 +240,7 @@ Joins this machine to the fleet and writes `node.key` and `identity.json` under 
 | `--token-file` | | Read the token from this file: a regular file, mode 0600 or 0400 (others may not read it), at most 4 KiB. Removed once the join succeeds or the machine had already joined; a read-only mount only logs a warning |
 | `--node-id` | | The node an installed OS must join as; implies `--attestor provisioned`. A different identity exits 1 |
 | `--server` | | The control plane URL (`https://`): its `/.well-known/better-compute` supplies the join key when `join-encryption.jwk` is absent, and the gateway when `config.toml` is |
-| `--attestor` | `join-token` | `tpm` joins with the host's TPM (`/dev/tpmrm0`) and no token; `cloud-iid` with an EC2 instance's signed identity document and no token (exits 1 off EC2, before any metadata request); `provisioned` with `--node-id`. `tpm` or `cloud-iid` with `--token-file` exits 2 |
+| `--attestor` | `join-token` | `tpm` joins with the host's TPM (`/dev/tpmrm0`) and no token; `cloud-iid` with an EC2 instance's signed identity document and no token (exits 1 off EC2, before any metadata request; EC2 is the DMI `sys_vendor` `Amazon EC2`, or `Xen` with EC2's BIOS version or UUID on previous-generation types such as t2 and m4); `provisioned` with `--node-id`. `tpm` or `cloud-iid` with `--token-file` exits 2 |
 | `--serving-ca-pin` | | `sha256/<base64>`; required with `--server` and no `config.toml` (host builds). With a `config.toml` it must equal `serving_ca_spki_pin` |
 | `--join-signing-pin` | | Same, for `join_signing_key_pin` |
 | `--join-encryption-pin` | | Same, for `join_encryption_key_pin` |
