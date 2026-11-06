@@ -79,3 +79,14 @@ func TestJoinCloudIidTakesNoToken(t *testing.T) {
 		t.Fatal("BCD_JOIN_TOKEN still set after a cloud-iid join")
 	}
 }
+
+func TestCloudHostOnlyOnEC2(t *testing.T) {
+	hits := fakeCloud(t, "QEMU")
+	if cloudHost() != nil || hits.Load() != 0 {
+		t.Fatal("a cloud host off EC2")
+	}
+	fakeCloud(t, "Amazon EC2")
+	if cloudHost() == nil {
+		t.Fatal("no cloud host on EC2")
+	}
+}

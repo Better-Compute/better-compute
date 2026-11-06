@@ -132,7 +132,7 @@ func (a *Agent) runInventoryRefresh(_ context.Context, cmd dispatch.Command) (jo
 	if err := payloadOf(cmd, req); err != nil {
 		return journal.Result{}, err
 	}
-	known := map[string]bool{"images": true}
+	known := map[string]bool{"images": true, cloudSectionName: true}
 	for _, n := range inventory.SectionNames() {
 		known[n] = true
 	}
@@ -340,6 +340,12 @@ func (a *Agent) collect(rescan bool) ([]inventory.Section, error) {
 		}
 		sum := sha256.Sum256(content)
 		sections = append(sections, inventory.Section{Name: "images", Content: content, Sha256: sum[:]})
+	}
+	// The "cloud" section (AWS A6): the instance this node is, once its metadata was read.
+	if cloud, ok, err := a.cloudSectionLocked(); err != nil {
+		return nil, err
+	} else if ok {
+		sections = append(sections, cloud)
 	}
 	a.inv = inv
 	a.collected = sections

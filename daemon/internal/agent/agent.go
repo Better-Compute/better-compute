@@ -133,6 +133,11 @@ type Options struct {
 	// BalloonFloor is the share of its memory a ballooned guest always keeps ([instances]
 	// balloon_floor_percent; 0: half).
 	BalloonFloor float64
+	// Cloud is the cloud instance this node is (EC2: cloud/aws), reported as the "cloud" inventory
+	// section; nil off a cloud.
+	Cloud Cloud
+	// CloudRetry is the first wait before the cloud metadata is read again (default 5 s, doubling).
+	CloudRetry time.Duration
 }
 
 // Agent is the node agent.
@@ -230,6 +235,8 @@ type Agent struct {
 	invMu     sync.Mutex
 	inv       *inventory.NodeInventory
 	collected []inventory.Section
+	// cloud is the cloud section once read (Options.Cloud).
+	cloud *agentv1.CloudSection
 	// hashesChanged: a re-collection sent changed sections; the next heartbeat carries the hashes
 	// (the gateway applies an inventory only once the hashes and the sections agree).
 	hashesChanged atomic.Bool
@@ -258,6 +265,9 @@ func New(o Options) (*Agent, error) {
 	}
 	if o.WelcomeTimeout == 0 {
 		o.WelcomeTimeout = 30 * time.Second
+	}
+	if o.CloudRetry == 0 {
+		o.CloudRetry = 5 * time.Second
 	}
 	bootID, err := o.Host.BootID()
 	if err != nil {
@@ -402,6 +412,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		a.log.Warn("journal sweep failed", "error", err.Error())
 	} else if n > 0 {
 		a.log.Info("journal swept", "removed", n)
+	}
+	if a.o.Cloud != nil && !a.loadCloud(ctx) {
+		go a.cloudLoop(ctx)
 	}
 	if _, err := a.collect(true); err != nil {
 		a.log.Warn("inventory collection failed", "error", err.Error())

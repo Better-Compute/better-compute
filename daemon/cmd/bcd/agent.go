@@ -571,6 +571,12 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		// A fakehw build writes under its fake root and needs no privilege.
 		Unprivileged: !devBuild && mode == "node" && os.Geteuid() != 0 && !underHelper,
 	}
+	if mode == "node" {
+		// On EC2 (DMI): the "cloud" inventory section and, on spot, the interruption notice.
+		if c := cloudHost(); c != nil {
+			opts.Cloud = c
+		}
+	}
 	if d, err := time.ParseDuration(os.Getenv("BCD_RENEW_AFTER")); devBuild && err == nil {
 		opts.RenewAfter = d // fakehw builds only: renew soon after start (e2e)
 	}
