@@ -630,6 +630,26 @@ export interface Offer {
   pricePerHour?: number;
   currency?: string;
   available: boolean;
+  /** (AWS A3) How the capacity is bought. Absent: on-demand. */
+  market?: OfferMarket;
+  /** (AWS A3) The CPU architecture of the machine type, when the provider reports it. */
+  arch?: 'x86_64' | 'arm64';
+  /**
+   * (AWS A3) Free slots when known: what a reservation has left, or the quota headroom in machines of
+   * this shape. Absent: unknown (unbounded as far as the offer can tell).
+   */
+  count?: number;
+}
+
+/** (AWS A3) The market an offer's capacity comes from. */
+export type OfferMarket = 'on-demand' | 'spot' | 'reserved' | 'capacity-block';
+
+/** (AWS A3) A notice that the provider will take a machine away, or has. */
+export interface MachineInterruption {
+  kind: 'spot' | 'capacity-block-end' | 'maintenance';
+  /** When it happens (or happened), epoch ms. */
+  at: number;
+  action?: 'terminate' | 'stop' | 'hibernate';
 }
 
 /** A provider image id, or a catalog image `name@version`. */
@@ -682,6 +702,34 @@ export interface ExternalMachine {
   createdAt?: number;
   /** The better-compute instance id the provider's ownership label names, if any. */
   claimedBy?: string;
+  /** (AWS A3) The market the machine's capacity comes from. Absent: on-demand. */
+  market?: OfferMarket;
+  /** (AWS A3) A pending or past interruption of the machine (a Spot reclaim, a Capacity Block's end). */
+  interruption?: MachineInterruption;
+}
+
+/** (AWS A3) What `listReservationOfferings` searches for: capacity that can be bought. */
+export interface ReservationOfferingQuery {
+  instanceType: string;
+  count: number;
+  durationHours: number;
+  /** Epoch ms bounds on the start; absent: as soon as possible. */
+  earliestStart?: number;
+  latestStart?: number;
+}
+
+/** (AWS A3) Capacity a provider sells ahead of time (a Capacity Block offering, an ODCR to create). */
+export interface ReservationOffering {
+  /** The id `purchaseReservation` takes. */
+  id: string;
+  instanceType: string;
+  zone: string;
+  count: number;
+  startsAt: number;
+  endsAt: number;
+  /** What the purchase charges up front; 0 when the capacity is billed as it runs. */
+  upfrontPrice: number;
+  currency: string;
 }
 
 /** A provider capacity reservation (GCE reservations and the like), as the provider reports it. */
@@ -1039,6 +1087,16 @@ export interface ProviderImpl {
   /** Removes the ownership label if it names `instanceId`. */
   release?(id: string, instanceId: string, context: CallContext): Promise<void>;
   listReservations?(context: CallContext): Promise<ExternalReservation[]>;
+  /** (AWS A3) Capacity the account could buy that matches `query`. A read; it never spends. */
+  listReservationOfferings?(
+    query: ReservationOfferingQuery,
+    context: CallContext,
+  ): Promise<ReservationOffering[]>;
+  /**
+   * (AWS A3) Buys an offering. **Spends money.** vps calls it only for a root caller, after
+   * confirmation, with a stable `idempotencyKey`, so a retried purchase buys once.
+   */
+  purchaseReservation?(offeringId: string, context: CallContext): Promise<ExternalReservation>;
   /**
    * (platform compute billing) The provider's list prices, for the regions asked (all when absent). A provider
    * caches what it reads; the prices are the provider's, before any margin.
