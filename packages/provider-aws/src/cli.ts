@@ -56,6 +56,12 @@ export function iamPolicy(
     eksNodeRoleArn?: string;
     /** (kubernetes) The accounts' `eksNodeInstanceProfile`: iam:PassRole of its role to EC2. */
     eksNodeInstanceProfileArn?: string;
+    /**
+     * (kubernetes) Lets the role give itself the cluster-admin access entry on clusters better-compute
+     * did not create (credentials on adopted clusters). Without it, only on clusters tagged
+     * `better-compute:managed=true`.
+     */
+    eksAdoptClusters?: boolean;
   } = {},
 ): IamPolicyDocument {
   const partition = options.partition ?? 'aws';
@@ -247,7 +253,7 @@ function eksStatements(
   partition: AwsPartition,
   region: string,
   account: string,
-  options: { eksClusterRoleArn?: string; eksNodeRoleArn?: string },
+  options: { eksClusterRoleArn?: string; eksNodeRoleArn?: string; eksAdoptClusters?: boolean },
 ): IamStatement[] {
   const roles: string[] = [];
   for (const [flag, value] of [
@@ -271,6 +277,15 @@ function eksStatements(
   const clusters = eks('cluster/*');
   const nodegroups = eks('nodegroup/*/*/*');
   const managed = { StringEquals: { [`aws:ResourceTag/${tags.managed}`]: 'true' } };
+  const accessEntries = eks('access-entry/*/*/*/*/*');
+  // The caller's own principal only; and unless the account adopts clusters, only on clusters (and
+  // access entries) tagged managed: never cluster-admin on a cluster of the account it did not make.
+  const ownEntry = {
+    StringEquals: {
+      'eks:principalArn': '${aws:PrincipalArn}',
+      ...(options.eksAdoptClusters ? {} : { [`aws:ResourceTag/${tags.managed}`]: 'true' }),
+    },
+  };
   return [
     {
       Sid: 'EksRead',
@@ -292,7 +307,7 @@ function eksStatements(
       Sid: 'EksCreateTagged',
       Effect: 'Allow',
       Action: ['eks:CreateCluster', 'eks:CreateNodegroup', 'eks:TagResource'],
-      Resource: [clusters, nodegroups],
+      Resource: [clusters, nodegroups, accessEntries],
       Condition: { StringEquals: { [`aws:RequestTag/${tags.managed}`]: 'true' } },
     },
     {
@@ -309,11 +324,13 @@ function eksStatements(
       Condition: managed,
     },
     {
+      // CreateAccessEntry authorizes on the cluster (its tags), AssociateAccessPolicy on the entry,
+      // which the driver creates tagged managed.
       Sid: 'EksOwnAccessEntry',
       Effect: 'Allow',
       Action: ['eks:CreateAccessEntry', 'eks:AssociateAccessPolicy'],
-      Resource: [clusters, eks('access-entry/*/*/*/*/*')],
-      Condition: { StringEquals: { 'eks:principalArn': '${aws:PrincipalArn}' } },
+      Resource: [clusters, accessEntries],
+      Condition: ownEntry,
     },
     {
       Sid: 'EksAdminPolicyOnly',
@@ -481,6 +498,11 @@ export function awsIamPolicyCommand() {
         value: 'ARN',
         description: 'The accounts eksNodeRoleArn (adds managed Kubernetes on EKS)',
       },
+      'eks-adopt-clusters': {
+        type: 'boolean' as const,
+        description:
+          'Let the role make itself cluster-admin (access entry) on EKS clusters better-compute did not create',
+      },
       'eks-node-instance-profile': {
         type: 'string' as const,
         value: 'ARN',
@@ -509,6 +531,7 @@ export function awsIamPolicyCommand() {
           ...(text(context.flags['eks-node-role'])
             ? { eksNodeRoleArn: text(context.flags['eks-node-role'])! }
             : {}),
+          ...(context.flags['eks-adopt-clusters'] === true ? { eksAdoptClusters: true } : {}),
           ...(text(context.flags['eks-node-instance-profile'])
             ? { eksNodeInstanceProfileArn: text(context.flags['eks-node-instance-profile'])! }
             : {}),

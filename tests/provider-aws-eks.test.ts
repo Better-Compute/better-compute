@@ -617,6 +617,8 @@ describe('eks credentials', () => {
     expect(bodyOf(s, 'CreateAccessEntry')).toEqual({
       principalArn: 'arn:aws:iam::111111111111:role/bc-control-plane',
       type: 'STANDARD',
+      // The IAM policy associates access policies only with entries tagged so.
+      tags: { 'better-compute:managed': 'true' },
     });
     expect(bodyOf(s, 'AssociateAccessPolicy')).toEqual({
       policyArn: 'arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy',
@@ -719,7 +721,25 @@ describe('eks IAM policy', () => {
       StringEquals: { 'aws:ResourceTag/better-compute:managed': 'true' },
     });
     expect(by('EksManageOwned').Resource).toContain('arn:aws:eks:us-east-1:111111111111:cluster/*');
-    expect(by('EksOwnAccessEntry').Condition).toEqual({
+    // Its own principal, and only on clusters (and entries) better-compute manages: never
+    // cluster-admin on every cluster of a BYO account.
+    expect(by('EksOwnAccessEntry')).toMatchObject({
+      Action: ['eks:CreateAccessEntry', 'eks:AssociateAccessPolicy'],
+      Resource: [
+        'arn:aws:eks:us-east-1:111111111111:cluster/*',
+        'arn:aws:eks:us-east-1:111111111111:access-entry/*/*/*/*/*',
+      ],
+      Condition: {
+        StringEquals: {
+          'eks:principalArn': '${aws:PrincipalArn}',
+          'aws:ResourceTag/better-compute:managed': 'true',
+        },
+      },
+    });
+    expect(by('EksCreateTagged').Resource).toContain('arn:aws:eks:us-east-1:111111111111:access-entry/*/*/*/*/*');
+    // Adopting clusters better-compute did not create is an explicit opt-in.
+    const adopt = iamPolicy({ region, account: '111111111111', eksClusterRoleArn: clusterRoleArn, eksAdoptClusters: true });
+    expect(adopt.Statement.find((statement) => statement.Sid === 'EksOwnAccessEntry')!.Condition).toEqual({
       StringEquals: { 'eks:principalArn': '${aws:PrincipalArn}' },
     });
     expect(by('EksAdminPolicyOnly')).toMatchObject({ Effect: 'Deny', Action: 'eks:AssociateAccessPolicy' });

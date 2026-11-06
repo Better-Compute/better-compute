@@ -7,6 +7,7 @@ import {
   type KubernetesCredentials,
 } from '@better-compute/core';
 import { parseArn, type AwsPartition } from '@better-compute/aws-core';
+import { tags } from '../ids.js';
 import { invalid, type EksClient, type EksCluster } from './client.js';
 import type { KubeResponse, KubeTransport } from './transport.js';
 
@@ -36,6 +37,7 @@ import type { KubeResponse, KubeTransport } from './transport.js';
 export const accessNamespace = 'bc-access';
 
 const managedBy = { 'app.kubernetes.io/managed-by': 'better-compute' };
+const managedTag = tags.managed;
 const rbacGroup = 'rbac.authorization.k8s.io';
 const subjectPattern = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
 const hostPattern = /^[A-Za-z0-9]([-A-Za-z0-9.]{0,251}[A-Za-z0-9])?$/;
@@ -306,7 +308,8 @@ export async function ensureAdminAccess(options: {
   if (!entry) {
     try {
       await client.request('POST', base, {
-        body: { principalArn, type: 'STANDARD' },
+        // Tagged managed: the IAM policy lets the role associate access policies only with such entries.
+        body: { principalArn, type: 'STANDARD', tags: { [managedTag]: 'true' } },
         signal,
         what: `Creating the EKS access entry of the account principal on ${cluster}`,
       });
