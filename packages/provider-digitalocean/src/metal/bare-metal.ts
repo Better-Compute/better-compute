@@ -46,15 +46,20 @@ export interface DoBareMetalMachine {
   diskGiB?: number;
   gpus?: { model: string; count: number };
   /**
-   * SHA-256 of the machine's SSH host key (`SHA256:<base64>`, as `ssh-keygen -lf` prints it). The
-   * executor must refuse any other key; without it, the executor's own known_hosts decides.
+   * SHA-256 of the machine's SSH host key (`SHA256:<base64>`, as `ssh-keygen -lf` prints it).
+   * Required: the executor must refuse any other key. Bootstrap writes a single-use join token over
+   * this connection, so an unpinned host (TOFU, an empty known_hosts) would hand it to whoever is on
+   * the path.
    */
-  hostKeySha256?: string;
+  hostKeySha256: string;
 }
 
-/** Runs one command over SSH; `stdin` carries secrets so they never appear in argv. */
+/**
+ * Runs one command over SSH; `stdin` carries secrets so they never appear in argv. The executor
+ * must refuse a host whose key is not `hostKeySha256` (never trust on first use).
+ */
 export type DoSshExecutor = (
-  target: { host: string; username: string; privateKey: string; hostKeySha256?: string },
+  target: { host: string; username: string; privateKey: string; hostKeySha256: string },
   command: string,
   stdin?: string,
 ) => Promise<{ code: number; stdout: string; stderr: string }>;
@@ -75,7 +80,9 @@ export const doBareMetalConfig = manifest({
   sshUser: field
     .string({ pattern: '^[a-z_][a-z0-9_-]{0,31}$' })
     .default('root')
-    .describe('The user SSH logs in as (root, or one with passwordless sudo)'),
+    .describe(
+      'The user SSH logs in as: root, or one with passwordless sudo (every command then runs through sudo -n)',
+    ),
   regions: field
     .list(field.string({ pattern: '^[a-z][a-z0-9]*$' }), { min: 1 })
     .describe('Region slugs this account offers machines in'),
@@ -158,6 +165,17 @@ export const releaseCommand = [
 export const productUuidCommand = 'cat /sys/class/dmi/id/product_uuid';
 export const writeTokenCommand = `umask 077 && mkdir -p /etc/bcd && cat > ${bareMetalJoinTokenPath}`;
 export const rebootCommand = 'systemctl reboot';
+/** The command bootstrap's install script runs in (the script is its stdin). */
+export const installCommand = 'sh -s';
+
+/**
+ * A command as `user` runs it: as is for root, else through passwordless sudo (`sudo -n`, which
+ * fails rather than prompts). stdin passes through to the elevated shell.
+ */
+export function asRoot(command: string, user: string): string {
+  if (user === 'root') return command;
+  return `sudo -n sh -c '${command.replaceAll("'", "'\\''")}'`;
+}
 
 /**
  * The `bcd join` the machine runs once (the Go contract, as provider-hetzner's robot provider
@@ -245,7 +263,10 @@ function checkMachines(machines: readonly DoBareMetalMachine[]): Map<string, DoB
       throw fail('INVALID_CONFIG', `${where}: the region is not a region slug`, 'machines');
     if (!ipv4Pattern.test(machine.address))
       throw fail('INVALID_CONFIG', `${where}: the address is not an IPv4 address`, 'machines');
-    if (machine.hostKeySha256 !== undefined && !hostKeyPattern.test(machine.hostKeySha256))
+    // Fail closed: the join token goes over this connection (bootstrap), so the host is pinned.
+    if (machine.hostKeySha256 === undefined)
+      throw fail('INVALID_CONFIG', `${where}: hostKeySha256 is required`, 'hostKey');
+    if (!hostKeyPattern.test(machine.hostKeySha256))
       throw fail('INVALID_CONFIG', `${where}: hostKeySha256 is not SHA256:<base64>`, 'machines');
     if (!(machine.vcpu > 0 && machine.memoryGiB > 0))
       throw fail('INVALID_CONFIG', `${where}: vcpu and memoryGiB must be positive`, 'machines');
@@ -294,6 +315,8 @@ class DoBareMetal implements ProviderImpl {
         'digitaloceanMetal needs an ssh executor (digitaloceanMetalProvider({ ssh }))',
         'ssh',
       );
+    if (!machine.hostKeySha256 || !hostKeyPattern.test(machine.hostKeySha256))
+      throw fail('INVALID_CONFIG', `Bare Metal machine ${machine.id} pins no host key`, 'hostKey');
     const privateKey = await this.#context.secrets.resolve(this.#config.sshKey);
     try {
       return await this.#ssh(
@@ -301,9 +324,9 @@ class DoBareMetal implements ProviderImpl {
           host: machine.address,
           username: this.#config.sshUser,
           privateKey,
-          ...(machine.hostKeySha256 !== undefined ? { hostKeySha256: machine.hostKeySha256 } : {}),
+          hostKeySha256: machine.hostKeySha256,
         },
-        command,
+        asRoot(command, this.#config.sshUser),
         stdin,
       );
     } catch {
@@ -323,8 +346,14 @@ class DoBareMetal implements ProviderImpl {
     return claim === '' ? undefined : claim;
   }
 
+  /** Whether the claim is this deployment's (any of its instances'): what `list` shows. */
   #ours(claim: string | undefined): boolean {
     return claim !== undefined && claimPattern.test(claim) && claim.startsWith(this.#claimPrefix);
+  }
+
+  /** The exact claim the caller (its idempotency key: the instance or bootstrap id) writes. */
+  #claimFor(context: CallContext): string {
+    return bareMetalClaim(this.#deployment, context.idempotencyKey);
   }
 
   #toMachine(machine: DoBareMetalMachine): ExternalMachine {
@@ -405,27 +434,36 @@ class DoBareMetal implements ProviderImpl {
     return this.#toMachine(machine);
   }
 
-  /** A machine this deployment claimed; any other reads as absent. */
-  async get(id: string): Promise<ExternalMachine | undefined> {
+  /**
+   * The machine if the caller holds its claim; any other claim, another instance's of this
+   * deployment included, reads as absent (the caller's machine is gone).
+   */
+  async get(id: string, context: CallContext): Promise<ExternalMachine | undefined> {
     const machine = this.#machine(id);
     if (!machine) return undefined;
     const claim = await this.#claimOf(machine);
-    return this.#ours(claim) ? this.#toMachine(machine) : undefined;
+    return claim === this.#claimFor(context) ? this.#toMachine(machine) : undefined;
   }
 
-  /** Releases the claim and stops bcd; the machine stays. A machine not ours is refused. */
-  async delete(id: string): Promise<void> {
+  /**
+   * Releases the caller's claim and stops bcd; the machine stays. Another instance's claim of this
+   * deployment means the caller's is already gone (a release that won on the machine but was not
+   * recorded): done, and that claim is left alone. A claim outside this deployment is refused.
+   */
+  async delete(id: string, context: CallContext): Promise<void> {
     const machine = this.#machine(id);
     if (!machine) return;
     const claim = await this.#claimOf(machine);
     if (claim === undefined) return;
-    if (!this.#ours(claim))
+    const expected = this.#claimFor(context);
+    if (claim !== expected && this.#ours(claim)) return;
+    if (claim !== expected)
       throw fail(
         'INVALID_STATE',
         `Bare Metal machine ${id} is not claimed by this better-compute deployment`,
         'notManaged',
       );
-    const released = await this.#run(machine, releaseCommand, `${claim}\n`);
+    const released = await this.#run(machine, releaseCommand, `${expected}\n`);
     // 3: the claim changed between the read and the release; the next delete looks again.
     if (released.code === 3)
       throw fail('CONFLICT', `the claim on ${id} changed while it was released`, 'claimChanged');
@@ -433,27 +471,27 @@ class DoBareMetal implements ProviderImpl {
       throw fail('PROVIDER_ERROR', `could not release ${id}`, 'claimRelease');
   }
 
-  /** The machine `id` if this deployment claimed it, else refused. */
-  async #claimed(id: string): Promise<DoBareMetalMachine> {
+  /** The machine `id` if the caller holds its claim, else refused (another instance's included). */
+  async #claimed(id: string, context: CallContext): Promise<DoBareMetalMachine> {
     const machine = this.#machine(id);
     if (!machine) throw fail('NOT_FOUND', `Bare Metal machine ${id} is not listed`, 'machine');
-    if (!this.#ours(await this.#claimOf(machine)))
+    if ((await this.#claimOf(machine)) !== this.#claimFor(context))
       throw fail(
         'INVALID_STATE',
-        `Bare Metal machine ${id} is not claimed by this better-compute deployment`,
+        `Bare Metal machine ${id} is not claimed by this instance of this better-compute deployment`,
         'notManaged',
       );
     return machine;
   }
 
-  async power(id: string, action: PowerAction): Promise<void> {
+  async power(id: string, action: PowerAction, context: CallContext): Promise<void> {
     if (action !== 'graceful-restart')
       throw fail(
         'UNSUPPORTED',
         `DigitalOcean Bare Metal has no API or BMC for ${action}: only a reboot over SSH`,
         'noBmc',
       );
-    const machine = await this.#claimed(id);
+    const machine = await this.#claimed(id, context);
     await this.#run(machine, rebootCommand);
   }
 
@@ -465,8 +503,11 @@ class DoBareMetal implements ProviderImpl {
     }
   }
 
-  async identify(machine: ExternalMachine): Promise<{ productUuid: string }> {
-    const target = await this.#claimed(machine.id);
+  async identify(
+    machine: ExternalMachine,
+    context: CallContext,
+  ): Promise<{ productUuid: string }> {
+    const target = await this.#claimed(machine.id, context);
     const read = await this.#run(target, productUuidCommand);
     const productUuid = read.stdout.trim().toLowerCase();
     if (
@@ -484,6 +525,7 @@ class DoBareMetal implements ProviderImpl {
   async bootstrap(
     machine: ExternalMachine,
     bootstrap: Parameters<NonNullable<ProviderImpl['bootstrap']>>[1],
+    context: CallContext,
   ): Promise<void> {
     if (!bootstrap.controlPlaneUrl || !unitSafeUrl.test(bootstrap.controlPlaneUrl))
       throw fail(
@@ -501,7 +543,7 @@ class DoBareMetal implements ProviderImpl {
       throw fail('INVALID_INPUT', 'bootstrap.sha256 must be a hex sha256', 'sha256');
     if (!unitSafeUrl.test(bootstrap.bcdUrl))
       throw fail('INVALID_INPUT', 'bcdUrl must be an https URL', 'bcdUrl');
-    const target = await this.#claimed(machine.id);
+    const target = await this.#claimed(machine.id, context);
     const written = await this.#run(target, writeTokenCommand, bootstrap.joinToken);
     if (written.code !== 0)
       throw fail('PROVIDER_ERROR', `could not deliver the join token to ${machine.id}`, 'token');
@@ -511,7 +553,7 @@ class DoBareMetal implements ProviderImpl {
       controlPlaneUrl: bootstrap.controlPlaneUrl,
       pins,
     });
-    const installed = await this.#run(target, 'sh -s', script);
+    const installed = await this.#run(target, installCommand, script);
     if (installed.code !== 0)
       throw fail('PROVIDER_ERROR', `installing bcd failed on ${machine.id}`, 'install', {
         code: installed.code,
