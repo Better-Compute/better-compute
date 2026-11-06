@@ -12,6 +12,7 @@ import {
   type ManualClock,
   type MethodContext,
   type ModuleContext,
+  type PoolPolicy,
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
@@ -1470,7 +1471,16 @@ describe('provider instances', () => {
 
   it('a pool with replacePreempted recreates a preempted instance on a new machine', async () => {
     await spotFlavor();
-    await db.query(`UPDATE pools SET policy = '{"replacePreempted": true}' WHERE id = $1`, [providerPool]);
+    // Set through the pools API, which takes only a boolean.
+    await expect(
+      callCapacity('pools', 'update', {
+        tenantId: 'root',
+        poolId: providerPool,
+        policy: { replacePreempted: 'please' },
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    const policy: PoolPolicy = { replacePreempted: true };
+    await callCapacity('pools', 'update', { tenantId: 'root', poolId: providerPool, policy });
     const created = (await call('instances', 'create', createProvider({ flavor: 'cx22-spot' }))) as View;
     await reconcile(created.id);
     expect((await get(created.id)).externalId).toBe('srv-1');

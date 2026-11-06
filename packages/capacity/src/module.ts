@@ -658,6 +658,10 @@ function checkPolicy(policy: unknown): PoolPolicy {
   const singleTenant = (policy as Record<string, unknown>).singleTenant;
   if (singleTenant !== undefined && typeof singleTenant !== 'boolean')
     fail('policy.singleTenant must be true or false');
+  // vps reads it with a boolean cast: anything but a boolean would fail every preemption.
+  const replacePreempted = (policy as Record<string, unknown>).replacePreempted;
+  if (replacePreempted !== undefined && typeof replacePreempted !== 'boolean')
+    fail('policy.replacePreempted must be true or false');
   const billing = (policy as Record<string, unknown>).billing;
   if (billing !== undefined) {
     if (typeof billing !== 'object' || billing === null || Array.isArray(billing))
