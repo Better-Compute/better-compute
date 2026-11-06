@@ -6,6 +6,7 @@ import { registerCatalog } from './catalog.js';
 import { registerDroplets } from './droplets.js';
 import { registerFirewalls } from './firewalls.js';
 import { registerKeys } from './keys.js';
+import { registerNfs } from './nfs.js';
 import { registerTags } from './tags.js';
 import { registerVolumes } from './volumes.js';
 import { registerVpcs } from './vpcs.js';
@@ -97,6 +98,10 @@ export class DoEmulator {
   volumeActionReads = 0;
   /** How many volumes the account may hold (DO's per-account volume limit). */
   volumeLimit = 100;
+  /** How many reads of a new NFS share it takes to turn from `CREATING` to `ACTIVE`; at 0, at once. */
+  nfsCreateReads = 0;
+  /** How many reads of an NFS share a share action takes to complete; at 0 it completes when it starts. */
+  nfsActionReads = 0;
   /** How many reads of a reserved IP an assign or unassign takes to complete; at 0, at once. */
   addressActionReads = 0;
   /** How many reserved IPs (v4 and v6) the account may hold. */
@@ -287,5 +292,6 @@ export class DoEmulator {
     registerFirewalls(this);
     registerVolumes(this);
     registerAddresses(this);
+    registerNfs(this);
   }
 }

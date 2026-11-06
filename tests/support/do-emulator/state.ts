@@ -53,6 +53,10 @@ export class DoState {
   volumes = new Map<string, Json>();
   /** Keyed by id. DO snapshots (volume snapshots; Droplet snapshots are images). */
   snapshots = new Map<string, Json>();
+  /** Keyed by uuid. DO Network File Storage shares (`region` is a slug). */
+  nfsShares = new Map<string, Json>();
+  /** Keyed by uuid. DO NFS share snapshots. */
+  nfsSnapshots = new Map<string, Json>();
   /** Keyed by address. DO reserved IPv4 addresses (`droplet_id` names the Droplet). */
   reservedIps = new Map<string, Json>();
   /** Keyed by address. DO reserved IPv6 addresses. */
