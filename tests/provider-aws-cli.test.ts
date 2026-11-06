@@ -104,6 +104,51 @@ describe('provider-aws CLI policies', () => {
     ).toBe('ml');
   });
 
+  it('reinstall can name its new task, volume, snapshot and image; the instance stays tag-guarded', () => {
+    const policy = iamPolicy({ region: 'us-east-1', account: '222222222222' });
+    const replace = policy.Statement.filter((s) =>
+      actionsOf(s).includes('ec2:CreateReplaceRootVolumeTask'),
+    );
+    const guarded = replace.find((s) => s.Sid === 'PowerClaimed')!;
+    expect(guarded.Resource).toBe('arn:aws:ec2:us-east-1:222222222222:instance/*');
+    const extra = replace.find((s) => s.Sid === 'ReinstallResources')!;
+    expect(actionsOf(extra)).toEqual(['ec2:CreateReplaceRootVolumeTask']);
+    expect(extra.Resource).toEqual([
+      'arn:aws:ec2:us-east-1:222222222222:replace-root-volume-task/*',
+      'arn:aws:ec2:us-east-1:222222222222:volume/*',
+      'arn:aws:ec2:us-east-1::snapshot/*',
+      'arn:aws:ec2:us-east-1::image/*',
+    ]);
+    expect(JSON.stringify(extra.Resource)).not.toContain('instance/');
+  });
+
+  it('--kms-key adds the EBS grants for that key only, through EC2', () => {
+    expect(iamPolicy().Statement.some((s) => actionsOf(s).some((a) => a.startsWith('kms:')))).toBe(
+      false,
+    );
+    const key = 'arn:aws:kms:us-east-1:222222222222:key/1234abcd-12ab-34cd-56ef-1234567890ab';
+    const policy = iamPolicy({ region: 'us-east-1', kmsKeyArn: key });
+    const kms = policy.Statement.filter((s) => actionsOf(s).some((a) => a.startsWith('kms:')));
+    expect(kms.map((s) => s.Sid).sort()).toEqual(['EbsKey', 'EbsKeyGrant']);
+    for (const statement of kms) {
+      expect(statement.Resource).toBe(key);
+      expect(statement.Condition?.StringEquals?.['kms:ViaService']).toBe(
+        'ec2.us-east-1.amazonaws.com',
+      );
+    }
+    const grant = kms.find((s) => s.Sid === 'EbsKeyGrant')!;
+    expect(actionsOf(grant)).toEqual(['kms:CreateGrant']);
+    expect(grant.Condition?.Bool?.['kms:GrantIsForAWSResource']).toBe('true');
+    expect(
+      iamPolicy({ kmsKeyArn: key }).Statement.find((s) => s.Sid === 'EbsKey')!.Condition
+        ?.StringLike?.['kms:ViaService'],
+    ).toBe('ec2.*.amazonaws.com');
+    for (const bad of ['alias/x', 'arn:aws:s3:::b', 'arn:aws-cn:kms:cn-north-1:222222222222:key/x'])
+      expect(() => iamPolicy({ kmsKeyArn: bad })).toThrow(
+        expect.objectContaining({ code: 'INVALID_INPUT' }),
+      );
+  });
+
   it('partition flows into ARNs', () => {
     const policy = iamPolicy({
       partition: 'aws-us-gov',

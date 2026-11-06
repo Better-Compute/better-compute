@@ -45,6 +45,8 @@ export function iamPolicy(
     instanceProfileArn?: string;
     /** `key=value`: attach may tag only instances carrying this tag (the account's discoverTag). */
     discoverTag?: string;
+    /** The customer-managed KMS key ARN of the accounts' `kmsKeyId`: adds EBS's grants on it. */
+    kmsKeyArn?: string;
   } = {},
 ): IamPolicyDocument {
   const partition = options.partition ?? 'aws';
@@ -125,6 +127,19 @@ export function iamPolicy(
       Condition: { Null: { [`ec2:ResourceTag/${tags.instance}`]: 'false' } },
     },
     {
+      // The other resources a root-volume replacement names. Each resource of a request must be
+      // allowed, so the instance itself stays guarded by PowerClaimed.
+      Sid: 'ReinstallResources',
+      Effect: 'Allow',
+      Action: 'ec2:CreateReplaceRootVolumeTask',
+      Resource: [
+        ec2('replace-root-volume-task/*'),
+        ec2('volume/*'),
+        ec2('snapshot/*', false),
+        ec2('image/*', false),
+      ],
+    },
+    {
       Sid: 'Attach',
       Effect: 'Allow',
       Action: ['ec2:CreateTags', 'ec2:DeleteTags'],
@@ -144,6 +159,45 @@ export function iamPolicy(
     },
     { Sid: 'Identity', Effect: 'Allow', Action: 'sts:GetCallerIdentity', Resource: '*' },
   ];
+  if (options.kmsKeyArn !== undefined) {
+    let key;
+    try {
+      key = parseArn(options.kmsKeyArn);
+    } catch {
+      key = undefined;
+    }
+    if (!key || key.service !== 'kms' || !/^key\/[\w-]{1,128}$/.test(key.resource))
+      throw usage('--kms-key is a KMS key ARN (arn:…:kms:<region>:<account>:key/<id>)');
+    if (key.partition !== partition)
+      throw usage(`--kms-key is in partition ${key.partition}, not ${partition}`);
+    // EBS uses the key on the caller's behalf: only through EC2, and grants only for AWS resources.
+    const suffix = partition === 'aws-cn' ? 'amazonaws.com.cn' : 'amazonaws.com';
+    const via: Record<string, Record<string, string>> = region === '*'
+      ? { StringLike: { 'kms:ViaService': `ec2.*.${suffix}` } }
+      : { StringEquals: { 'kms:ViaService': `ec2.${region}.${suffix}` } };
+    statements.push(
+      {
+        Sid: 'EbsKey',
+        Effect: 'Allow',
+        Action: [
+          'kms:DescribeKey',
+          'kms:GenerateDataKeyWithoutPlaintext',
+          'kms:Decrypt',
+          'kms:ReEncryptFrom',
+          'kms:ReEncryptTo',
+        ],
+        Resource: options.kmsKeyArn,
+        Condition: via,
+      },
+      {
+        Sid: 'EbsKeyGrant',
+        Effect: 'Allow',
+        Action: ['kms:CreateGrant'],
+        Resource: options.kmsKeyArn,
+        Condition: { ...via, Bool: { 'kms:GrantIsForAWSResource': 'true' } },
+      },
+    );
+  }
   if (options.instanceProfileArn !== undefined) {
     const profile = parseArn(options.instanceProfileArn);
     if (profile.service !== 'iam' || !profile.resource.startsWith('instance-profile/'))
@@ -241,7 +295,7 @@ export function awsIamPolicyCommand() {
     group: 'Providers' as const,
     summary: 'Print the IAM permissions policy an AWS provider account needs',
     description:
-      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag.',
+      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId.',
     target: 'none' as const,
     output: 'text' as const,
     flags: {
@@ -266,6 +320,11 @@ export function awsIamPolicyCommand() {
         value: 'ARN',
         description: 'The instance profile accounts pass to RunInstances (adds iam:PassRole)',
       },
+      'kms-key': {
+        type: 'string' as const,
+        value: 'ARN',
+        description: 'The customer-managed KMS key accounts set as kmsKeyId (adds the EBS grants)',
+      },
       'discover-tag': {
         type: 'string' as const,
         value: 'KEY=VALUE',
@@ -284,6 +343,7 @@ export function awsIamPolicyCommand() {
           ...(text(context.flags['instance-profile'])
             ? { instanceProfileArn: text(context.flags['instance-profile'])! }
             : {}),
+          ...(text(context.flags['kms-key']) ? { kmsKeyArn: text(context.flags['kms-key'])! } : {}),
           ...(text(context.flags['discover-tag'])
             ? { discoverTag: text(context.flags['discover-tag'])! }
             : {}),
