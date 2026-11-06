@@ -38,3 +38,20 @@ export function denyInsecureTransport(bucket: string): PolicyStatement {
     Condition: { Bool: { 'aws:SecureTransport': 'false' } },
   };
 }
+
+/**
+ * A KMS key policy that delegates to this account's IAM (the AWS default key policy), plus any
+ * service statements the key needs (CloudWatch Logs, SNS publishers).
+ */
+export function accountKeyPolicy(extra: readonly PolicyStatement[] = []) {
+  return policyDocument([
+    {
+      Sid: 'AccountIam',
+      Effect: 'Allow',
+      Principal: { AWS: arn('iam::${AWS::AccountId}:root') },
+      Action: 'kms:*',
+      Resource: '*',
+    },
+    ...extra,
+  ]);
+}
