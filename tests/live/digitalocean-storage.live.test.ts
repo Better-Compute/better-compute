@@ -285,7 +285,8 @@ describe.skipIf(!enabled)('provider-digitalocean storage live', () => {
     expect(typeof secret).toBe('string');
     values.set(refs.newAccess, created.id);
     values.set(refs.newSecret, secret!);
-    expect((await resources.get('do.spaces-key', created.id, call('k1')))?.secretOutputs).toBeUndefined();
+    const reread = await resources.get('do.spaces-key', created.id, call('k1'));
+    expect(reread !== undefined && reread.secretOutputs === undefined).toBe(true);
 
     const store = spacesBlobStore({
       region,
@@ -351,8 +352,8 @@ describe.skipIf(!enabled)('provider-digitalocean storage live', () => {
       const resolved = await source.resolve(env.BC_DO_LIVE_IMAGE!);
       const url = new URL(resolved.url);
       expect(url.protocol).toBe('https:');
-      // The URL carries no credential of ours.
-      expect(resolved.url).not.toContain(env.BC_DO_TOKEN ?? '\u0000');
+      // The URL carries no credential of ours (a boolean, so a failure never prints the token).
+      expect(resolved.url.includes(env.BC_DO_TOKEN ?? '\u0000')).toBe(false);
       const response = await fetch(url, { headers: { range: 'bytes=0-0' } });
       await response.body?.cancel();
       expect([200, 206]).toContain(response.status);
