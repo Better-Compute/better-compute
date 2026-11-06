@@ -1,4 +1,4 @@
-import { ec2Client } from '@better-compute/aws-core';
+import { ec2Client, jsonClient } from '@better-compute/aws-core';
 import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
 import { accountCredentials } from './account.js';
 import { AwsCompute } from './compute.js';
@@ -29,8 +29,23 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
         ...(options.endpoints?.ec2 !== undefined ? { endpoint: options.endpoints.ec2 } : {}),
         ...(options.rateLimit ? { rateLimit: options.rateLimit } : {}),
       });
+      const quotas = jsonClient({
+        service: 'servicequotas',
+        region: config.region,
+        credentials: account.source,
+        fetch: options.fetch,
+        clock: context.clock,
+        log: context.log,
+        jsonVersion: '1.1',
+        targetPrefix: 'ServiceQuotasV20190624',
+        ...(options.endpoints?.servicequotas !== undefined
+          ? { endpoint: options.endpoints.servicequotas }
+          : {}),
+        ...(options.rateLimit ? { rateLimit: options.rateLimit } : {}),
+      });
       return new AwsCompute(config, context, options, {
         ec2,
+        quotas,
         account,
         types: instanceTypeCache(ec2, { clock: context.clock }),
         zones: zoneCache(ec2, { clock: context.clock }),

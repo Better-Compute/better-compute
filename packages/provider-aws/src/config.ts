@@ -73,6 +73,12 @@ export const awsConfig = manifest({
     .describe(
       'Offer Spot capacity (<zone>/<type>:spot): one-time requests that EC2 may reclaim, terminated on interruption',
     ),
+  quotas: field
+    .boolean()
+    .default(true)
+    .describe(
+      'Read the EC2 vCPU quotas (Service Quotas) so offers carry their headroom as a machine count',
+    ),
 });
 
 /** The validated account configuration. */
@@ -92,12 +98,14 @@ export interface AwsConfig {
   discoverTag?: string;
   /** (A3) Offer and launch Spot capacity. */
   spot: boolean;
+  /** (A3) Cap offers at the EC2 vCPU quota headroom. */
+  quotas: boolean;
 }
 
 export interface AwsProviderOptions {
   fetch?: typeof fetch;
   /** Tests and VPC endpoints; host options, never account config. */
-  endpoints?: Partial<Record<'ec2' | 'sts', string>>;
+  endpoints?: Partial<Record<'ec2' | 'sts' | 'servicequotas' | 'pricing', string>>;
   /** Ambient identity for platform accounts (default `ambientCredentials()`). */
   credentials?: CredentialSource;
   /** ExternalId prefix: `${externalIdPrefix}:${providerAccountId}` (default 'better-compute'). */

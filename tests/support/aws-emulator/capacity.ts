@@ -1,6 +1,6 @@
 import type { AwsEmulator, EmulatorRequest } from './index.js';
 import type { Ec2Emulator, EmuInstance } from './ec2.js';
-import { ec2Error, ec2Response, el, items } from './xml.js';
+import { ec2Error, ec2Response, el, items, jsonError, requestId } from './xml.js';
 
 // EC2 capacity markets as provider-aws uses them (AWS A3): On-Demand Capacity Reservations and
 // Capacity Blocks (DescribeCapacityReservations), launches into them (RunInstances with a
@@ -223,5 +223,45 @@ export class CapacityEmulator {
   /** The time the emulator sees (for reservations relative to now). */
   now(): number {
     return this.emu.now();
+  }
+}
+
+const jsonOk = (body: unknown) =>
+  new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'content-type': 'application/x-amz-json-1.1', 'x-amzn-requestid': requestId() },
+  });
+
+/** Service Quotas (JSON 1.1, `ServiceQuotasV20190624`): GetServiceQuota for `ec2` quota codes. */
+export class ServiceQuotasEmulator {
+  /** Quota code → value (vCPUs for the EC2 instance quotas). A code not here does not exist. */
+  readonly quotas = new Map<string, number>();
+
+  constructor(emu: AwsEmulator) {
+    emu.register(/^servicequotas\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$/, {
+      service: 'servicequotas',
+      protocol: 'json',
+      handle: (request) => this.#handle(request),
+    });
+  }
+
+  #handle(request: EmulatorRequest): Response {
+    if (request.headers.get('x-amz-target')?.split('.')[0] !== 'ServiceQuotasV20190624')
+      return jsonError('UnknownOperationException', 'wrong target prefix');
+    const body = JSON.parse(request.body || '{}') as { ServiceCode?: string; QuotaCode?: string };
+    if (request.operation !== 'GetServiceQuota')
+      return jsonError('UnknownOperationException', request.operation);
+    const value = body.ServiceCode === 'ec2' ? this.quotas.get(body.QuotaCode ?? '') : undefined;
+    if (value === undefined)
+      return jsonError('NoSuchResourceException', `no quota ${body.QuotaCode}`);
+    return jsonOk({
+      Quota: {
+        ServiceCode: 'ec2',
+        QuotaCode: body.QuotaCode,
+        Value: value,
+        Unit: 'None',
+        Adjustable: true,
+      },
+    });
   }
 }

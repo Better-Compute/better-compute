@@ -12,7 +12,7 @@ import {
   type ProviderContext,
   type ProviderImpl,
 } from '@better-compute/core';
-import type { QueryClient, QueryParams, XmlElement } from '@better-compute/aws-core';
+import type { JsonClient, QueryClient, QueryParams, XmlElement } from '@better-compute/aws-core';
 import type { AccountCredentials } from './account.js';
 import { parseDiscoverTag, type AwsConfig, type AwsProviderOptions } from './config.js';
 import { clientToken, offerId, parseInstanceId, parseOfferId, tags, tagValue } from './ids.js';
@@ -34,9 +34,12 @@ import {
   unusableReservation,
   type CapacityReservationInfo,
 } from './markets/reservations.js';
+import { quotaClassOf, quotaReader, type QuotaReader } from './markets/quotas.js';
 
 export interface AwsComputeDeps {
   ec2: QueryClient;
+  /** (A3) Service Quotas (JSON 1.1); absent: offers carry no quota headroom. */
+  quotas?: JsonClient;
   account: AccountCredentials;
   types: InstanceTypeCache;
   zones: ZoneCache;
@@ -149,6 +152,7 @@ export class AwsCompute implements ProviderImpl {
   /** Error codes already logged once (an unreadable market read is warned once per code). */
   readonly #warned = new Set<string>();
   readonly #ssmPrefixes: readonly string[];
+  readonly #quotas: QuotaReader | undefined;
 
   constructor(
     readonly config: AwsConfig,
@@ -157,6 +161,15 @@ export class AwsCompute implements ProviderImpl {
     readonly deps: AwsComputeDeps,
   ) {
     this.#ssmPrefixes = ssmImagePrefixes(options.ssmImagePrefixes);
+    this.#quotas =
+      config.quotas && deps.quotas
+        ? quotaReader({
+            client: deps.quotas,
+            clock: context.clock,
+            usage: (signal) => this.#quotaUsage(signal),
+            onError: (error) => this.warnOnce('EC2 vCPU quotas', error),
+          })
+        : undefined;
   }
 
   /** How long EC2 may not yet show what this client just launched or tagged. */
@@ -276,8 +289,78 @@ export class AwsCompute implements ProviderImpl {
           market: 'spot',
         });
     }
+    await this.#applyQuotas(offers, signal);
     offers.push(...(await this.#reservationOffers(query, signal)));
     return offers;
+  }
+
+  // --- Capacity markets (A3): quotas -------------------------------------------------------------
+
+  /** Caps on-demand and Spot offers at the quota headroom of their family: `count` machines. */
+  async #applyQuotas(offers: Offer[], signal: AbortSignal): Promise<void> {
+    if (!this.#quotas || offers.length === 0) return;
+    const codeOf = (offer: Offer) => {
+      const quota = quotaClassOf(parseOfferId(offer.id).instanceType);
+      return quota ? (offer.market === 'spot' ? quota.spot : quota.onDemand) : undefined;
+    };
+    const codes = offers.map(codeOf).filter((code): code is string => code !== undefined);
+    const headroom = await this.#quotas.headroom(codes, signal);
+    for (const offer of offers) {
+      const code = codeOf(offer);
+      const room = code === undefined ? undefined : headroom.get(code);
+      if (room === undefined || offer.vcpu <= 0) continue;
+      offer.count = Math.floor(room / offer.vcpu);
+      offer.available = offer.count > 0;
+    }
+  }
+
+  /**
+   * vCPUs in use per quota code: the default vCPUs of every pending or running instance (EC2's
+   * "Running" quotas), Spot ones against the Spot code. Capacity Block instances are left out.
+   */
+  async #quotaUsage(signal: AbortSignal): Promise<Map<string, number>> {
+    const found: { type: string; lifecycle: string | undefined }[] = [];
+    const seen = new Set<string>();
+    let token: string | undefined;
+    do {
+      const doc = await this.call(
+        'DescribeInstances',
+        {
+          Filter: [{ Name: 'instance-state-name', Value: ['pending', 'running'] }],
+          MaxResults: 1000,
+          NextToken: token,
+        },
+        signal,
+      );
+      for (const reservation of doc.items('reservationSet'))
+        for (const instance of reservation.items('instancesSet')) {
+          const type = instance.textOf('instanceType');
+          if (type) found.push({ type, lifecycle: instance.textOf('instanceLifecycle') });
+        }
+      token = doc.textOf('nextToken') || undefined;
+      if (token && seen.has(token))
+        throw new ComputeError(
+          'PROVIDER_ERROR',
+          'AWS returned a pagination token twice',
+          undefined,
+          { provider: 'aws', reason: 'pagination-loop' },
+        );
+      if (token) seen.add(token);
+    } while (token);
+    const types = await this.#knownTypes(
+      found.map((entry) => entry.type),
+      signal,
+    );
+    const usage = new Map<string, number>();
+    for (const { type, lifecycle } of found) {
+      if (lifecycle === 'capacity-block') continue;
+      const quota = quotaClassOf(type);
+      const vcpu = types.get(type)?.vcpu;
+      if (!quota || vcpu === undefined) continue;
+      const code = lifecycle === 'spot' ? quota.spot : quota.onDemand;
+      usage.set(code, (usage.get(code) ?? 0) + vcpu);
+    }
+    return usage;
   }
 
   // --- Capacity markets (A3): reservations ---------------------------------------------------------

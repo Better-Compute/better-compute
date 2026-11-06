@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CallContext, Logger, ProviderContext } from '@better-compute/core';
-import { ec2Client } from '@better-compute/aws-core';
+import { ec2Client, jsonClient } from '@better-compute/aws-core';
 import {
   accountCredentials,
   AwsCompute,
@@ -11,7 +11,7 @@ import {
 } from '@better-compute/provider-aws';
 import { AwsEmulator } from './support/aws-emulator/index.js';
 import { Ec2Emulator } from './support/aws-emulator/ec2.js';
-import { CapacityEmulator } from './support/aws-emulator/capacity.js';
+import { CapacityEmulator, ServiceQuotasEmulator } from './support/aws-emulator/capacity.js';
 
 // AWS A3, capacity markets: On-Demand Capacity Reservations and Capacity Blocks as
 // ExternalReservations and reservation offers, launches into them, Spot, quota headroom and
@@ -24,6 +24,7 @@ function world(overrides: Partial<AwsConfig> = {}, logs: unknown[][] = []) {
   const emu = new AwsEmulator();
   const ec2emu = new Ec2Emulator(emu);
   const capacity = new CapacityEmulator(emu, ec2emu);
+  const quotas = new ServiceQuotasEmulator(emu);
   const config = {
     ...(awsConfig.parse({ region: 'us-east-1', zones: ['us-east-1a', 'us-east-1b'] }) as AwsConfig),
     ...overrides,
@@ -49,6 +50,15 @@ function world(overrides: Partial<AwsConfig> = {}, logs: unknown[][] = []) {
   });
   const compute = new AwsCompute(config, context, options, {
     ec2,
+    quotas: jsonClient({
+      service: 'servicequotas',
+      region: config.region,
+      credentials: account.source,
+      fetch: emu.fetch,
+      clock: emu.clock,
+      jsonVersion: '1.1',
+      targetPrefix: 'ServiceQuotasV20190624',
+    }),
     account,
     types: instanceTypeCache(ec2, { clock: emu.clock }),
     zones: zoneCache(ec2, { clock: emu.clock }),
@@ -60,7 +70,7 @@ function world(overrides: Partial<AwsConfig> = {}, logs: unknown[][] = []) {
     secrets: context.secrets,
     log,
   });
-  return { emu, ec2emu, capacity, compute, config, call, logs };
+  return { emu, ec2emu, capacity, quotas, compute, config, call, logs };
 }
 
 describe('capacity reservations', () => {
@@ -346,5 +356,82 @@ describe('spot', () => {
     const plain = await w.compute.create(createRequest('us-east-1a/t3.micro'), w.call('ins_2'));
     w.ec2emu.asyncFailure(plain.id, 'Client.UserInitiatedShutdown');
     expect((await w.compute.get(plain.id, w.call('ins_2')))?.interruption).toBeUndefined();
+  });
+});
+
+describe('quotas', () => {
+  it('quota headroom limits offer count', async () => {
+    const w = world({ spot: true });
+    // Standard on-demand: 10 vCPUs, 4 in use (two running m7i.large; a stopped one counts nothing).
+    w.quotas.quotas.set('L-1216C47A', 10);
+    w.ec2emu.addInstance({ type: 'm7i.large' });
+    w.ec2emu.addInstance({ type: 'm7i.large', state: 'pending' });
+    w.ec2emu.addInstance({ type: 'm7i.large', state: 'stopped' });
+    // G and VT on-demand: none at all. P: the quota does not exist here (count unknown).
+    w.quotas.quotas.set('L-DB2E81BA', 0);
+    // Standard Spot: 4 vCPUs, one t3.micro Spot Instance running.
+    w.quotas.quotas.set('L-34B43A08', 4);
+    w.ec2emu.addInstance({ type: 't3.micro' }).lifecycle = 'spot';
+    const offers = await w.compute.listOffers({});
+    const byId = new Map(offers.map((offer) => [offer.id, offer]));
+    expect(byId.get('us-east-1a/m7i.large')).toMatchObject({ count: 3, available: true });
+    expect(byId.get('us-east-1a/t3.micro')).toMatchObject({ count: 3, available: true });
+    expect(byId.get('us-east-1a/g6.xlarge')).toMatchObject({ count: 0, available: false });
+    expect(byId.get('us-east-1a/p5.48xlarge')?.count).toBeUndefined();
+    expect(byId.get('us-east-1a/p5.48xlarge')?.available).toBe(true);
+    expect(byId.get('us-east-1a/t3.micro:spot')).toMatchObject({ count: 1, available: true });
+    expect(byId.get('us-east-1a/m7i.large:spot')).toMatchObject({ count: 1, available: true });
+    // Graviton is a standard family too.
+    expect(byId.get('us-east-1a/m7g.large')).toMatchObject({ count: 3 });
+
+    // Usage and limits are cached for 5 minutes.
+    const reads = () => [
+      w.emu.calls('GetServiceQuota').length,
+      w.emu.calls('DescribeInstances').length,
+    ];
+    const before = reads();
+    await w.compute.listOffers({});
+    expect(reads()).toEqual(before);
+    w.emu.clock.advance(6 * 60_000);
+    w.ec2emu.addInstance({ type: 'm7i.large' });
+    const later = new Map((await w.compute.listOffers({})).map((offer) => [offer.id, offer]));
+    expect(later.get('us-east-1a/m7i.large')).toMatchObject({ count: 2 });
+  });
+
+  it('an unreadable quota leaves count unset', async () => {
+    const logs: unknown[][] = [];
+    const w = world({}, logs);
+    w.emu.failNext('GetServiceQuota', 'AccessDeniedException', 400, 20);
+    const offers = await w.compute.listOffers({});
+    expect(offers.length).toBeGreaterThan(0);
+    expect(
+      offers
+        .filter((offer) => !offer.id.includes('@'))
+        .every((offer) => offer.count === undefined && offer.available),
+    ).toBe(true);
+    expect(
+      logs.some(([level, message]) => level === 'warn' && String(message).includes('quotas')),
+    ).toBe(true);
+  });
+
+  it('quotas: false reads no quota', async () => {
+    const w = world({ quotas: false });
+    w.quotas.quotas.set('L-1216C47A', 0);
+    const offers = await w.compute.listOffers({});
+    expect(offers.find((offer) => offer.id === 'us-east-1a/m7i.large')?.count).toBeUndefined();
+    expect(w.emu.calls('GetServiceQuota')).toHaveLength(0);
+  });
+});
+
+describe('quota errors', () => {
+  it('a quota code the region does not have is unknown, not a warning', async () => {
+    const logs: unknown[][] = [];
+    const w = world({}, logs);
+    // Only the standard code exists; G/VT and P answer NoSuchResourceException.
+    w.quotas.quotas.set('L-1216C47A', 10);
+    const offers = await w.compute.listOffers({});
+    expect(offers.find((offer) => offer.id === 'us-east-1a/m7i.large')?.count).toBe(5);
+    expect(offers.find((offer) => offer.id === 'us-east-1a/g6.xlarge')?.count).toBeUndefined();
+    expect(logs.filter(([level]) => level === 'warn')).toEqual([]);
   });
 });
