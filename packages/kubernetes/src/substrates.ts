@@ -1141,7 +1141,9 @@ async function removeGoneNodes(
   for (const { id } of unmatched) {
     const snapshot = await deps.inventory.get(id);
     const name = reportedNodeName(snapshot?.sections);
-    const node = name !== undefined ? listed.get(name) : undefined;
+    // No Node name reported yet (its first inventory is not in): look again next run, not an hour later.
+    if (name === undefined) continue;
+    const node = listed.get(name);
     await sql.query(
       `INSERT INTO kubernetes_substrate_nodes (node_id, pool_id, kubernetes_node, kubernetes_uid, learned_at)
        VALUES ($1, $2, $3, $4, compute_now())

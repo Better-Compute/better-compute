@@ -167,7 +167,8 @@ await compute.api.pools.create(credential, {
   picks which Node it replaces next, so `disruptionBudget` does not apply.
 - **Removed Nodes.** A connected pool node is matched once to its Kubernetes Node by the Node name bcd reports
   (inventory `kubernetes.nodeName`, else `os.hostname`), only when that is exactly a listed Node's name; its uid is
-  recorded too (`kubernetes_substrate_nodes`). A node that matches no Node (an EKS hostname that is not the Node
+  recorded too (`kubernetes_substrate_nodes`). A node whose bcd has not reported a Node name yet (its first inventory is not in) is
+  looked at again on the next run. A node that matches no Node (an EKS hostname that is not the Node
   name) is never taken for gone. A matched node that is not connected and whose Node is gone from the cluster's full
   Node list, or listed under its name with another uid (EKS reuses IP-based names), is removed: its reservations end
   through capacity's `endNodeReservations` (bound ones released with their quota refunded once, Spot ones as
