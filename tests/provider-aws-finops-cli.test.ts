@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest';
+import { validateFleetConfig } from '@better-compute/fleet';
 import {
   awsIamPolicyCommand,
+  awsOrganizationAccountsCommand,
+  awsQuotaRequestCommand,
+  awsQuotasCommand,
   iamPolicy,
   type AwsCommandContext,
   type IamStatement,
 } from '@better-compute/provider-aws';
+import { AwsEmulator } from './support/aws-emulator/index.js';
+import { OrganizationsEmulator, ServiceQuotasEmulator } from './support/aws-emulator/governance.js';
 
 const actionsOf = (statement: IamStatement) =>
   typeof statement.Action === 'string' ? [statement.Action] : [...statement.Action];
@@ -41,5 +47,170 @@ describe('provider-aws FinOps CLI', () => {
     await awsIamPolicyCommand().run(context);
     expect(JSON.parse(out[0]!).Statement.map((s: IamStatement) => s.Sid)).toContain('CostExplorer');
     expect(awsIamPolicyCommand().flags.costs.type).toBe('boolean');
+  });
+
+  it('organization-accounts renders FleetConfig providerAccounts for ACTIVE member accounts', async () => {
+    const emu = new AwsEmulator();
+    const orgs = new OrganizationsEmulator(emu);
+    orgs.pageSize = 2;
+    orgs.accounts.push(
+      {
+        Id: '222222222222',
+        Name: 'ml-prod',
+        Email: 'ml@example.com',
+        Status: 'ACTIVE',
+        parent: 'ou-ab12-gpu00001',
+      },
+      {
+        Id: '333333333333',
+        Name: 'old',
+        Email: 'old@example.com',
+        Status: 'SUSPENDED',
+        parent: 'ou-ab12-gpu00001',
+      },
+      { Id: '444444444444', Name: 'web', Email: 'web@example.com', Status: 'ACTIVE' },
+      { Id: '555555555555', Name: 'payer', Email: 'payer@example.com', Status: 'ACTIVE' },
+    );
+    const command = awsOrganizationAccountsCommand({
+      fetch: emu.fetch,
+      credentials: emu.ambient,
+      clock: emu.clock,
+    });
+    const { out, notes, context } = harness({
+      role: 'better-compute',
+      region: 'us-east-1',
+      zones: 'us-east-1a,us-east-1b',
+      exclude: '555555555555',
+    });
+    await command.run(context);
+    const document = JSON.parse(out.join('\n'));
+    expect(document).toEqual({
+      version: 1,
+      providerAccounts: [
+        {
+          name: 'aws-222222222222-us-east-1',
+          provider: 'aws',
+          config: {
+            region: 'us-east-1',
+            zones: ['us-east-1a', 'us-east-1b'],
+            assumeRoleArn: 'arn:aws:iam::222222222222:role/better-compute',
+          },
+        },
+        expect.objectContaining({ name: 'aws-444444444444-us-east-1' }),
+      ],
+    });
+    // a FleetConfig fleet.apply takes; no e-mail address is printed
+    expect(validateFleetConfig(document).providerAccounts).toHaveLength(2);
+    expect(out.join('\n')).not.toContain('@example.com');
+    expect(notes.join('\n')).toMatch(/zone names/i);
+    // it only reads
+    expect(emu.requests.every((request) => /^ListAccounts/.test(request.operation))).toBe(true);
+
+    const byOu = harness({
+      role: 'bc',
+      region: 'us-gov-west-1',
+      zones: 'us-gov-west-1a',
+      parent: 'ou-ab12-gpu00001',
+      prefix: 'gov',
+    });
+    await command.run(byOu.context);
+    expect(JSON.parse(byOu.out.join('\n')).providerAccounts).toEqual([
+      expect.objectContaining({
+        name: 'gov-222222222222-us-gov-west-1',
+        config: expect.objectContaining({
+          assumeRoleArn: 'arn:aws-us-gov:iam::222222222222:role/bc',
+        }),
+      }),
+    ]);
+    for (const flags of [
+      { role: 'bad role!', region: 'us-east-1', zones: 'us-east-1a' },
+      { role: 'bc', region: 'mars-1', zones: 'us-east-1a' },
+      { role: 'bc', region: 'us-east-1', zones: 'eu-west-1a' },
+      { role: 'bc', region: 'us-east-1', zones: 'us-east-1a', parent: 'not-an-ou' },
+    ])
+      await expect(command.run(harness(flags).context)).rejects.toMatchObject({
+        code: 'INVALID_INPUT',
+      });
+  });
+
+  it('quotas lists the EC2 instance quotas; quota-request asks only with --yes', async () => {
+    const emu = new AwsEmulator();
+    const quotas = new ServiceQuotasEmulator(emu);
+    quotas.pageSize = 1;
+    quotas.quotas.push(
+      {
+        QuotaCode: 'L-1216C47A',
+        QuotaName: 'Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances',
+        Value: 64,
+        Adjustable: true,
+      },
+      {
+        QuotaCode: 'L-417A185B',
+        QuotaName: 'Running On-Demand P instances',
+        Value: 0,
+        Adjustable: true,
+      },
+      { QuotaCode: 'L-0263D0A3', QuotaName: 'EC2-VPC Elastic IPs', Value: 5, Adjustable: true },
+      {
+        QuotaCode: 'L-34B43A08',
+        QuotaName: 'All Standard (A, C, D, H, I, M, R, T, Z) Spot Instance Requests',
+        Value: 64,
+        Adjustable: true,
+      },
+    );
+    const options = { fetch: emu.fetch, credentials: emu.ambient, clock: emu.clock };
+    const listed = harness({ region: 'us-east-1' });
+    await awsQuotasCommand(options).run(listed.context);
+    const rows = JSON.parse(listed.out.join('\n'));
+    expect(rows.map((row: { quotaCode: string }) => row.quotaCode)).toEqual([
+      'L-1216C47A',
+      'L-417A185B',
+      'L-34B43A08',
+    ]);
+    expect(rows[1]).toEqual({
+      quotaCode: 'L-417A185B',
+      name: 'Running On-Demand P instances',
+      value: 0,
+      adjustable: true,
+    });
+
+    const dry = harness({ region: 'us-east-1', 'quota-code': 'L-417A185B', value: 192 });
+    await awsQuotaRequestCommand(options).run(dry.context);
+    expect(quotas.requests).toEqual([]);
+    expect(dry.notes.join('\n')).toMatch(/--yes/);
+    expect(JSON.parse(dry.out.join('\n'))).toMatchObject({
+      quotaCode: 'L-417A185B',
+      current: 0,
+      desired: 192,
+      submitted: false,
+    });
+
+    const sent = harness({
+      region: 'us-east-1',
+      'quota-code': 'L-417A185B',
+      value: 192,
+      yes: true,
+    });
+    await awsQuotaRequestCommand(options).run(sent.context);
+    expect(quotas.requests).toEqual([{ QuotaCode: 'L-417A185B', DesiredValue: 192 }]);
+    expect(JSON.parse(sent.out.join('\n'))).toMatchObject({
+      submitted: true,
+      requestId: 'req-1',
+      status: 'PENDING',
+    });
+
+    // never a decrease or the same value; never a malformed code
+    for (const flags of [
+      { region: 'us-east-1', 'quota-code': 'L-1216C47A', value: 64, yes: true },
+      { region: 'us-east-1', 'quota-code': 'L-1216C47A', value: 8, yes: true },
+      { region: 'us-east-1', 'quota-code': 'bad', value: 8, yes: true },
+      { region: 'us-east-1', 'quota-code': 'L-1216C47A', value: -1, yes: true },
+    ])
+      await expect(
+        awsQuotaRequestCommand(options).run(harness(flags).context),
+      ).rejects.toMatchObject({
+        code: 'INVALID_INPUT',
+      });
+    expect(quotas.requests).toHaveLength(1);
   });
 });

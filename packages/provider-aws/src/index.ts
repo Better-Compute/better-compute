@@ -10,3 +10,4 @@ export * from './cli.js';
 export * from './costs.js';
 export * from './finops.js';
 export * from './prices.js';
+export * from './finops-cli.js';
