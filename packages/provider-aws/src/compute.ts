@@ -814,14 +814,15 @@ export class AwsCompute implements ProviderImpl {
     if (sqs === undefined || this.config.eventQueueUrl === undefined) {
       const now = this.context.clock.now();
       if (this.#scannedAt !== undefined && now - this.#scannedAt < scheduledEventScanMs)
-        return { events: [], ack: async () => {} };
+        return { events: [], received: 0, ack: async () => {} };
       const events = await scanScheduledEvents(
         (action, params, signal) => this.call(action, params, signal),
         context.signal,
         now,
       );
       this.#scannedAt = now;
-      return { events, ack: async () => {} };
+      // Not a queue: nothing more to read until the next scan, however many events it found.
+      return { events, received: 0, ack: async () => {} };
     }
     return pollQueue(
       {

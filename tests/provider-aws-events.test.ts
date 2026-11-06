@@ -153,6 +153,30 @@ describe('provider-aws event intake', () => {
     ]);
   });
 
+  it('one Health message naming 150 instances is one received message and 150 events', async () => {
+    const { sqs, queue, poll } = await world();
+    const ids = Array.from({ length: 150 }, (_, index) => `i-0abc1234567${index.toString(16).padStart(6, '0')}`);
+    sqs.send(
+      queue,
+      envelope(
+        'AWS Health Event',
+        {
+          service: 'EC2',
+          eventTypeCode: 'AWS_EC2_INSTANCE_RETIREMENT_SCHEDULED',
+          statusCode: 'upcoming',
+          startTime: 'Sat, 03 Oct 2026 06:00:00 GMT',
+          affectedEntities: ids.map((entityValue) => ({ entityValue })),
+        },
+        { id: 'e-many', source: 'aws.health' },
+      ),
+    );
+    sqs.send(queue, { not: 'an envelope' } as never);
+    const batch = await poll();
+    expect(batch.received).toBe(2);
+    expect(batch.events).toHaveLength(150);
+    expect(batch.events.map((event) => event.machineId)).toEqual(ids);
+  });
+
   it('drops an event from a foreign account', async () => {
     const { sqs, queue, poll, records } = await world();
     sqs.send(
@@ -292,6 +316,8 @@ describe('provider-aws event intake', () => {
     const scan = emu.calls('DescribeInstanceStatus').at(-1)!.params;
     expect(scan.get('Filter.1.Name')).toBe('event.code');
     expect(emu.calls('ReceiveMessage')).toHaveLength(0);
+    // No queue to drain: vps does not poll again for more.
+    expect(first.received).toBe(0);
     await first.ack();
     // Within 5 minutes nothing is read again.
     emu.clock.advance(60_000);

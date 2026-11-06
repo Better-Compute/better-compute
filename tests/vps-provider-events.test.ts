@@ -32,6 +32,8 @@ interface Intake {
   polls: number;
   /** The next ack throws (a lost delete: the batch comes again). */
   failAck?: boolean;
+  /** Queue messages each poll reports reading (`received`), one entry per poll; absent: omitted. */
+  received?: number[];
 }
 
 function eventsProvider(cloud: FakeGce, intake: Intake): ProviderDefinition {
@@ -48,8 +50,10 @@ function eventsProvider(cloud: FakeGce, intake: Intake): ProviderDefinition {
         async pollEvents() {
           intake.polls += 1;
           const events = [...intake.pending];
+          const received = intake.received?.shift();
           return {
             events,
+            ...(received !== undefined ? { received } : {}),
             async ack() {
               if (intake.failAck) {
                 intake.failAck = false;
@@ -385,6 +389,59 @@ describe('vps.provider-events', () => {
     // The poll saw the out-of-band stop and converged back to the desired running state.
     expect(world.cloud.requests).toContain(`power ${machine.id} on`);
     expect(world.cloud.machines.get(machine.id)!.state).toBe('running');
+  });
+
+  it('handles every event of a large batch before it acks', async () => {
+    // One AWS Health message can name hundreds of instances: none is dropped, each chunk of the
+    // batch commits in its own transaction, and the batch is acked only after the last one.
+    const world = await eventsWorld();
+    const vm = await world.instance('vm-1');
+    await world.fixture.database.query(`DELETE FROM work_queue WHERE kind = $1`, [instanceWork]);
+    const at = world.fixture.clock.now();
+    for (let index = 0; index < 150; index++)
+      world.intake.pending.push({
+        id: `h-1/m-${index}`,
+        kind: 'maintenance-scheduled',
+        machineId: index === 120 ? vm.machineId : `us-central1-a/other-${index}`,
+        at,
+        deadline: at + 86_400_000,
+        details: { code: 'system-reboot', status: 'scheduled' },
+      });
+    world.intake.pending.push({ id: 'late-wake', kind: 'machine-changed', machineId: vm.machineId, at });
+    await world.poll();
+    expect(world.intake.acked).toHaveLength(151);
+    expect(world.intake.pending).toEqual([]);
+    const { rows } = await world.fixture.database.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM provider_event_seen WHERE account_id = $1`,
+      [world.eventsAccountId],
+    );
+    expect(rows[0]!.count).toBe('151');
+    expect((await instanceRow(world, vm.id)).conditions).toContainEqual(
+      expect.objectContaining({ type: maintenanceCondition }),
+    );
+    expect(await dueKeys(world, instanceWork)).toEqual([vm.id]);
+  });
+
+  it('polls again while the queue returns full batches of messages, mapped or not', async () => {
+    const world = await eventsWorld();
+    // Ten messages that all mapped to nothing (forged or unknown) still mean more may wait.
+    world.intake.received = [10, 10, 3];
+    await world.poll();
+    expect(world.intake.polls).toBe(3);
+    // A batch of many events from one message does not keep a drained queue polling.
+    world.intake.polls = 0;
+    world.intake.received = [1, 0];
+    const at = world.fixture.clock.now();
+    for (let index = 0; index < 20; index++)
+      world.intake.pending.push({
+        id: `h-2/m-${index}`,
+        kind: 'maintenance-scheduled',
+        machineId: `us-central1-a/other-${index}`,
+        at,
+      });
+    await world.fixture.advance(15_000);
+    await world.poll();
+    expect(world.intake.polls).toBe(1);
   });
 
   it('event details reach tenants only as short printable facts', () => {

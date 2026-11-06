@@ -1006,6 +1006,12 @@ export interface ProviderEvent {
 /** One poll's events. `ack` removes them at the provider; vps calls it after its transaction commits. */
 export interface ProviderEventBatch {
   events: readonly ProviderEvent[];
+  /**
+   * (AWS A4) How many queue messages the poll read, mapped or dropped (0 for a source that is no
+   * queue). One message can map to many events or none, so vps polls again while this equals
+   * `max`. Absent: vps counts `events`.
+   */
+  received?: number;
   ack(): Promise<void>;
 }
 

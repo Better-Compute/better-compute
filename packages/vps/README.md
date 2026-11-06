@@ -117,7 +117,9 @@ join token ever goes into tenant-readable user data.
 
 An account whose client has `pollEvents` (an EC2 account's EventBridge → SQS intake) is polled every
 15 s (`vps({ events: { every, waitMs, budgetMs } })`). The long poll runs outside any transaction;
-a batch is handled in one transaction and acked only after it commits. Event ids are kept 24 h in
+every event of a batch is handled (one AWS Health message can name hundreds of instances), in
+transactions of at most 100 events, and the batch is acked only after the last one commits. A run
+polls again while the queue returns full batches of messages (`ProviderEventBatch.received`). Event ids are kept 24 h in
 `provider_event_seen`, so a redelivered event is processed once. Events never write machine state:
 
 | Event | Effect |

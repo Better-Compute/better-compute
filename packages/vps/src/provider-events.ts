@@ -28,9 +28,10 @@ import {
 // account whose client has `pollEvents` (an EC2 account's EventBridge → SQS queue) and lets events
 // wake reconcilers early. Polling stays the source of truth: no event writes machine state.
 // Key `all` (periodic, 15 s) enqueues the accounts that can poll and prunes old event ids; key
-// `<accountId>` long-polls one account (outside any transaction), handles a batch in one
-// transaction and acks it only after that commits. An unacked batch comes again; its event ids
-// are in `provider_event_seen` by then (kept 24 h), so each event is processed once.
+// `<accountId>` long-polls one account (outside any transaction), handles every event of a batch
+// in transactions of at most 100 events and acks it only after the last commits. An unacked batch
+// comes again; the ids already handled are in `provider_event_seen` by then, so each event is
+// processed once. A run polls again while the queue returns full batches of messages.
 //
 // | event | effect |
 // |---|---|
@@ -81,6 +82,8 @@ CREATE INDEX provider_event_seen_at ON provider_event_seen (seen_at);
 };
 
 const maxBatch = 10;
+/** Events handled per transaction. */
+const maxChunk = 100;
 const maxRounds = 8;
 
 /** Whether a client reads provider events. */
@@ -180,10 +183,15 @@ async function pollAccount(
       });
       return;
     }
-    const events = batch.events.slice(0, 100);
-    if (events.length > 0)
-      await context.sql.transaction((tx) => handleEvents(deps, tx, account, events));
-    // Only after the transaction committed: a failure above leaves the batch to come again.
+    // Every event, in chunks of at most `maxChunk`, each in its own transaction (one Health message
+    // can name hundreds of instances). A failure leaves the batch unacked to come again: the ids
+    // already committed are in provider_event_seen, so the retry handles only the rest.
+    const events = batch.events;
+    for (let start = 0; start < events.length; start += maxChunk) {
+      const chunk = events.slice(start, start + maxChunk);
+      await context.sql.transaction((tx) => handleEvents(deps, tx, account, chunk));
+    }
+    // Only after every chunk committed: a failure above leaves the batch to come again.
     try {
       await batch.ack();
     } catch (error) {
@@ -193,7 +201,10 @@ async function pollAccount(
       });
       return;
     }
-    if (events.length < maxBatch) break;
+    // Messages, not events: ten forged messages mapped to nothing may still have more behind them,
+    // and one message naming many instances says nothing about what is left.
+    const received = Number.isFinite(batch.received) ? batch.received! : events.length;
+    if (received < maxBatch) break;
   }
 }
 

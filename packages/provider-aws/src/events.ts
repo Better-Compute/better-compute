@@ -338,6 +338,7 @@ export async function pollQueue(
   let acked = false;
   return {
     events,
+    received: messages.length,
     async ack() {
       if (acked || receipts.length === 0) return;
       acked = true;
