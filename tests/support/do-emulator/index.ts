@@ -9,6 +9,7 @@ import { registerDroplets } from './droplets.js';
 import { registerFirewalls } from './firewalls.js';
 import { registerFunctions } from './functions.js';
 import { registerKeys } from './keys.js';
+import { registerPartner } from './partner.js';
 import { registerTags } from './tags.js';
 import { registerVpcs } from './vpcs.js';
 import { DoState, errorFixtures, type Json } from './state.js';
@@ -100,6 +101,8 @@ export class DoEmulator {
   failDeployments = false;
   /** How many reads an add-on stays `provisioning` (or `deprovisioning`). */
   addonReads = 1;
+  /** How many reads a partner attachment stays `PENDING` (or `DELETING`). */
+  partnerReads = 1;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -288,5 +291,6 @@ export class DoEmulator {
     registerApps(this);
     registerFunctions(this);
     registerAddons(this);
+    registerPartner(this);
   }
 }

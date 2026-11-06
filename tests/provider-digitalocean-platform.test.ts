@@ -7,6 +7,7 @@ import {
 import { deploymentTag, digitaloceanProvider } from '@better-compute/provider-digitalocean';
 import { seedAddon } from './support/do-emulator/addons.js';
 import { seedApp } from './support/do-emulator/apps.js';
+import { seedAttachment } from './support/do-emulator/partner.js';
 import { seedNamespace } from './support/do-emulator/functions.js';
 import { DoEmulator, type RecordedRequest } from './support/do-emulator/index.js';
 import {
@@ -731,5 +732,138 @@ describe('do.addon', () => {
     expect((await resources.delete('do.addon', byHand.uuid, call())).state).toBe('deleting');
     expect((await resources.delete('do.addon', byHand.uuid, call())).state).toBe('deleted');
     expect(mutations(emu, 'DELETE', /^\/v2\/add-ons\//)).toHaveLength(1);
+  });
+});
+
+describe('ProviderResources conformance: do.partner-attachment (the tenant’s own account)', () => {
+  const vpcA = '5a4981aa-9653-4bd1-bef5-d6bff52042e4';
+  const vpcB = 'f2b1a3c4-0000-4000-8000-000000000001';
+  const subject = (): ProviderResourcesConformanceSubject => {
+    const emu = emulator();
+    const unmanaged = seedAttachment(emu.state);
+    const spec = { region: 'nyc3', bandwidthMbps: '1000', naasProvider: 'MEGAPORT', vpcs: [vpcA] };
+    return {
+      provider: digitaloceanProvider({ fetch: emu.fetch }),
+      config: doAccount,
+      context: { secrets, account: platformAccount },
+      kind: 'do.partner-attachment',
+      accountScope: 'tenant',
+      spec,
+      updatedSpec: { ...spec, vpcs: [vpcA, vpcB] },
+      replaceSpec: { ...spec, bandwidthMbps: '2000' },
+      unmanaged: unmanaged.id,
+    };
+  };
+  for (const test of providerResourcesConformanceCases())
+    it(test.name, async () => {
+      freshBudgets();
+      await test.run(subject());
+    });
+});
+
+describe('do.partner-attachment', () => {
+  const vpc = '5a4981aa-9653-4bd1-bef5-d6bff52042e4';
+  const bgpKey = 'bgp-chosen-by-tenant-9931';
+  const spec = {
+    region: 'nyc3',
+    bandwidthMbps: '1000',
+    naasProvider: 'MEGAPORT',
+    vpcs: [vpc],
+    localRouterIp: '169.254.0.1/29',
+    peerRouterIp: '169.254.0.6/29',
+    peerRouterAsn: 64532,
+    bgpAuthKey: 'secret://acme/bgp',
+  };
+  const keyed = (key = 'crs_pnc'): CallContext => {
+    const base = call(key);
+    return {
+      ...base,
+      secrets: {
+        resolve: async (ref: string) =>
+          ref === 'secret://acme/bgp' ? bgpKey : base.secrets.resolve(ref as any),
+      },
+    };
+  };
+  const request = (extra: Record<string, unknown> = {}) => ({
+    kind: 'do.partner-attachment',
+    name: 'bc-r-pnc',
+    spec,
+    labels,
+    accountScope: 'tenant' as const,
+    ...extra,
+  });
+
+  it('exists only on the tenant’s own account; nothing is sent otherwise', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    for (const scope of [{ accountScope: undefined }, { accountScope: 'shared' }]) {
+      const error = await failure(resources.ensure(request(scope), keyed()));
+      expect(error.details?.reason).toBe('accountWide');
+    }
+    expect(mutations(emu, 'POST', /partner_network_connect/)).toEqual([]);
+  });
+
+  it('the chosen BGP key is resolved for the create only; service and BGP keys are secret outputs', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const first = await resources.ensure(request(), keyed());
+    expect(first.state).toBe('pending');
+    expect(first.secretOutputs).toBeUndefined();
+    const [create] = mutations(emu, 'POST', /partner_network_connect\/attachments$/);
+    expect(create!.body).toMatchObject({
+      name: `bc-r-pnc-bc${deploymentHash}`,
+      connection_bandwidth_in_mbps: 1000,
+      naas_provider: 'MEGAPORT',
+      vpc_ids: [vpc],
+      bgp: { auth_key: bgpKey, peer_router_asn: 64532 },
+    });
+    let ready = await resources.ensure(request({ id: first.id }), keyed());
+    for (let round = 0; round < 5 && ready.state !== 'ready'; round++)
+      ready = await resources.ensure(request({ id: first.id }), keyed());
+    const attachment = emu.state.partnerAttachments.get(first.id)!;
+    expect(ready.state).toBe('ready');
+    expect(ready.secretOutputs).toEqual({ serviceKey: attachment._serviceKey, bgpAuthKey: bgpKey });
+    const { bgpAuthKey: _ref, ...plain } = spec;
+    expect(ready.spec).toEqual(plain);
+    expect(JSON.stringify([ready.outputs, ready.spec, ready.message])).not.toContain(bgpKey);
+    // A retry without the id finds it by name; the VPCs change in place, the bandwidth does not.
+    expect((await resources.ensure(request(), keyed())).id).toBe(first.id);
+    const other = 'f2b1a3c4-0000-4000-8000-000000000001';
+    await resources.ensure(
+      request({ id: first.id, spec: { ...spec, vpcs: [vpc, other] } }),
+      keyed(),
+    );
+    expect(mutations(emu, 'PATCH', /partner_network_connect/)[0]!.body).toEqual({
+      vpc_ids: [vpc, other],
+    });
+    const error = await failure(
+      resources.ensure(
+        request({ id: first.id, spec: { ...spec, bandwidthMbps: '5000' } }),
+        keyed(),
+      ),
+    );
+    expect(error.details?.reason).toBe('replaceRequired');
+  });
+
+  it('delete leaves an attachment made by hand alone, and deletes its own', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const byHand = seedAttachment(emu.state);
+    expect(
+      (await failure(resources.delete('do.partner-attachment', byHand.id, keyed()))).details
+        ?.reason,
+    ).toBe('notManaged');
+    const mine = await resources.ensure(request(), keyed());
+    await resources.ensure(request({ id: mine.id }), keyed());
+    expect((await resources.delete('do.partner-attachment', mine.id, keyed())).state).toBe(
+      'deleting',
+    );
+    expect((await resources.delete('do.partner-attachment', mine.id, keyed())).state).toBe(
+      'deleting',
+    );
+    expect((await resources.delete('do.partner-attachment', mine.id, keyed())).state).toBe(
+      'deleted',
+    );
+    expect(mutations(emu, 'DELETE', /partner_network_connect/)).toHaveLength(1);
   });
 });

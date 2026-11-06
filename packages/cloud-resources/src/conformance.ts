@@ -38,6 +38,8 @@ export interface ProviderResourcesConformanceSubject {
   replaceSpec?: Record<string, unknown>;
   /** A resource id of `kind` the deployment does not manage: `delete` refuses it. Skipped when absent. */
   unmanaged?: string;
+  /** Whose account the cases say it is on every `ensure` (default: none given, which counts as shared). */
+  accountScope?: 'tenant' | 'shared';
   /** Ownership labels the cases pass to `ensure` (default: managed + a resource id). */
   labels?: Readonly<Record<string, string>>;
   /** A per-run prefix so concurrent runs never share idempotency keys or names. */
@@ -170,6 +172,7 @@ export function providerResourcesConformanceCases(): ConformanceCase<ProviderRes
       name: key(subject, name),
       spec,
       labels: labels(subject, name),
+      ...(subject.accountScope !== undefined ? { accountScope: subject.accountScope } : {}),
     };
     const first = await resources.ensure(request, call(key(subject, name)));
     checkState(first, kind, 'ensure');

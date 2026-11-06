@@ -14,6 +14,7 @@ import { addonKind } from './kinds/addons.js';
 import { appKind } from './kinds/apps.js';
 import { databaseKinds } from './kinds/databases.js';
 import { functionsKinds } from './kinds/functions.js';
+import { partnerKind } from './kinds/partner.js';
 import type { DoKind, DoKindEnv } from './kind.js';
 
 // The `ProviderResources` dispatcher: every long-tail DigitalOcean kind, by name. The cloud-resources module
@@ -22,7 +23,7 @@ import type { DoKind, DoKindEnv } from './kind.js';
 
 /** Every kind this provider serves, in catalog order. */
 export function doResourceKinds(): DoKind[] {
-  return [...databaseKinds(), appKind(), ...functionsKinds(), addonKind()];
+  return [...databaseKinds(), appKind(), ...functionsKinds(), addonKind(), partnerKind()];
 }
 
 export class DoResources implements ProviderResources {

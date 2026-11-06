@@ -154,13 +154,16 @@ DigitalOcean has no network object, so a tenant network is built from a VPC per 
 - **Add-Ons:** `do.addon`, a Marketplace SaaS add-on on a plan, owned through the name suffix
   `-bc<deployment hash>` (adopt renames it, release renames it back); only the plan changes in place. The vendor SSO
   link is never an output.
+- **Partner Network Connect:** `do.partner-attachment` joins VPCs of the account to a NaaS partner, so it exists only
+  on the tenant's own account (refused with `accountWide` on a shared one). Owned through the name suffix; the
+  service key and the BGP auth key are secret outputs, a BGP key the tenant chooses is a SecretRef; only the attached
+  VPCs change in place.
 
 Token scopes: `database:read`, `database:create`, `database:update` and `database:delete`, plus `tag:create` for
 adopt and release; the App Platform, Functions and Add-Ons scopes for those kinds. The App, Functions and Add-Ons
 bodies follow the API reference and are not yet checked against recorded responses. A cluster's `vpc` (a VPC uuid)
 is accepted only on the tenant's own account and cannot change in place. Not modelled yet: Standard and Advanced
-editions, a tenant network (`net_…`) as a cluster's VPC, Vector Databases, the 1-Click catalog and Partner Network
-Connect.
+editions, a tenant network (`net_…`) as a cluster's VPC, Vector Databases and the 1-Click catalog.
 
 ## Rate budget
 
