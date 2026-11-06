@@ -371,7 +371,10 @@ describe('do.guardrail', () => {
     expect(seen.find((entry) => entry.id === byHand.uuid)).not.toHaveProperty('managedBy');
     expect(seen).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ id: byHand.uuid, spec: expect.objectContaining({ type: 'jailbreak' }) }),
+        expect.objectContaining({
+          id: byHand.uuid,
+          spec: expect.objectContaining({ type: 'jailbreak' }),
+        }),
         expect.objectContaining({
           id: foreign.uuid,
           managedBy: 'other',

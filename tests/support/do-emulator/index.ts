@@ -14,6 +14,7 @@ import { registerGuardrails } from './guardrails.js';
 import { registerInference } from './inference.js';
 import { registerKnowledgeBases } from './knowledge-bases.js';
 import { registerKeys } from './keys.js';
+import { registerManagedAgents } from './managed-agents.js';
 import { registerPartner } from './partner.js';
 import { registerTags } from './tags.js';
 import { registerVpcs } from './vpcs.js';
@@ -114,6 +115,8 @@ export class DoEmulator {
   inferenceSoldOut = new Set<string>();
   /** How many reads a knowledge base stays `CREATING` (and an indexing job running). */
   knowledgeBaseReads = 1;
+  /** How many reads a Managed Agents harness or action gateway stays DEPLOYING, PROVISIONING or UPDATING. */
+  managedAgentReads = 1;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -308,5 +311,6 @@ export class DoEmulator {
     registerGenai(this);
     registerKnowledgeBases(this);
     registerGuardrails(this);
+    registerManagedAgents(this);
   }
 }

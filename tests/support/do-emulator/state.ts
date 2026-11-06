@@ -63,6 +63,10 @@ export class DoState {
   knowledgeBases = new Map<string, Json>();
   /** Keyed by uuid. DO GenAI guardrails. */
   guardrails = new Map<string, Json>();
+  /** Keyed by uuid. DO Managed Agents harness agents (preview). */
+  harnesses = new Map<string, Json>();
+  /** Keyed by uuid. DO Managed Agents action gateways (preview). */
+  actionGateways = new Map<string, Json>();
   /** Keyed by uuid. DO autoscale pool resources. */
   autoscalePools = new Map<string, Json>();
   /** The members of each autoscale pool, keyed by the pool's uuid. */

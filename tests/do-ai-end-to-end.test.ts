@@ -206,3 +206,39 @@ describe('DigitalOcean Dedicated Inference through cloudResources', () => {
     expect(w.emu.state.modelKeys.size).toBe(0);
   });
 });
+
+describe('DigitalOcean Managed Agents (preview) through cloudResources', () => {
+  it('lists the preview kinds as unavailable and refuses them with no row and nothing sent', async () => {
+    const w = await world(2);
+    const kinds = await w.api.cloudResources.kinds(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+    });
+    for (const name of ['do.agent-harness', 'do.action-gateway'])
+      expect(kinds.items.find((kind: { kind: string }) => kind.kind === name)).toMatchObject({
+        family: 'ai',
+        preview: true,
+        available: false,
+      });
+    const before = w.emu.requests.length;
+    const error = await w.api.cloudResources
+      .create(w.acme, {
+        tenantId: w.acmeTenant,
+        poolId: w.poolId,
+        kind: 'do.agent-harness',
+        name: 'helper',
+        spec: { region: 'nyc3', model: 'llama3.3-70b-instruct', instructions: 'Help.' },
+        idempotencyKey: 'helper',
+      })
+      .then(
+        () => undefined,
+        (failure: unknown) => failure,
+      );
+    expect(error).toMatchObject({ code: 'UNSUPPORTED', details: { reason: 'preview' } });
+    const rows = await w.fixture.database.query(`SELECT id FROM cloud_resources`);
+    expect(rows.rows).toEqual([]);
+    expect(
+      w.emu.requests.slice(before).filter((r) => r.url.pathname.includes('managed-agents')),
+    ).toEqual([]);
+  });
+});

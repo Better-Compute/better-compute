@@ -1,5 +1,4 @@
 import {
-  ComputeError,
   field,
   manifest,
   type CallContext,
@@ -8,6 +7,7 @@ import {
   type ProviderResourceState,
 } from '@better-compute/core';
 import { found, replaceRequired, type DoKind, type DoKindEnv } from '../kind.js';
+import { assertNameOwned, nameOwner, ownedName } from './named.js';
 
 // Guardrails (`do.guardrail`, P8, Agent Platform): a jailbreak, sensitive-data or content-moderation check, with the
 // response an agent gives when it trips. The response and description change in place; the type is a new guardrail.
@@ -42,28 +42,10 @@ interface DoGuardrail {
 
 const base = '/gen-ai/guardrails';
 const path = (uuid: string) => `${base}/${encodeURIComponent(uuid)}`;
-const nameShape = /^(.+)-bc([0-9a-f]{12})$/;
 
-const deploymentHash = (env: DoKindEnv) =>
-  env.deploymentTag.slice(env.deploymentTag.indexOf(':') + 1);
-
-const nameFor = (env: DoKindEnv, name: string) => `${name}-bc${deploymentHash(env)}`;
-
-function owner(env: DoKindEnv, guardrail: DoGuardrail): 'this' | 'other' | undefined {
-  const match = nameShape.exec(guardrail.name ?? '');
-  if (!match) return undefined;
-  return match[2] === deploymentHash(env) ? 'this' : 'other';
-}
-
-function assertOwned(env: DoKindEnv, guardrail: DoGuardrail): void {
-  if (owner(env, guardrail) !== 'this')
-    throw new ComputeError(
-      'INVALID_STATE',
-      `Guardrail ${guardrail.uuid} is not managed by this better-compute deployment; it is left alone`,
-      undefined,
-      { provider: 'digitalocean', reason: 'notManaged' },
-    );
-}
+const owner = (env: DoKindEnv, guardrail: DoGuardrail) => nameOwner(env, guardrail.name);
+const assertOwned = (env: DoKindEnv, guardrail: DoGuardrail) =>
+  assertNameOwned(env, guardrail.name, `Guardrail ${guardrail.uuid}`);
 
 function typeOf(doType: string): GuardrailType | undefined {
   return (Object.keys(types) as GuardrailType[]).find((key) => types[key] === doType);
@@ -162,7 +144,7 @@ export function guardrailKind(): DoKind {
         assertOwned(env, guardrail);
         return converge(env, guardrail, wanted, context);
       }
-      const name = nameFor(env, request.name);
+      const name = ownedName(env, request.name);
       // The answer of an earlier create was lost: the name finds it.
       const existing = await byName(env, name, context.signal);
       if (existing) return converge(env, existing, wanted, context);

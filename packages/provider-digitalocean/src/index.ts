@@ -37,3 +37,11 @@ export {
   type KnowledgeBaseSpec,
 } from './resources/kinds/knowledge-bases.js';
 export { guardrailKindName, type GuardrailSpec } from './resources/kinds/guardrails.js';
+export {
+  actionGatewayHoursMeter,
+  actionGatewayKindName,
+  agentHarnessHoursMeter,
+  agentHarnessKindName,
+  type ActionGatewaySpec,
+  type AgentHarnessSpec,
+} from './resources/kinds/managed-agents.js';

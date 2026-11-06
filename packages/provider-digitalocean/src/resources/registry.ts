@@ -19,13 +19,15 @@ import { guardrailKind } from './kinds/guardrails.js';
 import { dedicatedInferenceKind } from './kinds/inference.js';
 import { inferenceKeyKind } from './kinds/inference-keys.js';
 import { knowledgeBaseKind } from './kinds/knowledge-bases.js';
+import { actionGatewayKind, agentHarnessKind } from './kinds/managed-agents.js';
 import { partnerKind } from './kinds/partner.js';
 import { oneClickCatalog } from './one-clicks.js';
 import type { DoKind, DoKindEnv } from './kind.js';
 
 // The `ProviderResources` dispatcher: every long-tail DigitalOcean kind, by name. The cloud-resources module
 // validates a spec with the kind's manifest before it calls; the dispatcher refuses an unknown kind and a preview
-// kind the account does not enable, and passes everything else to the kind.
+// kind the account does not enable (a rejected promise, before anything is sent), and passes everything else to
+// the kind.
 
 /** Every kind this provider serves, in catalog order. */
 export function doResourceKinds(): DoKind[] {
@@ -39,6 +41,8 @@ export function doResourceKinds(): DoKind[] {
     inferenceKeyKind(),
     knowledgeBaseKind(),
     guardrailKind(),
+    agentHarnessKind(),
+    actionGatewayKind(),
   ];
 }
 
@@ -84,15 +88,22 @@ export class DoResources implements ProviderResources {
     return found;
   }
 
-  ensure(request: ProviderResourceRequest, context: CallContext): Promise<ProviderResourceState> {
+  async ensure(
+    request: ProviderResourceRequest,
+    context: CallContext,
+  ): Promise<ProviderResourceState> {
     return this.#kind(request.kind).ensure(this.#env, request, context);
   }
 
-  get(kind: string, id: string, context: CallContext): Promise<ProviderResourceState | undefined> {
+  async get(
+    kind: string,
+    id: string,
+    context: CallContext,
+  ): Promise<ProviderResourceState | undefined> {
     return this.#kind(kind).get(this.#env, id, context);
   }
 
-  delete(kind: string, id: string, context: CallContext): Promise<ProviderResourceState> {
+  async delete(kind: string, id: string, context: CallContext): Promise<ProviderResourceState> {
     return this.#kind(kind).delete(this.#env, id, context);
   }
 
