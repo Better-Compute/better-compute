@@ -235,7 +235,8 @@ describe('provider capacity purchases', () => {
     expect(w.emu.calls('CreateCapacityReservation')).toHaveLength(0);
   });
 
-  it('allowPurchases=false refuses the request itself, recording nothing', async () => {
+  it('allowPurchases=false refuses', async () => {
+    // The request itself is refused: no row, no event, nothing for the worker.
     const w = await world({});
     const offering = block(await w.offerings());
     await expect(w.purchase(offering.id)).rejects.toMatchObject({

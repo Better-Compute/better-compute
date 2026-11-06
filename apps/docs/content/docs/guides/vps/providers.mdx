@@ -1153,8 +1153,9 @@ in one region: a fleet in several regions is several accounts.
   against them; a block launch sets `MarketType=capacity-block`. With `spot`, `:spot` offers launch one-time Spot
   Instances, and a reclaimed one reads as `deleted` with an `interruption`. Offers carry the vCPU quota headroom as
   `count` and, with `pricing`, Price List and Spot prices. `providerAccounts.reservationOfferings` lists capacity to
-  buy, and `providerAccounts.purchaseReservation` buys it: root-only, `confirm: true`, exactly once, and only with
-  `allowPurchases` in a platform account.
+  buy, and `providerAccounts.purchaseReservation` buys it: both root-only, the purchase with `confirm: true`, exactly
+  once, and only with `allowPurchases` in a platform account (otherwise refused before anything is recorded). A
+  purchase whose attempts ran out while one may have bought is `unknown`, never `failed`.
 - **Attach.** `discover` yields every instance that is not terminated; `claim` writes the ownership tag and re-reads
   it, turning a lost race into `CONFLICT`; deleting an attached instance detaches it and leaves it running.
 

@@ -386,6 +386,23 @@ export interface ProviderImpl { /* existing */
 **Exit:** the GCP plan's reservation admission (`claimReservationSlot`) covers ODCRs and blocks unchanged:
 `admits only the free slots between polls`, re-run for AWS.
 
+**As built (A3 lane):**
+- Action `compute:providers:purchase` (the existing `providers:*` family); table `vps/0087_provider_purchases`, and
+  `vps/0088_provider_purchases_unknown` (state `unknown`, `uncertain_since`). `reservationOfferings` is root-only
+  too and runs with no transaction open.
+- `PurchaseCapacityBlock` has no ClientToken and `DescribeCapacityReservations` is eventually consistent, so
+  `purchaseReservation` takes an optional `PurchaseAttempt` (`attempt`, `requestedAt`, `uncertainSince`). After an
+  attempt that may have bought, a retry finds the block by type, zone, count, start and creation time, and buys
+  again only after 15 min with nothing in sight; attempts that run out after such an attempt leave the purchase
+  `unknown` (`provider.purchase.unknown`), never `failed`. Providers may describe offering ids
+  (`ProviderInput.describeOffering`) for the approver.
+- Spot metering reads `ExternalMachine.market` (the machine record) rather than a new `instances.market` column;
+  the instance view does not show the market yet.
+- `MachineInterruption` kinds `capacity-block-end` and `maintenance` are declared but produced by A4 (event intake,
+  `DescribeInstanceStatus`); A3 maps only Spot reclaims.
+- `ec2:DescribeCapacityBlockOfferings` is granted with the always-on reads (`reservationOfferings` lists blocks with
+  purchases off); `RunInReservations` names any owner's reservation ARN so RAM-shared ODCRs launch.
+
 ### A4 — Event intake, Spot interruptions, maintenance
 
 **Contract changes (additive):**
@@ -948,7 +965,7 @@ services remain reachable through the interop layer (EventBridge events, S3 audi
 |---|---|
 | A1 | `ec2:RunInstances` (`aws:RequestTag/better-compute:managed=true`, `ec2:CreateAction=RunInstances` for `ec2:CreateTags`), `ec2:DescribeInstances`, `ec2:DescribeInstanceTypes`, `ec2:DescribeInstanceTypeOfferings`, `ec2:DescribeAvailabilityZones`, `ec2:DescribeImages`, `ec2:Start/Stop/Reboot/TerminateInstances` + `ec2:SendDiagnosticInterrupt` + `ec2:CreateReplaceRootVolumeTask` (`ec2:ResourceTag/better-compute:managed=true`), `ec2:CreateTags`/`DeleteTags` (condition on the `better-compute:instance` key for attach), `ssm:GetParameters` on `arn:<p>:ssm:*::parameter/aws/service/*`, `sts:GetCallerIdentity`, `iam:PassRole` (only `instanceProfile`, A9) |
 | A2 | VPC/subnet/IGW/route-table/SG/NACL/endpoint create and delete, scoped to `better-compute:network` tags |
-| A3 | `ec2:DescribeCapacityReservations`, `ec2:DescribeSpotPriceHistory`, `servicequotas:GetServiceQuota`, `pricing:GetProducts`; purchases (`ec2:PurchaseCapacityBlock`, `ec2:CreateCapacityReservation`, `ec2:DescribeCapacityBlockOfferings`) in a separate opt-in statement |
+| A3 | `ec2:DescribeCapacityReservations`, `ec2:DescribeSpotPriceHistory`, `servicequotas:GetServiceQuota`, `pricing:GetProducts`; `ec2:DescribeCapacityBlockOfferings` (offerings are read with purchases off), `ec2:RunInstances` on `capacity-reservation/*` of any owner (RAM-shared ODCRs); purchases (`ec2:PurchaseCapacityBlock`, `ec2:CreateCapacityReservation`, `ec2:CreateTags` on create) in a separate opt-in statement |
 | A4 | `sqs:ReceiveMessage`, `sqs:DeleteMessage` on the intake queue; `ec2:DescribeInstanceStatus` |
 | A5 | `ec2:CreateVolume`/`AttachVolume`/`DetachVolume`/`ModifyVolume`/`DeleteVolume`/`CreateSnapshot` (tag-scoped), `kms:CreateGrant` (with `kms:GrantIsForAWSResource`) when `kmsKeyId` is set |
 | A6 | `ssm:SendCommand` (document `AWS-RunShellScript`, instances tagged `better-compute:instance`), `ssm:GetCommandInvocation` |
