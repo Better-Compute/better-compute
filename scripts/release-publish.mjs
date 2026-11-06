@@ -67,6 +67,8 @@ export const releaseAllowlist = Object.freeze([
 /** Workspace packages a release deliberately leaves out, with the reason. */
 export const notReleased = Object.freeze({
   '@better-compute/aws-core': 'not ready: only the unreleased AWS provider uses it',
+  '@better-compute/cloud-resources':
+    'not ready: managed services land with the DigitalOcean program (P7), then AWS and GCP',
   '@better-compute/provider-digitalocean':
     'not ready: the DigitalOcean program is still in progress',
 });

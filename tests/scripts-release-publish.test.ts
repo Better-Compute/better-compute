@@ -48,11 +48,12 @@ describe('the release allowlist', () => {
     );
   });
 
-  it('leaves out aws-core and provider-digitalocean', () => {
+  it('leaves out aws-core, cloud-resources and provider-digitalocean', () => {
     expect(releaseAllowlist).not.toContain('@better-compute/aws-core');
     expect(releaseAllowlist).not.toContain('@better-compute/provider-digitalocean');
     expect(Object.keys(notReleased).sort()).toEqual([
       '@better-compute/aws-core',
+      '@better-compute/cloud-resources',
       '@better-compute/provider-digitalocean',
     ]);
   });
