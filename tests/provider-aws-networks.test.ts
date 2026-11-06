@@ -21,7 +21,10 @@ import { VpcEmulator } from './support/aws-emulator/vpc.js';
 const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 
 /** An emulated platform account in us-east-1 with EC2 and VPC, and its provider client. */
-async function world(overrides: Partial<AwsConfig> = {}) {
+async function world(
+  overrides: Partial<AwsConfig> = {},
+  options: { wrapFetch?: (inner: typeof fetch) => typeof fetch } = {},
+) {
   const emu = new AwsEmulator();
   const ec2 = new Ec2Emulator(emu);
   const vpc = new VpcEmulator(emu, ec2);
@@ -32,7 +35,10 @@ async function world(overrides: Partial<AwsConfig> = {}) {
     warn: (message, fields) => logs.push({ level: 'warn', message, fields }),
     error: (message, fields) => logs.push({ level: 'error', message, fields }),
   };
-  const provider = awsProvider({ fetch: emu.fetch, credentials: emu.ambient });
+  const provider = awsProvider({
+    fetch: options.wrapFetch ? options.wrapFetch(emu.fetch) : emu.fetch,
+    credentials: emu.ambient,
+  });
   const config = {
     ...(awsConfig.parse({ region: 'us-east-1', zones: ['us-east-1a', 'us-east-1b'] }) as AwsConfig),
     ...overrides,
@@ -219,6 +225,52 @@ describe('networks: VPC', () => {
     expect(waiting).toMatchObject({ state: 'pending', id: made.id });
     emu.clock.advance(121_000);
     expect((await networks.deleteNetwork('bc-net-1', call())).state).toBe('deleted');
+  });
+
+  it('a CreateVpc whose answer was lost is found again by range, not made twice', async () => {
+    let lose = 1;
+    const { networks, vpc, emu, call, settle } = await world(
+      {},
+      {
+        wrapFetch: (inner) => async (input, init) => {
+          const response = await inner(input, init);
+          if (String(init?.body ?? '').includes('Action=CreateVpc') && lose-- > 0)
+            throw new TypeError('fetch failed: socket hang up');
+          return response;
+        },
+      },
+    );
+    vpc.tagLagReads = 5;
+    await expect(networks.ensureNetwork({ name: 'bc-net-1' }, call())).rejects.toMatchObject({
+      code: 'UNAVAILABLE',
+    });
+    expect(vpc.vpcs.size).toBe(1);
+    // Another tenant network on the same range is never taken for this one.
+    await settle(() => networks.ensureNetwork({ name: 'bc-net-2' }, call()));
+    expect((await settle(() => networks.ensureNetwork({ name: 'bc-net-1' }, call()))).state).toBe(
+      'ready',
+    );
+    expect(emu.calls('CreateVpc')).toHaveLength(2);
+    expect(vpc.vpcs.size).toBe(2);
+  });
+
+  it('of two VPCs with the same network tag, the one with the gateway is used', async () => {
+    const { networks, vpc, emu, call, settle } = await world();
+    await settle(() => networks.ensureNetwork({ name: 'bc-net-1' }, call()));
+    const first = vpc.vpcByName('bc-net-1')!;
+    // A duplicate with a lower id (another process inside the tag lag), still empty.
+    const { vpc: duplicate, subnet } = vpc.addForeignVpc('10.64.0.0/16');
+    vpc.subnets.delete(subnet.id);
+    duplicate.tags.set('better-compute:network', 'bc-net-1');
+    duplicate.tags.set('better-compute:managed', 'true');
+    vpc.vpcs.delete(duplicate.id);
+    const lower = { ...duplicate, id: 'vpc-00000000000000001' };
+    vpc.vpcs.set(lower.id, lower);
+    for (const owned of [...vpc.routeTables.values(), ...vpc.nacls.values(), ...vpc.groups.values()])
+      if (owned.vpcId === duplicate.id) owned.vpcId = lower.id;
+    const ensured = await networks.ensureNetwork({ name: 'bc-net-1' }, call());
+    expect(ensured).toMatchObject({ state: 'ready', id: first.id });
+    expect(emu.calls('CreateInternetGateway')).toHaveLength(1);
   });
 
   it('ensureNetwork rides out the tag lag without making a second VPC', async () => {
@@ -415,6 +467,21 @@ describe('networks: subnets', () => {
     expect(vpc.subnets.has(ready.id)).toBe(false);
     expect((await networks.deleteSubnet('us-east-1', 'bc-sub-1', call())).state).toBe('deleted');
     expect((await networks.deleteSubnet('us-west-2', 'bc-sub-1', call())).state).toBe('deleted');
+  });
+
+  it('deleteSubnet never deletes a subnet it did not make', async () => {
+    const { networks, vpc, emu, call } = await withNetwork();
+    // Tagged with the subnet key by someone else: in an adopted VPC, and one without the
+    // managed tag or the network tag.
+    const { subnet: foreign } = vpc.addForeignVpc();
+    foreign.tags.set('better-compute:subnet', 'bc-sub-1');
+    const { subnet: half } = vpc.addForeignVpc('172.30.0.0/16');
+    half.tags.set('better-compute:subnet', 'bc-sub-1');
+    half.tags.set('better-compute:managed', 'true');
+    expect((await networks.deleteSubnet('us-east-1', 'bc-sub-1', call())).state).toBe('deleted');
+    expect(vpc.subnets.has(foreign.id)).toBe(true);
+    expect(vpc.subnets.has(half.id)).toBe(true);
+    expect(emu.calls('DeleteSubnet')).toHaveLength(0);
   });
 
   it('waits for its network before making a subnet', async () => {

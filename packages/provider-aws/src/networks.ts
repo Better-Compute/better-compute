@@ -331,20 +331,53 @@ export class AwsNetworks implements ProviderNetworks {
       .items('vpcSet')
       .map(parseVpc)
       .sort((a, b) => (a.id < b.id ? -1 : 1));
-    if (found.length > 1)
-      this.host.context.log.warn(
-        'aws: more than one VPC carries a network tag; the first is used',
-        {
-          provider: 'aws',
-          network: name,
-          vpcs: found.map((vpc) => vpc.id),
-        },
+    if (found.length > 1) {
+      // A duplicate (a CreateVpc retried inside the tag lag): the one in use, with the gateway,
+      // wins over an empty one, whatever the ids; deleteNetwork deletes them all.
+      const gateways = await this.#call(
+        'DescribeInternetGateways',
+        { Filter: [{ Name: 'attachment.vpc-id', Value: found.map((vpc) => vpc.id) }] },
+        signal,
       );
+      const attached = new Set(
+        gateways
+          .items('internetGatewaySet')
+          .flatMap((igw) => igw.items('attachmentSet').map((a) => a.textOf('vpcId'))),
+      );
+      found.sort((a, b) => Number(attached.has(b.id)) - Number(attached.has(a.id)));
+      this.host.context.log.warn('aws: more than one VPC carries a network tag', {
+        provider: 'aws',
+        network: name,
+        vpcs: found.map((vpc) => vpc.id),
+        used: found[0]!.id,
+      });
+    }
     if (found[0]) return found[0];
     const created = this.#created.get(name);
     if (created && this.host.context.clock.now() - created.at < this.host.consistencyWindowMs())
       return { id: created.id, state: 'pending', blocks: [], tags: new Map(), ours: true };
     return undefined;
+  }
+
+  /**
+   * CreateVpc takes no idempotency token: before making one, a VPC of the range read without a tag
+   * filter (which lags) whose tags name the network, as a lost CreateVpc answer leaves. Not with an
+   * IPAM pool, whose range is not known up front.
+   */
+  async #byRange(name: string, cidr: string, signal: AbortSignal): Promise<Vpc | undefined> {
+    if (this.#config.ipamPoolId) return undefined;
+    const doc = await this.#call(
+      'DescribeVpcs',
+      { Filter: [{ Name: 'cidr-block-association.cidr-block', Value: [cidr] }] },
+      signal,
+    );
+    const mine = doc
+      .items('vpcSet')
+      .map(parseVpc)
+      .filter((vpc) => vpc.tags.get(networkTags.network) === name)
+      .sort((a, b) => (a.id < b.id ? -1 : 1))[0];
+    if (mine) this.#created.set(name, { id: mine.id, at: this.host.context.clock.now() });
+    return mine;
   }
 
   /** Every VPC that carries the network's tag (duplicates included). */
@@ -370,7 +403,7 @@ export class AwsNetworks implements ProviderNetworks {
       );
     const cidr = spec.cidr ?? defaultNetworkCidr;
     vpcRange(cidr, 'network cidr');
-    const vpc = await this.#vpc(spec.name, signal);
+    const vpc = (await this.#vpc(spec.name, signal)) ?? (await this.#byRange(spec.name, cidr, signal));
     if (!vpc) {
       const doc = await this.#call(
         'CreateVpc',
@@ -925,10 +958,16 @@ export class AwsNetworks implements ProviderNetworks {
   ): Promise<ProviderNetworkState> {
     const id = `${region}/${name}`;
     if (region !== this.#config.region || !namePattern.test(name)) return state(id, 'deleted');
-    const found = await this.#subnetsBy(
-      [{ Name: `tag:${networkTags.subnet}`, Value: [name] }],
-      context.signal,
-    );
+    // Only subnets better-compute made: managed, of one of its networks.
+    const found = (
+      await this.#subnetsBy(
+        [
+          { Name: `tag:${networkTags.subnet}`, Value: [name] },
+          { Name: `tag:${tags.managed}`, Value: ['true'] },
+        ],
+        context.signal,
+      )
+    ).filter((subnet) => subnet.tags.has(networkTags.network));
     for (const subnet of found) {
       try {
         await this.#call('DeleteSubnet', { SubnetId: subnet.id }, context.signal);
