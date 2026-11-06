@@ -882,6 +882,106 @@ describe('networks: machines', () => {
     expect(claimed.groups.map((g) => g.id)).toEqual([groupId('bc-net-bc-net-1'), groupId(tagB)]);
   });
 
+  it('setTags checks the interface limit before it creates any group', async () => {
+    const { create, networks, call, vpc } = await onNetwork({ securityGroupsPerInterface: 2 });
+    const machine = await create('ins_1');
+    const before = vpc.groups.size;
+    await expect(
+      networks.setTags(machine.id, [tagA, tagB, 'bc-1111111111111111'], call(), 'ins_1'),
+    ).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED' });
+    expect(vpc.groups.size).toBe(before);
+  });
+
+  it('refuses a tag that would take a network group name (bc-net-…)', async () => {
+    const { create, networks, call } = await onNetwork();
+    const machine = await create('ins_1');
+    await expect(
+      networks.setTags(machine.id, ['bc-net-bc-net-1'], call(), 'ins_1'),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'tag' } });
+    await expect(
+      networks.ensureFirewall(
+        {
+          network: 'bc-net-1',
+          name: 'bc-fw-x',
+          direction: 'ingress',
+          action: 'allow',
+          priority: 1000,
+          rules: [{ protocol: 'tcp', ports: ['22'] }],
+          targetTags: ['bc-net-bc-net-1'],
+        },
+        call(),
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'tag' } });
+  });
+
+  it('deleting an instance eventually removes its tag group; groups in use or targeted stay', async () => {
+    const { create, networks, ec2, emu, call, groupId } = await onNetwork();
+    const gone = await create('ins_1');
+    const kept = await create('ins_2', { tags: [tagB] });
+    // A firewall targets a third tag no machine carries: its group stays for the next one.
+    const targeted = 'bc-2222222222222222';
+    await networks.ensureFirewall(
+      {
+        network: 'bc-net-1',
+        name: 'bc-fw-t',
+        direction: 'ingress',
+        action: 'allow',
+        priority: 1000,
+        rules: [{ protocol: 'tcp', ports: ['22'] }],
+        targetTags: [targeted],
+      },
+      call(),
+    );
+    ec2.instances.get(gone.id)!.state = 'terminated';
+    const sweep = async () => {
+      emu.clock.advance(11 * 60_000);
+      expect((await networks.ensureNetwork({ name: 'bc-net-1' }, call())).state).toBe('ready');
+    };
+    await sweep();
+    // Seen unused once: not deleted yet (an instance being launched may not show yet).
+    expect(groupId(tagA)).toBeDefined();
+    await sweep();
+    expect(groupId(tagA)).toBeUndefined();
+    expect(groupId(tagB)).toBeDefined();
+    expect(groupId(targeted)).toBeDefined();
+    expect(groupId('bc-net-bc-net-1')).toBeDefined();
+    expect(ec2.instances.get(kept.id)!.groups.map((g) => g.id)).toContain(groupId(tagB));
+  });
+
+  it('a tag group that is in use again by the second look is kept', async () => {
+    const { create, networks, ec2, emu, call, groupId } = await onNetwork();
+    const first = await create('ins_1');
+    ec2.instances.get(first.id)!.state = 'terminated';
+    emu.clock.advance(11 * 60_000);
+    await networks.ensureNetwork({ name: 'bc-net-1' }, call());
+    // Another machine took the tag meanwhile.
+    await create('ins_3');
+    emu.clock.advance(11 * 60_000);
+    await networks.ensureNetwork({ name: 'bc-net-1' }, call());
+    emu.clock.advance(11 * 60_000);
+    await networks.ensureNetwork({ name: 'bc-net-1' }, call());
+    expect(groupId(tagA)).toBeDefined();
+  });
+
+  it('tag groups of an adopted VPC are swept by setTags too', async () => {
+    const w = await world();
+    const { vpc: foreign, subnet } = w.vpc.addForeignVpc();
+    const machine = w.ec2.addInstance({ tags: { 'better-compute:instance': 'ins_1' } });
+    machine.vpcId = foreign.id;
+    machine.subnetId = subnet.id;
+    machine.groups = [];
+    await w.networks.setTags(machine.id, [tagA], w.call('ins_1'), 'ins_1');
+    const tagGroup = () =>
+      [...w.vpc.groups.values()].find((g) => g.vpcId === foreign.id && g.name === tagA);
+    expect(tagGroup()).toBeDefined();
+    await w.networks.setTags(machine.id, [tagB], w.call('ins_1'), 'ins_1');
+    for (let n = 0; n < 2; n++) {
+      w.emu.clock.advance(11 * 60_000);
+      await w.networks.setTags(machine.id, [tagB], w.call('ins_1'), 'ins_1');
+    }
+    expect(tagGroup()).toBeUndefined();
+  });
+
   it('a firewall rule targeting a tag reaches the machine that carries it', async () => {
     const { create, networks, call, vpc, ec2 } = await onNetwork();
     const machine = await create('ins_1');

@@ -284,8 +284,10 @@ nothing depends on remembered ids. The tenant-facing behaviour above holds; thes
 - **Private service access.** A subnet with private Google access on GCE maps to S3 and DynamoDB gateway endpoints on
   the VPC's main route table; they are removed with the network.
 - **Deletion** removes endpoints, subnets, security groups and the gateway, then the VPC; anything still in use
-  (`DependencyViolation`) keeps the delete `pending`. Only VPCs carrying the network tag are ever deleted. The groups
-  of instances' tags are removed with the network; on an adopted VPC they stay.
+  (`DependencyViolation`) keeps the delete `pending`, and machines still on a subnet keep their groups and gateway
+  until they are gone. Only VPCs carrying the network tag are ever deleted. An
+  instance's tag group goes once no machine has it and no rule targets it (swept every few minutes, adopted VPCs
+  included), and the rest go with the network.
 - **IAM.** `better-compute aws iam-policy --phases A1,A2` adds the network permissions: creates must tag what they make
   `better-compute:managed=true`, and changes and deletes need that tag. AWS creates a VPC's main route table and
   default ACL untagged, so better-compute tags both with `better-compute:network` first, and routes and ACL entries

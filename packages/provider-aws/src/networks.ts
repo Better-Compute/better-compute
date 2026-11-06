@@ -45,11 +45,14 @@ export const defaultNetworkCidr = '10.64.0.0/16';
 export const naclAllowAllRule = 32766;
 /** The security groups a network interface may have unless the account config says otherwise. */
 export const defaultGroupsPerInterface = 5;
+/** How often a VPC's unused tag groups are looked for (at most; by ensureNetwork, ensureFirewall, setTags). */
+export const tagGroupSweepMs = 10 * 60_000;
 
 const namePattern = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const vpcIdPattern = /^vpc-[0-9a-f]{8,17}$/;
 const subnetIdPattern = /^subnet-[0-9a-f]{8,17}$/;
-const tagPattern = /^bc-[a-z0-9-]{1,60}$/;
+// A tag's group is named after the tag, so a tag never takes the name of a network's group.
+const tagPattern = /^bc-(?!net-)[a-z0-9-]{1,60}$/;
 
 const state = (id: string, value: ProviderNetworkState['state'], message?: string) =>
   ({ id, state: value, ...(message !== undefined ? { message } : {}) }) as ProviderNetworkState;
@@ -259,6 +262,10 @@ export class AwsNetworks implements ProviderNetworks {
   readonly #created = new Map<string, { id: string; at: number }>();
   /** VPCs whose DNS attributes this client has set. */
   readonly #dns = new Set<string>();
+  /** VPC id → when its tag groups were last swept. */
+  readonly #swept = new Map<string, number>();
+  /** Tag group id → when a sweep first saw it unused (it is deleted at a later sweep, if still unused). */
+  readonly #unused = new Map<string, { vpcId: string; at: number }>();
 
   constructor(readonly host: AwsNetworksHost) {}
 
@@ -406,6 +413,7 @@ export class AwsNetworks implements ProviderNetworks {
     const igw = await this.#ensureGateway(spec.name, vpc.id, signal);
     await this.#ensureDefaultRoute(spec.name, vpc.id, igw, signal);
     await this.#ensureAclBaseline(spec.name, vpc.id, signal);
+    await this.#sweepTagGroups(vpc.id, signal);
     return state(vpc.id, 'ready');
   }
 
@@ -1128,6 +1136,7 @@ export class AwsNetworks implements ProviderNetworks {
           for (const cidr of peers(spec))
             desired.push({ groupId, egress: spec.direction === 'egress', ...tuple, cidr });
     await this.#applyRules(spec.name, network ?? vpc.id, desired, signal);
+    await this.#sweepTagGroups(vpc.id, signal);
     return state(spec.name, 'ready');
   }
 
@@ -1462,15 +1471,20 @@ export class AwsNetworks implements ProviderNetworks {
         'subnet-zone',
       );
     const network = vpc.ours ? vpc.tags.get(networkTags.network) : undefined;
-    const groupIds = await this.#groupIdsFor(vpc.id, network, ref.tags ?? [], signal);
+    const groupIds = await this.#groupIdsFor(vpc.id, network, ref.tags ?? [], 0, signal);
     return { subnetId: subnet.id, zone: subnet.zone, groupIds };
   }
 
-  /** The better-compute security groups of a machine with `machineTags` in a VPC. */
+  /**
+   * The better-compute security groups of a machine with `machineTags` in a VPC, created when
+   * missing. `others` is how many other groups the interface keeps: what would not fit is refused
+   * before any group is made.
+   */
   async #groupIdsFor(
     vpcId: string,
     network: string | undefined,
     machineTags: readonly string[],
+    others: number,
     signal: AbortSignal,
   ): Promise<string[]> {
     for (const tag of machineTags)
@@ -1483,6 +1497,14 @@ export class AwsNetworks implements ProviderNetworks {
       ...(network ? [{ name: AwsNetworks.groupName('network', network) }] : []),
       ...[...new Set(machineTags)].map((tag) => ({ name: AwsNetworks.groupName('tag', tag), tag })),
     ];
+    const limit = this.#config.securityGroupsPerInterface ?? defaultGroupsPerInterface;
+    if (others + wanted.length > limit)
+      throw new ComputeError(
+        'QUOTA_EXCEEDED',
+        `the machine would have ${others + wanted.length} security groups; an interface takes ${limit}`,
+        undefined,
+        { provider: 'aws', reason: 'security-groups-per-interface', limit },
+      );
     const ids = await this.#ensureGroups(vpcId, wanted, network, signal);
     return wanted.map((w) => ids.get(w.name)!);
   }
@@ -1552,7 +1574,6 @@ export class AwsNetworks implements ProviderNetworks {
     const vpcDoc = await this.#call('DescribeVpcs', { VpcId: [vpcId] }, signal);
     const vpcItem = vpcDoc.items('vpcSet')[0];
     const network = vpcItem ? parseVpc(vpcItem).tags.get(networkTags.network) : undefined;
-    const ours = await this.#groupIdsFor(vpcId, network, machineTags, signal);
 
     // Which current groups are better-compute's (by tag, never by name): those are replaced.
     let foreign = currentIds;
@@ -1572,39 +1593,131 @@ export class AwsNetworks implements ProviderNetworks {
       );
       foreign = currentIds.filter((id) => !managed.has(id));
     }
+    // The limit is checked before any group is made, so a machine over it leaves none behind.
+    const ours = await this.#groupIdsFor(vpcId, network, machineTags, foreign.length, signal);
     const next = [...new Set([...foreign, ...ours])];
-    if (next.length === currentIds.length && next.every((id) => currentIds.includes(id))) return;
-    const limit = this.#config.securityGroupsPerInterface ?? defaultGroupsPerInterface;
-    if (next.length > limit)
-      throw new ComputeError(
-        'QUOTA_EXCEEDED',
-        `${machineId} would have ${next.length} security groups; an interface takes ${limit}`,
-        undefined,
-        { provider: 'aws', reason: 'security-groups-per-interface', limit },
-      );
-    if (interfaces.length > 1) {
-      const eniId = primary.textOf('networkInterfaceId') ?? '';
-      // The IAM policy changes an interface's groups only when it carries the ownership tag:
-      // RunInstances puts it there; a claimed machine's interface gets it now.
-      const eni = await this.#call(
-        'DescribeNetworkInterfaces',
-        { NetworkInterfaceId: [eniId] },
-        signal,
-      );
-      const eniTags = eni.items('networkInterfaceSet')[0];
-      if (!eniTags || tagMap(eniTags).get(tags.instance) !== claimedBy)
-        await this.#call(
-          'CreateTags',
-          { ResourceId: [eniId], Tag: [{ Key: tags.instance, Value: claimedBy }] },
+    if (next.length !== currentIds.length || !next.every((id) => currentIds.includes(id))) {
+      if (interfaces.length > 1) {
+        const eniId = primary.textOf('networkInterfaceId') ?? '';
+        // The IAM policy changes an interface's groups only when it carries the ownership tag:
+        // RunInstances puts it there; a claimed machine's interface gets it now.
+        const eni = await this.#call(
+          'DescribeNetworkInterfaces',
+          { NetworkInterfaceId: [eniId] },
           signal,
         );
-      await this.#call(
-        'ModifyNetworkInterfaceAttribute',
-        { NetworkInterfaceId: eniId, SecurityGroupId: next },
+        const eniItem = eni.items('networkInterfaceSet')[0];
+        if (!eniItem || tagMap(eniItem).get(tags.instance) !== claimedBy)
+          await this.#call(
+            'CreateTags',
+            { ResourceId: [eniId], Tag: [{ Key: tags.instance, Value: claimedBy }] },
+            signal,
+          );
+        await this.#call(
+          'ModifyNetworkInterfaceAttribute',
+          { NetworkInterfaceId: eniId, SecurityGroupId: next },
+          signal,
+        );
+      } else
+        await this.#call(
+          'ModifyInstanceAttribute',
+          { InstanceId: machineId, GroupId: next },
+          signal,
+        );
+    }
+    await this.#sweepTagGroups(vpcId, signal);
+  }
+
+  // --- Tag group garbage collection ------------------------------------------------------------
+
+  /**
+   * Deletes the VPC's tag groups nothing uses any more: a managed group carrying
+   * `better-compute:tag` that no network interface has and no firewall rule targets (its machine
+   * is gone, or carries other tags now). A group is deleted only when two sweeps, at least the
+   * consistency window apart, both saw it unused, so a machine being launched with it right now
+   * (whose interface a read may not show yet) keeps it; EC2 refuses to delete a group still in
+   * use (DependencyViolation) anyway, which leaves it for a later sweep. At most one sweep per VPC
+   * every `tagGroupSweepMs`; a sweep that fails is logged, never the caller's error.
+   */
+  async #sweepTagGroups(vpcId: string, signal: AbortSignal): Promise<void> {
+    const now = this.host.context.clock.now();
+    const last = this.#swept.get(vpcId);
+    if (last !== undefined && now - last < tagGroupSweepMs) return;
+    this.#swept.set(vpcId, now);
+    try {
+      const doc = await this.#call(
+        'DescribeSecurityGroups',
+        {
+          Filter: [
+            { Name: 'vpc-id', Value: [vpcId] },
+            { Name: 'tag-key', Value: [networkTags.tag] },
+            { Name: `tag:${tags.managed}`, Value: ['true'] },
+          ],
+        },
         signal,
       );
-    } else
-      await this.#call('ModifyInstanceAttribute', { InstanceId: machineId, GroupId: next }, signal);
+      const candidates = doc
+        .items('securityGroupInfo')
+        .map((item) => item.textOf('groupId') ?? '')
+        .filter(Boolean);
+      const keep = new Set<string>();
+      for (let start = 0; start < candidates.length; start += 200) {
+        const chunk = candidates.slice(start, start + 200);
+        const enis = await this.#call(
+          'DescribeNetworkInterfaces',
+          { Filter: [{ Name: 'group-id', Value: chunk }] },
+          signal,
+        );
+        for (const eni of enis.items('networkInterfaceSet'))
+          for (const group of eni.items('groupSet')) keep.add(group.textOf('groupId') ?? '');
+        let token: string | undefined;
+        const seen = new Set<string>();
+        do {
+          const rules = await this.#call(
+            'DescribeSecurityGroupRules',
+            { Filter: [{ Name: 'group-id', Value: chunk }], MaxResults: 1000, NextToken: token },
+            signal,
+          );
+          for (const rule of rules.items('securityGroupRuleSet').map(parseRule))
+            if ([...rule.tags.keys()].some((key) => key.startsWith(networkTags.firewallPrefix)))
+              keep.add(rule.groupId);
+          token = rules.textOf('nextToken') || undefined;
+          if (token && seen.has(token)) break;
+          if (token) seen.add(token);
+        } while (token);
+      }
+      for (const id of candidates) {
+        if (keep.has(id)) {
+          this.#unused.delete(id);
+          continue;
+        }
+        const since = this.#unused.get(id)?.at;
+        if (since === undefined) {
+          this.#unused.set(id, { vpcId, at: now });
+          continue;
+        }
+        if (now - since < this.host.consistencyWindowMs()) continue;
+        try {
+          await this.#call('DeleteSecurityGroup', { GroupId: id }, signal);
+          this.#unused.delete(id);
+        } catch (error) {
+          if (isComputeError(error, 'NOT_FOUND')) this.#unused.delete(id);
+          // In use after all (DependencyViolation): looked at again by a later sweep.
+          else if (isComputeError(error, 'INVALID_STATE')) this.#unused.delete(id);
+          else throw error;
+        }
+      }
+      // This VPC's groups gone some other way are forgotten.
+      for (const [id, entry] of [...this.#unused])
+        if (entry.vpcId === vpcId && !candidates.includes(id)) this.#unused.delete(id);
+    } catch (error) {
+      if (signal.aborted) throw error;
+      this.host.context.log.warn('aws: sweeping unused tag security groups failed', {
+        provider: 'aws',
+        vpc: vpcId,
+        error: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
+      });
+    }
   }
 }
 
