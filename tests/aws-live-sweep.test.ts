@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { liveGate, testRunTagKey } from './live/aws/support/live.js';
 import { sweepTestRuns } from './live/aws/support/sweep.js';
 import { AwsEmulator, testAccessKeyId, testSecret } from './support/aws-platform-emulator/index.js';
-import { recorderFake, stsFake, taggingFake, type RecordedCall } from './support/aws-live-fakes.js';
+import { fisFake, recorderFake, s3SweepFake, stsFake, taggingFake, type FakeBucket, type RecordedCall } from './support/aws-live-fakes.js';
 
 // The live-suite sweeper (A12): deletes what a crashed live run left behind, found by its
 // test-run tag, only in the pinned sandbox account, only for runs older than two hours, in
@@ -14,7 +14,10 @@ const oldRun = `r${(NOW - 3 * 3600_000) / 1000}-0badc0de`;
 const youngRun = `r${(NOW - 30 * 60_000) / 1000}-00c0ffee`;
 const arn = (service: string, resource: string, account = SANDBOX) => `arn:aws:${service}:us-east-1:${account}:${resource}`;
 
-function world(resources: { arn: string; tags: Record<string, string> }[], options: { account?: string; pageSize?: number } = {}) {
+function world(
+  resources: { arn: string; tags: Record<string, string> }[],
+  options: { account?: string; pageSize?: number; buckets?: Map<string, FakeBucket>; s3PageSize?: number; failKeys?: Set<string> } = {},
+) {
   const emu = new AwsEmulator(NOW);
   stsFake(emu, { account: options.account ?? SANDBOX });
   const tagging = taggingFake(emu, { resources, ...(options.pageSize ? { pageSize: options.pageSize } : {}) });
@@ -33,6 +36,12 @@ function world(resources: { arn: string; tags: Record<string, string> }[], optio
     ['kms', 'json'],
   ] as const)
     recorderFake(emu, service, protocol, log);
+  fisFake(emu, log);
+  const s3 = s3SweepFake(emu, {
+    buckets: options.buckets ?? new Map(),
+    ...(options.s3PageSize ? { pageSize: options.s3PageSize } : {}),
+    ...(options.failKeys ? { failKeys: options.failKeys } : {}),
+  });
   const gate = liveGate({
     BETTER_COMPUTE_AWS_LIVE: '1',
     BETTER_COMPUTE_AWS_LIVE_ACCOUNT: SANDBOX,
@@ -44,7 +53,7 @@ function world(resources: { arn: string; tags: Record<string, string> }[], optio
   const sweep = (apply: boolean) =>
     sweepTestRuns({ config: gate.config, deps: { fetch: emu.fetch, clock: emu.clock, endpoint: 'http://emu.local' }, apply });
   const order = () => emu.requests.filter((request) => !['GetResources', 'GetCallerIdentity'].includes(request.operation)).map((request) => request.operation);
-  return { emu, log, tagging, sweep, order };
+  return { emu, log, tagging, s3, sweep, order };
 }
 
 const tagged = (resource: string, run = oldRun) => ({ arn: resource, tags: { [testRunTagKey]: run, 'better-compute:managed': 'true' } });
@@ -155,12 +164,73 @@ describe('sweepTestRuns', () => {
   });
 
   it('skips resource types it has no deleter for, with a reason', async () => {
-    const { sweep } = world([tagged('arn:aws:s3:::bc-live-bucket'), tagged(arn('dynamodb', 'table/bc-live'))]);
+    const { sweep } = world([tagged(`arn:aws:iam::${SANDBOX}:role/bc-live`), tagged(arn('dynamodb', 'table/bc-live'))]);
     const report = await sweep(true);
     expect(report.skipped.map((entry) => entry.reason)).toEqual([
-      expect.stringContaining('no sweeper for s3'),
+      expect.stringContaining('no sweeper for iam:role'),
       expect.stringContaining('no sweeper for dynamodb'),
     ]);
+  });
+
+  it('empties an S3 bucket of every version and delete marker, then deletes it, as the sandbox owner', async () => {
+    const versions = Array.from({ length: 5 }, (_, index) => ({ key: `blobs/k&${index}`, versionId: `v${index}`, marker: index === 4 }));
+    const buckets = new Map<string, FakeBucket>([['bc-live-bucket', { owner: SANDBOX, versions }]]);
+    const { sweep, s3 } = world([tagged('arn:aws:s3:::bc-live-bucket')], { buckets, s3PageSize: 2 });
+    const report = await sweep(true);
+    expect(report.pending).toEqual([]);
+    expect(report.deleted).toEqual(['arn:aws:s3:::bc-live-bucket']);
+    expect(buckets.has('bc-live-bucket')).toBe(false);
+    expect(s3.requests.map((request) => request.operation)).toEqual([
+      'ListObjectVersions',
+      'DeleteObjects',
+      'ListObjectVersions',
+      'DeleteObjects',
+      'ListObjectVersions',
+      'DeleteObjects',
+      'DeleteBucket',
+    ]);
+    // S3 ARNs name no account: S3 itself refuses a bucket some other account owns.
+    for (const request of s3.requests) expect(request.headers['x-amz-expected-bucket-owner']).toBe(SANDBOX);
+    expect(s3.requests[1]!.body).toContain('<Key>blobs/k&amp;0</Key><VersionId>v0</VersionId>');
+  });
+
+  it('dry-runs S3 buckets without touching them', async () => {
+    const buckets = new Map<string, FakeBucket>([['bc-live-bucket', { owner: SANDBOX, versions: [{ key: 'a', versionId: 'v1' }] }]]);
+    const { sweep, s3 } = world([tagged('arn:aws:s3:::bc-live-bucket')], { buckets });
+    expect((await sweep(false)).wouldDelete).toEqual(['arn:aws:s3:::bc-live-bucket']);
+    expect(s3.requests).toEqual([]);
+  });
+
+  it('keeps a bucket pending when S3 refuses to delete some of its objects', async () => {
+    const buckets = new Map<string, FakeBucket>([
+      ['bc-live-bucket', { owner: SANDBOX, versions: [{ key: 'a', versionId: 'v1' }, { key: 'locked', versionId: 'v2' }] }],
+    ]);
+    const { sweep, s3 } = world([tagged('arn:aws:s3:::bc-live-bucket')], { buckets, failKeys: new Set(['locked']) });
+    const report = await sweep(true);
+    expect(report.deleted).toEqual([]);
+    expect(report.pending).toEqual([{ arn: 'arn:aws:s3:::bc-live-bucket', reason: expect.stringContaining('AccessDenied') }]);
+    expect(s3.requests.map((request) => request.operation)).not.toContain('DeleteBucket');
+  });
+
+  it('keeps a bucket another account owns pending, untouched', async () => {
+    const buckets = new Map<string, FakeBucket>([['bc-live-bucket', { owner: '333333333333', versions: [{ key: 'a', versionId: 'v1' }] }]]);
+    const { sweep } = world([tagged('arn:aws:s3:::bc-live-bucket')], { buckets });
+    const report = await sweep(true);
+    expect(report.pending).toEqual([{ arn: 'arn:aws:s3:::bc-live-bucket', reason: expect.stringContaining('AccessDenied') }]);
+    expect(buckets.get('bc-live-bucket')!.versions).toHaveLength(1);
+  });
+
+  it('deletes an event bus after its rules, and FIS experiment templates', async () => {
+    const { sweep, order, log } = world([
+      tagged(arn('events', 'event-bus/bc-live-bus')),
+      tagged(arn('events', 'rule/bc-live-bus/bc-live-rule')),
+      tagged(arn('fis', 'experiment-template/EXTabc123')),
+    ]);
+    const report = await sweep(true);
+    expect(report.pending).toEqual([]);
+    expect(order()).toEqual(['ListTargetsByRule', 'RemoveTargets', 'DeleteRule', 'DeleteExperimentTemplate', 'DeleteEventBus']);
+    expect(log.find((entry) => entry.operation === 'DeleteEventBus')?.params).toEqual({ Name: 'bc-live-bus' });
+    expect(log.find((entry) => entry.operation === 'DeleteExperimentTemplate')?.params).toEqual({ id: 'EXTabc123' });
   });
 
   it('reads every page of tagged resources', async () => {

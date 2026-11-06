@@ -4,6 +4,10 @@
 // leaves anything it cannot place (young runs, unreadable tags, other accounts, unknown types)
 // alone with a reason. A delete that fails because something still depends on the resource is
 // `pending`: the next pass (the sweeper runs on a schedule) retries it.
+//
+// S3 ARNs name no account, so every S3 request carries x-amz-expected-bucket-owner set to the
+// sandbox account: S3 itself then refuses (403) to touch a bucket any other account owns.
+import { createHash } from 'node:crypto';
 import { ComputeError, systemClock } from '@better-compute/core';
 import { parseXml, serializeEc2Query, type QueryParams, type XmlElement } from '@better-compute/aws-core';
 import { createTransport, jsonClient, queryClient, serviceEndpoint, type Transport } from '../../../../packages/aws/src/internal/transport.js';
@@ -49,6 +53,68 @@ interface Clients {
   ec2(action: string, params: QueryParams): Promise<XmlElement>;
   json(service: 'sqs' | 'events' | 'secretsmanager' | 'logs' | 'kms', operation: string, body: Record<string, unknown>): Promise<Record<string, unknown>>;
   query(service: 'sns' | 'cloudformation', action: string, params: QueryParams): Promise<XmlElement>;
+  /** A bucket-level S3 request as the sandbox account (x-amz-expected-bucket-owner). */
+  s3(input: {
+    method: 'GET' | 'POST' | 'DELETE';
+    bucket: string;
+    operation: string;
+    query: Record<string, string>;
+    body?: string;
+    headers?: Record<string, string>;
+  }): Promise<XmlElement | undefined>;
+  /** FIS (rest-json). */
+  fis(method: 'DELETE', path: string, operation: string): Promise<void>;
+}
+
+const escapeXml = (text: string) =>
+  text.replace(/[<>&'"]/g, (c) => `&${{ '<': 'lt', '>': 'gt', '&': 'amp', "'": 'apos', '"': 'quot' }[c]};`);
+
+/** One DeleteObjects call takes at most this many keys. */
+const deleteObjectsMax = 1000;
+
+/** Deletes every object version and delete marker of a bucket, a page at a time, then the bucket. */
+async function emptyAndDeleteBucket(c: Clients, bucket: string): Promise<void> {
+  let marker: { key: string; versionId: string } | undefined;
+  for (let page = 0; page < 10_000; page++) {
+    const listed = await c.s3({
+      method: 'GET',
+      bucket,
+      operation: 'ListObjectVersions',
+      query: {
+        versions: '',
+        'max-keys': String(deleteObjectsMax),
+        ...(marker ? { 'key-marker': marker.key, 'version-id-marker': marker.versionId } : {}),
+      },
+    });
+    const objects = [...(listed?.all('Version') ?? []), ...(listed?.all('DeleteMarker') ?? [])].map((entry) => ({
+      key: entry.textOf('Key') ?? '',
+      versionId: entry.textOf('VersionId') ?? '',
+    }));
+    if (objects.length > 0) {
+      const body = `<?xml version="1.0" encoding="UTF-8"?><Delete xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Quiet>true</Quiet>${objects
+        .map((object) => `<Object><Key>${escapeXml(object.key)}</Key><VersionId>${escapeXml(object.versionId)}</VersionId></Object>`)
+        .join('')}</Delete>`;
+      const result = await c.s3({
+        method: 'POST',
+        bucket,
+        operation: 'DeleteObjects',
+        query: { delete: '' },
+        body,
+        // DeleteObjects requires an integrity header.
+        headers: { 'content-type': 'application/xml', 'content-md5': createHash('md5').update(body, 'utf8').digest('base64') },
+      });
+      const failed = result?.all('Error') ?? [];
+      if (failed.length > 0)
+        throw new ComputeError('PROVIDER_ERROR', `S3 kept ${failed.length} object version(s) of the bucket`, undefined, {
+          code: failed[0]!.textOf('Code') ?? 'DeleteObjects',
+        });
+    }
+    if (listed?.textOf('IsTruncated') !== 'true') break;
+    const key = listed.textOf('NextKeyMarker');
+    if (key === undefined) break;
+    marker = { key, versionId: listed.textOf('NextVersionIdMarker') ?? '' };
+  }
+  await c.s3({ method: 'DELETE', bucket, operation: 'DeleteBucket', query: {} });
 }
 
 /** A resource type the sweeper knows: its rank (lower deletes first) and how to delete it. */
@@ -88,6 +154,13 @@ const serviceDeleters: Record<string, (arn: Arn) => Deleter | undefined> = {
     arn.resource.startsWith('stack/')
       ? { rank: 0, remove: (c, _a, text) => c.query('cloudformation', 'DeleteStack', { StackName: text }).then(() => {}) }
       : undefined,
+  // An S3 ARN is `arn:aws:s3:::<bucket>`; the Tagging API lists buckets, never objects.
+  s3: (arn) =>
+    /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(arn.resource) ? { rank: 2, remove: (c, a) => emptyAndDeleteBucket(c, a.resource) } : undefined,
+  fis: (arn) =>
+    /^experiment-template\/[A-Za-z0-9]{1,64}$/.test(arn.resource)
+      ? { rank: 2, remove: (c, a) => c.fis('DELETE', `/experimentTemplates/${encodeURIComponent(id(a))}`, 'DeleteExperimentTemplate') }
+      : undefined,
   sqs: () => ({
     rank: 2,
     remove: (c, a) =>
@@ -95,6 +168,9 @@ const serviceDeleters: Record<string, (arn: Arn) => Deleter | undefined> = {
   }),
   sns: () => ({ rank: 2, remove: (c, _a, text) => c.query('sns', 'DeleteTopic', { TopicArn: text }).then(() => {}) }),
   events: (arn) => {
+    // A bus goes after its rules: EventBridge refuses to delete a bus that still has rules.
+    if (/^event-bus\/[A-Za-z0-9._-]{1,256}$/.test(arn.resource) && arn.resource !== 'event-bus/default')
+      return { rank: 3, remove: (c, a) => c.json('events', 'DeleteEventBus', { Name: id(a) }).then(() => {}) };
     if (!arn.resource.startsWith('rule/')) return undefined;
     const path = arn.resource.slice('rule/'.length).split('/');
     const rule = path.at(-1)!;
@@ -150,7 +226,7 @@ const jsonTargets = {
   kms: { jsonVersion: '1.1', targetPrefix: 'TrentService' },
 } as const;
 
-function clients(transport: Transport): Clients {
+function clients(transport: Transport, account: string): Clients {
   // EC2 speaks its own query flavour (`Name.N` lists), so it gets a request of its own.
   const ec2Url = serviceEndpoint('ec2', transport.region, transport.endpointOverride);
   return {
@@ -172,6 +248,32 @@ function clients(transport: Transport): Clients {
     },
     query(service, action, params) {
       return queryClient(transport, { hostPrefix: service, version: service === 'sns' ? '2010-03-31' : '2010-05-15' }).call(action, params);
+    },
+    async s3(input) {
+      // Virtual-hosted on AWS; path-style for an endpoint override and for dotted names (TLS).
+      const base = serviceEndpoint('s3', transport.region, transport.endpointOverride);
+      const url =
+        transport.endpointOverride !== undefined || input.bucket.includes('.')
+          ? new URL(`${base.origin}/${input.bucket}/`)
+          : new URL(`${base.protocol}//${input.bucket}.${base.host}/`);
+      for (const [name, value] of Object.entries(input.query)) url.searchParams.set(name, value);
+      const response = await transport.send({
+        method: input.method,
+        url,
+        headers: { ...(input.headers ?? {}), 'x-amz-expected-bucket-owner': account },
+        ...(input.body !== undefined ? { body: input.body } : {}),
+        service: 's3',
+        operation: input.operation,
+        protocol: 'rest-xml',
+        s3: true,
+      });
+      const text = await response.text();
+      return text.trim() === '' ? undefined : parseXml(text);
+    },
+    async fis(method, path, operation) {
+      const base = serviceEndpoint('fis', transport.region, transport.endpointOverride);
+      const response = await transport.send({ method, url: new URL(path, base), service: 'fis', operation, protocol: 'json' });
+      await response.body?.cancel();
     },
   };
 }
@@ -212,7 +314,8 @@ export async function sweepTestRuns(options: SweepOptions): Promise<SweepReport>
         report.skipped.push({ arn: text, reason: `no sweeper for ${arn ? `${arn.service}:${arn.resource.split(/[/:]/)[0]}` : 'this ARN'}; delete it by hand` });
         continue;
       }
-      if (arn.account !== config.account) {
+      // S3 ARNs carry no account; S3 enforces the owner instead (x-amz-expected-bucket-owner).
+      if (arn.account !== config.account && !(arn.service === 's3' && arn.account === '')) {
         report.skipped.push({ arn: text, reason: `belongs to another account (${arn.account || 'none'})` });
         continue;
       }
@@ -236,7 +339,7 @@ export async function sweepTestRuns(options: SweepOptions): Promise<SweepReport>
     report.wouldDelete = queue.map((entry) => entry.text);
     return report;
   }
-  const api = clients(transport);
+  const api = clients(transport, config.account);
   for (const entry of queue) {
     try {
       await entry.deleter.remove(api, entry.arn, entry.text);

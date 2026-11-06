@@ -29,7 +29,10 @@ Enabled but misconfigured is an error, not a skip.
 - **Tags:** everything a run creates carries `better-compute:test-run=r<unix seconds>-<hex>` and
   `better-compute:managed=true` (`liveTags`). Files clean up in `afterAll`.
 - **Sweeper:** `scripts/aws-live-sweep.mjs` deletes what carries a test-run tag older than two hours, for runs that
-  crashed before their `afterAll`. Run it on a schedule in the sandbox account.
+  crashed before their `afterAll`. Run it on a schedule in the sandbox account. It knows EC2 networking, instances
+  and volumes, CloudFormation stacks, S3 buckets (every version and delete marker first; S3 requests name the sandbox
+  as the expected bucket owner), SQS, SNS, EventBridge rules and buses, Secrets Manager, log groups, KMS keys and FIS
+  experiment templates. Anything else it reports as skipped, to delete by hand.
 - **Account-level backstop:** give the sandbox account an AWS Budget with an action that denies
   `ec2:RunInstances` once it is exceeded.
 
