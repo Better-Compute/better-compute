@@ -1,4 +1,5 @@
 import { field, isComputeError, manifest, type CallContext } from '@better-compute/core';
+import type { DoClient } from '../../client/http.js';
 import { spacesRegionPattern, xmlValue, xmlValues, type SpacesClient } from '../../spaces/s3.js';
 import {
   hasCode,
@@ -52,6 +53,38 @@ export function parseBucketId(id: string): BucketTarget {
   return { region: match[1]!, bucket: match[2]! };
 }
 
+/** The most bytes of a marker object that are read. */
+const maxMarkerBytes = 4096;
+
+/** A bucket's marker: who it names, and its bytes (to put the same marker back). */
+async function readMarker(
+  s3: SpacesClient,
+  bucket: string,
+  deploymentTag: string,
+  signal: AbortSignal,
+): Promise<{ owner: 'mine' | 'missing' | 'other'; body?: Uint8Array }> {
+  const response = await s3.request('GET', bucket, bucketMarkerKey, { signal, allow: [404] });
+  // Anything in a bucket can be written by its key holders: a marker too big to be one is not read.
+  if (Number(response.headers.get('content-length') ?? 0) > maxMarkerBytes) {
+    await response.body?.cancel();
+    return { owner: 'other' };
+  }
+  const body = new Uint8Array(await response.arrayBuffer());
+  if (response.status === 404) return { owner: 'missing' };
+  if (body.length > maxMarkerBytes) return { owner: 'other' };
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(body)) as {
+      managedBy?: unknown;
+      deployment?: unknown;
+    };
+    return parsed.managedBy === 'better-compute' && parsed.deployment === deploymentTag
+      ? { owner: 'mine', body }
+      : { owner: 'other' };
+  } catch {
+    return { owner: 'other' };
+  }
+}
+
 /**
  * Who manages a bucket: `mine` (this deployment's marker), `missing` (no marker, or no bucket)
  * or `other` (another deployment's marker, or one that does not parse).
@@ -62,23 +95,15 @@ export async function bucketOwnership(
   deploymentTag: string,
   signal: AbortSignal,
 ): Promise<'mine' | 'missing' | 'other'> {
-  const response = await s3.request('GET', bucket, bucketMarkerKey, { signal, allow: [404] });
-  const text = await response.text();
-  if (response.status === 404) return 'missing';
-  try {
-    const parsed = JSON.parse(text) as { managedBy?: unknown; deployment?: unknown };
-    return parsed.managedBy === 'better-compute' && parsed.deployment === deploymentTag
-      ? 'mine'
-      : 'other';
-  } catch {
-    return 'other';
-  }
+  return (await readMarker(s3, bucket, deploymentTag, signal)).owner;
 }
 
 export function spacesBucketKind(deps: {
   /** The account's S3 client for a region; throws INVALID_CONFIG when the account has no Spaces keys. */
   spaces: (region: string) => SpacesClient;
   deploymentTag: string;
+  /** The account's DigitalOcean API client: a delete looks for CDN endpoints in front of the bucket. */
+  client: DoClient;
 }): DoResourceKind<SpacesBucketSpec> {
   /** The marker's bytes; it names the cloud resource when the caller passed its labels. */
   const markerFor = (labels?: Readonly<Record<string, string>>) =>
@@ -91,8 +116,6 @@ export function spacesBucketKind(deps: {
           : {}),
       }),
     );
-  const marker = markerFor();
-
   async function putMarker(
     s3: SpacesClient,
     bucket: string,
@@ -343,10 +366,25 @@ export function spacesBucketKind(deps: {
       const s3 = deps.spaces(target.region);
       const status = await head(s3, target.bucket, ctx.signal);
       if (status === 404 || status === 403) return { id, state: 'deleted' };
-      if ((await ownership(s3, target.bucket, ctx.signal)) !== 'mine')
+      const found = await readMarker(s3, target.bucket, deps.deploymentTag, ctx.signal);
+      if (found.owner !== 'mine')
         throw notManaged(
           `Bucket ${target.bucket} is not one this deployment manages; it was left alone`,
         );
+      // A CDN endpoint is this deployment's only through its origin's marker: deleting the bucket
+      // under one would leave an endpoint nothing could delete.
+      const origin = `${target.bucket}.${target.region}.digitaloceanspaces.com`;
+      for await (const endpoint of deps.client.pages<{ id: string; origin?: string }>(
+        '/cdn/endpoints',
+        'endpoints',
+        { signal: ctx.signal, budget: 'sweep' },
+      ))
+        if (endpoint.origin === origin)
+          throw storageError(
+            'INVALID_STATE',
+            `Bucket ${target.bucket} is the origin of CDN endpoint ${endpoint.id}; delete the endpoint first`,
+            'cdnEndpointAttached',
+          );
       const listing = await (
         await s3.request('GET', target.bucket, undefined, {
           query: { 'list-type': '2', 'max-keys': '2' },
@@ -389,7 +427,8 @@ export function spacesBucketKind(deps: {
         await s3.request('DELETE', target.bucket, undefined, { signal: ctx.signal, allow: [404] });
       } catch (error) {
         // An object arrived between the listing and the delete: the bucket stays, marked as ours.
-        if (hasCode(error, 'INVALID_STATE')) await putMarker(s3, target.bucket, marker, ctx.signal);
+        if (hasCode(error, 'INVALID_STATE'))
+          await putMarker(s3, target.bucket, found.body ?? markerFor(), ctx.signal);
         throw error;
       }
       ctx.log.info('digitalocean.spaces-bucket.deleted', {

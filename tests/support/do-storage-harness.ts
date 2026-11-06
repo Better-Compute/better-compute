@@ -10,13 +10,14 @@ import {
   type DoStorageResources,
   type DoStorageOptions,
 } from '@better-compute/provider-digitalocean';
+import { registerCdn } from './do-emulator/cdn.js';
 import { DoEmulator } from './do-emulator/index.js';
 import { noopLog, platformAccount } from './do-harness.js';
 import { SpacesEmulator } from './spaces-emulator.js';
 
-// Shared setup for the DigitalOcean storage kinds: the DO API emulator, the Spaces (S3) emulator,
-// and `doStorageResources` built over both for an account whose config the provider's manifest
-// validated.
+// Shared setup for the DigitalOcean storage kinds: the DO API emulator (with the CDN routes the
+// bucket and CDN kinds read), the Spaces (S3) emulator, and `doStorageResources` built over both
+// for an account whose config the provider's manifest validated.
 
 export const storageSecrets = {
   resolve: async (ref: string): Promise<string> => {
@@ -71,6 +72,7 @@ export async function storageWorld(
   const clock = manualClock(t0);
   const emu = new DoEmulator({ now: () => clock.now() });
   const spaces = new SpacesEmulator({ now: () => clock.now() });
+  registerCdn(emu);
   register({ emu, spaces });
   const parsed = await digitalocean.config['~standard'].validate(config);
   if ('issues' in parsed && parsed.issues) throw new Error(parsed.issues[0]!.message);

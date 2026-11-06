@@ -88,7 +88,7 @@ export function storageKindHandlers(
   const spaces = spacesFor(config, context, options);
   return [
     spacesKeyKind(client),
-    spacesBucketKind({ spaces, deploymentTag: tag }),
+    spacesBucketKind({ spaces, deploymentTag: tag, client }),
     cdnEndpointKind({ client, spaces, deploymentTag: tag }),
     containerRegistryKind(client),
     registryGcKind(client),

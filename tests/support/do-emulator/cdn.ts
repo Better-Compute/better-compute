@@ -39,7 +39,12 @@ export function seedCdnEndpoint(emu: DoEmulator, endpoint: Json): Json {
   return entry;
 }
 
+const registered = new WeakSet<DoEmulator>();
+
+/** Adds the CDN routes to `emu`; a second call is a no-op. */
 export function registerCdn(emu: DoEmulator): void {
+  if (registered.has(emu)) return;
+  registered.add(emu);
   const endpoints = cdnEndpoints(emu);
   emu.route('GET', /^\/cdn\/endpoints$/, (c) => emu.paged(c, 'endpoints', [...endpoints.values()]));
   emu.route('GET', /^\/cdn\/endpoints\/([^/]+)$/, (c) => {

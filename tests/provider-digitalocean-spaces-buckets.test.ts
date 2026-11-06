@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { isComputeError, type ComputeError } from '@better-compute/core';
 import { bucketMarkerKey, deploymentTag, resetBudgets } from '@better-compute/provider-digitalocean';
+import { seedCdnEndpoint } from './support/do-emulator/cdn.js';
 import { storageAccount, storageWorld } from './support/do-storage-harness.js';
 
 // The `do.spaces-bucket` kind: tenant buckets over S3 with the account's Spaces keys. Ownership is
@@ -155,6 +156,18 @@ describe('do.spaces-bucket ensure', () => {
     expect(w.spaces.buckets.has('raced-name')).toBe(true);
   });
 
+  it('does not read a marker too big to be one', async () => {
+    const w = await storageWorld();
+    const padded = w.spaces.seedBucket('padded');
+    padded.objects.set(bucketMarkerKey, {
+      body: new TextEncoder().encode(
+        JSON.stringify({ managedBy: 'better-compute', deployment: deploymentTag('default'), pad: 'x'.repeat(5000) }),
+      ),
+    });
+    const error = await failure(w.ensure('do.spaces-bucket', 'padded', { region: 'nyc3' }, w.ctx()));
+    expect(error.details?.reason).toBe('managedByAnother');
+  });
+
   it('validates the name and spec before any request', async () => {
     const w = await storageWorld();
     for (const [name, spec] of [
@@ -251,15 +264,40 @@ describe('do.spaces-bucket get and delete', () => {
     expect(bucket.objects.has(bucketMarkerKey)).toBe(true);
   });
 
-  it('puts the marker back when an object lands between the check and the delete', async () => {
+  it('puts the same marker back when an object lands between the check and the delete', async () => {
     const w = await storageWorld();
-    await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx());
+    await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx(), {
+      labels: { 'better-compute-resource': 'res_1' },
+    });
+    const text = (body: Uint8Array) => new TextDecoder().decode(body);
+    const before = text(w.spaces.buckets.get('tenant-a-assets')!.objects.get(bucketMarkerKey)!.body);
+    expect(before).toContain('res_1');
     w.spaces.failNext('DELETE /tenant-a-assets$', 409, 'BucketNotEmpty');
     const refused = await failure(
       w.resources.delete('do.spaces-bucket', 'nyc3/tenant-a-assets', w.ctx()),
     );
     expect(refused.details?.reason).toBe('bucketNotEmpty');
+    const after = w.spaces.buckets.get('tenant-a-assets')!.objects.get(bucketMarkerKey)!.body;
+    expect(text(after)).toBe(before);
+  });
+
+  it('refuses to delete a bucket a CDN endpoint still fronts', async () => {
+    const w = await storageWorld();
+    await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx());
+    // Deleting the bucket first would orphan the endpoint: its ownership is the bucket's marker.
+    seedCdnEndpoint(w.emu, { origin: 'tenant-a-assets.nyc3.digitaloceanspaces.com' });
+    const refused = await failure(
+      w.resources.delete('do.spaces-bucket', 'nyc3/tenant-a-assets', w.ctx()),
+    );
+    expect(refused.code).toBe('INVALID_STATE');
+    expect(refused.details?.reason).toBe('cdnEndpointAttached');
     expect(w.spaces.buckets.get('tenant-a-assets')!.objects.has(bucketMarkerKey)).toBe(true);
+    // An endpoint in front of another bucket does not hold this one.
+    seedCdnEndpoint(w.emu, { origin: 'tenant-a-other.nyc3.digitaloceanspaces.com' });
+    await w.ensure('do.spaces-bucket', 'tenant-a-spare', { region: 'nyc3' }, w.ctx());
+    expect((await w.resources.delete('do.spaces-bucket', 'nyc3/tenant-a-spare', w.ctx())).state).toBe(
+      'deleted',
+    );
   });
 
   it('refuses to delete a bucket it does not manage', async () => {
