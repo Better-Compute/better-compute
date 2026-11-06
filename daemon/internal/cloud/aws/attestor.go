@@ -35,5 +35,9 @@ func (a *Attestor) Evidence() ([]byte, error) {
 	return c.Evidence(ctx)
 }
 
+// SingleUseEvidence: the control plane admits each instance once (agent.SingleUseEvidence), so a
+// refusal after a lost answer is reported as spent evidence, not as a plain refusal.
+func (a *Attestor) SingleUseEvidence() bool { return true }
+
 // Answer refuses: a cloud-iid join is decided on the evidence alone.
 func (a *Attestor) Answer(_, _ []byte) ([]byte, error) { return nil, ErrNoChallenge }

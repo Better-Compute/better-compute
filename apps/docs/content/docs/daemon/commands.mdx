@@ -262,7 +262,9 @@ What it does, in order:
    claims. Retryable failures (`UNAVAILABLE`, `RESOURCE_EXHAUSTED`, deadlines) retry with jittered back-off up to 20
    attempts, or exactly when the gateway's `grpc-retry-pushback-ms` says; a pending approval waits and asks again;
    a `tpm` join answers up to 3 challenge rounds. A `cloud-iid` join reads the identity document and its signature from
-   IMDSv2 once and sends them as the attestation, with no token.
+   IMDSv2 once and sends them as the attestation, with no token. The control plane admits each instance once, so a
+   `Join refused` after a retried attempt says the evidence is spent: the lost attempt may have admitted the instance
+   (check for the node, or re-join with `--reset` and a join token).
 5. Verifies the signed `JoinResponse`, stores the key and identity, writes a bootstrapped `config.toml` (0600) and
    `join-encryption.jwk` (0644), removes the token file, and prints
    `joined as <node> (site <site>, role <role>); certificate valid until <time>`.

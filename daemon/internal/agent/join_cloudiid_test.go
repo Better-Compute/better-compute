@@ -8,8 +8,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"connectrpc.com/connect"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/cloud/aws"
@@ -105,5 +108,57 @@ func TestJoinWithCloudIidOffEC2SendsNothing(t *testing.T) {
 	})
 	if !errors.Is(err, aws.ErrNotEC2) || *gets != 0 || len(g.evidence) != 0 {
 		t.Fatalf("err %v, %d metadata reads, %d joins", err, *gets, len(g.evidence))
+	}
+}
+
+// lostAnswerGateway admits the first cloud-iid join but its answer is lost (UNAVAILABLE); the
+// control plane then refuses every retry, as cloud-iid admits each instance once ("Join refused";
+// the refusal reason stays server-side).
+type lostAnswerGateway struct {
+	csrs, evidence []string
+	firstRefused   bool
+}
+
+func (g *lostAnswerGateway) Join(_ context.Context, req *agentv1.JoinRequest) (*agentv1.JoinResponse, error) {
+	g.csrs = append(g.csrs, string(req.GetCsr()))
+	g.evidence = append(g.evidence, string(req.GetAttestation()))
+	if len(g.csrs) == 1 && !g.firstRefused {
+		return nil, connect.NewError(connect.CodeUnavailable, errors.New("connection reset"))
+	}
+	return nil, connect.NewError(connect.CodePermissionDenied, errors.New("Join refused"))
+}
+
+func TestCloudIidRefusalAfterALostAnswerSaysTheEvidenceIsSpent(t *testing.T) {
+	srv, _ := iidIMDS(t)
+	f := joinFixture(t)
+	g := &lostAnswerGateway{}
+	attest := &aws.Attestor{Client: &aws.Client{Root: ec2Root(t, "Amazon EC2"), Endpoint: srv.URL}}
+	_, err := Join(context.Background(), JoinOptions{
+		Client: g, Attestor: aws.AttestorID, Attest: attest,
+		EncryptionKey: &f.encKey.PublicKey, SignerPin: f.pin, DataDir: t.TempDir(),
+		Sleep: func(context.Context, time.Duration) error { return nil },
+	})
+	if !errors.Is(err, ErrEvidenceSpent) || !strings.Contains(err.Error(), "--reset") {
+		t.Fatalf("err %v, want ErrEvidenceSpent with the way out", err)
+	}
+	// The retry is the same request (same CSR, same evidence): the control plane can make it
+	// idempotent by the CSR hash.
+	if len(g.csrs) != 2 || g.csrs[0] != g.csrs[1] || g.evidence[0] != g.evidence[1] {
+		t.Fatalf("%d attempts; the retry changed the CSR or the evidence", len(g.csrs))
+	}
+}
+
+func TestCloudIidRefusedAtOnceIsAPlainRefusal(t *testing.T) {
+	srv, _ := iidIMDS(t)
+	f := joinFixture(t)
+	g := &lostAnswerGateway{firstRefused: true}
+	attest := &aws.Attestor{Client: &aws.Client{Root: ec2Root(t, "Amazon EC2"), Endpoint: srv.URL}}
+	_, err := Join(context.Background(), JoinOptions{
+		Client: g, Attestor: aws.AttestorID, Attest: attest,
+		EncryptionKey: &f.encKey.PublicKey, SignerPin: f.pin, DataDir: t.TempDir(),
+		Sleep: func(context.Context, time.Duration) error { return nil },
+	})
+	if err == nil || errors.Is(err, ErrEvidenceSpent) || connect.CodeOf(err) != connect.CodePermissionDenied || len(g.csrs) != 1 {
+		t.Fatalf("err %v after %d attempts, want the refusal as it came", err, len(g.csrs))
 	}
 }
