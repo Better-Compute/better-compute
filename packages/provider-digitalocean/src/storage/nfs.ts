@@ -8,8 +8,11 @@ import {
   type ProviderVolumeSpec,
 } from '@better-compute/core';
 import type { DoClient } from '../client/http.js';
+import { assignTag, hasTag, spelled, unassignTag } from '../compute/tags.js';
+import type { DoDroplet } from '../compute/types.js';
 import type { DoConfig } from '../config.js';
-import { vpcForNetwork } from '../networks/vpcs.js';
+import { deploymentTag, labels, parseMachineId, tagFor } from '../ids.js';
+import { networkOfVpc, vpcForNetwork, vpcLookup } from '../networks/vpcs.js';
 import type { DoShare, DoShareAction } from './types.js';
 
 // Network File Storage shares as `kind: 'shared'` provider volumes (P6). The API's shapes are
@@ -25,6 +28,15 @@ import type { DoShare, DoShareAction } from './types.js';
 // Reachability. An NFS share is reached over a VPC, and VPC membership is its only access
 // control, so a share is created in its tenant network's VPC in the region (`spec.network`,
 // required) and never in a region's default VPC or a VPC that is not a better-compute network's.
+//
+// Attachments. A share is attached to many machines at once, and DO keeps no record of which: the
+// VPCs it is reachable from are all it knows. Attaching a share to a Droplet (an instance of this
+// deployment, in the share's region) tags the Droplet `bc-nfs-<16 hex>` (`shareTag`), the
+// stateless record of who has it, and attaches the Droplet's VPC to the share when it is not
+// there yet. That VPC must be a better-compute network's (never a default or hand-made VPC) and
+// of the same network as the share's VPCs. Detaching untags the Droplet and takes its VPC off the
+// share once no tagged Droplet is left in it; the share's last VPC, its home in the tenant
+// network, stays. A share some Droplet still carries the tag of is not deleted.
 //
 // Ids. Every share call names the region (`?region=`), so a share's provider id is
 // `nfs:<region>:<uuid>`; nothing else in the provider has that shape, which is how `DoVolumes`
@@ -60,6 +72,11 @@ function deploymentHash(deployment: string): string {
 /** The provider name of the share vps names `name`, for this deployment. */
 export function shareName(name: string, deployment: string): string {
   return `${name}-${deploymentHash(deployment)}`;
+}
+
+/** The Droplet tag that records a Droplet has the share attached: `bc-nfs-<16 hex>`. */
+export function shareTag(uuid: string): string {
+  return `bc-nfs-${createHash('sha256').update(uuid.toLowerCase()).digest('hex').slice(0, 16)}`;
 }
 
 /** A share's provider id: `nfs:<region>:<uuid>`. */
@@ -136,6 +153,7 @@ export class DoShares {
   protected readonly log: Logger;
   protected readonly deployment: string;
   protected readonly suffix: string;
+  protected readonly deploymentTag: string;
 
   constructor(client: DoClient, config: DoConfig, deployment: string, log: Logger) {
     this.client = client;
@@ -143,6 +161,7 @@ export class DoShares {
     this.log = log;
     this.deployment = deployment;
     this.suffix = `-${deploymentHash(deployment)}`;
+    this.deploymentTag = deploymentTag(deployment);
   }
 
   /** Whether better-compute may act on the share: its name carries this deployment's hash. */
@@ -390,21 +409,14 @@ export class DoShares {
     return this.after(share, action, 'updating', signal);
   }
 
-  /**
-   * Deletes a share of ours. `attached` says whether any machine still has it attached (the
-   * caller knows; DO does not keep it): such a share is not deleted.
-   */
-  async delete(
-    id: string,
-    ctx: CallContext,
-    attached?: (share: DoShare) => Promise<number | undefined>,
-  ): Promise<ProviderResourceState> {
+  /** Deletes a share of ours that no Droplet has attached. */
+  async delete(id: string, ctx: CallContext): Promise<ProviderResourceState> {
     const ref = this.parse(id);
     const { signal } = ctx;
     const share = await this.share(ref, signal);
     if (!share) return state(shareId(ref.region, ref.uuid), 'deleted');
     this.refuseForeign(share);
-    const holder = attached ? await attached(share) : undefined;
+    const holder = (await this.holders(share, signal))[0]?.id;
     if (holder !== undefined)
       throw fail(
         'INVALID_STATE',
@@ -424,5 +436,144 @@ export class DoShares {
     }
     this.log.info('digitalocean.shareDeleted', { share: share.id });
     return state(shareId(share.region, share.id), 'deleted');
+  }
+
+  // ----------------------------------------------------------------------- attach and detach
+
+  /** The Droplet, or undefined when it does not exist. */
+  protected async droplet(dropletId: number, signal: AbortSignal): Promise<DoDroplet | undefined> {
+    try {
+      const reply = await this.client.request<{ droplet: DoDroplet }>(
+        'GET',
+        `/droplets/${dropletId}`,
+        { signal, budget: 'observe' },
+      );
+      return reply.droplet;
+    } catch (error) {
+      if (isComputeError(error, 'NOT_FOUND')) return undefined;
+      throw error;
+    }
+  }
+
+  /**
+   * Every Droplet that carries the share's tag, ours or not (a tag put on by hand still counts:
+   * it keeps the share, and its VPC, in place). The default list omits GPU Droplets (research
+   * S2), so the GPU list is read too and filtered here.
+   */
+  protected async holders(share: DoShare, signal: AbortSignal): Promise<DoDroplet[]> {
+    const tag = shareTag(share.id);
+    const out = new Map<number, DoDroplet>();
+    const queries: Record<string, string>[] = [{ tag_name: tag }, { type: 'gpus' }];
+    for (const query of queries)
+      for await (const droplet of this.client.pages<DoDroplet>('/droplets', 'droplets', {
+        query,
+        signal,
+        budget: 'observe',
+      }))
+        if (hasTag(droplet, tag)) out.set(droplet.id, droplet);
+    return [...out.values()];
+  }
+
+  async attach(
+    id: string,
+    machineId: string,
+    ctx: CallContext,
+    instanceId?: string,
+  ): Promise<ProviderResourceState> {
+    this.parse(id);
+    const dropletId = parseMachineId(machineId);
+    const { signal } = ctx;
+    const share = await this.ours(id, signal);
+    const droplet = await this.droplet(dropletId, signal);
+    if (!droplet) throw fail('NOT_FOUND', `Droplet ${dropletId} does not exist`, 'machine');
+    if (droplet.region.slug !== share.region)
+      throw fail(
+        'INVALID_INPUT',
+        `share ${share.id} is in ${share.region} and Droplet ${droplet.id} in ${droplet.region.slug}: a share attaches only in its region`,
+        'region',
+      );
+    const instanceOf =
+      instanceId === undefined
+        ? (droplet.tags ?? []).some((t) => t.toLowerCase().startsWith(`${labels.instance}:`))
+        : hasTag(droplet, tagFor(labels.instance, instanceId));
+    if (!hasTag(droplet, this.deploymentTag) || !instanceOf)
+      throw fail(
+        'INVALID_STATE',
+        instanceId === undefined
+          ? `Droplet ${droplet.id} does not belong to an instance of this better-compute deployment`
+          : `Droplet ${droplet.id} does not belong to instance ${instanceId}`,
+        'notInstance',
+      );
+    // NFS has no access control but the VPC: only a VPC of the share's own network may reach it.
+    const lookup = vpcLookup(this.client, signal);
+    const vpc = droplet.vpc_uuid ? await lookup(droplet.vpc_uuid) : undefined;
+    const network = vpc && !vpc.default ? networkOfVpc(vpc) : undefined;
+    if (!vpc || network === undefined)
+      throw fail(
+        'INVALID_STATE',
+        `Droplet ${droplet.id} is not in a better-compute network's VPC; a share is reachable only from its network`,
+        'vpcNotManaged',
+      );
+    const vpcIds = share.vpc_ids ?? [];
+    if (!vpcIds.includes(vpc.id)) {
+      const networks = new Set<string>();
+      for (const vpcId of vpcIds) {
+        const found = await lookup(vpcId);
+        const of = found && networkOfVpc(found);
+        if (of !== undefined) networks.add(of);
+      }
+      if (!networks.has(network))
+        throw fail(
+          'INVALID_STATE',
+          `Droplet ${droplet.id} is in network ${network}; share ${share.id} belongs to another network`,
+          'otherNetwork',
+        );
+    }
+    const sid = shareId(share.region, share.id);
+    if (share.status !== 'ACTIVE') {
+      const now = shareState(share);
+      return now.state === 'error' ? now : state(sid, 'pending', shareOutputs(share));
+    }
+    // The tag first: a detach running meanwhile then sees this Droplet and keeps its VPC.
+    const tag = shareTag(share.id);
+    if (!hasTag(droplet, tag)) await assignTag(this.client, tag, droplet.id, signal);
+    const on = (outputs: Record<string, string> | undefined) => ({
+      ...(outputs ?? shareOutputs(share)),
+      attachedTo: String(droplet.id),
+    });
+    if (vpcIds.includes(vpc.id)) return state(sid, 'ready', on(shareOutputs(share)));
+    const action = await this.act(share, 'attach', { vpc_id: vpc.id }, signal);
+    const after = await this.after(share, action, 'pending', signal);
+    return after.state === 'ready' ? { ...after, outputs: on(after.outputs) } : after;
+  }
+
+  async detach(id: string, machineId: string, ctx: CallContext): Promise<ProviderResourceState> {
+    const ref = this.parse(id);
+    const dropletId = parseMachineId(machineId);
+    const { signal } = ctx;
+    const sid = shareId(ref.region, ref.uuid);
+    const share = await this.share(ref, signal);
+    if (!share) return state(sid, 'deleted');
+    const droplet = await this.droplet(dropletId, signal);
+    // A Droplet that is gone took its tag with it.
+    if (!droplet) return state(sid, 'deleted');
+    const tag = shareTag(share.id);
+    if (hasTag(droplet, tag)) {
+      this.refuseForeign(share);
+      await unassignTag(this.client, spelled(droplet, tag), droplet.id, signal);
+    } else if (!this.owned(share)) return state(sid, 'deleted');
+    // The Droplet's VPC leaves the share once no Droplet there has it; the last VPC stays.
+    const vpcIds = share.vpc_ids ?? [];
+    const vpcId = droplet.vpc_uuid;
+    if (vpcId === undefined || !vpcIds.includes(vpcId) || vpcIds.length <= 1)
+      return state(sid, 'deleted');
+    if (share.status !== 'ACTIVE') return state(sid, 'deleting', shareOutputs(share));
+    const others = (await this.holders(share, signal)).filter(
+      (d) => d.id !== droplet.id && d.vpc_uuid === vpcId,
+    );
+    if (others.length > 0) return state(sid, 'deleted');
+    const action = await this.act(share, 'detach', { vpc_id: vpcId }, signal);
+    const after = await this.after(share, action, 'deleting', signal);
+    return after.state === 'ready' ? state(sid, 'deleted') : after;
   }
 }

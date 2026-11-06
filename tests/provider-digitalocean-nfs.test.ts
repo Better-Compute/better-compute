@@ -6,9 +6,12 @@ import {
   networkDescription,
   shareId,
   shareName,
+  shareTag,
+  tagFor,
   type DoCompute,
 } from '@better-compute/provider-digitalocean';
 import { DoEmulator, type Json, type RecordedRequest } from './support/do-emulator/index.js';
+import { seedDroplet } from './support/do-emulator/droplets.js';
 import { seedShare } from './support/do-emulator/nfs.js';
 import { seedVpc } from './support/do-emulator/vpcs.js';
 import { build, ctx, freshBudgets } from './support/do-harness.js';
@@ -50,6 +53,28 @@ const writes = (emu: DoEmulator) => emu.requests.filter((r) => r.method !== 'GET
 function subnet(emu: DoEmulator, name = 'net-a-nyc3', region = 'nyc3', network = 'net-a'): Json {
   return seedVpc(emu.state, { name, region, description: networkDescription(network) });
 }
+
+/** A Droplet of instance `ins_1` (or `instance`) of this deployment, in `vpc`. */
+function host(
+  emu: DoEmulator,
+  vpc: Json,
+  extra: { region?: string; tags?: string[]; instance?: string } = {},
+): Json {
+  return seedDroplet(emu.state, {
+    region: extra.region ?? vpc.region,
+    vpc_uuid: vpc.id,
+    tags: extra.tags ?? [deployment, tagFor(labels.instance, extra.instance ?? 'ins_1')],
+  });
+}
+
+const uuidOf = (id: string) => id.split(':')[2]!;
+const tagged = (droplet: Json, id: string) =>
+  (droplet.tags as string[]).includes(shareTag(uuidOf(id)));
+const shareOf = (emu: DoEmulator, id: string) => emu.state.nfsShares.get(uuidOf(id))!;
+const shareActions = (emu: DoEmulator, type?: string) =>
+  calls(emu, 'POST', /^\/v2\/nfs\/[^/]+\/actions$/).filter(
+    (r) => type === undefined || (r.body as Json).type === type,
+  );
 
 async function setup(emu = emulator()): Promise<{ emu: DoEmulator; impl: DoCompute; vpc: Json }> {
   const vpc = subnet(emu);
@@ -268,5 +293,167 @@ describe('provider-digitalocean NFS shares: resize and delete', () => {
     expect(emu.state.nfsShares.has(foreign.id)).toBe(true);
     expect(calls(emu, 'DELETE', /^\/v2\/nfs\//)).toHaveLength(1);
     expect(calls(emu, 'DELETE', /^\/v2\/nfs\//)[0]!.url.searchParams.get('region')).toBe('nyc3');
+  });
+});
+
+describe('provider-digitalocean NFS shares: attach and detach', () => {
+  it("attaches to an instance Droplet in the share's VPC: tags it, no share action", async () => {
+    const { emu, impl, vpc } = await setup();
+    const droplet = host(emu, vpc);
+    const { id } = await impl.volumes.ensureVolume(spec, ctx());
+    const attached = await impl.volumes.attachVolume(id, String(droplet.id), ctx(), 'ins_1');
+    expect(attached).toMatchObject({
+      id,
+      state: 'ready',
+      outputs: { attachedTo: String(droplet.id), device: expect.stringMatching(/:\//) },
+    });
+    expect(tagged(emu.state.droplets.get(droplet.id)!, id)).toBe(true);
+    expect(shareActions(emu)).toHaveLength(0);
+    const before = writes(emu).length;
+    expect((await impl.volumes.attachVolume(id, String(droplet.id), ctx())).state).toBe('ready');
+    expect(writes(emu)).toHaveLength(before);
+    // getVolume names no machine: a share is attached to many.
+    expect((await impl.volumes.getVolume(id, ctx()))?.outputs?.attachedTo).toBe(undefined);
+  });
+
+  it('attaches another subnet of the same network through a VPC attach, non-blocking', async () => {
+    const emu = emulator();
+    emu.nfsActionReads = 2;
+    const { impl } = await setup(emu);
+    const other = subnet(emu, 'net-a-nyc3-b');
+    const first = host(emu, other);
+    const second = host(emu, other, { instance: 'ins_2' });
+    const { id } = await impl.volumes.ensureVolume(spec, ctx());
+    const seen: string[] = [];
+    for (let i = 0; i < 4; i++)
+      seen.push((await impl.volumes.attachVolume(id, String(first.id), ctx())).state);
+    expect(seen[0]).toBe('pending');
+    expect(seen.at(-1)).toBe('ready');
+    expect(shareActions(emu, 'attach')[0]!.body).toEqual({
+      type: 'attach',
+      region: 'nyc3',
+      params: { vpc_id: other.id },
+    });
+    expect(shareOf(emu, id).vpc_ids.filter((v: string) => v === other.id)).toHaveLength(1);
+    // The VPC is there now: a second machine in it needs no action.
+    const actions = shareActions(emu).length;
+    expect((await impl.volumes.attachVolume(id, String(second.id), ctx())).state).toBe('ready');
+    expect(shareActions(emu)).toHaveLength(actions);
+  });
+
+  it('refuses a Droplet it may not reach the share from, before any write', async () => {
+    const { emu, impl, vpc } = await setup();
+    const { id } = await impl.volumes.ensureVolume(spec, ctx());
+    const writesBefore = writes(emu).length;
+    const defaultVpc = seedVpc(emu.state, { name: 'default-nyc3', region: 'nyc3', default: true });
+    const foreignVpc = subnet(emu, 'net-b-nyc3', 'nyc3', 'net-b');
+    const plainVpc = seedVpc(emu.state, { name: 'hand-made', region: 'nyc3' });
+    const away = subnet(emu, 'net-a-sfo3', 'sfo3');
+    const cases: [Json, string | undefined, string, string][] = [
+      [host(emu, away), undefined, 'INVALID_INPUT', 'region'],
+      [
+        host(emu, vpc, { tags: [tagFor(labels.instance, 'ins_1')] }),
+        undefined,
+        'INVALID_STATE',
+        'notInstance',
+      ],
+      [host(emu, vpc, { instance: 'ins_2' }), 'ins_1', 'INVALID_STATE', 'notInstance'],
+      [host(emu, defaultVpc), undefined, 'INVALID_STATE', 'vpcNotManaged'],
+      [host(emu, plainVpc), undefined, 'INVALID_STATE', 'vpcNotManaged'],
+      [host(emu, foreignVpc), undefined, 'INVALID_STATE', 'otherNetwork'],
+    ];
+    for (const [droplet, instance, code, reason] of cases) {
+      const error = await failure(
+        impl.volumes.attachVolume(id, String(droplet.id), ctx(), instance),
+      );
+      expect([error.code, error.details?.reason], reason).toEqual([code, reason]);
+    }
+    const missing = await failure(impl.volumes.attachVolume(id, '999999', ctx()));
+    expect(missing.code).toBe('NOT_FOUND');
+    const foreign = seedShare(emu.state, { name: 'their-share', vpc_ids: [vpc.id] });
+    const notOurs = await failure(
+      impl.volumes.attachVolume(shareId('nyc3', foreign.id), String(host(emu, vpc).id), ctx()),
+    );
+    expect([notOurs.code, notOurs.details?.reason]).toEqual(['INVALID_STATE', 'notManaged']);
+    const malformed = await failure(
+      impl.volumes.attachVolume('nfs:nyc3:x', String(host(emu, vpc).id), ctx()),
+    );
+    expect(malformed.code).toBe('INVALID_INPUT');
+    expect(writes(emu)).toHaveLength(writesBefore);
+  });
+
+  it('is pending on a share that is still CREATING, without writing', async () => {
+    const emu = emulator();
+    emu.nfsCreateReads = 5;
+    const { impl, vpc } = await setup(emu);
+    const droplet = host(emu, vpc);
+    const { id } = await impl.volumes.ensureVolume(spec, ctx());
+    const before = writes(emu).length;
+    expect((await impl.volumes.attachVolume(id, String(droplet.id), ctx())).state).toBe('pending');
+    expect(writes(emu)).toHaveLength(before);
+  });
+
+  it('detaches: untags the Droplet, and takes a VPC off once no tagged Droplet is in it', async () => {
+    const { emu, impl, vpc } = await setup();
+    const home = host(emu, vpc);
+    const other = subnet(emu, 'net-a-nyc3-b');
+    const first = host(emu, other);
+    const second = host(emu, other, { instance: 'ins_2' });
+    const { id } = await impl.volumes.ensureVolume(spec, ctx());
+    for (const droplet of [home, first, second])
+      expect((await impl.volumes.attachVolume(id, String(droplet.id), ctx())).state).toBe('ready');
+    expect(shareOf(emu, id).vpc_ids).toEqual([vpc.id, other.id]);
+
+    expect(await impl.volumes.detachVolume(id, String(first.id), ctx())).toEqual({
+      id,
+      state: 'deleted',
+    });
+    expect(tagged(emu.state.droplets.get(first.id)!, id)).toBe(false);
+    // `second` still reaches it from that VPC.
+    expect(shareOf(emu, id).vpc_ids).toEqual([vpc.id, other.id]);
+    expect((await impl.volumes.detachVolume(id, String(second.id), ctx())).state).toBe('deleted');
+    expect(shareOf(emu, id).vpc_ids).toEqual([vpc.id]);
+    expect(shareActions(emu, 'detach')[0]!.body).toEqual({
+      type: 'detach',
+      region: 'nyc3',
+      params: { vpc_id: other.id },
+    });
+    // The share's last VPC stays: it is the share's home in the tenant network.
+    expect((await impl.volumes.detachVolume(id, String(home.id), ctx())).state).toBe('deleted');
+    expect(shareOf(emu, id).vpc_ids).toEqual([vpc.id]);
+    // Again, and for a Droplet that never had it or is gone: deleted, no writes.
+    const before = writes(emu).length;
+    for (const machine of [String(home.id), String(host(emu, vpc).id), '999999'])
+      expect((await impl.volumes.detachVolume(id, machine, ctx())).state).toBe('deleted');
+    expect(writes(emu)).toHaveLength(before);
+  });
+
+  it('a VPC detach that runs is deleting until it completes', async () => {
+    const emu = emulator();
+    const { impl, vpc } = await setup(emu);
+    host(emu, vpc);
+    const other = subnet(emu, 'net-a-nyc3-b');
+    const droplet = host(emu, other);
+    const { id } = await impl.volumes.ensureVolume(spec, ctx());
+    await impl.volumes.attachVolume(id, String(droplet.id), ctx());
+    emu.nfsActionReads = 2;
+    const seen: string[] = [];
+    for (let i = 0; i < 4; i++)
+      seen.push((await impl.volumes.detachVolume(id, String(droplet.id), ctx())).state);
+    expect(seen[0]).toBe('deleting');
+    expect(seen.at(-1)).toBe('deleted');
+    expect(shareOf(emu, id).vpc_ids).toEqual([vpc.id]);
+  });
+
+  it('never deletes a share a Droplet still has attached', async () => {
+    const { emu, impl, vpc } = await setup();
+    const droplet = host(emu, vpc);
+    const { id } = await impl.volumes.ensureVolume(spec, ctx());
+    await impl.volumes.attachVolume(id, String(droplet.id), ctx());
+    const error = await failure(impl.volumes.deleteVolume(id, ctx()));
+    expect([error.code, error.details?.reason]).toEqual(['INVALID_STATE', 'attached']);
+    expect(emu.state.nfsShares.size).toBe(1);
+    await impl.volumes.detachVolume(id, String(droplet.id), ctx());
+    expect((await impl.volumes.deleteVolume(id, ctx())).state).toBe('deleted');
   });
 });

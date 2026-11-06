@@ -444,6 +444,7 @@ export class DoVolumes implements ProviderVolumes {
     ctx: CallContext,
     instanceId?: string,
   ): Promise<ProviderResourceState> {
+    if (isShareId(volumeId)) return this.shares.attach(volumeId, machineId, ctx, instanceId);
     const id = parseVolumeId(volumeId);
     const dropletId = parseMachineId(machineId);
     const { signal } = ctx;
@@ -468,6 +469,7 @@ export class DoVolumes implements ProviderVolumes {
     machineId: string,
     ctx: CallContext,
   ): Promise<ProviderResourceState> {
+    if (isShareId(volumeId)) return this.shares.detach(volumeId, machineId, ctx);
     const id = parseVolumeId(volumeId);
     const dropletId = parseMachineId(machineId);
     const { signal } = ctx;
