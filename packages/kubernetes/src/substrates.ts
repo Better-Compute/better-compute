@@ -14,7 +14,7 @@ import {
 } from '@better-compute/core';
 import { endNodeReservations } from '@better-compute/capacity';
 import { readAccount, zoneRegion } from '@better-compute/vps';
-import { markDeleted, reopen } from './clusters.js';
+import { clusterNetwork, markDeleted, reopen } from './clusters.js';
 import { canonical, sha256Hex } from './input.js';
 import {
   accountKubernetes,
@@ -355,12 +355,25 @@ async function establishCluster(
     [pool.owner_tenant_id, name],
   );
   if (taken.rows.length > 0) throw new Refused(`A cluster named ${name} already exists in the pool owner's tenant`);
+  let network: { networkId: string; subnetId: string } | undefined;
+  if (create.networkId !== undefined)
+    try {
+      network = await clusterNetwork(tx, {
+        tenantId: pool.owner_tenant_id,
+        accountId: account.id,
+        networkId: create.networkId,
+        region,
+      });
+    } catch (error) {
+      if (!isComputeError(error)) throw error;
+      throw new Refused(text(error));
+    }
   await tx.query(
     `INSERT INTO kubernetes_clusters (id, tenant_id, project_id, pool_id, provider_account_id, network_id, subnet_id,
                                       name, description, mode, location, region, release_channel, requested_version,
                                       authorized_networks, private_nodes, provider_name, state, desired_state,
                                       created_by, idempotency_key, request_hash, version, substrate_pool_id)
-     VALUES ($1, $2, NULL, $3, $4, NULL, NULL, $5, $6, 'standard', $7, $8, $9, $10, $11::jsonb, $12, $13, 'pending',
+     VALUES ($1, $2, NULL, $3, $4, $17, $18, $5, $6, 'standard', $7, $8, $9, $10, $11::jsonb, $12, $13, 'pending',
              'present', $14, $15, decode($16, 'hex'), 1, $3)`,
     [
       clusterId,
@@ -379,6 +392,8 @@ async function establishCluster(
       substrateCreator,
       `substrate:${clusterId}`,
       await sha256Hex(substrateIdentity(substrate)),
+      network?.networkId ?? null,
+      network?.subnetId ?? null,
     ],
   );
   for (const flavor of substrate.flavors)

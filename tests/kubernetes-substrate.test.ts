@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { newId } from '@better-compute/core';
 import { substrateCapacityLabel, substratePoolLabel, substrateSubject } from '@better-compute/kubernetes';
 import { substrateWorld, type SubstrateWorld } from './support/substrate-world.js';
 
@@ -333,6 +334,58 @@ describe('substrate: refusals', () => {
     expect(row.state).toBe('error');
     expect(row.message).toMatch(/flavor gpu: machineType cannot change in place/);
     expect(world.cloud.calls.some((call) => call.startsWith('deleteNodePool'))).toBe(false);
+  });
+});
+
+describe('substrate: isolated worker nodes', () => {
+  async function network(target: SubstrateWorld, region = 'us-central1'): Promise<{ networkId: string; subnetId: string }> {
+    const networkId = newId('net');
+    const subnetId = newId('snet');
+    await target.fixture.database.query(
+      `INSERT INTO networks (id, tenant_id, pool_id, provider_account_id, name, state, desired_state, created_by,
+                             idempotency_key, request_hash, version, provisioned_at)
+       VALUES ($1, $2, $3, $4, $5, 'ready', 'present', 'usr', $5, decode('00', 'hex'), 1, compute_now())`,
+      [networkId, target.rootTenant, target.poolId, target.accountId, `k8s-${networkId.slice(-6)}`],
+    );
+    await target.fixture.database.query(
+      `INSERT INTO network_subnets (id, network_id, name, region, cidr, state, desired_state)
+       VALUES ($1, $2, 'nodes', $3, '10.20.0.0/20', 'ready', 'present')`,
+      [subnetId, networkId, region],
+    );
+    return { networkId, subnetId };
+  }
+
+  it('creates the cluster with private nodes on a tenant network and its subnet in the region', async () => {
+    world = await substrateWorld();
+    const { networkId, subnetId } = await network(world);
+    const pool = await world.createPool(
+      createSpec([gpu], { cluster: { create: { location: 'us-central1', privateNodes: true, networkId } } }),
+    );
+    await world.converge(pool.id, 6);
+    const row = await world.substrate(pool.id);
+    expect(row.state).toBe('ready');
+    const cluster = await world.api.kubernetesClusters.get(world.root, { tenantId: world.rootTenant, clusterId: row.cluster_id });
+    expect(cluster).toMatchObject({ networkId, subnetId, privateNodes: true });
+    expect(world.cloud.specs.at(-1)).toMatchObject({ privateNodes: true });
+  });
+
+  it('refuses private nodes without a network, and a network with no subnet in the region', async () => {
+    world = await substrateWorld();
+    await expect(
+      world.createPool(createSpec([gpu], { cluster: { create: { location: 'us-central1', privateNodes: true } } })),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT', message: expect.stringMatching(/privateNodes needs a networkId/) });
+    await expect(
+      world.createPool(createSpec([gpu], { cluster: { create: { location: 'us-central1', networkId: 'net_nope' } } })),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    const { networkId } = await network(world, 'europe-west4');
+    const pool = await world.createPool(
+      createSpec([gpu], { cluster: { create: { location: 'us-central1', privateNodes: true, networkId } } }),
+    );
+    await world.converge(pool.id, 2);
+    const row = await world.substrate(pool.id);
+    expect(row).toMatchObject({ state: 'error', cluster_id: null });
+    expect(row.message).toMatch(/no ready subnet in us-central1/);
+    expect(world.cloud.calls).toEqual([]);
   });
 });
 

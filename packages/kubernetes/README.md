@@ -137,6 +137,10 @@ await compute.api.pools.create(credential, {
   changed or deleted; only the node pools its flavors add are. One substrate per cluster. Account, mode, location
   and private nodes never change in place (the substrate goes `error`); a flavor's shape never does either (give
   the new shape another name). Direct `kubernetesClusters.delete` and `kubernetesNodePools` changes are refused.
+- **Isolated workers.** `create.networkId` puts the nodes on a network of the pool owner (same account, a ready
+  subnet in the cluster's region); `create.privateNodes: true` gives them no public addresses and needs a
+  `networkId`: bcd then reaches its gateway through that network's NAT, which the operator runs (better-compute
+  has no NAT resource). Both are part of the substrate's identity (never changed in place).
 - **bcd.** Once the cluster is ready, each run mints a 600 s `admin` credential (`ProviderKubernetes.credentials`,
   service account `bc-substrate`), held in memory for that run only, lists the substrate's Nodes and server-side
   applies bcd (Namespace, ConfigMap, DaemonSet with the substrate node selector, device plugin only).

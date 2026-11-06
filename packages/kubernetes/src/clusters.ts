@@ -100,7 +100,7 @@ function assertZones(
  * The tenant network the nodes use: the tenant's, on the pool's account, provisioned (it was `ready` once) and not
  * being deleted, with a `ready` subnet in the cluster's region (the first by name when there are several).
  */
-async function clusterNetwork(
+export async function clusterNetwork(
   tx: SqlTx,
   input: { tenantId: string; accountId: string; networkId: string; region: string },
 ): Promise<{ networkId: string; subnetId: string }> {

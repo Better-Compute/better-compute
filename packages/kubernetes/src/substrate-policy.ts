@@ -37,6 +37,8 @@ export interface SubstrateCreate {
   version?: string;
   authorizedNetworks: string[];
   privateNodes: boolean;
+  /** The pool owner's network the nodes use (its subnet in the cluster's region). */
+  networkId?: string;
 }
 
 /** A parsed `policy.substrate`. */
@@ -134,6 +136,7 @@ function clusterOf(raw: unknown): PoolSubstrate['cluster'] {
     'version',
     'authorizedNetworks',
     'privateNodes',
+    'networkId',
   ]);
   const create: SubstrateCreate = {
     location: at('.cluster.create', () => location(spec.location)),
@@ -148,6 +151,13 @@ function clusterOf(raw: unknown): PoolSubstrate['cluster'] {
     privateNodes: flag(spec.privateNodes, '.cluster.create.privateNodes'),
   };
   if (spec.version !== undefined) create.version = at('.cluster.create', () => kubernetesVersion(spec.version));
+  if (spec.networkId !== undefined) {
+    if (!isId(spec.networkId, 'net')) refuse('.cluster.create.networkId must be a network id (net_…)');
+    create.networkId = spec.networkId as string;
+  }
+  // Isolated workers reach bcd's gateway only through their network's NAT, which the operator runs.
+  if (create.privateNodes && create.networkId === undefined)
+    refuse('.cluster.create.privateNodes needs a networkId: a network with a NAT that lets bcd reach its gateway');
   return { create };
 }
 
@@ -240,6 +250,9 @@ export function substrateIdentity(substrate: PoolSubstrate): string {
           mode: 'create',
           location: substrate.cluster.create.location,
           privateNodes: substrate.cluster.create.privateNodes,
+          ...(substrate.cluster.create.networkId !== undefined
+            ? { networkId: substrate.cluster.create.networkId }
+            : {}),
         }
       : { account: substrate.account, mode: 'adopt', adopt: substrate.cluster.adopt },
   );

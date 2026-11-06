@@ -221,7 +221,10 @@ export interface KubernetesPoolSubstrate {
           releaseChannel?: 'rapid' | 'regular' | 'stable' | 'extended';
           version?: string;
           authorizedNetworks?: string[];
+          /** Nodes get no public addresses (isolated workers). Needs `networkId`: bcd's egress is that network's NAT. */
           privateNodes?: boolean;
+          /** A network of the pool owner (`networks`) on the same account, with a ready subnet in the region. */
+          networkId?: string;
         };
       }
     | { adopt: string };
