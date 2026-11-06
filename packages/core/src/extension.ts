@@ -899,6 +899,27 @@ export interface ProviderKubernetes {
     context: CallContext,
   ): Promise<KubernetesCredentials>;
   versions(location: string, context: CallContext): Promise<KubernetesVersions>;
+  /**
+   * (AWS A9) The clusters on the account, whoever created them, with what machines need to join one
+   * (`policy.kubernetes`): for EKS, nodeadm's cluster (`eks`). Plain values only, never credentials.
+   */
+  listClusters?(context: CallContext): Promise<ProviderKubernetesCluster[]>;
+}
+
+/** (AWS A9) One cluster of `ProviderKubernetes.listClusters`. */
+export interface ProviderKubernetesCluster {
+  /** The provider-side name, and the `cluster` id `getCluster` takes. */
+  name: string;
+  id: string;
+  location: string;
+  state: ProviderResourceState['state'];
+  version?: string;
+  /** `https://…` of the control plane. */
+  endpoint?: string;
+  /** better-compute created it (its managed tag or label). */
+  managed: boolean;
+  /** EKS: `policy.kubernetes.eks` for machines that join it through nodeadm (`k8s-join` mode `eks`). */
+  eks?: { name: string; apiServerEndpoint: string; certificateAuthority: string; cidr: string };
 }
 
 /**

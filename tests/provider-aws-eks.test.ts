@@ -628,3 +628,43 @@ describe('eks IAM policy', () => {
     expect(() => iamPolicy({ partition: 'aws-cn', eksNodeRoleArn: nodeRoleArn })).toThrow(/partition/);
   });
 });
+
+describe('eks cluster discovery (providerAccounts.clusters)', () => {
+  it('lists every cluster with the nodeadm settings k8s-join mode eks takes', async () => {
+    const s = await setup();
+    await readyCluster(s);
+    // A cluster better-compute did not create.
+    await readyCluster(s, { ...standard, name: 'foreign', labels: {} });
+    delete s.eks.clusters.get('foreign')!.tags['better-compute:managed'];
+    s.eks.delayTicks = 5;
+    await s.k8s.ensureCluster({ ...standard, name: 'bc-k-two' }, s.ctx()); // still creating
+    s.eks.pageSize = 1;
+    const listed = await s.k8s.listClusters!(s.ctx());
+    const one = s.eks.clusters.get('bc-k-one')!;
+    expect(listed).toEqual([
+      {
+        name: 'bc-k-one',
+        id: 'us-east-1/bc-k-one',
+        location: region,
+        state: 'ready',
+        version: '1.33',
+        endpoint: one.endpoint,
+        managed: true,
+        eks: {
+          name: 'bc-k-one',
+          apiServerEndpoint: one.endpoint,
+          certificateAuthority: emulatedEksCaData,
+          cidr: '172.20.0.0/16',
+        },
+      },
+      { name: 'bc-k-two', id: 'us-east-1/bc-k-two', location: region, state: 'pending', version: '1.33', managed: true },
+      expect.objectContaining({ name: 'foreign', managed: false, state: 'ready', eks: expect.any(Object) }),
+    ]);
+    // What it lists is what provision accepts.
+    const { resolveHostConfig, poolHostConfig } = await import('@better-compute/provision');
+    await expect(
+      resolveHostConfig(poolHostConfig({ kubernetes: { eks: listed[0]!.eks } }), { labels: {} }),
+    ).resolves.toMatchObject({ config: { 'k8s-join': { mode: 'eks' } } });
+    expect(s.eks.calls('ListClusters').length).toBeGreaterThan(1);
+  });
+});

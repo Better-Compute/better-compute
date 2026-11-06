@@ -9,6 +9,7 @@ import {
   type KubernetesNodePoolSpec,
   type KubernetesVersions,
   type ProviderKubernetes,
+  type ProviderKubernetesCluster,
   type ProviderResourceState,
 } from '@better-compute/core';
 import {
@@ -37,6 +38,7 @@ import {
   checkImmutable,
   clusterBody,
   clusterState,
+  clusterTags,
   nextClusterChange,
   subnetsOf,
 } from './clusters.js';
@@ -546,6 +548,47 @@ export class AwsKubernetes implements ProviderKubernetes {
       expiresAt: credentials.expiresAt,
     });
     return credentials;
+  }
+
+  // -------------------------------------------------------------------------------- discovery
+
+  /**
+   * Every cluster of the account's region (ListClusters, DescribeCluster each), with the nodeadm
+   * cluster (`policy.kubernetes.eks`) of those that are ready: machines join them through
+   * `k8s-join` mode `eks`. At most 100 clusters.
+   */
+  async listClusters(context: CallContext): Promise<ProviderKubernetesCluster[]> {
+    const { signal } = context;
+    const names = await this.#client.names('/clusters', 'clusters', signal, 'Listing the EKS clusters', 100);
+    const out: ProviderKubernetesCluster[] = [];
+    for (const name of names.slice(0, 100)) {
+      const found = await this.#client.cluster(name, signal);
+      if (!found) continue;
+      const id = clusterId(this.#region, name);
+      const state = clusterState(id, this.#region, found).state;
+      const cidr =
+        found.kubernetesNetworkConfig?.serviceIpv4Cidr ?? found.kubernetesNetworkConfig?.serviceIpv6Cidr;
+      let eks: ProviderKubernetesCluster['eks'];
+      if (found.endpoint && found.certificateAuthority?.data && cidr && found.status === 'ACTIVE') {
+        try {
+          const { server, caData } = endpointOf(id, found);
+          eks = { name, apiServerEndpoint: server, certificateAuthority: caData, cidr };
+        } catch {
+          eks = undefined; // A malformed endpoint or CA: listed, but nothing to join with.
+        }
+      }
+      out.push({
+        name,
+        id,
+        location: this.#region,
+        state,
+        ...(found.version ? { version: found.version } : {}),
+        ...(found.endpoint ? { endpoint: found.endpoint } : {}),
+        managed: found.tags?.[clusterTags.managed] === 'true',
+        ...(eks ? { eks } : {}),
+      });
+    }
+    return out;
   }
 
   // --------------------------------------------------------------------------------- versions
