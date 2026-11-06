@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { isComputeError, type ComputeError } from '@better-compute/core';
-import { resetBudgets } from '@better-compute/provider-digitalocean';
+import { managedNamePrefix, resetBudgets } from '@better-compute/provider-digitalocean';
 import { registerSpacesKeys, seedSpacesKey, spacesKeys } from './support/do-emulator/spaces-keys.js';
 import { storageWorld } from './support/do-storage-harness.js';
 
@@ -19,6 +19,9 @@ async function failure(promise: Promise<unknown>): Promise<ComputeError> {
   throw new Error('expected the call to fail');
 }
 
+// This deployment's keys are named bc-<deployment hash>-…; requests name bc-….
+const own = managedNamePrefix('default');
+
 const world = () =>
   storageWorld(undefined, undefined, ({ emu, spaces }) => registerSpacesKeys(emu, spaces));
 
@@ -30,7 +33,7 @@ describe('do.spaces-key', () => {
     expect(first.state).toBe('ready');
     expect(first.outputs).toEqual({
       accessKeyId: first.id,
-      name: 'bc-key1',
+      name: `${own}key1`,
       grants: 'tenant-a-assets:readwrite,tenant-a-logs:read',
     });
     expect(first.secretOutputs?.secretKey).toBe(w.spaces.keys.get(first.id));
@@ -45,7 +48,7 @@ describe('do.spaces-key', () => {
     const posts = w.emu.requests.filter((r) => r.method === 'POST');
     expect(posts).toHaveLength(1);
     expect(posts[0]!.body).toEqual({
-      name: 'bc-key1',
+      name: `${own}key1`,
       grants: [
         { bucket: 'tenant-a-assets', permission: 'readwrite' },
         { bucket: 'tenant-a-logs', permission: 'read' },
@@ -97,13 +100,13 @@ describe('do.spaces-key', () => {
   it('picks the oldest of two keys with one name', async () => {
     const w = await world();
     seedSpacesKey(w.emu, {
-      name: 'bc-dup',
+      name: `${own}dup`,
       access_key: 'DOYOUNGER0001',
       created_at: '2026-11-02T00:00:00Z',
       grants: [{ bucket: 'b-one', permission: 'read' }],
     });
     seedSpacesKey(w.emu, {
-      name: 'bc-dup',
+      name: `${own}dup`,
       access_key: 'DOOLDER00001',
       created_at: '2026-11-01T00:00:00Z',
       grants: [{ bucket: 'b-one', permission: 'read' }],
@@ -153,15 +156,46 @@ describe('do.spaces-key', () => {
     expect(spacesKeys(w.emu).has('DOFOREIGN0001')).toBe(true);
   });
 
+  it("never deletes or regrants another deployment's bc- key", async () => {
+    const w = await world();
+    const theirs = seedSpacesKey(w.emu, {
+      name: `${managedNamePrefix('staging')}key1`,
+      access_key: 'DOSTAGING0001',
+      grants: [{ bucket: 'b-one', permission: 'read' }],
+    });
+    // A bc- name with no deployment in it predates deployment-scoped names: not this one's either.
+    const legacy = seedSpacesKey(w.emu, { name: 'bc-key1', access_key: 'DOLEGACY00001' });
+    for (const key of [theirs, legacy]) {
+      const refused = await failure(w.resources.delete('do.spaces-key', key.access_key, w.ctx()));
+      expect(refused.code).toBe('INVALID_STATE');
+      expect(refused.details?.reason).toBe('managedByAnother');
+      const regrant = await failure(
+        w.ensure('do.spaces-key', 'bc-key1', { grants: ['b-one:readwrite'] }, w.ctx(), {
+          id: key.access_key,
+        }),
+      );
+      expect(regrant.details?.reason).toBe('managedByAnother');
+    }
+    expect(spacesKeys(w.emu).has('DOSTAGING0001')).toBe(true);
+    expect(spacesKeys(w.emu).has('DOLEGACY00001')).toBe(true);
+    expect(w.emu.requests.some((r) => r.method !== 'GET')).toBe(false);
+    const found = [];
+    for await (const entry of w.resources.discover('do.spaces-key', w.ctx())) found.push(entry);
+    expect(found.map((e) => [e.id, e.managedBy])).toEqual([
+      ['DOSTAGING0001', 'other'],
+      ['DOLEGACY00001', 'other'],
+    ]);
+  });
+
   it('discovers every key and marks the managed ones', async () => {
     const w = await world();
     seedSpacesKey(w.emu, { name: 'ci-deploy', access_key: 'DOFOREIGN0001' });
-    seedSpacesKey(w.emu, { name: 'bc-mine', access_key: 'DOMINE000001' });
+    seedSpacesKey(w.emu, { name: `${own}mine`, access_key: 'DOMINE000001' });
     const found = [];
     for await (const entry of w.resources.discover('do.spaces-key', w.ctx())) found.push(entry);
     expect(found.map((e) => [e.id, e.name, e.managedBy])).toEqual([
       ['DOFOREIGN0001', 'ci-deploy', undefined],
-      ['DOMINE000001', 'bc-mine', 'this'],
+      ['DOMINE000001', `${own}mine`, 'this'],
     ]);
   });
 

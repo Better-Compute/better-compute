@@ -2,24 +2,26 @@ import { field, manifest, type CallContext } from '@better-compute/core';
 import type { DoClient } from '../../client/http.js';
 import { docrHost } from '../../registry/credentials.js';
 import {
-  checkManagedName,
   hasCode,
   managedResourceName,
-  notManaged,
   storageError,
   type DoResourceKind,
   type DoResourceState,
+  type ManagedNames,
 } from './kind.js';
 
 // DigitalOcean Container Registry as resources:
 // - `do.container-registry`: a registry (`/v2/registries`, the multi-registry API). Registries
-//   take no tags, so ownership is the managed name (`bc-…`, DO-D4). `delete` refuses a registry
-//   without one, and one that still holds repositories: images are never deleted to delete a
-//   registry.
+//   take no tags, so ownership is the name, which carries the deployment (`bc-<deployment hash>-…`,
+//   DO-D4, DO-D16). `ensure` and `delete` refuse, before any request, a registry named for
+//   another deployment (`managedByAnother`) or for none (`notManaged`), and `delete` refuses one
+//   that still holds repositories: images are never deleted to delete a registry.
 // - `do.registry-garbage-collection`: "this registry was garbage-collected within the last
 //   `intervalHours`". `ensure` adopts the newest collection inside the window (running or done)
 //   and starts one only when there is none, so a reconciler calling it again never starts a
-//   second; `delete` cancels a running collection.
+//   second; `delete` cancels a running collection. It lives in its registry: the request's
+//   `parent` (the dispatcher's own tenant-scoped registry row) is required and must be the
+//   registry the spec names, so a tenant never collects (or cancels) another tenant's registry.
 
 const regionPattern = /^[a-z]{3}[0-9]$/;
 
@@ -85,12 +87,10 @@ async function readRegistry(
   }
 }
 
-function refuseUnmanaged(name: string): void {
-  if (!managedResourceName.test(name))
-    throw notManaged(`Registry ${name} is not one better-compute manages; it was left alone`);
-}
-
-export function containerRegistryKind(client: DoClient): ContainerRegistryKind {
+export function containerRegistryKind(
+  client: DoClient,
+  names: ManagedNames,
+): ContainerRegistryKind {
   async function* repositories(name: string, signal: AbortSignal): AsyncIterable<DoRepository> {
     yield* client.pages<DoRepository>(`/registry/${name}/repositoriesV2`, 'repositories', {
       signal,
@@ -109,10 +109,10 @@ export function containerRegistryKind(client: DoClient): ContainerRegistryKind {
     updatable: [],
 
     async ensure(request, ctx) {
-      // A registry's id is its name.
-      const name = request.id ?? request.name;
+      // A registry's id is its name; one an earlier ensure answered must be this deployment's.
+      if (request.id !== undefined) names.requireOwn(request.id, 'Registry');
+      const name = request.id ?? names.provider(request.name, 'A registry');
       const { spec } = request;
-      checkManagedName(name, 'A registry');
       const existing = await readRegistry(client, name, ctx.signal);
       if (existing) {
         if (existing.region && existing.region !== spec.region)
@@ -140,9 +140,9 @@ export function containerRegistryKind(client: DoClient): ContainerRegistryKind {
     },
 
     async delete(id, ctx) {
+      names.requireOwn(id, 'Registry');
       const registry = await readRegistry(client, id, ctx.signal);
       if (!registry) return { id, state: 'deleted' };
-      refuseUnmanaged(registry.name);
       const first = await repositories(id, ctx.signal)[Symbol.asyncIterator]().next();
       if (!first.done)
         throw storageError(
@@ -170,13 +170,14 @@ export function containerRegistryKind(client: DoClient): ContainerRegistryKind {
           id: registry.name,
           name: registry.name,
           ...(registry.region ? { region: registry.region, spec: { region: registry.region } } : {}),
-          // Registries carry no tags: a managed name is all there is.
-          ...(managedResourceName.test(registry.name) ? { managedBy: 'this' as const } : {}),
+          // Registries carry no tags: the name says which deployment manages one.
+          ...(names.owner(registry.name) ? { managedBy: names.owner(registry.name)! } : {}),
           outputs: registryState(registry).outputs!,
         };
     },
 
     async *repositories(name, ctx) {
+      names.requireOwn(name, 'Registry');
       if (!(await readRegistry(client, name, ctx.signal)))
         throw storageError('NOT_FOUND', `Registry ${name} not found`, 'registry');
       for await (const repository of repositories(name, ctx.signal))
@@ -196,7 +197,7 @@ const gcTypes = {
 export const registryGcSpec = manifest({
   registry: field
     .string({ pattern: managedResourceName })
-    .describe('The registry to collect: one better-compute manages (bc-…)'),
+    .describe('The registry to collect: the id of the registry this collection lives in'),
   type: field
     .option(['untagged-manifests', 'unreferenced-blobs', 'all'])
     .default('all')
@@ -247,7 +248,10 @@ function parseGcId(id: string): { registry: string; uuid: string } {
   return { registry: match[1]!, uuid: match[2]! };
 }
 
-export function registryGcKind(client: DoClient): DoResourceKind<RegistryGcSpec> {
+export function registryGcKind(
+  client: DoClient,
+  names: ManagedNames,
+): DoResourceKind<RegistryGcSpec> {
   async function find(
     registry: string,
     signal: AbortSignal,
@@ -279,12 +283,20 @@ export function registryGcKind(client: DoClient): DoResourceKind<RegistryGcSpec>
     parent: 'do.container-registry',
 
     async ensure({ spec, parent }, ctx) {
-      if (parent !== undefined && parent !== spec.registry)
+      // The parent is the caller's own registry row: without it nothing says the registry is theirs.
+      if (parent === undefined)
+        throw storageError(
+          'INVALID_INPUT',
+          'A garbage collection lives in a registry: the request names it as its parent',
+          'parent',
+        );
+      if (parent !== spec.registry)
         throw storageError(
           'INVALID_INPUT',
           `The collection names registry ${spec.registry} but lives in ${parent}`,
           'parent',
         );
+      names.requireOwn(spec.registry, 'Registry');
       if (!(await readRegistry(client, spec.registry, ctx.signal)))
         throw storageError('NOT_FOUND', `Registry ${spec.registry} not found`, 'registry');
       const since = ctx.clock.now() - spec.intervalHours * 3_600_000;
@@ -320,8 +332,8 @@ export function registryGcKind(client: DoClient): DoResourceKind<RegistryGcSpec>
 
     async delete(id, ctx) {
       const { registry, uuid } = parseGcId(id);
-      // A collection is this deployment's only on a registry it manages (a bc- name).
-      refuseUnmanaged(registry);
+      // A collection is this deployment's only on a registry it manages (its own name prefix).
+      names.requireOwn(registry, 'Registry');
       const gc = await find(registry, ctx.signal, (entry) => entry.uuid === uuid);
       if (!gc || finished.has(gc.status)) return { id, state: 'deleted' };
       await client.request('PUT', `/registry/${registry}/garbage-collection/${uuid}`, {

@@ -1,12 +1,13 @@
 import { ComputeError, type ProviderContext } from '@better-compute/core';
 import { clientFor } from '../../client/build.js';
 import type { DoConfig, DoProviderOptions } from '../../config.js';
-import { deploymentTag } from '../../ids.js';
+import { deploymentTag, managedNamePrefix } from '../../ids.js';
 import { spacesClient, type SpacesClient } from '../../spaces/s3.js';
 import { cdnEndpointKind } from './cdn-endpoint.js';
 import { containerRegistryKind, registryGcKind } from './container-registry.js';
 import {
   asDoKind,
+  managedNames,
   storageDispatcher,
   type DoResourceKind,
   type DoStorageKindEntry,
@@ -84,14 +85,16 @@ export function storageKindHandlers(
       { provider: 'digitalocean', reason: 'spacesKeys' },
     );
   const client = clientFor(config, context, options);
-  const tag = deploymentTag(options.deployment ?? 'default');
+  const deployment = options.deployment ?? 'default';
+  const tag = deploymentTag(deployment);
+  const names = managedNames(managedNamePrefix(deployment));
   const spaces = spacesFor(config, context, options);
   return [
-    spacesKeyKind(client),
+    spacesKeyKind({ client, names }),
     spacesBucketKind({ spaces, deploymentTag: tag, client }),
     cdnEndpointKind({ client, spaces, deploymentTag: tag }),
-    containerRegistryKind(client),
-    registryGcKind(client),
+    containerRegistryKind(client, names),
+    registryGcKind(client, names),
   ];
 }
 

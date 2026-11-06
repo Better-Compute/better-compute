@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   ComputeError,
   isComputeError,
@@ -149,6 +150,62 @@ export function checkManagedName(name: string, what: string): void {
 /** The contract's refusal of a resource this deployment does not manage. */
 export function notManaged(message: string): ComputeError {
   return storageError('INVALID_STATE', message, 'notManaged');
+}
+
+/** The contract's refusal of a resource another better-compute deployment manages. */
+export function managedByAnother(message: string): ComputeError {
+  return storageError('INVALID_STATE', message, 'managedByAnother');
+}
+
+/** The longest provider-side name of an untaggable resource (DO registry names: 63). */
+const maxManagedName = 63;
+
+/**
+ * The names of one deployment's untaggable resources (Spaces keys, registries). Their owner is
+ * their name, so the name carries the deployment: `bc-<deployment hash>-<rest>`.
+ */
+export interface ManagedNames {
+  readonly prefix: string;
+  /**
+   * The provider-side name for a requested `bc-` name: the name itself when it already has this
+   * deployment's prefix, else the prefix and the rest (hashed down to fit 63 characters).
+   */
+  provider(name: string, what: string): string;
+  /** `this` for this deployment's names, `other` for another's `bc-` names, else undefined. */
+  owner(name: string): 'this' | 'other' | undefined;
+  /** Refuses (nothing sent) a name that is not this deployment's. */
+  requireOwn(name: string, what: string): void;
+}
+
+export function managedNames(prefix: string): ManagedNames {
+  if (!/^bc-[0-9a-f]{12}-$/.test(prefix))
+    throw storageError('INVALID_CONFIG', 'Not a managed name prefix', 'namePrefix');
+  const owner = (name: string): 'this' | 'other' | undefined =>
+    !managedResourceName.test(name)
+      ? undefined
+      : name.startsWith(prefix) && name.length > prefix.length
+        ? 'this'
+        : 'other';
+  return {
+    prefix,
+    provider(name, what) {
+      checkManagedName(name, what);
+      if (name.startsWith(prefix) && name.length > prefix.length) return name;
+      const rest = name.slice('bc-'.length);
+      const full = `${prefix}${rest}`;
+      if (full.length <= maxManagedName) return full;
+      const hash = createHash('sha256').update(rest).digest('hex').slice(0, 8);
+      return `${prefix}${rest.slice(0, maxManagedName - prefix.length - 9)}-${hash}`;
+    },
+    owner,
+    requireOwn(name, what) {
+      const found = owner(name);
+      if (found === 'this') return;
+      if (found === 'other')
+        throw managedByAnother(`${what} ${name} is managed by another better-compute deployment`);
+      throw notManaged(`${what} ${name} is not one better-compute manages; it was left alone`);
+    },
+  };
 }
 
 /** Validates (and defaults) the request's spec with the kind's manifest, then ensures. */

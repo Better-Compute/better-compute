@@ -1,20 +1,20 @@
 import { field, manifest, type CallContext } from '@better-compute/core';
 import type { DoClient } from '../../client/http.js';
 import {
-  checkManagedName,
   hasCode,
-  managedResourceName,
-  notManaged,
   storageError,
   type DoResourceKind,
   type DoResourceState,
+  type ManagedNames,
 } from './kind.js';
 
 // `do.spaces-key`: a Spaces access key with per-bucket grants (`/v2/spaces/keys`). The access key
 // id is the resource id and a plain output (an identifier, as AWS treats key ids); the secret key
 // is a secret output, returned once by the `ensure` that creates the key and never again (DO shows
-// it only at creation). Keys carry no tags, so ownership is the managed name (`bc-…`, DO-D4):
-// `delete` refuses a key without one.
+// it only at creation). Keys carry no tags, so ownership is the name, which carries the
+// deployment (`bc-<deployment hash>-…`, DO-D4, DO-D16): `ensure` and `delete` refuse a key named
+// for another deployment (`managedByAnother`) or for none (`notManaged`), and discovery reports
+// another deployment's keys as `managedBy: 'other'`.
 
 /** `<bucket>:read`, `<bucket>:readwrite`, or `*:fullaccess` (every bucket of the account). */
 export const spacesGrantPattern =
@@ -87,7 +87,11 @@ function checkAccessKey(id: string): void {
     throw storageError('INVALID_INPUT', 'Not a Spaces access key id', 'accessKey');
 }
 
-export function spacesKeyKind(client: DoClient): DoResourceKind<SpacesKeySpec> {
+export function spacesKeyKind(deps: {
+  client: DoClient;
+  names: ManagedNames;
+}): DoResourceKind<SpacesKeySpec> {
+  const { client, names } = deps;
   async function byName(name: string, signal: AbortSignal): Promise<DoSpacesKey | undefined> {
     let found: DoSpacesKey | undefined;
     for await (const key of client.pages<DoSpacesKey>('/spaces/keys', 'keys', {
@@ -124,14 +128,14 @@ export function spacesKeyKind(client: DoClient): DoResourceKind<SpacesKeySpec> {
     regional: false,
     updatable: ['grants'],
 
-    async ensure({ name, spec, id }, ctx: CallContext) {
-      checkManagedName(name, 'A Spaces key');
+    async ensure(request, ctx: CallContext) {
+      const { spec, id } = request;
+      const name = names.provider(request.name, 'A Spaces key');
       const grants = toGrants(spec.grants);
       // The key an earlier ensure answered wins over the name; one gone is created again.
       const existing = (id !== undefined ? await read(id, ctx.signal) : undefined) ?? (await byName(name, ctx.signal));
-      // Keys are owned by their bc- names: an id naming another key changes nothing.
-      if (existing && !managedResourceName.test(existing.name))
-        throw notManaged(`Spaces key ${existing.access_key} is not one better-compute manages; it was left alone`);
+      // Keys are owned by their names: an id naming another key changes nothing.
+      if (existing) names.requireOwn(existing.name, 'Spaces key');
       if (!existing) {
         const created = await client.request<{ key: DoSpacesKey }>('POST', '/spaces/keys', {
           body: { name, grants },
@@ -166,8 +170,7 @@ export function spacesKeyKind(client: DoClient): DoResourceKind<SpacesKeySpec> {
     async delete(id, ctx) {
       const key = await read(id, ctx.signal);
       if (!key) return { id, state: 'deleted' };
-      if (!managedResourceName.test(key.name))
-        throw notManaged(`Spaces key ${id} is not one better-compute manages; it was left alone`);
+      names.requireOwn(key.name, 'Spaces key');
       try {
         await client.request('DELETE', `/spaces/keys/${id}`, {
           signal: ctx.signal,
@@ -188,8 +191,8 @@ export function spacesKeyKind(client: DoClient): DoResourceKind<SpacesKeySpec> {
         yield {
           id: key.access_key,
           name: key.name,
-          // Keys carry no tags: a managed name is all there is (another deployment's looks the same).
-          ...(managedResourceName.test(key.name) ? { managedBy: 'this' as const } : {}),
+          // Keys carry no tags: the name says which deployment manages one.
+          ...(names.owner(key.name) ? { managedBy: names.owner(key.name)! } : {}),
           outputs: outputsOf(key),
           ...(spec ? { spec } : {}),
         };

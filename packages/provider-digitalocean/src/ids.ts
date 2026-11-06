@@ -122,9 +122,22 @@ export function labelsFromTags(tags: readonly string[]): Record<string, string> 
   return out;
 }
 
+/** The deployment's 12-hex hash: the value of its tag, and the prefix of untaggable names. */
+export function deploymentHash(deployment: string): string {
+  return sha256(deployment).toString('hex').slice(0, 12);
+}
+
 /** The tag naming the deployment a Droplet belongs to; the deployment is hashed to stay short. */
 export function deploymentTag(deployment: string): string {
-  return tagFor(labels.deployment, sha256(deployment).toString('hex').slice(0, 12));
+  return tagFor(labels.deployment, deploymentHash(deployment));
+}
+
+/**
+ * The name prefix of this deployment's resources that carry no tags (Spaces keys, registries):
+ * `bc-<deployment hash>-`. Another deployment's `bc-` names are its own, never this one's.
+ */
+export function managedNamePrefix(deployment: string): string {
+  return `bc-${deploymentHash(deployment)}-`;
 }
 
 /** The tag carrying a create call's idempotency key (hashed), so a retry finds its Droplet. */

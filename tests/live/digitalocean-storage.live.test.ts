@@ -12,6 +12,7 @@ import {
   digitalocean,
   docrImageSource,
   doStorageResources,
+  managedNamePrefix,
   spacesBlobStore,
   spacesClient,
   xmlValues,
@@ -55,6 +56,9 @@ const prefix = `bc-live-${run}`;
 const bucket = `${prefix}-assets`;
 const keyName = `${prefix}-key`;
 const registryName = prefix;
+// Keys and registries carry the deployment in their provider-side names (bc-<hash>-…): this run's.
+const owned = managedNamePrefix(`live-${run}`);
+const registryId = `${owned}${registryName.slice('bc-'.length)}`;
 const region = env.BC_DO_SPACES_REGION || 'nyc3';
 const otherRegion = env.BC_DO_SPACES_OTHER_REGION || (region === 'ams3' ? 'sgp1' : 'ams3');
 const origin = `${bucket}.${region}.digitaloceanspaces.com`;
@@ -199,11 +203,11 @@ async function sweep(): Promise<string[]> {
       '/spaces/keys?per_page=200',
     );
     for (const key of body?.keys ?? [])
-      if (key.name.startsWith(`${prefix}-`)) await api('DELETE', `/spaces/keys/${key.access_key}`);
+      if (key.name.startsWith(owned)) await api('DELETE', `/spaces/keys/${key.access_key}`);
   });
   if (flag(env.BC_DO_LIVE_REGISTRY))
     await attempt('the registry', async () => {
-      await api('DELETE', `/registries/${registryName}`);
+      await api('DELETE', `/registries/${registryId}`);
     });
   return errors;
 }
@@ -334,11 +338,11 @@ describe.skipIf(!enabled)('provider-digitalocean storage live', () => {
         { kind: 'do.container-registry', name: registryName, spec: { region } },
         call('r1'),
       );
-      expect(created.outputs?.endpoint).toBe(`registry.digitalocean.com/${registryName}`);
+      expect(created.outputs?.endpoint).toBe(`registry.digitalocean.com/${registryId}`);
       const found = [];
       for await (const entry of resources.discover('do.container-registry', call('r1'))) found.push(entry);
-      expect(found.find((e) => e.id === registryName)).toMatchObject({ managedBy: 'this', region });
-      expect((await resources.delete('do.container-registry', registryName, call('r1'))).state).toBe(
+      expect(found.find((e) => e.id === registryId)).toMatchObject({ managedBy: 'this', region });
+      expect((await resources.delete('do.container-registry', registryId, call('r1'))).state).toBe(
         'deleted',
       );
     },

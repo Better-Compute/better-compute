@@ -5,7 +5,12 @@ import {
   type ComputeError,
   type Manifest,
 } from '@better-compute/core';
-import { bucketMarkerKey, deploymentTag, resetBudgets } from '@better-compute/provider-digitalocean';
+import {
+  bucketMarkerKey,
+  deploymentTag,
+  managedNamePrefix,
+  resetBudgets,
+} from '@better-compute/provider-digitalocean';
 import { registerCdn, seedCdnEndpoint } from './support/do-emulator/cdn.js';
 import { registerRegistry, seedRegistry } from './support/do-emulator/registry.js';
 import { registerSpacesKeys, seedSpacesKey } from './support/do-emulator/spaces-keys.js';
@@ -91,6 +96,8 @@ const labels = {
   'better-compute-resource': 'crs_01abc',
   'better-compute-tenant': 'ten_01abc',
 };
+
+const own = managedNamePrefix('default');
 
 const world = (): Promise<StorageWorld> =>
   storageWorld(undefined, undefined, ({ emu, spaces }) => {
@@ -334,7 +341,7 @@ describe('refusals and discovery', () => {
     const w = await world();
     seedSpacesKey(w.emu, { name: 'ci-deploy', access_key: 'DOFOREIGN0001', grants: [] });
     seedSpacesKey(w.emu, {
-      name: 'bc-mine',
+      name: `${own}mine`,
       access_key: 'DOMINE000001',
       grants: [{ bucket: 'b-one', permission: 'read' }],
     });
@@ -346,18 +353,18 @@ describe('refusals and discovery', () => {
       },
       {
         id: 'DOMINE000001',
-        name: 'bc-mine',
+        name: `${own}mine`,
         managedBy: 'this',
-        outputs: { accessKeyId: 'DOMINE000001', name: 'bc-mine', grants: 'b-one:read' },
+        outputs: { accessKeyId: 'DOMINE000001', name: `${own}mine`, grants: 'b-one:read' },
         spec: { grants: ['b-one:read'] },
       },
     ]);
 
-    seedRegistry(w.emu, { name: 'bc-reg', region: 'ams3' });
+    seedRegistry(w.emu, { name: `${own}reg`, region: 'ams3' });
     const [registry] = await collect(w.resources.discover('do.container-registry', w.ctx()));
     expect(registry).toMatchObject({
-      id: 'bc-reg',
-      name: 'bc-reg',
+      id: `${own}reg`,
+      name: `${own}reg`,
       region: 'ams3',
       managedBy: 'this',
       spec: { region: 'ams3' },
