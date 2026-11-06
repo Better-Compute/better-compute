@@ -7,15 +7,19 @@ import type { DoConfig, DoProviderOptions } from './config.js';
 // page of each list the provider reads. A 403 on a list is that scope missing; `account:read` is
 // fatal, since without it nothing else is worth reporting.
 
-/** Whether the token may read a family of resources. */
-export type DoFamilyState = 'ok' | 'denied';
+/**
+ * Whether the token may read a family of resources. `unavailable` is only for an optional family
+ * (`nfs`): the account's first region answered that it has no such list there, or the account
+ * names no region to ask about.
+ */
+export type DoFamilyState = 'ok' | 'denied' | 'unavailable';
 
 /** What `probeAccount` found. */
 export interface DoAccountReport {
   /** `dropletLimit` is absent when the token lacks `droplet:read`: DigitalOcean then leaves it out. */
   account: { uuid: string; status: string; dropletLimit?: number };
   families: Record<
-    'compute' | 'networks' | 'keys' | 'tags' | 'storage' | 'addresses',
+    'compute' | 'networks' | 'keys' | 'tags' | 'storage' | 'addresses' | 'nfs',
     DoFamilyState
   >;
   /** The read scopes the token lacks, in probe order. */
@@ -26,9 +30,17 @@ type Family = keyof DoAccountReport['families'];
 
 /**
  * One list per read scope. A family is denied when any of its probes is. `regional` lists need a
- * region (the account's first). NFS (P6) answers per region, and its scope name is unverified.
+ * region (the account's first). NFS (P6) answers per region, and its path, parameters and scope
+ * name are unverified, so it is `optional`: its own family, never failing the probe for an
+ * answer that says NFS is not there (400, 404, 422, UNSUPPORTED), and never hiding block storage.
  */
-const probes: readonly { family: Family; path: string; scope: string; regional?: boolean }[] = [
+const probes: readonly {
+  family: Family;
+  path: string;
+  scope: string;
+  regional?: boolean;
+  optional?: boolean;
+}[] = [
   { family: 'compute', path: '/droplets', scope: 'droplet:read' },
   { family: 'compute', path: '/regions', scope: 'regions:read' },
   { family: 'compute', path: '/sizes', scope: 'sizes:read' },
@@ -37,7 +49,7 @@ const probes: readonly { family: Family; path: string; scope: string; regional?:
   { family: 'keys', path: '/account/keys', scope: 'ssh_key:read' },
   { family: 'tags', path: '/tags', scope: 'tag:read' },
   { family: 'storage', path: '/volumes', scope: 'block_storage:read' },
-  { family: 'storage', path: '/nfs', scope: 'nfs:read', regional: true },
+  { family: 'nfs', path: '/nfs', scope: 'nfs:read', regional: true, optional: true },
   { family: 'addresses', path: '/reserved_ips', scope: 'reserved_ip:read' },
 ];
 
@@ -59,7 +71,8 @@ function badBody(): ComputeError {
  * reserved_ips?per_page=1, nfs?region=<first region>&per_page=1). Built the way the provider
  * builds its client, so the token resolves, and is budgeted, exactly as it does for a create.
  * Throws when the token is refused or cannot read the account; any other failure of a list
- * propagates too, since it says nothing about a scope.
+ * propagates too, since it says nothing about a scope, except that the optional NFS list is
+ * reported `unavailable` when its region answers it has none (or there is no region to ask).
  */
 export async function probeAccount(
   config: DoConfig,
@@ -101,20 +114,26 @@ async function probe(
   // droplet_limit needs droplet:read in DigitalOcean's model: without it the body omits the field.
   if (typeof account?.uuid !== 'string' || typeof account.status !== 'string') throw badBody();
 
-  const denied = await Promise.all(
-    probes.map(async ({ path, regional }) => {
+  const region = config.regions[0];
+  const answers = await Promise.all(
+    probes.map(async ({ path, regional, optional }): Promise<DoFamilyState> => {
+      if (regional && region === undefined) return 'unavailable';
       try {
         await client.request('GET', path, {
-          query: {
-            per_page: '1',
-            ...(regional && config.regions[0] !== undefined ? { region: config.regions[0] } : {}),
-          },
+          query: { per_page: '1', ...(regional ? { region: region! } : {}) },
           signal,
           budget: 'observe',
         });
-        return false;
+        return 'ok';
       } catch (error) {
-        if (isComputeError(error, 'ACCESS_DENIED')) return true;
+        if (isComputeError(error, 'ACCESS_DENIED')) return 'denied';
+        if (
+          optional &&
+          (isComputeError(error, 'INVALID_INPUT') ||
+            isComputeError(error, 'NOT_FOUND') ||
+            isComputeError(error, 'UNSUPPORTED'))
+        )
+          return 'unavailable';
         throw error;
       }
     }),
@@ -127,12 +146,15 @@ async function probe(
     tags: 'ok',
     storage: 'ok',
     addresses: 'ok',
+    nfs: 'ok',
   };
   const missing: string[] = [];
   probes.forEach(({ family, scope }, i) => {
-    if (!denied[i]) return;
-    families[family] = 'denied';
-    missing.push(scope);
+    const answer = answers[i]!;
+    if (answer === 'denied') {
+      families[family] = 'denied';
+      missing.push(scope);
+    } else if (answer === 'unavailable' && families[family] === 'ok') families[family] = answer;
   });
   return {
     account: {
