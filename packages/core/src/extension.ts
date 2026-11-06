@@ -1382,6 +1382,12 @@ export interface PkiPort {
        * attestation differ is refused without spending the token.
        */
       expect?: { mac?: string; productUuid?: string; serial?: string; gpuUuid?: string };
+      /**
+       * (kubernetes substrate) `kubernetes`: for bcd running as a DaemonSet the module applies to a cluster, as
+       * `joinTokens.create({ hosted })`: JoinService lands its nodes `tenant-controlled` unless the pool's
+       * `policy.kubernetes.platformOperated` is true. Role `node` only.
+       */
+      hosted?: 'kubernetes';
     },
   ): Promise<{ id: string; token: string }>;
   /**

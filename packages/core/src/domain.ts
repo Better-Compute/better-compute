@@ -176,6 +176,59 @@ export interface PoolPolicy {
   };
   /** (v1.1) Where the pool's hosts export GPU and host metrics (OTLP); wins over the deployment's. */
   telemetry?: TelemetrySpec;
+  /**
+   * (kubernetes substrate) The pool's machines are the nodes of a managed Kubernetes cluster on one of the owner's
+   * provider accounts (any provider whose `ProviderImpl.kubernetes` exists: GKE, EKS, DOKS). The kubernetes module
+   * creates or adopts the cluster, keeps one node pool per flavor, and runs bcd on it as a DaemonSet that joins
+   * this pool. Needs `agent: 'bcd'` and `kubernetes` without the `k8s-join` settings.
+   */
+  substrate?: KubernetesPoolSubstrate;
+}
+
+/** (kubernetes substrate) One node pool of a substrate's cluster: a machine shape and how many. */
+export interface KubernetesSubstrateFlavor {
+  /** A DNS-1123 label unique in the substrate: the node pool's name. */
+  name: string;
+  /** The provider's machine type. */
+  machineType: string;
+  /** Nodes per zone; with `autoscaling`, the initial count. */
+  nodes: number;
+  autoscaling?: { minNodes: number; maxNodes: number };
+  /** GPUs per node by the provider's accelerator type (`nvidia-l4`). */
+  gpus?: { type: string; count: number };
+  diskGiB?: number;
+  /** Zones of the cluster's region; absent: the provider's default. */
+  zones?: string[];
+  /** Spot (preemptible) nodes. Refused unless the substrate sets `allowSpot`. */
+  spot?: boolean;
+}
+
+/** (kubernetes substrate) The managed Kubernetes cluster behind a pool. */
+export interface KubernetesPoolSubstrate {
+  kind: 'kubernetes';
+  /** The provider account (an id of the pool owner's `provider_accounts`). */
+  account: string;
+  /**
+   * `create`: the module creates the cluster and deletes it when the pool is archived. `adopt`: an existing
+   * cluster by its provider id (`ProviderKubernetes.getCluster`); it is never deleted, only the node pools the
+   * module created in it are.
+   */
+  cluster:
+    | {
+        create: {
+          /** A region (regional cluster) or a zone of the account. */
+          location: string;
+          releaseChannel?: 'rapid' | 'regular' | 'stable' | 'extended';
+          version?: string;
+          authorizedNetworks?: string[];
+          privateNodes?: boolean;
+        };
+      }
+    | { adopt: string };
+  /** One node pool per flavor; at least one with `create`. */
+  flavors?: KubernetesSubstrateFlavor[];
+  /** Lets flavors ask for Spot nodes (default false). */
+  allowSpot?: boolean;
 }
 
 /** A scheduling and policy domain in one site, with exactly one GPU model. */
