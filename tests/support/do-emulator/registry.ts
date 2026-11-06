@@ -172,6 +172,8 @@ export class DocrEmulator {
   serveBlobs = false;
   /** Where a registry's blobs live (the presigned URL's region); default nyc3. */
   blobRegions = new Map<string, string>();
+  /** The presigned URL's origin for a registry (a test can point it off DigitalOcean's storage). */
+  blobOrigins = new Map<string, string>();
   /** `<registry>@<digest>` blobs a registry does not have (a mirror that has not caught up). */
   missingBlobs = new Set<string>();
   /** Status a registry answers every blob request with (a mirror that is down). */
@@ -239,10 +241,11 @@ export class DocrEmulator {
       return new Response(JSON.stringify({ errors: [{ code: 'BLOB_UNKNOWN' }] }), { status: 404 });
     if (this.serveBlobs) return new Response(blob as BodyInit, { status: 200 });
     const region = this.blobRegions.get(registry) ?? 'nyc3';
+    const origin = this.blobOrigins.get(registry) ?? `https://docr-blobs.${region}.digitaloceanspaces.com`;
     return new Response(null, {
       status: 307,
       headers: {
-        location: `https://docr-blobs.${region}.digitaloceanspaces.com/${reference!.replace(':', '/')}?X-Amz-Expires=1200&X-Amz-Signature=presigned`,
+        location: `${origin}/${reference!.replace(':', '/')}?X-Amz-Expires=1200&X-Amz-Signature=presigned`,
       },
     });
   };

@@ -22,8 +22,8 @@ import { docrCredentialSource, docrHost, type DocrCredentialSource } from './cre
 // `oci://registry.digitalocean.com/<registry>/<repository>:<tag>` (or `@sha256:…`) to the disk
 // image layer of that artifact. The control plane authenticates with short-lived, read-only
 // registry credentials; nodes get only the registry's own short-lived presigned blob URL (its
-// redirect to storage), and verify the layer digest the resolution returns. No credential ever
-// leaves this process, and none goes to a token realm off DigitalOcean's hosts.
+// redirect to storage, on an allowed host), and verify the layer digest the resolution returns. No
+// credential ever leaves this process, and none goes to a token realm off DigitalOcean's hosts.
 
 const nameComponent = '[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*';
 const referencePattern = new RegExp(
@@ -58,6 +58,13 @@ export interface DocrImageSourceOptions {
    * from the mirror; a mirror without the layer, or one that fails, falls back to the source.
    */
   mirrors?: Readonly<Record<string, Readonly<Record<string, string>>>> | false;
+  /**
+   * The hosts a layer URL handed to nodes may be on: exact hosts, or `*.<domain>` for any host
+   * under a domain. Default: `*.digitaloceanspaces.com` (where DOCR keeps its blobs). The
+   * registry itself is always allowed. A registry redirect anywhere else fails the resolution (a
+   * mirror's falls back to the source). A code-level option.
+   */
+  blobHosts?: readonly string[];
   clock?: Clock;
   log?: Logger;
 }
@@ -74,6 +81,8 @@ export interface DocrImageSource extends ImageSource {
 }
 
 const registryNamePattern = /^[a-z0-9-]{1,63}$/;
+const hostPattern = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+const defaultBlobDomains = ['*.digitaloceanspaces.com'];
 const regionSlugPattern = /^[a-z]{3}[0-9]$/;
 const redirects = [301, 302, 303, 307, 308];
 const listingTtlMs = 300_000;
@@ -178,6 +187,26 @@ function formatOf(layer: {
   };
 }
 
+/** A predicate over hosts from a `blobHosts` list (exact hosts and `*.<domain>` entries). */
+function blobHostMatcher(hosts: readonly string[]): (host: string) => boolean {
+  const exact = new Set<string>();
+  const domains: string[] = [];
+  for (const entry of hosts) {
+    const domain = entry.startsWith('*.') ? entry.slice(2) : undefined;
+    if (!hostPattern.test(domain ?? entry))
+      throw registryError(
+        'INVALID_CONFIG',
+        'A blob host is a lower-case host name, or *.<domain> for the hosts under a domain',
+        'blobHosts',
+      );
+    if (domain) domains.push(`.${domain}`);
+    else exact.add(entry);
+  }
+  if (exact.size === 0 && domains.length === 0)
+    throw registryError('INVALID_CONFIG', 'The blob host list is empty', 'blobHosts');
+  return (host) => exact.has(host) || domains.some((domain) => host.endsWith(domain));
+}
+
 function checkMirrors(mirrors: DocrImageSourceOptions['mirrors']): void {
   if (!mirrors) return;
   for (const [source, byRegion] of Object.entries(mirrors)) {
@@ -209,6 +238,8 @@ export function docrImageSource(options: DocrImageSourceOptions): DocrImageSourc
   const registryUrl = new URL(options.registryUrl ?? `https://${docrHost}`);
   // Token realms are trusted only on DigitalOcean's API host and the registry itself.
   const realmHosts = new Set([new URL(apiEndpoint).host, registryUrl.host]);
+  // The registry itself is always allowed; these are the storage hosts it may redirect to.
+  const blobHostAllowed = blobHostMatcher(options.blobHosts ?? defaultBlobDomains);
   const { token, secrets } = options;
   const client = doClient({
     fetch: doFetch,
@@ -369,6 +400,16 @@ export function docrImageSource(options: DocrImageSourceOptions): DocrImageSourc
     const target = new URL(location, registryUrl);
     if (target.protocol !== 'https:')
       throw registryError('PROVIDER_ERROR', 'The registry redirected to a non-https URL', 'blobRedirect');
+    // The URL goes to nodes as is: only on the registry itself or an allowed host on the default
+    // port, with no credentials of its own. The error never names the host.
+    const allowed =
+      target.host === registryUrl.host || (!target.port && blobHostAllowed(target.hostname));
+    if (target.username || target.password || !allowed)
+      throw registryError(
+        'PROVIDER_ERROR',
+        'The registry redirected the layer off the allowed storage hosts',
+        'blobHost',
+      );
     return { url: target };
   }
 

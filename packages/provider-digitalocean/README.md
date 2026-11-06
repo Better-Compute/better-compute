@@ -141,13 +141,15 @@ const blobStore = spacesBlobStore({
 ```
 
 - `get` answers `undefined` for a missing object. A missing bucket throws `NOT_FOUND`.
-- `put` sends a `Uint8Array`, or a stream of at most one part (default 16 MiB, at least 5 MiB), as one `PUT`. A longer stream goes as a multipart upload, which is aborted if anything fails, so at most one part is held in memory.
+- `put` sends a `Uint8Array`, or a stream of at most one part (default 16 MiB, at least 5 MiB), as one `PUT`. A longer stream goes as a multipart upload, which is aborted if anything fails (a part stored without an ETag included: `PROVIDER_ERROR`, `noEtag`), so at most one part is held in memory.
 - `delete` succeeds for a blob that is already gone.
 - `presign` signs a `GET` or `PUT` for 1 second to 7 days.
 
 Requests are path-style (`https://<region>.digitaloceanspaces.com/<bucket>/<key>`) and signed with SigV4 (`spaces/sigv4.ts`). The signer is hand-written on `node:crypto` (DO-D19) and tested against AWS's published vectors. `@better-compute/aws-core` is reserved for the AWS packages (`scripts/check-deps.mjs` rule 5), so this package does not use it.
 
 A key with a `.` or `..` segment, a control character, a leading `/` or more than 1024 bytes is refused before any request, because URL parsing would turn it into another key. The key pair is resolved on first use. The secret key never appears in a URL, a header that is returned, a log line or an error.
+
+The client never follows a redirect, because a request carries signed headers and only the configured endpoint may be reached. A 3xx (`PermanentRedirect`, `TemporaryRedirect`, or one without a body) is `INVALID_CONFIG` with `reason` `bucketRegion`: the bucket is behind another endpoint, usually another region's. The error does not carry the redirect's location.
 
 ### Storage kinds
 
@@ -181,8 +183,11 @@ Adopting and releasing:
 
 Tenant data is never deleted to delete a resource:
 
-- A bucket is deleted only when it holds nothing but its marker. Otherwise the delete is refused with `bucketNotEmpty`. If an object arrives during the delete, the marker is put back.
+- A bucket is deleted only when it holds nothing but its marker. Otherwise the delete is refused with `bucketNotEmpty`. If an object arrives during the delete, the same marker is put back.
+- A bucket is not deleted while a CDN endpoint has it as its origin (`cdnEndpointAttached`): the endpoint is managed only through the bucket's marker, so it would be left with nothing able to delete it. Delete the endpoint first.
 - A registry is deleted only when it holds no repositories. Otherwise the delete is refused with `registryNotEmpty`.
+
+Creating a bucket never leaves it unmarked and never takes another deployment's. After the create, the marker is read: another deployment's marker (a create can answer 200 for a bucket the account already holds) is refused with `managedByAnother`, and the marker is written only where there is none. If that check or write fails, the bucket that was just made, which is empty, is removed, so the next pass starts over rather than finding an unmarked bucket it must refuse. A marker over 4 KiB is not read; it counts as another's.
 
 A bucket needs the account's Spaces key pair (the `spacesAccessKey` and `spacesSecretKey` config fields, both secret references). Without it, every bucket call fails closed with `INVALID_CONFIG` and `reason` `spacesKeys`. A bucket name that another account holds is `CONFLICT` with `bucketNameTaken`.
 
@@ -207,6 +212,7 @@ The source fails closed in two cases:
 
 - A registry that would serve the bytes itself is refused with `blobRedirect`, because a node would need the control plane's credentials to fetch them.
 - Credentials are never sent to a token realm outside DigitalOcean's hosts. Such a realm is refused with `realm`.
+- The layer URL goes to nodes only when it is on the registry itself or on an allowed storage host on the default port, without credentials in it. Otherwise the resolution fails with `blobHost` (a mirror's falls back to the source). The `blobHosts` option lists the allowed hosts, exact or `*.<domain>`; the default is `*.digitaloceanspaces.com`. It is a code-level option.
 
 An image index is `UNSUPPORTED`; reference one platform's manifest by digest.
 
@@ -216,7 +222,7 @@ An image index is `UNSUPPORTED`; reference one platform's manifest by digest.
 
 - The manifest is always read from the source registry. The source decides what a tag means, and the disk layer's digest comes from there.
 - Only the layer, by digest, is fetched from the mirror. A node verifies that digest, so a stale or tampered mirror cannot substitute content.
-- A mirror that lacks the layer, answers an error, or would serve the bytes itself is skipped. The source's presigned URL is used instead.
+- A mirror that lacks the layer, answers an error, would serve the bytes itself, or redirects off the allowed hosts is skipped. The source's presigned URL is used instead.
 
 The `mirrors` option sets them:
 
@@ -246,7 +252,7 @@ DigitalOcean errors map to `ComputeError` codes: 401 `INVALID_CONFIG` (`token`),
 
 The tests run against an in-memory emulator of the endpoints the provider uses (`tests/support/do-emulator/`), plugged in through the `fetch` option. `tests/provider-digitalocean.test.ts` and `tests/provider-digitalocean-networks.test.ts` run the conformance cases and the DigitalOcean specifics, and `tests/do-end-to-end.test.ts` runs the provider and the emulator through vps: create, stop and delete; discover, attach and detach; auto-attach; a tenant network with its base firewall and a rule; and a create DigitalOcean refuses for capacity.
 
-The storage tests cover the signer (`tests/provider-digitalocean-sigv4.test.ts`, on AWS's published vectors), the S3 client and the BlobStore (`-spaces-s3`, `-spaces-blob-store`), the kinds (`-spaces-keys`, `-spaces-buckets`, `-cdn`, `-registry-kinds`) and the DOCR image source (`-docr-image-source`). They run against `tests/support/spaces-emulator.ts`, which checks every SigV4 signature with its own canonicalization, and against the Spaces Keys, CDN and registry modules in `tests/support/do-emulator/` (`spaces-keys.ts`, `cdn.ts`, `registry.ts`, which the tests register). How Spaces answers a `HEAD` on another account's bucket (403) and on a bucket in another region (301), the CDN's one-endpoint-per-origin rule, and the registry's redirect of blobs to presigned storage are **unverified** until the storage live suite checks them.
+The storage tests cover the signer (`tests/provider-digitalocean-sigv4.test.ts`, on AWS's published vectors), the S3 client and the BlobStore (`-spaces-s3`, `-spaces-blob-store`), the kinds (`-spaces-keys`, `-spaces-buckets`, `-cdn`, `-registry-kinds`) and the DOCR image source (`-docr-image-source`). They run against `tests/support/spaces-emulator.ts`, which checks every SigV4 signature with its own canonicalization, and against the Spaces Keys, CDN and registry modules in `tests/support/do-emulator/` (`spaces-keys.ts`, `cdn.ts`, `registry.ts`, which the tests register). How Spaces answers a `HEAD` on another account's bucket (403) and on a bucket in another region (301), the CDN's one-endpoint-per-origin rule, and the registry's redirect of blobs to presigned storage (and its host, which `blobHosts` defaults to `*.digitaloceanspaces.com`) are **unverified** until the storage live suite checks them.
 
 `tests/live/digitalocean-storage.live.test.ts` is that suite. It is off unless `BC_DO_LIVE`, `BC_DO_TOKEN`, `BC_DO_SPACES_ACCESS_KEY` and `BC_DO_SPACES_SECRET_KEY` are all set. It creates a bucket, a Spaces key and a CDN endpoint, all named `bc-live-<hex>-…`, and sweeps them afterwards. On an account without Spaces, the first bucket starts the Spaces subscription, which is billed monthly. It checks:
 

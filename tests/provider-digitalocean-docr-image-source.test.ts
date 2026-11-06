@@ -145,6 +145,70 @@ describe('docrImageSource', () => {
     ).toBe('blobRedirect');
   });
 
+  it('hands nodes a layer URL only on an allowed storage host', async () => {
+    const { source, docr } = setup();
+    const ref = 'oci://registry.digitalocean.com/acme/images/ubuntu:24.04';
+    for (const origin of [
+      'https://evil.example',
+      'https://digitaloceanspaces.com.evil.example',
+      'https://user:pw@docr-blobs.nyc3.digitaloceanspaces.com',
+      'https://docr-blobs.nyc3.digitaloceanspaces.com:8443',
+    ]) {
+      docr.blobOrigins.set('acme', origin);
+      const error = await failure(source.resolve(ref));
+      expect(error.code, origin).toBe('PROVIDER_ERROR');
+      expect(error.details?.reason, origin).toBe('blobHost');
+      expect(JSON.stringify(error), origin).not.toContain('evil.example');
+    }
+    // An operator can name its own hosts; the default ones are then not allowed.
+    const { emu, docr: docr2, clock } = setup();
+    const own = docrImageSource({
+      token: 'secret://do/t',
+      secrets,
+      fetch: docrFetch(emu, docr2),
+      clock,
+      blobHosts: ['blobs.example.net', '*.cdn.example.net'],
+    });
+    docr2.blobOrigins.set('acme', 'https://edge-1.cdn.example.net');
+    expect(new URL((await own.resolve(ref)).url).host).toBe('edge-1.cdn.example.net');
+    docr2.blobOrigins.set('acme', 'https://blobs.example.net');
+    expect(new URL((await own.resolve(ref)).url).host).toBe('blobs.example.net');
+    docr2.blobOrigins.delete('acme');
+    expect((await failure(own.resolve(ref))).details?.reason).toBe('blobHost');
+  });
+
+  it('skips a mirror whose layer URL is off the allowed hosts', async () => {
+    const clock = manualClock(t0);
+    const emu = new DoEmulator({ now: () => clock.now() });
+    registerRegistry(emu);
+    const docr = new DocrEmulator(registryWorld(emu), () => clock.now());
+    const layer = docr.blob(new TextEncoder().encode('disk'));
+    docr.push('acme/images/ubuntu', '24.04', {
+      schemaVersion: 2,
+      mediaType: 'application/vnd.oci.image.manifest.v1+json',
+      layers: [{ mediaType: 'application/vnd.better-compute.disk.raw', digest: layer, size: 4 }],
+    });
+    docr.blobOrigins.set('acme-ams3', 'https://evil.example');
+    const source = docrImageSource({
+      token: 'secret://do/t',
+      secrets,
+      fetch: docrFetch(emu, docr),
+      clock,
+      mirrors: { acme: { ams3: 'acme-ams3' } },
+    });
+    const resolved = await source.resolve('oci://registry.digitalocean.com/acme/images/ubuntu:24.04', {
+      region: 'ams3',
+    });
+    expect(new URL(resolved.url).host).toBe('docr-blobs.nyc3.digitaloceanspaces.com');
+  });
+
+  it('refuses a malformed blob host list', () => {
+    for (const blobHosts of [[], ['*'], ['https://x.example'], ['Bad_Host.example'], ['a.*.example']])
+      expect(() =>
+        docrImageSource({ token: 'secret://do/t', secrets, blobHosts }),
+      ).toThrow(/blob host/i);
+  });
+
   it('refuses references it cannot serve', async () => {
     const { source, docr, layer } = setup();
     const reason = async (ref: string) => (await failure(source.resolve(ref))).details?.reason;
