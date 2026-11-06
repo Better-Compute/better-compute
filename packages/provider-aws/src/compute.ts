@@ -11,6 +11,7 @@ import {
   type Offer,
   type OfferQuery,
   type PowerAction,
+  type ProviderPlacement,
   type ProviderContext,
   type ProviderEventBatch,
   type ProviderImpl,
@@ -28,6 +29,7 @@ import {
 } from './events.js';
 import { aliasRootDeviceOf, resolveImage, ssmImagePrefixes } from './images.js';
 import { AwsNetworks } from './networks.js';
+import { checkPlacement, PlacementGroups, placementParams } from './placement.js';
 import {
   toMachine,
   type InstanceTypeCache,
@@ -76,6 +78,8 @@ export interface AwsCreateRequest {
   userData: string;
   name: string;
   network?: NetworkRef;
+  /** (A10) The placement group to launch into, made on first use. */
+  placement?: ProviderPlacement;
   labels?: Readonly<Record<string, string>>;
   sshKeys?: readonly string[];
 }
@@ -197,6 +201,8 @@ export class AwsCompute implements ProviderImpl {
   readonly networks: AwsNetworks;
   readonly #quotas: QuotaReader | undefined;
   readonly #prices: PriceReader;
+  /** (A10) Placement groups made on first use. */
+  readonly #placementGroups: PlacementGroups;
   /** (A4, no queue) When the last DescribeInstanceStatus scan succeeded. */
   #scannedAt: number | undefined;
 
@@ -226,6 +232,10 @@ export class AwsCompute implements ProviderImpl {
       ready: (signal) => this.ready(signal),
       onError: (topic, error) => this.warnOnce(topic, error),
     });
+    this.#placementGroups = new PlacementGroups(
+      (action, params, signal) => this.call(action, params, signal),
+      context.clock,
+    );
     this.networks = new AwsNetworks({
       config,
       context,
@@ -1077,6 +1087,17 @@ export class AwsCompute implements ProviderImpl {
           reason: 'zone',
         },
       );
+    if (request.placement) {
+      checkPlacement(request.placement);
+      // An ODCR or Capacity Block pins where its capacity is; a placement group cannot move it.
+      if (offer.reservation !== undefined)
+        throw new ComputeError(
+          'INVALID_INPUT',
+          'a launch into a capacity reservation takes no placement group',
+          undefined,
+          { provider: 'aws', reason: 'placement-reservation' },
+        );
+    }
     const { signal } = context;
     let target: CapacityReservationInfo | undefined;
     if (offer.reservation !== undefined)
@@ -1108,6 +1129,8 @@ export class AwsCompute implements ProviderImpl {
     const placement = request.network
       ? await this.networks.placement(request.network, offer.zone, signal)
       : undefined;
+    // (A10) The placement group first: made on first use, refused when it is not ours.
+    if (request.placement) await this.#placementGroups.ensure(request.placement, signal);
     const subnet = placement?.subnetId ?? this.config.subnetId;
     const groups = placement?.groupIds ?? this.config.securityGroupIds ?? [];
     const params: QueryParams = {
@@ -1115,7 +1138,10 @@ export class AwsCompute implements ProviderImpl {
       MinCount: 1,
       MaxCount: 1,
       InstanceType: offer.instanceType,
-      Placement: { AvailabilityZone: offer.zone },
+      Placement: {
+        AvailabilityZone: offer.zone,
+        ...(request.placement ? placementParams(request.placement) : {}),
+      },
       ImageId: imageId,
       UserData: userData.base64 === '' ? undefined : userData.base64,
       MetadataOptions: {
