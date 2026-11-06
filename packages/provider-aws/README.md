@@ -36,6 +36,7 @@ One provider account is one AWS account in one region. A fleet in several region
 | `metadataHopLimit`  | `1`        | The IMDSv2 hop limit (2 when containers on the instance need IMDS).                                                                             |
 | `associatePublicIp` | `true`     | Give instances a public IPv4 address (with a subnet).                                                                                           |
 | `discoverTag`       | –          | `key=value`: discovery yields only instances carrying this tag.                                                                                 |
+| `costs`             | –          | `region` or `account`: read this account's costs from Cost Explorer (see Costs). Absent or `off`: none.                                         |
 
 `awsConfig.parse` checks field shapes (`INVALID_INPUT`); the provider checks the region, that every zone is in it, and the role ARN's shape and partition (`INVALID_CONFIG`), so `providerAccounts.create` refuses a bad account before it is stored.
 
@@ -111,13 +112,21 @@ EC2 takes at most 16 384 bytes of user data. With SSH keys, the user data is a M
 
 `discover` yields every instance that is not terminated (only those tagged `discoverTag`, when set). `claim` writes `better-compute:instance` (and `better-compute:managed` when deletion is handed over) and re-reads: EC2 tags have no compare-and-swap, so a re-read naming another instance is a lost race (`CONFLICT`). Tag reads lag behind writes too: a re-read that does not show the tag (or `managed`) yet is `UNAVAILABLE` (reason `tag-propagation`, retried), and so is a `delete` right after a managed claim that does not see `managed` yet. The vps unique index on the external id referees between control planes. `release` removes the tags only when they name the instance. Deleting an attached instance detaches it by default and leaves it running.
 
+## Costs, prices and governance
+
+Costs (A11) are opt-in, because Cost Explorer charges per request: an account with `costs: 'region'` (only its own region, for several regional accounts on one AWS account) or `costs: 'account'` (every region) has `costs`, which the `vps.costs` worker reads into `provider_costs`. It is `GetCostAndUsage`, daily, in three queries per window: regular usage by the `better-compute:instance` tag and usage type, regular usage without that tag by `better-compute:tenant`, and everything else (tax, credits, fees, Savings Plan negation) by record type and service, as `costType`. Every query is filtered to the caller's own linked account, so a payer role never reads its member accounts. The current UTC day is never read (it is incomplete) and a day read is kept 24 hours (`costsCacheMs`), so the 6-hourly pass costs one read per day. Cost Explorer groups only by **active cost allocation tags**: activate `better-compute:instance`, `better-compute:tenant` and `better-compute:pool` in the payer account (`better-compute aws cost-allocation-tags --activate --yes`, or the Billing console), or nothing is attributed to instances or tenants. Activation applies from then on, not to earlier costs. `awsBilling` tells vps that instance hours are compute and EBS volumes and public IPv4 addresses are metered, so those rows are never passed through, and leak detection compares a daily row's billed hours with the instance's running intervals.
+
+`listPrices` reads the AWS Price List (`pricing:GetProducts`; Linux, shared tenancy, on demand) for the regions asked, the account's region by default, each kept 24 hours. It exists in the `aws` partition only, the one the Price List serves. Instance prices are split per family into a vCPU and a GiB price (a GiB weighs 0.074 of a vCPU) that compose back to the family's prices exactly; a GPU type's vCPUs and memory take the region's cheapest general-purpose family and the rest per GPU is the GPU price. EBS capacity is per GiB-hour (730 hours a month) and an in-use public IPv4 address per hour. There are no Spot list prices.
+
+`aws iam-policy --costs --prices` adds `ce:GetCostAndUsage` and `pricing:GetProducts` (neither takes resource ARNs). The governance commands run as the operator's own AWS identity: `aws organization-accounts --role <name> --region <r> --zones <a,b> [--parent ou-…]` prints FleetConfig provider accounts for an organization's ACTIVE accounts (it only renders); `aws quotas` prints the EC2 instance vCPU quotas and `aws quota-request --quota-code L-… --value <n> --yes` asks for more (without `--yes` it only prints); `aws tag-policy [--enforce]` renders an Organizations tag policy for the better-compute keys; `aws budget-template --amount <n> [--tenant <id> | --pool <id>] --email <a>` renders an `AWS::Budgets::Budget` CloudFormation template. `awsMonthToDateCost` and `assertAwsSpendBelow` are the live suite's spend guard.
+
 ## What comes next
 
-Networks (A2), capacity reservations, Capacity Blocks, Spot and prices (A3), event intake and Spot interruptions (A4), EBS volumes (A5), EC2 hosts joining as bcd nodes (A6), workload roles (A7), EKS (A9), placement groups and EFA (A10), and costs (A11), per `docs/superpowers/plans/2026-10-18-aws-integration-program.md`.
+Networks (A2), capacity reservations, Capacity Blocks, Spot and prices (A3), event intake and Spot interruptions (A4), EBS volumes (A5), EC2 hosts joining as bcd nodes (A6), workload roles (A7), EKS (A9), placement groups and EFA (A10), and Marketplace metering (A11, blocked on usage sinks), per `docs/superpowers/plans/2026-10-18-aws-integration-program.md`.
 
 ## Testing
 
-`tests/support/aws-emulator` emulates STS, IMDS and EC2 in process through `fetch`. `tests/provider-aws*.test.ts` cover the config, credentials, offers, compute, attach, the CLI policies and the `providerConformanceCases()` suite; `tests/aws-end-to-end.test.ts` drives the provider through vps on PGlite. No test calls AWS.
+`tests/support/aws-emulator` emulates STS, IMDS, EC2, Cost Explorer, the Price List, Organizations and Service Quotas in process through `fetch`. `tests/provider-aws*.test.ts` cover the config, credentials, offers, compute, attach, the CLI policies and the `providerConformanceCases()` suite; `tests/aws-end-to-end.test.ts` drives the provider through vps on PGlite. No test calls AWS.
 
 ## License
 
