@@ -150,5 +150,27 @@ describe('DigitalOcean invoices through vps.costs', () => {
     expect(billingReads.every((r) => r.method === 'GET')).toBe(true);
     const { rows: all } = await fixture.database.query<any>(`SELECT record FROM provider_costs`);
     expect(JSON.stringify(all)).not.toContain('root-do-token');
+
+    // Leaks (periodRows): an hour billed for a Droplet that has run a minute is within the tolerance...
+    const leaks = async () =>
+      (
+        await fixture.database.query<any>(`SELECT payload FROM outbox WHERE topic = 'billing.leak'`)
+      ).rows.map((row: any) => row.payload.data);
+    expect(await leaks()).toEqual([]);
+    // ...48 hours of it after 6 hours of running is a leak, raised for the instance's January item (the next
+    // pass is 6 hours on).
+    billing.items.get('preview-jan')![0]!.duration = '48';
+    billing.preview.updated_at = '2026-01-01T06:00:00Z';
+    await fixture.advance(6 * 3_600_000 + 60_000);
+    for (let round = 0; round < 2; round++) await compute.jobs['vps.costs']!.tick();
+    expect(await leaks()).toEqual([
+      expect.objectContaining({
+        accountId: account.id,
+        instanceId: created.id,
+        tenantId: tenants.acme.id,
+        day: '2026-01-01',
+        providerHours: 48,
+      }),
+    ]);
   });
 });

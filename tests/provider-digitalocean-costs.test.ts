@@ -301,6 +301,9 @@ describe('billing SKU matchers', () => {
     expect(doBilling.meteredSku(row('Volumes'))).toBe(true);
     expect(doBilling.meteredSku(row('Reserved IPs'))).toBe(true);
     expect(doBilling.meteredSku(row('Spaces'))).toBe(false);
+    // An invoice item is a month aggregate of hours, and DigitalOcean bills a powered-off Droplet.
+    expect(doBilling.periodRows).toBe(true);
+    expect(doBilling.billsStopped).toBe(true);
   });
 
   it('reads a pass-through pattern (empty service) the same way', () => {

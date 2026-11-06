@@ -905,8 +905,14 @@ export async function detectLeaks(
 ): Promise<{ leaks: number }> {
   // Platform accounts only: a tenant's own account is the tenant's cost, not the platform's.
   if (!isPlatformAccount(account, deps.rootTenantId)) return { leaks: 0 };
-  const computeSku = deps.providers.get(account.provider)?.billing?.computeSku;
+  const billing = deps.providers.get(account.provider)?.billing;
+  const computeSku = billing?.computeSku;
   if (typeof computeSku !== 'function') return { leaks: 0 };
+  if (billing?.periodRows === true)
+    return detectPeriodLeaks(deps, tx, account, window, toleranceHours, {
+      computeSku,
+      billsStopped: billing.billsStopped === true,
+    });
   // Only the columns the check reads, of regular usage rows attributed to an instance root bills (an instance
   // with billing 'none' has no intervals by design).
   const { rows } = await tx.query<LeakRow>(
@@ -997,7 +1003,128 @@ export async function detectLeaks(
   return { leaks };
 }
 
-// --- Margins (D12) -------------------------------------------------------------------------------------------
+/** The units a period row's quantity may be in to be read as hours. */
+const hourUnits = new Set(['h', 'hr', 'hrs', 'hour', 'hours']);
+
+/** Share of a period row's hours tolerated as rounding (per-hour billing of each start, stop and resize). */
+export const periodLeakShare = 0.05;
+
+/**
+ * The leak check for a provider of period rows (`billing.periodRows`, P9): a row is a resource's charge for a
+ * billing period so far, so the hours it bills (its quantity, in an hour unit; other units are not checked) are
+ * compared with the hours the instance's intervals (`running`, and `stopped` when the provider bills those) cover
+ * of the row's span. Every row whose span overlaps the window is checked, since a month's row starts on its first
+ * day. The rows of one instance and period start are summed; a gap over `max(toleranceHours, 5%)` of the billed
+ * hours raises `billing.leak` once per instance and period (`day` = the period's first UTC day).
+ */
+async function detectPeriodLeaks(
+  deps: Pick<CostsDeps, 'events' | 'clock'>,
+  tx: SqlTx,
+  account: ProviderAccount,
+  window: { from: number; to: number },
+  toleranceHours: number,
+  hooks: {
+    computeSku: (record: Pick<ProviderCostRecord, 'service' | 'sku' | 'skuDescription'>) => boolean;
+    billsStopped: boolean;
+  },
+): Promise<{ leaks: number }> {
+  const { rows } = await tx.query<LeakRow & { quantity: number; unit: string | null }>(
+    `SELECT c.instance_id, c.tenant_id, c.record->>'service' AS service, c.record->>'sku' AS sku,
+            c.record->>'skuDescription' AS sku_description,
+            (c.record->>'quantity')::float8 AS quantity, lower(c.record->>'unit') AS unit,
+            (extract(epoch FROM c.usage_start) * 1000)::float8 AS start_ms,
+            (extract(epoch FROM c.usage_end) * 1000)::float8 AS end_ms
+       FROM provider_costs c JOIN instances i ON i.id = c.instance_id
+      WHERE c.account_id = $1 AND c.instance_id IS NOT NULL
+        AND c.usage_start < to_timestamp($3::float8 / 1000) AND c.usage_end > to_timestamp($2::float8 / 1000)
+        AND COALESCE(c.record->>'costType', 'regular') = 'regular'
+        AND (c.record->>'quantity')::float8 > 0
+        AND i.billing IS DISTINCT FROM 'none'`,
+    [account.id, window.from, window.to],
+  );
+  // instance → period day → billed hours and the span they cover
+  const billed = new Map<
+    string,
+    { tenantId: string | null; periods: Map<string, { hours: number; start: number; end: number }> }
+  >();
+  for (const row of rows) {
+    if (!hourUnits.has(row.unit ?? '')) continue;
+    const sku = {
+      service: row.service ?? '',
+      sku: row.sku ?? '',
+      ...(row.sku_description !== null ? { skuDescription: row.sku_description } : {}),
+    };
+    if (!hooks.computeSku(sku)) continue;
+    const entry = billed.get(row.instance_id) ?? { tenantId: row.tenant_id, periods: new Map() };
+    billed.set(row.instance_id, entry);
+    const start = Number(row.start_ms);
+    const end = Number(row.end_ms);
+    const day = dayOf(start);
+    const period = entry.periods.get(day);
+    entry.periods.set(
+      day,
+      period
+        ? {
+            hours: period.hours + Number(row.quantity),
+            start: Math.min(period.start, start),
+            end: Math.max(period.end, end),
+          }
+        : { hours: Number(row.quantity), start, end },
+    );
+  }
+  if (billed.size === 0) return { leaks: 0 };
+  const phases = hooks.billsStopped ? ['running', 'stopped'] : ['running'];
+  const earliest = Math.min(
+    ...[...billed.values()].flatMap(({ periods }) => [...periods.values()].map((period) => period.start)),
+  );
+  const { rows: intervals } = await tx.query<{
+    instance_id: string;
+    started_ms: number;
+    ended_ms: number | null;
+  }>(
+    `SELECT instance_id, (extract(epoch FROM started_at) * 1000)::float8 AS started_ms,
+            (extract(epoch FROM ended_at) * 1000)::float8 AS ended_ms
+       FROM instance_usage_intervals
+      WHERE instance_id = ANY($1::text[]) AND phase = ANY($2::text[])
+        AND (ended_at IS NULL OR ended_at > to_timestamp($3::float8 / 1000))`,
+    [[...billed.keys()], phases, earliest],
+  );
+  const now = deps.clock.now();
+  let leaks = 0;
+  for (const [instanceId, { tenantId, periods }] of billed) {
+    const spans = intervals
+      .filter((interval) => interval.instance_id === instanceId)
+      .map((interval) => ({
+        start: Number(interval.started_ms),
+        end: interval.ended_ms === null ? now : Number(interval.ended_ms),
+      }));
+    for (const [day, period] of [...periods].sort(([a], [b]) => a.localeCompare(b))) {
+      let covered = 0;
+      for (const span of spans)
+        covered += Math.max(0, Math.min(span.end, period.end) - Math.max(span.start, period.start));
+      const providerHours = Math.round(period.hours * 100) / 100;
+      const meteredHours = Math.round((covered / HOUR) * 100) / 100;
+      if (providerHours - meteredHours <= Math.max(toleranceHours, providerHours * periodLeakShare))
+        continue;
+      const { rows: raised } = await tx.query(
+        `INSERT INTO provider_cost_leaks (instance_id, day, account_id, provider_hours, metered_hours)
+         VALUES ($1, $2::date, $3, $4, $5) ON CONFLICT DO NOTHING RETURNING instance_id`,
+        [instanceId, day, account.id, providerHours, meteredHours],
+      );
+      if (raised.length === 0) continue;
+      leaks++;
+      await deps.events.publish(tx, {
+        type: 'billing.leak',
+        tenantId: account.tenantId,
+        subject: `provider-account/${account.id}`,
+        data: { accountId: account.id, instanceId, tenantId, day, providerHours, meteredHours },
+      });
+    }
+  }
+  return { leaks };
+}
+
+// --- Margins (D12)-------------------------------------------------------------------------------------------
 
 /** What `billing.margins` groups by. */
 export type MarginGroup = 'tenant' | 'pool' | 'account' | 'meter';

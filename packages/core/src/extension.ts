@@ -1179,6 +1179,15 @@ export interface ProviderInput<C> {
     computeSku?(record: Pick<ProviderCostRecord, 'service' | 'sku' | 'skuDescription'>): boolean;
     /** Other SKUs compute meters itself (disks, public addresses): never passed through either. */
     meteredSku?(record: Pick<ProviderCostRecord, 'service' | 'sku' | 'skuDescription'>): boolean;
+    /**
+     * (P9, additive) The provider's cost rows are period aggregates: one row per resource and billing period (a
+     * DigitalOcean invoice item is a Droplet's month), its `quantity` the hours billed so far (`unit`
+     * hours). Leak detection then compares that quantity with the instance's hours over the row's span, instead of
+     * counting the hour slots the span covers.
+     */
+    periodRows?: boolean;
+    /** (P9, additive) The provider bills a stopped machine's hours as compute (DigitalOcean): leaks count them. */
+    billsStopped?: boolean;
   };
 }
 export interface ProviderDefinition<C = any> extends ProviderInput<C>, Extension {

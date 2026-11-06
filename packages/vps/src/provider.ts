@@ -94,11 +94,14 @@ export function defineProvider<C>(provider: ProviderInput<C>): ProviderDefinitio
     if (typeof billing !== 'object' || billing === null || Array.isArray(billing))
       fail('billing', 'must be an object');
     for (const key of Object.keys(billing))
-      if (key !== 'computeSku' && key !== 'meteredSku')
+      if (!['computeSku', 'meteredSku', 'periodRows', 'billsStopped'].includes(key))
         fail(`billing.${key}`, 'is not a known field');
     for (const hook of ['computeSku', 'meteredSku'])
       if (billing[hook] !== undefined && typeof billing[hook] !== 'function')
         fail(`billing.${hook}`, 'must be a function');
+    for (const flag of ['periodRows', 'billsStopped'])
+      if (billing[flag] !== undefined && typeof billing[flag] !== 'boolean')
+        fail(`billing.${flag}`, 'must be true or false');
   }
   return Object.freeze({ ...provider, extension: 'provider' as const });
 }

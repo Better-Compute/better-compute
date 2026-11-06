@@ -281,4 +281,8 @@ const meteredProduct = (value: string): boolean =>
 export const doBilling = Object.freeze({
   computeSku: (record: SkuRecord): boolean => computeProduct(textOf(record)),
   meteredSku: (record: SkuRecord): boolean => meteredProduct(textOf(record)),
+  // An invoice item is a resource's month so far, its duration in hours (leak detection by hours, not slots).
+  periodRows: true,
+  // DigitalOcean bills a powered-off Droplet until it is destroyed.
+  billsStopped: true,
 });
