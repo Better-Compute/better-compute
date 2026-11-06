@@ -792,3 +792,99 @@ describe('doks credentials', () => {
     }
   });
 });
+
+describe('doks upgrades and deletes', () => {
+  it('upgrades the control plane in place, and a minor is satisfied by a patch', async () => {
+    const s = await setup();
+    const pinned = { ...standard, version: '1.33' };
+    const id = await readyCluster(s, pinned);
+    expect(s.doks.clusters.get(id)!.version).toBe('1.33.5-do.1');
+    const raised = { ...standard, version: '1.34' };
+    expect((await s.k8s.ensureCluster(raised, s.ctx())).state).toBe('updating');
+    expect(posted(s, `/kubernetes/clusters/${id}/upgrade`)).toEqual([{ version: '1.34.1-do.0' }]);
+    const { last } = await settle(() => s.k8s.ensureCluster(raised, s.ctx()), 'ready');
+    expect(last.outputs).toMatchObject({ version: '1.34.1-do.0', nodeVersion: '1.34.1-do.0' });
+    const before = mutations(s).length;
+    expect((await s.k8s.ensureCluster(raised, s.ctx())).state).toBe('ready');
+    expect(mutations(s)).toHaveLength(before);
+    expect(s.logs.some((entry) => entry.message === 'doks.cluster.upgrade')).toBe(true);
+  });
+
+  it('steps through the upgrades DOKS offers, and refuses what it cannot reach', async () => {
+    const s = await setup();
+    s.doks.versions = [{ slug: '1.35.0-do.0', kubernetes_version: '1.35.0' }, ...s.doks.versions];
+    const id = await readyCluster(s, { ...standard, version: '1.33.4' });
+    const target = { ...standard, version: '1.36' };
+    // The newest offered upgrade that does not pass the wanted version.
+    await settle(() => s.k8s.ensureCluster({ ...standard, version: '1.34.1' }, s.ctx()), 'ready');
+    expect(posted(s, `/kubernetes/clusters/${id}/upgrade`)).toEqual([{ version: '1.34.1-do.0' }]);
+    expect((await s.k8s.ensureCluster(target, s.ctx())).state).toBe('updating');
+    await settle(() => s.k8s.getCluster(id, s.ctx()), 'ready');
+    expect(s.doks.clusters.get(id)!.version).toBe('1.35.0-do.0');
+    const stuck = await failure(s.k8s.ensureCluster(target, s.ctx()));
+    expect([stuck.code, stuck.details?.reason]).toEqual(['INVALID_STATE', 'versionUnavailable']);
+  });
+
+  it('refuses a downgrade', async () => {
+    const s = await setup();
+    await readyCluster(s);
+    const error = await failure(s.k8s.ensureCluster({ ...standard, version: '1.33' }, s.ctx()));
+    expect([error.code, error.details?.reason]).toEqual(['INVALID_STATE', 'downgrade']);
+  });
+
+  it('deletes its cluster by id, keeping what the cluster made for its workloads', async () => {
+    const s = await setup();
+    const id = await readyCluster(s);
+    s.doks.associated.set(id, {
+      load_balancers: [{ id: 'lb-1', name: 'web' }],
+      volumes: [
+        { id: 'vol-1', name: 'pvc-1' },
+        { id: 'vol-2', name: 'pvc-2' },
+      ],
+      volume_snapshots: [],
+    });
+    const first = await s.k8s.deleteCluster(id, s.ctx());
+    expect(first.state).toBe('deleting');
+    expect(first.message).toContain('1 load balancer');
+    expect(first.message).toContain('2 volumes');
+    const { states } = await settle(() => s.k8s.deleteCluster(id, s.ctx()), 'deleted');
+    expect(states).toEqual(['deleted']);
+    // One plain delete: never /dangerous, never a bulk call.
+    expect(mutations(s).filter((m) => m.startsWith('DELETE'))).toEqual([
+      `DELETE /kubernetes/clusters/${id}`,
+    ]);
+    expect(await s.k8s.getCluster(id, s.ctx())).toBeUndefined();
+    // The same spec again makes a new cluster.
+    const again = await s.k8s.ensureCluster(standard, s.ctx());
+    expect(again.state).toBe('pending');
+    expect(again.id).not.toBe(id);
+  });
+
+  it('answers deleting while DOKS deletes, and deleted for a cluster that is gone', async () => {
+    const s = await setup();
+    const id = await readyCluster(s);
+    s.doks.transitionReads = 3;
+    expect((await s.k8s.deleteCluster(id, s.ctx())).state).toBe('deleting');
+    expect((await s.k8s.deleteCluster(id, s.ctx())).state).toBe('deleting');
+    expect((await s.k8s.ensureCluster(standard, s.ctx())).state).toBe('deleting');
+    expect(mutations(s).filter((m) => m.startsWith('DELETE'))).toHaveLength(1);
+    const missing = '0d0c5000-0000-4000-8000-999999999999';
+    expect(await s.k8s.deleteCluster(missing, s.ctx())).toEqual({ id: missing, state: 'deleted' });
+  });
+
+  it("never deletes a cluster that is not this deployment's", async () => {
+    const s = await setup();
+    const adopted = s.doks.seedCluster({ name: 'team-cluster', region: 'nyc3' });
+    const other = s.doks.seedCluster({
+      name: 'bc-k-other',
+      region: 'nyc3',
+      tags: [tagFor('better-compute-kubernetes', 'true'), deploymentTag('another')],
+    });
+    for (const cluster of [adopted, other]) {
+      const error = await failure(s.k8s.deleteCluster(cluster.id, s.ctx()));
+      expect([error.code, error.details?.reason]).toEqual(['INVALID_STATE', 'notOwned']);
+    }
+    expect(mutations(s)).toEqual([]);
+    expect(s.doks.clusters.size).toBe(2);
+  });
+});

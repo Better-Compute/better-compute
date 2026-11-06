@@ -48,8 +48,14 @@ import {
 } from './node-pools.js';
 import { checkCredentialRequest, mintCredentials } from './credentials.js';
 import { httpsKubeTransport, type KubeTransport } from './transport.js';
-import type { DoksCluster, DoksNodePool } from './types.js';
-import { byNewest, pickVersion, readOptions, readVersions } from './versions.js';
+import type { DoksAssociatedResources, DoksCluster, DoksNodePool, DoksVersion } from './types.js';
+import {
+  byNewest,
+  compareDoksVersion,
+  pickVersion,
+  readOptions,
+  readVersions,
+} from './versions.js';
 
 export { kubernetesTag } from './clusters.js';
 export { accessNamespace, adminCredentialSeconds, clusterRoles } from './credentials.js';
@@ -241,15 +247,67 @@ export class DoKubernetes implements ProviderKubernetes {
     if (state === 'deleting') return clusterState(id, found);
     await this.#checkImmutable(spec, found, signal);
     if (state !== 'running' && state !== 'degraded') return clusterState(id, found);
+    const upgrade =
+      spec.version !== undefined ? compareDoksVersion(spec.version, found.version) : 0;
+    if (upgrade < 0)
+      throw fail(
+        'INVALID_STATE',
+        `Cluster ${id} runs ${found.version}: ${spec.version} would be a downgrade, which DOKS does not do`,
+        'downgrade',
+      );
     const update = clusterUpdate(spec, found);
-    if (!update) return clusterState(id, found);
-    log.info('doks.cluster.update', { cluster: id, fields: Object.keys(update) });
-    await this.#client.request('PUT', `/kubernetes/clusters/${id}`, {
-      body: { name: found.name, tags: ownTags(found), ...update },
+    if (update) {
+      log.info('doks.cluster.update', { cluster: id, fields: Object.keys(update) });
+      await this.#client.request('PUT', `/kubernetes/clusters/${id}`, {
+        body: { name: found.name, tags: ownTags(found), ...update },
+        signal,
+        budget: 'mutate',
+      });
+      return resourceState(id, 'updating', { outputs: outputsOf(found) });
+    }
+    if (upgrade > 0) return this.#upgrade(found, spec.version!, context);
+    return clusterState(id, found);
+  }
+
+  /**
+   * One step of a control-plane upgrade (P5 task 7): to the newest version DOKS offers this
+   * cluster that does not pass the wanted one. DOKS upgrades a minor at a time, so a far target
+   * takes several steps; one it offers no way towards is INVALID_STATE. A surge upgrade replaces
+   * the nodes, so bcd pods restart and drain as on any node loss.
+   */
+  async #upgrade(
+    cluster: DoksCluster,
+    wanted: string,
+    context: CallContext,
+  ): Promise<ProviderResourceState> {
+    const { signal, log } = context;
+    const offered = await this.#client.request<{ available_upgrade_versions?: DoksVersion[] }>(
+      'GET',
+      `/kubernetes/clusters/${cluster.id}/upgrades`,
+      { signal, budget: 'observe' },
+    );
+    const target = byNewest(offered.available_upgrade_versions ?? []).find(
+      (version) =>
+        compareDoksVersion(wanted, version.slug) >= 0 &&
+        compareDoksVersion(version.slug, cluster.version) > 0,
+    );
+    if (!target)
+      throw fail(
+        'INVALID_STATE',
+        `Cluster ${cluster.id} runs ${cluster.version}: DOKS offers it no upgrade towards ${wanted}`,
+        'versionUnavailable',
+      );
+    log.info('doks.cluster.upgrade', {
+      cluster: cluster.id,
+      from: cluster.version,
+      to: target.slug,
+    });
+    await this.#client.request('POST', `/kubernetes/clusters/${cluster.id}/upgrade`, {
+      body: { version: target.slug },
       signal,
       budget: 'mutate',
     });
-    return resourceState(id, 'updating', { outputs: outputsOf(found) });
+    return resourceState(cluster.id, 'updating', { outputs: outputsOf(cluster) });
   }
 
   async #createCluster(
@@ -317,12 +375,68 @@ export class DoKubernetes implements ProviderKubernetes {
     return found ? clusterState(id, found) : undefined;
   }
 
-  deleteCluster(_cluster: string, _context: CallContext): Promise<ProviderResourceState> {
-    return Promise.resolve(this.#notYet());
+  /**
+   * Deletes one of this deployment's clusters (P5 task 7). A cluster without both ownership tags
+   * (an adopted one, another deployment's) is INVALID_STATE and never deleted (DO-D16). The delete
+   * is DOKS's plain one: the load balancers and volumes the cluster's workloads made are kept
+   * (they carry no tag of ours, so a selective delete would name none, and `/dangerous` would take
+   * tenant data); the answer says how many stay.
+   */
+  async deleteCluster(cluster: string, context: CallContext): Promise<ProviderResourceState> {
+    const id = parseClusterId(cluster);
+    const { signal, log } = context;
+    const found = await this.#read(id, signal);
+    if (!found) {
+      for (const [name, uuid] of this.#names) if (uuid === id) this.#names.delete(name);
+      return resourceState(id, 'deleted');
+    }
+    if (!this.#owned(found))
+      throw fail(
+        'INVALID_STATE',
+        `DOKS cluster ${id} is not this deployment's: it is never deleted`,
+        'notOwned',
+      );
+    if (found.status?.state === 'deleting') return resourceState(id, 'deleting');
+    const kept = await this.#associated(id, signal);
+    log.info('doks.cluster.delete', { cluster: id, ...kept });
+    await this.#deleteOwned(found, signal);
+    const parts = [
+      [kept.loadBalancers, 'load balancer'],
+      [kept.volumes, 'volume'],
+      [kept.snapshots, 'volume snapshot'],
+    ] as const;
+    const left = parts
+      .filter(([count]) => count > 0)
+      .map(([count, what]) => `${count} ${what}${count === 1 ? '' : 's'}`);
+    return resourceState(id, 'deleting', {
+      ...(left.length > 0
+        ? { message: `Kept ${left.join(', ')} the cluster's workloads made` }
+        : {}),
+    });
   }
 
-  #notYet(): never {
-    throw fail('UNSUPPORTED', 'This DOKS call is not supported yet', 'notYet');
+  /** How many load balancers, volumes and snapshots of the cluster's own a plain delete keeps. */
+  async #associated(
+    id: string,
+    signal: AbortSignal,
+  ): Promise<{ loadBalancers: number; volumes: number; snapshots: number }> {
+    try {
+      const listed = await this.#client.request<DoksAssociatedResources>(
+        'GET',
+        `/kubernetes/clusters/${id}/destroy_with_associated_resources`,
+        { signal, budget: 'observe' },
+      );
+      return {
+        loadBalancers: listed.load_balancers?.length ?? 0,
+        volumes: listed.volumes?.length ?? 0,
+        snapshots: listed.volume_snapshots?.length ?? 0,
+      };
+    } catch (error) {
+      // Only a count for the message: a token that may not list them still deletes.
+      if (isComputeError(error, 'ACCESS_DENIED'))
+        return { loadBalancers: 0, volumes: 0, snapshots: 0 };
+      throw error;
+    }
   }
 
   // -------------------------------------------------------------------------------- node pools
