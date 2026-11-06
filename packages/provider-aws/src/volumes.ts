@@ -277,6 +277,8 @@ export class AwsVolumes implements ProviderVolumes {
   readonly #createdSnapshotIds = new Map<string, number>();
   /** Attachments (`volumeId:instanceId`) this process force-detached: forced once, then waited on. */
   readonly #forced = new Set<string>();
+  /** volume id → the resize this client started, for the window DescribeVolumesModifications may not list it. */
+  readonly #resizing = new Map<string, { sizeGiB: number; at: number }>();
 
   constructor(
     readonly config: AwsConfig,
@@ -303,6 +305,7 @@ export class AwsVolumes implements ProviderVolumes {
   #forget(id: string): void {
     this.#createdIds.delete(id);
     this.#createdSnapshotIds.delete(id);
+    this.#resizing.delete(id);
     for (const [name, entry] of this.#created) if (entry.id === id) this.#created.delete(name);
     for (const [name, entry] of this.#createdSnapshots)
       if (entry.id === id) this.#createdSnapshots.delete(name);
@@ -817,6 +820,24 @@ export class AwsVolumes implements ProviderVolumes {
     return latest;
   }
 
+  /**
+   * The volume's latest modification: EBS's, or the one this client just started when EBS does not
+   * list it yet (sizes only grow, so a listed one with another target is an older one).
+   */
+  async #latestModification(
+    volumeId: string,
+    signal: AbortSignal,
+  ): Promise<{ state: string; targetSize: number; startTime: number } | undefined> {
+    const listed = await this.#modification(volumeId, signal);
+    const started = this.#resizing.get(volumeId);
+    if (!started || !this.#recent(started.at)) {
+      this.#resizing.delete(volumeId);
+      return listed;
+    }
+    if (listed && listed.targetSize === started.sizeGiB) return listed;
+    return { state: 'modifying', targetSize: started.sizeGiB, startTime: started.at };
+  }
+
   #cooldown(volumeId: string, retryAfterMs: number, why: string): ComputeError {
     return new ComputeError(
       'RATE_LIMITED',
@@ -846,14 +867,20 @@ export class AwsVolumes implements ProviderVolumes {
         `volume ${volume.id} is ${volume.sizeGiB} GiB; a volume only grows`,
         'shrink',
       );
-    const modification = await this.#modification(volume.id, signal);
+    const modification = await this.#latestModification(volume.id, signal);
     const now = this.context.clock.now();
-    const left = (modification?.startTime ?? -Infinity) + ebsModificationCooldownMs - now;
-    if (modification?.state === 'modifying') {
-      if (modification.targetSize === sizeGiB)
-        return state(volume.id, 'updating', volumeOutputs(volume, region));
-      throw this.#cooldown(volume.id, left, `is being modified to ${modification.targetSize} GiB`);
+    // A failed modification holds nothing here: EBS rolled it back, and its own refusal (if it
+    // still counts one) is RATE_LIMITED below.
+    const live = modification?.state === 'failed' ? undefined : modification;
+    const left = (live?.startTime ?? -Infinity) + ebsModificationCooldownMs - now;
+    if (live?.targetSize === sizeGiB) {
+      // This very resize: under way until EBS optimizes it and DescribeVolumes shows the size.
+      if (live.state !== 'modifying' && volume.sizeGiB >= sizeGiB)
+        return volumeState(volume, region);
+      return state(volume.id, 'updating', volumeOutputs(volume, region));
     }
+    if (live?.state === 'modifying')
+      throw this.#cooldown(volume.id, left, `is being modified to ${live.targetSize} GiB`);
     if (sizeGiB === volume.sizeGiB) return volumeState(volume, region);
     if (volume.status !== 'available' && volume.status !== 'in-use')
       return state(volume.id, 'updating', volumeOutputs(volume, region));
@@ -861,6 +888,10 @@ export class AwsVolumes implements ProviderVolumes {
       throw this.#cooldown(volume.id, left, 'was modified less than six hours ago');
     try {
       await this.deps.call('ModifyVolume', { VolumeId: volume.id, Size: sizeGiB }, signal);
+      const at = this.context.clock.now();
+      for (const [key, entry] of this.#resizing)
+        if (at - entry.at >= this.consistencyWindowMs) this.#resizing.delete(key);
+      this.#resizing.set(volume.id, { sizeGiB, at });
     } catch (error) {
       const code = error instanceof ComputeError ? String(error.details?.code ?? '') : '';
       // EBS's own view of the cooldown (a modification this client did not see).

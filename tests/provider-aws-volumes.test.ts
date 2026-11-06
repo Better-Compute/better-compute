@@ -579,6 +579,58 @@ describe('provider-aws volumes: resize', () => {
     emu.failNext('ModifyVolume', 'IncorrectModificationState');
     await rejects(volumes.resizeVolume(volume.id, 20, call()), 'RATE_LIMITED', 'cooldown');
   });
+
+  it('a retry of its own resize waits while DescribeVolumes still shows the old size', async () => {
+    const { volumes, call, ebs, emu, managed } = world();
+    ebs.sizeShownWhen = 'completed';
+    const volume = ebs.addVolume({ tags: managed, sizeGiB: 10 });
+    expect((await volumes.resizeVolume(volume.id, 20, call())).state).toBe('updating');
+    ebs.tick(); // optimizing; the size still reads 10
+    expect(ebs.modifications[0]!.state).toBe('optimizing');
+    expect((await volumes.resizeVolume(volume.id, 20, call())).state).toBe('updating');
+    ebs.tick(); // completed: 20
+    expect(await volumes.resizeVolume(volume.id, 20, call())).toMatchObject({
+      state: 'ready',
+      outputs: { sizeGiB: '20' },
+    });
+    expect(emu.calls('ModifyVolume')).toHaveLength(1);
+  });
+
+  it('a retry right after ModifyVolume, before EBS lists the modification, starts no second one', async () => {
+    const { volumes, call, ebs, emu, managed } = world();
+    const volume = ebs.addVolume({ tags: managed, sizeGiB: 10 });
+    ebs.hiddenModifications.add(volume.id);
+    expect((await volumes.resizeVolume(volume.id, 20, call())).state).toBe('updating');
+    expect((await volumes.resizeVolume(volume.id, 20, call())).state).toBe('updating');
+    // A larger target in that window waits for the cooldown of the one this client started.
+    const error = (await rejects(
+      volumes.resizeVolume(volume.id, 30, call()),
+      'RATE_LIMITED',
+      'cooldown',
+    )) as { details?: { retryAfterMs?: number } };
+    expect(error.details?.retryAfterMs).toBe(6 * 3_600_000);
+    expect(emu.calls('ModifyVolume')).toHaveLength(1);
+    ebs.hiddenModifications.clear();
+    ebs.tick();
+    expect((await volumes.resizeVolume(volume.id, 20, call())).state).toBe('ready');
+  });
+
+  it('a failed modification is retried: no local cooldown, EBS has the last word', async () => {
+    const { volumes, call, ebs, emu, managed } = world();
+    const volume = ebs.addVolume({ tags: managed, sizeGiB: 10 });
+    await volumes.resizeVolume(volume.id, 20, call());
+    ebs.modifications[0]!.state = 'failed';
+    emu.clock.advance(60_000);
+    // Where EBS lets a failed modification be retried at once, the retry goes through.
+    ebs.failedModificationCoolsDown = false;
+    expect((await volumes.resizeVolume(volume.id, 20, call())).state).toBe('updating');
+    expect(emu.calls('ModifyVolume')).toHaveLength(2);
+    // Where EBS still counts it, its refusal is RATE_LIMITED.
+    ebs.modifications[1]!.state = 'failed';
+    emu.clock.advance(200_000);
+    ebs.failedModificationCoolsDown = true;
+    await rejects(volumes.resizeVolume(volume.id, 20, call()), 'RATE_LIMITED', 'cooldown');
+  });
 });
 
 describe('provider-aws volumes: snapshots and restores', () => {

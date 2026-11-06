@@ -125,6 +125,12 @@ export class EbsEmulator {
   hideFromFilters = new Set<string>();
   /** Volumes whose detach stays `detaching` until a DetachVolume with Force=true. */
   stuckDetach = new Set<string>();
+  /** When DescribeVolumes shows a modification's new size: from `optimizing` (default) or only once `completed`. */
+  sizeShownWhen: 'optimizing' | 'completed' = 'optimizing';
+  /** Volumes whose modifications DescribeVolumesModifications leaves out (a read that lags ModifyVolume). */
+  hiddenModifications = new Set<string>();
+  /** Whether a failed modification still holds the next one for six hours ((verify) A12). */
+  failedModificationCoolsDown = true;
   #next = 0;
 
   constructor(
@@ -208,11 +214,14 @@ export class EbsEmulator {
       }
     }
     for (const modification of this.modifications) {
+      const volume = this.volumes.get(modification.volumeId);
       if (modification.state === 'modifying') {
         modification.state = 'optimizing';
-        const volume = this.volumes.get(modification.volumeId);
+        if (volume && this.sizeShownWhen === 'optimizing') volume.sizeGiB = modification.targetSize;
+      } else if (modification.state === 'optimizing') {
+        modification.state = 'completed';
         if (volume) volume.sizeGiB = modification.targetSize;
-      } else if (modification.state === 'optimizing') modification.state = 'completed';
+      }
     }
     for (const snapshot of this.snapshots.values())
       if (snapshot.state === 'pending') snapshot.state = 'completed';
@@ -402,7 +411,11 @@ export class EbsEmulator {
             'IncorrectModificationState',
             `Volume ${volume.id} is in a modification state that does not allow further modification.`,
           );
-        if (last && this.emu.now() - last.startTime < sixHoursMs)
+        if (
+          last &&
+          (last.state !== 'failed' || this.failedModificationCoolsDown) &&
+          this.emu.now() - last.startTime < sixHoursMs
+        )
           return ec2Error(
             this.cooldownCode,
             "You've reached the maximum modification rate per volume limit. Wait at least 6 hours between modifications per EBS volume.",
@@ -428,7 +441,8 @@ export class EbsEmulator {
         // Like EBS: the latest modification of each volume; a volume never modified is NotFound.
         const latest = new Map<string, EmuModification>();
         for (const m of this.modifications)
-          if (ids.length === 0 || ids.includes(m.volumeId)) latest.set(m.volumeId, m);
+          if ((ids.length === 0 || ids.includes(m.volumeId)) && !this.hiddenModifications.has(m.volumeId))
+            latest.set(m.volumeId, m);
         const missing = ids.find((id) => !latest.has(id));
         if (missing)
           return ec2Error(
