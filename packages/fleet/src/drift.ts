@@ -171,7 +171,9 @@ export async function checkDrift(
     config = { version: 1 };
   }
   const plan = await planAs(tx, tenantId, row.applied_by, config, row.prune);
-  const drifted = plan.calls.length > 0 || plan.blocked;
+  // A deferred change (a cluster waiting for the pool this plan creates) is drift too: no call yet.
+  const drifted =
+    plan.calls.length > 0 || plan.blocked || plan.changes.some((change) => change.deferred);
   const drift: FleetDrift | undefined = drifted
     ? {
         changes: plan.changes.filter((change) => change.action !== 'unchanged' || change.blocked),

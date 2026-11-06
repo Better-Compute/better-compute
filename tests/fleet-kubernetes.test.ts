@@ -1,6 +1,15 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { closeFixtures } from '@better-compute/testing';
-import { fleetModule, type FleetConfig } from '@better-compute/fleet';
+import {
+  fleetCreateKey,
+  fleetModule,
+  type ApplyResult,
+  type FleetChange,
+  type FleetConfig,
+  type FleetKubernetesCluster,
+  type FleetPool,
+  type PlanResult,
+} from '@better-compute/fleet';
 import type { KubernetesClusterView } from '@better-compute/kubernetes';
 import { kubernetesWorld, type KubernetesWorld } from './support/kubernetes-world.js';
 
@@ -150,5 +159,388 @@ describe('fleet.export with Kubernetes clusters', () => {
     const substrate = config.pools?.find((entry) => entry.name === pool.id)?.policy?.substrate;
     expect(substrate).toMatchObject({ account: 'gke-main', kind: 'kubernetes' });
     await world.api.pools.archive(world.root, { tenantId: world.rootTenant, poolId: pool.id });
+  });
+});
+
+const plan = (config: FleetConfig, prune = false): Promise<PlanResult> =>
+  world.api.fleet.plan(world.root, { tenantId: world.rootTenant, config, prune });
+const apply = (config: FleetConfig, extra: Record<string, unknown> = {}): Promise<ApplyResult> =>
+  world.api.fleet.apply(world.root, { tenantId: world.rootTenant, config, ...extra });
+/** The current fleet as a document, with these clusters instead of the ones it has. */
+const withClusters = async (clusters: FleetKubernetesCluster[]): Promise<FleetConfig> => ({
+  ...(await exported()),
+  kubernetesClusters: clusters,
+});
+const system = { name: 'system', machineType: 'e2-standard-4', nodeCount: 1 };
+const gpu = {
+  name: 'gpu',
+  machineType: 'g2-standard-8',
+  nodeCount: 0,
+  autoscaling: { minNodes: 0, maxNodes: 4 },
+  accelerators: { type: 'nvidia-l4', count: 1 },
+};
+const created = (
+  name: string,
+  extra: Record<string, unknown> = {},
+): Promise<KubernetesClusterView> =>
+  world.api.kubernetesClusters.create(
+    world.root,
+    clusterBody({ name, nodePools: [system, gpu], idempotencyKey: `api-${name}`, ...extra }),
+  );
+const changeOf = (result: PlanResult, kind: FleetChange['kind'], name: string) =>
+  result.changes.find((change) => change.kind === kind && change.name === name);
+
+describe('fleet.plan for Kubernetes clusters', () => {
+  it('plans a new cluster as one kubernetesClusters.create with its node pools, keyed per incarnation', async () => {
+    const document = await withClusters([
+      { name: 'training', pool: world.poolId, location: 'us-central1', nodePools: [system, gpu] },
+    ]);
+    const planned = await plan(document);
+    expect(changeOf(planned, 'kubernetesCluster', 'training')).toEqual({
+      kind: 'kubernetesCluster',
+      name: 'training',
+      action: 'create',
+    });
+    expect(changeOf(planned, 'kubernetesNodePool', 'training/gpu')?.action).toBe('create');
+    expect(planned.calls).toEqual([
+      {
+        path: 'kubernetesClusters/create',
+        input: {
+          tenantId: world.rootTenant,
+          poolId: world.poolId,
+          name: 'training',
+          mode: 'standard',
+          location: 'us-central1',
+          nodePools: [system, gpu],
+          idempotencyKey: fleetCreateKey(world.rootTenant, 'kubernetesCluster', 'training', 0),
+        },
+      },
+    ]);
+    expect(planned.blocked).toBe(false);
+
+    // Once a cluster of that name existed and was deleted, a new one gets a fresh key.
+    await created('training');
+    await world.fixture.database.query(
+      `UPDATE kubernetes_clusters SET state = 'deleted', desired_state = 'deleted' WHERE name = 'training'`,
+    );
+    expect((await plan(document)).calls[0]?.input.idempotencyKey).toBe(
+      fleetCreateKey(world.rootTenant, 'kubernetesCluster', 'training', 1),
+    );
+    // A long tenant id or name still makes a key the module takes (at most 128 characters).
+    expect(fleetCreateKey('t'.repeat(128), 'kubernetesNodePool', 'gpu', 3)).toMatch(
+      /^fleet:[0-9a-f]{64}:3$/,
+    );
+  });
+
+  it('plans nothing for its own export, and updates in place what can change', async () => {
+    const cluster = await created('training', { authorizedNetworks: ['203.0.113.0/24'] });
+    const document = await exported();
+    expect((await plan(document)).calls).toEqual([]);
+    expect(changeOf(await plan(document), 'kubernetesCluster', 'training')?.action).toBe(
+      'unchanged',
+    );
+
+    const next = structuredClone(document);
+    const wanted = next.kubernetesClusters![0]!;
+    wanted.releaseChannel = 'stable';
+    wanted.authorizedNetworks = ['198.51.100.0/24'];
+    wanted.description = 'GPU training';
+    const pools = wanted.nodePools!;
+    pools.find((pool) => pool.name === 'system')!.nodeCount = 3;
+    delete pools.find((pool) => pool.name === 'gpu')!.autoscaling;
+    pools.push({ name: 'batch', machineType: 'e2-standard-8', nodeCount: 2, spot: false });
+    const planned = await plan(next);
+    expect(changeOf(planned, 'kubernetesCluster', 'training')).toEqual({
+      kind: 'kubernetesCluster',
+      name: 'training',
+      action: 'update',
+      fields: ['releaseChannel', 'authorizedNetworks', 'description'],
+    });
+    expect(changeOf(planned, 'kubernetesNodePool', 'training/system')).toMatchObject({
+      action: 'update',
+      fields: ['nodeCount'],
+    });
+    expect(changeOf(planned, 'kubernetesNodePool', 'training/gpu')).toMatchObject({
+      action: 'update',
+      fields: ['autoscaling'],
+    });
+    const nodePoolId = (name: string) => cluster.nodePools.find((pool) => pool.name === name)!.id;
+    expect(planned.calls).toEqual(
+      expect.arrayContaining([
+        {
+          path: 'kubernetesClusters/update',
+          input: {
+            tenantId: world.rootTenant,
+            clusterId: cluster.id,
+            releaseChannel: 'stable',
+            authorizedNetworks: ['198.51.100.0/24'],
+            description: 'GPU training',
+          },
+        },
+        {
+          path: 'kubernetesNodePools/update',
+          input: {
+            tenantId: world.rootTenant,
+            clusterId: cluster.id,
+            nodePoolId: nodePoolId('system'),
+            nodeCount: 3,
+          },
+        },
+        {
+          path: 'kubernetesNodePools/update',
+          input: {
+            tenantId: world.rootTenant,
+            clusterId: cluster.id,
+            nodePoolId: nodePoolId('gpu'),
+            autoscaling: null,
+          },
+        },
+        {
+          path: 'kubernetesNodePools/create',
+          input: {
+            tenantId: world.rootTenant,
+            clusterId: cluster.id,
+            name: 'batch',
+            machineType: 'e2-standard-8',
+            nodeCount: 2,
+            idempotencyKey: fleetCreateKey(world.rootTenant, 'kubernetesNodePool', 'batch', 0),
+          },
+        },
+      ]),
+    );
+    expect(planned.calls).toHaveLength(4);
+
+    // Applied through the composite envelope: every call checked for the caller, then run at once.
+    const applied = await apply(next, { planHash: planned.planHash });
+    expect(applied.applied).toBe(4);
+    expect((await plan(next)).calls).toEqual([]);
+    const after = await world.api.kubernetesClusters.get(world.root, {
+      tenantId: world.rootTenant,
+      clusterId: cluster.id,
+    });
+    expect(after).toMatchObject({ releaseChannel: 'stable', description: 'GPU training' });
+    expect(after.nodePools.map((pool: { name: string }) => pool.name).sort()).toEqual([
+      'batch',
+      'gpu',
+      'system',
+    ]);
+  });
+
+  it('blocks what cannot change, a cluster being deleted, an unknown pool and a taken name', async () => {
+    const cluster = await created('training');
+    const document = await exported();
+    const variant = (change: (cluster: FleetKubernetesCluster) => void) => {
+      const next = structuredClone(document);
+      change(next.kubernetesClusters![0]!);
+      return plan(next);
+    };
+    const moved = await variant((wanted) => (wanted.location = 'europe-west4'));
+    expect(moved.blocked).toBe(true);
+    expect(changeOf(moved, 'kubernetesCluster', 'training')).toMatchObject({
+      action: 'update',
+      fields: ['location'],
+      blocked: 'location cannot change; create a cluster under another name',
+    });
+    const autopilot = await variant((wanted) => {
+      wanted.mode = 'autopilot';
+      delete wanted.nodePools;
+    });
+    expect(changeOf(autopilot, 'kubernetesCluster', 'training')?.fields).toEqual(['mode']);
+    const resized = await variant((wanted) => {
+      wanted.nodePools!.find((pool) => pool.name === 'system')!.machineType = 'e2-standard-8';
+    });
+    expect(changeOf(resized, 'kubernetesNodePool', 'training/system')).toMatchObject({
+      fields: ['machineType'],
+      blocked: 'machineType cannot change; add a node pool under another name',
+    });
+    const ghost = await variant((wanted) => (wanted.pool = 'ghost'));
+    expect(changeOf(ghost, 'kubernetesCluster', 'training')?.blocked).toBe('unknown pool ghost');
+    // Fail closed: a blocked plan is refused whole.
+    await expect(
+      apply(
+        structuredClone({
+          ...document,
+          kubernetesClusters: [{ ...document.kubernetesClusters![0]!, location: 'europe-west4' }],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_STATE' });
+
+    await world.api.kubernetesClusters.delete(world.root, {
+      tenantId: world.rootTenant,
+      clusterId: cluster.id,
+    });
+    expect(changeOf(await plan(document), 'kubernetesCluster', 'training')?.blocked).toMatch(
+      /being deleted/,
+    );
+
+    // A substrate's cluster is its pool's: its name is taken.
+    const other = await created('substrate');
+    await world.fixture.database.query(
+      `UPDATE kubernetes_clusters SET substrate_pool_id = pool_id WHERE id = $1`,
+      [other.id],
+    );
+    const taken = await plan(
+      await withClusters([
+        { name: 'substrate', pool: world.poolId, location: 'us-central1', nodePools: [system] },
+      ]),
+    );
+    expect(changeOf(taken, 'kubernetesCluster', 'substrate')?.blocked).toBe(
+      `the name is taken by the substrate cluster of pool ${world.poolId}`,
+    );
+  });
+
+  it('prunes node pools, then clusters, before pools are archived; an account a cluster uses is kept', async () => {
+    const cluster = await created('training');
+    const document = await exported();
+    const withoutGpu = structuredClone(document);
+    withoutGpu.kubernetesClusters![0]!.nodePools = [system];
+    expect((await plan(withoutGpu)).calls).toEqual([]);
+    const pruned = await plan(withoutGpu, true);
+    expect(changeOf(pruned, 'kubernetesNodePool', 'training/gpu')?.action).toBe('delete');
+    expect(pruned.calls).toEqual([
+      {
+        path: 'kubernetesNodePools/delete',
+        input: {
+          tenantId: world.rootTenant,
+          clusterId: cluster.id,
+          nodePoolId: cluster.nodePools.find((pool) => pool.name === 'gpu')!.id,
+        },
+      },
+    ]);
+
+    // Everything gone from the document: the cluster is deleted before its pool is archived, and
+    // the account stays until the provider deleted the cluster.
+    const empty = await plan({ version: 1 }, true);
+    const paths = empty.calls.map((call) => call.path);
+    expect(paths.indexOf('kubernetesClusters/delete')).toBeLessThan(paths.indexOf('pools/archive'));
+    expect(changeOf(empty, 'providerAccount', 'gke-main')).toMatchObject({
+      action: 'unchanged',
+      note: 'kept: cluster training uses it until it is deleted; apply again then',
+    });
+
+    const noCluster = { ...document, kubernetesClusters: [] };
+    await apply(noCluster, { prune: true });
+    expect(
+      (
+        await world.api.kubernetesClusters.get(world.root, {
+          tenantId: world.rootTenant,
+          clusterId: cluster.id,
+        })
+      ).state,
+    ).toBe('deleting');
+    // A cluster on its way out is not deleted again.
+    expect((await plan(noCluster, true)).calls).toEqual([]);
+  });
+
+  it('defers a cluster on a pool the same plan creates, and reports it as drift until then', async () => {
+    const document = await exported();
+    const next: FleetConfig = {
+      ...document,
+      pools: [
+        ...(document.pools ?? []),
+        { name: 'gke-two', site: world.siteId, class: 'provider', providerAccount: 'gke-main' },
+      ],
+      kubernetesClusters: [
+        { name: 'later', pool: 'gke-two', location: 'us-central1', nodePools: [system] },
+      ],
+    };
+    const planned = await plan(next);
+    expect(planned.blocked).toBe(false);
+    expect(changeOf(planned, 'kubernetesCluster', 'later')).toMatchObject({
+      action: 'create',
+      deferred: true,
+    });
+    expect(planned.calls.map((call) => call.path)).toEqual(['pools/create']);
+    await apply(next);
+    const status = await world.api.fleet.status(world.root, { tenantId: world.rootTenant });
+    expect(status.applied).toBeDefined();
+    // The pool exists now: the next plan creates the cluster on it.
+    const again = await plan(next);
+    expect(again.calls.map((call) => call.path)).toEqual(['kubernetesClusters/create']);
+    const poolId = (await exported()).pools!.find((pool) => pool.name === 'gke-two');
+    expect(poolId).toBeDefined();
+    await apply({ ...next, pools: document.pools, kubernetesClusters: [] }, { prune: true });
+  });
+});
+
+describe('pool substrates in the document', () => {
+  const substratePool = (extra: Record<string, unknown> = {}): FleetPool => ({
+    name: 'gpu-substrate',
+    site: world.siteId,
+    class: 'vps-host',
+    policy: {
+      kubernetes: {},
+      substrate: {
+        kind: 'kubernetes',
+        account: 'gke-main',
+        cluster: { create: { location: 'us-central1' } },
+        flavors: [{ name: 'gpu', machineType: 'g2-standard-8', nodes: 1 }],
+        ...extra,
+      },
+    },
+  });
+  const withPool = async (pool: FleetPool): Promise<FleetConfig> => {
+    const document = await exported();
+    return {
+      ...document,
+      pools: [...(document.pools ?? []).filter((item) => item.name !== pool.name), pool],
+    };
+  };
+
+  it('resolves the account by name, round-trips, and blocks moving the substrate', async () => {
+    const document = await withPool(substratePool());
+    const planned = await plan(document);
+    const create = planned.calls.find((call) => call.path === 'pools/create')!;
+    expect((create.input.policy as { substrate: { account: string } }).substrate.account).toBe(
+      world.accountId,
+    );
+    await apply(document);
+    expect((await plan(document)).calls).toEqual([]);
+    const exportedPool = (await exported()).pools!.find((pool) => pool.name === 'gpu-substrate')!;
+    expect((exportedPool.policy!.substrate as { account: string }).account).toBe('gke-main');
+    expect((await plan(await exported())).calls).toEqual([]);
+
+    // Sizing changes in place; the account or the cluster's place never does (K-D8).
+    const resized = await plan(
+      await withPool(
+        substratePool({ flavors: [{ name: 'gpu', machineType: 'g2-standard-8', nodes: 3 }] }),
+      ),
+    );
+    expect(changeOf(resized, 'pool', 'gpu-substrate')).toMatchObject({
+      action: 'update',
+      fields: ['policy'],
+    });
+    const moved = await plan(
+      await withPool(substratePool({ cluster: { create: { location: 'europe-west4' } } })),
+    );
+    expect(changeOf(moved, 'pool', 'gpu-substrate')).toMatchObject({
+      blocked: 'policy.substrate (account, cluster) cannot change; create a new pool',
+    });
+    const unknown = await plan(await withPool(substratePool({ account: 'nobody' })));
+    expect(changeOf(unknown, 'pool', 'gpu-substrate')?.blocked).toBe(
+      'unknown provider account nobody (policy.substrate.account)',
+    );
+
+    // Archiving tears the substrate down; the account it runs on is kept while the document keeps it.
+    const archived = await plan(
+      {
+        ...(await exported()),
+        pools: (await exported()).pools!.filter((pool) => pool.name !== 'gpu-substrate'),
+      },
+      true,
+    );
+    expect(changeOf(archived, 'pool', 'gpu-substrate')?.note).toMatch(/substrate is torn down/);
+    const keepAccount = await plan({ version: 1, pools: [substratePool()] }, true);
+    expect(changeOf(keepAccount, 'providerAccount', 'gke-main')).toMatchObject({
+      action: 'unchanged',
+      note: 'kept: the substrate of pool gpu-substrate uses it',
+    });
+    await apply(
+      {
+        ...(await exported()),
+        pools: (await exported()).pools!.filter((pool) => pool.name !== 'gpu-substrate'),
+      },
+      { prune: true },
+    );
   });
 });

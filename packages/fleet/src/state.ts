@@ -49,7 +49,7 @@ export interface FleetState {
    */
   kubernetesClusters: FleetStateCluster[];
   /** Live clusters of pool substrates, by row name: their names are taken. */
-  substrateClusters: { name: string; poolId: string }[];
+  substrateClusters: { name: string; poolId: string; providerAccountId: string }[];
   /** How many clusters of each name the tenant ever had (deleted ones too): fleet's create keys count them. */
   clusterIncarnations: Record<string, number>;
   /** Tables of modules this deployment does not run (vps: flavors, provider accounts, sandbox templates; kubernetes). */
@@ -70,6 +70,7 @@ export type FleetStateCluster = Required<
   Omit<FleetKubernetesCluster, 'nodePools'> & {
     id: string;
     poolId: string;
+    providerAccountId: string;
     privateNodes: boolean;
     state: string;
     /** Being deleted (`kubernetesClusters.delete`): its name is still taken until it is gone. */
@@ -338,6 +339,7 @@ export async function readFleetState(tx: SqlTx, tenantId: string): Promise<Fleet
 interface ClusterRow {
   id: string;
   pool_id: string;
+  provider_account_id: string;
   project_id: string | null;
   network_id: string | null;
   name: string;
@@ -382,7 +384,7 @@ async function readClusters(
   // substrate_pool_id and adopted through to_jsonb: absent before kubernetes/0002.
   const rows = (
     await tx.query<ClusterRow>(
-      `SELECT id, pool_id, project_id, network_id, name, description, mode, location, release_channel,
+      `SELECT id, pool_id, provider_account_id, project_id, network_id, name, description, mode, location, release_channel,
               requested_version, authorized_networks, private_nodes, state, desired_state,
               to_jsonb(k)->>'substrate_pool_id' AS substrate_pool_id,
               coalesce((to_jsonb(k)->>'adopted')::bool, false) AS adopted
@@ -400,7 +402,11 @@ async function readClusters(
     clusterIncarnations[row.name] = Number(row.count);
   const substrateClusters = rows
     .filter((row) => row.substrate_pool_id !== null || row.adopted)
-    .map((row) => ({ name: row.name, poolId: row.substrate_pool_id ?? row.pool_id }));
+    .map((row) => ({
+      name: row.name,
+      poolId: row.substrate_pool_id ?? row.pool_id,
+      providerAccountId: row.provider_account_id,
+    }));
   const owned = rows.filter((row) => row.substrate_pool_id === null && !row.adopted);
   const clusterIds = owned.map((row) => row.id);
   const nodePools = (
@@ -430,6 +436,7 @@ async function readClusters(
     return {
       id: row.id,
       poolId: row.pool_id,
+      providerAccountId: row.provider_account_id,
       name: row.name,
       // Offered pools are not the tenant's, so they are named by id.
       pool: poolName.get(row.pool_id) ?? row.pool_id,
