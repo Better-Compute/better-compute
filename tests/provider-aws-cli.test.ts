@@ -63,12 +63,13 @@ describe('provider-aws CLI policies', () => {
     const tagging = policy.Statement.filter((s) =>
       actionsOf(s).some((a) => a === 'ec2:CreateTags' || a === 'ec2:DeleteTags'),
     );
-    expect(tagging.length).toBe(2);
+    expect(tagging.length).toBe(3);
     for (const statement of tagging) {
       const onCreate = statement.Condition?.StringEquals?.['ec2:CreateAction'];
       const keys = statement.Condition?.['ForAllValues:StringEquals']?.['aws:TagKeys'];
       expect(
         onCreate === 'RunInstances' ||
+          JSON.stringify(onCreate) === JSON.stringify(['CreateVolume', 'CreateSnapshot']) ||
           JSON.stringify(keys) ===
             JSON.stringify(['better-compute:instance', 'better-compute:managed']),
       ).toBe(true);
@@ -147,6 +148,78 @@ describe('provider-aws CLI policies', () => {
       expect(() => iamPolicy({ kmsKeyArn: bad })).toThrow(
         expect.objectContaining({ code: 'INVALID_INPUT' }),
       );
+  });
+
+  it('EBS actions are tag-scoped (A5)', () => {
+    const policy = iamPolicy({ region: 'us-east-1', account: '222222222222' });
+    const byAction = (action: string) =>
+      policy.Statement.filter((s) => actionsOf(s).includes(action));
+    const describe = policy.Statement.find((s) => s.Sid === 'Describe')!;
+    expect(actionsOf(describe)).toEqual(
+      expect.arrayContaining([
+        'ec2:DescribeVolumes',
+        'ec2:DescribeSnapshots',
+        'ec2:DescribeVolumesModifications',
+      ]),
+    );
+    const volumes = 'arn:aws:ec2:us-east-1:222222222222:volume/*';
+    const snapshots = 'arn:aws:ec2:us-east-1::snapshot/*';
+    const instances = 'arn:aws:ec2:us-east-1:222222222222:instance/*';
+    // Creating a volume or snapshot must tag it managed; a restore reads only managed snapshots.
+    const create = byAction('ec2:CreateVolume');
+    expect(create.map((s) => [s.Resource, s.Condition])).toEqual([
+      [volumes, { StringEquals: { 'aws:RequestTag/better-compute:managed': 'true' } }],
+      [snapshots, { StringEquals: { 'ec2:ResourceTag/better-compute:managed': 'true' } }],
+    ]);
+    const snap = byAction('ec2:CreateSnapshot');
+    expect(snap.map((s) => [s.Resource, s.Condition])).toEqual(
+      expect.arrayContaining([
+        [snapshots, { StringEquals: { 'aws:RequestTag/better-compute:managed': 'true' } }],
+        [volumes, { StringEquals: { 'ec2:ResourceTag/better-compute:managed': 'true' } }],
+      ]),
+    );
+    // Every change to an existing volume needs it managed; attach/detach need a claimed instance.
+    for (const action of [
+      'ec2:AttachVolume',
+      'ec2:DetachVolume',
+      'ec2:ModifyVolume',
+      'ec2:DeleteVolume',
+    ]) {
+      const statements = byAction(action);
+      const onVolumes = statements.filter((s) => s.Resource === volumes);
+      expect(onVolumes, action).toHaveLength(1);
+      expect(
+        onVolumes[0]!.Condition?.StringEquals?.['ec2:ResourceTag/better-compute:managed'],
+      ).toBe('true');
+      for (const statement of statements) expect(statement.Condition, action).toBeDefined();
+    }
+    for (const action of ['ec2:AttachVolume', 'ec2:DetachVolume']) {
+      const onInstances = byAction(action).filter((s) => s.Resource === instances);
+      expect(onInstances).toHaveLength(1);
+      expect(onInstances[0]!.Condition?.Null?.['ec2:ResourceTag/better-compute:instance']).toBe(
+        'false',
+      );
+    }
+    const deleteSnapshot = byAction('ec2:DeleteSnapshot');
+    expect(deleteSnapshot.map((s) => [s.Resource, s.Condition])).toEqual([
+      [snapshots, { StringEquals: { 'ec2:ResourceTag/better-compute:managed': 'true' } }],
+    ]);
+    // Without volumes, none of it.
+    const ebs = [
+      'ec2:CreateVolume',
+      'ec2:AttachVolume',
+      'ec2:DetachVolume',
+      'ec2:ModifyVolume',
+      'ec2:DeleteVolume',
+      'ec2:CreateSnapshot',
+      'ec2:DeleteSnapshot',
+      'ec2:DescribeVolumes',
+      'ec2:DescribeSnapshots',
+      'ec2:DescribeVolumesModifications',
+    ];
+    const bare = iamPolicy({ volumes: false }).Statement.flatMap(actionsOf);
+    expect(bare.filter((action) => ebs.includes(action))).toEqual([]);
+    expect(iamPolicy().Statement.flatMap(actionsOf)).toEqual(expect.arrayContaining(ebs));
   });
 
   it('partition flows into ARNs', () => {
