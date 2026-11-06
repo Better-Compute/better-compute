@@ -113,6 +113,25 @@ Provider errors become a `ProviderError` condition and are retried. A machine th
 the instance `lost`. User data carries only the tenant's keys or the tenant's own cloud-init. No
 join token ever goes into tenant-readable user data.
 
+#### Provider events (`vps.provider-events`)
+
+An account whose client has `pollEvents` (an EC2 account's EventBridge → SQS intake) is polled every
+15 s (`vps({ events: { every, waitMs, budgetMs } })`). The long poll runs outside any transaction;
+a batch is handled in one transaction and acked only after it commits. Event ids are kept 24 h in
+`provider_event_seen`, so a redelivered event is processed once. Events never write machine state:
+
+| Event | Effect |
+|---|---|
+| `machine-changed`, `api-call` | The instance's reconcile is enqueued now. |
+| `interruption-warning` | `InterruptionPending` condition and `instance.interruption { deadline }`. When the machine backs a node (a joined provider bootstrap), the node's reservations get the spot notice up to the deadline (cut back, or re-queued when not started) and the node the NoSchedule taint `<provider>.spot/interruption` (`node.tainted`). |
+| `rebalance-recommended` | `RebalanceRecommended` condition and `instance.rebalance-recommended`. |
+| `maintenance-scheduled` | `MaintenanceScheduled` condition (cleared when the event completes or is canceled) and `instance.maintenance`. |
+| `reservation-changed` | The account's `vps.reservations` scan is enqueued. |
+| `health` | `instance.health`. |
+
+Machines that are not a live instance or joined node are ignored. Without intake, polling alone
+converges as before.
+
 ## Sandboxes (§3.7, v0.5)
 
 A sandbox is a hosted instance with a template, a lifetime and a fast start. It has no placement or

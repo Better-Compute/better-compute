@@ -36,6 +36,8 @@ One provider account is one AWS account in one region. A fleet in several region
 | `metadataHopLimit`  | `1`        | The IMDSv2 hop limit (2 when containers on the instance need IMDS).                                                                             |
 | `associatePublicIp` | `true`     | Give instances a public IPv4 address (with a subnet).                                                                                           |
 | `discoverTag`       | –          | `key=value`: discovery yields only instances carrying this tag.                                                                                 |
+| `eventQueueUrl`     | –          | The SQS intake queue the account's EventBridge rules feed (`aws event-rules`), in this account and region. See [Events](#events).               |
+| `eventSources`      | `aws.ec2`, `aws.health` | The EventBridge sources taken from the queue; `aws.guardduty` is opt-in. Anything else is dropped.                                       |
 
 `awsConfig.parse` checks field shapes (`INVALID_INPUT`); the provider checks the region, that every zone is in it, and the role ARN's shape and partition (`INVALID_CONFIG`), so `providerAccounts.create` refuses a bad account before it is stored.
 
@@ -111,13 +113,33 @@ EC2 takes at most 16 384 bytes of user data. With SSH keys, the user data is a M
 
 `discover` yields every instance that is not terminated (only those tagged `discoverTag`, when set). `claim` writes `better-compute:instance` (and `better-compute:managed` when deletion is handed over) and re-reads: EC2 tags have no compare-and-swap, so a re-read naming another instance is a lost race (`CONFLICT`). Tag reads lag behind writes too: a re-read that does not show the tag (or `managed`) yet is `UNAVAILABLE` (reason `tag-propagation`, retried), and so is a `delete` right after a managed claim that does not see `managed` yet. The vps unique index on the external id referees between control planes. `release` removes the tags only when they name the instance. Deleting an attached instance detaches it by default and leaves it running.
 
+## Events
+
+`pollEvents` is the account's event intake (A4, AD12), read by vps's `vps.provider-events` worker. With `eventQueueUrl`, it long-polls the queue (`ReceiveMessage`, at most 10 messages, `WaitTimeSeconds` at most 10) and maps EventBridge envelopes:
+
+| `detail-type`                                                     | Event                                                     |
+| ----------------------------------------------------------------- | --------------------------------------------------------- |
+| `EC2 Instance State-change Notification`                          | `machine-changed`                                         |
+| `EC2 Spot Instance Interruption Warning`                          | `interruption-warning`, deadline = event time + 2 minutes |
+| `EC2 Instance Rebalance Recommendation`                           | `rebalance-recommended`                                   |
+| `AWS Health Event` (service `EC2`, naming instances)              | `maintenance-scheduled` per instance, deadline = `startTime` |
+| Capacity Reservation, Capacity Block and ODCR types (by name)     | `reservation-changed`                                     |
+| `AWS API Call via CloudTrail` (succeeded EC2 instance calls)      | `api-call` per instance                                   |
+| `GuardDuty Finding` (when `aws.guardduty` is allowed)             | `health`                                                  |
+
+An envelope counts only when its `account` is the account's verified AWS id, its `region` the account's region and its `source` allowed. Everything else (and anything malformed) is dropped, with counts logged and no message content, and deleted with the batch, so a forged message is read once and never loops. Messages are deleted (`DeleteMessageBatch`) only when vps calls the batch's `ack()`, after its transaction commits; a queue in another AWS account than the identity is `INVALID_CONFIG`. Events only wake reconcilers early: polling stays the source of truth, so a forged event can at worst cause a harmless re-read. The Capacity Reservation detail-type names are matched by pattern until they are verified against AWS.
+
+Without a queue, `pollEvents` reads scheduled events with `DescribeInstanceStatus` at most every 5 minutes and reports each as `maintenance-scheduled`; the event id carries its status, so a completed or canceled event is new.
+
+`better-compute aws event-rules --queue-name <name> --account <id>` prints the CloudFormation stack to deploy in the account: the queue and its dead-letter queue (SSE-SQS, 14-day retention), the EventBridge rules (`--api-calls` adds CloudTrail EC2 calls, `--guardduty` GuardDuty findings), and a queue policy that lets only `events.amazonaws.com` send, only from those rule ARNs in the account, only over TLS. Its `QueueUrl` output is `eventQueueUrl`. `aws iam-policy` includes `ec2:DescribeInstanceStatus`, and `--event-queue <name>` adds `sqs:ReceiveMessage` and `sqs:DeleteMessage` on the queue. Add `awsEventRulesCommand()` to the CLI configuration next to the policy commands.
+
 ## What comes next
 
-Networks (A2), capacity reservations, Capacity Blocks, Spot and prices (A3), event intake and Spot interruptions (A4), EBS volumes (A5), EC2 hosts joining as bcd nodes (A6), workload roles (A7), EKS (A9), placement groups and EFA (A10), and costs (A11), per `docs/superpowers/plans/2026-10-18-aws-integration-program.md`.
+Networks (A2), capacity reservations, Capacity Blocks, Spot and prices (A3), EBS volumes (A5), EC2 hosts joining as bcd nodes (A6), workload roles (A7), EKS (A9), placement groups and EFA (A10), and costs (A11), per `docs/superpowers/plans/2026-10-18-aws-integration-program.md`.
 
 ## Testing
 
-`tests/support/aws-emulator` emulates STS, IMDS and EC2 in process through `fetch`. `tests/provider-aws*.test.ts` cover the config, credentials, offers, compute, attach, the CLI policies and the `providerConformanceCases()` suite; `tests/aws-end-to-end.test.ts` drives the provider through vps on PGlite. No test calls AWS.
+`tests/support/aws-emulator` emulates STS, IMDS, EC2 and the SQS intake queue in process through `fetch`. `tests/provider-aws*.test.ts` cover the config, credentials, offers, compute, attach, the CLI policies and the `providerConformanceCases()` suite; `tests/aws-end-to-end.test.ts` and `tests/aws-events-end-to-end.test.ts` (interruptions, forged events) drive the provider through vps on PGlite. No test calls AWS.
 
 ## License
 
