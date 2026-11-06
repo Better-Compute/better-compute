@@ -154,13 +154,28 @@ export const claimCommand = [
   `( set -C; printf '%s\\n' "$CLAIM" > ${bareMetalClaimPath} ) 2>/dev/null || true`,
   `cat ${bareMetalClaimPath}`,
 ].join('; ');
-/** Stops bcd and removes the claim, if it still is the one on stdin. */
+/**
+ * What a release removes besides the claim: bcd's binary, units, configuration and state (its node
+ * identity among them), so the next claim's bcd joins as a new node and inherits nothing. The OS
+ * and anything outside these stays: DigitalOcean has no API to reinstall a Bare Metal machine.
+ */
+export const bareMetalBcdPaths = [
+  '/usr/local/bin/bcd',
+  '/usr/local/bin/bcd.new',
+  '/etc/systemd/system/bcd.service',
+  '/etc/systemd/system/bcd-join.service',
+  '/etc/bcd',
+  '/var/lib/bcd',
+] as const;
+/** Stops bcd, removes its install and the claim, if the claim still is the one on stdin. */
 export const releaseCommand = [
   'set -eu',
   'IFS= read -r CLAIM',
   `[ "$(cat ${bareMetalClaimPath} 2>/dev/null || true)" = "$CLAIM" ] || exit 3`,
   'systemctl disable --now bcd.service bcd-join.service 2>/dev/null || true',
-  `rm -f ${bareMetalJoinTokenPath} ${bareMetalClaimPath}`,
+  `rm -rf ${bareMetalJoinTokenPath} ${bareMetalBcdPaths.join(' ')}`,
+  'systemctl daemon-reload 2>/dev/null || true',
+  `rm -f ${bareMetalClaimPath}`,
 ].join('; ');
 export const productUuidCommand = 'cat /sys/class/dmi/id/product_uuid';
 export const writeTokenCommand = `umask 077 && mkdir -p /etc/bcd && cat > ${bareMetalJoinTokenPath}`;

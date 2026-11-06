@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { isComputeError, manualClock, type ComputeError } from '@better-compute/core';
 import {
+  bareMetalBcdPaths,
   bareMetalClaim,
   bareMetalClaimPath,
   bareMetalJoinTokenPath,
@@ -270,6 +271,15 @@ describe('digitaloceanMetal', () => {
     const refused = await failure(compute.delete('bm-h100-2', call()));
     expect([refused.code, refused.details?.reason]).toEqual(['INVALID_STATE', 'notManaged']);
     expect(hosts.get('198.51.100.11')!.files.get(bareMetalClaimPath)).toBe('manual-use\n');
+  });
+
+  it("a release removes bcd's install and state, and the claim last", () => {
+    for (const path of bareMetalBcdPaths) expect(releaseCommand).toContain(path);
+    expect(releaseCommand).toContain('/var/lib/bcd');
+    expect(releaseCommand.lastIndexOf(bareMetalClaimPath)).toBeGreaterThan(
+      releaseCommand.lastIndexOf('/var/lib/bcd'),
+    );
+    expect(releaseCommand.trimEnd().endsWith(`rm -f ${bareMetalClaimPath}`)).toBe(true);
   });
 
   it('only a reboot is a power action, and only on a claimed machine', async () => {
