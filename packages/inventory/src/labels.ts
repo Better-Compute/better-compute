@@ -1,5 +1,5 @@
 import type { Condition, Label } from '@better-compute/core';
-import type { GpusSection } from '@better-compute/protocol';
+import type { CloudSection, GpusSection } from '@better-compute/protocol';
 import type { NodeConditionType } from './conditions.js';
 import { bytesToGiB } from './devices.js';
 import { normalizeGpuProduct } from './gpu-models.js';
@@ -35,6 +35,15 @@ export const inventoryLabelKeys = [
   'os.distro',
   'os.kernel',
   'kvm.available',
+  // (AWS A6) The cloud instance the node is, from bcd's "cloud" section: selectors such as
+  // `cloud.lifecycle = on-demand` or `efa.count > 0`.
+  'cloud.provider',
+  'cloud.instance-type',
+  'cloud.region',
+  'cloud.zone',
+  'cloud.zone-id',
+  'cloud.lifecycle',
+  'efa.count',
 ] as const;
 export type InventoryLabelKey = (typeof inventoryLabelKeys)[number];
 
@@ -101,11 +110,49 @@ function gpuLabels(section: GpusSection | undefined, labels: Map<string, string>
   if (domain) labels.set('fabric.domain', domain);
 }
 
+/** Sets the cloud.* labels and the EFA count of a "cloud" section; a field the metadata left empty is absent. */
+function setCloudLabels(section: CloudSection | undefined, labels: Map<string, string>): void {
+  if (!section) return;
+  const fields: [string, string][] = [
+    ['cloud.provider', section.provider],
+    ['cloud.instance-type', section.instanceType],
+    ['cloud.region', section.region],
+    ['cloud.zone', section.zone],
+    ['cloud.zone-id', section.zoneId],
+    ['cloud.lifecycle', section.lifecycle],
+  ];
+  for (const [key, value] of fields) if (value) labels.set(key, value);
+  labels.set('efa.count', String(section.efaDevices));
+}
+
+const sortedLabels = (labels: Map<string, string>): Label[] =>
+  [...labels]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, value]) => ({ key, value, source: 'inventory' as const }));
+
+/**
+ * The labels of a "cloud" inventory section (AWS A6), sorted by key: `cloud.provider`,
+ * `cloud.instance-type`, `cloud.region`, `cloud.zone`, `cloud.zone-id`, `cloud.lifecycle`
+ * (`on-demand`, `spot`, `capacity-block`) when the metadata says them, and `efa.count`.
+ */
+export function cloudLabels(section: CloudSection | undefined): Label[] {
+  const labels = new Map<string, string>();
+  setCloudLabels(section, labels);
+  return sortedLabels(labels);
+}
+
+/**
+ * The sections `inventoryLabels` reads. `cloud` is listed until the control plane registers the
+ * "cloud" section (INVENTORY_SECTIONS, the node_inventory_sections CHECK; the AWS A6 TypeScript
+ * half), from when `InventorySections` carries it itself and its labels follow without a change here.
+ */
+export type LabelSections = InventorySections & { cloud?: CloudSection };
+
 /**
  * The inventory-sourced labels of a node, sorted by key. A label whose GPUs disagree is `mixed`;
  * a label without data is absent. Values are strings, as node labels are.
  */
-export function inventoryLabels(sections: InventorySections): Label[] {
+export function inventoryLabels(sections: LabelSections): Label[] {
   const labels = new Map<string, string>();
   if (sections.gpus !== undefined || sections.system !== undefined) gpuLabels(sections.gpus, labels);
   if (sections.cpu?.architecture) labels.set('cpu.arch', sections.cpu.architecture);
@@ -131,9 +178,8 @@ export function inventoryLabels(sections: InventorySections): Label[] {
   if (sections.os?.distro) labels.set('os.distro', sections.os.distro);
   if (sections.os?.kernel) labels.set('os.kernel', sections.os.kernel);
   if (sections.os) labels.set('kvm.available', String(sections.os.kvm));
-  return [...labels]
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([key, value]) => ({ key, value, source: 'inventory' as const }));
+  setCloudLabels(sections.cloud, labels);
+  return sortedLabels(labels);
 }
 
 /** What the node is expected to hold: a join token's `expect`, or the pool's hardware profile. */
