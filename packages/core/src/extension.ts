@@ -855,6 +855,14 @@ export interface ProviderResourceKind {
    * caller refuses the second (`CONFLICT`, `reason 'identity'`). Absent or undefined: each resource is its own.
    */
   identity?(spec: unknown): string | undefined;
+  /**
+   * (Pure, no I/O.) The better-compute instance ids the spec names (a database's trusted instances). The caller
+   * refuses an id that is not a live instance of the resource's tenant on the same provider account (`INVALID_INPUT`,
+   * `reason 'instance'`) before it records the resource or the change; the provider maps each to its own handle (on
+   * DigitalOcean the Droplet's instance tag). Unlike raw machine ids or tags, they never reach another tenant's
+   * machines, so they are not account-wide.
+   */
+  instances?(spec: unknown): readonly string[];
 }
 
 /** (cloud-resources) What `ProviderResources.ensure` is asked for. */

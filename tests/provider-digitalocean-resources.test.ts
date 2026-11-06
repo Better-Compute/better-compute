@@ -482,7 +482,10 @@ describe('what lives in a cluster', () => {
       ctx(),
     );
     expect(mutations(emu, 'PUT', /\/firewall$/)).toHaveLength(1);
-    expect((await resources.get('do.database.pg.firewall', state.id, ctx()))!.spec).toEqual(spec);
+    expect((await resources.get('do.database.pg.firewall', state.id, ctx()))!.spec).toEqual({
+      ...spec,
+      instances: [],
+    });
     expect((await resources.delete('do.database.pg.firewall', state.id, ctx())).state).toBe(
       'deleted',
     );
@@ -518,18 +521,35 @@ describe('what lives in a cluster', () => {
         expect(error.details?.reason).toBe('accountWide');
       }
     expect(mutations(emu, 'PUT', /\/firewall$/)).toEqual([]);
-    // Addresses alone are fine on a shared account.
+    // Addresses, and the tenant's instances (by their Droplets' instance tag), are fine on a shared account.
+    const instance = 'inst_0123456789abcdefghjkmnpqrs';
+    expect(kind.accountWide!({ ipAddresses: [], instances: [instance], tags: [], droplets: [] })).toEqual(
+      [],
+    );
+    expect(kind.instances!({ instances: [instance] })).toEqual([instance]);
     const state = await resources.ensure(
       {
         kind: 'do.database.pg.firewall',
         name: 'fw',
-        spec: { ipAddresses: ['198.51.100.7'], tags: [], droplets: [] },
+        spec: { ipAddresses: ['198.51.100.7'], instances: [instance], tags: [], droplets: [] },
         parent: mine.id,
         accountScope: 'shared',
       },
       ctx(),
     );
     expect(state.state).toBe('ready');
+    expect(mutations(emu, 'PUT', /\/firewall$/)[0]!.body).toEqual({
+      rules: [
+        { type: 'ip_addr', value: '198.51.100.7' },
+        { type: 'tag', value: tagFor('better-compute-instance', instance) },
+      ],
+    });
+    expect((await resources.get('do.database.pg.firewall', state.id, ctx()))!.spec).toEqual({
+      ipAddresses: ['198.51.100.7'],
+      instances: [instance],
+      tags: [],
+      droplets: [],
+    });
   });
 
   it('pools: created, changed in place, with the password a secret output', async () => {

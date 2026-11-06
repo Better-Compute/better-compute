@@ -8,7 +8,7 @@ import {
   type ProviderResourceRequest,
   type ProviderResourceState,
 } from '@better-compute/core';
-import { keyTag } from '../../ids.js';
+import { keyTag, labels as tagKeys, tagFor } from '../../ids.js';
 import {
   assertOwned,
   childId,
@@ -878,18 +878,31 @@ function firewallAccountWide(spec: unknown): string[] {
 
 function firewallKind(info: EngineInfo): DoKind {
   const kind = `${databaseKind(info.engine)}.firewall`;
+  // A trusted instance is its Droplet's instance tag (`better-compute-instance:<id>`), which only that instance's
+  // Droplet carries: instances by tag, safe on a shared account once the caller checked they are the tenant's.
+  const instanceTagPrefix = `${tagKeys.instance}:`;
   const rulesOf = (spec: {
     ipAddresses?: string[];
+    instances?: string[];
     tags?: string[];
     droplets?: string[];
   }): DoFirewallRule[] => [
     ...(spec.ipAddresses ?? []).map((value) => ({ type: 'ip_addr' as const, value })),
+    ...(spec.instances ?? []).map((id) => ({
+      type: 'tag' as const,
+      value: tagFor(tagKeys.instance, id),
+    })),
     ...(spec.tags ?? []).map((value) => ({ type: 'tag' as const, value })),
     ...(spec.droplets ?? []).map((value) => ({ type: 'droplet' as const, value })),
   ];
+  const isInstance = (rule: DoFirewallRule) =>
+    rule.type === 'tag' && rule.value.toLowerCase().startsWith(instanceTagPrefix);
   const specOf = (rules: readonly DoFirewallRule[]) => ({
     ipAddresses: rules.filter((rule) => rule.type === 'ip_addr').map((rule) => rule.value),
-    tags: rules.filter((rule) => rule.type === 'tag').map((rule) => rule.value),
+    instances: rules.filter(isInstance).map((rule) => rule.value.slice(instanceTagPrefix.length)),
+    tags: rules
+      .filter((rule) => rule.type === 'tag' && !isInstance(rule))
+      .map((rule) => rule.value),
     droplets: rules.filter((rule) => rule.type === 'droplet').map((rule) => rule.value),
   });
   const read = async (env: DoKindEnv, parent: string, signal: AbortSignal) =>
@@ -915,12 +928,16 @@ function firewallKind(info: EngineInfo): DoKind {
     definition: {
       kind,
       family: 'data',
-      description: `The trusted sources of a DigitalOcean Managed ${info.name} cluster (addresses, tags, Droplets)`,
+      description: `The trusted sources of a DigitalOcean Managed ${info.name} cluster (addresses, the tenant's instances, Droplet tags and ids)`,
       spec: manifest({
         ipAddresses: field
           .list(field.string({ pattern: cidrPattern }), { max: 100 })
           .default([])
           .describe('Addresses or CIDRs that may connect'),
+        instances: field
+          .list(field.string({ pattern: /^inst_[0-9a-z]{26,52}$/ }), { max: 100 })
+          .default([])
+          .describe("better-compute instances of the tenant on this account whose Droplets may connect (by their instance tag)"),
         tags: field
           .list(field.string({ pattern: /^[a-z0-9:_-]{1,255}$/ }), { max: 100 })
           .default([])
@@ -932,10 +949,12 @@ function firewallKind(info: EngineInfo): DoKind {
       }),
       outputs: [],
       regional: false,
-      updatable: ['ipAddresses', 'tags', 'droplets'],
+      updatable: ['ipAddresses', 'instances', 'tags', 'droplets'],
       parent: databaseKind(info.engine),
       // A cluster has one firewall: one resource manages it.
       identity: () => 'firewall',
+      // The caller checks they are the tenant's own, on this account.
+      instances: (spec: unknown) => (spec as { instances?: string[] } | undefined)?.instances ?? [],
       // Droplet ids and tags name objects of the whole account: on a shared (hosted) account they would reach other
       // tenants' Droplets, and a refused id would tell which exist.
       accountWide: firewallAccountWide,

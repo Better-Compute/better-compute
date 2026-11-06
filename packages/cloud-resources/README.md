@@ -68,7 +68,10 @@ betterCompute({
   `'shared'` on a hosted pool. A kind names the spec fields that reach account-wide objects (a VPC, a registry,
   linked repositories, another resource by name) through its pure `accountWide(spec)`: on a shared account
   `create` and `update` refuse such a spec (`INVALID_INPUT`, `reason 'accountWide'`) before anything is
-  recorded, and `ensure` refuses it again.
+  recorded, and `ensure` refuses it again. A spec may instead name better-compute instances (a database's trusted
+  instances), through the kind's pure `instances(spec)`: each must be a live instance of the tenant on the same
+  provider account (`INVALID_INPUT`, `reason 'instance'`), and the provider maps it to its own handle (DigitalOcean:
+  the Droplet's instance tag), so it is safe on a hosted pool.
 - **Secrets in a spec** are SecretRefs, resolved only within the resource's tenant, just before the provider call.
 - **Quota** per tenant and kind: `maxPerKind` (default 20) and `quotas: { 'do.database.pg': 5 }`.
 - **Events** `cloud.resource.*` (`created`, `ready`, `updating`, `updated`, `failed`, `deleting`, `deleted`,

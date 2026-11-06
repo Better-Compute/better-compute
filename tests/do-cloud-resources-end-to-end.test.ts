@@ -288,6 +288,80 @@ describe('DigitalOcean Managed Databases through cloudResources', () => {
     expect(w.emu.state.databases.has(providerId)).toBe(false);
   });
 
+  it('trusted instances on a hosted pool: only the tenant’s own, on the pool’s account, become instance-tag rules', async () => {
+    const w = await world();
+    const database = await w.api.cloudResources.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      kind: 'do.database.pg',
+      name: 'ledger',
+      spec: { region: 'nyc3', version: '16', size: 'db-s-1vcpu-1gb' },
+      idempotencyKey: 'ledger',
+    });
+    await w.until(database.id, 'ready');
+    const { provider_account_id: accountId } = (
+      await w.fixture.database.query<{ provider_account_id: string }>(
+        `SELECT provider_account_id FROM cloud_resources WHERE id = $1`,
+        [database.id],
+      )
+    ).rows[0]!;
+    const ours = 'inst_aaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const theirs = 'inst_bbbbbbbbbbbbbbbbbbbbbbbbbb';
+    // Instance rows as vps admits them (the pool and flavor rows they reference are not needed here).
+    await w.fixture.database.query(`SET session_replication_role = replica`);
+    try {
+      for (const [id, tenantId] of [
+        [ours, w.acmeTenant],
+        [theirs, w.fixture.tenants.other.id],
+      ])
+        await w.fixture.database.query(
+          `INSERT INTO instances (id, tenant_id, pool_id, flavor_id, flavor, image_id, runtime, draft, state,
+                                  desired_state, provider_account_id, owner_identity_id, idempotency_key,
+                                  request_hash, version)
+           VALUES ($1, $2, $3, 'flv_x', '{}'::jsonb, 'img', 'provider', false, 'running', 'running', $4, 'idn_x',
+                   $1, '\\x00'::bytea, 1)`,
+          [id, tenantId, w.poolId, accountId],
+        );
+    } finally {
+      await w.fixture.database.query(`SET session_replication_role = DEFAULT`);
+    }
+    const trust = (instances: string[], key: string) =>
+      w.api.cloudResources.create(w.acme, {
+        tenantId: w.acmeTenant,
+        poolId: w.poolId,
+        kind: 'do.database.pg.firewall',
+        name: key,
+        parentId: database.id,
+        spec: { instances },
+        idempotencyKey: key,
+      });
+    for (const named of [[theirs], ['inst_cccccccccccccccccccccccccc']]) {
+      const error = await trust(named, `fw-${named[0]!.slice(-4)}`).then(
+        () => undefined,
+        (failure: { code?: string; details?: Record<string, unknown> }) => failure,
+      );
+      expect(error).toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'instance' } });
+    }
+    const trusted = await trust([ours], 'fw-ours');
+    await w.until(trusted.id, 'ready');
+    const cluster = w.emu.state.databases.get((await w.get(database.id)).providerId)!;
+    expect(
+      cluster._firewall.map((rule: { type: string; value: string }) => [rule.type, rule.value]),
+    ).toEqual([['tag', tagFor('better-compute-instance', ours)]]);
+    // Naming another tenant's instance later is refused the same way.
+    const changed = await w.api.cloudResources
+      .update(w.acme, {
+        tenantId: w.acmeTenant,
+        resourceId: trusted.id,
+        spec: { instances: [ours, theirs] },
+      })
+      .then(
+        () => undefined,
+        (failure: { code?: string; details?: Record<string, unknown> }) => failure,
+      );
+    expect(changed).toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'instance' } });
+  });
+
   it('a tenant cannot discover or adopt on the platform account it is offered', async () => {
     const w = await world();
     await expect(

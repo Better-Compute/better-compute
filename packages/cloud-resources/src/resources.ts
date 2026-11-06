@@ -214,6 +214,40 @@ function assertAccountScope(
     );
 }
 
+/**
+ * The instances a spec names (`ProviderResourceKind.instances`) must be live instances of the tenant on the same
+ * provider account: INVALID_INPUT otherwise, the same for one that does not exist and one of another tenant.
+ */
+export async function assertInstances(
+  tx: SqlTx,
+  tenantId: string,
+  accountId: string,
+  kind: ProviderResourceKind,
+  spec: unknown,
+  /** On an update, the stored spec: the instances it already named are not checked again (one may be gone). */
+  before?: unknown,
+): Promise<void> {
+  if (typeof kind.instances !== 'function') return;
+  const kept = new Set(before === undefined ? [] : kind.instances(before));
+  const named = [...new Set(kind.instances(spec))].filter((id) => !kept.has(id));
+  if (named.length === 0) return;
+  const { rows } = await tx.query<{ id: string }>(
+    `SELECT id FROM instances
+      WHERE id = ANY($1::text[]) AND tenant_id = $2 AND provider_account_id = $3 AND NOT draft
+        AND desired_state <> 'deleted' AND state <> 'deleted'`,
+    [named, tenantId, accountId],
+  );
+  const found = new Set(rows.map((row) => row.id));
+  const missing = named.filter((id) => !found.has(id));
+  if (missing.length > 0)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `${kind.kind}: instance ${missing[0]} is not an instance of this tenant on the pool's provider account`,
+      undefined,
+      { reason: 'instance', field: 'spec', instances: missing, kind: kind.kind },
+    );
+}
+
 async function parentOf(
   tx: SqlTx,
   input: { tenantId: string; parentId?: string },
@@ -277,6 +311,7 @@ async function admit(
   assertKindAllowed(deps, provider, kind);
   const spec = await validSpec(kind, input.spec);
   assertAccountScope(provider, input.tenantId, kind, spec);
+  await assertInstances(tx, input.tenantId, provider.account.id, kind, spec);
   const region = regionOf(provider, kind, spec);
   const parent = await parentOf(tx, input, kind, provider.account.id);
   const identity = parent ? identityOf(kind, spec) : undefined;
@@ -567,6 +602,7 @@ export async function updateResource(
     const kind = kindOf(provider, row.kind);
     spec = await validSpec(kind, { ...stored, ...input.spec });
     assertAccountScope(provider, row.tenant_id, kind, spec);
+    await assertInstances(tx, row.tenant_id, row.provider_account_id, kind, spec, stored);
     const changed = [...new Set([...Object.keys(stored), ...Object.keys(spec)])].filter(
       (field) => !same(stored[field], spec[field]),
     );

@@ -130,7 +130,9 @@ DigitalOcean has no network object, so a tenant network is built from a VPC per 
   (trusted addresses, Droplet tags and Droplet ids). Size, nodes and storage resize in place; PostgreSQL and MySQL
   upgrade in place; a downgrade, a region change or a storage shrink is `INVALID_STATE` (`replaceRequired`).
   Droplet tags and Droplet ids are account-wide (`accountWide`): on a shared (hosted) account they would reach other
-  tenants' Droplets, so only addresses are trusted there. A `.user` is never bound to the cluster's admin user (role
+  tenants' Droplets, so only addresses and `instances` are trusted there. `instances` names better-compute instances
+  of the tenant (the module checks they are its own, on the same account) and trusts each by its Droplet's
+  `better-compute-instance:<id>` tag, which only that Droplet carries. A `.user` is never bound to the cluster's admin user (role
   `primary`, `doadmin`): that is `INVALID_INPUT` (`primaryUser`), and a delete of it answers `deleted` without a call,
   since it goes with the cluster.
 - **Ownership.** A cluster carries `better-compute-managed:true`, this deployment's tag, the idempotency key's tag and
