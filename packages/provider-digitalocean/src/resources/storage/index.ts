@@ -3,10 +3,12 @@ import { clientFor } from '../../client/build.js';
 import type { DoConfig, DoProviderOptions } from '../../config.js';
 import { deploymentTag } from '../../ids.js';
 import { spacesClient, type SpacesClient } from '../../spaces/s3.js';
+import { cdnEndpointKind } from './cdn-endpoint.js';
 import { doResources, type DoResources } from './kind.js';
 import { spacesBucketKind } from './spaces-bucket.js';
 import { spacesKeyKind } from './spaces-key.js';
 
+export * from './cdn-endpoint.js';
 export * from './kind.js';
 export * from './spaces-bucket.js';
 export * from './spaces-key.js';
@@ -75,8 +77,10 @@ export function doStorageResources(
     );
   const client = clientFor(config, context, options);
   const tag = deploymentTag(options.deployment ?? 'default');
+  const spaces = spacesFor(config, context, options);
   return doResources([
     spacesKeyKind(client),
-    spacesBucketKind({ spaces: spacesFor(config, context, options), deploymentTag: tag }),
+    spacesBucketKind({ spaces, deploymentTag: tag }),
+    cdnEndpointKind({ client, spaces, deploymentTag: tag }),
   ]);
 }

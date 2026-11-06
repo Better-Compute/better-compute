@@ -45,6 +45,29 @@ export function parseBucketId(id: string): BucketTarget {
   return { region: match[1]!, bucket: match[2]! };
 }
 
+/**
+ * Who manages a bucket: `mine` (this deployment's marker), `missing` (no marker, or no bucket)
+ * or `other` (another deployment's marker, or one that does not parse).
+ */
+export async function bucketOwnership(
+  s3: SpacesClient,
+  bucket: string,
+  deploymentTag: string,
+  signal: AbortSignal,
+): Promise<'mine' | 'missing' | 'other'> {
+  const response = await s3.request('GET', bucket, bucketMarkerKey, { signal, allow: [404] });
+  const text = await response.text();
+  if (response.status === 404) return 'missing';
+  try {
+    const parsed = JSON.parse(text) as { managedBy?: unknown; deployment?: unknown };
+    return parsed.managedBy === 'better-compute' && parsed.deployment === deploymentTag
+      ? 'mine'
+      : 'other';
+  } catch {
+    return 'other';
+  }
+}
+
 export function spacesBucketKind(deps: {
   /** The account's S3 client for a region; throws INVALID_CONFIG when the account has no Spaces keys. */
   spaces: (region: string) => SpacesClient;
@@ -62,24 +85,8 @@ export function spacesBucketKind(deps: {
     return response.status;
   }
 
-  /** `mine`, `missing` (no marker) or `other` (another deployment's marker). */
-  async function ownership(
-    s3: SpacesClient,
-    bucket: string,
-    signal: AbortSignal,
-  ): Promise<'mine' | 'missing' | 'other'> {
-    const response = await s3.request('GET', bucket, bucketMarkerKey, { signal, allow: [404] });
-    const text = await response.text();
-    if (response.status === 404) return 'missing';
-    try {
-      const parsed = JSON.parse(text) as { managedBy?: unknown; deployment?: unknown };
-      return parsed.managedBy === 'better-compute' && parsed.deployment === deps.deploymentTag
-        ? 'mine'
-        : 'other';
-    } catch {
-      return 'other';
-    }
-  }
+  const ownership = (s3: SpacesClient, bucket: string, signal: AbortSignal) =>
+    bucketOwnership(s3, bucket, deps.deploymentTag, signal);
 
   function refuseOwnership(found: 'missing' | 'other', bucket: string): never {
     throw storageError(
