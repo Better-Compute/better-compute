@@ -142,12 +142,17 @@ await compute.api.pools.create(credential, {
   Secret exist only while nodes are still to join; then the token is revoked and the Secret deleted. A Node
   replaced by an upgrade, a scale-down or a Spot reclaim gets a new one. Compute books the nodes' GPUs like any
   `binding: 'kubernetes'` pool's.
+- **Removed Nodes.** A pool node maps to its Kubernetes Node by the OS hostname bcd reports. One that is not
+  connected and whose Node is gone from the cluster's full Node list (a scale-down, a Spot reclaim, a repair) gets
+  NoSchedule `substrate-node-removed`, and its reservations end through capacity's `endNodeReservations`: bound ones
+  are released with their quota refunded once (Spot ones as `preempted`), unbound ones go back to `pending` and are
+  placed elsewhere. It stops counting as joined. If the Node comes back and bcd reconnects, the reason goes.
 - **Teardown.** Archiving the pool or removing `policy.substrate` revokes the token, cordons the pool's nodes
   (`substrate-teardown`), waits for their bookings to end (nothing is force-released), removes bcd from the
   cluster, then deletes a created cluster (an adopted one stays).
 - **Secrets.** No credential or join token is stored, logged or published; rows keep the token's id only.
-- **Events** `kubernetes.substrate.*` (`created`, `ready`, `error`, `token-issued`, `token-revoked`, `deleting`,
-  `deleted`), subject `pool/{id}`. Migration `kubernetes/0002_substrates`. Adopted clusters bill no
+- **Events** `kubernetes.substrate.*` (`created`, `ready`, `error`, `token-issued`, `token-revoked`, `node-removed`,
+  `deleting`, `deleted`), subject `pool/{id}`. Migration `kubernetes/0002_substrates`. Adopted clusters bill no
   `kubernetes.cluster.hours`.
 
 ## License

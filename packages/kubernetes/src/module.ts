@@ -220,6 +220,8 @@ export function kubernetes(
     ...depsOf(context),
     ...(substrate ? { substrate } : {}),
     ...(context.pki ? { pki: context.pki } : {}),
+    ...(context.desired ? { desired: context.desired } : {}),
+    ...(context.inventory ? { inventory: context.inventory } : {}),
   });
   const credentialOptions = { ttlSeconds: ttl, typePrefix };
 

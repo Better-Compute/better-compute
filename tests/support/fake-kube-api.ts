@@ -56,6 +56,11 @@ export class FakeKubeApi {
     return [...this.store(server).values()].map((object) => `${object.kind}/${object.metadata.name}`).sort();
   }
 
+  /** The Nodes a server lists now (every one, no selector). */
+  nodeList(server: string): FakeKubeNode[] {
+    return this.options.nodes(new URL(server).origin);
+  }
+
   routes(): string[] {
     return this.calls.map((call) => `${call.method} ${call.path}`);
   }

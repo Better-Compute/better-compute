@@ -25,8 +25,13 @@ export interface SubstrateWorld extends KubernetesWorld {
   /** Runs the substrate reconciler `rounds` times, then the cluster reconciler, alternating. */
   converge(poolId: string, rounds?: number): Promise<void>;
   substrate(poolId: string): Promise<any>;
-  /** Inserts `count` adopted nodes in the pool, as bcd joining would. */
-  joinNodes(poolId: string, count: number): Promise<string[]>;
+  /**
+   * Inserts `count` adopted nodes in the pool, as bcd joining would; with `hostnames`, node `i` reports inventory
+   * `os.hostname` `hostnames[i]` (its Kubernetes Node name).
+   */
+  joinNodes(poolId: string, count: number, hostnames?: readonly string[]): Promise<string[]>;
+  /** The Node names the fake Kubernetes API lists for the substrate's cluster now. */
+  nodeNames(poolId: string): Promise<string[]>;
   /** The API server origin of the substrate's cluster. */
   server(poolId: string): Promise<string>;
 }
@@ -92,7 +97,15 @@ export async function substrateWorld(
       void poolId;
     },
     substrate,
-    async joinNodes(poolId: string, count: number) {
+    async nodeNames(poolId: string) {
+      const row = await substrate(poolId);
+      const { rows } = await world.fixture.database.query<{ endpoint: string }>(
+        `SELECT endpoint FROM kubernetes_clusters WHERE id = $1`,
+        [row.cluster_id],
+      );
+      return kube.nodeList(rows[0]!.endpoint).map((node) => node.name);
+    },
+    async joinNodes(poolId: string, count: number, hostnames?: readonly string[]) {
       const ids: string[] = [];
       const { rows } = await world.fixture.database.query<{ site_id: string; owner_tenant_id: string }>(
         `SELECT site_id, owner_tenant_id FROM pools WHERE id = $1`,
@@ -111,6 +124,13 @@ export async function substrateWorld(
           `INSERT INTO node_sessions (node_id, session_epoch, connected_at) VALUES ($1, 1, compute_now())`,
           [id],
         );
+        const hostname = hostnames?.[i];
+        if (hostname !== undefined)
+          await world.fixture.database.query(
+            `INSERT INTO inventory_snapshots (id, node_id, sha256, section_hashes, sections, collected_at)
+             VALUES ($1, $2, decode($3, 'hex'), '{}'::jsonb, $4::jsonb, compute_now())`,
+            [`inv_${id}`, id, 'ab'.repeat(32), JSON.stringify({ os: { hostname } })],
+          );
         ids.push(id);
       }
       return ids;

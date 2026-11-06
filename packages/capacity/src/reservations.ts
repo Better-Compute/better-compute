@@ -1821,6 +1821,105 @@ export async function endReservation(
   return next;
 }
 
+/** What `endNodeReservations` did: reservations sent back to `pending`, and reservations released. */
+export interface NodeReservationsEnded {
+  requeued: string[];
+  released: string[];
+}
+
+/**
+ * Ends what a node that no longer exists held: a managed Kubernetes Node deleted by a scale-down, a
+ * Spot reclaim or a repair (pool substrates). Unlike `releaseAllocation` (`CapacityPort.release`),
+ * which frees the bookings and leaves the reservation running (so its quota would be refunded again
+ * when it ends), every reservation with a live booking on the node is moved on properly:
+ * - one not bound yet (`placed`, `binding`) loses its bookings on every node and goes back to
+ *   `pending` to be placed again, quota kept (`Unschedulable`, reason `NodeRemoved`), as a spot
+ *   notice does for one that has not run;
+ * - a bound one (`active`) is released, quota refunded, with a `NodeRemoved` condition and
+ *   `reservation.released { reason }`: `preempted` for spot, `reason` otherwise.
+ * The gone node's bookings are released at once (no pod is left there to hold the devices); a
+ * released reservation's bookings on other nodes follow `deferRelease` as usual. Bookings a
+ * reservation that already ended left on the node are released too. Idempotent: a node with no
+ * live booking changes nothing. The caller holds no reservation lock; rows are locked in id order.
+ */
+export async function endNodeReservations(
+  deps: Pick<ReservationDeps, 'clock' | 'events' | 'work' | 'desired'>,
+  tx: SqlTx,
+  nodeId: string,
+  reason = 'node-removed',
+): Promise<NodeReservationsEnded> {
+  const ended: NodeReservationsEnded = { requeued: [], released: [] };
+  const { rows: owners } = await tx.query<{ owner_id: string }>(
+    `SELECT DISTINCT owner_id FROM allocations
+      WHERE node_id = $1 AND owner_kind = 'reservation' AND released_at IS NULL
+      ORDER BY owner_id`,
+    [nodeId],
+  );
+  const now = deps.clock.now();
+  const message = `node ${nodeId} was removed`;
+  const pools = new Set<string>();
+  for (const { owner_id: id } of owners) {
+    const row = await readReservationById(tx, id, true);
+    if (!row) continue;
+    const allocations = await readOwnerAllocations(tx, { kind: 'reservation', id: row.id });
+    if (reservationStateTable.terminal.includes(row.state) || row.state === 'pending') {
+      for (const allocation of allocations.filter((entry) => entry.nodeId === nodeId)) {
+        await releaseAllocation(tx, allocation.id);
+        await deps.desired.invalidate(tx, nodeId);
+      }
+      pools.add(row.poolId);
+      continue;
+    }
+    if (row.state === 'draft' || row.state === 'awaiting-confirmation') continue;
+    pools.add(row.poolId);
+    if (row.state === 'placed' || row.state === 'binding') {
+      for (const allocation of allocations) {
+        await releaseAllocation(tx, allocation.id);
+        await deps.desired.invalidate(tx, allocation.nodeId);
+      }
+      if (isNodeBinding(row)) await wakeMetal(deps, tx, allocations);
+      const pending = await move(tx, row, 'defer', {
+        during: null,
+        conditions: withCondition(
+          row.conditions,
+          { type: 'Unschedulable', status: 'true', reason: 'NodeRemoved', message },
+          now,
+        ),
+      });
+      await deps.work.enqueue(tx, reservationWork, row.id, { notBefore: now + pendingRetryMs });
+      await publish(deps, tx, pending, 'reservation.pending', { reason: 'NodeRemoved', nodeId });
+      ended.requeued.push(row.id);
+      continue;
+    }
+    // Bound (`active`, or a `releasing` left mid-way): released like `endReservation`.
+    const why = row.request.spot === true ? 'preempted' : reason;
+    await refundQuota(tx, row.tenantId, row.poolId, reservationDemand(row.request));
+    const kubernetes = row.request.binding === 'kubernetes';
+    for (const allocation of allocations) {
+      if (
+        allocation.nodeId === nodeId ||
+        !(kubernetes && (await deferRelease(tx, allocation.id)))
+      )
+        await releaseAllocation(tx, allocation.id);
+      await deps.desired.invalidate(tx, allocation.nodeId);
+    }
+    if (isNodeBinding(row)) await wakeMetal(deps, tx, allocations);
+    const conditions = withCondition(
+      row.conditions,
+      { type: 'NodeRemoved', status: 'true', reason: 'NodeRemoved', message },
+      now,
+    );
+    const next =
+      row.state === 'releasing'
+        ? await move(tx, row, 'complete', { conditions })
+        : await move(tx, await move(tx, row, 'release', { conditions }), 'complete');
+    await publish(deps, tx, next, `reservation.${next.state}`, { reason: why, nodeId });
+    ended.released.push(row.id);
+  }
+  for (const poolId of [...pools].sort()) await wakePendingReservations(tx, deps.work, poolId);
+  return ended;
+}
+
 async function failReservation(
   deps: ReservationDeps,
   tx: SqlTx,

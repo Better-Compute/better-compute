@@ -12,6 +12,7 @@ import {
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
+import { endNodeReservations } from '@better-compute/capacity';
 import { readAccount, zoneRegion } from '@better-compute/vps';
 import { markDeleted, reopen } from './clusters.js';
 import { canonical, sha256Hex } from './input.js';
@@ -128,6 +129,10 @@ export interface SubstrateOptions {
 export interface SubstrateDeps extends KubernetesDeps {
   substrate?: SubstrateOptions;
   pki?: PkiPort;
+  /** Node specs to rebuild when a removed node's reservations end (`ctx.desired`). */
+  desired?: ModuleContext['desired'];
+  /** Maps a pool node to its Kubernetes Node by the OS hostname bcd reports (`ctx.inventory`). */
+  inventory?: ModuleContext['inventory'];
 }
 
 // --- rows ----------------------------------------------------------------------------------------------------------
@@ -799,10 +804,99 @@ async function joinedNodes(sql: SqlExecutor, poolId: string): Promise<number> {
     `SELECT count(*)::text AS count FROM nodes n LEFT JOIN node_sessions s ON s.node_id = n.id
       WHERE n.pool_id = $1 AND n.provision_state NOT IN ('retiring', 'retired')
         AND (n.connectivity = 'connected' OR s.connected_at IS NULL)
-        AND NOT ('substrate-teardown' = ANY(n.no_schedule_reasons))`,
-    [poolId],
+        AND NOT ($2 = ANY(n.no_schedule_reasons)) AND NOT ($3 = ANY(n.no_schedule_reasons))`,
+    [poolId, substrateTeardownReason, substrateNodeRemovedReason],
   );
   return Number(rows[0]?.count ?? 0);
+}
+
+/** The NoSchedule reason on a pool node whose Kubernetes Node is gone (scale-down, Spot reclaim, repair). */
+export const substrateNodeRemovedReason = 'substrate-node-removed';
+
+/**
+ * Pool nodes whose Kubernetes Node is gone. A pool node maps to its Node by the OS hostname bcd reports (inventory
+ * `os.hostname`, the Node name on every managed provider). One that is not connected and whose hostname is absent from
+ * the cluster's FULL Node list (not only the substrate's selection: a relabelled Node is not gone) gets NoSchedule
+ * `substrate-node-removed`, and its reservations end properly (`endNodeReservations`: bound ones released with their
+ * quota refunded once, Spot ones as `preempted`; unbound ones placed again elsewhere). A node with the reason that is
+ * connected again under a listed Node loses it. Nodes with no reported hostname are never touched (fail closed).
+ * Returns false when the Node list could not be read (nothing changed).
+ */
+async function removeGoneNodes(
+  deps: SubstrateDeps,
+  sql: SqlExecutor,
+  row: SubstrateRow,
+  api: SubstrateClusterApi,
+  selected: { nodes: SubstrateNode[]; full: boolean },
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (!deps.inventory || !deps.desired) return true;
+  const { rows: candidates } = await sql.query<{ id: string; connectivity: string; removed: boolean }>(
+    `SELECT n.id, n.connectivity, ($2 = ANY(n.no_schedule_reasons)) AS removed FROM nodes n
+      WHERE n.pool_id = $1 AND n.provision_state NOT IN ('retiring', 'retired')
+        AND NOT ($3 = ANY(n.no_schedule_reasons))
+        AND (n.connectivity <> 'connected' OR $2 = ANY(n.no_schedule_reasons))
+      ORDER BY n.id LIMIT 500`,
+    [row.pool_id, substrateNodeRemovedReason, substrateTeardownReason],
+  );
+  if (candidates.length === 0) return true;
+  const hostnames = new Map<string, string>();
+  for (const candidate of candidates) {
+    const snapshot = await deps.inventory.get(candidate.id);
+    const os = snapshot?.sections.os;
+    const hostname =
+      typeof os === 'object' && os !== null && !Array.isArray(os) ? (os as Record<string, Json>).hostname : undefined;
+    if (typeof hostname === 'string' && hostname.length > 0) hostnames.set(candidate.id, hostname);
+  }
+  if (hostnames.size === 0) return true;
+  let names: Set<string>;
+  if (selected.full) names = new Set(selected.nodes.map((node) => node.name));
+  else {
+    const listed = await attempt(deps, row.pool_id, signal, () => api.nodes());
+    if (!listed || 'error' in listed) return false;
+    names = new Set(listed.value.map((node) => node.name));
+  }
+  for (const candidate of candidates) {
+    const hostname = hostnames.get(candidate.id);
+    if (hostname === undefined) continue;
+    const gone = !names.has(hostname);
+    if (candidate.removed && !gone && candidate.connectivity === 'connected') {
+      await sql.query(
+        `UPDATE nodes SET no_schedule_reasons = array_remove(no_schedule_reasons, $2), version = version + 1
+          WHERE id = $1 AND $2 = ANY(no_schedule_reasons)`,
+        [candidate.id, substrateNodeRemovedReason],
+      );
+      continue;
+    }
+    if (candidate.removed || !gone) continue;
+    await sql.transaction(async (tx) => {
+      // Re-read under the node's lock: one that reconnected meanwhile is not gone.
+      const { rows: locked } = await tx.query<{ id: string }>(
+        `UPDATE nodes SET no_schedule_reasons = array_append(no_schedule_reasons, $2), version = version + 1
+          WHERE id = $1 AND connectivity <> 'connected' AND NOT ($2 = ANY(no_schedule_reasons)) RETURNING id`,
+        [candidate.id, substrateNodeRemovedReason],
+      );
+      if (locked.length === 0) return;
+      const ended = await endNodeReservations(
+        {
+          clock: deps.clock,
+          events: deps.events,
+          work: deps.work,
+          desired: deps.desired!,
+        },
+        tx,
+        candidate.id,
+        'node-removed',
+      );
+      await publishSubstrate(deps, tx, row, 'kubernetes.substrate.node-removed', {
+        nodeId: candidate.id,
+        kubernetesNode: hostname,
+        released: ended.released.length,
+        requeued: ended.requeued.length,
+      });
+    });
+  }
+  return true;
 }
 
 /** Whether a token id is still usable for `uses` more joins and lives past the next few runs. */
@@ -916,6 +1010,11 @@ async function applyBcd(
     return undefined;
   }
   const nodes = listed.value;
+  // Nodes gone from the cluster first: their bookings end, and they no longer count as joined.
+  if (!(await removeGoneNodes(deps, sql, row, api, { nodes, full: selector === undefined }, signal)))
+    deps.log.warn('kubernetes: substrate could not list every Node; removed nodes are checked next time', {
+      poolId: row.pool_id,
+    });
   const joined = await joinedNodes(sql, row.pool_id);
   const gap = Math.max(0, nodes.length - joined);
 

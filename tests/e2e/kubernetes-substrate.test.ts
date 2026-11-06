@@ -18,6 +18,8 @@ import { substrateBcd } from '../support/substrate-world.js';
 const cloud = fakeKubernetes();
 cloud.delayTicks = 0;
 const providers = [fakeKubernetesProvider(cloud)];
+/** Nodes the provider deleted (a Spot reclaim, a repair): no longer listed. */
+const deletedNodes = new Set<string>();
 const kube = new FakeKubeApi({
   nodes(server) {
     const nodes: { name: string; labels: Record<string, string> }[] = [];
@@ -27,7 +29,7 @@ const kube = new FakeKubeApi({
         for (let i = 0; i < pool.spec.nodeCount; i++)
           nodes.push({ name: `${cluster.spec.name}-${name}-${i}`, labels: { ...(pool.spec.labels ?? {}) } });
     }
-    return nodes;
+    return nodes.filter((node) => !deletedNodes.has(node.name));
   },
   accepts: (token) => cloud.tokens.includes(token),
 });
@@ -37,6 +39,7 @@ let api: any;
 let poolId: string;
 let server: string;
 const kubelets = new Map<string, string>(); // Kubernetes Node name → better-compute node id
+let booked: { reservationId: string; nodeId: string; allocationId: string } | undefined;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until<T>(what: string, probe: () => Promise<T | undefined | false>, timeoutMs = 60_000): Promise<T> {
@@ -205,5 +208,75 @@ describe('Kubernetes pool substrate, join and book (end to end)', () => {
     const spec = JSON.parse(daemon.files.get(cdiSpecPath(rows[0]!.id))!);
     expect(spec.annotations['bcd.dev/binding']).toBe('kubernetes');
     expect(spec.devices).toHaveLength(4);
+    booked = { reservationId: reservation.id, nodeId: rows[0]!.node_id, allocationId: rows[0]!.id };
   }, 60_000);
+
+  it('releases the bookings of a node whose Kubernetes Node was deleted, once, with no orphans', async () => {
+    const { reservationId, nodeId, allocationId } = booked!;
+    const name = [...kubelets].find(([, id]) => id === nodeId)![0];
+    // Another reservation fills the other node (8 GPUs do not fit on the booked one): its quota must stay charged.
+    const other = await api.reservations.create(dev.root, {
+      tenantId: dev.rootTenantId,
+      poolId,
+      devices: [{ class: 'gpu', count: 8 }],
+      duration: 3_600_000,
+      binding: 'kubernetes',
+      idempotencyKey: 'substrate-other',
+    });
+    const used = async () =>
+      (
+        await dev.database.query<{ used: string }>(
+          `SELECT used::text AS used FROM quota_usage WHERE pool_id = $1 AND resource = 'gpu'`,
+          [poolId],
+        )
+      ).rows.map((row) => Number(row.used));
+    expect(await used()).toEqual([12]);
+    // The provider deletes the Node (a repair, a Spot reclaim): its bcd pod dies with it.
+    deletedNodes.add(name);
+    dev.daemons.get(nodeId)!.crash('node-deleted');
+    await until('the node to drop', async () => {
+      const { rows } = await dev.database.query<{ connectivity: string }>(`SELECT connectivity FROM nodes WHERE id = $1`, [
+        nodeId,
+      ]);
+      return rows[0]!.connectivity !== 'connected';
+    });
+    const released = await until('the reservation to be released', async () => {
+      await kick();
+      const current = await api.reservations.get(dev.root, { tenantId: dev.rootTenantId, reservationId });
+      return current.state === 'released' ? current : undefined;
+    });
+    expect(released.conditions).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'NodeRemoved' })]));
+    const { rows: node } = await dev.database.query<{ no_schedule_reasons: string[] }>(
+      `SELECT no_schedule_reasons FROM nodes WHERE id = $1`,
+      [nodeId],
+    );
+    expect(node[0]!.no_schedule_reasons).toContain('substrate-node-removed');
+    // No orphans: nothing on the node is still booked, and the quota was given back once.
+    const { rows: live } = await dev.database.query(
+      `SELECT 1 FROM allocations WHERE node_id = $1 AND released_at IS NULL`,
+      [nodeId],
+    );
+    expect(live).toEqual([]);
+    const { rows: allocation } = await dev.database.query<{ released_at: Date | null }>(
+      `SELECT released_at FROM allocations WHERE id = $1`,
+      [allocationId],
+    );
+    expect(allocation[0]!.released_at).not.toBeNull();
+    expect(await used()).toEqual([8]);
+    const { rows: otherLive } = await dev.database.query<{ node_id: string }>(
+      `SELECT node_id FROM allocations WHERE owner_id = $1 AND released_at IS NULL`,
+      [other.id],
+    );
+    expect(otherLive.map((entry) => entry.node_id)).toEqual([expect.not.stringMatching(nodeId)]);
+    // One node left, joined: no token is minted for the deleted one.
+    const row = await until('the substrate to settle', async () => {
+      await kick();
+      const current = await substrate();
+      return current?.nodes_listed === 1 ? current : undefined;
+    });
+    expect(row).toMatchObject({ state: 'ready', nodes_joined: 1, join_token_id: null });
+    // A release afterwards is a no-op: the quota is not refunded twice.
+    await api.reservations.release(dev.root, { tenantId: dev.rootTenantId, reservationId });
+    expect(await used()).toEqual([8]);
+  }, 120_000);
 });

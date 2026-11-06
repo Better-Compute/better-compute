@@ -275,4 +275,58 @@ describe('substrate: replaced nodes', () => {
     ]);
     expect(rows[0].uses_left).toBe(1);
   });
+
+  it('a node whose Kubernetes Node is gone (scale-down) is set NoSchedule and stops counting; one that only disconnected is not', async () => {
+    world = await substrateWorld();
+    const pool = await world.createPool(createSpec([{ ...gpu, nodes: 3 }]));
+    await world.converge(pool.id, 6);
+    const names = (await world.nodeNames(pool.id)).sort();
+    expect(names).toHaveLength(3);
+    // Node 0 and 1 report their Node names; node 2 reports none (it is never touched).
+    const joined = await world.joinNodes(pool.id, 3, [names[0]!, names[2]!]);
+    await world.converge(pool.id, 3);
+    expect(await world.substrate(pool.id)).toMatchObject({ join_token_id: null, nodes_joined: 3 });
+
+    // Scale down to one Node: the provider drops the last two Nodes; their bcds go away.
+    await world.api.pools.update(world.root, {
+      tenantId: world.rootTenant,
+      poolId: pool.id,
+      policy: { ...pool.policy, substrate: { ...pool.policy.substrate, flavors: [{ ...gpu, nodes: 1 }] } },
+    });
+    await world.fixture.database.query(`UPDATE nodes SET connectivity = 'disconnected' WHERE id = ANY($1)`, [joined]);
+    await world.converge(pool.id, 6);
+    const left = await world.nodeNames(pool.id);
+    expect(left).toEqual([names[0]]);
+    const reasons = async () =>
+      new Map(
+        (
+          await world!.fixture.database.query<{ id: string; no_schedule_reasons: string[] }>(
+            `SELECT id, no_schedule_reasons FROM nodes WHERE pool_id = $1`,
+            [pool.id],
+          )
+        ).rows.map((row) => [row.id, row.no_schedule_reasons]),
+      );
+    const now = await reasons();
+    // Node 1's Node (names[2]) is gone: removed. Node 0's Node is still listed: only disconnected. Node 2: no hostname.
+    expect(now.get(joined[1]!)).toContain('substrate-node-removed');
+    expect(now.get(joined[0]!)).not.toContain('substrate-node-removed');
+    expect(now.get(joined[2]!)).not.toContain('substrate-node-removed');
+    const events = (await world.events('kubernetes.substrate.node-removed')).map((event) => event.data);
+    expect(events).toEqual([
+      expect.objectContaining({ poolId: pool.id, nodeId: joined[1], kubernetesNode: names[2], released: 0, requeued: 0 }),
+    ]);
+    // Running again changes nothing (idempotent).
+    await world.converge(pool.id, 2);
+    expect(await world.events('kubernetes.substrate.node-removed')).toHaveLength(1);
+
+    // Scale up again: the Node comes back under the same name and its bcd reconnects; the reason goes.
+    await world.api.pools.update(world.root, {
+      tenantId: world.rootTenant,
+      poolId: pool.id,
+      policy: { ...pool.policy, substrate: { ...pool.policy.substrate, flavors: [{ ...gpu, nodes: 3 }] } },
+    });
+    await world.fixture.database.query(`UPDATE nodes SET connectivity = 'connected' WHERE id = ANY($1)`, [joined]);
+    await world.converge(pool.id, 6);
+    expect((await reasons()).get(joined[1]!)).not.toContain('substrate-node-removed');
+  });
 });
