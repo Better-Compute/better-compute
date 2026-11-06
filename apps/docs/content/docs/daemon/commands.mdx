@@ -265,6 +265,9 @@ What it does, in order:
    IMDSv2 once and sends them as the attestation, with no token. The control plane admits each instance once, so a
    `Join refused` after a retried attempt says the evidence is spent: the lost attempt may have admitted the instance
    (check for the node, or re-join with `--reset` and a join token).
+   In a container on EC2 (an EKS DaemonSet without host networking), IMDSv2 answers the token request only when the
+   instance's metadata hop limit (`HttpPutResponseHopLimit`) is at least 2; otherwise the read times out with that
+   hint, and `bcd node` keeps retrying the cloud section with back-off (5 s doubling to 5 min).
 5. Verifies the signed `JoinResponse`, stores the key and identity, writes a bootstrapped `config.toml` (0600) and
    `join-encryption.jwk` (0644), removes the token file, and prints
    `joined as <node> (site <site>, role <role>); certificate valid until <time>`.

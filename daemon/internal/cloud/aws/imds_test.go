@@ -337,3 +337,23 @@ func TestRefusesADocumentWithoutIdentity(t *testing.T) {
 		t.Fatal("malformed signature accepted")
 	}
 }
+
+// In a container on EC2 (bcd as an EKS DaemonSet without host networking) the token PUT's answer
+// is dropped past the IMDSv2 hop limit (default 1 on many launch templates): the read times out. The
+// error says why instead of a bare timeout.
+func TestTokenTimeoutNamesTheHopLimit(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+	c := &Client{Root: dmiRoot(t, EC2SysVendor), Endpoint: srv.URL, Timeout: 50 * time.Millisecond}
+	_, err := c.Get(context.Background(), "/latest/meta-data/instance-id")
+	if err == nil || !strings.Contains(err.Error(), "hop limit") {
+		t.Fatalf("err %v, want the hop limit hint", err)
+	}
+	if !errors.Is(err, ErrNoToken) {
+		t.Fatalf("err %v is not ErrNoToken", err)
+	}
+}

@@ -60,6 +60,12 @@ const XenSysVendor = "Xen"
 // ErrNotEC2 is returned, before any network call, on a host whose DMI is not EC2's.
 var ErrNotEC2 = errors.New("aws: this host is not an EC2 instance (DMI sys_vendor is not \"Amazon EC2\", nor \"Xen\" with EC2's BIOS version or UUID)")
 
+// ErrNoToken is an IMDSv2 session token PUT that got no answer in time. In a container (bcd as an
+// EKS DaemonSet without host networking) the usual cause is the instance's metadata hop limit: the
+// answer to a PUT is dropped past HttpPutResponseHopLimit hops, and many launch templates set 1.
+var ErrNoToken = errors.New("aws: no IMDSv2 session token answer in time; in a container, the instance's " +
+	"metadata hop limit (HttpPutResponseHopLimit) must be at least 2, or bcd must use the host network")
+
 // ErrNotFound is a metadata path the instance does not have (404), e.g. no spot notice.
 var ErrNotFound = errors.New("aws: metadata path not found")
 
@@ -230,6 +236,10 @@ func (c *Client) tokenLocked(ctx context.Context) (string, error) {
 	issued := c.now()
 	body, err := c.do(ctx, http.MethodPut, "/latest/api/token", http.Header{tokenTTLHeader: {strconv.Itoa(TokenTTLSeconds)}})
 	if err != nil {
+		var ne net.Error
+		if ctx.Err() == nil && (errors.Is(err, context.DeadlineExceeded) || errors.As(err, &ne) && ne.Timeout()) {
+			return "", fmt.Errorf("%w (%v)", ErrNoToken, err)
+		}
 		return "", err
 	}
 	token := strings.TrimSpace(string(body))
