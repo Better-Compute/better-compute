@@ -159,6 +159,15 @@ describe('control-plane template', () => {
     expect(gateway).toContain('rds-db:connect');
     for (const action of ['s3:PutObject', 's3:DeleteObject', 'secretsmanager:CreateSecret', 'secretsmanager:PutSecretValue', 'events:PutEvents'])
       expect(gateway).not.toContain(action);
+    // The gateway hosts the secret broker in process (serve --roles gateway calls gatewayServices.secret), so it
+    // reads tenant secrets; it only decrypts with the platform key and never encrypts.
+    expect(gateway).toEqual(expect.arrayContaining(['secretsmanager:GetSecretValue', 'kms:Decrypt']));
+    for (const action of ['kms:Encrypt', 'kms:GenerateDataKey']) expect(gateway).not.toContain(action);
+    for (const role of ['ApiTaskRole', 'WorkerTaskRole'])
+      expect(actionsOf(role), role).toEqual(expect.arrayContaining(['kms:Decrypt', 'kms:Encrypt', 'kms:GenerateDataKey']));
+    // awsSecretsManagerStore never calls DescribeSecret, so no role is granted it.
+    for (const role of ['ApiTaskRole', 'WorkerTaskRole', 'GatewayTaskRole'])
+      expect(actionsOf(role), role).not.toContain('secretsmanager:DescribeSecret');
     // Only the worker (sinks role) appends audit batches and publishes events.
     expect(actionsOf('WorkerTaskRole')).toEqual(expect.arrayContaining(['s3:PutObjectRetention', 'events:PutEvents']));
     expect(actionsOf('ApiTaskRole')).not.toContain('s3:PutObjectRetention');

@@ -79,16 +79,20 @@ topic. The database has a key of its own. Both keys are kept when a stack is del
 ### Task roles
 
 Every role trusts only `ecs-tasks.amazonaws.com` calling from this account. A base policy, shared by all three,
-allows `rds-db:connect` as the one database user, reading secrets under `better-compute/<name>/*`, the platform key,
-and reading snapshots (NodeSpec signs snapshot download URLs wherever it renders). The secret prefix carries the
+allows `rds-db:connect` as the one database user, `secretsmanager:GetSecretValue` under `better-compute/<name>/*`,
+`kms:Decrypt` with the platform key, and reading snapshots (NodeSpec signs snapshot download URLs wherever it renders). The secret prefix carries the
 deployment name, so a staging deployment in the same account and region can neither read nor overwrite production's
 tenant secrets; the config module passes the same prefix to `awsSecretsManagerStore`. On top of that:
 
 | Role | Adds |
 | --- | --- |
-| api | Writing secrets under `better-compute/<name>/*`; reading the downloads bucket; reading and writing blobs and snapshots; `events:PutEvents` on the bus |
-| worker | Writing secrets; blobs and snapshots; `s3:PutObject` and `s3:PutObjectRetention` on the audit bucket; `events:PutEvents` |
+| api | Encrypting with the platform key; writing secrets under `better-compute/<name>/*`; reading the downloads bucket; reading and writing blobs and snapshots; `events:PutEvents` on the bus |
+| worker | Encrypting with the platform key; writing secrets; blobs and snapshots; `s3:PutObject` and `s3:PutObjectRetention` on the audit bucket; `events:PutEvents` |
 | gateway | Nothing |
+
+The gateway reads tenant secrets because `serve --roles gateway` runs the secret broker in process: a daemon's
+`SecretRequest` is answered there, and the broker releases a ref only when it is bound to work the asking node is
+doing right now, sealed to that node. It never writes secrets, objects or events, and never encrypts.
 
 No statement uses a wildcard resource or a service-wide action. The migrate task runs with the worker role.
 

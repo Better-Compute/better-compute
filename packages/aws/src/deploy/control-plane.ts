@@ -338,11 +338,16 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
         ResourceId: cfnImport('ClusterResourceId', 'DataStack'),
       }),
     },
-    { Sid: 'ResolveSecrets', Effect: 'Allow', Action: ['secretsmanager:GetSecretValue', 'secretsmanager:DescribeSecret'], Resource: secretPrefix },
-    { Sid: 'UsePlatformKey', Effect: 'Allow', Action: ['kms:Decrypt', 'kms:GenerateDataKey', 'kms:Encrypt'], Resource: keyArn },
+    // Every role resolves: the gateway too, because `serve --roles gateway` runs the secret broker in process
+    // (gatewayServices.secret). The broker only releases a ref bound to the asking node's current work, sealed
+    // to the node (JWE); the store calls GetSecretValue and nothing else.
+    { Sid: 'ResolveSecrets', Effect: 'Allow', Action: 'secretsmanager:GetSecretValue', Resource: secretPrefix },
+    { Sid: 'DecryptWithPlatformKey', Effect: 'Allow', Action: 'kms:Decrypt', Resource: keyArn },
     // NodeSpec signs snapshot download URLs wherever it renders.
     { Sid: 'ReadSnapshots', Effect: 'Allow', Action: 's3:GetObject', Resource: objects('SnapshotsBucket') },
   ];
+  // Writing secrets and KMS-encrypted objects asks KMS for data keys as the caller; only api and worker write.
+  const encrypt: PolicyStatement = { Sid: 'EncryptWithPlatformKey', Effect: 'Allow', Action: ['kms:GenerateDataKey', 'kms:Encrypt'], Resource: keyArn };
   const writeSecrets: PolicyStatement = {
     Sid: 'WriteSecrets',
     Effect: 'Allow',
@@ -357,6 +362,7 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
   });
   const policies: Record<Exclude<Role, 'migrate'>, PolicyStatement[]> = {
     api: [
+      encrypt,
       writeSecrets,
       { Sid: 'ServeDownloads', Effect: 'Allow', Action: 's3:GetObject', Resource: objects('DownloadsBucket') },
       writeObjects('Blobs', 'BlobsBucket'),
@@ -364,6 +370,7 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
       { Sid: 'PublishEvents', Effect: 'Allow', Action: 'events:PutEvents', Resource: cfnGetAtt('EventBus', 'Arn') },
     ],
     worker: [
+      encrypt,
       writeSecrets,
       writeObjects('Blobs', 'BlobsBucket'),
       writeObjects('Snapshots', 'SnapshotsBucket'),
