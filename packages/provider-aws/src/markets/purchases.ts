@@ -106,6 +106,36 @@ export function parseOfferingId(id: string, zones: readonly string[]): ParsedOff
   return { kind: 'odcr', zone: zone!, instanceType: instanceType!, count, hours };
 }
 
+const iso = (ms: number) => new Date(ms).toISOString().replace(/.000Z$/, 'Z');
+
+/**
+ * What a person approving a purchase reads for an offering id: what, where, when, what it costs.
+ * Undefined for an id that is not one of ours. Pure: the id is self-describing.
+ */
+export function describeOfferingId(id: string): string | undefined {
+  if (typeof id !== 'string') return undefined;
+  const block = blockPattern.exec(id);
+  const odcr = block ? null : odcrPattern.exec(id);
+  if (!block && !odcr) return undefined;
+  const [, zone, instanceType, countText, hoursText] = (block ?? odcr)!;
+  const count = Number(countText);
+  const hours = Number(hoursText);
+  if (block) {
+    const start = Number(block[5]) * 1000;
+    const cents = Number(block[6]);
+    const currency = zone!.startsWith('cn-') ? 'CNY' : 'USD';
+    return (
+      `AWS Capacity Block: ${count} × ${instanceType} in ${zone}, ${hours} h from ${iso(start)} ` +
+      `to ${iso(start + hours * 3_600_000)}, at most ${(cents / 100).toFixed(2)} ${currency} paid up front`
+    );
+  }
+  return (
+    `AWS On-Demand Capacity Reservation: ${count} × ${instanceType} in ${zone} for ${hours} h from the ` +
+    `purchase, billed hourly at on-demand rates for every reserved instance, used or not ` +
+    `(${count * hours} instance-hours), nothing up front`
+  );
+}
+
 /** The ODCR offering for a query, in a zone that offers the type; only when it may start now. */
 export function odcrOffering(
   query: ReservationOfferingQuery,

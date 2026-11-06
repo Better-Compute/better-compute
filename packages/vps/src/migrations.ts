@@ -9,7 +9,10 @@ import { reservationGrantsMigration } from './reservation-grants.js';
 import { vpsVolumeResizeHoldMigration, vpsVolumesMigration } from './volumes.js';
 import { vpsVolumeStorageMigration } from './volume-storage.js';
 import { providerReservationsMigration } from './provider-reservations.js';
-import { providerPurchasesMigration } from './provider-purchases.js';
+import {
+  providerPurchasesMigration,
+  providerPurchasesUnknownMigration,
+} from './provider-purchases.js';
 import { vpsNetworkAdoptMigration, vpsNetworksMigration } from './networks.js';
 import {
   vpsIdentityRebindMigration,
@@ -208,4 +211,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsInstanceLabelsMigration,
   vpsNetworkAdoptMigration,
   providerPurchasesMigration,
+  providerPurchasesUnknownMigration,
 ]);

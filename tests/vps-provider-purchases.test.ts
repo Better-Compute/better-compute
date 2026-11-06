@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import type { SqlExecutor, SqlTx } from '@better-compute/core';
 import { awsProvider } from '@better-compute/provider-aws';
 import { closeFixtures, computeFixture } from '@better-compute/testing';
-import { vps } from '@better-compute/vps';
+import {
+  describePurchase,
+  ProviderClients,
+  requestPurchase,
+  vps,
+  type PurchaseDeps,
+} from '@better-compute/vps';
 import { AwsEmulator } from './support/aws-emulator/index.js';
 import { Ec2Emulator } from './support/aws-emulator/ec2.js';
 import { CapacityEmulator } from './support/aws-emulator/capacity.js';
@@ -16,12 +23,32 @@ afterEach(closeFixtures);
 type Api = any;
 const HOUR = 3_600_000;
 
+/**
+ * Whether the calling code runs inside a transaction of `database`: a transaction-local setting
+ * survives into the next statement only inside one.
+ */
+async function inTransaction(database: SqlExecutor): Promise<boolean> {
+  await database.query(`SELECT set_config('bc_test.marker', 'set', true)`);
+  const { rows } = await database.query<{ value: string | null }>(
+    `SELECT current_setting('bc_test.marker', true) AS value`,
+  );
+  return rows[0]?.value === 'set';
+}
+
 async function world(config: Record<string, unknown> = { allowPurchases: true }) {
   const emu = new AwsEmulator();
   const ec2 = new Ec2Emulator(emu);
   const capacity = new CapacityEmulator(emu, ec2);
-  const aws = awsProvider({ fetch: emu.fetch, credentials: emu.ambient });
+  /** Per AWS call: whether a transaction of the store was open (once the fixture exists). */
+  const inTx: boolean[] = [];
+  let database: SqlExecutor | undefined;
+  const fetch: typeof emu.fetch = async (input, init) => {
+    if (database) inTx.push(await inTransaction(database));
+    return emu.fetch(input, init);
+  };
+  const aws = awsProvider({ fetch, credentials: emu.ambient });
   const fixture = await computeFixture({ clock: 'sim', modules: [vps({ providers: [aws] })] });
+  database = fixture.database;
   emu.follow(fixture.clock);
   const { compute, tenants, iam } = fixture;
   (iam as { rootTenantId?: string }).rootTenantId = tenants.root.id;
@@ -49,6 +76,8 @@ async function world(config: Record<string, unknown> = { allowPurchases: true })
   const ref = { tenantId: tenants.root.id, accountId: account.id };
   return {
     emu,
+    aws,
+    inTx,
     capacity,
     fixture,
     api,
@@ -59,6 +88,16 @@ async function world(config: Record<string, unknown> = { allowPurchases: true })
     async work(job: string) {
       await fixture.advance(1_000);
       for (let round = 0; round < 2; round++) await compute.jobs[job]!.tick();
+    },
+    async events(prefix: string) {
+      const { rows } = await fixture.database.query<{ topic: string; payload: { data: any } }>(
+        `SELECT topic, payload FROM outbox WHERE topic LIKE $1 ORDER BY seq`,
+        [`${prefix}%`],
+      );
+      return rows.map((row) => ({ type: row.topic, data: row.payload.data }));
+    },
+    async list() {
+      return (await api.providerAccounts.purchases(root, ref)).items as any[];
     },
     offerings: async () =>
       (
@@ -196,14 +235,202 @@ describe('provider capacity purchases', () => {
     expect(w.emu.calls('CreateCapacityReservation')).toHaveLength(0);
   });
 
-  it('allowPurchases=false refuses', async () => {
+  it('allowPurchases=false refuses the request itself, recording nothing', async () => {
     const w = await world({});
     const offering = block(await w.offerings());
-    await w.purchase(offering.id);
+    await expect(w.purchase(offering.id)).rejects.toMatchObject({
+      code: 'UNSUPPORTED',
+      details: { reason: 'purchases-unavailable' },
+    });
     await w.work('vps.purchases');
-    const [purchase] = (await w.api.providerAccounts.purchases(w.root, w.ref)).items;
-    expect(purchase).toMatchObject({ state: 'failed', error: { code: 'ACCESS_DENIED' } });
+    expect(await w.list()).toEqual([]);
+    expect(await w.events('provider.purchase.')).toEqual([]);
     expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(0);
     expect(w.capacity.purchases).toEqual([]);
+  });
+
+  it('offerings are root-only, on platform accounts, read with no transaction open', async () => {
+    const w = await world();
+    w.inTx.length = 0;
+    await w.offerings();
+    expect(w.inTx.length).toBeGreaterThan(0);
+    expect(new Set(w.inTx)).toEqual(new Set([false]));
+    const query = { instanceType: 'p5.48xlarge', count: 1, durationHours: 24 };
+    // A tenant may not list offerings (nor drive provider traffic with them).
+    await expect(
+      w.api.providerAccounts.reservationOfferings(w.acme, { ...w.ref, query }),
+    ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    // Not even on its own account; nor root on a tenant's account.
+    const tenantId = w.fixture.tenants.acme.id;
+    const theirs = await w.api.providerAccounts.create(w.acme, {
+      tenantId,
+      provider: 'aws',
+      name: 'acme-aws',
+      config: {
+        region: 'us-east-1',
+        zones: ['us-east-1a'],
+        assumeRoleArn: 'arn:aws:iam::333333333333:role/bc',
+      },
+    });
+    w.inTx.length = 0;
+    for (const who of [w.acme, w.root])
+      await expect(
+        w.api.providerAccounts.reservationOfferings(who, { tenantId, accountId: theirs.id, query }),
+      ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    expect(w.inTx).toEqual([]);
+  });
+
+  it('providerAccounts.offers reads the provider with no transaction open', async () => {
+    const w = await world();
+    w.inTx.length = 0;
+    await w.api.providerAccounts.offers(w.root, { ...w.ref, query: {} });
+    expect(w.inTx.length).toBeGreaterThan(0);
+    expect(new Set(w.inTx)).toEqual(new Set([false]));
+  });
+
+  const loseFirstPurchase = (w: Awaited<ReturnType<typeof world>>) => {
+    let lost = true;
+    w.emu.afterAction('PurchaseCapacityBlock', () => {
+      if (lost) {
+        lost = false;
+        throw new TypeError('fetch failed: connection reset');
+      }
+    });
+  };
+
+  it('a lost Capacity Block answer is never bought twice, nor reported failed', async () => {
+    const w = await world();
+    const offering = block(await w.offerings());
+    // EC2 could sell more blocks like it, and shows the one it sold only after a while (its tag
+    // later still): the retries must find it rather than buy again.
+    w.capacity.blockOfferings[0]!.stock = 5;
+    w.capacity.purchaseLag = { hiddenReads: 6, tagsHiddenReads: 12 };
+    loseFirstPurchase(w);
+    await w.purchase(offering.id);
+    for (let round = 0; round < 12; round++) {
+      await w.work('vps.purchases');
+      await w.fixture.advance(60_000);
+    }
+    const [purchase] = await w.list();
+    expect(purchase).toMatchObject({
+      state: 'purchased',
+      reservationId: expect.stringMatching(/^cb:cr-/),
+    });
+    expect(purchase.attempts).toBeGreaterThan(2);
+    expect(w.capacity.purchases).toHaveLength(1);
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(1);
+    expect((await w.events('provider.purchase.')).map((e) => e.type)).toEqual([
+      'provider.purchase.requested',
+      'provider.purchase.completed',
+    ]);
+  });
+
+  it('a lost answer whose block went off sale waits for the block rather than failing', async () => {
+    const w = await world();
+    const offering = block(await w.offerings());
+    // Sold out by this purchase itself; EC2 shows the block only after a few reads.
+    w.capacity.purchaseLag = { hiddenReads: 6, tagsHiddenReads: 6 };
+    loseFirstPurchase(w);
+    await w.purchase(offering.id);
+    for (let round = 0; round < 12; round++) {
+      await w.work('vps.purchases');
+      await w.fixture.advance(60_000);
+    }
+    expect(await w.list()).toMatchObject([{ state: 'purchased' }]);
+    expect(w.capacity.purchases).toHaveLength(1);
+    expect(await w.events('provider.purchase.failed')).toEqual([]);
+  });
+
+  it('attempts running out after a lost answer leave the purchase unknown, never failed', async () => {
+    const w = await world();
+    const offering = block(await w.offerings());
+    w.emu.afterAction('PurchaseCapacityBlock', () => {
+      // EC2 bought; the answer is lost, and EC2 stops answering reads.
+      w.emu.failNext('DescribeCapacityReservations', 'ServiceUnavailable', 503, 100_000);
+      throw new TypeError('fetch failed: connection reset');
+    });
+    await w.purchase(offering.id);
+    for (let round = 0; round < 30; round++) {
+      await w.work('vps.purchases');
+      await w.fixture.advance(16 * 60_000);
+    }
+    const [purchase] = await w.list();
+    expect(purchase).toMatchObject({ state: 'unknown', attempts: 20 });
+    expect(w.capacity.purchases).toHaveLength(1);
+    expect((await w.events('provider.purchase.')).map((e) => e.type)).toEqual([
+      'provider.purchase.requested',
+      'provider.purchase.unknown',
+    ]);
+  });
+
+  it('two requests racing on one key record one purchase', async () => {
+    const w = await world();
+    const offering = block(await w.offerings());
+    const first = await w.purchase(offering.id, { idempotencyKey: 'race-1' });
+    const { rows } = await w.fixture.database.query<{ created_by: string }>(
+      'SELECT created_by FROM provider_purchases WHERE id = $1',
+      [first.id],
+    );
+    const caller = { tenantId: w.ref.tenantId, identityId: rows[0]!.created_by } as any;
+    const published: unknown[] = [];
+    const deps: PurchaseDeps = {
+      clock: w.fixture.clock,
+      events: {
+        publish: async (_tx: unknown, event: unknown) => void published.push(event),
+      } as any,
+      work: { enqueue: async () => {} } as any,
+      log: { debug() {}, info() {}, warn() {}, error() {} },
+      secrets: { resolve: async () => '' },
+      clients: new ProviderClients(new Map([['aws', w.aws]])),
+      rootTenantId: w.ref.tenantId,
+    };
+    // The second request looked the key up before the first committed: it misses the row.
+    const second = await w.fixture.database.transaction((tx) => {
+      let hide = true;
+      const racing = new Proxy(tx, {
+        get(target, key) {
+          if (key === 'query')
+            return (text: string, params?: unknown[]) => {
+              if (hide && /FROM provider_purchases\s+WHERE tenant_id/.test(text)) {
+                hide = false;
+                return Promise.resolve({ rows: [] });
+              }
+              return target.query(text, params);
+            };
+          const value = Reflect.get(target, key);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      }) as SqlTx;
+      return requestPurchase(
+        deps,
+        racing,
+        { ...w.ref, offeringId: offering.id, idempotencyKey: 'race-1', confirm: true },
+        caller,
+      );
+    });
+    expect(second.id).toBe(first.id);
+    expect(published).toEqual([]);
+    expect(await w.list()).toHaveLength(1);
+  });
+
+  it('the approver reads what is bought, where, when and for how much', async () => {
+    const w = await world();
+    const offering = block(await w.offerings());
+    const text = describePurchase(
+      { ...w.ref, offeringId: offering.id, idempotencyKey: 'k', confirm: true },
+      [w.aws],
+    );
+    expect(text).toContain('1 × p5.48xlarge in us-east-1a');
+    expect(text).toContain(`from ${new Date(w.start).toISOString().replace('.000Z', 'Z')}`);
+    expect(text).toContain('1179.84 USD paid up front');
+    expect(text).toContain('spends money');
+    const odcr = describePurchase(
+      { ...w.ref, offeringId: 'odcr:us-east-1a/p5.48xlarge/2/48', idempotencyKey: 'k' },
+      [w.aws],
+    );
+    expect(odcr).toContain('billed hourly at on-demand rates');
+    expect(odcr).toContain('96 instance-hours');
+    // An id no provider describes is shown as it is.
+    expect(describePurchase({ ...w.ref, offeringId: 'x:1', idempotencyKey: 'k' })).toContain('x:1');
   });
 });

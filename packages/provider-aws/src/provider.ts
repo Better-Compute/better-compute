@@ -3,6 +3,7 @@ import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
 import { accountCredentials } from './account.js';
 import { AwsCompute } from './compute.js';
 import { awsConfig, validateAwsConfig, type AwsConfig, type AwsProviderOptions } from './config.js';
+import { describeOfferingId } from './markets/purchases.js';
 import { instanceTypeCache, zoneCache } from './shapes.js';
 
 /**
@@ -17,6 +18,7 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
     provides: ['vps'],
     config: awsConfig as unknown as ProviderDefinition<AwsConfig>['config'],
     capabilities: ['power', 'reinstall', 'list', 'discover', 'claim'],
+    describeOffering: describeOfferingId,
     create: (config, context) => {
       validateAwsConfig(config);
       const account = accountCredentials(config, context, options);
@@ -60,7 +62,7 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
                 : {}),
               ...(options.rateLimit ? { rateLimit: options.rateLimit } : {}),
             });
-      return new AwsCompute(config, context, options, {
+      const compute = new AwsCompute(config, context, options, {
         ec2,
         quotas,
         ...(pricing ? { pricing } : {}),
@@ -68,6 +70,11 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
         types: instanceTypeCache(ec2, { clock: context.clock }),
         zones: zoneCache(ec2, { clock: context.clock }),
       });
+      // Purchases off (the default): the client cannot buy at all, so vps refuses a purchase
+      // before recording it. (purchaseReservation also refuses on its own.)
+      if (!config.allowPurchases)
+        Object.defineProperty(compute, 'purchaseReservation', { value: undefined });
+      return compute;
     },
   });
 }

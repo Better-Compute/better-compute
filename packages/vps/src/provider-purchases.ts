@@ -12,6 +12,8 @@ import {
   type Logger,
   type Migration,
   type ModuleContext,
+  type ProviderDefinition,
+  type PurchaseAttempt,
   type Reconciler,
   type ReservationOffering,
   type ReservationOfferingQuery,
@@ -59,7 +61,26 @@ CREATE INDEX provider_purchases_account ON provider_purchases (account_id, creat
 `,
 };
 
-export type PurchaseState = 'requested' | 'purchasing' | 'purchased' | 'failed';
+/**
+ * A purchase whose attempts ran out while an attempt may have bought (its answer was lost) is
+ * `unknown`, never `failed`: money may have been spent. `uncertain_since` is when the latest such
+ * attempt started; the provider waits for what it may have bought before it buys again.
+ */
+export const providerPurchasesUnknownMigration: Migration = {
+  name: 'vps/0088_provider_purchases_unknown',
+  sql: `
+ALTER TABLE provider_purchases DROP CONSTRAINT provider_purchases_state_check;
+ALTER TABLE provider_purchases ADD CONSTRAINT provider_purchases_state_check
+  CHECK (state IN ('requested', 'purchasing', 'purchased', 'failed', 'unknown'));
+ALTER TABLE provider_purchases ADD COLUMN uncertain_since timestamptz;
+`,
+};
+
+/**
+ * `unknown`: the attempts ran out while one may have bought; a person checks the provider account
+ * (`providerAccounts.reservations` lists what was bought).
+ */
+export type PurchaseState = 'requested' | 'purchasing' | 'purchased' | 'failed' | 'unknown';
 
 /** A purchase as the API shows it. */
 export interface ProviderPurchaseView {
@@ -250,12 +271,13 @@ interface PurchaseRow {
   reservation_id: string | null;
   reservation: ExternalReservation | string | null;
   error: { code: string; message: string } | string | null;
+  uncertain_since: Date | null;
   created_at: Date;
   updated_at: Date;
 }
 
 const columns = `id, account_id, tenant_id, created_by, idempotency_key, offering_id, state, attempts,
-  reservation_id, reservation, error, created_at, updated_at`;
+  reservation_id, reservation, error, uncertain_since, created_at, updated_at`;
 
 const json = <T>(value: T | string | null): T | undefined =>
   value === null ? undefined : typeof value === 'string' ? (JSON.parse(value) as T) : value;
@@ -332,16 +354,27 @@ function rootOnly(caller: Caller | undefined, rootTenantId: string | undefined):
 
 // --- API -------------------------------------------------------------------------------------------
 
-/** `providerAccounts.reservationOfferings`: what the account could buy. A provider read; no spend. */
+/**
+ * `providerAccounts.reservationOfferings`: what the account could buy. A provider read; no spend.
+ * Root-only, on the platform's own accounts (like buying), and declared `transaction: 'manual'`:
+ * `sql` is the read-only executor, so the provider calls run with no transaction open.
+ */
 export async function listReservationOfferings(
   deps: PurchaseDeps,
   sql: SqlTx,
   input: ReservationOfferingsInput,
+  caller: Caller | undefined,
   signal: AbortSignal,
 ): Promise<{ items: ReservationOffering[] }> {
+  rootOnly(caller, deps.rootTenantId);
   const account = await readAccount(sql, input.accountId, input.tenantId);
   if (!account)
     throw new ComputeError('NOT_FOUND', `Provider account ${input.accountId} not found`);
+  if (account.tenantId !== deps.rootTenantId)
+    throw new ComputeError(
+      'ACCESS_DENIED',
+      "Capacity is bought only in the platform's own provider accounts",
+    );
   const client = await deps.clients.client(account, deps);
   if (typeof client.listReservationOfferings !== 'function')
     throw new ComputeError(
@@ -370,9 +403,25 @@ export async function preparePurchase(
   return viewOf(existing);
 }
 
-/** What a person asked to approve the purchase reads. */
-export function describePurchase(input: PurchaseReservationInput): string {
-  return `Buy provider capacity ${input.offeringId} in provider account ${input.accountId} (spends money)`;
+/**
+ * What a person asked to approve the purchase reads: the provider's own account of the offering
+ * (what, where, when, what it costs) when a registered provider describes it, else the raw id.
+ */
+export function describePurchase(
+  input: PurchaseReservationInput,
+  providers: Iterable<Pick<ProviderDefinition, 'describeOffering'>> = [],
+): string {
+  let what: string | undefined;
+  for (const provider of providers) {
+    try {
+      what = provider.describeOffering?.(input.offeringId);
+    } catch {
+      what = undefined;
+    }
+    if (what) break;
+  }
+  const summary = what ? `${what.slice(0, 400)} (offering ${input.offeringId})` : input.offeringId;
+  return `Buy provider capacity: ${summary}, in provider account ${input.accountId}. This spends money.`;
 }
 
 /**
@@ -412,11 +461,18 @@ export async function requestPurchase(
   // Building the client validates its config; it calls no provider API.
   const client = await deps.clients.client(account, deps);
   if (typeof client.purchaseReservation !== 'function')
-    throw new ComputeError('UNSUPPORTED', `Provider ${account.provider} cannot buy capacity`);
+    throw new ComputeError(
+      'UNSUPPORTED',
+      `Provider account ${account.id} cannot buy capacity: provider ${account.provider} sells none, or the account does not allow purchases`,
+      undefined,
+      { reason: 'purchases-unavailable', accountId: account.id },
+    );
   const purchaseId = newId('ppur');
+  // A concurrent request with the same key may insert first: replay its purchase.
   const { rows } = await tx.query<PurchaseRow>(
     `INSERT INTO provider_purchases (id, account_id, tenant_id, created_by, idempotency_key, offering_id, state)
      VALUES ($1, $2, $3, $4, $5, $6, 'requested')
+     ON CONFLICT (tenant_id, created_by, idempotency_key) DO NOTHING
      RETURNING ${columns}`,
     [
       purchaseId,
@@ -427,6 +483,13 @@ export async function requestPurchase(
       input.offeringId,
     ],
   );
+  if (!rows[0]) {
+    const winner = await byKey(tx, input.tenantId, caller!.identityId, input.idempotencyKey);
+    if (!winner) throw new ComputeError('CONFLICT', 'The purchase changed underneath; retry');
+    if (!sameRequest(winner, input))
+      throw new ComputeError('CONFLICT', 'This idempotency key was used for a different purchase');
+    return viewOf(winner);
+  }
   await deps.work.enqueue(tx, purchasesWork, purchaseId);
   await deps.events.publish(tx, {
     type: 'provider.purchase.requested',
@@ -440,7 +503,7 @@ export async function requestPurchase(
 /** The `poll` of `purchaseReservation`: done once the purchase settled. */
 export const purchasePoll = {
   done: (output: ProviderPurchaseView): boolean =>
-    output.state === 'purchased' || output.state === 'failed',
+    output.state === 'purchased' || output.state === 'failed' || output.state === 'unknown',
   async refresh(
     context: { sql: SqlTx },
     _input: PurchaseReservationInput,
@@ -475,6 +538,17 @@ export async function listPurchases(
 
 /** Errors worth another attempt: the provider may not have bought, or may not show it yet. */
 const retryable = new Set(['UNAVAILABLE', 'RATE_LIMITED', 'TIMEOUT']);
+
+/**
+ * The provider's own answer that this attempt bought nothing: it waits for what an earlier attempt
+ * may have bought to show. It leaves the purchase as uncertain as it was.
+ */
+function propagating(error: unknown): boolean {
+  return (
+    isComputeError(error, 'UNAVAILABLE') &&
+    (error.details as { reason?: unknown } | undefined)?.reason === 'purchase-propagating'
+  );
+}
 const maxAttempts = 20;
 const retryMs = (attempt: number) => Math.min(15 * 60_000, 15_000 * 2 ** Math.min(attempt, 6));
 
@@ -508,6 +582,7 @@ export async function reconcilePurchase(
   const account = await sql.transaction((tx) => readAccount(tx, claimed.account_id));
   if (!account) return undefined;
   let bought: ExternalReservation;
+  const startedAt = deps.clock.now();
   try {
     // Purchases stay the platform's even if the account changed hands since the request.
     if (
@@ -522,32 +597,44 @@ export async function reconcilePurchase(
     const client = await deps.clients.client(account, deps);
     if (typeof client.purchaseReservation !== 'function')
       throw new ComputeError('UNSUPPORTED', `Provider ${account.provider} cannot buy capacity`);
+    const attempt: PurchaseAttempt = {
+      attempt: Number(claimed.attempts),
+      requestedAt: claimed.created_at.getTime(),
+      ...(claimed.uncertain_since ? { uncertainSince: claimed.uncertain_since.getTime() } : {}),
+    };
     bought = await client.purchaseReservation(
       claimed.offering_id,
       callContext(deps, `purchase:${claimed.id}`, signal),
+      attempt,
     );
   } catch (error) {
     const failure = safeError(error);
     // A failure that is not the provider's answer (a timeout, a dropped connection) may or may not
-    // have bought: try again with the same key, which the provider makes idempotent.
-    const again =
-      (!isComputeError(error) || retryable.has(error.code)) &&
-      Number(claimed.attempts) < maxAttempts;
-    await sql.transaction(async (tx) => {
-      if (again) {
-        await tx.query(
-          `UPDATE provider_purchases SET error = $2::jsonb, updated_at = compute_now() WHERE id = $1`,
-          [claimed.id, JSON.stringify(failure)],
-        );
-        return;
-      }
-      await tx.query(
-        `UPDATE provider_purchases SET state = 'failed', error = $2::jsonb, updated_at = compute_now()
-          WHERE id = $1 AND state = 'purchasing'`,
-        [claimed.id, JSON.stringify(failure)],
+    // have bought: try again with the same key, which the provider makes idempotent, and tell it
+    // when this attempt started (it waits for what it may have bought before buying again).
+    const retry = !isComputeError(error) || retryable.has(error.code);
+    const uncertain = retry && !propagating(error);
+    const again = retry && Number(claimed.attempts) < maxAttempts;
+    // Out of attempts while one may have bought: money may have been spent, so not 'failed'.
+    const state = again
+      ? undefined
+      : retry && (uncertain || claimed.uncertain_since)
+        ? 'unknown'
+        : 'failed';
+    const settled = await sql.transaction(async (tx) => {
+      const { rows } = await tx.query<{ id: string }>(
+        `UPDATE provider_purchases
+            SET state = COALESCE($3, state), error = $2::jsonb,
+                uncertain_since = CASE WHEN $4::boolean THEN $5::timestamptz ELSE uncertain_since END,
+                updated_at = compute_now()
+          WHERE id = $1 AND state = 'purchasing'
+          RETURNING id`,
+        [claimed.id, JSON.stringify(failure), state ?? null, uncertain, new Date(startedAt)],
       );
+      // Only the run that settled the purchase says so (a concurrent run may have recorded it).
+      if (!state || !rows[0]) return false;
       await deps.events.publish(tx, {
-        type: 'provider.purchase.failed',
+        type: state === 'unknown' ? 'provider.purchase.unknown' : 'provider.purchase.failed',
         subject: `provider-account/${claimed.account_id}`,
         tenantId: claimed.tenant_id,
         data: {
@@ -557,9 +644,13 @@ export async function reconcilePurchase(
           code: failure.code,
         },
       });
+      return true;
     });
-    if (!again)
-      deps.log.warn('vps.purchase_failed', { purchaseId: claimed.id, code: failure.code });
+    if (settled)
+      deps.log.warn(state === 'unknown' ? 'vps.purchase_unknown' : 'vps.purchase_failed', {
+        purchaseId: claimed.id,
+        code: failure.code,
+      });
     return again ? deps.clock.now() + retryMs(Number(claimed.attempts)) : undefined;
   }
   await sql.transaction(async (tx) => {

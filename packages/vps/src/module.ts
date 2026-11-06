@@ -1427,6 +1427,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       offers: defineMethod({
         action: 'compute:providers:read',
         kind: 'read',
+        // A provider read: it runs with no transaction open (the read-only executor).
+        transaction: 'manual',
         resource: accountResource,
         validate: describedBy(schemas.accountOffers, (raw) => {
           const input = parseAccountRef(raw, ['query']);
@@ -1557,10 +1559,12 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         handler: (context, input) => requestDiscovery(depsOf(context), context.sql, input),
         poll: discoverPoll,
       }),
-      // AWS A3: buying capacity. Reading offerings is a provider read; buying is root-only.
+      // AWS A3: buying capacity, root-only. Reading offerings is a provider read (no spend), made
+      // with no transaction open.
       reservationOfferings: defineMethod({
         action: 'compute:providers:read',
         kind: 'read',
+        transaction: 'manual',
         resource: accountResource,
         validate: describedBy(purchaseSchemas.reservationOfferings, parseReservationOfferings),
         handler: (context, input) =>
@@ -1568,6 +1572,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
             purchaseDeps(context),
             context.sql,
             input,
+            context.caller,
             context.signal ?? new AbortController().signal,
           ),
       }),
@@ -1583,7 +1588,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
               ? { status: 'replay' as const, result: existing }
               : { status: 'decide' as const, resource: accountResource(input) };
           },
-          describe: describePurchase,
+          describe: (input) => describePurchase(input, providers.values()),
         },
         handler: (context, input) =>
           requestPurchase(purchaseDeps(context), context.sql, input, context.caller),

@@ -1187,6 +1187,12 @@ export interface ProviderInput<C> {
   /** A key no two accounts of this provider may share (e.g. a federation audience). Pure; no I/O. */
   accountKey?(config: C): string | undefined;
   /**
+   * (AWS A3) A person-readable account of a `ReservationOffering` id (what, where, when, what it
+   * costs), shown to whoever approves the purchase; undefined for an id this provider does not
+   * issue. Pure; no I/O.
+   */
+  describeOffering?(offeringId: string): string | undefined;
+  /**
    * (v1.0, D11/D12) How this provider's cost rows relate to what compute meters. Pure; no I/O. A record may
    * be a probe built from a pass-through rule's pattern (`sku` and `skuDescription` = the pattern, `service`
    * empty): a matcher treats an empty service as possibly its compute service.
