@@ -218,6 +218,7 @@ describe('liveEc2Fetch', () => {
       ['CreateRouteTable', '<CreateRouteTableResponse><routeTable><routeTableId>rtb-01</routeTableId><vpcId>vpc-01</vpcId></routeTable></CreateRouteTableResponse>', { kind: 'route-table', id: 'rtb-01' }],
       ['CreateNetworkAcl', '<CreateNetworkAclResponse><networkAcl><networkAclId>acl-01</networkAclId><vpcId>vpc-01</vpcId></networkAcl></CreateNetworkAclResponse>', { kind: 'network-acl', id: 'acl-01' }],
       ['CreateVolume', '<CreateVolumeResponse><volumeId>vol-01</volumeId></CreateVolumeResponse>', { kind: 'volume', id: 'vol-01' }],
+      ['CreateVpcEndpoint', '<CreateVpcEndpointResponse><vpcEndpoint><vpcEndpointId>vpce-01</vpcEndpointId><vpcId>vpc-01</vpcId></vpcEndpoint></CreateVpcEndpointResponse>', { kind: 'vpc-endpoint', id: 'vpce-01' }],
       ['AllocateAddress', '<AllocateAddressResponse><publicIp>192.0.2.1</publicIp><allocationId>eipalloc-01</allocationId></AllocateAddressResponse>', { kind: 'elastic-ip', id: 'eipalloc-01' }],
     ];
     for (const [action, answer, expected] of cases) {

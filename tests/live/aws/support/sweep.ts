@@ -141,6 +141,19 @@ const ec2Deleters: Record<string, Deleter> = {
       await c.ec2('DeleteInternetGateway', { InternetGatewayId: gateway });
     },
   },
+  // A gateway endpoint holds routes in the VPC's route tables. DeleteVpcEndpoints answers 200 and lists
+  // what it could not delete in `unsuccessful`.
+  'vpc-endpoint': {
+    rank: 4,
+    async remove(c, a) {
+      const answer = await c.ec2('DeleteVpcEndpoints', { VpcEndpointId: [id(a)] });
+      for (const item of answer.items('unsuccessful')) {
+        const error = item.child('error');
+        const code = error?.textOf('code') ?? 'Unknown';
+        throw new ComputeError(code.endsWith('.NotFound') ? 'NOT_FOUND' : 'PROVIDER_ERROR', `DeleteVpcEndpoints: ${error?.textOf('message') ?? code}`, undefined, { code });
+      }
+    },
+  },
   // A subnet's route table and network ACL associations go with it.
   subnet: { rank: 5, remove: (c, a) => c.ec2('DeleteSubnet', { SubnetId: id(a) }).then(() => {}) },
   'route-table': { rank: 6, remove: (c, a) => c.ec2('DeleteRouteTable', { RouteTableId: id(a) }).then(() => {}) },

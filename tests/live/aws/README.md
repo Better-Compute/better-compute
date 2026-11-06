@@ -60,7 +60,8 @@ provider has no such feature yet (`networks`, `pollEvents`, Spot offers). It tak
 The provider's fetch goes through `liveEc2Fetch` (`support/live.ts`). It answers a refused call the way EC2 would
 (403 `UnauthorizedOperation`), so nothing is sent: an instance type off the allow-list in any `…InstanceType`
 parameter, a launch of more than one instance, or any purchase, dedicated host, capacity reservation, NAT gateway or
-fleet. Every instance, VPC, subnet, security group, gateway, route table, network ACL, volume and Elastic IP that EC2
+fleet. Every instance, VPC, subnet, security group, internet gateway, gateway endpoint, route table, network ACL, volume and
+Elastic IP that EC2
 creates is recorded at once and tagged with the run's tags.
 
 Files create their fixtures through `support/resources.ts` (`liveAws`): each is tagged with the run's tags and its

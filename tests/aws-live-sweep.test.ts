@@ -16,7 +16,14 @@ const arn = (service: string, resource: string, account = SANDBOX) => `arn:aws:$
 
 function world(
   resources: { arn: string; tags: Record<string, string> }[],
-  options: { account?: string; pageSize?: number; buckets?: Map<string, FakeBucket>; s3PageSize?: number; failKeys?: Set<string> } = {},
+  options: {
+    account?: string;
+    pageSize?: number;
+    buckets?: Map<string, FakeBucket>;
+    s3PageSize?: number;
+    failKeys?: Set<string>;
+    ec2Answers?: Record<string, () => string>;
+  } = {},
 ) {
   const emu = new AwsEmulator(NOW);
   stsFake(emu, { account: options.account ?? SANDBOX });
@@ -25,6 +32,7 @@ function world(
   recorderFake(emu, 'ec2', 'query', log, {
     DescribeInternetGateways: () =>
       `<DescribeInternetGatewaysResponse><internetGatewaySet><item><internetGatewayId>igw-1</internetGatewayId><attachmentSet><item><vpcId>vpc-1</vpcId><state>available</state></item></attachmentSet></item></internetGatewaySet></DescribeInternetGatewaysResponse>`,
+    ...options.ec2Answers,
   });
   recorderFake(emu, 'events', 'json', log, { ListTargetsByRule: () => ({ Targets: [{ Id: 't1' }, { Id: 't2' }] }) });
   for (const [service, protocol] of [
@@ -98,6 +106,7 @@ describe('sweepTestRuns', () => {
       tagged(arn('ec2', 'subnet/subnet-1')),
       tagged(arn('ec2', 'security-group/sg-1')),
       tagged(arn('ec2', 'internet-gateway/igw-1')),
+      tagged(arn('ec2', 'vpc-endpoint/vpce-1')),
       tagged(arn('ec2', 'route-table/rtb-1')),
       tagged(arn('ec2', 'network-acl/acl-1')),
       tagged(arn('ec2', 'volume/vol-1')),
@@ -107,7 +116,7 @@ describe('sweepTestRuns', () => {
     ]);
     const report = await sweep(true);
     expect(report.pending).toEqual([]);
-    expect(report.deleted).toHaveLength(10);
+    expect(report.deleted).toHaveLength(11);
     expect(order()).toEqual([
       'DeleteStack',
       'TerminateInstances',
@@ -117,6 +126,8 @@ describe('sweepTestRuns', () => {
       'DescribeInternetGateways',
       'DetachInternetGateway',
       'DeleteInternetGateway',
+      // Gateway endpoints hold routes in the VPC's tables; they go before the tables and the VPC.
+      'DeleteVpcEndpoints',
       // A subnet's route table and NACL associations go with it, so subnets come first.
       'DeleteSubnet',
       'DeleteRouteTable',
@@ -147,6 +158,20 @@ describe('sweepTestRuns', () => {
     expect(call('DeleteSecret')).toEqual({ SecretId: arn('secretsmanager', 'secret:bc-live/x-AbCdEf'), ForceDeleteWithoutRecovery: true });
     expect(call('DeleteLogGroup')).toEqual({ logGroupName: '/bc-live/x' });
     expect(call('ScheduleKeyDeletion')).toEqual({ KeyId: arn('kms', 'key/1234abcd-12ab-34cd-56ef-1234567890ab'), PendingWindowInDays: 7 });
+  });
+
+  it('reads DeleteVpcEndpoints failures from its unsuccessful set: gone is deleted, in use is pending', async () => {
+    const unsuccessful = (code: string) =>
+      `<DeleteVpcEndpointsResponse><unsuccessful><item><resourceId>vpce-x</resourceId><error><code>${code}</code><message>m</message></error></item></unsuccessful></DeleteVpcEndpointsResponse>`;
+    for (const [code, outcome] of [
+      ['InvalidVpcEndpointId.NotFound', 'deleted'],
+      ['DependencyViolation', 'pending'],
+    ] as const) {
+      const { sweep } = world([tagged(arn('ec2', 'vpc-endpoint/vpce-x'))], { ec2Answers: { DeleteVpcEndpoints: () => unsuccessful(code) } });
+      const report = await sweep(true);
+      if (outcome === 'deleted') expect(report.deleted, code).toEqual([arn('ec2', 'vpc-endpoint/vpce-x')]);
+      else expect(report.pending, code).toEqual([{ arn: arn('ec2', 'vpc-endpoint/vpce-x'), reason: expect.stringContaining(code) }]);
+    }
   });
 
   it('keeps a resource still in use pending, and counts one already gone as deleted', async () => {

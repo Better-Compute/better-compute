@@ -166,7 +166,17 @@ export function assertLiveInstanceType(type: string): string {
 
 /** What an EC2 create made, as the resource type of its ARN (`arn:…:ec2:…:<kind>/<id>`). */
 export interface LiveCreated {
-  kind: 'instance' | 'vpc' | 'subnet' | 'security-group' | 'internet-gateway' | 'route-table' | 'network-acl' | 'volume' | 'elastic-ip';
+  kind:
+    | 'instance'
+    | 'vpc'
+    | 'subnet'
+    | 'security-group'
+    | 'internet-gateway'
+    | 'route-table'
+    | 'network-acl'
+    | 'vpc-endpoint'
+    | 'volume'
+    | 'elastic-ip';
   id: string;
 }
 
@@ -187,6 +197,8 @@ const createdBy: Record<string, (root: XmlElement) => LiveCreated[]> = {
   CreateInternetGateway: (root) => one('internet-gateway', root.child('internetGateway')?.textOf('internetGatewayId')),
   CreateRouteTable: (root) => one('route-table', root.child('routeTable')?.textOf('routeTableId')),
   CreateNetworkAcl: (root) => one('network-acl', root.child('networkAcl')?.textOf('networkAclId')),
+  // provider-aws (A2) adds S3 and DynamoDB gateway endpoints for a subnet's private service access.
+  CreateVpcEndpoint: (root) => one('vpc-endpoint', root.child('vpcEndpoint')?.textOf('vpcEndpointId')),
   CreateVolume: (root) => one('volume', root.textOf('volumeId')),
   AllocateAddress: (root) => one('elastic-ip', root.textOf('allocationId')),
 };
