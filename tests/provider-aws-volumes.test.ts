@@ -28,20 +28,24 @@ function world(config: Partial<AwsConfig> & Record<string, unknown> = {}) {
     error: (m, f) => lines.push(`${m} ${JSON.stringify(f ?? {})}`),
   };
   const provider = awsProvider({ fetch: emu.fetch, credentials: emu.ambient });
-  const impl = provider.create(
-    provider.config.parse({
-      region: 'us-east-1',
-      zones: ['us-east-1a', 'us-east-1b'],
-      ...config,
-    }) as AwsConfig,
-    {
-      clock: emu.clock,
-      log,
-      secrets: { resolve: async () => '' },
-      account: { id: 'pa_platform', tenantId: 'root', platform: true },
-    },
-  ) as ProviderImpl;
+  const create = () =>
+    provider.create(
+      provider.config.parse({
+        region: 'us-east-1',
+        zones: ['us-east-1a', 'us-east-1b'],
+        ...config,
+      }) as AwsConfig,
+      {
+        clock: emu.clock,
+        log,
+        secrets: { resolve: async () => '' },
+        account: { id: 'pa_platform', tenantId: 'root', platform: true },
+      },
+    ) as ProviderImpl;
+  const impl = create();
   const volumes = impl.volumes!;
+  /** Another control-plane process on the same account: none of this one's memos. */
+  const fresh = () => create().volumes!;
   const call = (key = 'pv_test'): CallContext => ({
     idempotencyKey: key,
     signal: new AbortController().signal,
@@ -71,7 +75,7 @@ function world(config: Partial<AwsConfig> & Record<string, unknown> = {}) {
     throw new Error('did not settle');
   };
   const managed = { 'better-compute:managed': 'true', 'better-compute:volume': 'bc-v-made' };
-  return { emu, ec2, ebs, impl, volumes, call, spec, settle, lines, managed };
+  return { emu, ec2, ebs, impl, volumes, fresh, call, spec, settle, lines, managed };
 }
 
 async function rejects(promise: Promise<unknown>, code: string, reason?: string) {
@@ -259,6 +263,51 @@ describe('provider-aws volumes: ensure, get, delete', () => {
     await volumes.ensureVolume(spec({ type: 'gp3', iops: 6000, throughputMiBps: 500 }), call());
     const p = emu.calls('CreateVolume')[0]!.params;
     expect([p.get('Iops'), p.get('Throughput')]).toEqual(['6000', '500']);
+  });
+
+  it('a volume deleted outside better-compute is an error, never pending forever', async () => {
+    const { volumes, fresh, call, spec, emu, ebs } = world();
+    const made = await volumes.ensureVolume(spec(), call());
+    ebs.tick();
+    expect((await volumes.ensureVolume(spec(), call())).state).toBe('ready');
+    // An operator deletes it: EBS still lists the deleting twin under the name.
+    ebs.volumes.get(made.id)!.state = 'deleting';
+    const outside = await volumes.ensureVolume(spec(), call());
+    expect(outside).toMatchObject({
+      id: made.id,
+      state: 'error',
+      outputs: { reason: 'deleted-outside' },
+    });
+    expect(outside.message).toContain('deleted outside better-compute');
+    expect(await fresh().ensureVolume(spec(), call())).toMatchObject({ state: 'error' });
+    // Gone from the listing: where EBS answers the old ClientToken with the deleted volume, that is
+    // the same error, and the id is not remembered as one this client is waiting on.
+    ebs.retainClientTokens = true;
+    ebs.tick();
+    ebs.tick();
+    expect(ebs.volumes.has(made.id)).toBe(false);
+    const again = fresh();
+    expect(await again.ensureVolume(spec(), call())).toMatchObject({
+      id: made.id,
+      state: 'error',
+      outputs: { reason: 'deleted-outside' },
+    });
+    expect(await again.getVolume(made.id, call())).toBeUndefined();
+    expect(ebs.volumes.size).toBe(0);
+    expect(emu.calls('CreateVolume')).toHaveLength(2);
+  });
+
+  it('a volume this client is deleting reads deleting, not an error', async () => {
+    const { volumes, call, spec, ebs } = world();
+    const made = await volumes.ensureVolume(spec(), call());
+    ebs.tick();
+    expect((await volumes.deleteVolume(made.id, call())).state).toBe('deleting');
+    expect(await volumes.ensureVolume(spec(), call())).toMatchObject({
+      id: made.id,
+      state: 'deleting',
+    });
+    ebs.tick();
+    expect((await volumes.ensureVolume(spec(), call())).state).toBe('deleted');
   });
 
   it('getVolume: undefined for a missing or malformed id, pending while a new one is not visible', async () => {

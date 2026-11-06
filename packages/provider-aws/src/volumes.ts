@@ -208,6 +208,21 @@ function volumeState(volume: EbsVolume, region: string): ProviderResourceState {
   }
 }
 
+const gone = (volume: EbsVolume) => volume.status === 'deleted' || volume.status === 'deleting';
+
+/**
+ * A volume of a name that was deleted outside better-compute (an operator, a cleanup script): an
+ * error vps surfaces, never pending for ever and never an empty volume in its place.
+ */
+function deletedOutside(id: string): ProviderResourceState {
+  return state(
+    id,
+    'error',
+    { reason: 'deleted-outside' },
+    `EBS volume ${id} was deleted outside better-compute`,
+  );
+}
+
 /** A snapshot as DescribeSnapshots / CreateSnapshot reports it. */
 interface EbsSnapshot {
   id: string;
@@ -279,6 +294,8 @@ export class AwsVolumes implements ProviderVolumes {
   readonly #forced = new Set<string>();
   /** volume id → the resize this client started, for the window DescribeVolumesModifications may not list it. */
   readonly #resizing = new Map<string, { sizeGiB: number; at: number }>();
+  /** volume id → when this client sent its DeleteVolume: a deleting twin of a name is then its own. */
+  readonly #deleted = new Map<string, number>();
 
   constructor(
     readonly config: AwsConfig,
@@ -494,7 +511,11 @@ export class AwsVolumes implements ProviderVolumes {
       // Made by this client and not visible to any read yet.
       if (!existing) return state(known.id, 'pending');
     }
-    if (existing) return volumeState(existing, this.config.region);
+    if (existing) {
+      if (gone(existing) && !this.#recent(this.#deleted.get(existing.id)))
+        return deletedOutside(existing.id);
+      return volumeState(existing, this.config.region);
+    }
     if (spec.snapshotId !== undefined) {
       await this.#restoreSource(spec.snapshotId, spec.sizeGiB, signal);
     }
@@ -534,6 +555,9 @@ export class AwsVolumes implements ProviderVolumes {
     }
     const made = parseVolume(doc);
     if (!made) throw fail('PROVIDER_ERROR', 'CreateVolume returned no volume', 'create');
+    // EC2 answered the name's ClientToken with the volume it made before, deleted since: never
+    // remembered as one being made (it would read pending for good), and never silently replaced.
+    if (gone(made)) return deletedOutside(made.id);
     this.#remember(name, made.id);
     return volumeState(made, this.config.region);
   }
@@ -600,6 +624,10 @@ export class AwsVolumes implements ProviderVolumes {
     try {
       await this.deps.call('DeleteVolume', { VolumeId: id }, signal);
       this.#forget(id);
+      const at = this.context.clock.now();
+      for (const [key, sent] of this.#deleted)
+        if (at - sent >= this.consistencyWindowMs) this.#deleted.delete(key);
+      this.#deleted.set(id, at);
     } catch (error) {
       if (isComputeError(error, 'NOT_FOUND')) return state(id, 'deleted');
       if (error instanceof ComputeError && error.details?.code === 'VolumeInUse')

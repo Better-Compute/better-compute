@@ -131,6 +131,13 @@ export class EbsEmulator {
   hiddenModifications = new Set<string>();
   /** Whether a failed modification still holds the next one for six hours ((verify) A12). */
   failedModificationCoolsDown = true;
+  /**
+   * Whether CreateVolume answers a ClientToken of a volume already gone with that (deleted) volume
+   * rather than making a new one ((verify) how long EC2 keeps a token after the volume is deleted).
+   */
+  retainClientTokens = false;
+  /** token → the deleted volume it made (with retainClientTokens). */
+  readonly #retired = new Map<string, EmuVolume>();
   #next = 0;
 
   constructor(
@@ -193,7 +200,11 @@ export class EbsEmulator {
     for (const volume of this.volumes.values()) {
       if (volume.state === 'creating') volume.state = 'available';
       else if (volume.state === 'deleting') volume.state = 'deleted';
-      else if (volume.state === 'deleted') this.volumes.delete(volume.id);
+      else if (volume.state === 'deleted') {
+        this.volumes.delete(volume.id);
+        if (this.retainClientTokens && volume.clientToken)
+          this.#retired.set(volume.clientToken, volume);
+      }
       const attachment = volume.attachment;
       // AttachVolume leaves DeleteOnTermination false: a terminating instance lets its volumes go
       // (detaching while it shuts down, available once it is terminated), stuck guest or not.
@@ -562,6 +573,8 @@ export class EbsEmulator {
           );
         return ec2Response('CreateVolume', this.#volumeXml(existing));
       }
+      const retired = this.retainClientTokens ? this.#retired.get(token) : undefined;
+      if (retired) return ec2Response('CreateVolume', this.#volumeXml(retired));
     }
     const zone = p.get('AvailabilityZone') ?? '';
     if (!this.ec2.zones.has(zone))
