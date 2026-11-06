@@ -119,8 +119,12 @@ An account whose client has `pollEvents` (an EC2 account's EventBridge → SQS i
 15 s (`vps({ events: { every, waitMs, budgetMs } })`). The long poll runs outside any transaction;
 every event of a batch is handled (one AWS Health message can name hundreds of instances), in
 transactions of at most 100 events, and the batch is acked only after the last one commits. A run
-polls again while the queue returns full batches of messages (`ProviderEventBatch.received`). Event ids are kept 24 h in
-`provider_event_seen`, so a redelivered event is processed once. Events never write machine state:
+polls again while the queue returns full batches of messages (`ProviderEventBatch.received`). Event ids are kept in
+`provider_event_seen` for `retainMs` (24 h) after they were last delivered, so a redelivered event is
+processed once and an id that keeps coming (a still-scheduled event the no-queue scan reports every
+5 minutes) stays seen. An event older than the retention less a margin (23 h by default) is dropped:
+its id may be pruned, and the queue keeps messages 14 days. An interruption warning whose deadline
+has passed only wakes the instance reconcile. Events never write machine state:
 
 | Event | Effect |
 |---|---|

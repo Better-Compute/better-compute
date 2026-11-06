@@ -63,7 +63,10 @@ export interface ProviderEventsOptions {
    * polls again while batches come back full and the budget lasts.
    */
   budgetMs?: number;
-  /** How long seen event ids are kept (default 24 h). */
+  /**
+   * How long seen event ids are kept after they were last delivered (default 24 h). An event older
+   * than this, less a margin (an hour at most), is dropped unprocessed: its id may be pruned.
+   */
   retainMs?: number;
 }
 
@@ -86,6 +89,9 @@ const maxBatch = 10;
 const maxChunk = 100;
 const maxRounds = 8;
 
+/** How old an event may be for `retainMs`: the retention less a margin (a quarter, an hour at most). */
+export const maxEventAgeMs = (retainMs: number): number => retainMs - Math.min(3_600_000, retainMs / 4);
+
 /** Whether a client reads provider events. */
 const polls = (client: ProviderImpl): boolean => typeof client.pollEvents === 'function';
 
@@ -103,7 +109,7 @@ export function providerEventsReconciler(
     async run(context, key) {
       const resolved = deps(context);
       if (key === 'all') await seedAccounts(resolved, context, retainMs);
-      else await pollAccount(resolved, context, key, { waitMs, budgetMs });
+      else await pollAccount(resolved, context, key, { waitMs, budgetMs, maxAgeMs: maxEventAgeMs(retainMs) });
       return 'DONE';
     },
   };
@@ -145,7 +151,7 @@ async function pollAccount(
   deps: InstanceDeps,
   context: ReconcileContext,
   accountId: string,
-  limits: { waitMs: number; budgetMs: number },
+  limits: { waitMs: number; budgetMs: number; maxAgeMs: number },
 ): Promise<void> {
   const account = await context.sql.transaction((tx) => readAccount(tx, accountId));
   if (!account) return;
@@ -189,7 +195,9 @@ async function pollAccount(
     const events = batch.events;
     for (let start = 0; start < events.length; start += maxChunk) {
       const chunk = events.slice(start, start + maxChunk);
-      await context.sql.transaction((tx) => handleEvents(deps, tx, account, chunk));
+      await context.sql.transaction((tx) =>
+        handleEvents(deps, tx, account, chunk, { maxAgeMs: limits.maxAgeMs }),
+      );
     }
     // Only after every chunk committed: a failure above leaves the batch to come again.
     try {
@@ -215,20 +223,39 @@ interface Target {
 }
 
 /**
- * One batch in one transaction: new ids only (`provider_event_seen`), then each event's effect on
- * the live instance or joined node its machine is. Returns the ids handled.
+ * Some events in one transaction: events older than `maxAgeMs` (default 23 h) are dropped, then
+ * new ids only (`provider_event_seen`; a repeated id's `seen_at` is refreshed, so an id that keeps
+ * coming, like a still-scheduled event the no-queue scan reports every 5 minutes, stays seen), then
+ * each event's effect on the live instance or joined node its machine is. Returns the ids handled.
  */
 export async function handleEvents(
   deps: InstanceDeps,
   tx: SqlTx,
   account: Pick<ProviderAccount, 'id' | 'tenantId' | 'provider'>,
   events: readonly ProviderEvent[],
+  options: { maxAgeMs?: number } = {},
 ): Promise<string[]> {
+  const oldest = deps.clock.now() - (options.maxAgeMs ?? maxEventAgeMs(86_400_000));
   const byId = new Map<string, ProviderEvent>();
-  for (const event of events)
-    if (typeof event.id === 'string' && event.id.length > 0 && event.id.length <= 256 && !byId.has(event.id))
-      byId.set(event.id, event);
+  let stale = 0;
+  for (const event of events) {
+    if (typeof event.id !== 'string' || event.id.length === 0 || event.id.length > 256 || byId.has(event.id))
+      continue;
+    // A redelivery after an outage, a DLQ redrive or lost acks: its id may be pruned by now.
+    if (!Number.isFinite(event.at) || event.at < oldest) stale += 1;
+    else byId.set(event.id, event);
+  }
+  if (stale > 0)
+    deps.log.warn('vps.provider-events: dropped provider events older than the seen-id retention', {
+      accountId: account.id,
+      stale,
+    });
   if (byId.size === 0) return [];
+  await tx.query(
+    `UPDATE provider_event_seen SET seen_at = compute_now()
+      WHERE account_id = $1 AND event_id = ANY($2::text[])`,
+    [account.id, [...byId.keys()]],
+  );
   const { rows: fresh } = await tx.query<{ event_id: string }>(
     `INSERT INTO provider_event_seen (account_id, event_id)
      SELECT $1, e FROM unnest($2::text[]) AS e ON CONFLICT DO NOTHING RETURNING event_id`,
@@ -275,7 +302,10 @@ export async function handleEvents(
         if (target.instanceId) wake.add(target.instanceId);
         break;
       case 'interruption-warning':
-        await interruption(deps, tx, account, event, target);
+        // Past its deadline the machine is reclaimed (or stopped and back): the reconcile reads
+        // which, and nothing is marked, tainted or cut on a warning that is over.
+        if (interruptionDeadline(event) > deps.clock.now())
+          await interruption(deps, tx, account, event, target);
         if (target.instanceId) wake.add(target.instanceId);
         break;
       case 'rebalance-recommended':
@@ -396,6 +426,10 @@ async function maintenance(
   );
 }
 
+/** An interruption's deadline: the provider's, or its time when it names none. */
+const interruptionDeadline = (event: ProviderEvent): number =>
+  Number.isFinite(event.deadline) ? event.deadline! : event.at;
+
 async function interruption(
   deps: InstanceDeps,
   tx: SqlTx,
@@ -403,7 +437,7 @@ async function interruption(
   event: ProviderEvent,
   target: Target,
 ): Promise<void> {
-  const deadline = Number.isFinite(event.deadline) ? event.deadline! : event.at;
+  const deadline = interruptionDeadline(event);
   if (target.instanceId)
     await conditionEvent(
       deps,

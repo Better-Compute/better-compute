@@ -169,9 +169,10 @@ describe('vps.provider-events', () => {
     // Drain whatever the create left due, so the event's wake is what we see.
     await world.fixture.database.query(`DELETE FROM work_queue WHERE kind = $1`, [instanceWork]);
     const before = await instanceRow(world, vm.id);
+    const at = world.fixture.clock.now();
     world.intake.pending.push(
-      { id: 'e-1', kind: 'machine-changed', machineId: vm.machineId, at: 1, details: { state: 'stopped' } },
-      { id: 'e-2', kind: 'machine-changed', machineId: 'us-central1-a/unknown', at: 1 },
+      { id: 'e-1', kind: 'machine-changed', machineId: vm.machineId, at, details: { state: 'stopped' } },
+      { id: 'e-2', kind: 'machine-changed', machineId: 'us-central1-a/unknown', at },
     );
     await world.poll();
     expect(world.intake.polls).toBeGreaterThanOrEqual(1);
@@ -442,6 +443,75 @@ describe('vps.provider-events', () => {
     await world.fixture.advance(15_000);
     await world.poll();
     expect(world.intake.polls).toBe(1);
+  });
+
+  it('drops an event older than the seen-id retention', async () => {
+    // A redelivery after an outage or a DLQ redrive can come back after its id was pruned: an event
+    // older than the retention (less a margin) is dropped, not processed a second time.
+    const world = await eventsWorld();
+    const vm = await world.instance('vm-1');
+    const now = world.fixture.clock.now();
+    world.intake.pending.push({
+      id: 'old-maintenance',
+      kind: 'maintenance-scheduled',
+      machineId: vm.machineId,
+      at: now - 25 * 3_600_000,
+      deadline: now + 86_400_000,
+      details: { code: 'system-reboot', status: 'scheduled' },
+    });
+    await world.poll();
+    expect(world.intake.acked).toEqual(['old-maintenance']);
+    expect((await instanceRow(world, vm.id)).conditions.map((c) => c.type)).not.toContain(
+      maintenanceCondition,
+    );
+    expect(await world.events('instance.maintenance')).toEqual([]);
+  });
+
+  it('an interruption whose deadline passed only wakes the reconcile', async () => {
+    // The machine is already reclaimed (or stopped and back): no condition, no taint, no cut.
+    const world = await eventsWorld();
+    const vm = await world.instance('vm-1');
+    await world.fixture.database.query(`DELETE FROM work_queue WHERE kind = $1`, [instanceWork]);
+    const now = world.fixture.clock.now();
+    world.intake.pending.push({
+      id: 'late-spot',
+      kind: 'interruption-warning',
+      machineId: vm.machineId,
+      at: now - 300_000,
+      deadline: now - 180_000,
+      details: { action: 'stop' },
+    });
+    await world.poll();
+    expect(world.intake.acked).toEqual(['late-spot']);
+    expect((await instanceRow(world, vm.id)).conditions.map((c) => c.type)).not.toContain(
+      interruptionCondition,
+    );
+    expect(await world.events('instance.interruption')).toEqual([]);
+    expect(await dueKeys(world, instanceWork)).toEqual([vm.id]);
+  });
+
+  it('an id that keeps coming stays seen past the retention', async () => {
+    // The no-queue scan re-emits a still-scheduled event every 5 minutes with the same id: it is
+    // processed once, not again each day after the prune.
+    const world = await eventsWorld();
+    const vm = await world.instance('vm-1');
+    const scheduled = (): ProviderEvent => ({
+      id: `status/${vm.machineId}/instance-event-0123456789abcdef0/scheduled`,
+      kind: 'maintenance-scheduled',
+      machineId: vm.machineId,
+      at: world.fixture.clock.now(),
+      deadline: world.fixture.clock.now() + 7 * 86_400_000,
+      details: { code: 'system-reboot', status: 'scheduled' },
+    });
+    for (let hour = 0; hour < 30; hour += 6) {
+      world.intake.pending.push(scheduled());
+      await world.poll();
+      await world.fixture.advance(6 * 3_600_000);
+    }
+    await world.tick(providerEventsWork, 1);
+    world.intake.pending.push(scheduled());
+    await world.poll();
+    expect(await world.events('instance.maintenance')).toHaveLength(1);
   });
 
   it('event details reach tenants only as short printable facts', () => {
