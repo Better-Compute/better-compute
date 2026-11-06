@@ -31,7 +31,15 @@ import { networkNamer, vpcForNetwork } from '../networks/vpcs.js';
 import { poolMembers } from './autoscale.js';
 import { ensureSshKeys } from './keys.js';
 import { cachedSize, gpuModelOf, listOffers } from './offers.js';
-import { assignTag, ensureTag, hasTag, isKubernetesNode, spelled, unassignTag } from './tags.js';
+import {
+  assignTag,
+  doksTagKeys,
+  ensureTag,
+  hasTag,
+  isKubernetesNode,
+  spelled,
+  unassignTag,
+} from './tags.js';
 import type { DoAction, DoDroplet, DoVpc } from './types.js';
 
 // Droplets as machines. DO has no idempotency key, so a create carries its key as a tag
@@ -340,6 +348,13 @@ export class DoCompute implements ProviderImpl {
         throw fail(
           'INVALID_INPUT',
           `label ${JSON.stringify(key)} can't be a DigitalOcean tag key: it has a colon`,
+          'label',
+        );
+      // DOKS's own tag keys would make the Droplet read as a cluster worker, never ours to delete.
+      if (doksTagKeys.has(key.toLowerCase()))
+        throw fail(
+          'INVALID_INPUT',
+          `label ${JSON.stringify(key)} is DigitalOcean Kubernetes's own tag key (k8s, k8s-worker)`,
           'label',
         );
       if (reservedKeys.has(key.toLowerCase())) continue;

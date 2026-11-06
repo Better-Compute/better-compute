@@ -697,6 +697,39 @@ describe('doks node pools', () => {
     for (const id of workers) expect(s.doks.do.state.droplets.has(Number(id))).toBe(false);
   });
 
+  it("never takes a vps Droplet for a worker: DOKS's tag keys are no label's, and k8s:<value> needs a uuid", async () => {
+    const s = await setup();
+    const request = {
+      offerId: 'nyc3/s-2vcpu-4gb',
+      image: 'ubuntu-24-04-x64',
+      userData: '#cloud-config\n',
+      name: 'inst_1',
+      sshKeys: [
+        'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICbbzkHhLXTIyRDUgXLAC0pVt8MQajr4BGKVoF5MJ71Z test@bc',
+      ],
+      labels: { team: 'web' },
+    };
+    const drops = (): number => posted(s, '/droplets').length;
+    // DOKS's own tag keys are refused as labels, in any case, before anything is sent.
+    for (const key of ['k8s', 'K8S', 'k8s-worker']) {
+      const error = await failure(
+        s.impl.create({ ...request, labels: { [key]: 'yes' } }, s.ctx()),
+      );
+      expect([error.code, error.details?.reason]).toEqual(['INVALID_INPUT', 'label']);
+    }
+    expect(drops()).toBe(0);
+    // A Droplet that carries `k8s:yes` anyway (tagged before that refusal, or by hand) is still
+    // this instance's: a retried create finds it instead of posting a second one, and it deletes.
+    const first = await s.impl.create(request, s.ctx());
+    const droplet = s.doks.do.state.droplets.get(Number(first.id))!;
+    droplet.tags.push('k8s:yes', 'k8s-worker:x');
+    const retried = await s.impl.create(request, s.ctx());
+    expect(retried.id).toBe(first.id);
+    expect(drops()).toBe(1);
+    await s.impl.delete!(first.id, s.ctx());
+    expect(posted(s, `/droplets/${first.id}`, 'DELETE')).toHaveLength(1);
+  });
+
   it('refuses differences that cannot change in place with INVALID_STATE', async () => {
     const s = await setup();
     const cluster = await readyCluster(s);
