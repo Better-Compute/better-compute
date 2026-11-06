@@ -40,6 +40,8 @@ let poolId: string;
 let server: string;
 const kubelets = new Map<string, string>(); // Kubernetes Node name → better-compute node id
 let booked: { reservationId: string; nodeId: string; allocationId: string } | undefined;
+/** The hosted token the first test's nodes joined with (read from the row bcd was applied with, not later). */
+let joinTokenId: string | undefined;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until<T>(what: string, probe: () => Promise<T | undefined | false>, timeoutMs = 60_000): Promise<T> {
@@ -153,6 +155,8 @@ describe('Kubernetes pool substrate, join and book (end to end)', () => {
       ready.cluster_id,
     ]);
     server = new URL(rows[0]!.endpoint).origin;
+    joinTokenId = ready.join_token_id;
+    expect(joinTokenId).toEqual(expect.any(String));
     expect(kube.kinds(server)).toContain('DaemonSet/bcd');
     expect(kube.get(server, '/apis/apps/v1/namespaces/bcd-system/daemonsets/bcd').spec.template.spec.nodeSelector).toEqual({
       [substratePoolLabel]: poolId,
@@ -170,7 +174,6 @@ describe('Kubernetes pool substrate, join and book (end to end)', () => {
   }, 120_000);
 
   it('revokes the token and deletes the Secret once every node joined', async () => {
-    const before = await substrate();
     const done = await until('the token to be revoked', async () => {
       await kick();
       const row = await substrate();
@@ -179,7 +182,7 @@ describe('Kubernetes pool substrate, join and book (end to end)', () => {
     expect(done).toMatchObject({ state: 'ready', nodes_listed: 2 });
     expect(kube.get(server, '/api/v1/namespaces/bcd-system/secrets/bcd-join-token')).toBeUndefined();
     const { rows } = await dev.database.query<any>(`SELECT hosted, revoked_at, uses_left FROM join_tokens WHERE id = $1`, [
-      before.join_token_id,
+      joinTokenId,
     ]);
     expect(rows[0]).toMatchObject({ hosted: 'kubernetes', uses_left: 0 });
     expect(rows[0].revoked_at).not.toBeNull();
