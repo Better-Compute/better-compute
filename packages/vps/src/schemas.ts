@@ -321,6 +321,51 @@ export const schemas = {
     },
     ['tenantId', 'provider', 'name'],
   ),
+  connectSetup: strictObject(
+    {
+      tenantId,
+      provider: providerId,
+      redirectUri: {
+        type: 'string',
+        maxLength: 2048,
+        description: 'Where the provider sends the browser back, one the platform registered (https)',
+      },
+      state: {
+        type: 'string',
+        pattern: '^[A-Za-z0-9._~-]{16,256}$',
+        description: 'The caller’s anti-forgery value, echoed back on the redirect',
+      },
+    },
+    ['tenantId', 'provider', 'redirectUri', 'state'],
+  ),
+  connectAccount: strictObject(
+    {
+      tenantId,
+      provider: providerId,
+      name: nameOf('The account name, e.g. do-main'),
+      code: {
+        type: 'string',
+        pattern: '^[A-Za-z0-9._~+/=-]{1,512}$',
+        description: 'The authorization code the redirect carried (single use)',
+      },
+      redirectUri: {
+        type: 'string',
+        maxLength: 2048,
+        description: 'The redirect URI connectSetup was given',
+      },
+      config: {
+        ...config("The rest of the account's config; the provider fills in the credential"),
+        default: {},
+      },
+      idempotencyKey: {
+        type: 'string',
+        pattern: '^[A-Za-z0-9._~:/+=-]{1,128}$',
+        maxLength: 128,
+        description: 'Makes the account id deterministic; a retry returns the account',
+      },
+    },
+    ['tenantId', 'provider', 'name', 'code', 'redirectUri'],
+  ),
   accountOffers: strictObject(
     {
       tenantId,

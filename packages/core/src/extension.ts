@@ -1112,6 +1112,35 @@ export interface ProviderAccountProbe {
   details?: { [key: string]: Json };
 }
 
+/**
+ * (P9) A provider's OAuth connect flow (`providerAccounts.connectSetup` and `connect`): the person's browser goes
+ * to `authorizeUrl`, comes back to the redirect URI with a code, and `exchange` trades the code (single use) for the
+ * credential vps seals as the new account's secret. The OAuth app's client id and secret are the platform's,
+ * held by the provider definition, never a tenant's. Each refuses a redirect URI the platform did not register
+ * (`INVALID_INPUT`).
+ */
+export interface ProviderConnect {
+  /** The config field (a `field.secret()`) that names the sealed credential, e.g. `refreshToken`. */
+  field: string;
+  /** The provider's authorization URL; `state` is the caller's anti-forgery value, echoed back on the redirect. */
+  authorizeUrl(input: { redirectUri: string; state: string }): string;
+  /** Trades an authorization code; `INVALID_INPUT` for a code the provider refuses. */
+  exchange(input: {
+    code: string;
+    redirectUri: string;
+    clock: Clock;
+    signal: AbortSignal;
+  }): Promise<ProviderConnection>;
+}
+
+/** What `ProviderConnect.exchange` answers. */
+export interface ProviderConnection {
+  /** The credential: sealed in the secret store, never stored elsewhere, logged or answered. */
+  secret: string;
+  /** What the provider says about the connected account (its id, name). JSON, never a secret. */
+  account?: { [key: string]: Json };
+}
+
 /** A provider as written for `defineProvider` (vps). Accounts are data validated by `config`. */
 export interface ProviderInput<C> {
   id: string;
@@ -1129,13 +1158,15 @@ export interface ProviderInput<C> {
   checkAccount?(config: C, context: ProviderContext & { signal: AbortSignal }): Promise<void>;
   /**
    * (P9) A read-only look at what a stored account's credential may do, for `providerAccounts.check`: the
-   * account's identity at the provider and the permissions it lacks. Runs with no transaction open. Throws
-   * when the credential is refused outright (`INVALID_CONFIG`) or the provider cannot be asked.
+   * account's identity at the provider and the permissions it lacks. Read-only at the provider. Throws when the
+   * credential is refused outright (`INVALID_CONFIG`) or the provider cannot be asked.
    */
   probeAccount?(
     config: C,
     context: ProviderContext & { signal: AbortSignal },
   ): Promise<ProviderAccountProbe>;
+  /** (P9) An OAuth connect flow, when the provider has one configured (`providerAccounts.connect`). */
+  connect?: ProviderConnect;
   /** A key no two accounts of this provider may share (e.g. a federation audience). Pure; no I/O. */
   accountKey?(config: C): string | undefined;
   /**

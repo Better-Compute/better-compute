@@ -20,6 +20,7 @@ export * from './lifecycle.js';
 export * from './status.js';
 export * from './flavors.js';
 export * from './accounts.js';
+export * from './connect.js';
 export * from './ipam.js';
 export * from './hosts.js';
 export * from './bootstraps.js';

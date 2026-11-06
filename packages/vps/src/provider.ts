@@ -9,6 +9,7 @@ const providerKeys = [
   'create',
   'checkAccount',
   'probeAccount',
+  'connect',
   'accountKey',
   'billing',
 ];
@@ -76,6 +77,18 @@ export function defineProvider<C>(provider: ProviderInput<C>): ProviderDefinitio
   for (const hook of ['checkAccount', 'probeAccount', 'accountKey'])
     if (candidate[hook] !== undefined && typeof candidate[hook] !== 'function')
       fail(hook, 'must be a function');
+  const connect = candidate.connect as Record<string, unknown> | undefined;
+  if (connect !== undefined) {
+    if (typeof connect !== 'object' || connect === null || Array.isArray(connect))
+      fail('connect', 'must be an object');
+    for (const key of Object.keys(connect))
+      if (!['field', 'authorizeUrl', 'exchange'].includes(key))
+        fail(`connect.${key}`, 'is not a known field');
+    if (typeof connect.field !== 'string' || !/^[A-Za-z][A-Za-z0-9]{0,63}$/.test(connect.field))
+      fail('connect.field', 'must name a config field');
+    for (const hook of ['authorizeUrl', 'exchange'])
+      if (typeof connect[hook] !== 'function') fail(`connect.${hook}`, 'must be a function');
+  }
   const billing = candidate.billing as Record<string, unknown> | undefined;
   if (billing !== undefined) {
     if (typeof billing !== 'object' || billing === null || Array.isArray(billing))

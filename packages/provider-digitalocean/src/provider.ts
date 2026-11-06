@@ -5,6 +5,7 @@ import { DoCompute } from './compute/droplets.js';
 import { doConfig, type DoConfig, type DoProviderOptions } from './config.js';
 import { deploymentTag } from './ids.js';
 import { doBilling, readInvoiceCosts } from './ops/costs.js';
+import { doConnect } from './ops/oauth.js';
 import { withTenantProjects } from './ops/projects.js';
 import { checkReport, probeAccount } from './probe.js';
 
@@ -29,6 +30,9 @@ function invalidConfig(message: string, reason: string): ComputeError {
 export function digitaloceanProvider(
   options: DoProviderOptions = {},
 ): ProviderDefinition<DoConfig> {
+  const connect = options.oauth
+    ? doConnect(options.oauth, options.fetch ?? globalThis.fetch.bind(globalThis))
+    : undefined;
   return defineProvider<DoConfig>({
     id: 'digitalocean',
     version: '0.1.0',
@@ -36,6 +40,8 @@ export function digitaloceanProvider(
     config: doConfig as unknown as ProviderDefinition<DoConfig>['config'],
     capabilities: ['power', 'reinstall', 'list', 'discover', 'claim', 'networks'],
     billing: doBilling,
+    // "Connect a DigitalOcean account" (P9): only when the host registered a redirect URI for its OAuth app.
+    ...(connect ? { connect } : {}),
     // providerAccounts.check (P9): the read scopes, the operations ones as optional.
     probeAccount: async (config: DoConfig, context) =>
       checkReport(await probeAccount(config, context, options, { operations: true })),

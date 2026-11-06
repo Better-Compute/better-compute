@@ -961,7 +961,7 @@ export interface ProviderAccountCheck extends ProviderAccountProbe {
 
 /**
  * `providerAccounts.check` (P9): asks the provider what a stored account's credential may do
- * (`ProviderInput.probeAccount`), with no transaction open. The stored config is validated and its refs
+ * (`ProviderInput.probeAccount`), read-only at the provider. The stored config is validated and its refs
  * checked again, and its secrets are scoped to the account exactly as a client's. A provider with only
  * `checkAccount` answers `ok` when it passes; one with neither is `UNSUPPORTED`. Errors propagate.
  */

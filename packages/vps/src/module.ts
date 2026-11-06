@@ -17,6 +17,7 @@ import {
   type Offer,
   type OfferQuery,
   type ProviderDefinition,
+  type SecretRef,
   type SecretResolver,
   type WorkloadIssuerPort,
 } from '@better-compute/core';
@@ -46,6 +47,15 @@ import {
   type ProviderAccountCheck,
   type TenantVaultPaths,
 } from './accounts.js';
+import {
+  assertConnectConfig,
+  connectedCreate,
+  connectOf,
+  parseConnectAccount,
+  parseConnectSetup,
+  type ConnectAccountInput,
+  type ConnectSetupInput,
+} from './connect.js';
 import {
   createFlavor,
   deleteFlavor,
@@ -438,6 +448,10 @@ export type VpsApi = {
     create: MethodDefinition<CreateAccountInput, ProviderAccountView>;
     list: MethodDefinition<{ tenantId: string }, { items: ProviderAccountView[] }>;
     federationSetup: MethodDefinition<FederationSetupInput, FederationSetup>;
+    /** (P9) The provider's OAuth authorization URL for a redirect URI and the caller's state. */
+    connectSetup: MethodDefinition<ConnectSetupInput, { authorizeUrl: string }>;
+    /** (P9) Trades an OAuth code for a sealed credential and stores the account (as create does). */
+    connect: MethodDefinition<ConnectAccountInput, ProviderAccountView>;
     get: MethodDefinition<AccountRef, ProviderAccountView>;
     offers: MethodDefinition<AccountRef & { query: OfferQuery }, { items: Offer[] }>;
     /** (P9) What the account's credential may do, as its provider probes it (read-only). */
@@ -783,6 +797,29 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     if (accountId === undefined) {
       accountId = await accountIdOf(context, input);
       requestAccountIds.set(input, accountId);
+    }
+    return accountId;
+  };
+  /**
+   * `providerAccounts.connect` (P9): the create request each connect becomes once its admission check sealed the
+   * credential (by its parsed input), and the account id it gets, drawn once per request as create's is.
+   */
+  const connectedRequests = new WeakMap<ConnectAccountInput, CreateAccountInput>();
+  const connectIds = new WeakMap<ConnectAccountInput, string>();
+  const connectAccountId = async (
+    context: ModuleContext & { caller?: { identityId: string } },
+    input: ConnectAccountInput,
+  ): Promise<string> => {
+    let accountId = connectIds.get(input);
+    if (accountId === undefined) {
+      accountId = await accountIdOf(context, {
+        tenantId: input.tenantId,
+        provider: input.provider,
+        name: input.name,
+        config: {},
+        ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+      });
+      connectIds.set(input, accountId);
     }
     return accountId;
   };
@@ -1377,6 +1414,103 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           };
         },
       }),
+      // OAuth-connected accounts (P9). A pure read: the provider builds its authorization URL, no provider call.
+      connectSetup: defineMethod({
+        action: 'compute:providers:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(schemas.connectSetup, parseConnectSetup),
+        handler: async (_context, input) => ({
+          authorizeUrl: connectOf(providers, input.provider).authorizeUrl({
+            redirectUri: input.redirectUri,
+            state: input.state,
+          }),
+        }),
+      }),
+      // As create, with the credential from the code: the admission check (no transaction open) exchanges the
+      // code, seals the credential and runs the provider's account checks on the full config; the handler stores
+      // the account. A refused check or a failed store deletes the sealed credential again.
+      connect: defineMethod({
+        action: 'compute:providers:manage',
+        kind: 'mutation',
+        resource: tenantResource,
+        validate: describedBy(schemas.connectAccount, parseConnectAccount),
+        admission: {
+          async prepare(context, input, tx) {
+            const decide = { status: 'decide' as const, resource: tenantResource(input) };
+            if (input.idempotencyKey === undefined) return decide;
+            const existing = await readAccount(
+              tx,
+              await connectAccountId(context, input),
+              input.tenantId,
+            );
+            if (!existing) return decide;
+            if (existing.provider !== input.provider || existing.name !== input.name)
+              throw new ComputeError(
+                'CONFLICT',
+                'This idempotency key was used for a different request',
+              );
+            return { status: 'replay', result: existing };
+          },
+          check: async (context, input) => {
+            const connect = connectOf(providers, input.provider);
+            assertConnectConfig(input, connect.field);
+            const secrets = context.secrets;
+            if (!secrets)
+              throw new ComputeError(
+                'INVALID_CONFIG',
+                'Connecting an account needs the secret broker, to seal its credential',
+              );
+            const connection = await connect.exchange({
+              code: input.code,
+              redirectUri: input.redirectUri,
+              clock: context.clock,
+              signal: context.signal ?? AbortSignal.timeout(55_000),
+            });
+            const ref = await secrets.put(input.tenantId, connection.secret);
+            const request = connectedCreate(input, connect.field, ref);
+            try {
+              await accountAdmissionCheck(context, request, {
+                id: await connectAccountId(context, input),
+                tenantId: input.tenantId,
+                name: input.name,
+              });
+            } catch (error) {
+              await secrets.delete?.(ref).catch(() => {});
+              throw error;
+            }
+            connectedRequests.set(input, request);
+          },
+        },
+        handler: async (context, input) => {
+          const request = connectedRequests.get(input);
+          if (!request)
+            throw new ComputeError('INTERNAL_ERROR', 'The connect request was not checked');
+          const ref = (request.config as Record<string, SecretRef>)[
+            connectOf(providers, input.provider).field
+          ]!;
+          let account: ProviderAccount;
+          try {
+            account = await createAccount(
+              context.sql,
+              providers,
+              request,
+              await connectAccountId(context, input),
+              accountCheck(context),
+            );
+          } catch (error) {
+            await context.secrets?.delete?.(ref).catch(() => {});
+            throw error;
+          }
+          await context.authz.upsert(context.sql, {
+            type: 'provider-account',
+            id: account.id,
+            tenantId: account.tenantId,
+            attributes: { provider: account.provider },
+          });
+          return account;
+        },
+      }),
       get: defineMethod({
         action: 'compute:providers:read',
         kind: 'read',
@@ -1409,7 +1543,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           return { items: await client.listOffers(input.query) };
         },
       }),
-      // A read-only look at what the stored credential may do (P9): the provider's probe, no transaction open.
+      // A read-only look at what the stored credential may do (P9): the provider's probe, as offers reads.
       check: defineMethod({
         action: 'compute:providers:read',
         kind: 'read',

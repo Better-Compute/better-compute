@@ -461,6 +461,8 @@ describe('apiSurface (§9.2)', () => {
       'providerAccounts.discover': 'v1.0',
       'providerAccounts.federationSetup': 'v1.0',
       'providerAccounts.check': 'v1.0',
+      'providerAccounts.connectSetup': 'v1.0',
+      'providerAccounts.connect': 'v1.0',
       'instances.attach': 'v1.0',
       'instances.detach': 'v1.0',
       'instances.reboot': 'v1.0',

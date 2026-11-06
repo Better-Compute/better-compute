@@ -2,8 +2,10 @@ import {
   ComputeError,
   type Clock,
   type Logger,
+  type ProviderConnect,
   type ProviderContext,
   type SecretRef,
+  type SecretStore,
 } from '@better-compute/core';
 
 // OAuth accounts (DigitalOcean P9, DO-D13): "Connect a DigitalOcean account" stores a refresh token as the account's
@@ -21,6 +23,8 @@ import {
 
 /** DigitalOcean's token endpoint. */
 export const defaultOAuthEndpoint = 'https://cloud.digitalocean.com/v1/oauth/token';
+/** DigitalOcean's authorization endpoint (the browser goes there to connect an account). */
+export const defaultAuthorizeEndpoint = 'https://cloud.digitalocean.com/v1/oauth/authorize';
 
 /** The host's side of OAuth accounts (`digitaloceanProvider({ oauth })`). */
 export interface DoOAuthOptions {
@@ -32,6 +36,15 @@ export interface DoOAuthOptions {
   clientSecret: () => Promise<string>;
   /** Default `https://cloud.digitalocean.com/v1/oauth/token`; https only. */
   endpoint?: string;
+  /**
+   * The redirect URIs registered for the OAuth app: "Connect a DigitalOcean account" (`providerAccounts.connect`)
+   * is offered only with at least one, and only for these, exactly as written.
+   */
+  redirectUris?: readonly string[];
+  /** The scope the connect flow asks for (default `read write`; DO's granular OAuth scopes are unverified). */
+  scope?: string;
+  /** Default `https://cloud.digitalocean.com/v1/oauth/authorize`; https only. */
+  authorizeEndpoint?: string;
 }
 
 export interface DoOAuthTokens {
@@ -281,4 +294,66 @@ export function oauthTokenSource(
 export function resetOAuthState(): void {
   inFlight.clear();
   unwritten.clear();
+}
+
+/**
+ * The host's `rotate` hook over its secret store: the rotated refresh token is written over the account's own
+ * secret ref (`SecretStore.put(tenantId, value, { ref })`), so the account keeps naming the same ref.
+ */
+export function rotateInto(store: Pick<SecretStore, 'put'>): DoOAuthOptions['rotate'] {
+  return async ({ ref, value, tenantId }) => {
+    await store.put(tenantId, value, { ref });
+  };
+}
+
+/**
+ * "Connect a DigitalOcean account" (`ProviderInput.connect`, P9): the authorization URL for a registered redirect
+ * URI, and the code exchange whose refresh token vps seals as the account's `refreshToken`. The access token the
+ * exchange also answers is dropped: the account's first request exchanges the refresh token (and rotates it).
+ * Undefined unless the host registered at least one redirect URI.
+ */
+export function doConnect(
+  options: DoOAuthOptions,
+  fetchImpl: typeof fetch,
+): ProviderConnect | undefined {
+  const allowed = new Set(options.redirectUris ?? []);
+  if (allowed.size === 0) return undefined;
+  const registered = (redirectUri: string) => {
+    if (!allowed.has(redirectUri))
+      throw oauthError(
+        'INVALID_INPUT',
+        'The redirect URI is not one the platform registered for DigitalOcean',
+        'redirectUri',
+      );
+  };
+  return {
+    field: 'refreshToken',
+    authorizeUrl({ redirectUri, state }) {
+      registered(redirectUri);
+      const url = endpointOf(options.authorizeEndpoint ?? defaultAuthorizeEndpoint);
+      url.searchParams.set('client_id', options.clientId);
+      url.searchParams.set('redirect_uri', redirectUri);
+      url.searchParams.set('response_type', 'code');
+      url.searchParams.set('scope', options.scope ?? 'read write');
+      url.searchParams.set('state', state);
+      return url.toString();
+    },
+    async exchange({ code, redirectUri, clock, signal }) {
+      registered(redirectUri);
+      const tokens = await exchangeAuthorizationCode({
+        code,
+        redirectUri,
+        clientId: options.clientId,
+        clientSecret: await options.clientSecret(),
+        fetch: fetchImpl,
+        ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
+        clock,
+        signal,
+      });
+      return {
+        secret: tokens.refreshToken,
+        ...(tokens.account ? { account: { ...tokens.account } } : {}),
+      };
+    },
+  };
 }
