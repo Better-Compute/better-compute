@@ -187,6 +187,25 @@ describe.each(cases)('$name sink', (sinkCase) => {
   });
 });
 
+describe('malformed batch responses', () => {
+  it('a response that accounts for fewer entries than were sent throws (never a silent drop)', async () => {
+    for (const name of ['SNS', 'SQS', 'EventBridge']) {
+      const emu = new AwsEmulator();
+      const world = cases.find((c) => c.name === name)!.make(emu);
+      // Replace the fake with one that answers success but lists nothing.
+      const service = name === 'SNS' ? 'sns' : name === 'SQS' ? 'sqs' : 'events';
+      emu.register(service, {
+        protocol: name === 'SNS' ? 'query' : 'json',
+        handle: () =>
+          name === 'SNS'
+            ? new Response('<PublishBatchResponse><PublishBatchResult><Successful></Successful><Failed></Failed></PublishBatchResult></PublishBatchResponse>', { status: 200 })
+            : new Response(JSON.stringify(name === 'SQS' ? { Successful: [], Failed: [] } : { FailedEntryCount: 0, Entries: [] }), { status: 200 }),
+      });
+      await expect(world.sink.deliver([event(1), event(2)])).rejects.toBeInstanceOf(ComputeError);
+    }
+  });
+});
+
 describe('sink configuration', () => {
   it('refuses malformed targets', () => {
     const emu = new AwsEmulator();

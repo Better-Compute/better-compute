@@ -1,7 +1,7 @@
 import { ComputeError, defineSink, type ComputeEvent, type EventSink } from '@better-compute/core';
 import type { QueryParams, QueryValue } from '@better-compute/aws-core';
 import { transportFor, type AwsServiceOptions } from './common.js';
-import { deliverInChunks } from './internal/batches.js';
+import { deliverInChunks, type FailedEntry } from './internal/batches.js';
 import { jsonClient, queryClient } from './internal/transport.js';
 import { utf8Bytes } from './secret-refs.js';
 
@@ -78,6 +78,12 @@ function messageSize(event: ComputeEvent): number {
   return bytes;
 }
 
+/** A batch answer must account for every entry sent; otherwise the whole chunk counts as failed. */
+function accountedFor(what: string, sent: number, succeeded: number, failed: FailedEntry[]): FailedEntry[] {
+  if (succeeded + failed.length === sent) return failed;
+  return Array.from({ length: sent }, (_, index) => ({ index, code: `${what}: ${succeeded + failed.length} of ${sent} entries answered` }));
+}
+
 function fifoIds(fifo: boolean, event: ComputeEvent) {
   return fifo ? { MessageGroupId: event.tenantId, MessageDeduplicationId: event.id.slice(0, 128) } : {};
 }
@@ -110,10 +116,11 @@ export function snsSink(options: SnsSinkOptions): EventSink {
         const params: QueryParams = { TopicArn: options.topicArn, PublishBatchRequestEntries: entries };
         const root = await client.call('PublishBatch', params);
         const result = root.child('PublishBatchResult');
-        return (result?.items('Failed') ?? []).map((member) => ({
+        const failed = (result?.items('Failed') ?? []).map((member) => ({
           index: Number(member.textOf('Id')),
           code: member.textOf('Code'),
         }));
+        return accountedFor('SNS PublishBatch', chunk.length, result?.items('Successful').length ?? 0, failed);
       }),
   });
 }
@@ -140,7 +147,7 @@ export function sqsSink(options: SqsSinkOptions): EventSink {
     id: options.id ?? 'aws-sqs',
     deliver: (events) =>
       deliverInChunks('sqs', events, { maxCount: 10, maxBytes: batchMaxBytes, size: messageSize }, async (chunk) => {
-        const result = await client.call<{ Failed?: { Id: string; Code?: string }[] }>('SendMessageBatch', {
+        const result = await client.call<{ Successful?: unknown[]; Failed?: { Id: string; Code?: string }[] }>('SendMessageBatch', {
           QueueUrl: options.queueUrl,
           Entries: chunk.map((event, index) => ({
             Id: String(index),
@@ -151,7 +158,8 @@ export function sqsSink(options: SqsSinkOptions): EventSink {
             ...fifoIds(fifo, event),
           })),
         });
-        return (result.Failed ?? []).map((entry) => ({ index: Number(entry.Id), code: entry.Code }));
+        const failed = (result.Failed ?? []).map((entry) => ({ index: Number(entry.Id), code: entry.Code }));
+        return accountedFor('SQS SendMessageBatch', chunk.length, result.Successful?.length ?? 0, failed);
       }),
   });
 }
