@@ -9,12 +9,14 @@ import {
   type OfferQuery,
   type PowerAction,
   type ProviderContext,
+  type ProviderEventBatch,
   type ProviderImpl,
 } from '@better-compute/core';
-import type { QueryClient, QueryParams, XmlElement } from '@better-compute/aws-core';
+import type { JsonClient, QueryClient, QueryParams, XmlElement } from '@better-compute/aws-core';
 import type { AccountCredentials } from './account.js';
 import { parseDiscoverTag, type AwsConfig, type AwsProviderOptions } from './config.js';
 import { clientToken, offerId, parseInstanceId, parseOfferId, tags, tagValue } from './ids.js';
+import { defaultEventSources, pollQueue } from './events.js';
 import { aliasRootDeviceOf, resolveImage, ssmImagePrefixes } from './images.js';
 import {
   toMachine,
@@ -26,6 +28,8 @@ import { packUserData } from './userdata.js';
 
 export interface AwsComputeDeps {
   ec2: QueryClient;
+  /** (A4) The event-intake queue's client, when the account names `eventQueueUrl`. */
+  sqs?: JsonClient;
   account: AccountCredentials;
   types: InstanceTypeCache;
   zones: ZoneCache;
@@ -785,6 +789,34 @@ export class AwsCompute implements ProviderImpl {
       'DeleteTags',
       { ResourceId: [id], Tag: [{ Key: tags.instance, Value: instanceId }, { Key: tags.managed }] },
       context.signal,
+    );
+  }
+
+  // --- Events (A4) --------------------------------------------------------------------------------
+
+  /**
+   * The account's EventBridge events from its intake queue (`eventQueueUrl`), authenticated by
+   * account, region and source. Messages are deleted only by the batch's `ack`.
+   */
+  async pollEvents(
+    context: CallContext,
+    options: { waitMs: number; max: number },
+  ): Promise<ProviderEventBatch> {
+    const { sqs } = this.deps;
+    if (sqs === undefined || this.config.eventQueueUrl === undefined)
+      return { events: [], ack: async () => {} };
+    return pollQueue(
+      {
+        sqs,
+        queueUrl: this.config.eventQueueUrl,
+        region: this.config.region,
+        sources: this.config.eventSources ?? defaultEventSources,
+        account: async (signal) =>
+          (await this.deps.account.verify({ signal, clock: this.context.clock })).account,
+        log: context.log,
+      },
+      context,
+      options,
     );
   }
 }
