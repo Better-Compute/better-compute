@@ -461,6 +461,8 @@ describe.skipIf(!enabled)('provider-digitalocean live', () => {
       const input = (name: string) => ({
         offerId: `${region}/${size}`,
         image: 'live-image@1',
+        // As vps resolves it for the instance's tenant.
+        catalogImage: { tenantId: 'live', sha256: importSha256!.toLowerCase() },
         userData: '#cloud-config\n',
         name,
       });

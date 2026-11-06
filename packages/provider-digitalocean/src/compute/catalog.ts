@@ -1,4 +1,9 @@
-import { ComputeError, isComputeError, type Logger } from '@better-compute/core';
+import {
+  ComputeError,
+  isComputeError,
+  type CatalogImageIdentity,
+  type Logger,
+} from '@better-compute/core';
 import type { DoClient } from '../client/http.js';
 import { labels, tagFor } from '../ids.js';
 import type { DoAction, DoImage } from './types.js';
@@ -30,12 +35,17 @@ export interface CatalogImageLocation {
   distribution?: string;
 }
 
-/** The host's catalog: provision's image catalog plus a BlobStore that can presign a GET. */
+/**
+ * The host's catalog: provision's image catalog plus a BlobStore that can presign a GET. A catalog
+ * ref is unique only within a tenant (and may be private), so the source is handed the image as
+ * vps resolved it for the instance's tenant (`tenantId`, `sha256`) and must look it up by those,
+ * never by the bare ref; the provider refuses a location whose digest differs.
+ */
 export interface CatalogImageSource {
-  /** The catalog image `ref` names; undefined when the catalog has none. */
+  /** The catalog image `ref` names in `tenantId`'s catalog; undefined when it has none. */
   locate(
     ref: string,
-    options: { expiresInSeconds: number; signal: AbortSignal },
+    options: CatalogImageIdentity & { expiresInSeconds: number; signal: AbortSignal },
   ): Promise<CatalogImageLocation | undefined>;
 }
 
@@ -129,9 +139,18 @@ export class DoCatalogImages {
     return tagged(image, this.#managedTag) && tagged(image, this.#deploymentTag);
   }
 
-  /** The catalog's location of `ref`, checked; the URL is not looked at beyond its scheme. */
-  protected async locate(ref: string, signal: AbortSignal): Promise<CatalogImageLocation> {
+  /**
+   * The catalog's location of `ref` as resolved for `identity`'s tenant, checked; the URL is not
+   * looked at beyond its scheme.
+   */
+  protected async locate(
+    ref: string,
+    identity: CatalogImageIdentity,
+    signal: AbortSignal,
+  ): Promise<CatalogImageLocation> {
     const location = await this.#source.locate(ref, {
+      tenantId: identity.tenantId,
+      sha256: identity.sha256.toLowerCase(),
       expiresInSeconds: importUrlTtlSeconds,
       signal,
     });
@@ -139,6 +158,13 @@ export class DoCatalogImages {
       throw fail('INVALID_CONFIG', `catalog image ${ref} does not exist`, 'catalogImage');
     if (!/^[0-9a-f]{64}$/i.test(location.sha256))
       throw fail('INVALID_CONFIG', `catalog image ${ref} has no SHA-256 digest`, 'catalogImage');
+    // The image vps resolved for the tenant is the one imported, or nothing is.
+    if (location.sha256.toLowerCase() !== identity.sha256.toLowerCase())
+      throw fail(
+        'INVALID_CONFIG',
+        `the catalog source located a different artifact for ${ref} than the one resolved`,
+        'catalogImageDigest',
+      );
     if (!formats.has(location.format))
       throw fail(
         'UNSUPPORTED',
@@ -236,12 +262,17 @@ export class DoCatalogImages {
   }
 
   /**
-   * The id of the import of `ref` that can boot in `region`. Starts the import, or a transfer of
-   * an import that is in another region, and throws `UNAVAILABLE` (`retryAfterMs`) until it is
-   * there.
+   * The id of the import of `ref` (as resolved for `identity`'s tenant) that can boot in `region`.
+   * Starts the import, or a transfer of an import that is in another region, and throws
+   * `UNAVAILABLE` (`retryAfterMs`) until it is there.
    */
-  async imageIn(ref: string, region: string, signal: AbortSignal): Promise<number> {
-    const location = await this.locate(ref, signal);
+  async imageIn(
+    ref: string,
+    identity: CatalogImageIdentity,
+    region: string,
+    signal: AbortSignal,
+  ): Promise<number> {
+    const location = await this.locate(ref, identity, signal);
     const tag = imageTag(location.sha256);
     let images = await this.byTag(tag, signal);
     if (images.length === 0) {

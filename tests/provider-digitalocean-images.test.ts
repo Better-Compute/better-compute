@@ -105,10 +105,15 @@ const presigned =
 
 /** A catalog source with one image; `null` makes it know none. */
 function catalogSource(over: Partial<CatalogImageLocation> | null = {}) {
-  const calls: { ref: string; expiresInSeconds: number }[] = [];
+  const calls: { ref: string; tenantId: string; sha256: string; expiresInSeconds: number }[] = [];
   const source: CatalogImageSource = {
     async locate(ref, options) {
-      calls.push({ ref, expiresInSeconds: options.expiresInSeconds });
+      calls.push({
+        ref,
+        tenantId: options.tenantId,
+        sha256: options.sha256,
+        expiresInSeconds: options.expiresInSeconds,
+      });
       if (over === null) return undefined;
       return { url: presigned, sha256: digest, format: 'qcow2', compression: 'gzip', ...over };
     },
@@ -127,6 +132,8 @@ function capturingLog() {
 }
 
 const catalogRef = 'ubuntu-24.04-server@2026.09';
+/** The catalog image as vps resolved it for the instance's tenant. */
+const pinned = { tenantId: 'acme', sha256: digest };
 const imagePosts = (emu: DoEmulator) =>
   emu.requests.filter((r) => r.method === 'POST' && r.url.pathname === '/v2/images');
 const ourImageTags = ['better-compute-managed:true', deploymentTag('default'), imageTag(digest)];
@@ -141,7 +148,7 @@ describe('catalog image import', () => {
     const compute = await build(emu, doAccount, { catalogImages: source });
 
     // The import starts; the create waits for it without blocking.
-    const first = await failure(compute.create(request({ image: catalogRef }), ctx('k')));
+    const first = await failure(compute.create(request({ image: catalogRef, catalogImage: pinned }), ctx('k')));
     expect(first.code).toBe('UNAVAILABLE');
     expect(first.details).toMatchObject({ reason: 'imageImporting', retryAfterMs: 30_000 });
     expect(dropletPosts(emu)).toHaveLength(0);
@@ -154,10 +161,15 @@ describe('catalog image import', () => {
       description: `better-compute catalog image ${catalogRef}`,
       tags: ourImageTags,
     });
-    expect(calls[0]).toEqual({ ref: catalogRef, expiresInSeconds: 6 * 3600 });
+    expect(calls[0]).toEqual({
+      ref: catalogRef,
+      tenantId: 'acme',
+      sha256: digest,
+      expiresInSeconds: 6 * 3600,
+    });
 
     // The retry finds the import (no second one) and creates from it once it is there.
-    const machine = await compute.create(request({ image: catalogRef }), ctx('k'));
+    const machine = await compute.create(request({ image: catalogRef, catalogImage: pinned }), ctx('k'));
     expect(imagePosts(emu)).toHaveLength(1);
     const [imported] = importsOf(emu);
     expect(imported!.status).toBe('available');
@@ -166,7 +178,7 @@ describe('catalog image import', () => {
     expect(machine.state).toBe('pending');
 
     // Another instance of the same image reuses the import.
-    await compute.create(request({ name: 'inst_2', image: catalogRef }), ctx('k2'));
+    await compute.create(request({ name: 'inst_2', image: catalogRef, catalogImage: pinned }), ctx('k2'));
     expect(imagePosts(emu)).toHaveLength(1);
     expect(dropletPosts(emu)).toHaveLength(2);
   });
@@ -184,7 +196,7 @@ describe('catalog image import', () => {
         created_at: '2026-11-05T09:00:00Z',
       }).id;
     });
-    await compute.create(request({ image: catalogRef }), ctx('k'));
+    await compute.create(request({ image: catalogRef, catalogImage: pinned }), ctx('k'));
     expect((dropletPosts(emu)[0]!.body as { image: unknown }).image).toBe(rival);
     expect(imagePosts(emu)).toHaveLength(1);
     const deleted = emu.requests.filter((r) => r.method === 'DELETE').map((r) => r.url.pathname);
@@ -203,7 +215,7 @@ describe('catalog image import', () => {
     const unmanaged = seedImage(emu.state, { tags: [imageTag(digest)], regions: ['nyc3'] });
     const { source } = catalogSource();
     const compute = await build(emu, doAccount, { catalogImages: source });
-    await compute.create(request({ image: catalogRef }), ctx('k'));
+    await compute.create(request({ image: catalogRef, catalogImage: pinned }), ctx('k'));
     expect(imagePosts(emu)).toHaveLength(1);
     const used = (dropletPosts(emu)[0]!.body as { image: number }).image;
     expect([foreign.id, unmanaged.id]).not.toContain(used);
@@ -217,15 +229,15 @@ describe('catalog image import', () => {
     emu.importReads = 5;
     const { source } = catalogSource();
     const compute = await build(emu, doAccount, { catalogImages: source });
-    await failure(compute.create(request({ image: catalogRef }), ctx('k')));
+    await failure(compute.create(request({ image: catalogRef, catalogImage: pinned }), ctx('k')));
     const [image] = importsOf(emu);
     failImport(emu.state, image!.id, `could not fetch ${presigned}`);
-    const error = await failure(compute.create(request({ image: catalogRef }), ctx('k')));
+    const error = await failure(compute.create(request({ image: catalogRef, catalogImage: pinned }), ctx('k')));
     expect(error.code).toBe('INVALID_STATE');
     expect(error.details).toMatchObject({ reason: 'imageImportFailed' });
     expect(error.message).not.toContain('SECRETSIGNATURE');
     expect(emu.state.images.has(image!.id)).toBe(false);
-    const again = await failure(compute.create(request({ image: catalogRef }), ctx('k')));
+    const again = await failure(compute.create(request({ image: catalogRef, catalogImage: pinned }), ctx('k')));
     expect(again.details).toMatchObject({ reason: 'imageImporting' });
     expect(imagePosts(emu)).toHaveLength(2);
   });
@@ -244,11 +256,38 @@ describe('catalog image import', () => {
       const emu = new DoEmulator({ now: () => t0 });
       const { source } = catalogSource(over);
       const compute = await build(emu, doAccount, { catalogImages: source });
-      const error = await failure(compute.create(request({ image: catalogRef }), ctx('k')));
+      const error = await failure(compute.create(request({ image: catalogRef, catalogImage: pinned }), ctx('k')));
       expect([error.code, error.details?.reason], JSON.stringify(over)).toEqual([code, reason]);
       expect(imagePosts(emu)).toHaveLength(0);
       expect(dropletPosts(emu)).toHaveLength(0);
     }
+  });
+
+  it('a catalog ref the host did not resolve for a tenant is refused before the source is asked', async () => {
+    const emu = new DoEmulator({ now: () => t0 });
+    const { source, calls } = catalogSource();
+    const compute = await build(emu, doAccount, { catalogImages: source });
+    const error = await failure(compute.create(request({ image: catalogRef }), ctx('k')));
+    expect([error.code, error.details?.reason]).toEqual(['INVALID_INPUT', 'catalogImageUnresolved']);
+    const droplet = seedDroplet(emu.state, {
+      tags: ['better-compute-managed:true', deploymentTag('default')],
+    });
+    const rebuild = await failure(compute.reinstall(String(droplet.id), catalogRef, ctx()));
+    expect(rebuild.details?.reason).toBe('catalogImageUnresolved');
+    expect(calls).toHaveLength(0);
+    expect(emu.requests).toHaveLength(0);
+  });
+
+  it("refuses a location whose digest is not the resolved image's: no import", async () => {
+    const emu = new DoEmulator({ now: () => t0 });
+    const { source } = catalogSource({ sha256: 'ef'.repeat(32) });
+    const compute = await build(emu, doAccount, { catalogImages: source });
+    const error = await failure(
+      compute.create(request({ image: catalogRef, catalogImage: pinned }), ctx('k')),
+    );
+    expect([error.code, error.details?.reason]).toEqual(['INVALID_CONFIG', 'catalogImageDigest']);
+    expect(imagePosts(emu)).toHaveLength(0);
+    expect(dropletPosts(emu)).toHaveLength(0);
   });
 
   it('the presigned URL never reaches a log line or an error, even when DO quotes it', async () => {
@@ -260,12 +299,12 @@ describe('catalog image import', () => {
       id: 'unprocessable_entity',
       message: `url ${presigned} is not reachable`,
     });
-    const error = await failure(compute.create(request({ image: catalogRef }), ctx('k')));
+    const error = await failure(compute.create(request({ image: catalogRef, catalogImage: pinned }), ctx('k')));
     expect(error.code).toBe('INVALID_INPUT');
     expect(JSON.stringify({ message: error.message, details: error.details })).not.toContain(
       'SECRETSIGNATURE',
     );
-    await compute.create(request({ image: catalogRef }), ctx('k'));
+    await compute.create(request({ image: catalogRef, catalogImage: pinned }), ctx('k'));
     expect(lines.length).toBeGreaterThan(0);
     for (const line of lines) expect(line).not.toContain('SECRETSIGNATURE');
   });
@@ -277,7 +316,7 @@ describe('catalog image import', () => {
     const droplet = seedDroplet(emu.state, {
       tags: ['better-compute-managed:true', deploymentTag('default')],
     });
-    await compute.reinstall(String(droplet.id), catalogRef, ctx());
+    await compute.reinstall(String(droplet.id), catalogRef, ctx(), { catalogImage: pinned });
     const [imported] = importsOf(emu);
     const rebuild = emu.requests.find(
       (r) => r.method === 'POST' && r.url.pathname === `/v2/droplets/${droplet.id}/actions`,
@@ -308,7 +347,7 @@ describe('catalog image region transfer', () => {
       { ...doAccount, regions: ['nyc3', 'sfo3'] },
       { catalogImages: source },
     );
-    const sfo = request({ offerId: 'sfo3/s-1vcpu-1gb', image: catalogRef });
+    const sfo = request({ offerId: 'sfo3/s-1vcpu-1gb', image: catalogRef, catalogImage: pinned });
     const transfers = () =>
       emu.requests.filter(
         (r) => r.method === 'POST' && r.url.pathname === `/v2/images/${imported.id}/actions`,
@@ -342,7 +381,7 @@ describe('catalog image region transfer', () => {
       { ...doAccount, regions: ['nyc3', 'sfo3'] },
       { catalogImages: source },
     );
-    const sfo = request({ offerId: 'sfo3/s-1vcpu-1gb', image: catalogRef });
+    const sfo = request({ offerId: 'sfo3/s-1vcpu-1gb', image: catalogRef, catalogImage: pinned });
     await failure(compute.create(sfo, ctx('k')));
     const action = [...emu.state.actions.values()].find((a) => a.resource_id === imported.id);
     action!.status = 'errored';

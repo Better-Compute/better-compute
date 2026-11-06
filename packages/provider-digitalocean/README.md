@@ -105,7 +105,9 @@ An `ImageRef` is tried in this order:
 
 1. **A DigitalOcean slug** (`ubuntu-24-04-x64`, the AI/ML image `gpu-h100x1-base`): passed through. A slug has a letter in it.
 2. **A numeric image id** (a snapshot or custom image): passed through as a number.
-3. **A catalog image** `name@version`: imported as a DigitalOcean custom image. This needs `digitaloceanProvider({ catalogImages })`, a host-side source whose `locate(ref, { expiresInSeconds })` returns the image's digest, format and a short-lived HTTPS URL DigitalOcean can fetch (provision's catalog plus a BlobStore that presigns a GET). Without it a catalog image is `UNSUPPORTED` (`catalogImage`).
+3. **A catalog image** `name@version`: imported as a DigitalOcean custom image. This needs `digitaloceanProvider({ catalogImages })`, a host-side source whose `locate(ref, { tenantId, sha256, expiresInSeconds })` returns the image's digest, format and a short-lived HTTPS URL DigitalOcean can fetch (provision's catalog plus a BlobStore that presigns a GET). Without it a catalog image is `UNSUPPORTED` (`catalogImage`).
+
+**Catalog refs are per tenant.** A `name@version` is unique only within a tenant's catalog, and an image may be private. vps resolves the ref for the instance's tenant when the instance is created (`vps({ images })`) and refuses one the tenant can't see (`NOT_FOUND`), so a provider pool never gets an unresolved catalog ref. The create then carries the resolution (`catalogImage: { tenantId, sha256 }`), which the provider hands to the source: the source must look the image up in that tenant's catalog, and a location whose digest is not the resolved one is refused (`INVALID_CONFIG`, `catalogImageDigest`). A catalog ref without a resolution is `INVALID_INPUT` (`catalogImageUnresolved`) before the source is asked.
 
 How an import works:
 

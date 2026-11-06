@@ -32,6 +32,7 @@ import {
   hostExhaustedCondition,
   maxExhaustedReplacements,
   instanceWork,
+  isCatalogImageRef,
   isSecretRef,
   moveInstance,
   preemptedCondition,
@@ -593,6 +594,11 @@ async function reconcileProvider(
         {
           offerId: row.shape.offerId,
           image: row.imageId,
+          // (DO P3) A catalog image as it was resolved for the tenant at create: the provider fetches
+          // that artifact, never whatever the bare ref might name elsewhere.
+          ...(row.image !== undefined && isCatalogImageRef(row.imageId)
+            ? { catalogImage: { tenantId: row.tenantId, sha256: row.image.sha256 } }
+            : {}),
           // A tenant's secret:// ref (checked to be its own at create) is resolved for the provider.
           userData: isSecretRef(row.userData)
             ? await deps.secrets.resolve(row.userData)

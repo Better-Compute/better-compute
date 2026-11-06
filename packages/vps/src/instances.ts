@@ -79,6 +79,15 @@ export interface ImageResolver {
   resolve(tx: SqlTx, tenantId: string, imageId: string): Promise<VpsImage | undefined>;
 }
 
+/**
+ * Whether an image id names a catalog image (`name@version`, provision's image catalog) rather than
+ * a provider's own image. On a provider pool such an id must resolve for the tenant, and the
+ * resolution (tenant, digest) goes to the provider with it (`catalogImage`).
+ */
+export function isCatalogImageRef(imageId: string): boolean {
+  return imageId.includes('@');
+}
+
 /** What instance services need beyond a transaction. */
 export interface InstanceDeps {
   clock: Clock;
@@ -1302,7 +1311,13 @@ export async function prepareCreateInstance(
     if (!image) throw new ComputeError('NOT_FOUND', `Image ${input.imageId} not found`);
   } else if (!pool.providerAccountId)
     throw new ComputeError('INVALID_STATE', `Provider pool ${pool.id} has no provider account`);
-  else image = await deps.images?.resolve(tx, input.tenantId, input.imageId);
+  else {
+    image = await deps.images?.resolve(tx, input.tenantId, input.imageId);
+    // (DO P3) A catalog ref (`name@version`) is unique only within a tenant and may be private: one
+    // the tenant can't see is refused here, so no provider is ever asked to fetch it (fail closed).
+    if (!image && isCatalogImageRef(input.imageId))
+      throw new ComputeError('NOT_FOUND', `Image ${input.imageId} not found`);
+  }
 
   // (v1.0) A tenant network: provider pools only, ready, on the pool's account. Locked until this
   // transaction commits, so networks.delete sees the draft that is on it.

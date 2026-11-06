@@ -2,6 +2,7 @@ import {
   ComputeError,
   isComputeError,
   type CallContext,
+  type CatalogImageIdentity,
   type ExternalMachine,
   type Offer,
   type OfferQuery,
@@ -307,7 +308,7 @@ export class DoCompute implements ProviderImpl {
         'region',
       );
     if (spot) this.checkSpot(size);
-    const imageChoice = this.checkImage(classifyImage(request.image));
+    const imageChoice = this.checkImage(classifyImage(request.image), request.catalogImage);
     if (Buffer.byteLength(request.userData, 'utf8') > maxUserDataBytes)
       throw fail(
         'INVALID_INPUT',
@@ -369,7 +370,7 @@ export class DoCompute implements ProviderImpl {
     if (existing.length > 0) return toMachine(await this.converge(existing, signal));
 
     // 3. The image, which for a catalog image may still be on its way into the region.
-    const image = await this.imageFor(imageChoice, region, signal);
+    const image = await this.imageFor(imageChoice, region, signal, request.catalogImage);
 
     // 4. The VPC, then the keys: a create refused for its VPC uploads no key.
     const vpc = ref
@@ -557,8 +558,13 @@ export class DoCompute implements ProviderImpl {
     await this.act(droplet, { type: powerTypes[action] }, ctx.signal);
   }
 
-  async reinstall(id: string, image: string, ctx: CallContext): Promise<void> {
-    const choice = this.checkImage(classifyImage(image));
+  async reinstall(
+    id: string,
+    image: string,
+    ctx: CallContext,
+    options: { catalogImage?: CatalogImageIdentity } = {},
+  ): Promise<void> {
+    const choice = this.checkImage(classifyImage(image), options.catalogImage);
     const droplet = await this.target(id, ctx.signal, (d) => this.owned(d), {
       reason: 'notManaged',
       message: (d) =>
@@ -566,15 +572,25 @@ export class DoCompute implements ProviderImpl {
     });
     const gpuInfo = droplet.gpu_info ?? droplet.size?.gpu_info;
     checkGpuImage(choice, droplet.size_slug, gpuInfo !== undefined, gpuInfo?.model);
-    const param = await this.imageFor(choice, droplet.region.slug, ctx.signal);
+    const param = await this.imageFor(choice, droplet.region.slug, ctx.signal, options.catalogImage);
     await this.act(droplet, { type: 'rebuild', image: param }, ctx.signal);
   }
 
   // ------------------------------------------------------------------------------- images
 
-  /** Refuses, before any request, an image this provider can't boot: a catalog image needs a source. */
-  protected checkImage(choice: ImageChoice): ImageChoice {
-    if (choice.kind === 'catalog' && !this.catalog) throw noCatalog(choice.ref);
+  /**
+   * Refuses, before any request, an image this provider can't boot: a catalog image needs a source,
+   * and the host's resolution of it for the instance's tenant (a ref is unique only per tenant).
+   */
+  protected checkImage(choice: ImageChoice, identity?: CatalogImageIdentity): ImageChoice {
+    if (choice.kind !== 'catalog') return choice;
+    if (!this.catalog) throw noCatalog(choice.ref);
+    if (identity === undefined || !/^[0-9a-f]{64}$/i.test(identity.sha256) || !identity.tenantId)
+      throw fail(
+        'INVALID_INPUT',
+        `catalog image ${choice.ref} was not resolved for a tenant, so it is not imported`,
+        'catalogImageUnresolved',
+      );
     return choice;
   }
 
@@ -583,10 +599,20 @@ export class DoCompute implements ProviderImpl {
     choice: ImageChoice,
     region: string,
     signal: AbortSignal,
+    identity?: CatalogImageIdentity,
   ): Promise<string | number> {
     if (choice.kind !== 'catalog') return imageParam(choice);
     if (!this.catalog) throw noCatalog(choice.ref);
-    return this.catalog.imageIn(choice.ref, region, signal);
+    return this.catalog.imageIn(choice.ref, this.checkedIdentity(choice, identity), region, signal);
+  }
+
+  /** The identity `checkImage` already required, for the compiler. */
+  protected checkedIdentity(
+    choice: Extract<ImageChoice, { kind: 'catalog' }>,
+    identity: CatalogImageIdentity | undefined,
+  ): CatalogImageIdentity {
+    this.checkImage(choice, identity);
+    return identity!;
   }
 
   /**
