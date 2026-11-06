@@ -296,9 +296,15 @@ export class Updates {
     this.#running.set(memory, update);
   }
 
-  forget(prefix: string): void {
+  /** Forgets `memory`, or every memory under it when it ends in `/` (a cluster's pools). */
+  forget(memory: string): void {
     for (const key of [...this.#running.keys()])
-      if (key === prefix || key.startsWith(`${prefix}:`)) this.#running.delete(key);
+      if (key === memory || (memory.endsWith('/') && key.startsWith(memory))) this.#running.delete(key);
+  }
+
+  /** Whether an update of `memory` is remembered. */
+  has(memory: string): boolean {
+    return this.#running.has(memory);
   }
 
   async poll(memory: string, signal: AbortSignal): Promise<Polled | undefined> {

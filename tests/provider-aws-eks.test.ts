@@ -434,6 +434,33 @@ describe('eks node groups', () => {
     expect(isComputeError(flipped, 'INVALID_STATE')).toBe(true);
   });
 
+  it('refuses a GPU pool whose type it cannot read, instead of a CPU AMI without the taint', async () => {
+    const s = await setup();
+    const id = await readyCluster(s);
+    const gpu: KubernetesNodePoolSpec = {
+      name: 'gpu',
+      machineType: 'g6.xlarge',
+      nodeCount: 1,
+      accelerators: { type: 'nvidia-l4', count: 1 },
+    };
+    s.emu.failNext('DescribeInstanceTypes', 'UnauthorizedOperation', 403);
+    const denied = await rejection(s.k8s.ensureNodePool(id, gpu, s.ctx()));
+    expect(isComputeError(denied, 'INVALID_STATE'), String(denied)).toBe(true);
+    expect((denied as Error).message).toMatch(/ec2:DescribeInstanceTypes/);
+    // EC2 failing is a failure, not "unknown type".
+    s.emu.failNext('DescribeInstanceTypes', 'InternalError', 500, 10);
+    const failed = await rejection(s.k8s.ensureNodePool(id, gpu, s.ctx()));
+    expect(isComputeError(failed)).toBe(true);
+    expect(isComputeError(failed, 'INVALID_STATE')).toBe(false);
+    expect(s.eks.calls('CreateNodegroup')).toHaveLength(0);
+    // A CPU pool without the read: EKS decides.
+    const c = await setup();
+    const cid = await readyCluster(c);
+    c.emu.failNext('DescribeInstanceTypes', 'UnauthorizedOperation', 403);
+    await settle(() => c.k8s.ensureNodePool(cid, { ...pool, name: 'cpu' }, c.ctx()), 'ready');
+    expect(bodyOf(c, 'CreateNodegroup').amiType).toBe('AL2023_x86_64_STANDARD');
+  });
+
   it('resizes and re-bounds in place; anything else is INVALID_STATE', async () => {
     const s = await setup();
     const id = await readyCluster(s);
@@ -478,6 +505,22 @@ describe('eks node groups', () => {
     const tokens = s.eks.calls('UpdateNodegroupConfig').map((call) => JSON.parse(call.body).clientRequestToken);
     expect(tokens).toHaveLength(3);
     expect(new Set(tokens).size).toBe(3);
+  });
+
+  it("forgets a deleted cluster's node pool updates", async () => {
+    const s = await setup();
+    const id = await readyCluster(s);
+    await settle(() => s.k8s.ensureNodePool(id, pool, s.ctx()), 'ready');
+    s.eks.delayTicks = 50;
+    expect(await s.k8s.ensureNodePool(id, { ...pool, nodeCount: 2 }, s.ctx())).toMatchObject({ state: 'updating' });
+    s.eks.delayTicks = 0;
+    s.eks.settleAll();
+    await settle(() => s.k8s.deleteCluster(id, s.ctx()), 'deleted', 20);
+    // Same name again: no DescribeUpdate for the old cluster's pool update.
+    await readyCluster(s);
+    const reads = s.eks.calls('DescribeUpdate').length;
+    await settle(() => s.k8s.ensureNodePool(id, pool, s.ctx()), 'ready');
+    expect(s.eks.calls('DescribeUpdate')).toHaveLength(reads);
   });
 
   it('deletes a node group; an absent one is deleted', async () => {
@@ -827,6 +870,28 @@ describe('eks cluster discovery (providerAccounts.clusters)', () => {
 });
 
 describe('eks access entry principal', () => {
+  it("is the platform role's ARN, path included, for an ambient session the host names", async () => {
+    const pathed = 'arn:aws:iam::111111111111:role/platform/compute/bc-control-plane';
+    const s = await setup({}, { platformRoleArn: pathed });
+    // The host's ambient identity is a session of that role (an instance profile, IRSA, SSO).
+    const ambient = [...s.emu.sts.identities.values()].find((identity) => identity.account === platformAccount)!;
+    ambient.arn = `arn:aws:sts::${platformAccount}:assumed-role/bc-control-plane/i-0123456789abcdef0`;
+    const id = await readyCluster(s);
+    s.eks.accessEntries.clear();
+    // (The emulator maps a session to its role without the path, so the token may not match the entry.)
+    await s.k8s.credentials(id, { subject: 'bc-u-bob', role: 'view', ttlSeconds: 600 }, s.ctx()).catch(() => undefined);
+    expect(bodyOf(s, 'CreateAccessEntry').principalArn).toBe(pathed);
+    // A tenant account never uses the host's role.
+    const role = 'arn:aws:iam::333333333333:role/better-compute';
+    const t = await setup({ assumeRoleArn: role }, { platformRoleArn: pathed }, { id: 'pa_tenant', tenantId: 't_acme', platform: false });
+    t.emu.sts.roles.set(role, { externalId: 'better-compute:pa_tenant' });
+    const tid = await readyCluster(t);
+    t.eks.accessEntries.clear();
+    // (The emulator maps a session to its role without the path, so the token may not match the entry.)
+    await t.k8s.credentials(tid, { subject: 'bc-u-bob', role: 'view', ttlSeconds: 600 }, t.ctx()).catch(() => undefined);
+    expect(bodyOf(t, 'CreateAccessEntry').principalArn).toBe(role);
+  });
+
   it('is the IAM role of an assumed-role session, with its path when the account names the role', () => {
     const session = 'arn:aws:sts::111111111111:assumed-role/bc-control/bc-session';
     // Without a known role ARN: the role without a path (STS session ARNs drop it).

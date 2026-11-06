@@ -103,6 +103,8 @@ export interface AwsKubernetesOptions {
   config: AwsConfig;
   /** The account's credentials: they sign EKS calls and the eksToken. */
   credentials: CredentialSource;
+  /** Role ARNs (with their paths) the account's session may be: its assumeRoleArn, or the host's role. */
+  principalRoles?: readonly string[];
   /** The account's IAM identity (GetCallerIdentity), memoized by the caller. */
   identity: (context: CallContext) => Promise<{ arn: string }>;
   clock: Clock;
@@ -128,6 +130,7 @@ export class AwsKubernetes implements ProviderKubernetes {
   readonly #config: AwsConfig;
   readonly #credentials: CredentialSource;
   readonly #identity: AwsKubernetesOptions['identity'];
+  readonly #principalRoles: readonly string[];
   readonly #clock: Clock;
   readonly #transport: KubeTransport;
   readonly #stsEndpoint: string | undefined;
@@ -150,6 +153,7 @@ export class AwsKubernetes implements ProviderKubernetes {
     this.#config = options.config;
     this.#credentials = options.credentials;
     this.#identity = options.identity;
+    this.#principalRoles = options.principalRoles ?? [];
     this.#clock = options.clock;
     this.#transport = options.kubeTransport ?? httpsKubeTransport;
     this.#stsEndpoint = options.stsEndpoint;
@@ -323,7 +327,7 @@ export class AwsKubernetes implements ProviderKubernetes {
     const found = await this.#client.cluster(name, signal);
     if (!found) {
       this.#updates.forget(`cluster:${cluster}`);
-      this.#updates.forget(`pool:${cluster}`);
+      this.#updates.forget(`pool:${cluster}/`);
       return resourceState(cluster, 'deleted');
     }
     if (found.status === 'DELETING') return resourceState(cluster, 'deleting');
@@ -393,8 +397,9 @@ export class AwsKubernetes implements ProviderKubernetes {
     try {
       return (await this.#types.get([machineType], signal)).get(machineType);
     } catch (error) {
-      // Without ec2:DescribeInstanceTypes (or for a type EC2 does not know) EKS decides.
-      if (isComputeError(error, 'ACCESS_DENIED') || isComputeError(error, 'INVALID_INPUT') || isComputeError(error, 'PROVIDER_ERROR'))
+      // Without ec2:DescribeInstanceTypes (or for a type EC2 does not know) EKS decides, except for
+      // accelerators (checkAccelerators). EC2 failing is a failure.
+      if (isComputeError(error, 'ACCESS_DENIED') || isComputeError(error, 'INVALID_INPUT'))
         return undefined;
       throw error;
     }
@@ -537,10 +542,7 @@ export class AwsKubernetes implements ProviderKubernetes {
     const key = found.arn ?? cluster;
     let fresh = false;
     if (!this.#admitted.has(key)) {
-      const principalArn = principalArnOf(
-        (await this.#identity(context)).arn,
-        this.#config.assumeRoleArn !== undefined ? [this.#config.assumeRoleArn] : [],
-      );
+      const principalArn = principalArnOf((await this.#identity(context)).arn, this.#principalRoles);
       fresh = await ensureAdminAccess({
         client: this.#client,
         cluster: name,

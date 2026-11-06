@@ -122,6 +122,12 @@ export interface AwsProviderOptions {
    * `node:https` trusting only the cluster's CA.
    */
   kubeTransport?: KubeTransport;
+  /**
+   * (kubernetes) The IAM role ARN, path included, of the host's ambient identity when it is a role
+   * under a path: an assumed-role session ARN drops the path, which an EKS access entry needs.
+   * Platform accounts without assumeRoleArn or credentials name it in their access entry.
+   */
+  platformRoleArn?: string;
   /** Ambient identity for platform accounts (default `ambientCredentials()`). */
   credentials?: CredentialSource;
   /** ExternalId prefix: `${externalIdPrefix}:${providerAccountId}` (default 'better-compute'). */

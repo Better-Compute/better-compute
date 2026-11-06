@@ -117,7 +117,15 @@ export function checkAccelerators(spec: KubernetesNodePoolSpec, info: InstanceTy
       throw invalid(`${spec.machineType} is a Neuron type: its accelerators are aws-neuron`);
     return;
   }
-  if (!info) return; // The type is unknown to DescribeInstanceTypes: EKS refuses it on create.
+  // Unread (no ec2:DescribeInstanceTypes, or a type EC2 does not know): the AMI and the GPU taint
+  // would silently be the CPU ones, so a GPU pool is refused rather than made unusable.
+  if (!info)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Cannot verify that ${spec.machineType} has ${wanted.count} ${wanted.type}: grant ec2:DescribeInstanceTypes (and check the instance type)`,
+      undefined,
+      { provider: 'aws', service: 'eks', reason: 'instanceTypeUnknown' },
+    );
   if (!info.gpus || info.gpus.count === 0)
     throw invalid(`${spec.machineType} has no GPUs: pick a GPU instance type for accelerators`);
   if (info.gpus.count !== wanted.count)

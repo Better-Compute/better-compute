@@ -58,6 +58,15 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
         types,
         config,
         credentials: account.source,
+        // The role ARNs (with their paths) an access entry may name for the account's session.
+        principalRoles:
+          config.assumeRoleArn !== undefined
+            ? [config.assumeRoleArn]
+            : context.account?.platform === true &&
+                config.credentials === undefined &&
+                options.platformRoleArn !== undefined
+              ? [options.platformRoleArn]
+              : [],
         identity: async (call) => {
           // The account guards (role hop, platform account) run before the identity is used.
           await account.verify({ signal: call.signal, clock: context.clock });
