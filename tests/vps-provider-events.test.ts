@@ -35,6 +35,8 @@ interface Intake {
   failAck?: boolean;
   /** Queue messages each poll reports reading (`received`), one entry per poll; absent: omitted. */
   received?: number[];
+  /** The waitMs of each poll. */
+  waits?: number[];
 }
 
 function eventsProvider(cloud: FakeGce, intake: Intake): ProviderDefinition {
@@ -48,8 +50,9 @@ function eventsProvider(cloud: FakeGce, intake: Intake): ProviderDefinition {
       const impl = (await inner.create(config, context)) as ProviderImpl;
       return {
         ...impl,
-        async pollEvents() {
+        async pollEvents(_context: unknown, options: { waitMs: number }) {
           intake.polls += 1;
+          (intake.waits ??= []).push(options.waitMs);
           const events = [...intake.pending];
           const received = intake.received?.shift();
           return {
@@ -499,6 +502,9 @@ describe('vps.provider-events', () => {
     world.intake.received = [10, 10, 3];
     await world.poll();
     expect(world.intake.polls).toBe(3);
+    // A short long poll by default: polling runs on one replica, a few accounts at a time, so an
+    // idle queue must not hold a lane 10 s (with many accounts the Spot warning would be over).
+    expect(world.intake.waits).toEqual([2_000, 2_000, 2_000]);
     // A batch of many events from one message does not keep a drained queue polling.
     world.intake.polls = 0;
     world.intake.received = [1, 0];

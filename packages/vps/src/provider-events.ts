@@ -57,7 +57,12 @@ export const interruptionTaintKey = (provider: string): string => `${provider}.s
 export interface ProviderEventsOptions {
   /** How often every account is polled (default `15s`). */
   every?: Duration;
-  /** The long poll per call (default 10 000 ms, at most 10 000). */
+  /**
+   * The long poll per call (default 2 000 ms, at most 10 000). Polling runs on one replica
+   * (`shardBy: 'none'`; the runtime shards by node or pool, not by account), `concurrency` accounts
+   * at a time, so a long idle poll would hold a lane: at 10 s, forty accounts take minutes to come
+   * round, past the 2-minute Spot warning. A queue with messages answers at once either way.
+   */
   waitMs?: number;
   /**
    * A run's time budget per account (default 12 000 ms: inside the work queue's 15 s claim). A run
@@ -114,7 +119,7 @@ export function providerEventsReconciler(
   options: ProviderEventsOptions,
   deps: (context: ModuleContext) => InstanceDeps,
 ): Reconciler {
-  const waitMs = Math.max(0, Math.min(10_000, options.waitMs ?? 10_000));
+  const waitMs = Math.max(0, Math.min(10_000, options.waitMs ?? 2_000));
   const budgetMs = Math.max(1_000, options.budgetMs ?? 12_000);
   const retainMs = Math.max(60_000, options.retainMs ?? 86_400_000);
   return {

@@ -102,7 +102,8 @@ export function eventRulesTemplate(options: EventRulesOptions): Record<string, J
           QueueName: options.queueName,
           SqsManagedSseEnabled: true,
           MessageRetentionPeriod: fourteenDays,
-          // better-compute long-polls 10 s and acks after its transaction: a minute covers a run.
+          // better-compute long-polls at most 10 s (its WaitTimeSeconds wins over this default) and
+          // acks after its transactions: a minute covers a run.
           ReceiveMessageWaitTimeSeconds: 10,
           VisibilityTimeout: 60,
           RedrivePolicy: {

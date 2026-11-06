@@ -116,7 +116,10 @@ join token ever goes into tenant-readable user data.
 #### Provider events (`vps.provider-events`)
 
 An account whose client has `pollEvents` (an EC2 account's EventBridge → SQS intake) is polled every
-15 s (`vps({ events: { every, waitMs, budgetMs } })`). The long poll runs outside any transaction;
+15 s (`vps({ events: { every, waitMs, budgetMs } })`). The long poll runs outside any transaction and
+lasts 2 s by default: the runtime shards reconcilers by node or pool, not by account, so every
+account is polled on one replica a few at a time, and a 10 s idle poll per account would let a busy
+deployment's accounts come round only after the 2-minute Spot warning;
 every event of a batch is handled (one AWS Health message can name hundreds of instances), in
 transactions of at most 100 events, and the batch is acked only after the last one commits. A run
 polls again while the queue returns full batches of messages (`ProviderEventBatch.received`). Event ids are kept in
