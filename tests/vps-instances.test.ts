@@ -77,6 +77,8 @@ const fakeCloud = defineProvider({
   id: 'fake-cloud',
   version: '1.0.0',
   provides: ['vps'],
+  // Its <offer>@spot ids are Spot capacity (the preemption tests).
+  capabilities: ['spot-offers'],
   config: manifest({
     token: field.secret(),
     location: field.option(['fsn1', 'hel1']).default('fsn1'),

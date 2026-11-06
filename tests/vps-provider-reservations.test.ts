@@ -669,6 +669,23 @@ describe('api & admission', () => {
     expect(stored.rows).toEqual([]);
   });
 
+  it('on a provider that does not declare @spot offers, …@spot names a reservation: a missing one is refused', async () => {
+    await call('flavors', 'create', {
+      tenantId: 'root',
+      poolId: providerPool,
+      name: 'named-spot',
+      vcpu: 2,
+      memoryGiB: 4,
+      diskGiB: 40,
+      offerId: 'us-central1-a/a3-highgpu-8g@spot',
+    });
+    await expect(create('vm-spot', 'named-spot')).rejects.toMatchObject({
+      code: 'CAPACITY_UNAVAILABLE',
+      details: { state: 'missing' },
+    });
+    expect(cloud.created).toEqual([]);
+  });
+
   it('admits only the free slots between polls', async () => {
     await bind();
     // total 2, inUse 1: one slot, two creates at once.

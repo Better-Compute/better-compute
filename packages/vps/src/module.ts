@@ -63,6 +63,7 @@ import {
   type FlavorEstimate,
   type InstanceEstimate,
 } from './estimates.js';
+import { declaresSpotOffers } from './spot.js';
 import { id, int, name, object, optional, tenant } from './input.js';
 import { isRootCaller } from './billing.js';
 import {
@@ -761,6 +762,10 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       ? parseTenantVaultPaths(options.tenantVaultPaths)
       : undefined;
   const clients = new ProviderClients(providers, tenantVaultPaths);
+  /** (P3) Providers whose `…@spot` offer ids are Spot capacity (estimates read them). */
+  const spotProviders = new Set(
+    [...providers.values()].filter((p) => declaresSpotOffers(p)).map((p) => p.id),
+  );
   /** What `providerAccounts.create/update` check an account's config with. */
   const accountCheck = (context: ModuleContext): ClientDeps => ({
     ...depsOf(context),
@@ -807,6 +812,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     cache: estimateCache,
     currency,
     gpuModels: options.billing?.gpuModels,
+    spotProviders,
   });
   /** The list prices of a platform provider account, read through its cached client. */
   const billingProviders: BillingProviders = {

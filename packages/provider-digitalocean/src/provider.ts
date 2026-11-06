@@ -30,7 +30,8 @@ export function digitaloceanProvider(
     version: '0.1.0',
     provides: ['vps'],
     config: doConfig as unknown as ProviderDefinition<DoConfig>['config'],
-    capabilities: ['power', 'reinstall', 'list', 'discover', 'claim', 'networks'],
+    // 'spot-offers': its <region>/<size>@spot offer ids are Spot capacity (vps's spotOffersCapability).
+    capabilities: ['power', 'reinstall', 'list', 'discover', 'claim', 'networks', 'spot-offers'],
     create: (config: DoConfig, context: ProviderContext) => {
       if (config.regions.length === 0)
         throw invalidConfig('A DigitalOcean account lists at least one region', 'regions');

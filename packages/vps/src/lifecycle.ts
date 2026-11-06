@@ -473,8 +473,12 @@ async function loseMachine(
   row: InstanceRow,
   conditions: Condition[],
   now: number,
+  provider: string,
 ): Promise<number | undefined> {
-  const preempted = row.origin !== 'attached' && isSpotOffer(row.shape.offerId);
+  // Spot only on a provider that declares the `@spot` convention (elsewhere it names a reservation).
+  const preempted =
+    row.origin !== 'attached' &&
+    isSpotOffer(row.shape.offerId, deps.clients.definition(provider));
   const lost = await moveInstance(tx, row, 'lose', 'lost', {
     conditions: preempted
       ? withCondition(
@@ -824,7 +828,7 @@ async function reconcileProvider(
       if (current.state === 'lost') return undefined;
       if (current.state === 'scheduling')
         current = await moveInstance(tx, current, 'complete', 'provisioning');
-      return loseMachine(deps, tx, current, conditions, now);
+      return loseMachine(deps, tx, current, conditions, now, account.provider);
     }
     const reported = machineStates[machine.state];
     const machineKnown = current.externalId !== undefined;
@@ -888,7 +892,7 @@ async function reconcileProvider(
         // Already lost (a machine the provider still lists as deleted): it stays lost.
         return current.state === 'lost'
           ? undefined
-          : await loseMachine(deps, tx, current, current.conditions, now);
+          : await loseMachine(deps, tx, current, current.conditions, now, account.provider);
       if (reported === 'running' || reported === 'stopped') {
         // A machine that booted while `stopped` is wanted gets powered off next round, and vice versa.
         const booting = current.state === 'provisioning' || current.state === 'starting';

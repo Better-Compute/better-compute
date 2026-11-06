@@ -20,7 +20,6 @@ import { readAccount, type ClientDeps, type ProviderClients } from './accounts.j
 import { createFlavor, deleteFlavor } from './flavors.js';
 import { checkGrantCapacity, reservationGone } from './reservation-grants.js';
 import { key as keyOf, name, object, optional, tenant, id } from './input.js';
-import { isSpotOffer } from './spot.js';
 
 // Provider capacity reservations (GCE reservations and the like): the `vps.reservations` worker
 // reads what each account's provider reports into `provider_reservations`, publishes
@@ -729,7 +728,14 @@ export interface ReservationClaim {
  */
 export async function claimReservationSlot(
   tx: SqlTx,
-  input: { accountId: string; offerId: string; tenantId: string; projectId?: string },
+  input: {
+    accountId: string;
+    offerId: string;
+    tenantId: string;
+    projectId?: string;
+    /** (P3) The offer is Spot capacity (`isSpotOffer`: the account's provider declares `@spot`). */
+    spot?: boolean;
+  },
 ): Promise<ReservationClaim | undefined> {
   if (input.offerId.indexOf('@') < 0) return undefined;
   // An offer id names the reservation by its own spelling (a name, or a shared-in path); the stored
@@ -745,8 +751,9 @@ export async function claimReservationSlot(
   const refuse = (message: string, details: Record<string, Json>): never => {
     throw new ComputeError('CAPACITY_UNAVAILABLE', message, undefined, details);
   };
-  // (P3) `<region>/<size>@spot` is Spot capacity, not a reservation, unless a reservation answers to it.
-  if (!row && isSpotOffer(input.offerId)) return undefined;
+  // (P3) `<region>/<size>@spot` on a provider that declares it is Spot capacity, not a reservation,
+  // unless a reservation answers to it; on any other provider it names a reservation, which must exist.
+  if (!row && input.spot === true) return undefined;
   if (!row)
     return refuse(`Reservation of offer ${input.offerId} is not known`, {
       reservationId: input.offerId.slice(input.offerId.indexOf('@') + 1),

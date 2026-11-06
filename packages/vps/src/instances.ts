@@ -28,6 +28,7 @@ import { chargeQuota, refundQuota, resizeAllocation } from '@better-compute/capa
 import type { ClientDeps, ProviderClients } from './accounts.js';
 import { readFlavorByName, type FlavorRecord } from './flavors.js';
 import { claimReservationSlot } from './provider-reservations.js';
+import { isSpotOffer } from './spot.js';
 import {
   canonical,
   fail,
@@ -1599,10 +1600,16 @@ export async function completeCreateInstance(
     // creates between two provider polls cannot both take the last slot (CAPACITY_UNAVAILABLE).
     if (next.providerAccountId !== undefined && next.shape.offerId !== undefined) {
       // A reservation grant of the tenant takes it first (D7).
+      const { rows: accounts } = await tx.query<{ provider: string }>(
+        `SELECT provider FROM provider_accounts WHERE id = $1`,
+        [next.providerAccountId],
+      );
+      const provider = accounts[0] ? deps.clients.definition(accounts[0].provider) : undefined;
       const claim = await claimReservationSlot(tx, {
         accountId: next.providerAccountId,
         offerId: next.shape.offerId,
         tenantId: next.tenantId,
+        spot: isSpotOffer(next.shape.offerId, provider),
         ...(next.projectId !== undefined ? { projectId: next.projectId } : {}),
       });
       if (claim !== undefined)
