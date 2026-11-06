@@ -50,7 +50,10 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
       });
       let identity: Promise<{ arn: string }> | undefined;
       compute.kubernetes = new AwsKubernetes({
-        client: new EksClient(eks),
+        // Every EKS call runs after the account guards, as every EC2 call does (AwsCompute.ready).
+        client: new EksClient(eks, async (signal) => {
+          await account.verify({ signal, clock: context.clock });
+        }),
         ec2,
         types,
         config,

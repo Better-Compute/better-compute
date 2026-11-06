@@ -15,7 +15,7 @@ import {
   type AwsConfig,
   type AwsProviderOptions,
 } from '@better-compute/provider-aws';
-import { AwsEmulator } from './support/aws-emulator/index.js';
+import { AwsEmulator, platformAccount } from './support/aws-emulator/index.js';
 import { Ec2Emulator } from './support/aws-emulator/ec2.js';
 import { emulatedEksCaData, EksEmulator, type EksKubeApi } from './support/eks-emulator.js';
 
@@ -47,6 +47,11 @@ interface Setup {
 async function setup(
   config: Partial<AwsConfig> = {},
   options: AwsProviderOptions = {},
+  account: { id: string; tenantId: string; platform: boolean } = {
+    id: 'pa_platform',
+    tenantId: 'root',
+    platform: true,
+  },
 ): Promise<Setup> {
   const emu = new AwsEmulator();
   const ec2 = new Ec2Emulator(emu);
@@ -82,7 +87,7 @@ async function setup(
     clock: emu.clock,
     secrets: { resolve: async () => '' },
     log,
-    account: { id: 'pa_platform', tenantId: 'root', platform: true },
+    account,
   });
   const ctx = (): CallContext => ({
     idempotencyKey: 'k1',
@@ -691,5 +696,58 @@ describe('eks access entry principal', () => {
       'arn:aws:iam::111111111111:user/ops/alice',
     );
     expect(() => principalArnOf('arn:aws:sts::111111111111:federated-user/bob')).toThrow(/IAM role or user/);
+  });
+});
+
+describe('eks account guards (confused deputy)', () => {
+  const tenant = { id: 'pa_tenant', tenantId: 't_acme', platform: false };
+  const every = (s: Setup) => [
+    () => s.k8s.ensureCluster(standard, s.ctx()),
+    () => s.k8s.getCluster('us-east-1/bc-k-one', s.ctx()),
+    () => s.k8s.deleteCluster('us-east-1/bc-k-one', s.ctx()),
+    () => s.k8s.ensureNodePool('us-east-1/bc-k-one', pool, s.ctx()),
+    () => s.k8s.deleteNodePool('us-east-1/bc-k-one', 'general', s.ctx()),
+    () => s.k8s.listClusters!(s.ctx()),
+    () => s.k8s.versions(region, s.ctx()),
+    () =>
+      s.k8s.credentials('us-east-1/bc-k-one', { subject: 'alice', role: 'admin', ttlSeconds: 3600 }, s.ctx()),
+  ];
+  const eksCalls = (s: Setup) =>
+    s.emu.requests.filter((request) => request.service === 'eks').length;
+
+  it('refuses an assumeRoleArn in the platform account before any EKS call', async () => {
+    const platformRole = `arn:aws:iam::${platformAccount}:role/admin`;
+    const s = await setup({ assumeRoleArn: platformRole }, {}, tenant);
+    s.emu.sts.roles.set(platformRole, { externalId: 'better-compute:pa_tenant' });
+    // The platform account's clusters: the tenant must not see or touch them.
+    const platform = await setup();
+    await readyCluster(platform);
+    s.eks.clusters.set('bc-k-one', platform.eks.clusters.get('bc-k-one')!);
+    for (const call of every(s)) {
+      const error = await rejection(call());
+      expect(isComputeError(error, 'ACCESS_DENIED'), String(error)).toBe(true);
+      expect((error as { details?: { reason?: string } }).details?.reason).toBe('platform-account-role');
+    }
+    expect(eksCalls(s)).toBe(0);
+  });
+
+  it('refuses when the assumed identity is another account, before any EKS call', async () => {
+    const role = 'arn:aws:iam::333333333333:role/better-compute';
+    const s = await setup({ assumeRoleArn: role }, {}, tenant);
+    s.emu.sts.roles.set(role, { externalId: 'better-compute:pa_tenant', identityAccount: '444444444444' });
+    for (const call of every(s)) {
+      const error = await rejection(call());
+      expect(isComputeError(error, 'ACCESS_DENIED'), String(error)).toBe(true);
+      expect((error as { details?: { reason?: string } }).details?.reason).toBe('assumed-identity-mismatch');
+    }
+    expect(eksCalls(s)).toBe(0);
+  });
+
+  it('a tenant role in its own account reaches EKS', async () => {
+    const role = 'arn:aws:iam::333333333333:role/better-compute';
+    const s = await setup({ assumeRoleArn: role }, {}, tenant);
+    s.emu.sts.roles.set(role, { externalId: 'better-compute:pa_tenant' });
+    await expect(s.k8s.listClusters!(s.ctx())).resolves.toEqual([]);
+    expect(eksCalls(s)).toBeGreaterThan(0);
   });
 });

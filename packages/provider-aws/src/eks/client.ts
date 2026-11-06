@@ -138,9 +138,16 @@ const segment = (value: string) => encodeURIComponent(value);
 
 export class EksClient {
   readonly #rest: RestClient;
+  readonly #verify: ((signal: AbortSignal) => Promise<void>) | undefined;
 
-  constructor(rest: RestClient) {
+  /**
+   * `verify` runs before every call (the account guards: a tenant role in the platform account,
+   * an assumed identity in another account); it is memoized by the account, and its refusal is the
+   * call's.
+   */
+  constructor(rest: RestClient, verify?: (signal: AbortSignal) => Promise<void>) {
     this.#rest = rest;
+    this.#verify = verify;
   }
 
   /** One call; the body is JSON, the answer parsed JSON (`{}` when empty). */
@@ -154,6 +161,7 @@ export class EksClient {
       what: string;
     },
   ): Promise<T> {
+    if (this.#verify) await this.#verify(options.signal);
     let response;
     try {
       response = await this.#rest.request(method, path, {
