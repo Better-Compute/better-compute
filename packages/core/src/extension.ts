@@ -635,6 +635,18 @@ export interface Offer {
 /** A provider image id, or a catalog image `name@version`. */
 export type ImageRef = string;
 
+/**
+ * (DO P3) The catalog image an `ImageRef` names, as the host resolved it for the instance's tenant:
+ * a catalog ref is unique only within a tenant, so a provider that fetches catalog images itself
+ * looks the image up by these, never by the bare ref.
+ */
+export interface CatalogImageIdentity {
+  /** The tenant whose catalog the ref was resolved in (visibility already checked). */
+  tenantId: string;
+  /** Hex SHA-256 of the resolved artifact. */
+  sha256: string;
+}
+
 /** A machine as the provider reports it. */
 export interface ExternalMachine {
   id: string;
@@ -990,6 +1002,8 @@ export interface ProviderImpl {
        * provider that can install keys without cloud-init (Compute Engine's `ssh-keys`) does.
        */
       sshKeys?: readonly string[];
+      /** (DO P3) The catalog image `image` names, as the host resolved it; absent for other refs. */
+      catalogImage?: CatalogImageIdentity;
     },
     context: CallContext,
   ): Promise<ExternalMachine>;
@@ -1022,7 +1036,13 @@ export interface ProviderImpl {
   identify?(machine: ExternalMachine, context: CallContext): Promise<{ productUuid: string }>;
   power?(id: string, action: PowerAction, context: CallContext): Promise<void>;
   rescue?(id: string, context: CallContext): Promise<RescueAccess>;
-  reinstall?(id: string, image: ImageRef, context: CallContext): Promise<void>;
+  reinstall?(
+    id: string,
+    image: ImageRef,
+    context: CallContext,
+    /** (DO P3) The catalog image `image` names, as the host resolved it. */
+    options?: { catalogImage?: CatalogImageIdentity },
+  ): Promise<void>;
   list?(context: CallContext): AsyncIterable<ExternalMachine>;
   /** Every machine the account can see, including ones better-compute did not create. */
   discover?(context: CallContext): AsyncIterable<ExternalMachine>;
