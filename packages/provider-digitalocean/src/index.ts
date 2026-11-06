@@ -31,3 +31,8 @@ export {
   inferenceKeyKindName,
   inferenceTokensMeter,
 } from './resources/kinds/inference-keys.js';
+export {
+  knowledgeBaseHoursMeter,
+  knowledgeBaseKindName,
+  type KnowledgeBaseSpec,
+} from './resources/kinds/knowledge-bases.js';

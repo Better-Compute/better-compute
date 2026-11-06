@@ -11,6 +11,7 @@ import { registerFirewalls } from './firewalls.js';
 import { registerFunctions } from './functions.js';
 import { registerGenai } from './genai.js';
 import { registerInference } from './inference.js';
+import { registerKnowledgeBases } from './knowledge-bases.js';
 import { registerKeys } from './keys.js';
 import { registerPartner } from './partner.js';
 import { registerTags } from './tags.js';
@@ -110,6 +111,8 @@ export class DoEmulator {
   inferenceReads = 1;
   /** GPU sizes a dedicated inference create is refused for (insufficient capacity). */
   inferenceSoldOut = new Set<string>();
+  /** How many reads a knowledge base stays `CREATING` (and an indexing job running). */
+  knowledgeBaseReads = 1;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -302,5 +305,6 @@ export class DoEmulator {
     registerOneClicks(this);
     registerInference(this);
     registerGenai(this);
+    registerKnowledgeBases(this);
   }
 }

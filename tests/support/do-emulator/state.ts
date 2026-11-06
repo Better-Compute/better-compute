@@ -59,6 +59,8 @@ export class DoState {
   dedicatedInferences = new Map<string, Json>();
   /** Keyed by uuid. DO GenAI model access keys (their secret in `_secret`). */
   modelKeys = new Map<string, Json>();
+  /** Keyed by uuid. DO GenAI knowledge bases (their data sources in `_sources`). */
+  knowledgeBases = new Map<string, Json>();
   /** Keyed by uuid. DO autoscale pool resources. */
   autoscalePools = new Map<string, Json>();
   /** The members of each autoscale pool, keyed by the pool's uuid. */
