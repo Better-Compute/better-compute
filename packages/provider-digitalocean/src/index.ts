@@ -10,6 +10,7 @@ export * from './compute/droplets.js';
 export * from './compute/images.js';
 export * from './compute/keys.js';
 export * from './compute/offers.js';
+export * from './compute/spot.js';
 export * from './compute/types.js';
 export * from './config.js';
 export * from './ids.js';

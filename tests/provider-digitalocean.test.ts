@@ -1286,9 +1286,9 @@ describe('compute', () => {
     expect(emu.requests).toHaveLength(0);
   });
 
-  it('a spot offer is UNSUPPORTED until P3, even with allowSpot', async () => {
+  it('a spot offer is UNSUPPORTED without allowSpot', async () => {
     const emu = emulator();
-    const compute = await build(emu, { ...doAccount, allowSpot: true });
+    const compute = await build(emu, doAccount);
     const error = await failure(
       compute.create(request({ offerId: 'nyc3/s-2vcpu-4gb@spot' }), ctx()),
     );

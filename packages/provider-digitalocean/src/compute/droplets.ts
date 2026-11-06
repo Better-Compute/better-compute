@@ -32,6 +32,7 @@ import { ensureSshKeys } from './keys.js';
 import { DoCatalogImages } from './catalog.js';
 import { checkGpuImage, classifyImage, imageParam, type ImageChoice } from './images.js';
 import { cachedSize, gpuModelOf, listOffers } from './offers.js';
+import { spotPriceOf, spotShape } from './spot.js';
 import { assignTag, ensureTag, hasTag, spelled, unassignTag } from './tags.js';
 import type { DoAction, DoDroplet, DoVpc } from './types.js';
 
@@ -58,7 +59,9 @@ const reservedKeys: ReadonlySet<string> = new Set([
   labels.deployment,
   labels.key,
   labels.autoscalePool,
+  labels.capacity,
 ]);
+const spotTag = tagFor(labels.capacity, 'spot');
 const tagPattern = /^[a-z0-9:_-]{1,255}$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -109,7 +112,7 @@ export function toMachine(droplet: DoDroplet): ExternalMachine {
     id: machineId(droplet.id),
     name: droplet.name,
     state: states[droplet.status] ?? 'unknown',
-    offerId: offerId(droplet.region.slug, droplet.size_slug),
+    offerId: offerId(droplet.region.slug, droplet.size_slug, hasTag(droplet, spotTag)),
     region: droplet.region.slug,
     addresses: [...publicV4, ...privateV4, ...v6.map((n) => n.ip_address)],
     machineType: droplet.size_slug,
@@ -303,7 +306,7 @@ export class DoCompute implements ProviderImpl {
         `offer ${request.offerId} is in ${region}, which this account does not use`,
         'region',
       );
-    if (spot) throw fail('UNSUPPORTED', 'DigitalOcean Spot capacity is not supported yet', 'spot');
+    if (spot) this.checkSpot(size);
     const imageChoice = this.checkImage(classifyImage(request.image));
     if (Buffer.byteLength(request.userData, 'utf8') > maxUserDataBytes)
       throw fail(
@@ -324,6 +327,7 @@ export class DoCompute implements ProviderImpl {
       this.deploymentTag,
       keyTag(ctx.idempotencyKey),
       tagFor(labels.instance, request.name),
+      ...(spot ? [spotTag] : []),
     ];
     for (const [key, value] of Object.entries(request.labels ?? {})) {
       // A tag is `<key>:<value>` split at its first colon, so a key with a colon could forge a
@@ -395,6 +399,7 @@ export class DoCompute implements ProviderImpl {
           monitoring: this.config.monitoring ?? true,
           ipv6: this.config.ipv6 ?? false,
           tags: [...new Set(tags)],
+          ...(spot ? spotShape.createBody : {}),
         },
         signal,
         budget: 'mutate',
@@ -424,6 +429,22 @@ export class DoCompute implements ProviderImpl {
         },
       );
     return toMachine(await this.converge([...found.values()], signal));
+  }
+
+  /**
+   * Refuses a Spot create the account does not allow (DO-D14), or one for a size the cached
+   * catalog shows without Spot capacity. Without a cached catalog DO decides.
+   */
+  protected checkSpot(size: string): void {
+    if (!this.config.allowSpot)
+      throw fail(
+        'UNSUPPORTED',
+        'Spot capacity is off for this DigitalOcean account (allowSpot)',
+        'spot',
+      );
+    const known = cachedSize(this.client, size);
+    if (known && spotPriceOf(known) === undefined)
+      throw fail('INVALID_INPUT', `size ${size} has no Spot capacity on DigitalOcean`, 'spot');
   }
 
   // ------------------------------------------------------------------------------- get, delete

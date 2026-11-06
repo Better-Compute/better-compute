@@ -3,6 +3,7 @@ import type { DoClient } from '../client/http.js';
 import type { DoConfig } from '../config.js';
 import { offerId } from '../ids.js';
 import { untilAborted } from './abort.js';
+import { spotPriceOf } from './spot.js';
 import type { DoRegion, DoSize } from './types.js';
 
 // Offers: one per (size, region) the account is configured for. The size and region lists change
@@ -109,7 +110,7 @@ export async function listOffers(
       if (!config.regions.includes(slug)) continue;
       if (query.region !== undefined && query.region !== slug) continue;
       const region = catalog.regions.get(slug);
-      offers.push({
+      const offer: Offer = {
         id: offerId(slug, size.slug),
         kind: 'vps',
         region: slug,
@@ -120,7 +121,13 @@ export async function listOffers(
         pricePerHour: size.price_hourly,
         currency: 'USD',
         available: size.available && !!region?.available && region.sizes.includes(size.slug),
-      });
+      };
+      offers.push(offer);
+      // Spot capacity is its own offer (DO-D8), only when the account allows it (DO-D14) and the
+      // size reports a Spot price (today's; it changes daily).
+      const spotPrice = config.allowSpot ? spotPriceOf(size) : undefined;
+      if (spotPrice !== undefined)
+        offers.push({ ...offer, id: offerId(slug, size.slug, true), pricePerHour: spotPrice });
     }
   }
   return offers;
