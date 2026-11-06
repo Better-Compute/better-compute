@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { ComputeError, type SecretRef, type SecretStore } from '@better-compute/core';
-import { awsSecretsManagerStore, routeSecretStores } from '@better-compute/aws';
+import { awsParameterStore, awsSecretsManagerStore, routeSecretStores } from '@better-compute/aws';
 import { AwsEmulator, recordingLogger } from './support/aws-platform-emulator/index.js';
-import { secretsManagerFake } from './support/aws-platform-emulator/secrets.js';
+import { parameterStoreFake, secretsManagerFake } from './support/aws-platform-emulator/secrets.js';
 
 function smWorld(options: { recoveryWindowDays?: number; cacheTtlMs?: number } = {}) {
   const emu = new AwsEmulator();
@@ -170,5 +170,64 @@ describe('routing', () => {
     expect(local.values.has(legacy)).toBe(false);
     expect(emu.calls('CreateSecret')).toHaveLength(1);
     expect(() => routeSecretStores({ routes: [{ prefix: 'aws-sm', store: sm }], fallback: local, putTo: sm })).toThrow(ComputeError);
+  });
+});
+
+describe('Parameter Store', () => {
+  function ssmWorld(tier?: 'Standard' | 'Advanced') {
+    const emu = new AwsEmulator();
+    const fake = parameterStoreFake(emu);
+    const log = recordingLogger();
+    const store = awsParameterStore({
+      region: 'eu-central-1',
+      credentials: emu.credentials,
+      fetch: emu.fetch,
+      endpoint: 'http://emu.local',
+      clock: emu.clock,
+      log,
+      kmsKeyId: 'alias/bc-params',
+      ...(tier ? { tier } : {}),
+    });
+    return { emu, fake, store, log };
+  }
+
+  it('stores SecureString parameters under the tenant path', async () => {
+    const { store, fake, emu, log } = ssmWorld();
+    const ref = await store.put('t1', 'p4ssw0rd-value');
+    expect(ref).toMatch(/^secret:\/\/aws-ssm\/t1\/[A-Za-z0-9_-]+$/);
+    const [parameter] = [...fake.parameters.values()];
+    expect(parameter).toMatchObject({
+      name: `/better-compute/t1/${ref.split('/').at(-1)}`,
+      type: 'SecureString',
+      keyId: 'alias/bc-params',
+      tier: 'Standard',
+      tags: [{ Key: 'better-compute:tenant', Value: 't1' }],
+    });
+    await expect(store.resolve(ref, { tenantId: 't1' })).resolves.toBe('p4ssw0rd-value');
+    await store.put('t1', 'rotated-value', { ref });
+    await expect(store.resolve(ref)).resolves.toBe('rotated-value');
+    await store.delete(ref);
+    await expect(store.delete(ref)).resolves.toBeUndefined();
+    expect(emu.calls('DeleteParameter')).toHaveLength(2);
+    expect(log.text()).not.toContain('p4ssw0rd-value');
+    expect(log.text()).not.toContain('rotated-value');
+  });
+
+  it('respects tier size limits', async () => {
+    const standard = ssmWorld();
+    expect(await codeOf(standard.store.put('t1', 'x'.repeat(4097)))).toBe('PAYLOAD_TOO_LARGE');
+    await expect(standard.store.put('t1', 'x'.repeat(4096))).resolves.toBeDefined();
+    const advanced = ssmWorld('Advanced');
+    await expect(advanced.store.put('t1', 'x'.repeat(8192))).resolves.toBeDefined();
+    expect(await codeOf(advanced.store.put('t1', 'x'.repeat(8193)))).toBe('PAYLOAD_TOO_LARGE');
+    expect([...advanced.fake.parameters.values()][0]!.tier).toBe('Advanced');
+  });
+
+  it("refuses another tenant's ref without calling AWS", async () => {
+    const { store, emu } = ssmWorld();
+    expect(await codeOf(store.resolve('secret://aws-ssm/t2/x', { tenantId: 't1' }))).toBe('ACCESS_DENIED');
+    expect(await codeOf(store.resolve('secret://aws-ssm/t1/../t2/x' as SecretRef))).toBe('INVALID_INPUT');
+    expect(await codeOf(store.resolve('secret://aws-sm/t1/x', { tenantId: 't1' }))).toBe('INVALID_INPUT');
+    expect(emu.requests).toHaveLength(0);
   });
 });
