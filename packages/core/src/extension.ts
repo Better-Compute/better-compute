@@ -1075,6 +1075,17 @@ export interface CallContext {
   log: Logger;
 }
 
+/**
+ * (P2) What a machine's delete may take down with it. Optional: a provider that cannot delete associated resources in
+ * the same call ignores it, and the caller deletes them after the machine (so naming one is never required for it to
+ * go). A provider names only resources it would delete on its own (ours, attached to that machine): a tenant's own
+ * volume attached by hand always survives.
+ */
+export interface ProviderDeleteOptions {
+  /** Provider ids (as `ProviderVolumes` returns them) of volumes attached to the machine, to delete with it. */
+  volumes?: readonly string[];
+}
+
 /** One configured provider account's client (§5.4). */
 export interface ProviderImpl {
   listOffers(query: OfferQuery): Promise<Offer[]>;
@@ -1096,7 +1107,7 @@ export interface ProviderImpl {
   ): Promise<ExternalMachine>;
   get(id: string, context: CallContext): Promise<ExternalMachine | undefined>;
   /** A machine that is already gone counts as deleted (`NOT_FOUND` ⇒ success). */
-  delete(id: string, context: CallContext): Promise<void>;
+  delete(id: string, context: CallContext, options?: ProviderDeleteOptions): Promise<void>;
   /**
    * `agent: 'bcd'` pools only: delivers a single-use `provisioned` join token through rescue or
    * installimage, never through tenant-readable user-data. The installed OS runs

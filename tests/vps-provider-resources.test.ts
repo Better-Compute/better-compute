@@ -76,7 +76,10 @@ const cloud = {
   pendingTicks: 0,
   progress: new Map<string, number>(),
   counter: 0,
+  /** Whether a machine delete also deletes the volumes it names (DO's selective destroy); else they are detached. */
+  selective: true,
   reset() {
+    this.selective = true;
     this.volumes.clear();
     this.snapshots.clear();
     this.addresses.clear();
@@ -146,9 +149,22 @@ const doLike = defineProvider({
       throw new Error('unused');
     },
     async get(machineId: string): Promise<ExternalMachine | undefined> {
+      if (!cloud.machines.has(machineId)) return undefined;
       return { id: machineId, name: machineId, state: 'running', addresses: [] };
     },
-    async delete() {},
+    // Like DigitalOcean's (selective) destroy: the named volumes attached to it go with it, every other volume is
+    // detached and every address unassigned.
+    async delete(machineId: string, _context, options) {
+      cloud.call(`delete ${machineId} ${options?.volumes?.join(',') || '-'}`);
+      cloud.machines.delete(machineId);
+      for (const volume of [...cloud.volumes.values()]) {
+        if (volume.attachedTo !== machineId) continue;
+        delete volume.attachedTo;
+        if (cloud.selective && options?.volumes?.includes(volume.id)) cloud.volumes.delete(volume.id);
+      }
+      for (const address of cloud.addresses.values())
+        if (address.assignedTo === machineId) delete address.assignedTo;
+    },
     volumes: {
       async ensureVolume(spec) {
         cloud.call(`ensureVolume ${spec.name}`);
@@ -850,5 +866,122 @@ describe('providerAddresses', () => {
   it('an address quota of 0 refuses the reserve', async () => {
     await db.transaction((tx) => setQuota(tx, 'root', doPool, 'addresses', 0));
     expect(await codeOf(createAddress())).toBe('QUOTA_EXCEEDED');
+  });
+});
+
+describe('instance delete', () => {
+  const instanceReconciler = () => module.reconcilers!.find((entry) => entry.name === 'vps.instances')!;
+  /** Asks for the instance's delete and runs its controller until it is deleted. */
+  async function deleteInstance(instanceId: string, onDelete?: 'detach'): Promise<void> {
+    await db.query(
+      `UPDATE instances SET desired_state = 'deleted', version = version + 1,
+              origin = CASE WHEN $2::text IS NULL THEN origin ELSE 'attached' END,
+              on_delete = coalesce($2::text, on_delete),
+              provider_claimed_at = CASE WHEN $2::text IS NULL THEN provider_claimed_at ELSE compute_now() END
+        WHERE id = $1`,
+      [instanceId, onDelete ?? null],
+    );
+    for (let i = 0; i < 5; i++) {
+      await instanceReconciler().run(
+        { ...moduleContext(db), signal: new AbortController().signal } as never,
+        instanceId,
+      );
+      const { rows } = await db.query<{ state: string }>(`SELECT state FROM instances WHERE id = $1`, [instanceId]);
+      if (rows[0]?.state === 'deleted') return;
+    }
+    throw new Error(`instance ${instanceId} was not deleted`);
+  }
+  const attachmentsOf = async (instanceId: string) =>
+    (
+      await db.query<{ volume_id: string; state: string; desired_state: string }>(
+        `SELECT volume_id, state, desired_state FROM provider_volume_attachments WHERE instance_id = $1
+          ORDER BY volume_id`,
+        [instanceId],
+      )
+    ).rows;
+
+  it('deletes its deleteWithInstance volumes with its machine, detaches the others and keeps its addresses', async () => {
+    const instanceId = await insertInstance();
+    const machine = `droplet-${keyCounter}`;
+    const keep = await createVolume({ instanceId, sizeGiB: 10 });
+    const gone = await createVolume({ instanceId, sizeGiB: 20, deleteWithInstance: true });
+    const address = await createAddress();
+    await call('providerAddresses', 'assign', { tenantId: 'root', addressId: address.id, instanceId });
+    await drain();
+    expect((await getVolume(gone.id)).attachment).toMatchObject({ state: 'ready' });
+    expect(await getAddress(address.id)).toMatchObject({ assignmentState: 'ready' });
+    const goneExternal = [...cloud.volumes.values()].find(
+      (volume) => volume.spec.name === providerResourceName(gone.id),
+    )!.id;
+
+    await deleteInstance(instanceId);
+    // One machine delete names the volume to go with it (DO's selective destroy, DO-D16).
+    expect(cloud.calls.filter((label) => label.startsWith('delete '))).toEqual([
+      `delete ${machine} ${goneExternal}`,
+    ]);
+    // The instance's attachments are no longer wanted, and every resource it had is woken.
+    expect((await attachmentsOf(instanceId)).map((row) => row.desired_state)).toEqual(['deleted', 'deleted']);
+    expect([...queue.keys()].sort()).toEqual([address.id, gone.id, keep.id].sort());
+    expect(await getVolume(gone.id)).toMatchObject({ desiredState: 'deleted', state: 'deleting' });
+    await drain();
+
+    expect(await getVolume(keep.id)).toMatchObject({ state: 'ready', desiredState: 'present' });
+    expect((await getVolume(keep.id)).attachment).toBeUndefined();
+    expect((await getVolume(gone.id)).state).toBe('deleted');
+    expect(cloud.volumes.size).toBe(1);
+    expect(await quotaUsed('diskGiB')).toBe(10);
+    // The address is unassigned and kept.
+    expect(await getAddress(address.id)).toMatchObject({ state: 'ready', assignmentState: 'none' });
+    expect((await getAddress(address.id)).instanceId).toBeUndefined();
+    expect(cloud.addresses.size).toBe(1);
+    expect(events.map((event) => event.type)).toEqual(
+      expect.arrayContaining([
+        'providerVolume.detached',
+        'providerVolume.deleted',
+        'providerAddress.unassigned',
+      ]),
+    );
+    expect(cloud.calls).not.toContain(`deleteVolume ${goneExternal}`);
+  });
+
+  it('a provider without selective destroy: the volume is deleted after the machine', async () => {
+    cloud.selective = false;
+    const instanceId = await insertInstance();
+    const gone = await createVolume({ instanceId, deleteWithInstance: true });
+    await drain();
+    await deleteInstance(instanceId);
+    await drain();
+    expect((await getVolume(gone.id)).state).toBe('deleted');
+    expect(cloud.volumes.size).toBe(0);
+    expect(cloud.calls.some((label) => label.startsWith('deleteVolume '))).toBe(true);
+    expect(await quotaUsed('diskGiB')).toBe(0);
+  });
+
+  it('while the instance is being deleted, its deleteWithInstance volume waits without a provider call', async () => {
+    const instanceId = await insertInstance();
+    const gone = await createVolume({ instanceId, deleteWithInstance: true });
+    await drain();
+    await db.query(`UPDATE instances SET state = 'deleting', desired_state = 'deleted' WHERE id = $1`, [
+      instanceId,
+    ]);
+    // The machine's delete took the volume (its answer not yet applied): the volume is never made again.
+    cloud.volumes.clear();
+    cloud.calls.length = 0;
+    queue.set(gone.id, clock.now());
+    await tick();
+    expect(cloud.calls).toEqual([]);
+    expect(await getVolume(gone.id)).toMatchObject({ desiredState: 'present', state: 'ready' });
+  });
+
+  it('a machine the instance leaves running keeps its volumes: detached, never deleted', async () => {
+    const instanceId = await insertInstance();
+    const kept = await createVolume({ instanceId, deleteWithInstance: true });
+    await drain();
+    await deleteInstance(instanceId, 'detach');
+    expect(cloud.calls.filter((label) => label.startsWith('delete '))).toEqual([]);
+    await drain();
+    expect(await getVolume(kept.id)).toMatchObject({ state: 'ready', desiredState: 'present' });
+    expect((await getVolume(kept.id)).attachment).toBeUndefined();
+    expect(cloud.volumes.size).toBe(1);
   });
 });

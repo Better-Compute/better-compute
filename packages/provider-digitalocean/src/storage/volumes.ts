@@ -354,6 +354,30 @@ export class DoVolumes implements ProviderVolumes {
     return volume ? state(volume.id, 'ready', volumeOutputs(volume)) : undefined;
   }
 
+  /**
+   * Of `ids`, the volumes a Droplet's selective destroy may name (DO-D16): each exists, is ours (managed and this
+   * deployment's) and is attached to `dropletId`. Anything else (a tenant's own volume attached by hand, one of ours on
+   * another Droplet, a malformed id) is left out, and survives the Droplet.
+   */
+  async deletableWith(
+    ids: readonly string[],
+    dropletId: number,
+    signal: AbortSignal,
+  ): Promise<string[]> {
+    const out: string[] = [];
+    for (const raw of new Set(ids)) {
+      if (!uuidPattern.test(raw)) continue;
+      const volume = await this.volume(raw.toLowerCase(), signal);
+      if (!volume || !this.owned(volume.tags) || !(volume.droplet_ids ?? []).includes(dropletId)) {
+        if (volume)
+          this.log.warn('digitalocean.selectiveDestroySkipped', { volume: volume.id, droplet: dropletId });
+        continue;
+      }
+      if (!out.includes(volume.id)) out.push(volume.id);
+    }
+    return out;
+  }
+
   // ----------------------------------------------------------------------- attach and detach
 
   /** The Droplet a volume attaches to: in the volume's region and an instance's of this deployment. */
@@ -434,7 +458,7 @@ export class DoVolumes implements ProviderVolumes {
     const { signal } = ctx;
     const volume = await this.volume(id, signal);
     if (!volume) return state(id, 'deleted');
-    if (!volume.droplet_ids.includes(dropletId)) {
+    if (!(volume.droplet_ids ?? []).includes(dropletId)) {
       // An attach still running would attach it after this call said it was detached.
       if (this.owned(volume.tags) && (await this.running(volume.id, signal)))
         return state(volume.id, 'deleting', volumeOutputs(volume));

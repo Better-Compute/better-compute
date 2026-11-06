@@ -262,4 +262,28 @@ export function registerDroplets(emulator: DoEmulator): void {
     unassignAll(context.state, id);
     return { status: 204 };
   });
+
+  // Selective destroy (P2, DO-D16): the Droplet, and the associated volumes the body names. Each named volume must be
+  // attached to it (anything else is a 422, and nothing is deleted). Answers 202; the emulator applies it at once.
+  emulator.route(
+    'DELETE',
+    /^\/droplets\/(\d+)\/destroy_with_associated_resources\/selective$/,
+    (context) => {
+      const id = Number(context.match[1]);
+      if (!context.state.droplets.has(id)) return emulator.error('not-found');
+      const named = (context.body?.volumes ?? []) as unknown[];
+      if (!Array.isArray(named)) return emulator.error('422-unknown');
+      for (const volumeId of named) {
+        const volume = context.state.volumes.get(String(volumeId));
+        if (!volume || !(volume.droplet_ids as number[]).includes(id))
+          return emulator.error('422-unknown');
+      }
+      context.state.droplets.delete(id);
+      progressOf(context.state).delete(id);
+      detachAll(context.state, id);
+      unassignAll(context.state, id);
+      for (const volumeId of named) context.state.volumes.delete(String(volumeId));
+      return { status: 202 };
+    },
+  );
 }

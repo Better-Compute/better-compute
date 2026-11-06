@@ -2325,6 +2325,14 @@ async function convergeVolume(
   volumes: ProviderVolumes,
   { volume, attachments, source }: LoadedVolume,
 ): Promise<void> {
+  // A volume that goes with its instance's machine, while that machine is being deleted: no provider call (the
+  // delete may already have taken it, and an ensure by name would make it again). The instance's finished delete
+  // wakes it (onInstanceDeleted).
+  if (
+    volume.delete_with_instance &&
+    attachments.some((a) => a.desired_state === 'present' && a.instance_state === 'deleting')
+  )
+    return;
   let snapshotId: string | undefined;
   if (volume.source_snapshot_id) {
     // A restore waits for its snapshot's provider id; a snapshot that went away fails it.
@@ -2844,6 +2852,61 @@ async function teardownAddress(
   }
   run.inFlight = true;
   await set(settled('deleting'));
+}
+
+// --- Instance delete ---------------------------------------------------------------------------
+
+/**
+ * The provider ids of the volumes an instance's machine delete may take with it (`ProviderDeleteOptions.volumes`,
+ * DO's selective destroy): wanted on it, created with `deleteWithInstance`, and at the provider. The provider itself
+ * names only those it finds ours and attached there; one it leaves is deleted after the machine (onInstanceDeleted).
+ */
+export async function volumesDeletedWith(tx: SqlTx, instanceId: string): Promise<string[]> {
+  const { rows } = await tx.query<{ external_id: string }>(
+    `SELECT v.external_id FROM provider_volume_attachments a JOIN provider_volumes v ON v.id = a.volume_id
+      WHERE a.instance_id = $1 AND a.state <> 'deleted' AND a.desired_state = 'present'
+        AND v.delete_with_instance AND v.desired_state = 'present' AND v.external_id IS NOT NULL
+      ORDER BY v.id`,
+    [instanceId],
+  );
+  return rows.map((row) => row.external_id);
+}
+
+/**
+ * Called in the transaction that finishes an instance's deletion. Its attachments are no longer wanted; when its
+ * machine was deleted (not left running by a detach), its `deleteWithInstance` volumes are deleted too. Every volume
+ * and address it had is woken: the reconciler settles the detach (the provider detached them with the machine),
+ * deletes what is to go (already gone after a selective destroy) and unassigns its addresses, which are kept.
+ */
+export async function onInstanceDeleted(
+  deps: Pick<ProviderResourceDeps, 'events' | 'work'>,
+  tx: SqlTx,
+  instanceId: string,
+  options: { machineDeleted: boolean },
+): Promise<void> {
+  const attached = await tx.query<{ volume_id: string }>(
+    `UPDATE provider_volume_attachments SET desired_state = 'deleted'
+      WHERE instance_id = $1 AND state <> 'deleted' RETURNING volume_id`,
+    [instanceId],
+  );
+  const volumeIds = [...new Set(attached.rows.map((row) => row.volume_id))].sort();
+  if (options.machineDeleted && volumeIds.length > 0) {
+    const doomed = await tx.query<VolumeRow>(
+      `UPDATE provider_volumes SET desired_state = 'deleted', state = 'deleting', message = NULL,
+              version = version + 1
+        WHERE id = ANY($1::text[]) AND delete_with_instance AND desired_state = 'present' AND state <> 'deleted'
+        RETURNING *`,
+      [volumeIds],
+    );
+    for (const row of doomed.rows)
+      await publish(deps, tx, 'providerVolume', row, 'deleting', { instanceId });
+  }
+  const addresses = await tx.query<{ id: string }>(
+    `SELECT id FROM provider_addresses WHERE instance_id = $1 AND state <> 'deleted' ORDER BY id`,
+    [instanceId],
+  );
+  for (const id of [...volumeIds, ...addresses.rows.map((row) => row.id)])
+    await deps.work.enqueue(tx, providerResourcesWork, id);
 }
 
 // --- Entry points ------------------------------------------------------------------------------

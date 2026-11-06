@@ -49,6 +49,7 @@ import { closeOpenInterval, openInterval } from './instance-usage.js';
 import { releaseAddress } from './ipam.js';
 import { networkTag, providerResourceName } from './networks.js';
 import { specPlacement, type HostPlacement } from './placement.js';
+import { onInstanceDeleted, volumesDeletedWith } from './provider-resources.js';
 import { markSandboxReady, sandboxWork } from './sandboxes.js';
 import { instanceVolumeSpecs, volumePlacement } from './volumes.js';
 
@@ -152,6 +153,11 @@ async function finishDeletion(
   await tx.query(`UPDATE provider_machines SET instance_id = NULL WHERE instance_id = $1`, [row.id]);
   const detached =
     row.origin === 'attached' && (row.onDelete === 'detach' || options.detached === true);
+  // (P2) Its provider volumes are detached and its addresses unassigned (kept); its deleteWithInstance volumes go
+  // only with a machine that was deleted, never one left running.
+  await onInstanceDeleted(deps, tx, row.id, {
+    machineDeleted: options.detached !== true && !(row.origin === 'attached' && row.onDelete === 'detach'),
+  });
   await publishInstance(deps, tx, deleted, detached ? 'instance.detached' : 'instance.deleted', {
     ...(detached && row.externalId ? { externalId: row.externalId } : {}),
   });
@@ -479,10 +485,13 @@ async function reconcileProvider(
     const account = row.providerAccountId
       ? await readPoolAccount(tx, row.providerAccountId, row.poolId)
       : undefined;
-    return { row, account };
+    // (P2) The volumes its machine delete may take with it (DO's selective destroy).
+    const withVolumes = row.state === 'deleting' ? await volumesDeletedWith(tx, row.id) : [];
+    return { row, account, withVolumes };
   });
   if (!planned) return undefined;
-  const { row, account } = planned;
+  const { row, account, withVolumes } = planned;
+  const deleteOptions = withVolumes.length > 0 ? { volumes: withVolumes } : undefined;
   const action = providerAction(row);
   const now = deps.clock.now();
 
@@ -559,7 +568,7 @@ async function reconcileProvider(
       );
     } else if (action.kind === 'delete') {
       try {
-        await client.delete(row.externalId!, context);
+        await client.delete(row.externalId!, context, deleteOptions);
       } catch (error) {
         if (!isComputeError(error, 'NOT_FOUND')) throw error;
       }
@@ -584,7 +593,7 @@ async function reconcileProvider(
             : true;
       if (claimed !== undefined)
         try {
-          await client.delete(row.externalId!, context);
+          await client.delete(row.externalId!, context, deleteOptions);
         } catch (error) {
           if (!isComputeError(error, 'NOT_FOUND')) throw error;
         }

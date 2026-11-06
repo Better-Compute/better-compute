@@ -7,6 +7,7 @@ import {
   type OfferQuery,
   type PowerAction,
   type ProviderContext,
+  type ProviderDeleteOptions,
   type ProviderImpl,
 } from '@better-compute/core';
 import type { DoClient } from '../client/http.js';
@@ -484,7 +485,12 @@ export class DoCompute implements ProviderImpl {
     return networkNamer(this.client, ctx.signal, this.context.log)(toMachine(droplet));
   }
 
-  async delete(id: string, ctx: CallContext): Promise<void> {
+  /**
+   * Deletes a Droplet of ours. With `options.volumes` (P2) it is one selective destroy that also deletes those of the
+   * named volumes that are ours and attached to it (DO-D16: never a tag-scoped bulk call, never a tenant's own
+   * volume); naming none of ours is a plain delete. Every other volume is detached by DO and survives.
+   */
+  async delete(id: string, ctx: CallContext, options?: ProviderDeleteOptions): Promise<void> {
     const droplet = await this.droplet(id, ctx.signal);
     if (!droplet) return;
     if (!this.owned(droplet))
@@ -493,7 +499,22 @@ export class DoCompute implements ProviderImpl {
         `Droplet ${droplet.id} is not managed by this better-compute deployment and is never deleted by it`,
         'notManaged',
       );
-    await this.destroy(droplet.id, ctx.signal);
+    const volumes = options?.volumes?.length
+      ? await this.volumes.deletableWith(options.volumes, droplet.id, ctx.signal)
+      : [];
+    if (volumes.length === 0) {
+      await this.destroy(droplet.id, ctx.signal);
+      return;
+    }
+    try {
+      await this.client.request(
+        'DELETE',
+        `/droplets/${droplet.id}/destroy_with_associated_resources/selective`,
+        { body: { volumes }, signal: ctx.signal, budget: 'mutate' },
+      );
+    } catch (error) {
+      if (!isComputeError(error, 'NOT_FOUND')) throw error;
+    }
   }
 
   // ------------------------------------------------------------------- power, reinstall, list

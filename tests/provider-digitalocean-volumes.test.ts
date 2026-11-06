@@ -334,6 +334,41 @@ describe('provider-digitalocean volumes: attach and detach', () => {
     await impl.delete(String(droplet.id), ctx());
     expect((await impl.volumes.getVolume(id, ctx()))?.outputs?.attachedTo).toBe(undefined);
   });
+
+  it('deletes a Droplet with the named volumes of ours in one selective destroy (DO-D16)', async () => {
+    const { emu, impl } = await setup();
+    const droplet = host(emu, { tags: [managed, deployment, instanceTag('ins_1')] });
+    const { id: mine } = await impl.volumes.ensureVolume(spec, ctx());
+    await impl.volumes.attachVolume(mine, String(droplet.id), ctx());
+    // A tenant's own volume attached by hand, and one of ours that is not on this Droplet: both survive.
+    const byHand = seedVolume(emu.state, { name: 'by-hand', droplet_ids: [droplet.id] });
+    const { id: elsewhere } = await impl.volumes.ensureVolume({ ...spec, name: 'bc-v2' }, ctx('k2'));
+    await impl.delete(String(droplet.id), ctx('del'), {
+      volumes: [mine, byHand.id, elsewhere, 'not-a-volume'],
+    });
+    const selective = calls(
+      emu,
+      'DELETE',
+      /^\/v2\/droplets\/\d+\/destroy_with_associated_resources\/selective$/,
+    );
+    expect(selective).toHaveLength(1);
+    expect(selective[0]!.body).toEqual({ volumes: [mine] });
+    expect(calls(emu, 'DELETE', /^\/v2\/droplets\/\d+$/)).toHaveLength(0);
+    expect(emu.state.droplets.has(droplet.id)).toBe(false);
+    expect(await impl.volumes.getVolume(mine, ctx())).toBeUndefined();
+    expect(emu.state.volumes.get(byHand.id)?.droplet_ids).toEqual([]);
+    expect(await impl.volumes.getVolume(elsewhere, ctx())).toMatchObject({ state: 'ready' });
+  });
+
+  it('a delete naming no volume of ours is a plain Droplet delete', async () => {
+    const { emu, impl } = await setup();
+    const droplet = host(emu, { tags: [managed, deployment, instanceTag('ins_1')] });
+    const byHand = seedVolume(emu.state, { name: 'by-hand', droplet_ids: [droplet.id] });
+    await impl.delete(String(droplet.id), ctx(), { volumes: [byHand.id] });
+    expect(calls(emu, 'DELETE', /^\/v2\/droplets\/\d+$/)).toHaveLength(1);
+    expect(calls(emu, 'DELETE', /selective$/)).toHaveLength(0);
+    expect(emu.state.volumes.has(byHand.id)).toBe(true);
+  });
 });
 
 describe('provider-digitalocean volumes: resize and delete', () => {
