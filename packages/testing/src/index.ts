@@ -215,3 +215,8 @@ export type {
   DevStackIam,
   DevStackOptions,
 } from './dev/stack.js';
+export { kubernetesProviderConformanceCases } from './kubernetes-conformance.js';
+export type {
+  KubernetesConformanceShape,
+  KubernetesProviderConformanceSubject,
+} from './kubernetes-conformance.js';
