@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   ComputeError,
   type Clock,
@@ -13,10 +14,12 @@ import type { DoksCluster, DoksCredentials } from './types.js';
 // Credentials for one principal on a DOKS cluster, minted through the cluster's own Kubernetes
 // API (the GKE driver's approach). DOKS hands out a short-lived cluster-admin credential
 // (`GET /kubernetes/clusters/{id}/credentials?expiry_seconds=…`); the driver holds it in memory for
-// this one call only, to create or reuse a service account named `subject` in the `bc-access`
-// namespace, bind it to the built-in ClusterRole for the role, and ask the TokenRequest API for a
-// bound token. The connection trusts only the cluster's CA. Neither token is ever stored, logged
-// or put in an error.
+// this one call only, to create or reuse the service account of the subject and role in the
+// `bc-access` namespace, bind it to the built-in ClusterRole for the role, and ask the TokenRequest
+// API for a bound token. Each (subject, role) has its own account and binding, so a token always
+// acts with the role it was minted for: a mint of another role for the same subject, concurrent or
+// later, never re-scopes it. The connection trusts only the cluster's CA. Neither token is ever
+// stored, logged or put in an error.
 
 /** The namespace that holds the service accounts better-compute mints credentials for. */
 export const accessNamespace = 'bc-access';
@@ -33,6 +36,23 @@ const maxTtlSeconds = 86_400;
 
 /** The built-in ClusterRole each role binds to. */
 export const clusterRoles = { view: 'view', edit: 'edit', admin: 'cluster-admin' } as const;
+
+const roleSuffixes = { view: 'v', edit: 'e', admin: 'a' } as const;
+
+/**
+ * The service account of one subject and role: `<subject>-<v|e|a>` (at most 62 characters), or for
+ * a subject longer than 60 its first 40 characters, 20 hex of its SHA-256 and the role letter
+ * (exactly 63). The two forms never share a length, so no subject can take another's account.
+ */
+export function serviceAccountName(
+  subject: string,
+  role: KubernetesCredentialRequest['role'],
+): string {
+  const suffix = roleSuffixes[role];
+  if (subject.length <= 60) return `${subject}-${suffix}`;
+  const hash = createHash('sha256').update(subject).digest('hex').slice(0, 20);
+  return `${subject.slice(0, 40)}-${hash}-${suffix}`;
+}
 
 /** Validates a credential request: subject a DNS-1123 label, role, and a TTL of 600..86400 s. */
 export function checkCredentialRequest(request: KubernetesCredentialRequest): void {
@@ -164,6 +184,7 @@ export async function mintCredentials(options: {
   const admin = await adminCredential(options.client, id, server, signal);
   const { subject, ttlSeconds } = request;
   const role = clusterRoles[request.role];
+  const account = serviceAccountName(subject, request.role);
 
   const send = async (
     method: 'GET' | 'POST' | 'DELETE',
@@ -208,27 +229,32 @@ export async function mintCredentials(options: {
     409,
   );
 
-  // 2. The service account.
-  const accounting = `Creating service account ${subject}`;
+  // 2. The service account of this subject and role.
+  const accounting = `Creating service account ${account}`;
   expect(
     await send('POST', `/api/v1/namespaces/${accessNamespace}/serviceaccounts`, accounting, {
       apiVersion: 'v1',
       kind: 'ServiceAccount',
-      metadata: { name: subject, namespace: accessNamespace, labels: managedBy },
+      metadata: {
+        name: account,
+        namespace: accessNamespace,
+        labels: { ...managedBy, 'better-compute.io/role': request.role },
+        annotations: { 'better-compute.io/subject': subject },
+      },
     }),
     accounting,
     409,
   );
 
   // 3. The binding. Its roleRef is immutable: a binding to another role is deleted and recreated.
-  const bindingName = `${accessNamespace}:${subject}`;
+  const bindingName = `${accessNamespace}:${account}`;
   const bindings = `/apis/${rbacGroup}/v1/clusterrolebindings`;
   const binding = {
     apiVersion: `${rbacGroup}/v1`,
     kind: 'ClusterRoleBinding',
     metadata: { name: bindingName, labels: managedBy },
     roleRef: { apiGroup: rbacGroup, kind: 'ClusterRole', name: role },
-    subjects: [{ kind: 'ServiceAccount', name: subject, namespace: accessNamespace }],
+    subjects: [{ kind: 'ServiceAccount', name: account, namespace: accessNamespace }],
   };
   const matches = (found: unknown): boolean => {
     const current = found as
@@ -243,7 +269,7 @@ export async function mintCredentials(options: {
       current.roleRef.name === role &&
       subjects.length === 1 &&
       subjects[0]!.kind === 'ServiceAccount' &&
-      subjects[0]!.name === subject &&
+      subjects[0]!.name === account &&
       subjects[0]!.namespace === accessNamespace
     );
   };
@@ -270,11 +296,11 @@ export async function mintCredentials(options: {
   }
 
   // 4. A bound token for the service account.
-  const minting = `Minting a token for ${subject}`;
+  const minting = `Minting a token for ${account}`;
   const minted = expect(
     await send(
       'POST',
-      `/api/v1/namespaces/${accessNamespace}/serviceaccounts/${subject}/token`,
+      `/api/v1/namespaces/${accessNamespace}/serviceaccounts/${account}/token`,
       minting,
       {
         apiVersion: 'authentication.k8s.io/v1',

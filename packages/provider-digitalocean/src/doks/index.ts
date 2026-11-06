@@ -160,8 +160,11 @@ export class DoKubernetes implements ProviderKubernetes {
     return isOwned(cluster.tags, this.#deploymentTag);
   }
 
-  /** Deletes one of this deployment's clusters by its id (never a bulk or a dangerous delete). */
-  async #deleteOwned(cluster: DoksCluster, signal: AbortSignal): Promise<void> {
+  /**
+   * Deletes one of this deployment's clusters by its id (never a bulk or a dangerous delete).
+   * False when it was already gone.
+   */
+  async #deleteOwned(cluster: DoksCluster, signal: AbortSignal): Promise<boolean> {
     if (!this.#owned(cluster))
       throw fail(
         'INVALID_STATE',
@@ -173,8 +176,10 @@ export class DoKubernetes implements ProviderKubernetes {
         signal,
         budget: 'mutate',
       });
+      return true;
     } catch (error) {
       if (!isComputeError(error, 'NOT_FOUND')) throw error;
+      return false;
     }
   }
 
@@ -453,9 +458,12 @@ export class DoKubernetes implements ProviderKubernetes {
         'notOwned',
       );
     if (found.status?.state === 'deleting') return resourceState(id, 'deleting');
-    const kept = await this.#associated(id, signal);
+    const kept = await this.#associated(id, signal, log);
     log.info('doks.cluster.delete', { cluster: id, ...kept });
-    await this.#deleteOwned(found, signal);
+    if (!(await this.#deleteOwned(found, signal))) {
+      for (const [name, uuid] of this.#names) if (uuid === id) this.#names.delete(name);
+      return resourceState(id, 'deleted');
+    }
     const parts = [
       [kept.loadBalancers, 'load balancer'],
       [kept.volumes, 'volume'],
@@ -471,10 +479,15 @@ export class DoKubernetes implements ProviderKubernetes {
     });
   }
 
-  /** How many load balancers, volumes and snapshots of the cluster's own a plain delete keeps. */
+  /**
+   * How many load balancers, volumes and snapshots of the cluster's own a plain delete keeps. Only
+   * a count for the answer's message: any failure to list them (a token that may not, DO busy,
+   * the cluster gone meanwhile) counts none and is logged by its code, and the delete goes on.
+   */
   async #associated(
     id: string,
     signal: AbortSignal,
+    log: Logger,
   ): Promise<{ loadBalancers: number; volumes: number; snapshots: number }> {
     try {
       const listed = await this.#client.request<DoksAssociatedResources>(
@@ -488,10 +501,12 @@ export class DoKubernetes implements ProviderKubernetes {
         snapshots: listed.volume_snapshots?.length ?? 0,
       };
     } catch (error) {
-      // Only a count for the message: a token that may not list them still deletes.
-      if (isComputeError(error, 'ACCESS_DENIED'))
-        return { loadBalancers: 0, volumes: 0, snapshots: 0 };
-      throw error;
+      if (signal.aborted) throw error;
+      log.warn('doks.cluster.associatedUnread', {
+        cluster: id,
+        error: isComputeError(error) ? error.code : 'unknown',
+      });
+      return { loadBalancers: 0, volumes: 0, snapshots: 0 };
     }
   }
 

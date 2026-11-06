@@ -276,6 +276,10 @@ describe('doks clusters', () => {
       [{ authorizedNetworks: ['10.0.0.0/33'] }, 'INVALID_INPUT', 'cidr'],
       [{ version: 'latest' }, 'INVALID_INPUT', 'version'],
       [{ labels: { 'bad key!': 'x' } }, 'INVALID_INPUT', 'label'],
+      // DOKS's own tag namespace (k8s, k8s:<uuid>, k8s-worker) is never a label's.
+      [{ labels: { k8s: 'x' } }, 'INVALID_INPUT', 'label'],
+      [{ labels: { K8S: '0d0c5000-0000-4000-8000-000000000009' } }, 'INVALID_INPUT', 'label'],
+      [{ labels: { 'k8s-worker': 'x' } }, 'INVALID_INPUT', 'label'],
       [{ initialNodePools: [{ ...cpuPool, zones: ['nyc3-a'] }] }, 'UNSUPPORTED', 'zones'],
       [{ initialNodePools: [{ ...cpuPool, diskGiB: 100 }] }, 'UNSUPPORTED', 'disk'],
       [{ initialNodePools: [cpuPool, cpuPool] }, 'INVALID_INPUT', 'nodePool'],
@@ -605,9 +609,15 @@ describe('doks node pools', () => {
     expect([dropped.code, dropped.details?.reason]).toEqual(['UNSUPPORTED', 'spotUnverified']);
     const [made] = s.doks.byName('bc-k-tor');
     expect(made!.status.state).toBe('deleting');
-    expect(mutations(s)).toEqual(['POST /kubernetes/clusters', `DELETE /kubernetes/clusters/${made!.id}`]);
+    expect(mutations(s)).toEqual([
+      'POST /kubernetes/clusters',
+      `DELETE /kubernetes/clusters/${made!.id}`,
+    ]);
     // Once it is gone, a create with a Spot pool is refused before anything is sent.
-    await settle(() => s.k8s.getCluster(made!.id, s.ctx()).then((x) => x ?? { state: 'gone' }), 'gone');
+    await settle(
+      () => s.k8s.getCluster(made!.id, s.ctx()).then((x) => x ?? { state: 'gone' }),
+      'gone',
+    );
     const later = await failure(s.k8s.ensureCluster(spec, s.ctx()));
     expect([later.code, later.details?.reason]).toEqual(['UNSUPPORTED', 'spotUnverified']);
     expect(posted(s, '/kubernetes/clusters')).toHaveLength(1);
@@ -697,13 +707,24 @@ describe('doks credentials', () => {
       token: 'doks-sa-token-1',
       expiresAt: t0 + 3600 * 1000,
     });
+    // One service account per subject and role: bc-u-alice-e is alice's edit account.
     expect(s.doks.kube.routes()).toEqual([
       'POST /api/v1/namespaces',
       'POST /api/v1/namespaces/bc-access/serviceaccounts',
-      'GET /apis/rbac.authorization.k8s.io/v1/clusterrolebindings/bc-access:bc-u-alice',
+      'GET /apis/rbac.authorization.k8s.io/v1/clusterrolebindings/bc-access:bc-u-alice-e',
       'POST /apis/rbac.authorization.k8s.io/v1/clusterrolebindings',
-      'POST /api/v1/namespaces/bc-access/serviceaccounts/bc-u-alice/token',
+      'POST /api/v1/namespaces/bc-access/serviceaccounts/bc-u-alice-e/token',
     ]);
+    expect(s.doks.kube.calls[1]!.body).toMatchObject({
+      metadata: {
+        name: 'bc-u-alice-e',
+        labels: {
+          'app.kubernetes.io/managed-by': 'better-compute',
+          'better-compute.io/role': 'edit',
+        },
+        annotations: { 'better-compute.io/subject': 'bc-u-alice' },
+      },
+    });
     // Each call trusts the cluster's CA only and carries DO's short-lived admin token for it.
     expect(s.doks.credentialExpiries).toEqual([300]);
     for (const call of s.doks.kube.calls) {
@@ -711,9 +732,9 @@ describe('doks credentials', () => {
       expect(s.doks.adminTokens.get(call.token)?.cluster).toBe(s.cluster);
       expect(call.url.startsWith(`${server}/`)).toBe(true);
     }
-    expect(s.doks.kube.bindings.get('bc-access:bc-u-alice')).toMatchObject({
+    expect(s.doks.kube.bindings.get('bc-access:bc-u-alice-e')).toMatchObject({
       roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: 'edit' },
-      subjects: [{ kind: 'ServiceAccount', name: 'bc-u-alice', namespace: 'bc-access' }],
+      subjects: [{ kind: 'ServiceAccount', name: 'bc-u-alice-e', namespace: 'bc-access' }],
       metadata: { labels: { 'app.kubernetes.io/managed-by': 'better-compute' } },
     });
     expect(s.doks.kube.calls.at(-1)!.body).toEqual({
@@ -733,22 +754,58 @@ describe('doks credentials', () => {
     expect(s.doks.kube.routes().filter((r) => r.endsWith('/clusterrolebindings'))).toHaveLength(1);
   });
 
-  it('recreates the binding when the role changes (roleRef is immutable)', async () => {
+  it("binds each role to its own service account, so a token never gets another mint's role", async () => {
     const s = await withCluster();
     const request = { subject: 'bc-u-bob', role: 'view' as const, ttlSeconds: 3600 };
     await s.k8s.credentials(s.cluster, request, s.ctx());
-    expect(s.doks.kube.bindings.get('bc-access:bc-u-bob')!.roleRef.name).toBe('view');
+    // An admin mint for the same subject, even one that runs alongside, never re-scopes the view
+    // account: it gets an account (and binding) of its own.
+    await Promise.all([
+      s.k8s.credentials(s.cluster, { ...request, role: 'admin' }, s.ctx()),
+      s.k8s.credentials(s.cluster, request, s.ctx()),
+    ]);
+    const role = (name: string) => s.doks.kube.bindings.get(`bc-access:${name}`)!.roleRef.name;
+    expect(role('bc-u-bob-v')).toBe('view');
+    expect(role('bc-u-bob-a')).toBe('cluster-admin');
+    expect(s.doks.kube.routes().filter((r) => r.startsWith('DELETE'))).toEqual([]);
+    const minted = s.doks.kube.calls
+      .filter((call) => call.url.endsWith('/token'))
+      .map((call) => new URL(call.url).pathname.split('/')[6]);
+    expect(minted.sort()).toEqual(['bc-u-bob-a', 'bc-u-bob-v', 'bc-u-bob-v']);
+  });
+
+  it('replaces a binding of its account that grants another role (roleRef is immutable)', async () => {
+    const s = await withCluster();
+    const request = { subject: 'bc-u-bob', role: 'view' as const, ttlSeconds: 3600 };
+    await s.k8s.credentials(s.cluster, request, s.ctx());
+    // Someone re-pointed the view account's binding at cluster-admin.
+    s.doks.kube.bindings.get('bc-access:bc-u-bob-v')!.roleRef.name = 'cluster-admin';
     s.doks.kube.calls = [];
-    await s.k8s.credentials(s.cluster, { ...request, role: 'admin' }, s.ctx());
+    await s.k8s.credentials(s.cluster, request, s.ctx());
     expect(s.doks.kube.routes()).toEqual([
       'POST /api/v1/namespaces',
       'POST /api/v1/namespaces/bc-access/serviceaccounts',
-      'GET /apis/rbac.authorization.k8s.io/v1/clusterrolebindings/bc-access:bc-u-bob',
-      'DELETE /apis/rbac.authorization.k8s.io/v1/clusterrolebindings/bc-access:bc-u-bob',
+      'GET /apis/rbac.authorization.k8s.io/v1/clusterrolebindings/bc-access:bc-u-bob-v',
+      'DELETE /apis/rbac.authorization.k8s.io/v1/clusterrolebindings/bc-access:bc-u-bob-v',
       'POST /apis/rbac.authorization.k8s.io/v1/clusterrolebindings',
-      'POST /api/v1/namespaces/bc-access/serviceaccounts/bc-u-bob/token',
+      'POST /api/v1/namespaces/bc-access/serviceaccounts/bc-u-bob-v/token',
     ]);
-    expect(s.doks.kube.bindings.get('bc-access:bc-u-bob')!.roleRef.name).toBe('cluster-admin');
+    expect(s.doks.kube.bindings.get('bc-access:bc-u-bob-v')!.roleRef.name).toBe('view');
+  });
+
+  it('names the account of a long subject by a hash, distinct per role and from short ones', async () => {
+    const s = await withCluster();
+    const long = `bc-u-${'a'.repeat(58)}`;
+    const short = `bc-u-${'a'.repeat(55)}`;
+    for (const subject of [long, `${long.slice(0, 62)}b`, short])
+      for (const role of ['view', 'admin'] as const)
+        await s.k8s.credentials(s.cluster, { subject, role, ttlSeconds: 600 }, s.ctx());
+    const names = [...s.doks.kube.serviceAccounts].map((key) => key.split('/')[1]!);
+    expect(new Set(names).size).toBe(6);
+    for (const name of names) expect(name).toMatch(/^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/);
+    expect(names).toContain(`${short}-v`);
+    // Hashed names are always 63 characters, plain ones at most 62: the two never meet.
+    expect(names.filter((name) => name.length === 63)).toHaveLength(4);
   });
 
   it('validates the subject, role and ttl before calling anything', async () => {
@@ -952,6 +1009,38 @@ describe('doks upgrades and deletes', () => {
     const again = await s.k8s.ensureCluster(standard, s.ctx());
     expect(again.state).toBe('pending');
     expect(again.id).not.toBe(id);
+  });
+
+  it('deletes even when the associated-resources listing fails', async () => {
+    const s = await setup();
+    const id = await readyCluster(s);
+    const listing = (cluster: string) =>
+      new RegExp(`^/kubernetes/clusters/${cluster}/destroy_with_associated_resources$`);
+    s.doks.do.failNext({ method: 'GET', path: listing(id) }, 503, {
+      id: 'service_unavailable',
+      message: 'try again',
+    });
+    expect(await s.k8s.deleteCluster(id, s.ctx())).toEqual({ id, state: 'deleting' });
+    expect(mutations(s).filter((m) => m.startsWith('DELETE'))).toEqual([
+      `DELETE /kubernetes/clusters/${id}`,
+    ]);
+    expect(
+      s.logs.find((entry) => entry.message === 'doks.cluster.associatedUnread')?.fields,
+    ).toMatchObject({ cluster: id, error: 'UNAVAILABLE' });
+
+    // The cluster went between the read and the listing: deleted, not an error.
+    const other = await readyCluster(s, { ...standard, name: 'bc-k-two' });
+    const missing = {
+      id: 'not_found',
+      message: 'The resource you were accessing could not be found.',
+    };
+    s.doks.do.failNext({ method: 'GET', path: listing(other) }, 404, missing);
+    s.doks.do.failNext(
+      { method: 'DELETE', path: new RegExp(`^/kubernetes/clusters/${other}$`) },
+      404,
+      missing,
+    );
+    expect(await s.k8s.deleteCluster(other, s.ctx())).toEqual({ id: other, state: 'deleted' });
   });
 
   it('answers deleting while DOKS deletes, and deleted for a cluster that is gone', async () => {

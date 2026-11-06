@@ -15,6 +15,11 @@ import { parseDoksVersion } from './versions.js';
 const channels = ['rapid', 'regular', 'stable', 'extended'] as const;
 const cidrPattern = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?$/;
 const labelKeyPattern = /^[a-z0-9_-]{1,64}$/;
+/**
+ * DOKS's own tag keys: `k8s`, `k8s:<cluster uuid>` (membership) and `k8s-worker`. A label with one
+ * of them would collide with (or forge) the tags DOKS manages, and DOKS strips them on a PUT.
+ */
+const doksTagKeys = new Set(['k8s', 'k8s-worker']);
 
 /**
  * The tag that marks a DOKS cluster (and its node pools) as better-compute's. It is deliberately
@@ -98,12 +103,18 @@ export function checkClusterSpec(
       'DOKS worker nodes without public addresses need a VPC NAT gateway, which is not supported yet',
       'privateNodes',
     );
-  for (const key of Object.keys(spec.labels ?? {}))
+  for (const key of Object.keys(spec.labels ?? {})) {
     if (!labelKeyPattern.test(key.toLowerCase()))
       throw invalid(
         `The label key ${JSON.stringify(key)} cannot be a DigitalOcean tag key ([a-z0-9_-], at most 64)`,
         'label',
       );
+    if (doksTagKeys.has(key.toLowerCase()))
+      throw invalid(
+        `The label key ${JSON.stringify(key)} is DOKS's own tag key (k8s, k8s-worker)`,
+        'label',
+      );
+  }
   if (!forCreate) return;
   const pools = spec.initialNodePools ?? [];
   if (pools.length === 0)
