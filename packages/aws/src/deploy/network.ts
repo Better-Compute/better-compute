@@ -191,8 +191,9 @@ export function networkTemplate(options: AwsDeploymentOptions = {}): CfnTemplate
         Type: 'String',
         Description: 'The VPC CIDR block (a /16; six /20 subnets are carved from it)',
         Default: '10.40.0.0/16',
-        AllowedPattern: '^(10|172|192)\\.(\\d{1,3})\\.0\\.0/16$',
-        ConstraintDescription: 'a private /16 such as 10.40.0.0/16',
+        // RFC 1918 only: 10.0-255, 172.16-31 or 192.168, each as a /16 on its boundary.
+        AllowedPattern: '^(10\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)|172\\.(1[6-9]|2\\d|3[01])|192\\.168)\\.0\\.0/16$',
+        ConstraintDescription: 'a private (RFC 1918) /16 such as 10.40.0.0/16',
       },
       FlowLogRetentionDays: {
         Type: 'Number',

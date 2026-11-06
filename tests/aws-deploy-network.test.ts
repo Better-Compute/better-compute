@@ -15,6 +15,17 @@ describe('network template', () => {
         expect(lintTemplate(networkTemplate({ zones, natGateways }))).toEqual([]);
   });
 
+  it('accepts only a private (RFC 1918) /16 as the VPC CIDR', () => {
+    const parameter = networkTemplate().Parameters!.VpcCidr!;
+    const pattern = new RegExp(parameter.AllowedPattern!);
+    expect(pattern.test(String(parameter.Default))).toBe(true);
+    for (const cidr of ['10.0.0.0/16', '10.40.0.0/16', '10.255.0.0/16', '172.16.0.0/16', '172.31.0.0/16', '192.168.0.0/16'])
+      expect(pattern.test(cidr), cidr).toBe(true);
+    // Public or impossible ranges, and anything but a /16 on a /16 boundary.
+    for (const cidr of ['172.200.0.0/16', '172.15.0.0/16', '172.32.0.0/16', '192.1.0.0/16', '192.169.0.0/16', '10.300.0.0/16', '10.01.0.0/16', '11.0.0.0/16', '10.40.0.0/20', '10.40.1.0/16', ''])
+      expect(pattern.test(cidr), cidr).toBe(false);
+  });
+
   it('spans three zones with a public and a private subnet in each', () => {
     const template = networkTemplate();
     const subnets = ofType(template, 'AWS::EC2::Subnet');
