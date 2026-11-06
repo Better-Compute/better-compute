@@ -9,6 +9,7 @@ import {
   type ProviderResourceRequest,
   type ProviderResources,
   type ProviderResourceState,
+  type SecretRef,
 } from '@better-compute/core';
 import { defineProvider } from '@better-compute/vps';
 
@@ -45,6 +46,8 @@ export interface FakeResourcesCloud {
   failNext?: ComputeError;
   /** Every password handed out, so tests can check none leaks. */
   passwords: string[];
+  /** The value a spec's `secret` resolved to, by provider-side name. */
+  resolved: Map<string, string>;
   /** The `accountScope` of the last ensure, by provider-side name. */
   scopes: Map<string, string | undefined>;
   reset(): void;
@@ -65,6 +68,7 @@ export function fakeResourcesCloud(): FakeResourcesCloud {
     refuse: new Set(),
     passwords: [],
     scopes: new Map(),
+    resolved: new Map(),
     reset() {
       this.resources.clear();
       this.calls.length = 0;
@@ -73,6 +77,7 @@ export function fakeResourcesCloud(): FakeResourcesCloud {
       delete this.failNext;
       this.passwords.length = 0;
       this.scopes.clear();
+      this.resolved.clear();
     },
     seed(resource) {
       const id = `f-${++next}`;
@@ -131,6 +136,10 @@ export const fakeKinds: readonly ProviderResourceKind[] = Object.freeze([
     spec: manifest({
       image: field.string().describe('Image'),
       instances: field.int({ min: 1, max: 10 }).default(1).describe('Instances'),
+      secret: field
+        .secret()
+        .optional()
+        .describe('A secret the app is given (resolved at the provider)'),
     }),
     outputs: ['url'],
     regional: false,
@@ -219,6 +228,9 @@ export function fakeProviderResources(
     async ensure(request: ProviderResourceRequest, context: CallContext) {
       call(`ensure ${request.kind} ${request.name}`);
       cloud.scopes.set(request.name, request.accountScope);
+      const secretRef = (request.spec as { secret?: SecretRef }).secret;
+      if (secretRef !== undefined)
+        cloud.resolved.set(request.name, await context.secrets.resolve(secretRef));
       const kind = kindOf(request.kind);
       if (kind.preview && options.previews !== true)
         throw new ComputeError('UNSUPPORTED', `${kind.kind} is a preview`, undefined, {

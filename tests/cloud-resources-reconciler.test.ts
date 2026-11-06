@@ -153,6 +153,39 @@ describe('cloud.resources: convergence', () => {
     expect(world.cloud.scopes.get(own.providerName)).toBe('tenant');
   });
 
+  it('a spec SecretRef resolves only as the tenant’s own secret://<tenant>/… ref, whatever the store would serve', async () => {
+    // A store that would hand these to acme: the module must not rely on the store's own scoping.
+    const store = secrets.values as Map<string, { tenantId: string; value: string }>;
+    store.set('env://CONTROL_PLANE_KEY', {
+      tenantId: world.acmeTenant,
+      value: 'control-plane-key',
+    });
+    store.set(`secret://${world.otherTenant}/theirs`, {
+      tenantId: world.acmeTenant,
+      value: 'other-value',
+    });
+    store.set('vault://platform/db', { tenantId: world.acmeTenant, value: 'vault-value' });
+    store.set(`secret://${world.acmeTenant}/mine`, {
+      tenantId: world.acmeTenant,
+      value: 'acme-own',
+    });
+    const app = (name: string, secret: string) =>
+      create({ kind: 'fake.app', name, spec: { image: 'nginx', secret } });
+    const own = await app('ref-own', `secret://${world.acmeTenant}/mine`);
+    const refused = [
+      await app('ref-env', 'env://CONTROL_PLANE_KEY'),
+      await app('ref-other', `secret://${world.otherTenant}/theirs`),
+      await app('ref-vault', 'vault://platform/db'),
+    ];
+    await settled(own.id, 'ready');
+    expect(world.cloud.resolved.get(own.providerName)).toBe('acme-own');
+    for (const resource of refused) {
+      await settled(resource.id, 'error');
+      expect((await get(resource.id)).message).toContain('own secrets');
+    }
+    expect([...world.cloud.resolved.values()]).toEqual(['acme-own']);
+  });
+
   it('a provider refusal is error (published once); a busy provider is retried later', async () => {
     world.cloud.refuse.add('fake.app');
     const app = await create({ kind: 'fake.app', name: 'refused', spec: { image: 'nginx' } });

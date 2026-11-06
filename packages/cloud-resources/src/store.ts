@@ -14,6 +14,7 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import {
+  accountRefRefusal,
   readAccount,
   visibleVpsPool,
   zoneRegion,
@@ -277,8 +278,24 @@ export function kindOf(
   return found;
 }
 
-/** A tenant-scoped resolver: a provider resolving a spec's SecretRef can only reach the tenant's own secrets. */
+/**
+ * A tenant-scoped resolver: a provider resolving a spec's SecretRef can only reach the tenant's own secrets. The ref
+ * is checked here, not left to the store: a tenant names only `secret://<its tenant>/…`, never `env://` (the control
+ * plane's own environment), `vault://` or another tenant's ref, whatever a host's store would serve. The root
+ * tenant names any ref, as its provider accounts do.
+ */
 export function tenantSecrets(deps: CloudResourcesDeps, tenantId: string) {
   const broker = deps.secrets ?? noSecrets;
-  return { resolve: (ref: SecretRef) => broker.resolve(ref, { tenantId }) };
+  return {
+    resolve: async (ref: SecretRef) => {
+      if (accountRefRefusal(ref, { tenantId }, { rootTenantId: deps.rootTenantId }) !== undefined)
+        throw new ComputeError(
+          'ACCESS_DENIED',
+          `A spec may only name the tenant's own secrets (secret://${tenantId}/…)`,
+          undefined,
+          { reason: 'secretRefScope' },
+        );
+      return broker.resolve(ref, { tenantId });
+    },
+  };
 }
