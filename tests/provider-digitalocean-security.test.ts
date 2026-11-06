@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { manualClock } from '@better-compute/core';
 import {
+  billingSummary,
   probeAccount,
   readSecurityFindings,
   readFindings,
@@ -152,7 +153,14 @@ describe('readSecurityFindings', () => {
       group: 'SSH open to the internet',
     });
     expect(securityFindings({ findings: [{ rule: 'r', title: 't', severity: 'low' }] })).toEqual([
-      { id: 'security:r', kind: 'security', severity: 'info', title: 't', detail: 'Found by the latest DigitalOcean security scan.', group: 't' },
+      {
+        id: 'security:r',
+        kind: 'security',
+        severity: 'info',
+        title: 't',
+        detail: 'Found by the latest DigitalOcean security scan.',
+        group: 't',
+      },
     ]);
     emu.failNext({ path: /^\/security\// }, 403, emu.error('forbidden').body);
     expect(await readFindings(doAccount as DoConfig, context, { fetch: emu.fetch })).toEqual([
@@ -162,6 +170,22 @@ describe('readSecurityFindings', () => {
     await expect(
       readFindings(doAccount as DoConfig, context, { fetch: emu.fetch }),
     ).rejects.toBeDefined();
+  });
+
+  it('stops when the caller cancels: the findings read, the probe and the billing summary', async () => {
+    const emu = world();
+    const cancelled = { ...context, signal: AbortSignal.abort() };
+    await expect(
+      readFindings(doAccount as DoConfig, cancelled, { fetch: emu.fetch }),
+    ).rejects.toBeDefined();
+    await expect(
+      probeAccount(doAccount as DoConfig, cancelled, { fetch: emu.fetch }, { operations: true }),
+    ).rejects.toBeDefined();
+    await expect(
+      billingSummary(doAccount as DoConfig, cancelled, { fetch: emu.fetch }),
+    ).rejects.toBeDefined();
+    // A cancelled request spends none of the account's budget at DigitalOcean.
+    expect(emu.requests).toHaveLength(0);
   });
 
   it('adds security:read to the operations probe', async () => {

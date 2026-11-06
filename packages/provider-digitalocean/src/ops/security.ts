@@ -1,5 +1,6 @@
 import { isComputeError, type ProviderContext, type ProviderFinding } from '@better-compute/core';
 import { clientFor } from '../client/build.js';
+import { readDeadline } from '../client/deadline.js';
 import type { DoConfig, DoProviderOptions } from '../config.js';
 
 // Security posture findings (DigitalOcean P9): the latest scan of DO's Security API, read-only (scope
@@ -67,18 +68,23 @@ function findingOf(raw: Record<string, unknown>): DoSecurityFinding | undefined 
 /** The latest scan's findings, read with the account's own token. `ACCESS_DENIED` without `security:read`. */
 export async function readSecurityFindings(
   config: DoConfig,
-  context: ProviderContext,
+  context: ProviderContext & { signal?: AbortSignal },
   options: DoProviderOptions = {},
 ): Promise<DoSecurityReport> {
   const client = clientFor(config, context, options);
-  const signal = AbortSignal.timeout(readTimeoutMs);
+  const deadline = readDeadline(context, readTimeoutMs);
   let body: { scan?: Record<string, unknown> };
   try {
-    body = await client.request('GET', '/security/scans/latest', { signal, budget: 'observe' });
+    body = await client.request('GET', '/security/scans/latest', {
+      signal: deadline.signal,
+      budget: 'observe',
+    });
   } catch (error) {
     // No scan has run on this account yet.
     if (isComputeError(error, 'NOT_FOUND')) return { findings: [] };
     throw error;
+  } finally {
+    deadline.done();
   }
   const scan = body.scan;
   const id = text(scan?.id);
@@ -153,7 +159,10 @@ function detailOf(finding: DoSecurityFinding): string {
     finding.affectedResources === undefined
       ? undefined
       : `${finding.affectedResources} ${finding.affectedResources === 1 ? 'resource' : 'resources'} affected.`;
-  return [count, finding.detail].filter(Boolean).join(' ') || 'Found by the latest DigitalOcean security scan.';
+  return (
+    [count, finding.detail].filter(Boolean).join(' ') ||
+    'Found by the latest DigitalOcean security scan.'
+  );
 }
 
 /** The report as provider findings (`providerAccounts.findings`): one per rule, a finding's time else the scan's. */
@@ -179,7 +188,7 @@ export function securityFindings(report: DoSecurityReport): ProviderFinding[] {
  */
 export async function readFindings(
   config: DoConfig,
-  context: ProviderContext,
+  context: ProviderContext & { signal?: AbortSignal },
   options: DoProviderOptions = {},
 ): Promise<ProviderFinding[]> {
   let report: DoSecurityReport;
@@ -193,7 +202,8 @@ export async function readFindings(
         kind: 'security',
         severity: 'info',
         title: 'Security findings are not readable',
-        detail: "The token lacks security:read, so the account's DigitalOcean security scan cannot be read.",
+        detail:
+          "The token lacks security:read, so the account's DigitalOcean security scan cannot be read.",
       },
     ];
   }

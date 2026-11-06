@@ -5,6 +5,7 @@ import {
   type ProviderContext,
 } from '@better-compute/core';
 import { clientFor } from './client/build.js';
+import { readDeadline } from './client/deadline.js';
 import type { DoClient } from './client/http.js';
 import type { DoConfig, DoProviderOptions } from './config.js';
 
@@ -71,22 +72,17 @@ function badBody(): ComputeError {
  */
 export async function probeAccount(
   config: DoConfig,
-  context: ProviderContext,
+  context: ProviderContext & { signal?: AbortSignal },
   options: DoProviderOptions = {},
   scope: { operations?: boolean } = {},
 ): Promise<DoAccountReport> {
   const client: DoClient = clientFor(config, context, options);
-  const controller = new AbortController();
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, probeTimeoutMs);
+  const deadline = readDeadline(context, probeTimeoutMs);
   try {
-    return await probe(client, controller.signal, scope.operations === true);
+    return await probe(client, deadline.signal, scope.operations === true);
   } catch (error) {
     // The client rethrows an abort as it is; a caller should see a ComputeError.
-    if (timedOut)
+    if (deadline.timedOut())
       throw new ComputeError(
         'UNAVAILABLE',
         `The DigitalOcean account probe took longer than ${probeTimeoutMs / 1000} seconds`,
@@ -95,7 +91,7 @@ export async function probeAccount(
       );
     throw error;
   } finally {
-    clearTimeout(timer);
+    deadline.done();
   }
 }
 

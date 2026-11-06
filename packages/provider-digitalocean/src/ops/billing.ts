@@ -1,5 +1,6 @@
 import { ComputeError, type ProviderContext } from '@better-compute/core';
 import { clientFor } from '../client/build.js';
+import { readDeadline } from '../client/deadline.js';
 import type { DoClient } from '../client/http.js';
 import type { DoConfig, DoProviderOptions } from '../config.js';
 import { decimalMicros } from './costs.js';
@@ -147,15 +148,16 @@ export async function readBillingSummary(
  */
 export async function billingSummary(
   config: DoConfig,
-  context: ProviderContext,
+  context: ProviderContext & { signal?: AbortSignal },
   options: DoProviderOptions = {},
 ): Promise<DoBillingSummary> {
   const client = clientFor(config, context, options);
-  const signal = AbortSignal.timeout(summaryTimeoutMs);
+  const deadline = readDeadline(context, summaryTimeoutMs);
   try {
-    return await readBillingSummary(client, signal);
+    return await readBillingSummary(client, deadline.signal);
   } catch (error) {
-    if (signal.aborted)
+    // The read's own deadline; a caller that cancelled sees its abort as it is.
+    if (deadline.timedOut())
       throw new ComputeError(
         'UNAVAILABLE',
         `Reading the DigitalOcean billing summary took longer than ${summaryTimeoutMs / 1000} seconds`,
@@ -163,5 +165,7 @@ export async function billingSummary(
         { provider: 'digitalocean', reason: 'timeout' },
       );
     throw error;
+  } finally {
+    deadline.done();
   }
 }

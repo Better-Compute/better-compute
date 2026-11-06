@@ -147,6 +147,8 @@ export class DoEmulator {
   }
 
   fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    // Like fetch: a request whose signal has aborted never leaves.
+    if (init?.signal?.aborted) throw init.signal.reason;
     const url = new URL(typeof input === 'object' && 'url' in input ? input.url : String(input));
     const method = (init?.method ?? 'GET').toUpperCase();
     const headers = new Headers(init?.headers);
