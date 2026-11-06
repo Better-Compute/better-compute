@@ -9,3 +9,4 @@ export * from './provider.js';
 export * from './cli.js';
 export * from './costs.js';
 export * from './finops.js';
+export * from './prices.js';
