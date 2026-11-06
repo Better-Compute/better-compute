@@ -51,7 +51,9 @@ describe('the release allowlist', () => {
   it('leaves out aws-core and provider-digitalocean', () => {
     expect(releaseAllowlist).not.toContain('@better-compute/aws-core');
     expect(releaseAllowlist).not.toContain('@better-compute/provider-digitalocean');
+    expect(releaseAllowlist).not.toContain('@better-compute/aws');
     expect(Object.keys(notReleased).sort()).toEqual([
+      '@better-compute/aws',
       '@better-compute/aws-core',
       '@better-compute/provider-digitalocean',
     ]);
