@@ -20,7 +20,7 @@ import {
 import { DoEmulator, type Json } from './support/do-emulator/index.js';
 import { seedVpc } from './support/do-emulator/vpcs.js';
 import { doAccount, freshBudgets, platformAccount, secrets } from './support/do-harness.js';
-import { DoksEmulator } from './support/doks-emulator.js';
+import { DoksEmulator, doksCaData, doksCaPem } from './support/doks-emulator.js';
 
 // provider-digitalocean managed Kubernetes (DOKS) against the DOKS emulator: the contract wiring,
 // versions, clusters, node pools (CPU, GPU, Spot GPU, autoscaling), credentials minted through a
@@ -607,5 +607,188 @@ describe('doks node pools', () => {
     await settle(() => s.k8s.ensureNodePool(adopted.id, mine, s.ctx()), 'ready');
     await settle(() => s.k8s.deleteNodePool(adopted.id, 'bc-extra', s.ctx()), 'deleted');
     expect(s.doks.clusters.get(adopted.id)!.node_pools.map((p: Json) => p.name)).toEqual(['team']);
+  });
+});
+
+describe('doks credentials', () => {
+  async function withCluster(): Promise<Setup & { cluster: string }> {
+    const s = await setup();
+    const cluster = await readyCluster(s);
+    return { ...s, cluster };
+  }
+
+  it('creates the namespace, service account and binding, and mints a bound token', async () => {
+    const s = await withCluster();
+    const credentials = await s.k8s.credentials(
+      s.cluster,
+      { subject: 'bc-u-alice', role: 'edit', ttlSeconds: 3600 },
+      s.ctx(),
+    );
+    const server = `https://${s.cluster}.k8s.ondigitalocean.com`;
+    expect(credentials).toEqual({
+      server,
+      certificateAuthorityData: doksCaData,
+      token: 'doks-sa-token-1',
+      expiresAt: t0 + 3600 * 1000,
+    });
+    expect(s.doks.kube.routes()).toEqual([
+      'POST /api/v1/namespaces',
+      'POST /api/v1/namespaces/bc-access/serviceaccounts',
+      'GET /apis/rbac.authorization.k8s.io/v1/clusterrolebindings/bc-access:bc-u-alice',
+      'POST /apis/rbac.authorization.k8s.io/v1/clusterrolebindings',
+      'POST /api/v1/namespaces/bc-access/serviceaccounts/bc-u-alice/token',
+    ]);
+    // Each call trusts the cluster's CA only and carries DO's short-lived admin token for it.
+    expect(s.doks.credentialExpiries).toEqual([300]);
+    for (const call of s.doks.kube.calls) {
+      expect(call.caPem).toBe(doksCaPem);
+      expect(s.doks.adminTokens.get(call.token)?.cluster).toBe(s.cluster);
+      expect(call.url.startsWith(`${server}/`)).toBe(true);
+    }
+    expect(s.doks.kube.bindings.get('bc-access:bc-u-alice')).toMatchObject({
+      roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: 'edit' },
+      subjects: [{ kind: 'ServiceAccount', name: 'bc-u-alice', namespace: 'bc-access' }],
+      metadata: { labels: { 'app.kubernetes.io/managed-by': 'better-compute' } },
+    });
+    expect(s.doks.kube.calls.at(-1)!.body).toEqual({
+      apiVersion: 'authentication.k8s.io/v1',
+      kind: 'TokenRequest',
+      spec: { expirationSeconds: 3600 },
+    });
+
+    // Again with the same role: everything is reused, a new token is minted.
+    const again = await s.k8s.credentials(
+      s.cluster,
+      { subject: 'bc-u-alice', role: 'edit', ttlSeconds: 600 },
+      s.ctx(),
+    );
+    expect(again.token).toBe('doks-sa-token-2');
+    expect(s.doks.kube.routes().filter((r) => r.startsWith('DELETE'))).toHaveLength(0);
+    expect(s.doks.kube.routes().filter((r) => r.endsWith('/clusterrolebindings'))).toHaveLength(1);
+  });
+
+  it('recreates the binding when the role changes (roleRef is immutable)', async () => {
+    const s = await withCluster();
+    const request = { subject: 'bc-u-bob', role: 'view' as const, ttlSeconds: 3600 };
+    await s.k8s.credentials(s.cluster, request, s.ctx());
+    expect(s.doks.kube.bindings.get('bc-access:bc-u-bob')!.roleRef.name).toBe('view');
+    s.doks.kube.calls = [];
+    await s.k8s.credentials(s.cluster, { ...request, role: 'admin' }, s.ctx());
+    expect(s.doks.kube.routes()).toEqual([
+      'POST /api/v1/namespaces',
+      'POST /api/v1/namespaces/bc-access/serviceaccounts',
+      'GET /apis/rbac.authorization.k8s.io/v1/clusterrolebindings/bc-access:bc-u-bob',
+      'DELETE /apis/rbac.authorization.k8s.io/v1/clusterrolebindings/bc-access:bc-u-bob',
+      'POST /apis/rbac.authorization.k8s.io/v1/clusterrolebindings',
+      'POST /api/v1/namespaces/bc-access/serviceaccounts/bc-u-bob/token',
+    ]);
+    expect(s.doks.kube.bindings.get('bc-access:bc-u-bob')!.roleRef.name).toBe('cluster-admin');
+  });
+
+  it('validates the subject, role and ttl before calling anything', async () => {
+    const s = await withCluster();
+    const before = s.doks.do.requests.length;
+    for (const request of [
+      { subject: 'Bob', role: 'view', ttlSeconds: 3600 },
+      { subject: 'bc-u-', role: 'view', ttlSeconds: 3600 },
+      { subject: `bc-${'a'.repeat(61)}`, role: 'view', ttlSeconds: 3600 },
+      { subject: 'bc-u-bob', role: 'owner', ttlSeconds: 3600 },
+      { subject: 'bc-u-bob', role: 'view', ttlSeconds: 599 },
+      { subject: 'bc-u-bob', role: 'view', ttlSeconds: 86_401 },
+      { subject: 'bc-u-bob', role: 'view', ttlSeconds: 1000.5 },
+    ]) {
+      const error = await failure(s.k8s.credentials(s.cluster, request as never, s.ctx()));
+      expect(error.code).toBe('INVALID_INPUT');
+    }
+    expect(s.doks.kube.calls).toHaveLength(0);
+    expect(s.doks.do.requests).toHaveLength(before);
+  });
+
+  it('maps Kubernetes API failures, an absent cluster and one not running yet', async () => {
+    const s = await withCluster();
+    const request = { subject: 'bc-u-carol', role: 'view' as const, ttlSeconds: 3600 };
+    s.doks.kube.failWith = 403;
+    expect((await failure(s.k8s.credentials(s.cluster, request, s.ctx()))).code).toBe(
+      'ACCESS_DENIED',
+    );
+    s.doks.kube.failWith = 503;
+    expect((await failure(s.k8s.credentials(s.cluster, request, s.ctx()))).code).toBe(
+      'UNAVAILABLE',
+    );
+    s.doks.kube.failWith = undefined;
+    s.doks.kube.unreachable = true;
+    expect((await failure(s.k8s.credentials(s.cluster, request, s.ctx()))).code).toBe(
+      'UNAVAILABLE',
+    );
+    s.doks.kube.unreachable = false;
+    const missing = '0d0c5000-0000-4000-8000-999999999999';
+    expect((await failure(s.k8s.credentials(missing, request, s.ctx()))).code).toBe('NOT_FOUND');
+    s.doks.transitionReads = 3;
+    const pending = await s.k8s.ensureCluster({ ...standard, name: 'bc-k-new' }, s.ctx());
+    const early = await failure(s.k8s.credentials(pending.id, request, s.ctx()));
+    expect([early.code, early.details?.reason]).toEqual(['INVALID_STATE', 'notReady']);
+  });
+
+  it('refuses DO credentials that name another endpoint or carry no token', async () => {
+    const s = await withCluster();
+    const request = { subject: 'bc-u-dan', role: 'view' as const, ttlSeconds: 3600 };
+    const path = new RegExp(`^/kubernetes/clusters/${s.cluster}/credentials$`);
+    s.doks.do.failNext({ method: 'GET', path }, 200, {
+      server: 'https://attacker.example.com',
+      certificate_authority_data: doksCaData,
+      token: 'doks-admin-elsewhere',
+    });
+    const elsewhere = await failure(s.k8s.credentials(s.cluster, request, s.ctx()));
+    expect([elsewhere.code, elsewhere.details?.reason]).toEqual(['PROVIDER_ERROR', 'endpoint']);
+    s.doks.do.failNext({ method: 'GET', path }, 200, {
+      server: `https://${s.cluster}.k8s.ondigitalocean.com`,
+      certificate_authority_data: doksCaData,
+      client_certificate_data: 'Y2VydA==',
+      client_key_data: 'a2V5',
+      token: null,
+    });
+    const tokenless = await failure(s.k8s.credentials(s.cluster, request, s.ctx()));
+    expect([tokenless.code, tokenless.details?.reason]).toEqual(['PROVIDER_ERROR', 'noToken']);
+    expect(s.doks.kube.calls).toHaveLength(0);
+  });
+
+  it('mints on a cluster it does not own (an adopted one)', async () => {
+    const s = await setup();
+    const adopted = s.doks.seedCluster({ name: 'team-cluster', region: 'nyc3' });
+    const minted = await s.k8s.credentials(
+      adopted.id,
+      { subject: 'bc-u-erin', role: 'view', ttlSeconds: 600 },
+      s.ctx(),
+    );
+    expect(minted.server).toBe(adopted.endpoint);
+  });
+
+  it('never logs or reports a token', async () => {
+    const s = await withCluster();
+    const minted = await s.k8s.credentials(
+      s.cluster,
+      { subject: 'bc-u-dave', role: 'admin', ttlSeconds: 3600 },
+      s.ctx(),
+    );
+    s.doks.kube.failWith = 401;
+    const failed = await failure(
+      s.k8s.credentials(
+        s.cluster,
+        { subject: 'bc-u-dave', role: 'admin', ttlSeconds: 3600 },
+        s.ctx(),
+      ),
+    );
+    expect(failed.code).toBe('ACCESS_DENIED');
+    const secretsSeen = [minted.token, 'do-token', ...s.doks.adminTokens.keys()];
+    expect(secretsSeen.length).toBeGreaterThan(2);
+    const state = JSON.stringify(await s.k8s.getCluster(s.cluster, s.ctx()));
+    const logged = JSON.stringify(s.logs);
+    expect(s.logs.some((entry) => entry.message === 'doks.credentials')).toBe(true);
+    for (const token of secretsSeen) {
+      expect(logged).not.toContain(token);
+      expect(state).not.toContain(token);
+      expect(failed.message).not.toContain(token);
+      expect(JSON.stringify(failed.details ?? {})).not.toContain(token);
+    }
   });
 });

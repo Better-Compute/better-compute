@@ -46,11 +46,13 @@ import {
   nodePoolState,
   nodePoolUpdate,
 } from './node-pools.js';
+import { checkCredentialRequest, mintCredentials } from './credentials.js';
 import { httpsKubeTransport, type KubeTransport } from './transport.js';
 import type { DoksCluster, DoksNodePool } from './types.js';
 import { byNewest, pickVersion, readOptions, readVersions } from './versions.js';
 
 export { kubernetesTag } from './clusters.js';
+export { accessNamespace, adminCredentialSeconds, clusterRoles } from './credentials.js';
 export { parseClusterId as parseDoksClusterId } from './common.js';
 export { compareDoksVersion, parseDoksVersion } from './versions.js';
 export {
@@ -482,13 +484,35 @@ export class DoKubernetes implements ProviderKubernetes {
 
   // ------------------------------------------------------------------------------ credentials
 
-  credentials(
-    _cluster: string,
-    _request: KubernetesCredentialRequest,
-    _context: CallContext,
+  /**
+   * A bound token for one principal. Any cluster the token can read is served (an adopted one
+   * too): the credential only reaches the cluster's own API, trusting its CA alone.
+   */
+  async credentials(
+    cluster: string,
+    request: KubernetesCredentialRequest,
+    context: CallContext,
   ): Promise<KubernetesCredentials> {
-    void this.#transport;
-    return Promise.resolve(this.#notYet());
+    const id = parseClusterId(cluster);
+    checkCredentialRequest(request);
+    const found = await this.#read(id, context.signal);
+    if (!found) throw clusterNotFound(id);
+    const credentials = await mintCredentials({
+      id,
+      cluster: found,
+      request,
+      client: this.#client,
+      transport: this.#transport,
+      signal: context.signal,
+      clock: this.#client.clock,
+    });
+    context.log.info('doks.credentials', {
+      cluster: id,
+      subject: request.subject,
+      role: request.role,
+      expiresAt: credentials.expiresAt,
+    });
+    return credentials;
   }
 
   // --------------------------------------------------------------------------------- versions
