@@ -18,11 +18,19 @@ import type { KubeResponse, KubeTransport } from './transport.js';
 // (bootstrapClusterCreatorAdminPermissions), and the driver creates it (CreateAccessEntry +
 // AssociateAccessPolicy) on a cluster another principal created. There is no aws-auth ConfigMap.
 //
-// Each subject then gets a service account in `bc-access`, bound to the built-in ClusterRole for
-// its role (view, edit, cluster-admin: what AmazonEKSViewPolicy, AmazonEKSEditPolicy and
-// AmazonEKSClusterAdminPolicy grant an access entry), and a bound token from the TokenRequest API,
-// which honours the requested lifetime (an eksToken lasts 15 minutes at most). Nothing is stored;
-// neither token is ever logged or put in an error.
+// Each subject then gets a service account in `bc-access`, bound to a ClusterRole for its role, and
+// a bound token from the TokenRequest API, which honours the requested lifetime (an eksToken lasts 15
+// minutes at most). Nothing is stored; neither token is ever logged or put in an error.
+//
+// view and admin bind the built-in `view` and `cluster-admin`. edit does not bind the built-in
+// `edit`: it lets a subject impersonate, mint tokens for and run pods as any service account of the
+// namespaces it covers, and every subject's service account lives in `bc-access`, so an edit subject
+// would be cluster-admin through an admin subject's. `better-compute:edit` is `view` plus edit's
+// writes without serviceaccount impersonation or TokenRequest, and before any token is minted the
+// cluster gets a ValidatingAdmissionPolicy that refuses every write, delete and connect in
+// `bc-access` and `kube-system` (whose service accounts run the control loops) by a subject that
+// cannot escalate ClusterRoles (any but cluster-admin). Clusters before Kubernetes 1.30 (no
+// ValidatingAdmissionPolicy) get no credentials.
 
 /** The namespace that holds the service accounts better-compute mints credentials for. */
 export const accessNamespace = 'bc-access';
@@ -34,8 +42,158 @@ const hostPattern = /^[A-Za-z0-9]([-A-Za-z0-9.]{0,251}[A-Za-z0-9])?$/;
 const minTtlSeconds = 600;
 const maxTtlSeconds = 86_400;
 
-/** The built-in ClusterRole each role binds to. */
-export const clusterRoles = { view: 'view', edit: 'edit', admin: 'cluster-admin' } as const;
+/** The ClusterRole each role binds to: built-in for view and admin, better-compute's for edit. */
+export const clusterRoles = {
+  view: 'view',
+  edit: 'better-compute:edit',
+  admin: 'cluster-admin',
+} as const;
+
+/** The ValidatingAdmissionPolicy (and its binding) that keeps subjects out of `guardedNamespaces`. */
+export const accessGuard = 'better-compute-access-guard';
+/** The namespaces only cluster-admin subjects change: the subjects' own, and the control loops'. */
+export const guardedNamespaces = [accessNamespace, 'kube-system'] as const;
+const editWritesRole = 'better-compute:edit-writes';
+const aggregateToEdit = 'better-compute.dev/aggregate-to-edit';
+const writeVerbs = ['create', 'delete', 'deletecollection', 'patch', 'update'];
+
+/**
+ * The cluster objects credentials rely on: `better-compute:edit` (aggregating `view` and
+ * `better-compute:edit-writes`, the built-in edit's writes without `impersonate` on
+ * serviceaccounts and without `serviceaccounts/token`), and the access guard policy and binding.
+ */
+export function accessManifests(): {
+  clusterRoles: Record<string, unknown>[];
+  policy: Record<string, unknown>;
+  binding: Record<string, unknown>;
+} {
+  const role = (
+    name: string,
+    extra: Record<string, unknown>,
+    labels: Record<string, string> = {},
+  ) => ({
+    apiVersion: `${rbacGroup}/v1`,
+    kind: 'ClusterRole',
+    metadata: { name, labels: { ...managedBy, ...labels } },
+    ...extra,
+  });
+  return {
+    clusterRoles: [
+      role(
+        editWritesRole,
+        {
+          rules: [
+            {
+              apiGroups: [''],
+              resources: ['pods/attach', 'pods/exec', 'pods/portforward', 'pods/proxy', 'secrets', 'services/proxy'],
+              verbs: ['get', 'list', 'watch'],
+            },
+            {
+              apiGroups: [''],
+              resources: ['pods', 'pods/attach', 'pods/exec', 'pods/portforward', 'pods/proxy'],
+              verbs: writeVerbs,
+            },
+            { apiGroups: [''], resources: ['pods/eviction'], verbs: ['create'] },
+            {
+              apiGroups: [''],
+              resources: [
+                'configmaps',
+                'events',
+                'persistentvolumeclaims',
+                'replicationcontrollers',
+                'replicationcontrollers/scale',
+                'secrets',
+                'serviceaccounts',
+                'services',
+                'services/proxy',
+              ],
+              verbs: writeVerbs,
+            },
+            {
+              apiGroups: ['apps'],
+              resources: [
+                'daemonsets',
+                'deployments',
+                'deployments/rollback',
+                'deployments/scale',
+                'replicasets',
+                'replicasets/scale',
+                'statefulsets',
+                'statefulsets/scale',
+              ],
+              verbs: writeVerbs,
+            },
+            { apiGroups: ['autoscaling'], resources: ['horizontalpodautoscalers'], verbs: writeVerbs },
+            { apiGroups: ['batch'], resources: ['cronjobs', 'jobs'], verbs: writeVerbs },
+            { apiGroups: ['policy'], resources: ['poddisruptionbudgets'], verbs: writeVerbs },
+            {
+              apiGroups: ['networking.k8s.io'],
+              resources: ['ingresses', 'networkpolicies'],
+              verbs: writeVerbs,
+            },
+            {
+              apiGroups: ['coordination.k8s.io'],
+              resources: ['leases'],
+              verbs: [...writeVerbs, 'get', 'list', 'watch'],
+            },
+          ],
+        },
+        { [aggregateToEdit]: 'true' },
+      ),
+      role(clusterRoles.edit, {
+        aggregationRule: {
+          clusterRoleSelectors: [
+            { matchLabels: { 'rbac.authorization.k8s.io/aggregate-to-view': 'true' } },
+            { matchLabels: { [aggregateToEdit]: 'true' } },
+          ],
+        },
+      }),
+    ],
+    policy: {
+      apiVersion: 'admissionregistration.k8s.io/v1',
+      kind: 'ValidatingAdmissionPolicy',
+      metadata: { name: accessGuard, labels: managedBy },
+      spec: {
+        failurePolicy: 'Fail',
+        matchConstraints: {
+          namespaceSelector: {
+            matchExpressions: [
+              { key: 'kubernetes.io/metadata.name', operator: 'In', values: [...guardedNamespaces] },
+            ],
+          },
+          resourceRules: [
+            {
+              apiGroups: ['*'],
+              apiVersions: ['*'],
+              operations: ['CREATE', 'UPDATE', 'DELETE', 'CONNECT'],
+              resources: ['*', '*/*'],
+              scope: 'Namespaced',
+            },
+          ],
+        },
+        matchConditions: [
+          {
+            name: 'better-compute-subject',
+            expression: `request.userInfo.groups.exists(g, g == 'system:serviceaccounts:${accessNamespace}')`,
+          },
+        ],
+        validations: [
+          {
+            expression: `authorizer.group('${rbacGroup}').resource('clusterroles').check('escalate').allowed()`,
+            message: `Only cluster-admin subjects change ${guardedNamespaces.join(' or ')}`,
+            reason: 'Forbidden',
+          },
+        ],
+      },
+    },
+    binding: {
+      apiVersion: 'admissionregistration.k8s.io/v1',
+      kind: 'ValidatingAdmissionPolicyBinding',
+      metadata: { name: accessGuard, labels: managedBy },
+      spec: { policyName: accessGuard, validationActions: ['Deny'] },
+    },
+  };
+}
 
 /** The EKS access policy that grants the same as each role's ClusterRole. */
 export const accessPolicies = {
@@ -268,6 +426,8 @@ export async function mintCredentials(options: {
   transport: KubeTransport;
   signal: AbortSignal;
   clock: Clock;
+  /** The access guard and better-compute:edit were put in place by this process already. */
+  guarded?: boolean;
 }): Promise<KubernetesCredentials> {
   const { id, request, transport, signal } = options;
   const { server, caPem, caData } = endpointOf(id, options.cluster);
@@ -275,7 +435,7 @@ export async function mintCredentials(options: {
   const role = clusterRoles[request.role];
 
   const send = async (
-    method: 'GET' | 'POST' | 'DELETE',
+    method: 'GET' | 'POST' | 'PUT' | 'DELETE',
     path: string,
     what: string,
     body?: unknown,
@@ -304,6 +464,38 @@ export async function mintCredentials(options: {
       return response;
     throw kubeError(id, what, response, options.fresh);
   };
+
+  // 0. The access guard and better-compute:edit, before any subject exists: created, or replaced
+  // with what this version wants (an unconditional PUT).
+  if (!options.guarded) {
+    const manifests = accessManifests();
+    const admission = '/apis/admissionregistration.k8s.io/v1';
+    const write = async (collection: string, object: Record<string, unknown>, what: string) => {
+      const name = (object.metadata as { name: string }).name;
+      const created = await send('POST', collection, what, object);
+      if (created.status === 404 && collection.startsWith(admission))
+        throw new ComputeError(
+          'INVALID_STATE',
+          `Cluster ${id} has no ValidatingAdmissionPolicy API (Kubernetes 1.30 or later): better-compute mints no credentials without its access guard`,
+          undefined,
+          { provider: 'aws', service: 'eks', status: 404, reason: 'accessGuard' },
+        );
+      if (expect(created, what, 409).status === 409)
+        expect(await send('PUT', `${collection}/${encodeURIComponent(name)}`, what, object), what);
+    };
+    for (const role of manifests.clusterRoles)
+      await write(
+        `/apis/${rbacGroup}/v1/clusterroles`,
+        role,
+        `Writing ClusterRole ${(role.metadata as { name: string }).name}`,
+      );
+    await write(`${admission}/validatingadmissionpolicies`, manifests.policy, `Writing admission policy ${accessGuard}`);
+    await write(
+      `${admission}/validatingadmissionpolicybindings`,
+      manifests.binding,
+      `Writing admission policy binding ${accessGuard}`,
+    );
+  }
 
   // 1. The namespace (409: it is there).
   expect(

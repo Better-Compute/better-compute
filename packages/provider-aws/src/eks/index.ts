@@ -70,10 +70,13 @@ export {
 } from './client.js';
 export { compareMinor, minorOf } from './clusters.js';
 export {
+  accessGuard,
+  accessManifests,
   accessNamespace,
   accessPolicies,
   accessPolicyArn,
   clusterRoles,
+  guardedNamespaces,
   principalArnOf,
 } from './credentials.js';
 export { amiTypeOf, gpuTaint, scalingOf } from './node-groups.js';
@@ -137,6 +140,8 @@ export class AwsKubernetes implements ProviderKubernetes {
   readonly #started = new Map<string, number>();
   /** Clusters (by ARN) where the account principal's admin access entry was seen. */
   readonly #admitted = new Set<string>();
+  /** Clusters (by ARN) where this process wrote the access guard and better-compute:edit. */
+  readonly #guarded = new Set<string>();
 
   constructor(options: AwsKubernetesOptions) {
     this.#client = options.client;
@@ -348,7 +353,10 @@ export class AwsKubernetes implements ProviderKubernetes {
       if (isBusy(error)) return resourceState(cluster, 'deleting', { message: error.message });
       throw error;
     }
-    if (found.arn) this.#admitted.delete(found.arn);
+    if (found.arn) {
+      this.#admitted.delete(found.arn);
+      this.#guarded.delete(found.arn);
+    }
     return resourceState(cluster, 'deleting');
   }
 
@@ -561,13 +569,16 @@ export class AwsKubernetes implements ProviderKubernetes {
         transport: this.#transport,
         signal,
         clock: this.#clock,
+        guarded: this.#guarded.has(key),
       });
     } catch (error) {
       // Check the access entry again next time.
       if (isComputeError(error, 'ACCESS_DENIED') || isComputeError(error, 'UNAVAILABLE'))
         this.#admitted.delete(key);
+      this.#guarded.delete(key);
       throw error;
     }
+    this.#guarded.add(key);
     context.log.info('eks.credentials', {
       cluster,
       subject: request.subject,

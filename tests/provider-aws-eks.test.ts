@@ -506,6 +506,11 @@ describe('eks credentials', () => {
       expiresAt: s.emu.now() + 3600 * 1000,
     });
     expect(s.kube.routes()).toEqual([
+      // The access guard and better-compute:edit come first, before any subject exists.
+      'POST /apis/rbac.authorization.k8s.io/v1/clusterroles',
+      'POST /apis/rbac.authorization.k8s.io/v1/clusterroles',
+      'POST /apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies',
+      'POST /apis/admissionregistration.k8s.io/v1/validatingadmissionpolicybindings',
       'POST /api/v1/namespaces',
       'POST /api/v1/namespaces/bc-access/serviceaccounts',
       'GET /apis/rbac.authorization.k8s.io/v1/clusterrolebindings/bc-access:bc-u-alice',
@@ -516,7 +521,7 @@ describe('eks credentials', () => {
     expect(new Set(s.kube.principals)).toEqual(new Set(['arn:aws:iam::111111111111:role/bc-control-plane']));
     for (const call of s.kube.calls) expect(call.token.startsWith('k8s-aws-v1.')).toBe(true);
     expect(s.kube.bindings.get('bc-access:bc-u-alice')).toMatchObject({
-      roleRef: { kind: 'ClusterRole', name: 'edit' },
+      roleRef: { kind: 'ClusterRole', name: 'better-compute:edit' },
       subjects: [{ kind: 'ServiceAccount', name: 'bc-u-alice', namespace: 'bc-access' }],
     });
     // The account principal already had its entry (the creator's): nothing was created.
@@ -532,6 +537,75 @@ describe('eks credentials', () => {
     // A role change recreates the binding.
     await s.k8s.credentials(id, { subject: 'bc-u-alice', role: 'admin', ttlSeconds: 600 }, s.ctx());
     expect(s.kube.bindings.get('bc-access:bc-u-alice')!.roleRef.name).toBe('cluster-admin');
+  });
+
+  it('an edit subject cannot reach an admin subject (impersonation, tokens, pods, secrets)', async () => {
+    const s = await setup();
+    const id = await readyCluster(s);
+    await s.k8s.credentials(id, { subject: 'bc-u-root', role: 'admin', ttlSeconds: 600 }, s.ctx());
+    await s.k8s.credentials(id, { subject: 'bc-u-alice', role: 'edit', ttlSeconds: 600 }, s.ctx());
+    // Not the built-in edit (impersonate on serviceaccounts, serviceaccounts/token).
+    expect(s.kube.bindings.get('bc-access:bc-u-alice')!.roleRef.name).toBe('better-compute:edit');
+    const edit = s.kube.clusterRoles.get('better-compute:edit')!;
+    expect(edit.rules).toBeUndefined();
+    const selectors = edit.aggregationRule.clusterRoleSelectors.map((selector: { matchLabels: object }) => selector.matchLabels);
+    expect(selectors).toEqual([
+      { 'rbac.authorization.k8s.io/aggregate-to-view': 'true' },
+      { 'better-compute.dev/aggregate-to-edit': 'true' },
+    ]);
+    // Exactly what the aggregation picks up besides view.
+    const aggregated = [...s.kube.clusterRoles.values()].filter(
+      (role) => role.metadata.labels?.['better-compute.dev/aggregate-to-edit'] === 'true',
+    );
+    expect(aggregated.map((role) => role.metadata.name)).toEqual(['better-compute:edit-writes']);
+    const rules = aggregated[0]!.rules as { apiGroups: string[]; resources: string[]; verbs: string[] }[];
+    for (const rule of rules) {
+      expect(rule.verbs).not.toContain('impersonate');
+      expect(rule.verbs).not.toContain('*');
+      expect(rule.resources).not.toContain('*');
+      expect(rule.resources).not.toContain('serviceaccounts/token');
+      expect(rule.apiGroups).not.toContain('rbac.authorization.k8s.io');
+      expect(rule.apiGroups).not.toContain('admissionregistration.k8s.io');
+    }
+    expect(rules.some((rule) => rule.resources.includes('deployments') && rule.verbs.includes('create'))).toBe(true);
+    // The guard: no pod, secret, token or exec in bc-access or kube-system for anyone in bc-access
+    // but cluster-admin subjects; the account principal (not a service account) is not matched.
+    const editor = { groups: ['system:serviceaccounts', 'system:serviceaccounts:bc-access', 'system:authenticated'], canEscalate: false };
+    const admin = { ...editor, canEscalate: true };
+    for (const namespace of ['bc-access', 'kube-system'])
+      for (const operation of ['CREATE', 'UPDATE', 'DELETE', 'CONNECT']) {
+        expect(s.kube.admissionDenies({ namespace, operation, ...editor })).toBe(true);
+        expect(s.kube.admissionDenies({ namespace, operation, ...admin })).toBe(false);
+      }
+    expect(s.kube.admissionDenies({ namespace: 'default', operation: 'CREATE', ...editor })).toBe(false);
+    expect(
+      s.kube.admissionDenies({ namespace: 'bc-access', operation: 'CREATE', groups: ['system:authenticated'], canEscalate: false }),
+    ).toBe(false);
+    const policy = s.kube.admissionPolicies.get('better-compute-access-guard')!;
+    expect(policy.spec.failurePolicy).toBe('Fail');
+    expect(policy.spec.matchConstraints.resourceRules[0].resources).toEqual(['*', '*/*']);
+    // Written once per cluster by this process.
+    const writes = s.kube.routes().filter((route) => route.includes('admissionregistration')).length;
+    await s.k8s.credentials(id, { subject: 'bc-u-bob', role: 'edit', ttlSeconds: 600 }, s.ctx());
+    expect(s.kube.routes().filter((route) => route.includes('admissionregistration'))).toHaveLength(writes);
+    // Another process replaces what is there with what it wants.
+    const t = await setup();
+    const tid = await readyCluster(t);
+    t.kube.admissionPolicies.set('better-compute-access-guard', { metadata: { name: 'better-compute-access-guard' }, spec: {} });
+    await t.k8s.credentials(tid, { subject: 'bc-u-root', role: 'admin', ttlSeconds: 600 }, t.ctx());
+    expect(t.kube.routes()).toContain('PUT /apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies/better-compute-access-guard');
+    expect(t.kube.admissionPolicies.get('better-compute-access-guard')!.spec.failurePolicy).toBe('Fail');
+  });
+
+  it('mints nothing on a cluster without ValidatingAdmissionPolicy (before 1.30)', async () => {
+    const s = await setup();
+    const id = await readyCluster(s);
+    s.kube.noAdmissionApi = true;
+    const error = await rejection(s.k8s.credentials(id, { subject: 'bc-u-alice', role: 'view', ttlSeconds: 600 }, s.ctx()));
+    expect(isComputeError(error, 'INVALID_STATE'), String(error)).toBe(true);
+    expect((error as Error).message).toMatch(/1.30/);
+    expect(s.kube.serviceAccounts.size).toBe(0);
+    expect(s.kube.issued).toHaveLength(0);
   });
 
   it('creates the account principal its access entry on a cluster another principal created', async () => {

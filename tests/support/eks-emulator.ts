@@ -625,6 +625,11 @@ export class EksKubeApi {
   namespaces = new Set<string>();
   serviceAccounts = new Set<string>();
   bindings = new Map<string, Json>();
+  clusterRoles = new Map<string, Json>();
+  admissionPolicies = new Map<string, Json>();
+  admissionBindings = new Map<string, Json>();
+  /** A cluster before Kubernetes 1.30: no ValidatingAdmissionPolicy API. */
+  noAdmissionApi = false;
   issued: string[] = [];
   /** The principals each call authenticated as. */
   principals: string[] = [];
@@ -636,6 +641,38 @@ export class EksKubeApi {
     private readonly eks: EksEmulator,
     private readonly emu: AwsEmulator,
   ) {}
+
+  /**
+   * Whether the bound ValidatingAdmissionPolicies refuse a request, as the API server would decide
+   * for what the driver installs: the namespace selector (In on kubernetes.io/metadata.name), the
+   * operations, a matchCondition on the requester's groups, and a validation on whether the
+   * requester may escalate ClusterRoles (`canEscalate`, what RBAC says for its bindings).
+   */
+  admissionDenies(request: { namespace: string; operation: string; groups: string[]; canEscalate: boolean }): boolean {
+    for (const binding of this.admissionBindings.values()) {
+      if (!binding.spec?.validationActions?.includes('Deny')) continue;
+      const policy = this.admissionPolicies.get(binding.spec.policyName);
+      if (!policy) continue;
+      const constraints = policy.spec.matchConstraints;
+      const selected = (constraints.namespaceSelector?.matchExpressions ?? []).every(
+        (expression: Json) =>
+          expression.key === 'kubernetes.io/metadata.name' &&
+          expression.operator === 'In' &&
+          expression.values.includes(request.namespace),
+      );
+      const operation = constraints.resourceRules.some((rule: Json) => rule.operations.includes(request.operation));
+      const conditions = (policy.spec.matchConditions ?? []).every((condition: Json) => {
+        const group = /g == '([^']+)'/.exec(condition.expression)?.[1];
+        return group !== undefined && request.groups.includes(group);
+      });
+      if (!selected || !operation || !conditions) continue;
+      for (const validation of policy.spec.validations) {
+        const escalate = validation.expression.endsWith(".resource('clusterroles').check('escalate').allowed()");
+        if (!escalate || !request.canEscalate) return true;
+      }
+    }
+    return false;
+  }
 
   routes(): string[] {
     return this.calls.map((call) => `${call.method} ${new URL(call.url).pathname}`);
@@ -728,6 +765,25 @@ export class EksKubeApi {
         ...body,
         status: { token, expirationTimestamp: new Date(this.emu.now() + ttl * 1000).toISOString() },
       });
+    }
+    for (const [collection, store] of [
+      ['/apis/rbac.authorization.k8s.io/v1/clusterroles', this.clusterRoles],
+      ['/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies', this.admissionPolicies],
+      ['/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicybindings', this.admissionBindings],
+    ] as const) {
+      if (this.noAdmissionApi && collection.includes('admissionregistration') && path.startsWith(collection))
+        return ok(404, { kind: 'Status', reason: 'NotFound', message: 'the server could not find the requested resource' });
+      if (path === collection && request.method === 'POST') {
+        if (store.has(body.metadata.name)) return ok(409, exists);
+        store.set(body.metadata.name, body);
+        return ok(201, body);
+      }
+      if (path.startsWith(`${collection}/`) && request.method === 'PUT') {
+        const name = decodeURIComponent(path.slice(collection.length + 1));
+        if (!store.has(name) || body.metadata.name !== name) return ok(404, missing);
+        store.set(name, body);
+        return ok(200, body);
+      }
     }
     const bindings = '/apis/rbac.authorization.k8s.io/v1/clusterrolebindings';
     if (path === bindings && request.method === 'POST') {
