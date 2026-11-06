@@ -122,9 +122,14 @@ export function labelsFromTags(tags: readonly string[]): Record<string, string> 
   return out;
 }
 
+/** The deployment, hashed to stay short: 12 hex characters of its SHA-256. */
+export function deploymentHash(deployment: string): string {
+  return sha256(deployment).toString('hex').slice(0, 12);
+}
+
 /** The tag naming the deployment a Droplet belongs to; the deployment is hashed to stay short. */
 export function deploymentTag(deployment: string): string {
-  return tagFor(labels.deployment, sha256(deployment).toString('hex').slice(0, 12));
+  return tagFor(labels.deployment, deploymentHash(deployment));
 }
 
 /** The tag carrying a create call's idempotency key (hashed), so a retry finds its Droplet. */

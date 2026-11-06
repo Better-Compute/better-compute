@@ -57,6 +57,8 @@ export const unprocessablePatterns: readonly {
   // Reserved IPs (P2). A pending event means an assign or unassign still runs: try again later.
   { pattern: /reserved ip limit/i, code: 'QUOTA_EXCEEDED', reason: 'reservedIpLimit' },
   { pattern: /has a pending event/i, code: 'CONFLICT', reason: 'actionPending' },
+  // Load balancers (P4).
+  { pattern: /load balancer limit/i, code: 'QUOTA_EXCEEDED', reason: 'loadBalancerLimit' },
   { pattern: /ssh key is already in use/i, code: 'CONFLICT', reason: 'sshKeyInUse' },
   { pattern: /name is already in use/i, code: 'CONFLICT', reason: 'nameInUse' },
   { pattern: /already exists/i, code: 'CONFLICT', reason: 'alreadyExists' },

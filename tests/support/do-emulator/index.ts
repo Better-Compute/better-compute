@@ -6,6 +6,7 @@ import { registerCatalog } from './catalog.js';
 import { registerDroplets } from './droplets.js';
 import { registerFirewalls } from './firewalls.js';
 import { registerKeys } from './keys.js';
+import { registerLoadBalancers } from './load-balancers.js';
 import { registerTags } from './tags.js';
 import { registerVolumes } from './volumes.js';
 import { registerVpcs } from './vpcs.js';
@@ -101,6 +102,10 @@ export class DoEmulator {
   addressActionReads = 0;
   /** How many reserved IPs (v4 and v6) the account may hold. */
   reservedIpLimit = 10;
+  /** How many reads a new load balancer answers `new` to before it is `active`; at 0, at once. */
+  loadBalancerReads = 1;
+  /** How many load balancers the account may hold. */
+  loadBalancerLimit = 10;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -287,5 +292,6 @@ export class DoEmulator {
     registerFirewalls(this);
     registerVolumes(this);
     registerAddresses(this);
+    registerLoadBalancers(this);
   }
 }

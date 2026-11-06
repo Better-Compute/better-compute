@@ -57,6 +57,10 @@ export class DoState {
   reservedIps = new Map<string, Json>();
   /** Keyed by address. DO reserved IPv6 addresses. */
   reservedIpv6 = new Map<string, Json>();
+  /** Keyed by uuid. DO load balancers (regional and global). */
+  loadBalancers = new Map<string, Json>();
+  /** Keyed by uuid. DO certificates. */
+  certificates = new Map<string, Json>();
   regions: Json[] = structuredClone(fixture('regions').regions as Json[]);
   sizes: Json[] = structuredClone(fixture('sizes').sizes as Json[]);
 
