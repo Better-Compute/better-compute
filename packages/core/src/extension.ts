@@ -801,6 +801,17 @@ export interface ProviderVolumeSpec {
   snapshotId?: string;
   /** Plain labels, written as the provider's labels or tags. `better-compute-*` keys are the provider's own. */
   labels?: Readonly<Record<string, string>>;
+  /**
+   * The zone of `region` the volume lives in, for providers whose volumes are zonal (EBS, GCE persistent disks).
+   * Absent: the provider picks one of the account's zones. A provider without zones ignores it.
+   */
+  zone?: string;
+  /** The provider's volume type (one of `ProviderVolumes.types`, e.g. EBS `gp3`); absent: the provider default. */
+  type?: string;
+  /** Provisioned IOPS, for the types that take them (EBS gp3, io1, io2). */
+  iops?: number;
+  /** Provisioned throughput in MiB/s, for the types that take it (EBS gp3). */
+  throughputMiBps?: number;
 }
 
 /**
@@ -846,6 +857,8 @@ export interface ProviderVolumes {
   ): Promise<ProviderResourceState>;
   getSnapshot(snapshotId: string, context: CallContext): Promise<ProviderResourceState | undefined>;
   deleteSnapshot(snapshotId: string, context: CallContext): Promise<ProviderResourceState>;
+  /** The volume types `ProviderVolumeSpec.type` may name (e.g. `['gp3', 'io2', 'st1', 'sc1']`); absent: none. */
+  readonly types?: readonly string[];
 }
 
 /** (provider addresses) A reserved public address as vps asks for it. */
