@@ -771,6 +771,26 @@ export interface ProviderNetworks {
     context: CallContext,
     instanceId?: string,
   ): Promise<void>;
+  /**
+   * (edge) A NAT gateway that carries the egress of `spec.subnet`, so its machines need no public address of their
+   * own. Idempotent by `spec.name` (one per subnet); `pending` while the provider makes it. Outputs: `region`,
+   * `address` (its public egress IPv4s, comma-separated, once assigned) and `gateway` (its address inside the
+   * subnet). A gateway on another subnet under the same name is `INVALID_STATE` (reason `replace`). While a gateway
+   * of the subnet exists, `deleteSubnet` does not delete the subnet: it reports `pending` (a provider may delete its
+   * own gateway first, which is the order a teardown needs).
+   */
+  ensureNatGateway?(spec: ProviderNatGatewaySpec, context: CallContext): Promise<ProviderResourceState>;
+  /** (edge) Deletes the NAT gateway `name` this deployment made in `region`; a gone one counts as deleted. */
+  deleteNatGateway?(region: string, name: string, context: CallContext): Promise<ProviderResourceState>;
+}
+
+/** (edge) A NAT gateway as vps asks for it: `name` is the provider-side name vps derives. */
+export interface ProviderNatGatewaySpec {
+  name: string;
+  network: string;
+  /** The subnet whose egress it carries (as `ensureSubnet` named it). */
+  subnet: string;
+  region: string;
 }
 
 /**

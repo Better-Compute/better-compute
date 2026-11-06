@@ -2,10 +2,13 @@ import {
   ComputeError,
   isComputeError,
   type CallContext,
+  type Logger,
   type ProviderFirewallSpec,
+  type ProviderNatGatewaySpec,
   type ProviderNetworks,
   type ProviderNetworkSpec,
   type ProviderNetworkState,
+  type ProviderResourceState,
   type ProviderSubnetSpec,
 } from '@better-compute/core';
 import type { DoClient } from '../client/http.js';
@@ -26,9 +29,11 @@ import {
   type DoFirewall,
   type DoFirewallBody,
 } from './firewalls.js';
+import { DoNatGateways } from './nat.js';
 import { accountVpcs, checkSubnet, networkDescription, networkOfVpc, vpcLookup } from './vpcs.js';
 
 export * from './firewalls.js';
+export * from './nat.js';
 export * from './vpcs.js';
 
 // Tenant networking on DigitalOcean (DO-D9, DO-D10). A network is no DO object of its own: it is
@@ -114,13 +119,33 @@ export class DoNetworks implements ProviderNetworks {
   readonly #client: DoClient;
   readonly #config: DoConfig;
   readonly #deploymentTag: string;
+  /** NAT gateways (P4): one per subnet, deleted before their subnet. */
+  readonly #nat: DoNatGateways;
   /** The firewall list, per client (one DoNetworks per client); undefined until read. */
   #firewallCache: { loadedAt: number; firewalls: Promise<readonly DoFirewall[]> } | undefined;
 
-  constructor(client: DoClient, config: DoConfig, deployment: string) {
+  constructor(client: DoClient, config: DoConfig, deployment: string, log?: Logger) {
     this.#client = client;
     this.#config = config;
     this.#deploymentTag = deploymentTag(deployment);
+    this.#nat = new DoNatGateways(client, config, deployment, log);
+  }
+
+  // ---------------------------------------------------------------------------- NAT gateways
+
+  ensureNatGateway(
+    spec: ProviderNatGatewaySpec,
+    context: CallContext,
+  ): Promise<ProviderResourceState> {
+    return this.#nat.ensure(spec, context);
+  }
+
+  deleteNatGateway(
+    region: string,
+    name: string,
+    context: CallContext,
+  ): Promise<ProviderResourceState> {
+    return this.#nat.delete(region, name, context);
   }
 
   // ------------------------------------------------------------------------------ firewalls
@@ -346,6 +371,19 @@ export class DoNetworks implements ProviderNetworks {
         `VPC ${name} is not a subnet of a better-compute network and is never deleted by it`,
         'notManaged',
       );
+    // Ordered teardown (P4): the subnet's NAT gateways of ours go first; while any gateway still
+    // serves the VPC, DO would refuse its delete, so the subnet stays pending.
+    const serving = await this.#nat.release(vpc, signal);
+    if (serving.length > 0) {
+      const foreign = serving.filter((g) => !this.#nat.isOurs(g));
+      return state(
+        id,
+        'pending',
+        foreign.length
+          ? `NAT gateway ${foreign.map((g) => g.id).join(', ')}, which better-compute did not make, still serves VPC ${name}`
+          : undefined,
+      );
+    }
     try {
       await this.#client.request('DELETE', `/vpcs/${encodeURIComponent(vpc.id)}`, {
         signal,

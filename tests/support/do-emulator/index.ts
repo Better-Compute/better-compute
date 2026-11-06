@@ -9,6 +9,7 @@ import { registerDroplets } from './droplets.js';
 import { registerFirewalls } from './firewalls.js';
 import { registerKeys } from './keys.js';
 import { registerLoadBalancers } from './load-balancers.js';
+import { registerNatGateways } from './nat-gateways.js';
 import { registerTags } from './tags.js';
 import { registerVolumes } from './volumes.js';
 import { registerVpcs } from './vpcs.js';
@@ -110,6 +111,8 @@ export class DoEmulator {
   loadBalancerLimit = 10;
   /** How many reads a new Let's Encrypt certificate answers `pending` to before it is `verified`. */
   certificateReads = 1;
+  /** How many reads a new NAT gateway answers `NEW` to before it is `ACTIVE`; at 0, at once. */
+  natGatewayReads = 1;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -299,5 +302,6 @@ export class DoEmulator {
     registerLoadBalancers(this);
     registerDns(this);
     registerCertificates(this);
+    registerNatGateways(this);
   }
 }

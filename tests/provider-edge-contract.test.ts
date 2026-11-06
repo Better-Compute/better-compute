@@ -8,6 +8,7 @@ import {
   type ProviderDns,
   type ProviderImpl,
   type ProviderLoadBalancers,
+  type ProviderNetworks,
   type ProviderResourceState,
 } from '@better-compute/core';
 import { runConformance } from '@better-compute/core/conformance';
@@ -25,7 +26,9 @@ const lbRegionCase =
 const dnsCase =
   'dns (when offered): a zone, a record found by name, type and data, changed in place, deleted';
 const certCase = 'certificates (when offered): a custom certificate by name, deleted idempotently';
-const edgeCases = [lbCase, lbRegionCase, dnsCase, certCase];
+const natCase =
+  'nat gateways (when offered): one per subnet by name; the subnet goes only after its gateway';
+const edgeCases = [lbCase, lbRegionCase, dnsCase, certCase, natCase];
 
 const fail = (code: ConstructorParameters<typeof ComputeError>[0], message: string) =>
   new ComputeError(code, message);
@@ -51,6 +54,8 @@ interface Breaks {
   duplicateRecords?: boolean;
   /** Reports the private key among a certificate's outputs. */
   leaksKey?: boolean;
+  /** Deletes a subnet a NAT gateway still serves. */
+  subnetUnderNat?: boolean;
 }
 
 function fakeProvider(breaks: Breaks = {}, members: { edge?: boolean } = {}) {
@@ -196,6 +201,43 @@ function fakeProvider(breaks: Breaks = {}, members: { edge?: boolean } = {}) {
     },
   };
 
+  const subnets = new Set<string>();
+  const gateways = new Map<string, string>();
+  const networks: ProviderNetworks = {
+    ensureNetwork: async (spec) => ({ id: spec.name, state: 'ready' }),
+    ensureSubnet: async (spec) => {
+      subnets.add(`${spec.region}/${spec.name}`);
+      return { id: `${spec.region}/${spec.name}`, state: 'ready' };
+    },
+    ensureFirewall: async (spec) => ({ id: spec.name, state: 'ready' }),
+    deleteNetwork: async (name) => ({ id: name, state: 'deleted' }),
+    deleteSubnet: async (region, name) => {
+      const id = `${region}/${name}`;
+      if (!breaks.subnetUnderNat && [...gateways.values()].includes(id))
+        return { id, state: 'pending' };
+      subnets.delete(id);
+      return { id, state: 'deleted' };
+    },
+    deleteFirewall: async (name) => ({ id: name, state: 'deleted' }),
+    setTags: async () => {},
+    ensureNatGateway: async (spec) => {
+      const subnet = `${spec.region}/${spec.subnet}`;
+      if (!subnets.has(subnet)) throw fail('INVALID_STATE', 'no such subnet');
+      const id = `${spec.region}/${spec.name}`;
+      const known = gateways.get(id);
+      if (known !== undefined && known !== subnet) throw fail('INVALID_STATE', 'another subnet');
+      gateways.set(id, subnet);
+      return state(id, known ? 'ready' : 'pending', {
+        address: '203.0.113.200',
+        region: spec.region,
+      });
+    },
+    deleteNatGateway: async (region, name) => {
+      gateways.delete(`${region}/${name}`);
+      return state(`${region}/${name}`, 'deleted');
+    },
+  };
+
   const impl: ProviderImpl = {
     listOffers: async (query) =>
       query.minVcpu && query.minVcpu > 1000
@@ -220,7 +262,7 @@ function fakeProvider(breaks: Breaks = {}, members: { edge?: boolean } = {}) {
     delete: async (id) => {
       machines.delete(id);
     },
-    ...(members.edge === false ? {} : { loadBalancers, dns, certificates }),
+    ...(members.edge === false ? {} : { loadBalancers, dns, certificates, networks }),
   };
   return defineProvider({
     id: 'edge-fake',
@@ -283,5 +325,9 @@ describe('provider edge contracts', () => {
 
   it('a certificate that reports its key fails the certificate case', async () => {
     expect(await failedCases({ leaksKey: true })).toEqual([certCase]);
+  });
+
+  it('a subnet deleted while its NAT gateway exists fails the NAT case', async () => {
+    expect(await failedCases({ subnetUnderNat: true })).toEqual([natCase]);
   });
 });

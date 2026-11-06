@@ -202,7 +202,7 @@ export class DoCompute implements ProviderImpl {
     this.options = options;
     this.client = client;
     this.deploymentTag = deploymentTag(options.deployment);
-    this.networks = new DoNetworks(client, config, options.deployment);
+    this.networks = new DoNetworks(client, config, options.deployment, context.log);
     this.volumes = new DoVolumes(client, config, options.deployment, context.log);
     this.addresses = new DoAddresses(client, config, options.deployment, context.log);
     this.loadBalancers = new DoLoadBalancers(client, config, options.deployment, context.log);

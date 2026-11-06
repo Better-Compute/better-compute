@@ -68,6 +68,8 @@ export interface ProviderConformanceSubject {
    * case; it is skipped without them.
    */
   certificate?: { certificate: SecretRef; privateKey: SecretRef; chain?: SecretRef };
+  /** (edge) The CIDR of the subnet the NAT gateway case makes (default `10.250.0.0/24`). */
+  natCidr?: string;
 }
 
 const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -985,6 +987,91 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
               await dns.deleteRecord(zone, recordId, call('dns-cleanup-record')).catch(() => {});
             await dns.deleteZone(zone, call('dns-cleanup-zone')).catch(() => {});
           }
+        }
+      },
+    },
+    {
+      name: 'nat gateways (when offered): one per subnet by name; the subnet goes only after its gateway',
+      async run(subject) {
+        const probe = await client(subject);
+        const networks = probe.impl.networks;
+        if (!networks?.ensureNatGateway || !networks.deleteNatGateway) return;
+        const { impl, call } = probe;
+        const region =
+          subject.region ??
+          (await impl.listOffers({})).find((offer) => offer.id === subject.offerId)?.region;
+        check(region !== undefined, 'the subject names no region and its offer reports none');
+        const network = key(subject, 'nat-net');
+        const subnet = key(subject, 'nat-sub');
+        const name = key(subject, 'nat');
+        const asResource = (step: () => Promise<{ id: string; state: string; message?: string }>) =>
+          step as () => Promise<ProviderResourceState>;
+        let made = false;
+        try {
+          await settle(
+            subject,
+            asResource(() => networks.ensureNetwork({ name: network }, call('nat-network'))),
+            ['ready'],
+            'ensureNetwork',
+          );
+          await settle(
+            subject,
+            asResource(() =>
+              networks.ensureSubnet(
+                { network, name: subnet, region, cidr: subject.natCidr ?? '10.250.0.0/24' },
+                call('nat-subnet'),
+              ),
+            ),
+            ['ready'],
+            'ensureSubnet',
+          );
+          const spec = { name, network, subnet, region };
+          const gateway = await settle(
+            subject,
+            () => networks.ensureNatGateway!(spec, call('nat-ensure')),
+            ['ready'],
+            'ensureNatGateway',
+          );
+          made = true;
+          check(
+            typeof gateway.outputs?.address === 'string' && gateway.outputs.address !== '',
+            'a NAT gateway reports its egress address',
+          );
+          checkEqual(
+            (await networks.ensureNatGateway!(spec, call('nat-ensure-again'))).id,
+            gateway.id,
+            'ensuring the gateway again returns the same gateway',
+          );
+          const early = await networks.deleteSubnet(region, subnet, call('nat-subnet-early'));
+          check(early.state !== 'deleted', 'a subnet is not deleted while its NAT gateway exists');
+          await settle(
+            subject,
+            () => networks.deleteNatGateway!(region, name, call('nat-delete')),
+            ['deleted'],
+            'deleteNatGateway',
+          );
+          made = false;
+          checkEqual(
+            (await networks.deleteNatGateway!(region, name, call('nat-delete-again'))).state,
+            'deleted',
+            'deleting a deleted gateway counts as deleted',
+          );
+          await settle(
+            subject,
+            asResource(() => networks.deleteSubnet(region, subnet, call('nat-subnet-delete'))),
+            ['deleted'],
+            'deleteSubnet',
+          );
+          await settle(
+            subject,
+            asResource(() => networks.deleteNetwork(network, call('nat-network-delete'))),
+            ['deleted'],
+            'deleteNetwork',
+          );
+        } finally {
+          if (made) await networks.deleteNatGateway!(region, name, call('nat-cleanup')).catch(() => {});
+          await networks.deleteSubnet(region, subnet, call('nat-cleanup-subnet')).catch(() => {});
+          await networks.deleteNetwork(network, call('nat-cleanup-network')).catch(() => {});
         }
       },
     },
