@@ -1026,6 +1026,9 @@ The token needs the custom scopes `account:read`, `regions:read`, `sizes:read`, 
 - **Bare Metal GPUs.** `digitaloceanMetalProvider({ machines, ssh })` (id `digitalocean-metal`, `provides: ['metal']`,
   platform accounts only) claims operator-listed machines over SSH with an atomic claim file, bootstraps bcd with the
   join token over SSH stdin, and reboots them; DigitalOcean's API has no Bare Metal resource.
+- **Droplet metadata.** On a Droplet, bcd reads the metadata service into the inventory system section's `cloud`
+  (Droplet id, region, tags, interfaces; never user data, keys or tokens). It is inventory only: the service is
+  unsigned, so Droplets join with tokens, and the control plane reads it with `cloudInstanceOf`.
 - **Rate budget.** DigitalOcean allows 250 requests a minute and 5,000 an hour per token, shared by every reconciler
   that uses it. The provider keeps each token under both limits: discovery and listing may spend at most 20% of a
   window, single reads 30%, and writes whatever is left, so discovery defers first. Over its share a call is
