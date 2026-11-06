@@ -61,6 +61,8 @@ export class DoState {
   modelKeys = new Map<string, Json>();
   /** Keyed by uuid. DO GenAI knowledge bases (their data sources in `_sources`). */
   knowledgeBases = new Map<string, Json>();
+  /** Keyed by uuid. DO GenAI guardrails. */
+  guardrails = new Map<string, Json>();
   /** Keyed by uuid. DO autoscale pool resources. */
   autoscalePools = new Map<string, Json>();
   /** The members of each autoscale pool, keyed by the pool's uuid. */

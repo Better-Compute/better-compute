@@ -15,6 +15,7 @@ import { addonKind } from './kinds/addons.js';
 import { appKind } from './kinds/apps.js';
 import { databaseKinds } from './kinds/databases.js';
 import { functionsKinds } from './kinds/functions.js';
+import { guardrailKind } from './kinds/guardrails.js';
 import { dedicatedInferenceKind } from './kinds/inference.js';
 import { inferenceKeyKind } from './kinds/inference-keys.js';
 import { knowledgeBaseKind } from './kinds/knowledge-bases.js';
@@ -37,6 +38,7 @@ export function doResourceKinds(): DoKind[] {
     dedicatedInferenceKind(),
     inferenceKeyKind(),
     knowledgeBaseKind(),
+    guardrailKind(),
   ];
 }
 

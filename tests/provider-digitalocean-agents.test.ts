@@ -11,6 +11,7 @@ import {
   managedTag,
   tagFor,
 } from '@better-compute/provider-digitalocean';
+import { seedGuardrail } from './support/do-emulator/guardrails.js';
 import { seedKnowledgeBase } from './support/do-emulator/knowledge-bases.js';
 import { DoEmulator, type RecordedRequest } from './support/do-emulator/index.js';
 import {
@@ -244,5 +245,151 @@ describe('do.knowledge-base', () => {
     );
     await resources.release!('do.knowledge-base', byHand.uuid, call());
     expect(emu.state.knowledgeBases.get(byHand.uuid)!.tags).toEqual([]);
+  });
+});
+
+const guardrailSpec = { type: 'jailbreak', defaultResponse: 'I cannot help with that request.' };
+
+describe('ProviderResources conformance: do.guardrail', () => {
+  const subject = (): ProviderResourcesConformanceSubject => {
+    const emu = emulator();
+    const unmanaged = seedGuardrail(emu.state);
+    return {
+      provider: digitaloceanProvider({ fetch: emu.fetch }),
+      config: doAccount,
+      context: { secrets, account: platformAccount },
+      kind: 'do.guardrail',
+      spec: guardrailSpec,
+      updatedSpec: { ...guardrailSpec, defaultResponse: 'No.' },
+      replaceSpec: { ...guardrailSpec, type: 'content-moderation' },
+      unmanaged: unmanaged.uuid,
+    };
+  };
+  for (const test of providerResourcesConformanceCases())
+    it(test.name, async () => {
+      freshBudgets();
+      await test.run(subject());
+    });
+});
+
+describe('do.guardrail', () => {
+  const hash = deploymentTag('default').split(':')[1]!;
+  const request = (extra: Record<string, unknown> = {}) => ({
+    kind: 'do.guardrail',
+    name: 'bc-r-guard',
+    spec: guardrailSpec,
+    labels,
+    ...extra,
+  });
+  const call = (key = 'crs_guard'): CallContext => ctx(key);
+
+  it('is an account-level ai kind; the response and description change in place', async () => {
+    const { resources } = await build(emulator());
+    const kind = resources.kinds().find((entry) => entry.kind === 'do.guardrail')!;
+    expect(kind).toMatchObject({
+      family: 'ai',
+      regional: false,
+      outputs: ['type'],
+      updatable: ['defaultResponse', 'description'],
+    });
+    expect(kind.quota).toBeUndefined();
+    expect(kind.secretOutputs ?? []).toEqual([]);
+  });
+
+  it('creates a guardrail named for this deployment; a retry finds it by name and sends nothing', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const created = await resources.ensure(request(), call());
+    expect(created).toMatchObject({
+      state: 'ready',
+      outputs: { type: 'GUARDRAIL_TYPE_JAILBREAK' },
+      spec: guardrailSpec,
+    });
+    expect(mutations(emu, 'POST', /guardrails$/).map((r) => r.body)).toEqual([
+      {
+        name: `bc-r-guard-bc${hash}`,
+        type: 'GUARDRAIL_TYPE_JAILBREAK',
+        default_response: 'I cannot help with that request.',
+      },
+    ]);
+    expect((await resources.ensure(request(), call())).id).toBe(created.id);
+    expect((await resources.ensure(request({ id: created.id }), call())).state).toBe('ready');
+    expect(mutations(emu, 'POST', /guardrails/)).toHaveLength(1);
+    expect(mutations(emu, 'PUT', /guardrails/)).toEqual([]);
+    expect((await resources.get('do.guardrail', created.id, call()))?.managedBy).toBe('this');
+  });
+
+  it('a response or description change is one PUT; the type is replaceRequired with nothing sent', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const created = await resources.ensure(request(), call());
+    const changed = { ...guardrailSpec, defaultResponse: 'No.', description: 'Blocks jailbreaks' };
+    const updated = await resources.ensure(request({ id: created.id, spec: changed }), call());
+    expect(updated).toMatchObject({ state: 'ready', spec: changed });
+    expect(mutations(emu, 'PUT', /guardrails\//).map((r) => r.body)).toEqual([
+      { default_response: 'No.', description: 'Blocks jailbreaks' },
+    ]);
+    const error = await failure(
+      resources.ensure(
+        request({ id: created.id, spec: { ...guardrailSpec, type: 'sensitive-data' } }),
+        call(),
+      ),
+    );
+    expect(error.details).toMatchObject({ reason: 'replaceRequired', field: 'type' });
+    expect(mutations(emu, 'PUT', /guardrails\//)).toHaveLength(1);
+  });
+
+  it('a guardrail gone at DigitalOcean is an error state, not a silent re-create', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const created = await resources.ensure(request(), call());
+    emu.state.guardrails.delete(created.id);
+    const state = await resources.ensure(request({ id: created.id }), call());
+    expect(state.state).toBe('error');
+    expect(mutations(emu, 'POST', /guardrails/)).toHaveLength(1);
+  });
+
+  it('leaves guardrails made by hand or by another deployment alone; discover says whose they are', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const byHand = seedGuardrail(emu.state);
+    const foreign = seedGuardrail(emu.state, {
+      name: 'bc-r-guard-bc0123456789ab',
+      type: 'GUARDRAIL_TYPE_SENSITIVE_DATA',
+    });
+    // A guardrail of another deployment with the same base name is not this one's.
+    const created = await resources.ensure(request(), call());
+    expect(created.id).not.toBe(foreign.uuid);
+    for (const id of [byHand.uuid, foreign.uuid])
+      expect((await failure(resources.delete('do.guardrail', id, call()))).details?.reason).toBe(
+        'notManaged',
+      );
+    expect(mutations(emu, 'DELETE', /guardrails/)).toEqual([]);
+    const seen: Record<string, unknown>[] = [];
+    for await (const entry of resources.discover!('do.guardrail', call()))
+      seen.push(entry as unknown as Record<string, unknown>);
+    expect(seen.find((entry) => entry.id === byHand.uuid)).not.toHaveProperty('managedBy');
+    expect(seen).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: byHand.uuid, spec: expect.objectContaining({ type: 'jailbreak' }) }),
+        expect.objectContaining({
+          id: foreign.uuid,
+          managedBy: 'other',
+          spec: expect.objectContaining({ type: 'sensitive-data' }),
+        }),
+        expect.objectContaining({ id: created.id, managedBy: 'this' }),
+      ]),
+    );
+  });
+
+  it('an unknown type, an empty or an over-long response never validates', async () => {
+    const { resources } = await build(emulator());
+    const kind = resources.kinds().find((entry) => entry.kind === 'do.guardrail')!;
+    for (const spec of [
+      { type: 'prompt-injection', defaultResponse: 'x' },
+      { type: 'jailbreak', defaultResponse: 'x'.repeat(1001) },
+      { type: 'jailbreak', defaultResponse: '' },
+    ])
+      expect((await kind.spec['~standard'].validate(spec)).issues).toBeDefined();
   });
 });

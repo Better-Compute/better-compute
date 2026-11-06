@@ -36,3 +36,4 @@ export {
   knowledgeBaseKindName,
   type KnowledgeBaseSpec,
 } from './resources/kinds/knowledge-bases.js';
+export { guardrailKindName, type GuardrailSpec } from './resources/kinds/guardrails.js';
