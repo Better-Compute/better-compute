@@ -13,7 +13,7 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { readAccount, zoneRegion } from '@better-compute/vps';
-import { reopen } from './clusters.js';
+import { markDeleted, reopen } from './clusters.js';
 import { canonical, sha256Hex } from './input.js';
 import {
   accountKubernetes,
@@ -788,11 +788,12 @@ async function prepare(
   });
 }
 
-/** The pool's nodes whose bcd joined and that are not retired. */
+/** The pool's nodes whose bcd joined, not retired and not left over from a substrate torn down. */
 async function joinedNodes(sql: SqlExecutor, poolId: string): Promise<number> {
   const { rows } = await sql.query<{ count: string }>(
     `SELECT count(*)::text AS count FROM nodes
-      WHERE pool_id = $1 AND provision_state NOT IN ('retiring', 'retired')`,
+      WHERE pool_id = $1 AND provision_state NOT IN ('retiring', 'retired')
+        AND NOT ('substrate-teardown' = ANY(no_schedule_reasons))`,
     [poolId],
   );
   return Number(rows[0]?.count ?? 0);
@@ -822,11 +823,7 @@ export async function reconcileSubstrate(
 ): Promise<number | undefined> {
   const prepared = await prepare(deps, sql, poolId);
   const now = () => deps.clock.now();
-  if (prepared.teardown) {
-    // Teardown lands with the next task; until then a removed substrate is left as it is.
-    deps.log.warn('kubernetes: substrate teardown is not implemented yet', { poolId });
-    return undefined;
-  }
+  if (prepared.teardown) return teardown(deps, sql, prepared.teardown, signal);
   const plan = prepared.plan;
   if (!plan) return undefined;
   const { row, cluster } = plan;
@@ -1009,6 +1006,172 @@ async function applyBcd(
   // Nodes still joining, or the cluster still converging (a resize, an upgrade): look again soon. Otherwise the
   // periodic refresh comes back.
   return gap > 0 || cluster.state !== 'ready' ? deps.clock.now() + substratePollMs : undefined;
+}
+
+/** The NoSchedule reason on a pool's nodes once its substrate is being torn down. */
+export const substrateTeardownReason = 'substrate-teardown';
+/** How often a teardown waiting for bookings to end looks again. */
+export const substrateDrainRecheckMs = 5 * 60_000;
+
+/**
+ * The pool was archived or its substrate removed: tear down what the substrate made, with drain semantics.
+ *   1. The substrate goes `deleting`, its join token is revoked and the pool's nodes are cordoned (NoSchedule
+ *      `substrate-teardown`); nothing new lands on them.
+ *   2. It waits until the pool's nodes hold no live booking: nothing is force-released (an archived pool's
+ *      reservations keep their bookings until they end).
+ *   3. bcd's objects leave the cluster (DaemonSet, ConfigMap, token Secret, Namespace), then the cluster row is
+ *      deleted: a created cluster at the provider, an adopted one only its substrate node pools (never the cluster).
+ *   4. Once the cluster row is `deleted`, the substrate is.
+ */
+async function teardown(
+  deps: SubstrateDeps,
+  sql: SqlExecutor,
+  current: SubstrateRow,
+  signal: AbortSignal,
+): Promise<number | undefined> {
+  const poll = () => deps.clock.now() + substratePollMs;
+  let row = current;
+  if (row.desired_state !== 'deleted') {
+    const marked = await sql.transaction(async (tx) => {
+      const locked = await readSubstrate(tx, row.pool_id, { lock: true });
+      if (!locked || Number(locked.version) !== Number(row.version)) return undefined;
+      await revokeToken(tx, locked.join_token_id);
+      await tx.query(
+        `UPDATE nodes SET cordoned = true, version = version + 1,
+                no_schedule_reasons = array_append(no_schedule_reasons, $2)
+          WHERE pool_id = $1 AND NOT ($2 = ANY(no_schedule_reasons))`,
+        [row.pool_id, substrateTeardownReason],
+      );
+      await tx.query(
+        `UPDATE kubernetes_pool_substrates
+            SET desired_state = 'deleted', state = 'deleting', message = NULL, join_token_id = NULL,
+                token_applied = false, updated_at = compute_now(), version = version + 1
+          WHERE pool_id = $1`,
+        [row.pool_id],
+      );
+      await publishSubstrate(deps, tx, locked, 'kubernetes.substrate.deleting', {
+        ...(locked.cluster_id !== null ? { clusterId: locked.cluster_id } : {}),
+      });
+      return (await readSubstrate(tx, row.pool_id, { lock: true }))!;
+    });
+    if (!marked) return deps.clock.now();
+    row = marked;
+  }
+  // Drain semantics: wait for the bookings on the pool's nodes to end.
+  const { rows: live } = await sql.query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM allocations a JOIN nodes n ON n.id = a.node_id
+      WHERE n.pool_id = $1 AND a.released_at IS NULL
+        AND (upper_inf(a.during) OR upper(a.during) > compute_now())`,
+    [row.pool_id],
+  );
+  const bookings = Number(live[0]?.count ?? 0);
+  if (bookings > 0) {
+    const message = `Waiting for ${bookings} booking(s) on the pool's nodes to end before the cluster is torn down`;
+    if (row.message !== message) await setState(deps, sql, row, { state: 'deleting', message });
+    return deps.clock.now() + substrateDrainRecheckMs;
+  }
+  const cluster =
+    row.cluster_id === null
+      ? undefined
+      : (
+          await sql.query<ClusterRow>(`SELECT ${clusterColumns} FROM kubernetes_clusters WHERE id = $1`, [
+            row.cluster_id,
+          ])
+        ).rows[0];
+  if (cluster && cluster.desired_state !== 'deleted') {
+    // bcd leaves the cluster first (what matters on an adopted one, which stays).
+    if (cluster.provider_id !== null && deps.substrate && ['ready', 'updating', 'error'].includes(cluster.state)) {
+      const removed = await removeBcd(deps, sql, row, cluster, signal);
+      if (removed === 'retry') return deps.clock.now() + substrateRetryMs;
+    }
+    await sql.transaction(async (tx) => {
+      const { rows } = await tx.query<{ desired_state: string }>(
+        `SELECT desired_state FROM kubernetes_clusters WHERE id = $1 FOR UPDATE`,
+        [cluster.id],
+      );
+      if (rows[0]?.desired_state === 'deleted') return;
+      await markDeleted(tx, cluster.id);
+      await deps.work.enqueue(tx, clustersWork, cluster.id);
+      await publishCluster(deps, tx, cluster, 'kubernetes.cluster.deleting', {
+        reason: 'substrate-removed',
+        ...(cluster.adopted ? { adopted: true } : {}),
+      });
+    });
+    return poll();
+  }
+  if (cluster && cluster.state !== 'deleted') return poll();
+  await sql.transaction(async (tx) => {
+    const { rows } = await tx.query(
+      `UPDATE kubernetes_pool_substrates
+          SET state = 'deleted', message = NULL, deleted_at = compute_now(), updated_at = compute_now(),
+              version = version + 1
+        WHERE pool_id = $1 AND state <> 'deleted' RETURNING pool_id`,
+      [row.pool_id],
+    );
+    if (rows.length > 0)
+      await publishSubstrate(deps, tx, row, 'kubernetes.substrate.deleted', {
+        ...(row.cluster_id !== null ? { clusterId: row.cluster_id } : {}),
+      });
+  });
+  return undefined;
+}
+
+/** Deletes bcd's objects from the cluster; a cluster that is gone or refuses the credential has nothing to delete. */
+async function removeBcd(
+  deps: SubstrateDeps,
+  sql: SqlExecutor,
+  row: SubstrateRow,
+  cluster: ClusterRow,
+  signal: AbortSignal,
+): Promise<'done' | 'retry'> {
+  const agent = deps.substrate!.agent;
+  let kubernetes: ProviderKubernetes;
+  try {
+    const account = await sql.transaction((tx) => readAccount(tx, row.provider_account_id, row.tenant_id));
+    if (!account) return 'done';
+    kubernetes = (await accountKubernetes(deps, account)).kubernetes;
+  } catch {
+    return 'done';
+  }
+  const call: CallContext = {
+    idempotencyKey: `substrate:${row.pool_id}:teardown`,
+    signal,
+    clock: deps.clock,
+    secrets: deps.secrets,
+    log: deps.log,
+  };
+  const minted = await attempt(deps, row.pool_id, signal, () =>
+    kubernetes.credentials(
+      cluster.provider_id!,
+      { subject: substrateSubject, role: 'admin', ttlSeconds: substrateCredentialTtlSeconds },
+      call,
+    ),
+  );
+  if (!minted) return 'retry';
+  if ('error' in minted) {
+    deps.log.warn('kubernetes: substrate teardown could not reach the cluster; leaving bcd objects', {
+      poolId: row.pool_id,
+      error: minted.error,
+    });
+    return 'done';
+  }
+  const api = agent.connect(minted.value, { signal });
+  const objects = [...agent.manifests({ siteId: 'site_teardown' }), agent.tokenSecret];
+  // DaemonSet first, the Namespace last (it takes anything left in it).
+  const order = (kind: string) => (kind === 'DaemonSet' ? 0 : kind === 'Namespace' ? 2 : 1);
+  for (const object of objects.sort((a, b) => order(a.kind) - order(b.kind))) {
+    const removed = await attempt(deps, row.pool_id, signal, () =>
+      api.remove({ apiVersion: object.apiVersion, kind: object.kind, metadata: { ...object.metadata } }),
+    );
+    if (!removed) return 'retry';
+    if ('error' in removed)
+      deps.log.warn('kubernetes: substrate teardown could not delete a bcd object', {
+        poolId: row.pool_id,
+        kind: object.kind,
+        error: removed.error,
+      });
+  }
+  return 'done';
 }
 
 async function enqueueAll(context: ModuleContext, tx: SqlTx, ids: readonly string[]): Promise<void> {
