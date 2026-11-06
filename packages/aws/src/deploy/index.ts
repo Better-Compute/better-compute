@@ -4,3 +4,4 @@ export * from './policy.js';
 export * from './network.js';
 export * from './data.js';
 export * from './control-plane.js';
+export * from './templates.js';
