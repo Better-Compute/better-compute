@@ -114,6 +114,47 @@ describe('do.spaces-bucket ensure', () => {
     ).toBe('managedByAnother');
   });
 
+  it('removes the bucket it just made when the marker cannot be written, so the next pass starts over', async () => {
+    const w = await storageWorld();
+    w.spaces.failNext(`PUT /tenant-a-assets/${bucketMarkerKey}`, 503, 'SlowDown');
+    const error = await failure(
+      w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx()),
+    );
+    expect(error.code).toBe('RATE_LIMITED');
+    // Left in place, an unmarked bucket would be refused as unmanaged on every later pass.
+    expect(w.spaces.buckets.has('tenant-a-assets')).toBe(false);
+    const again = await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx());
+    expect(again.state).toBe('ready');
+    expect(w.spaces.buckets.get('tenant-a-assets')!.objects.has(bucketMarkerKey)).toBe(true);
+  });
+
+  it("never overwrites another deployment's marker when a create answers 200 on an existing bucket", async () => {
+    // Some S3 implementations answer 200 to a create of a bucket the caller already owns. If
+    // another deployment of the same account made it between the HEAD and the PUT, its marker
+    // must survive.
+    let spaces: import('./support/spaces-emulator.js').SpacesEmulator | undefined;
+    const lenientCreate: typeof fetch = async (input, init) => {
+      const response = await spaces!.fetch(input, init);
+      const url = new URL(String(input));
+      const isCreate = init?.method === 'PUT' && url.pathname.split('/').length === 2 && !url.search;
+      return isCreate && response.status === 409 ? new Response(null, { status: 200 }) : response;
+    };
+    const w = await storageWorld(storageAccount, { spacesFetch: lenientCreate }, (world) => {
+      spaces = world.spaces;
+    });
+    const raced = w.spaces.seedBucket('raced-name');
+    raced.objects.set(bucketMarkerKey, { body: markerBody('staging') });
+    w.spaces.failNext('HEAD /raced-name$', 404, 'NoSuchBucket');
+    const error = await failure(
+      w.ensure('do.spaces-bucket', 'raced-name', { region: 'nyc3' }, w.ctx()),
+    );
+    expect(error.details?.reason).toBe('managedByAnother');
+    expect(new TextDecoder().decode(raced.objects.get(bucketMarkerKey)!.body)).toContain(
+      deploymentTag('staging'),
+    );
+    expect(w.spaces.buckets.has('raced-name')).toBe(true);
+  });
+
   it('validates the name and spec before any request', async () => {
     const w = await storageWorld();
     for (const [name, spec] of [

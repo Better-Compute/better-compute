@@ -1,4 +1,4 @@
-import { field, manifest, type CallContext } from '@better-compute/core';
+import { field, isComputeError, manifest, type CallContext } from '@better-compute/core';
 import { spacesRegionPattern, xmlValue, xmlValues, type SpacesClient } from '../../spaces/s3.js';
 import {
   hasCode,
@@ -254,7 +254,27 @@ export function spacesBucketKind(deps: {
           headers: { 'x-amz-acl': spec.acl },
           signal: ctx.signal,
         });
-        await putMarker(s3, target.bucket, markerFor(labels), ctx.signal);
+        // A create can answer 200 for a bucket the account already holds, which another
+        // deployment may have made since the HEAD: the marker is written only where there is none.
+        let owner: 'mine' | 'missing' | 'other';
+        try {
+          owner = await ownership(s3, target.bucket, ctx.signal);
+          if (owner === 'missing') await putMarker(s3, target.bucket, markerFor(labels), ctx.signal);
+        } catch (error) {
+          // Left unmarked, the bucket would be refused as unmanaged on every later pass. It was
+          // just made, so it is empty; S3 never deletes a bucket that is not.
+          await s3
+            .request('DELETE', target.bucket, undefined, { signal: ctx.signal, allow: [404] })
+            .catch((rollback: unknown) =>
+              ctx.log.warn('digitalocean.spaces-bucket.rollback-failed', {
+                bucket: target.bucket,
+                region: target.region,
+                code: isComputeError(rollback) ? rollback.code : 'UNKNOWN',
+              }),
+            );
+          throw error;
+        }
+        if (owner === 'other') refuseOwnership(owner, target.bucket);
         ctx.log.info('digitalocean.spaces-bucket.created', {
           bucket: target.bucket,
           region: target.region,
