@@ -102,6 +102,12 @@ export interface AwsProviderOptions {
   /** ExternalId prefix: `${externalIdPrefix}:${providerAccountId}` (default 'better-compute'). */
   externalIdPrefix?: string;
   /**
+   * The control plane's own IAM principal (the identity that calls AssumeRole), shown to tenants as
+   * `providerAccounts.get` `onboarding.platformPrincipalArn` for their role's trust (A7). Display
+   * only: nothing is signed with it.
+   */
+  platformPrincipalArn?: string;
+  /**
    * AWS account ids a tenant account's `assumeRoleArn` may never name (the ambient identity's own
    * account is always refused too, at first use).
    */

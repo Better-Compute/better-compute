@@ -30,6 +30,8 @@ Returns what a tenant sets up at its cloud to give a provider account keyless si
 
 Returns one provider account of the tenant.
 
+When its provider describes it, the account carries `onboarding`: what the tenant still sets up at its cloud. An `aws` account shows its `mode` (`assume-role`, `web-identity`, `access-key` or `ambient`); a role the control plane assumes also shows the platform-assigned `externalId` its trust must require and, when the host names it, the `platformPrincipalArn` to trust; a keyless (`webIdentityRoleArn`) account shows the `subject` and `audience` its role must trust. It never holds a secret.
+
 An account of another tenant, or none, is `NOT_FOUND`.
 
 ## offers

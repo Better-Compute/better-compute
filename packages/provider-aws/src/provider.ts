@@ -4,6 +4,7 @@ import { accountCredentials } from './account.js';
 import { AwsCompute } from './compute.js';
 import { awsConfig, validateAwsConfig, type AwsConfig, type AwsProviderOptions } from './config.js';
 import { checkAwsAccount } from './federation.js';
+import { describeAwsAccount } from './onboarding.js';
 import { instanceTypeCache, zoneCache } from './shapes.js';
 
 /**
@@ -23,6 +24,8 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
       validateAwsConfig(config);
       return checkAwsAccount(config, context, options);
     },
+    // What the tenant still sets up at AWS for this account (providerAccounts.get onboarding).
+    describeAccount: (config, account) => describeAwsAccount(config, account, options),
     create: (config, context) => {
       validateAwsConfig(config);
       const account = accountCredentials(config, context, options);

@@ -30,6 +30,11 @@ export interface ProviderAccount {
   version: number;
   /** (D11) Pass-through rules; present only when the account has some (platform accounts only). */
   billing?: AccountBilling;
+  /**
+   * (AWS A7) `providerAccounts.get` only: what the tenant still sets up at its cloud, from the
+   * provider's `describeAccount`; absent when the provider describes nothing.
+   */
+  onboarding?: Record<string, Json>;
 }
 
 /** One pass-through rule (D11): cost rows whose SKU contains `skuPattern` bill `meter` at cost × `multiplier`. */
@@ -948,6 +953,32 @@ export async function checkAccountConfig(
     ...providerContext(provider, account, deps, deps),
     signal,
   });
+}
+
+/**
+ * The account as `providerAccounts.get` shows it: with `onboarding` when its provider describes it
+ * (`ProviderInput.describeAccount`, pure). A provider that throws, or answers with anything but a
+ * plain object, shows nothing: the read never fails on it.
+ */
+export function describedAccount(
+  providers: ReadonlyMap<string, ProviderDefinition>,
+  account: ProviderAccount,
+  rootTenantId: string | undefined,
+): ProviderAccount {
+  const describe = providers.get(account.provider)?.describeAccount;
+  if (!describe) return account;
+  let onboarding: unknown;
+  try {
+    onboarding = describe(account.config, {
+      ...accountContext(account, rootTenantId),
+      name: account.name,
+    });
+  } catch {
+    return account;
+  }
+  if (typeof onboarding !== 'object' || onboarding === null || Array.isArray(onboarding))
+    return account;
+  return { ...account, onboarding: JSON.parse(JSON.stringify(onboarding)) as Record<string, Json> };
 }
 
 /** Builds provider clients from accounts, cached per (account id, version). */

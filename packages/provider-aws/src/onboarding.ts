@@ -9,7 +9,7 @@ import {
   type IamPolicyDocument,
   type IamStatement,
 } from './cli.js';
-import { webIdentityAudience } from './config.js';
+import { webIdentityAudience, type AwsConfig, type AwsProviderOptions } from './config.js';
 
 // AWS A7: what a tenant deploys in its own AWS account, as CloudFormation JSON (AQ7).
 //
@@ -289,6 +289,36 @@ export function workloadRoleTemplate(options: WorkloadRoleOptions): CloudFormati
       Audience: { Description: 'The audience workload tokens carry', Value: webIdentityAudience },
     },
   };
+}
+
+/**
+ * `ProviderInput.describeAccount` for AWS (`providerAccounts.get` `onboarding`): how the account
+ * signs in, and what its role must trust. A role the control plane assumes shows the
+ * platform-assigned ExternalId (and the platform principal when the host names it); a keyless one
+ * the subject and audience. Never a secret: a key account shows only that it uses a key.
+ */
+export function describeAwsAccount(
+  config: AwsConfig,
+  account: { id: string; tenantId: string; name: string; platform: boolean },
+  options: Pick<AwsProviderOptions, 'externalIdPrefix' | 'platformPrincipalArn'> = {},
+): Record<string, string> {
+  if (config.webIdentityRoleArn !== undefined)
+    return {
+      mode: 'web-identity',
+      roleArn: config.webIdentityRoleArn,
+      subject: accountSubject(account.tenantId, 'aws', account.name),
+      audience: webIdentityAudience,
+    };
+  if (config.assumeRoleArn !== undefined)
+    return {
+      mode: 'assume-role',
+      roleArn: config.assumeRoleArn,
+      externalId: `${options.externalIdPrefix ?? 'better-compute'}:${account.id}`,
+      ...(options.platformPrincipalArn !== undefined
+        ? { platformPrincipalArn: options.platformPrincipalArn }
+        : {}),
+    };
+  return { mode: config.credentials !== undefined ? 'access-key' : 'ambient' };
 }
 
 const text = (value: unknown) => (typeof value === 'string' && value !== '' ? value : undefined);

@@ -9,6 +9,7 @@ const providerKeys = [
   'create',
   'checkAccount',
   'accountKey',
+  'describeAccount',
   'billing',
 ];
 const idPattern = /^[a-z][a-z0-9-]{0,63}$/;
@@ -72,7 +73,7 @@ export function defineProvider<C>(provider: ProviderInput<C>): ProviderDefinitio
   )
     fail('capabilities', 'must be a list of non-empty strings');
   if (typeof candidate.create !== 'function') fail('create', 'must be a function');
-  for (const hook of ['checkAccount', 'accountKey'])
+  for (const hook of ['checkAccount', 'accountKey', 'describeAccount'])
     if (candidate[hook] !== undefined && typeof candidate[hook] !== 'function')
       fail(hook, 'must be a function');
   const billing = candidate.billing as Record<string, unknown> | undefined;
