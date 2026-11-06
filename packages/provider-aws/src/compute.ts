@@ -72,6 +72,35 @@ function terminatedFailure(code: string | undefined): ComputeError | 'error' | u
   return undefined;
 }
 
+const rebootLike = { waits: ['pending', 'stopping'], accepts: ['running'] } as const;
+/**
+ * Per power action, the EC2 states it waits out (a retryable UNAVAILABLE, so the reconciler comes
+ * back) and the states EC2 accepts it in. EC2 answers StartInstances on a stopping instance and
+ * StopInstances on a pending one with IncorrectInstanceState; vps would fail the instance for good
+ * on that INVALID_STATE, and `get` reports stopping as stopped, so vps does ask to start it.
+ */
+const powerStates: Record<PowerAction, { waits: readonly string[]; accepts: readonly string[] }> = {
+  on: { waits: ['stopping'], accepts: ['pending', 'running', 'stopped'] },
+  'graceful-off': { waits: ['pending'], accepts: ['running', 'stopping', 'stopped'] },
+  off: { waits: ['pending'], accepts: ['running', 'stopping', 'stopped'] },
+  reset: rebootLike,
+  cycle: rebootLike,
+  'graceful-restart': rebootLike,
+  nmi: rebootLike,
+};
+
+/** `state` undefined: the instance changed state while the action ran. */
+function transitional(id: string, state?: string): ComputeError {
+  return new ComputeError(
+    'UNAVAILABLE',
+    state === undefined
+      ? `instance ${id} changed state during the power action; it is retried`
+      : `instance ${id} is ${state}; the power action waits for it to settle`,
+    undefined,
+    { provider: 'aws', reason: 'transitional-state', ...(state === undefined ? {} : { state }) },
+  );
+}
+
 /** The ownership keys (`better-compute:<key>`) a tenant label may never set. */
 const reservedLabels: ReadonlySet<string> = new Set(
   Object.values(tags)
@@ -560,8 +589,23 @@ export class AwsCompute implements ProviderImpl {
         undefined,
         { provider: 'aws' },
       );
-    await this.#claimed(id, context.signal);
-    await this.call(call[0], call[1], context.signal);
+    const instance = await this.#claimed(id, context.signal);
+    const state = instance.child('instanceState')?.textOf('name') ?? '';
+    const { waits, accepts } = powerStates[action];
+    if (waits.includes(state)) throw transitional(id, state);
+    try {
+      await this.call(call[0], call[1], context.signal);
+    } catch (error) {
+      // It moved between the read and the call (IncorrectInstanceState from a state EC2 accepts the
+      // action in): retry. From a stable state the action cannot apply to, it stays INVALID_STATE.
+      if (
+        accepts.includes(state) &&
+        isComputeError(error, 'INVALID_STATE') &&
+        error.details?.code === 'IncorrectInstanceState'
+      )
+        throw transitional(id);
+      throw error;
+    }
   }
 
   async reinstall(id: string, image: ImageRef, context: CallContext): Promise<void> {

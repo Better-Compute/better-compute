@@ -4,7 +4,9 @@ import { ec2Error, ec2Response, el, items } from './xml.js';
 // EC2 as provider-aws uses it: instance types, offerings and AZs; RunInstances with ClientToken
 // dedupe; DescribeInstances with ids, filters and paging; terminate, start/stop/reboot, diagnostic
 // interrupts, replace-root-volume tasks, tags and images. Knobs: newInstanceNotFound (eventual
-// consistency), asyncFailure, tick, disableApiTermination and addInstance (foreign instances).
+// consistency), asyncFailure, tick, settleOnRead, disableApiTermination and addInstance (foreign
+// instances). Like EC2, StartInstances refuses a stopping instance, StopInstances a pending one and
+// RebootInstances anything not running (IncorrectInstanceState).
 
 export interface EmuType {
   type: string;
@@ -119,6 +121,8 @@ export class Ec2Emulator {
   pageSize = 2;
   /** Reads that miss a new instance: by `InstanceId` and by the `client-token` filter. */
   newInstanceNotFound = { byId: 0, byToken: 0 };
+  /** Every DescribeInstances first moves transitional states one step (time passing between reads). */
+  settleOnRead = false;
   #next = 0;
 
   constructor(private readonly emu: AwsEmulator) {
@@ -331,6 +335,7 @@ export class Ec2Emulator {
       case 'RunInstances':
         return this.#run(request);
       case 'DescribeInstances': {
+        if (this.settleOnRead) this.tick();
         const ids = listOf(p, 'InstanceId');
         const filters = filtersOf(p);
         let found: EmuInstance[];
@@ -394,13 +399,23 @@ export class Ec2Emulator {
           } else if (action === 'StartInstances') {
             if (instance.state === 'terminated' || instance.state === 'shutting-down')
               return ec2Error('IncorrectInstanceState', 'terminated');
-            if (instance.state === 'stopped' || instance.state === 'stopping')
-              instance.state = 'pending';
+            if (instance.state === 'stopping')
+              return ec2Error(
+                'IncorrectInstanceState',
+                `The instance '${id}' is not in a state from which it can be started.`,
+              );
+            if (instance.state === 'stopped') instance.state = 'pending';
           } else {
             if (instance.state === 'terminated' || instance.state === 'shutting-down')
               return ec2Error('IncorrectInstanceState', 'terminated');
-            if (instance.state === 'running' || instance.state === 'pending')
-              instance.state = p.get('Force') === 'true' ? 'stopped' : 'stopping';
+            if (instance.state === 'pending')
+              return ec2Error(
+                'IncorrectInstanceState',
+                `The instance '${id}' is not in a state from which it can be stopped.`,
+              );
+            const force = p.get('Force') === 'true';
+            if (instance.state === 'running') instance.state = force ? 'stopped' : 'stopping';
+            else if (instance.state === 'stopping' && force) instance.state = 'stopped';
           }
           changes.push(
             `${el('instanceId', id)}<currentState>${el('code', stateCodes[instance.state])}${el('name', instance.state)}</currentState><previousState>${el('code', stateCodes[previous])}${el('name', previous)}</previousState>`,
@@ -409,9 +424,16 @@ export class Ec2Emulator {
         return ec2Response(action, items('instancesSet', changes));
       }
       case 'RebootInstances': {
-        for (const id of listOf(p, 'InstanceId'))
-          if (!this.instances.has(id))
+        for (const id of listOf(p, 'InstanceId')) {
+          const instance = this.instances.get(id);
+          if (!instance)
             return ec2Error('InvalidInstanceID.NotFound', `The instance ID '${id}' does not exist`);
+          if (instance.state !== 'running')
+            return ec2Error(
+              'IncorrectInstanceState',
+              `The instance '${id}' is not in a state from which it can be rebooted.`,
+            );
+        }
         return ec2Response(action, el('return', true));
       }
       case 'SendDiagnosticInterrupt': {

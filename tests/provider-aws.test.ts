@@ -726,8 +726,9 @@ describe('power & reinstall', () => {
     ['cycle', 'RebootInstances', undefined],
     ['graceful-restart', 'RebootInstances', undefined],
   ] as const)('maps power actions: %s', async (action, operation, force) => {
-    const { emu, create, impl, call } = await providerWorld();
+    const { emu, ec2emu, create, impl, call } = await providerWorld();
     const machine = await create('ins_power');
+    ec2emu.tick();
     await impl.power(machine.id, action, call('ins_power'));
     const [request] = emu.calls(operation);
     expect(request!.params.get('InstanceId.1')).toBe(machine.id);
@@ -751,9 +752,64 @@ describe('power & reinstall', () => {
     ).toBe('not-claimed');
   });
 
+  it('power waits out transitional states (UNAVAILABLE) instead of failing them', async () => {
+    const { emu, ec2emu, create, impl, call } = await providerWorld();
+    const machine = await create('ins_trans');
+    const instance = ec2emu.instances.get(machine.id)!;
+    const ctx = call('ins_trans');
+    // pending: a stop or reboot waits; a start of a starting instance is fine.
+    for (const action of ['off', 'graceful-off', 'reset', 'nmi'] as const)
+      expect(await rejection(() => impl.power(machine.id, action, ctx))).toMatchObject({
+        code: 'UNAVAILABLE',
+        details: { reason: 'transitional-state' },
+      });
+    expect(emu.calls('StopInstances')).toHaveLength(0);
+    expect(emu.calls('RebootInstances')).toHaveLength(0);
+    await impl.power(machine.id, 'on', ctx);
+    ec2emu.tick();
+    // stopping (a guest shutdown, or a stop just sent): a start waits for it to finish.
+    await impl.power(machine.id, 'graceful-off', ctx);
+    expect(instance.state).toBe('stopping');
+    expect(await rejection(() => impl.power(machine.id, 'on', ctx))).toMatchObject({
+      code: 'UNAVAILABLE',
+      details: { reason: 'transitional-state' },
+    });
+    expect(emu.calls('StartInstances')).toHaveLength(1);
+    ec2emu.tick();
+    // The state moves between the read and the call: EC2's IncorrectInstanceState is a retry too.
+    emu.beforeAction('StartInstances', () => {
+      instance.state = 'stopping';
+    });
+    expect(await rejection(() => impl.power(machine.id, 'on', ctx))).toMatchObject({
+      code: 'UNAVAILABLE',
+      details: { reason: 'transitional-state' },
+    });
+    emu.beforeAction('StartInstances', () => {});
+    // A stable state the action cannot apply to stays INVALID_STATE.
+    instance.state = 'stopped';
+    expect((await rejection(() => impl.power(machine.id, 'reset', ctx))).code).toBe(
+      'INVALID_STATE',
+    );
+    instance.state = 'terminated';
+    expect((await rejection(() => impl.power(machine.id, 'on', ctx))).code).toBe('INVALID_STATE');
+  });
+
+  it('the emulator refuses start while stopping and stop while pending, like EC2', async () => {
+    const { ec2, ec2emu } = directWorld();
+    const instance = ec2emu.addInstance({ state: 'stopping' });
+    await expect(
+      ec2.call('StartInstances', { InstanceId: [instance.id] }, { signal }),
+    ).rejects.toMatchObject({ code: 'INVALID_STATE', details: { code: 'IncorrectInstanceState' } });
+    instance.state = 'pending';
+    await expect(
+      ec2.call('StopInstances', { InstanceId: [instance.id] }, { signal }),
+    ).rejects.toMatchObject({ code: 'INVALID_STATE', details: { code: 'IncorrectInstanceState' } });
+  });
+
   it('nmi sends a diagnostic interrupt', async () => {
     const { ec2emu, create, impl, call } = await providerWorld();
     const machine = await create('ins_nmi');
+    ec2emu.tick();
     await impl.power(machine.id, 'nmi', call('ins_nmi'));
     expect(ec2emu.diagnosticInterrupts).toEqual([machine.id]);
   });
@@ -795,6 +851,8 @@ describe('conformance', () => {
     const report = await runConformance(providerConformanceCases(), () => {
       const emu = new AwsEmulator();
       const ec2emu = new Ec2Emulator(emu);
+      // EC2 refuses a stop while pending; time passes between the contract's calls on real EC2.
+      ec2emu.settleOnRead = true;
       const attachable = ec2emu.addInstance({ tags: { Name: 'legacy' } });
       return {
         provider: awsProvider({ fetch: emu.fetch, credentials: emu.ambient }),
