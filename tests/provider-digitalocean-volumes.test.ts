@@ -165,6 +165,18 @@ describe('provider-digitalocean volumes: ensure and get', () => {
     expect([error.code, error.details?.reason]).toEqual(['QUOTA_EXCEEDED', 'volumeLimit']);
   });
 
+  it('findVolume finds our volume by name without creating one, and never a volume that is not ours', async () => {
+    const { emu, impl } = await setup();
+    expect(await impl.volumes.findVolume('bc-v1', 'nyc3', ctx())).toBe(undefined);
+    seedVolume(emu.state, { name: 'bc-v2', tags: ['team:ops'] });
+    expect(await impl.volumes.findVolume('bc-v2', 'nyc3', ctx())).toBe(undefined);
+    const mine = seedVolume(emu.state, { name: 'bc-v3', tags: ours });
+    expect((await impl.volumes.findVolume('bc-v3', 'nyc3', ctx()))?.id).toBe(mine.id);
+    expect(await impl.volumes.findVolume('bc-v3', 'ams3', ctx())).toBe(undefined);
+    expect(await impl.volumes.findVolume('Bad Name', 'nyc3', ctx())).toBe(undefined);
+    expect(writes(emu)).toHaveLength(0);
+  });
+
   it('getVolume is undefined for a missing or malformed id', async () => {
     const { emu, impl } = await setup();
     expect(await impl.volumes.getVolume('0b7d9b2c-0000-4000-8000-000000000000', ctx())).toBe(

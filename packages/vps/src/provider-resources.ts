@@ -1948,6 +1948,20 @@ const text = (error: unknown) => String((error as Error)?.message ?? error).slic
 const transientCodes = ['RATE_LIMITED', 'UNAVAILABLE', 'TIMEOUT'];
 /** Of those, the ones after which the provider may have done what was asked (its answer was lost). */
 const ambiguousCodes = ['UNAVAILABLE', 'TIMEOUT'];
+/**
+ * Refusals of an `ensureVolume` after which the provider holds no volume of that name for us (an ensure finds an
+ * existing one by name before it creates). Any other error (`PROVIDER_ERROR` for an accepted create with no body,
+ * `INVALID_STATE` for one of ours formatted otherwise) may mean a volume exists.
+ */
+const refusedCodes = [
+  'QUOTA_EXCEEDED',
+  'CONFLICT',
+  'INVALID_INPUT',
+  'UNSUPPORTED',
+  'ACCESS_DENIED',
+  'UNAUTHENTICATED',
+  'NOT_FOUND',
+];
 
 /** The machine an attached volume or an assigned address names (`outputs.attachedTo` / `outputs.assignedTo`). */
 const output = (state: ProviderResourceState | undefined, name: string): string | undefined => {
@@ -1978,7 +1992,7 @@ class Run {
   backoff = false;
   /** The run ran out of time, or the row changed meanwhile: continue at once. */
   again = false;
-  /** The code of the last provider error that `attempt` swallowed (transient ones). */
+  /** The code of the last provider error `attempt` caught (a transient one, or the one behind an `error` state). */
   lastCode: string | undefined;
   readonly #started: number;
 
@@ -2032,6 +2046,7 @@ class Run {
         this.backoff = true;
         return undefined;
       }
+      this.lastCode = isComputeError(error) ? error.code : undefined;
       return { id: '', state: 'error', message: text(error) };
     }
   }
@@ -2407,11 +2422,16 @@ async function convergeVolume(
   );
   if (ensured === undefined) return;
   if (ensured === 'missing' || ensured.state === 'error') {
-    await setVolume(
-      run,
-      volume,
-      settled('error', ensured === 'missing' ? 'The provider did not answer' : ensured.message),
-    );
+    // A refusal created nothing: a delete then needs no provider call, and its quota is refunded at once.
+    const refused =
+      ensured !== 'missing' &&
+      !volume.external_id &&
+      run.lastCode !== undefined &&
+      refusedCodes.includes(run.lastCode);
+    await setVolume(run, volume, {
+      ...settled('error', ensured === 'missing' ? 'The provider did not answer' : ensured.message),
+      ...(refused ? { ensure_requested: false } : {}),
+    });
     return;
   }
   const externalId = ensured.id || volume.external_id;
@@ -2486,20 +2506,29 @@ async function teardownVolume(
 ): Promise<void> {
   let externalId = volume.external_id;
   if (!externalId) {
-    // Never sent to the provider: nothing to delete there. Sent, with its answer lost: the ensure (by name) finds
-    // what it made (or makes it), so it is deleted rather than leaked.
+    // Never sent to the provider, or refused by it: nothing to delete there. Sent, with its answer lost: found by
+    // name (never created to be deleted); a provider without `findVolume` falls back to the ensure by name.
     if (!volume.ensure_requested) {
       for (const attachment of attachments) await settleDetached(run, attachment, volume);
       await finishVolume(run, volume);
       return;
     }
-    const ensured = await run.attempt(`ensure ${volume.id}`, () =>
-      volumes.ensureVolume(
-        volumeSpec(volume, source?.external_id ?? undefined),
-        run.call(`ensure:${volume.id}`),
-      ),
+    const find = volumes.findVolume?.bind(volumes);
+    const name = providerResourceName(volume.id);
+    const ensured = await run.attempt(`find ${volume.id}`, () =>
+      find
+        ? find(name, volume.region, run.call(`find:${volume.id}`))
+        : volumes.ensureVolume(
+            volumeSpec(volume, source?.external_id ?? undefined),
+            run.call(`ensure:${volume.id}`),
+          ),
     );
     if (ensured === undefined) return;
+    if (ensured === 'missing' && find) {
+      for (const attachment of attachments) await settleDetached(run, attachment, volume);
+      await finishVolume(run, volume);
+      return;
+    }
     if (ensured === 'missing' || ensured.state === 'error' || !ensured.id) {
       await setVolume(
         run,

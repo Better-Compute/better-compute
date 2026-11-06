@@ -188,6 +188,13 @@ const doLike = defineProvider({
         cloud.volumes.set(volume.id, volume);
         return cloud.volumeState(volume, cloud.running(`create ${spec.name}`) ? 'pending' : 'ready');
       },
+      async findVolume(name, region) {
+        cloud.call(`findVolume ${name}`);
+        const found = [...cloud.volumes.values()].find(
+          (volume) => volume.spec.name === name && volume.spec.region === region,
+        );
+        return found ? cloud.volumeState(found) : undefined;
+      },
       async getVolume(volumeId) {
         cloud.call(`getVolume ${volumeId}`);
         const volume = cloud.volumes.get(volumeId);
@@ -795,6 +802,55 @@ describe('providerVolumes', () => {
     expect((await getVolume(volume.id)).state).toBe('deleted');
     expect(cloud.volumes.has(id)).toBe(false);
     expect(instanceId).toMatch(/^inst_/);
+  });
+
+  it('a create the provider refused is deleted without a provider call, and its quota refunded', async () => {
+    const volume = await createVolume({ sizeGiB: 30 });
+    cloud.failNext = new ComputeError('QUOTA_EXCEEDED', 'volume limit reached');
+    await tick();
+    expect(await getVolume(volume.id)).toMatchObject({ state: 'error', message: 'volume limit reached' });
+    expect(await quotaUsed('diskGiB')).toBe(30);
+    cloud.calls.length = 0;
+    await call('providerVolumes', 'delete', { tenantId: 'root', volumeId: volume.id });
+    await drain();
+    await runKey('all');
+    await drain();
+    expect((await getVolume(volume.id)).state).toBe('deleted');
+    expect(await quotaUsed('diskGiB')).toBe(0);
+    expect(cloud.calls).toEqual([]);
+    expect(cloud.volumes.size).toBe(0);
+  });
+
+  it('a delete after an answer that may have created the volume looks it up by name, never creating one', async () => {
+    // An accepted create with no body: the volume may exist.
+    const unsure = await createVolume();
+    cloud.failNext = new ComputeError('PROVIDER_ERROR', 'accepted a create but returned no volume');
+    await tick();
+    expect((await getVolume(unsure.id)).state).toBe('error');
+    await call('providerVolumes', 'delete', { tenantId: 'root', volumeId: unsure.id });
+    cloud.calls.length = 0;
+    await drain();
+    expect((await getVolume(unsure.id)).state).toBe('deleted');
+    expect(cloud.calls).toEqual([`findVolume ${providerResourceName(unsure.id)}`]);
+
+    // A lost answer whose create landed: found, then deleted.
+    const landed = await createVolume();
+    cloud.failNext = new ComputeError('TIMEOUT', 'the answer was lost');
+    await tick();
+    const name = providerResourceName(landed.id);
+    cloud.volumes.set('vol-landed', {
+      id: 'vol-landed',
+      spec: { name, region: 'nyc3', sizeGiB: 10, kind: 'block' },
+      sizeGiB: 10,
+    });
+    await call('providerVolumes', 'delete', { tenantId: 'root', volumeId: landed.id });
+    cloud.calls.length = 0;
+    queue.set(landed.id, clock.now());
+    await drain();
+    expect((await getVolume(landed.id)).state).toBe('deleted');
+    expect(cloud.volumes.size).toBe(0);
+    expect(cloud.calls.some((label) => label.startsWith('ensureVolume'))).toBe(false);
+    expect(cloud.calls).toContain('deleteVolume vol-landed');
   });
 
   it('a volume never sent to the provider is deleted without a provider call', async () => {

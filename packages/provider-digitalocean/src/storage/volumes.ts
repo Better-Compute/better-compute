@@ -348,6 +348,16 @@ export class DoVolumes implements ProviderVolumes {
     return state(created.id, 'ready', volumeOutputs(created));
   }
 
+  async findVolume(
+    name: string,
+    region: string,
+    ctx: CallContext,
+  ): Promise<ProviderResourceState | undefined> {
+    if (!volumeNamePattern.test(name) || !this.config.regions.includes(region)) return undefined;
+    const found = (await this.byName(name, region, ctx.signal)).find((volume) => this.owned(volume.tags));
+    return found ? state(found.id, 'ready', volumeOutputs(found)) : undefined;
+  }
+
   async getVolume(id: string, ctx: CallContext): Promise<ProviderResourceState | undefined> {
     if (!uuidPattern.test(id)) return undefined;
     const volume = await this.volume(id.toLowerCase(), ctx.signal);

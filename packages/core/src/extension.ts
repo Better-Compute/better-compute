@@ -820,6 +820,17 @@ export interface ProviderVolumes {
   ensureVolume(spec: ProviderVolumeSpec, context: CallContext): Promise<ProviderResourceState>;
   /** The volume as it is; undefined when it does not exist. */
   getVolume(volumeId: string, context: CallContext): Promise<ProviderResourceState | undefined>;
+  /**
+   * The volume named `name` in `region` that this deployment made, without creating one: undefined when there is
+   * none (a same-named volume that is not ours is none). A delete whose create answer was lost finds it by this
+   * instead of an `ensureVolume`, which could create a volume only to delete it. Optional: without it, vps falls
+   * back to `ensureVolume` for that one case.
+   */
+  findVolume?(
+    name: string,
+    region: string,
+    context: CallContext,
+  ): Promise<ProviderResourceState | undefined>;
   /** With `instanceId`, only a machine whose ownership label names that instance is attached to. */
   attachVolume(
     volumeId: string,
