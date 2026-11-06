@@ -975,6 +975,37 @@ describe('instance delete', () => {
     expect(await getVolume(gone.id)).toMatchObject({ desiredState: 'present', state: 'ready' });
   });
 
+  it('a deleteWithInstance volume is not detached once its instance is being deleted', async () => {
+    const instanceId = await insertInstance();
+    const gone = await createVolume({ instanceId, deleteWithInstance: true });
+    const kept = await createVolume({ instanceId });
+    await drain();
+    await db.query(`UPDATE instances SET desired_state = 'deleted' WHERE id = $1`, [instanceId]);
+    expect(
+      await codeOf(call('providerVolumes', 'detach', { tenantId: 'root', volumeId: gone.id })),
+    ).toBe('INVALID_STATE');
+    // One without deleteWithInstance may still be detached first.
+    expect(
+      (await call('providerVolumes', 'detach', { tenantId: 'root', volumeId: kept.id })).attachment,
+    ).toMatchObject({ desiredState: 'deleted' });
+  });
+
+  it('a deleteWithInstance volume detached before the instance delete is kept', async () => {
+    const instanceId = await insertInstance();
+    const machine = `droplet-${keyCounter}`;
+    const volume = await createVolume({ instanceId, deleteWithInstance: true });
+    await drain();
+    // Detached, the detach not settled yet when the instance is deleted.
+    await call('providerVolumes', 'detach', { tenantId: 'root', volumeId: volume.id });
+    queue.clear();
+    await deleteInstance(instanceId);
+    expect(cloud.calls.filter((label) => label.startsWith('delete '))).toEqual([`delete ${machine} -`]);
+    await drain();
+    expect(await getVolume(volume.id)).toMatchObject({ state: 'ready', desiredState: 'present' });
+    expect((await getVolume(volume.id)).attachment).toBeUndefined();
+    expect(cloud.volumes.size).toBe(1);
+  });
+
   it('a machine the instance leaves running keeps its volumes: detached, never deleted', async () => {
     const instanceId = await insertInstance();
     const kept = await createVolume({ instanceId, deleteWithInstance: true });

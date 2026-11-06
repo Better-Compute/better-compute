@@ -1417,6 +1417,19 @@ export async function detachProviderVolume(
   const row = await requireVolume(tx, input, true);
   const [live] = await liveAttachments(tx, [row.id]);
   if (!live || live.desired_state === 'deleted') return volumeViewOf(tx, row.id);
+  if (row.delete_with_instance) {
+    // Once its instance is being deleted, the volume goes with the machine (whose delete may already name it):
+    // a detach now could make the reconciler ensure again a volume the provider is deleting.
+    const { rows } = await tx.query<{ desired_state: string; state: string }>(
+      `SELECT desired_state, state FROM instances WHERE id = $1`,
+      [live.instance_id],
+    );
+    if (rows[0] && (rows[0].desired_state === 'deleted' || ['deleting', 'deleted'].includes(rows[0].state)))
+      throw new ComputeError(
+        'INVALID_STATE',
+        `Instance ${live.instance_id} is being deleted, and volume ${row.id} (deleteWithInstance) is deleted with it`,
+      );
+  }
   await tx.query(
     `UPDATE provider_volume_attachments SET desired_state = 'deleted',
             state = CASE WHEN state = 'ready' THEN 'deleting' ELSE state END
@@ -2884,19 +2897,25 @@ export async function onInstanceDeleted(
   instanceId: string,
   options: { machineDeleted: boolean },
 ): Promise<void> {
-  const attached = await tx.query<{ volume_id: string }>(
-    `UPDATE provider_volume_attachments SET desired_state = 'deleted'
-      WHERE instance_id = $1 AND state <> 'deleted' RETURNING volume_id`,
+  const attached = await tx.query<{ volume_id: string; desired_state: string }>(
+    `SELECT volume_id, desired_state FROM provider_volume_attachments
+      WHERE instance_id = $1 AND state <> 'deleted' ORDER BY volume_id FOR UPDATE`,
     [instanceId],
   );
-  const volumeIds = [...new Set(attached.rows.map((row) => row.volume_id))].sort();
-  if (options.machineDeleted && volumeIds.length > 0) {
+  await tx.query(
+    `UPDATE provider_volume_attachments SET desired_state = 'deleted' WHERE instance_id = $1 AND state <> 'deleted'`,
+    [instanceId],
+  );
+  const volumeIds = [...new Set(attached.rows.map((row) => row.volume_id))];
+  // Only a volume still wanted on it goes with it: one detached before the delete was asked is kept.
+  const wanted = attached.rows.filter((row) => row.desired_state === 'present').map((row) => row.volume_id);
+  if (options.machineDeleted && wanted.length > 0) {
     const doomed = await tx.query<VolumeRow>(
       `UPDATE provider_volumes SET desired_state = 'deleted', state = 'deleting', message = NULL,
               version = version + 1
         WHERE id = ANY($1::text[]) AND delete_with_instance AND desired_state = 'present' AND state <> 'deleted'
         RETURNING *`,
-      [volumeIds],
+      [wanted],
     );
     for (const row of doomed.rows)
       await publish(deps, tx, 'providerVolume', row, 'deleting', { instanceId });

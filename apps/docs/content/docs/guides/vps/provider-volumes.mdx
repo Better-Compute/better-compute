@@ -148,6 +148,10 @@ Deleting an instance takes care of its volumes and addresses:
    (already gone after a selective destroy; a provider without one deletes it after the machine) and unassigns its
    addresses, which stay reserved.
 
+Once the instance's delete is asked, `detach` of a `deleteWithInstance` volume is `INVALID_STATE`: it goes with the
+machine. Detach it before deleting the instance to keep it; a volume detached before the delete is never deleted with
+it.
+
 An instance that finishes as a **detach** (an attached machine with `onDelete: 'detach'`, or one whose ownership label
 is gone) leaves its machine running. Its volumes are only detached, `deleteWithInstance` or not.
 
