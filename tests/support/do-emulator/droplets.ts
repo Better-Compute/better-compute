@@ -2,6 +2,7 @@ import type { DoEmulator, RouteContext } from './index.js';
 import { isoSeconds, settleAction, startAction } from './actions.js';
 import { fixture, type DoState, type Json } from './state.js';
 import { hasTag, touchTags } from './tags.js';
+import { unassignAll } from './addresses.js';
 import { detachAll } from './volumes.js';
 import { defaultVpc } from './vpcs.js';
 
@@ -258,6 +259,7 @@ export function registerDroplets(emulator: DoEmulator): void {
     if (!context.state.droplets.delete(id)) return emulator.error('not-found');
     progressOf(context.state).delete(id);
     detachAll(context.state, id);
+    unassignAll(context.state, id);
     return { status: 204 };
   });
 }

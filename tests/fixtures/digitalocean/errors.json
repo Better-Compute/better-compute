@@ -253,6 +253,28 @@
       }
     },
     {
+      "name": "422-reserved-ip-limit",
+      "status": 422,
+      "verified": false,
+      "code": "QUOTA_EXCEEDED",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "You have reached the reserved IP limit for your account",
+        "request_id": "f2a6c8e4-0036-4b7b-9a51-1c0e7f6c0036"
+      }
+    },
+    {
+      "name": "422-pending-event",
+      "status": 422,
+      "verified": false,
+      "code": "CONFLICT",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "The reserved IP has a pending event",
+        "request_id": "f2a6c8e4-0037-4b7b-9a51-1c0e7f6c0037"
+      }
+    },
+    {
       "name": "422-unknown",
       "status": 422,
       "verified": true,

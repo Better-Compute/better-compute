@@ -54,6 +54,9 @@ export const unprocessablePatterns: readonly {
   { pattern: /exceed your volume limit/i, code: 'QUOTA_EXCEEDED', reason: 'volumeLimit' },
   { pattern: /must be in the same region/i, code: 'INVALID_INPUT', reason: 'region' },
   { pattern: /must be larger than the current size/i, code: 'INVALID_INPUT', reason: 'shrink' },
+  // Reserved IPs (P2). A pending event means an assign or unassign still runs: try again later.
+  { pattern: /reserved ip limit/i, code: 'QUOTA_EXCEEDED', reason: 'reservedIpLimit' },
+  { pattern: /has a pending event/i, code: 'CONFLICT', reason: 'actionPending' },
   { pattern: /ssh key is already in use/i, code: 'CONFLICT', reason: 'sshKeyInUse' },
   { pattern: /name is already in use/i, code: 'CONFLICT', reason: 'nameInUse' },
   { pattern: /already exists/i, code: 'CONFLICT', reason: 'alreadyExists' },

@@ -25,6 +25,7 @@ import {
   parseOfferId,
   tagFor,
 } from '../ids.js';
+import { DoAddresses } from '../edge/addresses.js';
 import { DoNetworks } from '../networks/index.js';
 import { DoVolumes } from '../storage/volumes.js';
 import { networkNamer, vpcForNetwork } from '../networks/vpcs.js';
@@ -177,6 +178,8 @@ export class DoCompute implements ProviderImpl {
   readonly networks: DoNetworks;
   /** Block Storage volumes and their snapshots (P2). */
   readonly volumes: DoVolumes;
+  /** Reserved IPv4 and IPv6 addresses (P2). */
+  readonly addresses: DoAddresses;
 
   constructor(
     config: DoConfig,
@@ -191,6 +194,7 @@ export class DoCompute implements ProviderImpl {
     this.deploymentTag = deploymentTag(options.deployment);
     this.networks = new DoNetworks(client, config, options.deployment);
     this.volumes = new DoVolumes(client, config, options.deployment, context.log);
+    this.addresses = new DoAddresses(client, config, options.deployment, context.log);
   }
 
   /** Whether better-compute may delete the Droplet: managed, and in this deployment (R3). */

@@ -2199,6 +2199,9 @@ describe('definition', () => {
 
   it('passes every case of the ProviderImpl contract', async () => {
     const report = await runConformance(providerConformanceCases(), () => {
+      // Each case gets the token's whole budget: the volume and address cases alone make a
+      // few dozen requests on one manual clock.
+      freshBudgets();
       const emu = emulator();
       // A create needs an SSH key: the account's default one.
       const key = seedSshKey(emu.state, 'ops', testKey);

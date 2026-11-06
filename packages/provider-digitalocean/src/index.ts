@@ -10,6 +10,7 @@ export * from './compute/keys.js';
 export * from './compute/offers.js';
 export * from './compute/types.js';
 export * from './config.js';
+export * from './edge/addresses.js';
 export * from './ids.js';
 export * from './networks/index.js';
 export * from './probe.js';

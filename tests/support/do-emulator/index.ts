@@ -1,4 +1,5 @@
 import { registerAccount } from './account.js';
+import { registerAddresses } from './addresses.js';
 import { registerActions } from './actions.js';
 import { registerAutoscale } from './autoscale.js';
 import { registerCatalog } from './catalog.js';
@@ -96,6 +97,10 @@ export class DoEmulator {
   volumeActionReads = 0;
   /** How many volumes the account may hold (DO's per-account volume limit). */
   volumeLimit = 100;
+  /** How many reads of a reserved IP an assign or unassign takes to complete; at 0, at once. */
+  addressActionReads = 0;
+  /** How many reserved IPs (v4 and v6) the account may hold. */
+  reservedIpLimit = 10;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -281,5 +286,6 @@ export class DoEmulator {
     registerVpcs(this);
     registerFirewalls(this);
     registerVolumes(this);
+    registerAddresses(this);
   }
 }

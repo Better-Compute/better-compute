@@ -1,0 +1,22 @@
+{
+  "_provenance": "Shape: OpenAPI reserved_ips/models/reserved_ip.yml (spec): ip, region (a region object), droplet (a Droplet or null), locked, project_id. Reserved IPv6: OpenAPI reserved_ipv6/models/reserved_ipv6.yml (spec): ip, region_slug, reserved_at, droplet. Values are illustrative. The emulator spreads these templates and overrides the address, region, Droplet and lock.",
+  "reserved_ip": {
+    "ip": "45.55.96.47",
+    "region": {
+      "name": "New York 3",
+      "slug": "nyc3",
+      "features": ["private_networking", "backups", "ipv6", "metadata"],
+      "available": true,
+      "sizes": ["s-1vcpu-1gb", "s-2vcpu-4gb"]
+    },
+    "droplet": null,
+    "locked": false,
+    "project_id": "746c6152-2fa2-11ed-92d3-27aaa54e4988"
+  },
+  "reserved_ipv6": {
+    "ip": "2409:40d0:f7:1017:74b4:3a96:105e:1c77",
+    "region_slug": "nyc3",
+    "reserved_at": "2024-11-20T11:08:30Z",
+    "droplet": null
+  }
+}
