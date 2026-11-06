@@ -231,6 +231,12 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
       });
       // Every cluster API call carried a credential the driver minted.
       expect(kube.tokens.every((token) => profile.accepts(token))).toBe(true);
+      // The applied document is the fleet: planning it again changes nothing, and neither does its export.
+      const document = fleetPoolDocument(profile, accountConfig, [{ name: 'gpu-fleet', nodes: 2 }]);
+      const again = await api.fleet.plan(dev.root, { tenantId: dev.rootTenantId, config: document });
+      expect(again.calls).toEqual([]);
+      const { config: exported } = await api.fleet.export(dev.root, { tenantId: dev.rootTenantId });
+      expect((await api.fleet.plan(dev.root, { tenantId: dev.rootTenantId, config: exported, prune: true })).calls).toEqual([]);
     }, 90_000);
 
     it('the Nodes bcd runs on join the fleet pool, and the hosted token goes once they all did', async () => {
